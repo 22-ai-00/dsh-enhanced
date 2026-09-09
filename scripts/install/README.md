@@ -17,7 +17,7 @@
 
 两种操作都要求先停止所有使用同一 `DSH_HOME` 的进程，且都会拒绝活动的第三方顶层 bundle，因为安装器无法穷举其私有状态路径；未作为 bundle 激活的普通第三方依赖会原样保留。安装器持有 home 外的独占锁，在无网络隔离环境中对私有副本更新 package/lockfile、组合配置和实际激活；只有副本通过才提交。成功升级只更新当前已安装的 `@dsh-enhanced/*` 顶层依赖，不新增场景能力，并保留自定义 patch、凭据、Session、Goal 与其它任务状态。卸载把完整旧 profile 归档到 `$DSH_HOME/uninstalled-profiles/`，创建干净的同名 DSH 基础 profile，并保留外置状态。归档配置不会继续激活；再次卸载已无受管依赖的基础 profile 是幂等 no-op。
 
-当前事务入口只由 Linux 上的完整本地仓库安装器提供，并要求 Node.js、`flock`、Perl 和 bubblewrap；upgrade 会先用本机 pnpm store 做 `--offline --frozen-lockfile` 安装并构建当前 checkout，缺缓存时在触碰 DSH_HOME 前失败。它不管理 Lark/supervised 常驻服务，也不修改权限、模型或 Agent 工具配置，这些组合会在变更前明确拒绝。事务会拒绝 home 内的外部状态链接、外部硬链接、挂载点、特殊文件及无法证明归属的旧事务残留；失败证据保留在同级 transaction 目录供人工排查。`--confirm-dsh-home-stopped` 是操作者对整个 home 离线状态的确认，不是进程探测或强制停机命令。
+生命周期事务目前只支持 Linux，并要求 Node.js、`flock`、Perl 和 bubblewrap。本地 upgrade 会先对当前 checkout 执行 `pnpm install --offline --frozen-lockfile` 和构建；npm upgrade 则在同一生命周期锁内先把发布 selector 解析为精确 cohort，并以禁用 install scripts 的 `pnpm store add` 预取，随后才创建 transaction，且 bwrap 内的 package 更新强制 offline + copy。uninstall 不访问 npm registry 或 pnpm store。两种来源都不管理 Lark/supervised 常驻服务，也不修改权限、模型或 Agent 工具配置，这些组合会在变更前明确拒绝。事务会拒绝不安全 owner/权限、home 内的外部状态链接、外部硬链接、挂载点、特殊文件及无法证明归属的旧事务残留；失败证据保留在同级 transaction 目录供人工排查。`--confirm-dsh-home-stopped` 是操作者对整个 home 离线状态的确认，不是进程探测或强制停机命令。
 
 交互运行不传参数会选择场景；自动化可显式指定：
 
@@ -148,7 +148,7 @@ DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-mo
 
 `--require-service` 在 Linux 同时验证 systemd user unit、稳定性窗口和 lingering；若检测到循环崩溃会停止该 unit 并输出 journal，若未启用 lingering，注销会停止 user service，按 doctor 提示运行 `sudo loginctl enable-linger "$(id -u)"`。未带 `--require-service` 的 doctor 会避免对已启用 Lark 的 profile 启动第二个 Host；macOS LaunchAgent 与 Windows 当前用户计划任务只能在用户登录会话中运行；Windows 的任务会在失败后重启，但不宣称注销后继续运行。
 
-远程 npm 安装器（`install-npm.sh`）可从 `main` 直接拉取执行，但它只是薄引导器；当脚本不在 `common.sh` 旁边运行时，它从一个固定 `vX.Y.Z` 发布标签拉取 `common.sh` 并验证内嵌 SHA-256 后才 source，实际安装逻辑不从 mutable `main` 执行。因而 checkout 中尚未发布的安装逻辑不会被远程引导器加载；必须先由 `release:prepare` 同步新 tag、digest 与 host range，再发布该 tag。发布流程会自动完成这项同步。
+远程 npm 安装器（`install-npm.sh`）可从 `main` 直接拉取执行，但它只是薄引导器；当脚本不在 `common.sh` 旁边运行时，它从固定 `vX.Y.Z` 发布标签拉取并校验 `common.sh`。仅当参数中的最终 `--operation` 为 `upgrade` 或 `uninstall` 时，它才从同一个 tag 拉取 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`；所需资产先写入私有临时目录中的 `.download` 文件，全部通过各自内嵌的 lowercase SHA-256 校验后才原子改名并设为只读，随后才 source `common.sh`。远程 bootstrap 要求 `TMPDIR` 是绝对 canonical 路径、最终目标不是 symlink、由当前用户拥有，且其非系统临时目录祖先不能由非 root/当前用户拥有或向 group/other 开放写权限；系统 `/tmp`（包括 macOS 指向 `/private/tmp` 的标准别名）必须解析到 root-owned `01777` 目录。实际安装逻辑和生命周期执行器都不从 mutable `main` 执行。可分别用 `DSH_ENHANCED_INSTALL_COMMON_SHA256`、`DSH_ENHANCED_INSTALL_LIFECYCLE_CONFIG_SHA256`、`DSH_ENHANCED_INSTALL_LIFECYCLE_PROFILE_SHA256` 覆盖 digest，并用 `DSH_ENHANCED_INSTALL_REF` 覆盖固定发布 tag；所有 digest 必须是精确的 64 位小写十六进制值。当前 `v0.1.24` 发布不含两个 lifecycle helper，因此它们使用全零 sentinel：普通远程 install 仍只下载并校验 `common.sh`，远程 upgrade/uninstall 则在任何下载或 source 前 fail closed。本地 sibling 模式仍直接使用 checkout helper，下一次 `release:prepare` 会在新 release 中写入三个真实 digest。因而 checkout 中尚未发布的安装逻辑不会被远程引导器加载。
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash

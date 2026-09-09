@@ -1,0 +1,148 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-09",
+  "baseline": "dd19370f050b6017e2f755b0b6a68a253fc73413",
+  "scope": [
+    "WP17 npm remote bootstrap entry for Linux web/autonomy profile upgrade and uninstall",
+    "Release-time pinning and verification of common.sh, lifecycle-config.mjs, and lifecycle-profile.mjs as one immutable release cohort",
+    "Fail-closed remote bootstrap temporary-file, digest, lifecycle-lock, npm cohort, offline bubblewrap, and recovery boundaries"
+  ],
+  "relationshipToOfflineLifecycleEvidence": {
+    "path": "docs/evidence/offline-lifecycle-2026-09-09.json",
+    "independent": true,
+    "note": "The earlier evidence covers the local-checkout offline lifecycle batch. This file records the later npm remote entrypoint and does not replace or inherit that batch's full-check result."
+  },
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2,
+    "wp17": "implementing",
+    "remaining": [
+      "Publish a release containing the lifecycle helpers and non-sentinel hashes",
+      "Complete Lark and supervised resident-service lifecycle handling and the other outstanding WP17 acceptance paths"
+    ]
+  },
+  "implementation": [
+    "Remote install detects the final upgrade/uninstall operation and obtains all required helpers from the same pinned release tag.",
+    "Each asset is downloaded into a private canonical temporary directory, checked as a current-user-owned regular single-link file, verified against its own lowercase SHA-256, atomically renamed, made read-only, and rechecked before common.sh is sourced.",
+    "npm upgrade holds the external lifecycle locks while recovering residue, reading the existing managed package set, resolving one exact cohort, checking every required package, and prefetching with install scripts disabled.",
+    "The staged package update runs in the existing no-network bubblewrap transaction with npm offline mode and copy import; the opened validator fd 4 is exposed read-only at /run/dsh-enhanced-lifecycle-config.mjs after /tmp is hidden, and post-package structure, activation, state paths, symlink/hardlink/mount boundaries, and atomic rename are revalidated before commit.",
+    "Lifecycle coordination captures and revalidates the complete ancestor chain, then inherits and verifies parent-directory fd 3, the per-home lock fd 4, and the global rendezvous lock fd 5 across subprocess execution.",
+    "Before swap, the staged filesystem is flushed with sync -f and its directory fsynced; transaction and lock-parent directories are fsynced across rename, recovery, commit, and cleanup boundaries.",
+    "npm uninstall reuses the same locked and isolated lifecycle transaction but performs no npm registry lookup or pnpm store prefetch.",
+    "release:prepare rewrites the release ref, verified Host range, and independent hashes for all three assets; verify-tag and record recompute and reject missing, partial, duplicated, malformed, or changed pins."
+  ],
+  "releaseBoundary": {
+    "currentRelease": "v0.1.24",
+    "currentCommonSha256": "2ef41724f752a9030a158822288d0e3326e7b046102ead5013594679120ba821",
+    "currentLifecycleConfigSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "currentLifecycleProfileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "state": "zero-sentinel",
+    "behavior": {
+      "install": "downloads and verifies only the released common.sh, then continues",
+      "upgrade": "fails before download or source because the release lacks verified lifecycle helpers",
+      "uninstall": "fails before download or source because the release lacks verified lifecycle helpers"
+    },
+    "nextRelease": "release:prepare must replace the sentinel pair and pin the real SHA-256 of all three assets from the release snapshot before remote lifecycle operations become available"
+  },
+  "targetedValidation": [
+    {
+      "command": "pnpm exec vitest run tests/installers.spec.ts",
+      "exitCode": 0,
+      "testFilesPassed": 1,
+      "testsTotal": 130,
+      "testsPassed": 129,
+      "testsSkipped": 1,
+      "skipReason": "The conditional pinned lifecycle-helper tag comparison is intentionally skipped because v0.1.24 uses the documented zero sentinel and does not contain those two helpers. Both real bubblewrap tests, including validator execution through fd 4 under isolated /run after /tmp is hidden, ran and passed."
+    },
+    {
+      "command": "pnpm exec vitest run tests/release-version.spec.ts",
+      "exitCode": 0,
+      "testFilesPassed": 1,
+      "testsPassed": 93,
+      "testsSkipped": 0
+    }
+  ],
+  "highFidelityRemoteBootstrap": {
+    "state": "passed",
+    "environment": {
+      "npm": "recording executable used to make registry resolution observable without publishing or changing a real registry",
+      "pnpm": "recording executable used for cohort prefetch and staged package-operation assertions",
+      "assets": "the current real common.sh, lifecycle-config.mjs, and lifecycle-profile.mjs bytes and their real SHA-256 values",
+      "sandbox": "the installed real /usr/bin/bwrap, including an actual fd-bound staged home and validator fd exposed read-only through /run after /tmp isolation"
+    },
+    "results": {
+      "upgrade": "PASS: with default TMPDIR=/tmp, one exact managed cohort was resolved and prefetched under lock, the staged package command was offline/copy, the real bwrap validator and activation completed without MODULE_NOT_FOUND, and original durable state was preserved",
+      "uninstall": "PASS: with default TMPDIR=/tmp, the remote three-asset bootstrap entered the real isolated lifecycle path without npm/pnpm network preparation; the validator remained visible through fd 4 under /run and the clean profile committed only after validation",
+      "zeroSentinel": "PASS: v0.1.24 remote upgrade and uninstall both stopped before asset download, common.sh source, or DSH_HOME mutation; ordinary remote install still used only the verified released common.sh"
+    },
+    "latestRerun": {
+      "state": "passed",
+      "scope": "default TMPDIR=/tmp remote bootstrap plus real bwrap upgrade and uninstall",
+      "result": "upgrade, uninstall, and zero-sentinel checks passed; validator execution no longer failed with MODULE_NOT_FOUND"
+    },
+    "reproductionNote": "The one-off orchestration driver was deleted and is intentionally not cited as a reproducible command. Checked-in installer and release suites cover the durable entrypoint contracts; a release smoke must use the published tag and its three recorded asset hashes."
+  },
+  "securityReview": {
+    "status": "PASS",
+    "independent": true,
+    "reviewedBoundary": [
+      "remote bootstrap argument parsing and same-tag asset selection",
+      "TMPDIR ancestry, owner, permissions, link count, type, inode identity, and cleanup behavior",
+      "three-asset digest verification before source or execution",
+      "complete ancestor-chain identity plus parent-directory fd 3, per-home lock fd 4, and rendezvous lock fd 5 across canonical aliases and rename windows",
+      "registry/store access ordering, exact cohort selection, disabled prefetch scripts, offline staged install, and failure immutability",
+      "staged-filesystem syncfs and transaction/lock-parent directory fsync boundaries before and after rename, recovery, commit, and cleanup",
+      "release prepare, verify-tag, record, and supersede pin consistency"
+    ],
+    "fixedFindings": [
+      "Remote bootstrap initially trusted temporary paths too broadly; it now rejects non-canonical or symlink TMPDIR values, unsafe/foreign ancestors, group/other-writable private paths, replaced directories, and non-private or non-single-link assets before source.",
+      "Lifecycle coordination initially depended only on a pathname lock whose parent could change; it now binds the ancestor chain and parent fd, anchors the per-home lock through that fd, adds a root-sticky-/tmp rendezvous lock, and rechecks identities around critical renames.",
+      "A package operation could introduce or retarget an external node_modules symlink after the pre-scan; the post-package scan now permits only unchanged pre-existing package links and rejects new, changed, or newly dangling links before commit.",
+      "An uninstall activation failure could expose archive work in the live home; archive creation now remains inside staged evidence and the original home remains unchanged on failure.",
+      "npm selector and release pin parsing accepted insufficiently narrow or partially updated states; exact SemVer/dist-tag resolution, complete same-version cohort checks, paired lifecycle sentinels, and atomic three-asset release pin validation now fail closed.",
+      "Recovery and canonical-home aliases had path/identity gaps before registry access; recovery now uses physical paths under the held lock and returns for operator confirmation without registry or store access.",
+      "The validator was previously addressed through the logical DSH_HOME under default /tmp, which the sandbox then hid; the final implementation passes the already-open validator as fd 4 and mounts it read-only under isolated /run before executing validation."
+    ]
+  },
+  "engineeringValidation": {
+    "fullCheck": {
+      "state": "passed",
+      "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+      "owner": "main thread",
+      "exitCode": 0,
+      "log": "/tmp/dsh-wp17-npm-final2-check.log",
+      "logSha256": "2989065aff3bbe4ce9a0b628a53211715d1a72fe89dfc1a80a1d837c323d40fe",
+      "testFilesPassed": 352,
+      "testFilesSkipped": 0,
+      "testsPassed": 4397,
+      "testsSkipped": 1,
+      "packCount": 33,
+      "note": "The single skipped test is the conditional comparison against published lifecycle-helper assets: v0.1.24 intentionally has the documented zero sentinel and does not contain those helpers."
+    }
+  },
+  "sourceHashes": {
+    "snapshot": "current working tree after implementation and before final evidence-document edits",
+    "validWhile": "No non-documentation implementation or test file changes after this audit snapshot; recompute affected hashes if the main thread changes code before final verification.",
+    "files": {
+      "scripts/install/install-npm.sh": "317ac6fa52fe0621df53ce8849cd4e571a2abe9b5fd164f79b083a0c528778da",
+      "scripts/install/common.sh": "d4d2713c0e6665e96bd66c21c8ffc6e2ae18fe09769744a5a445087f5919f1f6",
+      "scripts/install/lifecycle-config.mjs": "02140fc3ad87ae65fe1c1c75f581ca8b91f28d5fbe011f505b38f654465aaddb",
+      "scripts/install/lifecycle-profile.mjs": "08180163cfa43e24822e299a996289029c70b95174c55d851a03217a80b17229",
+      "scripts/release-version.mjs": "93bf77321a8cef7ec34033d5d46e2bfa3c07ec3f2fb65464f71245117bf07c6d",
+      "tests/installers.spec.ts": "29d794c94e6088a3467d597337ad4eacfa6323f4085d2acc9c118a66965f5294",
+      "tests/release-version.spec.ts": "8b07b44d7f3b1de918cfc03a0bf8ae49321cf9b46d479ae2d98f961a1b78d003"
+    },
+    "nextReleaseAssetSha256": {
+      "common.sh": "d4d2713c0e6665e96bd66c21c8ffc6e2ae18fe09769744a5a445087f5919f1f6",
+      "lifecycle-config.mjs": "02140fc3ad87ae65fe1c1c75f581ca8b91f28d5fbe011f505b38f654465aaddb",
+      "lifecycle-profile.mjs": "08180163cfa43e24822e299a996289029c70b95174c55d851a03217a80b17229"
+    }
+  },
+  "limitations": [
+    "The npm and pnpm executables in the high-fidelity verification were recording substitutes; no package was published and no real npm registry state was changed.",
+    "The mutable main copy of install-npm.sh remains outside the three downloaded asset digests; immutable tag policy and repository administration remain part of the release trust root.",
+    "Only Linux web/autonomy offline lifecycle is supported. Lark and supervised resident-service stop, restart, readiness, and rollback are not delivered.",
+    "This evidence does not claim model quality, external credentials, long-running service lifecycle, or full WP17 completion."
+  ]
+}

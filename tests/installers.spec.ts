@@ -23,12 +23,22 @@ const installerLibrary = join(installDirectory, 'common.sh')
 const temporaryRoots: string[] = []
 const pinnedInstallerSource = readFileSync(npmInstaller, 'utf8')
 const pinnedReleaseRef = pinnedInstallerSource.match(/^DSH_ENHANCED_PINNED_RELEASE_REF='([^']+)'$/mu)?.[1]
+const pinnedLifecycleConfigHash = pinnedInstallerSource
+  .match(/^DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='([0-9a-f]{64})'$/mu)?.[1]
+const pinnedLifecycleProfileHash = pinnedInstallerSource
+  .match(/^DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='([0-9a-f]{64})'$/mu)?.[1]
 const pinnedRemoteCommon = pinnedReleaseRef === undefined ? undefined : spawnSync('git', [
   'show', `${pinnedReleaseRef}:scripts/install/common.sh`,
 ], {
   cwd: repoRoot,
   encoding: 'buffer',
 })
+const pinnedRemoteLifecycleConfig = pinnedReleaseRef === undefined ? undefined : spawnSync('git', [
+  'show', `${pinnedReleaseRef}:scripts/install/lifecycle-config.mjs`,
+], { cwd: repoRoot, encoding: 'buffer' })
+const pinnedRemoteLifecycleProfile = pinnedReleaseRef === undefined ? undefined : spawnSync('git', [
+  'show', `${pinnedReleaseRef}:scripts/install/lifecycle-profile.mjs`,
+], { cwd: repoRoot, encoding: 'buffer' })
 const realBwrapProbe = spawnSync('/usr/bin/bwrap', [
   '--unshare-all', '--die-with-parent', '--ro-bind', '/', '/', '--proc', '/proc', '--dev', '/dev', '--', '/bin/true',
 ], { encoding: 'utf8', timeout: 5_000 })
@@ -95,6 +105,144 @@ async function writeExecutable(path: string, content: string): Promise<void> {
   await chmod(path, 0o755)
 }
 
+const zeroSha256 = '0'.repeat(64)
+
+function withPinnedLifecycleHashes(source: string, configHash: string, profileHash: string): string {
+  return source
+    .replace(
+      /^DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='[0-9a-f]{64}'$/mu,
+      `DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='${configHash}'`,
+    )
+    .replace(
+      /^DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='[0-9a-f]{64}'$/mu,
+      `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${profileHash}'`,
+    )
+}
+
+interface RemoteBootstrapFixture {
+  assets: Record<'common.sh' | 'lifecycle-config.mjs' | 'lifecycle-profile.mjs', string>
+  assetDirectory: string
+  dshHome: string
+  fakeBin: string
+  hashes: Record<'common.sh' | 'lifecycle-config.mjs' | 'lifecycle-profile.mjs', string>
+  logPath: string
+  temporaryDirectory: string
+}
+
+async function remoteBootstrapFixture(
+  replacements: Partial<RemoteBootstrapFixture['assets']> = {},
+): Promise<RemoteBootstrapFixture> {
+  const root = await temporaryDshHome()
+  const assetDirectory = join(root, 'release-assets')
+  const fakeBin = join(root, 'bin')
+  const temporaryDirectory = join(root, 'tmp')
+  const dshHome = join(root, 'dsh-home')
+  const logPath = join(root, 'bootstrap.log')
+  await Promise.all([
+    mkdir(assetDirectory),
+    mkdir(fakeBin),
+    mkdir(temporaryDirectory, { mode: 0o700 }),
+  ])
+  const assets = {
+    'common.sh': [
+      '#!/usr/bin/env bash',
+      'printf \'source:common\\n\' >> "$REMOTE_BOOTSTRAP_LOG"',
+      'dsh_enhanced_install() {',
+      '  { printf \'run\'; printf \'\\t%s\' "$@"; printf \'\\n\'; } >> "$REMOTE_BOOTSTRAP_LOG"',
+      '  mkdir -p "$DSH_HOME"',
+      '  printf \'mutated\\n\' > "$DSH_HOME/bootstrap-ran"',
+      '}',
+      '',
+    ].join('\n'),
+    'lifecycle-config.mjs': '// lifecycle config fixture\n',
+    'lifecycle-profile.mjs': '// lifecycle profile fixture\n',
+    ...replacements,
+  }
+  await Promise.all(Object.entries(assets).map(([name, source]) => (
+    writeFile(join(assetDirectory, name), source, 'utf8')
+  )))
+  await writeExecutable(join(fakeBin, 'curl'), [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    "url=''",
+    "destination=''",
+    'while [[ $# -gt 0 ]]; do',
+    '  case "$1" in',
+    '    -o) destination="$2"; shift 2 ;;',
+    '    -*) shift ;;',
+    '    *) url="$1"; shift ;;',
+    '  esac',
+    'done',
+    'asset="$(basename "$url")"',
+    'printf \'download\\t%s\\n\' "$url" >> "$REMOTE_BOOTSTRAP_LOG"',
+    'cp "$REMOTE_BOOTSTRAP_ASSETS/$asset" "$destination"',
+    'if [[ "$REMOTE_BOOTSTRAP_TAMPER" == "$asset" ]]; then',
+    '  printf \'tampered\\n\' >> "$destination"',
+    'fi',
+    '',
+  ].join('\n'))
+  await writeExecutable(join(fakeBin, 'sha256sum'), [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    'asset="$(basename "$1" .download)"',
+    'printf \'verify\\t%s\\n\' "$asset" >> "$REMOTE_BOOTSTRAP_LOG"',
+    'exec /usr/bin/sha256sum "$@"',
+    '',
+  ].join('\n'))
+  await writeExecutable(join(fakeBin, 'stat'), [
+    '#!/bin/bash',
+    'set -euo pipefail',
+    'target="${@: -1}"',
+    'if [[ -n "${REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH:-}" && "$target" == "$REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH" && "${1:-}" == -c ]]; then',
+    '  raw="$(/usr/bin/stat "$@")"',
+    '  IFS=: read -r device inode _ mode links type <<< "$raw"',
+    "  printf '%s:%s:%s:%s:%s:%s\\n' \"$device\" \"$inode\" \"$REMOTE_BOOTSTRAP_FOREIGN_UID\" \"$mode\" \"$links\" \"$type\"",
+    '  exit 0',
+    'fi',
+    'exec /usr/bin/stat "$@"',
+    '',
+  ].join('\n'))
+  const hashes = Object.fromEntries(Object.entries(assets).map(([name, source]) => [
+    name, createHash('sha256').update(source).digest('hex'),
+  ])) as RemoteBootstrapFixture['hashes']
+  return { assets, assetDirectory, dshHome, fakeBin, hashes, logPath, temporaryDirectory }
+}
+
+function runRemoteNpmBootstrap(
+  installer: string,
+  fixture: RemoteBootstrapFixture,
+  args: readonly string[],
+  options: {
+    lifecycleDigests?: boolean
+    foreignStatPath?: string
+    tamper?: keyof RemoteBootstrapFixture['assets']
+    temporaryDirectory?: string
+  } = {},
+) {
+  return spawnSync('/bin/bash', ['-s', '--', ...args], {
+    cwd: dirname(fixture.dshHome),
+    encoding: 'utf8',
+    input: installer,
+    env: {
+      PATH: fixture.fakeBin + ':/usr/bin:/bin',
+      TMPDIR: options.temporaryDirectory ?? fixture.temporaryDirectory,
+      DSH_HOME: fixture.dshHome,
+      DSH_ENHANCED_INSTALL_REF: 'v9.8.7',
+      DSH_ENHANCED_INSTALL_BASE_URL: 'https://assets.invalid/v9.8.7',
+      DSH_ENHANCED_INSTALL_COMMON_SHA256: fixture.hashes['common.sh'],
+      ...(options.lifecycleDigests ? {
+        DSH_ENHANCED_INSTALL_LIFECYCLE_CONFIG_SHA256: fixture.hashes['lifecycle-config.mjs'],
+        DSH_ENHANCED_INSTALL_LIFECYCLE_PROFILE_SHA256: fixture.hashes['lifecycle-profile.mjs'],
+      } : {}),
+      REMOTE_BOOTSTRAP_ASSETS: fixture.assetDirectory,
+      REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH: options.foreignStatPath ?? '',
+      REMOTE_BOOTSTRAP_FOREIGN_UID: String((process.getuid?.() ?? 0) + 1),
+      REMOTE_BOOTSTRAP_LOG: fixture.logPath,
+      REMOTE_BOOTSTRAP_TAMPER: options.tamper ?? '',
+    },
+  })
+}
+
 interface LifecycleFixtureOptions {
   activationFails?: boolean
   managedDependencies?: readonly string[]
@@ -105,9 +253,14 @@ interface LifecycleFixtureOptions {
 interface LifecycleRunOptions {
   activationMarker?: string
   configAfterUpgrade?: string
+  npmBlock?: boolean
+  npmVersion?: string
   packageBlock?: boolean
   packageFails?: boolean
+  packageSymlinkRelative?: string
+  packageSymlinkTarget?: string
   packageWriteRelative?: string
+  storeFails?: boolean
 }
 
 async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
@@ -117,6 +270,7 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   const fakeBin = join(root, 'bin')
   await mkdir(profileDirectory, { recursive: true })
   await mkdir(fakeBin)
+  await symlink(join(repoRoot, 'node_modules'), join(root, 'node_modules'), 'dir')
   const thirdParty = options.thirdParty ?? false
   const managedDependencies = options.managedDependencies ?? ['personal-assistant']
   const dependencies = Object.fromEntries(managedDependencies.map(name => [`@dsh-enhanced/${name}`, '0.1.0']))
@@ -146,6 +300,8 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   await writeFile(join(dshHome, 'sessions', 'owner-session.jsonl'), 'durable-session')
   const dshLog = join(root, 'dsh.log')
   const bwrapLog = join(root, 'bwrap.log')
+  const operationLog = join(root, 'lifecycle-operations.log')
+  await writeFile(operationLog, '')
   const lifecycleTarget = join(root, 'managed-target')
   await mkdir(lifecycleTarget)
   await writeFile(join(lifecycleTarget, 'package.json'), JSON.stringify({
@@ -164,6 +320,9 @@ set -euo pipefail
 { printf 'CALL'; printf '\t%s' "$@"; printf '\n'; } >> "$LIFECYCLE_DSH_LOG"
 if [[ " ${'$'}{1:-} " == ' --version ' ]]; then printf '0.1.2-rc.1\n'; exit 0; fi
 if [[ " $* " == *' plugin '* && " $* " == *' add '* ]]; then
+  transaction_state='absent'
+  [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
+  printf 'dsh-add\t%s\toffline=%s\timport=%s\t%s\n' "$transaction_state" "${'$'}{npm_config_offline:-}" "${'$'}{npm_config_package_import_method:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
   if [[ "$LIFECYCLE_PACKAGE_FAILS" == '1' ]]; then printf 'package update failed\n' >&2; exit 42; fi
   if [[ "$LIFECYCLE_PACKAGE_BLOCK" == '1' ]]; then
     : > "$DSH_HOME/.package-preparation-started"
@@ -174,6 +333,11 @@ if [[ " $* " == *' plugin '* && " $* " == *' add '* ]]; then
   fi
   if [[ -n "$LIFECYCLE_PACKAGE_WRITE_RELATIVE" ]]; then
     printf 'outside-write\n' > "$DSH_HOME/$LIFECYCLE_PACKAGE_WRITE_RELATIVE"
+  fi
+  if [[ -n "$LIFECYCLE_PACKAGE_SYMLINK_RELATIVE" ]]; then
+    mkdir -p "$(dirname "$DSH_HOME/$LIFECYCLE_PACKAGE_SYMLINK_RELATIVE")"
+    rm -f -- "$DSH_HOME/$LIFECYCLE_PACKAGE_SYMLINK_RELATIVE"
+    ln -s -- "$LIFECYCLE_PACKAGE_SYMLINK_TARGET" "$DSH_HOME/$LIFECYCLE_PACKAGE_SYMLINK_RELATIVE"
   fi
   printf 'upgraded\n' > "$DSH_HOME/profiles/web/upgraded"
   exit 0
@@ -195,14 +359,37 @@ if [[ " $* " == *' --host 127.0.0.1 --no-open --port 0 '* ]]; then
 fi
 exit 2
 `.replace('__ACTIVATION__', activation))
+  await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+set -euo pipefail
+if [[ " \${1:-} " == ' view ' && " \${3:-} " == ' version ' && " \${4:-} " == ' --json ' ]]; then
+  transaction_state='absent'
+  [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
+  printf 'npm-view\t%s\t%s\n' "$transaction_state" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  if [[ "$LIFECYCLE_NPM_BLOCK" == '1' ]]; then
+    : > "$LIFECYCLE_NPM_BLOCK_STARTED"
+    while [[ ! -f "$LIFECYCLE_NPM_BLOCK_RELEASE" ]]; do sleep 0.05; done
+  fi
+  printf '"%s"\n' "$LIFECYCLE_NPM_VERSION"
+  exit 0
+fi
+printf 'unexpected fake npm invocation: %s\n' "$*" >&2
+exit 91
+`)
   await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 set -euo pipefail
-if [[ " \${1:-} " == ' --version ' ]]; then printf '10.0.0\n'; fi
-exit 0
+if [[ " \${1:-} " == ' --version ' ]]; then printf '10.0.0\n'; exit 0; fi
+if [[ " \${1:-} \${2:-} " == ' store add ' ]]; then
+  transaction_state='absent'
+  [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
+  printf 'pnpm-store-add\t%s\tignore=%s\t%s\n' "$transaction_state" "${'$'}{npm_config_ignore_scripts:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  if [[ "$LIFECYCLE_STORE_FAILS" == '1' ]]; then printf 'store prefetch failed\n' >&2; exit 93; fi
+  exit 0
+fi
+printf 'unexpected fake pnpm invocation: %s\n' "$*" >&2
+exit 92
 `)
   await writeExecutable(join(fakeBin, 'bwrap'), `#!${process.execPath}
-const { appendFileSync } = require('node:fs')
-const { realpathSync } = require('node:fs')
+const { appendFileSync, realpathSync } = require('node:fs')
 const { spawnSync } = require('node:child_process')
 const args = process.argv.slice(2)
 const separator = args.indexOf('--')
@@ -210,16 +397,22 @@ const environment = {}
 const controls = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('LIFECYCLE_')))
 let stageHome
 let logicalHome
+let validatorFd
+let validatorPath
+let validatorMode
 for (let index = 0; index < separator; index += 1) {
   if (args[index] === '--setenv') { environment[args[index + 1]] = args[index + 2]; index += 2; continue }
   if (args[index] === '--bind') { stageHome = args[index + 1]; logicalHome = args[index + 2]; index += 2; continue }
   if (args[index] === '--bind-fd') { stageHome = realpathSync('/proc/self/fd/' + args[index + 1]); logicalHome = args[index + 2]; index += 2; continue }
+  if (args[index] === '--perms') { validatorMode = args[index + 1]; index += 1; continue }
+  if (args[index] === '--ro-bind-data') { validatorFd = args[index + 1]; validatorPath = args[index + 2]; index += 2; continue }
   if (args[index] === '--ro-bind') { index += 2; continue }
   if (args[index] === '--tmpfs' || args[index] === '--proc' || args[index] === '--dev') { index += 1 }
 }
 if (controls.LIFECYCLE_BWRAP_LOG) appendFileSync(controls.LIFECYCLE_BWRAP_LOG, JSON.stringify(args) + '\\n')
-if (separator < 0 || !args.includes('--unshare-all') || args.includes('--share-net') || !stageHome || !logicalHome) {
-  process.stderr.write('fake bwrap rejected unsafe or incomplete sandbox arguments\\n')
+if (separator < 0 || !args.includes('--unshare-all') || args.includes('--share-net') || !stageHome || !logicalHome
+  || validatorMode !== '0400' || validatorFd !== '4' || validatorPath !== '/run/dsh-enhanced-lifecycle-config.mjs') {
+  process.stderr.write('fake bwrap rejected unsafe or incomplete sandbox arguments: ' + JSON.stringify({ separator, stageHome, logicalHome, validatorMode, validatorFd, validatorPath }) + '\\n')
   process.exit(97)
 }
 for (const [key, value] of Object.entries(environment)) {
@@ -231,18 +424,23 @@ for (const key of ['LIFECYCLE_ACTIVATION_MARKER']) {
   if (value === logicalHome || value.startsWith(logicalHome + '/')) environment[key] = stageHome + value.slice(logicalHome.length)
 }
 const command = args.slice(separator + 1)
+let validatorCommand = false
 for (let index = 0; index < command.length; index += 1) {
   const value = command[index]
   if (value === logicalHome || value.startsWith(logicalHome + '/')) command[index] = stageHome + value.slice(logicalHome.length)
+  else if (value === validatorPath) { command[index] = '/proc/self/fd/' + validatorFd; validatorCommand = true }
 }
-const result = spawnSync(command[0], command.slice(1), { env: environment, encoding: 'buffer' })
+if (validatorCommand) command.splice(1, 0, '--preserve-symlinks-main')
+const result = spawnSync(command[0], command.slice(1), {
+  env: environment, encoding: 'buffer', stdio: ['ignore', 'pipe', 'pipe', 3, 4],
+})
 if (result.stdout) process.stdout.write(result.stdout)
 if (result.stderr) process.stderr.write(result.stderr)
 if (result.error) { process.stderr.write(String(result.error) + '\\n'); process.exit(98) }
 process.exit(result.status ?? 99)
 `)
   return {
-    root, dshHome, profileDirectory, fakeBin, databasePath, dshLog, bwrapLog, lifecycleTarget,
+    root, dshHome, profileDirectory, fakeBin, databasePath, dshLog, bwrapLog, operationLog, lifecycleTarget,
     activationMarker: join(dshHome, '.activation-ran'),
   }
 }
@@ -254,9 +452,18 @@ function lifecycleEnvironment(dshHome: string, fakeBin: string, options: Lifecyc
     LIFECYCLE_BWRAP_LOG: join(dirname(dshHome), 'bwrap.log'),
     LIFECYCLE_CONFIG_AFTER_UPGRADE: options.configAfterUpgrade ?? '',
     LIFECYCLE_DSH_LOG: join(dirname(dshHome), 'dsh.log'),
+    LIFECYCLE_NPM_BLOCK: options.npmBlock ? '1' : '0',
+    LIFECYCLE_NPM_BLOCK_RELEASE: join(dirname(dshHome), 'npm-block-release'),
+    LIFECYCLE_NPM_BLOCK_STARTED: join(dirname(dshHome), 'npm-block-started'),
+    LIFECYCLE_NPM_VERSION: options.npmVersion ?? '1.4.0',
+    LIFECYCLE_OPERATION_LOG: join(dirname(dshHome), 'lifecycle-operations.log'),
+    LIFECYCLE_ORIGINAL_HOME: dshHome,
     LIFECYCLE_PACKAGE_FAILS: options.packageFails ? '1' : '0',
     LIFECYCLE_PACKAGE_BLOCK: options.packageBlock ? '1' : '0',
+    LIFECYCLE_PACKAGE_SYMLINK_RELATIVE: options.packageSymlinkRelative ?? '',
+    LIFECYCLE_PACKAGE_SYMLINK_TARGET: options.packageSymlinkTarget ?? '',
     LIFECYCLE_PACKAGE_WRITE_RELATIVE: options.packageWriteRelative ?? '',
+    LIFECYCLE_STORE_FAILS: options.storeFails ? '1' : '0',
   }
 }
 
@@ -267,6 +474,28 @@ function runLifecycle(args: readonly string[], dshHome: string, fakeBin: string,
     encoding: 'utf8',
     env: lifecycleEnvironment(dshHome, fakeBin, options),
   })
+}
+
+function startInstaller(
+  script: string,
+  args: readonly string[],
+  dshHome: string,
+  fakeBin: string,
+  options: LifecycleRunOptions = {},
+) {
+  const child = spawn('/bin/bash', [script, ...args], {
+    cwd: repoRoot, env: lifecycleEnvironment(dshHome, fakeBin, options),
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += String(chunk) })
+  child.stderr.on('data', chunk => { stderr += String(chunk) })
+  return {
+    child,
+    done: new Promise<{ status: number | null; stdout: string; stderr: string }>(resolveDone => {
+      child.once('close', status => resolveDone({ status, stdout, stderr }))
+    }),
+  }
 }
 
 function startLifecycle(args: readonly string[], dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
@@ -516,6 +745,9 @@ describe('one-click installers', () => {
       expect(invocation).toContain('--die-with-parent')
       expect(invocation).toContain('--new-session')
       expect(invocation).toEqual(expect.arrayContaining(['--ro-bind', '/', '/', '--tmpfs', '/tmp']))
+      expect(invocation).toEqual(expect.arrayContaining([
+        '--perms', '0400', '--ro-bind-data', '4', '/run/dsh-enhanced-lifecycle-config.mjs',
+      ]))
       const bind = invocation.indexOf('--bind-fd')
       expect(invocation.slice(bind, bind + 3)).toEqual(['--bind-fd', '3', f.dshHome])
       const dshHomeVariable = invocation.findIndex((value, index) => value === 'DSH_HOME' && invocation[index - 1] === '--setenv')
@@ -564,6 +796,37 @@ describe('one-click installers', () => {
     expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
   })
 
+  test.each([
+    '@dsh-enhanced/personal-assistant@1.4.0-rc.2',
+    '@dsh-enhanced/personal-assistant@1.4.0+build.7',
+  ])('lifecycle executor accepts exact prerelease or build npm spec %s', async target => {
+    const f = await lifecycleFixture()
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', target], f.dshHome, f.fakeBin, {
+      packageFails: true,
+    })
+
+    expect(result.status, result.stderr).toBe(42)
+    expect(result.stderr).not.toContain('升级目标必须是本地绝对路径或精确版本')
+    expect(await readFile(f.operationLog, 'utf8')).toContain(`\tplugin --profile web add ${target}\n`)
+  })
+
+  test.each([
+    '@dsh-enhanced/personal-assistant@^1.4.0',
+    '@dsh-enhanced/personal-assistant@1.4.x',
+    '@dsh-enhanced/personal-assistant@latest',
+    '@dsh-enhanced/personal-assistant@next',
+  ])('lifecycle executor rejects range or tag npm spec %s before creating a transaction', async target => {
+    const f = await lifecycleFixture()
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', target], f.dshHome, f.fakeBin)
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('升级目标必须是本地绝对路径或精确版本')
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('offline uninstall archives the complete old profile and preserves all external durable state', async () => {
     const f = await lifecycleFixture({ thirdParty: false })
 
@@ -582,6 +845,36 @@ describe('one-click installers', () => {
     expect(repeated.status, repeated.stderr).toBe(0)
     expect(repeated.stdout).toContain('没有 @dsh-enhanced/* 顶层依赖')
     expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archives)
+  })
+
+  test('uninstall activation failure leaves the original home unchanged and keeps its archive only in staged evidence', async () => {
+    const f = await lifecycleFixture({ activationFails: true })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const patchBefore = await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')
+    const sessionBefore = await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')
+
+    const result = runLifecycle(['uninstall', 'web', f.dshHome, '0'], f.dshHome, f.fakeBin)
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('原 DSH_HOME 未修改')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    expect(await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')).toBe(patchBefore)
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+    expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe(sessionBefore)
+    await expect(stat(join(f.dshHome, 'uninstalled-profiles'))).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const preserved = await preservedLifecycleTransactions(f.dshHome)
+    expect(preserved).toEqual([`${f.dshHome}.dsh-enhanced-transaction`])
+    const stagedHome = join(preserved[0]!, 'staged-home')
+    const stagedArchives = await readdir(join(stagedHome, 'uninstalled-profiles'))
+    expect(stagedArchives).toHaveLength(1)
+    const archived = JSON.parse(await readFile(
+      join(stagedHome, 'uninstalled-profiles', stagedArchives[0]!, 'package.json'), 'utf8',
+    ))
+    expect(archived.dependencies).toMatchObject({ '@dsh-enhanced/personal-assistant': '0.1.0' })
+    expect(readLifecycleDatabase(join(stagedHome, 'assistant-goals', 'web.sqlite'))).toEqual({
+      userVersion: 2, values: ['durable-goal-state', 'migrated-during-activation'],
+    })
   })
 
   test('uninstall fails closed without changing a profile that has third-party bundles', async () => {
@@ -864,6 +1157,54 @@ describe('one-click installers', () => {
     expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
   })
 
+  test.each([
+    ['a newly created', 'profiles/web/node_modules/new-external', false],
+    ['a changed existing', 'profiles/web/node_modules/existing-external', true],
+  ] as const)('post-package scan rejects %s external package symlink and leaves the original home unchanged',
+    async (_kind, packageSymlinkRelative, existing) => {
+      const f = await lifecycleFixture()
+      const firstExternal = join(f.root, 'external-package-a')
+      const secondExternal = join(f.root, 'external-package-b')
+      await mkdir(firstExternal)
+      await mkdir(secondExternal)
+      if (existing) {
+        await mkdir(dirname(join(f.dshHome, packageSymlinkRelative)), { recursive: true })
+        await symlink(firstExternal, join(f.dshHome, packageSymlinkRelative))
+      }
+      const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+      const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, {
+        packageSymlinkRelative,
+        packageSymlinkTarget: secondExternal,
+      })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toMatch(/symbolic link|symlink|符号链接|外链/iu)
+      expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+      await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+      const preserved = await preservedLifecycleTransactions(f.dshHome)
+      expect(preserved).toEqual([`${f.dshHome}.dsh-enhanced-transaction`])
+      expect(await realpath(join(preserved[0]!, 'staged-home', packageSymlinkRelative))).toBe(secondExternal)
+      if (existing) expect(await realpath(join(f.dshHome, packageSymlinkRelative))).toBe(firstExternal)
+      else await expect(stat(join(f.dshHome, packageSymlinkRelative))).rejects.toMatchObject({ code: 'ENOENT' })
+    })
+
+  test('post-package scan allows an unchanged existing external pnpm package symlink', async () => {
+    const f = await lifecycleFixture()
+    const externalPackage = join(f.root, 'pnpm-store-package')
+    const packageLink = join(f.profileDirectory, 'node_modules', 'existing-external')
+    await mkdir(externalPackage)
+    await mkdir(dirname(packageLink), { recursive: true })
+    await symlink(externalPackage, packageLink)
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await realpath(packageLink)).toBe(externalPackage)
+    expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
+  })
+
   test('rejects a hardlink with a directory entry outside DSH_HOME before the staged package command', async () => {
     const f = await lifecycleFixture({ thirdParty: false })
     const outsideFile = join(f.root, 'outside-state')
@@ -913,6 +1254,38 @@ describe('one-click installers', () => {
     }
   })
 
+  test.skipIf(!realBwrapUsable)('real bwrap executes a /tmp validator through ro-bind-data after /tmp is hidden', async () => {
+    const root = await temporaryDshHome()
+    const validatorPath = join(root, 'validator.mjs')
+    await writeFile(validatorPath, [
+      "import { readFileSync } from 'node:fs'",
+      "if (readFileSync(import.meta.filename, 'utf8').includes('validator-through-fd')) {",
+      "  process.stdout.write('validator-through-fd\\n')",
+      '}',
+      '// validator-through-fd',
+      '',
+    ].join('\n'))
+    const validatorHandle = await open(validatorPath, 'r')
+
+    try {
+      const result = spawnSync('/usr/bin/bwrap', [
+        '--unshare-all', '--die-with-parent', '--new-session',
+        '--ro-bind', '/', '/',
+        '--tmpfs', '/tmp', '--tmpfs', '/run',
+        '--perms', '0400', '--ro-bind-data', '3', '/run/validator.mjs',
+        '--proc', '/proc', '--dev', '/dev',
+        '--chdir', '/tmp', '--clearenv',
+        '--setenv', 'PATH', '/usr/bin:/bin',
+        '--', process.execPath, '/run/validator.mjs',
+      ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe', validatorHandle.fd], timeout: 5_000 })
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toBe('validator-through-fd\n')
+    } finally {
+      await validatorHandle.close()
+    }
+  })
+
   test('installer upgrade targets only existing managed dependencies and preserves third-party dependencies', async () => {
     const f = await lifecycleFixture({
       managedDependencies: ['personal-assistant', 'assistant-goals'],
@@ -937,6 +1310,190 @@ describe('one-click installers', () => {
       expect(result.stdout).not.toContain(join(repoRoot, 'plugins', absent))
     }
     expect(JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))).toEqual(manifestBefore)
+  })
+
+  test('npm lifecycle dry-run upgrades only existing managed names at one exact version', async () => {
+    const f = await lifecycleFixture({
+      managedDependencies: ['personal-assistant', 'assistant-goals'],
+      thirdPartyDependency: true,
+    })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped',
+      '--plugin-version', '1.4.0', '--dry-run',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).not.toContain('只由完整本地仓库安装器提供')
+    expect(result.stdout).toContain('npm cohort（dry-run）：将核验所有 bundle 都已发布为 1.4.0')
+    expect(result.stdout).toContain('@dsh-enhanced/personal-assistant@1.4.0')
+    expect(result.stdout).toContain('@dsh-enhanced/assistant-goals@1.4.0')
+    for (const absent of ['plugin-control-plane', 'assistant-delivery', 'assistant-web-owner']) {
+      expect(result.stdout).not.toContain('@dsh-enhanced/' + absent + '@1.4.0')
+    }
+    expect(result.stdout).not.toContain('owner-library@1.4.0')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+  })
+
+  test('npm upgrade resolves and prefetches its exact cohort before creating the offline transaction', async () => {
+    const f = await lifecycleFixture()
+    const version = '1.4.0-rc.2+build.7'
+    const target = `@dsh-enhanced/personal-assistant@${version}`
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped',
+      '--plugin-version', version,
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { npmVersion: version }))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect((await readFile(f.operationLog, 'utf8')).trim().split('\n')).toEqual([
+      `npm-view\tabsent\tview ${target} version --json`,
+      `npm-view\tabsent\tview ${target} version --json`,
+      `pnpm-store-add\tabsent\tignore=true\tstore add ${target}`,
+      `dsh-add\tpresent\toffline=true\timport=copy\tplugin --profile web add ${target}`,
+    ])
+  })
+
+  test('npm upgrade keeps its lifecycle lock while npm view is blocked and a contender fails busy before any transaction', async () => {
+    const f = await lifecycleFixture()
+    const args = [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped',
+      '--plugin-version', '1.4.0',
+    ]
+    const first = startInstaller(npmInstaller, args, f.dshHome, f.fakeBin, { npmBlock: true })
+    await waitForFile(join(f.root, 'npm-block-started'))
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+
+    const second = startInstaller(npmInstaller, args, f.dshHome, f.fakeBin)
+    const observedSecond = await Promise.race([
+      second.done,
+      new Promise<undefined>(resolveDelay => setTimeout(resolveDelay, 1_000)),
+    ])
+
+    expect(observedSecond, 'the contender must fail immediately while npm view holds the lifecycle lock').toBeDefined()
+    expect(observedSecond!.status).not.toBe(0)
+    expect(observedSecond!.stderr).toMatch(/busy|lock|正在|并发|占用/iu)
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readFile(f.operationLog, 'utf8')).match(/^npm-view/mgu)).toHaveLength(1)
+
+    await writeFile(join(f.root, 'npm-block-release'), '')
+    const firstResult = await first.done
+    expect(firstResult.status, firstResult.stderr).toBe(0)
+  })
+
+  test.each([
+    ['group-writable DSH_HOME parent', (f: Awaited<ReturnType<typeof lifecycleFixture>>) => dirname(f.dshHome), 0o020],
+    ['other-writable DSH_HOME parent', (f: Awaited<ReturnType<typeof lifecycleFixture>>) => dirname(f.dshHome), 0o002],
+    ['group-writable DSH_HOME', (f: Awaited<ReturnType<typeof lifecycleFixture>>) => f.dshHome, 0o020],
+    ['other-writable DSH_HOME', (f: Awaited<ReturnType<typeof lifecycleFixture>>) => f.dshHome, 0o002],
+    ['group-writable profile', (f: Awaited<ReturnType<typeof lifecycleFixture>>) => f.profileDirectory, 0o020],
+    ['other-writable profile', (f: Awaited<ReturnType<typeof lifecycleFixture>>) => f.profileDirectory, 0o002],
+  ] as const)('npm upgrade rejects %s before registry access', async (_label, selectedPath, writableBit) => {
+    const f = await lifecycleFixture()
+    const unsafePath = selectedPath(f)
+    const originalMode = (await stat(unsafePath)).mode & 0o777
+    await chmod(unsafePath, originalMode | writableBit)
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped',
+      '--plugin-version', '1.4.0',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/writable|permission|权限|写入|不可写|不安全/iu)
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('npm upgrade store prefetch failure leaves all original state untouched and never creates a transaction', async () => {
+    const f = await lifecycleFixture()
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const patchBefore = await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')
+    const sessionBefore = await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped',
+      '--plugin-version', '1.4.0',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { storeFails: true }))
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('npm cohort 预取失败')
+    expect((await readFile(f.operationLog, 'utf8')).trim().split('\n')).toEqual([
+      'npm-view\tabsent\tview @dsh-enhanced/personal-assistant@1.4.0 version --json',
+      'npm-view\tabsent\tview @dsh-enhanced/personal-assistant@1.4.0 version --json',
+      'pnpm-store-add\tabsent\tignore=true\tstore add @dsh-enhanced/personal-assistant@1.4.0',
+    ])
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    expect(await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')).toBe(patchBefore)
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+    expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe(sessionBefore)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(f.activationMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+    const dshCalls = await readFile(f.dshLog, 'utf8')
+    expect(dshCalls).toContain('CALL\t--version\n')
+    expect(dshCalls).not.toContain('\tplugin\t')
+    expect(dshCalls).not.toContain('\t--host\t')
+  })
+
+  test('npm upgrade recovers an old transaction and returns before registry or store access', async () => {
+    const f = await lifecycleFixture()
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const stagedHome = join(transaction, 'staged-home')
+    await mkdir(stagedHome, { recursive: true })
+    await writeFile(join(stagedHome, 'recovered-evidence'), 'preserve')
+    await writeBoundLifecycleManifest({
+      dshHome: f.dshHome, originalHome: f.dshHome, stagedHome, state: 'failed',
+    })
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('本次未访问 npm registry')
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    const preserved = await preservedLifecycleTransactions(f.dshHome)
+    expect(preserved).toHaveLength(1)
+    expect(preserved[0]).not.toBe(transaction)
+    expect(await readFile(join(preserved[0]!, 'staged-home', 'recovered-evidence'), 'utf8')).toBe('preserve')
+  })
+
+  test('npm upgrade through a canonical home symlink recovers residue without registry access', async () => {
+    const f = await lifecycleFixture()
+    const homeAlias = join(f.root, 'home-alias')
+    await symlink(f.dshHome, homeAlias)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const stagedHome = join(transaction, 'staged-home')
+    await mkdir(stagedHome, { recursive: true })
+    await writeFile(join(stagedHome, 'canonical-recovery-evidence'), 'preserve')
+    await writeBoundLifecycleManifest({
+      dshHome: f.dshHome, originalHome: f.dshHome, stagedHome, state: 'failed',
+    })
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped',
+    ], homeAlias, undefined, lifecycleEnvironment(homeAlias, f.fakeBin))
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('本次未访问 npm registry')
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    const preserved = await preservedLifecycleTransactions(f.dshHome)
+    expect(preserved).toHaveLength(1)
+    expect(preserved[0]).not.toBe(transaction)
+    expect(await readFile(join(preserved[0]!, 'staged-home', 'canonical-recovery-evidence'), 'utf8')).toBe('preserve')
+  })
+
+  test('npm uninstall skips registry cohort resolution and pnpm store prefetch', async () => {
+    const f = await lifecycleFixture()
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'uninstall', '--scenario', 'web', '--confirm-dsh-home-stopped',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
   })
 
   test('upgrade and uninstall require an existing stopped web or autonomy profile', async () => {
@@ -1031,6 +1588,159 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
 
     expect(pinnedHash).toBe(createHash('sha256').update(pinnedRemoteCommon!.stdout).digest('hex'))
   })
+
+  test('remote lifecycle helper pins are both zero sentinels or both release hashes', () => {
+    expect(pinnedLifecycleConfigHash).toMatch(/^[0-9a-f]{64}$/u)
+    expect(pinnedLifecycleProfileHash).toMatch(/^[0-9a-f]{64}$/u)
+    expect(pinnedLifecycleConfigHash === zeroSha256).toBe(pinnedLifecycleProfileHash === zeroSha256)
+  })
+
+  test.skipIf(
+    pinnedLifecycleConfigHash === undefined
+      || pinnedLifecycleProfileHash === undefined
+      || pinnedLifecycleConfigHash === zeroSha256
+      || pinnedLifecycleProfileHash === zeroSha256
+      || pinnedRemoteLifecycleConfig === undefined
+      || pinnedRemoteLifecycleConfig.status !== 0
+      || pinnedRemoteLifecycleProfile === undefined
+      || pinnedRemoteLifecycleProfile.status !== 0,
+  )('remote lifecycle helper hashes match their pinned release assets when that tag is available locally', () => {
+    expect(pinnedLifecycleConfigHash).toBe(
+      createHash('sha256').update(pinnedRemoteLifecycleConfig!.stdout).digest('hex'),
+    )
+    expect(pinnedLifecycleProfileHash).toBe(
+      createHash('sha256').update(pinnedRemoteLifecycleProfile!.stdout).digest('hex'),
+    )
+  })
+
+  test('remote npm install with lifecycle zero sentinels downloads, verifies, and sources only common.sh', async () => {
+    const fixture = await remoteBootstrapFixture()
+    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+
+    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'])
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(fixture.logPath, 'utf8')).toBe([
+      'download\thttps://assets.invalid/v9.8.7/common.sh',
+      'verify\tcommon.sh',
+      'source:common',
+      'run\tnpm\t\t--dry-run',
+      '',
+    ].join('\n'))
+    expect(await readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).toBe('mutated\n')
+    expect(await readdir(fixture.temporaryDirectory)).toEqual([])
+  })
+
+  test('remote npm bootstrap rejects an unsafe custom TMPDIR before download or source', async () => {
+    const fixture = await remoteBootstrapFixture()
+    await chmod(fixture.temporaryDirectory, 0o777)
+    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+
+    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'])
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/TMPDIR|temporary|临时/iu)
+    await expect(stat(fixture.logPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(join(fixture.dshHome, 'bootstrap-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readdir(fixture.temporaryDirectory)).toEqual([])
+  })
+
+  test('remote npm bootstrap rejects a private TMPDIR beneath a foreign-owned ancestor before download or source',
+    async () => {
+      const fixture = await remoteBootstrapFixture()
+      const foreignAncestor = join(fixture.temporaryDirectory, 'foreign-ancestor')
+      const privateTmp = join(foreignAncestor, 'private-tmp')
+      await mkdir(foreignAncestor, { mode: 0o755 })
+      await mkdir(privateTmp, { mode: 0o700 })
+      const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+
+      const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
+        foreignStatPath: foreignAncestor,
+        temporaryDirectory: privateTmp,
+      })
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/TMPDIR|临时目录祖先所有者不受信任/iu)
+      await expect(stat(fixture.logPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(join(fixture.dshHome, 'bootstrap-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await readdir(privateTmp)).toEqual([])
+    },
+  )
+
+  test('remote npm bootstrap accepts a private custom TMPDIR', async () => {
+    const fixture = await remoteBootstrapFixture()
+    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+
+    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'])
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(fixture.logPath, 'utf8')).toContain('source:common\n')
+    expect(await readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).toBe('mutated\n')
+    expect(await readdir(fixture.temporaryDirectory)).toEqual([])
+  })
+
+  test.each(['upgrade', 'uninstall'] as const)(
+    'remote npm %s with lifecycle zero sentinels fails before downloads or source',
+    async operation => {
+      const fixture = await remoteBootstrapFixture()
+      const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+
+      const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, [
+        '--operation', operation, '--confirm-dsh-home-stopped', '--scenario', 'web', '--dry-run',
+      ])
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('固定发布未包含已校验的 lifecycle helper')
+      await expect(readFile(fixture.logPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await readdir(fixture.temporaryDirectory)).toEqual([])
+    },
+  )
+
+  test.each(['upgrade', 'uninstall'] as const)(
+    'remote npm %s lifecycle bootstrap downloads one release cohort and verifies every asset before source',
+    async operation => {
+      const fixture = await remoteBootstrapFixture()
+
+      const result = runRemoteNpmBootstrap(pinnedInstallerSource, fixture, [
+        '--operation', operation, '--confirm-dsh-home-stopped', '--scenario', 'web', '--dry-run',
+      ], { lifecycleDigests: true })
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(await readFile(fixture.logPath, 'utf8')).toBe([
+        'download\thttps://assets.invalid/v9.8.7/common.sh',
+        'verify\tcommon.sh',
+        'download\thttps://assets.invalid/v9.8.7/lifecycle-config.mjs',
+        'download\thttps://assets.invalid/v9.8.7/lifecycle-profile.mjs',
+        'verify\tlifecycle-config.mjs',
+        'verify\tlifecycle-profile.mjs',
+        'source:common',
+        `run\tnpm\t\t--operation\t${operation}\t--confirm-dsh-home-stopped\t--scenario\tweb\t--dry-run`,
+        '',
+      ].join('\n'))
+      expect(await readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).toBe('mutated\n')
+      expect(await readdir(fixture.temporaryDirectory)).toEqual([])
+    },
+  )
+
+  test.each(['common.sh', 'lifecycle-config.mjs', 'lifecycle-profile.mjs'] as const)(
+    'remote npm lifecycle bootstrap rejects tampered %s before source or home mutation',
+    async tamperedAsset => {
+      const fixture = await remoteBootstrapFixture()
+
+      const result = runRemoteNpmBootstrap(pinnedInstallerSource, fixture, [
+        '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--scenario', 'web', '--dry-run',
+      ], { lifecycleDigests: true, tamper: tamperedAsset })
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('远程 ' + tamperedAsset + ' 完整性校验失败')
+      const log = await readFile(fixture.logPath, 'utf8')
+      expect(log).not.toContain('source:common')
+      expect(log).not.toContain('\nrun\t')
+      await expect(readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await readdir(fixture.temporaryDirectory)).toEqual([])
+    },
+  )
 
   test('collects an interactive model route before its npm cohort is preflighted', async () => {
     const source = await readFile(installerLibrary, 'utf8')

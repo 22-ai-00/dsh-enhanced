@@ -56,7 +56,7 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
 ```
 
-不便先 clone 仓库时，可一键远程安装。远程引导器会校验并执行固定发布 tag 的 `common.sh`；当前 checkout 中的 cohort 解析改动会在下一次 `release:prepare` 和发布该 tag 后才进入这条远程路径。DSH host 默认跟随 npm `latest`；发布后的安装脚本会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，从而保持默认获取最新完整发布且避免跨包 `latest` 混装。安装器会按发布账本中的已验证 host 范围进行检查，显式指定范围外版本时必须同时传 `--ack-unverified-host`：
+不便先 clone 仓库时，可一键远程安装。远程引导器会从固定发布 tag 下载并校验 `common.sh`；请求 `--operation upgrade|uninstall` 时，还会从同一个 tag 下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`，三个资产全部通过各自内嵌的 SHA-256 后才允许任何安装代码执行。当前 `v0.1.24` 不含后两个 helper，因此其占位 digest 为全零：普通远程安装继续可用，远程 upgrade/uninstall 则在下载或执行任何资产前 fail closed；下一次 `release:prepare` 会写入三个发布资产的真实 digest 后才可发布。直接从 checkout 运行的本地安装不受此占位值影响。DSH host 默认跟随 npm `latest`；发布后的安装脚本会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，从而保持默认获取最新完整发布且避免跨包 `latest` 混装。安装器会按发布账本中的已验证 host 范围进行检查，显式指定范围外版本时必须同时传 `--ack-unverified-host`：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
@@ -68,7 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash -s -- --scenario lark --lark configure
 ```
 
-引导器 `install-npm.sh` 虽从 `main` 拉取，但实际安装逻辑（`common.sh`）从一个固定 `vX.Y.Z` 发布标签拉取并经内嵌 SHA-256 校验后才执行，不从 mutable `main` 执行代码。完整场景选项、凭据存储和平台差异见[安装脚本文档](scripts/install)；飞书授权、模型选择、进度展示与常驻服务见 [`lark-channel` 文档](plugins/lark-channel)。
+引导器 `install-npm.sh` 虽从 `main` 拉取，但实际安装逻辑及按操作需要的生命周期 helper 从同一个固定 `vX.Y.Z` 发布标签拉取并全部通过内嵌 SHA-256 校验后才执行，不从 mutable `main` 执行代码。完整场景选项、凭据存储和平台差异见[安装脚本文档](scripts/install)；飞书授权、模型选择、进度展示与常驻服务见 [`lark-channel` 文档](plugins/lark-channel)。
 
 个人助理默认采用 `workspace-write + ask`；可显式传 `--permission auto`，让确定性低风险动作和隔离 reviewer 认可的局部可逆动作自动继续，而网络、凭据、破坏性操作、提权和复杂 shell 仍交人工。需要最低打扰时可传 `--permission danger-full-access --confirm-dangerous-full-access`，此时 reviewer 为 `none`，工具风险分类被整体跳过（网络、凭据读取、破坏性命令和提权都不再询问），只应在完全信任当前 workspace 时使用。注意两套名称不同：安装器 `--permission` 取 `preserve|workspace-write|auto|danger-full-access`，而运行时在飞书里用 `/permission ask|auto|full confirm` 切换（`full` 需二次确认）。工具可达性和执行权限是两层控制；即使选择 `danger-full-access`，显式 Policy deny、紧急停止、身份校验和预算硬门仍然生效。完整边界以各插件 README 为准。
 

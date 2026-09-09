@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, test } from 'vitest'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -70,6 +71,47 @@ function runRelease(root: string, ...args: string[]) {
   })
 }
 
+const installerAssets = {
+  'common.sh': '# fixture installer library\n',
+  'lifecycle-config.mjs': 'export const fixtureConfig = true\n',
+  'lifecycle-profile.mjs': 'export const fixtureProfile = true\n',
+}
+
+async function createInstaller(root: string) {
+  const installDirectory = join(root, 'scripts', 'install')
+  await mkdir(installDirectory, { recursive: true })
+  for (const [name, contents] of Object.entries(installerAssets)) {
+    await writeFile(join(installDirectory, name), contents)
+  }
+  await writeFile(join(installDirectory, 'install-npm.sh'), [
+    "DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.0'",
+    `DSH_ENHANCED_PINNED_COMMON_SHA256='${'0'.repeat(64)}'`,
+    `DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='${'1'.repeat(64)}'`,
+    `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${'2'.repeat(64)}'`,
+    "DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'",
+    '',
+  ].join('\n'))
+  return installDirectory
+}
+
+function sha256(contents: string) {
+  return createHash('sha256').update(contents).digest('hex')
+}
+
+const invalidVerifiedHostRanges = [
+  ['single-quote injection', ">=0.1.2-rc.1'; touch injected; #"],
+  ['double quote', '>=0.1.2-rc.1"'],
+  ['newline injection', '>=0.1.2-rc.1\n<0.2.0'],
+  ['carriage-return injection', '>=0.1.2-rc.1\r<0.2.0'],
+  ['control-character injection', '>=0.1.2-rc.1\u0001<0.2.0'],
+  ['shell metacharacter', '>=0.1.2-rc.1;touch'],
+  ['command substitution', '>=0.1.2-rc.1$(touch injected)'],
+  ['backtick substitution', '>=0.1.2-rc.1`touch injected`'],
+  ['unsupported disjunction', '>=0.1.2-rc.1 || <0.2.0'],
+  ['unsupported caret range', '^0.1.2'],
+  ['unsupported wildcard range', '0.1.x'],
+] as const
+
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
@@ -101,6 +143,50 @@ describe('release version workflow', () => {
     expect(ledger.pending.version).toBe('0.1.1')
     expect(ledger.pending.verifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
     expect(ledger.pending.packages).toEqual({ '@fixture/example': '0.1.1' })
+  })
+
+  test('prepare accepts legacy history entries without verified host ranges', async () => {
+    const root = await createRepository('0.1.24')
+    const ledgerPath = join(root, 'release-manifest.json')
+    const ledger = await readJson(ledgerPath)
+    const legacyVersions = [
+      '0.1.0',
+      '0.1.1',
+      '0.1.2',
+      '0.1.3',
+      '0.1.4',
+      '0.1.5',
+      '0.1.6',
+      '0.1.7',
+      '0.1.12',
+      '0.1.14',
+      '0.1.17',
+      '0.1.18',
+      '0.1.19',
+      '0.1.20',
+      '0.1.21',
+      '0.1.22',
+      '0.1.23',
+    ]
+    ledger.history = [
+      ...legacyVersions.map((version, index) => ({
+        version,
+        releasedAt: new Date(Date.UTC(2026, 7, index + 1)).toISOString(),
+        packages: { '@fixture/example': version },
+      })),
+      ledger.current,
+    ]
+    await writeJson(ledgerPath, ledger)
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status, result.stderr).toBe(0)
+    const preparedLedger = await readJson(ledgerPath)
+    expect(preparedLedger.pending.version).toBe('0.1.25')
+    expect(preparedLedger.pending.verifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
+    expect(preparedLedger.history.slice(0, -1).every(
+      (release: Record<string, unknown>) => !Object.hasOwn(release, 'verifiedHostRange'),
+    )).toBe(true)
   })
 
   test('record promotes the pending release and appends immutable history', async () => {
@@ -136,23 +222,150 @@ describe('release version workflow', () => {
 
   test('prepare pins the verified host range into the remote installer', async () => {
     const root = await createRepository('0.1.0')
-    const installDirectory = join(root, 'scripts', 'install')
-    await mkdir(installDirectory, { recursive: true })
-    await writeFile(join(installDirectory, 'common.sh'), '# fixture installer library\n')
-    await writeFile(join(installDirectory, 'install-npm.sh'), [
-      "DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.0'",
-      `DSH_ENHANCED_PINNED_COMMON_SHA256='${'0'.repeat(64)}'`,
-      "DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'",
-      '',
-    ].join('\n'))
+    const installDirectory = await createInstaller(root)
 
     const result = runRelease(root, 'prepare')
 
     expect(result.status, result.stderr).toBe(0)
     const installer = await readFile(join(installDirectory, 'install-npm.sh'), 'utf8')
     expect(installer).toContain("DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.1'")
-    expect(installer).toMatch(/^DSH_ENHANCED_PINNED_COMMON_SHA256='[0-9a-f]{64}'$/mu)
+    expect(installer).toContain(`DSH_ENHANCED_PINNED_COMMON_SHA256='${sha256(installerAssets['common.sh'])}'`)
+    expect(installer).toContain(
+      `DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='${sha256(installerAssets['lifecycle-config.mjs'])}'`,
+    )
+    expect(installer).toContain(
+      `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${sha256(installerAssets['lifecycle-profile.mjs'])}'`,
+    )
     expect(installer).toContain("DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'")
+  })
+
+  test.each([
+    '>=0.1.0-rc.8',
+    '>=0.1.2-rc.1 <0.2.0',
+    '>0.1.0 <=0.2.0',
+    '=0.1.2',
+    '0.1.2',
+  ])('prepare accepts supported verified host range %s', async verifiedHostRange => {
+    const root = await createRepository('0.1.0')
+    const installDirectory = await createInstaller(root)
+    const ledgerPath = join(root, 'release-manifest.json')
+    const ledger = await readJson(ledgerPath)
+    ledger.nextVerifiedHostRange = verifiedHostRange
+    await writeJson(ledgerPath, ledger)
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status, result.stderr).toBe(0)
+    expect((await readJson(ledgerPath)).pending.verifiedHostRange).toBe(verifiedHostRange)
+    expect(await readFile(join(installDirectory, 'install-npm.sh'), 'utf8'))
+      .toContain(`DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`)
+  })
+
+  test.each(invalidVerifiedHostRanges)(
+    'prepare rejects a next verified host range with %s before writing files',
+    async (_description, verifiedHostRange) => {
+      const root = await createRepository('0.1.0')
+      const installDirectory = await createInstaller(root)
+      const installerPath = join(installDirectory, 'install-npm.sh')
+      const originalInstaller = await readFile(installerPath, 'utf8')
+      const ledgerPath = join(root, 'release-manifest.json')
+      const ledger = await readJson(ledgerPath)
+      ledger.nextVerifiedHostRange = verifiedHostRange
+      await writeJson(ledgerPath, ledger)
+
+      const result = runRelease(root, 'prepare')
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain(
+        'nextVerifiedHostRange must be a space-separated conjunction of supported host version comparators',
+      )
+      expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
+      expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('0.1.0')
+      expect(await readFile(join(root, 'plugins', 'example', 'src', 'version.ts'), 'utf8'))
+        .toBe("export const version = '0.1.0'\n")
+      expect((await readJson(ledgerPath)).pending).toBeNull()
+      expect(await readFile(installerPath, 'utf8')).toBe(originalInstaller)
+    },
+  )
+
+  test('prepare fails closed on a partial installer asset set without writing versions', async () => {
+    const root = await createRepository('0.1.0')
+    const installDirectory = join(root, 'scripts', 'install')
+    await mkdir(installDirectory, { recursive: true })
+    await writeFile(join(installDirectory, 'common.sh'), installerAssets['common.sh'])
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Installer asset set is incomplete; missing: install-npm.sh')
+    expect(result.stderr).toContain('lifecycle-config.mjs')
+    expect(result.stderr).toContain('lifecycle-profile.mjs')
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
+    expect((await readJson(join(root, 'release-manifest.json'))).pending).toBeNull()
+  })
+
+  test.each([
+    ['duplicate', "DSH_ENHANCED_PINNED_COMMON_SHA256='0000000000000000000000000000000000000000000000000000000000000000'\n"],
+    ['malformed', "DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='not-a-digest'"],
+  ])('prepare rejects a %s installer pin without writing versions', async (_description, mutation) => {
+    const root = await createRepository('0.1.0')
+    const installDirectory = await createInstaller(root)
+    const installerPath = join(installDirectory, 'install-npm.sh')
+    const installer = await readFile(installerPath, 'utf8')
+    await writeFile(
+      installerPath,
+      mutation.endsWith('\n') ? `${installer}${mutation}` : installer.replace(
+        /^DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256=.*$/mu,
+        mutation,
+      ),
+    )
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toMatch(/must contain exactly one|is malformed/u)
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
+    expect((await readJson(join(root, 'release-manifest.json'))).pending).toBeNull()
+  })
+
+  test('prepare rejects an injected existing installer range pin without writing versions', async () => {
+    const root = await createRepository('0.1.0')
+    const installDirectory = await createInstaller(root)
+    const installerPath = join(installDirectory, 'install-npm.sh')
+    const injectedInstaller = (await readFile(installerPath, 'utf8')).replace(
+      /^DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE=.*$/mu,
+      "DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'; touch injected; #'",
+    )
+    await writeFile(installerPath, injectedInstaller)
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE assignment is malformed')
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
+    expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('0.1.0')
+    expect((await readJson(join(root, 'release-manifest.json'))).pending).toBeNull()
+    expect(await readFile(installerPath, 'utf8')).toBe(injectedInstaller)
+  })
+
+  test('prepare rejects a missing installer asset pin without writing versions', async () => {
+    const root = await createRepository('0.1.0')
+    const installDirectory = await createInstaller(root)
+    const installerPath = join(installDirectory, 'install-npm.sh')
+    const installer = await readFile(installerPath, 'utf8')
+    await writeFile(installerPath, installer.replace(
+      /^DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256=.*\n/mu,
+      '',
+    ))
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(
+      'install-npm.sh must contain exactly one DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256 assignment',
+    )
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
+    expect((await readJson(join(root, 'release-manifest.json'))).pending).toBeNull()
   })
 
   test('supersede advances a failed pending release without recording it as successful', async () => {
@@ -179,6 +392,24 @@ describe('release version workflow', () => {
     })
   })
 
+  test('supersede rewrites the release ref while preserving all current asset digests', async () => {
+    const root = await createRepository('0.1.0')
+    const installDirectory = await createInstaller(root)
+    expect(runRelease(root, 'prepare').status).toBe(0)
+
+    const result = runRelease(root, 'supersede', '0.1.2')
+
+    expect(result.status, result.stderr).toBe(0)
+    const installer = await readFile(join(installDirectory, 'install-npm.sh'), 'utf8')
+    expect(installer).toContain("DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.2'")
+    for (const [name, contents] of Object.entries(installerAssets)) {
+      const pinName = name === 'common.sh'
+        ? 'DSH_ENHANCED_PINNED_COMMON'
+        : name.replace(/\.mjs$/u, '').replace(/-/gu, '_').replace(/^/u, 'DSH_ENHANCED_PINNED_').toUpperCase()
+      expect(installer).toContain(`${pinName}_SHA256='${sha256(contents)}'`)
+    }
+  })
+
   test('supersede requires an explicit version greater than the pending release', async () => {
     const root = await createRepository('0.1.0')
     expect(runRelease(root, 'prepare').status).toBe(0)
@@ -191,6 +422,36 @@ describe('release version workflow', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('must be greater than pending release 0.1.1')
     expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.1')
+  })
+
+  test.each([
+    ['supersede', ['supersede', '0.1.2']],
+    ['verify-tag', ['verify-tag', 'v0.1.1']],
+    ['record', ['record']],
+  ] as const)('%s rejects a malicious pending verified host range before writing', async (_command, args) => {
+    const root = await createRepository('0.1.0')
+    const installDirectory = await createInstaller(root)
+    expect(runRelease(root, 'prepare').status).toBe(0)
+    const installerPath = join(installDirectory, 'install-npm.sh')
+    const originalInstaller = await readFile(installerPath, 'utf8')
+    const ledgerPath = join(root, 'release-manifest.json')
+    const ledger = await readJson(ledgerPath)
+    ledger.pending.verifiedHostRange = ">=0.1.2-rc.1'; touch injected; #"
+    await writeJson(ledgerPath, ledger)
+
+    const result = runRelease(root, ...args)
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(
+      'Pending release verifiedHostRange must be a space-separated conjunction of supported host version comparators',
+    )
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.1')
+    expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('0.1.1')
+    expect(await readFile(join(root, 'plugins', 'example', 'src', 'version.ts'), 'utf8'))
+      .toBe("export const version = '0.1.1'\n")
+    expect((await readJson(ledgerPath)).pending.version).toBe('0.1.1')
+    expect((await readJson(ledgerPath)).current.version).toBe('0.1.0')
+    expect(await readFile(installerPath, 'utf8')).toBe(originalInstaller)
   })
 
   test('versions ordinary publishable packages together with plugins', async () => {
@@ -220,6 +481,33 @@ describe('release version workflow', () => {
     const ledger = await readJson(join(root, 'release-manifest.json'))
     expect(ledger.current.version).toBe('0.1.0')
     expect(ledger.pending.version).toBe('0.1.1')
+  })
+
+  test.each(['common.sh', 'lifecycle-config.mjs', 'lifecycle-profile.mjs'])(
+    'verify-tag rejects tampering with pinned installer asset %s',
+    async assetName => {
+      const root = await createRepository('0.1.0')
+      const installDirectory = await createInstaller(root)
+      expect(runRelease(root, 'prepare').status).toBe(0)
+      await writeFile(join(installDirectory, assetName), `${installerAssets[assetName as keyof typeof installerAssets]}tampered\n`)
+
+      const result = runRelease(root, 'verify-tag', 'v0.1.1')
+
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('installer asset digests')
+    },
+  )
+
+  test('verify-tag rejects a missing asset from an otherwise present installer set', async () => {
+    const root = await createRepository('0.1.0')
+    const installDirectory = await createInstaller(root)
+    expect(runRelease(root, 'prepare').status).toBe(0)
+    await rm(join(installDirectory, 'lifecycle-profile.mjs'))
+
+    const result = runRelease(root, 'verify-tag', 'v0.1.1')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Installer asset set is incomplete; missing: lifecycle-profile.mjs')
   })
 
   test.each([
@@ -541,6 +829,27 @@ describe('release version workflow', () => {
     expect(result.stderr).toContain('Release history entry 0 version is not a stable semantic version')
   })
 
+  test('verify-tag rejects a malicious verified host range when legacy history contains the field', async () => {
+    const root = await createRepository('0.1.0')
+    expect(runRelease(root, 'prepare').status).toBe(0)
+    const ledgerPath = join(root, 'release-manifest.json')
+    const ledger = await readJson(ledgerPath)
+    ledger.history.unshift({
+      version: '0.0.9',
+      releasedAt: '2026-08-17T00:00:00.000Z',
+      verifiedHostRange: '>=0.1.0-rc.8 || <0.2.0',
+      packages: { '@fixture/example': '0.0.9' },
+    })
+    await writeJson(ledgerPath, ledger)
+
+    const result = runRelease(root, 'verify-tag', 'v0.1.1')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(
+      'Release history entry 0 verifiedHostRange must be a space-separated conjunction of supported host version comparators',
+    )
+  })
+
   test('verify-tag rejects non-increasing release history', async () => {
     const root = await createRepository('0.1.0')
     expect(runRelease(root, 'prepare').status).toBe(0)
@@ -584,6 +893,27 @@ describe('release version workflow', () => {
 
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('Unsupported release manifest schema version: 2')
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
+    expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('0.1.0')
+    expect(await readFile(join(root, 'plugins', 'example', 'src', 'version.ts'), 'utf8'))
+      .toBe("export const version = '0.1.0'\n")
+    expect((await readJson(ledgerPath)).pending).toBeNull()
+  })
+
+  test('prepare rejects a malicious current verified host range before writing versions', async () => {
+    const root = await createRepository('0.1.0')
+    const ledgerPath = join(root, 'release-manifest.json')
+    const ledger = await readJson(ledgerPath)
+    ledger.current.verifiedHostRange = ">=0.1.0-rc.8'; touch injected; #"
+    ledger.history[0].verifiedHostRange = ledger.current.verifiedHostRange
+    await writeJson(ledgerPath, ledger)
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain(
+      'Current release verifiedHostRange must be a space-separated conjunction of supported host version comparators',
+    )
     expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
     expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('0.1.0')
     expect(await readFile(join(root, 'plugins', 'example', 'src', 'version.ts'), 'utf8'))
@@ -684,6 +1014,7 @@ describe('release version workflow', () => {
     ledger.pending = {
       version: pendingVersion,
       preparedAt: '2026-08-27T00:00:00.000Z',
+      verifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
       packages: { '@fixture/example': pendingVersion },
     }
     await writeJson(ledgerPath, ledger)
@@ -704,6 +1035,7 @@ describe('release version workflow', () => {
       pending: {
         version: '0.1.0',
         preparedAt: '2026-08-27T00:00:00.000Z',
+        verifiedHostRange: '>=0.1.0-rc.8',
         packages: { '@fixture/example': '0.1.0' },
       },
       history: [],
@@ -827,6 +1159,7 @@ describe('release version workflow', () => {
       pending: {
         version: '0.1.0',
         preparedAt: '2026-08-27T00:00:00.000Z',
+        verifiedHostRange: '>=0.1.0-rc.8',
         packages: { '@fixture/example': '0.1.0' },
       },
       history: [],

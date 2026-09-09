@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { access, readFile, readdir, writeFile } from 'node:fs/promises'
+import { readFile, readdir, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,6 +8,17 @@ import { fileURLToPath } from 'node:url'
 const defaultRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const stableVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/
 const runtimeVersionSourcePattern = /^\s*export\s+const\s+version\s*=\s*(['"])((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\1\s*;?\s*$/
+const hostVersionPatternSource = '[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?'
+const hostRangeComparatorPatternSource = `(?:>=|<=|>|<|=)?${hostVersionPatternSource}`
+const verifiedHostRangePattern = new RegExp(
+  `^${hostRangeComparatorPatternSource}(?: ${hostRangeComparatorPatternSource})*$`,
+  'u',
+)
+const installerAssetPins = [
+  ['common.sh', 'DSH_ENHANCED_PINNED_COMMON_SHA256'],
+  ['lifecycle-config.mjs', 'DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256'],
+  ['lifecycle-profile.mjs', 'DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256'],
+]
 
 function parseArguments(argv) {
   const rootIndex = argv.indexOf('--root')
@@ -46,6 +57,22 @@ function assertIsoTimestamp(value, label) {
   }
 }
 
+function assertVerifiedHostRange(value, label) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`${label} must be a non-empty string`)
+  }
+  const hasControlCharacter = [...value].some(character => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f)
+  })
+  if (hasControlCharacter || !verifiedHostRangePattern.test(value)) {
+    throw new Error(
+      `${label} must be a space-separated conjunction of supported host version comparators`,
+    )
+  }
+  return value
+}
+
 function versionFromTag(tag) {
   const match = typeof tag === 'string'
     ? /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(tag)
@@ -75,12 +102,15 @@ function packageMapsMatch(left, right) {
   return JSON.stringify(leftEntries) === JSON.stringify(rightEntries)
 }
 
-function validateReleaseRecord(release, label) {
+function validateReleaseRecord(release, label, verifiedHostRangeRequired = true) {
   if (!isObject(release)) {
     throw new Error(`${label} must be an object`)
   }
   assertStableVersion(release.version, `${label} version`)
   assertIsoTimestamp(release.releasedAt, `${label} releasedAt`)
+  if (verifiedHostRangeRequired || Object.hasOwn(release, 'verifiedHostRange')) {
+    assertVerifiedHostRange(release.verifiedHostRange, `${label} verifiedHostRange`)
+  }
   if (!isObject(release.packages)) {
     throw new Error(`${label} packages must be an object`)
   }
@@ -114,7 +144,7 @@ function validateRecordedRelease(ledger) {
   validateReleaseRecord(ledger.current, 'Current release')
   for (const [index, release] of ledger.history.entries()) {
     const label = `Release history entry ${index}`
-    validateReleaseRecord(release, label)
+    validateReleaseRecord(release, label, false)
     if (index > 0 && compareVersions(release.version, ledger.history[index - 1].version) <= 0) {
       throw new Error(`${label} version ${release.version} must be greater than ${ledger.history[index - 1].version}`)
     }
@@ -129,11 +159,10 @@ function validateRecordedRelease(ledger) {
 }
 
 function nextVerifiedHostRange(ledger) {
-  const range = ledger.nextVerifiedHostRange
-  if (typeof range !== 'string' || range.trim() === '') {
-    throw new Error('Release manifest nextVerifiedHostRange must be a non-empty string')
-  }
-  return range
+  return assertVerifiedHostRange(
+    ledger.nextVerifiedHostRange,
+    'Release manifest nextVerifiedHostRange',
+  )
 }
 
 async function readJson(path) {
@@ -144,37 +173,92 @@ async function writeJson(path, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
-async function updatePinnedRemoteInstaller(root, version, verifiedHostRange) {
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function replacePinnedAssignment(installer, name, expectedValue, validValuePattern) {
+  const escapedName = escapeRegExp(name)
+  const assignments = installer.match(new RegExp(`^\\s*${escapedName}\\s*=.*$`, 'gmu')) ?? []
+  if (assignments.length !== 1) {
+    throw new Error(`install-npm.sh must contain exactly one ${name} assignment`)
+  }
+  const canonical = new RegExp(`^${escapedName}='([^']+)'$`).exec(assignments[0])
+  if (!canonical || !validValuePattern.test(canonical[1])) {
+    throw new Error(`install-npm.sh ${name} assignment is malformed`)
+  }
+  return installer.replace(assignments[0], `${name}='${expectedValue}'`)
+}
+
+async function readRemoteInstallerAssets(root) {
+  const installDirectory = join(root, 'scripts', 'install')
   try {
-    await access(join(root, 'scripts', 'install', 'common.sh'))
-    await access(join(root, 'scripts', 'install', 'install-npm.sh'))
-  } catch {
-    // Focused release-version tests intentionally build minimal repositories.
-    // Production repositories always carry both installer files.
-    return
+    await readdir(installDirectory)
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      // Focused release-version tests intentionally build minimal repositories.
+      return null
+    }
+    throw error
   }
-  const common = await readFile(join(root, 'scripts', 'install', 'common.sh'))
-  const hash = createHash('sha256').update(common).digest('hex')
-  const installerPath = join(root, 'scripts', 'install', 'install-npm.sh')
-  const installer = await readFile(installerPath, 'utf8')
-  const withReference = installer.replace(
-    /^DSH_ENHANCED_PINNED_RELEASE_REF='v\d+\.\d+\.\d+'$/m,
-    `DSH_ENHANCED_PINNED_RELEASE_REF='v${version}'`,
-  )
-  const withHash = withReference.replace(
-    /^DSH_ENHANCED_PINNED_COMMON_SHA256='[0-9a-f]{64}'$/m,
-    `DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`,
-  )
-  const pinned = withHash.replace(
-    /^DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='[^']+'$/m,
-    () => `DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`,
-  )
-  if (pinned === installer || !pinned.includes(`DSH_ENHANCED_PINNED_RELEASE_REF='v${version}'`)
-    || !pinned.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)
-    || !pinned.includes(`DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`)) {
-    throw new Error('install-npm.sh must contain exactly one releasable pinned ref, SHA-256, and verified host range')
+
+  const requiredNames = ['install-npm.sh', ...installerAssetPins.map(([assetName]) => assetName)]
+  const reads = await Promise.all(requiredNames.map(async name => {
+    try {
+      return [name, await readFile(join(installDirectory, name))]
+    } catch (error) {
+      if (error?.code === 'ENOENT') return [name, null]
+      throw error
+    }
+  }))
+  const missing = reads.filter(([, contents]) => contents === null).map(([name]) => name)
+  if (missing.length > 0) {
+    throw new Error(`Installer asset set is incomplete; missing: ${missing.join(', ')}`)
   }
-  await writeFile(installerPath, pinned)
+  return {
+    installerPath: join(installDirectory, 'install-npm.sh'),
+    installer: reads[0][1].toString('utf8'),
+    assets: new Map(reads.slice(1)),
+  }
+}
+
+function pinRemoteInstaller(installerAssets, version, verifiedHostRange) {
+  assertVerifiedHostRange(verifiedHostRange, 'Pinned installer verifiedHostRange')
+  let pinned = replacePinnedAssignment(
+    installerAssets.installer,
+    'DSH_ENHANCED_PINNED_RELEASE_REF',
+    `v${version}`,
+    /^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/,
+  )
+  for (const [assetName, pinName] of installerAssetPins) {
+    const hash = createHash('sha256').update(installerAssets.assets.get(assetName)).digest('hex')
+    pinned = replacePinnedAssignment(pinned, pinName, hash, /^[0-9a-f]{64}$/)
+  }
+  pinned = replacePinnedAssignment(
+    pinned,
+    'DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE',
+    verifiedHostRange,
+    verifiedHostRangePattern,
+  )
+  return pinned
+}
+
+async function preparePinnedRemoteInstallerUpdate(root, version, verifiedHostRange) {
+  const installerAssets = await readRemoteInstallerAssets(root)
+  if (installerAssets === null) return null
+  return {
+    path: installerAssets.installerPath,
+    contents: pinRemoteInstaller(installerAssets, version, verifiedHostRange),
+  }
+}
+
+async function verifyPinnedRemoteInstaller(root, version, verifiedHostRange) {
+  const installerAssets = await readRemoteInstallerAssets(root)
+  if (installerAssets === null) return
+  const expected = pinRemoteInstaller(installerAssets, version, verifiedHostRange)
+  if (expected !== installerAssets.installer) {
+    throw new Error('Pinned remote installer does not match the pending release version, installer asset digests, and verified host range')
+  }
 }
 
 async function publishableEntries(root) {
@@ -205,6 +289,7 @@ async function validatePendingRelease(root, operation = 'verify') {
   const pendingVersion = ledger.pending.version
   assertStableVersion(pendingVersion, 'Pending release version')
   assertIsoTimestamp(ledger.pending.preparedAt, 'Pending release preparedAt')
+  assertVerifiedHostRange(ledger.pending.verifiedHostRange, 'Pending release verifiedHostRange')
   if (ledger.current && compareVersions(pendingVersion, ledger.current.version) <= 0) {
     throw new Error(`Pending release ${pendingVersion} must be greater than current release ${ledger.current.version}`)
   }
@@ -262,20 +347,7 @@ async function validatePendingRelease(root, operation = 'verify') {
     }
   }
 
-  try {
-    const installer = await readFile(join(root, 'scripts', 'install', 'install-npm.sh'), 'utf8')
-    const common = await readFile(join(root, 'scripts', 'install', 'common.sh'))
-    const hash = createHash('sha256').update(common).digest('hex')
-    if (!installer.includes(`DSH_ENHANCED_PINNED_RELEASE_REF='v${pendingVersion}'`)
-      || !installer.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)
-      || !installer.includes(`DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${ledger.pending.verifiedHostRange}'`)) {
-      throw new Error('Pinned remote installer does not match the pending release version, common.sh digest, and verified host range')
-    }
-  } catch (error) {
-    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
-      // Minimal release-version fixtures do not contain installer assets.
-    } else throw error
-  }
+  await verifyPinnedRemoteInstaller(root, pendingVersion, ledger.pending.verifiedHostRange)
 
   return { ledger, ledgerPath, pendingVersion }
 }
@@ -346,11 +418,12 @@ async function prepare(root, requestedVersion) {
     verifiedHostRange: nextVerifiedHostRange(ledger),
     packages,
   }
+  const installerUpdate = await preparePinnedRemoteInstallerUpdate(root, version, ledger.pending.verifiedHostRange)
 
   await writeJson(rootManifestPath, rootManifest)
   await Promise.all(workspacePackages.map(workspacePackage => writeJson(workspacePackage.path, workspacePackage.manifest)))
   await Promise.all(workspacePackages.map(workspacePackage => writeFile(workspacePackage.versionPath, workspacePackage.versionSource)))
-  await updatePinnedRemoteInstaller(root, version, ledger.pending.verifiedHostRange)
+  if (installerUpdate) await writeFile(installerUpdate.path, installerUpdate.contents)
   await writeJson(ledgerPath, ledger)
   console.log(`Prepared release ${version}`)
 }
@@ -388,12 +461,17 @@ async function supersede(root, requestedVersion) {
     verifiedHostRange: ledger.pending.verifiedHostRange,
     packages: Object.fromEntries(workspacePackages.map(({ manifest }) => [manifest.name, requestedVersion])),
   }
+  const installerUpdate = await preparePinnedRemoteInstallerUpdate(
+    root,
+    requestedVersion,
+    ledger.pending.verifiedHostRange,
+  )
   await writeJson(rootManifestPath, rootManifest)
   await Promise.all(workspacePackages.map(({ manifest, manifestPath }) => writeJson(manifestPath, manifest)))
   await Promise.all(workspacePackages.map(({ versionPath }) => (
     writeFile(versionPath, `export const version = '${requestedVersion}'\n`)
   )))
-  await updatePinnedRemoteInstaller(root, requestedVersion, ledger.pending.verifiedHostRange)
+  if (installerUpdate) await writeFile(installerUpdate.path, installerUpdate.contents)
   await writeJson(ledgerPath, ledger)
   console.log(`Superseded pending release ${pendingVersion} with ${requestedVersion}`)
 }
