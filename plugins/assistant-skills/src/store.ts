@@ -41,6 +41,8 @@ export interface SkillCandidate {
   updatedAt: number
   activatedVersion?: number
   trialRunId?: string
+  activationComparisonId?: string
+  deploymentId?: string
   acceptanceDigest?: string
   activationWatchDigest?: string
   activationWatchId?: string
@@ -54,6 +56,14 @@ export interface SkillWatch {
   runIds: readonly string[]; observations: readonly SkillWatchObservation[]; createdAt: number; updatedAt: number; rollbackVersion?: number
 }
 export interface SkillWatchInput { ownerRouteId: string; skillName: string; version: number; fallbackVersion: number; expiresAt: number; maxRuns: number; failureThreshold: number }
+export interface SkillDeploymentInput { ownerRouteId: string; expiresAt: number; maxRuns: number; canaryRuns: number }
+export interface SkillDeployment {
+  id: string; scope: object; candidateId: string; comparisonId: string; qualificationDigest: string; routeReceipt: unknown; ownerRouteId: string
+  skillName: string; version: number; definitionDigest: string; parentVersion: number; watchId: string
+  expiresAt: number; maxRuns: number; canaryRuns: number; runIds: string[]
+  state: 'canary' | 'promoted' | 'blocked' | 'expired' | 'revoked' | 'rolled-back' | 'superseded'
+  createdAt: number; updatedAt: number
+}
 export interface SkillCapture {
   id: string; scope: object; routeReceipt: unknown; ownerRouteId: string; goalId: string; sessionId: string
   nativeGoalId: string; name: string; description: string; parentVersion: number; parentDigest: string | null; definitionDigest: string
@@ -87,6 +97,7 @@ function text(value: unknown, maximum = 512): value is string { return typeof va
 function runId(scope: unknown, sessionId: string, invocationId: string): string { return `skill-run-${acceptanceDigest([scope, sessionId, invocationId])}` }
 function comparisonId(scope: unknown, sessionId: string, invocationId: string): string { return `skill-comparison-${acceptanceDigest([scope, sessionId, invocationId])}` }
 function watchId(scope: unknown, input: SkillWatchInput): string { return `skill-watch-${acceptanceDigest([scope, input])}` }
+function deploymentId(scope: unknown, candidateId: string, comparisonId: string, qualificationDigest: string, input: SkillDeploymentInput, routeReceipt: unknown): string { return `skill-deployment-${acceptanceDigest([scope, candidateId, comparisonId, qualificationDigest, input, routeReceipt])}` }
 function definitionValid(definition: unknown): definition is SkillDefinition { return !!definition && typeof definition === 'object' && (definition as SkillDefinition).protocol === 'assistant-skills/definition/v1' && name((definition as SkillDefinition).name) && json(definition) }
 
 function privatePath(path: string): void {
@@ -117,13 +128,16 @@ export class SkillStore {
       CREATE TABLE IF NOT EXISTS skill_candidates(scope_key TEXT NOT NULL, id TEXT NOT NULL, candidate_json TEXT NOT NULL, PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_comparisons(scope_key TEXT NOT NULL,id TEXT NOT NULL,profile_id TEXT NOT NULL,identity_json TEXT NOT NULL,comparison_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('running','complete','unknown')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_watches(scope_key TEXT NOT NULL,id TEXT NOT NULL,watch_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('watching','rolled-back','expired','revoked','superseded','exhausted')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS skill_deployments(scope_key TEXT NOT NULL,id TEXT NOT NULL,deployment_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('canary','promoted','blocked','expired','revoked','rolled-back','superseded')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_captures(scope_key TEXT NOT NULL,id TEXT NOT NULL,capture_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','captured','revoked','expired','unsupported','unknown')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS skill_definitions_current ON skill_definitions(scope_key,name,version DESC);
       CREATE INDEX IF NOT EXISTS skill_runs_scope ON skill_runs(scope_key,id);
       CREATE INDEX IF NOT EXISTS skill_watches_scope_state ON skill_watches(scope_key,state);
+      CREATE INDEX IF NOT EXISTS skill_deployments_scope_state ON skill_deployments(scope_key,state);
       CREATE INDEX IF NOT EXISTS skill_captures_scope_state ON skill_captures(scope_key,state);
 `)
     this.#db.prepare("UPDATE skill_runs SET state='unknown', run_json=json_set(run_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
+    this.#db.prepare("UPDATE skill_deployments SET state='blocked', deployment_json=json_set(deployment_json, '$.state', 'blocked', '$.updatedAt', ?) WHERE state IN ('canary','promoted') AND EXISTS (SELECT 1 FROM json_each(skill_deployments.deployment_json, '$.runIds') claimed JOIN skill_runs run ON run.id=claimed.value AND run.scope_key=skill_deployments.scope_key WHERE run.state IN ('unknown','failed'))").run(Date.now())
     this.#db.prepare("UPDATE skill_comparisons SET state='unknown', comparison_json=json_set(comparison_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
     this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS skill_runs_one_active ON skill_runs(scope_key,json_extract(identity_json,'$.sessionId'),json_extract(identity_json,'$.goalId')) WHERE state='running'")
     this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS skill_comparisons_one_active ON skill_comparisons(scope_key) WHERE state='running'")
@@ -269,6 +283,68 @@ export class SkillStore {
       this.#putCandidate(key, saved); this.#db.exec('COMMIT'); return clone(activated)
     } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
   }
+  activateQualifiedCandidate(scope: object, candidateId: string, comparisonId: string, qualificationDigest: string, input: SkillDeploymentInput, routeReceipt: unknown): { definition: StoredSkillDefinition; deployment: SkillDeployment } {
+    const key = scopeKey(scope)
+    if (!text(candidateId, 128) || !text(comparisonId, 128) || !/^[a-f0-9]{64}$/u.test(qualificationDigest) || !input || !text(input.ownerRouteId, 128)
+      || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > Date.now() + 7 * 86400000
+      || !Number.isSafeInteger(input.maxRuns) || input.maxRuns < 1 || input.maxRuns > 100 || !Number.isSafeInteger(input.canaryRuns) || input.canaryRuns < 1 || input.canaryRuns > input.maxRuns
+      || !routeReceipt || !json(routeReceipt)) fail('assistant-skills: invalid qualified activation')
+    const id = deploymentId(scope, candidateId, comparisonId, qualificationDigest, input, routeReceipt)
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const existing = this.#deployment(key, id)
+      if (existing) {
+        const definition = this.get(scope, existing.skillName, existing.version)
+        if (!definition) fail('assistant-skills: deployment conflict')
+        this.#db.exec('COMMIT'); return { definition, deployment: clone(existing) }
+      }
+      const candidate = this.#candidate(key, candidateId)
+      const comparison = this.#comparison(key, comparisonId)
+      if (!candidate || candidate.state !== 'pending' || candidate.expiresAt <= Date.now() || candidate.parentVersion <= 0 || !comparison || comparison.state !== 'complete'
+        || comparison.candidateId !== candidateId || !json(comparison.result) || acceptanceDigest(comparison.result) !== qualificationDigest) fail('assistant-skills: qualification unavailable')
+      const current = this.#latest(key, candidate.definition.name)
+      if (!current || current.retired || current.version !== candidate.parentVersion || acceptanceDigest(current) !== candidate.parentDigest) fail('assistant-skills: version conflict')
+      const definition = this.#newDefinition(candidate.definition, candidate.parentVersion + 1, candidate.parentVersion)
+      this.#insertDefinition(key, definition)
+      const watch = this.#createWatch(scope, { ownerRouteId: input.ownerRouteId, skillName: definition.name, version: definition.version, fallbackVersion: candidate.parentVersion, expiresAt: input.expiresAt, maxRuns: input.maxRuns, failureThreshold: 1 }, routeReceipt)
+      const now = Date.now()
+      const deployment: SkillDeployment = { id, scope: clone(scope), candidateId, comparisonId, qualificationDigest, routeReceipt: clone(routeReceipt), ownerRouteId: input.ownerRouteId, skillName: definition.name, version: definition.version,
+        definitionDigest: acceptanceDigest(definition), parentVersion: candidate.parentVersion, watchId: watch.id, expiresAt: input.expiresAt, maxRuns: input.maxRuns, canaryRuns: input.canaryRuns, runIds: [], state: 'canary', createdAt: now, updatedAt: now }
+      this.#putDeployment(key, deployment)
+      this.#putCandidate(key, { ...candidate, state: 'activated', activatedVersion: definition.version, activationComparisonId: comparisonId, deploymentId: id, updatedAt: now })
+      this.#db.exec('COMMIT'); return { definition: clone(definition), deployment: clone(deployment) }
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  getDeployment(scope: object, id: string): SkillDeployment | undefined {
+    const key = scopeKey(scope); if (!text(id, 128)) fail('assistant-skills: invalid deployment reference')
+    const deployment = this.#deployment(key, id); return deployment === undefined ? undefined : clone(deployment)
+  }
+  deploymentForVersion(scope: object, skillName: string, wantedVersion: number): SkillDeployment | undefined {
+    const key = scopeKey(scope); if (!name(skillName) || !version(wantedVersion)) fail('assistant-skills: invalid deployment reference')
+    const rows = this.#db.prepare('SELECT deployment_json FROM skill_deployments WHERE scope_key=?').all(key) as { deployment_json: string }[]
+    const deployment = rows.map(row => JSON.parse(row.deployment_json) as SkillDeployment).find(value => value.skillName === skillName && value.version === wantedVersion)
+    return deployment === undefined ? undefined : clone(deployment)
+  }
+  listDeployments(scope?: object): SkillDeployment[] {
+    const rows = scope === undefined ? this.#db.prepare('SELECT deployment_json FROM skill_deployments ORDER BY id').all() : this.#db.prepare('SELECT deployment_json FROM skill_deployments WHERE scope_key=? ORDER BY id').all(scopeKey(scope))
+    return (rows as { deployment_json: string }[]).map(row => clone(JSON.parse(row.deployment_json) as SkillDeployment))
+  }
+  reconcileDeployment(scope: object, id: string): SkillDeployment | undefined {
+    const key = scopeKey(scope); if (!text(id, 128)) fail('assistant-skills: invalid deployment reference')
+    this.#db.exec('BEGIN IMMEDIATE'); try { const deployment = this.#deployment(key, id); const saved = deployment && this.#reconcileDeployment(key, deployment); this.#db.exec('COMMIT'); return saved && clone(saved) } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  stopDeployment(scope: object, id: string, state: Extract<SkillDeployment['state'], 'blocked' | 'revoked'>): SkillDeployment | undefined {
+    const key = scopeKey(scope); if (!text(id, 128)) fail('assistant-skills: invalid deployment reference')
+    this.#db.exec('BEGIN IMMEDIATE'); try { const deployment = this.#deployment(key, id); if (!deployment || deployment.state !== 'canary' && deployment.state !== 'promoted') { this.#db.exec('COMMIT'); return deployment && clone(deployment) }; const saved = { ...deployment, state, updatedAt: Date.now() }; this.#putDeployment(key, saved); this.#db.exec('COMMIT'); return clone(saved) } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  assertDeploymentRun(scope: object, id: string): SkillDeployment {
+    const key = scopeKey(scope); if (!text(id, 128)) fail('assistant-skills: invalid deployment run')
+    const deployment = this.#deploymentsForRun(key, id)[0]
+    if (!deployment || deployment.state !== 'canary' && deployment.state !== 'promoted' || deployment.expiresAt <= Date.now()) fail('assistant-skills: deployment unavailable')
+    const active = this.#latest(key, deployment.skillName)
+    if (!active || active.retired || active.version !== deployment.version || acceptanceDigest(active) !== deployment.definitionDigest) fail('assistant-skills: deployment unavailable')
+    return clone(deployment)
+  }
   rollback(scope: object, skillName: string, expectedVersion: number, targetVersion: number): StoredSkillDefinition {
     const key = scopeKey(scope); if (!name(skillName) || !version(expectedVersion) || !version(targetVersion)) fail('assistant-skills: invalid skill reference')
     this.#db.exec('BEGIN IMMEDIATE')
@@ -351,6 +427,17 @@ export class SkillStore {
         if (acceptanceDigest(identity) !== acceptanceDigest(JSON.parse(existing.identity_json))) fail('assistant-skills: invocation conflict')
         this.#db.exec('COMMIT'); return { claimed: false, run: clone(JSON.parse(existing.run_json) as SkillRun) }
       }
+      if (input.candidateId === undefined) {
+        const active = this.#latest(key, input.skillName)
+        if (!active || active.retired || active.version !== input.version) fail('assistant-skills: inactive skill version')
+        const deployment = this.#deploymentForVersion(key, input.skillName, input.version)
+        if (deployment) {
+          const reconciled = this.#reconcileDeployment(key, deployment)
+          if (reconciled.state !== 'canary' && reconciled.state !== 'promoted' || reconciled.expiresAt <= Date.now()) fail('assistant-skills: deployment unavailable')
+          if (acceptanceDigest(active) !== reconciled.definitionDigest || reconciled.runIds.length >= reconciled.maxRuns || reconciled.state === 'canary' && reconciled.runIds.length >= reconciled.canaryRuns) fail('assistant-skills: deployment quota exhausted')
+          this.#putDeployment(key, { ...reconciled, runIds: [...reconciled.runIds, id], updatedAt: Date.now() })
+        }
+      }
       const unresolved = this.#db.prepare("SELECT run_json FROM skill_runs WHERE scope_key=? AND json_extract(identity_json,'$.sessionId')=? AND json_extract(identity_json,'$.goalId')=? AND json_extract(identity_json,'$.skillName')=? AND json_extract(identity_json,'$.version')=? AND coalesce(json_extract(identity_json,'$.candidateId'),'')=coalesce(?, '') AND state IN ('running','unknown') LIMIT 1")
         .get(key, input.sessionId, input.goalId, input.skillName, input.version, input.candidateId ?? null) as { run_json: string } | undefined
       if (unresolved) fail('assistant-skills: unresolved invocation for this Goal; inspect skill_status, do not replay')
@@ -370,6 +457,11 @@ export class SkillStore {
       const completed: SkillRun = { ...current, state, steps: clone(steps), updatedAt: Date.now() }
       if (this.#db.prepare("UPDATE skill_runs SET state=?,run_json=? WHERE id=? AND scope_key=? AND state='running'").run(state, JSON.stringify(completed), id, key).changes !== 1) fail('assistant-skills: run state conflict')
       this.#attachWatchRun(scope, completed)
+      if (state === 'failed' || state === 'unknown') {
+        for (const deployment of this.#deploymentsForRun(key, id)) {
+          if (deployment.state === 'canary' || deployment.state === 'promoted') this.#putDeployment(key, { ...deployment, state: 'blocked', updatedAt: Date.now() })
+        }
+      }
       this.#db.exec('COMMIT'); return clone(completed)
     } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
   }
@@ -425,6 +517,36 @@ export class SkillStore {
   #watch(key: string, id: string): SkillWatch | undefined { const row = this.#db.prepare('SELECT watch_json FROM skill_watches WHERE scope_key=? AND id=?').get(key, id) as { watch_json: string } | undefined; return row ? JSON.parse(row.watch_json) as SkillWatch : undefined }
   #watches(key: string, state: SkillWatch['state']): SkillWatch[] { return (this.#db.prepare('SELECT watch_json FROM skill_watches WHERE scope_key=? AND state=?').all(key, state) as { watch_json: string }[]).map(row => JSON.parse(row.watch_json) as SkillWatch) }
   #putWatch(key: string, watch: SkillWatch): void { this.#db.prepare('INSERT INTO skill_watches(scope_key,id,watch_json,state) VALUES(?,?,?,?) ON CONFLICT(scope_key,id) DO UPDATE SET watch_json=excluded.watch_json,state=excluded.state').run(key, watch.id, JSON.stringify(watch), watch.state) }
+  #deployment(key: string, id: string): SkillDeployment | undefined { const row = this.#db.prepare('SELECT deployment_json FROM skill_deployments WHERE scope_key=? AND id=?').get(key, id) as { deployment_json: string } | undefined; return row ? JSON.parse(row.deployment_json) as SkillDeployment : undefined }
+  #deploymentForVersion(key: string, skillName: string, wantedVersion: number): SkillDeployment | undefined {
+    const rows = this.#db.prepare('SELECT deployment_json FROM skill_deployments WHERE scope_key=?').all(key) as { deployment_json: string }[]
+    return rows.map(row => JSON.parse(row.deployment_json) as SkillDeployment).find(value => value.skillName === skillName && value.version === wantedVersion)
+  }
+  #deploymentsForRun(key: string, run: string): SkillDeployment[] {
+    const rows = this.#db.prepare('SELECT deployment_json FROM skill_deployments WHERE scope_key=?').all(key) as { deployment_json: string }[]
+    return rows.map(row => JSON.parse(row.deployment_json) as SkillDeployment).filter(value => value.runIds.includes(run))
+  }
+  #putDeployment(key: string, deployment: SkillDeployment): void { this.#db.prepare('INSERT INTO skill_deployments(scope_key,id,deployment_json,state) VALUES(?,?,?,?) ON CONFLICT(scope_key,id) DO UPDATE SET deployment_json=excluded.deployment_json,state=excluded.state').run(key, deployment.id, JSON.stringify(deployment), deployment.state) }
+  #comparison(key: string, id: string): SkillComparison | undefined { const row = this.#db.prepare('SELECT comparison_json FROM skill_comparisons WHERE scope_key=? AND id=?').get(key, id) as { comparison_json: string } | undefined; return row ? JSON.parse(row.comparison_json) as SkillComparison : undefined }
+  #reconcileDeployment(key: string, deployment: SkillDeployment): SkillDeployment {
+    if (deployment.state !== 'canary' && deployment.state !== 'promoted' && deployment.state !== 'blocked') return deployment
+    let state: SkillDeployment['state'] | undefined
+    const watch = this.#watch(key, deployment.watchId)
+    const active = this.#latest(key, deployment.skillName)
+    if (watch?.state === 'rolled-back' && watch.skillName === deployment.skillName && watch.version === deployment.version && watch.definitionDigest === deployment.definitionDigest) state = 'rolled-back'
+    else if (deployment.state === 'blocked') return deployment
+    else if (deployment.expiresAt <= Date.now()) state = 'expired'
+    else if (!active || active.retired || active.version !== deployment.version || acceptanceDigest(active) !== deployment.definitionDigest) state = 'superseded'
+    else if (!watch || watch.skillName !== deployment.skillName || watch.version !== deployment.version || watch.definitionDigest !== deployment.definitionDigest || watch.maxRuns !== deployment.maxRuns || watch.failureThreshold !== 1) state = 'superseded'
+    else if (watch.state === 'expired') state = 'expired'
+    else if (watch.state === 'revoked') state = 'revoked'
+    else if (watch.state === 'superseded') state = 'superseded'
+    else if (deployment.runIds.some(id => { const run = this.#run(key, id); return !run || run.state === 'failed' || run.state === 'unknown' })) state = 'blocked'
+    else if (watch.observations.some(value => value.objectiveStatus === 'not-achieved')) state = 'blocked'
+    else if (deployment.state === 'canary' && new Set(watch.observations.filter(value => value.objectiveStatus === 'achieved' && value.validUntil > Date.now() && deployment.runIds.includes(value.runId)).map(value => value.runId)).size >= deployment.canaryRuns) state = 'promoted'
+    if (!state || state === deployment.state) return deployment
+    const saved = { ...deployment, state, updatedAt: Date.now() }; this.#putDeployment(key, saved); return saved
+  }
   #putCandidate(key: string, candidate: SkillCandidate): void {
     this.#db.prepare('INSERT INTO skill_candidates(scope_key,id,candidate_json) VALUES(?,?,?) ON CONFLICT(scope_key,id) DO UPDATE SET candidate_json=excluded.candidate_json').run(key, candidate.id, JSON.stringify(candidate))
   }
@@ -433,15 +555,11 @@ export class SkillStore {
     const row = this.#db.prepare('SELECT run_json FROM skill_runs WHERE scope_key=? AND id=?').get(key, id) as { run_json: string } | undefined
     return row === undefined ? undefined : JSON.parse(row.run_json) as SkillRun
   }
-  #validateClaim(scope: object, input: SkillRunClaim): void {
+  #validateClaim(_scope: object, input: SkillRunClaim): void {
     if (!input || !text(input.invocationId, 256) || !text(input.goalId, 256) || !text(input.sessionId, 512) || !name(input.skillName) || !version(input.version) || !input.inputs || typeof input.inputs !== 'object' || Array.isArray(input.inputs) || !json(input.inputs)
       || input.goalExecutionRunId !== undefined && !text(input.goalExecutionRunId, 256) || input.goalDefinitionDigest !== undefined && !/^[a-f0-9]{64}$/u.test(input.goalDefinitionDigest) || input.nativeGoalId !== undefined && !text(input.nativeGoalId, 256) || input.candidateId !== undefined && !text(input.candidateId, 128)
       || input.candidateId !== undefined && input.goalExecutionRunId === undefined) fail('assistant-skills: invalid invocation')
-    if (input.candidateId !== undefined) {
-      return
-    }
-    const active = this.get(scope, input.skillName)
-    if (!active || active.version !== input.version) fail('assistant-skills: inactive skill version')
+    if (input.candidateId !== undefined) return
   }
   #validateTrialClaim(key: string, input: SkillRunClaim): void {
     const candidate = this.#candidate(key, input.candidateId!)

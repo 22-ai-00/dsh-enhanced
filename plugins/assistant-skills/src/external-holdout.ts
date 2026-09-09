@@ -11,7 +11,7 @@ export interface ExternalHoldoutProfile {
   readonly version: number
   readonly scope: GoalScope
   readonly execution: HoldoutExecutionConfig
-  readonly authority: { readonly executable: string; readonly args: readonly string[]; readonly publicKey: string; readonly datasetDigest: string }
+  readonly authority: { readonly executable: string; readonly args: readonly string[]; readonly publicKey: string; readonly datasetDigest?: string; readonly generatorDigest?: string }
   readonly inputs?: Readonly<Record<string, unknown>>
   readonly files?: readonly { path: string; content: string }[]
   readonly maxComparisons: 1
@@ -28,9 +28,11 @@ function exact(value: unknown, required: readonly string[], optional: readonly s
 function freeze<T>(value: T): T { if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value) } return value }
 function overlaps(a: string, b: string): boolean { const child = relative(a, b); return !child || !child.startsWith('..') && !isAbsolute(child) }
 function validateAuthority(authority: ExternalHoldoutProfile['authority']): void {
-  if (!exact(authority, ['executable', 'args', 'publicKey', 'datasetDigest']) || typeof authority.executable !== 'string' || !isAbsolute(authority.executable) || authority.executable.includes('\0')
+  if (!exact(authority, ['executable', 'args', 'publicKey'], ['datasetDigest', 'generatorDigest']) || typeof authority.executable !== 'string' || !isAbsolute(authority.executable) || authority.executable.includes('\0')
     || !Array.isArray(authority.args) || authority.args.length > 64 || authority.args.some(arg => typeof arg !== 'string' || arg.includes('\0')) || Buffer.byteLength(JSON.stringify(authority.args)) > 16384
-    || typeof authority.publicKey !== 'string' || authority.publicKey.length > 16384 || !/^[a-f0-9]{64}$/u.test(authority.datasetDigest)) reject()
+    || typeof authority.publicKey !== 'string' || authority.publicKey.length > 16384
+    || Object.hasOwn(authority, 'datasetDigest') === Object.hasOwn(authority, 'generatorDigest')
+    || typeof (authority.datasetDigest ?? authority.generatorDigest) !== 'string' || !/^[a-f0-9]{64}$/u.test((authority.datasetDigest ?? authority.generatorDigest)!)) reject()
   try { if (createPublicKey(authority.publicKey).asymmetricKeyType !== 'ed25519') reject() } catch { reject() }
 }
 

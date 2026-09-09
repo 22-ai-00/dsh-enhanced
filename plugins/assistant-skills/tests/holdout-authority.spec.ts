@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto'
 import { describe, expect, test } from 'vitest'
 import { HoldoutAuthority, verifyHoldoutSignature, type CellObservation, type HoldoutDataset } from '../src/holdout-authority.ts'
+import { createProspectiveCertificate, generateProspectiveDataset, generatorDigest, prospectiveDatasetDigest, verifyProspectiveCertificate } from '../src/prospective-holdout.ts'
 
 const hex = (letter: string) => letter.repeat(64)
 const dataset: HoldoutDataset = {
@@ -16,6 +17,19 @@ const config = (now = () => 1) => ({ dataset, privateKey: keys.privateKey, limit
 const observation = (cellId: string, armDigest: string, stdout = 'replay ok'): CellObservation => ({ cellId, armDigest, stdout, exitCode: 0, quiescent: true, status: 'completed', artifactDigest: hex('e'), toolCalls: [] })
 
 describe('independent holdout authority', () => {
+  test('binds a prospective certificate to the frozen arms, generated dataset, key, and sequence', () => {
+    const prospectiveDataset = generateProspectiveDataset(), freezeId = '123e4567-e89b-42d3-a456-426614174000'
+    const certificate = createProspectiveCertificate(binding, prospectiveDataset, keys.privateKey, freezeId)
+    expect(prospectiveDatasetDigest(prospectiveDataset)).toBe(certificate.datasetDigest)
+    expect(verifyProspectiveCertificate(certificate, binding, keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest)).toBe(true)
+    expect(verifyProspectiveCertificate({ ...certificate, binding: { ...binding, candidateDigest: hex('e') } }, binding, keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest)).toBe(false)
+    expect(verifyProspectiveCertificate({ ...certificate, datasetDigest: hex('e') }, binding, keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest)).toBe(false)
+    expect(verifyProspectiveCertificate({ ...certificate, generatedSequence: 1 }, binding, keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest)).toBe(false)
+    expect(verifyProspectiveCertificate(certificate, binding, generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest)).toBe(false)
+    const authority = HoldoutAuthority.create({ dataset: prospectiveDataset, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 }, prospective: certificate, now: () => 1 })
+    expect(authority.begin(binding).prospective).toEqual(certificate)
+  })
+
   test('binds a plan and signs cells and receipts without exposing expected answers', () => {
     const authority = HoldoutAuthority.create(config())
     const begin = authority.begin(binding)

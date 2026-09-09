@@ -16,8 +16,8 @@ import { validateComparisonProfiles, SkillComparator, type SkillComparisonProfil
 import { watchObservation } from './watch-proof.js'
 import { sealedPlan, type SealedSkillHoldoutProvider } from './sealed-holdout.js'
 import { openHoldoutProcess, validateExternalHoldoutProfiles, type ExternalHoldoutProfile } from './external-holdout.js'
-import { qualifyHoldout } from './holdout-qualification.js'
-import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition, type SkillCapture } from './store.js'
+import { inspectProspectiveQualification, qualifyHoldout } from './holdout-qualification.js'
+import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition, type SkillCapture, type SkillDeployment, type SkillDeploymentInput } from './store.js'
 
 export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[]; externalHoldouts?: ExternalHoldoutProfile[] }
 export const Config: Schema<Config> = Schema.object({
@@ -33,7 +33,7 @@ declare module '@deepseek-ai/cordis' { interface Context { assistantSkills: Assi
 const output = { schema: { type: 'object' as const, additionalProperties: false, properties: { context: { type: 'string' as const, required: true } } },
   render: (_args: unknown, value: { context: string }) => [{ type: 'text' as const, text: value.context }] } as const
 const businessGoalId = 'Business Goal ID returned by goal_create or goal_context (the goal_id label), not the native get_goal ID.'
-type Action = 'inspect' | 'save' | 'run' | 'retire' | 'draft' | 'trial' | 'activate' | 'reject' | 'rollback' | 'compare' | 'watch' | 'capture'
+type Action = 'inspect' | 'save' | 'run' | 'retire' | 'draft' | 'trial' | 'activate' | 'reject' | 'rollback' | 'compare' | 'watch' | 'capture' | 'canary'
 const resource = { kind: 'evolution' as const, id: 'verified-workflows' }
 function parse(value: string, array = false): any {
   if (typeof value !== 'string' || Buffer.byteLength(value) > 262144) throw new Error('assistant-skills: bounded JSON required')
@@ -129,6 +129,9 @@ export class AssistantSkillsService extends Service {
       runtime.tools.register(defineTool({ name: 'skill_qualify', description: 'Submit a pending candidate and its current parent to one configured external independent holdout authority. The authority keeps holdout questions and keys private. Requires the current owner request. A stable invocation_id never repeats an unknown or completed qualification. It returns measurement only and never activates or promotes a skill.',
         parameters: { candidate_id: { type: 'string', required: true }, profile_id: { type: 'string', required: true }, invocation_id: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(await this.qualifyExternalHoldout(exec, args.candidate_id, args.profile_id, args.invocation_id)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_canary', description: 'Owner-authorize one finite canary deployment only after the configured external authority supplies a fresh prospective qualification bound to this exact candidate and parent. It runs a finite exact-version watch, automatically promotes after fresh independent successes, and blocks then rolls back after a verified failure.',
+        parameters: { candidate_id: { type: 'string', required: true }, profile_id: { type: 'string', required: true }, invocation_id: { type: 'string', required: true }, owner_route_id: { type: 'string', required: true }, expires_at: { type: 'integer', required: true }, max_runs: { type: 'integer', required: true }, canary_runs: { type: 'integer', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(await this.canary(exec, args.candidate_id, args.profile_id, args.invocation_id, { ownerRouteId: args.owner_route_id, expiresAt: args.expires_at, maxRuns: args.max_runs, canaryRuns: args.canary_runs })) }) }))
       runtime.tools.register(defineTool({ name: 'skill_comparison_status', description: 'Read a private comparison receipt or available comparison profile summaries. Test inputs and expected answers are not included.', parameters: { comparison_id: { type: 'string' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.comparisonStatus(exec.agent, args.comparison_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_candidate', description: 'Draft a private candidate from an independently achieved Goal following the current owner request. The current active skill stays unchanged. Review the stored trace and structural delta; no performance gain is inferred.',
@@ -161,6 +164,8 @@ export class AssistantSkillsService extends Service {
         execute: async (_args, exec) => ({ context: JSON.stringify(this.#store.listCaptures(this.#scope(exec.agent, 'inspect'))) }) }))
       runtime.tools.register(defineTool({ name: 'skill_watches', description: 'Inspect this owner’s finite rollback watches and their independently verified outcome observations.', parameters: {}, output,
         execute: async (_args, exec) => ({ context: JSON.stringify(this.#store.listWatches(this.#scope(exec.agent, 'inspect'))) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_deployment_status', description: 'Inspect this owner’s finite canary deployments, their exact version, quota, and terminal promotion or rollback state.', parameters: { deployment_id: { type: 'string' } }, output,
+        execute: async (args, exec) => { const scope = this.#scope(exec.agent, 'inspect'); return { context: JSON.stringify(args.deployment_id === undefined ? this.#store.listDeployments(scope) : this.#store.getDeployment(scope, args.deployment_id) ?? null) } } }))
     })
     ctx.inject(['assistantGoals', 'assistantPolicy', 'assistantDelivery', 'assistantVerifier'], () => { this.#queueReconcile() })
     // SessionQuery is optional for ordinary manual skills. When it becomes
@@ -210,7 +215,7 @@ export class AssistantSkillsService extends Service {
     const owner = delivery?.preferencePrincipalForAgent(agent)
     if (!owner || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-skills: authenticated owner required')
     const scope = { principalId: owner.principalId, ...owner.principalLineage, workspace: owner.scope.workspace, preset: owner.scope.preset }
-    if (['save', 'retire', 'draft', 'activate', 'reject', 'rollback', 'compare', 'watch', 'capture'].includes(action)) {
+    if (['save', 'retire', 'draft', 'activate', 'reject', 'rollback', 'compare', 'watch', 'capture', 'canary'].includes(action)) {
       const current = delivery?.currentPreferenceTurn(agent)
       if (!current || acceptanceDigest({ principalId: current.principalId, ...current.principalLineage, workspace: current.scope.workspace, preset: current.scope.preset }) !== acceptanceDigest(scope)) throw new Error('assistant-skills: current owner request required')
     }
@@ -293,8 +298,8 @@ export class AssistantSkillsService extends Service {
     ]
   }
   /** Fixed external authority qualification. Private cells, authority keys and operator configuration never become tool arguments or status data. */
-  async qualifyExternalHoldout(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string) {
-    const scope = this.#scope(exec.agent, 'compare')
+  async qualifyExternalHoldout(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string, action: 'compare' | 'canary' = 'compare', currentAuthority?: () => void) {
+    const scope = this.#scope(exec.agent, action)
     const profile = this.#externalHoldouts.find(value => value.id === profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
     if (!profile || profile.execution.expiresAt <= Date.now()) throw new Error('assistant-skills: current external holdout profile required')
     const profileDigest = acceptanceDigest(profile)
@@ -304,9 +309,10 @@ export class AssistantSkillsService extends Service {
     const claim = this.#store.claimComparison(scope, { sessionId: String(exec.agent!.session.id), candidateId, parentDigest: candidate.parentDigest, profileId: `external:${profile.id}:${profile.version}`, profileDigest, invocationId }, 1)
     const current = (running = true) => {
       exec.signal.throwIfAborted(); this.#lifecycle.signal.throwIfAborted()
+      currentAuthority?.()
       const fresh = this.#externalHoldouts.find(value => value.id === profile.id && value.version === profile.version && acceptanceDigest(value.scope) === acceptanceDigest(scope))
       if (!fresh || acceptanceDigest(fresh) !== profileDigest || Date.now() >= profile.execution.expiresAt
-        || acceptanceDigest(this.#scope(exec.agent, 'compare')) !== acceptanceDigest(scope)
+        || acceptanceDigest(this.#scope(exec.agent, action)) !== acceptanceDigest(scope)
         || acceptanceDigest(this.#store.getCandidate(scope, candidateId)) !== candidateDigest
         || running && this.#store.getComparison(scope, claim.comparison.id)?.state !== 'running') throw new Error('assistant-skills: external qualification authority changed')
       this.#pending(scope, candidateId)
@@ -323,7 +329,7 @@ export class AssistantSkillsService extends Service {
         try {
           result = await qualifyHoldout({ baseline, candidate: candidate.definition, scope,
             execution: { ...profile.execution, stateRoot: join(profile.execution.stateRoot, claim.comparison.id) }, ...(profile.inputs === undefined ? {} : { inputs: profile.inputs }), ...(profile.files === undefined ? {} : { files: profile.files }),
-            pinnedPublicKey: profile.authority.publicKey, expectedDatasetDigest: profile.authority.datasetDigest, transport: opened.transport,
+            pinnedPublicKey: profile.authority.publicKey, ...(profile.authority.datasetDigest === undefined ? {} : { expectedDatasetDigest: profile.authority.datasetDigest }), ...(profile.authority.generatorDigest === undefined ? {} : { expectedGeneratorDigest: profile.authority.generatorDigest }), transport: opened.transport,
             signal: AbortSignal.any([exec.signal, this.#lifecycle.signal]), authorize: current })
         } finally { await opened.close() }
         current()
@@ -335,6 +341,76 @@ export class AssistantSkillsService extends Service {
     })()
     this.#comparing.add(operation)
     try { return await operation } finally { this.#comparing.delete(operation) }
+  }
+  #promotePolicy(scope: GoalScope) {
+    return { subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
+      action: 'promote', resource, context: { initiator: 'background' as const } }
+  }
+  #deploymentCurrent(deployment: SkillDeployment): void {
+    const scope = deployment.scope as GoalScope
+    if (!this.#active || deployment.expiresAt <= Date.now() || deployment.state !== 'canary' && deployment.state !== 'promoted') throw new Error('assistant-skills: deployment authority ended')
+    const watch = this.#store.listWatches(scope).find(value => value.id === deployment.watchId)
+    if (!watch || watch.ownerRouteId.length === 0 || acceptanceDigest(watch.routeReceipt) !== acceptanceDigest(deployment.routeReceipt)) throw new Error('assistant-skills: deployment route changed')
+    this.#watchRoute(scope, watch.ownerRouteId, deployment.routeReceipt)
+    this.#watchAuthorized(watch)
+    const current = this.#store.get(scope, deployment.skillName)
+    if (!current || current.retired || current.version !== deployment.version || acceptanceDigest(current) !== deployment.definitionDigest) throw new Error('assistant-skills: deployment superseded')
+    const comparison = this.#store.getComparison(scope, deployment.comparisonId)
+    if (!comparison || comparison.state !== 'complete' || acceptanceDigest(comparison.result) !== deployment.qualificationDigest) throw new Error('assistant-skills: deployment qualification changed')
+    const profile = this.#externalHoldouts.find(value => `external:${value.id}:${value.version}` === comparison.profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+    if (!profile || acceptanceDigest(profile) !== comparison.profileDigest || profile.execution.expiresAt < deployment.expiresAt) throw new Error('assistant-skills: deployment profile changed')
+  }
+  #deploymentAuthorized(deployment: SkillDeployment, authorize = false): void {
+    this.#deploymentCurrent(deployment)
+    const policy = this.ctx.get('assistantPolicy', false)
+    if (!policy || policy.evaluate(this.#promotePolicy(deployment.scope as GoalScope)).effect !== 'allow') throw new Error('assistant-skills: deployment promotion authority ended')
+    if (authorize && policy.authorize(this.#promotePolicy(deployment.scope as GoalScope), { idempotencyKey: `${deployment.id}:promote` }).effect !== 'allow') throw new Error('assistant-skills: deployment promotion authorization denied')
+  }
+  #canaryCurrent(exec: ToolRunContext, scope: GoalScope, profile: ExternalHoldoutProfile, input: SkillDeploymentInput, receipt?: unknown): unknown {
+    if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > profile.execution.expiresAt || input.expiresAt > Date.now() + 7 * 86400000
+      || !Number.isSafeInteger(input.maxRuns) || input.maxRuns < 1 || input.maxRuns > 100 || !Number.isSafeInteger(input.canaryRuns) || input.canaryRuns < 1 || input.canaryRuns > input.maxRuns) throw new Error('assistant-skills: invalid canary authorization')
+    if (acceptanceDigest(this.#scope(exec.agent, 'canary')) !== acceptanceDigest(scope) || acceptanceDigest(this.#scope(exec.agent, 'compare')) !== acceptanceDigest(scope) || acceptanceDigest(this.#scope(exec.agent, 'watch')) !== acceptanceDigest(scope)) throw new Error('assistant-skills: canary authority changed')
+    const route = this.#watchRoute(scope, input.ownerRouteId, receipt)
+    const policy = this.ctx.get('assistantPolicy', false)
+    if (!policy || policy.evaluate(this.#promotePolicy(scope)).effect !== 'allow'
+      || ['watch', 'rollback'].some(action => policy.evaluate(this.#watchPolicy(scope, action as 'watch' | 'rollback')).effect !== 'allow')) throw new Error('assistant-skills: configure finite promotion and rollback authority')
+    return route
+  }
+  async canary(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string, input: SkillDeploymentInput) {
+    input = Object.freeze({ ...input })
+    const scope = this.#scope(exec.agent, 'canary')
+    const candidate = this.#store.getCandidate(scope, candidateId)
+    if (!candidate) throw new Error('assistant-skills: candidate unavailable')
+    const profile = this.#externalHoldouts.find(value => value.id === profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+    if (!profile) throw new Error('assistant-skills: prospective external holdout profile required')
+    const route = this.#canaryCurrent(exec, scope, profile, input)
+    // A candidate can only ever receive one deployment.  A retry must match the
+    // original finite authorization exactly; it cannot renew or mutate it.
+    if (candidate.state === 'activated') {
+      const existing = candidate.deploymentId ? this.#store.getDeployment(scope, candidate.deploymentId) : undefined
+      const watch = existing && this.#store.listWatches(scope).find(value => value.id === existing.watchId)
+      if (!existing || !watch || existing.comparisonId === '' || existing.expiresAt !== input.expiresAt || existing.maxRuns !== input.maxRuns || existing.canaryRuns !== input.canaryRuns || watch.ownerRouteId !== input.ownerRouteId) throw new Error('assistant-skills: canary authorization conflict')
+      const comparison = this.#store.getComparison(scope, existing.comparisonId)
+      if (!comparison || comparison.profileId !== `external:${profile.id}:${profile.version}` || comparison.invocationId !== invocationId) throw new Error('assistant-skills: canary authorization conflict')
+      this.#watchRoute(scope, input.ownerRouteId, existing.routeReceipt)
+      return { definition: this.#store.get(scope, existing.skillName, existing.version), deployment: existing, replayed: true }
+    }
+    if (!profile.authority.generatorDigest) throw new Error('assistant-skills: prospective external holdout profile required')
+    this.#pending(scope, candidateId)
+    this.#authorize(exec.agent, 'canary', [scope, candidateId, profileId, invocationId, input, route])
+    const qualified = await this.qualifyExternalHoldout(exec, candidateId, profileId, invocationId, 'canary', () => { this.#canaryCurrent(exec, scope, profile, input, route) })
+    const comparison = this.#store.getComparison(scope, qualified.id)
+    const baseline = this.#store.get(scope, candidate.definition.name, candidate.parentVersion)
+    if (!comparison || !baseline || candidate.state !== 'pending') throw new Error('assistant-skills: canary qualification unavailable')
+    const prospective = inspectProspectiveQualification(comparison.result, { scope, baseline, candidate: candidate.definition, execution: profile.execution,
+      ...(profile.inputs === undefined ? {} : { inputs: profile.inputs }), ...(profile.files === undefined ? {} : { files: profile.files }), pinnedPublicKey: profile.authority.publicKey, expectedGeneratorDigest: profile.authority.generatorDigest })
+    if (!prospective || prospective.prospectiveHoldout !== 'authority-attested-after-freeze' || prospective.quality.candidateChecksPassed !== true || prospective.quality.evaluationGainObserved !== true || prospective.quality.criticalRegressionsPassed !== true) throw new Error('assistant-skills: prospective qualification gates failed')
+    this.#canaryCurrent(exec, scope, profile, input, route)
+    this.#authorize(exec.agent, 'watch', [scope, candidateId, comparison.id, input, route])
+    this.#canaryCurrent(exec, scope, profile, input, route)
+    const activated = this.#store.activateQualifiedCandidate(scope, candidateId, comparison.id, acceptanceDigest(comparison.result), input, route)
+    this.#changed(); this.#queueReconcile()
+    return { ...activated, replayed: false }
   }
   async compare(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string) {
     const scope = this.#scope(exec.agent, 'compare')
@@ -527,6 +603,17 @@ export class AssistantSkillsService extends Service {
   #reconcile(): void {
     if (!this.#active || !this.ctx.get('assistantGoals', false) || !this.ctx.get('assistantPolicy', false)
       || !this.ctx.get('assistantDelivery', false) || !this.ctx.get('assistantVerifier', false)) return
+    // Establish current deployment authority before consuming any later Goal
+    // outcome.  A stale route/profile/policy cannot turn an old observation into
+    // a promotion decision.
+    for (const deployment of this.#store.listDeployments()) {
+      const watch = this.#store.listWatches(deployment.scope).find(value => value.id === deployment.watchId)
+      // These terminal facts cannot create a promotion, so synchronize them
+      // without treating a later rollback as a policy revocation.
+      if (deployment.expiresAt <= Date.now() || watch && ['rolled-back', 'expired', 'revoked', 'superseded'].includes(watch.state)) { this.#store.reconcileDeployment(deployment.scope, deployment.id); continue }
+      if (deployment.state !== 'canary' && deployment.state !== 'promoted') continue
+      try { this.#deploymentAuthorized(deployment, true) } catch { this.#store.stopDeployment(deployment.scope, deployment.id, 'revoked') }
+    }
     for (const watch of this.#store.listWatches()) {
       const scope = watch.scope as GoalScope
       if (watch.expiresAt <= Date.now()) { this.#store.stopWatch(scope, watch.id, 'expired'); continue }
@@ -554,6 +641,19 @@ export class AssistantSkillsService extends Service {
           if (observed.observations.length >= observed.maxRuns) { this.#store.stopWatch(scope, watch.id, 'exhausted'); break }
         } catch { /* Changed or unavailable evidence supplies no rollback authority. */ }
       }
+    }
+    // Watches above produce only independently verified observations.  Recheck
+    // exact authority after that read, then let the store atomically select the
+    // terminal deployment state; it never writes over a later skill version.
+    for (const deployment of this.#store.listDeployments()) {
+      const watch = this.#store.listWatches(deployment.scope).find(value => value.id === deployment.watchId)
+      if (deployment.expiresAt <= Date.now() || watch && ['rolled-back', 'expired', 'revoked', 'superseded'].includes(watch.state)) { this.#store.reconcileDeployment(deployment.scope, deployment.id); continue }
+      if (deployment.state !== 'canary' && deployment.state !== 'promoted') continue
+      try {
+        this.#deploymentAuthorized(deployment, true)
+        const reconciled = this.#store.reconcileDeployment(deployment.scope, deployment.id)
+        if (reconciled && reconciled.state !== deployment.state) this.#changed()
+      } catch { this.#store.stopDeployment(deployment.scope, deployment.id, 'revoked') }
     }
     for (const capture of this.#store.listCaptures()) {
       const scope = capture.scope as GoalScope
@@ -602,10 +702,35 @@ export class AssistantSkillsService extends Service {
     if (acceptanceDigest(scope) !== acceptanceDigest(current.scope) || goalId === skill.source.goal.id) throw new Error('assistant-skills: fresh owner Goal required')
     const identity = acceptanceDigest(current)
     const goalContext = current as typeof current & { nativeGoalId?: string }
+    // claim() reconciles a deployed version while holding its transaction.  Do
+    // not let that implicit state transition promote from an old background
+    // permission or route observation.
+    const deploymentBeforeClaim = candidateId ? undefined : this.#store.deploymentForVersion(scope, name, version)
+    const priorRun = this.#store.getRun(scope, `skill-run-${acceptanceDigest([scope, current.sessionId, invocationId])}`)
+    if (deploymentBeforeClaim && !priorRun) {
+      try {
+        this.#deploymentAuthorized(deploymentBeforeClaim, true)
+        const watch = this.#store.listWatches(scope).find(value => value.id === deploymentBeforeClaim.watchId)
+        if (!watch) throw new Error('assistant-skills: deployment watch unavailable')
+        this.#watchAuthorized(watch)
+      } catch {
+        this.#store.stopDeployment(scope, deploymentBeforeClaim.id, 'revoked')
+        throw new Error('assistant-skills: deployment authority ended')
+      }
+    }
     const claim = this.#store.claim(scope, { invocationId, goalId, sessionId: current.sessionId, skillName: name, version, inputs, goalExecutionRunId: current.goalExecutionRunId, goalDefinitionDigest: current.definition.digest, ...(typeof goalContext.nativeGoalId === 'string' ? { nativeGoalId: goalContext.nativeGoalId } : {}), ...(candidateId ? { candidateId } : {}) })
     if (!claim.claimed) {
       if (claim.run.state !== 'succeeded') throw new Error(`assistant-skills: invocation ${claim.run.id} is ${claim.run.state}; inspect skill_status, do not replay`)
       return { ...claim.run, replayed: false, acceptance: 'requires-fresh-goal-verification' }
+    }
+    // claim() atomically reserves a deployment slot with the run.  The second
+    // read binds this dispatch to that exact reservation before any tool call.
+    const deployment = deploymentBeforeClaim
+    if (deployment) {
+      try { this.#deploymentAuthorized(this.#store.assertDeploymentRun(scope, claim.run.id)) } catch {
+        this.#store.finish(scope, claim.run.id, 'unknown', [])
+        throw new Error(`assistant-skills: invocation ${claim.run.id} is unknown; inspect skill_status, do not replay`)
+      }
     }
     const timeout = new AbortController()
     const timer = setTimeout(() => timeout.abort(), this.#duration); timer.unref?.()
@@ -622,6 +747,7 @@ export class AssistantSkillsService extends Service {
       else {
         const live = this.#store.get(scope, name)
         if (!live || live.retired || live.version !== version) throw new Error('assistant-skills: skill retired or superseded')
+        if (deployment) this.#deploymentAuthorized(this.#store.assertDeploymentRun(scope, claim.run.id))
       }
     }
     try {
@@ -631,6 +757,7 @@ export class AssistantSkillsService extends Service {
         if (!this.#allowed.includes(step.toolName)) throw new Error('assistant-skills: current tool allowlist denied')
         dispatched = true
         const result = await exec.agent!.ctx.get('tools')!.execute({ callId: ToolCallId(`${exec.callId}:skill:${index + 1}`), rootCallId: exec.rootCallId, parent: exec.token, agent: exec.agent!, name: step.toolName, arguments: step.arguments, signal })
+        revalidate()
         for (const context of result.additionalContexts ?? []) exec.deferContext(context)
         const interrupted = signal.aborted || result.isError && ['ABORTED', 'ABORTED_BEFORE_DISPATCH'].includes(result.error.info?.code ?? '')
         completed.push({ id: step.id, state: interrupted ? 'unknown' : result.isError ? 'failed' : 'succeeded', detail: result.isError ? result.error.info?.code ?? 'tool-rejected' : `result:${acceptanceDigest(result.content)}` })
@@ -641,7 +768,7 @@ export class AssistantSkillsService extends Service {
         dispatched = false
         if (index === steps.length - 1) state = 'succeeded'
       }
-    } catch { state = dispatched || signal.aborted ? 'unknown' : 'failed' }
+    } catch { state = deployment || dispatched || signal.aborted ? 'unknown' : 'failed' }
     finally { clearTimeout(timer) }
     if (!this.#active) throw new Error('assistant-skills: runtime disposed; invocation will recover as unknown')
     const saved = this.#store.finish(scope, claim.run.id, state, completed)

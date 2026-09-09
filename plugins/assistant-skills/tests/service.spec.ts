@@ -7,6 +7,7 @@ import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { generateKeyPairSync } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -29,7 +30,7 @@ function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id):
   session.append('turn/start', { turn: 1 })
   return value
 }
-async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId) {
+async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[]) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-skills-service-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const comparisonRoot = comparison ? await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-')) : undefined
@@ -74,7 +75,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 },
     { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }] : undefined
-  const config = comparison ? { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], comparisons: comparisons! } : { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'] }
+  const config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}) }
   let plugin = await ctx.plugin(AssistantSkillsService, config)
   await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
   const execute = (name: string, args: unknown, agent = owner) => agent.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
@@ -110,6 +111,13 @@ function sealedProfile(f: Awaited<ReturnType<typeof fixture>>) {
     { id: 'replay', kind: 'replay' as const, inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation' as const, inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }, { id: 'regression', kind: 'regression' as const, inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }
 }
+function canaryProfile({ root, scope }: { root: string; scope: object }) {
+  const publicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  return [{ id: 'canary', version: 1, scope, execution: { image: `sha256:${'a'.repeat(64)}`, dockerPath: process.execPath,
+    stateRoot: join(tmpdir(), `assistant-skills-canary-${root.split('/').pop()}`), command: '/bin/sh /workspace/artifact', artifactPath: 'result.sh', expiresAt: Date.now() + 60000,
+    repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 },
+  authority: { executable: process.execPath, args: [], publicKey, generatorDigest: '1'.repeat(64) }, maxComparisons: 1 }]
+}
 
 test('native tool composition writes parameterized artifacts, persists across restart and never repeats a duplicate invocation', async () => {
   const f = await fixture(); result(await f.save()); f.human(false)
@@ -120,6 +128,28 @@ test('native tool composition writes parameterized artifacts, persists across re
   expect(f.lineage[2]).toEqual({ name: 'write', root: f.lineage[1]!.root, nested: true })
   await f.restart(); expect((await f.owner.ctx.get('skills')!.list({ scope: f.owner })).map(value => value.name)).toEqual(['saved-write']); expect(result(await f.run()).id).toBe(first.id); expect(f.count()).toBe(1); expect(f.charges).toHaveLength(2)
   expect(result(await f.run('new-invocation')).state).toBe('succeeded'); expect(f.count()).toBe(2)
+})
+
+test('skill_canary is registered, requires a current owner and rejects an unavailable prospective profile before creating deployment state', async () => {
+  const f = await fixture(); result(await f.save())
+  const candidate = result(await f.candidate(1))
+  const args = { candidate_id: candidate.id, profile_id: 'missing', invocation_id: 'canary-once', owner_route_id: 'owner-route', expires_at: Date.now() + 60000, max_runs: 2, canary_runs: 1 }
+  expect(result(await f.execute('skill_deployment_status', {}))).toEqual([])
+  expect((await f.execute('skill_canary', args)).isError).toBe(true)
+  expect(result(await f.execute('skill_deployment_status', {}))).toEqual([])
+  f.human(false)
+  expect((await f.execute('skill_canary', args)).isError).toBe(true)
+})
+
+test.each(['expired', 'route-revoked', 'background-revoked'] as const)('skill_canary rejects %s before opening a qualification or changing the candidate', async failure => {
+  const f = await fixture(false, false, 'owner-session', 'owner-session', canaryProfile); result(await f.save())
+  const candidate = result(await f.candidate(1))
+  if (failure === 'route-revoked') f.revokeRoute()
+  if (failure === 'background-revoked') f.denyBackground()
+  const response = await f.execute('skill_canary', { candidate_id: candidate.id, profile_id: 'canary', invocation_id: `canary-${failure}`, owner_route_id: 'owner-route', expires_at: failure === 'expired' ? Date.now() - 1 : Date.now() + 30000, max_runs: 2, canary_runs: 1 })
+  expect(response.isError).toBe(true)
+  expect(result(await f.execute('skill_deployment_status', {}))).toEqual([])
+  expect(result(await f.execute('skill_candidates', { candidate_id: candidate.id }))).toMatchObject({ state: 'pending' })
 })
 
 test('requires a human save request, and hands an active owner Goal to its first native round without claiming work', async () => {

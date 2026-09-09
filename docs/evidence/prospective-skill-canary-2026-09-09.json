@@ -1,0 +1,124 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "baseline": "f4e72d27c5580550b133a8d5d439792c5650aa45",
+  "status": "engineering-canary-lifecycle-verified",
+  "scope": "Prospective qualified, finite skill canary with fresh-outcome promotion and exact-version rollback",
+  "capabilities": [
+    "Private authority freezes exact scope/arms/budget before generating order-summary/v1 cases; signed certificates are rechecked by the formal service.",
+    "skill_canary consumes distinct owner canary/compare/watch authorization and current background promotion/rollback authority.",
+    "Atomic candidate activation, deployment execution quota and exact-version watch.",
+    "Fresh accepted Goal outcomes promote within the original lifetime and total quota; later failed outcomes roll back the exact version.",
+    "Failed and unconfirmed runs keep their charged slot and block the deployment across restart.",
+    "Mode switches and failure after durable authority freeze cannot reset or regenerate consumed qualification state."
+  ],
+  "validation": {
+    "targeted": {
+      "path": "/tmp/dsh-canary-targeted-v3.log",
+      "sha256": "7961ab6334e890a3089d65feb14bbeef6435a5b71abc40ccb7e3b047f3d566c1",
+      "exitCode": 0,
+      "files": 13,
+      "tests": 115,
+      "skipped": 0,
+      "command": "pnpm --filter @dsh-enhanced/assistant-skills build && pnpm --filter @dsh-enhanced/assistant-skills typecheck && DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm --filter @dsh-enhanced/assistant-skills exec vitest run"
+    },
+    "lint": {
+      "path": "/tmp/dsh-canary-lint.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exitCode": 0
+    },
+    "formalConsumer": "plugins/assistant-skills/tests/external-holdout-service.spec.ts: real prospective CLI qualification enters canary once and retries without another authority process",
+    "consumerAssertions": [
+      "registered skill_canary -> actual private CLI -> real isolated program comparison -> canary",
+      "restart and identical activation retry do not start another authority",
+      "ordinary skill_run writes an artifact; a second canary run is denied before acceptance",
+      "explicit fresh Goal acceptance fixture triggers automatic promotion",
+      "restart preserves finite quota; excess execution is denied",
+      "explicit failed Goal acceptance fixture triggers rollback",
+      "activation retry retains rolled-back deployment and does not restore its old version"
+    ]
+  },
+  "failures": [
+    {
+      "log": {
+        "path": "/tmp/dsh-canary-types-initial.log",
+        "sha256": "3434650649ecdab2d8ba20f2ee8ce97d633664bc6e564dd861326557400334c8"
+      },
+      "exitCode": 2,
+      "reason": "Unvalidated WIP type errors, corrected before runtime tests."
+    },
+    {
+      "log": {
+        "path": "/tmp/dsh-canary-targeted.log",
+        "sha256": "d7ac9d7fac9885524891f0274e00ab88884625e4d1ae1fb3fe633aba61fa701d"
+      },
+      "exitCode": 2,
+      "reason": "Duplicate test import and unused import; corrected."
+    },
+    {
+      "log": {
+        "path": "/tmp/dsh-canary-targeted-v2.log",
+        "sha256": "279eeacf42a9e1c8b4d4b26124c12743b2c96a572f2be00bf0afb1a990f8b1d3"
+      },
+      "exitCode": 1,
+      "reason": "Two new fixture errors: XOR profile accidentally contained both pins; fixed-clock binding was passed to real-clock authority. Corrected fixtures without weakening assertions. 113 tests passed, 2 failed."
+    }
+  ],
+  "independentReview": {
+    "agent": "progress_plan_verify_sep09",
+    "result": "PASS",
+    "scope": "Read-only source review and current targeted success evidence; full check pending at review time.",
+    "correctedFinding": "Reviewer retracted an incorrect stateRoot/budgetDigest inference; stateRoot is deliberately absent from budgetDigest."
+  },
+  "limitations": [
+    "No new real-model browser run or measured real-user-task improvement is claimed in this batch.",
+    "Comparison programs and source acceptance are explicit engineering fixtures. CLI and candidate container execution are real; later Goal acceptance is a fixture.",
+    "The supported prospective generator covers order-summary/v1 only; historical or training-data independence and general model intelligence gain remain unproven.",
+    "Automatic generation from broader failure/repeated trajectories, 3–5 real skill classes, second real task/calendar source, signed production release, and complete installation/upgrade requirements remain in scope and incomplete.",
+    "Live GitHub authorization/CI/review/remote lifecycle has not been exercised.",
+    "All 18 work packages remain in scope; no calendar waiting requirement."
+  ],
+  "sourceAndTestSha256": {
+    "plugins/assistant-skills/src/comparison.ts": "bcb0513b0fd59202fa5dfeaa7496ba8f6513f7619d3ab57a927204006c34a38a",
+    "plugins/assistant-skills/src/definition.ts": "ae88cfd9ebd763cc790f4b0c58729a1b9b55ab4a6901c8b763527cbe60fd4a75",
+    "plugins/assistant-skills/src/external-holdout.ts": "a1226d144b8d3e50d5e3d1e068b58ac961bfd66c8d3e85d3ad10f33f98b5db31",
+    "plugins/assistant-skills/src/holdout-authority.ts": "f1ce47e6c325c81a701881ac4fc3197d11ac95cd11d830bc3ed25921c0375571",
+    "plugins/assistant-skills/src/holdout-cli.ts": "f0715fbd223ab77325ffe89be9c5a23827a36aa3bf916035fcc7e9e623d50ec7",
+    "plugins/assistant-skills/src/holdout-qualification.ts": "8e9e2cd772138569c08f03dec61c2ef3805ead04f424affed2933c076714e091",
+    "plugins/assistant-skills/src/index.ts": "6cf4ebb84d09ba410cb5b2ee5af773563a9e4403368ba12d54217fd863c698d8",
+    "plugins/assistant-skills/src/prospective-holdout.ts": "cb6470dd2139090c0489f462fede3dc012a132396b4e0d19e2d394c4f4376f6c",
+    "plugins/assistant-skills/src/replay.ts": "b568819f8e81f6b0417feca523189660a6ba7608ed6d162444f581faea5e5493",
+    "plugins/assistant-skills/src/sealed-holdout.ts": "899ebf0e49041e0394e4e451fab6354b5ab3c690e667d8ddae85494ecb3ac779",
+    "plugins/assistant-skills/src/service.ts": "e8c1af22d60a2bb83728d7d2ee36bee1097468d9a95ae3f275cb5b7ad52eb00e",
+    "plugins/assistant-skills/src/store.ts": "1733e14d664ac970dd178bf20ebbc647a7be175915407332130d7489ec22d786",
+    "plugins/assistant-skills/src/version.ts": "e1b18323af74400f9b81251674b87f8732fdc8009bfcad168de2b5e890c22f71",
+    "plugins/assistant-skills/src/watch-proof.ts": "b61d07f20f3c4ad4ffc00273a667e0ef0c6f80580a700f41dcc942e1f7430918",
+    "plugins/assistant-skills/tests/comparison.spec.ts": "2998b6884ea71752b7cdf0b26c90ae8f6e42bb0a48458df78c4f58b3817278f1",
+    "plugins/assistant-skills/tests/definition.spec.ts": "41271f621d4fcc183884367d8b9e6a38e49e6749646a427b29b323a119ce16c9",
+    "plugins/assistant-skills/tests/external-holdout-service.spec.ts": "5bacf22877a7716e5cdd7b9194d5fb3bd0917fc8dad2138adf37d34da2cb66bb",
+    "plugins/assistant-skills/tests/external-holdout.spec.ts": "f3fa18235b8c7846783d74877d8bed7e48e518e6800d5cbda61213cc44134f38",
+    "plugins/assistant-skills/tests/holdout-authority.spec.ts": "ce1221ba8ad4bf18abe5787b63c833b93d06b538048f5344461e635332de3977",
+    "plugins/assistant-skills/tests/holdout-cli.spec.ts": "c8eb5d239600642ebac8716378d43743387dfa4749cc092cb98fddc209a7919a",
+    "plugins/assistant-skills/tests/holdout-qualification.spec.ts": "14c1d3d4d6777eff841a5e8a485985fba34b0aa48e426bb0212296907fe35b05",
+    "plugins/assistant-skills/tests/index.spec.ts": "c0054722965154ffaae7aeea0c580a0708cb26519c1be2c0fe1b84cd67eaba4a",
+    "plugins/assistant-skills/tests/prospective-integration.spec.ts": "793282430d1137dd6bc60b40d63843fc0f486d1c5b0f852020a3040a03addb4c",
+    "plugins/assistant-skills/tests/replay.spec.ts": "e22791b86e1887362a712c7b3ef615260339395411fa4a34f60c8ad6c697496b",
+    "plugins/assistant-skills/tests/sealed-holdout.spec.ts": "ed5acc5f657cca4b2be2fe36d5c66a5a71e212ad42a8b379c2a6be000648df5c",
+    "plugins/assistant-skills/tests/service.spec.ts": "7e5f199112a83eb1722f1c67c380eaf5a976aa4ba2c156fdeee5e568dde98be2",
+    "plugins/assistant-skills/tests/store.spec.ts": "33a418cb5a723e34474af0c953ade3fce4b8f7e1ba5bd3181c43d5ac34992edf"
+  },
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+    "log": "/tmp/dsh-canary-check.log",
+    "sha256": "156d925f030ea3795f213c5befd6936d2d28193a899a2819987bb9078c19fd74",
+    "exitCode": 0,
+    "files": 348,
+    "tests": 4232,
+    "skipped": 0,
+    "dryRunPacks": 33,
+    "newRuntimeFilesInDryRun": [
+      "lib/prospective-holdout.js",
+      "lib/prospective-holdout.d.ts"
+    ],
+    "frozenSourceAndTestHashesUnchanged": true
+  }
+}
