@@ -187,7 +187,9 @@ test('skill_failure_candidate exposes only identity and definition inputs and pe
     trigger: 'host-verified-failure:objective-not-achieved',
     definition: { name: 'saved-write', source: { goalDefinitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), stepCount: 1 } },
     failure: { category: 'objective-not-achieved', count: 1, digest: expect.stringMatching(/^[a-f0-9]{64}$/u) } })
-  expect(Object.keys(candidate.failure)).toEqual(['category', 'count', 'digest'])
+  expect(candidate.failure).toMatchObject({ protocol: 'assistant-skills/failure-capture-provenance/v1',
+    provenanceDigest: candidate.failure.digest, occurrences: 1, count: 1, taskFamilyId: 'write-artifact',
+    taskFamilyDefinitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), rollbackTarget: { name: 'saved-write', version: 1 } })
   const firstJson = JSON.stringify(candidate)
   expect(firstJson).not.toMatch(/trigger-goal|trigger-session|trigger-native|trigger-run|repair-session|repair-native|repair-run/u)
   expect(firstJson).not.toMatch(/"(?:scope|workspace|principalId|principalRecordId|principalVersion|sessionId|nativeGoalId|runId|failureProvenance|acceptance|contractId|receiptDigest)":/u)
@@ -236,7 +238,9 @@ test('skill_failure_candidate canonicalizes and forwards a repeated failure loca
   expect(forwarded.failures.every(Object.isFrozen)).toBe(true)
   expect(first).toMatchObject({ state: 'pending', trigger: 'host-verified-failure:repeated-not-achieved',
     failure: { category: 'repeated-not-achieved', count: 2, digest: expect.stringMatching(/^[a-f0-9]{64}$/u) } })
-  expect(Object.keys(first.failure)).toEqual(['category', 'count', 'digest'])
+  expect(first.failure).toMatchObject({ protocol: 'assistant-skills/failure-capture-provenance/v1',
+    provenanceDigest: first.failure.digest, occurrences: 2, count: 2, taskFamilyId: 'write-artifact',
+    taskFamilyDefinitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), rollbackTarget: { name: 'saved-write', version: 1 } })
   expect(JSON.stringify(first)).not.toMatch(/failure-(?:session|goal)-[ab]|trigger-native|trigger-run|repair-(?:session|native|run)/u)
   const replay = result(await f.execute('skill_failure_candidate', failureCandidateArgs({ trigger_goal_id: undefined, trigger_session_id: undefined, failure_locators: [...locators].reverse().map(locator => ({ session_id: locator.sessionId, goal_id: locator.goalId })), minimum_occurrences: 2 })))
   expect(replay).toEqual(first)
