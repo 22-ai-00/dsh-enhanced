@@ -1,0 +1,93 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-10",
+  "recordedAt": "2026-09-10T07:15:15Z",
+  "baseCommit": "367d6cd18b9f9a81755dd62f585adcaeaf7ce565",
+  "workingTreeState": "final source hashes recorded after root validation",
+  "scope": [
+    "WP17 checkout-local Linux systemd --user service-aware uninstall for a standard Lark profile",
+    "Crash-safe archive-to-clean-Web endpoint with original active-set restoration",
+    "Manifest-bound foreign ownership and exact clean-profile inventory"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2,
+    "wp17": "implementing"
+  },
+  "supportedBoundary": {
+    "platform": "Linux",
+    "serviceManager": "systemd --user",
+    "operation": "uninstall",
+    "scenario": "lark",
+    "source": "local checkout or sibling helper only; released remote helpers remain zero-sentinel",
+    "endpoint": "archive the complete old profile and install an exact clean Web profile while preserving external durable state"
+  },
+  "implementation": [
+    "Public local and npm entry points dispatch standard Linux Lark uninstall to the existing v2 service lifecycle; npm uninstall performs no registry or pnpm-store work.",
+    "The transaction masks and stops every installer-managed unit bound to the canonical DSH_HOME, activates a copied clean profile offline, atomically swaps homes, and restores only units that were originally active.",
+    "Units, drop-ins, credentials, owner binding, Session, Goal, database, linger settings and external state are retained because their deletion has no separate crash-safe retirement transaction.",
+    "Foreign custom or legacy units are ignored only when unique absolute DSH_HOME and WorkingDirectory evidence both prove they are outside the target home; relative, ambiguous, nested or drifting ownership fails closed.",
+    "The v2 manifest binds the complete managed/foreign unit partition and foreign ownership digests, which are rechecked before mutation, rename, service acceptance, finalization, cleanup and recovery.",
+    "Same-home clean profiles from an earlier uninstall are accepted only when four exact installer files and the complete directory entry set match; every clean profile digest is manifest-bound and rechecked across restart, stability, finalization, cleanup and recovery.",
+    "Pre-swap failure restores the original home and active set; original-renamed recovery restores the original directory; post-swap failure preserves clean current and original backup homes and keeps services contained without automatic rollback.",
+    "A repeated uninstall of an already clean target with no managed top-level dependency is an idempotent no-op that does not touch systemd."
+  ],
+  "targetedValidation": [
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=8 pnpm exec vitest run tests/installers.spec.ts --reporter=dot",
+      "exitCode": 0,
+      "testsPassed": 225,
+      "testsSkipped": 1,
+      "testsTotal": 226,
+      "log": "/tmp/dsh-wp17-installers-final-v4.log",
+      "logSha256": "ddea829498b10f7dcabcd9de53bcede88aac857ca562233e6bd572aa74736a11",
+      "skipReason": "The published lifecycle-helper asset comparison is conditional while the current release intentionally uses zero sentinel hashes."
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=1 pnpm exec vitest run plugins/lark-channel/tests/setup.spec.ts plugins/lark-channel/tests/supervised-growth-setup.spec.ts --reporter=dot",
+      "exitCode": 0,
+      "testsPassed": 123,
+      "testsSkipped": 0,
+      "log": "/tmp/dsh-wp17-setup-final.log",
+      "logSha256": "f6e5d636a7625150c4e913e3af19a38c5c9856568cffb82634b73982990287b6"
+    }
+  ],
+  "engineeringValidation": {
+    "command": "CI=true VITEST_MAX_WORKERS=1 pnpm check",
+    "exitCode": 0,
+    "log": "/tmp/dsh-wp17-uninstall-root-check.log",
+    "logSha256": "7c4237cea7b724d47b5730f687987a36fc6cb5b0a4cee8523337976334e0235f",
+    "testFilesPassed": 343,
+    "testFilesSkipped": 12,
+    "testsPassed": 4536,
+    "testsSkipped": 43,
+    "rootTestFilesPassed": 30,
+    "rootTestsPassed": 427,
+    "rootTestsSkipped": 1,
+    "dryRunPacks": 33,
+    "result": "manifest, zero-warning lint, workspace typecheck/tests, build and every plugin dry-run pack passed"
+  },
+  "independentReview": {
+    "ownershipSecurity": "PASS after foreign snapshot propagation and exact target/sibling clean-profile binding; zero blocker, high or medium findings",
+    "testCoverage": "PASS; zero blocker, high or medium gaps"
+  },
+  "releaseBoundary": {
+    "currentRelease": "v0.1.24",
+    "state": "zero-sentinel",
+    "behavior": "Remote upgrade and uninstall remain fail closed; this evidence does not claim a published lifecycle capability."
+  },
+  "sourceHashes": {
+    "scripts/install/common.sh": "24b8fd3b75f846ad7292b2a7b75784050ec64fa211b410d5670ff5211f0ea840",
+    "scripts/install/lifecycle-profile.mjs": "940354b55fe023b07c626f131f45ec3206485737d13d797923047805936ac9cd",
+    "scripts/install/README.md": "f5994c788696d910f635534b2f38f9629f334c9f6e17e6db58639874bfe985a7",
+    "tests/installers.spec.ts": "5ca3ea72ce187a2f26040bc9127390035a32ca21d0feaebf046ced8c57661bfe",
+    "docs/agent-autonomy-implementation.md": "d1b3263ad1ed7e92000c17275ca7c517f2fd1816ae3276e12d65c09b078a62a1"
+  },
+  "limitations": [
+    "No complete real DSH_HOME uninstall was executed; engineering fixtures and prior real-systemd primitive evidence are not a production uninstall acceptance.",
+    "Supervised and non-Linux service-aware lifecycle remain unsupported.",
+    "The operation intentionally retains systemd units, drop-ins, credentials, owner binding, Session, Goal, database, linger settings and external state.",
+    "The full 18-work-package objective remains incomplete."
+  ]
+}

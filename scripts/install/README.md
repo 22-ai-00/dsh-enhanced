@@ -13,13 +13,18 @@
   --confirm-dsh-home-stopped --yes
 ./scripts/install/install-local.sh --operation uninstall --scenario web \
   --confirm-dsh-home-stopped --yes
+
+# Linux systemd --user managed Lark profile; the installer stops and restores
+# the proven same-home unit set itself.
+./scripts/install/install-local.sh --operation uninstall --scenario lark \
+  --confirm-dsh-home-stopped --yes
 ```
 
-两种操作都要求整个 `DSH_HOME` 在复制和切换时保持静止，且都会拒绝活动的第三方顶层 bundle，因为安装器无法穷举其私有状态路径；未作为 bundle 激活的普通第三方依赖会原样保留。`web` / `autonomy` 由操作者预先停止所有相关进程；Linux `lark` upgrade 则由安装器在锁内停止并屏蔽已证明归属的 systemd units，操作者只需预先停止其它外部或手工进程。安装器持有 home 外的独占锁，在无网络隔离环境中对私有副本更新 package/lockfile、组合配置和实际激活；只有副本通过才提交。成功升级只更新当前已安装的 `@dsh-enhanced/*` 顶层依赖，不新增场景能力，并保留自定义 patch、凭据、Session、Goal 与其它任务状态。卸载把完整旧 profile 归档到 `$DSH_HOME/uninstalled-profiles/`，创建干净的同名 DSH 基础 profile，并保留外置状态。归档配置不会继续激活；再次卸载已无受管依赖的基础 profile 是幂等 no-op。
+两种操作都要求整个 `DSH_HOME` 在复制和切换时保持静止，且都会拒绝活动的第三方顶层 bundle，因为安装器无法穷举其私有状态路径；未作为 bundle 激活的普通第三方依赖会原样保留。`web` / `autonomy` 由操作者预先停止所有相关进程；Linux `lark` upgrade/uninstall 则由安装器在锁内停止并屏蔽已证明归属的 systemd units，操作者只需预先停止其它外部或手工进程。安装器持有 home 外的独占锁，在无网络隔离环境中对私有副本更新 package/lockfile、组合配置和实际激活；只有副本通过才提交。成功升级只更新当前已安装的 `@dsh-enhanced/*` 顶层依赖，不新增场景能力，并保留自定义 patch、凭据、Session、Goal 与其它任务状态。卸载把完整旧 profile 归档到 `$DSH_HOME/uninstalled-profiles/`，创建干净的同名 DSH 基础 profile，并保留 systemd unit/drop-in、凭据、owner binding、Session、Goal、数据库及其它外置状态；原 active units 在 clean profile 通过 fresh readiness 后恢复，原 inactive units 保持停止。归档配置不会继续激活；再次卸载已无受管依赖的基础 profile 是幂等 no-op。
 
-生命周期事务目前只支持 Linux，并要求 Node.js、`flock`、Perl、`/usr/bin/python3` 和 bubblewrap。本地 upgrade 会先对当前 checkout 执行 `pnpm install --offline --frozen-lockfile` 和构建；npm upgrade 则在同一生命周期锁内先把发布 selector 解析为精确 cohort，并以禁用 install scripts 的 `pnpm store add` 预取，随后才创建 transaction，且 bwrap 内的 package 更新强制 offline + copy。uninstall 不访问 npm registry 或 pnpm store。`web` / `autonomy` 仍使用操作者预先停止整个 home 的离线事务；Linux `lark` upgrade 会在锁内枚举同一 canonical `DSH_HOME` 的 installer-managed systemd user units，以绑定 inode 的高优先级 `user.control` mask 屏蔽后全部停止，在每次 rename 前后复核进程静止，并只恢复原 active units；启动由独立 crash guardian 执行，fresh InvocationID 的 journal ready marker 与稳定窗口通过后才删除旧备份。此能力要求 `DSH_HOME` 与用户 systemd 配置位于同一文件系统，以便用 Linux `renameat2(RENAME_NOREPLACE)` 原子移动受管 mask 和 enablement link。此能力不适用于外部 supervisor、macOS、Windows、`lark` uninstall 或 `supervised` upgrade/uninstall，这些组合会在变更前明确拒绝。事务也不会修改权限、模型或 Agent 工具配置，并会拒绝不安全 owner/权限、home 内的外部状态链接、外部硬链接、挂载点、特殊文件及无法证明归属的旧事务残留；失败证据保留在同级 transaction 目录供人工排查。`--confirm-dsh-home-stopped` 对 Lark upgrade 表示除安装器将自行停止的 systemd units 外，其它使用整个 `DSH_HOME` 的外部/手工进程均已停止；它不是允许安装器 kill 未知进程的授权。
+生命周期事务目前只支持 Linux，并要求 Node.js、`flock`、Perl、`/usr/bin/python3` 和 bubblewrap。本地 upgrade 会先对当前 checkout 执行 `pnpm install --offline --frozen-lockfile` 和构建；npm upgrade 则在同一生命周期锁内先把发布 selector 解析为精确 cohort，并以禁用 install scripts 的 `pnpm store add` 预取，随后才创建 transaction，且 bwrap 内的 package 更新强制 offline + copy。uninstall 不访问 npm registry 或 pnpm store。`web` / `autonomy` 仍使用操作者预先停止整个 home 的离线事务；Linux `lark` upgrade/uninstall 会在锁内枚举同一 canonical `DSH_HOME` 的 installer-managed systemd user units，以绑定 inode 的高优先级 `user.control` mask 屏蔽后全部停止，在每次 rename 前后复核进程静止，并只恢复原 active units；启动由独立 crash guardian 执行，fresh InvocationID 的 journal ready marker 与稳定窗口通过后才删除旧备份。明确属于其它绝对 HOME 的 custom/legacy unit 不会被修改，但它的 ownership 摘要会写入事务并持续复核；归属缺失、相对、冲突、漂移为当前 HOME 或嵌套于当前 HOME 都会 fail closed。此前卸载留下的同 HOME clean profile 只有在四文件和目录闭集精确匹配 installer baseline 时才允许共存，其摘要同样绑定到事务并在恢复、启动、验收与清理前复核。此能力要求 `DSH_HOME` 与用户 systemd 配置位于同一文件系统，以便用 Linux `renameat2(RENAME_NOREPLACE)` 原子移动受管 mask 和 enablement link。此能力不适用于外部 supervisor、macOS、Windows 或 `supervised` upgrade/uninstall，这些组合会在变更前明确拒绝。事务也不会修改权限、模型或 Agent 工具配置，并会拒绝不安全 owner/权限、home 内的外部状态链接、外部硬链接、挂载点、特殊文件及无法证明归属的旧事务残留；失败证据保留在同级 transaction 目录供人工排查。`--confirm-dsh-home-stopped` 对 Lark upgrade/uninstall 表示除安装器将自行停止的 systemd units 外，其它使用整个 `DSH_HOME` 的外部/手工进程均已停止；它不是允许安装器 kill 未知进程的授权。
 
-Linux Lark service-aware upgrade 另外要求固定系统解释器 `/usr/bin/python3`，用于 `renameat2(RENAME_NOREPLACE)` 的无覆盖文件屏障；`DSH_HOME` 与用户 systemd 配置目录必须位于同一文件系统。
+Linux Lark service-aware upgrade/uninstall 另外要求固定系统解释器 `/usr/bin/python3`，用于 `renameat2(RENAME_NOREPLACE)` 的无覆盖文件屏障；`DSH_HOME` 与用户 systemd 配置目录必须位于同一文件系统。
 
 交互运行不传参数会选择场景；自动化可显式指定：
 
@@ -42,7 +47,7 @@ Linux Lark service-aware upgrade 另外要求固定系统解释器 `/usr/bin/pyt
 飞书向导支持纯 SSH/无桌面 Linux：默认先探测 Secret Service，不可用时会在 OAuth 前自动验证并改用当前用户 `0700` 目录下的版本化 `0600` protected-file，不要求安装 GNOME Keyring。该文件没有额外静态加密，同 UID、root 与可读备份仍能读取；需要强制系统钥匙环时可在安装后直接运行 `dsh-lark-setup --linux-credential-provider secret-service`。
 
 管理内建服务时，安装器会在 OAuth 前检查 systemd user manager 和 lingering。当前用户有权时会自动启用 lingering；需要管理员权限时，交互向导会先展示唯一的固定提权命令，并询问是否现在通过 `sudo` 执行，密码由 `sudo` 直接读取，不进入安装器、参数或日志。拒绝、失败或非交互运行都会在云端授权前停止并给出同一条可复制命令。Linux 安装完成后还会观察 user unit 的 `ActiveState`、`ExecMainStatus` 和 `NRestarts` 一个短窗口；发现快速崩溃/重启循环会打印最近 journal 并停止该 unit，避免 systemd 无限重启掩盖原始错误。容器、未启用 systemd 的 WSL 或其他没有 systemd user manager/logind 的系统应使用 `--no-service`，并由 Docker、s6、runit 等外部 supervisor 保持 `dsh --profile <name> --no-open` 常驻；此时安装器不会宣称或验证内建服务的注销后存活能力。
-Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 root-owned `01777` `/tmp`；setup 会在任何 profile、凭据、数据库或 service mutation 前持有与 upgrade 相同的 canonical `DSH_HOME` rendezvous lock，避免 onboarding/reconfigure 与 service-aware lifecycle 并发。
+Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 root-owned `01777` `/tmp`；setup 会在任何 profile、凭据、数据库或 service mutation 前持有与 upgrade/uninstall 相同的 canonical `DSH_HOME` rendezvous lock，避免 onboarding/reconfigure 与 service-aware lifecycle 并发。
 
 普通 `lark` 场景已经安装 Preference Learning：经 owner onboarding 的完成对话只产生无正文的有界行为证据，并可在固定 T1 目录、阈值和回滚门内自动应用偏好；它不要求 Health、Heartbeat 或 Recovery，也不会新增通用 Agent 工具授权。`--disable-agent-tools` 只移除向导托管的规则，不覆盖用户自定义规则或显式的全局 Policy 默认值。
 
