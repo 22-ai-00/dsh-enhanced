@@ -2,9 +2,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, WorkflowRequest } from './types.js'
+import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, CompensationPreimage, CompensationPreimageFile, CompensationRecord, CompensationRequest, CompensationResult, WorkflowRequest } from './types.js'
 
-const schemaVersion = 2
+const schemaVersion = 3
 const maxRecords = 10_000
 const maxActiveActions = 2
 
@@ -18,7 +18,12 @@ export class ActionLedgerError extends Error {
 type GrantRow = { id: string; revision: number; grant_json: string; revoked: number }
 type RecordRow = {
   kind: ActionRecord['kind']; id: string; identity_json: string; session_id: string; grant_id: string; idempotency_digest: string; grant_revision: number; repository: string; branch: string; expected_head_oid: string; request_digest: string
-  bytes: number; expires_at: number; status: ActionRecord['status']; version: number; result_json: string | null
+  bytes: number; expires_at: number; status: ActionRecord['status']; version: number; result_json: string | null; paths_json: string | null
+}
+type CompensationRow = {
+  id: string; forward_action_id: string; forward_action_version: number; forward_grant_revision: number; identity_json: string; session_id: string; grant_id: string; grant_revision: number; repository: string; branch: string
+  paths_json: string; parent_oid: string; idempotency_digest: string; forward_request_digest: string; forward_commit_oid: string; request_digest: string; preimage_digest: string | null; preimage_json: string | null
+  budget_id: string; budget_max_actions: number; budget_max_total_bytes: number; bytes: number; expires_at: number; status: CompensationRecord['status']; version: number; result_json: string | null
 }
 
 function fail(code: ActionLedgerError['code']): never { throw new ActionLedgerError(code) }
@@ -96,7 +101,7 @@ function identityInput(value: unknown): ActionIdentity {
 }
 
 function grantInput(value: unknown): ActionGrant {
-  const input = object(value, ['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'repository', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes'], ['repoWorkflow', 'verifiedDelivery'])
+  const input = object(value, ['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'repository', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes'], ['repoWorkflow', 'verifiedDelivery', 'rollback'])
   const identity = identityInput({ principalDigest: input.principalDigest, principalRecordId: input.principalRecordId, principalVersion: input.principalVersion, workspace: input.workspace, agentPreset: input.agentPreset })
   const paths = array(input.paths, 1_000).map(validPath)
   if (paths.length === 0 || new Set(paths).size !== paths.length) fail('invalid-input')
@@ -104,7 +109,12 @@ function grantInput(value: unknown): ActionGrant {
   if (workflow && (typeof workflow.allowBranchCreate !== 'boolean' || typeof workflow.allowPullRequest !== 'boolean')) fail('invalid-input')
   const delivery = input.verifiedDelivery === undefined ? undefined : object(input.verifiedDelivery, ['ownerRouteId', 'budgetId'], ['acceptance'])
   if (delivery?.acceptance !== undefined && delivery.acceptance !== 'goal-outcome' && delivery.acceptance !== 'goal-step') fail('invalid-input')
-  return Object.freeze({ ...identity, id: text(input.id), revision: integer(input.revision, 1), repository: text(input.repository), branch: text(input.branch), paths, credentialHandle: text(input.credentialHandle), expiresAt: integer(input.expiresAt, 0), maxActions: integer(input.maxActions, 1, maxRecords), maxTotalBytes: integer(input.maxTotalBytes, 0), ...(workflow ? { repoWorkflow: Object.freeze({ baseBranch: text(workflow.baseBranch), allowBranchCreate: workflow.allowBranchCreate as boolean, allowPullRequest: workflow.allowPullRequest as boolean }) } : {}), ...(delivery ? { verifiedDelivery: Object.freeze({ ownerRouteId: text(delivery.ownerRouteId, 200), budgetId: text(delivery.budgetId, 200), ...(delivery.acceptance === undefined ? {} : { acceptance: delivery.acceptance as 'goal-outcome' | 'goal-step' }) }) } : {}) })
+  const rollback = input.rollback === undefined ? undefined : object(input.rollback, ['allowRollback', 'budgetId', 'maxActions', 'maxTotalBytes'])
+  if (rollback && rollback.allowRollback !== true) fail('invalid-input')
+  return Object.freeze({ ...identity, id: text(input.id), revision: integer(input.revision, 1), repository: text(input.repository), branch: text(input.branch), paths, credentialHandle: text(input.credentialHandle), expiresAt: integer(input.expiresAt, 0), maxActions: integer(input.maxActions, 1, maxRecords), maxTotalBytes: integer(input.maxTotalBytes, 0),
+    ...(workflow ? { repoWorkflow: Object.freeze({ baseBranch: text(workflow.baseBranch), allowBranchCreate: workflow.allowBranchCreate as boolean, allowPullRequest: workflow.allowPullRequest as boolean }) } : {}),
+    ...(delivery ? { verifiedDelivery: Object.freeze({ ownerRouteId: text(delivery.ownerRouteId, 200), budgetId: text(delivery.budgetId, 200), ...(delivery.acceptance === undefined ? {} : { acceptance: delivery.acceptance as 'goal-outcome' | 'goal-step' }) }) } : {}),
+    ...(rollback ? { rollback: Object.freeze({ allowRollback: true as const, budgetId: text(rollback.budgetId, 200), maxActions: integer(rollback.maxActions, 1, maxRecords), maxTotalBytes: integer(rollback.maxTotalBytes, 1, 64 * 1024 * 1024) }) } : {}) })
 }
 
 export function normalizeWorkflow(value: unknown): WorkflowRequest {
@@ -152,6 +162,56 @@ function authorityInput(value: unknown): ActionAuthority {
   return Object.freeze({ ownerId: text(input.ownerId), fence: integer(input.fence, 1) })
 }
 
+function pathList(value: unknown): string[] {
+  const paths = array(value, 1_000).map(validPath)
+  if (paths.length === 0 || new Set(paths).size !== paths.length) fail('invalid-input')
+  return paths
+}
+
+function compensationFiles(value: unknown): CompensationPreimageFile[] {
+  const files = array(value, 1_000).map(item => {
+    if (!plain(item) || item.state !== 'present' && item.state !== 'absent') fail('invalid-input')
+    if (item.state === 'absent') {
+      const file = object(item, ['path', 'state'])
+      return Object.freeze({ path: validPath(file.path), state: 'absent' as const })
+    }
+    const file = object(item, ['path', 'state', 'blobOid', 'content', 'size'])
+    const blobOid = text(file.blobOid, 128); if (!/^[0-9a-f]{40,128}$/iu.test(blobOid)) fail('invalid-input')
+    const content = text(file.content, 1_048_576, 0); const size = integer(file.size, 0, 1_048_576)
+    if (Buffer.byteLength(content) !== size || Buffer.from(content).toString('utf8') !== content) fail('invalid-input')
+    return Object.freeze({ path: validPath(file.path), state: 'present' as const, blobOid, content, size })
+  })
+  if (files.length === 0 || new Set(files.map(file => file.path)).size !== files.length
+    || files.reduce((total, file) => total + Buffer.byteLength(file.path) + (file.state === 'present' ? file.size : 0), 0) > 1_048_576) fail('invalid-input')
+  return files
+}
+
+function compensationInput(value: unknown): CompensationRequest {
+  const input = object(value, ['grantId', 'idempotencyKey', 'forwardActionId', 'forwardActionVersion', 'forwardRequestDigest', 'forwardCommitOid'])
+  const forwardCommitOid = text(input.forwardCommitOid, 128)
+  if (!/^[0-9a-f]{40,128}$/iu.test(forwardCommitOid)) fail('invalid-input')
+  return Object.freeze({ grantId: text(input.grantId), idempotencyKey: text(input.idempotencyKey), forwardActionId: text(input.forwardActionId), forwardActionVersion: integer(input.forwardActionVersion, 1),
+    forwardRequestDigest: digest(input.forwardRequestDigest), forwardCommitOid })
+}
+
+function compensationPreimage(value: unknown): CompensationPreimage {
+  const input = object(value, ['repository', 'branch', 'commitOid', 'files'])
+  const commitOid = text(input.commitOid, 128); if (!/^[0-9a-f]{40,128}$/iu.test(commitOid)) fail('invalid-input')
+  return Object.freeze({ repository: text(input.repository), branch: text(input.branch, 256), commitOid, files: Object.freeze(compensationFiles(input.files)) })
+}
+
+function compensationBytes(preimage: CompensationPreimage): number { return Buffer.byteLength(stableJson(preimage), 'utf8') }
+
+function compensationResultInput(value: unknown): CompensationResult {
+  const input = object(value, ['actionId', 'status', 'repository', 'branch', 'parentOid', 'actionMarker'], ['resultOid', 'reason'])
+  if (!['succeeded', 'failed', 'unknown'].includes(String(input.status))) fail('invalid-input')
+  const resultOid = input.resultOid === undefined ? undefined : text(input.resultOid, 128)
+  if (resultOid !== undefined && !/^[0-9a-f]{40,128}$/iu.test(resultOid)) fail('invalid-input')
+  if ((input.status === 'succeeded') !== (resultOid !== undefined)) fail('invalid-input')
+  return Object.freeze({ actionId: text(input.actionId), status: input.status as CompensationResult['status'], repository: text(input.repository), branch: text(input.branch, 256), parentOid: text(input.parentOid, 128), actionMarker: text(input.actionMarker),
+    ...(resultOid === undefined ? {} : { resultOid }), ...(input.reason === undefined ? {} : { reason: text(input.reason, 4_096) }) })
+}
+
 function privateFile(path: string): void {
   const stat = lstatSync(path)
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0 || (process.getuid?.() !== undefined && stat.uid !== process.getuid?.())) fail('unsafe-file')
@@ -185,17 +245,21 @@ function open(path: string): DatabaseSync {
       BEGIN IMMEDIATE;
       CREATE TABLE grants (id TEXT NOT NULL, revision INTEGER NOT NULL, grant_json TEXT NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0, 1)), PRIMARY KEY(id, revision)) STRICT, WITHOUT ROWID;
       CREATE TABLE grant_heads (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0, 1)), FOREIGN KEY(id, revision) REFERENCES grants(id, revision)) STRICT;
-      CREATE TABLE actions (kind TEXT NOT NULL DEFAULT 'commit' CHECK(kind IN ('commit', 'branch', 'pull-request', 'inspect')), id TEXT PRIMARY KEY, identity_json TEXT NOT NULL, session_id TEXT NOT NULL, grant_id TEXT NOT NULL, idempotency_digest TEXT NOT NULL, grant_revision INTEGER NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, expected_head_oid TEXT NOT NULL, request_digest TEXT NOT NULL, bytes INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('prepared', 'dispatched', 'succeeded', 'failed', 'unknown')), version INTEGER NOT NULL, result_json TEXT, UNIQUE(identity_json, session_id, grant_id, idempotency_digest), FOREIGN KEY(grant_id, grant_revision) REFERENCES grants(id, revision)) STRICT;
+      CREATE TABLE actions (kind TEXT NOT NULL DEFAULT 'commit' CHECK(kind IN ('commit', 'branch', 'pull-request', 'inspect')), id TEXT PRIMARY KEY, identity_json TEXT NOT NULL, session_id TEXT NOT NULL, grant_id TEXT NOT NULL, idempotency_digest TEXT NOT NULL, grant_revision INTEGER NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, expected_head_oid TEXT NOT NULL, request_digest TEXT NOT NULL, bytes INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('prepared', 'dispatched', 'succeeded', 'failed', 'unknown')), version INTEGER NOT NULL, result_json TEXT, paths_json TEXT, UNIQUE(identity_json, session_id, grant_id, idempotency_digest), FOREIGN KEY(grant_id, grant_revision) REFERENCES grants(id, revision)) STRICT;
+      CREATE TABLE compensations (id TEXT PRIMARY KEY, forward_action_id TEXT NOT NULL UNIQUE, forward_action_version INTEGER NOT NULL, forward_grant_revision INTEGER NOT NULL, identity_json TEXT NOT NULL, session_id TEXT NOT NULL, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, paths_json TEXT NOT NULL, parent_oid TEXT NOT NULL, idempotency_digest TEXT NOT NULL, forward_request_digest TEXT NOT NULL, forward_commit_oid TEXT NOT NULL, request_digest TEXT NOT NULL, preimage_digest TEXT, preimage_json TEXT, budget_id TEXT NOT NULL, budget_max_actions INTEGER NOT NULL, budget_max_total_bytes INTEGER NOT NULL, bytes INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('capturing', 'prepared', 'dispatched', 'succeeded', 'failed', 'unknown')), version INTEGER NOT NULL, result_json TEXT, CHECK((status = 'capturing' AND preimage_digest IS NULL AND preimage_json IS NULL AND bytes = 0) OR (status != 'capturing' AND preimage_digest IS NOT NULL AND preimage_json IS NOT NULL)), UNIQUE(identity_json, session_id, grant_id, idempotency_digest), FOREIGN KEY(forward_action_id) REFERENCES actions(id), FOREIGN KEY(grant_id, grant_revision) REFERENCES grants(id, revision)) STRICT;
       CREATE TABLE controller (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;
       CREATE TABLE audit (sequence INTEGER PRIMARY KEY, kind TEXT NOT NULL, subject_id TEXT NOT NULL, revision INTEGER, recorded_at INTEGER NOT NULL) STRICT;
       CREATE INDEX actions_grant ON actions(grant_id, grant_revision);
       CREATE INDEX actions_destination_head ON actions(repository, branch, expected_head_oid, status);
-      PRAGMA user_version = 2;
+      CREATE INDEX compensations_status ON compensations(status);
+      PRAGMA user_version = 3;
       COMMIT;`)
-    if (version === 1) database.exec("BEGIN IMMEDIATE; ALTER TABLE actions ADD COLUMN kind TEXT NOT NULL DEFAULT 'commit' CHECK(kind IN ('commit', 'branch', 'pull-request', 'inspect')); PRAGMA user_version = 2; COMMIT;")
-    if (![0, 1, schemaVersion].includes(version)) fail('schema')
+    const compensationSchema = "CREATE TABLE compensations (id TEXT PRIMARY KEY, forward_action_id TEXT NOT NULL UNIQUE, forward_action_version INTEGER NOT NULL, forward_grant_revision INTEGER NOT NULL, identity_json TEXT NOT NULL, session_id TEXT NOT NULL, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, paths_json TEXT NOT NULL, parent_oid TEXT NOT NULL, idempotency_digest TEXT NOT NULL, forward_request_digest TEXT NOT NULL, forward_commit_oid TEXT NOT NULL, request_digest TEXT NOT NULL, preimage_digest TEXT, preimage_json TEXT, budget_id TEXT NOT NULL, budget_max_actions INTEGER NOT NULL, budget_max_total_bytes INTEGER NOT NULL, bytes INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('capturing', 'prepared', 'dispatched', 'succeeded', 'failed', 'unknown')), version INTEGER NOT NULL, result_json TEXT, CHECK((status = 'capturing' AND preimage_digest IS NULL AND preimage_json IS NULL AND bytes = 0) OR (status != 'capturing' AND preimage_digest IS NOT NULL AND preimage_json IS NOT NULL)), UNIQUE(identity_json, session_id, grant_id, idempotency_digest), FOREIGN KEY(forward_action_id) REFERENCES actions(id), FOREIGN KEY(grant_id, grant_revision) REFERENCES grants(id, revision)) STRICT; CREATE INDEX compensations_status ON compensations(status);"
+    if (version === 1) database.exec(`BEGIN IMMEDIATE; ALTER TABLE actions ADD COLUMN kind TEXT NOT NULL DEFAULT 'commit' CHECK(kind IN ('commit', 'branch', 'pull-request', 'inspect')); ALTER TABLE actions ADD COLUMN paths_json TEXT; ${compensationSchema} PRAGMA user_version = 3; COMMIT;`)
+    if (version === 2) database.exec(`BEGIN IMMEDIATE; ALTER TABLE actions ADD COLUMN paths_json TEXT; ${compensationSchema} PRAGMA user_version = 3; COMMIT;`)
+    if (![0, 1, 2, schemaVersion].includes(version)) fail('schema')
     const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map(row => row.name)
-    if (!equal(tables, ['actions', 'audit', 'controller', 'grant_heads', 'grants'])) fail('schema')
+    if (!equal(tables, ['actions', 'audit', 'compensations', 'controller', 'grant_heads', 'grants'])) fail('schema')
     const strict = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ sql: string }>
     if (!strict.every(row => /\bSTRICT\b/u.test(row.sql))) fail('schema')
     const check = database.prepare('PRAGMA quick_check').get() as { quick_check: string }
@@ -258,10 +322,46 @@ export class ActionLedger {
       if (terminal !== (row.result_json !== null)) fail('schema')
       const result = row.result_json === null ? undefined : resultInput(storedJson(row.result_json))
       if (result && (result.actionId !== id || result.status !== status)) fail('schema')
+      const paths = row.paths_json === null ? undefined : pathList(storedJson(row.paths_json))
+      if (paths !== undefined && row.kind !== 'commit') fail('schema')
       const grant = this.#grantRevision(grantId, grantRevision)
       const grantIdentity: ActionIdentity = { principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: grant.workspace, agentPreset: grant.agentPreset }
       if (!equal(identity, grantIdentity) || grant.repository !== text(row.repository) || grant.branch !== text(row.branch) || (row.kind === 'inspect' ? row.expected_head_oid !== '' : !/^[0-9a-f]{40}$/iu.test(row.expected_head_oid))) fail('schema')
-      return Object.freeze({ kind: row.kind, id, identity, sessionId, grantId, grantRevision, requestDigest, bytes, expiresAt, status, version, ...(result ? { result } : {}) })
+      return Object.freeze({ kind: row.kind, id, identity, sessionId, grantId, grantRevision, requestDigest, bytes, expiresAt, status, version, ...(paths ? { paths: Object.freeze(paths) } : {}), ...(result ? { result } : {}) })
+    } catch { return fail('schema') }
+  }
+  #compensationRow(row: CompensationRow): CompensationRecord {
+    try {
+      const id = text(row.id); const forwardActionId = text(row.forward_action_id); const forwardActionVersion = integer(row.forward_action_version, 1); const forwardGrantRevision = integer(row.forward_grant_revision, 1)
+      const identity = identityInput(storedJson(row.identity_json)); const sessionId = text(row.session_id); const grantId = text(row.grant_id); const grantRevision = integer(row.grant_revision, 1)
+      const repository = text(row.repository); const branch = text(row.branch, 256); const paths = pathList(storedJson(row.paths_json)); const parentOid = text(row.parent_oid, 128)
+      if (!/^[0-9a-f]{40,128}$/iu.test(parentOid)) fail('schema')
+      digest(row.idempotency_digest); const forwardRequestDigest = digest(row.forward_request_digest); const forwardCommitOid = text(row.forward_commit_oid, 128)
+      if (!/^[0-9a-f]{40,128}$/iu.test(forwardCommitOid)) fail('schema')
+      const requestDigest = digest(row.request_digest); const budgetId = text(row.budget_id, 200); const budgetMaxActions = integer(row.budget_max_actions, 1, maxRecords)
+      const budgetMaxTotalBytes = integer(row.budget_max_total_bytes, 1, 64 * 1024 * 1024); const bytes = integer(row.bytes, 0, 64 * 1024 * 1024); const expiresAt = integer(row.expires_at, 0); const version = integer(row.version, 1)
+      if (!['capturing', 'prepared', 'dispatched', 'succeeded', 'failed', 'unknown'].includes(row.status)) fail('schema')
+      const status = row.status as CompensationRecord['status']; const terminal = ['succeeded', 'failed', 'unknown'].includes(status)
+      if (terminal !== (row.result_json !== null) || (status === 'capturing') !== (row.preimage_json === null || row.preimage_digest === null)) fail('schema')
+      if ((row.preimage_json === null) !== (row.preimage_digest === null) || (status === 'capturing' && bytes !== 0)) fail('schema')
+      const preimage = row.preimage_json === null ? undefined : compensationPreimage(storedJson(row.preimage_json))
+      const preimageDigest = row.preimage_digest === null ? undefined : digest(row.preimage_digest)
+      if (preimage && (preimageDigest !== createHash('sha256').update(stableJson(preimage)).digest('hex') || preimage.repository !== repository || preimage.branch !== branch || preimage.commitOid !== parentOid
+        || !equal(preimage.files.map(file => file.path), paths) || bytes !== compensationBytes(preimage))) fail('schema')
+      const result = row.result_json === null ? undefined : compensationResultInput(storedJson(row.result_json))
+      if (result && (result.actionId !== id || result.status !== status || result.repository !== repository || result.branch !== branch || result.parentOid !== forwardCommitOid || result.actionMarker !== `dsh-compensation:${id}`)) fail('schema')
+      const grant = this.#grantRevision(grantId, grantRevision); const rollback = grant.rollback
+      const grantIdentity: ActionIdentity = { principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: grant.workspace, agentPreset: grant.agentPreset }
+      if (!rollback || !equal(identity, grantIdentity) || rollback.budgetId !== budgetId || rollback.maxActions !== budgetMaxActions || rollback.maxTotalBytes !== budgetMaxTotalBytes
+        || grant.repository !== repository || grant.branch !== branch || !paths.every(path => grant.paths.includes(path))) fail('schema')
+      const forwardRow = this.#database.prepare('SELECT * FROM actions WHERE id = ?').get(forwardActionId) as RecordRow | undefined
+      if (!forwardRow) fail('schema')
+      const forward = this.#row(forwardRow)
+      if (forward.kind !== 'commit' || forward.status !== 'succeeded' || forward.version !== forwardActionVersion || forward.grantRevision !== forwardGrantRevision
+        || forward.grantId !== grantId || forward.sessionId !== sessionId || !equal(forward.identity, identity) || !equal(forward.paths, paths) || forward.requestDigest !== forwardRequestDigest
+        || forwardRow.repository !== repository || forwardRow.branch !== branch || forwardRow.expected_head_oid !== parentOid || forward.result?.commitOid !== forwardCommitOid) fail('schema')
+      return Object.freeze({ id, forwardActionId, forwardActionVersion, forwardGrantRevision, identity, sessionId, grantId, grantRevision, repository, branch, paths: Object.freeze(paths), parentOid,
+        forwardRequestDigest, forwardCommitOid, requestDigest, bytes, expiresAt, status, version, ...(preimageDigest ? { preimageDigest } : {}), ...(preimage ? { preimage } : {}), ...(result ? { result } : {}) })
     } catch { return fail('schema') }
   }
   #currentGrant(id: string): GrantRow | undefined {
@@ -282,6 +382,9 @@ export class ActionLedger {
       const actions = this.#database.prepare('SELECT * FROM actions LIMIT 10001').all() as RecordRow[]
       if (actions.length > maxRecords) fail('schema')
       for (const action of actions) this.#row(action)
+      const compensations = this.#database.prepare('SELECT * FROM compensations LIMIT 10001').all() as CompensationRow[]
+      if (compensations.length > maxRecords) fail('schema')
+      for (const compensation of compensations) this.#compensationRow(compensation)
     } catch { fail('schema') }
   }
 
@@ -370,7 +473,7 @@ export class ActionLedger {
       const records = (this.#database.prepare('SELECT COUNT(*) AS count FROM actions').get() as { count: number }).count
       if (records >= maxRecords || used.count >= grant.maxActions || used.bytes + bytes > grant.maxTotalBytes) fail('limit')
       const expiresAt = Math.min(after(now, lease), grant.expiresAt); const id = randomUUID()
-      this.#database.prepare('INSERT INTO actions(kind, id, identity_json, session_id, grant_id, idempotency_digest, grant_revision, repository, branch, expected_head_oid, request_digest, bytes, expires_at, status, version, result_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'prepared\', 1, NULL)').run(kind, id, stableJson(identity), sessionId, grant.id, idempotencyDigest, grant.revision, grant.repository, grant.branch, head, digest, bytes, expiresAt)
+      this.#database.prepare('INSERT INTO actions(kind, id, identity_json, session_id, grant_id, idempotency_digest, grant_revision, repository, branch, expected_head_oid, request_digest, bytes, expires_at, status, version, result_json, paths_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'prepared\', 1, NULL, ?)').run(kind, id, stableJson(identity), sessionId, grant.id, idempotencyDigest, grant.revision, grant.repository, grant.branch, head, digest, bytes, expiresAt, kind === 'commit' ? stableJson((request as import('./types.js').CommitRequest).files.map(file => file.path)) : null)
       this.#audit('action-prepared', id, 1, now)
       const row = this.#database.prepare('SELECT * FROM actions WHERE id = ?').get(id) as RecordRow
       this.#database.exec('COMMIT'); return { record: this.#row(row), created: true }
@@ -404,6 +507,129 @@ export class ActionLedger {
       const updated = this.#database.prepare('SELECT * FROM actions WHERE id = ?').get(actionId) as RecordRow; this.#database.exec('COMMIT'); return this.#row(updated)
     } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
   }
+
+  prepareCompensation(input: Readonly<{ identity: ActionIdentity; sessionId: string; request: CompensationRequest; authority: ActionAuthority; leaseMs?: number }>): { record: CompensationRecord; created: boolean } {
+    const args = object(input, ['identity', 'sessionId', 'request', 'authority'], ['leaseMs'])
+    const identity = identityInput(args.identity); const sessionId = text(args.sessionId); const request = compensationInput(args.request)
+    const lease = own(args, 'leaseMs') ? integer(args.leaseMs, 1, 30_000) : 30_000; const now = this.#time()
+    const requestDigest = createHash('sha256').update(stableJson(request)).digest('hex'); const idempotencyDigest = createHash('sha256').update(request.idempotencyKey).digest('hex')
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#controller(args.authority, now)
+      const keyed = this.#database.prepare('SELECT * FROM compensations WHERE identity_json = ? AND session_id = ? AND grant_id = ? AND idempotency_digest = ?').get(stableJson(identity), sessionId, request.grantId, idempotencyDigest) as CompensationRow | undefined
+      if (keyed) {
+        if (keyed.request_digest !== requestDigest) fail('conflict')
+        this.#database.exec('COMMIT'); return { record: this.#compensationRow(keyed), created: false }
+      }
+      const previous = this.#database.prepare('SELECT request_digest FROM compensations WHERE forward_action_id = ?').get(request.forwardActionId) as { request_digest: string } | undefined
+      if (previous) fail('conflict')
+      const forwardRow = this.#database.prepare('SELECT * FROM actions WHERE id = ?').get(request.forwardActionId) as RecordRow | undefined
+      if (!forwardRow) fail('state')
+      const forward = this.#row(forwardRow)
+      if (forward.kind !== 'commit' || forward.status !== 'succeeded' || forward.version !== request.forwardActionVersion || forward.requestDigest !== request.forwardRequestDigest
+        || forward.result?.commitOid !== request.forwardCommitOid || forward.grantId !== request.grantId || forward.sessionId !== sessionId || !forward.paths || !equal(forward.identity, identity)) fail('state')
+      const grantRow = this.#currentGrant(request.grantId); if (!grantRow || grantRow.revoked) fail('grant')
+      const grant = this.#grantRow(grantRow); const rollback = grant.rollback
+      if (!rollback || grant.expiresAt <= now || !equal(identity, { principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: grant.workspace, agentPreset: grant.agentPreset })
+        || grant.repository !== forwardRow.repository || grant.branch !== forwardRow.branch || !forward.paths.every(path => grant.paths.includes(path))) fail('grant')
+      const used = this.#database.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS bytes FROM compensations WHERE identity_json = ? AND grant_id = ? AND budget_id = ?').get(stableJson(identity), grant.id, rollback.budgetId) as { count: number; bytes: number }
+      const records = (this.#database.prepare('SELECT COUNT(*) AS count FROM compensations').get() as { count: number }).count
+      if (records >= maxRecords || used.count >= rollback.maxActions || used.bytes > rollback.maxTotalBytes) fail('limit')
+      const expiresAt = Math.min(after(now, lease), grant.expiresAt); const id = randomUUID()
+      this.#database.prepare(`INSERT INTO compensations(id, forward_action_id, forward_action_version, forward_grant_revision, identity_json, session_id, grant_id, grant_revision, repository, branch, paths_json, parent_oid, idempotency_digest, forward_request_digest, forward_commit_oid, request_digest, preimage_digest, preimage_json, budget_id, budget_max_actions, budget_max_total_bytes, bytes, expires_at, status, version, result_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0, ?, 'capturing', 1, NULL)`).run(id, forward.id, forward.version, forward.grantRevision, stableJson(identity), sessionId, grant.id, grant.revision, grant.repository, grant.branch, stableJson(forward.paths), forwardRow.expected_head_oid, idempotencyDigest, forward.requestDigest, request.forwardCommitOid, requestDigest, rollback.budgetId, rollback.maxActions, rollback.maxTotalBytes, expiresAt)
+      this.#audit('compensation-capturing', id, 1, now)
+      const row = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(id) as CompensationRow
+      this.#database.exec('COMMIT'); return { record: this.#compensationRow(row), created: true }
+    } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
+  }
+
+  captureCompensation(id: string, version: number, value: CompensationPreimage, authority: ActionAuthority): CompensationRecord {
+    const compensationId = text(id); const expected = integer(version, 1); const preimage = compensationPreimage(value); const now = this.#time(); const bytes = compensationBytes(preimage)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#controller(authority, now)
+      const row = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(compensationId) as CompensationRow | undefined; if (!row) fail('state')
+      const record = this.#compensationRow(row)
+      if (record.status !== 'capturing' || record.version !== expected || record.expiresAt <= now || preimage.repository !== record.repository || preimage.branch !== record.branch || preimage.commitOid !== record.parentOid
+        || !equal(preimage.files.map(file => file.path), record.paths)) fail('state')
+      const head = this.#currentGrant(record.grantId); if (!head || head.revoked || head.revision !== record.grantRevision) fail('grant')
+      const grant = this.#grantRow(head); if (grant.expiresAt <= now || !grant.rollback) fail('grant')
+      const used = this.#database.prepare('SELECT COALESCE(SUM(bytes), 0) AS bytes FROM compensations WHERE identity_json = ? AND grant_id = ? AND budget_id = ? AND id != ?').get(stableJson(record.identity), record.grantId, row.budget_id, record.id) as { bytes: number }
+      if (!Number.isSafeInteger(used.bytes) || used.bytes + bytes > row.budget_max_total_bytes) fail('limit')
+      const serialized = stableJson(preimage); const preimageDigest = createHash('sha256').update(serialized).digest('hex')
+      const changed = this.#database.prepare("UPDATE compensations SET status = 'prepared', version = version + 1, preimage_digest = ?, preimage_json = ?, bytes = ? WHERE id = ? AND status = 'capturing' AND version = ?").run(preimageDigest, serialized, bytes, compensationId, expected)
+      if (changed.changes !== 1) fail('state'); this.#audit('compensation-prepared', compensationId, expected + 1, now)
+      const updated = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(compensationId) as CompensationRow
+      this.#database.exec('COMMIT'); return this.#compensationRow(updated)
+    } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
+  }
+
+  dispatchCompensation(id: string, version: number, authority: ActionAuthority): CompensationRecord {
+    const compensationId = text(id); const expected = integer(version, 1); const now = this.#time(); this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#controller(authority, now)
+      const row = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(compensationId) as CompensationRow | undefined; if (!row) fail('state')
+      const record = this.#compensationRow(row); if (record.status !== 'prepared' || record.version !== expected || record.expiresAt <= now) fail('state')
+      const head = this.#currentGrant(record.grantId); if (!head || head.revoked || head.revision !== record.grantRevision || this.#grantRow(head).expiresAt <= now) fail('grant')
+      const changed = this.#database.prepare("UPDATE compensations SET status = 'dispatched', version = version + 1 WHERE id = ? AND status = 'prepared' AND version = ?").run(compensationId, expected)
+      if (changed.changes !== 1) fail('state'); this.#audit('compensation-dispatched', compensationId, expected + 1, now)
+      const updated = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(compensationId) as CompensationRow
+      this.#database.exec('COMMIT'); return this.#compensationRow(updated)
+    } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
+  }
+
+  settleCompensation(id: string, version: number, result: CompensationResult, authority: ActionAuthority): CompensationRecord {
+    const compensationId = text(id); const expected = integer(version, 1); const outcome = compensationResultInput(result); const now = this.#time()
+    if (outcome.actionId !== compensationId) fail('invalid-input')
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#controller(authority, now)
+      const row = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(compensationId) as CompensationRow | undefined; if (!row) fail('state')
+      const record = this.#compensationRow(row); if (record.status !== 'dispatched' || record.version !== expected || outcome.repository !== record.repository || outcome.branch !== record.branch
+        || outcome.parentOid !== record.forwardCommitOid || outcome.actionMarker !== `dsh-compensation:${record.id}`) fail('state')
+      const changed = this.#database.prepare("UPDATE compensations SET status = ?, version = version + 1, result_json = ? WHERE id = ? AND status = 'dispatched' AND version = ?").run(outcome.status, stableJson(outcome), compensationId, expected)
+      if (changed.changes !== 1) fail('state'); this.#audit('compensation-settled', compensationId, expected + 1, now)
+      const updated = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(compensationId) as CompensationRow
+      this.#database.exec('COMMIT'); return this.#compensationRow(updated)
+    } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
+  }
+
+  getCompensation(id: string): CompensationRecord | undefined { const row = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(text(id)) as CompensationRow | undefined; return row && this.#compensationRow(row) }
+  discardCompensation(id: string, version: number, authority: ActionAuthority): boolean {
+    const compensationId = text(id); const expected = integer(version, 1); const now = this.#time()
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#controller(authority, now)
+      const changed = this.#database.prepare("DELETE FROM compensations WHERE id = ? AND status = 'capturing' AND version = ?").run(compensationId, expected)
+      if (changed.changes > 1) fail('state')
+      if (changed.changes === 1) this.#audit('compensation-discarded', compensationId, expected, now)
+      this.#database.exec('COMMIT'); return changed.changes === 1
+    } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
+  }
+  recoverCompensations(authority: ActionAuthority): number {
+    const now = this.#time(); this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#controller(authority, now); const rows = this.#database.prepare("SELECT * FROM compensations WHERE status IN ('capturing', 'prepared', 'dispatched')").all() as CompensationRow[]
+      for (const row of rows) {
+        const record = this.#compensationRow(row)
+        if (record.status === 'capturing') {
+          // A capturing row carries no preimage and can never have reached the
+          // dispatch POST; drop it so the forward action, idempotency key and
+          // action budget are released for a fresh attempt.
+          const changed = this.#database.prepare("DELETE FROM compensations WHERE id = ? AND status = 'capturing' AND version = ?").run(record.id, record.version)
+          if (changed.changes !== 1) fail('state')
+          this.#audit('compensation-discarded', record.id, record.version, now)
+        } else {
+          const result: CompensationResult = { actionId: record.id, status: 'unknown', repository: record.repository, branch: record.branch, parentOid: record.forwardCommitOid, actionMarker: `dsh-compensation:${record.id}`, reason: 'controller-recovery-no-replay' }
+          const changed = this.#database.prepare("UPDATE compensations SET status = 'unknown', version = version + 1, result_json = ? WHERE id = ? AND status IN ('prepared', 'dispatched') AND version = ?").run(stableJson(result), record.id, record.version)
+          if (changed.changes !== 1) fail('state'); this.#audit('compensation-recovered', record.id, record.version + 1, now)
+        }
+      }
+      this.#database.exec('COMMIT'); return rows.length
+    } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
+  }
+
   usable(id: string): boolean { const row = this.#database.prepare('SELECT * FROM actions WHERE id = ?').get(text(id)) as RecordRow | undefined; if (!row) return false; const record = this.#row(row); if (!['prepared', 'dispatched'].includes(record.status) || record.expiresAt <= this.#time()) return false; const head = this.#currentGrant(record.grantId); return !!head && !head.revoked && head.revision === record.grantRevision && this.#grantRow(head).expiresAt > this.#time() }
   recover(authority: ActionAuthority): number {
     const now = this.#time(); this.#database.exec('BEGIN IMMEDIATE')

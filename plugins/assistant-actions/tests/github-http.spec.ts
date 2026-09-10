@@ -2,7 +2,7 @@ import { createServer, request as httpRequest } from 'node:http'
 import type { IncomingMessage, RequestOptions, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { describe, expect, it, vi } from 'vitest'
-import { commitOnGitHub, createBranchOnGitHub, createPullRequestOnGitHub, inspectGitHub } from '../src/github.ts'
+import { commitOnGitHub, createBranchOnGitHub, createCompensatingCommitOnGitHub, createPullRequestOnGitHub, inspectGitHub, inspectGitHubBranchHead, readGitHubPreimage } from '../src/github.ts'
 import type { ActionGrant, CommitRequest } from '../src/types.ts'
 
 const actionId = 'action-http-123'
@@ -245,4 +245,109 @@ it('cancels a hung REST response and removes its abort listener', async () => {
     expect(installed).toBeDefined()
     expect(remove).toHaveBeenCalledWith('abort', installed![1])
   } finally { await close(server) }
+})
+
+describe('compensation HTTP socket boundary', () => {
+  const parentOid = 'c'.repeat(40), forwardOid = 'd'.repeat(40), resultOid = 'e'.repeat(40)
+  const compensationGrant: ActionGrant = { ...grant, paths: ['src/old.txt', 'src/new.txt'] }
+
+  it('uses fixed hosts, exact encoded path/ref and never follows a preimage redirect', async () => {
+    let redirected = 0, seenUrl: string | undefined, authorization: string | undefined
+    const target = await listen((_request, response) => { redirected++; response.end('{}') })
+    const redirector = await listen((request, response) => {
+      seenUrl = request.url; authorization = request.headers.authorization
+      response.writeHead(302, { location: target.url.href }); response.end()
+    })
+    const index = await listen((_request, response) => {
+      response.setHeader('content-type', 'application/json')
+      if ((_request.url ?? '').includes('/git/commits/')) { response.end(JSON.stringify({ sha: parentOid, tree: { sha: expectedHeadOid } })); return }
+      response.end(JSON.stringify({ sha: expectedHeadOid, truncated: false, tree: [] }))
+    })
+    const transport = ((targetUrl: URL, options: RequestOptions, callback: (response: IncomingMessage) => void) => {
+      expect(targetUrl.origin).toBe('https://api.github.com')
+      if (targetUrl.pathname.includes('/git/commits/') || targetUrl.pathname.includes('/git/trees/')) {
+        return httpRequest(new URL(targetUrl.pathname + targetUrl.search, index.url), options, callback)
+      }
+      expect(targetUrl.pathname).toBe('/repos/owner/repository/contents/src/old.txt')
+      expect(targetUrl.searchParams.get('ref')).toBe(parentOid)
+      return httpRequest(new URL(targetUrl.pathname + targetUrl.search, redirector.url), options, callback)
+    }) as unknown as typeof import('node:https').request
+    try {
+      await expect(readGitHubPreimage({ grant: compensationGrant, commitOid: parentOid, paths: ['src/old.txt'], token: 'only-at-server', signal: new AbortController().signal }, transport)).resolves.toBeUndefined()
+      expect(seenUrl).toBe(`/repos/owner/repository/contents/src/old.txt?ref=${parentOid}`)
+      expect(authorization).toBe('Bearer only-at-server')
+      expect(redirected).toBe(0)
+    } finally { await close(index.server); await close(redirector.server); await close(target.server) }
+  })
+
+  it('inspects the exact branch then sends one ordinary expected-head compensation commit', async () => {
+    let branchCalls = 0, graphCalls = 0, payload: Record<string, any> | undefined
+    const { server, url } = await listen(async (request, response) => {
+      response.setHeader('content-type', 'application/json')
+      if (request.url === '/repos/owner/repository/branches/main') {
+        branchCalls++; response.end(JSON.stringify({ name: 'main', commit: { sha: forwardOid } })); return
+      }
+      expect(request.url).toBe('/graphql'); graphCalls++; payload = JSON.parse(await readBody(request))
+      response.end(JSON.stringify({ data: { createCommitOnBranch: {
+        clientMutationId: `dsh-compensation:${actionId}`,
+        commit: { oid: resultOid, parents: { nodes: [{ oid: forwardOid }] }, repository: { nameWithOwner: grant.repository } },
+        ref: { name: grant.branch, target: { oid: resultOid } },
+      } } }))
+    })
+    const rest = ((targetUrl: URL, options: RequestOptions, callback: (response: IncomingMessage) => void) => {
+      expect(targetUrl.href).toBe('https://api.github.com/repos/owner/repository/branches/main')
+      expect(options).toMatchObject({ method: 'GET', agent: false })
+      return httpRequest(new URL(targetUrl.pathname, url), options, callback)
+    }) as unknown as typeof import('node:https').request
+    const graph = ((targetUrl: URL, options: RequestOptions, callback: (response: IncomingMessage) => void) => {
+      expect(targetUrl.href).toBe('https://api.github.com/graphql')
+      expect(options).toMatchObject({ method: 'POST', agent: false })
+      return httpRequest(url, options, callback)
+    }) as unknown as typeof import('node:https').request
+    const preimage = { repository: grant.repository, branch: grant.branch, commitOid: parentOid, files: [
+      { path: 'src/old.txt', state: 'present' as const, blobOid: parentOid, content: 'before', size: 6 },
+      { path: 'src/new.txt', state: 'absent' as const },
+    ] }
+    try {
+      expect(await inspectGitHubBranchHead({ grant: compensationGrant, token: 'only-at-server', signal: new AbortController().signal }, rest)).toEqual({ repository: grant.repository, branch: grant.branch, headOid: forwardOid })
+      await expect(createCompensatingCommitOnGitHub({ actionId, grant: compensationGrant, forwardCommitOid: forwardOid, preimage, token: 'only-at-server', signal: new AbortController().signal }, { rest, graphql: graph })).resolves.toEqual({
+        actionId, status: 'succeeded', repository: grant.repository, branch: grant.branch, parentOid: forwardOid, actionMarker: `dsh-compensation:${actionId}`, resultOid,
+      })
+      expect(payload?.variables.input).toEqual({
+        branch: { repositoryNameWithOwner: grant.repository, branchName: grant.branch }, expectedHeadOid: forwardOid,
+        message: { headline: `Compensate ${actionId}`, body: `dsh-compensation:${actionId}` },
+        fileChanges: { additions: [{ path: 'src/old.txt', contents: 'YmVmb3Jl' }], deletions: [{ path: 'src/new.txt' }] },
+        clientMutationId: `dsh-compensation:${actionId}`,
+      })
+      expect(payload?.query).not.toMatch(/force|updateRef/i)
+      expect(branchCalls).toBe(2); expect(graphCalls).toBe(1)
+    } finally { await close(server) }
+  })
+
+  it('does not follow a GraphQL redirect and sends the compensation mutation only once', async () => {
+    let redirected = 0, dispatched = 0
+    const target = await listen((_request, response) => { redirected++; response.end('{}') })
+    const redirector = await listen(async (request, response) => { dispatched++; await readBody(request); response.writeHead(302, { location: target.url.href }); response.end() })
+    const head = await listen((_request, response) => response.end(JSON.stringify({ name: grant.branch, commit: { sha: forwardOid } })))
+    const preimage = { repository: grant.repository, branch: grant.branch, commitOid: parentOid, files: [{ path: 'src/old.txt', state: 'present' as const, blobOid: parentOid, content: 'before', size: 6 }] }
+    try {
+      await expect(createCompensatingCommitOnGitHub({ actionId, grant: compensationGrant, forwardCommitOid: forwardOid, preimage, token: 'only-at-server', signal: new AbortController().signal }, { rest: restTransport(head.url), graphql: localhostTransport(redirector.url) })).resolves.toMatchObject({ status: 'unknown', reason: 'github-compensation-unknown' })
+      expect(dispatched).toBe(1); expect(redirected).toBe(0)
+    } finally { await close(head.server); await close(redirector.server); await close(target.server) }
+  })
+
+  it('returns unknown after a dispatched compensation loses acknowledgement and never replays it', async () => {
+    let dispatched = 0
+    const mutation = await listen((request) => {
+      void readBody(request).then(() => { dispatched++; request.socket.destroy() })
+    })
+    const head = await listen((_request, response) => response.end(JSON.stringify({ name: grant.branch, commit: { sha: forwardOid } })))
+    const preimage = { repository: grant.repository, branch: grant.branch, commitOid: parentOid, files: [{ path: 'src/old.txt', state: 'present' as const, blobOid: parentOid, content: 'before', size: 6 }] }
+    try {
+      await expect(createCompensatingCommitOnGitHub({ actionId, grant: compensationGrant, forwardCommitOid: forwardOid, preimage, token: 'only-at-server', signal: new AbortController().signal }, { rest: restTransport(head.url), graphql: localhostTransport(mutation.url) })).resolves.toMatchObject({
+        status: 'unknown', reason: 'github-compensation-unknown', repository: grant.repository, branch: grant.branch, parentOid: forwardOid, actionMarker: `dsh-compensation:${actionId}`,
+      })
+      expect(dispatched).toBe(1)
+    } finally { await close(head.server); await close(mutation.server) }
+  })
 })

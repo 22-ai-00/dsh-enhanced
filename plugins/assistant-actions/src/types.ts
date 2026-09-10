@@ -15,6 +15,7 @@ export interface ActionGrant extends ActionIdentity {
   expiresAt: number
   maxActions: number
   maxTotalBytes: number
+  rollback?: { allowRollback: true; budgetId: string; maxActions: number; maxTotalBytes: number }
   repoWorkflow?: { baseBranch: string; allowBranchCreate: boolean; allowPullRequest: boolean }
   verifiedDelivery?: { ownerRouteId: string; budgetId: string; acceptance?: 'goal-outcome' | 'goal-step' }
 }
@@ -59,6 +60,57 @@ export interface ActionRecord {
   expiresAt: number
   status: 'prepared' | 'dispatched' | ActionResult['status']
   version: number
+  /** Present for schema-v3 commit rows; legacy commits cannot be compensated. */
+  paths?: readonly string[]
   result?: ActionResult
 }
 export interface ActionAuthority { ownerId: string; fence: number }
+
+/** Owner request binding an exact succeeded forward commit. Preimages are Host-captured. */
+export interface CompensationRequest {
+  grantId: string
+  idempotencyKey: string
+  forwardActionId: string
+  forwardActionVersion: number
+  forwardRequestDigest: string
+  forwardCommitOid: string
+}
+export type CompensationPreimageFile =
+  | Readonly<{ path: string; state: 'present'; blobOid: string; content: string; size: number }>
+  | Readonly<{ path: string; state: 'absent' }>
+export interface CompensationPreimage { repository: string; branch: string; commitOid: string; files: readonly CompensationPreimageFile[] }
+export interface CompensationResult {
+  actionId: string
+  status: 'succeeded' | 'failed' | 'unknown'
+  repository: string
+  branch: string
+  parentOid: string
+  actionMarker: string
+  resultOid?: string
+  reason?: string
+}
+
+export interface CompensationRecord {
+  id: string
+  forwardActionId: string
+  forwardActionVersion: number
+  forwardGrantRevision: number
+  identity: ActionIdentity
+  sessionId: string
+  grantId: string
+  grantRevision: number
+  repository: string
+  branch: string
+  paths: readonly string[]
+  parentOid: string
+  forwardRequestDigest: string
+  forwardCommitOid: string
+  requestDigest: string
+  bytes: number
+  expiresAt: number
+  status: 'capturing' | 'prepared' | 'dispatched' | CompensationResult['status']
+  version: number
+  preimageDigest?: string
+  preimage?: CompensationPreimage
+  result?: CompensationResult
+}
