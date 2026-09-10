@@ -9,6 +9,7 @@ import { IsolationLedger } from './ledger.js'
 import { removeIsolatedContainer } from './runner.js'
 import { defaultStoragePolicy, validateStoragePolicy } from './storage-policy.js'
 import { maintainIsolationStorage, type IsolationStorageMaintenance } from './storage.js'
+import { archiveIsolationAudit, verifyIsolationAuditArchive } from './audit-archive.js'
 
 function privateLedger(stateRoot: string, dockerPath: string): string {
   if (!isAbsolute(stateRoot) || realpathSync(stateRoot) !== stateRoot) throw new Error('canonical state root required')
@@ -107,6 +108,17 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
       process.once('SIGINT', cancel); process.once('SIGTERM', cancel)
       try { process.stdout.write(`${JSON.stringify(await reconcileIsolation(stateRoot, grantId, abort.signal))}\n`) }
       finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel) }
+    } else if (command === 'archive-audit') {
+      if (stateRoot === undefined || grantId === undefined || dockerPath !== undefined || extra.length > 0
+        || (revision !== undefined && (!/^[1-9][0-9]*$/.test(revision) || !Number.isSafeInteger(Number(revision)) || Number(revision) > 1_000))) {
+        throw new Error('usage: dsh-isolation archive-audit /absolute/private/state-root /absolute/private/archive-directory [batch-size]')
+      }
+      process.stdout.write(`${JSON.stringify(archiveIsolationAudit({ stateRoot, archiveDirectory: grantId, ...(revision === undefined ? {} : { batchSize: Number(revision) }) }))}\n`)
+    } else if (command === 'verify-audit') {
+      if (stateRoot === undefined || grantId !== undefined || revision !== undefined || dockerPath !== undefined || extra.length > 0) {
+        throw new Error('usage: dsh-isolation verify-audit /absolute/private/archive-directory')
+      }
+      process.stdout.write(`${JSON.stringify(verifyIsolationAuditArchive(stateRoot))}\n`)
     } else {
     if (command !== 'revoke' || stateRoot === undefined || grantId === undefined || revision === undefined || extra.length > 0 || !/^[1-9][0-9]*$/.test(revision)) throw new Error('usage: dsh-isolation revoke /absolute/private/state-root grant-id revision [/absolute/docker]')
     const result = await revokeIsolationGrant(stateRoot, grantId, Number(revision), dockerPath)
