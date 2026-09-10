@@ -1,0 +1,125 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-10",
+  "recordedAt": "2026-09-10T11:29:12Z",
+  "baseCommit": "075836be81cac4af1bf8862bc6da4632c9d1e364",
+  "scope": [
+    "WP10 worker-protected tamper-evident Isolation lifecycle audit archive",
+    "Fixed-high-water read-only snapshot from Isolation ledger schema 6",
+    "Operator CLI, package API, archive verifier and wire v1 compatibility"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2,
+    "wp10": "implementing",
+    "slice": "deliverable",
+    "fullGoal": "incomplete"
+  },
+  "supportedBoundary": {
+    "producer": "trusted Host/operator",
+    "source": "assistant-isolation ledger schema 6 lifecycle audit",
+    "format": "canonical content-addressed hash-linked NDJSON archive wire v1",
+    "protection": "worker-protected and tamper-evident relative to a trusted digest",
+    "sourceRowsDeleted": false,
+    "externalAnchorImplemented": false
+  },
+  "implementation": [
+    "A dedicated readOnly SQLite connection uses query_only and one explicit BEGIN transaction to freeze schema, sequence high-water, source prefix and new rows.",
+    "Each content-addressed batch binds archive instance, canonical state-root digest, sequence range, snapshot high-water, previous batch digest and exact record bytes.",
+    "A private control SQLite BEGIN IMMEDIATE serializes exporters; all fd-closing control-file validation happens before lock acquisition and locked checks use lstat only.",
+    "Private temporary files use O_EXCL and O_NOFOLLOW, file fsync, atomic no-overwrite hardlink publication, temporary unlink and directory fsync; exact link-before-unlink crash residue is recovered.",
+    "The public verifier rejects uninitialized, control-only and incomplete archives, unknown entries or versions, noncanonical JSON, digest mismatch, fork, gap, duplicate, reorder, truncation and unsafe ownership or links.",
+    "archive-audit and verify-audit are operator-only CLI commands and both APIs are exported from the package root; no model tool receives the state or archive root."
+  ],
+  "targetedValidation": [
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation build && CI=true pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/audit-archive.spec.ts tests/audit-archive-cli.spec.ts --reporter=dot",
+      "exitCode": 0,
+      "testFilesPassed": 2,
+      "testsPassed": 29,
+      "log": "/tmp/dsh-isolation-audit-focused.log",
+      "logSha256": "a8201666a602eeeb935ecd1b6c897ef7859c50095a6ea806f152a951d9e173bb"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run --reporter=dot",
+      "exitCode": 0,
+      "testFilesPassed": 16,
+      "testFilesConditionallySkipped": 10,
+      "testsPassed": 108,
+      "testsConditionallySkipped": 27,
+      "log": "/tmp/dsh-isolation-audit-package.log",
+      "logSha256": "d8dff0af9fb2806345c5a1e61e12b1ff3d6df5bd04aa806e1546db4901860680"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck && CI=true pnpm exec oxlint --deny-warnings plugins/assistant-isolation",
+      "exitCode": 0,
+      "warnings": 0,
+      "errors": 0,
+      "log": "/tmp/dsh-isolation-audit-static.log",
+      "logSha256": "d81394e9d87394202787aac56be003fd03ba880c4ce64830906fe9759dafa0fa"
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-isolation pack --dry-run --json",
+      "exitCode": 0,
+      "archiveArtifactsIncluded": true,
+      "log": "/tmp/dsh-isolation-audit-pack.json",
+      "logSha256": "30b64c7be68766605033b39de46aaa68b334a91dbdcafa60b5d841e381dffd1c"
+    }
+  ],
+  "adversarialValidation": {
+    "fixedSnapshotWithLiveWalWriter": "passed",
+    "fourProcessWriterSerializationAndChangingHighWater": "passed",
+    "idempotentReplayAndPartialSnapshotResume": "passed",
+    "linkBeforeUnlinkCrashRecovery": "passed",
+    "conflictingSourcePrefixAndSourceRootRejected": "passed",
+    "contentTamperForkGapReorderTruncationRejected": "passed",
+    "uninitializedControlOnlyAndIncompleteTailRejected": "passed",
+    "symlinkHardlinkPermissionsAndUnknownEntriesRejected": "passed",
+    "largeSchemaValidDetailRoundTrip": "passed",
+    "sourceAuditRowsPreserved": "passed"
+  },
+  "engineeringValidation": {
+    "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+    "status": "passed",
+    "exitCode": 0,
+    "log": "/tmp/dsh-isolation-audit-root-check.log",
+    "logSha256": "90f766c9b593884b0e02f7e7b2371c7624dccead6511bc1f4a2b9b9971483f21",
+    "testFilesPassed": 358,
+    "testsPassed": 4665,
+    "testsConditionallySkipped": 1,
+    "dryRunPacks": 33,
+    "isolationTestFilesPassed": 26,
+    "isolationTestsPassed": 135,
+    "result": "manifest, zero-warning lint, workspace typecheck and tests, final build and every package dry-run pack passed"
+  },
+  "independentReview": {
+    "acceptance": "PASS after fixes; 0 BLOCK, 0 HIGH, 0 MEDIUM",
+    "security": "PASS under the worker-protected boundary; 0 BLOCK, 0 HIGH, 0 MEDIUM after fixes"
+  },
+  "limitations": [
+    "The archive is protected from the isolated worker, not from a malicious or compromised same-UID Host or root.",
+    "SHA-256 linkage is not a signature and does not establish authenticity, nonrepudiation or WORM semantics.",
+    "Local verification cannot detect whole-chain replacement or rollback at a completed snapshot boundary without a protected external monotonic anchor.",
+    "The wire binds the canonical state-root path, not a persistent ledger instance ID; trusted replacement of a ledger at the same path is in the Host trust boundary.",
+    "A live-WAL read-only snapshot does not change schema or business rows but may create or use SQLite WAL or SHM coordination sidecars.",
+    "This slice preserves every SQLite audit row and does not solve state-root hard capacity, secure deletion, daemon-generation final reconciliation, version rollback or irreversible-action compensation.",
+    "The complete 18-work-package objective remains incomplete."
+  ],
+  "failedChecks": [
+    "Initial package test assumed an always-present WAL file; the assertion was corrected to the logical read-only contract while retaining main database and table equality.",
+    "Initial concurrent CLI assertion exposed that createdRecords counted replayed rows; accounting now counts only newly published content.",
+    "Independent four-process review exposed that closing another fd for the control inode released the POSIX SQLite lock; all fd validation moved before BEGIN IMMEDIATE and deterministic races now pass.",
+    "Independent schema review found valid audit detail above 16384 characters was rejected; detail now has its own bounded UTF-8 byte rule and a real large-record regression."
+  ],
+  "sourceHashes": {
+    "plugins/assistant-isolation/src/audit-archive.ts": "bed0b66a56a44773380a1049af65e8e55890b03605732a3d008f3856f62a03aa",
+    "plugins/assistant-isolation/src/cli.ts": "c78ede808cb9301f4b5a6e2ba345fbbee7da70d0d14d84af31c19af3b9e5f5e9",
+    "plugins/assistant-isolation/src/index.ts": "dd5430468762f4202f74255eb20af92ff3f774987d2e87262e81bd4deb5b099d",
+    "plugins/assistant-isolation/tests/audit-archive.spec.ts": "7aa7e1a7634769602d10105425bfaa8983af931143df40fb9675e0ba43f07ea1",
+    "plugins/assistant-isolation/tests/audit-archive-cli.spec.ts": "c0a6edc89714619a098273c44725b67d1211eb73a32277b7e1694c1ec7e1159a",
+    "plugins/assistant-isolation/README.md": "8d59a0d77209f3229896e902fde7c005fe90736d0ff67e464df33076f9a55fcc",
+    "docs/compatibility.md": "728faea8892b7585e102046d53f60e026095a2bb4f62234116205b93d0afd619",
+    "docs/agent-autonomy-implementation.md": "497ab01811daa485d82b98d6fb9744ffa7dc0464d2f51a152d0d72be105205aa"
+  }
+}

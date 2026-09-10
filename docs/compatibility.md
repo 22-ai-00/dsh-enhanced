@@ -88,6 +88,8 @@ PersonalMemory 工具证据恢复使用 `@deepseek-ai/dsh-fs`、`dsh-fs-local`�
 
 Isolation 工作区要求 Linux Docker local volume driver 支持 tmpfs `size`/`nr_inodes`/UID/GID 选项。不可变镜像须包含可信 `/bin/busybox` 的 sleep/stat/cat 与 `/bin/sh`，拒绝声明 VOLUME 的镜像；仍不自动拉取镜像。SQLite v1→v2 增加持久资源预留，降级前需保留数据库并停止旧运行体，不能由旧版本打开 v2 绕过预算。
 
+Isolation 审计归档 wire v1 只读取 ledger schema 6 的固定高水位快照，输出 canonical、连续且 hash-linked 的 NDJSON batch，并保留源 SQLite audit 行；重复归档须字节幂等。旧 reader 必须拒绝未知 archive wire/record 版本，不能跳过后继续验证；ledger schema 或 archive wire 升级必须排空旧 writer、保留原库与归档，并重跑 schema 迁移、打包后 `archive-audit`/`verify-audit`、中断恢复、重复执行、篡改/缺失/乱序/截断拒绝和发布包公开导出测试。archive v1 的本地 hash 仅提供相对可信 digest 的完整性与链接，不提供真实性或不可否认性；检测同 UID Host/root 的整链重算及尾部/全量回滚需要外部受保护的单调 anchor `{archiveInstanceId, highestSequence, headDigest}`。
+
 
 `assistant-actions` 使用 DSH `dsh-tools@0.1.2-rc.1` 的 exact `tools.get(name, agent)` 定义身份、pre-execute waterfall 与其后的单调 guard；升级时重跑预授权、shadow、撤销与 native tool 集成。它需要同仓版本 Policy 的 `registerPreauthorizedTool/isPreauthorizedTool/evaluateAgent`，Delivery 当前 owner lineage 与 Keychain callback lease。npm optional peers 仅表示 Host 提供依赖，入口仍要求这些服务注入；旧 Policy 不具备此能力。GitHub 固定 GraphQL `createCommitOnBranch` 的 expectedHeadOid 是远端版本前置条件，实际账号/权限与生产调用仍需独立验证。
 

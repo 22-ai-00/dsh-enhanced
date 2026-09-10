@@ -7,6 +7,7 @@ export { version, AssistantIsolationService, Config }
 export { IsolatedVerifierRunner, type IsolatedVerifierRunnerConfig } from './verifier-runner.js'
 export { inspectIsolationGrant, type IsolationGrantDiagnostic, type IsolationGrantDiagnosticReason } from './diagnostics.js'
 export { probeIsolationRuntime } from './probe.js'
+export * from './audit-archive.js'
 export { isolationPrincipalDigest } from './service.js'
 export type * from './types.js'
 
