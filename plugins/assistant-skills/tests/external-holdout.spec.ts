@@ -1,5 +1,8 @@
 import { generateKeyPairSync } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
+import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 import { openHoldoutProcess, validateExternalHoldoutProfiles, type ExternalHoldoutProfile } from '../src/external-holdout.ts'
 
@@ -28,6 +31,24 @@ describe('external authority configuration', () => {
     expect(validateExternalHoldoutProfiles([prospective])).toHaveLength(1)
     expect(() => validateExternalHoldoutProfiles([{ ...prospective, authority: { ...prospective.authority, datasetDigest: 'd'.repeat(64) } }])).toThrow(/invalid external/)
     expect(() => validateExternalHoldoutProfiles([{ ...prospective, authority: { executable: prospective.authority.executable, args: prospective.authority.args, publicKey } }])).toThrow(/invalid external/)
+  })
+
+  test('accepts a strict canary admission only on prospective profiles', () => {
+    const canaryAdmission = { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: 'saved', parentDefinitionDigest: 'd'.repeat(64), candidateDefinitionDigest: 'e'.repeat(64),
+      taskFamily: { goalDefinitionDigest: 'f'.repeat(64), outcomeProfile: { id: 'exact-outcome', version: 1, digest: '9'.repeat(64) } } }
+    const prospective = { ...profile(), authority: { executable: process.execPath, args: [], publicKey, generatorDigest: 'c'.repeat(64) }, canaryAdmission }
+    expect(validateExternalHoldoutProfiles([prospective])[0]?.canaryAdmission).toEqual(canaryAdmission)
+    expect(() => validateExternalHoldoutProfiles([{ ...profile(), canaryAdmission }])).toThrow(/invalid external/)
+    expect(() => validateExternalHoldoutProfiles([{ ...prospective, canaryAdmission: { ...canaryAdmission, candidateDefinitionDigest: 'not-a-digest' } }])).toThrow(/invalid external/)
+  })
+
+  test('rejects workspace/state roots which overlap through a symlink and a nonexistent suffix', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'external-holdout-path-'))
+    try {
+      const workspace = join(root, 'workspace'), alias = join(root, 'alias')
+      await mkdir(workspace); await symlink(workspace, alias)
+      expect(() => validateExternalHoldoutProfiles([{ ...profile(), scope: { ...profile().scope, workspace }, execution: { ...profile().execution, stateRoot: join(alias, 'not-created-yet') } }])).toThrow(/invalid external/)
+    } finally { await rm(root, { recursive: true, force: true }) }
   })
 })
 

@@ -9,6 +9,15 @@ function source(steps: VerifiedWorkflowSource['steps'] = [{ id: 'call-1', toolNa
 }
 
 describe('skill definitions', () => {
+  it('keeps legacy order-summary definitions byte-compatible without failure-capture metadata', () => {
+    const objective = 'Implement summarize.mjs: normalize orders.'
+    const orderSummary = { ...source([{ id: 'write', toolName: 'write', arguments: { file_path: 'summarize.mjs', content: 'export default true\n' } }]),
+      goal: { ...source().goal, definition: { version: 1, digest: acceptanceDigest({ objective }), objective } } }
+    const definition = createDefinition(orderSummary, { name: 'order-summary', description: 'Write an order summary program.' }, ['write'])
+    expect(Object.keys(definition)).toEqual(['protocol', 'name', 'description', 'source', 'inputs', 'steps', 'fileObservations', 'preconditions', 'compensation'])
+    expect(acceptanceDigest(definition)).toBe('6e3b69ed060b9952cd0c21c58effb90e98854a44c845e73f985e5ca86e98d4e4')
+  })
+
   it('derives scalar bindings and instantiates declared values without mutating defaults', () => {
     const definition = createDefinition(source([{ id: 'read', toolName: 'files_read', arguments: { path: '/tmp/a', retry: false } }, { id: 'summarize', toolName: 'text_summary', arguments: { max: 10 } }]),
       { name: 'read-report', description: 'Read and summarize a report.', bindings: [{ name: 'path', stepId: 'read', path: '/path' }, { name: 'max', stepId: 'summarize', path: '/max' }] }, ['files_read', 'text_summary'])

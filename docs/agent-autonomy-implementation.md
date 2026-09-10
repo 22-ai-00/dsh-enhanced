@@ -2,6 +2,8 @@
 
 本账本落实 [2026-09-06 路线图](agent-intelligence-autonomy-roadmap-2026-09-06.md) 和 [成长专项审计](agent-growth-gap-evidence-2026-09-06.md)。目标是完整实现可验证的目标经营、任务上下文、独立验收、主动行动、高权限隔离和自主技能进化，并提供容易安装、诊断和升级的产品入口。实现起点为 `1b65852`。历史分析保留原始结论；当前进度与新证据记录在这里。
 
+> 最新成长批次（2026-09-10，基线 `8bcb46e`）：WP13–15 新增 `template-render/v1` 失败证据候选、冻结后随机 prospective 留出、精确 admission、有限 canary 晋升和因果回滚。Goals 只从 source 后、completed turn 前且有原始 append 引用的 Session 事件生成 Host proof；Skills 的模型可见结果改为白名单投影。Skills 211/211、Goals 203/203、guard 9/9 与最终根 `pnpm check` 通过。真实 TraeX 旧运行到达 promotion，但负控参数漂移被 guard 拒绝，未产生可回滚 run；修复后因本机 Trae 状态库估算单次整链约 80–98 万 token 暂停重跑（运行日志自身 usage 为 null），故不声称真实模型闭环通过。详见[本批证据](evidence/template-render-failure-canary-2026-09-10.json)。工作包状态不变，仍为 **3 已验证 / 13 实现中 / 2 待做**。
+
 > 最新实施批次（2026-09-09，基线 `559c378`）：WP17 新增 Linux `systemd --user` 标准 Lark profile 的 service-aware upgrade。安装器以 canonical `DSH_HOME` 在 lifecycle、Lark setup 与 supervised setup 之间共享 rendezvous 锁；持久化 unit inventory、用户控制 mask、enablement barrier、动态收容 intent 与 fresh InvocationID readiness，并在切换前后验证进程/服务静止。崩溃 guardian 脱离父进程组、处理终止信号并继承 fd 3/4/5 锁；控制面无法证明动态 unit 归属时持续 fail closed，不盲停 foreign-home unit，也不允许并发 setup/recovery。public entry 支持 dangling alias 下 recovery-first；统一 classifier 与 manifest 绑定阻止 scenario spoof 和 package/activation 后漂移；canonical cleanup 失败可恢复，v1 residue 兼容。最终独立安全审计 **PASS（0 blocker / 0 high / 0 medium）**。冻结根 `pnpm check` 退出 **0**：340 files passed / 12 conditional files skipped，4,434 tests passed / 43 skipped，33 份 dry-run pack 完成；installer 单套件 203 passed / 1 skipped，setup 两套件 123/123。真实 systemd 隔离 primitive 验证已通过，但没有声称完整真实 DSH_HOME swap。当前 `v0.1.24` lifecycle helper hashes 仍为 zero sentinel，远程 upgrade/uninstall 继续 fail closed；Lark uninstall、supervised lifecycle 与非 Linux service lifecycle 尚未开放。详见[本批证据](evidence/lark-service-lifecycle-2026-09-09.json)。WP17 仍为实现中；全部 18 项仍为 **3 已验证 / 13 实现中 / 2 待做**。
 
 > 上一实施批次（2026-09-09，基线 `dd19370`）：WP17 已补齐 npm 远程 `upgrade` / `uninstall` 发布入口。远端引导器把 `common.sh`、`lifecycle-config.mjs`、`lifecycle-profile.mjs` 绑定到同一不可变 release tag，三份资产全部下载、独立校验 SHA-256 并封存后才执行；upgrade 在生命周期锁内先恢复旧事务、解析并预取精确 npm cohort，再以 offline/copy 模式进入真实 bubblewrap 事务，uninstall 不访问 registry。当前 `v0.1.24` 尚无两个 helper，故保持双零 sentinel，普通 install 可用而远端 upgrade/uninstall 在下载或执行任何资产前 fail closed；下一次 `release:prepare` 才会写入三资产真实 hash，并由 tag/record 校验复核。本批证据见[npm 生命周期证据](evidence/npm-lifecycle-2026-09-09.json)。
@@ -754,3 +756,15 @@ Skills 新增主人明确授权的有限 `skill_watch`：只观察创建后准�
 正式工具→实际 CLI→真实容器两臂→canary→重启幂等→实际技能写入→验收后晋升→重启后后续运行→超额拒绝→退化回滚→旧启用请求不复活，已在同一服务场景运行通过。模型、源任务接受证明和后续 Goal 验收为明确工程夹具，不能外推真实模型收益或任意任务可靠性。冻结后根 `pnpm check` 退出 0：348 文件、4,232 测试、零跳过、33 份 dry-run pack；新运行时文件在打包清单中，源代码摘要与定向验收时一致。独立只读复核 PASS；初次类型和夹具失败均保留在[结构化证据](evidence/prospective-skill-canary-2026-09-09.json)。配置用法见[operator 指南](skill-holdout-authority.md#prospective-qualification-and-finite-canary)。
 
 后续用真实任务产生的候选取得同预算新样本收益证据，复用此入口扩展其余技能类别；当前仍只支持 order-summary/v1 生成器。仓库授权前置齐备即独立完成真实 GitHub 验收；第二任务/日历来源、机会排序、记忆/策略收益、真实签名发布和安装升级要求继续保留。此次机制交付不等于全部成长或全部 18 项完成，不设置日历等待。
+
+## 2026-09-10：template-render 失败候选与精确 canary 因果链
+
+在 `8bcb46e` 基线上新增第二个 prospective 技能族 `template-render/v1`。失败候选不接受模型自报的 outcome 或 provenance：Goals 在当前 owner route 下双读稳定的 Goal、execution、独立 `not-achieved` receipt 和原始 Session 事件，Skills 再将一次失败与后续独立 `achieved` 修复绑定为父版本、失败类别、任务族、权限差异和准确回滚目标。候选只进入 pending；提取、判定和启用权限继续分离。
+
+prospective authority 在 scope、baseline、candidate、共同预算及 `canaryAdmission` 冻结后才生成随机私有用例。admission 精确绑定父/候选定义、修复 Goal definition 和后续 outcome profile；三个 gate 全部通过后才原子写入 v2、有限执行额度与因果 watch。canary promotion/rollback 只接受原始 Goal source 后、completed turn 前恰好一次成功 `skill_run`，且 tool result 必须是引用准确 call sequence 的原始 append。standalone watch 仍只观察，不获得变更版本的权限。模型可见 candidate/canary/status 均使用白名单投影，不返回 owner route、Session/native Goal、原始 failure evidence、receipt、run IDs 或 observations。
+
+工程验证使用真实 CLI 与固定 digest Docker image 跑通 qualification→canary→新鲜 achieved→promotion→重启→后续 not-achieved→exact rollback→幂等旧请求不复活：Skills 17 files / 211 tests、Goals 20 files / 203 tests、零模型 E2E guard 9 tests 均通过。独立审计发现并促成 source-window 和公共返回脱敏加固；最终 Goals 与 Skills 安全复核均为 PASS（0 blocker / 0 high / 0 medium），exact admission 与 qualified rollback authority 未发现阻塞项。
+
+旧真实 TraeX 场景已走到 promotion，但 negative prompt 与 guard 使用了不同输入，调用在 Skills 入口前被正确拒绝，因此没有 causal SkillRun，后续 Goal `not-achieved` 也没有触发 rollback；该次失败不算通过。现已让 prompt、guard 和 exact-run assertion 共用 `task.negativeInputs` 并增加零模型语义回归。由于当前 ACP provider 每次 DSH model call 都新建 TraeX Session 并重复发送完整上下文/工具 schema，本机 Trae 状态数据库估算一次六 Session 整链约消耗 80–98 万 token；运行日志自身的 ACP usage 为 null，不能单独复算该值。在没有低调用复验方案前不再盲目重跑。当前最终源码没有真实模型 `proof.json`，只声称工程机制验证通过，不声称真实 TraeX template-render 闭环已验收。
+
+本批加强 WP13 的失败轨迹候选、WP14 的第二 generator/精确留出 admission/有限 canary、WP15 的 task-family 因果 promotion/rollback，但仍只覆盖一个受控新任务族，未满足 3–5 类高频技能、更广真实收益与其他 deployment cohort。真实 GitHub、生产签名发布和完整安装生命周期也不由本批证明。结构化结果、失败产物哈希和源码冻结摘要见[本批证据](evidence/template-render-failure-canary-2026-09-10.json)。本批未改变任何工作包状态；完整 18 项仍为 **3 已验证 / 13 实现中 / 2 待做**。

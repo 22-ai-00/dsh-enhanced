@@ -84,6 +84,63 @@ export interface OwnerGoalExecutionSnapshotInput {
   goalId: string
 }
 
+/** Exact Host route and durable run selected for a raw native trace read. */
+export interface OwnerGoalRunProofInput extends OwnerGoalExecutionSnapshotInput {
+  runId: string
+}
+
+/** Integrity-bound native call trace. Trust comes from the current Host-only service capability, not this public digest. */
+export interface OwnerGoalRunProof {
+  protocol: 'assistant-goals/owner-run-trace/v1'
+  runId: string
+  turn: number
+  nativeRevision: number
+  definitionDigest: string
+  outcomeProfile: { id: string; version: number; digest: string }
+  steps: readonly { id: string; name: string; arguments: unknown; outcome: 'succeeded' | 'failed' }[]
+  traceDigest: string
+}
+
+export interface OwnerFailureCaptureSummaryInput {
+  ownerRouteId: string
+  principalId: string
+  workspace: string
+  preset: string
+  taskFamilyId: string
+  repair: { sessionId: string; goalId: string }
+  failures: readonly { sessionId: string; goalId: string }[]
+  minimumOccurrences: number
+}
+
+export interface FailureCaptureGoalIdentity {
+  id: string
+  definition: { version: number; digest: string; objective: string }
+  sessionId: string
+  nativeGoalId: string
+}
+
+export interface HostFailureEvidenceObservation {
+  goal: FailureCaptureGoalIdentity
+  runId: string
+  execution: { status: 'succeeded'; quiescent: true }
+  outcome: 'not-achieved'
+  acceptance: { contractId: string; contractDigest: string; receiptDigest: string; verifiedAt: number; validUntil: number }
+  traceDigest: string
+}
+
+/** Public digest is only an integrity link; provenance requires the current Host-only Goals capability. */
+export interface HostFailureEvidenceSummary {
+  protocol: 'assistant-skills/host-failure-evidence/v1'
+  scope: GoalScope
+  taskFamily: { id: string; definitionDigest: string; objective: string }
+  failureCategory: 'objective-not-achieved' | 'repeated-not-achieved'
+  triggerCondition: { kind: 'not-achieved-count'; minimumOccurrences: number; windowStartedAt: number; windowEndedAt: number }
+  failures: readonly HostFailureEvidenceObservation[]
+  repairGoal: FailureCaptureGoalIdentity
+  attestedAt: number
+  evidence: { producer: 'assistant-goals'; generation: string; digest: string }
+}
+
 /** Owner-authorized lifecycle change for the currently bound native goal. */
 export interface GoalControlInput {
   goalId: string

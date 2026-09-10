@@ -1,9 +1,9 @@
 import { spawn } from 'node:child_process'
 import { createPublicKey } from 'node:crypto'
-import { isAbsolute, relative } from 'node:path'
+import { isAbsolute } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import type { GoalScope } from '@dsh-enhanced/assistant-goals'
-import { validateHoldoutExecution, type HoldoutExecutionConfig, type HoldoutQualificationInput } from './holdout-qualification.js'
+import { holdoutPathsOverlap, validateCanaryAdmission, validateHoldoutExecution, type CanaryAdmission, type HoldoutExecutionConfig, type HoldoutQualificationInput } from './holdout-qualification.js'
 
 /** Public Host configuration. The authority owns its private dataset/key/state elsewhere. */
 export interface ExternalHoldoutProfile {
@@ -14,6 +14,8 @@ export interface ExternalHoldoutProfile {
   readonly authority: { readonly executable: string; readonly args: readonly string[]; readonly publicKey: string; readonly datasetDigest?: string; readonly generatorDigest?: string }
   readonly inputs?: Readonly<Record<string, unknown>>
   readonly files?: readonly { path: string; content: string }[]
+  /** Required for canary admission. Legacy prospective profiles remain qualification-only. */
+  readonly canaryAdmission?: CanaryAdmission
   readonly maxComparisons: 1
 }
 
@@ -26,7 +28,6 @@ function exact(value: unknown, required: readonly string[], optional: readonly s
   return plain(value) && required.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => required.includes(key) || optional.includes(key))
 }
 function freeze<T>(value: T): T { if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value) } return value }
-function overlaps(a: string, b: string): boolean { const child = relative(a, b); return !child || !child.startsWith('..') && !isAbsolute(child) }
 function validateAuthority(authority: ExternalHoldoutProfile['authority']): void {
   if (!exact(authority, ['executable', 'args', 'publicKey'], ['datasetDigest', 'generatorDigest']) || typeof authority.executable !== 'string' || !isAbsolute(authority.executable) || authority.executable.includes('\0')
     || !Array.isArray(authority.args) || authority.args.length > 64 || authority.args.some(arg => typeof arg !== 'string' || arg.includes('\0')) || Buffer.byteLength(JSON.stringify(authority.args)) > 16384
@@ -40,15 +41,16 @@ export function validateExternalHoldoutProfiles(values: readonly ExternalHoldout
   if (!Array.isArray(values) || values.length > 16) reject()
   const ids = new Set<string>(), commands = new Set<string>(), roots: string[] = []
   for (const value of values) {
-    if (!exact(value, ['id', 'version', 'scope', 'execution', 'authority', 'maxComparisons'], ['inputs', 'files']) || typeof value.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/u.test(value.id) || ids.has(value.id)
+    if (!exact(value, ['id', 'version', 'scope', 'execution', 'authority', 'maxComparisons'], ['inputs', 'files', 'canaryAdmission']) || typeof value.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/u.test(value.id) || ids.has(value.id)
       || !Number.isSafeInteger(value.version) || value.version < 1 || value.maxComparisons !== 1
       || !exact(value.scope, ['principalId', 'principalRecordId', 'principalVersion', 'workspace', 'preset']) || ['principalId', 'principalRecordId', 'workspace', 'preset'].some(key => typeof value.scope[key as keyof GoalScope] !== 'string' || !value.scope[key as keyof GoalScope])
       || !Number.isSafeInteger(value.scope.principalVersion) || value.scope.principalVersion < 1 || !isAbsolute(value.scope.workspace)) reject()
     validateAuthority(value.authority); validateHoldoutExecution(value.execution)
-    if (overlaps(value.scope.workspace, value.execution.stateRoot) || overlaps(value.execution.stateRoot, value.scope.workspace)
-      || roots.some(root => overlaps(root, value.execution.stateRoot) || overlaps(value.execution.stateRoot, root))) reject()
+    if (holdoutPathsOverlap(value.scope.workspace, value.execution.stateRoot) || roots.some(root => holdoutPathsOverlap(root, value.execution.stateRoot))) reject()
     const command = JSON.stringify([value.authority.executable, value.authority.args])
-    if (commands.has(command) || value.inputs !== undefined && !plain(value.inputs) || value.files !== undefined && (!Array.isArray(value.files) || value.files.length > 32 || value.files.some((file: { path: unknown; content: unknown }) => !exact(file, ['path', 'content']) || typeof file.path !== 'string' || typeof file.content !== 'string'))) reject()
+    if (commands.has(command) || value.inputs !== undefined && !plain(value.inputs) || value.files !== undefined && (!Array.isArray(value.files) || value.files.length > 32 || value.files.some((file: { path: unknown; content: unknown }) => !exact(file, ['path', 'content']) || typeof file.path !== 'string' || typeof file.content !== 'string'))
+      || value.canaryAdmission !== undefined && value.authority.generatorDigest === undefined) reject()
+    if (value.canaryAdmission !== undefined) { try { validateCanaryAdmission(value.canaryAdmission) } catch { reject() } }
     if (Buffer.byteLength(JSON.stringify({ inputs: value.inputs, files: value.files })) > value.execution.maxBytes) reject()
     ids.add(value.id); commands.add(command); roots.push(value.execution.stateRoot)
   }

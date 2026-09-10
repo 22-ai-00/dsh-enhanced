@@ -11,7 +11,7 @@ import { acceptanceCanonicalJson, acceptanceDigest, validateTaskAcceptanceContra
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { GoalStore } from './store.js'
-import type { GoalCheckpoint, GoalControlInput, GoalExecutionRun, GoalRecord, GoalScope, GoalTaskContext, NativeGoalState, OwnerGoalExecutionSnapshotInput } from './types.js'
+import type { FailureCaptureGoalIdentity, GoalCheckpoint, GoalControlInput, GoalExecutionRun, GoalRecord, GoalScope, GoalTaskContext, HostFailureEvidenceObservation, HostFailureEvidenceSummary, NativeGoalState, OwnerFailureCaptureSummaryInput, OwnerGoalExecutionSnapshotInput, OwnerGoalRunProof, OwnerGoalRunProofInput } from './types.js'
 import { registerGoalTools } from './tools.js'
 import { GoalExecutionRuntime } from './execution.js'
 import { buildGoalFeedback, type GoalFeedback } from './feedback.js'
@@ -29,7 +29,7 @@ import { GoalOutcomeRuntime, type GoalOutcomeView } from './outcome.js'
 import type { GoalOutcomeAssessment } from './outcome-store.js'
 import { GoalStrategyRuntime, validateGoalStrategyConfig, validateGoalStrategyInput, type GoalStrategyConfig } from './strategy.js'
 import { buildGoalStrategyHistory, type GoalStrategyHistory } from './strategy-feedback.js'
-import { OwnerVerifiedWorkflowSourceError, verifiedWorkflowSource, verifiedWorkflowSourceChain, type VerifiedWorkflowSource } from './verified-workflow.js'
+import { failureSummaryEvidenceDigest, OwnerVerifiedWorkflowSourceError, ownerGoalRunProof, verifiedWorkflowSource, verifiedWorkflowSourceChain, type VerifiedWorkflowSource } from './verified-workflow.js'
 import { buildOwnerAcceptedStepArtifacts, buildOwnerVerifiedArtifacts, validateOwnerVerifiedArtifactsInput, type OwnerVerifiedArtifactsInput } from './verified-artifact.js'
 
 export interface Config { eventWaits?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
@@ -106,6 +106,34 @@ function ownerSnapshotInput(value: unknown): value is OwnerGoalExecutionSnapshot
   if (names.length !== 6 || !['ownerRouteId', 'principalId', 'workspace', 'preset', 'sessionId', 'goalId'].every(key => names.includes(key))) return false
   const descriptors = Object.getOwnPropertyDescriptors(input)
   return Object.values(descriptors).every(descriptor => descriptor.enumerable && 'value' in descriptor && typeof descriptor.value === 'string' && descriptor.value.length > 0 && descriptor.value.length <= 4_096)
+}
+function ownerRunProofInput(value: unknown): value is OwnerGoalRunProofInput {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
+  const input = value as Record<string, unknown>; const names = Object.getOwnPropertyNames(input)
+  if (names.length !== 7 || !['ownerRouteId', 'principalId', 'workspace', 'preset', 'sessionId', 'goalId', 'runId'].every(key => names.includes(key))) return false
+  const descriptors = Object.getOwnPropertyDescriptors(input)
+  return Object.values(descriptors).every(descriptor => descriptor.enumerable && 'value' in descriptor && typeof descriptor.value === 'string' && descriptor.value.length > 0 && descriptor.value.length <= 4_096)
+}
+function ownerFailureSummaryInput(value: unknown): value is OwnerFailureCaptureSummaryInput {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
+  const input = value as Record<string, unknown>, keys = Object.keys(input), descriptors = Object.getOwnPropertyDescriptors(input)
+  if (keys.length !== 8 || !['ownerRouteId', 'principalId', 'workspace', 'preset', 'taskFamilyId', 'repair', 'failures', 'minimumOccurrences'].every(key => keys.includes(key))) return false
+  if (!Object.values(descriptors).every(descriptor => descriptor.enumerable && 'value' in descriptor)) return false
+  const field = (key: string): unknown => descriptors[key]?.value
+  const bounded = (item: unknown): item is string => typeof item === 'string' && item.length > 0 && item.length <= 4_096
+  if (![field('ownerRouteId'), field('principalId'), field('workspace'), field('preset')].every(bounded)
+    || typeof field('taskFamilyId') !== 'string' || !/^[a-z](?:[a-z0-9-]{0,62}[a-z0-9])?$/u.test(field('taskFamilyId') as string)
+    || !Number.isSafeInteger(field('minimumOccurrences')) || (field('minimumOccurrences') as number) < 1 || (field('minimumOccurrences') as number) > 32
+    || !Array.isArray(field('failures')) || (field('failures') as unknown[]).length < 1 || (field('failures') as unknown[]).length > 32
+    || (field('failures') as unknown[]).length < (field('minimumOccurrences') as number)) return false
+  const locator = (item: unknown): item is { sessionId: string; goalId: string } => item !== null && typeof item === 'object' && !Array.isArray(item)
+    && Object.getPrototypeOf(item) === Object.prototype && Object.getOwnPropertySymbols(item).length === 0
+    && Object.keys(item).length === 2 && Object.hasOwn(item, 'sessionId') && Object.hasOwn(item, 'goalId')
+    && Object.values(Object.getOwnPropertyDescriptors(item)).every(descriptor => descriptor.enumerable && 'value' in descriptor && bounded(descriptor.value))
+  const failures = field('failures') as unknown[]
+  return Reflect.ownKeys(failures).length === failures.length + 1 && locator(field('repair'))
+    && Object.values(Object.getOwnPropertyDescriptors(failures)).every((descriptor, index) => index === failures.length || descriptor.enumerable && 'value' in descriptor)
+    && failures.every(locator)
 }
 
 export class AssistantGoalsService extends Service {
@@ -866,6 +894,165 @@ export class AssistantGoalsService extends Service {
 
   /** Host-only accepted step artifact handoff for explicitly authorized intermediate delivery. */
   inspectOwnerAcceptedStepArtifacts = (value: OwnerVerifiedArtifactsInput) => this.#inspectOwnerArtifacts(value, buildOwnerAcceptedStepArtifacts)
+
+  /**
+   * Host-only exact native run trace.  The digest provides integrity and
+   * correlation only; callers trust this value because it came directly from
+   * the current Goals service capability.
+   */
+  inspectOwnerGoalRunProof = async (value: OwnerGoalRunProofInput, signal?: AbortSignal): Promise<OwnerGoalRunProof> => {
+    if (!this.#active || !ownerRunProofInput(value)) throw new Error('assistant-goals: invalid owner run proof input')
+    const input = detached(value), query = this.ctx.get('sessionQuery' as never, false) as SessionQueryEngine | undefined
+    if (query === undefined || typeof query.observeSession !== 'function') throw new Error('assistant-goals: owner run proof is unavailable')
+    const ownerInput: OwnerGoalExecutionSnapshotInput = { ownerRouteId: input.ownerRouteId, principalId: input.principalId,
+      workspace: input.workspace, preset: input.preset, sessionId: input.sessionId, goalId: input.goalId }
+    const deadline = new AbortController(), timer = setTimeout(() => deadline.abort(new Error('owner run proof deadline exceeded')), 10_000)
+    const combined = signal === undefined ? deadline.signal : AbortSignal.any([signal, deadline.signal])
+    let firstObservation: SessionObservation | undefined, secondObservation: SessionObservation | undefined
+    try {
+      combined.throwIfAborted()
+      const first = this.inspectOwnerGoalExecution(ownerInput)
+      const selected = this.#ownerRunProofEvidence(first, input.runId)
+      firstObservation = await query.observeSession(SessionId(input.sessionId), { signal: combined, projectionMode: 'none' })
+      this.#assertOwnerRootObservation(firstObservation, input)
+      const proof = ownerGoalRunProof(selected.stored.scope, { id: selected.stored.id, scope: selected.stored.scope,
+        definition: selected.stored.definition, native: selected.stored.nativeAtLastObservation }, selected.run, selected.outcome.contract.profile, firstObservation.events)
+      combined.throwIfAborted()
+      secondObservation = await query.observeSession(SessionId(input.sessionId), { signal: combined, projectionMode: 'none' })
+      this.#assertOwnerRootObservation(secondObservation, input)
+      const current = this.inspectOwnerGoalExecution(ownerInput), currentSelected = this.#ownerRunProofEvidence(current, input.runId)
+      if (!same(first.ownerRoute, current.ownerRoute) || !same(selected.stored, currentSelected.stored)
+        || !same(selected.run, currentSelected.run) || !same(selected.stepAccepted, currentSelected.stepAccepted)
+        || !same(selected.assessment, currentSelected.assessment) || !same(selected.outcomeAccepted, currentSelected.outcomeAccepted)
+        || !same(firstObservation.header, secondObservation.header) || firstObservation.cursor !== secondObservation.cursor
+        || firstObservation.revision !== secondObservation.revision || !same(firstObservation.events, secondObservation.events)) {
+        throw new Error('assistant-goals: owner run proof changed during evidence read')
+      }
+      return proof
+    } catch (error) {
+      if (combined.aborted) throw new Error('assistant-goals: owner run proof observation was interrupted', { cause: error })
+      throw error
+    } finally {
+      clearTimeout(timer)
+      secondObservation?.[Symbol.dispose]()
+      firstObservation?.[Symbol.dispose]()
+    }
+  }
+
+  /**
+   * Host-only not-achieved evidence for one exact failed Goal and a distinct
+   * repair Goal. The public digest detects drift but does not authenticate a
+   * caller-supplied value; source trust is this current service capability.
+   */
+  inspectOwnerFailureCaptureSummary = async (value: OwnerFailureCaptureSummaryInput, signal?: AbortSignal): Promise<HostFailureEvidenceSummary> => {
+    if (!this.#active || !ownerFailureSummaryInput(value)) throw new Error('assistant-goals: invalid owner failure summary input')
+    const input = detached(value)
+    // The first slice intentionally admits one independently assessed failure.
+    if (input.minimumOccurrences !== 1 || input.failures.length !== 1) throw new Error('assistant-goals: unsupported failure summary window')
+    const failureLocator = input.failures[0]!
+    if (failureLocator.goalId === input.repair.goalId || failureLocator.sessionId === input.repair.sessionId) {
+      throw new Error('assistant-goals: failure repair Goal is not independent')
+    }
+    const owner = (locator: { sessionId: string; goalId: string }): OwnerGoalExecutionSnapshotInput => ({ ownerRouteId: input.ownerRouteId,
+      principalId: input.principalId, workspace: input.workspace, preset: input.preset, sessionId: locator.sessionId, goalId: locator.goalId })
+    signal?.throwIfAborted()
+    const firstFailure = this.inspectOwnerGoalExecution(owner(failureLocator)), failure = this.#ownerFailureEvidence(firstFailure)
+    const firstRepair = this.inspectOwnerGoalExecution(owner(input.repair)), repairGoal = this.#failureGoalIdentity(firstRepair)
+    if (!same(failure.scope, firstRepair.storedGoal.scope) || !same(failure.goal.definition, repairGoal.definition) || failure.goal.id === repairGoal.id
+      || failure.goal.sessionId === repairGoal.sessionId || failure.goal.nativeGoalId === repairGoal.nativeGoalId) {
+      throw new Error('assistant-goals: failure repair Goal is not independent')
+    }
+    const proof = await this.inspectOwnerGoalRunProof({ ...owner(failureLocator), runId: failure.runId }, signal)
+    if (proof.definitionDigest !== failure.goal.definition.digest || !same(proof.outcomeProfile, failure.outcomeProfile)) {
+      throw new Error('assistant-goals: failure run proof does not bind the outcome')
+    }
+    signal?.throwIfAborted()
+    const currentFailure = this.inspectOwnerGoalExecution(owner(failureLocator)), current = this.#ownerFailureEvidence(currentFailure)
+    const currentRepair = this.inspectOwnerGoalExecution(owner(input.repair)), currentRepairGoal = this.#failureGoalIdentity(currentRepair)
+    if (!same(firstFailure.ownerRoute, currentFailure.ownerRoute) || !same(firstFailure.ownerRoute, firstRepair.ownerRoute)
+      || !same(firstFailure.ownerRoute, currentRepair.ownerRoute) || !same(failure.stable, current.stable)
+      || !same(firstRepair.storedGoal, currentRepair.storedGoal) || !same(repairGoal, currentRepairGoal)) {
+      throw new Error('assistant-goals: owner failure evidence changed during read')
+    }
+    const attestedAt = Date.now()
+    if (failure.observation.acceptance.validUntil <= attestedAt) throw new Error('assistant-goals: failure outcome evidence expired')
+    const unsigned = { protocol: 'assistant-skills/host-failure-evidence/v1' as const, scope: failure.scope,
+      taskFamily: { id: input.taskFamilyId, definitionDigest: failure.goal.definition.digest, objective: failure.goal.definition.objective },
+      failureCategory: 'objective-not-achieved' as const, triggerCondition: { kind: 'not-achieved-count' as const, minimumOccurrences: 1,
+        windowStartedAt: failure.observation.acceptance.verifiedAt, windowEndedAt: failure.observation.acceptance.verifiedAt },
+      failures: Object.freeze([{ ...failure.observation, traceDigest: proof.traceDigest }]), repairGoal, attestedAt }
+    const generation = String(this.trustedAcceptanceProducerGeneration())
+    return detached({ ...unsigned, evidence: { producer: 'assistant-goals' as const, generation,
+      digest: failureSummaryEvidenceDigest(unsigned, generation) } })
+  }
+
+  #assertOwnerRootObservation(observation: SessionObservation, input: Pick<OwnerGoalRunProofInput, 'sessionId' | 'workspace' | 'preset'>): void {
+    const header = observation.header
+    if (String(header.id) !== input.sessionId || header.cwd !== input.workspace || header.agentPreset !== input.preset
+      || header.origin === 'subagent' || header.parentSession !== undefined || (header.delegationDepth ?? 0) !== 0) {
+      throw new Error('assistant-goals: run session identity is not an exact owner root')
+    }
+  }
+
+  #ownerRunProofEvidence(snapshot: ReturnType<AssistantGoalsService['inspectOwnerGoalExecution']>, runId: string) {
+    const stored = snapshot.storedGoal
+    const run = snapshot.executionRuns.find(item => item.intent.runId === runId)
+    if (run?.execution?.status !== 'succeeded' || run.execution.quiescent !== true || run.acceptance === undefined
+      || run.intent.task.goal.id !== stored.id || run.intent.task.goal.definitionVersion !== stored.definition.version
+      || run.intent.task.goal.definitionDigest !== stored.definition.digest || run.intent.task.goal.sessionId !== stored.nativeAtLastObservation.sessionId
+      || run.intent.task.goal.nativeGoalId !== stored.nativeAtLastObservation.goalId) throw new Error('assistant-goals: exact settled successful run is unavailable')
+    const stepAccepted = snapshot.acceptedTasks.find(item => item.contractId === run.acceptance!.contractId)
+    if (stepAccepted?.state !== 'done' || stepAccepted.contract === null || stepAccepted.receipt === null
+      || stepAccepted.contract.digest !== run.acceptance.contractDigest || stepAccepted.contract.task.kind !== 'goal-step'
+      || !same(stepAccepted.contract.task, run.intent.task) || stepAccepted.verifierExecutionObservation === null
+      || !same(stepAccepted.verifierExecutionObservation, { ...run.execution, executionRef: runId })) {
+      throw new Error('assistant-goals: exact accepted run is unavailable')
+    }
+    const assessment = snapshot.outcomeAssessments.find(item => item.triggerRunId === runId)
+    if (assessment?.execution?.status !== 'succeeded' || assessment.execution.quiescent !== true || assessment.contract.task.kind !== 'goal-outcome'
+      || assessment.contract.task.goal.id !== stored.id || assessment.contract.task.goal.definitionVersion !== stored.definition.version
+      || assessment.contract.task.goal.definitionDigest !== stored.definition.digest || assessment.contract.task.goal.sessionId !== stored.nativeAtLastObservation.sessionId
+      || assessment.contract.task.goal.nativeGoalId !== stored.nativeAtLastObservation.goalId) throw new Error('assistant-goals: exact settled goal outcome is unavailable')
+    const outcomeAccepted = snapshot.acceptedTasks.find(item => item.contractId === assessment.contract.id)
+    if (outcomeAccepted?.state !== 'done' || outcomeAccepted.contract === null || outcomeAccepted.receipt === null
+      || !same(outcomeAccepted.contract, assessment.contract) || outcomeAccepted.receipt.objectiveStatus === 'unknown'
+      || outcomeAccepted.receipt.validUntil <= Date.now() || outcomeAccepted.receipt.completedAt > Date.now()
+      || !same(outcomeAccepted.verifierExecutionObservation, { ...assessment.execution, executionRef: assessment.contract.task.ref })) {
+      throw new Error('assistant-goals: exact accepted goal outcome is unavailable')
+    }
+    return { stored, run, stepAccepted, assessment, outcome: outcomeAccepted, outcomeAccepted }
+  }
+
+  #failureGoalIdentity(snapshot: ReturnType<AssistantGoalsService['inspectOwnerGoalExecution']>): FailureCaptureGoalIdentity {
+    const stored = snapshot.storedGoal
+    if (stored.definition.digest !== acceptanceDigest({ objective: stored.definition.objective })) throw new Error('assistant-goals: exact repair Goal identity is unavailable')
+    return detached({ id: stored.id, definition: stored.definition, sessionId: stored.nativeAtLastObservation.sessionId, nativeGoalId: stored.nativeAtLastObservation.goalId })
+  }
+
+  #ownerFailureEvidence(snapshot: ReturnType<AssistantGoalsService['inspectOwnerGoalExecution']>) {
+    const goal = this.#failureGoalIdentity(snapshot), matches = snapshot.outcomeAssessments.flatMap(assessment => {
+      if (assessment.execution?.status !== 'succeeded' || assessment.execution.quiescent !== true || typeof assessment.triggerRunId !== 'string') return []
+      const accepted = snapshot.acceptedTasks.find(item => item.contractId === assessment.contract.id)
+      if (accepted?.state !== 'done' || accepted.contract === null || accepted.receipt === null
+        || accepted.receipt.objectiveStatus !== 'not-achieved' || accepted.receipt.validUntil <= Date.now() || accepted.receipt.completedAt > Date.now()
+        || !same(accepted.contract, assessment.contract) || !same(accepted.verifierExecutionObservation, { ...assessment.execution, executionRef: assessment.contract.task.ref })) return []
+      const run = snapshot.executionRuns.find(item => item.intent.runId === assessment.triggerRunId)
+      if (run?.execution?.status !== 'succeeded' || run.execution.quiescent !== true || assessment.contract.task.kind !== 'goal-outcome'
+        || assessment.contract.task.goal.id !== goal.id || assessment.contract.task.goal.definitionVersion !== goal.definition.version
+        || assessment.contract.task.goal.definitionDigest !== goal.definition.digest || assessment.contract.task.goal.sessionId !== goal.sessionId
+        || assessment.contract.task.goal.nativeGoalId !== goal.nativeGoalId || run.intent.task.goal.id !== goal.id
+        || run.intent.task.goal.definitionVersion !== goal.definition.version || run.intent.task.goal.definitionDigest !== goal.definition.digest
+        || run.intent.task.goal.sessionId !== goal.sessionId || run.intent.task.goal.nativeGoalId !== goal.nativeGoalId) return []
+      const receipt = accepted.receipt
+      const observation: HostFailureEvidenceObservation = { goal, runId: run.intent.runId, execution: { status: 'succeeded', quiescent: true },
+        outcome: 'not-achieved', acceptance: { contractId: assessment.contract.id, contractDigest: assessment.contract.digest,
+          receiptDigest: receipt.digest, verifiedAt: receipt.completedAt, validUntil: receipt.validUntil }, traceDigest: '' }
+      return [{ scope: snapshot.storedGoal.scope, goal, runId: run.intent.runId, run, assessment, accepted, observation,
+        outcomeProfile: assessment.contract.profile, stable: { storedGoal: snapshot.storedGoal, run, assessment, accepted } }]
+    })
+    if (matches.length !== 1) throw new Error('assistant-goals: exact not-achieved goal outcome is unavailable')
+    return matches[0]!
+  }
 
   #ownerAcceptedTask(record: GoalRecord, runs: readonly GoalExecutionRun[], verifier: { inspectAcceptedTask(id: string): unknown } | undefined, contractId: string, outcomeAssessments: readonly GoalOutcomeAssessment[]) {
     const unavailable = { contractId, state: 'unavailable' as const, attempts: 0, reason: null, contract: null, receipt: null, verifierExecutionObservation: null }

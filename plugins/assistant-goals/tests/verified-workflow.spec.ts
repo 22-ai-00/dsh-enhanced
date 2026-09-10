@@ -8,7 +8,7 @@ function chainFixture(earlyCall = false) {
   const run = (round: number, turn: number) => { const runId = verifiedRunId(scope, 'goal-a', 'session-a', turn); return { intent: { runId, scope, objective: 'objective', admission: { issuedAt: now, expiresAt: now + 10_000, maxGoalRounds: 2, round, authorizationDigest: 'auth' }, task: { kind: 'goal-step', ref: `step-${round}`, goal: { id: 'goal-a', definitionVersion: 1, definitionDigest: 'digest', stepId: `step-${round}`, runId, sessionId: 'session-a', nativeGoalId: 'native-a', nativeRevision: 1 } } }, execution: { status: 'succeeded', quiescent: true, completedAt: now } } as any }
   const first = run(1, 3); const final = run(2, 5)
   const call = (id: string, turn: number, seq: number) => ({ seq, type: 'tool/call', data: { turn, callId: id, name: 'read', arguments: JSON.stringify({ file_path: `${turn}.md` }) } })
-  const result = (id: string, turn: number, seq: number) => ({ seq, type: 'tool/result', data: { turn, message: { source: { callId: id }, content: [{ type: 'tool-result', toolCallId: id, content: [] }] } } })
+  const result = (id: string, turn: number, seq: number) => ({ seq, type: 'tool/result', surfaceOp: 'append', sourceEventSeqs: [seq - 1], data: { turn, message: { source: { callId: id }, content: [{ type: 'tool-result', toolCallId: id, content: [] }] } } })
   const events: any[] = [{ seq: 0, type: 'turn/start', data: { turn: 3 } }, { seq: 1, type: 'user/message', data: { source: { kind: 'goal', goalId: 'native-a', revision: 1, round: 1 } } }]
   if (earlyCall) events.push(call('shared', 3, 2), result('shared', 3, 3))
   events.push({ seq: earlyCall ? 4 : 2, type: 'turn/end', data: { turn: 3, reason: { kind: 'completed' } } }, { seq: earlyCall ? 5 : 3, type: 'turn/start', data: { turn: 5 } }, { seq: earlyCall ? 6 : 4, type: 'user/message', data: { source: { kind: 'goal', goalId: 'native-a', revision: 1, round: 2 } } }, call(earlyCall ? 'shared' : 'final', 5, earlyCall ? 7 : 5), result(earlyCall ? 'shared' : 'final', 5, earlyCall ? 8 : 6), { seq: earlyCall ? 9 : 7, type: 'turn/end', data: { turn: 5, reason: { kind: 'completed' } } })
@@ -54,7 +54,7 @@ test('retains only an explicit failed native read probe as a failed observation'
 test('exports a failed read probe separately from confirmed successful workflow steps', () => {
   const runId = verifiedRunId(scope, 'goal-a', 'session-a', 3); const now = Date.now()
   const call = (id: string, name: string, arguments_: unknown, seq: number) => ({ seq, type: 'tool/call', data: { turn: 3, callId: id, name, arguments: JSON.stringify(arguments_) } })
-  const result = (id: string, failed: boolean, seq: number) => ({ seq, type: 'tool/result', data: { turn: 3, message: { ...(failed ? { isError: true } : {}), source: { callId: id }, content: [{ type: 'tool-result', toolCallId: id, ...(failed ? { isError: true } : {}), content: [] }] } } })
+  const result = (id: string, failed: boolean, seq: number) => ({ seq, type: 'tool/result', surfaceOp: 'append', sourceEventSeqs: [seq - 1], data: { turn: 3, message: { ...(failed ? { isError: true } : {}), source: { callId: id }, content: [{ type: 'tool-result', toolCallId: id, ...(failed ? { isError: true } : {}), content: [] }] } } })
   const source = verifiedWorkflowSource({ scope, record: { id: 'goal-a', scope, originalObjective: 'objective', definition: { version: 1, digest: 'digest', objective: 'objective' },
     native: { sessionId: 'session-a', goalId: 'native-a', revision: 1, objective: 'objective', phase: 'complete', roundsStarted: 1, maxGoalRounds: 1, updatedAt: now },
     checkpoint: { nextStep: '', blockers: [], assumptions: [], evidenceRefs: [], dependencies: [] }, version: 1, createdAt: now, updatedAt: now },
@@ -88,6 +88,30 @@ test('rejects duplicate or contradictory results even for a read observation', (
 test('chains a completed empty early round without treating it as a replayable step', () => {
   const source = verifiedWorkflowSourceChain(chainFixture())
   expect(source.segments).toMatchObject([{ round: 1, steps: [] }, { round: 2, steps: [{ id: 'final' }] }])
+})
+
+test.each(['before-source', 'after-end'] as const)('excludes a settled call %s from workflow segments', position => {
+  const input = chainFixture(), events = input.events as any[]
+  const call = { type: 'tool/call', data: { turn: 5, callId: `outside-${position}`, name: 'write', arguments: '{}' } }
+  const result = { type: 'tool/result', surfaceOp: 'append', data: { turn: 5, message: { source: { callId: `outside-${position}` },
+    content: [{ type: 'tool-result', toolCallId: `outside-${position}` }] } } }
+  if (position === 'before-source') {
+    for (const event of events.slice(4)) {
+      event.seq += 2
+      if (Array.isArray(event.sourceEventSeqs)) event.sourceEventSeqs = event.sourceEventSeqs.map((seq: number) => seq + 2)
+    }
+    events.splice(4, 0, { ...call, seq: 4 }, { ...result, seq: 5, sourceEventSeqs: [4] })
+  } else {
+    events.push({ ...call, seq: 8 }, { ...result, seq: 9, sourceEventSeqs: [8] })
+  }
+  expect(verifiedWorkflowSourceChain(input).segments).toMatchObject([{ round: 1, steps: [] }, { round: 2, steps: [{ id: 'final' }] }])
+})
+
+test.each(['wrong-source', 'replacement'] as const)('rejects a workflow result with invalid append provenance: %s', kind => {
+  const input = chainFixture(), result = (input.events as any[]).find(event => event.type === 'tool/result' && event.data.turn === 5)
+  if (kind === 'wrong-source') result.sourceEventSeqs = [4]
+  else result.surfaceOp = { op: 'replace', start: result.seq, end: result.seq }
+  expect(() => verifiedWorkflowSourceChain(input)).toThrow(/unconfirmed/u)
 })
 
 test.each(['missing-round', 'unknown-middle', 'duplicate-call', 'max-round-drift'] as const)('rejects an invalid multi-round workflow chain: %s', kind => {

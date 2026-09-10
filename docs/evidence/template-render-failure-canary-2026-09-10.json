@@ -1,0 +1,119 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-10",
+  "recordedAt": "2026-09-10T04:53:50Z",
+  "baseCommit": "8bcb46e07c44e26a41ad9358e2792e8ddc2d7533",
+  "workingTreeState": "dirty-selected-critical-files-recorded-by-sha256",
+  "status": "engineering-validated-real-traex-reverification-pending",
+  "completeWorkPackage": false,
+  "scope": "template-render/v1 failure-evidence candidate, prospective qualification, exact canary promotion and causal rollback",
+  "workPackages": {
+    "strengthened": ["13", "14", "15"],
+    "statusChanged": false,
+    "totals": { "verified": 3, "implementing": 13, "pending": 2 }
+  },
+  "implemented": [
+    "Current Goals Host capabilities derive failure evidence and exact owner-run proofs from stable owner, route, Goal, receipt and raw Session-event snapshots.",
+    "Workflow and canary traces accept only calls strictly after the exact Goal source and before the completed turn end, with original append results that cite exactly the matching call sequence.",
+    "Failure candidates bind the independently not-achieved trigger, later independently achieved repair, parent, permission delta and rollback target without accepting caller-supplied evidence.",
+    "template-render/v1 freezes a CSPRNG prospective dataset only after scope, baseline, candidate, budget and exact canary admission are bound.",
+    "The admission binds parent and candidate definition digests plus the Goal definition and independent outcome profile used by later canary observations.",
+    "Only one exact successful skill_run in the raw Goal trace may supply promotion or rollback evidence; standalone watches remain observation-only.",
+    "Candidate, watch, deployment and canary mutation responses expose explicit public projections rather than owner routes, raw provenance, Session identifiers, receipts, observations or run IDs.",
+    "The zero-model negative control is executable, intentionally fails at least one strict one-pass template case, passes at least one control case and is single-sourced by the prompt, guard and exact-run assertion."
+  ],
+  "engineeringValidation": {
+    "assistantGoals": {
+      "command": "VITEST_MAX_WORKERS=1 pnpm --filter @dsh-enhanced/assistant-goals test",
+      "exitCode": 0,
+      "files": 20,
+      "testsPassed": 203,
+      "testsSkipped": 0
+    },
+    "assistantSkills": {
+      "command": "VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm --filter @dsh-enhanced/assistant-skills test",
+      "exitCode": 0,
+      "files": 17,
+      "testsPassed": 211,
+      "testsSkipped": 0,
+      "realDockerConsumer": "real prospective CLI qualification enters canary once and retries without another authority process"
+    },
+    "zeroModelGuard": {
+      "command": "VITEST_MAX_WORKERS=1 pnpm exec vitest run tests/web-owner-real-guard.spec.ts --reporter=verbose",
+      "exitCode": 0,
+      "testsPassed": 9
+    },
+    "packageTypechecks": {
+      "assistantGoals": 0,
+      "assistantSkills": 0
+    },
+    "fullCheck": {
+      "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+      "log": "/tmp/dsh-template-render-final-check-v3.log",
+      "sha256": "0d52b271e286e897e29ddbb8c7b22ffb2f4bde705c616119e6b42d7750ae6927",
+      "exitCode": 0,
+      "rootTestFilesPassed": 30,
+      "rootTestsPassed": 405,
+      "rootTestsSkipped": 1,
+      "dryRunPacks": 33,
+      "result": "manifest, zero-warning lint, workspace typecheck/tests, final build and dry-run packs passed"
+    }
+  },
+  "realModelE2e": {
+    "requiredRoute": { "provider": "traex-agent", "model": "gpt-5.6-terra", "api": "acp" },
+    "result": "not-rerun-after-final-fixes",
+    "exitCode": null,
+    "proof": null,
+    "reason": "The prior full-chain run consumed roughly one million model tokens per attempt according to a local Trae state-database estimate; model.jsonl cannot independently confirm the estimate because its ACP settlements report usage:null. Each DSH model call starts a fresh ACP session with the complete context and tool schemas. After diagnosing and fixing the deterministic negative-input drift, this batch intentionally stopped further full-chain model reruns. No success is inferred without a new proof.json from the exact final source and required route."
+  },
+  "failedAttempts": [
+    {
+      "result": "failed-no-proof",
+      "loggedRoute": { "provider": "traex-agent", "model": "default", "api": "acp" },
+      "modelDispatches": 28,
+      "modelSettlements": 28,
+      "reason": "The run reached a promoted deployment, but its negative skill_run arguments differed from the guard's pinned template-render input. The guard correctly denied the call before a SkillRun was persisted, so the unrelated not-achieved Goal could not authorize rollback. The harness now uses task.negativeInputs as the single source and has a zero-model semantic regression; this failed run is not completion evidence.",
+      "artifacts": {
+        "lastRun": { "path": ".cache/web-owner-real-canary-e2e/.last-run.json", "sha256": "92e0070c242e4f00cac5351f66d68f392b143a09b8cd1ab85c8fe9225ec7648c" },
+        "errorContext": { "path": ".cache/web-owner-real-canary-e2e/web-owner-real-canary-real-2279d--and-rolls-it-back-causally/error-context.md", "sha256": "db252ce8994fdfc37f5eb0425956d0922a38af7b62efa594d7d6bbcea0c90949" },
+        "failureDom": { "path": ".cache/web-owner-real-canary-e2e/web-owner-real-canary-real-2279d--and-rolls-it-back-causally/failure-dom.txt", "sha256": "824f5863e18b6c02cec873a040305ba096c6a67f491226c91a12a2cf1cc1c322" },
+        "modelLog": { "path": ".cache/web-owner-real-canary-e2e/web-owner-real-canary-real-2279d--and-rolls-it-back-causally/model.jsonl", "sha256": "4c15053f86eb1ac336b34a035c8a49eae0940b03e5d96790cde19ac428901c6d" },
+        "transport": { "path": ".cache/web-owner-real-canary-e2e/web-owner-real-canary-real-2279d--and-rolls-it-back-causally/transport.json", "sha256": "5fbb62f063e167f450c59657ccf7ff008cba5345e28711719483d08128f6c34e" }
+      },
+      "privateArtifactsExcluded": ["retained environment path", "temporary profile", "private key", "private generated holdout cases", "authority SQLite"]
+    }
+  ],
+  "independentReview": {
+    "preFixReview": "Found and corrected two source-window causal gaps and one model-visible projection leak; found no blocker in exact canary admission or qualified rollback authority.",
+    "finalReview": "PASS: independent Goals and Skills security reviews found zero blocker, high or medium findings after source-window and complete public-output projection fixes; independent evidence review found no remaining factual inconsistency after final log and count reconciliation."
+  },
+  "limitations": [
+    "This is one controlled template-render task family, not the required three to five real high-frequency workflow classes.",
+    "The real Docker prospective qualification and synthetic fresh-outcome lifecycle passed, but no post-fix full real-TraeX proof exists.",
+    "A passing zero-model guard proves deterministic test input and security policy, not general model reliability or real-task gain.",
+    "This batch does not validate real GitHub, signed production publication, installation upgrade, another deployment type or the complete WP13-WP15 scope.",
+    "Private retained profiles, holdout cases, keys and authority databases are not published."
+  ],
+  "selectedCriticalSourceAndTestSha256": {
+    "plugins/assistant-goals/src/types.ts": "a967f7190e9bf880b27a0ba4f48b426d14794e8a8971aa6f72494f8ba9ff1192",
+    "plugins/assistant-goals/src/verified-workflow.ts": "21377027d76e4934347cd4e55a1dfc21577b3065b6e3b5bcbdcf66566f01168a",
+    "plugins/assistant-goals/src/service.ts": "25173567d33ea5d9b6570ea760eda4c47cbec5315e16ff87a73d1420b996f628",
+    "plugins/assistant-goals/tests/owner-evidence.spec.ts": "d8d25d3895b38c6ef818ee41c7ff62ba843e9b21e2ffdd329e857ec4cff3d365",
+    "plugins/assistant-goals/tests/verified-workflow.spec.ts": "d5de104d028cefd6500b0d97cb28084f85b9dfa1768763397d417c296dd7df58",
+    "plugins/assistant-skills/src/definition.ts": "296b107f8443b9ddf89654be060bc2dbaaf1c48ad79d407b38d710f16e2fd22d",
+    "plugins/assistant-skills/src/capture-expansion.ts": "4f37c7cf41f5aff3fb7445facff54dc69a1cd9f17c2c0ba3422a8e071b320eaa",
+    "plugins/assistant-skills/src/prospective-holdout.ts": "4f3df9b02acf3cb700718a71b34a39dec8ad5a1da68c9e62cabc121a76384710",
+    "plugins/assistant-skills/src/holdout-authority.ts": "3d50ee3848e3401d7370027b287d936cd01e273d531295724c60fb0c8b4aa150",
+    "plugins/assistant-skills/src/holdout-qualification.ts": "670da1b9a3566cf92135d495a5f0b78dd9b37dd087a5eedaf1639d5fec7351f5",
+    "plugins/assistant-skills/src/external-holdout.ts": "3c282e7dda01dc6b821ef3dd61240e90fb1b5f8233a57d9c77d55b3471ecf77a",
+    "plugins/assistant-skills/src/store.ts": "1c909970e243e57e3a2e2a9b3f05d01c81298c56bc1050f256f26ce816ee8046",
+    "plugins/assistant-skills/src/watch-proof.ts": "086a8407060984717ed42b4b57563797254d8855a26d640b1ebfe773c6c09a7d",
+    "plugins/assistant-skills/src/service.ts": "abb6aba0b815fc8fbcfed8fa0c665056e534c0dd1cc60159c3bf23e2edcf7c41",
+    "plugins/assistant-skills/tests/external-holdout-service.spec.ts": "93795a6eea7e3b08e33f0cc200b3f3d0dab4e025b61cc9fd87693bb8b93e3e82",
+    "plugins/assistant-skills/tests/service.spec.ts": "825f75acd77c27a1b809b759f67bf30b84d06b2abbd47125864fc6df15253091",
+    "scripts/e2e/real-canary-helpers.mjs": "2fc9f0877957d2810e353ea334c3629a9906c4ae19acaf5d080787c8bcff3bc3",
+    "scripts/e2e/web-owner-real-canary-guard.mjs": "0fd00bb153ea1ac6220ab3bfb572bee50edbba7152215c5dea0f31d62fead516",
+    "scripts/e2e/web-owner-real-canary.spec.mjs": "247c7b322e0d68edfa0a9541d33f60fa2534276dec15df64b29d73543b1c9da5",
+    "tests/web-owner-real-guard.spec.ts": "1cd8f39525f013ac63a7795e583424a80dce101762023ec595aa16d85fa0fd7d"
+  }
+}

@@ -13,14 +13,14 @@ import { createDefinition } from '../src/definition.ts'
 import { qualifyHoldout } from '../src/holdout-qualification.ts'
 import { openHoldoutProcess } from '../src/external-holdout.ts'
 import { verifyHoldoutSignature, type BeginResult, type HoldoutReceipt, type SignedCell } from '../src/holdout-authority.ts'
-import { generatorDigest, prospectiveGeneratorDigest, verifyProspectiveCertificate } from '../src/prospective-holdout.ts'
+import { generatorDigest, prospectiveGeneratorDigest, verifyProspectiveCertificate, type ProspectiveGeneratorName } from '../src/prospective-holdout.ts'
 
 const exec = promisify(execFile), roots: string[] = [], closes: (() => Promise<void>)[] = []
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 const cli = fileURLToPath(new URL('../lib/holdout-cli.js', import.meta.url))
 const dataset = { id: 'operator-echo-cases', version: '1', cases: ['replay', 'evaluation', 'regression'].map((kind, index) => ({ id: `case-${index}`, kind, stdin: `${kind}\n`, expectedStdout: `${kind}\n`, expectedExitCode: 0 })) }
 afterEach(async () => { for (const close of closes.splice(0)) await close(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
-async function setup(container = false, prospective = false, generator: 'order-summary/v1' | 'order-summary/v2' = 'order-summary/v1', maxToolCalls = 4) {
+async function setup(container = false, prospective = false, generator: ProspectiveGeneratorName = 'order-summary/v1', maxToolCalls = 4) {
   const root = await mkdtemp(join(tmpdir(), 'holdout-cli-')); roots.push(root)
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const prefix = container ? '/authority' : root
@@ -41,7 +41,7 @@ function connect(command: string, args: string[]) {
   closes.push(close)
   return { read, exit, close, async request(operation: string, value?: unknown) { const id = `request-${++serial}`; child.stdin.write(JSON.stringify({ id, operation, ...(value === undefined ? {} : { value }) }) + '\n'); const response = await read(); expect(response.id).toBe(id); return response } }
 }
-const binding = () => ({ scopeDigest: sha('scope'), baselineDigest: sha('baseline'), candidateDigest: sha('candidate'), budgetDigest: sha('four-tools-zero-model-calls'), expiresAt: Date.now() + 300000, repeats: 2 })
+const binding = (admissionDigest?: string) => ({ scopeDigest: sha('scope'), baselineDigest: sha('baseline'), candidateDigest: sha('candidate'), budgetDigest: sha('four-tools-zero-model-calls'), ...(admissionDigest === undefined ? {} : { admissionDigest }), expiresAt: Date.now() + 300000, repeats: 2 })
 function observation(cell: SignedCell, stdout = cell.stdin) { return { cellId: cell.cellId, armDigest: cell.armDigest, stdout, exitCode: 0, quiescent: true, status: 'completed', artifactDigest: sha('fixture-artifact'), toolCalls: [{ name: 'write', inputDigest: sha('fixture-input'), outputDigest: sha('fixture-output') }] } }
 
 test('operator inspection returns public pins without consuming qualification state', async () => {
@@ -63,7 +63,7 @@ test('installed symbolic-link CLI invokes the operator instead of silently exiti
 test('prospective inspection does not generate a dataset and begin returns a binding certificate', async () => {
   const config = await setup(false, true)
   const { stdout } = await exec(process.execPath, [cli, '--inspect-config', join(config.root, 'config.json')])
-  expect(JSON.parse(stdout)).toEqual({ publicKey: config.publicKey, generatorDigest, limits: { maxToolCalls: 4, maxOutputBytes: 16384 } })
+  expect(JSON.parse(stdout)).toEqual({ publicKey: config.publicKey, profileVersion: 'order-summary/v1', profileDigest: generatorDigest, generatorDigest, limits: { maxToolCalls: 4, maxOutputBytes: 16384 } })
   await expect(stat(join(config.root, 'state.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
   const client = connect(process.execPath, [cli, '--config', join(config.root, 'config.json')]); await client.read()
   const frozen = binding(), begin = (await client.request('begin', frozen)).value as BeginResult
@@ -85,6 +85,22 @@ test('v2 inspection pins its generator without consuming state and rejects gener
   await client.close()
   await writeFile(path, JSON.stringify({ prospective: { generator: 'order-summary/v1' }, privateKeyPath: join(config.root, 'key.pem'), statePath: join(config.root, 'state.sqlite'), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } }), { mode: 0o600 })
   const restarted = connect(process.execPath, [cli, '--config', path]); expect(await restarted.exit).toBe(1)
+})
+
+test('second-family inspection and certificate pin the exact template-render profile', async () => {
+  const generator = 'template-render/v1', config = await setup(false, true, generator), path = join(config.root, 'config.json')
+  const profileDigest = prospectiveGeneratorDigest(generator)
+  const { stdout } = await exec(process.execPath, [cli, '--inspect-config', path])
+  expect(JSON.parse(stdout)).toEqual({ publicKey: config.publicKey, profileVersion: generator, profileDigest, generatorDigest: profileDigest, limits: { maxToolCalls: 4, maxOutputBytes: 16384 } })
+  await expect(stat(join(config.root, 'state.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
+  const client = connect(process.execPath, [cli, '--config', path]); await client.read()
+  const frozen = binding(), begin = (await client.request('begin', frozen)).value as BeginResult
+  expect(begin.prospective).toMatchObject({ binding: frozen, profileVersion: generator, profileDigest, generatorDigest: profileDigest, frozenSequence: 1, generatedSequence: 2 })
+  expect(verifyProspectiveCertificate(begin.prospective, frozen, config.publicKey, profileDigest)).toBe(true)
+  const db = new DatabaseSync(join(config.root, 'state.sqlite'))
+  const record = JSON.parse((db.prepare('SELECT prospective FROM authority').get() as { prospective: string }).prospective) as { phase: string; generator: string; binding: unknown; dataset: { version: string } }
+  db.close()
+  expect(record).toMatchObject({ phase: 'complete', generator, binding: frozen, dataset: { version: generator } })
 })
 
 test('legacy v1 frozen state resumes without regenerating or losing consumed cells', async () => {
@@ -118,14 +134,15 @@ test.each([false, true])('switching authority mode cannot reset durable qualific
   expect(after.prepare('SELECT state,prospective FROM authority').get()).toEqual(state); after.close()
 })
 
-test('failure after durable freeze poisons the prospective plan instead of regenerating samples', async () => {
-  const config = await setup(false, true), path = join(config.root, 'config.json')
+test.each(['order-summary/v1', 'template-render/v1'] as const)('failure after durable freeze poisons the %s prospective plan instead of regenerating samples', async generator => {
+  const config = await setup(false, true, generator), path = join(config.root, 'config.json')
   const client = connect(process.execPath, [cli, '--config', path]); await client.read()
   const db = new DatabaseSync(join(config.root, 'state.sqlite'))
   db.exec("CREATE TRIGGER fail_generated BEFORE UPDATE OF prospective ON authority WHEN json_extract(NEW.prospective, '$.phase')='generated' BEGIN SELECT RAISE(ABORT, 'injected write failure after freeze'); END")
-  expect((await client.request('begin', binding())).ok).toBe(false); expect(await client.exit).toBe(1)
+  const frozenBinding = binding(sha('admission'))
+  expect((await client.request('begin', frozenBinding)).ok).toBe(false); expect(await client.exit).toBe(1)
   const frozen = db.prepare('SELECT state,prospective FROM authority').get() as { state: null; prospective: string }
-  expect(frozen.state).toBeNull(); expect(JSON.parse(frozen.prospective)).toMatchObject({ phase: 'frozen' })
+  expect(frozen.state).toBeNull(); expect(JSON.parse(frozen.prospective)).toEqual({ phase: 'frozen', generator, freezeId: expect.any(String), binding: frozenBinding })
   // Trusted test fixture expires the dead controller lease; it never alters the frozen binding.
   db.exec('UPDATE authority SET lease_until=0; DROP TRIGGER fail_generated'); db.close()
   const restarted = connect(process.execPath, [cli, '--config', path]); expect(await restarted.exit).toBe(1)

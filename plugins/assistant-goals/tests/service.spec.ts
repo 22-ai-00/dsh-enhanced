@@ -779,6 +779,11 @@ describe('owner-scoped native goal context', () => {
     // This Host read has no Agent argument; it only observes the existing
     // Session log and does not create or activate an Agent.
     const ownerSource = await f.service.inspectOwnerVerifiedWorkflowSource(ownerInput)
+    const ownerRunProof = await f.service.inspectOwnerGoalRunProof({ ...ownerInput, runId: exported.runId })
+    expect(ownerRunProof).toMatchObject({ protocol: 'assistant-goals/owner-run-trace/v1', runId: exported.runId, turn: exported.turn,
+      nativeRevision: expect.any(Number), definitionDigest: complete.definition.digest,
+      outcomeProfile: { id: expect.any(String), version: expect.any(Number), digest: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+      steps: [{ id: 'read-source-final', name: 'read_report', arguments: {}, outcome: 'succeeded' }], traceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) })
     expect(ownerSource).toMatchObject({ ...exported, segments: [{ round: 1, turn: expect.any(Number), runId: expect.any(String), nativeRevision: expect.any(Number), steps: [{ id: 'read-source-first' }] },
       { round: 2, turn: exported.turn, runId: exported.runId, nativeRevision: expect.any(Number), steps: exported.steps }] })
     f.human.delete(agent)

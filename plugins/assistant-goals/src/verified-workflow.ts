@@ -1,5 +1,5 @@
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { GoalExecutionRun, GoalScope, GoalRecord } from './types.js'
+import type { GoalExecutionRun, GoalScope, GoalRecord, HostFailureEvidenceSummary, OwnerGoalRunProof } from './types.js'
 
 export interface VerifiedWorkflowSource {
   protocol: 'assistant-goals/verified-workflow-source/v1'
@@ -52,6 +52,71 @@ export function successfulToolSteps(events: readonly any[], turn: number): reado
 }
 
 /**
+ * Reconstruct every settled call in one exact native Goal run.  Failed calls
+ * remain explicit so downstream consumers can fail closed.  traceDigest is an
+ * integrity checksum only; provenance comes from the Host-only service method.
+ */
+export function ownerGoalRunProof(scope: GoalScope, record: Pick<GoalRecord, 'id' | 'scope' | 'definition' | 'native'>, run: GoalExecutionRun,
+  outcomeProfile: { id: string; version: number; digest: string }, rawEvents: readonly unknown[]): OwnerGoalRunProof {
+  if (acceptanceDigest(record.scope) !== acceptanceDigest(scope) || acceptanceDigest(run.intent.scope) !== acceptanceDigest(scope)
+    || run.execution?.status !== 'succeeded' || run.execution.quiescent !== true || run.intent.runId !== run.intent.task.goal.runId
+    || run.intent.task.ref !== run.intent.runId || run.intent.objective !== record.definition.objective
+    || run.intent.task.goal.id !== record.id || run.intent.task.goal.definitionVersion !== record.definition.version
+    || run.intent.task.goal.definitionDigest !== record.definition.digest || run.intent.task.goal.sessionId !== record.native.sessionId
+    || run.intent.task.goal.nativeGoalId !== record.native.goalId) throw new Error('assistant-goals: exact settled successful run is required')
+  const events = rawEvents as readonly any[]
+  const turns = events.filter(event => event?.type === 'turn/start' && Number.isSafeInteger(event.data?.turn)
+    && run.intent.runId === verifiedRunId(scope, record.id, record.native.sessionId, event.data.turn)).map(event => event.data.turn as number)
+  if (turns.length !== 1) throw new Error('assistant-goals: run source turn is unavailable')
+  const turn = turns[0]!
+  const starts = events.filter(event => event?.type === 'turn/start' && event.data?.turn === turn && Number.isSafeInteger(event.seq))
+  const ends = events.filter(event => event?.type === 'turn/end' && event.data?.turn === turn && Number.isSafeInteger(event.seq))
+  if (starts.length !== 1 || ends.length !== 1 || ends[0]!.seq <= starts[0]!.seq || ends[0]!.data?.reason?.kind !== 'completed') {
+    throw new Error('assistant-goals: completed run source turn is unavailable')
+  }
+  const start = starts[0]!, end = ends[0]!
+  const source = events.filter(event => event?.type === 'user/message' && Number.isSafeInteger(event.seq) && event.seq > start.seq && event.seq < end.seq
+    && event.data?.source?.kind === 'goal' && event.data.source.goalId === record.native.goalId
+    && event.data.source.revision === run.intent.task.goal.nativeRevision && event.data.source.round === run.intent.admission.round)
+  if (source.length !== 1) throw new Error('assistant-goals: run goal source is invalid')
+  const calls = new Map<string, { id: string; name: string; arguments: unknown; seq: number }>()
+  const results = new Map<string, { outcome: 'succeeded' | 'failed'; seq: number }>()
+  let argumentBytes = 0
+  for (const event of events) {
+    if (!Number.isSafeInteger(event?.seq) || event.seq <= source[0]!.seq || event.seq >= end.seq || event.data?.turn !== turn) continue
+    if (event.type === 'tool/call' && typeof event.data.callId === 'string' && typeof event.data.name === 'string') {
+      if (calls.has(event.data.callId) || calls.size >= 32) throw new Error('assistant-goals: duplicate or oversized run trace')
+      const arguments_ = parseArguments(event.data.arguments)
+      argumentBytes += Buffer.byteLength(event.data.arguments, 'utf8')
+      if (argumentBytes > 256 * 1024) throw new Error('assistant-goals: oversized run trace arguments')
+      calls.set(event.data.callId, { id: event.data.callId, name: event.data.name, arguments: arguments_, seq: event.seq })
+    }
+    if (event.type === 'tool/result' && event.surfaceOp === 'append' && Array.isArray(event.sourceEventSeqs)
+      && event.sourceEventSeqs.length === 1 && typeof event.data?.message?.source?.callId === 'string') {
+      const id = event.data.message.source.callId, content = event.data.message.content
+      const result = Array.isArray(content) && content.length === 1 && content[0]?.type === 'tool-result' ? content[0] : undefined
+      const call = calls.get(id)
+      if (call === undefined || event.sourceEventSeqs[0] !== call.seq) continue
+      if (results.has(id) || result?.toolCallId !== id || event.seq <= call.seq) throw new Error('assistant-goals: run trace contains a missing, duplicate or mismatched result')
+      results.set(id, { outcome: event.data.message.isError === true || result.isError === true ? 'failed' : 'succeeded', seq: event.seq })
+    }
+  }
+  if ([...calls.keys()].some(id => !results.has(id))) throw new Error('assistant-goals: run trace contains an unconfirmed call')
+  const steps = Object.freeze([...calls.values()].sort((a, b) => a.seq - b.seq).map(call => Object.freeze({
+    id: call.id, name: call.name, arguments: call.arguments, outcome: results.get(call.id)!.outcome,
+  })))
+  const payload = { protocol: 'assistant-goals/owner-run-trace/v1' as const, runId: run.intent.runId, turn,
+    nativeRevision: run.intent.task.goal.nativeRevision, definitionDigest: record.definition.digest,
+    outcomeProfile: Object.freeze({ ...outcomeProfile }), steps }
+  return Object.freeze({ ...payload, traceDigest: acceptanceDigest(payload) })
+}
+
+/** Integrity linkage only; source trust requires the current Host-only Goals service capability. */
+export function failureSummaryEvidenceDigest(value: Omit<HostFailureEvidenceSummary, 'evidence'>, generation: string): string {
+  return acceptanceDigest({ ...JSON.parse(JSON.stringify(value)), evidence: { producer: 'assistant-goals', generation } })
+}
+
+/**
  * A complete native turn trace. Failed calls are rejected except for bounded,
  * explicit read-only probes, which stay separately labelled as observations.
  */
@@ -60,25 +125,32 @@ export function verifiedToolTrace(events: readonly any[], turn: number): { steps
   return { steps: trace.steps, failedObservations: trace.failedObservations }
 }
 
-function verifiedToolTraceInternal(events: readonly any[], turn: number): { steps: readonly { id: string; toolName: string; arguments: unknown }[]; failedObservations: readonly { id: string; toolName: string; arguments: unknown; outcome: 'failed' }[]; argumentBytes: number } {
-  const calls = new Map<string, { id: string; toolName: string; arguments: unknown }>()
+function verifiedToolTraceInternal(events: readonly any[], turn: number, window?: { sourceSeq: number; endSeq: number }): { steps: readonly { id: string; toolName: string; arguments: unknown }[]; failedObservations: readonly { id: string; toolName: string; arguments: unknown; outcome: 'failed' }[]; argumentBytes: number } {
+  const calls = new Map<string, { id: string; toolName: string; arguments: unknown; seq?: number }>()
   const results = new Map<string, 'succeeded' | 'failed'>()
   let argumentBytes = 0
   for (const event of events) {
     if (event?.type === 'tool/call' && event.data?.turn === turn && typeof event.data.callId === 'string'
       && typeof event.data.name === 'string') {
+      if (window !== undefined && !traceEventInWindow(event, window)) continue
       if (calls.has(event.data.callId) || calls.size >= 32) throw new Error('assistant-goals: duplicate or oversized tool trace')
       const arguments_ = parseArguments(event.data.arguments)
       argumentBytes += Buffer.byteLength(event.data.arguments, 'utf8')
       if (argumentBytes > 256 * 1024) throw new Error('assistant-goals: oversized tool trace arguments')
-      calls.set(event.data.callId, { id: event.data.callId, toolName: event.data.name, arguments: arguments_ })
+      calls.set(event.data.callId, { id: event.data.callId, toolName: event.data.name, arguments: arguments_, seq: event.seq })
     }
-    if (event?.type === 'tool/result' && event.data?.turn === turn && typeof event.data?.message?.source?.callId === 'string') {
+    if (event?.type === 'tool/result' && event.data?.turn === turn && (window === undefined || traceEventInWindow(event, window))
+      && typeof event.data?.message?.source?.callId === 'string') {
       const id = event.data.message.source.callId
       const content = event.data.message.content
       const result = Array.isArray(content) && content.length === 1 && content[0]?.type === 'tool-result' ? content[0] : undefined
+      const call = calls.get(id)
       // Native errors live in the matching tool-result block, not on Message.
-      if (!calls.has(id) || results.has(id) || !result || result.toolCallId !== id) throw new Error('assistant-goals: tool trace contains a failed, duplicate or mismatched result')
+      if (call === undefined || window !== undefined && (event.surfaceOp !== 'append' || !Array.isArray(event.sourceEventSeqs)
+        || event.sourceEventSeqs.length !== 1 || event.sourceEventSeqs[0] !== call.seq)) continue
+      if (results.has(id) || !result || result.toolCallId !== id || window !== undefined && event.seq <= call.seq!) {
+        throw new Error('assistant-goals: tool trace contains a failed, duplicate or mismatched result')
+      }
       results.set(id, event.data.message.isError === true || result.isError === true ? 'failed' : 'succeeded')
     }
   }
@@ -86,9 +158,10 @@ function verifiedToolTraceInternal(events: readonly any[], turn: number): { step
   const steps: Array<{ id: string; toolName: string; arguments: unknown }> = []
   const failedObservations: Array<{ id: string; toolName: string; arguments: unknown; outcome: 'failed' }> = []
   for (const call of calls.values()) {
-    if (results.get(call.id) === 'succeeded') { steps.push(call); continue }
+    const step = { id: call.id, toolName: call.toolName, arguments: call.arguments }
+    if (results.get(call.id) === 'succeeded') { steps.push(step); continue }
     if (!readOnlyProbe(call)) throw new Error('assistant-goals: tool trace contains a failed non-observation call')
-    failedObservations.push({ ...call, outcome: 'failed' })
+    failedObservations.push({ ...step, outcome: 'failed' })
   }
   return { steps, failedObservations, argumentBytes }
 }
@@ -154,19 +227,26 @@ function workflowSegment(scope: GoalScope, record: GoalRecord, run: GoalExecutio
     .map(event => event.data.turn as number)
     .find(value => run.intent.runId === verifiedRunId(scope, record.id, record.native.sessionId, value))
   if (turn === undefined) throw new Error('assistant-goals: trigger run has no source turn')
-  const start = events.find(event => event?.type === 'turn/start' && event.data?.turn === turn)
-  const end = events.find(event => event?.type === 'turn/end' && event.data?.turn === turn)
-  const source = events.filter(event => event?.type === 'user/message' && start !== undefined && end !== undefined && event.seq > start.seq && event.seq < end.seq
+  const starts = events.filter(event => event?.type === 'turn/start' && event.data?.turn === turn && Number.isSafeInteger(event.seq))
+  const ends = events.filter(event => event?.type === 'turn/end' && event.data?.turn === turn && Number.isSafeInteger(event.seq))
+  if (starts.length !== 1 || ends.length !== 1 || ends[0]!.seq <= starts[0]!.seq || ends[0]!.data?.reason?.kind !== 'completed') {
+    throw new Error('assistant-goals: completed source turn is required')
+  }
+  const start = starts[0]!, end = ends[0]!
+  const source = events.filter(event => event?.type === 'user/message' && Number.isSafeInteger(event.seq) && event.seq > start.seq && event.seq < end.seq
     && event.data?.source?.kind === 'goal' && event.data.source.goalId === record.native.goalId && event.data.source.revision === run.intent.task.goal.nativeRevision
     && event.data.source.round === run.intent.admission.round)
   if (source.length !== 1) throw new Error('assistant-goals: trigger run goal source is invalid')
-  if (end?.data?.reason?.kind !== 'completed') throw new Error('assistant-goals: completed source turn is required')
-  const trace = verifiedToolTraceInternal(events, turn)
+  const trace = verifiedToolTraceInternal(events, turn, { sourceSeq: source[0]!.seq, endSeq: end.seq })
   if (!allowEmpty && trace.steps.length === 0 || trace.steps.length + trace.failedObservations.length > 32) {
     throw new Error('assistant-goals: bounded successful tool trace is required')
   }
   return { segment: Object.freeze({ runId: run.intent.runId, turn, round: run.intent.admission.round, nativeRevision: run.intent.task.goal.nativeRevision, steps: Object.freeze(trace.steps.map(step => Object.freeze({ ...step }))),
     ...(trace.failedObservations.length === 0 ? {} : { failedObservations: Object.freeze(trace.failedObservations.map(step => Object.freeze({ ...step }))) }) }), calls: trace.steps.length + trace.failedObservations.length, argumentBytes: trace.argumentBytes }
+}
+
+function traceEventInWindow(event: any, window: { sourceSeq: number; endSeq: number }): event is { seq: number } {
+  return Number.isSafeInteger(event?.seq) && event.seq > window.sourceSeq && event.seq < window.endSeq
 }
 
 function readOnlyProbe(call: { toolName: string; arguments: unknown }): boolean {

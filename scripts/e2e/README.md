@@ -119,3 +119,59 @@ pnpm test:web-owner:real-capture
 The observer bounds the entire experiment to 24 model dispatches; each Goal has an explicit eight-call/twelve-tool budget. It does not replace prompts, filter the model's tool catalog, prescribe tool arguments/order, or force round completion. Browser approvals permit only the task's file tools, owner Goal/skill controls, and session-local todo updates. The configured reusable tool allowlist is read/write/edit/glob/grep/todo_write/get_goal. The verifier runs the exported program on independent fixed cases; this is not an OS-sealed holdout or measured improvement experiment. Automatic activation is not exercised or authorized.
 
 Artifacts are written under `.cache/web-owner-real-capture-e2e/`. With `DSH_CAPTURE_RETAIN_FAILURE=1`, failure stops the Host/browser and retains its private temporary home; `retained-environment.json` identifies the directory for local diagnosis without another model task. Delete that directory after diagnosis. With the option absent, private temporary data is removed on success and failure. Never publish the private home or raw session contents.
+
+## Template-render prospective canary contract
+
+```sh
+CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/google-chrome \
+  DSH_HOLDOUT_TEST_IMAGE=sha256:<existing-local-image-id> \
+  pnpm test:web-owner:real-canary
+```
+
+This opt-in project runs the independent `web-owner-real-canary.spec.mjs`
+browser journey against the real TraeX ACP route; other model providers are
+rejected. It needs a pinned local holdout image and is separate from
+`pnpm check`. Do not use the older order-summary scenario as evidence for this
+canary.
+
+The journey uses separate baseline, failure, repair, control, promotion and
+negative-control Sessions. The baseline Goal creates the recursive
+`render.mjs`, passes the legacy public checks and saves `template-render`
+version 1. The failure Session then performs version 1 `skill_run` as its only
+business action: the run itself succeeds, but independent strict literal
+one-pass verification records the whole Goal as `not-achieved`. The repair
+Session first reproduces version 1, then reads and edits only `render.mjs`; its
+strict Goal is independently `achieved`. `skill_failure_candidate` is called
+with the exact failure and repair Goal/Session identities, the repair edit id
+and parent version 1, so the failed outcome remains causal candidate evidence.
+
+After a Host restart, `runtimeCanaryAdmission()` derives the complete
+`assistant-skills/canary-admission/v1` object only from persisted parent,
+candidate, strict Goal/native Goal and outcome-contract rows. It binds the
+parent and candidate definition digests, strict Goal definition digest and
+outcome profile id/version/digest. A private isolated holdout pinned to the
+`template-render/v1` generator must observe positive candidate gain before
+version 2 enters its finite canary; this prospective result does not authorize
+promotion by itself.
+
+Promotion requires a fresh exact-family Goal whose only business action is the
+exact version 2 `skill_run` and whose independent outcome is `achieved`; the
+background canary observation then promotes it without `skill_activate`. A
+separate negative-control Goal uses the same strict objective and outcome
+profile but supplies the declared `implementation` input containing the
+recursive implementation. Its `not-achieved` outcome causes the finite watch to
+roll back to a new immutable version 3 restored from version 1. A final Host
+restart requires definitions, runs, comparisons, deployments, watches, Goals,
+verification records, processed Inbox rows and model-dispatch count to remain
+unchanged, proving no replay or resurrection.
+
+The reusable-tool allowlist is only `read` and `edit`, scoped to `render.mjs`;
+`bash`, `skill_activate` and other manual artifact/control paths are forbidden,
+and any surfaced `bash` approval is rejected in the browser. Model-visible
+comparison/deployment status is checked recursively for private receipt
+material; private SQLite and holdout evidence is inspected only by the test
+process. Artifacts are under `.cache/web-owner-real-canary-e2e/`: failures retain
+Playwright trace/video/screenshots plus Host, model, transport and DOM evidence.
+Set `DSH_CAPTURE_RETAIN_FAILURE=1` to also retain the private temporary profile
+and write `retained-environment.json`; otherwise the profile is removed. Delete
+retained environments after diagnosis and never publish their contents.
