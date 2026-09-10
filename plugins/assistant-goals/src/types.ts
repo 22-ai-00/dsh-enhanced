@@ -23,6 +23,25 @@ export interface GoalCheckpoint {
   assumptions: readonly { statement: string; expiresAt: number }[]
   evidenceRefs: readonly string[]
   dependencies: readonly string[]
+  /** Host-frozen identities. Missing with non-empty dependencies means a legacy unresolved checkpoint. */
+  dependencyBindings?: readonly GoalDependencyBinding[]
+}
+
+export interface GoalDependencyBinding {
+  goalId: string
+  definitionVersion: number
+  definitionDigest: string
+}
+
+export type GoalDependencyStatus = 'achieved' | 'pending' | 'failed' | 'unknown' | 'cleared' | 'stale'
+
+export interface GoalDependencyView {
+  goalId: string
+  definitionVersion?: number
+  definitionDigest?: string
+  status: GoalDependencyStatus
+  reason?: 'definition-changed' | 'legacy-unbound'
+  nativePhase?: NativeGoalState['phase']
 }
 
 /** Immutable semantic definition; native lifecycle revisions do not advance it. */
@@ -50,7 +69,7 @@ export interface GoalTaskContext {
   scope: GoalScope
   active: boolean
   goal: { id: string; definition: { version: number; digest: string }; native: NativeGoalState; objective: string }
-  checkpoint: { nextStep: string }
+  checkpoint: { nextStep: string; dependencies?: readonly GoalDependencyView[] }
 }
 
 export interface GoalStepTask {
@@ -63,6 +82,8 @@ export interface GoalExecutionIntent {
   runId: string
   scope: GoalScope
   objective: string
+  /** Optional only for persisted pre-v3 runs; new runs always bind this list. */
+  dependencies?: readonly GoalDependencyBinding[]
   admission: { issuedAt: number; expiresAt: number; maxGoalRounds: number; round: number; authorizationDigest: string }
   task: GoalStepTask
 }

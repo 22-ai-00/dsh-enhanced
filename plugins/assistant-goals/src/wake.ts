@@ -34,13 +34,16 @@ export class GoalWakeRuntime {
   #automations: AssistantAutomationsService | undefined
   #live = true
   #failures = 0
+  #reconciling = false
   constructor(private readonly ctx: Context, path: string, readonly config: Required<GoalWakeConfig>,
     private readonly record: (scope: GoalScope, goalId: string, agent?: Agent) => GoalRecord | undefined,
     private readonly ready: () => boolean,
     private readonly settleExecution: (agent: Agent, signal: AbortSignal) => Promise<void>,
     private readonly verifiedCompletion: (record: GoalRecord, wake: GoalWakeIntent['native']) => boolean,
     private readonly assertEventWait: (intent: GoalWakeIntent, phase: 'before-resume' | 'running' | 'terminal') => void = () => {},
-    private readonly acceptedEventPause: (record: GoalRecord, agent?: Agent) => boolean = () => false) {
+    private readonly acceptedEventPause: (record: GoalRecord, agent?: Agent) => boolean = () => false,
+    private readonly assertDependencies: (record: GoalRecord) => void = () => {},
+    private readonly dependenciesReady: () => boolean = () => true) {
     this.#store = new GoalWakeStore(path)
     ctx.inject(['assistantAutomations', 'assistantDelivery', 'assistantPolicy'], runtime => {
       const automations = runtime.assistantAutomations
@@ -52,10 +55,10 @@ export class GoalWakeRuntime {
           && spec.runbookVersion === 1,
         execute: input => this.#execute(input),
       })
-      for (const wake of this.#store.listPending()) {
-        try { this.materialize(wake.intent) } catch { this.#failures++ }
-      }
-      return () => { dispose(); if (this.#automations === automations) this.#automations = undefined }
+      const timer = setInterval(() => { void this.#reconcilePending() }, 500)
+      timer.unref?.()
+      void this.#reconcilePending()
+      return () => { clearInterval(timer); dispose(); if (this.#automations === automations) this.#automations = undefined }
     })
     ctx.effect(() => () => {
       this.#live = false
@@ -65,7 +68,27 @@ export class GoalWakeRuntime {
   }
   owns = (input: DeliveryGoalWakeInput): boolean => this.#live && this.#automations !== undefined && this.#capabilities.has(input)
   health = () => ({ enabled: true, connected: this.#automations !== undefined, reconciliationFailures: this.#failures })
+  reconcile = (): Promise<void> => this.#reconcilePending()
   inspect = (scope: GoalScope, goalId: string): readonly GoalWake[] => this.#store.listForGoal(scope, goalId).map(wake => this.#reconcileTerminal(wake))
+  async #reconcilePending(): Promise<void> {
+    if (!this.#live || this.#automations === undefined || !this.ready() || this.#reconciling) return
+    this.#reconciling = true
+    try {
+      for (const wake of this.#store.listPending()) {
+        if ((wake.intent.dependencies?.length ?? 0) > 0 && !this.dependenciesReady()) continue
+        if (Date.now() < wake.intent.expiresAt) {
+          try {
+            const record = this.#boundRecord(wake.intent)
+            if (!same(record.native, wake.intent.native) || record.native.phase !== 'paused') reject()
+          } catch {
+            try { this.#store.finish(wake.intent.id, 'denied', Date.now()) } catch { this.#failures++ }
+            continue
+          }
+        }
+        try { this.materialize(wake.intent) } catch { this.#failures++ }
+      }
+    } finally { this.#reconciling = false }
+  }
   #reconcileTerminal(wake: GoalWake): GoalWake {
     if (wake.state !== 'scheduled' || wake.definitionHash === undefined || this.#automations === undefined) return wake
     const actual = this.#automations.inspectSystemOwned({ owner, automationId: wake.intent.id })
@@ -86,6 +109,7 @@ export class GoalWakeRuntime {
     const policy = this.ctx.get('assistantPolicy')
     if (policy?.getBudgetConfig(this.config.budgetId)?.metric !== 'automation-runs') reject()
     this.#route(record.scope, this.config.ownerRouteId)
+    this.assertDependencies(record)
   }
   #route(scope: GoalScope, routeId: string): void {
     const receipt = this.ctx.get('assistantDelivery')?.validateOwnerRoute({ authorityId: routeId,
@@ -96,15 +120,23 @@ export class GoalWakeRuntime {
     const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     if (delivery?.goalWakeSettlementVersion?.() !== 1) reject()
   }
+  #boundRecord(intent: GoalWakeIntent, agent?: Agent): GoalRecord {
+    const record = this.record(intent.scope, intent.goalId, agent)
+    if (record === undefined || !same(record.scope, intent.scope) || !same(record.definition, intent.definition)
+      || record.native.sessionId !== intent.native.sessionId || record.native.goalId !== intent.native.goalId
+      || record.native.maxGoalRounds !== intent.native.maxGoalRounds) reject()
+    if (intent.dependencies === undefined
+      ? record.checkpoint.dependencies.length > 0
+      : !same(record.checkpoint.dependencyBindings ?? [], intent.dependencies)) reject()
+    try { this.assertDependencies(record) } catch { reject() }
+    return record
+  }
   #current(intent: GoalWakeIntent, phase: 'before-resume' | 'running' | 'terminal', agent?: Agent): GoalRecord {
     if (!this.#live || !this.ready() || Date.now() >= intent.expiresAt) reject()
     this.#requireSettlementCapability()
     if (intent.id.startsWith('goal-event-wake-') && this.ctx.get('assistantDelivery')?.goalWakeResultVersion?.() !== 1) reject()
     this.assertEventWait(intent, phase)
-    const record = this.record(intent.scope, intent.goalId, agent)
-    if (record === undefined || !same(record.scope, intent.scope) || !same(record.definition, intent.definition)
-      || record.native.sessionId !== intent.native.sessionId || record.native.goalId !== intent.native.goalId
-      || record.native.maxGoalRounds !== intent.native.maxGoalRounds) reject()
+    const record = this.#boundRecord(intent, agent)
     const native = record.native
     const before = native.phase === 'paused' && native.revision === intent.native.revision
       && native.roundsStarted === intent.native.roundsStarted
@@ -122,9 +154,14 @@ export class GoalWakeRuntime {
   materialize(intent: GoalWakeIntent): GoalWake {
     const automations = this.#automations
     if (automations === undefined || !this.#live) reject()
+    if (Date.now() >= intent.expiresAt) {
+      const expired = this.#store.prepare(intent)
+      return expired.state === 'prepared' || expired.state === 'scheduled'
+        ? this.#store.finish(intent.id, 'denied', Date.now()) : expired
+    }
+    this.#current(intent, 'before-resume')
     const wake = this.#store.prepare(intent)
     if (wake.state !== 'prepared' && wake.state !== 'scheduled') return wake
-    if (Date.now() >= intent.expiresAt) return this.#store.finish(intent.id, 'denied', Date.now())
     const definition: HostAutomationDefinition = {
       name: 'Scheduled business goal', schedule: { kind: 'at', at: new Date(intent.at).toISOString() },
       workspace: intent.scope.workspace, agentPreset: intent.scope.preset,
@@ -162,6 +199,7 @@ export class GoalWakeRuntime {
       || input.principal !== wake.intent.scope.principalId || input.ownerRouteId !== wake.intent.ownerRouteId) {
       return this.#result('failed', 'goal-wake-identity-denied', false)
     }
+    if (wake.state === 'denied') return this.#result('failed', 'goal-wake-prior-state', false)
     if (wake.state !== 'scheduled') return this.#result('unknown', 'goal-wake-prior-state', true)
     const intent = wake.intent
     let dispatched = false

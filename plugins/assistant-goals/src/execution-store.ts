@@ -10,7 +10,7 @@ const parse = (value: string): unknown => { try { return JSON.parse(value) } cat
 const freeze = <T>(value: T): T => { if (value && typeof value === 'object') { for (const child of Object.values(value as Record<string, unknown>)) freeze(child); Object.freeze(value) }; return value }
 
 function intentInput(value: GoalExecutionIntent): GoalExecutionIntent {
-  const { runId, scope, objective, admission, task } = value ?? {} as GoalExecutionIntent
+  const { runId, scope, objective, dependencies, admission, task } = value ?? {} as GoalExecutionIntent
   if (typeof runId !== 'string' || runId.length === 0 || runId.length > 512 || typeof objective !== 'string' || objective.length === 0 || objective.length > 16_384
     || !scope || typeof scope.principalId !== 'string' || typeof scope.principalRecordId !== 'string' || !Number.isSafeInteger(scope.principalVersion) || scope.principalVersion < 1
     || typeof scope.workspace !== 'string' || !scope.workspace.startsWith('/') || typeof scope.preset !== 'string'
@@ -21,7 +21,14 @@ function intentInput(value: GoalExecutionIntent): GoalExecutionIntent {
     || !task || task.kind !== 'goal-step' || task.ref !== runId || !task.goal || task.goal.runId !== runId
     || [task.goal.id, task.goal.stepId, task.goal.sessionId, task.goal.nativeGoalId].some(item => typeof item !== 'string' || !/^[A-Za-z0-9_.:-]{1,512}$/u.test(item))
     || !Number.isSafeInteger(task.goal.definitionVersion) || task.goal.definitionVersion < 1 || !Number.isSafeInteger(task.goal.nativeRevision) || task.goal.nativeRevision < 1
-    || task.goal.definitionDigest !== acceptanceDigest({ objective })) fail('invalid-input')
+    || task.goal.definitionDigest !== acceptanceDigest({ objective })
+    || dependencies !== undefined && (!Array.isArray(dependencies) || dependencies.length > 16
+      || new Set(dependencies.map(item => item?.goalId)).size !== dependencies.length
+      || dependencies.some(item => item === null || typeof item !== 'object'
+        || Object.keys(item).length !== 3 || !Object.hasOwn(item, 'goalId') || !Object.hasOwn(item, 'definitionVersion') || !Object.hasOwn(item, 'definitionDigest')
+        || typeof item.goalId !== 'string' || !/^[A-Za-z0-9_.:-]{1,512}$/u.test(item.goalId)
+        || !Number.isSafeInteger(item.definitionVersion) || item.definitionVersion < 1
+        || typeof item.definitionDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(item.definitionDigest)))) fail('invalid-input')
   return freeze(JSON.parse(JSON.stringify(value)) as GoalExecutionIntent)
 }
 

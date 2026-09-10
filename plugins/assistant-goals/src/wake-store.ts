@@ -2,12 +2,14 @@ import { DatabaseSync } from 'node:sqlite'
 import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { DeliveryPreferencePrincipalAttestation } from '@dsh-enhanced/assistant-delivery'
 import { GoalStoreError } from './types.js'
-import type { GoalDefinition, GoalScope, NativeGoalState } from './types.js'
+import type { GoalDefinition, GoalDependencyBinding, GoalScope, NativeGoalState } from './types.js'
 import { prepareGoalStoreDatabaseFile } from './store.js'
 
 export interface GoalWakeIntent {
   id: string; scope: GoalScope; goalId: string; definition: GoalDefinition; native: NativeGoalState
   attestation: DeliveryPreferencePrincipalAttestation; at: number; expiresAt: number; ownerRouteId: string; budgetId: string
+  /** Optional only for persisted pre-v3 wakes; new intents always bind this list. */
+  dependencies?: readonly GoalDependencyBinding[]
 }
 export interface GoalWake {
   intent: GoalWakeIntent; state: 'prepared' | 'scheduled' | 'dispatched' | 'succeeded' | 'unknown' | 'denied'
@@ -26,13 +28,19 @@ const plain = (value: unknown): value is Record<string, unknown> => value !== nu
 const exact = (value: unknown, keys: readonly string[]): value is Record<string, unknown> => plain(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 
 export function validateGoalWakeIntent(value: GoalWakeIntent): GoalWakeIntent {
-  if (!exact(value, ['id', 'scope', 'goalId', 'definition', 'native', 'attestation', 'at', 'expiresAt', 'ownerRouteId', 'budgetId']) || !text(value.id) || !text(value.goalId) || !routeText(value.ownerRouteId) || !routeText(value.budgetId)
+  const keys = ['id', 'scope', 'goalId', 'definition', 'native', 'attestation', 'at', 'expiresAt', 'ownerRouteId', 'budgetId']
+  if (!(exact(value, keys) || exact(value, [...keys, 'dependencies'])) || !text(value.id) || !text(value.goalId) || !routeText(value.ownerRouteId) || !routeText(value.budgetId)
     || !exact(value.scope, ['principalId', 'principalRecordId', 'principalVersion', 'workspace', 'preset']) || !routeText(value.scope.principalId) || !text(value.scope.principalRecordId) || !integer(value.scope.principalVersion, 1) || typeof value.scope.workspace !== 'string' || !value.scope.workspace.startsWith('/') || !text(value.scope.preset)
     || !exact(value.definition, ['version', 'digest', 'objective']) || !integer(value.definition.version, 1) || !/^[a-f0-9]{64}$/u.test(value.definition.digest) || typeof value.definition.objective !== 'string' || value.definition.objective.length < 1 || value.definition.objective.length > 16384 || value.definition.digest !== acceptanceDigest({ objective: value.definition.objective })
     || !exact(value.native, ['sessionId', 'goalId', 'revision', 'objective', 'phase', 'roundsStarted', 'maxGoalRounds', 'updatedAt']) || value.native.phase !== 'paused' || !text(value.native.sessionId) || !text(value.native.goalId) || !integer(value.native.revision, 1) || typeof value.native.objective !== 'string' || value.native.objective.length < 1 || value.native.objective.length > 16384 || !integer(value.native.roundsStarted) || !integer(value.native.maxGoalRounds, 1) || value.native.roundsStarted >= value.native.maxGoalRounds || !integer(value.native.updatedAt)
     || value.native.objective !== value.definition.objective
     || !exact(value.attestation, ['scope', 'principalId', 'principalLineage', 'bindingId', 'bindingVersion', 'bindingGeneration', 'sessionId']) || !exact(value.attestation.scope, ['workspace', 'preset']) || value.attestation.scope.workspace !== value.scope.workspace || value.attestation.scope.preset !== value.scope.preset || value.attestation.principalId !== value.scope.principalId || !exact(value.attestation.principalLineage, ['principalRecordId', 'principalVersion']) || value.attestation.principalLineage.principalRecordId !== value.scope.principalRecordId || value.attestation.principalLineage.principalVersion !== value.scope.principalVersion || value.attestation.sessionId !== value.native.sessionId || !text(value.attestation.bindingId) || !integer(value.attestation.bindingVersion, 1) || !integer(value.attestation.bindingGeneration, 1)
-    || !integer(value.at) || !integer(value.expiresAt) || value.expiresAt <= value.at || value.expiresAt - value.at > 300000) fail('invalid-input')
+    || !integer(value.at) || !integer(value.expiresAt) || value.expiresAt <= value.at || value.expiresAt - value.at > 300000
+    || value.dependencies !== undefined && (!Array.isArray(value.dependencies) || value.dependencies.length > 16
+      || new Set(value.dependencies.map(item => item?.goalId)).size !== value.dependencies.length
+      || value.dependencies.some(item => !exact(item, ['goalId', 'definitionVersion', 'definitionDigest'])
+        || !text(item.goalId) || !integer(item.definitionVersion, 1) || typeof item.definitionDigest !== 'string'
+        || !/^[a-f0-9]{64}$/u.test(item.definitionDigest)))) fail('invalid-input')
   return freeze(JSON.parse(JSON.stringify(value)) as GoalWakeIntent)
 }
 function parse(value: string): unknown { try { return JSON.parse(value) } catch { return fail('schema') } }

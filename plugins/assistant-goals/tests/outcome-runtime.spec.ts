@@ -12,8 +12,12 @@ import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contr
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import type { TaskAcceptanceProducer, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 import { GoalOutcomeRuntime } from '../src/outcome.ts'
+import type { GoalOutcomeView } from '../src/outcome.ts'
 import { GoalOutcomeStore } from '../src/outcome-store.ts'
+import { assertGoalDependenciesAchieved } from '../src/dependency.ts'
 import type { GoalExecutionRun, GoalRecord } from '../src/types.ts'
+
+const dependency = { goalId: 'dependency-a', definitionVersion: 1, definitionDigest: acceptanceDigest({ objective: 'dependency' }) }
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -54,23 +58,36 @@ function record(root: string, revision = 1): GoalRecord {
     checkpoint: { nextStep: 'Verify target', blockers: [], assumptions: [], evidenceRefs: [], dependencies: [] }, version: 1, createdAt: 1, updatedAt: 1,
   }
 }
+function dependent(value: GoalRecord): GoalRecord {
+  return { ...value, checkpoint: { ...value.checkpoint, dependencies: [dependency.goalId], dependencyBindings: [dependency] } }
+}
+function dependencyRecord(root: string): GoalRecord {
+  const objective = 'dependency'
+  const value = record(root)
+  return { ...value, id: dependency.goalId, originalObjective: objective,
+    definition: { version: dependency.definitionVersion, digest: dependency.definitionDigest, objective },
+    native: { ...value.native, sessionId: 'dependency-session', goalId: 'dependency-native', objective, phase: 'complete' } }
+}
 function run(value: GoalRecord, now: number): GoalExecutionRun {
   const runId = 'run-a'
   const task = { kind: 'goal-step' as const, ref: runId, goal: { id: value.id, definitionVersion: value.definition.version, definitionDigest: value.definition.digest,
     stepId: 'step-a', runId, sessionId: value.native.sessionId, nativeGoalId: value.native.goalId, nativeRevision: value.native.revision } }
   const scope = value.scope
-  return { intent: { runId, scope, objective: value.definition.objective, task,
+  return { intent: { runId, scope, objective: value.definition.objective, dependencies: value.checkpoint.dependencyBindings ?? [], task,
     admission: { issuedAt: now, expiresAt: now + 30_000, maxGoalRounds: value.native.maxGoalRounds, round: 1,
       authorizationDigest: acceptanceDigest({ scope, action: 'execute', resource: { kind: 'goal', id: 'business-context' } }) } } }
 }
 
-async function runtimeHarness(paths: { verifier: string; outcome: string }, current: () => GoalRecord, runs: () => readonly GoalExecutionRun[], ready: () => boolean = () => true) {
+async function runtimeHarness(paths: { verifier: string; outcome: string }, current: () => GoalRecord, runs: () => readonly GoalExecutionRun[], ready: () => boolean = () => true,
+  assertDependencies: (record: GoalRecord) => void = parent => {
+    if (parent.checkpoint.dependencies.length > 0) throw new Error('unexpected dependency')
+  }) {
   const url = await proofServer(ready)
   const authorityInput = { kind: 'readback' as const, id: 'target', urlTemplate: url, objectIdPointer: '/id', timeoutMs: 1_000, maxResponseBytes: 1_024, allowHttpLoopback: true }
   const [authority] = createVerifierAuthorities({ authorities: [authorityInput] }); if (authority === undefined) throw new Error('missing readback authority')
   const ctx = new Context(); contexts.push(ctx)
   const bridge = new GoalsBridge(); ctx.provide('assistantGoals' as never, bridge as never)
-  const runtime = new GoalOutcomeRuntime(ctx, paths.outcome, () => current(), () => runs())
+  const runtime = new GoalOutcomeRuntime(ctx, paths.outcome, () => current(), () => runs(), 60_000, assertDependencies)
   bridge.runtime = runtime
   const value = current()
   const verifier = new AssistantVerifierService(ctx, { databasePath: paths.verifier, tickIntervalMs: 0, requireAcceptance: true, authorities: [authorityInput], profiles: [{
@@ -101,6 +118,37 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
     await f.verifier.tick(); await new Promise<void>(resolve => setImmediate(resolve))
     expect(completions).toBe(phase === 'active' ? 1 : 0)
     await f.verifier.tick(); expect(completions).toBe(phase === 'active' ? 1 : 0)
+  })
+
+  it.each(['stale', 'cleared', 'unavailable', 'achieved'] as const)('late verification revalidates an exact %s dependency immediately before completion', async state => {
+    const root = await mkdtemp(join(tmpdir(), 'goal-outcome-late-dependency-')); roots.push(root)
+    let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    let current = dependent(record(root)); const initial = run(current, clock), agent = {} as Agent
+    let nativeRuns: readonly GoalExecutionRun[] = [], ready = false, completions = 0
+    const exactDependency = dependencyRecord(root)
+    const staleObjective = 'changed dependency'
+    let dependencyCurrent = exactDependency
+    let dependencyOutcome: GoalOutcomeView = { status: 'achieved', definitionVersion: dependency.definitionVersion, nativeCompletion: 'complete' }
+    const assertDependencies = (parent: GoalRecord) => assertGoalDependenciesAchieved(parent, {
+      get: (_scope, goalId) => goalId === dependency.goalId ? dependencyCurrent : undefined,
+      outcome: () => dependencyOutcome as GoalOutcomeView,
+    })
+    const f = await runtimeHarness({ verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcome.sqlite') },
+      () => current, () => nativeRuns, () => ready, assertDependencies)
+    f.ctx.provide('goals' as never, { get: () => ({ id: current.native.goalId, revision: current.native.revision }), complete: () => {
+      completions += 1; current = { ...current, native: { ...current.native, phase: 'complete', revision: current.native.revision + 1 } }
+    } } as never)
+    f.runtime.bind(current); f.runtime.prepare(agent, initial)
+    const durable = { ...initial, dispatchedAt: clock, execution: { status: 'succeeded' as const, quiescent: true, completedAt: clock } }
+    nativeRuns = [durable]
+    await f.runtime.settled(agent, durable, () => {})
+    expect(completions).toBe(0)
+    if (state === 'stale') dependencyCurrent = { ...exactDependency, definition: { version: 2, digest: acceptanceDigest({ objective: staleObjective }), objective: staleObjective } }
+    if (state === 'cleared') dependencyCurrent = { ...exactDependency, native: { ...exactDependency.native, phase: 'cleared' } }
+    if (state === 'unavailable') dependencyOutcome = { status: 'unavailable', definitionVersion: dependency.definitionVersion }
+    ready = true; clock += 5_001
+    await f.verifier.tick(); await new Promise<void>(resolve => setImmediate(resolve))
+    expect(completions).toBe(state === 'achieved' ? 1 : 0)
   })
 
   it('downgrades a sidecar-only success to durable verifier unknown after a reload', async () => {
@@ -166,7 +214,7 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
   it('preserves an achieved receipt across reload and completes only the exact current native goal', async () => {
     const root = await mkdtemp(join(tmpdir(), 'goal-outcome-runtime-')); roots.push(root)
     const paths = { verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcomes.sqlite') }
-    let current = record(root); const now = Date.now(); const initial = run(current, now); const agent = {} as Agent
+    let current = dependent(record(root)); const now = Date.now(); const initial = run(current, now); const agent = {} as Agent
     // The native round projection is deliberately narrow: the durable parts under
     // test are the real outcome sidecar and Verifier databases, while this Host
     // supplies only its already-settled native execution evidence.
@@ -179,22 +227,48 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
     expect(first.runtime.view(current)).toMatchObject({ status: 'achieved', nativeCompletion: 'pending' })
     await first.ctx.fiber.restart(); contexts.splice(contexts.indexOf(first.ctx), 1)
 
-    const second = await runtimeHarness(paths, () => current, () => nativeRuns)
-    let completeCalls = 0
-    second.ctx.provide('goals' as never, { get: () => ({ id: current.native.goalId, revision: current.native.revision }), complete: (_agent: Agent, input: { id: string; revision: number }) => {
+    let dependencyCurrent: GoalRecord | undefined = dependencyRecord(root)
+    let dependencyOutcome: GoalOutcomeView | undefined = { status: 'achieved', definitionVersion: dependency.definitionVersion, nativeCompletion: 'complete' }
+    const second = await runtimeHarness(paths, () => current, () => nativeRuns, () => true, parent => {
+      assertGoalDependenciesAchieved(parent, { get: (_scope, goalId) => goalId === dependency.goalId ? dependencyCurrent : undefined, outcome: () => dependencyOutcome })
+    })
+    let completeCalls = 0; let beforeNativeRead: (() => void) | undefined
+    second.ctx.provide('goals' as never, { get: () => {
+      beforeNativeRead?.(); beforeNativeRead = undefined
+      return { id: current.native.goalId, revision: current.native.revision }
+    }, complete: (_agent: Agent, input: { id: string; revision: number }) => {
       if (input.id !== current.native.goalId || input.revision !== current.native.revision) throw new Error('stale native completion')
       completeCalls += 1; current = { ...current, native: { ...current.native, phase: 'complete', revision: current.native.revision + 1 } }
     } } as never)
     expect(second.runtime.view(current)).toMatchObject({ status: 'achieved', nativeCompletion: 'pending' })
     current = { ...current, scope: { ...current.scope, principalId: 'foreign', principalRecordId: 'foreign-row' } }
     expect(second.runtime.reconcileCompletion(agent)).toBe(false)
-    current = { ...record(root), definition: { version: 2, objective: 'changed definition', digest: acceptanceDigest({ objective: 'changed definition' }) } }
+    current = { ...dependent(record(root)), definition: { version: 2, objective: 'changed definition', digest: acceptanceDigest({ objective: 'changed definition' }) } }
     expect(second.runtime.reconcileCompletion(agent)).toBe(false)
-    current = record(root, 2)
+    current = dependent(record(root, 2))
     expect(second.runtime.reconcileCompletion(agent)).toBe(false)
-    current = { ...record(root), native: { ...record(root).native, roundsStarted: 3 } }
+    current = { ...dependent(record(root)), native: { ...record(root).native, roundsStarted: 3 } }
     expect(second.runtime.reconcileCompletion(agent)).toBe(false)
-    current = record(root)
+    current = dependent(record(root))
+    beforeNativeRead = () => { current = { ...current, checkpoint: { ...current.checkpoint, dependencyBindings: [{ ...dependency, definitionDigest: 'changed-binding' }] } } }
+    expect(second.runtime.reconcileCompletion(agent)).toBe(false)
+    current = dependent(record(root))
+    const { dependencyBindings: _binding, ...legacyCheckpoint } = current.checkpoint
+    current = { ...current, checkpoint: legacyCheckpoint }
+    expect(second.runtime.reconcileCompletion(agent)).toBe(false)
+    current = dependent(record(root))
+    const { dependencies: _dependencies, ...legacyIntent } = durable.intent
+    nativeRuns = [{ ...durable, intent: legacyIntent }]
+    expect(second.runtime.reconcileCompletion(agent)).toBe(false)
+    nativeRuns = [durable]
+    const staleObjective = 'changed dependency'
+    dependencyCurrent = { ...dependencyRecord(root), definition: { version: 2, digest: acceptanceDigest({ objective: staleObjective }), objective: staleObjective } }
+    expect(second.runtime.reconcileCompletion(agent)).toBe(false)
+    dependencyCurrent = { ...dependencyRecord(root), native: { ...dependencyRecord(root).native, phase: 'cleared' } }
+    expect(second.runtime.reconcileCompletion(agent)).toBe(false)
+    dependencyCurrent = dependencyRecord(root); dependencyOutcome = { status: 'unavailable', definitionVersion: dependency.definitionVersion }
+    expect(second.runtime.reconcileCompletion(agent)).toBe(false)
+    dependencyOutcome = { status: 'achieved', definitionVersion: dependency.definitionVersion, nativeCompletion: 'complete' }
     expect(second.runtime.reconcileCompletion(agent)).toBe(true)
     expect(completeCalls).toBe(1)
   })

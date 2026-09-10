@@ -4,9 +4,9 @@ import { isAbsolute, dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { GoalStoreError } from './types.js'
-import type { GoalCheckpoint, GoalDefinition, GoalRecord, GoalScope, NativeGoalState } from './types.js'
+import type { GoalCheckpoint, GoalDefinition, GoalDependencyBinding, GoalRecord, GoalScope, NativeGoalState } from './types.js'
 
-const schemaVersion = 2
+const schemaVersion = 3
 const message = 'goal store operation rejected'
 const phases = new Set<NativeGoalState['phase']>(['active', 'paused', 'blocked', 'complete', 'cleared'])
 
@@ -77,7 +77,7 @@ function validateSchema(database: DatabaseSync): void {
         PRIMARY KEY(scope_json, session_id),
         FOREIGN KEY(record_id) REFERENCES goal_records(id) ON DELETE RESTRICT
       ) STRICT, WITHOUT ROWID;
-      PRAGMA user_version = 2;
+      PRAGMA user_version = 3;
       COMMIT;
     `)
   }
@@ -101,6 +101,15 @@ function validateSchema(database: DatabaseSync): void {
     validateStoredPayloads(database)
     database.exec('PRAGMA user_version = 2; COMMIT;')
     version = 2
+  }
+  if (version === 2) {
+    // v2 checkpoints stored dependency IDs only. Keep them readable but
+    // unresolved; only a new owner checkpoint can bind exact definitions.
+    validateStoredPayloads(database)
+    const forged = database.prepare("SELECT 1 AS found FROM goal_records WHERE json_type(checkpoint_json, '$.dependencyBindings') IS NOT NULL UNION ALL SELECT 1 AS found FROM goal_history WHERE kind = 'checkpoint' AND json_type(payload_json, '$.dependencyBindings') IS NOT NULL LIMIT 1").get()
+    if (forged !== undefined) fail('schema')
+    database.exec('PRAGMA user_version = 3;')
+    version = 3
   }
   if (version !== 0 && version !== schemaVersion) fail('schema')
   const expected = JSON.stringify(['goal_focus', 'goal_history', 'goal_records'])
@@ -196,8 +205,23 @@ function definitionFromHistory(natives: readonly NativeGoalState[]): GoalDefinit
   return freeze({ version, digest: acceptanceDigest({ objective }), objective })
 }
 
+function definitionsFromHistory(natives: readonly NativeGoalState[]): readonly GoalDefinition[] {
+  const definitions: GoalDefinition[] = []
+  for (const native of natives) {
+    const previous = definitions.at(-1)
+    if (previous?.objective === native.objective) continue
+    definitions.push(freeze({ version: definitions.length + 1, digest: acceptanceDigest({ objective: native.objective }), objective: native.objective }))
+  }
+  return definitions
+}
+
 function checkpointInput(value: unknown): GoalCheckpoint {
-  const input = object(value, ['nextStep', 'blockers', 'assumptions', 'evidenceRefs', 'dependencies'])
+  if (!plain(value)) fail('invalid-input')
+  const names = Object.getOwnPropertyNames(value)
+  const expected = ['nextStep', 'blockers', 'assumptions', 'evidenceRefs', 'dependencies']
+  if (!same(names.sort(), (names.includes('dependencyBindings') ? [...expected, 'dependencyBindings'] : expected).sort())) fail('invalid-input')
+  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) if (!('value' in descriptor) || !descriptor.enumerable) fail('invalid-input')
+  const input = value as Record<string, unknown>
   const blockers = array(input.blockers, 16).map(item => text(item, 2000))
   const assumptions = array(input.assumptions, 16).map(item => {
     const assumption = object(item, ['statement', 'expiresAt'])
@@ -206,7 +230,19 @@ function checkpointInput(value: unknown): GoalCheckpoint {
   const evidenceRefs = array(input.evidenceRefs, 32).map(item => text(item, 512))
   const dependencies = array(input.dependencies, 16).map(item => text(item, 512))
   if (new Set(dependencies).size !== dependencies.length) fail('invalid-input')
-  return freeze({ nextStep: text(input.nextStep, 4000, 0), blockers, assumptions, evidenceRefs, dependencies })
+  let dependencyBindings: readonly GoalDependencyBinding[] | undefined
+  if (input.dependencyBindings !== undefined) {
+    dependencyBindings = array(input.dependencyBindings, 16).map(item => {
+      const binding = object(item, ['goalId', 'definitionVersion', 'definitionDigest'])
+      const definitionDigest = text(binding.definitionDigest, 64)
+      if (!/^[a-f0-9]{64}$/u.test(definitionDigest)) fail('invalid-input')
+      return freeze({ goalId: text(binding.goalId, 512), definitionVersion: integer(binding.definitionVersion, 1), definitionDigest })
+    })
+    if (new Set(dependencyBindings.map(binding => binding.goalId)).size !== dependencyBindings.length
+      || !same(dependencyBindings.map(binding => binding.goalId), dependencies)) fail('invalid-input')
+  }
+  return freeze({ nextStep: text(input.nextStep, 4000, 0), blockers, assumptions, evidenceRefs, dependencies,
+    ...(dependencyBindings === undefined ? {} : { dependencyBindings }) })
 }
 
 function freeze<T>(value: T): T {
@@ -264,6 +300,24 @@ function validateStoredPayloads(database: DatabaseSync): void {
         || stored.row.updated_at !== recordedAt || !same(currentNative, stored.native) || !same(currentCheckpoint, stored.checkpoint)
         || !same(historyDefinition, stored.definition)) fail('schema')
     }
+    for (const [id, stored] of byId) {
+      for (const dependencyId of stored.checkpoint.dependencies) {
+        const dependency = byId.get(dependencyId)
+        if (!dependency || !same(dependency.scope, stored.scope) || dependencyId === id) fail('schema')
+      }
+      const walksTo = (current: string, seen: Set<string>): boolean => {
+        if (current === id) return true
+        if (seen.has(current)) return false
+        seen.add(current)
+        return (byId.get(current)?.checkpoint.dependencies ?? []).some(next => walksTo(next, seen))
+      }
+      if (stored.checkpoint.dependencies.some(dependency => walksTo(dependency, new Set()))) fail('schema')
+      for (const binding of stored.checkpoint.dependencyBindings ?? []) {
+        const events = historyById.get(binding.goalId) ?? []
+        const definitions = definitionsFromHistory(events.filter(event => event.kind === 'native').map(event => nativeInput(parse(event.payload_json))))
+        if (!definitions.some(definition => definition.version === binding.definitionVersion && definition.digest === binding.definitionDigest)) fail('schema')
+      }
+    }
     const focus = database.prepare('SELECT scope_json, session_id, record_id FROM goal_focus').all() as Array<{ scope_json: string; session_id: string; record_id: string }>
     for (const row of focus) {
       const focusScope = scopeInput(parse(row.scope_json)); const sessionId = text(row.session_id, 512); const recordId = text(row.record_id, 512)
@@ -309,6 +363,18 @@ export class GoalStore {
       return (byId.get(current)?.checkpoint.dependencies ?? []).some(next => walksTo(next, seen))
     }
     if (checkpoint.dependencies.some(dependency => walksTo(dependency, new Set()))) fail('invalid-input')
+  }
+
+  #bindDependencies(scope: GoalScope, checkpoint: GoalCheckpoint): GoalCheckpoint {
+    const bindings = checkpoint.dependencies.map(goalId => {
+      const dependency = this.#read(goalId)
+      if (!dependency) fail('not-found')
+      const current = dependency as GoalRecord
+      if (!same(current.scope, scope)) fail('not-found')
+      const definition = current.definition
+      return freeze({ goalId, definitionVersion: definition.version, definitionDigest: definition.digest })
+    })
+    return freeze({ ...checkpoint, dependencyBindings: bindings })
   }
 
   observe(scopeValue: GoalScope, nativeValue: NativeGoalState, allowCreate: boolean): GoalRecord | undefined {
@@ -380,14 +446,15 @@ export class GoalStore {
   }
 
   checkpoint(scopeValue: GoalScope, idValue: string, expectedVersion: number, checkpointValue: GoalCheckpoint): GoalRecord {
-    const scope = scopeInput(scopeValue); const id = text(idValue, 512); integer(expectedVersion, 1); const checkpoint = checkpointInput(checkpointValue)
+    const scope = scopeInput(scopeValue); const id = text(idValue, 512); integer(expectedVersion, 1); const requested = checkpointInput(checkpointValue)
     return this.#transaction(() => {
       const found = this.#read(id)
       if (!found) throw new GoalStoreError('not-found')
       if (!same(found.scope, scope)) throw new GoalStoreError('not-found')
       const existing: GoalRecord = found
       if (existing.version !== expectedVersion) fail('conflict')
-      this.#validateDependencies(scope, id, checkpoint)
+      this.#validateDependencies(scope, id, requested)
+      const checkpoint = this.#bindDependencies(scope, requested)
       const updatedAt = Math.max(existing.updatedAt, Date.now())
       const next: GoalRecord = freeze({ ...existing, checkpoint, version: existing.version + 1, updatedAt })
       this.#database.prepare('UPDATE goal_records SET checkpoint_json = ?, version = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(checkpoint), next.version, updatedAt, id)

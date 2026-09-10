@@ -45,16 +45,26 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   }
   // Unit seam only. Actual Delivery owner/turn handling is covered separately
   // in assistant-delivery's real runtime integration test.
+  const resumeScheduledGoal = vi.fn(async (_input: { beforeResume(agent: Agent): void }): Promise<{ outcome: 'denied' | 'unknown'; dispatched: boolean; quiescent: boolean }> => ({ outcome: 'denied', dispatched: false, quiescent: false }))
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: attestation,
     currentPreferenceTurn: (agent: Agent) => human.has(agent) ? attestation(agent) : undefined,
     goalWakeResultVersion: () => 1, goalWakeSettlementVersion: () => 1,
+    resumeScheduledGoal,
     validateOwnerRoute: ({ authorityId, principalId, workspace, agentPreset }: { authorityId: string; principalId: string; workspace: string; agentPreset: string }) => {
       if (!routeAvailable) throw new Error('owner route revoked')
       return { authorityId, principalId, principalRecordId: `record-${principalId}`, principalVersion: 1, workspace, agentPreset }
     } } as never)
   ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }),
     evaluateAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }), evaluate: () => ({ effect: allowed ? 'allow' : 'deny' }), getBudgetConfig: () => ({ metric: 'automation-runs' }) } as never)
-  ctx.provide('assistantAutomations' as never, { registerHostExecutor: () => () => {} } as never)
+  let hostExecutor: { descriptor: { catalogDigest: string }; execute(input: unknown): Promise<unknown> } | undefined
+  const automationHashes = new Map<string, { definition: unknown; definitionHash: string }>()
+  const reconcileSystem = vi.fn((input: { automationId: string; definition: unknown }) => {
+    const definitionHash = createHash('sha256').update(JSON.stringify(input.definition)).digest('hex')
+    automationHashes.set(input.automationId, { definition: input.definition, definitionHash })
+    return { definition: input.definition }
+  })
+  ctx.provide('assistantAutomations' as never, { registerHostExecutor: (value: typeof hostExecutor) => { hostExecutor = value; return () => { if (hostExecutor === value) hostExecutor = undefined } }, reconcileSystem,
+    inspectSystemOwned: ({ automationId }: { automationId: string }) => ({ definitionHash: automationHashes.get(automationId)?.definitionHash, definition: automationHashes.get(automationId)?.definition, latestTerminalRuns: {} }) } as never)
   ctx.provide('eventTriggers' as never, { sourceSnapshot: () => ({ protocol: 'dsh-event-source/v1', sourceId: 'event-triggers:file', kind: 'file', version: '1', configDigest: 'a'.repeat(64), target: { automationId: 'automation' }, highWaterSequence: 0 }), firstEventAfter: () => undefined, subscribeSourceChanges: () => () => {} } as never)
   if (duringGoalChange !== undefined) ctx.on('goal/changed', ({ agent }) => duringGoalChange(agent))
   const path = databasePath ?? join(root, 'goals.sqlite')
@@ -67,7 +77,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
     cleanups.push(() => handle.dispose())
     return handle.agent
   }
-  return { ctx, root, path, plugin, owners, human, create, async dispose(agent: Agent) { await handles.get(agent)?.dispose() }, revokeRoute() { routeAvailable = false }, restoreRoute() { routeAvailable = true }, deny() { allowed = false }, denyAction(action: string) { deniedActions.add(action) }, service: ctx.assistantGoals }
+  return { ctx, root, path, plugin, owners, human, create, reconcileSystem, resumeScheduledGoal, get hostExecutor() { return hostExecutor }, async dispose(agent: Agent) { await handles.get(agent)?.dispose() }, revokeRoute() { routeAvailable = false }, restoreRoute() { routeAvailable = true }, deny() { allowed = false }, denyAction(action: string) { deniedActions.add(action) }, service: ctx.assistantGoals }
 }
 const documentAuthority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 1_024 }
 const [compiledDocumentAuthority] = createVerifierAuthorities({ authorities: [documentAuthority] })
@@ -348,6 +358,30 @@ describe('owner-scoped native goal context', () => {
     expect(f.service.taskContext(agent)?.goal.id).toBe(edited.id)
     f.ctx.goals.complete(agent, { id: edited.native.goalId as never, revision: edited.native.revision })
     expect(f.service.taskContext(agent)).toBeUndefined()
+  })
+
+  it('projects bounded dependency status into task and model context without treating native completion as achievement', async () => {
+    const f = await harness(undefined, 4096)
+    const dependencyAgent = await f.create('task-context-dependency', 'owner')
+    const parentAgent = await f.create('task-context-parent', 'owner')
+    f.human.add(dependencyAgent); f.human.add(parentAgent)
+    const dependency = f.service.create(dependencyAgent, 'Produce prerequisite evidence')
+    f.ctx.goals.complete(dependencyAgent, f.ctx.goals.get(dependencyAgent)!)
+    const parent = f.service.create(parentAgent, 'Continue only after prerequisite acceptance')
+    const saved = f.service.checkpoint(parentAgent, parent.id, parent.version, { ...checkpoint, dependencies: [dependency.id] })
+
+    expect(f.service.taskContext(parentAgent)?.checkpoint.dependencies).toEqual([{
+      goalId: dependency.id, definitionVersion: dependency.definition.version, definitionDigest: dependency.definition.digest,
+      status: 'unknown', nativePhase: 'complete',
+    }])
+    const context = f.service.snapshot(parentAgent)
+    expect(context.length).toBeLessThanOrEqual(4096)
+    expect(context).toContain('dependencyStatus')
+    expect(context).toContain('unknown')
+    expect(context).not.toContain('"reason":"legacy-unbound"')
+    expect(f.service.inspect(parentAgent, saved.id).checkpoint.dependencyBindings).toEqual([{
+      goalId: dependency.id, definitionVersion: dependency.definition.version, definitionDigest: dependency.definition.digest,
+    }])
   })
 
   it('uses an explicit same-owner focus as retrieval context but hides it when snapshot authority is revoked', async () => {
@@ -715,14 +749,163 @@ describe('owner-scoped native goal context', () => {
     expect(shortVerifier.service.health()).toMatchObject({ awaitingExecution: 0, pendingVerification: 0, pendingReceipts: 0 })
   })
 
-  it('exports a contiguous two-round owner workflow after the final independent whole-goal acceptance', async () => {
+  it('blocks an unachieved cross-goal dependency before a real native resume can call the model or tools, without spinning', async () => {
     const f = await harness(undefined, undefined, undefined, true, true, 2_000)
+    await installNativeGoalRoundDriver(f.ctx)
+    const dependencyObjective = 'Produce the prerequisite before the blocked resume'
+    const parentObjective = 'Run only after the prerequisite is independently achieved'
+    await installGoalVerifier(f, [
+      ...goalProfiles(f.root, dependencyObjective).map(profile => ({ ...profile, id: `blocked-source-${profile.id}` })),
+      ...goalProfiles(f.root, parentObjective).map(profile => ({ ...profile, id: `blocked-parent-${profile.id}` })),
+    ])
+    const dependencyAgent = await f.create('native-dependency-unachieved', 'owner'); f.human.add(dependencyAgent)
+    const dependency = f.service.create(dependencyAgent, dependencyObjective, 3)
+    f.service.control(dependencyAgent, { goalId: dependency.id, expectedRevision: dependency.native.revision, operation: 'pause' })
+
+    const parentAgent = await f.create('native-dependency-blocked-parent', 'owner'); f.human.add(parentAgent)
+    const parent = f.service.create(parentAgent, parentObjective, 3)
+    const paused = f.service.control(parentAgent, { goalId: parent.id, expectedRevision: parent.native.revision, operation: 'pause' })
+    const checkpointed = f.service.checkpoint(parentAgent, paused.id, paused.version, { ...checkpoint, dependencies: [dependency.id] })
+    expect(f.service.taskContext(parentAgent)).toBeUndefined()
+
+    const tool = vi.fn(async () => ({ result: 'must not execute' }))
+    f.ctx.tools.register(defineTool({ name: 'dependency_blocked_probe', description: 'Must stay behind the dependency gate', parameters: {},
+      output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, value) => [{ type: 'text', text: value.result }] }, execute: tool }))
+    let modelRequests = 0
+    class Adapter extends LlmAdapter { async *stream(): AsyncIterable<StreamChunk> {
+      modelRequests += 1
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id: ToolCallId('blocked-dependency-probe'), name: 'dependency_blocked_probe', argumentsDelta: '{}' }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('blocked-dependency-probe'), name: 'dependency_blocked_probe', arguments: '{}' } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    } }
+    f.ctx.llm.registerAdapter(['fixture'], new Adapter())
+
+    const resumed = f.ctx.goals.resume(parentAgent, { id: checkpointed.native.goalId as never, revision: checkpointed.native.revision })
+    await parentAgent.whenIdle(); await f.service.whenIdle()
+    const admittedMessages = () => parentAgent.session.snapshotEvents().filter(event => event.type === 'user/message'
+      && event.data.source.kind === 'goal' && event.data.source.goalId === resumed.id)
+    expect(admittedMessages()).toHaveLength(0)
+    expect(f.ctx.goals.get(parentAgent)).toMatchObject({ roundsStarted: 0, maxGoalRounds: 3, activation: 'armed' })
+    expect(modelRequests).toBe(0)
+    expect(tool).not.toHaveBeenCalled()
+    expect(f.service.executionRuns(parentAgent, checkpointed.id)).toEqual([])
+
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await parentAgent.whenIdle(); await f.service.whenIdle()
+    expect(admittedMessages()).toHaveLength(0)
+    expect(f.ctx.goals.get(parentAgent)).toMatchObject({ roundsStarted: 0, activation: 'armed' })
+    expect(modelRequests).toBe(0)
+    expect(tool).not.toHaveBeenCalled()
+  })
+
+  it('admits an exact achieved dependency and settles a running round unknown when that dependency drifts after a side effect', async () => {
+    const f = await harness(undefined, undefined, undefined, true, true, 2_000)
+    await installNativeGoalRoundDriver(f.ctx)
+    const dependencyObjective = 'Produce the accepted dependency artifact'
+    const allowedObjective = 'Consume the exact accepted dependency'
+    const driftObjective = 'Stop after the accepted dependency changes'
+    await writeFile(join(f.root, 'report.md'), 'Step verified\nGoal verified\n')
+    registerReadReportTool(f.ctx, f.root)
+    await installGoalVerifier(f, [
+      ...goalProfiles(f.root, dependencyObjective).map(profile => ({ ...profile, id: `live-source-${profile.id}` })),
+      ...goalProfiles(f.root, allowedObjective).map(profile => ({ ...profile, id: `live-allowed-${profile.id}` })),
+      ...goalProfiles(f.root, driftObjective).map(profile => ({ ...profile, id: `live-drift-${profile.id}` })),
+    ])
+
+    const dependencyAgent = await f.create('native-dependency-achieved', 'owner'); f.human.add(dependencyAgent)
+    let dependency!: ReturnType<AssistantGoalsService['create']>
+    let phase: 'source' | 'allowed' | 'drift' = 'source'
+    let phaseRequests = 0
+    const sideEffects = vi.fn(async () => {
+      if (phase === 'drift') {
+        const native = f.ctx.goals.get(dependencyAgent)!
+        f.ctx.goals.edit(dependencyAgent, { id: native.id, revision: native.revision }, { objective: 'Dependency definition changed after the side effect' })
+      }
+      return { result: 'side effect committed' }
+    })
+    f.ctx.tools.register(defineTool({ name: 'dependency_side_effect', description: 'Perform the parent side effect', parameters: {},
+      output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, value) => [{ type: 'text', text: value.result }] }, execute: sideEffects }))
+    class Adapter extends LlmAdapter { async *stream(): AsyncIterable<StreamChunk> {
+      phaseRequests += 1
+      if (phaseRequests === 1) {
+        const name = phase === 'source' ? 'read_report' : 'dependency_side_effect'
+        const id = ToolCallId(`${phase}-dependency-tool`)
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: '{}' }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: '{}' } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'Ready for independent verification.' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Ready for independent verification.' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } }
+    f.ctx.llm.registerAdapter(['fixture'], new Adapter())
+
+    dependency = f.service.create(dependencyAgent, dependencyObjective, 1)
+    await vi.waitFor(() => expect(phaseRequests).toBe(2), { timeout: 2_000 })
+    await dependencyAgent.whenIdle(); await f.service.whenIdle()
+    const achieved = f.service.inspect(dependencyAgent, dependency.id)
+    expect(achieved.native).toMatchObject({ phase: 'complete' })
+    expect(f.service.inspectGoalOutcome(dependencyAgent, dependency.id)).toMatchObject({ status: 'achieved', nativeCompletion: 'complete' })
+
+    const prepareParent = async (sessionId: string, objective: string) => {
+      const agent = await f.create(sessionId, 'owner'); f.human.add(agent)
+      const created = f.service.create(agent, objective, 1)
+      const paused = f.service.control(agent, { goalId: created.id, expectedRevision: created.native.revision, operation: 'pause' })
+      const saved = f.service.checkpoint(agent, paused.id, paused.version, { ...checkpoint, dependencies: [dependency.id] })
+      return { agent, saved }
+    }
+
+    const allowed = await prepareParent('native-dependency-allowed-parent', allowedObjective)
+    phase = 'allowed'; phaseRequests = 0
+    f.service.control(allowed.agent, { goalId: allowed.saved.id, expectedRevision: allowed.saved.native.revision, operation: 'resume' })
+    await vi.waitFor(() => expect(phaseRequests).toBe(2), { timeout: 2_000 })
+    await allowed.agent.whenIdle(); await f.service.whenIdle()
+    expect(sideEffects).toHaveBeenCalledTimes(1)
+    expect(f.service.executionRuns(allowed.agent, allowed.saved.id)).toMatchObject([{
+      intent: { dependencies: [{ goalId: dependency.id, definitionVersion: achieved.definition.version, definitionDigest: achieved.definition.digest }] },
+      execution: { status: 'succeeded', quiescent: true },
+    }])
+
+    const drifting = await prepareParent('native-dependency-drifting-parent', driftObjective)
+    phase = 'drift'; phaseRequests = 0
+    f.service.control(drifting.agent, { goalId: drifting.saved.id, expectedRevision: drifting.saved.native.revision, operation: 'resume' })
+    await vi.waitFor(() => expect(sideEffects).toHaveBeenCalledTimes(2), { timeout: 2_000 })
+    await drifting.agent.whenIdle(); await f.service.whenIdle()
+    expect(phaseRequests).toBe(1)
+    const toolResults = drifting.agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
+      .flatMap(event => event.data.message.content).filter(block => block.type === 'tool-result' && block.toolCallId === 'drift-dependency-tool')
+    expect(toolResults).toMatchObject([{ isError: false }])
+    expect(f.service.executionRuns(drifting.agent, drifting.saved.id)).toMatchObject([{
+      intent: { dependencies: [{ goalId: dependency.id, definitionVersion: achieved.definition.version, definitionDigest: achieved.definition.digest }] },
+      execution: { status: 'unknown', quiescent: false },
+    }])
+    const described = f.service.describe(f.service.inspect(drifting.agent, drifting.saved.id))
+    expect(described).toContain('"status":"stale"')
+    expect(described).toContain('"reason":"definition-changed"')
+  })
+
+  it('exports a contiguous two-round owner workflow after the final independent whole-goal acceptance', async () => {
+    const callsBudget = { mode: 'calls' as const, modelCalls: 10, toolCalls: 10, durationMs: 120_000, maxOutputTokensPerCall: 500, routes: [{ provider: 'fixture', model: 'fixture' }] }
+    const f = await harness(undefined, undefined, undefined, true, true, 2_000, {
+      preauthorizedSchedule: true, executionBudget: callsBudget,
+      backgroundWake: { ...scheduleWake, runTimeoutMs: 1_000 },
+    })
     await installNativeGoalRoundDriver(f.ctx)
     const agent = await f.create('verified-workflow-source', 'owner'); f.human.add(agent)
     const objective = 'Produce the independently verified workflow report'
+    const parentObjective = 'Use the independently accepted workflow output'
+    const blockedParentObjective = 'Do not run after the dependency is cleared'
     await writeFile(join(f.root, 'report.md'), 'Step verified\n')
     registerReadReportTool(f.ctx, f.root)
-    await installGoalVerifier(f, goalProfiles(f.root, objective))
+    await installGoalVerifier(f, [
+      ...goalProfiles(f.root, objective),
+      ...goalProfiles(f.root, parentObjective, { validityMs: 120_000 }).map(profile => ({ ...profile, id: `dependency-${profile.id}` })),
+      ...goalProfiles(f.root, blockedParentObjective, { validityMs: 120_000 }).map(profile => ({ ...profile, id: `blocked-dependency-${profile.id}` })),
+    ])
     let record!: ReturnType<AssistantGoalsService['create']>
     let requests = 0
     class Adapter extends LlmAdapter {
@@ -765,14 +948,55 @@ describe('owner-scoped native goal context', () => {
     expect(requests).toBe(5)
     expect(complete.native).toMatchObject({ phase: 'complete', roundsStarted: 2, revision: record.native.revision + 2 })
     expect(f.service.inspectGoalOutcome(agent, record.id)).toMatchObject({ status: 'achieved', nativeCompletion: 'complete' })
+    const parentAgent = await f.create('verified-dependency-parent', 'owner'); f.human.add(parentAgent)
+    const parent = f.service.create(parentAgent, parentObjective, 1)
+    f.service.checkpoint(parentAgent, parent.id, parent.version, { ...checkpoint, dependencies: [record.id] })
+    expect(f.service.taskContext(parentAgent)?.checkpoint.dependencies).toMatchObject([{
+      goalId: record.id, definitionVersion: complete.definition.version, definitionDigest: complete.definition.digest,
+      status: 'achieved', nativePhase: 'complete',
+    }])
+    const wakeAt = Date.now() + 1_000
+    const scheduled = await f.service.schedule(parentAgent, parent.id, parent.native.revision, wakeAt, new AbortController().signal)
+    expect(scheduled).toMatchObject({ state: 'scheduled', intent: { dependencies: [{ goalId: record.id,
+        definitionVersion: complete.definition.version, definitionDigest: complete.definition.digest }] } })
+    expect(f.reconcileSystem).toHaveBeenCalledTimes(2)
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(wakeAt)
+    f.resumeScheduledGoal.mockImplementationOnce(async input => { input.beforeResume(parentAgent); return { outcome: 'unknown', dispatched: true, quiescent: false } })
+    const executor = f.hostExecutor!
+    await expect(executor.execute({ occurrenceId: 'dependency-wake-occurrence', automationId: scheduled.intent.id,
+      definitionHash: scheduled.definitionHash, executionMode: 'production',
+      targetScope: { workspace: scheduled.intent.scope.workspace, preset: scheduled.intent.scope.preset },
+      principal: scheduled.intent.scope.principalId, ownerRouteId: scheduled.intent.ownerRouteId,
+      activationNonce: scheduled.intent.id, catalogDigest: executor.descriptor.catalogDigest, signal: new AbortController().signal }))
+      .resolves.toMatchObject({ outcome: 'unknown', sideEffectState: 'unknown' })
+    expect(f.resumeScheduledGoal).toHaveBeenCalledOnce()
+
+    vi.useRealTimers()
+    // Freeze the accepted source before the dependency is explicitly cleared.
+    // The current-workflow API intentionally requires that exact native goal to
+    // remain current and complete; historical reads below remain valid later.
+    const exported = f.service.inspectVerifiedWorkflowSource(agent, record.id)
+    const historical = f.service.inspectVerifiedWorkflowRun(agent, record.id, exported.runId)
+    expect(historical).toEqual(exported)
+    const unresolvedAgent = await f.create('unresolved-dependency', 'owner'); f.human.add(unresolvedAgent)
+    const unresolved = f.service.create(unresolvedAgent, parentObjective, 1)
+    const blockedAgent = await f.create('blocked-dependency-parent', 'owner'); f.human.add(blockedAgent)
+    const blocked = f.service.create(blockedAgent, blockedParentObjective, 1)
+    const paused = f.service.control(blockedAgent, { goalId: blocked.id, expectedRevision: blocked.native.revision, operation: 'pause' })
+    const checkpointed = f.service.checkpoint(blockedAgent, paused.id, paused.version, { ...checkpoint, dependencies: [unresolved.id] })
+    expect(() => f.service.control(blockedAgent, { goalId: checkpointed.id, expectedRevision: checkpointed.native.revision, operation: 'resume' }))
+      .toThrow('exact independently achieved dependencies are required')
+    const beforeBlockedResume = requests
+    f.ctx.goals.resume(blockedAgent, { id: checkpointed.native.goalId as never, revision: checkpointed.native.revision })
+    await blockedAgent.whenIdle()
+    expect(requests).toBe(beforeBlockedResume)
+    expect(f.service.executionRuns(blockedAgent, checkpointed.id)).toEqual([])
 
     // The harness keeps its owner-turn seam asserted; capture happens only after
     // the autonomous source turn has completed and been independently accepted.
     const sourceResults = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
     expect(sourceResults.some(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError === true)), JSON.stringify(sourceResults)).toBe(false)
-    const exported = f.service.inspectVerifiedWorkflowSource(agent, record.id)
-    const historical = f.service.inspectVerifiedWorkflowRun(agent, record.id, exported.runId)
-    expect(historical).toEqual(exported)
+    expect(f.service.inspectVerifiedWorkflowRun(agent, record.id, exported.runId)).toEqual(exported)
     await f.ctx.plugin(SessionQueryEngine, [])
     const ownerInput = { ownerRouteId: 'owner-route', principalId: 'owner', workspace: f.root,
       preset: 'primary', sessionId: String(agent.session.id), goalId: record.id }

@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it } from 'vitest'
 import { GoalStore } from '../src/store.ts'
+import { goalDependencies } from '../src/dependency.ts'
 import { GoalStoreError } from '../src/types.ts'
 import type { GoalCheckpoint, GoalScope, NativeGoalState } from '../src/types.ts'
 
@@ -186,6 +187,83 @@ describe('GoalStore', () => {
     const secondSaved = store.checkpoint(scope(), second.id, 1, checkpoint({ dependencies: [first.id] }))
     expect(secondSaved.version).toBe(2)
     expect(() => store.checkpoint(scope(), first.id, 1, checkpoint({ dependencies: [second.id] }))).toThrow(GoalStoreError)
+    store.close()
+  })
+
+  it('freezes dependency definition identities at checkpoint time and preserves them across objective drift and restart', async () => {
+    const path = await database()
+    const store = new GoalStore(path)
+    const dependency = store.observe(scope(), native({ sessionId: 'dependency-session', goalId: 'dependency-goal', objective: 'Publish version one' }), true)!
+    const parent = store.observe(scope(), native({ sessionId: 'parent-session', goalId: 'parent-goal', objective: 'Use the published result' }), true)!
+    const saved = store.checkpoint(scope(), parent.id, parent.version, checkpoint({ dependencies: [dependency.id], dependencyBindings: [{
+      goalId: dependency.id, definitionVersion: 999, definitionDigest: 'f'.repeat(64),
+    }] }))
+
+    expect(saved.checkpoint.dependencyBindings).toEqual([{ goalId: dependency.id, definitionVersion: dependency.definition.version, definitionDigest: dependency.definition.digest }])
+    expect(Object.isFrozen(saved.checkpoint.dependencyBindings)).toBe(true)
+    expect(Object.isFrozen(saved.checkpoint.dependencyBindings?.[0])).toBe(true)
+    const edited = store.observe(scope(), native({ sessionId: 'dependency-session', goalId: 'dependency-goal', revision: 2, objective: 'Publish version two', updatedAt: 200 }), false)!
+    expect(edited.definition.version).toBe(dependency.definition.version + 1)
+    expect(store.get(scope(), parent.id)?.checkpoint.dependencyBindings).toEqual(saved.checkpoint.dependencyBindings)
+    store.close()
+
+    const reopened = new GoalStore(path)
+    const persisted = reopened.get(scope(), parent.id)!
+    expect(persisted.checkpoint.dependencyBindings).toEqual(saved.checkpoint.dependencyBindings)
+    expect(goalDependencies(persisted, { get: (_scope, goalId) => reopened.get(scope(), goalId),
+      outcome: () => ({ status: 'achieved', definitionVersion: edited.definition.version, nativeCompletion: 'complete' }) }))
+      .toMatchObject([{ goalId: dependency.id, status: 'stale', reason: 'definition-changed' }])
+    reopened.close()
+  })
+
+  it('migrates v2 ID-only dependencies as legacy unresolved and never silently binds them on restart', async () => {
+    const path = await database()
+    const store = new GoalStore(path)
+    const dependency = store.observe(scope(), native({ sessionId: 'legacy-dependency-session', goalId: 'legacy-dependency-goal' }), true)!
+    const parent = store.observe(scope(), native({ sessionId: 'legacy-parent-session', goalId: 'legacy-parent-goal' }), true)!
+    const saved = store.checkpoint(scope(), parent.id, parent.version, checkpoint({ dependencies: [dependency.id] }))
+    store.close()
+
+    const legacy = { ...saved.checkpoint }
+    delete legacy.dependencyBindings
+    const raw = new DatabaseSync(path)
+    raw.prepare('UPDATE goal_records SET checkpoint_json = ? WHERE id = ?').run(JSON.stringify(legacy), parent.id)
+    raw.prepare("UPDATE goal_history SET payload_json = ? WHERE record_id = ? AND kind = 'checkpoint' AND sequence = (SELECT MAX(sequence) FROM goal_history WHERE record_id = ?)").run(JSON.stringify(legacy), parent.id, parent.id)
+    raw.exec('PRAGMA user_version = 2;')
+    raw.close()
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const reopened = new GoalStore(path)
+      const migrated = reopened.get(scope(), parent.id)!
+      expect(migrated.checkpoint).toEqual(legacy)
+      expect(goalDependencies(migrated, { get: () => dependency, outcome: () => ({ status: 'achieved', definitionVersion: 1, nativeCompletion: 'complete' }) }))
+        .toEqual([{ goalId: dependency.id, status: 'stale', reason: 'legacy-unbound' }])
+      reopened.close()
+    }
+  })
+
+  it('rejects a v2 database that forges Host-only dependency bindings', async () => {
+    const path = await database()
+    const store = new GoalStore(path)
+    const dependency = store.observe(scope(), native({ sessionId: 'forged-dependency-session', goalId: 'forged-dependency-goal' }), true)!
+    const parent = store.observe(scope(), native({ sessionId: 'forged-parent-session', goalId: 'forged-parent-goal' }), true)!
+    const saved = store.checkpoint(scope(), parent.id, parent.version, checkpoint({ dependencies: [dependency.id] }))
+    store.close()
+    const raw = new DatabaseSync(path)
+    raw.exec('PRAGMA user_version = 2;')
+    raw.close()
+    expect(() => new GoalStore(path)).toThrow(GoalStoreError)
+    expect(saved.checkpoint.dependencyBindings).toHaveLength(1)
+  })
+
+  it('rejects malformed persisted dependency bindings instead of trusting caller metadata', () => {
+    const store = new GoalStore(':memory:')
+    const dependency = store.observe(scope(), native({ sessionId: 'digest-dependency-session', goalId: 'digest-dependency-goal' }), true)!
+    const parent = store.observe(scope(), native({ sessionId: 'digest-parent-session', goalId: 'digest-parent-goal' }), true)!
+    expect(() => store.checkpoint(scope(), parent.id, parent.version, checkpoint({ dependencies: [dependency.id], dependencyBindings: [{
+      goalId: dependency.id, definitionVersion: 1, definitionDigest: 'not-a-sha256',
+    }] }))).toThrow(GoalStoreError)
+    expect(store.get(scope(), parent.id)?.checkpoint.dependencies).toEqual([])
     store.close()
   })
 
