@@ -126,7 +126,21 @@ function publicCandidate(candidate: SkillCandidate, parent?: StoredSkillDefiniti
     ...(candidate.activationComparisonId === undefined ? {} : { activationComparisonId: candidate.activationComparisonId }),
     ...(candidate.deploymentId === undefined ? {} : { deploymentId: candidate.deploymentId }),
     ...(candidate.activationWatchId === undefined ? {} : { activationWatchId: candidate.activationWatchId }),
-    ...(failure === undefined ? {} : { failure: { category: failure.trigger.failureCategory, count: failure.trigger.failures.length, digest: acceptanceDigest(failure) } }),
+    ...(failure === undefined ? {} : { failure: {
+      // Keep the v1 projection stable for existing clients while adding the
+      // bounded repeated-failure aliases. Raw Goal, Session, run, contract,
+      // receipt and trace identities remain private in failureProvenance.
+      protocol: failure.protocol,
+      provenanceDigest: acceptanceDigest(failure),
+      category: failure.trigger.failureCategory,
+      occurrences: failure.trigger.failures.length,
+      taskFamilyId: failure.trigger.taskFamily.id,
+      taskFamilyDefinitionDigest: failure.trigger.taskFamily.definitionDigest,
+      permissionDelta: failure.permissionDelta,
+      rollbackTarget: failure.rollbackTarget,
+      count: failure.trigger.failures.length,
+      digest: acceptanceDigest(failure),
+    } }),
     comparison: { kind: 'structural-only', improvement: 'unmeasured',
       toolsAdded: [...after].filter(tool => !before.has(tool)), toolsRemoved: [...before].filter(tool => !after.has(tool)),
       inputsChanged: acceptanceDigest(parent?.inputs ?? []) !== acceptanceDigest(candidate.definition.inputs),

@@ -187,7 +187,10 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('repeated failures q
     { sessionId: 'failure-session-a', goalId: 'failure-goal-a' }, { sessionId: 'failure-session-b', goalId: 'failure-goal-b' },
   ], minimumOccurrences: 2 }])
   expect(candidate).toMatchObject({ state: 'pending', trigger: 'host-verified-failure:repeated-not-achieved', failure: { category: 'repeated-not-achieved', count: 2, digest: expect.stringMatching(/^[a-f0-9]{64}$/u) }, definition: { name: 'topology-order', source: { goalDefinitionDigest }, inputs: [{ name: 'implementation', stepId: 'write-topology', path: '/content', type: 'string', default: topologyImplementation }], steps: [{ id: 'write-topology', toolName: 'write', arguments: { file_path: 'topology.mjs', content: topologyImplementation } }] } })
-  expect(Object.keys(candidate.failure)).toEqual(['category', 'count', 'digest'])
+  expect(candidate.failure).toMatchObject({ protocol: 'assistant-skills/failure-capture-provenance/v1',
+    provenanceDigest: candidate.failure.digest, category: 'repeated-not-achieved', occurrences: 2, count: 2,
+    taskFamilyId: 'dependency-topological-order', taskFamilyDefinitionDigest: goalDefinitionDigest,
+    rollbackTarget: { name: 'topology-order', version: 1 } })
   expect(JSON.stringify(candidate)).not.toMatch(/failure-(?:session|goal|native|run)|repair-(?:session|native|run)|contractId|receiptDigest|traceDigest|failureProvenance/u)
   const config = { ...baseConfig, externalHoldouts: [{ id: 'positive', version: 1, scope, execution: { image: candidateImage, dockerPath: '/usr/bin/docker', stateRoot, command: '/usr/local/bin/node /workspace/artifact < /workspace/input', artifactPath: 'topology.mjs', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 20000, verificationDurationMs: 10000 }, authority: { executable: process.execPath, args: ['--import', hook, cli, '--config', authorityConfig], publicKey: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: topologyGeneratorDigest },
     canaryAdmission: { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: 'topology-order', parentDefinitionDigest: acceptanceDigest(parent), candidateDefinitionDigest: candidate.definitionDigest,
