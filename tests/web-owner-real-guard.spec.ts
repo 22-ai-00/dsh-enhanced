@@ -1,6 +1,8 @@
 import { describe, expect, test, vi } from 'vitest'
 
 const { createRunGuard, isExperimentToolAllowed, isEventExperimentToolAllowed, experimentToolNames, objective } = await import('../scripts/e2e/web-owner-real-guard.mjs')
+const { templateRenderCanaryTask } = await import('../scripts/e2e/real-canary-helpers.mjs')
+const { templateCanaryFixedToolAllowed, templateCanaryForbiddenTool } = await import('../scripts/e2e/web-owner-real-canary-guard.mjs')
 
 describe('real-model browser experiment guard', () => {
   test('allows owner event arming but forbids immediate handoff and arbitrary triggers', () => {
@@ -54,6 +56,29 @@ describe('real-model browser experiment guard', () => {
     expect(isExperimentToolAllowed('todo_write', { todos: [] }, '/workspace')).toBe(false)
     expect(isExperimentToolAllowed('bash', { command: 'echo unsafe' }, '/workspace')).toBe(false)
     expect(isExperimentToolAllowed('update_goal', { status: 'complete' }, '/workspace')).toBe(false)
+  })
+
+  test('keeps the template canary negative control executable, semantic, and single-sourced', async () => {
+    const args = { goal_id: 'negative-goal', name: 'template-render', version: 2,
+      inputs_json: JSON.stringify(templateRenderCanaryTask.negativeInputs), invocation_id: 'negative-control-v2' }
+    expect(templateCanaryFixedToolAllowed('skill_run', args, 'negative-run')).toBe(true)
+    expect(templateCanaryFixedToolAllowed('skill_run', { ...args, inputs_json: JSON.stringify({ implementation: `${templateRenderCanaryTask.negativeInputs.implementation} ` }) }, 'negative-run')).toBe(false)
+    expect(templateCanaryForbiddenTool('bash')).toBe(true)
+    expect(templateCanaryForbiddenTool('skill_activate')).toBe(true)
+    expect(templateCanaryForbiddenTool('skill_activate_watched')).toBe(true)
+    const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+    const { spawnSync } = await import('node:child_process')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const directory = await mkdtemp(join(tmpdir(), 'template-negative-'))
+    try {
+      const artifact = join(directory, templateRenderCanaryTask.artifactPath)
+      await writeFile(artifact, templateRenderCanaryTask.negativeInputs.implementation)
+      const results = templateRenderCanaryTask.strictCriteria.map(item => spawnSync(process.execPath, [artifact], { input: item.stdin, encoding: 'utf8' }))
+      expect(results.every(result => result.status === 0)).toBe(true)
+      expect(results.some((result, index) => result.stdout !== templateRenderCanaryTask.strictCriteria[index].expectedStdout)).toBe(true)
+      expect(results.some((result, index) => result.stdout === templateRenderCanaryTask.strictCriteria[index].expectedStdout)).toBe(true)
+    } finally { await rm(directory, { recursive: true, force: true }) }
   })
   test('records intent before dispatch and refuses the next call without dispatching it', async () => {
     const records: unknown[] = []

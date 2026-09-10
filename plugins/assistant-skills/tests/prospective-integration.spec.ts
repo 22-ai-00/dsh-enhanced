@@ -34,7 +34,8 @@ test.skipIf(!existsSync('/usr/bin/docker') || !/^sha256:[a-f0-9]{64}$/u.test(ima
   await writeFile(privateKey, key.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
   await writeFile(configPath, JSON.stringify({ prospective: { generator: 'order-summary/v1' }, privateKeyPath: privateKey, statePath: join(root, 'authority.sqlite'), limits: { maxToolCalls: 2, maxOutputBytes: 4096 } }), { mode: 0o600 })
   const inspectedConfig = JSON.parse((await execFile(process.execPath, [cli, '--inspect-config', configPath])).stdout)
-  expect(inspectedConfig).toEqual({ publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), limits: { maxToolCalls: 2, maxOutputBytes: 4096 } })
+  expect(inspectedConfig).toEqual({ publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString(), profileVersion: 'order-summary/v1', profileDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), generatorDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), limits: { maxToolCalls: 2, maxOutputBytes: 4096 } })
+  expect(inspectedConfig.profileDigest).toBe(inspectedConfig.generatorDigest)
   await expect(stat(join(root, 'authority.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
 
   const workspace = join(root, 'workspace'); await mkdir(workspace, { mode: 0o700 })

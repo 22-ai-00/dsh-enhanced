@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, expect, test } from 'vitest'
-import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantSkillsService } from '../src/service.ts'
 import { generatorDigest } from '../src/prospective-holdout.ts'
 
@@ -75,8 +75,9 @@ test('skill_qualify uses one external process attempt, persists unknown, and exp
   expect(status).toEqual(expect.arrayContaining([
     { id: 'external', version: 1, kind: 'local', executionTool: 'skill_compare', expiresAt: expect.any(Number), cases: 3, repeats: 2, maxComparisons: 1 },
     { id: 'external', version: 1, kind: 'external', executionTool: 'skill_qualify', expiresAt: expect.any(Number), maxComparisons: 1 },
-    { id: 'prospective', version: 1, kind: 'external', executionTool: 'skill_qualify', canaryExecutionTool: 'skill_canary', expiresAt: expect.any(Number), maxComparisons: 1 },
+    { id: 'prospective', version: 1, kind: 'external', executionTool: 'skill_qualify', expiresAt: expect.any(Number), maxComparisons: 1 },
   ]))
+  expect(status.find((entry: { id: string }) => entry.id === 'prospective')).not.toHaveProperty('canaryExecutionTool')
   expect(status).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'foreign' })]))
   expect(JSON.stringify(status)).not.toMatch(/publicKey|datasetDigest|generatorDigest|authority\.mjs|stateRoot/u)
 })
@@ -99,12 +100,20 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('real prospective CL
   const snapshots = new Map<string, unknown>()
   ctx.provide('assistantVerifier' as never, {} as never)
   ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source,
-    inspectWorkflowRunContext: (_agent: Agent, goalId: string) => ({ scope, goalId, sessionId: String(owner.session.id), goalExecutionRunId: `execution-${goalId}`, nativeGoalId: `native-${goalId}`, definition: { version: 1, digest: digest(goalId) } }),
-    inspectOwnerGoalExecution: (input: { goalId: string }) => snapshots.get(input.goalId) ?? {} } as never)
+    inspectWorkflowRunContext: (_agent: Agent, goalId: string) => ({ scope, goalId, sessionId: String(owner.session.id), goalExecutionRunId: `execution-${goalId}`, nativeGoalId: `native-${goalId}`, definition: { version: 1, digest: digest('goal') } }),
+    inspectOwnerGoalExecution: (input: { goalId: string }) => snapshots.get(input.goalId) ?? {},
+    inspectOwnerGoalRunProof: async (input: { goalId: string; runId: string }) => {
+      const invocationId = input.goalId === 'canary-goal' ? 'first-use' : input.goalId === 'later-goal' ? 'second-use' : undefined
+      if (!invocationId) throw new Error('fixture run is unavailable')
+      const payload = { protocol: 'assistant-goals/owner-run-trace/v1' as const, runId: input.runId, turn: 1, nativeRevision: 1, definitionDigest: digest('goal'),
+        outcomeProfile: { id: 'fixture', version: 1, digest: digest('fixture') },
+        steps: [{ id: `call-${input.runId}`, name: 'skill_run', arguments: { goal_id: input.goalId, name: 'saved', version: 2, inputs_json: '{}', invocation_id: invocationId }, outcome: 'succeeded' as const }] }
+      return { ...payload, traceDigest: acceptanceDigest(payload) }
+    } } as never)
   // Explicit independent-acceptance fixtures exercise the production watch consumer.
   // CLI qualification above/below executes real programs; these Goal outcomes do not claim a real verifier run.
   const acceptRun = (run: { goalId: string; goalExecutionRunId: string }, achieved: boolean) => {
-    const now = Date.now(), goal = { id: run.goalId, definitionVersion: 1, definitionDigest: digest(run.goalId), sessionId: String(owner.session.id), nativeGoalId: `native-${run.goalId}` }
+    const now = Date.now(), goal = { id: run.goalId, definitionVersion: 1, definitionDigest: digest('goal'), sessionId: String(owner.session.id), nativeGoalId: `native-${run.goalId}` }
     const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v3', id: `outcome-${run.goalId}`, task: { kind: 'goal-outcome', ref: `assessment-${run.goalId}`, goal: { ...goal, assessmentId: `assessment-${run.goalId}` } },
       scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'record', principalVersion: 1 }, objective: 'Fixture: verify the reused result', profile: { id: 'fixture', version: 1, digest: digest('fixture') },
       criteria: [{ id: 'result', kind: 'target-readback', authority: { id: 'fixture', digest: digest('fixture') }, objectId: 'output', expected: [{ pointer: '/ready', value: true }] }], issuedAt: now - 1000, expiresAt: now + 60000, bounds: { maxDurationMs: 1000, maxEvidenceBytes: 4096 } })
@@ -112,7 +121,7 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('real prospective CL
       results: [{ criterionId: 'result', status: achieved ? 'passed' : 'failed', reason: 'explicit-engineering-fixture', evidence: [] }], startedAt: now, completedAt: now, validUntil: now + 60000 })
     const execution = { status: 'succeeded', quiescent: true, completedAt: now }
     snapshots.set(run.goalId, { storedGoal: { id: run.goalId, scope, definition: { version: 1, digest: goal.definitionDigest }, nativeAtLastObservation: { sessionId: goal.sessionId, goalId: goal.nativeGoalId } },
-      executionRuns: [{ intent: { runId: run.goalExecutionRunId, scope, task: { kind: 'goal-step', goal } }, dispatchedAt: now - 1000, execution }],
+      executionRuns: [{ intent: { runId: run.goalExecutionRunId, scope, task: { kind: 'goal-step', goal: { ...goal, nativeRevision: 1 } } }, dispatchedAt: now - 1000, execution }],
       outcomeAssessments: [{ triggerRunId: run.goalExecutionRunId, contract, dispatchedAt: now - 1000, execution }],
       acceptedTasks: [{ contractId: contract.id, state: 'done', contract, receipt, verifierExecutionObservation: { ...execution, executionRef: contract.task.ref } }] })
     ctx.emit('assistant-verifier/receipt', { taskKind: 'goal-outcome' } as never)
@@ -120,23 +129,32 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('real prospective CL
 
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
   await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(FsPolicy); await ctx.plugin(FileTools)
-  const config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['read', 'write'], externalHoldouts: [{ id: 'positive', version: 1, scope, execution: { image: candidateImage, dockerPath: '/usr/bin/docker', stateRoot, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 20000, verificationDurationMs: 10000 }, authority: { executable: process.execPath, args: ['--import', hook, cli, '--config', authorityConfig], publicKey: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest }, maxComparisons: 1 as const }] }
-  let plugin = await ctx.plugin(AssistantSkillsService, config); cleanups.push(() => plugin.dispose())
+  const baseConfig = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['read', 'write'] }
+  let plugin = await ctx.plugin(AssistantSkillsService, baseConfig); cleanups.push(() => plugin.dispose())
   const execute = (name: string, toolArguments: object) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: toolArguments, signal: new AbortController().signal, agent: owner })
   const json = async (name: string, toolArguments: object) => JSON.parse(((await execute(name, toolArguments)).value as { context: string }).context)
-  await json('skill_save', { goal_id: 'goal', name: 'saved', description: 'save', bindings_json: '[]', expected_version: 0 }); source.steps[0]!.arguments = { file_path: 'result.sh', content: "node -e 'let s=\"\";process.stdin.on(\"data\",c=>s+=c).on(\"end\",()=>{const t={};for(const o of JSON.parse(s))if(o.status!==\"cancelled\")t[o.currency]=(t[o.currency]||0)+o.cents;const r={};for(const k of Object.keys(t).sort())r[k]=t[k];process.stdout.write(JSON.stringify(r)+\"\\n\")})'" }
+  const parent = await json('skill_save', { goal_id: 'goal', name: 'saved', description: 'save', bindings_json: '[]', expected_version: 0 }); source.steps[0]!.arguments = { file_path: 'result.sh', content: "node -e 'let s=\"\";process.stdin.on(\"data\",c=>s+=c).on(\"end\",()=>{const t={};for(const o of JSON.parse(s))if(o.status!==\"cancelled\")t[o.currency]=(t[o.currency]||0)+o.cents;const r={};for(const k of Object.keys(t).sort())r[k]=t[k];process.stdout.write(JSON.stringify(r)+\"\\n\")})'" }
   const candidate = await json('skill_candidate', { goal_id: 'goal', name: 'saved', description: 'candidate', bindings_json: '[]', parent_version: 1, reason: 'synthetic test', trigger: 'test' })
+  const config = { ...baseConfig, externalHoldouts: [{ id: 'positive', version: 1, scope, execution: { image: candidateImage, dockerPath: '/usr/bin/docker', stateRoot, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 20000, verificationDurationMs: 10000 }, authority: { executable: process.execPath, args: ['--import', hook, cli, '--config', authorityConfig], publicKey: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest },
+    canaryAdmission: { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: 'saved', parentDefinitionDigest: acceptanceDigest(parent), candidateDefinitionDigest: candidate.definitionDigest,
+      taskFamily: { goalDefinitionDigest: candidate.definition.source.goalDefinitionDigest, outcomeProfile: { id: 'fixture', version: 1, digest: digest('fixture') } } }, maxComparisons: 1 as const }] }
+  await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config)
+  expect(await json('skill_comparison_status', {})).toEqual([expect.objectContaining({ id: 'positive', executionTool: 'skill_qualify', canaryExecutionTool: 'skill_canary' })])
   const expiresAt = Date.now() + 60000
   const completed = await execute('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 }); expect(completed.isError).toBe(false)
   const deployed = JSON.parse((completed.value as { context: string }).context)
-  expect(deployed).toMatchObject({ replayed: false, definition: { version: 2 }, deployment: { state: 'canary', comparisonId: expect.any(String), ownerRouteId: route.authorityId } })
+  expect(deployed).toMatchObject({ replayed: false, definition: { name: 'saved', version: 2, definitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) }, deployment: { state: 'canary', comparisonId: expect.any(String), admissionDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission), runCount: 0 } })
+  const sensitiveKeys = /"(?:scope|workspace|principalId|principalRecordId|principalVersion|sessionId|nativeGoalId|runId|routeReceipt|ownerRouteId|runIds|observations|input|publicKey|acceptance|receipt[^"]*)":/u
+  expect(JSON.stringify(deployed)).not.toMatch(sensitiveKeys)
   expect(await readFile(marker, 'utf8')).toBe('x'); expect(await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).toMatchObject({ id: deployed.deployment.id, state: 'canary' })
   await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config)
-  expect(await json('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 })).toMatchObject({ replayed: true, deployment: { id: deployed.deployment.id, state: 'canary' } }); expect(await readFile(marker, 'utf8')).toBe('x')
+  const replayed = await json('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 })
+  expect(replayed).toMatchObject({ replayed: true, definition: { name: 'saved', version: 2 }, deployment: { id: deployed.deployment.id, state: 'canary', runCount: 0 } })
+  expect(JSON.stringify(replayed)).not.toMatch(sensitiveKeys); expect(await readFile(marker, 'utf8')).toBe('x')
   const firstRun = await json('skill_run', { goal_id: 'canary-goal', name: 'saved', version: 2, inputs_json: '{}', invocation_id: 'first-use' })
   expect(firstRun.state).toBe('succeeded'); expect(await readFile(join(root, 'result.sh'), 'utf8')).toContain('JSON.parse')
   expect((await execute('skill_run', { goal_id: 'too-early', name: 'saved', version: 2, inputs_json: '{}', invocation_id: 'too-early' })).isError).toBe(true)
-  expect((await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).runIds).toEqual([firstRun.id])
+  expect(await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).toMatchObject({ id: deployed.deployment.id, runCount: 1 })
   acceptRun(firstRun, true)
   await expect.poll(async () => (await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).state).toBe('promoted')
   await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config)
@@ -148,5 +166,6 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('real prospective CL
   expect((await json('skill_status', {}))[0].version).toBe(3)
   const retry = await json('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 })
   expect(retry).toMatchObject({ replayed: true, deployment: { state: 'rolled-back' } })
+  expect(JSON.stringify(retry)).not.toMatch(sensitiveKeys)
   expect((await json('skill_status', {}))[0].version).toBe(3); expect(await readFile(marker, 'utf8')).toBe('x')
 }, 180000)

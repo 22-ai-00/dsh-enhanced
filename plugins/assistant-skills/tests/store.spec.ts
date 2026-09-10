@@ -3,8 +3,10 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createDefinition, type VerifiedWorkflowSource } from '../src/definition.ts'
+import { createDefinition, failureSummaryEvidenceDigest, type HostFailureEvidenceSummary, type VerifiedWorkflowSource } from '../src/definition.ts'
+import { captureFailureCandidateProvenance } from '../src/capture-expansion.ts'
 import { SkillStore } from '../src/store.ts'
+import type { SkillCandidate, SkillDeploymentAdmission } from '../src/store.ts'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 
 const roots: string[] = []
@@ -17,6 +19,20 @@ function definition() {
     acceptance: { contractId: 'contract', contractDigest: 'b'.repeat(64), receiptDigest: 'c'.repeat(64), verifiedAt: 1, validUntil: 2 }, steps: [{ id: 'read', toolName: 'files_read', arguments: { path: '/tmp/a' } }] }
   return createDefinition(source, { name: 'read-report', description: 'Read a report.', bindings: [{ name: 'path', stepId: 'read', path: '/path' }] }, ['files_read'])
 }
+function admission(candidate: SkillCandidate): SkillDeploymentAdmission {
+  return { protocol: 'assistant-skills/canary-admission/v1', skillName: candidate.definition.name, parentDefinitionDigest: candidate.parentDigest!, candidateDefinitionDigest: acceptanceDigest(candidate.definition),
+    taskFamily: { goalDefinitionDigest: candidate.definition.source.goal.definition.digest, outcomeProfile: { id: 'canary-outcome', version: 1, digest: 'e'.repeat(64) } } }
+}
+function failureCandidate(parent: ReturnType<SkillStore['save']>) {
+  const objective = 'Read.', digest = acceptanceDigest({ objective }), now = Date.now()
+  const repair: VerifiedWorkflowSource = { protocol: 'assistant-goals/verified-workflow-source/v1', scope, goal: { id: 'repair-goal', definition: { version: 1, digest, objective }, sessionId: 'repair-session', nativeGoalId: 'repair-native' },
+    runId: 'repair-run', turn: 2, acceptance: { contractId: 'repair-contract', contractDigest: '4'.repeat(64), receiptDigest: '5'.repeat(64), verifiedAt: now - 1_000, validUntil: now + 60_000 }, steps: [{ id: 'read', toolName: 'files_read', arguments: { path: '/tmp/b' } }] }
+  const definition = createDefinition(repair, { name: parent.name, description: 'Repair read.', bindings: [{ name: 'path', stepId: 'read', path: '/path' }] }, ['files_read'])
+  const unsigned = { protocol: 'assistant-skills/host-failure-evidence/v1' as const, scope, taskFamily: { id: 'read-report', definitionDigest: digest, objective }, failureCategory: 'objective-not-achieved' as const,
+    triggerCondition: { kind: 'not-achieved-count' as const, minimumOccurrences: 1, windowStartedAt: now - 2_000, windowEndedAt: now - 2_000 }, failures: [{ goal: { id: 'failed-goal', definition: { version: 1, digest, objective }, sessionId: 'failed-session', nativeGoalId: 'failed-native' }, runId: 'failed-run', execution: { status: 'succeeded' as const, quiescent: true as const }, outcome: 'not-achieved' as const, acceptance: { contractId: 'failed-contract', contractDigest: '6'.repeat(64), receiptDigest: '7'.repeat(64), verifiedAt: now - 2_000, validUntil: now + 60_000 }, traceDigest: '8'.repeat(64) }], repairGoal: repair.goal, attestedAt: now }
+  const generation = 'goals-generation-1', summary: HostFailureEvidenceSummary = { ...unsigned, evidence: { producer: 'assistant-goals', generation, digest: failureSummaryEvidenceDigest(unsigned, generation) } }
+  return { definition, provenance: captureFailureCandidateProvenance(summary, repair, scope, parent, definition) }
+}
 async function database() { const root = await mkdtemp(join(tmpdir(), 'assistant-skills-')); roots.push(root); return join(root, 'skills.sqlite') }
 
 describe('SkillStore', () => {
@@ -24,28 +40,52 @@ describe('SkillStore', () => {
     const store = new SkillStore(':memory:'); store.save(scope, definition())
     const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Improve.', trigger: 'owner', expiresAt: Date.now() + 60000 })
     const comparison = store.claimComparison(scope, { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'qualified' }, 1).comparison
-    const result = { qualified: true, gates: ['quality'] }; store.finishComparison(scope, comparison.id, 'complete', result)
+    const admitted = admission(candidate), result = { qualified: true, gates: ['quality'], admissionDigest: acceptanceDigest(admitted) }; store.finishComparison(scope, comparison.id, 'complete', result)
     const input = { ownerRouteId: 'route', expiresAt: Date.now() + 60000, maxRuns: 2, canaryRuns: 1 }, receipt = { route: 'receipt' }
-    expect(() => store.activateQualifiedCandidate(scope, candidate.id, comparison.id, 'e'.repeat(64), input, receipt)).toThrow(/qualification unavailable/)
-    const active = store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), input, receipt)
+    expect(() => store.activateQualifiedCandidate(scope, candidate.id, comparison.id, 'e'.repeat(64), admitted, input, receipt)).toThrow(/qualification unavailable/)
+    expect(() => store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), { ...admitted, taskFamily: { ...admitted.taskFamily, goalDefinitionDigest: 'f'.repeat(64) } }, input, receipt)).toThrow(/qualification unavailable/)
+    const active = store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), admitted, input, receipt)
     expect(active).toMatchObject({ definition: { version: 2, parentVersion: 1 }, deployment: { state: 'canary', runIds: [] } })
-    expect(store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), input, receipt)).toEqual(active)
+    expect(store.listWatches(scope)).toMatchObject([{ id: active.deployment.watchId, proofVersion: 'sole-skill-run/v1' }])
+    expect(store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), admitted, input, receipt)).toEqual(active)
     const run = store.claim(scope, { invocationId: 'canary', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'goal-run' })
     expect(store.claim(scope, { invocationId: 'canary', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'goal-run' }).claimed).toBe(false)
     store.finish(scope, run.run.id, 'succeeded', [])
     expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('canary')
-    store.observeWatch(scope, active.deployment.watchId, { runId: run.run.id, receiptDigest: 'f'.repeat(64), objectiveStatus: 'achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000 })
+    store.observeWatch(scope, active.deployment.watchId, { runId: run.run.id, receiptDigest: 'f'.repeat(64), objectiveStatus: 'achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000, executionTraceDigest: 'c'.repeat(64) })
+    expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('canary')
+    store.observeWatch(scope, active.deployment.watchId, { runId: run.run.id, receiptDigest: 'e'.repeat(64), objectiveStatus: 'achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000, executionTraceDigest: 'd'.repeat(64), taskFamilyDigest: acceptanceDigest(admitted.taskFamily) })
     expect(store.reconcileDeployment(scope, active.deployment.id)).toMatchObject({ state: 'promoted' })
     expect(store.assertDeploymentRun(scope, run.run.id)).toMatchObject({ id: active.deployment.id, state: 'promoted' })
     const second = store.claim(scope, { invocationId: 'promoted', goalId: 'second-goal', sessionId: 'second-session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'second-goal-run' })
     store.finish(scope, second.run.id, 'succeeded', [])
     expect(() => store.claim(scope, { invocationId: 'over-quota', goalId: 'third-goal', sessionId: 'third-session', skillName: 'read-report', version: 2, inputs: {} })).toThrow(/quota exhausted/)
-    store.observeWatch(scope, active.deployment.watchId, { runId: second.run.id, receiptDigest: 'a'.repeat(64), objectiveStatus: 'not-achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000 })
+    store.observeWatch(scope, active.deployment.watchId, { runId: second.run.id, receiptDigest: '9'.repeat(64), objectiveStatus: 'not-achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000, executionTraceDigest: '8'.repeat(64), taskFamilyDigest: '7'.repeat(64) })
+    expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('promoted')
+    store.observeWatch(scope, active.deployment.watchId, { runId: second.run.id, receiptDigest: 'a'.repeat(64), objectiveStatus: 'not-achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000, executionTraceDigest: 'b'.repeat(64), taskFamilyDigest: acceptanceDigest(admitted.taskFamily) })
     expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('blocked')
     expect(store.rollbackWatch(scope, active.deployment.watchId)?.state).toBe('rolled-back')
     expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('rolled-back')
-    expect(store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), input, receipt).deployment.state).toBe('rolled-back')
+    expect(store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), admitted, input, receipt).deployment.state).toBe('rolled-back')
     expect(store.get(scope, 'read-report')?.version).toBe(3)
+    store.close()
+  })
+
+  it.each(['achieved', 'not-achieved'] as const)('keeps a standalone %s watch observation-only', objectiveStatus => {
+    const store = new SkillStore(':memory:')
+    store.save(scope, definition())
+    const active = store.save(scope, definition(), 1)
+    const watch = store.createWatch(scope, { ownerRouteId: 'route', skillName: active.name, version: 2, fallbackVersion: 1, expiresAt: Date.now() + 60_000, maxRuns: 1, failureThreshold: 1 }, { route: 'receipt' })
+    const claimed = store.claim(scope, { invocationId: `standalone-${objectiveStatus}`, goalId: `goal-${objectiveStatus}`, sessionId: 'session', skillName: active.name, version: 2, inputs: {}, goalExecutionRunId: `goal-run-${objectiveStatus}` })
+    store.finish(scope, claimed.run.id, 'succeeded', [])
+    const observed = store.observeWatch(scope, watch.id, { runId: claimed.run.id, receiptDigest: (objectiveStatus === 'achieved' ? 'a' : 'b').repeat(64), objectiveStatus, verifiedAt: Date.now(), validUntil: Date.now() + 60_000, executionTraceDigest: 'c'.repeat(64) })
+    expect(observed).toMatchObject({ observations: [{ objectiveStatus }] })
+    expect(observed).not.toHaveProperty('taskFamily')
+    const afterRollbackAttempt = store.rollbackWatch(scope, watch.id)
+    expect(afterRollbackAttempt).toMatchObject({ state: 'watching' })
+    expect(afterRollbackAttempt).not.toHaveProperty('rollbackVersion')
+    expect(store.get(scope, active.name)).toMatchObject({ version: 2 })
+    expect(store.get(scope, active.name)).not.toHaveProperty('restoredFromVersion')
     store.close()
   })
 
@@ -53,8 +93,8 @@ describe('SkillStore', () => {
     const path = await database(), first = new SkillStore(path); first.save(scope, definition())
     const candidate = first.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Improve.', trigger: 'owner', expiresAt: Date.now() + 60000 })
     const comparison = first.claimComparison(scope, { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'qualified' }, 1).comparison
-    const result = { qualified: true }; first.finishComparison(scope, comparison.id, 'complete', result)
-    const deployed = first.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), { ownerRouteId: 'route', expiresAt: Date.now() + 60000, maxRuns: 2, canaryRuns: 2 }, { route: 'receipt' })
+    const admitted = admission(candidate), result = { qualified: true, admissionDigest: acceptanceDigest(admitted) }; first.finishComparison(scope, comparison.id, 'complete', result)
+    const deployed = first.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), admitted, { ownerRouteId: 'route', expiresAt: Date.now() + 60000, maxRuns: 2, canaryRuns: 2 }, { route: 'receipt' })
     const run = first.claim(scope, { invocationId: 'debit', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'goal-run' })
     if (state !== 'running') first.finish(scope, run.run.id, state, [])
     first.close()
@@ -65,14 +105,32 @@ describe('SkillStore', () => {
     restored.close()
   })
 
+  it('fails closed across restart for a legacy deployment watch without causal proof version', async () => {
+    const path = await database(), first = new SkillStore(path); first.save(scope, definition())
+    const candidate = first.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Improve.', trigger: 'owner', expiresAt: Date.now() + 60000 })
+    const comparison = first.claimComparison(scope, { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'qualified' }, 1).comparison
+    const admitted = admission(candidate), result = { qualified: true, admissionDigest: acceptanceDigest(admitted) }; first.finishComparison(scope, comparison.id, 'complete', result)
+    const active = first.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), admitted, { ownerRouteId: 'route', expiresAt: Date.now() + 60000, maxRuns: 2, canaryRuns: 1 }, { route: 'receipt' })
+    first.close()
+    const legacy = new DatabaseSync(path)
+    legacy.prepare("UPDATE skill_watches SET watch_json=json_remove(watch_json, '$.proofVersion') WHERE id=?").run(active.deployment.watchId)
+    legacy.prepare("UPDATE skill_deployments SET deployment_json=json_remove(deployment_json, '$.admissionDigest', '$.candidateDefinitionDigest', '$.taskFamily') WHERE id=?").run(active.deployment.id)
+    legacy.close()
+    const restored = new SkillStore(path)
+    expect(restored.getDeployment(scope, active.deployment.id)).toMatchObject({ state: 'blocked' })
+    expect(restored.listWatches(scope)).toMatchObject([{ id: active.deployment.watchId, state: 'revoked' }])
+    expect(() => restored.claim(scope, { invocationId: 'legacy', goalId: 'legacy-goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'legacy-goal-run' })).toThrow(/deployment unavailable/)
+    restored.close()
+  })
+
   it('rolls back a qualified activation when the deployment record cannot be inserted', async () => {
     const path = await database(), store = new SkillStore(path); store.save(scope, definition())
     const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Improve.', trigger: 'owner', expiresAt: Date.now() + 60000 })
     const comparison = store.claimComparison(scope, { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'qualified' }, 1).comparison
-    const result = { qualified: true }; store.finishComparison(scope, comparison.id, 'complete', result)
+    const admitted = admission(candidate), result = { qualified: true, admissionDigest: acceptanceDigest(admitted) }; store.finishComparison(scope, comparison.id, 'complete', result)
     const writer = new DatabaseSync(path)
     writer.exec("CREATE TRIGGER reject_deployment BEFORE INSERT ON skill_deployments BEGIN SELECT RAISE(ABORT, 'deployment storage unavailable'); END")
-    expect(() => store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), { ownerRouteId: 'route', expiresAt: Date.now() + 60000, maxRuns: 2, canaryRuns: 1 }, { route: 'receipt' })).toThrow(/deployment storage unavailable/)
+    expect(() => store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), admitted, { ownerRouteId: 'route', expiresAt: Date.now() + 60000, maxRuns: 2, canaryRuns: 1 }, { route: 'receipt' })).toThrow(/deployment storage unavailable/)
     expect(store.get(scope, 'read-report')).toMatchObject({ version: 1 })
     expect(store.getCandidate(scope, candidate.id)).toMatchObject({ state: 'pending' })
     expect(store.listWatches(scope)).toEqual([]); expect(store.listDeployments(scope)).toEqual([])
@@ -185,6 +243,26 @@ describe('SkillStore', () => {
       expect(() => store.claim(scope, { invocationId: 'trial', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {}, candidateId: candidate.id, goalExecutionRunId: 'goal-run' })).toThrow(/candidate unavailable/)
       store.close()
     } finally { vi.useRealTimers() }
+  })
+
+  it('keeps legacy candidate IDs stable and persists exact failure provenance through activation and rollback', async () => {
+    const path = await database(), first = new SkillStore(path), parent = first.save(scope, definition()), repair = failureCandidate(parent)
+    const options = { expectedVersion: 1, reason: 'Repair.', trigger: 'failure:read-report', expiresAt: Date.now() + 60_000 }
+    const legacy = first.stageCandidate(scope, repair.definition, options)
+    expect(legacy.id).toBe(`skill-candidate-${acceptanceDigest([scope, repair.definition, 1, acceptanceDigest(parent), options.reason, options.trigger])}`)
+    expect(legacy).not.toHaveProperty('failureProvenance')
+    const candidate = first.stageCandidate(scope, repair.definition, { ...options, failureProvenance: repair.provenance })
+    expect(candidate.id).not.toBe(legacy.id); expect(candidate.failureProvenance).toEqual(repair.provenance)
+    expect(() => first.stageCandidate(scope, repair.definition, { ...options, failureProvenance: { ...repair.provenance, rollbackTarget: { ...repair.provenance.rollbackTarget, digest: '0'.repeat(64) } } })).toThrow(/provenance|rollback/u)
+    const trial = first.claim(scope, { invocationId: 'repair-trial', goalId: 'trial-goal', sessionId: 'trial-session', skillName: parent.name, version: 2, inputs: {}, candidateId: candidate.id, goalExecutionRunId: 'trial-run' })
+    first.finish(scope, trial.run.id, 'succeeded', [])
+    expect(first.activateCandidate(scope, candidate.id, trial.run.id, 'receipt')).toMatchObject({ version: 2, parentVersion: 1 })
+    expect(first.getCandidate(scope, candidate.id)?.failureProvenance).toEqual(repair.provenance)
+    expect(first.rollback(scope, parent.name, 2, 1)).toMatchObject({ version: 3, restoredFromVersion: 1 })
+    first.close()
+    const restored = new SkillStore(path)
+    expect(restored.getCandidate(scope, candidate.id)).toMatchObject({ state: 'activated', failureProvenance: repair.provenance })
+    restored.close()
   })
 
   it('claims candidate trials without an active definition and activates atomically only after success', () => {

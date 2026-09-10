@@ -25,6 +25,8 @@ export interface QualificationBinding {
   readonly baselineDigest: string
   readonly candidateDigest: string
   readonly budgetDigest: string
+  /** Optional exact canary admission policy/configuration pin. */
+  readonly admissionDigest?: string
   readonly expiresAt: number
   readonly repeats: number
 }
@@ -60,6 +62,7 @@ export interface BeginResult {
   readonly baselineDigest: string
   readonly candidateDigest: string
   readonly budgetDigest: string
+  readonly admissionDigest?: string
   readonly expiresAt: number
   readonly repeats: number
   readonly limits: HoldoutLimits
@@ -183,10 +186,16 @@ function validateDataset(dataset: HoldoutDataset, limits: HoldoutLimits): void {
 }
 
 function validateBinding(binding: QualificationBinding, now: number): void {
-  assert(exact(binding, ['scopeDigest', 'baselineDigest', 'candidateDigest', 'budgetDigest', 'expiresAt', 'repeats']), 'binding shape is invalid')
+  assert(exact(binding, ['scopeDigest', 'baselineDigest', 'candidateDigest', 'budgetDigest', 'expiresAt', 'repeats'], ['admissionDigest']), 'binding shape is invalid')
   for (const value of [binding.scopeDigest, binding.baselineDigest, binding.candidateDigest, binding.budgetDigest]) assert(validDigest(value), 'binding digests must be lowercase SHA-256 hex')
+  assert(binding.admissionDigest === undefined || validDigest(binding.admissionDigest), 'admissionDigest must be lowercase SHA-256 hex')
   assert(Number.isInteger(binding.repeats) && binding.repeats >= 2 && binding.repeats <= 4, 'repeats must be an integer from 2 to 4')
   assert(Number.isSafeInteger(binding.expiresAt) && binding.expiresAt > now && binding.expiresAt <= now + 7 * 24 * 60 * 60 * 1000, 'expiresAt must be a future timestamp within seven days')
+}
+
+function bindingFromBegin(begin: BeginResult): QualificationBinding {
+  return { scopeDigest: begin.scopeDigest, baselineDigest: begin.baselineDigest, candidateDigest: begin.candidateDigest, budgetDigest: begin.budgetDigest,
+    ...(begin.admissionDigest === undefined ? {} : { admissionDigest: begin.admissionDigest }), expiresAt: begin.expiresAt, repeats: begin.repeats }
 }
 
 /** A synchronous, stateful authority. It has no Cordis dependency and never claims an OS seal or promotion authority. */
@@ -213,8 +222,11 @@ export class HoldoutAuthority {
     this.#publicKey = createPublicKey(this.#privateKey).export({ format: 'pem', type: 'spki' }).toString()
     this.#limits = Object.freeze({ ...options.limits })
     if (options.prospective !== undefined) {
-      assert(options.dataset.version === 'order-summary/v1' || options.dataset.version === 'order-summary/v2', 'prospective dataset generator is invalid')
+      assert(options.dataset.version === 'order-summary/v1' || options.dataset.version === 'order-summary/v2' || options.dataset.version === 'template-render/v1', 'prospective dataset generator is invalid')
       assert(options.prospective.generatorDigest === prospectiveGeneratorDigest(options.dataset.version as ProspectiveGeneratorName), 'prospective certificate generator does not match dataset')
+      if (options.prospective.profileVersion !== undefined || options.prospective.profileDigest !== undefined) {
+        assert(options.prospective.profileVersion === options.dataset.version && options.prospective.profileDigest === options.prospective.generatorDigest, 'prospective certificate profile does not match dataset')
+      }
       assert(verifyProspectiveCertificate(options.prospective, options.prospective.binding, this.#publicKey, options.prospective.generatorDigest), 'prospective certificate is invalid')
       assert(options.prospective.datasetDigest === this.#datasetDigest, 'prospective certificate dataset does not match')
       this.#prospective = Object.freeze(structuredClone(options.prospective))
@@ -316,9 +328,12 @@ export class HoldoutAuthority {
 
   private validateRestoredState(): void {
     if (!this.#begin) { assert(this.#cells.length === 0 && !this.#stopped && !this.#stoppedReason, 'unbegun serialized state is inconsistent'); return }
-    validateBinding({ scopeDigest: this.#begin.scopeDigest, baselineDigest: this.#begin.baselineDigest, candidateDigest: this.#begin.candidateDigest, budgetDigest: this.#begin.budgetDigest, expiresAt: this.#begin.expiresAt, repeats: this.#begin.repeats }, this.#createdAt)
+    assert(exact(this.#begin, ['sessionId', 'planDigest', 'datasetDigest', 'publicKey', 'scopeDigest', 'baselineDigest', 'candidateDigest', 'budgetDigest', 'expiresAt', 'repeats', 'limits', 'cellCount'], ['admissionDigest', 'prospective']), 'restored begin shape is invalid')
+    const restoredBinding = bindingFromBegin(this.#begin)
+    validateBinding(restoredBinding, this.#createdAt)
+    assert(typeof this.#begin.sessionId === 'string' && validDigest(this.#begin.planDigest) && Number.isSafeInteger(this.#begin.cellCount), 'restored begin identity is invalid')
     assert(this.#begin.baselineDigest !== this.#begin.candidateDigest && this.#begin.datasetDigest === this.#datasetDigest && this.#begin.publicKey === this.#publicKey && canonical(this.#begin.limits) === canonical(this.#limits), 'restored qualification binding is invalid')
-    if (this.#prospective) assert(this.#begin.prospective && this.#begin.prospective.generatorDigest === this.#prospective.generatorDigest && verifyProspectiveCertificate(this.#begin.prospective, { scopeDigest: this.#begin.scopeDigest, baselineDigest: this.#begin.baselineDigest, candidateDigest: this.#begin.candidateDigest, budgetDigest: this.#begin.budgetDigest, expiresAt: this.#begin.expiresAt, repeats: this.#begin.repeats }, this.#publicKey, this.#prospective.generatorDigest), 'restored prospective certificate is invalid')
+    if (this.#prospective) assert(this.#begin.prospective && this.#begin.prospective.generatorDigest === this.#prospective.generatorDigest && verifyProspectiveCertificate(this.#begin.prospective, restoredBinding, this.#publicKey, this.#prospective.generatorDigest), 'restored prospective certificate is invalid')
     else assert(this.#begin.prospective === undefined, 'restored prospective certificate is inconsistent')
     const expectedCount = this.#dataset.cases.length * this.#begin.repeats * 2
     assert(this.#cells.length === expectedCount && this.#begin.cellCount === expectedCount, 'restored cell count is invalid')
@@ -327,7 +342,7 @@ export class HoldoutAuthority {
       assert(!seen.has(cell.cellId) && /^cell-[1-9][0-9]*$/u.test(cell.cellId) && validDigest(cell.armDigest) && this.#dataset.cases.some(item => item.id === cell.caseId) && kinds.includes(cell.kind) && Number.isInteger(cell.repeat) && cell.repeat >= 1 && cell.repeat <= this.#begin.repeats && typeof cell.issued === 'boolean' && (cell.verdict === undefined || ['achieved', 'not-achieved', 'unknown'].includes(cell.verdict)), 'restored cell is invalid')
       seen.add(cell.cellId)
     }
-    const planDigest = sha256({ sessionId: this.#begin.sessionId, datasetDigest: this.#datasetDigest, binding: { scopeDigest: this.#begin.scopeDigest, baselineDigest: this.#begin.baselineDigest, candidateDigest: this.#begin.candidateDigest, budgetDigest: this.#begin.budgetDigest, expiresAt: this.#begin.expiresAt, repeats: this.#begin.repeats }, limits: this.#limits, cells: this.#cells.map(({ cellId, armDigest, caseId, kind, repeat }) => ({ cellId, armDigest, caseId, kind, repeat })) })
+    const planDigest = sha256({ sessionId: this.#begin.sessionId, datasetDigest: this.#datasetDigest, binding: restoredBinding, limits: this.#limits, cells: this.#cells.map(({ cellId, armDigest, caseId, kind, repeat }) => ({ cellId, armDigest, caseId, kind, repeat })) })
     assert(planDigest === this.#begin.planDigest, 'restored plan digest is invalid')
   }
 

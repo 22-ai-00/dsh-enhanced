@@ -1,7 +1,7 @@
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { GoalScope } from '@dsh-enhanced/assistant-goals'
-import type { VerifiedWorkflowSource } from './definition.js'
-import { fileObservationSteps, instantiate, type SkillDefinition, type SkillRunExpansion } from './definition.js'
+import type { FailureCaptureProvenance, HostFailureEvidenceSummary, VerifiedWorkflowSource } from './definition.js'
+import { fileObservationSteps, instantiate, validateFailureCaptureProvenance, validateHostFailureEvidenceSummary, type SkillDefinition, type SkillRunExpansion } from './definition.js'
 import type { SkillRun, SkillRunStep, SkillStore, StoredSkillDefinition } from './store.js'
 
 type SourceStep = { id: string; toolName: string; arguments: unknown }
@@ -78,6 +78,58 @@ function validCheckpoint(run: SkillRun, definition: SkillDefinition): boolean {
     if (wanted.observation?.allowAbsent === true && wanted.observation.toolName === 'write' && actual.detail === 'absence:FS_NOT_FOUND') return true
     return typeof actual.detail === 'string' && resultDetail.test(actual.detail)
   })
+}
+
+/**
+ * Bind current-Goals-capability not-achieved evidence to a later, independently
+ * achieved repair.  This freezes comparison metadata only; it neither stages
+ * nor activates a candidate and grants no authority. The public evidence
+ * digest is an integrity link, not producer authentication.
+ */
+export function captureFailureCandidateProvenance(
+  trigger: HostFailureEvidenceSummary,
+  repair: VerifiedWorkflowSource,
+  scope: GoalScope,
+  parent: StoredSkillDefinition,
+  candidate: SkillDefinition,
+): Readonly<FailureCaptureProvenance> {
+  const observed = validateHostFailureEvidenceSummary(trigger)
+  if (!record(repair) || Object.keys(repair).some(key => !['protocol', 'scope', 'goal', 'runId', 'turn', 'acceptance', 'steps', 'failedObservations', 'segments'].includes(key))
+    || repair.protocol !== 'assistant-goals/verified-workflow-source/v1' || acceptanceDigest(repair.scope) !== acceptanceDigest(scope)
+    || acceptanceDigest(observed.scope) !== acceptanceDigest(scope) || !record(repair.goal) || !record(repair.goal.definition)
+    || !text(repair.goal.id, 256) || !text(repair.goal.sessionId, 256) || !text(repair.goal.nativeGoalId, 256) || !text(repair.runId, 256)
+    || !Number.isSafeInteger(repair.goal.definition.version) || repair.goal.definition.version < 1 || !resultDetail.test(`result:${repair.goal.definition.digest}`)
+    || !text(repair.goal.definition.objective, 16_384) || repair.goal.definition.digest !== acceptanceDigest({ objective: repair.goal.definition.objective })
+    || !record(repair.acceptance) || Object.keys(repair.acceptance).some(key => !['contractId', 'contractDigest', 'receiptDigest', 'verifiedAt', 'validUntil'].includes(key))
+    || !text(repair.acceptance.contractId, 256) || !resultDetail.test(`result:${repair.acceptance.contractDigest}`)
+    || !resultDetail.test(`result:${repair.acceptance.receiptDigest}`) || !Number.isSafeInteger(repair.acceptance.verifiedAt) || repair.acceptance.verifiedAt < 0
+    || !Number.isSafeInteger(repair.acceptance.validUntil) || repair.acceptance.validUntil <= repair.acceptance.verifiedAt
+    || !Array.isArray(repair.steps) || repair.steps.length === 0 || repair.steps.length > 32) fail('achieved repair source is invalid')
+  if (acceptanceDigest(repair.goal) !== acceptanceDigest(observed.repairGoal)
+    || repair.goal.definition.digest !== observed.taskFamily.definitionDigest || repair.goal.definition.objective !== observed.taskFamily.objective
+    || observed.failures.some(failure => failure.goal.id === repair.goal.id || failure.goal.sessionId === repair.goal.sessionId
+      || failure.goal.nativeGoalId === repair.goal.nativeGoalId || failure.runId === repair.runId || failure.acceptance.verifiedAt >= repair.acceptance.verifiedAt)
+    || repair.acceptance.verifiedAt > observed.attestedAt || repair.acceptance.validUntil <= observed.attestedAt) {
+    fail('achieved repair source is not independent or later')
+  }
+  if (!parent || parent.protocol !== 'assistant-skills/definition/v1' || parent.retired || !Number.isSafeInteger(parent.version) || parent.version < 1
+    || parent.name !== candidate.name || !candidate || candidate.protocol !== 'assistant-skills/definition/v1'
+    || acceptanceDigest(candidate.source) !== acceptanceDigest(repair)) fail('failure candidate binding is invalid')
+  const permissions = (definition: SkillDefinition): readonly string[] => Object.freeze([...new Set(definition.steps.map(step => step.toolName))].sort())
+  const parentPermissions = permissions(parent), candidatePermissions = permissions(candidate)
+  const before = new Set(parentPermissions), after = new Set(candidatePermissions)
+  const output: FailureCaptureProvenance = {
+    protocol: 'assistant-skills/failure-capture-provenance/v1',
+    trigger: clone(observed),
+    repair: { goal: clone(repair.goal), runId: repair.runId, sourceDigest: acceptanceDigest(repair), acceptanceDigest: acceptanceDigest(repair.acceptance) },
+    parent: { name: parent.name, version: parent.version, digest: acceptanceDigest(parent) },
+    candidate: { name: candidate.name, definitionDigest: acceptanceDigest(candidate) },
+    // Diagnostic only: ToolRuntime/Policy must authorize the actual run.
+    permissionDelta: { parent: parentPermissions, candidate: candidatePermissions, added: candidatePermissions.filter(tool => !before.has(tool)),
+      removed: parentPermissions.filter(tool => !after.has(tool)), expandsAuthority: candidatePermissions.some(tool => !before.has(tool)) },
+    rollbackTarget: { name: parent.name, version: parent.version, digest: acceptanceDigest(parent) },
+  }
+  return validateFailureCaptureProvenance(output)
 }
 
 /**
