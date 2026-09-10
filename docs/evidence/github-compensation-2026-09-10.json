@@ -2,8 +2,9 @@
   "protocol": "autonomy-delivery-evidence/v1",
   "date": "2026-09-10",
   "baseCommit": "cb46b2d",
-  "workingTreeState": "validated-root-check-passed",
-  "status": "validated-pending-dev-push",
+  "workingTreeState": "validated-and-pushed-to-dev",
+  "status": "validated-on-dev",
+  "devCommit": "092c838ec02d2708be6bc1cfdf8799a5bf839e4c",
   "completeWorkPackage": false,
   "scope": "WP10 finite GitHub compensating commit for exact succeeded forward commits",
   "workPackages": {
