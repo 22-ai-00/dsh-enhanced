@@ -12,7 +12,7 @@ function intent(id = 'event-wait-a'): GoalEventWaitIntent {
   const objective = 'wait for a durable source event'; const scope = { principalId: 'owner-a', principalRecordId: 'owner-row', principalVersion: 1, workspace: '/tmp/owner-a', preset: 'primary' }
   return { id, wake: { scope, goalId: 'goal-a', definition: { version: 1, objective, digest: acceptanceDigest({ objective }) }, native: { sessionId: 'session-a', goalId: 'native-a', revision: 2, objective, phase: 'paused', roundsStarted: 1, maxGoalRounds: 3, updatedAt: 1 }, attestation: { scope: { workspace: scope.workspace, preset: scope.preset }, principalId: scope.principalId, principalLineage: { principalRecordId: scope.principalRecordId, principalVersion: 1 }, bindingId: 'binding-a', bindingVersion: 1, bindingGeneration: 1, sessionId: 'session-a' }, ownerRouteId: 'route-a', budgetId: 'budget-a' }, source: { protocol: 'dsh-event-source/v1', sourceId: 'event-triggers:trigger-a', kind: 'file', version: '1', configDigest: 'a'.repeat(64), target: { automationId: 'automation-a' }, highWaterSequence: 7 }, createdAt: 1_000, expiresAt: 2_000, runTimeoutMs: 1_000 }
 }
-function envelope() { return { protocol: 'dsh-external-event/v1' as const, source: { id: 'event-triggers:trigger-a', kind: 'file' as const, version: '1', configDigest: 'a'.repeat(64) }, event: { id: 'event-a', occurredAt: 1_100, receivedAt: 1_100 }, observation: { digest: 'b'.repeat(64), revision: '1', timeBasis: 'observed' as const }, trust: { method: 'local-observation' as const, content: 'untrusted' as const }, target: { automationId: 'automation-a' }, deduplicationKey: 'event-triggers:trigger-a:event-a' } }
+function envelope(kind: 'file' | 'lark-calendar' = 'file') { return { protocol: 'dsh-external-event/v1' as const, source: { id: 'event-triggers:trigger-a', kind, version: '1', configDigest: 'a'.repeat(64) }, event: { id: 'event-a', occurredAt: 1_100, receivedAt: 1_100 }, observation: { digest: 'b'.repeat(64), revision: '1', timeBasis: 'observed' as const }, trust: { method: kind === 'file' ? 'local-observation' as const : 'https-observation' as const, content: 'untrusted' as const }, target: { automationId: 'automation-a' }, deduplicationKey: 'event-triggers:trigger-a:event-a' } }
 
 describe('goal event wait ledger', () => {
   it('CAS-freezes the first source sequence and original wake across connections', async () => {
@@ -40,6 +40,19 @@ describe('goal event wait ledger', () => {
     const first = new GoalEventWaitStore(path); const value = intent(); first.prepare(value); first.advanceCursor(value.id, 9); first.close()
     const reopened = new GoalEventWaitStore(path)
     expect(reopened.cursor(value.id)).toBe(9); expect(reopened.get(value.id)!.intent).toEqual(value); reopened.close()
+  })
+  it('persists and matches a lark-calendar source snapshot across restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'event-wait-calendar-')); roots.push(root); const path = join(root, 'waits.sqlite')
+    const value = intent(); value.source.kind = 'lark-calendar'
+    const first = new GoalEventWaitStore(path); first.prepare(value); first.close()
+    const reopened = new GoalEventWaitStore(path)
+    expect(reopened.get(value.id)!.intent.source).toEqual(value.source)
+    const wake = { ...value.wake, id: 'goal-event-wake-event-wait-a', at: 1_100, expiresAt: 2_000 }
+    expect(() => reopened.match(value.id, { sequence: 8, envelope: envelope(), wake })).toThrow()
+    expect(reopened.match(value.id, { sequence: 8, envelope: envelope('lark-calendar'), wake })).toMatchObject({
+      state: 'matched', match: { sequence: 8, envelope: { source: { kind: 'lark-calendar' } }, wake },
+    })
+    reopened.close()
   })
   it('migrates a populated v1 ledger to the cursor schema without changing its intent', async () => {
     const root = await mkdtemp(join(tmpdir(), 'event-wait-v1-')); roots.push(root); const path = join(root, 'waits.sqlite'); const value = intent()

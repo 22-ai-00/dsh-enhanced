@@ -14,7 +14,25 @@ import type { GoalWakeRuntime } from '../src/wake.ts'
 const roots: string[] = []
 afterEach(async () => { vi.useRealTimers(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-function fixture(path = ':memory:', prior?: GoalRecord, proactive?: { evaluate: (input: unknown) => { disposition: 'defer' | 'consume' | 'execute'; decision: { eventSequence: number } } }) {
+type ProactiveInput = {
+  waitId: string; profileId: string; scope: GoalRecord['scope']; goalId: string; sessionId: string
+  definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string
+  sourceDigest: string; sourceId: string; event: { id: string; sequence: number; digest: string }; expiresAt: number
+}
+type ProactiveDecisionIdentity = {
+  waitId: string; profileId: string; scope: GoalRecord['scope']; goalId: string; sessionId: string
+  definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string
+  sourceDigest: string; sourceId: string; eventId: string; eventSequence: number; eventDigest: string; expiresAt: number
+}
+type FakeProactive = { evaluate: (input: ProactiveInput) => { disposition: 'defer' | 'consume' | 'execute'; decision: unknown } }
+const executionDecision = (input: ProactiveInput): ProactiveDecisionIdentity => ({
+  waitId: input.waitId, profileId: input.profileId, scope: input.scope, goalId: input.goalId, sessionId: input.sessionId,
+  definitionDigest: input.definitionDigest, objective: input.objective, nativeGoalId: input.nativeGoalId, nativeRevision: input.nativeRevision, ownerRouteId: input.ownerRouteId,
+  sourceDigest: input.sourceDigest, sourceId: input.sourceId, eventId: input.event.id, eventSequence: input.event.sequence,
+  eventDigest: input.event.digest, expiresAt: input.expiresAt,
+})
+
+function fixture(path = ':memory:', prior?: GoalRecord, proactive?: FakeProactive) {
   const now = Date.now(); const objective = 'resume after an event'
   const scope = { principalId: 'owner', principalRecordId: 'row', principalVersion: 1, workspace: '/tmp/event-wait', preset: 'primary' }
   let record: GoalRecord = prior ?? { id: 'goal', scope, originalObjective: objective, definition: { version: 1, digest: acceptanceDigest({ objective }), objective }, native: { sessionId: 'session', goalId: 'native', revision: 2, objective, phase: 'paused', roundsStarted: 1, maxGoalRounds: 3, updatedAt: now }, checkpoint: { nextStep: '', blockers: [], assumptions: [], evidenceRefs: [], dependencies: [] }, version: 1, createdAt: now, updatedAt: now }
@@ -73,6 +91,16 @@ describe('durable event wait lifecycle', () => {
     const f = fixture(); const wait = f.runtime.prepare(f.intent())
     expect(wait).toMatchObject({ state: 'materialized', match: { sequence: 8 } }); expect(f.materializations).toBe(1)
     f.emitChange(); f.emitChange(); expect(f.materializations).toBe(1)
+  })
+  it('terminalizes an old wait when the parent dependency set changes without a native revision change', () => {
+    const f = fixture(); f.emitted = false
+    const prepared = f.runtime.prepare(f.intent())
+    const dependency = { goalId: 'dependency-a', definitionVersion: 1, definitionDigest: 'a'.repeat(64) }
+    f.record = { ...f.record, checkpoint: { ...f.record.checkpoint, dependencies: [dependency.goalId], dependencyBindings: [dependency] }, version: f.record.version + 1 }
+    f.emitted = true; f.emitChange()
+    expect(f.runtime.inspect(f.scope, f.record.id)).toMatchObject([{ intent: { id: prepared.intent.id }, state: 'terminal', reason: 'invalid-current' }])
+    expect(f.materializations).toBe(0)
+    f.close()
   })
   it('claims a dedicated source once and retires it from the trusted goal record before any wake is materialized', () => {
     const f = fixture(); f.emitted = false
@@ -194,10 +222,55 @@ describe('durable event wait lifecycle', () => {
   it('matures a deferred selected profile on the durable runtime timer without a new source hint', () => {
     vi.useFakeTimers()
     let calls = 0
-    const f = fixture(':memory:', undefined, { evaluate: () => ({ disposition: ++calls === 1 ? 'defer' : 'execute', decision: { eventSequence: 8 } }) })
+    const f = fixture(':memory:', undefined, { evaluate: input => {
+      calls++
+      return calls === 1
+        ? { disposition: 'defer', decision: { eventSequence: input.event.sequence } }
+        : { disposition: 'execute', decision: executionDecision(input) }
+    } })
     expect(f.runtime.prepare({ ...f.intent(), opportunityProfile: 'execute-profile' }).state).toBe('waiting')
     expect(f.materializations).toBe(0); vi.advanceTimersByTime(1_000)
     expect(f.materializations).toBe(1); expect(f.runtime.inspect(f.scope, 'goal')).toMatchObject([{ state: 'materialized', match: { sequence: 8 } }]); f.close()
+  })
+  it.each([
+    ['waitId', (value: ProactiveDecisionIdentity) => ({ ...value, waitId: 'other-wait' })],
+    ['profileId', (value: ProactiveDecisionIdentity) => ({ ...value, profileId: 'other-profile' })],
+    ['scope', (value: ProactiveDecisionIdentity) => ({ ...value, scope: { ...value.scope, workspace: '/tmp/other-event-wait' } })],
+    ['goalId', (value: ProactiveDecisionIdentity) => ({ ...value, goalId: 'other-goal' })],
+    ['sessionId', (value: ProactiveDecisionIdentity) => ({ ...value, sessionId: 'other-session' })],
+    ['definitionDigest', (value: ProactiveDecisionIdentity) => ({ ...value, definitionDigest: '0'.repeat(64) })],
+    ['objective', (value: ProactiveDecisionIdentity) => ({ ...value, objective: 'other objective' })],
+    ['nativeGoalId', (value: ProactiveDecisionIdentity) => ({ ...value, nativeGoalId: 'other-native-goal' })],
+    ['nativeRevision', (value: ProactiveDecisionIdentity) => ({ ...value, nativeRevision: value.nativeRevision + 1 })],
+    ['ownerRouteId', (value: ProactiveDecisionIdentity) => ({ ...value, ownerRouteId: 'other-route' })],
+    ['sourceId', (value: ProactiveDecisionIdentity) => ({ ...value, sourceId: 'event-triggers:other' })],
+    ['sourceDigest', (value: ProactiveDecisionIdentity) => ({ ...value, sourceDigest: '0'.repeat(64) })],
+    ['eventId', (value: ProactiveDecisionIdentity) => ({ ...value, eventId: 'other-event' })],
+    ['eventDigest', (value: ProactiveDecisionIdentity) => ({ ...value, eventDigest: '0'.repeat(64) })],
+    ['expiresAt', (value: ProactiveDecisionIdentity) => ({ ...value, expiresAt: value.expiresAt - 1 })],
+  ] as const)('rejects an execute decision with the same sequence but mismatched %s', (_field, mutate) => {
+    const f = fixture(':memory:', undefined, { evaluate: input => ({ disposition: 'execute', decision: mutate(executionDecision(input)) }) })
+    expect(() => f.runtime.prepare({ ...f.intent(), opportunityProfile: 'execute-profile' })).toThrow('opportunity execution does not bind the observed event')
+    expect(f.materializations).toBe(0)
+    expect(f.runtime.inspect(f.scope, 'goal')).toMatchObject([{ state: 'waiting' }])
+    f.close()
+  })
+  it('rejects an execute decision bound behind the current event', () => {
+    const f = fixture(':memory:', undefined, { evaluate: input => ({
+      disposition: 'execute', decision: { ...executionDecision(input), eventSequence: 7 },
+    }) })
+    expect(() => f.runtime.prepare({ ...f.intent(), opportunityProfile: 'execute-profile' })).toThrow('opportunity execution does not bind the observed event')
+    expect(f.materializations).toBe(0)
+    expect(f.runtime.inspect(f.scope, 'goal')).toMatchObject([{ state: 'waiting' }])
+    f.close()
+  })
+  it('waits for a future execute decision event instead of treating an earlier event as its authority', () => {
+    const f = fixture(':memory:', undefined, { evaluate: input => ({
+      disposition: 'execute', decision: { ...executionDecision(input), eventId: 'event-9', eventSequence: 9, eventDigest: 'f'.repeat(64) },
+    }) })
+    expect(f.runtime.prepare({ ...f.intent(), opportunityProfile: 'execute-profile' })).toMatchObject({ state: 'waiting' })
+    expect(f.materializations).toBe(0)
+    f.close()
   })
   it('denies a selected profile if its service disappears before observation', () => {
     const f = fixture(); const wait = f.runtime.prepare({ ...f.intent(), opportunityProfile: 'execute-profile' })

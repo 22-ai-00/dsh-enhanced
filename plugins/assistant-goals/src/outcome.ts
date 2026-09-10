@@ -31,7 +31,8 @@ export class GoalOutcomeRuntime {
   constructor(private readonly ctx: Context, path: string,
     private readonly current: (agent: Agent) => GoalRecord,
     private readonly runs: (scope: GoalScope, goalId: string) => readonly GoalExecutionRun[],
-    private readonly stepMaxDurationMs = 60_000) {
+    private readonly stepMaxDurationMs: number,
+    private readonly assertDependencies: (record: GoalRecord) => void) {
     this.#store = new GoalOutcomeStore(path)
     this.#store.recoverIncomplete()
     ctx.on('assistant-verifier/receipt', notice => {
@@ -213,6 +214,14 @@ export class GoalOutcomeRuntime {
     const goals = this.ctx.get('goals', false)
     const native = goals?.get(agent)
     if (goals === undefined || native === undefined || String(native.id) !== record.native.goalId || native.revision !== record.native.revision) return false
+    try {
+      const parent = this.current(agent)
+      if (parent.id !== record.id || !same(parent.scope, record.scope) || !same(parent.definition, record.definition)
+        || !same(parent.native, record.native) || run.intent.dependencies === undefined
+        || (parent.checkpoint.dependencies.length > 0 && parent.checkpoint.dependencyBindings === undefined)
+        || !same(parent.checkpoint.dependencyBindings ?? [], run.intent.dependencies)) return false
+      this.assertDependencies(parent)
+    } catch { return false }
     goals.complete(agent, { id: native.id, revision: native.revision })
     return true
   }

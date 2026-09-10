@@ -29,6 +29,17 @@ describe('GoalWakeStore', () => {
     store.close()
   })
 
+  it('binds exact dependency definitions while accepting dependency-free legacy wakes', () => {
+    const store = new GoalWakeStore(':memory:')
+    const legacy = intent('wake-legacy')
+    expect(store.prepare(legacy).intent).not.toHaveProperty('dependencies')
+    const dependency = { goalId: 'dependency-a', definitionVersion: 2, definitionDigest: 'b'.repeat(64) }
+    const bound = { ...intent('wake-bound'), dependencies: [dependency] }
+    expect(store.prepare(bound).intent.dependencies).toEqual([dependency])
+    expect(() => store.prepare({ ...bound, dependencies: [{ ...dependency, definitionDigest: 'invalid' }] })).toThrow(GoalStoreError)
+    store.close()
+  })
+
   it('fences concurrent dispatch and keeps dispatched wake unreplayable across restart', async () => {
     const path = join(await privateRoot('goal-wake-'), 'wakes.sqlite')
     const first = new GoalWakeStore(path); first.prepare(intent()); first.scheduled('wake-a', 'a'.repeat(64))

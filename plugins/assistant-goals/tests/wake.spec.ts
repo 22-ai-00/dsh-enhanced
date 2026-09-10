@@ -8,9 +8,10 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { assertGoalDependenciesAchieved } from '../src/dependency.ts'
 import { GoalWakeRuntime } from '../src/wake.ts'
 import type { GoalRecord } from '../src/types.ts'
-import type { GoalWakeIntent } from '../src/wake-store.ts'
+import { GoalWakeStore, type GoalWakeIntent } from '../src/wake-store.ts'
 
 const contexts: Context[] = []; const roots: string[] = []
 afterEach(async () => { await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.dispose())); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -20,18 +21,35 @@ function record(root: string): GoalRecord {
   const objective = 'resume a paused goal'; const scope = { principalId: 'lark/bot/tenant/owner', principalRecordId: 'owner-row', principalVersion: 1, workspace: root, preset: 'primary' }
   return { id: 'business-goal-a', scope, originalObjective: objective, definition: { version: 1, digest: acceptanceDigest({ objective }), objective }, native: { sessionId: 'session-a', goalId: 'native-goal-a', revision: 2, objective, phase: 'paused', roundsStarted: 1, maxGoalRounds: 3, updatedAt: 1 }, checkpoint: { nextStep: '', blockers: [], assumptions: [], evidenceRefs: [], dependencies: [] }, version: 1, createdAt: 1, updatedAt: 1 }
 }
-function intent(value: GoalRecord): GoalWakeIntent {
-  return { id: `wake-${acceptanceDigest([value.scope, value.id, value.definition, value.native])}`, scope: value.scope, goalId: value.id, definition: value.definition, native: value.native, attestation: { scope: { workspace: value.scope.workspace, preset: value.scope.preset }, principalId: value.scope.principalId, principalLineage: { principalRecordId: value.scope.principalRecordId, principalVersion: value.scope.principalVersion }, bindingId: 'binding-a', bindingVersion: 1, bindingGeneration: 1, sessionId: value.native.sessionId }, at: Date.now() + 60_000, expiresAt: Date.now() + 120_000, ownerRouteId: 'local/owner', budgetId: 'goal-budget/owner' }
+function dependencyRecord(root: string): GoalRecord {
+  const objective = 'produce the verified prerequisite'; const value = record(root)
+  return { ...value, id: 'dependency-a', originalObjective: objective, definition: { version: 1, digest: acceptanceDigest({ objective }), objective },
+    native: { ...value.native, sessionId: 'dependency-session-a', goalId: 'dependency-native-a', objective, phase: 'complete', maxGoalRounds: 1 } }
 }
-async function harness(withSettlementCapability = true, pauseAgain = false) {
+function intent(value: GoalRecord): GoalWakeIntent {
+  return { id: `wake-${acceptanceDigest([value.scope, value.id, value.definition, value.native, value.checkpoint.dependencyBindings ?? []])}`, scope: value.scope, goalId: value.id, definition: value.definition, native: value.native, dependencies: value.checkpoint.dependencyBindings ?? [], attestation: { scope: { workspace: value.scope.workspace, preset: value.scope.preset }, principalId: value.scope.principalId, principalLineage: { principalRecordId: value.scope.principalRecordId, principalVersion: value.scope.principalVersion }, bindingId: 'binding-a', bindingVersion: 1, bindingGeneration: 1, sessionId: value.native.sessionId }, at: Date.now() + 60_000, expiresAt: Date.now() + 120_000, ownerRouteId: 'local/owner', budgetId: 'goal-budget/owner' }
+}
+type DependencyState = 'achieved' | 'stale' | 'cleared' | 'unavailable'
+function assertDependencyState(value: GoalRecord, state: DependencyState): void {
+  const dependency = dependencyRecord(value.scope.workspace)
+  const current = state === 'stale'
+    ? { ...dependency, definition: { version: 2, digest: acceptanceDigest({ objective: 'changed prerequisite' }), objective: 'changed prerequisite' } }
+    : state === 'cleared' ? { ...dependency, native: { ...dependency.native, phase: 'cleared' as const } } : dependency
+  assertGoalDependenciesAchieved(value, { get: (_scope, goalId) => goalId === dependency.id ? current : undefined,
+    outcome: () => state === 'unavailable' ? { status: 'unavailable', definitionVersion: 1 }
+      : { status: 'achieved', definitionVersion: 1, nativeCompletion: 'complete' } })
+}
+async function harness(withSettlementCapability = true, pauseAgain = false, dependencyOptions: { revokeBeforeDispatch?: boolean; revokeBeforeSettlement?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'goal-wake-runtime-')); roots.push(root)
   const ctx = new Context(); contexts.push(ctx)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), budgets: [{ id: 'goal-budget/owner', metric: 'automation-runs', limit: 10, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }], rules: [{ id: 'allow-wake-reconcile', effect: 'allow', subject: { kind: 'background', id: owner, workspace: root }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } }] })
-  let value = record(root); let proveCompletion = false; let settleCalls = 0; let acceptPause = false; let revokeOnSettle = false
+  let value = record(root); let proveCompletion = false; let settleCalls = 0; let acceptPause = false; let revokeOnSettle = false; let dependencyState: DependencyState = 'achieved'; let dependencyChecks = 0
   const resumeScheduledGoal = vi.fn(async (input: { beforeResume(agent: Agent): void; settle(agent: Agent, signal: AbortSignal): Promise<void> }) => {
     const agent = { session: { id: value.native.sessionId } } as Agent
+    if (dependencyOptions.revokeBeforeDispatch) dependencyState = 'unavailable'
     input.beforeResume(agent)
     value = { ...value, native: { ...value.native, phase: pauseAgain ? 'paused' : 'blocked', revision: value.native.revision + 2, roundsStarted: pauseAgain ? value.native.roundsStarted + 1 : value.native.maxGoalRounds } }
+    if (dependencyOptions.revokeBeforeSettlement) dependencyState = 'unavailable'
     await input.settle(agent, new AbortController().signal)
     return { outcome: 'succeeded' as const, dispatched: true, quiescent: true }
   })
@@ -45,14 +63,23 @@ async function harness(withSettlementCapability = true, pauseAgain = false) {
       signal.throwIfAborted(); settleCalls += 1
       if (revokeOnSettle) acceptPause = false
       if (!pauseAgain) value = { ...value, native: { ...value.native, phase: 'complete', revision: value.native.revision + 1 } }
-    }, () => proveCompletion, () => {}, current => acceptPause && current === value)
+    }, () => proveCompletion, () => {}, current => acceptPause && current === value, () => {
+      dependencyChecks += 1
+      assertDependencyState(value, dependencyState)
+    })
   return { ctx, root, runtime, get value() { return value }, wakePath, automationPath, resumeScheduledGoal,
     proveCompletion(value: boolean) { proveCompletion = value }, get settleCalls() { return settleCalls },
-    acceptPause(value: boolean) { acceptPause = value }, revokeOnSettle() { revokeOnSettle = true } }
+    acceptPause(value: boolean) { acceptPause = value }, revokeOnSettle() { revokeOnSettle = true },
+    get dependencyChecks() { return dependencyChecks }, blockDependencies(state: Exclude<DependencyState, 'achieved'> = 'unavailable') { dependencyState = state },
+    addDependency() {
+      const current = dependencyRecord(root)
+      const dependency = { goalId: current.id, definitionVersion: current.definition.version, definitionDigest: current.definition.digest }
+      value = { ...value, checkpoint: { ...value.checkpoint, dependencies: [dependency.goalId], dependencyBindings: [dependency] } }
+    } }
 }
 
-async function executeWake(f: Awaited<ReturnType<typeof harness>>) {
-  const wake = f.runtime.materialize({ ...intent(f.value), at: Date.now() - 10, expiresAt: Date.now() + 10_000 })
+async function executeWake(f: Awaited<ReturnType<typeof harness>>, scheduled?: ReturnType<GoalWakeRuntime['materialize']>) {
+  const wake = scheduled ?? f.runtime.materialize({ ...intent(f.value), at: Date.now() - 10, expiresAt: Date.now() + 10_000 })
   const registry = (f.ctx.assistantAutomations as unknown as { hostExecutors: { prove(input: unknown): unknown; execute(proof: unknown, input: unknown): Promise<{ outcome: string }> } }).hostExecutors
   const catalogDigest = acceptanceDigest({ protocol: owner, operation: 'resume-paused-native-goal', version: 1 })
   const execution = { kind: 'host', executorId: owner, executorContractVersion: 1, runbookId: 'resume-paused-native-goal', runbookVersion: 1,
@@ -62,7 +89,89 @@ async function executeWake(f: Awaited<ReturnType<typeof harness>>) {
     ownerRouteId: wake.intent.ownerRouteId, activationNonce: wake.intent.id, catalogDigest, signal: new AbortController().signal })
 }
 
+function wakeDefinition(value: GoalWakeIntent) {
+  const catalogDigest = acceptanceDigest({ protocol: owner, operation: 'resume-paused-native-goal', version: 1 })
+  return { name: 'Scheduled business goal', schedule: { kind: 'at' as const, at: new Date(value.at).toISOString() },
+    workspace: value.scope.workspace, agentPreset: value.scope.preset, timeoutMs: value.expiresAt - value.at,
+    misfire: { kind: 'latest' as const }, overlap: 'skip' as const, retrySafety: 'never' as const, maxRetries: 0,
+    principal: value.scope.principalId, budgetId: value.budgetId, budgetAmount: 1,
+    execution: { kind: 'host' as const, executorId: owner, executorContractVersion: 1, runbookId: 'resume-paused-native-goal',
+      runbookVersion: 1, catalogDigest, targetScope: { workspace: value.scope.workspace, preset: value.scope.preset },
+      scopeDigest: '0'.repeat(64), ownerRouteId: value.ownerRouteId, activationNonce: value.id } }
+}
+
+async function restartHarness(state: 'prepared' | 'scheduled', blocker: 'verifier' | 'outcome' | undefined, dependencyState: DependencyState = 'achieved') {
+  const root = await mkdtemp(join(tmpdir(), 'goal-wake-reconcile-')); roots.push(root)
+  const wakePath = join(root, 'wakes.sqlite')
+  const value = record(root)
+  const current = dependencyRecord(root)
+  const dependency = { goalId: current.id, definitionVersion: current.definition.version, definitionDigest: current.definition.digest }
+  const bound = { ...value, checkpoint: { ...value.checkpoint, dependencies: [dependency.goalId], dependencyBindings: [dependency] } }
+  const pending = { ...intent(bound), at: Date.now() + 60_000, expiresAt: Date.now() + 120_000 }
+  const ctx = new Context(); contexts.push(ctx)
+  await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), budgets: [{ id: 'goal-budget/owner', metric: 'automation-runs', limit: 10, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }], rules: [{ id: 'allow', effect: 'allow', subject: { kind: 'background', id: owner, workspace: root }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } }] })
+  const resumeScheduledGoal = vi.fn()
+  ctx.provide('assistantDelivery' as never, { validateOwnerRoute: () => ({ principalRecordId: 'owner-row', principalVersion: 1 }), goalWakeSettlementVersion: () => 1, resumeScheduledGoal } as never)
+  await ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0, allowUnbudgetedExecution: true })
+  const seed = new GoalWakeStore(wakePath)
+  seed.prepare(pending)
+  if (state === 'scheduled') {
+    const definition = wakeDefinition(pending)
+    const paused = ctx.assistantAutomations.reconcileSystem({ owner, automationId: pending.id, idempotencyKey: `prepare:${pending.id}`, desiredStatus: 'paused', definition })
+    seed.scheduled(pending.id, createHash('sha256').update(JSON.stringify(paused.definition)).digest('hex'))
+  }
+  seed.close()
+  let verifierReady = blocker !== 'verifier'; let outcomeReady = blocker !== 'outcome'
+  const runtime = new GoalWakeRuntime(ctx, wakePath, { ownerRouteId: 'local/owner', budgetId: 'goal-budget/owner', maxDelayMs: 86_400_000, runTimeoutMs: 60_000 }, () => bound, () => verifierReady, async () => {}, () => false, () => {}, () => false, () => assertDependencyState(bound, dependencyState), () => outcomeReady)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  return { bound, dependency, pending, ctx, runtime, resumeScheduledGoal, restore() { verifierReady = true; outcomeReady = true } }
+}
+
 describe('durable goal wake scheduling protocol', () => {
+  it('permits an exactly achieved dependency through preflight and every wake fence', async () => {
+    const f = await harness(); f.addDependency(); f.proveCompletion(true)
+    expect(() => f.runtime.preflight(f.value)).not.toThrow()
+    await expect(executeWake(f)).resolves.toMatchObject({ outcome: 'succeeded' })
+    expect(f.resumeScheduledGoal).toHaveBeenCalledOnce()
+    expect(f.settleCalls).toBe(1)
+    expect(f.dependencyChecks).toBeGreaterThanOrEqual(4)
+  })
+
+  it('rechecks dependencies after scheduling and immediately before Delivery dispatch', async () => {
+    const f = await harness(true, false, { revokeBeforeDispatch: true }); f.addDependency()
+    expect(() => f.runtime.preflight(f.value)).not.toThrow()
+    await expect(executeWake(f)).resolves.toMatchObject({ outcome: 'failed', sideEffectState: 'none' })
+    expect(f.resumeScheduledGoal).toHaveBeenCalledOnce()
+    expect(f.settleCalls).toBe(0)
+    expect(f.runtime.inspect(f.value.scope, f.value.id)).toMatchObject([{ state: 'denied' }])
+  })
+
+  it('does not persist a wake when dependency authority is lost after preflight', async () => {
+    const f = await harness(); f.addDependency()
+    expect(() => f.runtime.preflight(f.value)).not.toThrow()
+    f.blockDependencies()
+    expect(() => f.runtime.materialize(intent(f.value))).toThrow('wake authority is unavailable')
+    expect(f.runtime.inspect(f.value.scope, f.value.id)).toEqual([])
+  })
+
+  it('denies a legacy dependency-free wake when the parent later gains dependencies', async () => {
+    const f = await harness()
+    const { dependencies: _dependencies, ...legacy } = intent(f.value)
+    const scheduled = f.runtime.materialize({ ...legacy, at: Date.now() - 10, expiresAt: Date.now() + 10_000 })
+    f.addDependency()
+    await expect(executeWake(f, scheduled)).resolves.toMatchObject({ outcome: 'failed', sideEffectState: 'none' })
+    expect(f.resumeScheduledGoal).not.toHaveBeenCalled()
+    expect(f.runtime.inspect(f.value.scope, f.value.id)).toMatchObject([{ state: 'denied' }])
+  })
+
+  it('rechecks dependencies after dispatch and immediately before settlement', async () => {
+    const f = await harness(true, false, { revokeBeforeSettlement: true }); f.addDependency()
+    await expect(executeWake(f)).resolves.toMatchObject({ outcome: 'unknown', sideEffectState: 'unknown' })
+    expect(f.resumeScheduledGoal).toHaveBeenCalledOnce()
+    expect(f.settleCalls).toBe(0)
+    expect(f.runtime.inspect(f.value.scope, f.value.id)).toMatchObject([{ state: 'unknown' }])
+  })
+
   it.each(['accepted', 'unproved', 'revoked-during-settlement'] as const)('settles a resumed round waiting again only with exact durable authority: %s', async scenario => {
     const f = await harness(true, true)
     f.acceptPause(scenario !== 'unproved')
@@ -110,6 +219,32 @@ describe('durable goal wake scheduling protocol', () => {
     const f = await harness(); const value = intent(f.value); const first = f.runtime.materialize(value); const second = f.runtime.materialize(value)
     expect(second).toEqual(first)
     expect(f.ctx.assistantAutomations.inspectSystemOwned({ owner, automationId: first.intent.id }).definitionHash).toBe(first.definitionHash)
+  })
+
+  it.each([
+    ['prepared', 'verifier'], ['prepared', 'outcome'], ['scheduled', 'verifier'], ['scheduled', 'outcome'],
+  ] as const)('reconciles a dependency-bound %s wake after restart when %s readiness recovers', async (state, blocker) => {
+    const f = await restartHarness(state, blocker)
+    expect(f.runtime.health().connected).toBe(true)
+    expect(f.runtime.inspect(f.bound.scope, f.bound.id)).toMatchObject([{ state, intent: { dependencies: [f.dependency] } }])
+    if (state === 'scheduled') expect(f.ctx.assistantAutomations.inspectSystemOwned({ owner, automationId: f.pending.id }).automationStatus).toBe('paused')
+    expect(f.resumeScheduledGoal).not.toHaveBeenCalled()
+
+    f.restore(); await f.runtime.reconcile()
+
+    expect(f.runtime.inspect(f.bound.scope, f.bound.id)).toMatchObject([{ state: 'scheduled', intent: { dependencies: [f.dependency] } }])
+    expect(f.ctx.assistantAutomations.inspectSystemOwned({ owner, automationId: f.pending.id }).automationStatus).toBe('active')
+    expect(f.resumeScheduledGoal).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['prepared', 'stale'], ['prepared', 'cleared'], ['prepared', 'unavailable'],
+    ['scheduled', 'stale'], ['scheduled', 'cleared'], ['scheduled', 'unavailable'],
+  ] as const)('denies a restarted %s wake without Delivery when its dependency is %s', async (wakeState, dependencyState) => {
+    const f = await restartHarness(wakeState, undefined, dependencyState)
+    expect(f.runtime.inspect(f.bound.scope, f.bound.id)).toMatchObject([{ state: 'denied', intent: { dependencies: [f.dependency] } }])
+    if (wakeState === 'scheduled') expect(f.ctx.assistantAutomations.inspectSystemOwned({ owner, automationId: f.pending.id }).automationStatus).toBe('paused')
+    expect(f.resumeScheduledGoal).not.toHaveBeenCalled()
   })
 
   it('reconciles a real expired running Automations task to denied before Delivery dispatch CAS', async () => {

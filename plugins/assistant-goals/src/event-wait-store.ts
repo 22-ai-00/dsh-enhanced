@@ -8,7 +8,7 @@ import { validateGoalWakeIntent, type GoalWakeIntent } from './wake-store.js'
 export interface GoalEventSourceSnapshot {
   protocol: 'dsh-event-source/v1'
   sourceId: string
-  kind: 'file' | 'http-json' | 'webhook' | 'github-repository'
+  kind: 'file' | 'http-json' | 'webhook' | 'github-repository' | 'lark-calendar'
   version: string
   configDigest: string
   target: { automationId: string }
@@ -43,7 +43,7 @@ const freeze = <T>(value: T): T => { if (value && typeof value === 'object' && !
 const parse = (value: string): unknown => { try { return JSON.parse(value) } catch { return fail('schema') } }
 function source(value: unknown): GoalEventSourceSnapshot {
   if (!exact(value, ['protocol', 'sourceId', 'kind', 'version', 'configDigest', 'target', 'highWaterSequence']) || value.protocol !== 'dsh-event-source/v1'
-    || !text(value.sourceId) || !['file', 'http-json', 'webhook', 'github-repository'].includes(value.kind as string) || !text(value.version, 200)
+    || !text(value.sourceId) || !['file', 'http-json', 'webhook', 'github-repository', 'lark-calendar'].includes(value.kind as string) || !text(value.version, 200)
     || typeof value.configDigest !== 'string' || !digest.test(value.configDigest) || !exact(value.target, ['automationId']) || !text(value.target.automationId)
     || !integer(value.highWaterSequence)) fail()
   const input = value as Record<string, unknown>; const target = input.target as Record<string, unknown>

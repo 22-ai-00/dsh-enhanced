@@ -71,7 +71,11 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
 }
 ```
 
-这是 `goal_checkpoint` 的参数；`expires_at` 是 Unix 毫秒时间，示例 0 表示已到期。版本变化会拒绝旧写入，应重新读取再决定是否更新。依赖只能指向相同 owner record/version、workspace 和 preset 的业务目标，不允许重复、自依赖或环。
+这是 `goal_checkpoint` 的参数；`expires_at` 是 Unix 毫秒时间，示例 0 表示已到期。版本变化会拒绝旧写入，应重新读取再决定是否更新。依赖只能指向相同 owner record/version、workspace 和 preset 的业务目标，不允许重复、自依赖或环。调用方只提交业务 Goal ID；Host 在同一个 CAS 事务内把依赖冻结为当时准确的 definition version/digest，不能由模型指定或覆盖。旧数据库中只有 ID 的依赖保持 `stale`（`reason=legacy-unbound`），必须在新的 owner checkpoint 中重新绑定，重启时不会静默追认。
+
+`goal_context` 和动态 `goal-task-context/v1` 会展示当前依赖状态。只有冻结定义仍一致、最新独立 whole-goal 回执为 `achieved`、且原生依赖目标已 complete 时才是 `achieved`；否则区分 `pending`、`failed`、`unknown`、`cleared` 和 `stale`。`stale` 的 reason 区分 `definition-changed` 与 `legacy-unbound`。原生 complete 本身不等于 achieved，缺少 Verifier/Outcome 服务也只能是 unknown。
+
+所有执行恢复入口都要求全部依赖为准确 achieved：包括新的原生自治回合、主人发起的 `goal_control resume`、`goal_schedule` 和 `goal_wait_event`。系统在准入、Session flush 后、wake 持久化前、Delivery resume 前、运行中和终态结算边界重复核验，并将有序依赖绑定写入 execution/wake identity。派发前变化会拒绝且不启动模型/工具；派发后变化保留 unknown 且不自动重放。重启后的未派发 wake 只在 Verifier/Outcome 再次就绪后有界重试并重新核验；过期 wake 终止为 denied。主人当前回合的检查、编辑和清理仍按原 Policy 执行，本门控不会自行授予新的动作权限。
 
 新会话使用 `goal_context {"goal_id":"已保存的业务记录 ID","focus":true}` 后，后续模型步骤会收到该目标上下文。focus 只保存引用，不创建、转移、恢复或完成原生目标；开始新的原生目标会切换到新记录。跨会话 focus 和笔记在插件重启后保留。过期假设标记为 `stale`，当前没有自动重查执行器。
 
@@ -241,7 +245,7 @@ Verifier 回执、Goals 数据库投影与原生 Session 事件独立提交。`n
 
 ## Host 任务检索上下文
 
-`assistantGoals.taskContext(agent)` 返回只读 `goal-task-context/v1`：owner scope、目标 ID/definition version/digest、原生状态、objective 和 checkpoint nextStep。每次读取重新检查 live Agent、Delivery owner 和 Policy `snapshot` 授权；默认使用当前原生目标，也可使用同 owner 在本会话明确设置的 focus。当前会话的投影须匹配 live 原生 GoalId/revision/active 状态，终态、身份失效或拒绝授权返回 `undefined`。
+`assistantGoals.taskContext(agent)` 返回只读 `goal-task-context/v1`：owner scope、目标 ID/definition version/digest、原生状态、objective、checkpoint nextStep，以及可选的 Host 解析依赖状态。每次读取重新检查 live Agent、Delivery owner 和 Policy `snapshot` 授权；默认使用当前原生目标，也可使用同 owner 在本会话明确设置的 focus。当前会话的投影须匹配 live 原生 GoalId/revision/active 状态，终态、身份失效或拒绝授权返回 `undefined`。
 
 这是 Personal Memory 等 Host 消费者的检索输入。跨会话 focus 不授予执行权，checkpoint 不成为可信事实；本接口不修改原生目标或业务索引、不创建模型调用或唤醒任务。Memory 可独立安装，并在该接口不可用时继续按原用户输入召回。
 

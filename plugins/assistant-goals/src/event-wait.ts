@@ -24,10 +24,18 @@ type GoalSourceClaim = {
   triggerId: string; scope: GoalScope; goalId: string; definition: { version: number; digest: string }
   native: { sessionId: string; goalId: string; revision: number }; configDigest: string; automationId: string
 }
-type OpportunityEvaluation = { disposition: 'defer' | 'consume' | 'execute'; decision: { eventSequence: number } }
+type OpportunityInput = {
+  waitId: string; profileId: string; scope: GoalScope; goalId: string; sessionId: string
+  definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string
+  sourceDigest: string; sourceId: string; event: { id: string; sequence: number; digest: string; occurredAt: number }; expiresAt: number
+}
+// assistant-proactive is optional, so reuse the complete local authority
+// identity instead of coupling this independently installable plugin to it.
+type OpportunityDecisionIdentity = PreparationAuthority
+type OpportunityEvaluation = { disposition: 'defer' | 'consume' | 'execute'; decision: Readonly<OpportunityDecisionIdentity> }
 type OpportunityService = {
   closeWait?(waitId: string, scope: GoalScope, reason: 'expired' | 'cancelled'): void
-  evaluate(input: { waitId: string; profileId: string; scope: GoalScope; goalId: string; sessionId: string; definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string; sourceDigest: string; sourceId: string; event: { id: string; sequence: number; digest: string; occurredAt: number }; expiresAt: number }): OpportunityEvaluation
+  evaluate(input: OpportunityInput): OpportunityEvaluation
 }
 const same = (a: unknown, b: unknown) => acceptanceDigest(a) === acceptanceDigest(b)
 function fail(): never { throw new Error('assistant-goals: event wait authority is unavailable, changed or expired') }
@@ -38,6 +46,25 @@ function reader(value: unknown): SourceReader | undefined {
   if (!value || typeof value !== 'object') return undefined
   const candidate = value as Partial<SourceReader>
   return typeof candidate.sourceSnapshot === 'function' && typeof candidate.firstEventAfter === 'function' && typeof candidate.subscribeSourceChanges === 'function' ? candidate as SourceReader : undefined
+}
+function opportunity(value: unknown): OpportunityService | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  return typeof (value as Partial<OpportunityService>).evaluate === 'function' ? value as OpportunityService : undefined
+}
+function bindsOpportunityContext(decision: unknown, input: OpportunityInput): decision is OpportunityDecisionIdentity {
+  if (!decision || typeof decision !== 'object') return false
+  const candidate = decision as Partial<OpportunityDecisionIdentity>
+  return candidate.waitId === input.waitId && candidate.profileId === input.profileId && same(candidate.scope, input.scope)
+    && candidate.goalId === input.goalId && candidate.sessionId === input.sessionId
+    && candidate.definitionDigest === input.definitionDigest && candidate.objective === input.objective
+    && candidate.nativeGoalId === input.nativeGoalId
+    && candidate.nativeRevision === input.nativeRevision && candidate.ownerRouteId === input.ownerRouteId
+    && candidate.sourceDigest === input.sourceDigest && candidate.sourceId === input.sourceId
+    && candidate.expiresAt === input.expiresAt
+}
+function bindsOpportunityDecision(decision: OpportunityDecisionIdentity, input: OpportunityInput): boolean {
+  return decision.eventId === input.event.id && decision.eventSequence === input.event.sequence
+    && decision.eventDigest === input.event.digest
 }
 
 /** Converts one post-snapshot event observation into one owner-bound GoalWake. */
@@ -50,7 +77,7 @@ export class GoalEventWaitRuntime {
   #cursor = ''
   constructor(ctx: Context, path: string, private readonly wake: GoalWakeRuntime,
     private readonly current: (intent: GoalEventWaitIntent) => GoalRecord | undefined,
-    private readonly proactive: () => OpportunityService | undefined = () => undefined) {
+    private readonly proactive: () => unknown = () => undefined) {
     this.#store = new GoalEventWaitStore(path)
     // Do not import EventTriggers: goals remains installable without that optional plugin.
     ;(ctx as unknown as { inject(keys: readonly string[], callback: (runtime: unknown) => () => void): void }).inject(['eventTriggers'], runtime => {
@@ -110,6 +137,9 @@ export class GoalEventWaitRuntime {
     if (!record || !same(record.scope, intent.wake.scope) || !same(record.definition, intent.wake.definition)
       || record.native.sessionId !== intent.wake.native.sessionId || record.native.goalId !== intent.wake.native.goalId
       || record.native.maxGoalRounds !== intent.wake.native.maxGoalRounds
+      || (intent.wake.dependencies === undefined
+        ? record.checkpoint.dependencies.length > 0
+        : !same(record.checkpoint.dependencyBindings ?? [], intent.wake.dependencies))
       || requirePaused && (!same(record.native, intent.wake.native) || record.native.phase !== 'paused')) return undefined
     return record
   }
@@ -163,6 +193,11 @@ export class GoalEventWaitRuntime {
       return
     }
     if (!record || (wait.state === 'materialized' && ['blocked', 'complete', 'cleared'].includes(record.native.phase))) { this.#terminal(wait, 'invalid-current'); return }
+    if (wait.intent.wake.dependencies === undefined
+      ? record.checkpoint.dependencies.length > 0
+      : !same(record.checkpoint.dependencyBindings ?? [], wait.intent.wake.dependencies)) {
+      this.#terminal(wait, 'invalid-current'); return
+    }
     if (wait.state === 'waiting') {
       this.wake.preflight(record)
       let found = source.firstEventAfter(wait.intent.source, this.#store.cursor(wait.intent.id), wait.intent.expiresAt)
@@ -174,11 +209,11 @@ export class GoalEventWaitRuntime {
         && value.target.automationId === wait.intent.source.target.automationId
       if (!valid(found, envelope)) return
       if (wait.intent.opportunityProfile !== undefined) {
-        const proactive = this.proactive()
+        const proactive = opportunity(this.proactive())
         if (!proactive) { this.#terminal(wait, 'denied'); return }
         let executable = false
         for (let observed = 0; observed < 32; observed++) {
-          const evaluation = proactive.evaluate({
+          const input: OpportunityInput = {
             waitId: wait.intent.id, profileId: wait.intent.opportunityProfile, scope: wait.intent.wake.scope,
             goalId: wait.intent.wake.goalId, sessionId: wait.intent.wake.native.sessionId,
             definitionDigest: wait.intent.wake.definition.digest, objective: record.native.objective,
@@ -187,11 +222,16 @@ export class GoalEventWaitRuntime {
             sourceId: wait.intent.source.sourceId,
             event: { id: envelope.event.id, sequence: found.sequence, digest: externalEventDigest(envelope), occurredAt: envelope.event.occurredAt },
             expiresAt: wait.intent.expiresAt,
-          })
+          }
+          const evaluation = proactive.evaluate(input)
           if (evaluation.disposition === 'consume') { this.#store.advanceCursor(wait.intent.id, found.sequence); return }
           if (evaluation.disposition === 'execute') {
-            if (!Number.isSafeInteger(evaluation.decision.eventSequence) || evaluation.decision.eventSequence < found.sequence) throw new Error('assistant-goals: opportunity execution does not bind the observed event')
-            if (evaluation.decision.eventSequence === found.sequence) { executable = true; break }
+            if (!bindsOpportunityContext(evaluation.decision, input) || !Number.isSafeInteger(evaluation.decision.eventSequence)
+              || evaluation.decision.eventSequence < found.sequence) throw new Error('assistant-goals: opportunity execution does not bind the observed event')
+            if (evaluation.decision.eventSequence === found.sequence) {
+              if (!bindsOpportunityDecision(evaluation.decision, input)) throw new Error('assistant-goals: opportunity execution does not bind the observed event')
+              executable = true; break
+            }
           }
           if (evaluation.disposition !== 'defer' && evaluation.disposition !== 'execute') throw new Error('assistant-goals: invalid opportunity evaluation')
           const next = source.firstEventAfter(wait.intent.source, found.sequence, wait.intent.expiresAt)
@@ -218,7 +258,7 @@ export class GoalEventWaitRuntime {
     }
   }
   #terminal(wait: GoalEventWait, reason: NonNullable<GoalEventWait['reason']>): void {
-    if (wait.intent.opportunityProfile !== undefined) this.proactive()?.closeWait?.(wait.intent.id, wait.intent.wake.scope, reason === 'expired' ? 'expired' : 'cancelled')
+    if (wait.intent.opportunityProfile !== undefined) opportunity(this.proactive())?.closeWait?.(wait.intent.id, wait.intent.wake.scope, reason === 'expired' ? 'expired' : 'cancelled')
     this.#store.terminal(wait.intent.id, reason)
   }
   #onSourceChanged(): void {

@@ -43,6 +43,7 @@ export class GoalExecutionRuntime {
       prepare(agent: Agent, run: GoalExecutionRun): void
       settled(agent: Agent, run: GoalExecutionRun, assertCurrent: () => void): Promise<void>
     },
+    private readonly assertDependencies: (record: GoalRecord) => void = () => {},
   ) {
     if (path !== undefined) {
       this.#store = new GoalExecutionStore(path)
@@ -253,6 +254,7 @@ export class GoalExecutionRuntime {
     if (!this.#active || registration === undefined) throw new Error('assistant-goals: step verifier unavailable')
     signal.throwIfAborted()
     const { scope, record } = this.current(agent)
+    this.assertDependencies(record)
     const native = this.ctx.get('goals')?.get(agent)
     const start = agent.session.snapshotEvents().findLast(event => event.type === 'turn/start' && event.data.turn === turn)
     const sources = agent.session.snapshotEvents().filter(event => event.type === 'user/message'
@@ -263,7 +265,9 @@ export class GoalExecutionRuntime {
       || record.native.sessionId !== String(agent.session.id)) throw new Error('assistant-goals: native round is not current')
     const runId = `goal-run-${acceptanceDigest([scope, record.id, String(agent.session.id), turn])}`
     const now = Date.now()
-    const prepared = store.prepare({ runId, scope, objective: record.definition.objective,
+    const dependencies = record.checkpoint.dependencyBindings
+    if (record.checkpoint.dependencies.length > 0 && dependencies === undefined) throw new Error('assistant-goals: legacy dependencies require re-checkpoint')
+    const prepared = store.prepare({ runId, scope, objective: record.definition.objective, dependencies: dependencies ?? [],
       task: { kind: 'goal-step', ref: runId, goal: { id: record.id, definitionVersion: record.definition.version,
         definitionDigest: record.definition.digest, stepId: `round-${source.round}`, runId,
         sessionId: String(agent.session.id), nativeGoalId: String(native.id), nativeRevision: native.revision } },
@@ -302,6 +306,7 @@ export class GoalExecutionRuntime {
       || this.#revoked.has(round.agent)
       || Date.now() >= round.run.intent.admission.expiresAt) throw new Error('assistant-goals: step admission expired')
     const { scope, record } = this.current(round.agent)
+    this.assertDependencies(record)
     const exactRevision = record.native.revision === round.run.intent.task.goal.nativeRevision
     const terminalTransition = terminal && record.native.revision === round.run.intent.task.goal.nativeRevision + 1
       && (record.native.phase === 'complete'
@@ -311,6 +316,9 @@ export class GoalExecutionRuntime {
       && record.native.revision === eventWaitPause.revision && record.native.phase === 'paused'
       && (!terminal || eventWaitPause.materialized)
     if (acceptanceDigest(scope) !== acceptanceDigest(round.run.intent.scope)
+      || (round.run.intent.dependencies === undefined
+        ? record.checkpoint.dependencies.length > 0
+        : acceptanceDigest(record.checkpoint.dependencyBindings ?? []) !== acceptanceDigest(round.run.intent.dependencies))
       || record.id !== round.run.intent.task.goal.id || record.definition.version !== round.run.intent.task.goal.definitionVersion
       || record.definition.digest !== round.run.intent.task.goal.definitionDigest
       || record.native.goalId !== round.run.intent.task.goal.nativeGoalId

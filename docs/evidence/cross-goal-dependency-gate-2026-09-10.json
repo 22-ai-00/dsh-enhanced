@@ -1,0 +1,93 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-10",
+  "recordedAt": "2026-09-10T10:46:45Z",
+  "baseCommit": "32904b6f67df047aaa523b72aefe67e0e8c5750b",
+  "workingTreeState": "final source frozen before root validation",
+  "scope": [
+    "WP05 cross-goal dependency definition binding and live status projection",
+    "Fail-closed gating for native rounds, owner resume, scheduled wake, event wait and delayed completion",
+    "Restart recovery for dependency-bound prepared and scheduled wakes"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2,
+    "wp05": "implementing",
+    "slice": "deliverable"
+  },
+  "implementation": [
+    "Goal schema v3 freezes ordered dependency goal IDs with exact definition version and digest in the same owner-scoped checkpoint CAS transaction; duplicate, cross-scope, self and cyclic dependencies are rejected.",
+    "Schema v2 ID-only dependencies remain stale with reason legacy-unbound and require an explicit new owner checkpoint; a v2 database carrying impossible Host-only bindings is rejected.",
+    "The public projection has six states: achieved, pending, failed, unknown, cleared and stale. Only an exact independently achieved receipt plus native complete satisfies the gate.",
+    "Execution and wake intents persist ordered dependency bindings. Native AgentLoop admission, owner resume, scheduling, event waits, Delivery dispatch, tools, settlement and delayed whole-goal completion recheck the live binding and outcome.",
+    "Dependency loss before dispatch produces no model or tool effect and a denied wake. Drift after a tool or Delivery dispatch preserves unknown, non-quiescent state and is never automatically replayed.",
+    "Pending prepared and paused-scheduled wakes retry only after both step verifier and whole-goal outcome services are ready. Permanent stale, cleared or unavailable dependency states terminate the wake as denied while the paused Automation remains unclaimable.",
+    "Proactive execute decisions bind the complete wait, owner, goal, definition, native, source, event and expiry identity instead of only event sequence.",
+    "Goals now accepts the lark-calendar event-source kind already emitted by the same-release EventTriggers protocol."
+  ],
+  "targetedValidation": {
+    "assistantGoals": {
+      "command": "pnpm --filter @dsh-enhanced/assistant-goals test",
+      "exitCode": 0,
+      "files": 21,
+      "testsPassed": 261,
+      "testsSkipped": 0
+    },
+    "typecheck": {
+      "command": "pnpm --filter @dsh-enhanced/assistant-goals typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "command": "pnpm exec oxlint --deny-warnings plugins/assistant-goals",
+      "exitCode": 0,
+      "warnings": 0,
+      "errors": 0
+    },
+    "package": {
+      "command": "pnpm --filter @dsh-enhanced/assistant-goals pack --dry-run --json",
+      "exitCode": 0,
+      "dependencyArtifactsIncluded": true
+    }
+  },
+  "engineeringValidation": {
+    "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+    "status": "passed",
+    "exitCode": 0,
+    "log": "/tmp/dsh-cross-goal-dependency-check.log",
+    "logSha256": "594ba7647672bad806d567e86a329303a37407cc6e7ffacc9534efe9df6fa421",
+    "testFilesPassed": 356,
+    "testsPassed": 4636,
+    "testsSkipped": 1,
+    "dryRunPacks": 33,
+    "result": "manifest, zero-warning lint, workspace typecheck/tests, final build and every package dry-run pack passed"
+  },
+  "independentReview": {
+    "goalCoverage": "PASS: zero blocker, high or medium findings; the dependency propagation slice is deliverable while WP05 remains implementing.",
+    "securityBeforeFixes": "Found one HIGH delayed-completion bypass and two MEDIUM event-wait identity/compatibility defects.",
+    "securityAfterFixes": "PASS: zero blocker, high or medium findings after rechecking the final source."
+  },
+  "limitations": [
+    "This batch uses deterministic native AgentLoop, verifier, SQLite and Automations integration tests; it does not add a new real-model or browser run.",
+    "Goal, Outcome, Execution, Wake and Session databases are not one cross-database transaction; repeated fences and unknown-after-side-effect semantics provide the bounded guarantee.",
+    "WP05 remains implementing: automatic stale-assumption investigation, real external-submit readback and compensation, and a long-running production scenario remain outstanding.",
+    "The complete 18-work-package objective remains incomplete."
+  ],
+  "failedChecks": [
+    "The first root check exposed a stale assistant-goals build consumed by nine assistant-delivery scheduled-goal tests; rebuilding the package made all nine pass without changing their assertions.",
+    "The second root check exposed that a legitimate proactive coalescing decision can bind a later event in the current bounded page. The final implementation preserves full non-event identity checks, scans forward at most 32 events, and materializes only after the exact event ID, sequence and digest are observed."
+  ],
+  "sourceHashes": {
+    "plugins/assistant-goals/src/dependency.ts": "4feb3a48a662fdb1582f2a9eb48797cf9831a0c2a7dceaa788373e516fd1911c",
+    "plugins/assistant-goals/src/store.ts": "e0ecd6a62d1295aae38ff6916912fedc83a643a860694257482af5e0a6db2e2d",
+    "plugins/assistant-goals/src/execution.ts": "847af7f3511567167f929ae477054f6b17fc43b1b614651ad586d82bfc1a3c98",
+    "plugins/assistant-goals/src/execution-store.ts": "3d4f68c7b99919608d82485b759ae2b576dc77372c0c60b7b532b65e99029032",
+    "plugins/assistant-goals/src/wake.ts": "d91bbdd09398f48f37ec2cdf7e8128626573dc71afa3d5779dc19b758e1305b3",
+    "plugins/assistant-goals/src/wake-store.ts": "11a9a56792b202bd7e0b325d0ef9edbcadbe0f51f4cef46f16710bec73aee1b1",
+    "plugins/assistant-goals/src/event-wait.ts": "a533ccba1dd3c94217f5a6953f990bd608fc5643be5e30f6880d6ec3d159cf76",
+    "plugins/assistant-goals/src/event-wait-store.ts": "7b51088c4df488c28f9dd5a8dfd9d4a6ec44686c29292cc68e84e020a5569b15",
+    "plugins/assistant-goals/src/outcome.ts": "e414513ce4249ce33944ba4bbd6a2ed4c44e0e0f5559aa6eaa9e4235a091281c",
+    "plugins/assistant-goals/src/service.ts": "81e357708ea8dd9f93b687178d0897817b2da68181a7da6b3aad4bc19af4de42",
+    "plugins/assistant-goals/src/types.ts": "fc13a6e1222f1fc0e4ddb60bb162a1e8adec750a6c32d2609430c534e5db5944"
+  }
+}
