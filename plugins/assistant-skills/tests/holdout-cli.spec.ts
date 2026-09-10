@@ -52,6 +52,14 @@ test('operator inspection returns public pins without consuming qualification st
   expect(stdout).not.toMatch(/PRIVATE KEY|expectedStdout|stdin/u)
 })
 
+test('operator rejects an unknown prospective generator before creating state', async () => {
+  const config = await setup(false, true), path = join(config.root, 'config.json')
+  await writeFile(path, JSON.stringify({ prospective: { generator: 'dependency-topological-order/v2' }, privateKeyPath: join(config.root, 'key.pem'), statePath: join(config.root, 'state.sqlite'), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } }), { mode: 0o600 })
+  const client = connect(process.execPath, [cli, '--config', path])
+  expect(await client.exit).toBe(1)
+  await expect(stat(join(config.root, 'state.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
 test('installed symbolic-link CLI invokes the operator instead of silently exiting', async () => {
   const config = await setup(false, true, 'order-summary/v2'), link = join(config.root, 'dsh-skill-holdout')
   await symlink(cli, link)
@@ -103,6 +111,33 @@ test('second-family inspection and certificate pin the exact template-render pro
   expect(record).toMatchObject({ phase: 'complete', generator, binding: frozen, dataset: { version: generator } })
 })
 
+test('third-family topology profile persists exact private dataset across lost begin acknowledgement and rejects drift', async () => {
+  const generator = 'dependency-topological-order/v1', config = await setup(false, true, generator), path = join(config.root, 'config.json')
+  const profileDigest = prospectiveGeneratorDigest(generator), hook = join(config.root, 'before-begin-ack.mjs')
+  const { stdout } = await exec(process.execPath, [cli, '--inspect-config', path])
+  expect(JSON.parse(stdout)).toEqual({ publicKey: config.publicKey, profileVersion: generator, profileDigest, generatorDigest: profileDigest, limits: { maxToolCalls: 4, maxOutputBytes: 16384 } })
+  await writeFile(hook, `const original = process.stdout.write.bind(process.stdout); process.stdout.write = function(chunk, ...args) { let message; try { message = JSON.parse(String(chunk)) } catch {} if (message?.id === 'request-1' && message.ok) process.kill(process.pid, 'SIGKILL'); return original(chunk, ...args) }`, { mode: 0o600 })
+  const first = connect(process.execPath, ['--import', hook, cli, '--config', path]); await first.read()
+  const frozen = binding(sha('topology-admission'))
+  await expect(first.request('begin', frozen)).rejects.toThrow(/authority exit/u); await first.exit
+  const beforeDb = new DatabaseSync(join(config.root, 'state.sqlite'))
+  const before = beforeDb.prepare('SELECT state,prospective FROM authority').get() as { state: string; prospective: string }
+  const persisted = JSON.parse(before.prospective) as { phase: string; generator: string; binding: unknown; dataset: { version: string; cases: { stdin: string }[] }; certificate: { profileVersion: string; profileDigest: string; datasetDigest: string } }
+  expect(persisted).toMatchObject({ phase: 'complete', generator, binding: frozen, dataset: { version: generator }, certificate: { profileVersion: generator, profileDigest } })
+  expect(persisted.certificate.datasetDigest).toBe(acceptanceDigest(persisted.dataset))
+  beforeDb.exec('UPDATE authority SET lease_until=0'); beforeDb.close()
+  const restarted = connect(process.execPath, [cli, '--config', path]); await restarted.read()
+  const next = (await restarted.request('next')).value as SignedCell
+  expect(verifyHoldoutSignature(next as unknown as Record<string, unknown>, config.publicKey)).toBe(true)
+  expect(persisted.dataset.cases.map(value => value.stdin)).toContain(next.stdin)
+  await restarted.close()
+  const afterDb = new DatabaseSync(join(config.root, 'state.sqlite'))
+  expect(afterDb.prepare('SELECT prospective FROM authority').get()).toEqual({ prospective: before.prospective })
+  const changed = structuredClone(persisted); changed.dataset.cases[0]!.stdin += 'na nb\n'
+  afterDb.prepare('UPDATE authority SET prospective=?, lease_until=0').run(JSON.stringify(changed)); afterDb.close()
+  const poisoned = connect(process.execPath, [cli, '--config', path]); expect(await poisoned.exit).toBe(1)
+})
+
 test('legacy v1 frozen state resumes without regenerating or losing consumed cells', async () => {
   const config = await setup(false, true), path = join(config.root, 'config.json')
   const client = connect(process.execPath, [cli, '--config', path]); await client.read()
@@ -134,7 +169,7 @@ test.each([false, true])('switching authority mode cannot reset durable qualific
   expect(after.prepare('SELECT state,prospective FROM authority').get()).toEqual(state); after.close()
 })
 
-test.each(['order-summary/v1', 'template-render/v1'] as const)('failure after durable freeze poisons the %s prospective plan instead of regenerating samples', async generator => {
+test.each(['order-summary/v1', 'template-render/v1', 'dependency-topological-order/v1'] as const)('failure after durable freeze poisons the %s prospective plan instead of regenerating samples', async generator => {
   const config = await setup(false, true, generator), path = join(config.root, 'config.json')
   const client = connect(process.execPath, [cli, '--config', path]); await client.read()
   const db = new DatabaseSync(join(config.root, 'state.sqlite'))

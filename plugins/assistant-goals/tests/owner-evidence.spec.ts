@@ -56,6 +56,43 @@ async function fixture() {
   return { ctx, service: ctx.assistantGoals, root, scope, runId, snapshot, events, observation }
 }
 
+type EvidenceFixture = Awaited<ReturnType<typeof fixture>>
+function evidenceSnapshot(f: EvidenceFixture, input: { goalId: string; sessionId: string; nativeGoalId: string; outcome: 'achieved' | 'not-achieved';
+  verifiedAt?: number; objective?: string }) {
+  const value = f.snapshot(), run = value.executionRuns[0]!, assessment = value.outcomeAssessments[0]!
+  const definition = { version: 1, objective: input.objective ?? value.storedGoal.definition.objective,
+    digest: acceptanceDigest({ objective: input.objective ?? value.storedGoal.definition.objective }) }
+  const runId = `run-${input.goalId}`, stepContractId = `step-${input.goalId}`, outcomeContractId = `outcome-${input.goalId}`
+  const stepContractDigest = acceptanceDigest({ kind: 'step', goalId: input.goalId })
+  const outcomeContractDigest = acceptanceDigest({ kind: 'outcome', goalId: input.goalId })
+  const receiptDigest = acceptanceDigest({ kind: 'receipt', goalId: input.goalId, outcome: input.outcome })
+  value.storedGoal.id = input.goalId; value.storedGoal.definition = definition; value.storedGoal.originalObjective = definition.objective
+  Object.assign(value.storedGoal.nativeAtLastObservation, { sessionId: input.sessionId, goalId: input.nativeGoalId, objective: definition.objective,
+    phase: input.outcome === 'achieved' ? 'complete' : 'blocked' })
+  run.intent.runId = runId; run.intent.objective = definition.objective; run.intent.task.ref = runId
+  Object.assign(run.intent.task.goal, { id: input.goalId, definitionVersion: definition.version, definitionDigest: definition.digest, runId,
+    sessionId: input.sessionId, nativeGoalId: input.nativeGoalId })
+  run.acceptance = { contractId: stepContractId, contractDigest: stepContractDigest }
+  assessment.triggerRunId = runId; assessment.contract.id = outcomeContractId; assessment.contract.digest = outcomeContractDigest
+  assessment.contract.task.ref = `assessment-${input.goalId}`; assessment.contract.task.goal.assessmentId = `assessment-${input.goalId}`
+  Object.assign(assessment.contract.task.goal, { id: input.goalId, definitionVersion: definition.version, definitionDigest: definition.digest,
+    sessionId: input.sessionId, nativeGoalId: input.nativeGoalId })
+  const stepAccepted = value.acceptedTasks[0]!, outcomeAccepted = value.acceptedTasks[1]!, verifiedAt = input.verifiedAt ?? Date.now()
+  stepAccepted.contractId = stepContractId; stepAccepted.contract = { id: stepContractId, digest: stepContractDigest, task: structuredClone(run.intent.task) }
+  stepAccepted.receipt.digest = acceptanceDigest({ kind: 'step-receipt', goalId: input.goalId })
+  outcomeAccepted.contractId = outcomeContractId; outcomeAccepted.contract = structuredClone(assessment.contract)
+  Object.assign(outcomeAccepted.receipt, { objectiveStatus: input.outcome, digest: receiptDigest, completedAt: verifiedAt, validUntil: verifiedAt + 60_000 })
+  outcomeAccepted.verifierExecutionObservation = { ...assessment.execution!, executionRef: assessment.contract.task.ref }
+  return value
+}
+
+function runProof(snapshot: ReturnType<EvidenceFixture['snapshot']>) {
+  const run = snapshot.executionRuns[0]!, assessment = snapshot.outcomeAssessments[0]!
+  return { protocol: 'assistant-goals/owner-run-trace/v1' as const, runId: run.intent.runId, turn: 4, nativeRevision: 2,
+    definitionDigest: snapshot.storedGoal.definition.digest, outcomeProfile: assessment.contract.profile, steps: [],
+    traceDigest: acceptanceDigest({ trace: run.intent.runId }) }
+}
+
 test('returns an integrity-bound exact run trace and preserves failed calls', async () => {
   const f = await fixture(), snapshots = [f.snapshot(), f.snapshot()], observations = [f.observation(), f.observation()]
   const inspect = vi.spyOn(f.service, 'inspectOwnerGoalExecution').mockImplementation(() => snapshots.shift()! as never)
@@ -126,37 +163,123 @@ test.each(['route-race', 'receipt-drift', 'session-event-drift', 'run-mismatch']
 })
 
 test('derives one Host failure evidence summary from stable exact snapshots', async () => {
-  const f = await fixture(), failedFirst = f.snapshot(), failedLast = f.snapshot()
-  const repair = () => {
-    const value = f.snapshot()
-    value.storedGoal.id = 'repair-goal'; value.storedGoal.nativeAtLastObservation.sessionId = 'repair-session'; value.storedGoal.nativeAtLastObservation.goalId = 'repair-native'
-    value.executionRuns = []; value.outcomeAssessments = []; value.acceptedTasks = []
-    return value
-  }
-  const repairFirst = repair(), repairLast = repair(), snapshots = [failedFirst, repairFirst, failedLast, repairLast]
+  const f = await fixture(), now = Date.now(), failedFirst = evidenceSnapshot(f, { goalId: 'goal-a', sessionId: 'session-a', nativeGoalId: 'native-a', outcome: 'not-achieved', verifiedAt: now - 1_000 })
+  const failedLast = structuredClone(failedFirst), repairFirst = evidenceSnapshot(f, { goalId: 'repair-goal', sessionId: 'repair-session', nativeGoalId: 'repair-native', outcome: 'achieved', verifiedAt: now })
+  const repairLast = structuredClone(repairFirst), snapshots = [failedFirst, repairFirst, failedLast, repairLast]
   vi.spyOn(f.service, 'inspectOwnerGoalExecution').mockImplementation(() => structuredClone(snapshots.shift()!) as never)
-  vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockResolvedValue({ protocol: 'assistant-goals/owner-run-trace/v1', runId: f.runId, turn: 4, nativeRevision: 2,
-    definitionDigest: failedFirst.storedGoal.definition.digest, outcomeProfile: failedFirst.outcomeAssessments[0]!.contract.profile, steps: [], traceDigest: 'e'.repeat(64) })
+  vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockResolvedValue(runProof(failedFirst))
   vi.spyOn(f.service, 'trustedAcceptanceProducerGeneration').mockReturnValue('producer-generation')
   const summary = await f.service.inspectOwnerFailureCaptureSummary({ ownerRouteId: 'route', principalId: 'owner', workspace: f.root, preset: 'primary', taskFamilyId: 'repair-evidence',
     repair: { sessionId: 'repair-session', goalId: 'repair-goal' }, failures: [{ sessionId: 'session-a', goalId: 'goal-a' }], minimumOccurrences: 1 })
   expect(summary).toMatchObject({ protocol: 'assistant-skills/host-failure-evidence/v1', taskFamily: { id: 'repair-evidence', definitionDigest: failedFirst.storedGoal.definition.digest },
-    failureCategory: 'objective-not-achieved', triggerCondition: { minimumOccurrences: 1 }, failures: [{ goal: { id: 'goal-a' }, runId: f.runId, outcome: 'not-achieved',
-      execution: { status: 'succeeded', quiescent: true }, traceDigest: 'e'.repeat(64) }], repairGoal: { id: 'repair-goal', sessionId: 'repair-session', nativeGoalId: 'repair-native' },
+    failureCategory: 'objective-not-achieved', triggerCondition: { minimumOccurrences: 1 }, failures: [{ goal: { id: 'goal-a' }, runId: 'run-goal-a', outcome: 'not-achieved',
+      execution: { status: 'succeeded', quiescent: true }, traceDigest: runProof(failedFirst).traceDigest }], repairGoal: { id: 'repair-goal', sessionId: 'repair-session', nativeGoalId: 'repair-native' },
     evidence: { producer: 'assistant-goals', generation: 'producer-generation' } })
   const { evidence, ...unsigned } = summary
   expect(evidence.digest).toBe(acceptanceDigest({ ...unsigned, evidence: { producer: 'assistant-goals', generation: evidence.generation } }))
 })
 
+test('aggregates repeated independent failures in canonical order before a later achieved repair', async () => {
+  const f = await fixture(), now = Date.now()
+  const goalA = evidenceSnapshot(f, { goalId: 'goal-a', sessionId: 'session-z', nativeGoalId: 'native-a', outcome: 'not-achieved', verifiedAt: now - 2_000 })
+  const goalB = evidenceSnapshot(f, { goalId: 'goal-b', sessionId: 'session-a', nativeGoalId: 'native-b', outcome: 'not-achieved', verifiedAt: now - 2_000 })
+  const repair = evidenceSnapshot(f, { goalId: 'repair-goal', sessionId: 'repair-session', nativeGoalId: 'repair-native', outcome: 'achieved', verifiedAt: now - 1_000 })
+  // Input order is B, A; canonical locator and evidence ordering both read A, B.
+  const snapshots = [goalA, goalB, repair, goalA, goalB, repair]
+  vi.spyOn(f.service, 'inspectOwnerGoalExecution').mockImplementation(() => structuredClone(snapshots.shift()!) as never)
+  vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockImplementation(async input => runProof(input.goalId === 'goal-a' ? goalA : goalB))
+  vi.spyOn(f.service, 'trustedAcceptanceProducerGeneration').mockReturnValue('producer-generation')
+  const summary = await f.service.inspectOwnerFailureCaptureSummary({ ownerRouteId: 'route', principalId: 'owner', workspace: f.root, preset: 'primary',
+    taskFamilyId: 'repair-evidence', repair: { sessionId: 'repair-session', goalId: 'repair-goal' }, failures: [
+      { sessionId: 'session-z', goalId: 'goal-a' }, { sessionId: 'session-a', goalId: 'goal-b' },
+    ], minimumOccurrences: 2 })
+  expect(summary.failureCategory).toBe('repeated-not-achieved')
+  expect(summary.triggerCondition).toEqual({ kind: 'not-achieved-count', minimumOccurrences: 2, windowStartedAt: now - 2_000, windowEndedAt: now - 2_000 })
+  expect(summary.failures.map(item => item.goal.id)).toEqual(['goal-a', 'goal-b'])
+  expect(summary.repairGoal.id).toBe('repair-goal')
+})
+
+test.each(['duplicate-locator', 'duplicate-goal', 'duplicate-session', 'duplicate-native', 'duplicate-run', 'duplicate-contract-id',
+  'duplicate-contract-digest', 'duplicate-receipt', 'minimum-mismatch', 'cross-scope', 'cross-definition', 'outcome-profile', 'repair-profile'] as const)(
+  'rejects a non-independent repeated failure set: %s', async kind => {
+    const f = await fixture(), now = Date.now()
+    const goalA = evidenceSnapshot(f, { goalId: 'goal-a', sessionId: 'session-a', nativeGoalId: 'native-a', outcome: 'not-achieved', verifiedAt: now - 2_000 })
+    const goalB = evidenceSnapshot(f, { goalId: 'goal-b', sessionId: 'session-b', nativeGoalId: 'native-b', outcome: 'not-achieved',
+      verifiedAt: now - 1_500, ...(kind === 'cross-definition' ? { objective: 'Another task' } : {}) })
+    const repair = evidenceSnapshot(f, { goalId: 'repair-goal', sessionId: 'repair-session', nativeGoalId: 'repair-native', outcome: 'achieved', verifiedAt: now - 1_000 })
+    if (kind === 'cross-scope') goalB.storedGoal.scope.principalRecordId = 'other-record'
+    if (kind === 'duplicate-goal') goalB.storedGoal.id = goalA.storedGoal.id
+    if (kind === 'duplicate-session') goalB.storedGoal.nativeAtLastObservation.sessionId = goalA.storedGoal.nativeAtLastObservation.sessionId
+    if (kind === 'duplicate-native') goalB.storedGoal.nativeAtLastObservation.goalId = goalA.storedGoal.nativeAtLastObservation.goalId
+    if (kind === 'duplicate-run') {
+      goalB.executionRuns[0]!.intent.runId = goalA.executionRuns[0]!.intent.runId
+      goalB.outcomeAssessments[0]!.triggerRunId = goalA.executionRuns[0]!.intent.runId
+    }
+    if (kind === 'duplicate-contract-id') {
+      goalB.outcomeAssessments[0]!.contract.id = goalA.outcomeAssessments[0]!.contract.id
+      goalB.acceptedTasks[1]!.contractId = goalA.outcomeAssessments[0]!.contract.id
+      goalB.acceptedTasks[1]!.contract.id = goalA.outcomeAssessments[0]!.contract.id
+    }
+    if (kind === 'duplicate-contract-digest') {
+      goalB.outcomeAssessments[0]!.contract.digest = goalA.outcomeAssessments[0]!.contract.digest
+      goalB.acceptedTasks[1]!.contract.digest = goalA.outcomeAssessments[0]!.contract.digest
+    }
+    if (kind === 'outcome-profile') {
+      goalB.outcomeAssessments[0]!.contract.profile.digest = 'f'.repeat(64)
+      ;(goalB.acceptedTasks[1]!.contract as typeof goalB.outcomeAssessments[number]['contract']).profile.digest = 'f'.repeat(64)
+    }
+    if (kind === 'repair-profile') {
+      repair.outcomeAssessments[0]!.contract.profile.digest = 'e'.repeat(64)
+      ;(repair.acceptedTasks[1]!.contract as typeof repair.outcomeAssessments[number]['contract']).profile.digest = 'e'.repeat(64)
+    }
+    if (kind === 'duplicate-receipt') goalB.acceptedTasks[1]!.receipt.digest = goalA.acceptedTasks[1]!.receipt.digest!
+    const snapshots = [goalA, goalB, repair]
+    vi.spyOn(f.service, 'inspectOwnerGoalExecution').mockImplementation(() => structuredClone(snapshots.shift()!) as never)
+    vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockImplementation(async input => runProof(input.goalId === 'goal-a' ? goalA : goalB))
+    const failures = kind === 'duplicate-locator'
+      ? [{ sessionId: 'session-a', goalId: 'goal-a' }, { sessionId: 'session-a', goalId: 'goal-a' }]
+      : [{ sessionId: 'session-a', goalId: 'goal-a' }, { sessionId: 'session-b', goalId: 'goal-b' }]
+    await expect(f.service.inspectOwnerFailureCaptureSummary({ ownerRouteId: 'route', principalId: 'owner', workspace: f.root, preset: 'primary',
+      taskFamilyId: 'repair-evidence', repair: { sessionId: 'repair-session', goalId: 'repair-goal' }, failures,
+      minimumOccurrences: kind === 'minimum-mismatch' ? 3 : 2 })).rejects.toThrow()
+  })
+
+test.each(['trace', 'receipt', 'route'] as const)('rejects one drifting member of a repeated failure set: %s', async kind => {
+  const f = await fixture(), now = Date.now()
+  const goalA = evidenceSnapshot(f, { goalId: 'goal-a', sessionId: 'session-a', nativeGoalId: 'native-a', outcome: 'not-achieved', verifiedAt: now - 2_000 })
+  const goalB = evidenceSnapshot(f, { goalId: 'goal-b', sessionId: 'session-b', nativeGoalId: 'native-b', outcome: 'not-achieved', verifiedAt: now - 1_500 })
+  const repair = evidenceSnapshot(f, { goalId: 'repair-goal', sessionId: 'repair-session', nativeGoalId: 'repair-native', outcome: 'achieved', verifiedAt: now - 1_000 })
+  const goalALast = structuredClone(goalA), goalBLast = structuredClone(goalB), repairLast = structuredClone(repair)
+  if (kind === 'receipt') goalBLast.acceptedTasks[1]!.receipt.digest = 'f'.repeat(64)
+  if (kind === 'route') goalBLast.ownerRoute = { route: 2 }
+  const snapshots = [goalA, goalB, repair, goalALast, goalBLast, repairLast]
+  vi.spyOn(f.service, 'inspectOwnerGoalExecution').mockImplementation(() => structuredClone(snapshots.shift()!) as never)
+  vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockImplementation(async input => {
+    const proof = runProof(input.goalId === 'goal-a' ? goalA : goalB)
+    return kind === 'trace' && input.goalId === 'goal-b' ? { ...proof, runId: 'wrong-run' } : proof
+  })
+  await expect(f.service.inspectOwnerFailureCaptureSummary({ ownerRouteId: 'route', principalId: 'owner', workspace: f.root, preset: 'primary',
+    taskFamilyId: 'repair-evidence', repair: { sessionId: 'repair-session', goalId: 'repair-goal' }, failures: [
+      { sessionId: 'session-a', goalId: 'goal-a' }, { sessionId: 'session-b', goalId: 'goal-b' },
+    ], minimumOccurrences: 2 })).rejects.toThrow()
+})
+
+test('rejects a repair that is not achieved strictly after every failure', async () => {
+  const f = await fixture(), now = Date.now()
+  const failure = evidenceSnapshot(f, { goalId: 'goal-a', sessionId: 'session-a', nativeGoalId: 'native-a', outcome: 'not-achieved', verifiedAt: now - 1_000 })
+  const repair = evidenceSnapshot(f, { goalId: 'repair-goal', sessionId: 'repair-session', nativeGoalId: 'repair-native', outcome: 'achieved', verifiedAt: now - 1_000 })
+  const snapshots = [failure, repair, failure, repair]
+  vi.spyOn(f.service, 'inspectOwnerGoalExecution').mockImplementation(() => structuredClone(snapshots.shift()!) as never)
+  vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockResolvedValue(runProof(failure))
+  await expect(f.service.inspectOwnerFailureCaptureSummary({ ownerRouteId: 'route', principalId: 'owner', workspace: f.root, preset: 'primary',
+    taskFamilyId: 'repair-evidence', repair: { sessionId: 'repair-session', goalId: 'repair-goal' },
+    failures: [{ sessionId: 'session-a', goalId: 'goal-a' }], minimumOccurrences: 1 })).rejects.toThrow(/must follow/u)
+})
+
 test.each(['route-race', 'receipt-drift', 'unknown-execution', 'achieved-trigger', 'expired-receipt', 'cross-owner'] as const)('rejects invalid failure evidence: %s', async kind => {
-  const f = await fixture(), failureFirst = f.snapshot(), failureLast = f.snapshot()
-  const repair = () => {
-    const value = f.snapshot()
-    value.storedGoal.id = 'repair-goal'; value.storedGoal.nativeAtLastObservation.sessionId = 'repair-session'; value.storedGoal.nativeAtLastObservation.goalId = 'repair-native'
-    value.executionRuns = []; value.outcomeAssessments = []; value.acceptedTasks = []
-    return value
-  }
-  const repairFirst = repair(), repairLast = repair()
+  const f = await fixture(), now = Date.now(), failureFirst = evidenceSnapshot(f, { goalId: 'goal-a', sessionId: 'session-a', nativeGoalId: 'native-a', outcome: 'not-achieved', verifiedAt: now - 1_000 })
+  const failureLast = structuredClone(failureFirst), repairFirst = evidenceSnapshot(f, { goalId: 'repair-goal', sessionId: 'repair-session', nativeGoalId: 'repair-native', outcome: 'achieved', verifiedAt: now })
+  const repairLast = structuredClone(repairFirst)
   if (kind === 'route-race') failureLast.ownerRoute = { route: 2 }
   if (kind === 'receipt-drift') failureLast.acceptedTasks[1]!.receipt.validUntil++
   if (kind === 'unknown-execution') (failureFirst.executionRuns[0]! as any).execution = { status: 'unknown', quiescent: false, completedAt: 3 }
@@ -165,8 +288,7 @@ test.each(['route-race', 'receipt-drift', 'unknown-execution', 'achieved-trigger
   if (kind === 'cross-owner') repairFirst.storedGoal.scope.principalId = 'other-owner'
   const snapshots = [failureFirst, repairFirst, failureLast, repairLast]
   vi.spyOn(f.service, 'inspectOwnerGoalExecution').mockImplementation(() => structuredClone(snapshots.shift()!) as never)
-  vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockResolvedValue({ protocol: 'assistant-goals/owner-run-trace/v1', runId: f.runId, turn: 4, nativeRevision: 2,
-    definitionDigest: failureFirst.storedGoal.definition.digest, outcomeProfile: failureFirst.outcomeAssessments[0]!.contract.profile, steps: [], traceDigest: 'e'.repeat(64) })
+  vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockResolvedValue(runProof(failureFirst))
   await expect(f.service.inspectOwnerFailureCaptureSummary({ ownerRouteId: 'route', principalId: 'owner', workspace: f.root, preset: 'primary', taskFamilyId: 'repair-evidence',
     repair: { sessionId: 'repair-session', goalId: 'repair-goal' }, failures: [{ sessionId: 'session-a', goalId: 'goal-a' }], minimumOccurrences: 1 })).rejects.toThrow()
 })

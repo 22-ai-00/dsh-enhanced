@@ -115,27 +115,29 @@ function result(value: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['r
   expect(value.isError, JSON.stringify(value)).toBe(false)
   return JSON.parse((value.value as { context: string }).context)
 }
-function failureEvidence(f: Awaited<ReturnType<typeof fixture>>) {
+function failureEvidence(f: Awaited<ReturnType<typeof fixture>>, locators: readonly { sessionId: string; goalId: string }[] = [{ sessionId: 'trigger-session', goalId: 'trigger-goal' }], minimumOccurrences = 1) {
   const objective = 'Write a source artifact', definition = { version: 1, digest: acceptanceDigest({ objective }), objective }, now = Date.now()
   const repair: VerifiedWorkflowSource = { ...f.source, goal: { id: 'repair-goal', definition, sessionId: 'repair-session', nativeGoalId: 'repair-native' }, runId: 'repair-run',
     acceptance: { ...f.source.acceptance, verifiedAt: now - 1_000, validUntil: now + 60_000 } }
   const unsigned = { protocol: 'assistant-skills/host-failure-evidence/v1' as const, scope: repair.scope, taskFamily: { id: 'write-artifact', definitionDigest: definition.digest, objective },
-    failureCategory: 'objective-not-achieved' as const, triggerCondition: { kind: 'not-achieved-count' as const, minimumOccurrences: 1, windowStartedAt: now - 2_000, windowEndedAt: now - 2_000 },
-    failures: [{ goal: { id: 'trigger-goal', definition, sessionId: 'trigger-session', nativeGoalId: 'trigger-native' }, runId: 'trigger-run', execution: { status: 'succeeded' as const, quiescent: true as const }, outcome: 'not-achieved' as const,
-      acceptance: { contractId: 'failure-contract', contractDigest: '1'.repeat(64), receiptDigest: '2'.repeat(64), verifiedAt: now - 2_000, validUntil: now + 60_000 }, traceDigest: '3'.repeat(64) }], repairGoal: repair.goal, attestedAt: now }
+    failureCategory: minimumOccurrences >= 2 ? 'repeated-not-achieved' as const : 'objective-not-achieved' as const, triggerCondition: { kind: 'not-achieved-count' as const, minimumOccurrences, windowStartedAt: now - 2_000 - locators.length, windowEndedAt: now - 2_001 },
+    failures: locators.map((locator, index) => ({ goal: { id: locator.goalId, definition, sessionId: locator.sessionId, nativeGoalId: `trigger-native-${index}` }, runId: `trigger-run-${index}`, execution: { status: 'succeeded' as const, quiescent: true as const }, outcome: 'not-achieved' as const,
+      acceptance: { contractId: `failure-contract-${index}`, contractDigest: index.toString(16).padStart(64, '1').slice(-64), receiptDigest: index.toString(16).padStart(64, '2').slice(-64), verifiedAt: now - 2_000 - locators.length + index, validUntil: now + 60_000 }, traceDigest: index.toString(16).padStart(64, '3').slice(-64) })), repairGoal: repair.goal, attestedAt: now }
   const generation = 'goals-generation-1'
   const summary: HostFailureEvidenceSummary = { ...unsigned, evidence: { producer: 'assistant-goals', generation, digest: failureSummaryEvidenceDigest(unsigned, generation) } }
   return { repair, summary, generation }
 }
-function installFailureHost(f: Awaited<ReturnType<typeof fixture>>, mutate?: (read: { kind: 'failure' | 'repair'; count: number }, state: { repair: VerifiedWorkflowSource; summary: HostFailureEvidenceSummary; generation: string }) => void) {
-  const state = failureEvidence(f), goals = f.ctx.get('assistantGoals')! as any
-  let failureReads = 0, repairReads = 0
+function installFailureHost(f: Awaited<ReturnType<typeof fixture>>, mutate?: (read: { kind: 'failure' | 'repair'; count: number }, state: { repair: VerifiedWorkflowSource; summary: HostFailureEvidenceSummary; generation: string }) => void, options?: { locators: readonly { sessionId: string; goalId: string }[]; minimumOccurrences: number }) {
+  const state = failureEvidence(f, options?.locators, options?.minimumOccurrences), goals = f.ctx.get('assistantGoals')! as any
+  let failureReads = 0, repairReads = 0; const failureInputs: unknown[] = []
   goals.trustedAcceptanceProducerGeneration = () => state.generation
-  goals.inspectOwnerFailureCaptureSummary = async () => { failureReads++; mutate?.({ kind: 'failure', count: failureReads }, state); return structuredClone(state.summary) }
+  goals.inspectOwnerFailureCaptureSummary = async (input: unknown) => { failureReads++; failureInputs.push(input); mutate?.({ kind: 'failure', count: failureReads }, state); return structuredClone(state.summary) }
   goals.inspectOwnerVerifiedWorkflowSource = async () => { repairReads++; mutate?.({ kind: 'repair', count: repairReads }, state); return structuredClone(state.repair) }
-  return Object.assign(state, { failureReadCount: () => failureReads, repairReadCount: () => repairReads })
+  return Object.assign(state, { failureReadCount: () => failureReads, repairReadCount: () => repairReads, failureInputs })
 }
-function failureCandidateArgs(extra: Record<string, unknown> = {}) { return { owner_route_id: 'owner-route', trigger_goal_id: 'trigger-goal', trigger_session_id: 'trigger-session', repair_goal_id: 'repair-goal', repair_session_id: 'repair-session', task_family_id: 'write-artifact', name: 'saved-write', description: 'Repair writer.', bindings_json: JSON.stringify([{ name: 'message', stepId: 'step-1', path: '/data' }]), parent_version: 1, ...extra } }
+function failureCandidateArgs(extra: Record<string, unknown> = {}) {
+  return Object.fromEntries(Object.entries({ owner_route_id: 'owner-route', trigger_goal_id: 'trigger-goal', trigger_session_id: 'trigger-session', repair_goal_id: 'repair-goal', repair_session_id: 'repair-session', task_family_id: 'write-artifact', name: 'saved-write', description: 'Repair writer.', bindings_json: JSON.stringify([{ name: 'message', stepId: 'step-1', path: '/data' }]), parent_version: 1, ...extra }).filter(([, value]) => value !== undefined))
+}
 function sealedProfile(f: Awaited<ReturnType<typeof fixture>>) {
   return { id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
     { id: 'replay', kind: 'replay' as const, inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation' as const, inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }, { id: 'regression', kind: 'regression' as const, inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
@@ -172,14 +174,20 @@ test('skill_canary is registered, requires a current owner and rejects an unavai
 })
 
 test('skill_failure_candidate exposes only identity and definition inputs and persists Host-produced provenance across restart', async () => {
-  const f = await fixture(); result(await f.save()); installFailureHost(f)
+  const f = await fixture(); result(await f.save()); const state = installFailureHost(f)
   const parameters = f.ctx.tools.get('skill_failure_candidate')!.parameters as Record<string, unknown>
-  expect(parameters).not.toHaveProperty('summary'); expect(parameters).not.toHaveProperty('provenance'); expect(parameters).not.toHaveProperty('digest'); expect(parameters).not.toHaveProperty('outcome')
+  const properties = parameters.properties as Record<string, unknown>
+  expect(properties).not.toHaveProperty('summary'); expect(properties).not.toHaveProperty('provenance'); expect(properties).not.toHaveProperty('digest'); expect(properties).not.toHaveProperty('outcome')
+  expect(properties.failure_locators).toMatchObject({ type: 'array', items: { type: 'object', additionalProperties: false, properties: { session_id: { type: 'string' }, goal_id: { type: 'string' } }, required: ['session_id', 'goal_id'] } })
+  expect(Object.keys(((properties.failure_locators as { items: { properties: object } }).items.properties))).toEqual(['session_id', 'goal_id'])
   const candidate = result(await f.execute('skill_failure_candidate', failureCandidateArgs()))
+  expect(state.failureInputs).toHaveLength(1)
+  expect(state.failureInputs[0]).toMatchObject({ failures: [{ sessionId: 'trigger-session', goalId: 'trigger-goal' }], minimumOccurrences: 1 })
   expect(candidate).toMatchObject({ state: 'pending', parentVersion: 1, reason: 'Host-verified, evidence-bound repair after an independently verified failure.',
     trigger: 'host-verified-failure:objective-not-achieved',
     definition: { name: 'saved-write', source: { goalDefinitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), stepCount: 1 } },
-    failure: { protocol: 'assistant-skills/failure-capture-provenance/v1', provenanceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), category: 'objective-not-achieved', occurrences: 1, taskFamilyId: 'write-artifact', rollbackTarget: { name: 'saved-write', version: 1 } } })
+    failure: { category: 'objective-not-achieved', count: 1, digest: expect.stringMatching(/^[a-f0-9]{64}$/u) } })
+  expect(Object.keys(candidate.failure)).toEqual(['category', 'count', 'digest'])
   const firstJson = JSON.stringify(candidate)
   expect(firstJson).not.toMatch(/trigger-goal|trigger-session|trigger-native|trigger-run|repair-session|repair-native|repair-run/u)
   expect(firstJson).not.toMatch(/"(?:scope|workspace|principalId|principalRecordId|principalVersion|sessionId|nativeGoalId|runId|failureProvenance|acceptance|contractId|receiptDigest)":/u)
@@ -207,10 +215,58 @@ test('skill_failure_candidate consumes one atomically attested failure summary a
   Object.defineProperty(goals, Service.tracker, { configurable: true, value: { associate: 'assistantGoals', property: 'ctx' } })
   expect(f.ctx.get('assistantGoals')).not.toBe(f.ctx.get('assistantGoals'))
   const candidate = result(await f.execute('skill_failure_candidate', failureCandidateArgs()))
-  expect(candidate).toMatchObject({ state: 'pending', failure: { protocol: 'assistant-skills/failure-capture-provenance/v1', provenanceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) } })
+  expect(candidate).toMatchObject({ state: 'pending', failure: { category: 'objective-not-achieved', count: 1, digest: expect.stringMatching(/^[a-f0-9]{64}$/u) } })
   expect(JSON.stringify(candidate)).not.toContain(String(state.summary.attestedAt))
   expect(state.failureReadCount()).toBe(1)
   expect(state.repairReadCount()).toBe(2)
+})
+
+test('skill_failure_candidate canonicalizes and forwards a repeated failure locator window while redacting every locator', async () => {
+  const f = await fixture(); result(await f.save())
+  const locators = [{ sessionId: 'failure-session-b', goalId: 'failure-goal-b' }, { sessionId: 'failure-session-a', goalId: 'failure-goal-a' }]
+  const state = installFailureHost(f, undefined, { locators, minimumOccurrences: 2 })
+  const args = failureCandidateArgs({ trigger_goal_id: undefined, trigger_session_id: undefined, failure_locators: locators.map(locator => ({ session_id: locator.sessionId, goal_id: locator.goalId })), minimum_occurrences: 2 })
+  const first = result(await f.execute('skill_failure_candidate', args))
+  expect(state.failureInputs).toHaveLength(1)
+  const forwarded = state.failureInputs[0] as { failures: { sessionId: string; goalId: string }[]; minimumOccurrences: number }
+  expect(forwarded).toMatchObject({ minimumOccurrences: 2, failures: [
+    { sessionId: 'failure-session-a', goalId: 'failure-goal-a' }, { sessionId: 'failure-session-b', goalId: 'failure-goal-b' },
+  ] })
+  expect(Object.isFrozen(forwarded.failures)).toBe(true)
+  expect(forwarded.failures.every(Object.isFrozen)).toBe(true)
+  expect(first).toMatchObject({ state: 'pending', trigger: 'host-verified-failure:repeated-not-achieved',
+    failure: { category: 'repeated-not-achieved', count: 2, digest: expect.stringMatching(/^[a-f0-9]{64}$/u) } })
+  expect(Object.keys(first.failure)).toEqual(['category', 'count', 'digest'])
+  expect(JSON.stringify(first)).not.toMatch(/failure-(?:session|goal)-[ab]|trigger-native|trigger-run|repair-(?:session|native|run)/u)
+  const replay = result(await f.execute('skill_failure_candidate', failureCandidateArgs({ trigger_goal_id: undefined, trigger_session_id: undefined, failure_locators: [...locators].reverse().map(locator => ({ session_id: locator.sessionId, goal_id: locator.goalId })), minimum_occurrences: 2 })))
+  expect(replay).toEqual(first)
+  expect(state.failureInputs).toHaveLength(2)
+  expect(state.failureInputs[1]).toEqual(state.failureInputs[0])
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([first])
+})
+
+test.each([
+  ['duplicate', [{ sessionId: 'same-session', goalId: 'same-goal' }, { sessionId: 'same-session', goalId: 'same-goal' }], 2],
+  ['minimum over unique count', [{ sessionId: 'session-a', goalId: 'goal-a' }, { sessionId: 'session-b', goalId: 'goal-b' }], 3],
+  ['over-bound', Array.from({ length: 33 }, (_, index) => ({ sessionId: `session-${index}`, goalId: `goal-${index}` })), 2],
+  ['malformed', [{ sessionId: 'session-a', goalId: 'goal-a', outcome: 'not-achieved' }], 1],
+] as const)('skill_failure_candidate rejects %s failure locator windows before a Host read', async (_kind, locators, minimumOccurrences) => {
+  const f = await fixture(); result(await f.save()); const state = installFailureHost(f)
+  const response = await f.execute('skill_failure_candidate', failureCandidateArgs({ trigger_goal_id: undefined, trigger_session_id: undefined, failure_locators: locators.map(locator => ({ session_id: locator.sessionId, goal_id: locator.goalId, ...('outcome' in locator ? { outcome: locator.outcome } : {}) })), minimum_occurrences: minimumOccurrences }))
+  expect(response.isError).toBe(true)
+  expect(state.failureReadCount()).toBe(0)
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([])
+})
+
+test('skill_failure_candidate rejects mixed legacy and list locators and propagates Host rejection without staging', async () => {
+  const f = await fixture(); result(await f.save()); const state = installFailureHost(f)
+  const listed = { failure_locators: [{ session_id: 'failure-session-a', goal_id: 'failure-goal-a' }], minimum_occurrences: 1 }
+  expect((await f.execute('skill_failure_candidate', failureCandidateArgs(listed))).isError).toBe(true)
+  expect(state.failureReadCount()).toBe(0)
+  const goals = f.ctx.get('assistantGoals')! as any
+  goals.inspectOwnerFailureCaptureSummary = async () => { throw new Error('assistant-goals: repeated failure evidence rejected') }
+  expect((await f.execute('skill_failure_candidate', failureCandidateArgs({ trigger_goal_id: undefined, trigger_session_id: undefined, ...listed }))).isError).toBe(true)
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([])
 })
 
 test('skill_failure_candidate reports an explicit upgrade error when the Goals evidence API is unavailable', async () => {

@@ -83,7 +83,7 @@ test('the authority binding changes with actual initial files and rejects an old
   } } })).rejects.toThrow(/begin binding/)
 })
 
-test.each(['order-summary/v1', 'order-summary/v2', 'template-render/v1'] as const)('prospective inspection recomputes signed quality and rejects a changed pin, arm, budget, certificate, or receipt (%s)', async generator => {
+test.each(['order-summary/v1', 'order-summary/v2', 'template-render/v1', 'dependency-topological-order/v1'] as const)('prospective inspection recomputes signed quality and rejects a changed pin, arm, budget, certificate, or receipt (%s)', async generator => {
   const dataset = generateProspectiveDataset(generator)
   const workspace = await stateRoot(), root = await stateRoot(), keys = generateKeyPairSync('ed25519')
   const scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }

@@ -52,6 +52,43 @@ function exactArguments(value: unknown, allowed: readonly string[]): Record<stri
   const args = plainArguments(value); if (!args || Object.keys(args).some(key => !allowed.includes(key))) return undefined
   return args
 }
+interface FailureLocator { sessionId: string; goalId: string }
+function failureLocator(value: unknown): value is FailureLocator {
+  const locator = plainArguments(value)
+  return locator !== undefined && Object.keys(locator).length === 2 && Object.hasOwn(locator, 'sessionId') && Object.hasOwn(locator, 'goalId')
+    && [locator.sessionId, locator.goalId].every(part => typeof part === 'string' && part.length > 0 && part.length <= 4_096)
+}
+function failureWindow(input: { triggerGoalId?: unknown; triggerSessionId?: unknown; failureLocators?: unknown; minimumOccurrences?: unknown }): { failures: readonly FailureLocator[]; minimumOccurrences: number } {
+  const legacyPresent = input.triggerGoalId !== undefined || input.triggerSessionId !== undefined
+  if (input.failureLocators !== undefined && legacyPresent) throw new Error('assistant-skills: choose legacy failure locator or failure locator list')
+  const rawFailures: unknown = input.failureLocators === undefined
+    ? [{ sessionId: input.triggerSessionId as string, goalId: input.triggerGoalId as string }]
+    : input.failureLocators
+  const minimumOccurrences = input.minimumOccurrences ?? 1
+  if (!Array.isArray(rawFailures) || Object.getPrototypeOf(rawFailures) !== Array.prototype || rawFailures.length < 1 || rawFailures.length > 32
+    || Object.getOwnPropertySymbols(rawFailures).length !== 0 || Reflect.ownKeys(rawFailures).length !== rawFailures.length + 1
+    || !Number.isSafeInteger(minimumOccurrences) || (minimumOccurrences as number) < 1 || (minimumOccurrences as number) > 32
+    || (minimumOccurrences as number) > rawFailures.length) {
+    throw new Error('assistant-skills: invalid bounded failure locator window')
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(rawFailures), failures: FailureLocator[] = []
+  for (let index = 0; index < rawFailures.length; index++) {
+    const descriptor = descriptors[String(index)]
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor) || !failureLocator(descriptor.value)) {
+      throw new Error('assistant-skills: invalid bounded failure locator window')
+    }
+    failures.push(descriptor.value)
+  }
+  if (input.failureLocators === undefined && (minimumOccurrences !== 1 || !failureLocator(failures[0]))) {
+    throw new Error('assistant-skills: invalid bounded failure locator window')
+  }
+  const identities = failures.map(locator => acceptanceDigest(locator))
+  if (new Set(identities).size !== identities.length) throw new Error('assistant-skills: duplicate failure locator')
+  const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0
+  const canonical = failures.map(locator => ({ sessionId: locator.sessionId, goalId: locator.goalId }))
+    .sort((left, right) => compare(left.sessionId, right.sessionId) || compare(left.goalId, right.goalId))
+  return { failures: Object.freeze(canonical.map(locator => Object.freeze(locator))), minimumOccurrences: minimumOccurrences as number }
+}
 function publicDefinition(definition: SkillDefinition | StoredSkillDefinition) {
   const source = { digest: acceptanceDigest(definition.source), goalDefinitionDigest: definition.source.goal.definition.digest, stepCount: definition.source.steps.length,
     failedObservationCount: definition.source.failedObservations?.length ?? 0, segmentCount: definition.source.segments?.length ?? 0 }
@@ -89,7 +126,7 @@ function publicCandidate(candidate: SkillCandidate, parent?: StoredSkillDefiniti
     ...(candidate.activationComparisonId === undefined ? {} : { activationComparisonId: candidate.activationComparisonId }),
     ...(candidate.deploymentId === undefined ? {} : { deploymentId: candidate.deploymentId }),
     ...(candidate.activationWatchId === undefined ? {} : { activationWatchId: candidate.activationWatchId }),
-    ...(failure === undefined ? {} : { failure: { protocol: failure.protocol, provenanceDigest: acceptanceDigest(failure), category: failure.trigger.failureCategory, occurrences: failure.trigger.failures.length, taskFamilyId: failure.trigger.taskFamily.id, taskFamilyDefinitionDigest: failure.trigger.taskFamily.definitionDigest, permissionDelta: failure.permissionDelta, rollbackTarget: failure.rollbackTarget } }),
+    ...(failure === undefined ? {} : { failure: { category: failure.trigger.failureCategory, count: failure.trigger.failures.length, digest: acceptanceDigest(failure) } }),
     comparison: { kind: 'structural-only', improvement: 'unmeasured',
       toolsAdded: [...after].filter(tool => !before.has(tool)), toolsRemoved: [...before].filter(tool => !after.has(tool)),
       inputsChanged: acceptanceDigest(parent?.inputs ?? []) !== acceptanceDigest(candidate.definition.inputs),
@@ -184,9 +221,9 @@ export class AssistantSkillsService extends Service {
       runtime.tools.register(defineTool({ name: 'skill_candidate', description: 'Draft a private candidate from an independently achieved Goal following the current owner request. The current active skill stays unchanged. Review the stored trace and structural delta; no performance gain is inferred.',
         parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true }, reason: { type: 'string', required: true }, trigger: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.stage(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[] }, args.parent_version, args.reason, args.trigger)) }) }))
-      runtime.tools.register(defineTool({ name: 'skill_failure_candidate', description: 'Draft a private repair candidate from one exact independently verified not-achieved Goal and a later independent achieved repair Goal. Failure evidence, outcomes, summaries, provenance and digests are read only from the current Goals Host capability and are never caller inputs. The current active skill stays unchanged.',
-        parameters: { owner_route_id: { type: 'string', required: true }, trigger_goal_id: { type: 'string', required: true, description: businessGoalId }, trigger_session_id: { type: 'string', required: true }, repair_goal_id: { type: 'string', required: true, description: businessGoalId }, repair_session_id: { type: 'string', required: true }, task_family_id: { type: 'string', required: true }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true } }, output,
-        execute: async (args, exec) => ({ context: JSON.stringify(await this.stageFailureCandidate(exec, { ownerRouteId: args.owner_route_id, triggerGoalId: args.trigger_goal_id, triggerSessionId: args.trigger_session_id, repairGoalId: args.repair_goal_id, repairSessionId: args.repair_session_id, taskFamilyId: args.task_family_id, name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[], parentVersion: args.parent_version })) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_failure_candidate', description: 'Draft a private repair candidate from one or more exact independently verified not-achieved Goals and a later independent achieved repair Goal. Use failure_locators plus minimum_occurrences for repeated failures; the legacy trigger Goal fields remain valid for one failure. Failure outcomes, summaries, provenance and digests are read only from the current Goals Host capability and are never caller inputs. The current active skill stays unchanged.',
+        parameters: { owner_route_id: { type: 'string', required: true }, trigger_goal_id: { type: 'string', description: `${businessGoalId} Legacy single-failure input; omit when failure_locators is supplied.` }, trigger_session_id: { type: 'string', description: 'Legacy single-failure session; omit when failure_locators is supplied.' }, failure_locators: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { session_id: { type: 'string', required: true }, goal_id: { type: 'string', required: true, description: businessGoalId } } }, description: 'Bounded list of 1-32 exact failure locators. It contains identities only, never outcomes, receipts, provenance or digests.' }, minimum_occurrences: { type: 'integer', description: 'Required evidence count for failure_locators (1-32 and no greater than the locator count). Legacy single-failure input defaults to 1.' }, repair_goal_id: { type: 'string', required: true, description: businessGoalId }, repair_session_id: { type: 'string', required: true }, task_family_id: { type: 'string', required: true }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(await this.stageFailureCandidate(exec, { ownerRouteId: args.owner_route_id, ...(args.trigger_goal_id === undefined ? {} : { triggerGoalId: args.trigger_goal_id }), ...(args.trigger_session_id === undefined ? {} : { triggerSessionId: args.trigger_session_id }), ...(args.failure_locators === undefined ? {} : { failureLocators: args.failure_locators.map(locator => ({ sessionId: locator.session_id, goalId: locator.goal_id })) }), ...(args.minimum_occurrences === undefined ? {} : { minimumOccurrences: args.minimum_occurrences }), repairGoalId: args.repair_goal_id, repairSessionId: args.repair_session_id, taskFamilyId: args.task_family_id, name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[], parentVersion: args.parent_version })) }) }))
       runtime.tools.register(defineTool({ name: 'skill_candidates', description: 'Inspect private candidate definitions, expiry, structural differences and trial references. Pending candidates are not active native skills.', parameters: { candidate_id: { type: 'string' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.candidates(exec.agent, args.candidate_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_trial', description: 'Run a pending candidate in a fresh native Goal using ordinary tool permissions and budgets. If the current owner Goal has no admitted native round, it returns awaiting-native-round without steps or durable work and the next native round must repeat the same invocation_id. This can have real effects once admitted and never changes the active skill. Independent Goal acceptance and a current owner request are required for later activation.',
@@ -535,9 +572,10 @@ export class AssistantSkillsService extends Service {
     this.#authorize(agent, 'draft', [scope, definition, parentVersion, reason, trigger])
     return this.#preview(scope, this.#store.stageCandidate(scope, definition, { expectedVersion: parentVersion, reason, trigger, expiresAt: Date.now() + this.#candidateTtl }))
   }
-  async stageFailureCandidate(exec: ToolRunContext, input: { ownerRouteId: string; triggerGoalId: string; triggerSessionId: string; repairGoalId: string; repairSessionId: string; taskFamilyId: string; name: string; description: string; bindings?: readonly SkillBinding[]; parentVersion: number }) {
+  async stageFailureCandidate(exec: ToolRunContext, input: { ownerRouteId: string; triggerGoalId?: string; triggerSessionId?: string; failureLocators?: unknown; minimumOccurrences?: number; repairGoalId: string; repairSessionId: string; taskFamilyId: string; name: string; description: string; bindings?: readonly SkillBinding[]; parentVersion: number }) {
     const scope = this.#scope(exec.agent, 'draft')
     const route = this.#watchRoute(scope, input.ownerRouteId)
+    const window = failureWindow(input)
     const failureGoals = () => {
       const value = this.#goals()
       if (typeof value.trustedAcceptanceProducerGeneration !== 'function' || typeof value.inspectOwnerFailureCaptureSummary !== 'function'
@@ -548,7 +586,7 @@ export class AssistantSkillsService extends Service {
     const generation = goals.trustedAcceptanceProducerGeneration()
     if (typeof generation !== 'string' || generation.length < 1 || generation.length > 256) throw new Error('assistant-skills: invalid Goals producer generation')
     const evidenceInput = { ownerRouteId: input.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, taskFamilyId: input.taskFamilyId,
-      repair: { sessionId: input.repairSessionId, goalId: input.repairGoalId }, failures: [{ sessionId: input.triggerSessionId, goalId: input.triggerGoalId }], minimumOccurrences: 1 }
+      repair: { sessionId: input.repairSessionId, goalId: input.repairGoalId }, failures: window.failures, minimumOccurrences: window.minimumOccurrences }
     const repairInput = { ownerRouteId: input.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: input.repairSessionId, goalId: input.repairGoalId }
     const signal = AbortSignal.any([exec.signal, this.#lifecycle.signal])
     // The Goals capability performs its own atomic double-read before issuing
@@ -574,8 +612,11 @@ export class AssistantSkillsService extends Service {
     this.#watchRoute(scope, input.ownerRouteId, route)
     const currentParent = this.#store.get(scope, input.name)
     if (!currentParent || currentParent.version !== input.parentVersion || acceptanceDigest(currentParent) !== acceptanceDigest(parent)) throw new Error('assistant-skills: candidate parent changed')
-    const reason = 'Host-verified, evidence-bound repair after an independently verified failure.'
-    const trigger = `failure:${input.taskFamilyId}:${input.triggerGoalId}`
+    const single = window.minimumOccurrences === 1 && window.failures.length === 1
+    const reason = single ? 'Host-verified, evidence-bound repair after an independently verified failure.'
+      : 'Host-verified, evidence-bound repair after independently verified repeated failures.'
+    const trigger = single ? `failure:${input.taskFamilyId}:${window.failures[0]!.goalId}`
+      : `failure:${input.taskFamilyId}:${failure.failureCategory}:${failure.failures.length}`
     return this.#preview(scope, this.#store.stageCandidate(scope, definition, { expectedVersion: input.parentVersion, reason, trigger, expiresAt: Date.now() + this.#candidateTtl, failureProvenance: provenance }))
   }
   #preview(scope: GoalScope, candidate: SkillCandidate) {
