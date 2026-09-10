@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ActionLedger, ActionLedgerError } from '../src/ledger.ts'
-import type { ActionGrant, ActionIdentity, CommitRequest } from '../src/types.ts'
+import type { ActionGrant, ActionIdentity, CommitRequest, CompensationPreimage, CompensationResult } from '../src/types.ts'
 
 let now = 1_000_000
 const roots: string[] = []
@@ -214,9 +214,252 @@ it('upgrades a v1 commit ledger without replaying its uncertain action', async (
   const input = request(), prepared = value.prepare({ identity, sessionId: 'session', request: input, bytes: commitBytes(input), authority }).record
   value.dispatch(prepared.id, prepared.version, authority); value.recover(authority); value.close()
   const path = join(roots[0]!, 'ledger.sqlite'), legacy = new DatabaseSync(path)
-  legacy.exec('ALTER TABLE actions DROP COLUMN kind; PRAGMA user_version = 1;'); legacy.close()
+  // A genuine v1 store has no kind column (v2), no actions.paths_json and no compensations table (both v3).
+  legacy.exec('DROP TABLE compensations; ALTER TABLE actions DROP COLUMN paths_json; ALTER TABLE actions DROP COLUMN kind; PRAGMA user_version = 1;'); legacy.close()
   const reopened = new ActionLedger(path, { now: () => now })
   expect(reopened.get(prepared.id)).toMatchObject({ kind: 'commit', status: 'unknown' })
   expect(() => reopened.dispatch(prepared.id, 1, authority)).toThrow(/state/)
   reopened.close()
+})
+
+describe('ActionLedger compensations', () => {
+  const rollbackGrant = (revision = 1, changes: Partial<ActionGrant> = {}): ActionGrant =>
+    grant(revision, { rollback: { allowRollback: true as const, budgetId: 'rollback-budget', maxActions: 2, maxTotalBytes: 100_000 }, ...changes })
+
+  async function rollbackLedger(revision = 1, changes: Partial<ActionGrant> = {}): Promise<{ ledger: ActionLedger; authority: { ownerId: string; fence: number } }> {
+    const value = await ledger(); const authority = value.claimController('owner'); value.syncGrants([rollbackGrant(revision, changes)], authority)
+    return { ledger: value, authority }
+  }
+
+  function succeedForward(value: ActionLedger, authority: { ownerId: string; fence: number }, key = 'key', commitOid = 'b'.repeat(40), expectedHeadOid = 'a'.repeat(40)) {
+    const input = { ...request(key), expectedHeadOid }
+    const prepared = value.prepare({ identity, sessionId: 'session', request: input, bytes: commitBytes(input), authority }).record
+    const dispatched = value.dispatch(prepared.id, prepared.version, authority)
+    return value.settle(prepared.id, dispatched.version, { actionId: prepared.id, status: 'succeeded', commitOid }, authority)
+  }
+
+  const receipt = (forward: { id: string; version: number; requestDigest: string; result?: { commitOid?: string } }, idempotencyKey = 'compensate') => ({
+    grantId: 'grant', idempotencyKey, forwardActionId: forward.id, forwardActionVersion: forward.version,
+    forwardRequestDigest: forward.requestDigest, forwardCommitOid: forward.result!.commitOid!,
+  })
+
+  const presentFile = (path = 'a.txt', content = 'previous') => ({ path, state: 'present' as const, blobOid: 'd'.repeat(40), content, size: Buffer.byteLength(content) })
+  const preimageAt = (commitOid: string, files: CompensationPreimage['files']): CompensationPreimage => ({ repository: 'owner/repository', branch: 'main', commitOid, files })
+  const outcome = (record: { id: string; forwardCommitOid: string }, status: CompensationResult['status'], extra: Partial<CompensationResult> = {}): CompensationResult =>
+    ({ actionId: record.id, status, repository: 'owner/repository', branch: 'main', parentOid: record.forwardCommitOid, actionMarker: `dsh-compensation:${record.id}`, ...extra })
+
+  it('drives capturing through prepared, dispatched and succeeded with version compare-and-swap', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const forward = succeedForward(value, authority)
+    const { record: capturing, created } = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority })
+    expect(created).toBe(true)
+    expect(capturing).toMatchObject({ status: 'capturing', version: 1, parentOid: 'a'.repeat(40), forwardCommitOid: 'b'.repeat(40), paths: ['a.txt'] })
+    expect(capturing.preimage).toBeUndefined()
+    const preimage = preimageAt(capturing.parentOid, [presentFile()])
+    const prepared = value.captureCompensation(capturing.id, capturing.version, preimage, authority)
+    expect(prepared).toMatchObject({ status: 'prepared', version: 2, preimageDigest: expect.any(String) })
+    expect(prepared.preimage).toEqual(preimage)
+    const dispatched = value.dispatchCompensation(prepared.id, prepared.version, authority)
+    expect(dispatched).toMatchObject({ status: 'dispatched', version: 3 })
+    const succeeded = value.settleCompensation(dispatched.id, dispatched.version, outcome(dispatched, 'succeeded', { resultOid: 'c'.repeat(40) }), authority)
+    expect(succeeded).toMatchObject({ status: 'succeeded', version: 4, result: { resultOid: 'c'.repeat(40) } })
+    value.close()
+  })
+
+  it('returns the same record for the identical idempotency key and request', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const forward = succeedForward(value, authority)
+    const first = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority })
+    const second = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority })
+    expect(second.created).toBe(false); expect(second.record.id).toBe(first.record.id)
+    value.close()
+  })
+
+  it('allows at most one compensation per succeeded forward action even with a new idempotency key', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const forward = succeedForward(value, authority)
+    value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward, 'one'), authority })
+    expect(() => value.prepareCompensation({ identity, sessionId: 'session-2', request: receipt(forward, 'two'), authority })).toThrow(/conflict/)
+    value.close()
+  })
+
+  it('requires an exact succeeded commit receipt and rejects identity, session, version, digest and OID mismatches', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const forward = succeedForward(value, authority)
+    const valid = receipt(forward)
+    expect(() => value.prepareCompensation({ identity: { ...identity, workspace: '/other' }, sessionId: 'session', request: valid, authority })).toThrow(/state/)
+    expect(() => value.prepareCompensation({ identity, sessionId: 'other-session', request: valid, authority })).toThrow(/state/)
+    expect(() => value.prepareCompensation({ identity, sessionId: 'session', request: { ...valid, forwardActionVersion: 99 }, authority })).toThrow(/state/)
+    expect(() => value.prepareCompensation({ identity, sessionId: 'session', request: { ...valid, forwardCommitOid: 'c'.repeat(40) }, authority })).toThrow(/state/)
+    expect(() => value.prepareCompensation({ identity, sessionId: 'session', request: { ...valid, forwardRequestDigest: 'e'.repeat(64) }, authority })).toThrow(/state/)
+    value.close()
+  })
+
+  it('cannot prepare compensation against an unknown, failed, inspect or legacy path-less commit', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const input = request(); const prepared = value.prepare({ identity, sessionId: 'session', request: input, bytes: commitBytes(input), authority }).record
+    value.dispatch(prepared.id, prepared.version, authority); value.recover(authority)
+    const unknown = value.get(prepared.id)!
+    const unknownReceipt = { ...receipt(unknown, 'x'), forwardActionVersion: unknown.version, forwardRequestDigest: unknown.requestDigest, forwardCommitOid: 'c'.repeat(40) }
+    expect(() => value.prepareCompensation({ identity, sessionId: 'session', request: unknownReceipt, authority })).toThrow(/state/)
+    const succeeded = succeedForward(value, authority, 'with-paths', 'c'.repeat(40), '9'.repeat(40))
+    value.close()
+    const database = new DatabaseSync(join(roots[0]!, 'ledger.sqlite'))
+    database.prepare('UPDATE actions SET paths_json = NULL WHERE id = ?').run(succeeded.id); database.close()
+    const reopened = new ActionLedger(join(roots[0]!, 'ledger.sqlite'), { now: () => now })
+    expect(() => reopened.prepareCompensation({ identity, sessionId: 'session', request: receipt(reopened.get(succeeded.id)!, 'legacy'), authority })).toThrow(/state/)
+    reopened.close()
+  })
+
+  it('requires the grant to opt into rollback', async () => {
+    const plain = await ledger(); const authority = plain.claimController('owner'); plain.syncGrants([grant()], authority)
+    const forward = succeedForward(plain, authority)
+    expect(() => plain.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority })).toThrow(/grant/)
+    plain.close()
+  })
+
+  it('enforces the independent rollback action budget across forwards', async () => {
+    const { ledger: value, authority } = await rollbackLedger(1, { rollback: { allowRollback: true, budgetId: 'rollback-budget', maxActions: 1, maxTotalBytes: 100_000 } })
+    const first = succeedForward(value, authority, 'one')
+    const prepared = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(first, 'c1'), authority }).record
+    value.captureCompensation(prepared.id, prepared.version, preimageAt(prepared.parentOid, [presentFile()]), authority)
+    const second = succeedForward(value, authority, 'two')
+    expect(() => value.prepareCompensation({ identity, sessionId: 'session', request: receipt(second, 'c2'), authority })).toThrow(/limit/)
+    value.close()
+  })
+
+  it('rejects a preimage that would exceed the rollback byte budget', async () => {
+    const { ledger: value, authority } = await rollbackLedger(1, { rollback: { allowRollback: true, budgetId: 'rollback-budget', maxActions: 2, maxTotalBytes: 10 } })
+    const forward = succeedForward(value, authority)
+    const prepared = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority }).record
+    expect(() => value.captureCompensation(prepared.id, prepared.version, preimageAt(prepared.parentOid, [presentFile()]), authority)).toThrow(/limit/)
+    expect(value.getCompensation(prepared.id)?.status).toBe('capturing')
+    value.close()
+  })
+
+  it('rebinds repository, branch, parent OID and exact path order at capture', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const forward = succeedForward(value, authority)
+    const prepared = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority }).record
+    const file = presentFile()
+    expect(() => value.captureCompensation(prepared.id, prepared.version, { ...preimageAt(prepared.parentOid, [file]), repository: 'other/repository' }, authority)).toThrow(/state/)
+    expect(() => value.captureCompensation(prepared.id, prepared.version, { ...preimageAt(prepared.parentOid, [file]), branch: 'other' }, authority)).toThrow(/state/)
+    expect(() => value.captureCompensation(prepared.id, prepared.version, preimageAt('f'.repeat(40), [file]), authority)).toThrow(/state/)
+    expect(() => value.captureCompensation(prepared.id, prepared.version, preimageAt(prepared.parentOid, [{ path: 'b.txt', state: 'absent' }]), authority)).toThrow(/state/)
+    value.captureCompensation(prepared.id, prepared.version, preimageAt(prepared.parentOid, [file]), authority)
+    value.close()
+  })
+
+  it('enforces the state machine and never settles outside the dispatched state', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const forward = succeedForward(value, authority)
+    const prepared = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority }).record
+    expect(() => value.dispatchCompensation(prepared.id, prepared.version, authority)).toThrow(/state/)
+    const ready = value.captureCompensation(prepared.id, prepared.version, preimageAt(prepared.parentOid, [presentFile()]), authority)
+    expect(() => value.settleCompensation(ready.id, ready.version, outcome(ready, 'succeeded', { resultOid: 'c'.repeat(40) }), authority)).toThrow(/state/)
+    const dispatched = value.dispatchCompensation(ready.id, ready.version, authority)
+    const wrong = outcome(dispatched, 'succeeded', { resultOid: 'c'.repeat(40) })
+    expect(() => value.settleCompensation(dispatched.id, dispatched.version, { ...wrong, parentOid: 'f'.repeat(40) }, authority)).toThrow(/state/)
+    value.settleCompensation(dispatched.id, dispatched.version, wrong, authority)
+    expect(() => value.dispatchCompensation(ready.id, ready.version, authority)).toThrow(/state/)
+    value.close()
+  })
+
+  it('pins the grant revision at preparation and rejects capture after a grant revision change', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const forward = succeedForward(value, authority)
+    const prepared = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority }).record
+    value.syncGrants([rollbackGrant(2)], authority)
+    expect(() => value.captureCompensation(prepared.id, prepared.version, preimageAt(prepared.parentOid, [presentFile()]), authority)).toThrow(/grant/)
+    value.close()
+  })
+
+  it('recovers dispatched compensations as unknown on restart and never replays them', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const path = join(roots[0]!, 'ledger.sqlite')
+    const forward = succeedForward(value, authority)
+    const prepared = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority }).record
+    value.captureCompensation(prepared.id, prepared.version, preimageAt(prepared.parentOid, [presentFile()]), authority)
+    value.dispatchCompensation(prepared.id, 2, authority); value.close()
+    const reopened = new ActionLedger(path, { now: () => now })
+    expect(reopened.recoverCompensations(authority)).toBe(1)
+    const recovered = reopened.getCompensation(prepared.id)!
+    expect(recovered).toMatchObject({ status: 'unknown', version: 4, result: { reason: 'controller-recovery-no-replay' } })
+    expect(() => reopened.dispatchCompensation(prepared.id, 3, authority)).toThrow(/state/)
+    expect(reopened.recoverCompensations(authority)).toBe(0)
+    reopened.close()
+  })
+
+  it('recovers prepared compensations as unknown on restart and never replays them', async () => {
+    const { ledger: value, authority } = await rollbackLedger()
+    const path = join(roots[0]!, 'ledger.sqlite')
+    const forward = succeedForward(value, authority)
+    const prepared = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority }).record
+    value.captureCompensation(prepared.id, prepared.version, preimageAt(prepared.parentOid, [presentFile()]), authority)
+    value.close()
+    const reopened = new ActionLedger(path, { now: () => now })
+    // A prepared row already carries a sealed preimage: it must become unknown,
+    // never silently dispatched after restart.
+    expect(reopened.recoverCompensations(authority)).toBe(1)
+    const recovered = reopened.getCompensation(prepared.id)!
+    expect(recovered).toMatchObject({ status: 'unknown', version: 3, result: { reason: 'controller-recovery-no-replay' } })
+    expect(() => reopened.dispatchCompensation(prepared.id, 2, authority)).toThrow(/state/)
+    expect(reopened.recoverCompensations(authority)).toBe(0)
+    reopened.close()
+  })
+
+  it('discards capturing placeholders on restart and frees the forward action and action budget', async () => {
+    const { ledger: value, authority } = await rollbackLedger(1, { rollback: { allowRollback: true, budgetId: 'rollback-budget', maxActions: 1, maxTotalBytes: 100_000 } })
+    const path = join(roots[0]!, 'ledger.sqlite')
+    const forward = succeedForward(value, authority)
+    const capturing = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority }).record
+    expect(capturing.status).toBe('capturing'); value.close()
+    const reopened = new ActionLedger(path, { now: () => now })
+    expect(reopened.recoverCompensations(authority)).toBe(1)
+    expect(reopened.getCompensation(capturing.id)).toBeUndefined()
+    // The placeholder never sealed a preimage nor dispatched anything, so the
+    // one-compensation-per-forward slot and the single rollback action free up.
+    const retried = reopened.prepareCompensation({ identity, sessionId: 'session', request: { ...receipt(forward), idempotencyKey: 'retry' }, authority })
+    expect(retried.created).toBe(true)
+    expect(reopened.recoverCompensations(authority)).toBe(1)
+    reopened.close()
+  })
+
+  it('recovers a mix of capturing, prepared and dispatched compensations in one pass', async () => {
+    const { ledger: value, authority } = await rollbackLedger(1, { rollback: { allowRollback: true, budgetId: 'rollback-budget', maxActions: 4, maxTotalBytes: 100_000 } })
+    const path = join(roots[0]!, 'ledger.sqlite')
+    const capturingForward = succeedForward(value, authority, 'one')
+    const capturing = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(capturingForward, 'c1'), authority }).record
+    const preparedForward = succeedForward(value, authority, 'two')
+    const prepared = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(preparedForward, 'c2'), authority }).record
+    value.captureCompensation(prepared.id, prepared.version, preimageAt(prepared.parentOid, [presentFile()]), authority)
+    const dispatchedForward = succeedForward(value, authority, 'three')
+    const dispatched = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(dispatchedForward, 'c3'), authority }).record
+    value.captureCompensation(dispatched.id, dispatched.version, preimageAt(dispatched.parentOid, [presentFile()]), authority)
+    value.dispatchCompensation(dispatched.id, 2, authority)
+    value.close()
+    const reopened = new ActionLedger(path, { now: () => now })
+    expect(reopened.recoverCompensations(authority)).toBe(3)
+    expect(reopened.getCompensation(capturing.id)).toBeUndefined()
+    expect(reopened.getCompensation(prepared.id)).toMatchObject({ status: 'unknown', version: 3 })
+    expect(reopened.getCompensation(dispatched.id)).toMatchObject({ status: 'unknown', version: 4 })
+    expect(reopened.recoverCompensations(authority)).toBe(0)
+    reopened.close()
+  })
+
+  it('discards a live capturing placeholder so the forward action can be compensated again', async () => {
+    // Used by the service when a denial, abort or capture failure happens
+    // before any preimage is sealed: the placeholder must not wedge the slot.
+    const { ledger: value, authority } = await rollbackLedger()
+    const forward = succeedForward(value, authority)
+    const capturing = value.prepareCompensation({ identity, sessionId: 'session', request: receipt(forward), authority }).record
+    expect(value.discardCompensation(capturing.id, capturing.version, authority)).toBe(true)
+    expect(value.getCompensation(capturing.id)).toBeUndefined()
+    // Only a capturing row may be discarded; a sealed prepared row stays put.
+    const second = value.prepareCompensation({ identity, sessionId: 'session', request: { ...receipt(forward), idempotencyKey: 'again' }, authority }).record
+    value.captureCompensation(second.id, second.version, preimageAt(second.parentOid, [presentFile()]), authority)
+    expect(value.discardCompensation(second.id, 2, authority)).toBe(false)
+    expect(value.getCompensation(second.id)?.status).toBe('prepared')
+    value.close()
+  })
 })

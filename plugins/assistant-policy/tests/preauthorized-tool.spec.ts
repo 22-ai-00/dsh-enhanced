@@ -137,7 +137,14 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test.each(['action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect'])('executes exact granted %s without asking, while ungranted calls fail closed', async name => {
+  test.each([
+    'action_github_commit',
+    'action_github_branch',
+    'action_github_pr',
+    'action_github_inspect',
+    'action_github_compensate',
+    'action_github_compensation_status',
+  ])('executes exact granted %s without asking, while ungranted calls fail closed', async name => {
     const current = await fixture()
     let executions = 0
     const trusted = definition(name, () => { executions += 1 })
@@ -246,6 +253,16 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
+  test.each(['action_github_compensation', 'action_github_compensate_status'])('rejects nearby unapproved assistant-actions tool %s', async name => {
+    const current = await fixture()
+    const unapproved = definition(name, () => {})
+    current.ctx.tools.register(unapproved)
+
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), unapproved, () => true))
+      .toThrow('reserved for approved assistant-actions GitHub tools')
+    await current.ctx.fiber.restart()
+  })
+
   test('rejects generic tools and callers outside assistant-actions', async () => {
     const current = await fixture()
     const commit = definition('action_github_commit', () => {})
@@ -254,9 +271,9 @@ describe('trusted Host tool preauthorization', () => {
     current.ctx.tools.register(bash)
 
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), bash, () => true))
-      .toThrow('reserved for assistant-actions action_github_commit')
+      .toThrow('reserved for approved assistant-actions GitHub tools')
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, commit, () => true))
-      .toThrow('reserved for assistant-actions action_github_commit')
+      .toThrow('reserved for approved assistant-actions GitHub tools')
     await current.ctx.fiber.restart()
   })
 

@@ -1,0 +1,137 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-10",
+  "baseCommit": "cb46b2d",
+  "workingTreeState": "validated-root-check-passed",
+  "status": "validated-pending-dev-push",
+  "completeWorkPackage": false,
+  "scope": "WP10 finite GitHub compensating commit for exact succeeded forward commits",
+  "workPackages": {
+    "strengthened": ["10"],
+    "statusChanged": false,
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "implemented": [
+    "Rollback is absent by default and requires grant.rollback with allowRollback true plus a dedicated Policy budget ID, maximum action count and maximum byte count.",
+    "At compensation time (never before dispatch), the Host reads each exact grant-scoped path at the immutable parent commit identified by the forward receipt's expectedHeadOid; only canonical bounded UTF-8 files or exact 404 absence are accepted.",
+    "A path 404 is not trusted by itself: the same immutable parent commit is read through the Git Data API (git/commits/{oid} then git/trees/{tree_sha}?recursive=1) and its blob index must corroborate every result. A 404 for a path the immutable tree lists as a blob, a contents blob OID that disagrees with the tree, an unexpected commit/tree OID, a truncated or oversized tree, or any index fetch failure fails closed: capture aborts and no compensation commit is sent. This prevents a fine-grained PAT lacking Contents read (branches 200, contents 404) or a >100 MiB blob (contents 404) from turning live files into deletions.",
+    "The complete present/absent preimage and digest stay in the private ledger; the model-visible succeeded forward result exposes only forwardActionId, forwardActionVersion, forwardRequestDigest and forwardCommitOid.",
+    "A compensation request references the exact redacted forward receipt and does not accept paths, files, content or preimage from the caller.",
+    "Owner, Session, grant revision, repository, branch, paths, forward action/version/request digest/commit OID, private preimage and current rollback authority are rebound before dispatch.",
+    "Each exact succeeded forward action has at most one compensation record; alternate idempotency keys cannot create another attempt.",
+    "Compensation first requires the branch head to equal the forward commit and then sends one ordinary createCommitOnBranch mutation with that expected head, restoring prior files and deleting paths that were previously absent.",
+    "The protocol never force-pushes, resets, calls updateRef or rewrites history; later branch changes produce a conflict.",
+    "A dispatched compensation is sent once. Timeout, cancellation, redirect, lost acknowledgement or malformed/mismatched response remains unknown and is not replayed after restart; on restart, prepared/dispatched rows are recovered to unknown (never re-dispatched) while capturing placeholder rows that never sealed a preimage are deleted, freeing the forward action's one-compensation slot and its action budget.",
+    "Before dispatch, a denied second-stage budget authorization, an expired authority or a fail-closed capture error discards the capturing placeholder so a pre-dispatch failure can neither wedge the forward action nor permanently consume a rollback action; after the preimage is sealed, failures keep the row for manual unknown resolution.",
+    "A GraphQL rejection (errors entry, CAS conflict, or mismatched commit/parent/ref in the mutation response) settles the compensation as failed with reason github-compensation-rejected and is never retried or misreported as succeeded.",
+    "File compensation does not retract pull requests, CI, reviews, comments, messages, notifications, webhooks, deployments, releases or other external side effects."
+  ],
+  "focusedValidation": {
+    "githubTransport": {
+      "status": "passed",
+      "command": "pnpm vitest run tests/github.spec.ts tests/github-http.spec.ts",
+      "log": "/tmp/wp10-github-transport.log",
+      "logSha256": "77ee5af8b758f9dfb8255cf865b45018910cc93a87613c02cb064720c6626b22",
+      "exitCode": 0,
+      "testFiles": 2,
+      "testsPassed": 46
+    },
+    "ledgerAndServiceIntegration": {
+      "status": "passed",
+      "command": "pnpm vitest run tests/ledger.spec.ts tests/compensation-service.spec.ts",
+      "log": "/tmp/wp10-ledger-service.log",
+      "logSha256": "0ece28edac2ef0ff24848f252b2dba650157c966011885dff992d65c0e4e7db5",
+      "exitCode": 0,
+      "testFiles": 2,
+      "testsPassed": 45
+    },
+    "packageSuite": {
+      "status": "passed",
+      "assistantActions": "pnpm build && pnpm vitest run && pnpm typecheck && pnpm oxlint --deny-warnings -> 10 files / 137 tests passed, typecheck and zero-warning lint exit 0",
+      "assistantPolicy": "pnpm vitest run -> 15 files / 207 tests passed",
+      "assistantIsolation": "pnpm vitest run -> 16 passed + 10 skipped files, 108 passed + 27 skipped tests"
+    },
+    "independentSecurityReview": {
+      "status": "passed",
+      "verdict": "YES-WITH-FOLLOWUPS",
+      "summary": "An independent adversarial reviewer read the frozen WP10 diff against base cb46b2d in a read-only pass (no network, no git writes) and concluded the change is safe to merge to dev in its default-off configuration. No CRITICAL or HIGH findings. All ten safety invariants were CONFIRMED against source. Four LOW followups and seven test gaps were recorded; the two gaps that directly pin the core invariants were closed in this submission, the remainder are explicitly deferred post-merge followups.",
+      "reviewBaseCommit": "cb46b2d",
+      "reviewMode": "read-only; local source and tests only; no network access and no git mutations",
+      "reviewerIndependentReruns": {
+        "assistantActions": "135/135 tests passed at review time (the two added regression tests post-date the review run; the full 137-test suite is covered by packageSuite)",
+        "assistantPolicy": "207/207 tests passed",
+        "assistantIsolation": "108 passed / 27 skipped (Docker-gated) tests"
+      },
+      "invariants": [
+        { "id": 1, "claim": "Rollback is default-off behind four independent gates", "verdict": "CONFIRMED", "evidence": "service.ts:123 conditional tool registration; config.ts:18-19 rollback absent unless explicitly configured; ledger.ts:112-117 schema gate; rollback authority re-checked on every compensation identity evaluation" },
+        { "id": 2, "claim": "No force-push/reset/updateRef; local head precheck plus GraphQL expectedHeadOid CAS plus strict acknowledgement validation", "verdict": "CONFIRMED", "evidence": "github.ts:420-444 single createCommitOnBranch with expectedHeadOid; github.ts:142-159 strict marker/repository/branch/parent/ref checks" },
+        { "id": 3, "claim": "Single dispatch with no replay and three-state recovery across restart", "verdict": "CONFIRMED", "evidence": "ledger.ts:610-631 prepared/dispatched recover to unknown, unsealed capturing rows deleted; service.ts:542-544 dispatch happens exactly once" },
+        { "id": 4, "claim": "M2 mitigation: immutable commit/tree blob index cross-check fails closed", "verdict": "CONFIRMED", "evidence": "github.ts:324-370 git/commits then recursive git/trees; tree unavailable/truncated/OID mismatch/blob-sha contradiction/404 refuted by tree all return undefined and send nothing" },
+        { "id": 5, "claim": "Four-layer path scope enforcement, exact encoding, no redirect following", "verdict": "CONFIRMED", "evidence": "github.ts:97-100 exact path allow-list; github.ts:300-301 and 346-349 exact encoding/index matching; transport does not follow redirects" },
+        { "id": 6, "claim": "Two-phase budget authorization, capturing placeholder discarded on pre-dispatch failure, one compensation per forward action", "verdict": "CONFIRMED", "evidence": "service.ts:177-189 identity-only evaluate before placeholder; service.ts:526 and :553-555 real authorizeAgent before capture and before dispatch; ledger.ts:249 and :599-608 UNIQUE(forward_action_id) and discard path" },
+        { "id": 7, "claim": "Credential never persisted; echo suppression; 0600/O_NOFOLLOW private state", "verdict": "CONFIRMED", "evidence": "Keychain lease used in-memory only; result/error fields suppress raw token echoes; ledger files 0600 under 0700 state root" },
+        { "id": 8, "claim": "GraphQL errors settle failed/rejected, never succeeded, never retried", "verdict": "CONFIRMED", "evidence": "github.ts:440 maps errors/CAS/commit-parent-ref mismatch to reason github-compensation-rejected; pinned by the added github.spec.ts regression test" },
+        { "id": 9, "claim": "Size limits enforced at three layers", "verdict": "CONFIRMED", "evidence": "per-file, per-request file count and aggregate byte bounds enforced in config normalization, capture and ledger reservation" },
+        { "id": 10, "claim": "Untrusted JSON is narrowly validated and submodule entries are excluded from the blob index", "verdict": "CONFIRMED", "evidence": "strict shape narrowing on every GitHub response; only type=blob tree entries enter the index" }
+      ],
+      "lowFollowups": [
+        { "id": "LOW-1", "issue": "The tree index records only blob entries, so a 404 for a submodule (type=commit) or directory (type=tree) path lacks the same cross-validation as a blob path.", "exploitability": "Not exploitable on real GitHub: both kinds return 200 from contents, and deleting them is rejected by mutation errors. Hardening only.", "recommendation": "Record non-blob tree entry types and fail closed when a 404 matches any indexed entry.", "deferred": true },
+        { "id": "LOW-2", "issue": "When capture fails at the capturing stage, the Policy budget already finalized is not released, so an agent can exhaust only its own rollback budget.", "exploitability": "Self-denial of service; no integrity impact.", "recommendation": "Release the budget reservation when discarding a capturing placeholder.", "deferred": true },
+        { "id": "LOW-3", "issue": "A GraphQL 200 carrying both errors and legal data is always recorded failed.", "exploitability": "Conservative semantics; UNIQUE guarantees no double commit.", "recommendation": "Retain current conservative behavior; document it.", "deferred": true },
+        { "id": "LOW-4", "issue": "An oversized or truncated recursive tree permanently disables compensation for that commit.", "exploitability": "Intentional fail-closed availability tradeoff, not a vulnerability.", "recommendation": "None required; recorded as a known boundary.", "deferred": true }
+      ],
+      "testGapDisposition": [
+        { "gap": "errors-array acknowledgement settles rejected and is not retried", "status": "closed-in-this-submission", "test": "plugins/assistant-actions/tests/github.spec.ts -> 'settles a GraphQL errors acknowledgement as failed/rejected and never retries'" },
+        { "gap": "post-placeholder authorization denial discards the row and a new key retry succeeds", "status": "closed-in-this-submission", "test": "plugins/assistant-actions/tests/compensation-service.spec.ts -> test J" },
+        { "gap": "in-flight revoke and owner-change branches during the 100ms poll", "status": "deferred-followup" },
+        { "gap": "submodule/directory tree entries in 200 and 404 cases (LOW-1 hardening)", "status": "deferred-followup" },
+        { "gap": "branches endpoint 302 maps to unknown", "status": "deferred-followup" },
+        { "gap": "v2-to-v3 ledger migration coverage (only v1 migration is covered today)", "status": "deferred-followup" },
+        { "gap": "service-level end-to-end assertion that compensation file contents never echo the PAT", "status": "deferred-followup" }
+      ]
+    }
+  },
+  "finalRootCheck": {
+    "status": "passed",
+    "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+    "log": "/tmp/wp10-root-check.log",
+    "sha256": "5b258e375aa42f62383a04316fb468d07294a08c890ae0fc906659e70eaaf0c7",
+    "exitCode": 0,
+    "rootTestFilesPassed": 359,
+    "rootTestsPassed": 4754,
+    "rootTestsSkipped": 1,
+    "countingNote": "Totals sum every 'Test Files'/'Tests' summary line in the log: the root-aggregated vitest run (30 files / 427 passed / 1 skipped, 320s, including the Docker-backed isolation tests) plus the per-package recursive test run; the two layers execute overlapping packages, so these are aggregate executions rather than unique tests. The single skip is in the root-aggregated run; the recursive assistant-isolation package ran its Docker suite to completion (26 files / 135 passed).",
+    "dryRunPacks": 33
+  },
+  "claimsBoundary": {
+    "realGitHubAuthorized": false,
+    "realGitHubInvoked": false,
+    "localTransportAndIntegrationOnly": true,
+    "forcePushOrResetSupported": false,
+    "externalSideEffectsReversed": false
+  },
+  "limitations": [
+    "No real GitHub repository, account or token was authorized for this slice; local HTTP transport and integration evidence cannot establish live GitHub behavior or production permission correctness.",
+    "A compensation commit is visible append-only history and does not erase either the forward commit or itself.",
+    "A changed branch head blocks compensation rather than overwriting intervening work.",
+    "Unknown forward commits are ineligible because an exact succeeded forward receipt is required.",
+    "Unknown compensation dispatches stay occupied and are never automatically retried or relabeled from observed branch state.",
+    "Only the captured authorized files are restored; PR, CI, review/comment, message/notification, webhook, deployment, release and arbitrary external effects remain outside this protocol.",
+    "Private preimages contain repository file content and require the same private state-root ownership, retention and backup controls as the Actions ledger.",
+    "The independent adversarial review is complete (YES-WITH-FOLLOWUPS) and the final root gate passed (exit 0); deferred LOW items and test gaps are recorded for post-merge followup.",
+    "WP10 remains implementing and the complete 18-work-package objective remains active."
+  ],
+  "sourceHashes": {
+    "plugins/assistant-actions/src/github.ts": "dbdefcd29b0337f3c6ed1724a0c63da7183fd48eb70d34e0d059ff23c3e4dbe0",
+    "plugins/assistant-actions/src/ledger.ts": "21b195dc5f8e6d3218f6aea176a1aaa6f50343583b8e530418e8195f05bf3e97",
+    "plugins/assistant-actions/src/service.ts": "81fa5654ae3c3b9bbca1ab9751c5c3c1f17d16808b328693c7d89210bd2bb605",
+    "plugins/assistant-actions/src/config.ts": "3baa4801041a94d3617e0354645f3abbbb22223994604fea79539d48af54da6c",
+    "plugins/assistant-actions/src/types.ts": "ac84a026cc53f9f69f267ea3ed588b20eb38dbb1f159f7c829c00cb89cd7213f",
+    "plugins/assistant-policy/src/service.ts": "8fcf43442c3debab07dfeb82709b8fee3ddc7a00b1e9fbc23a26f1f6a16e9c30",
+    "plugins/assistant-isolation/src/service.ts": "3ef9ca58fcc452c95e3ac89a964963d55cd7aea7b21830a4e918451f05b6e339"
+  }
+}

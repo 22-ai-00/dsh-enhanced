@@ -1,10 +1,17 @@
 import { request as httpsRequest } from 'node:https'
-import type { ActionGrant, ActionResult, CommitRequest } from './types.js'
+import type { ActionGrant, ActionResult, CommitRequest, CompensationPreimage, CompensationPreimageFile, CompensationResult } from './types.js'
 
 const GITHUB_GRAPHQL_URL = new URL('https://api.github.com/graphql')
 const RESPONSE_LIMIT = 16_384
 const REQUEST_TIMEOUT_MS = 30_000
 const UNKNOWN_REASON = 'github-commit-unknown'
+const COMPENSATION_UNKNOWN_REASON = 'github-compensation-unknown'
+const PREIMAGE_FILE_LIMIT = 1_048_576
+const PREIMAGE_FILE_COUNT_LIMIT = 32
+const PREIMAGE_TOTAL_LIMIT = 1_048_576
+const REST_RESPONSE_LIMIT = 262_144
+const CONTENT_RESPONSE_LIMIT = 1_500_000
+const TREE_RESPONSE_LIMIT = 1_500_000
 const API = 'https://api.github.com/repos/'
 
 export interface GitHubCommitInput {
@@ -14,6 +21,41 @@ export interface GitHubCommitInput {
   token: string
   signal: AbortSignal
 }
+
+export type GitHubFilePreimage = CompensationPreimageFile
+export type GitHubPreimageSnapshot = CompensationPreimage
+
+export interface GitHubPreimageInput {
+  grant: ActionGrant
+  commitOid: string
+  paths: readonly string[]
+  token: string
+  signal: AbortSignal
+}
+
+export interface GitHubBranchHead {
+  repository: string
+  branch: string
+  headOid: string
+}
+
+export interface GitHubCompensationInput {
+  actionId: string
+  grant: ActionGrant
+  forwardCommitOid: string
+  preimage: GitHubPreimageSnapshot
+  token: string
+  signal: AbortSignal
+}
+
+export type GitHubCompensationResult = CompensationResult
+
+export interface GitHubCompensationTransports {
+  graphql?: typeof httpsRequest
+  rest?: typeof httpsRequest
+}
+
+export type { CompensationPreimage, CompensationPreimageFile, CompensationResult } from './types.js'
 
 type GitHubTransport = typeof httpsRequest
 
@@ -40,19 +82,31 @@ function validHeaderToken(token: string): boolean {
   return token.length > 0 && token.length <= 8192 && /^[\x21-\x7e]+$/.test(token)
 }
 
+function validActionId(actionId: string): boolean {
+  return actionId.length > 0 && actionId.length <= 256 && !/\p{Cc}/u.test(actionId)
+}
+
+function validRepository(repository: string): boolean {
+  return repository.length <= 256 && /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(repository)
+}
+
+function validBranch(branch: string): boolean {
+  return branch.length > 0 && branch.length <= 255 && !branch.startsWith('refs/') && !/\p{Cc}/u.test(branch)
+}
+
+function validScopedPath(path: string): boolean {
+  return path.length > 0 && path.length <= 1024 && !/[\\\p{Cc}]/u.test(path)
+    && path.split('/').every(part => part !== '' && part !== '.' && part !== '..' && part.toLowerCase() !== '.git')
+}
+
 function validInput(input: GitHubCommitInput): boolean {
   const { actionId, grant, request } = input
-  return actionId.length > 0
-    && actionId.length <= 256
-    && !/\p{Cc}/u.test(actionId)
-    && /^[\w.-]+\/[\w.-]+$/.test(grant.repository)
-    && grant.branch.length > 0
-    && grant.branch.length <= 255
-    && !grant.branch.startsWith('refs/')
-    && !/\p{Cc}/u.test(grant.branch)
+  return validActionId(actionId)
+    && validRepository(grant.repository)
+    && validBranch(grant.branch)
     && /^[0-9a-f]{40,128}$/i.test(request.expectedHeadOid)
     && request.files.length > 0
-    && request.files.every((file) => file.path.length > 0 && !/\p{Cc}/u.test(file.path))
+    && request.files.every((file) => validScopedPath(file.path))
 }
 
 function makePayload(input: GitHubCommitInput): string {
@@ -85,57 +139,56 @@ function makePayload(input: GitHubCommitInput): string {
   })
 }
 
-function responseMatches(response: GitHubResponse, input: GitHubCommitInput): string | undefined {
+function matchingCommitOid(response: GitHubResponse, expected: { clientMutationId: string; repository: string; branch: string; parentOid: string }): string | undefined {
   if (response.errors !== undefined || response.data === undefined) return undefined
   const result = response.data.createCommitOnBranch
   const commit = result?.commit
   const parents = commit?.parents?.nodes
   const oid = commit?.oid
   const refOid = result?.ref?.target?.oid
-  if (result?.clientMutationId !== `dsh-action:${input.actionId}`
-    || commit?.repository?.nameWithOwner !== input.grant.repository
-    || result?.ref?.name !== input.grant.branch
+  if (result?.clientMutationId !== expected.clientMutationId
+    || commit?.repository?.nameWithOwner !== expected.repository
+    || result?.ref?.name !== expected.branch
     || !Array.isArray(parents)
     || parents.length !== 1
-    || parents[0]?.oid !== input.request.expectedHeadOid
+    || parents[0]?.oid !== expected.parentOid
     || typeof oid !== 'string'
     || !/^[0-9a-f]{40,128}$/i.test(oid)
     || refOid !== oid) return undefined
   return oid
 }
 
-/** Commit exactly the approved files through GitHub's atomic expected-head mutation. */
-export async function commitOnGitHub(
-  input: GitHubCommitInput,
-  transport: GitHubTransport = httpsRequest,
-): Promise<ActionResult> {
-  if (input.signal.aborted) return { actionId: input.actionId, status: 'failed', reason: 'dispatch-aborted' }
-  if (!validHeaderToken(input.token) || !validInput(input)) return unknown(input.actionId)
+function responseMatches(response: GitHubResponse, input: GitHubCommitInput): string | undefined {
+  return matchingCommitOid(response, {
+    clientMutationId: `dsh-action:${input.actionId}`,
+    repository: input.grant.repository,
+    branch: input.grant.branch,
+    parentOid: input.request.expectedHeadOid,
+  })
+}
 
-  const payload = makePayload(input)
-  return new Promise<ActionResult>((resolve) => {
+async function graphql(payload: string, token: string, signal: AbortSignal, transport: GitHubTransport): Promise<GitHubResponse | undefined> {
+  if (!validHeaderToken(token) || signal.aborted) return undefined
+  return await new Promise<GitHubResponse | undefined>((resolve) => {
     let settled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let request: ReturnType<GitHubTransport> | undefined
-    const finish = (result: ActionResult): void => {
+    const finish = (result: GitHubResponse | undefined): void => {
       if (settled) return
       settled = true
       if (timer !== undefined) clearTimeout(timer)
-      input.signal.removeEventListener('abort', onAbort)
+      signal.removeEventListener('abort', onAbort)
       resolve(result)
     }
-    const onAbort = (): void => {
-      request?.destroy()
-      finish(unknown(input.actionId))
-    }
+    const onAbort = (): void => { request?.destroy(); finish(undefined) }
     try {
       request = transport(GITHUB_GRAPHQL_URL, {
         method: 'POST',
         agent: false,
-        signal: input.signal,
+        signal,
         headers: {
           accept: 'application/json',
-          authorization: `Bearer ${input.token}`,
+          authorization: `Bearer ${token}`,
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(payload),
           'user-agent': 'dsh-enhanced-assistant-actions',
@@ -146,40 +199,40 @@ export async function commitOnGitHub(
         response.on('data', (chunk: Buffer | string) => {
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
           size += buffer.length
-          if (size > RESPONSE_LIMIT) {
-            response.destroy()
-            finish(unknown(input.actionId))
-            return
-          }
-          chunks.push(buffer)
+          if (size > RESPONSE_LIMIT) { response.destroy(); request?.destroy(); finish(undefined) } else chunks.push(buffer)
         })
-        response.once('error', () => finish(unknown(input.actionId)))
-        response.once('aborted', () => finish(unknown(input.actionId)))
+        response.once('error', () => finish(undefined))
+        response.once('aborted', () => finish(undefined))
         response.once('end', () => {
-          if (response.statusCode === undefined || response.statusCode < 200 || response.statusCode >= 300) {
-            finish(unknown(input.actionId))
-            return
-          }
+          if (settled || signal.aborted || response.statusCode === undefined || response.statusCode < 200 || response.statusCode >= 300) { finish(undefined); return }
           try {
-            const oid = responseMatches(JSON.parse(Buffer.concat(chunks).toString('utf8')) as GitHubResponse, input)
-            finish(oid === undefined || oid.includes(input.token) ? unknown(input.actionId) : { actionId: input.actionId, status: 'succeeded', commitOid: oid })
-          } catch {
-            finish(unknown(input.actionId))
-          }
+            const raw = Buffer.concat(chunks).toString('utf8')
+            const parsed = JSON.parse(raw) as GitHubResponse
+            finish(raw.includes(token) || JSON.stringify(parsed).includes(token) ? undefined : parsed)
+          } catch { finish(undefined) }
         })
       })
-      request.once('error', () => finish(unknown(input.actionId)))
-      input.signal.addEventListener('abort', onAbort, { once: true })
-      timer = setTimeout(() => {
-        request?.destroy()
-        finish(unknown(input.actionId))
-      }, REQUEST_TIMEOUT_MS)
+      request.once('error', () => finish(undefined))
+      signal.addEventListener('abort', onAbort, { once: true })
+      if (signal.aborted) { onAbort(); return }
+      timer = setTimeout(onAbort, REQUEST_TIMEOUT_MS)
+      timer.unref()
       request.end(payload)
-    } catch {
-      request?.destroy()
-      finish(unknown(input.actionId))
-    }
+    } catch { request?.destroy(); finish(undefined) }
   })
+}
+
+/** Commit exactly the approved files through GitHub's atomic expected-head mutation. */
+export async function commitOnGitHub(
+  input: GitHubCommitInput,
+  transport: GitHubTransport = httpsRequest,
+): Promise<ActionResult> {
+  if (input.signal.aborted) return { actionId: input.actionId, status: 'failed', reason: 'dispatch-aborted' }
+  if (!validHeaderToken(input.token) || !validInput(input)) return unknown(input.actionId)
+  const payload = makePayload(input)
+  const response = await graphql(payload, input.token, input.signal, transport)
+  const resultOid = response === undefined ? undefined : responseMatches(response, input)
+  return resultOid === undefined ? unknown(input.actionId) : { actionId: input.actionId, status: 'succeeded', commitOid: resultOid }
 }
 
 type RestTransport = typeof httpsRequest
@@ -188,7 +241,7 @@ const record = (value: unknown): Record<string, unknown> | undefined => value !=
 const oid = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{40}$/i.test(value)
 const positiveInteger = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0
 
-async function rest(path: string, method: 'GET' | 'POST', token: string, body: object | undefined, signal: AbortSignal, transport: RestTransport = httpsRequest): Promise<RestReply | undefined> {
+async function rest(path: string, method: 'GET' | 'POST', token: string, body: object | undefined, signal: AbortSignal, transport: RestTransport = httpsRequest, acceptedStatuses?: readonly number[], responseLimit = REST_RESPONSE_LIMIT): Promise<RestReply | undefined> {
   if (!validHeaderToken(token) || signal.aborted || !path.startsWith('/')) return undefined
   const payload = body === undefined ? undefined : JSON.stringify(body)
   return await new Promise(resolve => {
@@ -214,17 +267,23 @@ async function rest(path: string, method: 'GET' | 'POST', token: string, body: o
         response.on('data', (chunk: Buffer | string) => {
           const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
           bytes += value.length
-          if (bytes > 262_144) { response.destroy(); request?.destroy(); finish(undefined) } else chunks.push(value)
+          if (bytes > responseLimit) { response.destroy(); request?.destroy(); finish(undefined) } else chunks.push(value)
         })
         response.once('error', () => finish(undefined))
         response.once('aborted', () => finish(undefined))
         response.once('end', () => {
-          if (done || signal.aborted || !response.statusCode || response.statusCode < 200 || response.statusCode >= 300) { finish(undefined); return }
+          if (done || signal.aborted || !response.statusCode
+            || (response.statusCode < 200 || response.statusCode >= 300) && !acceptedStatuses?.includes(response.statusCode)) { finish(undefined); return }
           try {
             const raw = Buffer.concat(chunks).toString('utf8')
+            if (raw.includes(token)) { finish(undefined); return }
+            if (acceptedStatuses?.includes(response.statusCode) && (response.statusCode < 200 || response.statusCode >= 300)) {
+              finish({ status: response.statusCode, body: undefined, hasNextPage: false })
+              return
+            }
             const parsed: unknown = JSON.parse(raw)
             // Never release a credential echoed anywhere in a remote response.
-            if (raw.includes(token) || JSON.stringify(parsed).includes(token)) { finish(undefined); return }
+            if (JSON.stringify(parsed).includes(token)) { finish(undefined); return }
             finish({ status: response.statusCode, body: parsed, hasNextPage: /\brel="?next\b/i.test(String(response.headers.link ?? '')) })
           } catch { finish(undefined) }
         })
@@ -239,6 +298,152 @@ async function rest(path: string, method: 'GET' | 'POST', token: string, body: o
 }
 
 const repoPath = (grant: ActionGrant): string => `${encodeURIComponent(grant.repository.split('/')[0]!)}/${encodeURIComponent(grant.repository.split('/')[1]!)}`
+const contentPath = (grant: ActionGrant, path: string, ref: string): string => `/${repoPath(grant)}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(ref)}`
+
+function decodedFile(value: unknown, expectedPath: string, token: string): Extract<GitHubFilePreimage, { state: 'present' }> | undefined {
+  const body = record(value)
+  if (!body || body.path !== expectedPath || body.type !== 'file' || body.encoding !== 'base64'
+    || typeof body.content !== 'string' || !oid(body.sha) || !Number.isSafeInteger(body.size)
+    || (body.size as number) < 0 || (body.size as number) > PREIMAGE_FILE_LIMIT || body.truncated === true) return undefined
+  const encoded = body.content.replace(/\n/g, '')
+  const content = Buffer.from(encoded, 'base64')
+  const text = content.toString('utf8')
+  if (content.length !== body.size || content.toString('base64') !== encoded
+    || Buffer.from(text, 'utf8').compare(content) !== 0 || text.includes(token)) return undefined
+  return Object.freeze({ path: expectedPath, state: 'present', blobOid: body.sha, content: text, size: content.length })
+}
+
+/**
+ * Index every blob in the immutable parent commit's (possibly recursive) tree
+ * via the Git Data API. Contents 404s are cross-checked against this index so
+ * that an existing-but-unreadable blob (an oversized file or an endpoint that
+ * hides the path from this credential) can never be misread as "absent" and
+ * turned into a destructive deletion. Returns undefined whenever the index
+ * cannot be established completely; callers must then abort the compensation.
+ */
+async function readGitHubTreeIndex(grant: ActionGrant, commitOid: string, token: string, signal: AbortSignal, transport: RestTransport): Promise<ReadonlyMap<string, string> | undefined> {
+  const commitReply = await rest(`/${repoPath(grant)}/git/commits/${encodeURIComponent(commitOid)}`, 'GET', token, undefined, signal, transport)
+  if (commitReply?.status !== 200) return undefined
+  const commitBody = record(commitReply.body)
+  const tree = record(commitBody?.tree)
+  const treeSha = typeof tree?.sha === 'string' ? tree.sha : undefined
+  if (commitBody?.sha !== commitOid || !oid(treeSha)) return undefined
+  const treeReply = await rest(`/${repoPath(grant)}/git/trees/${encodeURIComponent(treeSha)}?recursive=1`, 'GET', token, undefined, signal, transport, undefined, TREE_RESPONSE_LIMIT)
+  if (treeReply?.status !== 200) return undefined
+  const treeBody = record(treeReply.body)
+  const entries = treeBody?.tree
+  if (treeBody?.sha !== treeSha || !Array.isArray(entries) || treeBody.truncated === true) return undefined
+  const blobs = new Map<string, string>()
+  for (const value of entries) {
+    const entry = record(value)
+    if (entry?.type === 'blob' && typeof entry.path === 'string' && oid(entry.sha)) blobs.set(entry.path, entry.sha)
+  }
+  return blobs
+}
+
+/** Read exact allowed file states at one immutable Git commit without following redirects. */
+export async function readGitHubPreimage(input: GitHubPreimageInput, transport?: RestTransport): Promise<GitHubPreimageSnapshot | undefined> {
+  if (!validRepository(input.grant.repository) || !validBranch(input.grant.branch) || !oid(input.commitOid)
+    || !Array.isArray(input.paths) || input.paths.length < 1 || input.paths.length > PREIMAGE_FILE_COUNT_LIMIT
+    || new Set(input.paths).size !== input.paths.length
+    || input.paths.some(path => !validScopedPath(path) || !input.grant.paths.includes(path))) return undefined
+  const resolvedTransport = transport ?? httpsRequest
+  // Bind the capture to the immutable parent commit: its tree is the authority
+  // on which grant paths exist. A contents 404 contradicted by this tree, or a
+  // contents blob whose OID differs from the tree entry, aborts the capture.
+  const index = await readGitHubTreeIndex(input.grant, input.commitOid, input.token, input.signal, resolvedTransport)
+  if (!index) return undefined
+  const files: GitHubFilePreimage[] = []
+  let total = 0
+  for (const path of input.paths) {
+    total += Buffer.byteLength(path)
+    if (total > PREIMAGE_TOTAL_LIMIT) return undefined
+    const reply = await rest(contentPath(input.grant, path, input.commitOid), 'GET', input.token, undefined, input.signal, resolvedTransport, [404], CONTENT_RESPONSE_LIMIT)
+    if (reply?.status === 404) {
+      // The parent tree proves a blob lives at this path; the 404 is an
+      // oversized or credential-hidden file, not proof of absence.
+      if (index.has(path)) return undefined
+      files.push(Object.freeze({ path, state: 'absent' })); continue
+    }
+    if (reply?.status !== 200) return undefined
+    const file = decodedFile(reply.body, path, input.token)
+    if (!file || index.get(path) !== file.blobOid) return undefined
+    total += file.size
+    if (total > PREIMAGE_TOTAL_LIMIT) return undefined
+    files.push(file)
+  }
+  return Object.freeze({ repository: input.grant.repository, branch: input.grant.branch, commitOid: input.commitOid, files: Object.freeze(files) })
+}
+
+/** Inspect only the grant-fixed branch head and bind the observation to its scope. */
+export async function inspectGitHubBranchHead(input: { grant: ActionGrant; token: string; signal: AbortSignal }, transport?: RestTransport): Promise<GitHubBranchHead | undefined> {
+  if (!validRepository(input.grant.repository) || !validBranch(input.grant.branch)) return undefined
+  const reply = await rest(`/${repoPath(input.grant)}/branches/${encodeURIComponent(input.grant.branch)}`, 'GET', input.token, undefined, input.signal, transport)
+  const body = record(reply?.body)
+  const headOid = record(body?.commit)?.sha
+  return reply?.status === 200 && body?.name === input.grant.branch && oid(headOid)
+    ? Object.freeze({ repository: input.grant.repository, branch: input.grant.branch, headOid }) : undefined
+}
+
+function validPreimage(input: GitHubCompensationInput): boolean {
+  const { preimage, grant } = input
+  if (!validActionId(input.actionId) || !validRepository(grant.repository) || !validBranch(grant.branch) || !oid(input.forwardCommitOid)
+    || preimage.repository !== grant.repository || preimage.branch !== grant.branch || !oid(preimage.commitOid)
+    || !Array.isArray(preimage.files) || preimage.files.length < 1 || preimage.files.length > PREIMAGE_FILE_COUNT_LIMIT
+    || new Set(preimage.files.map(file => file.path)).size !== preimage.files.length) return false
+  let total = 0
+  for (const file of preimage.files) {
+    if (!validScopedPath(file.path) || !grant.paths.includes(file.path)) return false
+    total += Buffer.byteLength(file.path)
+    if (file.state === 'present') {
+      const bytes = Buffer.from(file.content, 'utf8')
+      if (!oid(file.blobOid) || !Number.isSafeInteger(file.size) || file.size < 0 || file.size > PREIMAGE_FILE_LIMIT
+        || bytes.length !== file.size || bytes.toString('utf8') !== file.content || file.content.includes(input.token)) return false
+      total += bytes.length
+    } else if (file.state !== 'absent') return false
+  }
+  return total <= PREIMAGE_TOTAL_LIMIT
+}
+
+function compensationPayload(input: GitHubCompensationInput, actionMarker: string): string {
+  const additions = input.preimage.files.filter((file): file is Extract<GitHubFilePreimage, { state: 'present' }> => file.state === 'present')
+    .map(file => ({ path: file.path, contents: Buffer.from(file.content, 'utf8').toString('base64') }))
+  const deletions = input.preimage.files.filter(file => file.state === 'absent').map(file => ({ path: file.path }))
+  return JSON.stringify({
+    query: `mutation CreateCommitOnBranch($input: CreateCommitOnBranchInput!) {
+  createCommitOnBranch(input: $input) {
+    clientMutationId
+    commit { oid parents(first: 2) { nodes { oid } } repository { nameWithOwner } }
+    ref { name target { oid } }
+  }
+}`,
+    variables: { input: {
+      branch: { repositoryNameWithOwner: input.grant.repository, branchName: input.grant.branch },
+      expectedHeadOid: input.forwardCommitOid,
+      message: { headline: `Compensate ${input.actionId}`, body: actionMarker },
+      fileChanges: { additions, deletions },
+      clientMutationId: actionMarker,
+    } },
+  })
+}
+
+/** Restore a captured preimage through an expected-head commit; never force-pushes. */
+export async function createCompensatingCommitOnGitHub(input: GitHubCompensationInput, transports: GitHubCompensationTransports = {}): Promise<GitHubCompensationResult> {
+  const actionMarker = `dsh-compensation:${input.actionId}`
+  const base = { actionId: input.actionId, repository: input.grant.repository, branch: input.grant.branch, parentOid: input.forwardCommitOid, actionMarker }
+  if (input.signal.aborted) return { ...base, status: 'failed', reason: 'dispatch-aborted' }
+  if (!validHeaderToken(input.token) || !validPreimage(input)) return { ...base, status: 'unknown', reason: COMPENSATION_UNKNOWN_REASON }
+  const head = await inspectGitHubBranchHead(input, transports.rest)
+  if (!head) return { ...base, status: 'unknown', reason: COMPENSATION_UNKNOWN_REASON }
+  if (head.headOid !== input.forwardCommitOid) return { ...base, status: 'failed', reason: 'github-compensation-head-conflict' }
+  const response = await graphql(compensationPayload(input, actionMarker), input.token, input.signal, transports.graphql ?? httpsRequest)
+  if (response?.errors !== undefined) return { ...base, status: 'failed', reason: 'github-compensation-rejected' }
+  const resultOid = response === undefined ? undefined : matchingCommitOid(response, {
+    clientMutationId: actionMarker, repository: input.grant.repository, branch: input.grant.branch, parentOid: input.forwardCommitOid,
+  })
+  return resultOid === undefined ? { ...base, status: 'unknown', reason: COMPENSATION_UNKNOWN_REASON } : { ...base, status: 'succeeded', resultOid }
+}
+
 function scopedPr(value: unknown, grant: ActionGrant, number?: number, headOid?: string): Record<string, unknown> | undefined {
   const body = record(value), head = record(body?.head), base = record(body?.base)
   if (!body || !grant.repoWorkflow || !positiveInteger(body.number) || (number !== undefined && body.number !== number)

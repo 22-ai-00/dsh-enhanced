@@ -10,23 +10,26 @@ import { validateTaskAcceptanceContract, validateTaskVerificationReceipt, type T
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
-import { Config, commitBytes, normalizeCommit, normalizeVerifiedDelivery, validateConfig } from './config.js'
+import { Config, commitBytes, normalizeCommit, normalizeCompensation, normalizeVerifiedDelivery, validateConfig } from './config.js'
 import { VerifiedDeliveryRuntime, type DeliveryIntent, type DeliveryOutcome, type DeliverySecurity, type VerifiedFiles } from './verified-delivery.js'
 import { normalizeRepositoryReadback, validateRepositoryReadbackRequirements, type RepositoryReadback, type RepositoryReadbackRequirements } from './repository-readback.js'
 import { ActionLedger, normalizeWorkflow } from './ledger.js'
-import { commitOnGitHub, createBranchOnGitHub, createPullRequestOnGitHub, inspectGitHub } from './github.js'
-import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, BranchRequest, CommitRequest, InspectRequest, PullRequestRequest, VerifiedDeliveryRequest, WorkflowRequest } from './types.js'
+import { commitOnGitHub, createBranchOnGitHub, createCompensatingCommitOnGitHub, createPullRequestOnGitHub, inspectGitHub, readGitHubPreimage } from './github.js'
+import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, BranchRequest, CommitRequest, CompensationRecord, CompensationRequest, CompensationResult, InspectRequest, PullRequestRequest, VerifiedDeliveryRequest, WorkflowRequest } from './types.js'
 
 export { Config }
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const principalDigest = (value: string): string => createHash('sha256').update(value).digest('hex')
 interface Authorization { identity(): ActionIdentity; authorize(record: ActionRecord): boolean; sessionId: string }
 type Operation = (actionId: string, grant: ActionGrant, token: string, signal: AbortSignal) => Promise<ActionResult>
+type CompensationStatus = Readonly<{ actionId: string; status: CompensationRecord['status']; repository: string; branch: string; parentOid: string; resultOid?: string; reason?: string }>
 interface RepositoryReadbackContext {
   authority: { grantId: string; grantRevision: number; repository: string; branch: string; baseBranch: string; timeoutMs: number; freshnessMs: number }
   evidenceDigest: string; requirements: RepositoryReadbackRequirements; security: DeliverySecurity; intent: DeliveryIntent; commitOid: string; pullRequestNumber: number
 }
 const workflowTransport = { branch: createBranchOnGitHub, pullRequest: createPullRequestOnGitHub, inspect: inspectGitHub }
+const compensationTransport = { capture: readGitHubPreimage, commit: createCompensatingCommitOnGitHub }
+const ROLLBACK_BUDGET_METRIC = 'github-compensations'
 
 declare module '@deepseek-ai/cordis' { interface Context { assistantActions: AssistantActionsService } }
 
@@ -36,10 +39,11 @@ export class AssistantActionsService extends Service {
   readonly #ledger: ActionLedger
   readonly #authority: ActionAuthority
   readonly #pending = new Map<string, { abort: AbortController; done: Promise<ActionResult> }>()
+  readonly #pendingCompensations = new Map<string, { abort: AbortController; done: Promise<CompensationResult> }>()
   #active = true
   #verified: VerifiedDeliveryRuntime | undefined
 
-  constructor(ctx: Context, input: Config = {}, private readonly commit = commitOnGitHub, private readonly workflow = workflowTransport) {
+  constructor(ctx: Context, input: Config = {}, private readonly commit = commitOnGitHub, private readonly workflow = workflowTransport, private readonly compensation = compensationTransport) {
     super(ctx, 'assistantActions')
     const config = validateConfig(input)
     mkdirSync(config.stateRoot, { recursive: true, mode: 0o700 })
@@ -51,18 +55,22 @@ export class AssistantActionsService extends Service {
       this.#authority = this.#ledger.claimController(randomUUID(), 30_000)
       this.#ledger.syncGrants(config.grants, this.#authority)
       this.#ledger.recover(this.#authority)
+      this.#ledger.recoverCompensations(this.#authority)
     } catch (error) { this.#ledger.close(); throw error }
     const timer = setInterval(() => {
       try { if (this.#active && this.#ledger.renewController(this.#authority, 30_000)) return } catch { /* Stop when the fence is lost. */ }
       this.#active = false
       for (const operation of this.#pending.values()) operation.abort.abort()
+      for (const operation of this.#pendingCompensations.values()) operation.abort.abort()
     }, 5000)
     timer.unref()
     ctx.effect(() => async () => {
       this.#active = false; clearInterval(timer)
       await this.#verified?.close()
       for (const operation of this.#pending.values()) operation.abort.abort()
+      for (const operation of this.#pendingCompensations.values()) operation.abort.abort()
       await Promise.allSettled([...this.#pending.values()].map(operation => operation.done))
+      await Promise.allSettled([...this.#pendingCompensations.values()].map(operation => operation.done))
       try { this.#ledger.releaseController(this.#authority) } finally { this.#ledger.close() }
     }, 'assistant-actions.controller')
     // Configured scopes keep their restricted execution route even after grants
@@ -71,7 +79,7 @@ export class AssistantActionsService extends Service {
       const header = execution.agent?.session.header
       if (header && config.grants.some(grant => grant.workspace === header.cwd && grant.agentPreset === header.agentPreset)
         && !['isolation_run', 'isolation_grants', 'goal_context', 'goal_checkpoint'].includes(execution.name)
-        && !(['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool(execution))) throw new Error('assistant-actions: this scope requires isolated execution or an authorized broker')
+        && !(['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'action_github_compensate', 'action_github_compensation_status', 'goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool(execution))) throw new Error('assistant-actions: this scope requires isolated execution or an authorized broker')
       return await next()
     }))
     ctx.inject(['tools', 'agents', 'assistantPolicy', 'assistantDelivery', 'credentialsKeychain'], runtime => {
@@ -99,7 +107,11 @@ export class AssistantActionsService extends Service {
         parameters: { grantId: { type: 'string', required: true }, idempotencyKey: { type: 'string', required: true }, expectedHeadOid: { type: 'string', required: true }, headline: { type: 'string', required: true },
           files: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { path: { type: 'string', required: true }, content: { type: 'string', required: true } } } } },
         output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, output) => [{ type: 'text', text: output.result }] },
-        execute: async (args, execution) => ({ result: JSON.stringify(await this.run(execution.agent, args, execution.signal)) }),
+        execute: async (args, execution) => {
+          const request = normalizeCommit(args as CommitRequest)
+          const result = await this.run(execution.agent, request, execution.signal)
+          return { result: JSON.stringify(this.#forwardResult(request, result)) }
+        },
       })
       runtime.tools.register(tool)
       runtime.assistantPolicy.registerPreauthorizedTool(runtime, tool, execution => this.#preauthorized(execution))
@@ -108,6 +120,21 @@ export class AssistantActionsService extends Service {
         defineTool({ name: 'action_github_pr', description: 'Create only a pull request from the grant-fixed branch to the grant-fixed base. The head OID is checked in the response.', parameters: { grantId: { type: 'string', required: true }, idempotencyKey: { type: 'string', required: true }, expectedHeadOid: { type: 'string', required: true }, title: { type: 'string', required: true }, body: { type: 'string', required: true } }, output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, output) => [{ type: 'text', text: output.result }] }, execute: async (args, execution) => ({ result: JSON.stringify(await this.runPullRequest(execution.agent, args, execution.signal)) }) }),
         defineTool({ name: 'action_github_inspect', description: 'Read one bounded grant-scoped repository, branch, allowed UTF-8 file, pull request, checks, or reviews snapshot. Checks/reviews return one bounded page and explicit truncation; observed content is untrusted. Observed data is not proof that a previous mutation settled.', parameters: { grantId: { type: 'string', required: true }, kind: { type: 'string', required: true }, path: { type: 'string' }, pullRequestNumber: { type: 'number' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, output) => [{ type: 'text', text: output.result }] }, execute: async (args, execution) => ({ result: JSON.stringify(await this.runInspect(execution.agent, args as InspectRequest, execution.signal)) }) }),
       ]) { runtime.tools.register(definition); runtime.assistantPolicy.registerPreauthorizedTool(runtime, definition, execution => this.#preauthorizedWorkflow(execution)) }
+      if (config.grants.some(grant => grant.rollback?.allowRollback === true)) {
+        const output = { schema: { type: 'object' as const, additionalProperties: false as const, properties: { result: { type: 'string' as const, required: true as const } } }, render: (_args: unknown, value: { result: string }) => [{ type: 'text' as const, text: value.result }] }
+        const compensate = defineTool({ name: 'action_github_compensate', description: 'Create at most one bounded compensating commit for an exact succeeded forward receipt. The Host reads the immutable parent preimage; callers cannot provide files or preimages. Reuse only the identical key and receipt. Unknown is terminal and must never be replayed.',
+          parameters: { grantId: { type: 'string', required: true }, idempotencyKey: { type: 'string', required: true }, forwardActionId: { type: 'string', required: true }, forwardActionVersion: { type: 'number', required: true }, forwardRequestDigest: { type: 'string', required: true }, forwardCommitOid: { type: 'string', required: true } }, output,
+          execute: async (args, execution) => ({ result: JSON.stringify(await this.runCompensation(execution.agent, args as CompensationRequest, execution.signal)) }),
+        })
+        runtime.tools.register(compensate)
+        runtime.assistantPolicy.registerPreauthorizedTool(runtime, compensate, execution => this.#preauthorizedCompensation(execution))
+        const status = defineTool({ name: 'action_github_compensation_status', description: 'Read one compensation status in this exact Session and grant. This never returns captured file preimages.',
+          parameters: { grantId: { type: 'string', required: true }, actionId: { type: 'string', required: true } }, output,
+          execute: async (args, execution) => ({ result: JSON.stringify(this.compensationStatus(execution.agent, args as { grantId: string; actionId: string })) }),
+        })
+        runtime.tools.register(status)
+        runtime.assistantPolicy.registerPreauthorizedTool(runtime, status, execution => this.#preauthorizedCompensationStatus(execution))
+      }
       if (config.grants.some(grant => grant.verifiedDelivery)) {
         const output = { schema: { type: 'object' as const, additionalProperties: false as const, properties: { result: { type: 'string' as const, required: true as const } } }, render: (_args: unknown, value: { result: string }) => [{ type: 'text' as const, text: value.result }] }
         const deliver = defineTool({ name: 'action_github_deliver', description: 'During the current native artifact goal round, register a finite GitHub delivery intent. Export all listed paths with isolation_run. Host submits exact independently accepted artifacts after the grant acceptance mode: goal-outcome requires step and whole-goal verification (default); goal-step allows intermediate delivery after step verification while the original goal waits. This call only queues intent and never proves whole-goal completion. Never supply file content. Optional pullRequest opens the grant-fixed branch-to-base PR after the commit. Query action_github_delivery_status for the actual result; unknown must not be resent.',
@@ -137,6 +164,40 @@ export class AssistantActionsService extends Service {
     if (!owner || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-actions: authenticated owner required')
     if (this.ctx.get('assistantPolicy')?.evaluateAgent(agent, 'execute', { kind: 'tool', id: `action:github:${grantId}` }).effect !== 'allow') throw new Error('assistant-actions: policy denied')
     return { principalDigest: principalDigest(owner.principalId), ...owner.principalLineage, workspace: owner.scope.workspace, agentPreset: owner.scope.preset }
+  }
+
+  #compensationIdentity(agent: Agent | undefined, grantId: string): ActionIdentity {
+    if (!this.#active || !this.#ledger.hasController(this.#authority)) throw new Error('assistant-actions: controller unavailable')
+    if (!agent || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-actions: exact live agent required')
+    const owner = this.ctx.get('assistantDelivery')?.preferencePrincipalForAgent(agent)
+    if (!owner || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-actions: authenticated owner required')
+    const grant = this.#ledger.grant(grantId)
+    const rollback = grant?.rollback
+    const policy = this.ctx.get('assistantPolicy')
+    if (!grant || !rollback?.allowRollback || grant.expiresAt <= Date.now()
+      || policy?.getBudgetConfig(rollback.budgetId)?.metric !== ROLLBACK_BUDGET_METRIC
+      || policy.evaluateAgent(agent, 'compensate', { kind: 'tool', id: `action:github-rollback:${grantId}` }).effect !== 'allow') throw new Error('assistant-actions: compensation denied')
+    return { principalDigest: principalDigest(owner.principalId), ...owner.principalLineage, workspace: owner.scope.workspace, agentPreset: owner.scope.preset }
+  }
+
+  #authorizeCompensation(agent: Agent | undefined, record: CompensationRecord): boolean {
+    try {
+      const grant = this.#ledger.grant(record.grantId)
+      const rollback = grant?.rollback
+      const policy = this.ctx.get('assistantPolicy')
+      if (!rollback?.allowRollback || policy?.getBudgetConfig(rollback.budgetId)?.metric !== ROLLBACK_BUDGET_METRIC) return false
+      const decision = policy.authorizeAgent(agent, 'compensate', { kind: 'tool', id: `action:github-rollback:${record.grantId}` }, { idempotencyKey: `compensation:${record.id}` })
+      return decision.effect === 'allow' && decision.budget?.id === rollback.budgetId
+    } catch { return false }
+  }
+
+  #forwardResult(request: CommitRequest, result: ActionResult): ActionResult | (ActionResult & { forwardReceipt: { actionId: string; version: number; requestDigest: string; commitOid: string } }) {
+    if (result.status !== 'succeeded' || !result.commitOid) return result
+    const record = this.#ledger.get(result.actionId)
+    const grant = this.#ledger.grant(request.grantId)
+    if (!grant?.rollback?.allowRollback || !record || record.kind !== 'commit' || record.status !== 'succeeded'
+      || record.grantId !== request.grantId || record.result?.commitOid !== result.commitOid || digest(record.result) !== digest(result)) return result
+    return { ...result, forwardReceipt: { actionId: record.id, version: record.version, requestDigest: record.requestDigest, commitOid: result.commitOid } }
   }
 
   prepareVerifiedDelivery = (agent: Agent | undefined, input: VerifiedDeliveryRequest) => {
@@ -376,10 +437,124 @@ export class AssistantActionsService extends Service {
     } catch { return false }
   }
 
+  #preauthorizedCompensation(execution: ToolExecution): boolean {
+    try {
+      if (execution.signal.aborted) return false
+      const request = normalizeCompensation(execution.arguments as CompensationRequest)
+      const identity = this.#compensationIdentity(execution.agent, request.grantId)
+      const forward = this.#ledger.get(request.forwardActionId)
+      return !!forward && forward.kind === 'commit' && forward.status === 'succeeded' && forward.sessionId === String(execution.agent?.session.id)
+        && forward.grantId === request.grantId && forward.version === request.forwardActionVersion
+        && forward.requestDigest === request.forwardRequestDigest && forward.result?.commitOid === request.forwardCommitOid
+        && digest(forward.identity) === digest(identity)
+    } catch { return false }
+  }
+
+  #preauthorizedCompensationStatus(execution: ToolExecution): boolean {
+    try {
+      if (execution.signal.aborted || !execution.arguments || typeof execution.arguments !== 'object' || Array.isArray(execution.arguments)
+        || Object.keys(execution.arguments).length !== 2) return false
+      const { grantId, actionId } = execution.arguments as { grantId?: unknown; actionId?: unknown }
+      if (typeof grantId !== 'string' || typeof actionId !== 'string') return false
+      const identity = this.#compensationIdentity(execution.agent, grantId)
+      const record = this.#ledger.getCompensation(actionId)
+      return !!record && record.grantId === grantId && record.sessionId === String(execution.agent?.session.id) && digest(record.identity) === digest(identity)
+    } catch { return false }
+  }
+
   run = async (agent: Agent | undefined, input: CommitRequest, signal: AbortSignal): Promise<ActionResult> => {
     const request = normalizeCommit(input)
     if (this.#ledger.grant(request.grantId)?.verifiedDelivery) throw new Error('assistant-actions: this grant requires independently verified delivery')
     return await this.#runWorkflow(agent, request, signal, async (actionId, grant, token, combined) => await this.commit({ actionId, grant, request, token, signal: combined }))
+  }
+
+  runCompensation = async (agent: Agent | undefined, input: CompensationRequest, signal: AbortSignal): Promise<CompensationStatus> => {
+    signal.throwIfAborted()
+    const request = normalizeCompensation(input)
+    const identity = this.#compensationIdentity(agent, request.grantId)
+    const sessionId = String(agent?.session.id)
+    const { record } = this.#ledger.prepareCompensation({ identity, sessionId, request, authority: this.#authority })
+    const terminal = this.#publicCompensation(record)
+    if (terminal) return terminal
+    const current = this.#pendingCompensations.get(record.id)
+    if (current) return this.#publicCompensationResult(await current.done)
+    const abort = new AbortController()
+    const done = this.#executeCompensation(agent, identity, record, AbortSignal.any([signal, abort.signal]))
+    this.#pendingCompensations.set(record.id, { abort, done })
+    try {
+      const result = await done
+      if (digest(this.#compensationIdentity(agent, request.grantId)) !== digest(identity)) throw new Error('assistant-actions: owner changed')
+      return this.#publicCompensationResult(result)
+    } finally { this.#pendingCompensations.delete(record.id) }
+  }
+
+  compensationStatus = (agent: Agent | undefined, input: { grantId: string; actionId: string }): CompensationStatus | { status: 'not-found' } => {
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 2
+      || typeof input.grantId !== 'string' || typeof input.actionId !== 'string') throw new Error('assistant-actions: invalid compensation status request')
+    const identity = this.#compensationIdentity(agent, input.grantId)
+    const record = this.#ledger.getCompensation(input.actionId)
+    if (!record) return { status: 'not-found' }
+    if (record.grantId !== input.grantId || record.sessionId !== String(agent?.session.id) || digest(record.identity) !== digest(identity)) throw new Error('assistant-actions: compensation status denied')
+    return this.#publicCompensation(record) ?? { actionId: record.id, status: record.status, repository: record.repository, branch: record.branch, parentOid: record.forwardCommitOid }
+  }
+
+  #publicCompensation(record: CompensationRecord): CompensationStatus | undefined {
+    if (!record.result) return undefined
+    return this.#publicCompensationResult(record.result)
+  }
+
+  #publicCompensationResult(result: CompensationResult): CompensationStatus {
+    return Object.freeze({ actionId: result.actionId, status: result.status, repository: result.repository, branch: result.branch, parentOid: result.parentOid,
+      ...(result.resultOid === undefined ? {} : { resultOid: result.resultOid }), ...(result.reason === undefined ? {} : { reason: result.reason }) })
+  }
+
+  async #executeCompensation(agent: Agent | undefined, identity: ActionIdentity, initial: CompensationRecord, signal: AbortSignal): Promise<CompensationResult> {
+    let record = initial
+    const abort = new AbortController()
+    const stillAuthorized = (): boolean => {
+      try {
+        const grant = this.#ledger.grant(record.grantId)
+        return !signal.aborted && !!grant?.rollback?.allowRollback && grant.revision === record.grantRevision && grant.expiresAt > Date.now()
+          && digest(this.#compensationIdentity(agent, record.grantId)) === digest(identity)
+      } catch { return false }
+    }
+    const timer = setInterval(() => { if (!stillAuthorized()) abort.abort() }, 100); timer.unref()
+    try {
+      const grant = this.#ledger.grant(record.grantId)
+      const credentials = this.ctx.get('credentialsKeychain')
+      if (!grant || !credentials || !stillAuthorized()) throw new Error('assistant-actions: compensation unavailable')
+      if (!this.#authorizeCompensation(agent, record)) throw new Error('assistant-actions: compensation budget denied')
+      return await credentials.withSecret(this.ctx, { handleId: grant.credentialHandle, purpose: 'github.compensate', idempotencyKey: `compensation:${record.id}`, ttlMs: Math.min(30_000, record.expiresAt - Date.now()) }, async (token, credentialSignal) => {
+        const combined = AbortSignal.any([signal, abort.signal, credentialSignal, AbortSignal.timeout(Math.max(1, record.expiresAt - Date.now()))])
+        combined.throwIfAborted()
+        if (!stillAuthorized()) throw new Error('assistant-actions: compensation authorization ended')
+        if (record.status === 'capturing') {
+          const preimage = await this.compensation.capture({ grant, commitOid: record.parentOid, paths: record.paths, token, signal: combined })
+          if (!preimage || !stillAuthorized() || combined.aborted) throw new Error('assistant-actions: compensation capture unavailable')
+          record = this.#ledger.captureCompensation(record.id, record.version, preimage, this.#authority)
+        }
+        if (record.status !== 'prepared' || !record.preimage) throw new Error('assistant-actions: compensation is not dispatchable')
+        if (!stillAuthorized() || !this.#authorizeCompensation(agent, record)) throw new Error('assistant-actions: compensation authorization ended')
+        record = this.#ledger.dispatchCompensation(record.id, record.version, this.#authority)
+        let outcome: CompensationResult
+        try {
+          outcome = await this.compensation.commit({ actionId: record.id, grant, forwardCommitOid: record.forwardCommitOid, preimage: record.preimage!, token, signal: combined })
+          if (!stillAuthorized() || combined.aborted) outcome = { actionId: record.id, status: 'unknown', repository: record.repository, branch: record.branch, parentOid: record.forwardCommitOid, actionMarker: `dsh-compensation:${record.id}`, reason: 'authorization-ended-after-dispatch' }
+        } catch {
+          outcome = { actionId: record.id, status: 'unknown', repository: record.repository, branch: record.branch, parentOid: record.forwardCommitOid, actionMarker: `dsh-compensation:${record.id}`, reason: 'dispatch-unconfirmed-no-replay' }
+        }
+        return this.#ledger.settleCompensation(record.id, record.version, outcome, this.#authority).result!
+      })
+    } catch (error) {
+      // A capturing row is only a pre-dispatch placeholder: no preimage was
+      // sealed and no compensation POST could have been sent. Drop it so a
+      // denial, abort or capture failure neither wedges the forward action's
+      // one-compensation slot nor permanently consumes a rollback action.
+      if (record.status === 'capturing') {
+        try { this.#ledger.discardCompensation(record.id, record.version, this.#authority) } catch {}
+      }
+      throw error
+    } finally { clearInterval(timer) }
   }
 
   async #runWorkflow(agent: Agent | undefined, request: WorkflowRequest, signal: AbortSignal, operation: Operation): Promise<ActionResult> {
