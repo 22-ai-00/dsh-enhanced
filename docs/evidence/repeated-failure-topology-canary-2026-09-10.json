@@ -1,0 +1,118 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-10",
+  "recordedAt": "2026-09-10T13:09:12Z",
+  "baseCommit": "8fb30771d9b27c262bf5dbeae1756227777582a2",
+  "workingTreeState": "wp13-wp15-staged-root-check-passed",
+  "status": "root-check-passed",
+  "completeWorkPackage": false,
+  "scope": "WP13-WP15 repeated exact failure aggregation and dependency-topological-order/v1 prospective canary lifecycle",
+  "workPackages": {
+    "strengthened": ["13", "14", "15"],
+    "statusChanged": false,
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "implemented": [
+    "Goals aggregates 1-32 canonicalized, distinct exact failure locators; a minimum of at least two produces repeated-not-achieved while one retains objective-not-achieved.",
+    "Every failure and the later exact achieved repair must retain the same owner route, scope, immutable Goal definition and outcome profile, with independent Goal, Session, native Goal, run, contract and receipt identities.",
+    "Goals rereads the evidence and acceptance-producer generation, rejects expiry or drift, and requires the repair acceptance to be later than every failure acceptance.",
+    "Skills callers provide Session and Goal locators plus a bounded minimum only; outcomes, receipts, categories, trace digests and provenance come exclusively from the current Goals Host capability.",
+    "The public candidate projection exposes only the Host-derived failure category, count and integrity digest.",
+    "dependency-topological-order/v1 accepts exact two-field edges whose labels match [a-z][a-z0-9]{1,31}, ignores malformed lines, deduplicates edges, emits the stepwise lexicographically smallest DAG order, and emits CYCLE followed by a newline for cycles.",
+    "The topology profile privately generates bounded replay DAG, dynamic lexical-tie evaluation and cycle regression cases after the exact qualification and admission binding is durably frozen.",
+    "The profile, generated dataset, Ed25519 certificate, signed receipt, canary admission and restored state are exact-bound; lost acknowledgement resumes persisted bytes and freeze failure cannot reroll cases.",
+    "The package integration uses the genuine authority CLI, fixed-digest Docker execution, Skills tools, SQLite store, finite deployment watch, restart recovery, promotion and exact rollback.",
+    "The integrated Skills test uses a faithful Goals Host summary fixture; actual Goals snapshot derivation is separately covered by the Goals package tests."
+  ],
+  "focusedValidation": {
+    "assistantGoalsFull": {
+      "result": "passed",
+      "testFilesPassed": 21,
+      "testsPassed": 279,
+      "testsSkipped": 0,
+      "command": null,
+      "log": null
+    },
+    "assistantSkillsFull": {
+      "result": "passed",
+      "testFilesPassed": 17,
+      "testsPassed": 214,
+      "testsSkipped": 9,
+      "command": null,
+      "log": null
+    },
+    "focusedGoals": {
+      "result": "passed",
+      "testsPassed": 34,
+      "testsSkipped": 0,
+      "command": null,
+      "log": null
+    },
+    "focusedSkills": {
+      "result": "passed",
+      "testsPassed": 103,
+      "testsSkipped": 5,
+      "command": null,
+      "log": null
+    },
+    "integratedAuthorityDockerSkillsLifecycle": {
+      "result": "passed",
+      "testsPassed": 2,
+      "testsSkipped": 0,
+      "uses": [
+        "installed dsh-skill-holdout CLI",
+        "Ed25519 certificate and receipt verification",
+        "fixed-digest Docker candidate execution",
+        "AssistantSkillsService public tools",
+        "durable Skills store, deployment and watch",
+        "Host restart, promotion and exact rollback"
+      ],
+      "goalsEvidenceBoundary": "faithful Host-capability fixture; real Goals aggregation is package-tested independently",
+      "command": null,
+      "log": null
+    },
+    "independentSecurityReview": {
+      "result": "PASS",
+      "blocker": 0,
+      "high": 0,
+      "medium": 0
+    }
+  },
+  "finalRootCheck": {
+    "status": "passed",
+    "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+    "log": "/tmp/dsh-repeated-failure-topology-root-check.log",
+    "sha256": "ccc724f9e3dc5e12a7af4818ec7478f60ef98e6c661015743ba252adadd09ac1",
+    "exitCode": 0,
+    "rootTestFilesPassed": 358,
+    "rootTestsPassed": 4695,
+    "rootTestsSkipped": 1,
+    "dryRunPacks": 33,
+    "result": "manifest validation, zero-warning lint, typechecking, root and recursive package tests, build and every dry-run pack passed"
+  },
+  "claimsBoundary": {
+    "realModelGain": false,
+    "historicalHoldoutIndependence": "unproven",
+    "deterministicTaskFamilies": [
+      "order-summary/v1 and order-summary/v2",
+      "template-render/v1",
+      "dependency-topological-order/v1"
+    ],
+    "failureDrivenTaskFamilies": [
+      "template-render/v1",
+      "dependency-topological-order/v1"
+    ]
+  },
+  "limitations": [
+    "No real model was run for this slice and no real-task quality gain is claimed.",
+    "The private generator and signature sequence do not prove that samples were absent from historical training data.",
+    "Only three deterministic engineering task families exist, and only two have failure-driven candidate fixtures; this is not the required three to five real high-frequency workflow classes.",
+    "The integrated lifecycle's Goals summary is a faithful fixture rather than an actual Goals service instance; Goals' exact aggregation is validated separately in its package suite.",
+    "The final root check proves repository engineering gates only; it does not prove real-model gain, historical independence or production deployment.",
+    "WP13, WP14 and WP15 remain implementing; the full 18-work-package objective remains active."
+  ]
+}

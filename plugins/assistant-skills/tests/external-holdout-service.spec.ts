@@ -16,13 +16,44 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, expect, test } from 'vitest'
 import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { failureSummaryEvidenceDigest, type HostFailureEvidenceSummary } from '../src/definition.ts'
 import { AssistantSkillsService } from '../src/service.ts'
-import { generatorDigest } from '../src/prospective-holdout.ts'
+import { generatorDigest, prospectiveGeneratorDigest } from '../src/prospective-holdout.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 const digest = (value: string) => createHash('sha256').update(value).digest('hex')
 const cli = fileURLToPath(new URL('../lib/holdout-cli.js', import.meta.url))
 const candidateImage = process.env.DSH_HOLDOUT_TEST_IMAGE ?? ''
+const topologyGeneratorDigest = prospectiveGeneratorDigest('dependency-topological-order/v1')
+const topologyImplementation = String.raw`let input = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', chunk => { input += chunk })
+process.stdin.on('end', () => {
+  const label = /^[a-z][a-z0-9]{1,31}$/
+  const nodes = new Set(), edges = new Set()
+  for (const line of input.split(/\r?\n/)) {
+    const fields = line.trim().split(/\s+/)
+    if (fields.length !== 2 || !label.test(fields[0]) || !label.test(fields[1])) continue
+    nodes.add(fields[0]); nodes.add(fields[1]); edges.add(fields[0] + '\0' + fields[1])
+  }
+  const indegree = new Map([...nodes].map(node => [node, 0]))
+  const outgoing = new Map([...nodes].map(node => [node, []]))
+  for (const edge of edges) {
+    const [before, after] = edge.split('\0')
+    outgoing.get(before).push(after); indegree.set(after, indegree.get(after) + 1)
+  }
+  const ready = [...nodes].filter(node => indegree.get(node) === 0).sort(), order = []
+  while (ready.length > 0) {
+    const node = ready.shift(); order.push(node)
+    for (const after of outgoing.get(node).sort()) {
+      const remaining = indegree.get(after) - 1; indegree.set(after, remaining)
+      if (remaining === 0) ready.push(after)
+    }
+    ready.sort()
+  }
+  process.stdout.write(order.length === nodes.size ? order.join('\n') + '\n' : 'CYCLE\n')
+})`
+const wrongTopologyImplementation = "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('WRONG\\n'))"
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 function agent(ctx: Context, workspace: string): Agent {
   const id = SessionId('external-owner'), session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
@@ -82,13 +113,13 @@ test('skill_qualify uses one external process attempt, persists unknown, and exp
   expect(JSON.stringify(status)).not.toMatch(/publicKey|datasetDigest|generatorDigest|authority\.mjs|stateRoot/u)
 })
 
-test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('real prospective CLI qualification enters canary once and retries without another authority process', async () => {
+test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('repeated failures qualify a topology repair, promote its canary, and roll back a bad same-family run across restarts', async () => {
   const root = await mkdtemp(join(tmpdir(), 'external-holdout-positive-')), stateRoot = await mkdtemp(join(tmpdir(), 'external-holdout-positive-state-'))
   await chmod(stateRoot, 0o700); cleanups.push(() => rm(root, { recursive: true, force: true }), () => rm(stateRoot, { recursive: true, force: true }))
   const keyPair = generateKeyPairSync('ed25519')
   const key = join(root, 'key.pem'), authorityConfig = join(root, 'authority.json'), marker = join(root, 'starts'), hook = join(root, 'mark-start.mjs')
   await writeFile(key, keyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
-  await writeFile(authorityConfig, JSON.stringify({ prospective: { generator: 'order-summary/v1' }, privateKeyPath: key, statePath: join(root, 'authority.sqlite'), limits: { maxToolCalls: 2, maxOutputBytes: 1024 } }), { mode: 0o600 })
+  await writeFile(authorityConfig, JSON.stringify({ prospective: { generator: 'dependency-topological-order/v1' }, privateKeyPath: key, statePath: join(root, 'authority.sqlite'), limits: { maxToolCalls: 2, maxOutputBytes: 1024 } }), { mode: 0o600 })
   await writeFile(hook, `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(marker)}, 'x')`, { mode: 0o600 })
   const ctx = new Context(), owner = agent(ctx, root), scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: root, preset: 'primary' }
   cleanups.push(() => ctx.fiber.restart()); ctx.provide('agents' as never, { get: () => owner, list: () => [owner] } as never)
@@ -96,26 +127,42 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('real prospective CL
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }), currentPreferenceTurn: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }), validateOwnerRoute: (input: typeof route) => input.authorityId === route.authorityId && input.principalId === route.principalId && input.workspace === route.workspace && input.agentPreset === route.agentPreset ? route : undefined } as never)
   let policyAllowed = true
   ctx.provide('assistantPolicy' as never, { evaluateAgent: () => ({ effect: policyAllowed ? 'allow' : 'deny' }), authorizeAgent: () => ({ effect: policyAllowed ? 'allow' : 'deny' }), evaluate: () => ({ effect: policyAllowed ? 'allow' : 'deny' }), authorize: () => ({ effect: policyAllowed ? 'allow' : 'deny' }) } as never)
-  const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope, goal: { id: 'goal', definition: { version: 1, digest: digest('goal'), objective: 'synthetic echo' }, sessionId: String(owner.session.id), nativeGoalId: 'native' }, runId: 'run', turn: 1, acceptance: { contractId: 'contract', contractDigest: digest('contract'), receiptDigest: digest('receipt'), verifiedAt: Date.now(), validUntil: Date.now() + 60000 }, steps: [{ id: 'write', toolName: 'write', arguments: { file_path: 'result.sh', content: 'printf wrong' } }], failedObservations: [] }
+  const objective = 'Produce the deterministic dependency topological order', goalDefinitionDigest = acceptanceDigest({ objective })
+  const outcomeProfile = { id: 'topology-outcome', version: 1, digest: digest('topology-outcome') }, evidenceNow = Date.now()
+  const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope, goal: { id: 'repair-goal', definition: { version: 1, digest: goalDefinitionDigest, objective }, sessionId: 'repair-session', nativeGoalId: 'repair-native' }, runId: 'repair-run', turn: 1, acceptance: { contractId: 'repair-contract', contractDigest: digest('repair-contract'), receiptDigest: digest('repair-receipt'), verifiedAt: evidenceNow - 1000, validUntil: evidenceNow + 120000 }, steps: [{ id: 'write-topology', toolName: 'write', arguments: { file_path: 'topology.mjs', content: wrongTopologyImplementation } }], failedObservations: [] }
   const snapshots = new Map<string, unknown>()
+  const failureSummaryReads: unknown[] = []
+  const failureLocators = [{ sessionId: 'failure-session-b', goalId: 'failure-goal-b' }, { sessionId: 'failure-session-a', goalId: 'failure-goal-a' }]
+  const failures = [...failureLocators].reverse().map((locator, index) => ({ goal: { id: locator.goalId, definition: source.goal.definition, sessionId: locator.sessionId, nativeGoalId: `failure-native-${index + 1}` }, runId: `failure-run-${index + 1}`, execution: { status: 'succeeded' as const, quiescent: true as const }, outcome: 'not-achieved' as const,
+    acceptance: { contractId: `failure-contract-${index + 1}`, contractDigest: digest(`failure-contract-${index + 1}`), receiptDigest: digest(`failure-receipt-${index + 1}`), verifiedAt: evidenceNow - 3000 + index * 500, validUntil: evidenceNow + 120000 }, traceDigest: digest(`failure-trace-${index + 1}`) }))
+  const unsignedFailureSummary = { protocol: 'assistant-skills/host-failure-evidence/v1' as const, scope, taskFamily: { id: 'dependency-topological-order', definitionDigest: goalDefinitionDigest, objective }, failureCategory: 'repeated-not-achieved' as const,
+    triggerCondition: { kind: 'not-achieved-count' as const, minimumOccurrences: 2, windowStartedAt: failures[0]!.acceptance.verifiedAt, windowEndedAt: failures[1]!.acceptance.verifiedAt }, failures, repairGoal: source.goal, attestedAt: evidenceNow }
+  const goalsGeneration = 'external-topology-fixture-v1'
+  const failureSummary: HostFailureEvidenceSummary = { ...unsignedFailureSummary, evidence: { producer: 'assistant-goals', generation: goalsGeneration, digest: failureSummaryEvidenceDigest(unsignedFailureSummary, goalsGeneration) } }
   ctx.provide('assistantVerifier' as never, {} as never)
   ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source,
-    inspectWorkflowRunContext: (_agent: Agent, goalId: string) => ({ scope, goalId, sessionId: String(owner.session.id), goalExecutionRunId: `execution-${goalId}`, nativeGoalId: `native-${goalId}`, definition: { version: 1, digest: digest('goal') } }),
+    // Goals' package tests derive and validate repeated failure evidence from real
+    // Host snapshots. This fixture reuses that Host-only capability boundary so
+    // this package can exercise the complete Skills consumer lifecycle.
+    trustedAcceptanceProducerGeneration: () => goalsGeneration,
+    inspectOwnerFailureCaptureSummary: async (input: unknown) => { failureSummaryReads.push(structuredClone(input)); return structuredClone(failureSummary) },
+    inspectOwnerVerifiedWorkflowSource: async () => structuredClone(source),
+    inspectWorkflowRunContext: (_agent: Agent, goalId: string) => ({ scope, goalId, sessionId: String(owner.session.id), goalExecutionRunId: `execution-${goalId}`, nativeGoalId: `native-${goalId}`, definition: { version: 1, digest: goalDefinitionDigest } }),
     inspectOwnerGoalExecution: (input: { goalId: string }) => snapshots.get(input.goalId) ?? {},
     inspectOwnerGoalRunProof: async (input: { goalId: string; runId: string }) => {
       const invocationId = input.goalId === 'canary-goal' ? 'first-use' : input.goalId === 'later-goal' ? 'second-use' : undefined
       if (!invocationId) throw new Error('fixture run is unavailable')
-      const payload = { protocol: 'assistant-goals/owner-run-trace/v1' as const, runId: input.runId, turn: 1, nativeRevision: 1, definitionDigest: digest('goal'),
-        outcomeProfile: { id: 'fixture', version: 1, digest: digest('fixture') },
-        steps: [{ id: `call-${input.runId}`, name: 'skill_run', arguments: { goal_id: input.goalId, name: 'saved', version: 2, inputs_json: '{}', invocation_id: invocationId }, outcome: 'succeeded' as const }] }
+      const inputsJson = input.goalId === 'later-goal' ? JSON.stringify({ implementation: wrongTopologyImplementation }) : '{}'
+      const payload = { protocol: 'assistant-goals/owner-run-trace/v1' as const, runId: input.runId, turn: 1, nativeRevision: 1, definitionDigest: goalDefinitionDigest,
+        outcomeProfile, steps: [{ id: `call-${input.runId}`, name: 'skill_run', arguments: { goal_id: input.goalId, name: 'topology-order', version: 2, inputs_json: inputsJson, invocation_id: invocationId }, outcome: 'succeeded' as const }] }
       return { ...payload, traceDigest: acceptanceDigest(payload) }
     } } as never)
   // Explicit independent-acceptance fixtures exercise the production watch consumer.
   // CLI qualification above/below executes real programs; these Goal outcomes do not claim a real verifier run.
   const acceptRun = (run: { goalId: string; goalExecutionRunId: string }, achieved: boolean) => {
-    const now = Date.now(), goal = { id: run.goalId, definitionVersion: 1, definitionDigest: digest('goal'), sessionId: String(owner.session.id), nativeGoalId: `native-${run.goalId}` }
+    const now = Date.now(), goal = { id: run.goalId, definitionVersion: 1, definitionDigest: goalDefinitionDigest, sessionId: String(owner.session.id), nativeGoalId: `native-${run.goalId}` }
     const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v3', id: `outcome-${run.goalId}`, task: { kind: 'goal-outcome', ref: `assessment-${run.goalId}`, goal: { ...goal, assessmentId: `assessment-${run.goalId}` } },
-      scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'record', principalVersion: 1 }, objective: 'Fixture: verify the reused result', profile: { id: 'fixture', version: 1, digest: digest('fixture') },
+      scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'record', principalVersion: 1 }, objective: 'Fixture: verify the reused topology result', profile: outcomeProfile,
       criteria: [{ id: 'result', kind: 'target-readback', authority: { id: 'fixture', digest: digest('fixture') }, objectId: 'output', expected: [{ pointer: '/ready', value: true }] }], issuedAt: now - 1000, expiresAt: now + 60000, bounds: { maxDurationMs: 1000, maxEvidenceBytes: 4096 } })
     const receipt = createTaskVerificationReceipt(contract, { protocol: 'task-verification/v3', id: `receipt-${run.goalId}`, contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task: contract.task,
       results: [{ criterionId: 'result', status: achieved ? 'passed' : 'failed', reason: 'explicit-engineering-fixture', evidence: [] }], startedAt: now, completedAt: now, validUntil: now + 60000 })
@@ -133,37 +180,46 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('real prospective CL
   let plugin = await ctx.plugin(AssistantSkillsService, baseConfig); cleanups.push(() => plugin.dispose())
   const execute = (name: string, toolArguments: object) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: toolArguments, signal: new AbortController().signal, agent: owner })
   const json = async (name: string, toolArguments: object) => JSON.parse(((await execute(name, toolArguments)).value as { context: string }).context)
-  const parent = await json('skill_save', { goal_id: 'goal', name: 'saved', description: 'save', bindings_json: '[]', expected_version: 0 }); source.steps[0]!.arguments = { file_path: 'result.sh', content: "node -e 'let s=\"\";process.stdin.on(\"data\",c=>s+=c).on(\"end\",()=>{const t={};for(const o of JSON.parse(s))if(o.status!==\"cancelled\")t[o.currency]=(t[o.currency]||0)+o.cents;const r={};for(const k of Object.keys(t).sort())r[k]=t[k];process.stdout.write(JSON.stringify(r)+\"\\n\")})'" }
-  const candidate = await json('skill_candidate', { goal_id: 'goal', name: 'saved', description: 'candidate', bindings_json: '[]', parent_version: 1, reason: 'synthetic test', trigger: 'test' })
-  const config = { ...baseConfig, externalHoldouts: [{ id: 'positive', version: 1, scope, execution: { image: candidateImage, dockerPath: '/usr/bin/docker', stateRoot, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 20000, verificationDurationMs: 10000 }, authority: { executable: process.execPath, args: ['--import', hook, cli, '--config', authorityConfig], publicKey: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest },
-    canaryAdmission: { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: 'saved', parentDefinitionDigest: acceptanceDigest(parent), candidateDefinitionDigest: candidate.definitionDigest,
-      taskFamily: { goalDefinitionDigest: candidate.definition.source.goalDefinitionDigest, outcomeProfile: { id: 'fixture', version: 1, digest: digest('fixture') } } }, maxComparisons: 1 as const }] }
+  const parent = await json('skill_save', { goal_id: 'repair-goal', name: 'topology-order', description: 'baseline topology implementation', bindings_json: '[]', expected_version: 0 })
+  source.steps[0]!.arguments = { file_path: 'topology.mjs', content: topologyImplementation }
+  const candidate = await json('skill_failure_candidate', { owner_route_id: route.authorityId, failure_locators: failureLocators.map(locator => ({ session_id: locator.sessionId, goal_id: locator.goalId })), minimum_occurrences: 2, repair_goal_id: source.goal.id, repair_session_id: source.goal.sessionId, task_family_id: 'dependency-topological-order', name: 'topology-order', description: 'deterministic topological ordering', bindings_json: JSON.stringify([{ name: 'implementation', stepId: 'write-topology', path: '/content' }]), parent_version: 1 })
+  expect(failureSummaryReads).toEqual([{ ownerRouteId: route.authorityId, principalId: 'owner', workspace: root, preset: 'primary', taskFamilyId: 'dependency-topological-order', repair: { sessionId: 'repair-session', goalId: 'repair-goal' }, failures: [
+    { sessionId: 'failure-session-a', goalId: 'failure-goal-a' }, { sessionId: 'failure-session-b', goalId: 'failure-goal-b' },
+  ], minimumOccurrences: 2 }])
+  expect(candidate).toMatchObject({ state: 'pending', trigger: 'host-verified-failure:repeated-not-achieved', failure: { category: 'repeated-not-achieved', count: 2, digest: expect.stringMatching(/^[a-f0-9]{64}$/u) }, definition: { name: 'topology-order', source: { goalDefinitionDigest }, inputs: [{ name: 'implementation', stepId: 'write-topology', path: '/content', type: 'string', default: topologyImplementation }], steps: [{ id: 'write-topology', toolName: 'write', arguments: { file_path: 'topology.mjs', content: topologyImplementation } }] } })
+  expect(Object.keys(candidate.failure)).toEqual(['category', 'count', 'digest'])
+  expect(JSON.stringify(candidate)).not.toMatch(/failure-(?:session|goal|native|run)|repair-(?:session|native|run)|contractId|receiptDigest|traceDigest|failureProvenance/u)
+  const config = { ...baseConfig, externalHoldouts: [{ id: 'positive', version: 1, scope, execution: { image: candidateImage, dockerPath: '/usr/bin/docker', stateRoot, command: '/usr/local/bin/node /workspace/artifact < /workspace/input', artifactPath: 'topology.mjs', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 20000, verificationDurationMs: 10000 }, authority: { executable: process.execPath, args: ['--import', hook, cli, '--config', authorityConfig], publicKey: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: topologyGeneratorDigest },
+    canaryAdmission: { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: 'topology-order', parentDefinitionDigest: acceptanceDigest(parent), candidateDefinitionDigest: candidate.definitionDigest,
+      taskFamily: { goalDefinitionDigest, outcomeProfile } }, maxComparisons: 1 as const }] }
   await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config)
   expect(await json('skill_comparison_status', {})).toEqual([expect.objectContaining({ id: 'positive', executionTool: 'skill_qualify', canaryExecutionTool: 'skill_canary' })])
   const expiresAt = Date.now() + 60000
   const completed = await execute('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 }); expect(completed.isError).toBe(false)
   const deployed = JSON.parse((completed.value as { context: string }).context)
-  expect(deployed).toMatchObject({ replayed: false, definition: { name: 'saved', version: 2, definitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) }, deployment: { state: 'canary', comparisonId: expect.any(String), admissionDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission), runCount: 0 } })
+  expect(deployed).toMatchObject({ replayed: false, definition: { name: 'topology-order', version: 2, definitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) }, deployment: { state: 'canary', comparisonId: expect.any(String), admissionDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission), taskFamilyDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission.taskFamily), runCount: 0 } })
+  expect(await json('skill_comparison_status', { comparison_id: deployed.deployment.comparisonId })).toMatchObject({ state: 'complete', generatorDigest: topologyGeneratorDigest, admissionDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission), quality: { candidateChecksPassed: true, evaluationGain: 1, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'unproven' } })
   const sensitiveKeys = /"(?:scope|workspace|principalId|principalRecordId|principalVersion|sessionId|nativeGoalId|runId|routeReceipt|ownerRouteId|runIds|observations|input|publicKey|acceptance|receipt[^"]*)":/u
   expect(JSON.stringify(deployed)).not.toMatch(sensitiveKeys)
   expect(await readFile(marker, 'utf8')).toBe('x'); expect(await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).toMatchObject({ id: deployed.deployment.id, state: 'canary' })
   await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config)
   const replayed = await json('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 })
-  expect(replayed).toMatchObject({ replayed: true, definition: { name: 'saved', version: 2 }, deployment: { id: deployed.deployment.id, state: 'canary', runCount: 0 } })
+  expect(replayed).toMatchObject({ replayed: true, definition: { name: 'topology-order', version: 2 }, deployment: { id: deployed.deployment.id, state: 'canary', runCount: 0 } })
   expect(JSON.stringify(replayed)).not.toMatch(sensitiveKeys); expect(await readFile(marker, 'utf8')).toBe('x')
-  const firstRun = await json('skill_run', { goal_id: 'canary-goal', name: 'saved', version: 2, inputs_json: '{}', invocation_id: 'first-use' })
-  expect(firstRun.state).toBe('succeeded'); expect(await readFile(join(root, 'result.sh'), 'utf8')).toContain('JSON.parse')
-  expect((await execute('skill_run', { goal_id: 'too-early', name: 'saved', version: 2, inputs_json: '{}', invocation_id: 'too-early' })).isError).toBe(true)
+  const firstRun = await json('skill_run', { goal_id: 'canary-goal', name: 'topology-order', version: 2, inputs_json: '{}', invocation_id: 'first-use' })
+  expect(firstRun.state).toBe('succeeded'); expect(await readFile(join(root, 'topology.mjs'), 'utf8')).toBe(topologyImplementation)
+  expect((await execute('skill_run', { goal_id: 'too-early', name: 'topology-order', version: 2, inputs_json: '{}', invocation_id: 'too-early' })).isError).toBe(true)
   expect(await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).toMatchObject({ id: deployed.deployment.id, runCount: 1 })
   acceptRun(firstRun, true)
   await expect.poll(async () => (await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).state).toBe('promoted')
   await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config)
-  const laterRun = await json('skill_run', { goal_id: 'later-goal', name: 'saved', version: 2, inputs_json: '{}', invocation_id: 'second-use' })
-  expect(laterRun.state).toBe('succeeded')
-  expect((await execute('skill_run', { goal_id: 'over-quota', name: 'saved', version: 2, inputs_json: '{}', invocation_id: 'over-quota' })).isError).toBe(true)
+  const laterRun = await json('skill_run', { goal_id: 'later-goal', name: 'topology-order', version: 2, inputs_json: JSON.stringify({ implementation: wrongTopologyImplementation }), invocation_id: 'second-use' })
+  expect(laterRun.state).toBe('succeeded'); expect(await readFile(join(root, 'topology.mjs'), 'utf8')).toBe(wrongTopologyImplementation)
+  expect((await execute('skill_run', { goal_id: 'over-quota', name: 'topology-order', version: 2, inputs_json: '{}', invocation_id: 'over-quota' })).isError).toBe(true)
   acceptRun(laterRun, false)
   await expect.poll(async () => (await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).state).toBe('rolled-back')
   expect((await json('skill_status', {}))[0].version).toBe(3)
+  await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config)
   const retry = await json('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 })
   expect(retry).toMatchObject({ replayed: true, deployment: { state: 'rolled-back' } })
   expect(JSON.stringify(retry)).not.toMatch(sensitiveKeys)

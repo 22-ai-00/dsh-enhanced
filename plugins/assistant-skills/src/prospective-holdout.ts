@@ -3,16 +3,22 @@ import type { HoldoutCase, HoldoutDataset, QualificationBinding } from './holdou
 
 const digestPattern = /^[a-f0-9]{64}$/u
 const protocol = 'assistant-skills/prospective-holdout/v1' as const
-export type ProspectiveGeneratorName = 'order-summary/v1' | 'order-summary/v2' | 'template-render/v1'
+export type ProspectiveGeneratorName = 'order-summary/v1' | 'order-summary/v2' | 'template-render/v1' | 'dependency-topological-order/v1'
+export const prospectiveGeneratorNames: readonly ProspectiveGeneratorName[] = Object.freeze(['order-summary/v1', 'order-summary/v2', 'template-render/v1', 'dependency-topological-order/v1'])
 const generatorName = 'order-summary/v1' as const
 
 export const generatorDigest = createHash('sha256').update('assistant-skills/prospective-holdout/order-summary/v1: stdin JSON array of orders; cancelled orders excluded; integer cents summed by currency; sorted JSON object plus newline; CSPRNG cases; replay/evaluation/regression').digest('hex')
 const generatorV2Digest = createHash('sha256').update('assistant-skills/prospective-holdout/order-summary/v2: stdin JSON array of orders; cancelled orders excluded; integer amountCents summed by currency including negative values; sorted JSON object plus newline; explicit empty case and randomized negative evaluation with cancellation and accumulation; CSPRNG cases; replay/evaluation/regression').digest('hex')
 const templateRenderV1Digest = createHash('sha256').update('assistant-skills/prospective-holdout/template-render/v1: stdin JSON object with template string and string values object; replace known {{ascii_key}} placeholders literally in one non-recursive pass; preserve unknown placeholders; append newline; CSPRNG cases; replay/evaluation/regression').digest('hex')
+const dependencyTopologicalOrderV1Digest = createHash('sha256').update('assistant-skills/prospective-holdout/dependency-topological-order/v1: stdin lines; exactly two whitespace-separated labels each matching [a-z][a-z0-9]{1,31} (2 through 32 lowercase ASCII alphanumeric characters, letter first) form a directed edge; malformed and blank lines ignored; duplicate edges deduplicated; nodes are edge endpoints; emit lexicographically smallest topological order one node per line or CYCLE newline; bounded CSPRNG labels, edge order, and irrelevant lines; replay DAG, evaluation dynamic lexical tie, regression cycle').digest('hex')
+export function isProspectiveGeneratorName(value: unknown): value is ProspectiveGeneratorName {
+  return typeof value === 'string' && prospectiveGeneratorNames.includes(value as ProspectiveGeneratorName)
+}
 export function prospectiveGeneratorDigest(name: ProspectiveGeneratorName): string {
   if (name === 'order-summary/v1') return generatorDigest
   if (name === 'order-summary/v2') return generatorV2Digest
   if (name === 'template-render/v1') return templateRenderV1Digest
+  if (name === 'dependency-topological-order/v1') return dependencyTopologicalOrderV1Digest
   throw new Error('prospective-holdout: unsupported generator')
 }
 export function prospectiveGeneratorProfile(name: ProspectiveGeneratorName): Readonly<{ version: ProspectiveGeneratorName; digest: string }> {
@@ -87,9 +93,70 @@ function templateInput(kind: HoldoutCase['kind']): { template: string; values: R
 function templateExpected(input: { template: string; values: Readonly<Record<string, string>> }): string {
   return input.template.replace(/\{\{([a-z][a-z0-9_]*)\}\}/gu, (placeholder, key: string) => Object.hasOwn(input.values, key) ? input.values[key]! : placeholder) + '\n'
 }
+function shuffled<T>(values: readonly T[]): T[] {
+  const result = [...values]
+  for (let index = result.length - 1; index > 0; index--) {
+    const other = randomInt(index + 1); [result[index], result[other]] = [result[other]!, result[index]!]
+  }
+  return result
+}
+function topologyLabels(count: number): string[] {
+  const labels = new Set<string>()
+  while (labels.size < count) labels.add(`n${randomBytes(6).toString('hex')}`)
+  return [...labels]
+}
+function topologyInput(edges: readonly (readonly [string, string])[]): string {
+  const duplicate = edges[randomInt(edges.length)]!
+  const acceptedBoundary = `n${randomBytes(16).toString('hex').slice(0, 31)}`
+  const digitLeading = `1${randomBytes(6).toString('hex')}`, rejectedBoundary = `n${randomBytes(16).toString('hex')}`
+  const irrelevant = ['x y', `${digitLeading} ${duplicate[0]}`, `${rejectedBoundary} ${duplicate[0]}`, `ignored${randomBytes(4).toString('hex')} has extra fields`, '']
+  return shuffled([...edges.map(edge => `${edge[0]} ${edge[1]}`), `${duplicate[0]} ${duplicate[1]}`, `${duplicate[1]} ${acceptedBoundary}`, ...irrelevant]).join('\n') + '\n'
+}
+function topologyExpected(input: string): string {
+  const edges = new Set<string>(), nodes = new Set<string>()
+  for (const line of input.split(/\r?\n/u)) {
+    const fields = line.trim().split(/\s+/u)
+    if (fields.length !== 2 || !fields.every(field => /^[a-z][a-z0-9]{1,31}$/u.test(field))) continue
+    const [before, after] = fields as [string, string]
+    nodes.add(before); nodes.add(after); edges.add(`${before}\u0000${after}`)
+  }
+  const indegree = new Map([...nodes].map(node => [node, 0])), outgoing = new Map([...nodes].map(node => [node, [] as string[]]))
+  for (const edge of edges) {
+    const [before, after] = edge.split('\u0000') as [string, string]
+    outgoing.get(before)!.push(after); indegree.set(after, indegree.get(after)! + 1)
+  }
+  const ready = [...nodes].filter(node => indegree.get(node) === 0).sort(), result: string[] = []
+  while (ready.length) {
+    const node = ready.shift()!; result.push(node)
+    for (const after of outgoing.get(node)!.sort()) {
+      const remaining = indegree.get(after)! - 1; indegree.set(after, remaining)
+      if (remaining === 0) ready.push(after)
+    }
+    ready.sort()
+  }
+  return result.length === nodes.size ? `${result.join('\n')}\n` : 'CYCLE\n'
+}
+function topologyDataset(): HoldoutDataset {
+  const replayNodes = topologyLabels(6), replayOrder = shuffled(replayNodes)
+  const replayEdges: [string, string][] = [[replayOrder[0]!, replayOrder[2]!], [replayOrder[1]!, replayOrder[2]!], [replayOrder[2]!, replayOrder[3]!], [replayOrder[1]!, replayOrder[4]!], [replayOrder[4]!, replayOrder[5]!]]
+
+  const tie = topologyLabels(5).sort()
+  // After tie[0] is emitted, tie[2] becomes ready ahead of the older tie[3].
+  // This distinguishes a lexical priority queue from a one-time root sort.
+  const tieEdges: [string, string][] = [[tie[0]!, tie[2]!], [tie[2]!, tie[1]!], [tie[3]!, tie[4]!], [tie[1]!, tie[4]!]]
+
+  const cycle = topologyLabels(6).sort()
+  const cycleEdges: [string, string][] = [[cycle[0]!, cycle[2]!], [cycle[2]!, cycle[4]!], [cycle[4]!, cycle[0]!], [cycle[1]!, cycle[3]!], [cycle[3]!, cycle[5]!]]
+  const cases = ([['replay', replayEdges], ['evaluation', tieEdges], ['regression', cycleEdges]] as const).map(([kind, edges]) => {
+    const stdin = topologyInput(edges)
+    return Object.freeze({ id: `${kind}-${randomBytes(8).toString('hex')}`, kind, stdin, expectedStdout: topologyExpected(stdin), expectedExitCode: 0 })
+  })
+  return Object.freeze({ id: `prospective-dependency-topological-order-${randomBytes(12).toString('hex')}`, version: 'dependency-topological-order/v1', cases: Object.freeze(cases) })
+}
 
 /** Creates private random cases after an immutable qualification binding has been frozen. */
 export function generateProspectiveDataset(name: ProspectiveGeneratorName = generatorName): HoldoutDataset {
+  if (name === 'dependency-topological-order/v1') return topologyDataset()
   if (name === 'template-render/v1') {
     const kinds: HoldoutCase['kind'][] = ['replay', 'evaluation', 'regression']
     const cases = kinds.map(kind => {
@@ -128,7 +195,7 @@ export function createProspectiveCertificate(binding: QualificationBinding, data
   if (!validBinding(binding) || typeof freezeId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(freezeId)) throw new Error('prospective-holdout: invalid frozen binding')
   const key = privateKey instanceof KeyObject ? privateKey : createPrivateKey(privateKey)
   if (key.type !== 'private' || key.asymmetricKeyType !== 'ed25519') throw new Error('prospective-holdout: private key must be Ed25519')
-  if (dataset.version !== 'order-summary/v1' && dataset.version !== 'order-summary/v2' && dataset.version !== 'template-render/v1') throw new Error('prospective-holdout: unsupported dataset generator')
+  if (!isProspectiveGeneratorName(dataset.version)) throw new Error('prospective-holdout: unsupported dataset generator')
   const name = dataset.version as ProspectiveGeneratorName
   const profile = prospectiveGeneratorProfile(name)
   const unsigned = { protocol, freezeId, binding, generatorDigest: profile.digest, profileVersion: profile.version, profileDigest: profile.digest, datasetDigest: prospectiveDatasetDigest(dataset), publicKey: createPublicKey(key).export({ format: 'pem', type: 'spki' }).toString(), frozenSequence: 1 as const, generatedSequence: 2 as const }
@@ -145,7 +212,7 @@ export function verifyProspectiveCertificate(value: unknown, expectedBinding: Qu
     || typeof value.datasetDigest !== 'string' || !digestPattern.test(value.datasetDigest) || value.publicKey !== pinnedKey || value.frozenSequence !== 1 || value.generatedSequence !== 2 || typeof value.signature !== 'string' || value.signature.length < 32 || value.signature.length > 512) return false
   const certificate = value as Record<string, unknown>
   if (profiled) {
-    if (!['order-summary/v1', 'order-summary/v2', 'template-render/v1'].includes(String(value.profileVersion))
+    if (!isProspectiveGeneratorName(value.profileVersion)
       || value.profileDigest !== value.generatorDigest || prospectiveGeneratorDigest(value.profileVersion as ProspectiveGeneratorName) !== value.profileDigest) return false
   } else if (![generatorDigest, generatorV2Digest].includes(String(certificate.generatorDigest))) return false
   try {

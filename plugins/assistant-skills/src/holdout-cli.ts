@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { StringDecoder } from 'node:string_decoder'
 import { HoldoutAuthority, type AuthorityOptions, type QualificationBinding, type CellObservation } from './holdout-authority.js'
-import { createProspectiveCertificate, generateProspectiveDataset, prospectiveGeneratorProfile, type ProspectiveGeneratorName, type ProspectiveHoldoutCertificate } from './prospective-holdout.js'
+import { createProspectiveCertificate, generateProspectiveDataset, isProspectiveGeneratorName, prospectiveGeneratorProfile, type ProspectiveGeneratorName, type ProspectiveHoldoutCertificate } from './prospective-holdout.js'
 
 function privateParent(path: string): void {
   if (!isAbsolute(path) || realpathSync(dirname(path)) !== dirname(path)) throw new Error('private-path-required')
@@ -35,7 +35,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (!object(config) || Object.keys(config).some(key => !['datasetPath', 'prospective', 'privateKeyPath', 'statePath', 'limits'].includes(key))
     || !['privateKeyPath', 'statePath'].every(key => typeof config[key] === 'string') || !object(config.limits)
     || hasDataset === hasProspective || hasDataset && typeof config.datasetPath !== 'string'
-    || hasProspective && (!object(config.prospective) || Object.keys(config.prospective).length !== 1 || !['order-summary/v1', 'order-summary/v2', 'template-render/v1'].includes(String(config.prospective.generator)))) throw new Error('invalid-operator-config')
+    || hasProspective && (!object(config.prospective) || Object.keys(config.prospective).length !== 1 || !isProspectiveGeneratorName(config.prospective.generator))) throw new Error('invalid-operator-config')
   const privateKey = privateRead(config.privateKeyPath as string, 16384), prospective = hasProspective, generator = prospective ? (config.prospective as { generator: ProspectiveGeneratorName }).generator : undefined
   const fixedOptions = (): AuthorityOptions => ({ dataset: JSON.parse(privateRead(config.datasetPath as string, 262144)), privateKey, limits: config.limits as unknown as AuthorityOptions['limits'] })
   if (argv[0] === '--inspect-config') {

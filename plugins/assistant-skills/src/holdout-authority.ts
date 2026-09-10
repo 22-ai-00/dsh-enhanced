@@ -1,5 +1,5 @@
 import { createHash, createPrivateKey, createPublicKey, KeyObject, randomUUID, sign, verify } from 'node:crypto'
-import { prospectiveGeneratorDigest, verifyProspectiveCertificate, type ProspectiveGeneratorName, type ProspectiveHoldoutCertificate } from './prospective-holdout.js'
+import { isProspectiveGeneratorName, prospectiveGeneratorDigest, verifyProspectiveCertificate, type ProspectiveHoldoutCertificate } from './prospective-holdout.js'
 
 export type HoldoutCaseKind = 'replay' | 'evaluation' | 'regression'
 export type CellVerdict = 'achieved' | 'not-achieved' | 'unknown'
@@ -222,8 +222,8 @@ export class HoldoutAuthority {
     this.#publicKey = createPublicKey(this.#privateKey).export({ format: 'pem', type: 'spki' }).toString()
     this.#limits = Object.freeze({ ...options.limits })
     if (options.prospective !== undefined) {
-      assert(options.dataset.version === 'order-summary/v1' || options.dataset.version === 'order-summary/v2' || options.dataset.version === 'template-render/v1', 'prospective dataset generator is invalid')
-      assert(options.prospective.generatorDigest === prospectiveGeneratorDigest(options.dataset.version as ProspectiveGeneratorName), 'prospective certificate generator does not match dataset')
+      assert(isProspectiveGeneratorName(options.dataset.version), 'prospective dataset generator is invalid')
+      assert(options.prospective.generatorDigest === prospectiveGeneratorDigest(options.dataset.version), 'prospective certificate generator does not match dataset')
       if (options.prospective.profileVersion !== undefined || options.prospective.profileDigest !== undefined) {
         assert(options.prospective.profileVersion === options.dataset.version && options.prospective.profileDigest === options.prospective.generatorDigest, 'prospective certificate profile does not match dataset')
       }

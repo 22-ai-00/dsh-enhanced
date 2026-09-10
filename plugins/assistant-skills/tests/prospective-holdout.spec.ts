@@ -17,6 +17,75 @@ test('generator profiles keep legacy pins stable and give the second family an e
   expect(generatorDigest).toBe('08e42db3920adf0c7f9d8aaa739cb623136f40797d7cd527a04bfcdd13542cc3')
   expect(prospectiveGeneratorDigest('order-summary/v2')).toBe('943b57b083f3577404af882f7a97da72f3f8a0da79f23a53107b89062e6fb057')
   expect(prospectiveGeneratorProfile('template-render/v1')).toEqual({ version: 'template-render/v1', digest: '9cccbf2de23f24b53bd432ff7f651769c909184d373a2997ad8bc3b7ed7d40d9' })
+  expect(prospectiveGeneratorProfile('dependency-topological-order/v1')).toEqual({ version: 'dependency-topological-order/v1', digest: 'a17c8b3166e5e7c42f33cf54608504f7814bee67ba586839b09585cc8f83a752' })
+  expect(() => prospectiveGeneratorDigest('dependency-topological-order/v2' as never)).toThrow(/unsupported generator/)
+})
+
+test('dependency topology privately generates bounded DAG, dynamic lexical-tie, and cycle cases', () => {
+  const first = generateProspectiveDataset('dependency-topological-order/v1'), second = generateProspectiveDataset('dependency-topological-order/v1')
+  expect(first.version).toBe('dependency-topological-order/v1')
+  expect(first.cases.map(value => value.kind)).toEqual(['replay', 'evaluation', 'regression'])
+  expect(prospectiveDatasetDigest(first)).not.toBe(prospectiveDatasetDigest(second))
+  const solve = (stdin: string): { output: string; dynamicTie: boolean } => {
+    const edgeKeys = new Set<string>(), nodes = new Set<string>()
+    for (const line of stdin.split(/\r?\n/u)) {
+      const fields = line.trim().split(/\s+/u)
+      if (fields.length !== 2 || !fields.every(field => /^[a-z][a-z0-9]{1,31}$/u.test(field))) continue
+      nodes.add(fields[0]!); nodes.add(fields[1]!); edgeKeys.add(`${fields[0]}\u0000${fields[1]}`)
+    }
+    const indegree = new Map([...nodes].map(node => [node, 0])), outgoing = new Map([...nodes].map(node => [node, [] as string[]]))
+    for (const key of edgeKeys) { const [before, after] = key.split('\u0000') as [string, string]; outgoing.get(before)!.push(after); indegree.set(after, indegree.get(after)! + 1) }
+    const ready = [...nodes].filter(node => indegree.get(node) === 0).sort(), result: string[] = []; let dynamicTie = false
+    while (ready.length) {
+      const node = ready.shift()!, priorMinimum = ready[0]; result.push(node)
+      for (const after of outgoing.get(node)!) { const remaining = indegree.get(after)! - 1; indegree.set(after, remaining); if (remaining === 0) { if (priorMinimum !== undefined && after < priorMinimum) dynamicTie = true; ready.push(after) } }
+      ready.sort()
+    }
+    return { output: result.length === nodes.size ? `${result.join('\n')}\n` : 'CYCLE\n', dynamicTie }
+  }
+  for (const sample of first.cases) {
+    expect(Buffer.byteLength(sample.stdin)).toBeLessThan(2048)
+    expect(sample.stdin.split('\n').length).toBeLessThanOrEqual(16)
+    expect(sample.expectedStdout).toBe(solve(sample.stdin).output)
+    const lines = sample.stdin.split(/\r?\n/u), output = sample.expectedStdout.trim().split('\n')
+    expect(lines).toContain('x y')
+    const digitLeading = lines.find(line => /^1[a-f0-9]+ n[a-f0-9]+$/u.test(line))!, rejectedBoundary = lines.find(line => /^n[a-f0-9]{32} n[a-f0-9]+$/u.test(line))!
+    const acceptedBoundary = lines.flatMap(line => line.trim().split(/\s+/u)).find(label => /^n[a-f0-9]{31}$/u.test(label))!
+    expect(digitLeading).toBeDefined(); expect(rejectedBoundary).toBeDefined(); expect(acceptedBoundary).toBeDefined()
+    if (sample.kind !== 'regression') {
+      expect(output).toContain(acceptedBoundary)
+      expect(output).not.toContain('x'); expect(output).not.toContain('y')
+      expect(output).not.toContain(digitLeading.split(' ')[0]); expect(output).not.toContain(rejectedBoundary.split(' ')[0])
+    }
+  }
+  expect(solve(first.cases.find(value => value.kind === 'evaluation')!.stdin).dynamicTie).toBe(true)
+  expect(first.cases.find(value => value.kind === 'regression')!.expectedStdout).toBe('CYCLE\n')
+  for (const sample of first.cases.filter(value => value.kind !== 'regression')) {
+    const output = sample.expectedStdout.trim().split('\n')
+    expect(output).toHaveLength(new Set(output).size)
+    expect(output).not.toEqual(['CYCLE'])
+  }
+})
+
+test('dependency topology certificate and authority bind exact profile, dataset, and signed receipt', () => {
+  const keys = generateKeyPairSync('ed25519'), publicKey = keys.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const dataset = generateProspectiveDataset('dependency-topological-order/v1'), pin = prospectiveGeneratorDigest('dependency-topological-order/v1')
+  const certificate = createProspectiveCertificate(binding, dataset, keys.privateKey, '123e4567-e89b-42d3-a456-426614174010')
+  expect(certificate).toMatchObject({ profileVersion: dataset.version, profileDigest: pin, generatorDigest: pin, datasetDigest: prospectiveDatasetDigest(dataset) })
+  expect(verifyProspectiveCertificate(certificate, binding, publicKey, pin)).toBe(true)
+  const changed = { ...structuredClone(dataset), cases: dataset.cases.map((sample, index) => index === 0 ? { ...sample, stdin: `${sample.stdin}na nb\n` } : { ...sample }) }
+  expect(() => HoldoutAuthority.create({ dataset: changed, privateKey: keys.privateKey, limits: { maxToolCalls: 4, maxOutputBytes: 4096 }, prospective: certificate, now: () => 1 })).toThrow(/dataset does not match/)
+  const authority = HoldoutAuthority.create({ dataset, privateKey: keys.privateKey, limits: { maxToolCalls: 4, maxOutputBytes: 4096 }, prospective: certificate, now: () => 1 })
+  authority.begin(binding)
+  while (true) {
+    const cell = authority.next(); if (!cell) break
+    const expected = dataset.cases.find(sample => sample.stdin === cell.stdin)!.expectedStdout
+    authority.record({ cellId: cell.cellId, armDigest: cell.armDigest, stdout: expected, exitCode: 0, quiescent: true, status: 'completed', artifactDigest: hex('e'), toolCalls: [] })
+  }
+  const receipt = authority.finish()
+  expect(receipt.prospective).toEqual(certificate)
+  expect(verifyHoldoutSignature(receipt as unknown as Record<string, unknown>, publicKey)).toBe(true)
+  expect(verifyHoldoutSignature({ ...receipt, prospective: { ...certificate, datasetDigest: hex('f') } } as unknown as Record<string, unknown>, publicKey)).toBe(false)
 })
 
 test('template-render privately generates replay, evaluation, and regression samples with literal non-recursive replacement', () => {
