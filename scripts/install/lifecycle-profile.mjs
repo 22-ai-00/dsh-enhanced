@@ -27,6 +27,7 @@ const ANCESTOR_CHAIN_ENV = 'DSH_ENHANCED_LIFECYCLE_ANCESTORS'
 const LOCK_PARENT_FD_PATH = '/proc/self/fd/3'
 const ALLOWED_WEB_BUNDLES = new Set(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
 const SYSTEMD_UNIT = /^dsh-profile-([A-Za-z0-9][A-Za-z0-9._-]{0,63})\.service$/u
+const SYSTEMD_OWNERSHIP_PROPERTIES = ['Id', 'LoadState', 'WorkingDirectory', 'Environment']
 const SYSTEMD_SHOW_PROPERTIES = [
   'Id', 'LoadState', 'FragmentPath', 'DropInPaths', 'ActiveState', 'SubState', 'MainPID',
   'ControlPID', 'InvocationID', 'NRestarts', 'UnitFileState', 'WorkingDirectory', 'Environment', 'ExecStart',
@@ -75,6 +76,9 @@ function bindingFor(manifest) {
     serviceFailure: manifest.serviceFailure,
     serviceAcceptance: manifest.serviceAcceptance,
     unitUniverse: manifest.unitUniverse,
+    foreignOwnership: manifest.foreignOwnership,
+    cleanProfileDigest: manifest.cleanProfileDigest,
+    cleanProfiles: manifest.cleanProfiles,
     serviceMasks: manifest.serviceMasks,
     containmentMasks: manifest.containmentMasks,
     containmentMaskIntents: manifest.containmentMaskIntents,
@@ -514,6 +518,7 @@ async function loadManifest(physicalTransactionRoot, expected) {
     && manifest.state === 'preparing' && manifest.servicePhase === 'initializing'
     && Array.isArray(manifest.services) && manifest.services.length > 0
     && Array.isArray(manifest.unitUniverse) && manifest.unitUniverse.length > 0
+    && validForeignOwnershipInventory(manifest)
     && Array.isArray(manifest.serviceMasks) && manifest.serviceMasks.length === 0
     && Array.isArray(manifest.containmentMasks) && manifest.containmentMasks.length === 0
     && Array.isArray(manifest.containmentMaskIntents) && manifest.containmentMaskIntents.length === 0
@@ -524,6 +529,7 @@ async function loadManifest(physicalTransactionRoot, expected) {
     && Array.isArray(manifest.unitUniverse) && manifest.unitUniverse.length > 0
     && new Set(manifest.unitUniverse).size === manifest.unitUniverse.length
     && manifest.unitUniverse.every(unit => typeof unit === 'string' && SYSTEMD_UNIT.test(unit))
+    && validForeignOwnershipInventory(manifest)
     && SERVICE_PHASES.has(manifest.servicePhase)
     && Array.isArray(manifest.serviceMasks) && manifest.serviceMasks.length === manifest.services.length
     && manifest.serviceMasks.every((mask, index) => validBoundMask(mask, manifest.services[index]?.unit, physicalTransactionRoot))
@@ -565,24 +571,59 @@ async function loadManifest(physicalTransactionRoot, expected) {
       && (manifest.operation === 'uninstall'
         ? manifest.stagedScenario === 'unsupported'
         : manifest.stagedScenario === manifest.expectedScenario)
-      && (manifest.version !== SERVICE_MANIFEST_VERSION || manifest.stagedScenario === 'lark')
+      && (manifest.version !== SERVICE_MANIFEST_VERSION || (manifest.operation === 'uninstall'
+        ? manifest.stagedScenario === 'unsupported'
+        : manifest.stagedScenario === 'lark'))
+  const validCleanProfileDigest = manifest?.cleanProfileDigest === undefined
+    || manifest.version === SERVICE_MANIFEST_VERSION && manifest.operation === 'uninstall'
+      && /^[0-9a-f]{64}$/u.test(manifest.cleanProfileDigest)
+  const validCleanProfiles = manifest?.cleanProfiles === undefined || Array.isArray(manifest.cleanProfiles)
+    && new Set(manifest.cleanProfiles.map(entry => entry?.profile)).size === manifest.cleanProfiles.length
+    && manifest.cleanProfiles.every(entry => entry !== null && typeof entry === 'object'
+      && typeof entry.profile === 'string' && PROFILE_NAME.test(entry.profile)
+      && /^[0-9a-f]{64}$/u.test(entry.digest)
+      && manifest.services?.some(service => service?.profile === entry.profile))
   if (![MANIFEST_VERSION, SERVICE_MANIFEST_VERSION].includes(manifest?.version)
     || typeof manifest.id !== 'string'
     || manifest.homePath !== expected.homePath
     || manifest.transactionPath !== expected.transactionPath
     || manifest.version === SERVICE_MANIFEST_VERSION && (manifest.transactionIdentity === undefined
       || typeof manifest.transactionIdentity.dev !== 'string' || typeof manifest.transactionIdentity.ino !== 'string')
+    || manifest.version === SERVICE_MANIFEST_VERSION && manifest.operation === 'uninstall'
+      && (!Array.isArray(manifest.foreignOwnership) || !Array.isArray(manifest.cleanProfiles))
     || manifest.profile !== expected.profile
     || !['upgrade', 'uninstall'].includes(manifest.operation)
     || !['preparing', 'prepared', 'validated', 'original-renamed', 'swapped', 'committed', 'cleanup-started', 'failed', 'service-accepted', 'service-failed'].includes(manifest.state)
     || !validServiceManifest
     || !validExpectedScenario
     || !validStagedScenario
+    || !validCleanProfileDigest
+    || !validCleanProfiles
     || manifest.bindingDigest !== sha256(JSON.stringify(bindingFor(manifest)))) {
     fail(`拒绝未绑定或校验失败的生命周期事务 manifest：${expected.transactionPath}`)
   }
   if (expected.homePath !== manifest.canonicalHome) fail(`生命周期事务 manifest 与当前 DSH_HOME 未绑定：${expected.transactionPath}`)
   return manifest
+}
+
+function validForeignOwnershipEvidence(evidence) {
+  return evidence !== null && typeof evidence === 'object'
+    && typeof evidence.unit === 'string' && SYSTEMD_UNIT.test(evidence.unit)
+    && typeof evidence.digest === 'string' && /^[0-9a-f]{64}$/u.test(evidence.digest)
+}
+
+function validForeignOwnershipInventory(manifest) {
+  if (!Array.isArray(manifest?.services) || !Array.isArray(manifest.unitUniverse)) return false
+  const managed = manifest.services.map(service => service?.unit)
+  const foreign = manifest.foreignOwnership
+  if (foreign === undefined) {
+    return new Set(managed).size === managed.length && managed.every(unit => manifest.unitUniverse.includes(unit))
+  }
+  if (!Array.isArray(foreign) || !foreign.every(evidence => validForeignOwnershipEvidence(evidence))) return false
+  const foreignUnits = foreign.map(evidence => evidence.unit)
+  const combined = [...managed, ...foreignUnits].sort()
+  return new Set(combined).size === combined.length
+    && JSON.stringify(combined) === JSON.stringify([...manifest.unitUniverse].sort())
 }
 
 function validBoundMask(mask, expectedUnit, expectedTransactionRoot) {
@@ -712,7 +753,7 @@ async function recoverBoundTransaction({
   const backupIsOriginal = backupStat !== undefined && sameIdentity(backupStat, manifest.originalIdentity)
   if (manifest.version === SERVICE_MANIFEST_VERSION) {
     if (serviceContext === undefined || dshExecutable === undefined) {
-      fail(`service-aware 生命周期恢复需要以原 Lark upgrade 命令持锁执行；保留证据：${transactionRoot}`)
+      fail(`service-aware 生命周期恢复需要以原 Lark lifecycle 命令持锁执行；保留证据：${transactionRoot}`)
     }
     const scenarioHome = homeIsOriginal || homeIsStaged ? homePath
       : backupIsOriginal ? join(transactionRoot, 'original-home') : undefined
@@ -722,7 +763,7 @@ async function recoverBoundTransaction({
     await assertLockedLifecycleScenario({
       dshExecutable, profile, homePath: scenarioHome,
       expectedScenario: homeIsStaged ? manifest.stagedScenario ?? manifest.expectedScenario : manifest.expectedScenario,
-      serviceAware: true,
+      serviceAware: true, operation: manifest.operation,
     })
     if (manifest.servicePhase === 'initializing') {
       if (!homeIsOriginal || backupStat !== undefined) {
@@ -970,19 +1011,19 @@ const ownership = (unit) => {
   const configuredHomes = environment
     .filter(value => value.startsWith('DSH_HOME='))
     .map(value => value.slice('DSH_HOME='.length))
-  if (configuredHomes.length > 1) return undefined
+  if (configuredHomes.length !== 1 || !isAbsolute(configuredHomes[0])) return undefined
   const canonicalHome = configuredHomes.length === 1 && isAbsolute(configuredHomes[0])
     ? canonical(configuredHomes[0]) : undefined
-  const homeMatches = canonicalHome === containmentHome
   const working = values.WorkingDirectory
-  if (working !== '' && !isAbsolute(working)) return undefined
-  const canonicalWorking = working === '' ? '' : canonical(working)
+  if (working === '' || !isAbsolute(working)) return undefined
+  const canonicalWorking = canonical(working)
+  const homeMatches = canonicalHome !== undefined
+    && (canonicalHome === containmentHome || canonicalHome.startsWith(containmentHome + sep))
   const workingMatches = canonicalWorking !== undefined
     && (canonicalWorking === containmentHome || canonicalWorking.startsWith(containmentHome + sep))
   if (homeMatches || workingMatches) return 'same-home'
-  const homeForeign = canonicalHome !== undefined && canonicalHome !== containmentHome
-  const workingForeign = canonicalWorking !== undefined && canonicalWorking !== '' && !workingMatches
-  return homeForeign || workingForeign ? 'foreign' : undefined
+  if (canonicalHome === undefined || canonicalWorking === undefined) return undefined
+  return 'foreign'
 }
 const state = unit => parseProperties(command([
   '--user', 'show', unit, '--no-pager', '--property=Id', '--property=ActiveState',
@@ -1178,17 +1219,79 @@ function delay(milliseconds) {
   return new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(100, Math.max(1, milliseconds))))
 }
 
-function parseSystemdShow(source, unit) {
+function parseSystemdShowProperties(source, unit, properties) {
   const values = new Map()
   for (const line of source.trimEnd().split('\n')) {
     const separator = line.indexOf('=')
     if (separator <= 0) fail(`systemctl show 返回无法解析的字段：${unit}`)
     const key = line.slice(0, separator)
-    if (!SYSTEMD_SHOW_PROPERTIES.includes(key) || values.has(key)) fail(`systemctl show 返回重复或未知字段：${unit}:${key}`)
+    if (!properties.includes(key) || values.has(key)) fail(`systemctl show 返回重复或未知字段：${unit}:${key}`)
     values.set(key, line.slice(separator + 1))
   }
-  for (const property of SYSTEMD_SHOW_PROPERTIES) if (!values.has(property)) fail(`systemctl show 缺少字段：${unit}:${property}`)
+  for (const property of properties) if (!values.has(property)) fail(`systemctl show 缺少字段：${unit}:${property}`)
   return Object.fromEntries(values)
+}
+
+function parseSystemdShow(source, unit) {
+  return parseSystemdShowProperties(source, unit, SYSTEMD_SHOW_PROPERTIES)
+}
+
+function parseSystemdEnvironment(source, unit) {
+  const values = []
+  let value = ''
+  let quote = ''
+  let active = false
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '\\') {
+      const next = source[index + 1]
+      if (next === undefined) fail(`systemd unit Environment 转义不完整：${unit}`)
+      if (next === 'x' && /^[0-9A-Fa-f]{2}$/u.test(source.slice(index + 2, index + 4))) {
+        value += String.fromCharCode(Number.parseInt(source.slice(index + 2, index + 4), 16))
+        index += 3
+      } else {
+        value += next
+        index += 1
+      }
+      active = true
+    } else if (quote !== '') {
+      if (character === quote) quote = ''
+      else value += character
+      active = true
+    } else if (character === '"' || character === "'") {
+      quote = character
+      active = true
+    } else if (/\s/u.test(character)) {
+      if (active) { values.push(value); value = ''; active = false }
+    } else {
+      value += character
+      active = true
+    }
+  }
+  if (quote !== '') fail(`systemd unit Environment 引号不完整：${unit}`)
+  if (active) values.push(value)
+  if (values.some(entry => !/^[^=]+=/u.test(entry))) fail(`systemd unit Environment 无法安全解析：${unit}`)
+  return values
+}
+
+async function classifyServiceUnitOwnership(systemctlExecutable, unit, homePath) {
+  if (!SYSTEMD_UNIT.test(unit)) fail(`非法 DSH systemd unit：${unit}`)
+  const shown = parseSystemdShowProperties((await runServiceCommand(systemctlExecutable, [
+    '--user', 'show', unit, '--no-pager', ...SYSTEMD_OWNERSHIP_PROPERTIES.map(property => `--property=${property}`),
+  ])).stdout, unit, SYSTEMD_OWNERSHIP_PROPERTIES)
+  if (shown.Id !== unit || shown.LoadState !== 'loaded') fail(`systemd unit ownership 无法证明：${unit}`)
+  const homes = parseSystemdEnvironment(shown.Environment, unit)
+    .filter(value => value.startsWith('DSH_HOME='))
+    .map(value => value.slice('DSH_HOME='.length))
+  if (homes.length !== 1 || !isAbsolute(homes[0]) || !isAbsolute(shown.WorkingDirectory)) {
+    fail(`systemd unit ownership 含缺失、重复或非绝对路径证据：${unit}`)
+  }
+  const serviceHome = await canonicalMissingAllowed(homes[0])
+  const workingDirectory = await canonicalMissingAllowed(shown.WorkingDirectory)
+  if (inside(homePath, serviceHome) || inside(homePath, workingDirectory)) {
+    return { classification: 'same-home', digest: sha256(JSON.stringify(shown)) }
+  }
+  return { classification: 'foreign', digest: sha256(JSON.stringify(shown)) }
 }
 
 function decodeUnitQuoted(value, label) {
@@ -1272,7 +1375,9 @@ async function inspectServiceUnit(systemctlExecutable, unit, dshExecutable) {
   if (pathEnvironment.slice('PATH='.length).split(':').some(path => !isAbsolute(path))
     || await realpath(dshPath).catch(() => '') !== dshExecutable
     || await realpath(nodePath).catch(() => '') === '') fail(`systemd unit executable/PATH 与当前运行时不匹配：${unit}`)
-  const serviceHome = await canonicalMissingAllowed(dshEnvironment.slice('DSH_HOME='.length))
+  const configuredHome = dshEnvironment.slice('DSH_HOME='.length)
+  if (!isAbsolute(configuredHome)) fail(`systemd unit DSH_HOME 必须是绝对路径：${unit}`)
+  const serviceHome = await canonicalMissingAllowed(configuredHome)
   const expectedWorkingDirectory = join(serviceHome, 'profiles', match[1])
   if (await canonicalMissingAllowed(workingDirectory) !== expectedWorkingDirectory || shown.WorkingDirectory !== workingDirectory) {
     fail(`systemd unit WorkingDirectory 与 profile 不匹配：${unit}`)
@@ -1358,25 +1463,57 @@ async function listedServiceUnits(systemctlExecutable) {
   return [...new Set(names)].sort()
 }
 
-async function assertUnitUniverseStable(systemctlExecutable, unitUniverse) {
+async function assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership = []) {
   const current = await listedServiceUnits(systemctlExecutable)
   if (JSON.stringify(current) !== JSON.stringify(unitUniverse)) {
     fail('systemd DSH unit inventory 在事务期间发生变化。')
   }
+  for (const expected of foreignOwnership) {
+    const currentOwnership = await classifyServiceUnitOwnership(systemctlExecutable, expected.unit, homePath)
+    if (currentOwnership.classification !== 'foreign' || currentOwnership.digest !== expected.digest) {
+      fail(`foreign systemd unit ownership 在事务期间发生变化：${expected.unit}`)
+    }
+  }
+}
+
+async function captureForeignOwnership(systemctlExecutable, units, homePath) {
+  const foreignOwnership = []
+  for (const unit of units) {
+    const ownership = await classifyServiceUnitOwnership(systemctlExecutable, unit, homePath)
+    if (ownership.classification !== 'foreign') {
+      fail(`未绑定的 systemd unit 不再能证明属于 foreign DSH_HOME：${unit}`)
+    }
+    foreignOwnership.push({ unit, digest: ownership.digest })
+  }
+  return foreignOwnership
 }
 
 async function captureServiceInventory(systemctlExecutable, homePath, targetProfile, dshExecutable) {
   await runServiceCommand(systemctlExecutable, ['--user', 'daemon-reload'])
   const names = await listedServiceUnits(systemctlExecutable)
   const services = []
+  const foreignUnits = []
   for (const unit of names) {
+    const ownership = await classifyServiceUnitOwnership(systemctlExecutable, unit, homePath)
+    if (ownership.classification === 'foreign') {
+      foreignUnits.push(unit)
+      continue
+    }
     const inspected = await inspectServiceUnit(systemctlExecutable, unit, dshExecutable)
-    if (inspected.serviceHome === homePath) services.push(inspected)
+    if (inspected.serviceHome !== homePath) {
+      fail(`systemd unit 使用目标 DSH_HOME 内的嵌套 home；拒绝在外层目录切换期间忽略或接管：${unit}`)
+    }
+    services.push(inspected)
   }
   const targetUnit = `dsh-profile-${targetProfile}.service`
   const target = services.find(service => service.unit === targetUnit)
-  if (target === undefined) fail(`Lark upgrade 需要由 installer 管理的目标 unit：${targetUnit}`)
-  return { services, unitUniverse: names }
+  if (target === undefined || target.serviceHome !== homePath) {
+    fail(`Lark service lifecycle 需要由 installer 管理且属于目标 DSH_HOME 的 unit：${targetUnit}`)
+  }
+  return {
+    services, unitUniverse: names,
+    foreignOwnership: await captureForeignOwnership(systemctlExecutable, foreignUnits, homePath),
+  }
 }
 
 function sameServiceFileIdentity(actual, expected) {
@@ -1657,10 +1794,10 @@ async function restoreServiceEnablement(systemctlExecutable, barriers) {
 }
 
 async function assertMaskedAndQuiescent({
-  systemctlExecutable, services, serviceMasks, homePath, unitUniverse, equivalentHomePaths = [],
+  systemctlExecutable, services, serviceMasks, homePath, unitUniverse, foreignOwnership = [], equivalentHomePaths = [],
 }) {
   await assertServiceFilesUnchanged(services)
-  await assertUnitUniverseStable(systemctlExecutable, unitUniverse)
+  await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
   for (const service of services) {
     const mask = serviceMasks.find(candidate => candidate.unit === service.unit)
     if (mask === undefined || await boundMaskLocation(mask) !== 'installed') {
@@ -1679,7 +1816,7 @@ async function assertMaskedAndQuiescent({
 }
 
 async function stopServicesAndWait(
-  systemctlExecutable, services, masks, homePath, dshExecutable, unitUniverse, timeoutMilliseconds,
+  systemctlExecutable, services, masks, homePath, dshExecutable, unitUniverse, foreignOwnership, timeoutMilliseconds,
 ) {
   const names = services.map(service => service.unit)
   await installBoundMasks(systemctlExecutable, masks)
@@ -1695,7 +1832,9 @@ async function stopServicesAndWait(
     const states = await Promise.all(services.map(service => readRawServiceState(systemctlExecutable, service.unit)))
     if (states.every(service => service.activeState === 'inactive'
     && service.subState === 'dead' && service.mainPid === 0 && service.controlPid === 0)) {
-      await assertMaskedAndQuiescent({ systemctlExecutable, services, serviceMasks: masks, homePath, dshExecutable, unitUniverse })
+      await assertMaskedAndQuiescent({
+        systemctlExecutable, services, serviceMasks: masks, homePath, dshExecutable, unitUniverse, foreignOwnership,
+      })
       return states
     }
     if (Date.now() >= deadline) fail('systemd services 未在超时内停止为 inactive/dead/MainPID=0。')
@@ -1786,7 +1925,8 @@ async function stopRelatedServices(
     }
   }
   await stopServicesAndWait(
-    systemctlExecutable, services, manifest.serviceMasks, homePath, dshExecutable, currentUniverse, timeoutMilliseconds,
+    systemctlExecutable, services, manifest.serviceMasks, homePath, dshExecutable, currentUniverse,
+    manifest.foreignOwnership ?? [], timeoutMilliseconds,
   )
   const deadline = Date.now() + timeoutMilliseconds
   for (;;) {
@@ -1812,7 +1952,7 @@ async function journalHasReadyMarker(journalctlExecutable, service) {
 
 async function startAndAcceptServices({
   systemctlExecutable, journalctlExecutable, services, serviceMasks,
-  homePath, targetProfile, unitUniverse, timeouts,
+  homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts,
 }) {
   const activeBefore = services.filter(service => service.wasActive)
   const activeMasks = activeBefore.map(service => {
@@ -1821,12 +1961,14 @@ async function startAndAcceptServices({
     return mask
   })
   await stageBoundMasks(systemctlExecutable, activeMasks)
+  await assertCleanProfileInventory(homePath, cleanProfiles)
   const unitNames = activeBefore.map(service => service.unit)
   let accepted
   const result = await withCrashStopGuardian(systemctlExecutable, unitNames, randomUUID(), async () => {
     const deadline = Date.now() + timeouts.ready
     for (;;) {
-      await assertUnitUniverseStable(systemctlExecutable, unitUniverse)
+      await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
+      await assertCleanProfileInventory(homePath, cleanProfiles)
       await assertServiceFilesUnchanged(services)
       const current = await Promise.all(activeBefore.map(async previous => ({
         ...previous, ...await readRawServiceState(systemctlExecutable, previous.unit),
@@ -1858,7 +2000,8 @@ async function startAndAcceptServices({
       fail('目标 Lark service 未通过 readiness。')
     }
     if (timeouts.stability > 0) await new Promise(resolveDelay => setTimeout(resolveDelay, timeouts.stability))
-    await assertUnitUniverseStable(systemctlExecutable, unitUniverse)
+    await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
+    await assertCleanProfileInventory(homePath, cleanProfiles)
     const stable = await Promise.all(activeBefore.map(async previous => ({
       ...previous, ...await readRawServiceState(systemctlExecutable, previous.unit),
     })))
@@ -1885,21 +2028,22 @@ async function startAndAcceptServices({
 async function finalizeAcceptedServices({
   systemctlExecutable, dshExecutable, services, serviceMasks, containmentMasks, serviceStartBarriers,
   containmentStartBarriers,
-  homePath, unitUniverse, acceptance,
+  homePath, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance,
 }) {
   await stageBoundMasks(systemctlExecutable, serviceMasks)
   await stageBoundMasks(systemctlExecutable, containmentMasks)
   await restoreServiceEnablement(systemctlExecutable, serviceStartBarriers)
   await restoreServiceEnablement(systemctlExecutable, containmentStartBarriers)
   await assertAcceptedServicesStillBound({
-    systemctlExecutable, dshExecutable, services, homePath, unitUniverse, acceptance,
+    systemctlExecutable, dshExecutable, services, homePath, unitUniverse, foreignOwnership, cleanProfiles, acceptance,
   })
 }
 
 async function assertAcceptedServicesStillBound({
-  systemctlExecutable, dshExecutable, services, homePath, unitUniverse, acceptance,
+  systemctlExecutable, dshExecutable, services, homePath, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance,
 }) {
-  await assertUnitUniverseStable(systemctlExecutable, unitUniverse)
+  await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
+  await assertCleanProfileInventory(homePath, cleanProfiles)
   await assertServiceFilesUnchanged(services)
   const current = await readServiceStates(systemctlExecutable, services, homePath, dshExecutable)
   const byUnit = new Map(current.map(service => [service.unit, service]))
@@ -1921,6 +2065,13 @@ async function assertAcceptedServicesStillBound({
 }
 
 async function removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome }) {
+  if (manifest.operation === 'uninstall') {
+    if (typeof manifest.cleanProfileDigest !== 'string') {
+      fail(`service-aware uninstall cleanup 缺少 clean baseline 绑定：${transactionRoot}`)
+    }
+    await assertInstallerCleanWebProfile(manifest.homePath, manifest.profile, manifest.cleanProfileDigest)
+  }
+  await assertCleanProfileInventory(manifest.homePath, manifest.cleanProfiles ?? [])
   const transactionIdentity = await lstat(physicalTransactionRoot)
   const expectedTransactionIdentity = manifest.transactionIdentity
     ?? (manifest.version === MANIFEST_VERSION ? identity(transactionIdentity) : undefined)
@@ -1979,6 +2130,8 @@ async function recoverServiceTransaction({
   const serviceMasks = manifest.serviceMasks
   const serviceStartBarriers = manifest.serviceStartBarriers
   const unitUniverse = manifest.unitUniverse
+  const foreignOwnership = manifest.foreignOwnership ?? []
+  const cleanProfiles = manifest.cleanProfiles ?? []
   const timeouts = serviceTimeouts()
   if (services.length === 0 || services.some(service => typeof service?.unit !== 'string'
     || SYSTEMD_UNIT.exec(service.unit) === null || typeof service.wasActive !== 'boolean'
@@ -1986,9 +2139,20 @@ async function recoverServiceTransaction({
   if (!Array.isArray(unitUniverse) || unitUniverse.some(unit => typeof unit !== 'string' || !SYSTEMD_UNIT.test(unit))) {
     fail(`service-aware manifest 中的 unit universe 无效：${transactionRoot}`)
   }
+  await assertUnitUniverseStable(serviceContext.systemctlExecutable, unitUniverse, homePath, foreignOwnership)
+  await assertCleanProfileInventory(
+    homeIsOriginal ? physicalHomePath : backupIsOriginal ? backupHome : physicalHomePath, cleanProfiles,
+  )
   const target = services.find(service => service.profile === profile)
   if (target === undefined) fail(`service-aware manifest 缺少目标 unit：${transactionRoot}`)
   await assertServiceFilesUnchanged(services)
+  const assertCommittedCleanProfile = async () => {
+    if (manifest.operation !== 'uninstall') return
+    if (typeof manifest.cleanProfileDigest !== 'string') {
+      fail(`service-aware uninstall manifest 缺少 clean baseline 绑定：${transactionRoot}`)
+    }
+    await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
+  }
 
   if (homeIsOriginal && backupStat === undefined) {
     await assertProfileDigest(physicalHomePath, profile, manifest.originalProfileDigest)
@@ -1996,7 +2160,8 @@ async function recoverServiceTransaction({
     await restoreOriginalActiveSet({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
-      homePath, targetProfile: profile, unitUniverse, timeouts,
+      homePath, targetProfile: profile, unitUniverse, foreignOwnership, timeouts,
+      cleanProfiles,
     })
     const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -2014,7 +2179,8 @@ async function recoverServiceTransaction({
     await restoreOriginalActiveSet({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
-      homePath, targetProfile: profile, unitUniverse, timeouts,
+      homePath, targetProfile: profile, unitUniverse, foreignOwnership, timeouts,
+      cleanProfiles,
     })
     const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -2025,6 +2191,8 @@ async function recoverServiceTransaction({
   const cleanupWithoutBackup = homeIsStaged && backupStat === undefined && manifest.state === 'cleanup-started'
   if (homeIsStaged && (backupIsOriginal || cleanupWithoutBackup)) {
     await assertProfileDigest(physicalHomePath, profile, manifest.stagedProfileDigest)
+    await assertCommittedCleanProfile()
+    await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
     if (backupIsOriginal && manifest.state !== 'cleanup-started') {
       await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
     }
@@ -2033,7 +2201,10 @@ async function recoverServiceTransaction({
       cleanupWithoutBackup ? 'cleanup-started' : 'swapped')
     let accepted
     try {
-      accepted = await startAndAcceptServices({ ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile, unitUniverse, timeouts })
+      accepted = await startAndAcceptServices({
+        ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
+        unitUniverse, foreignOwnership, cleanProfiles, timeouts,
+      })
     } catch (error) {
       try {
         manifest = await stopRelatedServices(
@@ -2052,11 +2223,15 @@ async function recoverServiceTransaction({
     manifest = await writeManifest(physicalTransactionRoot, {
       ...manifest, servicePhase: 'service-accepted', serviceAcceptance: acceptance, serviceFailure: undefined,
     }, cleanupWithoutBackup ? 'cleanup-started' : 'service-accepted')
+    await assertCommittedCleanProfile()
+    await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
     await finalizeAcceptedServices({
       ...serviceContext, dshExecutable, services, serviceMasks, containmentMasks: manifest.containmentMasks,
       containmentStartBarriers: manifest.containmentStartBarriers,
-      serviceStartBarriers, homePath, unitUniverse, acceptance,
+      serviceStartBarriers, homePath, unitUniverse, foreignOwnership, cleanProfiles, acceptance,
     })
+    await assertCommittedCleanProfile()
+    await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'cleanup-started')
     await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
     process.stdout.write('service-aware 生命周期恢复：swapped home 已重新验收并完成绑定清理。\n')
@@ -2154,10 +2329,18 @@ async function assertNoUnmanagedHomeProcesses(homePath, equivalentHomePaths = []
   }
 }
 
-async function assertNotSupervisedProfile({ dshExecutable, profile, homePath }) {
+async function assertStandardLarkOrCleanProfile({ dshExecutable, profile, homePath }) {
   const { scenario } = await readLifecycleConfig({ dshExecutable, profile, homePath })
-  if (scenario === 'supervised') {
-    fail('检测到 active supervised/recovery/automation 配置；缺少只读 generation/attestation API，拒绝 service-aware upgrade。')
+  if (scenario === 'lark') return undefined
+  if (scenario === 'unsupported') {
+    return await assertInstallerCleanWebProfile(homePath, profile)
+  }
+  fail(`受管 systemd unit 的 effective/composed profile 不是标准 Lark 或 installer clean baseline：${profile}:${scenario}`)
+}
+
+async function assertCleanProfileInventory(homePath, cleanProfiles = []) {
+  for (const entry of cleanProfiles) {
+    await assertInstallerCleanWebProfile(homePath, entry.profile, entry.digest)
   }
 }
 
@@ -2171,7 +2354,7 @@ async function readLifecycleConfig({ dshExecutable, profile, homePath }) {
   }
 }
 
-async function assertLockedLifecycleScenario({ dshExecutable, profile, homePath, expectedScenario, serviceAware }) {
+async function assertLockedLifecycleScenario({ dshExecutable, profile, homePath, expectedScenario, serviceAware, operation = 'upgrade' }) {
   const { scenario } = await readLifecycleConfig({ dshExecutable, profile, homePath })
   if (scenario === 'supervised') {
     fail('检测到实际 effective/composed profile 含 active supervised/recovery/automation markers；拒绝在 npm registry/store 或 systemd mutation 前继续。')
@@ -2182,8 +2365,8 @@ async function assertLockedLifecycleScenario({ dshExecutable, profile, homePath,
   if (expectedScenario !== undefined && scenario !== expectedScenario) {
     fail(`声明的 lifecycle scenario ${expectedScenario} 与实际 effective/composed profile 场景 ${scenario} 不一致；拒绝 lifecycle 操作。`, 2)
   }
-  if (serviceAware && scenario !== 'lark') {
-    fail('service-aware lifecycle 要求实际 effective/composed profile 含 active Lark channel。')
+  if (serviceAware && scenario !== 'lark' && !(operation === 'uninstall' && scenario === 'unsupported')) {
+    fail('service-aware lifecycle 要求原 profile 为 active Lark，或要求已提交 uninstall 的目标 profile 为 clean unsupported。')
   }
   if (!serviceAware && scenario === 'lark') {
     fail('检测到实际 effective/composed profile 含 active Lark channel；必须使用 service-aware lifecycle。')
@@ -2194,16 +2377,16 @@ async function assertLockedLifecycleScenario({ dshExecutable, profile, homePath,
 async function restoreOriginalActiveSet({
   systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
   containmentMasks = [], containmentStartBarriers = [],
-  homePath, targetProfile, unitUniverse, timeouts,
+  homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts,
 }) {
   await assertServiceFilesUnchanged(services)
   const accepted = await startAndAcceptServices({
     systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks,
-    homePath, targetProfile, unitUniverse, timeouts,
+    homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, timeouts,
   })
   await finalizeAcceptedServices({
     systemctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
-    containmentMasks, containmentStartBarriers, homePath, unitUniverse, acceptance: accepted,
+    containmentMasks, containmentStartBarriers, homePath, unitUniverse, foreignOwnership, cleanProfiles, acceptance: accepted,
   })
   return accepted
 }
@@ -2517,19 +2700,73 @@ async function copyHome(homePath, stageHome) {
   await run('/bin/cp', ['-a', '--no-preserve=links', '--reflink=auto', '--', `${homePath}${sep}.`, stageHome], { passFds: [3, 4, 5] })
 }
 
-async function initializeCleanWebProfile(stageHome, profile) {
-  const profilePath = join(stageHome, 'profiles', profile)
-  await mkdir(profilePath, { recursive: true, mode: 0o700 })
+function cleanWebProfileSources(profile) {
   const manifest = {
     name: `dsh-profile-${profile}`,
     private: true,
     dependencies: {},
     dsh: { profile: { bundles: [...ALLOWED_WEB_BUNDLES], patchReload: 'live' } },
   }
-  await writeFile(join(profilePath, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
-  await writeFile(join(profilePath, 'cordis.yml'), '[]\n')
-  await writeFile(join(profilePath, 'cordis.patch.yml'), '[]\n')
-  await writeFile(join(profilePath, 'pnpm-workspace.yaml'), 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n')
+  return new Map([
+    ['package.json', `${JSON.stringify(manifest, null, 2)}\n`],
+    ['cordis.yml', '[]\n'],
+    ['cordis.patch.yml', '[]\n'],
+    ['pnpm-workspace.yaml', 'packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n'],
+  ])
+}
+
+async function installerCleanWebProfileDigest(homePath, profile) {
+  const current = await readProfile(homePath, profile)
+  const sources = cleanWebProfileSources(profile)
+  const expectedEntries = [...sources.keys()].sort()
+  const profileDescriptor = openSync(current.profilePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  const anchoredProfile = `/proc/self/fd/${profileDescriptor}`
+  try {
+    const openedProfile = fstatSync(profileDescriptor)
+    if (!sameIdentity(openedProfile, identity(current.profileStat))) {
+      fail(`installer clean baseline profile 目录身份不稳定：${profile}`)
+    }
+    if (JSON.stringify((await readdir(anchoredProfile)).sort()) !== JSON.stringify(expectedEntries)) {
+      fail(`unsupported systemd profile 不是 installer clean baseline：${profile}`)
+    }
+    for (const [name, expected] of sources) {
+      const path = join(anchoredProfile, name)
+      let descriptor
+      try { descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW) }
+      catch { fail(`installer clean baseline 缺少或无法安全打开文件：${profile}:${name}`) }
+      try {
+        const entry = fstatSync(descriptor)
+        assertOwnedPrivateEntry(entry, path, 'file')
+        const linked = await lstat(path)
+        if (entry.nlink !== 1 || entry.size !== Buffer.byteLength(expected)
+          || !sameServiceFileIdentity(linked, identity(entry))
+          || await readFile(`/proc/self/fd/${descriptor}`, 'utf8') !== expected) {
+          fail(`unsupported systemd profile 不是 installer clean baseline：${profile}:${name}`)
+        }
+      } finally { closeSync(descriptor) }
+    }
+    if (JSON.stringify((await readdir(anchoredProfile)).sort()) !== JSON.stringify(expectedEntries)) {
+      fail(`installer clean baseline 在验证期间发生变化：${profile}`)
+    }
+  } finally {
+    closeSync(profileDescriptor)
+  }
+  await assertProfileTreeIdentity(current)
+  return sha256(JSON.stringify([...sources]))
+}
+
+async function assertInstallerCleanWebProfile(homePath, profile, expectedDigest) {
+  const digest = await installerCleanWebProfileDigest(homePath, profile)
+  if (expectedDigest !== undefined && digest !== expectedDigest) {
+    fail(`installer clean baseline 摘要与事务绑定不匹配：${profile}`)
+  }
+  return digest
+}
+
+async function initializeCleanWebProfile(stageHome, profile) {
+  const profilePath = join(stageHome, 'profiles', profile)
+  await mkdir(profilePath, { recursive: true, mode: 0o700 })
+  for (const [name, source] of cleanWebProfileSources(profile)) await writeFile(join(profilePath, name), source)
 }
 
 async function performLifecycle({
@@ -2547,15 +2784,10 @@ async function performLifecycle({
     const recovery = await recoverBoundTransaction({
       homePath, physicalHomePath, profile, transactionRoot, physicalTransactionRoot, serviceContext, dshExecutable,
     })
-    if (typeof recovery === 'string' && recovery.startsWith('service-')) {
-      await assertLockedLifecycleScenario({
-        dshExecutable, profile, homePath, expectedScenario, serviceAware: true,
-      })
-      return
-    }
+    if (typeof recovery === 'string' && recovery.startsWith('service-')) return
   }
   await assertLockedLifecycleScenario({
-    dshExecutable, profile, homePath, expectedScenario, serviceAware: serviceContext !== undefined,
+    dshExecutable, profile, homePath, expectedScenario, serviceAware: serviceContext !== undefined, operation,
   })
   const homeLstat = await lstat(physicalHomePath).catch(() => undefined)
   if (homeLstat === undefined || !homeLstat.isDirectory() || homeLstat.isSymbolicLink() || resolve(homePath) === sep) {
@@ -2583,17 +2815,23 @@ async function performLifecycle({
   }
   let services
   let unitUniverse
+  let foreignOwnership
+  let cleanProfiles
   let timeouts
   if (serviceContext !== undefined) {
-    if (operation !== 'upgrade') fail('service-aware lifecycle only supports upgrade', 2)
     timeouts = serviceTimeouts()
     const inventory = await captureServiceInventory(serviceContext.systemctlExecutable, homePath, profile, dshExecutable)
     services = inventory.services
     unitUniverse = inventory.unitUniverse
+    foreignOwnership = inventory.foreignOwnership
+    cleanProfiles = []
     for (const service of services) {
-      await assertNotSupervisedProfile({ dshExecutable, profile: service.profile, homePath })
+      const cleanDigest = await assertStandardLarkOrCleanProfile({
+        dshExecutable, profile: service.profile, homePath,
+      })
+      if (cleanDigest !== undefined) cleanProfiles.push({ profile: service.profile, digest: cleanDigest })
       if (!['enabled', 'disabled'].includes(service.unitFileState)) {
-        fail(`service-aware upgrade 仅支持 enabled/disabled units；${service.unit} 当前为 ${service.unitFileState}。`)
+        fail(`service-aware lifecycle 仅支持 enabled/disabled units；${service.unit} 当前为 ${service.unitFileState}。`)
       }
       if (await existingIdentity(serviceMaskPath(service.unit)) !== undefined
         || await existingIdentity(`${serviceMaskPath(service.unit)}.d`) !== undefined) {
@@ -2603,7 +2841,7 @@ async function performLifecycle({
     const controlRootStat = await stat(join(process.env.HOME ?? '', '.config', 'systemd', 'user'))
     const homeParentStat = fstatSync(3)
     if (String(controlRootStat.dev) !== String(homeParentStat.dev)) {
-      fail('service-aware upgrade 要求 DSH_HOME parent 与用户 systemd 配置位于同一文件系统，以保证 no-replace 原子屏障。')
+      fail('service-aware lifecycle 要求 DSH_HOME parent 与用户 systemd 配置位于同一文件系统，以保证 no-replace 原子屏障。')
     }
   }
 
@@ -2629,7 +2867,8 @@ async function performLifecycle({
   try {
     if (serviceContext !== undefined) {
       await writeManifest(physicalTransactionRoot, {
-        ...transactionCreated, services, unitUniverse, serviceMasks: [], containmentMasks: [], containmentMaskIntents: [],
+        ...transactionCreated, services, unitUniverse, foreignOwnership, cleanProfiles,
+        serviceMasks: [], containmentMasks: [], containmentMaskIntents: [],
         containmentStartBarriers: [],
         serviceStartBarriers: [], servicePhase: 'initializing', serviceFailure: undefined, serviceAcceptance: undefined,
       }, 'preparing')
@@ -2644,7 +2883,7 @@ async function performLifecycle({
   let manifest = {
     ...transactionCreated,
     ...(serviceContext === undefined ? {} : {
-      services, unitUniverse, serviceMasks, containmentMasks: [], containmentMaskIntents: [],
+      services, unitUniverse, foreignOwnership, cleanProfiles, serviceMasks, containmentMasks: [], containmentMaskIntents: [],
       containmentStartBarriers: [], serviceStartBarriers,
       servicePhase: 'stopping', serviceFailure: undefined, serviceAcceptance: undefined,
     }),
@@ -2652,9 +2891,15 @@ async function performLifecycle({
   if (serviceContext !== undefined) {
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'preparing')
     try {
+      await assertUnitUniverseStable(
+        serviceContext.systemctlExecutable, unitUniverse, homePath, foreignOwnership,
+      )
       await installBoundMasks(serviceContext.systemctlExecutable, serviceMasks)
       await establishServiceStartBarriers(serviceContext.systemctlExecutable, serviceStartBarriers)
-      await stopServicesAndWait(serviceContext.systemctlExecutable, services, serviceMasks, homePath, dshExecutable, unitUniverse, timeouts.stop)
+      await stopServicesAndWait(
+        serviceContext.systemctlExecutable, services, serviceMasks, homePath, dshExecutable,
+        unitUniverse, foreignOwnership, timeouts.stop,
+      )
       await assertNoUnmanagedHomeProcesses(homePath)
       manifest = await writeManifest(physicalTransactionRoot, { ...manifest, servicePhase: 'stopped' }, 'preparing')
     } catch (error) {
@@ -2662,7 +2907,7 @@ async function performLifecycle({
         await restoreOriginalActiveSet({
           ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
           containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
-          homePath, targetProfile: profile, unitUniverse, timeouts,
+          homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, timeouts,
         })
         await rm(physicalTransactionRoot, { recursive: true, force: true })
       } catch (restoreError) {
@@ -2687,7 +2932,7 @@ async function performLifecycle({
   try {
     if (serviceContext !== undefined) {
       await assertMaskedAndQuiescent({
-        ...serviceContext, services, serviceMasks, homePath, dshExecutable, unitUniverse,
+        ...serviceContext, services, serviceMasks, homePath, dshExecutable, unitUniverse, foreignOwnership,
       })
     }
     await copyHome(physicalHomePath, stageHome)
@@ -2720,7 +2965,12 @@ async function performLifecycle({
     await run('/bin/sync', ['-f', stageHome], { passFds: [3, 4, 5] })
     await fsyncPath(stageHome, true)
     const validatedProfile = await readProfile(stageHome, profile)
-    manifest = await writeManifest(physicalTransactionRoot, { ...manifest, stagedProfileDigest: sha256(validatedProfile.source) }, 'validated')
+    const cleanProfileDigest = operation === 'uninstall'
+      ? await assertInstallerCleanWebProfile(stageHome, profile)
+      : undefined
+    manifest = await writeManifest(physicalTransactionRoot, {
+      ...manifest, stagedProfileDigest: sha256(validatedProfile.source), cleanProfileDigest,
+    }, 'validated')
 
     assertLockParentStable(homePath)
     assertExpectedDirectoryMetadata(await lstat(physicalHomePath), originalStat, homePath)
@@ -2730,7 +2980,7 @@ async function performLifecycle({
     else await readProfile(stageHome, profile)
     if (serviceContext !== undefined) {
       await assertMaskedAndQuiescent({
-        ...serviceContext, services, serviceMasks, homePath, dshExecutable, unitUniverse,
+        ...serviceContext, services, serviceMasks, homePath, dshExecutable, unitUniverse, foreignOwnership,
       })
     }
     await rename(physicalHomePath, backupHome)
@@ -2756,7 +3006,7 @@ async function performLifecycle({
     else await readProfile(stageHome, profile)
     if (serviceContext !== undefined) {
       await assertMaskedAndQuiescent({
-        ...serviceContext, services, serviceMasks, homePath, dshExecutable, unitUniverse,
+        ...serviceContext, services, serviceMasks, homePath, dshExecutable, unitUniverse, foreignOwnership,
         equivalentHomePaths: [await realpath(backupHome)],
       })
     }
@@ -2773,7 +3023,8 @@ async function performLifecycle({
       manifest = await writeManifest(physicalTransactionRoot, { ...manifest, servicePhase: 'starting' }, 'swapped')
       try {
         const accepted = await startAndAcceptServices({
-          ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile, unitUniverse, timeouts,
+          ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
+          unitUniverse, foreignOwnership, cleanProfiles, timeouts,
         })
         manifest = await writeManifest(physicalTransactionRoot, {
           ...manifest, servicePhase: 'service-accepted',
@@ -2813,18 +3064,25 @@ async function performLifecycle({
         ...serviceContext, dshExecutable, services, serviceMasks, containmentMasks: manifest.containmentMasks,
         containmentStartBarriers: manifest.containmentStartBarriers,
         serviceStartBarriers,
-        homePath, unitUniverse, acceptance: manifest.serviceAcceptance,
+        homePath, unitUniverse, foreignOwnership, cleanProfiles, acceptance: manifest.serviceAcceptance,
       })
     }
     commitUncertain = true
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'committed')
     commitUncertain = false
     await assertProfileDigest(physicalHomePath, profile, manifest.stagedProfileDigest)
+    if (operation === 'uninstall') {
+      await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
+    }
     await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
     if (serviceContext !== undefined) {
       await assertAcceptedServicesStillBound({
-        ...serviceContext, dshExecutable, services, homePath, unitUniverse, acceptance: manifest.serviceAcceptance,
+        ...serviceContext, dshExecutable, services, homePath, unitUniverse, foreignOwnership,
+        cleanProfiles, acceptance: manifest.serviceAcceptance,
       })
+    }
+    if (operation === 'uninstall') {
+      await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
     }
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'cleanup-started')
     committedCleanup = true
@@ -2873,7 +3131,7 @@ async function performLifecycle({
           ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
           containmentMasks: (persisted ?? manifest).containmentMasks,
           containmentStartBarriers: (persisted ?? manifest).containmentStartBarriers,
-          homePath, targetProfile: profile, unitUniverse, timeouts,
+          homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, timeouts,
         })
         const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
         await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -2908,7 +3166,7 @@ async function main() {
   if (lockHeld) argv.pop()
   const [operation, profile, suppliedHomePath, suppliedDshExecutable, suppliedBwrapExecutable, ...targets] = argv
   if (operation === undefined || profile === undefined || suppliedHomePath === undefined || suppliedDshExecutable === undefined || suppliedBwrapExecutable === undefined) {
-    fail('usage: lifecycle-profile.mjs <upgrade|npm-upgrade|uninstall|recover> <profile> <dsh-home> <dsh-executable> <bwrap-executable> [operation-arguments...]', 2)
+    fail('usage: lifecycle-profile.mjs <upgrade|npm-upgrade|service-upgrade|npm-service-upgrade|uninstall|service-uninstall|recover|service-recover> <profile> <dsh-home> <dsh-executable> <bwrap-executable> [operation-arguments...]', 2)
   }
   if (!isAbsolute(suppliedHomePath) || resolve(suppliedHomePath) !== suppliedHomePath) fail('invalid lifecycle DSH_HOME', 2)
   const homePath = await canonicalMissingAllowed(suppliedHomePath)
@@ -2960,6 +3218,17 @@ async function main() {
     const journalctlExecutable = await trustedServiceExecutable(suppliedJournalctl, 'journalctl')
     await performLifecycle({
       operation: 'upgrade', profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets: serviceTargets,
+      serviceContext: { systemctlExecutable, journalctlExecutable },
+    })
+    return
+  }
+  if (operation === 'service-uninstall') {
+    if (targets.length !== 3) fail('service-uninstall requires systemctl, journalctl, and expected scenario', 2)
+    const [suppliedSystemctl, suppliedJournalctl, expectedScenario] = targets
+    const systemctlExecutable = await trustedServiceExecutable(suppliedSystemctl, 'systemctl')
+    const journalctlExecutable = await trustedServiceExecutable(suppliedJournalctl, 'journalctl')
+    await performLifecycle({
+      operation: 'uninstall', profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets: [],
       serviceContext: { systemctlExecutable, journalctlExecutable },
     })
     return

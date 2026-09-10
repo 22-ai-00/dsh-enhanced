@@ -64,7 +64,7 @@ Install a minimal, runnable dsh-enhanced personal-assistant scenario.
 Options:
   --profile <name>          DSH profile (default: web)
   --operation <name>        install, upgrade, or uninstall (default: install)
-  --confirm-dsh-home-stopped Required for lifecycle; Lark upgrade stops managed units, you stop other DSH_HOME users
+  --confirm-dsh-home-stopped Required for lifecycle; Lark upgrade/uninstall stops managed units, you stop other DSH_HOME users
   --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto)
   --workspace <absolute>    Web owner workspace (web/autonomy; default: current directory)
   --agent-preset <id>       Web owner Agent preset (web/autonomy; default: standard)
@@ -2144,9 +2144,9 @@ dsh_enhanced_run_lifecycle_executor() {
     dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_enhanced_fail 1 '找不到现有 dsh executable。'; return $?; }
     bwrap_executable="$(command -v bwrap 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 bubblewrap（bwrap）。'; return $?; }
   fi
-  if [[ "$operation" == 'service-upgrade' || "$operation" == 'npm-service-upgrade' || "$operation" == 'service-recover' ]]; then
-    systemctl_executable="$(command -v systemctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark service upgrade 需要 systemctl。'; return $?; }
-    journalctl_executable="$(command -v journalctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark service upgrade 需要 journalctl 验证 fresh InvocationID readiness。'; return $?; }
+  if [[ "$operation" == 'service-upgrade' || "$operation" == 'npm-service-upgrade' || "$operation" == 'service-uninstall' || "$operation" == 'service-recover' ]]; then
+    systemctl_executable="$(command -v systemctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark service lifecycle 需要 systemctl。'; return $?; }
+    journalctl_executable="$(command -v journalctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark service lifecycle 需要 journalctl 验证 fresh InvocationID readiness。'; return $?; }
     set -- "$systemctl_executable" "$journalctl_executable" "$@"
   fi
   if [[ "$operation" == 'npm-upgrade' || "$operation" == 'npm-service-upgrade' ]]; then
@@ -2496,7 +2496,7 @@ dsh_enhanced_install() {
       return $?
     }
     if [[ "$confirm_dsh_home_stopped" != '1' ]]; then
-      dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；Lark upgrade 会自行停止受管 systemd units，该确认表示其它外部/手工进程均已停止。"
+      dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；Lark service lifecycle 会自行停止受管 systemd units，该确认表示其它外部/手工进程均已停止。"
       return $?
     fi
     if [[ "$scenario_explicit" != '1' ]]; then
@@ -2507,20 +2507,20 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 "supervised $operation 尚缺少只读 generation/attestation 验证接口；本切片拒绝执行。"
       return $?
     fi
-    if [[ "$operation" == 'uninstall' && ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) ]]; then
-      dsh_enhanced_fail 2 'Lark/supervised service-aware uninstall 尚未开放；拒绝停止或修改服务。'
+    if [[ "$operation" == 'uninstall' && "$scenario" == 'supervised' ]]; then
+      dsh_enhanced_fail 2 'supervised service-aware uninstall 尚未开放；拒绝停止或修改服务。'
       return $?
     fi
     if [[ "$scenario" != 'web' && "$scenario" != 'autonomy' && "$scenario" != 'lark' ]]; then
-      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前只支持显式 --scenario web、autonomy 或 lark upgrade。'
+      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前只支持显式 --scenario web、autonomy 或 lark。'
       return $?
     fi
-    if [[ "$scenario" == 'lark' && "$operation" == 'upgrade' && "$manage_service" != '1' ]]; then
-      dsh_enhanced_fail 2 'Lark upgrade 必须由 systemd user service-aware 生命周期执行；不能使用 --no-service。'
+    if [[ "$scenario" == 'lark' && "$manage_service" != '1' ]]; then
+      dsh_enhanced_fail 2 'Lark upgrade/uninstall 必须由 systemd user service-aware 生命周期执行；不能使用 --no-service。'
       return $?
     fi
-    if [[ "$scenario" == 'lark' && "$operation" == 'upgrade' && "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" != 'Linux' ]]; then
-      dsh_enhanced_fail 2 'Lark service-aware upgrade 当前仅支持 Linux systemd --user。'
+    if [[ "$scenario" == 'lark' && "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" != 'Linux' ]]; then
+      dsh_enhanced_fail 2 'Lark service-aware upgrade/uninstall 当前仅支持 Linux systemd --user。'
       return $?
     fi
     if [[ "$dry_run" == '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
@@ -2726,7 +2726,19 @@ dsh_enhanced_install() {
     dsh_enhanced_ensure_pnpm "$dry_run" || return $?
   fi
   if [[ "$operation" == 'uninstall' ]]; then
-    dsh_enhanced_profile_lifecycle uninstall "$profile" "$dsh_home" "$dry_run" "$effective_lifecycle_scenario"
+    if [[ "$effective_lifecycle_scenario" == 'lark' ]]; then
+      if [[ "$dry_run" == '1' ]]; then
+        printf '\nLark service-aware uninstall (Linux systemd --user):\n'
+        printf '  - Inventory, persistently block starts, stop and quiesce installer-managed units for canonical DSH_HOME.\n'
+        printf '  - Archive the complete old profile and activate a clean Web profile in the offline bwrap copy before atomic swap.\n'
+        printf '  - Restart only the previously active units and require fresh InvocationID readiness before backup cleanup.\n'
+        printf '  - Preserve units, credentials, owner binding, Sessions, Goals and external durable state.\n'
+      else
+        dsh_enhanced_run_lifecycle_executor service-uninstall "$profile" "$dsh_home" "$effective_lifecycle_scenario"
+      fi
+    else
+      dsh_enhanced_profile_lifecycle uninstall "$profile" "$dsh_home" "$dry_run" "$effective_lifecycle_scenario"
+    fi
     return $?
   fi
 
