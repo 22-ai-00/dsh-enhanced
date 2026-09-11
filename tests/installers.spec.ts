@@ -48,6 +48,20 @@ const realBwrapProbe = spawnSync('/usr/bin/bwrap', [
 const realBwrapUsable = realBwrapProbe.status === 0
 
 const digest64 = 'a'.repeat(64)
+const supervisedManagedDependencies = [
+  'personal-assistant',
+  'plugin-control-plane',
+  'assistant-delivery',
+  'credentials-keychain',
+  'lark-channel',
+  'preference-learning',
+  'assistant-evaluation',
+  'assistant-evolution',
+  'assistant-growth-experiments',
+  'assistant-heartbeat',
+  'assistant-health',
+  'assistant-recovery',
+] as const
 
 function supervisedProof(protocol: string, schemaVersion: number, extras: Record<string, unknown> = {}) {
   return {
@@ -91,7 +105,75 @@ function supervisedManifestFixture(phase: string) {
   }
 }
 
+function supervisedUninstallLifecycleFixture(phase: string) {
+  const source = supervisedManifestFixture('post-swap-accepted').source
+  return {
+    protocol: 'dsh-enhanced/supervised-uninstall/v1',
+    phase,
+    ...(['source-attested', 'clean-target-validated', 'clean-target-pending', 'clean-target-accepted'].includes(phase)
+      ? { databasePaths: source.databasePaths, source }
+      : {}),
+  }
+}
+
+function supervisedUninstallManifestFixture(phase = 'clean-target-accepted') {
+  const lifecycle = supervisedUninstallLifecycleFixture(phase)
+  const stateByPhase: Record<string, [string, string]> = {
+    'source-pending': ['preparing', 'stopped'],
+    'source-attested': ['prepared', 'stopped'],
+    'clean-target-validated': ['validated', 'stopped'],
+    'clean-target-pending': ['swapped', 'starting'],
+    'clean-target-accepted': ['service-accepted', 'service-accepted'],
+  }
+  const [state, servicePhase] = stateByPhase[phase]!
+  const id = '11111111-2222-4333-8444-555555555555'
+  const accepted = { unit: 'dsh-profile-web.service', invocationId: 'fresh-web-1', mainPid: 42, nRestarts: 0 }
+  const cleanPhase = ['clean-target-validated', 'clean-target-pending', 'clean-target-accepted'].includes(phase)
+  return {
+    version: 3, id, profile: 'web', operation: 'uninstall', expectedScenario: 'supervised',
+    stagedScenario: 'unsupported', state, servicePhase,
+    originalProfileDigest: digest64,
+    ...(phase === 'source-pending' ? {} : { originalProfileTreeDigest: digest64 }),
+    ...(cleanPhase ? { cleanProfileDigest: digest64 } : {}),
+    services: [{ unit: 'dsh-profile-web.service', wasActive: true }],
+    ...(phase === 'clean-target-accepted' ? { serviceAcceptance: [accepted] } : {}),
+    ...(cleanPhase ? {
+      archivedProfile: {
+        relativePath: `uninstalled-profiles/web-20260911T000000000Z-${id}`,
+        identity: { dev: '1', ino: '2', uid: process.getuid?.() ?? 0, mode: 0o40700 },
+        profileDigest: digest64, treeDigest: digest64,
+      },
+    } : {}),
+    supervisedLifecycle: lifecycle,
+  }
+}
+
 describe('supervised lifecycle v3 invariants', () => {
+  test('validates supervised uninstall as a strict operation/protocol/phase union', () => {
+    const validator = (lifecycleProfileTest as typeof lifecycleProfileTest & {
+      validV3OperationShape(value: unknown): boolean
+    }).validV3OperationShape
+    for (const phase of [
+      'source-pending', 'source-attested', 'clean-target-validated', 'clean-target-pending', 'clean-target-accepted',
+    ]) {
+      const manifest = supervisedUninstallManifestFixture(phase)
+      expect(validator(manifest), phase).toBe(true)
+      expect(lifecycleProfileTest.validSupervisedLifecycle(manifest.supervisedLifecycle, 'uninstall'), phase).toBe(true)
+    }
+
+    const accepted = supervisedUninstallManifestFixture()
+    const rejects = [
+      { ...accepted, operation: 'upgrade' },
+      { ...accepted, stagedScenario: 'supervised' },
+      { ...accepted, supervisedLifecycle: { ...accepted.supervisedLifecycle, protocol: 'dsh-enhanced/supervised-lifecycle/v1' } },
+      { ...accepted, supervisedLifecycle: { ...accepted.supervisedLifecycle, phase: 'post-swap-accepted' } },
+      { ...accepted, supervisedLifecycle: { ...accepted.supervisedLifecycle, activationNonce: 'smuggled' } },
+      { ...accepted, supervisedLifecycle: { ...accepted.supervisedLifecycle, startAttempt: { kind: 'accept-active', baselineGeneration: 2 } } },
+      { ...accepted, archivedProfile: { ...accepted.archivedProfile, extra: true } },
+    ]
+    for (const candidate of rejects) expect(validator(candidate)).toBe(false)
+  })
+
   test('accepts only the exact phase payload and rejects future fields or proof type drift', () => {
     const accepted = supervisedManifestFixture('post-swap-accepted')
     expect(lifecycleProfileTest.validSupervisedLifecycle(accepted)).toBe(true)
@@ -520,6 +602,11 @@ interface LifecycleSystemdFixtureOptions {
 interface LifecycleRunOptions {
   activationMarker?: string
   canonicalCleanupFails?: boolean
+  crashDuringCleanup?: boolean
+  crashAfterCleanupMetadata?: boolean
+  crashAfterCleanupPrepared?: boolean
+  crashAfterCleanupReacceptGuardian?: boolean
+  crashAfterCleanupReacceptPending?: boolean
   configAfterActivation?: string
   configAfterUpgrade?: string
   expectedScenario?: 'autonomy' | 'lark' | 'supervised' | 'unsupported' | 'web'
@@ -540,6 +627,8 @@ interface LifecycleRunOptions {
   storeFails?: boolean
   systemdDropInMutation?: 'hash' | 'identity'
   systemdCrashBeforeStartProfile?: string
+  systemdCachedLoadStateProfile?: string
+  systemdCachedLoadState?: 'loaded' | 'masked'
   systemdDynamicProfile?: string
   systemdDynamicReportedDshHome?: '__other__'
   systemdGuardianListUnitFilesFailureBudget?: number
@@ -550,13 +639,17 @@ interface LifecycleRunOptions {
   systemdLarkDisconnectAfterConnect?: boolean
   systemdLarkFlapAfterAccept?: boolean
   systemdLarkFlapAtReadinessBaseline?: boolean
+  systemdMaskedMetadataEmpty?: boolean
   systemdKillLifecycleDuringStartProfile?: string
+  systemdLarkProfiles?: readonly string[]
   systemdOwnershipChangesProfile?: string
   systemdOwnershipChangesAfterStartProfile?: string
   systemdPidStuckProfile?: string
   systemdProcPids?: readonly number[]
   systemdQuiescenceDriftProfile?: string
   systemdReadinessFailsProfile?: string
+  systemdRawBlankNumericProfile?: string
+  systemdRawIdMismatchProfile?: string
   systemdReplaceControlMaskOnUnmaskProfile?: string
   systemdRestartLoopProfile?: string
   systemdStartFailsProfile?: string
@@ -590,6 +683,11 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   const originalRenamed = "    manifest = await writeManifest(physicalTransactionRoot, manifest, 'original-renamed')\n"
   const serviceStopped = "      manifest = await writeManifest(physicalTransactionRoot, { ...manifest, servicePhase: 'stopped' }, 'preparing')\n"
   const canonicalCleanup = 'async function removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome }) {\n'
+  const cleanupDeleting = "        cleanup: { ...manifest.cleanup, phase: 'deleting' },\n      })\n"
+  const cleanupMetadata = "      manifest = await writeManifest(cleanupFdPath, manifest, 'cleanup-started', {\n        cleanup: { ...manifest.cleanup, phase: 'metadata-only' },\n      })\n"
+  const cleanupPrepared = "          cleanup: { protocol: SERVICE_CLEANUP_PROTOCOL, phase: 'prepared', tombstoneName, identity: boundBackupIdentity },\n        })\n"
+  const cleanupReacceptPending = "    }, resumeCleanup ? 'cleanup-started' : 'swapped')\n    let accepted\n"
+  const cleanupReacceptGuardian = "      })\n    } catch (error) {\n      if (supervisedContext !== undefined && manifest.supervisedLifecycle.source === undefined) {\n"
   const supervisedOperator = 'async function runSupervisedOperator(context, action, nonce, extraEnvironment) {\n'
   const supervisedDirectOperator = 'async function runSupervisedOperatorDirect(context, action, nonce) {\n'
   const supervisedHost = 'async function startSandboxHost(context) {\n'
@@ -602,12 +700,27 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   expect(lifecycleSource).toContain(originalRenamed)
   expect(lifecycleSource).toContain(serviceStopped)
   expect(lifecycleSource).toContain(canonicalCleanup)
+  expect(lifecycleSource).toContain(cleanupDeleting)
+  expect(lifecycleSource).toContain(cleanupMetadata)
+  expect(lifecycleSource).toContain(cleanupPrepared)
+  expect(lifecycleSource).toContain(cleanupReacceptPending)
+  expect(lifecycleSource).toContain(cleanupReacceptGuardian)
   expect(lifecycleSource).toContain(supervisedOperator)
   expect(lifecycleSource).toContain(supervisedDirectOperator)
   expect(lifecycleSource).toContain(supervisedHost)
   expect(lifecycleSource).toContain(supervisedCapability)
   const supervisedMock = `
 async function testSupervisedOperator(action, nonce, direct, context) {
+  let archivePresent = false
+  for (const candidate of [context?.stageHome, context?.homePath]) {
+    if (candidate !== undefined
+      && await lstat(join(candidate, 'uninstalled-profiles')).then(() => true, () => false)) archivePresent = true
+  }
+  if (process.env.DSH_ENHANCED_TEST_SUPERVISED_OPERATOR_LOG) {
+    await writeFile(process.env.DSH_ENHANCED_TEST_SUPERVISED_OPERATOR_LOG,
+      'supervised-operator\\t' + action + '\\t' + (direct ? 'direct' : 'sandbox')
+        + '\\tarchive=' + String(archivePresent) + '\\n', { flag: 'a' })
+  }
   const digest = '${digest64}'
   const database = { device: '1', inode: '2', size: '3', digest }
   const generationFile = process.env.LIFECYCLE_SUPERVISED_GENERATION_FILE
@@ -701,6 +814,31 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     canonicalCleanup
       + "  if (process.env.DSH_ENHANCED_TEST_FAIL_CANONICAL_CLEANUP === '1') fail('injected canonical cleanup failure')\n",
   ).replace(
+    cleanupPrepared,
+    cleanupPrepared
+      + "        if (process.env.DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_PREPARED === '1') process.kill(process.pid, 'SIGKILL')\n",
+  ).replace(
+    cleanupDeleting,
+    cleanupDeleting
+      + "      if (process.env.DSH_ENHANCED_TEST_CRASH_DURING_CLEANUP === '1') {\n"
+      + "        await rm(join(anchoredTombstone, 'profiles'), { recursive: true, force: true })\n"
+      + "        process.kill(process.pid, 'SIGKILL')\n"
+      + "      }\n",
+  ).replace(
+    cleanupMetadata,
+    cleanupMetadata
+      + "      if (process.env.DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_METADATA === '1') process.kill(process.pid, 'SIGKILL')\n",
+  ).replace(
+    cleanupReacceptPending,
+    cleanupReacceptPending.replace('    let accepted\n',
+      "    if (process.env.DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_REACCEPT_PENDING === '1') process.kill(process.pid, 'SIGKILL')\n"
+        + '    let accepted\n'),
+  ).replace(
+    cleanupReacceptGuardian,
+    cleanupReacceptGuardian.replace('    } catch (error) {\n',
+      "      if (process.env.DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_REACCEPT_GUARDIAN === '1') process.kill(process.pid, 'SIGKILL')\n"
+        + '    } catch (error) {\n'),
+  ).replace(
     supervisedOperator,
     supervisedMock + supervisedOperator
       + "  if (process.env.LIFECYCLE_SUPERVISED_MOCK === '1') return testSupervisedOperator(action, nonce ?? context.supervisedNonce, false, context)\n",
@@ -774,6 +912,8 @@ async function testSupervisedOperator(action, nonce, direct, context) {
   const bwrapLog = join(root, 'bwrap.log')
   const operationLog = join(root, 'lifecycle-operations.log')
   await writeFile(operationLog, '')
+  const supervisedOperatorLog = join(root, 'supervised-operator.log')
+  await writeFile(supervisedOperatorLog, '')
   const lifecycleTarget = join(root, 'managed-target')
   await mkdir(lifecycleTarget)
   await writeFile(join(lifecycleTarget, 'package.json'), JSON.stringify({
@@ -844,6 +984,8 @@ if [[ " $* " == *' --dump-config '* ]]; then
   done
   if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE" && "$requested_profile" == "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE" ]]; then
     printf '%s\n' "- id: dsh-enhanced-assistant-recovery" "  name: '@dsh-enhanced/assistant-recovery'"
+  elif [[ ",$LIFECYCLE_SYSTEMD_LARK_PROFILES," == *",$requested_profile,"* ]]; then
+    printf '%s\n' "- id: dsh-enhanced-lark-channel" "  name: '@dsh-enhanced/lark-channel'" "  config:" "    enabled: true"
   elif [[ -n "$LIFECYCLE_SYSTEMD_UNSUPPORTED_PROFILE" && "$requested_profile" == "$LIFECYCLE_SYSTEMD_UNSUPPORTED_PROFILE" ]]; then
     printf '[]\n'
   elif [[ -d "$DSH_HOME/uninstalled-profiles" ]] \
@@ -995,7 +1137,11 @@ const dshExecutable = ${JSON.stringify(join(fakeBin, 'dsh'))}
 const originalHome = ${JSON.stringify(dshHome)}
 appendFileSync(logPath, JSON.stringify(args) + '\\n')
 const state = JSON.parse(readFileSync(statePath, 'utf8'))
-const persist = () => writeFileSync(statePath, JSON.stringify(state) + '\\n')
+const persist = () => {
+  const temporary = statePath + '.' + process.pid + '.tmp'
+  writeFileSync(temporary, JSON.stringify(state) + '\\n', { mode: 0o600 })
+  renameSync(temporary, statePath)
+}
 if (state.firstCommandHomeExists === undefined) {
   state.firstCommandHomeExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME)
   state.firstCommandBackupExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-enhanced-transaction/original-home')
@@ -1036,6 +1182,9 @@ if (args[1] === 'daemon-reload') {
     const wants = process.env.HOME + '/.config/systemd/user/default.target.wants/' + name
     unit.unitFileState = existsSync(wants) ? 'enabled' : 'disabled'
   }
+  persist()
+  state.controls.cachedLoadState = undefined
+  state.controls.cachedLoadStateProfile = undefined
   persist()
   const profile = state.controls.replaceControlMaskOnUnmaskProfile
   const started = Object.values(state.units).some(unit => unit.starts > 0)
@@ -1083,19 +1232,20 @@ if (args[1] === 'show') {
     persist()
   }
   const properties = [
-    ['Id', args[2]],
-    ['LoadState', controlMasked || unit.unitFileState === 'masked-runtime' ? 'masked' : 'loaded'],
+    ['Id', state.controls.rawIdMismatchProfile === unit.profile ? 'dsh-profile-wrong.service' : args[2]],
+    ['LoadState', state.controls.cachedLoadStateProfile === unit.profile ? state.controls.cachedLoadState
+      : controlMasked || unit.unitFileState === 'masked-runtime' ? 'masked' : 'loaded'],
     ['FragmentPath', unit.fragmentPath],
     ['DropInPaths', dropIns.join(' ')],
     ['ActiveState', unit.activeState],
     ['SubState', unit.subState],
-    ['MainPID', unit.mainPid],
+    ['MainPID', state.controls.rawBlankNumericProfile === unit.profile ? '' : unit.mainPid],
     ['ControlPID', unit.controlPid],
     ['InvocationID', unit.invocationId],
     ['NRestarts', unit.nRestarts],
     ['UnitFileState', controlMasked ? 'masked' : unit.unitFileState],
-    ['WorkingDirectory', unit.workingDirectory],
-    ['Environment', 'DSH_HOME=' + unit.reportedDshHome + ' PATH=' + unit.pathEnvironment
+    ['WorkingDirectory', controlMasked && state.controls.maskedMetadataEmpty ? '' : unit.workingDirectory],
+    ['Environment', controlMasked && state.controls.maskedMetadataEmpty ? '' : 'DSH_HOME=' + unit.reportedDshHome + ' PATH=' + unit.pathEnvironment
       + ' DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + process.getuid() + '/bus'
       + ' XDG_RUNTIME_DIR=/run/user/' + process.getuid()],
     ['ExecStart', '{ path=' + process.execPath + ' ; argv[]=' + process.execPath + ' '
@@ -1242,11 +1392,16 @@ if (args[1] === 'start' || args[1] === 'restart') {
 process.exit(91)
 `)
   await writeExecutable(join(fakeBin, 'journalctl'), `#!${process.execPath}
-const { appendFileSync, existsSync, writeFileSync } = require('node:fs')
+const { appendFileSync, existsSync, renameSync, writeFileSync } = require('node:fs')
 const { join } = require('node:path')
 const args = process.argv.slice(2)
 const statePath = ${JSON.stringify(systemdState)}
 const state = require(statePath)
+const persist = () => {
+  const temporary = statePath + '.' + process.pid + '.tmp'
+  writeFileSync(temporary, JSON.stringify(state) + '\\n', { mode: 0o600 })
+  renameSync(temporary, statePath)
+}
 appendFileSync(${JSON.stringify(journalLog)}, JSON.stringify(args) + '\\n')
 if (state.controls.journal === 'fail') process.exit(7)
 const invocation = args.find(value => value.startsWith('_SYSTEMD_INVOCATION_ID='))?.slice('_SYSTEMD_INVOCATION_ID='.length)
@@ -1262,13 +1417,13 @@ if (state.controls.journal !== 'stale' && invocation?.startsWith('fresh-')) {
     const swapped = existsSync(join(${JSON.stringify(join(dshHome, 'profiles'))}, profile, 'upgraded'))
     if (swapped) {
       state.controls.larkFlapQuery = (state.controls.larkFlapQuery ?? 0) + 1
-      writeFileSync(statePath, JSON.stringify(state) + '\\n', { mode: 0o600 })
+      persist()
       if (state.controls.larkFlapQuery === 4) lines.push('lark-channel: disconnected', 'lark-channel: connected')
     }
   }
   if (state.controls.larkFlapAtReadinessBaseline) {
     state.controls.larkReadinessQuery = (state.controls.larkReadinessQuery ?? 0) + 1
-    writeFileSync(statePath, JSON.stringify(state) + '\\n', { mode: 0o600 })
+    persist()
     if (state.controls.larkReadinessQuery === 3) lines.push('lark-channel: disconnected', 'lark-channel: connected')
   }
 } else {
@@ -1328,7 +1483,7 @@ if (result.error) { process.stderr.write(String(result.error) + '\\n'); process.
 process.exit(result.status ?? 99)
 `)
   return {
-    root, dshHome, profileDirectory, fakeBin, databasePath, dshLog, bwrapLog, operationLog, lifecycleTarget,
+    root, dshHome, profileDirectory, fakeBin, databasePath, dshLog, bwrapLog, operationLog, supervisedOperatorLog, lifecycleTarget,
     activationMarker: join(dshHome, '.activation-ran'),
     fixtureInstallDirectory, fixtureInstallerLibrary, journalLog, systemdHome, systemdLog, systemdState,
   }
@@ -1338,6 +1493,7 @@ function lifecycleEnvironment(dshHome: string, fakeBin: string, options: Lifecyc
   return {
     PATH: `${fakeBin}:${process.env.PATH ?? ''}`, DSH_HOME: dshHome, NODE_ENV: 'test',
     DSH_ENHANCED_TEST_SERVICE_TOOLS: '1',
+    DSH_ENHANCED_TEST_SUPERVISED_OPERATOR_LOG: join(dirname(dshHome), 'supervised-operator.log'),
     LIFECYCLE_ACTIVATION_MARKER: options.activationMarker ?? join(dshHome, '.activation-ran'),
     LIFECYCLE_BWRAP_LOG: join(dirname(dshHome), 'bwrap.log'),
     LIFECYCLE_CONFIG_AFTER_ACTIVATION: options.configAfterActivation ?? '',
@@ -1373,10 +1529,16 @@ function lifecycleEnvironment(dshHome: string, fakeBin: string, options: Lifecyc
     DSH_ENHANCED_TEST_DISCONNECT_GUARDIAN_AFTER_START: options.guardianDisconnectAfterStart ? '1' : '',
     DSH_ENHANCED_TEST_GUARDIAN_PID_FILE: join(dirname(dshHome), 'guardian.pid'),
     DSH_ENHANCED_TEST_FAIL_CANONICAL_CLEANUP: options.canonicalCleanupFails ? '1' : '',
+    DSH_ENHANCED_TEST_CRASH_DURING_CLEANUP: options.crashDuringCleanup ? '1' : '',
+    DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_METADATA: options.crashAfterCleanupMetadata ? '1' : '',
+    DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_PREPARED: options.crashAfterCleanupPrepared ? '1' : '',
+    DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_REACCEPT_GUARDIAN: options.crashAfterCleanupReacceptGuardian ? '1' : '',
+    DSH_ENHANCED_TEST_CRASH_AFTER_CLEANUP_REACCEPT_PENDING: options.crashAfterCleanupReacceptPending ? '1' : '',
     DSH_ENHANCED_TEST_KILL_PARENT_AFTER_GUARDIAN_START: options.systemdKillLifecycleDuringStartProfile === undefined ? '' : '1',
     DSH_ENHANCED_TEST_KILL_AFTER_ORIGINAL_RENAME: options.killLifecycleAfterOriginalRename ? '1' : '',
     DSH_ENHANCED_TEST_KILL_AFTER_STOPPED: options.killLifecycleAfterStopped ? '1' : '',
     LIFECYCLE_SYSTEMD_LOG: join(dirname(dshHome), 'systemd.log'),
+    LIFECYCLE_SYSTEMD_LARK_PROFILES: options.systemdLarkProfiles?.join(',') ?? '',
     LIFECYCLE_SYSTEMD_PID_STUCK_PROFILE: options.systemdPidStuckProfile ?? '',
     DSH_ENHANCED_TEST_PROC_PIDS: options.systemdProcPids?.join(',') ?? '',
     DSH_ENHANCED_TEST_INCLUDE_ANCESTORS: options.processAncestorReference === undefined ? '' : '1',
@@ -1503,11 +1665,11 @@ function startLifecycle(args: readonly string[], dshHome: string, fakeBin: strin
   }
 }
 
-function runRecovery(profile: string, dshHome: string, fakeBin: string) {
+function runRecovery(profile: string, dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
   const lifecycleInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
   return spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_recover_profile_lifecycle "$2" "$3" 0',
     'recovery-test', lifecycleInstallerLibrary, profile, dshHome], {
-    cwd: repoRoot, encoding: 'utf8', env: lifecycleEnvironment(dshHome, fakeBin),
+    cwd: repoRoot, encoding: 'utf8', env: lifecycleEnvironment(dshHome, fakeBin, options),
   })
 }
 
@@ -1607,6 +1769,8 @@ interface LifecycleSystemdState {
     crashBeforeStartProfile?: string
     crashTriggered?: boolean
     controlMaskReplaced?: boolean
+    cachedLoadState?: 'loaded' | 'masked'
+    cachedLoadStateProfile?: string
     dynamicAdded?: boolean
     dynamicProfile?: string
     dropInMutation?: 'hash' | 'identity'
@@ -1619,6 +1783,8 @@ interface LifecycleSystemdState {
     pidStuckProfile?: string
     quiescenceDriftProfile?: string
     readinessFailsProfile?: string
+    rawBlankNumericProfile?: string
+    rawIdMismatchProfile?: string
     replaceControlMaskOnUnmaskProfile?: string
     restartLoopProfile?: string
     startFailsProfile?: string
@@ -1663,6 +1829,8 @@ function setLifecycleSystemdControls(path: string, options: LifecycleRunOptions)
   state.controls = {
     dropInMutation: options.systemdDropInMutation,
     crashBeforeStartProfile: options.systemdCrashBeforeStartProfile,
+    cachedLoadState: options.systemdCachedLoadState,
+    cachedLoadStateProfile: options.systemdCachedLoadStateProfile,
     dynamicProfile: options.systemdDynamicProfile,
     dynamicReportedDshHome: options.systemdDynamicReportedDshHome === '__other__'
       ? join(dirname(path), 'other-home') : undefined,
@@ -1674,12 +1842,15 @@ function setLifecycleSystemdControls(path: string, options: LifecycleRunOptions)
     larkDisconnectAfterConnect: options.systemdLarkDisconnectAfterConnect ?? false,
     larkFlapAfterAccept: options.systemdLarkFlapAfterAccept ?? false,
     larkFlapAtReadinessBaseline: options.systemdLarkFlapAtReadinessBaseline ?? false,
+    maskedMetadataEmpty: options.systemdMaskedMetadataEmpty ?? false,
     killLifecycleDuringStartProfile: options.systemdKillLifecycleDuringStartProfile,
     ownershipChangesProfile: options.systemdOwnershipChangesProfile,
     ownershipChangesAfterStartProfile: options.systemdOwnershipChangesAfterStartProfile,
     pidStuckProfile: options.systemdPidStuckProfile,
     quiescenceDriftProfile: options.systemdQuiescenceDriftProfile,
     readinessFailsProfile: options.systemdReadinessFailsProfile,
+    rawBlankNumericProfile: options.systemdRawBlankNumericProfile,
+    rawIdMismatchProfile: options.systemdRawIdMismatchProfile,
     replaceControlMaskOnUnmaskProfile: options.systemdReplaceControlMaskOnUnmaskProfile,
     restartLoopProfile: options.systemdRestartLoopProfile,
     startFailsProfile: options.systemdStartFailsProfile,
@@ -1697,6 +1868,8 @@ type RecoveryState = 'preparing' | 'prepared' | 'validated' | 'original-renamed'
 interface LifecycleIdentity {
   dev: string
   ino: string
+  mode?: number
+  uid?: number
 }
 
 interface BoundLifecycleManifest {
@@ -1710,6 +1883,7 @@ interface BoundLifecycleManifest {
   operation: 'upgrade' | 'uninstall'
   originalIdentity: LifecycleIdentity
   originalProfileDigest: string
+  originalProfileTreeDigest?: string
   stagedIdentity?: LifecycleIdentity
   stagedProfileDigest?: string
   expectedScenario?: 'autonomy' | 'lark' | 'web'
@@ -1737,6 +1911,7 @@ function lifecycleBinding(manifest: Omit<BoundLifecycleManifest, 'bindingDigest'
     operation: manifest.operation,
     originalIdentity: manifest.originalIdentity,
     originalProfileDigest: manifest.originalProfileDigest,
+    originalProfileTreeDigest: manifest.originalProfileTreeDigest,
     stagedIdentity: manifest.stagedIdentity,
     stagedProfileDigest: manifest.stagedProfileDigest,
     expectedScenario: manifest.expectedScenario,
@@ -1758,6 +1933,7 @@ function serviceLifecycleBinding(manifest: Record<string, unknown>) {
     operation: manifest.operation,
     originalIdentity: manifest.originalIdentity,
     originalProfileDigest: manifest.originalProfileDigest,
+    originalProfileTreeDigest: manifest.originalProfileTreeDigest,
     stagedIdentity: manifest.stagedIdentity,
     stagedProfileDigest: manifest.stagedProfileDigest,
     expectedScenario: manifest.expectedScenario,
@@ -1777,6 +1953,8 @@ function serviceLifecycleBinding(manifest: Record<string, unknown>) {
     containmentMaskIntents: manifest.containmentMaskIntents,
     serviceStartBarriers: manifest.serviceStartBarriers,
     containmentStartBarriers: manifest.containmentStartBarriers,
+    archivedProfile: manifest.archivedProfile,
+    cleanup: manifest.cleanup,
     supervisedLifecycle: manifest.supervisedLifecycle,
   }
 }
@@ -2192,6 +2370,41 @@ describe('one-click installers', () => {
     expect(await lifecycleIdentity(f.dshHome)).toEqual(stagedIdentity)
     expect(await readFile(join(f.dshHome, 'committed-marker'), 'utf8')).toBe('keep live')
     expect(await preservedLifecycleTransactions(f.dshHome), result.stderr).toEqual([])
+  })
+
+  test('bound v1 cleanup tombstone survives partial deletion and retries without a complete backup tree', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const backupHome = join(transaction, 'original-home')
+    const stagedHome = join(transaction, 'staged-home')
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+    await mkdir(transaction, { mode: 0o700 })
+    await rename(f.dshHome, backupHome)
+    await cp(backupHome, stagedHome, { recursive: true })
+    await writeFile(join(stagedHome, 'committed-marker'), 'keep live')
+    const stagedIdentity = await lifecycleIdentity(stagedHome)
+    const stagedProfileDigest = createHash('sha256')
+      .update(await readFile(join(stagedHome, 'profiles', 'web', 'package.json'))).digest('hex')
+    await writeBoundLifecycleManifest({
+      dshHome: f.dshHome, originalHome: backupHome, stagedHome, state: 'committed',
+      includeTransactionIdentity: false, originalIdentity, stagedIdentity, stagedProfileDigest,
+    })
+    await rename(stagedHome, f.dshHome)
+
+    const crashed = runRecovery('web', f.dshHome, f.fakeBin, { crashDuringCleanup: true })
+    expect(crashed.status).not.toBe(0)
+    const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(manifest).toMatchObject({
+      version: 1, state: 'cleanup-started',
+      cleanup: { protocol: 'dsh-enhanced/service-cleanup/v1', phase: 'deleting' },
+    })
+    await expect(stat(join(transaction, manifest.cleanup.tombstoneName, 'profiles')))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+
+    const recovered = runRecovery('web', f.dshHome, f.fakeBin)
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(await readFile(join(f.dshHome, 'committed-marker'), 'utf8')).toBe('keep live')
+    await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test.each([
@@ -2646,6 +2859,38 @@ describe('one-click installers', () => {
     expect(await readFile(f.operationLog, 'utf8')).toBe('')
   })
 
+  test('supervised uninstall does not require pnpm to be installed', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const runtimeBin = join(f.root, 'runtime-without-pnpm')
+    await mkdir(runtimeBin)
+    await symlink(process.execPath, join(runtimeBin, 'node'))
+    for (const executable of ['bwrap', 'dsh', 'journalctl', 'systemctl']) {
+      await symlink(join(f.fakeBin, executable), join(runtimeBin, executable))
+    }
+    for (const executable of [
+      'awk', 'basename', 'cat', 'chmod', 'cp', 'dirname', 'flock', 'grep', 'head', 'id', 'mktemp', 'npm', 'readlink',
+      'realpath', 'rm', 'sed', 'sort', 'stat', 'tail', 'tr', 'uname',
+    ]) {
+      const resolved = spawnSync('/bin/bash', ['-c', `command -v ${executable}`], { encoding: 'utf8' }).stdout.trim()
+      await symlink(resolved, join(runtimeBin, executable))
+    }
+    const environment = {
+      ...lifecycleEnvironment(f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }),
+      PATH: runtimeBin,
+    }
+    expect(spawnSync('/bin/bash', ['-c', 'command -v pnpm'], { encoding: 'utf8', env: environment }).status).not.toBe(0)
+
+    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
+      '--operation', 'uninstall', '--scenario', 'supervised', '--confirm-dsh-home-stopped',
+    ], f.dshHome, undefined, environment)
+
+    expect(result.status, result.stderr).toBe(0)
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
   test('upgrade and uninstall require explicit supported lifecycle scenarios and stopped-home confirmation', async () => {
     const dshHome = await temporaryDshHome()
     const profile = join(dshHome, 'profiles', 'web')
@@ -2655,15 +2900,12 @@ describe('one-click installers', () => {
     const missingConfirmation = runInstaller(localInstaller, ['--operation', 'upgrade', '--scenario', 'web', '--dry-run'], dshHome)
     expect(missingConfirmation.status).toBe(2)
     expect(missingConfirmation.stderr).toContain('--confirm-dsh-home-stopped')
-    const supervisedUninstall = runInstaller(localInstaller, ['--operation', 'uninstall', '--scenario', 'supervised', '--confirm-dsh-home-stopped', '--dry-run'], dshHome)
-    expect(supervisedUninstall.status).toBe(2)
-    expect(supervisedUninstall.stderr).toMatch(/supervised.*uninstall|uninstall.*supervised|未开放/iu)
     const hostChange = runInstaller(localInstaller, ['--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--dsh-version', '0.1.2-rc.1', '--dry-run'], dshHome)
     expect(hostChange.status).toBe(2)
     expect(hostChange.stderr).toContain('不会修改全局 DSH')
   })
 
-  test('Linux service lifecycle admits Lark upgrade/uninstall and supervised upgrade', async () => {
+  test('Linux service lifecycle admits Lark upgrade/uninstall and supervised upgrade/uninstall', async () => {
     const f = await lifecycleFixture({ systemd: {} })
     const supervisedFixture = await lifecycleFixture({ systemd: {}, effectiveScenario: 'supervised' })
     const commonArgs = ['--confirm-dsh-home-stopped', '--dry-run']
@@ -2677,6 +2919,11 @@ describe('one-click installers', () => {
     const larkUninstall = runInstaller(localInstaller, [
       '--operation', 'uninstall', '--scenario', 'lark', ...commonArgs,
     ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin))
+    const supervisedUninstall = runInstaller(localInstaller, [
+      '--operation', 'uninstall', '--scenario', 'supervised', ...commonArgs,
+    ], supervisedFixture.dshHome, 'Linux', lifecycleEnvironment(
+      supervisedFixture.dshHome, supervisedFixture.fakeBin, { expectedScenario: 'supervised' },
+    ))
 
     expect(larkUpgrade.status, larkUpgrade.stderr).toBe(0)
     expect(larkUpgrade.stdout).toContain('Lark service-aware upgrade (Linux systemd --user)')
@@ -2687,6 +2934,10 @@ describe('one-click installers', () => {
     expect(supervisedUpgrade.stdout).toContain('supervised service-aware upgrade (Linux systemd --user)')
     expect(supervisedUpgrade.stdout).toContain('fresh nonce/catalog-bound Recovery preview')
     expect(supervisedUpgrade.stdout).toContain('newer exact active attestation')
+    expect(supervisedUninstall.status, supervisedUninstall.stderr).toBe(0)
+    expect(supervisedUninstall.stdout).toContain('Supervised service-aware uninstall (Linux systemd --user)')
+    expect(supervisedUninstall.stdout).toMatch(/archive.*complete old profile|完整.*归档/iu)
+    expect(supervisedUninstall.stdout).toMatch(/do not actively delete.*profile-external|不主动清除.*profile.*外/iu)
     expect(larkUninstall.status, larkUninstall.stderr).toBe(0)
     expect(larkUninstall.stdout).toContain('Lark service-aware uninstall (Linux systemd --user)')
     expect(larkUninstall.stdout).toContain('Archive the complete old profile and activate a clean Web profile')
@@ -2700,11 +2951,12 @@ describe('one-click installers', () => {
     async source => {
       for (const dryRun of [false, true]) {
         for (const rejected of [
-          { operation: 'uninstall', scenario: 'supervised', extra: [] as string[], platform: 'Linux' },
           { operation: 'upgrade', scenario: 'supervised', extra: ['--no-service'], platform: 'Linux' },
+          { operation: 'uninstall', scenario: 'supervised', extra: ['--no-service'], platform: 'Linux' },
           { operation: 'upgrade', scenario: 'lark', extra: ['--no-service'], platform: 'Linux' },
           { operation: 'uninstall', scenario: 'lark', extra: ['--no-service'], platform: 'Linux' },
           { operation: 'upgrade', scenario: 'supervised', extra: [] as string[], platform: 'Darwin' },
+          { operation: 'uninstall', scenario: 'supervised', extra: [] as string[], platform: 'Darwin' },
           { operation: 'upgrade', scenario: 'lark', extra: [] as string[], platform: 'Darwin' },
           { operation: 'uninstall', scenario: 'lark', extra: [] as string[], platform: 'Darwin' },
         ]) {
@@ -2721,6 +2973,52 @@ describe('one-click installers', () => {
           await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
         }
       }
+    },
+    15_000,
+  )
+
+  test.each(['local', 'npm'] as const)(
+    'public %s supervised uninstall dry-run is admitted without systemd, registry, or transaction mutation',
+    async source => {
+      const f = await lifecycleFixture({
+        effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies, systemd: {},
+      })
+      const script = source === 'local'
+        ? join(f.fixtureInstallDirectory, 'install-local.sh')
+        : join(f.fixtureInstallDirectory, 'install-npm.sh')
+      const result = runInstaller(script, [
+        '--operation', 'uninstall', '--scenario', 'supervised',
+        '--confirm-dsh-home-stopped', '--yes', '--dry-run',
+      ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }))
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toContain('Supervised service-aware uninstall (Linux systemd --user)')
+      expect(await readFile(f.operationLog, 'utf8')).toBe('')
+      expect(await readFile(f.systemdLog, 'utf8')).toBe('')
+      await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    },
+    15_000,
+  )
+
+  test.each(['local', 'npm'] as const)(
+    'public %s supervised uninstall dispatches the live service transaction without package or registry work',
+    async source => {
+      const f = await lifecycleFixture({
+        effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+        systemd: { units: [{ profile: 'web', active: true }] },
+      })
+      const script = source === 'local'
+        ? join(f.fixtureInstallDirectory, 'install-local.sh')
+        : join(f.fixtureInstallDirectory, 'install-npm.sh')
+      const result = runInstaller(script, [
+        '--operation', 'uninstall', '--scenario', 'supervised', '--confirm-dsh-home-stopped', '--yes',
+      ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }))
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toHaveLength(1)
+      expect(await readFile(f.operationLog, 'utf8')).toBe('')
+      expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'stop')).toBe(true)
+      await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     },
     15_000,
   )
@@ -2769,6 +3067,77 @@ describe('one-click installers', () => {
     const state = await readLifecycleSystemdState(f.systemdState)
     expect(state.units['dsh-profile-web.service'].activeState).toBe('active')
   })
+
+  test('supervised service uninstall archives the exact managed profile and preserves external state without post-archive operator work', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [
+        { profile: 'web', active: true }, { profile: 'worker', active: true }, { profile: 'dormant', active: false },
+      ] },
+    })
+    const originalManifest = JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))
+    const originalPatch = await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', systemdLarkProfiles: ['worker', 'dormant'] }, 'service-uninstall',
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    const archives = await readdir(join(f.dshHome, 'uninstalled-profiles'))
+    expect(archives).toHaveLength(1)
+    const archive = join(f.dshHome, 'uninstalled-profiles', archives[0]!)
+    expect(JSON.parse(await readFile(join(archive, 'package.json'), 'utf8'))).toEqual(originalManifest)
+    expect(Object.keys(originalManifest.dependencies).sort()).toEqual(
+      supervisedManagedDependencies.map(name => `@dsh-enhanced/${name}`).sort(),
+    )
+    expect(await readFile(join(archive, 'cordis.patch.yml'), 'utf8')).toBe(originalPatch)
+    expect(await readdir(archive)).toEqual(expect.arrayContaining([
+      'package.json', 'cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml', 'pnpm-lock.yaml',
+    ]))
+    expect(JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))).toMatchObject({
+      dependencies: {},
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'] } },
+    })
+    expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe('durable-session')
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({
+      userVersion: 2, values: ['durable-goal-state', 'migrated-during-activation'],
+    })
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    const operatorCalls = await readFile(f.supervisedOperatorLog, 'utf8')
+    expect(operatorCalls.trim().split('\n')).toEqual([
+      'supervised-operator\tattest-active\tdirect\tarchive=false',
+      'supervised-operator\tattest-active\tsandbox\tarchive=false',
+    ])
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 1 })
+    expect(state.units['dsh-profile-web.service']!.invocationId).toMatch(/^fresh-web-/u)
+    expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
+    expect(state.units['dsh-profile-worker.service']!.invocationId).toMatch(/^fresh-worker-/u)
+    expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', starts: 0 })
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test('supervised uninstall accepts an unchanged node_modules hardlink without weakening profile data files', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const packageDirectory = join(f.profileDirectory, 'node_modules', '.pnpm', 'linked')
+    await mkdir(packageDirectory, { recursive: true })
+    const storeFile = join(f.root, 'pnpm-store-file.js')
+    const linkedFile = join(packageDirectory, 'linked-file.js')
+    await writeFile(storeFile, 'export default 1\n')
+    await link(storeFile, linkedFile)
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }, 'service-uninstall',
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    const [archive] = await readdir(join(f.dshHome, 'uninstalled-profiles'))
+    expect(await readFile(join(f.dshHome, 'uninstalled-profiles', archive!,
+      'node_modules', '.pnpm', 'linked', 'linked-file.js'), 'utf8')).toBe('export default 1\n')
+  }, 15_000)
 
   test('supervised preview failure restores the source home and original active set', async () => {
     const f = await lifecycleFixture({ effectiveScenario: 'supervised', systemd: { units: [{ profile: 'web', active: true }] } })
@@ -2947,6 +3316,485 @@ describe('one-click installers', () => {
     await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].activeState).toBe('active')
   })
+
+  test('supervised uninstall original-renamed crash restores the source home and original active set', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+    const crashed = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', killLifecycleAfterOriginalRename: true }, 'service-uninstall',
+    )
+
+    expect(crashed.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    expect(existsSync(f.dshHome), crashed.stderr).toBe(false)
+    const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(crashManifest).toMatchObject({
+      version: 3, operation: 'uninstall', expectedScenario: 'supervised', stagedScenario: 'unsupported',
+      state: 'original-renamed', servicePhase: 'stopped',
+      supervisedLifecycle: { protocol: 'dsh-enhanced/supervised-uninstall/v1', phase: 'clean-target-validated' },
+    })
+    expect((lifecycleProfileTest as typeof lifecycleProfileTest & { validV3OperationShape(value: unknown): boolean })
+      .validV3OperationShape(crashManifest)).toBe(true)
+    const operatorCalls = await readFile(f.supervisedOperatorLog, 'utf8')
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }, 'service-uninstall',
+    )
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(`${recovered.stdout}\n${recovered.stderr}`).toMatch(/original-renamed|恢复/iu)
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+    expect(await readFile(f.supervisedOperatorLog, 'utf8')).not.toBe(operatorCalls)
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    await expect(stat(join(f.dshHome, 'uninstalled-profiles'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 1 })
+  }, 15_000)
+
+  test('supervised uninstall post-swap retry does not archive or run the operator a second time', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }, { profile: 'worker', active: true }] },
+    })
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', systemdJournal: 'stale', systemdLarkProfiles: ['worker'] }, 'service-uninstall',
+    )
+
+    expect(first.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(manifest).toMatchObject({
+      version: 3, operation: 'uninstall', state: 'service-failed', servicePhase: 'service-failed',
+      supervisedLifecycle: { protocol: 'dsh-enhanced/supervised-uninstall/v1', phase: 'clean-target-pending' },
+    })
+    const archives = await readdir(join(f.dshHome, 'uninstalled-profiles'))
+    expect(archives).toHaveLength(1)
+    const archivedManifest = await readFile(
+      join(f.dshHome, 'uninstalled-profiles', archives[0]!, 'package.json'), 'utf8',
+    )
+    const operationsBefore = await readFile(f.operationLog, 'utf8')
+    const operatorBefore = await readFile(f.supervisedOperatorLog, 'utf8')
+    expect(operatorBefore).not.toMatch(/preview|archive=true/u)
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', systemdJournal: 'ready' }, 'service-uninstall',
+    )
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archives)
+    expect(await readFile(join(f.dshHome, 'uninstalled-profiles', archives[0]!, 'package.json'), 'utf8'))
+      .toBe(archivedManifest)
+    expect(await readFile(f.operationLog, 'utf8')).toBe(operationsBefore)
+    expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe(operatorBefore)
+    await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 2 })
+    expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 2 })
+  }, 15_000)
+
+  test('supervised uninstall recovery rejects archive tampering before service or operator mutation', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }, { profile: 'worker', active: true }] },
+    })
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', systemdJournal: 'stale', systemdLarkProfiles: ['worker'] }, 'service-uninstall',
+    )
+    expect(first.status).not.toBe(0)
+    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const archives = await readdir(join(f.dshHome, 'uninstalled-profiles'))
+    expect(archives).toHaveLength(1)
+    await writeFile(join(f.dshHome, 'uninstalled-profiles', archives[0]!, 'cordis.patch.yml'), 'tampered\n')
+    const systemdBefore = await readFile(f.systemdLog, 'utf8')
+    const operatorBefore = await readFile(f.supervisedOperatorLog, 'utf8')
+    const homeBefore = await lifecycleIdentity(f.dshHome)
+    const backupBefore = await lifecycleIdentity(join(transaction, 'original-home'))
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', systemdJournal: 'ready' }, 'service-uninstall',
+    )
+
+    expect(recovered.status).not.toBe(0)
+    expect(recovered.stderr).toMatch(/archive|归档|tree.*digest|摘要/iu)
+    expect(await readFile(f.systemdLog, 'utf8'), recovered.stderr).toBe(systemdBefore)
+    expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe(operatorBefore)
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(homeBefore)
+    expect(await lifecycleIdentity(join(transaction, 'original-home'))).toEqual(backupBefore)
+  }, 15_000)
+
+  test('supervised uninstall recovery rejects malformed service acceptance before external mutation', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', canonicalCleanupFails: true }, 'service-uninstall',
+    )
+    expect(first.status).not.toBe(0)
+    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const manifestPath = join(transaction, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    expect(manifest).toMatchObject({
+      version: 3, operation: 'uninstall', state: 'cleanup-started', servicePhase: 'service-accepted',
+      supervisedLifecycle: { protocol: 'dsh-enhanced/supervised-uninstall/v1', phase: 'clean-target-accepted' },
+    })
+    const malformed = { ...manifest, serviceAcceptance: [manifest.serviceAcceptance[0], manifest.serviceAcceptance[0]] }
+    malformed.updatedAt = '2026-09-11T20:00:00.000Z'
+    malformed.bindingDigest = createHash('sha256')
+      .update(JSON.stringify(serviceLifecycleBinding(malformed))).digest('hex')
+    await writeFile(manifestPath, JSON.stringify(malformed, null, 2) + '\n', { mode: 0o600 })
+    const systemdBefore = await readFile(f.systemdLog, 'utf8')
+    const operatorBefore = await readFile(f.supervisedOperatorLog, 'utf8')
+    const homeBefore = await lifecycleIdentity(f.dshHome)
+    const backupBefore = await lifecycleIdentity(join(transaction, 'original-home'))
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }, 'service-uninstall',
+    )
+
+    expect(recovered.status).not.toBe(0)
+    expect(recovered.stderr).toMatch(/manifest.*校验失败|service acceptance|未绑定/iu)
+    expect(await readFile(f.systemdLog, 'utf8')).toBe(systemdBefore)
+    expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe(operatorBefore)
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(homeBefore)
+    expect(await lifecycleIdentity(join(transaction, 'original-home'))).toEqual(backupBefore)
+  }, 15_000)
+
+  test('supervised uninstall cleanup tombstone survives a partial-delete crash and retries without repeating acceptance work', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const crashed = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', crashDuringCleanup: true }, 'service-uninstall',
+    )
+
+    expect(crashed.status).not.toBe(0)
+    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(manifest).toMatchObject({
+      version: 3, operation: 'uninstall', state: 'cleanup-started', servicePhase: 'service-accepted',
+      cleanup: {
+        protocol: 'dsh-enhanced/service-cleanup/v1', phase: 'deleting', tombstoneName: 'cleanup-original-home',
+      },
+      supervisedLifecycle: { protocol: 'dsh-enhanced/supervised-uninstall/v1', phase: 'clean-target-accepted' },
+    })
+    const tombstone = join(transaction, manifest.cleanup.tombstoneName)
+    await expect(stat(tombstone)).resolves.toBeDefined()
+    await expect(stat(join(tombstone, 'profiles'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const archives = await readdir(join(f.dshHome, 'uninstalled-profiles'))
+    const operationsBefore = await readFile(f.operationLog, 'utf8')
+    const operatorBefore = await readFile(f.supervisedOperatorLog, 'utf8')
+    const startsBefore = (await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']!.starts
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }, 'service-uninstall',
+    )
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archives)
+    expect(await readFile(f.operationLog, 'utf8')).toBe(operationsBefore)
+    expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe(operatorBefore)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']!.starts).toBe(startsBefore)
+    await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test('supervised uninstall cleanup reaccepts a restarted clean service before deleting transaction metadata', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const crashed = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', crashDuringCleanup: true }, 'service-uninstall',
+    )
+    expect(crashed.status).not.toBe(0)
+    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const state = await readLifecycleSystemdState(f.systemdState)
+    const web = state.units['dsh-profile-web.service']!
+    const startsBeforeRecovery = web.starts
+    web.mainPid += 100
+    web.invocationId = `external-restart-${web.mainPid}`
+    web.nRestarts += 1
+    await writeFile(f.systemdState, `${JSON.stringify(state)}\n`, { mode: 0o600 })
+    const operatorBefore = await readFile(f.supervisedOperatorLog, 'utf8')
+    const operationsBefore = await readFile(f.operationLog, 'utf8')
+    const archiveBefore = await readdir(join(f.dshHome, 'uninstalled-profiles'))
+    const systemdBefore = (await readLifecycleSystemdLog(f.systemdLog)).length
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }, 'service-uninstall',
+    )
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    const accepted = (await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']!
+    expect(accepted).toMatchObject({ activeState: 'active', subState: 'running', starts: startsBeforeRecovery + 1 })
+    expect(accepted.invocationId).toMatch(/^fresh-web-/u)
+    const recoveryCommands = (await readLifecycleSystemdLog(f.systemdLog)).slice(systemdBefore)
+    const stopIndex = recoveryCommands.findIndex(command => command[1] === 'stop'
+      && command.includes('dsh-profile-web.service'))
+    const startIndex = recoveryCommands.findIndex(command => command[1] === 'start'
+      && command.includes('dsh-profile-web.service'))
+    expect(stopIndex).toBeGreaterThanOrEqual(0)
+    expect(startIndex).toBeGreaterThan(stopIndex)
+    expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archiveBefore)
+    expect(await readFile(f.operationLog, 'utf8')).toBe(operationsBefore)
+    expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe(operatorBefore)
+    await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test.each([
+    ['deleting', { crashDuringCleanup: true }],
+    ['metadata-only', { crashAfterCleanupMetadata: true }],
+  ] as const)('supervised uninstall %s cleanup survives a second crash during fresh reaccept',
+    async (cleanupPhase, firstCrash) => {
+      const f = await lifecycleFixture({
+        effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+        systemd: { units: [{ profile: 'web', active: true }] },
+      })
+      const crashed = runServiceLifecycle(
+        ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+        { expectedScenario: 'supervised', ...firstCrash }, 'service-uninstall',
+      )
+      expect(crashed.status).not.toBe(0)
+      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const initialManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+      expect(initialManifest).toMatchObject({
+        state: 'cleanup-started', servicePhase: 'service-accepted', cleanup: { phase: cleanupPhase },
+      })
+      const state = await readLifecycleSystemdState(f.systemdState)
+      const web = state.units['dsh-profile-web.service']!
+      web.mainPid += 100
+      web.invocationId = `external-restart-${web.mainPid}`
+      web.nRestarts += 1
+      await writeFile(f.systemdState, `${JSON.stringify(state)}\n`, { mode: 0o600 })
+      const operatorBefore = await readFile(f.supervisedOperatorLog, 'utf8')
+
+      const interrupted = runServiceLifecycle(
+        ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+        { expectedScenario: 'supervised', crashAfterCleanupReacceptPending: true, systemdMaskedMetadataEmpty: true },
+        'service-uninstall',
+      )
+      expect(interrupted.status).not.toBe(0)
+      expect(JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))).toMatchObject({
+        state: 'cleanup-started', servicePhase: 'starting', cleanup: { phase: cleanupPhase },
+      })
+
+      const recovered = runServiceLifecycle(
+        ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+        { expectedScenario: 'supervised', systemdMaskedMetadataEmpty: true }, 'service-uninstall',
+      )
+
+      expect(recovered.status, recovered.stderr).toBe(0)
+      expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']).toMatchObject({
+        activeState: 'active', subState: 'running',
+      })
+      expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe(operatorBefore)
+      await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+    }, 20_000)
+
+  test.each([
+    ['installed mask with stale loaded cache', { crashAfterCleanupReacceptPending: true }, 'loaded'],
+    ['staged mask with stale masked cache', {}, 'masked'],
+  ] as const)('supervised uninstall reconciles %s before cleanup', async (_label, residue, cachedLoadState) => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const crashed = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', crashDuringCleanup: true }, 'service-uninstall',
+    )
+    expect(crashed.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    if (residue.crashAfterCleanupReacceptPending) {
+      const state = await readLifecycleSystemdState(f.systemdState)
+      const web = state.units['dsh-profile-web.service']!
+      web.mainPid += 100
+      web.invocationId = `external-restart-${web.mainPid}`
+      web.nRestarts += 1
+      await writeFile(f.systemdState, `${JSON.stringify(state)}\n`, { mode: 0o600 })
+      const interrupted = runServiceLifecycle(
+        ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+        { expectedScenario: 'supervised', crashAfterCleanupReacceptPending: true }, 'service-uninstall',
+      )
+      expect(interrupted.status).not.toBe(0)
+    }
+    const operatorBefore = await readFile(f.supervisedOperatorLog, 'utf8')
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, {
+        expectedScenario: 'supervised', systemdCachedLoadStateProfile: 'web', systemdCachedLoadState: cachedLoadState,
+      }, 'service-uninstall',
+    )
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe(operatorBefore)
+    await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 20_000)
+
+  test.each([
+    ['mismatched unit id', { systemdRawIdMismatchProfile: 'web' }],
+    ['blank numeric field', { systemdRawBlankNumericProfile: 'web' }],
+  ] as const)('supervised uninstall cleanup rejects %s before systemd mutation', async (_label, malformed) => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const crashed = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', crashDuringCleanup: true }, 'service-uninstall',
+    )
+    expect(crashed.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const systemdBefore = (await readLifecycleSystemdLog(f.systemdLog)).length
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'supervised', ...malformed },
+      'service-uninstall',
+    )
+
+    expect(recovered.status).not.toBe(0)
+    const commands = (await readLifecycleSystemdLog(f.systemdLog)).slice(systemdBefore)
+    expect(commands.some(command => ['disable', 'enable', 'mask', 'start', 'stop', 'unmask'].includes(command[1]))).toBe(false)
+    await expect(stat(transaction)).resolves.toBeDefined()
+  }, 20_000)
+
+  test('supervised uninstall cleanup survives a crash after durable reacceptance while the service is active and masked',
+    async () => {
+      const f = await lifecycleFixture({
+        effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+        systemd: { units: [{ profile: 'web', active: true }] },
+      })
+      const crashed = runServiceLifecycle(
+        ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+        { expectedScenario: 'supervised', crashDuringCleanup: true }, 'service-uninstall',
+      )
+      expect(crashed.status).not.toBe(0)
+      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const state = await readLifecycleSystemdState(f.systemdState)
+      const web = state.units['dsh-profile-web.service']!
+      web.mainPid += 100
+      web.invocationId = `external-restart-${web.mainPid}`
+      web.nRestarts += 1
+      await writeFile(f.systemdState, `${JSON.stringify(state)}\n`, { mode: 0o600 })
+      const operatorBefore = await readFile(f.supervisedOperatorLog, 'utf8')
+      const operationsBefore = await readFile(f.operationLog, 'utf8')
+
+      const interrupted = runServiceLifecycle(
+        ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, {
+          expectedScenario: 'supervised', crashAfterCleanupReacceptGuardian: true, systemdMaskedMetadataEmpty: true,
+        }, 'service-uninstall',
+      )
+      expect(interrupted.status).not.toBe(0)
+      expect(JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))).toMatchObject({
+        state: 'cleanup-started', servicePhase: 'service-accepted', cleanup: { phase: 'deleting' },
+      })
+      expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']).toMatchObject({
+        activeState: 'active', subState: 'running', mainPid: expect.any(Number),
+      })
+
+      const recovered = runServiceLifecycle(
+        ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+        { expectedScenario: 'supervised', systemdMaskedMetadataEmpty: true }, 'service-uninstall',
+      )
+
+      expect(recovered.status, recovered.stderr).toBe(0)
+      expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']).toMatchObject({
+        activeState: 'active', subState: 'running',
+      })
+      expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe(operatorBefore)
+      expect(await readFile(f.operationLog, 'utf8')).toBe(operationsBefore)
+      await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+    }, 20_000)
+
+  test('supervised uninstall keeps a late same-home unit persistently masked after transaction cleanup', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', systemdDynamicProfile: 'late' }, 'service-uninstall',
+    )
+    expect(first.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    const containment = manifest.containmentMasks.find((mask: { unit: string }) => (
+      mask.unit === 'dsh-profile-late.service'
+    ))
+    expect(containment).toMatchObject({ target: '/dev/null' })
+    const lateStarts = (await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-late.service']!.starts
+    const systemdBefore = (await readLifecycleSystemdLog(f.systemdLog)).length
+    const archiveBefore = await readdir(join(f.dshHome, 'uninstalled-profiles'))
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }, 'service-uninstall',
+    )
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-late.service']).toMatchObject({
+      activeState: 'inactive', subState: 'dead', mainPid: 0, controlPid: 0, starts: lateStarts, unitFileState: 'disabled',
+    })
+    const recoveryCommands = (await readLifecycleSystemdLog(f.systemdLog)).slice(systemdBefore)
+    expect(recoveryCommands.some(command => ['start', 'enable'].includes(command[1])
+      && command.includes('dsh-profile-late.service'))).toBe(false)
+    const installed = await lstat(containment.path)
+    expect(installed.isSymbolicLink()).toBe(true)
+    expect({ dev: String(installed.dev), ino: String(installed.ino), uid: installed.uid, mode: installed.mode })
+      .toEqual(containment.identity)
+    expect(await readlink(containment.path)).toBe('/dev/null')
+    await expect(stat(join(f.systemdHome, '.config', 'systemd', 'user', 'default.target.wants',
+      'dsh-profile-late.service'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archiveBefore)
+    await expect(stat(state.units['dsh-profile-late.service']!.fragmentPath)).resolves.toBeDefined()
+  }, 15_000)
+
+  test('supervised uninstall cleanup prepared crash preserves cleanup state while reaccepting on retry', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'supervised', managedDependencies: supervisedManagedDependencies,
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+    const crashed = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', crashAfterCleanupPrepared: true }, 'service-uninstall',
+    )
+    expect(crashed.status).not.toBe(0)
+    const transaction = f.dshHome + '.dsh-enhanced-transaction'
+    const prepared = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(prepared).toMatchObject({
+      state: 'cleanup-started', servicePhase: 'service-accepted',
+      cleanup: { protocol: 'dsh-enhanced/service-cleanup/v1', phase: 'prepared' },
+    })
+
+    const interrupted = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', systemdCrashBeforeStartProfile: 'web' }, 'service-uninstall',
+    )
+    expect(interrupted.status).not.toBe(0)
+    const retried = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(retried).toMatchObject({
+      state: 'cleanup-started', cleanup: { protocol: 'dsh-enhanced/service-cleanup/v1' },
+    })
+
+    const recovered = runServiceLifecycle(
+      ['web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' }, 'service-uninstall',
+    )
+    expect(recovered.status, recovered.stderr).toBe(0)
+    await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
 
   test('supervised stopped crash before source attestation rebuilds source proof and restores the active set', async () => {
     const f = await lifecycleFixture({ effectiveScenario: 'supervised', systemd: { units: [{ profile: 'web', active: true }] } })

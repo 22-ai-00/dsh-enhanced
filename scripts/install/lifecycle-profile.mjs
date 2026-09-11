@@ -38,11 +38,16 @@ const SYSTEMD_SHOW_PROPERTIES = [
 const KEYRING_DROP_IN = '[Unit]\nRequires=gnome-keyring-daemon.service\nAfter=gnome-keyring-daemon.service\n'
 const SERVICE_PHASES = new Set(['initializing', 'stopping', 'stopped', 'swapped', 'starting', 'service-accepted', 'service-failed'])
 const LIFECYCLE_SCENARIOS = new Set(['web', 'autonomy', 'lark', 'supervised'])
-const SUPERVISED_PHASES = new Set([
+const SUPERVISED_UPGRADE_PHASES = new Set([
   'source-pending', 'source-attested', 'preview-prepared', 'preview-running',
   'preview-accepted', 'active-prepared', 'post-swap-pending', 'post-swap-accepted',
 ])
-const SUPERVISED_PROTOCOL = 'dsh-enhanced/supervised-lifecycle/v1'
+const SUPERVISED_UNINSTALL_PHASES = new Set([
+  'source-pending', 'source-attested', 'clean-target-validated', 'clean-target-pending', 'clean-target-accepted',
+])
+const SUPERVISED_UPGRADE_PROTOCOL = 'dsh-enhanced/supervised-lifecycle/v1'
+const SUPERVISED_UNINSTALL_PROTOCOL = 'dsh-enhanced/supervised-uninstall/v1'
+const SERVICE_CLEANUP_PROTOCOL = 'dsh-enhanced/service-cleanup/v1'
 const SUPERVISED_POLL_INTERVAL_MS = 100
 const SUPERVISED_OPERATOR_PROGRAM = String.raw`
 import { createHash, randomUUID } from 'node:crypto'
@@ -270,6 +275,7 @@ function bindingFor(manifest) {
     operation: manifest.operation,
     originalIdentity: manifest.originalIdentity,
     originalProfileDigest: manifest.originalProfileDigest,
+    originalProfileTreeDigest: manifest.originalProfileTreeDigest,
     stagedIdentity: manifest.stagedIdentity,
     stagedProfileDigest: manifest.stagedProfileDigest,
     expectedScenario: manifest.expectedScenario,
@@ -289,6 +295,8 @@ function bindingFor(manifest) {
     containmentMaskIntents: manifest.containmentMaskIntents,
     serviceStartBarriers: manifest.serviceStartBarriers,
     containmentStartBarriers: manifest.containmentStartBarriers,
+    archivedProfile: manifest.archivedProfile,
+    cleanup: manifest.cleanup,
     supervisedLifecycle: manifest.supervisedLifecycle,
   }
 }
@@ -424,7 +432,10 @@ function assertOwnedPrivateEntry(entry, path, kind) {
 }
 
 async function assertOwnedPrivateDirectory(path) {
-  const entry = await lstat(path).catch(() => undefined)
+  const descriptorMatch = /^\/proc\/self\/fd\/(\d+)$/u.exec(path)
+  const entry = descriptorMatch === null
+    ? await lstat(path).catch(() => undefined)
+    : (() => { try { return fstatSync(Number(descriptorMatch[1])) } catch { return undefined } })()
   if (entry === undefined) fail(`生命周期目录不存在：${path}`)
   assertOwnedPrivateEntry(entry, path, 'directory')
   return entry
@@ -706,14 +717,16 @@ async function writeFileAtomic(path, contents) {
 }
 
 const MANIFEST_MAX_BYTES = 64 * 1024
+const PROFILE_TREE_MAX_ENTRIES = 200_000
+const PROFILE_TREE_MAX_FILE_BYTES = 64 * 1024 * 1024
 const MANIFEST_TOP_LEVEL_KEYS = [
   'version', 'id', 'homePath', 'canonicalHome', 'transactionPath', 'transactionIdentity',
-  'profile', 'operation', 'originalIdentity', 'originalProfileDigest', 'stagedIdentity',
+  'profile', 'operation', 'originalIdentity', 'originalProfileDigest', 'originalProfileTreeDigest', 'stagedIdentity',
   'stagedProfileDigest', 'expectedScenario', 'stagedScenario', 'createdAt', 'state',
   'services', 'servicePhase', 'serviceFailure', 'serviceAcceptance', 'unitUniverse',
   'foreignOwnership', 'cleanProfileDigest', 'cleanProfiles', 'serviceMasks',
   'containmentMasks', 'containmentMaskIntents', 'serviceStartBarriers',
-  'containmentStartBarriers', 'supervisedLifecycle',
+  'containmentStartBarriers', 'archivedProfile', 'cleanup', 'supervisedLifecycle',
   // 以下三个键不进 bindingDigest：updatedAt/failure 是事务时间线与收容诊断，
   // bindingDigest 是自反校验字段本身。未知顶层键必须拒绝，否则可绕过篡改信封。
   'updatedAt', 'failure', 'bindingDigest',
@@ -739,17 +752,26 @@ async function writeManifest(transactionRoot, manifest, state, details = {}) {
 }
 
 async function loadManifest(physicalTransactionRoot, expected) {
-  const rootStat = await lstat(physicalTransactionRoot)
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.uid !== process.getuid?.() || (rootStat.mode & 0o077) !== 0) fail(`拒绝未绑定或未知的生命周期事务目录：${expected.transactionPath}`)
-  const manifestPath = join(physicalTransactionRoot, 'manifest.json')
+  let rootDescriptor
+  let manifestDescriptor
   let manifest
   try {
-    const manifestStat = await lstat(manifestPath)
-    if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.uid !== process.getuid?.()
+    rootDescriptor = openSync(physicalTransactionRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+    const rootStat = fstatSync(rootDescriptor)
+    if (!rootStat.isDirectory() || rootStat.uid !== currentUid() || (rootStat.mode & 0o077) !== 0) throw new Error('unsafe root')
+    manifestDescriptor = openSync(`/proc/self/fd/${rootDescriptor}/manifest.json`, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const manifestStat = fstatSync(manifestDescriptor)
+    if (!manifestStat.isFile() || manifestStat.uid !== currentUid()
       || manifestStat.nlink !== 1 || (manifestStat.mode & 0o077) !== 0 || manifestStat.size > MANIFEST_MAX_BYTES) throw new Error('unsafe manifest')
-    manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    manifest = JSON.parse(await readFile(`/proc/self/fd/${manifestDescriptor}`, 'utf8'))
+    if (isServiceManifestVersion(manifest?.version) && !sameIdentity(rootStat, manifest.transactionIdentity)) {
+      throw new Error('transaction root identity mismatch')
+    }
   } catch {
     fail(`拒绝未绑定或未知的生命周期事务；缺少有效 manifest：${expected.transactionPath}`)
+  } finally {
+    if (manifestDescriptor !== undefined) closeSync(manifestDescriptor)
+    if (rootDescriptor !== undefined) closeSync(rootDescriptor)
   }
   const initializingServiceManifest = isServiceManifestVersion(manifest?.version)
     && manifest.state === 'preparing' && manifest.servicePhase === 'initializing'
@@ -821,10 +843,12 @@ async function loadManifest(physicalTransactionRoot, expected) {
       && typeof entry.profile === 'string' && PROFILE_NAME.test(entry.profile)
       && /^[0-9a-f]{64}$/u.test(entry.digest)
       && manifest.services?.some(service => service?.profile === entry.profile))
-  const validSupervised = manifest?.version !== SUPERVISED_SERVICE_MANIFEST_VERSION
-    || manifest.operation === 'upgrade' && manifest.expectedScenario === 'supervised'
-      && manifest.stagedScenario === 'supervised' && validSupervisedLifecycle(manifest.supervisedLifecycle)
-      && validSupervisedManifestPhase(manifest) && validV3ServiceAcceptance(manifest)
+  const validCleanup = manifest?.cleanup === undefined
+    || validServiceCleanup(manifest.cleanup, manifest)
+  const validSupervised = validV3OperationShape(manifest)
+  const validVersionFields = manifest?.version === SUPERVISED_SERVICE_MANIFEST_VERSION
+    || manifest?.supervisedLifecycle === undefined && manifest?.archivedProfile === undefined
+      && manifest?.originalProfileTreeDigest === undefined
   if (![MANIFEST_VERSION, SERVICE_MANIFEST_VERSION, SUPERVISED_SERVICE_MANIFEST_VERSION].includes(manifest?.version)
     || typeof manifest.id !== 'string'
     || manifest.homePath !== expected.homePath
@@ -841,7 +865,9 @@ async function loadManifest(physicalTransactionRoot, expected) {
     || !validStagedScenario
     || !validCleanProfileDigest
     || !validCleanProfiles
+    || !validCleanup
     || !validSupervised
+    || !validVersionFields
     || !validManifestTopLevel(manifest)
     || manifest.bindingDigest !== sha256(JSON.stringify(bindingFor(manifest)))) {
     fail(`拒绝未绑定或校验失败的生命周期事务 manifest：${expected.transactionPath}`)
@@ -927,12 +953,14 @@ function validDatabasePaths(paths) {
       && paths[key] !== '' && paths[key] !== '.' && !isAbsolute(paths[key]) && !paths[key].split('/').includes('..'))
 }
 
-function validSupervisedLifecycle(value) {
-  if (!exactKeys(value, ['protocol', 'phase', 'activationNonce'], [
+function validSupervisedLifecycle(value, operation = 'upgrade') {
+  const uninstall = operation === 'uninstall'
+  if (uninstall) return validSupervisedUninstallLifecycle(value)
+  if (operation !== 'upgrade' || !exactKeys(value, ['protocol', 'phase', 'activationNonce'], [
     'catalogDigest', 'databasePaths', 'source', 'previewPlan', 'previewAcceptance', 'activePlan',
     'startAttempt', 'postSwapAcceptance',
-  ]) || value.protocol !== 'dsh-enhanced/supervised-lifecycle/v1'
-    || !SUPERVISED_PHASES.has(value.phase) || typeof value.activationNonce !== 'string'
+  ]) || value.protocol !== SUPERVISED_UPGRADE_PROTOCOL
+    || !SUPERVISED_UPGRADE_PHASES.has(value.phase) || typeof value.activationNonce !== 'string'
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value.activationNonce)) return false
   const catalogRequired = !['source-pending', 'source-attested'].includes(value.phase)
   if (catalogRequired ? !validDigest(value.catalogDigest) : value.catalogDigest !== undefined) return false
@@ -992,7 +1020,6 @@ function validSupervisedLifecycle(value) {
     'post-swap-pending': ['source', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt'],
     'post-swap-accepted': ['source', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt', 'postSwapAcceptance'],
   }
-  const phaseOrder = [...SUPERVISED_PHASES]
   const allowedByPhase = {
     'source-pending': [], 'source-attested': ['databasePaths', 'source', 'startAttempt'],
     'preview-prepared': ['databasePaths', 'source', 'catalogDigest', 'previewPlan'],
@@ -1002,6 +1029,7 @@ function validSupervisedLifecycle(value) {
     'post-swap-pending': ['databasePaths', 'source', 'catalogDigest', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt'],
     'post-swap-accepted': ['databasePaths', 'source', 'catalogDigest', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt', 'postSwapAcceptance'],
   }
+  const phaseOrder = [...SUPERVISED_UPGRADE_PHASES]
   const optionalStateKeys = ['catalogDigest', 'databasePaths', 'source', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt', 'postSwapAcceptance']
   const proofPathsMatch = value.source === undefined || value.databasePaths === undefined || (
     JSON.stringify(value.source.databasePaths) === JSON.stringify(value.databasePaths)
@@ -1027,10 +1055,49 @@ function validSupervisedLifecycle(value) {
     && (value.postSwapAcceptance === undefined || value.postSwapAcceptance.generation > value.startAttempt.baselineGeneration)
 }
 
+function validSupervisedUninstallLifecycle(value) {
+  if (!exactKeys(value, ['protocol', 'phase'], ['databasePaths', 'source', 'startAttempt'])
+    || value.protocol !== SUPERVISED_UNINSTALL_PROTOCOL
+    || !SUPERVISED_UNINSTALL_PHASES.has(value.phase)) return false
+  if (value.databasePaths !== undefined && !validDatabasePaths(value.databasePaths)) return false
+  const source = value.source
+  if (source !== undefined && !validSupervisedLifecycle({
+    protocol: SUPERVISED_UPGRADE_PROTOCOL, phase: 'source-attested',
+    activationNonce: '00000000-0000-4000-8000-000000000000',
+    databasePaths: value.databasePaths, source,
+  })) return false
+  if (value.startAttempt !== undefined && (!exactKeys(value.startAttempt, ['kind', 'baselineGeneration'])
+    || value.startAttempt.kind !== 'restore-source'
+    || !Number.isSafeInteger(value.startAttempt.baselineGeneration) || value.startAttempt.baselineGeneration < 0)) return false
+  const required = {
+    'source-pending': [],
+    'source-attested': ['databasePaths', 'source'],
+    'clean-target-validated': ['databasePaths', 'source'],
+    'clean-target-pending': ['databasePaths', 'source'],
+    'clean-target-accepted': ['databasePaths', 'source'],
+  }
+  const allowed = {
+    'source-pending': [],
+    'source-attested': ['databasePaths', 'source', 'startAttempt'],
+    'clean-target-validated': ['databasePaths', 'source'],
+    'clean-target-pending': ['databasePaths', 'source'],
+    'clean-target-accepted': ['databasePaths', 'source'],
+  }
+  return required[value.phase].every(key => value[key] !== undefined)
+    && ['databasePaths', 'source', 'startAttempt'].every(key => value[key] === undefined || allowed[value.phase].includes(key))
+    && (source === undefined || JSON.stringify(source.databasePaths) === JSON.stringify(value.databasePaths))
+}
+
 function validSupervisedManifestPhase(manifest) {
   if (manifest.version !== SUPERVISED_SERVICE_MANIFEST_VERSION) return true
   const phase = manifest.supervisedLifecycle?.phase
-  const allowed = {
+  const allowed = manifest.operation === 'uninstall' ? {
+    'source-pending': [['preparing', 'initializing'], ['preparing', 'stopping'], ['preparing', 'stopped'], ['service-failed', 'service-failed']],
+    'source-attested': [['preparing', 'stopped'], ['preparing', 'starting'], ['prepared', 'stopped'], ['service-failed', 'service-failed']],
+    'clean-target-validated': [['validated', 'stopped'], ['original-renamed', 'stopped'], ['swapped', 'swapped'], ['service-failed', 'service-failed']],
+    'clean-target-pending': [['swapped', 'starting'], ['cleanup-started', 'starting'], ['cleanup-started', 'service-failed'], ['service-failed', 'service-failed']],
+    'clean-target-accepted': [['service-accepted', 'service-accepted'], ['committed', 'service-accepted'], ['cleanup-started', 'service-accepted'], ['service-failed', 'service-failed']],
+  } : {
     'source-pending': [['preparing', 'initializing'], ['preparing', 'stopping'], ['preparing', 'stopped'], ['service-failed', 'service-failed']],
     'source-attested': [['preparing', 'stopped'], ['preparing', 'starting'], ['prepared', 'stopped'], ['service-failed', 'service-failed']],
     'preview-prepared': [['prepared', 'stopped'], ['service-failed', 'service-failed']],
@@ -1048,12 +1115,22 @@ function validV3ServiceAcceptance(manifest) {
   const acceptance = manifest.serviceAcceptance
   const phase = manifest.supervisedLifecycle?.phase
   const outerState = `${manifest.state}:${manifest.servicePhase}`
-  const acceptanceAllowed = phase === 'post-swap-pending'
+  const pendingPhase = manifest.operation === 'uninstall' ? 'clean-target-pending' : 'post-swap-pending'
+  const acceptedPhase = manifest.operation === 'uninstall' ? 'clean-target-accepted' : 'post-swap-accepted'
+  const acceptanceAllowed = phase === pendingPhase
     ? ['swapped:starting', 'cleanup-started:starting', 'cleanup-started:service-failed', 'service-failed:service-failed'].includes(outerState)
-    : phase === 'post-swap-accepted'
+    : phase === acceptedPhase
       && ['service-accepted:service-accepted', 'committed:service-accepted', 'cleanup-started:service-accepted', 'service-failed:service-failed'].includes(outerState)
-  if (acceptance === undefined) return phase !== 'post-swap-accepted'
-  if (!acceptanceAllowed || !Array.isArray(acceptance) || !Array.isArray(manifest.services)) return false
+  if (acceptance === undefined) return phase !== acceptedPhase
+  return acceptanceAllowed && validServiceAcceptanceRecords(manifest)
+    && (manifest.operation === 'uninstall' || manifest.supervisedLifecycle?.postSwapAcceptance === undefined
+      || acceptance.some(proof => proof.unit === `dsh-profile-${manifest.profile}.service`
+        && proof.invocationId === manifest.supervisedLifecycle.postSwapAcceptance.invocationId))
+}
+
+function validServiceAcceptanceRecords(manifest) {
+  const acceptance = manifest.serviceAcceptance
+  if (!Array.isArray(acceptance) || !Array.isArray(manifest.services)) return false
   const activeUnits = manifest.services.filter(service => service?.wasActive === true).map(service => service.unit).sort()
   if (acceptance.length !== activeUnits.length) return false
   const acceptedUnits = []
@@ -1061,15 +1138,61 @@ function validV3ServiceAcceptance(manifest) {
     if (!exactKeys(proof, ['unit', 'invocationId', 'mainPid', 'nRestarts'])
       || typeof proof.unit !== 'string' || !SYSTEMD_UNIT.test(proof.unit)
       || typeof proof.invocationId !== 'string' || proof.invocationId === ''
-      || !Number.isSafeInteger(proof.mainPid) || proof.mainPid < 0
+      || !Number.isSafeInteger(proof.mainPid) || proof.mainPid <= 0
       || !Number.isSafeInteger(proof.nRestarts) || proof.nRestarts < 0) return false
     acceptedUnits.push(proof.unit)
   }
   if (new Set(acceptedUnits).size !== acceptedUnits.length
     || JSON.stringify([...acceptedUnits].sort()) !== JSON.stringify(activeUnits)) return false
-  const target = acceptance.find(proof => proof.unit === `dsh-profile-${manifest.profile}.service`)
-  const postSwap = manifest.supervisedLifecycle?.postSwapAcceptance
-  return postSwap === undefined || target !== undefined && target.invocationId === postSwap.invocationId
+  return true
+}
+
+function validArchivedProfile(archive, manifest) {
+  if (!exactKeys(archive, ['relativePath', 'identity', 'profileDigest', 'treeDigest'])) return false
+  const parts = typeof archive.relativePath === 'string' ? archive.relativePath.split('/') : []
+  return parts.length === 2 && parts[0] === 'uninstalled-profiles'
+    && parts[1].startsWith(`${manifest.profile}-`) && parts[1].endsWith(`-${manifest.id}`)
+    && archive.identity !== null && typeof archive.identity === 'object'
+    && exactKeys(archive.identity, ['dev', 'ino', 'uid', 'mode'])
+    && typeof archive.identity.dev === 'string' && typeof archive.identity.ino === 'string'
+    && archive.identity.uid === currentUid() && typeof archive.identity.mode === 'number'
+    && archive.profileDigest === manifest.originalProfileDigest && validDigest(archive.treeDigest)
+    && archive.treeDigest === manifest.originalProfileTreeDigest
+}
+
+function validV3OperationShape(manifest) {
+  if (manifest.version !== SUPERVISED_SERVICE_MANIFEST_VERSION) return true
+  const uninstall = manifest.operation === 'uninstall'
+  if (!['upgrade', 'uninstall'].includes(manifest.operation)
+    || manifest.expectedScenario !== 'supervised'
+    || manifest.stagedScenario !== (uninstall ? 'unsupported' : 'supervised')
+    || !validSupervisedLifecycle(manifest.supervisedLifecycle, manifest.operation)
+    || !validSupervisedManifestPhase(manifest) || !validV3ServiceAcceptance(manifest)) return false
+  const cleanPhase = ['clean-target-validated', 'clean-target-pending', 'clean-target-accepted']
+    .includes(manifest.supervisedLifecycle.phase)
+  if (!uninstall) return manifest.archivedProfile === undefined && manifest.cleanProfileDigest === undefined
+    && manifest.originalProfileTreeDigest === undefined
+  const sourceBound = manifest.supervisedLifecycle.phase !== 'source-pending'
+  if (sourceBound !== validDigest(manifest.originalProfileTreeDigest)) return false
+  return cleanPhase
+    ? validDigest(manifest.cleanProfileDigest) && validArchivedProfile(manifest.archivedProfile, manifest)
+    : manifest.cleanProfileDigest === undefined && manifest.archivedProfile === undefined
+}
+
+function validServiceCleanup(cleanup, manifest) {
+  const serviceStateValid = !isServiceManifestVersion(manifest.version) || (
+    ['starting', 'service-failed'].includes(manifest.servicePhase)
+      || manifest.servicePhase === 'service-accepted' && validServiceAcceptanceRecords(manifest)
+  )
+  return exactKeys(cleanup, ['protocol', 'phase', 'tombstoneName', 'identity'])
+    && cleanup.protocol === SERVICE_CLEANUP_PROTOCOL
+    && ['prepared', 'tombstoned', 'deleting', 'metadata-only'].includes(cleanup.phase)
+    && cleanup.tombstoneName === 'cleanup-original-home'
+    && cleanup.identity !== null && typeof cleanup.identity === 'object'
+    && exactKeys(cleanup.identity, ['dev', 'ino', 'uid', 'mode'])
+    && typeof cleanup.identity.dev === 'string' && typeof cleanup.identity.ino === 'string'
+    && cleanup.identity.uid === currentUid() && typeof cleanup.identity.mode === 'number'
+    && manifest.state === 'cleanup-started' && serviceStateValid
 }
 
 function validBoundMask(mask, expectedUnit, expectedTransactionRoot) {
@@ -1143,8 +1266,10 @@ async function assertCriticalDirectory(path, expected) {
 async function assertProfileDigest(home, profile, expected) {
   const pieces = [home, join(home, 'profiles'), join(home, 'profiles', profile)]
   for (const path of pieces) {
-    const entry = await lstat(path)
-    if (!entry.isDirectory() || entry.isSymbolicLink() || entry.uid !== currentUid() || isGroupOrOtherWritable(entry)) {
+    const descriptorMatch = /^\/proc\/self\/fd\/(\d+)$/u.exec(path)
+    const entry = descriptorMatch === null ? await lstat(path) : fstatSync(Number(descriptorMatch[1]))
+    if (!entry.isDirectory() || descriptorMatch === null && entry.isSymbolicLink()
+      || entry.uid !== currentUid() || isGroupOrOtherWritable(entry)) {
       fail('生命周期事务中的 profile 路径身份不安全；拒绝自动恢复。')
     }
   }
@@ -1159,6 +1284,103 @@ async function assertProfileDigest(home, profile, expected) {
     const source = await readFile(`/proc/self/fd/${descriptor}`)
     if (sha256(source) !== expected) fail('生命周期事务中的原 profile manifest 摘要不匹配；拒绝自动恢复。')
   } finally { closeSync(descriptor) }
+}
+
+async function profileTreeDigest(profilePath) {
+  const records = []
+  let count = 0
+  const visit = async (directory, prefix = '') => {
+    const entries = await readdir(directory, { withFileTypes: true })
+    entries.sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)))
+    for (const entry of entries) {
+      count += 1
+      if (count > PROFILE_TREE_MAX_ENTRIES) fail('profile tree 超过可验证条目上限。')
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`
+      const path = join(directory, entry.name)
+      const linked = await lstat(path)
+      if (entry.isDirectory()) {
+        assertOwnedPrivateEntry(linked, path, 'directory')
+        records.push(['directory', relative, linked.mode])
+        await visit(path, relative)
+      } else if (entry.isFile()) {
+        assertOwnedPrivateEntry(linked, path, 'file')
+        const packageEntry = relative.split('/').includes('node_modules')
+        if (!packageEntry && linked.nlink !== 1 || linked.size > PROFILE_TREE_MAX_FILE_BYTES) {
+          fail(`profile tree 文件身份或大小不安全：${relative}`)
+        }
+        const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+        try {
+          const opened = fstatSync(descriptor)
+          if (!sameRegularFileIdentity(opened, identity(linked), packageEntry)) {
+            fail(`profile tree 文件在读取前发生变化：${relative}`)
+          }
+          const contents = await readFile(`/proc/self/fd/${descriptor}`)
+          if (!sameRegularFileIdentity(await lstat(path), identity(opened), packageEntry)) {
+            fail(`profile tree 文件在读取后发生变化：${relative}`)
+          }
+          records.push(['file', relative, opened.mode, opened.size, sha256(contents)])
+        } finally { closeSync(descriptor) }
+      } else if (entry.isSymbolicLink()) {
+        if (linked.uid !== currentUid() || linked.nlink !== 1) fail(`profile tree symlink 身份不安全：${relative}`)
+        records.push(['symlink', relative, linked.mode, await readlink(path)])
+      } else fail(`profile tree 含不支持的特殊文件：${relative}`)
+    }
+  }
+  await visit(profilePath)
+  return sha256(canonicalJson(records))
+}
+
+async function assertArchivedProfile(homePath, manifest) {
+  if (!validArchivedProfile(manifest.archivedProfile, manifest)) fail('supervised uninstall 缺少有效的归档绑定。')
+  const archivePath = join(homePath, manifest.archivedProfile.relativePath)
+  const entry = await assertCriticalDirectory(archivePath, manifest.archivedProfile.identity)
+  if (String(entry.dev) !== manifest.archivedProfile.identity.dev || String(entry.ino) !== manifest.archivedProfile.identity.ino
+    || await profileTreeDigest(archivePath) !== manifest.archivedProfile.treeDigest) {
+    fail(`supervised uninstall 归档内容或身份发生变化：${archivePath}`)
+  }
+}
+
+async function moveBoundDirectoryNoReplace(source, destination, expectedIdentity, guard) {
+  const helper = [
+    'import ctypes, os, re, stat, sys',
+    'source, destination, expected_dev, expected_ino, expected_uid, guard_path, guard_dev, guard_ino = sys.argv[1:]',
+    'source_parent, source_name = os.path.split(source)',
+    'destination_parent, destination_name = os.path.split(destination)',
+    'def open_parent(path):',
+    '  match = re.fullmatch(r"/proc/self/fd/(\\d+)", path)',
+    '  return os.dup(int(match.group(1))) if match else os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)',
+    'source_fd = open_parent(source_parent)',
+    'destination_fd = open_parent(destination_parent)',
+    'guard_fd = None',
+    'try:',
+    '  if guard_path:',
+    '    guard_fd = os.open(guard_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)',
+    '    guard_entry = os.fstat(guard_fd)',
+    '    if (guard_entry.st_dev, guard_entry.st_ino) != (int(guard_dev), int(guard_ino)): raise RuntimeError("guard identity changed")',
+    '  entry = os.stat(source_name, dir_fd=source_fd, follow_symlinks=False)',
+    '  if not stat.S_ISDIR(entry.st_mode) or (entry.st_dev, entry.st_ino) != (int(expected_dev), int(expected_ino)) or (expected_uid and entry.st_uid != int(expected_uid)): raise RuntimeError("source identity changed")',
+    '  libc = ctypes.CDLL(None, use_errno=True)',
+    '  renameat2 = getattr(libc, "renameat2", None)',
+    '  if renameat2 is None: raise RuntimeError("renameat2 unavailable")',
+    '  if renameat2(source_fd, source_name.encode(), destination_fd, destination_name.encode(), 1) != 0: raise RuntimeError("renameat2 noreplace errno=%d" % ctypes.get_errno())',
+    '  moved = os.stat(destination_name, dir_fd=destination_fd, follow_symlinks=False)',
+    '  if (moved.st_dev, moved.st_ino) != (int(expected_dev), int(expected_ino)) or (expected_uid and moved.st_uid != int(expected_uid)): raise RuntimeError("destination identity changed")',
+    '  os.fsync(destination_fd)',
+    '  if source_fd != destination_fd: os.fsync(source_fd)',
+    'finally:',
+    '  if guard_fd is not None: os.close(guard_fd)',
+    '  os.close(source_fd)',
+    '  if destination_fd != source_fd: os.close(destination_fd)',
+  ].join('\n')
+  try {
+    await run('/usr/bin/python3', ['-I', '-S', '-c', helper, source, destination,
+      String(expectedIdentity.dev), String(expectedIdentity.ino), String(expectedIdentity.uid ?? currentUid()),
+      guard?.path ?? '', String(guard?.identity?.dev ?? ''), String(guard?.identity?.ino ?? '')], {
+      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }, capture: true, timeoutMs: 30_000, passFds: [3],
+    })
+  } catch (error) {
+    fail(`无法无覆盖地移动绑定目录 ${source} -> ${destination}：${error instanceof Error ? error.message : String(error)}`)
+  }
 }
 
 async function recoverBoundTransaction({
@@ -1272,7 +1494,7 @@ async function recoverBoundTransaction({
     await assertCriticalDirectory(backupHome, manifest.originalIdentity)
     assertLockParentStable(homePath)
     if (await existingIdentity(physicalHomePath) !== undefined) fail('DSH_HOME 在恢复 rename 前重新出现；拒绝覆盖。')
-    await rename(backupHome, physicalHomePath)
+    await moveBoundDirectoryNoReplace(backupHome, physicalHomePath, manifest.originalIdentity)
     assertLockParentStable(homePath)
     await fsyncPath(physicalTransactionRoot, true)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -1289,14 +1511,14 @@ async function recoverBoundTransaction({
     await assertCriticalDirectory(physicalHomePath, manifest.stagedIdentity)
     await assertCriticalDirectory(backupHome, manifest.originalIdentity)
     assertLockParentStable(homePath)
-    await rename(physicalHomePath, failedHome)
+    await moveBoundDirectoryNoReplace(physicalHomePath, failedHome, manifest.stagedIdentity)
     assertLockParentStable(homePath)
     await fsyncPath(physicalTransactionRoot, true)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
     await assertCriticalDirectory(backupHome, manifest.originalIdentity)
     assertLockParentStable(homePath)
     if (await existingIdentity(physicalHomePath) !== undefined) fail('DSH_HOME 在恢复 rename 前重新出现；拒绝覆盖。')
-    await rename(backupHome, physicalHomePath)
+    await moveBoundDirectoryNoReplace(backupHome, physicalHomePath, manifest.originalIdentity)
     assertLockParentStable(homePath)
     await fsyncPath(physicalTransactionRoot, true)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -1469,9 +1691,9 @@ const ownership = (unit) => {
   const working = values.WorkingDirectory
   if (working === '' || !isAbsolute(working)) return undefined
   const canonicalWorking = canonical(working)
+  if (canonicalHome === undefined || canonicalWorking === undefined) return undefined
   const homeMatches = canonicalHome === containmentHome
-  const workingMatches = canonicalWorking !== undefined
-    && (canonicalWorking === containmentHome || canonicalWorking.startsWith(containmentHome + sep))
+  const workingMatches = canonicalWorking === containmentHome || canonicalWorking.startsWith(containmentHome + sep)
   if (homeMatches && workingMatches) return 'same-home'
   if (!homeMatches && !workingMatches) return 'foreign'
   return undefined
@@ -1914,6 +2136,10 @@ async function readRawServiceState(systemctlExecutable, unit) {
   const shown = parseSystemdShow((await runServiceCommand(systemctlExecutable, [
     '--user', 'show', unit, '--no-pager', ...SYSTEMD_SHOW_PROPERTIES.map(property => `--property=${property}`),
   ])).stdout, unit)
+  if (shown.Id !== unit) fail(`systemd raw state unit 身份不匹配：${unit}`)
+  for (const property of ['MainPID', 'ControlPID', 'NRestarts']) {
+    if (!/^(?:0|[1-9]\d*)$/u.test(shown[property])) fail(`systemd unit 数字状态无效：${unit}:${property}`)
+  }
   const mainPid = Number(shown.MainPID)
   const controlPid = Number(shown.ControlPID)
   const nRestarts = Number(shown.NRestarts)
@@ -2006,9 +2232,14 @@ async function captureServiceInventory(systemctlExecutable, homePath, targetProf
 }
 
 function sameServiceFileIdentity(actual, expected) {
+  return sameRegularFileIdentity(actual, expected, false)
+}
+
+function sameRegularFileIdentity(actual, expected, allowHardlinks) {
   return actual.isFile() && !actual.isSymbolicLink()
     && String(actual.dev) === expected.dev && String(actual.ino) === expected.ino
-    && actual.uid === expected.uid && actual.mode === expected.mode && actual.nlink === 1
+    && actual.uid === expected.uid && actual.mode === expected.mode
+    && (allowHardlinks ? actual.nlink >= 1 : actual.nlink === 1)
 }
 
 async function assertServiceFilesUnchanged(services) {
@@ -2626,55 +2857,136 @@ async function finalizeAcceptedServices({
   systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, containmentMasks, serviceStartBarriers,
   containmentStartBarriers,
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
+  restoreContainedEnablement = true,
 }) {
   await stageBoundMasks(systemctlExecutable, serviceMasks)
-  await stageBoundMasks(systemctlExecutable, containmentMasks)
+  if (restoreContainedEnablement) await stageBoundMasks(systemctlExecutable, containmentMasks)
+  else {
+    await installBoundMasks(systemctlExecutable, containmentMasks)
+    for (const barrier of containmentStartBarriers) {
+      await ensureServiceStartBarriers(systemctlExecutable, [barrier])
+      const state = await readRawServiceState(systemctlExecutable, barrier.unit)
+      const mask = containmentMasks.find(candidate => candidate.unit === barrier.unit)
+      if (mask === undefined || await boundMaskLocation(mask) !== 'installed'
+        || state.activeState !== 'inactive' || state.subState !== 'dead'
+        || state.mainPid !== 0 || state.controlPid !== 0) {
+        fail(`卸载收容 unit 未保持 persistent masked/disabled/inactive：${barrier.unit}`)
+      }
+    }
+  }
   await restoreServiceEnablement(systemctlExecutable, serviceStartBarriers)
-  await restoreServiceEnablement(systemctlExecutable, containmentStartBarriers)
+  if (restoreContainedEnablement) await restoreServiceEnablement(systemctlExecutable, containmentStartBarriers)
   await assertAcceptedServicesStillBound({
-    systemctlExecutable, journalctlExecutable, dshExecutable, services, homePath, targetProfile, unitUniverse,
-    foreignOwnership, cleanProfiles, acceptance, requireLarkReady,
+    systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
+    homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, acceptance, requireLarkReady,
   })
 }
 
 async function assertAcceptedServicesStillBound({
-  systemctlExecutable, journalctlExecutable, dshExecutable, services, homePath, targetProfile, unitUniverse,
-  foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
+  systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
+  homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
+}) {
+  if (!await acceptedServicesStillBound({
+    systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
+    homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, acceptance, requireLarkReady,
+  })) fail('systemd service acceptance 在 cleanup 前失效。')
+}
+
+async function acceptedServicesStillBound({
+  systemctlExecutable, journalctlExecutable, services, serviceMasks, serviceStartBarriers, homePath, targetProfile,
+  unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
 }) {
   await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
   await assertCleanProfileInventory(homePath, cleanProfiles)
   await assertServiceFilesUnchanged(services)
-  const current = await readServiceStates(systemctlExecutable, services, homePath, dshExecutable)
-  const byUnit = new Map(current.map(service => [service.unit, service]))
   const accepted = new Map(acceptance.map(service => [service.unit, service]))
+  let readyForCleanup = true
   for (const original of services) {
-    const service = byUnit.get(original.unit)
-    if (service === undefined) fail(`systemd service inventory 在 cleanup 前发生变化：${original.unit}`)
+    const mask = serviceMasks.find(candidate => candidate.unit === original.unit)
+    const barrier = serviceStartBarriers.find(candidate => candidate.unit === original.unit)
+    if (mask === undefined || barrier === undefined) fail(`systemd service cleanup 绑定不完整：${original.unit}`)
+    const maskLocation = await boundMaskLocation(mask)
+    if (maskLocation === 'missing') fail(`绑定的 systemd lifecycle mask 已丢失：${mask.path}`)
+    let enablementLocation = 'installed'
+    if (barrier.originalUnitFileState === 'enabled') {
+      enablementLocation = await boundEnablementLocation(barrier.enablement)
+      if (enablementLocation === 'missing') fail(`绑定的 systemd enablement link 已丢失：${barrier.unit}`)
+    } else if (barrier.originalUnitFileState !== 'disabled') {
+      fail(`systemd service start barrier 状态不受支持：${barrier.unit}`)
+    }
+    const service = await readRawServiceState(systemctlExecutable, original.unit)
+    if (!['loaded', 'masked'].includes(service.loadState)
+      || !['enabled', 'disabled', 'masked', 'masked-runtime'].includes(service.unitFileState)) {
+      fail(`systemd service raw load/unit-file state 无效：${original.unit}:${service.loadState}/${service.unitFileState}`)
+    }
+    const stableActive = service.activeState === 'active' && service.subState === 'running'
+      && service.mainPid > 0 && service.controlPid === 0 && service.invocationId !== ''
+    const stableInactive = service.activeState === 'inactive' && service.subState === 'dead'
+      && service.mainPid === 0 && service.controlPid === 0
+    if (!stableActive && !stableInactive) fail(`systemd service raw runtime state 无法安全重验：${original.unit}`)
+    if (maskLocation === 'installed') {
+      // renameat2() of the inode-bound mask and daemon-reload are not one
+      // syscall.  A crash between them can legitimately leave the filesystem
+      // mask installed while systemd still reports the previous loaded state.
+      readyForCleanup = false
+      continue
+    } else {
+      // The inverse cache-skew exists when the bound mask has moved back to
+      // staging but daemon-reload has not observed that move yet.
+      if (service.loadState === 'masked') {
+        readyForCleanup = false
+        continue
+      }
+      if (!await sameHomeRawServiceOwnership(service, homePath)) {
+        fail(`systemd service ownership 在 cleanup 前发生变化：${original.unit}`)
+      }
+      if (enablementLocation !== 'installed' || service.unitFileState !== barrier.originalUnitFileState) {
+        readyForCleanup = false
+      }
+    }
     if (!original.wasActive) {
       if (service.activeState !== 'inactive' || service.subState !== 'dead' || service.mainPid !== 0 || service.controlPid !== 0) {
-        fail(`原 inactive service 在 cleanup 前被启动：${original.unit}`)
+        readyForCleanup = false
       }
       continue
     }
     const proof = accepted.get(original.unit)
     if (proof === undefined || service.activeState !== 'active' || service.subState !== 'running'
       || service.mainPid !== proof.mainPid || service.invocationId !== proof.invocationId
-      || service.nRestarts !== proof.nRestarts) fail(`systemd service acceptance 在 cleanup 前失效：${original.unit}`)
+      || service.nRestarts !== proof.nRestarts) readyForCleanup = false
     if (requireLarkReady && original.profile === targetProfile
       && !LARK_ACCEPTED_STATES.has(await latestLarkJournalState(journalctlExecutable, service))) {
-      fail(`Lark service 在 cleanup 前未保持 connected：${original.unit}`)
+      readyForCleanup = false
     }
   }
+  return readyForCleanup
 }
 
 async function removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome }) {
+  const liveDescriptor = openSync(manifest.homePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  try {
+    if (!sameIdentity(fstatSync(liveDescriptor), manifest.stagedIdentity)) {
+      fail(`service-aware canonical home 身份已变化；拒绝删除原始备份：${manifest.homePath}`)
+    }
+    await removeCommittedTransactionBound({
+      physicalTransactionRoot, transactionRoot, manifest, backupHome, liveDescriptor,
+    })
+  } finally { closeSync(liveDescriptor) }
+}
+
+async function removeCommittedTransactionBound({
+  physicalTransactionRoot, transactionRoot, manifest: initialManifest, backupHome, liveDescriptor,
+}) {
+  let manifest = initialManifest
+  const liveHome = `/proc/self/fd/${liveDescriptor}`
   if (manifest.operation === 'uninstall') {
     if (typeof manifest.cleanProfileDigest !== 'string') {
       fail(`service-aware uninstall cleanup 缺少 clean baseline 绑定：${transactionRoot}`)
     }
-    await assertInstallerCleanWebProfile(manifest.homePath, manifest.profile, manifest.cleanProfileDigest)
+    await assertInstallerCleanWebProfile(liveHome, manifest.profile, manifest.cleanProfileDigest)
+    if (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION) await assertArchivedProfile(liveHome, manifest)
   }
-  await assertCleanProfileInventory(manifest.homePath, manifest.cleanProfiles ?? [])
+  await assertCleanProfileInventory(liveHome, manifest.cleanProfiles ?? [])
   const transactionIdentity = await lstat(physicalTransactionRoot)
   const expectedTransactionIdentity = manifest.transactionIdentity
     ?? (manifest.version === MANIFEST_VERSION ? identity(transactionIdentity) : undefined)
@@ -2690,20 +3002,115 @@ async function removeCommittedTransaction({ physicalTransactionRoot, transaction
       fail(`service-aware transaction root fd 身份不匹配：${transactionRoot}`)
     }
     const anchoredBackup = join(cleanupFdPath, basename(backupHome))
+    const tombstoneName = 'cleanup-original-home'
+    const anchoredTombstone = join(cleanupFdPath, tombstoneName)
     const backupIdentity = await existingIdentity(anchoredBackup)
-    if (backupIdentity !== undefined) {
+    const tombstoneIdentity = await existingIdentity(anchoredTombstone)
+    if (backupIdentity !== undefined && tombstoneIdentity !== undefined) {
+      fail(`service-aware cleanup 同时存在 original-home 与 deletion tombstone：${transactionRoot}`)
+    }
+    if (manifest.cleanup === undefined) {
+      if (backupIdentity === undefined) {
+        manifest = await writeManifest(cleanupFdPath, manifest, 'cleanup-started', {
+          cleanup: { protocol: SERVICE_CLEANUP_PROTOCOL, phase: 'metadata-only', tombstoneName, identity: manifest.originalIdentity },
+        })
+      } else {
+        if (!sameIdentity(backupIdentity, manifest.originalIdentity)) fail(`service-aware original-home 身份不匹配；拒绝清理：${backupHome}`)
+        await assertProfileDigest(anchoredBackup, manifest.profile, manifest.originalProfileDigest)
+        const boundBackupIdentity = identity(backupIdentity)
+        manifest = await writeManifest(cleanupFdPath, manifest, 'cleanup-started', {
+          cleanup: { protocol: SERVICE_CLEANUP_PROTOCOL, phase: 'prepared', tombstoneName, identity: boundBackupIdentity },
+        })
+      }
+    }
+    if (manifest.cleanup.phase === 'prepared') {
+      if (backupIdentity !== undefined) {
+        await moveBoundDirectoryNoReplace(backupHome, join(physicalTransactionRoot, tombstoneName),
+          manifest.cleanup.identity, manifest.transactionIdentity === undefined ? undefined
+            : { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
+      } else if (!sameIdentity(tombstoneIdentity, manifest.cleanup.identity)) {
+        fail(`service-aware cleanup tombstone 身份未知：${transactionRoot}`)
+      }
+      manifest = await writeManifest(cleanupFdPath, manifest, 'cleanup-started', {
+        cleanup: { ...manifest.cleanup, phase: 'tombstoned' },
+      })
+    }
+    if (manifest.cleanup.phase === 'tombstoned') {
+      const currentTombstone = await existingIdentity(anchoredTombstone)
+      if (!sameIdentity(currentTombstone, manifest.cleanup.identity)) fail(`service-aware cleanup tombstone 身份不匹配：${transactionRoot}`)
+      await assertProfileDigest(anchoredTombstone, manifest.profile, manifest.originalProfileDigest)
+      await assertNoMounts(anchoredTombstone)
+      manifest = await writeManifest(cleanupFdPath, manifest, 'cleanup-started', {
+        cleanup: { ...manifest.cleanup, phase: 'deleting' },
+      })
+    }
+    if (manifest.cleanup.phase === 'deleting') {
+      const currentTombstone = await existingIdentity(anchoredTombstone)
+      if (currentTombstone !== undefined) {
+        assertExpectedDirectoryMetadata(currentTombstone, manifest.cleanup.identity, anchoredTombstone)
+        await assertNoMounts(anchoredTombstone)
+        if (!sameIdentity(fstatSync(liveDescriptor), manifest.stagedIdentity)
+          || !sameIdentity(await lstat(manifest.homePath), manifest.stagedIdentity)) {
+          fail(`service-aware canonical home 在不可逆删除前发生替换：${manifest.homePath}`)
+        }
+        const deletion = [
+          'import os, stat, sys',
+          'parent_fd, name, expected_dev, expected_ino, expected_uid = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])',
+          'root_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)',
+          'def purge(fd):',
+          '  for entry in os.listdir(fd):',
+          '    info = os.stat(entry, dir_fd=fd, follow_symlinks=False)',
+          '    if stat.S_ISDIR(info.st_mode):',
+          '      child = os.open(entry, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)',
+          '      try: purge(child)',
+          '      finally: os.close(child)',
+          '      os.rmdir(entry, dir_fd=fd)',
+          '    else:',
+          '      os.unlink(entry, dir_fd=fd)',
+          'try:',
+          '  info = os.fstat(root_fd)',
+          '  if (info.st_dev, info.st_ino, info.st_uid) != (expected_dev, expected_ino, expected_uid): raise RuntimeError("tombstone identity changed")',
+          '  purge(root_fd)',
+          '  os.fsync(root_fd)',
+          'finally: os.close(root_fd)',
+          'os.rmdir(name, dir_fd=parent_fd)',
+          'os.fsync(parent_fd)',
+        ].join('\n')
+        await run('/usr/bin/python3', ['-I', '-S', '-c', deletion, '3', tombstoneName,
+          manifest.cleanup.identity.dev, manifest.cleanup.identity.ino, String(manifest.cleanup.identity.uid)], {
+          env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }, capture: true, timeoutMs: 30_000,
+          passFds: [cleanupDescriptor],
+        })
+        await fsyncPath(cleanupFdPath, true)
+      }
+      manifest = await writeManifest(cleanupFdPath, manifest, 'cleanup-started', {
+        cleanup: { ...manifest.cleanup, phase: 'metadata-only' },
+      })
+    }
+    if (manifest.cleanup.phase !== 'metadata-only') fail(`service-aware cleanup phase 无效：${transactionRoot}`)
+    const remainingBackup = await existingIdentity(anchoredBackup)
+    const remainingTombstone = await existingIdentity(anchoredTombstone)
+    if (remainingBackup !== undefined || remainingTombstone !== undefined) fail(`service-aware cleanup 删除阶段未收敛：${transactionRoot}`)
+    if (backupIdentity !== undefined && manifest.cleanup.phase === 'metadata-only') {
       if (!sameIdentity(backupIdentity, manifest.originalIdentity)) {
         fail(`service-aware original-home 身份不匹配；拒绝清理：${backupHome}`)
       }
-      await assertProfileDigest(anchoredBackup, manifest.profile, manifest.originalProfileDigest)
+    }
+    if (!sameIdentity(fstatSync(liveDescriptor), manifest.stagedIdentity)
+      || !sameIdentity(await lstat(manifest.homePath), manifest.stagedIdentity)) {
+      fail(`service-aware canonical home 在删除前发生替换：${manifest.homePath}`)
     }
     await assertNoMounts(cleanupFdPath)
     const entries = await readdir(cleanupFdPath)
     if (!entries.includes('manifest.json')) {
       fail(`service-aware transaction root 在清理前缺少 manifest：${transactionRoot}`)
     }
+    const allowedCleanupEntries = new Set(['manifest.json', 'service-mask-staging', 'service-enablement'])
+    const unknownEntries = entries.filter(entry => !allowedCleanupEntries.has(entry))
+    if (unknownEntries.length > 0) fail(`service-aware cleanup 包含未知事务条目：${unknownEntries.join(', ')}`)
     for (const entry of entries) {
       if (entry === 'manifest.json') continue
+      await assertOwnedPrivateDirectory(join(cleanupFdPath, entry))
       await rm(join(cleanupFdPath, entry), { recursive: true })
     }
     await fsyncPath(cleanupFdPath, true)
@@ -2742,6 +3149,39 @@ async function recoverServiceTransaction({
   if (!Array.isArray(unitUniverse) || unitUniverse.some(unit => typeof unit !== 'string' || !SYSTEMD_UNIT.test(unit))) {
     fail(`service-aware manifest 中的 unit universe 无效：${transactionRoot}`)
   }
+  if (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION && manifest.operation === 'uninstall' && homeIsStaged) {
+    await assertProfileDigest(physicalHomePath, profile, manifest.stagedProfileDigest)
+    await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
+    await assertArchivedProfile(physicalHomePath, manifest)
+    await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
+  }
+  if (isServiceManifestVersion(manifest.version) && homeIsStaged && manifest.state === 'cleanup-started'
+    && manifest.cleanup !== undefined && ['deleting', 'metadata-only'].includes(manifest.cleanup.phase)) {
+    await assertProfileDigest(physicalHomePath, profile, manifest.stagedProfileDigest)
+    if (manifest.operation === 'uninstall' && manifest.version !== SUPERVISED_SERVICE_MANIFEST_VERSION) {
+      await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
+    }
+    await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
+    const acceptanceStillBound = await acceptedServicesStillBound({
+      ...serviceContext, services, serviceMasks, serviceStartBarriers, homePath, targetProfile: profile, unitUniverse,
+      foreignOwnership, cleanProfiles, acceptance: manifest.serviceAcceptance,
+      requireLarkReady: manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION && manifest.operation === 'upgrade',
+    })
+    if (acceptanceStillBound && manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION && manifest.operation === 'upgrade') {
+      await assertPersistedSupervisedAcceptance({
+        homePath, profile, dshExecutable, acceptance: manifest.supervisedLifecycle.postSwapAcceptance,
+      })
+      await assertAcceptedSupervisedInvocation({
+        ...serviceContext, services, homePath, dshExecutable, profile,
+        acceptance: manifest.supervisedLifecycle.postSwapAcceptance,
+      })
+    }
+    if (acceptanceStillBound) {
+      await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
+      process.stdout.write('service-aware 生命周期恢复：已完成崩溃中断的绑定清理。\n')
+      return 'service-committed'
+    }
+  }
   manifest = await stopRelatedServices(
     serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop,
     physicalTransactionRoot, manifest,
@@ -2752,7 +3192,7 @@ async function recoverServiceTransaction({
   const target = services.find(service => service.profile === profile)
   if (target === undefined) fail(`service-aware manifest 缺少目标 unit：${transactionRoot}`)
   if (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION && target.wasActive !== true) {
-    fail(`supervised recovery manifest 的目标 unit 原本不是 active：${transactionRoot}`)
+    fail(`supervised lifecycle 要求目标 unit 原本是 active：${transactionRoot}`)
   }
   await assertServiceFilesUnchanged(services)
   const assertCommittedCleanProfile = async () => {
@@ -2762,7 +3202,8 @@ async function recoverServiceTransaction({
     }
     await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
   }
-  const supervisedContext = manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION
+  const supervisedSource = manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION
+  const supervisedContext = manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION && manifest.operation === 'upgrade'
     ? {
         homePath, profile, dshExecutable, supervisedNonce: manifest.supervisedLifecycle.activationNonce,
         supervisedCatalogDigest: manifest.supervisedLifecycle.catalogDigest,
@@ -2771,12 +3212,15 @@ async function recoverServiceTransaction({
         supervisedSource: manifest.supervisedLifecycle.source,
       }
     : undefined
-  if (supervisedContext !== undefined && manifest.supervisedLifecycle.source === undefined) {
+  if (supervisedSource && manifest.supervisedLifecycle.source === undefined) {
+    const sourceHome = homeIsOriginal ? physicalHomePath : backupIsOriginal ? backupHome : physicalHomePath
     const source = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
       homePath: homeIsOriginal ? homePath : backupIsOriginal ? backupHome : homePath, profile, dshExecutable,
     }, 'attest-active'))
     manifest = await writeManifest(physicalTransactionRoot, {
-      ...manifest, servicePhase: 'stopped', supervisedLifecycle: {
+      ...manifest, ...(manifest.operation === 'uninstall' ? {
+        originalProfileTreeDigest: await profileTreeDigest(join(sourceHome, 'profiles', profile)),
+      } : {}), servicePhase: 'stopped', supervisedLifecycle: {
         ...manifest.supervisedLifecycle, phase: 'source-attested', databasePaths: source.databasePaths, source,
       },
     }, 'preparing')
@@ -2786,7 +3230,7 @@ async function recoverServiceTransaction({
     await assertProfileDigest(physicalHomePath, profile, manifest.originalProfileDigest)
     manifest = await stopRelatedServices(serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop, physicalTransactionRoot, manifest)
     let sourceAcceptance
-    if (supervisedContext !== undefined) {
+    if (supervisedSource) {
       manifest = await persistSourceRestoreAttempt({ manifest, physicalTransactionRoot, homePath, profile, dshExecutable })
       sourceAcceptance = sourceRestoreAcceptance({ manifest, homePath, profile, dshExecutable, timeouts })
     }
@@ -2794,7 +3238,7 @@ async function recoverServiceTransaction({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
       homePath, targetProfile: profile, unitUniverse, foreignOwnership, timeouts,
-      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedContext !== undefined,
+      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedSource,
     })
     const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -2806,11 +3250,12 @@ async function recoverServiceTransaction({
     await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
     manifest = await stopRelatedServices(serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop, physicalTransactionRoot, manifest)
     assertLockParentStable(homePath)
-    await rename(backupHome, physicalHomePath)
+    await moveBoundDirectoryNoReplace(backupHome, physicalHomePath, manifest.originalIdentity,
+      { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
     await fsyncPath(physicalTransactionRoot, true)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
     let sourceAcceptance
-    if (supervisedContext !== undefined) {
+    if (supervisedSource) {
       manifest = await persistSourceRestoreAttempt({ manifest, physicalTransactionRoot, homePath, profile, dshExecutable })
       sourceAcceptance = sourceRestoreAcceptance({ manifest, homePath, profile, dshExecutable, timeouts })
     }
@@ -2818,7 +3263,7 @@ async function recoverServiceTransaction({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
       homePath, targetProfile: profile, unitUniverse, foreignOwnership, timeouts,
-      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedContext !== undefined,
+      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedSource,
     })
     const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -2841,13 +3286,21 @@ async function recoverServiceTransaction({
         homePath, profile, dshExecutable,
       }, 'snapshot'), false)
     }
+    // cleanup-started is durable before removeCommittedTransaction creates its
+    // phase descriptor.  If the backup disappears after that commit point,
+    // recovery must keep the outer cleanup state even while it freshly
+    // reaccepts services; otherwise a second acceptance failure strands an
+    // irreversible transaction as ordinary service-failed residue.
+    const resumeCleanup = manifest.state === 'cleanup-started'
     manifest = await writeManifest(physicalTransactionRoot, {
       ...manifest, servicePhase: 'starting',
-      ...(supervisedContext === undefined ? {} : { supervisedLifecycle: {
+      ...(supervisedSource ? { supervisedLifecycle: manifest.operation === 'uninstall' ? {
+        ...manifest.supervisedLifecycle, phase: 'clean-target-pending',
+      } : {
         ...manifest.supervisedLifecycle, phase: 'post-swap-pending', postSwapAcceptance: undefined,
         startAttempt: { kind: 'accept-active', baselineGeneration: recoveryStartBaseline.recoveryProof.bootstrap.generation },
-      } }),
-    }, cleanupWithoutBackup ? 'cleanup-started' : 'swapped')
+      } } : {}),
+    }, resumeCleanup ? 'cleanup-started' : 'swapped')
     let accepted
     try {
       let postSwapProof
@@ -2855,14 +3308,21 @@ async function recoverServiceTransaction({
         ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
         unitUniverse, foreignOwnership, cleanProfiles, timeouts,
         requireLarkReady: supervisedContext !== undefined,
-        ...(supervisedContext === undefined ? {} : { acceptAfterReady: async () => {
+        ...(supervisedSource ? { ...(supervisedContext === undefined ? {} : { acceptAfterReady: async () => {
           postSwapProof = await awaitSupervisedDirectSuccessor(supervisedContext, { recoveryProof: { bootstrap: {
             generation: manifest.supervisedLifecycle.startAttempt.baselineGeneration,
           } } }, 'active', timeouts.ready)
-        }, durableAccept: async acceptedStates => {
+        } }), durableAccept: async acceptedStates => {
           const serviceAcceptance = acceptedStates.map(service => ({
             unit: service.unit, invocationId: service.invocationId, mainPid: service.mainPid, nRestarts: service.nRestarts,
           }))
+          if (manifest.operation === 'uninstall') {
+            manifest = await writeManifest(physicalTransactionRoot, {
+              ...manifest, servicePhase: 'service-accepted', serviceAcceptance, serviceFailure: undefined,
+              supervisedLifecycle: { ...manifest.supervisedLifecycle, phase: 'clean-target-accepted' },
+            }, resumeCleanup ? 'cleanup-started' : 'service-accepted')
+            return
+          }
           const targetAcceptance = serviceAcceptance.find(service => service.unit === `dsh-profile-${profile}.service`)
           if (targetAcceptance === undefined) fail('supervised durable acceptance 缺少目标 InvocationID。')
           manifest = await writeManifest(physicalTransactionRoot, {
@@ -2878,8 +3338,8 @@ async function recoverServiceTransaction({
                 recoveryProof: postSwapProof.proof.recoveryProof, automationsProof: postSwapProof.proof.automationsProof,
               },
             },
-          }, cleanupWithoutBackup ? 'cleanup-started' : 'service-accepted')
-        } }),
+          }, resumeCleanup ? 'cleanup-started' : 'service-accepted')
+        } } : {}),
       })
     } catch (error) {
       if (supervisedContext !== undefined && manifest.supervisedLifecycle.source === undefined) {
@@ -2897,16 +3357,16 @@ async function recoverServiceTransaction({
       } catch {}
       await writeManifest(physicalTransactionRoot, {
         ...manifest, servicePhase: 'service-failed', serviceFailure: error instanceof Error ? error.message : String(error),
-      }, cleanupWithoutBackup ? 'cleanup-started' : 'service-failed').catch(() => {})
+      }, resumeCleanup ? 'cleanup-started' : 'service-failed').catch(() => {})
       throw error
     }
     const acceptance = accepted.map(service => ({
       unit: service.unit, invocationId: service.invocationId, mainPid: service.mainPid, nRestarts: service.nRestarts,
     }))
-    if (supervisedContext === undefined) {
+    if (!supervisedSource) {
       manifest = await writeManifest(physicalTransactionRoot, {
         ...manifest, servicePhase: 'service-accepted', serviceAcceptance: acceptance, serviceFailure: undefined,
-      }, cleanupWithoutBackup ? 'cleanup-started' : 'service-accepted')
+      }, resumeCleanup ? 'cleanup-started' : 'service-accepted')
     }
     await assertCommittedCleanProfile()
     await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
@@ -2915,6 +3375,7 @@ async function recoverServiceTransaction({
       containmentStartBarriers: manifest.containmentStartBarriers,
       serviceStartBarriers, homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, acceptance,
       requireLarkReady: supervisedContext !== undefined,
+      restoreContainedEnablement: manifest.operation !== 'uninstall',
     })
     if (supervisedContext !== undefined) {
       await assertPersistedSupervisedAcceptance({
@@ -3273,12 +3734,16 @@ function sourceSupervisedPlan(source) {
 
 async function persistSourceRestoreAttempt({ manifest, physicalTransactionRoot, homePath, profile, dshExecutable }) {
   const raw = compactSupervisedSnapshot(await runSupervisedOperatorDirect({ homePath, profile, dshExecutable }, 'snapshot'), false)
+  const lifecycle = manifest.operation === 'uninstall' ? {
+    ...manifest.supervisedLifecycle, phase: 'source-attested',
+    startAttempt: { kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation },
+  } : {
+    ...manifest.supervisedLifecycle, phase: 'source-attested', catalogDigest: undefined,
+    previewPlan: undefined, previewAcceptance: undefined, activePlan: undefined, postSwapAcceptance: undefined,
+    startAttempt: { kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation },
+  }
   return await writeManifest(physicalTransactionRoot, {
-    ...manifest, servicePhase: 'starting', supervisedLifecycle: {
-      ...manifest.supervisedLifecycle, phase: 'source-attested', catalogDigest: undefined,
-      previewPlan: undefined, previewAcceptance: undefined, activePlan: undefined, postSwapAcceptance: undefined,
-      startAttempt: { kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation },
-    },
+    ...manifest, servicePhase: 'starting', supervisedLifecycle: lifecycle,
   }, 'preparing')
 }
 
@@ -3660,9 +4125,6 @@ function assertExpectedScenario(expectedScenario, serviceAware, operation = 'upg
   if (!LIFECYCLE_SCENARIOS.has(expectedScenario) && !emptyUninstall) {
     fail('lifecycle expected scenario must be web, autonomy, lark, or supervised', 2)
   }
-  if (expectedScenario === 'supervised' && operation !== 'upgrade') {
-    fail('supervised lifecycle is only available for upgrade', 2)
-  }
   if (serviceAware !== (expectedScenario === 'lark' || expectedScenario === 'supervised')) {
     fail(serviceAware
       ? 'service-aware lifecycle expected scenario must be lark or supervised'
@@ -3912,8 +4374,11 @@ async function performLifecycle({
     stagedIdentity: undefined, stagedProfileDigest: undefined, createdAt: new Date().toISOString(),
     expectedScenario, stagedScenario: operation === 'uninstall' ? 'unsupported' : expectedScenario,
     ...(expectedScenario === 'supervised' ? {
-      supervisedLifecycle: {
-        protocol: SUPERVISED_PROTOCOL, phase: 'source-pending', activationNonce: randomUUID(),
+      supervisedLifecycle: operation === 'uninstall' ? {
+        protocol: SUPERVISED_UNINSTALL_PROTOCOL, phase: 'source-pending',
+        databasePaths: undefined, source: undefined, startAttempt: undefined,
+      } : {
+        protocol: SUPERVISED_UPGRADE_PROTOCOL, phase: 'source-pending', activationNonce: randomUUID(),
         catalogDigest: undefined, databasePaths: undefined, source: undefined,
         previewPlan: undefined, previewAcceptance: undefined, activePlan: undefined,
         postSwapAcceptance: undefined,
@@ -3965,7 +4430,10 @@ async function performLifecycle({
           homePath, profile, dshExecutable,
         }, 'attest-active'))
         manifest = await writeManifest(physicalTransactionRoot, {
-          ...manifest, supervisedLifecycle: {
+          ...manifest, ...(operation === 'uninstall' ? {
+            originalProfileTreeDigest: await profileTreeDigest(current.profilePath),
+          } : {}),
+          supervisedLifecycle: {
             ...manifest.supervisedLifecycle, phase: 'source-attested', databasePaths: stoppedSource.databasePaths,
             source: stoppedSource,
           },
@@ -3979,12 +4447,13 @@ async function performLifecycle({
             homePath, profile, dshExecutable,
           }, 'snapshot'), false)
           manifest = await writeManifest(physicalTransactionRoot, {
-            ...manifest, servicePhase: 'starting', supervisedLifecycle: {
+            ...manifest, servicePhase: 'starting', supervisedLifecycle: operation === 'uninstall' ? {
+              ...manifest.supervisedLifecycle, phase: 'source-attested',
+              startAttempt: { kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation },
+            } : {
               ...manifest.supervisedLifecycle, phase: 'source-attested', catalogDigest: undefined,
               previewPlan: undefined, previewAcceptance: undefined, activePlan: undefined, postSwapAcceptance: undefined,
-              startAttempt: {
-                kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation,
-              },
+              startAttempt: { kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation },
             },
           }, 'preparing')
           const identity = sourceSupervisedIdentity(manifest.supervisedLifecycle.source)
@@ -4043,6 +4512,7 @@ async function performLifecycle({
       const copiedSource = compactSupervisedSnapshot(await runSupervisedOperator(sandbox, 'attest-active'))
       assertCopiedSupervisedSnapshot(manifest.supervisedLifecycle.source, copiedSource)
     }
+    let archivedProfile
     if (operation === 'upgrade') {
       await sandboxRun(sandbox, [dshExecutable, 'plugin', '--profile', profile, 'add', ...targets], {
         extraEnvironment: { npm_config_offline: 'true', npm_config_package_import_method: 'copy' },
@@ -4051,12 +4521,23 @@ async function performLifecycle({
       const archiveRoot = join(stageHome, 'uninstalled-profiles')
       await mkdir(archiveRoot, { recursive: true, mode: 0o700 })
       const archiveName = `${profile}-${new Date().toISOString().replaceAll(/[-:.]/gu, '')}-${manifest.id}`
-      await rename(join(stageHome, 'profiles', profile), join(archiveRoot, archiveName))
+      const sourceProfilePath = join(stageHome, 'profiles', profile)
+      const archivePath = join(archiveRoot, archiveName)
+      const archiveSourceIdentity = identity(await lstat(sourceProfilePath))
+      const archiveTreeDigest = await profileTreeDigest(sourceProfilePath)
+      if (expectedScenario === 'supervised' && archiveTreeDigest !== manifest.originalProfileTreeDigest) {
+        fail('supervised uninstall copied profile tree 与 stopped source 不一致。')
+      }
+      await moveBoundDirectoryNoReplace(sourceProfilePath, archivePath, archiveSourceIdentity)
+      archivedProfile = {
+        relativePath: `uninstalled-profiles/${archiveName}`, identity: identity(await lstat(archivePath)),
+        profileDigest: manifest.originalProfileDigest, treeDigest: archiveTreeDigest,
+      }
       await initializeCleanWebProfile(stageHome, profile)
     }
     const committedScenario = manifest.stagedScenario
     const packageScenario = await validateComposedConfig({ ...sandbox, expectedScenario: committedScenario }, 'after-package')
-    if (expectedScenario === 'supervised') {
+    if (expectedScenario === 'supervised' && operation === 'upgrade') {
       const nonce = manifest.supervisedLifecycle.activationNonce
       const overlay = supervisedPreviewOverlayPaths(sandbox)
       // Clear any dotfile left by a crashed earlier attempt; prepare-preview
@@ -4138,7 +4619,11 @@ async function performLifecycle({
       : undefined
     manifest = await writeManifest(physicalTransactionRoot, {
       ...manifest, stagedProfileDigest: sha256(validatedProfile.source), cleanProfileDigest,
+      ...(expectedScenario === 'supervised' && operation === 'uninstall' ? {
+        archivedProfile, supervisedLifecycle: { ...manifest.supervisedLifecycle, phase: 'clean-target-validated' },
+      } : {}),
     }, 'validated')
+    if (expectedScenario === 'supervised' && operation === 'uninstall') await assertArchivedProfile(stageHome, manifest)
 
     assertLockParentStable(homePath)
     assertExpectedDirectoryMetadata(await lstat(physicalHomePath), originalStat, homePath)
@@ -4151,7 +4636,8 @@ async function performLifecycle({
         ...serviceContext, services, serviceMasks, homePath, dshExecutable, unitUniverse, foreignOwnership,
       })
     }
-    await rename(physicalHomePath, backupHome)
+    await moveBoundDirectoryNoReplace(physicalHomePath, backupHome, manifest.originalIdentity,
+      { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
     assertLockParentStable(homePath)
     await fsyncPath(physicalTransactionRoot, true)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -4161,7 +4647,8 @@ async function performLifecycle({
         await assertNoUnmanagedHomeProcesses(homePath, [await realpath(backupHome)])
       } catch (error) {
         if (await existingIdentity(physicalHomePath) !== undefined) fail('DSH_HOME 在 post-rename quiescence 恢复前重新出现；拒绝覆盖。')
-        await rename(backupHome, physicalHomePath)
+        await moveBoundDirectoryNoReplace(backupHome, physicalHomePath, manifest.originalIdentity,
+          { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
         await fsyncPath(physicalTransactionRoot, true)
         await fsyncPath(LOCK_PARENT_FD_PATH, true)
         throw error
@@ -4178,7 +4665,8 @@ async function performLifecycle({
         equivalentHomePaths: [await realpath(backupHome)],
       })
     }
-    await rename(stageHome, physicalHomePath)
+    await moveBoundDirectoryNoReplace(stageHome, physicalHomePath, manifest.stagedIdentity,
+      { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
     assertLockParentStable(homePath)
     await fsyncPath(physicalTransactionRoot, true)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -4187,8 +4675,9 @@ async function performLifecycle({
       ...manifest, ...(serviceContext === undefined ? {} : { servicePhase: 'swapped' }),
     }, 'swapped')
     await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
+    if (expectedScenario === 'supervised' && operation === 'uninstall') await assertArchivedProfile(physicalHomePath, manifest)
     if (serviceContext !== undefined) {
-      if (expectedScenario === 'supervised') {
+      if (expectedScenario === 'supervised' && operation === 'upgrade') {
         const rawBeforeStart = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
           homePath, profile, dshExecutable,
         }, 'snapshot'), false)
@@ -4199,28 +4688,31 @@ async function performLifecycle({
           },
         }, 'swapped')
       } else {
-        manifest = await writeManifest(physicalTransactionRoot, { ...manifest, servicePhase: 'starting' }, 'swapped')
+        manifest = await writeManifest(physicalTransactionRoot, {
+          ...manifest, servicePhase: 'starting', serviceAcceptance: undefined,
+          ...(expectedScenario === 'supervised' ? {
+            supervisedLifecycle: { ...manifest.supervisedLifecycle, phase: 'clean-target-pending' },
+          } : {}),
+        }, 'swapped')
       }
       try {
         let postSwapProof
         const accepted = await startAndAcceptServices({
           ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
           unitUniverse, foreignOwnership, cleanProfiles, timeouts,
-          requireLarkReady: expectedScenario === 'supervised',
-          ...(expectedScenario === 'supervised' ? { acceptAfterReady: async () => {
-            postSwapProof = await awaitSupervisedDirectSuccessor({
-              homePath, profile, dshExecutable, supervisedNonce: manifest.supervisedLifecycle.activationNonce,
-              supervisedCatalogDigest: manifest.supervisedLifecycle.catalogDigest,
-              supervisedPlan: manifest.supervisedLifecycle.activePlan,
-              previewAcceptance: manifest.supervisedLifecycle.previewAcceptance,
-              supervisedSource: manifest.supervisedLifecycle.source,
-            }, { recoveryProof: { bootstrap: {
-              generation: manifest.supervisedLifecycle.startAttempt.baselineGeneration,
-            } } }, 'active', timeouts.ready)
-          }, durableAccept: async acceptedStates => {
+        requireLarkReady: expectedScenario === 'supervised' && operation === 'upgrade',
+        ...(expectedScenario === 'supervised' ? {
+          durableAccept: async acceptedStates => {
             const serviceAcceptance = acceptedStates.map(service => ({
               unit: service.unit, invocationId: service.invocationId, mainPid: service.mainPid, nRestarts: service.nRestarts,
             }))
+            if (operation === 'uninstall') {
+              manifest = await writeManifest(physicalTransactionRoot, {
+                ...manifest, servicePhase: 'service-accepted', serviceAcceptance, serviceFailure: undefined,
+                supervisedLifecycle: { ...manifest.supervisedLifecycle, phase: 'clean-target-accepted' },
+              }, 'service-accepted')
+              return
+            }
             const targetAcceptance = serviceAcceptance.find(service => service.unit === `dsh-profile-${profile}.service`)
             if (targetAcceptance === undefined) fail('supervised durable acceptance 缺少目标 InvocationID。')
             manifest = await writeManifest(physicalTransactionRoot, {
@@ -4237,7 +4729,19 @@ async function performLifecycle({
                 },
               },
             }, 'service-accepted')
+          },
+          ...(operation === 'upgrade' ? { acceptAfterReady: async () => {
+            postSwapProof = await awaitSupervisedDirectSuccessor({
+              homePath, profile, dshExecutable, supervisedNonce: manifest.supervisedLifecycle.activationNonce,
+              supervisedCatalogDigest: manifest.supervisedLifecycle.catalogDigest,
+              supervisedPlan: manifest.supervisedLifecycle.activePlan,
+              previewAcceptance: manifest.supervisedLifecycle.previewAcceptance,
+              supervisedSource: manifest.supervisedLifecycle.source,
+            }, { recoveryProof: { bootstrap: {
+              generation: manifest.supervisedLifecycle.startAttempt.baselineGeneration,
+            } } }, 'active', timeouts.ready)
           } } : {}),
+        } : {}),
         })
         if (expectedScenario !== 'supervised') {
           manifest = await writeManifest(physicalTransactionRoot, {
@@ -4280,7 +4784,8 @@ async function performLifecycle({
         containmentStartBarriers: manifest.containmentStartBarriers,
         serviceStartBarriers,
         homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, acceptance: manifest.serviceAcceptance,
-        requireLarkReady: expectedScenario === 'supervised',
+        requireLarkReady: expectedScenario === 'supervised' && operation === 'upgrade',
+        restoreContainedEnablement: operation !== 'uninstall',
       })
     }
     commitUncertain = true
@@ -4289,15 +4794,16 @@ async function performLifecycle({
     await assertProfileDigest(physicalHomePath, profile, manifest.stagedProfileDigest)
     if (operation === 'uninstall') {
       await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
+      if (expectedScenario === 'supervised') await assertArchivedProfile(physicalHomePath, manifest)
     }
     await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
     if (serviceContext !== undefined) {
       await assertAcceptedServicesStillBound({
-        ...serviceContext, dshExecutable, services, homePath, unitUniverse, foreignOwnership,
-        targetProfile: profile, cleanProfiles, acceptance: manifest.serviceAcceptance,
-        requireLarkReady: expectedScenario === 'supervised',
+        ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers, homePath, unitUniverse,
+        foreignOwnership, targetProfile: profile, cleanProfiles, acceptance: manifest.serviceAcceptance,
+        requireLarkReady: expectedScenario === 'supervised' && operation === 'upgrade',
       })
-      if (expectedScenario === 'supervised') {
+      if (expectedScenario === 'supervised' && operation === 'upgrade') {
         await assertPersistedSupervisedAcceptance({
           homePath, profile, dshExecutable, acceptance: manifest.supervisedLifecycle.postSwapAcceptance,
         })
@@ -4309,12 +4815,15 @@ async function performLifecycle({
     }
     if (operation === 'uninstall') {
       await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
+      if (expectedScenario === 'supervised') await assertArchivedProfile(physicalHomePath, manifest)
     }
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'cleanup-started')
     committedCleanup = true
     await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
     committedCleanup = false
-    process.stdout.write(`profile 生命周期事务完成：${operation}；配置、凭据、Session 与任务状态均从离线副本保留。\n`)
+    process.stdout.write(operation === 'uninstall'
+      ? 'profile 生命周期事务完成：uninstall；旧 profile 已归档，事务未主动清除 live profile 外状态。\n'
+      : 'profile 生命周期事务完成：upgrade；配置与持久状态已从离线副本保留。\n')
   } catch (error) {
     const persisted = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot }).catch(() => undefined)
     const liveAfterFailure = await existingIdentity(physicalHomePath)
@@ -4345,7 +4854,8 @@ async function performLifecycle({
       try {
         if (liveAfterFailure === undefined && sameIdentity(backupAfterFailure, manifest.originalIdentity)) {
           assertLockParentStable(homePath)
-          await rename(backupHome, physicalHomePath)
+          await moveBoundDirectoryNoReplace(backupHome, physicalHomePath, manifest.originalIdentity,
+            { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
           await fsyncPath(physicalTransactionRoot, true)
           await fsyncPath(LOCK_PARENT_FD_PATH, true)
         }
@@ -4361,11 +4871,14 @@ async function performLifecycle({
           }, 'snapshot'), false)
           const identity = sourceSupervisedIdentity(lifecycle.source)
           manifest = await writeManifest(physicalTransactionRoot, {
-            ...(persisted ?? manifest), servicePhase: 'starting', supervisedLifecycle: {
+            ...(persisted ?? manifest), servicePhase: 'starting', supervisedLifecycle: operation === 'uninstall' ? {
+              ...lifecycle, phase: 'source-attested',
+              startAttempt: { kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation },
+            } : {
               ...lifecycle, phase: 'source-attested', catalogDigest: undefined, previewPlan: undefined,
-              previewAcceptance: undefined, activePlan: undefined, postSwapAcceptance: undefined, startAttempt: {
-              kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation,
-            } },
+              previewAcceptance: undefined, activePlan: undefined, postSwapAcceptance: undefined,
+              startAttempt: { kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation },
+            },
           }, 'preparing')
           restoreAccepted = async () => {
             await awaitSupervisedDirectSuccessor({
@@ -4501,7 +5014,8 @@ async function main() {
 
 export const lifecycleProfileTest = Object.freeze({
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
-  validManifestTopLevel, validV3ServiceAcceptance, writeManifest, validSupervisedCapabilityProof, MANIFEST_MAX_BYTES,
+  validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest,
+  validSupervisedCapabilityProof, MANIFEST_MAX_BYTES,
 })
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {

@@ -2,7 +2,7 @@
 
 本账本落实 [2026-09-06 路线图](agent-intelligence-autonomy-roadmap-2026-09-06.md) 和 [成长专项审计](agent-growth-gap-evidence-2026-09-06.md)。目标是完整实现可验证的目标经营、任务上下文、独立验收、主动行动、高权限隔离和自主技能进化，并提供容易安装、诊断和升级的产品入口。实现起点为 `1b65852`。历史分析保留原始结论；当前进度与新证据记录在这里。
 
-> 最新 supervised 安装工程切片（2026-09-11）：WP17 在 checkout-local helper 中为 Linux `systemd --user` managed supervised profile 接通 service-aware upgrade。source cohort 必须在 registry、store、systemd 或事务 mutation 前证明只读 operator/attestation 能力；停服后以 Recovery、Automations、Delivery 的只读快照约束复制状态，不回退到会迁移数据库的 Store。v3 事务把 preview 唯一的 process-only `larkChannel` exemption、active exact attestation、原 active unit 闭集、fresh InvocationID 和 `serviceAcceptance` 绑定在一起；crash guardian 对动态 same-home unit 建立 durable disable/runtime-mask containment 和绑定恢复，无法同时证明 HOME 与 WorkingDirectory 归属时 fail closed。Lark 25 files / 441 tests、Health 2 files / 49 tests，以及相关 7 files / 198 tests 已通过；冻结 installer suite 为 252 passed / 1 conditional skip，根 `CI=true VITEST_MAX_WORKERS=1 pnpm check` 退出 0，根测试为 31 files / 466 passed / 1 conditional skip，递归包测试、build 与 33 个 dry-run pack 全部通过。当前没有完整真实 supervised `DSH_HOME` / systemd / Lark WebSocket upgrade 验收，没有 supervised uninstall，也没有远程发布；`v0.1.24` lifecycle helper 仍为 zero sentinel。还缺三项精确覆盖：`durableAccept()` 完成到 guardian completion token 发送之间的 crash window、三库 live-WAL 经真实 `copyHome` / `cp -a` 的跨 inode lifecycle 集成、真实 DSH/Cordis `--patch --dump-config` preview precedence。WP17 仍为实现中，不能据此声称 18 项完成；权威总数保持 **3 已验证 / 13 实现中 / 2 待做**。见[本批证据](evidence/supervised-service-upgrade-2026-09-11.json)。
+> 最新 supervised 安装工程切片（2026-09-11）：WP17 在 checkout-local helper 中为 Linux `systemd --user` managed supervised profile 接通 service-aware upgrade 与 uninstall。upgrade 继续以只读 Recovery、Automations、Delivery 快照、唯一 process-only `larkChannel` preview exemption、active exact attestation 和 `serviceAcceptance` 约束迁移；uninstall 则在同一 service-aware 事务内停用目标 profile、完整归档其 profile tree、换入 installer-clean 同名 Web profile，并只用通用 fresh InvocationID/journal readiness 与稳定窗口验收 clean target。uninstall 不访问 registry/store，也不撤销凭据、owner binding、Session、Goal、数据库或共享/外置状态；归档不是 whole-home bytewise 证明，后续重装或其它共享状态的 profile 仍可能解释保留数据。冻结 installer suite 为 276 passed / 1 conditional skip，根 `pnpm check` 退出 0：根测试 31 files / 490 passed / 1 conditional skip，递归包测试、最终 build 与 33 个 dry-run pack 全部通过；最终独立 release review 为 0 BLOCK / 0 HIGH。当前仍没有完整真实 supervised `DSH_HOME` / systemd / Lark WebSocket upgrade/uninstall 或三库 live-WAL lifecycle-copy 验收；同 UID 对手在事务中替换 transaction path 不属于强安全证明。远程 `v0.1.24` lifecycle helper 仍为 zero sentinel，非 Linux、`--no-service` 和外部 supervisor 不支持。WP17 仍为实现中，不能据此声称 18 项完成；权威总数保持 **3 已验证 / 13 实现中 / 2 待做**。既有 upgrade 证据见[结构化记录](evidence/supervised-service-upgrade-2026-09-11.json)，本次 uninstall 证据见[结构化记录](evidence/supervised-service-uninstall-2026-09-11.json)。
 
 > 最新 SQLite inode 绑定批次（2026-09-11，基线 `98826c0`）：Delivery、Automations、Recovery 的 operator snapshot 在 Linux 非 WAL 场景改为通过 pinned `/proc/self/fd/<fd>?mode=ro&immutable=1` 打开固定 inode，完整父目录 ABA 不能让 SQLite 改读同名恶意库；WAL 场景只把 main/WAL 逐字节复制到 pinned `0700` 私有目录，不复制 SHM，副本创建、校验、打开、清理均经目录 fd 锚定，并用本进程 fd inode 列表排除自检 fd 后证明 SQLite 持有副本。main/WAL/SHM 必须为精确 `0600`，父目录必须为 owner-only `0500/0700` 且拒绝 symlink、hardlink、setuid/setgid/sticky；源文件和 sidecar 在打开前后、查询后及 finally 重验，父目录漂移强制收敛为 `unsafe-parent`。三包定向规格为 Delivery 19、Automations 25、Recovery 23 项全部通过；隔离 worktree `/tmp/dsh-enhanced-sqlite-inode-20260911-v2` 的最终 v4 根门退出 0，根 Vitest 30 files / 427 passed / 1 skipped，根与递归汇总 361 file summaries / 4842 passed / 1 skipped，33 份 dry-run pack 完成，日志 SHA-256 为 `00c736d23e535f452e033c3b4cb052989c2bf5621179e0cc592827292590b09d`。v3 曾在无关 `assistant-actions` Verifier tick 用例出现 pending/null 失败，精确 spec 17 项与整包 10 files / 162 项重跑通过后，v4 才计为最终通过；主工作树同次根门被无关 installer WIP 的 `atomicWriteJson` 未使用 lint 阻断，未修改该 WIP。只读 verifier 子代理因 usage limit 未完成，本批没有独立子代理 PASS；该机制不防同 UID/root，digest 不是签名，没有外部 authenticity anchor，非 Linux fallback 无等价 fd 绑定证明，也不证明真实模型、生产 DSH 或 systemd。完整 18 项仍为 **3 已验证 / 13 实现中 / 2 待做**。见[本批证据](evidence/sqlite-inode-binding-2026-09-11.json)。
 
@@ -793,9 +793,9 @@ prospective authority 在 scope、baseline、candidate、共同预算及 `canary
 
 定向最终验证为 installer 225 passed / 1 conditional skip、Lark setup 123/123；独立 ownership 安全复核与 uninstall 测试覆盖复核均 PASS。最终根 `pnpm check`、源码哈希和完整命令记录见结构化证据。本能力当前只在 checkout-local helper 中成立；`v0.1.24` 仍是 zero-sentinel，远程 upgrade/uninstall 继续 fail closed。未运行完整真实 DSH_HOME uninstall，不能把 fixture、离线 activation 或既有 real-systemd primitive 证据扩展为生产卸载验收。WP17 状态不变，全部 18 项仍为 **3 已验证 / 13 实现中 / 2 待做**。
 
-## 2026-09-11：supervised service-aware upgrade 工程切片
+## 2026-09-11：supervised service-aware lifecycle 工程切片
 
-本切片扩展既有 Linux service lifecycle，不建立第二套 profile swap 协议。公共入口只允许显式 `--operation upgrade --scenario supervised`、Linux `systemd --user` managed service 和已确认无其它外部/手工进程使用整个 `DSH_HOME` 的组合；`--no-service`、非 Linux 和 supervised uninstall 均在 mutation 前拒绝。source cohort 必须先证明具备当前 upgrade 所需的只读 lifecycle capabilities，能力缺失会在 npm registry、pnpm store、systemd 和 transaction work 之前失败。
+本切片扩展既有 Linux service lifecycle，不建立第二套 profile swap 协议。公共入口允许显式 `--operation upgrade|uninstall --scenario supervised`、Linux `systemd --user` managed service 和已确认无其它外部/手工进程使用整个 `DSH_HOME` 的组合；`--no-service`、非 Linux 和外部 supervisor 均在 mutation 前拒绝。source cohort 必须先证明具备所选 operation 所需的只读 lifecycle capabilities，能力缺失会在 npm registry、pnpm store、systemd 和 transaction work 之前失败；uninstall 本身不访问 npm registry 或 pnpm store。
 
 安装器在同一 canonical-home rendezvous lock 内枚举并绑定 installer-managed units，建立 inode-bound `user.control` mask、persistent disable barrier 和原 active set，停止服务并证明 home 静止。停服后的状态证明只读取 Recovery、Automations 与 Delivery operator snapshot；不会为了读取旧库而初始化会迁移 schema 的 Store。快照、owner、数据库路径和 copied-state content/semantic digest 被 v3 manifest 绑定，复制允许 inode 改变但不允许内容或语义漂移。
 
@@ -807,14 +807,21 @@ staged home 使用 fresh activation nonce 和当前 package catalog 生成 previ
 
 本切片明确没有证明：
 
-- 一次完整真实 supervised `DSH_HOME` swap、真实 `systemd --user` service、真实 Lark WebSocket/cloud credentials 的 upgrade；
-- supervised uninstall；该路径仍 fail closed；
+- 一次完整真实 supervised `DSH_HOME` swap、真实 `systemd --user` service、真实 Lark WebSocket/cloud credentials 的 upgrade 或 uninstall；
 - 远程 lifecycle 发布；当前 `v0.1.24` helper hashes 仍为 zero sentinel，checkout-local 行为不能外推到远程 installer；
 - `durableAccept()` 已 durable 返回到 guardian completion token 成功发送之间的精确 crash window；
 - Recovery、Automations、Delivery 三库 live-WAL 经真实 `copyHome` / `cp -a` 的跨 inode lifecycle 集成；
 - preview overlay 经过真实 DSH/Cordis `--patch --dump-config` 的最终 precedence。
 
 因此 WP17 继续为**实现中**，本工程切片也不表示其它工作包或完整 18 项已经完成。权威状态仍为 **3 已验证 / 13 实现中 / 2 待做**。
+
+### supervised service-aware uninstall 增量
+
+checkout-local uninstall 沿用同一个 canonical-home rendezvous lock、service ownership proof、mask/disable containment、profile swap 和 crash-recovery 协议。停服并绑定只读 source proof 后，事务将目标 profile 的完整目录树归档到 home 内受管归档区，用 installer-clean 的同名 Web profile 替换 live target；clean target 不再要求已停用的 Lark/Health/supervised active attestation，只对原 active unit 做 fresh InvocationID、对应 journal ready marker 和稳定窗口组成的通用 readiness。原 inactive unit 保持停止，失败时保持收容并保留 current/original homes 与 manifest 供同一事务恢复。
+
+这里的“卸载”是目标 profile 的本地能力停用与归档，不是状态退休或遗忘协议：它不撤销凭据、owner binding、Session、Goal、数据库或共享/外置状态；完整 profile-tree archive 也不证明 whole-home bytewise identity。归档配置不会继续激活，但显式重装或共享同一状态库的其它 profile 仍可能再次解释保留状态。非 Linux、`--no-service` 与外部 supervisor 继续 fail closed；`v0.1.24` 远程 helper pins 仍为 zero sentinel，不能把 checkout-local 支持外推到远程发布。
+
+冻结 installer suite 为 276 passed / 1 conditional skip，日志 `/tmp/dsh-wp17-supervised-uninstall-installers-final.log` SHA-256 为 `23b2929a9c0dda35e47a9debf84016ee410374360e19494bc7e197868b61579c`。最终根 `CI=true VITEST_MAX_WORKERS=1 pnpm check` 退出 0：根测试 31 files / 490 passed / 1 conditional skip，递归 package tests 为 320 passed files / 12 skipped files、4,410 passed / 42 skipped tests；合计 4,900 passed / 43 skipped tests，最终 build 与 33 个 dry-run pack 全部通过。日志 `/tmp/dsh-wp17-supervised-uninstall-root-check.log` SHA-256 为 `e6b56ed674ee8733463ccf043e044c3ac89d276aa2aa2923461792bd7ec73146`。最终独立 release review 为 0 BLOCK / 0 HIGH。fixture 尚未验收完整真实 supervised `DSH_HOME`、真实 systemd/Lark 或 live-WAL lifecycle copy。同 UID 对手在事务执行期间替换 transaction path 不在当前强安全证明内；operator negative proof 仍不是 whole-home absence proof。因此 WP17 与总状态不变：**3 已验证 / 13 实现中 / 2 待做**。
 
 ## 2026-09-10：worker-protected 隔离审计归档
 
