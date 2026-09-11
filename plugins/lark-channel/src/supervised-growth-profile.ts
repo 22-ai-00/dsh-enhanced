@@ -750,6 +750,137 @@ export function configureSupervisedGrowthProfilePatch(input: SupervisedGrowthPro
   return document.toString({ lineWidth: 0 })
 }
 
+const supervisedGrowthLarkRowId = 'dsh-enhanced-lark-channel'
+const supervisedGrowthHealthRowId = 'dsh-enhanced-assistant-health'
+
+function rowIdentityList(rows: YAMLSeq, label: string): string[] {
+  const ids = rows.items.map(item => {
+    if (!isMap(item)) throw new Error(`supervised-growth setup: ${label} contains a non-mapping row`)
+    const id = item.get('id')
+    if (typeof id !== 'string' || id.trim() === '') {
+      throw new Error(`supervised-growth setup: ${label} contains a row without a string id`)
+    }
+    return id
+  })
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`supervised-growth setup: ${label} contains a duplicate row id`)
+  }
+  return ids
+}
+
+function plainRow(rows: YAMLSeq, id: string): Record<string, unknown> {
+  return mapJson(requiredUniqueMapById(rows, id, 'profile row'), `profile row ${id}`)
+}
+
+function withoutEntry(value: Record<string, unknown>, key: string): Record<string, unknown> {
+  const rest = Object.fromEntries(Object.entries(value).filter(([candidate]) => candidate !== key))
+  return rest
+}
+
+/**
+ * Derive the preview runtime overlay from the persisted, Lark-enabled baseline
+ * instead of shipping a fixed template. A fixed template silently drops any
+ * extra `assistant-health.requiredProviders` entry a user declared beyond the
+ * supervised set (e.g. credentialsKeychain), which would make the preview
+ * attestation's "larkChannel is the only exemption" claim false. We mutate the
+ * parsed baseline document in place—keeping every other field and every tagged
+ * `!!js dshHomePath` node—and make exactly two changes: disable the Lark row
+ * and remove larkChannel from the Health required providers.
+ */
+export function buildSupervisedGrowthPreviewOverlay(persistedConfig: string): string {
+  const { document, rows } = parseRows(persistedConfig, 'persisted effective profile')
+  const larkConfig = rowConfig(requireEnabledRow(rows, supervisedGrowthLarkRowId), supervisedGrowthLarkRowId)
+  const healthConfig = rowConfig(requireEnabledRow(rows, supervisedGrowthHealthRowId), supervisedGrowthHealthRowId)
+  const required = healthRequiredProviders(healthConfig)
+  if (!required.includes('larkChannel')) {
+    throw new Error('supervised-growth setup: persisted Health must require larkChannel before preview isolation')
+  }
+  if (larkConfig.get('enabled') !== true) {
+    throw new Error('supervised-growth setup: persisted Lark channel must be enabled before preview isolation')
+  }
+  for (let index = rows.items.length - 1; index >= 0; index -= 1) {
+    const item = rows.items[index]
+    const id = isMap(item) ? item.get('id') : undefined
+    if (id !== supervisedGrowthLarkRowId && id !== supervisedGrowthHealthRowId) {
+      rows.items.splice(index, 1)
+    }
+  }
+  larkConfig.set('enabled', false)
+  healthConfig.set('requiredProviders', document.createNode(required.filter(id => id !== 'larkChannel')))
+  return document.toString({ lineWidth: 0 })
+}
+
+/**
+ * Fail-closed proof that applying the preview overlay changed the composed
+ * configuration in EXACTLY the two sanctioned ways:
+ *   - the Lark row flipped config.enabled true -> false (nothing else on that
+ *     row, or any other row, may change);
+ *   - the Health row's config.requiredProviders lost exactly larkChannel while
+ *     preserving the original order and every user/provider-added entry.
+ * Any additional drop, addition, or rewrite is rejected, so a template that
+ * silently discarded an extra required provider can never be attested.
+ */
+export function assertSupervisedGrowthPreviewDerivation(input: {
+  persistedConfig: string
+  previewConfig: string
+}): { readonly externalProviderExemptions: readonly ['larkChannel'] } {
+  const persistedRows = parseRows(input.persistedConfig, 'persisted effective profile').rows
+  const previewRows = parseRows(input.previewConfig, 'preview effective profile').rows
+  const persistedIds = rowIdentityList(persistedRows, 'persisted effective profile')
+  const previewIds = rowIdentityList(previewRows, 'preview effective profile')
+  requireExact([...previewIds].sort(), [...persistedIds].sort(), 'preview profile row id set')
+
+  for (const id of persistedIds) {
+    const before = plainRow(persistedRows, id)
+    const after = plainRow(previewRows, id)
+    if (id === supervisedGrowthLarkRowId) {
+      const beforeConfig = before['config'] as Record<string, unknown>
+      const afterConfig = after['config'] as Record<string, unknown>
+      if (beforeConfig === null || typeof beforeConfig !== 'object' || Array.isArray(beforeConfig)
+        || afterConfig === null || typeof afterConfig !== 'object' || Array.isArray(afterConfig)) {
+        throw new Error('supervised-growth setup: Lark row config must be a mapping')
+      }
+      if (beforeConfig['enabled'] !== true || afterConfig['enabled'] !== false) {
+        throw new Error('supervised-growth setup: preview overlay must disable the Lark row and nothing weaker')
+      }
+      requireExact(
+        { ...after, config: withoutEntry(afterConfig as Record<string, unknown>, 'enabled') },
+        { ...before, config: withoutEntry(beforeConfig as Record<string, unknown>, 'enabled') },
+        'preview Lark row',
+      )
+    } else if (id === supervisedGrowthHealthRowId) {
+      const beforeConfig = before['config'] as Record<string, unknown>
+      const afterConfig = after['config'] as Record<string, unknown>
+      if (beforeConfig === null || typeof beforeConfig !== 'object' || Array.isArray(beforeConfig)
+        || afterConfig === null || typeof afterConfig !== 'object' || Array.isArray(afterConfig)) {
+        throw new Error('supervised-growth setup: Health row config must be a mapping')
+      }
+      const beforeProviders = beforeConfig['requiredProviders']
+      const afterProviders = afterConfig['requiredProviders']
+      if (!Array.isArray(beforeProviders) || !beforeProviders.every(value => typeof value === 'string')
+        || !Array.isArray(afterProviders) || !afterProviders.every(value => typeof value === 'string')) {
+        throw new Error('supervised-growth setup: Health requiredProviders must be string arrays')
+      }
+      if (!beforeProviders.includes('larkChannel') || afterProviders.includes('larkChannel')) {
+        throw new Error('supervised-growth setup: preview must remove exactly larkChannel from Health providers')
+      }
+      requireExact(
+        afterProviders,
+        beforeProviders.filter(value => value !== 'larkChannel'),
+        'preview Health requiredProviders',
+      )
+      requireExact(
+        { ...after, config: withoutEntry(afterConfig as Record<string, unknown>, 'requiredProviders') },
+        { ...before, config: withoutEntry(beforeConfig as Record<string, unknown>, 'requiredProviders') },
+        'preview Health row',
+      )
+    } else {
+      requireExact(after, before, `preview row ${id}`)
+    }
+  }
+  return Object.freeze({ externalProviderExemptions: Object.freeze(['larkChannel']) as readonly ['larkChannel'] })
+}
+
 /** Reads the exact Delivery route that an owner DM must match, without I/O. */
 export function supervisedGrowthBindingQuery(effectiveConfig: string, dshHome: string): SupervisedGrowthBindingQuery {
   const { rows } = parseRows(effectiveConfig, 'effective profile')

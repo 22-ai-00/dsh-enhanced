@@ -13,8 +13,11 @@ const VALIDATOR_PATH = join(dirname(SCRIPT_PATH), 'lifecycle-config.mjs')
 const SANDBOX_VALIDATOR_PATH = '/run/dsh-enhanced-lifecycle-config.mjs'
 const MANIFEST_VERSION = 1
 const SERVICE_MANIFEST_VERSION = 2
+const SUPERVISED_SERVICE_MANIFEST_VERSION = 3
 const TRANSACTION_SUFFIX = '.dsh-enhanced-transaction'
 const READY_MARKER = 'dsh web: http://127.0.0.1:'
+const LARK_STATE_PREFIX = 'lark-channel: '
+const LARK_ACCEPTED_STATES = new Set(['connected', 'connected-with-gap'])
 const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const MANAGED_PACKAGE = /^@dsh-enhanced\/[a-z0-9-]+$/u
 const SEMVER_PRERELEASE_IDENTIFIER = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)'
@@ -34,7 +37,189 @@ const SYSTEMD_SHOW_PROPERTIES = [
 ]
 const KEYRING_DROP_IN = '[Unit]\nRequires=gnome-keyring-daemon.service\nAfter=gnome-keyring-daemon.service\n'
 const SERVICE_PHASES = new Set(['initializing', 'stopping', 'stopped', 'swapped', 'starting', 'service-accepted', 'service-failed'])
-const LIFECYCLE_SCENARIOS = new Set(['web', 'autonomy', 'lark'])
+const LIFECYCLE_SCENARIOS = new Set(['web', 'autonomy', 'lark', 'supervised'])
+const SUPERVISED_PHASES = new Set([
+  'source-pending', 'source-attested', 'preview-prepared', 'preview-running',
+  'preview-accepted', 'active-prepared', 'post-swap-pending', 'post-swap-accepted',
+])
+const SUPERVISED_PROTOCOL = 'dsh-enhanced/supervised-lifecycle/v1'
+const SUPERVISED_POLL_INTERVAL_MS = 100
+const SUPERVISED_OPERATOR_PROGRAM = String.raw`
+import { createHash, randomUUID } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { readFile, writeFile, rename } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+const [action, home, profile, dsh, nonce = ''] = process.argv.slice(1)
+const digest = value => createHash('sha256').update(value).digest('hex')
+const canonical = value => value === null || typeof value !== 'object' ? JSON.stringify(value)
+  : Array.isArray(value) ? '[' + value.map(canonical).join(',') + ']'
+    : '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}'
+const jsonDigest = value => digest(canonical(value))
+const require = createRequire(join(home, 'profiles', profile, 'package.json'))
+const load = async name => import(require.resolve(name))
+const [lark, delivery, recovery, automations] = await Promise.all([
+  load('@dsh-enhanced/lark-channel'), load('@dsh-enhanced/assistant-delivery'),
+  load('@dsh-enhanced/assistant-recovery'), load('@dsh-enhanced/assistant-automations'),
+])
+const dump = (runtimeOverlay = false) => {
+  const overlay = process.env.DSH_ENHANCED_SUPERVISED_PREVIEW_OVERLAY
+  const result = spawnSync(dsh, ['--profile', profile,
+    ...(runtimeOverlay && overlay ? ['--patch', overlay] : []), '--dump-config'], {
+    encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, env: { ...process.env, DSH_HOME: home },
+  })
+  if (result.status !== 0) throw new Error('DSH rejected supervised lifecycle config: ' + String(result.stderr ?? '').trim().slice(0, 2000))
+  return String(result.stdout ?? '')
+}
+const previewOverlayPath = () => {
+  const overlayPath = process.env.DSH_ENHANCED_SUPERVISED_PREVIEW_OVERLAY
+  if (typeof overlayPath !== 'string'
+    || !isAbsolute(overlayPath) || (overlayPath !== home && !overlayPath.startsWith(home + sep))) {
+    throw new Error('supervised preview requires a runtime overlay path inside DSH_HOME')
+  }
+  return overlayPath
+}
+// Preview isolation overlay is ALWAYS derived from the current persisted,
+// Lark-enabled baseline — never a static template — so every extra Health
+// provider the user declared survives. Prepare stages the dotfile (exclusive
+// create) right after the persisted supervised patch is asserted; attestation
+// independently re-derives from the same baseline and requires the staged file
+// to be byte-identical, which makes a tampered/stale overlay and any baseline
+// drift both fail closed.
+const resolveStageConfig = async (persisted, stage) => {
+  if (stage !== 'preview') return { effectiveConfig: persisted }
+  const overlayPath = previewOverlayPath()
+  const derived = lark.buildSupervisedGrowthPreviewOverlay(persisted)
+  if (typeof derived !== 'string' || derived.trim() === '') {
+    throw new Error('supervised preview overlay derivation produced an empty patch')
+  }
+  if (action === 'prepare-preview') {
+    await writeFile(overlayPath, derived, { mode: 0o600, flag: 'wx' })
+    if (await readFile(overlayPath, 'utf8') !== derived) {
+      throw new Error('supervised preview runtime overlay could not be staged intact')
+    }
+  } else if (await readFile(overlayPath, 'utf8') !== derived) {
+    throw new Error('supervised preview runtime overlay is not derived from the current persisted baseline')
+  }
+  const effectiveConfig = dump(true)
+  // Fail-closed whitelist proof: composing with the derived overlay may only
+  // disable Lark and remove larkChannel from Health required providers.
+  lark.assertSupervisedGrowthPreviewDerivation({ persistedConfig: persisted, previewConfig: effectiveConfig })
+  return { effectiveConfig, overlayDigest: digest(derived) }
+}
+const relativeDatabasePath = path => {
+  if (!isAbsolute(path) || !(path === home || path.startsWith(home + sep))) throw new Error('supervised database path escapes DSH_HOME')
+  const value = relative(home, path)
+  if (value === '' || value.split(/[\\/]/u).includes('..')) throw new Error('invalid supervised database path')
+  return value
+}
+const observe = async effectiveConfig => {
+  const paths = lark.supervisedGrowthDatabasePaths(effectiveConfig, home)
+  const query = lark.supervisedGrowthBindingQuery(effectiveConfig, home)
+  const deliveryProof = delivery.inspectActiveLarkOwnerBindingsLocally({ databasePath: paths.deliveryDatabasePath, ...query })
+  if (deliveryProof.bindings.length !== 1) throw new Error('supervised lifecycle requires exactly one active owner Lark DM binding')
+  const recoveryProof = recovery.inspectRecoveryOperatorSnapshot(paths.recoveryDatabasePath)
+  const automationsProof = automations.inspectAutomationsOperatorSnapshot(paths.automationsDatabasePath)
+  const semantic = {
+    delivery: { scope: deliveryProof.scope, storageDigest: deliveryProof.storageDigest, bindings: deliveryProof.bindings },
+    recovery: recoveryProof.bootstrap,
+    automations: { inFlightCount: automationsProof.inFlightCount, inventoryDigest: automationsProof.inventoryDigest, records: automationsProof.records },
+  }
+  return { effectiveConfig, paths, deliveryProof, recoveryProof, automationsProof, binding: deliveryProof.bindings[0], semanticDigest: jsonDigest(semantic) }
+}
+const attest = async (effectiveConfig, stage) => {
+  const paths = lark.supervisedGrowthDatabasePaths(effectiveConfig, home)
+  return await lark.captureSupervisedGrowthLifecycleAttestation({
+    profile, stage, externalProviderExemptions: stage === 'preview' ? ['larkChannel'] : [],
+    effectiveConfig, recoveryDatabasePath: paths.recoveryDatabasePath,
+    automationsDatabasePath: paths.automationsDatabasePath,
+  })
+}
+const plan = async (stage, effectiveConfig, patchSource, ownerBindingDigest, overlayDigest) => {
+  const paths = lark.supervisedGrowthDatabasePaths(effectiveConfig, home)
+  const expected = await lark.expectedSupervisedGrowthRecoveryBootstrap(effectiveConfig, paths.recoveryDatabasePath)
+  const managedProjection = await lark.expectedSupervisedGrowthManagedAutomationDigest({
+    stage, effectiveConfig, recoveryDatabasePath: paths.recoveryDatabasePath,
+  })
+  if (stage === 'preview' && (typeof overlayDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(overlayDigest))) {
+    throw new Error('supervised preview plan requires the derived runtime overlay digest')
+  }
+  return {
+    patchDigest: digest(patchSource), effectiveConfigDigest: digest(effectiveConfig),
+    attestationSetDigest: expected.attestationSetDigest,
+    managedInventoryDigest: managedProjection.digest, ownerBindingDigest,
+    externalProviderExemptions: stage === 'preview' ? ['larkChannel'] : [],
+    // Active never carries a runtime overlay: omit the field entirely so the
+    // manifest reader's exact previewPlan/activePlan shape check stays closed.
+    ...(stage === 'preview' ? { runtimeOverlayDigest: overlayDigest } : {}),
+  }
+}
+const writePatch = async source => {
+  const path = join(home, 'profiles', profile, 'cordis.patch.yml')
+  const temporary = path + '.supervised-lifecycle-' + process.pid + '-' + randomUUID()
+  await writeFile(temporary, source, { mode: 0o600, flag: 'wx' }); await rename(temporary, path)
+}
+let output
+if (action === 'snapshot' || action === 'attest-active' || action === 'attest-preview') {
+  const persistedConfig = dump()
+  const { effectiveConfig } = await resolveStageConfig(persistedConfig,
+    action === 'attest-preview' ? 'preview' : 'active')
+  const observed = await observe(effectiveConfig)
+  const stage = action === 'attest-preview' ? 'preview' : 'active'
+  const managedProjection = await lark.expectedSupervisedGrowthManagedAutomationDigest({
+    stage, effectiveConfig, recoveryDatabasePath: observed.paths.recoveryDatabasePath,
+  })
+  output = {
+    effectiveConfigDigest: digest(effectiveConfig), semanticDigest: observed.semanticDigest,
+    databasePaths: Object.fromEntries(Object.entries(observed.paths).map(([key, value]) => [key.replace('DatabasePath', ''), relativeDatabasePath(value)])),
+    delivery: observed.deliveryProof, recovery: observed.recoveryProof, automations: observed.automationsProof,
+    managedProjection, ownerBindingDigest: jsonDigest(observed.binding),
+    ...(action === 'snapshot' ? {} : { attestation: await attest(effectiveConfig, stage) }),
+  }
+} else if (action === 'prepare-preview' || action === 'prepare-active') {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(nonce)) throw new Error('invalid fresh lifecycle nonce')
+  const before = dump(); const observed = await observe(before)
+  const stage = action === 'prepare-preview' ? 'preview' : 'active'
+  const patchPath = join(home, 'profiles', profile, 'cordis.patch.yml')
+  const originalPatch = await readFile(patchPath, 'utf8')
+  const patch = lark.configureSupervisedGrowthProfilePatch({
+    profilePatch: originalPatch, effectiveConfig: before, dshHome: home, binding: observed.binding,
+    activationState: stage, activationNonce: nonce, recoveryCatalogDigest: recovery.RECOVERY_CATALOG_DIGEST,
+  })
+  await writePatch(patch)
+  const persistedEffectiveConfig = dump()
+  lark.assertEffectiveSupervisedGrowthConfig({ effectiveConfig: persistedEffectiveConfig, dshHome: home, binding: observed.binding,
+    activationState: stage, activationNonce: nonce, recoveryCatalogDigest: recovery.RECOVERY_CATALOG_DIGEST })
+  const { effectiveConfig, overlayDigest } = await resolveStageConfig(persistedEffectiveConfig, stage)
+  output = { catalogDigest: recovery.RECOVERY_CATALOG_DIGEST,
+    plan: await plan(stage, effectiveConfig, patch, jsonDigest(observed.binding), overlayDigest) }
+} else throw new Error('unknown supervised lifecycle action')
+process.stdout.write(JSON.stringify(output))
+`
+const SUPERVISED_CAPABILITY_PROGRAM = String.raw`
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
+const [home, profile] = process.argv.slice(1)
+const require = createRequire(join(home, 'profiles', profile, 'package.json'))
+const load = async name => import(require.resolve(name))
+const [lark, delivery, recovery, automations] = await Promise.all([
+  load('@dsh-enhanced/lark-channel'), load('@dsh-enhanced/assistant-delivery'),
+  load('@dsh-enhanced/assistant-recovery'), load('@dsh-enhanced/assistant-automations'),
+])
+const required = [
+  [lark, 'captureSupervisedGrowthLifecycleAttestation'], [lark, 'configureSupervisedGrowthProfilePatch'],
+  [lark, 'assertEffectiveSupervisedGrowthConfig'], [lark, 'expectedSupervisedGrowthRecoveryBootstrap'],
+  [lark, 'expectedSupervisedGrowthManagedAutomationDigest'],
+  [lark, 'buildSupervisedGrowthPreviewOverlay'], [lark, 'assertSupervisedGrowthPreviewDerivation'],
+  [delivery, 'inspectActiveLarkOwnerBindingsLocally'], [recovery, 'inspectRecoveryOperatorSnapshot'],
+  [automations, 'inspectAutomationsOperatorSnapshot'], [automations, 'automationDefinitionDigest'],
+]
+if (required.some(([module, name]) => typeof module[name] !== 'function')) throw new Error('required read-only operator seam is unavailable')
+if (typeof recovery.RECOVERY_CATALOG_DIGEST !== 'string' || !/^[0-9a-f]{64}$/u.test(recovery.RECOVERY_CATALOG_DIGEST)) {
+  throw new Error('Recovery catalog identity is unavailable')
+}
+process.stdout.write(JSON.stringify({ protocol: 'dsh-enhanced/supervised-lifecycle-capability/v1' }))
+`
 
 class LifecycleError extends Error {
   constructor(message, exitCode = 1) {
@@ -51,6 +236,26 @@ function fail(message, exitCode = 1) {
 
 function sha256(value) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+}
+
+function unmanagedAutomationDigest(records) {
+  const managed = new Set(['recovery:supervised-growth', 'heartbeat:supervised-growth-analyst', 'heartbeat:supervised-growth'])
+  const projected = records.filter(record => !managed.has(record.id)).map(record => ({
+    id: record.id, owner: record.owner, definitionHash: record.definitionHash, status: record.status,
+    nextRunAt: record.nextRunAt, createdAt: record.createdAt, updatedAt: record.updatedAt,
+    version: record.version, runningTaskCount: record.runningTaskCount,
+  })).sort((left, right) => left.id.localeCompare(right.id))
+  return sha256(canonicalJson(projected))
+}
+
+function isServiceManifestVersion(version) {
+  return version === SERVICE_MANIFEST_VERSION || version === SUPERVISED_SERVICE_MANIFEST_VERSION
 }
 
 function bindingFor(manifest) {
@@ -84,6 +289,7 @@ function bindingFor(manifest) {
     containmentMaskIntents: manifest.containmentMaskIntents,
     serviceStartBarriers: manifest.serviceStartBarriers,
     containmentStartBarriers: manifest.containmentStartBarriers,
+    supervisedLifecycle: manifest.supervisedLifecycle,
   }
 }
 
@@ -267,6 +473,10 @@ async function canonicalMissingAllowed(path) {
 
 function inside(root, target) {
   return target === root || target.startsWith(root + sep)
+}
+
+function sameHomeOwnershipEvidence(serviceHome, workingDirectory, homePath) {
+  return serviceHome === homePath && inside(homePath, workingDirectory)
 }
 
 async function fsyncPath(path, directory = false) {
@@ -487,17 +697,44 @@ async function assertNoMounts(root) {
   }
 }
 
-async function atomicWriteJson(path, value) {
+async function writeFileAtomic(path, contents) {
   const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+  await writeFile(temporary, contents, { mode: 0o600 })
   await fsyncPath(temporary)
   await rename(temporary, path)
   await fsyncPath(dirname(path), true)
 }
 
+const MANIFEST_MAX_BYTES = 64 * 1024
+const MANIFEST_TOP_LEVEL_KEYS = [
+  'version', 'id', 'homePath', 'canonicalHome', 'transactionPath', 'transactionIdentity',
+  'profile', 'operation', 'originalIdentity', 'originalProfileDigest', 'stagedIdentity',
+  'stagedProfileDigest', 'expectedScenario', 'stagedScenario', 'createdAt', 'state',
+  'services', 'servicePhase', 'serviceFailure', 'serviceAcceptance', 'unitUniverse',
+  'foreignOwnership', 'cleanProfileDigest', 'cleanProfiles', 'serviceMasks',
+  'containmentMasks', 'containmentMaskIntents', 'serviceStartBarriers',
+  'containmentStartBarriers', 'supervisedLifecycle',
+  // 以下三个键不进 bindingDigest：updatedAt/failure 是事务时间线与收容诊断，
+  // bindingDigest 是自反校验字段本身。未知顶层键必须拒绝，否则可绕过篡改信封。
+  'updatedAt', 'failure', 'bindingDigest',
+]
+
+function validManifestTopLevel(manifest) {
+  return manifest !== null && typeof manifest === 'object' && !Array.isArray(manifest)
+    && Object.keys(manifest).every(key => MANIFEST_TOP_LEVEL_KEYS.includes(key))
+    && (manifest.failure === undefined || typeof manifest.failure === 'string')
+}
+
 async function writeManifest(transactionRoot, manifest, state, details = {}) {
   const next = withBindingDigest({ ...manifest, ...details, state, updatedAt: new Date().toISOString() })
-  await atomicWriteJson(join(transactionRoot, 'manifest.json'), next)
+  if (!validManifestTopLevel(next)) {
+    fail('生命周期事务 manifest 包含未知顶层字段，拒绝持久化（可能绕过 bindingDigest 信封）。')
+  }
+  const serialized = `${JSON.stringify(next, null, 2)}\n`
+  if (Buffer.byteLength(serialized, 'utf8') > MANIFEST_MAX_BYTES) {
+    fail(`生命周期事务 manifest 超过 ${MANIFEST_MAX_BYTES} 字节安全上限，拒绝持久化：${transactionRoot}`)
+  }
+  await writeFileAtomic(join(transactionRoot, 'manifest.json'), serialized)
   return next
 }
 
@@ -509,12 +746,12 @@ async function loadManifest(physicalTransactionRoot, expected) {
   try {
     const manifestStat = await lstat(manifestPath)
     if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.uid !== process.getuid?.()
-      || manifestStat.nlink !== 1 || (manifestStat.mode & 0o077) !== 0 || manifestStat.size > 64 * 1024) throw new Error('unsafe manifest')
+      || manifestStat.nlink !== 1 || (manifestStat.mode & 0o077) !== 0 || manifestStat.size > MANIFEST_MAX_BYTES) throw new Error('unsafe manifest')
     manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
   } catch {
     fail(`拒绝未绑定或未知的生命周期事务；缺少有效 manifest：${expected.transactionPath}`)
   }
-  const initializingServiceManifest = manifest?.version === SERVICE_MANIFEST_VERSION
+  const initializingServiceManifest = isServiceManifestVersion(manifest?.version)
     && manifest.state === 'preparing' && manifest.servicePhase === 'initializing'
     && Array.isArray(manifest.services) && manifest.services.length > 0
     && Array.isArray(manifest.unitUniverse) && manifest.unitUniverse.length > 0
@@ -524,7 +761,7 @@ async function loadManifest(physicalTransactionRoot, expected) {
     && Array.isArray(manifest.containmentMaskIntents) && manifest.containmentMaskIntents.length === 0
     && Array.isArray(manifest.containmentStartBarriers) && manifest.containmentStartBarriers.length === 0
     && Array.isArray(manifest.serviceStartBarriers) && manifest.serviceStartBarriers.length === 0
-  const validServiceManifest = manifest?.version !== SERVICE_MANIFEST_VERSION || initializingServiceManifest || (
+  const validServiceManifest = !isServiceManifestVersion(manifest?.version) || initializingServiceManifest || (
     Array.isArray(manifest.services) && manifest.services.length > 0
     && Array.isArray(manifest.unitUniverse) && manifest.unitUniverse.length > 0
     && new Set(manifest.unitUniverse).size === manifest.unitUniverse.length
@@ -562,20 +799,21 @@ async function loadManifest(physicalTransactionRoot, expected) {
       && Array.isArray(service.dropIns))
   )
   const validExpectedScenario = manifest?.expectedScenario === undefined
-    || LIFECYCLE_SCENARIOS.has(manifest.expectedScenario)
-      && (manifest.version === SERVICE_MANIFEST_VERSION
-        ? manifest.expectedScenario === 'lark'
-        : manifest.expectedScenario !== 'lark')
+    ? manifest?.version === MANIFEST_VERSION
+    : LIFECYCLE_SCENARIOS.has(manifest.expectedScenario)
+      && (isServiceManifestVersion(manifest.version)
+        ? manifest.expectedScenario === (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION ? 'supervised' : 'lark')
+        : manifest.expectedScenario === 'web' || manifest.expectedScenario === 'autonomy')
   const validStagedScenario = manifest?.stagedScenario === undefined
     || (LIFECYCLE_SCENARIOS.has(manifest.stagedScenario) || manifest.stagedScenario === 'unsupported')
       && (manifest.operation === 'uninstall'
         ? manifest.stagedScenario === 'unsupported'
         : manifest.stagedScenario === manifest.expectedScenario)
-      && (manifest.version !== SERVICE_MANIFEST_VERSION || (manifest.operation === 'uninstall'
+      && (!isServiceManifestVersion(manifest.version) || (manifest.operation === 'uninstall'
         ? manifest.stagedScenario === 'unsupported'
-        : manifest.stagedScenario === 'lark'))
+        : manifest.stagedScenario === (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION ? 'supervised' : 'lark')))
   const validCleanProfileDigest = manifest?.cleanProfileDigest === undefined
-    || manifest.version === SERVICE_MANIFEST_VERSION && manifest.operation === 'uninstall'
+    || isServiceManifestVersion(manifest.version) && manifest.operation === 'uninstall'
       && /^[0-9a-f]{64}$/u.test(manifest.cleanProfileDigest)
   const validCleanProfiles = manifest?.cleanProfiles === undefined || Array.isArray(manifest.cleanProfiles)
     && new Set(manifest.cleanProfiles.map(entry => entry?.profile)).size === manifest.cleanProfiles.length
@@ -583,13 +821,17 @@ async function loadManifest(physicalTransactionRoot, expected) {
       && typeof entry.profile === 'string' && PROFILE_NAME.test(entry.profile)
       && /^[0-9a-f]{64}$/u.test(entry.digest)
       && manifest.services?.some(service => service?.profile === entry.profile))
-  if (![MANIFEST_VERSION, SERVICE_MANIFEST_VERSION].includes(manifest?.version)
+  const validSupervised = manifest?.version !== SUPERVISED_SERVICE_MANIFEST_VERSION
+    || manifest.operation === 'upgrade' && manifest.expectedScenario === 'supervised'
+      && manifest.stagedScenario === 'supervised' && validSupervisedLifecycle(manifest.supervisedLifecycle)
+      && validSupervisedManifestPhase(manifest) && validV3ServiceAcceptance(manifest)
+  if (![MANIFEST_VERSION, SERVICE_MANIFEST_VERSION, SUPERVISED_SERVICE_MANIFEST_VERSION].includes(manifest?.version)
     || typeof manifest.id !== 'string'
     || manifest.homePath !== expected.homePath
     || manifest.transactionPath !== expected.transactionPath
-    || manifest.version === SERVICE_MANIFEST_VERSION && (manifest.transactionIdentity === undefined
+    || isServiceManifestVersion(manifest.version) && (manifest.transactionIdentity === undefined
       || typeof manifest.transactionIdentity.dev !== 'string' || typeof manifest.transactionIdentity.ino !== 'string')
-    || manifest.version === SERVICE_MANIFEST_VERSION && manifest.operation === 'uninstall'
+    || isServiceManifestVersion(manifest.version) && manifest.operation === 'uninstall'
       && (!Array.isArray(manifest.foreignOwnership) || !Array.isArray(manifest.cleanProfiles))
     || manifest.profile !== expected.profile
     || !['upgrade', 'uninstall'].includes(manifest.operation)
@@ -599,6 +841,8 @@ async function loadManifest(physicalTransactionRoot, expected) {
     || !validStagedScenario
     || !validCleanProfileDigest
     || !validCleanProfiles
+    || !validSupervised
+    || !validManifestTopLevel(manifest)
     || manifest.bindingDigest !== sha256(JSON.stringify(bindingFor(manifest)))) {
     fail(`拒绝未绑定或校验失败的生命周期事务 manifest：${expected.transactionPath}`)
   }
@@ -615,15 +859,217 @@ function validForeignOwnershipEvidence(evidence) {
 function validForeignOwnershipInventory(manifest) {
   if (!Array.isArray(manifest?.services) || !Array.isArray(manifest.unitUniverse)) return false
   const managed = manifest.services.map(service => service?.unit)
+  const contained = [
+    ...(Array.isArray(manifest.containmentMasks) ? manifest.containmentMasks : []),
+    ...(Array.isArray(manifest.containmentMaskIntents) ? manifest.containmentMaskIntents : []),
+  ].map(record => record?.unit)
   const foreign = manifest.foreignOwnership
   if (foreign === undefined) {
-    return new Set(managed).size === managed.length && managed.every(unit => manifest.unitUniverse.includes(unit))
+    const combined = [...managed, ...contained]
+    return new Set(combined).size === combined.length
+      && JSON.stringify([...combined].sort()) === JSON.stringify([...manifest.unitUniverse].sort())
   }
   if (!Array.isArray(foreign) || !foreign.every(evidence => validForeignOwnershipEvidence(evidence))) return false
   const foreignUnits = foreign.map(evidence => evidence.unit)
-  const combined = [...managed, ...foreignUnits].sort()
+  const combined = [...managed, ...foreignUnits, ...contained].sort()
   return new Set(combined).size === combined.length
     && JSON.stringify(combined) === JSON.stringify([...manifest.unitUniverse].sort())
+}
+
+function validDigest(value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value)
+}
+
+function validCompactOperatorProof(proof) {
+  const expected = {
+    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': 19,
+    'assistant-recovery/operator-snapshot/v1': 4,
+    'assistant-automations-operator-snapshot/v1': 15,
+  }
+  const additional = proof?.protocol === 'assistant-delivery/active-lark-owner-bindings-snapshot/v1'
+    ? ['storageDigest'] : proof?.protocol === 'assistant-automations-operator-snapshot/v1' ? ['inventoryDigest', 'storageDigest']
+      : proof?.protocol === 'assistant-recovery/operator-snapshot/v1' ? ['bootstrap'] : []
+  return exactKeys(proof, ['protocol', 'schemaVersion', 'database', 'snapshotDigest'], additional)
+    && expected[proof.protocol] === proof.schemaVersion
+    && validDigest(proof.snapshotDigest)
+    && proof.database !== null && typeof proof.database === 'object'
+    && typeof proof.database.device === 'string' && typeof proof.database.inode === 'string'
+    && (Number.isSafeInteger(proof.database.size) && proof.database.size >= 0
+      || typeof proof.database.size === 'string' && /^(?:0|[1-9]\d*)$/u.test(proof.database.size))
+    && validDigest(proof.database.digest)
+    && (proof.storageDigest === undefined || validDigest(proof.storageDigest))
+    && (proof.inventoryDigest === undefined || validDigest(proof.inventoryDigest))
+    && (proof.protocol !== 'assistant-automations-operator-snapshot/v1' || validDigest(proof.storageDigest))
+}
+
+function exactKeys(value, required, optional = []) {
+  if (value === null || typeof value !== 'object') return false
+  const allowed = new Set([...required, ...optional])
+  return required.every(key => Object.hasOwn(value, key))
+    && Object.keys(value).every(key => allowed.has(key))
+}
+
+function validRecoveryBootstrap(value) {
+  return exactKeys(value, ['status', 'generation', 'attestationValid', 'attestationSetDigest', 'attestations'])
+    && value.status === 'succeeded' && value.attestationValid === true
+    && Number.isSafeInteger(value.generation) && value.generation > 0
+    && validDigest(value.attestationSetDigest) && Array.isArray(value.attestations)
+    && value.attestations.length > 0 && value.attestations.every(attestation => (
+      exactKeys(attestation, ['automationId', 'activationState', 'activationNonce', 'activationPlanDigest'])
+      && typeof attestation.automationId === 'string' && ['preview', 'active'].includes(attestation.activationState)
+      && typeof attestation.activationNonce === 'string' && validDigest(attestation.activationPlanDigest)
+    ))
+}
+
+function validDatabasePaths(paths) {
+  return exactKeys(paths, ['delivery', 'automations', 'recovery'])
+    && ['delivery', 'automations', 'recovery'].every(key => typeof paths[key] === 'string'
+      && paths[key] !== '' && paths[key] !== '.' && !isAbsolute(paths[key]) && !paths[key].split('/').includes('..'))
+}
+
+function validSupervisedLifecycle(value) {
+  if (!exactKeys(value, ['protocol', 'phase', 'activationNonce'], [
+    'catalogDigest', 'databasePaths', 'source', 'previewPlan', 'previewAcceptance', 'activePlan',
+    'startAttempt', 'postSwapAcceptance',
+  ]) || value.protocol !== 'dsh-enhanced/supervised-lifecycle/v1'
+    || !SUPERVISED_PHASES.has(value.phase) || typeof value.activationNonce !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value.activationNonce)) return false
+  const catalogRequired = !['source-pending', 'source-attested'].includes(value.phase)
+  if (catalogRequired ? !validDigest(value.catalogDigest) : value.catalogDigest !== undefined) return false
+  const paths = value.databasePaths
+  if (paths !== undefined && !validDatabasePaths(paths)) return false
+  const source = value.source
+  if (source !== undefined && (!exactKeys(source, [
+    'effectiveConfigDigest', 'semanticDigest', 'databasePaths', 'ownerBindingDigest',
+    'deliveryProof', 'recoveryProof', 'automationsProof', 'unmanagedAutomationsDigest', 'activePlan',
+  ])
+    || !validDigest(source.effectiveConfigDigest) || !validDigest(source.semanticDigest)
+    || !validDatabasePaths(source.databasePaths) || !validDigest(source.ownerBindingDigest)
+    || !validDigest(source.unmanagedAutomationsDigest)
+    || !exactKeys(source.activePlan, [
+      'effectiveConfigDigest', 'attestationSetDigest', 'managedInventoryDigest', 'attestationDigest',
+      'activationNonceDigest', 'catalogDigest',
+    ]) || !Object.values(source.activePlan).every(validDigest)
+    || !validCompactOperatorProof(source.deliveryProof)
+    || !validCompactOperatorProof(source.recoveryProof)
+    || !validRecoveryBootstrap(source.recoveryProof.bootstrap)
+    || !validCompactOperatorProof(source.automationsProof))) return false
+  for (const key of ['previewPlan', 'activePlan']) {
+    const plan = value[key]
+    if (plan !== undefined && (!exactKeys(plan, [
+      'patchDigest', 'effectiveConfigDigest', 'attestationSetDigest', 'managedInventoryDigest', 'ownerBindingDigest',
+      'externalProviderExemptions', ...(key === 'previewPlan' ? ['runtimeOverlayDigest'] : []),
+    ])
+      || !validDigest(plan.patchDigest) || !validDigest(plan.effectiveConfigDigest)
+      || !validDigest(plan.attestationSetDigest) || !validDigest(plan.managedInventoryDigest)
+      || !validDigest(plan.ownerBindingDigest)
+      || key === 'previewPlan' && !validDigest(plan.runtimeOverlayDigest)
+      || JSON.stringify(plan.externalProviderExemptions) !== JSON.stringify(key === 'previewPlan' ? ['larkChannel'] : []))) return false
+  }
+  for (const key of ['previewAcceptance', 'postSwapAcceptance']) {
+    const proof = value[key]
+    if (proof !== undefined && (!exactKeys(proof, [
+      'generation', 'deliveryProof', 'recoveryProof', 'automationsProof', 'ownerBindingDigest',
+      'unmanagedAutomationsDigest', 'databasePaths', 'attestationDigest', ...(key === 'postSwapAcceptance' ? ['invocationId'] : []),
+    ])
+      || !Number.isSafeInteger(proof.generation) || proof.generation < 1
+      || !validCompactOperatorProof(proof.deliveryProof) || !validDigest(proof.ownerBindingDigest)
+      || !validDigest(proof.unmanagedAutomationsDigest)
+      || !validDatabasePaths(proof.databasePaths) || !validDigest(proof.attestationDigest)
+      || key === 'postSwapAcceptance' && (typeof proof.invocationId !== 'string' || proof.invocationId === '')
+      || !validCompactOperatorProof(proof.recoveryProof)
+      || !validRecoveryBootstrap(proof.recoveryProof.bootstrap)
+      || !validCompactOperatorProof(proof.automationsProof))) return false
+  }
+  if (value.startAttempt !== undefined && (!exactKeys(value.startAttempt, ['kind', 'baselineGeneration'])
+    || !['restore-source', 'accept-active'].includes(value.startAttempt.kind)
+    || !Number.isSafeInteger(value.startAttempt.baselineGeneration) || value.startAttempt.baselineGeneration < 0)) return false
+  const requiredByPhase = {
+    'source-pending': [], 'source-attested': ['source', 'databasePaths'], 'preview-prepared': ['source', 'databasePaths', 'previewPlan'],
+    'preview-running': ['source', 'previewPlan'],
+    'preview-accepted': ['source', 'previewPlan', 'previewAcceptance'],
+    'active-prepared': ['source', 'previewPlan', 'previewAcceptance', 'activePlan'],
+    'post-swap-pending': ['source', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt'],
+    'post-swap-accepted': ['source', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt', 'postSwapAcceptance'],
+  }
+  const phaseOrder = [...SUPERVISED_PHASES]
+  const allowedByPhase = {
+    'source-pending': [], 'source-attested': ['databasePaths', 'source', 'startAttempt'],
+    'preview-prepared': ['databasePaths', 'source', 'catalogDigest', 'previewPlan'],
+    'preview-running': ['databasePaths', 'source', 'catalogDigest', 'previewPlan'],
+    'preview-accepted': ['databasePaths', 'source', 'catalogDigest', 'previewPlan', 'previewAcceptance'],
+    'active-prepared': ['databasePaths', 'source', 'catalogDigest', 'previewPlan', 'previewAcceptance', 'activePlan'],
+    'post-swap-pending': ['databasePaths', 'source', 'catalogDigest', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt'],
+    'post-swap-accepted': ['databasePaths', 'source', 'catalogDigest', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt', 'postSwapAcceptance'],
+  }
+  const optionalStateKeys = ['catalogDigest', 'databasePaths', 'source', 'previewPlan', 'previewAcceptance', 'activePlan', 'startAttempt', 'postSwapAcceptance']
+  const proofPathsMatch = value.source === undefined || value.databasePaths === undefined || (
+    JSON.stringify(value.source.databasePaths) === JSON.stringify(value.databasePaths)
+    && value.source.deliveryProof.database !== undefined && value.source.recoveryProof.database !== undefined
+    && value.source.automationsProof.database !== undefined
+  )
+  const acceptanceMatches = (acceptance, plan) => acceptance === undefined || (
+    acceptance.recoveryProof.bootstrap.generation === acceptance.generation
+    && acceptance.recoveryProof.bootstrap.attestationSetDigest === plan.attestationSetDigest
+    && acceptance.ownerBindingDigest === plan.ownerBindingDigest
+    && acceptance.unmanagedAutomationsDigest === value.source.unmanagedAutomationsDigest
+    && JSON.stringify(acceptance.databasePaths) === JSON.stringify(value.databasePaths)
+  )
+  return phaseOrder.includes(value.phase) && requiredByPhase[value.phase].every(key => value[key] !== undefined)
+    && optionalStateKeys.every(key => value[key] === undefined || allowedByPhase[value.phase].includes(key))
+    && proofPathsMatch
+    && acceptanceMatches(value.previewAcceptance, value.previewPlan)
+    && acceptanceMatches(value.postSwapAcceptance, value.activePlan)
+    && (!['post-swap-pending', 'post-swap-accepted'].includes(value.phase) || value.startAttempt.kind === 'accept-active')
+    && (value.phase !== 'source-attested' || value.startAttempt === undefined || value.startAttempt.kind === 'restore-source')
+    && (value.startAttempt?.kind !== 'accept-active' || value.startAttempt.baselineGeneration >= value.previewAcceptance.generation)
+    && (value.previewAcceptance === undefined || value.previewAcceptance.generation > value.source.recoveryProof.bootstrap.generation)
+    && (value.postSwapAcceptance === undefined || value.postSwapAcceptance.generation > value.startAttempt.baselineGeneration)
+}
+
+function validSupervisedManifestPhase(manifest) {
+  if (manifest.version !== SUPERVISED_SERVICE_MANIFEST_VERSION) return true
+  const phase = manifest.supervisedLifecycle?.phase
+  const allowed = {
+    'source-pending': [['preparing', 'initializing'], ['preparing', 'stopping'], ['preparing', 'stopped'], ['service-failed', 'service-failed']],
+    'source-attested': [['preparing', 'stopped'], ['preparing', 'starting'], ['prepared', 'stopped'], ['service-failed', 'service-failed']],
+    'preview-prepared': [['prepared', 'stopped'], ['service-failed', 'service-failed']],
+    'preview-running': [['prepared', 'stopped'], ['service-failed', 'service-failed']],
+    'preview-accepted': [['prepared', 'stopped'], ['service-failed', 'service-failed']],
+    'active-prepared': [['prepared', 'stopped'], ['validated', 'stopped'], ['original-renamed', 'stopped'], ['swapped', 'swapped'], ['service-failed', 'service-failed']],
+    'post-swap-pending': [['swapped', 'starting'], ['cleanup-started', 'starting'], ['cleanup-started', 'service-failed'], ['service-failed', 'service-failed']],
+    'post-swap-accepted': [['service-accepted', 'service-accepted'], ['committed', 'service-accepted'], ['cleanup-started', 'service-accepted'], ['service-failed', 'service-failed']],
+  }
+  return allowed[phase]?.some(([state, servicePhase]) => manifest.state === state && manifest.servicePhase === servicePhase) === true
+}
+
+function validV3ServiceAcceptance(manifest) {
+  if (manifest.version !== SUPERVISED_SERVICE_MANIFEST_VERSION) return true
+  const acceptance = manifest.serviceAcceptance
+  const phase = manifest.supervisedLifecycle?.phase
+  const outerState = `${manifest.state}:${manifest.servicePhase}`
+  const acceptanceAllowed = phase === 'post-swap-pending'
+    ? ['swapped:starting', 'cleanup-started:starting', 'cleanup-started:service-failed', 'service-failed:service-failed'].includes(outerState)
+    : phase === 'post-swap-accepted'
+      && ['service-accepted:service-accepted', 'committed:service-accepted', 'cleanup-started:service-accepted', 'service-failed:service-failed'].includes(outerState)
+  if (acceptance === undefined) return phase !== 'post-swap-accepted'
+  if (!acceptanceAllowed || !Array.isArray(acceptance) || !Array.isArray(manifest.services)) return false
+  const activeUnits = manifest.services.filter(service => service?.wasActive === true).map(service => service.unit).sort()
+  if (acceptance.length !== activeUnits.length) return false
+  const acceptedUnits = []
+  for (const proof of acceptance) {
+    if (!exactKeys(proof, ['unit', 'invocationId', 'mainPid', 'nRestarts'])
+      || typeof proof.unit !== 'string' || !SYSTEMD_UNIT.test(proof.unit)
+      || typeof proof.invocationId !== 'string' || proof.invocationId === ''
+      || !Number.isSafeInteger(proof.mainPid) || proof.mainPid < 0
+      || !Number.isSafeInteger(proof.nRestarts) || proof.nRestarts < 0) return false
+    acceptedUnits.push(proof.unit)
+  }
+  if (new Set(acceptedUnits).size !== acceptedUnits.length
+    || JSON.stringify([...acceptedUnits].sort()) !== JSON.stringify(activeUnits)) return false
+  const target = acceptance.find(proof => proof.unit === `dsh-profile-${manifest.profile}.service`)
+  const postSwap = manifest.supervisedLifecycle?.postSwapAcceptance
+  return postSwap === undefined || target !== undefined && target.invocationId === postSwap.invocationId
 }
 
 function validBoundMask(mask, expectedUnit, expectedTransactionRoot) {
@@ -636,6 +1082,7 @@ function validBoundMask(mask, expectedUnit, expectedTransactionRoot) {
     && mask.identity !== null && typeof mask.identity === 'object'
     && typeof mask.identity.dev === 'string' && typeof mask.identity.ino === 'string'
     && mask.identity.uid === currentUid() && typeof mask.identity.mode === 'number'
+    && (mask.guardianRuntimeMask === undefined || mask.guardianRuntimeMask === true)
 }
 
 function validMaskIntent(intent, expectedTransactionRoot) {
@@ -646,6 +1093,7 @@ function validMaskIntent(intent, expectedTransactionRoot) {
     && inside(expectedTransactionRoot, intent.stagingPath)
     && intent.barrier !== null && typeof intent.barrier === 'object'
     && intent.barrier.unit === intent.unit && validBoundEnablement(intent.barrier, expectedTransactionRoot)
+    && (intent.guardianRuntimeMask === undefined || intent.guardianRuntimeMask === true)
 }
 
 function validBoundEnablement(barrier, expectedTransactionRoot) {
@@ -741,7 +1189,7 @@ async function recoverBoundTransaction({
   }
   let manifest
   manifest = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot })
-  if (serviceContext !== undefined && manifest.version !== SERVICE_MANIFEST_VERSION) {
+  if (serviceContext !== undefined && !isServiceManifestVersion(manifest.version)) {
     fail(`检测到旧版 stopped-home lifecycle residue；无法在受管 service 运行状态未知时安全恢复，拒绝修改 DSH_HOME：${transactionRoot}`)
   }
   const backupHome = join(physicalTransactionRoot, 'original-home')
@@ -751,7 +1199,7 @@ async function recoverBoundTransaction({
   const homeIsOriginal = homeStat !== undefined && sameIdentity(homeStat, manifest.originalIdentity)
   const homeIsStaged = homeStat !== undefined && sameIdentity(homeStat, manifest.stagedIdentity)
   const backupIsOriginal = backupStat !== undefined && sameIdentity(backupStat, manifest.originalIdentity)
-  if (manifest.version === SERVICE_MANIFEST_VERSION) {
+  if (isServiceManifestVersion(manifest.version)) {
     if (serviceContext === undefined || dshExecutable === undefined) {
       fail(`service-aware 生命周期恢复需要以原 Lark lifecycle 命令持锁执行；保留证据：${transactionRoot}`)
     }
@@ -792,7 +1240,8 @@ async function recoverBoundTransaction({
     })
   }
 
-  if (manifest.state === 'committed' || manifest.state === 'cleanup-started') {
+  if (!isServiceManifestVersion(manifest.version)
+    && (manifest.state === 'committed' || manifest.state === 'cleanup-started')) {
     if (!homeIsStaged || (backupStat !== undefined && !backupIsOriginal)) {
       fail(`已提交事务的 home/backup 身份不匹配；拒绝清理：${transactionRoot}`)
     }
@@ -915,15 +1364,18 @@ async function runServiceCommand(executable, args) {
 }
 
 async function withCrashStopGuardian(
-  systemctlExecutable, units, completionToken, operation, startUnits = true, containmentHome,
+  systemctlExecutable, units, completionToken, operation, startUnits = true, containmentHome, knownUniverse = units,
 ) {
   const source = String.raw`
 const { spawnSync } = require('node:child_process')
 const { realpathSync } = require('node:fs')
 const { isAbsolute, sep } = require('node:path')
-const [systemctl, completionToken, startFlag, containmentHome, ...units] = process.argv.slice(1)
+const [systemctl, completionToken, startFlag, containmentHome, startCountSource, ...allUnits] = process.argv.slice(1)
+const startCount = Number(startCountSource)
+const units = allUnits.slice(0, startCount)
+const knownUniverse = allUnits.slice(startCount)
 const unitPattern = /^dsh-profile-[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.service$/u
-const knownUnits = [...new Set(units)]
+const knownUnits = [...new Set([...units, ...knownUniverse])]
 let input = ''
 let parentDisconnected = false
 let containmentPromise
@@ -1017,13 +1469,12 @@ const ownership = (unit) => {
   const working = values.WorkingDirectory
   if (working === '' || !isAbsolute(working)) return undefined
   const canonicalWorking = canonical(working)
-  const homeMatches = canonicalHome !== undefined
-    && (canonicalHome === containmentHome || canonicalHome.startsWith(containmentHome + sep))
+  const homeMatches = canonicalHome === containmentHome
   const workingMatches = canonicalWorking !== undefined
     && (canonicalWorking === containmentHome || canonicalWorking.startsWith(containmentHome + sep))
-  if (homeMatches || workingMatches) return 'same-home'
-  if (canonicalHome === undefined || canonicalWorking === undefined) return undefined
-  return 'foreign'
+  if (homeMatches && workingMatches) return 'same-home'
+  if (!homeMatches && !workingMatches) return 'foreign'
+  return undefined
 }
 const state = unit => parseProperties(command([
   '--user', 'show', unit, '--no-pager', '--property=Id', '--property=ActiveState',
@@ -1033,6 +1484,10 @@ const inactive = (unit, values) => values !== undefined && values.Id === unit
   && values.ActiveState === 'inactive' && values.SubState === 'dead'
   && values.MainPID === '0' && values.ControlPID === '0'
 const stop = targets => targets.length === 0 || successful(command(['--user', 'stop', ...targets]))
+const blockStarts = targets => targets.length === 0 || (
+  successful(command(['--user', 'disable', ...targets]))
+  && successful(command(['--user', 'mask', '--runtime', ...targets]))
+)
 const verify = targets => targets.every(unit => inactive(unit, state(unit)))
 const stopKnownUntilVerified = async () => {
   for (;;) {
@@ -1085,6 +1540,15 @@ const stopAndVerify = async () => {
       ...knownUnits,
       ...classifications.filter(([, classification]) => classification === 'same-home').map(([unit]) => unit),
     ])].sort()
+    const dynamicTargets = targets.filter(unit => !knownUnits.includes(unit))
+    if (!blockStarts(dynamicTargets)) {
+      stableCensuses = 0
+      previousCensus = undefined
+      stop(targets)
+      verify(targets)
+      await sleep(1000)
+      continue
+    }
     stop(targets)
     const quiescent = verify(targets)
     if (!quiescent) {
@@ -1122,8 +1586,8 @@ process.stdin.on('end', () => {
 process.stdin.on('error', beginContainment)
 process.stdout.on('error', beginContainment)
 ;(async () => {
-  const startStatus = startFlag === '1' && knownUnits.length > 0
-    ? command(['--user', 'start', ...knownUnits]).status ?? 1
+  const startStatus = startFlag === '1' && units.length > 0
+    ? command(['--user', 'start', ...units]).status ?? 1
     : 0
   if (startStatus !== 0) {
     await stopKnownUntilVerified()
@@ -1136,7 +1600,8 @@ process.stdout.on('error', beginContainment)
 })().catch(beginContainment)
 `
   const guardian = spawn(process.execPath, [
-    '-e', source, systemctlExecutable, completionToken, startUnits ? '1' : '0', containmentHome ?? '-', ...units,
+    '-e', source, systemctlExecutable, completionToken, startUnits ? '1' : '0', containmentHome ?? '-',
+    String(units.length), ...units, ...knownUniverse,
   ], {
     // Keep the parent directory plus both kernel lock descriptions alive if
     // the lifecycle process dies. The detached guardian must continue to
@@ -1199,12 +1664,16 @@ async function trustedSystemExecutable(path, name) {
   return canonical
 }
 
-function parseBoundedMilliseconds(name, defaultValue, maximum) {
-  const raw = process.env[name] ?? String(defaultValue)
+function parseBoundedInteger(name, rawValue, defaultValue, maximum) {
+  const raw = rawValue ?? String(defaultValue)
   if (!/^(?:0|[1-9]\d*)$/u.test(raw)) fail(`${name} 必须是 0..${maximum} 的整数。`, 2)
   const value = Number(raw)
   if (!Number.isSafeInteger(value) || value > maximum) fail(`${name} 必须是 0..${maximum} 的整数。`, 2)
   return value
+}
+
+function parseBoundedMilliseconds(name, defaultValue, maximum) {
+  return parseBoundedInteger(name, process.env[name], defaultValue, maximum)
 }
 
 function serviceTimeouts() {
@@ -1212,6 +1681,10 @@ function serviceTimeouts() {
     stop: parseBoundedMilliseconds('DSH_ENHANCED_SERVICE_STOP_TIMEOUT_MS', 30_000, 300_000),
     ready: parseBoundedMilliseconds('DSH_ENHANCED_SERVICE_READY_TIMEOUT_MS', 30_000, 300_000),
     stability: parseBoundedMilliseconds('DSH_ENHANCED_SERVICE_STABILITY_MS', 12_000, 60_000),
+    // 稳定性窗口内要求连续通过的样本数；两点（接受点 + 窗口末点）采样抓不住
+    // connected→disconnected→connected 这类末点状态复原的窗口内抖动。
+    stabilitySamples: parseBoundedInteger(
+      'DSH_ENHANCED_SERVICE_STABILITY_SAMPLES', process.env.DSH_ENHANCED_SERVICE_STABILITY_SAMPLES, 4, 16),
   }
 }
 
@@ -1288,10 +1761,15 @@ async function classifyServiceUnitOwnership(systemctlExecutable, unit, homePath)
   }
   const serviceHome = await canonicalMissingAllowed(homes[0])
   const workingDirectory = await canonicalMissingAllowed(shown.WorkingDirectory)
-  if (inside(homePath, serviceHome) || inside(homePath, workingDirectory)) {
+  const homeMatches = serviceHome === homePath
+  const workingMatches = inside(homePath, workingDirectory)
+  if (homeMatches && workingMatches) {
     return { classification: 'same-home', digest: sha256(JSON.stringify(shown)) }
   }
-  return { classification: 'foreign', digest: sha256(JSON.stringify(shown)) }
+  if (!homeMatches && !workingMatches && !inside(homePath, serviceHome)) {
+    return { classification: 'foreign', digest: sha256(JSON.stringify(shown)) }
+  }
+  fail(`systemd unit ownership 的 HOME/WorkingDirectory 证据冲突或嵌套：${unit}`)
 }
 
 function decodeUnitQuoted(value, label) {
@@ -1450,6 +1928,17 @@ async function readRawServiceState(systemctlExecutable, unit) {
   }
 }
 
+async function sameHomeRawServiceOwnership(raw, homePath, strict = false) {
+  const homes = (raw.environment ?? '').split(' ').filter(value => value.startsWith('DSH_HOME='))
+  const candidate = homes.length === 1 ? homes[0].slice('DSH_HOME='.length) : undefined
+  if (candidate === undefined || !isAbsolute(candidate) || !isAbsolute(raw.workingDirectory ?? '')) return false
+  const canonicalize = strict ? realpath : canonicalMissingAllowed
+  const serviceHome = await canonicalize(candidate).catch(() => undefined)
+  const workingDirectory = await canonicalize(raw.workingDirectory).catch(() => undefined)
+  return serviceHome !== undefined && workingDirectory !== undefined
+    && sameHomeOwnershipEvidence(serviceHome, workingDirectory, homePath)
+}
+
 async function listedServiceUnits(systemctlExecutable) {
   const commands = [
     ['--user', 'list-unit-files', '--type=service', '--no-legend', '--no-pager', 'dsh-profile-*.service'],
@@ -1569,12 +2058,13 @@ async function prepareBoundMasks(transactionRoot, units, kind) {
   return records
 }
 
-async function newBoundMaskIntent(transactionRoot, unit, kind, unitFileState) {
+async function newBoundMaskIntent(transactionRoot, unit, kind, unitFileState, guardianRuntimeMask = false) {
   const [barrier] = await prepareServiceStartBarriers(transactionRoot, [{ unit, unitFileState }])
   return {
     unit, path: serviceMaskPath(unit),
     stagingPath: join(transactionRoot, 'service-mask-staging', kind, unit),
     transactionRoot, target: '/dev/null', barrier,
+    ...(guardianRuntimeMask ? { guardianRuntimeMask: true } : {}),
   }
 }
 
@@ -1683,6 +2173,29 @@ async function stageBoundMasks(systemctlExecutable, masks) {
   await fsyncPath(controlRoot, true)
   await fsyncPath(dirname(masks[0].stagingPath), true)
   await runServiceCommand(systemctlExecutable, ['--user', 'daemon-reload'])
+}
+
+async function releaseGuardianRuntimeMasks(systemctlExecutable, masks) {
+  for (const mask of masks.filter(candidate => candidate.guardianRuntimeMask === true)) {
+    if (await boundMaskLocation(mask) !== 'installed') {
+      fail(`guardian runtime mask 只能在绑定 lifecycle mask 安装后解除：${mask.unit}`)
+    }
+    const before = await readRawServiceState(systemctlExecutable, mask.unit)
+    if (before.loadState !== 'masked' || before.activeState !== 'inactive' || before.subState !== 'dead'
+      || before.mainPid !== 0 || before.controlPid !== 0) {
+      fail(`guardian runtime mask 解除前缺少 bound-masked/inactive 证明：${mask.unit}`)
+    }
+    await runServiceCommand(systemctlExecutable, ['--user', 'unmask', '--runtime', mask.unit])
+    await runServiceCommand(systemctlExecutable, ['--user', 'daemon-reload'])
+    if (await boundMaskLocation(mask) !== 'installed') {
+      fail(`guardian runtime mask 解除后 lifecycle mask 身份丢失：${mask.unit}`)
+    }
+    const after = await readRawServiceState(systemctlExecutable, mask.unit)
+    if (after.loadState !== 'masked' || after.activeState !== 'inactive' || after.subState !== 'dead'
+      || after.mainPid !== 0 || after.controlPid !== 0) {
+      fail(`guardian runtime mask 解除后未保持 bound-masked/inactive：${mask.unit}`)
+    }
+  }
 }
 
 async function prepareServiceStartBarriers(transactionRoot, services) {
@@ -1846,18 +2359,14 @@ async function stopRelatedServices(
   systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeoutMilliseconds, transactionRoot, manifest,
 ) {
   for (const intent of manifest.containmentMaskIntents) {
-    manifest = await withCrashStopGuardian(systemctlExecutable, [intent.unit], randomUUID(), async () => {
+    manifest = await withCrashStopGuardian(systemctlExecutable, [], randomUUID(), async () => {
       const raw = await readRawServiceState(systemctlExecutable, intent.unit)
-      const homes = (raw.environment ?? '').split(' ').filter(value => value.startsWith('DSH_HOME='))
-      const candidate = homes.length === 1 ? homes[0].slice('DSH_HOME='.length) : undefined
-      const environmentMatches = candidate !== undefined && isAbsolute(candidate)
-        && await canonicalMissingAllowed(candidate) === homePath
-      const workingMatches = isAbsolute(raw.workingDirectory ?? '')
-        && inside(homePath, await canonicalMissingAllowed(raw.workingDirectory))
-      if (!environmentMatches && !workingMatches) {
-        fail(`已持久化 containment intent 的 unit 不再属于当前 DSH_HOME；拒绝修改：${intent.unit}`)
+      if (!await sameHomeRawServiceOwnership(raw, homePath, intent.guardianRuntimeMask === true)) {
+        fail(`已持久化 containment intent 的 unit ownership 证据缺失或冲突；拒绝修改：${intent.unit}`)
       }
-      await ensureServiceStartBarriers(systemctlExecutable, [intent.barrier])
+      if (intent.guardianRuntimeMask !== true) {
+        await ensureServiceStartBarriers(systemctlExecutable, [intent.barrier])
+      }
       const mask = await materializeMaskIntent(intent)
       manifest = await writeManifest(transactionRoot, {
         ...manifest, containmentMaskIntents: manifest.containmentMaskIntents.filter(candidate => candidate.unit !== intent.unit),
@@ -1865,13 +2374,21 @@ async function stopRelatedServices(
         containmentStartBarriers: [...manifest.containmentStartBarriers, intent.barrier],
       }, manifest.state)
       await installBoundMasks(systemctlExecutable, [mask])
+      await releaseGuardianRuntimeMasks(systemctlExecutable, [mask])
       await runServiceCommand(systemctlExecutable, ['--user', 'stop', intent.unit])
       return manifest
     }, false, homePath)
   }
   const combined = new Map(services.map(service => [service.unit, service]))
   const containedUnits = new Set(manifest.containmentMasks.map(mask => mask.unit))
+  for (const mask of manifest.containmentMasks) {
+    const raw = await readRawServiceState(systemctlExecutable, mask.unit)
+    if (!await sameHomeRawServiceOwnership(raw, homePath, mask.guardianRuntimeMask === true)) {
+      fail(`已持久化 containment mask 的 unit ownership 证据缺失或冲突；拒绝修改：${mask.unit}`)
+    }
+  }
   await installBoundMasks(systemctlExecutable, [...manifest.serviceMasks, ...manifest.containmentMasks])
+  await releaseGuardianRuntimeMasks(systemctlExecutable, manifest.containmentMasks)
   await ensureServiceStartBarriers(systemctlExecutable, manifest.serviceStartBarriers)
   const currentUniverse = await listedServiceUnits(systemctlExecutable)
   const additionalUnits = [...containedUnits].filter(unit => currentUniverse.includes(unit))
@@ -1889,20 +2406,37 @@ async function stopRelatedServices(
     // its own fresh ownership census rather than stopping a foreign unit.
     const classified = await withCrashStopGuardian(systemctlExecutable, [], randomUUID(), async () => {
       const raw = await readRawServiceState(systemctlExecutable, unit)
+      const guardianContained = raw.unitFileState === 'masked-runtime'
       const homes = (raw.environment ?? '').split(' ').filter(value => value.startsWith('DSH_HOME='))
       const candidate = homes.length === 1 ? homes[0].slice('DSH_HOME='.length) : undefined
-      const environmentMatches = candidate !== undefined && isAbsolute(candidate)
-        && await canonicalMissingAllowed(candidate) === homePath
-      const workingMatches = isAbsolute(raw.workingDirectory ?? '')
-        && inside(homePath, await canonicalMissingAllowed(raw.workingDirectory))
-      if (environmentMatches || workingMatches) {
+      const canonicalize = guardianContained ? realpath : canonicalMissingAllowed
+      const serviceHome = candidate !== undefined && isAbsolute(candidate)
+        ? await canonicalize(candidate).catch(() => undefined) : undefined
+      const workingDirectory = isAbsolute(raw.workingDirectory ?? '')
+        ? await canonicalize(raw.workingDirectory).catch(() => undefined) : undefined
+      const sameHome = await sameHomeRawServiceOwnership(raw, homePath, guardianContained)
+      if (sameHome) {
+        if (manifest.foreignOwnership?.some(evidence => evidence.unit === unit)) {
+          fail(`既有 foreign systemd unit ownership 在事务期间发生变化；拒绝接管：${unit}`)
+        }
         if (!manifest.containmentMasks.some(mask => mask.unit === unit)) {
-          if (!['enabled', 'disabled'].includes(raw.unitFileState)) {
+          if (!['enabled', 'disabled', 'masked-runtime'].includes(raw.unitFileState)) {
             fail(`新增同-home unit 的 enablement 状态不受支持：${unit}:${raw.unitFileState}`)
           }
-          const intent = await newBoundMaskIntent(transactionRoot, unit, 'containment', raw.unitFileState)
+          // A detached crash guardian cannot safely rewrite manifest JSON, so
+          // it persistently disables and runtime-masks a late same-home unit.
+          // Recovery recognizes that fail-closed residue as originally
+          // disabled, then materializes the normal inode-bound user.control
+          // mask ledger before it performs any further work.
+          const intent = await newBoundMaskIntent(
+            transactionRoot, unit, 'containment', guardianContained ? 'disabled' : raw.unitFileState, guardianContained,
+          )
+          if (!unitUniverse.includes(unit)) {
+            unitUniverse.push(unit)
+            unitUniverse.sort()
+          }
           manifest = await writeManifest(transactionRoot, {
-            ...manifest, containmentMaskIntents: [...manifest.containmentMaskIntents, intent],
+            ...manifest, unitUniverse, containmentMaskIntents: [...manifest.containmentMaskIntents, intent],
           }, manifest.state)
           await establishServiceStartBarriers(systemctlExecutable, [intent.barrier])
           const mask = await materializeMaskIntent(intent)
@@ -1912,9 +2446,16 @@ async function stopRelatedServices(
             containmentStartBarriers: [...manifest.containmentStartBarriers, intent.barrier],
           }, manifest.state)
         }
-        await installBoundMasks(systemctlExecutable, manifest.containmentMasks.filter(mask => mask.unit === unit))
+        const unitMasks = manifest.containmentMasks.filter(mask => mask.unit === unit)
+        await installBoundMasks(systemctlExecutable, unitMasks)
+        await releaseGuardianRuntimeMasks(systemctlExecutable, unitMasks)
         await runServiceCommand(systemctlExecutable, ['--user', 'stop', unit])
         return { matched: true, manifest }
+      }
+      const environmentMatches = serviceHome === homePath
+      const workingMatches = workingDirectory !== undefined && inside(homePath, workingDirectory)
+      if (environmentMatches !== workingMatches || serviceHome !== undefined && inside(homePath, serviceHome)) {
+        fail(`新增 unit 的 HOME/WorkingDirectory ownership 证据冲突：${unit}`)
       }
       return { matched: false, manifest }
     }, false, homePath)
@@ -1925,7 +2466,7 @@ async function stopRelatedServices(
     }
   }
   await stopServicesAndWait(
-    systemctlExecutable, services, manifest.serviceMasks, homePath, dshExecutable, currentUniverse,
+    systemctlExecutable, services, manifest.serviceMasks, homePath, dshExecutable, unitUniverse,
     manifest.foreignOwnership ?? [], timeoutMilliseconds,
   )
   const deadline = Date.now() + timeoutMilliseconds
@@ -1950,9 +2491,31 @@ async function journalHasReadyMarker(journalctlExecutable, service) {
   return result.stdout.split('\n').some(line => line.includes(READY_MARKER))
 }
 
+async function larkJournalStates(journalctlExecutable, service) {
+  const result = await runServiceCommand(journalctlExecutable, [
+    '--user', '--unit', service.unit, `_SYSTEMD_INVOCATION_ID=${service.invocationId}`, '--output=cat', '--no-pager',
+  ])
+  return result.stdout.split('\n').flatMap(line => {
+    const normalized = line.trim()
+    if (!normalized.startsWith(LARK_STATE_PREFIX)) return []
+    const state = normalized.slice(LARK_STATE_PREFIX.length)
+    return ['connected', 'connected-with-gap', 'disconnected'].includes(state) ? [state] : []
+  })
+}
+
+function latestLarkState(states) {
+  const latest = states.at(-1)
+  return latest !== undefined && ['connected', 'connected-with-gap', 'disconnected'].includes(latest) ? latest : undefined
+}
+
+async function latestLarkJournalState(journalctlExecutable, service) {
+  return latestLarkState(await larkJournalStates(journalctlExecutable, service))
+}
+
 async function startAndAcceptServices({
   systemctlExecutable, journalctlExecutable, services, serviceMasks,
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts,
+  acceptAfterReady, durableAccept, requireLarkReady = false,
 }) {
   const activeBefore = services.filter(service => service.wasActive)
   const activeMasks = activeBefore.map(service => {
@@ -1964,6 +2527,7 @@ async function startAndAcceptServices({
   await assertCleanProfileInventory(homePath, cleanProfiles)
   const unitNames = activeBefore.map(service => service.unit)
   let accepted
+  const larkBaseline = new Map()
   const result = await withCrashStopGuardian(systemctlExecutable, unitNames, randomUUID(), async () => {
     const deadline = Date.now() + timeouts.ready
     for (;;) {
@@ -1987,10 +2551,20 @@ async function startAndAcceptServices({
         && service.controlPid === 0 && service.invocationId !== '' && service.invocationId !== previous.invocationId) && inactiveReady
       if (systemdReady) {
         let logsReady = true
+        const readinessLarkCounts = new Map()
         for (const candidate of candidates) {
           if (!await journalHasReadyMarker(journalctlExecutable, candidate.current)) { logsReady = false; break }
+          if (requireLarkReady && candidate.current.profile === targetProfile) {
+            const states = await larkJournalStates(journalctlExecutable, candidate.current)
+            if (!LARK_ACCEPTED_STATES.has(latestLarkState(states))) { logsReady = false; break }
+            readinessLarkCounts.set(candidate.current.unit, states.length)
+          }
         }
-        if (logsReady) { accepted = candidates.map(({ current }) => current); break }
+        if (logsReady) {
+          accepted = candidates.map(({ current }) => current)
+          for (const [unit, count] of readinessLarkCounts) larkBaseline.set(unit, count)
+          break
+        }
       }
       if (Date.now() >= deadline) fail('systemd services 未在超时内产生 fresh InvocationID Host ready marker。')
       await delay(deadline - Date.now())
@@ -1999,48 +2573,73 @@ async function startAndAcceptServices({
     if (targetBefore === undefined || targetBefore.wasActive && !accepted.some(service => service.profile === targetProfile)) {
       fail('目标 Lark service 未通过 readiness。')
     }
-    if (timeouts.stability > 0) await new Promise(resolveDelay => setTimeout(resolveDelay, timeouts.stability))
-    await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
-    await assertCleanProfileInventory(homePath, cleanProfiles)
-    const stable = await Promise.all(activeBefore.map(async previous => ({
-      ...previous, ...await readRawServiceState(systemctlExecutable, previous.unit),
-    })))
-    const stableByUnit = new Map(stable.map(service => [service.unit, service]))
-    for (const acceptedService of accepted) {
-      const service = stableByUnit.get(acceptedService.unit)
-      if (service === undefined || service.activeState !== 'active' || service.subState !== 'running' || service.mainPid <= 0
-        || service.invocationId !== acceptedService.invocationId || service.nRestarts !== acceptedService.nRestarts) {
-        fail(`systemd service 未通过稳定性验证：${acceptedService.unit}`)
+    if (acceptAfterReady !== undefined) await acceptAfterReady()
+    // 稳定性窗口：窗口内取 N 个连续样本，每个样本都必须独立通过全部门槛。
+    // 仅比对「接受点 + 窗口末点」会漏掉窗口内 connected→disconnected→connected
+    // （末点复原）与 nRestarts 不变的短暂掉线；对 Lark journal 还要逐条检查
+    // 自接受基线以来「新增的每一条状态行」，因为最新行会把一次掉线完全覆盖。
+    const sampleCount = timeouts.stability > 0 ? Math.max(2, timeouts.stabilitySamples) : 1
+    const gap = sampleCount > 1 ? timeouts.stability / (sampleCount - 1) : 0
+    for (let sample = 1; sample <= sampleCount; sample += 1) {
+      if (sample > 1) await new Promise(resolveDelay => setTimeout(resolveDelay, gap))
+      await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
+      await assertCleanProfileInventory(homePath, cleanProfiles)
+      const stable = await Promise.all(activeBefore.map(async previous => ({
+        ...previous, ...await readRawServiceState(systemctlExecutable, previous.unit),
+      })))
+      const stableByUnit = new Map(stable.map(service => [service.unit, service]))
+      for (const acceptedService of accepted) {
+        const service = stableByUnit.get(acceptedService.unit)
+        if (service === undefined || service.activeState !== 'active' || service.subState !== 'running' || service.mainPid <= 0
+          || service.controlPid !== 0
+          || service.invocationId !== acceptedService.invocationId || service.nRestarts !== acceptedService.nRestarts) {
+          fail(`systemd service 未通过稳定性验证：${acceptedService.unit}`)
+        }
+        if (requireLarkReady && acceptedService.profile === targetProfile) {
+          const states = await larkJournalStates(journalctlExecutable, service)
+          const baselineCount = larkBaseline.get(acceptedService.unit) ?? 0
+          const offending = states.slice(baselineCount)
+            .find(state => !LARK_ACCEPTED_STATES.has(state))
+          if (offending !== undefined) {
+            fail(`Lark service 在稳定性窗口内报告了非接受状态「${offending}」：${acceptedService.unit}`)
+          }
+          if (!LARK_ACCEPTED_STATES.has(latestLarkState(states))) {
+            fail(`Lark service 在稳定性窗口后未保持 connected：${acceptedService.unit}`)
+          }
+        }
       }
-    }
-    for (const inactiveService of services.filter(service => !service.wasActive)) {
-      const state = await readRawServiceState(systemctlExecutable, inactiveService.unit)
-      if (state.activeState !== 'inactive' || state.subState !== 'dead' || state.mainPid !== 0 || state.controlPid !== 0) {
-        fail(`原 inactive service 被意外启动：${inactiveService.unit}`)
+      for (const inactiveService of services.filter(service => !service.wasActive)) {
+        const state = await readRawServiceState(systemctlExecutable, inactiveService.unit)
+        if (state.activeState !== 'inactive' || state.subState !== 'dead' || state.mainPid !== 0 || state.controlPid !== 0) {
+          fail(`原 inactive service 被意外启动：${inactiveService.unit}`)
+        }
       }
     }
     await installBoundMasks(systemctlExecutable, activeMasks)
+    if (durableAccept !== undefined) await durableAccept(accepted)
     return accepted
-  }, true, homePath)
+  }, true, homePath, services.map(service => service.unit))
   return result
 }
 
 async function finalizeAcceptedServices({
-  systemctlExecutable, dshExecutable, services, serviceMasks, containmentMasks, serviceStartBarriers,
+  systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, containmentMasks, serviceStartBarriers,
   containmentStartBarriers,
-  homePath, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance,
+  homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
 }) {
   await stageBoundMasks(systemctlExecutable, serviceMasks)
   await stageBoundMasks(systemctlExecutable, containmentMasks)
   await restoreServiceEnablement(systemctlExecutable, serviceStartBarriers)
   await restoreServiceEnablement(systemctlExecutable, containmentStartBarriers)
   await assertAcceptedServicesStillBound({
-    systemctlExecutable, dshExecutable, services, homePath, unitUniverse, foreignOwnership, cleanProfiles, acceptance,
+    systemctlExecutable, journalctlExecutable, dshExecutable, services, homePath, targetProfile, unitUniverse,
+    foreignOwnership, cleanProfiles, acceptance, requireLarkReady,
   })
 }
 
 async function assertAcceptedServicesStillBound({
-  systemctlExecutable, dshExecutable, services, homePath, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance,
+  systemctlExecutable, journalctlExecutable, dshExecutable, services, homePath, targetProfile, unitUniverse,
+  foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
 }) {
   await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
   await assertCleanProfileInventory(homePath, cleanProfiles)
@@ -2061,6 +2660,10 @@ async function assertAcceptedServicesStillBound({
     if (proof === undefined || service.activeState !== 'active' || service.subState !== 'running'
       || service.mainPid !== proof.mainPid || service.invocationId !== proof.invocationId
       || service.nRestarts !== proof.nRestarts) fail(`systemd service acceptance 在 cleanup 前失效：${original.unit}`)
+    if (requireLarkReady && original.profile === targetProfile
+      && !LARK_ACCEPTED_STATES.has(await latestLarkJournalState(journalctlExecutable, service))) {
+      fail(`Lark service 在 cleanup 前未保持 connected：${original.unit}`)
+    }
   }
 }
 
@@ -2139,12 +2742,18 @@ async function recoverServiceTransaction({
   if (!Array.isArray(unitUniverse) || unitUniverse.some(unit => typeof unit !== 'string' || !SYSTEMD_UNIT.test(unit))) {
     fail(`service-aware manifest 中的 unit universe 无效：${transactionRoot}`)
   }
-  await assertUnitUniverseStable(serviceContext.systemctlExecutable, unitUniverse, homePath, foreignOwnership)
+  manifest = await stopRelatedServices(
+    serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop,
+    physicalTransactionRoot, manifest,
+  )
   await assertCleanProfileInventory(
     homeIsOriginal ? physicalHomePath : backupIsOriginal ? backupHome : physicalHomePath, cleanProfiles,
   )
   const target = services.find(service => service.profile === profile)
   if (target === undefined) fail(`service-aware manifest 缺少目标 unit：${transactionRoot}`)
+  if (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION && target.wasActive !== true) {
+    fail(`supervised recovery manifest 的目标 unit 原本不是 active：${transactionRoot}`)
+  }
   await assertServiceFilesUnchanged(services)
   const assertCommittedCleanProfile = async () => {
     if (manifest.operation !== 'uninstall') return
@@ -2153,15 +2762,39 @@ async function recoverServiceTransaction({
     }
     await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
   }
+  const supervisedContext = manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION
+    ? {
+        homePath, profile, dshExecutable, supervisedNonce: manifest.supervisedLifecycle.activationNonce,
+        supervisedCatalogDigest: manifest.supervisedLifecycle.catalogDigest,
+        supervisedPlan: manifest.supervisedLifecycle.activePlan,
+        previewAcceptance: manifest.supervisedLifecycle.previewAcceptance,
+        supervisedSource: manifest.supervisedLifecycle.source,
+      }
+    : undefined
+  if (supervisedContext !== undefined && manifest.supervisedLifecycle.source === undefined) {
+    const source = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
+      homePath: homeIsOriginal ? homePath : backupIsOriginal ? backupHome : homePath, profile, dshExecutable,
+    }, 'attest-active'))
+    manifest = await writeManifest(physicalTransactionRoot, {
+      ...manifest, servicePhase: 'stopped', supervisedLifecycle: {
+        ...manifest.supervisedLifecycle, phase: 'source-attested', databasePaths: source.databasePaths, source,
+      },
+    }, 'preparing')
+  }
 
   if (homeIsOriginal && backupStat === undefined) {
     await assertProfileDigest(physicalHomePath, profile, manifest.originalProfileDigest)
     manifest = await stopRelatedServices(serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop, physicalTransactionRoot, manifest)
+    let sourceAcceptance
+    if (supervisedContext !== undefined) {
+      manifest = await persistSourceRestoreAttempt({ manifest, physicalTransactionRoot, homePath, profile, dshExecutable })
+      sourceAcceptance = sourceRestoreAcceptance({ manifest, homePath, profile, dshExecutable, timeouts })
+    }
     await restoreOriginalActiveSet({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
       homePath, targetProfile: profile, unitUniverse, foreignOwnership, timeouts,
-      cleanProfiles,
+      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedContext !== undefined,
     })
     const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -2176,11 +2809,16 @@ async function recoverServiceTransaction({
     await rename(backupHome, physicalHomePath)
     await fsyncPath(physicalTransactionRoot, true)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
+    let sourceAcceptance
+    if (supervisedContext !== undefined) {
+      manifest = await persistSourceRestoreAttempt({ manifest, physicalTransactionRoot, homePath, profile, dshExecutable })
+      sourceAcceptance = sourceRestoreAcceptance({ manifest, homePath, profile, dshExecutable, timeouts })
+    }
     await restoreOriginalActiveSet({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
       homePath, targetProfile: profile, unitUniverse, foreignOwnership, timeouts,
-      cleanProfiles,
+      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedContext !== undefined,
     })
     const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -2197,15 +2835,60 @@ async function recoverServiceTransaction({
       await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
     }
     manifest = await stopRelatedServices(serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop, physicalTransactionRoot, manifest)
-    manifest = await writeManifest(physicalTransactionRoot, { ...manifest, servicePhase: 'starting' },
-      cleanupWithoutBackup ? 'cleanup-started' : 'swapped')
+    let recoveryStartBaseline
+    if (supervisedContext !== undefined) {
+      recoveryStartBaseline = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
+        homePath, profile, dshExecutable,
+      }, 'snapshot'), false)
+    }
+    manifest = await writeManifest(physicalTransactionRoot, {
+      ...manifest, servicePhase: 'starting',
+      ...(supervisedContext === undefined ? {} : { supervisedLifecycle: {
+        ...manifest.supervisedLifecycle, phase: 'post-swap-pending', postSwapAcceptance: undefined,
+        startAttempt: { kind: 'accept-active', baselineGeneration: recoveryStartBaseline.recoveryProof.bootstrap.generation },
+      } }),
+    }, cleanupWithoutBackup ? 'cleanup-started' : 'swapped')
     let accepted
     try {
+      let postSwapProof
       accepted = await startAndAcceptServices({
         ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
         unitUniverse, foreignOwnership, cleanProfiles, timeouts,
+        requireLarkReady: supervisedContext !== undefined,
+        ...(supervisedContext === undefined ? {} : { acceptAfterReady: async () => {
+          postSwapProof = await awaitSupervisedDirectSuccessor(supervisedContext, { recoveryProof: { bootstrap: {
+            generation: manifest.supervisedLifecycle.startAttempt.baselineGeneration,
+          } } }, 'active', timeouts.ready)
+        }, durableAccept: async acceptedStates => {
+          const serviceAcceptance = acceptedStates.map(service => ({
+            unit: service.unit, invocationId: service.invocationId, mainPid: service.mainPid, nRestarts: service.nRestarts,
+          }))
+          const targetAcceptance = serviceAcceptance.find(service => service.unit === `dsh-profile-${profile}.service`)
+          if (targetAcceptance === undefined) fail('supervised durable acceptance 缺少目标 InvocationID。')
+          manifest = await writeManifest(physicalTransactionRoot, {
+            ...manifest, servicePhase: 'service-accepted', serviceAcceptance, serviceFailure: undefined,
+            supervisedLifecycle: {
+              ...manifest.supervisedLifecycle, phase: 'post-swap-accepted', postSwapAcceptance: {
+                generation: postSwapProof.proof.recoveryProof.bootstrap.generation,
+                invocationId: targetAcceptance.invocationId,
+                deliveryProof: postSwapProof.proof.deliveryProof, ownerBindingDigest: postSwapProof.proof.ownerBindingDigest,
+                unmanagedAutomationsDigest: postSwapProof.proof.unmanagedAutomationsDigest,
+                databasePaths: postSwapProof.proof.databasePaths,
+                attestationDigest: postSwapProof.snapshot.attestation.attestationDigest,
+                recoveryProof: postSwapProof.proof.recoveryProof, automationsProof: postSwapProof.proof.automationsProof,
+              },
+            },
+          }, cleanupWithoutBackup ? 'cleanup-started' : 'service-accepted')
+        } }),
       })
     } catch (error) {
+      if (supervisedContext !== undefined && manifest.supervisedLifecycle.source === undefined) {
+        await writeManifest(physicalTransactionRoot, {
+          ...manifest, servicePhase: 'service-failed',
+          serviceFailure: `supervised source attestation failed: ${error instanceof Error ? error.message : String(error)}`,
+        }, 'service-failed').catch(() => {})
+        throw error
+      }
       try {
         manifest = await stopRelatedServices(
           serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop,
@@ -2214,22 +2897,34 @@ async function recoverServiceTransaction({
       } catch {}
       await writeManifest(physicalTransactionRoot, {
         ...manifest, servicePhase: 'service-failed', serviceFailure: error instanceof Error ? error.message : String(error),
-      }, 'service-failed').catch(() => {})
+      }, cleanupWithoutBackup ? 'cleanup-started' : 'service-failed').catch(() => {})
       throw error
     }
     const acceptance = accepted.map(service => ({
       unit: service.unit, invocationId: service.invocationId, mainPid: service.mainPid, nRestarts: service.nRestarts,
     }))
-    manifest = await writeManifest(physicalTransactionRoot, {
-      ...manifest, servicePhase: 'service-accepted', serviceAcceptance: acceptance, serviceFailure: undefined,
-    }, cleanupWithoutBackup ? 'cleanup-started' : 'service-accepted')
+    if (supervisedContext === undefined) {
+      manifest = await writeManifest(physicalTransactionRoot, {
+        ...manifest, servicePhase: 'service-accepted', serviceAcceptance: acceptance, serviceFailure: undefined,
+      }, cleanupWithoutBackup ? 'cleanup-started' : 'service-accepted')
+    }
     await assertCommittedCleanProfile()
     await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
     await finalizeAcceptedServices({
       ...serviceContext, dshExecutable, services, serviceMasks, containmentMasks: manifest.containmentMasks,
       containmentStartBarriers: manifest.containmentStartBarriers,
-      serviceStartBarriers, homePath, unitUniverse, foreignOwnership, cleanProfiles, acceptance,
+      serviceStartBarriers, homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, acceptance,
+      requireLarkReady: supervisedContext !== undefined,
     })
+    if (supervisedContext !== undefined) {
+      await assertPersistedSupervisedAcceptance({
+        homePath, profile, dshExecutable, acceptance: manifest.supervisedLifecycle.postSwapAcceptance,
+      })
+      await assertAcceptedSupervisedInvocation({
+        ...serviceContext, services, homePath, dshExecutable, profile,
+        acceptance: manifest.supervisedLifecycle.postSwapAcceptance,
+      })
+    }
     await assertCommittedCleanProfile()
     await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'cleanup-started')
@@ -2329,13 +3024,15 @@ async function assertNoUnmanagedHomeProcesses(homePath, equivalentHomePaths = []
   }
 }
 
-async function assertStandardLarkOrCleanProfile({ dshExecutable, profile, homePath }) {
+async function assertServiceProfileScenario({ dshExecutable, profile, homePath, targetProfile, expectedScenario }) {
   const { scenario } = await readLifecycleConfig({ dshExecutable, profile, homePath })
-  if (scenario === 'lark') return undefined
-  if (scenario === 'unsupported') {
-    return await assertInstallerCleanWebProfile(homePath, profile)
+  if (profile === targetProfile && expectedScenario === 'supervised') {
+    if (scenario !== 'supervised') fail(`目标 systemd profile 必须保持 supervised：${profile}:${scenario}`)
+    return undefined
   }
-  fail(`受管 systemd unit 的 effective/composed profile 不是标准 Lark 或 installer clean baseline：${profile}:${scenario}`)
+  if (scenario === 'lark') return undefined
+  if (scenario === 'unsupported') return await assertInstallerCleanWebProfile(homePath, profile)
+  fail(`受管 systemd sibling 必须是标准 Lark 或 installer clean baseline：${profile}:${scenario}`)
 }
 
 async function assertCleanProfileInventory(homePath, cleanProfiles = []) {
@@ -2356,20 +3053,18 @@ async function readLifecycleConfig({ dshExecutable, profile, homePath }) {
 
 async function assertLockedLifecycleScenario({ dshExecutable, profile, homePath, expectedScenario, serviceAware, operation = 'upgrade' }) {
   const { scenario } = await readLifecycleConfig({ dshExecutable, profile, homePath })
-  if (scenario === 'supervised') {
-    fail('检测到实际 effective/composed profile 含 active supervised/recovery/automation markers；拒绝在 npm registry/store 或 systemd mutation 前继续。')
-  }
   if (scenario === 'unsupported' && expectedScenario !== 'unsupported') {
     fail('实际 effective/composed profile 无法安全归类为 web、autonomy 或已启用 Lark；拒绝 lifecycle 操作。')
   }
   if (expectedScenario !== undefined && scenario !== expectedScenario) {
     fail(`声明的 lifecycle scenario ${expectedScenario} 与实际 effective/composed profile 场景 ${scenario} 不一致；拒绝 lifecycle 操作。`, 2)
   }
-  if (serviceAware && scenario !== 'lark' && !(operation === 'uninstall' && scenario === 'unsupported')) {
-    fail('service-aware lifecycle 要求原 profile 为 active Lark，或要求已提交 uninstall 的目标 profile 为 clean unsupported。')
+  if (serviceAware && scenario !== 'lark' && scenario !== 'supervised'
+    && !(operation === 'uninstall' && scenario === 'unsupported')) {
+    fail('service-aware lifecycle 要求原 profile 为 active Lark/supervised，或要求已提交 uninstall 的目标 profile 为 clean unsupported。')
   }
-  if (!serviceAware && scenario === 'lark') {
-    fail('检测到实际 effective/composed profile 含 active Lark channel；必须使用 service-aware lifecycle。')
+  if (!serviceAware && (scenario === 'lark' || scenario === 'supervised')) {
+    fail('检测到实际 effective/composed profile 含 active Lark/supervised channel；必须使用 service-aware lifecycle。')
   }
   return scenario
 }
@@ -2377,16 +3072,18 @@ async function assertLockedLifecycleScenario({ dshExecutable, profile, homePath,
 async function restoreOriginalActiveSet({
   systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
   containmentMasks = [], containmentStartBarriers = [],
-  homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts,
+  homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts, acceptAfterReady,
+  requireLarkReady = false,
 }) {
   await assertServiceFilesUnchanged(services)
   const accepted = await startAndAcceptServices({
     systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks,
-    homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, timeouts,
+    homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, timeouts, acceptAfterReady, requireLarkReady,
   })
   await finalizeAcceptedServices({
-    systemctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
-    containmentMasks, containmentStartBarriers, homePath, unitUniverse, foreignOwnership, cleanProfiles, acceptance: accepted,
+    systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
+    containmentMasks, containmentStartBarriers, homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, acceptance: accepted,
+    requireLarkReady,
   })
   return accepted
 }
@@ -2443,6 +3140,343 @@ async function sandboxRun(context, command, options = {}) {
   } finally {
     await resources.validator.close()
     await resources.stage.close()
+  }
+}
+
+function parseJsonOutput(source, label) {
+  try { return JSON.parse(source) }
+  catch { fail(`supervised lifecycle ${label} 返回无效 JSON。`) }
+}
+
+function compactDatabaseProof(snapshot) {
+  return {
+    protocol: snapshot.protocol, schemaVersion: snapshot.schemaVersion,
+    database: snapshot.database, snapshotDigest: snapshot.snapshotDigest
+      ?? sha256(JSON.stringify({
+        protocol: snapshot.protocol, schemaVersion: snapshot.schemaVersion,
+        database: snapshot.database, sidecars: snapshot.sidecars,
+        inFlightCount: snapshot.inFlightCount, inventoryDigest: snapshot.inventoryDigest, records: snapshot.records,
+      })),
+    ...(validDigest(snapshot.storageDigest) ? { storageDigest: snapshot.storageDigest } : {}),
+    ...(validDigest(snapshot.inventoryDigest) ? { inventoryDigest: snapshot.inventoryDigest } : {}),
+  }
+}
+
+function compactSupervisedSnapshot(snapshot, requireAttestation = true) {
+  const recoveryBootstrap = snapshot.recovery?.bootstrap
+  if (snapshot.delivery?.protocol !== 'assistant-delivery/active-lark-owner-bindings-snapshot/v1'
+    || snapshot.recovery?.protocol !== 'assistant-recovery/operator-snapshot/v1'
+    || snapshot.automations?.protocol !== 'assistant-automations-operator-snapshot/v1'
+    || snapshot.delivery.bindings?.length !== 1
+    || !Number.isSafeInteger(recoveryBootstrap?.generation) || recoveryBootstrap.generation < 0
+    || requireAttestation && (snapshot.automations.inFlightCount !== 0
+      || recoveryBootstrap.status !== 'succeeded' || recoveryBootstrap.attestationValid !== true
+      || recoveryBootstrap.generation < 1)
+    || snapshot.managedProjection?.protocol !== 'dsh-enhanced/supervised-growth-managed-automations/v1'
+    || !validDigest(snapshot.managedProjection.digest)
+    || !validDigest(snapshot.ownerBindingDigest)
+    || requireAttestation && (snapshot.attestation?.protocol !== 'dsh-enhanced/supervised-growth-lifecycle-attestation/v1'
+      || !validDigest(snapshot.attestation.attestationDigest)
+      || !Array.isArray(snapshot.attestation.externalProviderExemptions))
+    || !validDigest(snapshot.effectiveConfigDigest) || !validDigest(snapshot.semanticDigest)) {
+    fail('supervised lifecycle operator snapshot 不完整或协议不受支持。')
+  }
+  return {
+    effectiveConfigDigest: snapshot.effectiveConfigDigest, semanticDigest: snapshot.semanticDigest,
+    databasePaths: snapshot.databasePaths,
+    deliveryProof: compactDatabaseProof(snapshot.delivery),
+    recoveryProof: { ...compactDatabaseProof(snapshot.recovery), bootstrap: {
+      status: recoveryBootstrap.status, generation: recoveryBootstrap.generation,
+      attestationValid: recoveryBootstrap.attestationValid,
+      attestationSetDigest: recoveryBootstrap.attestationSetDigest,
+      attestations: recoveryBootstrap.attestations,
+    } },
+    automationsProof: compactDatabaseProof(snapshot.automations),
+    unmanagedAutomationsDigest: unmanagedAutomationDigest(snapshot.automations.records),
+    ownerBindingDigest: snapshot.ownerBindingDigest,
+    ...(requireAttestation ? {
+      activePlan: {
+        effectiveConfigDigest: snapshot.attestation.effectiveConfigDigest,
+        attestationSetDigest: snapshot.attestation.recovery.bootstrapAttestationSetDigest,
+        managedInventoryDigest: snapshot.managedProjection.digest,
+        attestationDigest: snapshot.attestation.attestationDigest,
+        activationNonceDigest: snapshot.attestation.recovery.activationNonceDigest,
+        catalogDigest: snapshot.attestation.recovery.catalogDigest,
+      },
+    } : {}),
+  }
+}
+
+function sameDatabaseLocation(left, right) {
+  return left?.device === right?.device && left?.inode === right?.inode
+}
+
+function assertPostSwapDatabaseLocations(preview, active) {
+  if (JSON.stringify(preview.databasePaths) !== JSON.stringify(active.databasePaths)) {
+    fail('post-swap supervised database paths 与 preview 不一致。')
+  }
+  if (!sameDatabaseLocation(preview.deliveryProof.database, active.deliveryProof.database)
+    || !sameDatabaseLocation(preview.recoveryProof.database, active.recoveryProof.database)
+    || !sameDatabaseLocation(preview.automationsProof.database, active.automationsProof.database)) {
+    fail('post-swap supervised DB 身份与 preview 验收的 staged DB 不一致。')
+  }
+}
+
+function assertCopiedSupervisedSnapshot(source, copied) {
+  if (JSON.stringify(source.databasePaths) !== JSON.stringify(copied.databasePaths)
+    || source.effectiveConfigDigest !== copied.effectiveConfigDigest
+    || source.semanticDigest !== copied.semanticDigest
+    || source.deliveryProof.storageDigest !== copied.deliveryProof.storageDigest
+    || source.recoveryProof.database.digest !== copied.recoveryProof.database.digest
+    || source.automationsProof.database.digest !== copied.automationsProof.database.digest
+    || source.automationsProof.storageDigest !== copied.automationsProof.storageDigest
+    || source.automationsProof.inventoryDigest !== copied.automationsProof.inventoryDigest) {
+    fail('copied supervised state 与 stopped source 的配置/DB semantic snapshot 不一致。')
+  }
+}
+
+function assertSupervisedOwnerBindingStable(source, current) {
+  if (JSON.stringify(source.databasePaths) !== JSON.stringify(current.databasePaths)
+    || source.ownerBindingDigest !== current.ownerBindingDigest
+    || source.unmanagedAutomationsDigest !== current.unmanagedAutomationsDigest) {
+    fail('supervised owner binding 或非受管 Automation 在 lifecycle phase 间发生变化。')
+  }
+}
+
+function assertSupervisedAcceptanceStable(expected, current) {
+  const checks = {
+    generation: current.recoveryProof.bootstrap.generation === expected.generation,
+    attestation: current.recoveryProof.bootstrap.attestationSetDigest === expected.recoveryProof.bootstrap.attestationSetDigest,
+    automationStorage: current.automationsProof.storageDigest === expected.automationsProof.storageDigest,
+    automationInventory: current.automationsProof.inventoryDigest === expected.automationsProof.inventoryDigest,
+    unmanagedAutomations: current.unmanagedAutomationsDigest === expected.unmanagedAutomationsDigest,
+    owner: current.ownerBindingDigest === expected.ownerBindingDigest,
+    paths: JSON.stringify(current.databasePaths) === JSON.stringify(expected.databasePaths),
+  }
+  if (Object.values(checks).includes(false)) fail(`supervised active proof 在稳定/cleanup 前发生漂移：${JSON.stringify(checks)}`)
+}
+
+function sourceSupervisedIdentity(source) {
+  const matches = source.recoveryProof.bootstrap.attestations.filter(
+    attestation => attestation.automationId === 'recovery:supervised-growth'
+      && attestation.activationState === 'active',
+  )
+  if (matches.length !== 1 || typeof matches[0].activationNonce !== 'string') {
+    fail('supervised source 缺少唯一 active Recovery identity。')
+  }
+  return { nonce: matches[0].activationNonce, catalogDigest: source.activePlan.catalogDigest }
+}
+
+function sourceSupervisedPlan(source) {
+  return { ...source.activePlan, ownerBindingDigest: source.ownerBindingDigest }
+}
+
+async function persistSourceRestoreAttempt({ manifest, physicalTransactionRoot, homePath, profile, dshExecutable }) {
+  const raw = compactSupervisedSnapshot(await runSupervisedOperatorDirect({ homePath, profile, dshExecutable }, 'snapshot'), false)
+  return await writeManifest(physicalTransactionRoot, {
+    ...manifest, servicePhase: 'starting', supervisedLifecycle: {
+      ...manifest.supervisedLifecycle, phase: 'source-attested', catalogDigest: undefined,
+      previewPlan: undefined, previewAcceptance: undefined, activePlan: undefined, postSwapAcceptance: undefined,
+      startAttempt: { kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation },
+    },
+  }, 'preparing')
+}
+
+function sourceRestoreAcceptance({ manifest, homePath, profile, dshExecutable, timeouts }) {
+  const source = manifest.supervisedLifecycle.source
+  const identity = sourceSupervisedIdentity(source)
+  return async () => {
+    await awaitSupervisedDirectSuccessor({
+      homePath, profile, dshExecutable, supervisedNonce: identity.nonce,
+      supervisedCatalogDigest: identity.catalogDigest, supervisedPlan: sourceSupervisedPlan(source),
+      supervisedSource: source,
+    }, { recoveryProof: { bootstrap: { generation: manifest.supervisedLifecycle.startAttempt.baselineGeneration } } },
+    'active', timeouts.ready)
+  }
+}
+
+function supervisedPreviewOverlayPaths(context) {
+  const name = `.dsh-enhanced-disable-lark-${context.transactionId}.yml`
+  return {
+    name,
+    stagePath: join(context.stageHome, name),
+    logicalPath: join(context.homePath, name),
+  }
+}
+
+function supervisedPreviewOverlayEnvironment(paths) {
+  return { DSH_ENHANCED_SUPERVISED_PREVIEW_OVERLAY: paths.logicalPath }
+}
+
+async function runSupervisedOperator(context, action, nonce, extraEnvironment) {
+  const result = await sandboxRun(context, [
+    process.execPath, '--input-type=module', '--eval', SUPERVISED_OPERATOR_PROGRAM,
+    action, context.homePath, context.profile, context.dshExecutable, ...(nonce === undefined ? [] : [nonce]),
+  ], { capture: true, extraEnvironment: extraEnvironment ?? context.supervisedOperatorEnvironment })
+  return parseJsonOutput(result.stdout, action)
+}
+
+async function runSupervisedOperatorDirect(context, action, nonce) {
+  const { homePath, profile, dshExecutable } = context
+  const effectiveNonce = nonce ?? context.supervisedNonce
+  const result = await run(process.execPath, [
+    '--input-type=module', '--eval', SUPERVISED_OPERATOR_PROGRAM,
+    action, homePath, profile, dshExecutable, ...(effectiveNonce === undefined ? [] : [effectiveNonce]),
+  ], { capture: true, env: { ...process.env, DSH_HOME: homePath } })
+  return parseJsonOutput(result.stdout, action)
+}
+
+function validSupervisedCapabilityProof(proof) {
+  return typeof proof === 'object' && proof !== null
+    && proof.protocol === 'dsh-enhanced/supervised-lifecycle-capability/v1'
+    && Object.keys(proof).length === 1
+}
+
+async function assertSupervisedLifecycleCapability(homePath, profile) {
+  let result
+  try {
+    result = await run(process.execPath, [
+      '--input-type=module', '--eval', SUPERVISED_CAPABILITY_PROGRAM, homePath, profile,
+    ], { capture: true, env: { ...process.env, DSH_HOME: homePath } })
+  } catch (error) {
+    fail(`当前 supervised source 缺少安全升级所需的只读 operator/attestation seam；请先安装支持该协议的 cohort：${error instanceof Error ? error.message : String(error)}`)
+  }
+  const proof = parseJsonOutput(result.stdout, 'capability')
+  if (!validSupervisedCapabilityProof(proof)) {
+    fail('supervised lifecycle capability proof 无效。')
+  }
+}
+
+async function assertPersistedSupervisedAcceptance({ homePath, profile, dshExecutable, acceptance }) {
+  const snapshot = await runSupervisedOperatorDirect({ homePath, profile, dshExecutable }, 'attest-active')
+  const proof = compactSupervisedSnapshot(snapshot)
+  assertSupervisedAcceptanceStable(acceptance, proof)
+  if (snapshot.attestation.attestationDigest !== acceptance.attestationDigest) {
+    fail('supervised active attestation digest 在 cleanup 前发生漂移。')
+  }
+}
+
+async function assertAcceptedSupervisedInvocation({
+  systemctlExecutable, journalctlExecutable, services, homePath, dshExecutable, profile, acceptance,
+}) {
+  const current = await readServiceStates(systemctlExecutable, services, homePath, dshExecutable)
+  const target = current.find(service => service.profile === profile)
+  if (target === undefined || target.invocationId !== acceptance.invocationId
+    || !LARK_ACCEPTED_STATES.has(await latestLarkJournalState(journalctlExecutable, target))) {
+    fail('supervised cleanup 前的 InvocationID/Lark latest state 与 durable acceptance 不一致。')
+  }
+}
+
+async function startSandboxHost(context) {
+  const resources = await openSandboxResources(context)
+  const overlay = supervisedPreviewOverlayPaths(context)
+  let stagedOverlay
+  try {
+    stagedOverlay = await readFile(overlay.stagePath)
+  } catch {
+    await resources.validator.close(); await resources.stage.close()
+    fail('supervised preview runtime overlay 在 Host 启动前缺失。')
+  }
+  if (sha256(stagedOverlay) !== context.supervisedPlan.runtimeOverlayDigest) {
+    await resources.validator.close(); await resources.stage.close()
+    fail('supervised preview runtime overlay digest 不匹配。')
+  }
+  const invocation = sandboxArgs({
+    ...context, validatorPath: SANDBOX_VALIDATOR_PATH,
+    command: [context.dshExecutable, '--profile', context.profile, '--patch', overlay.logicalPath,
+      '--host', '127.0.0.1', '--no-open', '--port', '0'],
+  })
+  const child = spawn(invocation.executable, invocation.args, {
+    env: process.env, stdio: ['ignore', 'pipe', 'pipe', resources.stage.fd, resources.validator.fd],
+  })
+  let stdout = ''; let stderr = ''; let closed = false; let closeCode
+  child.stdout.on('data', chunk => { if (stdout.length < 1024 * 1024) stdout += String(chunk) })
+  child.stderr.on('data', chunk => { if (stderr.length < 1024 * 1024) stderr += String(chunk) })
+  child.once('close', code => { closed = true; closeCode = code })
+  const close = async () => {
+    if (!closed) child.kill('SIGTERM')
+    const deadline = Date.now() + 2_000
+    while (!closed && Date.now() < deadline) await delay(25)
+    if (!closed) child.kill('SIGKILL')
+    while (!closed) await delay(25)
+    await resources.validator.close(); await resources.stage.close()
+  }
+  const readyDeadline = Date.now() + 30_000
+  while (!stdout.includes(READY_MARKER)) {
+    if (closed) { await close(); fail(`supervised 隔离 Host 激活失败（exit ${closeCode ?? 1}）${stderr === '' ? '' : `：${stderr.trim()}`}`) }
+    if (Date.now() >= readyDeadline) { await close(); fail('supervised 隔离 Host 在 30 秒内未就绪。') }
+    await delay(25)
+  }
+  return { child, close, closed: () => closed }
+}
+
+async function awaitSupervisedSuccessor(context, baseline, stage, timeoutMilliseconds = 30_000) {
+  const deadline = Date.now() + timeoutMilliseconds
+  let lastError
+  for (;;) {
+    try {
+      if (context.host?.closed()) fail('supervised preview Host exited before attestation completed.')
+      const snapshot = await runSupervisedOperator(context, `attest-${stage}`)
+      const proof = compactSupervisedSnapshot(snapshot)
+      assertSupervisedOwnerBindingStable(context.supervisedSource, proof)
+      if (proof.recoveryProof.bootstrap.generation <= baseline.recoveryProof.bootstrap.generation) {
+        fail(`supervised Recovery ${stage} generation 未严格前进。`)
+      }
+      const expectedNonceDigest = sha256(context.supervisedNonce)
+      const attestation = snapshot.attestation
+      if (attestation?.stage !== stage || attestation.recovery?.activationNonceDigest !== expectedNonceDigest
+        || attestation.recovery?.catalogDigest !== context.supervisedCatalogDigest
+        || attestation.effectiveConfigDigest !== context.supervisedPlan.effectiveConfigDigest
+        || attestation.recovery.bootstrapAttestationSetDigest !== context.supervisedPlan.attestationSetDigest
+        || snapshot.managedProjection?.digest !== context.supervisedPlan.managedInventoryDigest
+        || proof.ownerBindingDigest !== context.supervisedPlan.ownerBindingDigest
+        || JSON.stringify(attestation.externalProviderExemptions) !== JSON.stringify(stage === 'preview' ? ['larkChannel'] : [])) {
+        fail(`supervised Recovery ${stage} attestation 未绑定本事务 nonce/catalog。`)
+      }
+      if (context.host?.closed()) fail('supervised preview Host exited before acceptance.')
+      return { snapshot, proof }
+    } catch (error) { lastError = error }
+    if (Date.now() >= deadline) throw lastError
+    await delay(Math.min(SUPERVISED_POLL_INTERVAL_MS, deadline - Date.now()))
+  }
+}
+
+async function awaitSupervisedDirectSuccessor(context, baseline, stage, timeoutMilliseconds) {
+  const deadline = Date.now() + timeoutMilliseconds
+  let lastError
+  for (;;) {
+    try {
+      const snapshot = await runSupervisedOperatorDirect(context, `attest-${stage}`, context.supervisedNonce)
+      const proof = compactSupervisedSnapshot(snapshot)
+      assertSupervisedOwnerBindingStable(context.supervisedSource, proof)
+      if (proof.recoveryProof.bootstrap.generation <= baseline.recoveryProof.bootstrap.generation) {
+        fail(`supervised Recovery ${stage} generation 未严格前进。`)
+      }
+      if (snapshot.attestation?.stage !== stage
+        || snapshot.attestation.recovery?.activationNonceDigest !== sha256(context.supervisedNonce)
+        || snapshot.attestation.recovery?.catalogDigest !== context.supervisedCatalogDigest
+        || snapshot.attestation.effectiveConfigDigest !== context.supervisedPlan.effectiveConfigDigest
+        || snapshot.attestation.recovery.bootstrapAttestationSetDigest !== context.supervisedPlan.attestationSetDigest
+        || snapshot.managedProjection?.digest !== context.supervisedPlan.managedInventoryDigest
+        || proof.ownerBindingDigest !== context.supervisedPlan.ownerBindingDigest
+        || JSON.stringify(snapshot.attestation.externalProviderExemptions) !== JSON.stringify(stage === 'preview' ? ['larkChannel'] : [])) {
+        fail(`supervised Recovery ${stage} attestation 未绑定本事务 nonce/catalog/plan：`
+          + JSON.stringify({
+            nonce: snapshot.attestation?.recovery?.activationNonceDigest === sha256(context.supervisedNonce),
+            catalog: snapshot.attestation?.recovery?.catalogDigest === context.supervisedCatalogDigest,
+            config: snapshot.attestation?.effectiveConfigDigest === context.supervisedPlan.effectiveConfigDigest,
+            bootstrap: snapshot.attestation?.recovery?.bootstrapAttestationSetDigest === context.supervisedPlan.attestationSetDigest,
+            managed: snapshot.managedProjection?.digest === context.supervisedPlan.managedInventoryDigest,
+            owner: proof.ownerBindingDigest === context.supervisedPlan.ownerBindingDigest,
+          }))
+      }
+      if (context.previewAcceptance !== undefined) {
+        assertPostSwapDatabaseLocations(context.previewAcceptance, proof)
+      }
+      return { snapshot, proof }
+    } catch (error) { lastError = error }
+    if (Date.now() >= deadline) throw lastError
+    await delay(Math.min(SUPERVISED_POLL_INTERVAL_MS, deadline - Date.now()))
   }
 }
 
@@ -2624,11 +3658,14 @@ async function resolveNpmUpgradeCohort({ npmExecutable, selector, expectedNames 
 function assertExpectedScenario(expectedScenario, serviceAware, operation = 'upgrade') {
   const emptyUninstall = !serviceAware && operation === 'uninstall' && expectedScenario === 'unsupported'
   if (!LIFECYCLE_SCENARIOS.has(expectedScenario) && !emptyUninstall) {
-    fail('lifecycle expected scenario must be web, autonomy, or lark', 2)
+    fail('lifecycle expected scenario must be web, autonomy, lark, or supervised', 2)
   }
-  if (serviceAware !== (expectedScenario === 'lark')) {
+  if (expectedScenario === 'supervised' && operation !== 'upgrade') {
+    fail('supervised lifecycle is only available for upgrade', 2)
+  }
+  if (serviceAware !== (expectedScenario === 'lark' || expectedScenario === 'supervised')) {
     fail(serviceAware
-      ? 'service-aware lifecycle expected scenario must be lark'
+      ? 'service-aware lifecycle expected scenario must be lark or supervised'
       : 'ordinary lifecycle expected scenario must be web or autonomy', 2)
   }
 }
@@ -2678,6 +3715,7 @@ async function performNpmServiceUpgrade({
   })
   await assertLockedLifecycleScenario({ dshExecutable, profile, homePath, expectedScenario, serviceAware: true })
   if (recovery !== undefined) fail('已恢复上次生命周期事务；本次未访问 npm registry，请重试 upgrade。')
+  if (expectedScenario === 'supervised') await assertSupervisedLifecycleCapability(homePath, profile)
   const current = await readProfile(physicalHomePath, profile)
   const expectedManaged = managedNames(current.manifest)
   if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。')
@@ -2813,6 +3851,17 @@ async function performLifecycle({
       return
     }
   }
+  if (expectedScenario === 'supervised') {
+    await assertSupervisedLifecycleCapability(homePath, profile)
+  }
+  let serviceInventory
+  if (serviceContext !== undefined) {
+    serviceInventory = await captureServiceInventory(serviceContext.systemctlExecutable, homePath, profile, dshExecutable)
+    if (expectedScenario === 'supervised'
+      && serviceInventory.services.find(service => service.profile === profile)?.wasActive !== true) {
+      fail('supervised upgrade 要求目标 systemd user service 在事务开始前处于 active。')
+    }
+  }
   let services
   let unitUniverse
   let foreignOwnership
@@ -2820,14 +3869,14 @@ async function performLifecycle({
   let timeouts
   if (serviceContext !== undefined) {
     timeouts = serviceTimeouts()
-    const inventory = await captureServiceInventory(serviceContext.systemctlExecutable, homePath, profile, dshExecutable)
+    const inventory = serviceInventory
     services = inventory.services
     unitUniverse = inventory.unitUniverse
     foreignOwnership = inventory.foreignOwnership
     cleanProfiles = []
     for (const service of services) {
-      const cleanDigest = await assertStandardLarkOrCleanProfile({
-        dshExecutable, profile: service.profile, homePath,
+      const cleanDigest = await assertServiceProfileScenario({
+        dshExecutable, profile: service.profile, homePath, targetProfile: profile, expectedScenario,
       })
       if (cleanDigest !== undefined) cleanProfiles.push({ profile: service.profile, digest: cleanDigest })
       if (!['enabled', 'disabled'].includes(service.unitFileState)) {
@@ -2855,12 +3904,21 @@ async function performLifecycle({
   const stageHome = join(physicalTransactionRoot, 'staged-home')
   const backupHome = join(physicalTransactionRoot, 'original-home')
   const transactionCreated = {
-    version: serviceContext === undefined ? MANIFEST_VERSION : SERVICE_MANIFEST_VERSION,
+    version: serviceContext === undefined ? MANIFEST_VERSION
+      : expectedScenario === 'supervised' ? SUPERVISED_SERVICE_MANIFEST_VERSION : SERVICE_MANIFEST_VERSION,
     id: randomUUID(), homePath, canonicalHome, transactionPath: transactionRoot, profile, operation,
     transactionIdentity: identity(await lstat(physicalTransactionRoot)),
     originalIdentity: identity(originalStat), originalProfileDigest: sha256(current.source),
     stagedIdentity: undefined, stagedProfileDigest: undefined, createdAt: new Date().toISOString(),
     expectedScenario, stagedScenario: operation === 'uninstall' ? 'unsupported' : expectedScenario,
+    ...(expectedScenario === 'supervised' ? {
+      supervisedLifecycle: {
+        protocol: SUPERVISED_PROTOCOL, phase: 'source-pending', activationNonce: randomUUID(),
+        catalogDigest: undefined, databasePaths: undefined, source: undefined,
+        previewPlan: undefined, previewAcceptance: undefined, activePlan: undefined,
+        postSwapAcceptance: undefined,
+      },
+    } : {}),
   }
   let serviceMasks
   let serviceStartBarriers
@@ -2902,12 +3960,47 @@ async function performLifecycle({
       )
       await assertNoUnmanagedHomeProcesses(homePath)
       manifest = await writeManifest(physicalTransactionRoot, { ...manifest, servicePhase: 'stopped' }, 'preparing')
+      if (expectedScenario === 'supervised') {
+        const stoppedSource = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
+          homePath, profile, dshExecutable,
+        }, 'attest-active'))
+        manifest = await writeManifest(physicalTransactionRoot, {
+          ...manifest, supervisedLifecycle: {
+            ...manifest.supervisedLifecycle, phase: 'source-attested', databasePaths: stoppedSource.databasePaths,
+            source: stoppedSource,
+          },
+        }, 'preparing')
+      }
     } catch (error) {
       try {
+        let restoreAccepted
+        if (expectedScenario === 'supervised' && manifest.supervisedLifecycle.source !== undefined) {
+          const raw = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
+            homePath, profile, dshExecutable,
+          }, 'snapshot'), false)
+          manifest = await writeManifest(physicalTransactionRoot, {
+            ...manifest, servicePhase: 'starting', supervisedLifecycle: {
+              ...manifest.supervisedLifecycle, phase: 'source-attested', catalogDigest: undefined,
+              previewPlan: undefined, previewAcceptance: undefined, activePlan: undefined, postSwapAcceptance: undefined,
+              startAttempt: {
+                kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation,
+              },
+            },
+          }, 'preparing')
+          const identity = sourceSupervisedIdentity(manifest.supervisedLifecycle.source)
+          restoreAccepted = async () => {
+            await awaitSupervisedDirectSuccessor({
+              homePath, profile, dshExecutable, supervisedNonce: identity.nonce,
+              supervisedCatalogDigest: identity.catalogDigest, supervisedPlan: sourceSupervisedPlan(manifest.supervisedLifecycle.source),
+              supervisedSource: manifest.supervisedLifecycle.source,
+            }, { recoveryProof: { bootstrap: { generation: raw.recoveryProof.bootstrap.generation } } }, 'active', timeouts.ready)
+          }
+        }
         await restoreOriginalActiveSet({
           ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
           containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
           homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, timeouts,
+          acceptAfterReady: restoreAccepted, requireLarkReady: expectedScenario === 'supervised',
         })
         await rm(physicalTransactionRoot, { recursive: true, force: true })
       } catch (restoreError) {
@@ -2946,6 +4039,10 @@ async function performLifecycle({
       bwrapExecutable, stageHome, homePath, dshExecutable, profile, expectedScenario, transactionId: manifest.id,
     }
     await validateComposedConfig(sandbox, 'before')
+    if (expectedScenario === 'supervised') {
+      const copiedSource = compactSupervisedSnapshot(await runSupervisedOperator(sandbox, 'attest-active'))
+      assertCopiedSupervisedSnapshot(manifest.supervisedLifecycle.source, copiedSource)
+    }
     if (operation === 'upgrade') {
       await sandboxRun(sandbox, [dshExecutable, 'plugin', '--profile', profile, 'add', ...targets], {
         extraEnvironment: { npm_config_offline: 'true', npm_config_package_import_method: 'copy' },
@@ -2959,7 +4056,78 @@ async function performLifecycle({
     }
     const committedScenario = manifest.stagedScenario
     const packageScenario = await validateComposedConfig({ ...sandbox, expectedScenario: committedScenario }, 'after-package')
-    await activateInSandbox(sandbox)
+    if (expectedScenario === 'supervised') {
+      const nonce = manifest.supervisedLifecycle.activationNonce
+      const overlay = supervisedPreviewOverlayPaths(sandbox)
+      // Clear any dotfile left by a crashed earlier attempt; prepare-preview
+      // still creates it exclusively (flag 'wx') to reject a pre-planted file.
+      await rm(overlay.stagePath, { force: true })
+      const overlayEnvironment = supervisedPreviewOverlayEnvironment(overlay)
+      // prepare-preview derives the isolation overlay inside the sandbox from
+      // the just-asserted, Lark-enabled persisted baseline and stages it
+      // itself (exclusive create), so no fixed template can drop user providers.
+      const preview = await runSupervisedOperator(sandbox, 'prepare-preview', nonce, overlayEnvironment)
+      if (!validDigest(preview.catalogDigest) || preview.plan === undefined
+        || !validDigest(preview.plan.runtimeOverlayDigest)) fail('supervised preview plan 输出无效。')
+      // Independently confirm the operator-staged dotfile matches the digest the
+      // plan binds before the Host is allowed to consume it.
+      if (sha256(await readFile(overlay.stagePath)) !== preview.plan.runtimeOverlayDigest) {
+        await rm(overlay.stagePath, { force: true })
+        fail('supervised preview runtime overlay 写入后摘要不匹配。')
+      }
+      if (manifest.supervisedLifecycle.source.recoveryProof.bootstrap.attestations.some(
+        attestation => attestation.activationNonce === nonce,
+      )) fail('supervised lifecycle fresh nonce 与 source bootstrap nonce 重复。')
+      manifest = await writeManifest(physicalTransactionRoot, {
+        ...manifest, supervisedLifecycle: {
+          ...manifest.supervisedLifecycle, phase: 'preview-prepared', catalogDigest: preview.catalogDigest,
+          previewPlan: preview.plan,
+        },
+      }, 'prepared')
+      const previewContext = { ...sandbox, supervisedNonce: nonce, supervisedCatalogDigest: preview.catalogDigest,
+        supervisedPlan: preview.plan, supervisedSource: manifest.supervisedLifecycle.source,
+        supervisedOperatorEnvironment: overlayEnvironment }
+      manifest = await writeManifest(physicalTransactionRoot, {
+        ...manifest, supervisedLifecycle: { ...manifest.supervisedLifecycle, phase: 'preview-running' },
+      }, 'prepared')
+      const host = await startSandboxHost(previewContext)
+      previewContext.host = host
+      let previewSuccessor
+      try {
+        previewSuccessor = await awaitSupervisedSuccessor(
+          previewContext, manifest.supervisedLifecycle.source, 'preview', timeouts.ready,
+        )
+      } finally {
+        await host.close()
+        await rm(overlay.stagePath, { force: true })
+      }
+      manifest = await writeManifest(physicalTransactionRoot, {
+        ...manifest, supervisedLifecycle: {
+          ...manifest.supervisedLifecycle, phase: 'preview-accepted',
+          previewAcceptance: {
+            generation: previewSuccessor.proof.recoveryProof.bootstrap.generation,
+            deliveryProof: previewSuccessor.proof.deliveryProof,
+            ownerBindingDigest: previewSuccessor.proof.ownerBindingDigest,
+            unmanagedAutomationsDigest: previewSuccessor.proof.unmanagedAutomationsDigest,
+            databasePaths: previewSuccessor.proof.databasePaths,
+            attestationDigest: previewSuccessor.snapshot.attestation.attestationDigest,
+            recoveryProof: previewSuccessor.proof.recoveryProof,
+            automationsProof: previewSuccessor.proof.automationsProof,
+          },
+        },
+      }, 'prepared')
+      const active = await runSupervisedOperator(sandbox, 'prepare-active', nonce)
+      if (active.catalogDigest !== preview.catalogDigest || active.plan === undefined) {
+        fail('supervised active plan 未与 preview nonce/catalog 一致。')
+      }
+      manifest = await writeManifest(physicalTransactionRoot, {
+        ...manifest, supervisedLifecycle: {
+          ...manifest.supervisedLifecycle, phase: 'active-prepared', activePlan: active.plan,
+        },
+      }, 'prepared')
+    } else {
+      await activateInSandbox(sandbox)
+    }
     await validateComposedConfig({ ...sandbox, expectedScenario: packageScenario }, 'after-activation')
     await assertSnapshotTreeSafe(stageHome, homePath, false, packageSymlinkWhitelist)
     await run('/bin/sync', ['-f', stageHome], { passFds: [3, 4, 5] })
@@ -3020,18 +4188,65 @@ async function performLifecycle({
     }, 'swapped')
     await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
     if (serviceContext !== undefined) {
-      manifest = await writeManifest(physicalTransactionRoot, { ...manifest, servicePhase: 'starting' }, 'swapped')
+      if (expectedScenario === 'supervised') {
+        const rawBeforeStart = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
+          homePath, profile, dshExecutable,
+        }, 'snapshot'), false)
+        manifest = await writeManifest(physicalTransactionRoot, {
+          ...manifest, servicePhase: 'starting', supervisedLifecycle: {
+            ...manifest.supervisedLifecycle, phase: 'post-swap-pending',
+            startAttempt: { kind: 'accept-active', baselineGeneration: rawBeforeStart.recoveryProof.bootstrap.generation },
+          },
+        }, 'swapped')
+      } else {
+        manifest = await writeManifest(physicalTransactionRoot, { ...manifest, servicePhase: 'starting' }, 'swapped')
+      }
       try {
+        let postSwapProof
         const accepted = await startAndAcceptServices({
           ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
           unitUniverse, foreignOwnership, cleanProfiles, timeouts,
+          requireLarkReady: expectedScenario === 'supervised',
+          ...(expectedScenario === 'supervised' ? { acceptAfterReady: async () => {
+            postSwapProof = await awaitSupervisedDirectSuccessor({
+              homePath, profile, dshExecutable, supervisedNonce: manifest.supervisedLifecycle.activationNonce,
+              supervisedCatalogDigest: manifest.supervisedLifecycle.catalogDigest,
+              supervisedPlan: manifest.supervisedLifecycle.activePlan,
+              previewAcceptance: manifest.supervisedLifecycle.previewAcceptance,
+              supervisedSource: manifest.supervisedLifecycle.source,
+            }, { recoveryProof: { bootstrap: {
+              generation: manifest.supervisedLifecycle.startAttempt.baselineGeneration,
+            } } }, 'active', timeouts.ready)
+          }, durableAccept: async acceptedStates => {
+            const serviceAcceptance = acceptedStates.map(service => ({
+              unit: service.unit, invocationId: service.invocationId, mainPid: service.mainPid, nRestarts: service.nRestarts,
+            }))
+            const targetAcceptance = serviceAcceptance.find(service => service.unit === `dsh-profile-${profile}.service`)
+            if (targetAcceptance === undefined) fail('supervised durable acceptance 缺少目标 InvocationID。')
+            manifest = await writeManifest(physicalTransactionRoot, {
+              ...manifest, servicePhase: 'service-accepted', serviceAcceptance,
+              supervisedLifecycle: {
+                ...manifest.supervisedLifecycle, phase: 'post-swap-accepted', postSwapAcceptance: {
+                  generation: postSwapProof.proof.recoveryProof.bootstrap.generation,
+                  invocationId: targetAcceptance.invocationId,
+                  deliveryProof: postSwapProof.proof.deliveryProof, ownerBindingDigest: postSwapProof.proof.ownerBindingDigest,
+                  unmanagedAutomationsDigest: postSwapProof.proof.unmanagedAutomationsDigest,
+                  databasePaths: postSwapProof.proof.databasePaths,
+                  attestationDigest: postSwapProof.snapshot.attestation.attestationDigest,
+                  recoveryProof: postSwapProof.proof.recoveryProof, automationsProof: postSwapProof.proof.automationsProof,
+                },
+              },
+            }, 'service-accepted')
+          } } : {}),
         })
-        manifest = await writeManifest(physicalTransactionRoot, {
-          ...manifest, servicePhase: 'service-accepted',
-          serviceAcceptance: accepted.map(service => ({
-            unit: service.unit, invocationId: service.invocationId, mainPid: service.mainPid, nRestarts: service.nRestarts,
-          })),
-        }, 'service-accepted')
+        if (expectedScenario !== 'supervised') {
+          manifest = await writeManifest(physicalTransactionRoot, {
+            ...manifest, servicePhase: 'service-accepted',
+            serviceAcceptance: accepted.map(service => ({
+              unit: service.unit, invocationId: service.invocationId, mainPid: service.mainPid, nRestarts: service.nRestarts,
+            })),
+          }, 'service-accepted')
+        }
       } catch (serviceError) {
         let containmentFailure
         manifest = await loadManifest(physicalTransactionRoot, {
@@ -3064,7 +4279,8 @@ async function performLifecycle({
         ...serviceContext, dshExecutable, services, serviceMasks, containmentMasks: manifest.containmentMasks,
         containmentStartBarriers: manifest.containmentStartBarriers,
         serviceStartBarriers,
-        homePath, unitUniverse, foreignOwnership, cleanProfiles, acceptance: manifest.serviceAcceptance,
+        homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, acceptance: manifest.serviceAcceptance,
+        requireLarkReady: expectedScenario === 'supervised',
       })
     }
     commitUncertain = true
@@ -3078,8 +4294,18 @@ async function performLifecycle({
     if (serviceContext !== undefined) {
       await assertAcceptedServicesStillBound({
         ...serviceContext, dshExecutable, services, homePath, unitUniverse, foreignOwnership,
-        cleanProfiles, acceptance: manifest.serviceAcceptance,
+        targetProfile: profile, cleanProfiles, acceptance: manifest.serviceAcceptance,
+        requireLarkReady: expectedScenario === 'supervised',
       })
+      if (expectedScenario === 'supervised') {
+        await assertPersistedSupervisedAcceptance({
+          homePath, profile, dshExecutable, acceptance: manifest.supervisedLifecycle.postSwapAcceptance,
+        })
+        await assertAcceptedSupervisedInvocation({
+          ...serviceContext, services, homePath, dshExecutable, profile,
+          acceptance: manifest.supervisedLifecycle.postSwapAcceptance,
+        })
+      }
     }
     if (operation === 'uninstall') {
       await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
@@ -3093,7 +4319,7 @@ async function performLifecycle({
     const persisted = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot }).catch(() => undefined)
     const liveAfterFailure = await existingIdentity(physicalHomePath)
     const backupAfterFailure = await existingIdentity(backupHome)
-    const crossedSwapBoundary = persisted?.version === SERVICE_MANIFEST_VERSION
+    const crossedSwapBoundary = isServiceManifestVersion(persisted?.version)
       && sameIdentity(liveAfterFailure, persisted.stagedIdentity)
       && sameIdentity(backupAfterFailure, persisted.originalIdentity)
     if (committedCleanup) {
@@ -3127,11 +4353,34 @@ async function performLifecycle({
           serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop,
           physicalTransactionRoot, persisted ?? manifest,
         )
+        let restoreAccepted
+        if (expectedScenario === 'supervised' && (persisted ?? manifest).supervisedLifecycle?.source !== undefined) {
+          const lifecycle = (persisted ?? manifest).supervisedLifecycle
+          const raw = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
+            homePath, profile, dshExecutable,
+          }, 'snapshot'), false)
+          const identity = sourceSupervisedIdentity(lifecycle.source)
+          manifest = await writeManifest(physicalTransactionRoot, {
+            ...(persisted ?? manifest), servicePhase: 'starting', supervisedLifecycle: {
+              ...lifecycle, phase: 'source-attested', catalogDigest: undefined, previewPlan: undefined,
+              previewAcceptance: undefined, activePlan: undefined, postSwapAcceptance: undefined, startAttempt: {
+              kind: 'restore-source', baselineGeneration: raw.recoveryProof.bootstrap.generation,
+            } },
+          }, 'preparing')
+          restoreAccepted = async () => {
+            await awaitSupervisedDirectSuccessor({
+              homePath, profile, dshExecutable, supervisedNonce: identity.nonce,
+              supervisedCatalogDigest: identity.catalogDigest, supervisedPlan: sourceSupervisedPlan(lifecycle.source),
+              supervisedSource: lifecycle.source,
+            }, { recoveryProof: { bootstrap: { generation: raw.recoveryProof.bootstrap.generation } } }, 'active', timeouts.ready)
+          }
+        }
         await restoreOriginalActiveSet({
           ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
           containmentMasks: (persisted ?? manifest).containmentMasks,
           containmentStartBarriers: (persisted ?? manifest).containmentStartBarriers,
           homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, timeouts,
+          acceptAfterReady: restoreAccepted, requireLarkReady: expectedScenario === 'supervised',
         })
         const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
         await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -3250,7 +4499,14 @@ async function main() {
   })
 }
 
-main().catch(error => {
-  process.stderr.write(`dsh-enhanced lifecycle: ${error instanceof Error ? error.message : String(error)}\n`)
-  process.exitCode = error instanceof LifecycleError ? error.exitCode : 1
+export const lifecycleProfileTest = Object.freeze({
+  compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
+  validManifestTopLevel, validV3ServiceAcceptance, writeManifest, validSupervisedCapabilityProof, MANIFEST_MAX_BYTES,
 })
+
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {
+  main().catch(error => {
+    process.stderr.write(`dsh-enhanced lifecycle: ${error instanceof Error ? error.message : String(error)}\n`)
+    process.exitCode = error instanceof LifecycleError ? error.exitCode : 1
+  })
+}

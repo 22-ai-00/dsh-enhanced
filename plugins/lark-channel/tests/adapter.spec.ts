@@ -1614,22 +1614,67 @@ describe('Lark delivery adapter', () => {
   })
 
   test('cleans up listeners and exposes reconnect-gap health without claiming replay', async () => {
-    const f = fixture()
+    const edges: string[] = []
+    const onConnected = vi.fn()
+    const onDisconnected = vi.fn()
+    onConnected.mockImplementation(() => { edges.push('connected') })
+    onDisconnected.mockImplementation(() => { edges.push('disconnected') })
+    const f = fixture({ onConnected, onDisconnected })
     const dispose = await f.adapter.start(f.context)
+    expect(f.adapter.health()).toMatchObject({ state: 'connected' })
+    expect(onConnected).toHaveBeenCalledTimes(1)
     f.transport.handlers?.reconnecting()
     expect(f.adapter.health()).toMatchObject({ state: 'reconnecting', gapGeneration: 1 })
+    expect(onConnected).toHaveBeenCalledTimes(1)
+    expect(onDisconnected).toHaveBeenCalledTimes(1)
     f.transport.handlers?.reconnected()
     expect(f.adapter.health()).toMatchObject({ state: 'connected-with-gap', gapGeneration: 1 })
+    expect(onConnected).toHaveBeenCalledTimes(2)
     await dispose?.()
+    expect(edges).toEqual(['connected', 'disconnected', 'connected', 'disconnected'])
     expect(f.transport.handlers).toBeUndefined()
     expect(f.transport.disconnect).toHaveBeenCalledOnce()
   })
 
   test('rolls back subscriptions and disconnects when connect fails', async () => {
-    const f = fixture()
+    const onConnected = vi.fn()
+    const onDisconnected = vi.fn()
+    const f = fixture({ onConnected, onDisconnected })
     f.transport.connect.mockRejectedValueOnce(new Error('bad credentials'))
     await expect(f.adapter.start(f.context)).rejects.toThrow(/bad credentials/)
+    expect(onConnected).not.toHaveBeenCalled()
+    expect(onDisconnected).not.toHaveBeenCalled()
     expect(f.transport.handlers).toBeUndefined()
     expect(f.transport.disconnect).toHaveBeenCalledOnce()
+  })
+
+  test('does not announce readiness while the transport is still connecting', async () => {
+    let finish!: () => void
+    const onConnected = vi.fn()
+    const f = fixture({ onConnected })
+    f.transport.connect.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+    const starting = f.adapter.start(f.context)
+    await vi.waitFor(() => expect(f.adapter.health()).toMatchObject({ state: 'connecting' }))
+    expect(onConnected).not.toHaveBeenCalled()
+    finish()
+    const dispose = await starting
+    expect(f.adapter.health()).toMatchObject({ state: 'connected' })
+    expect(onConnected).toHaveBeenCalledOnce()
+    await dispose()
+  })
+
+  test('announces a disconnect edge once after a connected transport error', async () => {
+    const edges: string[] = []
+    const f = fixture({
+      onConnected: () => { edges.push('connected') },
+      onDisconnected: () => { edges.push('disconnected') },
+    })
+    const dispose = await f.adapter.start(f.context)
+    f.transport.handlers?.error(new LarkTransportError('not_connected', 'credential must not leak'))
+    f.transport.handlers?.error(new LarkTransportError('not_connected', 'credential must not leak'))
+    expect(f.adapter.health()).toMatchObject({ state: 'disconnected' })
+    expect(edges).toEqual(['connected', 'disconnected'])
+    await dispose()
+    expect(edges).toEqual(['connected', 'disconnected'])
   })
 })

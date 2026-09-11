@@ -1043,15 +1043,29 @@ describe('assistant health service', () => {
     })
   })
 
-  test.each(['connected-with-gap', 'reconnecting'])(
-    'accepts the Lark adapter health state %s',
-    (state) => {
-      const fixture = harness({ larkState: state })
-      expect(fixture.service.report(agent()).providers)
-        .toContainEqual({ id: 'larkChannel', status: 'ready', metrics: { state, gapGeneration: 2 } })
-      expect(fixture.service.report(agent()).severity).toBe('degraded')
-    },
-  )
+  test.each([
+    { state: 'connected', ready: true, severity: 'healthy', warnings: [] },
+    { state: 'connected-with-gap', ready: true, severity: 'degraded',
+      warnings: ['provider-degraded:larkChannel:connected-with-gap'] },
+    { state: 'connecting', ready: false, severity: 'degraded',
+      warnings: ['provider-degraded:larkChannel:connection-in-progress'] },
+    { state: 'reconnecting', ready: false, severity: 'degraded',
+      warnings: ['provider-degraded:larkChannel:connection-in-progress'] },
+    { state: 'disconnected', ready: false, severity: 'unhealthy',
+      warnings: ['provider-unhealthy:larkChannel:disconnected'] },
+    { state: 'disabled', ready: false, severity: 'unhealthy',
+      warnings: ['provider-unhealthy:larkChannel:disabled'] },
+  ])('maps required Lark adapter state $state to readiness', ({ state, ready, severity, warnings }) => {
+    const fixture = harness({ larkState: state, requiredProviders: ['larkChannel'] })
+
+    expect(fixture.service.readiness()).toEqual({ ready, warnings })
+    expect(fixture.service.report(agent())).toMatchObject({
+      ready, severity, warnings,
+      providers: expect.arrayContaining([
+        { id: 'larkChannel', status: 'ready', metrics: { state, gapGeneration: 2 } },
+      ]),
+    })
+  })
 
   test('policy-gates detailed reports and fails after disposal', async () => {
     const fixture = harness({ allow: false })

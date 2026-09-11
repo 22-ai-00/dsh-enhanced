@@ -9,6 +9,14 @@ import type { LarkChannelHealth, LarkTransport } from './types.js'
 export interface LarkChannelServiceOptions {
   env?: Readonly<Record<string, string | undefined>>
   createTransport?: (options: OfficialLarkTransportOptions) => LarkTransport
+  writeLifecycleMarker?: (marker: LarkLifecycleMarker) => void
+}
+
+export type LarkLifecycleMarker = 'lark-channel: connected' | 'lark-channel: disconnected'
+
+/** Emit one exact marker to stdout so systemd captures it in this Invocation's journal. */
+export function writeLarkLifecycleMarker(marker: LarkLifecycleMarker): void {
+  console.info(marker)
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -99,19 +107,22 @@ export class LarkChannelService extends Service {
       return
     }
     const createTransport = options.createTransport ?? createOfficialLarkTransport
+    const lifecycleMarker = options.writeLifecycleMarker ?? writeLarkLifecycleMarker
     if (config.credentialHandle !== undefined) {
       const credentials = ctx.get('credentialsKeychain') as CredentialLeaseService | undefined
       if (credentials === undefined) {
         throw new Error('lark-channel: credentialsKeychain service is required for credentialHandle')
       }
-      this.lifecycle = this.runCredentialLifecycle(ctx, credentials, delivery, config, createTransport)
+      this.lifecycle = this.runCredentialLifecycle(
+        ctx, credentials, delivery, config, createTransport, lifecycleMarker,
+      )
     } else {
       const envName = config.appSecretEnv
       const appSecret = envName === undefined ? undefined : (options.env ?? process.env)[envName]
       if (appSecret === undefined || appSecret.trim().length === 0) {
         throw new Error(`lark-channel: secret environment variable ${String(envName)} is missing or empty`)
       }
-      this.lifecycle = this.runAdapter(delivery, config, createTransport, appSecret)
+      this.lifecycle = this.runAdapter(delivery, config, createTransport, appSecret, undefined, lifecycleMarker)
     }
     void this.lifecycle.catch(error => this.ready.reject(error))
     ctx.effect(() => async () => {
@@ -171,6 +182,7 @@ export class LarkChannelService extends Service {
     createTransport: (options: OfficialLarkTransportOptions) => LarkTransport,
     appSecret: string,
     credentialSignal?: AbortSignal,
+    lifecycleMarker: (marker: LarkLifecycleMarker) => void = writeLarkLifecycleMarker,
   ): Promise<void> {
     const transport = createTransport({
       appId: config.appId,
@@ -190,6 +202,11 @@ export class LarkChannelService extends Service {
       maxTextBytes: config.maxTextBytes,
       staleAfterMs: config.staleAfterMs,
     }, transport, {
+      // These exact stdout markers are consumed from one fresh systemd
+      // Invocation journal. Cordis' built-in logger only buffers unless a
+      // console exporter is installed, so it cannot be the readiness source.
+      onConnected: () => lifecycleMarker('lark-channel: connected'),
+      onDisconnected: () => lifecycleMarker('lark-channel: disconnected'),
       approvalSecret: appSecret,
       showProgress: config.showProgress,
       progressDetails: config.progressDetails,
@@ -237,6 +254,7 @@ export class LarkChannelService extends Service {
     config: Required<Omit<import('./config.js').Config, 'appSecretEnv' | 'credentialHandle'>>
       & Pick<import('./config.js').Config, 'appSecretEnv' | 'credentialHandle'>,
     createTransport: (options: OfficialLarkTransportOptions) => LarkTransport,
+    lifecycleMarker: (marker: LarkLifecycleMarker) => void,
   ): Promise<void> {
     while (!this.stopController.signal.aborted) {
       let renew = false
@@ -246,7 +264,7 @@ export class LarkChannelService extends Service {
         ttlMs: config.credentialLeaseMs,
         idempotencyKey: `lark-channel:${config.account}:lease:${randomUUID()}`,
       }, async (appSecret, credentialSignal) => {
-        await this.runAdapter(delivery, config, createTransport, appSecret, credentialSignal)
+        await this.runAdapter(delivery, config, createTransport, appSecret, credentialSignal, lifecycleMarker)
         renew = credentialSignal.aborted && credentialLeaseAbortCode(credentialSignal.reason) === 'expired'
       })
       if (!renew) return
