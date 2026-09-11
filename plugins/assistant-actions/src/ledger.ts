@@ -8,6 +8,22 @@ const schemaVersion = 3
 const maxRecords = 10_000
 const maxActiveActions = 2
 
+export interface RecoveredCompensationRef {
+  id: string
+  identity: ActionIdentity
+  budgetId: string
+}
+export interface CompensationRecovery {
+  count: number
+  /**
+   * Records that never reached the dispatch POST: capturing placeholders
+   * (deleted) and prepared rows (sealed preimage, flipped to unknown). Their
+   * policy reservations were never allowed to cause a side effect and must be
+   * released. Dispatched rows are excluded — a POST may already have landed.
+   */
+  neverDispatched: RecoveredCompensationRef[]
+}
+
 export class ActionLedgerError extends Error {
   constructor(readonly code: 'invalid-input' | 'unsafe-file' | 'schema' | 'controller' | 'conflict' | 'limit' | 'grant' | 'state') {
     super(`action ledger rejected: ${code}`)
@@ -607,8 +623,33 @@ export class ActionLedger {
       this.#database.exec('COMMIT'); return changed.changes === 1
     } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
   }
-  recoverCompensations(authority: ActionAuthority): number {
-    const now = this.#time(); this.#database.exec('BEGIN IMMEDIATE')
+  /**
+   * Live counterpart of the prepared-row branch in recoverCompensations. A
+   * sealed prepared compensation whose authorization/hold ends *before* the
+   * local dispatch flip can never have sent a POST, so it is terminalized to
+   * unknown (never replayed) instead of being left as a zombie 'prepared' that
+   * only the next process restart would resolve. CAS on the exact prepared
+   * version keeps a racing dispatch authoritative. Returns undefined if the row
+   * is no longer a still-fresh prepared row at the expected version.
+   */
+  abandonPreparedCompensation(id: string, version: number, authority: ActionAuthority, reason: string): CompensationRecord | undefined {
+    const compensationId = text(id); const expected = integer(version, 1); const now = this.#time()
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#controller(authority, now)
+      const row = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(compensationId) as CompensationRow | undefined; if (!row) fail('state')
+      const record = this.#compensationRow(row)
+      if (record.status !== 'prepared' || record.version !== expected) { this.#database.exec('COMMIT'); return undefined }
+      const result: CompensationResult = { actionId: record.id, status: 'unknown', repository: record.repository, branch: record.branch, parentOid: record.forwardCommitOid, actionMarker: `dsh-compensation:${record.id}`, reason: text(reason) }
+      const changed = this.#database.prepare("UPDATE compensations SET status = 'unknown', version = version + 1, result_json = ? WHERE id = ? AND status = 'prepared' AND version = ?").run(stableJson(result), compensationId, expected)
+      if (changed.changes !== 1) fail('state'); this.#audit('compensation-abandoned', compensationId, expected + 1, now)
+      const updated = this.#database.prepare('SELECT * FROM compensations WHERE id = ?').get(compensationId) as CompensationRow
+      this.#database.exec('COMMIT'); return this.#compensationRow(updated)
+    } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
+  }
+
+  recoverCompensations(authority: ActionAuthority): CompensationRecovery {
+    const now = this.#time(); const neverDispatched: RecoveredCompensationRef[] = []; this.#database.exec('BEGIN IMMEDIATE')
     try {
       this.#controller(authority, now); const rows = this.#database.prepare("SELECT * FROM compensations WHERE status IN ('capturing', 'prepared', 'dispatched')").all() as CompensationRow[]
       for (const row of rows) {
@@ -620,13 +661,17 @@ export class ActionLedger {
           const changed = this.#database.prepare("DELETE FROM compensations WHERE id = ? AND status = 'capturing' AND version = ?").run(record.id, record.version)
           if (changed.changes !== 1) fail('state')
           this.#audit('compensation-discarded', record.id, record.version, now)
+          neverDispatched.push({ id: record.id, identity: record.identity, budgetId: text(row.budget_id) })
         } else {
           const result: CompensationResult = { actionId: record.id, status: 'unknown', repository: record.repository, branch: record.branch, parentOid: record.forwardCommitOid, actionMarker: `dsh-compensation:${record.id}`, reason: 'controller-recovery-no-replay' }
           const changed = this.#database.prepare("UPDATE compensations SET status = 'unknown', version = version + 1, result_json = ? WHERE id = ? AND status IN ('prepared', 'dispatched') AND version = ?").run(stableJson(result), record.id, record.version)
           if (changed.changes !== 1) fail('state'); this.#audit('compensation-recovered', record.id, record.version + 1, now)
+          // Prepared rows sealed a preimage but never flipped to dispatched, so
+          // no POST could have been sent; their reservation is still open.
+          if (record.status === 'prepared') neverDispatched.push({ id: record.id, identity: record.identity, budgetId: text(row.budget_id) })
         }
       }
-      this.#database.exec('COMMIT'); return rows.length
+      this.#database.exec('COMMIT'); return { count: rows.length, neverDispatched }
     } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
   }
 

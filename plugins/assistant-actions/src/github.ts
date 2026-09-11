@@ -314,14 +314,26 @@ function decodedFile(value: unknown, expectedPath: string, token: string): Extra
 }
 
 /**
- * Index every blob in the immutable parent commit's (possibly recursive) tree
- * via the Git Data API. Contents 404s are cross-checked against this index so
- * that an existing-but-unreadable blob (an oversized file or an endpoint that
- * hides the path from this credential) can never be misread as "absent" and
- * turned into a destructive deletion. Returns undefined whenever the index
- * cannot be established completely; callers must then abort the compensation.
+ * Immutable parent-commit tree entry. Every entry type is indexed, not only
+ * blobs: a contents 404 at a path the tree lists as a directory (040000) or
+ * submodule (160000) is equally a contradiction that must abort the capture,
+ * never be misread as an absent file and turned into a deletion.
  */
-async function readGitHubTreeIndex(grant: ActionGrant, commitOid: string, token: string, signal: AbortSignal, transport: RestTransport): Promise<ReadonlyMap<string, string> | undefined> {
+interface GitHubTreeEntry { readonly type: 'blob' | 'tree' | 'commit'; readonly mode: string; readonly oid: string | undefined }
+const BLOB_MODES = new Set(['100644', '100755', '120000'])
+const TREE_MODE = '040000'
+const COMMIT_MODE = '160000'
+
+/**
+ * Index every entry in the immutable parent commit's (possibly recursive) tree
+ * via the Git Data API. Contents 404s are cross-checked against this index so
+ * that an existing-but-unreadable path (an oversized blob, a directory or
+ * submodule, or an endpoint that hides the path from this credential) can never
+ * be misread as "absent" and turned into a destructive deletion. Returns
+ * undefined whenever the index cannot be established completely; callers must
+ * then abort the compensation.
+ */
+async function readGitHubTreeIndex(grant: ActionGrant, commitOid: string, token: string, signal: AbortSignal, transport: RestTransport): Promise<ReadonlyMap<string, GitHubTreeEntry> | undefined> {
   const commitReply = await rest(`/${repoPath(grant)}/git/commits/${encodeURIComponent(commitOid)}`, 'GET', token, undefined, signal, transport)
   if (commitReply?.status !== 200) return undefined
   const commitBody = record(commitReply.body)
@@ -333,12 +345,29 @@ async function readGitHubTreeIndex(grant: ActionGrant, commitOid: string, token:
   const treeBody = record(treeReply.body)
   const entries = treeBody?.tree
   if (treeBody?.sha !== treeSha || !Array.isArray(entries) || treeBody.truncated === true) return undefined
-  const blobs = new Map<string, string>()
+  const index = new Map<string, GitHubTreeEntry>()
   for (const value of entries) {
     const entry = record(value)
-    if (entry?.type === 'blob' && typeof entry.path === 'string' && oid(entry.sha)) blobs.set(entry.path, entry.sha)
+    if (entry === undefined || typeof entry.path !== 'string' || typeof entry.type !== 'string' || typeof entry.mode !== 'string') return undefined
+    // GitHub tree type/mode pairs are fixed. A mismatch (or a type/mode we do
+    // not recognize) means the response is not the tree shape compensations are
+    // proven against: fail closed rather than silently ignoring the entry.
+    let parsed: GitHubTreeEntry
+    if (entry.type === 'blob') {
+      if (!BLOB_MODES.has(entry.mode) || !oid(entry.sha)) return undefined
+      parsed = Object.freeze({ type: 'blob', mode: entry.mode, oid: entry.sha })
+    } else if (entry.type === 'tree') {
+      if (entry.mode !== TREE_MODE) return undefined
+      parsed = Object.freeze({ type: 'tree', mode: entry.mode, oid: oid(entry.sha) ? entry.sha : undefined })
+    } else if (entry.type === 'commit') {
+      if (entry.mode !== COMMIT_MODE) return undefined
+      parsed = Object.freeze({ type: 'commit', mode: entry.mode, oid: oid(entry.sha) ? entry.sha : undefined })
+    } else return undefined
+    const prior = index.get(entry.path)
+    if (prior !== undefined && (prior.type !== parsed.type || prior.mode !== parsed.mode || prior.oid !== parsed.oid)) return undefined
+    index.set(entry.path, parsed)
   }
-  return blobs
+  return index
 }
 
 /** Read exact allowed file states at one immutable Git commit without following redirects. */
@@ -359,15 +388,18 @@ export async function readGitHubPreimage(input: GitHubPreimageInput, transport?:
     total += Buffer.byteLength(path)
     if (total > PREIMAGE_TOTAL_LIMIT) return undefined
     const reply = await rest(contentPath(input.grant, path, input.commitOid), 'GET', input.token, undefined, input.signal, resolvedTransport, [404], CONTENT_RESPONSE_LIMIT)
+    const indexed = index.get(path)
     if (reply?.status === 404) {
-      // The parent tree proves a blob lives at this path; the 404 is an
-      // oversized or credential-hidden file, not proof of absence.
-      if (index.has(path)) return undefined
+      // The parent tree lists any entry (blob, directory tree, or submodule)
+      // at this path; a 404 then means an unreadable/hidden path, not absence.
+      if (indexed !== undefined) return undefined
       files.push(Object.freeze({ path, state: 'absent' })); continue
     }
     if (reply?.status !== 200) return undefined
     const file = decodedFile(reply.body, path, input.token)
-    if (!file || index.get(path) !== file.blobOid) return undefined
+    // A 200 is a file only when the tree agrees it is a blob with the same OID;
+    // a directory/submodule entry masquerading as contents must abort the capture.
+    if (!file || indexed?.type !== 'blob' || indexed.oid !== file.blobOid) return undefined
     total += file.size
     if (total > PREIMAGE_TOTAL_LIMIT) return undefined
     files.push(file)
@@ -437,6 +469,9 @@ export async function createCompensatingCommitOnGitHub(input: GitHubCompensation
   if (!head) return { ...base, status: 'unknown', reason: COMPENSATION_UNKNOWN_REASON }
   if (head.headOid !== input.forwardCommitOid) return { ...base, status: 'failed', reason: 'github-compensation-head-conflict' }
   const response = await graphql(compensationPayload(input, actionMarker), input.token, input.signal, transports.graphql ?? httpsRequest)
+  // GraphQL may return both `errors` and a populated `data`. Any error entry is
+  // treated as a hard rejection (fail closed) even when a commit OID is also
+  // present; the commit is never reported as succeeded from a partial response.
   if (response?.errors !== undefined) return { ...base, status: 'failed', reason: 'github-compensation-rejected' }
   const resultOid = response === undefined ? undefined : matchingCommitOid(response, {
     clientMutationId: actionMarker, repository: input.grant.repository, branch: input.grant.branch, parentOid: input.forwardCommitOid,

@@ -646,6 +646,27 @@ export class AssistantPolicyService extends Service {
     return result
   }
 
+  /**
+   * Crash-recovery settlement keyed by the reservation's idempotency key.
+   * Releases only a still-open reservation; a finalized charge is never
+   * unwound (invalid-state), a missing row is a no-op (undefined).
+   */
+  releaseByIdempotencyKey(idempotencyKey: string): BudgetReservationResult | undefined {
+    this.assertActive()
+    const result = this.ledger.releaseByIdempotencyKey(idempotencyKey)
+    if (result !== undefined) {
+      this.ledger.appendAudit({
+        actor: 'system',
+        action: 'budget.release',
+        resource: { kind: 'budget-reservation', id: result.reservationId },
+        outcome: result.status,
+        reasonCode: result.replayed ? 'idempotent-replay' : 'released',
+        details: { recovery: true, remaining: result.remaining },
+      })
+    }
+    return result
+  }
+
   propose(input: ApprovalProposalInput): ApprovalProposalResult {
     this.assertActive()
     const result = this.ledger.propose(input)

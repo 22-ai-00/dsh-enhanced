@@ -175,6 +175,80 @@ describe('GitHub compensation primitives', () => {
     await expect(readGitHubPreimage({ grant: scoped, commitOid: expectedHeadOid, paths: scoped.paths, token: 'secret', signal: new AbortController().signal }, mismatched.transport)).resolves.toBeUndefined()
   })
 
+  // Every tree entry type is indexed: a contents 404 at a path the immutable
+  // tree lists as a directory, submodule or symlink is a contradiction that has
+  // to abort the capture, never be turned into a deletion.
+  const treeIndexTransport = (entries: Array<Record<string, unknown>>, route: (url: URL) => { reply: object | string; status?: number }) =>
+    routedTransport(url => {
+      if (url.pathname.endsWith(`/git/commits/${expectedHeadOid}`)) return { reply: { sha: expectedHeadOid, tree: { sha: treeSha } } }
+      if (url.pathname.includes('/git/trees/')) return { reply: { sha: treeSha, truncated: false, tree: entries } }
+      return route(url)
+    })
+
+  it.each([
+    ['submodule', { path: 'vendor/lib', type: 'commit', mode: '160000', sha: 'd'.repeat(40) }, 'vendor/lib'],
+    ['directory', { path: 'src/dir', type: 'tree', mode: '040000', sha: 'd'.repeat(40) }, 'src/dir'],
+    ['symlink', { path: 'src/link', type: 'blob', mode: '120000', sha: oldOid }, 'src/link'],
+  ])('refuses to treat a 404 as absent when the parent tree indexes the path as a %s', async (_name, entry, path) => {
+    const scoped = { ...grant, paths: [path] }
+    const hidden = treeIndexTransport([entry], () => ({ status: 404, reply: { message: 'Not Found' } }))
+    await expect(readGitHubPreimage({ grant: scoped, commitOid: expectedHeadOid, paths: scoped.paths, token: 'secret', signal: new AbortController().signal }, hidden.transport)).resolves.toBeUndefined()
+  })
+
+  it('still trusts an exact 404 as absent for a path absent from every tree entry type', async () => {
+    const scoped = { ...grant, paths: ['vendor/lib', 'src/missing.txt'] }
+    const entries = [{ path: 'vendor/lib', type: 'commit', mode: '160000', sha: 'd'.repeat(40) }]
+    const server = treeIndexTransport(entries, url => url.pathname.endsWith('/src/missing.txt')
+      ? { status: 404, reply: { message: 'Not Found' } }
+      : { status: 404, reply: { message: 'Not Found' } })
+    // The submodule 404 must abort before the genuinely absent path is processed.
+    await expect(readGitHubPreimage({ grant: scoped, commitOid: expectedHeadOid, paths: scoped.paths, token: 'secret', signal: new AbortController().signal }, server.transport)).resolves.toBeUndefined()
+
+    const onlyMissing = { ...grant, paths: ['src/missing.txt'] }
+    const clean = treeIndexTransport(entries, () => ({ status: 404, reply: { message: 'Not Found' } }))
+    await expect(readGitHubPreimage({ grant: onlyMissing, commitOid: expectedHeadOid, paths: onlyMissing.paths, token: 'secret', signal: new AbortController().signal }, clean.transport))
+      .resolves.toEqual({ repository: grant.repository, branch: grant.branch, commitOid: expectedHeadOid, files: [{ path: 'src/missing.txt', state: 'absent' }] })
+  })
+
+  it('accepts executable (100755) and symlink (120000) blobs whose contents OID matches the tree', async () => {
+    const scoped = { ...grant, paths: ['src/bin'] }
+    const server = treeIndexTransport([{ path: 'src/bin', type: 'blob', mode: '100755', sha: oldOid }],
+      () => ({ reply: { path: 'src/bin', type: 'file', sha: oldOid, size: 5, encoding: 'base64', content: 'aGVsbG8=' } }))
+    await expect(readGitHubPreimage({ grant: scoped, commitOid: expectedHeadOid, paths: scoped.paths, token: 'secret', signal: new AbortController().signal }, server.transport))
+      .resolves.toMatchObject({ files: [{ path: 'src/bin', state: 'present', blobOid: oldOid }] })
+  })
+
+  it('aborts when a contents 200 is returned for a path the tree indexes as a non-blob entry', async () => {
+    const scoped = { ...grant, paths: ['src/dir'] }
+    const server = treeIndexTransport([{ path: 'src/dir', type: 'tree', mode: '040000', sha: 'd'.repeat(40) }],
+      () => ({ reply: { path: 'src/dir', type: 'file', sha: oldOid, size: 5, encoding: 'base64', content: 'aGVsbG8=' } }))
+    await expect(readGitHubPreimage({ grant: scoped, commitOid: expectedHeadOid, paths: scoped.paths, token: 'secret', signal: new AbortController().signal }, server.transport)).resolves.toBeUndefined()
+  })
+
+  it.each([
+    ['blob with tree mode', { path: 'src/file.txt', type: 'blob', mode: '040000', sha: oldOid }],
+    ['tree with blob mode', { path: 'src/dir', type: 'tree', mode: '100644' }],
+    ['commit with blob mode', { path: 'vendor/lib', type: 'commit', mode: '100644' }],
+    ['blob without an oid', { path: 'src/file.txt', type: 'blob', mode: '100644' }],
+    ['unrecognized type', { path: 'src/x', type: 'weird', mode: '100644', sha: oldOid }],
+    ['unrecognized mode', { path: 'src/x', type: 'blob', mode: '100744', sha: oldOid }],
+    ['missing mode', { path: 'src/x', type: 'blob', sha: oldOid }],
+  ])('fails closed on a contradictory or unrecognized tree entry (%s)', async (_name, entry) => {
+    const scoped = { ...grant, paths: ['src/file.txt'] }
+    const server = treeIndexTransport([entry], () => { throw new Error('contents must not be reached') })
+    await expect(readGitHubPreimage({ grant: scoped, commitOid: expectedHeadOid, paths: scoped.paths, token: 'secret', signal: new AbortController().signal }, server.transport)).resolves.toBeUndefined()
+  })
+
+  it('fails closed when the same tree path appears with contradictory entries', async () => {
+    const scoped = { ...grant, paths: ['src/file.txt'] }
+    const entries = [
+      { path: 'src/file.txt', type: 'blob', mode: '100644', sha: oldOid },
+      { path: 'src/file.txt', type: 'blob', mode: '100755', sha: oldOid },
+    ]
+    const server = treeIndexTransport(entries, () => { throw new Error('contents must not be reached') })
+    await expect(readGitHubPreimage({ grant: scoped, commitOid: expectedHeadOid, paths: scoped.paths, token: 'secret', signal: new AbortController().signal }, server.transport)).resolves.toBeUndefined()
+  })
+
   it.each([
     ['commit lookup 404', (url: URL) => url.pathname.includes('/git/commits/') ? { status: 404, reply: { message: 'Not Found' } } : { reply: {} }],
     ['tree lookup 403', (url: URL) => url.pathname.includes('/git/trees/') ? { status: 403, reply: { message: 'Forbidden' } } : { reply: {} }],
@@ -265,6 +339,21 @@ describe('GitHub compensation primitives', () => {
     expect(result).toMatchObject({ status: 'failed', reason: 'github-compensation-rejected' })
     // The mutation was sent exactly once; a rejection is terminal, not replayed.
     expect(rejected.calls).toHaveLength(1)
+  })
+
+  it('treats a payload carrying both errors and a commit payload as a terminal rejection', async () => {
+    const preimage = { repository: grant.repository, branch: grant.branch, commitOid: expectedHeadOid, files: [{ path: 'src/file.txt', state: 'present' as const, blobOid: oldOid, content: 'old', size: 3 }] }
+    const scoped = { ...grant, paths: ['src/file.txt'] }
+    const head = routedTransport(() => ({ reply: { name: grant.branch, commit: { sha: forwardOid } } }))
+    // A partial failure can surface both a populated data node and top-level
+    // errors; the errors win and the result must never be read as a success.
+    const mixed = routedTransport(() => ({ reply: {
+      data: { createCommitOnBranch: { clientMutationId: `dsh-compensation:${actionId}`, commit: { oid: compensationOid, parents: { nodes: [{ oid: forwardOid }] }, repository: { nameWithOwner: grant.repository } }, ref: { name: grant.branch, target: { oid: compensationOid } } } },
+      errors: [{ type: 'SOMETHING_ELSE', message: 'partial failure' }],
+    } }))
+    const result = await createCompensatingCommitOnGitHub({ actionId, grant: scoped, forwardCommitOid: forwardOid, preimage, token: 'secret', signal: new AbortController().signal }, { rest: head.transport, graphql: mixed.transport })
+    expect(result).toMatchObject({ status: 'failed', reason: 'github-compensation-rejected' })
+    expect(mixed.calls).toHaveLength(1)
   })
 
   type ReceiptChange = Partial<{ marker: string; repository: string; branch: string; parent: string; refResult: string; parents: string[] }>

@@ -45,6 +45,12 @@ interface HarnessOptions {
   branchHeadOverride?: string
   /** Destroy the socket (lost ACK) for the compensation GraphQL POST. */
   dropCompensationAck?: boolean
+  /** Make the first N preimage captures contradict the parent tree (blob 404), then serve normally. */
+  captureFailures?: number
+  /** Delay each preimage contents GET by this many ms (lets authorization change while the capture is in flight). */
+  captureDelayMs?: number
+  /** Invoked once, when the first preimage contents request reaches the server. */
+  onFirstCapture?: () => void
 }
 
 interface GraphQLPost { clientMutationId: string; input: Record<string, unknown>; raw: string }
@@ -60,6 +66,9 @@ async function makeHarness(options: HarnessOptions = {}) {
 
   let serverHead = initialHead
   let seq = 0
+  let captureFailuresRemaining = options.captureFailures ?? 0
+  let firstCaptureFired = false
+  const captureDelayMs = options.captureDelayMs ?? 0
   const posts: GraphQLPost[] = []
   const captureLog: Array<{ path: string; ref: string }> = []
   const branchLog: string[] = []
@@ -108,7 +117,15 @@ async function makeHarness(options: HarnessOptions = {}) {
     if (contents) {
       const path = decodeURIComponent(contents[1]!)
       captureLog.push({ path, ref: url.searchParams.get('ref') ?? '' })
+      if (!firstCaptureFired) { firstCaptureFired = true; options.onFirstCapture?.() }
+      if (captureDelayMs > 0) await new Promise<void>(resolve => setTimeout(resolve, captureDelayMs))
       const old = parentFiles[path]
+      // First N captures: the indexed blob path answers 404 although the parent
+      // tree proves the blob exists, which the capture must treat as a failure.
+      if (captureFailuresRemaining > 0 && old !== undefined) {
+        captureFailuresRemaining -= 1
+        res.statusCode = 404; res.end(); return
+      }
       if (old === undefined) { res.statusCode = 404; res.end(); return }
       const bytes = Buffer.from(old, 'utf8')
       res.setHeader('content-type', 'application/json')
@@ -148,7 +165,13 @@ async function makeHarness(options: HarnessOptions = {}) {
   ] })
   await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(secretRoot, 'token'), consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit', 'github.compensate'], maxLeaseMs: 30_000 }] })
   ctx.provide('agents' as never, { get: (id: string) => id === owner.id ? owner : id === other.id ? other : undefined } as never)
-  ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }) } as never)
+  // Tests may switch the resolved delivery principal while a compensation is in
+  // flight to prove the 100 ms authorization poll aborts it after owner change.
+  let principalOverride: { principalId: string; principalRecordId: string; principalVersion: number } | undefined
+  ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => {
+    const value = principalOverride ?? { principalId: 'owner', principalRecordId: 'record', principalVersion: 1 }
+    return { principalId: value.principalId, principalLineage: { principalRecordId: value.principalRecordId, principalVersion: value.principalVersion }, scope: { workspace: root, preset: 'primary' } }
+  } } as never)
   await ctx.plugin(AssistantIsolationService, { stateRoot: join(root, 'isolation'), image: 'sha256:' + 'a'.repeat(64), grants: [{ id: 'offline', revision: 1, principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: root, agentPreset: 'primary', expiresAt: grant.expiresAt, maxRuns: 1, maxTotalDurationMs: 60_000 }] })
   let asks = 0
   ctx.on('approval/request', async () => { asks++; return 'allowed-once' })
@@ -179,12 +202,15 @@ async function makeHarness(options: HarnessOptions = {}) {
   const statusOf = async (actionId: string, who: Agent = owner) => await call('action_github_compensation_status', { grantId: 'fix', actionId }, who)
   const compPosts = () => posts.filter(post => post.clientMutationId.startsWith('dsh-compensation:'))
   const openLedger = () => new DatabaseSync(join(stateRoot, 'ledger.sqlite'))
+  const openPolicy = () => new DatabaseSync(join(root, 'policy.sqlite'))
   const cleanup = async () => {
     try { await plugin?.dispose(); await ctx.fiber.dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) } finally {
       await rm(root, { recursive: true, force: true }); clock.mockRestore()
     }
   }
-  return { ctx, owner, other, grant, call, forward, compensate, statusOf, posts, compPosts, captureLog, branchLog, openLedger, reload: async () => { await plugin!.dispose(); plugin = await load() }, cleanup, asks: () => asks }
+  return { ctx, owner, other, grant, call, forward, compensate, statusOf, posts, compPosts, captureLog, branchLog, openLedger, openPolicy,
+    setPrincipal: (value: { principalId: string; principalRecordId: string; principalVersion: number } | undefined) => { principalOverride = value },
+    reload: async () => { await plugin!.dispose(); plugin = await load() }, cleanup, asks: () => asks }
 }
 
 test('A: succeeded forward result exposes only the redacted four-field receipt', async () => {
@@ -319,6 +345,15 @@ test('G: an advanced branch head fails compensation after capture, with zero com
     expect(replay.status).toBe('failed')
     expect(replay.reason).toBe('github-compensation-head-conflict')
     expect(h.compPosts()).toHaveLength(0)
+    // The local dispatch flip happened before the head inspection failed, so the
+    // reservation is finalized (a real dispatch attempt), never left as a hold.
+    const pdb = h.openPolicy()
+    try {
+      const reservation = pdb.prepare("SELECT status FROM budget_reservations WHERE idempotency_key LIKE 'compensation:%'").get() as { status: string }
+      expect(reservation.status).toBe('finalized')
+      const period = pdb.prepare("SELECT reserved_amount, spent_amount FROM budget_periods WHERE metric = 'github-compensations'").get() as { reserved_amount: number; spent_amount: number }
+      expect(period).toEqual({ reserved_amount: 0, spent_amount: 1 })
+    } finally { pdb.close() }
   } finally { await h.cleanup() }
 }, 30_000)
 
@@ -359,33 +394,260 @@ test('I: a preimage larger than 64 KiB (but within 1 MiB) compensates byte-for-b
   } finally { await h.cleanup() }
 }, 30_000)
 
-test('J: a pre-dispatch budget denial discards the capturing placeholder, freeing the slot for a retry', async () => {
+test('J: a pre-dispatch budget denial releases the hold and discards the capturing placeholder, freeing the slot for a retry', async () => {
   const h = await makeHarness()
   const policy = h.ctx.assistantPolicy
-  const original = policy.authorizeAgent.bind(policy)
-  let denyNext = true
-  const spy = vi.spyOn(policy, 'authorizeAgent').mockImplementation(((...args: Parameters<typeof original>) => {
-    if (denyNext && args[1] === 'compensate') { denyNext = false; return { effect: 'deny' as const, reasonCode: 'budget-exhausted' } }
-    return original(...args)
-  }) as typeof original)
+  // Exhaust the subject's rollback budget with an independent held reservation
+  // (same subject scope "agent:primary", same github-compensations metric).
+  const probe = policy.reserve({ budgetId: 'rollbacks', subject: { kind: 'agent', id: 'primary', workspace: h.grant.workspace }, amount: 1, idempotencyKey: 'probe:exhaust-rollbacks' })
+  expect(probe.status).toBe('reserved')
   try {
     const { receipt } = await h.forward()
     const denied = await h.compensate('comp-key-denied', receipt)
     expect(denied.isError).toBe(true)
-    // Authorization happens before preimage capture, so no GitHub GET/POST was attempted...
+    // The two-phase reserve is denied before preimage capture, so no GitHub GET/POST was attempted...
     expect(h.captureLog).toHaveLength(0)
     expect(h.compPosts()).toHaveLength(0)
-    // ...and the capturing placeholder was discarded, leaving no compensation row behind.
+    // ...the capturing placeholder was discarded, leaving no compensation row behind...
     const db = h.openLedger()
     try {
       expect((db.prepare('SELECT COUNT(*) AS n FROM compensations').get() as { n: number }).n).toBe(0)
     } finally { db.close() }
+    // ...and the denied attempt left no orphan reservation of its own.
+    const pdb = h.openPolicy()
+    try {
+      const rows = pdb.prepare("SELECT idempotency_key, status FROM budget_reservations WHERE idempotency_key LIKE 'compensation:%'").all() as Array<{ idempotency_key: string; status: string }>
+      expect(rows).toEqual([])
+    } finally { pdb.close() }
 
-    // A new compensation key for the same forward action can now proceed once the budget allows.
+    // Once the blocking hold is released, a new compensation key for the same forward action proceeds.
+    expect(policy.release(probe.reservationId).status).toBe('released')
     const retried = await h.compensate('comp-key-retry', receipt)
     expect(retried.isError, retried.result).toBe(false)
     expect(JSON.parse(retried.result).status).toBe('succeeded')
     expect(h.captureLog).toHaveLength(2)
     expect(h.compPosts()).toHaveLength(1)
-  } finally { spy.mockRestore(); await h.cleanup() }
+    // The successful attempt is finalized (charged once); the released probe and
+    // denied attempt consume nothing in the current period.
+    const pdb2 = h.openPolicy()
+    try {
+      const reservations = pdb2.prepare("SELECT idempotency_key, status FROM budget_reservations WHERE idempotency_key LIKE 'compensation:%'").all() as Array<{ idempotency_key: string; status: string }>
+      expect(reservations).toEqual([{ idempotency_key: expect.stringMatching(/^compensation:./u), status: 'finalized' }])
+      const period = pdb2.prepare("SELECT reserved_amount, spent_amount FROM budget_periods WHERE metric = 'github-compensations'").get() as { reserved_amount: number; spent_amount: number }
+      expect(period).toEqual({ reserved_amount: 0, spent_amount: 1 })
+    } finally { pdb2.close() }
+  } finally { await h.cleanup() }
+}, 30_000)
+
+test('K: a preimage-capture failure releases the budget hold and discards the placeholder, so a retry is not blocked', async () => {
+  // The first capture attempt contradicts the parent tree (blob 404); it
+  // happens after the budget reserve but before the dispatch boundary.
+  const h = await makeHarness({ captureFailures: 1 })
+  try {
+    const { receipt } = await h.forward()
+    const failed = await h.compensate('comp-key-failed', receipt)
+    expect(failed.isError).toBe(true)
+    expect(h.compPosts()).toHaveLength(0)
+    const ldb = h.openLedger()
+    try {
+      expect((ldb.prepare('SELECT COUNT(*) AS n FROM compensations').get() as { n: number }).n).toBe(0)
+    } finally { ldb.close() }
+    // The hold is released (the row stays for audit as a released reservation).
+    let pdb = h.openPolicy()
+    try {
+      const rows = pdb.prepare("SELECT status FROM budget_reservations WHERE idempotency_key LIKE 'compensation:%'").all() as Array<{ status: string }>
+      expect(rows).toEqual([{ status: 'released' }])
+    } finally { pdb.close() }
+
+    // The next attempt (server now serves the preimage) succeeds on the same one-action budget.
+    const retried = await h.compensate('comp-key-retry', receipt)
+    expect(retried.isError, retried.result).toBe(false)
+    expect(JSON.parse(retried.result).status).toBe('succeeded')
+    expect(h.compPosts()).toHaveLength(1)
+    pdb = h.openPolicy()
+    try {
+      const period = pdb.prepare("SELECT reserved_amount, spent_amount FROM budget_periods WHERE metric = 'github-compensations'").get() as { reserved_amount: number; spent_amount: number }
+      expect(period).toEqual({ reserved_amount: 0, spent_amount: 1 })
+    } finally { pdb.close() }
+  } finally { await h.cleanup() }
+}, 30_000)
+
+test('L: restart releases the orphaned budget hold for a compensation stuck prepared and never dispatches it again', async () => {
+  const h = await makeHarness()
+  try {
+    const { receipt } = await h.forward()
+    const ok = await h.compensate('comp-key', receipt)
+    expect(ok.isError, ok.result).toBe(false)
+    const actionId = (JSON.parse(ok.result) as { actionId: string }).actionId
+    expect(h.compPosts()).toHaveLength(1)
+
+    // Simulate the crash window: a sealed prepared compensation with a still-open
+    // reservation (process died after capture, before the dispatch flip).
+    await h.reload()
+    const ldb = h.openLedger()
+    try {
+      ldb.prepare("UPDATE compensations SET status = 'prepared', result_json = NULL WHERE id = ?").run(actionId)
+    } finally { ldb.close() }
+    const pdb0 = h.openPolicy()
+    try {
+      pdb0.prepare("UPDATE budget_reservations SET status = 'reserved' WHERE idempotency_key = ?").run(`compensation:${actionId}`)
+      pdb0.prepare("UPDATE budget_periods SET reserved_amount = 1, spent_amount = 0, version = version + 1 WHERE metric = 'github-compensations'").run()
+    } finally { pdb0.close() }
+
+    // Restart: recovery turns the stale row unknown (never replayed) and releases
+    // the orphan reservation through the deterministic idempotency key.
+    await h.reload()
+    const ldb2 = h.openLedger()
+    try {
+      const row = ldb2.prepare('SELECT status FROM compensations WHERE id = ?').get(actionId) as { status: string }
+      expect(row.status).toBe('unknown')
+    } finally { ldb2.close() }
+    const pdb = h.openPolicy()
+    try {
+      const reservation = pdb.prepare('SELECT status FROM budget_reservations WHERE idempotency_key = ?').get(`compensation:${actionId}`) as { status: string }
+      expect(reservation.status).toBe('released')
+      const period = pdb.prepare("SELECT reserved_amount, spent_amount FROM budget_periods WHERE metric = 'github-compensations'").get() as { reserved_amount: number; spent_amount: number }
+      expect(period).toEqual({ reserved_amount: 0, spent_amount: 0 })
+    } finally { pdb.close() }
+
+    // The recovered unknown is terminal: no second POST for the same key.
+    const replay = await h.compensate('comp-key', receipt)
+    expect(JSON.parse(replay.result)).toMatchObject({ status: 'unknown' })
+    expect(h.compPosts()).toHaveLength(1)
+  } finally { await h.cleanup() }
+}, 30_000)
+
+test('M: an in-flight grant revocation during preimage capture aborts before dispatch and discards the placeholder', async () => {
+  // The capture sleeps longer than the 100 ms authorization poll, so the
+  // second-connection revoke is observed while the capture is still running.
+  const h = await makeHarness({ captureDelayMs: 250, onFirstCapture: () => {
+    const db = h.openLedger()
+    try {
+      db.prepare('UPDATE grant_heads SET revoked = 1 WHERE id = ?').run(h.grant.id)
+      db.prepare('UPDATE grants SET revoked = 1 WHERE id = ? AND revision = ?').run(h.grant.id, h.grant.revision)
+    } finally { db.close() }
+  } })
+  try {
+    const { receipt } = await h.forward()
+    const revoked = await h.compensate('comp-key-revoked', receipt)
+    expect(revoked.isError).toBe(true)
+    expect(revoked.result).toMatch(/authorization ended|capture unavailable/u)
+    // The revocation was detected mid-capture: no compensation commit was posted.
+    expect(h.compPosts()).toHaveLength(0)
+    // The capturing placeholder was discarded (delete, not a terminal row).
+    const ldb = h.openLedger()
+    try {
+      expect((ldb.prepare('SELECT COUNT(*) AS n FROM compensations').get() as { n: number }).n).toBe(0)
+      const audits = ldb.prepare("SELECT kind FROM audit WHERE kind LIKE 'compensation-%' ORDER BY sequence").all() as Array<{ kind: string }>
+      expect(audits.map(entry => entry.kind)).toContain('compensation-discarded')
+    } finally { ldb.close() }
+    // The hold was released before the dispatch boundary; nothing was charged.
+    const pdb = h.openPolicy()
+    try {
+      const rows = pdb.prepare("SELECT status FROM budget_reservations WHERE idempotency_key LIKE 'compensation:%'").all() as Array<{ status: string }>
+      expect(rows).toEqual([{ status: 'released' }])
+      const period = pdb.prepare("SELECT reserved_amount, spent_amount FROM budget_periods WHERE metric = 'github-compensations'").get() as { reserved_amount: number; spent_amount: number }
+      expect(period).toEqual({ reserved_amount: 0, spent_amount: 0 })
+    } finally { pdb.close() }
+  } finally { await h.cleanup() }
+}, 30_000)
+
+test('N: an in-flight owner change during capture aborts before dispatch and discards the placeholder', async () => {
+  const h = await makeHarness({ captureDelayMs: 250, onFirstCapture: () => {
+    h.setPrincipal({ principalId: 'intruder', principalRecordId: 'record', principalVersion: 2 })
+  } })
+  try {
+    const { receipt } = await h.forward()
+    const changed = await h.compensate('comp-key-owner', receipt)
+    expect(changed.isError).toBe(true)
+    expect(changed.result).toMatch(/authorization ended|capture unavailable|owner changed/u)
+    expect(h.compPosts()).toHaveLength(0)
+    const ldb = h.openLedger()
+    try {
+      expect((ldb.prepare('SELECT COUNT(*) AS n FROM compensations').get() as { n: number }).n).toBe(0)
+      const audits = ldb.prepare("SELECT kind FROM audit WHERE kind LIKE 'compensation-%' ORDER BY sequence").all() as Array<{ kind: string }>
+      expect(audits.map(entry => entry.kind)).toContain('compensation-discarded')
+    } finally { ldb.close() }
+    const pdb = h.openPolicy()
+    try {
+      const rows = pdb.prepare("SELECT status FROM budget_reservations WHERE idempotency_key LIKE 'compensation:%'").all() as Array<{ status: string }>
+      expect(rows).toEqual([{ status: 'released' }])
+      const period = pdb.prepare("SELECT reserved_amount, spent_amount FROM budget_periods WHERE metric = 'github-compensations'").get() as { reserved_amount: number; spent_amount: number }
+      expect(period).toEqual({ reserved_amount: 0, spent_amount: 0 })
+    } finally { pdb.close() }
+  } finally { await h.cleanup() }
+}, 30_000)
+
+test('O: a parent file whose content echoes the PAT fails capture closed without dispatching or leaking the token', async () => {
+  const h = await makeHarness({ preimage: { 'a.txt': `prefix-${secret}-suffix` } })
+  try {
+    const { receipt } = await h.forward()
+    const blocked = await h.compensate('comp-key-token-echo', receipt)
+    expect(blocked.isError).toBe(true)
+    // The token-bearing blob is rejected at decode: fail-closed capture failure.
+    expect(blocked.result).toMatch(/capture unavailable/u)
+    expect(h.compPosts()).toHaveLength(0)
+    // Capture short-circuits on the first rejected path; b.txt is never fetched.
+    expect(h.captureLog.map(entry => entry.path)).toEqual(['a.txt'])
+    const ldb = h.openLedger()
+    try {
+      expect((ldb.prepare('SELECT COUNT(*) AS n FROM compensations').get() as { n: number }).n).toBe(0)
+      expect(JSON.stringify(ldb.prepare('SELECT * FROM compensations').all())).not.toContain(secret)
+    } finally { ldb.close() }
+    // Neither the tool result nor the persisted actions ledger ever carries the token.
+    expect(blocked.result).not.toContain(secret)
+    const adb = h.openLedger()
+    try {
+      expect(JSON.stringify(adb.prepare('SELECT * FROM actions').all())).not.toContain(secret)
+    } finally { adb.close() }
+    const pdb = h.openPolicy()
+    try {
+      const rows = pdb.prepare("SELECT status FROM budget_reservations WHERE idempotency_key LIKE 'compensation:%'").all() as Array<{ status: string }>
+      expect(rows).toEqual([{ status: 'released' }])
+    } finally { pdb.close() }
+  } finally { await h.cleanup() }
+}, 30_000)
+
+test('P: losing the rollback hold after the preimage seal but before dispatch terminalizes the sealed row to unknown without replay', async () => {
+  // During the capture flight the still-open reservation is released through
+  // the same crash-recovery API a host uses for orphaned holds. The seal then
+  // succeeds but the pre-dispatch re-check fails: the sealed prepared row must
+  // be terminalized to unknown live instead of lingering as a zombie that only
+  // a process restart would clear.
+  const h = await makeHarness({ captureDelayMs: 250, onFirstCapture: () => {
+    const pdb = h.openPolicy()
+    try {
+      const row = pdb.prepare("SELECT idempotency_key FROM budget_reservations WHERE idempotency_key LIKE 'compensation:%' AND status = 'reserved'").get() as { idempotency_key: string } | undefined
+      if (row) (h.ctx.get('assistantPolicy') as unknown as { releaseByIdempotencyKey(key: string): unknown }).releaseByIdempotencyKey(row.idempotency_key)
+    } finally { pdb.close() }
+  } })
+  try {
+    const { receipt } = await h.forward()
+    const blocked = await h.compensate('comp-key-sealed', receipt)
+    expect(blocked.isError).toBe(true)
+    expect(blocked.result).toMatch(/authorization ended/u)
+    // The dispatch flip never happened, so no compensation commit was posted.
+    expect(h.compPosts()).toHaveLength(0)
+    const ldb = h.openLedger()
+    try {
+      const row = ldb.prepare('SELECT status, result_json FROM compensations').get() as { status: string; result_json: string }
+      expect(row.status).toBe('unknown')
+      expect((JSON.parse(row.result_json) as { reason?: string }).reason).toBe('authorization-ended-before-dispatch')
+      const audits = ldb.prepare("SELECT kind FROM audit WHERE kind LIKE 'compensation-%' ORDER BY sequence").all() as Array<{ kind: string }>
+      expect(audits.map(entry => entry.kind)).toContain('compensation-abandoned')
+    } finally { ldb.close() }
+    // The never-dispatched hold is released; nothing was charged to the rollback budget.
+    const pdb = h.openPolicy()
+    try {
+      const rows = pdb.prepare("SELECT status FROM budget_reservations WHERE idempotency_key LIKE 'compensation:%'").all() as Array<{ status: string }>
+      expect(rows).toEqual([{ status: 'released' }])
+      const period = pdb.prepare("SELECT reserved_amount, spent_amount FROM budget_periods WHERE metric = 'github-compensations'").get() as { reserved_amount: number; spent_amount: number }
+      expect(period).toEqual({ reserved_amount: 0, spent_amount: 0 })
+    } finally { pdb.close() }
+    // unknown is terminal: replaying the identical key returns the stored unknown and never redispatches.
+    const replay = await h.compensate('comp-key-sealed', receipt)
+    expect(replay.isError, replay.result).toBe(false)
+    expect(JSON.parse(replay.result)).toMatchObject({ status: 'unknown', reason: 'authorization-ended-before-dispatch' })
+    expect(h.compPosts()).toHaveLength(0)
+  } finally { await h.cleanup() }
 }, 30_000)

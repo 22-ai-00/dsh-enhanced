@@ -13,7 +13,7 @@ import { join } from 'node:path'
 import { Config, commitBytes, normalizeCommit, normalizeCompensation, normalizeVerifiedDelivery, validateConfig } from './config.js'
 import { VerifiedDeliveryRuntime, type DeliveryIntent, type DeliveryOutcome, type DeliverySecurity, type VerifiedFiles } from './verified-delivery.js'
 import { normalizeRepositoryReadback, validateRepositoryReadbackRequirements, type RepositoryReadback, type RepositoryReadbackRequirements } from './repository-readback.js'
-import { ActionLedger, normalizeWorkflow } from './ledger.js'
+import { ActionLedger, normalizeWorkflow, type RecoveredCompensationRef } from './ledger.js'
 import { commitOnGitHub, createBranchOnGitHub, createCompensatingCommitOnGitHub, createPullRequestOnGitHub, inspectGitHub, readGitHubPreimage } from './github.js'
 import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, BranchRequest, CommitRequest, CompensationRecord, CompensationRequest, CompensationResult, InspectRequest, PullRequestRequest, VerifiedDeliveryRequest, WorkflowRequest } from './types.js'
 
@@ -40,6 +40,7 @@ export class AssistantActionsService extends Service {
   readonly #authority: ActionAuthority
   readonly #pending = new Map<string, { abort: AbortController; done: Promise<ActionResult> }>()
   readonly #pendingCompensations = new Map<string, { abort: AbortController; done: Promise<CompensationResult> }>()
+  #pendingCompensationReleases: RecoveredCompensationRef[] = []
   #active = true
   #verified: VerifiedDeliveryRuntime | undefined
 
@@ -55,7 +56,7 @@ export class AssistantActionsService extends Service {
       this.#authority = this.#ledger.claimController(randomUUID(), 30_000)
       this.#ledger.syncGrants(config.grants, this.#authority)
       this.#ledger.recover(this.#authority)
-      this.#ledger.recoverCompensations(this.#authority)
+      this.#pendingCompensationReleases = this.#ledger.recoverCompensations(this.#authority).neverDispatched
     } catch (error) { this.#ledger.close(); throw error }
     const timer = setInterval(() => {
       try { if (this.#active && this.#ledger.renewController(this.#authority, 30_000)) return } catch { /* Stop when the fence is lost. */ }
@@ -82,6 +83,17 @@ export class AssistantActionsService extends Service {
         && !(['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'action_github_compensate', 'action_github_compensation_status', 'goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool(execution))) throw new Error('assistant-actions: this scope requires isolated execution or an authorized broker')
       return await next()
     }))
+    // Reconcile rollback reservations orphaned by a crash. Only rows that never
+    // reached the local dispatch flip are reported (capturing/prepared), so no
+    // POST could have landed and their open holds are safe to release. A
+    // finalized hold is never unwound (release throws invalid-state); such a
+    // mismatch fails closed and is left for the budget period to roll over.
+    ctx.inject(['assistantPolicy'], runtime => {
+      for (const ref of this.#pendingCompensationReleases) {
+        try { runtime.assistantPolicy.releaseByIdempotencyKey(`compensation:${ref.id}`) } catch { /* retain the hold; fail closed */ }
+      }
+      this.#pendingCompensationReleases = []
+    })
     ctx.inject(['tools', 'agents', 'assistantPolicy', 'assistantDelivery', 'credentialsKeychain'], runtime => {
       if (config.grants.length === 0) return
       const grants = () => config.grants.map(grant => this.#ledger.grant(grant.id)).filter(grant => grant !== undefined && grant.expiresAt > Date.now())
@@ -180,15 +192,35 @@ export class AssistantActionsService extends Service {
     return { principalDigest: principalDigest(owner.principalId), ...owner.principalLineage, workspace: owner.scope.workspace, agentPreset: owner.scope.preset }
   }
 
-  #authorizeCompensation(agent: Agent | undefined, record: CompensationRecord): boolean {
+  #reserveCompensation(agent: Agent | undefined, record: CompensationRecord, expectedReservationId?: string): { reservationId: string; amount: number } | undefined {
     try {
       const grant = this.#ledger.grant(record.grantId)
       const rollback = grant?.rollback
       const policy = this.ctx.get('assistantPolicy')
-      if (!rollback?.allowRollback || policy?.getBudgetConfig(rollback.budgetId)?.metric !== ROLLBACK_BUDGET_METRIC) return false
-      const decision = policy.authorizeAgent(agent, 'compensate', { kind: 'tool', id: `action:github-rollback:${record.grantId}` }, { idempotencyKey: `compensation:${record.id}` })
-      return decision.effect === 'allow' && decision.budget?.id === rollback.budgetId
-    } catch { return false }
+      if (!rollback?.allowRollback || policy?.getBudgetConfig(rollback.budgetId)?.metric !== ROLLBACK_BUDGET_METRIC) return undefined
+      // evaluateAgent only decides; the two-phase reserve below is what holds
+      // budget capacity, so an authorization that never reaches the dispatch
+      // POST can be released instead of permanently spending the action.
+      const decision = policy.evaluateAgent(agent, 'compensate', { kind: 'tool', id: `action:github-rollback:${record.grantId}` })
+      if (decision.effect !== 'allow' || decision.budget?.id !== rollback.budgetId) return undefined
+      const preset = agent?.session.header.agentPreset
+      const workspace = agent?.session.header.cwd
+      if (!agent || preset === undefined || preset === '' || workspace === undefined) return undefined
+      const reservation = policy.reserve({
+        budgetId: rollback.budgetId,
+        subject: { kind: 'agent', id: preset, workspace },
+        amount: decision.budget.amount,
+        idempotencyKey: `compensation:${record.id}`,
+      })
+      // A still-open reservation is accepted both fresh (new capturing row) and
+      // as a replay (resuming a prepared row whose earlier attempt stopped
+      // before dispatch). A released/finalized replay is fail-closed: the
+      // capacity was already settled and a sealed prepared row is never reused.
+      if (reservation.status !== 'reserved') return undefined
+      // The pre-dispatch re-check must replay the very same open reservation.
+      if (expectedReservationId !== undefined && (!reservation.replayed || reservation.reservationId !== expectedReservationId)) return undefined
+      return { reservationId: reservation.reservationId, amount: decision.budget.amount }
+    } catch { return undefined }
   }
 
   #forwardResult(request: CommitRequest, result: ActionResult): ActionResult | (ActionResult & { forwardReceipt: { actionId: string; version: number; requestDigest: string; commitOid: string } }) {
@@ -510,6 +542,13 @@ export class AssistantActionsService extends Service {
 
   async #executeCompensation(agent: Agent | undefined, identity: ActionIdentity, initial: CompensationRecord, signal: AbortSignal): Promise<CompensationResult> {
     let record = initial
+    // Two-phase rollback budget: capacity is reserved before the preimage is
+    // captured and only charged (finalized) once the local dispatch boundary
+    // is crossed. A failure before dispatch releases the hold, so a denied or
+    // failed attempt cannot permanently burn the subject's rollback budget.
+    let reservation: { reservationId: string; amount: number } | undefined
+    let reservationSettled = false
+    let dispatched = false
     const abort = new AbortController()
     const stillAuthorized = (): boolean => {
       try {
@@ -523,7 +562,10 @@ export class AssistantActionsService extends Service {
       const grant = this.#ledger.grant(record.grantId)
       const credentials = this.ctx.get('credentialsKeychain')
       if (!grant || !credentials || !stillAuthorized()) throw new Error('assistant-actions: compensation unavailable')
-      if (!this.#authorizeCompensation(agent, record)) throw new Error('assistant-actions: compensation budget denied')
+      // Accepts a fresh reservation for a capturing row and an open replay when
+      // resuming a prepared row; a released/finalized replay is denied.
+      reservation = this.#reserveCompensation(agent, record)
+      if (!reservation) throw new Error('assistant-actions: compensation budget denied')
       return await credentials.withSecret(this.ctx, { handleId: grant.credentialHandle, purpose: 'github.compensate', idempotencyKey: `compensation:${record.id}`, ttlMs: Math.min(30_000, record.expiresAt - Date.now()) }, async (token, credentialSignal) => {
         const combined = AbortSignal.any([signal, abort.signal, credentialSignal, AbortSignal.timeout(Math.max(1, record.expiresAt - Date.now()))])
         combined.throwIfAborted()
@@ -534,8 +576,11 @@ export class AssistantActionsService extends Service {
           record = this.#ledger.captureCompensation(record.id, record.version, preimage, this.#authority)
         }
         if (record.status !== 'prepared' || !record.preimage) throw new Error('assistant-actions: compensation is not dispatchable')
-        if (!stillAuthorized() || !this.#authorizeCompensation(agent, record)) throw new Error('assistant-actions: compensation authorization ended')
+        // Re-decide and confirm the same open reservation still holds before the
+        // local dispatch flip that authorizes the network POST.
+        if (!stillAuthorized() || !this.#reserveCompensation(agent, record, reservation!.reservationId)) throw new Error('assistant-actions: compensation authorization ended')
         record = this.#ledger.dispatchCompensation(record.id, record.version, this.#authority)
+        dispatched = true
         let outcome: CompensationResult
         try {
           outcome = await this.compensation.commit({ actionId: record.id, grant, forwardCommitOid: record.forwardCommitOid, preimage: record.preimage!, token, signal: combined })
@@ -543,15 +588,42 @@ export class AssistantActionsService extends Service {
         } catch {
           outcome = { actionId: record.id, status: 'unknown', repository: record.repository, branch: record.branch, parentOid: record.forwardCommitOid, actionMarker: `dsh-compensation:${record.id}`, reason: 'dispatch-unconfirmed-no-replay' }
         }
-        return this.#ledger.settleCompensation(record.id, record.version, outcome, this.#authority).result!
+        const settled = this.#ledger.settleCompensation(record.id, record.version, outcome, this.#authority).result!
+        // The dispatch boundary is behind us and the POST may already have
+        // landed (every terminal outcome, including head-conflict and unknown,
+        // is a real attempt). Charge the reservation; never release it here.
+        try {
+          this.ctx.get('assistantPolicy')?.finalize(reservation!.reservationId, reservation!.amount)
+          reservationSettled = true
+        } catch (error) {
+          // A failed finalize leaves a conservative reserved hold (fails closed
+          // until the budget period rolls); never mask the settled compensation.
+          throw new Error(`assistant-actions: compensation budget finalize failed: ${error instanceof Error ? error.message : String(error)}`)
+        }
+        return settled
       })
     } catch (error) {
-      // A capturing row is only a pre-dispatch placeholder: no preimage was
-      // sealed and no compensation POST could have been sent. Drop it so a
-      // denial, abort or capture failure neither wedges the forward action's
-      // one-compensation slot nor permanently consumes a rollback action.
-      if (record.status === 'capturing') {
+      if (reservation && !reservationSettled) {
+        try {
+          const policy = this.ctx.get('assistantPolicy')
+          if (dispatched) policy?.finalize(reservation.reservationId, reservation.amount)
+          else policy?.release(reservation.reservationId)
+          reservationSettled = true
+        } catch { /* A retained reserved hold fails closed; preserve the original error. */ }
+      }
+      if (!dispatched && record.status === 'capturing') {
+        // A capturing row is only a pre-dispatch placeholder: no preimage was
+        // sealed and no compensation POST could have been sent. Drop it so a
+        // denial, abort or capture failure neither wedges the forward action's
+        // one-compensation slot nor permanently consumes a rollback action.
         try { this.#ledger.discardCompensation(record.id, record.version, this.#authority) } catch {}
+      } else if (!dispatched && record.status === 'prepared') {
+        // A preimage was sealed but the dispatch flip never happened, so no
+        // POST could have landed. Terminalize to unknown live (the same
+        // no-replay outcome crash recovery would assign) rather than leaving a
+        // zombie 'prepared' that only the next process restart clears. The open
+        // reservation for this never-dispatched row is released above.
+        try { this.#ledger.abandonPreparedCompensation(record.id, record.version, this.#authority, 'authorization-ended-before-dispatch') } catch {}
       }
       throw error
     } finally { clearInterval(timer) }
