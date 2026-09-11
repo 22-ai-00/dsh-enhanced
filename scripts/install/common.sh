@@ -249,74 +249,82 @@ dsh_enhanced_version_in_range() {
   local range="$2"
   local token
   local bound
+  local op
   local bound_without_build
   local version_without_build="${version%%+*}"
   local version_core="${version_without_build%%-*}"
-  local prerelease_allowed='0'
+  local version_prerelease=''
+  local same_core_prerelease_comparator='0'
+  local rc_core_strictly_inside='1'
   local -a tokens=()
   [[ -n "$range" ]] || return 1
   read -r -a tokens <<< "$range"
 
-  # npm SemVer ranges exclude prereleases unless at least one comparator in
-  # the same AND set names a prerelease with the exact same major/minor/patch
-  # tuple. Keep this gate dependency-free for macOS's Bash 3.2 installer.
-  if [[ "$version_without_build" == *-* ]]; then
-    for token in "${tokens[@]+"${tokens[@]}"}"; do
-      case "$token" in
-        '>='*) bound="${token#>=}" ;;
-        '<='*) bound="${token#<=}" ;;
-        '>'*) bound="${token#>}" ;;
-        '<'*) bound="${token#<}" ;;
-        '='*) bound="${token#=}" ;;
-        *) bound="$token" ;;
-      esac
-      bound_without_build="${bound%%+*}"
-      if dsh_enhanced_is_host_version "$bound" \
-        && [[ "$bound_without_build" == *-* ]] \
-        && [[ "${bound_without_build%%-*}" == "$version_core" ]]; then
-        prerelease_allowed='1'
-        break
-      fi
-    done
-    [[ "$prerelease_allowed" == '1' ]] || return 1
-  fi
-
+  # Comparator precedence check; runs for stable and prerelease versions alike.
+  # While walking the comparators, remember (a) whether one names a prerelease
+  # on the version's exact major/minor/patch tuple (the npm SemVer visibility
+  # rule) and (b) whether the version's stable core is pinned by an exclusive
+  # >/< boundary, in which case even an rc on that core is outside the range.
   for token in "${tokens[@]+"${tokens[@]}"}"; do
     case "$token" in
-      '>='*)
-        bound="${token#>=}"
-        dsh_enhanced_is_host_version "$bound" && dsh_enhanced_version_ge "$version" "$bound" || return 1
+      '>='*) op='>='; bound="${token#>=}" ;;
+      '<='*) op='<='; bound="${token#<=}" ;;
+      '>'*) op='>'; bound="${token#>}" ;;
+      '<'*) op='<'; bound="${token#<}" ;;
+      '='*) op='='; bound="${token#=}" ;;
+      *) op='='; bound="$token" ;;
+    esac
+    dsh_enhanced_is_host_version "$bound" || return 1
+    case "$op" in
+      '>=')
+        dsh_enhanced_version_ge "$version" "$bound" || return 1
         ;;
-      '>'*)
-        bound="${token#>}"
-        dsh_enhanced_is_host_version "$bound" || return 1
+      '>')
         dsh_enhanced_version_ge "$version" "$bound" || return 1
         if dsh_enhanced_version_ge "$bound" "$version"; then return 1; fi
         ;;
-      '<='*)
-        bound="${token#<=}"
-        dsh_enhanced_is_host_version "$bound" && dsh_enhanced_version_ge "$bound" "$version" || return 1
+      '<=')
+        dsh_enhanced_version_ge "$bound" "$version" || return 1
         ;;
-      '<'*)
-        bound="${token#<}"
-        dsh_enhanced_is_host_version "$bound" || return 1
+      '<')
         dsh_enhanced_version_ge "$bound" "$version" || return 1
         if dsh_enhanced_version_ge "$version" "$bound"; then return 1; fi
         ;;
-      '='*)
-        bound="${token#=}"
-        dsh_enhanced_is_host_version "$bound" || return 1
-        dsh_enhanced_version_ge "$version" "$bound" || return 1
-        dsh_enhanced_version_ge "$bound" "$version" || return 1
-        ;;
-      *)
-        bound="$token"
-        dsh_enhanced_is_host_version "$bound" || return 1
+      '=')
         dsh_enhanced_version_ge "$version" "$bound" || return 1
         dsh_enhanced_version_ge "$bound" "$version" || return 1
         ;;
     esac
+    bound_without_build="${bound%%+*}"
+    if [[ "$bound_without_build" == *-* ]] \
+      && [[ "${bound_without_build%%-*}" == "$version_core" ]]; then
+      same_core_prerelease_comparator='1'
+    fi
+    if [[ ( "$op" == '<' || "$op" == '>' ) \
+      && "${bound_without_build%%-*}" == "$version_core" ]]; then
+      rc_core_strictly_inside='0'
+    fi
   done
+
+  # npm SemVer hides prereleases unless a comparator in the same AND set names
+  # a prerelease with the exact same major/minor/patch tuple. DSH additionally
+  # publishes release candidates on a dedicated "rc" channel, so a later
+  # patch's rc (e.g. 0.1.5-rc.1 inside >=0.1.2-rc.1 <0.2.0) is accepted as
+  # part of the verified 0.1 line when its stable core lies strictly inside
+  # the bounds. Earlier channels (alpha/beta/...) stay hidden, an rc touching
+  # an exclusive boundary (e.g. 0.2.0-rc.x) stays excluded, and same-core
+  # precedence such as 0.1.2-rc.0 below an >=0.1.2-rc.1 floor was already
+  # rejected by the comparator loop above. Dependency-free for Bash 3.2.
+  if [[ "$version_without_build" == *-* ]]; then
+    [[ "$same_core_prerelease_comparator" == '1' ]] && return 0
+    version_prerelease="${version_without_build#*-}"
+    if [[ "$rc_core_strictly_inside" == '1' \
+      && ( "$version_prerelease" == 'rc' || "$version_prerelease" == rc.* ) ]]; then
+      return 0
+    fi
+    return 1
+  fi
+  return 0
 }
 
 dsh_enhanced_ensure_dsh() {
