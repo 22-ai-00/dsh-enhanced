@@ -28,6 +28,7 @@ export type {
   RecoveryJobConfig,
 } from './config.js'
 export * from './executor.js'
+export * from './operator.js'
 export * from './port.js'
 export {
   AssistantRecoveryError,

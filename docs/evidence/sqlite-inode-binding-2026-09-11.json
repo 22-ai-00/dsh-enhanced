@@ -1,0 +1,258 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-11",
+  "recordedAt": "2026-09-11T13:49:28Z",
+  "baseCommit": "98826c05346fb2278844b4cff676f232ca9ddf5a",
+  "status": "validated-before-ordinary-commit",
+  "scope": "Harden Delivery, Automations and Recovery SQLite operator snapshots against same-name parent ABA replacement and live-WAL private-copy drift.",
+  "completeWorkPackage": false,
+  "environment": {
+    "host": "local Linux workstation",
+    "kernel": "Linux 5.15.120.bsk.3-amd64 x86_64",
+    "architecture": "x86_64",
+    "node": "v24.7.0",
+    "pnpm": "11.7.0",
+    "realSystemd": false,
+    "productionDsh": false,
+    "realModel": false,
+    "externalAuthenticityAnchor": false
+  },
+  "workPackages": {
+    "strengthened": ["05", "09", "10", "17"],
+    "statusChanged": false,
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "implemented": [
+    "All three operator snapshot paths reject canonical-path, symlink, hardlink, ownership, mode and parent-directory violations before opening SQLite.",
+    "Main database, WAL and SHM sidecars are pinned as owner-private 0600 regular files; the parent directory must be a real owner-only directory with mode 0500 or 0700 and no setuid, setgid or sticky bits.",
+    "A parent directory fd is held for the whole snapshot. Symlink resolution, lstat identity and opened-fd identity are compared; final cleanup forces parent replacement or disappearance to unsafe-parent even if a lower-level result was already available.",
+    "On Linux, a database without WAL is opened through file:///proc/self/fd/<fd>?mode=ro&immutable=1, binding SQLite to the pinned inode rather than a swappable pathname.",
+    "When a live WAL is present, only the pinned main database and WAL bytes are copied into a fresh 0700 mkdtemp directory. SHM is intentionally not copied; SQLite creates private coordination state for the replica.",
+    "WAL private copies are materialized and reopened through the pinned temporary directory fd under /proc/self/fd. Copy creation, digest verification, SQLite open and cleanup never resolve a swappable temporary pathname.",
+    "The implementation enumerates regular-file fds in the current process, excludes descriptors held by the snapshot itself, and proves SQLite holds the pinned source inode in non-WAL mode or the pinned replica inodes after WAL querying.",
+    "Source main/WAL/SHM identity, size, timestamps and digests are rechecked before open, after open, after querying and in finally. Source rollback journals, incomplete WAL/SHM pairs, sidecar appearance/disappearance and copy digest mismatch fail closed as drift or busy/corrupt classifications.",
+    "Temporary-copy cleanup unlinks fixed replica names through the pinned directory fd, verifies the directory is empty and still the same inode, and only then removes the private directory. Recovery also removes a freshly created private mkdtemp directory if pinning that directory fails.",
+    "The public operator entry points remain read-only: they do not create, migrate, checkpoint, chmod, pair an owner or write a Session lease while producing operator inventory or recovery bootstrap state."
+  ],
+  "changedFiles": [
+    "plugins/assistant-delivery/src/index.ts",
+    "plugins/assistant-delivery/src/operator-snapshot.ts",
+    "plugins/assistant-delivery/tests/operator-snapshot.spec.ts",
+    "plugins/assistant-automations/src/index.ts",
+    "plugins/assistant-automations/src/operator.ts",
+    "plugins/assistant-automations/tests/operator.spec.ts",
+    "plugins/assistant-recovery/src/index.ts",
+    "plugins/assistant-recovery/src/operator.ts",
+    "plugins/assistant-recovery/tests/operator.spec.ts",
+    "docs/agent-autonomy-implementation.md",
+    "docs/evidence/sqlite-inode-binding-2026-09-11.json"
+  ],
+  "focusedSpecs": {
+    "assistantDelivery": {
+      "status": "passed",
+      "workingDirectory": "/tmp/dsh-enhanced-sqlite-inode-20260911-v2/plugins/assistant-delivery",
+      "testFile": "tests/operator-snapshot.spec.ts",
+      "testFiles": 1,
+      "testsPassed": 19,
+      "log": "/tmp/dsh-sqlite-inode-delivery-focused-2026-09-11.log",
+      "logSha256": "d2be0debb307701b2396b5b1952020dc53ddf9fcb16f0935fcff60b5a5a14d24"
+    },
+    "assistantAutomations": {
+      "status": "passed",
+      "workingDirectory": "/tmp/dsh-enhanced-sqlite-inode-20260911-v2/plugins/assistant-automations",
+      "testFile": "tests/operator.spec.ts",
+      "testFiles": 1,
+      "testsPassed": 25,
+      "log": "/tmp/dsh-sqlite-inode-automations-focused-2026-09-11.log",
+      "logSha256": "ff409a98f8492d68cf9497cc4dd6f907a781b616c52a840843d961e3ab949466"
+    },
+    "assistantRecovery": {
+      "status": "passed",
+      "workingDirectory": "/tmp/dsh-enhanced-sqlite-inode-20260911-v2/plugins/assistant-recovery",
+      "testFile": "tests/operator.spec.ts",
+      "testFiles": 1,
+      "testsPassed": 23,
+      "log": "/tmp/dsh-sqlite-inode-recovery-focused-2026-09-11.log",
+      "logSha256": "1df1bfe8a2e36c7aa40ca8bf48ab4e7e40cf63f71992ad4ad22d781a22bf77e4"
+    }
+  },
+  "packageSuitesInFinalGate": {
+    "assistantDelivery": {
+      "testFiles": 34,
+      "testsPassed": 733
+    },
+    "assistantAutomations": {
+      "testFiles": 18,
+      "testsPassed": 260
+    },
+    "assistantRecovery": {
+      "testFiles": 11,
+      "testsPassed": 144
+    },
+    "typecheck": "passed as part of the final isolated pnpm check",
+    "build": "passed as part of the final isolated pnpm check"
+  },
+  "mutationChecks": {
+    "status": "mutation-switches-restored",
+    "experiments": [
+      {
+        "mutation": "disable Linux inode-binding support",
+        "result": "the Delivery, Automations and Recovery H1/full-parent-ABA tests failed while the mutation was active"
+      },
+      {
+        "mutation": "keep the fd assertion but force non-WAL SQLite to use the path-based open",
+        "result": "the Delivery, Automations and Recovery tests failed with database-drift while the mutation was active"
+      }
+    ],
+    "restorationCheck": {
+      "command": "rg -n \"inodeBindSupported = false|operatorInodeBindSupported = false|target = false|if \\\\(false\\\\)\" plugins/assistant-delivery plugins/assistant-automations plugins/assistant-recovery",
+      "exitCodeWhenNoMatches": 1,
+      "matches": 0,
+      "restoredFocusedResults": {
+        "delivery": "1 file / 19 tests passed",
+        "automations": "1 file / 25 tests passed",
+        "recovery": "1 file / 23 tests passed"
+      }
+    },
+    "caveat": "The final Recovery special-bit parent fix was made after the earlier historical mutation matrix. The final Recovery focused suite and full v4 gate pass, but the complete earlier mutation matrix was not manually replayed after that specific narrow fix."
+  },
+  "testIdentifiers": {
+    "H1": {
+      "definitionFound": true,
+      "delivery": "H1: full parent ABA around the SQLite open cannot make the snapshot read a same-name malicious database",
+      "automations": "H1: full parent ABA around the SQLite open cannot make the snapshot read a same-name malicious database",
+      "recoveryEquivalent": "binds a non-WAL SQLite open to the original inode across a same-name parent ABA"
+    },
+    "M1": {
+      "definitionFound": true,
+      "automations": "M1: parent disappearance during an active snapshot stays unsafe-parent and compatibility layers do not return []",
+      "deliveryEquivalent": "fails closed when the pinned parent is swapped for a same-name replacement tree mid-snapshot and unsafe-parent override coverage",
+      "recoveryEquivalent": "returns unsafe-parent when the pinned parent disappears during an active snapshot"
+    },
+    "H2": {
+      "definitionFound": false,
+      "claim": "No H2 definition was found in this batch and no H2 result is claimed."
+    },
+    "L3": {
+      "definitionFound": false,
+      "claim": "No L3 definition was found in this batch and no L3 result is claimed."
+    }
+  },
+  "mainWorkingTreeGate": {
+    "status": "blocked-by-unrelated-work-in-progress",
+    "log": "/tmp/dsh-sqlite-inode-check-2026-09-11.log",
+    "logSha256": "c842847510d8158dbb052ffd77475f643712e3c802b0ff90d74edf704efd8ee2",
+    "blocker": {
+      "file": "scripts/install/lifecycle-profile.mjs",
+      "line": 688,
+      "column": 16,
+      "rule": "no-unused-vars",
+      "message": "Function 'atomicWriteJson' is declared but never used."
+    },
+    "note": "The installer WIP was outside the eleven permitted files and was not read, modified, reverted or staged for this submission."
+  },
+  "isolatedPreparation": {
+    "worktree": "/tmp/dsh-enhanced-sqlite-inode-20260911-v2",
+    "baseCommit": "98826c05346fb2278844b4cff676f232ca9ddf5a",
+    "stateAtFinalInspection": "detached HEAD at the base commit with only the nine target code/test files modified; generated lib output is ignored",
+    "pnpmWorkspaceYamlDiff": "none",
+    "koffiObservation": "Preparation notes recorded an offline koffi install/link observation. The temporary workspace adjustment was restored; final inspection showed no pnpm-workspace.yaml diff.",
+    "warmup": "Generated lib outputs were warmed in the isolated tree before the final clean gate; generated outputs were not treated as source evidence."
+  },
+  "firstCompleteGate": {
+    "status": "failed",
+    "attempt": "v3",
+    "exitCode": 1,
+    "log": "/tmp/dsh-sqlite-inode-isolated-check-2026-09-11-v3.log",
+    "logSha256": "afb2f88db8d39f3828fb3ee63cffcf7860eb5ef43093ddca9d193a78d30b0b34",
+    "rootVitest": {
+      "testFiles": 30,
+      "testsPassed": 427,
+      "testsSkipped": 1
+    },
+    "failure": {
+      "package": "@dsh-enhanced/assistant-actions",
+      "testFile": "tests/verified-delivery-service.spec.ts",
+      "test": "a real Verifier tick reaches Actions through the Cordis service and issues a fresh achieved receipt",
+      "observed": "state remained pending and receipt was null instead of the expected done/achieved receipt",
+      "packageSummary": "1 failed | 161 passed across 10 files"
+    },
+    "notCountedAsPass": true
+  },
+  "failureReruns": {
+    "exactSpec": {
+      "status": "passed",
+      "testFiles": 1,
+      "testsPassed": 17,
+      "log": "/tmp/dsh-sqlite-inode-actions-test-rerun-2026-09-11.log",
+      "logSha256": "a4dcca8868df54d94f86c6595682113f2d0bb578eb6ffb0a287c25c771d000f6"
+    },
+    "assistantActionsPackage": {
+      "status": "passed",
+      "testFiles": 10,
+      "testsPassed": 162,
+      "log": "/tmp/dsh-sqlite-inode-actions-package-rerun-2026-09-11.log",
+      "logSha256": "426cac0173adf47accd7b604009d9a25ee6c48b29bd8b5446281607f2758d380"
+    }
+  },
+  "finalRootCheck": {
+    "status": "passed",
+    "attempt": "v4",
+    "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm --config.verifyDepsBeforeRun=false run check",
+    "exitCode": 0,
+    "log": "/tmp/dsh-sqlite-inode-isolated-check-2026-09-11-v4.log",
+    "logSha256": "00c736d23e535f452e033c3b4cb052989c2bf5621179e0cc592827292590b09d",
+    "exitFile": "/tmp/dsh-sqlite-inode-isolated-check-2026-09-11-v4.exit",
+    "manifestValidation": "30 plugin packages and 3 shared packages validated",
+    "lint": "zero warnings",
+    "typecheck": "passed",
+    "rootVitest": {
+      "testFiles": 30,
+      "testsPassed": 427,
+      "testsSkipped": 1
+    },
+    "allVitestSummaryLines": {
+      "fileSummaries": 361,
+      "testsPassed": 4842,
+      "testsSkipped": 1,
+      "countingNote": "This sums root-aggregated and recursive package summaries. Packages overlap between layers, so this is an execution aggregate, not a count of unique tests."
+    },
+    "build": "passed",
+    "dryRunPacks": 33
+  },
+  "independentVerification": {
+    "status": "not-completed",
+    "readonlyVerifierPass": false,
+    "reason": "The read-only verifier subagents could not start because the account hit its usage limit; the latest message instructed trying again at Sep 15th, 2026 1:21 AM.",
+    "attempts": [
+      "Anscombe could not start because of the usage limit.",
+      "Boyle, a fresh read-only verifier, also failed to start because of the same usage limit."
+    ],
+    "mainCoordinatorReview": "The coordinator performed function-by-function static review and command verification, but this is not an independent verifier PASS."
+  },
+  "securityBoundaries": [
+    "The snapshot does not defend against a malicious process running as the same UID or against root.",
+    "Storage and snapshot digests are consistency hashes only; they are not digital signatures and do not identify a trusted author.",
+    "There is no external monotonic or authenticity anchor in this batch.",
+    "The non-Linux fallback retains historical path-based behavior and does not have an equivalent Linux /proc/self/fd inode-binding proof.",
+    "The local tests do not prove a real production DSH installation, a real systemd deployment, or a real model workflow.",
+    "Operator snapshots are bounded and read-only; they do not establish full OS isolation for arbitrary worker code.",
+    "The evidence covers Linux x86_64 local behavior and repository engineering checks only."
+  ],
+  "sourceHashes": {
+    "plugins/assistant-delivery/src/index.ts": "65e9cba29cff8aaae8bba75323af032be178d2e0e7fd77b6b7658ca5e2458dbc",
+    "plugins/assistant-delivery/src/operator-snapshot.ts": "07a12cdde0efae2c16c9929bb01f7f92060de1b1cbddef6306bcfc9cd3df2949",
+    "plugins/assistant-delivery/tests/operator-snapshot.spec.ts": "e0560c27e505636e0f0c633220a41f9668a669d2c36d3ba2b2fa379379e40f94",
+    "plugins/assistant-automations/src/index.ts": "71f61d70cf5fc60e03eb46ae667123c98a33cbbe68c1eadb1f6958ba6a66df5b",
+    "plugins/assistant-automations/src/operator.ts": "d0d0262fe7e083ebb88658ccba82ff98f0ac42f46b02d51b19eebe0f668815e3",
+    "plugins/assistant-automations/tests/operator.spec.ts": "73939cb60bea7069f42f7789fb19e20e038bb012c4661628cc64f0743fb4df79",
+    "plugins/assistant-recovery/src/index.ts": "6489ad92e69b068f7cd101910f021c70eca5fb17d8dcfed5cc8d0e3485f53657",
+    "plugins/assistant-recovery/src/operator.ts": "500c93ae942932436f6e385d2c4bde70a89281a42e7a608541120f1618979a03",
+    "plugins/assistant-recovery/tests/operator.spec.ts": "76dcda7d4deb129fed9428f6e705e9a0d3b21eaae7a5b7bcec1fbcb7d5eaceb3"
+  }
+}

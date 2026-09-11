@@ -18,7 +18,20 @@ export type {
   AcceptanceTaskInput,
   TaskAcceptanceRegistration,
 } from './acceptance.js'
-export { listActiveAutomationsLocally, listAutomationsLocally } from './operator.js'
+export {
+  AutomationOperatorSnapshotError,
+  automationDefinitionDigest,
+  inspectAutomationInventoryLocally,
+  inspectAutomationsOperatorSnapshot,
+  listActiveAutomationsLocally,
+  listAutomationsLocally,
+} from './operator.js'
+export type {
+  AutomationOperatorFileIdentity,
+  AutomationOperatorRecord,
+  AutomationOperatorSnapshotErrorCode,
+  AutomationsOperatorSnapshot,
+} from './operator.js'
 
 export function apply(ctx: Context, config: import('./service.js').Config): void {
   new AssistantAutomationsService(ctx, config)
