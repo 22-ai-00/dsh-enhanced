@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, test, vi } from 'vitest'
 import { signLarkApprovalAction } from '../src/approval.ts'
-import { LarkChannelService } from '../src/service.ts'
+import { LarkChannelService, writeLarkLifecycleMarker } from '../src/service.ts'
 import { DeliveryAdapterRegistryStoppedError, type DeliveryAdapter, type DeliveryAdapterContext } from '@dsh-enhanced/assistant-delivery'
 import type { LarkTransport, LarkTransportHandlers } from '../src/types.ts'
 
@@ -18,6 +18,20 @@ function transport(): LarkTransport {
 }
 
 describe('Lark Cordis service', () => {
+  test('writes lifecycle markers to stdout for systemd journal capture', () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      writeLarkLifecycleMarker('lark-channel: connected')
+      writeLarkLifecycleMarker('lark-channel: disconnected')
+      expect(info.mock.calls).toEqual([
+        ['lark-channel: connected'],
+        ['lark-channel: disconnected'],
+      ])
+    } finally {
+      info.mockRestore()
+    }
+  })
+
   test('rejects a late successful Calendar page after its credential lease is revoked', async () => {
     const ctx = new Context(), lease = new AbortController()
     ctx.provide('assistantDelivery', { registerAdapter: async (adapter: DeliveryAdapter) => { const dispose = await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext); return async () => { await dispose?.() } } })
@@ -52,6 +66,7 @@ describe('Lark Cordis service', () => {
   })
   test('resolves a named environment secret once and registers the thin adapter', async () => {
     const ctx = new Context()
+    const markers: string[] = []
     const unregister = vi.fn(async () => {})
     const adapterContext: DeliveryAdapterContext = {
       accept: vi.fn(async () => ({ duplicate: false, inboxId: 'inbox-1', status: 'queued' as const })),
@@ -71,12 +86,21 @@ describe('Lark Cordis service', () => {
     })
     const service = new LarkChannelService(ctx, {
       enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET',
-    }, { env: { LARK_APP_SECRET: 'super-secret-value' }, createTransport })
+    }, {
+      env: { LARK_APP_SECRET: 'super-secret-value' }, createTransport,
+      writeLifecycleMarker: marker => { markers.push(marker) },
+    })
     await service.whenReady()
     expect(registerAdapter).toHaveBeenCalledOnce()
     expect(service.health()).toMatchObject({ state: 'connected', gapGeneration: 0 })
+    expect(markers).toEqual(['lark-channel: connected'])
+    expect(markers.join(' ')).not.toContain('super-secret-value')
     expect(JSON.stringify(service.health())).not.toContain('super-secret')
     await ctx.fiber.restart()
+    expect(markers).toEqual([
+      'lark-channel: connected',
+      'lark-channel: disconnected',
+    ])
     expect(unregister).toHaveBeenCalledOnce()
   })
 
@@ -135,6 +159,30 @@ describe('Lark Cordis service', () => {
     expect(() => new LarkChannelService(empty, config, {
       env: { LARK_APP_SECRET: '   ' }, createTransport: () => transport(),
     })).toThrow(/LARK_APP_SECRET/)
+  })
+
+  test('does not emit the connected marker when transport connection fails', async () => {
+    const ctx = new Context()
+    const markers: string[] = []
+    ctx.provide('assistantDelivery', {
+      registerAdapter: async (adapter: DeliveryAdapter) => {
+        await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+        return async () => {}
+      },
+    })
+    const channel = transport()
+    channel.connect = vi.fn(async () => { throw new Error('secret-provider-detail') })
+    const service = new LarkChannelService(ctx, {
+      enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET',
+    }, {
+      env: { LARK_APP_SECRET: 'secret-value-must-not-leak' }, createTransport: () => channel,
+      writeLifecycleMarker: marker => { markers.push(marker) },
+    })
+    await expect(service.whenReady()).rejects.toThrow(/secret-provider-detail/u)
+    expect(markers).toEqual([])
+    expect(markers.join(' ')).not.toContain('secret-value-must-not-leak')
+    await ctx.fiber.restart()
   })
 
   test('treats a stopped delivery registry as benign teardown instead of a fatal cause', async () => {

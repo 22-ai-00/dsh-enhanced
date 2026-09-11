@@ -8,8 +8,13 @@ import { dirname, isAbsolute, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { OwnerRouteAuthority } from '@dsh-enhanced/assistant-delivery'
 import type {
+  AutomationOperatorRecord,
+  AutomationsOperatorSnapshot,
+} from '@dsh-enhanced/assistant-automations'
+import type {
   RecoveryBootstrapAttestation,
   RecoveryHealth,
+  RecoveryOperatorSnapshot,
 } from '@dsh-enhanced/assistant-recovery'
 import { isMap, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 import { installDshResidentService, residentServiceKind, type InstalledResidentService } from './resident.js'
@@ -325,6 +330,509 @@ export async function restartAndVerifySupervisedGrowthResident(input: {
 interface AutomationSnapshot extends AutomationGuardRecord {
   owner?: string
   definition?: unknown
+}
+
+export const SUPERVISED_GROWTH_LIFECYCLE_ATTESTATION_PROTOCOL
+  = 'dsh-enhanced/supervised-growth-lifecycle-attestation/v1' as const
+export const SUPERVISED_GROWTH_MANAGED_AUTOMATION_PROJECTION_PROTOCOL
+  = 'dsh-enhanced/supervised-growth-managed-automations/v1' as const
+
+export interface SupervisedGrowthManagedAutomationProjectionRecord {
+  readonly id: string
+  readonly owner: string
+  readonly status: 'active' | 'paused'
+  readonly definitionHash: string
+}
+
+export interface SupervisedGrowthManagedAutomationProjection {
+  readonly protocol: typeof SUPERVISED_GROWTH_MANAGED_AUTOMATION_PROJECTION_PROTOCOL
+  readonly records: readonly SupervisedGrowthManagedAutomationProjectionRecord[]
+  readonly digest: string
+}
+
+export interface SupervisedGrowthLifecycleAttestation {
+  readonly protocol: typeof SUPERVISED_GROWTH_LIFECYCLE_ATTESTATION_PROTOCOL
+  readonly schemaVersion: 1
+  readonly profile: string
+  readonly stage: SupervisedGrowthActivationState
+  readonly externalProviderExemptions: readonly string[]
+  /** SHA-256 over the exact final composed DSH config supplied to this gate. */
+  readonly effectiveConfigDigest: string
+  readonly recovery: Readonly<{
+    schemaVersion: number
+    database: RecoveryOperatorSnapshot['database']
+    snapshotDigest: string
+    bootstrapGeneration: number
+    bootstrapAttestationSetDigest: string
+    bootstrapAttestations: readonly RecoveryBootstrapAttestation[]
+    activationNonceDigest: string
+    catalogDigest: string
+  }>
+  readonly automations: Readonly<{
+    schemaVersion: number
+    database: AutomationsOperatorSnapshot['database']
+    sidecars: AutomationsOperatorSnapshot['sidecars']
+    inventoryDigest: string
+    snapshotDigest: string
+    inFlightCount: 0
+    /** Complete content-free inventory, not only active or managed rows. */
+    records: readonly AutomationOperatorRecord[]
+  }>
+  /** Local consistency digest. This is not proof against the same UID or root. */
+  readonly attestationDigest: string
+}
+
+export interface SupervisedGrowthLifecycleAttestationInput {
+  profile: string
+  stage: SupervisedGrowthActivationState
+  externalProviderExemptions: readonly string[]
+  effectiveConfig: string
+  recoveryDatabasePath: string
+  automationsDatabasePath: string
+}
+
+export interface SupervisedGrowthLifecycleAttestationDependencies {
+  inspectRecovery?: (databasePath: string) => RecoveryOperatorSnapshot | Promise<RecoveryOperatorSnapshot>
+  inspectAutomations?: (databasePath: string) => AutomationsOperatorSnapshot | Promise<AutomationsOperatorSnapshot>
+  expectedBootstrap?: (
+    effectiveConfig: string,
+    recoveryDatabasePath: string,
+  ) => Promise<SupervisedGrowthRecoveryBootstrapExpectation>
+  expectedAnalystDefinition?: (effectiveConfig: string) => Promise<unknown>
+  definitionDigest?: (definition: unknown) => string
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`
+}
+
+function digestJson(value: unknown): string {
+  return createHash('sha256').update(canonicalJson(value)).digest('hex')
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child)
+    Object.freeze(value)
+  }
+  return value
+}
+
+function sortedAutomationRecords(
+  records: readonly AutomationOperatorRecord[],
+): readonly AutomationOperatorRecord[] {
+  return Object.freeze([...records].sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+}
+
+function effectivePluginConfig(effectiveConfig: string, id: string): YAMLMap {
+  const document = parseDocument(effectiveConfig, { uniqueKeys: true })
+  if (document.errors.length > 0 || !isSeq(document.contents)) {
+    throw new Error('supervised-growth lifecycle: effective profile is invalid')
+  }
+  const rows = document.contents.items.filter(item => isMap(item)
+    && (item.get('id') as unknown) === id) as YAMLMap[]
+  if (rows.length !== 1 || rows[0]!.get('disabled') === true) {
+    throw new Error(`supervised-growth lifecycle: ${id} must be uniquely enabled`)
+  }
+  const config = rows[0]!.get('config', true) as Node | undefined
+  if (!isMap(config)) throw new Error(`supervised-growth lifecycle: ${id} config is invalid`)
+  return config
+}
+
+function assertLifecycleProviderContract(input: SupervisedGrowthLifecycleAttestationInput): readonly string[] {
+  const expected = input.stage === 'preview' ? ['larkChannel'] : []
+  if (!Array.isArray(input.externalProviderExemptions)
+    || !isDeepStrictEqual(input.externalProviderExemptions, expected)) {
+    throw new Error(`supervised-growth lifecycle: ${input.stage} external provider exemptions are invalid`)
+  }
+  const lark = effectivePluginConfig(input.effectiveConfig, 'dsh-enhanced-lark-channel')
+  const health = effectivePluginConfig(input.effectiveConfig, 'dsh-enhanced-assistant-health')
+  const providers = health.get('requiredProviders', true) as Node | undefined
+  const requiredProviders = isSeq(providers) ? providers.toJSON() as unknown[] : undefined
+  if (input.stage === 'preview') {
+    if (lark.get('enabled') !== false) {
+      throw new Error('supervised-growth lifecycle: preview Lark channel must be disabled')
+    }
+    if (requiredProviders === undefined || requiredProviders.includes('larkChannel')) {
+      throw new Error('supervised-growth lifecycle: preview Health must exempt larkChannel')
+    }
+  } else {
+    if (lark.get('enabled') !== true) {
+      throw new Error('supervised-growth lifecycle: active Lark channel must be enabled')
+    }
+    if (requiredProviders === undefined || !requiredProviders.includes('larkChannel')) {
+      throw new Error('supervised-growth lifecycle: active Health must require larkChannel')
+    }
+  }
+  return Object.freeze([...expected])
+}
+
+function sameRecoveryObservation(left: RecoveryOperatorSnapshot, right: RecoveryOperatorSnapshot): boolean {
+  return left.snapshotDigest === right.snapshotDigest
+    && left.database.device === right.database.device
+    && left.database.inode === right.database.inode
+    && left.database.digest === right.database.digest
+}
+
+function sameAutomationObservation(
+  left: AutomationsOperatorSnapshot,
+  right: AutomationsOperatorSnapshot,
+): boolean {
+  return left.inventoryDigest === right.inventoryDigest
+    && left.database.device === right.database.device
+    && left.database.inode === right.database.inode
+    && left.database.digest === right.database.digest
+    && isDeepStrictEqual(left.sidecars, right.sidecars)
+    && left.inFlightCount === right.inFlightCount
+    && isDeepStrictEqual(left.records, right.records)
+}
+
+function recoveryJobIdentity(effectiveConfig: string): {
+  activationState: SupervisedGrowthActivationState
+  activationNonce: string
+  catalogDigest: string
+} {
+  const config = supervisedGrowthRecoveryRuntimeConfig(effectiveConfig)
+  const jobs = config['jobs']
+  if (!Array.isArray(jobs)) throw new Error('supervised-growth lifecycle: Recovery jobs are invalid')
+  const matches = jobs.filter((job): job is Record<string, unknown> => typeof job === 'object'
+    && job !== null && !Array.isArray(job) && job['id'] === 'supervised-growth')
+  if (matches.length !== 1) {
+    throw new Error('supervised-growth lifecycle: exact Recovery job is missing or duplicated')
+  }
+  const job = matches[0]!
+  if ((job['activationState'] !== 'preview' && job['activationState'] !== 'active')
+    || typeof job['activationNonce'] !== 'string' || job['activationNonce'].trim() === ''
+    || !/^[a-f\d]{64}$/u.test(String(job['catalogDigest']))) {
+    throw new Error('supervised-growth lifecycle: Recovery activation identity is invalid')
+  }
+  return {
+    activationState: job['activationState'],
+    activationNonce: job['activationNonce'],
+    catalogDigest: String(job['catalogDigest']),
+  }
+}
+
+function configuredRecoveryIdentities(effectiveConfig: string): ReadonlyMap<string, Readonly<{
+  activationState: 'active' | 'paused' | 'preview'
+  activationNonce: string
+}>> {
+  const jobs = supervisedGrowthRecoveryRuntimeConfig(effectiveConfig)['jobs']
+  if (!Array.isArray(jobs) || jobs.length > 100) {
+    throw new Error('supervised-growth lifecycle: Recovery jobs are invalid')
+  }
+  const result = new Map<string, Readonly<{
+    activationState: 'active' | 'paused' | 'preview'
+    activationNonce: string
+  }>>()
+  for (const [index, raw] of jobs.entries()) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      throw new Error(`supervised-growth lifecycle: Recovery job ${index} is invalid`)
+    }
+    const job = raw as Record<string, unknown>
+    const id = job['id']
+    const activationState = job['activationState'] ?? 'paused'
+    const activationNonce = job['activationNonce']
+    if (typeof id !== 'string' || id.trim() === ''
+      || (activationState !== 'active' && activationState !== 'paused' && activationState !== 'preview')
+      || typeof activationNonce !== 'string' || activationNonce.trim() === '') {
+      throw new Error(`supervised-growth lifecycle: Recovery job ${index} identity is invalid`)
+    }
+    const automationId = `recovery:${id.normalize('NFC').trim()}`
+    if (result.has(automationId)) {
+      throw new Error('supervised-growth lifecycle: Recovery automation ids are duplicated')
+    }
+    result.set(automationId, Object.freeze({
+      activationState, activationNonce: activationNonce.normalize('NFC').trim(),
+    }))
+  }
+  return result
+}
+
+async function lifecycleDependencies(
+  dependencies: SupervisedGrowthLifecycleAttestationDependencies,
+): Promise<Required<SupervisedGrowthLifecycleAttestationDependencies>> {
+  const [automations, recovery] = await Promise.all([
+    import('@dsh-enhanced/assistant-automations'),
+    import('@dsh-enhanced/assistant-recovery'),
+  ])
+  return {
+    inspectRecovery: dependencies.inspectRecovery ?? recovery.inspectRecoveryOperatorSnapshot,
+    inspectAutomations: dependencies.inspectAutomations ?? automations.inspectAutomationsOperatorSnapshot,
+    expectedBootstrap: dependencies.expectedBootstrap ?? expectedSupervisedGrowthRecoveryBootstrap,
+    expectedAnalystDefinition: dependencies.expectedAnalystDefinition
+      ?? expectedSupervisedGrowthAnalystDefinition,
+    definitionDigest: dependencies.definitionDigest ?? automations.automationDefinitionDigest,
+  }
+}
+
+async function expectedManagedAutomationRecords(input: {
+  stage: SupervisedGrowthActivationState
+  effectiveConfig: string
+  recoveryDatabasePath: string
+}, dependencies: Required<SupervisedGrowthLifecycleAttestationDependencies>): Promise<ReadonlyMap<string, Readonly<{
+  owner: string
+  status: 'active' | 'paused'
+  definitionHash: string
+  runbookId?: string
+  runbookVersion?: number
+}>>> {
+  const recovery = await import('@dsh-enhanced/assistant-recovery')
+  const normalized = recovery.normalizeRecoveryConfig({
+    ...supervisedGrowthRecoveryRuntimeConfig(input.effectiveConfig),
+    databasePath: input.recoveryDatabasePath,
+  } as never)
+  const supervisedJob = normalized.jobs.find(candidate => candidate.id === 'supervised-growth')
+  if (supervisedJob === undefined || supervisedJob.activationState !== input.stage) {
+    throw new Error('supervised-growth lifecycle: effective Recovery stage does not match the requested target')
+  }
+  const analystDefinition = await dependencies.expectedAnalystDefinition(input.effectiveConfig)
+  type ExpectedRecord = Readonly<{
+    owner: string
+    status: 'active' | 'paused'
+    definitionHash: string
+    runbookId?: string
+    runbookVersion?: number
+  }>
+  const records: Array<readonly [string, ExpectedRecord]> = normalized.jobs.map(job => [`recovery:${job.id}`, Object.freeze({
+      owner: 'dsh-enhanced-assistant-recovery',
+      status: job.activationState === 'active' ? 'active' as const : 'paused' as const,
+      definitionHash: dependencies.definitionDigest(recovery.recoveryAutomationDefinition(
+        job, normalized.maxStepDurationMs, job.activationState === 'preview' ? 'preview' : 'production',
+      )),
+    })] as const)
+  records.push(
+    ['heartbeat:supervised-growth-analyst', Object.freeze({
+      owner: 'assistant-heartbeat',
+      status: input.stage === 'active' ? 'active' : 'paused',
+      definitionHash: dependencies.definitionDigest(analystDefinition),
+    })],
+  )
+  return new Map<string, ExpectedRecord>(records)
+}
+
+/** Build the exact content-free managed projection before a Host is started. */
+export async function expectedSupervisedGrowthManagedAutomationDigest(input: {
+  stage: SupervisedGrowthActivationState
+  effectiveConfig: string
+  recoveryDatabasePath: string
+}, supplied: Pick<
+SupervisedGrowthLifecycleAttestationDependencies, 'definitionDigest' | 'expectedAnalystDefinition'
+> = {}): Promise<SupervisedGrowthManagedAutomationProjection> {
+  const dependencies = await lifecycleDependencies(supplied)
+  const expected = await expectedManagedAutomationRecords(input, dependencies)
+  const records = Object.freeze([...expected.entries()].map(([id, record]) => Object.freeze({
+    id, owner: record.owner, status: record.status, definitionHash: record.definitionHash,
+  })).sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+  const unsigned = Object.freeze({
+    protocol: SUPERVISED_GROWTH_MANAGED_AUTOMATION_PROJECTION_PROTOCOL,
+    records,
+  })
+  return deepFreeze({ ...unsigned, digest: digestJson(unsigned) })
+}
+
+function assertManagedAutomationInventory(input: {
+  stage: SupervisedGrowthActivationState
+  snapshot: AutomationsOperatorSnapshot
+  expected: ReadonlyMap<string, Readonly<{
+    owner: string
+    status: 'active' | 'paused'
+    definitionHash: string
+    runbookId?: string
+    runbookVersion?: number
+  }>>
+}): void {
+  if (input.snapshot.inFlightCount !== 0
+    || input.snapshot.records.some(record => record.runningTaskCount !== 0)) {
+    throw new Error('supervised-growth lifecycle: Automations has in-flight work')
+  }
+  const records = new Map(input.snapshot.records.map(record => [record.id, record]))
+  for (const [id, expected] of input.expected) {
+    const actual = records.get(id)
+    if (actual === undefined || actual.owner !== expected.owner || actual.status !== expected.status
+      || actual.definitionHash !== expected.definitionHash) {
+      throw new Error(`supervised-growth lifecycle: managed automation ${id} does not match the exact ${input.stage} definition`)
+    }
+  }
+  const legacy = records.get('heartbeat:supervised-growth')
+  if (legacy?.status === 'active') {
+    throw new Error('supervised-growth lifecycle: legacy supervised-growth automation is active')
+  }
+  for (const record of input.snapshot.records) {
+    if (record.status !== 'active' || record.owner !== 'dsh-enhanced-assistant-recovery') continue
+    if (!input.expected.has(record.id)) {
+      throw new Error(`supervised-growth lifecycle: unexpected active managed automation ${record.id}`)
+    }
+  }
+}
+
+function assertRecoverySnapshot(input: {
+  stage: SupervisedGrowthActivationState
+  effectiveConfig: string
+  snapshot: RecoveryOperatorSnapshot
+  expected: SupervisedGrowthRecoveryBootstrapExpectation
+  previousGeneration?: number
+}): void {
+  const bootstrap = input.snapshot.bootstrap
+  if (input.previousGeneration !== undefined
+    && bootstrap.generation <= input.previousGeneration) {
+    throw new Error('supervised-growth lifecycle: Recovery bootstrap generation did not strictly advance')
+  }
+  if (bootstrap.status !== 'succeeded' || !bootstrap.attestationValid
+    || bootstrap.attestationSetDigest !== input.expected.attestationSetDigest
+    || !isDeepStrictEqual(bootstrap.attestations, input.expected.attestations)) {
+    throw new Error(`supervised-growth lifecycle: Recovery ${input.stage} proof does not match the exact effective plan`)
+  }
+  const configured = configuredRecoveryIdentities(input.effectiveConfig)
+  if (bootstrap.attestations.length !== configured.size) {
+    throw new Error('supervised-growth lifecycle: Recovery attestation set is incomplete')
+  }
+  for (const attestation of bootstrap.attestations) {
+    const job = configured.get(attestation.automationId)
+    if (job === undefined || job.activationState !== attestation.activationState
+      || job.activationNonce !== attestation.activationNonce) {
+      throw new Error('supervised-growth lifecycle: Recovery attestation identity does not match effective config')
+    }
+  }
+}
+
+async function observeLifecycle(input: SupervisedGrowthLifecycleAttestationInput, dependencies: Required<
+SupervisedGrowthLifecycleAttestationDependencies
+>): Promise<{
+  recovery: RecoveryOperatorSnapshot
+  automations: AutomationsOperatorSnapshot
+  expectedBootstrap: SupervisedGrowthRecoveryBootstrapExpectation
+  expectedManaged: Awaited<ReturnType<typeof expectedManagedAutomationRecords>>
+}> {
+  const expectedBootstrap = await dependencies.expectedBootstrap(
+    input.effectiveConfig, input.recoveryDatabasePath,
+  )
+  const expectedManaged = await expectedManagedAutomationRecords(input, dependencies)
+  const [recovery, automations] = await Promise.all([
+    dependencies.inspectRecovery(input.recoveryDatabasePath),
+    dependencies.inspectAutomations(input.automationsDatabasePath),
+  ])
+  return { recovery, automations, expectedBootstrap, expectedManaged }
+}
+
+function createLifecycleAttestation(input: SupervisedGrowthLifecycleAttestationInput, observed: Awaited<
+ReturnType<typeof observeLifecycle>
+>): SupervisedGrowthLifecycleAttestation {
+  const identity = recoveryJobIdentity(input.effectiveConfig)
+  const externalProviderExemptions = assertLifecycleProviderContract(input)
+  const recoveryAttestation = observed.expectedBootstrap.attestations.find(
+    value => value.automationId === 'recovery:supervised-growth',
+  )
+  if (recoveryAttestation === undefined || recoveryAttestation.activationState !== input.stage) {
+    throw new Error('supervised-growth lifecycle: supervised Recovery attestation is missing')
+  }
+  const recoveryDefinition = observed.expectedManaged.get('recovery:supervised-growth')
+  if (recoveryDefinition === undefined) throw new Error('supervised-growth lifecycle: Recovery definition is missing')
+  // The content-free contract carries the runbook identity through the
+  // definition digest, while explicit catalog/nonce digests make upgrade
+  // policy checks possible without persisting either secret-free raw value.
+  const unsigned = deepFreeze({
+    protocol: SUPERVISED_GROWTH_LIFECYCLE_ATTESTATION_PROTOCOL,
+    schemaVersion: 1 as const,
+    profile: input.profile.normalize('NFC').trim(),
+    stage: input.stage,
+    externalProviderExemptions,
+    effectiveConfigDigest: createHash('sha256').update(input.effectiveConfig).digest('hex'),
+    recovery: deepFreeze({
+      schemaVersion: observed.recovery.schemaVersion,
+      database: observed.recovery.database,
+      snapshotDigest: observed.recovery.snapshotDigest,
+      bootstrapGeneration: observed.recovery.bootstrap.generation,
+      bootstrapAttestationSetDigest: observed.recovery.bootstrap.attestationSetDigest,
+      bootstrapAttestations: observed.recovery.bootstrap.attestations,
+      activationNonceDigest: createHash('sha256').update(identity.activationNonce).digest('hex'),
+      catalogDigest: identity.catalogDigest,
+    }),
+    automations: deepFreeze({
+      schemaVersion: observed.automations.schemaVersion,
+      database: observed.automations.database,
+      sidecars: observed.automations.sidecars,
+      inventoryDigest: observed.automations.inventoryDigest,
+      snapshotDigest: digestJson(observed.automations),
+      inFlightCount: 0 as const,
+      records: sortedAutomationRecords(observed.automations.records),
+    }),
+  })
+  return deepFreeze({ ...unsigned, attestationDigest: digestJson(unsigned) })
+}
+
+export function supervisedGrowthLifecycleAttestationDigest(
+  value: Omit<SupervisedGrowthLifecycleAttestation, 'attestationDigest'>,
+): string {
+  return digestJson(value)
+}
+
+/**
+ * Capture one stable, content-free supervised lifecycle baseline. This function
+ * does not lock, stop, restart, patch, migrate, or otherwise mutate a service.
+ */
+export async function captureSupervisedGrowthLifecycleAttestation(
+  input: SupervisedGrowthLifecycleAttestationInput,
+  supplied: SupervisedGrowthLifecycleAttestationDependencies = {},
+): Promise<SupervisedGrowthLifecycleAttestation> {
+  if (!keyPattern.test(input.profile)) throw new Error('supervised-growth lifecycle: invalid profile')
+  assertLifecycleProviderContract(input)
+  const dependencies = await lifecycleDependencies(supplied)
+  const first = await observeLifecycle(input, dependencies)
+  assertRecoverySnapshot({
+    stage: input.stage, effectiveConfig: input.effectiveConfig,
+    snapshot: first.recovery, expected: first.expectedBootstrap,
+  })
+  assertManagedAutomationInventory({ stage: input.stage, snapshot: first.automations, expected: first.expectedManaged })
+  const second = await observeLifecycle(input, dependencies)
+  if (!sameRecoveryObservation(first.recovery, second.recovery)
+    || !sameAutomationObservation(first.automations, second.automations)
+    || !isDeepStrictEqual(first.expectedBootstrap, second.expectedBootstrap)
+    || !isDeepStrictEqual([...first.expectedManaged], [...second.expectedManaged])) {
+    throw new Error('supervised-growth lifecycle: operator state changed while capturing the baseline')
+  }
+  assertRecoverySnapshot({
+    stage: input.stage, effectiveConfig: input.effectiveConfig,
+    snapshot: second.recovery, expected: second.expectedBootstrap,
+  })
+  assertManagedAutomationInventory({ stage: input.stage, snapshot: second.automations, expected: second.expectedManaged })
+  return createLifecycleAttestation(input, second)
+}
+
+/**
+ * Verify a stable successor against a prior accepted lifecycle proof. The new
+ * Recovery generation must be strictly newer; a changed runbook/catalog must
+ * also carry a fresh activation nonce so old preview authority cannot be reused.
+ */
+export async function verifySupervisedGrowthLifecycleSuccessor(input: {
+  baseline: SupervisedGrowthLifecycleAttestation
+  target: SupervisedGrowthLifecycleAttestationInput
+}, supplied: SupervisedGrowthLifecycleAttestationDependencies = {}): Promise<SupervisedGrowthLifecycleAttestation> {
+  const { attestationDigest, ...unsignedBaseline } = input.baseline
+  if (input.baseline.protocol !== SUPERVISED_GROWTH_LIFECYCLE_ATTESTATION_PROTOCOL
+    || input.baseline.schemaVersion !== 1
+    || attestationDigest !== supervisedGrowthLifecycleAttestationDigest(unsignedBaseline)
+    || input.target.profile !== input.baseline.profile) {
+    throw new Error('supervised-growth lifecycle: baseline contract is invalid')
+  }
+  const successor = await captureSupervisedGrowthLifecycleAttestation(input.target, supplied)
+  if (successor.recovery.bootstrapGeneration <= input.baseline.recovery.bootstrapGeneration) {
+    throw new Error('supervised-growth lifecycle: Recovery successor generation did not strictly advance')
+  }
+  // Preview and active intentionally share one nonce even though their exact
+  // Automation definitions differ (preview is paused and uses a one-shot
+  // schedule; active is scheduled). The catalog digest is the stable identity
+  // of the compiled Recovery runbook, so only a catalog change requires a new
+  // nonce across lifecycle generations.
+  const runbookChanged = successor.recovery.catalogDigest !== input.baseline.recovery.catalogDigest
+  if (runbookChanged
+    && successor.recovery.activationNonceDigest === input.baseline.recovery.activationNonceDigest) {
+    throw new Error('supervised-growth lifecycle: changed Recovery runbook reused the old activation nonce')
+  }
+  return successor
 }
 
 export interface SupervisedGrowthRecoveryBootstrapExpectation {

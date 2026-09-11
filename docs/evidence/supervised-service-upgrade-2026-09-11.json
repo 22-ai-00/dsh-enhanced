@@ -1,0 +1,344 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-11",
+  "recordedAt": "2026-09-11T18:57:58Z",
+  "baseCommit": "45919be3539b93755ed7398819ae873cf0e070ba",
+  "status": "validated-engineering-boundary",
+  "completeWorkPackage": false,
+  "workingTreeState": {
+    "state": "final-source-hashes-recorded-after-persistent-root-gate",
+    "sourceHashesAreProvisional": false,
+    "mustRehashAfterPersistentRootGate": false,
+    "unrelatedDirtyWorkExcluded": [
+      "docs/evidence/sqlite-inode-binding-2026-09-11.json",
+      "plugins/assistant-automations/tests/operator.spec.ts",
+      "plugins/assistant-delivery/tests/operator-snapshot.spec.ts"
+    ]
+  },
+  "scope": [
+    "WP17 checkout-local service-aware upgrade for an existing supervised profile on Linux systemd --user",
+    "Manifest-v3 binding of source state, preview plan, active plan, exact systemd serviceAcceptance and crash recovery",
+    "Read-only Delivery, Recovery and Automations operator attestations across preview and active generations",
+    "Exact process-local preview exemption for larkChannel and real-Lark-required active acceptance"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2,
+    "wp17": "implementing"
+  },
+  "supportedBoundary": {
+    "platform": "Linux",
+    "serviceManager": "systemd --user",
+    "operation": "upgrade",
+    "scenario": "supervised",
+    "source": "checkout-local or sibling lifecycle helper",
+    "sourceProfile": "an active installer-managed supervised profile whose installed cohort exposes every required read-only operator and lifecycle-attestation seam",
+    "packageScope": "only already-installed @dsh-enhanced/* top-level dependencies",
+    "operatorResponsibility": "The operator must stop every external or manually started process using DSH_HOME. The installer controls only systemd units whose ownership it can prove.",
+    "supervisedUninstall": "unsupported and fail closed before mutation",
+    "nonLinux": "unsupported and fail closed before mutation",
+    "externalSupervisor": "unsupported",
+    "noService": "unsupported"
+  },
+  "compatibilityContract": {
+    "cordisRuntime": {
+      "@deepseek-ai/cordis": "4.0.2",
+      "@deepseek-ai/cordis-plugin-loader": "1.0.3",
+      "@deepseek-ai/cordis-plugin-include": "1.0.7"
+    },
+    "operatorSnapshotSchemas": {
+      "assistant-delivery/active-lark-owner-bindings-snapshot/v1": 19,
+      "assistant-recovery/operator-snapshot/v1": 4,
+      "assistant-automations-operator-snapshot/v1": 15
+    },
+    "requiredRuntimeSeams": [
+      "lark-channel.captureSupervisedGrowthLifecycleAttestation",
+      "lark-channel.configureSupervisedGrowthProfilePatch",
+      "lark-channel.assertEffectiveSupervisedGrowthConfig",
+      "lark-channel.expectedSupervisedGrowthRecoveryBootstrap",
+      "lark-channel.expectedSupervisedGrowthManagedAutomationDigest",
+      "lark-channel.buildSupervisedGrowthPreviewOverlay",
+      "lark-channel.assertSupervisedGrowthPreviewDerivation",
+      "assistant-delivery.inspectActiveLarkOwnerBindingsLocally",
+      "assistant-recovery.inspectRecoveryOperatorSnapshot",
+      "assistant-recovery.RECOVERY_CATALOG_DIGEST",
+      "assistant-automations.inspectAutomationsOperatorSnapshot",
+      "assistant-automations.automationDefinitionDigest"
+    ],
+    "capabilityProbe": "The source cohort is loaded and checked before registry, Store, systemd or transaction mutation. A peer range alone is not accepted as proof that the required seams exist.",
+    "previewExternalProviderExemptions": [
+      "larkChannel"
+    ],
+    "activeExternalProviderExemptions": [],
+    "journalMarkers": [
+      "lark-channel: connected",
+      "lark-channel: disconnected"
+    ],
+    "releaseCohort": "The supervised packages must come from one compatible release cohort; the installer does not synthesize support from an unverified mixture of package versions."
+  },
+  "implementation": [
+    "Lifecycle and setup entry points serialize on the canonical DSH_HOME rendezvous lock; the lifecycle executor additionally holds the external per-home transaction lock.",
+    "The source supervised cohort is capability-probed through real package loading before any Store, registry, systemd or transaction mutation; there is no fallback that opens a migrating Store.",
+    "The source active state is captured through read-only Delivery owner, Recovery bootstrap and Automations inventory snapshots and bound into manifest version 3.",
+    "Copied state is compared by content and semantic identity rather than inode identity, allowing a legitimate private-copy inode change while rejecting source, owner, definition or inventory drift.",
+    "The preview patch is generated with a fresh UUID and new package catalog. Its runtime overlay is created exclusively inside DSH_HOME and re-derived from the current persisted baseline before attestation.",
+    "Preview composition may make exactly two changes: disable the Lark row and remove larkChannel from Health requiredProviders. Every other row, setting and additional required provider must remain unchanged.",
+    "The preview Host runs in a no-network bubblewrap environment. The larkChannel exemption is process-local, manifest-bound and must not enter persisted active configuration.",
+    "Active preparation removes the preview overlay, restores Lark and required Lark health, retains the lifecycle nonce/catalog contract and requires a strictly newer exact Recovery generation.",
+    "Lark readiness is emitted as exact stdout lifecycle markers for systemd journal capture; a required Lark provider in connecting, reconnecting or disconnected state does not satisfy readiness.",
+    "Post-swap acceptance requires a fresh InvocationID, matching journal readiness, required Lark health, exact active attestation, strictly advancing Recovery generation and a stability window.",
+    "serviceAcceptance must exactly cover the originally active unit set. Duplicate, missing, extra, foreign, inactive-substitute, unsafe numeric or target-InvocationID-mismatching entries fail closed.",
+    "The crash guardian persists same-home dynamic-unit containment intent, disable barriers and bound user.control masks before relaxing lifecycle runtime masks. Unknown or drifting ownership never grants mutation authority.",
+    "Pre-swap failure restores the source home and original active set. Post-swap failure keeps services contained and preserves current home, original home and transaction evidence without automatically rolling migrated state back."
+  ],
+  "claims": {
+    "status": "engineering-validation-with-explicit-production-and-evidence-limits",
+    "supported": [
+      "The checkout contains a bounded Linux systemd --user supervised-upgrade implementation with fail-closed scenario, capability, preview, attestation, service-acceptance and recovery contracts.",
+      "The four reported targeted validation groups passed against the frozen slice.",
+      "One full repository root gate using CI=true VITEST_MAX_WORKERS=1 pnpm check exited zero.",
+      "A second run of the exact root command exited zero with persistent output at /tmp/dsh-wp17-supervised-root-check.log and a recorded SHA-256.",
+      "The preview overlay contract permits only the temporary larkChannel exemption and preserves additional configured Health providers.",
+      "The active acceptance path requires real Lark readiness and a strictly newer exact supervised attestation.",
+      "The released remote bootstrap remains fail closed for lifecycle operations while its helper pins are zero sentinels."
+    ],
+    "limits": [
+      "The four targeted command outputs were not retained. Their counts are reported results without retained logs or log SHA-256 values.",
+      "The first root gate exited zero without a retained final log; the second byte-equivalent command is the persistent final root-gate record.",
+      "No complete real supervised DSH_HOME upgrade transaction was executed in this batch.",
+      "No real Lark WebSocket, cloud credential, cloud application or production message flow was exercised.",
+      "No real systemd stop, mask, home swap, fresh InvocationID, journal marker, restart stability or crash-recovery sequence was observed for this supervised batch.",
+      "The September 9 standard-Lark systemd primitive evidence is not promoted to supervised transaction evidence.",
+      "The slice does not support supervised uninstall, external supervisors, macOS, Windows or --no-service.",
+      "The slice does not complete WP17 or the complete 18-work-package objective.",
+      "The implementation does not protect against a malicious same-UID Host process or root.",
+      "Content and attestation digests are consistency bindings, not signatures or external authenticity anchors."
+    ]
+  },
+  "targetedValidation": [
+    {
+      "id": "installer",
+      "status": "passed-reported-without-persistent-log",
+      "resultSource": "reported terminal summary",
+      "command": null,
+      "exitCode": 0,
+      "testFilesPassed": null,
+      "testFilesSkipped": null,
+      "testsPassed": 252,
+      "testsSkipped": 1,
+      "testsTotal": 253,
+      "durationSeconds": 298.92,
+      "log": null,
+      "logSha256": null,
+      "skipReason": "The conditional pinned lifecycle-helper release-asset comparison is skipped while v0.1.24 intentionally carries zero sentinel lifecycle-helper hashes.",
+      "evidenceStrength": "summary-only"
+    },
+    {
+      "id": "lark-channel",
+      "status": "passed-reported-without-persistent-log",
+      "resultSource": "reported terminal summary",
+      "command": null,
+      "exitCode": 0,
+      "testFilesPassed": 25,
+      "testFilesSkipped": 0,
+      "testsPassed": 441,
+      "testsSkipped": 0,
+      "testsTotal": 441,
+      "durationSeconds": null,
+      "log": null,
+      "logSha256": null,
+      "evidenceStrength": "summary-only"
+    },
+    {
+      "id": "assistant-health",
+      "status": "passed-reported-without-persistent-log",
+      "resultSource": "reported terminal summary",
+      "command": null,
+      "exitCode": 0,
+      "testFilesPassed": 2,
+      "testFilesSkipped": 0,
+      "testsPassed": 49,
+      "testsSkipped": 0,
+      "testsTotal": 49,
+      "durationSeconds": null,
+      "log": null,
+      "logSha256": null,
+      "evidenceStrength": "summary-only"
+    },
+    {
+      "id": "targeted-regression-selection",
+      "status": "passed-reported-without-persistent-log",
+      "resultSource": "reported terminal summary",
+      "command": null,
+      "exitCode": 0,
+      "testFilesPassed": 7,
+      "testFilesSkipped": 0,
+      "testsPassed": 198,
+      "testsSkipped": 0,
+      "testsTotal": 198,
+      "durationSeconds": null,
+      "log": null,
+      "logSha256": null,
+      "evidenceStrength": "summary-only"
+    }
+  ],
+  "engineeringValidation": {
+    "command": "CI=true VITEST_MAX_WORKERS=1 pnpm check",
+    "firstRun": {
+      "status": "passed-reported-without-persistent-log",
+      "exitCode": 0,
+      "log": null,
+      "logSha256": null,
+      "rootTestFilesPassed": 31,
+      "rootTestsPassed": 466,
+      "rootTestsSkipped": 1,
+      "recursivePackageTests": "passed",
+      "build": "passed",
+      "dryRunPacks": 33,
+      "evidenceStrength": "summary-only"
+    },
+    "persistentRerun": {
+      "status": "passed",
+      "exitCode": 0,
+      "startedAt": "2026-09-11T18:43:40Z",
+      "completedAt": "2026-09-11T18:57:58Z",
+      "durationSeconds": 858,
+      "log": "/tmp/dsh-wp17-supervised-root-check.log",
+      "logSha256": "81657efcb8d51f7e624510bcb6eaaadb7c0ef9347b96e0c1fecb216822cd405f",
+      "manifestValidation": "passed",
+      "lint": "passed-zero-warnings",
+      "typecheck": "passed",
+      "rootTestFilesPassed": 31,
+      "rootTestFilesSkipped": 0,
+      "rootTestsPassed": 466,
+      "rootTestsSkipped": 1,
+      "aggregateTestFileSummariesPassed": 351,
+      "aggregateTestFileSummariesSkipped": 12,
+      "aggregateTestsPassed": 4876,
+      "aggregateTestsSkipped": 43,
+      "build": "passed",
+      "dryRunPacks": 33
+    },
+    "acceptanceRule": "Satisfied: the persistent rerun exited zero, its exact counts and log SHA-256 are recorded, and every source hash was recomputed against the unchanged post-gate tree."
+  },
+  "independentReview": {
+    "status": "PASS-WITH-P1-EVIDENCE-LIMITATIONS",
+    "finalOpenFindings": {
+      "BLOCK": 0,
+      "HIGH": 0,
+      "MEDIUM": 0
+    },
+    "closedFindings": [
+      {
+        "severity": "MEDIUM",
+        "area": "serviceAcceptance",
+        "status": "closed",
+        "resolution": "Manifest validation and recovery require exact coverage of the originally active unit set, unique unit identities, non-negative safe integer process/restart fields, and target InvocationID agreement with the post-swap supervised proof."
+      }
+    ],
+    "p1EvidenceLimitations": [
+      {
+        "id": "guardian-completion-token-crash-window",
+        "status": "open-evidence-limitation",
+        "statement": "The exact crash window after durableAccept() has durably returned but before the guardian completion token is successfully sent is not covered."
+      },
+      {
+        "id": "three-database-live-wal-copy-integration",
+        "status": "open-evidence-limitation",
+        "statement": "Recovery, Automations and Delivery live-WAL databases have not been exercised through the real copyHome or cp -a cross-inode lifecycle copy."
+      },
+      {
+        "id": "real-dsh-cordis-preview-precedence",
+        "status": "open-evidence-limitation",
+        "statement": "The preview overlay has not been exercised through final precedence using a real DSH/Cordis --patch --dump-config composition."
+      }
+    ]
+  },
+  "realSystemdValidation": {
+    "status": "not-run-for-this-batch",
+    "priorEvidenceReused": false,
+    "unproven": [
+      "real supervised source-unit ownership census",
+      "real user.control mask and no-replace enablement barrier",
+      "real source-unit stop and DSH_HOME quiescence",
+      "real complete DSH_HOME private copy and atomic swap",
+      "real no-network preview Host startup",
+      "real active service restart",
+      "fresh target InvocationID",
+      "matching target-invocation journal connected marker",
+      "real Lark WebSocket and required-health acceptance",
+      "strictly newer real Recovery bootstrap generation",
+      "real post-swap stability window",
+      "real crash guardian recovery and failure containment"
+    ]
+  },
+  "releaseBoundary": {
+    "currentRelease": "v0.1.24",
+    "state": "zero-sentinel",
+    "currentCommonSha256": "2ef41724f752a9030a158822288d0e3326e7b046102ead5013594679120ba821",
+    "currentLifecycleConfigSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "currentLifecycleProfileSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "remoteInstall": "Ordinary remote install may download, verify and source only the pinned common.sh.",
+    "remoteUpgrade": "Fail closed before downloading or sourcing lifecycle assets.",
+    "remoteUninstall": "Fail closed before downloading or sourcing lifecycle assets.",
+    "publishedSupervisedUpgrade": false,
+    "nextReleaseRequirement": "A future release:prepare must atomically rewrite the release ref and all three real asset digests, followed by tagged-asset and release-record verification. That has not occurred in this batch."
+  },
+  "limitations": [
+    "The four targeted results are retained as reported counts only because their command lines and persistent logs were not preserved.",
+    "The first root gate exited zero without a retained final log; the exact persistent rerun is the final root-gate record.",
+    "No full real-systemd supervised upgrade was executed.",
+    "No real Lark cloud or credential path was exercised.",
+    "No supervised uninstall or non-Linux lifecycle is supported.",
+    "Remote lifecycle remains unpublished and zero-sentinel fail closed.",
+    "The exact durableAccept-to-guardian-completion-token crash window remains an evidence limitation.",
+    "The three live-WAL databases have not been exercised through the real cross-inode lifecycle copy.",
+    "Real DSH/Cordis preview overlay precedence has not been exercised.",
+    "WP17 remains implementing and the complete 18-work-package objective remains incomplete."
+  ],
+  "sourceHashSnapshot": {
+    "algorithm": "sha256",
+    "capturedAt": "2026-09-11T18:58:19Z",
+    "state": "final-after-persistent-root-gate",
+    "validWhile": "Every listed file remains byte-identical."
+  },
+  "sourceHashes": {
+    "package.json": "c0bf6be48c029925d27a461c75510d47c708fc916f40f7426b2e815baaf0c635",
+    "pnpm-workspace.yaml": "b642cdd524bdb96d538d081d485a4146bf57104cf85336e1d5663c058fc7c44e",
+    "pnpm-lock.yaml": "59365b26526ff71e22dbd5bf891318d5b92c5b4eb4772301b678ce1d23a50192",
+    "plugins/assistant-health/src/service.ts": "f18389ec5711927806551cc423187b5c79d27d2a5d9f30609a914baf3e7000fa",
+    "plugins/assistant-health/tests/service.spec.ts": "6b239637f1b8b8ed0018003964920aaed2acfaa72eb647573cf64b054a5d8f1f",
+    "plugins/assistant-delivery/src/index.ts": "65e9cba29cff8aaae8bba75323af032be178d2e0e7fd77b6b7658ca5e2458dbc",
+    "plugins/assistant-delivery/src/operator-snapshot.ts": "07a12cdde0efae2c16c9929bb01f7f92060de1b1cbddef6306bcfc9cd3df2949",
+    "plugins/assistant-automations/src/index.ts": "71f61d70cf5fc60e03eb46ae667123c98a33cbbe68c1eadb1f6958ba6a66df5b",
+    "plugins/assistant-automations/src/operator.ts": "d0d0262fe7e083ebb88658ccba82ff98f0ac42f46b02d51b19eebe0f668815e3",
+    "plugins/assistant-recovery/src/index.ts": "6489ad92e69b068f7cd101910f021c70eca5fb17d8dcfed5cc8d0e3485f53657",
+    "plugins/assistant-recovery/src/operator.ts": "500c93ae942932436f6e385d2c4bde70a89281a42e7a608541120f1618979a03",
+    "plugins/assistant-recovery/src/catalog.ts": "711b41d78423b5032fdb6dbff355386a4581806fef70ab7cd3f8849ddcb5263f",
+    "plugins/lark-channel/package.json": "aeae7aa22c8f1a953cc6295bfd16b39131597fedd6fd9806bab8df8611b873b9",
+    "plugins/lark-channel/src/adapter.ts": "a88875a6947e90cd082b201280aa678ce7d58cf0748003dcf0558c6804bc99ad",
+    "plugins/lark-channel/src/index.ts": "226f2514cb71a3472205dce1dd6baf3364e6c67faf6cf1561aadd9d3fb844a71",
+    "plugins/lark-channel/src/service.ts": "9003e6f58ef3ef11ea1bb1260b503ea1dc4843d584bcc0ff483e82ef285427b9",
+    "plugins/lark-channel/src/supervised-growth-profile.ts": "1ff2f166671ce2915be0a33344c3252904fdc9d33569bbe8f4d05f25d0511a92",
+    "plugins/lark-channel/src/supervised-growth-setup.ts": "41c51adc5db78a39f20094d823360207cf966507523958e11f7b8c048498e524",
+    "plugins/lark-channel/tests/adapter.spec.ts": "712c97322bfc3f4fef2761bc23593ba624f15507e59703c950132bfdf667423c",
+    "plugins/lark-channel/tests/service.spec.ts": "e93d5b3ed6933b060c5f434172d71a0720eec77057bfc248cbccaecda17d65cd",
+    "plugins/lark-channel/tests/supervised-growth-profile.spec.ts": "d74f1cf9c888e5b72deb2cb291cff590c20ea49717f6967df8a33804bdb96fe9",
+    "plugins/lark-channel/tests/supervised-growth-setup.spec.ts": "9438be6411011077879fcf0c5d05b418d8ff54a268cea9ce5ba98f63dc6353ae",
+    "plugins/lark-channel/tests/supervised-growth-lifecycle.spec.ts": "df32f0b8b6fa92915fad9cb18f6ecb7111e6ecd3e3cecc5c65306ca0e15b4784",
+    "scripts/install/README.md": "ac9289f4ce800dacae1bef54bd92d06ad8e1a19fadf70a022b75a5c960a1907a",
+    "scripts/install/common.sh": "572f1cf482ae4eaf587172b34b0f15d99110879a361bc9c67e72defab2c278ea",
+    "scripts/install/install-local.sh": "78811eb43a212b440ef6c9b98d45bf4d4d2a0e20f5cbbecc6bd6d93dc68287e4",
+    "scripts/install/install-npm.sh": "317ac6fa52fe0621df53ce8849cd4e571a2abe9b5fd164f79b083a0c528778da",
+    "scripts/install/lifecycle-config.mjs": "5d059f83b846b6efb51cb9e0eebc4f8aba414c792468243b7bfd2295b78df31b",
+    "scripts/install/lifecycle-profile.mjs": "62d3377e248e700df7cd978ebccfa1b734a37558775a7bc33d99f46de231b009",
+    "scripts/release-version.mjs": "93bf77321a8cef7ec34033d5d46e2bfa3c07ec3f2fb65464f71245117bf07c6d",
+    "tests/installers.spec.ts": "ec9cb977349cff97aa0e310551eec24ea596696ae8d50f3343cbcbd2394b76f0",
+    "tests/supervised-operator-program.spec.ts": "bd57ee6348b0fdc7a2ea5dd58a131bf7df2fc3aca9e6603c2444e5ab9d877264",
+    "tests/release-version.spec.ts": "8b07b44d7f3b1de918cfc03a0bf8ae49321cf9b46d479ae2d98f961a1b78d003",
+    "release-manifest.json": "a208b769f4861c8987ecfd77dc04351caccad333c06f6aea21548c59bf779f6c",
+    "docs/compatibility.md": "7aa48722b67f1872b2c7c4185996ead7d09273056beaf056dfd2209a5839f43b",
+    "docs/agent-autonomy-implementation.md": "33be19b930a6c25c987c34e83567519d2b4e24c4c2c0db8ca518dbd73e40361a"
+  }
+}

@@ -2511,24 +2511,20 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前需要显式 --scenario。'
       return $?
     fi
-    if [[ "$scenario" == 'supervised' ]]; then
-      dsh_enhanced_fail 2 "supervised $operation 尚缺少只读 generation/attestation 验证接口；本切片拒绝执行。"
-      return $?
-    fi
     if [[ "$operation" == 'uninstall' && "$scenario" == 'supervised' ]]; then
       dsh_enhanced_fail 2 'supervised service-aware uninstall 尚未开放；拒绝停止或修改服务。'
       return $?
     fi
-    if [[ "$scenario" != 'web' && "$scenario" != 'autonomy' && "$scenario" != 'lark' ]]; then
-      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前只支持显式 --scenario web、autonomy 或 lark。'
+    if [[ "$scenario" != 'web' && "$scenario" != 'autonomy' && "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
+      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前只支持显式 --scenario web、autonomy、lark，或 upgrade supervised。'
       return $?
     fi
-    if [[ "$scenario" == 'lark' && "$manage_service" != '1' ]]; then
-      dsh_enhanced_fail 2 'Lark upgrade/uninstall 必须由 systemd user service-aware 生命周期执行；不能使用 --no-service。'
+    if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$manage_service" != '1' ]]; then
+      dsh_enhanced_fail 2 'Lark/supervised upgrade/uninstall 必须由 systemd user service-aware 生命周期执行；不能使用 --no-service。'
       return $?
     fi
-    if [[ "$scenario" == 'lark' && "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" != 'Linux' ]]; then
-      dsh_enhanced_fail 2 'Lark service-aware upgrade/uninstall 当前仅支持 Linux systemd --user。'
+    if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" != 'Linux' ]]; then
+      dsh_enhanced_fail 2 'Lark/supervised service-aware upgrade/uninstall 当前仅支持 Linux systemd --user。'
       return $?
     fi
     if [[ "$dry_run" == '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
@@ -2557,7 +2553,7 @@ dsh_enhanced_install() {
       return $?
     fi
     if [[ "$dry_run" != '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
-      if [[ "$scenario" == 'lark' ]]; then
+      if [[ "$scenario" == 'lark' || "$scenario" == 'supervised' ]]; then
         dsh_enhanced_run_lifecycle_executor service-recover "$profile" "$dsh_home" "$scenario" || return $?
       else
         dsh_enhanced_run_lifecycle_executor recover "$profile" "$dsh_home" "$scenario" || return $?
@@ -2569,10 +2565,6 @@ dsh_enhanced_install() {
     if ! effective_lifecycle_scenario="$(dsh_enhanced_effective_lifecycle_scenario \
       "$profile" "$dsh_home" "$lifecycle_directory")"; then
       return 1
-    fi
-    if [[ "$effective_lifecycle_scenario" == 'supervised' ]]; then
-      dsh_enhanced_fail 1 '检测到实际 effective/composed profile 含 active supervised/recovery/automation markers；缺少只读 generation/attestation API，拒绝在 mutation 或 npm registry/store 前继续。'
-      return $?
     fi
     if [[ "$effective_lifecycle_scenario" == 'unsupported' && "$operation" != 'uninstall' ]]; then
       dsh_enhanced_fail 1 '实际 effective/composed profile 无法安全归类为 web、autonomy 或已启用 Lark；拒绝 lifecycle 操作。'
@@ -2586,7 +2578,7 @@ dsh_enhanced_install() {
     model_mode='skip'
     model_route_mode='skip'
     lark_mode='skip'
-    if [[ "$dry_run" != '1' && "$scenario" != 'lark' && ( "$source_mode" != 'npm' || "$operation" != 'upgrade' ) ]]; then
+    if [[ "$dry_run" != '1' && "$scenario" != 'lark' && "$scenario" != 'supervised' && ( "$source_mode" != 'npm' || "$operation" != 'upgrade' ) ]]; then
       dsh_enhanced_recover_profile_lifecycle "$profile" "$dsh_home" "$dry_run" || return $?
       if [[ ! -f "$dsh_home/profiles/$profile/package.json" ]]; then
         dsh_enhanced_fail 1 "--operation $operation 需要已存在的 profile：$dsh_home/profiles/$profile"
@@ -2596,7 +2588,7 @@ dsh_enhanced_install() {
     if [[ "$source_mode" == 'npm' && "$operation" == 'upgrade' && "$dry_run" != '1' ]]; then
       dsh_enhanced_require_node || return $?
       dsh_enhanced_require_existing_runtime "$ack_unverified_host" || return $?
-      if [[ "$scenario" == 'lark' ]]; then
+      if [[ "$scenario" == 'lark' || "$scenario" == 'supervised' ]]; then
         dsh_enhanced_run_lifecycle_executor npm-service-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version"
       else
         dsh_enhanced_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version"
@@ -2694,11 +2686,11 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 'core 场景不包含飞书；请改用 --scenario lark 或 --scenario supervised。'
     return $?
   fi
-  if [[ "$deployment_mode" == 'supervised-growth' && "$lark_mode" == 'skip' ]]; then
+  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$lark_mode" == 'skip' ]]; then
     dsh_enhanced_fail 2 'supervised-growth 需要飞书 onboarding；不能与 --lark skip 一起使用。'
     return $?
   fi
-  if [[ "$deployment_mode" == 'supervised-growth' && "$manage_service" != '1' ]]; then
+  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$manage_service" != '1' ]]; then
     dsh_enhanced_fail 2 'supervised-growth 需要常驻服务；不能与 --no-service 一起使用。'
     return $?
   fi
@@ -2917,12 +2909,22 @@ NODE
   done
 
   if [[ "$operation" == 'upgrade' ]]; then
-    if [[ "$scenario" == 'lark' ]]; then
+    if [[ "$scenario" == 'lark' || "$scenario" == 'supervised' ]]; then
       if [[ "$dry_run" == '1' ]]; then
-        printf '\nLark service-aware upgrade (Linux systemd --user):\n'
+        if [[ "$scenario" == 'supervised' ]]; then
+          printf '\nsupervised service-aware upgrade (Linux systemd --user):\n'
+        else
+          printf '\nLark service-aware upgrade (Linux systemd --user):\n'
+        fi
         printf '  - Inventory the installer-managed units for the canonical DSH_HOME, runtime-mask them, stop them, and verify PID quiescence.\n'
-        printf '  - Update and activate the offline bwrap copy, rechecking the mask and quiescence before each rename.\n'
-        printf '  - Restart only the previously active units; require fresh InvocationID journal readiness and stability before backup cleanup.\n'
+        if [[ "$scenario" == 'supervised' ]]; then
+          printf '  - Capture a read-only source baseline, update the offline bwrap copy, and create a fresh nonce/catalog-bound Recovery preview.\n'
+          printf '  - Keep the isolated Host alive until preview generation and exact paused managed rows are attested; then stage the matching active patch.\n'
+          printf '  - Restart only the previously active units; require fresh InvocationID, a newer exact active attestation, and stability before backup cleanup.\n'
+        else
+          printf '  - Update and activate the offline bwrap copy, rechecking the mask and quiescence before each rename.\n'
+          printf '  - Restart only the previously active units; require fresh InvocationID journal readiness and stability before backup cleanup.\n'
+        fi
         printf '  - On readiness failure, keep services stopped and preserve both homes plus the bound manifest without automatic rollback.\n'
         dsh_enhanced_print_command dsh plugin --profile "$profile" add "${targets[@]}"
       else

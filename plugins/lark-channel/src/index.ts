@@ -35,11 +35,25 @@ export {
 } from './setup.js'
 export type { LarkSetupRuntime, RawSecretTerminalOptions } from './setup.js'
 export {
+  SUPERVISED_GROWTH_LIFECYCLE_ATTESTATION_PROTOCOL,
+  SUPERVISED_GROWTH_MANAGED_AUTOMATION_PROJECTION_PROTOCOL,
   assertSupervisedGrowthAutomationGuard,
+  captureSupervisedGrowthLifecycleAttestation,
   commitSupervisedGrowthPatch,
+  expectedSupervisedGrowthManagedAutomationDigest,
+  expectedSupervisedGrowthRecoveryBootstrap,
   parseSupervisedGrowthSetupArgs,
   runSupervisedGrowthSetup,
   selectUniqueOwnerBinding,
+  supervisedGrowthLifecycleAttestationDigest,
+  verifySupervisedGrowthLifecycleSuccessor,
+} from './supervised-growth-setup.js'
+export type {
+  SupervisedGrowthLifecycleAttestation,
+  SupervisedGrowthLifecycleAttestationDependencies,
+  SupervisedGrowthLifecycleAttestationInput,
+  SupervisedGrowthManagedAutomationProjection,
+  SupervisedGrowthManagedAutomationProjectionRecord,
 } from './supervised-growth-setup.js'
 
 export function apply(ctx: Context, config: import('./config.js').Config): void {

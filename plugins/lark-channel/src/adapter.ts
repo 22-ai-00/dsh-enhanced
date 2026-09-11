@@ -81,6 +81,10 @@ export interface LarkApprovalSettlementInput {
 
 export interface LarkAdapterOptions {
   now?: () => number
+  /** Runtime-only readiness signal emitted after a confirmed WS connection. */
+  onConnected?(): void
+  /** Runtime-only liveness edge emitted after a confirmed connection is lost. */
+  onDisconnected?(): void
   showProgress?: boolean
   progressDetails?: 'off' | 'direct'
   statusReactions?: boolean
@@ -507,6 +511,8 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   readonly capabilities: DeliveryAdapter['capabilities']
 
   private readonly now: () => number
+  private readonly onConnected: LarkAdapterOptions['onConnected']
+  private readonly onDisconnected: LarkAdapterOptions['onDisconnected']
   private readonly approvalSecret: string | undefined
   private readonly settleApproval: LarkAdapterOptions['settleApproval']
   private readonly recoverApprovalSettlement: LarkAdapterOptions['recoverApprovalSettlement']
@@ -546,6 +552,8 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       userQuestions: hasUsableApprovalSecret(options.approvalSecret),
     })
     this.now = options.now ?? Date.now
+    this.onConnected = options.onConnected
+    this.onDisconnected = options.onDisconnected
     this.approvalSecret = options.approvalSecret
     this.settleApproval = options.settleApproval
     this.recoverApprovalSettlement = options.recoverApprovalSettlement
@@ -601,13 +609,16 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       reconnecting: () => {
         this.cancelPendingToolApprovals('unavailable')
         this.gapGeneration += 1
-        this.state = 'reconnecting'
+        this.leaveConnected('reconnecting')
       },
-      reconnected: () => { this.state = 'connected-with-gap' },
+      reconnected: () => {
+        this.state = 'connected-with-gap'
+        this.onConnected?.()
+      },
       error: error => {
         this.lastErrorCode = error.code
         if (error.code === 'not_connected') {
-          this.state = 'disconnected'
+          this.leaveConnected('disconnected')
           this.cancelPendingToolApprovals('unavailable')
         }
       },
@@ -615,6 +626,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     try {
       await this.transport.connect()
       this.state = 'connected'
+      this.onConnected?.()
     } catch (error) {
       unsubscribe()
       this.state = 'disconnected'
@@ -628,7 +640,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       if (!active) return
       active = false
       unsubscribe()
-      this.state = 'disconnected'
+      this.leaveConnected('disconnected')
       this.cancelPendingToolApprovals('unavailable', true)
       this.cancelPendingUserQuestions()
       this.clearUserQuestionAnswerEvents()
@@ -643,6 +655,12 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       gapGeneration: this.gapGeneration,
       ...(this.lastErrorCode === undefined ? {} : { lastErrorCode: this.lastErrorCode }),
     }
+  }
+
+  private leaveConnected(next: 'disconnected' | 'reconnecting'): void {
+    const wasConnected = this.state === 'connected' || this.state === 'connected-with-gap'
+    this.state = next
+    if (wasConnected) this.onDisconnected?.()
   }
 
   async progress(intent: Readonly<DeliveryProgressIntent>): Promise<void> {

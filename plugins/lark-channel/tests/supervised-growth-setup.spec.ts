@@ -99,6 +99,15 @@ async function startProductionLifecycleLockHolder(root: string, dshHome: string)
   }
 }
 
+function thrownCode(fn: () => unknown): string {
+  try {
+    fn()
+  } catch (error) {
+    return (error as { code?: string }).code ?? ''
+  }
+  throw new Error('expected the call to throw')
+}
+
 function bootstrapExpectation(
   input: readonly RecoveryBootstrapAttestation[],
 ): { attestations: readonly RecoveryBootstrapAttestation[]; attestationSetDigest: string } {
@@ -234,6 +243,39 @@ describe('supervised-growth setup guards', () => {
     expect(() => assertSupervisedGrowthAutomationGuard([
       { id: 'owner-created-job', status: 'active' },
     ], true)).not.toThrow()
+  })
+
+  test('a never-created automations database reads as an empty inventory through the real package and passes the setup guard (B-M1)', async () => {
+    // Fresh-profile shape at runSupervisedGrowthSetup's guard call: DSH_HOME/data
+    // exists (the delivery database lives beside it and an owner binding was
+    // already accepted) but the scheduler has never created automations.sqlite.
+    // The strict operator snapshot keeps failing closed; only the compatibility
+    // projection consumed by supervised-growth-setup.ts maps that to [].
+    const root = await mkdtemp(join(tmpdir(), 'supervised-growth-missing-automations-'))
+    roots.push(root)
+    await chmod(root, 0o700)
+    const missing = join(root, 'automations.sqlite')
+    const automations = await import('@dsh-enhanced/assistant-automations')
+    expect(thrownCode(() => automations.inspectAutomationsOperatorSnapshot(missing)))
+      .toBe('database-missing')
+    expect(automations.listAutomationsLocally(missing)).toEqual([])
+    const active = automations.listActiveAutomationsLocally(missing)
+    expect(active).toEqual([])
+    // This is the exact call shape at supervised-growth-setup.ts:1229-1233.
+    expect(() => assertSupervisedGrowthAutomationGuard(active, false)).not.toThrow()
+    // Any other defect (here: a symlinked database) must still surface instead
+    // of being silently treated as an empty fresh store. The target must exist:
+    // a dangling link is indistinguishable from a never-created file at the
+    // realpath layer and is (correctly) reported as database-missing.
+    const targetRoot = await mkdtemp(join(tmpdir(), 'supervised-growth-linked-automations-'))
+    roots.push(targetRoot)
+    await chmod(targetRoot, 0o700)
+    const target = join(targetRoot, 'target.sqlite')
+    await writeFile(target, 'not-a-database', { mode: 0o600 })
+    const linked = join(root, 'linked.sqlite')
+    await symlink(target, linked)
+    expect(thrownCode(() => automations.listActiveAutomationsLocally(linked)))
+      .toBe('unsafe-path')
   })
 
   test('refuses no or multiple matching owner DMs instead of guessing a recipient', () => {

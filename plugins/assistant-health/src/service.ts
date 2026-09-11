@@ -324,7 +324,8 @@ function operationalAssessments(
     case 'larkChannel': {
       const state = metric('state')
       add(state === 'connected-with-gap', 'degraded', 'connected-with-gap')
-      add(state === 'connecting' || state === 'reconnecting', 'degraded', 'connection-in-progress')
+      add(state === 'connecting' || state === 'reconnecting',
+        'degraded', 'connection-in-progress', required)
       add(state === 'disconnected', required ? 'unhealthy' : 'degraded', 'disconnected', required)
       add(state === 'disabled' && required, 'unhealthy', 'disabled', true)
       break

@@ -3,6 +3,8 @@ import { describe, expect, test } from 'vitest'
 import { parse } from 'yaml'
 import {
   assertEffectiveSupervisedGrowthConfig,
+  assertSupervisedGrowthPreviewDerivation,
+  buildSupervisedGrowthPreviewOverlay,
   configureSupervisedGrowthProfilePatch,
   supervisedGrowthDatabasePaths,
 } from '../src/supervised-growth-profile.ts'
@@ -457,5 +459,120 @@ describe('supervised-growth Recovery profile patch', () => {
       binding: { ...binding, workspace: '/Users/test/.dsh/other' },
       activationState: 'preview', activationNonce, recoveryCatalogDigest: RECOVERY_CATALOG_DIGEST,
     })).toThrow(/workspace/i)
+  })
+})
+
+// F9：preview 隔离 overlay 必须从持久化的 Lark-enabled 基线确定性派生，
+// 逐字节锚定，并且只能造成两处白名单差异。
+const overlayBaseline = `
+- id: dsh-enhanced-lark-channel
+  config: { enabled: true, account: primary, tenant: personal }
+- id: dsh-enhanced-assistant-health
+  config:
+    requiredProviders:
+      - assistantPolicy
+      - larkChannel
+      - credentialsKeychain
+      - assistantRecovery
+- id: dsh-enhanced-assistant-heartbeat
+  config:
+    scratchPath: /Users/test/.dsh/assistant-heartbeat/supervised-growth.md
+`
+
+// 模拟 DSH cordis profile 的分层 --patch 合成：行 id 覆盖、行内 config 整体替换。
+// 派生 patch 只含 lark/health 两行，合成后的 effective 仍保留全部三行。
+function composeOverlay(persisted: string, overlay: string): string {
+  const overlayRows = parse(overlay) as Array<{ id: string }>
+  const overridden = new Set(overlayRows.map(row => row.id))
+  const persistedRows = (parse(persisted) as any[]).filter(row => !overridden.has(row.id))
+  return persistedRows.concat(overlayRows)
+    .map(row => `- id: ${row.id}\n  config: ${JSON.stringify(row.config)}\n`)
+    .join('')
+}
+
+describe('supervised-growth preview overlay derivation (F9)', () => {
+  test('derived patch only carries the Lark and Health rows, disables Lark, and preserves every extra provider', () => {
+    const overlay = buildSupervisedGrowthPreviewOverlay(overlayBaseline)
+    const overlayRows = parse(overlay) as any[]
+    expect(overlayRows.map(row => row.id).sort()).toEqual([
+      'dsh-enhanced-assistant-health',
+      'dsh-enhanced-lark-channel',
+    ])
+    const lark = overlayRows.find(row => row.id === 'dsh-enhanced-lark-channel')
+    expect(lark.config).toEqual({ enabled: false, account: 'primary', tenant: 'personal' })
+    const health = overlayRows.find(row => row.id === 'dsh-enhanced-assistant-health')
+    expect(health.config.requiredProviders).toEqual([
+      'assistantPolicy', 'credentialsKeychain', 'assistantRecovery',
+    ])
+  })
+
+  test('derivation is deterministic (byte-identical across reruns)', () => {
+    expect(buildSupervisedGrowthPreviewOverlay(overlayBaseline))
+      .toBe(buildSupervisedGrowthPreviewOverlay(overlayBaseline))
+  })
+
+  test('round trip through layered composition satisfies the whitelist proof', () => {
+    const overlay = buildSupervisedGrowthPreviewOverlay(overlayBaseline)
+    const preview = composeOverlay(overlayBaseline, overlay)
+    const proof = assertSupervisedGrowthPreviewDerivation({
+      persistedConfig: overlayBaseline,
+      previewConfig: preview,
+    })
+    expect(proof.externalProviderExemptions).toEqual(['larkChannel'])
+    expect(Object.isFrozen(proof)).toBe(true)
+    expect(Object.isFrozen(proof.externalProviderExemptions)).toBe(true)
+  })
+
+  test.each([
+    ['persisted Health does not require larkChannel',
+      overlayBaseline.replace('      - larkChannel\n', ''), /persisted Health must require larkChannel/],
+    ['persisted Lark row is disabled',
+      overlayBaseline.replace('enabled: true', 'enabled: false'), /persisted Lark channel must be enabled/],
+  ])('build fails closed when %s', (_label, mutated, matcher) => {
+    expect(() => buildSupervisedGrowthPreviewOverlay(mutated)).toThrow(matcher)
+  })
+
+  const validPreview = () => composeOverlay(
+    overlayBaseline, buildSupervisedGrowthPreviewOverlay(overlayBaseline),
+  )
+
+  test.each([
+    ['overlay drops a second provider (credentialsKeychain)',
+      (text: string) => text.replace('"credentialsKeychain",', ''),
+      /Health requiredProviders/],
+    ['overlay adds an unrelated provider',
+      (text: string) => text.replace(
+        '"assistantRecovery"]', '"assistantRecovery","pluginControlPlane"]'),
+      /Health requiredProviders/],
+    ['overlay reorders the surviving providers',
+      (text: string) => text.replace(
+        '["assistantPolicy","credentialsKeychain","assistantRecovery"]',
+        '["credentialsKeychain","assistantPolicy","assistantRecovery"]'),
+      /Health requiredProviders/],
+    ['Lark row stays enabled',
+      (text: string) => text.replace(
+        '- id: dsh-enhanced-lark-channel\n  config: {"enabled":false',
+        '- id: dsh-enhanced-lark-channel\n  config: {"enabled":true'),
+      /disable the Lark row/],
+    ['Lark row mutates beyond enabled (account rewrite)',
+      (text: string) => text.replace('"account":"primary"', '"account":"attacker"'),
+      /preview Lark row/],
+    ['an unrelated row changes',
+      (text: string) => text.replace('supervised-growth.md', 'tampered.md'),
+      /preview row dsh-enhanced-assistant-heartbeat/],
+    ['a whole row disappears from the preview',
+      (text: string) => text.replace(
+        /- id: dsh-enhanced-assistant-heartbeat\n  config: \{[^\n]*\}\n/u, ''),
+      /preview profile row id set/],
+    ['larkChannel survives in the preview providers',
+      (text: string) => text.replace(
+        '"assistantPolicy","credentialsKeychain"',
+        '"assistantPolicy","larkChannel","credentialsKeychain"'),
+      /remove exactly larkChannel/],
+  ])('whitelist proof rejects when %s', (_label, mutate, matcher) => {
+    expect(() => assertSupervisedGrowthPreviewDerivation({
+      persistedConfig: overlayBaseline,
+      previewConfig: mutate(validPreview()),
+    })).toThrow(matcher)
   })
 })
