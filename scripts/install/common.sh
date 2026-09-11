@@ -64,7 +64,7 @@ Install a minimal, runnable dsh-enhanced personal-assistant scenario.
 Options:
   --profile <name>          DSH profile (default: web)
   --operation <name>        install, upgrade, or uninstall (default: install)
-  --confirm-dsh-home-stopped Required for lifecycle; Lark upgrade/uninstall stops managed units, you stop other DSH_HOME users
+  --confirm-dsh-home-stopped Required for lifecycle; Lark/supervised service operations stop managed units, you stop other DSH_HOME users
   --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto)
   --workspace <absolute>    Web owner workspace (web/autonomy; default: current directory)
   --agent-preset <id>       Web owner Agent preset (web/autonomy; default: standard)
@@ -421,11 +421,12 @@ dsh_enhanced_ensure_pnpm() {
 
 dsh_enhanced_require_existing_runtime() {
   local ack_unverified_host="$1"
+  local require_pnpm="${2:-1}"
   if ! command -v dsh >/dev/null 2>&1; then
     dsh_enhanced_fail 1 'profile 生命周期事务需要已安装的 DSH；不会在事务外安装或升级全局 Host。'
     return $?
   fi
-  if ! command -v pnpm >/dev/null 2>&1; then
+  if [[ "$require_pnpm" == '1' ]] && ! command -v pnpm >/dev/null 2>&1; then
     dsh_enhanced_fail 1 'profile 生命周期事务需要已安装的 pnpm；不会在事务外修改全局工具链。'
     return $?
   fi
@@ -2153,8 +2154,8 @@ dsh_enhanced_run_lifecycle_executor() {
     bwrap_executable="$(command -v bwrap 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 bubblewrap（bwrap）。'; return $?; }
   fi
   if [[ "$operation" == 'service-upgrade' || "$operation" == 'npm-service-upgrade' || "$operation" == 'service-uninstall' || "$operation" == 'service-recover' ]]; then
-    systemctl_executable="$(command -v systemctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark service lifecycle 需要 systemctl。'; return $?; }
-    journalctl_executable="$(command -v journalctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark service lifecycle 需要 journalctl 验证 fresh InvocationID readiness。'; return $?; }
+    systemctl_executable="$(command -v systemctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark/supervised service lifecycle 需要 systemctl。'; return $?; }
+    journalctl_executable="$(command -v journalctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark/supervised service lifecycle 需要 journalctl 验证 fresh InvocationID readiness。'; return $?; }
     set -- "$systemctl_executable" "$journalctl_executable" "$@"
   fi
   if [[ "$operation" == 'npm-upgrade' || "$operation" == 'npm-service-upgrade' ]]; then
@@ -2504,19 +2505,15 @@ dsh_enhanced_install() {
       return $?
     }
     if [[ "$confirm_dsh_home_stopped" != '1' ]]; then
-      dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；Lark service lifecycle 会自行停止受管 systemd units，该确认表示其它外部/手工进程均已停止。"
+      dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；Lark/supervised service lifecycle 会自行停止受管 systemd units，该确认表示其它外部/手工进程均已停止。"
       return $?
     fi
     if [[ "$scenario_explicit" != '1' ]]; then
       dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前需要显式 --scenario。'
       return $?
     fi
-    if [[ "$operation" == 'uninstall' && "$scenario" == 'supervised' ]]; then
-      dsh_enhanced_fail 2 'supervised service-aware uninstall 尚未开放；拒绝停止或修改服务。'
-      return $?
-    fi
     if [[ "$scenario" != 'web' && "$scenario" != 'autonomy' && "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
-      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前只支持显式 --scenario web、autonomy、lark，或 upgrade supervised。'
+      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前只支持显式 --scenario web、autonomy、lark 或 supervised。'
       return $?
     fi
     if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$manage_service" != '1' ]]; then
@@ -2720,19 +2717,31 @@ dsh_enhanced_install() {
   elif [[ "$dry_run" == '1' ]]; then
     printf '生命周期事务：将使用现有 DSH/pnpm，不修改全局工具链。\n'
   else
-    dsh_enhanced_require_existing_runtime "$ack_unverified_host" || return $?
+    local lifecycle_requires_pnpm='1'
+    [[ "$operation" == 'uninstall' ]] && lifecycle_requires_pnpm='0'
+    dsh_enhanced_require_existing_runtime "$ack_unverified_host" "$lifecycle_requires_pnpm" || return $?
   fi
   if [[ "$source_mode" == 'local' && "$operation" == 'install' ]]; then
     dsh_enhanced_ensure_pnpm "$dry_run" || return $?
   fi
   if [[ "$operation" == 'uninstall' ]]; then
-    if [[ "$effective_lifecycle_scenario" == 'lark' ]]; then
+    if [[ "$effective_lifecycle_scenario" == 'lark' || "$effective_lifecycle_scenario" == 'supervised' ]]; then
       if [[ "$dry_run" == '1' ]]; then
-        printf '\nLark service-aware uninstall (Linux systemd --user):\n'
-        printf '  - Inventory, persistently block starts, stop and quiesce installer-managed units for canonical DSH_HOME.\n'
-        printf '  - Archive the complete old profile and activate a clean Web profile in the offline bwrap copy before atomic swap.\n'
-        printf '  - Restart only the previously active units and require fresh InvocationID readiness before backup cleanup.\n'
-        printf '  - Preserve units, credentials, owner binding, Sessions, Goals and external durable state.\n'
+        if [[ "$effective_lifecycle_scenario" == 'supervised' ]]; then
+          printf '\nSupervised service-aware uninstall (Linux systemd --user):\n'
+          printf '  - Inventory, block starts, stop and quiesce installer-managed units, then bind a read-only source operator/attestation proof.\n'
+          printf '  - Archive the complete old profile and activate an installer-clean Web profile in the offline bwrap copy before atomic swap.\n'
+          printf '  - Restart only the previously active units and require generic fresh InvocationID/journal readiness plus a stability window.\n'
+          printf '  - Do not actively delete profile-external credentials, owner bindings, Sessions, Goals or databases; they are retained but not revoked or byte-for-byte verified.\n'
+          printf '  - Do not access the npm registry or pnpm store.\n'
+        else
+          printf '\nLark service-aware uninstall (Linux systemd --user):\n'
+          printf '  - Inventory, persistently block starts, stop and quiesce installer-managed units for canonical DSH_HOME.\n'
+          printf '  - Archive the complete old profile and activate a clean Web profile in the offline bwrap copy before atomic swap.\n'
+          printf '  - Restart only the previously active units and require fresh InvocationID readiness before backup cleanup.\n'
+          printf '  - Preserve units, credentials, owner binding, Sessions, Goals and external durable state.\n'
+          printf '  - Do not access the npm registry or pnpm store.\n'
+        fi
       else
         dsh_enhanced_run_lifecycle_executor service-uninstall "$profile" "$dsh_home" "$effective_lifecycle_scenario"
       fi

@@ -1,0 +1,164 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-11",
+  "recordedAt": "2026-09-11T22:40:19Z",
+  "baseCommit": "073415c6d1911c9d129f05f7488e21d61dfed792",
+  "status": "fixture-backed-checkout-local-engineering-slice-validated",
+  "completeWorkPackage": false,
+  "workingTreeState": {
+    "state": "frozen-root-gate-passed",
+    "sourceHashesAreProvisional": false,
+    "mustRehashAfterRootGate": false,
+    "unrelatedDirtyWorkExcluded": [
+      "docs/evidence/sqlite-inode-binding-2026-09-11.json",
+      "plugins/assistant-automations/tests/operator.spec.ts",
+      "plugins/assistant-delivery/tests/operator-snapshot.spec.ts"
+    ]
+  },
+  "scope": [
+    "WP17 checkout-local service-aware uninstall for an existing supervised profile on Linux systemd --user",
+    "Manifest-v3 source attestation, exact target-profile archive binding, clean Web replacement, service acceptance, crash recovery and cleanup residue retry",
+    "Preservation rather than revocation of durable state outside the archived target profile"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2,
+    "wp17": "implementing"
+  },
+  "supportedBoundary": {
+    "platform": "Linux",
+    "serviceManager": "systemd --user",
+    "operation": "uninstall",
+    "scenario": "supervised",
+    "source": "checkout-local or sibling lifecycle helper only",
+    "sourceProfile": "an installer-managed supervised target profile whose installed cohort exposes the required read-only operator and lifecycle-attestation seams",
+    "targetProfileLocalSemantics": "Uninstall deactivates and archives the named managed profile locally, then installs an exact clean Web profile under the same profile name. It is not a whole-DSH_HOME erase, identity revocation, credential revocation, external-state retirement or guarantee that another profile sharing retained state cannot interpret it later.",
+    "archiveScope": "the complete named profile directory tree as copied from the stopped source and bound by profile/tree digests",
+    "replacementScope": "an installer-clean Web profile at the same target-profile path",
+    "operatorResponsibility": "The operator must stop every external or manually started process using DSH_HOME. The installer controls only systemd units whose ownership it can prove.",
+    "nonLinux": "unsupported and fail closed before lifecycle mutation",
+    "noService": "unsupported and fail closed before lifecycle mutation",
+    "externalSupervisor": "unsupported"
+  },
+  "releaseBoundary": {
+    "currentRelease": "v0.1.24",
+    "state": "zero-sentinel",
+    "remoteLifecyclePublished": false,
+    "behavior": "The released remote bootstrap still carries zero sentinel lifecycle-helper hashes, so remote supervised uninstall fails closed before downloading or executing lifecycle helpers. This record proves only checkout-local behavior."
+  },
+  "implementation": [
+    "The public local lifecycle path admits supervised uninstall only for Linux systemd --user service management; non-Linux and --no-service combinations are rejected before lifecycle mutation, and uninstall performs no npm registry or pnpm-store work.",
+    "The source cohort is capability-probed before registry, Store, systemd or transaction mutation. After installer-owned units are stopped, a read-only supervised operator attests Delivery owner bindings, Recovery state and Automations state without opening a migrating Store.",
+    "The stopped source target-profile tree digest and compact operator proofs are manifest-bound before the home copy. The copied target profile must retain the exact tree digest before it can be moved into uninstalled-profiles/<profile>-<timestamp>-<transaction-id>.",
+    "The archive proof covers the complete target-profile directory tree. The compact operator proof is deliberately narrower: it binds only the protocol-defined Delivery, Recovery, Automations, owner and unmanaged-Automation projections. That negative proof is not evidence that every byte, private state path or effect anywhere in DSH_HOME was enumerated or retired.",
+    "The staged target is replaced with an installer-clean Web profile and activated offline. Supervised uninstall does not run the upgrade preview/active plan and does not require Lark or supervised active attestation after those capabilities have been removed.",
+    "Originally active installer-managed units must return with fresh InvocationIDs, exact accepted process/restart records and a stability window; originally inactive units remain inactive. Same-home dynamic units that are not in the accepted set remain persistently masked, disabled and inactive.",
+    "A crash before the swap boundary restores the original home and active set. A post-swap failure contains services and preserves current home, original home and manifest evidence rather than automatically rolling back possibly migrated state.",
+    "Recovery validates the operation/protocol/phase union, archive identity and digest, clean target digest, exact serviceAcceptance coverage, systemd ownership inventory and transaction bindings before external mutation. A retry after post-swap failure does not rerun archive creation or the source operator.",
+    "Cleanup recovery handles stale service acceptance by re-establishing bound masks and barriers, stopping the exact inventory, obtaining fresh InvocationID/journal/stability acceptance, durably replacing the acceptance proof and resuming the existing cleanup without repeating package, archive or supervised-operator work.",
+    "Crash recovery explicitly covers cleanup prepared, deleting and metadata-only phases, masked inactive and active residues, and both mask-path versus daemon-reload cache-skew directions. Raw systemd identity, numeric fields and stable state tuples fail closed before mutation.",
+    "Committed cleanup first tombstones and recursively deletes the original-home backup through descriptor-anchored traversal, then removes transaction residue. A metadata-only cleanup phase means only that the backup is already absent and transaction metadata remains to be removed; it is not proof that retained credentials, owner bindings, Session, Goal, databases, linger settings, unit files or external state were cleared."
+  ],
+  "securityAndTrustBoundaries": {
+    "sameUidPathReplacement": "Manifest loading opens and validates the transaction root through a directory fd, but closes that fd after the read; parts of recovery later resolve the transaction pathname again. Critical rename and cleanup paths have additional identity guards. Malicious same-UID pathname replacement and root are explicitly outside the claimed threat model.",
+    "guardianFinalizeKillGap": "The guardian completion token is sent after durable service acceptance, before mask/enablement finalization and transaction commit finish. A forced-kill regression now covers the resulting active-plus-bound-masked residue and proves a later retry performs fresh reacceptance and converges without repeating package, archive or supervised-operator work.",
+    "negativeProofGranularity": "The supervised source proof is a schema-defined projection and must not be described as a proof of absence across the whole home. The archived profile tree digest is broader but still target-profile-local.",
+    "metadataCleanupGranularity": "A cleanup-started metadata-only state records that original-home is already absent and only transaction metadata remains. Removing that residue does not revoke or delete durable state intentionally retained outside the archived target profile."
+  },
+  "targetedValidation": [
+    {
+      "id": "installer-full",
+      "status": "passed",
+      "command": "CI=true VITEST_MAX_WORKERS=1 pnpm exec vitest run tests/installers.spec.ts",
+      "exitCode": 0,
+      "testFilesPassed": 1,
+      "testFilesSkipped": 0,
+      "testsPassed": 276,
+      "testsSkipped": 1,
+      "testsTotal": 277,
+      "durationSeconds": 370.95,
+      "log": "/tmp/dsh-wp17-supervised-uninstall-installers-final.log",
+      "logSha256": "23b2929a9c0dda35e47a9debf84016ee410374360e19494bc7e197868b61579c",
+      "skipReason": "The published lifecycle-helper asset comparison remains conditional while v0.1.24 intentionally carries zero sentinel lifecycle-helper hashes."
+    }
+  ],
+  "engineeringValidation": {
+    "command": "CI=true VITEST_MAX_WORKERS=1 pnpm check",
+    "status": "passed",
+    "exitCode": 0,
+    "rootTestFilesPassed": 31,
+    "rootTestsPassed": 490,
+    "rootTestsSkipped": 1,
+    "packageTestFilesPassed": 320,
+    "packageTestFilesSkipped": 12,
+    "packageTestsPassed": 4410,
+    "packageTestsSkipped": 42,
+    "aggregateTestsPassed": 4900,
+    "aggregateTestsSkipped": 43,
+    "dryRunPackages": 33,
+    "log": "/tmp/dsh-wp17-supervised-uninstall-root-check.log",
+    "logSha256": "e6b56ed674ee8733463ccf043e044c3ac89d276aa2aa2923461792bd7ec73146",
+    "acceptanceRule": "The frozen tree passed workspace validation, zero-warning lint, typechecking, root and recursive package tests, final build, and dry-run packing for every plugin and shared package."
+  },
+  "independentReview": {
+    "status": "passed-for-the-documented-threat-model-and-engineering-slice",
+    "finalFindings": {
+      "BLOCK": 0,
+      "HIGH": 0
+    },
+    "interpretation": "The final frozen release review found no BLOCK or HIGH defect in the documented checkout-local threat model. Same-UID malicious pathname replacement, whole-home negative proof, external-state retirement and real-environment validation remain explicit claim boundaries rather than silently accepted properties."
+  },
+  "claims": {
+    "status": "fixture-backed-checkout-local-engineering-slice",
+    "supported": [
+      "The checkout contains a bounded Linux systemd --user supervised-uninstall path with strict dispatch, source attestation, target-profile archive binding, clean Web replacement, service acceptance and recovery contracts.",
+      "The frozen full installer suite passed 276 tests with one release-sentinel conditional skip and has a retained log whose SHA-256 is recorded.",
+      "The frozen repository root check passed workspace validation, zero-warning lint, typechecking, root and recursive tests, final build and 33 dry-run packs.",
+      "The target-profile archive and exact clean replacement are distinct from intentionally retained durable and external state.",
+      "Remote supervised uninstall remains fail closed under the current zero-sentinel release."
+    ],
+    "notYetSupportedByEvidence": [
+      "A complete real supervised DSH_HOME/systemd/Lark/live-WAL uninstall acceptance",
+      "WP17 completion or completion of the full 18-work-package objective"
+    ]
+  },
+  "realSystemdValidation": {
+    "status": "not-run-for-this-batch",
+    "priorEvidenceReused": false,
+    "unproven": [
+      "real supervised source-unit ownership census",
+      "real user.control masks, enablement barriers and same-home dynamic-unit containment",
+      "real source-unit stop and whole-DSH_HOME quiescence",
+      "real complete DSH_HOME copy, target-profile archive and atomic home swap",
+      "real clean Web target activation with fresh InvocationIDs and stability window",
+      "real crash guardian finalization and recovery behavior"
+    ]
+  },
+  "limitations": [
+    "No complete real supervised DSH_HOME uninstall transaction was executed in this batch.",
+    "No real systemd --user stop, mask, home swap, fresh InvocationID, journal readiness, stability or crash-recovery sequence was observed for this batch.",
+    "No real Lark WebSocket, cloud credential, cloud application or production message flow was exercised.",
+    "The three live-WAL databases were not exercised through a real cross-inode lifecycle copy and uninstall archive.",
+    "Non-Linux, --no-service and external-supervisor supervised uninstall remain unsupported.",
+    "The current release uses zero sentinel lifecycle-helper hashes, so remote supervised uninstall remains unpublished and fail closed.",
+    "The implementation does not claim protection against malicious same-UID processes or root.",
+    "The tested guardian-finalization crash windows do not prove every possible kernel, systemd or host failure interleaving.",
+    "The operator negative proof is not a whole-home proof, and metadata-only cleanup is not external-state retirement.",
+    "WP17 remains implementing and the complete 18-work-package objective remains incomplete."
+  ],
+  "sourceHashSnapshot": {
+    "algorithm": "sha256",
+    "capturedAt": "2026-09-11T22:40:19Z",
+    "state": "frozen-root-gate-passed",
+    "validWhile": "Valid for the exact source hashes below and invalidated by any change to those files."
+  },
+  "sourceHashes": {
+    "scripts/install/common.sh": "a79c8808c7f43fa9d5facaeeb46e54cdf9a247da354fdcb47f5978e12e7623bf",
+    "scripts/install/lifecycle-profile.mjs": "2f16d4a1093582211486c034deff8068fdf7f71dd1f9e5343fee38915180a9ac",
+    "scripts/install/README.md": "51146441cf8a68c7d81d8872356d42150c2fec57b5ef6cfb5204b51a73d4b93e",
+    "tests/installers.spec.ts": "bc9842a2597ad3d447d3f76fe5cf2e3eb6b05dfe087f7e59b160a03ace52a154",
+    "docs/compatibility.md": "4271ba0c7181299dbfbe40edda9978d90653d58df4115c383d0beee3186238a9",
+    "docs/agent-autonomy-implementation.md": "d52ba7091983254d43cc4d707172b5a65f261fcf2e268fd0868af0c63ea38331"
+  }
+}
