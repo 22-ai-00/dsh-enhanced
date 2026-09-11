@@ -336,6 +336,23 @@ describe('compensation HTTP socket boundary', () => {
     } finally { await close(head.server); await close(redirector.server); await close(target.server) }
   })
 
+  it('treats a branch-head redirect as no observation and never dispatches the compensation', async () => {
+    let redirectedRequests = 0, graphCalls = 0
+    const target = await listen((_request, response) => { redirectedRequests++; response.end(JSON.stringify({ name: grant.branch, commit: { sha: forwardOid } })) })
+    const redirector = await listen((_request, response) => { response.writeHead(302, { location: target.url.href }); response.end() })
+    const graph = await listen((request) => { void readBody(request).then(() => { graphCalls++ }) })
+    const rest = ((targetUrl: URL, options: RequestOptions, callback: (response: IncomingMessage) => void) => {
+      expect(targetUrl.href).toBe('https://api.github.com/repos/owner/repository/branches/main')
+      return httpRequest(new URL(targetUrl.pathname + targetUrl.search, redirector.url), options, callback)
+    }) as unknown as typeof import('node:https').request
+    const preimage = { repository: grant.repository, branch: grant.branch, commitOid: parentOid, files: [{ path: 'src/old.txt', state: 'present' as const, blobOid: parentOid, content: 'before', size: 6 }] }
+    try {
+      await expect(inspectGitHubBranchHead({ grant: compensationGrant, token: 'only-at-server', signal: new AbortController().signal }, rest)).resolves.toBeUndefined()
+      await expect(createCompensatingCommitOnGitHub({ actionId, grant: compensationGrant, forwardCommitOid: forwardOid, preimage, token: 'only-at-server', signal: new AbortController().signal }, { rest, graphql: localhostTransport(graph.url) })).resolves.toMatchObject({ status: 'unknown', reason: 'github-compensation-unknown' })
+      expect(redirectedRequests).toBe(0); expect(graphCalls).toBe(0)
+    } finally { await close(redirector.server); await close(target.server); await close(graph.server) }
+  })
+
   it('returns unknown after a dispatched compensation loses acknowledgement and never replays it', async () => {
     let dispatched = 0
     const mutation = await listen((request) => {

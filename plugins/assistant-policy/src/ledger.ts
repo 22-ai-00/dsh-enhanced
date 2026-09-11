@@ -718,6 +718,39 @@ export class PolicyLedger {
     })
   }
 
+  /**
+   * Release a still-open reservation addressed by its idempotency key. Used by
+   * hosts during crash recovery when only the deterministic key is available.
+   * A missing row returns undefined; a finalized reservation throws
+   * invalid-state (a charge is never unwound); released replays idempotently.
+   */
+  releaseByIdempotencyKey(idempotencyKey: string): BudgetReservationResult | undefined {
+    requireText(idempotencyKey, 'idempotencyKey')
+    return this.#transaction(() => {
+      const row = this.#database.prepare(`
+        SELECT id, idempotency_key, scope, metric, period_start, period_ms,
+               amount, actual_amount, status
+        FROM budget_reservations WHERE idempotency_key = ?
+      `).get(idempotencyKey) as ReservationRow | undefined
+      if (row === undefined) return undefined
+      if (row.status === 'released') return this.#result(row, true)
+      if (row.status !== 'reserved') {
+        throw new PolicyLedgerError('invalid-state', `cannot release a ${row.status} reservation`)
+      }
+      this.#database.prepare(`
+        UPDATE budget_periods
+        SET reserved_amount = reserved_amount - ?, version = version + 1
+        WHERE scope = ? AND metric = ? AND period_start = ? AND period_ms = ?
+      `).run(row.amount, row.scope, row.metric, row.period_start, row.period_ms)
+      this.#database.prepare(`
+        UPDATE budget_reservations
+        SET status = 'released', updated_at = ?, version = version + 1
+        WHERE id = ?
+      `).run(this.#now(), row.id)
+      return this.#result({ ...row, status: 'released' }, false)
+    })
+  }
+
   #reservation(id: string): ReservationRow {
     const row = this.#database.prepare(`
       SELECT id, idempotency_key, scope, metric, period_start, period_ms,

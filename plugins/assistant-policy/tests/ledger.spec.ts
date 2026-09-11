@@ -599,6 +599,40 @@ describe('policy ledger', () => {
     ledger.close()
   })
 
+  test('releases an orphaned reservation by idempotency key without reviving finalized spend', async () => {
+    const ledger = new PolicyLedger({ path: await temporaryDatabase(), now: () => 31_000 })
+    const common = {
+      scope: 'agent:primary',
+      metric: 'github-compensations',
+      limit: 2,
+      amount: 1,
+      periodMs: 60_000,
+    }
+    const orphan = ledger.reserve({ ...common, idempotencyKey: 'compensation:orphan' })
+    const settled = ledger.reserve({ ...common, idempotencyKey: 'compensation:settled' })
+    ledger.finalize(settled.reservationId, 1)
+
+    // The crash-recovery path releases a still-open hold keyed only by the
+    // deterministic idempotency key (no reservation id survives the crash).
+    const released = ledger.releaseByIdempotencyKey('compensation:orphan')
+    expect(released?.reservationId).toBe(orphan.reservationId)
+    expect(released?.status).toBe('released')
+    expect(released?.replayed).toBe(false)
+    expect(released?.remaining).toBe(1)
+    // Replaying the release is an idempotent no-op and reports the same result.
+    expect(ledger.releaseByIdempotencyKey('compensation:orphan')).toEqual({ ...released, replayed: true })
+
+    // A finalized reservation must never be revoked through this back door.
+    expect(() => ledger.releaseByIdempotencyKey('compensation:settled')).toThrowError(
+      expect.objectContaining<Partial<PolicyLedgerError>>({ code: 'invalid-state' }),
+    )
+    // A key that never produced a reservation (e.g. denial happened before reserve) is a no-op.
+    expect(ledger.releaseByIdempotencyKey('compensation:never-existed')).toBeUndefined()
+    // Capacity from the released hold is usable again; finalized spend still counts.
+    expect(ledger.reserve({ ...common, idempotencyKey: 'compensation:retry' }).remaining).toBe(0)
+    ledger.close()
+  })
+
   test('starts an independent budget period after rollover', async () => {
     const path = await temporaryDatabase()
     let now = 59_999
