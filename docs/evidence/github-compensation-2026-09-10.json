@@ -4,7 +4,9 @@
   "baseCommit": "cb46b2d",
   "workingTreeState": "validated-and-pushed-to-dev",
   "status": "validated-on-dev",
-  "devCommit": "092c838ec02d2708be6bc1cfdf8799a5bf839e4c",
+  "devCommit": "92d98aa0e0b60b8e0c4e48653c109380a54e9b8d",
+  "originalCommit": "092c838ec02d2708be6bc1cfdf8799a5bf839e4c",
+  "followupCommit": "92d98aa0e0b60b8e0c4e48653c109380a54e9b8d",
   "completeWorkPackage": false,
   "scope": "WP10 finite GitHub compensating commit for exact succeeded forward commits",
   "workPackages": {
@@ -27,7 +29,7 @@
     "Compensation first requires the branch head to equal the forward commit and then sends one ordinary createCommitOnBranch mutation with that expected head, restoring prior files and deleting paths that were previously absent.",
     "The protocol never force-pushes, resets, calls updateRef or rewrites history; later branch changes produce a conflict.",
     "A dispatched compensation is sent once. Timeout, cancellation, redirect, lost acknowledgement or malformed/mismatched response remains unknown and is not replayed after restart; on restart, prepared/dispatched rows are recovered to unknown (never re-dispatched) while capturing placeholder rows that never sealed a preimage are deleted, freeing the forward action's one-compensation slot and its action budget.",
-    "Before dispatch, a denied second-stage budget authorization, an expired authority or a fail-closed capture error discards the capturing placeholder so a pre-dispatch failure can neither wedge the forward action nor permanently consume a rollback action; after the preimage is sealed, failures keep the row for manual unknown resolution.",
+    "Before dispatch, a denied second-stage budget authorization, an expired authority or a fail-closed capture error discards the capturing placeholder so a pre-dispatch failure can neither wedge the forward action nor permanently consume a rollback action; once the preimage is sealed but the local dispatch flip has not happened, an authorization/hold failure terminalizes the prepared row to unknown live (reason authorization-ended-before-dispatch, audited compensation-abandoned) instead of leaving a zombie 'prepared' that only the next process restart would clear.",
     "A GraphQL rejection (errors entry, CAS conflict, or mismatched commit/parent/ref in the mutation response) settles the compensation as failed with reason github-compensation-rejected and is never retried or misreported as succeeded.",
     "File compensation does not retract pull requests, CI, reviews, comments, messages, notifications, webhooks, deployments, releases or other external side effects."
   ],
@@ -35,36 +37,36 @@
     "githubTransport": {
       "status": "passed",
       "command": "pnpm vitest run tests/github.spec.ts tests/github-http.spec.ts",
-      "log": "/tmp/wp10-github-transport.log",
-      "logSha256": "77ee5af8b758f9dfb8255cf865b45018910cc93a87613c02cb064720c6626b22",
+      "log": "/tmp/wp10-github-transport-2.log",
+      "logSha256": "5f56a62cea38841c25d3da2c4e223b101c458bfc51c939c3639cad3450d6a707",
       "exitCode": 0,
       "testFiles": 2,
-      "testsPassed": 46
+      "testsPassed": 62
     },
     "ledgerAndServiceIntegration": {
       "status": "passed",
       "command": "pnpm vitest run tests/ledger.spec.ts tests/compensation-service.spec.ts",
-      "log": "/tmp/wp10-ledger-service.log",
-      "logSha256": "0ece28edac2ef0ff24848f252b2dba650157c966011885dff992d65c0e4e7db5",
+      "log": "/tmp/wp10-ledger-service-2.log",
+      "logSha256": "fb2160245b5988efa351b8c230c85f1da72cbb3fa0133d57bbb7186d8767758a",
       "exitCode": 0,
       "testFiles": 2,
-      "testsPassed": 45
+      "testsPassed": 54
     },
     "packageSuite": {
       "status": "passed",
-      "assistantActions": "pnpm build && pnpm vitest run && pnpm typecheck && pnpm oxlint --deny-warnings -> 10 files / 137 tests passed, typecheck and zero-warning lint exit 0",
-      "assistantPolicy": "pnpm vitest run -> 15 files / 207 tests passed",
+      "assistantActions": "pnpm build && pnpm vitest run && pnpm typecheck && pnpm oxlint --deny-warnings -> 10 files / 162 tests passed, typecheck and zero-warning lint exit 0",
+      "assistantPolicy": "pnpm vitest run -> 15 files / 208 tests passed; pnpm typecheck exit 0",
       "assistantIsolation": "pnpm vitest run -> 16 passed + 10 skipped files, 108 passed + 27 skipped tests"
     },
     "independentSecurityReview": {
       "status": "passed",
       "verdict": "YES-WITH-FOLLOWUPS",
-      "summary": "An independent adversarial reviewer read the frozen WP10 diff against base cb46b2d in a read-only pass (no network, no git writes) and concluded the change is safe to merge to dev in its default-off configuration. No CRITICAL or HIGH findings. All ten safety invariants were CONFIRMED against source. Four LOW followups and seven test gaps were recorded; the two gaps that directly pin the core invariants were closed in this submission, the remainder are explicitly deferred post-merge followups.",
+      "summary": "An independent adversarial reviewer read the frozen WP10 diff against base cb46b2d in a read-only pass (no network, no git writes) and concluded the change is safe to merge to dev in its default-off configuration. No CRITICAL or HIGH findings. All ten safety invariants were CONFIRMED against source. Four LOW followups and seven test gaps were recorded; all four LOW items were dispositioned in followup (LOW-1/LOW-2 closed with code+tests, LOW-3/LOW-4 retained as intentional conservative boundaries), and every recorded test gap except the v2-to-v3 ledger migration coverage is now closed (see testGapDisposition and secondPassReview).",
       "reviewBaseCommit": "cb46b2d",
       "reviewMode": "read-only; local source and tests only; no network access and no git mutations",
       "reviewerIndependentReruns": {
-        "assistantActions": "135/135 tests passed at review time (the two added regression tests post-date the review run; the full 137-test suite is covered by packageSuite)",
-        "assistantPolicy": "207/207 tests passed",
+        "assistantActions": "the followup package suite runs 161/161 tests across 10 files (the review-time run predates tests K-P and the LOW-1 transport regressions)",
+        "assistantPolicy": "the followup package suite runs 208/208 tests across 15 files",
         "assistantIsolation": "108 passed / 27 skipped (Docker-gated) tests"
       },
       "invariants": [
@@ -77,35 +79,51 @@
         { "id": 7, "claim": "Credential never persisted; echo suppression; 0600/O_NOFOLLOW private state", "verdict": "CONFIRMED", "evidence": "Keychain lease used in-memory only; result/error fields suppress raw token echoes; ledger files 0600 under 0700 state root" },
         { "id": 8, "claim": "GraphQL errors settle failed/rejected, never succeeded, never retried", "verdict": "CONFIRMED", "evidence": "github.ts:440 maps errors/CAS/commit-parent-ref mismatch to reason github-compensation-rejected; pinned by the added github.spec.ts regression test" },
         { "id": 9, "claim": "Size limits enforced at three layers", "verdict": "CONFIRMED", "evidence": "per-file, per-request file count and aggregate byte bounds enforced in config normalization, capture and ledger reservation" },
-        { "id": 10, "claim": "Untrusted JSON is narrowly validated and submodule entries are excluded from the blob index", "verdict": "CONFIRMED", "evidence": "strict shape narrowing on every GitHub response; only type=blob tree entries enter the index" }
+        { "id": 10, "claim": "Untrusted JSON is narrowly validated and tree entry types/modes are pinned (LOW-1 hardened)", "verdict": "CONFIRMED", "evidence": "strict shape narrowing on every GitHub response; readGitHubTreeIndex validates the fixed type/mode pairs (blob 100644/100755/120000, tree 040000, commit 160000), indexes every entry, and a contents 404 matching any indexed entry fails capture closed" }
       ],
       "lowFollowups": [
-        { "id": "LOW-1", "issue": "The tree index records only blob entries, so a 404 for a submodule (type=commit) or directory (type=tree) path lacks the same cross-validation as a blob path.", "exploitability": "Not exploitable on real GitHub: both kinds return 200 from contents, and deleting them is rejected by mutation errors. Hardening only.", "recommendation": "Record non-blob tree entry types and fail closed when a 404 matches any indexed entry.", "deferred": true },
-        { "id": "LOW-2", "issue": "When capture fails at the capturing stage, the Policy budget already finalized is not released, so an agent can exhaust only its own rollback budget.", "exploitability": "Self-denial of service; no integrity impact.", "recommendation": "Release the budget reservation when discarding a capturing placeholder.", "deferred": true },
-        { "id": "LOW-3", "issue": "A GraphQL 200 carrying both errors and legal data is always recorded failed.", "exploitability": "Conservative semantics; UNIQUE guarantees no double commit.", "recommendation": "Retain current conservative behavior; document it.", "deferred": true },
-        { "id": "LOW-4", "issue": "An oversized or truncated recursive tree permanently disables compensation for that commit.", "exploitability": "Intentional fail-closed availability tradeoff, not a vulnerability.", "recommendation": "None required; recorded as a known boundary.", "deferred": true }
+        { "id": "LOW-1", "issue": "The tree index records only blob entries, so a 404 for a submodule (type=commit) or directory (type=tree) path lacks the same cross-validation as a blob path.", "exploitability": "Not exploitable on real GitHub: both kinds return 200 from contents, and deleting them is rejected by mutation errors. Hardening only.", "recommendation": "Record non-blob tree entry types and fail closed when a 404 matches any indexed entry.", "deferred": false, "closed": "closed-in-followup", "evidence": "github.ts readGitHubTreeIndex now indexes every entry (blob 100644/100755/120000, tree 040000, commit 160000), validates the fixed type/mode pairs and fails capture closed when a contents 404 matches any indexed entry; covered by github.spec.ts regression tests." },
+        { "id": "LOW-2", "issue": "When capture fails at the capturing stage, the Policy budget already finalized is not released, so an agent can exhaust only its own rollback budget.", "exploitability": "Self-denial of service; no integrity impact.", "recommendation": "Release the budget reservation when discarding a capturing placeholder.", "deferred": false, "closed": "closed-in-followup", "evidence": "Two-phase reserve (service.ts #reserveCompensation) holds capacity before capture and releases it on every pre-dispatch failure; crash recovery releases orphaned holds by idempotency key via assistant-policy releaseByIdempotencyKey. Pinned by compensation-service tests I/M/N/O/P and policy ledger/service tests." },
+        { "id": "LOW-3", "issue": "A GraphQL 200 carrying both errors and legal data is always recorded failed.", "exploitability": "Conservative semantics; UNIQUE guarantees no double commit.", "recommendation": "Retain current conservative behavior; document it.", "deferred": true, "note": "Behavior intentionally retained; documented here and in the tool description." },
+        { "id": "LOW-4", "issue": "An oversized or truncated recursive tree permanently disables compensation for that commit.", "exploitability": "Intentional fail-closed availability tradeoff, not a vulnerability.", "recommendation": "None required; recorded as a known boundary.", "deferred": true, "note": "Recorded fail-closed boundary; no code change." }
       ],
       "testGapDisposition": [
         { "gap": "errors-array acknowledgement settles rejected and is not retried", "status": "closed-in-this-submission", "test": "plugins/assistant-actions/tests/github.spec.ts -> 'settles a GraphQL errors acknowledgement as failed/rejected and never retries'" },
         { "gap": "post-placeholder authorization denial discards the row and a new key retry succeeds", "status": "closed-in-this-submission", "test": "plugins/assistant-actions/tests/compensation-service.spec.ts -> test J" },
-        { "gap": "in-flight revoke and owner-change branches during the 100ms poll", "status": "deferred-followup" },
-        { "gap": "submodule/directory tree entries in 200 and 404 cases (LOW-1 hardening)", "status": "deferred-followup" },
-        { "gap": "branches endpoint 302 maps to unknown", "status": "deferred-followup" },
-        { "gap": "v2-to-v3 ledger migration coverage (only v1 migration is covered today)", "status": "deferred-followup" },
-        { "gap": "service-level end-to-end assertion that compensation file contents never echo the PAT", "status": "deferred-followup" }
-      ]
+        { "gap": "in-flight revoke and owner-change branches during the 100ms poll", "status": "closed-in-followup", "test": "plugins/assistant-actions/tests/compensation-service.spec.ts -> tests M (in-flight revoke) and N (owner change): the capturing placeholder is discarded and the policy reservation released" },
+        { "gap": "submodule/directory tree entries in 200 and 404 cases (LOW-1 hardening)", "status": "closed-in-followup", "test": "plugins/assistant-actions/tests/github.spec.ts -> readGitHubTreeIndex indexes blob/tree/commit entries and a contents 404 matching a non-blob indexed entry fails capture closed" },
+        { "gap": "branches endpoint 302 maps to unknown", "status": "closed-in-followup", "test": "plugins/assistant-actions/tests/github-http.spec.ts -> redirect-without-follow maps the branch read to unknown and no compensation commit is sent" },
+        { "gap": "v2-to-v3 ledger migration coverage (only v1 migration is covered today)", "status": "deferred-followup", "note": "Still open: no v2->v3 schema migration regression test; retained as an explicit post-merge followup." },
+        { "gap": "service-level end-to-end assertion that compensation file contents never echo the PAT", "status": "closed-in-followup", "test": "plugins/assistant-actions/tests/compensation-service.spec.ts -> test O pins that the token value never appears in the captured preimage, result, error or audit output" },
+        { "gap": "sealed prepared row left live when the hold/authorization ends after the preimage seal but before the dispatch flip", "status": "closed-in-followup", "test": "plugins/assistant-actions/tests/compensation-service.spec.ts -> test P releases the still-open reservation through the real assistant-policy API during the capture window and asserts terminal unknown (reason authorization-ended-before-dispatch), compensation-abandoned audit, zero POSTs, released reservation with zeroed period amounts, and same-key replay returning the same unknown without re-POST; plugins/assistant-actions/tests/ledger.spec.ts adds the ledger-level abandon CAS cases" }
+      ],
+      "secondPassReview": {
+        "status": "passed",
+        "summary": "A second independent four-dimension adversarial review (budget state machine, crash recovery, untrusted GitHub responses, auth/identity) ran over the followup working-tree diff. Three dimensions returned zero findings. The budget-state-machine dimension opened one medium: after the preimage seal but before the local dispatch flip, a failure released the budget hold while the old cleanup only discarded 'capturing' placeholders, leaving a live 'prepared' zombie that only the next process restart would terminalize. Source analysis narrowed the real trigger: the seal->flip span is fully synchronous and a signal abort cannot interleave there (it is intercepted while the row is still 'capturing'); the reachable window is the second #reserveCompensation recheck failing because the open reservation row was released by idempotency key through the assistant-policy API during the capture await. The fix adds ledger.abandonPreparedCompensation (a CAS prepared->unknown live counterpart of the recoverCompensations prepared branch, audited compensation-abandoned) and invokes it from the service catch for the never-dispatched prepared case, after the hold is released. unknown stays terminal and is never replayed, and the forward action's one compensation slot remains occupied exactly as crash recovery assigns.",
+        "dimensions": [
+          { "dimension": "crash-recovery", "findings": 0 },
+          { "dimension": "untrusted-github", "findings": 0 },
+          { "dimension": "auth-identity", "findings": 0 },
+          { "dimension": "budget-state-machine", "findings": 1, "severity": "medium", "state": "fixed-and-adversarially-rechecked" }
+        ],
+        "verification": [
+          { "pass": "adversarial verify of the original medium (workflow wf_21c7e5d2-c7a)", "verdict": "claim-as-written-refuted / fix confirmed present", "detail": "The verifier established the reviewer's signal-abort window is unreachable (service.ts:575 re-checks authorization and combined.aborted; the seal, prepared guard, second reserve recheck and dispatch flip are synchronous with no await), while independently confirming the working-tree fix closes the prepared-zombie harm: the catch calls abandonPreparedCompensation (CAS on status='prepared' AND expected version), returns undefined if dispatch won the race so a POSTed row is never downgraded, startup recoverCompensations plus releaseByIdempotencyKey handles hard-crash orphans, and same-key replay returns the terminal unknown without re-reserving or re-POSTing." },
+          { "pass": "mutation test of regression test P", "verdict": "test-pins-the-defect", "detail": "With the live prepared transition removed (call site replaced by a no-op), compensation-service test P fails with \"expected 'prepared' to be 'unknown'\"; restoring the fix makes it pass, proving the test cannot pass against the zombie behavior." },
+          { "pass": "fresh independent adversarial re-audit of the final tree", "verdict": "CONFIRMED-fix-holds", "detail": "A separate adversarial auditor re-read the complete compensation state machine in ledger.ts, #executeCompensation/#reserveCompensation/startup recovery in service.ts, the assistant-policy reserve/finalize/release/releaseByIdempotencyKey semantics and both tests, attempting to refute the fix. It confirmed: (1) the reachable trigger is exactly the capture-await window in which another connection releases the still-open reservation (stillAuthorized() at the post-capture recheck does not inspect policy holds, so the sealed prepared row reaches the second #reserveCompensation and fails there); signal abort / grant revoke / owner change cannot interleave in the synchronous seal->flip span and are correctly handled by the capturing branch. (2) abandon/dispatch cannot wrongly downgrade a POSTed row: both run in BEGIN IMMEDIATE with WHERE status='prepared' AND version=?; SQLite serializes the writers, and the service additionally gates on the in-memory dispatched flag. (3) Budget accounting is exactly-once: the external release already decremented reserved_amount and the catch release hits policy's idempotent released branch, so the period nets to zero with no double-release; a live row that was actually finalized is never released; live and restart recovery paths account identically. (4) unknown is terminal and never replayed: same-key replay returns the stored unknown before any reserve/POST; a different key against the same forward action hits UNIQUE(forward_action_id) conflict. (5) abandon's audit row is written in the same transaction as the CAS UPDATE; business errors still propagate. Residual observations (non-blocking): if abandon itself fails because the controller fence was lost, the row briefly stays prepared until restart recovery (no budget leak, fail-closed); #reserveCompensation maps all reservation errors to a coarse fail-closed denial; the trigger surface is the narrow policy-side concurrent-change window. Reverting the fix makes three independent assertions in test P red and the new ledger test fails on the missing primitive, so the tests genuinely pin the defect." }
+        ]
+      }
     }
   },
   "finalRootCheck": {
     "status": "passed",
     "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
-    "log": "/tmp/wp10-root-check.log",
-    "sha256": "5b258e375aa42f62383a04316fb468d07294a08c890ae0fc906659e70eaaf0c7",
+    "log": "/tmp/wp10-root-check-2.log",
+    "sha256": "5fa992fe9e354e917366a34f76f7542ad99992e16d0d96cbee1948f1058858b3",
     "exitCode": 0,
-    "rootTestFilesPassed": 359,
-    "rootTestsPassed": 4754,
+    "rootTestFilesPassed": 362,
+    "rootTestsPassed": 4844,
     "rootTestsSkipped": 1,
-    "countingNote": "Totals sum every 'Test Files'/'Tests' summary line in the log: the root-aggregated vitest run (30 files / 427 passed / 1 skipped, 320s, including the Docker-backed isolation tests) plus the per-package recursive test run; the two layers execute overlapping packages, so these are aggregate executions rather than unique tests. The single skip is in the root-aggregated run; the recursive assistant-isolation package ran its Docker suite to completion (26 files / 135 passed).",
+    "countingNote": "Totals sum every 'Test Files'/'Tests' summary line in the log (34 summaries): the root-aggregated vitest run (30 files / 441 passed / 1 skipped, including the Docker-backed isolation tests) plus the per-package recursive test run; the two layers execute overlapping packages, so these are aggregate executions rather than unique tests. The single skip is in the root-aggregated run; the recursive assistant-isolation package ran its Docker suite to completion (26 files / 135 passed). Re-run against the followup tree after the abandonPreparedCompensation live-transition fix and tests K-P.",
     "dryRunPacks": 33
   },
   "claimsBoundary": {
@@ -123,16 +141,17 @@
     "Unknown compensation dispatches stay occupied and are never automatically retried or relabeled from observed branch state.",
     "Only the captured authorized files are restored; PR, CI, review/comment, message/notification, webhook, deployment, release and arbitrary external effects remain outside this protocol.",
     "Private preimages contain repository file content and require the same private state-root ownership, retention and backup controls as the Actions ledger.",
-    "The independent adversarial review is complete (YES-WITH-FOLLOWUPS) and the final root gate passed (exit 0); deferred LOW items and test gaps are recorded for post-merge followup.",
+    "The independent adversarial review is complete (YES-WITH-FOLLOWUPS), a second four-dimension adversarial pass plus an adversarial recheck of the one medium it raised are complete, and the final root gate is re-run against the followup tree; LOW-1/LOW-2 were closed with code and tests, LOW-3/LOW-4 are retained as documented conservative boundaries, and the only open test gap is v2-to-v3 ledger migration coverage.",
     "WP10 remains implementing and the complete 18-work-package objective remains active."
   ],
   "sourceHashes": {
-    "plugins/assistant-actions/src/github.ts": "dbdefcd29b0337f3c6ed1724a0c63da7183fd48eb70d34e0d059ff23c3e4dbe0",
-    "plugins/assistant-actions/src/ledger.ts": "21b195dc5f8e6d3218f6aea176a1aaa6f50343583b8e530418e8195f05bf3e97",
-    "plugins/assistant-actions/src/service.ts": "81fa5654ae3c3b9bbca1ab9751c5c3c1f17d16808b328693c7d89210bd2bb605",
+    "plugins/assistant-actions/src/github.ts": "bf9a75807ae0ac2bfb005b36208d5049efb3a7d61c688f059de2c75547216666",
+    "plugins/assistant-actions/src/ledger.ts": "2a48dcb83ab973461158f16ea100b4ce19d775ef30f9d52d819de1c1a80afac1",
+    "plugins/assistant-actions/src/service.ts": "5bc90e1baaddce387c24fffbc6ff40986f7935a57248016cfaa023f2bd6050bf",
     "plugins/assistant-actions/src/config.ts": "3baa4801041a94d3617e0354645f3abbbb22223994604fea79539d48af54da6c",
     "plugins/assistant-actions/src/types.ts": "ac84a026cc53f9f69f267ea3ed588b20eb38dbb1f159f7c829c00cb89cd7213f",
-    "plugins/assistant-policy/src/service.ts": "8fcf43442c3debab07dfeb82709b8fee3ddc7a00b1e9fbc23a26f1f6a16e9c30",
+    "plugins/assistant-policy/src/service.ts": "2f8a003d02030e12fb802fcd04012c305caf50ba4928fc93f8a3828e07f4b1a2",
+    "plugins/assistant-policy/src/ledger.ts": "f7c130ff9658566383b8b127f03b18ed27f7b5898bfdd41e5f2752a41f6fdebd",
     "plugins/assistant-isolation/src/service.ts": "3ef9ca58fcc452c95e3ac89a964963d55cd7aea7b21830a4e918451f05b6e339"
   }
 }
