@@ -11,7 +11,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
 
     steps:
       - name: Check out repository
@@ -104,7 +104,7 @@ jobs:
     # verified instead of trusting the Linux job for it. Linux-only suites
     # (bubblewrap sandbox, root-owned system dirs) skip themselves by platform.
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
 
     steps:
       - name: Check out repository

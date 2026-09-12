@@ -9,7 +9,9 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { DatabaseSync } from 'node:sqlite'
+import { externalDeliveryFixture } from './external-delivery-fixture.ts'
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -21,7 +23,7 @@ import type { ActionGrant } from '../src/types.ts'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 const oid = 'a'.repeat(40)
-async function fixture(acceptance?: 'goal-step') {
+async function fixture(acceptance?: 'goal-step', external = false) {
   const root = await mkdtemp(join(tmpdir(), 'verified-delivery-service-')); const ctx = new Context(); const id = SessionId('owner-session')
   await writeFile(join(root, 'secret'), 'fixture-secret', { mode: 0o600 })
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: root, agentPreset: 'primary' })
@@ -40,10 +42,10 @@ async function fixture(acceptance?: 'goal-step') {
     { id: 'background', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:verified' } },
     { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
   ] })
-  await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(root, 'secret'), consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }] })
+  if (!external) await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(root, 'secret'), consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }] })
   ctx.provide('agents' as never, { get: (key: string) => agents.get(key) } as never)
   const notifications = vi.fn()
-  ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' }, bindingVersion: 1, bindingGeneration: 1 }), validateOwnerRoute: () => ({ ...route, receiptVersion }), enqueueOwnerNotification: notifications } as never)
+  ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' }, sessionId: 'owner-session', bindingId: 'binding', bindingVersion: 1, bindingGeneration: 1 }), resolveOwnerRoute: () => ({ binding: { id: 'binding', sessionId: 'owner-session' }, snapshot: { bindingVersion: route.bindingVersion, generation: route.generation } }), validateOwnerRoute: () => ({ ...route, receiptVersion }), enqueueOwnerNotification: notifications } as never)
   ctx.provide('assistantGoals' as never, goals as never);
   const repositoryAuthority = { kind: 'repository-readback' as const, id: 'repository', grantId: 'verified', grantRevision: 1, repository: 'owner/repository', branch: 'fix', baseBranch: 'main', requiredChecks: [{ name: 'CI', appId: 7 }], reviewerIds: [42], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 1_000 }
   const compiledAuthority = createVerifierAuthorities({ authorities: [repositoryAuthority] })[0]!
@@ -51,17 +53,19 @@ async function fixture(acceptance?: 'goal-step') {
   const verifier = new AssistantVerifierService(ctx, { databasePath: join(root, 'verifier.sqlite'), authorities: [repositoryAuthority], tickIntervalMs: 0, requireAcceptance: true, profiles: [{ id: 'repository-profile', version: 1, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'record', principalVersion: 1 }, taskKind: 'goal-outcome', objective: 'Repository delivery', validityMs: 30_000, bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 }, criteria: [repositoryCriterion] }] })
   ctx.provide('assistantAutomations' as never, automations as never)
   const commit = vi.fn(async input => ({ actionId: input.actionId, status: 'succeeded' as const, commitOid: 'c'.repeat(40) })); const pullRequest = vi.fn(async input => ({ actionId: input.actionId, status: 'succeeded' as const, pullRequestNumber: 7 }))
-  const remotePullRequest = { id: 7, number: 7, state: 'open', merged: false, head: { ref: 'fix', sha: 'c'.repeat(40), repo: { full_name: 'owner/repository' } }, base: { ref: 'main', repo: { full_name: 'owner/repository' } } }
-  const inspect = vi.fn(async ({ kind }: any) => ({ observed: kind === 'branch' ? { name: 'fix', commit: { sha: 'c'.repeat(40) } }
-    : kind === 'pull-request' ? remotePullRequest
+  const remotePullRequest = { number: 7, state: 'open', merged: false, head: { ref: 'fix', sha: 'c'.repeat(40), repo: { full_name: 'owner/repository' } }, base: { ref: 'main', repo: { full_name: 'owner/repository' } } }
+  const inspect = vi.fn(async ({ kind }: any) => ({ observed: kind === 'branch' ? { name: 'fix', commit: { sha: 'c'.repeat(40) }, untrusted: true }
+    : kind === 'pull-request' ? { ...remotePullRequest, untrusted: true }
       : { pullRequest: remotePullRequest, headOid: 'c'.repeat(40), items: kind === 'checks' ? [{ id: 1, name: 'CI', app: { id: 7 }, head_sha: 'c'.repeat(40), status: 'completed', conclusion: 'success' }]
         : [{ id: 1, user: { id: 42 }, commit_id: 'c'.repeat(40), state: 'APPROVED', submitted_at: '2025-01-01T00:00:00Z' }], truncated: false, untrusted: true } }))
+  const broker = external ? await externalDeliveryFixture(root, grant, { commit, pullRequest, inspect }) : undefined
+  if (broker) cleanups.push(() => broker.close())
   let service!: AssistantActionsService
-  const plugin = await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) { service = new AssistantActionsService(runtime, { stateRoot: join(root, 'actions'), grants: [grant] }, commit, { branch: vi.fn(), pullRequest, inspect } as any) } })
+  const plugin = await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) { service = new AssistantActionsService(runtime, broker?.config ?? { stateRoot: join(root, 'actions'), grants: [grant] }, external ? vi.fn() : commit, external ? { branch: vi.fn(), pullRequest: vi.fn(), inspect: vi.fn() } as any : { branch: vi.fn(), pullRequest, inspect } as any, undefined, broker?.dispatch) } })
   const execute = (name: string, args: any) => ctx.tools.execute({ callId: ToolCallId(`${name}-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
   const activate = async (event = 'goal/changed') => { (ctx.emit as any)(event, { taskKind: 'goal-step' }); await new Promise(resolve => setTimeout(resolve, 0)); const active = reconciles.filter(entry => entry.desiredStatus === 'active').at(-1)!; return executors[0].execute({ occurrenceId: 'o', automationId: active.automationId, definitionHash: createHash('sha256').update(JSON.stringify(active.definition)).digest('hex'), executionMode: 'production', targetScope: { workspace: root, preset: 'primary' }, principal: 'owner', ownerRouteId: 'route', activationNonce: active.automationId, catalogDigest: executors[0].descriptor.catalogDigest, signal: new AbortController().signal }) }
   cleanups.push(async () => { await plugin.dispose(); await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
-  return { ctx, agent, agents, goals, registration: () => registration, setProof: (value: any) => { proof = value }, repositoryAuthority: compiledAuthority, executors, reconciles, grant, commit, pullRequest, inspect, verifier, notifications, execute, activate, read: (input: any) => service.readRepositoryGoalOutcome(input, new AbortController().signal), prepare: (input: any) => service.prepareVerifiedDelivery(agent, input), revokeRoute: () => { route = { ...route, bindingVersion: 2 } }, changeReceipt: () => { receiptVersion++ } }
+  return { root, broker, service, ctx, agent, agents, goals, registration: () => registration, setProof: (value: any) => { proof = value }, repositoryAuthority: compiledAuthority, executors, reconciles, grant, commit, pullRequest, inspect, verifier, notifications, execute, activate, read: (input: any) => service.readRepositoryGoalOutcome(input, new AbortController().signal), prepare: (input: any) => service.prepareVerifiedDelivery(agent, input), revokeRoute: () => { route = { ...route, bindingVersion: 2 } }, changeReceipt: () => { receiptVersion++ } }
 }
 
 describe('verified delivery Actions service', () => {
@@ -219,8 +223,71 @@ describe('verified delivery Actions service', () => {
   it('does not mark a remote outcome ready when the current branch head differs from the settled commit', async () => {
     const f = await fixture('goal-step'); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
     const original = f.inspect.getMockImplementation()
-    f.inspect.mockImplementation(async (input: any) => input.kind === 'branch' ? { observed: { name: 'fix', commit: { sha: oid } } } : await original!(input))
+    f.inspect.mockImplementation(async (input: any) => input.kind === 'branch' ? { observed: { name: 'fix', commit: { sha: oid }, untrusted: true } } : await original!(input))
     await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).resolves.toEqual(expect.objectContaining({ headOid: '', ci: 'unknown', review: 'unknown', pullRequest: 'open', ready: false }))
+  })
+
+  it('delivers accepted artifacts through the signed external socket and verifies the exact remote outcome without Host credentials', async () => {
+    const f = await fixture('goal-step', true)
+    expect(f.ctx.get('credentialsKeychain', false)).toBeUndefined()
+    await completeStepDelivery(f)
+    await expect(access(join(f.root, 'actions', 'ledger.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(f.commit).toHaveBeenCalledWith(expect.objectContaining({ token: 'external-only-fixture-secret', request: expect.objectContaining({ files: [{ path: 'artifacts/release.txt', content: 'verified source' }] }) }))
+    expect(f.pullRequest).toHaveBeenCalledOnce()
+    expect(f.notifications).toHaveBeenCalledOnce()
+    const status = await f.execute('action_github_delivery_status', { grantId: 'verified', idempotencyKey: 'repository' })
+    expect(JSON.stringify(status)).not.toContain('signature')
+    expect(JSON.stringify(status)).not.toContain('external-only-fixture-secret')
+    const db = new DatabaseSync(join(f.root, 'actions', 'verified-delivery.sqlite'))
+    try {
+      const rows = JSON.stringify(db.prepare('SELECT * FROM deliveries').all())
+      expect(rows).not.toContain('verified source')
+      expect(rows).toContain('brokerReceipts')
+    } finally { db.close() }
+    const { handle } = bindRepository(f)
+    f.setProof({ ...handle, dispatchedAt: Date.now(), completedAt: Date.now(), status: 'succeeded', quiescent: true, executionRef: 'assessment' })
+    await f.registration().completed(handle); await f.verifier.tick()
+    expect(f.verifier.inspectAcceptedTask(handle.contractId)).toMatchObject({ state: 'done', receipt: { objectiveStatus: 'achieved' } })
+    expect(f.inspect).toHaveBeenCalledTimes(4)
+    const inspected = await f.execute('action_github_inspect', { grantId: 'verified', kind: 'branch' })
+    expect(inspected.isError).not.toBe(true)
+    expect(JSON.stringify(inspected)).toContain('succeeded')
+    expect(JSON.stringify(inspected)).not.toContain('signature')
+    expect(JSON.stringify(inspected)).not.toContain('server-hello')
+  })
+
+  it('rejects altered signed delivery history before external readback', async () => {
+    const f = await fixture('goal-step', true); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
+    const db = new DatabaseSync(join(f.root, 'actions', 'verified-delivery.sqlite'))
+    try {
+      const row = db.prepare('SELECT id,result FROM deliveries').get() as { id: string; result: string }
+      const result = JSON.parse(row.result); result.brokerReceipts.commit.response.signature = Buffer.alloc(64).toString('base64url')
+      db.prepare('UPDATE deliveries SET result=? WHERE id=?').run(JSON.stringify(result), row.id)
+    } finally { db.close() }
+    await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).rejects.toThrow()
+    expect(f.inspect).not.toHaveBeenCalled()
+  })
+
+  it('fences external readback when broker generation changes and never repeats the successful writes', async () => {
+    const f = await fixture('goal-step', true); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
+    const input = { contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest }
+    const generation = f.service.repositoryReadbackGeneration()
+    await f.broker!.restart()
+    await expect(f.read(input)).rejects.toThrow(/broker changed/)
+    expect(f.service.repositoryReadbackGeneration()).not.toBe(generation)
+    await expect(f.read(input)).resolves.toMatchObject({ ready: true })
+    expect(f.commit).toHaveBeenCalledOnce(); expect(f.pullRequest).toHaveBeenCalledOnce()
+  })
+
+  it('rejects direct mutations and changed owner authority for external verified grants', async () => {
+    const f = await fixture('goal-step', true)
+    const direct = await f.execute('action_github_commit', { grantId: 'verified', idempotencyKey: 'direct', expectedHeadOid: oid, headline: 'No', files: [{ path: 'artifacts/release.txt', content: 'unverified' }] })
+    expect(direct.isError).toBe(true); expect(f.commit).not.toHaveBeenCalled()
+    f.goals.inspectOwnerGoalExecution.mockReturnValue(stepEvidence())
+    await f.execute('action_github_deliver', { grantId: 'verified', idempotencyKey: 'changed', expectedHeadOid: oid, headline: 'Deliver', paths: ['artifacts/release.txt'] })
+    f.changeReceipt(); (f.ctx.emit as any)('assistant-verifier/receipt', { taskKind: 'goal-step' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(f.commit).not.toHaveBeenCalled(); expect(f.notifications).not.toHaveBeenCalled()
   })
 
 })

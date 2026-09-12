@@ -4,9 +4,11 @@
 
 仓库提供两类能力：面向编码场景的 ACP/模型 provider，以及基于 DSH `0.1.2-rc.1` 自研的实验性个人助理套件。个人助理适合先在受监督的单机 profile 中使用。
 
+基本 RSI 首版支持同一任务族的有限连续改进：独立确认失败后自主修复，生成技能候选，经过独立比较和后续实际任务验证后晋升，再继续下一轮，并把结果送回原会话。模板渲染任务已取得连续两轮的真实 TraeX 组合验收证据。使用入口见[有限 repair admission](plugins/assistant-web-owner/README.md#有限-repair-admission)，证据和限制见[两轮验收记录](docs/evidence/basic-rsi-two-round-2026-09-12.json)。中途修复进程崩溃仍报告 `unknown`，不自动重放；完整 RSI 规划继续保留。
+
 ## 快速开始
 
-要求 Node.js 22.19+（或 24+）和 pnpm 11.7.0。安装已发布插件：
+要求 Node.js 22.19+（或 24+）、pnpm 11.7.0 和精确的 DSH `0.1.2-rc.1`。首版不兼容 DSH `0.1.5` 的会话持久化接口；已有其它版本时请为本套件使用独立的匹配 CLI，不要覆盖日常环境。安装已发布插件：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/<plugin-name>
@@ -56,7 +58,7 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
 ```
 
-不便先 clone 仓库时，可一键远程安装。远程引导器会从固定发布 tag 下载并校验 `common.sh`；请求 `--operation upgrade|uninstall` 时，还会从同一个 tag 下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`，三个资产全部通过各自内嵌的 SHA-256 后才允许任何安装代码执行。当前 `v0.1.24` 不含后两个 helper，因此其占位 digest 为全零：普通远程安装继续可用，远程 upgrade/uninstall 则在下载或执行任何资产前 fail closed；下一次 `release:prepare` 会写入三个发布资产的真实 digest 后才可发布。直接从 checkout 运行的本地安装不受此占位值影响。DSH host 默认跟随 npm `latest`；发布后的安装脚本会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，从而保持默认获取最新完整发布且避免跨包 `latest` 混装。安装器会按发布账本中的已验证 host 范围进行检查，显式指定范围外版本时必须同时传 `--ack-unverified-host`：
+不便先 clone 仓库时，可一键远程安装。远程引导器会从固定发布 tag 下载并校验 `common.sh`；请求 `--operation upgrade|uninstall` 时，还会从同一个 tag 下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`，三个资产全部通过各自内嵌的 SHA-256 后才允许任何安装代码执行。旧 `v0.1.24` 的 lifecycle helper 摘要为全零，因此它不支持远程 upgrade/uninstall；新发布由 `release:prepare` 为三个实际资产生成独立摘要。DSH host 固定到首版已验证的 `0.1.2-rc.1`，不同版本在修改 profile 前拒绝，不自动保留较新但不兼容的 Host。插件安装会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，避免跨包 `latest` 混装：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash

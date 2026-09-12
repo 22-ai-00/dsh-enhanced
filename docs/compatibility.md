@@ -1,5 +1,7 @@
 # 兼容性基线
 
+基本 RSI 首版的已验证 Host 精确为 `@deepseek-ai/dsh@0.1.2-rc.1`。2026-09-12 的真实安装发现，全局 DSH `0.1.5-rc.1` 携带的 `dsh-session-persistence@0.1.5-rc.2` 不再提供 Policy 事件注册所需的 `PersistenceCoordinator.assertEventsSupported`，因此无法按当前可信注册协议激活。安装器固定匹配版本并在修改 profile 前拒绝其它版本；不会跳过事件证明或静默降级用户已有 CLI。扩展支持范围需完成独立的 Host 适配与真实安装验证。
+
 Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc.1` 的 `observeSession(..., { projectionMode: 'none' })`，读取完成会话后释放 observation，不创建执行 Agent。缺少服务时返回 `unavailable`；Skills 在服务就绪后重新核验待处理授权。`verified-workflow-source/v1` 可附带只作来源记录、永不重放的 `failedObservations`，成功步骤语义不变。新 owner bridge 的多回合来源以可选 `segments` 保留连续执行记录，v1 顶层仍指向最终验收回合；既有手动单回合 API 不返回该字段。自动提取需成套升级 Goals 与 Skills；`skill_capture(start_native_rounds: true)` 仅在登记成功后使用原生 `concludeTurn()` 交接，默认仍允许同一 owner 回合组合授权。升级验证包括冷会话读取、授权撤销、失败观察隔离和真实目标交接后重启复用。
 
 仓库当前对齐以下上游发布状态：

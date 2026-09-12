@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createBrokerClientRequest, createBrokerServerHello, type BrokerRequestIntent } from '../src/broker-protocol.ts'
+import { createBrokerClientRequest, createBrokerServerHello, type BrokerOperation, type BrokerRequestIntent } from '../src/broker-protocol.ts'
 import { BrokerLedgerError, ExternalBrokerLedger, brokerPayloadBytes, externalGrantMirror, withBrokerGrantDigest, type ExternalGitHubGrantUnsigned } from '../src/broker-ledger.ts'
 
 const roots: string[] = []
@@ -23,8 +23,9 @@ function grant(changes: Partial<ExternalGitHubGrantUnsigned> = {}) {
 }
 
 function request(generation: number, value = grant(), changes: Partial<BrokerRequestIntent> = {}) {
-  const payload = { expectedHeadOid: 'c'.repeat(40), headline: 'change', files: [{ path: 'a.txt', content: 'hello' }] }
-  const partial = { actionId: 'action', grantId: value.id, grantRevision: value.revision, grantDigest: value.digest, owner: value.owner, sessionId: value.sessionId, agentId: 'agent', rootCallId: 'root-call', callId: 'call', operation: 'commit' as const,
+  const operation = (changes.operation ?? 'commit') as BrokerOperation
+  const payload = operation === 'commit' ? { expectedHeadOid: 'c'.repeat(40), headline: 'change', files: [{ path: 'a.txt', content: 'hello' }] } : operation === 'pull-request' ? { expectedHeadOid: 'c'.repeat(40), title: 'Change', body: 'Bounded change' } : { kind: 'repository' as const }
+  const partial = { actionId: 'action', grantId: value.id, grantRevision: value.revision, grantDigest: value.digest, owner: value.owner, sessionId: value.sessionId, agentId: 'agent', rootCallId: 'root-call', callId: 'call', operation,
     source: value.source, destination: { classification: 'github-repository' as const, repository: value.destination.repository, branch: value.destination.branch, ...(value.destination.baseBranch === undefined ? {} : { baseBranch: value.destination.baseBranch }) }, payload, deadline: now + 30_000,
     budget: { reservationId: 'reservation', actions: 1, bytes: 0, costMetric: 'github-api-units' as const, maxCostUnits: 1 }, ...changes }
   const hello = createBrokerServerHello({ instanceId: 'broker', generation, policyEpoch: value.policyEpoch, emergencyEpoch: value.emergencyEpoch, expiresAt: now + 30_000 }, keys.privateKey)
@@ -82,6 +83,17 @@ describe('ExternalBrokerLedger', () => {
     ledger.close()
   })
 
+  it('occupies a PR repository branch through success or unknown so a new action cannot retry it', async () => {
+    const ledger = new ExternalBrokerLedger(await path(), 'broker', { now: () => now }), authority = ledger.claimController('daemon')
+    const scoped = grant({ destination: { classification: 'github-repository', repository: 'owner/repository', branch: 'main', baseBranch: 'release', paths: ['a.txt'] }, allowedOperations: ['pull-request'], allowedInspectKinds: [] })
+    ledger.syncGrants([scoped], 4, authority)
+    let first = ledger.prepare(request(authority.generation, scoped, { operation: 'pull-request' }), authority).record
+    first = ledger.dispatch(first.actionId, first.version, first.requestDigest, 'github', now + 10_000, authority)
+    ledger.settle(first.actionId, first.version, first.requestDigest, { status: 'unknown', dispatched: true, result: null, error: { code: 'ack-lost' }, completedAt: now }, authority)
+    expect(() => ledger.prepare(request(authority.generation, scoped, { actionId: 'new-action', callId: 'new-call', operation: 'pull-request', payload: { expectedHeadOid: 'd'.repeat(40), title: 'Change', body: 'Bounded change' }, budget: { reservationId: 'new-reservation', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } }), authority)).toThrow(/conflict/)
+    ledger.close()
+  })
+
   it('fences controllers, reserves exact budgets and makes replay semantic rather than challenge-bound', async () => {
     const database = await path(), ledger = new ExternalBrokerLedger(database, 'broker', { now: () => now })
     const authority = ledger.claimController('daemon'); const value = grant(); ledger.syncGrants([value], 4, authority)
@@ -109,6 +121,22 @@ describe('ExternalBrokerLedger', () => {
     expect(second.status('client-key', prepared.actionId, prepared.requestDigest)?.outcome).toMatchObject({ status: 'failed', dispatched: false, error: { code: 'restart-before-dispatch' } })
     expect(second.status('client-key', dispatched.actionId, dispatched.requestDigest)?.outcome).toMatchObject({ status: 'unknown', dispatched: true, error: { code: 'restart-after-dispatch' } })
     second.close()
+  })
+
+  it('keeps an uncertain commit occupied across keys and grant revisions while permitting inspection', async () => {
+    const ledger = new ExternalBrokerLedger(await path(), 'broker', { now: () => now }), authority = ledger.claimController('daemon'), value = grant()
+    ledger.syncGrants([value], 4, authority)
+    const first = ledger.prepare(request(authority.generation, value), authority).record
+    const other = ledger.prepare(request(authority.generation, value, { actionId: 'other', callId: 'other', budget: { reservationId: 'other', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } }), authority).record
+    const sent = ledger.dispatch(first.actionId, first.version, first.requestDigest, 'github', now + 10_000, authority)
+    expect(() => ledger.dispatch(other.actionId, other.version, other.requestDigest, 'github', now + 10_000, authority)).toThrow(/conflict/)
+    ledger.settle(sent.actionId, sent.version, sent.requestDigest, { status: 'unknown', dispatched: true, result: null, error: { code: 'lost-ack' }, completedAt: now }, authority)
+    const replacement = grant({ revision: 2, policyEpoch: 5 })
+    ledger.syncGrants([replacement], 5, authority)
+    expect(() => ledger.prepare(request(authority.generation, replacement, { actionId: 'new-key', callId: 'new-key', budget: { reservationId: 'new-key', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } }), authority)).toThrow(/conflict/)
+    const read = ledger.prepare(request(authority.generation, replacement, { actionId: 'inspect', callId: 'inspect', operation: 'inspect', budget: { reservationId: 'inspect', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } }), authority)
+    expect(read.record.operation).toBe('inspect')
+    ledger.close()
   })
 
   it('bumps emergency epoch on stop and resume so stale requests never revive', async () => {
@@ -145,6 +173,21 @@ describe('ExternalBrokerLedger', () => {
     const reopened = new ExternalBrokerLedger(database, 'broker', { now: () => now }), next = reopened.claimController('next')
     expect(reopened.grant(value.id)).toBeUndefined()
     reopened.releaseController(next); reopened.close()
+  })
+
+  it('revokes a prepared PR and recovers a dispatched PR as unknown without reopening delivery', async () => {
+    const database = await path(), first = new ExternalBrokerLedger(database, 'broker', { now: () => now }), authority = first.claimController('daemon')
+    const scoped = grant({ destination: { classification: 'github-repository', repository: 'owner/repository', branch: 'main', baseBranch: 'release', paths: ['a.txt'] }, allowedOperations: ['pull-request'], allowedInspectKinds: [] })
+    first.syncGrants([scoped], 4, authority)
+    let pending = first.prepare(request(authority.generation, scoped, { operation: 'pull-request' }), authority).record
+    pending = first.dispatch(pending.actionId, pending.version, pending.requestDigest, 'github', now + 10_000, authority)
+    first.revoke(scoped.id, scoped.revision, first.snapshot().controlVersion, 'operator-request', authority)
+    expect(first.status(pending.clientKeyId, pending.actionId, pending.requestDigest)?.outcome).toMatchObject({ status: 'unknown', dispatched: true })
+    now += 31_000; first.close()
+    const second = new ExternalBrokerLedger(database, 'broker', { now: () => now }), next = second.claimController('next')
+    expect(second.status(pending.clientKeyId, pending.actionId, pending.requestDigest)?.outcome).toMatchObject({ status: 'unknown', dispatched: true })
+    expect(() => second.prepare(request(next.generation, scoped, { actionId: 'revoked-pr', callId: 'revoked-pr', operation: 'pull-request', budget: { reservationId: 'revoked-pr', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } }), next)).toThrow(/grant/)
+    second.close()
   })
 
   it('fails closed when a canonical stored grant is tampered', async () => {

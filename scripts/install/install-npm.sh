@@ -10,10 +10,11 @@ DSH_ENHANCED_PINNED_COMMON_SHA256='2ef41724f752a9030a158822288d0e3326e7b046102ea
 DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='0000000000000000000000000000000000000000000000000000000000000000'
 DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='0000000000000000000000000000000000000000000000000000000000000000'
 DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.8'
+DSH_ENHANCED_PINNED_HOST_VERSION='0.1.2-rc.1'
 
-# The local checkout's common.sh resolves npm `latest` once from the
-# personal-assistant anchor. The remote fallback intentionally stays on the
-# released ref above until release:prepare updates this ref and digest together.
+# The local checkout and the remote fallback both use an exact supported Host.
+# The remote fallback intentionally stays on the released ref above until
+# release:prepare updates this ref and digest together.
 # Override with --plugin-version or DSH_ENHANCED_VERSION using an exact version
 # or dist-tag. The pinned ref, SHA-256, and host range above stay aligned with
 # the fixed release used by the remote fallback.
@@ -434,6 +435,8 @@ else
   fi
   DSH_ENHANCED_VERIFIED_HOST_RANGE="$DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE"
   export DSH_ENHANCED_VERIFIED_HOST_RANGE
+  DSH_ENHANCED_PINNED_HOST_VERSION="$DSH_ENHANCED_PINNED_HOST_VERSION"
+  export DSH_ENHANCED_PINNED_HOST_VERSION
   # shellcheck source=/dev/null
   source "$TEMPORARY_DIRECTORY/common.sh"
 fi

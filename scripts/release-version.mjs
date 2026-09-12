@@ -14,6 +14,7 @@ const verifiedHostRangePattern = new RegExp(
   `^${hostRangeComparatorPatternSource}(?: ${hostRangeComparatorPatternSource})*$`,
   'u',
 )
+const pinnedHostVersionPattern = new RegExp(`^${hostVersionPatternSource}$`, 'u')
 const installerAssetPins = [
   ['common.sh', 'DSH_ENHANCED_PINNED_COMMON_SHA256'],
   ['lifecycle-config.mjs', 'DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256'],
@@ -73,6 +74,13 @@ function assertVerifiedHostRange(value, label) {
   return value
 }
 
+function assertPinnedHostVersion(value, label) {
+  if (typeof value !== 'string' || !pinnedHostVersionPattern.test(value)) {
+    throw new Error(`${label} must be an exact supported host semantic version`)
+  }
+  return value
+}
+
 function versionFromTag(tag) {
   const match = typeof tag === 'string'
     ? /^v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))$/.exec(tag)
@@ -110,6 +118,9 @@ function validateReleaseRecord(release, label, verifiedHostRangeRequired = true)
   assertIsoTimestamp(release.releasedAt, `${label} releasedAt`)
   if (verifiedHostRangeRequired || Object.hasOwn(release, 'verifiedHostRange')) {
     assertVerifiedHostRange(release.verifiedHostRange, `${label} verifiedHostRange`)
+  }
+  if (Object.hasOwn(release, 'pinnedHostVersion')) {
+    assertPinnedHostVersion(release.pinnedHostVersion, `${label} pinnedHostVersion`)
   }
   if (!isObject(release.packages)) {
     throw new Error(`${label} packages must be an object`)
@@ -156,12 +167,26 @@ function validateRecordedRelease(ledger) {
     || !packageMapsMatch(historyTail.packages, ledger.current.packages)) {
     throw new Error('Release history tail must match the current release')
   }
+  const currentHasPinnedHostVersion = Object.hasOwn(ledger.current, 'pinnedHostVersion')
+  const historyTailHasPinnedHostVersion = Object.hasOwn(historyTail, 'pinnedHostVersion')
+  if (currentHasPinnedHostVersion !== historyTailHasPinnedHostVersion
+    || (currentHasPinnedHostVersion
+      && ledger.current.pinnedHostVersion !== historyTail.pinnedHostVersion)) {
+    throw new Error('Release history tail pinnedHostVersion must match the current release')
+  }
 }
 
 function nextVerifiedHostRange(ledger) {
   return assertVerifiedHostRange(
     ledger.nextVerifiedHostRange,
     'Release manifest nextVerifiedHostRange',
+  )
+}
+
+function nextPinnedHostVersion(ledger) {
+  return assertPinnedHostVersion(
+    ledger.nextPinnedHostVersion,
+    'Release manifest nextPinnedHostVersion',
   )
 }
 
@@ -222,8 +247,18 @@ async function readRemoteInstallerAssets(root) {
   }
 }
 
-function pinRemoteInstaller(installerAssets, version, verifiedHostRange) {
+function pinSourceCommonHostVersion(source, pinnedHostVersion) {
+  return replacePinnedAssignment(
+    source,
+    'DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION',
+    pinnedHostVersion,
+    pinnedHostVersionPattern,
+  )
+}
+
+function pinRemoteInstaller(installerAssets, version, verifiedHostRange, pinnedHostVersion) {
   assertVerifiedHostRange(verifiedHostRange, 'Pinned installer verifiedHostRange')
+  assertPinnedHostVersion(pinnedHostVersion, 'Pinned installer host version')
   let pinned = replacePinnedAssignment(
     installerAssets.installer,
     'DSH_ENHANCED_PINNED_RELEASE_REF',
@@ -240,24 +275,39 @@ function pinRemoteInstaller(installerAssets, version, verifiedHostRange) {
     verifiedHostRange,
     verifiedHostRangePattern,
   )
+  pinned = replacePinnedAssignment(
+    pinned,
+    'DSH_ENHANCED_PINNED_HOST_VERSION',
+    pinnedHostVersion,
+    pinnedHostVersionPattern,
+  )
   return pinned
 }
 
-async function preparePinnedRemoteInstallerUpdate(root, version, verifiedHostRange) {
+async function preparePinnedRemoteInstallerUpdate(root, version, verifiedHostRange, pinnedHostVersion) {
   const installerAssets = await readRemoteInstallerAssets(root)
   if (installerAssets === null) return null
+  const common = installerAssets.assets.get('common.sh').toString('utf8')
+  const pinnedCommon = pinSourceCommonHostVersion(common, pinnedHostVersion)
+  installerAssets.assets.set('common.sh', Buffer.from(pinnedCommon))
   return {
     path: installerAssets.installerPath,
-    contents: pinRemoteInstaller(installerAssets, version, verifiedHostRange),
+    contents: pinRemoteInstaller(installerAssets, version, verifiedHostRange, pinnedHostVersion),
+    commonPath: join(root, 'scripts', 'install', 'common.sh'),
+    commonContents: pinnedCommon,
   }
 }
 
-async function verifyPinnedRemoteInstaller(root, version, verifiedHostRange) {
+async function verifyPinnedRemoteInstaller(root, version, verifiedHostRange, pinnedHostVersion) {
   const installerAssets = await readRemoteInstallerAssets(root)
   if (installerAssets === null) return
-  const expected = pinRemoteInstaller(installerAssets, version, verifiedHostRange)
+  const common = installerAssets.assets.get('common.sh').toString('utf8')
+  if (pinSourceCommonHostVersion(common, pinnedHostVersion) !== common) {
+    throw new Error('Pinned source common.sh host version does not match the pending exact host version')
+  }
+  const expected = pinRemoteInstaller(installerAssets, version, verifiedHostRange, pinnedHostVersion)
   if (expected !== installerAssets.installer) {
-    throw new Error('Pinned remote installer does not match the pending release version, installer asset digests, and verified host range')
+    throw new Error('Pinned remote installer does not match the pending release version, installer asset digests, verified host range, and exact host version')
   }
 }
 
@@ -290,6 +340,7 @@ async function validatePendingRelease(root, operation = 'verify') {
   assertStableVersion(pendingVersion, 'Pending release version')
   assertIsoTimestamp(ledger.pending.preparedAt, 'Pending release preparedAt')
   assertVerifiedHostRange(ledger.pending.verifiedHostRange, 'Pending release verifiedHostRange')
+  assertPinnedHostVersion(ledger.pending.pinnedHostVersion, 'Pending release pinnedHostVersion')
   if (ledger.current && compareVersions(pendingVersion, ledger.current.version) <= 0) {
     throw new Error(`Pending release ${pendingVersion} must be greater than current release ${ledger.current.version}`)
   }
@@ -347,7 +398,9 @@ async function validatePendingRelease(root, operation = 'verify') {
     }
   }
 
-  await verifyPinnedRemoteInstaller(root, pendingVersion, ledger.pending.verifiedHostRange)
+  await verifyPinnedRemoteInstaller(
+    root, pendingVersion, ledger.pending.verifiedHostRange, ledger.pending.pinnedHostVersion,
+  )
 
   return { ledger, ledgerPath, pendingVersion }
 }
@@ -416,14 +469,18 @@ async function prepare(root, requestedVersion) {
     version,
     preparedAt: new Date().toISOString(),
     verifiedHostRange: nextVerifiedHostRange(ledger),
+    pinnedHostVersion: nextPinnedHostVersion(ledger),
     packages,
   }
-  const installerUpdate = await preparePinnedRemoteInstallerUpdate(root, version, ledger.pending.verifiedHostRange)
+  const installerUpdate = await preparePinnedRemoteInstallerUpdate(
+    root, version, ledger.pending.verifiedHostRange, ledger.pending.pinnedHostVersion,
+  )
 
   await writeJson(rootManifestPath, rootManifest)
   await Promise.all(workspacePackages.map(workspacePackage => writeJson(workspacePackage.path, workspacePackage.manifest)))
   await Promise.all(workspacePackages.map(workspacePackage => writeFile(workspacePackage.versionPath, workspacePackage.versionSource)))
   if (installerUpdate) await writeFile(installerUpdate.path, installerUpdate.contents)
+  if (installerUpdate) await writeFile(installerUpdate.commonPath, installerUpdate.commonContents)
   await writeJson(ledgerPath, ledger)
   console.log(`Prepared release ${version}`)
 }
@@ -459,12 +516,14 @@ async function supersede(root, requestedVersion) {
     version: requestedVersion,
     preparedAt: new Date().toISOString(),
     verifiedHostRange: ledger.pending.verifiedHostRange,
+    pinnedHostVersion: ledger.pending.pinnedHostVersion,
     packages: Object.fromEntries(workspacePackages.map(({ manifest }) => [manifest.name, requestedVersion])),
   }
   const installerUpdate = await preparePinnedRemoteInstallerUpdate(
     root,
     requestedVersion,
     ledger.pending.verifiedHostRange,
+    ledger.pending.pinnedHostVersion,
   )
   await writeJson(rootManifestPath, rootManifest)
   await Promise.all(workspacePackages.map(({ manifest, manifestPath }) => writeJson(manifestPath, manifest)))
@@ -472,6 +531,7 @@ async function supersede(root, requestedVersion) {
     writeFile(versionPath, `export const version = '${requestedVersion}'\n`)
   )))
   if (installerUpdate) await writeFile(installerUpdate.path, installerUpdate.contents)
+  if (installerUpdate) await writeFile(installerUpdate.commonPath, installerUpdate.commonContents)
   await writeJson(ledgerPath, ledger)
   console.log(`Superseded pending release ${pendingVersion} with ${requestedVersion}`)
 }
@@ -483,6 +543,7 @@ async function record(root) {
     version: pendingVersion,
     releasedAt: new Date().toISOString(),
     verifiedHostRange: ledger.pending.verifiedHostRange,
+    pinnedHostVersion: ledger.pending.pinnedHostVersion,
     packages: ledger.pending.packages,
   }
   ledger.current = release
@@ -503,11 +564,13 @@ async function verifyTag(root, tag) {
 
 async function status(root) {
   const ledger = await readJson(join(root, 'release-manifest.json'))
+  validateRecordedRelease(ledger)
   const baseVersion = ledger.pending?.version ?? ledger.current?.version
   if (!baseVersion) throw new Error('Release manifest has neither a current nor a pending version')
   console.log(`Current release: ${ledger.current?.version ?? 'none'}`)
   console.log(`Pending release: ${ledger.pending?.version ?? 'none'}`)
   console.log(`Next verified host range: ${nextVerifiedHostRange(ledger)}`)
+  console.log(`Next pinned host version: ${nextPinnedHostVersion(ledger)}`)
   console.log(`Next default: ${nextPatch(baseVersion)}`)
 }
 

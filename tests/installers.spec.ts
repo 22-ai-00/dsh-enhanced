@@ -6013,7 +6013,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(explicit.stdout).not.toContain('dsh-supervised-growth-setup')
   })
 
-  test('npm installer tracks the latest DSH and applies one release selector to every published bundle', async () => {
+  test('npm installer pins the supported DSH and applies one release selector to every published bundle', async () => {
     const dshHome = await temporaryDshHome()
 
     const result = runInstaller(npmInstaller, [
@@ -6022,7 +6022,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('目标 profile：personal-web')
-    expect(result.stdout).toContain('@deepseek-ai/dsh@latest')
+    expect(result.stdout).toContain('@deepseek-ai/dsh@0.1.2-rc.1')
     expect(result.stdout).toContain('@dsh-enhanced/personal-assistant@0.2.0')
     expect(result.stdout).toContain('@dsh-enhanced/plugin-control-plane@0.2.0')
     expect(result.stdout).not.toContain('@dsh-enhanced/lark-channel@0.2.0')
@@ -6247,7 +6247,7 @@ printf '%s\\n' '{not-json'
     expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000')
   })
 
-  test('npm installer with its sibling common uses the source verified host range', async () => {
+  test('npm installer with its sibling common rejects an unsupported exact host version', async () => {
     const dshHome = await temporaryDshHome()
 
     const result = runInstaller(npmInstaller, [
@@ -6255,7 +6255,7 @@ printf '%s\\n' '{not-json'
     ], dshHome)
 
     expect(result.status).toBe(2)
-    expect(result.stderr).toContain('超出 dsh-enhanced 已验证范围 >=0.1.2-rc.1 <0.2.0')
+    expect(result.stderr).toContain('仅支持 DSH 0.1.2-rc.1')
   })
 
   test('remote npm installer exports the verified range paired with its pinned common', async () => {
@@ -6266,7 +6266,7 @@ printf '%s\\n' '{not-json'
     await writeFile(remoteCommon, [
       '#!/usr/bin/env bash',
       'dsh_enhanced_install() {',
-      "  printf 'remote-range=%s\\n' \"$DSH_ENHANCED_VERIFIED_HOST_RANGE\"",
+      "  printf 'remote-range=%s remote-host=%s\\n' \"$DSH_ENHANCED_VERIFIED_HOST_RANGE\" \"$DSH_ENHANCED_PINNED_HOST_VERSION\"",
       '}',
       '',
     ].join('\n'), 'utf8')
@@ -6279,7 +6279,11 @@ cp "$REMOTE_COMMON" "$4"
     const pinnedRange = installer.match(
       /^DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='([^']+)'$/mu,
     )?.[1]
+    const pinnedHostVersion = installer.match(
+      /^DSH_ENHANCED_PINNED_HOST_VERSION='([^']+)'$/mu,
+    )?.[1]
     expect(pinnedRange).toBe(releaseManifest.current.verifiedHostRange)
+    expect(pinnedHostVersion).toBe(releaseManifest.nextPinnedHostVersion)
 
     const result = spawnSync('/bin/bash', ['-s', '--', '--dry-run'], {
       cwd: root,
@@ -6295,7 +6299,7 @@ cp "$REMOTE_COMMON" "$4"
     })
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain(`remote-range=${pinnedRange}`)
+    expect(result.stdout).toContain(`remote-range=${pinnedRange} remote-host=${pinnedHostVersion}`)
     expect(result.stdout).not.toContain('remote-range=>=0.1.2-rc.1 <0.2.0')
   })
 
@@ -6490,21 +6494,21 @@ cp "$REMOTE_COMMON" "$4"
     expect(result.status, result.stderr).toBe(0)
   })
 
-  test('resolves latest but preserves an installed newer DSH version', async () => {
+  test('keeps an installed DSH when it exactly matches the supported version', async () => {
     const root = await temporaryDshHome()
     const fakeBin = join(root, 'bin')
     const logPath = join(root, 'commands.log')
     await mkdir(fakeBin, { recursive: true })
+    await writeFile(logPath, '', 'utf8')
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
-if [[ "\${1:-}" == '--version' ]]; then printf '0.1.3\n'; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.2-rc.1\n'; fi
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 printf 'npm %s\n' "$*" >> "$INSTALL_LOG"
-if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.2-rc.1\n'; fi
 `)
 
     const result = spawnSync('/bin/bash', [
-      '-c', 'source "$1"; dsh_enhanced_ensure_dsh latest 0 0',
+      '-c', 'source "$1"; dsh_enhanced_ensure_dsh 0.1.2-rc.1 0 0',
       'installer-test', installerLibrary,
     ], {
       encoding: 'utf8',
@@ -6512,30 +6516,63 @@ if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.2-rc
     })
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('DSH latest 已解析为：0.1.2-rc.1')
-    expect(result.stdout).toContain('保留现有版本，避免降级')
-    expect(await readFile(logPath, 'utf8')).toBe('npm view @deepseek-ai/dsh dist-tags.latest\n')
+    expect(result.stdout).toContain('DSH 已安装且版本匹配：0.1.2-rc.1')
+    expect(await readFile(logPath, 'utf8')).toBe('')
   })
 
-  test('requires explicit acknowledgement for a host outside the verified range', async () => {
+  test('rejects an installed newer DSH before npm, profile, or configuration side effects', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'dsh-home')
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'commands.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeFile(logPath, '', 'utf8')
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.5-rc.1\\n'; exit 0; fi
+printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
+`)
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
+`)
+
+    const result = spawnSync('/bin/bash', [localInstaller, '--lark', 'skip'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:/usr/bin:/bin`, DSH_HOME: dshHome, INSTALL_LOG: logPath },
+    })
+
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('检测到 DSH 0.1.5-rc.1')
+    expect(result.stderr).toContain('DSH 0.1.2-rc.1 的独立 CLI')
+    expect(await readFile(logPath, 'utf8')).toBe('')
+    expect(existsSync(dshHome)).toBe(false)
+  })
+
+  test('rejects a requested unsupported DSH version even when acknowledgement is supplied', async () => {
     const dshHome = await temporaryDshHome()
     const blocked = runInstaller(localInstaller, [
       '--dry-run', '--lark', 'skip', '--dsh-version', '0.1.0-rc.8',
     ], dshHome)
     expect(blocked.status).toBe(2)
-    expect(blocked.stderr).toContain('超出 dsh-enhanced 已验证范围 >=0.1.2-rc.1 <0.2.0')
-    expect(blocked.stderr).toContain('--ack-unverified-host')
+    expect(blocked.stderr).toContain('仅支持 DSH 0.1.2-rc.1')
     expect(blocked.stdout).not.toContain('dsh plugin')
 
     const acknowledged = runInstaller(localInstaller, [
       '--dry-run', '--lark', 'skip', '--dsh-version', '0.1.0-rc.8', '--ack-unverified-host',
     ], dshHome)
-    expect(acknowledged.status, acknowledged.stderr).toBe(0)
-    expect(acknowledged.stderr).toContain('已确认继续使用未经验证的 DSH host 版本')
-    expect(acknowledged.stdout).toContain('@deepseek-ai/dsh@0.1.0-rc.8')
+    expect(acknowledged.status).toBe(2)
+    expect(acknowledged.stderr).toContain('仅支持 DSH 0.1.2-rc.1')
+    expect(acknowledged.stdout).not.toContain('@deepseek-ai/dsh@0.1.0-rc.8')
+
+    const override = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], dshHome, undefined, {
+      DSH_ENHANCED_PINNED_HOST_VERSION: '0.1.5-rc.1',
+    })
+    expect(override.status).toBe(2)
+    expect(override.stderr).toContain('Host pin 与安装逻辑不一致')
+    expect(override.stdout).not.toContain('dsh plugin')
   })
 
-  test('local installer replaces an incompatible DSH and executes build, install, and validation', async () => {
+  test('local installer installs the exact supported DSH on a fresh machine and executes build, install, and validation', async () => {
     const root = await temporaryDshHome()
     const dshHome = join(root, 'dsh-home')
     const fakeBin = join(root, 'bin')
@@ -6549,10 +6586,6 @@ printf 'lark-setup %s\n' "$*" >> "$INSTALL_LOG"
     await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
 exit 0
-`)
-    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
-if [[ "\${1:-}" == '--version' ]]; then printf '0.0.0\\n'; exit 0; fi
-printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
 `)
     await writeExecutable(join(fakeBin, 'dsh-new'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '0.1.2-rc.1\\n'; exit 0; fi

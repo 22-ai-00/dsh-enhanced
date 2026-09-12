@@ -15,7 +15,7 @@ import {
   type BrokerSuccessResult,
 } from './broker-protocol.js'
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 2
 const MAX_RECORDS = 10_000
 const MAX_GRANTS = 1_000
 const DIGEST = /^[0-9a-f]{64}$/u
@@ -51,7 +51,7 @@ export interface BrokerLedgerRecord {
   grantRevision: number
   grantDigest: string
   requestDigest: string
-  operation: 'commit' | 'inspect'
+  operation: 'commit' | 'pull-request' | 'inspect'
   repository: string
   branch: string
   expectedHeadOid: string | null
@@ -130,7 +130,7 @@ export function externalGrantMirror(grant: ExternalGitHubGrantUnsigned): Externa
 export function brokerGrantDigest(grant: ExternalGitHubGrantUnsigned): string { return brokerGrantAuthorityDigest(normalizeGrantUnsigned(grant) as BrokerGrantAuthorityUnsigned) }
 export function withBrokerGrantDigest(grant: ExternalGitHubGrantUnsigned): ExternalGitHubGrant { const normalized = normalizeGrantUnsigned(grant); return Object.freeze({ ...normalized, digest: brokerGrantDigest(normalized) }) }
 export function normalizeBrokerGrant(value: unknown): ExternalGitHubGrant {
-  const input = exact(value, ['protocol', 'id', 'revision', 'digest', 'clientKeyId', 'owner', 'sessionId', 'destination', 'credentialId', 'expiresAt', 'maxActions', 'maxTotalBytes', 'maxCostUnits', 'allowedOperations', 'allowedInspectKinds', 'client', 'source', 'policyEpoch', 'emergencyEpoch'])
+  const input = exact(value, ['protocol', 'id', 'revision', 'digest', 'clientKeyId', 'owner', 'sessionId', 'destination', 'credentialId', 'expiresAt', 'maxActions', 'maxTotalBytes', 'maxCostUnits', 'allowedOperations', 'allowedInspectKinds', 'client', 'source', 'policyEpoch', 'emergencyEpoch', ...(plain(value) && Object.hasOwn(value, 'verifiedDelivery') ? ['verifiedDelivery'] : [])])
   const { digest: claimed, ...unsigned } = input
   const normalized = normalizeGrantUnsigned(unsigned)
   const expected = brokerGrantDigest(normalized)
@@ -195,17 +195,26 @@ function openDatabase(databasePath: string, instanceId: string, beforeOpen?: () 
         'CREATE TABLE controller (singleton INTEGER PRIMARY KEY CHECK(singleton=1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL CHECK(fence>=1), generation INTEGER NOT NULL CHECK(generation>=1), expires_at INTEGER NOT NULL CHECK(expires_at>=0)) STRICT',
         'CREATE TABLE grants (id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision>=1), digest TEXT NOT NULL, grant_json TEXT NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), created_at INTEGER NOT NULL CHECK(created_at>=0), PRIMARY KEY(id,revision), UNIQUE(digest)) STRICT, WITHOUT ROWID',
         'CREATE TABLE grant_heads (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), FOREIGN KEY(id,revision) REFERENCES grants(id,revision)) STRICT',
-        "CREATE TABLE requests (action_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, client_key_id TEXT NOT NULL, owner_json TEXT NOT NULL, session_id TEXT NOT NULL, agent_id TEXT NOT NULL, root_call_id TEXT NOT NULL, call_id TEXT NOT NULL, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, grant_digest TEXT NOT NULL, request_digest TEXT NOT NULL, operation TEXT NOT NULL CHECK(operation IN ('commit','inspect')), repository TEXT NOT NULL, branch TEXT NOT NULL, expected_head_oid TEXT, payload_digest TEXT NOT NULL, budget_reservation_id TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes>=0), cost_units INTEGER NOT NULL CHECK(cost_units>=0), deadline INTEGER NOT NULL CHECK(deadline>=1), policy_epoch INTEGER NOT NULL CHECK(policy_epoch>=0), emergency_epoch INTEGER NOT NULL CHECK(emergency_epoch>=0), generation INTEGER NOT NULL CHECK(generation>=1), status TEXT NOT NULL CHECK(status IN ('prepared','dispatched','succeeded','failed','unknown')), version INTEGER NOT NULL CHECK(version>=1), dispatched_at INTEGER, result_json TEXT, UNIQUE(client_key_id,request_id), UNIQUE(client_key_id,action_id), UNIQUE(client_key_id,budget_reservation_id), FOREIGN KEY(grant_id,grant_revision) REFERENCES grants(id,revision), CHECK((status IN ('prepared','dispatched') AND result_json IS NULL) OR (status IN ('succeeded','failed','unknown') AND result_json IS NOT NULL)), CHECK((status='prepared' AND dispatched_at IS NULL) OR status!='prepared')) STRICT",
-        "CREATE TABLE credential_leases (action_id TEXT PRIMARY KEY, credential_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('github.commit','github.inspect')), status TEXT NOT NULL CHECK(status IN ('active','completed','failed','revoked')), issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, settled_at INTEGER, version INTEGER NOT NULL, FOREIGN KEY(action_id) REFERENCES requests(action_id), CHECK((status='active' AND settled_at IS NULL) OR (status!='active' AND settled_at IS NOT NULL))) STRICT",
+        "CREATE TABLE requests (action_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, client_key_id TEXT NOT NULL, owner_json TEXT NOT NULL, session_id TEXT NOT NULL, agent_id TEXT NOT NULL, root_call_id TEXT NOT NULL, call_id TEXT NOT NULL, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, grant_digest TEXT NOT NULL, request_digest TEXT NOT NULL, operation TEXT NOT NULL CHECK(operation IN ('commit','pull-request','inspect')), repository TEXT NOT NULL, branch TEXT NOT NULL, expected_head_oid TEXT, payload_digest TEXT NOT NULL, budget_reservation_id TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes>=0), cost_units INTEGER NOT NULL CHECK(cost_units>=0), deadline INTEGER NOT NULL CHECK(deadline>=1), policy_epoch INTEGER NOT NULL CHECK(policy_epoch>=0), emergency_epoch INTEGER NOT NULL CHECK(emergency_epoch>=0), generation INTEGER NOT NULL CHECK(generation>=1), status TEXT NOT NULL CHECK(status IN ('prepared','dispatched','succeeded','failed','unknown')), version INTEGER NOT NULL CHECK(version>=1), dispatched_at INTEGER, result_json TEXT, UNIQUE(client_key_id,request_id), UNIQUE(client_key_id,action_id), UNIQUE(client_key_id,budget_reservation_id), FOREIGN KEY(grant_id,grant_revision) REFERENCES grants(id,revision), CHECK((status IN ('prepared','dispatched') AND result_json IS NULL) OR (status IN ('succeeded','failed','unknown') AND result_json IS NOT NULL)), CHECK((status='prepared' AND dispatched_at IS NULL) OR status!='prepared'), CHECK((operation IN ('commit','pull-request'))=(expected_head_oid IS NOT NULL))) STRICT",
+        "CREATE TABLE credential_leases (action_id TEXT PRIMARY KEY, credential_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('github.commit','github.pull-request','github.inspect')), status TEXT NOT NULL CHECK(status IN ('active','completed','failed','revoked')), issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, settled_at INTEGER, version INTEGER NOT NULL, FOREIGN KEY(action_id) REFERENCES requests(action_id), CHECK((status='active' AND settled_at IS NULL) OR (status!='active' AND settled_at IS NOT NULL))) STRICT",
         'CREATE TABLE admin_nonces (admin_key_id TEXT NOT NULL, nonce_digest TEXT NOT NULL, request_digest TEXT NOT NULL, expires_at INTEGER NOT NULL CHECK(expires_at>=1), PRIMARY KEY(admin_key_id,nonce_digest)) STRICT, WITHOUT ROWID',
         'CREATE TABLE audit (sequence INTEGER PRIMARY KEY, kind TEXT NOT NULL, subject_id TEXT NOT NULL, revision INTEGER, recorded_at INTEGER NOT NULL, previous_digest TEXT NOT NULL, digest TEXT NOT NULL UNIQUE) STRICT',
         'CREATE INDEX requests_grant_budget ON requests(grant_id,dispatched_at,status)',
         'CREATE INDEX requests_status ON requests(status)',
+        "CREATE INDEX requests_pr_occupancy ON requests(repository,branch,expected_head_oid,operation,status)",
       ].join(';'))
       database.prepare('INSERT INTO meta VALUES(1,?,0,0,0,0,0,0,0)').run(instanceId)
-      database.exec('PRAGMA user_version=1; COMMIT')
+      database.exec('PRAGMA user_version=2; COMMIT')
     }
-    if (version !== 0 && version !== SCHEMA_VERSION) fail('schema')
+    if (version === 1) {
+      try {
+        database.exec("BEGIN IMMEDIATE; ALTER TABLE credential_leases RENAME TO credential_leases_v1; ALTER TABLE requests RENAME TO requests_v1; CREATE TABLE requests (action_id TEXT PRIMARY KEY, request_id TEXT NOT NULL, client_key_id TEXT NOT NULL, owner_json TEXT NOT NULL, session_id TEXT NOT NULL, agent_id TEXT NOT NULL, root_call_id TEXT NOT NULL, call_id TEXT NOT NULL, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, grant_digest TEXT NOT NULL, request_digest TEXT NOT NULL, operation TEXT NOT NULL CHECK(operation IN ('commit','pull-request','inspect')), repository TEXT NOT NULL, branch TEXT NOT NULL, expected_head_oid TEXT, payload_digest TEXT NOT NULL, budget_reservation_id TEXT NOT NULL, bytes INTEGER NOT NULL CHECK(bytes>=0), cost_units INTEGER NOT NULL CHECK(cost_units>=0), deadline INTEGER NOT NULL CHECK(deadline>=1), policy_epoch INTEGER NOT NULL CHECK(policy_epoch>=0), emergency_epoch INTEGER NOT NULL CHECK(emergency_epoch>=0), generation INTEGER NOT NULL CHECK(generation>=1), status TEXT NOT NULL CHECK(status IN ('prepared','dispatched','succeeded','failed','unknown')), version INTEGER NOT NULL CHECK(version>=1), dispatched_at INTEGER, result_json TEXT, UNIQUE(client_key_id,request_id), UNIQUE(client_key_id,action_id), UNIQUE(client_key_id,budget_reservation_id), FOREIGN KEY(grant_id,grant_revision) REFERENCES grants(id,revision), CHECK((status IN ('prepared','dispatched') AND result_json IS NULL) OR (status IN ('succeeded','failed','unknown') AND result_json IS NOT NULL)), CHECK((status='prepared' AND dispatched_at IS NULL) OR status!='prepared'), CHECK((operation IN ('commit','pull-request'))=(expected_head_oid IS NOT NULL))) STRICT; INSERT INTO requests SELECT * FROM requests_v1; CREATE TABLE credential_leases (action_id TEXT PRIMARY KEY, credential_id TEXT NOT NULL, purpose TEXT NOT NULL CHECK(purpose IN ('github.commit','github.pull-request','github.inspect')), status TEXT NOT NULL CHECK(status IN ('active','completed','failed','revoked')), issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, settled_at INTEGER, version INTEGER NOT NULL, FOREIGN KEY(action_id) REFERENCES requests(action_id), CHECK((status='active' AND settled_at IS NULL) OR (status!='active' AND settled_at IS NOT NULL))) STRICT; INSERT INTO credential_leases SELECT * FROM credential_leases_v1; DROP TABLE credential_leases_v1; DROP TABLE requests_v1; CREATE INDEX requests_grant_budget ON requests(grant_id,dispatched_at,status); CREATE INDEX requests_status ON requests(status); CREATE INDEX requests_pr_occupancy ON requests(repository,branch,expected_head_oid,operation,status); PRAGMA user_version=2; COMMIT")
+      } catch {
+        try { database.exec('ROLLBACK') } catch {}
+        fail('schema')
+      }
+    }
+    if (version !== 0 && version !== 1 && version !== SCHEMA_VERSION) fail('schema')
     const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map(row => row.name)
     if (!equal(tables, ['admin_nonces', 'audit', 'controller', 'credential_leases', 'grant_heads', 'grants', 'meta', 'requests'])) fail('schema')
     const schemas = database.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ sql: string }>
@@ -224,7 +233,7 @@ function openDatabase(databasePath: string, instanceId: string, beforeOpen?: () 
       if (!equal(columns, expected)) fail('schema')
     }
     const indexes = (database.prepare("SELECT name FROM sqlite_schema WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map(row => row.name)
-    if (!indexes.includes('requests_grant_budget') || !indexes.includes('requests_status')) fail('schema')
+    if (!indexes.includes('requests_grant_budget') || !indexes.includes('requests_status') || !indexes.includes('requests_pr_occupancy')) fail('schema')
     if ((database.prepare('PRAGMA quick_check').get() as { quick_check: string }).quick_check !== 'ok') fail('schema')
     if (databasePath !== ':memory:') {
       if (!pinned || !pinnedPathMatches(databasePath, pinned)) fail('unsafe-file')
@@ -251,7 +260,7 @@ function outcome(value: unknown, record?: Pick<BrokerLedgerRecord, 'operation' |
   const status = input.status as BrokerTerminalStatus
   if (status === 'succeeded') {
     if (!input.dispatched || input.error !== null || !plain(input.result)) fail('invalid-input')
-    if (record && (input.result.operation !== record.operation || input.result.repository !== record.repository || input.result.branch !== record.branch || record.operation === 'commit' && input.result.parentOid !== record.expectedHeadOid)) fail('state')
+    if (record && (input.result.operation !== record.operation || input.result.repository !== record.repository || input.result.branch !== record.branch || record.operation === 'commit' && input.result.parentOid !== record.expectedHeadOid || record.operation === 'pull-request' && input.result.expectedHeadOid !== record.expectedHeadOid)) fail('state')
   } else {
     if (input.result !== null || !plain(input.error) || Object.keys(input.error).length !== 1 || typeof input.error.code !== 'string' || !/^[a-z0-9][a-z0-9-]{0,127}$/u.test(input.error.code)) fail('invalid-input')
     if (status === 'unknown' && !input.dispatched) fail('invalid-input')
@@ -290,8 +299,8 @@ export class ExternalBrokerLedger {
       if (!['prepared', 'dispatched', 'succeeded', 'failed', 'unknown'].includes(status)) fail('schema')
       const terminal = ['succeeded', 'failed', 'unknown'].includes(status)
       if (terminal !== (row.result_json !== null) || status === 'prepared' && row.dispatched_at !== null || status === 'dispatched' && row.dispatched_at === null) fail('schema')
-      const record: BrokerLedgerRecord = { actionId: text(row.action_id), requestId: text(row.request_id), clientKeyId: text(row.client_key_id), owner: owner(json(row.owner_json)), sessionId: text(row.session_id), agentId: text(row.agent_id), rootCallId: text(row.root_call_id), callId: text(row.call_id), grantId: text(row.grant_id), grantRevision: integer(row.grant_revision, 1), grantDigest: digest(row.grant_digest), requestDigest: digest(row.request_digest), operation: row.operation as 'commit' | 'inspect', repository: text(row.repository), branch: text(row.branch), expectedHeadOid: row.expected_head_oid, payloadDigest: digest(row.payload_digest), budgetReservationId: text(row.budget_reservation_id), bytes: integer(row.bytes), costUnits: integer(row.cost_units), deadline: integer(row.deadline, 1), policyEpoch: integer(row.policy_epoch), emergencyEpoch: integer(row.emergency_epoch), generation: integer(row.generation, 1), status, version: integer(row.version, 1) }
-      if (!['commit', 'inspect'].includes(record.operation) || (record.operation === 'commit') !== (record.expectedHeadOid !== null) || record.expectedHeadOid !== null && !/^[0-9a-f]{40,128}$/u.test(record.expectedHeadOid)) fail('schema')
+      const record: BrokerLedgerRecord = { actionId: text(row.action_id), requestId: text(row.request_id), clientKeyId: text(row.client_key_id), owner: owner(json(row.owner_json)), sessionId: text(row.session_id), agentId: text(row.agent_id), rootCallId: text(row.root_call_id), callId: text(row.call_id), grantId: text(row.grant_id), grantRevision: integer(row.grant_revision, 1), grantDigest: digest(row.grant_digest), requestDigest: digest(row.request_digest), operation: row.operation as BrokerLedgerRecord['operation'], repository: text(row.repository), branch: text(row.branch), expectedHeadOid: row.expected_head_oid, payloadDigest: digest(row.payload_digest), budgetReservationId: text(row.budget_reservation_id), bytes: integer(row.bytes), costUnits: integer(row.cost_units), deadline: integer(row.deadline, 1), policyEpoch: integer(row.policy_epoch), emergencyEpoch: integer(row.emergency_epoch), generation: integer(row.generation, 1), status, version: integer(row.version, 1) }
+      if (!['commit', 'pull-request', 'inspect'].includes(record.operation) || (['commit', 'pull-request'].includes(record.operation)) !== (record.expectedHeadOid !== null) || record.expectedHeadOid !== null && !/^[0-9a-f]{40,128}$/u.test(record.expectedHeadOid)) fail('schema')
       const grantRow = this.#database.prepare('SELECT * FROM grants WHERE id=? AND revision=?').get(record.grantId, record.grantRevision) as GrantRow | undefined
       if (!grantRow) fail('schema')
       const grant = this.#grant(grantRow)
@@ -323,7 +332,7 @@ export class ExternalBrokerLedger {
       const leases = this.#database.prepare('SELECT * FROM credential_leases').all() as CredentialLeaseRow[]
       for (const lease of leases) {
         const action = rows.find(row => row.action_id === text(lease.action_id)); if (!action || text(lease.credential_id, 128) !== this.#grant(this.#database.prepare('SELECT * FROM grants WHERE id=? AND revision=?').get(action.grant_id, action.grant_revision) as GrantRow).credentialId) fail('schema')
-        if (!['github.commit', 'github.inspect'].includes(lease.purpose) || lease.purpose !== (action.operation === 'commit' ? 'github.commit' : 'github.inspect') || !['active', 'completed', 'failed', 'revoked'].includes(lease.status)) fail('schema')
+        if (!['github.commit', 'github.pull-request', 'github.inspect'].includes(lease.purpose) || lease.purpose !== (action.operation === 'commit' ? 'github.commit' : action.operation === 'pull-request' ? 'github.pull-request' : 'github.inspect') || !['active', 'completed', 'failed', 'revoked'].includes(lease.status)) fail('schema')
         const issuedAt = integer(lease.issued_at); const expiresAt = integer(lease.expires_at, 1); integer(lease.version, 1)
         if (expiresAt <= issuedAt || (lease.status === 'active') !== (lease.settled_at === null) || lease.status === 'active' && action.status !== 'dispatched' || lease.status === 'completed' && action.status !== 'succeeded') fail('schema')
         if (lease.settled_at !== null) integer(lease.settled_at)
@@ -394,6 +403,7 @@ export class ExternalBrokerLedger {
       || request.policyEpoch !== grant.policyEpoch || request.policyEpoch !== meta.policy_epoch || request.emergencyEpoch !== grant.emergencyEpoch || request.emergencyEpoch !== meta.emergency_epoch
       || request.deadline <= now || request.deadline > grant.expiresAt || grant.expiresAt <= now || !grant.allowedOperations.includes(request.operation)) fail('grant')
     if (request.operation === 'commit') { if (!('files' in request.payload) || request.payload.files.some(file => !grant.destination.paths.includes(file.path))) fail('grant') }
+    else if (request.operation === 'pull-request') { if (!grant.destination.baseBranch || grant.destination.baseBranch === grant.destination.branch || !('expectedHeadOid' in request.payload)) fail('grant') }
     else if (!('kind' in request.payload) || !grant.allowedInspectKinds.includes(request.payload.kind) || request.payload.kind === 'file' && (!request.payload.path || !grant.destination.paths.includes(request.payload.path))) fail('grant')
     const bytes = brokerPayloadBytes(request)
     const costUnits = request.operation === 'inspect' && 'kind' in request.payload && ['checks', 'reviews'].includes(request.payload.kind) ? 2 : 1
@@ -418,10 +428,16 @@ export class ExternalBrokerLedger {
       const collision = this.#database.prepare('SELECT request_digest FROM requests WHERE client_key_id=? AND (request_id=? OR budget_reservation_id=?)').get(request.clientKeyId, request.requestId, request.budget.reservationId) as { request_digest: string } | undefined
       if (collision) fail('conflict')
       const count = (this.#database.prepare('SELECT COUNT(*) AS count FROM requests').get() as { count: number }).count; if (count >= MAX_RECORDS) fail('limit')
+      if (request.operation === 'pull-request') {
+        const occupied = this.#database.prepare("SELECT 1 FROM requests r JOIN grants g ON g.id=r.grant_id AND g.revision=r.grant_revision WHERE r.repository=? AND r.branch=? AND r.operation='pull-request' AND json_extract(g.grant_json,'$.destination.baseBranch')=? AND (r.status IN ('prepared','dispatched','unknown') OR (r.status='succeeded' AND r.expected_head_oid=?)) LIMIT 1").get(grant.destination.repository, grant.destination.branch, grant.destination.baseBranch!, 'expectedHeadOid' in request.payload ? request.payload.expectedHeadOid : '')
+        if (occupied) fail('conflict')
+      }
+      if (request.operation === 'commit' && 'expectedHeadOid' in request.payload
+        && this.#database.prepare("SELECT 1 FROM requests WHERE operation='commit' AND repository=? AND branch=? AND expected_head_oid=? AND status IN ('dispatched','unknown') LIMIT 1").get(grant.destination.repository, grant.destination.branch, request.payload.expectedHeadOid)) fail('conflict')
       const used = this.#database.prepare("SELECT COUNT(*) AS actions,COALESCE(SUM(bytes),0) AS bytes,COALESCE(SUM(cost_units),0) AS cost FROM requests WHERE grant_id=? AND (status='prepared' OR dispatched_at IS NOT NULL)").get(grant.id) as { actions: number; bytes: number; cost: number }
       const costUnits = request.budget.maxCostUnits
       if (used.actions + 1 > grant.maxActions || used.bytes + bytes > grant.maxTotalBytes || used.cost + costUnits > grant.maxCostUnits) fail('limit')
-      this.#database.prepare('INSERT INTO requests(action_id,request_id,client_key_id,owner_json,session_id,agent_id,root_call_id,call_id,grant_id,grant_revision,grant_digest,request_digest,operation,repository,branch,expected_head_oid,payload_digest,budget_reservation_id,bytes,cost_units,deadline,policy_epoch,emergency_epoch,generation,status,version,dispatched_at,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NULL,NULL)').run(request.actionId, request.requestId, request.clientKeyId, canonicalBrokerJson(request.owner), request.sessionId, request.agentId, request.rootCallId, request.callId, grant.id, grant.revision, grant.digest, requestDigest, request.operation, grant.destination.repository, grant.destination.branch, request.operation === 'commit' && 'expectedHeadOid' in request.payload ? request.payload.expectedHeadOid : null, request.payloadDigest, request.budget.reservationId, bytes, costUnits, request.deadline, request.policyEpoch, request.emergencyEpoch, meta.generation, 'prepared')
+      this.#database.prepare('INSERT INTO requests(action_id,request_id,client_key_id,owner_json,session_id,agent_id,root_call_id,call_id,grant_id,grant_revision,grant_digest,request_digest,operation,repository,branch,expected_head_oid,payload_digest,budget_reservation_id,bytes,cost_units,deadline,policy_epoch,emergency_epoch,generation,status,version,dispatched_at,result_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,NULL,NULL)').run(request.actionId, request.requestId, request.clientKeyId, canonicalBrokerJson(request.owner), request.sessionId, request.agentId, request.rootCallId, request.callId, grant.id, grant.revision, grant.digest, requestDigest, request.operation, grant.destination.repository, grant.destination.branch, (request.operation === 'commit' || request.operation === 'pull-request') && 'expectedHeadOid' in request.payload ? request.payload.expectedHeadOid : null, request.payloadDigest, request.budget.reservationId, bytes, costUnits, request.deadline, request.policyEpoch, request.emergencyEpoch, meta.generation, 'prepared')
       this.#audit('request-prepared', request.actionId, 1, now); const row = this.#database.prepare('SELECT * FROM requests WHERE action_id=?').get(request.actionId) as RequestRow
       this.#database.exec('COMMIT'); return { record: this.#row(row), created: true }
     } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }
@@ -434,9 +450,10 @@ export class ExternalBrokerLedger {
       if (record.status !== 'prepared' || record.version !== expected || record.requestDigest !== expectedDigest || record.deadline <= now || record.generation !== meta.generation || record.policyEpoch !== meta.policy_epoch || record.emergencyEpoch !== meta.emergency_epoch) fail('state')
       const head = this.#head(record.grantId); if (!head || head.revoked || head.head_revoked || head.revision !== record.grantRevision || head.digest !== record.grantDigest) fail('grant'); const grant = this.#grant(head)
       if (grant.expiresAt <= now || grant.credentialId !== credentialId || leaseExpiresAt <= now || leaseExpiresAt > record.deadline || leaseExpiresAt > grant.expiresAt) fail('grant')
+      if (record.operation === 'commit' && this.#database.prepare("SELECT 1 FROM requests WHERE action_id!=? AND operation='commit' AND repository=? AND branch=? AND expected_head_oid=? AND status IN ('dispatched','unknown') LIMIT 1").get(id, record.repository, record.branch, record.expectedHeadOid)) fail('conflict')
       const changed = this.#database.prepare("UPDATE requests SET status='dispatched',version=version+1,dispatched_at=? WHERE action_id=? AND status='prepared' AND version=? AND request_digest=?").run(now, id, expected, expectedDigest)
       if (changed.changes !== 1) fail('state')
-      this.#database.prepare("INSERT INTO credential_leases VALUES(?,?,?,'active',?,?,NULL,1)").run(id, credentialId, record.operation === 'commit' ? 'github.commit' : 'github.inspect', now, leaseExpiresAt)
+      this.#database.prepare("INSERT INTO credential_leases VALUES(?,?,?,'active',?,?,NULL,1)").run(id, credentialId, record.operation === 'commit' ? 'github.commit' : record.operation === 'pull-request' ? 'github.pull-request' : 'github.inspect', now, leaseExpiresAt)
       this.#audit('request-dispatched', id, expected + 1, now); const updated = this.#database.prepare('SELECT * FROM requests WHERE action_id=?').get(id) as RequestRow
       this.#database.exec('COMMIT'); return this.#row(updated)
     } catch (error) { try { this.#database.exec('ROLLBACK') } catch {} throw error }

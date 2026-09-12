@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ExternalBrokerCore, type ExternalBrokerCoreConfig } from '../src/broker-core.ts'
 import { brokerPayloadBytes, withBrokerGrantDigest, type ExternalGitHubGrantUnsigned } from '../src/broker-ledger.ts'
-import { createBrokerAdminRequest, createBrokerClientRequest, createBrokerServerHello, type BrokerAdminIntent, type BrokerRequestIntent } from '../src/broker-protocol.ts'
+import { createBrokerAdminRequest, createBrokerClientRequest, createBrokerServerHello, type BrokerAdminIntent, type BrokerOperation, type BrokerRequestIntent } from '../src/broker-protocol.ts'
 
 const keys = generateKeyPairSync('ed25519')
 const roots: string[] = []
@@ -19,15 +19,15 @@ async function fixture(): Promise<{ config: ExternalBrokerCoreConfig; secret: st
     protocol: 'assistant-actions/external-github-grant/v1', id: 'grant', revision: 1, clientKeyId: 'client-key',
     owner: { principalDigest: 'a'.repeat(64), principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', preset: 'primary', bindingId: 'binding', bindingVersion: 1, bindingGeneration: 1 }, sessionId: 'session',
     destination: { classification: 'github-repository', repository: 'owner/repository', branch: 'main', baseBranch: 'trunk', paths: ['a.txt'] }, credentialId: 'github', expiresAt: now + 120_000,
-    maxActions: 8, maxTotalBytes: 1_000_000, maxCostUnits: 8, allowedOperations: ['commit', 'inspect'], allowedInspectKinds: ['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'],
+    maxActions: 8, maxTotalBytes: 1_000_000, maxCostUnits: 8, allowedOperations: ['commit', 'inspect', 'pull-request'], allowedInspectKinds: ['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'],
     client: { kind: 'assistant-actions-host', instanceId: 'host', generation: 1 }, source: { classification: 'internal', provenanceDigest: 'b'.repeat(64) }, policyEpoch: 3, emergencyEpoch: 0,
   } satisfies ExternalGitHubGrantUnsigned)
   return { secret, config: { instanceId: 'broker', statePath: join(root, 'broker.sqlite'), credentials: [{ id: 'github', provider: 'linux-protected-file', path: secretPath, maxLeaseMs: 30_000 }], grants: [grant], policyEpoch: 3, now: () => now } }
 }
 
-function signed(config: ExternalBrokerCoreConfig, operation: 'commit' | 'inspect' = 'commit', changes: Partial<BrokerRequestIntent> = {}) {
+function signed(config: ExternalBrokerCoreConfig, operation: BrokerOperation = 'commit', changes: Partial<BrokerRequestIntent> = {}) {
   const grant = config.grants[0]!
-  const payload = operation === 'commit' ? { expectedHeadOid: 'c'.repeat(40), headline: 'change', files: [{ path: 'a.txt', content: 'hello' }] } : { kind: 'repository' as const }
+  const payload = operation === 'commit' ? { expectedHeadOid: 'c'.repeat(40), headline: 'change', files: [{ path: 'a.txt', content: 'hello' }] } : operation === 'pull-request' ? { expectedHeadOid: 'c'.repeat(40), title: 'Change', body: 'Bounded change' } : { kind: 'repository' as const }
   const intent = { actionId: 'action', grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.digest, owner: grant.owner, sessionId: grant.sessionId, agentId: 'agent', rootCallId: 'root', callId: 'call', operation,
     source: grant.source, destination: { classification: 'github-repository' as const, repository: grant.destination.repository, branch: grant.destination.branch, ...(grant.destination.baseBranch === undefined ? {} : { baseBranch: grant.destination.baseBranch }) }, payload, deadline: now + 30_000,
     budget: { reservationId: 'reservation', actions: 1, bytes: 0, costMetric: 'github-api-units' as const, maxCostUnits: 1 }, ...changes } as BrokerRequestIntent
@@ -77,6 +77,35 @@ describe('ExternalBrokerCore', () => {
     expect(JSON.stringify(result)).not.toContain(secret)
     await core.close()
     expect((await readFile(config.statePath)).includes(Buffer.from(secret))).toBe(false)
+  })
+
+  it('creates one expected-head PR through the only write-enabled broker transport', async () => {
+    const { config, secret } = await fixture()
+    const pullRequest = vi.fn(async (input: Parameters<typeof import('../src/github.ts').createPullRequestOnGitHub>[0]) => {
+      expect(input.token).toBe(secret)
+      expect(input.grant.repoWorkflow).toEqual({ baseBranch: 'trunk', allowBranchCreate: false, allowPullRequest: true })
+      expect(input.expectedHeadOid).toBe('c'.repeat(40))
+      return { actionId: input.actionId, status: 'succeeded' as const, pullRequestNumber: 7 }
+    })
+    const commit = vi.fn(), core = new ExternalBrokerCore(config, { commit, pullRequest })
+    const result = await core.execute(signed(config, 'pull-request'), new AbortController().signal)
+    expect(result).toMatchObject({ status: 'succeeded', dispatched: true, result: { operation: 'pull-request', repository: 'owner/repository', branch: 'main', baseBranch: 'trunk', expectedHeadOid: 'c'.repeat(40), pullRequestNumber: 7 } })
+    expect(pullRequest).toHaveBeenCalledOnce(); expect(commit).not.toHaveBeenCalled()
+    await core.close()
+  })
+
+  it('rejects secret-bearing PR input before dispatch and never retries an unknown PR', async () => {
+    const { config, secret } = await fixture()
+    const pullRequest = vi.fn(async () => ({ actionId: 'action', status: 'unknown' as const, reason: 'ack-lost' }))
+    const core = new ExternalBrokerCore(config, { pullRequest })
+    const leaked = signed(config, 'pull-request', { payload: { expectedHeadOid: 'c'.repeat(40), title: secret, body: 'bounded' } })
+    await expect(core.execute(leaked, new AbortController().signal)).resolves.toMatchObject({ status: 'failed', dispatched: false, error: { code: 'request-invalid' } })
+    expect(pullRequest).not.toHaveBeenCalled()
+    const request = signed(config, 'pull-request', { actionId: 'unknown-pr', callId: 'unknown-pr', budget: { reservationId: 'unknown-pr', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } })
+    await expect(core.execute(request, new AbortController().signal)).resolves.toMatchObject({ status: 'unknown', dispatched: true })
+    await expect(core.execute(request, new AbortController().signal)).resolves.toMatchObject({ status: 'unknown', dispatched: true })
+    expect(pullRequest).toHaveBeenCalledOnce()
+    await core.close()
   })
 
   it('rejects a payload containing the just-read token before dispatch', async () => {

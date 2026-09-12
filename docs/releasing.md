@@ -22,7 +22,7 @@ pnpm release:prepare
 pnpm release:prepare 0.2.0
 ```
 
-`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。它还会把同一发布标签、已验证 Host 范围，以及 `common.sh`、`lifecycle-config.mjs`、`lifecycle-profile.mjs` 三个远端安装资产的独立 SHA-256 同步写入 `install-npm.sh`；`release:verify-tag` 和 `release:record` 会重新计算并逐项核验这些值。
+`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。它还会把同一发布标签、精确 Host 版本及已验证范围，以及 `common.sh`、`lifecycle-config.mjs`、`lifecycle-profile.mjs` 三个远端安装资产的独立 SHA-256 同步写入 `install-npm.sh`；`release:verify-tag` 和 `release:record` 会重新计算并逐项核验这些值。
 
 ## 校验、合入与创建标签
 

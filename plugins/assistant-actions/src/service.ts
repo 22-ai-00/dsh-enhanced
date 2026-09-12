@@ -16,8 +16,10 @@ import { normalizeRepositoryReadback, validateRepositoryReadbackRequirements, ty
 import { ActionLedger, normalizeWorkflow, type RecoveredCompensationRef } from './ledger.js'
 import { commitOnGitHub, createBranchOnGitHub, createCompensatingCommitOnGitHub, createPullRequestOnGitHub, inspectGitHub, readGitHubPreimage } from './github.js'
 import { BrokerClientError, requestGitHubBroker, type GitHubBrokerClientOptions } from './broker-client.js'
-import { brokerDigest, canonicalBrokerJson, type BrokerRequestIntent, type BrokerServerResponse } from './broker-protocol.js'
+import { brokerDigest, canonicalBrokerJson, type BrokerOperation, type BrokerClientRequest, type BrokerServerHello, type BrokerRequestIntent, type BrokerServerResponse } from './broker-protocol.js'
 import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, BranchRequest, CommitRequest, CompensationRecord, CompensationRequest, CompensationResult, ExternalActionGrantMirror, InspectRequest, PullRequestRequest, VerifiedDeliveryRequest, WorkflowRequest } from './types.js'
+
+import { captureExternalDeliveryReceipt, verifyExternalDeliveryReceipt, type ExternalDeliveryReceipt } from './external-delivery-receipt.js'
 
 export { Config }
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -26,10 +28,12 @@ interface Authorization { identity(): ActionIdentity; authorize(record: ActionRe
 type Operation = (actionId: string, grant: ActionGrant, token: string, signal: AbortSignal) => Promise<ActionResult>
 type ExternalDispatch = (options: GitHubBrokerClientOptions, intent: BrokerRequestIntent, signal?: AbortSignal) => Promise<BrokerServerResponse>
 interface ExternalInvocation { callId: string; rootCallId: string }
+interface ExternalBackgroundAuthorization { sessionId: string; agentId: string; current(): void; authorize(actionId: string): boolean }
+type DeliveryGrant = Omit<ActionGrant, 'credentialHandle'>
 interface VisibleGrant {
   grantId: string; repository: string; branch: string; paths: readonly string[]; expiresAt: number; maxActions: number; verifiedDelivery: boolean
   acceptance?: 'goal-outcome' | 'goal-step'; workflow?: ActionGrant['repoWorkflow']; baseBranch?: string
-  allowedOperations?: readonly ('commit' | 'inspect')[]; allowedInspectKinds?: ExternalActionGrantMirror['allowedInspectKinds']
+  allowedOperations?: readonly BrokerOperation[]; allowedInspectKinds?: ExternalActionGrantMirror['allowedInspectKinds']
 }
 type CompensationStatus = Readonly<{ actionId: string; status: CompensationRecord['status']; repository: string; branch: string; parentOid: string; resultOid?: string; reason?: string }>
 interface RepositoryReadbackContext {
@@ -117,6 +121,9 @@ export class AssistantActionsService extends Service {
   readonly #externalGrants = new Map<string, ExternalActionGrantMirror>()
   readonly #mode: 'embedded-compat' | 'external-unix-v1'
   #externalClient: GitHubBrokerClientOptions | undefined
+  readonly #externalFacadeGeneration = randomUUID()
+  #externalObservedGeneration: number | undefined
+  #externalObservedEpochs: string | undefined
   readonly #externalDispatch: ExternalDispatch
   readonly #pending = new Map<string, { abort: AbortController; done: Promise<ActionResult> }>()
   readonly #pendingCompensations = new Map<string, { abort: AbortController; done: Promise<CompensationResult> }>()
@@ -215,7 +222,9 @@ export class AssistantActionsService extends Service {
           if (config.broker.mode === 'external-unix-v1') {
             const external = grant as ExternalActionGrantMirror
             this.#externalContext(agent, external.id)
-            return [{ grantId: external.id, repository: external.destination.repository, branch: external.destination.branch, paths: external.destination.paths, expiresAt: external.expiresAt, maxActions: external.maxActions, verifiedDelivery: false,
+            return [{ grantId: external.id, repository: external.destination.repository, branch: external.destination.branch, paths: external.destination.paths, expiresAt: external.expiresAt, maxActions: external.maxActions, verifiedDelivery: !!external.verifiedDelivery,
+              ...(external.verifiedDelivery ? { acceptance: external.verifiedDelivery.acceptance ?? 'goal-outcome' } : {}),
+              ...(external.destination.baseBranch ? { workflow: { baseBranch: external.destination.baseBranch, allowBranchCreate: false, allowPullRequest: external.allowedOperations.includes('pull-request') } } : {}),
               allowedOperations: external.allowedOperations, allowedInspectKinds: external.allowedInspectKinds,
               ...(external.destination.baseBranch === undefined ? {} : { baseBranch: external.destination.baseBranch }) }]
           }
@@ -274,7 +283,7 @@ export class AssistantActionsService extends Service {
         runtime.tools.register(status)
         runtime.assistantPolicy.registerPreauthorizedTool(runtime, status, execution => this.#preauthorizedCompensationStatus(execution))
       }
-      if (config.broker.mode === 'embedded-compat' && config.grants.some(grant => grant.verifiedDelivery)) {
+      if ((config.broker.mode === 'embedded-compat' ? config.grants : config.externalGrants).some(grant => grant.verifiedDelivery)) {
         const output = { schema: { type: 'object' as const, additionalProperties: false as const, properties: { result: { type: 'string' as const, required: true as const } } }, render: (_args: unknown, value: { result: string }) => [{ type: 'text' as const, text: value.result }] }
         const deliver = defineTool({ name: 'action_github_deliver', description: 'During the current native artifact goal round, register a finite GitHub delivery intent. Export all listed paths with isolation_run. Host submits exact independently accepted artifacts after the grant acceptance mode: goal-outcome requires step and whole-goal verification (default); goal-step allows intermediate delivery after step verification while the original goal waits. This call only queues intent and never proves whole-goal completion. Never supply file content. Optional pullRequest opens the grant-fixed branch-to-base PR after the commit. Query action_github_delivery_status for the actual result; unknown must not be resent.',
           parameters: { grantId: { type: 'string', required: true }, idempotencyKey: { type: 'string', required: true }, expectedHeadOid: { type: 'string', required: true }, headline: { type: 'string', required: true }, paths: { type: 'array', required: true, items: { type: 'string' } }, pullRequest: { type: 'object', additionalProperties: false, properties: { title: { type: 'string', required: true }, body: { type: 'string', required: true } } } }, output,
@@ -289,17 +298,23 @@ export class AssistantActionsService extends Service {
         runtime.assistantPolicy.registerPreauthorizedTool(runtime, status, execution => { try { const args = execution.arguments as { grantId: string }; return !execution.signal.aborted && !!this.#identity(execution.agent, args.grantId) } catch { return false } })
       }
     })
-    if (config.broker.mode === 'embedded-compat' && config.grants.some(grant => grant.verifiedDelivery)) this.#verified = new VerifiedDeliveryRuntime(ctx, config.stateRoot, {
+    if ((config.broker.mode === 'embedded-compat' ? config.grants : config.externalGrants).some(grant => grant.verifiedDelivery)) {
+      mkdirSync(config.stateRoot, { recursive: true, mode: 0o700 })
+      const root = lstatSync(config.stateRoot)
+      if (!root.isDirectory() || root.uid !== process.getuid?.() || realpathSync(config.stateRoot) !== config.stateRoot) throw new Error('assistant-actions: private owned state root required')
+      chmodSync(config.stateRoot, 0o700)
+      this.#verified = new VerifiedDeliveryRuntime(ctx, config.stateRoot, {
       capture: (agent, request) => this.#captureDelivery(agent, request), inspect: intent => this.#inspectDelivery(intent),
       deliver: (intent, snapshot, signal) => this.#deliverVerified(intent, snapshot, signal),
       notify: (intent, value) => this.#notifyVerifiedDelivery(intent, value),
-    })
+      })
+    }
   }
 
   get brokerMode(): 'embedded-compat' | 'external-unix-v1' { return this.#mode }
-  health = (): Readonly<{ active: boolean; mode: 'embedded-compat' | 'external-unix-v1'; projectedGrants: number; supportedOperations: readonly ('commit' | 'inspect')[] | readonly ('commit' | 'branch' | 'pull-request' | 'inspect' | 'compensate' | 'verified-delivery' | 'repository-readback')[] }> => Object.freeze({
+  health = (): Readonly<{ active: boolean; mode: 'embedded-compat' | 'external-unix-v1'; projectedGrants: number; supportedOperations: readonly BrokerOperation[] | readonly ('commit' | 'branch' | 'pull-request' | 'inspect' | 'compensate' | 'verified-delivery' | 'repository-readback')[] }> => Object.freeze({
     active: this.#active, mode: this.brokerMode, projectedGrants: this.#mode === 'external-unix-v1' ? this.#externalGrants.size : 0,
-    supportedOperations: Object.freeze(this.#mode === 'external-unix-v1' ? ['commit', 'inspect'] as const : ['commit', 'branch', 'pull-request', 'inspect', 'compensate', 'verified-delivery', 'repository-readback'] as const),
+    supportedOperations: Object.freeze(this.#mode === 'external-unix-v1' ? ['commit', 'pull-request', 'inspect', 'verified-delivery', 'repository-readback'] as const : ['commit', 'branch', 'pull-request', 'inspect', 'compensate', 'verified-delivery', 'repository-readback'] as const),
   })
 
   #external(): GitHubBrokerClientOptions {
@@ -320,20 +335,20 @@ export class AssistantActionsService extends Service {
     return { grant, owner, identity: { principalDigest: owner.principalDigest, principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion, workspace: owner.workspace, agentPreset: owner.preset } }
   }
 
-  #externalActionId(grant: ExternalActionGrantMirror, sessionId: string, operation: 'commit' | 'inspect', idempotencyKey: string): string {
+  #externalActionId(grant: ExternalActionGrantMirror, sessionId: string, operation: BrokerOperation, idempotencyKey: string): string {
     return brokerDigest({ protocol: 'assistant-actions/external-action-id/v1', clientKeyId: this.#external().clientKeyId, grantId: grant.id, grantRevision: grant.revision, sessionId, operation, idempotencyKey })
   }
 
-  async #externalRequest(agent: Agent | undefined, grant: ExternalActionGrantMirror, owner: BrokerRequestIntent['owner'], operation: 'commit' | 'inspect', payload: BrokerRequestIntent['payload'],
-    signal: AbortSignal, invocation: ExternalInvocation, idempotencyKey: string): Promise<{ result: ActionResult; observed?: unknown }> {
+  async #externalRequest(agent: Agent | undefined, grant: ExternalActionGrantMirror, owner: BrokerRequestIntent['owner'], operation: BrokerOperation, payload: BrokerRequestIntent['payload'],
+    signal: AbortSignal, invocation: ExternalInvocation, idempotencyKey: string, background?: ExternalBackgroundAuthorization): Promise<{ result: ActionResult; observed?: unknown; receipt?: ExternalDeliveryReceipt; generation?: number }> {
     signal.throwIfAborted()
-    const client = this.#external(), sessionId = String(agent!.session.id)
+    const client = this.#external(), sessionId = background?.sessionId ?? String(agent!.session.id)
     const actionId = this.#externalActionId(grant, sessionId, operation, idempotencyKey)
     const policy = this.ctx.get('assistantPolicy')
-    const decision = policy?.authorizeAgent(agent, 'execute', { kind: 'tool', id: `action:github:${grant.id}` }, { idempotencyKey: `external-action:${actionId}` })
-    if (decision?.effect !== 'allow') throw new Error('assistant-actions: external broker policy denied')
+    const decision = background ? undefined : policy?.authorizeAgent(agent, 'execute', { kind: 'tool', id: `action:github:${grant.id}` }, { idempotencyKey: `external-action:${actionId}` })
+    if (background ? !background.authorize(actionId) : decision?.effect !== 'allow') throw new Error('assistant-actions: external broker policy denied')
     const intent: BrokerRequestIntent = {
-      actionId, grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.grantDigest, owner, sessionId, agentId: String(agent!.id),
+      actionId, grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.grantDigest, owner, sessionId, agentId: background?.agentId ?? String(agent!.id),
       rootCallId: invocation.rootCallId, callId: invocation.callId, operation, source: grant.source,
       destination: { classification: 'github-repository', repository: grant.destination.repository, branch: grant.destination.branch,
         ...(grant.destination.baseBranch === undefined ? {} : { baseBranch: grant.destination.baseBranch }) }, payload, deadline: Math.min(grant.expiresAt, Date.now() + (client.timeoutMs ?? 30_000)),
@@ -343,14 +358,16 @@ export class AssistantActionsService extends Service {
     const authorization = new AbortController()
     const stillAuthorized = (): boolean => {
       try {
-        const current = this.#externalContext(agent, grant.id)
+        const current = background ? (background.current(), { grant: this.#externalGrants.get(grant.id)!, owner: grant.owner }) : this.#externalContext(agent, grant.id)
         return this.#active && !signal.aborted && !authorization.signal.aborted && this.#externalClient === client
           && current.grant.grantDigest === grant.grantDigest && digest(current.owner) === digest(owner)
       } catch { return false }
     }
     const timer = setInterval(() => { if (!stillAuthorized()) authorization.abort(new Error('assistant-actions external authorization ended')) }, 100)
     timer.unref()
-    const requestClient: GitHubBrokerClientOptions = { ...client, beforeWrite: (_hello, request, gateSignal) => {
+    let signed: { hello: BrokerServerHello; request: BrokerClientRequest } | undefined
+    const requestClient: GitHubBrokerClientOptions = { ...client, beforeWrite: (hello, request, gateSignal) => {
+      signed = { hello, request }
       gateSignal.throwIfAborted()
       if (!stillAuthorized() || request.actionId !== actionId || request.grantDigest !== grant.grantDigest || digest(request.owner) !== digest(owner)) throw new Error('assistant-actions: external authorization ended before dispatch')
     } }
@@ -359,11 +376,14 @@ export class AssistantActionsService extends Service {
     this.#pendingExternal.add(operationState)
     try {
       const response = await pending
+      this.#externalObservedGeneration = response.generation
+      if (signed && Number.isSafeInteger(signed.hello.policyEpoch) && Number.isSafeInteger(signed.hello.emergencyEpoch)) this.#externalObservedEpochs = brokerDigest([signed.hello.policyEpoch, signed.hello.emergencyEpoch])
       if (!stillAuthorized()) return { result: { actionId, status: response.dispatched ? 'unknown' : 'failed', reason: 'external-broker-authorization-ended' } }
       const result: ActionResult = { actionId: response.actionId, status: response.status,
         ...(response.result?.operation === 'commit' ? { commitOid: response.result.commitOid, branch: response.result.branch } : {}),
+        ...(response.result?.operation === 'pull-request' ? { pullRequestNumber: response.result.pullRequestNumber, branch: response.result.branch } : {}),
         ...(response.error ? { reason: `external-broker-${response.error.code}` } : {}) }
-      return { result, ...(response.status === 'succeeded' && response.result?.operation === 'inspect' ? { observed: structuredClone(response.result.observed) } : {}) }
+      return { result, generation: response.generation, ...(signed ? { receipt: captureExternalDeliveryReceipt(signed.hello, signed.request, response) } : {}), ...(response.status === 'succeeded' && response.result?.operation === 'inspect' ? { observed: structuredClone(response.result.observed) } : {}) }
     } catch (error) {
       if (error instanceof BrokerClientError) return { result: { actionId, status: error.postDispatchUnknown ? 'unknown' : 'failed', reason: `external-broker-${error.code}` } }
       throw error
@@ -372,7 +392,7 @@ export class AssistantActionsService extends Service {
 
   async #runExternal(agent: Agent | undefined, request: CommitRequest, signal: AbortSignal, invocation: ExternalInvocation): Promise<ActionResult> {
     const { grant, owner, identity } = this.#externalContext(agent, request.grantId)
-    if (!this.#allowsExternal(grant, identity, request)) throw new Error('assistant-actions: request not granted')
+    if (grant.verifiedDelivery || !this.#allowsExternal(grant, identity, request)) throw new Error('assistant-actions: request not granted')
     return (await this.#externalRequest(agent, grant, owner, 'commit', { expectedHeadOid: request.expectedHeadOid, headline: request.headline, files: request.files }, signal, invocation, request.idempotencyKey)).result
   }
 
@@ -382,7 +402,8 @@ export class AssistantActionsService extends Service {
     const { grant, owner, identity } = this.#externalContext(agent, request.grantId)
     if (!this.#allowsExternal(grant, identity, input)) throw new Error('assistant-actions: request not granted')
     const payload = { kind: request.kind, ...(request.path === undefined ? {} : { path: request.path }), ...(request.pullRequestNumber === undefined ? {} : { pullRequestNumber: request.pullRequestNumber }) } as BrokerRequestIntent['payload']
-    return await this.#externalRequest(agent, grant, owner, 'inspect', payload, signal, invocation, request.idempotencyKey)
+    const { result, observed } = await this.#externalRequest(agent, grant, owner, 'inspect', payload, signal, invocation, request.idempotencyKey)
+    return { result, ...(observed === undefined ? {} : { observed }) }
   }
 
   #identity(agent: Agent | undefined, grantId: string): ActionIdentity {
@@ -450,19 +471,17 @@ export class AssistantActionsService extends Service {
   }
 
   prepareVerifiedDelivery = (agent: Agent | undefined, input: VerifiedDeliveryRequest) => {
-    if (this.#mode === 'external-unix-v1') throw new Error(EXTERNAL_UNSUPPORTED)
     if (!this.#verified) throw new Error('assistant-actions: verified delivery unavailable')
     return this.#verified.prepare(agent, normalizeVerifiedDelivery(input))
   }
 
   /** Stable only while this fenced broker remains active; used by Verifier around an untrusted remote read. */
   repositoryReadbackGeneration = (): string => {
-    if (this.#mode === 'external-unix-v1') throw new Error(EXTERNAL_UNSUPPORTED)
+    if (this.#mode === 'external-unix-v1') return this.#active ? digest({ facade: this.#externalFacadeGeneration, generation: this.#externalObservedGeneration ?? this.#external().minimumServerGeneration, epochs: this.#externalObservedEpochs }) : ''
     return this.#active && this.#ledger.hasController(this.#authority) ? digest(this.#authority) : ''
   }
 
   readRepositoryGoalOutcome = async (input: { contractId: string; authorityId: string; authorityDigest: string }, signal: AbortSignal): Promise<RepositoryReadback & { ready: boolean }> => {
-    if (this.#mode === 'external-unix-v1') throw new Error(EXTERNAL_UNSUPPORTED)
     signal.throwIfAborted()
     const verifier = this.ctx.get('assistantVerifier', false)
     if (!verifier) throw new Error('assistant-actions: repository readback authority unavailable')
@@ -506,16 +525,20 @@ export class AssistantActionsService extends Service {
     if (security.goalId !== goal.id || security.nativeGoalId === undefined || security.nativeGoalId !== goal.nativeGoalId || security.sessionId !== goal.sessionId || security.definitionVersion !== goal.definitionVersion || security.definitionDigest !== goal.definitionDigest
       || security.grantId !== authority.grantId || security.grantRevision !== authority.grantRevision || security.identity.principalRecordId !== contract.owner.principalRecordId || security.identity.principalVersion !== contract.owner.principalVersion
       || security.identity.workspace !== contract.scope.workspace || security.identity.agentPreset !== contract.scope.preset) throw new Error('assistant-actions: repository delivery binding changed')
-    const grant = this.#ledger.grant(authority.grantId)
+    const grant = this.#deliveryGrant(authority.grantId)
     if (!grant || grant.revision !== authority.grantRevision || grant.repository !== authority.repository || grant.branch !== authority.branch || grant.repoWorkflow?.baseBranch !== authority.baseBranch) throw new Error('assistant-actions: repository grant changed')
     const outcome = latest.outcome as DeliveryOutcome
     const commitOid = outcome.commit.commitOid, pullRequestOutcome = outcome.pullRequest, pullRequestNumber = pullRequestOutcome?.pullRequestNumber
+    if (this.#mode === 'external-unix-v1') this.#verifyExternalDelivery(latest.intent, outcome)
+    else {
     const commit = this.#ledger.get(outcome.commit.actionId)
     const pullRequest = pullRequestOutcome && this.#ledger.get(pullRequestOutcome.actionId)
     if (outcome.commit.status !== 'succeeded' || !commitOid || !commit || commit.kind !== 'commit' || commit.status !== 'succeeded' || digest(commit.result) !== digest(outcome.commit)
       || commit.grantId !== grant.id || commit.grantRevision !== grant.revision || commit.sessionId !== security.sessionId || digest(commit.identity) !== digest(security.identity)
       || !pullRequestOutcome || pullRequestOutcome.status !== 'succeeded' || !pullRequestNumber || !pullRequest || pullRequest.kind !== 'pull-request' || pullRequest.status !== 'succeeded' || digest(pullRequest.result) !== digest(pullRequestOutcome)
       || pullRequest.grantId !== grant.id || pullRequest.grantRevision !== grant.revision || pullRequest.sessionId !== security.sessionId || digest(pullRequest.identity) !== digest(security.identity)) throw new Error('assistant-actions: repository delivery receipt invalid')
+    }
+    if (outcome.commit.status !== 'succeeded' || !commitOid || pullRequestOutcome?.status !== 'succeeded' || !pullRequestNumber) throw new Error('assistant-actions: repository delivery receipt invalid')
     this.#deliveryIdentity(security)
     type OwnerEvidence = { storedGoal?: { definition?: { version?: number; digest?: string }; nativeAtLastObservation?: { phase?: string; sessionId?: string; goalId?: string } }; acceptedTasks?: readonly { contractId: string; state: string; contract: unknown; receipt: unknown }[]; executionRuns?: readonly GoalExecutionRun[]; outcomeAssessments?: readonly { contract: TaskAcceptanceContract; triggerRunId: string | null; execution: { status: 'succeeded' | 'unknown'; quiescent: boolean } | null }[] }
     const goals = this.ctx.get('assistantGoals', false) as { inspectOwnerGoalExecution?: (input: { ownerRouteId: string; principalId: string; workspace: string; preset: string; sessionId: string; goalId: string }) => OwnerEvidence } | undefined
@@ -547,6 +570,19 @@ export class AssistantActionsService extends Service {
   async #readRepositoryInspection(context: () => RepositoryReadbackContext, kind: InspectRequest['kind'], pullRequestNumber: number | undefined, signal: AbortSignal): Promise<unknown> {
     let observed: unknown
     const start = context()
+    if (this.#mode === 'external-unix-v1') {
+      const grant = this.#externalGrants.get(start.authority.grantId)!
+      if (!grant.allowedOperations.includes('inspect') || !grant.allowedInspectKinds.includes(kind)) throw new Error('assistant-actions: repository inspection not granted')
+      const authorization = this.#externalDeliveryAuthorization(start.intent)
+      const current = authorization.current
+      authorization.current = () => { current(); if (digest(context()) !== digest(start)) throw new Error('assistant-actions: repository readback changed') }
+      const generation = this.#externalObservedGeneration, epochs = this.#externalObservedEpochs, callId = `readback:${randomUUID()}`
+      const response = await this.#externalRequest(undefined, grant, grant.owner, 'inspect', { kind, ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }) },
+        signal, { callId, rootCallId: start.intent.id }, callId, authorization)
+      if (response.result.status !== 'succeeded' || response.observed === undefined || generation !== undefined && generation !== response.generation || epochs !== undefined && epochs !== this.#externalObservedEpochs) throw new Error('assistant-actions: repository inspection unavailable or broker changed')
+      authorization.current()
+      return response.observed
+    }
     const request = normalizeWorkflow({ grantId: start.authority.grantId, operation: 'inspect', idempotencyKey: randomUUID(), kind, ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }) })
     if (!('operation' in request)) throw new Error('assistant-actions: repository inspection invalid')
     const authorization: Authorization = { sessionId: start.security.sessionId,
@@ -562,9 +598,20 @@ export class AssistantActionsService extends Service {
     return observed
   }
 
+  #deliveryGrant(id: string): DeliveryGrant | undefined {
+    if (this.#mode !== 'external-unix-v1') return this.#ledger.grant(id)
+    const grant = this.#externalGrants.get(id)
+    if (!grant) return undefined
+    return { id: grant.id, revision: grant.revision, principalDigest: grant.owner.principalDigest, principalRecordId: grant.owner.principalRecordId,
+      principalVersion: grant.owner.principalVersion, workspace: grant.owner.workspace, agentPreset: grant.owner.preset,
+      repository: grant.destination.repository, branch: grant.destination.branch, paths: [...grant.destination.paths], expiresAt: grant.expiresAt,
+      maxActions: grant.maxActions, maxTotalBytes: grant.maxTotalBytes, ...(grant.verifiedDelivery ? { verifiedDelivery: grant.verifiedDelivery } : {}),
+      ...(grant.destination.baseBranch ? { repoWorkflow: { baseBranch: grant.destination.baseBranch, allowBranchCreate: false, allowPullRequest: grant.allowedOperations.includes('pull-request') } } : {}) }
+  }
+
   #captureDelivery(agent: Agent | undefined, request: VerifiedDeliveryRequest): DeliverySecurity {
     const identity = this.#identity(agent, request.grantId)
-    const grant = this.#ledger.grant(request.grantId)
+    const grant = this.#deliveryGrant(request.grantId)
     if (!grant?.verifiedDelivery || grant.expiresAt <= Date.now() || digest(identity) !== digest({ principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: grant.workspace, agentPreset: grant.agentPreset })
       || !request.paths.every(path => grant.paths.includes(path)) || request.pullRequest && !grant.repoWorkflow?.allowPullRequest) throw new Error('assistant-actions: verified delivery is not granted')
     const delivery = this.ctx.get('assistantDelivery')!
@@ -579,7 +626,7 @@ export class AssistantActionsService extends Service {
       || routeReceipt.bindingVersion !== owner.bindingVersion || routeReceipt.generation !== owner.bindingGeneration) throw new Error('assistant-actions: current owner route mismatch')
     const security: DeliverySecurity = { principalId: owner.principalId, identity, sessionId: String(agent!.session.id),
       goalId: current.goalId, ...(typeof nativeGoalId === 'string' && nativeGoalId.length > 0 ? { nativeGoalId } : {}), runId: current.goalExecutionRunId, definitionDigest: current.definition.digest, definitionVersion: current.definition.version,
-      grantId: grant.id, grantRevision: grant.revision, ownerRouteId: grant.verifiedDelivery.ownerRouteId, budgetId: grant.verifiedDelivery.budgetId,
+      grantId: grant.id, grantRevision: grant.revision, ...(this.#mode === 'external-unix-v1' ? { externalGrantDigest: this.#externalGrants.get(grant.id)!.grantDigest } : {}), ownerRouteId: grant.verifiedDelivery.ownerRouteId, budgetId: grant.verifiedDelivery.budgetId,
       expiresAt: grant.expiresAt, routeReceipt, ...(grant.verifiedDelivery.acceptance ? { acceptance: grant.verifiedDelivery.acceptance } : {}) }
     this.#deliveryIdentity(security)
     return security
@@ -590,16 +637,25 @@ export class AssistantActionsService extends Service {
       action: 'execute' as const, resource: { kind: 'tool' as const, id: `action:github:${security.grantId}` }, context: { initiator: 'background' as const } }
   }
   #deliveryIdentity(security: DeliverySecurity): ActionIdentity {
-    if (!this.#active || !this.#ledger.hasController(this.#authority)) throw new Error('assistant-actions: controller unavailable')
-    const grant = this.#ledger.grant(security.grantId)
+    if (!this.#active || this.#mode !== 'external-unix-v1' && !this.#ledger.hasController(this.#authority)) throw new Error('assistant-actions: controller unavailable')
+    const grant = this.#deliveryGrant(security.grantId)
     if (!grant?.verifiedDelivery || grant.revision !== security.grantRevision || grant.expiresAt <= Date.now()
+      || grant.verifiedDelivery.ownerRouteId !== security.ownerRouteId || grant.verifiedDelivery.budgetId !== security.budgetId
+      || digest(security.identity) !== digest({ principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: grant.workspace, agentPreset: grant.agentPreset })
       || Date.now() >= security.expiresAt || (grant.verifiedDelivery.acceptance ?? 'goal-outcome') !== (security.acceptance ?? 'goal-outcome')) throw new Error('assistant-actions: delivery grant ended')
     const route = this.ctx.get('assistantDelivery')?.validateOwnerRoute({ authorityId: security.ownerRouteId, principalId: security.principalId,
       workspace: security.identity.workspace, agentPreset: security.identity.agentPreset })
     if (digest(route) !== digest(security.routeReceipt) || this.ctx.get('assistantPolicy')?.evaluate(this.#deliveryPolicy(security)).effect !== 'allow') throw new Error('assistant-actions: delivery authority changed')
+    if (this.#mode === 'external-unix-v1') {
+      const external = this.#externalGrants.get(grant.id)!
+      const resolved = this.ctx.get('assistantDelivery')?.resolveOwnerRoute(security.ownerRouteId)
+      if (security.externalGrantDigest !== external.grantDigest || external.sessionId !== security.sessionId
+        || resolved?.binding.id !== external.owner.bindingId || resolved.binding.sessionId !== security.sessionId
+        || resolved.snapshot.bindingVersion !== external.owner.bindingVersion || resolved.snapshot.generation !== external.owner.bindingGeneration) throw new Error('assistant-actions: external delivery binding changed')
+    } else if (security.externalGrantDigest !== undefined) throw new Error('assistant-actions: delivery backend changed')
     return security.identity
   }
-  #inspectDelivery(intent: DeliveryIntent): VerifiedFiles | undefined {
+  #inspectDelivery(intent: DeliveryIntent, historicalReadback = false): VerifiedFiles | undefined {
     const security = intent.security
     this.#deliveryIdentity(security)
     const goals = this.ctx.get('assistantGoals', false)
@@ -609,7 +665,7 @@ export class AssistantActionsService extends Service {
     const evidence = goals.inspectOwnerGoalExecution(input)
     const intermediate = security.acceptance === 'goal-step'
     if (evidence.storedGoal.definition.digest !== security.definitionDigest || evidence.storedGoal.definition.version !== security.definitionVersion
-      || !(intermediate ? ['active', 'paused', 'complete'] : ['active', 'complete']).includes(evidence.storedGoal.nativeAtLastObservation.phase)) throw new Error('assistant-actions: delivery goal changed')
+      || !(intermediate ? (historicalReadback ? ['active', 'paused', 'complete', 'blocked'] : ['active', 'paused', 'complete']) : ['active', 'complete']).includes(evidence.storedGoal.nativeAtLastObservation.phase)) throw new Error('assistant-actions: delivery goal changed')
     if (intermediate) {
       if (typeof goals.inspectOwnerAcceptedStepArtifacts !== 'function') throw new Error('assistant-actions: upgrade Goals for accepted step delivery')
       const run = evidence.executionRuns.find(item => item.intent.runId === security.runId)
@@ -639,8 +695,61 @@ export class AssistantActionsService extends Service {
         workspace: security.identity.workspace, preset: security.identity.agentPreset }, sessionId: security.sessionId,
       idempotencyKey: value.idempotencyKey, text: value.text, expiresAt: security.expiresAt })
   }
+  #externalDeliveryAuthorization(intent: DeliveryIntent, frozen?: string): ExternalBackgroundAuthorization {
+    const current = () => {
+      this.#deliveryIdentity(intent.security)
+      if (frozen !== undefined) {
+        const snapshot = this.#inspectDelivery(intent)
+        if (!snapshot || digest(snapshot) !== frozen) throw new Error('assistant-actions: accepted artifacts changed')
+      }
+    }
+    return { sessionId: intent.security.sessionId, agentId: `delivery:${intent.id}`, current,
+      authorize: actionId => { current(); return this.ctx.get('assistantPolicy')?.authorize(this.#deliveryPolicy(intent.security), { idempotencyKey: `external-action:${actionId}` }).effect === 'allow' } }
+  }
+
+  async #deliverExternalVerified(intent: DeliveryIntent, snapshot: VerifiedFiles, signal: AbortSignal): Promise<DeliveryOutcome> {
+    const security = intent.security, authorization = this.#externalDeliveryAuthorization(intent, digest(snapshot))
+    authorization.current()
+    const grant = this.#externalGrants.get(security.grantId)!
+    if (!grant.allowedOperations.includes('commit') || snapshot.files.some(file => !grant.destination.paths.includes(file.path))
+      || intent.request.pullRequest && !grant.allowedOperations.includes('pull-request')) throw new Error('assistant-actions: external delivery not granted')
+    const commitRequest = normalizeCommit({ grantId: grant.id, idempotencyKey: `${intent.id}:commit`, expectedHeadOid: intent.request.expectedHeadOid,
+      headline: intent.request.headline, files: snapshot.files.map(file => ({ path: file.path, content: file.content })) })
+    const committed = await this.#externalRequest(undefined, grant, grant.owner, 'commit', { expectedHeadOid: commitRequest.expectedHeadOid, headline: commitRequest.headline, files: commitRequest.files },
+      signal, { callId: `${intent.id}:commit`, rootCallId: intent.id }, commitRequest.idempotencyKey, authorization)
+    const commit = committed.result
+    if (commit.status !== 'succeeded') return { commit }
+    if (!committed.receipt || !commit.commitOid) return { commit: { ...commit, status: 'unknown', reason: 'external-delivery-receipt-unavailable' } }
+    const brokerReceipts: NonNullable<DeliveryOutcome['brokerReceipts']> = { commit: committed.receipt }
+    if (!intent.request.pullRequest) return { commit, brokerReceipts }
+    authorization.current()
+    const pr = normalizeWorkflow({ grantId: grant.id, idempotencyKey: `${intent.id}:pr`, expectedHeadOid: commit.commitOid, ...intent.request.pullRequest }) as PullRequestRequest
+    const created = await this.#externalRequest(undefined, grant, grant.owner, 'pull-request', { expectedHeadOid: pr.expectedHeadOid, title: pr.title, body: pr.body },
+      signal, { callId: `${intent.id}:pr`, rootCallId: intent.id }, pr.idempotencyKey, authorization)
+    if (created.result.status === 'succeeded' && !created.receipt) return { commit, pullRequest: { ...created.result, status: 'unknown', reason: 'external-delivery-receipt-unavailable' }, brokerReceipts }
+    return { commit, pullRequest: created.result, brokerReceipts: { ...brokerReceipts, ...(created.receipt ? { pullRequest: created.receipt } : {}) } }
+  }
+
+  #verifyExternalDelivery(intent: DeliveryIntent, outcome: DeliveryOutcome): void {
+    this.#deliveryIdentity(intent.security)
+    const grant = this.#externalGrants.get(intent.security.grantId)!, receipts = outcome.brokerReceipts
+    const snapshot = this.#inspectDelivery(intent, true)
+    if (!receipts?.commit || !receipts.pullRequest || !snapshot || !intent.request.pullRequest || !outcome.commit.commitOid || !outcome.pullRequest) throw new Error('assistant-actions: external delivery receipt unavailable')
+    const destination = { classification: 'github-repository' as const, repository: grant.destination.repository, branch: grant.destination.branch,
+      ...(grant.destination.baseBranch === undefined ? {} : { baseBranch: grant.destination.baseBranch }) }
+    const common = { grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.grantDigest, owner: grant.owner, sessionId: intent.security.sessionId, source: grant.source, destination }
+    const commit = verifyExternalDeliveryReceipt(receipts.commit, { expectedHeadOid: intent.request.expectedHeadOid, headline: intent.request.headline,
+      files: snapshot.files.map(file => ({ path: file.path, content: file.content })) },
+    { ...common, operation: 'commit', actionId: this.#externalActionId(grant, intent.security.sessionId, 'commit', `${intent.id}:commit`) }, this.#external())
+    const pr = verifyExternalDeliveryReceipt(receipts.pullRequest, { expectedHeadOid: outcome.commit.commitOid, ...intent.request.pullRequest },
+      { ...common, operation: 'pull-request', actionId: this.#externalActionId(grant, intent.security.sessionId, 'pull-request', `${intent.id}:pr`) }, this.#external())
+    if (commit.result?.operation !== 'commit' || pr.result?.operation !== 'pull-request' || commit.actionId !== outcome.commit.actionId || pr.actionId !== outcome.pullRequest.actionId
+      || commit.result.commitOid !== outcome.commit.commitOid || pr.result.pullRequestNumber !== outcome.pullRequest.pullRequestNumber) throw new Error('assistant-actions: external delivery receipt changed')
+  }
+
   async #deliverVerified(intent: DeliveryIntent, snapshot: VerifiedFiles, signal: AbortSignal) {
     const security = intent.security, frozen = digest(snapshot)
+    if (this.#mode === 'external-unix-v1') return await this.#deliverExternalVerified(intent, snapshot, signal)
     const authorization: Authorization = { sessionId: security.sessionId,
       identity: () => {
         const current = this.#inspectDelivery(intent)
@@ -683,7 +792,7 @@ export class AssistantActionsService extends Service {
 
   #allowsExternal(grant: ExternalActionGrantMirror | undefined, identity: ActionIdentity, request: CommitRequest | InspectRequest): boolean {
     if (!grant || grant.expiresAt <= Date.now() || digest(identity) !== digest({ principalDigest: grant.owner.principalDigest, principalRecordId: grant.owner.principalRecordId, principalVersion: grant.owner.principalVersion, workspace: grant.owner.workspace, agentPreset: grant.owner.preset })) return false
-    if ('files' in request) return grant.allowedOperations.includes('commit') && request.files.every(file => grant.destination.paths.includes(file.path)) && commitBytes(request) <= grant.maxTotalBytes
+    if ('files' in request) return !grant.verifiedDelivery && grant.allowedOperations.includes('commit') && request.files.every(file => grant.destination.paths.includes(file.path)) && commitBytes(request) <= grant.maxTotalBytes
     return grant.allowedOperations.includes('inspect') && grant.allowedInspectKinds.includes(request.kind) && (request.kind !== 'file' || grant.destination.paths.includes(request.path!))
       && (!['pull-request', 'checks', 'reviews'].includes(request.kind) || typeof grant.destination.baseBranch === 'string')
   }

@@ -59,9 +59,10 @@ async function externalConfig(root: string, grants: readonly BrokerGrantProjecti
     expectedSocketUid: process.getuid!(), expectedSocketGid: process.getgid!(), expectedBrokerPeerUid: process.getuid!(), expectedBrokerPeerGid: process.getgid!() } }
 }
 
-function response(actionId: string, status: 'succeeded' | 'failed' | 'unknown', operation: 'commit' | 'inspect' = 'commit'): BrokerServerResponse {
+function response(actionId: string, status: 'succeeded' | 'failed' | 'unknown', operation: 'commit' | 'inspect' | 'pull-request' = 'commit'): BrokerServerResponse {
   const result = status !== 'succeeded' ? null : operation === 'commit'
     ? { operation: 'commit' as const, repository: 'owner/repository', branch: 'main', parentOid: 'c'.repeat(40), commitOid: 'd'.repeat(40) }
+    : operation === 'pull-request' ? { operation: 'pull-request' as const, repository: 'owner/repository', branch: 'main', baseBranch: 'stable', expectedHeadOid: 'd'.repeat(40), pullRequestNumber: 42 }
     : { operation: 'inspect' as const, repository: 'owner/repository', branch: 'main', kind: 'repository' as const, observed: { full_name: 'owner/repository', untrusted: true } as const, observedDigest: brokerDigest({ full_name: 'owner/repository', untrusted: true }) }
   return { protocol: GITHUB_BROKER_PROTOCOL, type: 'server-response', requestId: 'request', actionId, instanceId: 'broker-1', generation: 1, challenge: Buffer.alloc(32).toString('base64url'), requestDigest: 'e'.repeat(64),
     status, dispatched: status !== 'failed', result, error: status === 'succeeded' ? null : { code: 'fixture-error' }, completedAt: Date.now(), signature: Buffer.alloc(64).toString('base64url') }
@@ -223,8 +224,8 @@ describe('external broker Host facade', () => {
     await expect(f.service.runBranch(f.agent, { grantId: 'external', idempotencyKey: 'b', baseHeadOid: 'c'.repeat(40) }, new AbortController().signal)).rejects.toThrow('external-operation-unsupported')
     await expect(f.service.runPullRequest(f.agent, { grantId: 'external', idempotencyKey: 'p', expectedHeadOid: 'c'.repeat(40), title: 'PR', body: '' }, new AbortController().signal)).rejects.toThrow('external-operation-unsupported')
     await expect(f.service.runCompensation(f.agent, { grantId: 'external', idempotencyKey: 'r', forwardActionId: 'a', forwardActionVersion: 1, forwardRequestDigest: 'd'.repeat(64), forwardCommitOid: 'c'.repeat(40) }, new AbortController().signal)).rejects.toThrow('external-operation-unsupported')
-    expect(() => f.service.prepareVerifiedDelivery(f.agent, { grantId: 'external', idempotencyKey: 'v', expectedHeadOid: 'c'.repeat(40), headline: 'x', paths: ['a.txt'] })).toThrow('external-operation-unsupported')
-    expect(() => f.service.repositoryReadbackGeneration()).toThrow('external-operation-unsupported')
+    expect(() => f.service.prepareVerifiedDelivery(f.agent, { grantId: 'external', idempotencyKey: 'v', expectedHeadOid: 'c'.repeat(40), headline: 'x', paths: ['a.txt'] })).toThrow('verified delivery unavailable')
+    expect(f.service.repositoryReadbackGeneration()).toMatch(/^[0-9a-f]{64}$/u)
     await expect(f.service.runInspect(f.agent, { grantId: 'external', kind: 'checks', pullRequestNumber: 1 }, new AbortController().signal)).rejects.toThrow(/request not granted/)
     expect(f.dispatch).not.toHaveBeenCalled(); expect(f.localCommit).not.toHaveBeenCalled(); expect(f.localWorkflow.branch).not.toHaveBeenCalled(); expect(f.localWorkflow.pullRequest).not.toHaveBeenCalled()
   })

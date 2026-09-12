@@ -4,7 +4,7 @@ import { lstat, open, realpath } from 'node:fs/promises'
 import type { BigIntStats } from 'node:fs'
 import { basename, dirname, isAbsolute, normalize } from 'node:path'
 import type { ActionGrant } from './types.js'
-import { commitOnGitHub, inspectGitHub } from './github.js'
+import { commitOnGitHub, createPullRequestOnGitHub, inspectGitHub } from './github.js'
 import {
   brokerAdminRequestDigest,
   canonicalBrokerJson,
@@ -14,6 +14,7 @@ import {
   type BrokerClientRequest,
   type BrokerCommitPayload,
   type BrokerInspectPayload,
+  type BrokerPullRequestPayload,
   type BrokerInspectObservation,
   type BrokerServerResponseUnsigned,
   type BrokerSuccessResult,
@@ -35,6 +36,7 @@ type BrokerResponse = Pick<BrokerServerResponseUnsigned, 'status' | 'dispatched'
 type BrokerAdminResponse = Pick<BrokerAdminResponseUnsigned, 'status' | 'state' | 'error' | 'completedAt'>
 type GitHubTransport = typeof commitOnGitHub
 type InspectTransport = typeof inspectGitHub
+type PullRequestTransport = typeof createPullRequestOnGitHub
 const FORCED_TEARDOWN_GRACE_MS = 100
 
 export interface BrokerProtectedFileCredential {
@@ -59,6 +61,7 @@ export interface ExternalBrokerCoreConfig {
 export interface ExternalBrokerCoreTransports {
   commit?: GitHubTransport
   inspect?: InspectTransport
+  pullRequest?: PullRequestTransport
   /** Deterministic race hook used only by filesystem-boundary tests. */
   beforeCredentialOpen?: () => void | Promise<void>
 }
@@ -194,9 +197,9 @@ function inspectProjection(payload: BrokerInspectPayload, observed: unknown, gra
   } catch { return undefined }
 }
 
-function githubGrant(grant: ExternalGitHubGrant): ActionGrant {
+function githubGrant(grant: ExternalGitHubGrant, allowPullRequest = false): ActionGrant {
   return Object.freeze({ id: grant.id, revision: grant.revision, principalDigest: grant.owner.principalDigest, principalRecordId: grant.owner.principalRecordId, principalVersion: grant.owner.principalVersion, workspace: grant.owner.workspace, agentPreset: grant.owner.preset, repository: grant.destination.repository, branch: grant.destination.branch, paths: [...grant.destination.paths], credentialHandle: grant.credentialId, expiresAt: grant.expiresAt, maxActions: grant.maxActions, maxTotalBytes: grant.maxTotalBytes,
-    ...(grant.destination.baseBranch === undefined ? {} : { repoWorkflow: Object.freeze({ baseBranch: grant.destination.baseBranch, allowBranchCreate: false, allowPullRequest: false }) }) })
+    ...(grant.destination.baseBranch === undefined ? {} : { repoWorkflow: Object.freeze({ baseBranch: grant.destination.baseBranch, allowBranchCreate: false, allowPullRequest }) }) })
 }
 
 function response(record: BrokerLedgerRecord): BrokerResponse {
@@ -211,6 +214,7 @@ export class ExternalBrokerCore {
   readonly #credentials: ReadonlyMap<string, BrokerProtectedFileCredential>
   readonly #commit: GitHubTransport
   readonly #inspect: InspectTransport
+  readonly #pullRequest: PullRequestTransport
   readonly #beforeCredentialOpen: (() => void | Promise<void>) | undefined
   readonly #now: () => number
   readonly #credentialMaxBytes: number
@@ -230,6 +234,7 @@ export class ExternalBrokerCore {
     const grants = [...config.grants]
     this.#commit = transports.commit ?? commitOnGitHub
     this.#inspect = transports.inspect ?? inspectGitHub
+    this.#pullRequest = transports.pullRequest ?? createPullRequestOnGitHub
     this.#beforeCredentialOpen = transports.beforeCredentialOpen
     this.#ledger = new ExternalBrokerLedger(statePath, instanceId, { now: this.#now })
     try {
@@ -280,6 +285,10 @@ export class ExternalBrokerCore {
         const payload = request.payload as BrokerCommitPayload
         const commit = await abortable(this.#commit({ actionId: request.actionId, grant: githubGrant(grant), request: { grantId: grant.id, idempotencyKey: request.actionId, expectedHeadOid: payload.expectedHeadOid, headline: payload.headline, files: payload.files.map(file => ({ ...file })) }, token, signal: combined }), combined)
         if (commit.status === 'succeeded' && commit.commitOid) result = { operation: 'commit', repository: grant.destination.repository, branch: grant.destination.branch, parentOid: payload.expectedHeadOid, commitOid: commit.commitOid }
+      } else if (request.operation === 'pull-request') {
+        const payload = request.payload as BrokerPullRequestPayload
+        const created = await abortable(this.#pullRequest({ actionId: request.actionId, grant: githubGrant(grant, true), expectedHeadOid: payload.expectedHeadOid, title: payload.title, body: payload.body, token, signal: combined }), combined)
+        if (created.status === 'succeeded' && created.pullRequestNumber && grant.destination.baseBranch !== undefined) result = { operation: 'pull-request', repository: grant.destination.repository, branch: grant.destination.branch, baseBranch: grant.destination.baseBranch, expectedHeadOid: payload.expectedHeadOid, pullRequestNumber: created.pullRequestNumber }
       } else {
         const payload = request.payload as BrokerInspectPayload
         const inspected = await abortable(this.#inspect({ grant: githubGrant(grant), kind: payload.kind, ...(payload.path === undefined ? {} : { path: payload.path }), ...(payload.pullRequestNumber === undefined ? {} : { pullRequestNumber: payload.pullRequestNumber }), token, signal: combined }), combined)
