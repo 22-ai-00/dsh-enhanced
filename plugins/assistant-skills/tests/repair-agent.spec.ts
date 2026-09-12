@@ -1,6 +1,9 @@
 import { Context } from '@deepseek-ai/cordis'
 import { expect, test, vi } from 'vitest'
 import { OwnerRepairAgentRuntime, type OwnerRepairAgentInput } from '../src/repair-agent.js'
+import { SkillStore } from '../src/store.js'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { SessionId } from '@deepseek-ai/dsh-session'
 
 const scope = { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: '/workspace', preset: 'repair' }
 const input = (): OwnerRepairAgentInput => ({ id: 'authorization-1', authorizationDigest: 'digest', scope, ownerRouteId: 'route',
@@ -9,6 +12,31 @@ const input = (): OwnerRepairAgentInput => ({ id: 'authorization-1', authorizati
     evidence: { producer: 'assistant-goals', generation: 'generation', digest: 'digest' } }, objective: 'Repair', maxGoalRounds: 1, expiresAt: Date.now() + 60_000,
   provider: 'provider', model: 'model', maxModelCalls: 1, maxToolCalls: 0, maxOutputTokens: 10, maxDurationMs: 1_000, allowedTools: [], assertCurrent: () => {} })
 
+test('released repair handles reattach through resume while preserving the original deadline and native identity', async () => {
+  const store = new SkillStore(':memory:')
+  const record = store.createRepairContinuation(scope, { invocationId: 'resume', ownerRouteId: 'route', source: { goalId: 'source', sessionId: 'source-session', nativeGoalId: 'source-native', definitionDigest: 'a'.repeat(64) },
+    profileId: 'profile', profileDigest: 'b'.repeat(64), skillName: 'repair-skill', parentVersion: 1, parentDigest: 'c'.repeat(64), maxIterations: 1, expiresAt: Date.now() + 60_000 }, {})
+  const original = { ...input(), id: record.id, authorizationDigest: record.authorizationDigest, expiresAt: record.authorization.expiresAt, maxDurationMs: 30_000 }
+  const create = vi.fn(async ({ sessionId }: { sessionId: string }) => ({ agent: { session: { id: sessionId } }, dispose: async () => {} }))
+  const resume = vi.fn(async ({ resumeSessionId }: { resumeSessionId: string }) => ({ agent: { session: { id: resumeSessionId } }, dispose: async () => {} }))
+  const startGoal = vi.fn(async () => ({ id: 'original-goal' })), resumeGoal = vi.fn(async (_agent: unknown) => ({ id: 'original-goal' }))
+  const ctx = { effect() {}, get: (name: string) => ({ agents: { create, resume }, assistantGoals: { startOwnerAuthorizedRepair: startGoal, resumeOwnerAuthorizedRepair: resumeGoal },
+    assistantPolicy: { bindInitiator: () => () => {} }, sessions: { flush: async () => {} } })[name as 'agents'] } as unknown as Context
+  const first = new OwnerRepairAgentRuntime(ctx, store), second = new OwnerRepairAgentRuntime(ctx, store)
+  try {
+    const made = await first.create(original), before = store.inspectRepairExecution(scope, record.id, 1)!
+    await first.closeSession(made.sessionId)
+    const reference = { ...made, nativeGoalId: 'original-native', definitionDigest: 'a'.repeat(64) }
+    const restored = await second.resume({ ...original, maxDurationMs: 60_000 }, reference)
+    expect(restored).toEqual(made)
+    expect(store.inspectRepairExecution(scope, record.id, 1)).toMatchObject({ deadlineAt: before.deadlineAt, fence: before.fence + 1 })
+    expect(create).toHaveBeenCalledTimes(1); expect(startGoal).toHaveBeenCalledTimes(1)
+    expect(resume).toHaveBeenCalledTimes(1); expect(resumeGoal.mock.calls[0]?.[0]).toBe(second.get(made.sessionId))
+    await expect(second.resume(original, reference)).rejects.toThrow(/unavailable/u)
+    expect(resume).toHaveBeenCalledTimes(1)
+  } finally { await first.dispose(); await second.dispose(); store.close() }
+})
+
 test('rejects malformed or expired repair bootstrap before creating an Agent', async () => {
   const runtime = new OwnerRepairAgentRuntime(new Context())
   const expired = { ...input(), expiresAt: Date.now() - 1 }
@@ -16,6 +44,37 @@ test('rejects malformed or expired repair bootstrap before creating an Agent', a
   const malformed = { ...input(), allowedTools: ['read', 'read'] }
   await expect(runtime.create(malformed)).rejects.toThrow(/invalid owner repair Agent input/u)
   await runtime.dispose()
+})
+
+test.each(['native', 'repair'])('a %s abort at normal provider return keeps its effect pending after handle disposal', async source => {
+  const store = new SkillStore(':memory:')
+  const record = store.createRepairContinuation(scope, { invocationId: `abort-${source}`, ownerRouteId: 'route', source: { goalId: 'source', sessionId: 'source-session', nativeGoalId: 'source-native', definitionDigest: 'a'.repeat(64) },
+    profileId: 'profile', profileDigest: 'b'.repeat(64), skillName: 'repair-skill', parentVersion: 1, parentDigest: 'c'.repeat(64), maxIterations: 1, expiresAt: Date.now() + 60_000 }, {})
+  const original = { ...input(), id: record.id, authorizationDigest: record.authorizationDigest, expiresAt: record.authorization.expiresAt, maxDurationMs: 30_000 }
+  const repairAbort = new AbortController(), nativeAbort = new AbortController()
+  let stream!: (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>
+  const create = async ({ sessionId, setup }: { sessionId: string; setup: (ctx: unknown) => Promise<void> }) => {
+    const agent = { session: { id: sessionId }, cancel: vi.fn() }
+    await setup({ agent, effect: (acquire: () => unknown) => acquire(), tools: { schemas: () => [], guard: () => {} },
+      on: (name: string, listener: typeof stream) => { if (name === 'llm/stream') stream = listener; return () => {} } })
+    return { agent, dispose: async () => {} }
+  }
+  const ctx = { effect() {}, get: (name: string) => ({ agents: { create }, assistantGoals: { startOwnerAuthorizedRepair: async () => ({ id: 'goal' }) },
+    assistantPolicy: { bindInitiator: () => () => {} }, sessions: { flush: async () => {} } })[name as 'agents'] } as unknown as Context
+  const runtime = new OwnerRepairAgentRuntime(ctx, store)
+  try {
+    const made = await runtime.create(original, repairAbort.signal)
+    const options: GenerateOptions = { sessionId: SessionId(made.sessionId), provider: 'provider', model: 'model', messages: [], maxTokens: 10, tools: [], signal: nativeAbort.signal }
+    const consume = async () => {
+      for await (const _chunk of stream(options, async function* () {
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        ;(source === 'native' ? nativeAbort : repairAbort).abort(new Error('cancelled after final chunk'))
+      })) { /* consume the provider's terminal chunk before its normal return */ }
+    }
+    await expect(consume()).rejects.toThrow('cancelled after final chunk')
+    await runtime.closeSession(made.sessionId)
+    expect(store.inspectRepairExecution(scope, record.id, 1)).toMatchObject({ state: 'active', pendingModel: 1 })
+  } finally { await runtime.dispose(); store.close() }
 })
 
 test('disposing while creation is in flight aborts and waits for its late result', async () => {

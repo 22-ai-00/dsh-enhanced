@@ -5,6 +5,8 @@ export interface RepairRuntimePorts {
   inspectTrigger(record: SkillRepairContinuation, signal: AbortSignal): Promise<unknown | undefined>
   createRepair(record: SkillRepairContinuation, evidence: unknown, signal: AbortSignal): Promise<{ sessionId: string; goalId: string }>
   inspectRepair(record: SkillRepairContinuation, signal: AbortSignal): Promise<'running' | 'achieved' | 'rejected'>
+  /** Reattach only the original repair Agent after its execution fence permits it. */
+  ensureRepair?(record: SkillRepairContinuation, signal: AbortSignal): Promise<void>
   capture(record: SkillRepairContinuation, signal: AbortSignal): Promise<{ candidateId: string }>
   compare(record: SkillRepairContinuation, signal: AbortSignal): Promise<{ deploymentId: string }>
   inspectDeployment(record: SkillRepairContinuation, signal: AbortSignal): Promise<'watching' | 'complete' | 'rejected'>
@@ -109,8 +111,14 @@ export class RepairContinuationRuntime {
     if (!record) throw new Error('assistant-skills: repair continuation missing')
     if (terminal.has(record.state)) return record
     const signal = AbortSignal.any([this.#lifecycle.signal])
+    let recovering = false
     try {
       this.#current(record, signal)
+      if (this.ports.ensureRepair && ['repairing', 'repair-achieved', 'candidate-staged'].includes(record.state)) {
+        recovering = true
+        await this.#dispatch(record, signal, () => this.ports.ensureRepair!(record!, signal))
+        recovering = false
+      }
       switch (record.state) {
         case 'armed': {
           if (record.iteration > 1 && record.checkpoint.trigger !== undefined) return this.#transition(record, 'source-confirmed', {})
@@ -162,7 +170,7 @@ export class RepairContinuationRuntime {
       const expired = current.authorization.expiresAt <= Date.now()
       // Work that was checkpointed as dispatched is uncertain; failures before
       // a dispatch are a rejection of the finite authority.
-      this.#ended(current, expired ? 'expired' : uncertain.has(current.state) ? 'unknown' : 'rejected', expired ? 'expired' : uncertain.has(current.state) ? 'dispatch-uncertain' : 'authority-or-port-failed')
+      this.#ended(current, expired ? 'expired' : recovering || uncertain.has(current.state) ? 'unknown' : 'rejected', expired ? 'expired' : recovering ? 'repair-recovery-unconfirmed' : uncertain.has(current.state) ? 'dispatch-uncertain' : 'authority-or-port-failed')
       throw error
     }
   }

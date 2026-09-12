@@ -3,6 +3,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { validateFailureCaptureProvenance, type FailureCaptureProvenance, type SkillDefinition } from './definition.js'
+import { currentRepairProcess, probeRepairProcess, type RepairProcessWitness } from './repair-process.js'
 
 export type SkillRunState = 'running' | 'succeeded' | 'failed' | 'unknown'
 export interface SkillRunStep { id: string; state: 'succeeded' | 'failed' | 'unknown'; detail?: string }
@@ -114,6 +115,12 @@ export interface SkillRepairContinuation {
   checkpoint: Readonly<Record<string, unknown>>
   createdAt: number
   updatedAt: number
+}
+export interface RepairExecutionLease {
+  authorizationId: string; authorizationDigest: string; iteration: number; sessionId: string; holderId: string; fence: number; deadlineAt: number
+  process: RepairProcessWitness
+  state: 'active' | 'released'
+  pendingModel: number; pendingTool: number
 }
 
 function fail(message = 'assistant-skills: store operation rejected'): never { throw new Error(message) }
@@ -317,6 +324,7 @@ export class SkillStore {
       CREATE TABLE IF NOT EXISTS skill_captures(scope_key TEXT NOT NULL,id TEXT NOT NULL,capture_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','captured','revoked','expired','unsupported','unknown')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_repair_continuations(scope_key TEXT NOT NULL,id TEXT NOT NULL,authorization_digest TEXT NOT NULL,route_receipt_digest TEXT NOT NULL,revision INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('armed','source-confirmed','creating-repair','repairing','repair-achieved','capturing','candidate-staged','comparing','watching','complete','rejected','revoked','expired','unknown')),continuation_json TEXT NOT NULL,PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_repair_usage(scope_key TEXT NOT NULL,id TEXT NOT NULL,authorization_digest TEXT NOT NULL,model_calls INTEGER NOT NULL CHECK(model_calls>=0),tool_calls INTEGER NOT NULL CHECK(tool_calls>=0),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS skill_repair_execution(scope_key TEXT NOT NULL,id TEXT NOT NULL,iteration INTEGER NOT NULL,lease_json TEXT NOT NULL,fence INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','released')),pending_model INTEGER NOT NULL CHECK(pending_model>=0),pending_tool INTEGER NOT NULL CHECK(pending_tool>=0),PRIMARY KEY(scope_key,id,iteration)) STRICT, WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS skill_definitions_current ON skill_definitions(scope_key,name,version DESC);
       CREATE INDEX IF NOT EXISTS skill_runs_scope ON skill_runs(scope_key,id);
       CREATE INDEX IF NOT EXISTS skill_watches_scope_state ON skill_watches(scope_key,state);
@@ -346,6 +354,72 @@ export class SkillStore {
     this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS skill_comparisons_one_active ON skill_comparisons(scope_key) WHERE state='running'")
   }
   close(): void { this.#db.close() }
+  inspectRepairExecution(scope: object, id: string, iteration: number): RepairExecutionLease | undefined {
+    const key = scopeKey(scope)
+    if (!text(id, 128) || !version(iteration)) fail('assistant-skills: invalid repair execution reference')
+    const value = this.#repairExecution(key, id, iteration)
+    return value === undefined ? undefined : clone(value)
+  }
+  claimRepairExecution(scope: object, id: string, iteration: number, sessionId: string, holderId: string, deadlineAt: number, options: { recover: boolean }): RepairExecutionLease {
+    const key = scopeKey(scope)
+    if (!text(id, 128) || !version(iteration) || !text(sessionId, 512) || !text(holderId, 512)
+      || !Number.isSafeInteger(deadlineAt) || deadlineAt <= Date.now() || !options || Object.keys(options).length !== 1 || typeof options.recover !== 'boolean') fail('assistant-skills: invalid repair execution claim')
+    const process = currentRepairProcess()
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const continuation = this.#repairExecutionAuthorization(key, id, iteration, deadlineAt)
+      const current = this.#repairExecution(key, id, iteration)
+      if (!options.recover) {
+        if (current !== undefined || !process) fail('assistant-skills: repair execution recovery required')
+        const lease: RepairExecutionLease = { authorizationId: id, authorizationDigest: continuation.authorizationDigest, iteration, sessionId, holderId, fence: 1, deadlineAt,
+          process, state: 'active', pendingModel: 0, pendingTool: 0 }
+        this.#putRepairExecution(key, lease); this.#db.exec('COMMIT'); return clone(lease)
+      }
+      if (!current || current.authorizationDigest !== continuation.authorizationDigest || current.sessionId !== sessionId || current.iteration !== iteration || current.deadlineAt !== deadlineAt) fail('assistant-skills: repair execution recovery unavailable')
+      if (current.state === 'released' && current.pendingModel === 0 && current.pendingTool === 0 && this.#sameRepairProcess(current.process, process)) {
+        const lease = { ...current, holderId, fence: current.fence + 1, process: process ?? current.process, state: 'active' as const }
+        this.#updateRepairExecution(key, current, lease); this.#db.exec('COMMIT'); return clone(lease)
+      }
+      if (!['active', 'released'].includes(current.state) || current.pendingModel !== 0 || current.pendingTool !== 0 || !process || probeRepairProcess(current.process) !== 'gone') fail('assistant-skills: repair execution holder remains authoritative')
+      const lease: RepairExecutionLease = { ...current, holderId, fence: current.fence + 1, process, state: 'active' }
+      this.#updateRepairExecution(key, current, lease); this.#db.exec('COMMIT'); return clone(lease)
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  assertRepairExecution(scope: object, lease: RepairExecutionLease): void {
+    const key = scopeKey(scope); this.#assertRepairExecution(key, lease, true)
+  }
+  beginRepairEffect(scope: object, lease: RepairExecutionLease, kind: 'model' | 'tool'): () => void {
+    const key = scopeKey(scope)
+    if (kind !== 'model' && kind !== 'tool') fail('assistant-skills: invalid repair effect')
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.#assertRepairExecution(key, lease, true)
+      const field = kind === 'model' ? 'pendingModel' : 'pendingTool'
+      const saved = { ...current, [field]: current[field] + 1 }
+      this.#updateRepairExecution(key, current, saved); this.#db.exec('COMMIT')
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+    let finished = false
+    return () => {
+      if (finished) return
+      this.#db.exec('BEGIN IMMEDIATE')
+      try {
+        const current = this.#repairExecution(key, lease.authorizationId, lease.iteration)
+        const field = kind === 'model' ? 'pendingModel' : 'pendingTool'
+        if (!current || current.fence !== lease.fence || current.authorizationDigest !== lease.authorizationDigest || current.sessionId !== lease.sessionId
+          || current.holderId !== lease.holderId || current.deadlineAt !== lease.deadlineAt || !this.#sameRepairProcess(current.process, currentRepairProcess())
+          || current.state !== 'active' || current[field] < 1) fail('assistant-skills: repair effect fence conflict')
+        this.#updateRepairExecution(key, current, { ...current, [field]: current[field] - 1 }); this.#db.exec('COMMIT'); finished = true
+      } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+    }
+  }
+  releaseRepairExecution(scope: object, lease: RepairExecutionLease): void {
+    const key = scopeKey(scope); this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.#assertRepairExecution(key, lease, false)
+      if (current.pendingModel !== 0 || current.pendingTool !== 0) fail('assistant-skills: repair effects remain pending')
+      this.#updateRepairExecution(key, current, { ...current, state: 'released' }); this.#db.exec('COMMIT')
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
   createRepairContinuation(scope: object, input: SkillRepairAuthorizationInput, routeReceipt: unknown): SkillRepairContinuation {
     const key = scopeKey(scope)
     if (!repairAuthorization(input) || !json(routeReceipt)) fail('assistant-skills: invalid repair continuation')
@@ -1021,6 +1095,56 @@ export class SkillStore {
   #repairContinuation(key: string, id: string): SkillRepairContinuation | undefined {
     const row = this.#db.prepare('SELECT continuation_json FROM skill_repair_continuations WHERE scope_key=? AND id=?').get(key, id) as { continuation_json: string } | undefined
     return row === undefined ? undefined : JSON.parse(row.continuation_json) as SkillRepairContinuation
+  }
+  #repairExecution(key: string, id: string, iteration: number): RepairExecutionLease | undefined {
+    const row = this.#db.prepare('SELECT lease_json FROM skill_repair_execution WHERE scope_key=? AND id=? AND iteration=?').get(key, id, iteration) as { lease_json: string } | undefined
+    if (!row) return undefined
+    try {
+      const lease = JSON.parse(row.lease_json) as RepairExecutionLease
+      if (!this.#validRepairExecution(lease) || lease.authorizationId !== id || lease.iteration !== iteration) fail('assistant-skills: invalid repair execution record')
+      return lease
+    } catch (error) { if (error instanceof Error && error.message.startsWith('assistant-skills:')) throw error; fail('assistant-skills: invalid repair execution record') }
+  }
+  #putRepairExecution(key: string, lease: RepairExecutionLease): void {
+    if (!this.#validRepairExecution(lease)) fail('assistant-skills: invalid repair execution record')
+    this.#db.prepare('INSERT INTO skill_repair_execution(scope_key,id,iteration,lease_json,fence,state,pending_model,pending_tool) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(scope_key,id,iteration) DO UPDATE SET lease_json=excluded.lease_json,fence=excluded.fence,state=excluded.state,pending_model=excluded.pending_model,pending_tool=excluded.pending_tool')
+      .run(key, lease.authorizationId, lease.iteration, JSON.stringify(lease), lease.fence, lease.state, lease.pendingModel, lease.pendingTool)
+  }
+  #updateRepairExecution(key: string, expected: RepairExecutionLease, saved: RepairExecutionLease): void {
+    if (!this.#validRepairExecution(expected) || !this.#validRepairExecution(saved) || expected.authorizationId !== saved.authorizationId || expected.iteration !== saved.iteration) fail('assistant-skills: invalid repair execution record')
+    const result = this.#db.prepare("UPDATE skill_repair_execution SET lease_json=?,fence=?,state=?,pending_model=?,pending_tool=? WHERE scope_key=? AND id=? AND iteration=? AND fence=? AND state=? AND pending_model=? AND pending_tool=? AND json_extract(lease_json, '$.authorizationDigest')=?")
+      .run(JSON.stringify(saved), saved.fence, saved.state, saved.pendingModel, saved.pendingTool, key, expected.authorizationId, expected.iteration, expected.fence, expected.state, expected.pendingModel, expected.pendingTool, expected.authorizationDigest)
+    if (result.changes !== 1) fail('assistant-skills: repair execution fence conflict')
+  }
+  #validRepairExecution(value: unknown): value is RepairExecutionLease {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || !json(value) || Object.keys(value).length !== 11) return false
+    const lease = value as RepairExecutionLease, proc = lease.process
+    return text(lease.authorizationId, 128) && digest(lease.authorizationDigest) && version(lease.iteration) && text(lease.sessionId, 512) && text(lease.holderId, 512)
+      && version(lease.fence) && Number.isSafeInteger(lease.deadlineAt) && lease.deadlineAt > 0 && ['active', 'released'].includes(lease.state)
+      && !!proc && typeof proc === 'object' && Object.keys(proc).length === 4 && typeof proc.bootId === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/u.test(proc.bootId)
+      && Number.isSafeInteger(proc.pid) && proc.pid > 0 && typeof proc.startTicks === 'string' && /^[1-9][0-9]{0,63}$/u.test(proc.startTicks)
+      && typeof proc.pidNamespace === 'string' && /^(?:linux:[0-9]{1,32}:[0-9]{1,32}|local:[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$/u.test(proc.pidNamespace)
+      && Number.isSafeInteger(lease.pendingModel) && lease.pendingModel >= 0 && Number.isSafeInteger(lease.pendingTool) && lease.pendingTool >= 0
+      && (lease.state !== 'released' || (lease.pendingModel === 0 && lease.pendingTool === 0))
+  }
+  #sameRepairProcess(expected: RepairProcessWitness, actual: RepairProcessWitness | undefined): boolean {
+    return !!actual && expected.bootId === actual.bootId && expected.pidNamespace === actual.pidNamespace && expected.pid === actual.pid && expected.startTicks === actual.startTicks
+  }
+  #repairExecutionAuthorization(key: string, id: string, iteration: number, deadlineAt: number): SkillRepairContinuation {
+    const continuation = this.#repairContinuation(key, id)
+    if (!continuation || continuation.iteration !== iteration || continuation.authorizationDigest !== acceptanceDigest(continuation.authorization)
+      || deadlineAt <= Date.now() || continuation.authorization.expiresAt <= Date.now() || deadlineAt > continuation.authorization.expiresAt
+      || ['complete', 'rejected', 'revoked', 'expired', 'unknown'].includes(continuation.state)) fail('assistant-skills: repair execution authorization unavailable')
+    return continuation
+  }
+  #assertRepairExecution(key: string, lease: RepairExecutionLease, authorization: boolean): RepairExecutionLease {
+    if (!this.#validRepairExecution(lease)) fail('assistant-skills: invalid repair execution lease')
+    const current = this.#repairExecution(key, lease.authorizationId, lease.iteration)
+    if (!current || current.state !== 'active' || current.fence !== lease.fence || current.authorizationDigest !== lease.authorizationDigest
+      || current.sessionId !== lease.sessionId || current.holderId !== lease.holderId || current.deadlineAt !== lease.deadlineAt
+      || !this.#sameRepairProcess(current.process, currentRepairProcess())) fail('assistant-skills: repair execution fence conflict')
+    if (authorization) this.#repairExecutionAuthorization(key, lease.authorizationId, lease.iteration, lease.deadlineAt)
+    return current
   }
   #watch(key: string, id: string): SkillWatch | undefined { const row = this.#db.prepare('SELECT watch_json FROM skill_watches WHERE scope_key=? AND id=?').get(key, id) as { watch_json: string } | undefined; return row ? JSON.parse(row.watch_json) as SkillWatch : undefined }
   #watches(key: string, state: SkillWatch['state']): SkillWatch[] { return (this.#db.prepare('SELECT watch_json FROM skill_watches WHERE scope_key=? AND state=?').all(key, state) as { watch_json: string }[]).map(row => JSON.parse(row.watch_json) as SkillWatch) }

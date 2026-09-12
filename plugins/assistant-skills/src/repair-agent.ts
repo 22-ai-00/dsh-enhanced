@@ -1,12 +1,13 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import { type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import type { GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput } from '@dsh-enhanced/assistant-goals'
+import type { GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput, OwnerAuthorizedRepairResumeInput } from '@dsh-enhanced/assistant-goals'
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import type { RepairExecutionLease, SkillStore } from './store.js'
 
 export interface OwnerRepairAgentInput {
   id: string
@@ -31,7 +32,7 @@ export interface OwnerRepairAgentInput {
   assertCurrent: () => void
 }
 
-type Goals = Pick<AssistantGoalsService, 'startOwnerAuthorizedRepair'>
+type Goals = Pick<AssistantGoalsService, 'startOwnerAuthorizedRepair' | 'resumeOwnerAuthorizedRepair'>
 type Policy = Pick<AssistantPolicyService, 'bindInitiator'>
 
 const validText = (value: unknown, max = 4_096): value is string => typeof value === 'string' && value.length > 0 && value.length <= max
@@ -64,14 +65,48 @@ export class OwnerRepairAgentRuntime {
   readonly #controllers = new Map<string, AbortController>()
   readonly #authorizationSessions = new Map<string, Set<string>>()
   readonly #inflight = new Map<string, Promise<{ sessionId: string; goalId: string }>>()
+  readonly #leases = new Map<string, { scope: GoalScope; lease: RepairExecutionLease }>()
+  readonly #resumeProofs = new Map<string, { input: OwnerAuthorizedRepairResumeInput; callback: () => void }>()
+  readonly #settlements = new Map<string, Set<Promise<void>>>()
+  readonly #closing = new Map<string, Promise<void>>()
   #disposeFlight: Promise<void> | undefined
   #disposed = false
 
-  constructor(private readonly ctx: Context) {
+  constructor(private readonly ctx: Context, private readonly store?: SkillStore) {
     ctx.effect(() => () => this.dispose(), 'assistant-skills.owner-repair-agents')
   }
 
   get(sessionId: string): Agent | undefined { return this.#handles.get(sessionId)?.agent }
+
+  /** A live process-local capability backed by the current durable execution fence. */
+  ownsResume(input: OwnerAuthorizedRepairResumeInput, callback: () => void): boolean {
+    const proof = this.#resumeProofs.get(input.repair.sessionId)
+    if (!proof || proof.callback !== callback || acceptanceDigest(proof.input) !== acceptanceDigest(input)
+      || !this.#handles.has(input.repair.sessionId)) return false
+    try { this.#assertLease(input.repair.sessionId); callback(); return true } catch { return false }
+  }
+
+  #assertLease(key: string): void {
+    const held = this.#leases.get(key)
+    if (this.store && !held) throw new Error('assistant-skills: repair execution fence missing')
+    if (held) this.store!.assertRepairExecution(held.scope, held.lease)
+  }
+
+  #claim(input: OwnerRepairAgentInput, key: string, recover: boolean): number {
+    if (recover && !this.store) throw new Error('assistant-skills: durable repair recovery unavailable')
+    const previous = recover ? this.store!.inspectRepairExecution(input.scope, input.id, input.iteration ?? 1) : undefined
+    const deadlineAt = previous?.deadlineAt ?? Math.min(input.expiresAt, Date.now() + input.maxDurationMs)
+    if (!this.store) return deadlineAt
+    const lease = this.store.claimRepairExecution(input.scope, input.id, input.iteration ?? 1, key, randomUUID(), deadlineAt, { recover })
+    this.#leases.set(key, { scope: input.scope, lease })
+    return lease.deadlineAt
+  }
+
+  #effect(key: string, kind: 'model' | 'tool'): () => void {
+    this.#assertLease(key)
+    const held = this.#leases.get(key)
+    return held ? this.store!.beginRepairEffect(held.scope, held.lease, kind) : () => {}
+  }
 
   async create(input: OwnerRepairAgentInput, signal?: AbortSignal): Promise<{ sessionId: string; goalId: string }> {
     if (this.#disposed) throw new Error('assistant-skills: owner repair Agent runtime disposed')
@@ -86,10 +121,23 @@ export class OwnerRepairAgentRuntime {
     try { return await creation } finally { this.#inflight.delete(key) }
   }
 
-  async #create(sessionId: SessionId, key: string, input: OwnerRepairAgentInput, signal?: AbortSignal): Promise<{ sessionId: string; goalId: string }> {
+  async resume(input: OwnerRepairAgentInput, repair: OwnerAuthorizedRepairResumeInput['repair'], signal?: AbortSignal): Promise<{ sessionId: string; goalId: string }> {
+    if (this.#disposed) throw new Error('assistant-skills: owner repair Agent runtime disposed')
+    validate(input); input.assertCurrent()
+    const sessionId = sessionIdFor(`${input.id}:${input.iteration ?? 1}`), key = String(sessionId)
+    if (key !== repair.sessionId || this.#attempted.has(key)) throw new Error('assistant-skills: exact repair recovery is unavailable')
+    this.#attempted.add(key)
+    const sessions = this.#authorizationSessions.get(input.id) ?? new Set<string>(); sessions.add(key); this.#authorizationSessions.set(input.id, sessions)
+    const resuming = this.#create(sessionId, key, input, signal, repair)
+    this.#inflight.set(key, resuming)
+    try { return await resuming } finally { this.#inflight.delete(key) }
+  }
+
+  async #create(sessionId: SessionId, key: string, input: OwnerRepairAgentInput, signal?: AbortSignal, recovered?: OwnerAuthorizedRepairResumeInput['repair']): Promise<{ sessionId: string; goalId: string }> {
+    const deadlineAt = this.#claim(input, key, recovered !== undefined)
     const deadline = new AbortController()
     this.#controllers.set(key, deadline)
-    const timer = setTimeout(() => deadline.abort(new Error('assistant-skills: owner repair Agent deadline exceeded')), Math.min(input.maxDurationMs, input.expiresAt - Date.now()))
+    const timer = setTimeout(() => deadline.abort(new Error('assistant-skills: owner repair Agent deadline exceeded')), Math.max(0, deadlineAt - Date.now()))
     timer.unref?.()
     const combined = signal === undefined ? deadline.signal : AbortSignal.any([signal, deadline.signal])
     let handle: AgentHandle | undefined
@@ -99,12 +147,13 @@ export class OwnerRepairAgentRuntime {
       const goals = this.ctx.get('assistantGoals' as never, false) as Goals | undefined
       const policy = this.ctx.get('assistantPolicy' as never, false) as Policy | undefined
       if (agents === undefined || goals === undefined || policy === undefined) throw new Error('assistant-skills: repair Agent dependencies unavailable')
-      handle = await agents.create({ sessionId, meta: { cwd: input.scope.workspace, agentPreset: input.scope.preset },
+      const options = {
         agentOptions: { provider: input.provider, model: input.model, maxTokens: input.maxOutputTokens }, signal: combined,
-        setup: async agentCtx => {
+        setup: async (agentCtx: Agent['ctx']) => {
           const agent = agentCtx.agent
           if (agent === undefined) throw new Error('assistant-skills: unpublished repair Agent is unavailable')
           input.assertCurrent(); combined.throwIfAborted()
+          this.#assertLease(key)
           // Establish background authority and cancellation before mounting preset effects.
           this.#setupRepairAgent(agentCtx, agent, input, combined, timer)
           const presets = this.ctx.get('agentPresets' as never, false) as { resolve(id: string): Promise<{ id: string }>; mount(ctx: typeof agentCtx, id: string): Promise<void> } | undefined
@@ -117,22 +166,37 @@ export class OwnerRepairAgentRuntime {
           input.assertCurrent(); combined.throwIfAborted()
           this.#checkRepairTools(agentCtx, agent, input)
         },
-      })
+      }
+      handle = recovered
+        ? await agents.resume({ ...options, resumeSessionId: sessionId })
+        : await agents.create({ ...options, sessionId, meta: { cwd: input.scope.workspace, agentPreset: input.scope.preset } })
       input.assertCurrent(); combined.throwIfAborted()
+      this.#assertLease(key)
       this.#handles.set(key, handle)
       const repair: OwnerAuthorizedRepairInput = { authorizationId: input.id, authorizationDigest: input.authorizationDigest,
         ownerRouteId: input.ownerRouteId, scope: input.scope, trigger: input.trigger, objective: input.objective,
         maxGoalRounds: input.maxGoalRounds, expiresAt: input.expiresAt }
       const currentGoals = this.ctx.get('assistantGoals' as never, false) as Goals | undefined
       if (currentGoals === undefined) throw new Error('assistant-skills: repair Goals service changed')
-      const record = await currentGoals.startOwnerAuthorizedRepair(handle.agent, repair, input.assertCurrent)
+      const resumed = recovered === undefined ? undefined : { ...repair, repair: recovered }
+      if (resumed) this.#resumeProofs.set(key, { input: resumed, callback: input.assertCurrent })
+      const record = resumed === undefined
+        ? await currentGoals.startOwnerAuthorizedRepair(handle.agent, repair, input.assertCurrent)
+        : await currentGoals.resumeOwnerAuthorizedRepair(handle.agent, resumed, input.assertCurrent)
+      // A recoverable execution must retain the native goal and its identity in
+      // the Session log, not only in the independent business-goal ledger.
+      if (this.store) await this.ctx.get('sessions')!.flush(handle.agent.session)
+      input.assertCurrent(); combined.throwIfAborted(); this.#assertLease(key)
       retained = true
       return { sessionId: key, goalId: record.id }
     } catch (error) {
       deadline.abort(new Error('assistant-skills: repair Agent creation failed'))
       this.#handles.delete(key)
       this.#toolSchemaDigests.delete(key)
-      if (handle !== undefined) await handle.dispose()
+      this.#resumeProofs.delete(key)
+      // A rejected factory can still have an abort-raced load. Do not release
+      // its durable fence without an observable handle and completed drain.
+      if (handle !== undefined) { await handle.dispose(); await this.#release(key) }
       throw error
     } finally { if (!retained) { this.#controllers.delete(key); clearTimeout(timer) } }
   }
@@ -159,6 +223,10 @@ export class OwnerRepairAgentRuntime {
     agentCtx.effect(() => installModelSelection(agentCtx, { current: { provider: input.provider, model: input.model }, assembled: undefined }), 'assistant-skills.owner-repair-model')
     const allowed = new Set(input.allowedTools)
     const schemaDigests = this.#toolSchemaDigests
+    const key = String(agent.session.id)
+    const assertLease = () => this.#assertLease(key)
+    const beginModel = () => this.#effect(key, 'model')
+    const toolsAwaitingLog = new Map<string, () => void>()
     agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
       const assembly = await next()
       if (context.agent !== agent) return assembly
@@ -170,16 +238,21 @@ export class OwnerRepairAgentRuntime {
       // Cordis service event filtering follows service realms, not Agent identity.
       // The native loop stamps this immutable Session id on every request.
       if (options.sessionId !== agent.session.id) { yield* next(); return }
-      input.assertCurrent(); combined.throwIfAborted()
+      input.assertCurrent(); combined.throwIfAborted(); options.signal?.throwIfAborted(); assertLease()
       if (options.provider !== input.provider || options.model !== input.model || options.maxTokens === undefined || options.maxTokens > input.maxOutputTokens || acceptanceDigest(options.tools ?? []) !== schemaDigests.get(String(agent.session.id)) || calls++ >= input.maxModelCalls) {
         agent.cancel({ kind: 'hook', reason: 'assistant-skills-owner-repair-model-limit' })
         throw new Error('assistant-skills: owner repair model request rejected')
       }
       input.recordUsage?.('model')
+      const settled = beginModel()
       for await (const chunk of next()) { combined.throwIfAborted(); yield chunk }
+      // Rejection/abort retains the pending effect: a provider may still own a
+      // subprocess or submitted request, and Host death alone cannot settle it.
+      combined.throwIfAborted(); options.signal?.throwIfAborted()
+      settled()
     })
     agentCtx.tools.guard(execution => {
-      input.assertCurrent(); combined.throwIfAborted()
+      input.assertCurrent(); combined.throwIfAborted(); this.#assertLease(key)
       if (!allowed.has(execution.name) || toolCalls >= input.maxToolCalls) {
         agent.cancel({ kind: 'hook', reason: 'assistant-skills-owner-repair-tool-limit' })
         return 'assistant-skills: owner repair tool request rejected'
@@ -188,12 +261,56 @@ export class OwnerRepairAgentRuntime {
       input.recordUsage?.('tool')
       return undefined
     })
+    agentCtx.on('tools/execute', async (execution, next) => {
+      if (execution.agent !== agent) return await next()
+      input.assertCurrent(); combined.throwIfAborted()
+      const settled = this.#effect(key, 'tool')
+      const result = await next()
+      if (!result.isError && !execution.signal.aborted) toolsAwaitingLog.set(String(execution.callId), settled)
+      // Do not clear the durable intent until the corresponding tool result
+      // has also reached the persistent Session. Unknown results retain it.
+      return result
+    }, { prepend: true })
+    agentCtx.on('session/event', (session, event) => {
+      if (session !== agent.session || event.type !== 'tool/result' || event.data.message.source?.kind !== 'tool') return
+      const callId = String(event.data.message.source.callId), settled = toolsAwaitingLog.get(callId)
+      if (!settled) return
+      toolsAwaitingLog.delete(callId)
+      const pending = this.#settlements.get(key) ?? new Set<Promise<void>>()
+      this.#settlements.set(key, pending)
+      const flush = Promise.resolve().then(async () => {
+        await this.ctx.get('sessions')!.flush(session)
+        settled()
+      }).catch(() => { agent.cancel({ kind: 'hook', reason: 'assistant-skills-repair-checkpoint-unconfirmed' }) }).finally(() => pending.delete(flush))
+      pending.add(flush)
+    })
     const abort = () => agent.cancel({ kind: 'hook', reason: 'assistant-skills-owner-repair-expired' })
     combined.addEventListener('abort', abort, { once: true })
     agentCtx.effect(() => () => { clearTimeout(timer); combined.removeEventListener('abort', abort) }, 'assistant-skills.owner-repair-deadline')
   }
 
   async closeSession(sessionId: string): Promise<void> {
+    const existing = this.#closing.get(sessionId)
+    if (existing) return await existing
+    const closing = this.#closeSession(sessionId).finally(() => this.#closing.delete(sessionId))
+    this.#closing.set(sessionId, closing)
+    return await closing
+  }
+
+  async #release(key: string): Promise<void> {
+    await Promise.allSettled(this.#settlements.get(key) ?? [])
+    this.#settlements.delete(key)
+    const held = this.#leases.get(key)
+    if (held) {
+      const current = this.store!.inspectRepairExecution(held.scope, held.lease.authorizationId, held.lease.iteration)
+      // Unconfirmed external effects keep the durable fence occupied. Native
+      // disposal cannot turn an aborted provider/tool into a cleanup receipt.
+      if (current && current.pendingModel === 0 && current.pendingTool === 0) this.store!.releaseRepairExecution(held.scope, held.lease)
+    }
+    this.#leases.delete(key)
+  }
+
+  async #closeSession(sessionId: string): Promise<void> {
     this.#controllers.get(sessionId)?.abort(new Error('assistant-skills: repair Agent closed'))
     const creation = this.#inflight.get(sessionId)
     if (creation !== undefined) await creation.catch(() => undefined)
@@ -202,6 +319,8 @@ export class OwnerRepairAgentRuntime {
     this.#handles.delete(sessionId)
     this.#controllers.delete(sessionId)
     await handle.dispose()
+    await this.#release(sessionId)
+    this.#resumeProofs.delete(sessionId)
     this.#toolSchemaDigests.delete(sessionId)
   }
 
@@ -224,9 +343,7 @@ export class OwnerRepairAgentRuntime {
     this.#controllers.clear()
     this.#toolSchemaDigests.clear()
     this.#authorizationSessions.clear()
-    const handles = [...this.#handles.entries()]
-    this.#handles.clear()
-    const disposalResults = await Promise.allSettled(handles.map(([, handle]) => handle.dispose()))
+    const disposalResults = await Promise.allSettled([...this.#handles.keys()].map(key => this.closeSession(key)))
     const errors = disposalResults.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
     if (errors.length) throw new AggregateError(errors, 'assistant-skills: repair Agent disposal failed')
   }

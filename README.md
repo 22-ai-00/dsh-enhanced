@@ -4,7 +4,7 @@
 
 插件覆盖目标管理、主动行动、记忆、消息交付、隔离执行、评测与恢复，并通过 ACP 和模型 provider 接入编码工具及现有模型线路。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。当前基本 RSI 首版基于 DSH `0.1.2-rc.1`，面向 Linux 上受监督的单机 profile，仍属实验性能力。
 
-基本 RSI 首版支持同一任务族的有限连续改进：独立确认失败后自主修复，生成技能候选，经过独立比较和后续实际任务验证后晋升，再继续下一轮，并把结果送回原会话。模板渲染任务已取得连续两轮的真实 TraeX 组合验收证据。使用入口见[有限 repair admission](plugins/assistant-web-owner/README.md#有限-repair-admission)，证据和限制见[两轮验收记录](docs/evidence/basic-rsi-two-round-2026-09-12.json)。中途修复进程崩溃仍报告 `unknown`，不自动重放；完整 RSI 规划继续保留。
+基本 RSI 首版支持同一任务族的有限连续改进：独立确认失败后自主修复，生成技能候选，经过独立比较和后续实际任务验证后晋升，再继续下一轮，并把结果送回原会话。模板渲染任务已取得连续两轮的真实 TraeX 组合验收证据。使用入口见[有限 repair admission](plugins/assistant-web-owner/README.md#有限-repair-admission)，证据和限制见[两轮验收记录](docs/evidence/basic-rsi-two-round-2026-09-12.json)。dev 已增加 Linux 安全检查点恢复：确认旧进程退出、没有未结算模型或工具调用后，续接原修复会话和目标，保留原预算与期限；其他中断仍报告 `unknown`，不自动重放。该增量尚未发布，详见[恢复边界](plugins/assistant-skills/README.md#repair-checkpoint-recovery)；完整 RSI 规划继续保留。
 
 ## 快速开始
 
