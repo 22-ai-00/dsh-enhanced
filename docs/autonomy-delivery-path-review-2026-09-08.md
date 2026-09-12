@@ -8,7 +8,17 @@
 
 本次只读核对本机与远端 `dev` 均为 `89751c3250180a3efc267d92bb69af1b6b0880c0`，比 `b7b4b16` 多 24 个提交。失败/重复轨迹候选、技能 canonical revision 监控、whole-goal owner correction/withdrawal、安装升级/卸载、GitHub 补偿及 external broker 已有提交，不能继续按 9 月 9 日的缺实现清单重新开发。总体仍为 3 已验证 / 13 实现中 / 2 待做；这个账本状态不等于停工，也不是能力完成百分比。
 
-### RSI 关键缺口与实际证据
+### 本批有限修复接线（2026-09-12，基线 `04e18c5`）
+
+新增默认关闭的 `repairProfiles` 与 `skill_repair_arm/status/revoke`。初次 owner 请求冻结源 Goal/Session/native Goal/definition、父版本、路由回执、profile/holdout digest 和期限；本批产品入口固定一次修复，不自行续期。源 Goal 停止且有独立失败回执后，Host 创建新的 root Session 和原生 Goal，由已有 goal-round driver 驱动模型；只有独立 achieved 修复轨迹能成为候选，候选随后进入同一授权下的 prospective holdout 与有限 canary。
+
+Goals 与 Skills 之间以当前实例私有持有的回调身份验证执行能力，另逐次重验持久授权和完整 owner route；普通公开 `goal_create`、draft、compare、canary 仍保留人类请求校验。`canaryAdmissionTemplate` 在实际候选产生后绑定精确摘要，不能预先提供修复程序或修改隐藏验收规则。派发前写检查点，重启或撤权后的不确定工作不重复执行。
+
+本批定向测试已实际打通原生 background Goal → 模型适配器 → 工具 → 独立 achieved 回执，并验证撤权后排队轮次为零模型调用。模型适配器和 verifier 输入是确定性 fixture，不能据此宣称真实模型自主修复或 RSI 智能增益。另验证授权幂等、armed 重启保留、有限状态/CAS、过期与撤权、late-create/dispose、动态 admission；完整检查结果见本批交付证据。
+
+剩余直接交付条件明确保留：真实 TraeX 模型从普通任务自主生成修复并完成整条比较/晋升链；中途 repair Agent 的安全重新获取和恢复（本批明确置 unknown，armed 等待与 watch 可恢复）；结果回到原 owner 会话；修复后后续真实任务及再次改进。全部 18 项规划保持原范围与状态，当前变化不等于基本 RSI 已完成。无需日历观察等待，不以指定日期限制推进速度。
+
+### 基线 RSI 关键缺口与实际证据（以下为本批实现前的诊断）
 
 - `skill_failure_candidate` 已从 Host 的失败证据和独立成功修复轨迹生成有来源证明的候选；但调用方仍提供失败定位、repair Goal 和任务族等信息。当前尚无完整普通委托下自主发现、诊断、修改、推广并再次改进的真实证据。
 - 进一步核对出单次委托的具体断点：`not-achieved` 不必终止原生 Goal，但 `goal_create` 只接受 live owner human turn（`assistant-goals/src/tools.ts`）；失败候选要求修复与失败分别来自不同 Goal、Session、native Goal 和 run，且修复已有独立 achieved 回执（`assistant-skills/src/capture-expansion.ts`、`assistant-goals/src/service.ts`）。现有后台 round 能继续修复，却不能独立创建所需 repair Goal，因此这条精确候选路径仍需要第二次 owner 请求。下一步在已有 Goals/Skills/Delivery/Policy 上补有限预授权的完整修复衔接，保留 lineage、预算、撤权与独立验收；不能简单放开后台 `goal_create`，也不据此另建通用调度框架。Skills 的 `draft/compare/canary/watch` 同样由 `#scope` 要求 current human turn，故新修复 Goal 并不足够。初始授权应固定来源 Goal/definition、任务族、父版本、profile template 和总次数/时间/预算；未来失败发生后由 Host 绑定真实 canonical failure，独立修复成功后再生成候选并绑定当时才可知的 candidate digest。只允许按冻结模板填入精确候选，不得让模型重写留出规则或伪造人类请求；后续有限轮次消费同一授权额度，不能自行续期。

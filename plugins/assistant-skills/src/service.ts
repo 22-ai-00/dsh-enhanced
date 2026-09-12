@@ -6,7 +6,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { SkillProviderControl } from '@deepseek-ai/dsh-skill'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { AssistantGoalsService, GoalScope } from '@dsh-enhanced/assistant-goals'
+import type { AssistantGoalsService, GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput } from '@dsh-enhanced/assistant-goals'
 import type { AssistantEvaluationService, EvaluationCanonicalLearningEvidenceTuple, EvaluationHostScope, TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import Schema from '@deepseek-ai/schemastery'
@@ -19,14 +19,24 @@ import { watchBindingCurrent, watchObservation, watchObservationResult, watchObs
 import { sealedPlan, type SealedSkillHoldoutProvider } from './sealed-holdout.js'
 import { openHoldoutProcess, validateExternalHoldoutProfiles, type ExternalHoldoutProfile } from './external-holdout.js'
 import { canaryAdmissionMatches, inspectProspectiveQualification, qualifyHoldout } from './holdout-qualification.js'
+import { materializeCanaryAdmission } from './repair-admission.js'
+import { validateRepairProfiles, type RepairContinuationProfile } from './repair-profile.js'
+import { RepairContinuationRuntime } from './repair-runtime.js'
+import { OwnerRepairAgentRuntime } from './repair-agent.js'
+import type { SkillRepairContinuation } from './store.js'
 import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRun, type SkillRunStep, type StoredSkillDefinition, type SkillCapture, type SkillDeployment, type SkillDeploymentInput, type SkillWatchObservationResult } from './store.js'
 
-export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[]; externalHoldouts?: ExternalHoldoutProfile[] }
+export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[]; externalHoldouts?: ExternalHoldoutProfile[]; repairProfiles?: RepairContinuationProfile[] }
+/** Narrow Host-only capability for a finite continuation of a prior owner authorization. */
+export interface RepairExecutionAuthority { readonly id: string; readonly scope: GoalScope; readonly ownerRouteId: string; readonly expiresAt: number; assertCurrent(): void }
+export type RepairExecutionContext = Pick<ToolRunContext, 'agent' | 'signal'>
+export interface StageFailureCandidateInput { readonly ownerRouteId: string; readonly triggerGoalId?: string; readonly triggerSessionId?: string; readonly failureLocators?: unknown; readonly minimumOccurrences?: number; readonly repairGoalId: string; readonly repairSessionId: string; readonly taskFamilyId: string; readonly name: string; readonly description: string; readonly bindings?: readonly SkillBinding[]; readonly parentVersion: number }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-skills.sqlite')),
   allowedTools: Schema.array(Schema.string()).default(['read', 'write', 'edit']),
   comparisons: Schema.array(Schema.any()).default([]),
   externalHoldouts: Schema.array(Schema.any()).default([]),
+  repairProfiles: Schema.array(Schema.any()).default([]),
   candidateTtlMs: Schema.number().step(1).min(1000).max(604800000).default(86400000),
   maxDurationMs: Schema.number().step(1).min(1000).max(300000).default(60000),
 })
@@ -185,6 +195,12 @@ export class AssistantSkillsService extends Service {
   readonly #candidateTtl: number
   readonly #comparisons: readonly SkillComparisonProfile[]
   readonly #externalHoldouts: readonly ExternalHoldoutProfile[]
+  readonly #repairProfiles: readonly RepairContinuationProfile[]
+  #repairRuntime: RepairContinuationRuntime | undefined
+  #repairAgents: OwnerRepairAgentRuntime | undefined
+  #repairTask: Promise<void> | undefined
+  readonly #repairAssertions = new Map<string, { callback: () => void; triggerDigest: string }>()
+  readonly #repairStops = new Set<() => Promise<void>>()
   readonly #comparators = new Map<string, Promise<SkillComparator>>()
   readonly #comparing = new Set<Promise<unknown>>()
   readonly #lifecycle = new AbortController()
@@ -208,8 +224,10 @@ export class AssistantSkillsService extends Service {
       || this.#allowed.length > 32 || this.#allowed.some(name => typeof name !== 'string' || !/^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/u.test(name))) throw new Error('assistant-skills: invalid configuration')
     this.#comparisons = validateComparisonProfiles(config.comparisons ?? [])
     this.#externalHoldouts = validateExternalHoldoutProfiles(config.externalHoldouts ?? [])
+    this.#repairProfiles = validateRepairProfiles(config.repairProfiles ?? [], this.#externalHoldouts)
     this.#store = new SkillStore(config.databasePath ?? join(homedir(), '.dsh', 'assistant-skills.sqlite'))
-    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
+    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); await Promise.all([...this.#repairStops].map(stop => stop())); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
+    if (this.#repairProfiles.length > 0) this.#installRepairRuntime(ctx)
     ctx.inject(['tools', 'agents', 'assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
       runtime.tools.register(defineTool({ name: 'skill_save', description: 'Save the exact successful tool trace of this owner session’s independently achieved Goal as a private versioned skill. Requires the current human request. Historical acceptance is provenance, never permission or acceptance for a future run.',
         parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string', description: 'JSON array of {name,stepId,path}; path is a scalar argument JSON pointer. Empty array keeps the original arguments.' }, expected_version: { type: 'integer' } }, output,
@@ -342,6 +360,26 @@ export class AssistantSkillsService extends Service {
     if (policy?.evaluateAgent(agent, action, resource).effect !== 'allow') throw new Error('assistant-skills: policy denied')
     return scope
   }
+  /** Host continuations deliberately do not consume a current human turn. */
+  #repairScope(exec: RepairExecutionContext, action: Exclude<Action, 'inspect'>, authority: RepairExecutionAuthority): GoalScope {
+    exec.signal.throwIfAborted(); this.#lifecycle.signal.throwIfAborted()
+    if (!this.#active || !exec.agent || this.ctx.get('agents')?.get(exec.agent.id) !== exec.agent
+      || !Number.isSafeInteger(authority.expiresAt) || authority.expiresAt <= Date.now()
+      || exec.agent.session.header.cwd !== authority.scope.workspace || exec.agent.session.header.agentPreset !== authority.scope.preset) throw new Error('assistant-skills: repair authority unavailable')
+    const minted = this.#repairAssertions.get(authority.id)
+    const record = this.#store.getRepairContinuation(authority.scope, authority.id)
+    if (!minted || minted.callback !== authority.assertCurrent || !record || record.authorization.ownerRouteId !== authority.ownerRouteId
+      || record.authorization.expiresAt !== authority.expiresAt) throw new Error('assistant-skills: unrecognized repair execution capability')
+    this.#assertRepair(record); authority.assertCurrent(); this.#watchRoute(authority.scope, authority.ownerRouteId)
+    const policy = this.ctx.get('assistantPolicy', false) as AssistantPolicyService | undefined
+    if (!policy || policy.evaluateAgent(exec.agent, action, resource).effect !== 'allow') throw new Error('assistant-skills: policy denied')
+    return authority.scope
+  }
+  #repairAuthorize(exec: RepairExecutionContext, action: Exclude<Action, 'inspect'>, key: unknown, authority: RepairExecutionAuthority): void {
+    const scope = this.#repairScope(exec, action, authority)
+    const policy = this.ctx.get('assistantPolicy', false) as AssistantPolicyService | undefined
+    if (!policy || policy.authorizeAgent(exec.agent, action, resource, { idempotencyKey: `skill-repair-${acceptanceDigest([authority.id, scope, action, key])}` }).effect !== 'allow') throw new Error('assistant-skills: policy authorization denied')
+  }
   #goals(): AssistantGoalsService {
     const goals = this.ctx.get('assistantGoals', false) as AssistantGoalsService | undefined
     if (!goals) throw new Error('assistant-skills: Goals unavailable')
@@ -363,6 +401,18 @@ export class AssistantSkillsService extends Service {
     const plan = sealedPlan(this.#sealedHoldout, planId, scope)
     // The opaque plan is deliberately not returned. This is only a Host-attested binding.
     return Object.freeze({ protocol: 'assistant-skills/sealed-holdout-binding/v1' as const, planId, bindingDigest: plan.bindingDigest, attestationDigest: plan.attestationDigest })
+  }
+  /** Host-only immutable configuration inspection for a previously authorized repair. */
+  inspectRepairProfile = (profileId: string, scope: GoalScope) => {
+    if (!this.#active) throw new Error('assistant-skills: repair profile unavailable')
+    const profile = this.#externalHoldouts.find(value => value.id === profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+    if (!profile) return undefined
+    return Object.freeze({ profile, digest: acceptanceDigest(profile), templateDigest: profile.canaryAdmissionTemplate === undefined ? undefined : acceptanceDigest(profile.canaryAdmissionTemplate) })
+  }
+  /** Host-only current definition read; callers must bind its digest in durable intent. */
+  inspectRepairParent = (scope: GoalScope, name: string) => {
+    if (!this.#active) throw new Error('assistant-skills: repair parent unavailable')
+    return this.#store.get(scope, name)
   }
   /** Host entrypoint: consumes opaque provider cases through the same native replay and isolated verifier as compare. */
   qualifySealedHoldout = async (exec: ToolRunContext, candidateId: string, planId: string, invocationId: string) => {
@@ -434,9 +484,9 @@ export class AssistantSkillsService extends Service {
       ...(receipt && plainArguments(receipt.prospective)?.generatorDigest !== undefined ? { generatorDigest: plainArguments(receipt.prospective)!.generatorDigest } : {}) }
   }
   /** Fixed external authority qualification. Private cells, authority keys and operator configuration never become tool arguments or status data. */
-  async qualifyExternalHoldout(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string, action: 'compare' | 'canary' = 'compare', currentAuthority?: () => void) {
-    const scope = this.#scope(exec.agent, action)
-    const profile = this.#externalHoldouts.find(value => value.id === profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+  async qualifyExternalHoldout(exec: RepairExecutionContext, candidateId: string, profileId: string, invocationId: string, action: 'compare' | 'canary' = 'compare', currentAuthority?: () => void, repair?: { authority: RepairExecutionAuthority; profile: ExternalHoldoutProfile; configuredDigest: string }) {
+    const scope = repair ? this.#repairScope(exec, action, repair.authority) : this.#scope(exec.agent, action)
+    const profile = repair?.profile ?? this.#externalHoldouts.find(value => value.id === profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
     if (!profile || profile.execution.expiresAt <= Date.now()) throw new Error('assistant-skills: current external holdout profile required')
     const profileDigest = acceptanceDigest(profile)
     const candidate = this.#store.getCandidate(scope, candidateId)
@@ -450,8 +500,8 @@ export class AssistantSkillsService extends Service {
       exec.signal.throwIfAborted(); this.#lifecycle.signal.throwIfAborted()
       currentAuthority?.()
       const fresh = this.#externalHoldouts.find(value => value.id === profile.id && value.version === profile.version && acceptanceDigest(value.scope) === acceptanceDigest(scope))
-      if (!fresh || acceptanceDigest(fresh) !== profileDigest || Date.now() >= profile.execution.expiresAt
-        || acceptanceDigest(this.#scope(exec.agent, action)) !== acceptanceDigest(scope)
+      if (!fresh || acceptanceDigest(fresh) !== (repair?.configuredDigest ?? profileDigest) || Date.now() >= profile.execution.expiresAt
+        || acceptanceDigest(repair ? this.#repairScope(exec, action, repair.authority) : this.#scope(exec.agent, action)) !== acceptanceDigest(scope)
         || acceptanceDigest(this.#store.getCandidate(scope, candidateId)) !== candidateDigest
         || running && this.#store.getComparison(scope, claim.comparison.id)?.state !== 'running') throw new Error('assistant-skills: external qualification authority changed')
       this.#pending(scope, candidateId)
@@ -459,7 +509,7 @@ export class AssistantSkillsService extends Service {
     if (!claim.claimed) { current(false); return this.#comparisonStatus(scope, claim.comparison.id)! }
     const operation = (async () => {
       try {
-        this.#authorize(exec.agent, 'compare', claim.comparison.id)
+        if (repair) this.#repairAuthorize(exec, 'compare', claim.comparison.id, repair.authority); else this.#authorize(exec.agent, 'compare', claim.comparison.id)
         current()
         const currentBaseline = this.#store.get(scope, candidate.definition.name, candidate.parentVersion)
         if (!currentBaseline || acceptanceDigest(currentBaseline) !== candidate.parentDigest || profile.canaryAdmission !== undefined && !canaryAdmissionMatches(profile.canaryAdmission, currentBaseline, candidate.definition)) throw new Error('assistant-skills: candidate parent or holdout admission changed')
@@ -500,11 +550,13 @@ export class AssistantSkillsService extends Service {
     const profile = this.#externalHoldouts.find(value => `external:${value.id}:${value.version}` === comparison.profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
     const candidate = this.#store.getCandidate(scope, deployment.candidateId)
     const parent = candidate && this.#store.get(scope, candidate.definition.name, candidate.parentVersion)
-    if (!profile || profile.canaryAdmission === undefined || acceptanceDigest(profile) !== comparison.profileDigest || profile.execution.expiresAt < deployment.expiresAt
-      || !candidate || !parent || !canaryAdmissionMatches(profile.canaryAdmission, parent, candidate.definition)
-      || acceptanceDigest(profile.canaryAdmission) !== deployment.admissionDigest
-      || profile.canaryAdmission.candidateDefinitionDigest !== deployment.candidateDefinitionDigest
-      || acceptanceDigest(profile.canaryAdmission.taskFamily) !== acceptanceDigest(deployment.taskFamily)
+    const admission = profile?.canaryAdmission ?? (profile?.canaryAdmissionTemplate !== undefined && parent && candidate ? materializeCanaryAdmission(profile.canaryAdmissionTemplate, parent, candidate.definition) : undefined)
+    const effectiveProfile = profile && admission ? { ...profile, canaryAdmission: admission } : undefined
+    if (!profile || !admission || !effectiveProfile || acceptanceDigest(effectiveProfile) !== comparison.profileDigest || profile.execution.expiresAt < deployment.expiresAt
+      || !candidate || !parent || !canaryAdmissionMatches(admission, parent, candidate.definition)
+      || acceptanceDigest(admission) !== deployment.admissionDigest
+      || admission.candidateDefinitionDigest !== deployment.candidateDefinitionDigest
+      || acceptanceDigest(admission.taskFamily) !== acceptanceDigest(deployment.taskFamily)
       || acceptanceDigest(watch.taskFamily ?? null) !== acceptanceDigest(deployment.taskFamily)
       || (comparison.result as { admissionDigest?: unknown }).admissionDigest !== deployment.admissionDigest) throw new Error('assistant-skills: deployment profile changed')
   }
@@ -574,27 +626,33 @@ export class AssistantSkillsService extends Service {
     }
     return { scope: evaluationScope, scopeWatermark: canonical.scopeWatermark, evidence }
   }
-  #canaryCurrent(exec: ToolRunContext, scope: GoalScope, profile: ExternalHoldoutProfile, input: SkillDeploymentInput, receipt?: unknown): unknown {
+  #canaryCurrent(exec: RepairExecutionContext, scope: GoalScope, profile: ExternalHoldoutProfile, input: SkillDeploymentInput, receipt?: unknown, authority?: RepairExecutionAuthority): unknown {
     if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > profile.execution.expiresAt || input.expiresAt > Date.now() + 7 * 86400000
       || !Number.isSafeInteger(input.maxRuns) || input.maxRuns < 1 || input.maxRuns > 100 || !Number.isSafeInteger(input.canaryRuns) || input.canaryRuns < 1 || input.canaryRuns > input.maxRuns) throw new Error('assistant-skills: invalid canary authorization')
-    if (acceptanceDigest(this.#scope(exec.agent, 'canary')) !== acceptanceDigest(scope) || acceptanceDigest(this.#scope(exec.agent, 'compare')) !== acceptanceDigest(scope) || acceptanceDigest(this.#scope(exec.agent, 'watch')) !== acceptanceDigest(scope)) throw new Error('assistant-skills: canary authority changed')
+    const current = (action: 'canary' | 'compare' | 'watch') => authority ? this.#repairScope(exec, action, authority) : this.#scope(exec.agent, action)
+    if (acceptanceDigest(current('canary')) !== acceptanceDigest(scope) || acceptanceDigest(current('compare')) !== acceptanceDigest(scope) || acceptanceDigest(current('watch')) !== acceptanceDigest(scope)) throw new Error('assistant-skills: canary authority changed')
     const route = this.#watchRoute(scope, input.ownerRouteId, receipt)
     const policy = this.ctx.get('assistantPolicy', false)
     if (!policy || policy.evaluate(this.#promotePolicy(scope)).effect !== 'allow'
       || ['watch', 'rollback'].some(action => policy.evaluate(this.#watchPolicy(scope, action as 'watch' | 'rollback')).effect !== 'allow')) throw new Error('assistant-skills: configure finite promotion and rollback authority')
     return route
   }
-  async canary(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string, input: SkillDeploymentInput) {
+  async canary(exec: RepairExecutionContext, candidateId: string, profileId: string, invocationId: string, input: SkillDeploymentInput, repair?: RepairExecutionAuthority) {
     input = Object.freeze({ ...input })
-    const scope = this.#scope(exec.agent, 'canary')
+    const scope = repair ? this.#repairScope(exec, 'canary', repair) : this.#scope(exec.agent, 'canary')
+    if (repair && input.ownerRouteId !== repair.ownerRouteId) throw new Error('assistant-skills: repair authority route changed')
     const candidate = this.#store.getCandidate(scope, candidateId)
     if (!candidate) throw new Error('assistant-skills: candidate unavailable')
-    const profile = this.#externalHoldouts.find(value => value.id === profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+    const configured = this.#externalHoldouts.find(value => value.id === profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+    const profile = configured
     if (!profile) throw new Error('assistant-skills: prospective external holdout profile required')
-    const route = this.#canaryCurrent(exec, scope, profile, input)
-    if (!profile.authority.generatorDigest || profile.canaryAdmission === undefined) throw new Error('assistant-skills: bound prospective external holdout profile required; call skill_comparison_status without comparison_id and use the exact id whose canaryExecutionTool is skill_canary')
+    const route = this.#canaryCurrent(exec, scope, profile, input, undefined, repair)
+    if (!profile.authority.generatorDigest || (!repair && profile.canaryAdmission === undefined) || repair && profile.canaryAdmissionTemplate === undefined) throw new Error('assistant-skills: bound prospective external holdout profile required; call skill_comparison_status without comparison_id and use the exact id whose canaryExecutionTool is skill_canary')
     const baselineBeforeQualification = this.#store.get(scope, candidate.definition.name, candidate.parentVersion)
-    if (!baselineBeforeQualification || !canaryAdmissionMatches(profile.canaryAdmission, baselineBeforeQualification, candidate.definition)) throw new Error('assistant-skills: prospective holdout admission does not match exact definitions')
+    if (!baselineBeforeQualification) throw new Error('assistant-skills: prospective holdout admission does not match exact definitions')
+    const admission = repair ? materializeCanaryAdmission(profile.canaryAdmissionTemplate!, baselineBeforeQualification, candidate.definition) : profile.canaryAdmission!
+    const effectiveProfile = repair ? Object.freeze({ ...profile, canaryAdmission: admission }) : profile
+    if (!canaryAdmissionMatches(admission, baselineBeforeQualification, candidate.definition)) throw new Error('assistant-skills: prospective holdout admission does not match exact definitions')
     // A candidate can only ever receive one deployment.  A retry must match the
     // original finite authorization exactly; it cannot renew or mutate it.
     if (candidate.state === 'activated') {
@@ -609,20 +667,24 @@ export class AssistantSkillsService extends Service {
       return { definition: publicDefinition(definition), deployment: publicDeployment(existing), replayed: true }
     }
     this.#pending(scope, candidateId)
-    this.#authorize(exec.agent, 'canary', [scope, candidateId, profileId, invocationId, input, route])
-    const qualified = await this.qualifyExternalHoldout(exec, candidateId, profileId, invocationId, 'canary', () => { this.#canaryCurrent(exec, scope, profile, input, route) })
+    if (repair) this.#repairAuthorize(exec, 'canary', [scope, candidateId, profileId, invocationId, input, route], repair); else this.#authorize(exec.agent, 'canary', [scope, candidateId, profileId, invocationId, input, route])
+    const qualified = await this.qualifyExternalHoldout(exec, candidateId, profileId, invocationId, 'canary', () => { this.#canaryCurrent(exec, scope, effectiveProfile, input, route, repair) }, repair ? { authority: repair, profile: effectiveProfile, configuredDigest: acceptanceDigest(profile) } : undefined)
     const comparison = this.#store.getComparison(scope, qualified.id)
     const baseline = this.#store.get(scope, candidate.definition.name, candidate.parentVersion)
     if (!comparison || !baseline || candidate.state !== 'pending') throw new Error('assistant-skills: canary qualification unavailable')
     const prospective = inspectProspectiveQualification(comparison.result, { scope, baseline, candidate: candidate.definition, execution: profile.execution,
-      ...(profile.inputs === undefined ? {} : { inputs: profile.inputs }), ...(profile.files === undefined ? {} : { files: profile.files }), pinnedPublicKey: profile.authority.publicKey, expectedGeneratorDigest: profile.authority.generatorDigest, canaryAdmission: profile.canaryAdmission })
+      ...(profile.inputs === undefined ? {} : { inputs: profile.inputs }), ...(profile.files === undefined ? {} : { files: profile.files }), pinnedPublicKey: profile.authority.publicKey, expectedGeneratorDigest: profile.authority.generatorDigest, canaryAdmission: admission })
     if (!prospective || prospective.prospectiveHoldout !== 'authority-attested-after-freeze' || prospective.quality.candidateChecksPassed !== true || prospective.quality.evaluationGainObserved !== true || prospective.quality.criticalRegressionsPassed !== true) throw new Error('assistant-skills: prospective qualification gates failed')
-    this.#canaryCurrent(exec, scope, profile, input, route)
-    this.#authorize(exec.agent, 'watch', [scope, candidateId, comparison.id, input, route])
-    this.#canaryCurrent(exec, scope, profile, input, route)
-    const activated = this.#store.activateQualifiedCandidate(scope, candidateId, comparison.id, acceptanceDigest(comparison.result), profile.canaryAdmission, input, route)
+    this.#canaryCurrent(exec, scope, effectiveProfile, input, route, repair)
+    if (repair) this.#repairAuthorize(exec, 'watch', [scope, candidateId, comparison.id, input, route], repair); else this.#authorize(exec.agent, 'watch', [scope, candidateId, comparison.id, input, route])
+    this.#canaryCurrent(exec, scope, effectiveProfile, input, route, repair)
+    const activated = this.#store.activateQualifiedCandidate(scope, candidateId, comparison.id, acceptanceDigest(comparison.result), admission, input, route)
     this.#changed(); this.#queueReconcile()
     return { definition: publicDefinition(activated.definition), deployment: publicDeployment(activated.deployment), replayed: false }
+  }
+  /** Host-only repair continuation. It requires a dynamic template, never a model-visible admission. */
+  canaryOwnerAuthorizedRepair = (exec: RepairExecutionContext, candidateId: string, profileId: string, invocationId: string, deploymentInput: SkillDeploymentInput, authority: RepairExecutionAuthority) => {
+    return this.canary(exec, candidateId, profileId, invocationId, deploymentInput, authority)
   }
   async compare(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string) {
     const scope = this.#scope(exec.agent, 'compare')
@@ -664,8 +726,9 @@ export class AssistantSkillsService extends Service {
     this.#authorize(agent, 'draft', [scope, definition, parentVersion, reason, trigger])
     return this.#preview(scope, this.#store.stageCandidate(scope, definition, { expectedVersion: parentVersion, reason, trigger, expiresAt: Date.now() + this.#candidateTtl }))
   }
-  async stageFailureCandidate(exec: ToolRunContext, input: { ownerRouteId: string; triggerGoalId?: string; triggerSessionId?: string; failureLocators?: unknown; minimumOccurrences?: number; repairGoalId: string; repairSessionId: string; taskFamilyId: string; name: string; description: string; bindings?: readonly SkillBinding[]; parentVersion: number }) {
-    const scope = this.#scope(exec.agent, 'draft')
+  async stageFailureCandidate(exec: RepairExecutionContext, input: StageFailureCandidateInput, repair?: RepairExecutionAuthority) {
+    const scope = repair ? this.#repairScope(exec, 'draft', repair) : this.#scope(exec.agent, 'draft')
+    if (repair && (acceptanceDigest(repair.scope) !== acceptanceDigest(scope) || repair.ownerRouteId !== input.ownerRouteId)) throw new Error('assistant-skills: repair authority scope changed')
     const route = this.#watchRoute(scope, input.ownerRouteId)
     const window = failureWindow(input)
     const failureGoals = () => {
@@ -694,13 +757,13 @@ export class AssistantSkillsService extends Service {
     const currentRepair = await currentGoals.inspectOwnerVerifiedWorkflowSource(repairInput, signal)
     if (currentGoals.trustedAcceptanceProducerGeneration() !== generation || failure.evidence.generation !== generation
       || acceptanceDigest(currentRepair) !== firstRepairDigest
-      || acceptanceDigest(this.#scope(exec.agent, 'draft')) !== acceptanceDigest(scope)) throw new Error('assistant-skills: Goals failure evidence changed during capture')
+      || acceptanceDigest(repair ? this.#repairScope(exec, 'draft', repair) : this.#scope(exec.agent, 'draft')) !== acceptanceDigest(scope)) throw new Error('assistant-skills: Goals failure evidence changed during capture')
     this.#watchRoute(scope, input.ownerRouteId, route)
     const provenance = captureFailureCandidateProvenance(failure, currentRepair, scope, parent, definition)
     const provenanceDigest = acceptanceDigest(provenance)
-    this.#authorize(exec.agent, 'draft', [scope, definition, input.parentVersion, provenanceDigest])
+    if (repair) this.#repairAuthorize(exec, 'draft', [scope, definition, input.parentVersion, provenanceDigest], repair); else this.#authorize(exec.agent, 'draft', [scope, definition, input.parentVersion, provenanceDigest])
     if (failureGoals().trustedAcceptanceProducerGeneration() !== generation
-      || acceptanceDigest(this.#scope(exec.agent, 'draft')) !== acceptanceDigest(scope)) throw new Error('assistant-skills: Goals producer authority changed')
+      || acceptanceDigest(repair ? this.#repairScope(exec, 'draft', repair) : this.#scope(exec.agent, 'draft')) !== acceptanceDigest(scope)) throw new Error('assistant-skills: Goals producer authority changed')
     this.#watchRoute(scope, input.ownerRouteId, route)
     const currentParent = this.#store.get(scope, input.name)
     if (!currentParent || currentParent.version !== input.parentVersion || acceptanceDigest(currentParent) !== acceptanceDigest(parent)) throw new Error('assistant-skills: candidate parent changed')
@@ -710,6 +773,9 @@ export class AssistantSkillsService extends Service {
     const trigger = single ? `failure:${input.taskFamilyId}:${window.failures[0]!.goalId}`
       : `failure:${input.taskFamilyId}:${failure.failureCategory}:${failure.failures.length}`
     return this.#preview(scope, this.#store.stageCandidate(scope, definition, { expectedVersion: input.parentVersion, reason, trigger, expiresAt: Date.now() + this.#candidateTtl, failureProvenance: provenance }))
+  }
+  stageOwnerAuthorizedFailureCandidate = (exec: RepairExecutionContext, input: StageFailureCandidateInput, authority: RepairExecutionAuthority) => {
+    return this.stageFailureCandidate(exec, input, authority)
   }
   #preview(scope: GoalScope, candidate: SkillCandidate) {
     const parent = candidate.parentVersion ? this.#store.get(scope, candidate.definition.name, candidate.parentVersion) : undefined
@@ -779,6 +845,209 @@ export class AssistantSkillsService extends Service {
     this.#authorize(agent, 'rollback', [scope, name, expectedVersion, targetVersion])
     const restored = this.#store.rollback(scope, name, expectedVersion, targetVersion)
     this.#changed(); return restored
+  }
+  /** Process-local capability check used by Goals; no tool can mint these assertions. */
+  ownsOwnerAuthorizedRepair = (input: OwnerAuthorizedRepairInput, callback: () => void): boolean => {
+    const minted = this.#repairAssertions.get(input.authorizationId)
+    if (!minted || minted.callback !== callback || minted.triggerDigest !== acceptanceDigest(input.trigger)) return false
+    const record = this.#store.getRepairContinuation(input.scope, input.authorizationId)
+    if (!record || record.authorizationDigest !== input.authorizationDigest || record.authorization.ownerRouteId !== input.ownerRouteId
+      || record.authorization.expiresAt !== input.expiresAt || input.objective !== input.trigger.taskFamily.objective) return false
+    try {
+      this.#assertRepair(record)
+      return this.#repairProfile(record).maxGoalRounds === input.maxGoalRounds
+    } catch { return false }
+  }
+  #repairProfile(record: SkillRepairContinuation): RepairContinuationProfile {
+    const profile = this.#repairProfiles.find(value => value.id === record.authorization.profileId && acceptanceDigest(value.scope) === acceptanceDigest(record.scope))
+    const holdout = profile && this.inspectRepairProfile(profile.externalHoldoutProfileId, profile.scope)
+    if (!profile || !holdout || acceptanceDigest([profile, holdout.digest]) !== record.authorization.profileDigest) throw new Error('assistant-skills: repair profile changed')
+    return profile
+  }
+  #repairLocator(record: SkillRepairContinuation, repair = false) {
+    const scope = record.scope as GoalScope
+    const locator = repair ? record.checkpoint.repair as { sessionId: string; goalId: string } | undefined : record.authorization.source
+    if (!locator?.sessionId || !locator.goalId) throw new Error('assistant-skills: repair locator unavailable')
+    return { ownerRouteId: record.authorization.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: locator.sessionId, goalId: locator.goalId }
+  }
+  #assertRepair(record: SkillRepairContinuation): void {
+    const current = this.#store.getRepairContinuation(record.scope, record.id)
+    if (!this.#active || !current || current.authorizationDigest !== record.authorizationDigest || current.authorization.expiresAt <= Date.now()
+      || ['complete', 'rejected', 'revoked', 'expired', 'unknown'].includes(current.state)) throw new Error('assistant-skills: repair authorization ended')
+    const scope = record.scope as GoalScope, profile = this.#repairProfile(current)
+    this.#watchRoute(scope, current.authorization.ownerRouteId, current.routeReceipt)
+    const policy = this.ctx.get('assistantPolicy', false)
+    if (!policy || ['draft', 'compare', 'canary', 'promote', 'watch', 'rollback'].some(action => policy.evaluate({
+      subject: { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
+      action, resource, context: { initiator: 'background' },
+    }).effect !== 'allow')) throw new Error('assistant-skills: repair background policy denied')
+    const source = this.#goals().inspectOwnerGoalExecution(this.#repairLocator(current)).storedGoal
+    if (source.definition.digest !== current.authorization.source.definitionDigest || source.nativeAtLastObservation.goalId !== current.authorization.source.nativeGoalId) throw new Error('assistant-skills: repair source changed')
+    const parent = this.#store.get(scope, profile.skillName)
+    if (parent && !parent.retired && parent.version === current.authorization.parentVersion && acceptanceDigest(parent) === current.authorization.parentDigest) return
+    // Activation by this exact comparison may advance the parent during its final await.
+    const candidateId = current.checkpoint.candidateId
+    const candidate = typeof candidateId === 'string' ? this.#store.getCandidate(scope, candidateId) : undefined
+    const deployment = candidate?.deploymentId ? this.#store.getDeployment(scope, candidate.deploymentId) : undefined
+    if (!['comparing', 'watching'].includes(current.state) || !parent || !candidate || !deployment || deployment.candidateId !== candidate.id
+      || deployment.parentVersion !== current.authorization.parentVersion || deployment.ownerRouteId !== current.authorization.ownerRouteId
+      || deployment.expiresAt !== current.authorization.expiresAt || deployment.maxRuns !== profile.maxCanaryRuns || deployment.canaryRuns !== profile.canaryRuns
+      || acceptanceDigest(deployment.routeReceipt) !== acceptanceDigest(current.routeReceipt)
+      || parent.version !== deployment.version || acceptanceDigest(parent) !== deployment.definitionDigest) throw new Error('assistant-skills: authorized repair parent changed')
+  }
+  #repairAuthority(record: SkillRepairContinuation): RepairExecutionAuthority {
+    const minted = this.#repairAssertions.get(record.id)
+    if (!minted) throw new Error('assistant-skills: repair execution capability unavailable')
+    return { id: record.id, scope: record.scope as GoalScope, ownerRouteId: record.authorization.ownerRouteId, expiresAt: record.authorization.expiresAt, assertCurrent: minted.callback }
+  }
+  #repairExec(record: SkillRepairContinuation, signal: AbortSignal): RepairExecutionContext {
+    const agent = this.#repairAgents?.get(this.#repairLocator(record, true).sessionId)
+    if (!agent) throw new Error('assistant-skills: repair Agent unavailable; uncertain work must not be recreated')
+    return { agent, signal }
+  }
+  #publicRepair(record: SkillRepairContinuation) {
+    return { id: record.id, state: record.state, iteration: record.iteration, maxIterations: record.authorization.maxIterations,
+      expiresAt: record.authorization.expiresAt, profileId: record.authorization.profileId, skillName: record.authorization.skillName,
+      sourceGoalId: record.authorization.source.goalId, ...(record.checkpoint.repair ? { repair: record.checkpoint.repair } : {}),
+      ...(record.checkpoint.candidateId ? { candidateId: record.checkpoint.candidateId } : {}),
+      ...(record.checkpoint.deploymentId ? { deploymentId: record.checkpoint.deploymentId } : {}),
+      ...(record.checkpoint.failure ? { failure: record.checkpoint.failure } : {}), updatedAt: record.updatedAt }
+  }
+  armRepair = (agent: Agent | undefined, input: { goalId: string; sessionId?: string; profileId: string; ownerRouteId: string; invocationId: string; expiresAt: number }) => {
+    const scope = this.#scope(agent, 'draft'), route = this.#watchRoute(scope, input.ownerRouteId)
+    const profile = this.#repairProfiles.find(value => value.id === input.profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+    const holdout = profile && this.inspectRepairProfile(profile.externalHoldoutProfileId, scope)
+    if (!this.#repairRuntime || !profile || !holdout?.profile.canaryAdmissionTemplate || !Number.isSafeInteger(input.expiresAt)
+      || input.expiresAt <= Date.now() || input.expiresAt > Math.min(holdout.profile.execution.expiresAt, Date.now() + 604800000)) throw new Error('assistant-skills: finite current repair profile required')
+    const parent = this.#store.get(scope, profile.skillName)
+    const sessionId = input.sessionId ?? String(agent!.session.id)
+    const snapshot = this.#goals().inspectOwnerGoalExecution({ ownerRouteId: input.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId, goalId: input.goalId })
+    if (!parent || parent.retired || snapshot.storedGoal.definition.digest !== holdout.profile.canaryAdmissionTemplate.taskFamily.goalDefinitionDigest) throw new Error('assistant-skills: exact repair source family and current parent required')
+    const authorization = { invocationId: input.invocationId, ownerRouteId: input.ownerRouteId,
+      source: { goalId: input.goalId, sessionId, nativeGoalId: snapshot.storedGoal.nativeAtLastObservation.goalId, definitionDigest: snapshot.storedGoal.definition.digest },
+      profileId: profile.id, profileDigest: acceptanceDigest([profile, holdout.digest]), skillName: profile.skillName,
+      parentVersion: parent.version, parentDigest: acceptanceDigest(parent), maxIterations: 1, expiresAt: input.expiresAt }
+    for (const action of ['draft', 'compare', 'canary', 'watch'] as const) {
+      this.#scope(agent, action); this.#authorize(agent, action, ['repair-arm', scope, authorization, route])
+    }
+    this.#watchRoute(scope, input.ownerRouteId, route)
+    const record = this.#store.createRepairContinuation(scope, authorization, route)
+    this.#queueRepair()
+    return this.#publicRepair(record)
+  }
+  repairStatus = (agent: Agent | undefined, id?: string) => {
+    const scope = this.#scope(agent, 'inspect')
+    if (id !== undefined) { const record = this.#store.getRepairContinuation(scope, id); return record ? this.#publicRepair(record) : null }
+    return { profiles: this.#repairProfiles.filter(value => acceptanceDigest(value.scope) === acceptanceDigest(scope)).map(value => ({ id: value.id, skillName: value.skillName, taskFamilyId: value.taskFamilyId, maxIterations: 1, maxGoalRounds: value.maxGoalRounds, maxModelCalls: value.maxModelCalls, maxToolCalls: value.maxToolCalls, maxDurationMs: value.maxDurationMs })),
+      continuations: this.#store.listRepairContinuations(scope).map(value => this.#publicRepair(value)) }
+  }
+  revokeRepair = async (agent: Agent | undefined, id: string) => {
+    const scope = this.#scope(agent, 'reject'), record = this.#store.getRepairContinuation(scope, id)
+    if (!record) throw new Error('assistant-skills: repair continuation unavailable')
+    this.#authorize(agent, 'reject', ['repair-revoke', id])
+    if (['complete', 'rejected', 'revoked', 'expired', 'unknown'].includes(record.state)) return this.#publicRepair(record)
+    const revoked = this.#store.transitionRepairContinuation(scope, id, record.revision, 'revoked', record.checkpoint)
+    await this.#repairAgents?.closeAuthorization(record.id)
+    this.#repairAssertions.delete(record.id)
+    return this.#publicRepair(revoked)
+  }
+  #queueRepair(): void {
+    const runtime = this.#repairRuntime
+    if (!this.#active || !runtime || this.#repairTask) return
+    this.#repairTask = runtime.tickAll().catch(() => []).then(async () => {
+      for (const record of this.#store.listRepairContinuations()) {
+        if (!['watching', 'complete', 'rejected', 'revoked', 'expired', 'unknown'].includes(record.state)) continue
+        const repair = record.checkpoint.repair as { sessionId: string } | undefined
+        if (repair) await this.#repairAgents?.closeSession(repair.sessionId)
+        this.#repairAssertions.delete(record.id)
+      }
+    }).catch(() => undefined).finally(() => { this.#repairTask = undefined })
+  }
+  #installRepairRuntime(ctx: Context): void {
+    ctx.inject(['tools', 'agents', 'sessions', 'llm', 'assistantGoals', 'assistantPolicy', 'assistantDelivery', 'assistantVerifier'], runtime => {
+      const agents = new OwnerRepairAgentRuntime(runtime)
+      const driver = new RepairContinuationRuntime(this.#store, {
+        assertCurrent: record => this.#assertRepair(record),
+        inspectTrigger: async (record, signal) => {
+          const snapshot = this.#goals().inspectOwnerGoalExecution(this.#repairLocator(record))
+          if (snapshot.outcome?.status !== 'not-achieved' || snapshot.storedGoal.nativeAtLastObservation.phase === 'active') return undefined
+          const profile = this.#repairProfile(record), locator = this.#repairLocator(record)
+          return this.#goals().inspectOwnerFailureTrigger({ ownerRouteId: locator.ownerRouteId, principalId: locator.principalId, workspace: locator.workspace, preset: locator.preset, taskFamilyId: profile.taskFamilyId, failures: [{ goalId: locator.goalId, sessionId: locator.sessionId }], minimumOccurrences: 1 }, signal)
+        },
+        createRepair: async (record, evidence, signal) => {
+          const profile = this.#repairProfile(record), trigger = evidence as HostFailureTriggerEvidence
+          const callback = () => this.#assertRepair(record)
+          this.#repairAssertions.set(record.id, { callback, triggerDigest: acceptanceDigest(trigger) })
+          return agents.create({ ...profile, id: record.id, authorizationDigest: record.authorizationDigest, ownerRouteId: record.authorization.ownerRouteId,
+            trigger, objective: trigger.taskFamily.objective, expiresAt: record.authorization.expiresAt, assertCurrent: callback }, signal)
+        },
+        inspectRepair: async (record, signal) => {
+          const locator = this.#repairLocator(record, true), snapshot = this.#goals().inspectOwnerGoalExecution(locator)
+          if (Date.now() >= record.updatedAt + this.#repairProfile(record).maxDurationMs) return 'rejected'
+          if (snapshot.outcome?.status === 'achieved' && snapshot.storedGoal.nativeAtLastObservation.phase === 'complete') {
+            await this.#goals().inspectOwnerVerifiedWorkflowSource(locator, signal)
+            return 'achieved'
+          }
+          const phase = snapshot.storedGoal.nativeAtLastObservation.phase
+          // Native round exhaustion precedes asynchronous independent outcome settlement.
+          if (phase === 'blocked' && ['pending', 'unverified', 'achieved'].includes(snapshot.outcome?.status ?? 'unverified')) return 'running'
+          return ['blocked', 'cleared', 'paused', 'complete'].includes(phase) ? 'rejected' : 'running'
+        },
+        capture: async (record, signal) => {
+          const profile = this.#repairProfile(record), locator = this.#repairLocator(record, true), source = record.authorization.source
+          const candidate = await this.stageOwnerAuthorizedFailureCandidate(this.#repairExec(record, signal), {
+            ownerRouteId: record.authorization.ownerRouteId, triggerGoalId: source.goalId, triggerSessionId: source.sessionId,
+            repairGoalId: locator.goalId, repairSessionId: locator.sessionId, taskFamilyId: profile.taskFamilyId,
+            name: profile.skillName, description: profile.description, ...(profile.bindings === undefined ? {} : { bindings: profile.bindings }), parentVersion: record.authorization.parentVersion,
+          }, this.#repairAuthority(record))
+          return { candidateId: candidate.id }
+        },
+        compare: async (record, signal) => {
+          const profile = this.#repairProfile(record), candidateId = record.checkpoint.candidateId
+          if (typeof candidateId !== 'string') throw new Error('assistant-skills: repair candidate unavailable')
+          const result = await this.canaryOwnerAuthorizedRepair(this.#repairExec(record, signal), candidateId, profile.externalHoldoutProfileId,
+            `repair-${record.id}-${record.iteration}`, { ownerRouteId: record.authorization.ownerRouteId, expiresAt: record.authorization.expiresAt,
+              maxRuns: profile.maxCanaryRuns, canaryRuns: profile.canaryRuns }, this.#repairAuthority(record))
+          return { deploymentId: result.deployment.id }
+        },
+        inspectDeployment: async record => {
+          const id = record.checkpoint.deploymentId
+          const deployment = typeof id === 'string' ? this.#store.getDeployment(record.scope, id) : undefined
+          if (!deployment) throw new Error('assistant-skills: repair deployment unavailable')
+          return deployment.state === 'promoted' ? 'complete' : deployment.state === 'canary' ? 'watching' : 'rejected'
+        },
+      })
+      this.#repairAgents = agents; this.#repairRuntime = driver
+      for (const record of this.#store.listRepairContinuations()) {
+        // An in-flight native repair cannot be recreated from a cached transcript.
+        // Until its Agent can be reacquired with verified quiescence, surface the
+        // interruption immediately rather than leaving it "running" until expiry.
+        if (['repairing', 'repair-achieved', 'candidate-staged'].includes(record.state)) {
+          this.#store.transitionRepairContinuation(record.scope, record.id, record.revision, 'unknown', { ...record.checkpoint, failure: 'repair-agent-interrupted' })
+        } else driver.recover(record.scope, record.id)
+      }
+      runtime.tools.register(defineTool({ name: 'skill_repair_arm', description: 'Authorize one bounded autonomous repair of an exact owner Goal using a configured profile. After independent failure evidence, a separate native Goal synthesizes a repair; only independent acceptance and prospective comparison can deploy a finite canary. Requires the current human request. Does not authorize recursive self-modification or renewed budgets.',
+        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, source_session_id: { type: 'string' }, profile_id: { type: 'string', required: true }, owner_route_id: { type: 'string', required: true }, invocation_id: { type: 'string', required: true }, expires_at: { type: 'integer', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.armRepair(exec.agent, { goalId: args.goal_id, ...(args.source_session_id === undefined ? {} : { sessionId: args.source_session_id }), profileId: args.profile_id, ownerRouteId: args.owner_route_id, invocationId: args.invocation_id, expiresAt: args.expires_at })) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_repair_status', description: 'Discover owner-scoped repair profile ids and finite limits, or inspect repair, candidate and deployment progress. Unknown work must not be replayed.', parameters: { repair_id: { type: 'string' } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.repairStatus(exec.agent, args.repair_id)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_repair_revoke', description: 'Revoke this owner’s remaining repair continuation and stop its active repair Agent. Already completed effects and any deployed version retain their explicit rollback controls.', parameters: { repair_id: { type: 'string', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(await this.revokeRepair(exec.agent, args.repair_id)) }) }))
+      let stopped: Promise<void> | undefined
+      const timer = setInterval(() => this.#queueRepair(), 1000)
+      const stop = () => stopped ??= (async () => {
+        clearInterval(timer)
+        if (this.#repairRuntime === driver) { this.#repairRuntime = undefined; this.#repairAgents = undefined }
+        // Close model admission first, then settle state transitions, then release handles.
+        const task = this.#repairTask
+        await Promise.all([driver.dispose(), agents.dispose()])
+        await task
+        this.#repairAssertions.clear()
+      })()
+      this.#repairStops.add(stop)
+      runtime.effect(() => stop, 'assistant-skills.repair-runtime')
+      this.#queueRepair()
+    })
   }
   #watchPolicy(scope: GoalScope, action: 'watch' | 'rollback') {
     return { subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
@@ -852,6 +1121,7 @@ export class AssistantSkillsService extends Service {
   }
   #queueReconcile(): void {
     if (!this.#active) return
+    this.#queueRepair()
     if (this.#reconcileQueued) { this.#reconcileDirty = true; return }
     this.#reconcileQueued = true
     queueMicrotask(() => { if (!this.#active) { this.#reconcileQueued = false; return }; const task = this.#reconcile().catch(() => {}).finally(() => { this.#reconcileQueued = false })

@@ -81,6 +81,32 @@ export interface SkillCapture {
 }
 export interface SkillCaptureInput { ownerRouteId: string; goalId: string; sessionId: string; nativeGoalId: string; name: string; description: string; parentVersion: number; expiresAt: number }
 export interface SkillCandidateOptions { expectedVersion: number; reason: string; trigger: string; expiresAt: number; failureProvenance?: FailureCaptureProvenance }
+export type SkillRepairState = 'armed' | 'source-confirmed' | 'creating-repair' | 'repairing' | 'repair-achieved' | 'capturing' | 'candidate-staged' | 'comparing' | 'watching' | 'complete' | 'rejected' | 'revoked' | 'expired' | 'unknown'
+export interface SkillRepairAuthorizationInput {
+  invocationId: string
+  ownerRouteId: string
+  source: { goalId: string; sessionId: string; nativeGoalId: string; definitionDigest: string }
+  profileId: string
+  profileDigest: string
+  skillName: string
+  parentVersion: number
+  parentDigest: string
+  maxIterations: number
+  expiresAt: number
+}
+export interface SkillRepairContinuation {
+  id: string
+  scope: object
+  authorization: SkillRepairAuthorizationInput
+  authorizationDigest: string
+  routeReceipt: unknown
+  iteration: number
+  revision: number
+  state: SkillRepairState
+  checkpoint: Readonly<Record<string, unknown>>
+  createdAt: number
+  updatedAt: number
+}
 
 function fail(message = 'assistant-skills: store operation rejected'): never { throw new Error(message) }
 function json(value: unknown): boolean {
@@ -109,6 +135,7 @@ function runId(scope: unknown, sessionId: string, invocationId: string): string 
 function comparisonId(scope: unknown, sessionId: string, invocationId: string): string { return `skill-comparison-${acceptanceDigest([scope, sessionId, invocationId])}` }
 function watchId(scope: unknown, input: SkillWatchInput): string { return `skill-watch-${acceptanceDigest([scope, input])}` }
 function deploymentId(scope: unknown, candidateId: string, comparisonId: string, qualificationDigest: string, admission: SkillDeploymentAdmission, input: SkillDeploymentInput, routeReceipt: unknown): string { return `skill-deployment-${acceptanceDigest([scope, candidateId, comparisonId, qualificationDigest, admission, input, routeReceipt])}` }
+function repairContinuationId(scope: unknown, input: SkillRepairAuthorizationInput): string { return `skill-repair-${acceptanceDigest([scope, input.ownerRouteId, input.invocationId])}` }
 function definitionValid(definition: unknown): definition is SkillDefinition { return !!definition && typeof definition === 'object' && (definition as SkillDefinition).protocol === 'assistant-skills/definition/v1' && name((definition as SkillDefinition).name) && json(definition) }
 function digest(value: unknown): value is string { return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value) }
 function canonicalRevision(value: unknown): value is SkillWatchCanonicalRevision {
@@ -207,6 +234,29 @@ function candidateOptions(value: unknown): value is SkillCandidateOptions {
     && ['expectedVersion', 'reason', 'trigger', 'expiresAt'].every(key => keys.includes(key))
     && Object.values(descriptors).every(descriptor => descriptor.enumerable && 'value' in descriptor)
 }
+function repairAuthorization(value: unknown): value is SkillRepairAuthorizationInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !json(value) || Object.keys(value).length !== 10) return false
+  const input = value as SkillRepairAuthorizationInput
+  if (!['invocationId', 'ownerRouteId', 'source', 'profileId', 'profileDigest', 'skillName', 'parentVersion', 'parentDigest', 'maxIterations', 'expiresAt'].every(key => Object.hasOwn(input, key))
+    || !text(input.invocationId, 256) || !text(input.ownerRouteId, 256) || !text(input.profileId, 256) || !digest(input.profileDigest)
+    || !name(input.skillName) || !version(input.parentVersion) || !digest(input.parentDigest) || !Number.isSafeInteger(input.maxIterations) || input.maxIterations < 1 || input.maxIterations > 4
+    || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > Date.now() + 7 * 86400000) return false
+  const source = input.source
+  return !!source && typeof source === 'object' && !Array.isArray(source) && json(source) && Object.keys(source).length === 4
+    && text(source.goalId, 256) && text(source.sessionId, 512) && text(source.nativeGoalId, 256) && digest(source.definitionDigest)
+}
+function repairCheckpoint(value: unknown): value is Readonly<Record<string, unknown>> {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !json(value)) return false
+  try { return Buffer.byteLength(JSON.stringify(value), 'utf8') <= 128 * 1024 } catch { return false }
+}
+function repairState(value: unknown): value is SkillRepairState {
+  return typeof value === 'string' && ['armed', 'source-confirmed', 'creating-repair', 'repairing', 'repair-achieved', 'capturing', 'candidate-staged', 'comparing', 'watching', 'complete', 'rejected', 'revoked', 'expired', 'unknown'].includes(value)
+}
+function repairTransition(from: SkillRepairState, to: SkillRepairState): boolean {
+  if (['complete', 'rejected', 'revoked', 'expired', 'unknown'].includes(from)) return false
+  if (['rejected', 'revoked', 'expired', 'unknown'].includes(to)) return true
+  return ({ armed: 'source-confirmed', 'source-confirmed': 'creating-repair', 'creating-repair': 'repairing', repairing: 'repair-achieved', 'repair-achieved': 'capturing', capturing: 'candidate-staged', 'candidate-staged': 'comparing', comparing: 'watching', watching: 'complete' } as Partial<Record<SkillRepairState, SkillRepairState>>)[from] === to
+}
 
 function privatePath(path: string): void {
   if (!isAbsolute(path)) fail('assistant-skills: database path must be absolute')
@@ -238,11 +288,13 @@ export class SkillStore {
       CREATE TABLE IF NOT EXISTS skill_watches(scope_key TEXT NOT NULL,id TEXT NOT NULL,watch_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('watching','rolled-back','expired','revoked','superseded','exhausted')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_deployments(scope_key TEXT NOT NULL,id TEXT NOT NULL,deployment_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('canary','promoted','blocked','expired','revoked','rolled-back','superseded')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_captures(scope_key TEXT NOT NULL,id TEXT NOT NULL,capture_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','captured','revoked','expired','unsupported','unknown')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS skill_repair_continuations(scope_key TEXT NOT NULL,id TEXT NOT NULL,authorization_digest TEXT NOT NULL,route_receipt_digest TEXT NOT NULL,revision INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN ('armed','source-confirmed','creating-repair','repairing','repair-achieved','capturing','candidate-staged','comparing','watching','complete','rejected','revoked','expired','unknown')),continuation_json TEXT NOT NULL,PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS skill_definitions_current ON skill_definitions(scope_key,name,version DESC);
       CREATE INDEX IF NOT EXISTS skill_runs_scope ON skill_runs(scope_key,id);
       CREATE INDEX IF NOT EXISTS skill_watches_scope_state ON skill_watches(scope_key,state);
       CREATE INDEX IF NOT EXISTS skill_deployments_scope_state ON skill_deployments(scope_key,state);
       CREATE INDEX IF NOT EXISTS skill_captures_scope_state ON skill_captures(scope_key,state);
+      CREATE INDEX IF NOT EXISTS skill_repair_continuations_scope_state ON skill_repair_continuations(scope_key,state);
 `)
     this.#db.prepare("UPDATE skill_runs SET state='unknown', run_json=json_set(run_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
     this.#db.exec('BEGIN IMMEDIATE')
@@ -266,6 +318,62 @@ export class SkillStore {
     this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS skill_comparisons_one_active ON skill_comparisons(scope_key) WHERE state='running'")
   }
   close(): void { this.#db.close() }
+  createRepairContinuation(scope: object, input: SkillRepairAuthorizationInput, routeReceipt: unknown): SkillRepairContinuation {
+    const key = scopeKey(scope)
+    if (!repairAuthorization(input) || !json(routeReceipt)) fail('assistant-skills: invalid repair continuation')
+    const authorization = clone(input), receipt = clone(routeReceipt), id = repairContinuationId(scope, authorization)
+    const authorizationDigest = acceptanceDigest(authorization), routeReceiptDigest = acceptanceDigest(receipt)
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const existing = this.#repairContinuation(key, id)
+      if (existing) {
+        if (existing.authorizationDigest !== authorizationDigest || acceptanceDigest(existing.routeReceipt) !== routeReceiptDigest) fail('assistant-skills: repair continuation conflict')
+        this.#db.exec('COMMIT'); return clone(existing)
+      }
+      const now = Date.now(), continuation: SkillRepairContinuation = { id, scope: clone(scope), authorization, authorizationDigest, routeReceipt: receipt, iteration: 1, revision: 1, state: 'armed', checkpoint: {}, createdAt: now, updatedAt: now }
+      this.#db.prepare('INSERT INTO skill_repair_continuations VALUES(?,?,?,?,?,?,?)').run(key, id, authorizationDigest, routeReceiptDigest, continuation.revision, continuation.state, JSON.stringify(continuation))
+      this.#db.exec('COMMIT'); return clone(continuation)
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  getRepairContinuation(scope: object, id: string): SkillRepairContinuation | undefined {
+    const key = scopeKey(scope); if (!text(id, 128)) fail('assistant-skills: invalid repair continuation reference')
+    const continuation = this.#repairContinuation(key, id)
+    return continuation === undefined ? undefined : clone(continuation)
+  }
+  listRepairContinuations(scope?: object): SkillRepairContinuation[] {
+    const rows = scope === undefined
+      ? this.#db.prepare('SELECT continuation_json FROM skill_repair_continuations ORDER BY id').all()
+      : this.#db.prepare('SELECT continuation_json FROM skill_repair_continuations WHERE scope_key=? ORDER BY id').all(scopeKey(scope))
+    return (rows as { continuation_json: string }[]).map(row => clone(JSON.parse(row.continuation_json) as SkillRepairContinuation))
+  }
+  transitionRepairContinuation(scope: object, id: string, expectedRevision: number, nextState: SkillRepairState, checkpoint: Readonly<Record<string, unknown>>): SkillRepairContinuation {
+    const key = scopeKey(scope)
+    if (!text(id, 128) || !version(expectedRevision) || !repairState(nextState) || !repairCheckpoint(checkpoint)) fail('assistant-skills: invalid repair continuation transition')
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.#repairContinuation(key, id)
+      if (!current) fail('assistant-skills: repair continuation missing')
+      if (current.revision !== expectedRevision || !repairTransition(current.state, nextState)) fail('assistant-skills: repair continuation state conflict')
+      const saved: SkillRepairContinuation = { ...current, state: nextState, checkpoint: clone(checkpoint), revision: current.revision + 1, updatedAt: Date.now() }
+      if (this.#db.prepare('UPDATE skill_repair_continuations SET revision=?,state=?,continuation_json=? WHERE scope_key=? AND id=? AND revision=? AND state=?')
+        .run(saved.revision, saved.state, JSON.stringify(saved), key, id, current.revision, current.state).changes !== 1) fail('assistant-skills: repair continuation state conflict')
+      this.#db.exec('COMMIT'); return clone(saved)
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  nextRepairIteration(scope: object, id: string, expectedRevision: number, checkpoint: Readonly<Record<string, unknown>>): SkillRepairContinuation {
+    const key = scopeKey(scope)
+    if (!text(id, 128) || !version(expectedRevision) || !repairCheckpoint(checkpoint)) fail('assistant-skills: invalid repair continuation iteration')
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.#repairContinuation(key, id)
+      if (!current) fail('assistant-skills: repair continuation missing')
+      if (current.revision !== expectedRevision || current.state !== 'watching' || current.iteration >= current.authorization.maxIterations || current.authorization.expiresAt <= Date.now()) fail('assistant-skills: repair continuation unavailable')
+      const saved: SkillRepairContinuation = { ...current, iteration: current.iteration + 1, revision: current.revision + 1, state: 'armed', checkpoint: clone(checkpoint), updatedAt: Date.now() }
+      if (this.#db.prepare("UPDATE skill_repair_continuations SET revision=?,state='armed',continuation_json=? WHERE scope_key=? AND id=? AND revision=? AND state='watching'")
+        .run(saved.revision, JSON.stringify(saved), key, id, current.revision).changes !== 1) fail('assistant-skills: repair continuation state conflict')
+      this.#db.exec('COMMIT'); return clone(saved)
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
   save(scope: object, definition: SkillDefinition, expectedVersion = 0): StoredSkillDefinition {
     const key = scopeKey(scope)
     if (!definitionValid(definition) || !version(expectedVersion, true)) fail('assistant-skills: invalid definition')
@@ -844,6 +952,10 @@ export class SkillStore {
     return matches[0]
   }
   #capture(key: string, id: string): SkillCapture | undefined { const row = this.#db.prepare('SELECT capture_json FROM skill_captures WHERE scope_key=? AND id=?').get(key, id) as { capture_json: string } | undefined; return row ? JSON.parse(row.capture_json) as SkillCapture : undefined }
+  #repairContinuation(key: string, id: string): SkillRepairContinuation | undefined {
+    const row = this.#db.prepare('SELECT continuation_json FROM skill_repair_continuations WHERE scope_key=? AND id=?').get(key, id) as { continuation_json: string } | undefined
+    return row === undefined ? undefined : JSON.parse(row.continuation_json) as SkillRepairContinuation
+  }
   #watch(key: string, id: string): SkillWatch | undefined { const row = this.#db.prepare('SELECT watch_json FROM skill_watches WHERE scope_key=? AND id=?').get(key, id) as { watch_json: string } | undefined; return row ? JSON.parse(row.watch_json) as SkillWatch : undefined }
   #watches(key: string, state: SkillWatch['state']): SkillWatch[] { return (this.#db.prepare('SELECT watch_json FROM skill_watches WHERE scope_key=? AND state=?').all(key, state) as { watch_json: string }[]).map(row => JSON.parse(row.watch_json) as SkillWatch) }
   #putWatch(key: string, watch: SkillWatch): void { this.#db.prepare('INSERT INTO skill_watches(scope_key,id,watch_json,state) VALUES(?,?,?,?) ON CONFLICT(scope_key,id) DO UPDATE SET watch_json=excluded.watch_json,state=excluded.state').run(key, watch.id, JSON.stringify(watch), watch.state) }
