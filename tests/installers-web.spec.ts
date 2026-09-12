@@ -34,8 +34,28 @@ async function actualFixture(setupExit: number | 'missing') {
   const fakeBin = join(root, 'bin')
   const log = join(root, 'order.log')
   const profileBin = join(dshHome, 'profiles', 'web', 'node_modules', '.bin')
+  const hostModules = join(fakeBin, 'node_modules', '@deepseek-ai')
   await mkdir(fakeBin, { recursive: true })
   await mkdir(profileBin, { recursive: true })
+  await mkdir(join(hostModules, 'dsh'), { recursive: true })
+  await mkdir(join(hostModules, 'dsh-app-boot'), { recursive: true })
+  await writeFile(join(hostModules, 'dsh', 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh', version: '0.1.2-rc.1',
+  }))
+  await writeFile(join(hostModules, 'dsh-app-boot', 'package.json'), JSON.stringify({
+    name: '@deepseek-ai/dsh-app-boot', type: 'module', exports: './index.js',
+  }))
+  await writeFile(join(hostModules, 'dsh-app-boot', 'index.js'), [
+    "import { mkdir, writeFile } from 'node:fs/promises'",
+    "import { join } from 'node:path'",
+    'export async function healProfilesModuleFallback({ installAnchor, home }) {',
+    "  if (!installAnchor.endsWith('/@deepseek-ai/dsh/package.json')) throw new Error('wrong Host anchor')",
+    "  await mkdir(join(home, 'profiles', 'node_modules'), { recursive: true })",
+    "  await writeFile(join(home, 'profiles', 'node_modules', '.host-fallback-healed'), 'exact-host')",
+    "  await writeFile(process.env.INSTALL_LOG, 'host-fallback\\n', { flag: 'a' })",
+    '}',
+    '',
+  ].join('\n'))
   await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; fi
 exit 0
@@ -148,7 +168,8 @@ describe('experimental Web owner installer scenario', () => {
     expect(result.status, result.stderr).toBe(0)
     const order = await readFile(log, 'utf8')
     const installed = order.slice(order.indexOf('plugin-add'))
-    expect(installed).toMatch(/^plugin-add\nsetup\n/u)
+    expect(installed).toMatch(/^plugin-add\nhost-fallback\nsetup\n/u)
+    expect(installed.indexOf('host-fallback')).toBeLessThan(installed.indexOf('setup'))
     expect(installed.indexOf('setup')).toBeLessThan(installed.indexOf('dump'))
     expect(installed.indexOf('dump')).toBeLessThan(installed.indexOf('probe'))
   }, 30_000)

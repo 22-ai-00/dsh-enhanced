@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-12T17:12:20.196170+00:00",
+  "capability": "fresh-linux-autonomy-installation-with-host-module-preparation",
+  "status": "passed",
+  "source": {
+    "baselineCommit": "bd5ccf0f2cb56e5690655362b861e57d15cbd894",
+    "candidateFile": "scripts/install/common.sh",
+    "candidateSha256": "ef31bb3fab89f657a796b746da9b265674e4e2fbfbc639de19d12983cc550d82",
+    "packageVersion": "0.1.30",
+    "installer": "candidate checkout; published npm packages",
+    "preparedRelease": "0.1.31"
+  },
+  "environment": {
+    "platform": "linux",
+    "node": "24.7.0",
+    "pnpm": "11.7.0 (Node script distribution)",
+    "dsh": "0.1.2-rc.1",
+    "isolatedHome": true,
+    "modelRequests": false
+  },
+  "command": {
+    "script": "/tmp/dsh-rsi-installer-final-gc8e2rcd/run.sh",
+    "exitCode": 0,
+    "mode": "--plugin-version 0.1.30 --scenario autonomy --profile web --yes --no-service --model skip --model-route skip --dsh-version 0.1.2-rc.1",
+    "isolationImage": "sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8"
+  },
+  "prerequisites": {
+    "nativeBuildApproval": "Only koffi preapproved in the new test profile; no dependencies, Host fallback, or application state existed before installation.",
+    "manualHostFallbackPreparation": false
+  },
+  "checks": {
+    "exactTopLevelCohort": {
+      "@dsh-enhanced/assistant-actions": "0.1.30",
+      "@dsh-enhanced/assistant-deepseek-budget": "0.1.30",
+      "@dsh-enhanced/assistant-delivery": "0.1.30",
+      "@dsh-enhanced/assistant-evaluation": "0.1.30",
+      "@dsh-enhanced/assistant-goals": "0.1.30",
+      "@dsh-enhanced/assistant-isolation": "0.1.30",
+      "@dsh-enhanced/assistant-proactive": "0.1.30",
+      "@dsh-enhanced/assistant-skills": "0.1.30",
+      "@dsh-enhanced/assistant-verifier": "0.1.30",
+      "@dsh-enhanced/assistant-web-owner": "0.1.30",
+      "@dsh-enhanced/credentials-keychain": "0.1.30",
+      "@dsh-enhanced/event-triggers": "0.1.30",
+      "@dsh-enhanced/personal-assistant": "0.1.30",
+      "@dsh-enhanced/plugin-control-plane": "0.1.30"
+    },
+    "hostPreparationBeforeSetup": true,
+    "successfulActivationProbes": 2,
+    "dumpConfigProduced": true,
+    "isolationDiagnostic": {
+      "scope": "finite-isolation",
+      "owner": {
+        "status": "matched"
+      },
+      "grant": {
+        "status": "available",
+        "reasons": [],
+        "runsUsed": 0,
+        "durationReservedMs": 0,
+        "remainingRuns": 20,
+        "remainingDurationMs": 600000,
+        "activeJobs": 0,
+        "unknownJobs": 0
+      },
+      "modelAndGoals": "not-checked",
+      "externalActions": "not-checked"
+    }
+  },
+  "evidence": {
+    "installLog": "/tmp/dsh-rsi-installer-final-gc8e2rcd/autonomy-logs/install.log",
+    "installLogSha256": "efef8f81565f99cb1b5c29e474a68ffd9b889213abcffde0262cfb7d47aa95e0",
+    "dumpConfigSha256": "468b5af40bc25d1995615a43a2ca7097eaf9df017ec1216ecef1ba7b55c344df"
+  },
+  "limits": [
+    "Candidate installer source, not yet a newly published immutable installer tag.",
+    "No real model, Goal execution, external Actions, live Lark, macOS or Windows acceptance in this smoke.",
+    "Native dependency build approval remains explicit in the profile.",
+    "Complete RSI roadmap remains open."
+  ]
+}

@@ -179,7 +179,8 @@ retained environments after diagnosis and never publish their contents.
 ## Owner-authorized autonomous repair
 
 Run from the repository root after building the workspace. The command requires
-DSH `0.1.2-rc.1` on `PATH`, Playwright Chromium (or its executable path), the
+the exact DSH version pinned by `release-manifest.json` (currently
+`0.1.2-rc.1`) on `PATH`, Playwright Chromium (or its executable path), the
 `traex` ACP command with an already usable local TraeX login for the selected
 model, `zstd`, and a reachable local Docker daemon. `DSH_HOLDOUT_TEST_IMAGE`
 must be an already-pulled `sha256:` image digest; the test does not build or
@@ -187,13 +188,27 @@ pull it. It creates a disposable `DSH_HOME`, so it does not modify an ordinary
 profile or configure a provider credential.
 
 ```sh
-CI=true pnpm build
+CLI_BIN=/tmp/dsh-real-cli/node_modules/.bin
+PATH="$CLI_BIN:$PATH" dsh --version # must equal release-manifest.json current/pending pinnedHostVersion
+CI=true PATH="$CLI_BIN:$PATH" pnpm build
 CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
+  PATH="$CLI_BIN:$PATH" \
   DSH_WEB_REAL_PROVIDER=traex-agent \
   DSH_WEB_REAL_MODEL=gpt-5.6-terra \
   DSH_HOLDOUT_TEST_IMAGE=sha256:<existing-local-image-id> \
   pnpm test:web-owner:real-repair
 ```
+
+The default command preserves the existing two-round template-render sequence.
+Run the independently configured, one-iteration dependency-topological-order
+family with the same prerequisites by replacing the final command with:
+
+```sh
+pnpm test:web-owner:real-repair:topology
+```
+
+That entry sets `DSH_REAL_REPAIR_FAMILY=topology`; it does not turn the
+template command into a broader or weaker test.
 
 `DSH_WEB_REAL_PROVIDER` must be exactly `traex-agent`; the test rejects Codex
 and custom-gateway fallback. `DSH_WEB_REAL_MODEL` is the TraeX selector, not a
@@ -224,14 +239,15 @@ repair, which must produce v3, pass a separate prospective comparison and be
 promoted by another real task. No second arm or supplied repair source is used;
 all first-round public regression assertions remain in the second-round path.
 
-Success also requires both iteration notices and the final notice to be accepted
+Success also requires every iteration notice and the final notice to be accepted
 by the durable Outbox for the original owner Session, visible Web feedback,
 cumulative call limits, and no new dispatch or duplicate notice after completion
-and process restart. This verifies the bounded two-profile workflow; mid-repair
+and process restart. This verifies the selected bounded repair workflow; mid-repair
 Agent recovery and unrestricted recursive improvement remain outside this test.
 
-The test guard limits model/tool calls per Session across Host restarts, grants
-the owner one exact arm operation and restricts repair file tools to `render.mjs`.
+The test guard limits model/tool calls per Session across Host restarts and grants
+the owner one exact arm operation. It restricts repair file tools to `render.mjs`
+for the default template family and `topology.mjs` for the topology family.
 It permits only causally nested file operations during an authorized saved-skill
 run. These test restrictions are additional to product Policy and Goal budgets;
 they are not a product-wide file-path permission feature.
@@ -244,13 +260,14 @@ Repair Agent turns finish through the model and native Goal driver normally.
 
 The installed test profile configures Goals calls budget as 16 model calls, 64
 tool calls, 300000 ms and 4096 output tokens per call, for the one exact TraeX
-route. Each of its two repair profiles is limited to 16 model calls and 16 tool
-calls, with the same 300000 ms and 4096-output-token limits. The installer
+route. Each repair profile is limited to 16 model calls and 16 tool calls, with
+the same 300000 ms and 4096-output-token limits. The installer
 rejects a repair profile when any of those four profile limits exceeds the
 corresponding Goals budget, or when its provider/model does not match an exact
-configured Goals route. The armed sequence shares the primary profile's total
-16 model calls and 16 tool calls across both iterations; starting iteration two
-does not reset these counters.
+configured Goals route. The default armed sequence shares the primary profile's
+total 16 model calls and 16 tool calls across both iterations; starting iteration
+two does not reset these counters. The topology entry has one iteration and
+retains the same frozen per-sequence limits.
 
 Artifacts live under `.cache/web-owner-real-repair-e2e/`. Set
 `DSH_CAPTURE_RETAIN_FAILURE=1` to retain the private temporary environment for
@@ -258,7 +275,7 @@ local diagnosis after the Host and browser stop. Never publish that home or raw
 Session contents. On a successful run, inspect the Playwright `proof.json`,
 redacted `model.jsonl`, install logs and Host/browser failure artifacts rather
 than treating process exit alone as capability evidence. The real-model test is
-separate from `pnpm check`. It covers only the bounded two-profile repair flow;
+separate from `pnpm check`. It covers only the selected bounded repair flow;
 mid-repair recovery, broader recursive improvement, long-running autonomy and
 the remaining RSI roadmap require separate evidence.
 
