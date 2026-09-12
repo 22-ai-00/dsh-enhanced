@@ -77,13 +77,15 @@ describe('SkillStore', () => {
     firstAchieved.observation.taskFamilyDigest = acceptanceDigest(admitted.taskFamily)
     store.replaceWatchObservation(scope, active.deployment.watchId, firstAchieved)
     expect(store.reconcileDeployment(scope, active.deployment.id)).toMatchObject({ state: 'canary' })
-    expect(store.reconcileDeploymentWithCanonicalPromotion(scope, active.deployment.id)).toMatchObject({ state: 'promoted' })
+    const promoted = store.reconcileDeploymentWithCanonicalPromotion(scope, active.deployment.id)
+    expect(promoted).toMatchObject({ state: 'promoted', promotedAt: expect.any(Number) })
+    const promotedAt = promoted!.promotedAt
     expect(store.assertDeploymentRun(scope, run.run.id)).toMatchObject({ id: active.deployment.id, state: 'promoted' })
     const second = store.claim(scope, { invocationId: 'promoted', goalId: 'second-goal', sessionId: 'second-session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'second-goal-run' })
     store.finish(scope, second.run.id, 'succeeded', [])
     expect(() => store.claim(scope, { invocationId: 'over-quota', goalId: 'third-goal', sessionId: 'third-session', skillName: 'read-report', version: 2, inputs: {} })).toThrow(/quota exhausted/)
     store.observeWatch(scope, active.deployment.watchId, { runId: second.run.id, receiptDigest: '9'.repeat(64), objectiveStatus: 'not-achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000, executionTraceDigest: '8'.repeat(64), taskFamilyDigest: '7'.repeat(64) })
-    expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('promoted')
+    expect(store.reconcileDeployment(scope, active.deployment.id)).toMatchObject({ state: 'promoted', promotedAt })
     const secondFailure = revisionObservation(second.run.id, 1, 'not-achieved', 'second')
     secondFailure.observation.taskFamilyDigest = acceptanceDigest(admitted.taskFamily)
     secondFailure.observation.canonical = { ...secondFailure.observation.canonical, subjectRef: 'second-assessment', digest: acceptanceDigest({ run: second.run.id }) }

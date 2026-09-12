@@ -175,3 +175,97 @@ Playwright trace/video/screenshots plus Host, model, transport and DOM evidence.
 Set `DSH_CAPTURE_RETAIN_FAILURE=1` to also retain the private temporary profile
 and write `retained-environment.json`; otherwise the profile is removed. Delete
 retained environments after diagnosis and never publish their contents.
+
+## Owner-authorized autonomous repair
+
+Run from the repository root after building the workspace. The command requires
+DSH `0.1.2-rc.1` on `PATH`, Playwright Chromium (or its executable path), the
+`traex` ACP command with an already usable local TraeX login for the selected
+model, `zstd`, and a reachable local Docker daemon. `DSH_HOLDOUT_TEST_IMAGE`
+must be an already-pulled `sha256:` image digest; the test does not build or
+pull it. It creates a disposable `DSH_HOME`, so it does not modify an ordinary
+profile or configure a provider credential.
+
+```sh
+CI=true pnpm build
+CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
+  DSH_WEB_REAL_PROVIDER=traex-agent \
+  DSH_WEB_REAL_MODEL=gpt-5.6-terra \
+  DSH_HOLDOUT_TEST_IMAGE=sha256:<existing-local-image-id> \
+  pnpm test:web-owner:real-repair
+```
+
+`DSH_WEB_REAL_PROVIDER` must be exactly `traex-agent`; the test rejects Codex
+and custom-gateway fallback. `DSH_WEB_REAL_MODEL` is the TraeX selector, not a
+display name. The Playwright project uses one worker and no retries. Its config
+default is 15 minutes, but this repair test calls `test.setTimeout(1500000)`, so
+its actual timeout is 25 minutes. A real provider, Docker, browser, or DSH
+failure is reported as a test failure. This document describes the expected
+checks and does not report the result of any current or prior run.
+
+This opt-in isolated Web test requires TraeX ACP and a pinned local holdout
+image. ACP uses selector values such as `gpt-5.6-terra`; the CLI display name
+`GPT-5.6-Terra` is not the same identifier. The test never falls back to Codex.
+
+An independently accepted legacy Goal supplies a saved baseline skill. A new
+Goal runs that skill against stricter literal, non-recursive template criteria
+and must independently fail. The owner then calls `skill_repair_arm` once.
+The Host creates a separate native repair Goal; its model receives the task
+objective and file tools, with no repaired source or prescribed repair steps.
+Both baseline and candidate replay from a common unfinished scaffold. The test
+resets that scaffold before repair and records this fixture choice in proof.
+
+Success requires an independent achieved repair receipt, failure-bound candidate,
+prospective isolated holdout qualification and a finite canary in `watching`.
+The test then executes a fresh task with v2 and requires independent acceptance
+and promotion. A subsequent JSON Lines task using v2 must independently fail
+after that promotion. The same frozen authorization starts a second native
+repair, which must produce v3, pass a separate prospective comparison and be
+promoted by another real task. No second arm or supplied repair source is used;
+all first-round public regression assertions remain in the second-round path.
+
+Success also requires both iteration notices and the final notice to be accepted
+by the durable Outbox for the original owner Session, visible Web feedback,
+cumulative call limits, and no new dispatch or duplicate notice after completion
+and process restart. This verifies the bounded two-profile workflow; mid-repair
+Agent recovery and unrestricted recursive improvement remain outside this test.
+
+The test guard limits model/tool calls per Session across Host restarts, grants
+the owner one exact arm operation and restricts repair file tools to `render.mjs`.
+It permits only causally nested file operations during an authorized saved-skill
+run. These test restrictions are additional to product Policy and Goal budgets;
+they are not a product-wide file-path permission feature.
+For the two administrative owner calls (`skill_save` and `skill_repair_arm`),
+the isolated test Policy preauthorizes tool execution for the exact external
+owner principal and workspace; product owner-turn checks still apply. The
+guard concludes the turn through the native tool API after successful
+execution. It does not wait for a text-only acknowledgement from the provider.
+Repair Agent turns finish through the model and native Goal driver normally.
+
+The installed test profile configures Goals calls budget as 16 model calls, 64
+tool calls, 300000 ms and 4096 output tokens per call, for the one exact TraeX
+route. Each of its two repair profiles is limited to 16 model calls and 16 tool
+calls, with the same 300000 ms and 4096-output-token limits. The installer
+rejects a repair profile when any of those four profile limits exceeds the
+corresponding Goals budget, or when its provider/model does not match an exact
+configured Goals route. The armed sequence shares the primary profile's total
+16 model calls and 16 tool calls across both iterations; starting iteration two
+does not reset these counters.
+
+Artifacts live under `.cache/web-owner-real-repair-e2e/`. Set
+`DSH_CAPTURE_RETAIN_FAILURE=1` to retain the private temporary environment for
+local diagnosis after the Host and browser stop. Never publish that home or raw
+Session contents. On a successful run, inspect the Playwright `proof.json`,
+redacted `model.jsonl`, install logs and Host/browser failure artifacts rather
+than treating process exit alone as capability evidence. The real-model test is
+separate from `pnpm check`. It covers only the bounded two-profile repair flow;
+mid-repair recovery, broader recursive improvement, long-running autonomy and
+the remaining RSI roadmap require separate evidence.
+
+This is an implementation description, not a current PASS report. The expected
+two-round evidence is scheduled at
+[`docs/evidence/basic-rsi-two-round-2026-09-12.json`](../../docs/evidence/basic-rsi-two-round-2026-09-12.json);
+the coordinator records its actual E2E, root-check and independent-review result
+there only after all three have settled.
+
+2026-09-12 首版实际证据采用同一真实运行与独立重启回读的组合验收：两轮修复/晋升已通过，原命令仅最终会话导航断言失败；修正为侧栏实际选择原会话、`aria-selected` 及新 `session/follow` 后，保留环境的独立 Host/Chromium 补验通过，无新增模型调用。原命令的退出 1 及补验退出 0 均保留，未声称修正后的全模型命令重新通过。详见[基本 RSI 两轮记录](../../docs/evidence/basic-rsi-two-round-2026-09-12.json)。

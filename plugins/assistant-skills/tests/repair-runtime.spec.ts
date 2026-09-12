@@ -5,9 +5,9 @@ import { RepairContinuationRuntime, type RepairRuntimePorts } from '../src/repai
 const scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/tmp/workspace', preset: 'primary' }
 const authorization = { invocationId: 'repair', ownerRouteId: 'route', source: { goalId: 'source', sessionId: 'session', nativeGoalId: 'native', definitionDigest: 'a'.repeat(64) }, profileId: 'profile', profileDigest: 'b'.repeat(64), skillName: 'repair-skill', parentVersion: 1, parentDigest: 'c'.repeat(64), maxIterations: 1, expiresAt: Date.now() + 60_000 }
 function ports(overrides: Partial<RepairRuntimePorts> = {}): RepairRuntimePorts {
-  return { assertCurrent() {}, inspectTrigger: async () => ({ proof: 'trigger' }), createRepair: async () => ({ sessionId: 'repair-session', goalId: 'repair-goal' }), inspectRepair: async () => 'achieved', capture: async () => ({ candidateId: 'candidate' }), compare: async () => ({ deploymentId: 'deployment' }), inspectDeployment: async () => 'complete', ...overrides }
+  return { assertCurrent() {}, inspectTrigger: async () => ({ proof: 'trigger' }), createRepair: async () => ({ sessionId: 'repair-session', goalId: 'repair-goal' }), inspectRepair: async () => 'achieved', capture: async () => ({ candidateId: 'candidate' }), compare: async () => ({ deploymentId: 'deployment' }), inspectDeployment: async () => 'complete', inspectNextIteration: async () => undefined, assertNextIteration() {}, ...overrides }
 }
-function created(store: SkillStore, invocationId = 'repair', expiresAt = Date.now() + 60_000): SkillRepairContinuation { return store.createRepairContinuation(scope, { ...authorization, invocationId, expiresAt }, { route: 'receipt' }) }
+function created(store: SkillStore, invocationId = 'repair', expiresAt = Date.now() + 60_000, maxIterations = 1): SkillRepairContinuation { return store.createRepairContinuation(scope, { ...authorization, invocationId, expiresAt, maxIterations, ...(maxIterations > 1 ? { profileSequence: [{ id: 'profile', digest: 'b'.repeat(64) }, { id: 'followup', digest: 'd'.repeat(64) }] } : {}) }, { route: 'receipt' }) }
 function deferred<T>() { let resolve!: (value: T) => void, reject!: (reason?: unknown) => void; const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 function stage(store: SkillStore, record: SkillRepairContinuation, states: readonly Exclude<SkillRepairContinuation['state'], 'armed'>[]): SkillRepairContinuation {
   let current = record
@@ -85,6 +85,25 @@ describe('repair continuation runtime', () => {
     const first = runtime.tickAll(), second = runtime.tickAll(); expect(first).toBe(second)
     await vi.waitFor(() => expect(calls).toBe(4)); gate.resolve(); await first
     expect(calls).toBe(5); expect(peak).toBe(4)
+    await runtime.dispose(); store.close()
+  })
+  test('admits one distinct host-provided successor only after a rejected deployment', async () => {
+    const store = new SkillStore(':memory:'), initial = created(store, 'two-round'), watching = stage(store, initial, ['source-confirmed', 'creating-repair', 'repairing', 'repair-achieved', 'capturing', 'candidate-staged', 'comparing', 'watching'])
+    const next = { profileId: 'followup', source: { goalId: 'new-goal', sessionId: 'new-session', nativeGoalId: 'new-native', definitionDigest: 'd'.repeat(64) }, trigger: { proof: 'new' }, predecessorDeploymentId: 'deployment' }
+    const runtime = new RepairContinuationRuntime(store, ports({ inspectDeployment: async () => 'rejected', inspectNextIteration: async () => next }))
+    const advanced = await runtime.tick(scope, watching.id)
+    expect(advanced).toMatchObject({ iteration: 1, state: 'rejected' })
+    await runtime.dispose(); store.close()
+  })
+  test('runs two independently sourced repairs through distinct candidate and deployment lifecycles', async () => {
+    const store = new SkillStore(':memory:'), first = created(store, 'two-full', Date.now() + 60_000, 2)
+    const next = { profileId: 'followup', source: { goalId: 'next-goal', sessionId: 'next-session', nativeGoalId: 'next-native', definitionDigest: 'd'.repeat(64) }, trigger: { proof: 'next' }, predecessorDeploymentId: 'deployment-1' }
+    let deployment = 0; const repairs: string[] = []; const candidates: string[] = []
+    const runtime = new RepairContinuationRuntime(store, ports({ createRepair: async record => { repairs.push(String((record.checkpoint.source as { goalId?: string } | undefined)?.goalId ?? record.authorization.source.goalId)); return { sessionId: `repair-${repairs.length}`, goalId: `goal-${repairs.length}` } }, capture: async () => ({ candidateId: `candidate-${candidates.push('x')}` }), compare: async () => ({ deploymentId: `deployment-${++deployment}` }), inspectDeployment: async record => record.iteration === 1 ? 'rejected' : 'complete', inspectNextIteration: async () => next }))
+    let record = first
+    for (let index = 0; index < 13; index++) record = await runtime.tick(scope, record.id)
+    expect(record).toMatchObject({ state: 'complete', iteration: 2 })
+    expect(repairs).toEqual(['source', 'next-goal']); expect(candidates).toHaveLength(2)
     await runtime.dispose(); store.close()
   })
 })

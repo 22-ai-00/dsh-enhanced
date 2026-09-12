@@ -84,7 +84,8 @@
     "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-deepseek-budget": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-actions": ">=0.1.24 <0.2.0"
+    "@dsh-enhanced/assistant-actions": ">=0.1.24 <0.2.0",
+    "@dsh-enhanced/assistant-skills": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@dsh-enhanced/event-triggers": { "optional": true },
@@ -104,7 +105,8 @@
     "@dsh-enhanced/assistant-goals": { "optional": true },
     "@dsh-enhanced/assistant-verifier": { "optional": true },
     "@dsh-enhanced/assistant-deepseek-budget": { "optional": true },
-    "@dsh-enhanced/assistant-actions": { "optional": true }
+    "@dsh-enhanced/assistant-actions": { "optional": true },
+    "@dsh-enhanced/assistant-skills": { "optional": true }
   },
   "devDependencies": {
     "@dsh-enhanced/event-triggers": "workspace:*",
@@ -130,7 +132,8 @@
     "@dsh-enhanced/assistant-goals": "workspace:*",
     "@dsh-enhanced/assistant-verifier": "workspace:*",
     "@dsh-enhanced/assistant-deepseek-budget": "workspace:*",
-    "@dsh-enhanced/assistant-actions": "workspace:*"
+    "@dsh-enhanced/assistant-actions": "workspace:*",
+    "@dsh-enhanced/assistant-skills": "workspace:*"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

@@ -18,7 +18,7 @@ async function database() { const root = await mkdtemp(join(tmpdir(), 'assistant
 function toWatching(store: SkillStore, value: ReturnType<SkillStore['createRepairContinuation']>) {
   let current = value
   for (const state of ['source-confirmed', 'creating-repair', 'repairing', 'repair-achieved', 'capturing', 'candidate-staged', 'comparing', 'watching'] as const) {
-    current = store.transitionRepairContinuation(scope, current.id, current.revision, state, { state })
+    current = store.transitionRepairContinuation(scope, current.id, current.revision, state, { state, ...(state === 'watching' ? { deploymentId: 'deployment' } : {}) })
   }
   return current
 }
@@ -56,14 +56,28 @@ describe('SkillStore repair continuations', () => {
 
   it('permits only finite unexpired iterations from watching', () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date('2030-01-01T00:00:00Z'))
-    const store = new SkillStore(':memory:'), created = store.createRepairContinuation(scope, input(), { receipt: true })
+    const store = new SkillStore(':memory:'), created = store.createRepairContinuation(scope, input({ profileSequence: [{ id: 'profile', digest: 'b'.repeat(64) }, { id: 'followup', digest: 'd'.repeat(64) }] }), { receipt: true })
     const watching = toWatching(store, created)
-    const second = store.nextRepairIteration(scope, watching.id, watching.revision, { retry: 2 })
-    expect(second).toMatchObject({ iteration: 2, state: 'armed', checkpoint: { retry: 2 } })
-    expect(() => store.nextRepairIteration(scope, second.id, second.revision, {})).toThrow(/unavailable/u)
+    const next = { profileId: 'followup', source: { goalId: 'next-goal', sessionId: 'next-session', nativeGoalId: 'next-native', definitionDigest: 'd'.repeat(64) }, trigger: { proof: 'next' }, predecessorDeploymentId: 'deployment' }
+    const second = store.nextRepairIteration(scope, watching.id, watching.revision, next)
+    expect(second).toMatchObject({ iteration: 2, state: 'armed', checkpoint: { profileId: 'followup', source: next.source, trigger: next.trigger, predecessorDeploymentId: 'deployment' } })
+    expect(() => store.nextRepairIteration(scope, second.id, second.revision, next)).toThrow(/unavailable/u)
+    const wrong = toWatching(store, store.createRepairContinuation(scope, input({ invocationId: 'wrong-profile', profileSequence: [{ id: 'profile', digest: 'b'.repeat(64) }, { id: 'followup', digest: 'd'.repeat(64) }] }), { receipt: 3 }))
+    expect(() => store.nextRepairIteration(scope, wrong.id, wrong.revision, { ...next, profileId: 'other' })).toThrow(/unavailable/u)
     const expiresSoon = store.createRepairContinuation(scope, input({ invocationId: 'expired-repair', expiresAt: Date.now() + 1 }), { receipt: 2 })
     const expiredWatching = toWatching(store, expiresSoon); vi.advanceTimersByTime(2)
-    expect(() => store.nextRepairIteration(scope, expiredWatching.id, expiredWatching.revision, {})).toThrow(/unavailable/u)
+    expect(() => store.nextRepairIteration(scope, expiredWatching.id, expiredWatching.revision, next)).toThrow(/unavailable/u)
+    store.close()
+  })
+  it('persists cumulative model and tool admission charges without revising the continuation', () => {
+    const store = new SkillStore(':memory:'), created = store.createRepairContinuation(scope, input(), { receipt: true })
+    expect(store.repairUsage(scope, created.id)).toEqual({ modelCalls: 0, toolCalls: 0 })
+    expect(store.chargeRepairUsage(scope, created.id, 'model', 2)).toEqual({ modelCalls: 1, toolCalls: 0 })
+    expect(store.chargeRepairUsage(scope, created.id, 'tool', 1)).toEqual({ modelCalls: 1, toolCalls: 1 })
+    expect(store.chargeRepairUsage(scope, created.id, 'model', 2)).toEqual({ modelCalls: 2, toolCalls: 1 })
+    expect(() => store.chargeRepairUsage(scope, created.id, 'model', 2)).toThrow(/exhausted/u)
+    expect(() => store.chargeRepairUsage(scope, created.id, 'tool', 1)).toThrow(/exhausted/u)
+    expect(store.getRepairContinuation(scope, created.id)?.revision).toBe(created.revision)
     store.close()
   })
 

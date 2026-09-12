@@ -1484,6 +1484,9 @@ importers:
       '@dsh-enhanced/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
+      '@dsh-enhanced/assistant-skills':
+        specifier: workspace:*
+        version: link:../assistant-skills
       '@dsh-enhanced/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier

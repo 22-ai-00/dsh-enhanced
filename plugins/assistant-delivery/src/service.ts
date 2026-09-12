@@ -2023,7 +2023,7 @@ export class AssistantDeliveryService extends Service {
       capabilities: Object.freeze({ reconcileUnknownSend: true, receipts: [], formats: ['plain'] as const }),
       async start() {},
       send: async (intent) => {
-        if (intent.metadata?.['dsh.native-notice'] !== 'v1' || this.#notificationGuard({ intent } as OutboxRecord) !== undefined) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+        if (this.#nativeNoticeGuard(intent) !== undefined) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
         return { outcome: 'accepted', providerMessageId: this.#notificationProviderId(intent) }
       },
       reconcileUnknownSend: async (record) => { return record.intent.metadata?.['dsh.native-notice'] === 'v1' && this.#notificationGuard(record) === undefined ? { outcome: 'accepted', providerMessageId: this.#notificationProviderId(record.intent) } : { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false } },
@@ -3809,6 +3809,19 @@ export class AssistantDeliveryService extends Service {
 
   #notificationGuard(record: Readonly<OutboxRecord>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
     const metadata = record.intent.metadata
+    const nativeKeys = Object.keys(metadata ?? {}).filter(key => key.startsWith('dsh.native-notice'))
+    if (nativeKeys.length > 0) {
+      // Native adapter sends receive only an intent, so never bind a fabricated
+      // outbox id into the goal-outcome sidecar lookup. A persisted record still
+      // rejects any sidecar collision before native authority is considered.
+      if (containsReservedLearningMetadata(metadata)) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+      if (typeof record.id === 'string') {
+        try { if (this.deliveryStore.getGoalOutcomeTarget(record.id) !== undefined) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false } } catch {
+          return { outcome: 'not-sent', failureCode: 'goal-outcome-target-invalid', retryable: false }
+        }
+      }
+      return this.#nativeNoticeGuard(record.intent)
+    }
     let goalTarget: ReturnType<DeliveryStore['getGoalOutcomeTarget']>
     try { goalTarget = this.deliveryStore.getGoalOutcomeTarget(record.id) } catch {
       return { outcome: 'not-sent', failureCode: 'goal-outcome-target-invalid', retryable: false }
@@ -3855,10 +3868,14 @@ export class AssistantDeliveryService extends Service {
       } catch { return { outcome: 'not-sent', failureCode: 'goal-outcome-authority-revoked', retryable: false } }
       return undefined
     }
+    return undefined
+  }
+  #nativeNoticeGuard(intent: Readonly<OutboundIntent>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
+    const metadata = intent.metadata
     const nativeKeys = Object.keys(metadata ?? {}).filter(key => key.startsWith('dsh.native-notice'))
-    if (nativeKeys.length === 0) return undefined
+    if (nativeKeys.length === 0 || containsReservedLearningMetadata(metadata)) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
     if (metadata?.['dsh.native-notice'] !== 'v1') return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
-    const expiresAt = Number(metadata['dsh.native-notice.expiresAt']); const binding = this.deliveryStore.getBinding(record.intent.bindingId)
+    const expiresAt = Number(metadata['dsh.native-notice.expiresAt']); const binding = this.deliveryStore.getBinding(intent.bindingId)
     const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
     if (!Number.isSafeInteger(expiresAt) || Date.now() >= expiresAt || binding?.status !== 'active' || owner?.status !== 'active' || owner.role !== 'owner'
       || owner.id !== metadata['dsh.native-notice.ownerRecordId'] || String(owner.version) !== metadata['dsh.native-notice.ownerVersion']

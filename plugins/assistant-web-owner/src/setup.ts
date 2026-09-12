@@ -178,22 +178,23 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
 
 export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-image sha256:<id> --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nGoal setup: use --list-goal-sessions to show real idle owner Sessions, or --goal-admission <private-absolute-task.json> [--session-id <existing-idle-session>]. Without --session-id, setup selects the sole matching idle Session and otherwise prints candidates.\nA v2 task may include repositoryDelivery with repository, baseBranch, branch, paths, credentialHandle, expiresAt, maxActions, maxTotalBytes and openPullRequest. Setup binds these to the existing owner and creates finite background delivery and result notification authorization. The credential handle and destination branch must already exist.\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup; configuration changes require restart.\n')
+    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-image sha256:<id> --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nGoal setup: use --list-goal-sessions to show real idle owner Sessions, or --goal-admission <private-absolute-task.json> [--session-id <existing-idle-session>]. Without --session-id, setup selects the sole matching idle Session and otherwise prints candidates.\nRepair setup: --repair-admission <private-absolute-json> installs preconfigured finite repair profiles after checking the current owner scope, owner route, Goals execution budget, exact model routes, Skills holdouts and Verifier profiles. It creates no Goal, Session, credential, grant, or unlimited authority.\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup; configuration changes require restart.\n')
     return
   }
   const input: WebOwnerSetupInput = { dshHome: process.env.DSH_HOME ?? join(homedir(), '.dsh'), profile: 'web', workspace: '', preset: 'standard' }
   const isolation: AutonomySetupOptions = { image: '', maxRuns: 20, leaseMs: 3_600_000, maxTotalDurationMs: 600_000 }
   let isolated = false
-  let goalAdmission: string | undefined; let sessionId: string | undefined; let listGoalSessions = false
+  let goalAdmission: string | undefined; let repairAdmission: string | undefined; let sessionId: string | undefined; let listGoalSessions = false
   const numeric = { '--isolation-max-runs': 'maxRuns', '--isolation-lease-ms': 'leaseMs', '--isolation-runtime-ms': 'maxTotalDurationMs' } as const
   const fields = { '--dsh-home': 'dshHome', '--profile': 'profile', '--workspace': 'workspace', '--preset': 'preset' } as const
   for (let index = 0; index < argv.length; index++) {
     const option = argv[index]!
     if (option === '--list-goal-sessions') { listGoalSessions = true; continue }
-    if (!(option in fields) && !['--isolation-image', '--goal-admission', '--session-id'].includes(option) && !(option in numeric)) fail(`unknown option ${option}`)
+    if (!(option in fields) && !['--isolation-image', '--goal-admission', '--repair-admission', '--session-id'].includes(option) && !(option in numeric)) fail(`unknown option ${option}`)
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) fail(`${option} requires a value`)
     if (option === '--goal-admission') goalAdmission = value
+    else if (option === '--repair-admission') repairAdmission = value
     else if (option === '--session-id') sessionId = value
     else if (option === '--isolation-image') { isolation.image = value; isolated = true }
     else if (option in numeric) {
@@ -203,8 +204,9 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
   }
   if (isolated) input.isolation = isolation
   validate(input)
-  if (listGoalSessions && (goalAdmission !== undefined || sessionId !== undefined || isolated)) fail('--list-goal-sessions cannot be combined with setup, goal admission, or isolation options')
+  if (listGoalSessions && (goalAdmission !== undefined || repairAdmission !== undefined || sessionId !== undefined || isolated)) fail('--list-goal-sessions cannot be combined with setup, goal admission, repair admission, or isolation options')
   if (sessionId !== undefined && goalAdmission === undefined) fail('--session-id requires --goal-admission')
+  if (repairAdmission !== undefined && (goalAdmission !== undefined || sessionId !== undefined || isolated)) fail('--repair-admission cannot be combined with goal admission, session selection, or isolation options')
   const readEffectiveSource = async (): Promise<string> => { try {
     const result = await promisify(execFile)('dsh', ['--profile', input.profile, '--dump-config'], {
       env: { ...process.env, DSH_HOME: input.dshHome }, timeout: 30_000, maxBuffer: 8 * 1024 * 1024,
@@ -223,6 +225,12 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
     const result = await configureGoalAdmission(input, effective, goalAdmission, sessionId, readEffectiveSource)
     if (result.repositoryDelivery) process.stdout.write(`Repository: ${result.repositoryDelivery.repository}; branch: ${result.repositoryDelivery.branch}. Authorized paths: ${result.repositoryDelivery.paths.join(', ')}. Independent acceptance: ${result.repositoryDelivery.acceptance}. Credential availability and remote GitHub access have not been tested.\n`)
     process.stdout.write(`Goal configuration written: ${result.path}\nAdmission: ${result.admissionId}; Session: ${result.sessionId}. Existing authority and budget are preserved. Restart the target Host. v2 uses the already configured exact provider/model route; v1 retains deepseek-goal-metered. Model connectivity and runtime admission have not been tested.\n`)
+    return
+  }
+  if (repairAdmission !== undefined) {
+    const { configureRepairAdmission } = await import('./repair-setup.js')
+    const result = await configureRepairAdmission(input, effective, repairAdmission, readEffectiveSource)
+    process.stdout.write(`Repair configuration written: ${result.path}\nProfile: ${result.id}. Existing authority and budgets were not expanded. Restart the target Host. Configuration completion is not real repair acceptance, canary success, or autonomous-improvement evidence.\n`)
     return
   }
   const path = await configureWebOwner(input, effective)

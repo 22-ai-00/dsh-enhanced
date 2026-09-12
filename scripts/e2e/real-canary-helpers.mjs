@@ -5,6 +5,7 @@ import { chmod, mkdir, stat, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { acceptanceDigest } from '../../packages/task-acceptance-contract/lib/index.js'
 import { validateFailureCaptureProvenance } from '../../plugins/assistant-skills/lib/definition.js'
+import { validateCanaryAdmissionTemplate } from '../../plugins/assistant-skills/lib/repair-admission.js'
 
 const candidateImage = 'sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8'
 const exec = promisify(execFile)
@@ -315,6 +316,15 @@ export async function createProspectiveCanaryAuthority({ root, home, workspace, 
       // Their edit traces must therefore share this exact pre-edit source.
       files: [{ path: task.artifactPath, content: initialSource }], authority: { executable: docker, args: ['run', '--rm', '-i', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', `${process.getuid()}:${process.getgid()}`, '--pids-limit', '32', '--memory', '128m', '--cpus', '1', '--mount', `type=bind,source=${resolve(cli, '..')},target=/runtime,readonly`, '--mount', `type=bind,source=${privateRoot},target=/authority`, '--entrypoint', '/usr/local/bin/node', authorityImage, '/runtime/holdout-cli.js', '--config', '/authority/authority.json'], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: inspected.generatorDigest }, canaryAdmission, maxComparisons: 1 }
     },
+    repairProfile: (owner, { canaryAdmissionTemplate, initialSource = task.scaffoldSource } = {}) => {
+      if (!owner || typeof owner.id !== 'string' || owner.id.length === 0 || !Number.isSafeInteger(owner.version) || owner.version < 1) throw new Error('exact repair profile owner is required')
+      if (typeof initialSource !== 'string') throw new Error('exact repair initial source is required')
+      try { validateCanaryAdmissionTemplate(canaryAdmissionTemplate) } catch { throw new Error('exact repair canary admission template is required') }
+      if (canaryAdmissionTemplate.skillName !== task.skillName) throw new Error('repair canary admission template has the wrong skill')
+      return { id: `real-${task.id}-repair`, version: 1, scope: { principalId: 'web/web/local/operator', principalRecordId: owner.id, principalVersion: owner.version, workspace, preset: 'standard' },
+        execution: { image: candidateImage, dockerPath: docker, stateRoot: join(privateRoot, 'repair-state'), command: '/usr/local/bin/node /workspace/artifact < /workspace/input', artifactPath: task.artifactPath, expiresAt: Date.now() + 600000, repeats: 2, maxToolCalls: 8, maxBytes: 16384, maxOutputBytes: 16384, cellDurationMs: 30000, verificationDurationMs: 15000 },
+        files: [{ path: task.artifactPath, content: initialSource }], authority: { executable: docker, args: ['run', '--rm', '-i', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', `${process.getuid()}:${process.getgid()}`, '--pids-limit', '32', '--memory', '128m', '--cpus', '1', '--mount', `type=bind,source=${resolve(cli, '..')},target=/runtime,readonly`, '--mount', `type=bind,source=${privateRoot},target=/authority`, '--entrypoint', '/usr/local/bin/node', authorityImage, '/runtime/holdout-cli.js', '--config', '/authority/authority.json'], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: inspected.generatorDigest }, canaryAdmissionTemplate, maxComparisons: 1 }
+    },
   }
 }
 
@@ -325,5 +335,17 @@ export function canaryPolicy(workspace) {
   return [
     { id: 'canary-owner', effect: 'allow', subject: agent, actions: ['inspect', 'run', 'compare', 'canary', 'watch'], resource, context: { initiators: ['external'] } },
     { id: 'canary-background', effect: 'allow', subject: background, actions: ['capture', 'promote', 'watch', 'rollback'], resource, context: { initiators: ['background'] } },
+  ]
+}
+
+/** Policy needed by an owner-armed repair continuation and its background worker. */
+export function repairPolicy(workspace) {
+  const agent = { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }
+  const background = { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace, principal: 'web/web/local/operator' }
+  const resource = { kind: 'evolution', id: 'verified-workflows' }
+  return [...canaryPolicy(workspace),
+    { id: 'repair-owner', effect: 'allow', subject: agent, actions: ['draft', 'compare', 'canary', 'watch'], resource, context: { initiators: ['external'] } },
+    { id: 'repair-agent', effect: 'allow', subject: agent, actions: ['draft', 'compare', 'canary', 'watch'], resource, context: { initiators: ['background'] } },
+    { id: 'repair-background', effect: 'allow', subject: background, actions: ['draft', 'compare', 'canary', 'promote', 'watch', 'rollback'], resource, context: { initiators: ['background'] } },
   ]
 }

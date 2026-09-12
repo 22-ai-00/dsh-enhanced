@@ -63,3 +63,18 @@ test('a Goals-start failure after Agent publication releases its handle, control
     await runtime.dispose()
   } finally { vi.restoreAllMocks(); vi.useRealTimers() }
 })
+
+test('uses a distinct repair session per iteration while preserving the frozen authorization id', async () => {
+  const sessions: string[] = []
+  const ctx = { effect: () => {}, get: (name: string) => {
+    if (name === 'agents') return { create: async ({ sessionId }: { sessionId: string }) => { sessions.push(sessionId); return { agent: {}, dispose: async () => {} } } }
+    if (name === 'assistantGoals') return { startOwnerAuthorizedRepair: async () => ({ id: 'goal' }) }
+    if (name === 'assistantPolicy') return { bindInitiator: () => () => {} }
+    return undefined
+  } } as unknown as Context
+  const runtime = new OwnerRepairAgentRuntime(ctx)
+  await runtime.create({ ...input(), iteration: 1 }); await runtime.create({ ...input(), iteration: 2 })
+  expect(sessions).toHaveLength(2); expect(sessions[0]).not.toBe(sessions[1])
+  await expect(runtime.create({ ...input(), iteration: 1 })).rejects.toThrow(/not retry-safe/u)
+  await runtime.dispose()
+})

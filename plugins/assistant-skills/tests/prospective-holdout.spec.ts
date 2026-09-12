@@ -17,6 +17,7 @@ test('generator profiles keep legacy pins stable and give the second family an e
   expect(generatorDigest).toBe('08e42db3920adf0c7f9d8aaa739cb623136f40797d7cd527a04bfcdd13542cc3')
   expect(prospectiveGeneratorDigest('order-summary/v2')).toBe('943b57b083f3577404af882f7a97da72f3f8a0da79f23a53107b89062e6fb057')
   expect(prospectiveGeneratorProfile('template-render/v1')).toEqual({ version: 'template-render/v1', digest: '9cccbf2de23f24b53bd432ff7f651769c909184d373a2997ad8bc3b7ed7d40d9' })
+  expect(prospectiveGeneratorProfile('template-render-jsonl/v1')).toEqual({ version: 'template-render-jsonl/v1', digest: prospectiveGeneratorDigest('template-render-jsonl/v1') })
   expect(prospectiveGeneratorProfile('dependency-topological-order/v1')).toEqual({ version: 'dependency-topological-order/v1', digest: 'a17c8b3166e5e7c42f33cf54608504f7814bee67ba586839b09585cc8f83a752' })
   expect(() => prospectiveGeneratorDigest('dependency-topological-order/v2' as never)).toThrow(/unsupported generator/)
 })
@@ -102,6 +103,46 @@ test('template-render privately generates replay, evaluation, and regression sam
   const evaluation = first.cases.find(value => value.kind === 'evaluation')!
   expect(evaluation.expectedStdout).toContain('unknown={{missing}}')
   expect(evaluation.expectedStdout).toMatch(/literal=\{\{release\}\}-[a-f0-9]+/u)
+})
+
+test('template-render-jsonl privately generates independent NDJSON records that reject the old whole-input JSON parser', () => {
+  const dataset = generateProspectiveDataset('template-render-jsonl/v1')
+  expect(dataset.version).toBe('template-render-jsonl/v1')
+  expect(dataset.cases.map(sample => sample.kind)).toEqual(['replay', 'evaluation', 'regression'])
+  const expectedLines = [1, 2, 3]
+  for (const [index, sample] of dataset.cases.entries()) {
+    const lines = sample.stdin.split('\n').filter(Boolean)
+    expect(lines).toHaveLength(expectedLines[index]!)
+    const expected = lines.map(line => {
+      const input = JSON.parse(line) as { template: string; values: Record<string, string> }
+      return input.template.replace(/\{\{([a-z][a-z0-9_]*)\}\}/gu, (placeholder, key: string) => Object.hasOwn(input.values, key) ? input.values[key]! : placeholder) + '\n'
+    }).join('')
+    expect(sample.expectedStdout).toBe(expected)
+    expect(sample.expectedStdout).toContain('unknown={{missing}}')
+    expect(sample.expectedStdout).toContain('literal={{known}}-東京-')
+    expect(sample.expectedStdout).toMatch(/café-☃-[a-f0-9]+/u)
+  }
+  const replay = dataset.cases[0]!, evaluation = dataset.cases[1]!, regression = dataset.cases[2]!
+  expect(replay.stdin.endsWith('\n')).toBe(false)
+  expect(JSON.parse(replay.stdin)).toMatchObject({ template: expect.any(String), values: expect.any(Object) })
+  expect(() => JSON.parse(evaluation.stdin)).toThrow()
+  expect(() => JSON.parse(regression.stdin)).toThrow()
+})
+
+test('template-render-jsonl certificate freezes its new generator rule and authority accepts each generated line result', () => {
+  const keys = generateKeyPairSync('ed25519'), publicKey = keys.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const dataset = generateProspectiveDataset('template-render-jsonl/v1'), pin = prospectiveGeneratorDigest('template-render-jsonl/v1')
+  const certificate = createProspectiveCertificate(binding, dataset, keys.privateKey, '123e4567-e89b-42d3-a456-426614174011')
+  expect(certificate).toMatchObject({ profileVersion: 'template-render-jsonl/v1', profileDigest: pin, generatorDigest: pin, datasetDigest: prospectiveDatasetDigest(dataset) })
+  expect(verifyProspectiveCertificate(certificate, binding, publicKey, pin)).toBe(true)
+  const authority = HoldoutAuthority.create({ dataset, privateKey: keys.privateKey, limits: { maxToolCalls: 4, maxOutputBytes: 4096 }, prospective: certificate, now: () => 1 })
+  authority.begin(binding)
+  while (true) {
+    const cell = authority.next(); if (!cell) break
+    const sample = dataset.cases.find(value => value.stdin === cell.stdin)!
+    authority.record({ cellId: cell.cellId, armDigest: cell.armDigest, stdout: sample.expectedStdout, exitCode: 0, quiescent: true, status: 'completed', artifactDigest: hex('e'), toolCalls: [] })
+  }
+  expect(verifyHoldoutSignature(authority.finish() as unknown as Record<string, unknown>, publicKey)).toBe(true)
 })
 
 test('profiled certificates bind the exact second-family version and legacy v1 certificates still verify', () => {

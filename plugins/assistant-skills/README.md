@@ -128,16 +128,19 @@ The capture/canary Web tests can use an already logged-in TraeX account in a fre
 An operator may configure `repairProfiles` to expose `skill_repair_arm`,
 `skill_repair_status`, and `skill_repair_revoke`. The owner selects a profile and
 an exact source Goal, route, invocation id and expiry. One authorization permits
-**one** independent repair Goal and one prospective candidate comparison with a
-finite canary; it cannot renew its expiry, extend budgets, or authorize another
-iteration. This is a bounded self-improvement building block, not evidence that
-unattended recursive self-improvement has been achieved.
+a finite sequence of independent repair Goals, each with its own prospective
+comparison and canary. `maxIterations` defaults to one and is limited to four;
+`followupProfileIds` explicitly names every subsequent profile in order. Arming
+freezes the full sequence and its digests. The sequence cannot renew its expiry,
+expand tool/model authority, or reset cumulative model/tool call budgets.
 
 A repair profile contains `id`, exact `scope` (principal id, record id/version,
 workspace and preset), `skillName`, `taskFamilyId`, `description`, optional typed
 capture `bindings`, `externalHoldoutProfileId`, `provider`, `model`,
 `allowedTools`, `maxGoalRounds`, `maxModelCalls`, `maxToolCalls`,
-`maxOutputTokens`, `maxDurationMs`, `canaryRuns`, and `maxCanaryRuns`.
+`maxOutputTokens`, `maxDurationMs`, `canaryRuns`, and `maxCanaryRuns`, plus optional
+`maxIterations` and `followupProfileIds`. Each followup uses the same owner, skill
+and model route with no broader tool, output, round or duration limits.
 The selected external holdout must use a prospective `generatorDigest` and
 `canaryAdmissionTemplate`:
 
@@ -162,8 +165,13 @@ Install the native Goal service and goal-round driver before creating repair
 Agents. Configure Goals' preauthorized round limit, independent native-round and
 whole-goal acceptance, and a compatible registered budget meter. The selected
 preset and model must support the required native tool protocol. Background
-Policy must permit the actual Goal and Skills operations, including promotion,
-watch and rollback. `repairProfiles` is empty by default; manual skills do not
+Policy must permit both identities: the configured preset's background Agent
+needs Goal `create/observe/execute`, its allowed file tools, and Skills
+`draft/compare/canary/watch`; the `dsh-enhanced-assistant-skills` background
+service needs `draft/compare/canary/promote/watch/rollback`. Scope both to the
+authorized principal and workspace. `notify: true` additionally requires the
+service's background message `send` permission. Allowing only the service does
+not authorize the Agent's candidate capture. `repairProfiles` is empty by default; manual skills do not
 acquire these runtime dependencies or start repair Agents.
 
 When the source Goal has stopped and has an exact independent `not-achieved`
@@ -176,13 +184,26 @@ route, source definition, parent version, expiry and background policy. A
 process-local capability links Goals to the current Skills instance; it is not
 isolation from arbitrary malicious plugins sharing the same Host process.
 
+A successor starts only after the prior version is promoted and a distinct
+new task using that version has independently failed under the next configured
+acceptance profile. The source run must have started strictly after the immutable
+promotion time. Old promoted records without that evidence cannot authorize a
+successor. Each iteration uses a fresh Session; the previous Agent closes before
+continuation advances. Profile changes, revoked authority and expiry prevent
+new work.
+
+`skill_repair_arm` accepts `notify: true` only from the owner route Session and
+with current background send Policy. It freezes that Session and route receipt
+for iteration and final-result notices through Delivery’s durable Outbox. Stable
+keys deduplicate notices across runtime ticks and restarts.
+
 Armed waits and deployed watches survive restart. A restart during dispatch, or
 before the native repair Agent can be safely reacquired, surfaces `unknown`
 without creating a second repair. Automatic resumption of an interrupted repair
 Agent is not implemented. Status includes the exact repair Session/Goal and
-candidate/deployment references; final delivery back into the original owner
-conversation and repeated autonomous improvement still require integration
-validation. `skill_repair_revoke` stops the remaining continuation; completed
+candidate/deployment references. The `test:web-owner:real-repair` journey checks
+two successive improvements, future-task promotion, original-session feedback
+and absence of replay after completion and restart. `skill_repair_revoke` stops the remaining continuation; completed
 filesystem effects or a deployed version require their existing explicit
 rollback controls. Repair Agents use the configured workspace, model route and
 tool authority, and may write files there; they are not an OS sandbox. Calls and

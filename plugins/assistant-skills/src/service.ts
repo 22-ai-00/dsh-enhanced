@@ -23,7 +23,8 @@ import { materializeCanaryAdmission } from './repair-admission.js'
 import { validateRepairProfiles, type RepairContinuationProfile } from './repair-profile.js'
 import { RepairContinuationRuntime } from './repair-runtime.js'
 import { OwnerRepairAgentRuntime } from './repair-agent.js'
-import type { SkillRepairContinuation } from './store.js'
+import { enqueueRepairFeedback, type RepairFeedbackMilestone } from './repair-feedback.js'
+import type { SkillRepairContinuation, SkillRepairNextIterationInput, SkillRepairAuthorizationInput } from './store.js'
 import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRun, type SkillRunStep, type StoredSkillDefinition, type SkillCapture, type SkillDeployment, type SkillDeploymentInput, type SkillWatchObservationResult } from './store.js'
 
 export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[]; externalHoldouts?: ExternalHoldoutProfile[]; repairProfiles?: RepairContinuationProfile[] }
@@ -858,15 +859,46 @@ export class AssistantSkillsService extends Service {
       return this.#repairProfile(record).maxGoalRounds === input.maxGoalRounds
     } catch { return false }
   }
-  #repairProfile(record: SkillRepairContinuation): RepairContinuationProfile {
-    const profile = this.#repairProfiles.find(value => value.id === record.authorization.profileId && acceptanceDigest(value.scope) === acceptanceDigest(record.scope))
+  #repairProfileAt(record: SkillRepairContinuation, iteration: number): RepairContinuationProfile {
+    const entry = record.authorization.profileSequence?.[iteration - 1]
+      ?? (iteration === 1 ? { id: record.authorization.profileId, digest: record.authorization.profileDigest } : undefined)
+    const profile = entry && this.#repairProfiles.find(value => value.id === entry.id && acceptanceDigest(value.scope) === acceptanceDigest(record.scope))
     const holdout = profile && this.inspectRepairProfile(profile.externalHoldoutProfileId, profile.scope)
-    if (!profile || !holdout || acceptanceDigest([profile, holdout.digest]) !== record.authorization.profileDigest) throw new Error('assistant-skills: repair profile changed')
+    if (!entry || !profile || !holdout || acceptanceDigest([profile, holdout.digest]) !== entry.digest) throw new Error('assistant-skills: repair profile changed')
     return profile
+  }
+  #repairProfile(record: SkillRepairContinuation): RepairContinuationProfile { return this.#repairProfileAt(record, record.iteration) }
+  #repairSource(record: SkillRepairContinuation): SkillRepairAuthorizationInput['source'] {
+    if (record.iteration === 1) return record.authorization.source
+    const source = record.checkpoint.source as SkillRepairAuthorizationInput['source'] | undefined
+    if (!source || record.checkpoint.profileId !== this.#repairProfile(record).id) throw new Error('assistant-skills: repair iteration source unavailable')
+    return source
+  }
+  #repairParent(record: SkillRepairContinuation): { version: number; digest: string } {
+    if (record.iteration === 1) return { version: record.authorization.parentVersion, digest: record.authorization.parentDigest }
+    const id = record.checkpoint.predecessorDeploymentId
+    const deployment = typeof id === 'string' ? this.#store.getDeployment(record.scope, id) : undefined
+    if (!deployment || deployment.promotedAt === undefined || deployment.ownerRouteId !== record.authorization.ownerRouteId
+      || deployment.skillName !== record.authorization.skillName || acceptanceDigest(deployment.routeReceipt) !== acceptanceDigest(record.routeReceipt)) throw new Error('assistant-skills: repair predecessor is not a current promoted deployment')
+    if (deployment.state !== 'promoted') {
+      const candidateId = record.checkpoint.candidateId
+      const candidate = typeof candidateId === 'string' ? this.#store.getCandidate(record.scope, candidateId) : undefined
+      const successor = candidate?.deploymentId ? this.#store.getDeployment(record.scope, candidate.deploymentId) : undefined
+      const profile = this.#repairProfile(record)
+      if (deployment.state !== 'superseded' || !['comparing', 'watching', 'complete'].includes(record.state)
+        || !candidate || candidate.state !== 'activated' || candidate.parentVersion !== deployment.version || candidate.parentDigest !== deployment.definitionDigest
+        || !successor || successor.candidateId !== candidate.id || successor.parentVersion !== deployment.version
+        || successor.version !== candidate.activatedVersion || successor.skillName !== deployment.skillName
+        || successor.ownerRouteId !== record.authorization.ownerRouteId || successor.expiresAt !== record.authorization.expiresAt
+        || successor.maxRuns !== profile.maxCanaryRuns || successor.canaryRuns !== profile.canaryRuns
+        || acceptanceDigest(successor.routeReceipt) !== acceptanceDigest(record.routeReceipt)
+        || record.state !== 'comparing' && record.checkpoint.deploymentId !== successor.id) throw new Error('assistant-skills: repair predecessor superseded outside its authorized successor')
+    }
+    return { version: deployment.version, digest: deployment.definitionDigest }
   }
   #repairLocator(record: SkillRepairContinuation, repair = false) {
     const scope = record.scope as GoalScope
-    const locator = repair ? record.checkpoint.repair as { sessionId: string; goalId: string } | undefined : record.authorization.source
+    const locator = repair ? record.checkpoint.repair as { sessionId: string; goalId: string } | undefined : this.#repairSource(record)
     if (!locator?.sessionId || !locator.goalId) throw new Error('assistant-skills: repair locator unavailable')
     return { ownerRouteId: record.authorization.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: locator.sessionId, goalId: locator.goalId }
   }
@@ -881,16 +913,18 @@ export class AssistantSkillsService extends Service {
       subject: { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
       action, resource, context: { initiator: 'background' },
     }).effect !== 'allow')) throw new Error('assistant-skills: repair background policy denied')
+    for (let iteration = 1; iteration <= current.authorization.maxIterations; iteration++) this.#repairProfileAt(current, iteration)
+    const expectedSource = this.#repairSource(current), expectedParent = this.#repairParent(current)
     const source = this.#goals().inspectOwnerGoalExecution(this.#repairLocator(current)).storedGoal
-    if (source.definition.digest !== current.authorization.source.definitionDigest || source.nativeAtLastObservation.goalId !== current.authorization.source.nativeGoalId) throw new Error('assistant-skills: repair source changed')
+    if (source.definition.digest !== expectedSource.definitionDigest || source.nativeAtLastObservation.goalId !== expectedSource.nativeGoalId) throw new Error('assistant-skills: repair source changed')
     const parent = this.#store.get(scope, profile.skillName)
-    if (parent && !parent.retired && parent.version === current.authorization.parentVersion && acceptanceDigest(parent) === current.authorization.parentDigest) return
+    if (parent && !parent.retired && parent.version === expectedParent.version && acceptanceDigest(parent) === expectedParent.digest) return
     // Activation by this exact comparison may advance the parent during its final await.
     const candidateId = current.checkpoint.candidateId
     const candidate = typeof candidateId === 'string' ? this.#store.getCandidate(scope, candidateId) : undefined
     const deployment = candidate?.deploymentId ? this.#store.getDeployment(scope, candidate.deploymentId) : undefined
     if (!['comparing', 'watching'].includes(current.state) || !parent || !candidate || !deployment || deployment.candidateId !== candidate.id
-      || deployment.parentVersion !== current.authorization.parentVersion || deployment.ownerRouteId !== current.authorization.ownerRouteId
+      || deployment.parentVersion !== expectedParent.version || deployment.ownerRouteId !== current.authorization.ownerRouteId
       || deployment.expiresAt !== current.authorization.expiresAt || deployment.maxRuns !== profile.maxCanaryRuns || deployment.canaryRuns !== profile.canaryRuns
       || acceptanceDigest(deployment.routeReceipt) !== acceptanceDigest(current.routeReceipt)
       || parent.version !== deployment.version || acceptanceDigest(parent) !== deployment.definitionDigest) throw new Error('assistant-skills: authorized repair parent changed')
@@ -908,12 +942,12 @@ export class AssistantSkillsService extends Service {
   #publicRepair(record: SkillRepairContinuation) {
     return { id: record.id, state: record.state, iteration: record.iteration, maxIterations: record.authorization.maxIterations,
       expiresAt: record.authorization.expiresAt, profileId: record.authorization.profileId, skillName: record.authorization.skillName,
-      sourceGoalId: record.authorization.source.goalId, ...(record.checkpoint.repair ? { repair: record.checkpoint.repair } : {}),
+      sourceGoalId: this.#repairSource(record).goalId, ...(record.checkpoint.repair ? { repair: record.checkpoint.repair } : {}),
       ...(record.checkpoint.candidateId ? { candidateId: record.checkpoint.candidateId } : {}),
       ...(record.checkpoint.deploymentId ? { deploymentId: record.checkpoint.deploymentId } : {}),
       ...(record.checkpoint.failure ? { failure: record.checkpoint.failure } : {}), updatedAt: record.updatedAt }
   }
-  armRepair = (agent: Agent | undefined, input: { goalId: string; sessionId?: string; profileId: string; ownerRouteId: string; invocationId: string; expiresAt: number }) => {
+  armRepair = (agent: Agent | undefined, input: { goalId: string; sessionId?: string; profileId: string; ownerRouteId: string; invocationId: string; expiresAt: number; notify?: boolean }) => {
     const scope = this.#scope(agent, 'draft'), route = this.#watchRoute(scope, input.ownerRouteId)
     const profile = this.#repairProfiles.find(value => value.id === input.profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
     const holdout = profile && this.inspectRepairProfile(profile.externalHoldoutProfileId, scope)
@@ -923,10 +957,31 @@ export class AssistantSkillsService extends Service {
     const sessionId = input.sessionId ?? String(agent!.session.id)
     const snapshot = this.#goals().inspectOwnerGoalExecution({ ownerRouteId: input.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId, goalId: input.goalId })
     if (!parent || parent.retired || snapshot.storedGoal.definition.digest !== holdout.profile.canaryAdmissionTemplate.taskFamily.goalDefinitionDigest) throw new Error('assistant-skills: exact repair source family and current parent required')
-    const authorization = { invocationId: input.invocationId, ownerRouteId: input.ownerRouteId,
+    const sequenceIds = [profile.id, ...(profile.followupProfileIds ?? [])]
+    if (sequenceIds.length !== (profile.maxIterations ?? 1)) throw new Error('assistant-skills: every finite repair iteration needs an explicit profile')
+    const profileSequence = sequenceIds.map(id => {
+      const next = this.#repairProfiles.find(value => value.id === id && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+      const nextHoldout = next && this.inspectRepairProfile(next.externalHoldoutProfileId, scope)
+      if (!next || !nextHoldout || next.skillName !== profile.skillName || next.provider !== profile.provider || next.model !== profile.model
+        || next.allowedTools.some(tool => !profile.allowedTools.includes(tool)) || next.maxOutputTokens > profile.maxOutputTokens || next.maxGoalRounds > profile.maxGoalRounds || next.maxDurationMs > profile.maxDurationMs
+        || input.expiresAt > nextHoldout.profile.execution.expiresAt) throw new Error('assistant-skills: followup profile exceeds the frozen repair authority')
+      return { id, digest: acceptanceDigest([next, nextHoldout.digest]) }
+    })
+    let feedbackAuthority: SkillRepairAuthorizationInput['feedbackAuthority']
+    if (input.notify === true) {
+      const delivery = this.ctx.get('assistantDelivery', false)
+      const resolved = delivery?.resolveOwnerRoute(input.ownerRouteId)
+      if (!resolved || resolved.binding.sessionId !== String(agent!.session.id)) throw new Error('assistant-skills: repair feedback requires the current owner route Session')
+      const permission = this.ctx.get('assistantPolicy', false)?.evaluate({ subject: { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
+        action: 'send', resource: { kind: 'message', id: resolved.binding.id }, context: { initiator: 'background' } })
+      if (permission?.effect !== 'allow') throw new Error('assistant-skills: repair feedback policy denied')
+      feedbackAuthority = { sessionId: resolved.binding.sessionId, expiresAt: input.expiresAt, routeReceipt: route }
+    }
+    const authorization: SkillRepairAuthorizationInput = { invocationId: input.invocationId, ownerRouteId: input.ownerRouteId,
       source: { goalId: input.goalId, sessionId, nativeGoalId: snapshot.storedGoal.nativeAtLastObservation.goalId, definitionDigest: snapshot.storedGoal.definition.digest },
       profileId: profile.id, profileDigest: acceptanceDigest([profile, holdout.digest]), skillName: profile.skillName,
-      parentVersion: parent.version, parentDigest: acceptanceDigest(parent), maxIterations: 1, expiresAt: input.expiresAt }
+      parentVersion: parent.version, parentDigest: acceptanceDigest(parent), maxIterations: profile.maxIterations ?? 1, expiresAt: input.expiresAt,
+      ...(profileSequence.length > 1 ? { profileSequence } : {}), ...(feedbackAuthority ? { feedbackAuthority } : {}) }
     for (const action of ['draft', 'compare', 'canary', 'watch'] as const) {
       this.#scope(agent, action); this.#authorize(agent, action, ['repair-arm', scope, authorization, route])
     }
@@ -938,7 +993,7 @@ export class AssistantSkillsService extends Service {
   repairStatus = (agent: Agent | undefined, id?: string) => {
     const scope = this.#scope(agent, 'inspect')
     if (id !== undefined) { const record = this.#store.getRepairContinuation(scope, id); return record ? this.#publicRepair(record) : null }
-    return { profiles: this.#repairProfiles.filter(value => acceptanceDigest(value.scope) === acceptanceDigest(scope)).map(value => ({ id: value.id, skillName: value.skillName, taskFamilyId: value.taskFamilyId, maxIterations: 1, maxGoalRounds: value.maxGoalRounds, maxModelCalls: value.maxModelCalls, maxToolCalls: value.maxToolCalls, maxDurationMs: value.maxDurationMs })),
+    return { profiles: this.#repairProfiles.filter(value => acceptanceDigest(value.scope) === acceptanceDigest(scope)).map(value => ({ id: value.id, skillName: value.skillName, taskFamilyId: value.taskFamilyId, maxIterations: value.maxIterations ?? 1, maxGoalRounds: value.maxGoalRounds, maxModelCalls: value.maxModelCalls, maxToolCalls: value.maxToolCalls, maxDurationMs: value.maxDurationMs })),
       continuations: this.#store.listRepairContinuations(scope).map(value => this.#publicRepair(value)) }
   }
   revokeRepair = async (agent: Agent | undefined, id: string) => {
@@ -951,11 +1006,50 @@ export class AssistantSkillsService extends Service {
     this.#repairAssertions.delete(record.id)
     return this.#publicRepair(revoked)
   }
+  #publishRepairFeedback(record: SkillRepairContinuation): void {
+    const feedbackAuthority = record.authorization.feedbackAuthority
+    const delivery = this.ctx.get('assistantDelivery', false)
+    if (!feedbackAuthority || !delivery || ['revoked', 'expired'].includes(record.state)) return
+    const publish = (iteration: number, milestone: RepairFeedbackMilestone) => enqueueRepairFeedback(delivery,
+      { ...record, scope: record.scope as GoalScope, feedbackAuthority },
+      { iteration, maxIterations: record.authorization.maxIterations, state: record.state, milestone })
+    const history = Array.isArray(record.checkpoint.iterationHistory) ? record.checkpoint.iterationHistory : []
+    for (let index = 0; index < history.length; index++) {
+      const id = (history[index] as { predecessorDeploymentId?: string }).predecessorDeploymentId
+      if (id && this.#store.getDeployment(record.scope, id)?.promotedAt !== undefined) publish(index + 1, 'iteration-success')
+    }
+    if (record.state === 'watching' || record.state === 'complete') {
+      const id = record.checkpoint.deploymentId
+      const deployment = typeof id === 'string' ? this.#store.getDeployment(record.scope, id) : undefined
+      if (deployment?.state === 'canary') publish(record.iteration, 'finite-canary')
+      if (deployment?.state === 'promoted') publish(record.iteration, 'iteration-success')
+    }
+    if (record.state === 'complete') publish(record.iteration, 'final-success')
+    if (record.state === 'rejected') publish(record.iteration, 'successor-failed')
+    if (record.state === 'unknown') publish(record.iteration, 'interrupted')
+  }
+  #assertRepairSuccessor(record: SkillRepairContinuation, input: SkillRepairNextIterationInput): void {
+    this.#assertRepair(record)
+    const profile = this.#repairProfileAt(record, record.iteration + 1)
+    const holdout = this.inspectRepairProfile(profile.externalHoldoutProfileId, record.scope as GoalScope)
+    const deployment = this.#store.getDeployment(record.scope, input.predecessorDeploymentId)
+    const trigger = input.trigger as HostFailureTriggerEvidence
+    const sourceRun = deployment?.promotedAt === undefined ? undefined : this.#store.repairSourceRuns(record.scope, profile.skillName, deployment.version, deployment.promotedAt)
+      .find(run => run.goalId === input.source.goalId && run.sessionId === input.source.sessionId && run.nativeGoalId === input.source.nativeGoalId && run.goalDefinitionDigest === input.source.definitionDigest)
+    if (input.profileId !== profile.id || input.predecessorDeploymentId !== record.checkpoint.deploymentId || deployment?.state !== 'promoted' || deployment.promotedAt === undefined
+      || sourceRun === undefined
+      || input.source.definitionDigest !== holdout?.profile.canaryAdmissionTemplate?.taskFamily.goalDefinitionDigest
+      || trigger.taskFamily.definitionDigest !== input.source.definitionDigest || trigger.taskFamily.id !== profile.taskFamilyId
+      || acceptanceDigest(trigger.scope) !== acceptanceDigest(record.scope)
+      || !trigger.failures.some(failure => failure.goal.id === input.source.goalId && failure.goal.sessionId === input.source.sessionId
+        && failure.goal.nativeGoalId === input.source.nativeGoalId)) throw new Error('assistant-skills: successor repair is not the authorized new failed task')
+  }
   #queueRepair(): void {
     const runtime = this.#repairRuntime
     if (!this.#active || !runtime || this.#repairTask) return
     this.#repairTask = runtime.tickAll().catch(() => []).then(async () => {
       for (const record of this.#store.listRepairContinuations()) {
+        this.#publishRepairFeedback(record)
         if (!['watching', 'complete', 'rejected', 'revoked', 'expired', 'unknown'].includes(record.state)) continue
         const repair = record.checkpoint.repair as { sessionId: string } | undefined
         if (repair) await this.#repairAgents?.closeSession(repair.sessionId)
@@ -964,7 +1058,7 @@ export class AssistantSkillsService extends Service {
     }).catch(() => undefined).finally(() => { this.#repairTask = undefined })
   }
   #installRepairRuntime(ctx: Context): void {
-    ctx.inject(['tools', 'agents', 'sessions', 'llm', 'assistantGoals', 'assistantPolicy', 'assistantDelivery', 'assistantVerifier'], runtime => {
+    ctx.inject(['tools', 'agents', 'sessions', 'llm', 'systemPrompt', 'assistantGoals', 'assistantPolicy', 'assistantDelivery', 'assistantVerifier'], runtime => {
       const agents = new OwnerRepairAgentRuntime(runtime)
       const driver = new RepairContinuationRuntime(this.#store, {
         assertCurrent: record => this.#assertRepair(record),
@@ -975,10 +1069,13 @@ export class AssistantSkillsService extends Service {
           return this.#goals().inspectOwnerFailureTrigger({ ownerRouteId: locator.ownerRouteId, principalId: locator.principalId, workspace: locator.workspace, preset: locator.preset, taskFamilyId: profile.taskFamilyId, failures: [{ goalId: locator.goalId, sessionId: locator.sessionId }], minimumOccurrences: 1 }, signal)
         },
         createRepair: async (record, evidence, signal) => {
-          const profile = this.#repairProfile(record), trigger = evidence as HostFailureTriggerEvidence
+          const profile = this.#repairProfile(record), primary = this.#repairProfileAt(record, 1), trigger = evidence as HostFailureTriggerEvidence
+          const usage = this.#store.repairUsage(record.scope, record.id)
           const callback = () => this.#assertRepair(record)
           this.#repairAssertions.set(record.id, { callback, triggerDigest: acceptanceDigest(trigger) })
-          return agents.create({ ...profile, id: record.id, authorizationDigest: record.authorizationDigest, ownerRouteId: record.authorization.ownerRouteId,
+          return agents.create({ ...profile, id: record.id, iteration: record.iteration, maxModelCalls: primary.maxModelCalls, maxToolCalls: primary.maxToolCalls,
+            initialModelCalls: usage.modelCalls, initialToolCalls: usage.toolCalls,
+            recordUsage: kind => { this.#store.chargeRepairUsage(record.scope, record.id, kind, kind === 'model' ? primary.maxModelCalls : primary.maxToolCalls) }, authorizationDigest: record.authorizationDigest, ownerRouteId: record.authorization.ownerRouteId,
             trigger, objective: trigger.taskFamily.objective, expiresAt: record.authorization.expiresAt, assertCurrent: callback }, signal)
         },
         inspectRepair: async (record, signal) => {
@@ -994,11 +1091,11 @@ export class AssistantSkillsService extends Service {
           return ['blocked', 'cleared', 'paused', 'complete'].includes(phase) ? 'rejected' : 'running'
         },
         capture: async (record, signal) => {
-          const profile = this.#repairProfile(record), locator = this.#repairLocator(record, true), source = record.authorization.source
+          const profile = this.#repairProfile(record), locator = this.#repairLocator(record, true), source = this.#repairSource(record)
           const candidate = await this.stageOwnerAuthorizedFailureCandidate(this.#repairExec(record, signal), {
             ownerRouteId: record.authorization.ownerRouteId, triggerGoalId: source.goalId, triggerSessionId: source.sessionId,
             repairGoalId: locator.goalId, repairSessionId: locator.sessionId, taskFamilyId: profile.taskFamilyId,
-            name: profile.skillName, description: profile.description, ...(profile.bindings === undefined ? {} : { bindings: profile.bindings }), parentVersion: record.authorization.parentVersion,
+            name: profile.skillName, description: profile.description, ...(profile.bindings === undefined ? {} : { bindings: profile.bindings }), parentVersion: this.#repairParent(record).version,
           }, this.#repairAuthority(record))
           return { candidateId: candidate.id }
         },
@@ -1009,6 +1106,32 @@ export class AssistantSkillsService extends Service {
             `repair-${record.id}-${record.iteration}`, { ownerRouteId: record.authorization.ownerRouteId, expiresAt: record.authorization.expiresAt,
               maxRuns: profile.maxCanaryRuns, canaryRuns: profile.canaryRuns }, this.#repairAuthority(record))
           return { deploymentId: result.deployment.id }
+        },
+        assertNextIteration: (record, next) => this.#assertRepairSuccessor(record, next),
+        inspectNextIteration: async (record, signal) => {
+          const id = record.checkpoint.deploymentId
+          const deployment = typeof id === 'string' ? this.#store.getDeployment(record.scope, id) : undefined
+          if (!deployment || deployment.state !== 'promoted' || deployment.promotedAt === undefined) return undefined
+          const profile = this.#repairProfileAt(record, record.iteration + 1)
+          const holdout = this.inspectRepairProfile(profile.externalHoldoutProfileId, record.scope as GoalScope)
+          const candidates = this.#store.repairSourceRuns(record.scope, profile.skillName, deployment.version, deployment.promotedAt)
+          for (const run of candidates) {
+            if (run.goalDefinitionDigest !== holdout?.profile.canaryAdmissionTemplate?.taskFamily.goalDefinitionDigest) continue
+            const locator = { ...this.#repairLocator(record), goalId: run.goalId, sessionId: run.sessionId }
+            const snapshot = this.#goals().inspectOwnerGoalExecution(locator)
+            if (snapshot.outcome?.status !== 'not-achieved' || snapshot.storedGoal.nativeAtLastObservation.phase === 'active') continue
+            const trigger = await this.#goals().inspectOwnerFailureTrigger({ ownerRouteId: locator.ownerRouteId, principalId: locator.principalId,
+              workspace: locator.workspace, preset: locator.preset, taskFamilyId: profile.taskFamilyId,
+              failures: [{ goalId: run.goalId, sessionId: run.sessionId }], minimumOccurrences: 1 }, signal)
+            const next = { profileId: profile.id, source: { goalId: run.goalId, sessionId: run.sessionId,
+              nativeGoalId: snapshot.storedGoal.nativeAtLastObservation.goalId, definitionDigest: snapshot.storedGoal.definition.digest }, trigger, predecessorDeploymentId: deployment.id }
+            this.#assertRepairSuccessor(record, next)
+            await agents.closeSession(this.#repairLocator(record, true).sessionId)
+            this.#repairAssertions.delete(record.id)
+            this.#assertRepairSuccessor(record, next)
+            return next
+          }
+          return undefined
         },
         inspectDeployment: async record => {
           const id = record.checkpoint.deploymentId
@@ -1026,9 +1149,9 @@ export class AssistantSkillsService extends Service {
           this.#store.transitionRepairContinuation(record.scope, record.id, record.revision, 'unknown', { ...record.checkpoint, failure: 'repair-agent-interrupted' })
         } else driver.recover(record.scope, record.id)
       }
-      runtime.tools.register(defineTool({ name: 'skill_repair_arm', description: 'Authorize one bounded autonomous repair of an exact owner Goal using a configured profile. After independent failure evidence, a separate native Goal synthesizes a repair; only independent acceptance and prospective comparison can deploy a finite canary. Requires the current human request. Does not authorize recursive self-modification or renewed budgets.',
-        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, source_session_id: { type: 'string' }, profile_id: { type: 'string', required: true }, owner_route_id: { type: 'string', required: true }, invocation_id: { type: 'string', required: true }, expires_at: { type: 'integer', required: true } }, output,
-        execute: async (args, exec) => ({ context: JSON.stringify(this.armRepair(exec.agent, { goalId: args.goal_id, ...(args.source_session_id === undefined ? {} : { sessionId: args.source_session_id }), profileId: args.profile_id, ownerRouteId: args.owner_route_id, invocationId: args.invocation_id, expiresAt: args.expires_at })) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_repair_arm', description: 'Authorize a bounded autonomous repair sequence starting from an exact owner Goal using configured profiles. After independent failure evidence, a separate native Goal synthesizes a repair; only independent acceptance and prospective comparison can deploy a finite canary. Requires the current human request. Followups require the frozen profile sequence and a new independently failed task after promotion; budgets and expiry cannot be renewed.',
+        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, source_session_id: { type: 'string' }, profile_id: { type: 'string', required: true }, owner_route_id: { type: 'string', required: true }, invocation_id: { type: 'string', required: true }, expires_at: { type: 'integer', required: true }, notify: { type: 'boolean', description: 'Send finite repair results to this exact current owner route Session.' } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.armRepair(exec.agent, { goalId: args.goal_id, ...(args.source_session_id === undefined ? {} : { sessionId: args.source_session_id }), profileId: args.profile_id, ownerRouteId: args.owner_route_id, invocationId: args.invocation_id, expiresAt: args.expires_at, ...(args.notify === undefined ? {} : { notify: args.notify }) })) }) }))
       runtime.tools.register(defineTool({ name: 'skill_repair_status', description: 'Discover owner-scoped repair profile ids and finite limits, or inspect repair, candidate and deployment progress. Unknown work must not be replayed.', parameters: { repair_id: { type: 'string' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.repairStatus(exec.agent, args.repair_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_repair_revoke', description: 'Revoke this owner’s remaining repair continuation and stop its active repair Agent. Already completed effects and any deployed version retain their explicit rollback controls.', parameters: { repair_id: { type: 'string', required: true } }, output,
@@ -1138,8 +1261,9 @@ export class AssistantSkillsService extends Service {
       // These terminal facts cannot create a promotion, so synchronize them
       // without treating a later rollback as a policy revocation.
       if (deployment.expiresAt <= Date.now() || watch && ['rolled-back', 'expired', 'revoked', 'superseded'].includes(watch.state)) { this.#store.reconcileDeployment(deployment.scope, deployment.id); continue }
-      if (deployment.state !== 'canary' && deployment.state !== 'promoted') continue
-      try { this.#deploymentAuthorized(deployment, true) } catch { this.#store.stopDeployment(deployment.scope, deployment.id, 'revoked') }
+      const current = this.#store.reconcileDeployment(deployment.scope, deployment.id)
+      if (!current || current.state !== 'canary' && current.state !== 'promoted') continue
+      try { this.#deploymentAuthorized(current, true) } catch { this.#store.stopDeployment(current.scope, current.id, 'revoked') }
     }
     for (const watch of this.#store.listWatches()) {
       const scope = watch.scope as GoalScope
@@ -1234,10 +1358,11 @@ export class AssistantSkillsService extends Service {
     for (const deployment of this.#store.listDeployments()) {
       const watch = this.#store.listWatches(deployment.scope).find(value => value.id === deployment.watchId)
       if (deployment.expiresAt <= Date.now() || watch && ['rolled-back', 'expired', 'revoked', 'superseded'].includes(watch.state)) { this.#store.reconcileDeployment(deployment.scope, deployment.id); continue }
-      if (deployment.state !== 'canary' && deployment.state !== 'promoted') continue
+      const current = this.#store.reconcileDeployment(deployment.scope, deployment.id)
+      if (!current || current.state !== 'canary' && current.state !== 'promoted') continue
       // Promotion is committed only in the all-observation Evaluation fence
       // above.  A bare reconciliation here could count stale prior successes.
-      try { this.#deploymentAuthorized(deployment, true) } catch { this.#store.stopDeployment(deployment.scope, deployment.id, 'revoked') }
+      try { this.#deploymentAuthorized(current, true) } catch { this.#store.stopDeployment(current.scope, current.id, 'revoked') }
     }
     for (const capture of this.#store.listCaptures()) {
       const scope = capture.scope as GoalScope

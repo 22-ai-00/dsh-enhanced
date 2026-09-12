@@ -6,17 +6,15 @@
 
 用户再次明确目标是基本 RSI 智能体。全部 18 项要求继续保留；当前主线以可重复的自我改进能力验收：实际任务/反馈产生失败 → 智能体归因并提出修改 → 生成以后会使用的策略、技能或工具候选 → 独立同预算比较与回归 → 预授权范围内有限启用 → 后续真实任务复用并接受纠正 → 更新后的版本继续参与下一轮改进。失败候选可被拒绝，不要求每轮必然晋升；不能用手工提供修复答案代替自主改进。
 
-本次只读核对本机与远端 `dev` 均为 `89751c3250180a3efc267d92bb69af1b6b0880c0`，比 `b7b4b16` 多 24 个提交。失败/重复轨迹候选、技能 canonical revision 监控、whole-goal owner correction/withdrawal、安装升级/卸载、GitHub 补偿及 external broker 已有提交，不能继续按 9 月 9 日的缺实现清单重新开发。总体仍为 3 已验证 / 13 实现中 / 2 待做；这个账本状态不等于停工，也不是能力完成百分比。
+此前复审时，本机与远端 `dev` 均为 `89751c3250180a3efc267d92bb69af1b6b0880c0`，比 `b7b4b16` 多 24 个提交。失败/重复轨迹候选、技能 canonical revision 监控、whole-goal owner correction/withdrawal、安装升级/卸载、GitHub 补偿及 external broker 已有提交，不能继续按 9 月 9 日的缺实现清单重新开发。总体仍为 3 已验证 / 13 实现中 / 2 待做；这个账本状态不等于停工，也不是能力完成百分比。
 
-### 本批有限修复接线（2026-09-12，基线 `04e18c5`）
+### 本批基本 RSI 两轮交付（2026-09-12，基线 `8612a35`）
 
-新增默认关闭的 `repairProfiles` 与 `skill_repair_arm/status/revoke`。初次 owner 请求冻结源 Goal/Session/native Goal/definition、父版本、路由回执、profile/holdout digest 和期限；本批产品入口固定一次修复，不自行续期。源 Goal 停止且有独立失败回执后，Host 创建新的 root Session 和原生 Goal，由已有 goal-round driver 驱动模型；只有独立 achieved 修复轨迹能成为候选，候选随后进入同一授权下的 prospective holdout 与有限 canary。
+默认关闭的 `repairProfiles` 与 `skill_repair_arm/status/revoke` 现在可把有限 sequence、源 Goal/Session/native Goal/definition、父版本、owner route 回执、profile/holdout digest、期限和原 owner 反馈权限一次冻结。本批验收配置为两轮共享同一 continuation 的累计 16 次模型调用和 16 次工具调用，每个 repair Goal 最多 3 个 native rounds；运行时不能续期或扩大冻结预算。源 Goal 停止且有独立失败回执后，Host 创建独立 repair Session/Goal；独立 achieved 轨迹才能成为候选，随后仍须 prospective holdout、有限 canary 和后续真实任务的独立验收。第二轮在首轮 promotion 后只接受冻结 successor profile 与新失败任务，且保留首轮公开回归。
 
-Goals 与 Skills 之间以当前实例私有持有的回调身份验证执行能力，另逐次重验持久授权和完整 owner route；普通公开 `goal_create`、draft、compare、canary 仍保留人类请求校验。`canaryAdmissionTemplate` 在实际候选产生后绑定精确摘要，不能预先提供修复程序或修改隐藏验收规则。派发前写检查点，重启或撤权后的不确定工作不重复执行。
+正式 `--repair-admission` 安装器只合并完整有限 profiles/holdouts，并重验 current owner、精确 route 和 Goals calls budget；完成后的迭代/final feedback 由 durable Outbox 发回 arm 时的原 owner Session。完成后重启只读回状态，不得再次派发或重复通知。in-flight `repairing`、`repair-achieved` 或 `candidate-staged` 在重启时归为 `unknown`，不从缓存 transcript 自动重放；安全重新获取仍是后续工作。
 
-本批定向测试已实际打通原生 background Goal → 模型适配器 → 工具 → 独立 achieved 回执，并验证撤权后排队轮次为零模型调用。模型适配器和 verifier 输入是确定性 fixture，不能据此宣称真实模型自主修复或 RSI 智能增益。另验证授权幂等、armed 重启保留、有限状态/CAS、过期与撤权、late-create/dispose、动态 admission；完整检查结果见本批交付证据。
-
-剩余直接交付条件明确保留：真实 TraeX 模型从普通任务自主生成修复并完成整条比较/晋升链；中途 repair Agent 的安全重新获取和恢复（本批明确置 unknown，armed 等待与 watch 可恢复）；结果回到原 owner 会话；修复后后续真实任务及再次改进。全部 18 项规划保持原范围与状态，当前变化不等于基本 RSI 已完成。无需日历观察等待，不以指定日期限制推进速度。
+基本 RSI 首版采用同一真实运行与独立重启回读的组合验收：TraeX 自主生成两轮修复，v1→v2→v3 两次独立比较及后续任务晋升通过；一次 arm、累计 8 次模型调用/6 次工具调用，原会话 5 条通知各接受一次。原 E2E 命令退出 1，失败在测试用缓存恢复会话的最终 UI 断言；导航改为实际选择原会话并核对新 follow 后，在同一保留环境独立补验退出 0：最终通知可见，5 个运行时 tick 的 continuation、预算、通知均不变，重启未新增模型调用。没有重跑模型或生成新候选来补这个导航断言。根 `pnpm check` 退出 0，5,239 passed / 1 skipped，33 份 dry-run pack 完成；完整原始结果和限制见[交付证据](evidence/basic-rsi-two-round-2026-09-12.json)。这仅证明一类模板渲染任务的有界自主改进；全部 18 项账本保持 **3 已验证 / 13 实现中 / 2 待做**。
 
 ### 基线 RSI 关键缺口与实际证据（以下为本批实现前的诊断）
 
@@ -26,7 +24,7 @@ Goals 与 Skills 之间以当前实例私有持有的回调身份验证执行能
 - 9 月 10 日 template-render 真实 TraeX 记录曾到达 promoted，随后因负向调用参数与 guard 不符失败；因此不是“从未运行过比较”，也没有最终完整回滚证据。对应修复后尚无全链新 proof，见 [template-render 证据](evidence/template-render-failure-canary-2026-09-10.json)。三类固定工程任务族和可控 Goals/反馈夹具还不能满足 3–5 类真实工作流或通用改进收益要求。
 - 本次已收口 WP04 independent holdout Host SDK、provider 取消/进程组清理、archive 并发身份检查及相关测试夹具。最终 `pnpm check` 退出 0：5,154 passed / 1 skipped，33 份 dry-run pack；Evaluation 为 36 files / 293 passed。原生独立 verifier 已复核；TraeX 全量审查超时不计通过，缩小范围后的审查正常完成，实际问题已修复并独立验证。这个工程交付不代表独立 holdout 部署、真实模型收益或基本 RSI 完成，见[本批证据](evidence/wp04-independent-holdout-provider-2026-09-12.json)。
 
-### 下一批交付顺序
+### 历史：本批实现前的下一批交付顺序（已由两轮交付说明取代）
 
 1. 当前 holdout 与相关 isolation 修复已完成最终根检查与独立复核，收口为本批交付；历史测试/证据另行注明范围。下一开发主线转入下项单次授权的完整 RSI 衔接。
 2. 用已有 TraeX 独立会话打通一次普通任务触发的 RSI 闭环。只给任务、可见失败反馈、预算、可修改范围和成功条件；不提供修复答案、工具调用顺序或候选参数。优先选事先固定的真实失败，禁止人为削弱基线、挑新样本追求晋升或更改验收器答案。
