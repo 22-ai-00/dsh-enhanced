@@ -35,7 +35,7 @@ function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id):
   session.append('turn/start', { turn: 1 })
   return value
 }
-async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image) {
+async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image, repair = false) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-skills-service-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const comparisonRoot = comparison ? await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-')) : undefined
@@ -122,7 +122,12 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 },
     { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }] : undefined
-  let config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}) }
+  const repairHoldout: ExternalHoldoutProfile = { id: 'repair-holdout', version: 1, scope,
+    execution: { image: `sha256:${'b'.repeat(64)}`, dockerPath: '/usr/bin/docker', stateRoot: `${root}-holdout`, command: 'cat', artifactPath: 'artifact.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 4, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 2000, verificationDurationMs: 1000 },
+    authority: { executable: process.execPath, args: [], publicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: 'c'.repeat(64) }, maxComparisons: 1,
+    canaryAdmissionTemplate: { protocol: 'assistant-skills/canary-admission-template/v1', skillName: 'saved-write', taskFamily: { goalDefinitionDigest: 'd'.repeat(64), outcomeProfile: { id: 'repair-outcome', version: 1, digest: 'e'.repeat(64) } } } }
+  if (repair) { ctx.provide('sessions' as never, {} as never); ctx.provide('llm' as never, {} as never) }
+  let config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}), ...(repair ? { externalHoldouts: [repairHoldout], repairProfiles: [{ id: 'repair-profile', scope, skillName: 'saved-write', taskFamilyId: 'repair-family', description: 'Repair saved write', externalHoldoutProfileId: 'repair-holdout', provider: 'fixture', model: 'fixture', allowedTools: ['write'], maxGoalRounds: 2, maxModelCalls: 4, maxToolCalls: 4, maxOutputTokens: 128, maxDurationMs: 30000, canaryRuns: 1, maxCanaryRuns: 2 }] } : {}) }
   let plugin = await ctx.plugin(AssistantSkillsService, config)
   await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
   const execute = (name: string, args: unknown, agent = owner) => agent.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
@@ -1094,4 +1099,37 @@ test('captures an exact successful skill reuse as fixed bound steps while retain
   expect(candidate.definition).not.toHaveProperty('runExpansions')
   expect(candidate.definition.steps).toEqual([{ id: expect.stringMatching(/^expanded:[a-f0-9]{64}$/u), toolName: 'write', arguments: { file: 'output.txt', data: 'reused' }, dependsOn: [] }])
   expect(f.count()).toBe(1)
+})
+
+
+test('finite repair arming requires a live human request and exact immutable replay, and survives restart without dispatch', async () => {
+  const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, true)
+  await f.save()
+  const input = { goalId: 'failed-goal', profileId: 'repair-profile', ownerRouteId: 'owner-route', invocationId: 'repair-once', expiresAt: Date.now() + 30000 }
+  f.human(false)
+  expect(() => f.ctx.assistantSkills.armRepair(f.owner, input)).toThrow(/current owner request/)
+  f.human(true)
+  const armed = f.ctx.assistantSkills.armRepair(f.owner, input)
+  expect(armed).toMatchObject({ state: 'armed', maxIterations: 1 })
+  expect(f.ctx.assistantSkills.armRepair(f.owner, input).id).toBe(armed.id)
+  expect(() => f.ctx.assistantSkills.armRepair(f.owner, { ...input, expiresAt: input.expiresAt + 1 })).toThrow(/conflict/)
+  f.human(false)
+  expect(f.ctx.assistantSkills.repairStatus(f.owner, armed.id)).toMatchObject({ state: 'armed' })
+  await f.restart()
+  expect(f.ctx.assistantSkills.repairStatus(f.owner, armed.id)).toMatchObject({ state: 'armed', maxIterations: 1, expiresAt: input.expiresAt })
+  f.human(true)
+  expect(await f.ctx.assistantSkills.revokeRepair(f.owner, armed.id)).toMatchObject({ state: 'revoked' })
+  await f.restart()
+  expect(f.ctx.assistantSkills.repairStatus(f.owner, armed.id)).toMatchObject({ state: 'revoked' })
+})
+
+test('repair rejects expired authorization, exposes only scoped configuration, and denies fabricated execution capability', async () => {
+  const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, true)
+  await f.save()
+  const input = { goalId: 'failed-goal', profileId: 'repair-profile', ownerRouteId: 'owner-route', invocationId: 'repair-once', expiresAt: Date.now() - 1 }
+  expect(() => f.ctx.assistantSkills.armRepair(f.owner, input)).toThrow(/finite/)
+  const status = f.ctx.assistantSkills.repairStatus(f.owner)
+  expect(status).toMatchObject({ profiles: [{ id: 'repair-profile', maxIterations: 1 }], continuations: [] })
+  expect(JSON.stringify(status)).not.toContain('generatorDigest')
+  expect(f.ctx.assistantSkills.ownsOwnerAuthorizedRepair({ authorizationId: 'fake' } as never, () => {})).toBe(false)
 })

@@ -10,3 +10,6 @@ export type { ExternalHoldoutProfile } from './external-holdout.js'
 export type { SkillComparison, SkillComparisonIdentity, SkillCandidate, SkillDeployment, SkillRun, SkillWatch, SkillWatchCanonicalRevision, SkillWatchCanonicalState, SkillWatchObservation, SkillWatchObservationBinding, SkillWatchObservationResult, StoredSkillDefinition } from './store.js'
 export function apply(ctx: Context, config: Config = {}): void { new AssistantSkillsService(ctx, config) }
 export default { name, Config, apply }
+
+export type { RepairContinuationProfile } from './repair-profile.js'
+export type { RepairExecutionAuthority, RepairExecutionContext, StageFailureCandidateInput } from './service.js'

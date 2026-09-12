@@ -164,6 +164,40 @@ export interface HostFailureEvidenceSummary {
   evidence: { producer: 'assistant-goals'; generation: string; digest: string }
 }
 
+/** Host-only failure trigger.  Its digest links a current Goals observation; it is not a signature. */
+export interface HostFailureTriggerEvidence {
+  protocol: 'assistant-skills/host-failure-trigger/v1'
+  scope: GoalScope
+  taskFamily: { id: string; definitionDigest: string; objective: string }
+  failureCategory: 'objective-not-achieved' | 'repeated-not-achieved'
+  triggerCondition: { kind: 'not-achieved-count'; minimumOccurrences: number; windowStartedAt: number; windowEndedAt: number }
+  failures: readonly HostFailureEvidenceObservation[]
+  attestedAt: number
+  evidence: { producer: 'assistant-goals'; generation: string; digest: string }
+}
+
+export interface OwnerFailureTriggerInput {
+  ownerRouteId: string
+  principalId: string
+  workspace: string
+  preset: string
+  taskFamilyId: string
+  failures: readonly { sessionId: string; goalId: string }[]
+  minimumOccurrences: number
+}
+
+/** A Host-held authorization reference for one bounded background repair Goal. */
+export interface OwnerAuthorizedRepairInput {
+  authorizationId: string
+  authorizationDigest: string
+  ownerRouteId: string
+  scope: GoalScope
+  trigger: HostFailureTriggerEvidence
+  objective: string
+  maxGoalRounds: number
+  expiresAt: number
+}
+
 /** Owner-authorized lifecycle change for the currently bound native goal. */
 export interface GoalControlInput {
   goalId: string

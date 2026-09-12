@@ -4,6 +4,7 @@ import { isAbsolute } from 'node:path'
 import { StringDecoder } from 'node:string_decoder'
 import type { GoalScope } from '@dsh-enhanced/assistant-goals'
 import { holdoutPathsOverlap, validateCanaryAdmission, validateHoldoutExecution, type CanaryAdmission, type HoldoutExecutionConfig, type HoldoutQualificationInput } from './holdout-qualification.js'
+import { validateCanaryAdmissionTemplate, type CanaryAdmissionTemplate } from './repair-admission.js'
 
 /** Public Host configuration. The authority owns its private dataset/key/state elsewhere. */
 export interface ExternalHoldoutProfile {
@@ -16,6 +17,8 @@ export interface ExternalHoldoutProfile {
   readonly files?: readonly { path: string; content: string }[]
   /** Required for canary admission. Legacy prospective profiles remain qualification-only. */
   readonly canaryAdmission?: CanaryAdmission
+  /** Host-only repair admission, materialized only after an exact parent/candidate read. */
+  readonly canaryAdmissionTemplate?: CanaryAdmissionTemplate
   readonly maxComparisons: 1
 }
 
@@ -41,7 +44,7 @@ export function validateExternalHoldoutProfiles(values: readonly ExternalHoldout
   if (!Array.isArray(values) || values.length > 16) reject()
   const ids = new Set<string>(), commands = new Set<string>(), roots: string[] = []
   for (const value of values) {
-    if (!exact(value, ['id', 'version', 'scope', 'execution', 'authority', 'maxComparisons'], ['inputs', 'files', 'canaryAdmission']) || typeof value.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/u.test(value.id) || ids.has(value.id)
+    if (!exact(value, ['id', 'version', 'scope', 'execution', 'authority', 'maxComparisons'], ['inputs', 'files', 'canaryAdmission', 'canaryAdmissionTemplate']) || typeof value.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/u.test(value.id) || ids.has(value.id)
       || !Number.isSafeInteger(value.version) || value.version < 1 || value.maxComparisons !== 1
       || !exact(value.scope, ['principalId', 'principalRecordId', 'principalVersion', 'workspace', 'preset']) || ['principalId', 'principalRecordId', 'workspace', 'preset'].some(key => typeof value.scope[key as keyof GoalScope] !== 'string' || !value.scope[key as keyof GoalScope])
       || !Number.isSafeInteger(value.scope.principalVersion) || value.scope.principalVersion < 1 || !isAbsolute(value.scope.workspace)) reject()
@@ -49,8 +52,10 @@ export function validateExternalHoldoutProfiles(values: readonly ExternalHoldout
     if (holdoutPathsOverlap(value.scope.workspace, value.execution.stateRoot) || roots.some(root => holdoutPathsOverlap(root, value.execution.stateRoot))) reject()
     const command = JSON.stringify([value.authority.executable, value.authority.args])
     if (commands.has(command) || value.inputs !== undefined && !plain(value.inputs) || value.files !== undefined && (!Array.isArray(value.files) || value.files.length > 32 || value.files.some((file: { path: unknown; content: unknown }) => !exact(file, ['path', 'content']) || typeof file.path !== 'string' || typeof file.content !== 'string'))
-      || value.canaryAdmission !== undefined && value.authority.generatorDigest === undefined) reject()
+      || value.canaryAdmission !== undefined && value.canaryAdmissionTemplate !== undefined
+      || (value.canaryAdmission !== undefined || value.canaryAdmissionTemplate !== undefined) && value.authority.generatorDigest === undefined) reject()
     if (value.canaryAdmission !== undefined) { try { validateCanaryAdmission(value.canaryAdmission) } catch { reject() } }
+    if (value.canaryAdmissionTemplate !== undefined) { try { validateCanaryAdmissionTemplate(value.canaryAdmissionTemplate) } catch { reject() } }
     if (Buffer.byteLength(JSON.stringify({ inputs: value.inputs, files: value.files })) > value.execution.maxBytes) reject()
     ids.add(value.id); commands.add(command); roots.push(value.execution.stateRoot)
   }

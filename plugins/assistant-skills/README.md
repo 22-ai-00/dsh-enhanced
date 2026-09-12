@@ -122,3 +122,69 @@ Fixed replay comparison now retains validated workspace-contained glob/grep and 
 Validation uses package tests for native tool dispatch, typed inputs, owner isolation, current permission checks, retirement, persistence and no replay, plus `pnpm test:web-owner:real-skill` (reuse) and `DSH_WEB_REAL_SKILL_CANDIDATE=1 pnpm test:web-owner:real-skill` (candidate lifecycle) for the explicitly configured real-route Web scenario. See repository evidence for runs actually completed.
 
 The capture/canary Web tests can use an already logged-in TraeX account in a fresh temporary profile: `DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra pnpm test:web-owner:real-canary`. Select a model available in that account's current catalog; omitting `DSH_WEB_REAL_MODEL` uses TraeX's `default`. This installs the TraeX adapter only in the test profile, binds it to the test workspace, and never falls back to the Codex subscription route. Canary tests also require `DSH_HOLDOUT_TEST_IMAGE` with the pinned Node image and an available Chromium executable. Call/deadline limits remain enforced; TraeX usage is not treated as a verified token or monetary cap.
+
+### Owner-authorized repair continuation (experimental)
+
+An operator may configure `repairProfiles` to expose `skill_repair_arm`,
+`skill_repair_status`, and `skill_repair_revoke`. The owner selects a profile and
+an exact source Goal, route, invocation id and expiry. One authorization permits
+**one** independent repair Goal and one prospective candidate comparison with a
+finite canary; it cannot renew its expiry, extend budgets, or authorize another
+iteration. This is a bounded self-improvement building block, not evidence that
+unattended recursive self-improvement has been achieved.
+
+A repair profile contains `id`, exact `scope` (principal id, record id/version,
+workspace and preset), `skillName`, `taskFamilyId`, `description`, optional typed
+capture `bindings`, `externalHoldoutProfileId`, `provider`, `model`,
+`allowedTools`, `maxGoalRounds`, `maxModelCalls`, `maxToolCalls`,
+`maxOutputTokens`, `maxDurationMs`, `canaryRuns`, and `maxCanaryRuns`.
+The selected external holdout must use a prospective `generatorDigest` and
+`canaryAdmissionTemplate`:
+
+```json
+{
+  "protocol": "assistant-skills/canary-admission-template/v1",
+  "skillName": "saved-workflow",
+  "taskFamily": {
+    "goalDefinitionDigest": "<exact configured Goal definition digest>",
+    "outcomeProfile": { "id": "task-outcome", "version": 1, "digest": "<profile digest>" }
+  }
+}
+```
+
+A template and a static `canaryAdmission` are mutually exclusive. The Host fills
+in the actual parent and newly captured candidate digests after independent
+repair acceptance. Model tools cannot supply evaluator cases, rewrite this
+configuration, create another Goal, or promote themselves. The ordinary public
+capture/canary tools retain their current-human-request requirements.
+
+Install the native Goal service and goal-round driver before creating repair
+Agents. Configure Goals' preauthorized round limit, independent native-round and
+whole-goal acceptance, and a compatible registered budget meter. The selected
+preset and model must support the required native tool protocol. Background
+Policy must permit the actual Goal and Skills operations, including promotion,
+watch and rollback. `repairProfiles` is empty by default; manual skills do not
+acquire these runtime dependencies or start repair Agents.
+
+When the source Goal has stopped and has an exact independent `not-achieved`
+receipt, the Host creates a separate root Session in the authorized workspace.
+The native driver owns model rounds. The model receives the original objective
+and chooses its repair; the Host supplies no repaired program. It captures only
+an independently accepted repair trace, then uses the existing external holdout
+and canary gates. Each boundary rechecks the durable intent, profile, owner
+route, source definition, parent version, expiry and background policy. A
+process-local capability links Goals to the current Skills instance; it is not
+isolation from arbitrary malicious plugins sharing the same Host process.
+
+Armed waits and deployed watches survive restart. A restart during dispatch, or
+before the native repair Agent can be safely reacquired, surfaces `unknown`
+without creating a second repair. Automatic resumption of an interrupted repair
+Agent is not implemented. Status includes the exact repair Session/Goal and
+candidate/deployment references; final delivery back into the original owner
+conversation and repeated autonomous improvement still require integration
+validation. `skill_repair_revoke` stops the remaining continuation; completed
+filesystem effects or a deployed version require their existing explicit
+rollback controls. Repair Agents use the configured workspace, model route and
+tool authority, and may write files there; they are not an OS sandbox. Calls and
+deadlines are finite; token or monetary accounting still depends on the route's
+registered meter. No installation script or credential authority is added.

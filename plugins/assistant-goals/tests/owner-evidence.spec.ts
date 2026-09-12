@@ -292,3 +292,29 @@ test.each(['route-race', 'receipt-drift', 'unknown-execution', 'achieved-trigger
   await expect(f.service.inspectOwnerFailureCaptureSummary({ ownerRouteId: 'route', principalId: 'owner', workspace: f.root, preset: 'primary', taskFamilyId: 'repair-evidence',
     repair: { sessionId: 'repair-session', goalId: 'repair-goal' }, failures: [{ sessionId: 'session-a', goalId: 'goal-a' }], minimumOccurrences: 1 })).rejects.toThrow()
 })
+
+test('exports a repair-free owner failure trigger after double-reading exact evidence', async () => {
+  const f = await fixture(), now = Date.now()
+  const first = evidenceSnapshot(f, { goalId: 'goal-a', sessionId: 'session-a', nativeGoalId: 'native-a', outcome: 'not-achieved', verifiedAt: now })
+  const current = structuredClone(first)
+  const snapshots = [first, current]
+  vi.spyOn(f.service, 'inspectOwnerGoalExecution').mockImplementation(() => structuredClone(snapshots.shift()!) as never)
+  vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockResolvedValue(runProof(first))
+  const trigger = await f.service.inspectOwnerFailureTrigger({ ownerRouteId: 'route', principalId: 'owner', workspace: f.root, preset: 'primary',
+    taskFamilyId: 'repair-evidence', failures: [{ sessionId: 'session-a', goalId: 'goal-a' }], minimumOccurrences: 1 })
+  expect(trigger).toMatchObject({ protocol: 'assistant-skills/host-failure-trigger/v1', taskFamily: { id: 'repair-evidence', objective: 'Repair exact evidence' },
+    failureCategory: 'objective-not-achieved', failures: [{ goal: { id: 'goal-a' }, outcome: 'not-achieved' }] })
+  expect('repairGoal' in trigger).toBe(false)
+})
+
+test.each(['drift', 'expired'] as const)('rejects owner failure trigger %s', async kind => {
+  const f = await fixture(), first = evidenceSnapshot(f, { goalId: 'goal-a', sessionId: 'session-a', nativeGoalId: 'native-a', outcome: 'not-achieved' })
+  const current = structuredClone(first)
+  if (kind === 'drift') current.ownerRoute = { route: 2 }
+  else current.acceptedTasks[1]!.receipt.validUntil = Date.now() - 1
+  const snapshots = [first, current]
+  vi.spyOn(f.service, 'inspectOwnerGoalExecution').mockImplementation(() => structuredClone(snapshots.shift()!) as never)
+  vi.spyOn(f.service, 'inspectOwnerGoalRunProof').mockResolvedValue(runProof(first))
+  await expect(f.service.inspectOwnerFailureTrigger({ ownerRouteId: 'route', principalId: 'owner', workspace: f.root, preset: 'primary',
+    taskFamilyId: 'repair-evidence', failures: [{ sessionId: 'session-a', goalId: 'goal-a' }], minimumOccurrences: 1 })).rejects.toThrow()
+})

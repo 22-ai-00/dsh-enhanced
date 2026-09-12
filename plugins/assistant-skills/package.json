@@ -67,7 +67,8 @@
     "@dsh-enhanced/assistant-goals": ">=0.1.25 <0.2.0",
     "@dsh-enhanced/assistant-evaluation": ">0.1.24 <0.2.0",
     "@dsh-enhanced/assistant-isolation": ">=0.1.0 <0.2.0",
-    "@deepseek-ai/dsh-system-prompt": ">=0.1.2-rc.1 <0.2.0"
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-session": ">=0.1.2-rc.1 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -102,6 +103,9 @@
     },
     "@deepseek-ai/dsh-system-prompt": {
       "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -123,7 +127,8 @@
     "@deepseek-ai/dsh-agent-loop": "catalog:",
     "@dsh-enhanced/assistant-evaluation": "workspace:*",
     "@dsh-enhanced/assistant-isolation": "workspace:*",
-    "@deepseek-ai/dsh-fs-observation-policy": "catalog:"
+    "@deepseek-ai/dsh-fs-observation-policy": "catalog:",
+    "@dsh-enhanced/assistant-verifier": "workspace:*"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

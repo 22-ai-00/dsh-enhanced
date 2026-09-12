@@ -1,0 +1,311 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-12",
+  "recordedAt": "2026-09-12T10:09:31.426154+00:00",
+  "baseCommit": "04e18c5dcd7992de7586b233bc1920f8e0831261",
+  "status": "passed",
+  "completeWorkPackage": false,
+  "completeGoal": false,
+  "scope": [
+    "Finite owner-authorized background repair continuation",
+    "Native Goal repair bootstrap and independent acceptance wiring",
+    "Prospective candidate admission template and durable continuation state"
+  ],
+  "implemented": [
+    "Default-off operator repairProfiles and current-human skill_repair_arm/status/revoke tools; product authorization is one iteration with immutable owner scope, source, parent, route, profile, expiry and budgets.",
+    "Current Goals and Skills instances validate private process-local callback identity and durable authority; public goal_create/draft/compare/canary paths retain human gates.",
+    "A stopped source Goal with canonical independent failure evidence creates a distinct native repair Session; the native driver owns model rounds and ordinary tool permissions and budgets remain active.",
+    "Candidate capture requires a later independent achieved repair trace. A configured prospective admission template materializes exact candidate/parent digests for existing holdout/canary gates.",
+    "Checkpoint-before-dispatch, CAS, finite state transitions, revocation, expiry, cancellation and awaited late-create cleanup. Armed waits and deployment watches restart; interrupted repair Agent or uncertain dispatch becomes unknown without duplication."
+  ],
+  "validation": {
+    "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+    "exitCode": 0,
+    "log": "/tmp/dsh-owner-repair-check-v2-20260912.log",
+    "logSha256": "8a92451d7f604560d9ed2db23419fe6dc6462b042b638ba55b75636941151dfb",
+    "testSummaries": [
+      {
+        "package": "root",
+        "passed": 493,
+        "skipped": 1
+      },
+      {
+        "package": "packages/task-acceptance-contract",
+        "passed": 15,
+        "skipped": 0
+      },
+      {
+        "package": "packages/llm-route-capabilities",
+        "passed": 18,
+        "skipped": 0
+      },
+      {
+        "package": "packages/assistant-growth-contract",
+        "passed": 11,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/hello",
+        "passed": 2,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/acp",
+        "passed": 31,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-policy",
+        "passed": 208,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/plugin-control-plane",
+        "passed": 155,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/credentials-keychain",
+        "passed": 28,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/traex-acp-provider",
+        "passed": 161,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/coding-subscription-provider",
+        "passed": 384,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-verifier",
+        "passed": 76,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-actions",
+        "passed": 261,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-goals",
+        "passed": 286,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-automations",
+        "passed": 260,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/event-triggers",
+        "passed": 118,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-growth-experiments",
+        "passed": 20,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/lark-channel",
+        "passed": 441,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-evolution",
+        "passed": 172,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-evaluation",
+        "passed": 293,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-delivery",
+        "passed": 743,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-deepseek-budget",
+        "passed": 4,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-heartbeat",
+        "passed": 22,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-proactive",
+        "passed": 21,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/personal-wiki",
+        "passed": 65,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/personal-memory",
+        "passed": 138,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-isolation",
+        "passed": 135,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/memory-wiki-bridge",
+        "passed": 6,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/personal-assistant",
+        "passed": 4,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/preference-learning",
+        "passed": 84,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-web-owner",
+        "passed": 55,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-skills",
+        "passed": 295,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-health",
+        "passed": 49,
+        "skipped": 0
+      },
+      {
+        "package": "plugins/assistant-recovery",
+        "passed": 144,
+        "skipped": 0
+      }
+    ],
+    "testsPassed": 5198,
+    "testsSkipped": 1,
+    "independentReview": {
+      "status": "PASS",
+      "agent": "repair_authority_review",
+      "command": "pnpm --filter @dsh-enhanced/assistant-skills exec vitest run tests/repair-agent.spec.ts tests/repair-native.spec.ts",
+      "exitCode": 0,
+      "testsPassed": 5
+    },
+    "nativeFixture": {
+      "realNativeDriver": true,
+      "realGoalExecution": true,
+      "realIndependentVerifier": true,
+      "deterministicModelAdapter": true,
+      "modelCallsNormal": 2,
+      "modelCallsAfterRevocation": 0,
+      "mockedSourceFailureReader": true
+    },
+    "serviceIntegration": {
+      "realSkillsService": true,
+      "realToolRuntime": true,
+      "realSkillStore": true,
+      "mockedRepairAgentAndGoals": true,
+      "boundaryVerified": "public arm -> persisted authorization -> actual create port -> process-local Goals capability without second human turn"
+    },
+    "interruptedCheck": {
+      "log": "/tmp/dsh-owner-repair-check-20260912.log",
+      "exitCode": 143,
+      "reason": "Stopped after independent reviewer found retained controller on post-publication Goals-start failure; fixed and regression-tested before v2 full check."
+    },
+    "traexReview": {
+      "requestedModel": "GPT-5.6-Terra",
+      "requestedSandbox": "read-only",
+      "status": "timed-out",
+      "exitCode": 1,
+      "resultUsed": false,
+      "prompt": "/tmp/dsh-repair-authority-traex.prompt"
+    },
+    "packages": {
+      "dryRunPacks": 33,
+      "skillsPackage": "@dsh-enhanced/assistant-skills@0.1.0",
+      "requiredFilesChecked": [
+        "LICENSE",
+        "README.md",
+        "package.json",
+        "cordis.patch.yml",
+        "lib/repair-agent.js",
+        "lib/repair-agent.d.ts",
+        "lib/repair-runtime.js",
+        "lib/repair-runtime.d.ts",
+        "lib/repair-profile.js",
+        "lib/repair-profile.d.ts",
+        "lib/repair-admission.js",
+        "lib/repair-admission.d.ts"
+      ],
+      "testFixtureOrDatabaseFilesShipped": false
+    }
+  },
+  "limitations": [
+    "No claim of basic RSI completion or real-model intelligence gain.",
+    "No full real TraeX natural-task autonomous repair -> holdout -> future-task promotion evidence in this batch.",
+    "In-flight native repair resumption is not implemented; restart surfaces unknown instead of recreating work.",
+    "Original-owner automatic result delivery and repeated autonomous improvement remain incomplete.",
+    "Same-process Host plugins share trust; callback identity is not OS or hostile-plugin isolation."
+  ],
+  "workPackages": {
+    "statusChanged": false,
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "sourceHashes": {
+    "docs/autonomy-delivery-path-review-2026-09-08.md": "932db199793a51d7a18e6570cddaf62f9612431b41e0b259f71cd68dba704131",
+    "plugins/assistant-goals/src/service.ts": "f0846b2977f6e4d68a41c1abb5115b5321e2a373184f0c0ccc7d21e711261a62",
+    "plugins/assistant-goals/src/types.ts": "99e5fe1dc7c97d871045564c3fad705f17e39c631e90254531dc4fadfeb6a42b",
+    "plugins/assistant-goals/tests/owner-evidence.spec.ts": "40d4756e26ff5036b6da9edfdc86470d212571ce3c023afd0f8336bde26e37b7",
+    "plugins/assistant-skills/README.md": "d301ba76cb13d3a398ba56d5d2f3b2f2560125b192175844e16cbf8447d64661",
+    "plugins/assistant-skills/package.json": "d1a8b6a0b12767d0752193efd148a8e412f45c02164a5c54a24e25f1643f218c",
+    "plugins/assistant-skills/src/external-holdout.ts": "82c11294cebd9528deaa0ba04e65bae59bb75779272a0d30781bb18a48f6f782",
+    "plugins/assistant-skills/src/index.ts": "5dbf89b2474356a58ccb851b0a3e20c7faf4c9e3c1111f4a58eec3f87f4baefd",
+    "plugins/assistant-skills/src/repair-admission.ts": "936c58de56eeaa4bd67f5b702bcdeb8915172a53efa1deffc997a449315a0df4",
+    "plugins/assistant-skills/src/repair-agent.ts": "bfd2a6a44e1d85047195c4288eaff1f4c9d3f2e7e3d18a0dea3b492360e3b25e",
+    "plugins/assistant-skills/src/repair-profile.ts": "1cd818e60afe60394dfb4ad4d6a3dee046ece2d6f6e6422d60d915cfb79a459b",
+    "plugins/assistant-skills/src/repair-runtime.ts": "f019f3b09a463db89f9e9af6f6ad6c6c924035f701223aabd77d8bf96a1aeb03",
+    "plugins/assistant-skills/src/service.ts": "ab0be6214854be296a56ea89fef309ac7f9fe6930e4749882c35af16072569eb",
+    "plugins/assistant-skills/src/store.ts": "1e4e54f1fa5ec2893ddc23b8ca9c1bfd587da411778ae26c59a43e6466393e54",
+    "plugins/assistant-skills/tests/repair-admission.spec.ts": "36f366f3938b044c3c26a0196229583c136ba6abe94207eec065936799b59418",
+    "plugins/assistant-skills/tests/repair-agent.spec.ts": "2becf01ba0a02d4ac52dff8ae4f320be8f2b124778ac56a0cb395e03037e619e",
+    "plugins/assistant-skills/tests/repair-continuation-integration.spec.ts": "92a23bf63540187ac27cd202df9836be4cfdb79e4a71713cb80f6543f6964571",
+    "plugins/assistant-skills/tests/repair-native.spec.ts": "8bd7dff0c7c930c156ff3bdd08a28cb3044f6bd9f91d036f666439a402baf456",
+    "plugins/assistant-skills/tests/repair-profile.spec.ts": "9b13e5349e7b573910cca92fd90e17a8b628203ad9bfb48891bd2180f0fd3139",
+    "plugins/assistant-skills/tests/repair-runtime.spec.ts": "6d334b9b2a11ae3091b67ad594b7e400ac4dc906ca693e34d750bd3b2ca09b87",
+    "plugins/assistant-skills/tests/repair-store.spec.ts": "458d69117bb14adac10d27218ba05839a3c88e29669881ffddac291b647f3ac5",
+    "plugins/assistant-skills/tests/service.spec.ts": "57d58bfb618322a1d799d52029ee74d18ccc7073162b2d2cc2d37b40471fdb2a",
+    "pnpm-lock.yaml": "6b9a599bdea39e372393690a12c8d1c10139a8bbe703def5564674b63967cba6"
+  },
+  "nextValidation": {
+    "plannedEntry": "scripts/e2e/web-owner-real-repair.spec.mjs (not yet implemented)",
+    "reuse": [
+      "web-owner-real-route.mjs prepareRealRoute traex-agent branch",
+      "web-owner-helpers.mjs startHost/observePage/query/run",
+      "real-canary-helpers.mjs prospective authority bootstrap and isolated verifier"
+    ],
+    "requiredChanges": [
+      "Provide pre-candidate canaryAdmissionTemplate through the authority helper.",
+      "Grant background draft/compare/canary along with existing promote/watch/rollback permissions.",
+      "Allow one owner skill_repair_arm and derive the repair Session id before dispatch; constrain artifact paths, provider/model and finite budgets, without fixed repaired source or tool sequencing.",
+      "Observe independent repair achievement and prospective canary; promotion requires a later independent real task."
+    ]
+  }
+}

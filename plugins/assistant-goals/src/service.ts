@@ -11,7 +11,7 @@ import { acceptanceCanonicalJson, acceptanceDigest, validateTaskAcceptanceContra
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { GoalStore } from './store.js'
-import type { FailureCaptureGoalIdentity, GoalCheckpoint, GoalControlInput, GoalExecutionRun, GoalRecord, GoalScope, GoalTaskContext, HostFailureEvidenceObservation, HostFailureEvidenceSummary, NativeGoalState, OwnerFailureCaptureSummaryInput, OwnerGoalExecutionSnapshotInput, OwnerGoalRunProof, OwnerGoalRunProofInput } from './types.js'
+import type { FailureCaptureGoalIdentity, GoalCheckpoint, GoalControlInput, GoalExecutionRun, GoalRecord, GoalScope, GoalTaskContext, HostFailureEvidenceObservation, HostFailureEvidenceSummary, HostFailureTriggerEvidence, NativeGoalState, OwnerAuthorizedRepairInput, OwnerFailureCaptureSummaryInput, OwnerFailureTriggerInput, OwnerGoalExecutionSnapshotInput, OwnerGoalRunProof, OwnerGoalRunProofInput } from './types.js'
 import { registerGoalTools } from './tools.js'
 import { GoalExecutionRuntime } from './execution.js'
 import { buildGoalFeedback, type GoalFeedback } from './feedback.js'
@@ -150,6 +150,22 @@ function ownerFailureSummaryInput(value: unknown): value is OwnerFailureCaptureS
     && Object.values(Object.getOwnPropertyDescriptors(failures)).every((descriptor, index) => index === failures.length || descriptor.enumerable && 'value' in descriptor)
     && failures.every(locator)
 }
+function ownerFailureTriggerInput(value: unknown): value is OwnerFailureTriggerInput {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
+  const input = value as Record<string, unknown>
+  return Object.keys(input).length === 7 && ['ownerRouteId', 'principalId', 'workspace', 'preset', 'taskFamilyId', 'failures', 'minimumOccurrences'].every(key => Object.hasOwn(input, key))
+    && ownerFailureSummaryInput({ ...input, repair: { sessionId: 'unused', goalId: 'unused' } })
+}
+function ownerAuthorizedRepairInput(value: unknown): value is OwnerAuthorizedRepairInput {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
+  const input = value as Record<string, unknown>
+  const string = (item: unknown) => typeof item === 'string' && item.length > 0 && item.length <= 16_384
+  return Object.keys(input).length === 8 && ['authorizationId', 'authorizationDigest', 'ownerRouteId', 'scope', 'trigger', 'objective', 'maxGoalRounds', 'expiresAt'].every(key => Object.hasOwn(input, key))
+    && [input.authorizationId, input.authorizationDigest, input.ownerRouteId, input.objective].every(string)
+    && input.scope !== null && typeof input.scope === 'object' && input.trigger !== null && typeof input.trigger === 'object'
+    && Number.isSafeInteger(input.maxGoalRounds) && (input.maxGoalRounds as number) > 0
+    && Number.isSafeInteger(input.expiresAt)
+}
 
 export class AssistantGoalsService extends Service {
   static Config = Config
@@ -168,6 +184,7 @@ export class AssistantGoalsService extends Service {
   #wake: GoalWakeRuntime | undefined
   #outcome: GoalOutcomeRuntime | undefined
   #eventWait: GoalEventWaitRuntime | undefined
+  readonly #ownerRepairBindings = new Map<Agent, { scope: GoalScope; ownerRouteId: string; expiresAt: number; routeReceipt: unknown; currentAuthority: () => void; dispose: () => void }>()
   readonly eventWaitsEnabled!: boolean
   readonly #ownerGoalOutcomeFeedbackTargets = new WeakMap<object, Readonly<{ locator: OwnerGoalOutcomeFeedbackLocator; proof: OwnerGoalOutcomeFeedbackProof }>>()
 
@@ -203,7 +220,7 @@ export class AssistantGoalsService extends Service {
     Object.defineProperty(this, 'eventWaitsEnabled', { value: input.eventWaits === true, enumerable: true, writable: false, configurable: false })
     if (this.eventWaitsEnabled && (wake === undefined || budget === undefined || path === ':memory:' || input.verifyGoalOutcome !== true)) throw new Error('assistant-goals: event waits require durable wake, budgets and verified outcomes')
     this.#store = new GoalStore(path)
-    ctx.effect(() => () => { this.#active = false; this.#store.close() }, 'assistant-goals.store')
+    ctx.effect(() => () => { this.#active = false; for (const binding of this.#ownerRepairBindings.values()) binding.dispose(); this.#ownerRepairBindings.clear(); this.#store.close() }, 'assistant-goals.store')
     this.#execution = new GoalExecutionRuntime(ctx, input.verifyNativeRounds === true ? (path === ':memory:' ? path : `${path}.executions`) : undefined, duration, agent => {
       const scope = this.#scope(agent, 'execute')
       const record = this.#observe(agent, false)
@@ -319,6 +336,19 @@ export class AssistantGoalsService extends Service {
     const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     const policy = this.ctx.get('assistantPolicy') as AssistantPolicyService | undefined
     const owner = delivery?.preferencePrincipalForAgent(agent)
+    const repair = owner === undefined ? this.#ownerRepairBindings.get(agent) : undefined
+    if (repair !== undefined) {
+      if (Date.now() >= repair.expiresAt) throw new Error('assistant-goals: owner repair authorization expired')
+      repair.currentAuthority()
+      const receipt = delivery?.validateOwnerRoute({ authorityId: repair.ownerRouteId, principalId: repair.scope.principalId,
+        workspace: repair.scope.workspace, agentPreset: repair.scope.preset })
+      if (agent.session.header.cwd !== repair.scope.workspace || agent.session.header.agentPreset !== repair.scope.preset
+        || !same(receipt, repair.routeReceipt) || receipt === undefined || receipt.principalRecordId !== repair.scope.principalRecordId || receipt.principalVersion !== repair.scope.principalVersion
+        || receipt.workspace !== repair.scope.workspace || receipt.agentPreset !== repair.scope.preset) throw new Error('assistant-goals: owner repair route changed')
+      const decision = consume ? policy?.authorizeAgent(agent, action, { kind: 'goal', id: 'business-context' }) : policy?.evaluateAgent(agent, action, { kind: 'goal', id: 'business-context' })
+      if (decision?.effect !== 'allow') throw new Error('assistant-goals: policy denied')
+      return repair.scope
+    }
     if (owner === undefined || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-goals: authenticated owner required')
     const decision = consume ? policy?.authorizeAgent(agent, action, { kind: 'goal', id: 'business-context' }) : policy?.evaluateAgent(agent, action, { kind: 'goal', id: 'business-context' })
     if (decision?.effect !== 'allow') throw new Error('assistant-goals: policy denied')
@@ -351,7 +381,8 @@ export class AssistantGoalsService extends Service {
     // First binding must coincide with an authenticated human turn. Never adopt
     // old unbound session goals after an owner/session ownership change.
     const turn = (this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined)?.currentPreferenceTurn(agent)
-    const allowCreate = create && turn !== undefined && acceptanceDigest({ principalId: turn.principalId, ...turn.principalLineage, workspace: turn.scope.workspace, preset: turn.scope.preset }) === acceptanceDigest(scope)
+    const allowCreate = create && (turn !== undefined && acceptanceDigest({ principalId: turn.principalId, ...turn.principalLineage, workspace: turn.scope.workspace, preset: turn.scope.preset }) === acceptanceDigest(scope)
+      || this.#ownerRepairBindings.has(agent))
     const record = this.#store.observe(scope, this.#native(agent, current), allowCreate)
     if (allowCreate && record !== undefined) this.#store.setFocus(scope, String(agent.session.id), record.id)
     return record
@@ -1171,6 +1202,95 @@ export class AssistantGoalsService extends Service {
     if (this.trustedAcceptanceProducerGeneration() !== generation) throw new Error('assistant-goals: acceptance producer changed during aggregation')
     return detached({ ...unsigned, evidence: { producer: 'assistant-goals' as const, generation,
       digest: failureSummaryEvidenceDigest(unsigned, generation) } })
+  }
+
+  /**
+   * Host-only, repair-free evidence for a bounded repeated failure trigger.
+   * This is deliberately separate from the historical achieved-repair summary:
+   * it cannot be mistaken for a completed remediation.
+   */
+  inspectOwnerFailureTrigger = async (value: OwnerFailureTriggerInput, signal?: AbortSignal): Promise<HostFailureTriggerEvidence> => {
+    if (!this.#active || !ownerFailureTriggerInput(value)) throw new Error('assistant-goals: invalid owner failure trigger input')
+    const input = detached(value), generation = this.trustedAcceptanceProducerGeneration()
+    if (typeof generation !== 'string' || generation.length < 1 || generation.length > 256) throw new Error('assistant-goals: invalid acceptance producer generation')
+    const owner = (locator: { sessionId: string; goalId: string }): OwnerGoalExecutionSnapshotInput => ({ ownerRouteId: input.ownerRouteId,
+      principalId: input.principalId, workspace: input.workspace, preset: input.preset, sessionId: locator.sessionId, goalId: locator.goalId })
+    const locators = [...input.failures].sort((left, right) => acceptanceCanonicalJson(left).localeCompare(acceptanceCanonicalJson(right)))
+    if (new Set(locators.map(acceptanceCanonicalJson)).size !== locators.length || input.minimumOccurrences > locators.length) throw new Error('assistant-goals: failure locators are not independent')
+    signal?.throwIfAborted()
+    const first = locators.map(locator => { const snapshot = this.inspectOwnerGoalExecution(owner(locator)); return { locator, snapshot, evidence: this.#ownerFailureEvidence(snapshot) } })
+    const baseline = first[0]!
+    if (!first.every(item => same(item.snapshot.ownerRoute, baseline.snapshot.ownerRoute) && same(item.evidence.scope, baseline.evidence.scope)
+      && same(item.evidence.goal.definition, baseline.evidence.goal.definition) && same(item.evidence.outcomeProfile, baseline.evidence.outcomeProfile))) {
+      throw new Error('assistant-goals: failure trigger owner, definition or profile mismatch')
+    }
+    const proofs = await Promise.all(first.map(item => this.inspectOwnerGoalRunProof({ ...owner(item.locator), runId: item.evidence.runId }, signal)))
+    if (proofs.some((proof, index) => proof.runId !== first[index]!.evidence.runId || proof.definitionDigest !== first[index]!.evidence.goal.definition.digest
+      || !same(proof.outcomeProfile, first[index]!.evidence.outcomeProfile))) throw new Error('assistant-goals: failure run proof does not bind the outcome')
+    signal?.throwIfAborted()
+    const current = locators.map(locator => { const snapshot = this.inspectOwnerGoalExecution(owner(locator)); return { snapshot, evidence: this.#ownerFailureEvidence(snapshot) } })
+    if (this.trustedAcceptanceProducerGeneration() !== generation || current.some((item, index) => !same(item.snapshot.ownerRoute, baseline.snapshot.ownerRoute)
+      || !same(item.evidence.stable, first[index]!.evidence.stable))) throw new Error('assistant-goals: owner failure evidence changed during read')
+    const attestedAt = Date.now()
+    if (current.some(item => item.evidence.observation.acceptance.validUntil <= attestedAt)) throw new Error('assistant-goals: failure trigger outcome evidence expired')
+    const failures = current.map((item, index) => ({ ...item.evidence.observation, traceDigest: proofs[index]!.traceDigest })).sort((left, right) => this.#compareFailureObservations(left, right))
+    const verifiedAt = failures.map(item => item.acceptance.verifiedAt)
+    const unsigned = { protocol: 'assistant-skills/host-failure-trigger/v1' as const, scope: baseline.evidence.scope,
+      taskFamily: { id: input.taskFamilyId, definitionDigest: baseline.evidence.goal.definition.digest, objective: baseline.evidence.goal.definition.objective },
+      failureCategory: input.minimumOccurrences >= 2 ? 'repeated-not-achieved' as const : 'objective-not-achieved' as const,
+      triggerCondition: { kind: 'not-achieved-count' as const, minimumOccurrences: input.minimumOccurrences, windowStartedAt: Math.min(...verifiedAt), windowEndedAt: Math.max(...verifiedAt) },
+      failures: Object.freeze(failures), attestedAt }
+    if (this.trustedAcceptanceProducerGeneration() !== generation) throw new Error('assistant-goals: acceptance producer changed during aggregation')
+    return detached({ ...unsigned, evidence: { producer: 'assistant-goals' as const, generation, digest: acceptanceDigest({ ...unsigned, generation }) } })
+  }
+
+  /** Host-only bridge for a durable, already-authorized background repair. Never exposed as a tool. */
+  startOwnerAuthorizedRepair = async (agent: Agent, value: OwnerAuthorizedRepairInput, currentAuthority: () => void): Promise<GoalRecord> => {
+    if (!this.#active || !ownerAuthorizedRepairInput(value) || typeof currentAuthority !== 'function') throw new Error('assistant-goals: invalid owner repair input')
+    const input = detached(value)
+    const authorized = () => {
+      const producer = this.ctx.get('assistantSkills' as never, false) as { ownsOwnerAuthorizedRepair?(input: OwnerAuthorizedRepairInput, callback: () => void): boolean } | undefined
+      if (producer?.ownsOwnerAuthorizedRepair?.(input, currentAuthority) !== true) throw new Error('assistant-goals: repair continuation capability unavailable')
+      currentAuthority()
+    }
+    authorized()
+    if (agent.session.header.cwd !== input.scope.workspace || agent.session.header.agentPreset !== input.scope.preset) throw new Error('assistant-goals: repair Agent scope mismatch')
+    if (this.ctx.get('agents')?.get(agent.id) !== agent || this.ctx.get('goals')?.get(agent) !== undefined) throw new Error('assistant-goals: fresh exact live agent without a native goal required')
+    if (input.scope.principalId !== input.trigger.scope.principalId || input.scope.principalRecordId !== input.trigger.scope.principalRecordId
+      || input.scope.principalVersion !== input.trigger.scope.principalVersion || input.scope.workspace !== input.trigger.scope.workspace || input.scope.preset !== input.trigger.scope.preset
+      || input.objective !== input.trigger.taskFamily.objective || input.maxGoalRounds > this.#createMaxRounds || this.#createMaxRounds === 0
+      || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now()) throw new Error('assistant-goals: invalid owner repair bounds')
+    if (input.trigger.protocol !== 'assistant-skills/host-failure-trigger/v1' || input.trigger.failures.some(item => item.goal.sessionId === String(agent.session.id))) throw new Error('assistant-goals: repair source or session mismatch')
+    authorized()
+    const observed = await this.inspectOwnerFailureTrigger({ ownerRouteId: input.ownerRouteId, principalId: input.scope.principalId,
+      workspace: input.scope.workspace, preset: input.scope.preset, taskFamilyId: input.trigger.taskFamily.id,
+      failures: input.trigger.failures.map(item => ({ sessionId: item.goal.sessionId, goalId: item.goal.id })), minimumOccurrences: input.trigger.triggerCondition.minimumOccurrences })
+    if (!same({ ...observed, attestedAt: 0, evidence: { ...observed.evidence, digest: '' } }, { ...input.trigger, attestedAt: 0, evidence: { ...input.trigger.evidence, digest: '' } })) throw new Error('assistant-goals: repair trigger changed')
+    if (Date.now() >= input.expiresAt) throw new Error('assistant-goals: owner repair authorization expired')
+    const policy = this.ctx.get('assistantPolicy') as AssistantPolicyService | undefined
+    if (policy?.evaluateAgent(agent, 'create', { kind: 'goal', id: 'business-context' }).effect !== 'allow'
+      || policy.evaluateAgent(agent, 'observe', { kind: 'goal', id: 'business-context' }).effect !== 'allow'
+      || this.#budget === undefined || !this.#budget.hasMeter(agent.options) || this.#outcome === undefined) throw new Error('assistant-goals: background repair policy, meter or outcome unavailable')
+    authorized(); this.#outcome.preflight(input.scope, input.objective); authorized()
+    let active = true
+    const routeReceipt = this.ctx.get('assistantDelivery')?.validateOwnerRoute({ authorityId: input.ownerRouteId, principalId: input.scope.principalId, workspace: input.scope.workspace, agentPreset: input.scope.preset })
+    if (!routeReceipt) throw new Error('assistant-goals: repair owner route unavailable')
+    const binding = { scope: detached(input.scope) as GoalScope, ownerRouteId: input.ownerRouteId, expiresAt: input.expiresAt, routeReceipt, currentAuthority: authorized,
+      dispose: () => { active = false; if (this.#ownerRepairBindings.get(agent) === binding) this.#ownerRepairBindings.delete(agent) } }
+    this.#ownerRepairBindings.set(agent, binding)
+    agent.ctx.effect(() => () => binding.dispose(), 'assistant-goals.owner-repair-binding')
+    try {
+      authorized(); this.#scope(agent, 'create'); this.#scope(agent, 'observe');
+      const native = this.ctx.get('goals')!; native.create(agent, { objective: input.objective, maxGoalRounds: input.maxGoalRounds })
+      authorized(); if (!active || Date.now() >= input.expiresAt) throw new Error('assistant-goals: native goal created but owner repair authority changed; inspect before retrying')
+      const record = this.#store.findNative(input.scope, String(agent.session.id), String(native.get(agent)!.id))
+      if (record === undefined) throw new Error('assistant-goals: native goal created but context could not be indexed; inspect before retrying')
+      this.#outcome.bind(record)
+      return record
+    } catch (error) {
+      if (this.ctx.get('goals')?.get(agent) !== undefined) throw new Error('assistant-goals: native goal created but repair indexing is partial or unknown; inspect before retrying', { cause: error })
+      binding.dispose(); throw error
+    }
   }
 
   #assertOwnerRootObservation(observation: SessionObservation, input: Pick<OwnerGoalRunProofInput, 'sessionId' | 'workspace' | 'preset'>): void {
