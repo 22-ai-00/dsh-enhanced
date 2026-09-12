@@ -168,6 +168,13 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     reviseSnapshot, snapshot: (goalId: string) => structuredClone(snapshots.get(goalId)), canonical: (assessmentId: string) => currentCanonical(assessmentId), advanceCanonicalWatermark: () => { canonicalWatermark++ }, canonicalListenerCount: () => canonicalListeners.size, canonicalReadCount: () => canonicalReads, canonicalFenceCount: () => canonicalFences,
     notifyCanonical: (assessmentId: string) => { for (const listener of canonicalListeners) listener({ subjectKind: 'goal-outcome', subjectRef: assessmentId }) },
     restart: async () => { await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() },
+    restartAfterDatabaseMutation: async (mutate: (database: DatabaseSync) => void) => {
+      await plugin.dispose()
+      const database = new DatabaseSync(join(root, 'skills.sqlite'))
+      try { mutate(database) } finally { database.close() }
+      plugin = await ctx.plugin(AssistantSkillsService, config)
+      await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
+    },
     restartWithExternalHoldouts: async (profiles: ExternalHoldoutProfile[]) => { await plugin.dispose(); config = { ...config, externalHoldouts: profiles }; plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() } }
 }
 function result(value: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['run']>>) {
@@ -917,6 +924,28 @@ test('watch replaces a recorded outcome with the latest canonical revision acros
   await f.restartWithExternalHoldouts([f.profile]); f.notifyCanonical(`assessment-${run.goalId}`); await new Promise<void>(resolve => setImmediate(resolve))
   expect(await f.deployment()).toMatchObject({ state: 'rolled-back' })
   expect(result(await f.execute('skill_status', {}))[0]).toMatchObject({ version: 3, restoredFromVersion: 1 })
+})
+
+test('service restart quarantines a legacy promoted deployment before claim or native tool dispatch', async () => {
+  const f = await revisionDeploymentFixture(), run = await f.use('legacy-migration')
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'achieved')
+  f.notifyCanonical(`assessment-${run.goalId}`)
+  await expect.poll(f.deployment).toMatchObject({ state: 'promoted' })
+  const rowsBefore = runRows(f.root), writesBefore = f.dispatches.filter(name => name === 'write').length
+
+  await f.restartAfterDatabaseMutation(database => {
+    database.prepare("UPDATE skill_watches SET watch_json=json_remove(json_set(watch_json, '$.proofVersion', 'sole-skill-run/v1'), '$.canonicalRevisions', '$.observations[0].canonical') WHERE id=?")
+      .run(f.deployed.deployment.watchId)
+  })
+
+  await expect.poll(f.deployment).toMatchObject({ state: 'blocked' })
+  const denied = await f.execute('skill_run', { goal_id: 'legacy-migration-denied', name: 'saved-write', version: 2, inputs_json: '{"message":"must-not-run"}', invocation_id: 'legacy-migration-denied' })
+  expect(denied.isError).toBe(true)
+  expect(runRows(f.root)).toBe(rowsBefore)
+  expect(f.dispatches.filter(name => name === 'write')).toHaveLength(writesBefore)
+  expect(f.count()).toBe(1)
+  await f.restartWithExternalHoldouts([f.profile])
+  expect(await f.deployment()).toMatchObject({ state: 'blocked' })
 })
 
 test('a newer positive canonical revision remains promoted and never rolls back', async () => {

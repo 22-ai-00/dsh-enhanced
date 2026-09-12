@@ -37,7 +37,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
     ...(productionPersistence ? {} : { compression: 'none' as const, packChunks: false, writeBatchMaxDelayMs: 1 }) })
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
   await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
-  const owners = new Map<Agent, string>(); const handles = new Map<Agent, { dispose(): Promise<void> }>(); const human = new Set<Agent>(); let allowed = true; let routeAvailable = true; const deniedActions = new Set<string>()
+  const owners = new Map<Agent, string>(); const handles = new Map<Agent, { dispose(): Promise<void> }>(); const human = new Set<Agent>(); let allowed = true; let routeAvailable = true; let routeBinding: { id: string; version: number; generation: number; sessionId: string; workspace: string; agentPreset: string } | undefined; const deniedActions = new Set<string>()
   const attestation = (agent: Agent) => {
     const principalId = owners.get(agent)
     return principalId === undefined ? undefined : { scope: { workspace: root, preset: 'primary' }, principalId,
@@ -50,9 +50,14 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
     currentPreferenceTurn: (agent: Agent) => human.has(agent) ? attestation(agent) : undefined,
     goalWakeResultVersion: () => 1, goalWakeSettlementVersion: () => 1,
     resumeScheduledGoal,
+    resolveOwnerRoute: (authorityId: string) => {
+      if (!routeAvailable || routeBinding === undefined || !['owner-route', 'route-owner', 'local/owner', 'route'].includes(authorityId)) throw new Error('owner route revoked')
+      return { authorityId, binding: { ...routeBinding }, snapshot: { bindingId: routeBinding.id, bindingVersion: routeBinding.version, generation: routeBinding.generation } }
+    },
     validateOwnerRoute: ({ authorityId, principalId, workspace, agentPreset }: { authorityId: string; principalId: string; workspace: string; agentPreset: string }) => {
-      if (!routeAvailable) throw new Error('owner route revoked')
-      return { authorityId, principalId, principalRecordId: `record-${principalId}`, principalVersion: 1, workspace, agentPreset }
+      if (!routeAvailable || !['owner-route', 'route-owner', 'local/owner', 'route'].includes(authorityId)) throw new Error('owner route revoked')
+      return { authorityId, principalId, principalRecordId: `record-${principalId}`, principalVersion: 1, workspace, agentPreset,
+        bindingVersion: routeBinding?.version ?? 1, generation: routeBinding?.generation ?? 1 }
     } } as never)
   ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }),
     evaluateAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }), evaluate: () => ({ effect: allowed ? 'allow' : 'deny' }), getBudgetConfig: () => ({ metric: 'automation-runs' }) } as never)
@@ -73,11 +78,14 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   const create = async (id: string, owner?: string) => {
     const handle = await ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'fixture', model: 'fixture' } })
     if (owner !== undefined) owners.set(handle.agent, owner)
+    if (owner !== undefined) routeBinding = { id: `binding-${handle.agent.session.id}`, version: 1, generation: 1, sessionId: String(handle.agent.session.id), workspace: root, agentPreset: 'primary' }
     handles.set(handle.agent, handle)
     cleanups.push(() => handle.dispose())
     return handle.agent
   }
-  return { ctx, root, path, plugin, owners, human, create, reconcileSystem, resumeScheduledGoal, get hostExecutor() { return hostExecutor }, async dispose(agent: Agent) { await handles.get(agent)?.dispose() }, revokeRoute() { routeAvailable = false }, restoreRoute() { routeAvailable = true }, deny() { allowed = false }, denyAction(action: string) { deniedActions.add(action) }, service: ctx.assistantGoals }
+  return { ctx, root, path, plugin, owners, human, create, reconcileSystem, resumeScheduledGoal, get hostExecutor() { return hostExecutor }, async dispose(agent: Agent) { await handles.get(agent)?.dispose() }, revokeRoute() { routeAvailable = false }, restoreRoute() { routeAvailable = true },
+    replaceRouteBinding(value: Partial<NonNullable<typeof routeBinding>>) { if (routeBinding === undefined) throw new Error('missing route binding'); routeBinding = { ...routeBinding, ...value } },
+    deny() { allowed = false }, denyAction(action: string) { deniedActions.add(action) }, service: ctx.assistantGoals }
 }
 const documentAuthority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 1_024 }
 const [compiledDocumentAuthority] = createVerifierAuthorities({ authorities: [documentAuthority] })
@@ -1107,6 +1115,80 @@ describe('owner-scoped native goal context', () => {
 })
 
 describe('owner verified artifact Host boundary', () => {
+  it('issues and revalidates exact terminal whole-goal feedback capabilities without expiring historical receipts', async () => {
+    const f = await harness()
+    await f.create('terminal-session', 'owner')
+    const now = Date.now()
+    const definition = { version: 1, digest: acceptanceDigest({ objective: 'report terminal goal outcome' }), objective: 'report terminal goal outcome' }
+    const scope = { principalId: 'owner', principalRecordId: 'record-owner', principalVersion: 1, workspace: f.root, preset: 'primary' }
+    const stepTask = { kind: 'goal-step' as const, ref: 'terminal-run', goal: { id: 'terminal-goal', definitionVersion: 1,
+      definitionDigest: definition.digest, stepId: 'round-1', runId: 'terminal-run', sessionId: 'terminal-session',
+      nativeGoalId: 'terminal-native', nativeRevision: 1 } }
+    const outcomeTask = { kind: 'goal-outcome' as const, ref: 'terminal-assessment', goal: { id: 'terminal-goal',
+      definitionVersion: 1, definitionDigest: definition.digest, assessmentId: 'terminal-assessment',
+      sessionId: 'terminal-session', nativeGoalId: 'terminal-native' } }
+    const make = (task: typeof stepTask | typeof outcomeTask, id: string, criterionId: string) => createTaskAcceptanceContract({
+      protocol: 'task-acceptance/v4', id, scope: { workspace: f.root, preset: 'primary' },
+      owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, task, objective: definition.objective,
+      profile: { id: `${id}-profile`, version: 1, digest: acceptanceDigest({ id: `${id}-profile` }) }, issuedAt: now - 10_000,
+      expiresAt: now + 10_000, criteria: [{ id: criterionId, kind: 'isolated-process-behavior', authority: { id: 'runner', digest: 'a'.repeat(64) }, artifactPath: 'result.txt', testSetId: 'terminal-cases' }],
+      bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+    })
+    const step = make(stepTask, 'terminal-step-contract', 'terminal-step')
+    const outcome = make(outcomeTask, 'terminal-outcome-contract', 'terminal-outcome')
+    const completedAt = now - 5_000; const validUntil = now - 1_000
+    const makeReceipt = (status: 'passed' | 'failed') => createTaskVerificationReceipt(outcome, { protocol: 'task-verification/v4', id: `terminal-outcome-receipt-${status}`,
+      contractId: outcome.id, contractDigest: outcome.digest, scope: outcome.scope, owner: outcome.owner, task: outcome.task,
+      results: [{ criterionId: 'terminal-outcome', status, reason: 'verified', evidence: [] }],
+      startedAt: completedAt, completedAt, validUntil })
+    let phase: 'complete' | 'blocked' = 'complete'; let receipt = makeReceipt('passed')
+    const snapshot = () => ({ ownerRoute: { generation: 1 }, storedGoal: { id: 'terminal-goal', scope, definition,
+      nativeAtLastObservation: { sessionId: 'terminal-session', goalId: 'terminal-native', revision: 3, phase } },
+    executionRuns: [{ intent: { runId: 'terminal-run', scope, task: stepTask }, dispatchedAt: completedAt - 10,
+      acceptance: { contractId: step.id, contractDigest: step.digest }, execution: { status: 'succeeded', quiescent: true, completedAt } }],
+    outcomeAssessments: [{ contract: outcome, triggerRunId: 'terminal-run', dispatchedAt: completedAt - 10, execution: { status: 'succeeded', quiescent: true, completedAt } }],
+    acceptedTasks: [{ contractId: outcome.id, state: 'done', attempts: 1, reason: null, contract: outcome, receipt,
+      verifierExecutionObservation: { status: 'succeeded', quiescent: true, completedAt, executionRef: 'terminal-assessment' } }] })
+    const ownerRead = vi.fn(snapshot)
+    Object.defineProperty(f.service, 'inspectOwnerGoalExecution', { value: ownerRead })
+    f.replaceRouteBinding({ id: 'binding-terminal', sessionId: 'terminal-session' })
+    const locator = { protocol: 'assistant-goals/owner-goal-outcome-locator/v1' as const, ownerRouteId: 'owner-route',
+      principalId: 'owner', principalRecordId: 'record-owner', principalVersion: 1, workspace: f.root, preset: 'primary',
+      bindingId: 'binding-terminal', bindingVersion: 1, bindingGeneration: 1, sessionId: 'terminal-session',
+      goalId: 'terminal-goal', assessmentId: 'terminal-assessment' }
+    const capability = f.service.issueOwnerGoalOutcomeFeedbackTarget(locator)
+    const proof = f.service.resolveOwnerGoalOutcomeFeedbackTarget(capability)
+    const other = await harness()
+    expect(() => other.service.resolveOwnerGoalOutcomeFeedbackTarget(capability)).toThrow('capability is unavailable')
+    expect(proof).toMatchObject({ protocol: 'assistant-goals/owner-goal-outcome-feedback/v1', locator,
+      goal: { definitionVersion: 1, definitionDigest: definition.digest, nativeGoalId: 'terminal-native', phase: 'complete' },
+      runId: 'terminal-run', profile: outcome.profile, contract: { id: outcome.id, digest: outcome.digest },
+      receipt: { id: receipt.id, digest: receipt.digest, objectiveStatus: 'achieved', completedAt, validUntil },
+      proofDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) })
+    const { proofDigest: _proofDigest, ...unsigned } = proof
+    expect(proof.proofDigest).toBe(acceptanceDigest(unsigned))
+    expect(Object.isFrozen(proof)).toBe(true)
+    phase = 'blocked'
+    expect(() => f.service.resolveOwnerGoalOutcomeFeedbackTarget(capability)).toThrow('identity changed')
+    receipt = makeReceipt('failed')
+    expect(f.service.resolveOwnerGoalOutcomeFeedbackTarget(f.service.issueOwnerGoalOutcomeFeedbackTarget(locator)))
+      .toMatchObject({ goal: { phase: 'blocked' }, receipt: { objectiveStatus: 'not-achieved' } })
+    phase = 'complete'
+    receipt = makeReceipt('passed')
+    for (const changed of [
+      { ownerRouteId: 'wrong-route' }, { assessmentId: 'wrong-assessment' }, { sessionId: 'wrong-session' }, { principalRecordId: 'wrong-record' },
+      { bindingId: 'wrong-binding' }, { bindingVersion: 2 }, { bindingGeneration: 2 },
+    ]) expect(() => f.service.issueOwnerGoalOutcomeFeedbackTarget({ ...locator, ...changed })).toThrow()
+    const providerCapability = f.service.issueOwnerGoalOutcomeFeedbackTarget(locator)
+    ownerRead.mockReturnValueOnce({ ...snapshot(), acceptedTasks: [] })
+    expect(() => f.service.resolveOwnerGoalOutcomeFeedbackTarget(providerCapability)).toThrow('accepted owner goal outcome')
+    const wrongDefinition = snapshot(); wrongDefinition.storedGoal.definition = { ...definition, version: 2 }
+    ownerRead.mockReturnValueOnce(wrongDefinition)
+    expect(() => f.service.issueOwnerGoalOutcomeFeedbackTarget(locator)).toThrow(/outcome|contract identity/u)
+    await f.plugin.dispose()
+    expect(() => f.service.resolveOwnerGoalOutcomeFeedbackTarget(capability)).toThrow('capability is unavailable')
+  })
+
   it('reads Isolation between two owner snapshots and rejects route or receipt changes during that read', async () => {
     const f = await harness()
     const definition = { version: 1, digest: acceptanceDigest({ objective: 'deliver' }), objective: 'deliver' }

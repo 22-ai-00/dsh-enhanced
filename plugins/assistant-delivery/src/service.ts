@@ -7,6 +7,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import Schema from '@deepseek-ai/schemastery'
+import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
 import {
   approvalReviewerOf,
   isAutoReviewEscalation,
@@ -44,7 +45,14 @@ import { DeliveryStore, DeliveryStoreError, type OwnerRouteDispatchGuard } from 
 import { DshDeliveryRuntime } from './agent-runtime.js'
 import { DeliverySessionLeases } from './session-lease-runtime.js'
 import { NativeWebOwner, type NativeWebOwnerConfig, type NativeWebOwnerAccess } from './native-web-owner.js'
-import type { DeliveryGoalWakeInput, DeliveryGoalWakeResult } from './goal-wake-types.js'
+import {
+  validateOwnerGoalOutcomeFeedbackLocator,
+  validateOwnerGoalOutcomeFeedbackProof,
+  type DeliveryGoalWakeInput,
+  type DeliveryGoalWakeResult,
+  type OwnerGoalOutcomeFeedbackLocator,
+  type OwnerGoalOutcomeFeedbackProof,
+} from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptanceHandle, TaskAcceptanceRegistration } from './acceptance.js'
 import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
@@ -150,6 +158,23 @@ const automationObjectiveFeedbackFooter = [
   '任务结果反馈：直接回复本消息并发送 `/feedback achieved`、`/feedback partial` 或 `/feedback not-achieved`。',
   '`helpful` 等只记录偏好，不会被当成任务成败。',
 ].join('\n')
+const goalOutcomeFeedbackFooter = [
+  '',
+  '---',
+  '目标结果反馈：直接回复本消息并发送 `/feedback achieved`、`/feedback partial` 或 `/feedback not-achieved`。',
+  '`helpful` 等只记录偏好，不会被当成目标成败。',
+].join('\n')
+
+interface GoalOutcomeFeedbackAuthority {
+  issueOwnerGoalOutcomeFeedbackTarget(locator: Readonly<OwnerGoalOutcomeFeedbackLocator>): unknown
+  resolveOwnerGoalOutcomeFeedbackTarget(capability: unknown): Readonly<OwnerGoalOutcomeFeedbackProof>
+}
+
+function isGoalOutcomeFeedbackAuthority(value: unknown): value is GoalOutcomeFeedbackAuthority {
+  return typeof value === 'object' && value !== null
+    && typeof (value as Partial<GoalOutcomeFeedbackAuthority>).issueOwnerGoalOutcomeFeedbackTarget === 'function'
+    && typeof (value as Partial<GoalOutcomeFeedbackAuthority>).resolveOwnerGoalOutcomeFeedbackTarget === 'function'
+}
 
 interface AutomationDeliveryEvidenceResolver {
   resolveDeliveryEvidence(input: {
@@ -1646,9 +1671,7 @@ export class AssistantDeliveryService extends Service {
             try { owner.assertSession(target.sessionId) } catch { return denied() }
             return Object.freeze({ kind: 'native-session' as const, sessionId: target.sessionId })
           }
-          const key = createHash('sha256').update(JSON.stringify({ attestation: input.attestation, native: input.native })).digest('hex')
-          return this.enqueueBackground({ sourceId: 'assistant-goals-wake/v1', workspace: target.workspace,
-            bindingId: target.id, idempotencyKey: `goal-wake-result:${key}`, text, format: 'markdown' })
+          return this.publishScheduledGoalResult(input, text, current, denied)
         })
       }
     }
@@ -1661,6 +1684,77 @@ export class AssistantDeliveryService extends Service {
     const publish = this.goalWakeResults.get(input)
     if (publish === undefined) throw new AssistantDeliveryError('policy-denied', 'scheduled goal result is unavailable')
     return publish()
+  }
+
+  private publishScheduledGoalResult(
+    input: DeliveryGoalWakeInput,
+    text: string,
+    current: () => ConversationBinding,
+    denied: () => never,
+  ): OutboxRecord {
+    current()
+    let resolved: ReturnType<DeliveryGoalWakeInput['resolveOutcomeFeedbackTarget']>
+    try { resolved = input.resolveOutcomeFeedbackTarget() } catch { return denied() }
+    const afterResolve = current()
+    let locator: Readonly<OwnerGoalOutcomeFeedbackLocator>
+    let proof: Readonly<OwnerGoalOutcomeFeedbackProof>
+    try {
+      locator = validateOwnerGoalOutcomeFeedbackLocator(resolved.locator)
+      proof = validateOwnerGoalOutcomeFeedbackProof(resolved.proof)
+    } catch { return denied() }
+    const goals = this.ctx.get('assistantGoals' as never, false) as unknown
+    if (!isGoalOutcomeFeedbackAuthority(goals)) return denied()
+    let capabilityProof: Readonly<OwnerGoalOutcomeFeedbackProof>
+    try { capabilityProof = validateOwnerGoalOutcomeFeedbackProof(
+      goals.resolveOwnerGoalOutcomeFeedbackTarget(resolved.capability),
+    ) } catch { return denied() }
+    const finalBinding = current()
+    const owner = this.deliveryStore.getPrincipal(finalBinding.principal)
+    if (acceptanceCanonicalJson(locator) !== acceptanceCanonicalJson(proof.locator)
+      || acceptanceCanonicalJson(proof) !== acceptanceCanonicalJson(capabilityProof)
+      || finalBinding.id !== afterResolve.id || locator.bindingId !== finalBinding.id
+      || locator.bindingVersion !== finalBinding.version
+      || locator.bindingGeneration !== finalBinding.generation
+      || locator.sessionId !== finalBinding.sessionId || locator.workspace !== finalBinding.workspace
+      || locator.preset !== finalBinding.agentPreset
+      || locator.principalId !== externalPrincipalId(finalBinding.principal)
+      || owner?.status !== 'active' || owner.role !== 'owner'
+      || locator.principalRecordId !== owner.id || locator.principalVersion !== owner.version
+      || proof.goal.nativeGoalId !== input.native.goalId
+      || proof.receipt.completedAt > Date.now() || proof.receipt.validUntil <= Date.now()) return denied()
+    let route: ResolvedOwnerRoute
+    try { route = this.resolveOwnerRoute(locator.ownerRouteId) } catch { return denied() }
+    if (route.binding.id !== finalBinding.id || route.binding.version !== finalBinding.version
+      || route.binding.generation !== finalBinding.generation
+      || route.binding.sessionId !== finalBinding.sessionId) return denied()
+    const decision = this.policy.authorize({
+      subject: { kind: 'background', id: 'assistant-goals-wake/v1',
+        workspace: finalBinding.workspace, principal: locator.principalId },
+      action: 'send', resource: { kind: 'message', id: finalBinding.id }, context: { initiator: 'background' },
+    }, { idempotencyKey: `message-send:goal-outcome:${proof.proofDigest}:${finalBinding.id}` })
+    if (decision.effect !== 'allow') throw policyDenied(decision)
+    const rendered = `${text}${goalOutcomeFeedbackFooter}`
+    if (Buffer.byteLength(rendered, 'utf8') > this.config.maxTextBytes) {
+      throw new AssistantDeliveryError('runtime-conflict', 'scheduled goal result exceeds the delivery text limit')
+    }
+    const situation = `goal:${locator.goalId}:definition:${proof.goal.definitionVersion}`
+    return this.deliveryStore.enqueueGoalOutcomeTarget({
+      locator, proof,
+      intent: {
+        idempotencyKey: `goal-outcome:${proof.proofDigest}:${finalBinding.id}`,
+        bindingId: finalBinding.id,
+        target: { conversation: finalBinding.conversation, principal: finalBinding.principal },
+        text: rendered, format: 'markdown',
+        metadata: Object.freeze({
+          'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome',
+          'dsh.learning.goalId': locator.goalId, 'dsh.learning.assessmentId': locator.assessmentId,
+          'dsh.learning.runId': proof.runId, 'dsh.learning.situation': situation,
+          'dsh.learning.occurredAt': String(proof.receipt.completedAt),
+          'dsh.learning.objectiveStatus': proof.receipt.objectiveStatus,
+          'dsh.learning.proofDigest': proof.proofDigest,
+        }),
+      },
+    })
   }
 
   /** Private verifier producer generation; invalidated with this service. */
@@ -2967,6 +3061,12 @@ export class AssistantDeliveryService extends Service {
     if (hostCommand?.name !== 'feedback' || (inbox.envelope.attachments?.length ?? 0) !== 0
       || JSON.stringify(parseFeedbackCommand(hostCommand.rawInput)) !== JSON.stringify(parsed)) return 'invalid-target'
     const metadata = target.intent.metadata
+    let goalOutcomeTarget: ReturnType<DeliveryStore['getGoalOutcomeTarget']>
+    try { goalOutcomeTarget = this.deliveryStore.getGoalOutcomeTarget(target.id) } catch { return 'invalid-target' }
+    if (goalOutcomeTarget !== undefined || metadata?.['dsh.learning.kind'] === 'goal-outcome') {
+      if (goalOutcomeTarget === undefined) return 'invalid-target'
+      return await this.dispatchGoalOutcomeFeedback(binding, inbox, target, parsed, goalOutcomeTarget)
+    }
     // Ordinary Agent replies have no learning metadata.  They are eligible
     // only for Delivery's local, atomic verified-workflow receipt; the Store
     // rebuilds the full Inbox/Outbox fence and abstains unless the source text
@@ -2993,7 +3093,8 @@ export class AssistantDeliveryService extends Service {
       const projectForegroundOwner = async (inspectOnly: boolean) => {
         const sink = this.evaluationSink
         if (sink === undefined || lineage === undefined) return undefined
-        if ((parsed.kind !== 'objective' || inspectOnly) && (sink.registration.ownerRevisionProtocol !== 'owner-objective-revision/v1'
+        if ((parsed.kind !== 'objective' || inspectOnly) && (!['owner-objective-revision/v1', 'owner-objective-revision/v2']
+          .includes(String(sink.registration.ownerRevisionProtocol))
           || typeof sink.registration.inspect !== 'function')) return undefined
         const operationId = `owner-feedback:${createHash('sha256').update(JSON.stringify([inbox.id, inbox.envelopeHash])).digest('hex')}`
         const digest = createHash('sha256').update('assistant-delivery-foreground-objective-feedback-v1\0')
@@ -3104,7 +3205,8 @@ export class AssistantDeliveryService extends Service {
       || proof.proofDigest !== proofDigest) return 'invalid-target'
     const sink = this.evaluationSink
     if (sink === undefined) return 'unavailable'
-    if (parsed.kind !== 'objective' && (sink.registration.ownerRevisionProtocol !== 'owner-objective-revision/v1'
+    if (parsed.kind !== 'objective' && (!['owner-objective-revision/v1', 'owner-objective-revision/v2']
+      .includes(String(sink.registration.ownerRevisionProtocol))
       || typeof sink.registration.inspect !== 'function')) return 'unavailable'
     // One immutable Automation run is one learning subject. The objective
     // status and Inbox event deliberately do not enter the key: replays and
@@ -3154,6 +3256,109 @@ export class AssistantDeliveryService extends Service {
     } catch (error) {
       if (typeof error === 'object' && error !== null && 'code' in error
         && ['idempotency-conflict', 'version-conflict'].includes(String((error as { code?: unknown }).code))) return 'conflict'
+      return 'unknown'
+    }
+  }
+
+  private async dispatchGoalOutcomeFeedback(
+    binding: Readonly<ConversationBinding>,
+    inbox: Readonly<InboxRecord>,
+    target: Readonly<OutboxRecord>,
+    parsed: import('./feedback-command.js').ObjectiveCommand,
+    durable: NonNullable<ReturnType<DeliveryStore['getGoalOutcomeTarget']>>,
+  ): Promise<import('./feedback-command.js').ObjectiveCommandResult> {
+    const metadata = target.intent.metadata
+    const locator = durable.locator
+    const immutableProof = durable.proof
+    const situation = `goal:${locator.goalId}:definition:${immutableProof.goal.definitionVersion}`
+    if (metadata?.['dsh.learning.schemaVersion'] !== '3'
+      || metadata['dsh.learning.kind'] !== 'goal-outcome'
+      || metadata['dsh.learning.goalId'] !== locator.goalId
+      || metadata['dsh.learning.assessmentId'] !== locator.assessmentId
+      || metadata['dsh.learning.runId'] !== immutableProof.runId
+      || metadata['dsh.learning.situation'] !== situation
+      || metadata['dsh.learning.occurredAt'] !== String(immutableProof.receipt.completedAt)
+      || metadata['dsh.learning.objectiveStatus'] !== immutableProof.receipt.objectiveStatus
+      || metadata['dsh.learning.proofDigest'] !== immutableProof.proofDigest
+      || !target.intent.text.endsWith(goalOutcomeFeedbackFooter)) return 'invalid-target'
+    const owner = this.deliveryStore.getPrincipal(binding.principal)
+    if (locator.bindingId !== binding.id || locator.bindingVersion !== binding.version
+      || locator.bindingGeneration !== binding.generation || locator.sessionId !== binding.sessionId
+      || locator.workspace !== binding.workspace || locator.preset !== binding.agentPreset
+      || locator.principalId !== externalPrincipalId(binding.principal)
+      || owner?.status !== 'active' || owner.role !== 'owner'
+      || locator.principalRecordId !== owner.id || locator.principalVersion !== owner.version) return 'invalid-target'
+    let route: ResolvedOwnerRoute
+    try { route = this.resolveOwnerRoute(locator.ownerRouteId) } catch { return 'invalid-target' }
+    if (route.binding.id !== binding.id || route.binding.version !== binding.version
+      || route.binding.generation !== binding.generation || route.binding.sessionId !== binding.sessionId) {
+      return 'invalid-target'
+    }
+    const issuer = this.context.get('assistantGoals' as never, false) as unknown
+    if (!isGoalOutcomeFeedbackAuthority(issuer)) return 'unavailable'
+    let goalOutcomeCapability: unknown
+    try { goalOutcomeCapability = issuer.issueOwnerGoalOutcomeFeedbackTarget(locator) } catch { return 'invalid-target' }
+    const resolver = this.context.get('assistantGoals' as never, false) as unknown
+    if (!isGoalOutcomeFeedbackAuthority(resolver)) return 'unavailable'
+    let currentProof: Readonly<OwnerGoalOutcomeFeedbackProof>
+    try {
+      currentProof = validateOwnerGoalOutcomeFeedbackProof(
+        resolver.resolveOwnerGoalOutcomeFeedbackTarget(goalOutcomeCapability),
+      )
+    } catch { return 'invalid-target' }
+    // Expiry is not an identity change: the owner is allowed to label the
+    // immutable result after its verifier freshness window has elapsed.
+    if (acceptanceCanonicalJson(currentProof) !== acceptanceCanonicalJson(immutableProof)) return 'invalid-target'
+    const sink = this.evaluationSink
+    const registration = sink?.registration as unknown as Readonly<{
+      ownerRevisionProtocol?: string
+      issueCapability(claims: unknown): unknown
+      inspect?(capabilityReceipt: unknown): import('@dsh-enhanced/assistant-evaluation').OwnerObjectiveState | undefined
+      append(input: { capabilityReceipt: unknown; runId: string; outboxId: string; chatId: string; principalId: string; bindingId: string; idempotencyKey: string }): unknown
+    }> | undefined
+    if (sink === undefined || registration?.ownerRevisionProtocol !== 'owner-objective-revision/v2'
+      || typeof registration.inspect !== 'function') return 'unavailable'
+    const objectiveStatus = parsed.kind === 'objective-status' ? 'achieved' : parsed.objectiveStatus
+    const operationId = `owner-feedback:${createHash('sha256')
+      .update(JSON.stringify([inbox.id, inbox.envelopeHash])).digest('hex')}`
+    const digest = createHash('sha256').update('assistant-delivery-goal-outcome-feedback-v1\0')
+      .update(JSON.stringify([binding.workspace, binding.agentPreset, locator.goalId, locator.assessmentId, target.id]))
+      .digest('hex')
+    const idempotencyKey = parsed.kind === 'objective-revision'
+      ? operationId : `assistant-delivery:goal-outcome-feedback-v1:${digest}`
+    const claims = Object.freeze({
+      scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+      situation, subjectKind: 'goal-outcome' as const, subjectRef: locator.assessmentId,
+      runId: locator.assessmentId, outboxId: target.id, chatId: binding.conversation.chat,
+      principalId: locator.principalId, bindingId: binding.id, objectiveStatus, goalOutcomeCapability,
+      ownerCommand: { principalRecordId: locator.principalRecordId, principalVersion: locator.principalVersion,
+        operationId, action: parsed.kind === 'objective-revision' ? parsed.action : 'initial' as const,
+        ...(parsed.kind === 'objective-revision'
+          ? { expectedVersion: parsed.expectedVersion, previousStatus: parsed.previousStatus }
+          : {}),
+      },
+      occurredAt: immutableProof.receipt.completedAt,
+      initialIdempotencyKey: `assistant-delivery:goal-outcome-feedback-v1:${digest}`,
+      idempotencyKey,
+    })
+    try {
+      const capabilityReceipt = registration.issueCapability(claims)
+      if (this.evaluationSink?.token !== sink.token) return 'unknown'
+      if (parsed.kind === 'objective-status') return registration.inspect(capabilityReceipt) ?? 'recorded'
+      const receipt = await Promise.resolve(registration.append({
+        capabilityReceipt, runId: locator.assessmentId, outboxId: target.id,
+        chatId: binding.conversation.chat, principalId: locator.principalId,
+        bindingId: binding.id, idempotencyKey,
+      }))
+      if (typeof receipt !== 'object' || receipt === null
+        || typeof (receipt as Partial<{ idempotencyKey: string }>).idempotencyKey !== 'string') return 'unknown'
+      return (receipt as { ownerFeedbackState?: import('@dsh-enhanced/assistant-evaluation').OwnerObjectiveState })
+        .ownerFeedbackState ?? 'recorded'
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error
+        && ['idempotency-conflict', 'version-conflict'].includes(String((error as { code?: unknown }).code))) {
+        return 'conflict'
+      }
       return 'unknown'
     }
   }
@@ -3604,6 +3809,52 @@ export class AssistantDeliveryService extends Service {
 
   #notificationGuard(record: Readonly<OutboxRecord>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
     const metadata = record.intent.metadata
+    let goalTarget: ReturnType<DeliveryStore['getGoalOutcomeTarget']>
+    try { goalTarget = this.deliveryStore.getGoalOutcomeTarget(record.id) } catch {
+      return { outcome: 'not-sent', failureCode: 'goal-outcome-target-invalid', retryable: false }
+    }
+    if (goalTarget !== undefined || metadata?.['dsh.learning.kind'] === 'goal-outcome') {
+      if (goalTarget === undefined) {
+        return { outcome: 'not-sent', failureCode: 'goal-outcome-target-missing', retryable: false }
+      }
+      const locator = goalTarget.locator
+      const proof = goalTarget.proof
+      const binding = this.deliveryStore.getBinding(record.intent.bindingId)
+      const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+      try {
+        if (proof.receipt.completedAt > Date.now() || proof.receipt.validUntil <= Date.now()) {
+          throw new Error('goal outcome receipt expired')
+        }
+        // One captured service reference must both issue and resolve the
+        // process-local capability. A replacement cannot inherit authority.
+        const goals = this.context.get('assistantGoals' as never, false) as unknown
+        if (!isGoalOutcomeFeedbackAuthority(goals)) throw new Error('Goals unavailable')
+        const capability = goals.issueOwnerGoalOutcomeFeedbackTarget(locator)
+        const currentGoals = this.context.get('assistantGoals' as never, false) as unknown
+        if (!isGoalOutcomeFeedbackAuthority(currentGoals)) throw new Error('current Goals unavailable')
+        const currentProof = validateOwnerGoalOutcomeFeedbackProof(
+          currentGoals.resolveOwnerGoalOutcomeFeedbackTarget(capability),
+        )
+        if (acceptanceCanonicalJson(currentProof) !== acceptanceCanonicalJson(proof)) {
+          throw new Error('goal outcome proof changed')
+        }
+        const route = this.resolveOwnerRoute(locator.ownerRouteId)
+        if (binding?.status !== 'active' || route.binding.id !== binding.id
+          || route.binding.version !== locator.bindingVersion
+          || route.binding.generation !== locator.bindingGeneration
+          || route.binding.sessionId !== locator.sessionId || binding.workspace !== locator.workspace
+          || binding.agentPreset !== locator.preset || externalPrincipalId(binding.principal) !== locator.principalId
+          || owner?.status !== 'active' || owner.role !== 'owner'
+          || owner.id !== locator.principalRecordId || owner.version !== locator.principalVersion) {
+          throw new Error('goal outcome route changed')
+        }
+        const permission = this.policy.evaluate({ subject: { kind: 'background', id: 'assistant-goals-wake/v1',
+          workspace: locator.workspace, principal: locator.principalId }, action: 'send',
+        resource: { kind: 'message', id: binding.id }, context: { initiator: 'background' } })
+        if (permission.effect !== 'allow') throw new Error('goal outcome send denied')
+      } catch { return { outcome: 'not-sent', failureCode: 'goal-outcome-authority-revoked', retryable: false } }
+      return undefined
+    }
     const nativeKeys = Object.keys(metadata ?? {}).filter(key => key.startsWith('dsh.native-notice'))
     if (nativeKeys.length === 0) return undefined
     if (metadata?.['dsh.native-notice'] !== 'v1') return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }

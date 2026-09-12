@@ -20,6 +20,14 @@
 
 `/new` 会轮换 session，但保留该聊天已经选择的模型和 effort。`/stop` 不会清空上下文。
 
+## 整体目标结果反馈
+
+机器人通过外部 event-wait scheduled wake（当前 producer 为 `goal-event-wake-*`）发送整体目标结果时，结果末尾会带固定反馈说明；普通 `goal_schedule` 不外发该结果。请直接回复该条结果消息：`/feedback status` 查看当前版本；`/feedback correct <version> <previous-status> <achieved|partial|not-achieved>` 以 CAS 更正；`/feedback withdraw <version> <previous-status>` 撤回为 `unknown`。Verifier 判断已被采纳为 revision 1；裸 `achieved|partial|not-achieved` 只有与该 baseline 相同才幂等，若要改变判断必须先 `status`，再使用返回的 version/status 显式 `correct`。冲突时也按该流程重试。
+
+这条能力不依赖新的 Lark 卡片或回调。adapter 只提供原消息的 provider id、当前 actor 与 conversation；Delivery 会从 schema 20 typed sidecar 重建 owner/route/binding/Session，Goals 与 Verifier 重验 exact Goal definition、assessment、run、profile、contract 和 receipt，Evaluation v2 再执行版本 CAS/retract。复制文字、回复错误消息、错 owner、绑定换代或当前 provider identity 漂移都会失败关闭。结果发送前还要求 receipt 新鲜以及当前 route/Policy；消息已经发送后可以在 receipt 过期时纠正历史判断，但不能绕过不可变身份重验。
+
+当前工程回归使用本地 Delivery transport/Host fixture，没有真实飞书云端、真实模型或生产 cohort 证据。原生 Web 会话没有外部 provider reply identity，不支持这条 reply-feedback 路径。
+
 ## 模型选择
 
 私聊机器人发送 `/model` 后，会收到 schema 2.0 卡片。依次选择“分组 / Provider”“模型”“Effort 程度”，再点击“确认选择”。选择 provider 时，同一卡片立刻刷新为该分组的模型；选择模型时再刷新为该模型真实支持的 effort。没有独立 effort 档位的模型只显示“默认（该模型无 effort 档位）”。

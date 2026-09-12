@@ -272,4 +272,30 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
     expect(second.runtime.reconcileCompletion(agent)).toBe(true)
     expect(completeCalls).toBe(1)
   })
+
+  it('does not reuse an older achieved assessment for a later wake settlement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'goal-outcome-wake-binding-')); roots.push(root)
+    const paths = { verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcomes.sqlite') }
+    let current = record(root); const now = Date.now(); const old = run(current, now); const agent = {} as Agent
+    let nativeRuns: readonly GoalExecutionRun[] = []
+    const fixture = await runtimeHarness(paths, () => current, () => nativeRuns)
+    fixture.runtime.bind(current); fixture.runtime.prepare(agent, old)
+    const settledOld = { ...old, dispatchedAt: now, execution: { status: 'succeeded' as const, quiescent: true, completedAt: now + 1 } }
+    nativeRuns = [settledOld]
+    await fixture.runtime.settled(agent, settledOld, () => {})
+    expect(fixture.runtime.view(current).status).toBe('achieved')
+
+    const wake = { sessionId: current.native.sessionId, goalId: current.native.goalId, revision: 2, roundsStarted: 1, maxGoalRounds: 3 }
+    current = { ...current, native: { ...current.native, phase: 'complete', revision: 4, roundsStarted: 2 } }
+    expect(fixture.runtime.verifiedWakeOutcome(current, wake)).toBeUndefined()
+
+    const currentRun = run({ ...current, native: { ...current.native, phase: 'active', revision: 3 } }, now + 2)
+    currentRun.intent.runId = 'run-current'
+    currentRun.intent.task.ref = 'run-current'
+    currentRun.intent.task.goal.runId = 'run-current'
+    currentRun.intent.task.goal.nativeRevision = 3
+    currentRun.intent.admission.round = 2
+    nativeRuns = [{ ...currentRun, dispatchedAt: now + 2, execution: { status: 'succeeded', quiescent: true, completedAt: now + 3 } }, settledOld]
+    expect(fixture.runtime.verifiedWakeOutcome(current, wake)).toBeUndefined()
+  })
 })

@@ -162,8 +162,11 @@ Delivery's authenticated capability can explicitly correct or withdraw one exact
 
 Legacy schema 7 owner rows are adopted lazily through the exact Host delivery capability and stable initial idempotency key. Adoption verifies the run and Outbox references without rewriting raw history. Host consumers receive revision notifications and must also revalidate durable proof on startup / dispatch; a failed listener cannot prevent other consumers or the projection outbox from progressing.
 
-整体目标的独立 v3 回执使用 `goal-outcome/<assessmentId>` subject，与同 ref 的步骤、前台和 Automation 分离，仍按完整目标定义归因。schema 11 在事务内迁移旧 task projections 并保留历史；owner 反馈修订工具的原支持范围不变。
-当前 Delivery/Lark owner 纠正入口仍只覆盖既有前台与 Automation 结果，没有 whole-goal correction/withdraw UI。仓库测试可用 Host 工程夹具构造后续 `goal-outcome` revision 来验证消费者，但这不是一次真实 owner、Delivery 或 Lark 纠正链路验收。
+整体目标的独立 v3 回执使用 `goal-outcome/<assessmentId>` subject，与同 ref 的步骤、前台和 Automation 分离，仍按完整目标定义归因。schema 11 在事务内迁移旧 task projections 并保留历史。Delivery v2 producer 可携带 current Goals process-local capability，把 exact whole-goal Verifier receipt 惰性采纳为 owner revision 1；Evaluation 不信任 Delivery metadata，而会通过当前 Goals provider 重建 proof，并从当前 Verifier `inspectAcceptedTask()` 独立核对 owner/scope、Goal definition、Session/native Goal、assessment、run、profile、contract、receipt 及 digest。provider generation、capability 或任一绑定变化时 fail closed。
+
+同一 `goal-outcome/<assessmentId>` 随后使用既有 owner CAS 协议：`correct` 必须匹配当前 version 与 previous status，`withdraw` 写入 canonical `unknown` retract tombstone，重复命令幂等，乱序或同版本冲突保留拒绝审计而不覆盖 current projection。baseline adoption 在一个事务中把 exact immutable Verifier outcome 认领为 revision 1；如果 Evaluation 在原 receipt 产生时离线且恢复前 receipt 已过期，则只在当前 Goals opaque proof、当前 Verifier 原始 service identity/generation 以及 exact contract/receipt/execution 全部重验后，同构补写原 `assistant-verifier:<receiptId>` outcome、projection、outbox、watermark 与 revision 1，不续期、改写或伪造 receipt。后续每次 correction/retract 的新 owner revision、task projection、scope watermark 和 projection outbox 在一个 Evaluation SQLite writer transaction 中提交。因此 Skills 的 exact canonical monitor 会看到 v2 correction/retract，而不会把原始 immutable receipt 永久当作 achieved。历史回执可以在有效期后接受 owner 标注，但每次 issue/inspect/append 都必须由当前 Goals/Verifier 重验其不可变身份；这不是放宽发送前 freshness。
+
+仓库回归使用本地 Delivery/Goals/Verifier/Evaluation fixture 验证上述 Host 协议；没有连接真实 Lark、真实模型或生产 deployment cohort，不能写成真实渠道验收或长期收益。
 
 
 `memory-v1` 保留首轮公开试验的原始题目与判定，可按原计划复现。`memory-v2` 是单独版本，明确当前资料 ID、Memory provenance URI 与 `claim:<key>` 的引用约定；改进题目说明后必须建立新计划，不会重写 v1 的失败结果。

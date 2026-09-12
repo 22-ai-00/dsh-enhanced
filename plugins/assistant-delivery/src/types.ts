@@ -2,6 +2,7 @@ import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attach
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type { ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
+import type { OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from './goal-wake-types.js'
 
 export interface ExternalPrincipalKey {
   channel: string
@@ -567,6 +568,13 @@ export interface OutboxRecord {
   failureCode?: string
   createdAt: number
   updatedAt: number
+}
+
+/** Durable authority sidecar for one typed scheduled whole-goal result. */
+export interface DeliveryGoalOutcomeTarget {
+  readonly outboxId: string
+  readonly locator: Readonly<OwnerGoalOutcomeFeedbackLocator>
+  readonly proof: Readonly<OwnerGoalOutcomeFeedbackProof>
 }
 
 export type DeadLetterResolutionKind = 'inbox' | 'outbox'

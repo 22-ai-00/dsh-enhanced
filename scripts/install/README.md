@@ -78,7 +78,7 @@ Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 r
 
 autonomy 安装在 Host 激活检查后还会执行有限隔离诊断；已撤销、过期或耗尽的旧 grant 会使这一步失败，重复安装不会恢复它。日常复查使用 `./scripts/install/doctor.sh --profile web --require-isolation`。它读取已组合配置、Delivery owner 和 Isolation 的持久账本，报告累计次数/预留时长、剩余额度及 unknown 作业，再用同一镜像和 Docker 路径做临时探测；探测后重新核对配置及授权。该命令不启动第二个 Host，不配对、迁移账本、续期或消费业务 grant，可在已有 Host 运行时诊断。
 
-诊断当前只支持 installer-managed Web owner 与单一 `autonomy-<profile>` grant、Delivery schema 19 和 Isolation schema 6；缺失、旧版或不一致的状态明确失败，需先按正常升级/迁移流程处理。通过表示该时刻的有限隔离检查通过，仍不能证明后续动态 Policy、实际资源准入、模型计量、Goal 独立验收或外部 Actions 可用；这些能力在结果中明确未检查。不要通过删除账本或重跑 setup 绕过已消耗的授权。
+诊断当前只支持 installer-managed Web owner 与单一 `autonomy-<profile>` grant、Delivery schema 20 和 Isolation schema 6；缺失、旧版或不一致的状态明确失败，需先按正常升级/迁移流程处理。通过表示该时刻的有限隔离检查通过，仍不能证明后续动态 Policy、实际资源准入、模型计量、Goal 独立验收或外部 Actions 可用；这些能力在结果中明确未检查。不要通过删除账本或重跑 setup 绕过已消耗的授权。
 
 在该受管作用域中，模型只能调用受支持的隔离、目标上下文/检查点和获准的有限 Actions 工具，不能退回宿主 shell。Actions 默认无 grant，Keychain 不创建凭据。模型配置沿用安装器的独立引导；GitHub 目标/凭据、独立目标验收、后台唤醒以及完整自治生命周期仍需后续配置与验证。不要通过删除账本重置授权。
 

@@ -242,6 +242,10 @@ executionBudget:
 
 Verifier 回执、Goals 数据库投影与原生 Session 事件独立提交。`nativeCompletion: complete` 表示当前读回的原生状态，不是跨库原子提交或操作系统崩溃后的 exactly-once 保证；原生完成追加不等待独立 Session flush。恢复只在已有状态、准确轮次与当前授权可核对时收敛，投影/Session 不一致需要继续对账。
 
+外部 event-wait scheduled wake（当前仅 `goal-event-wake-*`，普通 `goal_schedule` 不外发结果）在 terminal settlement 后可由 Goals 为 Delivery 生成 `assistant-goals/owner-goal-outcome-feedback/v1` proof 和 opaque、process-local、generation-bound capability。locator 精确固定 owner route 与 principal lineage、binding version/generation、workspace/preset、Session、业务 Goal 和 assessment；proof 另固定定义/native Goal、trigger run、outcome profile、contract 与 Verifier receipt。目标必须为 `complete | blocked`，并且 assessment 只能由本次 wake 的 native revision、terminal round、唯一 succeeded run 与 triggerRunId 精确定位；旧成功 assessment 或当前 run 没有对应 assessment 时失败关闭。生成前后都重读当前 owner route，并要求 assessment 与 trigger run 已 succeeded/quiescent、Verifier accepted task 为 exact `done`。该接口不接受调用方提供 verdict，也不注册为模型工具。
+
+capability 只能由当前 live Goals service 解析；provider reload 后旧 object 失效。每次解析都会重建 owner route、Goals snapshot 与当前 Verifier identity。为支持 owner 对已投递历史结果的后续纠正，proof identity 的重建不要求 receipt 此刻仍新鲜；发送前的新鲜度由 Delivery 单独强制。definition、owner、route、binding、Session、assessment、run、profile、contract 或 receipt 任一漂移仍会拒绝。Web 原生会话只复用原 Session 中已持久的回复，不生成 provider reply identity，因此 Delivery 不会为它持久化或暴露这条 whole-goal owner feedback target。
+
 
 ## Host 任务检索上下文
 

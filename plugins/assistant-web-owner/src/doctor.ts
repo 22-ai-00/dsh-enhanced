@@ -86,7 +86,7 @@ export function inspectAutonomyOwner(profile: AutonomyDoctorProfile): { status: 
     if (!lstatSync(profile.databasePath).isFile() || realpathSync(profile.grant.workspace) !== profile.grant.workspace) return { status: 'unavailable' }
     database = new DatabaseSync(profile.databasePath, { readOnly: true })
     database.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 1000; BEGIN;')
-    if ((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 19) return { status: 'unavailable' }
+    if ((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 20) return { status: 'unavailable' }
     const row = database.prepare('SELECT principal_json, role, status, version, linked_to_id FROM delivery_principals WHERE id = ?').get(profile.grant.principalRecordId)
     if (!row || row.role !== 'owner' || row.status !== 'active' || row.version !== profile.grant.principalVersion || row.linked_to_id !== null
       || typeof row.principal_json !== 'string' || !isDeepStrictEqual(JSON.parse(row.principal_json), profile.principal)) return { status: 'mismatch' }

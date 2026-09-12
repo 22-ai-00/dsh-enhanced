@@ -37,6 +37,7 @@ import type {
   StoredSelfAssessment,
   StoredOutcome,
   TrustedTaskLearningProjectionReceipt,
+  TrustedGoalOutcomeOwnerProof,
 } from './types.js'
 
 export type EvaluationStoreErrorCode = 'idempotency-conflict' | 'invalid-input' | 'not-found' | 'version-conflict'
@@ -490,7 +491,8 @@ function isAuthenticatedOwnerFeedback(row: OutcomeRow): boolean {
     && row.source_id === 'assistant-delivery/typed-owner-feedback'
     && row.evaluator_id === 'assistant-delivery-owner-feedback'
     && row.evaluator_version === '2'
-    && (containsEvidence(row, 'automation-run') || containsEvidence(row, 'foreground-turn'))
+    && (containsEvidence(row, 'automation-run') || containsEvidence(row, 'foreground-turn')
+      || containsEvidence(row, 'goal-outcome'))
     && containsEvidence(row, 'delivery-outbox')
 }
 
@@ -592,9 +594,152 @@ export class EvaluationStore {
     } catch (error) { this.#database.exec('ROLLBACK'); throw error }
   }
 
+  /**
+   * Adopt the exact current Verifier whole-goal judgement as revision one for
+   * an authenticated owner lineage. The immutable Verifier outcome remains the
+   * authority row; the Goals proof is checked by the service and is not stored.
+   */
+  adoptTrustedGoalOutcomeOwnerBaseline(
+    claims: Readonly<import('./types.js').TrustedDeliveryEvaluationClaims>,
+    proof: Readonly<TrustedGoalOutcomeOwnerProof>,
+    verifierOutcome: Readonly<OutcomeEnvelope>,
+  ): boolean {
+    if (claims.subjectKind !== 'goal-outcome' || claims.ownerCommand === undefined) {
+      throw new EvaluationStoreError('invalid-input', 'goal outcome owner baseline claims are invalid')
+    }
+    const { scopeKey } = canonicalEvaluationScope(claims.scope)
+    const subjectRef = boundedText(claims.subjectRef, 'goal outcome assessmentId', 1_000)
+    const subject = taskSubject(scopeKey, '', [{ kind: 'goal-outcome', ref: subjectRef }])
+    const lineage = JSON.stringify([
+      claims.ownerCommand.principalRecordId,
+      claims.ownerCommand.principalVersion,
+    ])
+    const normalized = this.#normalize(verifierOutcome)
+    const payloadHash = digest(normalized)
+    const recordedAt = timestamp(this.#now(), 'recordedAt')
+    const outcomeId = `outcome-${randomUUID()}`
+    const verifierSubject = taskSubject(normalized.scopeKey, outcomeId, normalized.evidence)
+    const exactEvidence = (entries: readonly EvaluationEvidenceRef[], kind: string, ref: string, digestValue?: string) => entries.some(item => (
+      item.kind === kind && item.ref === ref
+      && (digestValue === undefined || item.digest === digestValue)
+    ))
+    if (normalized.scopeKey !== scopeKey || normalized.situation !== claims.situation
+      || normalized.objectiveStatus !== proof.receipt.objectiveStatus
+      || normalized.deliveryStatus !== 'not-required' || normalized.trust !== 'trusted'
+      || normalized.source.kind !== 'evaluator' || normalized.source.id !== 'assistant-verifier'
+      || normalized.evaluator.id !== 'assistant-verifier' || normalized.evaluator.version !== '1'
+      || normalized.occurredAt !== proof.receipt.completedAt
+      || normalized.idempotencyKey !== `assistant-verifier:${proof.receipt.id}`
+      || verifierSubject.kind !== 'goal-outcome' || verifierSubject.ref !== subjectRef
+      || normalized.evidence.length !== 4
+      || !exactEvidence(normalized.evidence, 'goal-outcome', subjectRef)
+      || !exactEvidence(normalized.evidence, 'acceptance-contract', proof.contract.id, proof.contract.digest)
+      || !exactEvidence(normalized.evidence, 'verification-receipt', proof.receipt.id, proof.receipt.digest)
+      || normalized.evidence.filter(item => item.kind === 'execution' && item.ref === subjectRef).length !== 1) {
+      throw new EvaluationStoreError('invalid-input', 'trusted goal outcome baseline input is invalid')
+    }
+    let changed = false
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      let row = this.#database.prepare(`
+        SELECT outcome.* FROM evaluation_outcomes outcome
+        WHERE outcome.task_subject_key = ? AND outcome.task_subject_kind = 'goal-outcome'
+          AND outcome.task_subject_ref = ? AND outcome.trust = 'trusted'
+          AND outcome.source_kind = 'evaluator' AND outcome.source_id = 'assistant-verifier'
+          AND outcome.evaluator_id = 'assistant-verifier' AND outcome.evaluator_version = '1'
+        ORDER BY outcome.recorded_at DESC, outcome.id DESC LIMIT 1
+      `).get(subject.key, subjectRef) as unknown as OutcomeRow | undefined
+      if (row === undefined) {
+        const metric = normalized.metrics
+        this.#database.prepare(`
+          INSERT INTO evaluation_outcomes(
+            id, idempotency_key, payload_hash, scope_key, workspace, preset, situation,
+            execution_status, objective_status, delivery_status, source_kind, source_id,
+            trust, evidence_json, metrics_json, cost_usd_micros, latency_ms, input_tokens,
+            output_tokens, tool_calls, occurred_at, recorded_at, evaluator_id, evaluator_version,
+            task_subject_key, task_subject_kind, task_subject_ref)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(idempotency_key) DO NOTHING
+        `).run(
+          outcomeId, normalized.idempotencyKey, payloadHash, normalized.scopeKey,
+          normalized.scope.workspace, normalized.scope.preset, normalized.situation,
+          normalized.executionStatus, normalized.objectiveStatus, normalized.deliveryStatus,
+          normalized.source.kind, normalized.source.id, normalized.trust,
+          JSON.stringify(normalized.evidence), JSON.stringify(normalized.metrics),
+          metric.costUsdMicros ?? null, metric.latencyMs ?? null, metric.inputTokens ?? null,
+          metric.outputTokens ?? null, metric.toolCalls ?? null, normalized.occurredAt,
+          recordedAt, normalized.evaluator.id, normalized.evaluator.version,
+          verifierSubject.key, verifierSubject.kind, verifierSubject.ref,
+        )
+        const winner = this.#database.prepare('SELECT * FROM evaluation_outcomes WHERE idempotency_key = ?')
+          .get(normalized.idempotencyKey) as unknown as OutcomeRow
+        if (winner.payload_hash !== payloadHash || winner.task_subject_key !== verifierSubject.key
+          || winner.task_subject_kind !== verifierSubject.kind || winner.task_subject_ref !== verifierSubject.ref) {
+          throw new EvaluationStoreError('idempotency-conflict', 'trusted verifier outcome identity was reused')
+        }
+        this.#database.prepare(`
+          INSERT INTO evaluation_task_projections(
+            subject_key, scope_key, subject_kind, subject_ref, updated_at)
+          VALUES (?, ?, ?, ?, ?) ON CONFLICT(subject_key) DO NOTHING
+        `).run(verifierSubject.key, winner.scope_key, verifierSubject.kind, verifierSubject.ref, winner.recorded_at)
+        const refreshed = this.#refreshTaskProjection(verifierSubject.key)
+        if (refreshed.learningVersionChanged) {
+          this.#database.prepare(`
+            INSERT INTO evaluation_projection_outbox(
+              evaluation_id, status, attempt_count, next_attempt_at,
+              last_failure_at, last_failure_code, created_at, updated_at)
+            VALUES (?, 'pending', 0, ?, NULL, NULL, ?, ?)
+            ON CONFLICT(evaluation_id) DO NOTHING
+          `).run(winner.id, winner.recorded_at, winner.recorded_at, winner.recorded_at)
+          this.#advanceScopeWatermark(winner.scope_key, winner.recorded_at)
+        }
+        row = winner
+        changed = true
+      }
+      const storedEvidence = JSON.parse(row.evidence_json) as EvaluationEvidenceRef[]
+      if (!isTrustedVerifierReceipt(row)
+        || row.idempotency_key !== normalized.idempotencyKey || row.payload_hash !== payloadHash
+        || (row.objective_status !== 'achieved' && row.objective_status !== 'not-achieved')
+        || row.objective_status !== proof.receipt.objectiveStatus
+        || row.situation !== claims.situation
+        || !exactEvidence(storedEvidence, 'goal-outcome', subjectRef)
+        || !exactEvidence(storedEvidence, 'acceptance-contract', proof.contract.id, proof.contract.digest)
+        || !exactEvidence(storedEvidence, 'verification-receipt', proof.receipt.id, proof.receipt.digest)) {
+        throw new EvaluationStoreError('invalid-input', 'trusted goal outcome baseline does not match the current verifier receipt')
+      }
+      const existing = this.#database.prepare(`
+        SELECT outcome_id FROM evaluation_owner_revisions
+        WHERE subject_key = ? AND lineage = ? ORDER BY version DESC LIMIT 1
+      `).get(subject.key, lineage) as { outcome_id: string } | undefined
+      if (existing !== undefined) {
+        this.#database.exec('COMMIT')
+        return changed
+      }
+      const foreignLineage = this.#database.prepare(`
+        SELECT lineage FROM evaluation_owner_revisions WHERE subject_key = ? LIMIT 1
+      `).get(subject.key) as { lineage: string } | undefined
+      if (foreignLineage !== undefined) {
+        throw new EvaluationStoreError('invalid-input', 'goal outcome baseline belongs to another owner lineage')
+      }
+      this.#database.prepare(`INSERT INTO evaluation_owner_revisions
+        (outcome_id, subject_key, lineage, version, previous_outcome_id, action, command_json)
+        VALUES (?, ?, ?, 1, NULL, 'initial', ?)`)
+        .run(row.id, subject.key, lineage, JSON.stringify({
+          action: 'goal-outcome-baseline-adoption',
+          assessmentId: subjectRef,
+        }))
+      changed = true
+      this.#database.exec('COMMIT')
+      return changed
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   ownerObjectiveState(scope: EvaluationScope, runId: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined
-  ownerObjectiveState(scope: EvaluationScope, subjectKind: 'automation-run' | 'foreground-turn', subjectRef: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined
-  ownerObjectiveState(scope: EvaluationScope, subjectKindOrRef: 'automation-run' | 'foreground-turn' | string, subjectRefOrPrincipal: string, principalRecordIdOrVersion: string | number, principalVersion?: number): OwnerObjectiveState | undefined {
+  ownerObjectiveState(scope: EvaluationScope, subjectKind: 'automation-run' | 'foreground-turn' | 'goal-outcome', subjectRef: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined
+  ownerObjectiveState(scope: EvaluationScope, subjectKindOrRef: 'automation-run' | 'foreground-turn' | 'goal-outcome' | string, subjectRefOrPrincipal: string, principalRecordIdOrVersion: string | number, principalVersion?: number): OwnerObjectiveState | undefined {
     // Arity, not the opaque legacy run id, selects the generic overload.
     const generic = principalVersion !== undefined
     const subjectKind = generic ? subjectKindOrRef : 'automation-run'

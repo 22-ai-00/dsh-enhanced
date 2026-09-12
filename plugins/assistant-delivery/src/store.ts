@@ -3,6 +3,7 @@ import { isAbsolute } from 'node:path'
 import type { DatabaseSync, StatementSync } from 'node:sqlite'
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
+import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
 import {
   ASSISTANT_GROWTH_CONTRACT_VERSION,
   WORKFLOW_TRACE_SOURCE_ID,
@@ -52,6 +53,12 @@ import {
   workflowDispatchRecoveryCode,
 } from './session-commands.js'
 import { parseFeedbackCommand } from './feedback-command.js'
+import {
+  validateOwnerGoalOutcomeFeedbackLocator,
+  validateOwnerGoalOutcomeFeedbackProof,
+  type OwnerGoalOutcomeFeedbackLocator,
+  type OwnerGoalOutcomeFeedbackProof,
+} from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptedExecution } from './acceptance.js'
 import { openDeliveryDatabase } from './sqlite.js'
 import type { SessionLease, SessionLeaseClaim, SessionLeaseTarget } from './session-lease-types.js'
@@ -68,6 +75,7 @@ import type {
   DeadLetterResolutionResult,
   DeadLetterResolutionStatus,
   DeliveryAttachment,
+  DeliveryGoalOutcomeTarget,
   DeliveryPreferenceEvent,
   DeliveryPresentation,
   DeliveryPresentationUpdate,
@@ -272,6 +280,25 @@ interface ApprovalOutboxRouteRow {
   principal: string
   principal_record_id: string
   principal_version: number
+}
+
+interface GoalOutcomeTargetRow {
+  outbox_id: string
+  locator_json: string
+  proof_json: string
+  proof_digest: string
+  owner_route_id: string
+  principal_id: string
+  principal_record_id: string
+  principal_version: number
+  workspace: string
+  preset: string
+  binding_id: string
+  binding_version: number
+  binding_generation: number
+  session_id: string
+  goal_id: string
+  assessment_id: string
 }
 
 interface DeliveryPresentationRow {
@@ -1191,6 +1218,37 @@ function approvalRouteFromRow(row: ApprovalOutboxRouteRow): ApprovalDispatchRout
     principalRecordId: row.principal_record_id,
     principalVersion: row.principal_version,
   })
+}
+
+function goalOutcomeTargetFromRow(row: GoalOutcomeTargetRow): DeliveryGoalOutcomeTarget {
+  let locator: Readonly<OwnerGoalOutcomeFeedbackLocator>
+  let proof: Readonly<OwnerGoalOutcomeFeedbackProof>
+  try {
+    locator = validateOwnerGoalOutcomeFeedbackLocator(JSON.parse(row.locator_json))
+    proof = validateOwnerGoalOutcomeFeedbackProof(JSON.parse(row.proof_json))
+  } catch {
+    throw new DeliveryStoreError('invalid-intent', 'stored goal outcome target is invalid')
+  }
+  if (acceptanceCanonicalJson(proof.locator) !== acceptanceCanonicalJson(locator)
+    || proof.proofDigest !== row.proof_digest || locator.ownerRouteId !== row.owner_route_id
+    || locator.principalId !== row.principal_id || locator.principalRecordId !== row.principal_record_id
+    || locator.principalVersion !== row.principal_version || locator.workspace !== row.workspace
+    || locator.preset !== row.preset || locator.bindingId !== row.binding_id
+    || locator.bindingVersion !== row.binding_version || locator.bindingGeneration !== row.binding_generation
+    || locator.sessionId !== row.session_id || locator.goalId !== row.goal_id
+    || locator.assessmentId !== row.assessment_id) {
+    throw new DeliveryStoreError('invalid-intent', 'stored goal outcome target columns do not match its proof')
+  }
+  return Object.freeze({ outboxId: row.outbox_id, locator, proof })
+}
+
+function sameGoalOutcomeTarget(
+  left: Readonly<DeliveryGoalOutcomeTarget>,
+  locator: Readonly<OwnerGoalOutcomeFeedbackLocator>,
+  proof: Readonly<OwnerGoalOutcomeFeedbackProof>,
+): boolean {
+  return acceptanceCanonicalJson(left.locator) === acceptanceCanonicalJson(locator)
+    && acceptanceCanonicalJson(left.proof) === acceptanceCanonicalJson(proof)
 }
 
 function sameApprovalRoute(left: ApprovalDispatchRouteV2, right: ApprovalDispatchRouteV2): boolean {
@@ -4238,6 +4296,76 @@ export class DeliveryStore {
       )
       return outbox
     })
+  }
+
+  /** Atomically insert a typed whole-goal result and its immutable authority sidecar. */
+  enqueueGoalOutcomeTarget(input: Readonly<{
+    intent: OutboundIntent
+    locator: OwnerGoalOutcomeFeedbackLocator
+    proof: OwnerGoalOutcomeFeedbackProof
+  }>): OutboxRecord {
+    this.assertOpen()
+    let locator: Readonly<OwnerGoalOutcomeFeedbackLocator>
+    let proof: Readonly<OwnerGoalOutcomeFeedbackProof>
+    try {
+      locator = validateOwnerGoalOutcomeFeedbackLocator(input.locator)
+      proof = validateOwnerGoalOutcomeFeedbackProof(input.proof)
+    } catch {
+      throw new DeliveryStoreError('invalid-intent', 'goal outcome target is invalid')
+    }
+    if (acceptanceCanonicalJson(locator) !== acceptanceCanonicalJson(proof.locator)) {
+      throw new DeliveryStoreError('invalid-intent', 'goal outcome locator does not match its proof')
+    }
+    return this.transaction(() => {
+      const binding = this.getBinding(locator.bindingId)
+      const owner = binding === undefined ? undefined : this.getBindingPrincipal(binding.id)
+      if (binding === undefined || binding.status !== 'active'
+        || binding.version !== locator.bindingVersion || binding.generation !== locator.bindingGeneration
+        || binding.sessionId !== locator.sessionId || binding.workspace !== locator.workspace
+        || binding.agentPreset !== locator.preset || externalPrincipalId(binding.principal) !== locator.principalId
+        || owner?.status !== 'active' || owner.role !== 'owner' || owner.id !== locator.principalRecordId
+        || owner.version !== locator.principalVersion || externalPrincipalId(owner.principal) !== locator.principalId) {
+        throw new DeliveryStoreError('invalid-binding', 'goal outcome target exact owner fence changed')
+      }
+      const intent = canonicalIntent(input.intent, binding, this.maxTextBytes)
+      const intentHash = digest(JSON.stringify(intent))
+      const winnerRow = this.database.prepare(`${outboxSelect} WHERE idempotency_key = ?`)
+        .get(intent.idempotencyKey) as OutboxRow | undefined
+      if (winnerRow !== undefined) {
+        const sidecar = this.getGoalOutcomeTarget(winnerRow.id)
+        if (winnerRow.intent_hash !== intentHash || sidecar === undefined
+          || !sameGoalOutcomeTarget(sidecar, locator, proof)) {
+          throw new DeliveryStoreError('idempotency-conflict',
+            'goal outcome Outbox winner does not match the exact immutable target and intent')
+        }
+        return outboxFromRow(winnerRow)
+      }
+      const outbox = this.enqueueIntent(intent, false)
+      this.database.prepare(`
+        INSERT INTO delivery_goal_outcome_targets(
+          outbox_id, locator_json, proof_json, proof_digest, owner_route_id, principal_id,
+          principal_record_id, principal_version, workspace, preset, binding_id, binding_version,
+          binding_generation, session_id, goal_id, assessment_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        outbox.id, acceptanceCanonicalJson(locator), acceptanceCanonicalJson(proof), proof.proofDigest,
+        locator.ownerRouteId, locator.principalId, locator.principalRecordId, locator.principalVersion,
+        locator.workspace, locator.preset, locator.bindingId, locator.bindingVersion,
+        locator.bindingGeneration, locator.sessionId, locator.goalId, locator.assessmentId,
+      )
+      return outbox
+    })
+  }
+
+  getGoalOutcomeTarget(outboxId: string): DeliveryGoalOutcomeTarget | undefined {
+    this.assertOpen()
+    const row = this.database.prepare(`
+      SELECT outbox_id, locator_json, proof_json, proof_digest, owner_route_id, principal_id,
+        principal_record_id, principal_version, workspace, preset, binding_id, binding_version,
+        binding_generation, session_id, goal_id, assessment_id
+      FROM delivery_goal_outcome_targets WHERE outbox_id = ?
+    `).get(outboxId) as GoalOutcomeTargetRow | undefined
+    return row === undefined ? undefined : goalOutcomeTargetFromRow(row)
   }
 
   /**

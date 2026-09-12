@@ -43,7 +43,7 @@ async function harness(withSettlementCapability = true, pauseAgain = false, depe
   const root = await mkdtemp(join(tmpdir(), 'goal-wake-runtime-')); roots.push(root)
   const ctx = new Context(); contexts.push(ctx)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), budgets: [{ id: 'goal-budget/owner', metric: 'automation-runs', limit: 10, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }], rules: [{ id: 'allow-wake-reconcile', effect: 'allow', subject: { kind: 'background', id: owner, workspace: root }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } }] })
-  let value = record(root); let proveCompletion = false; let settleCalls = 0; let acceptPause = false; let revokeOnSettle = false; let dependencyState: DependencyState = 'achieved'; let dependencyChecks = 0
+  let value = record(root); let provedOutcome: { assessmentId: string; runId: string; objectiveStatus: 'achieved' | 'not-achieved' } | undefined; let settleCalls = 0; let acceptPause = false; let revokeOnSettle = false; let dependencyState: DependencyState = 'achieved'; let dependencyChecks = 0
   const resumeScheduledGoal = vi.fn(async (input: { beforeResume(agent: Agent): void; settle(agent: Agent, signal: AbortSignal): Promise<void> }) => {
     const agent = { session: { id: value.native.sessionId } } as Agent
     if (dependencyOptions.revokeBeforeDispatch) dependencyState = 'unavailable'
@@ -58,18 +58,21 @@ async function harness(withSettlementCapability = true, pauseAgain = false, depe
   const automationPath = join(root, 'automations.sqlite')
   await ctx.plugin(AssistantAutomationsService, { databasePath: automationPath, runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0, allowUnbudgetedExecution: true })
   const wakePath = join(root, 'wakes.sqlite')
+  const outcomeFeedbackTarget = vi.fn((_intent: GoalWakeIntent, current: GoalRecord, outcome: NonNullable<typeof provedOutcome>) => ({ locator: { assessmentId: outcome.assessmentId }, capability: Object.freeze({}), proof: { goal: { phase: current.native.phase }, runId: outcome.runId, receipt: { objectiveStatus: outcome.objectiveStatus } } }) as never)
   const runtime = new GoalWakeRuntime(ctx, wakePath, { ownerRouteId: 'local/owner', budgetId: 'goal-budget/owner', maxDelayMs: 86_400_000, runTimeoutMs: 60_000 }, (scope, goalId) => acceptanceDigest(scope) === acceptanceDigest(value.scope) && goalId === value.id ? value : undefined, () => true,
     async (_agent, signal) => {
       signal.throwIfAborted(); settleCalls += 1
       if (revokeOnSettle) acceptPause = false
       if (!pauseAgain) value = { ...value, native: { ...value.native, phase: 'complete', revision: value.native.revision + 1 } }
-    }, () => proveCompletion, () => {}, current => acceptPause && current === value, () => {
+    }, () => provedOutcome, () => {}, current => acceptPause && current === value, () => {
       dependencyChecks += 1
       assertDependencyState(value, dependencyState)
-    })
+    }, () => true, outcomeFeedbackTarget)
   return { ctx, root, runtime, get value() { return value }, wakePath, automationPath, resumeScheduledGoal,
-    proveCompletion(value: boolean) { proveCompletion = value }, get settleCalls() { return settleCalls },
+    proveCompletion(value: boolean) { provedOutcome = value ? { assessmentId: 'assessment-current', runId: 'run-current', objectiveStatus: 'achieved' } : undefined },
+    proveOutcome(value: typeof provedOutcome) { provedOutcome = value }, get settleCalls() { return settleCalls },
     acceptPause(value: boolean) { acceptPause = value }, revokeOnSettle() { revokeOnSettle = true },
+    outcomeFeedbackTarget,
     get dependencyChecks() { return dependencyChecks }, blockDependencies(state: Exclude<DependencyState, 'achieved'> = 'unavailable') { dependencyState = state },
     addDependency() {
       const current = dependencyRecord(root)
@@ -122,7 +125,7 @@ async function restartHarness(state: 'prepared' | 'scheduled', blocker: 'verifie
   }
   seed.close()
   let verifierReady = blocker !== 'verifier'; let outcomeReady = blocker !== 'outcome'
-  const runtime = new GoalWakeRuntime(ctx, wakePath, { ownerRouteId: 'local/owner', budgetId: 'goal-budget/owner', maxDelayMs: 86_400_000, runTimeoutMs: 60_000 }, () => bound, () => verifierReady, async () => {}, () => false, () => {}, () => false, () => assertDependencyState(bound, dependencyState), () => outcomeReady)
+  const runtime = new GoalWakeRuntime(ctx, wakePath, { ownerRouteId: 'local/owner', budgetId: 'goal-budget/owner', maxDelayMs: 86_400_000, runTimeoutMs: 60_000 }, () => bound, () => verifierReady, async () => {}, () => undefined, () => {}, () => false, () => assertDependencyState(bound, dependencyState), () => outcomeReady)
   await new Promise<void>(resolve => setImmediate(resolve))
   return { bound, dependency, pending, ctx, runtime, resumeScheduledGoal, restore() { verifierReady = true; outcomeReady = true } }
 }
@@ -289,5 +292,44 @@ describe('durable goal wake scheduling protocol', () => {
     await expect(executeWake(accepted)).resolves.toMatchObject({ outcome: 'succeeded' })
     expect(accepted.settleCalls).toBe(1)
     expect(accepted.runtime.inspect(accepted.value.scope, accepted.value.id)).toMatchObject([{ state: 'succeeded' }])
+  })
+
+  it('exposes the latest exact outcome feedback target only during terminal verified settlement', async () => {
+    const f = await harness(); f.proveCompletion(true)
+    let resolve!: () => unknown
+    f.resumeScheduledGoal.mockImplementationOnce(async input => {
+      const wakeInput = input as typeof input & { resolveOutcomeFeedbackTarget(): unknown }
+      resolve = wakeInput.resolveOutcomeFeedbackTarget
+      expect(() => resolve()).toThrow('wake authority is unavailable')
+      const agent = { session: { id: f.value.native.sessionId } } as Agent
+      wakeInput.beforeResume(agent)
+      expect(() => resolve()).toThrow('wake authority is unavailable')
+      const current = f.value
+      Object.assign(current.native, { phase: 'blocked', revision: current.native.revision + 2, roundsStarted: current.native.maxGoalRounds })
+      await wakeInput.settle(agent, new AbortController().signal)
+      expect(resolve()).toMatchObject({ locator: { assessmentId: 'assessment-current' }, proof: { goal: { phase: 'complete' }, runId: 'run-current' } })
+      return { outcome: 'succeeded' as const, dispatched: true, quiescent: true }
+    })
+    await expect(executeWake(f)).resolves.toMatchObject({ outcome: 'succeeded' })
+    expect(f.outcomeFeedbackTarget).toHaveBeenCalledOnce()
+    expect(f.outcomeFeedbackTarget).toHaveBeenCalledWith(expect.objectContaining({ goalId: f.value.id }), expect.objectContaining({ native: expect.objectContaining({ phase: 'complete' }) }),
+      { assessmentId: 'assessment-current', runId: 'run-current', objectiveStatus: 'achieved' })
+    expect(() => resolve()).toThrow('wake authority is unavailable')
+  })
+
+  it('does not publish an older successful assessment when this wake has no exact terminal outcome', async () => {
+    const f = await harness()
+    f.resumeScheduledGoal.mockImplementationOnce(async input => {
+      const wakeInput = input as typeof input & { resolveOutcomeFeedbackTarget(): unknown }
+      const agent = { session: { id: f.value.native.sessionId } } as Agent
+      wakeInput.beforeResume(agent)
+      const current = f.value
+      Object.assign(current.native, { phase: 'blocked', revision: current.native.revision + 2, roundsStarted: current.native.maxGoalRounds })
+      await wakeInput.settle(agent, new AbortController().signal)
+      expect(() => wakeInput.resolveOutcomeFeedbackTarget()).toThrow('wake authority is unavailable')
+      return { outcome: 'succeeded' as const, dispatched: true, quiescent: true }
+    })
+    await expect(executeWake(f)).resolves.toMatchObject({ outcome: 'unknown' })
+    expect(f.outcomeFeedbackTarget).not.toHaveBeenCalled()
   })
 })

@@ -38,6 +38,18 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     expect(existsSync(profile.stateRoot)).toBe(false)
   })
 
+  it('accepts only the current Delivery schema without migrating an older database', () => {
+    const { home, source, databasePath } = fixture()
+    const profile = inspectAutonomyProfile(source, 'web', home)
+    const db = new DatabaseSync(databasePath)
+    try {
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(20)
+      db.exec('PRAGMA user_version=19')
+      expect(inspectAutonomyOwner(profile)).toEqual({ status: 'unavailable' })
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(19)
+    } finally { db.close() }
+  })
+
   it('reports revoked owners, version changes and foreign lineage without pairing or migration', () => {
     const { home, source, databasePath } = fixture()
     const profile = inspectAutonomyProfile(source, 'web', home)

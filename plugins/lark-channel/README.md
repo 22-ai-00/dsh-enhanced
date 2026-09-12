@@ -100,6 +100,12 @@ Calendar v4 读取默认关闭；每页响应上限为 1 MiB，超限请求失�
 
 飞书使用不可转发的 CardKit 2.0 卡片呈现选项。推荐项只显示“推荐”标识，不会自动选择；多选必须点击“提交已选答案”；无选项或需要输入其他答案时会明确要求回复对应问题卡片。未引用卡片的新文字始终作为普通消息处理，即使原会话只有这一条 pending question 也不会被当成答案吞掉。按钮和卡片回调使用签名 capability，且回调或自由文本都必须匹配 exact owner、account/tenant/chat、原会话路由、当前 binding version/generation 与请求 fence。群聊中的普通文字命令仍遵循 @ 机器人门槛，不想输入答案时可直接点击卡片“取消”。问题会发送到原 binding 会话而非强制转为私聊，因此在群聊中问题正文、详情和选项对群成员可见；不要把秘密、凭据或只应由私聊接收的内容放进问题。
 
+## 整体目标结果反馈
+
+外部 event-wait scheduled whole-goal 结果（当前 producer 为 `goal-event-wake-*`；普通 `goal_schedule` 不外发结果）沿用普通 Markdown Outbox 和现有飞书 reply identity；本 adapter 无需新增目标专用卡片、callback 或信任逻辑。结果正文由 Delivery 附加固定反馈说明，owner 必须直接回复那一条已发送消息，再使用 `/feedback status`、`correct` 或 `withdraw`。首次 `status` 已显示 Verifier baseline 的 revision 1；裸 `achieved|partial|not-achieved` 只有与 baseline 相同才幂等，不同判断必须按当前 version/status 使用 `correct`。Lark 只把 `replyToProviderMessageId` 连同 actor/conversation 写入 typed Inbox；Delivery、Goals、Verifier 与 Evaluation 负责核对 schema 20 sidecar、当前 owner/route/binding 和 exact assessment proof。复制正文、回复其它消息、错人或 `/new` 后失效 binding 都不能修订目标。
+
+已发送的历史结果即使原 Verifier freshness 到期仍可由同一 owner 纠正，但不可变 Goal/assessment/receipt identity 仍须由当前 Goals 与 Verifier 重验。发送前过期则失败关闭且不会调用飞书。当前测试是本地 transport/Host fixture，不是一次真实飞书云端、真实模型或生产 cohort 验收。Web `native-session` 没有飞书 provider reply identity，不属于本路径。
+
 ## 常用命令
 
 在飞书会话中使用：
