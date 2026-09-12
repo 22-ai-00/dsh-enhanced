@@ -94,7 +94,12 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify repository
+        id: repository
         run: pnpm check
+
+      - name: Collect remaining package test failures
+        if: failure() && steps.repository.outcome == 'failure'
+        run: pnpm --recursive --no-bail --if-present run test
 
   macos-verify:
     # The installers document macOS LaunchAgent support and the Control Plane
@@ -134,7 +139,12 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify repository
+        id: repository
         run: pnpm check
+
+      - name: Collect remaining package test failures
+        if: failure() && steps.repository.outcome == 'failure'
+        run: pnpm --recursive --no-bail --if-present run test
 
   windows-acp-smoke:
     runs-on: windows-2025
