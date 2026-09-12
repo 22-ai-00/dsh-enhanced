@@ -1532,9 +1532,10 @@ async function recoverBoundTransaction({
   fail(`生命周期事务 home/backup 身份未知；拒绝重命名或删除任何目录：${transactionRoot}`)
 }
 
-function run(executable, args, { env = process.env, capture = false, passFds = [], timeoutMs } = {}) {
+function run(executable, args, { cwd, env = process.env, capture = false, passFds = [], timeoutMs } = {}) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(executable, args, {
+      cwd,
       env,
       stdio: capture
         ? ['ignore', 'pipe', 'pipe', ...passFds]
@@ -3549,7 +3550,7 @@ async function restoreOriginalActiveSet({
   return accepted
 }
 
-function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraEnvironment = {} }) {
+function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraEnvironment = {}, pnpmStoreFd, pnpmStorePath }) {
   const args = [
     '--unshare-all', '--die-with-parent', '--new-session',
     '--ro-bind', '/', '/',
@@ -3565,14 +3566,22 @@ function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraE
     '--setenv', 'TMPDIR', '/tmp',
     '--setenv', 'DSH_HOME', homePath,
   ]
+  if (pnpmStoreFd !== undefined && pnpmStorePath !== undefined) {
+    args.push('--dir', dirname(pnpmStorePath), '--ro-bind-fd', String(pnpmStoreFd), pnpmStorePath)
+  }
   for (const [name, value] of Object.entries(extraEnvironment)) args.push('--setenv', name, value)
   args.push('--', ...command)
   return { executable: bwrapExecutable, args }
 }
 
-async function openSandboxResources(context) {
+function sandboxHiddenStorePath(storePath) {
+  return inside('/tmp', storePath) || inside('/run', storePath)
+}
+
+async function openSandboxResources(context, pnpmStore) {
   const stage = await open(context.stageHome, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
   let validator
+  let store
   try {
     validator = await open(VALIDATOR_PATH, constants.O_RDONLY | constants.O_NOFOLLOW)
     const validatorStat = await validator.stat()
@@ -3580,27 +3589,37 @@ async function openSandboxResources(context) {
       || isGroupOrOtherWritable(validatorStat) || validatorStat.size > 4 * 1024 * 1024) {
       fail(`生命周期 validator 身份或权限不安全：${VALIDATOR_PATH}`)
     }
-    return { stage, validator }
+    if (pnpmStore !== undefined && sandboxHiddenStorePath(pnpmStore.storePath)) {
+      store = await open(pnpmStore.storePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      const storeStat = await store.stat()
+      if (!storeStat.isDirectory() || !sameIdentity(storeStat, pnpmStore.identity)) {
+        fail(`npm cohort store identity changed before sandbox: ${pnpmStore.storePath}`)
+      }
+    }
+    return { stage, validator, store }
   } catch (error) {
     await stage.close()
     await validator?.close()
+    await store?.close()
     throw error
   }
 }
 
 async function sandboxRun(context, command, options = {}) {
-  const resources = await openSandboxResources(context)
+  const resources = await openSandboxResources(context, options.pnpmStore)
   const invocation = sandboxArgs({
     ...context, validatorPath: SANDBOX_VALIDATOR_PATH, command, extraEnvironment: options.extraEnvironment,
+    ...(resources.store === undefined ? {} : { pnpmStoreFd: 5, pnpmStorePath: options.pnpmStore.storePath }),
   })
   try {
     return await run(invocation.executable, invocation.args, {
       capture: options.capture,
-      passFds: [resources.stage.fd, resources.validator.fd],
+      passFds: [resources.stage.fd, resources.validator.fd, ...(resources.store === undefined ? [] : [resources.store.fd])],
     })
   } finally {
     await resources.validator.close()
     await resources.stage.close()
+    await resources.store?.close()
   }
 }
 
@@ -4132,6 +4151,46 @@ function assertExpectedScenario(expectedScenario, serviceAware, operation = 'upg
   }
 }
 
+async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath) {
+  let output
+  try {
+    output = await run(pnpmPath, ['store', 'path'], {
+      cwd: profilePath, capture: true,
+      env: { ...process.env, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' },
+    })
+  }
+  catch { fail('npm cohort 无法解析 pnpm store；尚未创建事务或修改 DSH_HOME。') }
+  const value = output.stdout.trim()
+  if (!isAbsolute(value) || value.includes('\n') || value.includes('\r')) fail('npm cohort pnpm store path 无效；尚未创建事务或修改 DSH_HOME。')
+  let canonical
+  try { canonical = await realpath(value) } catch { fail('npm cohort pnpm store 不存在或不可解析；尚未创建事务或修改 DSH_HOME。') }
+  const entry = await lstat(canonical).catch(() => undefined)
+  if (!entry?.isDirectory() || entry.isSymbolicLink()) fail('npm cohort pnpm store 不是安全目录；尚未创建事务或修改 DSH_HOME。')
+  if (inside(homePath, canonical)) fail('npm cohort pnpm store 不能位于 DSH_HOME 内；尚未创建事务或修改 DSH_HOME。')
+  let selected
+  try {
+    selected = await run(pnpmPath, ['store', 'path'], {
+      capture: true,
+      cwd: profilePath,
+      env: {
+        PATH: process.env.PATH ?? '/usr/bin:/bin',
+        HOME: process.env.HOME ?? dirname(homePath),
+        TMPDIR: '/tmp',
+        DSH_HOME: homePath,
+        pnpm_config_store_dir: canonical,
+        pnpm_config_ignore_pnpmfile: 'true',
+        pnpm_config_ignore_scripts: 'true',
+      },
+    })
+  }
+  catch { fail('npm cohort 无法复核 pnpm store；尚未创建事务或修改 DSH_HOME。') }
+  const selectedPath = selected.stdout.trim()
+  if (!isAbsolute(selectedPath) || selectedPath.includes('\n') || selectedPath.includes('\r') || await realpath(selectedPath).catch(() => '') !== canonical) {
+    fail('npm cohort store-dir 未精确绑定已预取 store；尚未创建事务或修改 DSH_HOME。')
+  }
+  return { storePath: canonical, identity: identity(entry) }
+}
+
 async function performNpmUpgrade({
   profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, npmExecutable, pnpmExecutable, selector,
 }) {
@@ -4153,15 +4212,18 @@ async function performNpmUpgrade({
   const npmPath = await realpath(npmExecutable).catch(() => fail('npm executable must exist'))
   const pnpmPath = await realpath(pnpmExecutable).catch(() => fail('pnpm executable must exist'))
   const targets = await resolveNpmUpgradeCohort({ npmExecutable: npmPath, selector, expectedNames: expectedManaged })
+  const profileCwd = await realpath(current.profilePath).catch(() => fail(`npm cohort 无法解析 profile：${profile}`))
+  if (!sameIdentity(await stat(profileCwd), identity(current.profileStat))) fail(`npm cohort profile 身份在 store 解析前发生变化：${profile}`)
+  const pnpmStore = await resolvedPnpmStorePath(pnpmPath, homePath, profileCwd)
   process.stdout.write(`npm cohort：正在生命周期锁内预取精确版本；DSH_HOME 尚未修改。\n`)
   try {
-    await run(pnpmPath, ['store', 'add', ...targets], { env: { ...process.env, npm_config_ignore_scripts: 'true' } })
+    await run(pnpmPath, ['--store-dir', pnpmStore.storePath, 'store', 'add', ...targets], { cwd: profileCwd, env: { ...process.env, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' } })
   } catch {
     fail('npm cohort 预取失败；尚未创建事务或修改 DSH_HOME。')
   }
   await performLifecycle({
     operation: 'upgrade', profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
-    skipRecovery: true, transactionPrechecked: true,
+    skipRecovery: true, transactionPrechecked: true, pnpmStore,
   })
 }
 
@@ -4186,11 +4248,14 @@ async function performNpmServiceUpgrade({
   const npmPath = await realpath(npmExecutable).catch(() => fail('npm executable must exist'))
   const pnpmPath = await realpath(pnpmExecutable).catch(() => fail('pnpm executable must exist'))
   const targets = await resolveNpmUpgradeCohort({ npmExecutable: npmPath, selector, expectedNames: expectedManaged })
-  try { await run(pnpmPath, ['store', 'add', ...targets], { env: { ...process.env, npm_config_ignore_scripts: 'true' } }) }
+  const profileCwd = await realpath(current.profilePath).catch(() => fail(`npm cohort 无法解析 profile：${profile}`))
+  if (!sameIdentity(await stat(profileCwd), identity(current.profileStat))) fail(`npm cohort profile 身份在 store 解析前发生变化：${profile}`)
+  const pnpmStore = await resolvedPnpmStorePath(pnpmPath, homePath, profileCwd)
+  try { await run(pnpmPath, ['--store-dir', pnpmStore.storePath, 'store', 'add', ...targets], { cwd: profileCwd, env: { ...process.env, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' } }) }
   catch { fail('npm cohort 预取失败；尚未创建事务或修改 DSH_HOME。') }
   await performLifecycle({
     operation: 'upgrade', profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
-    skipRecovery: true, transactionPrechecked: true,
+    skipRecovery: true, transactionPrechecked: true, pnpmStore,
     serviceContext: { systemctlExecutable, journalctlExecutable },
   })
 }
@@ -4271,7 +4336,7 @@ async function initializeCleanWebProfile(stageHome, profile) {
 
 async function performLifecycle({
   operation, profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
-  skipRecovery = false, transactionPrechecked = false, serviceContext,
+  skipRecovery = false, transactionPrechecked = false, serviceContext, pnpmStore,
 }) {
   if (!['upgrade', 'uninstall'].includes(operation) || !PROFILE_NAME.test(profile) || !isAbsolute(homePath) || resolve(homePath) !== homePath) fail('invalid lifecycle invocation', 2)
   assertExpectedScenario(expectedScenario, serviceContext !== undefined, operation)
@@ -4515,7 +4580,14 @@ async function performLifecycle({
     let archivedProfile
     if (operation === 'upgrade') {
       await sandboxRun(sandbox, [dshExecutable, 'plugin', '--profile', profile, 'add', ...targets], {
-        extraEnvironment: { npm_config_offline: 'true', npm_config_package_import_method: 'copy' },
+        extraEnvironment: {
+          pnpm_config_offline: 'true', pnpm_config_package_import_method: 'copy', pnpm_config_ignore_scripts: 'true',
+          pnpm_config_ignore_pnpmfile: 'true',
+          ...(pnpmStore === undefined ? {} : {
+            pnpm_config_store_dir: pnpmStore.storePath,
+            pnpm_config_frozen_store: 'true',
+          }) },
+        pnpmStore,
       })
     } else {
       const archiveRoot = join(stageHome, 'uninstalled-profiles')

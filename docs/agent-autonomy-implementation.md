@@ -1,5 +1,7 @@
 # 自治智能体落地与验收账本
 
+> 2026-09-12 npm 升级收尾：已修复 exact Host 的 YAML 依赖解析、非场景 Host 行的动态 `disabled` 分类、目标 profile 的 pnpm store 选择与只读 FD 挂载。真实 `.30 → .31` 已越过上述故障，仍被无网络环境中的 pnpm 供应链复核阻断，尚未完成升级；正式恢复后原 14 个 `.30` 依赖和选定配置/状态文件保持不变。`73fb1ac` 已向 `dev` 交付五处平台测试 fixture 修复。冻结代码的最终根 `CI=true pnpm check` 退出 0，汇总 5,238 passed / 42 skipped、33 份 dry-run pack；先前 broker 的 500ms 墙钟断言已改为 deadline、持久 unknown、successor 接管与 no-replay 行为验证。私有元数据原型和主线程独立无网络物化均通过：14 个 `.31` 受管包实际安装，准备好的三份元数据字节不变；它尚未接入升级事务。最终检查、失败、恢复与原型范围见[本批记录](evidence/lifecycle-npm-upgrade-preflight-2026-09-12.json)。下一步完成在线锁文件校验到离线物化的接线，不使用 `trustLockfile` 跳过验证。WP17 仍为实现中，完整 18 项保持 **3 已验证 / 13 实现中 / 2 待做**。
+
 本账本落实 [2026-09-06 路线图](agent-intelligence-autonomy-roadmap-2026-09-06.md) 和 [成长专项审计](agent-growth-gap-evidence-2026-09-06.md)。目标是完整实现可验证的目标经营、任务上下文、独立验收、主动行动、高权限隔离和自主技能进化，并提供容易安装、诊断和升级的产品入口。实现起点为 `1b65852`。历史分析保留原始结论；当前进度与新证据记录在这里。
 
 > NPM 交付完成（2026-09-12，`v0.1.31` / `ae8cb4c`）：Release 的完整 `pnpm check`、发布与账本记录均通过；实际 NPM registry 核对 33 包精确版本及 `latest` 全为 `0.1.31`，依赖无残留 `workspace:` / `catalog:`。从不可变 tag 下载的真实远程安装器与标签源码逐字一致；全新 Linux profile 安装退出 0，14 个自治入口包同版本，两次全部插件激活检查及真实 Docker 隔离诊断通过。仅预先批准 `koffi` 构建，未手动准备 Host 依赖；精确 Host CLI 和 Docker 镜像已存在。本次不调用模型，模型能力由下述独立真实任务证据支持。另一个既有 .30 临时 profile 的远程升级在 YAML 依赖解析预检失败，未进入生命周期事务；新安装通过不代表升级通过。macOS CI 尚未通过；修复中断恢复及全部 18 项规划继续保留，状态仍为 **3 已验证 / 13 实现中 / 2 待做**。见[发布与远程安装证据](evidence/autonomy-npm-release-0.1.31-2026-09-12.json)。

@@ -1,0 +1,266 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-12T18:50:38.111956+00:00",
+  "capability": "npm-upgrade-host-parser-and-read-only-profile-store-preflight",
+  "status": "incomplete",
+  "source": {
+    "baseCommit": "73fb1acb8618ac2c3a58e684917c1ae83f7e51bc",
+    "fileSha256": {
+      "scripts/install/lifecycle-config.mjs": "19acfe0c292a94fe70228432713c2cd6930d1642c1968002c758c490d4fe3485",
+      "scripts/install/lifecycle-profile.mjs": "c06ef5391b81b7dcca2bb2895d492334478ea782e8f95769c3ffa1bb8f314e14",
+      "tests/installers.spec.ts": "880cb55734666815b8d12f4ea273b9eacd7ce6ecdb17e88f0d5d2478b8663873",
+      "plugins/assistant-actions/tests/broker-core.spec.ts": "e53ad4e0d85346a0b6eccd50d633303a7e4ae015164acd431c6c0cac11b1549f"
+    }
+  },
+  "implemented": [
+    "Resolve YAML from the canonical exact DSH 0.1.2-rc.1 package closure, including pnpm shim and exports-hidden bin layouts.",
+    "Accept unrelated Host platform-dependent disabled expressions without executing them; reject dynamic lifecycle markers and invalid active row ids.",
+    "Resolve and prefetch pnpm store from the identity-checked target profile cwd; disable pnpmfile and install scripts.",
+    "Bind the same canonical store with pnpm 11.7 configuration names, frozen store and copy mode; expose hidden /tmp or /run store through a read-only directory descriptor only to the package-add sandbox."
+  ],
+  "environment": {
+    "platform": "Linux",
+    "node": "24.7.0",
+    "pnpm": "11.7.0",
+    "host": "0.1.2-rc.1",
+    "profile": "web",
+    "scenario": "autonomy",
+    "scope": "isolated disposable test home; ordinary pnpm runtime and exact already-installed CLI relocated outside sandbox tmpfs"
+  },
+  "realUpgrade": {
+    "from": "0.1.30",
+    "to": "0.1.31",
+    "packages": "published npm packages",
+    "installer": "copied checkout candidate helpers; not an immutable released installer",
+    "exitCode": 1,
+    "failedStage": "pnpm supply-chain verification in networkless sandbox",
+    "reason": "minimumReleaseAge metadata/attestation requests could not reach the registry; policies remained enforced",
+    "log": {
+      "path": "/tmp/dsh-lifecycle-real-3179_e4a/upgrade-profile-store.log",
+      "sha256": "754e13f0e32586135a457f8815d985cf7c7884323b9cb33c06891340d24a3cd8"
+    },
+    "candidateHelperSha256": "c06ef5391b81b7dcca2bb2895d492334478ea782e8f95769c3ffa1bb8f314e14",
+    "recovery": {
+      "command": "same installer upgrade invocation through formal recovery entry",
+      "exitCode": 1,
+      "meaning": "previous failed transaction quarantined; refused to begin a new mutation in the recovery invocation",
+      "log": {
+        "path": "/tmp/dsh-lifecycle-real-3179_e4a/recover-profile-store.log",
+        "sha256": "3fdb3cfe0ab741facf0ec8f550d3aa0bef6e424f41a5c2fb328f34fc5d2c4b3a"
+      },
+      "activeTransactionExists": false
+    },
+    "preservation": {
+      "profiles/web/cordis.patch.yml": {
+        "beforeSha256": "940945dba838cabb551c39221dc2145f840b60d08487657023d202ff6cf247fb",
+        "afterSha256": "940945dba838cabb551c39221dc2145f840b60d08487657023d202ff6cf247fb",
+        "unchanged": true
+      },
+      "storages/upgrade-preservation.json": {
+        "beforeSha256": "dd4996c3e57156b8b440bcce8c640c6708ccb20a9492a68f0ff89aad7d6204d3",
+        "afterSha256": "dd4996c3e57156b8b440bcce8c640c6708ccb20a9492a68f0ff89aad7d6204d3",
+        "unchanged": true
+      },
+      ".credentials.yaml": {
+        "beforeSha256": "526a5f1b4a0187adc9d97fb53223181480ba8b459e2fd2c86e9108f3ac2ebdd3",
+        "afterSha256": "526a5f1b4a0187adc9d97fb53223181480ba8b459e2fd2c86e9108f3ac2ebdd3",
+        "unchanged": true
+      },
+      ".anonymous-user-id": {
+        "beforeSha256": "188d5ac0aef74bc4814fa7763d134f2954f39097edead274a02e8b4747e9c239",
+        "afterSha256": "188d5ac0aef74bc4814fa7763d134f2954f39097edead274a02e8b4747e9c239",
+        "unchanged": true
+      }
+    },
+    "originalCohortCount": 14,
+    "originalCohortVersions": [
+      "0.1.30"
+    ]
+  },
+  "priorAttempts": [
+    {
+      "failedStage": "read-write pnpm SQLite store index in read-only sandbox",
+      "exitCode": 1,
+      "log": {
+        "path": "/tmp/dsh-lifecycle-real-3179_e4a/upgrade-store-bound.log",
+        "sha256": "8614a3e5c263c0c1e6cbc27356ea99b975b9bb4182d12998479421aec9c4b3fc"
+      }
+    },
+    {
+      "failedStage": "pnpm store selected from repository cwd differed from existing profile store",
+      "exitCode": 1,
+      "log": {
+        "path": "/tmp/dsh-lifecycle-real-3179_e4a/upgrade-frozen-store.log",
+        "sha256": "aafc183b6d029903be23ca6a22ae15e47a946393f26abb2cf4e81717c4bc131f"
+      }
+    }
+  ],
+  "verification": {
+    "targetedNpmUpgrade": {
+      "command": "pnpm exec vitest run tests/installers.spec.ts -t \"npm upgrade\"",
+      "exitCode": 0,
+      "passed": 14,
+      "skippedOutsideFilter": 270,
+      "log": {
+        "path": "/tmp/dsh-lifecycle-profile-store-upgrade.log",
+        "sha256": "686c5ea583f8f53382c5d5bfbe1df431e8249550e338d98651c1472dce590ba6"
+      }
+    },
+    "earlierFullInstallerSuite": {
+      "command": "CI=true pnpm exec vitest run tests/installers.spec.ts",
+      "exitCode": 0,
+      "passed": 284,
+      "scope": "before final profile-cwd and FD-binding changes; not final-source full-suite proof",
+      "log": {
+        "path": "/tmp/dsh-lifecycle-installers-final.log",
+        "sha256": "a6246aa3e6defb68ac3529919b68e8baa83bbc04f03950eecbd4652023a9a66b"
+      }
+    },
+    "independentReview": {
+      "result": "PASS for bounded source/fixture changes",
+      "completeUpgrade": "not passed"
+    },
+    "repositoryCheck": {
+      "command": "CI=true pnpm check",
+      "status": "passed",
+      "exitCode": 0,
+      "aggregatePassedTests": 5238,
+      "aggregateSkippedTests": 42,
+      "testSummaries": 34,
+      "dryRunPackageCount": 33,
+      "countsScope": "root and 33 recursive test summaries; skipped tests are not exercised behavior",
+      "log": {
+        "path": "/tmp/dsh-lifecycle-profile-final-check-v2.log",
+        "sha256": "853d1ad2c18edf24827336545117d1441949739864b757ad93af1928a9967ad1"
+      },
+      "completedAt": "2026-09-12T19:13:28.077050+00:00"
+    },
+    "previousRepositoryChecks": [
+      {
+        "command": "CI=true pnpm check",
+        "status": "failed",
+        "exitCode": 1,
+        "rootPassedTests": 519,
+        "rootPassedFiles": 35,
+        "failedTest": "plugins/assistant-actions/tests/broker-core.spec.ts: bounds drain and close when the transport ignores AbortSignal forever",
+        "failure": "close elapsed 585ms exceeded test wall-clock threshold 500ms",
+        "log": {
+          "path": "/tmp/dsh-lifecycle-profile-final-check.log",
+          "sha256": "9d6e95f6ee660ab47ebaad0708a5bf42afd83d38d889046b6e26f279781da6c6"
+        },
+        "scope": "manifest/lint/typechecks/root tests passed; recursive tests stopped at failure; not a complete check pass"
+      }
+    ],
+    "brokerClosureTestRepair": {
+      "scope": "test-only; replaced two wall-clock thresholds with deadline/settlement and durable successor no-replay behavior",
+      "targetedPassed": 23,
+      "independentReview": "PASS",
+      "fullSuitePassed": 288
+    }
+  },
+  "nextAction": "Prepare final metadata online using the existing profile policy; preserve lock resolution, normalize only authorized exact cohort version rules, bind metadata/cache identities and digests, then materialize that exact result offline inside the lifecycle transaction. Keep strict-policy rejection and do not use trustLockfile.",
+  "limitations": [
+    "No successful real npm upgrade yet; no new release is claimed.",
+    "Preservation hashes cover selected configuration, credential file, anonymous id and a synthetic state file, not all existing Goal or Session records.",
+    "No real systemd/Lark service-aware upgrade or uninstall acceptance in this run.",
+    "macOS failures remain outside the Linux verification scope.",
+    "Complete 18-work-package objective remains open: 3 verified, 13 implementing, 2 pending."
+  ],
+  "prototype": {
+    "status": "passed within prototype scope",
+    "onlineVerification": {
+      "command": "pnpm install --lockfile-only --frozen-lockfile",
+      "exitCode": 0,
+      "verifiedEntries": 51,
+      "log": {
+        "path": "/tmp/dsh-pnpm-policy-preserved-union-verify.log",
+        "sha256": "faeabd530c4e48ae44f7e37b1a8489e6440872f6c9b75e6e450f01d209b0dae2"
+      }
+    },
+    "policyNormalization": {
+      "scope": "private test metadata only",
+      "exactFirstPartyUnionRules": 21,
+      "versions": [
+        "0.1.30",
+        "0.1.31"
+      ],
+      "allNamesInPublishedCohort": true,
+      "wildcards": false,
+      "reason": "pnpm 11.7 evaluateVersionPolicy returns only the first matching package rule; separate old/new exact entries do not form a union",
+      "strictModeNegative": "normal exact-version update with minimumReleaseAgeStrict=true was rejected without changing workspace metadata"
+    },
+    "independentMaterialization": {
+      "command": [
+        "/usr/bin/bwrap",
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind",
+        "/",
+        "/",
+        "--tmpfs",
+        "/tmp",
+        "--tmpfs",
+        "/run",
+        "--bind",
+        "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/rsi-upgrade-offline-verify-dxyx57fh",
+        "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/rsi-upgrade-offline-verify-dxyx57fh",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--chdir",
+        "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/rsi-upgrade-offline-verify-dxyx57fh",
+        "--clearenv",
+        "--setenv",
+        "PATH",
+        "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin:/usr/bin:/bin",
+        "--setenv",
+        "HOME",
+        "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/rsi-upgrade-offline-verify-dxyx57fh",
+        "--setenv",
+        "TMPDIR",
+        "/tmp",
+        "--setenv",
+        "pnpm_config_store_dir",
+        "/data00/home/jiataorui/.cache/dsh-pnpm-policy-prototype.Weyq9J/store-preserved-union.2AolSJ",
+        "--setenv",
+        "pnpm_config_cache_dir",
+        "/data00/home/jiataorui/.cache/dsh-pnpm-policy-prototype.Weyq9J/cache-preserved-union.pgVVvA",
+        "--setenv",
+        "pnpm_config_offline",
+        "true",
+        "--setenv",
+        "pnpm_config_frozen_store",
+        "true",
+        "--setenv",
+        "pnpm_config_package_import_method",
+        "copy",
+        "--setenv",
+        "pnpm_config_ignore_scripts",
+        "true",
+        "--setenv",
+        "pnpm_config_ignore_pnpmfile",
+        "true",
+        "--",
+        "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+        "/data00/home/jiataorui/.local/share/pnpm/.tools/pnpm/11.7.0_tmp_3938489_0/node_modules/pnpm/dist/pnpm.mjs",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "exitCode": 0,
+      "workspace": "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/rsi-upgrade-offline-verify-dxyx57fh",
+      "verifiedInstalledManagedPackages": 14,
+      "metadataSha256": {
+        "package.json": "1126cd96f85ce2c8bd2d9b14d063b054d251003fb35312252c94424fb05815f4",
+        "pnpm-lock.yaml": "f7896005ebd202efddb8e61c7476f8e88b44bc675dfdf2f1e448b692152ac936",
+        "pnpm-workspace.yaml": "e1086b5bfb7ef80924578889d99f3cbaaf8ed2c4c84fa0d8ac8e7c50b988b30b"
+      },
+      "allThreeMetadataFilesUnchanged": true,
+      "log": "/tmp/dsh-pnpm-policy-root-offline-verify.log",
+      "logSha256": "e15acb4f17f913c47266cdf6033fc211cd6e4d61aa20eceaae58bd73513ad8c6",
+      "scope": "independent fresh no-network materialization of privately prepared metadata; not a lifecycle upgrade transaction"
+    },
+    "limitation": "Not connected to lifecycle transactions. Production implementation and a complete real upgrade remain required."
+  }
+}
