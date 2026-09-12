@@ -524,7 +524,7 @@ async function remoteBootstrapFixture(
     '#!/bin/bash',
     'set -euo pipefail',
     'target="${@: -1}"',
-    'if [[ -n "${REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH:-}" && "$target" == "$REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH" && "${1:-}" == -c ]]; then',
+    'if [[ -n "${REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH:-}" && "$target" == "$REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH" && ( "${1:-}" == -c || "${1:-}" == -f ) ]]; then',
     '  raw="$(/usr/bin/stat "$@")"',
     '  IFS=: read -r device inode _ mode links type <<< "$raw"',
     "  printf '%s:%s:%s:%s:%s:%s\\n' \"$device\" \"$inode\" \"$REMOTE_BOOTSTRAP_FOREIGN_UID\" \"$mode\" \"$links\" \"$type\"",
