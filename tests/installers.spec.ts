@@ -622,7 +622,16 @@ interface LifecycleRunOptions {
   killLifecycleAfterOriginalRename?: boolean
   killLifecycleAfterStopped?: boolean
   npmBlock?: boolean
+  npmPeerExternalBin?: string
+  npmPrepareFails?: boolean
+  npmReceiptMissingPolicy?: 'dependencyAliasCheck' | 'resolutionShapeCheck' | 'tarballUrlBinding'
+  npmSandboxRegistryDrift?: boolean
+  npmSourceMetadataMutation?: boolean
   npmVersion?: string
+  npmVerifyFails?: boolean
+  localBuildFails?: boolean
+  localInstallFails?: boolean
+  pnpmStoreMarker?: string
   pnpmfileMustNotRun?: boolean
   requirePnpmProfileCwd?: boolean
   requirePnpmStoreFd?: boolean
@@ -1037,7 +1046,15 @@ if [[ " \${1:-} " == ' --version ' ]]; then printf '10.0.0\n'; exit 0; fi
 if [[ " \${1:-} \${2:-} " == ' store path ' ]]; then
   if [[ "${'$'}{LIFECYCLE_REQUIRE_PNPM_PROFILE_CWD:-0}" == '1' && "$PWD" != "${'$'}{LIFECYCLE_PROFILE_DIRECTORY:-}" ]]; then printf 'pnpm profile cwd mismatch\n' >&2; exit 97; fi
   if [[ "${'$'}{LIFECYCLE_PNPMFILE_MUST_NOT_RUN:-0}" == '1' && "${'$'}{pnpm_config_ignore_pnpmfile:-}" != 'true' ]]; then printf 'pnpmfile execution was not disabled\n' >&2; exit 98; fi
+  if [[ -n "\${LIFECYCLE_PNPM_STORE_MARKER:-}" ]]; then : > "$LIFECYCLE_PNPM_STORE_MARKER"; fi
   printf '%s\n' "${pnpmStorePath}"; exit 0
+fi
+if [[ " \${1:-} \${2:-} \${3:-} " == ' config list --json ' ]]; then
+  if [[ ! -f "$PWD/pnpm-workspace.yaml" ]]; then printf 'pnpm config workspace missing\n' >&2; exit 96; fi
+  registry='https://registry.npmjs.org/'
+  if [[ "\${LIFECYCLE_NPM_SANDBOX_REGISTRY_DRIFT:-0}" == '1' && "\${pnpm_config_offline:-}" == 'true' ]]; then registry='https://registry.invalid/'; fi
+  printf '{"registry":"%s","@jsr:registry":"https://npm.jsr.io/"}\n' "$registry"
+  exit 0
 fi
 if [[ "\${1:-}" == '--store-dir' && "\${2:-}" == '${pnpmStorePath}' && "\${3:-}" == 'store' && "\${4:-}" == 'add' ]]; then
   if [[ "${'$'}{LIFECYCLE_REQUIRE_PNPM_PROFILE_CWD:-0}" == '1' && "$PWD" != "${'$'}{LIFECYCLE_PROFILE_DIRECTORY:-}" ]]; then printf 'pnpm profile cwd mismatch\n' >&2; exit 97; fi
@@ -1046,6 +1063,84 @@ if [[ "\${1:-}" == '--store-dir' && "\${2:-}" == '${pnpmStorePath}' && "\${3:-}"
   [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
   printf 'pnpm-store-add\t%s\tignore=%s\t%s\n' "$transaction_state" "${'$'}{pnpm_config_ignore_scripts:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
   if [[ "$LIFECYCLE_STORE_FAILS" == '1' ]]; then printf 'store prefetch failed\n' >&2; exit 93; fi
+  exit 0
+fi
+directory="$PWD"
+used_directory='0'
+arguments=("$@")
+if [[ "\${1:-}" == '--dir' ]]; then directory="$2"; used_directory='1'; arguments=("\${@:3}"); fi
+transaction_state='absent'
+[[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
+if [[ " \${arguments[0]:-} \${arguments[1]:-} \${arguments[2]:-} " == ' config list --json ' ]]; then
+  if [[ ! -f "$directory/pnpm-workspace.yaml" ]]; then printf 'pnpm config workspace missing\n' >&2; exit 96; fi
+  registry='https://registry.npmjs.org/'
+  if [[ "\${LIFECYCLE_NPM_SANDBOX_REGISTRY_DRIFT:-0}" == '1' && "\${pnpm_config_offline:-}" == 'true' ]]; then registry='https://registry.invalid/'; fi
+  printf '{"registry":"%s","@jsr:registry":"https://npm.jsr.io/"}\n' "$registry"
+  exit 0
+fi
+if [[ "\${arguments[0]:-}" == 'add' && " \${arguments[*]} " == *' --lockfile-only '* && " \${arguments[*]} " == *' --save-exact '* ]]; then
+  printf 'pnpm-prepare\t%s\tcwd=%s\tignore=%s\tstore=%s\tcache=%s\t%s\n' "$transaction_state" "$directory" "\${pnpm_config_ignore_scripts:-}" "\${pnpm_config_store_dir:-}" "\${pnpm_config_cache_dir:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  if [[ "\${LIFECYCLE_NPM_PREPARE_FAIL:-0}" == '1' ]]; then printf 'metadata preparation failed\n' >&2; exit 93; fi
+  node - "$directory" "\${arguments[@]}" <<'NODE'
+const { readFileSync, writeFileSync } = require('node:fs')
+const { join } = require('node:path')
+const directory = process.argv[2]
+const targets = process.argv.slice(3).filter(value => value.startsWith('@dsh-enhanced/'))
+const manifestPath = join(directory, 'package.json')
+const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+manifest.dependencies ??= {}
+for (const target of targets) {
+  const index = target.lastIndexOf('@')
+  manifest.dependencies[target.slice(0, index)] = target.slice(index + 1)
+}
+writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\\n')
+const dependencyLines = Object.entries(manifest.dependencies).map(([name, version]) => '      ' + JSON.stringify(name) + ':\\n        specifier: ' + JSON.stringify(version) + '\\n        version: ' + JSON.stringify(version)).join('\\n')
+const packageLines = targets.map(target => '  ' + JSON.stringify(target) + ':\\n    resolution: {integrity: sha512-fixture}').join('\\n')
+const snapshotLines = targets.map(target => '  ' + JSON.stringify(target) + ': {}').join('\\n')
+writeFileSync(join(directory, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\\n\\nimporters:\\n  .:\\n    dependencies:\\n" + dependencyLines + "\\n\\npackages:\\n" + packageLines + "\\n\\nsnapshots:\\n" + snapshotLines + "\\n")
+if (process.env.LIFECYCLE_NPM_SOURCE_METADATA_MUTATION === '1') {
+  const sourcePath = process.env.LIFECYCLE_ORIGINAL_METADATA_PATH
+  const source = JSON.parse(readFileSync(sourcePath, 'utf8'))
+  source.externalMutation = 'preserve'
+  writeFileSync(sourcePath, JSON.stringify(source, null, 2) + '\\n')
+}
+NODE
+  exit 0
+fi
+if [[ "\${arguments[0]:-}" == 'install' && " \${arguments[*]} " == *' --lockfile-only '* && " \${arguments[*]} " == *' --frozen-lockfile '* ]]; then
+  printf 'pnpm-verify\t%s\tcwd=%s\tignore=%s\tstore=%s\tcache=%s\t%s\n' "$transaction_state" "$directory" "\${pnpm_config_ignore_scripts:-}" "\${pnpm_config_store_dir:-}" "\${pnpm_config_cache_dir:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  if [[ "\${LIFECYCLE_NPM_VERIFY_FAIL:-0}" == '1' ]]; then printf 'metadata verification failed\n' >&2; exit 94; fi
+  node - "$directory/pnpm-lock.yaml" <<'NODE' > "\${pnpm_config_cache_dir:?}/lockfile-verified.jsonl"
+const { createHash } = require('node:crypto')
+const { readFileSync } = require('node:fs')
+const { resolve } = require('node:path')
+const path = resolve(process.argv[2])
+const policy = { tarballUrlBinding: true, resolutionShapeCheck: true, dependencyAliasCheck: true }
+if (process.env.LIFECYCLE_NPM_RECEIPT_MISSING_POLICY) delete policy[process.env.LIFECYCLE_NPM_RECEIPT_MISSING_POLICY]
+process.stdout.write(JSON.stringify({ lockfile: { path, hash: createHash('sha256').update(readFileSync(path)).digest('hex') }, policy }) + '\\n')
+NODE
+  exit 0
+fi
+if [[ "\${arguments[0]:-}" == 'fetch' && " \${arguments[*]} " == *' --frozen-lockfile '* ]]; then
+  printf 'pnpm-fetch\t%s\tcwd=%s\tignore=%s\tstore=%s\tcache=%s\t%s\n' "$transaction_state" "$directory" "\${pnpm_config_ignore_scripts:-}" "\${pnpm_config_store_dir:-}" "\${pnpm_config_cache_dir:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  if [[ "\${LIFECYCLE_NPM_PREFETCH_FAIL:-0}" == '1' || "$LIFECYCLE_STORE_FAILS" == '1' ]]; then printf 'metadata prefetch failed\n' >&2; exit 95; fi
+  exit 0
+fi
+if [[ "\${arguments[0]:-}" == 'build' ]]; then
+  if [[ ! -f "$directory/package.json" ]]; then printf 'pnpm build package manifest missing\n' >&2; exit 96; fi
+  if [[ "\${LIFECYCLE_LOCAL_BUILD_FAIL:-0}" == '1' && "$used_directory" == '1' && "$directory" == "$LIFECYCLE_REPO_ROOT" ]]; then printf 'local fixture pnpm build failed\n' >&2; exit 72; fi
+  exit 0
+fi
+if [[ "\${arguments[0]:-}" == 'install' && " \${arguments[*]} " == *' --offline '* && " \${arguments[*]} " == *' --frozen-lockfile '* ]]; then
+  if [[ "\${LIFECYCLE_LOCAL_INSTALL_FAIL:-0}" == '1' && "$used_directory" == '1' && "$directory" == "$LIFECYCLE_REPO_ROOT" ]]; then printf 'local fixture pnpm install failed\n' >&2; exit 71; fi
+  printf 'pnpm-offline-install\t%s\tcwd=%s\tignore=%s\tstore=%s\tcache=%s\t%s\n' "$transaction_state" "$directory" "\${pnpm_config_ignore_scripts:-}" "\${pnpm_config_store_dir:-}" "\${pnpm_config_cache_dir:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  if [[ -n "\${LIFECYCLE_NPM_PEER_EXTERNAL_BIN:-}" && -e "$directory/node_modules/@dsh-enhanced/lark-channel/package.json" ]]; then
+    mkdir -p "$(dirname "$LIFECYCLE_NPM_PEER_EXTERNAL_BIN")"
+    printf 'unexpected external bin\n' > "$LIFECYCLE_NPM_PEER_EXTERNAL_BIN"
+  fi
+  if [[ "$used_directory" == '1' && "$transaction_state" == 'present' && "$directory" == */profiles/web ]]; then
+    printf 'upgraded\n' > "$directory/upgraded"
+  fi
   exit 0
 fi
 printf 'unexpected fake pnpm invocation: %s\n' "$*" >&2
@@ -1464,15 +1559,14 @@ let logicalHome
 let validatorFd
 let validatorPath
 let validatorMode
-let storeFd
-let storePath
+const readonlyBindings = {}
 for (let index = 0; index < separator; index += 1) {
   if (args[index] === '--setenv') { environment[args[index + 1]] = args[index + 2]; index += 2; continue }
   if (args[index] === '--bind') { stageHome = args[index + 1]; logicalHome = args[index + 2]; index += 2; continue }
   if (args[index] === '--bind-fd') { stageHome = realpathSync('/proc/self/fd/' + args[index + 1]); logicalHome = args[index + 2]; index += 2; continue }
   if (args[index] === '--perms') { validatorMode = args[index + 1]; index += 1; continue }
   if (args[index] === '--ro-bind-data') { validatorFd = args[index + 1]; validatorPath = args[index + 2]; index += 2; continue }
-  if (args[index] === '--ro-bind-fd') { storeFd = args[index + 1]; storePath = args[index + 2]; index += 2; continue }
+  if (args[index] === '--ro-bind-fd') { readonlyBindings[args[index + 2]] = args[index + 1]; index += 2; continue }
   if (args[index] === '--ro-bind') { index += 2; continue }
   if (args[index] === '--tmpfs' || args[index] === '--proc' || args[index] === '--dev') { index += 1 }
 }
@@ -1482,9 +1576,11 @@ if (separator < 0 || !args.includes('--unshare-all') || args.includes('--share-n
   process.stderr.write('fake bwrap rejected unsafe or incomplete sandbox arguments: ' + JSON.stringify({ separator, stageHome, logicalHome, validatorMode, validatorFd, validatorPath }) + '\\n')
   process.exit(97)
 }
-if (controls.LIFECYCLE_REQUIRE_PNPM_STORE_FD === '1' && args.slice(separator + 1).includes('plugin')
-  && (storeFd !== '5' || storePath !== ${JSON.stringify(pnpmStorePath)} || realpathSync('/proc/self/fd/' + storeFd) !== storePath)) {
-  process.stderr.write('fake bwrap missing exact read-only pnpm store fd ' + JSON.stringify({ storeFd, storePath }) + '\\n')
+if (controls.LIFECYCLE_REQUIRE_PNPM_STORE_FD === '1' && (args.slice(separator + 1).includes('install') || args.slice(separator + 1).includes('config'))
+  && (readonlyBindings[${JSON.stringify(pnpmStorePath)}] !== '5'
+    || realpathSync('/proc/self/fd/' + readonlyBindings[${JSON.stringify(pnpmStorePath)}]) !== ${JSON.stringify(pnpmStorePath)}
+    || readonlyBindings['/run/dsh-enhanced-pnpm-cache'] !== '6')) {
+  process.stderr.write('fake bwrap missing exact read-only pnpm store/cache fds ' + JSON.stringify(readonlyBindings) + '\\n')
   process.exit(96)
 }
 for (const [key, value] of Object.entries(environment)) {
@@ -1532,11 +1628,22 @@ function lifecycleEnvironment(dshHome: string, fakeBin: string, options: Lifecyc
     LIFECYCLE_NPM_BLOCK: options.npmBlock ? '1' : '0',
     LIFECYCLE_NPM_BLOCK_RELEASE: join(dirname(dshHome), 'npm-block-release'),
     LIFECYCLE_NPM_BLOCK_STARTED: join(dirname(dshHome), 'npm-block-started'),
+    LIFECYCLE_NPM_PEER_EXTERNAL_BIN: options.npmPeerExternalBin ?? '',
+    LIFECYCLE_NPM_PREPARE_FAIL: options.npmPrepareFails ? '1' : '0',
+    LIFECYCLE_NPM_RECEIPT_MISSING_POLICY: options.npmReceiptMissingPolicy ?? '',
+    LIFECYCLE_NPM_SANDBOX_REGISTRY_DRIFT: options.npmSandboxRegistryDrift ? '1' : '0',
+    LIFECYCLE_NPM_SOURCE_METADATA_MUTATION: options.npmSourceMetadataMutation ? '1' : '0',
     LIFECYCLE_NPM_VERSION: options.npmVersion ?? '1.4.0',
+    LIFECYCLE_NPM_VERIFY_FAIL: options.npmVerifyFails ? '1' : '0',
+    LIFECYCLE_LOCAL_BUILD_FAIL: options.localBuildFails ? '1' : '0',
+    LIFECYCLE_LOCAL_INSTALL_FAIL: options.localInstallFails ? '1' : '0',
+    LIFECYCLE_PNPM_STORE_MARKER: options.pnpmStoreMarker ?? '',
     LIFECYCLE_OPERATION_LOG: join(dirname(dshHome), 'lifecycle-operations.log'),
     LIFECYCLE_ORIGINAL_HOME: dshHome,
+    LIFECYCLE_ORIGINAL_METADATA_PATH: join(dshHome, 'profiles', 'web', 'package.json'),
     LIFECYCLE_PNPMFILE_MUST_NOT_RUN: options.pnpmfileMustNotRun ? '1' : '0',
     LIFECYCLE_PROFILE_DIRECTORY: join(dshHome, 'profiles', 'web'),
+    LIFECYCLE_REPO_ROOT: repoRoot,
     LIFECYCLE_REQUIRE_PNPM_PROFILE_CWD: options.requirePnpmProfileCwd ? '1' : '0',
     LIFECYCLE_REQUIRE_PNPM_STORE_FD: options.requirePnpmStoreFd ? '1' : '0',
     LIFECYCLE_PACKAGE_FAILS: options.packageFails ? '1' : '0',
@@ -2736,10 +2843,12 @@ describe('one-click installers', () => {
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
   })
 
-  test('npm upgrade resolves and prefetches its exact cohort before creating the offline transaction', async () => {
+  test('npm upgrade prepares, verifies, fetches, and installs its exact metadata cohort transactionally', async () => {
     const f = await lifecycleFixture()
     const version = '1.4.0-rc.2+build.7'
     const target = `@dsh-enhanced/personal-assistant@${version}`
+    const packageBefore = JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))
+    const workspaceBefore = await readFile(join(f.profileDirectory, 'pnpm-workspace.yaml'), 'utf8')
 
     const result = runInstaller(npmInstaller, [
       '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped',
@@ -2747,15 +2856,27 @@ describe('one-click installers', () => {
     ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { npmVersion: version }))
 
     expect(result.status, result.stderr).toBe(0)
-    expect((await readFile(f.operationLog, 'utf8')).trim().split('\n')).toEqual([
+    const operations = (await readFile(f.operationLog, 'utf8')).trim().split('\n')
+    expect(operations.slice(0, 2)).toEqual([
       `npm-view\tabsent\tview ${target} version --json`,
       `npm-view\tabsent\tview ${target} version --json`,
-      `pnpm-store-add\tabsent\tignore=true\t--store-dir ${join(f.root, 'pnpm-store')} store add ${target}`,
-      `dsh-add\tpresent\toffline=true\timport=copy\tplugin --profile web add ${target}`,
     ])
+    const preparation = operations.find(line => line.startsWith('pnpm-prepare\tabsent\t'))
+    expect(preparation).toContain(`add --lockfile-only --save-exact ${target}`)
+    expect(preparation).toMatch(/ignore=true\tstore=.+\tcache=.+/u)
+    expect(preparation).not.toContain(`cwd=${f.dshHome}`)
+    expect(operations.find(line => line.startsWith('pnpm-verify\tabsent\t'))).toContain('install --lockfile-only --frozen-lockfile')
+    expect(operations.find(line => line.startsWith('pnpm-fetch\tabsent\t'))).toContain('fetch --frozen-lockfile')
+    expect(operations.find(line => line.startsWith('pnpm-offline-install\tpresent\t'))).toContain('install --offline --frozen-lockfile')
+    expect(operations.some(line => line.startsWith('pnpm-store-add') || line.startsWith('dsh-add'))).toBe(false)
+    const packageAfter = JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))
+    expect(packageAfter.dependencies['@dsh-enhanced/personal-assistant']).toBe(version)
+    expect(packageAfter.dsh).toEqual(packageBefore.dsh)
+    expect(await readFile(join(f.profileDirectory, 'pnpm-workspace.yaml'), 'utf8')).toBe(workspaceBefore)
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toContain(`"${target}"`)
   })
 
-  test('npm upgrade resolves the profile store without pnpmfile execution and fd-binds its hidden read-only store', async () => {
+  test('npm upgrade uses an isolated metadata preparation directory and a fd-bound frozen offline store', async () => {
     const f = await lifecycleFixture({
       requirePnpmStore: true, requirePnpmFrozenStore: true, requirePnpmStoreFd: true, requirePnpmProfileCwd: true,
     })
@@ -2766,6 +2887,11 @@ describe('one-click installers', () => {
     }))
 
     expect(result.status, result.stderr).toBe(0)
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations).toMatch(/^pnpm-prepare\tabsent\tcwd=(?!.*profiles\/web).*\tignore=true\tstore=.+\tcache=.+/mu)
+    expect(operations).toMatch(/^pnpm-verify\tabsent\t.*install --lockfile-only --frozen-lockfile/mu)
+    expect(operations).toMatch(/^pnpm-fetch\tabsent\t.*fetch --frozen-lockfile/mu)
+    expect(operations).toMatch(/^pnpm-offline-install\tpresent\t.*install --offline --frozen-lockfile/mu)
     expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
   })
 
@@ -2820,7 +2946,11 @@ describe('one-click installers', () => {
     await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test('npm upgrade store prefetch failure leaves all original state untouched and never creates a transaction', async () => {
+  test.each([
+    ['preparation', { npmPrepareFails: true }, 'pnpm-prepare', 'metadata preparation failed'],
+    ['verification', { npmVerifyFails: true }, 'pnpm-verify', 'metadata verification failed'],
+    ['prefetch', { storeFails: true }, 'pnpm-fetch', 'metadata prefetch failed'],
+  ] as const)('npm upgrade %s failure leaves all original state untouched and never creates a transaction', async (_phase, options, phaseLog, errorText) => {
     const f = await lifecycleFixture()
     const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
     const patchBefore = await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')
@@ -2829,15 +2959,13 @@ describe('one-click installers', () => {
     const result = runInstaller(npmInstaller, [
       '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped',
       '--plugin-version', '1.4.0',
-    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { storeFails: true }))
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, options))
 
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('npm cohort 预取失败')
-    expect((await readFile(f.operationLog, 'utf8')).trim().split('\n')).toEqual([
-      'npm-view\tabsent\tview @dsh-enhanced/personal-assistant@1.4.0 version --json',
-      'npm-view\tabsent\tview @dsh-enhanced/personal-assistant@1.4.0 version --json',
-      `pnpm-store-add\tabsent\tignore=true\t--store-dir ${join(f.root, 'pnpm-store')} store add @dsh-enhanced/personal-assistant@1.4.0`,
-    ])
+    expect(result.stderr).toContain(errorText)
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations).toContain(`${phaseLog}\tabsent\t`)
+    expect(operations).not.toContain('pnpm-offline-install\tpresent\t')
     await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
     expect(await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')).toBe(patchBefore)
@@ -2849,6 +2977,117 @@ describe('one-click installers', () => {
     expect(dshCalls).toContain('CALL\t--version\n')
     expect(dshCalls).not.toContain('\tplugin\t')
     expect(dshCalls).not.toContain('\t--host\t')
+  })
+
+  test.each([
+    'tarballUrlBinding',
+    'resolutionShapeCheck',
+    'dependencyAliasCheck',
+  ] as const)('npm upgrade rejects a verification receipt without %s before creating a transaction', async policyFlag => {
+    const f = await lifecycleFixture()
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const lockfileBefore = await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--plugin-version', '1.4.0',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { npmReceiptMissingPolicy: policyFlag }))
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toMatch(/final verification.*(?:tarball|resolution|alias)|verification cache/iu)
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations).toContain('pnpm-verify\tabsent\t')
+    expect(operations).toContain('pnpm-fetch\tabsent\t')
+    expect(operations).not.toContain('pnpm-offline-install\tpresent\t')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(lockfileBefore)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(f.activationMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('npm upgrade preserves an external source metadata mutation observed during preparation', async () => {
+    const f = await lifecycleFixture()
+    const lockfileBefore = await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')
+    const patchBefore = await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--plugin-version', '1.4.0',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { npmSourceMetadataMutation: true }))
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toMatch(/metadata|identity|changed|变化/iu)
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations).toContain('pnpm-prepare\tabsent\t')
+    expect(operations).not.toContain('pnpm-offline-install\tpresent\t')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))).toMatchObject({ externalMutation: 'preserve' })
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(lockfileBefore)
+    expect(await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')).toBe(patchBefore)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(f.activationMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('npm upgrade rejects a staged registry configuration drift before offline install or commit', async () => {
+    const f = await lifecycleFixture()
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const lockfileBefore = await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')
+    const databaseBefore = readLifecycleDatabase(f.databasePath)
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--plugin-version', '1.4.0',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { npmSandboxRegistryDrift: true }))
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toMatch(/effective configuration changed|cannot be reproduced|configuration/iu)
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations).toContain('pnpm-fetch\tabsent\t')
+    expect(operations).not.toContain('pnpm-offline-install\tpresent\t')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe(lockfileBefore)
+    expect(readLifecycleDatabase(f.databasePath)).toEqual(databaseBefore)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(f.activationMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('npm upgrade detaches and restores an external Host peer fallback before offline pnpm materialization', async () => {
+    const f = await lifecycleFixture()
+    const externalPeer = join(f.root, 'host-peer-fallback')
+    const peerLink = join(f.profileDirectory, 'node_modules', '@dsh-enhanced', 'lark-channel')
+    const unexpectedBin = join(f.root, 'outside-bin', 'lark-channel')
+    await mkdir(externalPeer, { recursive: true })
+    await writeFile(join(externalPeer, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/lark-channel', version: '0.1.0' }))
+    await mkdir(dirname(peerLink), { recursive: true })
+    await symlink(externalPeer, peerLink)
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--plugin-version', '1.4.0',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { npmPeerExternalBin: unexpectedBin }))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await realpath(peerLink)).toBe(externalPeer)
+    await expect(stat(unexpectedBin)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
+    await expect(stat(f.activationMarker)).resolves.toBeDefined()
+    expect(await readFile(f.dshLog, 'utf8')).toContain('CALL\t--profile\tweb\t--host\t127.0.0.1\t--no-open\t--port\t0\n')
+  })
+
+  test('npm upgrade rejects workspace configDependencies before pnpm store resolution or metadata preparation', async () => {
+    const f = await lifecycleFixture()
+    const marker = join(f.root, 'pnpm-store-would-execute')
+    await writeFile(join(f.profileDirectory, 'pnpm-workspace.yaml'), 'packages:\n  - .\nconfigDependencies:\n  unsafe-bootstrap: 1\n')
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--plugin-version', '1.4.0',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { pnpmStoreMarker: marker }))
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toMatch(/configDependencies|metadata|配置/iu)
+    await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations).not.toContain('pnpm-prepare\tabsent\t')
+    expect(operations).not.toContain('pnpm-store-add\tabsent\t')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('npm upgrade recovers an old transaction and returns before registry or store access', async () => {
@@ -2996,6 +3235,48 @@ describe('one-click installers', () => {
     expect(larkUninstall.stdout).toContain('Preserve units, credentials, owner binding, Sessions, Goals and external durable state')
     expect(await readFile(f.systemdLog, 'utf8')).toBe('')
   })
+
+  test('the historical local upgrade AND chain continued after a failed repository install', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const fixtureCommon = await readFile(f.fixtureInstallerLibrary, 'utf8')
+    const oldCommon = fixtureCommon.replace(
+      'pnpm --dir "$repo_root" install --offline --frozen-lockfile || return $?\n      pnpm --dir "$repo_root" build || return $?',
+      'pnpm --dir "$repo_root" install --offline --frozen-lockfile && pnpm --dir "$repo_root" build',
+    )
+    expect(oldCommon).not.toBe(fixtureCommon)
+    await writeFile(f.fixtureInstallerLibrary, oldCommon)
+
+    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
+      '--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped', '--yes',
+    ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin, { localInstallFails: true }))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'stop')).toBe(true)
+    expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
+  }, 15_000)
+
+  test.each([
+    ['install', { localInstallFails: true }, 71, 'local fixture pnpm install failed'],
+    ['build', { localBuildFails: true }, 72, 'local fixture pnpm build failed'],
+  ] as const)('local upgrade returns the repository %s failure before lifecycle mutation', async (_phase, options, code, message) => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const sessionBefore = await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')
+
+    const result = runInstaller(join(f.fixtureInstallDirectory, 'install-local.sh'), [
+      '--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped', '--yes',
+    ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin, options))
+
+    expect(result.status).toBe(code)
+    expect(result.stderr).toContain(message)
+    expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'stop')).toBe(false)
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe(sessionBefore)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const dshCalls = await readFile(f.dshLog, 'utf8')
+    expect(dshCalls).not.toContain('\tplugin\t')
+  }, 15_000)
 
   test.each(['local', 'npm'] as const)(
     '%s lifecycle entry rejects unsupported service modes before systemd, transaction, or registry work',

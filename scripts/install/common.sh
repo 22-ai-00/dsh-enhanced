@@ -2821,7 +2821,8 @@ dsh_enhanced_install() {
       fi
       dsh_enhanced_print_command pnpm --dir "$repo_root" build
     elif [[ "$operation" == 'upgrade' ]]; then
-      pnpm --dir "$repo_root" install --offline --frozen-lockfile && pnpm --dir "$repo_root" build
+      pnpm --dir "$repo_root" install --offline --frozen-lockfile || return $?
+      pnpm --dir "$repo_root" build || return $?
     else
       (cd "$repo_root" && pnpm install && pnpm build)
     fi
