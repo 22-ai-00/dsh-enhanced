@@ -22,6 +22,10 @@
       "types": "./lib/benchmark/native.d.ts",
       "default": "./lib/benchmark/native.js"
     },
+    "./benchmark/holdout": {
+      "types": "./lib/benchmark/holdout.d.ts",
+      "default": "./lib/benchmark/holdout.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json",
     "./benchmark/strategy": {

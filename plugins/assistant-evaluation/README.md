@@ -77,9 +77,9 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 ## 权限与数据边界
 
 - **文件系统：** 创建数据库父目录并写入本地 SQLite；新数据库目录使用 `0700`、数据库使用 `0600`。现有数据库若为符号链接、硬链接、非当前用户所有或对 group/other 开放，会拒绝启动。数据库启用 WAL、`synchronous=FULL`、迁移版本检查和 5 秒 busy timeout。
-- **网络：** 无。
-- **子进程：** 无。
-- **凭据：** 无。
+- **网络：** 默认 Evaluation 插件无网络访问；显式调用 experimental benchmark SDK 时，模型 delegate 或独立 holdout authority 是否联网由可信 Host/operator 的部署决定，SDK 本身只使用进程内调用或 stdio transport。
+- **子进程：** 默认 Evaluation 插件不创建子进程；显式调用 `./benchmark/holdout` 的 `openHoldoutProvider()` 才会启动 operator 指定的 authority executable。
+- **凭据：** 默认 Evaluation 插件不读取凭据；holdout provider 只收到 operator 显式给出的精确 environment，不继承 Host 环境，delegate 所需凭据仍由可信 Host 自行装配和撤销。
 - **浏览器：** 无。
 - **install script：** 无；仅有标准 TypeScript build/prepack 和仓库发布保护脚本。
 
@@ -107,6 +107,25 @@ scope、situation、producer/evaluator id、证据引用和指标属于本地评
 报告保留所有计划 cell 作为已验证成功率分母，unknown 和缺测单列，缺失费用/token/返工/人工介入量不会补成零。提供配对胜负、差值和均值/中位数/P95；区间按任务聚类 bootstrap，同题重复不当作独立任务。任一比较臂有缺测或 unknown 就不报告收益差值与区间，不能把基线的未知结果当作失败来制造增益；单臂有 unknown 也不报告其成功率区间。少于两个任务不提供区间。小样本或同质任务仍不足以证明泛化收益，报告始终 `promotionAuthorized: false`。
 
 **当前完成范围：** 冻结协议、持久账本、有界协调器、统计计算、原生 AgentLoop 执行器及 `dsh-benchmark` 命令。默认 `research-v1` 保留 8 道公开研究/注入开发题；`memory-v2` 增加 6 道公开记忆开发题。`strategy-v1` 增加 4 道公开合成 shell 开发题：整数汇总、接触区间合并、按频次/字典序词频和依赖拓扑排序。它们是开发语料，不是 holdout，也没有真实模型收益证据。
+
+### 独立留出 provider Host SDK（实验性）
+
+`@dsh-enhanced/assistant-evaluation/benchmark/holdout` 是 inert Host SDK：导入它不会挂载 Cordis 插件、启动 provider、创建数据库或注册模型工具。普通 `runIndependentHoldout()` 也只在可信 Host 显式调用时运行。若调用发生在插件生命周期内，应使用 `runIndependentHoldoutInContext(ctx, options)`；它把 benchmark journal、evidence store、authority/delegate session 和取消控制注册为当前 Cordis Fiber 的一个 owned effect。Fiber 卸载会停止新准入、abort 运行、等待有界清理并关闭两个 store；自然完成也会关闭资源并移除该 effect。`providerTimeoutMs` 为任意 Host provider 的启动、每个请求和关闭设置上限；在 abort 或期限后才解析的 provider 会只做一次有界 `close()`，不会再请求 manifest 或写入 store。它没有把 `ctx.isolate()` 当作进程、凭据或数据集隔离。
+
+operator 必须同时固定 `{ id, version, digest }` 数据集 pin 和 Ed25519 authority public key。authority 按顺序返回四类严格 envelope：
+
+- `manifest` 签名公开 dataset/case identity 及 input/acceptance commitments；
+- `input` 签名并绑定 exact manifest、plan、cell、input digest 和本次临时输入 bytes；
+- `verdict` 签名并绑定 exact input/acceptance/output digest、plan、cell 与判定；
+- `finish` 签名完整 cell 数和按计划顺序排列的 signed-verdict envelope digest 链。
+
+Host 不接受 authority 自报的资源用量：delegate 必须返回与冻结 variant 一致的版本、Host 侧 metrics、execution evidence digest 和 quiescence，runner 再核对每 cell 预算；墙钟 latency 由 runner 计量。这里的 Host 计量仍是可信同进程 adapter 的自证，不是独立外部 meter。`acceptanceDigest` 只承诺验收材料没有被事后替换，不加密低熵答案，也不能证明该材料在候选生成前已经冻结。
+
+私有 input 只在当前 delegate 调用期间存在，raw output 只用于本次 verdict 请求；SDK 在结算后尽力清零持有的 byte arrays。Benchmark SQLite、content-addressed evidence 与报告只保存 digests、Host metrics、执行证据引用以及 signed manifest/verdict/finish，不保存 signed input envelope、raw input 或 raw output。这个约束只覆盖 Host SDK 的持久化面，不能证明外部 authority、delegate、模型服务或同 UID 进程没有另行复制数据。
+
+恢复语义保持保守：完整 journal 加不可变 completion marker 可在不启动 authority/delegate 的情况下重验；已有 unknown 直接保持终态。completed prefix、遗留 running intent、缺失/漂移的 finish marker 都在 provider startup 前失败关闭，v1 不选择性续跑。若最后一个 cell 已发布 finish marker、但进程在 SQLite cell 终态提交前崩溃，重启仍看到 running intent；operator 必须先确认旧执行停止，再调用 `BenchmarkStore.interrupt()` 将其记为 unknown，不能用 marker 自动升级为成功。
+
+内置 provider transport 使用单请求 NDJSON、固定 `cwd: /`、完全显式的 child environment、长度/时间上限和 TERM→KILL 有界关闭。POSIX 关闭同时等待 leader/stdio 关闭和当前数值进程组消失，Windows 只管理直接 child 与其 stdio；继承管道仍未关闭时会有界报 `termination-unconfirmed`。普通 PID/PGID 信号不能约束脱离进程组的后代，也不能排除数值复用导致误发信号，因而不是无竞态进程身份或强 OS containment 证明。executable 只做绝对 canonical pathname 校验，没有 fd/inode 绑定，因此 pathname 在校验与 `spawn` 之间被替换不在当前保证内。现有真实子进程回归使用同 UID synthetic authority fixture；它验证 transport、签名链、无 raw I/O 持久化、零-spawn 重验和 fail-closed 恢复，不证明独立账号/机器/UID 部署、历史冻结透明度或真实隐藏性。目前也没有真实模型、真实独立 holdout 或 live benefit 证据，WP04 继续为实现中。
 
 ### 原生策略比较的 Host 接口
 

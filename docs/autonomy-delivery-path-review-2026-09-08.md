@@ -2,7 +2,34 @@
 
 结论：优先贯通正式安装后的完整用户能力，缩短首次真实集成的反馈周期。保留全部 18 项目标；取消按天和两周观察等待，不削弱权限、独立验收或回滚边界。
 
-## 当前执行决定（2026-09-09，基线 `bf04c89`）
+## 当前执行决定（2026-09-12，基线 `89751c3`，基本 RSI）
+
+用户再次明确目标是基本 RSI 智能体。全部 18 项要求继续保留；当前主线以可重复的自我改进能力验收：实际任务/反馈产生失败 → 智能体归因并提出修改 → 生成以后会使用的策略、技能或工具候选 → 独立同预算比较与回归 → 预授权范围内有限启用 → 后续真实任务复用并接受纠正 → 更新后的版本继续参与下一轮改进。失败候选可被拒绝，不要求每轮必然晋升；不能用手工提供修复答案代替自主改进。
+
+本次只读核对本机与远端 `dev` 均为 `89751c3250180a3efc267d92bb69af1b6b0880c0`，比 `b7b4b16` 多 24 个提交。失败/重复轨迹候选、技能 canonical revision 监控、whole-goal owner correction/withdrawal、安装升级/卸载、GitHub 补偿及 external broker 已有提交，不能继续按 9 月 9 日的缺实现清单重新开发。总体仍为 3 已验证 / 13 实现中 / 2 待做；这个账本状态不等于停工，也不是能力完成百分比。
+
+### RSI 关键缺口与实际证据
+
+- `skill_failure_candidate` 已从 Host 的失败证据和独立成功修复轨迹生成有来源证明的候选；但调用方仍提供失败定位、repair Goal 和任务族等信息。当前尚无完整普通委托下自主发现、诊断、修改、推广并再次改进的真实证据。
+- 进一步核对出单次委托的具体断点：`not-achieved` 不必终止原生 Goal，但 `goal_create` 只接受 live owner human turn（`assistant-goals/src/tools.ts`）；失败候选要求修复与失败分别来自不同 Goal、Session、native Goal 和 run，且修复已有独立 achieved 回执（`assistant-skills/src/capture-expansion.ts`、`assistant-goals/src/service.ts`）。现有后台 round 能继续修复，却不能独立创建所需 repair Goal，因此这条精确候选路径仍需要第二次 owner 请求。下一步在已有 Goals/Skills/Delivery/Policy 上补有限预授权的完整修复衔接，保留 lineage、预算、撤权与独立验收；不能简单放开后台 `goal_create`，也不据此另建通用调度框架。Skills 的 `draft/compare/canary/watch` 同样由 `#scope` 要求 current human turn，故新修复 Goal 并不足够。初始授权应固定来源 Goal/definition、任务族、父版本、profile template 和总次数/时间/预算；未来失败发生后由 Host 绑定真实 canonical failure，独立修复成功后再生成候选并绑定当时才可知的 candidate digest。只允许按冻结模板填入精确候选，不得让模型重写留出规则或伪造人类请求；后续有限轮次消费同一授权额度，不能自行续期。
+- `scripts/e2e/web-owner-real-canary.spec.mjs` 的 baseline/repair 阶段提供完整 `legacySource` / `repairedSource` 和工具步骤，候选与 canary 参数由测试构造。该用例用于接线验证，即使通过也不能证明自主生成修复。保留它的回归价值，另沿正式产品入口验证普通任务，不改名冒充 RSI 验收。
+- 9 月 10 日 template-render 真实 TraeX 记录曾到达 promoted，随后因负向调用参数与 guard 不符失败；因此不是“从未运行过比较”，也没有最终完整回滚证据。对应修复后尚无全链新 proof，见 [template-render 证据](evidence/template-render-failure-canary-2026-09-10.json)。三类固定工程任务族和可控 Goals/反馈夹具还不能满足 3–5 类真实工作流或通用改进收益要求。
+- 本次已收口 WP04 independent holdout Host SDK、provider 取消/进程组清理、archive 并发身份检查及相关测试夹具。最终 `pnpm check` 退出 0：5,154 passed / 1 skipped，33 份 dry-run pack；Evaluation 为 36 files / 293 passed。原生独立 verifier 已复核；TraeX 全量审查超时不计通过，缩小范围后的审查正常完成，实际问题已修复并独立验证。这个工程交付不代表独立 holdout 部署、真实模型收益或基本 RSI 完成，见[本批证据](evidence/wp04-independent-holdout-provider-2026-09-12.json)。
+
+### 下一批交付顺序
+
+1. 当前 holdout 与相关 isolation 修复已完成最终根检查与独立复核，收口为本批交付；历史测试/证据另行注明范围。下一开发主线转入下项单次授权的完整 RSI 衔接。
+2. 用已有 TraeX 独立会话打通一次普通任务触发的 RSI 闭环。只给任务、可见失败反馈、预算、可修改范围和成功条件；不提供修复答案、工具调用顺序或候选参数。优先选事先固定的真实失败，禁止人为削弱基线、挑新样本追求晋升或更改验收器答案。
+3. 验证已更新的策略/技能/工具在后续任务被实际调用，并由更新后的版本继续下一轮改进；先用连续两轮检查循环能否自行继续，不设置天/周等待。最终完整范围仍按 18 项逐条验收。
+4. 唯一辅助线收口已有安装/部署能力的实际环境验证。GitHub、Calendar、Lark 与独立 broker 部署需要准确测试资源时分别处理；不能把它们或 skill 正增益作为所有工作的共同前置。WP16 发布、其他 cohort、Memory/策略收益、高权限停止和补偿等要求全部保留。
+
+### AGENTS.md 对 RSI 的具体约束
+
+自我更新仍须通过实际 Loader 挂载值上的 `name/Config/inject/apply`、独立发布包和 Cordis Fiber 生命周期。候选验证、子进程、计时器、数据库、监听器属于调用方 Fiber；更新/撤权时先关闭准入、abort、drain，再 await teardown 与必要的外部资源释放。不能缓存旧 provider 或以 `registry.delete()` 返回、HMR 替换、`ctx.isolate()` 代替完成回滚或权限隔离的证明。
+
+运行时变更先阅读 `/home/jiataorui/work/github/cordis`，可执行验收以本仓库锁定的 `@deepseek-ai/cordis 4.0.2`、Include `1.0.7`、Loader `1.0.3` 为准。验证有效性由独立比较与实际后续结果决定；被改进的执行者不得修改验收答案、授权边界或将自身报告直接当作晋升依据。
+
+## 历史执行决定（2026-09-09，基线 `bf04c89`，已由上节取代）
 
 本节取代下方历史批次的“下一步”。Calendar 与 Skills v2 已在 `bf04c89` 交付；本批收口技能写前原生文件观察、成功复用的精确轨迹展开，以及 TraeX 工具参数兼容。真实测试已按用户要求切换为 TraeX 独立会话，不再消耗 Codex 订阅路线。TraeX 已执行目标创建、捕获登记和文件写入，但完整 canary 在未授权 bash 审批前停止，仍未验收；不扩大权限或反复重跑来制造通过。本批工程和运行边界见[交付证据](evidence/skill-runtime-traex-2026-09-09.json)，既有 Calendar/GitHub 真实资源缺口保留。
 
