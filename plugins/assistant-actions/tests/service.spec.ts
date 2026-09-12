@@ -36,7 +36,7 @@ function agent(ctx: Context, workspace: string): Agent {
   return value
 }
 
-test('real ToolRuntime, Keychain and HTTP execute a finite commit, preserve unknown after ACK loss and honor external revocation', async () => {
+test.runIf(process.platform === 'linux')('real ToolRuntime, Keychain and HTTP execute a finite commit, preserve unknown after ACK loss and honor external revocation', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'action-service-')))
   // The Policy ledger uses fixed wall-clock windows. Keep all four budget
   // reservations in one window; a real minute rollover made this assertion flaky.

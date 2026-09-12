@@ -16,7 +16,7 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { expect, test, vi } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { AssistantActionsService } from '../src/service.ts'
 import { commitOnGitHub, createCompensatingCommitOnGitHub, readGitHubPreimage } from '../src/github.ts'
 import type { ActionGrant } from '../src/types.ts'
@@ -213,6 +213,8 @@ async function makeHarness(options: HarnessOptions = {}) {
     reload: async () => { await plugin!.dispose(); plugin = await load() }, cleanup, asks: () => asks }
 }
 
+// Every scenario exercises the real linux-protected-file credential backend.
+describe.skipIf(process.platform !== 'linux')('Linux protected-file compensation', () => {
 test('A: succeeded forward result exposes only the redacted four-field receipt', async () => {
   const h = await makeHarness()
   try {
@@ -651,3 +653,4 @@ test('P: losing the rollback hold after the preimage seal but before dispatch te
     expect(h.compPosts()).toHaveLength(0)
   } finally { await h.cleanup() }
 }, 30_000)
+})
