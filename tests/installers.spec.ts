@@ -517,7 +517,7 @@ async function remoteBootstrapFixture(
     'set -euo pipefail',
     'asset="$(basename "$1" .download)"',
     'printf \'verify\\t%s\\n\' "$asset" >> "$REMOTE_BOOTSTRAP_LOG"',
-    'exec /usr/bin/sha256sum "$@"',
+    `"$REMOTE_BOOTSTRAP_NODE" -e 'const { createHash } = require("node:crypto"); const { readFileSync } = require("node:fs"); for (const path of process.argv.slice(1)) console.log(createHash("sha256").update(readFileSync(path)).digest("hex") + "  " + path)' "$@"`,
     '',
   ].join('\n'))
   await writeExecutable(join(fakeBin, 'stat'), [
@@ -556,6 +556,8 @@ function runRemoteNpmBootstrap(
     input: installer,
     env: {
       PATH: fixture.fakeBin + ':/usr/bin:/bin',
+      HOME: fixture.dshHome,
+      REMOTE_BOOTSTRAP_NODE: process.execPath,
       TMPDIR: options.temporaryDirectory ?? fixture.temporaryDirectory,
       DSH_HOME: fixture.dshHome,
       DSH_ENHANCED_INSTALL_REF: 'v9.8.7',
@@ -6103,7 +6105,7 @@ esac
     ], {
       cwd: repoRoot,
       encoding: 'utf8',
-      env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NPM_LOG: logPath, PROFILE_LOG: profileLogPath },
+      env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, HOME: root, NPM_LOG: logPath, PROFILE_LOG: profileLogPath },
     })
 
     expect(result.status).toBe(1)

@@ -167,12 +167,18 @@ async function drain(ctx: Context) {
   for (let index = 0; index < 4; index += 1) { await ctx.assistantAutomations.tick(); await ctx.assistantAutomations.whenIdle(); await ctx.assistantDelivery.tick(); await ctx.assistantDelivery.whenIdle(); await ctx.assistantGoals.whenIdle() }
 }
 
-async function drainUntil(ctx: Context, settled: () => boolean): Promise<void> {
-  await expect.poll(async () => {
-    await ctx.assistantAutomations.tick(); await ctx.assistantAutomations.whenIdle()
-    await ctx.assistantDelivery.tick(); await ctx.assistantDelivery.whenIdle(); await ctx.assistantGoals.whenIdle()
-    return settled()
-  }, { timeout: 10_000, intervals: [10, 25, 50, 100] }).toBe(true)
+async function drainUntil(ctx: Context, settled: () => boolean, diagnostic: () => unknown = () => undefined): Promise<void> {
+  try {
+    await expect.poll(async () => {
+      await ctx.assistantAutomations.tick(); await ctx.assistantAutomations.whenIdle()
+      await ctx.assistantDelivery.tick(); await ctx.assistantDelivery.whenIdle(); await ctx.assistantGoals.whenIdle()
+      return settled()
+    }, { timeout: 10_000, intervals: [10, 25, 50, 100] }).toBe(true)
+  } catch (error) {
+    let detail: unknown
+    try { detail = diagnostic() } catch (diagnosticError) { detail = { diagnosticError: String(diagnosticError) } }
+    throw new Error(`event-goal wake did not settle: ${JSON.stringify(detail)}`, { cause: error })
+  }
 }
 
 function readWait(root: string): { state: string; reason: string | null; sequence: number | null; envelope: Record<string, unknown> | null; intent: { source: { highWaterSequence: number }; wake: { native: { revision: number; sessionId: string; goalId: string } } }; wake: { id: string; native: { revision: number; sessionId: string; goalId: string } } | null } {
@@ -192,6 +198,13 @@ function readNative(root: string, goalId: string): { sessionId: string; goalId: 
     const row = database.prepare('SELECT native_json FROM goal_records WHERE id = ?').get(goalId) as { native_json: string } | undefined
     if (row === undefined) throw new Error('goal record was not durable')
     return JSON.parse(row.native_json)
+  } finally { database.close() }
+}
+
+function readVerificationJobs(root: string): Array<{ state: string; attempts: number; reason: string | null; retryAt: number | null }> {
+  const database = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
+  try {
+    return database.prepare('SELECT state, attempts, reason, retry_at AS retryAt FROM acceptance_jobs ORDER BY contract_id').all() as Array<{ state: string; attempts: number; reason: string | null; retryAt: number | null }>
   } finally { database.close() }
 }
 
@@ -286,7 +299,12 @@ if (phase === undefined) describe('native event-goal wake', () => {
       return wait.wake !== null && ['materialized', 'terminal'].includes(wait.state)
         && native.phase === 'complete' && native.roundsStarted === 1
         && fixture.model.requests.length === before + 3 && fixture.sends.length === 3
-    })
+    }, () => ({
+      wait: readWait(root), native: readNative(root, goalId),
+      verificationJobs: readVerificationJobs(root),
+      modelRequests: fixture.model.requests.length - before,
+      sends: fixture.sends.map(intent => ({ idempotencyKey: intent.idempotencyKey, metadata: intent.metadata })),
+    }))
     const waits = readWait(root)
     expect(['materialized', 'terminal']).toContain(waits.state)
     expect(waits).toMatchObject({ wake: { native: { revision: revision + 1, sessionId: expect.any(String) } } })
