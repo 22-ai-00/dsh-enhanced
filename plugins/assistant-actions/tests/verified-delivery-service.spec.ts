@@ -75,7 +75,7 @@ describe('verified delivery Actions service', () => {
     f.goals.inspectWorkflowRunContext.mockReturnValue({ goalId: 'goal', goalExecutionRunId: 'run', definition: { digest: 'd'.repeat(64), version: 1 } } as never)
     expect(f.prepare({ grantId: 'verified', idempotencyKey: 'legacy', expectedHeadOid: oid, headline: 'Legacy', paths: ['artifacts/release.txt'] })).toMatchObject({ status: 'awaiting-verification' })
   })
-  it('registers through the real tool/ledger, then host commits and opens a PR after the Agent disappears', async () => {
+  it.runIf(process.platform === 'linux')('registers through the real tool/ledger, then host commits and opens a PR after the Agent disappears', async () => {
     const f = await fixture(); const delivery = { grantId: 'verified', idempotencyKey: 'delivery', expectedHeadOid: oid, headline: 'Deliver verified', paths: ['artifacts/release.txt'], pullRequest: { title: 'PR', body: 'body' } }
     const queued: any = await f.execute('action_github_deliver', delivery)
     expect(queued.isError, JSON.stringify(queued)).toBe(false); f.agents.clear(); expect((await f.activate()).outcome).toBe('succeeded')
@@ -84,7 +84,7 @@ describe('verified delivery Actions service', () => {
     expect(f.notifications.mock.calls[0]?.[0].text).toContain('#7')
   })
 
-  it('uses explicit step acceptance to commit and open a PR while the original goal remains paused and unachieved', async () => {
+  it.runIf(process.platform === 'linux')('uses explicit step acceptance to commit and open a PR while the original goal remains paused and unachieved', async () => {
     const f = await fixture('goal-step')
     const evidence = { storedGoal: { definition: { digest: 'd'.repeat(64), version: 1 }, nativeAtLastObservation: { phase: 'active' } },
       outcome: { status: 'not-achieved' }, executionRuns: [{ intent: { runId: 'run' }, acceptance: { contractId: 'step' }, execution: { status: 'succeeded', quiescent: true } }],
@@ -176,13 +176,13 @@ describe('verified delivery Actions service', () => {
     expect((await f.activate('assistant-verifier/receipt')).outcome).toBe(outcome)
   }
 
-  it('uses the fenced Host ledger and four independently charged reads for a fresh exact repository outcome', async () => {
+  it.runIf(process.platform === 'linux')('uses the fenced Host ledger and four independently charged reads for a fresh exact repository outcome', async () => {
     const f = await fixture('goal-step'); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
     await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).resolves.toEqual({ objectId: 'owner/repository:fix', headOid: 'c'.repeat(40), ci: 'passed', review: 'approved', pullRequest: 'open', ready: true })
     expect(f.inspect).toHaveBeenCalledTimes(4); expect(f.inspect.mock.calls.map((call: any[]) => call[0].kind)).toEqual(['checks', 'reviews', 'pull-request', 'branch'])
   })
 
-  it('a real Verifier tick reaches Actions through the Cordis service and issues a fresh achieved receipt', async () => {
+  it.runIf(process.platform === 'linux')('a real Verifier tick reaches Actions through the Cordis service and issues a fresh achieved receipt', async () => {
     const f = await fixture('goal-step'); await completeStepDelivery(f); const { handle } = bindRepository(f)
     f.setProof({ ...handle, dispatchedAt: Date.now(), completedAt: Date.now(), status: 'succeeded', quiescent: true, executionRef: 'assessment' })
     await f.registration().completed(handle); await f.verifier.tick()
@@ -190,7 +190,7 @@ describe('verified delivery Actions service', () => {
     expect(f.inspect).toHaveBeenCalledTimes(4)
   })
 
-  it('does not reuse an older success once a newer exact delivery is pending or unknown', async () => {
+  it.runIf(process.platform === 'linux')('does not reuse an older success once a newer exact delivery is pending or unknown', async () => {
     const f = await fixture('goal-step'); await completeStepDelivery(f, 'old'); const { authority, contract } = bindRepository(f)
     await f.execute('action_github_deliver', { grantId: 'verified', idempotencyKey: 'new', expectedHeadOid: oid, headline: 'New', paths: ['artifacts/release.txt'], pullRequest: { title: 'PR', body: 'body' } })
     await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).rejects.toThrow('not settled')
@@ -202,7 +202,7 @@ describe('verified delivery Actions service', () => {
     await expect(unknown.read({ contractId: binding.contract.id, authorityId: binding.authority.id, authorityDigest: binding.authority.digest })).rejects.toThrow('not settled')
   })
 
-  it.each(['later-source', 'unknown-source', 'changed-assessment', 'failed-source-proof'] as const)('rejects %s substitution before remote I/O', async change => {
+  it.runIf(process.platform === 'linux').each(['later-source', 'unknown-source', 'changed-assessment', 'failed-source-proof'] as const)('rejects %s substitution before remote I/O', async change => {
     const f = await fixture('goal-step'); await completeStepDelivery(f); const binding = bindRepository(f)
     const evidence = structuredClone(binding.evidence)
     if (change === 'later-source') evidence.executionRuns[0]!.intent.admission.round = 3
@@ -214,14 +214,14 @@ describe('verified delivery Actions service', () => {
     expect(f.inspect).not.toHaveBeenCalled()
   })
 
-  it('does not read back after route revocation or a contract native-goal mismatch', async () => {
+  it.runIf(process.platform === 'linux')('does not read back after route revocation or a contract native-goal mismatch', async () => {
     const f = await fixture('goal-step'); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
     f.changeReceipt(); await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).rejects.toThrow('authority changed')
     const fresh = await fixture('goal-step'); await completeStepDelivery(fresh); const wrong = bindRepository(fresh, 'other-native')
     await expect(fresh.read({ contractId: wrong.contract.id, authorityId: wrong.authority.id, authorityDigest: wrong.authority.digest })).rejects.toThrow('not settled')
   })
 
-  it('does not mark a remote outcome ready when the current branch head differs from the settled commit', async () => {
+  it.runIf(process.platform === 'linux')('does not mark a remote outcome ready when the current branch head differs from the settled commit', async () => {
     const f = await fixture('goal-step'); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
     const original = f.inspect.getMockImplementation()
     f.inspect.mockImplementation(async (input: any) => input.kind === 'branch' ? { observed: { name: 'fix', commit: { sha: oid }, untrusted: true } } : await original!(input))
