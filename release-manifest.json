@@ -3,49 +3,8 @@
   "nextVerifiedHostRange": "=0.1.2-rc.1",
   "nextPinnedHostVersion": "0.1.2-rc.1",
   "current": {
-    "version": "0.1.30",
-    "releasedAt": "2026-09-12T16:41:06.682Z",
-    "verifiedHostRange": "=0.1.2-rc.1",
-    "pinnedHostVersion": "0.1.2-rc.1",
-    "packages": {
-      "@dsh-enhanced/assistant-growth-contract": "0.1.30",
-      "@dsh-enhanced/llm-route-capabilities": "0.1.30",
-      "@dsh-enhanced/task-acceptance-contract": "0.1.30",
-      "@dsh-enhanced/acp": "0.1.30",
-      "@dsh-enhanced/assistant-actions": "0.1.30",
-      "@dsh-enhanced/assistant-automations": "0.1.30",
-      "@dsh-enhanced/assistant-deepseek-budget": "0.1.30",
-      "@dsh-enhanced/assistant-delivery": "0.1.30",
-      "@dsh-enhanced/assistant-evaluation": "0.1.30",
-      "@dsh-enhanced/assistant-evolution": "0.1.30",
-      "@dsh-enhanced/assistant-goals": "0.1.30",
-      "@dsh-enhanced/assistant-growth-experiments": "0.1.30",
-      "@dsh-enhanced/assistant-health": "0.1.30",
-      "@dsh-enhanced/assistant-heartbeat": "0.1.30",
-      "@dsh-enhanced/assistant-isolation": "0.1.30",
-      "@dsh-enhanced/assistant-policy": "0.1.30",
-      "@dsh-enhanced/assistant-proactive": "0.1.30",
-      "@dsh-enhanced/assistant-recovery": "0.1.30",
-      "@dsh-enhanced/assistant-skills": "0.1.30",
-      "@dsh-enhanced/assistant-verifier": "0.1.30",
-      "@dsh-enhanced/assistant-web-owner": "0.1.30",
-      "@dsh-enhanced/coding-subscription-provider": "0.1.30",
-      "@dsh-enhanced/credentials-keychain": "0.1.30",
-      "@dsh-enhanced/event-triggers": "0.1.30",
-      "@dsh-enhanced/hello": "0.1.30",
-      "@dsh-enhanced/lark-channel": "0.1.30",
-      "@dsh-enhanced/memory-wiki-bridge": "0.1.30",
-      "@dsh-enhanced/personal-assistant": "0.1.30",
-      "@dsh-enhanced/personal-memory": "0.1.30",
-      "@dsh-enhanced/personal-wiki": "0.1.30",
-      "@dsh-enhanced/plugin-control-plane": "0.1.30",
-      "@dsh-enhanced/preference-learning": "0.1.30",
-      "@dsh-enhanced/traex-acp-provider": "0.1.30"
-    }
-  },
-  "pending": {
     "version": "0.1.31",
-    "preparedAt": "2026-09-12T17:11:58.678Z",
+    "releasedAt": "2026-09-12T17:38:57.781Z",
     "verifiedHostRange": "=0.1.2-rc.1",
     "pinnedHostVersion": "0.1.2-rc.1",
     "packages": {
@@ -84,6 +43,7 @@
       "@dsh-enhanced/traex-acp-provider": "0.1.31"
     }
   },
+  "pending": null,
   "history": [
     {
       "version": "0.1.0",
@@ -581,6 +541,47 @@
         "@dsh-enhanced/plugin-control-plane": "0.1.30",
         "@dsh-enhanced/preference-learning": "0.1.30",
         "@dsh-enhanced/traex-acp-provider": "0.1.30"
+      }
+    },
+    {
+      "version": "0.1.31",
+      "releasedAt": "2026-09-12T17:38:57.781Z",
+      "verifiedHostRange": "=0.1.2-rc.1",
+      "pinnedHostVersion": "0.1.2-rc.1",
+      "packages": {
+        "@dsh-enhanced/assistant-growth-contract": "0.1.31",
+        "@dsh-enhanced/llm-route-capabilities": "0.1.31",
+        "@dsh-enhanced/task-acceptance-contract": "0.1.31",
+        "@dsh-enhanced/acp": "0.1.31",
+        "@dsh-enhanced/assistant-actions": "0.1.31",
+        "@dsh-enhanced/assistant-automations": "0.1.31",
+        "@dsh-enhanced/assistant-deepseek-budget": "0.1.31",
+        "@dsh-enhanced/assistant-delivery": "0.1.31",
+        "@dsh-enhanced/assistant-evaluation": "0.1.31",
+        "@dsh-enhanced/assistant-evolution": "0.1.31",
+        "@dsh-enhanced/assistant-goals": "0.1.31",
+        "@dsh-enhanced/assistant-growth-experiments": "0.1.31",
+        "@dsh-enhanced/assistant-health": "0.1.31",
+        "@dsh-enhanced/assistant-heartbeat": "0.1.31",
+        "@dsh-enhanced/assistant-isolation": "0.1.31",
+        "@dsh-enhanced/assistant-policy": "0.1.31",
+        "@dsh-enhanced/assistant-proactive": "0.1.31",
+        "@dsh-enhanced/assistant-recovery": "0.1.31",
+        "@dsh-enhanced/assistant-skills": "0.1.31",
+        "@dsh-enhanced/assistant-verifier": "0.1.31",
+        "@dsh-enhanced/assistant-web-owner": "0.1.31",
+        "@dsh-enhanced/coding-subscription-provider": "0.1.31",
+        "@dsh-enhanced/credentials-keychain": "0.1.31",
+        "@dsh-enhanced/event-triggers": "0.1.31",
+        "@dsh-enhanced/hello": "0.1.31",
+        "@dsh-enhanced/lark-channel": "0.1.31",
+        "@dsh-enhanced/memory-wiki-bridge": "0.1.31",
+        "@dsh-enhanced/personal-assistant": "0.1.31",
+        "@dsh-enhanced/personal-memory": "0.1.31",
+        "@dsh-enhanced/personal-wiki": "0.1.31",
+        "@dsh-enhanced/plugin-control-plane": "0.1.31",
+        "@dsh-enhanced/preference-learning": "0.1.31",
+        "@dsh-enhanced/traex-acp-provider": "0.1.31"
       }
     }
   ]
