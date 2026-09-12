@@ -125,16 +125,22 @@ async function cancellableRuntime(hangDispose = false) {
   return { runtime, ready, controller, releaseDispose, wasAborted: () => aborted }
 }
 
+// This fixture boots the native Goal/Isolation/Verifier graph before its readiness
+// barrier; allow that real setup under concurrent package-test scheduling.
 test('cancellation reaches the native adapter and keeps the uncompleted outer reservation', async () => {
   const f = await cancellableRuntime()
   cleanups.push(f.runtime.close)
   const execution = f.runtime.execute().then(() => null, error => error as Error)
-  await f.ready; f.controller.abort()
+  await Promise.race([
+    f.ready,
+    execution.then(result => { throw new Error('runtime settled before the native adapter became ready', { cause: result }) }),
+  ])
+  f.controller.abort()
   expect(await execution).toBeInstanceOf(Error)
   expect(f.wasAborted()).toBe(true)
   expect(f.runtime.snapshotMeter()).toMatchObject({ modelCalls: 0, heldModelCalls: 1, heldInputTokens: 10, heldOutputTokens: 128 })
   await expect(f.runtime.execute()).rejects.toThrow('only once')
-})
+}, 15_000)
 
 test('a non-cooperative adapter disposer is bounded and never changes unknown stop into success', async () => {
   const f = await cancellableRuntime(true)

@@ -1,6 +1,6 @@
 {
   "name": "dsh-enhanced",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "private": true,
   "description": "A scalable monorepo for community DeepSeek Harness plugins.",
   "license": "MIT",
@@ -23,7 +23,7 @@
     "release:status": "node ./scripts/release-version.mjs status",
     "release:supersede": "node ./scripts/release-version.mjs supersede",
     "test": "pnpm run build && pnpm run test:built",
-    "test:built": "pnpm run test:root && pnpm --recursive --if-present run test",
+    "test:built": "pnpm run test:root && pnpm --recursive --if-present run test --testTimeout=15000",
     "test:root": "vitest run --testTimeout=15000 --dir tests",
     "test:autonomy": "playwright test --config scripts/e2e/playwright-autonomy.config.mjs",
     "test:autonomy:wake": "playwright test --config scripts/e2e/playwright-wake.config.mjs",

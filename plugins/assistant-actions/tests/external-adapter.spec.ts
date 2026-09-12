@@ -52,9 +52,9 @@ function projection(root: string, overrides: Partial<BrokerGrantProjection> = {}
   }
 }
 
-async function externalConfig(root: string, grants: readonly BrokerGrantProjection[] = [projection(root)]): Promise<Config> {
+async function externalConfig(root: string, grants: readonly BrokerGrantProjection[] = [projection(root)], socketRoot = root): Promise<Config> {
   const keys = await keyFixture(root)
-  return { stateRoot: join(root, 'must-not-create-host-ledger'), externalGrants: grants, broker: { mode: 'external-unix-v1', actionSocketPath: join(root, 'broker.sock'), brokerId: 'broker-1',
+  return { stateRoot: join(root, 'must-not-create-host-ledger'), externalGrants: grants, broker: { mode: 'external-unix-v1', actionSocketPath: join(socketRoot, 'broker.sock'), brokerId: 'broker-1',
     brokerPublicKeyPath: keys.brokerPublicKeyPath, clientKeyId: 'client-key-1', clientSigningKeyPath: keys.clientSigningKeyPath, clientInstanceId: 'host-1', clientGeneration: 3,
     expectedSocketUid: process.getuid!(), expectedSocketGid: process.getgid!(), expectedBrokerPeerUid: process.getuid!(), expectedBrokerPeerGid: process.getgid!() } }
 }
@@ -246,10 +246,12 @@ describe('Cordis mode lifecycle', () => {
 
   it('mounts external mode without Keychain and never creates the Host state root', async () => {
     // This mode validates the configured UDS pathname even though no broker is
-    // connected. Keep the fixture under the production 100-byte pathname cap.
-    const root = await realpath(await mkdtemp('/tmp/aea-')), ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+    // connected. Keep only the socket under the production 100-byte pathname
+    // cap; keys retain their private temporary-root ancestry.
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-external-lifecycle-')))
+    const socketRoot = await realpath(await mkdtemp('/tmp/aea-')), ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }); await rm(socketRoot, { recursive: true, force: true }) })
     ctx.provide('assistantPolicy' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never)
-    const config = await externalConfig(root, [])
+    const config = await externalConfig(root, [], socketRoot)
     const mounted = await ctx.plugin(plugin, config); const service = ctx.assistantActions
     expect(service.health()).toMatchObject({ mode: 'external-unix-v1', projectedGrants: 0 })
     await expect(access(config.stateRoot!)).rejects.toMatchObject({ code: 'ENOENT' })
