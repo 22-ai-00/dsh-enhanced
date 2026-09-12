@@ -6276,14 +6276,20 @@ cp "$REMOTE_COMMON" "$4"
     const commonHash = createHash('sha256').update(await readFile(remoteCommon)).digest('hex')
     const installer = await readFile(npmInstaller, 'utf8')
     const releaseManifest = JSON.parse(await readFile(join(repoRoot, 'release-manifest.json'), 'utf8'))
+    const pinnedRelease = releaseManifest.pending ?? releaseManifest.current
+    expect(pinnedRelease).toBeDefined()
     const pinnedRange = installer.match(
       /^DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='([^']+)'$/mu,
     )?.[1]
     const pinnedHostVersion = installer.match(
       /^DSH_ENHANCED_PINNED_HOST_VERSION='([^']+)'$/mu,
     )?.[1]
-    expect(pinnedRange).toBe(releaseManifest.current.verifiedHostRange)
-    expect(pinnedHostVersion).toBe(releaseManifest.nextPinnedHostVersion)
+    const pinnedReleaseRef = installer.match(
+      /^DSH_ENHANCED_PINNED_RELEASE_REF='([^']+)'$/mu,
+    )?.[1]
+    expect(pinnedReleaseRef).toBe(`v${pinnedRelease.version}`)
+    expect(pinnedRange).toBe(pinnedRelease.verifiedHostRange)
+    expect(pinnedHostVersion).toBe(pinnedRelease.pinnedHostVersion)
 
     const result = spawnSync('/bin/bash', ['-s', '--', '--dry-run'], {
       cwd: root,
@@ -6292,7 +6298,7 @@ cp "$REMOTE_COMMON" "$4"
       env: {
         PATH: `${fakeBin}:/usr/bin:/bin`,
         DSH_HOME: join(root, 'dsh-home'),
-        DSH_ENHANCED_INSTALL_BASE_URL: 'https://installer.invalid/v0.1.24',
+        DSH_ENHANCED_INSTALL_BASE_URL: `https://installer.invalid/v${pinnedRelease.version}`,
         DSH_ENHANCED_INSTALL_COMMON_SHA256: commonHash,
         REMOTE_COMMON: remoteCommon,
       },
@@ -6300,7 +6306,6 @@ cp "$REMOTE_COMMON" "$4"
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain(`remote-range=${pinnedRange} remote-host=${pinnedHostVersion}`)
-    expect(result.stdout).not.toContain('remote-range=>=0.1.2-rc.1 <0.2.0')
   })
 
   test('refuses incompatible stored permission defaults before changing the installation', async () => {
