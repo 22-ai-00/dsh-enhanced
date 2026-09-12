@@ -2,6 +2,14 @@
 
 Host-only `inspectIsolationGrant({ stateRoot, grant, now? })` supplies a read-only schema 6 snapshot for operator diagnostics. It compares every configured grant field with persisted authority and reports revocation, expiry, historical run/duration reservations across revisions, and active/unknown jobs. It never creates or migrates a database, claims a controller, renews authority, refunds reservations, or returns commands/artifacts. Missing, unsupported or corrupt state is unavailable. `available` refers only to these grant checks; the Web owner doctor combines it with owner checks and a real temporary isolation probe. It is not a Policy, resource-admission or complete autonomy verdict.
 
+After a Host crash, startup waits up to 31 seconds for the previous controller's
+30-second lease to expire naturally. The service and its injected consumers stay
+pending until controller acquisition and recovery finish. An owner that keeps
+renewing is never forcibly replaced; expiry is not rewritten, and uncertain jobs
+retain their existing recovery rules. Unloading during the wait cancels admission
+and closes the ledger without a later claim. Startup supervisors must allow this
+lease interval plus ordinary boot time before treating readiness as a failure.
+
 `@dsh-enhanced/assistant-isolation` adds `isolation_run` to the native DSH ToolRuntime. An operator grants a finite number of offline shell jobs to one authenticated owner, workspace and agent preset. Each job receives only explicitly supplied text files in a fresh scratch directory. Results and artifacts are untrusted process output; exit code zero does not establish that a user goal was achieved.
 
 This is the first actual isolation component of autonomy work packages 08–10. External action/credential brokerage, rollback/compensation and installer bootstrap remain separate delivery requirements. It does not isolate arbitrary Host plugins or replace the native AgentLoop. The Host, Docker daemon, configured image and local operator remain trusted. Each workspace uses a private tmpfs volume with byte and inode hard limits. A persistent pool bounds admitted worker/workspace/keeper reservations across this ledger; it is not a machine-wide guarantee against Docker/kernel overhead or unrelated workloads. Do not treat this initial component as a complete hostile-code production platform.

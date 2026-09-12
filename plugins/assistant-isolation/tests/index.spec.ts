@@ -15,7 +15,8 @@ describe('assistant-isolation bundle', () => {
       expect(name).toBe('dsh-enhanced-assistant-isolation')
       expect(version).toBe(manifest.version)
       expect(manifest.files).toContain('runtime')
-      apply(ctx, { stateRoot: root })
+      expect(plugin.apply).toBe(apply)
+      await ctx.plugin(plugin, { stateRoot: root })
       expect(ctx.assistantIsolation).toBeDefined()
     } finally { await ctx.fiber.dispose(); rmSync(root, { recursive: true, force: true }) }
   })

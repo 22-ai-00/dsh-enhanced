@@ -27,16 +27,38 @@ export function query(path, sql, ...args) {
 
 export async function startHost(env) {
   const child = spawn('dsh', ['--profile', 'web', '--host', '127.0.0.1', '--port', '0', '--no-open'], { cwd: root, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
-  let output = ''; let settled = false
-  const closed = once(child, 'close').then(() => { settled = true }); closed.catch(() => {})
+  let output = ''; let settled = false; let termination
+  const closed = once(child, 'close').then(([code, signal]) => { settled = true; return { code, signal } }); closed.catch(() => {})
   const url = await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('DSH Web did not announce readiness')), 30_000)
+    // Isolation may still be waiting out the previous Host's 30-second
+    // controller lease after a crash. Readiness must include that startup.
+    const timer = setTimeout(() => reject(new Error('DSH Web did not announce readiness')), 45_000)
     const receive = chunk => { output += chunk; const match = stripVTControlCharacters(output).match(/http:\/\/127\.0\.0\.1:\d+\/\?token=[^\s]+/); if (match) { clearTimeout(timer); resolve(match[0]) } }
     child.stdout.on('data', receive); child.stderr.on('data', receive)
     child.once('error', error => { clearTimeout(timer); reject(error) })
     child.once('close', code => { clearTimeout(timer); reject(new Error(`DSH stopped before readiness (${code}): ${sanitize(output).slice(-6000)}`)) })
   }).catch(async error => { if (child.pid && !settled) { try { process.kill(-child.pid, 'SIGKILL') } catch (killError) { if (killError?.code !== 'ESRCH') throw killError } }; await closed.catch(() => {}); throw error })
-  return { url, log: () => sanitize(output), async stop() { if (settled) return; try { process.kill(-child.pid, 'SIGINT') } catch (error) { if (error?.code !== 'ESRCH') throw error }; const timer = setTimeout(() => { if (!settled) try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error?.code !== 'ESRCH') throw error } }, 10_000); try { await closed } finally { clearTimeout(timer) } } }
+  return {
+    url,
+    pid: child.pid,
+    log: () => sanitize(output),
+    async terminate() {
+      if (termination) return termination
+      termination = (async () => {
+        const evidence = { pid: child.pid, processGroup: child.pid, signal: 'SIGKILL', alreadyClosed: settled, sent: false }
+        if (!settled && child.pid) {
+          try { process.kill(-child.pid, 'SIGKILL'); evidence.sent = true } catch (error) {
+            if (error?.code === 'ESRCH') evidence.missing = true
+            else throw error
+          }
+        }
+        const result = await closed
+        return { ...evidence, closed: true, code: result.code, closeSignal: result.signal }
+      })()
+      return termination
+    },
+    async stop() { if (settled) return; try { process.kill(-child.pid, 'SIGINT') } catch (error) { if (error?.code !== 'ESRCH') throw error }; const timer = setTimeout(() => { if (!settled) try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error?.code !== 'ESRCH') throw error } }, 10_000); try { await closed } finally { clearTimeout(timer) } },
+  }
 }
 
 export function observePage(page, http, transport, streams, frames) {

@@ -190,6 +190,11 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 
 ### 有限 repair admission
 
+当 profile 启用了 Isolation 时，repair setup 会为 Skills 写入依赖该服务的
+Cordis `inject`，并保留已有注入配置。Host 崩溃后，隔离控制器可能需要等待旧的
+30 秒租约自然到期；在隔离服务就绪前，修复流程保持等待，避免提前恢复后随
+Host 启动失败而中断。未启用 Isolation 的独立 Skills 安装不因此新增依赖。
+
 停止目标 Host 后，在已安装并完成普通 owner setup 的目标 profile 上运行：
 
 ```sh

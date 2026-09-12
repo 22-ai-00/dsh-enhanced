@@ -210,6 +210,26 @@ pnpm test:web-owner:real-repair:topology
 That entry sets `DSH_REAL_REPAIR_FAMILY=topology`; it does not turn the
 template command into a broader or weaker test.
 
+To exercise a cold restart inside the two-round template repair sequence, use
+the same prerequisites with:
+
+```sh
+pnpm exec playwright test --config scripts/e2e/playwright-real-repair-restart.config.mjs
+```
+
+This entry observes the first production `repair-achieved` checkpoint, requires
+an independently achieved native Goal and no unsettled model or tool calls, then
+sends SIGKILL to its own test Host process group. It does not edit business state,
+provide repaired code, or renew authority. The restarted Host must keep the same
+repair Session, Goal, definition, authorization, cumulative usage and deadline,
+increase the execution fence once, and finish capture, comparison, actual canary
+promotion, the second improvement round and feedback to the original owner.
+The native Goal is already complete at this checkpoint: this proves recovery of
+the unfinished RSI sequence, not continuation of an unfinished native Goal or an
+in-flight external call. Missing the checkpoint is a failure, with no synthetic
+fallback. Artifacts, including before/after checkpoint evidence, use the separate
+`.cache/web-owner-real-repair-restart-e2e/` directory.
+
 `DSH_WEB_REAL_PROVIDER` must be exactly `traex-agent`; the test rejects Codex
 and custom-gateway fallback. `DSH_WEB_REAL_MODEL` is the TraeX selector, not a
 display name. The Playwright project uses one worker and no retries. Its config

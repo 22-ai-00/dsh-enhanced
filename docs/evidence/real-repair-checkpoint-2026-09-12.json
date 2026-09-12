@@ -1,0 +1,186 @@
+{
+  "date": "2026-09-12",
+  "baseCommit": "261852d3091ae3ad80dee3c6986f743dbd430822",
+  "capability": "An installed real TraeX/Web RSI sequence survives a SIGKILL after its first native repair Goal completes, then captures, compares, promotes two successors and feeds results back to the original owner.",
+  "delivery": "dev increment; not a new npm publication",
+  "realRun": {
+    "command": "PATH=\"$PWD/.cache/lifecycle-cli-relocated/node_modules/.bin:$PATH\" CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 DSH_CAPTURE_RETAIN_FAILURE=1 pnpm exec playwright test --config scripts/e2e/playwright-real-repair-restart.config.mjs",
+    "exitCode": 0,
+    "reportedDuration": "6.1 minutes",
+    "sessionId": 2954,
+    "log": {
+      "path": "/tmp/dsh-real-repair-restart-v2.log",
+      "sha256": "19937f62521aecb680ec0e2a6b4a6a4a9a82c92a317a598c0e830aeb921978c2"
+    },
+    "proof": {
+      "path": ".cache/web-owner-real-repair-restart-e2e/web-owner-real-repair-real-b3d6d-delivers-the-bounded-result/proof.json",
+      "sha256": "e9970225ae7a9bdcfba54f50e4eec1e66bb5cea94740f3c380536c975fed5163"
+    },
+    "provider": "traex-agent",
+    "model": "gpt-5.6-terra",
+    "api": "acp",
+    "hostVersion": "0.1.2-rc.1",
+    "state": "complete",
+    "iterations": 2,
+    "versions": [
+      2,
+      3
+    ],
+    "repairUsage": {
+      "model_calls": 8,
+      "tool_calls": 6
+    },
+    "configuredLimits": {
+      "modelCalls": 16,
+      "toolCalls": 16
+    },
+    "feedbackMessages": 5,
+    "allFeedbackAcceptedExactlyOnce": true,
+    "completedRestartNoReplay": true,
+    "coldCheckpoint": {
+      "state": "repair-achieved",
+      "nativeGoalPhase": "complete",
+      "termination": {
+        "pid": 542023,
+        "processGroup": 542023,
+        "signal": "SIGKILL",
+        "alreadyClosed": false,
+        "sent": true,
+        "closed": true,
+        "code": null,
+        "closeSignal": "SIGKILL"
+      },
+      "pendingModel": 0,
+      "pendingTool": 0,
+      "beforeFence": 1,
+      "afterFence": 2,
+      "sameSession": true,
+      "sameRepairGoal": true,
+      "sameAuthorizationDigest": true,
+      "sameAbsoluteDeadline": true,
+      "usageBefore": {
+        "model_calls": 4,
+        "tool_calls": 3
+      },
+      "usageAfter": {
+        "model_calls": 4,
+        "tool_calls": 3
+      },
+      "afterState": "watching",
+      "isolationFenceBefore": 3,
+      "isolationFenceAfter": 4,
+      "nativeGoalMessagesBefore": 1
+    }
+  },
+  "initialFailure": {
+    "exitCode": 1,
+    "sessionId": 5015,
+    "log": {
+      "path": "/tmp/dsh-real-repair-restart-v1.log",
+      "sha256": "fd13f45fa9f0f5ff1d36ee261abe643f2869b24f1116d318747e24d15a94cb13"
+    },
+    "retainedEnvironment": "/tmp/dsh-real-owner-repair-WUeZTh",
+    "artifactArchive": ".cache/web-owner-real-repair-restart-e2e-v1",
+    "cause": "Skills obtained its next execution fence but new Host boot failed because the prior Isolation controller lease was still unexpired. No successful capture/comparison/feedback claimed for v1."
+  },
+  "corrections": [
+    "Isolation startup waits cancellably at most 31 seconds for the existing 30-second controller lease; no forced claim or expiry rewrite. Both class and default-object mounts await readiness.",
+    "Repair setup adds a composition-specific Skills -> assistantIsolation injection when Isolation is enabled; preserves existing array/map injections and idempotence.",
+    "The existing configured-scope Host tool guard remains active throughout pending startup; capability publication waits for acquisition and recovery.",
+    "An exact-own Fiber disposal notification aborts pending startup before Cordis waits for async apply; ordinary owned disposal then drains and closes resources.",
+    "Restart test allows 45 seconds for Host readiness and disables raw browser trace/video/screenshots; v1 archived artifacts were restricted to owner access."
+  ],
+  "validation": {
+    "webRepairSetup": {
+      "testsPassed": 12,
+      "commandExitCode": 0,
+      "log": {
+        "path": "/tmp/dsh-repair-restart-web-tests-final.log",
+        "sha256": "280ec9d0920750febea940faf5b36af98eb5b634e7e47ca0934ae2da27fa2362"
+      }
+    },
+    "fullCheck": {
+      "command": "CI=true pnpm check",
+      "exitCode": 0,
+      "durationSeconds": 764.74,
+      "log": "/tmp/dsh-real-repair-restart-check.log",
+      "logSha256": "298c7f0d4265b8f687fcd6c7bc4fbae444daa1c7fb287f5176e5f0783e4967cc",
+      "frozenInputs": {
+        "plugins/assistant-isolation/src/index.ts": "71bc46dd4d5a4046e4343fd70defae212651360d5cb457a563ff579e4091d3d3",
+        "plugins/assistant-isolation/src/service.ts": "8502d951bb130ba1af0a94a522d76af46db9cc8cb702fddbe84d80920d066ba9",
+        "plugins/assistant-isolation/tests/controller-startup.spec.ts": "b47c28684abff79ea5ce80895bfda5150bfef5accbd177b77504cba7768eaca6",
+        "plugins/assistant-isolation/tests/index.spec.ts": "3b89b0feae8004201eed70a2e839375ff2d072d338c6e319bdbec375226c390c",
+        "plugins/assistant-web-owner/src/repair-setup.ts": "02af9afc0d3904d00c502ec4496cf7232225dbab58ebf9fffd1626d49acc5b52",
+        "plugins/assistant-web-owner/tests/repair-setup.spec.ts": "cef7d4a987b855d75db0f5c4f582c4eb49ac65ae377b9a533a0cf021c373aa26",
+        "scripts/e2e/playwright-real-repair-restart.config.mjs": "885f11cea8753c567659aa80e40be88896d1f0b5afa056eae071593fdd29e393",
+        "scripts/e2e/web-owner-helpers.mjs": "a7c7b32c0a628de4b1072e4bd21a30615b1f74f31fdc718bd1f75e391f64c870",
+        "scripts/e2e/web-owner-real-repair.spec.mjs": "26a7da89a93b9430ac5f6a85392d6a23f6795488327340aa567718c8ebd236ff"
+      },
+      "frozenInputsUnchanged": true,
+      "status": "passed",
+      "sessionId": 50458,
+      "testGroups": 34,
+      "dryRunPacks": 33,
+      "passed": 5294,
+      "skipped": 42,
+      "failed": 0
+    },
+    "independentReview": {
+      "status": "passed",
+      "reviewer": "real_checkpoint_verifier",
+      "scope": "Read-only independent code and evidence review; final whole-repository command, frozen source/test hashes, focused startup and bundle checks, and real v2 proof verified.",
+      "findings": "No remaining delivery blockers for this dev increment.",
+      "limits": "The real v2 E2E precedes the final synchronous guard, disabled-row and early-abort corrections. Focused behavior tests and the final full check cover those deltas; no final-source real E2E rerun is claimed. The native Goal was complete at SIGKILL."
+    },
+    "isolationStartup": {
+      "testsPassed": 6,
+      "commandExitCode": 0,
+      "log": {
+        "path": "/tmp/dsh-isolation-startup-guard-final.log",
+        "sha256": "03697cb6a3418c1e6f14dd5384bba6d15cf2f6a6ecb9e2159f5d8f7aa31c574b"
+      },
+      "assertions": [
+        "constructed provider remains inactive and dependency pending until controller ready",
+        "scoped raw write/bash denied during startup; unscoped delegation preserved",
+        "release or expiry during pending startup advances fence once and rejects stale authority",
+        "live renewal remains authoritative until bounded startup rejection",
+        "exact owning Fiber disposal cancels pending startup without late claim or grant/job/audit mutation"
+      ]
+    },
+    "isolationBundleAndStartup": {
+      "testsPassed": 7,
+      "commandExitCode": 0,
+      "sessionId": 43963,
+      "log": {
+        "path": "/tmp/dsh-isolation-startup-bundle-final.log",
+        "sha256": "91e1b7de46adb9ca90b10c7c78e9b151d6b530d895e6958e7c9053e9626f50d2"
+      }
+    },
+    "previousFullCheck": {
+      "command": "CI=true pnpm check",
+      "exitCode": 1,
+      "durationSeconds": 659.5,
+      "log": "/tmp/dsh-real-repair-restart-check-v1.log",
+      "logSha256": "fc07537d537cd609bfb455cd2457800a4f97420b45eb1acc766665c2872fa3aa",
+      "frozenInputs": {
+        "plugins/assistant-isolation/src/index.ts": "71bc46dd4d5a4046e4343fd70defae212651360d5cb457a563ff579e4091d3d3",
+        "plugins/assistant-isolation/src/service.ts": "8502d951bb130ba1af0a94a522d76af46db9cc8cb702fddbe84d80920d066ba9",
+        "plugins/assistant-isolation/tests/controller-startup.spec.ts": "b47c28684abff79ea5ce80895bfda5150bfef5accbd177b77504cba7768eaca6",
+        "plugins/assistant-web-owner/src/repair-setup.ts": "02af9afc0d3904d00c502ec4496cf7232225dbab58ebf9fffd1626d49acc5b52",
+        "plugins/assistant-web-owner/tests/repair-setup.spec.ts": "cef7d4a987b855d75db0f5c4f582c4eb49ac65ae377b9a533a0cf021c373aa26",
+        "scripts/e2e/playwright-real-repair-restart.config.mjs": "885f11cea8753c567659aa80e40be88896d1f0b5afa056eae071593fdd29e393",
+        "scripts/e2e/web-owner-helpers.mjs": "a7c7b32c0a628de4b1072e4bd21a30615b1f74f31fdc718bd1f75e391f64c870",
+        "scripts/e2e/web-owner-real-repair.spec.mjs": "26a7da89a93b9430ac5f6a85392d6a23f6795488327340aa567718c8ebd236ff"
+      },
+      "frozenInputsUnchanged": true,
+      "failure": "Existing bundle test called async apply without awaiting it, then disposed its Context. Vitest reported an unhandled INACTIVE_EFFECT despite passing assertions. The test now mounts the actual default plugin through Cordis and awaits readiness; index + startup checks pass 7/7."
+    }
+  },
+  "coverageNotes": [
+    "The native Goal is complete at SIGKILL. This proves recovery of the unfinished production RSI sequence, not a live unfinished native Goal or an in-flight external call.",
+    "The v2 real run used an enabled Isolation row with no configured scoped grants and preceded the final disabled-row, synchronous routing-guard and early-disposal-abort corrections. Those specific deltas are covered by focused tests and the final whole-repository gate; v2 is not claimed as a rerun of the final source.",
+    "The same-UID operator-controlled holdout authority and test guard are not proof of an independently administered security domain or broad intelligence gains.",
+    "One template task family has two rounds here; earlier topology evidence is separate. Full 18-work-package roadmap remains 3 verified / 13 implementing / 2 pending.",
+    "Accepted delivery does not prove user read; no daily profile was modified; no new npm release is claimed."
+  ]
+}

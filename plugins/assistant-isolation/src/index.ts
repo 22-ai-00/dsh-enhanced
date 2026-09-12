@@ -11,6 +11,6 @@ export * from './audit-archive.js'
 export { isolationPrincipalDigest } from './service.js'
 export type * from './types.js'
 
-export function apply(ctx: Context, config: Config = {}): void { new AssistantIsolationService(ctx, config) }
+export async function apply(ctx: Context, config: Config = {}): Promise<void> { await new AssistantIsolationService(ctx, config).ready }
 // Loader unwraps the default export; preserve the trusted plugin identity there.
 export default { name, Config, apply }
