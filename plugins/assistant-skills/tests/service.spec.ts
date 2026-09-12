@@ -12,11 +12,14 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
+import { canonicalEvaluationHostScope, canonicalEvaluationScope, evaluationLearningProjectionDigest } from '@dsh-enhanced/assistant-evaluation'
 import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { SkillComparator, type SkillComparisonProfile } from '../src/comparison.ts'
+import type { ExternalHoldoutProfile } from '../src/external-holdout.ts'
 import { failureSummaryEvidenceDigest, type HostFailureEvidenceSummary, type VerifiedWorkflowSource } from '../src/definition.ts'
 import * as HoldoutQualification from '../src/holdout-qualification.ts'
 import { AssistantSkillsService } from '../src/service.ts'
+import { SkillStore } from '../src/store.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
@@ -56,6 +59,13 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
   // These are Host source/admission seams, not independent acceptance fixtures.
   // Goals tests and the real Web scenario validate the provenance producer.
   const snapshots = new Map<string, unknown>()
+  const canonicalOutcomes = new Map<string, any>()
+  const canonicalListeners = new Set<(notice: unknown) => void>()
+  let canonicalReads = 0, canonicalFences = 0, canonicalWatermark = 0
+  const currentCanonical = (assessmentId: string) => {
+    const value = canonicalOutcomes.get(assessmentId)
+    return value && { ...structuredClone(value), scopeWatermark: canonicalWatermark }
+  }
   let automaticSource: typeof source | Error | undefined, automaticDefinitionDigest = 'd'.repeat(64)
   let bridgeRequiresSessionQuery = false, sessionQueryReady = false
   let automaticGate: Promise<void> | undefined, releaseAutomaticGate: (() => void) | undefined
@@ -73,6 +83,34 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     },
     inspectVerifiedWorkflowRun: (_agent: Agent, goalId: string, runId: string) => { if (verified instanceof Error) throw verified; const proof = verified; return { scope, goal: { id: proof?.goalId ?? goalId, sessionId: ownerSession, definition: { version: 1, digest: 'd'.repeat(64) } }, runId: proof?.runId ?? runId,
       acceptance: { contractId: 'trial-contract', contractDigest: 'e'.repeat(64), receiptDigest: 'f'.repeat(64), verifiedAt: source.acceptance.verifiedAt, validUntil: source.acceptance.validUntil }, steps: proof?.steps ?? [] } } } as never)
+  ctx.provide('assistantEvaluation' as never, {
+    canonicalHostScope: (input: { workspace: string; preset: string }) => canonicalEvaluationHostScope(input),
+    isTrustedTaskLearningProjectionReceipt: (value: any) => {
+      try {
+        const current = currentCanonical(value?.projection?.subjectRef)
+        return current !== undefined && evaluationLearningProjectionDigest(value) === value.projection.digest
+          && acceptanceDigest(current) === acceptanceDigest(value)
+      } catch { return false }
+    },
+    getTrustedGoalOutcomeLearningProjection: (input: { scope: { workspace: string; preset: string }; assessmentId: string }) => {
+      canonicalReads++
+      const value = currentCanonical(input.assessmentId)
+      return value && value.scope.workspace === input.scope.workspace && value.scope.preset === input.scope.preset ? value : undefined
+    },
+    withTrustedCanonicalTaskWriterFence: (input: { scope: { workspace: string; preset: string }; scopeWatermark: number; evidence: readonly { subjectKind: string; subjectRef: string; version: number; digest: string; disposition: 'upsert' | 'retract' }[] }, callback: () => unknown) => {
+      canonicalFences++
+      const matched = canonicalWatermark === input.scopeWatermark && input.evidence.every(expected => {
+        const current = currentCanonical(expected.subjectRef)
+        return current && current.scope.workspace === input.scope.workspace && current.scope.preset === input.scope.preset
+          && expected.subjectKind === current.projection.subjectKind && expected.subjectRef === current.projection.subjectRef
+          && expected.version === current.projection.version && expected.digest === current.projection.digest && expected.disposition === current.projection.disposition
+      })
+      return matched
+        ? { matched: true, value: callback() } : { matched: false, reason: 'evidence-changed' }
+    },
+    onTrustedTaskChange: (listener: (notice: unknown) => void) => { canonicalListeners.add(listener); return () => canonicalListeners.delete(listener) },
+  } as never)
+  await new Promise<void>(resolve => setImmediate(resolve))
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
   ctx.tools.register(defineTool({ name: 'write', description: 'Fixture filesystem writer', parameters: comparison ? { file_path: { type: 'string', required: true }, content: { type: 'string', required: true } } : { file: { type: 'string', required: true }, data: { type: 'string', required: true } },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async args => { count++; await writeFile(join(root, comparison ? args.file_path as string : args.file as string), comparison ? args.content as string : args.data as string); if (revokeAfterWrite) live = false; return 'written' } }))
@@ -84,7 +122,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 },
     { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }] : undefined
-  const config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}) }
+  let config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}) }
   let plugin = await ctx.plugin(AssistantSkillsService, config)
   await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
   const execute = (name: string, args: unknown, agent = owner) => agent.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
@@ -94,22 +132,43 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
   const trial = (candidateId: string, goalId = 'trial-goal', invocationId = 'trial-invocation', inputsJson = '{"message":"candidate"}') => execute('skill_trial', { candidate_id: candidateId, goal_id: goalId, inputs_json: inputsJson, invocation_id: invocationId })
   const activate = (candidateId: string, trialRunId: string, agent = owner) => execute('skill_activate', { candidate_id: candidateId, trial_run_id: trialRunId }, agent)
   const rollback = (expectedVersion: number, targetVersion: number) => execute('skill_rollback', { name: 'saved-write', expected_version: expectedVersion, target_version: targetVersion })
+  const reviseSnapshot = (goalId: string, input: { version: number; status?: 'achieved' | 'not-achieved'; disposition?: 'upsert' | 'retract'; subjectRef?: string; lookupAssessmentId?: string; workspace?: string; principalRecordId?: string; principalVersion?: number }) => {
+    const snapshot = snapshots.get(goalId) as any
+    if (!snapshot) throw new Error('snapshot unavailable')
+    const assessment = snapshot.outcomeAssessments[0], contract = assessment.contract
+    const evaluationScope = { workspace: input.workspace ?? contract.scope.workspace, preset: contract.scope.preset }
+    const scopeKey = canonicalEvaluationScope(evaluationScope).scopeKey
+    const subjectRef = input.subjectRef ?? contract.task.ref, disposition = input.disposition ?? 'upsert'
+    const execution = { outcomeId: `evaluation-execution-${goalId}`, status: 'succeeded' as const, source: { kind: 'evaluator' as const, id: 'assistant-verifier' },
+      evidence: [{ kind: 'goal-outcome' as const, ref: subjectRef }], occurredAt: assessment.execution.completedAt, evaluator: { id: 'assistant-verifier', version: '1' } }
+    const objective = disposition === 'retract' ? undefined : { outcomeId: `evaluation-objective-${goalId}-${input.version}`, status: input.status ?? 'achieved', source: { kind: input.version === 1 ? 'evaluator' as const : 'user-feedback' as const, id: input.version === 1 ? 'assistant-verifier' : 'assistant-delivery/typed-owner-feedback' },
+      evidence: [{ kind: 'goal-outcome' as const, ref: subjectRef }], occurredAt: assessment.execution.completedAt, evaluator: { id: input.version === 1 ? 'assistant-verifier' : 'assistant-delivery-owner-feedback', version: input.version === 1 ? '1' : '2' } }
+    const projectionBase = { subjectKind: 'goal-outcome' as const, subjectRef, disposition, ...(objective === undefined ? {} : { evidenceOutcomeId: objective.outcomeId }) }
+    const digest = evaluationLearningProjectionDigest({ scopeKey, situation: `goal:${goalId}:definition:1`, execution, ...(objective === undefined ? {} : { objective }), projection: projectionBase })
+    canonicalWatermark++
+    canonicalOutcomes.set(input.lookupAssessmentId ?? subjectRef, { triggerOutcomeId: objective?.outcomeId ?? `evaluation-retract-${goalId}-${input.version}`, scope: evaluationScope, scopeKey, scopeWatermark: canonicalWatermark, situation: `goal:${goalId}:definition:1`, execution,
+      ...(objective === undefined ? {} : { objective }), projection: { ...projectionBase, version: input.version, digest } })
+  }
   return { root, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true },
-    source, candidate, trial, activate, rollback, enableAutomaticSource: () => { automaticSource = { ...source, goal: { ...source.goal, definition: { ...source.goal.definition, digest: automaticDefinitionDigest } } } }, addFailedReadObservation: () => { source.failedObservations.push({ id: 'missing-read', toolName: 'read', arguments: { file: 'missing.txt' }, outcome: 'failed' }) }, requireSessionQuery: () => { bridgeRequiresSessionQuery = true }, provideSessionQuery: () => { sessionQueryReady = true; ctx.provide('sessionQuery' as never, {} as never) }, changeAutomaticDefinition: () => { automaticDefinitionDigest = 'e'.repeat(64) }, holdAutomaticSource: () => { automaticGate = new Promise(resolve => { releaseAutomaticGate = resolve }) }, releaseAutomaticSource: () => { releaseAutomaticGate?.(); automaticGate = undefined; releaseAutomaticGate = undefined }, setAutomaticSourceError: () => { automaticSource = Object.assign(new Error('unknown outcome'), { code: 'unknown' }) }, setVerifiedTrial: (goalId: string, runId: string, args: unknown, extraSteps: unknown[] = []) => { verified = { goalId, runId, steps: [{ toolName: 'skill_trial', arguments: args }, ...extraSteps] } }, setVerifiedTrialSteps: (goalId: string, runId: string, steps: unknown[]) => { verified = { goalId, runId, steps } }, clearVerifiedTrial: () => { verified = undefined }, failVerifiedTrial: () => { verified = new Error('fixture acceptance proof expired') }, setSnapshot: (goalId: string, runId: string, status: 'achieved' | 'not-achieved', options: { expired?: boolean; wrongRun?: boolean; wrongNative?: boolean; unknownExecution?: boolean; future?: boolean; tampered?: boolean } = {}) => {
+    source, candidate, trial, activate, rollback, enableAutomaticSource: () => { automaticSource = { ...source, goal: { ...source.goal, definition: { ...source.goal.definition, digest: automaticDefinitionDigest } } } }, addFailedReadObservation: () => { source.failedObservations.push({ id: 'missing-read', toolName: 'read', arguments: { file: 'missing.txt' }, outcome: 'failed' }) }, requireSessionQuery: () => { bridgeRequiresSessionQuery = true }, provideSessionQuery: () => { sessionQueryReady = true; ctx.provide('sessionQuery' as never, {} as never) }, changeAutomaticDefinition: () => { automaticDefinitionDigest = 'e'.repeat(64) }, holdAutomaticSource: () => { automaticGate = new Promise(resolve => { releaseAutomaticGate = resolve }) }, releaseAutomaticSource: () => { releaseAutomaticGate?.(); automaticGate = undefined; releaseAutomaticGate = undefined }, setAutomaticSourceError: () => { automaticSource = Object.assign(new Error('unknown outcome'), { code: 'unknown' }) }, setVerifiedTrial: (goalId: string, runId: string, args: unknown, extraSteps: unknown[] = []) => { verified = { goalId, runId, steps: [{ toolName: 'skill_trial', arguments: args }, ...extraSteps] } }, setVerifiedTrialSteps: (goalId: string, runId: string, steps: unknown[]) => { verified = { goalId, runId, steps } }, clearVerifiedTrial: () => { verified = undefined }, failVerifiedTrial: () => { verified = new Error('fixture acceptance proof expired') }, setSnapshot: (goalId: string, runId: string, status: 'achieved' | 'not-achieved', options: { expired?: boolean; validForMs?: number; wrongRun?: boolean; wrongNative?: boolean; wrongOwner?: boolean; wrongProfile?: boolean; unknownExecution?: boolean; future?: boolean; tampered?: boolean } = {}) => {
       const now = Date.now(), goal = { id: goalId, definitionVersion: 1, definitionDigest: 'd'.repeat(64), sessionId: ownerSession, nativeGoalId: options.wrongNative ? 'foreign-native' : `native-${goalId}` }
       const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v3', id: `outcome-${goalId}`, task: { kind: 'goal-outcome', ref: `assessment-${goalId}`, goal: { ...goal, assessmentId: `assessment-${goalId}` } },
-        scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'owner-record', principalVersion: 1 }, objective: 'Check reused skill result', profile: { id: 'profile', version: 1, digest: 'a'.repeat(64) },
+        scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: options.wrongOwner ? 'foreign-record' : 'owner-record', principalVersion: 1 }, objective: 'Check reused skill result', profile: { id: options.wrongProfile ? 'foreign-profile' : 'profile', version: 1, digest: 'a'.repeat(64) },
         criteria: [{ id: 'result', kind: 'target-readback', authority: { id: 'check', digest: 'a'.repeat(64) }, objectId: 'output', expected: [{ pointer: '/ready', value: true }] }], issuedAt: now - 1000, expiresAt: now + 60_000, bounds: { maxDurationMs: 1000, maxEvidenceBytes: 4096 } })
       const completedAt = options.expired ? now - 2 : options.future ? now + 1000 : now
       const receipt = createTaskVerificationReceipt(contract, { protocol: 'task-verification/v3', id: `receipt-${goalId}`, contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task: contract.task,
-        results: [{ criterionId: 'result', status: status === 'achieved' ? 'passed' : 'failed', reason: 'independent-fixture-check', evidence: [] }], startedAt: completedAt, completedAt, validUntil: options.expired ? now - 1 : now + 60_000 })
+        results: [{ criterionId: 'result', status: status === 'achieved' ? 'passed' : 'failed', reason: 'independent-fixture-check', evidence: [] }], startedAt: completedAt, completedAt, validUntil: options.expired ? now - 1 : now + (options.validForMs ?? 60_000) })
       const execution = { status: options.unknownExecution ? 'unknown' : 'succeeded', quiescent: !options.unknownExecution, completedAt: now }
       snapshots.set(goalId, { storedGoal: { id: goalId, scope, definition: { version: 1, digest: 'd'.repeat(64) }, nativeAtLastObservation: { sessionId: ownerSession, goalId: `native-${goalId}` } },
         executionRuns: [{ intent: { runId, scope, task: { kind: 'goal-step', goal: { ...goal, nativeRevision: 1 } } }, dispatchedAt: now - 1000, execution }],
         outcomeAssessments: [{ triggerRunId: options.wrongRun ? 'wrong-run' : runId, contract, dispatchedAt: now - 1000, execution }],
         acceptedTasks: [{ contractId: contract.id, state: 'done', contract, receipt: options.tampered ? { ...receipt, digest: 'f'.repeat(64) } : receipt, verifierExecutionObservation: { ...execution, executionRef: contract.task.ref } }] })
+      reviseSnapshot(goalId, { version: 1, status })
     }, denyBackground: () => { backgroundAllowed = false }, rebindRoute: () => { routeVersion++ }, revokeRoute: () => { routeLive = false },
-    restart: async () => { await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() } }
+    reviseSnapshot, snapshot: (goalId: string) => structuredClone(snapshots.get(goalId)), canonical: (assessmentId: string) => currentCanonical(assessmentId), advanceCanonicalWatermark: () => { canonicalWatermark++ }, canonicalListenerCount: () => canonicalListeners.size, canonicalReadCount: () => canonicalReads, canonicalFenceCount: () => canonicalFences,
+    notifyCanonical: (assessmentId: string) => { for (const listener of canonicalListeners) listener({ subjectKind: 'goal-outcome', subjectRef: assessmentId }) },
+    restart: async () => { await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() },
+    restartWithExternalHoldouts: async (profiles: ExternalHoldoutProfile[]) => { await plugin.dispose(); config = { ...config, externalHoldouts: profiles }; plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() } }
 }
 function result(value: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['run']>>) {
   expect(value.isError, JSON.stringify(value)).toBe(false)
@@ -702,8 +761,42 @@ async function watchedFixture(failureThreshold = 1, maxRuns = 2) {
   expect(JSON.stringify(watch)).not.toMatch(/"(?:scope|routeReceipt|ownerRouteId|afterRunRowId|runIds|observations|proofVersion|taskFamily)":/u)
   const use = async (goalId: string) => result(await f.execute('skill_run', { goal_id: goalId, name: 'saved-write', version: 2, inputs_json: '{"message":"observed"}', invocation_id: goalId }))
   const watches = async () => result(await f.execute('skill_watches', {}))
+  const notify = () => { f.ctx.emit('assistant-verifier/receipt', { taskKind: 'goal-outcome' } as never) }
   const nudge = async () => { f.ctx.emit('assistant-verifier/receipt', { taskKind: 'goal-outcome' } as never); await new Promise<void>(resolve => setImmediate(resolve)) }
-  return { ...f, watch, expiresAt, use, watches, nudge }
+  return { ...f, watch, expiresAt, use, watches, notify, nudge }
+}
+
+async function revisionDeploymentFixture(canaryRuns = 1, maxRuns = 2) {
+  const f = await fixture(), parent = result(await f.save())
+  f.source.goal.definition.digest = 'd'.repeat(64)
+  const candidate = result(await f.candidate(1))
+  const stateRoot = await mkdtemp(join(tmpdir(), 'assistant-skills-revision-canary-')); await chmod(stateRoot, 0o700)
+  cleanups.push(() => rm(stateRoot, { recursive: true, force: true }))
+  const keys = generateKeyPairSync('ed25519')
+  const taskFamily = { goalDefinitionDigest: candidate.definition.source.goalDefinitionDigest, outcomeProfile: { id: 'profile', version: 1, digest: 'a'.repeat(64) } }
+  const admission = { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: 'saved-write', parentDefinitionDigest: acceptanceDigest(parent), candidateDefinitionDigest: candidate.definitionDigest, taskFamily }
+  const profile: ExternalHoldoutProfile = { id: 'revision-canary', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' },
+    execution: { image: `sha256:${'a'.repeat(64)}`, dockerPath: '/usr/bin/docker', stateRoot, command: '/bin/sh /workspace/artifact', artifactPath: 'artifact', expiresAt: Date.now() + 120_000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 },
+    authority: { executable: process.execPath, args: ['-e', "process.stdout.write(JSON.stringify({event:'ready',protocol:'assistant-skills/holdout-ipc/v1'})+'\\n');process.stdin.resume();setInterval(()=>{},1000)"], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: '9'.repeat(64) },
+    canaryAdmission: admission, maxComparisons: 1 }
+  const store = new SkillStore(join(f.root, 'skills.sqlite'))
+  const storedCandidate = store.getCandidate(profile.scope, candidate.id)!
+  const comparison = store.claimComparison(profile.scope, { sessionId: String(f.owner.session.id), candidateId: candidate.id, parentDigest: storedCandidate.parentDigest!, profileId: `external:${profile.id}:${profile.version}`, profileDigest: acceptanceDigest(profile), invocationId: 'revision-qualification' }, 1).comparison
+  const qualification = { qualified: true, admissionDigest: acceptanceDigest(admission) }
+  store.finishComparison(profile.scope, comparison.id, 'complete', qualification)
+  const activated = store.activateQualifiedCandidate(profile.scope, candidate.id, comparison.id, acceptanceDigest(qualification), admission,
+    { ownerRouteId: 'owner-route', expiresAt: Date.now() + 60_000, maxRuns, canaryRuns }, { authorityId: 'owner-route', principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, agentPreset: 'primary', bindingVersion: 1, generation: 1 })
+  store.close()
+  vi.spyOn(HoldoutQualification, 'inspectProspectiveQualification').mockReturnValue({
+    receipt: { complete: true }, quality: { candidateChecksPassed: true, evaluationGain: 1, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'unproven' },
+    modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact', prospectiveHoldout: 'authority-attested-after-freeze', admissionDigest: acceptanceDigest(admission),
+  } as never)
+  await f.restartWithExternalHoldouts([profile])
+  await expect.poll(f.canonicalListenerCount).toBe(1)
+  const use = async (goalId: string) => result(await f.execute('skill_run', { goal_id: goalId, name: 'saved-write', version: 2, inputs_json: '{"message":"observed"}', invocation_id: goalId }))
+  const watches = async () => result(await f.execute('skill_watches', {}))
+  const deployment = async () => result(await f.execute('skill_deployment_status', { deployment_id: activated.deployment.id }))
+  return { ...f, profile, taskFamily, deployed: activated, use, watches, deployment }
 }
 
 test.each(['route', 'policy', 'budget', 'late-route', 'late-policy', 'expired'] as const)('watched activation leaves the parent active when %s blocks the commit', async failure => {
@@ -799,6 +892,157 @@ test('positive observations exhaust a finite watch without rollback and one fail
   f.setSnapshot(second.goalId, second.goalExecutionRunId, 'achieved'); await f.nudge()
   expect((await f.watches())[0]).toMatchObject({ state: 'exhausted', observedRuns: 2, achieved: 1, notAchieved: 1 })
   expect(result(await f.execute('skill_status', {}))[0].version).toBe(2)
+})
+
+test('watch replaces a recorded outcome with the latest canonical revision across duplicate notices and restart', async () => {
+  const f = await revisionDeploymentFixture(), run = await f.use('revision-aware')
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'achieved')
+  const direct = (await import('../src/watch-proof.ts')).watchObservationResult(f.snapshot(run.goalId) as never, f.profile.scope,
+    result(await f.execute('skill_status', { run_id: run.id })) as never, Date.now(),
+    await (f.ctx.get('assistantGoals')! as any).inspectOwnerGoalRunProof({ goalId: run.goalId, runId: run.goalExecutionRunId }), f.taskFamily, f.canonical(`assessment-${run.goalId}`),
+    (value: any) => evaluationLearningProjectionDigest(value) === value.projection.digest)
+  expect(direct).toMatchObject({ kind: 'current', observation: { objectiveStatus: 'achieved' } })
+  f.notifyCanonical(`assessment-${run.goalId}`); f.notifyCanonical(`assessment-${run.goalId}`)
+  await expect.poll(f.canonicalReadCount).toBeGreaterThan(0)
+  await expect.poll(f.canonicalFenceCount).toBeGreaterThan(0)
+  await expect.poll(async () => (await f.watches())[0]).toMatchObject({ state: 'watching', observedRuns: 1, achieved: 1, notAchieved: 0 })
+  await expect.poll(f.deployment).toMatchObject({ state: 'promoted' })
+
+  // The verifier receipt stays achieved; a newer canonical owner correction
+  // must replace it instead of being rejected as a duplicate run.
+  f.reviseSnapshot(run.goalId, { version: 2, status: 'not-achieved' })
+  f.notifyCanonical(`assessment-${run.goalId}`); f.notifyCanonical(`assessment-${run.goalId}`); await new Promise<void>(resolve => setImmediate(resolve))
+  await expect.poll(f.deployment).toMatchObject({ state: 'rolled-back' })
+  expect((await f.watches())[0]).toMatchObject({ state: 'rolled-back', observedRuns: 1, achieved: 0, notAchieved: 1, rollbackVersion: 3 })
+  await f.restartWithExternalHoldouts([f.profile]); f.notifyCanonical(`assessment-${run.goalId}`); await new Promise<void>(resolve => setImmediate(resolve))
+  expect(await f.deployment()).toMatchObject({ state: 'rolled-back' })
+  expect(result(await f.execute('skill_status', {}))[0]).toMatchObject({ version: 3, restoredFromVersion: 1 })
+})
+
+test('a newer positive canonical revision remains promoted and never rolls back', async () => {
+  const f = await revisionDeploymentFixture(), run = await f.use('revision-positive')
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'achieved'); f.notifyCanonical(`assessment-${run.goalId}`)
+  await expect.poll(async () => (await f.watches())[0]).toMatchObject({ observedRuns: 1, achieved: 1 })
+  await expect.poll(f.deployment).toMatchObject({ state: 'promoted' })
+  f.reviseSnapshot(run.goalId, { version: 2, status: 'achieved' })
+  f.notifyCanonical(`assessment-${run.goalId}`); f.notifyCanonical(`assessment-${run.goalId}`)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect(await f.deployment()).toMatchObject({ state: 'promoted' })
+  expect((await f.watches())[0]).toMatchObject({ state: 'watching', observedRuns: 1, achieved: 1, notAchieved: 0 })
+  await f.restartWithExternalHoldouts([f.profile]); f.notifyCanonical(`assessment-${run.goalId}`); await new Promise<void>(resolve => setImmediate(resolve))
+  expect(await f.deployment()).toMatchObject({ state: 'promoted' })
+  expect(result(await f.execute('skill_status', {}))[0]).toMatchObject({ version: 2 })
+})
+
+test('concurrent canonical revisions cannot commit a stale first read', async () => {
+  const f = await revisionDeploymentFixture(), run = await f.use('revision-race')
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'achieved')
+  const stale = f.snapshot(run.goalId)
+  const staleCanonical = f.canonical(`assessment-${run.goalId}`)
+  f.reviseSnapshot(run.goalId, { version: 2, status: 'not-achieved' })
+  const latest = f.snapshot(run.goalId)
+  const latestCanonical = f.canonical(`assessment-${run.goalId}`)
+  let reads = 0, canonicalReads = 0
+  ;(f.ctx.get('assistantGoals')! as any).inspectOwnerGoalExecution = () => structuredClone(++reads === 1 ? stale : latest)
+  ;(f.ctx.get('assistantEvaluation')! as any).getTrustedGoalOutcomeLearningProjection = () => structuredClone(++canonicalReads === 1 ? staleCanonical : latestCanonical)
+  f.notifyCanonical(`assessment-${run.goalId}`); f.notifyCanonical(`assessment-${run.goalId}`)
+  await expect.poll(f.deployment).toMatchObject({ state: 'rolled-back' })
+  expect((await f.watches())[0]).toMatchObject({ observedRuns: 1, achieved: 0, notAchieved: 1 })
+  expect(reads).toBeGreaterThanOrEqual(2)
+})
+
+test('unrelated scope watermark advancement does not poison unchanged canary evidence', async () => {
+  const f = await revisionDeploymentFixture(2, 2)
+  const first = await f.use('revision-watermark-first')
+  f.setSnapshot(first.goalId, first.goalExecutionRunId, 'achieved'); f.notifyCanonical(`assessment-${first.goalId}`)
+  await expect.poll(async () => (await f.watches())[0]).toMatchObject({ observedRuns: 1, achieved: 1 })
+  await expect.poll(f.deployment).toMatchObject({ state: 'canary' })
+  f.advanceCanonicalWatermark()
+
+  const second = await f.use('revision-watermark-second')
+  f.setSnapshot(second.goalId, second.goalExecutionRunId, 'achieved'); f.notifyCanonical(`assessment-${second.goalId}`)
+  await expect.poll(async () => (await f.watches())[0]).toMatchObject({ observedRuns: 2, achieved: 2, notAchieved: 0 })
+  await expect.poll(f.deployment).toMatchObject({ state: 'promoted' })
+})
+
+test.each([
+  ['not-achieved', { status: 'not-achieved' as const }, { observedRuns: 1, achieved: 0, notAchieved: 1 }],
+  ['retract', { disposition: 'retract' as const }, { observedRuns: 0, achieved: 0, notAchieved: 0 }],
+] as const)('two-run promotion is fenced when the first canonical outcome changes to %s between aggregate read and commit', async (_change, correction, finalCounts) => {
+  const f = await revisionDeploymentFixture(2, 2)
+  const first = await f.use(`revision-fence-first-${_change}`)
+  f.setSnapshot(first.goalId, first.goalExecutionRunId, 'achieved'); f.notifyCanonical(`assessment-${first.goalId}`)
+  await expect.poll(async () => (await f.watches())[0]).toMatchObject({ observedRuns: 1, achieved: 1 })
+  await expect.poll(f.deployment).toMatchObject({ state: 'canary' })
+
+  const second = await f.use(`revision-fence-second-${_change}`)
+  f.setSnapshot(second.goalId, second.goalExecutionRunId, 'achieved')
+  const evaluation = f.ctx.get('assistantEvaluation')! as any
+  const fence = evaluation.withTrustedCanonicalTaskWriterFence.bind(evaluation)
+  let raced = false
+  evaluation.withTrustedCanonicalTaskWriterFence = (input: any, callback: () => unknown) => {
+    if (!raced && input.evidence.length === 2) {
+      raced = true
+      f.reviseSnapshot(first.goalId, { version: 2, ...correction })
+    }
+    return fence(input, callback)
+  }
+  f.notifyCanonical(`assessment-${second.goalId}`)
+  await expect.poll(() => raced).toBe(true)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  expect(await f.deployment()).toMatchObject({ state: 'canary' })
+  expect((await f.watches())[0]).toMatchObject({ observedRuns: 1, achieved: 1, notAchieved: 0 })
+
+  f.notifyCanonical(`assessment-${first.goalId}`)
+  await expect.poll(f.deployment).toMatchObject({ state: 'rolled-back' })
+  expect((await f.watches())[0]).toMatchObject({ state: 'rolled-back', ...finalCounts, rollbackVersion: 3 })
+})
+
+test('watch invalidates a withdrawn canonical outcome durably and does not resurrect it after restart', async () => {
+  const f = await revisionDeploymentFixture(), run = await f.use('revision-withdrawn')
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'achieved'); f.notifyCanonical(`assessment-${run.goalId}`)
+  await expect.poll(async () => (await f.watches())[0]).toMatchObject({ observedRuns: 1, achieved: 1 })
+  await expect.poll(f.deployment).toMatchObject({ state: 'promoted' })
+  expect((await f.watches())[0]).toMatchObject({ observedRuns: 1, achieved: 1 })
+  f.reviseSnapshot(run.goalId, { version: 2, disposition: 'retract' }); f.notifyCanonical(`assessment-${run.goalId}`); await new Promise<void>(resolve => setImmediate(resolve))
+  await expect.poll(f.deployment).toMatchObject({ state: 'rolled-back' })
+  expect((await f.watches())[0]).toMatchObject({ state: 'rolled-back', observedRuns: 0, achieved: 0, notAchieved: 0, rollbackVersion: 3 })
+  await f.restartWithExternalHoldouts([f.profile]); f.notifyCanonical(`assessment-${run.goalId}`); f.notifyCanonical(`assessment-${run.goalId}`); await new Promise<void>(resolve => setImmediate(resolve))
+  expect((await f.watches())[0]).toMatchObject({ state: 'rolled-back', observedRuns: 0, achieved: 0, notAchieved: 0, rollbackVersion: 3 })
+  expect(result(await f.execute('skill_status', {}))[0]).toMatchObject({ version: 3, restoredFromVersion: 1 })
+})
+
+test.each([
+  ['wrong run', { canonical: { subjectRef: 'foreign-assessment', lookupAssessmentId: 'assessment-revision-wrong-run' } }],
+  ['wrong owner', { snapshot: { wrongOwner: true } }],
+  ['wrong profile', { snapshot: { wrongProfile: true } }],
+] as const)('watch rejects a newer canonical revision for the %s without replacing accepted evidence', async (_name, invalid) => {
+  const f = await revisionDeploymentFixture(), run = await f.use(`revision-${_name.replace(' ', '-')}`)
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'achieved')
+  f.notifyCanonical(`assessment-${run.goalId}`)
+  await expect.poll(async () => (await f.watches())[0]).toMatchObject({ observedRuns: 1, achieved: 1 })
+  await expect.poll(f.deployment).toMatchObject({ state: 'promoted' })
+  if ('snapshot' in invalid) f.setSnapshot(run.goalId, run.goalExecutionRunId, 'achieved', invalid.snapshot)
+  f.reviseSnapshot(run.goalId, { version: 2, status: 'not-achieved', ...('canonical' in invalid ? invalid.canonical : {}) })
+  f.notifyCanonical(`assessment-${run.goalId}`); await new Promise<void>(resolve => setImmediate(resolve))
+  expect((await f.watches())[0]).toMatchObject({ state: 'watching', observedRuns: 1, achieved: 1, notAchieved: 0 })
+  expect(await f.deployment()).toMatchObject({ state: 'promoted' })
+  expect(result(await f.execute('skill_status', {}))[0]).toMatchObject({ version: 2 })
+})
+
+test('a later canonical correction can roll back after the originally bound verifier receipt expires', async () => {
+  const f = await revisionDeploymentFixture(), run = await f.use('revision-after-expiry')
+  let now = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => now)
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'achieved', { validForMs: 10 })
+  f.notifyCanonical(`assessment-${run.goalId}`)
+  await expect.poll(async () => (await f.watches())[0]).toMatchObject({ observedRuns: 1, achieved: 1 })
+  await expect.poll(f.deployment).toMatchObject({ state: 'promoted' })
+  now += 11
+  f.reviseSnapshot(run.goalId, { version: 2, status: 'not-achieved' })
+  f.notifyCanonical(`assessment-${run.goalId}`)
+  await expect.poll(f.deployment).toMatchObject({ state: 'rolled-back' })
+  expect((await f.watches())[0]).toMatchObject({ state: 'rolled-back', observedRuns: 1, achieved: 0, notAchieved: 1, rollbackVersion: 3 })
+  expect(result(await f.execute('skill_status', {}))[0]).toMatchObject({ version: 3, restoredFromVersion: 1 })
 })
 
 

@@ -191,6 +191,19 @@ export interface EvaluationLearningEvidenceTuple {
 }
 
 /**
+ * Exact current canonical task identity. Unlike promotion evidence, a Host
+ * reconciliation may need to fence a retraction so stale downstream state can
+ * be invalidated under the same Evaluation writer lock.
+ */
+export interface EvaluationCanonicalLearningEvidenceTuple {
+  subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
+  subjectRef: string
+  version: number
+  digest: string
+  disposition: 'upsert' | 'retract'
+}
+
+/**
  * A complete scope-level fence snapshot.  The callback-capability accepting
  * this type is synchronous: it holds Evaluation's writer lock for its entire
  * execution, and callers must acquire any downstream lock only afterwards.
@@ -198,6 +211,12 @@ export interface EvaluationLearningEvidenceTuple {
 export interface EvaluationLearningWriterFence {
   scopeWatermark: number
   evidence: readonly Readonly<EvaluationLearningEvidenceTuple>[]
+}
+
+/** A scope-level fence for exact canonical reconciliation, including retracts. */
+export interface EvaluationCanonicalLearningWriterFence {
+  scopeWatermark: number
+  evidence: readonly Readonly<EvaluationCanonicalLearningEvidenceTuple>[]
 }
 
 export type EvaluationLearningWriterFenceFailure =

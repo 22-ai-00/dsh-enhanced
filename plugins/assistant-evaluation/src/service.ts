@@ -4,10 +4,15 @@ import type SkillRegistry from '@deepseek-ai/dsh-skill'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
 import { validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
-import { EvaluationStore, canonicalEvaluationScope } from './store.js'
+import {
+  EvaluationStore,
+  canonicalEvaluationScope,
+  evaluationLearningProjectionDigest,
+} from './store.js'
 import { registerEvaluationTools } from './tools.js'
 import type {
   EvaluationHealth,
+  EvaluationCanonicalLearningEvidenceTuple,
   EvaluationLearningEvidenceTuple,
   EvaluationLearningWriterFenceResult,
   EvaluationLimits,
@@ -34,7 +39,12 @@ import type {
   TrustedOutcomeReceipt,
   TrustedTaskLearningProjectionReceipt,
 } from './types.js'
-import { TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from './types.js'
+import {
+  executionStatuses,
+  objectiveStatuses,
+  outcomeSourceKinds,
+  TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
+} from './types.js'
 
 export interface Config {
   databasePath: string
@@ -156,6 +166,54 @@ function hostIdentifier(value: unknown, label: string, maxBytes: number): string
 
 function hostOutcomeId(value: unknown): string {
   return hostIdentifier(value, 'outcomeId', 200)
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+function exactHostIdentifier(value: unknown, label: string, maxBytes: number): value is string {
+  if (typeof value !== 'string') return false
+  try {
+    return hostIdentifier(value, label, maxBytes) === value
+  } catch {
+    return false
+  }
+}
+
+function validTrustedEvidence(value: unknown, maximum: number): boolean {
+  if (!Array.isArray(value) || value.length > maximum) return false
+  return value.every((item, index) => {
+    const entry = recordValue(item)
+    return entry !== undefined
+      && exactHostIdentifier(entry.kind, `evidence[${index}].kind`, 64)
+      && exactHostIdentifier(entry.ref, `evidence[${index}].ref`, 512)
+      && (entry.digest === undefined
+        || exactHostIdentifier(entry.digest, `evidence[${index}].digest`, 128))
+  })
+}
+
+function validTrustedTaskComponent(
+  value: unknown,
+  statuses: readonly string[],
+  maximumEvidence: number,
+): boolean {
+  const component = recordValue(value)
+  const source = recordValue(component?.source)
+  const evaluator = recordValue(component?.evaluator)
+  return component !== undefined
+    && exactHostIdentifier(component.outcomeId, 'component.outcomeId', 200)
+    && typeof component.status === 'string' && statuses.includes(component.status)
+    && source !== undefined
+    && typeof source.kind === 'string' && outcomeSourceKinds.includes(source.kind as never)
+    && exactHostIdentifier(source.id, 'component.source.id', 200)
+    && validTrustedEvidence(component.evidence, maximumEvidence)
+    && Number.isSafeInteger(component.occurredAt) && (component.occurredAt as number) >= 0
+    && evaluator !== undefined
+    && exactHostIdentifier(evaluator.id, 'component.evaluator.id', 200)
+    && exactHostIdentifier(evaluator.version, 'component.evaluator.version', 100)
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -501,6 +559,16 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   }
 
   /**
+   * Mint the opaque scope token required by trusted Host APIs. Consumers of an
+   * optionally injected Evaluation service can call this instance method and
+   * keep their package dependency type-only.
+   */
+  canonicalHostScope(input: EvaluationScope): EvaluationHostScope {
+    this.assertActive()
+    return canonicalEvaluationHostScope(input)
+  }
+
+  /**
    * Exact Host-only lookup used to project quality evidence into another local
    * ledger. Untrusted and missing rows are deliberately indistinguishable.
    */
@@ -547,6 +615,81 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     return this.store.getAutomationRunLearningProjection(exactEvaluationHostScope(input.scope), input.runId)
   }
 
+  /** Host-only exact canonical whole-goal proof, addressed by assessment id. */
+  getTrustedGoalOutcomeLearningProjection(input: {
+    scope: EvaluationHostScope
+    assessmentId: string
+  }): TrustedTaskLearningProjectionReceipt | undefined {
+    this.assertActive()
+    return this.store.getGoalOutcomeLearningProjection(
+      exactEvaluationHostScope(input.scope),
+      hostIdentifier(input.assessmentId, 'assessmentId', 1_000),
+    )
+  }
+
+  /**
+   * Validate that a structurally untrusted value is the exact current trusted
+   * Evaluation projection. This is the runtime seam for optional consumers:
+   * malformed, forged, stale, cross-scope and post-disposal values return false.
+   */
+  isTrustedTaskLearningProjectionReceipt(
+    input: unknown,
+  ): input is TrustedTaskLearningProjectionReceipt {
+    try {
+      this.assertActive()
+      const receipt = recordValue(input)
+      const scope = recordValue(receipt?.scope)
+      const projection = recordValue(receipt?.projection)
+      if (receipt === undefined || scope === undefined || projection === undefined
+        || !exactHostIdentifier(receipt.triggerOutcomeId, 'triggerOutcomeId', 200)
+        || !exactHostIdentifier(scope.workspace, 'scope.workspace', 4_096)
+        || !exactHostIdentifier(scope.preset, 'scope.preset', 200)
+        || typeof receipt.scopeKey !== 'string'
+        || !Number.isSafeInteger(receipt.scopeWatermark) || (receipt.scopeWatermark as number) < 1
+        || !exactHostIdentifier(receipt.situation, 'situation', this.config.maxSituationBytes)
+        || (receipt.execution !== undefined
+          && !validTrustedTaskComponent(receipt.execution, executionStatuses, this.config.maxEvidenceRefs))
+        || (receipt.objective !== undefined
+          && !validTrustedTaskComponent(receipt.objective, objectiveStatuses, this.config.maxEvidenceRefs))
+        || (projection.subjectKind !== 'automation-run'
+          && projection.subjectKind !== 'foreground-turn'
+          && projection.subjectKind !== 'goal-step'
+          && projection.subjectKind !== 'goal-outcome'
+          && projection.subjectKind !== 'outcome')
+        || !exactHostIdentifier(projection.subjectRef, 'projection.subjectRef', 1_000)
+        || !Number.isSafeInteger(projection.version) || (projection.version as number) < 1
+        || (projection.version as number) > 1_000_000_000
+        || typeof projection.digest !== 'string' || !/^[a-f\d]{64}$/u.test(projection.digest)
+        || (projection.disposition !== 'upsert' && projection.disposition !== 'retract')
+        || (projection.evidenceOutcomeId !== undefined
+          && !exactHostIdentifier(projection.evidenceOutcomeId, 'projection.evidenceOutcomeId', 200))) {
+        return false
+      }
+      const canonical = canonicalEvaluationScope(scope as unknown as EvaluationScope)
+      if (canonical.scope.workspace !== scope.workspace || canonical.scope.preset !== scope.preset
+        || canonical.scopeKey !== receipt.scopeKey
+        || evaluationLearningProjectionDigest(
+          input as TrustedTaskLearningProjectionReceipt,
+        ) !== projection.digest) return false
+      const current = this.store.getTaskLearningProjection(
+        canonical.scope,
+        receipt.triggerOutcomeId as string,
+      )
+      return current !== undefined
+        && current.scopeKey === receipt.scopeKey
+        && current.scopeWatermark === receipt.scopeWatermark
+        && current.situation === receipt.situation
+        && current.projection.subjectKind === projection.subjectKind
+        && current.projection.subjectRef === projection.subjectRef
+        && current.projection.version === projection.version
+        && current.projection.digest === projection.digest
+        && current.projection.disposition === projection.disposition
+        && current.projection.evidenceOutcomeId === projection.evidenceOutcomeId
+    } catch {
+      return false
+    }
+  }
+
   /**
    * Synchronous cross-ledger writer fence.  Evaluation's writer lock is always
    * acquired before the callback may acquire Evolution's writer lock.
@@ -585,6 +728,26 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       scopeWatermark: input.scopeWatermark,
       evidence: input.evidence,
     }, callback, { requireProjectionDelivery: false })
+  }
+
+  /**
+   * Exact canonical task fence for reconciliation. It accepts a current
+   * retraction so a downstream ledger can invalidate stale state atomically.
+   */
+  withTrustedCanonicalTaskWriterFence<T>(input: Readonly<{
+    scope: EvaluationHostScope
+    scopeWatermark: number
+    evidence: readonly Readonly<EvaluationCanonicalLearningEvidenceTuple>[]
+  }>, callback: () => T): EvaluationLearningWriterFenceResult<T> {
+    this.assertActive()
+    if (typeof callback !== 'function') {
+      throw new AssistantEvaluationError('invalid-input', 'writer fence callback is required')
+    }
+    const scope = exactEvaluationHostScope(input.scope)
+    return this.store.withCanonicalTaskWriterFence(scope, {
+      scopeWatermark: input.scopeWatermark,
+      evidence: input.evidence,
+    }, callback)
   }
 
   /** Host-only seam for a memory-assisted/model evaluator; always stored as self-reported. */

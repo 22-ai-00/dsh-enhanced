@@ -7,6 +7,7 @@ import type { SkillProviderControl } from '@deepseek-ai/dsh-skill'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantGoalsService, GoalScope } from '@dsh-enhanced/assistant-goals'
+import type { AssistantEvaluationService, EvaluationCanonicalLearningEvidenceTuple, EvaluationHostScope, TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
@@ -14,11 +15,11 @@ import { join } from 'node:path'
 import { createDefinition, fileObservationSteps, instantiate, type SkillBinding, type SkillDefinition } from './definition.js'
 import { captureFailureCandidateProvenance, captureRunExpansions } from './capture-expansion.js'
 import { validateComparisonProfiles, SkillComparator, type SkillComparisonProfile } from './comparison.js'
-import { watchObservation } from './watch-proof.js'
+import { watchBindingCurrent, watchObservation, watchObservationResult, watchObservationRevision } from './watch-proof.js'
 import { sealedPlan, type SealedSkillHoldoutProvider } from './sealed-holdout.js'
 import { openHoldoutProcess, validateExternalHoldoutProfiles, type ExternalHoldoutProfile } from './external-holdout.js'
 import { canaryAdmissionMatches, inspectProspectiveQualification, qualifyHoldout } from './holdout-qualification.js'
-import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition, type SkillCapture, type SkillDeployment, type SkillDeploymentInput } from './store.js'
+import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRun, type SkillRunStep, type StoredSkillDefinition, type SkillCapture, type SkillDeployment, type SkillDeploymentInput, type SkillWatchObservationResult } from './store.js'
 
 export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[]; externalHoldouts?: ExternalHoldoutProfile[] }
 export const Config: Schema<Config> = Schema.object({
@@ -195,6 +196,7 @@ export class AssistantSkillsService extends Service {
   readonly #captureInflight = new Set<string>()
   readonly #captureDirty = new Set<string>()
   readonly #captureTasks = new Set<Promise<void>>()
+  readonly #deployedExecutions = new Set<AbortController>()
   #active = true
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'assistantSkills')
@@ -273,6 +275,22 @@ export class AssistantSkillsService extends Service {
     // available, retry durable preauthorized captures that previously received
     // the typed `unavailable` bridge result.
     ctx.inject(['sessionQuery' as never], () => { this.#queueReconcile() })
+    // Evaluation is optional for ordinary saved skills and standalone watches.
+    // Qualified deployments bind to it dynamically and fail closed while it is
+    // absent; a provider replacement gets a fresh subscription and cold reread.
+    ctx.inject(['assistantEvaluation' as never], runtime => {
+      const evaluation = runtime.get('assistantEvaluation' as never) as unknown as AssistantEvaluationService | undefined
+      if (!evaluation) return
+      const unsubscribe = evaluation.onTrustedTaskChange(() => {
+        for (const controller of this.#deployedExecutions) controller.abort()
+        this.#queueReconcile()
+      })
+      this.#queueReconcile()
+      return () => {
+        unsubscribe()
+        for (const controller of this.#deployedExecutions) controller.abort()
+      }
+    })
     ctx.on('assistant-verifier/receipt', notice => { if (notice.taskKind === 'goal-outcome') this.#queueReconcile() })
     // A native goal change is only a durable-evidence reread nudge. It carries no
     // authority and capture still revalidates route, Policy, parent and definition.
@@ -470,7 +488,7 @@ export class AssistantSkillsService extends Service {
   }
   #deploymentCurrent(deployment: SkillDeployment): void {
     const scope = deployment.scope as GoalScope
-    if (!this.#active || deployment.expiresAt <= Date.now() || deployment.state !== 'canary' && deployment.state !== 'promoted') throw new Error('assistant-skills: deployment authority ended')
+    if (!this.#active || deployment.expiresAt <= Date.now() || !['canary', 'promoted', 'blocked'].includes(deployment.state)) throw new Error('assistant-skills: deployment authority ended')
     const watch = this.#store.listWatches(scope).find(value => value.id === deployment.watchId)
     if (!watch || watch.ownerRouteId.length === 0 || acceptanceDigest(watch.routeReceipt) !== acceptanceDigest(deployment.routeReceipt)) throw new Error('assistant-skills: deployment route changed')
     this.#watchRoute(scope, watch.ownerRouteId, deployment.routeReceipt)
@@ -491,10 +509,70 @@ export class AssistantSkillsService extends Service {
       || (comparison.result as { admissionDigest?: unknown }).admissionDigest !== deployment.admissionDigest) throw new Error('assistant-skills: deployment profile changed')
   }
   #deploymentAuthorized(deployment: SkillDeployment, authorize = false): void {
+    if (deployment.state !== 'canary' && deployment.state !== 'promoted') throw new Error('assistant-skills: deployment authority ended')
     this.#deploymentCurrent(deployment)
     const policy = this.ctx.get('assistantPolicy', false)
     if (!policy || policy.evaluate(this.#promotePolicy(deployment.scope as GoalScope)).effect !== 'allow') throw new Error('assistant-skills: deployment promotion authority ended')
     if (authorize && policy.authorize(this.#promotePolicy(deployment.scope as GoalScope), { idempotencyKey: `${deployment.id}:promote` }).effect !== 'allow') throw new Error('assistant-skills: deployment promotion authorization denied')
+  }
+  #deploymentCanonicalEvidenceCurrent(deployment: SkillDeployment): void {
+    const evaluation = this.ctx.get('assistantEvaluation' as never) as unknown as AssistantEvaluationService | undefined
+    if (!evaluation || typeof evaluation.getTrustedGoalOutcomeLearningProjection !== 'function'
+      || typeof evaluation.withTrustedCanonicalTaskWriterFence !== 'function') throw new Error('assistant-skills: canonical deployment evidence unavailable')
+    const scope = deployment.scope as GoalScope
+    const watch = this.#store.listWatches(scope).find(value => value.id === deployment.watchId)
+    if (!watch || watch.observations.some(value => value.canonical === undefined)) throw new Error('assistant-skills: canonical deployment evidence unavailable')
+    const evaluationScope = evaluation.canonicalHostScope({ workspace: scope.workspace, preset: scope.preset })
+    let scopeWatermark: number | undefined
+    const evidence: { subjectKind: 'goal-outcome'; subjectRef: string; version: number; digest: string; disposition: 'upsert' | 'retract' }[] = []
+    for (const expected of watch.canonicalRevisions ?? []) {
+      const run = this.#store.getRun(scope, expected.runId)
+      if (!run) throw new Error('assistant-skills: canonical deployment evidence changed')
+      const current = evaluation.getTrustedGoalOutcomeLearningProjection({ scope: evaluationScope, assessmentId: expected.subjectRef })
+      if (!current || current.projection.subjectKind !== expected.subjectKind || current.projection.subjectRef !== expected.subjectRef
+        || current.projection.version !== expected.version || current.projection.digest !== expected.digest
+        || current.projection.disposition !== expected.disposition) throw new Error('assistant-skills: canonical deployment evidence changed')
+      const first = this.#goals().inspectOwnerGoalExecution({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: run.sessionId, goalId: run.goalId })
+      if (!watch.taskFamily || !watchBindingCurrent(first, scope, run, watch.taskFamily, expected.binding, current)) throw new Error('assistant-skills: canonical deployment evidence changed')
+      const second = this.#goals().inspectOwnerGoalExecution({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: run.sessionId, goalId: run.goalId })
+      if (acceptanceDigest(second) !== acceptanceDigest(first)) throw new Error('assistant-skills: canonical deployment evidence changed')
+      if (scopeWatermark !== undefined && current.scopeWatermark !== scopeWatermark) throw new Error('assistant-skills: canonical deployment evidence changed')
+      scopeWatermark = current.scopeWatermark
+      evidence.push({
+        subjectKind: expected.subjectKind, subjectRef: expected.subjectRef, version: expected.version, digest: expected.digest, disposition: expected.disposition,
+      })
+    }
+    if (scopeWatermark === undefined) return
+    const fenced = evaluation.withTrustedCanonicalTaskWriterFence({ scope: evaluationScope, scopeWatermark, evidence }, () => true)
+    if (!fenced.matched) throw new Error('assistant-skills: canonical deployment evidence changed')
+  }
+  #watchEvidenceCurrent(evaluation: AssistantEvaluationService, scope: GoalScope, watch: SkillWatch, run: SkillRun, result: SkillWatchObservationResult, canonical: TrustedTaskLearningProjectionReceipt): { scope: EvaluationHostScope; scopeWatermark: number; evidence: EvaluationCanonicalLearningEvidenceTuple[] } | undefined {
+    if (!watch.taskFamily) return
+    const evaluationScope = evaluation.canonicalHostScope({ workspace: scope.workspace, preset: scope.preset })
+    const observations = watch.observations.filter(value => value.runId !== run.id)
+    if (result.kind === 'current') observations.push(result.observation)
+    const revisions = (watch.canonicalRevisions ?? []).filter(value => value.runId !== run.id)
+    const resultBinding = result.binding ?? watch.canonicalRevisions?.find(value => value.runId === run.id)?.binding
+    if (!resultBinding) return
+    const resultRevision = result.kind === 'current' ? result.observation.canonical : result.canonical
+    revisions.push({ runId: run.id, ...resultRevision, binding: resultBinding })
+    const evidence: EvaluationCanonicalLearningEvidenceTuple[] = []
+    for (const revision of revisions) {
+      const observation = observations.find(value => value.runId === revision.runId)
+      const observedRun = this.#store.getRun(scope, revision.runId)
+      if (!observedRun || revision.disposition === 'upsert' && (!observation || observation.taskFamilyDigest !== acceptanceDigest(watch.taskFamily))) return
+      const current = revision.runId === run.id ? canonical : evaluation.getTrustedGoalOutcomeLearningProjection({ scope: evaluationScope, assessmentId: revision.subjectRef })
+      if (!current || current.scopeWatermark !== canonical.scopeWatermark || current.projection.subjectKind !== revision.subjectKind
+        || current.projection.subjectRef !== revision.subjectRef || current.projection.version !== revision.version
+        || current.projection.digest !== revision.digest || current.projection.disposition !== revision.disposition
+        || revision.disposition === 'upsert' && current.objective?.status !== observation!.objectiveStatus) return
+      const first = this.#goals().inspectOwnerGoalExecution({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: observedRun.sessionId, goalId: observedRun.goalId })
+      if (!watchBindingCurrent(first, scope, observedRun, watch.taskFamily, revision.binding, current)) return
+      const second = this.#goals().inspectOwnerGoalExecution({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: observedRun.sessionId, goalId: observedRun.goalId })
+      if (acceptanceDigest(second) !== acceptanceDigest(first)) return
+      evidence.push({ subjectKind: revision.subjectKind, subjectRef: revision.subjectRef, version: revision.version, digest: revision.digest, disposition: revision.disposition })
+    }
+    return { scope: evaluationScope, scopeWatermark: canonical.scopeWatermark, evidence }
   }
   #canaryCurrent(exec: ToolRunContext, scope: GoalScope, profile: ExternalHoldoutProfile, input: SkillDeploymentInput, receipt?: unknown): unknown {
     if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > profile.execution.expiresAt || input.expiresAt > Date.now() + 7 * 86400000
@@ -804,28 +882,79 @@ export class AssistantSkillsService extends Service {
         if (!run || run.skillName !== watch.skillName || run.version !== watch.version) continue
         try {
           const read = () => this.#goals().inspectOwnerGoalExecution({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: run.sessionId, goalId: run.goalId })
-          const goals = this.#goals() as AssistantGoalsService & { inspectOwnerGoalRunProof?: (input: { ownerRouteId: string; principalId: string; workspace: string; preset: string; sessionId: string; goalId: string; runId: string }, signal?: AbortSignal) => Promise<import('@dsh-enhanced/assistant-goals').OwnerGoalRunProof> }
-          if (typeof goals.inspectOwnerGoalRunProof !== 'function') { this.#store.stopWatch(scope, watch.id, 'revoked'); break }
-          const proof = await goals.inspectOwnerGoalRunProof({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: run.sessionId, goalId: run.goalId, runId: run.goalExecutionRunId! }, this.#lifecycle.signal)
-          const observation = watchObservation(read(), scope, run, Date.now(), proof, watch.taskFamily)
-          if (!observation) continue
-          this.#watchAuthorized(watch)
           const currentDeployment = this.#store.listDeployments(scope).find(value => value.watchId === watch.id)
-          if (currentDeployment) this.#deploymentAuthorized(currentDeployment)
-          if (acceptanceDigest(watchObservation(read(), scope, run, Date.now(), proof, watch.taskFamily) ?? null) !== acceptanceDigest(observation)) continue
-          const observed = this.#store.observeWatch(scope, watch.id, observation)
-          if (observed?.state !== 'watching') continue
-          const qualifiedTaskFamilyDigest = currentDeployment && watch.taskFamily
-            && acceptanceDigest(currentDeployment.taskFamily) === acceptanceDigest(watch.taskFamily)
-            ? acceptanceDigest(watch.taskFamily) : undefined
-          if (qualifiedTaskFamilyDigest !== undefined && observed.observations.filter(value => value.objectiveStatus === 'not-achieved' && value.taskFamilyDigest === qualifiedTaskFamilyDigest).length >= observed.failureThreshold) {
-            const policy = this.ctx.get('assistantPolicy', false)!
-            if (policy.authorize(this.#watchPolicy(scope, 'rollback'), { idempotencyKey: `${watch.id}:rollback` }).effect !== 'allow') { this.#store.stopWatch(scope, watch.id, 'revoked'); break }
+          const currentWatch = this.#store.listWatches(scope).find(value => value.id === watch.id)
+          if (!currentWatch || currentWatch.state !== 'watching') break
+          const prior = currentDeployment && currentWatch.canonicalRevisions?.find(value => value.runId === run.id)
+          const goals = this.#goals() as AssistantGoalsService & { inspectOwnerGoalRunProof?: (input: { ownerRouteId: string; principalId: string; workspace: string; preset: string; sessionId: string; goalId: string; runId: string }, signal?: AbortSignal) => Promise<import('@dsh-enhanced/assistant-goals').OwnerGoalRunProof> }
+          if (!currentDeployment) {
+            if (typeof goals.inspectOwnerGoalRunProof !== 'function') { this.#store.stopWatch(scope, watch.id, 'revoked'); break }
+            const proof = await goals.inspectOwnerGoalRunProof({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: run.sessionId, goalId: run.goalId, runId: run.goalExecutionRunId! }, this.#lifecycle.signal)
+            const observation = watchObservation(read(), scope, run, Date.now(), proof)
+            if (!observation) continue
             this.#watchAuthorized(watch)
-            if (this.#store.rollbackWatch(scope, watch.id)?.state === 'rolled-back') this.#changed()
-            break
+            if (acceptanceDigest(watchObservation(read(), scope, run, Date.now(), proof) ?? null) !== acceptanceDigest(observation)) continue
+            const observed = this.#store.observeWatch(scope, watch.id, observation)
+            if (observed?.state === 'watching' && observed.observations.length >= observed.maxRuns) { this.#store.stopWatch(scope, watch.id, 'exhausted'); break }
+            continue
           }
-          if (observed.observations.length >= observed.maxRuns) { this.#store.stopWatch(scope, watch.id, 'exhausted'); break }
+          // Deployment evidence is never downgraded to the immutable verifier
+          // receipt. Goals proves owner/run/profile; Evaluation supplies the
+          // current canonical revision for that exact assessment.
+          if (!currentWatch.taskFamily || acceptanceDigest(currentDeployment.taskFamily) !== acceptanceDigest(currentWatch.taskFamily)) continue
+          const evaluation = this.ctx.get('assistantEvaluation' as never) as unknown as AssistantEvaluationService | undefined
+          if (!evaluation || typeof evaluation.getTrustedGoalOutcomeLearningProjection !== 'function'
+            || typeof evaluation.withTrustedCanonicalTaskWriterFence !== 'function') continue
+          const proof = prior === undefined && typeof goals.inspectOwnerGoalRunProof === 'function'
+            ? await goals.inspectOwnerGoalRunProof({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: run.sessionId, goalId: run.goalId, runId: run.goalExecutionRunId! }, this.#lifecycle.signal)
+            : undefined
+          if (prior === undefined && proof === undefined) { this.#store.stopWatch(scope, watch.id, 'revoked'); break }
+          const first = prior === undefined ? read() : undefined
+          const assessments = first?.outcomeAssessments.filter(value => value.triggerRunId === run.goalExecutionRunId) ?? []
+          const task = assessments.length === 1 ? assessments[0]?.contract.task : undefined
+          const assessmentId = prior?.subjectRef ?? (task?.kind === 'goal-outcome' && task.ref === task.goal.assessmentId ? task.ref : undefined)
+          if (!assessmentId) continue
+          const evaluationScope = evaluation.canonicalHostScope({ workspace: scope.workspace, preset: scope.preset })
+          const canonical = evaluation.getTrustedGoalOutcomeLearningProjection({ scope: evaluationScope, assessmentId })
+          if (!canonical || canonical.projection.subjectKind !== 'goal-outcome' || canonical.projection.subjectRef !== assessmentId) continue
+          const result = prior === undefined
+            ? watchObservationResult(first!, scope, run, Date.now(), proof!, currentWatch.taskFamily, canonical, value => evaluation.isTrustedTaskLearningProjectionReceipt(value))
+            : watchObservationRevision(prior.binding, scope, canonical, value => evaluation.isTrustedTaskLearningProjectionReceipt(value))
+          if (!result) continue
+          if (prior !== undefined) {
+            const firstCurrent = read()
+            if (!watchBindingCurrent(firstCurrent, scope, run, currentWatch.taskFamily, prior.binding, canonical)
+              || acceptanceDigest(read()) !== acceptanceDigest(firstCurrent)) continue
+          }
+          this.#watchAuthorized(watch)
+          if (currentDeployment.state === 'canary' || currentDeployment.state === 'promoted') this.#deploymentAuthorized(currentDeployment)
+          else if (currentDeployment.state === 'blocked') this.#deploymentCurrent(currentDeployment)
+          else continue
+          if (prior === undefined && acceptanceDigest(watchObservationResult(read(), scope, run, Date.now(), proof!, currentWatch.taskFamily, canonical, value => evaluation.isTrustedTaskLearningProjectionReceipt(value)) ?? null) !== acceptanceDigest(result)) continue
+          const revision = result.kind === 'current' ? result.observation.canonical : result.canonical
+          const needsRollback = result.kind === 'invalidated' || result.observation.objectiveStatus === 'not-achieved'
+          if (needsRollback) {
+            const policy = this.ctx.get('assistantPolicy', false)!
+            if (policy.authorize(this.#watchPolicy(scope, 'rollback'), { idempotencyKey: `${watch.id}:rollback:${acceptanceDigest(revision)}` }).effect !== 'allow') { this.#store.stopWatch(scope, watch.id, 'revoked'); break }
+            this.#watchAuthorized(watch)
+          }
+          const promotionFence = result.kind === 'current' && result.observation.objectiveStatus === 'achieved'
+            ? this.#watchEvidenceCurrent(evaluation, scope, currentWatch, run, result, canonical) : undefined
+          if (result.kind === 'current' && result.observation.objectiveStatus === 'achieved' && !promotionFence) continue
+          const fence = promotionFence ?? { scope: evaluationScope, scopeWatermark: revision.scopeWatermark, evidence: [{
+            subjectKind: revision.subjectKind, subjectRef: revision.subjectRef, version: revision.version, digest: revision.digest, disposition: revision.disposition,
+          }] }
+          const fenced = evaluation.withTrustedCanonicalTaskWriterFence(fence, () => {
+            if (needsRollback) {
+              const observed = this.#store.replaceWatchObservationAndRollback(scope, watch.id, result)
+              return { observed, terminal: this.#store.getDeployment(scope, currentDeployment.id) }
+            }
+            const committed = this.#store.replaceWatchObservationAndPromote(scope, watch.id, currentDeployment.id, result)
+            return { observed: committed.watch, terminal: committed.deployment }
+          })
+          if (!fenced.matched) continue
+          if (fenced.value.observed?.state === 'rolled-back' || fenced.value.terminal?.state !== currentDeployment.state) this.#changed()
+          if (fenced.value.observed?.state === 'rolled-back') break
         } catch { /* Changed or unavailable evidence supplies no rollback authority. */ }
       }
     }
@@ -836,11 +965,9 @@ export class AssistantSkillsService extends Service {
       const watch = this.#store.listWatches(deployment.scope).find(value => value.id === deployment.watchId)
       if (deployment.expiresAt <= Date.now() || watch && ['rolled-back', 'expired', 'revoked', 'superseded'].includes(watch.state)) { this.#store.reconcileDeployment(deployment.scope, deployment.id); continue }
       if (deployment.state !== 'canary' && deployment.state !== 'promoted') continue
-      try {
-        this.#deploymentAuthorized(deployment, true)
-        const reconciled = this.#store.reconcileDeployment(deployment.scope, deployment.id)
-        if (reconciled && reconciled.state !== deployment.state) this.#changed()
-      } catch { this.#store.stopDeployment(deployment.scope, deployment.id, 'revoked') }
+      // Promotion is committed only in the all-observation Evaluation fence
+      // above.  A bare reconciliation here could count stale prior successes.
+      try { this.#deploymentAuthorized(deployment, true) } catch { this.#store.stopDeployment(deployment.scope, deployment.id, 'revoked') }
     }
     for (const capture of this.#store.listCaptures()) {
       const scope = capture.scope as GoalScope
@@ -901,6 +1028,11 @@ export class AssistantSkillsService extends Service {
     const deploymentBeforeClaim = candidateId ? undefined : this.#store.deploymentForVersion(scope, name, version)
     const priorRun = this.#store.getRun(scope, `skill-run-${acceptanceDigest([scope, current.sessionId, invocationId])}`)
     if (deploymentBeforeClaim && !priorRun) {
+      // Evaluation is an optional plugin for manual skills, but a qualified
+      // deployment may not admit new work while its canonical evidence cannot
+      // be read. Provider unload is transient and therefore does not revoke the
+      // durable deployment; dispatch simply fails closed before claim.
+      this.#deploymentCanonicalEvidenceCurrent(deploymentBeforeClaim)
       try {
         this.#deploymentAuthorized(deploymentBeforeClaim, true)
         const watch = this.#store.listWatches(scope).find(value => value.id === deploymentBeforeClaim.watchId)
@@ -920,14 +1052,16 @@ export class AssistantSkillsService extends Service {
     // read binds this dispatch to that exact reservation before any tool call.
     const deployment = deploymentBeforeClaim
     if (deployment) {
-      try { this.#deploymentAuthorized(this.#store.assertDeploymentRun(scope, claim.run.id)) } catch {
+      try { const reserved = this.#store.assertDeploymentRun(scope, claim.run.id); this.#deploymentCanonicalEvidenceCurrent(reserved); this.#deploymentAuthorized(reserved) } catch {
         this.#store.finish(scope, claim.run.id, 'unknown', [])
         throw new Error(`assistant-skills: invocation ${claim.run.id} is unknown; inspect skill_status, do not replay`)
       }
     }
+    const deploymentRevision = deployment ? new AbortController() : undefined
+    if (deploymentRevision) this.#deployedExecutions.add(deploymentRevision)
     const timeout = new AbortController()
     const timer = setTimeout(() => timeout.abort(), this.#duration); timer.unref?.()
-    const signal = AbortSignal.any([exec.signal, timeout.signal, this.#lifecycle.signal])
+    const signal = AbortSignal.any([exec.signal, timeout.signal, this.#lifecycle.signal, ...(deploymentRevision ? [deploymentRevision.signal] : [])])
     const completed: SkillRunStep[] = []
     let state: 'succeeded' | 'failed' | 'unknown' = 'unknown'
     let dispatched = false
@@ -940,7 +1074,7 @@ export class AssistantSkillsService extends Service {
       else {
         const live = this.#store.get(scope, name)
         if (!live || live.retired || live.version !== version) throw new Error('assistant-skills: skill retired or superseded')
-        if (deployment) this.#deploymentAuthorized(this.#store.assertDeploymentRun(scope, claim.run.id))
+        if (deployment) { const reserved = this.#store.assertDeploymentRun(scope, claim.run.id); this.#deploymentCanonicalEvidenceCurrent(reserved); this.#deploymentAuthorized(reserved) }
       }
     }
     try {
@@ -993,7 +1127,7 @@ export class AssistantSkillsService extends Service {
         if (index === steps.length - 1) state = 'succeeded'
       }
     } catch { state = deployment || dispatched || signal.aborted ? 'unknown' : 'failed' }
-    finally { clearTimeout(timer) }
+    finally { clearTimeout(timer); if (deploymentRevision) this.#deployedExecutions.delete(deploymentRevision) }
     if (!this.#active) throw new Error('assistant-skills: runtime disposed; invocation will recover as unknown')
     const saved = this.#store.finish(scope, claim.run.id, state, completed)
     if (saved.state !== 'succeeded') throw new Error(`assistant-skills: invocation ${saved.id} is ${saved.state}; inspect skill_status, do not replay`)
