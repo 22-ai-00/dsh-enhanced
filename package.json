@@ -1,6 +1,6 @@
 {
   "name": "dsh-enhanced",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "private": true,
   "description": "A scalable monorepo for community DeepSeek Harness plugins.",
   "license": "MIT",
@@ -37,7 +37,8 @@
     "test:web-owner:real-skill": "playwright test --config scripts/e2e/playwright-real-skill.config.mjs",
     "test:web-owner:real-capture": "playwright test --config scripts/e2e/playwright-real-capture.config.mjs",
     "test:web-owner:real-canary": "playwright test --config scripts/e2e/playwright-real-canary.config.mjs",
-    "test:web-owner:real-repair": "playwright test --config scripts/e2e/playwright-real-repair.config.mjs"
+    "test:web-owner:real-repair": "playwright test --config scripts/e2e/playwright-real-repair.config.mjs",
+    "test:web-owner:real-repair:topology": "playwright test --config scripts/e2e/playwright-real-repair-topology.config.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",

@@ -11,13 +11,14 @@ import { isMap, isSeq, parseDocument } from 'yaml'
 import { acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '../../packages/task-acceptance-contract/lib/index.js'
 import { fileObservationSteps, instantiate } from '../../plugins/assistant-skills/lib/definition.js'
 import { repairPolicy, createProspectiveCanaryAuthority, templateRenderCanaryTask } from './real-canary-helpers.mjs'
+import { topologyRepairTask } from './real-repair-topology-fixture.mjs'
 import { contracts, jobs, setConfig } from './web-owner-real-helpers.mjs'
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const task = Object.freeze({
+const templateTask = Object.freeze({
   ...templateRenderCanaryTask,
   legacyObjective: 'Implement render.mjs: read a JSON object from stdin whose template field is a string and whose values field is an object mapping keys to strings. For legacy compatibility, recursively replace known {{ascii_key}} placeholders for values-count plus one passes, preserve unknown placeholders, then print the rendered text and a newline.',
   strictObjective: 'Implement render.mjs: read a JSON object from stdin whose template field is a string and whose values field is an object mapping keys to strings. Replace known {{ascii_key}} placeholders literally in one non-recursive pass, preserve unknown placeholders, and print the rendered text followed by a newline.',
@@ -27,15 +28,20 @@ const task = Object.freeze({
     expectedStdout: 'release=r1;literal=r1-candidate\n',
   }],
 })
-const nextTask = Object.freeze({
-  ...task, id: 'template-render-jsonl-v1', generator: 'template-render-jsonl/v1',
+const templateNextTask = Object.freeze({
+  ...templateTask, id: 'template-render-jsonl-v1', generator: 'template-render-jsonl/v1',
   strictObjective: 'Implement render.mjs: read one or more newline-separated JSON objects from stdin, each with a template string field and a values object field mapping keys to strings. Replace every known {{ascii_key}} occurrence in the original template once with its literal value, without scanning substituted values for placeholders; preserve unknown placeholders and print one rendered line per input object. Accept a single JSON object without a trailing newline and preserve Unicode values.',
-  strictCriteria: [...task.strictCriteria, {
+  strictCriteria: [...templateTask.strictCriteria, {
     id: 'jsonl-literal-unicode',
     stdin: '{"template":"{{x}} {{missing}}","values":{"x":"café {{x}}"}}\n{"template":"city={{city}}","values":{"city":"東京"}}\n',
     expectedStdout: 'café {{x}} {{missing}}\ncity=東京\n',
   }],
 })
+const selectedFamily = process.env.DSH_REAL_REPAIR_FAMILY ?? 'template'
+if (!['template', 'topology'].includes(selectedFamily)) throw new Error('DSH_REAL_REPAIR_FAMILY must be template or topology')
+const task = selectedFamily === 'topology' ? topologyRepairTask : templateTask
+const nextTask = selectedFamily === 'template' ? templateNextTask : undefined
+const repairIterations = nextTask ? 2 : 1
 const exec = promisify(execFile)
 
 function projectKey(cwd) {
@@ -88,14 +94,30 @@ function toolCalls(frames, sessionId) {
     && (!sessionId || frame.value.event.data.sessionId === undefined || frame.value.event.data.sessionId === sessionId) ? [frame.value.event.data] : [])
 }
 
-test('real TraeX autonomously improves one workflow twice and delivers the bounded result', async ({ page, context }, testInfo) => {
+async function assertPinnedDshCli(env) {
+  const manifest = JSON.parse(await readFile(join(root, 'release-manifest.json'), 'utf8'))
+  const current = manifest?.current?.pinnedHostVersion, pending = manifest?.pending?.pinnedHostVersion
+  if (typeof current !== 'string' || current.length === 0 || pending !== undefined && (typeof pending !== 'string' || pending !== current)) {
+    throw new Error('real repair requires matching current and pending pinnedHostVersion values in release-manifest.json')
+  }
+  let resolved
+  try { resolved = (await run('dsh', ['--version'], env)).trim() } catch (error) {
+    throw new Error(`real repair requires dsh ${current} on PATH before starting the Host: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (resolved !== current) throw new Error(`real repair requires dsh ${current} on PATH before starting the Host; resolved ${resolved || 'no version output'}`)
+}
+
+test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workflow twice and delivers the bounded result' : 'real TraeX autonomously improves the topology workflow and delivers the bounded result', async ({ page, context }, testInfo) => {
   test.setTimeout(1_500_000)
+  const preflightEnv = { ...process.env, CI: 'true' }
+  if (preflightEnv.DSH_WEB_REAL_PROVIDER !== undefined && preflightEnv.DSH_WEB_REAL_PROVIDER !== 'traex-agent') throw new Error('real repair requires DSH_WEB_REAL_PROVIDER=traex-agent; Codex fallback is forbidden')
+  await assertPinnedDshCli(preflightEnv)
   const temp = await mkdtemp(join(tmpdir(), 'dsh-real-owner-repair-'))
   const home = join(temp, 'home'), workspace = join(temp, 'workspace'), modelLog = join(temp, 'model.jsonl'), controlPath = join(temp, 'control.json')
   const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_WEB_REAL_PROVIDER: process.env.DSH_WEB_REAL_PROVIDER ?? 'traex-agent',
     DSH_WEB_REAL_MODEL: process.env.DSH_WEB_REAL_MODEL ?? 'gpt-5.6-terra', DSH_WEB_REAL_LOG: modelLog, DSH_WEB_REAL_WORKSPACE: workspace,
   }
-  if (env.DSH_WEB_REAL_PROVIDER !== 'traex-agent') throw new Error('real template canary requires DSH_WEB_REAL_PROVIDER=traex-agent; Codex fallback is forbidden')
+  if (env.DSH_WEB_REAL_PROVIDER !== 'traex-agent') throw new Error('real repair requires DSH_WEB_REAL_PROVIDER=traex-agent; Codex fallback is forbidden')
   if (!/^sha256:[a-f0-9]{64}$/u.test(process.env.DSH_HOLDOUT_TEST_IMAGE ?? '')) throw new Error('DSH_HOLDOUT_TEST_IMAGE must pin the installed authority image')
   const deliveryPath = join(home, 'assistant-delivery/state.sqlite'), goalsPath = join(home, 'assistant-goals/web.sqlite')
   const verifierPath = join(home, 'assistant-verifier/verification.sqlite'), skillsPath = join(home, 'assistant-skills/skills.sqlite')
@@ -253,17 +275,25 @@ test('real TraeX autonomously improves one workflow twice and delivers the bound
     const { createVerifierAuthorities, compileAcceptanceProfiles } = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-verifier/lib/index.js')).href)
     const authority = { kind: 'runner', id: 'node', executable: process.execPath, fixedArgs: [], timeoutMs: 5000, maxOutputBytes: 16384 }
     const [runner] = createVerifierAuthorities({ authorities: [authority] })
-    const profile = (kind, objective, criteria) => ({ id: `template-${kind}-${acceptanceDigest({ objective }).slice(0, 12)}`, version: 1, scope: { workspace, preset: 'standard' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: kind, objective, validityMs: 600000, bounds: { maxDurationMs: 15000, maxEvidenceBytes: 16384 }, criteria: (kind === 'goal-step' ? criteria.slice(0, 1) : criteria).map(entry => ({ id: entry.id, kind: 'process-behavior', authority: { id: runner.id, digest: runner.digest }, artifactPath: task.artifactPath, stdin: entry.stdin, expectedStdout: entry.expectedStdout, expectedExitCode: 0 })) })
-    const futureProfile = profile('goal-outcome', nextTask.strictObjective, nextTask.strictCriteria)
-    const compiledFuture = compileAcceptanceProfiles({ databasePath: verifierPath, authorities: [authority], profiles: [futureProfile] }).profiles[0]
+    const profile = (kind, objective, criteria) => ({ id: `${task.id}-${kind}-${acceptanceDigest({ objective }).slice(0, 12)}`, version: 1, scope: { workspace, preset: 'standard' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: kind, objective, validityMs: 600000, bounds: { maxDurationMs: 15000, maxEvidenceBytes: 16384 }, criteria: (kind === 'goal-step' ? criteria.slice(0, 1) : criteria).map(entry => ({ id: entry.id, kind: 'process-behavior', authority: { id: runner.id, digest: runner.digest }, artifactPath: task.artifactPath, stdin: entry.stdin, expectedStdout: entry.expectedStdout, expectedExitCode: 0 })) })
+    const futureProfile = nextTask && profile('goal-outcome', nextTask.strictObjective, nextTask.strictCriteria)
+    const compiledFuture = futureProfile && compileAcceptanceProfiles({ databasePath: verifierPath, authorities: [authority], profiles: [futureProfile] }).profiles[0]
     patchPath = join(home, 'profiles/web/cordis.patch.yml'); patch = parseDocument(await readFile(patchPath, 'utf8'))
     setConfig(patch, 'dsh-enhanced-assistant-goals', '@dsh-enhanced/assistant-goals', { databasePath: goalsPath, preauthorizedCreateMaxRounds: 3, verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 300000, executionBudget: { mode: 'calls', modelCalls: 16, toolCalls: 64, durationMs: 300000, maxOutputTokensPerCall: 4096, routes: [{ provider: route.provider, model: route.model }] } })
     setConfig(patch, 'dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', { databasePath: skillsPath, allowedTools: ['read', 'write', 'edit'], maxDurationMs: 60000 })
     setConfig(patch, 'dsh-enhanced-assistant-isolation', '@dsh-enhanced/assistant-isolation', { stateRoot: join(home, 'assistant-isolation') })
-    setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority], profiles: [profile('goal-step', task.legacyObjective, task.legacyCriteria), profile('goal-outcome', task.legacyObjective, task.legacyCriteria), profile('goal-step', task.strictObjective, task.strictCriteria), profile('goal-outcome', task.strictObjective, task.strictCriteria), profile('goal-step', nextTask.strictObjective, nextTask.strictCriteria), futureProfile] })
+    const legacyAcceptanceProfiles = [profile('goal-step', task.legacyObjective, task.legacyCriteria), profile('goal-outcome', task.legacyObjective, task.legacyCriteria)]
+    const strictAcceptanceProfiles = [profile('goal-step', task.strictObjective, task.strictCriteria), profile('goal-outcome', task.strictObjective, task.strictCriteria)]
+    const acceptanceProfiles = [...legacyAcceptanceProfiles, ...strictAcceptanceProfiles]
+    if (nextTask && futureProfile) acceptanceProfiles.push(profile('goal-step', nextTask.strictObjective, nextTask.strictCriteria), futureProfile)
+    const configureAcceptanceProfiles = profiles => setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority], profiles })
+    // Topology's legacy and strict objectives deliberately disagree.  Do not
+    // expose the later strict objective while creating the ordinary baseline.
+    // The default template path retains its already-proven two-round setup.
+    configureAcceptanceProfiles(selectedFamily === 'topology' ? legacyAcceptanceProfiles : acceptanceProfiles)
     setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300000 })
     appendPolicy(patch, [
-      { id: 'template-workflow-owner', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['inspect', 'save', 'draft', 'run'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: { initiators: ['external'] } },
+      { id: 'repair-workflow-owner', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['inspect', 'save', 'draft', 'run'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: { initiators: ['external'] } },
       ...['skill_save', 'skill_repair_arm'].map(name => ({ id: `repair-owner-setup-${name}`, effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['execute'], resource: { kind: 'tool', id: name }, context: { initiators: ['external'] } })),
       ...repairPolicy(workspace),
       { id: 'repair-owner-feedback', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace, principal: 'web/web/local/operator' }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } },
@@ -291,15 +321,23 @@ test('real TraeX autonomously improves one workflow twice and delivers the bound
     await selectRestoredSession(activePage, /Confirm this session is ready/u)
     activeSession = baselineSession
     await resetArtifact(task.scaffoldSource)
-    const baselineGoal = await createGoal('baseline-create', baselineSession, task.legacyObjective, 'baseline', 'Implement the requested recursive compatibility behavior using the authorized file tools. End the native round for independent verification.')
+    const baselineGoal = await createGoal('baseline-create', baselineSession, task.legacyObjective, 'baseline', 'Implement the current task\'s described compatibility behavior using the authorized file tools. End the native round for independent verification.')
     await waitOutcome(baselineGoal, 'achieved', 'legacy baseline acceptance', baselineSession)
-    const saveArgs = { goal_id: baselineGoal, name: task.skillName, description: 'Render known template placeholders.', bindings_json: '[]', expected_version: 0 }
+    const saveArgs = { goal_id: baselineGoal, name: task.skillName, description: `Implement ${task.id}.`, bindings_json: '[]', expected_version: 0 }
     await setControl('baseline-save', baselineSession, [{ toolName: 'skill_save', arguments: saveArgs }])
     await prompt(`Call skill_save exactly once with ${JSON.stringify(saveArgs)}. After its successful response, end the turn immediately. Do not repeat the save.`)
-    await wait(() => query(skillsPath, "SELECT COUNT(*) AS count FROM skill_definitions WHERE name='template-render'")[0]?.count === 1, 'save baseline v1', baselineSession)
+    await wait(() => query(skillsPath, 'SELECT COUNT(*) AS count FROM skill_definitions WHERE name=?', task.skillName)[0]?.count === 1, 'save baseline v1', baselineSession)
+    if (selectedFamily === 'topology') {
+      await stop()
+      // Preserve the legacy profile for its saved v1 provenance, then add the
+      // explicitly requested strict profile before the failure Goal.
+      configureAcceptanceProfiles([...legacyAcceptanceProfiles, ...strictAcceptanceProfiles])
+      await writeFile(patchPath, String(patch), { mode: 0o600 })
+      await open(true)
+    }
 
     const failureSession = await createSession(); await resetArtifact(task.scaffoldSource)
-    const failureGoal = await createGoal('failure-create', failureSession, task.strictObjective, 'strict failure', 'Call skill_run once with the returned business goal_id, name template-render, version 1, inputs_json as the JSON string "{}" (not an object), and invocation_id strict-failure-v1. Do not call any other tool.')
+    const failureGoal = await createGoal('failure-create', failureSession, task.strictObjective, 'strict failure', `Call skill_run once with the returned business goal_id, name ${task.skillName}, version 1, inputs_json as the JSON string "{}" (not an object), and invocation_id strict-failure-v1. Do not call any other tool.`)
     await waitOutcome(failureGoal, 'not-achieved', 'strict v1 failure', failureSession)
     const failureRun = parsedRows(skillsPath, 'skill_runs', 'run_json').find(item => item.goalId === failureGoal)
     expect(failureRun).toMatchObject({ state: 'succeeded', skillName: task.skillName, version: 1 })
@@ -315,23 +353,24 @@ test('real TraeX autonomously improves one workflow twice and delivers the bound
       taskFamily: { goalDefinitionDigest: JSON.parse(failedRecord.definition_json).digest, outcomeProfile: failedContract.profile } }
     const holdout = await createProspectiveCanaryAuthority({ root: temp, home, workspace, task })
     const holdoutProfile = holdout.repairProfile(owner, { canaryAdmissionTemplate: admissionTemplate })
-    const nextAdmissionTemplate = { protocol: 'assistant-skills/canary-admission-template/v1', skillName: task.skillName, taskFamily: { goalDefinitionDigest: acceptanceDigest({ objective: nextTask.strictObjective }), outcomeProfile: { id: futureProfile.id, version: futureProfile.version, digest: compiledFuture.digest } } }
-    const nextHoldout = await createProspectiveCanaryAuthority({ root: join(temp, 'round2'), home, workspace, task: nextTask })
-    const nextHoldoutProfile = nextHoldout.repairProfile(owner, { canaryAdmissionTemplate: nextAdmissionTemplate })
-    holdoutProfile.execution.expiresAt = nextHoldoutProfile.execution.expiresAt = Date.now() + 1_200_000
-    const repairProfile = { id: 'real-template-repair', scope, skillName: task.skillName, taskFamilyId: task.id,
-      description: 'Produce a reusable workflow implementing literal non-recursive template rendering.',
+    const nextAdmissionTemplate = nextTask && futureProfile && compiledFuture && { protocol: 'assistant-skills/canary-admission-template/v1', skillName: task.skillName, taskFamily: { goalDefinitionDigest: acceptanceDigest({ objective: nextTask.strictObjective }), outcomeProfile: { id: futureProfile.id, version: futureProfile.version, digest: compiledFuture.digest } } }
+    const nextHoldout = nextTask && nextAdmissionTemplate && await createProspectiveCanaryAuthority({ root: join(temp, 'round2'), home, workspace, task: nextTask })
+    const nextHoldoutProfile = nextHoldout && nextAdmissionTemplate && nextHoldout.repairProfile(owner, { canaryAdmissionTemplate: nextAdmissionTemplate })
+    holdoutProfile.execution.expiresAt = Date.now() + 1_200_000
+    if (nextHoldoutProfile) nextHoldoutProfile.execution.expiresAt = holdoutProfile.execution.expiresAt
+    const repairProfile = { id: `real-${task.id}-repair`, scope, skillName: task.skillName, taskFamilyId: task.id,
+      description: `Produce a reusable workflow for ${task.id}.`,
       externalHoldoutProfileId: holdoutProfile.id, provider: route.provider, model: route.model,
       allowedTools: ['read', 'write'], maxGoalRounds: 3, maxModelCalls: 16, maxToolCalls: 16,
-      maxIterations: 2, followupProfileIds: ['real-template-jsonl-repair'],
+      maxIterations: repairIterations, followupProfileIds: nextTask ? ['real-template-jsonl-repair'] : [],
       maxOutputTokens: 4096, maxDurationMs: 300000, canaryRuns: 1, maxCanaryRuns: 2 }
-    const nextRepairProfile = { ...repairProfile, id: 'real-template-jsonl-repair', taskFamilyId: nextTask.id, description: 'Extend literal template rendering to independent JSON Lines records and Unicode values.', externalHoldoutProfileId: nextHoldoutProfile.id, maxIterations: 1, followupProfileIds: [] }
+    const nextRepairProfile = nextTask && nextHoldoutProfile && { ...repairProfile, id: 'real-template-jsonl-repair', taskFamilyId: nextTask.id, description: 'Extend literal template rendering to independent JSON Lines records and Unicode values.', externalHoldoutProfileId: nextHoldoutProfile.id, maxIterations: 1, followupProfileIds: [] }
     setConfig(patch, 'dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', {
       databasePath: skillsPath, allowedTools: ['read', 'write', 'edit'], maxDurationMs: 60000,
     })
     const repairAdmissionPath = join(temp, 'repair-admission.json')
     await writeFile(repairAdmissionPath, JSON.stringify({ ownerRouteId: 'capture-owner',
-      externalHoldouts: [holdoutProfile, nextHoldoutProfile], repairProfiles: [repairProfile, nextRepairProfile] }), { mode: 0o600 })
+      externalHoldouts: [holdoutProfile, ...(nextHoldoutProfile ? [nextHoldoutProfile] : [])], repairProfiles: [repairProfile, ...(nextRepairProfile ? [nextRepairProfile] : [])] }), { mode: 0o600 })
     await writeFile(patchPath, String(patch), { mode: 0o600 })
     const setupCommand = join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup')
     const setupArgs = ['--profile', 'web', '--workspace', workspace, '--repair-admission', repairAdmissionPath]
@@ -343,11 +382,11 @@ test('real TraeX autonomously improves one workflow twice and delivers the bound
     patch = parseDocument(installedRepairPatch)
     const invocationId = 'autonomous-repair-v1'
     const continuationId = `skill-repair-${acceptanceDigest([scope, 'capture-owner', invocationId])}`
-    authorizedRepairSessions = [1, 2].map(iteration => `owner-repair-${createHash('sha256').update(`${continuationId}:${iteration}`).digest('hex').slice(0, 40)}`)
+    authorizedRepairSessions = Array.from({ length: repairIterations }, (_, index) => `owner-repair-${createHash('sha256').update(`${continuationId}:${index + 1}`).digest('hex').slice(0, 40)}`)
     const [repairSession, nextRepairSession] = authorizedRepairSessions
     const armArgs = { goal_id: failureGoal, source_session_id: failureSession, profile_id: repairProfile.id,
       owner_route_id: 'capture-owner', invocation_id: invocationId, notify: true, expires_at: holdoutProfile.execution.expiresAt - 1000 }
-    // Both frozen workflows will replay from this same unfinished artifact. No
+    // The frozen workflow replays from this same unfinished artifact. No
     // repaired implementation, tool sequence or hidden cases are supplied.
     await resetArtifact(task.scaffoldSource)
     await writeFile(controlPath, JSON.stringify({ phase: 'repair', ownerSessionId: baselineSession, repairSessionIds: authorizedRepairSessions,
@@ -402,7 +441,7 @@ test('real TraeX autonomously improves one workflow twice and delivers the bound
     const promote = async (round, currentTask) => {
       const sessionId = await createSession(); await resetArtifact(task.scaffoldSource)
       const goalId = await createGoal('promotion-create', sessionId, currentTask.strictObjective, `promotion v${round.deployment.version}`,
-        `Call skill_run exactly once with the returned business goal_id, name template-render, version ${round.deployment.version}, inputs_json as the JSON string "{}" (not an object), and invocation_id promote-v${round.deployment.version}. Then end the native round. Do not call any other tool.`)
+        `Call skill_run exactly once with the returned business goal_id, name ${task.skillName}, version ${round.deployment.version}, inputs_json as the JSON string "{}" (not an object), and invocation_id promote-v${round.deployment.version}. Then end the native round. Do not call any other tool.`)
       await waitOutcome(goalId, 'achieved', `independent future task v${round.deployment.version}`, sessionId)
       await expect.poll(() => deploymentById(round.deployment.id)?.state, { timeout: 30000 }).toBe('promoted')
       round.deployment = deploymentById(round.deployment.id)
@@ -410,44 +449,46 @@ test('real TraeX autonomously improves one workflow twice and delivers the bound
       round.promotion = { sessionId, goalId, promotedAt: round.deployment.promotedAt }
     }
     await promote(rounds[0], task)
-    // The next failure is a real task created after v2 promotion. It is not an
-    // injected failure receipt, a second arm, or a pre-promotion queued run.
-    const nextFailureSession = await createSession(); await resetArtifact(task.scaffoldSource)
-    const nextFailureGoal = await createGoal('failure-create', nextFailureSession, nextTask.strictObjective, 'JSON Lines failure',
-      'Call skill_run exactly once with the returned business goal_id, name template-render, version 2, inputs_json as the JSON string "{}" (not an object), and invocation_id jsonl-failure-v2. Then end the native round. Do not call any other tool.')
-    const nextFailedOutcome = await waitOutcome(nextFailureGoal, 'not-achieved', 'independent JSON Lines v2 failure', nextFailureSession)
-    const nextFailureRun = parsedRows(skillsPath, 'skill_runs', 'run_json').find(item => item.goalId === nextFailureGoal)
-    expect(nextFailureRun).toMatchObject({ state: 'succeeded', version: 2 })
-    expect(nextFailureRun.createdAt).toBeGreaterThan(rounds[0].promotion.promotedAt)
-    const second = await waitRepair(2)
-    expect(second.checkpoint.repair.sessionId).toBe(nextRepairSession)
-    const nextRepairGoal = second.checkpoint.repair.goalId
-    expect(new Set([failureGoal, repairGoal, nextFailureGoal, nextRepairGoal]).size).toBe(4)
-    const nextResult = outcome(verifierPath, nextRepairGoal)
-    const nextContract = validateTaskAcceptanceContract(nextResult.contract.contract)
-    const nextReceipt = validateTaskVerificationReceipt(nextContract, nextResult.job.receipt)
-    expect(nextReceipt.objectiveStatus).toBe('achieved')
-    expect(nextContract.profile).toEqual(nextAdmissionTemplate.taskFamily.outcomeProfile)
-    expect(nextContract.task.goal).toMatchObject({ id: nextRepairGoal, sessionId: nextRepairSession, definitionDigest: nextAdmissionTemplate.taskFamily.goalDefinitionDigest })
-    const nextCandidate = parsedRows(skillsPath, 'skill_candidates', 'candidate_json').find(item => item.parentVersion === 2)
-    const nextComparison = parsedRows(skillsPath, 'skill_comparisons', 'comparison_json').find(item => item.candidateId === nextCandidate?.id)
-    const nextDeployment = parsedRows(skillsPath, 'skill_deployments', 'deployment_json').find(item => item.candidateId === nextCandidate?.id)
-    expect(nextCandidate).toMatchObject({ state: 'activated', parentVersion: 2, activatedVersion: 3,
-      failureProvenance: { repair: { goal: { id: nextRepairGoal, sessionId: nextRepairSession } } } })
-    expect(nextCandidate.failureProvenance.trigger.failures).toEqual(expect.arrayContaining([expect.objectContaining({ goal: expect.objectContaining({ id: nextFailureGoal, sessionId: nextFailureSession }) })]))
-    expect(nextComparison).toMatchObject({ state: 'complete', result: { prospectiveHoldout: 'authority-attested-after-freeze',
-      quality: { candidateChecksPassed: true, evaluationGainObserved: true, criticalRegressionsPassed: true } } })
-    expect(nextComparison.result.receipt).toMatchObject({ complete: true, prospective: { generatorDigest: nextHoldoutProfile.authority.generatorDigest } })
-    expect(nextDeployment).toMatchObject({ state: 'canary', version: 3, maxRuns: 2, canaryRuns: 1 })
-    rounds.push({ iteration: 2, sourceSession: nextFailureSession, sourceGoal: nextFailureGoal, repairSession: nextRepairSession,
-      repairGoal: nextRepairGoal, candidate: nextCandidate, comparison: nextComparison, deployment: nextDeployment,
-      failureReceiptDigest: nextFailedOutcome.job.receipt.digest, repairReceiptDigest: nextReceipt.digest })
-    await promote(rounds[1], nextTask)
+    if (nextTask && nextAdmissionTemplate && nextHoldoutProfile && nextRepairSession) {
+      // The next failure is a real task created after v2 promotion. It is not an
+      // injected failure receipt, a second arm, or a pre-promotion queued run.
+      const nextFailureSession = await createSession(); await resetArtifact(task.scaffoldSource)
+      const nextFailureGoal = await createGoal('failure-create', nextFailureSession, nextTask.strictObjective, 'JSON Lines failure',
+        `Call skill_run exactly once with the returned business goal_id, name ${task.skillName}, version 2, inputs_json as the JSON string "{}" (not an object), and invocation_id jsonl-failure-v2. Then end the native round. Do not call any other tool.`)
+      const nextFailedOutcome = await waitOutcome(nextFailureGoal, 'not-achieved', 'independent JSON Lines v2 failure', nextFailureSession)
+      const nextFailureRun = parsedRows(skillsPath, 'skill_runs', 'run_json').find(item => item.goalId === nextFailureGoal)
+      expect(nextFailureRun).toMatchObject({ state: 'succeeded', version: 2 })
+      expect(nextFailureRun.createdAt).toBeGreaterThan(rounds[0].promotion.promotedAt)
+      const second = await waitRepair(2)
+      expect(second.checkpoint.repair.sessionId).toBe(nextRepairSession)
+      const nextRepairGoal = second.checkpoint.repair.goalId
+      expect(new Set([failureGoal, repairGoal, nextFailureGoal, nextRepairGoal]).size).toBe(4)
+      const nextResult = outcome(verifierPath, nextRepairGoal)
+      const nextContract = validateTaskAcceptanceContract(nextResult.contract.contract)
+      const nextReceipt = validateTaskVerificationReceipt(nextContract, nextResult.job.receipt)
+      expect(nextReceipt.objectiveStatus).toBe('achieved')
+      expect(nextContract.profile).toEqual(nextAdmissionTemplate.taskFamily.outcomeProfile)
+      expect(nextContract.task.goal).toMatchObject({ id: nextRepairGoal, sessionId: nextRepairSession, definitionDigest: nextAdmissionTemplate.taskFamily.goalDefinitionDigest })
+      const nextCandidate = parsedRows(skillsPath, 'skill_candidates', 'candidate_json').find(item => item.parentVersion === 2)
+      const nextComparison = parsedRows(skillsPath, 'skill_comparisons', 'comparison_json').find(item => item.candidateId === nextCandidate?.id)
+      const nextDeployment = parsedRows(skillsPath, 'skill_deployments', 'deployment_json').find(item => item.candidateId === nextCandidate?.id)
+      expect(nextCandidate).toMatchObject({ state: 'activated', parentVersion: 2, activatedVersion: 3,
+        failureProvenance: { repair: { goal: { id: nextRepairGoal, sessionId: nextRepairSession } } } })
+      expect(nextCandidate.failureProvenance.trigger.failures).toEqual(expect.arrayContaining([expect.objectContaining({ goal: expect.objectContaining({ id: nextFailureGoal, sessionId: nextFailureSession }) })]))
+      expect(nextComparison).toMatchObject({ state: 'complete', result: { prospectiveHoldout: 'authority-attested-after-freeze',
+        quality: { candidateChecksPassed: true, evaluationGainObserved: true, criticalRegressionsPassed: true } } })
+      expect(nextComparison.result.receipt).toMatchObject({ complete: true, prospective: { generatorDigest: nextHoldoutProfile.authority.generatorDigest } })
+      expect(nextDeployment).toMatchObject({ state: 'canary', version: 3, maxRuns: 2, canaryRuns: 1 })
+      rounds.push({ iteration: 2, sourceSession: nextFailureSession, sourceGoal: nextFailureGoal, repairSession: nextRepairSession,
+        repairGoal: nextRepairGoal, candidate: nextCandidate, comparison: nextComparison, deployment: nextDeployment,
+        failureReceiptDigest: nextFailedOutcome.job.receipt.digest, repairReceiptDigest: nextReceipt.digest })
+      await promote(rounds[1], nextTask)
+    }
     await expect.poll(() => continuation()?.state, { timeout: 30000 }).toBe('complete')
-    expect(continuation()).toMatchObject({ iteration: 2, authorization: { maxIterations: 2 } })
+    expect(continuation()).toMatchObject({ iteration: repairIterations, authorization: { maxIterations: repairIterations } })
     const noticeRows = () => query(deliveryPath, 'SELECT idempotency_key,status,attempt_count,binding_id FROM outbox_messages WHERE idempotency_key LIKE ?', `repair-feedback:${continuationId}:%`)
-    const requiredNotices = ['1:iteration-success', '2:iteration-success', '2:final-success'].map(suffix => `repair-feedback:${continuationId}:${suffix}`)
-    await expect.poll(() => requiredNotices.every(key => noticeRows().some(item => item.idempotency_key === key && item.status === 'accepted')), { message: 'both iterations and final result delivered to original owner session', timeout: 30000 }).toBe(true)
+    const requiredNotices = [...Array.from({ length: repairIterations }, (_, index) => `${index + 1}:iteration-success`), `${repairIterations}:final-success`].map(suffix => `repair-feedback:${continuationId}:${suffix}`)
+    await expect.poll(() => requiredNotices.every(key => noticeRows().some(item => item.idempotency_key === key && item.status === 'accepted')), { message: 'each repair iteration and final result delivered to original owner session', timeout: 30000 }).toBe(true)
     for (const notice of noticeRows()) expect(notice).toMatchObject({ binding_id: binding.id, status: 'accepted', attempt_count: 1 })
     const generatedArtifactDigest = createHash('sha256').update(await readFile(join(workspace, task.artifactPath))).digest('hex')
     const usage = () => query(skillsPath, 'SELECT model_calls,tool_calls FROM skill_repair_usage WHERE id=?', continuationId)[0]
@@ -488,7 +529,7 @@ test('real TraeX autonomously improves one workflow twice and delivers the bound
     }
     await stop()
     expect((await readModelEvents()).filter(item => item.event === 'dispatch')).toHaveLength(dispatches.length)
-    await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ capability: 'real-traex-two-round-bounded-rsi',
+    await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ capability: selectedFamily === 'template' ? 'real-traex-two-round-bounded-rsi' : 'real-traex-topology-one-round-bounded-rsi', family: selectedFamily,
       route: route.proof, scope, baseline: { sessionId: baselineSession, goalId: baselineGoal, version: 1 },
       continuationId, state: continuation().state, iterations: continuation().iteration, rounds: rounds.map(round => ({
         iteration: round.iteration, sourceSession: round.sourceSession, sourceGoal: round.sourceGoal,

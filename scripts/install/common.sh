@@ -1985,6 +1985,69 @@ dsh_enhanced_apply_supervised_growth() {
   dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
 }
 
+# Setup CLIs run as ordinary Node processes before a profile is mounted.  Ask
+# the verified Host's public boot API to materialize its shared peer closure
+# under this DSH_HOME, without composing or activating a profile.
+dsh_enhanced_heal_host_module_fallback() {
+  local dsh_home="$1"
+  local expected_version="$2"
+  local dsh_executable=''
+  dsh_executable="$(command -v dsh 2>/dev/null)" || {
+    dsh_enhanced_fail 1 '找不到已验证的 dsh executable；无法准备 setup 所需的 Host peer 闭包。'
+    return $?
+  }
+  if ! node --input-type=module - "$dsh_home" "$dsh_executable" "$expected_version" <<'NODE'
+import { readFile, realpath } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+
+const [home, suppliedExecutable, expectedVersion] = process.argv.slice(2)
+const executable = await realpath(suppliedExecutable)
+const cliRequire = createRequire(executable)
+const validHostManifest = async candidate => {
+  try {
+    const manifest = JSON.parse(await readFile(candidate, 'utf8'))
+    return manifest?.name === '@deepseek-ai/dsh' && manifest.version === expectedVersion
+  } catch {
+    return false
+  }
+}
+let installAnchor
+try {
+  const candidate = cliRequire.resolve('@deepseek-ai/dsh/package.json')
+  if (await validHostManifest(candidate)) installAnchor = candidate
+} catch {}
+// npm may expose dsh through a symlink to its package bin.  If resolving the
+// package name from that bin is blocked by exports, only accept the nearest
+// exact Host manifest on the canonical executable's ancestor chain.
+for (let directory = dirname(executable); installAnchor === undefined;) {
+  const candidate = join(directory, 'package.json')
+  if (await validHostManifest(candidate)) {
+    installAnchor = candidate
+    break
+  }
+  const parent = dirname(directory)
+  if (parent === directory) break
+  directory = parent
+}
+if (installAnchor === undefined) {
+  throw new Error('canonical dsh executable is not contained by the verified Host package')
+}
+const hostRequire = createRequire(installAnchor)
+const appBoot = await import(pathToFileURL(hostRequire.resolve('@deepseek-ai/dsh-app-boot')).href)
+if (typeof appBoot.healProfilesModuleFallback !== 'function') {
+  throw new Error('verified DSH does not expose the required module fallback API')
+}
+await appBoot.healProfilesModuleFallback({ installAnchor, home })
+NODE
+  then
+    dsh_enhanced_fail 1 '无法准备已验证 DSH 的 setup peer 闭包；尚未运行 setup 或启动 profile。'
+    return $?
+  fi
+  printf '已准备已验证 DSH 的 setup peer 闭包；未挂载或启动 profile。\n'
+}
+
 dsh_enhanced_apply_web_owner() {
   local profile="$1"
   local dsh_home="$2"
@@ -2946,6 +3009,13 @@ NODE
   printf '  - %s\n' "${targets[@]}"
   printf '\n安装到 DSH profile：\n'
   dsh_enhanced_run "$dry_run" dsh plugin --profile "$profile" add "${targets[@]}" || return $?
+  if [[ "$scenario" != 'core' ]]; then
+    if [[ "$dry_run" == '1' ]]; then
+      printf 'DSH setup peer 闭包：dry-run 不写入 %s/profiles/node_modules。\n' "$dsh_home"
+    else
+      dsh_enhanced_heal_host_module_fallback "$dsh_home" "$dsh_version" || return $?
+    fi
+  fi
   if [[ "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then
     printf '\nWeb owner 初始化：\n'
     if [[ "$scenario" == 'autonomy' ]]; then

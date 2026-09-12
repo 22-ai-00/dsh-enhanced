@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:net'
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -6531,6 +6532,132 @@ printf 'npm %s\n' "$*" >> "$INSTALL_LOG"
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('DSH 已安装且版本匹配：0.1.2-rc.1')
     expect(await readFile(logPath, 'utf8')).toBe('')
+  })
+
+  test('prepares setup Host peers from the exact canonical dsh package without mounting a profile', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'dsh-home')
+    const fakeBin = join(root, 'bin')
+    const hostRoot = join(root, 'host', 'node_modules')
+    const dshPackage = join(hostRoot, '@deepseek-ai', 'dsh')
+    const appBootPackage = join(hostRoot, '@deepseek-ai', 'dsh-app-boot')
+    const canonicalDsh = join(dshPackage, 'bin', 'dsh.js')
+    await mkdir(dirname(canonicalDsh), { recursive: true })
+    await mkdir(appBootPackage, { recursive: true })
+    await mkdir(fakeBin, { recursive: true })
+    // Exports deliberately hides package.json so this covers an npm bin
+    // symlink whose canonical executable must be anchored by its package.
+    await writeFile(join(dshPackage, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh', version: '0.1.2-rc.1', type: 'module', exports: './bin/dsh.js',
+    }))
+    await writeFile(canonicalDsh, '#!/usr/bin/env node\nthrow new Error("dsh must not be mounted for setup peers")\n')
+    await chmod(canonicalDsh, 0o755)
+    await writeFile(join(appBootPackage, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh-app-boot', type: 'module', exports: './index.js',
+    }))
+    await writeFile(join(appBootPackage, 'index.js'), [
+      "import { mkdir, writeFile } from 'node:fs/promises'",
+      "import { join } from 'node:path'",
+      'export async function healProfilesModuleFallback({ installAnchor, home }) {',
+      "  if (!installAnchor.endsWith('/@deepseek-ai/dsh/package.json')) throw new Error('wrong Host anchor')",
+      "  await mkdir(join(home, 'profiles', 'node_modules'), { recursive: true })",
+      "  await writeFile(join(home, 'profiles', 'node_modules', '.host-fallback-healed'), 'exact-host')",
+      '}',
+      '',
+    ].join('\n'))
+    await symlink(canonicalDsh, join(fakeBin, 'dsh'))
+
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_heal_host_module_fallback "$2" 0.1.2-rc.1',
+      'installer-test', installerLibrary, dshHome,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin` },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('已准备已验证 DSH 的 setup peer 闭包')
+    expect(await readFile(join(dshHome, 'profiles', 'node_modules', '.host-fallback-healed'), 'utf8')).toBe('exact-host')
+    await expect(stat(join(dshHome, '.activation-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('installs the Host peer closure after bundle add and before the web setup CLI', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'dsh-home')
+    const fakeBin = join(root, 'bin')
+    const workspace = join(root, 'workspace')
+    const logPath = join(root, 'commands.log')
+    const hostRoot = join(root, 'host', 'node_modules')
+    const dshPackage = join(hostRoot, '@deepseek-ai', 'dsh')
+    const appBootPackage = join(hostRoot, '@deepseek-ai', 'dsh-app-boot')
+    const canonicalDsh = join(dshPackage, 'bin', 'dsh.js')
+    await Promise.all([mkdir(dirname(canonicalDsh), { recursive: true }), mkdir(appBootPackage, { recursive: true }),
+      mkdir(fakeBin, { recursive: true }), mkdir(workspace), writeFile(logPath, '')])
+    await writeFile(join(dshPackage, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh', version: '0.1.2-rc.1', type: 'module', exports: './bin/dsh.js',
+    }))
+    await writeFile(canonicalDsh, [
+      '#!/usr/bin/env node',
+      "import { appendFile, chmod, mkdir, writeFile } from 'node:fs/promises'",
+      "import { join } from 'node:path'",
+      'const args = process.argv.slice(2)',
+      "await appendFile(process.env.INSTALL_LOG, `dsh ${args.join(' ')}\\n`)",
+      "if (args[0] === '--version') { process.stdout.write('0.1.2-rc.1\\n'); process.exit(0) }",
+      "if (args.includes('plugin') && args.includes('add')) {",
+      "  const bin = join(process.env.DSH_HOME, 'profiles', 'web', 'node_modules', '.bin')",
+      '  await mkdir(bin, { recursive: true })',
+      "  const setup = join(bin, 'dsh-web-owner-setup')",
+      `  await writeFile(setup, ${JSON.stringify('#!/bin/bash\nset -euo pipefail\ntest -f "$DSH_HOME/profiles/node_modules/.host-fallback-healed"\nprintf "web-setup %s\\n" "$*" >> "$INSTALL_LOG"\n')})`,
+      '  await chmod(setup, 0o755)',
+      '  process.exit(0)',
+      '}',
+      "if (args.includes('--dump-config')) { process.stdout.write('[]\\n'); process.exit(0) }",
+      "if (args.includes('--host')) { process.stdout.write('dsh web: http://127.0.0.1:43210\\n'); process.exit(0) }",
+      'process.exit(0)',
+      '',
+    ].join('\n'))
+    await chmod(canonicalDsh, 0o755)
+    await writeFile(join(appBootPackage, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh-app-boot', type: 'module', exports: './index.js',
+    }))
+    await writeFile(join(appBootPackage, 'index.js'), [
+      "import { mkdir, writeFile } from 'node:fs/promises'",
+      "import { join } from 'node:path'",
+      'export async function healProfilesModuleFallback({ installAnchor, home }) {',
+      "  if (!installAnchor.endsWith('/@deepseek-ai/dsh/package.json')) throw new Error('wrong Host anchor')",
+      "  await mkdir(join(home, 'profiles', 'node_modules'), { recursive: true })",
+      "  await writeFile(join(home, 'profiles', 'node_modules', '.host-fallback-healed'), 'exact-host')",
+      "  await writeFile(process.env.INSTALL_LOG, 'host-fallback\\n', { flag: 'a' })",
+      '}',
+      '',
+    ].join('\n'))
+    await symlink(canonicalDsh, join(fakeBin, 'dsh'))
+    const webPort = await new Promise<number>((resolvePort, rejectPort) => {
+      const server = createServer()
+      server.once('error', rejectPort)
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address()
+        if (address === null || typeof address === 'string') return rejectPort(new Error('missing test port'))
+        server.close(error => error === undefined ? resolvePort(address.port) : rejectPort(error))
+      })
+    })
+    await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
+if [[ "${'$'}{1:-}" == '--version' ]]; then printf '11.7.0\\n'; else printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"; fi
+`)
+
+    const result = spawnSync('/bin/bash', [
+      localInstaller, '--scenario', 'web', '--workspace', workspace, '--yes', '--no-service', '--model', 'skip',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`, DSH_HOME: dshHome, INSTALL_LOG: logPath, DSH_ENHANCED_WEB_PORT: String(webPort) },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    const log = await readFile(logPath, 'utf8')
+    expect(log).toMatch(/dsh plugin --profile web add[\s\S]*host-fallback[\s\S]*web-setup/)
+    expect(await readFile(join(dshHome, 'profiles', 'node_modules', '.host-fallback-healed'), 'utf8')).toBe('exact-host')
   })
 
   test('rejects an installed newer DSH before npm, profile, or configuration side effects', async () => {
