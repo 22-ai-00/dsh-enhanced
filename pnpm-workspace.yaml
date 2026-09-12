@@ -76,6 +76,8 @@ linkWorkspacePackages: true
 # pnpm denies dependency build scripts unless they are reviewed here.
 allowBuilds:
   esbuild: true
+  # koffi installs the reviewed platform N-API binding used for Linux SO_PEERCRED broker authentication.
+  koffi: true
   # protobufjs only prints a dependency-version advisory; the SDK ships built output.
   protobufjs: false
 

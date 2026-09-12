@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-heartbeat",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "description": "A bounded active-hours heartbeat policy layer backed by assistant-automations.",
   "license": "MIT",
   "type": "module",
