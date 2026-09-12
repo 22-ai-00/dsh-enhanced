@@ -1,5 +1,17 @@
 # 安装、诊断与重启
 
+## 首次安装依赖审批
+
+Linux `autonomy` 场景需要原生依赖 `koffi`。pnpm 11.7.0 首次安装可能以 `ERR_PNPM_IGNORED_BUILDS` 停止，并列出 `koffi` 和实际 profile 目录。进入该报错中的目录，使用同一个 pnpm 11.7.0 执行：
+
+```sh
+pnpm approve-builds koffi
+```
+
+该命令只批准并构建当前 profile 的 `koffi`；成功后返回原工作目录，使用相同的 `DSH_HOME`、profile 和参数重跑安装命令。不要使用 `--all` 批准其它待审依赖。`--yes` 不代替 pnpm 的依赖构建审批。
+
+## 安装入口
+
 安装器先确保 Node.js、pnpm 和精确的 DSH `0.1.2-rc.1`。已有其它 Host 版本会在安装或修改 profile 前拒绝；请为本套件使用独立的匹配 CLI，安装器不会静默降级或继续使用不兼容版本。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
 
 ```sh
