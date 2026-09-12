@@ -3,10 +3,10 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs'
-import { chmod, lstat, mkdir, open, opendir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { classifyLifecycleScenario } from './lifecycle-config.mjs'
+import { assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata } from './lifecycle-config.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const VALIDATOR_PATH = join(dirname(SCRIPT_PATH), 'lifecycle-config.mjs')
@@ -3550,7 +3550,7 @@ async function restoreOriginalActiveSet({
   return accepted
 }
 
-function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraEnvironment = {}, pnpmStoreFd, pnpmStorePath }) {
+function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraEnvironment = {}, pnpmStoreFd, pnpmStorePath, pnpmCacheFd, workspaceFds = [] }) {
   const args = [
     '--unshare-all', '--die-with-parent', '--new-session',
     '--ro-bind', '/', '/',
@@ -3569,6 +3569,8 @@ function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraE
   if (pnpmStoreFd !== undefined && pnpmStorePath !== undefined) {
     args.push('--dir', dirname(pnpmStorePath), '--ro-bind-fd', String(pnpmStoreFd), pnpmStorePath)
   }
+  if (pnpmCacheFd !== undefined) args.push('--ro-bind-fd', String(pnpmCacheFd), '/run/dsh-enhanced-pnpm-cache')
+  for (const workspace of workspaceFds) args.push('--dir', dirname(workspace.path), '--ro-bind-fd', String(workspace.fd), workspace.path)
   for (const [name, value] of Object.entries(extraEnvironment)) args.push('--setenv', name, value)
   args.push('--', ...command)
   return { executable: bwrapExecutable, args }
@@ -3578,16 +3580,21 @@ function sandboxHiddenStorePath(storePath) {
   return inside('/tmp', storePath) || inside('/run', storePath)
 }
 
-async function openSandboxResources(context, pnpmStore) {
+async function openSandboxResources(context, pnpmStore, npmPreparation, bindWorkspaces = false) {
   const stage = await open(context.stageHome, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
   let validator
   let store
+  let cache
+  const workspaces = []
   try {
     validator = await open(VALIDATOR_PATH, constants.O_RDONLY | constants.O_NOFOLLOW)
     const validatorStat = await validator.stat()
     if (!validatorStat.isFile() || validatorStat.uid !== currentUid() || validatorStat.nlink !== 1
       || isGroupOrOtherWritable(validatorStat) || validatorStat.size > 4 * 1024 * 1024) {
       fail(`生命周期 validator 身份或权限不安全：${VALIDATOR_PATH}`)
+    }
+    if (pnpmStore !== undefined) {
+      if (!sameIdentity(await lstat(pnpmStore.storePath), pnpmStore.identity)) fail('npm cohort store identity changed before sandbox')
     }
     if (pnpmStore !== undefined && sandboxHiddenStorePath(pnpmStore.storePath)) {
       store = await open(pnpmStore.storePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
@@ -3596,30 +3603,46 @@ async function openSandboxResources(context, pnpmStore) {
         fail(`npm cohort store identity changed before sandbox: ${pnpmStore.storePath}`)
       }
     }
-    return { stage, validator, store }
+    if (npmPreparation !== undefined) {
+      await assertNpmPreparationCache(npmPreparation)
+      cache = await open(npmPreparation.cachePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      if (!sameIdentity(await cache.stat(), npmPreparation.cacheIdentity)) fail('npm cohort verification cache identity changed before sandbox')
+    }
+    if (bindWorkspaces) {
+      for (const workspace of context.activationWorkspaces ?? []) {
+        const handle = await open(workspace.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+        workspaces.push({ ...workspace, handle })
+        if (!sameIdentity(await handle.stat(), workspace.identity) || !sameIdentity(await lstat(workspace.path), workspace.identity)) fail('lifecycle activation workspace identity changed')
+      }
+    }
+    return { stage, validator, store, cache, workspaces }
   } catch (error) {
     await stage.close()
     await validator?.close()
     await store?.close()
+    await cache?.close()
+    for (const workspace of workspaces) await workspace.handle.close()
     throw error
   }
 }
 
 async function sandboxRun(context, command, options = {}) {
-  const resources = await openSandboxResources(context, options.pnpmStore)
+  const resources = await openSandboxResources(context, options.pnpmStore, options.npmPreparation)
   const invocation = sandboxArgs({
     ...context, validatorPath: SANDBOX_VALIDATOR_PATH, command, extraEnvironment: options.extraEnvironment,
     ...(resources.store === undefined ? {} : { pnpmStoreFd: 5, pnpmStorePath: options.pnpmStore.storePath }),
+    ...(resources.cache === undefined ? {} : { pnpmCacheFd: resources.store === undefined ? 5 : 6 }),
   })
   try {
     return await run(invocation.executable, invocation.args, {
       capture: options.capture,
-      passFds: [resources.stage.fd, resources.validator.fd, ...(resources.store === undefined ? [] : [resources.store.fd])],
+      passFds: [resources.stage.fd, resources.validator.fd, ...(resources.store === undefined ? [] : [resources.store.fd]), ...(resources.cache === undefined ? [] : [resources.cache.fd])],
     })
   } finally {
     await resources.validator.close()
     await resources.stage.close()
     await resources.store?.close()
+    await resources.cache?.close()
   }
 }
 
@@ -3988,20 +4011,31 @@ async function validateComposedConfig(context, label) {
   if (scenario !== context.expectedScenario) {
     fail(`隔离副本 ${label} 的 lifecycle scenario ${scenario} 与预期 ${context.expectedScenario} 不一致；拒绝提交。`)
   }
+  const activationWorkspaces = []
+  for (const path of await lifecycleWorkspacePaths(dumped.stdout, { dshExecutable: context.dshExecutable })) {
+    if (!sandboxHiddenStorePath(path) || inside(context.homePath, path)) continue
+    if (inside(path, context.homePath)) fail('lifecycle temporary workspace must not contain DSH_HOME')
+    const canonical = await realpath(path)
+    if (canonical !== path) fail('lifecycle temporary workspace must be a canonical directory')
+    const entry = await assertOwnedPrivateDirectory(path)
+    activationWorkspaces.push({ path, identity: identity(entry) })
+  }
+  context.activationWorkspaces = activationWorkspaces
   return scenario
 }
 
 async function activateInSandbox(context) {
-  const resources = await openSandboxResources(context)
+  const resources = await openSandboxResources(context, undefined, undefined, true)
   const invocation = sandboxArgs({
     ...context,
     validatorPath: SANDBOX_VALIDATOR_PATH,
     command: [context.dshExecutable, '--profile', context.profile, '--host', '127.0.0.1', '--no-open', '--port', '0'],
+    workspaceFds: resources.workspaces.map((workspace, index) => ({ path: workspace.path, fd: 5 + index })),
   })
   try { await new Promise((resolveActivation, rejectActivation) => {
     const child = spawn(invocation.executable, invocation.args, {
       env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe', resources.stage.fd, resources.validator.fd],
+      stdio: ['ignore', 'pipe', 'pipe', resources.stage.fd, resources.validator.fd, ...resources.workspaces.map(workspace => workspace.handle.fd)],
     })
     let stdout = ''
     let stderr = ''
@@ -4044,6 +4078,7 @@ async function activateInSandbox(context) {
   }) } finally {
     await resources.validator.close()
     await resources.stage.close()
+    for (const workspace of resources.workspaces) await workspace.handle.close()
   }
 }
 
@@ -4125,15 +4160,16 @@ async function resolveNpmUpgradeCohort({ npmExecutable, selector, expectedNames 
   const version = parseSingleExactNpmVersion(anchorResult.stdout, anchorSpec)
   process.stdout.write(`npm cohort：${anchorSpec} 解析为精确版本 ${version}。\n`)
   const targets = []
-  for (const name of expectedNames) {
-    const packageSpec = `${name}@${version}`
-    let result
-    try { result = await run(npmExecutable, ['view', packageSpec, 'version', '--json'], { capture: true }) }
-    catch { fail(`npm 未发布所需 cohort bundle：${packageSpec}。尚未修改 profile。`) }
-    if (parseSingleExactNpmVersion(result.stdout, packageSpec) !== version) {
-      fail(`npm 未发布所需 cohort bundle：${packageSpec}。尚未修改 profile。`)
+  for (let offset = 0; offset < expectedNames.length; offset += 4) {
+    const batch = expectedNames.slice(offset, offset + 4).map(name => `${name}@${version}`)
+    const results = await Promise.allSettled(batch.map(packageSpec => run(npmExecutable, ['view', packageSpec, 'version', '--json'], { capture: true })))
+    for (const [index, result] of results.entries()) {
+      const packageSpec = batch[index]
+      if (result.status === 'rejected' || parseSingleExactNpmVersion(result.value.stdout, packageSpec) !== version) {
+        fail(`npm 未发布所需 cohort bundle：${packageSpec}。尚未修改 profile。`)
+      }
+      targets.push(packageSpec)
     }
-    targets.push(packageSpec)
   }
   process.stdout.write(`npm cohort：已核验 ${targets.length} 个 bundle 均为 ${version}。\n`)
   return targets
@@ -4156,7 +4192,7 @@ async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath) {
   try {
     output = await run(pnpmPath, ['store', 'path'], {
       cwd: profilePath, capture: true,
-      env: { ...process.env, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' },
+      env: { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' },
     })
   }
   catch { fail('npm cohort 无法解析 pnpm store；尚未创建事务或修改 DSH_HOME。') }
@@ -4191,6 +4227,251 @@ async function resolvedPnpmStorePath(pnpmPath, homePath, profilePath) {
   return { storePath: canonical, identity: identity(entry) }
 }
 
+const npmMetadataFiles = { packageJson: 'package.json', lockfile: 'pnpm-lock.yaml', workspace: 'pnpm-workspace.yaml' }
+
+function sameNpmFileIdentity(actual, expected) {
+  return expected !== undefined && actual.isFile() && String(actual.dev) === expected.dev
+    && String(actual.ino) === expected.ino && actual.uid === expected.uid && actual.mode === expected.mode
+}
+
+async function readNpmMetadataFile(path, optional = false) {
+  let handle
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const before = await handle.stat()
+    assertOwnedPrivateEntry(before, path, 'file')
+    if (before.nlink !== 1 || before.size > 16 * 1024 * 1024) fail(`npm cohort metadata identity or size is unsafe: ${path}`)
+    const source = await handle.readFile('utf8')
+    const after = await handle.stat()
+    if (!sameNpmFileIdentity(await lstat(path), identity(before)) || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) {
+      fail(`npm cohort metadata changed while reading: ${path}`)
+    }
+    return { source, digest: sha256(source), identity: identity(before) }
+  } catch (error) {
+    if (optional && error?.code === 'ENOENT') return undefined
+    throw error
+  } finally { await handle?.close() }
+}
+
+async function readNpmMetadata(profilePath) {
+  const result = {}
+  for (const [key, name] of Object.entries(npmMetadataFiles)) result[key] = await readNpmMetadataFile(join(profilePath, name), key !== 'packageJson')
+  return result
+}
+
+async function precheckNpmMetadata(current, dshExecutable) {
+  await assertProfileTreeIdentity(current)
+  if (await existingIdentity(join(current.profilePath, '.npmrc')) !== undefined) fail('npm cohort metadata preparation does not yet support a profile .npmrc; original profile is unchanged')
+  for (const key of Object.keys(process.env)) {
+    if (!/^p?npm_config_/iu.test(key)) continue
+    const setting = key.replace(/^p?npm_config_/iu, '').replaceAll(/[-_]/gu, '').toLowerCase()
+    if (['configdependencies', 'dir', 'lockfiledir', 'workspacepackages', 'workspaceprefix'].includes(setting)) fail(`npm cohort cannot preflight environment setting: ${key}`)
+  }
+  const metadata = await readNpmMetadata(current.profilePath)
+  if (metadata.workspace === undefined) fail('npm cohort requires a profile-local pnpm-workspace.yaml before package manager queries')
+  await assertLifecycleNpmMetadataSafe({ metadata: npmMetadataSources(metadata), dshExecutable })
+}
+
+function npmMetadataSources(snapshot) {
+  return Object.fromEntries(Object.entries(snapshot).map(([key, value]) => [key, value?.source]))
+}
+
+const npmOperationalConfig = new Set([
+  'json', 'userAgent', 'ignoreScripts', 'ignorePnpmfile', 'trustLockfile', 'storeDir', 'cacheDir',
+  'userconfig', 'npmrcAuthFile', 'configDir', 'dir', 'offline', 'frozenStore', 'frozenLockfile', 'packageImportMethod',
+])
+
+async function npmEffectiveConfig(pnpmPath, profilePath, environment) {
+  const result = await run(pnpmPath, ['config', 'list', '--json'], { cwd: profilePath, env: environment, capture: true, timeoutMs: 30_000 })
+  return parseNpmEffectiveConfig(result.stdout)
+}
+
+function parseNpmEffectiveConfig(source) {
+  let parsed
+  try { parsed = JSON.parse(source) } catch { fail('npm cohort cannot read the effective pnpm configuration') }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) fail('npm cohort effective configuration is invalid')
+  return Object.fromEntries(Object.entries(parsed).filter(([key]) => !npmOperationalConfig.has(key)))
+}
+
+function assertSameNpmConfig(actual, expected) {
+  if (canonicalJson(actual) !== canonicalJson(expected)) fail('npm cohort effective configuration changed or cannot be reproduced in isolation')
+}
+
+function npmConfigurationSnapshot(config) {
+  const settings = {}, registries = []
+  for (const [key, value] of Object.entries(config)) {
+    // These pnpm 11 settings are project-only and already travel in the exact
+    // workspace metadata. Reproduction is checked before invoking add.
+    if (['packages', 'allowBuilds', 'autoInstallPeers', 'nodeLinker'].includes(key)) continue
+    if (key === 'registry' || /^@[a-z0-9._-]+:registry$/u.test(key)) {
+      let url
+      try { url = new URL(value) } catch { fail('npm cohort registry configuration is invalid') }
+      if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') fail('npm cohort requires a credential-free HTTPS registry configuration')
+      registries.push(`${key}=${url.href}`)
+      continue
+    }
+    if (/auth|password|token|credential|cert|proxy|pnpmfile|configDependenc|patchedDependenc|[Pp]ath|[Dd]ir|runtime|executionEnv|packageManager/iu.test(key)) {
+      fail(`npm cohort cannot safely freeze pnpm setting: ${key}`)
+    }
+    settings[key] = value
+  }
+  return { settings: JSON.stringify(settings, null, 2) + '\n', registries: registries.join('\n') + '\n' }
+}
+
+function isolatedNpmEnvironment(cachePath, pnpmStore) {
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(?:p?npm_config_|PNPM_HOME$|NODE_OPTIONS$|NODE_PATH$|XDG_)/iu.test(key)))
+  return {
+    ...inherited, HOME: join(cachePath, 'home'), XDG_CONFIG_HOME: join(cachePath, 'config'),
+    pnpm_config_userconfig: join(cachePath, 'home', '.npmrc'),
+    pnpm_config_store_dir: pnpmStore.storePath,
+    pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false',
+  }
+}
+
+async function assertNpmConfiguration(preparation, profilePath) {
+  assertSameNpmConfig(await npmEffectiveConfig(preparation.pnpmPath, await realpath(profilePath), preparation.sourceEnvironment), preparation.sourceConfig)
+}
+
+async function detachNpmPeerLinks(stageHome, homePath, profile, originalLinks) {
+  const prefix = `profiles/${profile}/node_modules/`
+  const detached = []
+  // Host peer fallback links are not part of the pnpm lockfile. Letting pnpm
+  // inspect their manifests can manufacture new bins pointing outside the
+  // staged tree. Temporarily detach only the original top-level package links;
+  // restore missing peers after pnpm materializes the verified dependency graph.
+  for (const [relative, original] of originalLinks) {
+    if (!relative.startsWith(prefix) || original.target === undefined || inside(homePath, original.target)) continue
+    const suffix = relative.slice(prefix.length)
+    if (!/^(?:@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$/u.test(suffix)) continue
+    const path = join(stageHome, relative)
+    const entry = await lstat(path)
+    if (!entry.isSymbolicLink() || await readlink(path) !== original.linkText) fail('npm cohort Host peer link changed before offline materialization')
+    await rm(path)
+    detached.push({ path, linkText: original.linkText })
+  }
+  return async () => {
+    for (const peer of detached) {
+      if (await existingIdentity(peer.path) !== undefined) continue
+      await mkdir(dirname(peer.path), { recursive: true, mode: 0o700 })
+      await assertOwnedPrivateDirectory(dirname(peer.path))
+      await symlink(peer.linkText, peer.path)
+    }
+  }
+}
+
+async function assertNpmMetadata(profilePath, expected, checkIdentity = false) {
+  const actual = await readNpmMetadata(profilePath)
+  for (const key of Object.keys(npmMetadataFiles)) {
+    if (actual[key]?.digest !== expected[key]?.digest
+      || checkIdentity && expected[key] !== undefined && !sameNpmFileIdentity(await lstat(join(profilePath, npmMetadataFiles[key])), expected[key].identity)) {
+      fail(`npm cohort metadata changed after preparation: ${npmMetadataFiles[key]}`)
+    }
+  }
+}
+
+async function writeNpmMetadata(profilePath, sources) {
+  for (const [key, name] of Object.entries(npmMetadataFiles)) {
+    if (sources[key] === undefined) continue
+    const path = join(profilePath, name)
+    const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600)
+    try {
+      const entry = await handle.stat()
+      assertOwnedPrivateEntry(entry, path, 'file')
+      if (entry.nlink !== 1) fail(`npm cohort metadata has multiple links: ${name}`)
+      await handle.truncate(0)
+      await handle.writeFile(sources[key])
+    } finally { await handle.close() }
+  }
+}
+
+async function assertNpmPreparationCache(preparation) {
+  await assertCriticalDirectory(preparation.rootPath, preparation.rootIdentity)
+  await assertCriticalDirectory(preparation.cachePath, preparation.cacheIdentity)
+  for (const [name, expected] of Object.entries(preparation.configFiles)) {
+    const actual = await readNpmMetadataFile(join(preparation.cachePath, name))
+    if (actual.digest !== expected.digest || !sameNpmFileIdentity(await lstat(join(preparation.cachePath, name)), expected.identity)) fail('npm cohort isolated configuration changed after verification')
+  }
+  const receipt = await readNpmMetadataFile(join(preparation.cachePath, 'lockfile-verified.jsonl'))
+  if (receipt.digest !== preparation.cacheReceipt.digest || !sameNpmFileIdentity(await lstat(join(preparation.cachePath, 'lockfile-verified.jsonl')), preparation.cacheReceipt.identity)) {
+    fail('npm cohort verification cache changed after final lockfile verification')
+  }
+}
+
+async function prepareNpmUpgrade({ current, profile, pnpmPath, dshExecutable, targets, pnpmStore }) {
+  await assertProfileTreeIdentity(current)
+  // Profile-specific npm configuration can carry credentials and alter the
+  // verification policy. Do not silently drop it when copying metadata.
+  if (await existingIdentity(join(current.profilePath, '.npmrc')) !== undefined) {
+    fail('npm cohort metadata preparation does not yet support a profile .npmrc; original profile is unchanged')
+  }
+  const original = await readNpmMetadata(current.profilePath)
+  const sourceEnvironment = { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false' }
+  const sourceConfig = await npmEffectiveConfig(pnpmPath, await realpath(current.profilePath), sourceEnvironment)
+  const configuration = npmConfigurationSnapshot(sourceConfig)
+  const rootPath = await mkdtemp('/tmp/dsh-enhanced-npm-')
+  const rootIdentity = identity(await lstat(rootPath))
+  const dispose = async () => {
+    await assertCriticalDirectory(rootPath, rootIdentity)
+    await rm(rootPath, { recursive: true })
+  }
+  try {
+    const profilePath = join(rootPath, 'profile'), cachePath = join(rootPath, 'verified-cache')
+    await mkdir(profilePath, { mode: 0o700 })
+    const resolvingCache = join(rootPath, 'resolving-cache')
+    await mkdir(resolvingCache, { mode: 0o700 })
+    await writeNpmMetadata(profilePath, npmMetadataSources(original))
+    await mkdir(cachePath, { mode: 0o700 })
+    await mkdir(join(cachePath, 'home'), { mode: 0o700 })
+    await mkdir(join(cachePath, 'config', 'pnpm'), { recursive: true, mode: 0o700 })
+    const configFiles = {}
+    for (const [name, source] of Object.entries({
+      'config/pnpm/config.yaml': configuration.settings, 'config/pnpm/auth.ini': configuration.registries, 'home/.npmrc': '',
+    })) {
+      await writeFile(join(cachePath, name), source, { flag: 'wx', mode: 0o600 })
+      configFiles[name] = await readNpmMetadataFile(join(cachePath, name))
+    }
+    const environment = isolatedNpmEnvironment(cachePath, pnpmStore)
+    assertSameNpmConfig(await npmEffectiveConfig(pnpmPath, profilePath, environment), sourceConfig)
+    process.stdout.write(`npm cohort：正在独立目录准备并校验最终锁文件；DSH_HOME 尚未修改。\n`)
+    await run(pnpmPath, ['add', '--lockfile-only', '--save-exact', ...targets], {
+      cwd: profilePath, env: { ...environment, pnpm_config_cache_dir: resolvingCache }, timeoutMs: 300_000,
+    })
+    const metadata = await prepareLifecycleNpmMetadata({
+      original: npmMetadataSources(original), prepared: npmMetadataSources(await readNpmMetadata(profilePath)), targets, dshExecutable,
+    })
+    await writeNpmMetadata(profilePath, metadata)
+    const prepared = await readNpmMetadata(profilePath)
+    // Never reuse the cache from add: it may attest only the old wanted lock.
+    if (await existingIdentity(join(cachePath, 'lockfile-verified.jsonl')) !== undefined) fail('npm cohort final verification requires a fresh cache')
+    const finalEnvironment = { ...environment, pnpm_config_cache_dir: cachePath }
+    await run(pnpmPath, ['install', '--lockfile-only', '--frozen-lockfile'], { cwd: profilePath, env: finalEnvironment, timeoutMs: 300_000 })
+    await assertNpmMetadata(profilePath, prepared)
+    await run(pnpmPath, ['fetch', '--frozen-lockfile'], { cwd: profilePath, env: finalEnvironment, timeoutMs: 300_000 })
+    await assertNpmMetadata(profilePath, prepared)
+    const cacheReceipt = await readNpmMetadataFile(join(cachePath, 'lockfile-verified.jsonl'))
+    let receipts
+    try { receipts = cacheReceipt.source.trim().split('\n').map(line => JSON.parse(line)) } catch { fail('npm cohort final verification cache is invalid') }
+    if (!receipts.some(receipt => receipt.lockfile?.path === join(profilePath, 'pnpm-lock.yaml') && typeof receipt.lockfile?.hash === 'string'
+      && receipt.policy?.tarballUrlBinding === true && receipt.policy?.resolutionShapeCheck === true && receipt.policy?.dependencyAliasCheck === true)) {
+      fail('npm cohort final verification did not attest tarball, resolution shape and dependency aliases')
+    }
+    await assertProfileTreeIdentity(current)
+    await assertNpmMetadata(current.profilePath, original, true)
+    const preparation = {
+      original, prepared, metadata, pnpmPath, rootPath, rootIdentity, cachePath,
+      cacheIdentity: identity(await lstat(cachePath)), cacheReceipt, configFiles, sourceConfig, sourceEnvironment, dispose,
+    }
+    preparation.finalConfig = await npmEffectiveConfig(pnpmPath, profilePath, finalEnvironment)
+    await assertNpmConfiguration(preparation, current.profilePath)
+    await assertNpmPreparationCache(preparation)
+    process.stdout.write(`npm cohort：最终锁文件已校验并完整预取，准备离线升级 ${profile}。\n`)
+    return preparation
+  } catch (error) {
+    await dispose()
+    throw new Error(`npm cohort 元数据准备或预取失败；尚未创建事务或修改 DSH_HOME。${error.message}`, { cause: error })
+  }
+}
+
 async function performNpmUpgrade({
   profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, npmExecutable, pnpmExecutable, selector,
 }) {
@@ -4214,17 +4495,13 @@ async function performNpmUpgrade({
   const targets = await resolveNpmUpgradeCohort({ npmExecutable: npmPath, selector, expectedNames: expectedManaged })
   const profileCwd = await realpath(current.profilePath).catch(() => fail(`npm cohort 无法解析 profile：${profile}`))
   if (!sameIdentity(await stat(profileCwd), identity(current.profileStat))) fail(`npm cohort profile 身份在 store 解析前发生变化：${profile}`)
+  await precheckNpmMetadata(current, dshExecutable)
   const pnpmStore = await resolvedPnpmStorePath(pnpmPath, homePath, profileCwd)
-  process.stdout.write(`npm cohort：正在生命周期锁内预取精确版本；DSH_HOME 尚未修改。\n`)
-  try {
-    await run(pnpmPath, ['--store-dir', pnpmStore.storePath, 'store', 'add', ...targets], { cwd: profileCwd, env: { ...process.env, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' } })
-  } catch {
-    fail('npm cohort 预取失败；尚未创建事务或修改 DSH_HOME。')
-  }
-  await performLifecycle({
+  const npmPreparation = await prepareNpmUpgrade({ current, profile, homePath, pnpmPath, dshExecutable, targets, pnpmStore })
+  try { await performLifecycle({
     operation: 'upgrade', profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
-    skipRecovery: true, transactionPrechecked: true, pnpmStore,
-  })
+    skipRecovery: true, transactionPrechecked: true, pnpmStore, npmPreparation,
+  }) } finally { await npmPreparation.dispose() }
 }
 
 async function performNpmServiceUpgrade({
@@ -4250,14 +4527,14 @@ async function performNpmServiceUpgrade({
   const targets = await resolveNpmUpgradeCohort({ npmExecutable: npmPath, selector, expectedNames: expectedManaged })
   const profileCwd = await realpath(current.profilePath).catch(() => fail(`npm cohort 无法解析 profile：${profile}`))
   if (!sameIdentity(await stat(profileCwd), identity(current.profileStat))) fail(`npm cohort profile 身份在 store 解析前发生变化：${profile}`)
+  await precheckNpmMetadata(current, dshExecutable)
   const pnpmStore = await resolvedPnpmStorePath(pnpmPath, homePath, profileCwd)
-  try { await run(pnpmPath, ['--store-dir', pnpmStore.storePath, 'store', 'add', ...targets], { cwd: profileCwd, env: { ...process.env, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' } }) }
-  catch { fail('npm cohort 预取失败；尚未创建事务或修改 DSH_HOME。') }
-  await performLifecycle({
+  const npmPreparation = await prepareNpmUpgrade({ current, profile, homePath, pnpmPath, dshExecutable, targets, pnpmStore })
+  try { await performLifecycle({
     operation: 'upgrade', profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
-    skipRecovery: true, transactionPrechecked: true, pnpmStore,
+    skipRecovery: true, transactionPrechecked: true, pnpmStore, npmPreparation,
     serviceContext: { systemctlExecutable, journalctlExecutable },
-  })
+  }) } finally { await npmPreparation.dispose() }
 }
 
 async function copyHome(homePath, stageHome) {
@@ -4336,7 +4613,7 @@ async function initializeCleanWebProfile(stageHome, profile) {
 
 async function performLifecycle({
   operation, profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
-  skipRecovery = false, transactionPrechecked = false, serviceContext, pnpmStore,
+  skipRecovery = false, transactionPrechecked = false, serviceContext, pnpmStore, npmPreparation,
 }) {
   if (!['upgrade', 'uninstall'].includes(operation) || !PROFILE_NAME.test(profile) || !isAbsolute(homePath) || resolve(homePath) !== homePath) fail('invalid lifecycle invocation', 2)
   assertExpectedScenario(expectedScenario, serviceContext !== undefined, operation)
@@ -4363,6 +4640,11 @@ async function performLifecycle({
   const packageSymlinkWhitelist = await assertSnapshotTreeSafe(physicalHomePath, homePath, true)
 
   const current = await readProfile(physicalHomePath, profile)
+  if (npmPreparation !== undefined) {
+    await assertNpmMetadata(current.profilePath, npmPreparation.original, true)
+    await assertNpmPreparationCache(npmPreparation)
+    await assertNpmConfiguration(npmPreparation, current.profilePath)
+  }
   const expectedManaged = managedNames(current.manifest)
   const thirdParty = thirdPartyBundles(current.manifest)
   if (thirdParty.length > 0) fail(`检测到无法证明状态路径的第三方顶层 bundle，拒绝 ${operation}：${thirdParty.join(', ')}`)
@@ -4578,7 +4860,29 @@ async function performLifecycle({
       assertCopiedSupervisedSnapshot(manifest.supervisedLifecycle.source, copiedSource)
     }
     let archivedProfile
-    if (operation === 'upgrade') {
+    if (operation === 'upgrade' && npmPreparation !== undefined) {
+      await assertNpmMetadata(current.profilePath, npmPreparation.original, true)
+      await assertNpmMetadata(stagedProfile.profilePath, npmPreparation.original)
+      await writeNpmMetadata(stagedProfile.profilePath, npmPreparation.metadata)
+      const npmOptions = {
+        extraEnvironment: {
+          HOME: '/run/dsh-enhanced-pnpm-cache/home', XDG_CONFIG_HOME: '/run/dsh-enhanced-pnpm-cache/config',
+          pnpm_config_userconfig: '/run/dsh-enhanced-pnpm-cache/home/.npmrc',
+          ...(process.env.CI === undefined ? {} : { CI: process.env.CI }),
+          pnpm_config_offline: 'true', pnpm_config_frozen_store: 'true', pnpm_config_package_import_method: 'copy',
+          pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false',
+          pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_cache_dir: '/run/dsh-enhanced-pnpm-cache',
+        }, pnpmStore, npmPreparation,
+      }
+      const configResult = await sandboxRun(sandbox, [npmPreparation.pnpmPath, '--dir', join(homePath, 'profiles', profile), 'config', 'list', '--json'], { ...npmOptions, capture: true })
+      assertSameNpmConfig(parseNpmEffectiveConfig(configResult.stdout), npmPreparation.finalConfig)
+      const restorePeers = await detachNpmPeerLinks(stageHome, homePath, profile, packageSymlinkWhitelist)
+      try {
+        await sandboxRun(sandbox, [npmPreparation.pnpmPath, '--dir', join(homePath, 'profiles', profile), 'install', '--offline', '--frozen-lockfile'], npmOptions)
+      } finally { await restorePeers() }
+      await assertNpmMetadata(stagedProfile.profilePath, npmPreparation.prepared)
+      await assertNpmPreparationCache(npmPreparation)
+    } else if (operation === 'upgrade') {
       await sandboxRun(sandbox, [dshExecutable, 'plugin', '--profile', profile, 'add', ...targets], {
         extraEnvironment: {
           pnpm_config_offline: 'true', pnpm_config_package_import_method: 'copy', pnpm_config_ignore_scripts: 'true',
@@ -4701,6 +5005,11 @@ async function performLifecycle({
     assertExpectedDirectoryMetadata(await lstat(physicalHomePath), originalStat, homePath)
     await assertProfileTreeIdentity(current)
     await assertCriticalDirectory(stageHome, manifest.stagedIdentity)
+    if (npmPreparation !== undefined) {
+      await assertNpmMetadata(current.profilePath, npmPreparation.original, true)
+      await assertNpmMetadata(validatedProfile.profilePath, npmPreparation.prepared)
+      await assertNpmConfiguration(npmPreparation, current.profilePath)
+    }
     if (operation === 'upgrade') await assertProfileTreeIdentity(validatedProfile)
     else await readProfile(stageHome, profile)
     if (serviceContext !== undefined) {

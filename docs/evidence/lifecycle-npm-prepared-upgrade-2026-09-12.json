@@ -1,0 +1,252 @@
+{
+  "date": "2026-09-12",
+  "baseCommit": "133c236",
+  "scope": "Linux autonomy npm lifecycle upgrade from published 0.1.30 to 0.1.31 using checkout candidate helpers; no new release",
+  "realUpgrade": {
+    "exitCode": 0,
+    "log": "/tmp/dsh-lifecycle-real-3179_e4a/upgrade-prepared-metadata-v4.log",
+    "logSha256": "0d8aaabaa4cbf0c293d9310044b460842c36565be4a327fbb21f7c68eff10346",
+    "installedManagedPackages": {
+      "@dsh-enhanced/assistant-actions": "0.1.31",
+      "@dsh-enhanced/assistant-deepseek-budget": "0.1.31",
+      "@dsh-enhanced/assistant-delivery": "0.1.31",
+      "@dsh-enhanced/assistant-evaluation": "0.1.31",
+      "@dsh-enhanced/assistant-goals": "0.1.31",
+      "@dsh-enhanced/assistant-isolation": "0.1.31",
+      "@dsh-enhanced/assistant-proactive": "0.1.31",
+      "@dsh-enhanced/assistant-skills": "0.1.31",
+      "@dsh-enhanced/assistant-verifier": "0.1.31",
+      "@dsh-enhanced/assistant-web-owner": "0.1.31",
+      "@dsh-enhanced/credentials-keychain": "0.1.31",
+      "@dsh-enhanced/event-triggers": "0.1.31",
+      "@dsh-enhanced/personal-assistant": "0.1.31",
+      "@dsh-enhanced/plugin-control-plane": "0.1.31"
+    },
+    "preservation": [
+      {
+        "path": "profiles/web/cordis.patch.yml",
+        "sha256": "940945dba838cabb551c39221dc2145f840b60d08487657023d202ff6cf247fb",
+        "unchanged": true
+      },
+      {
+        "path": "storages/upgrade-preservation.json",
+        "sha256": "dd4996c3e57156b8b440bcce8c640c6708ccb20a9492a68f0ff89aad7d6204d3",
+        "unchanged": true
+      },
+      {
+        "path": ".credentials.yaml",
+        "sha256": "526a5f1b4a0187adc9d97fb53223181480ba8b459e2fd2c86e9108f3ac2ebdd3",
+        "unchanged": true
+      },
+      {
+        "path": ".anonymous-user-id",
+        "sha256": "188d5ac0aef74bc4814fa7763d134f2954f39097edead274a02e8b4747e9c239",
+        "unchanged": true
+      }
+    ],
+    "pausedGoalRecordAndCheckpointUnchanged": true,
+    "pausedGoalVersion": 2,
+    "noTransactionRemains": true,
+    "scope": "candidate checkout helper upgrades real .30 packages to published .31; actual isolated Host readiness and atomic commit; paused GoalStore fixture preservation, not in-flight model repair recovery"
+  },
+  "candidateRuntimeSha256": {
+    "lifecycle-profile.mjs": "6ef0e17d44c8c14754909fa1952714c890e0bff797a4b1c999b82c72d1b04f16",
+    "lifecycle-config.mjs": "f57c6a4396db8c8f1706a0e9cb5486ccf9c0fbfab366a182297822d5d602f10c"
+  },
+  "earlierAttempts": [
+    {
+      "attempt": 1,
+      "exitCode": 1,
+      "reason": "offline materialization passed; Host activation could not see declared /tmp workspace",
+      "log": "/tmp/dsh-lifecycle-real-3179_e4a/upgrade-prepared-metadata-v1.log",
+      "logSha256": "88a5034fd0198b6c4d6311dca42307cdf053d2cc0d70443b7b5dbb5b1e235506",
+      "formalRecovery": {
+        "exitCode": 1,
+        "meaning": "previous transaction quarantined; this invocation intentionally did not begin a new upgrade",
+        "log": "/tmp/dsh-lifecycle-real-3179_e4a/recover-prepared-metadata-v1.log",
+        "logSha256": "a73e391fdfb1ab634fae3c14f6a96f2d6ac1fcdb99784115b59a03e4fbfe0162"
+      }
+    },
+    {
+      "attempt": 2,
+      "exitCode": 1,
+      "reason": "workspace parser rejected ordinary Host !!js fields; fixed structural tag parsing",
+      "log": "/tmp/dsh-lifecycle-real-3179_e4a/upgrade-prepared-metadata-v2.log",
+      "logSha256": "f197558f2635a3c21cee772d48154e0e4486711b124a4adbc7ecc47d977660ac",
+      "formalRecovery": {
+        "exitCode": 1,
+        "meaning": "previous transaction quarantined; this invocation intentionally did not begin a new upgrade",
+        "log": "/tmp/dsh-lifecycle-real-3179_e4a/recover-prepared-metadata-v2.log",
+        "logSha256": "b926bef2cbc5f5c1e46be0bd1786d7307709bec7655d9649a00cc6638f0def75"
+      }
+    },
+    {
+      "attempt": 3,
+      "exitCode": 1,
+      "reason": "Host readiness passed; unchanged final guard rejected a new executable link from an existing lock-external peer fallback",
+      "log": "/tmp/dsh-lifecycle-real-3179_e4a/upgrade-prepared-metadata-v3.log",
+      "logSha256": "b1596192ffae40788cb3e197fa18cd77c49ec72bc83a2d90cff0daed50144dac",
+      "formalRecovery": {
+        "exitCode": 1,
+        "meaning": "previous transaction quarantined; this invocation intentionally did not begin a new upgrade",
+        "log": "/tmp/dsh-lifecycle-real-3179_e4a/recover-prepared-metadata-v3.log",
+        "logSha256": "9e0eb9f884935740d19c53bca55003d04b93fbf3f636252f5e7578cae19d1ef9"
+      }
+    }
+  ],
+  "design": [
+    "private metadata preparation outside DSH_HOME",
+    "same frozen public registry and policy inputs online and offline",
+    "final lockfile supply-chain verification using a fresh private cache, then full fetch",
+    "no network, no install scripts, no pnpmfile hooks, no trustLockfile in staged materialization",
+    "only original peer fallback links restored; final external-link guard unchanged",
+    "temporary external Web workspace is read-only during isolated Host readiness",
+    "local repository dependency preparation and build explicitly return on either failure before the lifecycle transaction"
+  ],
+  "limitations": [
+    "Current immutable remote installer release remains v0.1.31; candidate helper fixes have not been published.",
+    "Paused goal and checkpoint were seeded through installed GoalStore API; this is persistence evidence, not in-flight model repair continuation.",
+    "Real upgrade evidence covers Linux autonomy and an existing pinned Host CLI; service-aware Lark/supervised and other platforms are not proven by this run.",
+    "Profile .npmrc, credential-bearing registry settings, pnpm bootstrap code configuration and unsupported configuration snapshots reject before mutation.",
+    "Cross-version .30 to .31 execution used candidate v4; final frozen helper hashes were exercised by same-version .31 to .31 v6 only, not by a repeated cross-version run."
+  ],
+  "verification": {
+    "status": "passed",
+    "independentReview": {
+      "result": "PASS",
+      "method": "read-only source and evidence review; no separate Vitest execution claimed",
+      "originalFindingsCorrected": [
+        "preflight configDependencies and runtime metadata before pnpm store/config queries",
+        "bidirectional importer dependency comparison",
+        "engines.runtime rejection and source Node preload environment removal"
+      ],
+      "localBootstrapIncrement": {
+        "result": "PASS",
+        "method": "read-only source and targeted log review",
+        "scope": "explicit return of repository install/build failure before local upgrade lifecycle entry"
+      },
+      "documentationReview": {
+        "result": "PASS",
+        "findingCorrected": "Distinguish v4 cross-version execution from final frozen v6 same-version execution."
+      }
+    },
+    "targeted": [
+      {
+        "command": "pnpm exec vitest run tests/installers.spec.ts -t 'npm (lifecycle|upgrade|cohort)'",
+        "exitCode": 0,
+        "passed": 34,
+        "log": "/tmp/dsh-npm-metadata-cohort-lifecycle-final.log",
+        "logSha256": "dd2d88b1ece2470b33dabfea2a44e176d12b5a74cd824cd4cf1a5f22b0b8dc73"
+      },
+      {
+        "command": "pnpm exec vitest run tests/lifecycle-npm-metadata.spec.ts --reporter=dot",
+        "exitCode": 0,
+        "passed": 14,
+        "log": "/tmp/dsh-lifecycle-npm-metadata-engines-runtime.log",
+        "logSha256": "151988da6e428b9a611f67dc30b9e63e598213ded0aa187333a6b60a89770b17"
+      },
+      {
+        "command": "pnpm exec vitest run tests/installers.spec.ts -t 'historical local upgrade AND chain|local upgrade returns the repository'",
+        "exitCode": 0,
+        "passed": 3,
+        "log": "/tmp/dsh-local-upgrade-preflight-regression.log",
+        "logSha256": "8696fbd1b1d155243fe97eba9808495768702a27afcc3a712509db8146d60278"
+      },
+      {
+        "command": "pnpm exec vitest run tests/installers.spec.ts -t 'local and npm Lark upgrade entry points dispatch the service-aware executor'",
+        "exitCode": 0,
+        "passed": 1,
+        "log": "/tmp/dsh-local-upgrade-service-entrypoints.log",
+        "logSha256": "08f70139657a84e66cdfd80b72e10c982ebfe92802689efe357fcc32663a85ec"
+      },
+      {
+        "command": "pnpm exec vitest run tests/installers.spec.ts -t 'npm (lifecycle|upgrade|cohort)'",
+        "exitCode": 0,
+        "passed": 34,
+        "log": "/tmp/dsh-local-upgrade-npm-cohort.log",
+        "logSha256": "0359951f91b21f23769ff2fa9cf0efb2e3a7e5617bf246c23b4c04c5f6f8f453"
+      }
+    ],
+    "previousFullChecks": [
+      {
+        "command": "CI=true pnpm check",
+        "status": "failed",
+        "sessionId": 37696,
+        "log": "/tmp/dsh-npm-prepared-upgrade-final-check.log",
+        "frozenInputs": {
+          "scripts/install/lifecycle-profile.mjs": "3c1763ec58e16339c99b73124487edac10b9af3b7c0d1a5e4be529e94ef89ef0",
+          "scripts/install/lifecycle-config.mjs": "fc70f0615a3d7d16c9a2d0bd3ac8a353513776cbe4ab71cc2795d4a724923635",
+          "tests/installers.spec.ts": "c579dee67799ba56dc96fc5b7deec3fdef594cc81b8e6f80f71469ee7b8afb4c",
+          "tests/lifecycle-npm-metadata.spec.ts": "9a90ee9083618f1508cb1527565e0bbbc30bef58d6b4b108ce26ee2cd910e55a"
+        },
+        "exitCode": 1,
+        "failed": 1,
+        "passed": 541,
+        "phase": "root integration tests",
+        "logSha256": "998b208df679b5f7e87076f02fc46b039ce3361cefca29b1e6d7d1af68430bde",
+        "reason": "local Lark entrypoint fixture did not simulate pnpm --dir repository build; the investigation also exposed ignored repository install failure in the original shell AND chain"
+      }
+    ],
+    "fullCheck": {
+      "command": "CI=true pnpm check",
+      "status": "passed",
+      "sessionId": 30653,
+      "log": "/tmp/dsh-npm-prepared-upgrade-final-check-v2.log",
+      "frozenInputs": {
+        "scripts/install/common.sh": "b169a8135a77ba719c6cb8eecdc6d2d7c6675eb2679817dd451b56a77702a14e",
+        "scripts/install/lifecycle-config.mjs": "fc70f0615a3d7d16c9a2d0bd3ac8a353513776cbe4ab71cc2795d4a724923635",
+        "scripts/install/lifecycle-profile.mjs": "3c1763ec58e16339c99b73124487edac10b9af3b7c0d1a5e4be529e94ef89ef0",
+        "tests/installers.spec.ts": "9b05e37bf3e3b209c4b1f55a3b917b68f4a25a07251851335ac31708f1e3ca81",
+        "tests/lifecycle-npm-metadata.spec.ts": "9a90ee9083618f1508cb1527565e0bbbc30bef58d6b4b108ce26ee2cd910e55a"
+      },
+      "exitCode": 0,
+      "logSha256": "5dea685389eaae6754899e06b4f6b2f40281cd16a9863d927064177ce5f8d2f2",
+      "passed": 5264,
+      "skipped": 42,
+      "failed": 0,
+      "testGroups": 34,
+      "dryRunPacks": 33,
+      "manifestValidation": "passed",
+      "lint": "zero warnings",
+      "typecheck": "passed",
+      "build": "passed",
+      "frozenInputsUnchanged": true,
+      "rootFixtureArtifactAbsent": true
+    }
+  },
+  "fullGoal": {
+    "verified": 3,
+    "implementing": 13,
+    "pending": 2,
+    "status": "active"
+  },
+  "repeatUpgrade": {
+    "from": "0.1.31",
+    "to": "0.1.31",
+    "exitCode": 0,
+    "log": "/tmp/dsh-lifecycle-real-3179_e4a/upgrade-prepared-metadata-v5-repeat.log",
+    "logSha256": "e91bc666ea5a019352e9fe858178b1c4d3567ac03b2043eb579c3291142904f2",
+    "installedManagedPackages": 14,
+    "preservedSelectedFiles": 4,
+    "pausedGoalRecordAndCheckpointUnchanged": true,
+    "noTransactionRemains": true
+  },
+  "finalRuntimeSha256": {
+    "lifecycle-profile.mjs": "3c1763ec58e16339c99b73124487edac10b9af3b7c0d1a5e4be529e94ef89ef0",
+    "lifecycle-config.mjs": "fc70f0615a3d7d16c9a2d0bd3ac8a353513776cbe4ab71cc2795d4a724923635"
+  },
+  "finalCandidateRepeatUpgrade": {
+    "from": "0.1.31",
+    "to": "0.1.31",
+    "exitCode": 0,
+    "log": "/tmp/dsh-lifecycle-real-3179_e4a/upgrade-prepared-metadata-v6-final.log",
+    "logSha256": "48fcc50c6091176ac66b768d56550a289a2a1df1921033351f7cf1f527a08b6d",
+    "installedManagedPackages": 14,
+    "allManagedPackageRootsInsideHome": true,
+    "preservedSelectedFiles": 4,
+    "pausedGoalRecordAndCheckpointUnchanged": true,
+    "noTransactionRemains": true,
+    "noNewExternalPeerExecutable": true
+  },
+  "finalLocalBootstrapSha256": "b169a8135a77ba719c6cb8eecdc6d2d7c6675eb2679817dd451b56a77702a14e"
+}
