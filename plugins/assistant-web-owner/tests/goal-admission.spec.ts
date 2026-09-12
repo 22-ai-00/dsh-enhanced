@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, mkdir, writeFile, chmod } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, mkdir, writeFile, chmod } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,7 +21,7 @@ const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 async function fixture(now = Date.now()) {
-  const dshHome = await mkdtemp(join(tmpdir(), 'web-owner-goal-admission-')); roots.push(dshHome)
+  const dshHome = await realpath(await mkdtemp(join(tmpdir(), 'web-owner-goal-admission-'))); roots.push(dshHome)
   const input: WebOwnerSetupInput = { dshHome, profile: 'web', workspace: join(dshHome, 'workspace'), preset: 'standard' }
   const slugs = ['event-triggers', 'personal-assistant', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-isolation', 'assistant-actions', 'credentials-keychain', 'assistant-verifier', 'assistant-deepseek-budget']
   const effectiveDocument = parseDocument('[]')
@@ -32,7 +32,8 @@ async function fixture(now = Date.now()) {
     if (!isSeq(inserts)) throw new Error('fixture expected published inserts')
     for (const row of inserts.items) effectiveDocument.add(row)
   }
-  const effective = effectiveDocument.toString()
+  // Metadata-only fixture: verifier preparation validates an executable path but never runs Docker here; Linux E2E covers Docker execution.
+  const effective = effectiveDocument.toString().replace('/usr/bin/docker', await realpath(process.execPath))
   const initial = prepareWebOwnerProfile(input, '[]', effective)
   await mkdir(input.workspace)
   await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })

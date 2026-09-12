@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, cpSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, realpathSync, rmSync, readFileSync, writeFileSync, cpSync, mkdirSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, expect, test } from 'vitest'
@@ -16,7 +16,7 @@ import { runBenchmark } from '../../src/benchmark/runner.js'
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function config(): StrategyBenchmarkConfig {
-  const root = mkdtempSync(join(tmpdir(), 'strategy-executor-')); roots.push(root)
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'strategy-executor-'))); roots.push(root)
   return { suite: 'strategy-v1', id: 'strategy-executor', cases: ['integer-sum'], persona: 'Solve the public task with the admitted Goal and isolated tools.',
     model: { provider: 'strategy-fixture', model: 'fixed', temperature: null, maxOutputTokens: 128, inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null, adapterDigest: 'a'.repeat(64), tokenCounterDigest: 'b'.repeat(64) },
     execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 3 }, budget: { durationMs: 100000, inputTokens: 1000, outputTokens: 2048, toolCalls: 8, costUsdMicros: null },

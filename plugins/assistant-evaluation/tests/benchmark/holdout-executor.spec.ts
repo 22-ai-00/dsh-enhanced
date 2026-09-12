@@ -60,7 +60,7 @@ afterEach(async () => {
   for (const path of roots.splice(0)) rmSync(path, { recursive: true, force: true })
 })
 
-describe('independent holdout runner integration', () => {
+describe.runIf(process.platform === 'linux')('independent holdout runner integration', () => {
   it('runs the signed ordered authority flow, persists only commitments, and verifies a zero-spawn replay', async () => {
     const state = resources(), model = delegate(), openProvider = vi.fn(fixtureProvider()), openDelegate = vi.fn(async () => model.binding)
     const writeFinish = vi.spyOn(state.evidence, 'writeFinish').mockImplementation(function (this: HoldoutEvidenceStore, input) {

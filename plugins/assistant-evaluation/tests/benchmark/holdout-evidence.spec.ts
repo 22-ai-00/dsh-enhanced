@@ -38,7 +38,7 @@ function verifier(counter?: { manifest: number; verdict: number; finish: number 
 function stateRoot(): string { const parent = mkdtempSync(join(tmpdir(), 'holdout-evidence-')); roots.push(parent); return join(parent, 'state') }
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
-describe('HoldoutEvidenceStore', () => {
+describe.runIf(process.platform === 'linux')('HoldoutEvidenceStore', () => {
   it('publishes canonical 0600 manifest/verdict objects without private input or raw output and re-verifies from digests', () => {
     const root = stateRoot(), count = { manifest: 0, verdict: 0, finish: 0 }, cell = benchmarkSchedule(plan())[0]!, envelope = verdict(cell), store = new HoldoutEvidenceStore({ root, verifier: verifier(count) })
     const saved = store.writeVerdict({ plan: plan(), manifest, cell, outputDigest: outputDigest(cell), host: host(cell), envelope })

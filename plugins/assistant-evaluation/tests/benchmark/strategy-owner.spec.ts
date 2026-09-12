@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, mkdir, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -31,7 +31,7 @@ class OwnerAdapter extends LlmAdapter {
 }
 
 async function directories() {
-  const root = await mkdtemp(join(tmpdir(), 'strategy-owner-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'strategy-owner-'))); roots.push(root)
   const workspace = join(root, 'workspace'); const stateRoot = join(root, 'private-state')
   await mkdir(workspace, { mode: 0o700 }); await mkdir(stateRoot, { mode: 0o700 })
   return { workspace, stateRoot }

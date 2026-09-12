@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -22,7 +22,7 @@ afterEach(() => {
 })
 
 function config(): StrategyBenchmarkConfig {
-  const root = mkdtempSync(join(tmpdir(), 'strategy-deepseek-runtime-'))
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'strategy-deepseek-runtime-')))
   roots.push(root)
   return {
     suite: 'strategy-v1', id: 'strategy-deepseek-runtime', cases: ['integer-sum'], persona: 'Solve the public task with the admitted Goal and isolated tools.',

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, expect, test } from 'vitest'
@@ -19,7 +19,7 @@ function plan(): StrategyBenchmarkPlan {
 }
 
 test('registers lifecycle before setup and disposes a factory binding that arrives after cancellation', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'strategy-lifecycle-')); cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'strategy-lifecycle-'))); cleanups.push(() => rm(root, { recursive: true, force: true }))
   const workspace = join(root, 'workspace'); const stateRoot = join(root, 'state'); await mkdir(workspace, { mode: 0o700 }); await mkdir(stateRoot, { mode: 0o700 })
   const source = plan(); const bound = strategyBenchmarkJournalPlan(source); const variant = bound.variants[0]!; const cell = benchmarkSchedule(bound).find(value => value.variantId === variant.id)!
   const abort = new AbortController(); let control: StrategyGoalRuntimeControl | undefined; let started!: () => void; const factoryStarted = new Promise<void>(resolve => { started = resolve }); let release!: () => void; const late = new Promise<void>(resolve => { release = resolve }); let disposed = 0; let streams = 0
