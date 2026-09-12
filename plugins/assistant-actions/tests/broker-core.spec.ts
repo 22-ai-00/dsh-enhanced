@@ -18,8 +18,8 @@ async function fixture(): Promise<{ config: ExternalBrokerCoreConfig; secret: st
   const grant = withBrokerGrantDigest({
     protocol: 'assistant-actions/external-github-grant/v1', id: 'grant', revision: 1, clientKeyId: 'client-key',
     owner: { principalDigest: 'a'.repeat(64), principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', preset: 'primary', bindingId: 'binding', bindingVersion: 1, bindingGeneration: 1 }, sessionId: 'session',
-    destination: { classification: 'github-repository', repository: 'owner/repository', branch: 'main', paths: ['a.txt'] }, credentialId: 'github', expiresAt: now + 120_000,
-    maxActions: 8, maxTotalBytes: 1_000_000, maxCostUnits: 8, allowedOperations: ['commit', 'inspect'], allowedInspectKinds: ['repository', 'branch', 'file'],
+    destination: { classification: 'github-repository', repository: 'owner/repository', branch: 'main', baseBranch: 'trunk', paths: ['a.txt'] }, credentialId: 'github', expiresAt: now + 120_000,
+    maxActions: 8, maxTotalBytes: 1_000_000, maxCostUnits: 8, allowedOperations: ['commit', 'inspect'], allowedInspectKinds: ['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'],
     client: { kind: 'assistant-actions-host', instanceId: 'host', generation: 1 }, source: { classification: 'internal', provenanceDigest: 'b'.repeat(64) }, policyEpoch: 3, emergencyEpoch: 0,
   } satisfies ExternalGitHubGrantUnsigned)
   return { secret, config: { instanceId: 'broker', statePath: join(root, 'broker.sqlite'), credentials: [{ id: 'github', provider: 'linux-protected-file', path: secretPath, maxLeaseMs: 30_000 }], grants: [grant], policyEpoch: 3, now: () => now } }
@@ -29,7 +29,7 @@ function signed(config: ExternalBrokerCoreConfig, operation: 'commit' | 'inspect
   const grant = config.grants[0]!
   const payload = operation === 'commit' ? { expectedHeadOid: 'c'.repeat(40), headline: 'change', files: [{ path: 'a.txt', content: 'hello' }] } : { kind: 'repository' as const }
   const intent = { actionId: 'action', grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.digest, owner: grant.owner, sessionId: grant.sessionId, agentId: 'agent', rootCallId: 'root', callId: 'call', operation,
-    source: grant.source, destination: { classification: 'github-repository' as const, repository: grant.destination.repository, branch: grant.destination.branch }, payload, deadline: now + 30_000,
+    source: grant.source, destination: { classification: 'github-repository' as const, repository: grant.destination.repository, branch: grant.destination.branch, ...(grant.destination.baseBranch === undefined ? {} : { baseBranch: grant.destination.baseBranch }) }, payload, deadline: now + 30_000,
     budget: { reservationId: 'reservation', actions: 1, bytes: 0, costMetric: 'github-api-units' as const, maxCostUnits: 1 }, ...changes } as BrokerRequestIntent
   const hello = createBrokerServerHello({ instanceId: 'broker', generation: 1, policyEpoch: 3, emergencyEpoch: 0, expiresAt: now + 30_000 }, keys.privateKey)
   const requestId = 'wire-' + intent.actionId
@@ -100,7 +100,7 @@ describe('ExternalBrokerCore', () => {
     expect(commit).not.toHaveBeenCalled(); await core.close()
   })
 
-  it('does not dispatch unsupported PR-shaped inspection and bounds supported inspection', async () => {
+  it('returns the bounded authorized repository inspection', async () => {
     const { config } = await fixture(), inspect = vi.fn(async () => ({ observed: { full_name: 'owner/repository', untrusted: true } }))
     const core = new ExternalBrokerCore(config, { inspect })
     const result = await core.execute(signed(config, 'inspect'), new AbortController().signal)
@@ -109,12 +109,69 @@ describe('ExternalBrokerCore', () => {
     await core.close()
   })
 
-  it('projects inspect responses to explicit DTOs and drops unexpected remote fields', async () => {
+  it('rejects inspect responses with unexpected remote fields before they reach the wire', async () => {
     const { config, secret } = await fixture()
     const inspect = vi.fn(async () => ({ observed: { full_name: 'owner/repository', private: true, permissions: { admin: true }, injected: secret, untrusted: true } }))
     const core = new ExternalBrokerCore(config, { inspect }), result = await core.execute(signed(config, 'inspect'), new AbortController().signal)
-    expect(result).toMatchObject({ status: 'succeeded', result: { observed: { full_name: 'owner/repository', untrusted: true } } })
+    expect(result.status).not.toBe('succeeded')
     expect(JSON.stringify(result)).not.toContain(secret)
+    await core.close()
+  })
+
+  it('projects grant-bound pull requests, checks, and reviews through the read-only GitHub grant', async () => {
+    const { config } = await fixture()
+    const sha = 'd'.repeat(40)
+    const pullRequest = { number: 7, state: 'open', merged: false, head: { ref: 'main', sha, repo: { full_name: 'owner/repository' } }, base: { ref: 'trunk', repo: { full_name: 'owner/repository' } } }
+    const commit = vi.fn()
+    const inspect = vi.fn(async (input: Parameters<typeof import('../src/github.ts').inspectGitHub>[0]) => {
+      expect(input.grant.repoWorkflow).toEqual({ baseBranch: 'trunk', allowBranchCreate: false, allowPullRequest: false })
+      if (input.kind === 'pull-request') return { observed: { ...pullRequest, untrusted: true } }
+      if (input.kind === 'checks') return { observed: { pullRequest, headOid: sha, items: [{ id: 1, name: 'CI', status: 'completed', conclusion: 'success', head_sha: sha, app: { id: 2 } }], truncated: false, untrusted: true } }
+      return { observed: { pullRequest, headOid: sha, items: [{ id: 3, state: 'APPROVED', commit_id: sha, user: { id: 4 }, submitted_at: '2026-01-01T00:00:00Z' }], truncated: false, untrusted: true } }
+    })
+    const core = new ExternalBrokerCore(config, { commit, inspect })
+    for (const kind of ['pull-request', 'checks', 'reviews'] as const) {
+      const result = await core.execute(signed(config, 'inspect', { actionId: `${kind}-action`, callId: `${kind}-call`, payload: { kind, pullRequestNumber: 7 }, budget: { reservationId: `${kind}-reservation`, actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: kind === 'pull-request' ? 1 : 2 } }), new AbortController().signal)
+      expect(result).toMatchObject({ status: 'succeeded', dispatched: true, result: { operation: 'inspect', kind } })
+      expect(JSON.stringify(result)).not.toContain('github_pat_external_broker_only')
+    }
+    expect(inspect).toHaveBeenCalledTimes(3)
+    expect(commit).not.toHaveBeenCalled()
+    await core.close()
+  })
+
+  it.each([
+    ['wrong base', (value: Record<string, unknown>) => ({ ...value, base: { ref: 'other', repo: { full_name: 'owner/repository' } } })],
+    ['wrong head', (value: Record<string, unknown>) => ({ ...value, head: { ref: 'other', sha: 'd'.repeat(40), repo: { full_name: 'owner/repository' } } })],
+    ['wrong PR number', (value: Record<string, unknown>) => ({ ...value, number: 8 })],
+    ['foreign repository', (value: Record<string, unknown>) => ({ ...value, head: { ref: 'main', sha: 'd'.repeat(40), repo: { full_name: 'attacker/repository' } } })],
+  ])('does not report a success for a %s PR scope', async (_name, mutate) => {
+    const { config } = await fixture()
+    const observed = mutate({ number: 7, state: 'open', merged: false, head: { ref: 'main', sha: 'd'.repeat(40), repo: { full_name: 'owner/repository' } }, base: { ref: 'trunk', repo: { full_name: 'owner/repository' } }, untrusted: true })
+    const commit = vi.fn(), inspect = vi.fn(async () => ({ observed }))
+    const core = new ExternalBrokerCore(config, { commit, inspect })
+    const result = await core.execute(signed(config, 'inspect', { actionId: `${_name}-action`, callId: `${_name}-call`, payload: { kind: 'pull-request', pullRequestNumber: 7 }, budget: { reservationId: `${_name}-reservation`, actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } }), new AbortController().signal)
+    expect(result.status).not.toBe('succeeded')
+    expect(inspect).toHaveBeenCalledOnce()
+    expect(commit).not.toHaveBeenCalled()
+    await core.close()
+  })
+
+  it('does not release credential-shaped fields or otherwise valid observed credential values', async () => {
+    const { config, secret } = await fixture()
+    const sha = 'd'.repeat(40)
+    const pullRequest = { number: 7, state: 'open', merged: false, head: { ref: 'main', sha, repo: { full_name: 'owner/repository' } }, base: { ref: 'trunk', repo: { full_name: 'owner/repository' } } }
+    const inspect = vi.fn(async (input: Parameters<typeof import('../src/github.ts').inspectGitHub>[0]) => input.kind === 'pull-request'
+      ? { observed: { ...pullRequest, untrusted: true, token: secret } }
+      : { observed: { pullRequest, headOid: sha, items: [{ id: 1, name: secret, status: 'completed', conclusion: 'success', head_sha: sha, app: { id: 2 } }], truncated: false, untrusted: true } })
+    const core = new ExternalBrokerCore(config, { inspect })
+    const pr = await core.execute(signed(config, 'inspect', { actionId: 'secret-field-action', callId: 'secret-field-call', payload: { kind: 'pull-request', pullRequestNumber: 7 }, budget: { reservationId: 'secret-field-reservation', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } }), new AbortController().signal)
+    const checks = await core.execute(signed(config, 'inspect', { actionId: 'secret-value-action', callId: 'secret-value-call', payload: { kind: 'checks', pullRequestNumber: 7 }, budget: { reservationId: 'secret-value-reservation', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 2 } }), new AbortController().signal)
+    for (const result of [pr, checks]) {
+      expect(result.status).not.toBe('succeeded')
+      expect(JSON.stringify(result)).not.toContain(secret)
+    }
+    expect(inspect).toHaveBeenCalledTimes(2)
     await core.close()
   })
 

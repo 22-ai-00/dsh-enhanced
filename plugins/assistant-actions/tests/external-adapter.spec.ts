@@ -67,7 +67,7 @@ function response(actionId: string, status: 'succeeded' | 'failed' | 'unknown', 
     status, dispatched: status !== 'failed', result, error: status === 'succeeded' ? null : { code: 'fixture-error' }, completedAt: Date.now(), signature: Buffer.alloc(64).toString('base64url') }
 }
 
-async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDispatch>(async (_options, intent, _signal) => response(intent.actionId, 'succeeded'))) {
+async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDispatch>(async (_options, intent, _signal) => response(intent.actionId, 'succeeded')), grantOverrides?: (root: string) => Partial<BrokerGrantProjection>) {
   const root = await mkdtemp(join(tmpdir(), 'actions-external-')), ctx = new Context(), agent = ownerAgent(ctx, root)
   const localCommit = vi.fn(), localWorkflow = { branch: vi.fn(), pullRequest: vi.fn(), inspect: vi.fn() }, localCompensation = { capture: vi.fn(), commit: vi.fn() }
   let policyAllowed = true
@@ -77,7 +77,7 @@ async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDi
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' })
   ctx.provide('agents' as never, { get: (id: string) => id === agent.id ? agent : undefined } as never)
   ctx.provide('assistantPolicy' as never, policy as never); ctx.provide('assistantDelivery' as never, delivery as never)
-  const config = await externalConfig(root)
+  const config = await externalConfig(root, [projection(root, grantOverrides?.(root))])
   const service = new AssistantActionsService(ctx, config, localCommit as never, localWorkflow as never, localCompensation as never, dispatch as never)
   await new Promise(resolve => setTimeout(resolve, 0))
   const cleanup = async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) }; cleanups.push(cleanup)
@@ -115,6 +115,38 @@ describe('external broker configuration', () => {
 })
 
 describe('external broker Host facade', () => {
+  it.each(['pull-request', 'checks', 'reviews'] as const)('forwards scoped %s inspection with its API budget and without local credentials', async kind => {
+    const headOid = 'd'.repeat(40)
+    const pullRequest = { number: 42, state: 'open' as const, merged: false,
+      head: { ref: 'main', sha: headOid, repo: { full_name: 'owner/repository' } },
+      base: { ref: 'stable', repo: { full_name: 'owner/repository' } } }
+    const observed = kind === 'pull-request' ? { ...pullRequest, untrusted: true as const }
+      : { pullRequest, headOid, items: [], truncated: true, untrusted: true as const }
+    const dispatch = vi.fn<ExternalDispatch>(async (options, intent) => {
+      expect(intent.destination).toMatchObject({ branch: 'main', baseBranch: 'stable' })
+      expect(intent.payload).toEqual({ kind, pullRequestNumber: 42 })
+      expect(intent.budget.maxCostUnits).toBe(kind === 'pull-request' ? 1 : 2)
+      await options.beforeWrite!({} as never, intent as unknown as BrokerClientRequest, new AbortController().signal)
+      return { ...response(intent.actionId, 'succeeded', 'inspect'), result: { operation: 'inspect', repository: 'owner/repository', branch: 'main', kind, observed, observedDigest: brokerDigest(observed) } }
+    })
+    const f = await externalFixture(dispatch, root => ({ destination: { ...projection(root).destination, baseBranch: 'stable' }, allowedInspectKinds: ['pull-request', 'checks', 'reviews'] }))
+    const result = await f.service.runInspect(f.agent, { grantId: 'external', kind, pullRequestNumber: 42 }, new AbortController().signal)
+    expect(result).toMatchObject({ result: { status: 'succeeded' }, observed })
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(f.localWorkflow.inspect).not.toHaveBeenCalled()
+    expect(f.localWorkflow.pullRequest).not.toHaveBeenCalled()
+    expect(f.localCommit).not.toHaveBeenCalled()
+    await expect(access(f.config.stateRoot!)).rejects.toMatchObject({ code: 'ENOENT' })
+    const discovery = await f.execute('action_github_grants', {})
+    expect(JSON.stringify(discovery)).toContain('stable')
+  })
+
+  it('keeps existing external grants unable to inspect PRs without new authority', async () => {
+    const f = await externalFixture()
+    await expect(f.service.runInspect(f.agent, { grantId: 'external', kind: 'checks', pullRequestNumber: 42 }, new AbortController().signal)).rejects.toThrow(/request not granted/)
+    expect(f.dispatch).not.toHaveBeenCalled()
+  })
+
   it('executes commit and bounded inspect without Keychain, Host ledger or local GitHub fallback', async () => {
     const dispatch = vi.fn<ExternalDispatch>(async (options, intent, _signal) => {
       expect(options.beforeWrite).toBeTypeOf('function')

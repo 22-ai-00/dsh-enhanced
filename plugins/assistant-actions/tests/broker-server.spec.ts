@@ -16,6 +16,8 @@ import {
 import { GitHubBrokerServerError, startGitHubBrokerServer, type BrokerPeerCredentialInspector, type GitHubBrokerCorePort, type GitHubBrokerServer } from '../src/broker-server.js'
 import { loadBrokerCliConfig, runBrokerCli } from '../src/broker-cli.js'
 import { linuxPeerCredentialsAvailable } from '../src/broker-peer-linux.js'
+import { ExternalBrokerCore } from '../src/broker-core.js'
+import { withBrokerGrantDigest } from '../src/broker-ledger.js'
 import { writeFile } from 'node:fs/promises'
 
 const uid = process.getuid?.() ?? 0, gid = process.getgid?.() ?? 0
@@ -54,12 +56,12 @@ function core(overrides: Partial<GitHubBrokerCorePort> = {}): GitHubBrokerCorePo
 }
 
 const trustedPeer: BrokerPeerCredentialInspector = () => ({ uid, gid, pid: process.pid })
-async function start(options: { path?: string; core?: GitHubBrokerCorePort; peer?: BrokerPeerCredentialInspector; clientPeer?: { uid: number; gid: number }; adminPeer?: { uid: number; gid: number }; clientPublicKey?: KeyObject; adminPublicKey?: KeyObject; clientKeyId?: string; adminKeyId?: string; firstByteTimeoutMs?: number; frameTimeoutMs?: number; totalTimeoutMs?: number; maxConcurrentRequests?: number; maxActionConnections?: number; maxAdminConnections?: number; parentMode?: number; socketMode?: number } = {}): Promise<GitHubBrokerServer> {
+async function start(options: { path?: string; generation?: number; core?: GitHubBrokerCorePort; peer?: BrokerPeerCredentialInspector; clientPeer?: { uid: number; gid: number }; adminPeer?: { uid: number; gid: number }; clientPublicKey?: KeyObject; adminPublicKey?: KeyObject; clientKeyId?: string; adminKeyId?: string; firstByteTimeoutMs?: number; frameTimeoutMs?: number; totalTimeoutMs?: number; maxConcurrentRequests?: number; maxActionConnections?: number; maxAdminConnections?: number; parentMode?: number; socketMode?: number } = {}): Promise<GitHubBrokerServer> {
   const actionSocketPath = options.path ?? await privateSocketPath(), adminDirectory = join(dirname(dirname(actionSocketPath)), 'admin-runtime')
   await mkdir(adminDirectory, { recursive: true, mode: 0o700 }); await chmod(adminDirectory, 0o700)
   const adminSocketPath = join(adminDirectory, 'broker-admin.sock')
   const server = await startGitHubBrokerServer({
-    actionSocketPath, adminSocketPath, instanceId: 'broker-fixture', generation: 7, serverPrivateKey: serverKeys.privateKey, clientPublicKey: options.clientPublicKey ?? clientKeys.publicKey, clientKeyId: options.clientKeyId ?? 'client-fixture',
+    actionSocketPath, adminSocketPath, instanceId: 'broker-fixture', generation: options.generation ?? 7, serverPrivateKey: serverKeys.privateKey, clientPublicKey: options.clientPublicKey ?? clientKeys.publicKey, clientKeyId: options.clientKeyId ?? 'client-fixture',
     adminPublicKey: options.adminPublicKey ?? adminKeys.publicKey, adminKeyId: options.adminKeyId ?? 'admin-fixture', core: options.core ?? core(), inspectPeerCredentials: options.peer ?? trustedPeer,
     expectedClientPeerUid: options.clientPeer?.uid ?? uid, expectedClientPeerGid: options.clientPeer?.gid ?? gid, expectedAdminPeerUid: options.adminPeer?.uid ?? uid, expectedAdminPeerGid: options.adminPeer?.gid ?? gid,
     expectedActionSocketUid: uid, expectedActionSocketGid: gid, expectedActionParentMode: options.parentMode ?? 0o700, expectedActionSocketMode: options.socketMode ?? 0o600,
@@ -103,6 +105,52 @@ async function nextFrame(socket: Socket): Promise<unknown> {
 }
 
 describe('GitHubBrokerServer', () => {
+  it('serves PR follow-up through the signed socket and durable core without replaying after restart', async () => {
+    const path = await privateSocketPath(), root = dirname(path), tokenPath = join(root, 'credentials', 'token')
+    await mkdir(dirname(tokenPath), { mode: 0o700 })
+    const secret = 'github_pat_socket_read_fixture'
+    await writeFile(tokenPath, secret, { mode: 0o600 })
+    const request = intent(), client = actionOptions(path)
+    const grant = withBrokerGrantDigest({ protocol: 'assistant-actions/external-github-grant/v1', id: request.grantId, revision: 1,
+      clientKeyId: client.clientKeyId, owner: request.owner, sessionId: request.sessionId,
+      destination: { ...request.destination, baseBranch: 'stable', paths: ['a.txt'] }, credentialId: 'github', expiresAt: Date.now() + 30_000,
+      maxActions: 3, maxTotalBytes: 100_000, maxCostUnits: 5, allowedOperations: ['inspect'], allowedInspectKinds: ['pull-request', 'checks', 'reviews'],
+      client: client.source, source: request.source, policyEpoch: 3, emergencyEpoch: 0 })
+    const pr = { number: 42, state: 'open', merged: false, head: { ref: 'main', sha: 'a'.repeat(40), repo: { full_name: 'owner/repo' } }, base: { ref: 'stable', repo: { full_name: 'owner/repo' } } }
+    const inspect = vi.fn(async (input: Parameters<typeof import('../src/github.js').inspectGitHub>[0]) => {
+      expect(input.token).toBe(secret)
+      expect(input.grant.repoWorkflow).toEqual({ baseBranch: 'stable', allowBranchCreate: false, allowPullRequest: false })
+      return { observed: input.kind === 'pull-request' ? { ...pr, untrusted: true }
+        : { pullRequest: pr, headOid: pr.head.sha, items: [], truncated: true, untrusted: true } }
+    })
+    const config = { instanceId: 'broker-fixture', statePath: join(root, 'state.sqlite'), grants: [grant], policyEpoch: 3,
+      credentials: [{ id: 'github', provider: 'linux-protected-file' as const, path: tokenPath, maxLeaseMs: 30_000 }] }
+    const backend = new ExternalBrokerCore(config, { inspect })
+    const server = await start({ path, generation: backend.snapshot().generation, core: backend })
+    const options = { ...client, minimumServerGeneration: backend.snapshot().generation }
+    const requests: BrokerRequestIntent[] = ['pull-request', 'checks', 'reviews'].map(kind => ({ ...request,
+      actionId: kind, callId: kind, grantDigest: grant.digest, destination: { ...request.destination, baseBranch: 'stable' },
+      payload: { kind: kind as 'pull-request' | 'checks' | 'reviews', pullRequestNumber: 42 },
+      budget: { ...request.budget, reservationId: kind, bytes: Buffer.byteLength(JSON.stringify({ kind, pullRequestNumber: 42 })), maxCostUnits: kind === 'pull-request' ? 1 : 2 } }))
+    const replies = []
+    for (const entry of requests) {
+      const reply = await requestGitHubBroker(options, entry)
+      expect(reply, reply.error?.code).toMatchObject({ status: 'succeeded', result: { operation: 'inspect', observed: { untrusted: true } } })
+      expect(JSON.stringify(reply)).not.toContain(secret)
+      replies.push(reply)
+    }
+    expect(inspect).toHaveBeenCalledTimes(3)
+    const denied = await requestGitHubBroker(options, { ...requests[2]!, actionId: 'over-budget', callId: 'over-budget', budget: { ...requests[2]!.budget, reservationId: 'over-budget' } })
+    expect(denied).toMatchObject({ status: 'failed', dispatched: false })
+    expect(inspect).toHaveBeenCalledTimes(3)
+    await server.stop()
+    const restored = new ExternalBrokerCore(config, { inspect })
+    const restoredServer = await start({ path, generation: restored.snapshot().generation, core: restored })
+    const repeated = await requestGitHubBroker({ ...actionOptions(restoredServer.actionSocketPath), minimumServerGeneration: restored.snapshot().generation }, requests[2]!)
+    expect(repeated.result).toEqual(replies[2]!.result)
+    expect(inspect).toHaveBeenCalledTimes(3)
+  })
+
   it('serves exactly one signed action request over a private verified socket', async () => {
     const execute = vi.fn(async (request: BrokerClientRequest) => response(request))
     const server = await start({ core: core({ execute }) })

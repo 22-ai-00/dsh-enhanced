@@ -8,6 +8,7 @@ import { commitOnGitHub, inspectGitHub } from './github.js'
 import {
   brokerAdminRequestDigest,
   canonicalBrokerJson,
+  normalizeBrokerInspectObservation,
   type BrokerAdminRequest,
   type BrokerAdminResponseUnsigned,
   type BrokerClientRequest,
@@ -184,27 +185,18 @@ function containsCredentialShape(value: unknown): boolean {
   return false
 }
 
-function inspectProjection(kind: BrokerInspectPayload['kind'], observed: unknown, grant: ExternalGitHubGrant): BrokerInspectObservation | undefined {
-  if (!plain(observed) || observed.untrusted !== true) return undefined
-  if (kind === 'repository') {
-    if (observed.full_name !== grant.destination.repository) return undefined
-    return Object.freeze({ full_name: grant.destination.repository, untrusted: true })
-  }
-  if (kind === 'branch') {
-    const commit = plain(observed.commit) ? observed.commit : undefined
-    if (observed.name !== grant.destination.branch || typeof commit?.sha !== 'string' || !/^[0-9a-f]{40}$/iu.test(commit.sha)) return undefined
-    return Object.freeze({ name: grant.destination.branch, commit: Object.freeze({ sha: commit.sha }), untrusted: true })
-  }
-  if (kind === 'file') {
-    if (typeof observed.path !== 'string' || !grant.destination.paths.includes(observed.path) || typeof observed.sha !== 'string' || !/^[0-9a-f]{40}$/iu.test(observed.sha)
-      || typeof observed.content !== 'string' || Buffer.byteLength(observed.content) > 65_536 || Buffer.from(observed.content, 'utf8').toString('utf8') !== observed.content) return undefined
-    return Object.freeze({ path: observed.path, sha: observed.sha, content: observed.content, untrusted: true })
-  }
-  return undefined
+function inspectProjection(payload: BrokerInspectPayload, observed: unknown, grant: ExternalGitHubGrant): BrokerInspectObservation | undefined {
+  try {
+    // The protocol normalizer is the single wire DTO boundary.  In particular,
+    // it binds PR number, head, repository, and base branch before an untrusted
+    // GitHub response can enter the signed broker result.
+    return normalizeBrokerInspectObservation(payload, observed, grant.destination)
+  } catch { return undefined }
 }
 
 function githubGrant(grant: ExternalGitHubGrant): ActionGrant {
-  return Object.freeze({ id: grant.id, revision: grant.revision, principalDigest: grant.owner.principalDigest, principalRecordId: grant.owner.principalRecordId, principalVersion: grant.owner.principalVersion, workspace: grant.owner.workspace, agentPreset: grant.owner.preset, repository: grant.destination.repository, branch: grant.destination.branch, paths: [...grant.destination.paths], credentialHandle: grant.credentialId, expiresAt: grant.expiresAt, maxActions: grant.maxActions, maxTotalBytes: grant.maxTotalBytes })
+  return Object.freeze({ id: grant.id, revision: grant.revision, principalDigest: grant.owner.principalDigest, principalRecordId: grant.owner.principalRecordId, principalVersion: grant.owner.principalVersion, workspace: grant.owner.workspace, agentPreset: grant.owner.preset, repository: grant.destination.repository, branch: grant.destination.branch, paths: [...grant.destination.paths], credentialHandle: grant.credentialId, expiresAt: grant.expiresAt, maxActions: grant.maxActions, maxTotalBytes: grant.maxTotalBytes,
+    ...(grant.destination.baseBranch === undefined ? {} : { repoWorkflow: Object.freeze({ baseBranch: grant.destination.baseBranch, allowBranchCreate: false, allowPullRequest: false }) }) })
 }
 
 function response(record: BrokerLedgerRecord): BrokerResponse {
@@ -292,7 +284,7 @@ export class ExternalBrokerCore {
         const payload = request.payload as BrokerInspectPayload
         const inspected = await abortable(this.#inspect({ grant: githubGrant(grant), kind: payload.kind, ...(payload.path === undefined ? {} : { path: payload.path }), ...(payload.pullRequestNumber === undefined ? {} : { pullRequestNumber: payload.pullRequestNumber }), token, signal: combined }), combined)
         if (inspected) {
-          const projected = inspectProjection(payload.kind, inspected.observed, grant)
+          const projected = inspectProjection(payload, inspected.observed, grant)
           if (projected && !secrets.some(secret => containsSecret(projected, secret)) && !containsCredentialShape(projected)) { const canonical = canonicalBrokerJson(projected); result = { operation: 'inspect', repository: grant.destination.repository, branch: grant.destination.branch, kind: payload.kind, observed: projected, observedDigest: createHash('sha256').update(canonical).digest('hex') } }
         }
       }

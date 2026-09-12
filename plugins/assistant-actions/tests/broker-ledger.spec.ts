@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createBrokerClientRequest, createBrokerServerHello, type BrokerRequestIntent } from '../src/broker-protocol.ts'
-import { BrokerLedgerError, ExternalBrokerLedger, brokerPayloadBytes, withBrokerGrantDigest, type ExternalGitHubGrantUnsigned } from '../src/broker-ledger.ts'
+import { BrokerLedgerError, ExternalBrokerLedger, brokerPayloadBytes, externalGrantMirror, withBrokerGrantDigest, type ExternalGitHubGrantUnsigned } from '../src/broker-ledger.ts'
 
 const roots: string[] = []
 const keys = generateKeyPairSync('ed25519')
@@ -25,7 +25,7 @@ function grant(changes: Partial<ExternalGitHubGrantUnsigned> = {}) {
 function request(generation: number, value = grant(), changes: Partial<BrokerRequestIntent> = {}) {
   const payload = { expectedHeadOid: 'c'.repeat(40), headline: 'change', files: [{ path: 'a.txt', content: 'hello' }] }
   const partial = { actionId: 'action', grantId: value.id, grantRevision: value.revision, grantDigest: value.digest, owner: value.owner, sessionId: value.sessionId, agentId: 'agent', rootCallId: 'root-call', callId: 'call', operation: 'commit' as const,
-    source: value.source, destination: { classification: 'github-repository' as const, repository: value.destination.repository, branch: value.destination.branch }, payload, deadline: now + 30_000,
+    source: value.source, destination: { classification: 'github-repository' as const, repository: value.destination.repository, branch: value.destination.branch, ...(value.destination.baseBranch === undefined ? {} : { baseBranch: value.destination.baseBranch }) }, payload, deadline: now + 30_000,
     budget: { reservationId: 'reservation', actions: 1, bytes: 0, costMetric: 'github-api-units' as const, maxCostUnits: 1 }, ...changes }
   const hello = createBrokerServerHello({ instanceId: 'broker', generation, policyEpoch: value.policyEpoch, emergencyEpoch: value.emergencyEpoch, expiresAt: now + 30_000 }, keys.privateKey)
   const requestId = 'request-' + partial.actionId
@@ -53,8 +53,25 @@ describe('ExternalBrokerLedger', () => {
     await rename(parent, replacement); await rename(parked, parent)
   })
 
-  it('rejects inspect kinds that require absent base-branch authority before creating a ledger', () => {
+  it('requires exact grant base-branch scope for pull-request inspection', () => {
     expect(() => grant({ allowedInspectKinds: ['repository', 'pull-request'] })).toThrow(/invalid-input/)
+    const scoped = grant({ destination: { classification: 'github-repository', repository: 'owner/repository', branch: 'main', baseBranch: 'release', paths: ['a.txt'] }, allowedInspectKinds: ['pull-request', 'checks', 'reviews'] })
+    const { digest: _ignoredDigest, ...unsigned } = scoped
+    expect(externalGrantMirror(unsigned).destination).toMatchObject({ branch: 'main', baseBranch: 'release' })
+  })
+
+  it('rejects a pull-request request whose signed base branch differs from its grant', async () => {
+    const ledger = new ExternalBrokerLedger(await path(), 'broker', { now: () => now }), authority = ledger.claimController('daemon')
+    const scoped = grant({ destination: { classification: 'github-repository', repository: 'owner/repository', branch: 'main', baseBranch: 'release', paths: ['a.txt'] }, allowedOperations: ['inspect'], allowedInspectKinds: ['pull-request'] })
+    ledger.syncGrants([scoped], 4, authority)
+    const accepted = request(authority.generation, scoped, { operation: 'inspect', payload: { kind: 'pull-request', pullRequestNumber: 1 } })
+    expect(ledger.prepare(accepted, authority).record.operation).toBe('inspect')
+    const { protocol: _ignoredProtocol, type: _ignoredType, requestId: _ignoredRequestId, challenge: _ignoredChallenge, client: _ignoredClient, broker: _ignoredBroker, payloadDigest: _ignoredPayloadDigest, policyEpoch: _ignoredPolicyEpoch, emergencyEpoch: _ignoredEmergencyEpoch, clientKeyId: _ignoredClientKeyId, signature: _ignoredSignature, ...crossed } = accepted
+    const crossedIntent = { ...crossed, actionId: 'cross-base', callId: 'cross-base', destination: { ...accepted.destination, baseBranch: 'other' }, budget: { ...accepted.budget, reservationId: 'cross-base' } }
+    const hello = createBrokerServerHello({ instanceId: 'broker', generation: authority.generation, policyEpoch: scoped.policyEpoch, emergencyEpoch: scoped.emergencyEpoch, expiresAt: now + 30_000 }, keys.privateKey)
+    const signed = createBrokerClientRequest(crossedIntent, hello, scoped.client, scoped.clientKeyId, keys.privateKey, 'cross-base')
+    expect(() => ledger.prepare(signed, authority)).toThrow(/grant/)
+    ledger.close()
   })
 
   it('accounts action, byte, and GitHub API unit budgets before dispatch', async () => {
