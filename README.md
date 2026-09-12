@@ -44,6 +44,8 @@ dsh plugin --profile web add ./plugins/hello
 
 需要试用有限离线执行时，可显式使用 `--scenario autonomy --isolation-image sha256:<本机固定镜像ID>`。安装器会实际探测 Docker 并为本机 Web owner 配置有次数、期限和累计时长的隔离授权；参数与前置条件见[安装文档](scripts/install/README.md)。这是基本 RSI 首版的实验入口；有限修复使用下述 repair admission，外部动作需要单独配置范围明确的授权和凭据，完整自治规划继续推进。
 
+首次安装若因 `ERR_PNPM_IGNORED_BUILDS` 提示 `koffi` 未获准构建，请进入报错列出的 profile 目录，用 pnpm 11.7.0 执行 `pnpm approve-builds koffi`，成功后重跑原安装命令。此步骤只批准该 profile 的原生依赖，详见[首次安装依赖审批](scripts/install/README.md#首次安装依赖审批)。
+
 希望通过飞书日常对话自动学习语言等有界偏好时，使用普通 Lark 场景即可；它不要求 Evaluation、Heartbeat、Health 或 Recovery：
 
 ```sh
