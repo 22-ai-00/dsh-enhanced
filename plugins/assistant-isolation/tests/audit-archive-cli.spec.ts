@@ -91,6 +91,7 @@ describe('built isolation audit archive CLI', () => {
   })
 
   it('serializes repeated four-process archive races without a fork or duplicate records', async () => {
+    // Twenty rounds start four real Node processes each; retain each 10s child bound while allowing queued CI CPU time for the full race matrix.
     const options = { encoding: 'utf8' as const, timeout: 10_000, maxBuffer: 64 * 1024, env: { ...process.env, NODE_NO_WARNINGS: '1' } }
     for (let repetition = 0; repetition < 20; repetition += 1) {
       const { stateRoot, archiveDirectory } = fixture()
@@ -109,5 +110,5 @@ describe('built isolation audit archive CLI', () => {
         sourceStateRootDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
       })
     }
-  })
+  }, 60_000)
 })
