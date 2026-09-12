@@ -13,6 +13,28 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 当前实施次序：冻结协议与统计 → 耐久运行账本与有界协调器 → 固定任务及原生 Host adapter → 操作入口/真实模型/独立留出验证。每一步记录真实进度，工作包 04 完整验收前保持实现中。
 
 
+## 独立留出 provider 协议与 Host 生命周期
+
+`@dsh-enhanced/assistant-evaluation/benchmark/holdout` 现在提供独立留出 provider 的实验性 Host SDK。该子入口是 inert module：import 不会挂载插件、启动子进程、打开数据库或注册模型工具；plain `runIndependentHoldout()` 也必须由可信 Host 显式传入 plan、stores、authority factory 与 delegate factory。插件内调用使用 `runIndependentHoldoutInContext(ctx, options)`，由当前 Cordis Fiber 的 `ctx.effect()` 持有 journal/evidence descriptors、authority/delegate session 和 AbortController。卸载时 effect abort 运行、等待有界清理并关闭两个 store；自然完成后同样释放资源和 effect。Cordis 只负责生命周期所有权，不提供 OS、凭据或隐藏数据隔离。
+
+协议固定为 `dsh-benchmark/independent-holdout/v1`，operator 先固定 exact dataset `{id, version, digest}` 和 Ed25519 public key，Host 再验证有序的 signed `manifest → input → verdict → finish`：
+
+- manifest 只携带公开 case identity、domain、input digest 与 acceptance digest，并把数据集 digest 绑定到这些 commitments；
+- input 把临时 input bytes 绑定到 manifest、plan digest、exact cell 和 input digest，不携带 acceptance material；
+- verdict 把 authority 判定绑定到同一个 case/cell、input/acceptance commitment 及 Host 提交的 exact output digest；
+- finish 绑定完整 cell 数，以及按冻结计划顺序排列的 signed-verdict envelope digests。
+
+签名证明 envelope 来自 operator pinned key，digest 证明内容一致；二者都不证明数据集在候选生成前的历史冻结时间。`acceptanceDigest` 是 commitment，不是加密或保密边界，低熵答案仍可能被猜测。完整独立验收还需要外部只增透明 anchor 或等价的事前冻结证据，以及候选执行体无法读取/改写的 authority 部署。
+
+每个 cell 的私有 input 只交给 delegate，raw output 只发送给 authority 的 verdict operation。Host 在请求结算后尽力清零其持有的 input/output arrays；journal、content-addressed evidence 和 report 只写 commitments、signed manifest/verdict/finish、Host metrics、execution evidence digest、quiescence 和 output digest，不写 signed input envelope 或 raw input/output。该“不持久化”只描述 SDK 自己的存储，不能约束外部 provider、delegate、模型端或同 UID 进程。
+
+资源用量和停止状态由 Host delegate 返回并由 runner 按冻结 versions/budget 重验，elapsed latency 由 runner 计量；authority 不负责资源计量。当前没有独立于可信 Host adapter 的 meter，所以这些 metrics 仍是 Host 自计量证据。缺失 token/tool/cost（当金额预算存在）、版本漂移、超预算、非 quiescent、provider/协议错误、取消或清理无法确认都会产生 unknown，并阻止后续 cell。
+
+恢复不隐式重放：完整 journal 与完整 completion marker 可以离线递归重验，且不会重新启动 authority 或 delegate；unknown 直接返回。completed prefix、stale running intent、无 finish marker 的 completed journal，以及 marker/plan/evidence 漂移均在 provider startup 前失败关闭。v1 没有 durable provider resume token。尤其在最后一个 cell，finish marker 先于 runner 的 SQLite `finish()` 发布；若进程在两者之间真实崩溃，重启会保留 running intent，operator 必须确认旧执行已经停止，再显式 `BenchmarkStore.interrupt()` 记为 unknown，不能把 marker 当作 SQLite 成功终态。
+
+`openHoldoutProvider()` 使用一条串行 NDJSON stdio session，固定 child `cwd` 为 `/`，完全替换为 operator 显式 environment，不继承 Host environment，并对帧、stderr、ready/request/close/kill 设置上限。它要求 executable 是绝对 canonical pathname，但没有把 executable fd/inode 绑定到 `spawn`，无法抵抗校验后的 pathname 替换。当前集成测试的 authority 是仓库 fixture 启动的同 UID synthetic child；它证明真实子进程 transport、签名协议、持久化边界和重启重验行为，不证明独立 UID/账号/机器、真实 operator holdout、真实模型调用或线上收益。WP04 因此仍为实现中。
+
+
 ## 原生开发集入口
 
 `./benchmark/native` 复用 `AgentRegistry.create()` 与生产 `AgentLoop`，每个 cell 使用新 Context、Session 与临时目录。直接接原生入口是因为 Automations 的 `reconcileSystem` 会修改自动化定义并注入 Growth 上下文，不适合此阶段冻结单次输入与空能力环境；日常 Automation 路径没有被复制或替换。首批是 8 道公开合成研究/注入题，答案由纯函数严格判断，模型不接收验收对象。引用必须覆盖用于计算、候选排除和规则判断的来源，规则已纳入输入摘要；只有正确答案与引用、完整成功终态、完整计量和资源释放同时满足，才记录 completed。
@@ -84,3 +106,5 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 ## Memory 真实模型开发试验
 
 2026-09-07 使用同一 `codex-subscription/gpt-5.6-terra`，两个冻结版本各执行 24 次无工具请求。v1 的严格答案与引用验收为 baseline 2/12、candidate 1/12；候选核心答案正确但引用格式多不满足要求，保留原判定。v2 在新题目版本中明确来源 ID/URI/claim marker 约定，得到 baseline 2/12、candidate 12/12（10 对改善、2 对持平，无未知）。完整计划、逐 cell 答案与计量见 [原始试验证据](evidence/memory-benchmark-2026-09-07.json)。这只是公开开发题中的检索可用性收益，不是隐藏留出或基础模型智能提升证据。
+
+本切片最终工程验证（2026-09-12）：Evaluation 36 files / 293 passed，根 `pnpm check` 退出 0，合计 5,154 passed / 1 skipped，33 个 dry-run pack。provider startup 取消、迟到资源清理、POSIX 同组后代清理、独立 Node 清理等待及 startup cleanup 错误传播已补回归；进程组数值复用和脱组后代不属于强 OS containment 保证。完整命令、源码哈希、TraeX 审查处理和限制见[本批证据](evidence/wp04-independent-holdout-provider-2026-09-12.json)。

@@ -1,0 +1,280 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-12",
+  "recordedAt": "2026-09-12T09:11:16.533551+00:00",
+  "baseCommit": "89751c3250180a3efc267d92bb69af1b6b0880c0",
+  "status": "passed",
+  "completeWorkPackage": false,
+  "scope": [
+    "WP04 independent holdout signed protocol and operator-pinned dataset identity",
+    "WP04 inert Host SDK, Cordis Fiber-owned execution and fail-closed recovery",
+    "WP04 private evidence persistence boundary and real local subprocess transport"
+  ],
+  "workPackages": {
+    "strengthened": [
+      "04"
+    ],
+    "statusChanged": false,
+    "wp04": "implementing",
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "implemented": [
+    "The published ./benchmark/holdout surface is an inert Host SDK. Importing it does not mount a Cordis plugin, open stores, spawn an authority or register model tools.",
+    "runIndependentHoldoutInContext registers the journal, evidence store, authority and delegate session, cancellation and bounded cleanup as an effect owned by the caller's current Cordis Fiber.",
+    "The operator pins an exact dataset id, version and digest plus an Ed25519 authority public key. Signed manifest, input, verdict and finish envelopes bind the public commitments, exact plan and cell identities, output digest and ordered verdict chain.",
+    "The Host validates frozen variant versions, per-cell budget, Host-reported metrics, execution evidence and quiescence. The authority does not supply resource accounting.",
+    "The benchmark journal, evidence objects and reports persist commitments, signed manifest/verdict/finish envelopes, Host metrics and evidence digests, but not the signed input envelope, raw input or raw output. Host-held input and output byte arrays are zeroed after settlement on a best-effort basis.",
+    "A complete journal plus completion marker is recursively reverified without opening the provider or delegate. Unknown results are terminal; completed prefixes, unresolved intents, missing finish markers and identity drift fail closed without selective replay.",
+    "The provider transport uses one in-flight NDJSON request, a fixed child cwd of /, a complete operator-supplied environment instead of inherited Host environment, bounded frames and stderr, request deadlines and bounded TERM-to-KILL shutdown.",
+    "The Linux evidence store pins a private 0700 evidence directory descriptor, publishes canonical 0600 content-addressed files, rejects unsafe ancestors, links and replacement, and recursively verifies the manifest, verdict and finish chain on read.",
+    "Arbitrary Host provider startup, requests and close now have a validated providerTimeoutMs. Abort or timeout fences late startup to one bounded close with no further request/store access. POSIX subprocess shutdown requires both leader closure and same-process-group disappearance; remaining descendants receive TERM then KILL, with unconfirmed cleanup rejected."
+  ],
+  "validation": {
+    "processIntegration": {
+      "status": "passed",
+      "testFilesPassed": 1,
+      "testsPassed": 2,
+      "testsSkipped": 0,
+      "realChildProcess": true,
+      "sameUidSyntheticAuthority": true,
+      "liveModel": false,
+      "realIndependentHoldoutDeployment": false
+    },
+    "packageContract": {
+      "status": "passed",
+      "testFilesPassed": 1,
+      "testsPassed": 1,
+      "testsSkipped": 0,
+      "file": "tests/assistant-evaluation-holdout-package.spec.ts",
+      "result": "The packed package exposes the importable ./benchmark/holdout entry and excludes tests, fixtures, state databases and private keys.",
+      "sourceStage": "final-root-gate"
+    },
+    "independentReviews": {
+      "status": "passed-for-scoped-final-changes",
+      "reviews": {
+        "cordisLifecycle": {
+          "status": "passed",
+          "reviewer": "holdout_code_verify",
+          "command": "pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/holdout-executor.spec.ts",
+          "exitCode": 0,
+          "testsPassed": 18,
+          "fixedFinding": "Uncooperative provider startup could block Fiber disposal; late startup was not gated before manifest."
+        },
+        "providerProcessOwnership": {
+          "status": "passed",
+          "reviewer": "holdout_code_verify",
+          "command": "pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/holdout-provider.spec.ts",
+          "exitCode": 0,
+          "testsPassed": 26,
+          "providerSha256": "e064ed2e72e59c4566874dbb3e9dbd3ba7c1fa3fbc00c0bff3dc2305a8f22734",
+          "testsSha256": "bb1074ede94d8bef1a831973afbd130f46b78b9ba549fada7049b738445ff3e0",
+          "covered": [
+            "leader closes while descendant remains",
+            "standalone Node TLA keeps event loop alive through cleanup",
+            "unconfirmed startup cleanup is surfaced"
+          ]
+        },
+        "traexBroadReview": {
+          "status": "timed-out-no-final-verdict",
+          "command": "traex exec -s read-only review --model GPT-6-Astra --ephemeral --json",
+          "externalTimeoutSeconds": 600,
+          "exitCode": 124,
+          "log": "/tmp/dsh-traex-wip-review-20260912.jsonl",
+          "logSha256": "05f459146a5e6f0999fe657555db1c2b0c298ce1fa320643187a518064c40262",
+          "result": "Interim process-group finding was independently confirmed and fixed. The timeout is not a passed review."
+        },
+        "traexTargetedReview": {
+          "status": "completed-findings-triaged-and-scoped-fixes-independently-verified",
+          "command": "traex exec -s read-only --model GPT-5.6-Terra --ephemeral --json (source-only prompt; tools prohibited)",
+          "exitCode": 0,
+          "externalTimeoutSeconds": 180,
+          "reviewedProviderSha256": "20a132d0e06f25de919efa7d27d2d05642e34a62aac2491cd1b86ad620c492d9",
+          "report": "/tmp/dsh-traex-provider-targeted-20260912.md",
+          "reportSha256": "29b897188e1ab90fe954515b609edbd519a3652f9efbef24d064fe0961e3f47e",
+          "findings": [
+            {
+              "finding": "Unref shutdown polling can let a standalone Node Host exit before cleanup escalation.",
+              "decision": "accepted; independently reproduced exit 13 with surviving descendant; fix and standalone regression required; implemented and independently verified in final provider suite (26 passed)"
+            },
+            {
+              "finding": "Track child exit rather than close.",
+              "decision": "not adopted; stream closure is also owned resource settlement, so unresolved inherited pipes deliberately fail closed rather than report success"
+            },
+            {
+              "finding": "Startup error hides termination-unconfirmed cleanup failure.",
+              "decision": "accepted; propagate cleanup failure before original startup error; implemented and independently verified in final provider suite (26 passed)"
+            },
+            {
+              "finding": "Numeric PID/PGID reuse can target a different process group.",
+              "decision": "documented plain-process-group limitation; no race-free containment claim, stronger OS supervisor outside SDK slice"
+            }
+          ]
+        },
+        "skillsFixture": {
+          "status": "passed",
+          "reviewer": "holdout_code_verify",
+          "scope": "Read-only verification of exact canonical projection, scope, watermark and version/digest/disposition fence fixture; production gates unchanged.",
+          "file": "plugins/assistant-skills/tests/external-holdout-service.spec.ts",
+          "sourceSha256": "b4d4ba5e1e1e7ee5257f5fcd7c8be91bae107c3226338cc0a54a82ac47015fae",
+          "workerTargetedTests": {
+            "exitCode": 0,
+            "testsPassed": 2,
+            "dockerImage": "sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8"
+          },
+          "limitation": "Goal outcome/canonical evidence remains an explicit acceptance fixture, not a live verifier or autonomous repair proof."
+        },
+        "archiveAndSnapshotFollowups": {
+          "status": "passed",
+          "reviewer": "holdout_code_verify",
+          "scope": "Mutable archive control DB identity diff, 20 repetitions of four-process race regression, and two 04700 snapshot permission assertions.",
+          "result": "Regular-file, current UID, exact permissions, link count and dev/ino fences retained; changing SQLite timestamps are permitted. Historical full SQLite implementation was not re-reviewed in this scope.",
+          "command": "git diff --check",
+          "exitCode": 0
+        }
+      },
+      "remainingBlockingFindings": 0
+    },
+    "rootGate": {
+      "status": "passed",
+      "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+      "exitCode": 0,
+      "counts": {
+        "root": {
+          "testFilesPassed": 33,
+          "testsPassed": 493,
+          "testsSkipped": 1
+        },
+        "recursive": {
+          "testFilesPassed": 344,
+          "testsPassed": 4661,
+          "testsSkipped": 0
+        },
+        "aggregate": {
+          "testFilesPassed": 377,
+          "testsPassed": 5154,
+          "testsSkipped": 1
+        },
+        "dryRunPacks": 33
+      },
+      "log": "/tmp/dsh-rsi-wip-root-final-v2-20260912.log",
+      "logSha256": "a4362f9da0e7d3625c6949949af36a9069e147c75ff69322938b44ffeb92aa3e",
+      "note": "Runtime, test and package files were frozen before this final gate and their hashes rechecked afterward. Documentation and evidence metadata were finalized after the gate; no runtime/test/package changes followed.",
+      "previousAttempt": {
+        "status": "failed",
+        "exitCode": 1,
+        "log": "/tmp/dsh-rsi-wip-root-final-20260912.log",
+        "logSha256": "bd4e5872c316ba0ff1c7a9f29235552d1b323e065be4634de0dcbceadbbee780",
+        "failure": "assistant-skills external-holdout-service topology canary skill_run: canonical deployment evidence unavailable; test fixture omitted newly required assistantEvaluation projection/fence service. Reproduced in targeted run; fixture repair in progress.",
+        "note": "Lifecycle hardening was still in progress during this run; it is not final frozen-source evidence."
+      },
+      "manifestValidation": "30 plugins and 3 shared packages",
+      "lint": "zero warnings",
+      "typecheck": "passed",
+      "build": "passed",
+      "packageInspection": "Evaluation pack contains public holdout lib JS/declarations and excludes tests/fixtures/private-key/state files."
+    },
+    "previousFocused": {
+      "status": "passed",
+      "testFilesPassed": 6,
+      "testsPassed": 62,
+      "testsSkipped": 0,
+      "files": [
+        "plugins/assistant-evaluation/tests/benchmark/store.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-protocol.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-provider.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-evidence.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-executor.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-process-integration.spec.ts"
+      ],
+      "note": "Historical pre-hardening focused total; current final validation additionally covers provider startup cancellation and orphan descendant cleanup.",
+      "sourceStage": "before-final-lifecycle-hardening"
+    },
+    "focused": {
+      "status": "passed-with-final-package-suite",
+      "files": [
+        "plugins/assistant-evaluation/tests/benchmark/store.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-protocol.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-provider.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-evidence.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-executor.spec.ts",
+        "plugins/assistant-evaluation/tests/benchmark/holdout-process-integration.spec.ts"
+      ],
+      "note": "All listed specs ran in the final 36-file/293-test Evaluation suite; no separate focused count is claimed."
+    },
+    "previousAssistantEvaluationFull": {
+      "status": "passed",
+      "command": "pnpm --filter @dsh-enhanced/assistant-evaluation test",
+      "testFilesPassed": 35,
+      "testFilesSkipped": 1,
+      "testsPassed": 284,
+      "testsSkipped": 4,
+      "log": "/tmp/dsh-wp04-holdout-evaluation-final.log",
+      "logSha256": "82802f8091603ffe9fb08826461133c9afa4292f371129d57070623bfb5ba5bc",
+      "sourceStage": "before-final-lifecycle-hardening"
+    },
+    "assistantEvaluationFull": {
+      "status": "passed",
+      "command": "pnpm check (recursive assistant-evaluation test stage)",
+      "testFilesPassed": 36,
+      "testFilesSkipped": 0,
+      "testsPassed": 293,
+      "testsSkipped": 0,
+      "log": "/tmp/dsh-rsi-wip-root-final-v2-20260912.log",
+      "logSha256": "a4362f9da0e7d3625c6949949af36a9069e147c75ff69322938b44ffeb92aa3e"
+    }
+  },
+  "limitations": [
+    "The subprocess integration uses a synthetic authority child owned by the same OS UID. It does not prove an independent UID, account, machine, trust domain or production deployment boundary.",
+    "No real-model benchmark/RSI execution, independently administered holdout dataset or live benefit comparison was run in this slice. TraeX was used only for code review.",
+    "Ed25519 signatures and content digests authenticate current envelopes but do not prove that the dataset and oracle were frozen before candidate generation. There is no external append-only transparency or timestamp anchor.",
+    "Metrics are measured or asserted by the trusted Host adapter and checked by the runner; there is no independent external resource meter.",
+    "The provider executable is validated as an absolute canonical pathname but is not fd- or inode-bound across validation and spawn, so pathname replacement is outside the guarantee.",
+    "An acceptance digest is a content commitment, not encryption. It does not keep low-entropy acceptance material secret.",
+    "On the last cell, the signed finish evidence and completion marker are published before the SQLite cell result is committed. A crash in that window leaves a running intent; after independently confirming the old execution is stopped, an operator must interrupt it to unknown rather than promote the marker to success.",
+    "The evidence store is Linux-only and depends on /proc/self/fd directory anchoring plus owner-only path and file permissions. It does not provide an equivalent non-Linux evidence-store guarantee.",
+    "The SDK and benchmark report never authorize promotion; promotionAuthorized remains false.",
+    "Best-effort zeroing and SDK-level non-persistence do not prevent an authority, delegate, model provider or same-UID process from retaining private input or raw output elsewhere.",
+    "Plain POSIX process-group cleanup does not contain descendants that leave the group and cannot rule out numeric PID/PGID reuse causing a signal to reach a different group. It is not race-free OS process identity or a strong containment boundary. Windows manages the direct child and owned stdio; unresolved inherited streams cause bounded termination-unconfirmed rather than success."
+  ],
+  "sourceSha256": {
+    "status": "final-current-tree-runtime-tested-doc-metadata-finalized-after-gate",
+    "evidenceFileExcluded": true,
+    "files": {
+      "docs/agent-autonomy-implementation.md": "262838c95d93a3dd228fef96aeccc540c958b2c1007c7cdcd5756557738104cf",
+      "docs/autonomy-delivery-path-review-2026-09-08.md": "86c5d52ce18e913457807523d3ec301ca272e0a739346088b537a00beb217b05",
+      "docs/autonomy-handoff-2026-09-09.md": "8115da9827479bc99e006f630418b5bedeeacd5fd879ad8e09007061db2a8d88",
+      "docs/benchmark-implementation.md": "2d180e78f0bd647414dd35da3e4b6cecbd376c61eaf8b4256ff52f4e2e1c8286",
+      "docs/evidence/sqlite-inode-binding-2026-09-11.json": "27fb746b9fc7029c6b7b3faf1c4cf69409604179dfb44b1c733b4f686b60a1ba",
+      "plugins/assistant-automations/tests/operator.spec.ts": "d3c4980e2bb90a4a1038023fa3da98bffbec589b8fa17f6495a811a0977600b7",
+      "plugins/assistant-delivery/tests/operator-snapshot.spec.ts": "529f1761aa85309cc631d218772bacbcd932d45de0519ea378a69c21bf51190b",
+      "plugins/assistant-evaluation/README.md": "8b3c46e08fb47f20ee047dfa0b8b9430395de4ec3a6818577f609001f0e4b09d",
+      "plugins/assistant-evaluation/package.json": "115b26fa8557dfde6ffc746b8bd56b4b67a42184e4805311837e3ee203a49a4e",
+      "plugins/assistant-evaluation/src/benchmark/holdout-evidence.ts": "a6964b4e6e9885d7fe59cbe389798a3c12b53a104ba1a8cd899c3cebdd46389b",
+      "plugins/assistant-evaluation/src/benchmark/holdout-protocol.ts": "059c70e6cc249a100332f067d73c9c78a75392083e4be9d8e9cc189e5b4e8b17",
+      "plugins/assistant-evaluation/src/benchmark/holdout-provider.ts": "e064ed2e72e59c4566874dbb3e9dbd3ba7c1fa3fbc00c0bff3dc2305a8f22734",
+      "plugins/assistant-evaluation/src/benchmark/holdout.ts": "2608a874f75154c8ac09a9e7ea499af5bebd664e65688b56affdf74cc251bf82",
+      "plugins/assistant-evaluation/src/benchmark/store.ts": "a6b8e504e3561a6d01b0cf58bd5a9fa91fb91f0ea68e46401ac6b94126460390",
+      "plugins/assistant-evaluation/tests/benchmark/holdout-evidence.spec.ts": "fecd90d9f80da65fbae78ce1a553b08db16f5fa350e6b58addeee9ef5838de40",
+      "plugins/assistant-evaluation/tests/benchmark/holdout-executor.spec.ts": "380634d88af724a098f67b876fa3aaac47330def9653eadef412926926b13129",
+      "plugins/assistant-evaluation/tests/benchmark/holdout-process-integration.spec.ts": "fb0d00a87c02142304fde48f0ccee0d2de6f29b2d55af30a8bd33fe1ba9f8835",
+      "plugins/assistant-evaluation/tests/benchmark/holdout-protocol.spec.ts": "efe69b44d38a57b5dd95dab09216ff2c11a018a92a653f5ac6f7842458a0d714",
+      "plugins/assistant-evaluation/tests/benchmark/holdout-provider.spec.ts": "bb1074ede94d8bef1a831973afbd130f46b78b9ba549fada7049b738445ff3e0",
+      "plugins/assistant-evaluation/tests/benchmark/store.spec.ts": "f98e5faec88cdc4d168e7517d91f5d2ce229e3730884878b5c59e11fc8d4135c",
+      "plugins/assistant-evaluation/tests/fixtures/benchmark-holdout-authority.mjs": "a6c49ac0932856a9972d9f0e2a8e3e90f7859fc089aeb5f618ff7d4ec973621b",
+      "plugins/assistant-isolation/src/audit-archive.ts": "ac6395490992386c9884c9daa8894fe84ab80f9fd7470af4f918dbc500bac9c2",
+      "plugins/assistant-isolation/tests/audit-archive-cli.spec.ts": "33361ffd27b331d06c08193c6f95cd0fd9c5bde5073f75af07a903677759ea51",
+      "plugins/assistant-skills/tests/external-holdout-service.spec.ts": "b4d4ba5e1e1e7ee5257f5fcd7c8be91bae107c3226338cc0a54a82ac47015fae",
+      "tests/assistant-evaluation-holdout-package.spec.ts": "e0a64bbbb61ef748667cdb5002f98e64bc228f70a921ead27908be26efdd92a3"
+    }
+  },
+  "relatedFollowups": [
+    "Archive control DB identity permits concurrent SQLite timestamp/content changes while retaining inode/owner/mode/link checks; four-process stress repeats 20 times.",
+    "Delivery and Automations snapshot fixtures reject 04700 parents. Historical SQLite evidence is preserved separately.",
+    "Skills real Docker topology fixture now supplies current canonical Evaluation projections/fences; production authorization and acceptance gates are unchanged."
+  ]
+}

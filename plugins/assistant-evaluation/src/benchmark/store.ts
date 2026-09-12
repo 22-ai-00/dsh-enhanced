@@ -16,6 +16,10 @@ type PlanRow = { id: string; digest: string; plan_json: string; cells_json: stri
 type IntentRow = { cell_id: string; cell_json: string; started_at: number }
 type ResultRow = { cell_id: string; result_json: string }
 type CompiledPlan = { digest: string; cells: readonly BenchmarkCell[]; positions: ReadonlyMap<string, number>; parseResult: (value: unknown) => BenchmarkResult }
+export interface BenchmarkStoreStatus {
+  readonly results: readonly BenchmarkResult[]
+  readonly runningCell: BenchmarkCell | null
+}
 
 function databaseError(message: string): never { throw new BenchmarkError(message) }
 
@@ -143,6 +147,22 @@ export class BenchmarkStore {
     }
   }
 
+  #readTransaction<T>(operation: () => T): T {
+    try {
+      this.#database.exec('BEGIN')
+    } catch {
+      throw new BenchmarkError('benchmark journal transaction unavailable')
+    }
+    try {
+      const value = operation()
+      this.#database.exec('COMMIT')
+      return value
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
   #row(id: string): PlanRow {
     const row = this.#database.prepare('SELECT id, digest, plan_json, cells_json FROM benchmark_journal_plans WHERE id = ?').get(id) as PlanRow | undefined
     if (!row) databaseError(`benchmark plan ${id} was not found`)
@@ -202,6 +222,25 @@ export class BenchmarkStore {
   plan(id: string): Readonly<BenchmarkPlan> { return this.#readPlan(id) }
 
   results(id: string): readonly BenchmarkResult[] { return this.#readResults(this.#readPlan(id)) }
+
+  status(id: string): Readonly<BenchmarkStoreStatus> {
+    return this.#readTransaction(() => {
+      const plan = this.#readPlan(id)
+      const compiled = this.#compile(plan)
+      const results = this.#readResults(plan)
+      const intent = this.#database.prepare('SELECT cell_id, cell_json, started_at FROM benchmark_journal_intents WHERE plan_id = ?').get(id) as IntentRow | undefined
+      if (!intent) return Object.freeze({ results, runningCell: null })
+
+      benchmarkInteger(intent.started_at)
+      const stored = benchmarkSnapshot(json(intent.cell_json, 'running intent')) as BenchmarkCell
+      const scheduled = compiled.cells.find(cell => cell.id === intent.cell_id)
+      const completed = new Set(results.map(result => result.cell.id))
+      const firstUnfinished = compiled.cells.find(cell => !completed.has(cell.id))
+      if (intent.cell_id !== stored.id || !scheduled || !same(scheduled, stored) || !firstUnfinished || !same(firstUnfinished, stored)
+        || results.some(result => result.status === 'unknown')) databaseError('benchmark journal contains an invalid running intent')
+      return Object.freeze({ results, runningCell: scheduled })
+    })
+  }
 
   start(id: string, input: BenchmarkCell, now: number): boolean {
     benchmarkInteger(now)

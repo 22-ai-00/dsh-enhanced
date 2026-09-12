@@ -52,11 +52,61 @@ describe('BenchmarkStore', () => {
     expect(first.start(input.id, cell, 10)).toBe(true)
     first.close()
     const reopened = new BenchmarkStore(path)
+    const firstStatus = reopened.status(input.id)
+    expect(firstStatus).toEqual({ results: [], runningCell: cell })
+    expect(Object.isFrozen(firstStatus)).toBe(true)
+    expect(Object.isFrozen(firstStatus.results)).toBe(true)
+    expect(Object.isFrozen(firstStatus.runningCell)).toBe(true)
+    expect(reopened.status(input.id)).toEqual(firstStatus)
     expect(() => reopened.start(input.id, cell, 11)).toThrow(/running intent/i)
     expect(reopened.results(input.id)).toEqual([])
     reopened.interrupt(input.id, 12)
     expect(reopened.results(input.id)).toEqual([expect.objectContaining({ cell, status: 'unknown', reason: 'interrupted', startedAt: 10, completedAt: 12 })])
     reopened.close()
+  })
+
+  test('reads results and a running cell without consuming or changing the intent', () => {
+    const store = new BenchmarkStore(join(root(), 'benchmark.sqlite'))
+    const input = plan(); const [first, second] = benchmarkSchedule(input)
+    store.create(input)
+    store.start(input.id, first!, 10)
+    store.finish(input.id, result(input, 0))
+    store.start(input.id, second!, 20)
+
+    const before = store.status(input.id)
+    const after = store.status(input.id)
+    expect(before).toEqual({ results: [result(input, 0)], runningCell: second })
+    expect(after).toEqual(before)
+    expect(() => store.start(input.id, second!, 21)).toThrow(/running intent/i)
+    store.interrupt(input.id, 22)
+    expect(store.status(input.id)).toEqual({
+      results: [result(input, 0), expect.objectContaining({ cell: second, status: 'unknown', startedAt: 20, completedAt: 22 })],
+      runningCell: null,
+    })
+    store.close()
+  })
+
+  test('fails closed on a tampered running intent without deleting it', () => {
+    const path = join(root(), 'benchmark.sqlite')
+    const input = plan(); const [first, second] = benchmarkSchedule(input)
+    const store = new BenchmarkStore(path)
+    store.create(input)
+    store.start(input.id, first!, 10)
+    store.close()
+
+    const database = new DatabaseSync(path)
+    database.prepare('UPDATE benchmark_journal_intents SET cell_id = ?, cell_json = ? WHERE plan_id = ?')
+      .run(second!.id, JSON.stringify(second), input.id)
+    database.close()
+
+    const reopened = new BenchmarkStore(path)
+    expect(() => reopened.status(input.id)).toThrow(/invalid running intent/i)
+    reopened.close()
+    const unchanged = new DatabaseSync(path)
+    expect((unchanged.prepare('SELECT cell_id, cell_json, started_at FROM benchmark_journal_intents WHERE plan_id = ?').get(input.id) as { cell_id: string; cell_json: string; started_at: number })).toEqual({
+      cell_id: second!.id, cell_json: JSON.stringify(second), started_at: 10,
+    })
+    unchanged.close()
   })
 
   test('allows only the scheduled first unfinished cell across connections', () => {
