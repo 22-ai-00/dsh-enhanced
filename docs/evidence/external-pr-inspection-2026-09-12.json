@@ -1,0 +1,109 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-12",
+  "baseCommit": "0cff0809b29b6d1aad41b6079336f6a853aee346",
+  "status": "passed",
+  "completeWorkPackage": false,
+  "scope": "External broker PR, checks and reviews read-only follow-up",
+  "implemented": [
+    "Signed grant, Host projection, request and durable ledger bind exact repository, head branch and explicit base branch. PR-related reads require distinct head/base and the requested PR number.",
+    "Host routes all six authorized inspection kinds through the external broker. Existing grants without baseBranch preserve their canonical digest and do not gain PR authority.",
+    "Broker reuses the existing bounded GitHub GET transport with branch/PR creation disabled, validates strict wire DTOs and retains untrusted/truncated metadata.",
+    "Host and broker reserve one GitHub API unit for PR inspection and two for checks or reviews. Durable cumulative budgets and semantic no-replay survive restart."
+  ],
+  "checks": [
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-actions typecheck",
+      "exitCode": 0,
+      "log": "/tmp/dsh-broker-pr-types.log",
+      "logSha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    },
+    {
+      "scope": "external-adapter.spec.ts",
+      "passed": 15,
+      "exitCode": 0,
+      "log": "/tmp/dsh-broker-pr-host.log",
+      "logSha256": "a40b48307088e1d931eb9938e60e1ea73e7f7244f6753167e063fdb6fdd51249"
+    },
+    {
+      "scope": "broker-server.spec.ts new signed-socket/core/restart integration",
+      "passed": 1,
+      "skipped": 30,
+      "exitCode": 0,
+      "log": "/tmp/dsh-broker-pr-socket.log",
+      "logSha256": "660fc2fe6dc6a82a811ae0fefdb86f1a85896a8c7e912f804f107bef8fd960cd"
+    },
+    {
+      "command": "pnpm lint",
+      "exitCode": 0,
+      "log": "/tmp/dsh-broker-pr-lint.log",
+      "logSha256": "7919534034666272589f34f5366af533b9eaedce049069fb9e1a8b0ada3fae68"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+      "exitCode": 0,
+      "log": "/tmp/dsh-broker-pr-check.log",
+      "logSha256": "630f316ff9a21a5c92a5500390c63b866ce961878bea058baa07d3c0baf6268b",
+      "passed": 5253,
+      "skipped": 1,
+      "passedFiles": 388,
+      "dryRunPacks": 33
+    }
+  ],
+  "integrationEvidence": {
+    "actual": [
+      "Unix socket",
+      "Ed25519 request/response",
+      "ExternalBrokerCore",
+      "ExternalBrokerLedger SQLite",
+      "protected test token file",
+      "cumulative 1+2+2 budget",
+      "server/core restart"
+    ],
+    "fixtures": [
+      "GitHub inspect transport",
+      "trusted peer inspector"
+    ],
+    "observed": "Three authorized reads succeed; over-budget read never dispatches; repeated reviews key after restart returns durable result with transport count unchanged at three."
+  },
+  "limitations": [
+    "No live GitHub request, remote CI/review result or independent-UID deployment is claimed.",
+    "External branch/PR creation, compensation, verified delivery and repository-goal readback remain unsupported; this is not the complete repository-maintenance vertical flow.",
+    "A successful snapshot is not goal completion or mutation settlement; truncated checks/reviews cannot establish an overall verdict.",
+    "All 18 planned work packages remain: 3 verified, 13 implementing, 2 pending."
+  ],
+  "sourceHashes": {
+    "docs/agent-autonomy-implementation.md": "1e0b1a3af3106862ab5d97f2eaacf3327df9541f66c17f110606f1ff993644df",
+    "plugins/assistant-actions/README.md": "84387fd74c13b305c77b11dc39eb447edb6f15ff439a4ab7691ed008f6589298",
+    "plugins/assistant-actions/src/broker-core.ts": "f58402cee09600b7f8bfd188d150f8997e9936aff5dfd6d70c5cccd44f1f9bf1",
+    "plugins/assistant-actions/src/broker-ledger.ts": "fb8de0bfa6b0c43071cccaa68fbf3613abf8e652b6067a4898d1bc584dc97561",
+    "plugins/assistant-actions/src/broker-protocol.ts": "c656b4a9409742ab56f9a585bbca0b14f3274178ad681d4bd1f8e155c2d325d2",
+    "plugins/assistant-actions/src/config.ts": "49efe07d70f1a5bb9896182087ed8af15611e24e96326bac0acc9a103430824d",
+    "plugins/assistant-actions/src/service.ts": "38b6121d3ef168918846ecc283896d3b28333f89af26ad0370dbeb7c21e501c0",
+    "plugins/assistant-actions/tests/broker-core.spec.ts": "b572d3fe1a803665cf4adfa2f8310712d407ecfb0c754e884e6d24bfca8957d4",
+    "plugins/assistant-actions/tests/broker-ledger.spec.ts": "fa675bd3054f5c2174e3782d2b44a5e1561fd29bf21545777b1452646646cab2",
+    "plugins/assistant-actions/tests/broker-protocol.spec.ts": "e4dd24ac5bb001ed5809e293dd412c8e65c136d010204fed2e99fd72ab590c00",
+    "plugins/assistant-actions/tests/broker-server.spec.ts": "9d268e62037a6fa7a001442a1153a168dd83814143b81baafb69446706dffc9f",
+    "plugins/assistant-actions/tests/external-adapter.spec.ts": "4b89b5d9d9a18fe276fc3dd5bd6000c47d1d0760af374eea072d40bf068751d3"
+  },
+  "initialFailure": {
+    "command": "pnpm check",
+    "exitCode": 1,
+    "cause": "Unused destructuring variables in new ledger tests violated zero-warning lint. Renamed with underscore prefix; standalone lint passed.",
+    "log": "/tmp/dsh-broker-pr-check-lint-failure.log"
+  },
+  "recordedAt": "2026-09-12T13:22:15.103636+00:00",
+  "independentReview": {
+    "reviewer": "broker_pr_verify",
+    "role": "verifier",
+    "result": "PASS",
+    "verified": [
+      "final check log and aggregate counts",
+      "all recorded source hashes",
+      "git diff --check",
+      "scope binding and strict DTO boundaries",
+      "budget and restart behavior",
+      "documented fixture and unsupported capability limits"
+    ]
+  }
+}

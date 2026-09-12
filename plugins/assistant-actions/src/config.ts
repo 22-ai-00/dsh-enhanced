@@ -38,12 +38,12 @@ const externalGrantSchema = Schema.object({
   owner: Schema.object({ principalDigest: Schema.string().required(), principalRecordId: Schema.string().required(), principalVersion: positive(Number.MAX_SAFE_INTEGER).required(),
     workspace: Schema.string().required(), preset: Schema.string().required(), bindingId: Schema.string().required(), bindingVersion: positive(Number.MAX_SAFE_INTEGER).required(), bindingGeneration: positive(Number.MAX_SAFE_INTEGER).required() }).required(),
   sessionId: Schema.string().required(),
-  destination: Schema.object({ classification: Schema.const('github-repository').required(), repository: Schema.string().required(), branch: Schema.string().required(), paths: Schema.array(Schema.string()).required() }).required(),
+  destination: Schema.object({ classification: Schema.const('github-repository').required(), repository: Schema.string().required(), branch: Schema.string().required(), baseBranch: Schema.string(), paths: Schema.array(Schema.string()).required() }).required(),
   expiresAt: positive(Number.MAX_SAFE_INTEGER).required(), maxActions: positive(10_000).required(), maxTotalBytes: positive(64 * 1024 * 1024).required(),
   source: Schema.object({ classification: Schema.union(['public', 'internal', 'confidential', 'restricted'] as const).required(), provenanceDigest: Schema.string().required() }).required(),
   maxCostUnits: Schema.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).required(),
   allowedOperations: Schema.array(Schema.union(['commit', 'inspect'] as const)).required(),
-  allowedInspectKinds: Schema.array(Schema.union(['repository', 'branch', 'file'] as const)).required(),
+  allowedInspectKinds: Schema.array(Schema.union(['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'] as const)).required(),
 }) as Schema<ExternalActionGrantMirror>
 export const Config: Schema<Config> = Schema.object({
   stateRoot: Schema.string().default(join(homedir(), '.dsh', 'assistant-actions')),
@@ -83,8 +83,7 @@ const identifier = (value: unknown): value is string => text(value, 128) && /^[A
 const canonicalAbsolute = (value: unknown): value is string => typeof value === 'string' && isAbsolute(value) && resolve(value) === value && value !== '/' && !value.includes('\0')
 function validateExternalGrant(grant: ExternalActionGrantMirror): void {
   try {
-    const normalized = normalizeBrokerGrantProjection(grant)
-    if (normalized.allowedInspectKinds.some(kind => !['repository', 'branch', 'file'].includes(kind))) throw new Error('unsupported external inspection')
+    normalizeBrokerGrantProjection(grant)
   } catch { throw new Error('assistant-actions: invalid external grant projection') }
 }
 export function validateConfig(input: Config): ValidatedConfig {

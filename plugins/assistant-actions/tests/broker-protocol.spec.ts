@@ -126,6 +126,18 @@ describe('broker action authentication', () => {
     expect(brokerGrantAuthorityDigest({ ...authority, credentialId: 'other-token' })).not.toBe(projection.grantDigest)
   })
 
+  it('preserves legacy grant canonical form while binding pull-request authority to an explicit base branch', () => {
+    const authority = { protocol: 'assistant-actions/external-github-grant/v1' as const, id: 'grant-1', revision: 5, clientKeyId: 'client-key-1', owner: intent().owner, sessionId: intent().sessionId,
+      destination: { ...intent().destination, paths: ['src/file.txt'] }, credentialId: 'github-owner-token', expiresAt: now + 50_000, maxActions: 3, maxTotalBytes: 4096, maxCostUnits: 10, allowedOperations: ['inspect'] as const, allowedInspectKinds: ['file'] as const,
+      client, source: intent().source, policyEpoch: 12, emergencyEpoch: 4 }
+    expect(createBrokerGrantProjection(authority).destination).not.toHaveProperty('baseBranch')
+    expect(brokerGrantAuthorityDigest(authority)).toBe(brokerDigest(authority))
+    const scoped = { ...authority, destination: { ...authority.destination, baseBranch: 'release' }, allowedInspectKinds: ['pull-request', 'checks', 'reviews'] as const }
+    expect(createBrokerGrantProjection(scoped).destination).toMatchObject({ branch: 'main', baseBranch: 'release' })
+    expect(() => createBrokerGrantProjection({ ...scoped, destination: { ...scoped.destination, baseBranch: 'main' } })).toThrowError(/base branch/)
+    expect(() => createBrokerGrantProjection({ ...authority, allowedInspectKinds: ['pull-request'] as const })).toThrowError(/base branch/)
+  })
+
   it('accepts only a signed response bound to the exact request and result target', () => {
     const signedHello = hello(), request = createBrokerClientRequest(intent(), signedHello, client, 'client-key-1', clientKeys.privateKey, 'request-1')
     const response = createBrokerServerResponse({ status: 'succeeded', dispatched: true, result: { operation: 'commit', repository: request.destination.repository, branch: request.destination.branch, parentOid: (request.payload as { expectedHeadOid: string }).expectedHeadOid, commitOid: 'e'.repeat(40) }, error: null, completedAt: now + 2 }, request, signedHello, serverKeys.privateKey)
@@ -156,7 +168,7 @@ describe('broker action authentication', () => {
     expect(() => verifyBrokerAdminRequest(adminRequest, signedHello, adminKeys.publicKey, { now: signedHello.expiresAt })).toThrowError(/hello expired/)
   })
 
-  it('validates exact file, branch, pull-request, checks and reviews DTOs', () => {
+  it('validates exact file, branch, pull-request, checks and reviews DTOs with a precise base scope', () => {
     const signedHello = hello()
     const cases: Array<{ payload: BrokerRequestIntent['payload']; observed: unknown }> = [
       { payload: { kind: 'branch' }, observed: { name: 'main', commit: { sha: 'e'.repeat(40) }, untrusted: true } },
@@ -166,11 +178,23 @@ describe('broker action authentication', () => {
       { payload: { kind: 'reviews', pullRequestNumber: 7 }, observed: { pullRequest: { number: 7, state: 'open', merged: false, head: { ref: 'main', sha: 'e'.repeat(40), repo: { full_name: 'owner/repository' } }, base: { ref: 'base', repo: { full_name: 'owner/repository' } } }, headOid: 'e'.repeat(40), items: [{ id: 1, state: 'APPROVED', commit_id: 'e'.repeat(40), user: { id: 2 }, submitted_at: '2026-09-12T00:00:00Z' }], truncated: false, untrusted: true } },
     ]
     for (const [index, item] of cases.entries()) {
-      const request = createBrokerClientRequest({ ...intent(), operation: 'inspect', payload: item.payload }, signedHello, client, 'client-key-1', clientKeys.privateKey, `inspect-${index}`)
+      const request = createBrokerClientRequest({ ...intent(), destination: ['pull-request', 'checks', 'reviews'].includes((item.payload as { kind: string }).kind) ? { ...intent().destination, baseBranch: 'base' } : intent().destination, operation: 'inspect', payload: item.payload }, signedHello, client, 'client-key-1', clientKeys.privateKey, `inspect-${index}`)
       const response = createBrokerServerResponse({ status: 'succeeded', dispatched: true, result: { operation: 'inspect', repository: request.destination.repository, branch: request.destination.branch, kind: (item.payload as { kind: 'branch' }).kind, observed: item.observed as never, observedDigest: brokerDigest(item.observed) }, error: null, completedAt: now + 2 }, request, signedHello, serverKeys.privateKey)
       expect(verifyBrokerServerResponse(response, request, signedHello, serverKeys.publicKey).status).toBe('succeeded')
       expect(Object.isFrozen((response.result as { observed: object }).observed)).toBe(true)
     }
+  })
+
+  it('rejects pull-request inspection without an exact, distinct in-repository base branch', () => {
+    const signedHello = hello()
+    const pullRequest = { ...intent(), operation: 'inspect' as const, payload: { kind: 'pull-request' as const, pullRequestNumber: 7 } }
+    expect(() => createBrokerClientRequest(pullRequest, signedHello, client, 'client-key-1', clientKeys.privateKey)).toThrowError(/base branch/)
+    expect(() => createBrokerClientRequest({ ...pullRequest, destination: { ...intent().destination, baseBranch: 'main' } }, signedHello, client, 'client-key-1', clientKeys.privateKey)).toThrowError(/base branch/)
+    const request = createBrokerClientRequest({ ...pullRequest, destination: { ...intent().destination, baseBranch: 'base' } }, signedHello, client, 'client-key-1', clientKeys.privateKey)
+    const observed = { number: 7, state: 'open' as const, merged: false, head: { ref: 'main', sha: 'e'.repeat(40), repo: { full_name: 'fork/repository' } }, base: { ref: 'base', repo: { full_name: 'owner/repository' } }, untrusted: true as const }
+    expect(() => createBrokerServerResponse({ status: 'succeeded', dispatched: true, result: { operation: 'inspect', repository: request.destination.repository, branch: request.destination.branch, kind: 'pull-request', observed, observedDigest: brokerDigest(observed) }, error: null, completedAt: now + 2 }, request, signedHello, serverKeys.privateKey)).toThrowError(/scope does not match/)
+    const wrongBase = { ...observed, head: { ...observed.head, repo: { full_name: 'owner/repository' } }, base: { ...observed.base, ref: 'other' } }
+    expect(() => createBrokerServerResponse({ status: 'succeeded', dispatched: true, result: { operation: 'inspect', repository: request.destination.repository, branch: request.destination.branch, kind: 'pull-request', observed: wrongBase, observedDigest: brokerDigest(wrongBase) }, error: null, completedAt: now + 2 }, request, signedHello, serverKeys.privateKey)).toThrowError(/scope does not match/)
   })
 
   it('rejects a frame whose request payload exceeds 8 MiB', () => {

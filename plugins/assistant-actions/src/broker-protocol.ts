@@ -261,7 +261,7 @@ export type BrokerEndpoint =
   | { kind: 'github-broker'; instanceId: string; generation: number }
 export type BrokerSourceClassification = 'public' | 'internal' | 'confidential' | 'restricted'
 export interface BrokerDataSource { classification: BrokerSourceClassification; provenanceDigest: string }
-export interface BrokerDestination { classification: 'github-repository'; repository: string; branch: string }
+export interface BrokerDestination { classification: 'github-repository'; repository: string; branch: string; baseBranch?: string }
 export interface BrokerBudget { reservationId: string; actions: number; bytes: number; costMetric: 'github-api-units'; maxCostUnits: number }
 export interface BrokerCommitPayload { expectedHeadOid: string; headline: string; files: readonly Readonly<{ path: string; content: string }>[] }
 export interface BrokerInspectPayload { kind: 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews'; path?: string; pullRequestNumber?: number }
@@ -343,12 +343,14 @@ export function normalizeBrokerGrantAuthority(value: unknown): BrokerGrantAuthor
   if (input.protocol !== 'assistant-actions/external-github-grant/v1') reject('wrong-protocol', 'broker grant protocol is invalid')
   const normalizedOwner = owner(input.owner)
   if (!isAbsolute(normalizedOwner.workspace) || resolve(normalizedOwner.workspace) !== normalizedOwner.workspace || normalizedOwner.workspace === '/') reject('invalid-message', 'broker grant workspace is invalid')
-  const rawDestination = exact(input.destination, ['classification', 'repository', 'branch', 'paths'], 'broker grant destination')
-  const normalizedDestination = destination({ classification: rawDestination.classification, repository: rawDestination.repository, branch: rawDestination.branch })
+  const rawDestination = grantDestination(input.destination, 'broker grant destination')
+  const normalizedDestination = destination({ classification: rawDestination.classification, repository: rawDestination.repository, branch: rawDestination.branch, ...(rawDestination.baseBranch === undefined ? {} : { baseBranch: rawDestination.baseBranch }) })
   if (!Array.isArray(rawDestination.paths) || rawDestination.paths.length < 1 || rawDestination.paths.length > 128 || !rawDestination.paths.every(validPath) || new Set(rawDestination.paths).size !== rawDestination.paths.length) reject('invalid-message', 'broker grant paths are invalid')
   if (!Array.isArray(input.allowedOperations) || input.allowedOperations.length < 1 || input.allowedOperations.length > 2 || input.allowedOperations.some(value => !['commit', 'inspect'].includes(String(value))) || new Set(input.allowedOperations).size !== input.allowedOperations.length) reject('invalid-message', 'broker grant operations are invalid')
   if (!Array.isArray(input.allowedInspectKinds) || input.allowedInspectKinds.length > 6 || input.allowedInspectKinds.some(value => !['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'].includes(String(value))) || new Set(input.allowedInspectKinds).size !== input.allowedInspectKinds.length
     || input.allowedOperations.includes('inspect') !== (input.allowedInspectKinds.length > 0)) reject('invalid-message', 'broker grant inspect kinds are invalid')
+  if (input.allowedInspectKinds.some(kind => ['pull-request', 'checks', 'reviews'].includes(String(kind)))
+    && (normalizedDestination.baseBranch === undefined || normalizedDestination.baseBranch === normalizedDestination.branch)) reject('invalid-message', 'broker grant base branch is required for pull request inspection')
   return Object.freeze({
     protocol: 'assistant-actions/external-github-grant/v1', id: text(input.id, 'broker grant id'), revision: integer(input.revision, 'broker grant revision', 1), clientKeyId: instance(input.clientKeyId, 'broker grant clientKeyId'), owner: normalizedOwner, sessionId: text(input.sessionId, 'broker grant sessionId'),
     destination: Object.freeze({ ...normalizedDestination, paths: Object.freeze([...rawDestination.paths]) }) as BrokerGrantAuthorityUnsigned['destination'], credentialId: instance(input.credentialId, 'broker grant credentialId'), expiresAt: integer(input.expiresAt, 'broker grant expiresAt', 1),
@@ -366,12 +368,14 @@ export function createBrokerGrantProjection(grant: BrokerGrantAuthorityUnsigned)
 }
 export function normalizeBrokerGrantProjection(value: unknown): BrokerGrantProjection {
   const input = exact(value, ['id', 'revision', 'grantDigest', 'owner', 'sessionId', 'destination', 'expiresAt', 'maxActions', 'maxTotalBytes', 'source', 'maxCostUnits', 'allowedOperations', 'allowedInspectKinds'], 'broker grant projection')
-  const rawDestination = exact(input.destination, ['classification', 'repository', 'branch', 'paths'], 'broker grant projection destination')
-  const normalizedDestination = destination({ classification: rawDestination.classification, repository: rawDestination.repository, branch: rawDestination.branch })
+  const rawDestination = grantDestination(input.destination, 'broker grant projection destination')
+  const normalizedDestination = destination({ classification: rawDestination.classification, repository: rawDestination.repository, branch: rawDestination.branch, ...(rawDestination.baseBranch === undefined ? {} : { baseBranch: rawDestination.baseBranch }) })
   if (!Array.isArray(rawDestination.paths) || rawDestination.paths.length < 1 || rawDestination.paths.length > 128 || !rawDestination.paths.every(validPath) || new Set(rawDestination.paths).size !== rawDestination.paths.length) reject('invalid-message', 'broker grant projection paths are invalid')
   if (!Array.isArray(input.allowedOperations) || input.allowedOperations.length < 1 || input.allowedOperations.length > 2 || input.allowedOperations.some(value => !['commit', 'inspect'].includes(String(value))) || new Set(input.allowedOperations).size !== input.allowedOperations.length) reject('invalid-message', 'broker grant projection operations are invalid')
   if (!Array.isArray(input.allowedInspectKinds) || input.allowedInspectKinds.length > 6 || input.allowedInspectKinds.some(value => !['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'].includes(String(value))) || new Set(input.allowedInspectKinds).size !== input.allowedInspectKinds.length
     || input.allowedOperations.includes('inspect') !== (input.allowedInspectKinds.length > 0)) reject('invalid-message', 'broker grant projection inspect kinds are invalid')
+  if (input.allowedInspectKinds.some(kind => ['pull-request', 'checks', 'reviews'].includes(String(kind)))
+    && (normalizedDestination.baseBranch === undefined || normalizedDestination.baseBranch === normalizedDestination.branch)) reject('invalid-message', 'broker grant projection base branch is required for pull request inspection')
   const normalizedOwner = owner(input.owner)
   if (!isAbsolute(normalizedOwner.workspace) || resolve(normalizedOwner.workspace) !== normalizedOwner.workspace || normalizedOwner.workspace === '/') reject('invalid-message', 'broker grant projection workspace is invalid')
   return Object.freeze({ id: text(input.id, 'broker grant projection id'), revision: integer(input.revision, 'broker grant projection revision', 1), grantDigest: digest(input.grantDigest, 'broker grant projection digest'), owner: normalizedOwner, sessionId: text(input.sessionId, 'broker grant projection sessionId'), destination: Object.freeze({ ...normalizedDestination, paths: Object.freeze([...rawDestination.paths]) }) as BrokerGrantProjection['destination'], expiresAt: integer(input.expiresAt, 'broker grant projection expiresAt', 1), maxActions: integer(input.maxActions, 'broker grant projection maxActions', 1, 10_000), maxTotalBytes: integer(input.maxTotalBytes, 'broker grant projection maxTotalBytes', 1, 64 * 1024 * 1024), source: dataSource(input.source), maxCostUnits: integer(input.maxCostUnits, 'broker grant projection maxCostUnits'), allowedOperations: Object.freeze([...input.allowedOperations]) as BrokerGrantProjection['allowedOperations'], allowedInspectKinds: Object.freeze([...input.allowedInspectKinds]) as BrokerGrantProjection['allowedInspectKinds'] })
@@ -386,12 +390,25 @@ function dataSource(value: unknown): BrokerDataSource {
   if (!['public', 'internal', 'confidential', 'restricted'].includes(String(input.classification))) reject('invalid-message', 'request source classification is invalid')
   return Object.freeze({ classification: input.classification as BrokerSourceClassification, provenanceDigest: digest(input.provenanceDigest, 'request.source.provenanceDigest') })
 }
+function validBranch(value: unknown, label: string): string {
+  const branch = text(value, label, 255)
+  if (!BRANCH.test(branch) || branch.includes('..') || branch.startsWith('refs/') || branch.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) reject('invalid-message', `${label} is invalid`)
+  return branch
+}
+function grantDestination(value: unknown, label: string): Record<string, unknown> {
+  const input = record(value, label)
+  if (Object.keys(input).some(key => !['classification', 'repository', 'branch', 'baseBranch', 'paths'].includes(key))
+    || !Object.hasOwn(input, 'classification') || !Object.hasOwn(input, 'repository') || !Object.hasOwn(input, 'branch') || !Object.hasOwn(input, 'paths')) reject('unknown-field', `${label} has unknown or missing fields`)
+  return input
+}
 function destination(value: unknown): BrokerDestination {
-  const input = exact(value, ['classification', 'repository', 'branch'], 'request.destination')
+  const input = record(value, 'request.destination')
+  if (Object.keys(input).some(key => !['classification', 'repository', 'branch', 'baseBranch'].includes(key))
+    || !Object.hasOwn(input, 'classification') || !Object.hasOwn(input, 'repository') || !Object.hasOwn(input, 'branch')) reject('unknown-field', 'request.destination has unknown or missing fields')
   if (input.classification !== 'github-repository' || typeof input.repository !== 'string' || input.repository.length > 256 || !REPOSITORY.test(input.repository)) reject('invalid-message', 'request destination repository is invalid')
-  const branch = text(input.branch, 'request.destination.branch', 255)
-  if (!BRANCH.test(branch) || branch.includes('..') || branch.startsWith('refs/') || branch.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))) reject('invalid-message', 'request destination branch is invalid')
-  return Object.freeze({ classification: 'github-repository', repository: input.repository, branch })
+  const branch = validBranch(input.branch, 'request.destination.branch')
+  const baseBranch = input.baseBranch === undefined ? undefined : validBranch(input.baseBranch, 'request.destination.baseBranch')
+  return Object.freeze(baseBranch === undefined ? { classification: 'github-repository', repository: input.repository, branch } : { classification: 'github-repository', repository: input.repository, branch, baseBranch })
 }
 function endpoint<K extends BrokerEndpoint['kind']>(value: unknown, kind: K, label: string): Extract<BrokerEndpoint, { kind: K }> {
   const input = exact(value, ['kind', 'instanceId', 'generation'], label)
@@ -445,13 +462,16 @@ function normalizeRequestUnsigned(value: unknown): BrokerClientRequestUnsigned {
   if (input.protocol !== GITHUB_BROKER_PROTOCOL || input.type !== 'client-request') reject('wrong-protocol', 'client request protocol is invalid')
   const operation = input.operation
   const payload = normalizePayload(operation, input.payload)
+  const normalizedDestination = destination(input.destination)
+  if (operation === 'inspect' && ['pull-request', 'checks', 'reviews'].includes((payload as BrokerInspectPayload).kind)
+    && (normalizedDestination.baseBranch === undefined || normalizedDestination.baseBranch === normalizedDestination.branch)) reject('invalid-message', 'request base branch is required for pull request inspection')
   const payloadDigest = digest(input.payloadDigest, 'request.payloadDigest')
   if (brokerDigest(payload) !== payloadDigest) reject('digest-mismatch', 'request payload digest does not match')
   return Object.freeze({
     protocol: GITHUB_BROKER_PROTOCOL, type: 'client-request', requestId: text(input.requestId, 'request.requestId'), challenge: base64url(input.challenge, 'request.challenge', 32),
     client: endpoint(input.client, 'assistant-actions-host', 'request.client'), broker: endpoint(input.broker, 'github-broker', 'request.broker'),
     actionId: text(input.actionId, 'request.actionId'), grantId: text(input.grantId, 'request.grantId'), grantRevision: integer(input.grantRevision, 'request.grantRevision', 1), grantDigest: digest(input.grantDigest, 'request.grantDigest'),
-    owner: owner(input.owner), sessionId: text(input.sessionId, 'request.sessionId'), agentId: text(input.agentId, 'request.agentId'), rootCallId: text(input.rootCallId, 'request.rootCallId'), callId: text(input.callId, 'request.callId'), operation: operation as 'commit' | 'inspect', source: dataSource(input.source), destination: destination(input.destination), payload, payloadDigest,
+    owner: owner(input.owner), sessionId: text(input.sessionId, 'request.sessionId'), agentId: text(input.agentId, 'request.agentId'), rootCallId: text(input.rootCallId, 'request.rootCallId'), callId: text(input.callId, 'request.callId'), operation: operation as 'commit' | 'inspect', source: dataSource(input.source), destination: normalizedDestination, payload, payloadDigest,
     deadline: integer(input.deadline, 'request.deadline', 1), policyEpoch: integer(input.policyEpoch, 'request.policyEpoch'), emergencyEpoch: integer(input.emergencyEpoch, 'request.emergencyEpoch'), budget: budget(input.budget), clientKeyId: instance(input.clientKeyId, 'request.clientKeyId'),
   })
 }
@@ -556,8 +576,8 @@ function pullRequestScope(value: unknown, destination: BrokerDestination, expect
   const head = exact(input.head, ['ref', 'sha', 'repo'], 'pull request head'), headRepo = exact(head.repo, ['full_name'], 'pull request head repository')
   const base = exact(input.base, ['ref', 'repo'], 'pull request base'), baseRepo = exact(base.repo, ['full_name'], 'pull request base repository')
   const number = integer(input.number, 'pull request number', 1), state = input.state
-  if (expectedNumber !== undefined && number !== expectedNumber || !['open', 'closed'].includes(String(state)) || head.ref !== destination.branch || headRepo.full_name !== destination.repository || baseRepo.full_name !== destination.repository) reject('response-mismatch', 'pull request observation scope does not match')
-  const output: BrokerPullRequestScope = Object.freeze({ number, state: state as 'open' | 'closed', merged: boolean(input.merged, 'pull request merged'), head: Object.freeze({ ref: text(head.ref, 'pull request head ref', 255), sha: oid(head.sha, 'pull request head sha'), repo: Object.freeze({ full_name: text(headRepo.full_name, 'pull request head repository', 256) }) }), base: Object.freeze({ ref: text(base.ref, 'pull request base ref', 255), repo: Object.freeze({ full_name: text(baseRepo.full_name, 'pull request base repository', 256) }) }) })
+  if (expectedNumber !== undefined && number !== expectedNumber || !['open', 'closed'].includes(String(state)) || head.ref !== destination.branch || headRepo.full_name !== destination.repository || baseRepo.full_name !== destination.repository || destination.baseBranch === undefined || base.ref !== destination.baseBranch || head.ref === base.ref) reject('response-mismatch', 'pull request observation scope does not match')
+  const output: BrokerPullRequestScope = Object.freeze({ number, state: state as 'open' | 'closed', merged: boolean(input.merged, 'pull request merged'), head: Object.freeze({ ref: validBranch(head.ref, 'pull request head ref'), sha: oid(head.sha, 'pull request head sha'), repo: Object.freeze({ full_name: text(headRepo.full_name, 'pull request head repository', 256) }) }), base: Object.freeze({ ref: validBranch(base.ref, 'pull request base ref'), repo: Object.freeze({ full_name: text(baseRepo.full_name, 'pull request base repository', 256) }) }) })
   return topLevel ? Object.freeze({ ...output, untrusted: truth(input.untrusted, 'pull request untrusted') }) : output
 }
 export function normalizeBrokerInspectObservation(payload: BrokerInspectPayload, value: unknown, destination: BrokerDestination): BrokerInspectObservation {

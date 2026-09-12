@@ -121,10 +121,6 @@ function owner(value: unknown): ExternalGitHubGrant['owner'] {
 function normalizeGrantUnsigned(value: unknown): ExternalGitHubGrantUnsigned {
   try {
     const grant = normalizeBrokerGrantAuthority(value)
-    // v1 has no base-branch authority, so PR/check/review reads cannot be
-    // scoped with the existing GitHub transport and are rejected at config
-    // admission, never after a durable dispatch.
-    if (grant.allowedInspectKinds.some(kind => !['repository', 'branch', 'file'].includes(kind))) fail('invalid-input')
     return grant
   } catch { return fail('invalid-input') }
 }
@@ -394,7 +390,7 @@ export class ExternalBrokerLedger {
     if (request.clientKeyId !== grant.clientKeyId || request.grantRevision !== grant.revision || request.grantDigest !== grant.digest || !equal(request.owner, grant.owner) || request.sessionId !== grant.sessionId || !equal(request.source, grant.source)
       || !equal(request.client, grant.client)
       || request.broker.kind !== 'github-broker' || request.broker.instanceId !== meta.instance_id || request.broker.generation !== meta.generation
-      || request.destination.classification !== 'github-repository' || request.destination.repository !== grant.destination.repository || request.destination.branch !== grant.destination.branch
+      || request.destination.classification !== 'github-repository' || request.destination.repository !== grant.destination.repository || request.destination.branch !== grant.destination.branch || request.destination.baseBranch !== grant.destination.baseBranch
       || request.policyEpoch !== grant.policyEpoch || request.policyEpoch !== meta.policy_epoch || request.emergencyEpoch !== grant.emergencyEpoch || request.emergencyEpoch !== meta.emergency_epoch
       || request.deadline <= now || request.deadline > grant.expiresAt || grant.expiresAt <= now || !grant.allowedOperations.includes(request.operation)) fail('grant')
     if (request.operation === 'commit') { if (!('files' in request.payload) || request.payload.files.some(file => !grant.destination.paths.includes(file.path))) fail('grant') }
