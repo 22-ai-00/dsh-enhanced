@@ -1,9 +1,10 @@
 import { test, expect } from '@playwright/test'
-import { mkdtemp, mkdir, readFile, writeFile, rm, copyFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, copyFile, realpath } from 'node:fs/promises'
 import { existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createRequire } from 'node:module'
 import { createServer } from 'node:net'
 import { createHash } from 'node:crypto'
 import { parseDocument, isMap } from 'yaml'
@@ -11,16 +12,19 @@ import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { prepareRepositoryFixture } from './repo-verified-delivery-fixture.mjs'
+import { prepareExternalRepositoryFixture } from './repo-external-delivery-fixture.mjs'
 import { loadLiveRepositoryInput, mergeLiveCredentialHandles } from './repo-live-input.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const image = 'sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8'
 const verifiedDelivery = process.env.DSH_REPO_VERIFIED_DELIVERY === 'fixture'
+const externalBrokerFixture = process.env.DSH_REPO_EXTERNAL_BROKER === 'fixture'
 const setupOnly = process.env.DSH_REPO_SETUP_ONLY === '1'
 const liveInputPath = process.env.DSH_REPO_LIVE_INPUT
 const liveRepositoryEnabled = process.env.DSH_REPO_LIVE_GITHUB === '1' || typeof liveInputPath === 'string'
 if (liveRepositoryEnabled && (typeof liveInputPath !== 'string' || liveInputPath.length === 0)) throw new Error('live repository E2E requires DSH_REPO_LIVE_INPUT')
 if (liveRepositoryEnabled && (verifiedDelivery || process.env.DSH_REPO_EVENT_SOURCE !== undefined)) throw new Error('live repository E2E cannot use fixture transports')
+if (externalBrokerFixture && (!verifiedDelivery || process.env.DSH_REPO_EVENT_SOURCE !== undefined || liveRepositoryEnabled)) throw new Error('external broker fixture requires fixture verified delivery, no events, and no live repository')
 if (liveRepositoryEnabled && setupOnly) throw new Error('setup-only probe does not validate live repository access')
 const repositoryEvents = (verifiedDelivery && process.env.DSH_REPO_EVENT_SOURCE === 'fixture') || liveRepositoryEnabled
 const objective = 'Fix summarize.mjs: read a JSON order array from stdin, ignore orders whose status is "cancelled", sum integer amountCents by currency, and print one JSON object with currency keys in dictionary order followed by a newline.'
@@ -77,6 +81,49 @@ function installLiveCredentialReference(source, live) {
 
 function parseJson(value) {
   try { return typeof value === 'string' ? JSON.parse(value) : undefined } catch { return undefined }
+}
+
+async function preparePinnedDshCli(temp, env) {
+  // The repository declares the pinned DSH ABI; do not silently exercise a
+  // developer's globally installed CLI with a different session runtime.
+  const cliRoot = join(temp, 'pinned-dsh-cli')
+  await mkdir(cliRoot, { recursive: true, mode: 0o700 })
+  await writeFile(join(cliRoot, 'package.json'), JSON.stringify({ private: true }), { mode: 0o600 })
+  const bin = join(cliRoot, 'node_modules/.bin')
+  await run('pnpm', ['add', '--ignore-workspace', '--dir', cliRoot,
+    '--allow-build=@deepseek-ai/dsh-subprocess-local', '--allow-build=@google/genai', '--allow-build=koffi', '--allow-build=node-pty', '--allow-build=protobufjs',
+    '@deepseek-ai/dsh@0.1.2-rc.1'], env, 120_000)
+  if (!existsSync(join(bin, 'dsh'))) throw new Error('pinned DSH CLI installation did not provide dsh')
+  if ((await run(join(bin, 'dsh'), ['--version'], env)).trim() !== '0.1.2-rc.1') throw new Error('pinned DSH CLI resolved an unexpected version')
+  env.PATH = `${bin}:${env.PATH ?? ''}`
+  const dshRoot = join(cliRoot, 'node_modules/@deepseek-ai/dsh')
+  const resolvedDshRoot = await realpath(dshRoot)
+  // pnpm's non-hoisted CLI dependencies live in the resolved CLI package's
+  // virtual dependency directory, which is also the directory its loader
+  // resolves from at runtime.
+  const require = createRequire(join(dirname(dirname(resolvedDshRoot)), '.dsh-cli-runtime.cjs'))
+  const packagePathFor = entry => {
+    for (let current = dirname(entry); current !== dirname(current); current = dirname(current)) {
+      const candidate = join(current, 'package.json')
+      if (existsSync(candidate)) return candidate
+    }
+    throw new Error(`could not locate package metadata for ${entry}`)
+  }
+  const basePackagePath = packagePathFor(require.resolve('@deepseek-ai/dsh-base'))
+  const baseRequire = createRequire(basePackagePath)
+  const jsonlPackagePath = packagePathFor(baseRequire.resolve('@deepseek-ai/dsh-session-persistence-jsonl'))
+  const jsonlRequire = createRequire(jsonlPackagePath)
+  const packagePaths = {
+    '@deepseek-ai/dsh': join(dshRoot, 'package.json'),
+    '@deepseek-ai/dsh-session-persistence': packagePathFor(jsonlRequire.resolve('@deepseek-ai/dsh-session-persistence')),
+    '@deepseek-ai/dsh-session-persistence-jsonl': jsonlPackagePath,
+    '@deepseek-ai/cordis': packagePathFor(require.resolve('@deepseek-ai/cordis')),
+  }
+  const runtime = Object.fromEntries(await Promise.all(Object.entries(packagePaths).map(async ([name, packagePath]) => {
+    const { version } = JSON.parse(await readFile(packagePath, 'utf8'))
+    return [name, { version, packagePath }]
+  })))
+  return { cliRoot, runtime }
 }
 
 function goalExecutionRuns(goalsPath, goalId) {
@@ -235,31 +282,48 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
   const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_ENHANCED_WEB_PORT: String(port), DSH_REPO_AUTONOMY_OBSERVER_LOG: observerLog,
     DSH_REPO_AUTONOMY_NO_MODEL: setupOnly ? '1' : '0',
     DSH_REPO_AUTONOMY_MAX_CALLS: repositoryEvents ? '26' : '14', DSH_REPO_AUTONOMY_DURATION_MS: '300000' }
-  let host; let restarted; let activePage = page; let failed = false; let sessionId
+  let host; let restarted; let externalBroker; let activePage = page; let failed = false; let sessionId
   const http = [], transport = [], streams = new Map(), frames = [], approvals = []
   observePage(page, http, transport, streams, frames)
   try {
     await mkdir(workspace)
+    // Keep this disposable profile independent of a developer's published
+    // Skills/Proactive defaults before the formal installer reads them.
+    await mkdir(join(home, 'profiles', 'web'), { recursive: true, mode: 0o700 })
+    await writeFile(join(home, 'profiles', 'web', 'cordis.patch.yml'), `- id: dsh-enhanced-assistant-skills
+  name: '@dsh-enhanced/assistant-skills'
+  config:
+    databasePath: ${join(home, 'assistant-skills/skills.sqlite')}
+- id: dsh-enhanced-assistant-proactive
+  name: '@dsh-enhanced/assistant-proactive'
+  config:
+    databasePath: ${join(home, 'assistant-proactive/proactive.sqlite')}
+`, { mode: 0o600 })
+    const pinnedCli = await preparePinnedDshCli(temp, env)
+    await writeFile(testInfo.outputPath('pinned-cli-runtime.json'), JSON.stringify(pinnedCli.runtime, null, 2), { mode: 0o600 })
     const route = await prepareRealRoute({ env, home, workspace })
     env.DSH_WEB_REAL_PROVIDER = route.provider; env.DSH_WEB_REAL_MODEL = route.model
+    const addOns = route.bundles.flatMap(bundle => {
+      if (bundle === 'coding-subscription-provider') return ['--with', 'coding']
+      if (bundle === 'traex-acp-provider') return ['--with', 'traex']
+      throw new Error(`unsupported real-route bundle ${bundle}`)
+    })
     const install = await run('bash', [resolve(root, 'scripts/install/install-local.sh'), '--scenario', 'autonomy', '--workspace', workspace,
       '--isolation-image', image, '--isolation-max-runs', '12', '--isolation-lease-minutes', '10', '--isolation-runtime-minutes', '5', '--model', 'skip', '--model-route', 'skip',
-      ...(route.provider === 'codex-subscription' ? ['--with', 'coding'] : []), '--no-service', '--yes'], env, 180_000)
+      ...addOns, '--no-service', '--yes'], env, 180_000)
     await writeFile(testInfo.outputPath('install.log'), sanitize(install), { mode: 0o600 })
     await writeFile(testInfo.outputPath('verifier-controls.json'), JSON.stringify(await checkVerificationCommand(home, temp), null, 2), { mode: 0o600 })
     const patchPath = join(home, 'profiles/web/cordis.patch.yml')
     let patchSource = await readFile(patchPath, 'utf8')
     const configuredRoute = { provider: route.provider, model: route.model }
-    if (route.provider === 'codex-subscription') {
-      const patch = parseDocument(patchSource)
-      route.configurePatch(patch, (document, id, name, config) => {
-        let row = document.contents.items.find(item => isMap(item) && item.get('id') === id)
-        if (!row) { row = document.createNode({ id, name }); document.contents.add(row) }
-        row.set('config', document.createNode(config))
-      })
-      patchSource = String(patch)
-      configuredRoute.model = 'default'
-    }
+    const patch = parseDocument(patchSource)
+    route.configurePatch(patch, (document, id, name, config) => {
+      let row = document.contents.items.find(item => isMap(item) && item.get('id') === id)
+      if (!row) { row = document.createNode({ id, name }); document.contents.add(row) }
+      row.set('config', document.createNode(config))
+    })
+    patchSource = String(patch)
+    if (route.provider === 'codex-subscription') configuredRoute.model = 'default'
     if (liveRepository) patchSource = installLiveCredentialReference(patchSource, liveRepository)
     await writeFile(patchPath, addObserver(patchSource), { mode: 0o600 })
 
@@ -271,7 +335,13 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     sessionId = (await create.json()).result.value.sessionId
     await host.stop(); await writeFile(testInfo.outputPath('host-initial.log'), host.log(), { mode: 0o600 })
 
-    const repository = verifiedDelivery ? await prepareRepositoryFixture(home, patchPath, env) : liveRepository?.repositoryDelivery
+    let repository
+    if (externalBrokerFixture) {
+      const external = await prepareExternalRepositoryFixture(home, patchPath, env, { sessionId, workspace, objective, source: buggySource })
+      externalBroker = external.close
+      const { close: _close, ...delivery } = external
+      repository = delivery
+    } else repository = verifiedDelivery ? await prepareRepositoryFixture(home, patchPath, env) : liveRepository?.repositoryDelivery
     const admission = { version: 2, objective, route: configuredRoute, maxGoalRounds: repositoryEvents ? 6 : 3, stepMaxDurationMs: 120_000,
       executionBudget: { mode: 'calls', modelCalls: repositoryEvents ? 24 : 12, toolCalls: repositoryEvents ? 40 : 16, durationMs: 300_000, maxOutputTokensPerCall: 1024, routes: [configuredRoute] },
       verification: { artifactPath: 'summarize.mjs', command: verificationCommand, maxRuns: 12, maxTotalDurationMs: 240_000, maxDurationMs: 5_000, maxOutputBytes: 4096, cases },
@@ -439,6 +509,13 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       await expect.poll(() => query(path, 'SELECT state FROM deliveries')[0]?.state, { timeout: 65000 }).toBe('succeeded')
       const records = (await readFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
       expect(records.map(item => item.kind)).toEqual(['commit', 'pr'])
+      if (externalBrokerFixture) {
+        const brokerRequests = query(join(home, 'external-repository-broker/state.sqlite'), 'SELECT operation,status FROM requests ORDER BY rowid')
+        expect(brokerRequests.filter(row => row.operation === 'commit' || row.operation === 'pull-request')).toEqual([{ operation: 'commit', status: 'succeeded' }, { operation: 'pull-request', status: 'succeeded' }])
+        const reads = brokerRequests.filter(row => row.operation === 'inspect')
+        expect(reads.length).toBeLessThanOrEqual(6)
+        expect(reads.every(row => row.status === 'succeeded')).toBe(true)
+      }
       const commit = records[0], pr = records[1]
       const digest = createHash('sha256').update(commit.files[0].content).digest('hex')
       const deliveryIntent = JSON.parse(query(path, 'SELECT intent FROM deliveries')[0].intent)
@@ -590,9 +667,15 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       await writeFile(testInfo.outputPath('tool-events.json'), sanitize(JSON.stringify(toolEvents, null, 2)), { mode: 0o600 })
       if (failed && !new URL(activePage.url()).searchParams.has('token')) await writeFile(testInfo.outputPath('failure-dom.txt'), sanitize(await activePage.locator('body').innerText().catch(() => '')), { mode: 0o600 })
     } finally { try { if (host) { await host.stop(); await writeFile(testInfo.outputPath('host.log'), host.log(), { mode: 0o600 }) } } finally {
-      if (restarted) await restarted.close()
-      if (failed && process.env.DSH_REPO_RETAIN_FAILURE === '1') await writeFile(testInfo.outputPath('retained-environment.json'), JSON.stringify({ temp, sessionId }), { mode: 0o600 })
-      else await rm(temp, { recursive: true, force: true })
+      const retain = failed && process.env.DSH_REPO_RETAIN_FAILURE === '1'
+      // Persist this before best-effort server/browser shutdown: a shutdown
+      // error must never erase the only inspectable failed profile.
+      if (retain) await writeFile(testInfo.outputPath('retained-environment.json'), JSON.stringify({ temp, sessionId }), { mode: 0o600 })
+      try { if (externalBroker) await externalBroker() } finally {
+        try { if (restarted) await restarted.close() } finally {
+          if (!retain) await rm(temp, { recursive: true, force: true })
+        }
+      }
     } }
   }
 })

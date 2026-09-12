@@ -58,6 +58,7 @@ async function createRepository(currentVersion = '0.1.0', withLibrary = false) {
   await writeJson(join(root, 'release-manifest.json'), {
     schemaVersion: 1,
     nextVerifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
+    nextPinnedHostVersion: '0.1.2-rc.1',
     current,
     pending: null,
     history: [current],
@@ -72,7 +73,7 @@ function runRelease(root: string, ...args: string[]) {
 }
 
 const installerAssets = {
-  'common.sh': '# fixture installer library\n',
+  'common.sh': "DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.0-rc.7'\n",
   'lifecycle-config.mjs': 'export const fixtureConfig = true\n',
   'lifecycle-profile.mjs': 'export const fixtureProfile = true\n',
 }
@@ -89,6 +90,7 @@ async function createInstaller(root: string) {
     `DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='${'1'.repeat(64)}'`,
     `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${'2'.repeat(64)}'`,
     "DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'",
+    "DSH_ENHANCED_PINNED_HOST_VERSION='0.1.0-rc.7'",
     '',
   ].join('\n'))
   return installDirectory
@@ -140,8 +142,10 @@ describe('release version workflow', () => {
     expect(ledger.current.verifiedHostRange).toBe('>=0.1.0-rc.8')
     expect(ledger.history[0].verifiedHostRange).toBe('>=0.1.0-rc.8')
     expect(ledger.nextVerifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
+    expect(ledger.nextPinnedHostVersion).toBe('0.1.2-rc.1')
     expect(ledger.pending.version).toBe('0.1.1')
     expect(ledger.pending.verifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
+    expect(ledger.pending.pinnedHostVersion).toBe('0.1.2-rc.1')
     expect(ledger.pending.packages).toEqual({ '@fixture/example': '0.1.1' })
   })
 
@@ -184,9 +188,58 @@ describe('release version workflow', () => {
     const preparedLedger = await readJson(ledgerPath)
     expect(preparedLedger.pending.version).toBe('0.1.25')
     expect(preparedLedger.pending.verifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
+    expect(preparedLedger.pending.pinnedHostVersion).toBe('0.1.2-rc.1')
     expect(preparedLedger.history.slice(0, -1).every(
       (release: Record<string, unknown>) => !Object.hasOwn(release, 'verifiedHostRange'),
     )).toBe(true)
+  })
+
+  test('prepare rejects an invalid optional current pinned host version before writing', async () => {
+    const root = await createRepository('0.1.0')
+    const ledgerPath = join(root, 'release-manifest.json')
+    const ledger = await readJson(ledgerPath)
+    ledger.current.pinnedHostVersion = 'not-a-version'
+    ledger.history[0].pinnedHostVersion = 'not-a-version'
+    await writeJson(ledgerPath, ledger)
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Current release pinnedHostVersion must be an exact supported host semantic version')
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
+    expect((await readJson(ledgerPath)).pending).toBeNull()
+  })
+
+  test('status rejects a pinned host version mismatch between current and the history tail', async () => {
+    const root = await createRepository('0.1.0')
+    const ledgerPath = join(root, 'release-manifest.json')
+    const ledger = await readJson(ledgerPath)
+    ledger.current.pinnedHostVersion = '0.1.2-rc.1'
+    ledger.history[0].pinnedHostVersion = '0.1.3-rc.1'
+    await writeJson(ledgerPath, ledger)
+
+    const result = runRelease(root, 'status')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Release history tail pinnedHostVersion must match the current release')
+  })
+
+  test('status rejects an invalid optional pinned host version in an earlier history entry', async () => {
+    const root = await createRepository('0.1.0')
+    const ledgerPath = join(root, 'release-manifest.json')
+    const ledger = await readJson(ledgerPath)
+    ledger.history.unshift({
+      version: '0.0.9',
+      releasedAt: '2026-08-17T00:00:00.000Z',
+      pinnedHostVersion: 'bad host version',
+      packages: { '@fixture/example': '0.0.9' },
+    })
+    await writeJson(ledgerPath, ledger)
+
+    const result = runRelease(root, 'status')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('Release history entry 0 pinnedHostVersion must be an exact supported host semantic version')
   })
 
   test('record promotes the pending release and appends immutable history', async () => {
@@ -202,6 +255,7 @@ describe('release version workflow', () => {
     expect(ledger.current.version).toBe('0.1.1')
     expect(ledger.current.releasedAt).toEqual(expect.any(String))
     expect(ledger.current.verifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
+    expect(ledger.current.pinnedHostVersion).toBe('0.1.2-rc.1')
     expect(ledger.current.packages).toEqual({ '@fixture/example': '0.1.1' })
     expect(ledger.history.map((release: { version: string }) => release.version)).toEqual([
       '0.1.0',
@@ -229,7 +283,9 @@ describe('release version workflow', () => {
     expect(result.status, result.stderr).toBe(0)
     const installer = await readFile(join(installDirectory, 'install-npm.sh'), 'utf8')
     expect(installer).toContain("DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.1'")
-    expect(installer).toContain(`DSH_ENHANCED_PINNED_COMMON_SHA256='${sha256(installerAssets['common.sh'])}'`)
+    expect(installer).toContain(
+      `DSH_ENHANCED_PINNED_COMMON_SHA256='${sha256(await readFile(join(installDirectory, 'common.sh'), 'utf8'))}'`,
+    )
     expect(installer).toContain(
       `DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='${sha256(installerAssets['lifecycle-config.mjs'])}'`,
     )
@@ -237,6 +293,9 @@ describe('release version workflow', () => {
       `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${sha256(installerAssets['lifecycle-profile.mjs'])}'`,
     )
     expect(installer).toContain("DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'")
+    expect(installer).toContain("DSH_ENHANCED_PINNED_HOST_VERSION='0.1.2-rc.1'")
+    expect(await readFile(join(installDirectory, 'common.sh'), 'utf8'))
+      .toContain("DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.2-rc.1'")
   })
 
   test.each([
@@ -406,7 +465,10 @@ describe('release version workflow', () => {
       const pinName = name === 'common.sh'
         ? 'DSH_ENHANCED_PINNED_COMMON'
         : name.replace(/\.mjs$/u, '').replace(/-/gu, '_').replace(/^/u, 'DSH_ENHANCED_PINNED_').toUpperCase()
-      expect(installer).toContain(`${pinName}_SHA256='${sha256(contents)}'`)
+      const pinnedContents = name === 'common.sh'
+        ? await readFile(join(installDirectory, name), 'utf8')
+        : contents
+      expect(installer).toContain(`${pinName}_SHA256='${sha256(pinnedContents)}'`)
     }
   })
 
@@ -494,7 +556,7 @@ describe('release version workflow', () => {
       const result = runRelease(root, 'verify-tag', 'v0.1.1')
 
       expect(result.status).toBe(1)
-      expect(result.stderr).toContain('installer asset digests')
+      expect(result.stderr).toMatch(/installer asset digests|source common\.sh host version/u)
     },
   )
 
@@ -1015,6 +1077,7 @@ describe('release version workflow', () => {
       version: pendingVersion,
       preparedAt: '2026-08-27T00:00:00.000Z',
       verifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
+      pinnedHostVersion: '0.1.2-rc.1',
       packages: { '@fixture/example': pendingVersion },
     }
     await writeJson(ledgerPath, ledger)
@@ -1031,11 +1094,13 @@ describe('release version workflow', () => {
     await writeJson(ledgerPath, {
       schemaVersion: 1,
       nextVerifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
+      nextPinnedHostVersion: '0.1.2-rc.1',
       current: null,
       pending: {
         version: '0.1.0',
         preparedAt: '2026-08-27T00:00:00.000Z',
         verifiedHostRange: '>=0.1.0-rc.8',
+        pinnedHostVersion: '0.1.2-rc.1',
         packages: { '@fixture/example': '0.1.0' },
       },
       history: [],
@@ -1093,6 +1158,7 @@ describe('release version workflow', () => {
     expect(result.stdout).toContain('Current release: 0.1.0')
     expect(result.stdout).toContain('Pending release: none')
     expect(result.stdout).toContain('Next verified host range: >=0.1.2-rc.1 <0.2.0')
+    expect(result.stdout).toContain('Next pinned host version: 0.1.2-rc.1')
     expect(result.stdout).toContain('Next default: 0.1.1')
   })
 
@@ -1155,11 +1221,13 @@ describe('release version workflow', () => {
     await writeJson(ledgerPath, {
       schemaVersion: 1,
       nextVerifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
+      nextPinnedHostVersion: '0.1.2-rc.1',
       current: null,
       pending: {
         version: '0.1.0',
         preparedAt: '2026-08-27T00:00:00.000Z',
         verifiedHostRange: '>=0.1.0-rc.8',
+        pinnedHostVersion: '0.1.2-rc.1',
         packages: { '@fixture/example': '0.1.0' },
       },
       history: [],
@@ -1180,6 +1248,7 @@ describe('release version workflow', () => {
     await writeJson(ledgerPath, {
       schemaVersion: 1,
       nextVerifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
+      nextPinnedHostVersion: '0.1.2-rc.1',
       current: null,
       pending: {
         version: '0.1.0',

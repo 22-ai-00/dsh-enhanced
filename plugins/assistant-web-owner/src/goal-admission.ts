@@ -21,7 +21,7 @@ interface GoalAdmissionTaskBase {
     cases: Array<{ stdin: string; expectedStdout: string; expectedExitCode: number }>
   }
   wake?: { maxDelayMs: number; runTimeoutMs: number; maxRuns: number }
-  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step'; events?: { credentialHandle: string; maxPolls: number; maxFires: number; pollIntervalMs: number; requestTimeoutMs: number }; outcome?: Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> }
+  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle?: string; externalGrantId?: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step'; events?: { credentialHandle: string; maxPolls: number; maxFires: number; pollIntervalMs: number; requestTimeoutMs: number }; outcome?: Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> }
 }
 /** Legacy v1 fixed DeepSeek route. Kept for existing private admission files. */
 export interface GoalAdmissionTaskV1 extends GoalAdmissionTaskBase {
@@ -120,16 +120,19 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
   }
   if (input.repositoryDelivery !== undefined) {
     if (input.version !== 2) fail('repository delivery requires task version 2')
-    shape(input.repositoryDelivery, ['repository', 'baseBranch', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'openPullRequest'], ['acceptance', 'outcome', 'events'])
+    shape(input.repositoryDelivery, ['repository', 'baseBranch', 'branch', 'paths', 'expiresAt', 'maxActions', 'maxTotalBytes', 'openPullRequest'], ['credentialHandle', 'externalGrantId', 'acceptance', 'outcome', 'events'])
     const value = input.repositoryDelivery as NonNullable<GoalAdmissionTaskBase['repositoryDelivery']>
     if (value.acceptance !== undefined && !['goal-outcome', 'goal-step'].includes(value.acceptance)) fail('invalid repository acceptance')
-    for (const key of ['repository', 'baseBranch', 'branch', 'credentialHandle'] as const) if (typeof value[key] !== 'string' || value[key].length === 0 || value[key].length > 256) fail('invalid repository delivery')
+    for (const key of ['repository', 'baseBranch', 'branch'] as const) if (typeof value[key] !== 'string' || value[key].length === 0 || value[key].length > 256) fail('invalid repository delivery')
+    if ((typeof value.credentialHandle === 'string') === (typeof value.externalGrantId === 'string')
+      || value.credentialHandle !== undefined && (value.credentialHandle.length === 0 || value.credentialHandle.length > 256)
+      || value.externalGrantId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value.externalGrantId)) fail('repository delivery requires exactly one credentialHandle or externalGrantId')
     if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.repository) || !Array.isArray(value.paths) || value.paths.length !== 1 || value.paths[0] !== verification.artifactPath
       || value.baseBranch === value.branch || !Number.isSafeInteger(value.expiresAt) || typeof value.openPullRequest !== 'boolean') fail('invalid repository delivery')
     integer(value.maxActions, value.openPullRequest ? 3 : 2, 10_000); integer(value.maxTotalBytes, 1, 64 * 1024 * 1024)
     if (value.events !== undefined) {
       shape(value.events, ['credentialHandle', 'maxPolls', 'maxFires', 'pollIntervalMs', 'requestTimeoutMs'])
-      if (!value.outcome || typeof value.events.credentialHandle !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,199}$/u.test(value.events.credentialHandle)) fail('repository events require outcome and an existing observation credential')
+      if (value.externalGrantId !== undefined || !value.outcome || typeof value.events.credentialHandle !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,199}$/u.test(value.events.credentialHandle)) fail('repository events require outcome and an existing observation credential')
       integer(value.events.maxPolls, 2, 10000); integer(value.events.maxFires, 1, 100)
       integer(value.events.pollIntervalMs, 1000, 3600000); integer(value.events.requestTimeoutMs, 100, 30000)
       if (value.events.maxPolls <= value.events.maxFires || input.maxGoalRounds < 2) fail('repository event budget cannot cover observation and continuation')
@@ -167,6 +170,34 @@ function literalString(value: unknown): string | undefined {
 }
 function literalInteger(value: unknown): number | undefined {
   return isScalar(value) && value.tag === undefined && typeof value.value === 'number' && Number.isSafeInteger(value.value) ? value.value : undefined
+}
+/** Accept only the public, credential-free broker projection used for this admission. */
+function externalProjection(value: unknown): {
+  id: string; revision: number; grantDigest: string; owner: { principalDigest: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string; bindingId: string; bindingVersion: number; bindingGeneration: number }
+  sessionId: string; destination: { repository: string; branch: string; baseBranch?: string; paths: string[] }; expiresAt: number; maxActions: number; maxTotalBytes: number
+  allowedOperations: string[]; allowedInspectKinds: string[]; verifiedDelivery?: { ownerRouteId: string; budgetId: string; acceptance?: string }
+} {
+  const record = (input: unknown, required: string[], optional: string[] = []): Record<string, unknown> => {
+    if (input === null || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !required.includes(key) && !optional.includes(key)) || required.some(key => !Object.hasOwn(input, key))) fail('invalid external repository grant')
+    return input as Record<string, unknown>
+  }
+  const text = (input: unknown): input is string => typeof input === 'string' && input.length > 0 && input.length <= 4096 && !/[\p{Cc}]/u.test(input)
+  const positive = (input: unknown): input is number => typeof input === 'number' && Number.isSafeInteger(input) && input > 0
+  const grant = record(value, ['id', 'revision', 'grantDigest', 'owner', 'sessionId', 'destination', 'expiresAt', 'maxActions', 'maxTotalBytes', 'source', 'maxCostUnits', 'allowedOperations', 'allowedInspectKinds'], ['verifiedDelivery'])
+  const owner = record(grant.owner, ['principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'preset', 'bindingId', 'bindingVersion', 'bindingGeneration'])
+  const destination = record(grant.destination, ['classification', 'repository', 'branch', 'paths'], ['baseBranch'])
+  const source = record(grant.source, ['classification', 'provenanceDigest'])
+  const delivery = grant.verifiedDelivery === undefined ? undefined : record(grant.verifiedDelivery, ['ownerRouteId', 'budgetId'], ['acceptance'])
+  if (!text(grant.id) || !positive(grant.revision) || typeof grant.grantDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(grant.grantDigest) || !text(grant.sessionId)
+    || !text(owner.principalDigest) || !text(owner.principalRecordId) || !positive(owner.principalVersion) || !text(owner.workspace) || !text(owner.preset) || !text(owner.bindingId) || !positive(owner.bindingVersion) || !positive(owner.bindingGeneration)
+    || destination.classification !== 'github-repository' || !text(destination.repository) || !text(destination.branch) || destination.baseBranch !== undefined && !text(destination.baseBranch)
+    || !Array.isArray(destination.paths) || destination.paths.length < 1 || destination.paths.some(path => !text(path)) || !positive(grant.expiresAt) || !positive(grant.maxActions) || !positive(grant.maxTotalBytes)
+    || source.classification === undefined || typeof source.provenanceDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(source.provenanceDigest) || !positive(grant.maxCostUnits)
+    || !Array.isArray(grant.allowedOperations) || grant.allowedOperations.some(operation => typeof operation !== 'string') || !Array.isArray(grant.allowedInspectKinds) || grant.allowedInspectKinds.some(kind => typeof kind !== 'string')
+    || delivery !== undefined && (!text(delivery.ownerRouteId) || !text(delivery.budgetId) || delivery.acceptance !== undefined && !['goal-outcome', 'goal-step'].includes(String(delivery.acceptance)))) fail('invalid external repository grant')
+  return { id: grant.id, revision: grant.revision, grantDigest: grant.grantDigest, owner: owner as { principalDigest: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string; bindingId: string; bindingVersion: number; bindingGeneration: number }, sessionId: grant.sessionId,
+    destination: { repository: destination.repository as string, branch: destination.branch as string, ...(destination.baseBranch === undefined ? {} : { baseBranch: destination.baseBranch as string }), paths: [...destination.paths] as string[] }, expiresAt: grant.expiresAt, maxActions: grant.maxActions, maxTotalBytes: grant.maxTotalBytes,
+    allowedOperations: [...grant.allowedOperations] as string[], allowedInspectKinds: [...grant.allowedInspectKinds] as string[], ...(delivery === undefined ? {} : { verifiedDelivery: delivery as { ownerRouteId: string; budgetId: string; acceptance?: string } }) }
 }
 function parse(source: string) {
   const document = parseDocument(source.trim() || '[]', { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
@@ -211,7 +242,8 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   // Include complete required rows in the candidate before inspecting its inherited isolation scope.
   for (const slug of ['assistant-isolation', 'assistant-web-owner']) config(slug)
   const delivery = config('assistant-delivery'); const goals = config('assistant-goals'); const verifier = config('assistant-verifier')
-  const actions = task.repositoryDelivery ? config('assistant-actions') : undefined; const keychain = task.repositoryDelivery ? config('credentials-keychain', false) : undefined
+  const actions = task.repositoryDelivery ? config('assistant-actions') : undefined
+  const keychain = task.repositoryDelivery?.credentialHandle === undefined ? undefined : config('credentials-keychain', false)
   const eventTriggers = task.repositoryDelivery?.events ? config('event-triggers') : undefined
   const provider = task.version === 1 ? config('assistant-deepseek-budget') : undefined; const personal = config('personal-assistant')
   const policy = map(personal.get('assistantPolicy', true))
@@ -225,6 +257,29 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   const admissionId = `goal-${createHash('sha256').update(JSON.stringify([input.profile, binding.id, owner.id, owner.version, task.objective])).digest('hex').slice(0,24)}`
   const wake = task.wake ?? (task.repositoryDelivery ? { maxDelayMs: task.repositoryDelivery.events ? task.executionBudget.durationMs - 1 : Math.min(60_000, task.executionBudget.durationMs - 1), runTimeoutMs: Math.min(task.repositoryDelivery.events ? 300_000 : 60_000, task.executionBudget.durationMs), maxRuns: (task.repositoryDelivery.events?.maxFires ?? 0) + 1 } : undefined)
   if (task.repositoryDelivery && (task.repositoryDelivery.expiresAt <= now + task.executionBudget.durationMs + 60_000 || task.repositoryDelivery.expiresAt > profile.grant.expiresAt)) fail('repository delivery deadline mismatch')
+  const repository = task.repositoryDelivery
+  const externalGrant = (() => {
+    if (repository?.externalGrantId === undefined) return undefined
+    const configured = actions!.toJSON() as { broker?: { mode?: unknown }; grants?: unknown; externalGrants?: unknown }
+    if (configured.broker?.mode !== 'external-unix-v1' || !Array.isArray(configured.grants) || configured.grants.length !== 0 || !Array.isArray(configured.externalGrants)) fail('external repository grant requires external-unix-v1')
+    const matches = configured.externalGrants.map(externalProjection).filter(grant => grant.id === repository.externalGrantId)
+    if (matches.length !== 1) fail('external repository grant is unavailable')
+    const grant = matches[0]!
+    const expectedOwner = { principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version,
+      workspace: input.workspace, preset: input.preset, bindingId: binding.id, bindingVersion: binding.version, bindingGeneration: binding.generation }
+    const expectedOperations = ['commit', 'inspect', ...(repository.openPullRequest ? ['pull-request'] : [])]
+    const expectedInspections = ['repository', 'branch', 'file', ...(repository.outcome ? ['pull-request', 'checks', 'reviews'] : [])]
+    const acceptance = repository.acceptance ?? 'goal-outcome'
+    if (!isDeepStrictEqual(grant.owner, expectedOwner) || grant.sessionId !== binding.sessionId
+      || grant.destination.repository !== repository.repository || grant.destination.branch !== repository.branch || grant.destination.baseBranch !== repository.baseBranch
+      || !isDeepStrictEqual(grant.destination.paths, repository.paths) || grant.expiresAt !== repository.expiresAt
+      || grant.maxActions !== repository.maxActions || grant.maxTotalBytes !== repository.maxTotalBytes
+      || !isDeepStrictEqual([...grant.allowedOperations].sort(), expectedOperations.sort())
+      || !isDeepStrictEqual([...grant.allowedInspectKinds].sort(), expectedInspections.sort())
+      || grant.verifiedDelivery === undefined || grant.verifiedDelivery.ownerRouteId !== admissionId
+      || grant.verifiedDelivery.budgetId !== `${admissionId}-runs` || (grant.verifiedDelivery.acceptance ?? 'goal-outcome') !== acceptance) fail('external repository grant does not exactly match this admission')
+    return grant
+  })()
   const managed = isSeq(verifier.get('profiles', true)) && sequence(verifier.get('profiles', true)).items.some(value => isMap(value) && String(value.get('id')).startsWith('goal-'))
   const set = (config: YAMLMap, field: string, desired: unknown, defaults: unknown[] = []) => {
     if (config.has(field)) {
@@ -250,9 +305,8 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     image: profile.image, dockerPath: profile.dockerPath, command: task.verification.command, expiresAt: profile.grant.expiresAt,
     maxRuns: task.verification.maxRuns, maxTotalDurationMs: task.verification.maxTotalDurationMs, maxDurationMs: task.verification.maxDurationMs,
     maxOutputBytes: task.verification.maxOutputBytes, testSets: [{ id: 'cases', cases: task.verification.cases }] }
-  const repository = task.repositoryDelivery
   const remoteAuthority: RepositoryReadbackAuthorityInput | undefined = repository?.outcome === undefined ? undefined : {
-    ...repository.outcome, kind: 'repository-readback', id: `${admissionId}-repository-verify`, grantId: `${admissionId}-repository`, grantRevision: 1,
+    ...repository.outcome, kind: 'repository-readback', id: `${admissionId}-repository-verify`, grantId: externalGrant?.id ?? `${admissionId}-repository`, grantRevision: externalGrant?.revision ?? 1,
     repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch,
   }
   const authorities: VerifierAuthorityInput[] = remoteAuthority ? [authority, remoteAuthority] : [authority]
@@ -328,34 +382,43 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
       { id: `${admissionId}-resume`, effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: input.workspace, principal: principalId }, actions: ['wake'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
     ])
     if (task.repositoryDelivery) {
-      const repository = task.repositoryDelivery; const handles = keychain!.get('handles', true)
-      if (!isSeq(handles)) fail('credential handle is unavailable')
-      untagged(handles, 'credential handles')
-      const matching = handles.items.filter(item => isMap(item) && literalString(item.get('id', true)) === repository.credentialHandle) as YAMLMap[]
-      if (matching.length !== 1) fail('credential handle is unavailable')
-      const consumers = matching[0]!.get('consumers', true); const purposes = matching[0]!.get('purposes', true)
-      if (!isSeq(consumers) || !isSeq(purposes)
-        || literalString(matching[0]!.get('provider', true)) === undefined
-        || (literalInteger(matching[0]!.get('maxLeaseMs', true)) ?? 0) < 30_000
-        || !consumers.items.some(item => literalString(item) === 'dsh-enhanced-assistant-actions')
-        || !purposes.items.some(item => literalString(item) === 'github.commit')) fail('credential handle is unavailable')
-      const grant = { id: `${admissionId}-repository`, revision: 1, principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version, workspace: input.workspace, agentPreset: input.preset, repository: repository.repository, branch: repository.branch, paths: repository.paths, credentialHandle: repository.credentialHandle, expiresAt: repository.expiresAt, maxActions: repository.maxActions, maxTotalBytes: repository.maxTotalBytes, repoWorkflow: { baseBranch: repository.baseBranch, allowBranchCreate: false, allowPullRequest: repository.openPullRequest }, verifiedDelivery: { ownerRouteId: admissionId, budgetId, ...(repository.acceptance ? { acceptance: repository.acceptance } : {}) } }
-      append(actions!, 'grants', [grant])
-      if (typeof Actions.validateActionConfig !== 'function') fail('install matching @dsh-enhanced/assistant-actions first')
-      Actions.validateActionConfig(actions!.toJSON())
-      append(policy, 'rules', [
-        { id: `${admissionId}-repository-agent`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: `action:github:${grant.id}` }, context: { initiators: ['external', 'background'] } },
+      const repository = task.repositoryDelivery
+      let grantId = externalGrant?.id
+      if (!externalGrant) {
+        const handles = keychain!.get('handles', true)
+        if (!isSeq(handles)) fail('credential handle is unavailable')
+        untagged(handles, 'credential handles')
+        const matching = handles.items.filter(item => isMap(item) && literalString(item.get('id', true)) === repository.credentialHandle) as YAMLMap[]
+        if (matching.length !== 1) fail('credential handle is unavailable')
+        const consumers = matching[0]!.get('consumers', true); const purposes = matching[0]!.get('purposes', true)
+        if (!isSeq(consumers) || !isSeq(purposes)
+          || literalString(matching[0]!.get('provider', true)) === undefined
+          || (literalInteger(matching[0]!.get('maxLeaseMs', true)) ?? 0) < 30_000
+          || !consumers.items.some(item => literalString(item) === 'dsh-enhanced-assistant-actions')
+          || !purposes.items.some(item => literalString(item) === 'github.commit')) fail('credential handle is unavailable')
+        const grant = { id: `${admissionId}-repository`, revision: 1, principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version, workspace: input.workspace, agentPreset: input.preset, repository: repository.repository, branch: repository.branch, paths: repository.paths, credentialHandle: repository.credentialHandle!, expiresAt: repository.expiresAt, maxActions: repository.maxActions, maxTotalBytes: repository.maxTotalBytes, repoWorkflow: { baseBranch: repository.baseBranch, allowBranchCreate: false, allowPullRequest: repository.openPullRequest }, verifiedDelivery: { ownerRouteId: admissionId, budgetId, ...(repository.acceptance ? { acceptance: repository.acceptance } : {}) } }
+        append(actions!, 'grants', [grant])
+        if (typeof Actions.validateActionConfig !== 'function') fail('install matching @dsh-enhanced/assistant-actions first')
+        Actions.validateActionConfig(actions!.toJSON())
+        grantId = grant.id
+      }
+      const repositoryRules = [
+        { id: `${admissionId}-repository-agent`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: `action:github:${grantId}` }, context: { initiators: ['external', 'background'] } },
         ...['action_github_grants', 'action_github_inspect', 'action_github_deliver', 'action_github_delivery_status'].map(tool => ({ id: `${admissionId}-repository-${tool}`, effect: 'allow' as const, subject: { kind: 'agent' as const, id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool' as const, id: tool }, context: { initiators: ['external', 'background'] } })),
-        { id: `${admissionId}-repository-background`, effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions', workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: `action:github:${grant.id}` }, context: { initiators: ['background'] } },
-        { id: `${admissionId}-repository-credential`, effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: repository.credentialHandle }, context: { initiators: ['background'] } },
-        { id: `${admissionId}-repository-automation`, effect: 'allow', subject: { kind: 'background', id: '*', workspace: input.workspace, principal: principalId }, actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: 'verified-delivery-*' }, context: { initiators: ['background'] } },
-        { id: `${admissionId}-repository-notice`, effect: 'allow', subject: { kind: 'background', id: 'assistant-actions-verified-delivery/v1', workspace: input.workspace, principal: principalId }, actions: ['send'], resource: { kind: 'message', id: binding.id }, context: { initiators: ['background'] } },
-      ])
+        { id: `${admissionId}-repository-background`, effect: 'allow' as const, subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-actions', workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool' as const, id: `action:github:${grantId}` }, context: { initiators: ['background'] } },
+        { id: `${admissionId}-repository-automation`, effect: 'allow' as const, subject: { kind: 'background' as const, id: '*', workspace: input.workspace, principal: principalId }, actions: ['reconcile', 'execute'], resource: { kind: 'automation' as const, id: 'verified-delivery-*' }, context: { initiators: ['background'] } },
+        { id: `${admissionId}-repository-notice`, effect: 'allow' as const, subject: { kind: 'background' as const, id: 'assistant-actions-verified-delivery/v1', workspace: input.workspace, principal: principalId }, actions: ['send'], resource: { kind: 'message' as const, id: binding.id }, context: { initiators: ['background'] } },
+        ...(externalGrant ? [] : [{ id: `${admissionId}-repository-credential`, effect: 'allow' as const, subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential' as const, id: repository.credentialHandle! }, context: { initiators: ['background'] } }]),
+      ]
+      append(policy, 'rules', repositoryRules)
       if (repository.events) {
         if (typeof eventSupport?.normalizeEventTriggersConfig !== 'function' || typeof eventSupport.EVENT_OBSERVER_EXECUTOR !== 'string') fail('install matching event-triggers support for repository events')
         const { normalizeEventTriggersConfig, EVENT_OBSERVER_EXECUTOR } = eventSupport
         const events = repository.events, triggerId = `${admissionId}-repository-events`, automationId = `${triggerId}-source`, pollBudgetId = `${triggerId}-polls`, eventBudgetId = `${triggerId}-runs`
-        const eventHandle = handles.items.filter(item => isMap(item) && literalString(item.get('id', true)) === events.credentialHandle) as YAMLMap[]
+        const eventHandles = keychain!.get('handles', true)
+        if (!isSeq(eventHandles)) fail('repository observation credential handle is unavailable')
+        untagged(eventHandles, 'credential handles')
+        const eventHandle = eventHandles.items.filter(item => isMap(item) && literalString(item.get('id', true)) === events.credentialHandle) as YAMLMap[]
         if (eventHandle.length !== 1) fail('repository observation credential handle is unavailable')
         const eventConsumers = eventHandle[0]!.get('consumers', true), eventPurposes = eventHandle[0]!.get('purposes', true)
         if (!isSeq(eventConsumers) || !isSeq(eventPurposes) || (literalInteger(eventHandle[0]!.get('maxLeaseMs', true)) ?? 0) < events.requestTimeoutMs

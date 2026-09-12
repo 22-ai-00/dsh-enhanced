@@ -1,0 +1,193 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-12",
+  "baseCommit": "7a36512b466171864f6c50a978a0c457e9930980",
+  "status": "passed",
+  "completeWorkPackage": false,
+  "scope": "Independently accepted artifact delivery and fresh repository outcome verification through the external broker",
+  "implemented": [
+    "Formal v2 Goal admission consumes an existing exact externalGrantId without issuing a broker grant or requesting a Host credential. Generated Policy authorizes scoped tools, trusted background execution, finite scheduling and original-owner notices.",
+    "Accepted artifact bytes are committed through signed UDS, then an explicitly authorized fixed head/base PR is created. Host handoff storage retains signed history without artifact bytes; credential and authoritative action journal stay in the broker.",
+    "Repository outcome readback reconstructs the signed payload from current accepted artifacts, verifies commit/PR receipts and fetches current branch, PR, checks and reviews. Owner, grant, generation and epoch fences reject stale or mixed observations.",
+    "Ledger v1 to v2 migration preserves all historical grants, unknown outcomes and consumed budgets. Commit dispatch and PR occupancy reject a new key around an unresolved action, including grant revision changes; reads remain possible."
+  ],
+  "checks": [
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-actions exec vitest run tests/verified-delivery-service.spec.ts tests/broker-ledger.spec.ts tests/broker-ledger-migration.spec.ts tests/broker-core.spec.ts",
+      "exitCode": 0,
+      "log": "/tmp/dsh-external-delivery-integrated-final.log",
+      "logSha256": "80a75d1233988432ab37735bd004db17e5737d4e973c2f240819cd4ca4cba03c",
+      "passed": 61
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-actions typecheck",
+      "exitCode": 0,
+      "log": "/tmp/dsh-external-delivery-types.log",
+      "logSha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    },
+    {
+      "command": "pnpm lint",
+      "exitCode": 0,
+      "log": "/tmp/dsh-external-delivery-lint.log",
+      "logSha256": "decfb35129f4a3eb2629ca3980e9707d043c8162c302770aee3339015da2af54"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+      "exitCode": 0,
+      "passed": 5268,
+      "skipped": 1,
+      "passedFiles": 389,
+      "dryRunPacks": 33,
+      "log": "/tmp/dsh-external-delivery-check.log",
+      "logSha256": "754b0600edd65bb0af9ad16a3084968973ff6983cd8321ece4c86831cb8aedc6",
+      "scope": "Frozen external Actions/Web admission sources. Subsequent release Host pin, CLI test fixture and release version preparation require their final release check."
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-actions exec vitest run tests/verified-delivery-service.spec.ts tests/external-adapter.spec.ts",
+      "exitCode": 0,
+      "passed": 36,
+      "log": {
+        "path": "/tmp/dsh-external-delivery-redaction.log",
+        "sha256": "c96c7f96c64625a6f9ea79e96268a3f3af7ce13ee3bdcf3139a856b934595d42"
+      }
+    },
+    {
+      "command": "pnpm lint",
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/dsh-release-final-lint.log",
+        "sha256": "decfb35129f4a3eb2629ca3980e9707d043c8162c302770aee3339015da2af54"
+      }
+    },
+    {
+      "command": "DSH_REPO_SETUP_ONLY=1 DSH_REPO_RETAIN_FAILURE=1 DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EXTERNAL_BROKER=fixture DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs --output /tmp/dsh-external-delivery-setup-v9-results",
+      "exitCode": 0,
+      "passed": 1,
+      "log": {
+        "path": "/tmp/dsh-external-delivery-setup-v9.log",
+        "sha256": "d46c1206306249439cae6496948354c44631244e51c54e07d30e7d4107ef8396"
+      }
+    },
+    {
+      "command": "DSH_REPO_SETUP_ONLY=0 DSH_REPO_RETAIN_FAILURE=1 DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EXTERNAL_BROKER=fixture DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs --output /tmp/dsh-external-delivery-real-final-results",
+      "exitCode": 0,
+      "passed": 1,
+      "log": {
+        "path": "/tmp/dsh-external-delivery-real-final.log",
+        "sha256": "6144ca5f7ed909a6273918e764b98e4e6e4c72c1fea194d7e7e19bacaec86eea"
+      }
+    }
+  ],
+  "earlierFailures": [
+    {
+      "log": "/tmp/dsh-external-delivery-integrated.log",
+      "exitCode": 1,
+      "cause": "Migration budget negative fixture used the same head as an unresolved commit, so the new conflict guard rejected before the expected budget error. Changed only the test head; final combined 61-test suite passed."
+    },
+    {
+      "exitCode": 1,
+      "cause": "Initial setup used inherited user Skills database default; test now preconfigures private fixture paths. Its log was overwritten by the second attempt; no log hash is claimed."
+    },
+    {
+      "log": "/tmp/dsh-external-delivery-setup.log",
+      "exitCode": 1,
+      "cause": "Private state fixed the initial rejection, then global DSH 0.1.5-rc.1 activation timed out."
+    },
+    {
+      "log": "/tmp/dsh-external-delivery-setup-v3.log",
+      "exitCode": 1,
+      "cause": "Retained-host diagnosis identified incompatible global session-persistence 0.1.5-rc.2, missing the event-support oracle. Test uses independently installed pinned CLI; release installation compatibility is being tightened."
+    },
+    {
+      "exitCode": 1,
+      "log": {
+        "path": "/tmp/dsh-external-delivery-real.log",
+        "sha256": "ea949e210c5926a5b4faac44d3bc622be107f82e8a1021970137ff6191911fcb"
+      },
+      "cause": "The first real run independently completed repair/commit/PR, but the fixture returned repository DTO for file inspection. Corrected file response and retained strict successful-read assertions. Review also found private broker receipt fields exposed by inspect; fixed explicit public projection and added a real signed-socket regression. Final complete E2E passed."
+    }
+  ],
+  "limitations": [
+    "Local integration uses real UDS, Ed25519, SQLite, Core and protected test token files, with injected GitHub transports and same-UID peer fixtures; no live GitHub write, remote CI/review result or independent-UID deployment is claimed.",
+    "External branch creation, compensation and repository event polling remain unsupported. The operator provisions daemon identity, keys, credentials and authoritative grants.",
+    "Historical signed receipts prove bound broker history, not current authorization or remote freshness. Key rotation can make historical verification unavailable.",
+    "Unknown or interrupted writes never automatically replay. PR creation lacks a remote atomic expected-head CAS; mismatched acknowledgement remains unknown.",
+    "The previously delivered bounded two-round RSI milestone remains described in basic-rsi-two-round-2026-09-12.json. This increment does not establish general recursive intelligence or complete the 18-work-package roadmap.",
+    "All 18 planned work packages remain: 3 verified, 13 implementing, 2 pending. Delivery is the dev source branch, not a new npm/release publication.",
+    "TraeX exposes no token usage on this route; model/tool call counts are observed, not fabricated token or currency accounting."
+  ],
+  "realIntegration": {
+    "proof": {
+      "path": "/tmp/dsh-external-delivery-real-final-results/repo-autonomy-real-formal--92374-ry-isolated-repository-task/proof.json",
+      "sha256": "2699189846890a435e34e9dc2e0a9eacecaaed40013772c9985af5fcb361fafe"
+    },
+    "runtime": {
+      "path": "/tmp/dsh-external-delivery-real-final-results/repo-autonomy-real-formal--92374-ry-isolated-repository-task/pinned-cli-runtime.json",
+      "sha256": "4f2bdfdabf2058dcc63978896909044cb641a699872f85ddd2996b09ef83cb68"
+    },
+    "runtimeVersions": {
+      "@deepseek-ai/dsh": {
+        "version": "0.1.2-rc.1",
+        "packagePath": "/tmp/dsh-repo-autonomy-real-ihLvTU/pinned-dsh-cli/node_modules/@deepseek-ai/dsh/package.json"
+      },
+      "@deepseek-ai/dsh-session-persistence": {
+        "version": "0.1.2-rc.1",
+        "packagePath": "/tmp/dsh-repo-autonomy-real-ihLvTU/pinned-dsh-cli/node_modules/.pnpm/@deepseek-ai+dsh-session-persistence@0.1.2-rc.1_@deepseek-ai+cordis@4.0.2_@deepseek-ai+_c3f18da57067665a3860f57c74f0ea22/node_modules/@deepseek-ai/dsh-session-persistence/package.json"
+      },
+      "@deepseek-ai/dsh-session-persistence-jsonl": {
+        "version": "0.1.2-rc.1",
+        "packagePath": "/tmp/dsh-repo-autonomy-real-ihLvTU/pinned-dsh-cli/node_modules/.pnpm/@deepseek-ai+dsh-session-persistence-jsonl@0.1.2-rc.1_@deepseek-ai+cordis@4.0.2_@deepse_84e24c974dd349d55602b72a46e026a7/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/package.json"
+      },
+      "@deepseek-ai/cordis": {
+        "version": "4.0.2",
+        "packagePath": "/tmp/dsh-repo-autonomy-real-ihLvTU/pinned-dsh-cli/node_modules/.pnpm/@deepseek-ai+cordis@4.0.2_@deepseek-ai+cordis-plugin-include@1.0.7_@deepseek-ai+cordis-plugin-loader@1.0.3/node_modules/@deepseek-ai/cordis/package.json"
+      }
+    },
+    "provider": "traex-agent",
+    "model": "gpt-5.6-terra",
+    "sessionId": "session-95ecbf58-e856-4620-a398-576762e3a52a",
+    "goalId": "212085441e5863c435a9073531635d9b63e627a797fb534f3a9de981719fb2df",
+    "modelCalls": 9,
+    "toolCalls": 10,
+    "ownerToolApprovals": 3,
+    "goalPhase": "complete",
+    "commitOid": "3377e5719403645d239ea14fb5b7a443c2d93646",
+    "pullRequestNumber": 17,
+    "notifications": [
+      "accepted"
+    ],
+    "restart": {
+      "sameGoal": true,
+      "sameSourceJobEvidence": true,
+      "replyVisible": true
+    },
+    "boundary": "Real installed DSH/Chromium/TraeX, tools, Docker verification, signed UDS/Core/Ledger and owner feedback. GitHub transports and server peer inspector are fixtures; production Host peer probe is used. The test owner accepted native tool approval prompts; this is not evidence of zero-prompt operation."
+  },
+  "sourceHashes": {
+    "plugins/assistant-actions/README.md": "3a9ae5e226c8d3ade7f753b3be70b97159271fa24b59ce96ef57b6f70ec302ff",
+    "plugins/assistant-actions/src/broker-core.ts": "0f7ccd06c8601ecc92808f24e8f864bf6483b09e70ffa53326c2493854073a1f",
+    "plugins/assistant-actions/src/broker-ledger.ts": "f38e5a5089f289c71721ad0f3540193f3a28e44e61c71ecda5cb0c2859464bd2",
+    "plugins/assistant-actions/src/broker-protocol.ts": "5e76ebef80b88fa5eed518139d4bf8e8a4bf0a09e10a681866720e74c34357d4",
+    "plugins/assistant-actions/src/config.ts": "5ab4356b64a893b226323e8cd534af61766acf8467a7114af682dbdb7c845abb",
+    "plugins/assistant-actions/src/service.ts": "7ed9cddb34623e9a7d70a3bd2765feb4f98e86e3b914aab6db54cc719f347b9c",
+    "plugins/assistant-actions/src/verified-delivery.ts": "c3fd2acad694f40ef42813b093da7072ebdbb663340ddbe34c413a7c5decad98",
+    "plugins/assistant-actions/tests/broker-core.spec.ts": "0e5fa03b397c66a7b222d109ad31471ff26365856b296f6f062ac3e4b29e12fe",
+    "plugins/assistant-actions/tests/broker-ledger.spec.ts": "70170aee8065a837da3d75f0f2ed6735a52aa7a695009960088c1b28a3c6d33e",
+    "plugins/assistant-actions/tests/broker-protocol.spec.ts": "6ca88facb84f59e7100581d0ed42f26f7e5f82a4dda5397356bab5048449b23c",
+    "plugins/assistant-actions/tests/external-adapter.spec.ts": "bb8180b82ee8352b1f1a7a1641234d82d6c919ae99775f63cb43b45fd322182d",
+    "plugins/assistant-actions/tests/verified-delivery-service.spec.ts": "bcabdf18ab8e3ab946a5a727f59515a380e4869ac303f3ed566e8bfe98b74464",
+    "plugins/assistant-web-owner/src/goal-admission.ts": "71642fbbd780240a40f3b5f99b6120001ce7184e372011f80113975ecf3add1a",
+    "plugins/assistant-web-owner/tests/goal-admission.spec.ts": "fe617feef270f6fcb2418398a403a9c62090691acca07d0b9b0e409189701694",
+    "scripts/e2e/repo-autonomy-real.spec.mjs": "a9e053e53c3ca422b1e733551036aa46ce560c75fc856355c42dc7b07c1d749a",
+    "plugins/assistant-actions/src/external-delivery-receipt.ts": "87da1767359c1fdc257b0bea380bceccc38f850ac12fe61e0bd98da94203c4a4",
+    "plugins/assistant-actions/tests/broker-ledger-migration.spec.ts": "e9de94a31bf56c40cf33742f040f94bb6f228b6e9394f18244875ce983f9af82",
+    "plugins/assistant-actions/tests/external-delivery-fixture.ts": "a29e72c83dab6857ee8cbcfd076f68876e59a3782708296ed99cd63509a9b897",
+    "scripts/e2e/repo-external-delivery-fixture.mjs": "f704b1ed41cb73d894ee7d16e8ded8b426d4411f68fa436368302d1705811b9f"
+  },
+  "independentReview": {
+    "reviewer": "broker_pr_verify",
+    "role": "verifier",
+    "result": "PASS",
+    "scope": "Current development delivery, including redaction, local Host pin, history consistency and actual real-final E2E; does not substitute for the forthcoming exact release source verification."
+  }
+}

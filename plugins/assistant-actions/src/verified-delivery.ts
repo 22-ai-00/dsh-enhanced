@@ -1,3 +1,4 @@
+import type { ExternalDeliveryReceipt } from './external-delivery-receipt.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-goal'
@@ -14,7 +15,7 @@ const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(valu
 const catalogDigest = hash({ owner: verifiedDeliveryOwner, version: 1 })
 export interface DeliverySecurity {
   principalId: string; identity: ActionIdentity; sessionId: string; goalId: string; nativeGoalId?: string; runId: string
-  definitionDigest: string; definitionVersion: number; grantId: string; grantRevision: number
+  definitionDigest: string; definitionVersion: number; grantId: string; grantRevision: number; externalGrantDigest?: string
   ownerRouteId: string; budgetId: string; acceptance?: 'goal-outcome' | 'goal-step'; expiresAt: number; routeReceipt: unknown
 }
 export interface VerifiedFiles {
@@ -22,7 +23,7 @@ export interface VerifiedFiles {
   files: readonly { path: string; content: string; sha256: string; jobId: string }[]
 }
 export interface DeliveryIntent { id: string; request: VerifiedDeliveryRequest; security: DeliverySecurity }
-export interface DeliveryOutcome { commit: ActionResult; pullRequest?: ActionResult }
+export interface DeliveryOutcome { commit: ActionResult; pullRequest?: ActionResult; brokerReceipts?: { commit: ExternalDeliveryReceipt; pullRequest?: ExternalDeliveryReceipt } }
 type State = 'awaiting-verification' | 'scheduled' | 'executing' | 'succeeded' | 'failed' | 'unknown'
 interface Row { id: string; intent: string; state: State; at_ms: number | null; deadline_ms: number | null; definition_hash: string | null; result: string | null; notification_state: 'pending' | 'enqueued' }
 interface Ports {
@@ -78,7 +79,11 @@ export class VerifiedDeliveryRuntime {
     ctx.on('assistant-verifier/receipt', notice => { if (notice.taskKind === 'goal-step' || notice.taskKind === 'goal-outcome') nudge() })
   }
   #row(id: string): Row | undefined { return this.#db.prepare('SELECT * FROM deliveries WHERE id=?').get(id) as unknown as Row | undefined }
-  #public(row: Row) { return { deliveryId: row.id, status: row.state, ...(row.result === null ? {} : { result: JSON.parse(row.result) as unknown }) } }
+  #public(row: Row) {
+    const parsed = row.result === null ? undefined : JSON.parse(row.result) as Record<string, unknown>
+    const { brokerReceipts: _brokerReceipts, ...result } = parsed ?? {}
+    return { deliveryId: row.id, status: row.state, ...(parsed === undefined ? {} : { result }) }
+  }
   get(sessionId: string, grantId: string, idempotencyKey: string, identity?: ActionIdentity) {
     if (!this.#active) throw new Error('assistant-actions: delivery unavailable')
     const row = this.#row(key(sessionId, grantId, idempotencyKey))

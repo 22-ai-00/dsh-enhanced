@@ -3,10 +3,11 @@
 # Shared implementation for install-local.sh and install-npm.sh.
 # This file is sourced by the two public entrypoints; do not execute it directly.
 
-DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
+DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.2-rc.1'
+DSH_ENHANCED_DEFAULT_DSH_VERSION="$DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION"
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
 if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
-  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'
+  DSH_ENHANCED_VERIFIED_HOST_RANGE='=0.1.2-rc.1'
 fi
 DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
   'personal-assistant'
@@ -88,8 +89,7 @@ Options:
   --model-base-url <url>    Custom OpenAI-compatible gateway base URL (custom provider only)
   --model-api <protocol>    openai-completions (default), openai-responses, or anthropic-messages (custom provider only)
   --model-display-name <s>  Optional human label for a custom provider route
-  --dsh-version <version>   DSH version to ensure (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
-  --ack-unverified-host     Allow a DSH version outside ${DSH_ENHANCED_VERIFIED_HOST_RANGE}
+  --dsh-version <version>   Exact supported DSH version (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
   --no-service              Do not install or restart the platform resident service
   --yes                     Choose the safe default without the installer menu
   --dry-run                 Print the complete plan without changing the machine
@@ -327,6 +327,29 @@ dsh_enhanced_version_in_range() {
   return 0
 }
 
+dsh_enhanced_require_pinned_host_version() {
+  local version="$1"
+  if [[ -n "${DSH_ENHANCED_PINNED_HOST_VERSION:-}" && "$DSH_ENHANCED_PINNED_HOST_VERSION" != "$DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION" ]]; then
+    dsh_enhanced_fail 2 "安装引导器的 Host pin 与安装逻辑不一致；尚未修改运行时或 profile。"
+    return $?
+  fi
+  if [[ "$version" != "$DSH_ENHANCED_DEFAULT_DSH_VERSION" ]]; then
+    dsh_enhanced_fail 2 "此安装器仅支持 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION}；收到 ${version:-unknown}。请为本套件使用 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION} 的独立 CLI；不会修改现有全局 DSH。"
+    return $?
+  fi
+}
+
+dsh_enhanced_reject_incompatible_existing_dsh() {
+  local current_version=''
+  if command -v dsh >/dev/null 2>&1; then
+    current_version="$(dsh --version 2>/dev/null || true)"
+    if [[ "$current_version" != "$DSH_ENHANCED_DEFAULT_DSH_VERSION" ]]; then
+      dsh_enhanced_fail 2 "检测到 DSH ${current_version:-unknown}，但此安装器仅支持 ${DSH_ENHANCED_DEFAULT_DSH_VERSION}。请为本套件使用 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION} 的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
+      return $?
+    fi
+  fi
+}
+
 dsh_enhanced_ensure_dsh() {
   local requested_version="$1"
   local dry_run="$2"
@@ -334,30 +357,7 @@ dsh_enhanced_ensure_dsh() {
   local target_version="$requested_version"
   local current_version=''
   printf 'DSH 目标：@deepseek-ai/dsh@%s\n' "$requested_version"
-  if [[ "$requested_version" == 'latest' ]]; then
-    if [[ "$dry_run" == '1' ]]; then
-      dsh_enhanced_print_command npm install --global '@deepseek-ai/dsh@latest'
-      return 0
-    fi
-    if ! target_version="$(npm view @deepseek-ai/dsh dist-tags.latest)"; then
-      dsh_enhanced_fail 1 '无法从 npm 查询 @deepseek-ai/dsh 的 latest 版本。'
-      return $?
-    fi
-    if ! dsh_enhanced_is_host_version "$target_version"; then
-      dsh_enhanced_fail 1 "npm 返回了无效的 @deepseek-ai/dsh latest 版本：${target_version:-empty}"
-      return $?
-    fi
-    printf 'DSH latest 已解析为：%s\n' "$target_version"
-  fi
-  if ! dsh_enhanced_version_in_range "$target_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
-    printf '警告：DSH %s 超出 dsh-enhanced 已验证范围 %s。\n' \
-      "$target_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE" >&2
-    if [[ "$ack_unverified_host" != '1' ]]; then
-      dsh_enhanced_fail 2 '如需继续，请显式传入 --ack-unverified-host。'
-      return $?
-    fi
-    printf '已确认继续使用未经验证的 DSH host 版本。\n' >&2
-  fi
+  dsh_enhanced_require_pinned_host_version "$target_version" || return $?
   if [[ "$dry_run" == '1' ]]; then
     dsh_enhanced_print_command npm install --global "@deepseek-ai/dsh@$target_version"
     return 0
@@ -365,21 +365,16 @@ dsh_enhanced_ensure_dsh() {
   if command -v dsh >/dev/null 2>&1; then
     current_version="$(dsh --version 2>/dev/null || true)"
   fi
-  if [[ -n "$current_version" ]] && dsh_enhanced_is_host_version "$current_version" \
-    && dsh_enhanced_version_ge "$current_version" "$target_version"; then
-    if dsh_enhanced_version_ge "$target_version" "$current_version"; then
+  if [[ -n "$current_version" ]]; then
+    if [[ "$current_version" == "$target_version" ]]; then
       printf 'DSH 已安装且版本匹配：%s\n' "$current_version"
     else
-      printf 'DSH 当前版本 %s 高于目标 %s；保留现有版本，避免降级。\n' \
-        "$current_version" "$target_version"
+      dsh_enhanced_fail 2 "检测到 DSH ${current_version}，但此安装器仅支持 ${target_version}。请为本套件使用 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION} 的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
+      return $?
     fi
     return 0
   fi
-  if [[ -n "$current_version" ]]; then
-    printf 'DSH 当前版本为 %s，正在升级到 %s。\n' "$current_version" "$target_version"
-  else
-    printf '未检测到 DSH，正在安装。\n'
-  fi
+  printf '未检测到 DSH，正在安装。\n'
   npm install --global "@deepseek-ai/dsh@$target_version"
   hash -r
   dsh_enhanced_refresh_global_path || true
@@ -388,9 +383,8 @@ dsh_enhanced_ensure_dsh() {
     return $?
   fi
   current_version="$(dsh --version 2>/dev/null || true)"
-  if ! dsh_enhanced_is_host_version "$current_version" \
-    || ! dsh_enhanced_version_ge "$current_version" "$target_version"; then
-    dsh_enhanced_fail 1 "DSH 版本校验失败：得到 ${current_version:-unknown}，期望不低于 $target_version。"
+  if [[ "$current_version" != "$target_version" ]]; then
+    dsh_enhanced_fail 1 "DSH 版本校验失败：得到 ${current_version:-unknown}，期望精确版本 $target_version。"
     return $?
   fi
 }
@@ -436,12 +430,9 @@ dsh_enhanced_require_existing_runtime() {
     dsh_enhanced_fail 1 '无法读取当前 DSH 版本；尚未开始 profile 生命周期事务。'
     return $?
   fi
-  if ! dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
-    printf '警告：DSH %s 超出 dsh-enhanced 已验证范围 %s。\n' "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE" >&2
-    if [[ "$ack_unverified_host" != '1' ]]; then
-      dsh_enhanced_fail 2 '如需继续，请显式传入 --ack-unverified-host。'
-      return $?
-    fi
+  if [[ "$current_version" != "$DSH_ENHANCED_DEFAULT_DSH_VERSION" ]]; then
+    dsh_enhanced_fail 2 "检测到 DSH ${current_version}，但此安装器仅支持 ${DSH_ENHANCED_DEFAULT_DSH_VERSION}。请为本套件使用 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION} 的独立 CLI；不会修改现有全局 DSH。"
+    return $?
   fi
   printf '生命周期事务使用现有 DSH：%s；不会修改全局 DSH/pnpm。\n' "$current_version"
 }
@@ -2489,6 +2480,12 @@ dsh_enhanced_install() {
     if [[ ! -f "$repo_root/package.json" || ! -d "$repo_root/plugins" ]]; then
       dsh_enhanced_fail 1 "无法识别 dsh-enhanced 仓库根目录：$repo_root"
       return $?
+    fi
+  fi
+  if [[ "$operation" == 'install' ]]; then
+    dsh_enhanced_require_pinned_host_version "$dsh_version" || return $?
+    if [[ "$dry_run" != '1' ]]; then
+      dsh_enhanced_reject_incompatible_existing_dsh || return $?
     fi
   fi
   if [[ "$operation" != 'install' ]]; then

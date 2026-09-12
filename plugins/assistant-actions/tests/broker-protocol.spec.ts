@@ -138,6 +138,19 @@ describe('broker action authentication', () => {
     expect(() => createBrokerGrantProjection({ ...authority, allowedInspectKinds: ['pull-request'] as const })).toThrowError(/base branch/)
   })
 
+  it('projects verified delivery metadata only when explicitly granted', () => {
+    const authority = { protocol: 'assistant-actions/external-github-grant/v1' as const, id: 'grant-1', revision: 5, clientKeyId: 'client-key-1', owner: intent().owner, sessionId: intent().sessionId,
+      destination: { ...intent().destination, baseBranch: 'stable', paths: ['src/file.txt'] }, credentialId: 'github-owner-token', expiresAt: now + 50_000, maxActions: 3, maxTotalBytes: 4096, maxCostUnits: 10, allowedOperations: ['commit', 'pull-request'] as const, allowedInspectKinds: [] as const,
+      client, source: intent().source, policyEpoch: 12, emergencyEpoch: 4, verifiedDelivery: { ownerRouteId: 'owner-route', budgetId: 'delivery-budget', acceptance: 'goal-outcome' as const } }
+    expect(createBrokerGrantProjection(authority).verifiedDelivery).toEqual(authority.verifiedDelivery)
+    expect(() => createBrokerGrantProjection({ ...authority, allowedOperations: ['pull-request'] as const })).toThrowError(/requires commit/)
+    expect(() => createBrokerGrantProjection({ ...authority, verifiedDelivery: { ...authority.verifiedDelivery, unexpected: true } as unknown as typeof authority.verifiedDelivery })).toThrowError(/unknown or missing/)
+    const legacy = { ...authority, allowedOperations: ['commit'] as const, destination: { ...intent().destination, paths: ['src/file.txt'] } }
+    delete (legacy as { verifiedDelivery?: unknown }).verifiedDelivery
+    expect(createBrokerGrantProjection(legacy)).not.toHaveProperty('verifiedDelivery')
+    expect(brokerGrantAuthorityDigest(legacy)).toBe(brokerDigest(legacy))
+  })
+
   it('accepts only a signed response bound to the exact request and result target', () => {
     const signedHello = hello(), request = createBrokerClientRequest(intent(), signedHello, client, 'client-key-1', clientKeys.privateKey, 'request-1')
     const response = createBrokerServerResponse({ status: 'succeeded', dispatched: true, result: { operation: 'commit', repository: request.destination.repository, branch: request.destination.branch, parentOid: (request.payload as { expectedHeadOid: string }).expectedHeadOid, commitOid: 'e'.repeat(40) }, error: null, completedAt: now + 2 }, request, signedHello, serverKeys.privateKey)
@@ -146,6 +159,18 @@ describe('broker action authentication', () => {
     expect(() => verifyBrokerServerResponse(response, other, signedHello, serverKeys.publicKey)).toThrowError(/does not match|not bound/)
     expect(() => verifyBrokerServerResponse({ ...response, requestId: 'forged' }, request, signedHello, serverKeys.publicKey)).toThrowError(/not bound/)
     expect(canonicalBrokerJson(response)).not.toContain('token')
+  })
+
+  it('binds a pull-request request and result to its exact head and base scope', () => {
+    const signedHello = hello()
+    const request = createBrokerClientRequest({ ...intent(), operation: 'pull-request', destination: { ...intent().destination, baseBranch: 'stable' }, payload: { expectedHeadOid: 'd'.repeat(40), title: 'Deliver', body: 'trusted host will verify receipt' } }, signedHello, client, 'client-key-1', clientKeys.privateKey, 'pull-request')
+    const result = { operation: 'pull-request' as const, repository: 'owner/repository', branch: 'main', baseBranch: 'stable', expectedHeadOid: 'd'.repeat(40), pullRequestNumber: 7 }
+    const response = createBrokerServerResponse({ status: 'succeeded', dispatched: true, result, error: null, completedAt: now + 2 }, request, signedHello, serverKeys.privateKey)
+    expect(verifyBrokerServerResponse(response, request, signedHello, serverKeys.publicKey).result).toEqual(result)
+    expect(() => createBrokerClientRequest({ ...intent(), operation: 'pull-request', payload: { expectedHeadOid: 'd'.repeat(40), title: 'Deliver', body: '' } }, signedHello, client, 'client-key-1', clientKeys.privateKey)).toThrowError(/base branch/)
+    expect(() => createBrokerServerResponse({ status: 'succeeded', dispatched: true, result: { ...result, baseBranch: 'other' }, error: null, completedAt: now + 2 }, request, signedHello, serverKeys.privateKey)).toThrowError(/target does not match/)
+    expect(() => createBrokerServerResponse({ status: 'succeeded', dispatched: true, result: { ...result, expectedHeadOid: 'e'.repeat(40) }, error: null, completedAt: now + 2 }, request, signedHello, serverKeys.privateKey)).toThrowError(/expected head/)
+    expect(() => createBrokerServerResponse({ status: 'succeeded', dispatched: true, result: { ...result, pullRequestNumber: 0 }, error: null, completedAt: now + 2 }, request, signedHello, serverKeys.privateKey)).toThrowError(/pullRequestNumber/)
   })
 
   it('allows only the exact per-kind inspect response DTO', () => {

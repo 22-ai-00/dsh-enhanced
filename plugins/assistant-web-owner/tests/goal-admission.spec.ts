@@ -1,4 +1,5 @@
 import { mkdtemp, readFile, rm, mkdir, writeFile, chmod } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, test } from 'vitest'
@@ -106,6 +107,30 @@ function withoutKeychain(source: string): string {
   const index = document.contents.items.findIndex(row => yamlId(row) === 'dsh-enhanced-credentials-keychain')
   if (index < 0) throw new Error('fixture expected keychain')
   document.contents.items.splice(index, 1)
+  return document.toString()
+}
+function externalAdmissionId(input: WebOwnerSetupInput, snapshot: Awaited<ReturnType<typeof fixture>>['snapshot']): string {
+  return `goal-${createHash('sha256').update(JSON.stringify([input.profile, snapshot.binding.id, snapshot.owner.id, snapshot.owner.version, 'Verify the generated artifact'])).digest('hex').slice(0, 24)}`
+}
+function externalRepositoryEffective(source: string, input: WebOwnerSetupInput, snapshot: Awaited<ReturnType<typeof fixture>>['snapshot'], now: number,
+  change?: (grant: Record<string, unknown>) => void): string {
+  const document = parseDocument(repositoryEffective(source))
+  if (!isSeq(document.contents)) throw new Error('fixture expected rows')
+  const actions = document.contents.items.find(row => yamlId(row) === 'dsh-enhanced-assistant-actions')
+  if (!isMap(actions)) throw new Error('fixture expected actions')
+  const admissionId = externalAdmissionId(input, snapshot)
+  const grant: Record<string, unknown> = {
+    id: 'operator-repository-grant', revision: 7, grantDigest: 'a'.repeat(64),
+    owner: { principalDigest: createHash('sha256').update('web/web/local/operator').digest('hex'), principalRecordId: snapshot.owner.id, principalVersion: snapshot.owner.version,
+      workspace: input.workspace, preset: input.preset, bindingId: snapshot.binding.id, bindingVersion: snapshot.binding.version, bindingGeneration: snapshot.binding.generation },
+    sessionId: snapshot.binding.sessionId,
+    destination: { classification: 'github-repository', repository: 'octo/example', branch: 'automation/result', baseBranch: 'main', paths: ['result.txt'] },
+    expiresAt: now + 300_000, maxActions: 20, maxTotalBytes: 4096, source: { classification: 'internal', provenanceDigest: 'b'.repeat(64) }, maxCostUnits: 20,
+    allowedOperations: ['commit', 'inspect', 'pull-request'], allowedInspectKinds: ['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'],
+    verifiedDelivery: { ownerRouteId: admissionId, budgetId: `${admissionId}-runs`, acceptance: 'goal-step' },
+  }
+  change?.(grant)
+  ;(actions as unknown as { set(key: unknown, value: unknown): void }).set('config', document.createNode({ broker: { mode: 'external-unix-v1', actionSocketPath: '/tmp/actions.sock', brokerId: 'operator-broker', brokerPublicKeyPath: '/tmp/broker.pub', clientKeyId: 'web-owner', clientSigningKeyPath: '/tmp/client.key', clientInstanceId: 'web-owner-host', clientGeneration: 1, expectedSocketUid: 1, expectedSocketGid: 1, expectedBrokerPeerUid: 1, expectedBrokerPeerGid: 1 }, grants: [], externalGrants: [grant] }))
   return document.toString()
 }
 
@@ -265,6 +290,49 @@ llm-pi-ai:
     expect(() => parseGoalAdmissionTask(repositoryTask({ outcome, maxActions: 20 }))).toThrow('explicit goal-step')
     expect(() => parseGoalAdmissionTask(repositoryTask({ outcome, acceptance: 'goal-step', maxActions: 6 }))).toThrow('task limit')
     expect(() => parseGoalAdmissionTask(repositoryTask({ outcome: { ...outcome, minApprovals: 2 }, acceptance: 'goal-step', maxActions: 20 }))).toThrow('approvals')
+  })
+
+  test('v2 admits an operator-projected external repository grant without deriving credentials or grant authority', async () => {
+    const now = Date.now(), f = await fixture(now)
+    const outcome = { requiredChecks: [{ name: 'tests', appId: 42 }], reviewerIds: [7], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 30_000 }
+    const input = repositoryTask({ credentialHandle: undefined, externalGrantId: 'operator-repository-grant', expiresAt: now + 300_000, acceptance: 'goal-step', maxActions: 20, outcome })
+    const effective = externalRepositoryEffective(f.effective, f.input, f.snapshot, now)
+    const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), effective, input, f.snapshot, now)
+    const actions = config(plan.patch, 'dsh-enhanced-assistant-actions')
+    expect(actions.grants).toEqual([])
+    expect(actions.externalGrants).toEqual(config(effective, 'dsh-enhanced-assistant-actions').externalGrants)
+    expect(actions.broker).toEqual(config(effective, 'dsh-enhanced-assistant-actions').broker)
+    expect(plan.patch).not.toContain('credentials-keychain')
+    const verifier = config(plan.patch, 'dsh-enhanced-assistant-verifier')
+    expect(verifier.authorities).toContainEqual(expect.objectContaining({ kind: 'repository-readback', grantId: 'operator-repository-grant', grantRevision: 7, ...outcome }))
+    const rules = config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy.rules as PolicyRule[]
+    expect(rules.some(rule => rule.id.endsWith('-repository-credential') || rule.actions?.includes('credential.use'))).toBe(false)
+    const policy = compilePolicy(rules.filter(rule => rule.id.startsWith(`${plan.admissionId}-repository-`))), agent = { kind: 'agent' as const, id: f.input.preset, workspace: f.input.workspace, principal: 'web/web/local/operator' }
+    for (const tool of ['action:github:operator-repository-grant', 'action_github_grants', 'action_github_inspect', 'action_github_deliver', 'action_github_delivery_status']) {
+      expect(evaluatePolicy(policy, { subject: agent, action: 'execute', resource: { kind: 'tool', id: tool }, context: { initiator: 'external' } }).effect).toBe('allow')
+    }
+    for (const tool of ['action_github_commit', 'action_github_pr']) {
+      expect(evaluatePolicy(policy, { subject: agent, action: 'execute', resource: { kind: 'tool', id: tool }, context: { initiator: 'external' } }).effect).toBe('deny')
+    }
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions', workspace: f.input.workspace, principal: agent.principal }, action: 'execute', resource: { kind: 'tool', id: 'action:github:operator-repository-grant' }, context: { initiator: 'background' } }).effect).toBe('allow')
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'delivery-worker', workspace: f.input.workspace, principal: agent.principal }, action: 'reconcile', resource: { kind: 'automation', id: 'verified-delivery-123' }, context: { initiator: 'background' } }).effect).toBe('allow')
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'assistant-actions-verified-delivery/v1', workspace: f.input.workspace, principal: agent.principal }, action: 'send', resource: { kind: 'message', id: f.snapshot.binding.id }, context: { initiator: 'background' } }).effect).toBe('allow')
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, action: 'credential.use', resource: { kind: 'credential', id: 'repo-fixture' }, context: { initiator: 'background' } }).effect).toBe('deny')
+    expect(prepareGoalAdmission(f.input, plan.patch, effective, input, f.snapshot, now + 1).patch).toBe(plan.patch)
+  })
+
+  test('external repository admission rejects mixed credentials and projections outside its exact owner, operation, and readback fence', async () => {
+    const now = Date.now(), f = await fixture(now)
+    const outcome = { requiredChecks: [{ name: 'tests', appId: 42 }], reviewerIds: [7], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 30_000 }
+    const externalTask = repositoryTask({ credentialHandle: undefined, externalGrantId: 'operator-repository-grant', expiresAt: now + 300_000, acceptance: 'goal-step', maxActions: 20, outcome })
+    expect(() => parseGoalAdmissionTask(repositoryTask({ externalGrantId: 'operator-repository-grant' }))).toThrow('exactly one')
+    expect(() => parseGoalAdmissionTask(repositoryTask({ credentialHandle: undefined, externalGrantId: 'operator-repository-grant', events: { credentialHandle: 'github', maxPolls: 4, maxFires: 1, pollIntervalMs: 1000, requestTimeoutMs: 1000 }, acceptance: 'goal-step', maxActions: 20, outcome }))).toThrow('repository events')
+    const source = withoutKeychain(f.prepared.patch)
+    expect(() => prepareGoalAdmission(f.input, source, externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { grant.sessionId = 'other-session' }), externalTask, f.snapshot, now)).toThrow('exactly match')
+    expect(() => prepareGoalAdmission(f.input, source, externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { (grant.owner as Record<string, unknown>).bindingGeneration = 2 }), externalTask, f.snapshot, now)).toThrow('exactly match')
+    expect(() => prepareGoalAdmission(f.input, source, externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { grant.credentialHandle = 'github' }), externalTask, f.snapshot, now)).toThrow('invalid external repository grant')
+    expect(() => prepareGoalAdmission(f.input, source, externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { grant.allowedOperations = ['commit', 'inspect'] }), externalTask, f.snapshot, now)).toThrow('exactly match')
+    expect(() => prepareGoalAdmission(f.input, source, externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { grant.allowedInspectKinds = ['repository', 'branch', 'file'] }), externalTask, f.snapshot, now)).toThrow('exactly match')
   })
 
   test('repository delivery rejects absent credentials, foreign owners, paths, deadlines, and conflicting reruns', async () => {
