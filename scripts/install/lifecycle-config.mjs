@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module'
 import { lstat, readFile, realpath } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const repositoryRequire = createRequire(import.meta.url)
@@ -21,15 +21,56 @@ const lifecycleMarkers = new Map([
   ['@dsh-enhanced/assistant-evolution', 'supervised'],
 ])
 
+const pinnedHostVersion = '0.1.2-rc.1'
+
+async function hostRequire(dshExecutable) {
+  const executable = await realpath(dshExecutable)
+  const entryFor = async manifestPath => {
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    const bin = typeof manifest?.bin === 'string' ? manifest.bin : manifest?.bin?.dsh
+    const packageRoot = await realpath(dirname(manifestPath))
+    if (manifest?.name !== '@deepseek-ai/dsh' || manifest.version !== pinnedHostVersion || typeof bin !== 'string' || bin.length === 0 || isAbsolute(bin)) return undefined
+    const entry = resolve(packageRoot, bin)
+    if (!inside(packageRoot, entry)) return undefined
+    const canonicalEntry = await realpath(entry)
+    return inside(packageRoot, canonicalEntry) ? canonicalEntry : undefined
+  }
+  const acceptCanonicalEntry = async candidate => {
+    try {
+      const manifestPath = await realpath(candidate), entry = await entryFor(manifestPath)
+      return entry === executable ? createRequire(manifestPath) : undefined
+    } catch { return undefined }
+  }
+  try {
+    const resolved = createRequire(executable).resolve('@deepseek-ai/dsh/package.json')
+    const accepted = await acceptCanonicalEntry(resolved)
+    if (accepted !== undefined) return accepted
+  } catch {}
+  // An npm bin symlink can canonicalize directly to lib/bin.js while exports
+  // hides package.json. Only its immediate package manifest is considered.
+  const nearby = await acceptCanonicalEntry(join(dirname(dirname(executable)), 'package.json'))
+  if (nearby !== undefined) return nearby
+  // pnpm installs a shell wrapper in node_modules/.bin. Its static dsh entry
+  // must be the canonical entry from the exact sibling Host package.
+  if (basename(dirname(executable)) === '.bin') {
+    try {
+      const manifestPath = await realpath(join(dirname(dirname(executable)), '@deepseek-ai', 'dsh', 'package.json'))
+      const entry = await entryFor(manifestPath)
+      const source = await readFile(executable, 'utf8')
+      const targets = [...source.matchAll(/exec\s+(?:node|"\$basedir\/node")\s+"\$basedir\/([^"\r\n]+)"\s+"\$@"/gu)]
+        .map(match => resolve(dirname(executable), match[1]))
+      if (entry !== undefined && targets.length === 2 && (await Promise.all(targets.map(target => realpath(target).catch(() => '')))).every(target => target === entry)) return createRequire(manifestPath)
+    } catch {}
+  }
+  throw new Error('lifecycle configuration validation requires the yaml parser from this repository or the canonical DSH executable')
+}
+
 async function yamlModule(dshExecutable) {
   let resolved
   try {
     resolved = repositoryRequire.resolve('yaml')
   } catch {
-    try {
-      const executable = await realpath(dshExecutable)
-      resolved = createRequire(executable).resolve('yaml')
-    } catch {
+    try { resolved = (await hostRequire(dshExecutable)).resolve('yaml') } catch {
       throw new Error('lifecycle configuration validation requires the yaml parser from this repository or the canonical DSH executable')
     }
   }
@@ -135,9 +176,13 @@ export async function validateLifecycleConfig(source, { dshHome, dshExecutable }
   }
   for (const item of document.contents.items) {
     if (!yaml.isMap(item)) throw new Error('lifecycle configuration rows must be mappings and must not use YAML aliases')
-    const id = item.get('id')
-    if (typeof id !== 'string' || item.get('disabled') === true) continue
-    const name = item.get('name')
+    const id = item.get('id'), name = item.get('name'), disabled = item.get('disabled')
+    const idKind = lifecycleMarkers.get(id), nameKind = lifecycleMarkers.get(name)
+    if ((idKind !== undefined || nameKind !== undefined) && disabled !== undefined && typeof disabled !== 'boolean') {
+      throw new Error('lifecycle scenario row disabled field must be boolean')
+    }
+    if (disabled === true) continue
+    if (typeof id !== 'string') throw new Error('lifecycle configuration rows must have string id fields')
     if (typeof name !== 'string' || !trustedBundleName.test(name)) {
       throw new Error(`lifecycle configuration rejects enabled non-first-party row ${id}`)
     }
@@ -159,22 +204,19 @@ export async function classifyLifecycleScenario(source, { dshExecutable } = {}) 
   let larkRowCount = 0
   for (const item of document.contents.items) {
     if (!yaml.isMap(item)) throw new Error('lifecycle scenario configuration rows must be mappings')
-    const disabled = item.get('disabled')
-    if (disabled !== undefined && typeof disabled !== 'boolean') {
-      throw new Error('lifecycle scenario row disabled field must be boolean')
-    }
-    if (disabled === true) continue
-    const id = item.get('id')
-    const name = item.get('name')
-    if (typeof id !== 'string' || typeof name !== 'string') {
-      throw new Error('active lifecycle scenario rows must have string id and name fields')
-    }
-    const idKind = lifecycleMarkers.get(id)
-    const nameKind = lifecycleMarkers.get(name)
+    const id = item.get('id'), name = item.get('name'), disabled = item.get('disabled')
+    const idKind = lifecycleMarkers.get(id), nameKind = lifecycleMarkers.get(name)
     if (idKind !== undefined && nameKind !== undefined && idKind !== nameKind) {
       throw new Error('lifecycle scenario row has conflicting id and name markers')
     }
     const kind = idKind ?? nameKind
+    if (kind !== undefined && disabled !== undefined && typeof disabled !== 'boolean') {
+      throw new Error('lifecycle scenario row disabled field must be boolean')
+    }
+    if (disabled === true) continue
+    if (typeof id !== 'string' || typeof name !== 'string') {
+      throw new Error('active lifecycle scenario rows must have string id and name fields')
+    }
     if (kind === undefined) continue
     const marker = `${id}\0${name}`
     if (active[kind].has(marker)) throw new Error(`lifecycle scenario contains a duplicate active ${kind} row`)

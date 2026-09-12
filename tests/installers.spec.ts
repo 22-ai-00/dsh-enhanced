@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
+import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -581,6 +582,10 @@ interface LifecycleFixtureOptions {
   activationFails?: boolean
   effectiveScenario?: 'autonomy' | 'lark' | 'supervised' | 'web'
   managedDependencies?: readonly string[]
+  requirePnpmFrozenStore?: boolean
+  requirePnpmStore?: boolean
+  requirePnpmStoreFd?: boolean
+  requirePnpmProfileCwd?: boolean
   systemd?: LifecycleSystemdFixtureOptions
   thirdParty?: boolean
   thirdPartyDependency?: boolean
@@ -618,6 +623,9 @@ interface LifecycleRunOptions {
   killLifecycleAfterStopped?: boolean
   npmBlock?: boolean
   npmVersion?: string
+  pnpmfileMustNotRun?: boolean
+  requirePnpmProfileCwd?: boolean
+  requirePnpmStoreFd?: boolean
   packageBlock?: boolean
   packageExternalStartProfile?: string
   packageFails?: boolean
@@ -914,7 +922,8 @@ async function testSupervisedOperator(action, nonce, direct, context) {
   const dshLog = join(root, 'dsh.log')
   const bwrapLog = join(root, 'bwrap.log')
   const operationLog = join(root, 'lifecycle-operations.log')
-  await writeFile(operationLog, '')
+  const pnpmStorePath = join(root, 'pnpm-store')
+  await Promise.all([writeFile(operationLog, ''), mkdir(pnpmStorePath)])
   const supervisedOperatorLog = join(root, 'supervised-operator.log')
   await writeFile(supervisedOperatorLog, '')
   const lifecycleTarget = join(root, 'managed-target')
@@ -940,7 +949,9 @@ if [[ " ${'$'}{1:-} " == ' --version ' ]]; then printf '0.1.2-rc.1\n'; exit 0; f
 if [[ " $* " == *' plugin '* && " $* " == *' add '* ]]; then
   transaction_state='absent'
   [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
-  printf 'dsh-add\t%s\toffline=%s\timport=%s\t%s\n' "$transaction_state" "${'$'}{npm_config_offline:-}" "${'$'}{npm_config_package_import_method:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  printf 'dsh-add\t%s\toffline=%s\timport=%s\t%s\n' "$transaction_state" "${'$'}{pnpm_config_offline:-}" "${'$'}{pnpm_config_package_import_method:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  ${options.requirePnpmStore ? `if [[ "${'$'}{pnpm_config_store_dir:-}" != "${pnpmStorePath}" ]]; then printf 'sandbox store mismatch\n' >&2; exit 96; fi` : ''}
+  ${options.requirePnpmFrozenStore ? `if [[ "${'$'}{pnpm_config_frozen_store:-}" != 'true' || "${'$'}{pnpm_config_ignore_scripts:-}" != 'true' ]]; then printf 'sandbox store must be frozen with scripts disabled\n' >&2; exit 95; fi` : ''}
   if [[ "$LIFECYCLE_PACKAGE_FAILS" == '1' ]]; then printf 'package update failed\n' >&2; exit 42; fi
   if [[ "$LIFECYCLE_PACKAGE_BLOCK" == '1' ]]; then
     : > "$DSH_HOME/.package-preparation-started"
@@ -1023,10 +1034,17 @@ exit 91
   await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 set -euo pipefail
 if [[ " \${1:-} " == ' --version ' ]]; then printf '10.0.0\n'; exit 0; fi
-if [[ " \${1:-} \${2:-} " == ' store add ' ]]; then
+if [[ " \${1:-} \${2:-} " == ' store path ' ]]; then
+  if [[ "${'$'}{LIFECYCLE_REQUIRE_PNPM_PROFILE_CWD:-0}" == '1' && "$PWD" != "${'$'}{LIFECYCLE_PROFILE_DIRECTORY:-}" ]]; then printf 'pnpm profile cwd mismatch\n' >&2; exit 97; fi
+  if [[ "${'$'}{LIFECYCLE_PNPMFILE_MUST_NOT_RUN:-0}" == '1' && "${'$'}{pnpm_config_ignore_pnpmfile:-}" != 'true' ]]; then printf 'pnpmfile execution was not disabled\n' >&2; exit 98; fi
+  printf '%s\n' "${pnpmStorePath}"; exit 0
+fi
+if [[ "\${1:-}" == '--store-dir' && "\${2:-}" == '${pnpmStorePath}' && "\${3:-}" == 'store' && "\${4:-}" == 'add' ]]; then
+  if [[ "${'$'}{LIFECYCLE_REQUIRE_PNPM_PROFILE_CWD:-0}" == '1' && "$PWD" != "${'$'}{LIFECYCLE_PROFILE_DIRECTORY:-}" ]]; then printf 'pnpm profile cwd mismatch\n' >&2; exit 97; fi
+  if [[ "${'$'}{LIFECYCLE_PNPMFILE_MUST_NOT_RUN:-0}" == '1' && "${'$'}{pnpm_config_ignore_pnpmfile:-}" != 'true' ]]; then printf 'pnpmfile execution was not disabled\n' >&2; exit 98; fi
   transaction_state='absent'
   [[ -e "$LIFECYCLE_ORIGINAL_HOME.dsh-enhanced-transaction" ]] && transaction_state='present'
-  printf 'pnpm-store-add\t%s\tignore=%s\t%s\n' "$transaction_state" "${'$'}{npm_config_ignore_scripts:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
+  printf 'pnpm-store-add\t%s\tignore=%s\t%s\n' "$transaction_state" "${'$'}{pnpm_config_ignore_scripts:-}" "$*" >> "$LIFECYCLE_OPERATION_LOG"
   if [[ "$LIFECYCLE_STORE_FAILS" == '1' ]]; then printf 'store prefetch failed\n' >&2; exit 93; fi
   exit 0
 fi
@@ -1446,12 +1464,15 @@ let logicalHome
 let validatorFd
 let validatorPath
 let validatorMode
+let storeFd
+let storePath
 for (let index = 0; index < separator; index += 1) {
   if (args[index] === '--setenv') { environment[args[index + 1]] = args[index + 2]; index += 2; continue }
   if (args[index] === '--bind') { stageHome = args[index + 1]; logicalHome = args[index + 2]; index += 2; continue }
   if (args[index] === '--bind-fd') { stageHome = realpathSync('/proc/self/fd/' + args[index + 1]); logicalHome = args[index + 2]; index += 2; continue }
   if (args[index] === '--perms') { validatorMode = args[index + 1]; index += 1; continue }
   if (args[index] === '--ro-bind-data') { validatorFd = args[index + 1]; validatorPath = args[index + 2]; index += 2; continue }
+  if (args[index] === '--ro-bind-fd') { storeFd = args[index + 1]; storePath = args[index + 2]; index += 2; continue }
   if (args[index] === '--ro-bind') { index += 2; continue }
   if (args[index] === '--tmpfs' || args[index] === '--proc' || args[index] === '--dev') { index += 1 }
 }
@@ -1460,6 +1481,11 @@ if (separator < 0 || !args.includes('--unshare-all') || args.includes('--share-n
   || validatorMode !== '0400' || validatorFd !== '4' || validatorPath !== '/run/dsh-enhanced-lifecycle-config.mjs') {
   process.stderr.write('fake bwrap rejected unsafe or incomplete sandbox arguments: ' + JSON.stringify({ separator, stageHome, logicalHome, validatorMode, validatorFd, validatorPath }) + '\\n')
   process.exit(97)
+}
+if (controls.LIFECYCLE_REQUIRE_PNPM_STORE_FD === '1' && args.slice(separator + 1).includes('plugin')
+  && (storeFd !== '5' || storePath !== ${JSON.stringify(pnpmStorePath)} || realpathSync('/proc/self/fd/' + storeFd) !== storePath)) {
+  process.stderr.write('fake bwrap missing exact read-only pnpm store fd ' + JSON.stringify({ storeFd, storePath }) + '\\n')
+  process.exit(96)
 }
 for (const [key, value] of Object.entries(environment)) {
   if (value === logicalHome || value.startsWith(logicalHome + '/')) environment[key] = stageHome + value.slice(logicalHome.length)
@@ -1509,6 +1535,10 @@ function lifecycleEnvironment(dshHome: string, fakeBin: string, options: Lifecyc
     LIFECYCLE_NPM_VERSION: options.npmVersion ?? '1.4.0',
     LIFECYCLE_OPERATION_LOG: join(dirname(dshHome), 'lifecycle-operations.log'),
     LIFECYCLE_ORIGINAL_HOME: dshHome,
+    LIFECYCLE_PNPMFILE_MUST_NOT_RUN: options.pnpmfileMustNotRun ? '1' : '0',
+    LIFECYCLE_PROFILE_DIRECTORY: join(dshHome, 'profiles', 'web'),
+    LIFECYCLE_REQUIRE_PNPM_PROFILE_CWD: options.requirePnpmProfileCwd ? '1' : '0',
+    LIFECYCLE_REQUIRE_PNPM_STORE_FD: options.requirePnpmStoreFd ? '1' : '0',
     LIFECYCLE_PACKAGE_FAILS: options.packageFails ? '1' : '0',
     LIFECYCLE_PACKAGE_EXTERNAL_START_PROFILE: options.packageExternalStartProfile ?? '',
     LIFECYCLE_PACKAGE_BLOCK: options.packageBlock ? '1' : '0',
@@ -2720,9 +2750,23 @@ describe('one-click installers', () => {
     expect((await readFile(f.operationLog, 'utf8')).trim().split('\n')).toEqual([
       `npm-view\tabsent\tview ${target} version --json`,
       `npm-view\tabsent\tview ${target} version --json`,
-      `pnpm-store-add\tabsent\tignore=true\tstore add ${target}`,
+      `pnpm-store-add\tabsent\tignore=true\t--store-dir ${join(f.root, 'pnpm-store')} store add ${target}`,
       `dsh-add\tpresent\toffline=true\timport=copy\tplugin --profile web add ${target}`,
     ])
+  })
+
+  test('npm upgrade resolves the profile store without pnpmfile execution and fd-binds its hidden read-only store', async () => {
+    const f = await lifecycleFixture({
+      requirePnpmStore: true, requirePnpmFrozenStore: true, requirePnpmStoreFd: true, requirePnpmProfileCwd: true,
+    })
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--plugin-version', '1.4.0',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, {
+      pnpmfileMustNotRun: true, requirePnpmProfileCwd: true, requirePnpmStoreFd: true,
+    }))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
   })
 
   test('npm upgrade keeps its lifecycle lock while npm view is blocked and a contender fails busy before any transaction', async () => {
@@ -2792,7 +2836,7 @@ describe('one-click installers', () => {
     expect((await readFile(f.operationLog, 'utf8')).trim().split('\n')).toEqual([
       'npm-view\tabsent\tview @dsh-enhanced/personal-assistant@1.4.0 version --json',
       'npm-view\tabsent\tview @dsh-enhanced/personal-assistant@1.4.0 version --json',
-      'pnpm-store-add\tabsent\tignore=true\tstore add @dsh-enhanced/personal-assistant@1.4.0',
+      `pnpm-store-add\tabsent\tignore=true\t--store-dir ${join(f.root, 'pnpm-store')} store add @dsh-enhanced/personal-assistant@1.4.0`,
     ])
     await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
@@ -3945,6 +3989,23 @@ describe('one-click installers', () => {
     },
   )
 
+  test('scenario classifier ignores standard non-marker platform-disabled rows', async () => {
+    const scenario = await classifyLifecycleScenario(`
+- id: bash-sandbox
+  name: '@deepseek-ai/dsh-sandbox-bash'
+  disabled: !!js process.platform === 'win32'
+- id: pwsh-sandbox
+  name: '@deepseek-ai/dsh-sandbox-pwsh'
+  disabled: !!js process.platform !== 'win32'
+- id: dsh-enhanced-assistant-web-owner
+  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-enhanced-assistant-isolation
+  name: '@dsh-enhanced/assistant-isolation'
+`)
+
+    expect(scenario).toBe('autonomy')
+  })
+
   test('scenario classifier treats a config-disabled Lark row beside web as web', async () => {
     const scenario = await classifyLifecycleScenario(`
 - id: dsh-enhanced-assistant-web-owner
@@ -3979,6 +4040,12 @@ describe('one-click installers', () => {
 - id: dsh-enhanced-lark-channel
   name: '@dsh-enhanced/lark-channel'
   disabled: 'false'
+  config: { enabled: true }
+`],
+    ['dynamic lifecycle marker disabled expression', `
+- id: dsh-enhanced-lark-channel
+  name: '@dsh-enhanced/lark-channel'
+  disabled: !!js process.platform === 'win32'
   config: { enabled: true }
 `],
     ['malformed Lark enabled boolean', `
@@ -5699,6 +5766,118 @@ describe('one-click installers', () => {
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(manifest).toMatchObject({ version: 2, operation: 'upgrade', profile: 'web' })
   }, 15_000)
+  })
+
+  test('a copied lifecycle helper resolves YAML only through a pnpm-style canonical DSH package closure', async () => {
+    const root = await temporaryDshHome()
+    const home = join(root, 'home')
+    const hostRoot = join(root, 'cli', 'node_modules')
+    const dshPackage = join(hostRoot, '@deepseek-ai', 'dsh')
+    const shim = join(hostRoot, '.bin', 'dsh')
+    const copiedHelper = join(root, 'copied', 'lifecycle-config.mjs')
+    const yamlManifest = createRequire(import.meta.url).resolve('yaml/package.json')
+    await Promise.all([
+      mkdir(join(home, 'inside'), { recursive: true }),
+      mkdir(join(dshPackage, 'lib'), { recursive: true }),
+      mkdir(join(dshPackage, 'node_modules'), { recursive: true }),
+      mkdir(dirname(shim), { recursive: true }),
+      mkdir(dirname(copiedHelper), { recursive: true }),
+    ])
+    await writeFile(join(dshPackage, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh', version: '0.1.2-rc.1', type: 'module', exports: './lib/bin.js', bin: { dsh: 'lib/bin.js' }, dependencies: { yaml: '^2.9.0' },
+    }))
+    await writeFile(join(dshPackage, 'lib', 'bin.js'), '')
+    await symlink(dirname(yamlManifest), join(dshPackage, 'node_modules', 'yaml'))
+    await writeExecutable(shim, '#!/bin/sh\nbasedir=$(dirname "$0")\nif [ -x "$basedir/node" ]; then\n  exec "$basedir/node" "$basedir/../@deepseek-ai/dsh/lib/bin.js" "$@"\nelse\n  exec node "$basedir/../@deepseek-ai/dsh/lib/bin.js" "$@"\nfi\n')
+    const resolution = spawnSync(process.execPath, ['--input-type=module', '--eval', [
+      "import { createRequire } from 'node:module'",
+      'const [shim, manifest] = process.argv.slice(1)',
+      'try { createRequire(shim).resolve("yaml"); process.exitCode = 1 } catch (error) { if (error?.code !== "MODULE_NOT_FOUND") throw error }',
+      'process.stdout.write(createRequire(manifest).resolve("yaml"))',
+    ].join(';'), shim, join(dshPackage, 'package.json')], { cwd: root, encoding: 'utf8', env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin` } })
+    expect(resolution.status, resolution.stderr).toBe(0)
+    expect(resolution.stdout).toContain('/yaml/')
+    await cp(join(installDirectory, 'lifecycle-config.mjs'), copiedHelper)
+    const source = join(root, 'config.yml')
+    const malformed = join(root, 'malformed.yml')
+    const escaping = join(root, 'escaping.yml')
+    const dynamicMarker = join(root, 'dynamic-marker.yml')
+    const missingId = join(root, 'missing-id.yml')
+    const nonStringId = join(root, 'non-string-id.yml')
+    await writeFile(source, `- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n  config:\n    databasePath: ${join(home, 'inside', 'state.sqlite')}\n`)
+    await writeFile(malformed, '- id: [broken\n')
+    await writeFile(escaping, `- id: first-party\n  name: '@dsh-enhanced/assistant-web-owner'\n  config:\n    databasePath: ${join(root, 'outside.sqlite')}\n`)
+    await writeFile(dynamicMarker, "- id: dsh-enhanced-assistant-web-owner\n  name: '@dsh-enhanced/assistant-web-owner'\n  disabled: !!js process.platform === 'win32'\n")
+    await writeFile(missingId, `- name: '@untrusted/example'\n  config:\n    statePath: ${join(root, 'outside-missing-id.sqlite')}\n`)
+    await writeFile(nonStringId, `- id: 3\n  name: '@untrusted/example'\n  config:\n    statePath: ${join(root, 'outside-non-string-id.sqlite')}\n`)
+    const program = [
+      "import { readFile } from 'node:fs/promises'",
+      "import { pathToFileURL } from 'node:url'",
+      'const [helper, source, home, executable] = process.argv.slice(1)',
+      'const { classifyLifecycleScenario, validateLifecycleConfig } = await import(pathToFileURL(helper).href)',
+      'await validateLifecycleConfig(await readFile(source, "utf8"), { dshHome: home, dshExecutable: executable })',
+      'process.stdout.write(`${await classifyLifecycleScenario(await readFile(source, "utf8"), { dshExecutable: executable })}\\n`)',
+    ].join(';')
+    const run = (file: string, executable = shim) => spawnSync(process.execPath, ['--input-type=module', '--eval', program, copiedHelper, file, home, executable], {
+      cwd: root, encoding: 'utf8', env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin` },
+    })
+
+    const npmPackage = join(root, 'npm-host', 'node_modules', '@deepseek-ai', 'dsh')
+    const npmBin = join(npmPackage, 'lib', 'bin.js')
+    await mkdir(join(npmPackage, 'node_modules'), { recursive: true })
+    await mkdir(dirname(npmBin), { recursive: true })
+    await writeFile(join(npmPackage, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh', version: '0.1.2-rc.1', type: 'module', exports: './lib/bin.js', bin: { dsh: 'lib/bin.js' }, dependencies: { yaml: '^2.9.0' },
+    }))
+    await writeFile(npmBin, '')
+    await symlink(dirname(yamlManifest), join(npmPackage, 'node_modules', 'yaml'))
+    const npmCanonical = run(source, npmBin)
+    expect(npmCanonical.status, npmCanonical.stderr).toBe(0)
+    expect(npmCanonical.stdout).toBe('web\n')
+    const accepted = run(source)
+    expect(accepted.status, accepted.stderr).toBe(0)
+    expect(accepted.stdout).toBe('web\n')
+    const escapedEntry = join(root, 'outside-entry.js')
+    await writeFile(escapedEntry, '')
+    await rm(join(dshPackage, 'lib', 'bin.js'))
+    await symlink(escapedEntry, join(dshPackage, 'lib', 'bin.js'))
+    const symlinkEscape = run(source)
+    expect(symlinkEscape.status).not.toBe(0)
+    expect(symlinkEscape.stderr).toContain('canonical DSH executable')
+    await rm(join(dshPackage, 'lib', 'bin.js'))
+    await writeFile(join(dshPackage, 'lib', 'bin.js'), '')
+    const malformedResult = run(malformed)
+    expect(malformedResult.status).not.toBe(0)
+    expect(malformedResult.stderr).toContain('structurally valid YAML')
+    const escapingResult = run(escaping)
+    expect(escapingResult.status).not.toBe(0)
+    expect(escapingResult.stderr).toContain('resolves outside canonical DSH_HOME')
+    const dynamicMarkerResult = run(dynamicMarker)
+    expect(dynamicMarkerResult.status).not.toBe(0)
+    expect(dynamicMarkerResult.stderr).toContain('disabled field must be boolean')
+    for (const file of [missingId, nonStringId]) {
+      const result = run(file)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('must have string id fields')
+    }
+    const exactManifest = await readFile(join(dshPackage, 'package.json'), 'utf8')
+    await writeFile(join(dshPackage, 'package.json'), exactManifest.replace('0.1.2-rc.1', '0.1.2-rc.2'))
+    const wrongVersion = run(source)
+    expect(wrongVersion.status).not.toBe(0)
+    expect(wrongVersion.stderr).toContain('canonical DSH executable')
+    await writeFile(join(dshPackage, 'package.json'), exactManifest)
+    const forgedRoot = join(root, 'forged-host')
+    const forgedShim = join(forgedRoot, 'cli', 'node_modules', '.bin', 'dsh')
+    await mkdir(dirname(forgedShim), { recursive: true })
+    await mkdir(join(forgedRoot, 'node_modules'), { recursive: true })
+    await writeFile(join(forgedRoot, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.2-rc.1', bin: { dsh: 'lib/bin.js' } }))
+    await mkdir(join(forgedRoot, 'lib'), { recursive: true })
+    await writeFile(join(forgedRoot, 'lib', 'bin.js'), '')
+    await symlink(dirname(yamlManifest), join(forgedRoot, 'node_modules', 'yaml'))
+    await writeExecutable(forgedShim, '#!/bin/sh\nexec node "$0" "$@"\n')
+    const forgedAncestor = run(source, forgedShim)
+    expect(forgedAncestor.status).not.toBe(0)
+    expect(forgedAncestor.stderr).toContain('canonical DSH executable')
   })
 
   test('lifecycle transactions reject state paths outside the snapshotted DSH_HOME', async () => {

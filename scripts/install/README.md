@@ -12,6 +12,8 @@ pnpm approve-builds koffi
 
 ## 安装入口
 
+当前真实验收范围：`v0.1.31` 已完成 Linux `autonomy` 的远程全新安装；已有 profile 的 npm upgrade 仍在收尾。checkout 已修复 Host YAML 解析、目标 profile 的 pnpm store 选择和隔离只读缓存访问，但真实 `.30 → .31` 升级仍因离线环境无法完成 pnpm 供应链复核而拒绝提交。原 profile 保持不变；不要把全新安装通过当作升级通过。进展与运行记录见[升级验证记录](../../docs/evidence/lifecycle-npm-upgrade-preflight-2026-09-12.json)。
+
 安装器先确保 Node.js、pnpm 和精确的 DSH `0.1.2-rc.1`。已有其它 Host 版本会在安装或修改 profile 前拒绝；请为本套件使用独立的匹配 CLI，安装器不会静默降级或继续使用不兼容版本。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
 
 ```sh

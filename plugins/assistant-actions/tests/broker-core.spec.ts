@@ -268,27 +268,42 @@ describe.skipIf(process.platform !== 'linux')('ExternalBrokerCore', () => {
   }, 5_000)
 
   it('bounds drain and close when the transport ignores AbortSignal forever', async () => {
-    const { config } = await fixture()
-    let reached!: () => void; const started = new Promise<void>(resolve => { reached = resolve })
-    const commit = vi.fn(async () => { reached(); return await new Promise<never>(() => undefined) })
-    const core = new ExternalBrokerCore(config, { commit }), request = signed(config)
-    const pending = core.execute(request, new AbortController().signal)
-    await started; core.beginDrain('sigterm')
-    const drainStarted = Date.now(); await core.drain(now + 20)
-    expect(Date.now() - drainStarted).toBeLessThan(500)
-    await expect(pending).resolves.toMatchObject({ status: 'unknown', dispatched: true })
-    const closeStarted = Date.now(); await core.close()
-    expect(Date.now() - closeStarted).toBeLessThan(500)
-    expect(commit).toHaveBeenCalledOnce()
+    vi.useFakeTimers()
+    try {
+      const { config } = await fixture()
+      let reached!: () => void; const started = new Promise<void>(resolve => { reached = resolve })
+      let transportSettled = false
+      const commit = vi.fn(async () => { reached(); await new Promise<never>(() => undefined); transportSettled = true; throw new Error('unreachable') })
+      const core = new ExternalBrokerCore(config, { commit }), request = signed(config)
+      const pending = core.execute(request, new AbortController().signal)
+      await started; core.beginDrain('sigterm')
+      const draining = core.drain(now + 20)
+      await vi.advanceTimersByTimeAsync(20)
+      await draining
+      await expect(pending).resolves.toMatchObject({ status: 'unknown', dispatched: true })
+      await core.close()
+      expect(transportSettled).toBe(false)
+      const successor = new ExternalBrokerCore(config, { commit })
+      await expect(successor.execute(request, new AbortController().signal)).resolves.toMatchObject({ status: 'unknown', dispatched: true })
+      expect(commit).toHaveBeenCalledOnce()
+      await successor.close()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('bounds direct close while a non-cooperative transport is running', async () => {
     const { config } = await fixture()
     let reached!: () => void; const started = new Promise<void>(resolve => { reached = resolve })
-    const commit = vi.fn(async () => { reached(); return await new Promise<never>(() => undefined) })
-    const core = new ExternalBrokerCore(config, { commit }), pending = core.execute(signed(config), new AbortController().signal)
-    await started; const startedAt = Date.now(); await core.close()
-    expect(Date.now() - startedAt).toBeLessThan(500)
+    let transportSettled = false
+    const commit = vi.fn(async () => { reached(); await new Promise<never>(() => undefined); transportSettled = true; throw new Error('unreachable') })
+    const core = new ExternalBrokerCore(config, { commit }), request = signed(config), pending = core.execute(request, new AbortController().signal)
+    await started; await core.close()
     await expect(pending).resolves.toMatchObject({ status: 'unknown', dispatched: true })
+    expect(transportSettled).toBe(false)
+    const successor = new ExternalBrokerCore(config, { commit })
+    await expect(successor.execute(request, new AbortController().signal)).resolves.toMatchObject({ status: 'unknown', dispatched: true })
+    expect(commit).toHaveBeenCalledOnce()
+    await successor.close()
   })
 })
