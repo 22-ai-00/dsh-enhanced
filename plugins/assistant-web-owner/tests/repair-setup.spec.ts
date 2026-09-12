@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generateKeyPairSync } from 'node:crypto'
@@ -30,7 +30,7 @@ describe('repair admission input', () => {
 })
 
 test('rejects a non-private admission before modifying the profile patch', async () => {
-  const home = await mkdtemp(join(tmpdir(), 'repair-admission-')); roots.push(home)
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'repair-admission-'))); roots.push(home)
   const workspace = join(home, 'workspace'), profile = join(home, 'profiles', 'web'), path = join(profile, 'cordis.patch.yml'), admission = join(home, 'repair.json')
   await mkdir(workspace); await mkdir(profile, { recursive: true }); await writeFile(path, '# unchanged\n[]\n'); await writeFile(admission, JSON.stringify(task), { mode: 0o644 }); await chmod(admission, 0o644)
   await expect(configureRepairAdmission({ dshHome: home, profile: 'web', workspace, preset: 'standard' }, '[]', admission)).rejects.toThrow('private')
@@ -38,7 +38,7 @@ test('rejects a non-private admission before modifying the profile patch', async
 })
 
 async function configured() {
-  const home = await mkdtemp(join(tmpdir(), 'repair-admission-valid-')); roots.push(home)
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'repair-admission-valid-'))); roots.push(home)
   const input: WebOwnerSetupInput = { dshHome: home, profile: 'web', workspace: join(home, 'workspace'), preset: 'standard' }
   await mkdir(input.workspace); await mkdir(join(home, 'profiles', 'web'), { recursive: true })
   const effectiveDoc = parseDocument('[]')

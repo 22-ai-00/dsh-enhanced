@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -251,7 +251,7 @@ describe('supervised-growth setup guards', () => {
     // already accepted) but the scheduler has never created automations.sqlite.
     // The strict operator snapshot keeps failing closed; only the compatibility
     // projection consumed by supervised-growth-setup.ts maps that to [].
-    const root = await mkdtemp(join(tmpdir(), 'supervised-growth-missing-automations-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'supervised-growth-missing-automations-')))
     roots.push(root)
     await chmod(root, 0o700)
     const missing = join(root, 'automations.sqlite')
@@ -267,7 +267,7 @@ describe('supervised-growth setup guards', () => {
     // of being silently treated as an empty fresh store. The target must exist:
     // a dangling link is indistinguishable from a never-created file at the
     // realpath layer and is (correctly) reported as database-missing.
-    const targetRoot = await mkdtemp(join(tmpdir(), 'supervised-growth-linked-automations-'))
+    const targetRoot = await realpath(await mkdtemp(join(tmpdir(), 'supervised-growth-linked-automations-')))
     roots.push(targetRoot)
     await chmod(targetRoot, 0o700)
     const target = join(targetRoot, 'target.sqlite')

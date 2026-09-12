@@ -1,4 +1,4 @@
-import { linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -9,7 +9,7 @@ import { StrategyEvidenceStore, strategyEvidenceProtocol, strategyFailureProtoco
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
-const root = () => { const value = mkdtempSync(join(tmpdir(), 'strategy-evidence-')); roots.push(value); return value }
+const root = () => { const value = realpathSync(mkdtempSync(join(tmpdir(), 'strategy-evidence-'))); roots.push(value); return value }
 const hash = (value: string) => value.repeat(64).slice(0, 64)
 function plan(): StrategyBenchmarkPlan {
   const versions = { model: hash('1'), prompt: hash('2'), skills: hash('3'), tools: hash('4'), policy: hash('5'), runtime: hash('6') }

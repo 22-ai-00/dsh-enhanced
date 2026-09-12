@@ -172,7 +172,7 @@ afterEach(() => {
 })
 
 describe('Recovery operator snapshot', () => {
-  it('returns a canonical frozen schema-v4 bootstrap snapshot with local database identity', () => {
+  it.runIf(process.platform === 'linux')('returns a canonical frozen schema-v4 bootstrap snapshot with local database identity', () => {
     const { path } = seeded()
     const snapshot = inspectRecoveryOperatorSnapshot(path)
     expect(snapshot).toEqual({
@@ -205,7 +205,7 @@ describe('Recovery operator snapshot', () => {
     expect(Object.isFrozen(snapshot.bootstrap.attestations[0])).toBe(true)
   })
 
-  it('does not alter clean database bytes, mtime, schema, or create WAL sidecars', () => {
+  it.runIf(process.platform === 'linux')('does not alter clean database bytes, mtime, schema, or create WAL sidecars', () => {
     const { path } = seeded()
     const before = metadata(path)
     const version = userVersion(path)
@@ -216,7 +216,7 @@ describe('Recovery operator snapshot', () => {
     expect(sidecars(path)).toEqual([])
   })
 
-  it('reads committed WAL state without changing database/WAL bytes, database mtime, schema, or sidecar set', () => {
+  it.runIf(process.platform === 'linux')('reads committed WAL state without changing database/WAL bytes, database mtime, schema, or sidecar set', () => {
     const { path, store } = seeded(true)
     const beforeDatabase = metadata(path)
     const beforeWal = metadata(`${path}-wal`)
@@ -301,7 +301,7 @@ describe('Recovery operator snapshot', () => {
     expectCode(() => inspectRecoveryOperatorSnapshot(path), 'database-corrupt')
   })
 
-  it('fails closed while a rollback journal proves the database is busy', () => {
+  it.runIf(process.platform === 'linux')('fails closed while a rollback journal proves the database is busy', () => {
     const { path } = seeded()
     const database = new DatabaseSync(path)
     database.exec('PRAGMA journal_mode = DELETE; BEGIN IMMEDIATE')
@@ -314,7 +314,7 @@ describe('Recovery operator snapshot', () => {
     database.close()
   })
 
-  it('detects main database, WAL, and SHM identity drift with distinct error codes', async () => {
+  it.runIf(process.platform === 'linux')('detects main database, WAL, and SHM identity drift with distinct error codes', async () => {
     for (const [suffix, code] of [
       ['', 'database-drift'],
       ['-wal', 'wal-drift'],
@@ -339,7 +339,7 @@ describe('Recovery operator snapshot', () => {
     }
   })
 
-  it('equates a clean byte-identical copy at a different inode by storage digest and bootstrap semantics', () => {
+  it.runIf(process.platform === 'linux')('equates a clean byte-identical copy at a different inode by storage digest and bootstrap semantics', () => {
     // Headline cross-copy claim: copying the main database (e.g. operator
     // export to another path) yields a new inode, but content comparison must
     // ignore inode identity and match on the storage digest and bootstrap
@@ -370,7 +370,7 @@ describe('Recovery operator snapshot', () => {
     expect(copy.snapshotDigest).not.toBe(source.snapshotDigest)
   })
 
-  it('reads live WAL state through a private copy without changing source bytes or sidecars', () => {
+  it.runIf(process.platform === 'linux')('reads live WAL state through a private copy without changing source bytes or sidecars', () => {
     const sourceDirectory = root()
     const path = join(sourceDirectory, 'recovery.sqlite')
     let store = new RecoveryStore({ path, now: () => 2_000 })
@@ -407,7 +407,7 @@ describe('Recovery operator snapshot', () => {
     store.close()
   })
 
-  it('removes the private temporary directory when pinning rejects its permissions', () => {
+  it.runIf(process.platform === 'linux')('removes the private temporary directory when pinning rejects its permissions', () => {
     const { path, store } = seeded(true)
     fsControls.widenTemporaryDirectory = true
     expectCode(() => inspectRecoveryOperatorSnapshot(path), 'database-unavailable')
@@ -433,7 +433,7 @@ describe('Recovery operator snapshot', () => {
     }
   })
 
-  it('binds a non-WAL SQLite open to the original inode across a same-name parent ABA', () => {
+  it.runIf(process.platform === 'linux')('binds a non-WAL SQLite open to the original inode across a same-name parent ABA', () => {
     const { path } = seeded()
     const parent = dirnameForTest(path)
     const parked = `${parent}.parked`
@@ -454,7 +454,7 @@ describe('Recovery operator snapshot', () => {
     rmSync(malicious, { recursive: true, force: true })
   })
 
-  it('returns unsafe-parent when the pinned parent disappears during an active snapshot', () => {
+  it.runIf(process.platform === 'linux')('returns unsafe-parent when the pinned parent disappears during an active snapshot', () => {
     const { path } = seeded()
     const parent = dirnameForTest(path)
     const parked = `${parent}.parked`

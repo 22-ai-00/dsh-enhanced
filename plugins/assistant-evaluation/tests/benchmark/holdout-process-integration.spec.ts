@@ -139,7 +139,7 @@ async function readEvidenceObjects(root: string): Promise<unknown[]> {
   return await Promise.all(names.map(async name => JSON.parse(await readFile(join(root, name), 'utf8')) as unknown))
 }
 
-describe('independent holdout process integration', () => {
+describe.runIf(process.platform === 'linux')('independent holdout process integration', () => {
   it('runs a synthetic same-UID authority child for 1 case x 2 arms x 2 repeats, then reopens without spawning authority or delegate', async () => {
     const root = await privateRoot()
     const journalPath = join(root, 'journal.sqlite')

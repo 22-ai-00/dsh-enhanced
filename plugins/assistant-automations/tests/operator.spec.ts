@@ -430,7 +430,7 @@ describe('read-only Automations operator snapshot', () => {
     }
   })
 
-  test('fails closed on an exclusive locking-mode connection and does not alter the database timestamp', async () => {
+  test.runIf(process.platform === 'linux')('fails closed on an exclusive locking-mode connection and does not alter the database timestamp', async () => {
     // PRAGMA locking_mode=EXCLUSIVE locks the main database inode itself. That is
     // not the shape of a production WAL writer (whose WRITE lock lands on -shm);
     // the ordinary WAL transaction case is covered by the dedicated test below.
@@ -450,7 +450,7 @@ describe('read-only Automations operator snapshot', () => {
     } finally { child.kill('SIGTERM') }
   })
 
-  test('fails closed when the database identity drifts during inspection', async () => {
+  test.runIf(process.platform === 'linux')('fails closed when the database identity drifts during inspection', async () => {
     const f = await fixture(); f.store.close()
     const database = new DatabaseSync(f.path)
     database.exec('CREATE TABLE operator_drift_padding(bytes BLOB) STRICT')
@@ -494,7 +494,7 @@ describe('read-only Automations operator snapshot', () => {
     expect(parseWritableProcLock('')).toBeNull()
   })
 
-  test('fails closed when a hot rollback journal sits next to the database', async () => {
+  test.runIf(process.platform === 'linux')('fails closed when a hot rollback journal sits next to the database', async () => {
     const f = await fixture(); f.store.createApproved({
       automationId: 'journal', idempotencyKey: 'create', definition: definition('journal'),
     }); f.store.close()
@@ -505,7 +505,7 @@ describe('read-only Automations operator snapshot', () => {
     expect(await fingerprint(f.path)).toEqual(before)
   })
 
-  test('fails closed on an ordinary WAL write transaction, whose WRITE lock is on the SHM inode', async () => {
+  test.runIf(process.platform === 'linux')('fails closed on an ordinary WAL write transaction, whose WRITE lock is on the SHM inode', async () => {
     const f = await fixture()
     f.store.createApproved({ automationId: 'wal-writer', idempotencyKey: 'create', definition: definition('wal-writer') })
     f.store.close()
@@ -530,7 +530,7 @@ describe('read-only Automations operator snapshot', () => {
     procLocksReadFailure = false
   })
 
-  test('fails closed if a rollback journal appears during the snapshot window', async () => {
+  test.runIf(process.platform === 'linux')('fails closed if a rollback journal appears during the snapshot window', async () => {
     const f = await fixture()
     f.store.createApproved({ automationId: 'wal-journal-drift', idempotencyKey: 'create', definition: definition('wal-journal-drift') }); f.store.close()
     const writer = new DatabaseSync(f.path); writer.exec('PRAGMA wal_autocheckpoint=0')
@@ -560,7 +560,7 @@ describe('read-only Automations operator snapshot', () => {
     writer.close()
   })
 
-  test('detects ctime-only identity drift even when size, mtime and mode are unchanged', async () => {
+  test.runIf(process.platform === 'linux')('detects ctime-only identity drift even when size, mtime and mode are unchanged', async () => {
     const f = await fixture(); f.store.close()
     const database = new DatabaseSync(f.path)
     database.exec('CREATE TABLE operator_ctime_padding(bytes BLOB) STRICT')
@@ -587,7 +587,7 @@ describe('read-only Automations operator snapshot', () => {
     }
   })
 
-  test('fails closed with unsafe-parent when the pinned parent mode is widened during the snapshot', async () => {
+  test.runIf(process.platform === 'linux')('fails closed with unsafe-parent when the pinned parent mode is widened during the snapshot', async () => {
     const f = await fixture(); f.store.close()
     const database = new DatabaseSync(f.path)
     database.exec('CREATE TABLE operator_parent_padding(bytes BLOB) STRICT')
@@ -600,7 +600,7 @@ describe('read-only Automations operator snapshot', () => {
     await finishRaceWorker(race)
   })
 
-  test('fails closed when the pinned parent is swapped for a same-name replacement tree mid-snapshot', async () => {
+  test.runIf(process.platform === 'linux')('fails closed when the pinned parent is swapped for a same-name replacement tree mid-snapshot', async () => {
     const f = await fixture(); f.store.close()
     const database = new DatabaseSync(f.path)
     database.exec('CREATE TABLE operator_parent_swap_padding(bytes BLOB) STRICT')
@@ -621,7 +621,7 @@ describe('read-only Automations operator snapshot', () => {
     await finishRaceWorker(race)
   })
 
-  test('M1: parent disappearance during an active snapshot stays unsafe-parent and compatibility layers do not return []', async () => {
+  test.runIf(process.platform === 'linux')('M1: parent disappearance during an active snapshot stays unsafe-parent and compatibility layers do not return []', async () => {
     const f = await fixture()
     f.store.createApproved({ automationId: 'parent-removal', idempotencyKey: 'create', definition: definition('parent-removal') })
     f.store.close()
@@ -641,7 +641,7 @@ describe('read-only Automations operator snapshot', () => {
     await finishRaceWorker(race)
   })
 
-  test('H1: full parent ABA around the SQLite open cannot make the snapshot read a same-name malicious database', async () => {
+  test.runIf(process.platform === 'linux')('H1: full parent ABA around the SQLite open cannot make the snapshot read a same-name malicious database', async () => {
     const f = await fixture()
     const created = f.store.createApproved({ automationId: 'aba-original', idempotencyKey: 'create', definition: definition('aba-original') })
     f.store.close()

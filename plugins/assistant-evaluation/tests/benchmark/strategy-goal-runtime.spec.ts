@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { mkdir, mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, expect, test } from 'vitest'
@@ -28,7 +28,7 @@ function plan(): StrategyBenchmarkPlan {
 }
 
 for (const strategy of [false, true]) test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)(`real isolated Goal comparison arm strategy=${strategy}`, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'strategy-goal-runtime-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'strategy-goal-runtime-')))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const workspace = join(root, 'workspace'); const stateRoot = join(root, 'state')
   await mkdir(workspace, { mode: 0o700 }); await mkdir(stateRoot, { mode: 0o700 })
@@ -98,7 +98,7 @@ for (const strategy of [false, true]) test.skipIf(!process.env.DSH_ISOLATION_TES
 }, 120000)
 
 async function cancellableRuntime(hangDispose = false) {
-  const root = await mkdtemp(join(tmpdir(), 'strategy-goal-cancel-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'strategy-goal-cancel-')))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const workspace = join(root, 'workspace'); const stateRoot = join(root, 'state')
   await mkdir(workspace, { mode: 0o700 }); await mkdir(stateRoot, { mode: 0o700 })
