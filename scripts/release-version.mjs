@@ -204,7 +204,7 @@ function escapeRegExp(value) {
 
 function replacePinnedAssignment(installer, name, expectedValue, validValuePattern) {
   const escapedName = escapeRegExp(name)
-  const assignments = installer.match(new RegExp(`^\\s*${escapedName}\\s*=.*$`, 'gmu')) ?? []
+  const assignments = installer.match(new RegExp(`^[ \\t]*${escapedName}[ \\t]*=.*$`, 'gmu')) ?? []
   if (assignments.length !== 1) {
     throw new Error(`install-npm.sh must contain exactly one ${name} assignment`)
   }

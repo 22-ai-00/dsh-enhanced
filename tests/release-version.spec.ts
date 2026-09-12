@@ -73,7 +73,7 @@ function runRelease(root: string, ...args: string[]) {
 }
 
 const installerAssets = {
-  'common.sh': "DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.0-rc.7'\n",
+  'common.sh': "#!/usr/bin/env bash\n\n# fixture common source\n\nDSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.0-rc.7'\n",
   'lifecycle-config.mjs': 'export const fixtureConfig = true\n',
   'lifecycle-profile.mjs': 'export const fixtureProfile = true\n',
 }
