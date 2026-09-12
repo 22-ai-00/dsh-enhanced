@@ -138,10 +138,21 @@ function validCanonicalState(value: unknown): value is SkillWatchCanonicalState 
   return text(state.runId, 128) && canonicalRevision(revision) && validObservationBinding(binding)
     && binding.runId === state.runId && binding.subjectRef === state.subjectRef
 }
+function validRunIds(value: unknown): value is readonly string[] {
+  return Array.isArray(value) && value.length <= 100 && value.every(item => text(item, 128))
+    && new Set(value).size === value.length
+}
 function exactCanonicalObservationState(watch: SkillWatch, deployment: SkillDeployment): boolean {
+  const admission = { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: deployment.skillName,
+    parentDefinitionDigest: watch.fallbackDigest, candidateDefinitionDigest: deployment.candidateDefinitionDigest, taskFamily: deployment.taskFamily }
   if (watch.state !== 'watching' || watch.id !== deployment.watchId || watch.skillName !== deployment.skillName
     || watch.version !== deployment.version || watch.definitionDigest !== deployment.definitionDigest
-    || watch.maxRuns !== deployment.maxRuns || watch.failureThreshold !== 1
+    || watch.maxRuns !== deployment.maxRuns || watch.failureThreshold !== 1 || !validRunIds(watch.runIds)
+    || !validRunIds(deployment.runIds) || !Number.isSafeInteger(deployment.canaryRuns) || deployment.canaryRuns < 1
+    || deployment.canaryRuns > deployment.maxRuns || deployment.maxRuns < 1 || deployment.maxRuns > 100
+    || watch.runIds.length > watch.maxRuns || deployment.runIds.length > deployment.maxRuns
+    || watch.runIds.some(run => !deployment.runIds.includes(run)) || !deploymentAdmission(admission)
+    || deployment.admissionDigest !== acceptanceDigest(admission)
     || watch.proofVersion !== 'canonical-goal-outcome/v2' || !watch.taskFamily
     || acceptanceDigest(watch.taskFamily) !== acceptanceDigest(deployment.taskFamily)
     || !Array.isArray(watch.observations) || !Array.isArray(watch.canonicalRevisions)) return false
@@ -155,7 +166,8 @@ function exactCanonicalObservationState(watch: SkillWatch, deployment: SkillDepl
   for (const observation of watch.observations) {
     if (observedRuns.has(observation.runId) || !observation.canonical || !canonicalRevision(observation.canonical)
       || !digest(observation.receiptDigest) || !Number.isSafeInteger(observation.verifiedAt) || !Number.isSafeInteger(observation.validUntil)
-      || !digest(observation.executionTraceDigest) || observation.taskFamilyDigest !== familyDigest) return false
+      || !digest(observation.executionTraceDigest) || !['achieved', 'not-achieved'].includes(observation.objectiveStatus)
+      || observation.taskFamilyDigest !== familyDigest) return false
     observedRuns.add(observation.runId)
     const revision = revisions.get(observation.runId)
     if (!revision || revision.disposition !== 'upsert' || acceptanceDigest(observation.canonical) !== acceptanceDigest({
@@ -166,8 +178,8 @@ function exactCanonicalObservationState(watch: SkillWatch, deployment: SkillDepl
       validUntil: observation.validUntil, executionTraceDigest: observation.executionTraceDigest, taskFamilyDigest: observation.taskFamilyDigest,
     })) return false
   }
-  if (![...revisions.values()].every(revision => revision.disposition === 'retract'
-    ? !observedRuns.has(revision.runId) : observedRuns.has(revision.runId))) return false
+  if (![...revisions.values()].every(revision => revision.disposition === 'upsert' && observedRuns.has(revision.runId))
+    || watch.observations.some(observation => observation.objectiveStatus !== 'achieved')) return false
   // A previously promoted deployment keeps its historical first-proof
   // binding after that receipt expires; currentness comes from the canonical
   // Evaluation tuple. Freshness is still required at the canary -> promoted
@@ -233,16 +245,17 @@ export class SkillStore {
       CREATE INDEX IF NOT EXISTS skill_captures_scope_state ON skill_captures(scope_key,state);
 `)
     this.#db.prepare("UPDATE skill_runs SET state='unknown', run_json=json_set(run_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
-    this.#db.prepare("UPDATE skill_watches SET state='revoked', watch_json=json_set(watch_json, '$.state', 'revoked', '$.updatedAt', ?) WHERE state='watching' AND (coalesce(json_extract(watch_json, '$.proofVersion'), '') NOT IN ('sole-skill-run/v1','canonical-goal-outcome/v2') OR EXISTS (SELECT 1 FROM skill_deployments deployment WHERE deployment.scope_key=skill_watches.scope_key AND json_extract(deployment.deployment_json, '$.watchId')=skill_watches.id AND deployment.state IN ('canary','promoted') AND (length(coalesce(json_extract(deployment.deployment_json, '$.admissionDigest'), ''))<>64 OR coalesce(json_extract(deployment.deployment_json, '$.admissionDigest'), '') GLOB '*[^0-9a-f]*' OR length(coalesce(json_extract(deployment.deployment_json, '$.candidateDefinitionDigest'), ''))<>64 OR coalesce(json_extract(deployment.deployment_json, '$.candidateDefinitionDigest'), '') GLOB '*[^0-9a-f]*' OR coalesce(json_type(deployment.deployment_json, '$.taskFamily'), '')<>'object' OR coalesce(json_type(skill_watches.watch_json, '$.taskFamily'), '')<>'object')))").run(Date.now())
     this.#db.exec('BEGIN IMMEDIATE')
     try {
+      const migrationTime = Date.now()
+      this.#db.prepare("UPDATE skill_watches SET state='revoked', watch_json=json_set(watch_json, '$.state', 'revoked', '$.updatedAt', ?) WHERE state='watching' AND (coalesce(json_extract(watch_json, '$.proofVersion'), '') NOT IN ('sole-skill-run/v1','canonical-goal-outcome/v2') OR EXISTS (SELECT 1 FROM skill_deployments deployment WHERE deployment.scope_key=skill_watches.scope_key AND json_extract(deployment.deployment_json, '$.watchId')=skill_watches.id AND deployment.state IN ('canary','promoted') AND (length(coalesce(json_extract(deployment.deployment_json, '$.admissionDigest'), ''))<>64 OR coalesce(json_extract(deployment.deployment_json, '$.admissionDigest'), '') GLOB '*[^0-9a-f]*' OR length(coalesce(json_extract(deployment.deployment_json, '$.candidateDefinitionDigest'), ''))<>64 OR coalesce(json_extract(deployment.deployment_json, '$.candidateDefinitionDigest'), '') GLOB '*[^0-9a-f]*' OR coalesce(json_type(deployment.deployment_json, '$.taskFamily'), '')<>'object' OR coalesce(json_type(skill_watches.watch_json, '$.taskFamily'), '')<>'object')))").run(migrationTime)
       const active = this.#db.prepare("SELECT scope_key, deployment_json FROM skill_deployments WHERE state IN ('canary','promoted')").all() as { scope_key: string; deployment_json: string }[]
       for (const row of active) {
         const deployment = JSON.parse(row.deployment_json) as SkillDeployment
         const watch = this.#watch(row.scope_key, deployment.watchId)
         const legacyShape = !digest(deployment.admissionDigest) || !digest(deployment.candidateDefinitionDigest) || !deployment.taskFamily
         if (!watch || legacyShape || !exactCanonicalObservationState(watch, deployment)) {
-          this.#putDeployment(row.scope_key, { ...deployment, state: 'blocked', updatedAt: Date.now() })
+          this.#putDeployment(row.scope_key, { ...deployment, state: 'blocked', updatedAt: migrationTime })
         }
       }
       this.#db.exec('COMMIT')
@@ -563,7 +576,7 @@ export class SkillStore {
     this.#db.exec('BEGIN IMMEDIATE')
     try {
       const deployment = this.#deployment(key, deploymentId)
-      if (!deployment || deployment.watchId !== id) fail('assistant-skills: canonical promotion conflict')
+      if (!deployment || deployment.watchId !== id || !validRunIds(deployment.runIds)) fail('assistant-skills: canonical promotion conflict')
       const watch = this.#replaceWatchObservationInTransaction(scope, key, id, result, false)
       if (!watch || watch.state !== 'watching') fail('assistant-skills: canonical promotion unavailable')
       const reconciled = this.#reconcileDeployment(key, deployment, true)
@@ -593,6 +606,10 @@ export class SkillStore {
       || result.kind === 'invalidated' && canonical.disposition !== 'retract') fail('assistant-skills: invalid watch observation revision')
     const watch = this.#watch(key, id)
     if (!watch || watch.state !== 'watching') return watch
+    // v1 qualified observations predate revisioned Evaluation evidence.  Never
+    // mutate them into a v2 shape opportunistically; constructor quarantine is
+    // irreversible and a fresh qualified deployment is required.
+    if (watch.proofVersion !== 'canonical-goal-outcome/v2') return watch
     const deployment = this.#deploymentForWatch(key, watch.id)
     const taskFamilyDigest = watch.taskFamily === undefined ? undefined : acceptanceDigest(watch.taskFamily)
     if (!deployment || taskFamilyDigest === undefined || acceptanceDigest(deployment.taskFamily) !== taskFamilyDigest

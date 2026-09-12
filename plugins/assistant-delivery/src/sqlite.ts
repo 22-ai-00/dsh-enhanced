@@ -2,7 +2,37 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 19
+export const deliverySchemaVersion = 20
+
+const goalOutcomeTargetSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_goal_outcome_targets (
+    outbox_id TEXT PRIMARY KEY,
+    locator_json TEXT NOT NULL CHECK (json_valid(locator_json) AND json_type(locator_json) = 'object'),
+    proof_json TEXT NOT NULL CHECK (json_valid(proof_json) AND json_type(proof_json) = 'object'),
+    proof_digest TEXT NOT NULL CHECK (
+      length(proof_digest) = 64 AND proof_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    owner_route_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    principal_record_id TEXT NOT NULL,
+    principal_version INTEGER NOT NULL CHECK (principal_version >= 1),
+    workspace TEXT NOT NULL,
+    preset TEXT NOT NULL,
+    binding_id TEXT NOT NULL,
+    binding_version INTEGER NOT NULL CHECK (binding_version >= 1),
+    binding_generation INTEGER NOT NULL CHECK (binding_generation >= 1),
+    session_id TEXT NOT NULL,
+    goal_id TEXT NOT NULL,
+    assessment_id TEXT NOT NULL,
+    FOREIGN KEY (outbox_id) REFERENCES outbox_messages(id) ON DELETE CASCADE,
+    FOREIGN KEY (binding_id) REFERENCES conversation_bindings(id),
+    FOREIGN KEY (principal_record_id) REFERENCES delivery_principals(id)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS delivery_goal_outcome_target_binding
+    ON delivery_goal_outcome_targets(binding_id, binding_version, binding_generation);
+  CREATE INDEX IF NOT EXISTS delivery_goal_outcome_target_owner
+    ON delivery_goal_outcome_targets(principal_record_id, principal_version, workspace, preset);
+`
 
 const sessionLeaseSchema = `
   CREATE TABLE IF NOT EXISTS delivery_session_leases (
@@ -536,6 +566,85 @@ function assertApprovalOutboxRouteSchema(database: DatabaseSync): void {
   }
 }
 
+function assertGoalOutcomeTargetSchema(database: DatabaseSync): void {
+  const columns = database.prepare('PRAGMA table_info(delivery_goal_outcome_targets)').all() as Array<{
+    name: string
+    type: string
+    notnull: number
+    pk: number
+  }>
+  const expected = [
+    ['outbox_id', 'TEXT', 1, 1], ['locator_json', 'TEXT', 1, 0], ['proof_json', 'TEXT', 1, 0],
+    ['proof_digest', 'TEXT', 1, 0], ['owner_route_id', 'TEXT', 1, 0], ['principal_id', 'TEXT', 1, 0],
+    ['principal_record_id', 'TEXT', 1, 0], ['principal_version', 'INTEGER', 1, 0],
+    ['workspace', 'TEXT', 1, 0], ['preset', 'TEXT', 1, 0], ['binding_id', 'TEXT', 1, 0],
+    ['binding_version', 'INTEGER', 1, 0], ['binding_generation', 'INTEGER', 1, 0],
+    ['session_id', 'TEXT', 1, 0], ['goal_id', 'TEXT', 1, 0], ['assessment_id', 'TEXT', 1, 0],
+  ] as const
+  const sql = (database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'delivery_goal_outcome_targets'")
+    .get() as { sql: string } | undefined)?.sql
+  const requiredChecks = [
+    /locator_json\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*json_valid\s*\(\s*locator_json\s*\)\s+AND\s+json_type\s*\(\s*locator_json\s*\)\s*=\s*'object'\s*\)/iu,
+    /proof_json\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*json_valid\s*\(\s*proof_json\s*\)\s+AND\s+json_type\s*\(\s*proof_json\s*\)\s*=\s*'object'\s*\)/iu,
+    /proof_digest\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*length\s*\(\s*proof_digest\s*\)\s*=\s*64\s+AND\s+proof_digest\s+NOT\s+GLOB\s+'\*\[\^0-9a-f\]\*'\s*\)/iu,
+    /principal_version\s+INTEGER\s+NOT\s+NULL\s+CHECK\s*\(\s*principal_version\s*>=\s*1\s*\)/iu,
+    /binding_version\s+INTEGER\s+NOT\s+NULL\s+CHECK\s*\(\s*binding_version\s*>=\s*1\s*\)/iu,
+    /binding_generation\s+INTEGER\s+NOT\s+NULL\s+CHECK\s*\(\s*binding_generation\s*>=\s*1\s*\)/iu,
+  ]
+  if (!sql || !/\bSTRICT\b/u.test(sql) || requiredChecks.some(check => !check.test(sql))
+    || columns.length !== expected.length || expected.some((entry, index) => {
+    const column = columns[index]
+    return column === undefined || column.name !== entry[0] || column.type !== entry[1]
+      || column.notnull !== entry[2] || column.pk !== entry[3]
+  })) throw new Error('delivery goal outcome target schema is invalid')
+
+  const foreignKeys = database.prepare('PRAGMA foreign_key_list(delivery_goal_outcome_targets)').all() as Array<{
+    from: string
+    table: string
+    to: string
+    on_update: string
+    on_delete: string
+    match: string
+  }>
+  const expectedForeignKeys = [
+    ['binding_id', 'conversation_bindings', 'id', 'NO ACTION', 'NO ACTION', 'NONE'],
+    ['outbox_id', 'outbox_messages', 'id', 'NO ACTION', 'CASCADE', 'NONE'],
+    ['principal_record_id', 'delivery_principals', 'id', 'NO ACTION', 'NO ACTION', 'NONE'],
+  ]
+  const actualForeignKeys = foreignKeys.map(row => [
+    row.from, row.table, row.to, row.on_update, row.on_delete, row.match,
+  ]).sort()
+  if (JSON.stringify(actualForeignKeys) !== JSON.stringify(expectedForeignKeys)) {
+    throw new Error('delivery goal outcome target foreign keys are invalid')
+  }
+
+  const indexes = database.prepare('PRAGMA index_list(delivery_goal_outcome_targets)').all() as Array<{
+    name: string
+    unique: number
+    origin: string
+    partial: number
+  }>
+  const expectedIndexes = new Map<string, readonly string[]>([
+    ['delivery_goal_outcome_target_binding', ['binding_id', 'binding_version', 'binding_generation']],
+    ['delivery_goal_outcome_target_owner', ['principal_record_id', 'principal_version', 'workspace', 'preset']],
+  ])
+  const declaredIndexes = indexes.filter(index => index.origin === 'c')
+  if (declaredIndexes.length !== expectedIndexes.size || declaredIndexes.some(index => {
+    const expectedColumns = expectedIndexes.get(index.name)
+    if (expectedColumns === undefined || index.unique !== 0 || index.partial !== 0) return true
+    const actualColumns = database.prepare(`PRAGMA index_xinfo(${index.name})`).all() as Array<{
+      name: string | null
+      desc: number
+      coll: string
+      key: number
+    }>
+    const keyColumns = actualColumns.filter(column => column.key === 1)
+    return keyColumns.length !== expectedColumns.length || keyColumns.some((column, position) => (
+      column.name !== expectedColumns[position] || column.desc !== 0 || column.coll !== 'BINARY'
+    ))
+  })) throw new Error('delivery goal outcome target indexes are invalid')
+}
+
 const modelPickerStateSchema = `
   CREATE TABLE conversation_model_epochs (
     conversation_hash TEXT PRIMARY KEY,
@@ -885,6 +994,10 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec(`${sessionLeaseSchema} PRAGMA user_version = 19;`)
     version = 19
   }
+  if (version === 19) {
+    database.exec(`${goalOutcomeTargetSchema} PRAGMA user_version = 20;`)
+    version = 20
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1097,7 +1210,8 @@ function migrateObserved(database: DatabaseSync): void {
     ${ownerObjectiveRevisionSchema}
     ${taskAcceptanceExecutionSchema}
     ${sessionLeaseSchema}
-    PRAGMA user_version = 19;
+    ${goalOutcomeTargetSchema}
+    PRAGMA user_version = 20;
   `)
 }
 
@@ -1108,6 +1222,7 @@ function migrate(database: DatabaseSync): void {
     migrateObserved(database)
     assertApprovalOutboxRouteSchema(database)
     assertSessionLeaseSchema(database)
+    assertGoalOutcomeTargetSchema(database)
     database.exec('COMMIT')
   } catch (error) {
     try { database.exec('ROLLBACK') } catch {}

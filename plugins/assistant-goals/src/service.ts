@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GoalView } from '@deepseek-ai/dsh-goal'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionObservation, SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantDeliveryService, OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import Schema from '@deepseek-ai/schemastery'
 import { acceptanceCanonicalJson, acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
@@ -116,6 +116,19 @@ function ownerRunProofInput(value: unknown): value is OwnerGoalRunProofInput {
   const descriptors = Object.getOwnPropertyDescriptors(input)
   return Object.values(descriptors).every(descriptor => descriptor.enumerable && 'value' in descriptor && typeof descriptor.value === 'string' && descriptor.value.length > 0 && descriptor.value.length <= 4_096)
 }
+function ownerGoalOutcomeFeedbackLocator(value: unknown): value is OwnerGoalOutcomeFeedbackLocator {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
+  const input = value as Record<string, unknown>, names = Object.getOwnPropertyNames(input)
+  const keys = ['protocol', 'ownerRouteId', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'preset',
+    'bindingId', 'bindingVersion', 'bindingGeneration', 'sessionId', 'goalId', 'assessmentId']
+  if (names.length !== keys.length || !keys.every(key => names.includes(key))
+    || Object.values(Object.getOwnPropertyDescriptors(input)).some(descriptor => !descriptor.enumerable || !('value' in descriptor))) return false
+  const bounded = (item: unknown, max = 4_096): item is string => typeof item === 'string' && item.length > 0 && item.length <= max
+  return input.protocol === 'assistant-goals/owner-goal-outcome-locator/v1'
+    && [input.ownerRouteId, input.principalId, input.principalRecordId, input.workspace, input.preset, input.bindingId,
+      input.sessionId, input.goalId, input.assessmentId].every(item => bounded(item))
+    && [input.principalVersion, input.bindingVersion, input.bindingGeneration].every(item => Number.isSafeInteger(item) && (item as number) > 0)
+}
 function ownerFailureSummaryInput(value: unknown): value is OwnerFailureCaptureSummaryInput {
   if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
   const input = value as Record<string, unknown>, keys = Object.keys(input), descriptors = Object.getOwnPropertyDescriptors(input)
@@ -156,6 +169,7 @@ export class AssistantGoalsService extends Service {
   #outcome: GoalOutcomeRuntime | undefined
   #eventWait: GoalEventWaitRuntime | undefined
   readonly eventWaitsEnabled!: boolean
+  readonly #ownerGoalOutcomeFeedbackTargets = new WeakMap<object, Readonly<{ locator: OwnerGoalOutcomeFeedbackLocator; proof: OwnerGoalOutcomeFeedbackProof }>>()
 
   constructor(ctx: Context, input: Config = {}) {
     super(ctx, 'assistantGoals')
@@ -237,14 +251,30 @@ export class AssistantGoalsService extends Service {
       await this.#execution.refresh(agent, signal)
       signal.throwIfAborted()
       if (!this.#active) throw new Error('assistant-goals: disposed')
-    }, (record, native) => this.#outcome?.verifiedWakeCompletion(record, native) === true, (intent, phase) => {
+    }, (record, native) => this.#outcome?.verifiedWakeOutcome(record, native), (intent, phase) => {
       if (intent.id.startsWith('goal-event-wake-')) {
         if (this.#eventWait === undefined) throw new Error('assistant-goals: event wait authority unavailable')
         this.#eventWait.assertWakeCurrent(intent, phase)
       }
     }, (record, agent) => this.#eventWait?.acceptsPausedRecord(record) === true
       && this.#execution.acceptsPausedEventWaitSettlement(record, agent),
-    record => this.#assertDependencies(record), () => this.#outcome?.health().connected === true)
+    record => this.#assertDependencies(record), () => this.#outcome?.health().connected === true, (intent, record, outcome) => {
+      const locator: OwnerGoalOutcomeFeedbackLocator = {
+        protocol: 'assistant-goals/owner-goal-outcome-locator/v1', ownerRouteId: intent.ownerRouteId,
+        principalId: intent.attestation.principalId, principalRecordId: intent.attestation.principalLineage.principalRecordId,
+        principalVersion: intent.attestation.principalLineage.principalVersion, workspace: intent.attestation.scope.workspace,
+        preset: intent.attestation.scope.preset, bindingId: intent.attestation.bindingId, bindingVersion: intent.attestation.bindingVersion,
+        bindingGeneration: intent.attestation.bindingGeneration, sessionId: intent.attestation.sessionId, goalId: intent.goalId,
+        assessmentId: outcome.assessmentId,
+      }
+      const capability = this.issueOwnerGoalOutcomeFeedbackTarget(locator)
+      const proof = this.resolveOwnerGoalOutcomeFeedbackTarget(capability)
+      if (proof.runId !== outcome.runId || proof.receipt.objectiveStatus !== outcome.objectiveStatus
+        || proof.goal.phase !== record.native.phase) {
+        throw new Error('assistant-goals: owner goal outcome feedback target changed')
+      }
+      return Object.freeze({ locator: detached(locator), capability, proof })
+    })
     if (this.eventWaitsEnabled) this.#eventWait = new GoalEventWaitRuntime(ctx, `${path}.event-waits`, this.#wake!, intent => {
       if (!this.#active) throw new Error('assistant-goals: disposed')
       this.#eventWaitPolicy(intent)
@@ -890,6 +920,117 @@ export class AssistantGoalsService extends Service {
     return detached({ protocol: 'assistant-goals/owner-execution-snapshot/v1' as const, ownerRoute: receipt,
       storedGoal, executionRuns: runs, ...(budget === undefined ? {} : { budget }), ...(strategy === undefined ? {} : { strategy }),
       strategyRecords, ...(outcome === undefined ? {} : { outcome }), ...(feedback === undefined ? {} : { feedback }), outcomeAssessments: outcomeEvidence, acceptedTasks })
+  }
+
+  /** Mint a process-local capability for one exact terminal whole-goal assessment. */
+  issueOwnerGoalOutcomeFeedbackTarget = (value: OwnerGoalOutcomeFeedbackLocator): unknown => {
+    if (!this.#active || !ownerGoalOutcomeFeedbackLocator(value)) {
+      throw new Error('assistant-goals: invalid owner goal outcome feedback locator')
+    }
+    const locator = detached(value)
+    const proof = this.#ownerGoalOutcomeFeedbackProof(locator)
+    const capability = Object.freeze(Object.create(null) as object)
+    this.#ownerGoalOutcomeFeedbackTargets.set(capability, Object.freeze({ locator, proof }))
+    return capability
+  }
+
+  /** Resolve only a capability minted by this live service and re-prove its exact issuance identity. */
+  resolveOwnerGoalOutcomeFeedbackTarget = (capability: unknown): OwnerGoalOutcomeFeedbackProof => {
+    if (!this.#active || capability === null || typeof capability !== 'object') {
+      throw new Error('assistant-goals: owner goal outcome feedback capability is unavailable')
+    }
+    const issued = this.#ownerGoalOutcomeFeedbackTargets.get(capability)
+    if (issued === undefined) throw new Error('assistant-goals: owner goal outcome feedback capability is unavailable')
+    const proof = this.#ownerGoalOutcomeFeedbackProof(issued.locator)
+    if (!same(proof, issued.proof)) throw new Error('assistant-goals: owner goal outcome feedback identity changed')
+    return proof
+  }
+
+  #ownerGoalOutcomeFeedbackRoute(locator: OwnerGoalOutcomeFeedbackLocator): void {
+    const delivery = this.ctx.get('assistantDelivery', false) as AssistantDeliveryService | undefined
+    if (delivery === undefined || typeof delivery.resolveOwnerRoute !== 'function' || typeof delivery.validateOwnerRoute !== 'function') {
+      throw new Error('assistant-goals: owner goal outcome feedback route is unavailable')
+    }
+    const resolved = delivery.resolveOwnerRoute(locator.ownerRouteId)
+    const receipt = delivery.validateOwnerRoute({ authorityId: locator.ownerRouteId, principalId: locator.principalId,
+      workspace: locator.workspace, agentPreset: locator.preset })
+    if (resolved.authorityId !== locator.ownerRouteId || resolved.binding.id !== locator.bindingId
+      || resolved.binding.version !== locator.bindingVersion || resolved.binding.generation !== locator.bindingGeneration
+      || resolved.binding.sessionId !== locator.sessionId || resolved.binding.workspace !== locator.workspace
+      || resolved.binding.agentPreset !== locator.preset || receipt.authorityId !== locator.ownerRouteId
+      || receipt.principalId !== locator.principalId || receipt.principalRecordId !== locator.principalRecordId
+      || receipt.principalVersion !== locator.principalVersion || receipt.workspace !== locator.workspace
+      || receipt.agentPreset !== locator.preset || receipt.bindingVersion !== locator.bindingVersion
+      || receipt.generation !== locator.bindingGeneration) {
+      throw new Error('assistant-goals: owner goal outcome feedback route changed')
+    }
+  }
+
+  #ownerGoalOutcomeFeedbackProof(locator: OwnerGoalOutcomeFeedbackLocator): OwnerGoalOutcomeFeedbackProof {
+    this.#ownerGoalOutcomeFeedbackRoute(locator)
+    const snapshot = this.inspectOwnerGoalExecution({ ownerRouteId: locator.ownerRouteId, principalId: locator.principalId,
+      workspace: locator.workspace, preset: locator.preset, sessionId: locator.sessionId, goalId: locator.goalId })
+    const stored = snapshot.storedGoal
+    if (!same(stored.scope, { principalId: locator.principalId, principalRecordId: locator.principalRecordId,
+      principalVersion: locator.principalVersion, workspace: locator.workspace, preset: locator.preset })
+      || stored.id !== locator.goalId || stored.nativeAtLastObservation.sessionId !== locator.sessionId
+      || (stored.nativeAtLastObservation.phase !== 'complete' && stored.nativeAtLastObservation.phase !== 'blocked')
+      || stored.definition.digest !== acceptanceDigest({ objective: stored.definition.objective })) {
+      throw new Error('assistant-goals: terminal owner goal outcome is unavailable')
+    }
+    const assessments = snapshot.outcomeAssessments.filter(item => item.contract.task.kind === 'goal-outcome'
+      && item.contract.task.ref === locator.assessmentId && item.contract.task.goal.assessmentId === locator.assessmentId)
+    if (assessments.length !== 1) throw new Error('assistant-goals: exact owner goal outcome assessment is unavailable')
+    const assessment = assessments[0]!
+    if (assessment.execution?.status !== 'succeeded' || assessment.execution.quiescent !== true
+      || typeof assessment.triggerRunId !== 'string') {
+      throw new Error('assistant-goals: exact owner goal outcome assessment is not settled')
+    }
+    const run = snapshot.executionRuns.find(item => item.intent.runId === assessment.triggerRunId)
+    if (run?.execution?.status !== 'succeeded' || run.execution.quiescent !== true || run.dispatchedAt === undefined
+      || !same(run.intent.scope, stored.scope) || run.intent.task.kind !== 'goal-step'
+      || run.intent.task.ref !== run.intent.runId || run.intent.task.goal.runId !== run.intent.runId
+      || run.intent.task.goal.id !== stored.id || run.intent.task.goal.definitionVersion !== stored.definition.version
+      || run.intent.task.goal.definitionDigest !== stored.definition.digest
+      || run.intent.task.goal.sessionId !== stored.nativeAtLastObservation.sessionId
+      || run.intent.task.goal.nativeGoalId !== stored.nativeAtLastObservation.goalId) {
+      throw new Error('assistant-goals: exact owner goal outcome trigger run is unavailable')
+    }
+    const accepted = snapshot.acceptedTasks.find(item => item.contractId === assessment.contract.id)
+    if (accepted?.state !== 'done' || accepted.contract === null || accepted.receipt === null
+      || accepted.verifierExecutionObservation === null || !same(accepted.contract, assessment.contract)
+      || !same(accepted.verifierExecutionObservation, { ...assessment.execution, executionRef: locator.assessmentId })) {
+      throw new Error('assistant-goals: exact accepted owner goal outcome is unavailable')
+    }
+    const contract = validateTaskAcceptanceContract(accepted.contract)
+    if (contract.task.kind !== 'goal-outcome' || contract.id !== assessment.contract.id || contract.digest !== assessment.contract.digest
+      || contract.task.ref !== locator.assessmentId || contract.task.goal.assessmentId !== locator.assessmentId
+      || contract.task.goal.id !== stored.id || contract.task.goal.definitionVersion !== stored.definition.version
+      || contract.task.goal.definitionDigest !== stored.definition.digest
+      || contract.task.goal.sessionId !== stored.nativeAtLastObservation.sessionId
+      || contract.task.goal.nativeGoalId !== stored.nativeAtLastObservation.goalId
+      || contract.scope.workspace !== stored.scope.workspace || contract.scope.preset !== stored.scope.preset
+      || contract.owner.principalRecordId !== stored.scope.principalRecordId
+      || contract.owner.principalVersion !== stored.scope.principalVersion
+      || contract.objective !== stored.definition.objective || !same(contract.profile, assessment.contract.profile)) {
+      throw new Error('assistant-goals: owner goal outcome contract identity changed')
+    }
+    const receipt = validateTaskVerificationReceipt(contract, accepted.receipt)
+    if ((receipt.objectiveStatus !== 'achieved' && receipt.objectiveStatus !== 'not-achieved')
+      || receipt.validUntil <= receipt.completedAt || receipt.contractId !== contract.id
+      || receipt.contractDigest !== contract.digest || !same(receipt.task, contract.task)
+      || !same(receipt.scope, contract.scope) || !same(receipt.owner, contract.owner)) {
+      throw new Error('assistant-goals: owner goal outcome receipt is unavailable')
+    }
+    // This second route read fences all verifier and durable-ledger reads above.
+    this.#ownerGoalOutcomeFeedbackRoute(locator)
+    const unsigned = { protocol: 'assistant-goals/owner-goal-outcome-feedback/v1' as const, locator,
+      goal: { definitionVersion: stored.definition.version, definitionDigest: stored.definition.digest,
+        nativeGoalId: stored.nativeAtLastObservation.goalId, phase: stored.nativeAtLastObservation.phase },
+      runId: run.intent.runId, profile: { id: contract.profile.id, version: contract.profile.version, digest: contract.profile.digest },
+      contract: { id: contract.id, digest: contract.digest }, receipt: { id: receipt.id, digest: receipt.digest,
+        objectiveStatus: receipt.objectiveStatus, completedAt: receipt.completedAt, validUntil: receipt.validUntil } }
+    return detached({ ...unsigned, proofDigest: acceptanceDigest(unsigned) })
   }
 
   /** Host-only accepted artifact handoff. It never creates a model tool or Agent. */

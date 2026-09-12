@@ -69,6 +69,26 @@ const deliveryAttachmentsV6Schema = `
   ) STRICT;
 `
 
+const goalOutcomeTargetIndexes = `
+  CREATE INDEX delivery_goal_outcome_target_binding
+    ON delivery_goal_outcome_targets(binding_id, binding_version, binding_generation);
+  CREATE INDEX delivery_goal_outcome_target_owner
+    ON delivery_goal_outcome_targets(principal_record_id, principal_version, workspace, preset);
+`
+
+function rebuildGoalOutcomeTargetTable(database: DatabaseSync, mutate: (sql: string) => string): void {
+  const row = database.prepare(
+    "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'delivery_goal_outcome_targets'",
+  ).get() as { sql: string }
+  const changed = mutate(row.sql)
+  if (changed === row.sql) throw new Error('goal outcome target corruption did not change the schema')
+  database.exec(`
+    DROP TABLE delivery_goal_outcome_targets;
+    ${changed};
+    ${goalOutcomeTargetIndexes}
+  `)
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
@@ -96,6 +116,7 @@ describe('delivery SQLite boundary', () => {
       'delivery_preference_projection_outbox',
       'delivery_inbox_admission_clock', 'delivery_inbox_admissions',
       'delivery_task_acceptance_executions', 'delivery_session_leases',
+      'delivery_goal_outcome_targets',
     ]))
     const modelColumns = (database.prepare('PRAGMA table_info(conversation_model_selections)').all() as { name: string }[])
       .map(row => row.name)
@@ -119,6 +140,100 @@ describe('delivery SQLite boundary', () => {
     database.close()
     expect((await stat(join(root, 'nested'))).mode & 0o777).toBe(0o700)
     expect((await stat(path)).mode & 0o777).toBe(0o600)
+  })
+
+  test('migrates schema v19 with a strict goal outcome target sidecar', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v19-goal-outcome-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const raw = openDeliveryDatabase(path)
+    raw.exec('DROP TABLE delivery_goal_outcome_targets; PRAGMA user_version = 19;')
+    raw.close()
+
+    const migrated = openDeliveryDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 20 })
+    const columns = (migrated.prepare('PRAGMA table_info(delivery_goal_outcome_targets)').all() as Array<{ name: string }>)
+      .map(column => column.name)
+    expect(columns).toEqual([
+      'outbox_id', 'locator_json', 'proof_json', 'proof_digest', 'owner_route_id', 'principal_id',
+      'principal_record_id', 'principal_version', 'workspace', 'preset', 'binding_id',
+      'binding_version', 'binding_generation', 'session_id', 'goal_id', 'assessment_id',
+    ])
+    expect((migrated.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'delivery_goal_outcome_targets'")
+      .get() as { sql: string }).sql).toMatch(/json_valid\s*\(\s*locator_json\s*\)[\s\S]*proof_digest[\s\S]*binding_generation\s*>=\s*1[\s\S]*STRICT/iu)
+    expect((migrated.prepare('PRAGMA foreign_key_list(delivery_goal_outcome_targets)').all() as Array<{
+      from: string
+      table: string
+      to: string
+      on_delete: string
+    }>).map(row => [row.from, row.table, row.to, row.on_delete]).sort()).toEqual([
+      ['binding_id', 'conversation_bindings', 'id', 'NO ACTION'],
+      ['outbox_id', 'outbox_messages', 'id', 'CASCADE'],
+      ['principal_record_id', 'delivery_principals', 'id', 'NO ACTION'],
+    ])
+    expect((migrated.prepare('PRAGMA index_info(delivery_goal_outcome_target_binding)').all() as Array<{ name: string }>)
+      .map(row => row.name)).toEqual(['binding_id', 'binding_version', 'binding_generation'])
+    expect((migrated.prepare('PRAGMA index_info(delivery_goal_outcome_target_owner)').all() as Array<{ name: string }>)
+      .map(row => row.name)).toEqual(['principal_record_id', 'principal_version', 'workspace', 'preset'])
+    migrated.close()
+  })
+
+  test.each([
+    {
+      damage: 'a missing JSON-object CHECK',
+      corrupt: (database: DatabaseSync) => rebuildGoalOutcomeTargetTable(database, sql => sql.replace(
+        " CHECK (json_valid(locator_json) AND json_type(locator_json) = 'object')",
+        '',
+      )),
+    },
+    {
+      damage: 'a missing digest CHECK',
+      corrupt: (database: DatabaseSync) => rebuildGoalOutcomeTargetTable(database, sql => sql.replace(
+        / CHECK \(\s*length\(proof_digest\) = 64 AND proof_digest NOT GLOB '\*\[\^0-9a-f\]\*'\s*\)/u,
+        '',
+      )),
+    },
+    {
+      damage: 'a missing principal foreign key',
+      corrupt: (database: DatabaseSync) => rebuildGoalOutcomeTargetTable(database, sql => sql.replace(
+        ',\n    FOREIGN KEY (principal_record_id) REFERENCES delivery_principals(id)',
+        '',
+      )),
+    },
+    {
+      damage: 'a weakened outbox delete action',
+      corrupt: (database: DatabaseSync) => rebuildGoalOutcomeTargetTable(database, sql => sql.replace(
+        'REFERENCES outbox_messages(id) ON DELETE CASCADE',
+        'REFERENCES outbox_messages(id)',
+      )),
+    },
+    {
+      damage: 'a reordered binding index',
+      corrupt: (database: DatabaseSync) => database.exec(`
+        DROP INDEX delivery_goal_outcome_target_binding;
+        CREATE INDEX delivery_goal_outcome_target_binding
+          ON delivery_goal_outcome_targets(binding_id, binding_generation, binding_version);
+      `),
+    },
+    {
+      damage: 'an unknown extra index',
+      corrupt: (database: DatabaseSync) => database.exec(`
+        CREATE INDEX delivery_goal_outcome_target_unknown
+          ON delivery_goal_outcome_targets(assessment_id);
+      `),
+    },
+  ])('fails closed for schema v20 with $damage', async ({ corrupt }) => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v20-corrupt-goal-outcome-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    openDeliveryDatabase(path).close()
+    const raw = new DatabaseSync(path)
+    corrupt(raw)
+    raw.close()
+
+    expect(() => openDeliveryDatabase(path)).toThrow(
+      /delivery goal outcome target (?:schema is|(?:foreign keys|indexes) are) invalid/u,
+    )
   })
 
   test('backfills stable Inbox admission cursors when migrating schema v12', async () => {

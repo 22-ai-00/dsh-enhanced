@@ -45,6 +45,7 @@ import ApprovalService, { setApprovalPolicy } from '@deepseek-ai/dsh-user-approv
 import { approvalReviewerOf, AssistantPolicyService, type PolicyRule, type PolicyBudgetConfig } from '@dsh-enhanced/assistant-policy'
 import { AssistantAutomationsService, type AutomationProposalResult } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
+import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { installStrategyBenchmarkMeter } from '@dsh-enhanced/assistant-evaluation/benchmark/strategy'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
@@ -61,6 +62,7 @@ import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src/agent-runtime.ts'
 import { AssistantDeliveryService } from '../src/service.ts'
+import type { DeliveryGoalWakeInput, OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from '../src/goal-wake-types.ts'
 import { DeliveryStore } from '../src/store.ts'
 import { DELIVERY_PREFERENCE_PROJECTION_PROTOCOL } from '../src/types.ts'
 import type {
@@ -668,15 +670,35 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
   await service.whenIdle()
 }
 
-async function scheduledGoalHarness(root: string, saved: Map<string, SavedSession>, runTimeoutMs = 5_000, verificationTimeoutMs = 1_000, withSkills = false) {
+async function scheduledGoalHarness(root: string, saved: Map<string, SavedSession>, runTimeoutMs = 5_000, verificationTimeoutMs = 1_000, withSkills = false,
+  options: { goalOutcomeFeedback?: boolean } = {}) {
   const ownerId = 'lark/bot-1/tenant-a/ou_owner'
-  const fixture = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+  const sourceListeners = new Set<() => void>()
+  let emittedGoalEvent: Readonly<{ sequence: number; envelope: {
+    protocol: 'dsh-external-event/v1'; source: { id: string; kind: 'file'; version: string; configDigest: string };
+    event: { id: string; occurredAt: number; receivedAt: number }; observation: { digest: string; revision: string; timeBasis: 'observed' };
+    trust: { method: 'local-observation'; content: 'untrusted' }; target: { automationId: string }; deduplicationKey: string
+  } }> | undefined
+  const goalEventSource = {
+    sourceSnapshot: (triggerId: string) => {
+      if (triggerId !== 'scheduled-report') throw new Error('unknown event trigger')
+      return { protocol: 'dsh-event-source/v1' as const, sourceId: 'event-triggers:scheduled-report', kind: 'file' as const,
+        version: '1', configDigest: 'e'.repeat(64), target: { automationId: 'scheduled-report-observer' }, highWaterSequence: 0 }
+    },
+    firstEventAfter: (_snapshot: unknown, afterSequence: number, deadlineAt: number) =>
+      emittedGoalEvent !== undefined && afterSequence < emittedGoalEvent.sequence
+        && emittedGoalEvent.envelope.event.receivedAt <= deadlineAt ? emittedGoalEvent : undefined,
+    subscribeSourceChanges(listener: () => void) { sourceListeners.add(listener); return () => sourceListeners.delete(listener) },
+    claimGoalSource: () => true, retireGoalSource: () => true, canSettleGoalSource: () => true,
+  }
+  const fixture = await runtimeHarness(root, saved, undefined, options.goalOutcomeFeedback === true ? ['plain', 'markdown'] : undefined, root, undefined, 'primary', true, 'probe', undefined, {
     presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
     ownerRoutes: [{ id: 'goal-owner', conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }],
     policyBudgets: [{ id: 'goal-wake-runs', metric: 'automation-runs', limit: 10, periodMs: NON_ROLLING_TEST_BUDGET_PERIOD_MS, scope: 'global' }],
     policyRules: [
       { id: 'wake-goal', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: ownerId },
-        actions: ['create', 'observe', 'inspect', 'snapshot', 'schedule', 'pause', 'execute'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external', 'background'] } },
+        actions: ['create', 'observe', 'inspect', 'snapshot', 'schedule', ...(options.goalOutcomeFeedback === true ? ['wait' as const] : []), 'pause', 'execute'],
+        resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external', 'background'] } },
       { id: 'wake-human-tools', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: ownerId },
         actions: ['execute'], resource: { kind: 'tool', id: 'goal_*' }, context: { initiators: ['external'] } },
       { id: 'wake-native-probe', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: ownerId },
@@ -685,6 +707,15 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
         actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
       { id: 'wake-host', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId },
         actions: ['wake'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
+      ...(options.goalOutcomeFeedback === true ? [{ id: 'wake-goal-event-owner', effect: 'allow' as const,
+        subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId },
+        actions: ['wait-for-event'], resource: { kind: 'automation' as const, id: 'scheduled-report-observer' }, context: { initiators: ['external' as const] } },
+      { id: 'wake-goal-event-background', effect: 'allow' as const,
+        subject: { kind: 'background' as const, id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId },
+        actions: ['wait-for-event'], resource: { kind: 'automation' as const, id: 'scheduled-report-observer' }, context: { initiators: ['background' as const] } }] : []),
+      ...(options.goalOutcomeFeedback === true ? [{ id: 'wake-goal-outcome-send', effect: 'allow' as const,
+        subject: { kind: 'background' as const, id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId },
+        actions: ['send'], resource: { kind: 'message' as const, id: '*' }, context: { initiators: ['background' as const] } }] : []),
     ],
   })
   const native = await nativeGoalPlugins()
@@ -697,7 +728,9 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
   await fixture.ctx.plugin(native.goalTools as never, {} as never)
   await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
   await fixture.ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
-  await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, stepMaxDurationMs: runTimeoutMs + 5_000,
+  if (options.goalOutcomeFeedback === true) fixture.ctx.provide('eventTriggers' as never, goalEventSource as never)
+  await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true,
+    ...(options.goalOutcomeFeedback === true ? { verifyGoalOutcome: true, eventWaits: true } : {}), stepMaxDurationMs: runTimeoutMs + 5_000,
     executionBudget: { modelCalls: 5, toolCalls: 5, inputTokens: 500, outputTokens: 500, durationMs: 60_000, maxOutputTokensPerCall: 128 },
     backgroundWake: { ownerRouteId: 'goal-owner', budgetId: 'goal-wake-runs', maxDelayMs: 30_000, runTimeoutMs },
   })
@@ -712,11 +745,18 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
   await writeFile(join(root, 'wake-report.md'), 'Confirmed scheduled report')
   const authority = { kind: 'document' as const, id: 'wake-source', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: verificationTimeoutMs, maxResponseBytes: 4_096 }
   const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+  if (options.goalOutcomeFeedback === true) {
+    await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+  }
   await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
     authorities: [authority], profiles: [{ id: 'wake-step', version: 1, scope: { workspace: root, preset: 'primary' },
       owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000,
       bounds: { maxDurationMs: verificationTimeoutMs, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'report', kind: 'document-citations', authority: { id: 'wake-source', digest }, artifactPath: 'wake-report.md', requiredText: ['Confirmed scheduled report'], quotes: [] }],
-    }],
+    }, ...(options.goalOutcomeFeedback === true ? [{ id: 'wake-whole-goal', version: 1, scope: { workspace: root, preset: 'primary' },
+      owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-outcome' as const, objective, validityMs: 60_000,
+      bounds: { maxDurationMs: verificationTimeoutMs, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'whole-report', kind: 'document-citations' as const,
+        authority: { id: 'wake-source', digest }, artifactPath: 'wake-report.md', requiredText: ['Confirmed scheduled report'], quotes: [] }],
+    }] : [])],
   })
   const schedule = async () => {
     let scheduled: { id: string; wakeAt: number } | undefined
@@ -737,6 +777,39 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
     if (scheduled === undefined) throw new Error('goal schedule tool did not produce a wake')
     return scheduled
   }
+  const waitForEvent = async () => {
+    if (options.goalOutcomeFeedback !== true) throw new Error('goal event fixture is disabled')
+    let waiting: { id: string; state: string } | undefined
+    const remove = fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      if (fixture.service.currentPreferenceTurn(agent) === undefined || nativeGoals(fixture.ctx).get(agent) !== undefined) return await next()
+      const created = await fixture.ctx.tools.execute({ callId: ToolCallId('event-wake-create'), name: 'goal_create', agent, signal,
+        arguments: { objective, max_goal_rounds: 1 } })
+      expect(created.isError).not.toBe(true)
+      const record = fixture.ctx.assistantGoals.list(agent)[0]!
+      const result = await fixture.ctx.tools.execute({ callId: ToolCallId('event-wake-wait'), name: 'goal_wait_event', agent, signal, arguments: {
+        goal_id: record.id, expected_revision: record.native.revision, trigger_id: 'scheduled-report', expires_at: Date.now() + 30_000,
+      } })
+      expect(result.isError, JSON.stringify(result)).not.toBe(true)
+      waiting = JSON.parse(result.content.filter(block => block.type === 'text').map(block => block.text).join('')).wait
+      return await next()
+    })
+    try { await fixture.service.acceptInbound(message('evt-goal-event-wait', objective)); await drive(fixture.service) } finally { remove() }
+    if (waiting === undefined) throw new Error(`goal event wait tool did not produce a wait: ${JSON.stringify({ sends: fixture.sends,
+      requests: fixture.llm.requests.length, health: fixture.ctx.assistantGoals.health() })}`)
+    return waiting
+  }
+  const emitEvent = () => {
+    const now = Date.now()
+    emittedGoalEvent = Object.freeze({ sequence: 1, envelope: Object.freeze({ protocol: 'dsh-external-event/v1' as const,
+      source: Object.freeze({ id: 'event-triggers:scheduled-report', kind: 'file' as const, version: '1', configDigest: 'e'.repeat(64) }),
+      event: Object.freeze({ id: 'scheduled-report-ready', occurredAt: now, receivedAt: now }),
+      observation: Object.freeze({ digest: 'f'.repeat(64), revision: '1', timeBasis: 'observed' as const }),
+      trust: Object.freeze({ method: 'local-observation' as const, content: 'untrusted' as const }),
+      target: Object.freeze({ automationId: 'scheduled-report-observer' }),
+      deduplicationKey: 'event-triggers:scheduled-report:scheduled-report-ready',
+    }) })
+    for (const listener of sourceListeners) listener()
+  }
   const readWake = (id: string) => {
     const database = new DatabaseSync(join(root, 'goals.sqlite.wakes'), { readOnly: true })
     try { return database.prepare('SELECT state, intent_json, dispatched_at FROM goal_wakes WHERE id = ?').get(id) as { state: string; intent_json: string; dispatched_at: number | null } }
@@ -747,7 +820,7 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
     await fixture.ctx.assistantAutomations.tick(); await fixture.ctx.assistantAutomations.whenIdle()
     await fixture.ctx.assistantGoals.whenIdle()
   }
-  return { ...fixture, schedule, readWake, runAt }
+  return { ...fixture, schedule, waitForEvent, emitEvent, readWake, runAt }
 }
 
 function runtimeStore(service: AssistantDeliveryService): {
@@ -776,6 +849,7 @@ function runtimeStore(service: AssistantDeliveryService): {
   revokePrincipal(id: string, expectedVersion: number): unknown
   rotateBinding(input: { bindingId: string; expectedVersion: number; sessionId: string }): ConversationBinding
   enqueue(input: OutboundIntent): OutboxRecord
+  getGoalOutcomeTarget(id: string): unknown
   getOutbox(id: string): OutboxRecord | undefined
   listOutbox(input?: { bindingId?: string; limit?: number }): OutboxRecord[]
 } {
@@ -990,6 +1064,220 @@ function attachmentFixture() {
 }
 
 describe('real rc.1 delivery Agent runtime', () => {
+  test('delivers and revises an exact scheduled whole-goal result through durable feedback authority', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-outcome-feedback-')); roots.push(root)
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const deliveryOptions: PermissionHarnessOptions = {
+      ownerRoutes: [{ id: 'goal-owner', conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }],
+      policyRules: [{ id: 'goal-outcome-wake', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId },
+        actions: ['wake'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
+      { id: 'goal-outcome-send', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId },
+        actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } }],
+    }
+    const fixture = await runtimeHarness(root, new Map(), undefined, ['plain', 'markdown'], root, undefined, 'primary', true, 'probe', undefined, deliveryOptions)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-goal-outcome-seed', 'establish exact binding'))
+    await drive(fixture.service)
+    const binding = runtimeStore(fixture.service).getActiveBinding(conversation)!
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+    const locator: OwnerGoalOutcomeFeedbackLocator = {
+      protocol: 'assistant-goals/owner-goal-outcome-locator/v1', ownerRouteId: 'goal-owner', principalId: ownerId,
+      principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary',
+      bindingId: binding.id, bindingVersion: binding.version, bindingGeneration: binding.generation,
+      sessionId: binding.sessionId, goalId: 'goal-a', assessmentId: 'assessment-a',
+    }
+    const unsigned = { protocol: 'assistant-goals/owner-goal-outcome-feedback/v1' as const, locator,
+      goal: { definitionVersion: 2, definitionDigest: 'a'.repeat(64), nativeGoalId: 'native-goal-a', phase: 'complete' as const },
+      runId: 'run-a', profile: { id: 'whole-goal', version: 1, digest: 'b'.repeat(64) },
+      contract: { id: 'contract-a', digest: 'c'.repeat(64) }, receipt: { id: 'receipt-a', digest: 'd'.repeat(64),
+        objectiveStatus: 'achieved' as const, completedAt: Date.now() - 10, validUntil: Date.now() + 60_000 } }
+    const proof: OwnerGoalOutcomeFeedbackProof = { ...unsigned, proofDigest: acceptanceDigest(unsigned) }
+    const capabilities = new WeakMap<object, OwnerGoalOutcomeFeedbackProof>()
+    const goals = {
+      ownsWakeExecution: (value: unknown) => value === wake,
+      issueOwnerGoalOutcomeFeedbackTarget(value: OwnerGoalOutcomeFeedbackLocator) {
+        if (acceptanceDigest(value) !== acceptanceDigest(locator)) throw new Error('wrong locator')
+        const capability = Object.freeze(Object.create(null) as object); capabilities.set(capability, proof); return capability
+      },
+      resolveOwnerGoalOutcomeFeedbackTarget(capability: object) {
+        const value = capabilities.get(capability); if (value === undefined) throw new Error('stale capability'); return value
+      },
+    }
+    let disposeGoals = fixture.ctx.provide('assistantGoals' as never, goals as never)
+    const wake = Object.freeze({ attestation: { scope: { workspace: root, preset: 'primary' }, principalId: ownerId,
+      principalLineage: { principalRecordId: owner.id, principalVersion: owner.version }, bindingId: binding.id,
+      bindingVersion: binding.version, bindingGeneration: binding.generation, sessionId: binding.sessionId },
+      native: { goalId: 'native-goal-a', revision: 1 }, deadlineAt: Date.now() + 60_000, signal: new AbortController().signal,
+      includeOutput: true, assertCurrent() {}, beforeResume() {}, async settle() {},
+      resolveOutcomeFeedbackTarget: () => ({ locator, capability: goals.issueOwnerGoalOutcomeFeedbackTarget(locator), proof }),
+    }) satisfies DeliveryGoalWakeInput
+    const runtime = (fixture.service as unknown as { runtime: { resumeScheduledGoal(): unknown } }).runtime
+    vi.spyOn(runtime, 'resumeScheduledGoal').mockResolvedValue({ outcome: 'succeeded', dispatched: true, quiescent: true, output: 'Verified scheduled result.' })
+    await expect(fixture.service.resumeScheduledGoal(wake)).resolves.toMatchObject({ outcome: 'succeeded' })
+    const result = fixture.service.enqueueScheduledGoalResult(wake)
+    if ('kind' in result) throw new Error('external goal result unexpectedly used native-session')
+    expect(result.intent).toMatchObject({ format: 'markdown', metadata: {
+      'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome',
+      'dsh.learning.goalId': locator.goalId, 'dsh.learning.assessmentId': locator.assessmentId,
+    } })
+    expect(result.intent.text).toContain('/feedback not-achieved')
+    expect(runtimeStore(fixture.service).getGoalOutcomeTarget(result.id)).toMatchObject({ locator, proof })
+    expect(() => fixture.service.enqueueBackground({ sourceId: 'assistant-goals-wake/v1', workspace: root,
+      bindingId: binding.id, idempotencyKey: 'forged-goal-outcome', text: 'forged',
+      metadata: { 'dsh.learning.kind': 'goal-outcome' } }))
+      .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    await drive(fixture.service)
+    const delivered = runtimeStore(fixture.service).getOutbox(result.id)!
+    expect(delivered).toMatchObject({ status: 'accepted', providerMessageId: expect.any(String) })
+    const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+    const queuedForExpiry = store.enqueueGoalOutcomeTarget({ locator, proof, intent: {
+      ...result.intent, idempotencyKey: 'goal-outcome:expires-before-send',
+    } })
+    const expiryClock = vi.spyOn(Date, 'now').mockReturnValue(proof.receipt.validUntil)
+    try { await drive(fixture.service) } finally { expiryClock.mockRestore() }
+    expect(store.getOutbox(queuedForExpiry.id)).toMatchObject({ status: 'dead', failureCode: 'goal-outcome-authority-revoked' })
+    expect(fixture.sends).toHaveLength(2)
+    const queuedForReplacement = store.enqueueGoalOutcomeTarget({ locator, proof, intent: {
+      ...result.intent, idempotencyKey: 'goal-outcome:goals-replaced-before-send',
+    } })
+    await disposeGoals()
+    const replacement = { ...goals, resolveOwnerGoalOutcomeFeedbackTarget: () => ({ ...proof, runId: 'drift' }) }
+    const disposeReplacement = fixture.ctx.provide('assistantGoals' as never, replacement as never)
+    await drive(fixture.service)
+    expect(store.getOutbox(queuedForReplacement.id)).toMatchObject({ status: 'dead', failureCode: 'goal-outcome-authority-revoked' })
+    expect(fixture.sends).toHaveLength(2)
+    await disposeReplacement()
+    await fixture.ctx.fiber.restart()
+    const restarted = await runtimeHarness(root, new Map(), undefined, ['plain', 'markdown'], root, undefined, 'primary', true, 'probe', undefined, deliveryOptions)
+    disposeGoals = restarted.ctx.provide('assistantGoals' as never, goals as never)
+
+    const states = new Map<string, { version: number; objectiveStatus: string }>()
+    const registrationOwner = Object.freeze({ ownsTrustedAutomationEvaluationRegistration: () => false,
+      ownsTrustedDeliveryEvaluationRegistration: (value: object) => value === registration,
+      ownsTrustedVerifierEvaluationRegistration: () => false })
+    const evaluationCapabilities = new WeakMap<object, Record<string, unknown>>()
+    const registration = Object.freeze({ protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL, producer: 'assistant-delivery' as const,
+      ownerRevisionProtocol: 'owner-objective-revision/v2' as const, generation: restarted.service.trustedEvaluationProducerGeneration(), owner: registrationOwner,
+      issueCapability(claims: Record<string, unknown>) {
+        goals.resolveOwnerGoalOutcomeFeedbackTarget(claims.goalOutcomeCapability as object)
+        const key = String(claims.subjectRef); if (!states.has(key)) states.set(key, { version: 1, objectiveStatus: proof.receipt.objectiveStatus })
+        const capability = Object.freeze(Object.create(null) as object); evaluationCapabilities.set(capability, claims); return capability
+      },
+      inspect(capability: object) { const claims = evaluationCapabilities.get(capability)!; return states.get(String(claims.subjectRef)) },
+      append(input: Record<string, unknown>) {
+        const claims = evaluationCapabilities.get(input.capabilityReceipt as object)!
+        const key = String(claims.subjectRef), current = states.get(key)!
+        const command = claims.ownerCommand as { action: string; expectedVersion?: number; previousStatus?: string }
+        if (command.action === 'initial') {
+          if (current.objectiveStatus !== claims.objectiveStatus) throw Object.assign(new Error('conflict'), { code: 'idempotency-conflict' })
+        } else {
+          if (current.version !== command.expectedVersion || current.objectiveStatus !== command.previousStatus) throw Object.assign(new Error('stale'), { code: 'version-conflict' })
+          states.set(key, { version: current.version + 1, objectiveStatus: String(claims.objectiveStatus) })
+        }
+        return { idempotencyKey: input.idempotencyKey, ownerFeedbackState: states.get(key) }
+      } })
+    restarted.service.registerTrustedDeliveryEvaluationSink(registration as never)
+    const feedback = async (eventId: string, command: string) => {
+      await restarted.service.acceptInbound({ ...message(eventId, `/feedback ${command}`, 'command'),
+        metadata: { replyToProviderMessageId: delivered.providerMessageId! } })
+      await drive(restarted.service)
+      return restarted.sends.at(-1)!.text
+    }
+    expect(await feedback('evt-goal-initial-equal', 'achieved')).toContain('achieved，版本 1')
+    expect(await feedback('evt-goal-initial-opposite', 'not-achieved')).toContain('已经记录了不同的任务结果')
+    expect(await feedback('evt-goal-status', 'status')).toContain('achieved，版本 1')
+    expect(await feedback('evt-goal-correct', 'correct 1 achieved not-achieved')).toContain('not-achieved，版本 2')
+    expect(await feedback('evt-goal-withdraw', 'withdraw 2 not-achieved')).toContain('unknown，版本 3')
+    expect(await feedback('evt-goal-recover', 'correct 3 unknown achieved')).toContain('achieved，版本 4')
+    await restarted.service.acceptInbound({ ...message('evt-goal-wrong-reply', '/feedback status', 'command'),
+      metadata: { replyToProviderMessageId: 'om_wrong' } }); await drive(restarted.service)
+    expect(restarted.sends.at(-1)!.text).toContain('任务结果未记录')
+    await disposeGoals()
+    const finalReplacement = restarted.ctx.provide('assistantGoals' as never, { ...goals,
+      resolveOwnerGoalOutcomeFeedbackTarget: () => ({ ...proof, runId: 'drift' }),
+    } as never)
+    expect(await feedback('evt-goal-provider-replaced', 'status')).toContain('任务结果未记录')
+    await finalReplacement()
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('runs event-woken whole-goal feedback through real Goals, Verifier, Evaluation and Delivery services', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-real-goal-outcome-feedback-')); roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const first = await scheduledGoalHarness(root, saved, 15_000, 5_000, false, { goalOutcomeFeedback: true })
+    const waiting = await first.waitForEvent()
+
+    first.emitEvent()
+    const waits = new DatabaseSync(join(root, 'goals.sqlite.event-waits'), { readOnly: true })
+    let wake: { id?: string; at?: number } | undefined
+    try {
+      const matched = waits.prepare('SELECT wake_json FROM goal_event_waits WHERE id = ?').get(waiting.id) as { wake_json: string | null }
+      wake = matched.wake_json === null ? undefined : JSON.parse(matched.wake_json)
+    } finally { waits.close() }
+    expect(wake).toMatchObject({ id: expect.stringMatching(/^goal-event-wake-/u), at: expect.any(Number) })
+    if (typeof wake?.id !== 'string' || typeof wake.at !== 'number') throw new Error('event wake was not materialized')
+    await first.runAt(wake.at)
+    await drive(first.service)
+
+    expect(first.readWake(wake.id)).toMatchObject({ state: 'succeeded', dispatched_at: expect.any(Number) })
+    const verification = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
+    let assessmentId: string
+    try {
+      const rows = verification.prepare("SELECT id, payload FROM acceptance_contracts WHERE task_kind = 'goal-outcome'").all() as Array<{ id: string; payload: string }>
+      expect(rows).toHaveLength(1)
+      const contract = JSON.parse(rows[0]!.payload) as { task: { ref: string; goal: { assessmentId: string } } }
+      expect(contract.task.ref).toBe(contract.task.goal.assessmentId)
+      assessmentId = contract.task.ref
+      expect(first.ctx.assistantVerifier.inspectAcceptedTask(rows[0]!.id)).toMatchObject({
+        state: 'done', execution: { status: 'succeeded', quiescent: true },
+        receipt: { objectiveStatus: 'achieved' },
+      })
+    } finally { verification.close() }
+    const result = runtimeStore(first.service).listOutbox().find(item =>
+      item.intent.metadata?.['dsh.learning.kind'] === 'goal-outcome')
+    expect(result, JSON.stringify(result)).toMatchObject({ status: 'accepted', providerMessageId: expect.any(String), intent: {
+      format: 'markdown', metadata: {
+        'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome',
+        'dsh.learning.assessmentId': assessmentId, 'dsh.learning.objectiveStatus': 'achieved',
+      },
+    } })
+    expect(result!.intent.text).toContain('/feedback not-achieved')
+    expect(runtimeStore(first.service).getGoalOutcomeTarget(result!.id)).toMatchObject({
+      locator: { assessmentId }, proof: { receipt: { objectiveStatus: 'achieved' } },
+    })
+
+    const respond = async (fixture: Awaited<ReturnType<typeof scheduledGoalHarness>>, eventId: string, command: string) => {
+      await fixture.service.acceptInbound({
+        ...message(eventId, `/feedback ${command}`, 'command'),
+        metadata: { replyToProviderMessageId: result!.providerMessageId! },
+      })
+      await drive(fixture.service)
+      return fixture.sends.at(-1)!.text
+    }
+    expect(await respond(first, 'evt-real-goal-status', 'status')).toContain('achieved，版本 1')
+    const hostScope = first.ctx.assistantEvaluation.canonicalHostScope({ workspace: root, preset: 'primary' })
+    expect(first.ctx.assistantEvaluation.getTrustedGoalOutcomeLearningProjection({ scope: hostScope, assessmentId })).toMatchObject({
+      objective: { status: 'achieved' },
+      projection: { subjectKind: 'goal-outcome', subjectRef: assessmentId, disposition: 'upsert' },
+    })
+
+    await first.ctx.fiber.restart()
+    const restarted = await scheduledGoalHarness(root, saved, 15_000, 5_000, false, { goalOutcomeFeedback: true })
+    expect(await respond(restarted, 'evt-real-goal-correct', 'correct 1 achieved not-achieved')).toContain('not-achieved，版本 2')
+    const restartedScope = restarted.ctx.assistantEvaluation.canonicalHostScope({ workspace: root, preset: 'primary' })
+    expect(restarted.ctx.assistantEvaluation.getTrustedGoalOutcomeLearningProjection({
+      scope: restartedScope, assessmentId,
+    })).toMatchObject({ objective: { status: 'not-achieved' },
+      projection: { subjectKind: 'goal-outcome', subjectRef: assessmentId, disposition: 'upsert' } })
+    expect(await respond(restarted, 'evt-real-goal-withdraw', 'withdraw 2 not-achieved')).toContain('unknown，版本 3')
+    expect(restarted.ctx.assistantEvaluation.getTrustedGoalOutcomeLearningProjection({
+      scope: restartedScope, assessmentId,
+    })).toMatchObject({ objective: { status: 'unknown' },
+      projection: { subjectKind: 'goal-outcome', subjectRef: assessmentId, disposition: 'retract' } })
+    await restarted.ctx.fiber.restart()
+  }, 30_000)
+
   test('persists a scheduled goal across Host reload and resumes only its original native Session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-reload-')); roots.push(root)
     const saved = new Map<string, SavedSession>()

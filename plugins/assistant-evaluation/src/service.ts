@@ -1,9 +1,9 @@
-import { Context, Service } from '@deepseek-ai/cordis'
+import { Context, Service, symbols } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type SkillRegistry from '@deepseek-ai/dsh-skill'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
-import { validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import {
   EvaluationStore,
   canonicalEvaluationScope,
@@ -34,6 +34,7 @@ import type {
   TrustedDeliveryEvaluationAppendInput,
   TrustedDeliveryEvaluationClaims,
   TrustedDeliveryEvaluationRegistration,
+  TrustedGoalOutcomeOwnerProof,
   TrustedEvaluationRegistrationOwner,
   TrustedVerifierEvaluationRegistration,
   TrustedOutcomeReceipt,
@@ -174,6 +175,17 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
+function serviceIdentity(value: object): object {
+  try {
+    const original = Reflect.get(value, symbols.original) as unknown
+    return (typeof original === 'object' && original !== null) || typeof original === 'function'
+      ? original as object
+      : value
+  } catch {
+    return value
+  }
+}
+
 function exactHostIdentifier(value: unknown, label: string, maxBytes: number): value is string {
   if (typeof value !== 'string') return false
   try {
@@ -263,6 +275,33 @@ export interface TrustedDeliveryEvaluationProducer {
 interface TrustedVerifierEvaluationProducer {
   trustedVerificationProducerGeneration(): string
   registerTrustedVerifierEvaluationSink(registration: Readonly<TrustedVerifierEvaluationRegistration>): () => void
+}
+
+interface TrustedGoalsOutcomeOwnerResolver {
+  resolveOwnerGoalOutcomeFeedbackTarget(capability: unknown): TrustedGoalOutcomeOwnerProof
+}
+
+interface TrustedVerifierTaskInspector {
+  trustedVerificationProducerGeneration(): string
+  inspectAcceptedTask(contractId: string): Readonly<{
+    contract: unknown
+    receipt: unknown
+    execution: unknown
+    state: 'awaiting-execution' | 'pending' | 'verifying' | 'done' | 'needs-attention'
+  }> | null
+}
+
+function isTrustedGoalsOutcomeOwnerResolver(value: unknown): value is TrustedGoalsOutcomeOwnerResolver {
+  return typeof value === 'object' && value !== null
+    && typeof (value as Partial<TrustedGoalsOutcomeOwnerResolver>)
+      .resolveOwnerGoalOutcomeFeedbackTarget === 'function'
+}
+
+function isTrustedVerifierTaskInspector(value: unknown): value is TrustedVerifierTaskInspector {
+  return typeof value === 'object' && value !== null
+    && typeof (value as Partial<TrustedVerifierTaskInspector>)
+      .trustedVerificationProducerGeneration === 'function'
+    && typeof (value as Partial<TrustedVerifierTaskInspector>).inspectAcceptedTask === 'function'
 }
 
 interface TrustedProducerBinding<Producer> {
@@ -1016,13 +1055,18 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     const registration: TrustedDeliveryEvaluationRegistration = Object.freeze({
       protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
       producer: 'assistant-delivery' as const,
-      ownerRevisionProtocol: 'owner-objective-revision/v1' as const,
+      ownerRevisionProtocol: 'owner-objective-revision/v2' as const,
       generation,
       owner: this,
       issueCapability: (claims: TrustedDeliveryEvaluationClaims): unknown => {
         this.assertCurrentProducer(producer, generation, registered, 'delivery')
         const normalized = this.deliveryClaims(claims)
-        this.store.adoptLegacyOwnerFeedback(normalized)
+        if (normalized.subjectKind === 'goal-outcome') {
+          const { proof, verifierOutcome } = this.resolveGoalOutcomeOwnerProof(normalized)
+          if (this.store.adoptTrustedGoalOutcomeOwnerBaseline(normalized, proof, verifierOutcome)) {
+            this.notifyTrustedTaskChange()
+          }
+        } else this.store.adoptLegacyOwnerFeedback(normalized)
         const capability = Object.freeze(Object.create(null) as object)
         capabilities.set(capability, normalized)
         return capability
@@ -1032,6 +1076,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         if (typeof capabilityReceipt !== 'object' || capabilityReceipt === null) throw new AssistantEvaluationError('forbidden', 'invalid owner capability')
         const claims = capabilities.get(capabilityReceipt)
         if (claims?.ownerCommand === undefined) throw new AssistantEvaluationError('forbidden', 'missing owner lineage')
+        if (claims.subjectKind === 'goal-outcome') this.resolveGoalOutcomeOwnerProof(claims)
         return this.store.ownerObjectiveState(claims.scope, claims.subjectKind ?? 'automation-run',
           claims.subjectRef ?? claims.runId, claims.ownerCommand.principalRecordId, claims.ownerCommand.principalVersion)
       },
@@ -1053,6 +1098,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
           || hostIdentifier(input.idempotencyKey, 'idempotencyKey', 200) !== claims.idempotencyKey) {
           throw new AssistantEvaluationError('forbidden', 'delivery Evaluation capability identity changed')
         }
+        if (claims.subjectKind === 'goal-outcome') this.resolveGoalOutcomeOwnerProof(claims)
         return this.appendTrusted({
           scope: claims.scope,
           situation: claims.situation,
@@ -1277,7 +1323,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }
     const subjectKind = input.subjectKind ?? 'automation-run'
     const subjectRef = input.subjectRef ?? input.runId
-    if ((input.subjectKind !== undefined && input.subjectKind !== 'automation-run' && input.subjectKind !== 'foreground-turn')
+    if ((input.subjectKind !== undefined && input.subjectKind !== 'automation-run'
+      && input.subjectKind !== 'foreground-turn' && input.subjectKind !== 'goal-outcome')
       || (input.subjectRef !== undefined && input.subjectRef.trim() === '')) {
       throw new AssistantEvaluationError('forbidden', 'delivery Evaluation subject is invalid')
     }
@@ -1290,7 +1337,14 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         || command.expectedVersion! < 1 || !['achieved', 'partial', 'not-achieved', 'unknown'].includes(command.previousStatus!))))) {
       throw new AssistantEvaluationError('forbidden', 'owner revision precondition is invalid')
     }
+    if (subjectKind === 'goal-outcome' && (input.subjectRef === undefined
+      || subjectRef !== input.runId || command === undefined
+      || typeof input.goalOutcomeCapability !== 'object' || input.goalOutcomeCapability === null)) {
+      throw new AssistantEvaluationError('forbidden', 'goal outcome owner capability is invalid')
+    }
     return Object.freeze({
+      ...(subjectKind === 'goal-outcome'
+        ? { goalOutcomeCapability: input.goalOutcomeCapability } : {}),
       ...(input.initialIdempotencyKey === undefined ? {} : { initialIdempotencyKey: hostIdentifier(input.initialIdempotencyKey, 'initial feedback key', 200) }),
       ...(command === undefined ? {} : { ownerCommand: Object.freeze({ ...command,
         operationId: hostIdentifier(command.operationId, 'owner operation', 200),
@@ -1308,6 +1362,189 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       objectiveStatus: input.objectiveStatus,
       occurredAt: input.occurredAt,
       idempotencyKey: hostIdentifier(input.idempotencyKey, 'idempotencyKey', 200),
+    }) as Readonly<TrustedDeliveryEvaluationClaims>
+  }
+
+  private resolveGoalOutcomeOwnerProof(
+    claims: Readonly<TrustedDeliveryEvaluationClaims>,
+  ): Readonly<{
+    proof: TrustedGoalOutcomeOwnerProof
+    verifierOutcome: OutcomeEnvelope
+  }> {
+    const goals = this.ctx.get('assistantGoals' as never, false) as unknown
+    if (!isTrustedGoalsOutcomeOwnerResolver(goals)) {
+      throw new AssistantEvaluationError('forbidden', 'current Goals owner capability resolver is unavailable')
+    }
+    let value: unknown
+    try {
+      value = goals.resolveOwnerGoalOutcomeFeedbackTarget(claims.goalOutcomeCapability)
+    } catch {
+      throw new AssistantEvaluationError('forbidden', 'Goals owner capability is stale or invalid')
+    }
+    const proof = recordValue(value)
+    const locator = recordValue(proof?.locator)
+    const goal = recordValue(proof?.goal)
+    const profile = recordValue(proof?.profile)
+    const contract = recordValue(proof?.contract)
+    const receipt = recordValue(proof?.receipt)
+    const digestPattern = /^[a-f\d]{64}$/u
+    const exactKeys = (input: Record<string, unknown> | undefined, keys: readonly string[]) => {
+      if (input === undefined || (Object.getPrototypeOf(input) !== Object.prototype
+        && Object.getPrototypeOf(input) !== null) || Object.getOwnPropertySymbols(input).length !== 0
+        || Object.getOwnPropertyNames(input).sort().join(',') !== [...keys].sort().join(',')) return false
+      return Object.values(Object.getOwnPropertyDescriptors(input))
+        .every(descriptor => descriptor.enumerable && 'value' in descriptor)
+    }
+    if (!exactKeys(proof, ['protocol', 'locator', 'goal', 'runId', 'profile', 'contract', 'receipt', 'proofDigest'])
+      || !exactKeys(locator, ['protocol', 'ownerRouteId', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'preset', 'bindingId', 'bindingVersion', 'bindingGeneration', 'sessionId', 'goalId', 'assessmentId'])
+      || !exactKeys(goal, ['definitionVersion', 'definitionDigest', 'nativeGoalId', 'phase'])
+      || !exactKeys(profile, ['id', 'version', 'digest'])
+      || !exactKeys(contract, ['id', 'digest'])
+      || !exactKeys(receipt, ['id', 'digest', 'objectiveStatus', 'completedAt', 'validUntil'])
+      || proof!.protocol !== 'assistant-goals/owner-goal-outcome-feedback/v1'
+      || locator!.protocol !== 'assistant-goals/owner-goal-outcome-locator/v1'
+      || !Number.isSafeInteger(locator!.principalVersion) || (locator!.principalVersion as number) < 1
+      || !Number.isSafeInteger(locator!.bindingVersion) || (locator!.bindingVersion as number) < 1
+      || !Number.isSafeInteger(locator!.bindingGeneration) || (locator!.bindingGeneration as number) < 1
+      || !Number.isSafeInteger(goal!.definitionVersion) || (goal!.definitionVersion as number) < 1
+      || (goal!.phase !== 'complete' && goal!.phase !== 'blocked')
+      || !Number.isSafeInteger(profile!.version) || (profile!.version as number) < 1
+      || !Number.isSafeInteger(receipt!.completedAt) || (receipt!.completedAt as number) < 0
+      || !Number.isSafeInteger(receipt!.validUntil)
+      || (receipt!.validUntil as number) <= (receipt!.completedAt as number)
+      || (receipt!.objectiveStatus !== 'achieved' && receipt!.objectiveStatus !== 'not-achieved')
+      || ![goal!.definitionDigest, profile!.digest, contract!.digest, receipt!.digest, proof!.proofDigest]
+        .every(item => typeof item === 'string' && digestPattern.test(item))
+      || ![locator!.ownerRouteId, locator!.principalId, locator!.principalRecordId, locator!.workspace,
+        locator!.preset, locator!.bindingId, locator!.sessionId, locator!.goalId, locator!.assessmentId,
+        goal!.nativeGoalId, proof!.runId, profile!.id, contract!.id, receipt!.id]
+        .every(item => exactHostIdentifier(item, 'Goals owner proof identity', 4_096))
+      || acceptanceDigest({
+        protocol: proof!.protocol, locator, goal, runId: proof!.runId, profile, contract, receipt,
+      }) !== proof!.proofDigest) {
+      throw new AssistantEvaluationError('forbidden', 'Goals owner proof is invalid')
+    }
+    const valid = value as Readonly<TrustedGoalOutcomeOwnerProof>
+    const expectedSituation = `goal:${valid.locator.goalId}:definition:${valid.goal.definitionVersion}`
+    if (claims.subjectKind !== 'goal-outcome' || claims.subjectRef !== valid.locator.assessmentId
+      || claims.runId !== valid.locator.assessmentId || claims.scope.workspace !== valid.locator.workspace
+      || claims.scope.preset !== valid.locator.preset || claims.situation !== expectedSituation
+      || claims.principalId !== valid.locator.principalId || claims.bindingId !== valid.locator.bindingId
+      || claims.ownerCommand === undefined
+      || claims.ownerCommand.principalRecordId !== valid.locator.principalRecordId
+      || claims.ownerCommand.principalVersion !== valid.locator.principalVersion) {
+      throw new AssistantEvaluationError('forbidden', 'Goals owner proof does not match delivery claims')
+    }
+    const verifier = this.ctx.get('assistantVerifier' as never, false) as unknown
+    if (!isTrustedVerifierTaskInspector(verifier)) {
+      throw new AssistantEvaluationError('forbidden', 'current Verifier goal outcome proof is unavailable')
+    }
+    const expectedVerifierBinding = this.verifierBinding
+    let inspectedVerifierGeneration: string
+    try {
+      inspectedVerifierGeneration = hostIdentifier(
+        verifier.trustedVerificationProducerGeneration(),
+        'trusted verifier generation',
+        200,
+      )
+    } catch {
+      throw new AssistantEvaluationError('forbidden', 'current Verifier goal outcome proof is unavailable')
+    }
+    if (expectedVerifierBinding === undefined
+      || serviceIdentity(verifier) !== serviceIdentity(expectedVerifierBinding.producer)
+      || inspectedVerifierGeneration !== expectedVerifierBinding.generation) {
+      throw new AssistantEvaluationError('forbidden', 'current Verifier goal outcome proof is unavailable')
+    }
+    let accepted: ReturnType<TrustedVerifierTaskInspector['inspectAcceptedTask']>
+    try {
+      accepted = verifier.inspectAcceptedTask(valid.contract.id)
+    } catch {
+      throw new AssistantEvaluationError('forbidden', 'current Verifier goal outcome proof is unavailable')
+    }
+    let acceptedContract
+    let acceptedReceipt
+    try {
+      acceptedContract = validateTaskAcceptanceContract(accepted?.contract)
+      acceptedReceipt = validateTaskVerificationReceipt(acceptedContract, accepted?.receipt)
+    } catch {
+      throw new AssistantEvaluationError('forbidden', 'current Verifier goal outcome proof is invalid')
+    }
+    const execution = recordValue(accepted?.execution)
+    if (accepted?.state !== 'done' || acceptedContract.task.kind !== 'goal-outcome'
+      || !exactKeys(execution, ['status', 'quiescent', 'completedAt', 'executionRef'])
+      || !['succeeded', 'failed', 'timed-out', 'cancelled', 'unknown'].includes(execution!.status as string)
+      || execution!.quiescent !== true || !Number.isSafeInteger(execution!.completedAt)
+      || (execution!.completedAt as number) < acceptedContract.issuedAt
+      || acceptedReceipt.startedAt < (execution!.completedAt as number)
+      || acceptedReceipt.completedAt < acceptedReceipt.startedAt
+      || acceptedReceipt.completedAt > this.now()
+      || execution!.executionRef !== acceptedContract.task.ref
+      || acceptedContract.id !== valid.contract.id || acceptedContract.digest !== valid.contract.digest
+      || acceptedContract.task.ref !== valid.locator.assessmentId
+      || acceptedContract.task.goal.assessmentId !== valid.locator.assessmentId
+      || acceptedContract.task.goal.id !== valid.locator.goalId
+      || acceptedContract.task.goal.definitionVersion !== valid.goal.definitionVersion
+      || acceptedContract.task.goal.definitionDigest !== valid.goal.definitionDigest
+      || acceptedContract.task.goal.sessionId !== valid.locator.sessionId
+      || acceptedContract.task.goal.nativeGoalId !== valid.goal.nativeGoalId
+      || acceptedContract.scope.workspace !== valid.locator.workspace
+      || acceptedContract.scope.preset !== valid.locator.preset
+      || acceptedContract.owner.principalRecordId !== valid.locator.principalRecordId
+      || acceptedContract.owner.principalVersion !== valid.locator.principalVersion
+      || acceptedContract.profile.id !== valid.profile.id
+      || acceptedContract.profile.version !== valid.profile.version
+      || acceptedContract.profile.digest !== valid.profile.digest
+      || acceptedReceipt.id !== valid.receipt.id || acceptedReceipt.digest !== valid.receipt.digest
+      || acceptedReceipt.objectiveStatus !== valid.receipt.objectiveStatus
+      || acceptedReceipt.completedAt !== valid.receipt.completedAt
+      || acceptedReceipt.validUntil !== valid.receipt.validUntil) {
+      throw new AssistantEvaluationError('forbidden', 'Goals owner proof does not match the current Verifier receipt')
+    }
+    const currentGoals = this.ctx.get('assistantGoals' as never, false) as unknown
+    try {
+      if (!isTrustedGoalsOutcomeOwnerResolver(currentGoals)
+        || acceptanceDigest(currentGoals.resolveOwnerGoalOutcomeFeedbackTarget(
+          claims.goalOutcomeCapability,
+        )) !== acceptanceDigest(valid)) {
+        throw new Error('Goals generation changed')
+      }
+    } catch {
+      throw new AssistantEvaluationError('forbidden', 'Goals owner capability is stale or invalid')
+    }
+    const currentVerifier = this.ctx.get('assistantVerifier' as never, false) as unknown
+    try {
+      if (!isTrustedVerifierTaskInspector(currentVerifier)
+        || serviceIdentity(currentVerifier) !== serviceIdentity(expectedVerifierBinding.producer)
+        || hostIdentifier(currentVerifier.trustedVerificationProducerGeneration(),
+          'trusted verifier generation', 200) !== inspectedVerifierGeneration
+        || this.verifierBinding !== expectedVerifierBinding
+        || expectedVerifierBinding.generation !== inspectedVerifierGeneration) {
+        throw new Error('Verifier generation changed')
+      }
+    } catch {
+      throw new AssistantEvaluationError('forbidden', 'current Verifier goal outcome proof is unavailable')
+    }
+    return Object.freeze({
+      proof: valid,
+      verifierOutcome: Object.freeze({
+        scope: Object.freeze({ ...acceptedContract.scope }),
+        situation: expectedSituation,
+        executionStatus: execution!.status as OutcomeEnvelope['executionStatus'],
+        objectiveStatus: acceptedReceipt.objectiveStatus,
+        deliveryStatus: 'not-required' as const,
+        source: Object.freeze({ kind: 'evaluator' as const, id: 'assistant-verifier' }),
+        trust: 'trusted' as const,
+        evidence: Object.freeze([
+          Object.freeze({ kind: 'goal-outcome', ref: acceptedContract.task.ref }),
+          Object.freeze({ kind: 'acceptance-contract', ref: acceptedContract.id, digest: acceptedContract.digest }),
+          Object.freeze({ kind: 'verification-receipt', ref: acceptedReceipt.id, digest: acceptedReceipt.digest }),
+          Object.freeze({ kind: 'execution', ref: execution!.executionRef as string }),
+        ]),
+        metrics: Object.freeze({}),
+        occurredAt: acceptedReceipt.completedAt,
+        idempotencyKey: `assistant-verifier:${acceptedReceipt.id}`,
+        evaluator: Object.freeze({ id: 'assistant-verifier', version: '1' }),
+      }),
     })
   }
 
@@ -1321,11 +1558,15 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
 
   private appendTrusted(input: OutcomeEnvelope, command?: Readonly<import('./types.js').OwnerObjectiveCommand>): StoredOutcome {
     const outcome = this.store.append(input, command)
+    this.notifyTrustedTaskChange()
+    return outcome
+  }
+
+  private notifyTrustedTaskChange(): void {
     for (const listener of this.taskChangeListeners) {
       try { listener() } catch { /* Consumer startup / dispatch revalidation retries durable evidence. */ }
     }
     void this.reconcileProjections({ limit: 1 }).catch(() => {})
-    return outcome
   }
 
   private async projectOne(entry: {

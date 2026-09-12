@@ -17,6 +17,12 @@ export interface GoalOutcomeView {
   nativeCompletion?: 'complete' | 'pending'
 }
 
+export interface VerifiedWakeOutcome {
+  readonly assessmentId: string
+  readonly runId: string
+  readonly objectiveStatus: 'achieved' | 'not-achieved'
+}
+
 const same = (a: unknown, b: unknown): boolean => acceptanceDigest(a) === acceptanceDigest(b)
 const handle = (contract: TaskAcceptanceContract): AcceptanceHandle => ({ contractId: contract.id, contractDigest: contract.digest })
 
@@ -225,30 +231,49 @@ export class GoalOutcomeRuntime {
     goals.complete(agent, { id: native.id, revision: native.revision })
     return true
   }
+  /** Resolve only the assessment produced by this wake's exact terminal round. */
+  verifiedWakeOutcome(record: GoalRecord, wake: Readonly<{ sessionId: string; goalId: string; revision: number; roundsStarted: number; maxGoalRounds: number }>): Readonly<VerifiedWakeOutcome> | undefined {
+    try {
+      const phase = record.native.phase
+      const expectedOutcome = phase === 'complete' ? 'achieved' : phase === 'blocked' ? 'not-achieved' : undefined
+      const directTerminal = record.native.revision === wake.revision + 2
+      const verifiedAfterBlocked = phase === 'complete' && record.native.revision === wake.revision + 3
+      if (expectedOutcome === undefined || record.native.sessionId !== wake.sessionId || record.native.goalId !== wake.goalId
+        || record.native.maxGoalRounds !== wake.maxGoalRounds || record.native.roundsStarted <= wake.roundsStarted
+        || record.native.roundsStarted > wake.maxGoalRounds || !directTerminal && !verifiedAfterBlocked
+        || (phase === 'blocked' || verifiedAfterBlocked) && record.native.roundsStarted !== wake.maxGoalRounds
+        || record.checkpoint.dependencies.length > 0 && record.checkpoint.dependencyBindings === undefined) return undefined
+      const runs = this.runs(record.scope, record.id).filter(item => item.execution?.status === 'succeeded' && item.execution.quiescent
+        && item.dispatchedAt !== undefined && same(item.intent.scope, record.scope)
+        && same(item.intent.dependencies ?? [], record.checkpoint.dependencyBindings ?? [])
+        && item.intent.task.goal.id === record.id && item.intent.task.goal.definitionVersion === record.definition.version
+        && item.intent.task.goal.definitionDigest === record.definition.digest && item.intent.task.goal.sessionId === wake.sessionId
+        && item.intent.task.goal.nativeGoalId === wake.goalId && item.intent.task.goal.nativeRevision === wake.revision + 1
+        && item.intent.admission.round === record.native.roundsStarted && item.intent.admission.maxGoalRounds === wake.maxGoalRounds)
+      if (runs.length !== 1) return undefined
+      const run = runs[0]!
+      const assessment = this.#store.getByTriggerRun(record.scope, record.id, record.definition.version, run.intent.runId)
+      if (assessment === undefined || assessment.execution?.status !== 'succeeded' || !assessment.execution.quiescent
+        || !same(assessment.definition.scope, record.scope) || assessment.definition.goalId !== record.id
+        || !same(assessment.definition.definition, record.definition) || assessment.definition.sessionId !== wake.sessionId
+        || assessment.definition.nativeGoalId !== wake.goalId || assessment.contract.task.kind !== 'goal-outcome'
+        || assessment.contract.task.goal.id !== record.id || assessment.contract.task.goal.definitionVersion !== record.definition.version
+        || assessment.contract.task.goal.definitionDigest !== record.definition.digest
+        || assessment.contract.task.goal.sessionId !== wake.sessionId || assessment.contract.task.goal.nativeGoalId !== wake.goalId) return undefined
+      this.#ready()
+      const readback = this.ctx.get('assistantVerifier', false)!.inspectAcceptedTask(assessment.contract.id)
+      if (readback?.receipt === null || readback === null || !same(readback.contract, assessment.contract)
+        || !same(readback.execution, { ...assessment.execution, executionRef: assessment.contract.task.ref })) return undefined
+      const receipt = validateTaskVerificationReceipt(assessment.contract, readback.receipt)
+      if (receipt.objectiveStatus !== expectedOutcome || receipt.completedAt > Date.now() || receipt.validUntil <= Date.now()) return undefined
+      return Object.freeze({ assessmentId: assessment.contract.task.ref, runId: run.intent.runId, objectiveStatus: expectedOutcome })
+    } catch { return undefined }
+  }
   /** Read-only proof that this exact wake's final native completion follows its verified last round. */
   verifiedWakeCompletion(record: GoalRecord, wake: Readonly<{ sessionId: string; goalId: string; revision: number; roundsStarted: number; maxGoalRounds: number }>): boolean {
-    try {
-      const result = this.view(record)
-      if (result.status !== 'achieved' || result.nativeCompletion !== 'complete' || result.assessmentId === undefined
-        || record.native.phase !== 'complete' || record.native.sessionId !== wake.sessionId || record.native.goalId !== wake.goalId
-        || record.native.maxGoalRounds !== wake.maxGoalRounds || record.native.roundsStarted !== wake.maxGoalRounds
-        || record.native.revision !== wake.revision + 3) return false
-      const assessment = this.#store.get(result.assessmentId)
-      const run = this.runs(record.scope, record.id).find(item => item.intent.runId === assessment?.triggerRunId)
-      return assessment !== undefined && run !== undefined && assessment.execution?.status === 'succeeded' && assessment.execution.quiescent
-        && same(assessment.definition.scope, record.scope) && assessment.definition.goalId === record.id
-        && same(assessment.definition.definition, record.definition) && assessment.definition.sessionId === wake.sessionId
-        && assessment.definition.nativeGoalId === wake.goalId && same(run.intent.scope, record.scope)
-        && run.execution?.status === 'succeeded' && run.execution.quiescent && run.dispatchedAt !== undefined
-        && run.intent.task.goal.id === record.id && run.intent.task.goal.definitionVersion === record.definition.version
-        && run.intent.task.goal.definitionDigest === record.definition.digest && run.intent.task.goal.sessionId === wake.sessionId
-        && run.intent.task.goal.nativeGoalId === wake.goalId && run.intent.task.goal.nativeRevision === wake.revision + 1
-        && run.intent.admission.round === record.native.roundsStarted && record.native.roundsStarted === wake.maxGoalRounds
-        && run.intent.admission.round > wake.roundsStarted && run.intent.admission.maxGoalRounds === wake.maxGoalRounds
-        && assessment.contract.task.kind === 'goal-outcome' && assessment.contract.task.goal.id === record.id
-        && assessment.contract.task.goal.definitionVersion === record.definition.version && assessment.contract.task.goal.definitionDigest === record.definition.digest
-        && assessment.contract.task.goal.sessionId === wake.sessionId && assessment.contract.task.goal.nativeGoalId === wake.goalId
-    } catch { return false }
+    const outcome = this.verifiedWakeOutcome(record, wake)
+    return outcome?.objectiveStatus === 'achieved' && record.native.phase === 'complete'
+      && record.native.revision === wake.revision + 3
   }
   inspect = async (input: TaskAcceptanceContract): Promise<AcceptedExecution | null> => {
     this.#ready()

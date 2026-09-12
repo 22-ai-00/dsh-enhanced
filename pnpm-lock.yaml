@@ -772,6 +772,9 @@ importers:
       '@dsh-enhanced/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
+      '@dsh-enhanced/assistant-goals':
+        specifier: workspace:*
+        version: link:../assistant-goals
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy

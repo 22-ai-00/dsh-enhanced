@@ -6,7 +6,10 @@ import { version } from './version.js'
 export const name = 'dsh-enhanced-assistant-delivery'
 export { AssistantDeliveryService, Config, DeliveryAdapterRegistryStoppedError, isTrustedDeliveryPreferenceProducer, version }
 export type { DeliveryInboundRuntime } from './service.js'
-export type { DeliveryGoalWakeInput, DeliveryGoalWakeResult } from './goal-wake-types.js'
+export type {
+  DeliveryGoalWakeInput, DeliveryGoalWakeResult, OwnerGoalOutcomeFeedbackLocator,
+  OwnerGoalOutcomeFeedbackProof, OwnerGoalOutcomeFeedbackTarget,
+} from './goal-wake-types.js'
 export * from './types.js'
 export * from './operator.js'
 export * from './learning-command.js'

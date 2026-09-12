@@ -2707,6 +2707,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       || typeof input.signal.removeEventListener !== 'function' || input.signal.aborted
       || !isDeliveryGoalWakeDeadline(input.deadlineAt, now) || typeof input.assertCurrent !== 'function'
       || typeof input.beforeResume !== 'function' || typeof input.settle !== 'function'
+      || typeof input.resolveOutcomeFeedbackTarget !== 'function'
       || (input.includeOutput !== undefined && typeof input.includeOutput !== 'boolean') || typeof input.native?.goalId !== 'string'
       || input.native.goalId.length === 0 || input.native.goalId.length > 512
       || !Number.isSafeInteger(input.native.revision) || input.native.revision < 1) return false

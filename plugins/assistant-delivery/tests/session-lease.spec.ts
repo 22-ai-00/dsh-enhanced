@@ -67,7 +67,7 @@ describe('session leases', () => {
     const reopened = new DeliveryStore({ path: f.path })
     expect(reopened.getBinding(f.binding.id)?.sessionId).toBe('session-a')
     const inspected = new DatabaseSync(f.path)
-    expect((inspected.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(19)
+    expect((inspected.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(20)
     inspected.close()
     reopened.close()
   })

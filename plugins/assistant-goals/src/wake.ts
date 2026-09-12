@@ -1,13 +1,21 @@
 import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { DeliveryGoalWakeInput, AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import type { DeliveryGoalWakeInput, AssistantDeliveryService, OwnerGoalOutcomeFeedbackTarget } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput,
   HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { GoalWakeStore } from './wake-store.js'
 import type { GoalWake, GoalWakeIntent } from './wake-store.js'
 import type { GoalRecord, GoalScope } from './types.js'
+type DeliveryGoalWakeCapability = DeliveryGoalWakeInput & Readonly<{
+  resolveOutcomeFeedbackTarget(): Readonly<OwnerGoalOutcomeFeedbackTarget>
+}>
+type VerifiedWakeOutcome = Readonly<{
+  assessmentId: string
+  runId: string
+  objectiveStatus: 'achieved' | 'not-achieved'
+}>
 
 export interface GoalWakeConfig { ownerRouteId: string; budgetId: string; maxDelayMs?: number; runTimeoutMs?: number }
 const owner = 'assistant-goals-wake/v1'
@@ -39,11 +47,12 @@ export class GoalWakeRuntime {
     private readonly record: (scope: GoalScope, goalId: string, agent?: Agent) => GoalRecord | undefined,
     private readonly ready: () => boolean,
     private readonly settleExecution: (agent: Agent, signal: AbortSignal) => Promise<void>,
-    private readonly verifiedCompletion: (record: GoalRecord, wake: GoalWakeIntent['native']) => boolean,
+    private readonly verifiedOutcome: (record: GoalRecord, wake: GoalWakeIntent['native']) => VerifiedWakeOutcome | undefined,
     private readonly assertEventWait: (intent: GoalWakeIntent, phase: 'before-resume' | 'running' | 'terminal') => void = () => {},
     private readonly acceptedEventPause: (record: GoalRecord, agent?: Agent) => boolean = () => false,
     private readonly assertDependencies: (record: GoalRecord) => void = () => {},
-    private readonly dependenciesReady: () => boolean = () => true) {
+    private readonly dependenciesReady: () => boolean = () => true,
+    private readonly outcomeFeedbackTarget?: (intent: GoalWakeIntent, record: GoalRecord, outcome: VerifiedWakeOutcome) => Readonly<OwnerGoalOutcomeFeedbackTarget>) {
     this.#store = new GoalWakeStore(path)
     ctx.inject(['assistantAutomations', 'assistantDelivery', 'assistantPolicy'], runtime => {
       const automations = runtime.assistantAutomations
@@ -144,7 +153,7 @@ export class GoalWakeRuntime {
     const terminal = (native.phase === 'complete' || native.phase === 'blocked')
       && native.revision === intent.native.revision + 2
     const verifiedCompletion = native.phase === 'complete' && native.revision === intent.native.revision + 3
-      && this.verifiedCompletion(record, intent.native)
+      && this.verifiedOutcome(record, intent.native)?.objectiveStatus === 'achieved'
     const waitingAgain = phase === 'terminal' && native.phase === 'paused' && native.revision === intent.native.revision + 2
       && native.roundsStarted > intent.native.roundsStarted && this.acceptedEventPause(record, agent)
     if (!(phase === 'before-resume' ? before : running || phase === 'terminal' && (terminal || verifiedCompletion || waitingAgain))) reject()
@@ -204,7 +213,10 @@ export class GoalWakeRuntime {
     const intent = wake.intent
     let dispatched = false
     const signal = AbortSignal.any([input.signal, this.#lifecycle.signal])
-    const capability: DeliveryGoalWakeInput = Object.freeze({ attestation: intent.attestation,
+    let terminalSettlement: GoalRecord | undefined
+    let terminalOutcome: VerifiedWakeOutcome | undefined
+    let capability!: DeliveryGoalWakeCapability
+    capability = Object.freeze({ attestation: intent.attestation,
       native: { goalId: intent.native.goalId, revision: intent.native.revision }, deadlineAt: intent.expiresAt, signal,
       ...(intent.id.startsWith('goal-event-wake-') ? { includeOutput: true } : {}),
       assertCurrent: (agent: Agent, phase: 'before-resume' | 'running' | 'terminal') => {
@@ -226,7 +238,26 @@ export class GoalWakeRuntime {
         this.#current(intent, 'terminal', agent)
         await this.settleExecution(agent, combined)
         combined.throwIfAborted()
-        this.#current(intent, 'terminal', agent)
+        const settled = this.#current(intent, 'terminal', agent)
+        if (settled.native.phase === 'complete' || settled.native.phase === 'blocked') {
+          terminalSettlement = settled
+          terminalOutcome = this.verifiedOutcome(settled, intent.native)
+        }
+      },
+      resolveOutcomeFeedbackTarget: () => {
+        signal.throwIfAborted()
+        if (!this.#capabilities.has(capability) || !dispatched || this.outcomeFeedbackTarget === undefined
+          || terminalSettlement === undefined || terminalOutcome === undefined
+          || terminalSettlement.native.phase !== 'complete' && terminalSettlement.native.phase !== 'blocked') reject()
+        const current = this.#current(intent, 'terminal')
+        const currentOutcome = this.verifiedOutcome(current, intent.native)
+        const wake = this.#store.get(intent.id)
+        if (wake?.state !== 'dispatched' || wake.occurrenceId !== input.occurrenceId
+          || current.native.phase !== 'complete' && current.native.phase !== 'blocked'
+          || !same(current.scope, terminalSettlement.scope) || current.id !== terminalSettlement.id
+          || !same(current.definition, terminalSettlement.definition) || !same(current.native, terminalSettlement.native)
+          || currentOutcome === undefined || !same(currentOutcome, terminalOutcome)) reject()
+        return this.outcomeFeedbackTarget(intent, current, currentOutcome)
       },
     })
     this.#capabilities.add(capability)

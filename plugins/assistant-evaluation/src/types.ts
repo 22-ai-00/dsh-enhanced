@@ -303,13 +303,50 @@ export interface OwnerObjectiveState {
   objectiveStatus: ObjectiveStatus
 }
 
-export interface TrustedDeliveryEvaluationClaims {
+/**
+ * Structural view of the process-local Goals proof used to authorize owner
+ * feedback for one terminal whole-goal assessment. Evaluation deliberately
+ * does not import the optional Goals package at runtime.
+ */
+export interface TrustedGoalOutcomeOwnerProof {
+  protocol: 'assistant-goals/owner-goal-outcome-feedback/v1'
+  locator: Readonly<{
+    protocol: 'assistant-goals/owner-goal-outcome-locator/v1'
+    ownerRouteId: string
+    principalId: string
+    principalRecordId: string
+    principalVersion: number
+    workspace: string
+    preset: string
+    bindingId: string
+    bindingVersion: number
+    bindingGeneration: number
+    sessionId: string
+    goalId: string
+    assessmentId: string
+  }>
+  goal: Readonly<{
+    definitionVersion: number
+    definitionDigest: string
+    nativeGoalId: string
+    phase: 'complete' | 'blocked'
+  }>
+  runId: string
+  profile: Readonly<{ id: string; version: number; digest: string }>
+  contract: Readonly<{ id: string; digest: string }>
+  receipt: Readonly<{
+    id: string
+    digest: string
+    objectiveStatus: Extract<ObjectiveStatus, 'achieved' | 'not-achieved'>
+    completedAt: number
+    validUntil: number
+  }>
+  proofDigest: string
+}
+
+interface TrustedDeliveryEvaluationClaimsBase {
   scope: Readonly<EvaluationScope>
   situation: string
-  /** Defaults to the legacy Automation subject when omitted by an older Delivery producer. */
-  subjectKind?: 'automation-run' | 'foreground-turn'
-  /** Defaults to `runId` for legacy Automation feedback. */
-  subjectRef?: string
   /** Legacy Automation subject reference retained for rolling producer compatibility. */
   runId: string
   outboxId: string
@@ -323,6 +360,22 @@ export interface TrustedDeliveryEvaluationClaims {
   idempotencyKey: string
 }
 
+export type TrustedDeliveryEvaluationClaims = TrustedDeliveryEvaluationClaimsBase & (
+  | Readonly<{
+    /** Defaults to the legacy Automation subject when omitted by an older Delivery producer. */
+    subjectKind?: 'automation-run' | 'foreground-turn'
+    /** Defaults to `runId` for legacy Automation feedback. */
+    subjectRef?: string
+    goalOutcomeCapability?: never
+  }>
+  | Readonly<{
+    subjectKind: 'goal-outcome'
+    subjectRef: string
+    /** Opaque process-local capability minted by the current Goals generation. */
+    goalOutcomeCapability: unknown
+  }>
+)
+
 export interface TrustedDeliveryEvaluationAppendInput {
   capabilityReceipt: unknown
   runId: string
@@ -334,7 +387,7 @@ export interface TrustedDeliveryEvaluationAppendInput {
 }
 
 export interface TrustedDeliveryEvaluationRegistration {
-  ownerRevisionProtocol?: 'owner-objective-revision/v1'
+  ownerRevisionProtocol?: 'owner-objective-revision/v1' | 'owner-objective-revision/v2'
   protocol: typeof TRUSTED_EVALUATION_PRODUCER_PROTOCOL
   producer: 'assistant-delivery'
   generation: string

@@ -220,6 +220,10 @@ Goals 的单次计划恢复使用单独的 Host capability。`goalWakeSettlement
 
 `goalWakeResultVersion()` 返回 1 表示支持显式 `includeOutput`：只回读本次恢复中 exact Goal/revision 原生回合的完整最终文本，不返回历史回复、reasoning、截断或未完成工具调用。Goals 的可选事件等待在结算后调用 `enqueueScheduledGoalResult(capability)`，由 Delivery 使用自身保存的输出并在入队边界复核原 owner、binding version/generation 和 Session；调用者不能指定替代正文或收件人。Web 原生会话已在真实 teardown 前持久保存回复；当前 Web owner capability 再次确认同一 Session 后返回 `native-session`，不追加重复回复或生成 Outbox，也不声称用户已读。缺少当前 Web owner 或其身份不匹配时拒绝。外部渠道投递使用现有持久 Outbox、稳定身份 key，以及 `background:assistant-goals-wake/v1` 的 message `send` 权限。入队成功不等于渠道送达，未知发送仍不盲目重放。
 
+外部渠道的 event-wait scheduled whole-goal 终态（当前 producer 为 `goal-event-wake-*`）另由 Delivery schema 20 在同一事务中写入 result Outbox 与 `delivery_goal_outcome_targets` typed sidecar；普通 `goal_schedule` wake 不外发该结果。sidecar 固定 owner route、principal record/version、binding version/generation、Session、业务 Goal、assessment、定义/profile/contract/receipt 摘要和 Goals proof digest；普通 `enqueueBackground()` 及手写 `dsh.learning.*` metadata 都不能制造这条 authority。入队及每次实际 send 前都会重新取得当前 Goals provider，以进程内 capability 重建同一 Goals/Verifier proof，并核对回执仍新鲜、active owner/route/binding/Session 未漂移及 exact background `send` Policy。provider 被替换、proof 过期、route 或 Policy 变化时，尚未发送的 intent 以 `goal-outcome-authority-revoked` 失败关闭，不调用渠道 adapter。
+
+结果已经取得 provider message id 后，exact owner 可以直接回复该消息，沿用 `/feedback status`、`/feedback correct <version> <previous-status> <new-status>` 与 `/feedback withdraw <version> <previous-status>`。首次 `status` 已显示从 Verifier baseline 采纳的 revision 1；单词形式的初始判断只有与该 baseline 状态相同才幂等成功，任何不同判断都必须使用 `status` 返回的 version/status 做显式 `correct`，不能用裸命令覆盖。历史 Verifier receipt 此时允许超过原 freshness window，因为 owner 正在标注一份不可变的历史结果；但 Delivery、Goals 和 Evaluation 仍会重验同一个 sidecar、owner lineage、route/binding、Goal definition、assessment、run、profile、contract 与 receipt identity。原消息、当前 Goals provider 或任一身份不匹配时拒绝，不会仅凭过期 metadata 产生修订。Web `native-session` 返回值没有外部 Outbox/provider reply identity，因此当前不支持这条 whole-goal reply-feedback 路径。
+
 `/feedback` 的完整固定语法如下；不接受附件或额外自由文本：
 
 ```text
@@ -378,7 +382,7 @@ pnpm --dir plugins/assistant-delivery pack --dry-run
 
 兼容性基线见 [docs/compatibility.md](../../docs/compatibility.md)。
 
-更正/撤回/状态入口要求 Evaluation 注册 `owner-objective-revision/v1` capability；旧 Evaluation 仅能处理原始初次判断，修订命令明确返回服务不可用，不能退化为独立评价票。
+普通前台与 Automation 的更正/撤回/状态入口兼容 Evaluation `owner-objective-revision/v1` 或 v2；whole-goal 入口严格要求 v2。旧 Evaluation 不能消费 typed whole-goal capability，命令明确返回服务不可用，不能退化为独立评价票。
 
 旧 foreground receipt 未保存 principal version：仅当前仍为同一 record 的初始 v1 身份可修订；身份已更新时保守拒绝继承旧判断修订权。新记录完整保存 record+version。
 

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
+import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { DeliveryStore } from '../src/store.ts'
 import type { DeliveryPresentationUpdate, DeliveryReceipt, OutboundIntent } from '../src/types.ts'
 
@@ -47,6 +48,25 @@ function approvalRoute(f: Awaited<ReturnType<typeof fixture>>) {
   }
 }
 
+function goalOutcomeTarget(f: Awaited<ReturnType<typeof fixture>>) {
+  const owner = f.store.getPrincipal(f.principal)!
+  const locator = {
+    protocol: 'assistant-goals/owner-goal-outcome-locator/v1' as const, ownerRouteId: 'goal-owner',
+    principalId: 'lark/bot-1/tenant-a/ou_owner', principalRecordId: owner.id, principalVersion: owner.version,
+    workspace: f.binding.workspace, preset: f.binding.agentPreset, bindingId: f.binding.id,
+    bindingVersion: f.binding.version, bindingGeneration: f.binding.generation, sessionId: f.binding.sessionId,
+    goalId: 'goal-a', assessmentId: 'assessment-a',
+  }
+  const unsigned = {
+    protocol: 'assistant-goals/owner-goal-outcome-feedback/v1' as const, locator,
+    goal: { definitionVersion: 2, definitionDigest: 'a'.repeat(64), nativeGoalId: 'native-goal-a', phase: 'complete' as const },
+    runId: 'run-a', profile: { id: 'goal-outcome-profile', version: 3, digest: 'b'.repeat(64) },
+    contract: { id: 'contract-a', digest: 'c'.repeat(64) }, receipt: { id: 'receipt-a', digest: 'd'.repeat(64),
+      objectiveStatus: 'achieved' as const, completedAt: 900, validUntil: 2_000 },
+  }
+  return { locator, proof: { ...unsigned, proofDigest: acceptanceDigest(unsigned) } }
+}
+
 function addBinding(value: Awaited<ReturnType<typeof fixture>>, index: number) {
   const principal = { ...value.principal, user: `ou_batch_${index}` }
   const issued = value.store.issuePairing(principal, { ttlMs: 5_000, maxAttempts: 3 })
@@ -85,6 +105,34 @@ function incidentPresentation(
 }
 
 describe('durable outbox', () => {
+  test('atomically couples a typed goal outcome target to its idempotent Outbox winner', async () => {
+    const f = await fixture()
+    const target = goalOutcomeTarget(f)
+    const request = {
+      ...target,
+      intent: { ...intent('goal-outcome:one', f, 'Verified goal result'), format: 'markdown' as const,
+        metadata: { 'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome' } },
+    }
+    const first = f.store.enqueueGoalOutcomeTarget(request)
+    expect(f.store.enqueueGoalOutcomeTarget(request)).toEqual(first)
+    expect(f.store.getGoalOutcomeTarget(first.id)).toEqual({ outboxId: first.id, ...target })
+
+    const reopened = new DeliveryStore({ path: f.databasePath, now: () => 1_001 })
+    expect(reopened.getGoalOutcomeTarget(first.id)).toEqual({ outboxId: first.id, ...target })
+    expect(reopened.enqueueGoalOutcomeTarget(request)).toEqual(first)
+    reopened.close()
+
+    expect(() => f.store.enqueueGoalOutcomeTarget({ ...request, proof: { ...target.proof, runId: 'run-forged' } }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueueGoalOutcomeTarget({ ...request, intent: {
+      ...request.intent, idempotencyKey: 'goal-outcome:invalid-owner', text: 'must roll back',
+    }, locator: { ...target.locator, principalVersion: target.locator.principalVersion + 1 },
+    proof: { ...target.proof, locator: { ...target.locator, principalVersion: target.locator.principalVersion + 1 } } }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(f.store.getOutboxByIdempotencyKey('goal-outcome:invalid-owner')).toBeUndefined()
+    f.store.close()
+  })
+
   test('persists immutable idempotent intents before any adapter work', async () => {
     const f = await fixture()
     const first = f.store.enqueue(intent('automation:one:owner', f))

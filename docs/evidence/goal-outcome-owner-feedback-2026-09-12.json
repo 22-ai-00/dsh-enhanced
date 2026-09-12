@@ -1,0 +1,180 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-12",
+  "recordedAt": "2026-09-12T03:42:53Z",
+  "baseCommit": "40f9359fb8f3f4649c177ed8f52d7eff53a33341",
+  "status": "engineering-slice-validated",
+  "completeWorkPackage": false,
+  "workingTreeState": {
+    "state": "Whole-goal owner feedback, exact wake binding, offline baseline recovery, schema 20 diagnostics and legacy canary quarantine settled on the shared main worktree",
+    "sourceHashesAreProvisional": false,
+    "mustRehashAfterFinalRootGate": false,
+    "unrelatedDirtyWorkExcluded": [
+      "docs/evidence/sqlite-inode-binding-2026-09-11.json",
+      "plugins/assistant-automations/tests/operator.spec.ts",
+      "plugins/assistant-delivery/tests/operator-snapshot.spec.ts: unrelated chmod 04700 hunk only",
+      "docs/autonomy-handoff-2026-09-09.md"
+    ]
+  },
+  "scope": [
+    "WP15 owner correction and withdrawal for one exact externally delivered event-wait whole-goal assessment",
+    "Goals current owner and Verifier proof to Delivery schema 20 typed sidecar",
+    "Evaluation owner-objective-revision/v2 baseline adoption, CAS correction and retract",
+    "Existing Lark reply identity without a new adapter authority surface"
+  ],
+  "workPackages": {
+    "strengthened": ["15"],
+    "statusChanged": false,
+    "wp15": "implementing",
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "implemented": [
+    "Goals issues an opaque process-local generation-bound capability and canonical proof for one terminal event-wait whole-goal assessment after revalidating the current owner route, goal definition, trigger run and Verifier accepted task.",
+    "The feedback target is selected only from the current wake native revision, terminal round, unique succeeded run and its triggerRun assessment; an older successful assessment cannot be attached to a later wake.",
+    "Delivery schema 20 atomically couples the external event-wait result Outbox with an immutable typed goal-outcome sidecar; ordinary goal_schedule wakes and ordinary background metadata do not create this authority.",
+    "Before enqueue and provider send, Delivery reacquires the current Goals provider and rechecks proof freshness, active owner lineage, route, binding, session and exact background send Policy.",
+    "After a provider message exists, the exact owner may reply with feedback status, CAS correction or withdrawal. Historical receipt expiry is allowed only while the immutable Goals and Verifier identity is rebuilt and remains exact.",
+    "Evaluation owner-objective-revision/v2 adopts the current whole-goal receipt as revision one, applies version and previous-status CAS, and publishes withdrawal as a canonical unknown retract consumed by the existing Skills monitor.",
+    "When Evaluation was offline until the immutable receipt expired, current Goals and Verifier identity can atomically reconstruct the original trusted outcome and revision-one baseline without extending or rewriting that receipt.",
+    "Delivery schema 20 validates every sidecar CHECK, foreign key and index at startup; Web owner diagnostics and all new ABI peers require the matching post-0.1.24 cohort.",
+    "Legacy or malformed active qualified skill deployments without exact canonical quorum reopen blocked, cannot claim or dispatch, and are never auto-unblocked.",
+    "Lark uses its existing reply-to-provider-message identity and adds no target-specific callback or trust authority. Native Web sessions have no external reply identity and are excluded."
+  ],
+  "promptToArtifactChecklist": [
+    {
+      "requirement": "External event-wait scheduled whole-goal result has a non-forgeable typed feedback target",
+      "artifacts": [
+        "plugins/assistant-goals/src/service.ts",
+        "plugins/assistant-delivery/src/goal-wake-types.ts",
+        "plugins/assistant-delivery/src/store.ts",
+        "plugins/assistant-delivery/src/sqlite.ts"
+      ],
+      "evidence": [
+        "plugins/assistant-goals/tests/service.spec.ts: exact terminal capability revalidation",
+        "plugins/assistant-delivery/tests/outbox.spec.ts: Outbox plus typed sidecar atomic winner",
+        "plugins/assistant-delivery/tests/sqlite.spec.ts: v19 to v20 strict sidecar migration"
+      ],
+      "status": "validated"
+    },
+    {
+      "requirement": "Send is fenced by fresh current Goals, Verifier, owner route, binding and Policy",
+      "artifacts": [
+        "plugins/assistant-delivery/src/service.ts",
+        "plugins/assistant-goals/src/wake.ts",
+        "plugins/assistant-goals/src/service.ts"
+      ],
+      "evidence": [
+        "plugins/assistant-delivery/tests/agent-runtime.spec.ts: exact event-wait scheduled whole-goal result, expiry and provider replacement",
+        "plugins/assistant-goals/tests/wake.spec.ts: capability settlement and terminal identity"
+      ],
+      "status": "validated"
+    },
+    {
+      "requirement": "Existing feedback status, correct and withdraw operate on the exact delivered whole-goal result across Host reload",
+      "artifacts": [
+        "plugins/assistant-delivery/src/agent-runtime.ts",
+        "plugins/assistant-delivery/src/service.ts",
+        "plugins/assistant-evaluation/src/service.ts",
+        "plugins/assistant-evaluation/src/store.ts"
+      ],
+      "evidence": [
+        "plugins/assistant-delivery/tests/agent-runtime.spec.ts: Host reload, initial idempotency, status, correction, withdrawal, recovery, wrong reply and provider replacement",
+        "plugins/assistant-evaluation/tests/verifier-goal-step.spec.ts: v2 baseline adoption and direct corrections"
+      ],
+      "status": "validated"
+    },
+    {
+      "requirement": "Historical receipt expiry does not remove owner correction rights or weaken immutable identity checks",
+      "artifacts": [
+        "plugins/assistant-goals/src/service.ts",
+        "plugins/assistant-delivery/src/service.ts",
+        "plugins/assistant-evaluation/src/service.ts"
+      ],
+      "evidence": [
+        "plugins/assistant-goals/tests/service.spec.ts: historical terminal capability remains identity-valid after freshness expiry",
+        "plugins/assistant-delivery/tests/agent-runtime.spec.ts: correction path rebuilds current Goals capability"
+      ],
+      "status": "validated"
+    },
+    {
+      "requirement": "Lark needs no new authority and unsupported Web native-session behavior is explicit",
+      "artifacts": [
+        "plugins/lark-channel/README.md",
+        "plugins/lark-channel/docs/operations.md",
+        "plugins/assistant-delivery/src/service.ts"
+      ],
+      "evidence": [
+        "Delivery integration fixture uses the existing provider message reply identity",
+        "No real Lark cloud or native Web reply-feedback acceptance run is claimed"
+      ],
+      "status": "documented-engineering-boundary"
+    }
+  ],
+  "packageValidation": {
+    "status": "passed",
+    "results": {
+      "assistantDelivery": { "filesPassed": 34, "testsPassed": 743, "testsSkipped": 0 },
+      "assistantGoals": { "filesPassed": 21, "testsPassed": 283, "testsSkipped": 0 },
+      "assistantEvaluation": { "filesPassed": 30, "filesSkipped": 1, "testsPassed": 230, "testsSkipped": 4 },
+      "assistantSkills": { "filesPassed": 16, "filesSkipped": 1, "testsPassed": 243, "testsSkipped": 11 },
+      "assistantWebOwner": { "filesPassed": 7, "testsPassed": 55, "testsSkipped": 0 },
+      "realEventTriggerChain": { "filesPassed": 1, "testsPassed": 5, "testsSkipped": 0 },
+      "typechecks": ["assistant-delivery", "assistant-goals", "assistant-evaluation", "assistant-skills", "assistant-web-owner"]
+    }
+  },
+  "sourceSha256": {
+    "plugins/assistant-delivery/src/goal-wake-types.ts": "2789d393d4ec72e43d9e81adbda78ae2975d5a205ebaa97f4bd774838f386fe1",
+    "plugins/assistant-delivery/src/service.ts": "39aa35948564fb4d14c9210422b410dfac4b5d5dedf20abd179b18614d03ac21",
+    "plugins/assistant-delivery/src/sqlite.ts": "d8977f1176c2291cb2e295ca6c674092810ca8e4dd806bac144479deabf302fe",
+    "plugins/assistant-delivery/src/store.ts": "4b6cd3fe21aaa13e76d4ac176a15999cead6ea62dee2654efa11dee10d194188",
+    "plugins/assistant-delivery/src/types.ts": "a47512843c204e5cf636d5b9eb1b5f7735abc7d588f47fe97f5f289b2b9a17d9",
+    "plugins/assistant-evaluation/src/service.ts": "2681f3f05ddf856dfb87ccd943f06eebe45946f6135cfaaf6c16804957f05b58",
+    "plugins/assistant-evaluation/src/store.ts": "1d610cabfb12de3ab9d3132906887941944d9d4da619382fdd5e9ab227c22fdf",
+    "plugins/assistant-evaluation/src/types.ts": "df2fdc6cf97163deecaf4ea2f8e14c4ea100b1e5d253c595463b5944fe3c09f3",
+    "plugins/assistant-goals/src/outcome.ts": "e11a9c24456c8f9ae578f6cabc6e4728fec3ae3b8f9cb63ffdeee665bac50e03",
+    "plugins/assistant-goals/src/service.ts": "7d9d7f2cce5c2448d070dacfab4e11a881dff671ce2b059095875335ef8ef206",
+    "plugins/assistant-goals/src/wake.ts": "27be3d7e43616c0bfb9f83b6fcd4bb315adaf8cd7ac477a87cf7d74685e3b0ba",
+    "plugins/assistant-skills/src/store.ts": "91965983f693be11d7a9a0aee9a6c62003f88c48d6a000257dfb4f920a1519da",
+    "plugins/assistant-web-owner/src/doctor.ts": "374380f445f152875ce9c43edbf862ad791d9f6183547cf2dca6b3b36144464f",
+    "tests/autonomy-event-goal.spec.ts": "5918f39fe68a68ffa465223c6c879b45653bd81f87c18a57414be5fe5bcf2701"
+  },
+  "finalRootGate": {
+    "status": "passed",
+    "command": "CI=true VITEST_MAX_WORKERS=1 pnpm check",
+    "exitCode": 0,
+    "log": "/tmp/dsh-wp15-goal-outcome-owner-feedback-root-check.log",
+    "sha256": "4b1ccdfed1124898f2bcb8d546891935056c4b7a8b9fe32e3fdac880c54c6c81",
+    "rootTests": { "filesPassed": 31, "testsPassed": 490, "testsSkipped": 1 },
+    "aggregateTests": { "filesPassed": 351, "filesSkipped": 12, "testsPassed": 4950, "testsSkipped": 43 },
+    "dryRunPacks": 33,
+    "result": "Workspace validation, zero-warning lint, typechecking, root and recursive tests, build and all dry-run packs passed on the frozen source snapshot."
+  },
+  "independentReview": {
+    "status": "passed",
+    "block": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "notes": "Final read-only review confirmed exact wake run and assessment binding, offline expired-receipt baseline recovery, current Cordis provider identity fences, strict schema 20 validation, matching peer floors, the real EventTriggers integration path and fail-closed legacy canary quarantine."
+  },
+  "engineeringFixtureBoundary": {
+    "localHostAndTransportFixtures": true,
+    "realLarkOwnerCorrection": false,
+    "realModel": false,
+    "productionCohort": false,
+    "nativeWebReplyFeedback": false,
+    "otherDeploymentCohorts": false
+  },
+  "limitations": [
+    "The Lark path has not been exercised against real cloud credentials or a real provider message.",
+    "Native Web preserves the result in its Session but has no external provider reply identity for this feedback protocol.",
+    "The canonical revision monitor is still wired only to qualified finite canary skills, not guidance, workflow or plugin cohorts.",
+    "No real-model gain or long-running production cohort is proven.",
+    "WP15 remains implementing and global work-package counts remain 3 verified, 13 implementing and 2 pending."
+  ]
+}

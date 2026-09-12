@@ -16,6 +16,7 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantDeliveryService, type DeliveryAdapter, type InboundEnvelope, type OutboundIntent } from '@dsh-enhanced/assistant-delivery'
+import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { EventTriggersService } from '@dsh-enhanced/event-triggers'
@@ -59,6 +60,10 @@ class EventGoalModel extends LlmAdapter {
 
 function inbound(eventId: string): InboundEnvelope {
   return { channel: 'lark', account: 'event-goal-bot', eventId, occurredAt: Date.now(), principal, conversation, kind: 'text', text: objective }
+}
+
+function feedback(eventId: string, text: string, providerMessageId: string): InboundEnvelope {
+  return { ...inbound(eventId), kind: 'command', text: `/feedback ${text}`, metadata: { replyToProviderMessageId: providerMessageId } }
 }
 
 async function nativeGoalPlugins() {
@@ -124,7 +129,7 @@ async function open(root: string, options: { provision?: boolean; model?: EventG
   })
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'), schedulerEnabled: false, defaultWorkspace: workspace, defaultAgentPreset: 'primary', agentProvider: 'event-goal-model', agentModel: 'fixture', ownerRoutes: [{ id: 'event-goal-owner', conversation, principal, workspace, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }] })
   const sends: OutboundIntent[] = []
-  const adapter: DeliveryAdapter = { channel: 'lark', account: 'event-goal-bot', capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['markdown'] }, start: async () => {}, send: async intent => { sends.push(intent); return { outcome: 'accepted', providerMessageId: createHash('sha256').update(intent.idempotencyKey).digest('hex') } } }
+  const adapter: DeliveryAdapter = { channel: 'lark', account: 'event-goal-bot', capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain', 'markdown'] }, start: async () => {}, send: async intent => { sends.push(intent); return { outcome: 'accepted', providerMessageId: createHash('sha256').update(intent.idempotencyKey).digest('hex') } } }
   await ctx.assistantDelivery.registerAdapter(adapter)
   if (options.provision !== false) {
     const pairing = ctx.assistantDelivery.issuePairing('event-goal', principal)
@@ -143,6 +148,7 @@ async function open(root: string, options: { provision?: boolean; model?: EventG
   await ctx.plugin(native.goalTools as never, {} as never)
   await ctx.plugin(native.goalRoundDriver as never, {} as never)
   await ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
+  await ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
   const authority = { kind: 'document' as const, id: 'report-source', sources: [{ id: 'local', url: 'https://example.invalid/event-goal' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
   const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
   const verificationProfile = (id: string, taskKind: 'goal-step' | 'goal-outcome', profileObjective = objective) => ({ id, version: 1, scope: { workspace, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind, objective: profileObjective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'report', kind: 'document-citations' as const, authority: { id: 'report-source', digest }, artifactPath: 'report.md', requiredText: ['Event goal report verified'], quotes: [] }] })
@@ -169,12 +175,14 @@ async function drainUntil(ctx: Context, settled: () => boolean): Promise<void> {
   }, { timeout: 10_000, intervals: [10, 25, 50, 100] }).toBe(true)
 }
 
-function readWait(root: string): { state: string; reason: string | null; intent: { source: { highWaterSequence: number }; wake: { native: { revision: number; sessionId: string; goalId: string } } }; wake: { id: string; native: { revision: number; sessionId: string; goalId: string } } | null } {
+function readWait(root: string): { state: string; reason: string | null; sequence: number | null; envelope: Record<string, unknown> | null; intent: { source: { highWaterSequence: number }; wake: { native: { revision: number; sessionId: string; goalId: string } } }; wake: { id: string; native: { revision: number; sessionId: string; goalId: string } } | null } {
   const database = new DatabaseSync(join(root, 'goals.sqlite.event-waits'), { readOnly: true })
   try {
-    const row = database.prepare('SELECT state, reason, intent_json, wake_json FROM goal_event_waits').get() as { state: string; reason: string | null; intent_json: string; wake_json: string | null } | undefined
+    const row = database.prepare('SELECT state, reason, sequence, envelope_canonical, intent_json, wake_json FROM goal_event_waits').get() as { state: string; reason: string | null; sequence: number | null; envelope_canonical: string | null; intent_json: string; wake_json: string | null } | undefined
     if (row === undefined) throw new Error('event wait was not durable')
-    return { state: row.state, reason: row.reason, intent: JSON.parse(row.intent_json), wake: row.wake_json === null ? null : JSON.parse(row.wake_json) }
+    return { state: row.state, reason: row.reason, sequence: row.sequence,
+      envelope: row.envelope_canonical === null ? null : JSON.parse(row.envelope_canonical),
+      intent: JSON.parse(row.intent_json), wake: row.wake_json === null ? null : JSON.parse(row.wake_json) }
   } finally { database.close() }
 }
 
@@ -286,6 +294,22 @@ if (phase === undefined) describe('native event-goal wake', () => {
     const resumedRequests = JSON.stringify(fixture.model.requests.slice(before))
     expect(resumedRequests).toContain('event-triggers:file')
     expect(resumedRequests).not.toContain('changed')
+    const events = new DatabaseSync(join(root, 'events.sqlite'), { readOnly: true })
+    const sourceEvent = events.prepare(`
+      SELECT trigger_id, sequence, status, envelope_canonical, envelope_digest
+      FROM event_outbox
+    `).get() as { trigger_id: string; sequence: number; status: string;
+      envelope_canonical: string | null; envelope_digest: string | null } | undefined
+    events.close()
+    expect(sourceEvent).toMatchObject({ trigger_id: 'file', sequence: 1, status: 'delivered',
+      envelope_canonical: expect.any(String), envelope_digest: expect.stringMatching(/^[a-f0-9]{64}$/u) })
+    expect(JSON.parse(sourceEvent?.envelope_canonical ?? '{}')).toMatchObject({
+      source: { id: 'event-triggers:file', kind: 'file' },
+      target: { automationId: 'file-report' }, trust: { method: 'local-observation', content: 'untrusted' },
+    })
+    expect(waits).toMatchObject({ sequence: sourceEvent?.sequence, envelope: {
+      source: { id: 'event-triggers:file', kind: 'file' }, target: { automationId: 'file-report' },
+    } })
     const wake = waits.wake!
     const nativeAfterWake = readNative(root, goalId)
     const wakeAutomation = fixture.ctx.assistantAutomations.inspectSystemOwned({ owner: 'assistant-goals-wake/v1', automationId: waits.wake === null ? 'missing' : waits.wake.id })
@@ -296,9 +320,48 @@ if (phase === undefined) describe('native event-goal wake', () => {
     verification.close(); if (contract === undefined) throw new Error('resumed native goal did not persist a verification contract')
     expect(fixture.ctx.assistantVerifier.inspectAcceptedTask(contract.id)).toMatchObject({ state: 'done', receipt: { objectiveStatus: 'achieved' } })
     expect(fixture.sends).toHaveLength(3)
-    expect(fixture.sends).toEqual(expect.arrayContaining([
-      expect.objectContaining({ idempotencyKey: expect.stringContaining('goal-wake-result:'), text: expect.stringContaining('Event goal report verified.') }),
-    ]))
+    const result = fixture.sends.find(intent => intent.metadata?.['dsh.learning.kind'] === 'goal-outcome')
+    expect(result).toMatchObject({ idempotencyKey: expect.stringMatching(/^goal-outcome:[a-f0-9]{64}:binding_/u),
+      format: 'markdown', text: expect.stringContaining('/feedback not-achieved'), metadata: {
+        'dsh.learning.schemaVersion': '3', 'dsh.learning.goalId': goalId,
+        'dsh.learning.assessmentId': expect.stringMatching(/^goal-assessment-/u),
+        'dsh.learning.objectiveStatus': 'achieved', 'dsh.learning.proofDigest': expect.stringMatching(/^[a-f0-9]{64}$/u),
+      } })
+    if (result === undefined) throw new Error('typed whole-goal result was not delivered')
+    const delivery = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+    const typed = delivery.prepare(`
+      SELECT target.outbox_id, target.assessment_id, target.goal_id, target.proof_digest,
+        message.provider_message_id, message.status, message.intent_json
+      FROM delivery_goal_outcome_targets AS target
+      JOIN outbox_messages AS message ON message.id = target.outbox_id
+    `).get() as { outbox_id: string; assessment_id: string; goal_id: string; proof_digest: string;
+      provider_message_id: string | null; status: string; intent_json: string } | undefined
+    delivery.close()
+    expect(typed).toMatchObject({ goal_id: goalId, assessment_id: result.metadata?.['dsh.learning.assessmentId'],
+      proof_digest: result.metadata?.['dsh.learning.proofDigest'], provider_message_id: expect.any(String), status: 'accepted' })
+    expect(JSON.parse(typed?.intent_json ?? '{}')).toEqual(result)
+    if (typed?.provider_message_id === null || typed?.provider_message_id === undefined) throw new Error('typed result has no provider reply identity')
+
+    const respond = async (eventId: string, command: string) => {
+      await fixture.ctx.assistantDelivery.acceptInbound(feedback(eventId, command, typed.provider_message_id!))
+      await drain(fixture.ctx)
+      return fixture.sends.at(-1)?.text ?? ''
+    }
+    expect(await respond('event-goal-feedback-status', 'status')).toContain('achieved，版本 1')
+    const assessmentId = typed.assessment_id
+    const scope = fixture.ctx.assistantEvaluation.canonicalHostScope({ workspace: fixture.workspace, preset: 'primary' })
+    expect(fixture.ctx.assistantEvaluation.getTrustedGoalOutcomeLearningProjection({ scope, assessmentId })).toMatchObject({
+      objective: { status: 'achieved' },
+      projection: { subjectKind: 'goal-outcome', subjectRef: assessmentId, disposition: 'upsert' },
+    })
+    expect(await respond('event-goal-feedback-correct', 'correct 1 achieved not-achieved')).toContain('not-achieved，版本 2')
+    expect(fixture.ctx.assistantEvaluation.getTrustedGoalOutcomeLearningProjection({ scope, assessmentId })).toMatchObject({
+      objective: { status: 'not-achieved' }, projection: { disposition: 'upsert' },
+    })
+    expect(await respond('event-goal-feedback-withdraw', 'withdraw 2 not-achieved')).toContain('unknown，版本 3')
+    expect(fixture.ctx.assistantEvaluation.getTrustedGoalOutcomeLearningProjection({ scope, assessmentId })).toMatchObject({
+      objective: { status: 'unknown' }, projection: { disposition: 'retract' },
+    })
     await fixture.ctx.eventTriggers.pollOnce(); await drain(fixture.ctx)
     expect(fixture.model.requests).toHaveLength(before + 3)
   })
@@ -338,6 +401,24 @@ if (phase === undefined) describe('native event-goal wake', () => {
     const wait = new DatabaseSync(join(root, 'goals.sqlite.event-waits'), { readOnly: true })
     const states = wait.prepare('SELECT state FROM goal_event_waits').all() as Array<{ state: string }>
     wait.close(); expect(states).toEqual([{ state: 'materialized' }])
+    const delivery = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+    const typed = delivery.prepare(`
+      SELECT target.assessment_id, target.goal_id, message.provider_message_id, message.status
+      FROM delivery_goal_outcome_targets AS target
+      JOIN outbox_messages AS message ON message.id = target.outbox_id
+    `).get() as { assessment_id: string; goal_id: string; provider_message_id: string | null; status: string } | undefined
+    delivery.close()
+    expect(typed).toMatchObject({ goal_id: goalId, provider_message_id: expect.any(String), status: 'accepted' })
+    if (typed?.provider_message_id === null || typed?.provider_message_id === undefined) throw new Error('recovered typed result has no reply identity')
+    await restarted.ctx.assistantDelivery.acceptInbound(feedback(
+      'restart-event-feedback-status', 'status', typed.provider_message_id,
+    ))
+    await drain(restarted.ctx)
+    expect(restarted.sends.at(-1)?.text).toContain('achieved，版本 1')
+    const scope = restarted.ctx.assistantEvaluation.canonicalHostScope({ workspace: restarted.workspace, preset: 'primary' })
+    expect(restarted.ctx.assistantEvaluation.getTrustedGoalOutcomeLearningProjection({
+      scope, assessmentId: typed.assessment_id,
+    })).toMatchObject({ objective: { status: 'achieved' }, projection: { disposition: 'upsert' } })
   })
 
   test('rejects an event wait after a real owner revision change', async () => {
