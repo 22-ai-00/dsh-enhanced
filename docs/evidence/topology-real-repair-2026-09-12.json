@@ -1,0 +1,146 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-12T17:25:08.898467+00:00",
+  "sourceCommit": "ae8cb4cd13ea549c8ef34ce39deaa7b21091b02e",
+  "status": "passed",
+  "command": {
+    "test": "pnpm exec playwright test --config scripts/e2e/playwright-real-repair-topology.config.mjs",
+    "exitCode": 0,
+    "duration": "3.8 minutes",
+    "dsh": "0.1.2-rc.1 via isolated CLI on PATH",
+    "provider": "traex-agent",
+    "model": "gpt-5.6-terra",
+    "browser": "/usr/bin/chromium",
+    "isolationImage": "sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8",
+    "totalModelDispatches": 18,
+    "repairUsageScope": "proof.usage counts only the bounded repair continuation, not the full E2E"
+  },
+  "proof": {
+    "capability": "real-traex-topology-one-round-bounded-rsi",
+    "family": "topology",
+    "route": {
+      "provider": "traex-agent",
+      "model": "gpt-5.6-terra",
+      "api": "acp",
+      "command": "traex",
+      "cwd": "/tmp/dsh-real-owner-repair-Ck2k6f/workspace"
+    },
+    "scope": {
+      "principalId": "web/web/local/operator",
+      "principalRecordId": "principal_c6642c29-7fc1-40cf-a89c-de33eee87e5b",
+      "principalVersion": 1,
+      "workspace": "/tmp/dsh-real-owner-repair-Ck2k6f/workspace",
+      "preset": "standard"
+    },
+    "baseline": {
+      "sessionId": "session-a79274bf-4eb1-40e0-9cc2-304de34c1122",
+      "goalId": "68c1450256851dff8324e756927e1f2ec42020edfc365e2488d1507575664961",
+      "version": 1
+    },
+    "continuationId": "skill-repair-6f33c782edfa4f30ac3e85e1aecdd83a8b26f0557aa8d36683fb7974c9dfacc4",
+    "state": "complete",
+    "iterations": 1,
+    "rounds": [
+      {
+        "iteration": 1,
+        "sourceSession": "session-8bc76b63-a0f6-4786-927e-cfdb8a9eea90",
+        "sourceGoal": "532636e16cb6b11b832bb5a42ca5e07472182166c5923952c26bcf25659bd940",
+        "repairSession": "owner-repair-7c1f241a75a2a5df9aa68591be19b0d31a1799a1",
+        "repairGoal": "899711cbd2a89fe1e01cee628b953c76de93c8684c6f76be92811d885f959154",
+        "candidateId": "skill-candidate-b84fe2fb7a081a1a0155ea76291a4f2ddaf281d42ab800aa76d560b007aad6c2",
+        "comparisonId": "skill-comparison-b89cbd073496a8dc7580fdadd4dfe61f73bfd1c9a71f6331adcd2d6676d32f08",
+        "deploymentId": "skill-deployment-456d3cf2e393653b28cbec0017dba0eddb93e4feefc5983d7ea932cb9a1f4abb",
+        "version": 2,
+        "failureReceiptDigest": "d48104387e074ad7f37fe6020c359364f555219f538c459febae6dadb1a868b2",
+        "repairReceiptDigest": "56d3b98199c70b919fe3371519ab97ead3df06517bcc42585ae42336bd4e8991",
+        "candidateDefinitionDigest": "ad3a4a1156e496dac3d0e362d79a087337f8d853f04f3e140f3230993ede69c5",
+        "quality": {
+          "candidateChecksPassed": true,
+          "evaluationGain": 1,
+          "evaluationGainObserved": true,
+          "criticalRegressionsPassed": true,
+          "heldoutIndependence": "unproven"
+        },
+        "datasetDigest": "a37b76945564a4b740f0125a2f0915625f0abd050c4d39ed9704e54362aa509b",
+        "promotion": {
+          "sessionId": "session-d701f45b-35e9-4e03-b9cf-bffa1d1e5fe8",
+          "goalId": "ffa2c15155ceea82e4531907eebb319abe545e7c043586a1b82c8726a0249a3c",
+          "promotedAt": 1789233739219
+        },
+        "toolNames": [
+          "read",
+          "write",
+          "read"
+        ]
+      }
+    ],
+    "usage": {
+      "model_calls": 4,
+      "tool_calls": 3
+    },
+    "feedback": [
+      {
+        "idempotency_key": "repair-feedback:skill-repair-6f33c782edfa4f30ac3e85e1aecdd83a8b26f0557aa8d36683fb7974c9dfacc4:1:finite-canary",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_a4a76268-8fb5-40c1-96ea-f36f6a1d5d78"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-6f33c782edfa4f30ac3e85e1aecdd83a8b26f0557aa8d36683fb7974c9dfacc4:1:iteration-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_a4a76268-8fb5-40c1-96ea-f36f6a1d5d78"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-6f33c782edfa4f30ac3e85e1aecdd83a8b26f0557aa8d36683fb7974c9dfacc4:1:final-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_a4a76268-8fb5-40c1-96ea-f36f6a1d5d78"
+      }
+    ],
+    "generatedArtifactDigest": "3e1c27f876e4e633e65b936526ad070d6155c3cdba59d95ec011e2b8c8be8c7a",
+    "completedRestartNoReplay": true,
+    "initialArtifact": "shared unfinished scaffold",
+    "suppliedRepairedSource": false,
+    "installedRepairAdmissionIdempotent": true,
+    "limitations": [
+      "bounded two-profile workflow improvement",
+      "no mid-repair restart proof",
+      "delivery accepted does not mean user read"
+    ]
+  },
+  "evidence": {
+    "proofFile": ".cache/web-owner-real-repair-topology-e2e/web-owner-real-repair-real-9624b-delivers-the-bounded-result/proof.json",
+    "proofSha256": "5f35192f1d6f0cb0df77d5b7f39efd4d3d91d09b347a82f962888772c46b6e00",
+    "logFile": "/tmp/dsh-real-repair-topology-attempt3.log",
+    "logSha256": "ffb9510a5f6140ca3d70c9de8d573bc50423fc286dd1dd5a27252e7eb3037e38",
+    "modelMetadataSha256": "1775299e58427f2fbf401fd5594c61a32891d4276b0f6d95b29d4528e25f7d03"
+  },
+  "earlierAttempts": [
+    {
+      "attempt": 1,
+      "exitCode": 1,
+      "modelDispatches": 0,
+      "result": "Global DSH 0.1.5-rc.1 did not become ready; the test now checks the exact pinned CLI before any Host or model work."
+    },
+    {
+      "attempt": 2,
+      "exitCode": 1,
+      "modelDispatches": 2,
+      "result": "Native input ended with ACP_PROTOCOL_ERROR; retained model text reported legacy/strict objective conflict. The underlying protocol cause was not retained. The fixture now introduces future strict requirements after legacy acceptance, while preserving all comparison and promotion gates."
+    }
+  ],
+  "limits": [
+    "One topology repair iteration; the previously accepted template family separately has two iterations.",
+    "Same-UID test authority and the quality field heldoutIndependence=unproven do not establish production holdout secrecy or independent deployment.",
+    "No mid-repair crash recovery/reacquisition acceptance.",
+    "Accepted feedback does not prove the human read it.",
+    "No new live GitHub/Lark or cross-platform acceptance.",
+    "The full 18-work-package roadmap remains open."
+  ],
+  "independentReview": {
+    "role": "verifier",
+    "result": "PASS",
+    "scope": "single topology repair round; excludes Release CI and production holdout isolation"
+  }
+}
