@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-goals",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "description": "Persistent owner-scoped business goals over the native DSH goal domain.",
   "license": "MIT",
   "type": "module",
