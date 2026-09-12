@@ -1,6 +1,6 @@
 import { createHash, createHmac } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -9,6 +9,7 @@ import { EventTriggerStore } from '../src/store.ts'
 import { parseExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
 
 const roots: string[] = []
+const eventTriggersVersion = (JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 class FakePolicy extends Service {
@@ -110,7 +111,7 @@ describe('event triggers service', () => {
     const envelope = parseExternalEventEnvelope(delivered.envelope)
     expect(envelope).toMatchObject({
       protocol: 'dsh-external-event/v1',
-      source: { id: 'event-triggers:hook', kind: 'webhook', version: '0.1.24', configDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+      source: { id: 'event-triggers:hook', kind: 'webhook', version: eventTriggersVersion, configDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) },
       event: { id: delivered.eventId, occurredAt: 10_000, receivedAt: 10_000 },
       observation: { digest: expect.stringMatching(/^[a-f0-9]{64}$/u), revision: 'nonce-1', timeBasis: 'source-signed' },
       trust: { method: 'hmac-sha256', content: 'untrusted' },
