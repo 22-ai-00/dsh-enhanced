@@ -12,7 +12,7 @@ import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
 import { createHash } from 'node:crypto'
 import { createServer, request as httpRequest, type Server } from 'node:http'
 import type { request as httpsRequest } from 'node:https'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -58,7 +58,7 @@ interface GraphQLPost { clientMutationId: string; input: Record<string, unknown>
 async function makeHarness(options: HarnessOptions = {}) {
   const forwardFiles = options.forwardFiles ?? [{ path: 'a.txt', content: 'new-a' }, { path: 'b.txt', content: 'brand-new' }]
   const parentFiles = options.preimage ?? { 'a.txt': 'old-a' }
-  const root = await mkdtemp(join(tmpdir(), 'action-compensation-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'action-compensation-')))
   const fixedNow = Date.now()
   const clock = vi.spyOn(Date, 'now').mockReturnValue(fixedNow)
   const stateRoot = join(root, 'actions'); const secretRoot = join(root, 'secret')

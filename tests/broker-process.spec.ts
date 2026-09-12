@@ -194,7 +194,8 @@ async function delay(ms: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
 
-describe('assistant-actions broker process E2E', () => {
+// These process tests require the Linux SO_PEERCRED broker backend.
+describe.skipIf(process.platform !== 'linux')('assistant-actions broker process E2E', () => {
   it('serves built artifacts through real UDS, ledger, keys, protected token, status, action rejection, and stop', async () => {
     expect(process.platform).toBe('linux')
     expect(existsSync(brokerCli)).toBe(true)

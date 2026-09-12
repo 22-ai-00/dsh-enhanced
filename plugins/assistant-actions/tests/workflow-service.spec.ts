@@ -9,7 +9,7 @@ import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -25,7 +25,7 @@ const inspect = { grantId: 'fix', kind: 'repository' }
 const secret = 'fixture-workflow-secret'
 const cleanups: Array<() => Promise<void>> = []
 async function fixture(enabled = true) {
-  const root = await mkdtemp(join(tmpdir(), 'workflow-service-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'workflow-service-')))
   await writeFile(join(root, 'secret'), secret, { mode: 0o600 })
   const ctx = new Context(), id = SessionId('workflow-session')
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: root, agentPreset: 'primary' })

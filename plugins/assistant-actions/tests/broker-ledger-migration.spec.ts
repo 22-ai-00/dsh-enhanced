@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from 'node:crypto'
 import { chmodSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -13,7 +13,7 @@ const keys = generateKeyPairSync('ed25519')
 let now = 1_000_000
 
 async function database(name: string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'external-broker-v1-migration-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'external-broker-v1-migration-'))); roots.push(root)
   return join(root, name)
 }
 afterEach(async () => { now = 1_000_000; await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -73,7 +73,8 @@ function makeV1(targetPath: string, sourcePath?: string): void {
   target.close(); chmodSync(targetPath, 0o600)
 }
 
-describe('ExternalBrokerLedger v1 migration', () => {
+// The protected database backend pins Linux directory/file descriptors.
+describe.skipIf(process.platform !== 'linux')('ExternalBrokerLedger v1 migration', () => {
   it('migrates a real v1 database without replaying unknown history or clearing its budget, then admits one bounded PR', async () => {
     const sourcePath = await database('source.sqlite'), v1Path = await database('v1.sqlite')
     const source = new ExternalBrokerLedger(sourcePath, 'broker', { now: () => now }), sourceAuthority = source.claimController('source'), legacyGrant = grant()

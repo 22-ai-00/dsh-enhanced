@@ -12,7 +12,7 @@ import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
 import { createHash } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
 import type { request as httpsRequest } from 'node:https'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -37,7 +37,7 @@ function agent(ctx: Context, workspace: string): Agent {
 }
 
 test('real ToolRuntime, Keychain and HTTP execute a finite commit, preserve unknown after ACK loss and honor external revocation', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'action-service-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'action-service-')))
   // The Policy ledger uses fixed wall-clock windows. Keep all four budget
   // reservations in one window; a real minute rollover made this assertion flaky.
   const policyNow = Date.now()

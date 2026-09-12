@@ -11,7 +11,7 @@ import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
 import { createHash } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { externalDeliveryFixture } from './external-delivery-fixture.ts'
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -24,7 +24,7 @@ const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 const oid = 'a'.repeat(40)
 async function fixture(acceptance?: 'goal-step', external = false) {
-  const root = await mkdtemp(join(tmpdir(), 'verified-delivery-service-')); const ctx = new Context(); const id = SessionId('owner-session')
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'avd-'))); const ctx = new Context(); const id = SessionId('owner-session')
   await writeFile(join(root, 'secret'), 'fixture-secret', { mode: 0o600 })
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: root, agentPreset: 'primary' })
   const agent: Agent = { id, options: { provider: 'test', model: 'test' }, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
@@ -227,7 +227,7 @@ describe('verified delivery Actions service', () => {
     await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).resolves.toEqual(expect.objectContaining({ headOid: '', ci: 'unknown', review: 'unknown', pullRequest: 'open', ready: false }))
   })
 
-  it('delivers accepted artifacts through the signed external socket and verifies the exact remote outcome without Host credentials', async () => {
+  it.runIf(process.platform === 'linux')('delivers accepted artifacts through the signed external socket and verifies the exact remote outcome without Host credentials', async () => {
     const f = await fixture('goal-step', true)
     expect(f.ctx.get('credentialsKeychain', false)).toBeUndefined()
     await completeStepDelivery(f)
@@ -256,7 +256,7 @@ describe('verified delivery Actions service', () => {
     expect(JSON.stringify(inspected)).not.toContain('server-hello')
   })
 
-  it('rejects altered signed delivery history before external readback', async () => {
+  it.runIf(process.platform === 'linux')('rejects altered signed delivery history before external readback', async () => {
     const f = await fixture('goal-step', true); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
     const db = new DatabaseSync(join(f.root, 'actions', 'verified-delivery.sqlite'))
     try {
@@ -268,7 +268,7 @@ describe('verified delivery Actions service', () => {
     expect(f.inspect).not.toHaveBeenCalled()
   })
 
-  it('fences external readback when broker generation changes and never repeats the successful writes', async () => {
+  it.runIf(process.platform === 'linux')('fences external readback when broker generation changes and never repeats the successful writes', async () => {
     const f = await fixture('goal-step', true); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
     const input = { contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest }
     const generation = f.service.repositoryReadbackGeneration()
@@ -279,7 +279,7 @@ describe('verified delivery Actions service', () => {
     expect(f.commit).toHaveBeenCalledOnce(); expect(f.pullRequest).toHaveBeenCalledOnce()
   })
 
-  it('rejects direct mutations and changed owner authority for external verified grants', async () => {
+  it.runIf(process.platform === 'linux')('rejects direct mutations and changed owner authority for external verified grants', async () => {
     const f = await fixture('goal-step', true)
     const direct = await f.execute('action_github_commit', { grantId: 'verified', idempotencyKey: 'direct', expectedHeadOid: oid, headline: 'No', files: [{ path: 'artifacts/release.txt', content: 'unverified' }] })
     expect(direct.isError).toBe(true); expect(f.commit).not.toHaveBeenCalled()

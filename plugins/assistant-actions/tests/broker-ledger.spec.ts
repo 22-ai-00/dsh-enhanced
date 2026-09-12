@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomBytes } from 'node:crypto'
 import { renameSync } from 'node:fs'
-import { chmod, mkdir, mkdtemp, rename, rm } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, realpath, rename, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -34,19 +34,20 @@ function request(generation: number, value = grant(), changes: Partial<BrokerReq
   return createBrokerClientRequest({ ...partial, budget: { ...partial.budget, bytes: brokerPayloadBytes(first) } }, hello, value.client, value.clientKeyId, keys.privateKey, requestId)
 }
 
-async function path(): Promise<string> { const root = await mkdtemp(join(tmpdir(), 'external-broker-ledger-')); roots.push(root); return join(root, 'ledger.sqlite') }
+async function path(): Promise<string> { const root = await realpath(await mkdtemp(join(tmpdir(), 'external-broker-ledger-'))); roots.push(root); return join(root, 'ledger.sqlite') }
 afterEach(async () => { now = 1_000_000; await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-describe('ExternalBrokerLedger', () => {
+// The protected database backend pins Linux directory/file descriptors.
+describe.skipIf(process.platform !== 'linux')('ExternalBrokerLedger', () => {
   it('rejects a private direct parent below a writable non-sticky ancestor', async () => {
-    const outer = await mkdtemp(join(tmpdir(), 'external-broker-unsafe-')); roots.push(outer); await chmod(outer, 0o777)
+    const outer = await realpath(await mkdtemp(join(tmpdir(), 'external-broker-unsafe-'))); roots.push(outer); await chmod(outer, 0o777)
     const parent = join(outer, 'private'); await mkdir(parent, { mode: 0o700 })
     expect(() => new ExternalBrokerLedger(join(parent, 'ledger.sqlite'), 'broker', { now: () => now })).toThrow(/unsafe-file/)
     await chmod(outer, 0o700)
   })
 
   it('binds SQLite open to the pinned parent and rejects a directory replacement race', async () => {
-    const outer = await mkdtemp(join(tmpdir(), 'external-broker-race-')); roots.push(outer)
+    const outer = await realpath(await mkdtemp(join(tmpdir(), 'external-broker-race-'))); roots.push(outer)
     const parent = join(outer, 'state'), parked = join(outer, 'parked'), replacement = join(outer, 'replacement')
     await mkdir(parent, { mode: 0o700 }); await mkdir(replacement, { mode: 0o700 })
     const databasePath = join(parent, 'ledger.sqlite')
