@@ -3,13 +3,14 @@ import type { HoldoutCase, HoldoutDataset, QualificationBinding } from './holdou
 
 const digestPattern = /^[a-f0-9]{64}$/u
 const protocol = 'assistant-skills/prospective-holdout/v1' as const
-export type ProspectiveGeneratorName = 'order-summary/v1' | 'order-summary/v2' | 'template-render/v1' | 'dependency-topological-order/v1'
-export const prospectiveGeneratorNames: readonly ProspectiveGeneratorName[] = Object.freeze(['order-summary/v1', 'order-summary/v2', 'template-render/v1', 'dependency-topological-order/v1'])
+export type ProspectiveGeneratorName = 'order-summary/v1' | 'order-summary/v2' | 'template-render/v1' | 'template-render-jsonl/v1' | 'dependency-topological-order/v1'
+export const prospectiveGeneratorNames: readonly ProspectiveGeneratorName[] = Object.freeze(['order-summary/v1', 'order-summary/v2', 'template-render/v1', 'template-render-jsonl/v1', 'dependency-topological-order/v1'])
 const generatorName = 'order-summary/v1' as const
 
 export const generatorDigest = createHash('sha256').update('assistant-skills/prospective-holdout/order-summary/v1: stdin JSON array of orders; cancelled orders excluded; integer cents summed by currency; sorted JSON object plus newline; CSPRNG cases; replay/evaluation/regression').digest('hex')
 const generatorV2Digest = createHash('sha256').update('assistant-skills/prospective-holdout/order-summary/v2: stdin JSON array of orders; cancelled orders excluded; integer amountCents summed by currency including negative values; sorted JSON object plus newline; explicit empty case and randomized negative evaluation with cancellation and accumulation; CSPRNG cases; replay/evaluation/regression').digest('hex')
 const templateRenderV1Digest = createHash('sha256').update('assistant-skills/prospective-holdout/template-render/v1: stdin JSON object with template string and string values object; replace known {{ascii_key}} placeholders literally in one non-recursive pass; preserve unknown placeholders; append newline; CSPRNG cases; replay/evaluation/regression').digest('hex')
+const templateRenderJsonlV1Digest = createHash('sha256').update('assistant-skills/prospective-holdout/template-render-jsonl/v1: stdin NDJSON of one JSON object per physical line with template string and string values object; process each record independently; replace known {{ascii_key}} placeholders literally in one non-recursive pass; preserve unknown placeholders; emit one rendered line per input record; CSPRNG 1/2/3-record replay/evaluation/regression cases with Unicode values and optional final input newline; replay/evaluation/regression').digest('hex')
 const dependencyTopologicalOrderV1Digest = createHash('sha256').update('assistant-skills/prospective-holdout/dependency-topological-order/v1: stdin lines; exactly two whitespace-separated labels each matching [a-z][a-z0-9]{1,31} (2 through 32 lowercase ASCII alphanumeric characters, letter first) form a directed edge; malformed and blank lines ignored; duplicate edges deduplicated; nodes are edge endpoints; emit lexicographically smallest topological order one node per line or CYCLE newline; bounded CSPRNG labels, edge order, and irrelevant lines; replay DAG, evaluation dynamic lexical tie, regression cycle').digest('hex')
 export function isProspectiveGeneratorName(value: unknown): value is ProspectiveGeneratorName {
   return typeof value === 'string' && prospectiveGeneratorNames.includes(value as ProspectiveGeneratorName)
@@ -18,6 +19,7 @@ export function prospectiveGeneratorDigest(name: ProspectiveGeneratorName): stri
   if (name === 'order-summary/v1') return generatorDigest
   if (name === 'order-summary/v2') return generatorV2Digest
   if (name === 'template-render/v1') return templateRenderV1Digest
+  if (name === 'template-render-jsonl/v1') return templateRenderJsonlV1Digest
   if (name === 'dependency-topological-order/v1') return dependencyTopologicalOrderV1Digest
   throw new Error('prospective-holdout: unsupported generator')
 }
@@ -93,6 +95,23 @@ function templateInput(kind: HoldoutCase['kind']): { template: string; values: R
 function templateExpected(input: { template: string; values: Readonly<Record<string, string>> }): string {
   return input.template.replace(/\{\{([a-z][a-z0-9_]*)\}\}/gu, (placeholder, key: string) => Object.hasOwn(input.values, key) ? input.values[key]! : placeholder) + '\n'
 }
+function jsonlTemplateInput(index: number): { template: string; values: Record<string, string> } {
+  const token = randomBytes(8).toString('hex'), secondary = randomBytes(6).toString('hex')
+  return {
+    template: `row=${index};known={{known}};again={{known}};unknown={{missing}};literal={{literal}}`,
+    values: { known: `café-☃-${token}`, literal: `{{known}}-東京-${secondary}` },
+  }
+}
+function templateJsonlDataset(): HoldoutDataset {
+  const definitions: readonly [HoldoutCase['kind'], number, boolean][] = [['replay', 1, false], ['evaluation', 2, true], ['regression', 3, true]]
+  const cases = definitions.map(([kind, count, terminalNewline]) => {
+    const inputs = Array.from({ length: count }, (_, index) => jsonlTemplateInput(index + 1))
+    return Object.freeze({ id: `${kind}-${randomBytes(8).toString('hex')}`, kind,
+      stdin: inputs.map(input => JSON.stringify(input)).join('\n') + (terminalNewline ? '\n' : ''),
+      expectedStdout: inputs.map(templateExpected).join(''), expectedExitCode: 0 })
+  })
+  return Object.freeze({ id: `prospective-template-render-jsonl-${randomBytes(12).toString('hex')}`, version: 'template-render-jsonl/v1', cases: Object.freeze(cases) })
+}
 function shuffled<T>(values: readonly T[]): T[] {
   const result = [...values]
   for (let index = result.length - 1; index > 0; index--) {
@@ -157,6 +176,7 @@ function topologyDataset(): HoldoutDataset {
 /** Creates private random cases after an immutable qualification binding has been frozen. */
 export function generateProspectiveDataset(name: ProspectiveGeneratorName = generatorName): HoldoutDataset {
   if (name === 'dependency-topological-order/v1') return topologyDataset()
+  if (name === 'template-render-jsonl/v1') return templateJsonlDataset()
   if (name === 'template-render/v1') {
     const kinds: HoldoutCase['kind'][] = ['replay', 'evaluation', 'regression']
     const cases = kinds.map(kind => {

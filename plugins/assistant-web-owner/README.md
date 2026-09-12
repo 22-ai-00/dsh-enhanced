@@ -187,3 +187,40 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 结果只说明有限隔离检查，不能替代动态 Policy、实时资源准入、模型硬预算、Goal 验收或外部 Actions 检查。该 CLI 的临时探测使用现有 Isolation 资源边界和清理规则；未知清理保留证据，不消耗业务 grant。
 
 要为这份目标配置启用原生策略建议，可在私有 admission JSON 中增加 `"strategy": { "maxRunsPerGoal": 4 }`。setup 写入有界策略配置及精确 owner/workspace/preset 的 `goal_strategy`/`delegate` 规则；启用 wake 时同样覆盖该目标的后台路径。父子模型调用共用原来的 `executionBudget`，不会增加预算或延长隔离授权。省略该字段保持默认关闭。重新启动 Host 后生效；策略建议仍需原有独立验收，不能直接作为目标完成依据。
+
+### 有限 repair admission
+
+停止目标 Host 后，在已安装并完成普通 owner setup 的目标 profile 上运行：
+
+```sh
+dsh-web-owner-setup --profile web --workspace /absolute/workspace \
+  --repair-admission /private/repair-admission.json
+```
+
+admission 文件必须是 workspace 外部的 canonical、owner-only（`0600`）普通 JSON 文件，大小不超过 1 MiB。顶层**只**能有 `repairProfiles`、`externalHoldouts` 与 `ownerRouteId`：
+
+```json
+{
+  "ownerRouteId": "existing-owner-route-id",
+  "externalHoldouts": [{ "...": "complete Skills external-holdout profile" }],
+  "repairProfiles": [{
+    "id": "repair-profile-id",
+    "scope": {
+      "principalId": "web/web/local/operator",
+      "principalRecordId": "current-owner-record-id",
+      "principalVersion": 1,
+      "workspace": "/absolute/workspace",
+      "preset": "standard"
+    },
+    "skillName": "saved-skill", "taskFamilyId": "family-id", "description": "bounded repair",
+    "externalHoldoutProfileId": "holdout-id", "provider": "traex-agent", "model": "model-selector",
+    "allowedTools": ["read", "write"], "maxGoalRounds": 1, "maxModelCalls": 4,
+    "maxToolCalls": 8, "maxOutputTokens": 4096, "maxDurationMs": 300000,
+    "canaryRuns": 1, "maxCanaryRuns": 2, "maxIterations": 1
+  }]
+}
+```
+
+`externalHoldouts` 中每项必须是完整的已发布 Skills external-holdout profile，不能用上例的占位对象。每个 repair profile 只能使用上述字段；可选 `followupProfileIds` 和 `bindings` 也必须符合 Skills contract。`scope.principalId` 必须为 `web/<profile>/local/operator`，其 record id/version、workspace 与 preset 必须精确匹配当前 owner 和命令参数。`allowedTools` 至少一个，且不能包含 `skill_*`、`goal_create`、`goal_control`、`set_goal` 或 `update_goal`。
+
+命令只读核验 account 精确等于 `--profile` 的 current owner lineage、已有 owner route、Goals 有限 calls execution budget（model calls、tool calls、时长和每次输出上限）及其精确 provider/model route、Skills prospective holdouts 和 Verifier profiles，然后原子合并有限 profiles/holdouts 并保留已有配置键。每个 profile 的 `maxModelCalls`、`maxToolCalls`、`maxDurationMs` 与 `maxOutputTokens` 都不得超过既有 Goals budget 的对应值。已有 TraeX calls budget 即可；该流程不要求 DeepSeek budget bundle。写入前会重新读取有效配置和 owner lineage，任一变化都会拒绝提交；重复完全相同的 admission 不改变 patch 字节。它不创建 Goal、Session、owner、credential、grant 或无限权限。配置成功不是 repair 验收、canary 成功、模型质量或自主改进成功的证据。

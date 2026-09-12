@@ -35,7 +35,7 @@ function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id):
   session.append('turn/start', { turn: 1 })
   return value
 }
-async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image, repair = false) {
+async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image, repair = false, repairIterations = 1) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-skills-service-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const comparisonRoot = comparison ? await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-')) : undefined
@@ -82,7 +82,11 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
       return { ...proof, traceDigest: acceptanceDigest(proof) }
     },
     inspectVerifiedWorkflowRun: (_agent: Agent, goalId: string, runId: string) => { if (verified instanceof Error) throw verified; const proof = verified; return { scope, goal: { id: proof?.goalId ?? goalId, sessionId: ownerSession, definition: { version: 1, digest: 'd'.repeat(64) } }, runId: proof?.runId ?? runId,
-      acceptance: { contractId: 'trial-contract', contractDigest: 'e'.repeat(64), receiptDigest: 'f'.repeat(64), verifiedAt: source.acceptance.verifiedAt, validUntil: source.acceptance.validUntil }, steps: proof?.steps ?? [] } } } as never)
+      acceptance: { contractId: 'trial-contract', contractDigest: 'e'.repeat(64), receiptDigest: 'f'.repeat(64), verifiedAt: source.acceptance.verifiedAt, validUntil: source.acceptance.validUntil }, steps: proof?.steps ?? [] } },
+    // Successor tests install a concrete trusted failure trigger after their
+    // seeded continuation reaches watching; keeping this absent holds arming.
+    inspectOwnerFailureTrigger: async () => undefined,
+  } as never)
   ctx.provide('assistantEvaluation' as never, {
     canonicalHostScope: (input: { workspace: string; preset: string }) => canonicalEvaluationHostScope(input),
     isTrustedTaskLearningProjectionReceipt: (value: any) => {
@@ -127,7 +131,8 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     authority: { executable: process.execPath, args: [], publicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: 'c'.repeat(64) }, maxComparisons: 1,
     canaryAdmissionTemplate: { protocol: 'assistant-skills/canary-admission-template/v1', skillName: 'saved-write', taskFamily: { goalDefinitionDigest: 'd'.repeat(64), outcomeProfile: { id: 'repair-outcome', version: 1, digest: 'e'.repeat(64) } } } }
   if (repair) { ctx.provide('sessions' as never, {} as never); ctx.provide('llm' as never, {} as never) }
-  let config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}), ...(repair ? { externalHoldouts: [repairHoldout], repairProfiles: [{ id: 'repair-profile', scope, skillName: 'saved-write', taskFamilyId: 'repair-family', description: 'Repair saved write', externalHoldoutProfileId: 'repair-holdout', provider: 'fixture', model: 'fixture', allowedTools: ['write'], maxGoalRounds: 2, maxModelCalls: 4, maxToolCalls: 4, maxOutputTokens: 128, maxDurationMs: 30000, canaryRuns: 1, maxCanaryRuns: 2 }] } : {}) }
+  const repairProfile = { scope, skillName: 'saved-write', taskFamilyId: 'repair-family', description: 'Repair saved write', externalHoldoutProfileId: 'repair-holdout', provider: 'fixture', model: 'fixture', allowedTools: ['write'], maxGoalRounds: 2, maxModelCalls: 4, maxToolCalls: 4, maxOutputTokens: 128, maxDurationMs: 30000, canaryRuns: 1, maxCanaryRuns: 2 }
+  let config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}), ...(repair ? { externalHoldouts: [repairHoldout], repairProfiles: [{ id: 'repair-profile', ...repairProfile, ...(repairIterations > 1 ? { maxIterations: repairIterations, followupProfileIds: ['repair-followup'] } : {}) }, ...(repairIterations > 1 ? [{ id: 'repair-followup', ...repairProfile }] : [])] } : {}) }
   let plugin = await ctx.plugin(AssistantSkillsService, config)
   await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
   const execute = (name: string, args: unknown, agent = owner) => agent.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
@@ -154,7 +159,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     canonicalOutcomes.set(input.lookupAssessmentId ?? subjectRef, { triggerOutcomeId: objective?.outcomeId ?? `evaluation-retract-${goalId}-${input.version}`, scope: evaluationScope, scopeKey, scopeWatermark: canonicalWatermark, situation: `goal:${goalId}:definition:1`, execution,
       ...(objective === undefined ? {} : { objective }), projection: { ...projectionBase, version: input.version, digest } })
   }
-  return { root, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true },
+  return { root, scope, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true },
     source, candidate, trial, activate, rollback, enableAutomaticSource: () => { automaticSource = { ...source, goal: { ...source.goal, definition: { ...source.goal.definition, digest: automaticDefinitionDigest } } } }, addFailedReadObservation: () => { source.failedObservations.push({ id: 'missing-read', toolName: 'read', arguments: { file: 'missing.txt' }, outcome: 'failed' }) }, requireSessionQuery: () => { bridgeRequiresSessionQuery = true }, provideSessionQuery: () => { sessionQueryReady = true; ctx.provide('sessionQuery' as never, {} as never) }, changeAutomaticDefinition: () => { automaticDefinitionDigest = 'e'.repeat(64) }, holdAutomaticSource: () => { automaticGate = new Promise(resolve => { releaseAutomaticGate = resolve }) }, releaseAutomaticSource: () => { releaseAutomaticGate?.(); automaticGate = undefined; releaseAutomaticGate = undefined }, setAutomaticSourceError: () => { automaticSource = Object.assign(new Error('unknown outcome'), { code: 'unknown' }) }, setVerifiedTrial: (goalId: string, runId: string, args: unknown, extraSteps: unknown[] = []) => { verified = { goalId, runId, steps: [{ toolName: 'skill_trial', arguments: args }, ...extraSteps] } }, setVerifiedTrialSteps: (goalId: string, runId: string, steps: unknown[]) => { verified = { goalId, runId, steps } }, clearVerifiedTrial: () => { verified = undefined }, failVerifiedTrial: () => { verified = new Error('fixture acceptance proof expired') }, setSnapshot: (goalId: string, runId: string, status: 'achieved' | 'not-achieved', options: { expired?: boolean; validForMs?: number; wrongRun?: boolean; wrongNative?: boolean; wrongOwner?: boolean; wrongProfile?: boolean; unknownExecution?: boolean; future?: boolean; tampered?: boolean } = {}) => {
       const now = Date.now(), goal = { id: goalId, definitionVersion: 1, definitionDigest: 'd'.repeat(64), sessionId: ownerSession, nativeGoalId: options.wrongNative ? 'foreign-native' : `native-${goalId}` }
       const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v3', id: `outcome-${goalId}`, task: { kind: 'goal-outcome', ref: `assessment-${goalId}`, goal: { ...goal, assessmentId: `assessment-${goalId}` } },
@@ -164,7 +169,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
       const receipt = createTaskVerificationReceipt(contract, { protocol: 'task-verification/v3', id: `receipt-${goalId}`, contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task: contract.task,
         results: [{ criterionId: 'result', status: status === 'achieved' ? 'passed' : 'failed', reason: 'independent-fixture-check', evidence: [] }], startedAt: completedAt, completedAt, validUntil: options.expired ? now - 1 : now + (options.validForMs ?? 60_000) })
       const execution = { status: options.unknownExecution ? 'unknown' : 'succeeded', quiescent: !options.unknownExecution, completedAt: now }
-      snapshots.set(goalId, { storedGoal: { id: goalId, scope, definition: { version: 1, digest: 'd'.repeat(64) }, nativeAtLastObservation: { sessionId: ownerSession, goalId: `native-${goalId}` } },
+      snapshots.set(goalId, { outcome: { status }, storedGoal: { id: goalId, scope, definition: { version: 1, digest: 'd'.repeat(64) }, nativeAtLastObservation: { sessionId: ownerSession, goalId: `native-${goalId}` } },
         executionRuns: [{ intent: { runId, scope, task: { kind: 'goal-step', goal: { ...goal, nativeRevision: 1 } } }, dispatchedAt: now - 1000, execution }],
         outcomeAssessments: [{ triggerRunId: options.wrongRun ? 'wrong-run' : runId, contract, dispatchedAt: now - 1000, execution }],
         acceptedTasks: [{ contractId: contract.id, state: 'done', contract, receipt: options.tampered ? { ...receipt, digest: 'f'.repeat(64) } : receipt, verifierExecutionObservation: { ...execution, executionRef: contract.task.ref } }] })
@@ -180,7 +185,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
       plugin = await ctx.plugin(AssistantSkillsService, config)
       await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
     },
-    restartWithExternalHoldouts: async (profiles: ExternalHoldoutProfile[]) => { await plugin.dispose(); config = { ...config, externalHoldouts: profiles }; plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() } }
+    restartWithExternalHoldouts: async (profiles: ExternalHoldoutProfile[]) => { await plugin.dispose(); const retained = (config as { externalHoldouts?: ExternalHoldoutProfile[] }).externalHoldouts?.filter(value => value.id === 'repair-holdout') ?? []; config = { ...config, externalHoldouts: [...profiles, ...retained] }; plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() } }
 }
 function result(value: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['run']>>) {
   expect(value.isError, JSON.stringify(value)).toBe(false)
@@ -778,8 +783,11 @@ async function watchedFixture(failureThreshold = 1, maxRuns = 2) {
   return { ...f, watch, expiresAt, use, watches, notify, nudge }
 }
 
-async function revisionDeploymentFixture(canaryRuns = 1, maxRuns = 2) {
-  const f = await fixture(), parent = result(await f.save())
+async function revisionDeploymentFixture(canaryRuns = 1, maxRuns = 2, successor = false) {
+  const f = successor ? await fixture(false, false, 'owner-session', 'owner-session', undefined, image, true, 2) : await fixture(), parent = result(await f.save())
+  const expiresAt = Date.now() + 30_000
+  if (successor) await expect.poll(() => f.ctx.tools.get('skill_repair_arm')).toBeDefined()
+  const repair = successor ? f.ctx.assistantSkills.armRepair(f.owner, { goalId: 'source-goal', profileId: 'repair-profile', ownerRouteId: 'owner-route', invocationId: `successor-${Math.random()}`, expiresAt }) : undefined
   f.source.goal.definition.digest = 'd'.repeat(64)
   const candidate = result(await f.candidate(1))
   const stateRoot = await mkdtemp(join(tmpdir(), 'assistant-skills-revision-canary-')); await chmod(stateRoot, 0o700)
@@ -797,8 +805,9 @@ async function revisionDeploymentFixture(canaryRuns = 1, maxRuns = 2) {
   const qualification = { qualified: true, admissionDigest: acceptanceDigest(admission) }
   store.finishComparison(profile.scope, comparison.id, 'complete', qualification)
   const activated = store.activateQualifiedCandidate(profile.scope, candidate.id, comparison.id, acceptanceDigest(qualification), admission,
-    { ownerRouteId: 'owner-route', expiresAt: Date.now() + 60_000, maxRuns, canaryRuns }, { authorityId: 'owner-route', principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, agentPreset: 'primary', bindingVersion: 1, generation: 1 })
+    { ownerRouteId: 'owner-route', expiresAt, maxRuns, canaryRuns }, { authorityId: 'owner-route', principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, agentPreset: 'primary', bindingVersion: 1, generation: 1 })
   store.close()
+  if (repair) await seedRepairWatching({ root: f.root, scope: f.scope, repair, candidateId: candidate.id, deployed: activated })
   vi.spyOn(HoldoutQualification, 'inspectProspectiveQualification').mockReturnValue({
     receipt: { complete: true }, quality: { candidateChecksPassed: true, evaluationGain: 1, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'unproven' },
     modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact', prospectiveHoldout: 'authority-attested-after-freeze', admissionDigest: acceptanceDigest(admission),
@@ -808,8 +817,104 @@ async function revisionDeploymentFixture(canaryRuns = 1, maxRuns = 2) {
   const use = async (goalId: string) => result(await f.execute('skill_run', { goal_id: goalId, name: 'saved-write', version: 2, inputs_json: '{"message":"observed"}', invocation_id: goalId }))
   const watches = async () => result(await f.execute('skill_watches', {}))
   const deployment = async () => result(await f.execute('skill_deployment_status', { deployment_id: activated.deployment.id }))
-  return { ...f, profile, taskFamily, deployed: activated, use, watches, deployment }
+  return { ...f, profile, taskFamily, deployed: activated, repair, use, watches, deployment }
 }
+
+async function seedRepairWatching(f: { root: string; scope: object; repair: { id: string }; candidateId: string; deployed: { deployment: { id: string } } }) {
+  const store = new SkillStore(join(f.root, 'skills.sqlite'))
+  try {
+    let record = store.getRepairContinuation(f.scope, f.repair.id)!
+    const advance = (state: Parameters<SkillStore['transitionRepairContinuation']>[3], checkpoint: Record<string, unknown>) => {
+      record = store.transitionRepairContinuation(f.scope, record.id, record.revision, state, checkpoint)
+    }
+    advance('source-confirmed', {})
+    advance('creating-repair', {})
+    const repair = { sessionId: 'repair-session', goalId: 'repair-goal' }
+    advance('repairing', { repair })
+    advance('repair-achieved', { repair })
+    advance('capturing', { repair })
+    advance('candidate-staged', { repair })
+    advance('comparing', { repair })
+    advance('watching', { repair, candidateId: f.candidateId, deploymentId: f.deployed.deployment.id })
+    return record
+  } finally { store.close() }
+}
+
+function installSuccessorTrigger(f: Awaited<ReturnType<typeof revisionDeploymentFixture>>, run: { goalId: string }) {
+  ;(f.ctx.get('assistantGoals')! as any).inspectOwnerFailureTrigger = async () => ({
+    protocol: 'assistant-skills/host-failure-trigger/v1', scope: f.scope,
+    taskFamily: { id: 'repair-family', definitionDigest: 'd'.repeat(64), objective: 'Repair saved write' },
+    failures: [{ goal: { id: run.goalId, sessionId: String(f.owner.session.id), nativeGoalId: `native-${run.goalId}` } }],
+    triggerCondition: { minimumOccurrences: 1 }, evidence: { digest: 'trigger' },
+  })
+}
+
+async function promoteRevisionDeployment(f: Awaited<ReturnType<typeof revisionDeploymentFixture>>, run: { goalId: string; goalExecutionRunId: string }) {
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'achieved')
+  f.notifyCanonical(`assessment-${run.goalId}`)
+  await expect.poll(f.deployment).toMatchObject({ state: 'promoted' })
+}
+
+test.each(['successor', 'revocation'] as const)('deployment reconciliation distinguishes %s before checking old authority', async change => {
+  const f = await revisionDeploymentFixture()
+  await promoteRevisionDeployment(f, await f.use(`reconcile-${change}`))
+  const store = new SkillStore(join(f.root, 'skills.sqlite'))
+  try {
+    const promotedAt = store.getDeployment(f.scope, f.deployed.deployment.id)!.promotedAt
+    if (change === 'successor') {
+      const successor = result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'A later owner-authorized version.', expected_version: 2, bindings_json: '[]' }))
+      expect(successor.version).toBe(3)
+    } else f.revokeRoute()
+    f.ctx.emit('assistant-verifier/receipt', { taskKind: 'goal-outcome' } as never)
+    await expect.poll(() => store.getDeployment(f.scope, f.deployed.deployment.id)?.state, { timeout: 3_000 }).toBe(change === 'successor' ? 'superseded' : 'revoked')
+    expect(store.getDeployment(f.scope, f.deployed.deployment.id)?.promotedAt).toBe(promotedAt)
+  } finally { store.close() }
+})
+
+test('repair successor ignores a matching run created before or at predecessor promotion', async () => {
+  const f = await revisionDeploymentFixture(1, 2, true), at = Date.now()
+  if (!f.repair) throw new Error('successor repair fixture unavailable')
+  vi.spyOn(Date, 'now').mockReturnValue(at)
+  const run = await f.use('successor-at-promotion')
+  await promoteRevisionDeployment(f, run)
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'not-achieved')
+  installSuccessorTrigger(f, run)
+  await new Promise(resolve => setTimeout(resolve, 1_100))
+  expect(f.ctx.assistantSkills.repairStatus(f.owner, f.repair.id)).toMatchObject({ state: 'watching', iteration: 1 })
+})
+
+test('repair successor fails closed for a legacy promoted deployment without promotedAt', async () => {
+  const f = await revisionDeploymentFixture(1, 2, true)
+  if (!f.repair) throw new Error('successor repair fixture unavailable')
+  const run = await f.use('successor-legacy-promotion')
+  await promoteRevisionDeployment(f, run)
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'not-achieved')
+  installSuccessorTrigger(f, run)
+  const original = SkillStore.prototype.getDeployment
+  vi.spyOn(SkillStore.prototype, 'getDeployment').mockImplementation(function (this: SkillStore, scope, id) {
+    const deployment = original.call(this, scope, id)
+    if (deployment?.id !== f.deployed.deployment.id) return deployment
+    const { promotedAt: _promotedAt, ...legacy } = deployment
+    return legacy
+  })
+  await new Promise(resolve => setTimeout(resolve, 1_100))
+  expect(f.ctx.assistantSkills.repairStatus(f.owner, f.repair.id)).toMatchObject({ state: 'watching', iteration: 1 })
+})
+
+test('repair successor enters iteration two only for a matching run after predecessor promotion', async () => {
+  const f = await revisionDeploymentFixture(1, 2, true)
+  if (!f.repair) throw new Error('successor repair fixture unavailable')
+  const repairId = f.repair.id
+  const canary = await f.use('successor-promote')
+  await promoteRevisionDeployment(f, canary)
+  vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 10)
+  const run = await f.use('successor-after-promotion')
+  const store = new SkillStore(join(f.root, 'skills.sqlite'))
+  try { expect(store.repairSourceRuns(f.scope, 'saved-write', 2, store.getDeployment(f.scope, f.deployed.deployment.id)!.promotedAt!).map(value => value.id)).toContain(run.id) } finally { store.close() }
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'not-achieved')
+  installSuccessorTrigger(f, run)
+  await expect.poll(() => f.ctx.assistantSkills.repairStatus(f.owner, repairId), { timeout: 3_000 }).toMatchObject({ iteration: 2, state: 'armed' })
+})
 
 test.each(['route', 'policy', 'budget', 'late-route', 'late-policy', 'expired'] as const)('watched activation leaves the parent active when %s blocks the commit', async failure => {
   const f = await fixture(); result(await f.save())

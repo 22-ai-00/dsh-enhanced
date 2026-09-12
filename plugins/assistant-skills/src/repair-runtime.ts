@@ -1,4 +1,4 @@
-import type { SkillRepairContinuation, SkillRepairState } from './store.js'
+import type { SkillRepairContinuation, SkillRepairNextIterationInput, SkillRepairState } from './store.js'
 import { SkillStore } from './store.js'
 
 export interface RepairRuntimePorts {
@@ -8,6 +8,8 @@ export interface RepairRuntimePorts {
   capture(record: SkillRepairContinuation, signal: AbortSignal): Promise<{ candidateId: string }>
   compare(record: SkillRepairContinuation, signal: AbortSignal): Promise<{ deploymentId: string }>
   inspectDeployment(record: SkillRepairContinuation, signal: AbortSignal): Promise<'watching' | 'complete' | 'rejected'>
+  inspectNextIteration?(record: SkillRepairContinuation, signal: AbortSignal): Promise<SkillRepairNextIterationInput | undefined>
+  assertNextIteration?(record: SkillRepairContinuation, input: SkillRepairNextIterationInput): void
   assertCurrent(record: SkillRepairContinuation): void
 }
 
@@ -21,10 +23,16 @@ function validId(value: unknown, key: 'candidateId' | 'deploymentId'): value is 
   const id = value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined
   return typeof id === 'string' && id.length > 0
 }
+function validNext(value: unknown): value is SkillRepairNextIterationInput {
+  const input = value as SkillRepairNextIterationInput
+  return !!input && typeof input === 'object' && typeof input.profileId === 'string' && input.profileId.length > 0 && typeof input.predecessorDeploymentId === 'string' && input.predecessorDeploymentId.length > 0
+    && !!input.source && typeof input.source.goalId === 'string' && input.source.goalId.length > 0 && typeof input.source.sessionId === 'string' && input.source.sessionId.length > 0
+    && typeof input.source.nativeGoalId === 'string' && input.source.nativeGoalId.length > 0 && typeof input.source.definitionDigest === 'string' && /^[a-f0-9]{64}$/u.test(input.source.definitionDigest)
+}
 
 /**
- * Host-owned finite continuation driver. It never creates a new iteration;
- * callers must validate durable lineage before using SkillStore.nextRepairIteration.
+ * Host-owned finite continuation driver. A successor iteration requires a
+ * validated new source and the frozen profile sequence before Store advances it.
  */
 export class RepairContinuationRuntime {
   readonly #lifecycle = new AbortController()
@@ -105,6 +113,7 @@ export class RepairContinuationRuntime {
       this.#current(record, signal)
       switch (record.state) {
         case 'armed': {
+          if (record.iteration > 1 && record.checkpoint.trigger !== undefined) return this.#transition(record, 'source-confirmed', {})
           const evidence = await this.#dispatch(record, signal, () => this.ports.inspectTrigger(record!, signal))
           if (evidence === undefined) return record
           return this.#transition(record, 'source-confirmed', { trigger: evidence })
@@ -135,7 +144,13 @@ export class RepairContinuationRuntime {
         case 'watching': {
           const status = await this.#dispatch(record, signal, () => this.ports.inspectDeployment(record!, signal))
           if (status === 'watching') return record
-          return status === 'complete' ? this.#transition(record, 'complete', {}) : this.#ended(record, 'rejected', 'deployment-rejected')
+          if (status === 'complete' && record.iteration >= record.authorization.maxIterations) return this.#transition(record, 'complete', {})
+          if (status === 'rejected' && record.iteration >= record.authorization.maxIterations) return this.#ended(record, 'rejected', 'deployment-rejected')
+          if (this.ports.inspectNextIteration === undefined || this.ports.assertNextIteration === undefined) return this.#ended(record, 'rejected', 'next-source-unavailable')
+          const next = await this.#dispatch(record, signal, () => this.ports.inspectNextIteration!(record!, signal))
+          if (!validNext(next)) return status === 'complete' ? record : this.#ended(record, 'rejected', 'next-source-unavailable')
+          this.ports.assertNextIteration(record, next)
+          return this.store.nextRepairIteration(record.scope, record.id, record.revision, next)
         }
         default: return record
       }

@@ -1064,6 +1064,37 @@ function attachmentFixture() {
 }
 
 describe('real rc.1 delivery Agent runtime', () => {
+  test('native Web notice adapter accepts a typed owner notice, exposes it to its original session, and rejects mixed learning metadata', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-notice-')); roots.push(root)
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const webConversation = { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: 'owner-chat' }
+    const ownerId = 'web/browser/local/owner'
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [{ id: 'web-owner-notice', conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', policyRef: 'web-owner', minimumGeneration: 1 }],
+      policyRules: [{ id: 'web-owner-notice-send', effect: 'allow', subject: { kind: 'background', id: 'proactive-engine', workspace: root, principal: ownerId }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } }],
+    })
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    try {
+      operator.handoffOwner(webPrincipal)
+      access = fixture.service.bindNativeWebOwner(fixture.ctx, { principal: webPrincipal, workspace: root, preset: 'primary' })
+      const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+      const binding = store.createBinding({ conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', sessionId: 'web-owner-session', policyRef: 'web-owner' })
+      const owner = store.getPrincipal(webPrincipal)!
+      const notice = fixture.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice', scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' }, sessionId: binding.sessionId, idempotencyKey: 'native-notice-accepted', text: 'Private repair update.', expiresAt: Date.now() + 60_000 })
+      await drive(fixture.service)
+      expect(store.getOutbox(notice.id)).toMatchObject({ status: 'accepted' })
+      expect(access.notifications(binding.sessionId)).toEqual([expect.objectContaining({ id: notice.id, text: 'Private repair update.' })])
+
+      const mixed = fixture.service.enqueueOwnerNotification({ sourceId: 'proactive-engine', ownerRouteId: 'web-owner-notice', scope: { principalId: ownerId, principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary' }, sessionId: binding.sessionId, idempotencyKey: 'native-notice-mixed', text: 'Must not deliver.', expiresAt: Date.now() + 60_000 })
+      const database = new DatabaseSync(join(root, 'delivery.sqlite'))
+      try { database.prepare("UPDATE outbox_messages SET intent_json=json_set(intent_json, '$.metadata.\"dsh.learning.kind\"', 'goal-outcome') WHERE id=?").run(mixed.id) } finally { database.close() }
+      await drive(fixture.service)
+      expect(store.getOutbox(mixed.id)).toMatchObject({ status: 'dead', failureCode: 'native-notice-invalid' })
+      expect(access.notifications(binding.sessionId).map(value => value.id)).toEqual([notice.id])
+    } finally { await access?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
   test('delivers and revises an exact scheduled whole-goal result through durable feedback authority', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-outcome-feedback-')); roots.push(root)
     const ownerId = 'lark/bot-1/tenant-a/ou_owner'

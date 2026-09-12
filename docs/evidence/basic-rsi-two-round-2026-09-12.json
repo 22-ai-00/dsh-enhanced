@@ -1,0 +1,356 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-12",
+  "recordedAt": "2026-09-12T12:47:17.608022+00:00",
+  "baseCommit": "8612a350bd0fa245c72a1d4d60a216484ef13aaf",
+  "status": "passed-composed-live-run-and-independent-readback",
+  "milestone": "basic RSI: one real workflow improved autonomously through two bounded successor iterations",
+  "completeWorkPackage": false,
+  "workPackages": {
+    "statusChanged": false,
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "scope": [
+    "Single authorization freezes two repair profiles, owner lineage, route, expiry and cumulative usage budget.",
+    "A real TraeX model generates both file repairs in fresh native Goal sessions; no repaired source is supplied.",
+    "Each successor passes independent Goal acceptance, prospective comparison, finite canary and a later real task before promotion.",
+    "A new post-promotion failure triggers the next frozen repair profile without another owner arm.",
+    "Typed durable feedback returns to the original owner Session; installed repair admission is idempotent."
+  ],
+  "liveProof": {
+    "capability": "real-traex-two-round-bounded-rsi",
+    "route": {
+      "provider": "traex-agent",
+      "model": "gpt-5.6-terra",
+      "api": "acp",
+      "command": "traex"
+    },
+    "scope": {
+      "principalId": "web/web/local/operator",
+      "principalRecordId": "principal_7a18b95f-68bc-4d83-8f63-472b70c621ad",
+      "principalVersion": 1,
+      "workspace": "/tmp/dsh-real-owner-repair-tWO62S/workspace",
+      "preset": "standard"
+    },
+    "continuationId": "skill-repair-0a82077261f3af773c9d7b565a288d479c53830d571ad9864b38038da7c802d2",
+    "state": "complete",
+    "iterations": 2,
+    "ownerSession": "session-af3eb754-54a0-4a4d-aff9-f4b6ada2b64a",
+    "rounds": [
+      {
+        "iteration": 1,
+        "sourceSession": "session-1002fd2d-b38f-4e4b-a2a3-afdd823640da",
+        "sourceGoal": "7969fca1f1e2b826755662bd1b790d1a1f7b33ba9e88be79ddb87f0375cdd0d2",
+        "repairSession": "owner-repair-f3370fe892f27deddd95b2a0b6270220bd30960c",
+        "repairGoal": "aeab51c9299947527234bac7926d8695810bc384e89c0b11a27860290c1f9248",
+        "candidateId": "skill-candidate-78a0341abfe850ad87c63ef2c23567033f4f614bdb997fcd102b70e707a48677",
+        "comparisonId": "skill-comparison-c82746ec7c838bfe9c0cfa138087f746d37810f2e868b59a4851b477d184487a",
+        "deploymentId": "skill-deployment-739df659e059d1e373bafc41f9de4eea377727a8ed910831b508b53fa491de4b",
+        "version": 2,
+        "finalDeploymentState": "superseded",
+        "failureReceiptDigest": "6e684773d998853544ecaf36a2e0a6bf57bec961a074a893db719a92460d2ee4",
+        "repairReceiptDigest": "d62717f70a259433c23e76b5be799d8daef3842937b899faaf7e1ae1000b33ba",
+        "candidateDefinitionDigest": "f0718fea927b9a760f8c9e503aa1125b1e6afda6d3188dbeab387462c258b6af",
+        "quality": {
+          "candidateChecksPassed": true,
+          "evaluationGain": 1,
+          "evaluationGainObserved": true,
+          "criticalRegressionsPassed": true,
+          "heldoutIndependence": "unproven"
+        },
+        "datasetDigest": "8faf73dc290a0fc222a2b0953a8e801fcb0ad3ed3cf6604506e154816a3d20d8",
+        "promotion": {
+          "sessionId": "session-52819fea-8475-45b9-b317-2c387388ef62",
+          "goalId": "bb5109c7bcb2aa68612bed1e475e0d69f37b25fae30e27875244708463a1f22c",
+          "promotedAt": 1789216470346,
+          "receiptDigest": "25aa96e1ed3bbc448c88fd29839dfaa315f2bd99b964a5a12dc97bdb67c7ad03"
+        },
+        "toolNames": [
+          "read",
+          "write",
+          "read"
+        ]
+      },
+      {
+        "iteration": 2,
+        "sourceSession": "session-99337a1a-4901-4f7e-8bd2-d9359723184f",
+        "sourceGoal": "29d1c012b56f0dfa3389a9970bcbe30dbd06279c33f6f560f6017f80af87d89b",
+        "repairSession": "owner-repair-194bb36655b8a6e47013a30cebd069931b5a50d3",
+        "repairGoal": "cd976fad98ee70faf68a5b069ef74244f276ef0bfa21c952cec5b183d67677f5",
+        "candidateId": "skill-candidate-b0554a1436cb236e03ca615fd098bf519a2ff25b5417a17662f758d06a0ccf8f",
+        "comparisonId": "skill-comparison-b8b034754d901a4bb1a0ba8e4825309bf219bd037de6a34478cfd19aed7b0820",
+        "deploymentId": "skill-deployment-7b754efffabd849b934f08a79127fd8eb78c551f425fd1836194b1cd22867fb8",
+        "version": 3,
+        "finalDeploymentState": "promoted",
+        "failureReceiptDigest": "9bc26862cb12ad11d544202dbaee4dfe8e3e28394ea8f572a8947cfa4e58c276",
+        "repairReceiptDigest": "865decd4ebaf4b68c62b6a29aafc933f3f1849f856e80d4366684ec772c40583",
+        "candidateDefinitionDigest": "4ddc5ef6afc452a18caf9cdca04945a5cb3ce52f0bb6af2ec21ad05ccd9726df",
+        "quality": {
+          "candidateChecksPassed": true,
+          "evaluationGain": 1,
+          "evaluationGainObserved": true,
+          "criticalRegressionsPassed": true,
+          "heldoutIndependence": "unproven"
+        },
+        "datasetDigest": "31fb93e39370b13649954e6900e281b7ce8c90c7b6334dadecc25df94ad90de8",
+        "promotion": {
+          "sessionId": "session-5ae41147-b8ef-4fe0-8b27-22a87b32c6db",
+          "goalId": "9f5207a4d6db9e1d62217047c25effb66ad9f8d730e656ace2b94cdcf73c6905",
+          "promotedAt": 1789216598063,
+          "receiptDigest": "1fc6525e9cb799757f9a5e44a706b2d05e92af3144cdb2376e5e6d6abc2afcdc"
+        },
+        "toolNames": [
+          "read",
+          "write",
+          "read"
+        ]
+      }
+    ],
+    "usage": {
+      "model_calls": 8,
+      "tool_calls": 6
+    },
+    "feedback": [
+      {
+        "idempotency_key": "repair-feedback:skill-repair-0a82077261f3af773c9d7b565a288d479c53830d571ad9864b38038da7c802d2:1:finite-canary",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_84300735-9292-48a9-919d-7e9fe7f642e0"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-0a82077261f3af773c9d7b565a288d479c53830d571ad9864b38038da7c802d2:1:iteration-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_84300735-9292-48a9-919d-7e9fe7f642e0"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-0a82077261f3af773c9d7b565a288d479c53830d571ad9864b38038da7c802d2:2:final-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_84300735-9292-48a9-919d-7e9fe7f642e0"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-0a82077261f3af773c9d7b565a288d479c53830d571ad9864b38038da7c802d2:2:finite-canary",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_84300735-9292-48a9-919d-7e9fe7f642e0"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-0a82077261f3af773c9d7b565a288d479c53830d571ad9864b38038da7c802d2:2:iteration-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_84300735-9292-48a9-919d-7e9fe7f642e0"
+      }
+    ],
+    "generatedArtifactDigest": "292827772bdee2ca5d7083a937a3a42521c8537544396e3cffe33935a518b150",
+    "initialArtifact": "shared unfinished scaffold",
+    "suppliedRepairedSource": false,
+    "installedRepairAdmissionIdempotent": true,
+    "evidenceOrigin": "same retained real-run state; independent readback result recorded separately",
+    "completedRestartNoReplay": true,
+    "visibleOriginalOwnerFinalNotice": true
+  },
+  "validation": {
+    "rootGate": {
+      "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+      "exitCode": 0,
+      "testsPassed": 5239,
+      "testsSkipped": 1,
+      "testFilesPassed": 388,
+      "dryRunPacks": 33,
+      "packageFileListInspected": [
+        "assistant-web-owner: lib/repair-setup.js and declarations",
+        "assistant-skills: lib/repair-feedback.js and declarations"
+      ],
+      "log": {
+        "path": "/tmp/dsh-rsi-final-check.log",
+        "sha256": "abfada83af61e37f486f8a0fc667835155968b74cd2ac16bae18c6bbce82343a"
+      }
+    },
+    "liveRun": {
+      "command": "DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_CAPTURE_RETAIN_FAILURE=1 pnpm test:web-owner:real-repair",
+      "exitCode": 1,
+      "log": {
+        "path": "/tmp/dsh-rsi-proof-real.log",
+        "sha256": "f4976692bccdee4ccfbd42dd64ca5e0964adb65b9622559b0e817576d949371c"
+      },
+      "completedAssertions": "Two repairs, two independent comparisons, both subsequent promotions, five accepted notices, cumulative usage and native tool provenance passed before the final UI locator assertion.",
+      "failure": "The restart helper wrote localStorage and matched an earlier session/follow frame. The browser had not actually selected the original owner Session.",
+      "testFix": "Use the existing sidebar selection helper, require aria-selected=true, and accept only a fresh exact-session follow frame. No production change or new candidate generation was needed.",
+      "finalPatchedFullModelRunRepeated": false
+    },
+    "sameRunStateReverification": {
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/dsh-rsi-proof-extraction.log",
+        "sha256": "eeb23bcc70e970fc642986315045722cd230fe8c27edbe0c3483d612688c6fba"
+      },
+      "proofSha256": "7dae4fde6e565716091d6f6386e2a8c9831859bebe616a5dfa7079ea8ebc9a22",
+      "checks": [
+        "Receipt validation for both original failures, both repairs and both later successful tasks",
+        "Two activated candidate versions, exact parent succession and complete comparison gates",
+        "Second source run created after first promotion",
+        "Goal-sourced task requests and only native read/write calls",
+        "One skill_repair_arm, eight repair model calls, six repair tool calls, five accepted notices"
+      ]
+    },
+    "ownerReadbackDiagnostic": {
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/dsh-rsi-readback-diagnostic.log",
+        "sha256": "c55aea2cc5c8d135986001848358832c0fa4a46dbc59660ec2029b7b260016ee"
+      },
+      "actualFreshHostAndChromium": true,
+      "exactOriginalOwnerSelected": true,
+      "fiveNoticesReturnedByRpc": true,
+      "finalNoticeVisible": true,
+      "modelLogUnchanged": true
+    },
+    "independentReview": {
+      "status": "passed-for-basic-rsi-milestone",
+      "reviewer": "real_repair_verify",
+      "command": "PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm exec node --input-type=module < /tmp/dsh-rsi-independent-readback.mjs",
+      "exitCode": 0,
+      "scriptSha256": "75dc3cf3e4e7379590847b209582a0fa99db8115d6258c77ae1a0e06e5103954",
+      "proofSha256": "2da9d5b79205730e2087e0f766ee798fdeaaa34dd9992a30da07df9fc21330f2",
+      "proof": {
+        "result": "pass",
+        "originalSession": "session-af3eb754-54a0-4a4d-aff9-f4b6ada2b64a",
+        "continuation": {
+          "state": "complete",
+          "iteration": 2,
+          "maxIterations": 2,
+          "digest": "1e9d2c7ee4ead567fb7bc0654984703ad65bb2648b2b6c79d530d0366d28c15c"
+        },
+        "usage": {
+          "id": "skill-repair-0a82077261f3af773c9d7b565a288d479c53830d571ad9864b38038da7c802d2",
+          "model_calls": 8,
+          "tool_calls": 6
+        },
+        "acceptedNoticeCount": 5,
+        "noticesDigest": "861b6ee0d2bd45b65fbd33df25f8dbce2830ef120e5662f9d5f94ab65a047560",
+        "followTarget": "session-af3eb754-54a0-4a4d-aff9-f4b6ada2b64a",
+        "visibleFinalNotice": true,
+        "ticks": 5,
+        "stableTickDigest": "2e67f62985e5486a99ba8822fd7bb72de5adcd942eb77b011cdd205774679b79",
+        "modelDispatches": {
+          "before": 28,
+          "after": 28
+        },
+        "repairSessionMetadata": [
+          {
+            "id": "owner-repair-194bb36655b8a6e47013a30cebd069931b5a50d3",
+            "sourceKinds": [
+              "goal",
+              "plugin",
+              "skill-catalog"
+            ],
+            "goalRounds": [
+              1
+            ],
+            "toolNames": [
+              "read",
+              "write"
+            ]
+          },
+          {
+            "id": "owner-repair-f3370fe892f27deddd95b2a0b6270220bd30960c",
+            "sourceKinds": [
+              "goal",
+              "plugin",
+              "skill-catalog"
+            ],
+            "goalRounds": [
+              1
+            ],
+            "toolNames": [
+              "read",
+              "write"
+            ]
+          }
+        ]
+      },
+      "additionalChecks": [
+        "node --check scripts/e2e/web-owner-real-repair.spec.mjs: exit 0",
+        "git diff --check: no output",
+        "Independent production reconciliation and mounted native notification regressions passed",
+        "Final readback asserts fresh exact-session follow, selected UI row, visible final notice, unchanged full continuation/usage/Outbox summary over five ticks and no new model dispatch"
+      ],
+      "acceptance": "The two-round real chain and independent same-state restart readback satisfy the bounded first milestone. The original full Playwright exit 1 remains recorded and is not recast as a passed full command."
+    },
+    "finalLint": {
+      "command": "pnpm lint",
+      "exitCode": 0,
+      "log": {
+        "path": "/tmp/dsh-rsi-final-lint.log",
+        "sha256": "decfb35129f4a3eb2629ca3980e9707d043c8162c302770aee3339015da2af54"
+      }
+    },
+    "codeFreeze": "Production sources were frozen before the successful final root check. Later changes only corrected E2E public regression coverage, bounded goal-round configuration, native context classification, navigation assertions and delivery documentation."
+  },
+  "earlierFailures": [
+    {
+      "failure": "New successor activation was misclassified as parent revocation.",
+      "resolution": "Reconcile canonical supersession before live deployment authority checks; distinguish an owned successor from actual revocation with regression tests."
+    },
+    {
+      "failure": "The native notice adapter passed a fabricated Outbox record into a sidecar lookup, causing dead notifications.",
+      "resolution": "Separate intent validation from persisted-record validation; retain tamper and authority checks; mounted adapter-to-owner-readback regression."
+    },
+    {
+      "failure": "A model-generated JSONL candidate replaced only the first matching placeholder.",
+      "resolution": "Holdout correctly rejected it. Preserve all prior public regression criteria in the second task and clarify every-occurrence semantics. Hidden samples, answers and gain thresholds were not modified."
+    },
+    {
+      "failure": "The E2E asserted every user/message event was a goal request.",
+      "resolution": "Pinned DSH also persists system-prompt and skill-catalog context this way. Filter those two context kinds; still require only goal task requests with positive round and allowlisted tools."
+    }
+  ],
+  "limits": [
+    "This establishes a bounded template-rendering workflow improvement milestone, not general recursive intelligence or completion of the 18-work-package roadmap.",
+    "The operator freezes the task-family/profile sequence and supplies ordinary public tasks. This is not unrestricted discovery of new task families.",
+    "Prospective authority attests after freeze; historical heldout independence remains unproven. No cross-task generalization or population success-rate claim.",
+    "Repairing, repair-achieved and candidate-staged crashes remain unknown without automatic replay; no mid-repair resume proof. Armed waiting and deployment watching use existing recovery contracts.",
+    "TraeX reports no token usage here. Limits and evidence are explicit call counts; monetary or token costs are not fabricated.",
+    "Accepted notification and browser visibility do not prove a human read it.",
+    "Delivery is to the dev source branch; no new npm/release publication is included."
+  ],
+  "sourceSha256": {
+    "package.json": "27afdbc59e15d57a7ae3b32388ca6b18337df950bd00de4ef61f9707855aaabb",
+    "plugins/assistant-delivery/src/service.ts": "33a1f9b1ca9aee0953a2d59eb257470740f6040b0d84cdcf80aa2dfe2a468437",
+    "plugins/assistant-delivery/tests/agent-runtime.spec.ts": "68153bd986c8e29902247e9fa1d17fa2f814f39111e3a7de93d5e304219f2967",
+    "plugins/assistant-goals/src/service.ts": "9ea06c2a617b769f79fb0625b08ee3f30c0a279253f79b685096a34d130242fa",
+    "plugins/assistant-goals/tests/service.spec.ts": "4fe5ddbd6f5dd75045d9a1ea2e5b61e795d0ce8c7022bb5c076ec415ca133bdc",
+    "plugins/assistant-skills/src/index.ts": "5a299cd98cb06b61f59c3b753af22b1538a238f4536e2ec7dec779b152b7b431",
+    "plugins/assistant-skills/src/prospective-holdout.ts": "cab11be69cea64b01a77c7f4a7a55f8db18c742834bf4669726c7e5784c1e6e4",
+    "plugins/assistant-skills/src/repair-agent.ts": "522a4c4fbdd3c6ab6a8b5555e384794a7e3c2bbbc6d1706dbccc951432bda50b",
+    "plugins/assistant-skills/src/repair-feedback.ts": "f38d95dff2254df2abbc9393e306b8f867787ba3188c035cdf1c1c10fc20501d",
+    "plugins/assistant-skills/src/repair-profile.ts": "ad361c07957c9936a58023ea653dbbd99dea82095e8fc43fe0d9daea122948d6",
+    "plugins/assistant-skills/src/repair-runtime.ts": "cb3cfadfcab1c358e63094f1c5d7f0dcd511d1835c9875a16e545455aa8fae10",
+    "plugins/assistant-skills/src/service.ts": "af9175d136adc6e0408b4443ad0d6f55ded96f54b14eb470167d5ce65dca7e30",
+    "plugins/assistant-skills/src/store.ts": "f8dd1fcd8c9fd546a4485172e1af8dac90df3766a79bf201390c56d2d22adfea",
+    "plugins/assistant-skills/tests/prospective-holdout.spec.ts": "4baf18a5f1816d391328340caba688846ca65362b9db5f42cb792c5a99e8e53e",
+    "plugins/assistant-skills/tests/repair-agent.spec.ts": "9a5a907fcf0e0a4b9855c75accc7ae176f569b9fa2e9299118bff3a9b5b0fc1b",
+    "plugins/assistant-skills/tests/repair-feedback.spec.ts": "8cef73636788b8e916ec673354445dd9348eda1be93b80cfa6e7dc303ab62ac4",
+    "plugins/assistant-skills/tests/repair-native.spec.ts": "c872ed71a7a3ded0d4b2b3a5bfa1950db214aad8f6f9a2460115c7f199c1b831",
+    "plugins/assistant-skills/tests/repair-runtime.spec.ts": "eb681d9b061654d0c11ff1a43af5cf99b40739341627efed60ccef7ac3292fe6",
+    "plugins/assistant-skills/tests/repair-store.spec.ts": "6709ee911e25c5f41dfd1a8aad19946da06d29e904df10bea006dd212b9cd40e",
+    "plugins/assistant-skills/tests/service.spec.ts": "41ec46f17631efa1806933a5814232af86cdfe6f7899d25ca850bb692d5654ec",
+    "plugins/assistant-skills/tests/store.spec.ts": "3e0d8f19a1bfa539cc8b86346d3a53002ed3b8c87e17754dc70bb3b1218b6017",
+    "plugins/assistant-web-owner/package.json": "210080f351d4583a5978cbfd9c2049991915945d7d735a55fbfd57253ced8fa9",
+    "plugins/assistant-web-owner/src/repair-setup.ts": "2f93774e03320bb4e5c098c5e25797201e9f256029ceb2f8ad1721bbc91d3ac9",
+    "plugins/assistant-web-owner/src/setup.ts": "f2cbb1d6d6c6b44895943bece98d906ce33819610ca43c81e87106bc804d635b",
+    "plugins/assistant-web-owner/tests/repair-setup.spec.ts": "143fd97e08c3a5db57614e142f05daca5030c3bd4587469b171f02259bfbedaa",
+    "pnpm-lock.yaml": "1130ebdf9cf735201fd29507b02270b24196886158e64e1775977815bc194bc9",
+    "scripts/e2e/playwright-real-repair.config.mjs": "b0bfa43641800b9d3c4626a435a42c1729eab958e7320960c84f3d7108420250",
+    "scripts/e2e/real-canary-helpers.mjs": "2058a2d0f432c95affbbb9303a5352f81bbba43edc75afefaee8e49de434250f",
+    "scripts/e2e/web-owner-real-repair-guard.mjs": "d1fbcd8193c951e15d26ec767b24cc643f08550d34cf5c7ac0171b68273f0f9d",
+    "scripts/e2e/web-owner-real-repair.spec.mjs": "4953dbcc09adcbadee91bd627a7821eb7bb0b814d5bf01bf0506792207423ffc",
+    "tests/real-repair-authority.spec.ts": "95fc9cd9cbfdc5909a0952869d84b7b6c530681c5da8ca1d7acd554c59591604",
+    "tests/web-owner-real-repair-guard.spec.ts": "8aff203bd6aaea2d630b8c6b90fcdc84117f8b17c67ee4090ac228a810dabe6c"
+  }
+}
