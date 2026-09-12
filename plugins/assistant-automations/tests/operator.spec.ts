@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { chmodSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -102,7 +102,7 @@ function definition(name: string) {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'automations-operator-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'automations-operator-'))); roots.push(root)
   const state = join(root, 'state'); const path = join(state, 'automations.sqlite')
   const store = new AutomationStore({ path, now: () => Date.parse('2026-09-11T00:00:00.000Z') })
   return { root, state, path, store }
@@ -234,7 +234,7 @@ describe('read-only Automations operator snapshot', () => {
   })
 
   test('compatibility projections return an empty inventory for a never-created database while the strict snapshot keeps failing (B-M1)', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'automations-operator-missing-')); roots.push(root)
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'automations-operator-missing-'))); roots.push(root)
     await chmod(root, 0o700)
     const path = join(root, 'automations.sqlite')
     // Fresh-profile shape: private parent exists, database file was never created.
@@ -242,7 +242,7 @@ describe('read-only Automations operator snapshot', () => {
     expect(listAutomationsLocally(path)).toEqual([])
     expect(listActiveAutomationsLocally(path)).toEqual([])
     // Any other defect must still surface through the compatibility names.
-    const targetRoot = await mkdtemp(join(tmpdir(), 'automations-operator-missing-link-')); roots.push(targetRoot)
+    const targetRoot = await realpath(await mkdtemp(join(tmpdir(), 'automations-operator-missing-link-'))); roots.push(targetRoot)
     await chmod(targetRoot, 0o700)
     const target = join(targetRoot, 'automations.sqlite'); new AutomationStore({ path: target }).close()
     const linked = join(root, 'linked.sqlite'); await symlink(target, linked)
@@ -270,12 +270,12 @@ describe('read-only Automations operator snapshot', () => {
   })
 
   test('rejects missing, relative, symlinked, hardlinked, public-mode and non-private-parent paths', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'automations-operator-paths-')); roots.push(root)
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'automations-operator-paths-'))); roots.push(root)
     await chmod(root, 0o700)
     expectCode(() => inspectAutomationsOperatorSnapshot(join(root, 'missing.sqlite')), 'database-missing')
     expectCode(() => inspectAutomationsOperatorSnapshot('relative.sqlite'), 'invalid-path')
 
-    const targetRoot = await mkdtemp(join(tmpdir(), 'automations-operator-target-')); roots.push(targetRoot)
+    const targetRoot = await realpath(await mkdtemp(join(tmpdir(), 'automations-operator-target-'))); roots.push(targetRoot)
     const state = join(targetRoot, 'state'); const target = join(state, 'automations.sqlite')
     new AutomationStore({ path: target }).close()
     const symlinkPath = join(root, 'symlink.sqlite'); await symlink(target, symlinkPath)
@@ -295,7 +295,7 @@ describe('read-only Automations operator snapshot', () => {
     expectCode(() => inspectAutomationsOperatorSnapshot(target), 'unsafe-parent')
     await chmod(state, 0o700)
 
-    const ancestorRoot = await mkdtemp(join(tmpdir(), 'automations-operator-ancestor-')); roots.push(ancestorRoot)
+    const ancestorRoot = await realpath(await mkdtemp(join(tmpdir(), 'automations-operator-ancestor-'))); roots.push(ancestorRoot)
     await chmod(ancestorRoot, 0o700); const realParent = join(ancestorRoot, 'real'); await mkdir(realParent, { mode: 0o700 })
     const ancestorTarget = join(realParent, 'automations.sqlite'); new AutomationStore({ path: ancestorTarget }).close()
     const linkedParent = join(ancestorRoot, 'linked'); await symlink(realParent, linkedParent)
@@ -303,7 +303,7 @@ describe('read-only Automations operator snapshot', () => {
   })
 
   test.each([14, 16])('rejects schema v%s without migrating it', async version => {
-    const root = await mkdtemp(join(tmpdir(), `automations-operator-v${version}-`)); roots.push(root)
+    const root = await realpath(await mkdtemp(join(tmpdir(), `automations-operator-v${version}-`))); roots.push(root)
     await chmod(root, 0o700); const path = join(root, 'automations.sqlite')
     const database = new DatabaseSync(path); database.exec(`PRAGMA user_version=${version}`); database.close(); await chmod(path, 0o600)
     const before = await fingerprint(path)
@@ -314,7 +314,7 @@ describe('read-only Automations operator snapshot', () => {
   })
 
   test('rejects corrupt SQLite and canonical-definition/digest drift', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'automations-operator-corrupt-')); roots.push(root)
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'automations-operator-corrupt-'))); roots.push(root)
     await chmod(root, 0o700); const corrupt = join(root, 'corrupt.sqlite')
     await writeFile(corrupt, 'not sqlite'); await chmod(corrupt, 0o600)
     expectCode(() => inspectAutomationsOperatorSnapshot(corrupt), 'database-corrupt')
@@ -606,7 +606,7 @@ describe('read-only Automations operator snapshot', () => {
     database.exec('CREATE TABLE operator_parent_swap_padding(bytes BLOB) STRICT')
     database.prepare('INSERT INTO operator_parent_swap_padding(bytes) VALUES (zeroblob(?))').run(16 * 1024 * 1024)
     database.close()
-    const replacement = await mkdtemp(join(tmpdir(), 'automations-parent-replacement-')); roots.push(replacement)
+    const replacement = await realpath(await mkdtemp(join(tmpdir(), 'automations-parent-replacement-'))); roots.push(replacement)
     const moved = `${f.state}.old`; roots.push(moved)
     const race = startRaceWorker('swap-parent', [f.state, moved, replacement])
     armSourceRace(race, f.path)
@@ -648,7 +648,7 @@ describe('read-only Automations operator snapshot', () => {
     for (const suffix of ['-wal', '-shm', '-journal']) {
       await rm(`${f.path}${suffix}`, { force: true })
     }
-    const evilRoot = await mkdtemp(join(tmpdir(), 'automations-aba-evil-')); roots.push(evilRoot)
+    const evilRoot = await realpath(await mkdtemp(join(tmpdir(), 'automations-aba-evil-'))); roots.push(evilRoot)
     const evilState = join(evilRoot, 'state')
     const evilPath = join(evilState, 'automations.sqlite')
     new AutomationStore({
