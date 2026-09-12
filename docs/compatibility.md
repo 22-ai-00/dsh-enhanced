@@ -93,7 +93,7 @@ Web client 与工作区接线：本包构建期复用 `dsh-api-session-controlle
 该版本 `SessionStore.detach` 的 `session/disposed` 仅表示内存释放，Persistence 仍保留记录；Web owner 的空闲回收会抑制由此生成的 `api-session/removed`，避免浏览器误清空会话。没有修改原生持久删除 API。升级必须重跑双事件订阅的空闲回收、真实浏览器文本/审批/Goal，以及 Host 重启后恢复；独立 `pnpm test:web-owner` 验证实际 HTTP/WS 和新浏览器认证，不能由进程内 Gateway 测试代替。
 
 
-原生 Memory benchmark 的可选开发依赖扩大了 workspace 类型构建环。根 `build:bootstrap` 在 Policy → Evaluation → Delivery 后显式构建 Verifier → Automations → Goals，再启动递归构建，确保空 `lib` 环境下 Memory 的 Goals 类型增强已有声明产物；这只调整仓库构建顺序，不改变发布包或运行时服务激活。
+原生 Memory benchmark 和 supervised 配置的可选开发依赖扩大了 workspace 类型构建环。根 `build:bootstrap` 先生成共享包、Policy、Delivery/Evaluation、Isolation、Verifier 和 Automations，再按依赖顺序预建 Preference Learning、Health、Evolution、Growth Experiments、Heartbeat、Recovery 和 Goals，随后启动递归构建。这样空 `lib` 环境下，Lark 的 supervised 配置与 Memory 都能解析所需声明；只调整仓库构建顺序，不改变发布包或运行时服务激活。清洁构建验证必须使用不含既有 `lib` 和 `node_modules` 的源码副本。
 
 PersonalMemory 工具证据恢复使用 `@deepseek-ai/dsh-fs`、`dsh-fs-local`、`dsh-tool-fs`、`dsh-session-persistence-jsonl@0.1.2-rc.1` 与既有 AgentLoop/ToolRuntime/pruner 基线。FS 是可选 Host peer，Local/Tool/JSONL 仅作为根集成测试依赖，不随 Memory 自动启用。正常 append `tool/result` 的 `sourceEventSeqs` 指向对应 `tool/call`；指向旧 result 的复制与 replacement 不视为原始观察。Cordis 4.0.2 每次服务查询可返回新 trace proxy，代际检查使用公开 `Service.tracker` 的 per-instance 元数据。升级这些契约须重跑实际 JSONL 关闭/重建与文件授权回归。Memory schema 6 从 v5 增加独立 metadata 索引，升级前排空旧 writer。
 

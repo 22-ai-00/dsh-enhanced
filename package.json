@@ -1,6 +1,6 @@
 {
   "name": "dsh-enhanced",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "private": true,
   "description": "A scalable monorepo for community DeepSeek Harness plugins.",
   "license": "MIT",
@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "pnpm run build:bootstrap && pnpm --recursive --if-present run build",
-    "build:bootstrap": "pnpm run build:packages && pnpm --filter @dsh-enhanced/assistant-policy run build && pnpm --filter @dsh-enhanced/assistant-delivery run build:types && pnpm --filter @dsh-enhanced/assistant-evaluation run build && pnpm --filter @dsh-enhanced/assistant-delivery run build && pnpm --filter @dsh-enhanced/assistant-isolation run build && pnpm --filter @dsh-enhanced/assistant-verifier run build && pnpm --filter @dsh-enhanced/assistant-automations run build && pnpm --filter @dsh-enhanced/assistant-goals run build",
+    "build:bootstrap": "pnpm run build:packages && pnpm --filter @dsh-enhanced/assistant-policy run build && pnpm --filter @dsh-enhanced/assistant-delivery run build:types && pnpm --filter @dsh-enhanced/assistant-evaluation run build && pnpm --filter @dsh-enhanced/assistant-delivery run build && pnpm --filter @dsh-enhanced/assistant-isolation run build && pnpm --filter @dsh-enhanced/assistant-verifier run build && pnpm --filter @dsh-enhanced/assistant-automations run build && pnpm --filter @dsh-enhanced/preference-learning run build && pnpm --filter @dsh-enhanced/assistant-health run build && pnpm --filter @dsh-enhanced/assistant-evolution run build && pnpm --filter @dsh-enhanced/assistant-growth-experiments run build && pnpm --filter @dsh-enhanced/assistant-heartbeat run build && pnpm --filter @dsh-enhanced/assistant-recovery run build && pnpm --filter @dsh-enhanced/assistant-goals run build",
     "build:packages": "pnpm --recursive --filter './packages/*' --if-present run build",
     "check": "pnpm run validate && pnpm run lint && pnpm run typecheck && pnpm run test:built && pnpm run build && pnpm run pack:check",
     "create:plugin": "node ./scripts/create-plugin.mjs",

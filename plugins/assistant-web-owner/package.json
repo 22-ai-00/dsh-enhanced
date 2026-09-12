@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-web-owner",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "description": "A DeepSeek Harness plugin for Assistant Web Owner.",
   "license": "MIT",
   "type": "module",
