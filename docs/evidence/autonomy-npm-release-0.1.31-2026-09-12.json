@@ -1,0 +1,430 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-12T17:45:12.395979+00:00",
+  "capability": "published-rsi-cohort-and-fresh-remote-linux-autonomy-installation",
+  "status": "passed",
+  "source": {
+    "version": "0.1.31",
+    "tag": "v0.1.31",
+    "commit": "ae8cb4cd13ea549c8ef34ce39deaa7b21091b02e",
+    "releaseRecordCommit": "f22602a39d53e02e74d159b48700f20b3704e7b0"
+  },
+  "release": {
+    "workflowUrl": "https://github.com/22-ai-00/dsh-enhanced/actions/runs/34708001547",
+    "publishJob": {
+      "id": 103591460123,
+      "conclusion": "success"
+    },
+    "recordJob": {
+      "id": 103593765156,
+      "conclusion": "success"
+    },
+    "repositoryCheck": {
+      "command": "pnpm check",
+      "environment": "GitHub Actions ubuntu-latest, immutable release tag",
+      "conclusion": "success",
+      "aggregatePassedTests": 5233,
+      "aggregateSkippedTests": 42,
+      "dryRunPackageCount": 33,
+      "countsScope": "root and 33 recursive test summaries from the completed publish job log; skipped tests do not count as exercised behavior"
+    }
+  },
+  "registry": {
+    "checkedAt": "2026-09-12T17:42:55.678Z",
+    "version": "0.1.31",
+    "sourceCommit": "ae8cb4cd13ea549c8ef34ce39deaa7b21091b02e",
+    "packageCount": 33,
+    "passed": true,
+    "packages": [
+      {
+        "name": "@dsh-enhanced/assistant-growth-contract",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-ypc0bfcMK4CgGWwH0CiDVuj1zWOjspcYVjBpkrhcBZdfTmsh1xe4cgFfUStBaxSQoH8HXXgbHkh+owAoJwj5/A==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/llm-route-capabilities",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-d1Pe4sHf0eUrx/DlnZfoHC22erSJc4W/6smfhV7gX2Ifr25kQE5xJ/Zi5q3O63jJ6MmRLk9Un+N8X3AwmkLXUg==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/task-acceptance-contract",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-u76w23NwtsYW47bBSF+0fvBiyryQhRUUZEly9j2fERZ5sTLMfS4nDjt+qKx4RWDUmeGP6QvHluc3WGhVvE0asA==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/acp",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-IO530XJzBWEkf4pgXyD34rVAzxr5yjTYseRA/j2f6ZFLoBRqTchLXu1QCglZVP8FZ/OlwmE9aJ2YM+Ls57zG2w==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-actions",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-+P7sWWJuhTJzdqOOG1ijphpjdYlvSN5+9fq4EjUV+UDbEvP1HoXg5L2+op5jHn9E0HW6K4/Q8bMs6fAGcWK9fw==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-automations",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-4OofB90X+ZkkVij819yV6zAbdfmtYGmCY0U9kFxiGtjAIsYBMUjyCkOXtYE9nmOIodqt4bjlke8qBiZPaSzN4Q==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-deepseek-budget",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-AlUjHxYb+dq4SZex95uSN8m0Fj5oGZBxAbyb36DA1zbmArX+OPnIe/vdZY2VmFpIJOfQVdvv/B4jvhD1Yi2XzA==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-delivery",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-cqllIzZwQwyx4IwfQ2en4sw0Hc93XAWuJEoxFDfQv3MAzErMTJ87yA4O5rZogNj1RoAtGJLI52+yNKaVUSei5w==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-evaluation",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-j6qTIMOubeDasgdK7ngRz4rS/y6fsP9GGCdIZxq7Fa5BR/mAOoAb5cGpflMNwy8feEZuq5rORnLwo0dx/hUtvQ==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-evolution",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-pOZjfQCx4vg63iEzyxlz5W8OsMkWnOZUN1u5Vc7BS9JzBSrntExwsTcX11YxFtCfho+7MqLwF3eF99Lagrmb2A==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-goals",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-ph4IKEBAxX/Uwhe/1xqHduq09fdSkyuEa6dLhSmlgdp0Lu6/XXM26Uc1dmNdDqG1/jAG5ID7uE82ZrJEWW7Fqw==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-growth-experiments",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-5G3K5Dqm+9sy7d/hh2+VvBIIDVrOlURucOwiAqC1BK5AnzHiE+RIsngs+Y5cFSGC4qjG5D77FEO261/nuCvjVg==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-health",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-5jZ7Q/3qlhYP8RHlwsWcPRRtLImlkYAFZmia0i21At5JeRj4fFAU9el8+HxNDr2LJPdvJr57fov2gHuMDFX36Q==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-heartbeat",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-lrAOdnCqueCad3H7ePI9xoQBIx3SnMj+49bEcLRze73jLbQP6J4e41wQ2CuHC+QL1EkkW3HjJhssb/F6mxfgWQ==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-isolation",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-CjOMKAMoeyNYHjpBldzFMn9kVzOJkpJpAvtr1igM/NhzpD/jbWzFCRrxE/wtPpWG73zsMDKIgAtqfbEpz1zoww==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-policy",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-sa2MSHNrBwzY8tiDOA36nsUJiF0D2mHbzER2dFMjg7S1PdpdsOKNYuoMiGJmqUfPOGqb/27ZSu/P0H+HcgEmaQ==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-proactive",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-AxOrdtR0Owzvnyxn2QB6PCPE/vl2T+OmTfcHbCzPMYrbTQp9WIAT1ueRMnVyvQtbziWNO6YEphmRanMKurVBew==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-recovery",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-UeC5TPAASUwx3owuTCVrq4j5Lpp7WN4erWjsmYn2lsmFflUhEKwiRWrk5CY3kK3324O3QV/RT6Ao9W+LaO+U0w==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-skills",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-liASGEea+I976yDo6sCoqz03hu8MjSmEgdFvu8dAgvQ0IHg9Ukpcy0NJy/Hur164ckmAIOFAxx6EXMIkYBC33A==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-verifier",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-Uh2voZCoI5CxdSZ4JeFRx3v4GdnKisas/7BzBx4ajKal+TKNE7YhR09+JhPHjJnNTmBTilESLy0Vzag7DEHXew==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-web-owner",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-0/xq/Ce4DefMAx9cusw5wtuL/QTO6WLTGvgAyGE+AZ7gkXT0LyFXGLSAQuV8kSxuq+El4Zjzk/fKcM1DullEsg==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/coding-subscription-provider",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-UGoeHBNjy3GS+P+sQG+gjTk1TDzyIhutOjLlRSDmYpXS46WM9qGSLLx34ValNHAO8FqFj+MfOWL2L/oxUH9bhw==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/credentials-keychain",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-WN0VacD47vZxTNbili4MPS5nLudHi8xiqIC9R/0f2cBc6QgaV/E0AvDFGEiWKLge50E3H/99hFsXz3kjQdPQFQ==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/event-triggers",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-AHGETjkzUOdxkohQ5VdlInKIEK7cWOnBTRzFSt9YtSvIgmJ/eFUqoaYAqGBGIvv/v05iU4CBc1en/QK+b4dm8Q==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/hello",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-Yzh6E6oM755x+WsZDeuL0/2p9rCisTV1fc7n/KFjScv4dTRwI8ZqtXLeG1++83PNzM3KV8j3pQUFO+Ka1pB6lg==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/lark-channel",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-rsa1eKOaGtcuBkGyLZdVUIdlkd6JBT/TLOdh698Oy90WFHSUqqse8jEhmWCB+L+8FravxC7aQtVySFVpI656SA==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/memory-wiki-bridge",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-H+5fc/P/nM/XA8qjA7pOU8Au/xLliJZGpc+tbD8xv8CozXRy+UZg9OWC+4S8ugiIpEHQ49nh66kKbYL61WD/og==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/personal-assistant",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-KFG8AUwjyLuP2zB4NFYcffRZVbr4F3uLff68t8kCRnPf/0wrOkPaOlumdb5ZIJHZF8txYoE0iHGViVG+wKM3Og==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/personal-memory",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-OfDbFDujBsZTrq/VtAKoAyyiWFWytCqZBQspCaJHzjdQbs+q4YMNJb7e1LAf2iaGG6MQpagMBRj6kHQMqfRA7w==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/personal-wiki",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-8kGcWpOJV3pXWz3uwleDEVT1ZTPzH+vqvxOZWgfL/qd79JTbQ7eeKJsOhq2HLw8Y09BBb0Up/TzCaaTIHWQrEg==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/plugin-control-plane",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-KZqis/tUMNdQyUbQoOyN5gPBsgo7fw4IeZb3jX9xvHq/qmvZf8lR7EPRQKmmq6LFvDUkIDzD/MnIzXpw551yPQ==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/preference-learning",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-p/Rmszt+sl+rhlyW/+ZEfGdLb6AzPSp5UtmXiKiKNVBIuMyV4Mjub48Toew0oi99X7PBKBs0bVVEFhZJ5fJHOA==",
+        "unresolved": [],
+        "passed": true
+      },
+      {
+        "name": "@dsh-enhanced/traex-acp-provider",
+        "version": "0.1.31",
+        "latest": "0.1.31",
+        "gitHead": null,
+        "integrity": "sha512-Li7Isn1s/L2WDa/WJO+lK/Y6iqQzfJIsWNOtfOiKnhUCEcZu2K5vv3cSyq6ECxc/VTYVxkeofZgTtg/mr1Gxtg==",
+        "unresolved": [],
+        "passed": true
+      }
+    ]
+  },
+  "remoteInstall": {
+    "script": "/tmp/dsh-rsi-0.1.31-remote-9vitqe3y/run.sh",
+    "scriptSha256": "696732efaded37de7642a5d51160f1fb636bb20e96f808c5fea3215ce801c142",
+    "exitCode": 0,
+    "installerUrl": "https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v0.1.31/scripts/install/install-npm.sh",
+    "installerMatchesTag": true,
+    "installerSha256": "cebfeaaf14f06151cebc6239d522c4a9e582b4236f0938a1344282a1d92712e6",
+    "commonSha256": "ef31bb3fab89f657a796b746da9b265674e4e2fbfbc639de19d12983cc550d82",
+    "args": "--plugin-version 0.1.31 --scenario autonomy --profile web --yes --no-service --model skip --model-route skip --dsh-version 0.1.2-rc.1",
+    "isolationImage": "sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8",
+    "environment": {
+      "platform": "linux",
+      "node": "24.7.0",
+      "pnpm": "11.7.0 (Node script distribution)",
+      "dsh": "0.1.2-rc.1",
+      "isolatedHome": true,
+      "separateFreeWebPort": true
+    },
+    "prerequisites": {
+      "nativeBuildApproval": "Only koffi explicitly preapproved in the fresh test profile. Profile contains no prior dependencies or application state.",
+      "existingExactHostCliAndDockerImage": true,
+      "manualHostFallbackPreparation": false
+    },
+    "exactTopLevelCohort": {
+      "@dsh-enhanced/assistant-actions": "0.1.31",
+      "@dsh-enhanced/assistant-deepseek-budget": "0.1.31",
+      "@dsh-enhanced/assistant-delivery": "0.1.31",
+      "@dsh-enhanced/assistant-evaluation": "0.1.31",
+      "@dsh-enhanced/assistant-goals": "0.1.31",
+      "@dsh-enhanced/assistant-isolation": "0.1.31",
+      "@dsh-enhanced/assistant-proactive": "0.1.31",
+      "@dsh-enhanced/assistant-skills": "0.1.31",
+      "@dsh-enhanced/assistant-verifier": "0.1.31",
+      "@dsh-enhanced/assistant-web-owner": "0.1.31",
+      "@dsh-enhanced/credentials-keychain": "0.1.31",
+      "@dsh-enhanced/event-triggers": "0.1.31",
+      "@dsh-enhanced/personal-assistant": "0.1.31",
+      "@dsh-enhanced/plugin-control-plane": "0.1.31"
+    },
+    "successfulActivationProbes": 2,
+    "dumpConfigProduced": true,
+    "isolationDiagnostic": {
+      "scope": "finite-isolation",
+      "owner": {
+        "status": "matched"
+      },
+      "grant": {
+        "status": "available",
+        "reasons": [],
+        "runsUsed": 0,
+        "durationReservedMs": 0,
+        "remainingRuns": 20,
+        "remainingDurationMs": 600000,
+        "activeJobs": 0,
+        "unknownJobs": 0
+      },
+      "modelAndGoals": "not-checked",
+      "externalActions": "not-checked"
+    },
+    "privateLogs": {
+      "install": "/tmp/dsh-rsi-0.1.31-remote-9vitqe3y/autonomy-logs/install.log",
+      "installSha256": "bf4fa228fd61c4ec3097a58976737e8d4ba0c9cfd1c7438faf2755e8f0ef1621",
+      "dumpConfig": "/tmp/dsh-rsi-0.1.31-remote-9vitqe3y/autonomy-logs/dump-config.json",
+      "dumpConfigSha256": "32cba3d67037afa12f8be2d36955b2d2dd80691494ea3b4b7162d8105d6f4bd6"
+    }
+  },
+  "relatedRealModelEvidence": "topology-real-repair-2026-09-12.json",
+  "limits": [
+    "Remote installation smoke makes no model requests and does not exercise Goal execution, external Actions, live Lark or a managed system service.",
+    "Exact DSH CLI and Docker image already exist; this is fresh profile installation, not provisioning on a bare machine.",
+    "Native dependency build approval remains explicit.",
+    "Main CI macOS job 103591399958 failed; this release proof is Linux scoped. Windows ACP smoke is not Windows autonomy acceptance.",
+    "Topology task has one real repair round; template two-round evidence remains separate.",
+    "In-flight repair restart/reacquisition, production holdout separation and the complete 18-work-package RSI roadmap remain unfinished.",
+    "Published .31 remote upgrade failed YAML-parser preflight with the isolated exact DSH CLI; fresh installation PASS must not be represented as upgrade PASS."
+  ],
+  "postReleaseUpgradeProbe": {
+    "status": "failed-before-lifecycle-transaction",
+    "sourceVersion": "0.1.30",
+    "targetVersion": "0.1.31",
+    "exitCode": 1,
+    "log": "/tmp/dsh-rsi-installer-final-gc8e2rcd/remote-upgrade-0.1.31-attempt2.log",
+    "logSha256": "c025ef26104d3d352ddff8a884fe47b13133961da9eb858315e95ddcc9856c44",
+    "reason": "remote lifecycle-config helper could not resolve the YAML parser from the isolated exact DSH CLI dependency closure",
+    "trackedPreservationFilesUnchanged": true,
+    "scope": "Separate pre-existing temporary profile; does not alter the successful fresh .31 profile."
+  },
+  "independentReview": {
+    "reviewer": "broker_pr_verify",
+    "conclusion": "PASS",
+    "scope": "Published .31 source, Release jobs/log totals, registry cohort and fresh remote install evidence. macOS test changes and later upgrade probe are excluded."
+  }
+}
