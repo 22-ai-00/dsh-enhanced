@@ -192,6 +192,68 @@ it('reads real review arrays and validated checks, reporting incomplete pages wi
   } finally { await close(server) }
 })
 
+it('projects every inspect response onto a strict allowlist and drops raw or credential-shaped fields', async () => {
+  const leaked = 'github_pat_remote_response_only'
+  const { server, url } = await listen((request, response) => {
+    response.setHeader('content-type', 'application/json')
+    if (request.url === '/repos/owner/repository') {
+      response.end(JSON.stringify({ full_name: scopedGrant.repository, private: true, permissions: { admin: true }, authToken: leaked, html_url: 'https://example.invalid/repository' }))
+      return
+    }
+    if (request.url === `/repos/owner/repository/branches/${encodeURIComponent(scopedGrant.branch)}`) {
+      response.end(JSON.stringify({ name: scopedGrant.branch, commit: { sha: expectedHeadOid, authToken: leaked, url: 'https://example.invalid/commit' }, protected: true, links: { html: leaked } }))
+      return
+    }
+    if (request.url === `/repos/owner/repository/contents/a.txt?ref=${encodeURIComponent(scopedGrant.branch)}`) {
+      const content = 'safe file\n'
+      response.end(JSON.stringify({ path: 'a.txt', type: 'file', sha: expectedHeadOid, size: Buffer.byteLength(content), encoding: 'base64', content: Buffer.from(content).toString('base64'), download_url: leaked, credentials: leaked }))
+      return
+    }
+    if (request.url === '/repos/owner/repository/pulls/7') {
+      response.end(JSON.stringify({ ...scopedPr(), state: 'open', merged: false, body: leaked, html_url: leaked, user: { id: 99, authToken: leaked },
+        head: { ...scopedPr().head, repo: { ...scopedPr().head.repo, permissions: { admin: true }, token: leaked } },
+        base: { ...scopedPr().base, repo: { ...scopedPr().base.repo, url: leaked } } }))
+      return
+    }
+    if (request.url === `/repos/owner/repository/commits/${expectedHeadOid}/check-runs?per_page=20`) {
+      response.end(JSON.stringify({ total_count: 1, check_runs: [{ id: 2, name: 'CI', app: { id: 7, client_secret: leaked }, head_sha: expectedHeadOid, status: 'completed', conclusion: 'success', output: { text: leaked }, details_url: leaked }] }))
+      return
+    }
+    if (request.url === '/repos/owner/repository/pulls/7/reviews?per_page=30') {
+      response.end(JSON.stringify([{ id: 3, user: { id: 42, login: 'reviewer', token: leaked }, commit_id: expectedHeadOid, state: 'APPROVED', submitted_at: '2026-01-01T00:00:00Z', body: leaked, html_url: leaked }]))
+      return
+    }
+    response.statusCode = 404; response.end('{}')
+  })
+  const transport = restTransport(url)
+  const signal = new AbortController().signal
+  try {
+    await expect(inspectGitHub({ grant: scopedGrant, kind: 'repository', token: 'only-at-server', signal }, transport)).resolves.toEqual({
+      observed: { full_name: scopedGrant.repository, untrusted: true },
+    })
+    await expect(inspectGitHub({ grant: scopedGrant, kind: 'branch', token: 'only-at-server', signal }, transport)).resolves.toEqual({
+      observed: { name: scopedGrant.branch, commit: { sha: expectedHeadOid }, untrusted: true },
+    })
+    await expect(inspectGitHub({ grant: scopedGrant, kind: 'file', path: 'a.txt', token: 'only-at-server', signal }, transport)).resolves.toEqual({
+      observed: { path: 'a.txt', sha: expectedHeadOid, content: 'safe file\n', untrusted: true },
+    })
+    await expect(inspectGitHub({ grant: scopedGrant, kind: 'pull-request', pullRequestNumber: 7, token: 'only-at-server', signal }, transport)).resolves.toEqual({
+      observed: { number: 7, state: 'open', merged: false, head: { ref: scopedGrant.branch, sha: expectedHeadOid, repo: { full_name: scopedGrant.repository } },
+        base: { ref: 'main', repo: { full_name: scopedGrant.repository } }, untrusted: true },
+    })
+    await expect(inspectGitHub({ grant: scopedGrant, kind: 'checks', pullRequestNumber: 7, token: 'only-at-server', signal }, transport)).resolves.toEqual({
+      observed: { pullRequest: { number: 7, state: 'open', merged: false, head: { ref: scopedGrant.branch, sha: expectedHeadOid, repo: { full_name: scopedGrant.repository } },
+        base: { ref: 'main', repo: { full_name: scopedGrant.repository } }, untrusted: true }, headOid: expectedHeadOid,
+      items: [{ id: 2, name: 'CI', app: { id: 7 }, head_sha: expectedHeadOid, status: 'completed', conclusion: 'success' }], truncated: false, untrusted: true },
+    })
+    await expect(inspectGitHub({ grant: scopedGrant, kind: 'reviews', pullRequestNumber: 7, token: 'only-at-server', signal }, transport)).resolves.toEqual({
+      observed: { pullRequest: { number: 7, state: 'open', merged: false, head: { ref: scopedGrant.branch, sha: expectedHeadOid, repo: { full_name: scopedGrant.repository } },
+        base: { ref: 'main', repo: { full_name: scopedGrant.repository } }, untrusted: true }, headOid: expectedHeadOid,
+      items: [{ id: 3, user: { id: 42 }, commit_id: expectedHeadOid, state: 'APPROVED', submitted_at: '2026-01-01T00:00:00Z' }], truncated: false, untrusted: true },
+    })
+  } finally { await close(server) }
+})
+
 it('rejects forked PRs, untrusted SHA paths, wrong base snapshots and echoed credentials before releasing data', async () => {
   let mode: 'fork' | 'bad-sha' | 'token' | 'base' = 'fork', calls = 0
   const token = 'only-at-server'

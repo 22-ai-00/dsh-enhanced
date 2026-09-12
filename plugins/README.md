@@ -58,7 +58,7 @@
 
 | [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux Docker 执行、私有审计与外部撤销；生产磁盘配额及动作代理待补。 |
 
-| [assistant-actions](assistant-actions) | `@dsh-enhanced/assistant-actions` | 实验性 | 有限 owner 授权的 GitHub 提交 broker、短期凭据 lease 与 unknown 不重放；不默认启用。 |
+| [assistant-actions](assistant-actions) | `@dsh-enhanced/assistant-actions` | 实验性 | 有限 owner 授权的 GitHub 动作；内嵌兼容模式保留 PR/check/review inspection，外部 v1 broker 仅支持 expected-head commit 与 repository/branch/file inspection。Host projection 携带保守 allowlist；外部 broker 以双向 Linux `SO_PEERCRED` pin 和独立 action/admin sockets 隔离数据面/控制面，并保留 admin 容量；action group/ACL 可接入独立 Host UID。独立 UID、service-manager unit、key、credential 与基础设施仍由部署方提供。 |
 
 
 | [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性 | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；实际执行仍经 Goals 验收。 |

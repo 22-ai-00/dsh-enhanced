@@ -525,6 +525,9 @@ importers:
       '@dsh-enhanced/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract
+      koffi:
+        specifier: 3.2.1
+        version: 3.2.1
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
