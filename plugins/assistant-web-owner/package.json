@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-web-owner",
-  "version": "0.1.24",
+  "version": "0.1.25",
   "description": "A DeepSeek Harness plugin for Assistant Web Owner.",
   "license": "MIT",
   "type": "module",
@@ -55,7 +55,9 @@
   "dsh": {
     "client": {
       "platform": "web",
-      "external": ["@deepseek-ai/dsh-api-gateway/client"],
+      "external": [
+        "@deepseek-ai/dsh-api-gateway/client"
+      ],
       "inject": [
         "@deepseek-ai/dsh-api-gateway",
         "@deepseek-ai/dsh-client-ui-renderer",
@@ -88,25 +90,63 @@
     "@dsh-enhanced/assistant-skills": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
-    "@dsh-enhanced/event-triggers": { "optional": true },
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/dsh-agent": { "optional": true },
-    "@deepseek-ai/dsh-api-gateway": { "optional": true },
-    "@deepseek-ai/dsh-typert-registry": { "optional": true },
-    "@deepseek-ai/dsh-typert-protocol": { "optional": true },
-    "@deepseek-ai/dsh-api-session-controller": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-conversation": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-renderer": { "optional": true },
-    "@deepseek-ai/dsh-attachment": { "optional": true },
-    "@deepseek-ai/dsh-session": { "optional": true },
-    "@deepseek-ai/dsh-workspace": { "optional": true },
-    "@dsh-enhanced/assistant-delivery": { "optional": true },
-    "@dsh-enhanced/assistant-isolation": { "optional": true },
-    "@dsh-enhanced/assistant-goals": { "optional": true },
-    "@dsh-enhanced/assistant-verifier": { "optional": true },
-    "@dsh-enhanced/assistant-deepseek-budget": { "optional": true },
-    "@dsh-enhanced/assistant-actions": { "optional": true },
-    "@dsh-enhanced/assistant-skills": { "optional": true }
+    "@dsh-enhanced/event-triggers": {
+      "optional": true
+    },
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-api-gateway": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-registry": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-api-session-controller": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-conversation": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-renderer": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-attachment": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-workspace": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-delivery": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-isolation": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-goals": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-verifier": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-deepseek-budget": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-actions": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-skills": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@dsh-enhanced/event-triggers": "workspace:*",

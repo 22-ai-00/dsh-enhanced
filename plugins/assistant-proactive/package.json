@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-proactive",
-  "version": "0.1.24",
+  "version": "0.1.25",
   "description": "Owner-authorized goal event opportunity filtering with durable utility decisions and cooldowns.",
   "license": "MIT",
   "type": "module",
