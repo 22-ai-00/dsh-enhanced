@@ -18,7 +18,8 @@ const providers: HoldoutProviderTransport[] = []
 afterEach(async () => { await Promise.all(providers.splice(0).map(provider => provider.close().catch(() => undefined))) })
 
 function config(mode = 'echo', override: Partial<HoldoutProviderConfig> = {}): HoldoutProviderConfig {
-  return { executable: process.execPath, args: [fixture], environment: { HOLDOUT_FIXTURE_MODE: mode, LANG: 'C', LC_ALL: 'C' }, maxLineBytes: 1024, maxStderrBytes: 1024, readyTimeoutMs: 200, requestTimeoutMs: 200, closeTimeoutMs: 30, killTimeoutMs: 100, ...override }
+  // A real Node authority starts under concurrent package tests; dedicated timeout cases override this normal startup bound to 20ms.
+  return { executable: process.execPath, args: [fixture], environment: { HOLDOUT_FIXTURE_MODE: mode, LANG: 'C', LC_ALL: 'C' }, maxLineBytes: 1024, maxStderrBytes: 1024, readyTimeoutMs: 2_000, requestTimeoutMs: 200, closeTimeoutMs: 30, killTimeoutMs: 100, ...override }
 }
 async function open(mode = 'echo', override: Partial<HoldoutProviderConfig> = {}, signal?: AbortSignal): Promise<HoldoutProviderTransport> {
   const provider = await openHoldoutProvider(config(mode, override), signal); providers.push(provider); return provider
@@ -250,7 +251,7 @@ describe('holdout child provider transport', () => {
 const source = readFileSync(${JSON.stringify(providerSource)}, 'utf8');
 const transformed = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
 const { openHoldoutProvider } = await import('data:text/javascript;base64,' + Buffer.from(transformed).toString('base64'));
-const provider = await openHoldoutProvider({ executable: process.execPath, args: [${JSON.stringify(fixture)}], environment: { HOLDOUT_FIXTURE_MODE: 'orphan-descendant', LANG: 'C', LC_ALL: 'C' }, maxLineBytes: 1024, maxStderrBytes: 1024, readyTimeoutMs: 200, requestTimeoutMs: 200, closeTimeoutMs: 20, killTimeoutMs: 100 });
+const provider = await openHoldoutProvider({ executable: process.execPath, args: [${JSON.stringify(fixture)}], environment: { HOLDOUT_FIXTURE_MODE: 'orphan-descendant', LANG: 'C', LC_ALL: 'C' }, maxLineBytes: 1024, maxStderrBytes: 1024, readyTimeoutMs: 2_000, requestTimeoutMs: 200, closeTimeoutMs: 20, killTimeoutMs: 100 });
 console.log('PROVIDER_PID=' + provider.pid); const value = await provider.request('manifest', {}); console.log('DESCENDANT_PID=' + value.descendantPid); await provider.close(); console.log('CLOSE_SETTLED');`
     let output = ''
     try {
