@@ -98,6 +98,55 @@ describe('cross-ledger learning writer fence', () => {
       projection: { disposition: 'retract', version: first.projection.version + 1 },
     })
 
+    const canonicalFence = {
+      scopeWatermark: corrected.scopeWatermark,
+      evidence: [{
+        subjectKind: corrected.projection.subjectKind,
+        subjectRef: corrected.projection.subjectRef,
+        version: corrected.projection.version,
+        digest: corrected.projection.digest,
+        disposition: corrected.projection.disposition,
+      }],
+    }
+    const invalidated = vi.fn(() => 'downstream-invalidated')
+    // Canonical reconciliation fences the exact retract immediately; it does
+    // not wait for the optional Evolution projection outbox to drain.
+    expect(target.withCanonicalTaskWriterFence(scope, canonicalFence, invalidated)).toEqual({
+      matched: true,
+      value: 'downstream-invalidated',
+    })
+    expect(invalidated).toHaveBeenCalledOnce()
+
+    const staleDisposition = vi.fn(() => 'must-not-run')
+    expect(target.withCanonicalTaskWriterFence(scope, {
+      ...canonicalFence,
+      evidence: [{ ...canonicalFence.evidence[0]!, disposition: 'upsert' }],
+    }, staleDisposition)).toEqual({ matched: false, reason: 'evidence-changed' })
+    expect(staleDisposition).not.toHaveBeenCalled()
+    for (const evidence of [
+      { ...canonicalFence.evidence[0]!, version: canonicalFence.evidence[0]!.version + 1 },
+      { ...canonicalFence.evidence[0]!, digest: '0'.repeat(64) },
+      { ...canonicalFence.evidence[0]!, subjectRef: 'another-run' },
+    ]) {
+      expect(target.withCanonicalTaskWriterFence(scope, {
+        ...canonicalFence, evidence: [evidence],
+      }, staleDisposition)).toEqual({ matched: false, reason: 'evidence-changed' })
+    }
+    expect(target.withCanonicalTaskWriterFence(scope, {
+      ...canonicalFence, scopeWatermark: canonicalFence.scopeWatermark - 1,
+    }, staleDisposition)).toEqual({ matched: false, reason: 'watermark-changed' })
+    expect(target.withCanonicalTaskWriterFence(
+      { workspace: '/work/other', preset: 'primary' },
+      canonicalFence,
+      staleDisposition,
+    )).toEqual({ matched: false, reason: 'watermark-changed' })
+    expect(() => target.withLearningWriterFence(scope, {
+      scopeWatermark: corrected.scopeWatermark,
+      evidence: [canonicalFence.evidence[0]!],
+    } as EvaluationLearningWriterFence, staleDisposition)).toThrowError(
+      expect.objectContaining<Partial<EvaluationStoreError>>({ code: 'invalid-input' }),
+    )
+
     const blocked = vi.fn(() => 'must-not-run')
     expect(target.withLearningWriterFence(scope, fence, blocked)).toEqual({
       matched: false,
@@ -144,6 +193,49 @@ describe('cross-ledger learning writer fence', () => {
     expect(() => target.withLearningWriterFence(scope, fence, async () => 'escaped'))
       .toThrowError(expect.objectContaining<Partial<EvaluationStoreError>>({ code: 'invalid-input' }))
     expect(() => target.append(ownerObjective('achieved', 'writer-fence:after-rollback'))).not.toThrow()
+    const retracted = target.getTaskLearningProjection(
+      scope,
+      target.append(ownerObjective('achieved', 'writer-fence:after-rollback')).id,
+    )!
+    expect(retracted.projection.disposition).toBe('retract')
+    expect(() => target.withCanonicalTaskWriterFence(scope, {
+      scopeWatermark: retracted.scopeWatermark,
+      evidence: [{
+        subjectKind: retracted.projection.subjectKind,
+        subjectRef: retracted.projection.subjectRef,
+        version: retracted.projection.version,
+        digest: retracted.projection.digest,
+        disposition: retracted.projection.disposition,
+      }],
+    }, async () => 'escaped')).toThrowError(
+      expect.objectContaining<Partial<EvaluationStoreError>>({ code: 'invalid-input' }),
+    )
+    target.close()
+  })
+
+  test('rejects an exact tuple after another task advances the same scope watermark', () => {
+    const target = new EvaluationStore({ path: databasePath(), now: () => 5_000 })
+    const first = target.append(outcome({ objectiveStatus: 'achieved' }))
+    const receipt = target.getTaskLearningProjection(scope, first.id)!
+    expect(target.getGoalOutcomeLearningProjection(scope, 'writer-fence-run')).toBeUndefined()
+    target.append(outcome({
+      situation: 'automation:writer-fence-other',
+      evidence: [{ kind: 'automation-run', ref: 'writer-fence-other-run' }],
+      objectiveStatus: 'achieved',
+      idempotencyKey: 'writer-fence:other',
+    }))
+    const callback = vi.fn(() => 'must-not-run')
+    expect(target.withCanonicalTaskWriterFence(scope, {
+      scopeWatermark: receipt.scopeWatermark,
+      evidence: [{
+        subjectKind: receipt.projection.subjectKind,
+        subjectRef: receipt.projection.subjectRef,
+        version: receipt.projection.version,
+        digest: receipt.projection.digest,
+        disposition: receipt.projection.disposition,
+      }],
+    }, callback)).toEqual({ matched: false, reason: 'watermark-changed' })
+    expect(callback).not.toHaveBeenCalled()
     target.close()
   })
 })

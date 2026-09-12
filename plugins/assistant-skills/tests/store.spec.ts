@@ -34,6 +34,25 @@ function failureCandidate(parent: ReturnType<SkillStore['save']>) {
   return { definition, provenance: captureFailureCandidateProvenance(summary, repair, scope, parent, definition) }
 }
 async function database() { const root = await mkdtemp(join(tmpdir(), 'assistant-skills-')); roots.push(root); return join(root, 'skills.sqlite') }
+function qualifiedDeployment(store: SkillStore, canaryRuns = 1) {
+  store.save(scope, definition())
+  const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Improve.', trigger: 'owner', expiresAt: Date.now() + 60_000 })
+  const comparison = store.claimComparison(scope, { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'revision-qualified' }, 1).comparison
+  const admitted = admission(candidate), qualification = { qualified: true, admissionDigest: acceptanceDigest(admitted) }
+  store.finishComparison(scope, comparison.id, 'complete', qualification)
+  const active = store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(qualification), admitted,
+    { ownerRouteId: 'route', expiresAt: Date.now() + 60_000, maxRuns: 2, canaryRuns }, { route: 'receipt' })
+  const claim = store.claim(scope, { invocationId: 'revision-run', goalId: 'revision-goal', sessionId: 'revision-session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'revision-goal-run' })
+  store.finish(scope, claim.run.id, 'succeeded', [])
+  return { ...active, admitted, run: claim.run, watchId: active.deployment.watchId }
+}
+function canonical(version: number, disposition: 'upsert' | 'retract', suffix = '') {
+  return { subjectKind: 'goal-outcome' as const, subjectRef: 'revision-assessment', version, digest: acceptanceDigest({ version, disposition, suffix }), disposition, scopeWatermark: version }
+}
+function revisionObservation(runId: string, version: number, status: 'achieved' | 'not-achieved', suffix = '') {
+  return { kind: 'current' as const, observation: { runId, receiptDigest: acceptanceDigest({ receipt: runId }), objectiveStatus: status, verifiedAt: Date.now(), validUntil: Date.now() + 60_000,
+    executionTraceDigest: acceptanceDigest({ trace: runId }), taskFamilyDigest: acceptanceDigest({ goalDefinitionDigest: 'a'.repeat(64), outcomeProfile: { id: 'unused', version: 1, digest: 'b'.repeat(64) } }), canonical: canonical(version, 'upsert', suffix) } }
+}
 
 describe('SkillStore', () => {
   it('atomically deploys only a completed exact qualification and promotes after fresh successful canary evidence', () => {
@@ -46,7 +65,7 @@ describe('SkillStore', () => {
     expect(() => store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), { ...admitted, taskFamily: { ...admitted.taskFamily, goalDefinitionDigest: 'f'.repeat(64) } }, input, receipt)).toThrow(/qualification unavailable/)
     const active = store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), admitted, input, receipt)
     expect(active).toMatchObject({ definition: { version: 2, parentVersion: 1 }, deployment: { state: 'canary', runIds: [] } })
-    expect(store.listWatches(scope)).toMatchObject([{ id: active.deployment.watchId, proofVersion: 'sole-skill-run/v1' }])
+    expect(store.listWatches(scope)).toMatchObject([{ id: active.deployment.watchId, proofVersion: 'canonical-goal-outcome/v2' }])
     expect(store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), admitted, input, receipt)).toEqual(active)
     const run = store.claim(scope, { invocationId: 'canary', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'goal-run' })
     expect(store.claim(scope, { invocationId: 'canary', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'goal-run' }).claimed).toBe(false)
@@ -54,20 +73,162 @@ describe('SkillStore', () => {
     expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('canary')
     store.observeWatch(scope, active.deployment.watchId, { runId: run.run.id, receiptDigest: 'f'.repeat(64), objectiveStatus: 'achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000, executionTraceDigest: 'c'.repeat(64) })
     expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('canary')
-    store.observeWatch(scope, active.deployment.watchId, { runId: run.run.id, receiptDigest: 'e'.repeat(64), objectiveStatus: 'achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000, executionTraceDigest: 'd'.repeat(64), taskFamilyDigest: acceptanceDigest(admitted.taskFamily) })
-    expect(store.reconcileDeployment(scope, active.deployment.id)).toMatchObject({ state: 'promoted' })
+    const firstAchieved = revisionObservation(run.run.id, 1, 'achieved')
+    firstAchieved.observation.taskFamilyDigest = acceptanceDigest(admitted.taskFamily)
+    store.replaceWatchObservation(scope, active.deployment.watchId, firstAchieved)
+    expect(store.reconcileDeployment(scope, active.deployment.id)).toMatchObject({ state: 'canary' })
+    expect(store.reconcileDeploymentWithCanonicalPromotion(scope, active.deployment.id)).toMatchObject({ state: 'promoted' })
     expect(store.assertDeploymentRun(scope, run.run.id)).toMatchObject({ id: active.deployment.id, state: 'promoted' })
     const second = store.claim(scope, { invocationId: 'promoted', goalId: 'second-goal', sessionId: 'second-session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'second-goal-run' })
     store.finish(scope, second.run.id, 'succeeded', [])
     expect(() => store.claim(scope, { invocationId: 'over-quota', goalId: 'third-goal', sessionId: 'third-session', skillName: 'read-report', version: 2, inputs: {} })).toThrow(/quota exhausted/)
     store.observeWatch(scope, active.deployment.watchId, { runId: second.run.id, receiptDigest: '9'.repeat(64), objectiveStatus: 'not-achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000, executionTraceDigest: '8'.repeat(64), taskFamilyDigest: '7'.repeat(64) })
     expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('promoted')
-    store.observeWatch(scope, active.deployment.watchId, { runId: second.run.id, receiptDigest: 'a'.repeat(64), objectiveStatus: 'not-achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000, executionTraceDigest: 'b'.repeat(64), taskFamilyDigest: acceptanceDigest(admitted.taskFamily) })
+    const secondFailure = revisionObservation(second.run.id, 1, 'not-achieved', 'second')
+    secondFailure.observation.taskFamilyDigest = acceptanceDigest(admitted.taskFamily)
+    secondFailure.observation.canonical = { ...secondFailure.observation.canonical, subjectRef: 'second-assessment', digest: acceptanceDigest({ run: second.run.id }) }
+    store.replaceWatchObservation(scope, active.deployment.watchId, secondFailure)
     expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('blocked')
     expect(store.rollbackWatch(scope, active.deployment.watchId)?.state).toBe('rolled-back')
     expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('rolled-back')
     expect(store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), admitted, input, receipt).deployment.state).toBe('rolled-back')
     expect(store.get(scope, 'read-report')?.version).toBe(3)
+    store.close()
+  })
+
+  it('replaces one run observation by canonical revision and rolls back the exact deployed version after correction', () => {
+    const store = new SkillStore(':memory:'), state = qualifiedDeployment(store)
+    const familyDigest = acceptanceDigest(state.admitted.taskFamily)
+    const achieved = revisionObservation(state.run.id, 1, 'achieved')
+    achieved.observation.taskFamilyDigest = familyDigest
+    expect(store.replaceWatchObservation(scope, state.watchId, achieved)).toMatchObject({ observations: [{ objectiveStatus: 'achieved', canonical: { version: 1 } }] })
+    expect(store.reconcileDeployment(scope, state.deployment.id)).toMatchObject({ state: 'canary' })
+    expect(store.reconcileDeploymentWithCanonicalPromotion(scope, state.deployment.id)).toMatchObject({ state: 'promoted' })
+
+    const correction = revisionObservation(state.run.id, 2, 'not-achieved')
+    correction.observation.taskFamilyDigest = familyDigest
+    const replaced = store.replaceWatchObservation(scope, state.watchId, correction)!
+    expect(replaced.observations).toHaveLength(1)
+    expect(replaced.observations[0]).toMatchObject({ runId: state.run.id, objectiveStatus: 'not-achieved', canonical: { version: 2 } })
+    expect(store.replaceWatchObservation(scope, state.watchId, correction)).toEqual(replaced)
+    expect(store.replaceWatchObservation(scope, state.watchId, achieved)).toEqual(replaced)
+    expect(store.reconcileDeployment(scope, state.deployment.id)).toMatchObject({ state: 'blocked' })
+    expect(store.rollbackWatch(scope, state.watchId)).toMatchObject({ state: 'rolled-back', rollbackVersion: 3 })
+    expect(store.get(scope, 'read-report')).toMatchObject({ version: 3, restoredFromVersion: 1 })
+    store.close()
+  })
+
+  it('never promotes from claim or ordinary reconciliation and requires the explicit canonical promotion path', () => {
+    const store = new SkillStore(':memory:'), state = qualifiedDeployment(store)
+    const achieved = revisionObservation(state.run.id, 1, 'achieved')
+    achieved.observation.taskFamilyDigest = acceptanceDigest(state.admitted.taskFamily)
+    store.replaceWatchObservation(scope, state.watchId, achieved)
+    expect(store.reconcileDeployment(scope, state.deployment.id)).toMatchObject({ state: 'canary' })
+    expect(() => store.claim(scope, { invocationId: 'must-not-promote', goalId: 'later-goal', sessionId: 'later-session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'later-goal-run' })).toThrow(/quota exhausted/u)
+    expect(store.getDeployment(scope, state.deployment.id)).toMatchObject({ state: 'canary' })
+    expect(store.reconcileDeploymentWithCanonicalPromotion(scope, state.deployment.id)).toMatchObject({ state: 'promoted' })
+    store.close()
+  })
+
+  it('commits a positive canonical observation and promotion in one store transaction', () => {
+    const store = new SkillStore(':memory:'), state = qualifiedDeployment(store)
+    const achieved = revisionObservation(state.run.id, 1, 'achieved')
+    achieved.observation.taskFamilyDigest = acceptanceDigest(state.admitted.taskFamily)
+
+    const committed = store.replaceWatchObservationAndPromote(scope, state.watchId, state.deployment.id, achieved)
+
+    expect(committed.watch).toMatchObject({ observations: [{ runId: state.run.id, objectiveStatus: 'achieved', canonical: { version: 1 } }] })
+    expect(committed.deployment).toMatchObject({ id: state.deployment.id, state: 'promoted' })
+    expect(store.listWatches(scope)).toMatchObject([{ observations: [{ runId: state.run.id, objectiveStatus: 'achieved' }] }])
+    expect(store.getDeployment(scope, state.deployment.id)).toMatchObject({ state: 'promoted' })
+    store.close()
+  })
+
+  it('rolls back a positive canonical observation when promotion reconciliation rejects malformed deployment state', async () => {
+    const path = await database(), store = new SkillStore(path), state = qualifiedDeployment(store)
+    const achieved = revisionObservation(state.run.id, 1, 'achieved')
+    achieved.observation.taskFamilyDigest = acceptanceDigest(state.admitted.taskFamily)
+    const malformed = new DatabaseSync(path)
+    malformed.prepare("UPDATE skill_deployments SET deployment_json=json_set(deployment_json, '$.runIds', json('null')) WHERE scope_key=? AND id=?")
+      .run(acceptanceDigest(scope), state.deployment.id)
+    malformed.close()
+
+    expect(() => store.replaceWatchObservationAndPromote(scope, state.watchId, state.deployment.id, achieved)).toThrow()
+
+    expect(store.listWatches(scope)).toMatchObject([{ observations: [], canonicalRevisions: [] }])
+    expect(store.getDeployment(scope, state.deployment.id)).toMatchObject({ state: 'canary' })
+    store.close()
+  })
+
+  it('keeps duplicate and out-of-order revisions idempotent but rejects same-revision disagreement', () => {
+    const store = new SkillStore(':memory:'), state = qualifiedDeployment(store)
+    const familyDigest = acceptanceDigest(state.admitted.taskFamily)
+    const second = revisionObservation(state.run.id, 2, 'achieved'); second.observation.taskFamilyDigest = familyDigest
+    const saved = store.replaceWatchObservation(scope, state.watchId, second)!
+    expect(store.replaceWatchObservation(scope, state.watchId, second)).toEqual(saved)
+    const laterScopeWatermark = structuredClone(second)
+    laterScopeWatermark.observation.canonical.scopeWatermark += 1
+    expect(store.replaceWatchObservation(scope, state.watchId, laterScopeWatermark)).toEqual(saved)
+    const stale = revisionObservation(state.run.id, 1, 'not-achieved'); stale.observation.taskFamilyDigest = familyDigest
+    expect(store.replaceWatchObservation(scope, state.watchId, stale)).toEqual(saved)
+    const conflict = revisionObservation(state.run.id, 2, 'not-achieved', 'conflict'); conflict.observation.taskFamilyDigest = familyDigest
+    expect(() => store.replaceWatchObservation(scope, state.watchId, conflict)).toThrow(/revision|conflict/u)
+    expect(store.reconcileDeploymentWithCanonicalPromotion(scope, state.deployment.id)).toMatchObject({ state: 'promoted' })
+    expect(store.get(scope, 'read-report')).toMatchObject({ version: 2 })
+    store.close()
+  })
+
+  it('persists canonical invalidation across restart and never lets a withdrawn success keep a deployment promoted', async () => {
+    const path = await database(); let store = new SkillStore(path); const state = qualifiedDeployment(store)
+    const first = revisionObservation(state.run.id, 1, 'achieved'); first.observation.taskFamilyDigest = acceptanceDigest(state.admitted.taskFamily)
+    store.replaceWatchObservation(scope, state.watchId, first)
+    expect(store.reconcileDeploymentWithCanonicalPromotion(scope, state.deployment.id)).toMatchObject({ state: 'promoted' })
+    store.close(); store = new SkillStore(path)
+
+    const invalidated = { kind: 'invalidated' as const, runId: state.run.id, canonical: canonical(2, 'retract') }
+    const watch = store.replaceWatchObservation(scope, state.watchId, invalidated)!
+    expect(watch.observations).toEqual([])
+    expect(store.replaceWatchObservation(scope, state.watchId, invalidated)).toEqual(watch)
+    expect(store.reconcileDeployment(scope, state.deployment.id)).toMatchObject({ state: 'blocked' })
+    expect(store.rollbackWatch(scope, state.watchId)).toMatchObject({ state: 'rolled-back', rollbackVersion: 3 })
+    store.close(); store = new SkillStore(path)
+    expect(store.listWatches(scope)).toMatchObject([{ state: 'rolled-back', rollbackVersion: 3, observations: [] }])
+    expect(store.replaceWatchObservation(scope, state.watchId, first)).toMatchObject({ state: 'rolled-back', observations: [] })
+    expect(store.get(scope, 'read-report')).toMatchObject({ version: 3, restoredFromVersion: 1 })
+    store.close()
+  })
+
+  it.each(['canary', 'promoted'] as const)('blocks a legacy v1 %s deployment with observations across restart without changing its active definition', async legacyState => {
+    const path = await database(); let store = new SkillStore(path), state = qualifiedDeployment(store, legacyState === 'canary' ? 2 : 1)
+    const achieved = revisionObservation(state.run.id, 1, 'achieved')
+    achieved.observation.taskFamilyDigest = acceptanceDigest(state.admitted.taskFamily)
+    store.replaceWatchObservation(scope, state.watchId, achieved)
+    expect(legacyState === 'promoted'
+      ? store.reconcileDeploymentWithCanonicalPromotion(scope, state.deployment.id)
+      : store.reconcileDeployment(scope, state.deployment.id)).toMatchObject({ state: legacyState })
+    store.close()
+    const legacy = new DatabaseSync(path)
+    legacy.prepare("UPDATE skill_watches SET watch_json=json_set(watch_json, '$.proofVersion', 'sole-skill-run/v1') WHERE id=?").run(state.watchId)
+    legacy.close(); store = new SkillStore(path)
+    expect(store.getDeployment(scope, state.deployment.id)).toMatchObject({ state: 'blocked' })
+    expect(store.get(scope, 'read-report')).toMatchObject({ version: 2 })
+    expect(() => store.assertDeploymentRun(scope, state.run.id)).toThrow(/deployment unavailable/u)
+    store.close()
+  })
+
+  it('blocks a forged v2 promoted deployment without enough canonical achieved observations across restart', async () => {
+    const path = await database(); let store = new SkillStore(path), state = qualifiedDeployment(store, 1)
+    const achieved = revisionObservation(state.run.id, 1, 'achieved')
+    achieved.observation.taskFamilyDigest = acceptanceDigest(state.admitted.taskFamily)
+    store.replaceWatchObservation(scope, state.watchId, achieved)
+    expect(store.reconcileDeploymentWithCanonicalPromotion(scope, state.deployment.id)).toMatchObject({ state: 'promoted' })
+    store.close()
+    const forged = new DatabaseSync(path)
+    forged.prepare("UPDATE skill_watches SET watch_json=json_set(watch_json, '$.observations', json('[]'), '$.canonicalRevisions', json('[]')) WHERE id=?").run(state.watchId)
+    forged.close(); store = new SkillStore(path)
+    expect(store.getDeployment(scope, state.deployment.id)).toMatchObject({ state: 'blocked' })
+    expect(store.get(scope, 'read-report')).toMatchObject({ version: 2 })
+    expect(() => store.assertDeploymentRun(scope, state.run.id)).toThrow(/deployment unavailable/u)
     store.close()
   })
 

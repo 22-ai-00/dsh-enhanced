@@ -1,0 +1,129 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-11",
+  "recordedAt": "2026-09-12T01:20:29Z",
+  "baseCommit": "c7da58b064df733b087bbe8fca39e5082b44c5be",
+  "status": "engineering-slice-validated",
+  "completeWorkPackage": false,
+  "workingTreeState": {
+    "state": "WP15 source, package tests and final repository gate settled",
+    "sourceHashesAreProvisional": false,
+    "mustRehashAfterFinalRootGate": false,
+    "unrelatedDirtyWorkExcluded": [
+      "docs/evidence/sqlite-inode-binding-2026-09-11.json",
+      "plugins/assistant-automations/tests/operator.spec.ts",
+      "plugins/assistant-delivery/tests/operator-snapshot.spec.ts",
+      "docs/autonomy-handoff-2026-09-09.md"
+    ]
+  },
+  "scope": [
+    "WP15 qualified finite canary monitoring of current canonical goal-outcome revisions",
+    "Exact replacement or withdrawal of a previously accepted canary observation",
+    "Pre-dispatch canonical evidence gates for deployed skill runs"
+  ],
+  "workPackages": {
+    "strengthened": ["15"],
+    "statusChanged": false,
+    "wp15": "implementing",
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "implemented": [
+    "Evaluation exposes a Host-only exact goal-outcome lookup addressed by canonical workspace/preset scope plus assessment ID.",
+    "Evaluation exposes a synchronous canonical task writer fence over scope watermark, exact subject kind/ref, revision, digest and upsert or retract disposition without waiting for optional Evolution projection delivery.",
+    "Skills subscribes to Evaluation task-change nudges through Cordis optional-provider lifecycle, performs a cold reread on provider appearance or replacement and disposes the old subscription with its provider fiber.",
+    "A qualified canary watch freezes the first accepted run, assessment, receipt validity, execution trace and task-family binding; later revisions cannot replace that identity. New qualified watches use canonical-goal-outcome/v2, while legacy or malformed active qualified deployments without exact canonical evidence reopen as blocked without changing the active definition.",
+    "A newer canonical status replaces the prior observation, while a canonical retract removes it and persists exact invalidation. Same-version exact duplicates are idempotent; conflicts, lower versions and non-increasing watermarks are rejected or ignored without restoring older evidence.",
+    "Canonical replacement or invalidation, deployment reconciliation and required exact-version parent rollback commit in the Skills writer transaction while Evaluation holds the exact canonical fence.",
+    "Deployment admission rereads and briefly fences canonical evidence before claim, after quota reservation and before each native tool dispatch; task-change notices also abort active deployed executions. Missing or changed evidence fails closed, while post-claim uncertainty is recorded as unknown and cannot replay.",
+    "Public standalone watches retain their prior immutable-receipt observation-only behavior and cannot promote or roll back a version."
+  ],
+  "packageValidation": {
+    "assistantEvaluation": {
+      "command": "pnpm --filter @dsh-enhanced/assistant-evaluation test",
+      "exitCode": 0,
+      "testsPassed": 228,
+      "testsSkipped": 4
+    },
+    "assistantSkills": {
+      "command": "pnpm --filter @dsh-enhanced/assistant-skills test",
+      "exitCode": 0,
+      "testsPassed": 237,
+      "testsSkipped": 11
+    },
+    "typechecks": [
+      {
+        "command": "pnpm --filter @dsh-enhanced/assistant-evaluation typecheck",
+        "exitCode": 0
+      },
+      {
+        "command": "pnpm --filter @dsh-enhanced/assistant-skills typecheck",
+        "exitCode": 0
+      }
+    ]
+  },
+  "sourceSha256": {
+    "plugins/assistant-evaluation/src/service.ts": "0ad69981e3fa9590c1a568b491c3a4aba4f0ee9ba95d48e0564b3f2c3d530e4c",
+    "plugins/assistant-evaluation/src/store.ts": "1bb29055c33167c53a323dbf94a1d74018f634201a6a898cd189be3e643f59fb",
+    "plugins/assistant-evaluation/src/types.ts": "e10794bc8ec0b1ea3caac5fae737ab906746dfff5ae1636656f99a89f519314c",
+    "plugins/assistant-evaluation/tests/service.spec.ts": "410ddbf992837e3905c3770dfd70e820accf05449e3e0d2ccfd617ba59da55e3",
+    "plugins/assistant-evaluation/tests/verifier-goal-step.spec.ts": "36f09306cc107f1def1cdd26fa62f2f0ff47fa547adead0b2bba9acaf5503cec",
+    "plugins/assistant-evaluation/tests/writer-fence.spec.ts": "d0b5567819954881d735363e65158d50bc271adba228de1ebc68bd4ab2d9d888",
+    "plugins/assistant-skills/package.json": "c7d1cb471495c296cd5dabc303f1b945863234c94fbd567791e4607aff899e87",
+    "plugins/assistant-skills/src/index.ts": "395757cd835c136b31e176b98bd1a15684905109c6c8a06c1110c543d2eae090",
+    "plugins/assistant-skills/src/service.ts": "1de255224eaca83f3256ac4d08a1de45d58633d4ea407794a275822e9ffebd87",
+    "plugins/assistant-skills/src/store.ts": "b81824812dac4015d9fcdbfe04eb15886c891fb506250d46c012ca5787c3cb17",
+    "plugins/assistant-skills/src/watch-proof.ts": "bdf1de69586b9fe08b7983f33ab21c8c7805ed1b299f8e2c621c8e6cca1c03a6",
+    "plugins/assistant-skills/tests/service.spec.ts": "96949f21f1a10bc7abcc143d7a8b3780f65a16803431176d004204629aae9262",
+    "plugins/assistant-skills/tests/store.spec.ts": "400d7639446abb0a8d507257f347184ef58ff82ebc9d81c29e5c6bc992d0e100",
+    "plugins/assistant-skills/tests/watch-proof.spec.ts": "7a7f39a25445cdcd74c3475d93cca4d77fdcaabaad0fabf617314937fb11c1b7"
+  },
+  "finalRootGate": {
+    "status": "passed",
+    "command": "CI=true VITEST_MAX_WORKERS=1 pnpm check",
+    "exitCode": 0,
+    "log": "/tmp/dsh-wp15-canonical-revision-root-check-frozen.log",
+    "sha256": "a064cb9170a4529386688240bc047c9d1da75959cae21725aa5d0bf7726083ea",
+    "rootTests": {
+      "filesPassed": 31,
+      "testsPassed": 490,
+      "testsSkipped": 1
+    },
+    "aggregateTests": {
+      "filesPassed": 351,
+      "filesSkipped": 12,
+      "testsPassed": 4927,
+      "testsSkipped": 43
+    },
+    "dryRunPacks": 33,
+    "result": "Workspace validation, zero-warning lint, typechecking, tests, build and all dry-run packs passed on the frozen source snapshot."
+  },
+  "independentReview": {
+    "status": "passed",
+    "block": 0,
+    "high": 0,
+    "medium": 0,
+    "notes": "The final incremental review confirmed one Skills BEGIN IMMEDIATE covers positive canonical observation replacement and promotion, while negative or retract replacement and exact rollback retain their existing atomic path."
+  },
+  "engineeringFixtureBoundary": {
+    "goalsAndOwnerEvidence": "Controlled Host fixtures supply exact Goals snapshots, Evaluation revisions and owner-correction semantics.",
+    "realDeliveryOwnerCorrection": false,
+    "realLarkOwnerCorrection": false,
+    "wholeGoalOwnerCorrectionUi": "missing",
+    "realModel": false,
+    "productionCohort": false,
+    "otherDeploymentCohorts": false
+  },
+  "limitations": [
+    "The repository still has no Delivery or Lark owner-facing correction and withdrawal entrypoint for goal-outcome assessments.",
+    "A synchronous Evaluation fence cannot remain held across an asynchronous external tool call; a non-cooperative tool may complete after a later correction, its external effects are not undone, and the run is conservatively recorded unknown.",
+    "A fixture-authored canonical correction or retract is engineering evidence only and is not a real owner channel acceptance test.",
+    "The revision monitor is wired only to qualified finite canary deployments; standalone watches intentionally retain legacy observation-only semantics and no other cohort is claimed.",
+    "The passing package and repository gates do not substitute for real-model benefit measurement or production rollout evidence.",
+    "WP15 remains implementing and the global work-package counts remain 3 verified, 13 implementing and 2 pending."
+  ]
+}

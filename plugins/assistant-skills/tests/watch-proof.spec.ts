@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { OwnerGoalRunProof } from '@dsh-enhanced/assistant-goals'
+import { canonicalEvaluationScope, evaluationLearningProjectionDigest } from '@dsh-enhanced/assistant-evaluation'
 import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import type { SkillRun } from '../src/store.ts'
-import { soleSkillRunTrace, watchObservation } from '../src/watch-proof.ts'
+import { soleSkillRunTrace, watchObservation, watchObservationResult } from '../src/watch-proof.ts'
 
 const now = 10_000
 const scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', preset: 'primary' }
@@ -23,6 +24,26 @@ function proof(steps: OwnerGoalRunProof['steps'] = [
 }
 const trace = proof()
 const taskFamily = { goalDefinitionDigest: run.goalDefinitionDigest!, outcomeProfile: { id: 'profile', version: 1, digest: 'b'.repeat(64) } }
+const trusted = (value: unknown) => {
+  try {
+    const receipt = value as ReturnType<typeof canonicalOutcome>
+    return evaluationLearningProjectionDigest(receipt) === receipt.projection.digest
+  } catch { return false }
+}
+
+function canonicalOutcome(status: 'achieved' | 'not-achieved', version = 1, disposition: 'upsert' | 'retract' = 'upsert') {
+  const evaluationScope = { workspace: scope.workspace, preset: scope.preset }
+  const scopeKey = canonicalEvaluationScope(evaluationScope).scopeKey
+  const subjectRef = 'assessment'
+  const execution = { outcomeId: 'evaluation-execution', status: 'succeeded' as const, source: { kind: 'evaluator' as const, id: 'assistant-verifier' },
+    evidence: [{ kind: 'goal-outcome' as const, ref: subjectRef }], occurredAt: 600, evaluator: { id: 'assistant-verifier', version: '1' } }
+  const objective = disposition === 'retract' ? undefined : { outcomeId: `evaluation-objective-${version}`, status, source: { kind: version === 1 ? 'evaluator' as const : 'user-feedback' as const, id: version === 1 ? 'assistant-verifier' : 'assistant-delivery/typed-owner-feedback' },
+    evidence: [{ kind: 'goal-outcome' as const, ref: subjectRef }], occurredAt: 600 + version, evaluator: { id: version === 1 ? 'assistant-verifier' : 'assistant-delivery-owner-feedback', version: version === 1 ? '1' : '2' } }
+  const projectionBase = { subjectKind: 'goal-outcome' as const, subjectRef, disposition, ...(objective === undefined ? {} : { evidenceOutcomeId: objective.outcomeId }) }
+  const digest = evaluationLearningProjectionDigest({ scopeKey, situation: 'goal:goal:definition:1', execution, ...(objective === undefined ? {} : { objective }), projection: projectionBase })
+  return { triggerOutcomeId: objective?.outcomeId ?? `evaluation-retract-${version}`, scope: evaluationScope, scopeKey, scopeWatermark: version, situation: 'goal:goal:definition:1', execution,
+    ...(objective === undefined ? {} : { objective }), projection: { ...projectionBase, version, digest } }
+}
 
 function snapshot(status: 'achieved' | 'not-achieved') {
   const taskGoal = { id: run.goalId, definitionVersion: 1, definitionDigest: run.goalDefinitionDigest!, sessionId: run.sessionId, nativeGoalId: run.nativeGoalId! }
@@ -82,5 +103,40 @@ describe('deployment watch causal proof', () => {
   ])('rejects an unrelated Goal or outcome profile for both positive and negative outcomes', family => {
     expect(watchObservation(snapshot('achieved') as never, scope, run, now, trace, family)).toBeUndefined()
     expect(watchObservation(snapshot('not-achieved') as never, scope, run, now, trace, family)).toBeUndefined()
+  })
+
+  it('uses the latest canonical revision rather than preserving the original achieved receipt forever', () => {
+    const firstSnapshot = snapshot('achieved')
+    const first = watchObservationResult(firstSnapshot as never, scope, run, now, trace, taskFamily, canonicalOutcome('achieved'), trusted)
+    expect(first).toMatchObject({ kind: 'current', observation: { runId: run.id, objectiveStatus: 'achieved', canonical: {
+      subjectKind: 'goal-outcome', subjectRef: 'assessment', version: 1, disposition: 'upsert', scopeWatermark: 1,
+    } } })
+
+    // The immutable verifier receipt remains achieved. The canonical owner
+    // correction is the newer truth consumed by deployment monitoring.
+    const correctedSnapshot = snapshot('achieved')
+    const corrected = watchObservationResult(correctedSnapshot as never, scope, run, now, trace, taskFamily, canonicalOutcome('not-achieved', 2), trusted)
+    expect(corrected).toMatchObject({ kind: 'current', observation: { runId: run.id, objectiveStatus: 'not-achieved', canonical: {
+      subjectKind: 'goal-outcome', subjectRef: 'assessment', version: 2, disposition: 'upsert', scopeWatermark: 2,
+    } } })
+    expect(corrected).not.toEqual(first)
+  })
+
+  it('turns a canonical withdrawal into an explicit invalidation of the prior observation', () => {
+    const snapshotValue = snapshot('achieved')
+    const withdrawn = watchObservationResult(snapshotValue as never, scope, run, now, trace, taskFamily, canonicalOutcome('achieved', 3, 'retract'), trusted)
+    expect(withdrawn).toMatchObject({ kind: 'invalidated', runId: run.id, canonical: {
+      subjectKind: 'goal-outcome', subjectRef: 'assessment', version: 3, disposition: 'retract', scopeWatermark: 3,
+    } })
+    expect(withdrawn).not.toHaveProperty('observation')
+  })
+
+  it.each([
+    ['wrong canonical run', (value: ReturnType<typeof canonicalOutcome>) => { value.projection.subjectRef = 'other-assessment'; return value }],
+    ['wrong canonical owner scope', (value: ReturnType<typeof canonicalOutcome>) => { value.scope = { ...value.scope, workspace: '/foreign' }; return value }],
+    ['wrong canonical projection digest', (value: ReturnType<typeof canonicalOutcome>) => { value.projection.digest = 'f'.repeat(64); return value }],
+  ])('rejects %s instead of weakening exact run, owner, or profile binding', (_name, mutate) => {
+    const canonical = mutate(canonicalOutcome('achieved', 2))
+    expect(watchObservationResult(snapshot('achieved') as never, scope, run, now, trace, taskFamily, canonical, trusted)).toBeUndefined()
   })
 })

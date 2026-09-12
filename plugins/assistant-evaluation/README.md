@@ -152,6 +152,10 @@ Host 可通过 `getTrustedAutomationRunLearningProjection({ scope, runId })` 精
 
 `withTrustedCanonicalLearningWriterFence` 为依赖 Evaluation canonical 状态本身的 Host 写入提供同样的 scope watermark、精确 task tuple 和同步写锁校验，但不要求投递给 Evolution 的 outbox 已完成。`withTrustedLearningWriterFence` 继续为 Evolution 依赖方保留 projection-pending gate；两者都不会代替或伪造 outbox 投递。
 
+`getTrustedGoalOutcomeLearningProjection({ scope, assessmentId })` 是 whole-goal 消费者的 Host-only 精确读取入口。它只接受 `canonicalEvaluationHostScope()` 产生的 token，并且只查询相同 canonical workspace/preset 下 subject 恰为 `goal-outcome/<assessmentId>` 的当前 projection；缺失或跨 scope 返回 `undefined`。返回的 `version`、`digest`、`disposition` 与 scope watermark 是 Evaluation 当前状态，不把原始 immutable Verifier receipt 永久视为事实。该入口只证明 assessment 的 canonical 状态；owner、Goal、Session、run 和 outcome profile 的关联仍须由调用方从 Goals 的当前 Host snapshot 独立证明。
+
+`withTrustedCanonicalTaskWriterFence({ scope, scopeWatermark, evidence }, callback)` 是对应的同步 commit fence。它逐项核对 exact subject kind/ref、revision、digest 和 `upsert | retract` disposition，并在 Evaluation writer lock 持有期间执行同步 callback；scope 内任何任务推进 watermark，或该 assessment 被纠正、撤回、替换，都会在 callback 运行前返回 `evidence-changed` / `watermark-changed`。它不等待可选 Evolution projection outbox，因此可让下游在 exact retract 下原子移除旧观察；异步 callback 会失败并回滚。原 `withTrustedCanonicalLearningWriterFence` 继续只接受可推广的 `upsert`，其契约不被放宽。
+
 ### Owner outcome revisions
 
 Delivery's authenticated capability can explicitly correct or withdraw one exact delivered result. Schema 8 retains immutable raw outcomes, linked owner revisions, provider command receipts (including rejected CAS attempts), and a single canonical task projection. Owner lanes include principal record id and version. Only explicitly linked predecessors are superseded; independent contradictory owner evidence stays quarantined. Withdrawal is an authoritative `unknown` tombstone, so earlier terminal/evaluator success cannot reappear. The revision, digest, audit and projection outbox commit in the same SQLite transaction.
@@ -159,6 +163,7 @@ Delivery's authenticated capability can explicitly correct or withdraw one exact
 Legacy schema 7 owner rows are adopted lazily through the exact Host delivery capability and stable initial idempotency key. Adoption verifies the run and Outbox references without rewriting raw history. Host consumers receive revision notifications and must also revalidate durable proof on startup / dispatch; a failed listener cannot prevent other consumers or the projection outbox from progressing.
 
 整体目标的独立 v3 回执使用 `goal-outcome/<assessmentId>` subject，与同 ref 的步骤、前台和 Automation 分离，仍按完整目标定义归因。schema 11 在事务内迁移旧 task projections 并保留历史；owner 反馈修订工具的原支持范围不变。
+当前 Delivery/Lark owner 纠正入口仍只覆盖既有前台与 Automation 结果，没有 whole-goal correction/withdraw UI。仓库测试可用 Host 工程夹具构造后续 `goal-outcome` revision 来验证消费者，但这不是一次真实 owner、Delivery 或 Lark 纠正链路验收。
 
 
 `memory-v1` 保留首轮公开试验的原始题目与判定，可按原计划复现。`memory-v2` 是单独版本，明确当前资料 ID、Memory provenance URI 与 `claim:<key>` 的引用约定；改进题目说明后必须建立新计划，不会重写 v1 的失败结果。

@@ -126,6 +126,11 @@ describe('trusted Verifier goal-step Evaluation sink', () => {
     }
 
     const achieved = await complete(task('assessment-achieved', 7, 'a'.repeat(64)), { status: 'succeeded', quiescent: true })
+    const hostScope = evaluation.canonicalHostScope(scope)
+    const staleAchieved = evaluation.getTrustedGoalOutcomeLearningProjection({
+      scope: hostScope, assessmentId: 'assessment-achieved',
+    })!
+    expect(evaluation.isTrustedTaskLearningProjectionReceipt(staleAchieved)).toBe(true)
     const unknown = await complete(task('assessment-unknown', 7, 'a'.repeat(64)), { status: 'unknown', quiescent: false })
     const oldDefinition = await complete(task('assessment-old-definition', 6, 'b'.repeat(64)), { status: 'succeeded', quiescent: true })
 
@@ -142,6 +147,94 @@ describe('trusted Verifier goal-step Evaluation sink', () => {
     expect(evaluation.queryTasks({ scope, situation: 'goal:goal-42:definition:6', limit: 10 })).toEqual([
       expect.objectContaining({ projection: expect.objectContaining({ subjectKind: 'goal-outcome', subjectRef: 'assessment-old-definition' }), objectiveStatus: 'achieved' }),
     ])
+    const achievedProjection = evaluation.getTrustedGoalOutcomeLearningProjection({
+      scope: hostScope,
+      assessmentId: 'assessment-achieved',
+    })!
+    expect(achievedProjection).toMatchObject({
+      scope,
+      projection: {
+        subjectKind: 'goal-outcome',
+        subjectRef: 'assessment-achieved',
+        disposition: 'upsert',
+      },
+      objective: { status: 'achieved' },
+    })
+    expect(evaluation.isTrustedTaskLearningProjectionReceipt(achievedProjection)).toBe(true)
+    expect(evaluation.isTrustedTaskLearningProjectionReceipt(staleAchieved)).toBe(false)
+    const withdrawn = evaluation.getTrustedGoalOutcomeLearningProjection({
+      scope: hostScope,
+      assessmentId: 'assessment-unknown',
+    })!
+    expect(withdrawn).toMatchObject({
+      scope,
+      projection: {
+        subjectKind: 'goal-outcome',
+        subjectRef: 'assessment-unknown',
+        disposition: 'retract',
+      },
+      objective: { status: 'unknown' },
+    })
+    expect(evaluation.isTrustedTaskLearningProjectionReceipt(withdrawn)).toBe(true)
+    const altered = (change: Record<string, unknown>) => ({
+      ...structuredClone(withdrawn),
+      ...change,
+    }) as typeof withdrawn
+    for (const candidate of [
+      altered({ scopeKey: JSON.stringify([root, 'other']) }),
+      altered({ situation: 'goal:goal-42:definition:999' }),
+      altered({ projection: { ...withdrawn.projection, version: withdrawn.projection.version + 1 } }),
+      altered({ projection: { ...withdrawn.projection, digest: '0'.repeat(64) } }),
+      altered({ projection: { ...withdrawn.projection, disposition: 'upsert' } }),
+      altered({ objective: { ...withdrawn.objective!, status: 'malformed' } }),
+    ]) {
+      expect(evaluation.isTrustedTaskLearningProjectionReceipt(candidate)).toBe(false)
+    }
+    expect(() => evaluation.isTrustedTaskLearningProjectionReceipt(null as never)).not.toThrow()
+    expect(evaluation.isTrustedTaskLearningProjectionReceipt(null as never)).toBe(false)
+    const fencedRetraction = evaluation.withTrustedCanonicalTaskWriterFence({
+      scope: hostScope,
+      scopeWatermark: withdrawn.scopeWatermark,
+      evidence: [{
+        subjectKind: withdrawn.projection.subjectKind,
+        subjectRef: withdrawn.projection.subjectRef,
+        version: withdrawn.projection.version,
+        digest: withdrawn.projection.digest,
+        disposition: withdrawn.projection.disposition,
+      }],
+    }, () => 'invalidated')
+    expect(fencedRetraction).toEqual({ matched: true, value: 'invalidated' })
+    expect(() => evaluation.withTrustedCanonicalTaskWriterFence({
+      scope: hostScope,
+      scopeWatermark: withdrawn.scopeWatermark,
+      evidence: [{
+        subjectKind: withdrawn.projection.subjectKind,
+        subjectRef: withdrawn.projection.subjectRef,
+        version: withdrawn.projection.version,
+        digest: withdrawn.projection.digest,
+        disposition: withdrawn.projection.disposition,
+      }],
+    }, async () => 'escaped')).toThrow(/synchronous/i)
+    expect(() => evaluation.withTrustedCanonicalLearningWriterFence({
+      scope: hostScope,
+      scopeWatermark: withdrawn.scopeWatermark,
+      evidence: [{
+        subjectKind: withdrawn.projection.subjectKind,
+        subjectRef: withdrawn.projection.subjectRef,
+        version: withdrawn.projection.version,
+        digest: withdrawn.projection.digest,
+        disposition: withdrawn.projection.disposition,
+      }],
+    } as Parameters<typeof evaluation.withTrustedCanonicalLearningWriterFence>[0], () => 'must-not-run'))
+      .toThrow(/evidence.*invalid/i)
+    expect(evaluation.getTrustedGoalOutcomeLearningProjection({
+      scope: hostScope,
+      assessmentId: 'missing-assessment',
+    })).toBeUndefined()
+    expect(evaluation.getTrustedGoalOutcomeLearningProjection({
+      scope: evaluation.canonicalHostScope({ workspace: root, preset: 'other' }),
+      assessmentId: 'assessment-achieved',
+    })).toBeUndefined()
     expect(verifier.inspect(oldDefinition.contractId)?.receipt?.task.kind).toBe('goal-outcome')
 
     // An authenticated owner record only selects an exact profile. It cannot

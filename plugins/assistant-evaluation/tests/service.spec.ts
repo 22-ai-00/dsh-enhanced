@@ -118,6 +118,22 @@ describe('assistant evaluation service', () => {
     })).toBeUndefined()
   })
 
+  test('mints an opaque canonical Host scope through the service instance', async () => {
+    const { ctx, service } = await harness()
+    const scope = service.canonicalHostScope({ workspace: '/work/alpha/../alpha', preset: ' primary ' })
+    expect(scope).toEqual({ workspace: '/work/alpha', preset: 'primary' })
+    expect(Object.isFrozen(scope)).toBe(true)
+    expect(() => service.getTrustedGoalOutcomeLearningProjection({
+      scope: Object.freeze({ workspace: '/work/alpha', preset: 'primary' }) as typeof scope,
+      assessmentId: 'assessment-1',
+    })).toThrowError(expect.objectContaining<Partial<AssistantEvaluationError>>({ code: 'invalid-input' }))
+
+    await ctx.fiber.restart()
+    contexts.splice(contexts.indexOf(ctx), 1)
+    expect(() => service.canonicalHostScope({ workspace: '/work/alpha', preset: 'primary' }))
+      .toThrowError(expect.objectContaining<Partial<AssistantEvaluationError>>({ code: 'disposed' }))
+  })
+
   test('accepts a typed foreground owner subject while legacy Delivery claims remain Automation runs', async () => {
     const { delivery, service } = await harness()
     const scope = { workspace: '/work/alpha', preset: 'primary' }

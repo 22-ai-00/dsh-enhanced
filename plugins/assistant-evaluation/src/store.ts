@@ -11,10 +11,11 @@ import {
 } from './types.js'
 import type {
   DeliveryStatus,
+  EvaluationCanonicalLearningEvidenceTuple,
+  EvaluationCanonicalLearningWriterFence,
   EvaluationEvidenceRef,
   EvaluationHealth,
   EvaluationJson,
-  EvaluationLearningEvidenceTuple,
   EvaluationLearningWriterFence,
   EvaluationLearningWriterFenceResult,
   EvaluationMetrics,
@@ -945,6 +946,23 @@ export class EvaluationStore {
     return this.getTaskLearningProjection(scopeInput, task.projection.primaryOutcomeId)
   }
 
+  /** Exact whole-goal lookup by the verifier assessment identity. */
+  getGoalOutcomeLearningProjection(
+    scopeInput: EvaluationScope,
+    assessmentIdInput: string,
+  ): TrustedTaskLearningProjectionReceipt | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const assessmentId = boundedText(assessmentIdInput, 'assessmentId', 1_000)
+    const row = this.#database.prepare(`
+      SELECT task.* FROM evaluation_task_projection_view task
+      WHERE task.scope_key = ? AND task.task_subject_kind = 'goal-outcome'
+        AND task.task_subject_ref = ?
+    `).get(scopeKey, assessmentId) as unknown as ProjectedOutcomeRow | undefined
+    if (row === undefined) return undefined
+    const task = projected(row)
+    return this.getTaskLearningProjection(scopeInput, task.projection.primaryOutcomeId)
+  }
+
   /**
    * Resolve an append-only outbox trigger to the latest canonical state of its
    * task. The trigger may be arbitrarily old; version/digest always describe
@@ -1020,7 +1038,38 @@ export class EvaluationStore {
     options: Readonly<{ requireProjectionDelivery?: boolean }> = {},
   ): EvaluationLearningWriterFenceResult<T> {
     const { scopeKey } = canonicalEvaluationScope(scopeInput)
-    const fence = this.#normalizeLearningWriterFence(fenceInput)
+    const fence = this.#normalizeLearningWriterFence(fenceInput, false)
+    return this.#withLearningWriterFence(scopeKey, fence, callback, options)
+  }
+
+  /**
+   * Fence exact current canonical revisions, including retractions, without
+   * waiting for optional Evolution projection delivery.
+   */
+  withCanonicalTaskWriterFence<T>(
+    scopeInput: EvaluationScope,
+    fenceInput: EvaluationCanonicalLearningWriterFence,
+    callback: () => T,
+  ): EvaluationLearningWriterFenceResult<T> {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const fence = this.#normalizeLearningWriterFence(fenceInput, true)
+    return this.#withLearningWriterFence(
+      scopeKey,
+      fence,
+      callback,
+      { requireProjectionDelivery: false },
+    )
+  }
+
+  #withLearningWriterFence<T>(
+    scopeKey: string,
+    fence: Readonly<{
+      scopeWatermark: number
+      evidence: readonly Readonly<EvaluationCanonicalLearningEvidenceTuple>[]
+    }>,
+    callback: () => T,
+    options: Readonly<{ requireProjectionDelivery?: boolean }>,
+  ): EvaluationLearningWriterFenceResult<T> {
     this.#database.exec('BEGIN IMMEDIATE')
     try {
       const watermark = this.#database.prepare(`
@@ -1055,7 +1104,7 @@ export class EvaluationStore {
           evidence.subjectRef,
         ) as { version: number; digest: string; disposition: 'upsert' | 'retract' } | undefined
         if (current === undefined || current.version !== evidence.version
-          || current.digest !== evidence.digest || current.disposition !== 'upsert') {
+          || current.digest !== evidence.digest || current.disposition !== evidence.disposition) {
           this.#database.exec('COMMIT')
           return Object.freeze({ matched: false as const, reason: 'evidence-changed' as const })
         }
@@ -1502,8 +1551,12 @@ export class EvaluationStore {
   }
 
   #normalizeLearningWriterFence(
-    input: EvaluationLearningWriterFence,
-  ): Readonly<{ scopeWatermark: number; evidence: readonly Readonly<EvaluationLearningEvidenceTuple>[] }> {
+    input: EvaluationLearningWriterFence | EvaluationCanonicalLearningWriterFence,
+    allowRetract: boolean,
+  ): Readonly<{
+    scopeWatermark: number
+    evidence: readonly Readonly<EvaluationCanonicalLearningEvidenceTuple>[]
+  }> {
     if (typeof input !== 'object' || input === null || Array.isArray(input)
       || !Number.isSafeInteger(input.scopeWatermark) || input.scopeWatermark < 1
       || !Array.isArray(input.evidence) || input.evidence.length < 1
@@ -1513,7 +1566,7 @@ export class EvaluationStore {
     const seen = new Set<string>()
     const entries = input.evidence.map((raw, index) => {
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)
-        || raw.disposition !== 'upsert'
+        || (raw.disposition !== 'upsert' && (!allowRetract || raw.disposition !== 'retract'))
         || (raw.subjectKind !== 'automation-run' && raw.subjectKind !== 'foreground-turn' && raw.subjectKind !== 'goal-step' && raw.subjectKind !== 'goal-outcome' && raw.subjectKind !== 'outcome')
         || !Number.isSafeInteger(raw.version) || raw.version < 1
         || raw.version > 1_000_000_000
@@ -1531,7 +1584,7 @@ export class EvaluationStore {
         subjectRef,
         version: raw.version,
         digest: raw.digest,
-        disposition: 'upsert' as const,
+        disposition: raw.disposition,
       })
     })
     return Object.freeze({
