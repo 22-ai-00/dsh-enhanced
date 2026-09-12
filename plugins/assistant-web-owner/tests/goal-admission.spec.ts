@@ -33,7 +33,12 @@ async function fixture(now = Date.now()) {
     for (const row of inserts.items) effectiveDocument.add(row)
   }
   // Metadata-only fixture: verifier preparation validates an executable path but never runs Docker here; Linux E2E covers Docker execution.
-  const effective = effectiveDocument.toString().replace('/usr/bin/docker', await realpath(process.execPath))
+  if (!isSeq(effectiveDocument.contents)) throw new Error('fixture expected effective rows')
+  const isolationRow = effectiveDocument.contents.items.find(row => yamlId(row) === 'dsh-enhanced-assistant-isolation')
+  if (!isMap(isolationRow)) throw new Error('fixture expected isolation row')
+  const metadataExecutable = await realpath(process.execPath)
+  isolationRow.setIn(['config', 'dockerPath'], metadataExecutable)
+  const effective = effectiveDocument.toString()
   const initial = prepareWebOwnerProfile(input, '[]', effective)
   await mkdir(input.workspace)
   await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
@@ -43,6 +48,7 @@ async function fixture(now = Date.now()) {
   delivery.close()
   const prepared = { ...initial, patch: prepareAutonomyProfile({ ...input, isolation: { image: `sha256:${'a'.repeat(64)}`, maxRuns: 20, leaseMs: 3600000, maxTotalDurationMs: 600000 } }, initial.patch, effective, realOwner, now) }
   const profile = inspectAutonomyProfile(prepared.patch, input.profile, input.dshHome)
+  expect(profile.dockerPath).toBe(metadataExecutable)
   const snapshot = { binding: realBinding, owner: realOwner }
   await mkdir(profile.stateRoot, { recursive: true, mode: 0o700 })
   const isolation = new IsolationLedger(join(profile.stateRoot, 'ledger.sqlite'))

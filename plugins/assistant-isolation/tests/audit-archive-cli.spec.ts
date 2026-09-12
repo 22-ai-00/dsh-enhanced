@@ -1,4 +1,4 @@
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFile, spawnSync, type SpawnSyncReturns } from 'node:child_process'
@@ -24,7 +24,7 @@ function fixture(): { stateRoot: string; archiveDirectory: string } {
   const ledger = new IsolationLedger(join(stateRoot, 'ledger.sqlite'), { now: () => 10_000 })
   ledger.syncGrants([{ id: 'grant', revision: 1, principalDigest: 'principal', principalRecordId: 'record', principalVersion: 1, workspace: '/work', agentPreset: 'default', expiresAt: 100_000, maxRuns: 1, maxTotalDurationMs: 1_000 }])
   ledger.close()
-  return { stateRoot, archiveDirectory }
+  return { stateRoot: realpathSync(stateRoot), archiveDirectory: realpathSync(archiveDirectory) }
 }
 
 function json(stdout: string): Record<string, unknown> {
