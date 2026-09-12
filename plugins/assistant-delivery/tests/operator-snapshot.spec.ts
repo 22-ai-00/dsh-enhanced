@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, link, lstat, mkdtemp, readFile, rm, stat, symlink, truncate, writeFile } from 'node:fs/promises'
+import { chmod, link, lstat, mkdtemp, readFile, realpath, rm, stat, symlink, truncate, writeFile } from 'node:fs/promises'
 import { chmodSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -154,7 +154,7 @@ afterEach(async () => {
 })
 
 async function seeded() {
-  const root = await mkdtemp(join(tmpdir(), 'delivery-operator-snapshot-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'delivery-operator-snapshot-'))); roots.push(root)
   const path = join(root, 'delivery.sqlite'); const store = new DeliveryStore({ path, codeGenerator: () => 'PAIR1234' })
   const principal = { channel: 'web', account: 'profile', tenant: 'local', user: 'operator' }
   const issued = store.issuePairing(principal, { ttlMs: 1_000, maxAttempts: 3 })
@@ -165,7 +165,7 @@ async function seeded() {
 }
 
 async function larkSeeded() {
-  const root = await mkdtemp(join(tmpdir(), 'delivery-lark-operator-snapshot-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'delivery-lark-operator-snapshot-'))); roots.push(root)
   const path = join(root, 'delivery.sqlite'); const store = new DeliveryStore({ path, codeGenerator: () => 'PAIR1234' })
   const principal = { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_owner' }
   const issued = store.issuePairing(principal, { ttlMs: 1_000, maxAttempts: 3 })

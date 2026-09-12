@@ -53,7 +53,7 @@ import AssistantGoalsPlugin, { AssistantGoalsService } from '../../assistant-goa
 import { PersonalMemoryService } from '../../personal-memory/lib/index.js'
 import { MemoryStore } from '../../personal-memory/lib/store.js'
 import { createHash } from 'node:crypto'
-import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -3161,7 +3161,7 @@ describe('real rc.1 delivery Agent runtime', () => {
   })
 
   test('production Web owner admits a real native human turn, creates a business Goal and releases its idle Session', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-owner-')); roots.push(root)
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-delivery-native-owner-'))); roots.push(root)
     const PersistenceCoordinator = await persistenceCoordinatorConstructor()
     const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
     const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'web/browser/local/owner' }

@@ -191,7 +191,7 @@ async function finishRaceWorker(race: RaceWorker): Promise<void> {
 }
 
 describe('read-only Automations operator snapshot', () => {
-  test('returns a canonical, deeply frozen, content-free complete inventory without changing storage', async () => {
+  test.runIf(process.platform === 'linux')('returns a canonical, deeply frozen, content-free complete inventory without changing storage', async () => {
     const f = await fixture()
     const active = f.store.reconcileSystemOwned({ owner: 'owner-b', automationId: 'z-active',
       idempotencyKey: 'create-z', definition: definition('active') })
@@ -249,7 +249,7 @@ describe('read-only Automations operator snapshot', () => {
     expectCode(() => listAutomationsLocally(linked), 'unsafe-path')
   })
 
-  test('reports claimed/running tasks per definition and globally without exposing task content', async () => {
+  test.runIf(process.platform === 'linux')('reports claimed/running tasks per definition and globally without exposing task content', async () => {
     const f = await fixture()
     const created = f.store.createApproved({ automationId: 'active', idempotencyKey: 'create', definition: definition('active') })
     f.store.close()
@@ -289,8 +289,6 @@ describe('read-only Automations operator snapshot', () => {
     expectCode(() => inspectAutomationsOperatorSnapshot(target), 'unsafe-path')
     await chmod(target, 0o600); await chmod(state, 0o750)
     expectCode(() => inspectAutomationsOperatorSnapshot(target), 'unsafe-parent')
-    await chmod(state, 0o500)
-    expect(inspectAutomationsOperatorSnapshot(target).records).toEqual([])
     await chmod(state, 0o4700)
     expectCode(() => inspectAutomationsOperatorSnapshot(target), 'unsafe-parent')
     await chmod(state, 0o700)
@@ -302,7 +300,17 @@ describe('read-only Automations operator snapshot', () => {
     expectCode(() => inspectAutomationsOperatorSnapshot(join(linkedParent, 'automations.sqlite')), 'unsafe-path')
   })
 
-  test.each([14, 16])('rejects schema v%s without migrating it', async version => {
+  test.runIf(process.platform === 'linux')('reads an empty private database after the portable path preflight', async () => {
+    const f = await fixture(); f.store.close()
+    await chmod(f.state, 0o500)
+    try {
+      expect(inspectAutomationsOperatorSnapshot(f.path).records).toEqual([])
+    } finally {
+      await chmod(f.state, 0o700)
+    }
+  })
+
+  test.runIf(process.platform === 'linux').each([14, 16])('rejects schema v%s without migrating it', async version => {
     const root = await realpath(await mkdtemp(join(tmpdir(), `automations-operator-v${version}-`))); roots.push(root)
     await chmod(root, 0o700); const path = join(root, 'automations.sqlite')
     const database = new DatabaseSync(path); database.exec(`PRAGMA user_version=${version}`); database.close(); await chmod(path, 0o600)
@@ -313,7 +321,7 @@ describe('read-only Automations operator snapshot', () => {
     expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: version }); check.close()
   })
 
-  test('rejects corrupt SQLite and canonical-definition/digest drift', async () => {
+  test.runIf(process.platform === 'linux')('rejects corrupt SQLite and canonical-definition/digest drift', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'automations-operator-corrupt-'))); roots.push(root)
     await chmod(root, 0o700); const corrupt = join(root, 'corrupt.sqlite')
     await writeFile(corrupt, 'not sqlite'); await chmod(corrupt, 0o600)
@@ -326,7 +334,7 @@ describe('read-only Automations operator snapshot', () => {
     expectCode(() => inspectAutomationsOperatorSnapshot(f.path), 'database-corrupt')
   })
 
-  test.each([
+  test.runIf(process.platform === 'linux').each([
     ['JSON bytes', (database: DatabaseSync) => database.prepare(
       'UPDATE automation_definitions SET definition_json=? WHERE id=?',
     ).run(JSON.stringify({ ...definition('drift'), prompt: 'changed' }), 'drift')],
@@ -339,7 +347,7 @@ describe('read-only Automations operator snapshot', () => {
     expectCode(() => inspectAutomationsOperatorSnapshot(f.path), 'database-corrupt')
   })
 
-  test('reads committed live WAL state from a private copy without changing source sidecars', async () => {
+  test.runIf(process.platform === 'linux')('reads committed live WAL state from a private copy without changing source sidecars', async () => {
     const f = await fixture()
     f.store.createApproved({ automationId: 'wal', idempotencyKey: 'create', definition: definition('wal') }); f.store.close()
     const seed = new DatabaseSync(f.path)
@@ -370,7 +378,7 @@ describe('read-only Automations operator snapshot', () => {
     await chmod(`${f.path}-wal`, 0o600); writer.close()
   })
 
-  test('rejects source WAL drift while constructing the private copy', async () => {
+  test.runIf(process.platform === 'linux')('rejects source WAL drift while constructing the private copy', async () => {
     const f = await fixture()
     f.store.createApproved({ automationId: 'wal-drift', idempotencyKey: 'create', definition: definition('wal-drift') }); f.store.close()
     const writer = new DatabaseSync(f.path); writer.exec('PRAGMA wal_autocheckpoint=0')
@@ -400,7 +408,7 @@ describe('read-only Automations operator snapshot', () => {
     writer.close()
   })
 
-  test('rechecks temporary directory permissions through the pinned directory descriptor', async () => {
+  test.runIf(process.platform === 'linux')('rechecks temporary directory permissions through the pinned directory descriptor', async () => {
     const f = await fixture()
     f.store.createApproved({ automationId: 'temp-pin', idempotencyKey: 'create', definition: definition('temp-pin') })
     f.store.close()
@@ -416,7 +424,7 @@ describe('read-only Automations operator snapshot', () => {
     writer.close()
   })
 
-  test('unsafe-parent overrides a lower-level schema error discovered in the same snapshot', async () => {
+  test.runIf(process.platform === 'linux')('unsafe-parent overrides a lower-level schema error discovered in the same snapshot', async () => {
     const f = await fixture(); f.store.close()
     const database = new DatabaseSync(f.path)
     database.exec('PRAGMA user_version = 14')
