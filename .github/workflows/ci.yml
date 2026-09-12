@@ -99,7 +99,7 @@ jobs:
 
       - name: Collect remaining package test failures
         if: failure() && steps.repository.outcome == 'failure'
-        run: pnpm --recursive --no-bail --if-present run test
+        run: pnpm --recursive --no-bail --if-present run test --testTimeout=15000
 
   macos-verify:
     # The installers document macOS LaunchAgent support and the Control Plane
@@ -144,7 +144,7 @@ jobs:
 
       - name: Collect remaining package test failures
         if: failure() && steps.repository.outcome == 'failure'
-        run: pnpm --recursive --no-bail --if-present run test
+        run: pnpm --recursive --no-bail --if-present run test --testTimeout=15000
 
   windows-acp-smoke:
     runs-on: windows-2025

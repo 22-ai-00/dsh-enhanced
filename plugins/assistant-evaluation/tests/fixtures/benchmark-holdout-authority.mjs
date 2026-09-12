@@ -1,9 +1,12 @@
 import process from 'node:process'
 import { spawn } from 'node:child_process'
 import { createHash, createHmac, createPrivateKey, createPublicKey, sign } from 'node:crypto'
+import { existsSync, writeFileSync } from 'node:fs'
 
 const protocol = 'dsh-benchmark/holdout-provider-transport/v1'
 const mode = process.env.HOLDOUT_FIXTURE_MODE ?? 'echo'
+const acknowledgedPath = process.env.HOLDOUT_FIXTURE_ACKNOWLEDGED_PATH
+const injectedPath = process.env.HOLDOUT_FIXTURE_INJECTED_PATH
 const descendant = mode === 'orphan-descendant'
   ? spawn(process.execPath, ['-e', 'setInterval(() => {}, 1_000)'], { stdio: 'ignore' })
   : undefined
@@ -42,6 +45,15 @@ const split = value => {
   if (mode !== 'fragment') { process.stdout.write(value); return }
   const bytes = Buffer.from(value), at = Math.max(1, Math.floor(bytes.length / 2))
   process.stdout.write(bytes.subarray(0, at)); setTimeout(() => process.stdout.write(bytes.subarray(at)), 5)
+}
+const waitForAcknowledgement = async () => {
+  if (!acknowledgedPath || !injectedPath) return false
+  const deadline = Date.now() + 1_000
+  while (Date.now() < deadline) {
+    if (existsSync(acknowledgedPath)) return true
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  return false
 }
 if (mode === 'stderr-secret') process.stderr.write('secret fixture stderr that must not escape\n')
 if (mode === 'oversize-stderr') process.stderr.write('x'.repeat(4096))
@@ -114,7 +126,16 @@ process.stdin.on('data', chunk => {
       const response = JSON.stringify({ protocol, type: 'response', id, ok: true, value: { operation: message.operation, echo: message.value, envKeys: Object.keys(process.env).sort(), cwd: process.cwd(), ...(descendant ? { descendantPid: descendant.pid } : {}) } }) + '\n'
       if (mode === 'extra-line') process.stdout.write(response + JSON.stringify({ protocol, type: 'response', id: 'extra', ok: true, value: null }) + '\n')
       else if (mode === 'response-partial') process.stdout.write(response + '{"partial":')
-      else if (mode === 'predict-next-id') { process.stdout.write(response); setImmediate(() => process.stdout.write(JSON.stringify({ protocol, type: 'response', id: 'request-2', ok: true, value: 'predicted' }) + '\n')) }
+      else if (mode === 'predict-next-id') {
+        process.stdout.write(response)
+        void waitForAcknowledgement().then(acknowledged => {
+          if (!acknowledged) return
+          // Mark intent before stdout: the Host may correctly kill us as soon
+          // as it sees this unsolicited frame.
+          writeFileSync(injectedPath, 'injected\n', { mode: 0o600 })
+          process.stdout.write(JSON.stringify({ protocol, type: 'response', id: 'request-2', ok: true, value: 'predicted' }) + '\n')
+        })
+      }
       else split(response)
     } else try { split(JSON.stringify({ protocol, type: 'response', id, ok: true, value: authorityResponse(message.operation, message.value) }) + '\n') }
     catch { split(JSON.stringify({ protocol, type: 'response', id, ok: false, error: { code: 'sequence-rejected' } }) + '\n') }

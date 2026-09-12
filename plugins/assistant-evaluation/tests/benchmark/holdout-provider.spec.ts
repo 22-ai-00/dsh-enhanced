@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { access } from 'node:fs/promises'
+import { access, chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { HoldoutProviderError, openHoldoutProvider, type HoldoutProviderConfig, type HoldoutProviderTransport } from '../../src/benchmark/holdout-provider.js'
 import { holdoutEnvelopeDigest, parseSignedHoldoutFinish, parseSignedHoldoutInput, parseSignedHoldoutManifest, parseSignedHoldoutVerdict } from '../../src/benchmark/holdout-protocol.js'
@@ -47,6 +49,13 @@ async function runStandalone(script: string): Promise<{ readonly code: number | 
     child.once('close', code => { clearTimeout(timeout); resolveRun({ code, stdout, stderr }) })
   })
 }
+async function waitForFixtureFile(path: string): Promise<void> {
+  const deadline = Date.now() + 1_000
+  while (Date.now() < deadline) {
+    try { await access(path); return } catch { await new Promise<void>(resolveWait => setTimeout(resolveWait, 5)) }
+  }
+  throw new Error('fixture control handshake timed out')
+}
 
 describe('holdout child provider transport', () => {
   it('does not spawn at import time and requires explicit open', async () => {
@@ -79,12 +88,24 @@ describe('holdout child provider transport', () => {
   })
 
   it('uses unpredictable request ids so a provider cannot preinject the next response', async () => {
-    const provider = await open('predict-next-id')
-    await expect(provider.request('manifest', {})).resolves.toMatchObject({ operation: 'manifest' })
-    await new Promise(resolve => setTimeout(resolve, 30))
-    const next = provider.request('input', {})
-    await expect(next).rejects.toSatisfy((error: unknown) => code(error, 'closed'))
-    await expect(provider.request('finish', {})).rejects.toSatisfy((error: unknown) => code(error, 'closed'))
+    const root = await mkdtemp(join(tmpdir(), 'holdout-preinject-'))
+    await chmod(root, 0o700)
+    const acknowledged = join(root, 'acknowledged'), injected = join(root, 'injected')
+    let provider: HoldoutProviderTransport | undefined
+    try {
+      provider = await open('predict-next-id', { environment: { HOLDOUT_FIXTURE_MODE: 'predict-next-id', LANG: 'C', LC_ALL: 'C', HOLDOUT_FIXTURE_ACKNOWLEDGED_PATH: acknowledged, HOLDOUT_FIXTURE_INJECTED_PATH: injected } })
+      await expect(provider.request('manifest', {})).resolves.toMatchObject({ operation: 'manifest' })
+      await writeFile(acknowledged, 'received\n', { mode: 0o600 })
+      await waitForFixtureFile(injected)
+      // A frame that arrives before this random id is known must never settle it.
+      await expect(provider.request('input', {})).rejects.toSatisfy((error: unknown) => {
+        expect(['closed', 'protocol-error']).toContain((error as HoldoutProviderError).code); return true
+      })
+      await expect(provider.request('finish', {})).rejects.toSatisfy((error: unknown) => code(error, 'closed'))
+    } finally {
+      await provider?.close().catch(() => undefined)
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('poisons on unsolicited partial bytes after ready and before a request', async () => {

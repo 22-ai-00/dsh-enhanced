@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-isolation",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "Finite owner-authorized offline Linux Docker jobs with durable audit and external revocation.",
   "license": "MIT",
   "type": "module",
