@@ -1,8 +1,8 @@
-# dsh-enhanced
+# dsh-enhanced：RSI 智能助手插件集合
 
-`dsh-enhanced` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的社区增强插件仓库。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。
+`dsh-enhanced` 是基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 **RSI 智能助手插件集合**，围绕 RSI（Recursive Self-Improvement，递归自我改进）提供任务执行、独立验收、反馈学习、技能复用和有限连续改进能力，让助手在明确授权和预算内完成任务，并将成功经验用于后续任务。
 
-仓库提供两类能力：面向编码场景的 ACP/模型 provider，以及基于 DSH `0.1.2-rc.1` 自研的实验性个人助理套件。个人助理适合先在受监督的单机 profile 中使用。
+插件覆盖目标管理、主动行动、记忆、消息交付、隔离执行、评测与恢复，并通过 ACP 和模型 provider 接入编码工具及现有模型线路。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。当前基本 RSI 首版基于 DSH `0.1.2-rc.1`，面向 Linux 上受监督的单机 profile，仍属实验性能力。
 
 基本 RSI 首版支持同一任务族的有限连续改进：独立确认失败后自主修复，生成技能候选，经过独立比较和后续实际任务验证后晋升，再继续下一轮，并把结果送回原会话。模板渲染任务已取得连续两轮的真实 TraeX 组合验收证据。使用入口见[有限 repair admission](plugins/assistant-web-owner/README.md#有限-repair-admission)，证据和限制见[两轮验收记录](docs/evidence/basic-rsi-two-round-2026-09-12.json)。中途修复进程崩溃仍报告 `unknown`，不自动重放；完整 RSI 规划继续保留。
 
