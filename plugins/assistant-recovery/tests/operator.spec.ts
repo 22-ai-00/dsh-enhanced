@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -79,7 +80,7 @@ const roots: string[] = []
 const hash = (digit: string): string => digit.repeat(64)
 
 function root(): string {
-  const value = mkdtempSync(join(tmpdir(), 'assistant-recovery-operator-'))
+  const value = realpathSync(mkdtempSync(join(tmpdir(), 'assistant-recovery-operator-')))
   roots.push(value)
   return value
 }

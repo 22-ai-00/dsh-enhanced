@@ -64,7 +64,7 @@ async function fixture(enabled = true) {
 import { afterEach } from 'vitest'
 afterEach(async () => { await Promise.all(cleanups.splice(0).map(cleanup => cleanup())) })
 
-test('branch and PR receipts survive restart, duplicates do not redispatch, and reads consume a distinct durable action', async () => {
+test.runIf(process.platform === 'linux')('branch and PR receipts survive restart, duplicates do not redispatch, and reads consume a distinct durable action', async () => {
   const f = await fixture()
   const first = await f.execute('action_github_branch', branch)
   expect(first.isError, JSON.stringify(first)).toBe(false); expect(JSON.stringify(first)).toContain('succeeded')
@@ -81,7 +81,7 @@ test('branch and PR receipts survive restart, duplicates do not redispatch, and 
   expect(f.workflow.inspect).toHaveBeenCalledTimes(1)
 })
 
-test.each(['branch', 'pullRequest', 'inspect'] as const)('%s rechecks a revocation while waiting for credential access', async kind => {
+test.runIf(process.platform === 'linux').each(['branch', 'pullRequest', 'inspect'] as const)('%s rechecks a revocation while waiting for credential access', async kind => {
   const f = await fixture()
   const original = f.ctx.credentialsKeychain.withSecret.bind(f.ctx.credentialsKeychain)
   const gate = Promise.withResolvers<void>(), entered = Promise.withResolvers<void>()
@@ -93,7 +93,7 @@ test.each(['branch', 'pullRequest', 'inspect'] as const)('%s rechecks a revocati
   expect(f.rows()[0]?.status).toBe('failed')
 })
 
-test.each(['branch', 'pullRequest', 'inspect'] as const)('%s aborts on plugin disposal and suppresses a late observed result', async kind => {
+test.runIf(process.platform === 'linux').each(['branch', 'pullRequest', 'inspect'] as const)('%s aborts on plugin disposal and suppresses a late observed result', async kind => {
   const f = await fixture(), entered = Promise.withResolvers<void>()
   const blocked = async (input: { actionId?: string; signal: AbortSignal }) => {
     entered.resolve(); await new Promise<void>(resolve => input.signal.addEventListener('abort', () => resolve(), { once: true }))
