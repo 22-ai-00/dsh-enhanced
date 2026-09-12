@@ -487,6 +487,65 @@ function scopedPr(value: unknown, grant: ActionGrant, number?: number, headOid?:
   return body
 }
 
+type PullRequestObservation = {
+  number: number
+  state?: 'open' | 'closed'
+  merged?: boolean
+  head: { ref: string; sha: string; repo: { full_name: string } }
+  base: { ref: string; repo: { full_name: string } }
+  untrusted: true
+}
+
+/**
+ * Project a GitHub pull-request response onto the exact fields consumed by the
+ * broker and repository-readback reducer.  Never return the raw response: it
+ * can contain bodies, URLs, user objects, permissions, or future fields that
+ * are outside this capability.
+ */
+function pullRequestObservation(value: unknown, grant: ActionGrant, number?: number, headOid?: string): PullRequestObservation | undefined {
+  const body = scopedPr(value, grant, number, headOid)
+  if (!body) return undefined
+  const head = record(body.head)!
+  const base = record(body.base)!
+  const headRepository = record(head.repo)!
+  const baseRepository = record(base.repo)!
+  if (body.state !== undefined && !['open', 'closed'].includes(String(body.state))) return undefined
+  if (body.merged !== undefined && typeof body.merged !== 'boolean') return undefined
+  return {
+    number: body.number as number,
+    ...(body.state === undefined ? {} : { state: body.state as 'open' | 'closed' }),
+    ...(body.merged === undefined ? {} : { merged: body.merged }),
+    head: { ref: head.ref as string, sha: head.sha as string, repo: { full_name: headRepository.full_name as string } },
+    base: { ref: base.ref as string, repo: { full_name: baseRepository.full_name as string } },
+    untrusted: true,
+  }
+}
+
+function boundedObservationText(value: unknown, maximum = 256): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= maximum && !/\p{Cc}/u.test(value)
+}
+
+function checkObservation(value: unknown, headOid: string): Record<string, unknown> | undefined {
+  const item = record(value)
+  if (!item || !positiveInteger(item.id) || !boundedObservationText(item.name) || item.head_sha !== headOid
+    || !['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending'].includes(String(item.status))
+    || (item.conclusion !== null && !boundedObservationText(item.conclusion))) return undefined
+  const app = item.app === undefined ? undefined : record(item.app)
+  if (item.app !== undefined && (!app || !positiveInteger(app.id))) return undefined
+  return { id: item.id, name: item.name, ...(app ? { app: { id: app.id } } : {}), head_sha: headOid, status: item.status as string, conclusion: item.conclusion }
+}
+
+function reviewObservation(value: unknown): Record<string, unknown> | undefined {
+  const item = record(value)
+  if (!item || !positiveInteger(item.id) || !oid(item.commit_id)
+    || !['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'PENDING'].includes(String(item.state))) return undefined
+  const user = item.user === undefined ? undefined : record(item.user)
+  if (item.user !== undefined && (!user || !positiveInteger(user.id))) return undefined
+  if (item.submitted_at !== undefined && (!boundedObservationText(item.submitted_at, 64) || Number.isNaN(Date.parse(item.submitted_at)))) return undefined
+  return { id: item.id, ...(user ? { user: { id: user.id } } : {}), commit_id: item.commit_id, state: item.state as string,
+    ...(item.submitted_at === undefined ? {} : { submitted_at: item.submitted_at }) }
+}
+
 export async function createBranchOnGitHub(input: { actionId: string; grant: ActionGrant; baseHeadOid: string; token: string; signal: AbortSignal }, transport?: RestTransport): Promise<ActionResult> {
   const workflow = input.grant.repoWorkflow
   if (!workflow?.allowBranchCreate || !oid(input.baseHeadOid)) return unknown(input.actionId)
@@ -518,9 +577,15 @@ export async function inspectGitHub(input: { grant: ActionGrant; kind: 'reposito
   const reply = await rest(`/${repoPath(input.grant)}${suffix}`, 'GET', input.token, undefined, input.signal, transport)
   const body = record(reply?.body)
   if (reply?.status !== 200 || !body) return undefined
-  if (input.kind === 'repository' && body.full_name !== input.grant.repository) return undefined
-  if (input.kind === 'branch' && (body.name !== input.grant.branch || !oid(record(body.commit)?.sha))) return undefined
-  if (isPr && !scopedPr(body, input.grant, input.pullRequestNumber)) return undefined
+  if (input.kind === 'repository') return body.full_name === input.grant.repository
+    ? { observed: { full_name: input.grant.repository, untrusted: true } } : undefined
+  if (input.kind === 'branch') {
+    const commit = record(body.commit)
+    return body.name === input.grant.branch && oid(commit?.sha)
+      ? { observed: { name: input.grant.branch, commit: { sha: commit.sha }, untrusted: true } } : undefined
+  }
+  const pullRequest = isPr ? pullRequestObservation(body, input.grant, input.pullRequestNumber) : undefined
+  if (isPr && !pullRequest) return undefined
   if (input.kind === 'file') {
     if (body.path !== input.path || body.type !== 'file' || body.encoding !== 'base64' || typeof body.content !== 'string' || !oid(body.sha) || typeof body.size !== 'number' || body.size < 0 || body.size > 65_536) return undefined
     const encoded = body.content.replace(/\n/g, '')
@@ -528,8 +593,9 @@ export async function inspectGitHub(input: { grant: ActionGrant; kind: 'reposito
     if (content.length !== body.size || content.toString('base64') !== encoded || Buffer.from(content.toString('utf8')).compare(content) !== 0 || content.toString('utf8').includes(input.token)) return undefined
     return { observed: { path: body.path, sha: body.sha, content: content.toString('utf8'), untrusted: true } }
   }
+  if (input.kind === 'pull-request') return { observed: pullRequest! }
   if (input.kind === 'checks' || input.kind === 'reviews') {
-    const sha = record(body.head)!.sha as string
+    const sha = pullRequest!.head.sha
     const maximum = input.kind === 'checks' ? 20 : 30
     const tail = input.kind === 'checks' ? `/commits/${sha}/check-runs?per_page=${maximum}` : `/pulls/${input.pullRequestNumber}/reviews?per_page=${maximum}`
     const list = await rest(`/${repoPath(input.grant)}${tail}`, 'GET', input.token, undefined, input.signal, transport)
@@ -538,13 +604,9 @@ export async function inspectGitHub(input: { grant: ActionGrant; kind: 'reposito
     if (!Array.isArray(items) || items.length > maximum) return undefined
     const total = input.kind === 'checks' ? record(list.body)?.total_count : undefined
     if (input.kind === 'checks' && (typeof total !== 'number' || !Number.isSafeInteger(total) || total < items.length)) return undefined
-    for (const item of items) {
-      const value = record(item)
-      if (!value || !positiveInteger(value.id)) return undefined
-      if (input.kind === 'checks' && (value.head_sha !== sha || !['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending'].includes(String(value.status)) || typeof value.name !== 'string' || (value.conclusion !== null && typeof value.conclusion !== 'string'))) return undefined
-      if (input.kind === 'reviews' && (!oid(value.commit_id) || !['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED', 'PENDING'].includes(String(value.state)))) return undefined
-    }
-    return { observed: { pullRequest: body, headOid: sha, items, truncated: list.hasNextPage || (typeof total === 'number' && total > items.length) || items.length === maximum, untrusted: true } }
+    const projected = input.kind === 'checks' ? items.map(item => checkObservation(item, sha)) : items.map(reviewObservation)
+    if (projected.some(item => item === undefined)) return undefined
+    return { observed: { pullRequest, headOid: sha, items: projected as Record<string, unknown>[], truncated: list.hasNextPage || (typeof total === 'number' && total > items.length) || items.length === maximum, untrusted: true } }
   }
-  return { observed: { ...body, untrusted: true } }
+  return undefined
 }

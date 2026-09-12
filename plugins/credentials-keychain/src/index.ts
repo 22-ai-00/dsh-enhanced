@@ -14,4 +14,7 @@ export function apply(ctx: Context, config: import('./config.js').Config): void 
   new CredentialsKeychainService(ctx, config)
 }
 
-export default CredentialsKeychainService
+// Loader unwraps the module default before Cordis reads plugin metadata. Keep
+// the required Policy injection on that exact mounted value so the Keychain
+// remains pending, and is unloaded/reloaded, with its provider generation.
+export default { name, Config, inject, apply }

@@ -1,0 +1,254 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-12",
+  "recordedAt": "2026-09-12T06:19:07Z",
+  "baseCommit": "7c9f9e64ae82809a48a3b4a6ea14a65834623571",
+  "status": "passed",
+  "completeWorkPackage": false,
+  "workingTreeState": {
+    "state": "final broker source frozen after passing package and repository gates in a shared main worktree",
+    "sourceHashesAreFinal": true,
+    "finalCommandsRecorded": true,
+    "mustFreezeAfterFinalValidation": false,
+    "unrelatedDirtyWorkExcluded": [
+      "docs/evidence/sqlite-inode-binding-2026-09-11.json",
+      "plugins/assistant-automations/tests/operator.spec.ts",
+      "plugins/assistant-delivery/tests/operator-snapshot.spec.ts",
+      "docs/autonomy-handoff-2026-09-09.md"
+    ]
+  },
+  "scope": [
+    "WP08 finite external GitHub capability projection and daemon-side grant enforcement",
+    "WP09 external GitHub credential, journal and network broker process boundary",
+    "WP10 durable stop, revoke, crash recovery and no-replay behavior for the external broker slice"
+  ],
+  "workPackages": {
+    "strengthened": ["08", "09", "10"],
+    "statusChanged": false,
+    "wp08": "implementing",
+    "wp09": "implementing",
+    "wp10": "implementing",
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "packageBoundary": {
+    "package": "@dsh-enhanced/assistant-actions",
+    "hostFacade": "The existing Cordis bundle and patch mount only the Host facade, native tools and routing guard.",
+    "externalDaemon": "The same package publishes dsh-actions-broker as a separate executable; Cordis import/apply never starts it.",
+    "deploymentOwnership": "An operator or service manager must start, stop and provision the daemon, its identities, sockets, state and credential.",
+    "compatibilityMode": "embedded-compat preserves the prior in-Host Keychain, ActionLedger and GitHub transport boundary; it does not inherit the external process boundary."
+  },
+  "implemented": [
+    "external-unix-v1 and embedded-compat are explicit, mutually exclusive backends. External mode does not create or open the Host ActionLedger and cannot fall back to local Keychain or GitHub transport.",
+    "The daemon is authoritative for exact grant revisions and tombstones, action and byte usage, policy/emergency epochs, request journal, credential leases and GitHub network dispatch. The Host keeps only a read-only projection that can narrow but not expand daemon authority.",
+    "External grants bind client key, owner principal lineage, exact Delivery binding and Session, source Host instance/generation, destination broker instance/generation, repository, branch, paths, source classification/provenance, expiry, allowed operations and inspect kinds, action/byte limits and a protocol cost field.",
+    "The first external wire supports only expected-head GitHub commit and bounded repository, branch and allowed UTF-8 file inspection. Pull-request, checks and reviews inspection remains embedded-only, while branch creation, pull-request creation, compensation or rollback, verified delivery and repository outcome readback fail closed without embedded fallback.",
+    "Under the intended separate-UID deployment, the actual configured GitHub tokens are read only from daemon-owned Linux protected files through anchored O_NOFOLLOW and stable identity checks and never enter the Host. The canonical wire schema rejects credential-named fields; before outbound GitHub dispatch and before releasing inspect responses, the daemon scans all configured exact token values plus common credential literals and fails closed on a match.",
+    "The action and admin planes use distinct Unix-domain sockets with independent path, parent, UID, GID, mode and connection limits. A shared maxConcurrentRequests limits action execution only; action connection saturation does not consume the separately bounded admin listener.",
+    "Both directions authenticate the connected kernel peer with the built-in Linux SO_PEERCRED helper in addition to stable socket pathname and parent identity checks. Production serve fails closed before bind when Linux peer credentials are unavailable.",
+    "The action listener verifies only signed client-request frames and the admin listener verifies only signed admin-request frames. Cross-audience frames, unknown fields, wrong signatures, stale challenges, generation or epoch mismatch, truncated, trailing, non-canonical wire frames and oversize messages are rejected.",
+    "Pinned Ed25519 server, Host client and admin identities bind the fresh server hello, request/response audience, broker generation, challenge, exact intent digest and result. Broker generation is read from the durable ledger snapshot and must satisfy minimumBrokerGeneration.",
+    "The daemon writes intent before HTTP dispatch. Crash recovery terminalizes prepared requests as failed and dispatched requests as unknown; a lost acknowledgement or uncertain post-dispatch cancellation stays unknown and is never automatically resent.",
+    "Signed admin status, stop, resume and revoke use only the admin socket and do not open SQLite from the operator process. Mutations use control-version, generation, grant digest and epoch checks. Stop and resume advance the emergency epoch; stop and revoke terminalize affected admission and abort matching in-flight work.",
+    "The server owns both listener lifecycles, closes admission, drains or aborts bounded in-flight work, closes the broker core and removes only the exact socket inodes it owns. Replacement or unsafe socket identities are not unlinked as if owned.",
+    "Cordis external mode activates with Policy and Delivery without Keychain; embedded mode owns a nested Keychain injection and unloads or reloads its service on provider disappearance or replacement. Host facade disposal aborts and awaits its in-flight external IPC instead of leaving a detached request owned by the Fiber."
+  ],
+  "protocolAndResourceBounds": {
+    "protocol": "assistant-actions/github-broker/v1",
+    "framing": "four-byte big-endian length plus canonical UTF-8 JSON on the signed action/admin wire",
+    "requestMaxBytes": 8388608,
+    "responseMaxBytes": 2097152,
+    "configFormat": "owner-only 0600 strict UTF-8 JSON",
+    "configMaxBytes": 2097152,
+    "socketPlanes": ["action", "admin"],
+    "budgetDimensions": ["actions", "bytes", "github-api-units"],
+    "costBoundary": "The grant and request bind finite maxCostUnits measured as github-api-units; this is an internal operation metric, not provider billing or a monetary budget."
+  },
+  "builtSubprocessE2E": {
+    "status": "passed",
+    "entrypoint": "plugins/assistant-actions/lib/broker-cli.js",
+    "command": "pnpm exec vitest run --testTimeout=15000 tests/broker-process.spec.ts",
+    "testsPassed": 2,
+    "testsSkipped": 0,
+    "log": "/tmp/dsh-external-broker-process-final-v4.log",
+    "logSha256": "66aaa18a82afa2871db6c1e0c54cbb793bbacce1962e399b986be77e029cebbe",
+    "realProcessBoundary": true,
+    "realActionSocket": true,
+    "realAdminSocket": true,
+    "realSQLiteJournal": true,
+    "realEd25519Keys": true,
+    "realProtectedTokenFile": true,
+    "realLinuxSoPeercred": true,
+    "sameUidHostAndBroker": true,
+    "independentUidTested": false,
+    "liveGitHubRequest": false,
+    "scenarios": [
+      "The production built CLI daemon is spawned, both sockets become ready, signed status succeeds, an action containing a credential-shaped payload is rejected before transport and journaled failed without a credential lease, signed stop succeeds, SIGTERM drains, owned sockets disappear and captured outputs/state contain no protected token.",
+      "A separate fixture child uses the built core and server with real Unix sockets, SQLite, Ed25519 keys and protected token plus a controllable test transport. The child is SIGKILLed after dispatch; restart with the same semantic key returns unknown while the transport dispatch count remains exactly one."
+    ],
+    "productionCliScenario": true,
+    "fixtureChildCrashScenario": true,
+    "fixtureChildUsesProductionCliTransport": false,
+    "claimBoundary": "These are real built local process and kernel UDS exercises. The crash/no-replay case uses a controlled test transport rather than the production CLI GitHub transport; neither case is live GitHub, production service-manager or independent-UID acceptance."
+  },
+  "strictDtoAndDlpBoundary": {
+    "provided": [
+      "Exact DTO key sets, enums, sizes, identities and digests are validated at config, signed wire, journal reopen and response projection boundaries.",
+      "Credential-named fields are rejected recursively by the canonical wire schema. The daemon additionally scans requests before outbound GitHub dispatch and inspect projections before release against every configured exact token value and common credential literals.",
+      "Source classification and provenance digest are grant-bound, and destination repository, branch and paths are exact-bound."
+    ],
+    "notProvided": [
+      "Credential-shaped literals may traverse the Host-to-broker wire before the daemon-side pre-dispatch scan rejects them. No general semantic DLP classifier proves arbitrary file content is non-secret, and values outside the finite literal patterns or configured-token equality checks can still contain sensitive information.",
+      "Classification and provenance metadata do not independently prove the truth, safety or ownership of source content.",
+      "Bounded inspect data is explicitly untrusted and does not prove a prior mutation settled or a user goal succeeded.",
+      "The current protocol cost field is not a real GitHub billing measurement or monetary cap."
+    ]
+  },
+  "cordisLifecycleBoundary": {
+    "patchMountsHostFacadeOnly": true,
+    "daemonAutoSpawned": false,
+    "externalRequiresKeychainService": false,
+    "embeddedRequiresLiveKeychainInjection": true,
+    "hostDisposal": "Aborts and awaits Host-owned in-flight external client requests.",
+    "daemonDisposal": "Owned by the separate broker process and its server/core drain protocol, not by Cordis Fiber teardown."
+  },
+  "runtimeCompatibilityBoundary": {
+    "nodeSocketFd": "The built-in Linux peer inspector currently obtains the connected Unix socket descriptor through Node net.Socket private _handle.fd because the pinned Node runtime exposes no public fd API. Missing or changed private shape fails closed.",
+    "nativeAbi": "koffi loads libc.so.6 and calls getsockopt with Linux SOL_SOCKET, SO_PEERCRED and the expected ucred layout. Import is lazy and unsupported or ambiguous ABI paths fail closed.",
+    "upgradeRequirement": "Every Node, koffi, libc or supported-platform upgrade requires a real built Unix-socket SO_PEERCRED regression before the broker can be accepted; typechecking or mocked inspector tests alone are insufficient."
+  },
+  "validation": {
+    "focused": {
+      "status": "passed",
+      "commands": [
+        "Broker-focused combined Vitest run over protocol, client, peer credentials, server, ledger, core and built subprocess E2E"
+      ],
+      "testFilesPassed": 7,
+      "testsPassed": 84,
+      "testsSkipped": 0,
+      "logs": [],
+      "logSha256": [],
+      "note": "This was a successful broker-focused checkpoint. Frozen acceptance uses the later full Actions package and root-gate results below."
+    },
+    "assistantActionsFull": {
+      "status": "passed",
+      "command": "pnpm --filter @dsh-enhanced/assistant-actions test",
+      "testFilesPassed": 17,
+      "testsPassed": 261,
+      "testsSkipped": 0,
+      "log": "/tmp/dsh-external-broker-actions-final-v5.log",
+      "logSha256": "5bd619f22df348475a29b93e160340d9a778c57c35b90d091f183bd229999537"
+    },
+    "credentialsKeychainFull": {
+      "status": "passed",
+      "command": "pnpm --filter @dsh-enhanced/credentials-keychain test",
+      "testFilesPassed": 6,
+      "testsPassed": 28,
+      "testsSkipped": 0,
+      "log": "/tmp/dsh-external-broker-keychain-final.log",
+      "logSha256": "05fa1cd7c28fb0993ee3dbe10644a0868e9fcece18f3832d75cff11f140a0683"
+    },
+    "typecheck": {
+      "status": "passed",
+      "command": "pnpm --filter @dsh-enhanced/assistant-actions typecheck",
+      "exitCode": 0
+    },
+    "buildAndPack": {
+      "status": "passed-and-confirmed-by-root-gate",
+      "commands": [
+        "pnpm --filter @dsh-enhanced/assistant-actions run build",
+        "pnpm --filter @dsh-enhanced/assistant-actions pack --dry-run",
+        "CI=true VITEST_MAX_WORKERS=1 pnpm check"
+      ],
+      "exitCodes": [0, 0, 0],
+      "binIncluded": true,
+      "packagePackLog": "/tmp/dsh-external-broker-pack-final.log",
+      "packagePackLogSha256": "5b4b435bffeb76344fce47f187c4c9e4934fd8bb728f4852b152e7fba97361a0",
+      "note": "The package dry-run pack contained lib/broker-cli.js, and the final root gate rebuilt the workspace and completed every dry-run pack."
+    },
+    "rootGate": {
+      "status": "passed",
+      "command": "CI=true VITEST_MAX_WORKERS=1 pnpm check",
+      "exitCode": 0,
+      "workspaceProjects": 34,
+      "validatedPlugins": 30,
+      "validatedSharedPackages": 3,
+      "lintWarnings": 0,
+      "rootTestFilesPassed": 32,
+      "rootTestsPassed": 492,
+      "rootTestsSkipped": 1,
+      "aggregateTestFilesPassed": 359,
+      "aggregateTestFilesSkipped": 12,
+      "recursiveTestsPassed": 4560,
+      "recursiveTestsSkipped": 42,
+      "combinedTestsPassed": 5052,
+      "combinedTestsSkipped": 43,
+      "dryRunPacks": 33,
+      "log": "/tmp/dsh-external-broker-root-check-final-v3.log",
+      "logSha256": "1f21d53de9afaac1d3fbf7fb9ef571f80c2b68314c216cfdd55b814a2c60a74f",
+      "result": "Manifest validation, zero-warning lint, all typechecks, root and recursive tests, final build and all dry-run packs passed."
+    },
+    "independentReview": {
+      "status": "PASS",
+      "blocker": 0,
+      "high": 0,
+      "medium": 0,
+      "reviews": [
+        "Final independent code and security review: 0 BLOCK, 0 HIGH, 0 MEDIUM",
+        "Independent Cordis lifecycle review: 0 BLOCK, 0 HIGH, 0 MEDIUM"
+      ]
+    }
+  },
+  "sourceSha256": {
+    "status": "final",
+    "files": {
+      "plugins/assistant-actions/package.json": "9af490c65e4596284763d0c891d929fc852b691a7da4464889858e31c07fb788",
+      "plugins/assistant-actions/README.md": "da8022a423db1a0ccc62821ecbd836b7868a9af257301d6ae3de90199899ec7b",
+      "plugins/assistant-actions/cordis.patch.yml": "ca64d38b002fde3ebad47f04588c677e625f94e1f174e78978386b4b21da7c54",
+      "plugins/assistant-actions/src/config.ts": "33ff5ca27be3c7d59dda5c884168b176b286fe81813d197f1265b9bc06192178",
+      "plugins/assistant-actions/src/github.ts": "7b1045f6797fb99be42797aa1d436dc78205fab3ca0724cc52a09674f62d5edc",
+      "plugins/assistant-actions/src/index.ts": "222c0531a2f5d6f6307bfb1db72f9977b5eb58b9ce3547a77a279d8ec81b0c82",
+      "plugins/assistant-actions/src/service.ts": "00c6184f8d690002b153a1be41cf2292b4d5b4a8c6951453919cade72d899010",
+      "plugins/assistant-actions/src/types.ts": "bcdbc9a58cf387f245d355e545a1464271686b4f12c48aa7d9697ff469d305ec",
+      "plugins/assistant-actions/src/broker-cli.ts": "4f3ddc48ecee8379e29e8252acfb1cfc898db58b2968c26831b7165c2a4c084d",
+      "plugins/assistant-actions/src/broker-client.ts": "71050f43378f88d015e69e55c7ff5cd9238046c2ef0224c884cad7343ff0c49a",
+      "plugins/assistant-actions/src/broker-core.ts": "a10441e246b9b14fc3be3d80f94ca8572ed9de9af59c2992debe4546c570dc46",
+      "plugins/assistant-actions/src/broker-ledger.ts": "c213cf320cd77201fe18ec82163d628dd3b447cec68daa2370cf562a11a2d5b3",
+      "plugins/assistant-actions/src/broker-peer-linux.ts": "e5a778d3ac17c093d7cb5dc4674a855483de829e2d14a384b36b10207d705cc8",
+      "plugins/assistant-actions/src/broker-protocol.ts": "4c573af184039aa68b0186bc003435d61b8da46d95a1389b5348454d0ca91647",
+      "plugins/assistant-actions/src/broker-server.ts": "9bb3810de772a2058bf2a0a935f5e0aecb9c0b90052c42302b43c1d723c67def",
+      "plugins/assistant-actions/tests/github-http.spec.ts": "b33ec0da5478c9930166515305e0d47cb0f1ee62d9478be5149a9c627a456298",
+      "plugins/assistant-actions/tests/index.spec.ts": "72cea6d4c78c9be8acda0afff24fe1a439ca10674b62dc912b500d20a56ce44c",
+      "plugins/assistant-actions/tests/broker-client.spec.ts": "e52a9e8a87e877a4e29f15b74eafb3d1dea22247c9353f2a19e01bd1c4ce2a06",
+      "plugins/assistant-actions/tests/broker-core.spec.ts": "f29698e96251ddcc05ea23e645a447352974fe27ea00ba1fd92bee169e1b9e27",
+      "plugins/assistant-actions/tests/broker-ledger.spec.ts": "f504cd90221614c88496342ae01dd43a379240ef265b87659c55574a7f2d7cd7",
+      "plugins/assistant-actions/tests/broker-peer-linux.spec.ts": "309c5e2179e786db0b9db4edb52802cd6127530f143a0931665c0f794a1e8812",
+      "plugins/assistant-actions/tests/broker-protocol.spec.ts": "da5c4b83470ed3dade75275011cf506b4e6ab2551ae3c22c32363e9c6db94811",
+      "plugins/assistant-actions/tests/broker-server.spec.ts": "02914498fb34161aecb4d6a8edbf55a5d92a816b1a3cb8e1085a7c6248ec3c78",
+      "plugins/assistant-actions/tests/external-adapter.spec.ts": "4956f0f7f131d246aa87f9d89c5191795f9aa1cc9cf726f27d55b198ec747146",
+      "plugins/credentials-keychain/src/index.ts": "baf5cac5eac553f78da26a2b5e99aa3735db291cfb0b534e1c48c1bffa8e4c9d",
+      "plugins/credentials-keychain/tests/index.spec.ts": "d64925e3e2883df8f9259df44bd479afad4b03ee7a87233bb0480f8a94e98c38",
+      "tests/broker-process.spec.ts": "592c124b2cb853266054d1fdbc4438453cf5eb6b3295dd8745ca6e3fb8813e55",
+      "tests/fixtures/broker-process-fixture.mjs": "b285adbb9f60ce9385c09beef7f8b13bc8c0417f716f2723660c380b52c86d1f",
+      "plugins/README.md": "8cc6b3b6e88bce4db9046fde481997ad0ee95f306ad3da560bb9ec360c51828e",
+      "docs/architecture.md": "c52d9bc5fd1b570b5725b60e12683c63f042e7a5daa4144ee411a12d8b585fb7",
+      "docs/compatibility.md": "467be6e731a4251b760d8177ad7c4862c0475c77a1f1c376622e6200d962f9fa",
+      "docs/agent-autonomy-implementation.md": "32f614eedd15da6dd0b2d45ab165ae9e3141255fef07061b0bfdf3e2706ef523",
+      "pnpm-lock.yaml": "5da9768eb7110553f63f371637a74982dfe49c00ad40fcacd3d963ee61f34d57"
+    }
+  },
+  "limitations": [
+    "The built subprocess E2E runs Host, operator and broker as the same Unix UID. SO_PEERCRED is real, but no independent-UID deployment has been exercised.",
+    "No live GitHub account, token, repository, commit or inspect request is used. Local transport fixtures cannot establish remote acceptance, protection rules or atomic server behavior.",
+    "The package does not provision systemd or another service manager, create Unix users, generate or rotate keys, install credentials, configure socket directories or activate a real profile.",
+    "There is no external protected monotonic audit anchor. A broker UID or root that can rewrite all local state remains outside the local SQLite/hash trust claim.",
+    "External v1 does not implement pull-request, checks or reviews inspection; branch creation; pull-request creation; compensation or rollback; verified delivery; repository goal readback; unknown-result remote settlement; or a complete production platform lifecycle. Those inspect kinds remain embedded-only.",
+    "The Linux peer-credential implementation depends on Node private net.Socket._handle.fd plus the koffi/libc SO_PEERCRED ABI and must be revalidated with a real built socket test after runtime upgrades.",
+    "Strict DTO validation and finite token-pattern/equality checks are not comprehensive semantic DLP.",
+    "WP08, WP09 and WP10 remain implementing; the global work-package counts remain 3 verified, 13 implementing and 2 pending."
+  ]
+}

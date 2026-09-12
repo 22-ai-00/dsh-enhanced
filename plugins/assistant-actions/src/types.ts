@@ -19,6 +19,14 @@ export interface ActionGrant extends ActionIdentity {
   repoWorkflow?: { baseBranch: string; allowBranchCreate: boolean; allowPullRequest: boolean }
   verifiedDelivery?: { ownerRouteId: string; budgetId: string; acceptance?: 'goal-outcome' | 'goal-step' }
 }
+
+/**
+ * Read-only Host projection of a grant whose authority and durable state live
+ * in the external broker.  It deliberately contains no credential locator or
+ * local rollback/delivery authority.  `grantDigest` is issued with the broker
+ * grant and is rechecked by the broker on every request.
+ */
+export type ExternalActionGrantMirror = import('./broker-protocol.js').BrokerGrantProjection
 export interface VerifiedDeliveryRequest {
   grantId: string
   idempotencyKey: string
