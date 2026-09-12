@@ -177,12 +177,22 @@ function validateControlArtifact(path: string, name: string): void {
   const opened = inspectPrivateFile(path, name)
   closeSync(opened.descriptor)
 }
-function controlFileIdentity(path: string): ControlFileIdentity {
-  const opened = inspectPrivateFile(path, 'archive control database')
+function mutableControlFileIdentity(path: string): ControlFileIdentity {
+  let descriptor: number | undefined
   try {
-    const stat = fstatSync(opened.descriptor, { bigint: true })
-    return { path, device: stat.dev, inode: stat.ino, owner: stat.uid }
-  } finally { closeSync(opened.descriptor) }
+    const before = lstatSync(path, { bigint: true })
+    const owner = BigInt(process.getuid?.() ?? -1)
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n || before.uid !== owner || (before.mode & 0o7777n) !== 0o600n) fail('invalid-archive', 'archive control database must be one private owned regular file')
+    descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    const opened = fstatSync(descriptor, { bigint: true }); const after = lstatSync(path, { bigint: true })
+    if (!opened.isFile() || opened.nlink !== 1n || opened.uid !== owner || (opened.mode & 0o7777n) !== 0o600n
+      || !after.isFile() || after.isSymbolicLink() || after.nlink !== 1n || after.uid !== owner || (after.mode & 0o7777n) !== 0o600n
+      || !sameInode(before, opened) || !sameInode(opened, after)) fail('invalid-archive', 'archive control database changed while being opened')
+    return { path, device: opened.dev, inode: opened.ino, owner: opened.uid }
+  } catch (error) {
+    if (error instanceof IsolationAuditArchiveError) throw error
+    return fail('invalid-archive', 'archive control database is unavailable')
+  } finally { if (descriptor !== undefined) closeSync(descriptor) }
 }
 function validateLockedControlPath(identity: ControlFileIdentity): void {
   try {
@@ -334,7 +344,7 @@ function ensureControlFile(directory: SecureDirectory): ControlFileIdentity {
     finally { if (descriptor !== undefined) closeSync(descriptor) }
     fsyncSync(directory.descriptor)
   }
-  return controlFileIdentity(path)
+  return mutableControlFileIdentity(path)
 }
 function recoverTemporaryPublications(directory: SecureDirectory): void {
   let changed = false

@@ -92,7 +92,7 @@ describe('built isolation audit archive CLI', () => {
 
   it('serializes repeated four-process archive races without a fork or duplicate records', async () => {
     const options = { encoding: 'utf8' as const, timeout: 10_000, maxBuffer: 64 * 1024, env: { ...process.env, NODE_NO_WARNINGS: '1' } }
-    for (let repetition = 0; repetition < 3; repetition += 1) {
+    for (let repetition = 0; repetition < 20; repetition += 1) {
       const { stateRoot, archiveDirectory } = fixture()
       const arguments_ = [cli, 'archive-audit', stateRoot, archiveDirectory, '1']
       const completed = await Promise.all(Array.from({ length: 4 }, async () => await execFileAsync(process.execPath, arguments_, options)))

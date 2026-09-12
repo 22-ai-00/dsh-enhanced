@@ -2,9 +2,9 @@
   "schema": "dsh/autonomy-delivery-evidence/v1",
   "protocol": "autonomy-delivery-evidence/v1",
   "date": "2026-09-11",
-  "recordedAt": "2026-09-11T13:49:28Z",
+  "recordedAt": "2026-09-11T14:03:18Z",
   "baseCommit": "98826c05346fb2278844b4cff676f232ca9ddf5a",
-  "status": "validated-before-ordinary-commit",
+  "status": "followup-validated-in-current-tree",
   "scope": "Harden Delivery, Automations and Recovery SQLite operator snapshots against same-name parent ABA replacement and live-WAL private-copy drift.",
   "completeWorkPackage": false,
   "environment": {
@@ -19,7 +19,12 @@
     "externalAuthenticityAnchor": false
   },
   "workPackages": {
-    "strengthened": ["05", "09", "10", "17"],
+    "strengthened": [
+      "05",
+      "09",
+      "10",
+      "17"
+    ],
     "statusChanged": false,
     "totals": {
       "verified": 3,
@@ -39,6 +44,127 @@
     "Temporary-copy cleanup unlinks fixed replica names through the pinned directory fd, verifies the directory is empty and still the same inode, and only then removes the private directory. Recovery also removes a freshly created private mkdtemp directory if pinning that directory fails.",
     "The public operator entry points remain read-only: they do not create, migrate, checkpoint, chmod, pair an owner or write a Session lease while producing operator inventory or recovery bootstrap state."
   ],
+  "permissionContractDecision": {
+    "status": "decided",
+    "sourceDatabaseParent": {
+      "acceptedModes": [
+        "0500",
+        "0700"
+      ],
+      "decision": "The source database parent is opened only by the read-only operator. Owner-only 0500 is a valid least-privilege mode and must not be rejected merely because it is not exactly 0700; owner-only 0700 remains valid for profiles that create or remove files in that directory.",
+      "rejectedModes": "Any group or other permission, symlinked/non-directory identity, foreign ownership, or setuid, setgid or sticky special bit is unsafe-parent. A representative 04700 parent is rejected by all three products.",
+      "tests": [
+        {
+          "product": "assistant-delivery",
+          "file": "plugins/assistant-delivery/tests/operator-snapshot.spec.ts",
+          "behavior": "0500 succeeds; 0750 and 04700 return unsafe-parent; the fixture restores 0700"
+        },
+        {
+          "product": "assistant-automations",
+          "file": "plugins/assistant-automations/tests/operator.spec.ts",
+          "behavior": "0500 succeeds; 0750 and 04700 return unsafe-parent; the fixture restores 0700"
+        },
+        {
+          "product": "assistant-recovery",
+          "file": "plugins/assistant-recovery/tests/operator.spec.ts",
+          "behavior": "0500 succeeds; 0750 and 04700 return unsafe-parent; the fixture restores 0700"
+        }
+      ]
+    },
+    "sourceStorageFiles": {
+      "acceptedMode": "0600",
+      "decision": "Main SQLite databases and WAL/SHM sidecars must be regular owner-private files with exactly mode 0600."
+    },
+    "walPrivateReplicaDirectory": {
+      "acceptedMode": "0700",
+      "decision": "The private mkdtemp directory that creates, reopens and deletes WAL replicas must be exactly owner-only 0700. Unlike the read-only source parent, this directory requires write and execute permission for fixed replica filenames."
+    }
+  },
+  "labelDefinitionReview": {
+    "searchCommand": "rg -n --glob '!autonomy-handoff-2026-09-09.md' --glob '!evidence/sqlite-inode-binding-2026-09-11.json' '\\b(H2|L2|L3)\\b' docs plugins packages tests",
+    "h2": {
+      "formalDefinitionFound": false,
+      "result": "No SQLite-batch H2 definition was found. No independent H2 pass is claimed."
+    },
+    "l2": {
+      "formalDefinitionFound": false,
+      "result": "No SQLite-batch L2 definition was found. No independent L2 pass is claimed."
+    },
+    "l3": {
+      "formalDefinitionFound": false,
+      "taskCriterionFound": true,
+      "result": "No repository label definition was found, but the pasted follow-up task supplied the concrete L3 resource-handling criterion recorded in l3ResourceHandlingReview."
+    },
+    "unrelatedSearchResult": "The repository-wide search found an unrelated roadmap reference to L0/L1/L2 concepts; it does not define this SQLite batch."
+  },
+  "l3ResourceHandlingReview": {
+    "status": "satisfied-for-the-stated-criterion",
+    "criterion": "Copy helpers must prepare reusable copy resources before opening the destination fd, and once a destination or reopened replica fd is opened successfully it must be closed on every subsequent error path. Snapshot cleanup must close replica fds and remove only fixed replica names through the pinned private directory.",
+    "products": [
+      {
+        "product": "assistant-delivery",
+        "fallbackCopyHelper": "plugins/assistant-delivery/src/operator-snapshot.ts:621 allocates the buffer before openSync, closes the destination in finally, and closes the reopened verification fd in finally.",
+        "pinnedCopyHelper": "plugins/assistant-delivery/src/operator-snapshot.ts:445 allocates the buffer before openSync, closes a destination opened before an error, and closes the reopened replica on digest mismatch.",
+        "snapshotCleanup": "plugins/assistant-delivery/src/operator-snapshot.ts:833 closes source and replica fds and removes fixed delivery.sqlite, -wal and -shm names through the pinned directory."
+      },
+      {
+        "product": "assistant-automations",
+        "fallbackCopyHelper": "plugins/assistant-automations/src/operator.ts:554 allocates the buffer before openSync, closes the destination in finally, and closes the reopened verification fd in finally.",
+        "pinnedCopyHelper": "plugins/assistant-automations/src/operator.ts:308 allocates the buffer before openSync, closes a destination opened before an error, and closes the reopened replica on digest mismatch.",
+        "snapshotCleanup": "plugins/assistant-automations/src/operator.ts:823 closes source and replica fds and removes fixed automations.sqlite, -wal and -shm names through the pinned directory."
+      },
+      {
+        "product": "assistant-recovery",
+        "pinnedCopyHelper": "plugins/assistant-recovery/src/operator.ts:245 allocates the buffer before openSync, closes the destination in finally, and closes the reopened replica on digest mismatch.",
+        "snapshotCleanup": "plugins/assistant-recovery/src/operator.ts:672 closes replica fds and removes fixed recovery.sqlite, -wal and -shm names through the pinned directory."
+      }
+    ],
+    "evidenceBoundary": "This is static resource-lifecycle review backed by the passing focused suites. No separate OS-level descriptor-leak measurement was added in this follow-up."
+  },
+  "followupTests": {
+    "recordedAt": "2026-09-11T14:02:02Z",
+    "status": "passed",
+    "assistantDelivery": {
+      "testFile": "tests/operator-snapshot.spec.ts",
+      "testFiles": 1,
+      "testsPassed": 19,
+      "log": "/tmp/dsh-sqlite-inode-delivery-followup-2026-09-11.log",
+      "logSha256": "eefb7c4a117c3530d5691d54afdbeeab0a809d4e0ea969cb8503052da897b8c4"
+    },
+    "assistantAutomations": {
+      "testFile": "tests/operator.spec.ts",
+      "testFiles": 1,
+      "testsPassed": 25,
+      "log": "/tmp/dsh-sqlite-inode-automations-followup-2026-09-11.log",
+      "logSha256": "f82023aeb1241eb2f8bb4458a40dbd208ad0234eabcf3255db0412fba9fecfbc"
+    },
+    "assistantRecovery": {
+      "testFile": "tests/operator.spec.ts",
+      "testFiles": 1,
+      "testsPassed": 23,
+      "log": "/tmp/dsh-sqlite-inode-recovery-followup-2026-09-11.log",
+      "logSha256": "2f13597c960ac486e54b775f90e1be088cdc7c25c1465ee4652f24980d91f333"
+    }
+  },
+  "followupPackageBuilds": {
+    "recordedAt": "2026-09-11T14:02:02Z",
+    "status": "passed",
+    "assistantDelivery": {
+      "command": "pnpm --filter @dsh-enhanced/assistant-delivery build",
+      "log": "/tmp/dsh-sqlite-inode-delivery-build-followup-2026-09-11.log",
+      "logSha256": "244ec7db384d89acf95e70d5181447677a711f891427e6edb957a03fef25e133"
+    },
+    "assistantAutomations": {
+      "command": "pnpm --filter @dsh-enhanced/assistant-automations build",
+      "log": "/tmp/dsh-sqlite-inode-automations-build-followup-2026-09-11.log",
+      "logSha256": "00088c81ab3482d2e38dfe14e31e217af4d1285d4916976e38ac68895e9b1a83"
+    },
+    "assistantRecovery": {
+      "command": "pnpm --filter @dsh-enhanced/assistant-recovery build",
+      "log": "/tmp/dsh-sqlite-inode-recovery-build-followup-2026-09-11.log",
+      "logSha256": "e076967d1f84bd7a8e27c35c628cfd1995540b972102330b16fef963da6353b5"
+    }
+  },
   "changedFiles": [
     "plugins/assistant-delivery/src/index.ts",
     "plugins/assistant-delivery/src/operator-snapshot.ts",
@@ -136,11 +262,16 @@
     },
     "H2": {
       "definitionFound": false,
-      "claim": "No H2 definition was found in this batch and no H2 result is claimed."
+      "claim": "No H2 definition was found in this batch and no H2 result is claimed; see labelDefinitionReview."
+    },
+    "L2": {
+      "definitionFound": false,
+      "claim": "No L2 definition was found in this batch and no L2 result is claimed; see labelDefinitionReview."
     },
     "L3": {
       "definitionFound": false,
-      "claim": "No L3 definition was found in this batch and no L3 result is claimed."
+      "taskCriterionFound": true,
+      "claim": "No repository L3 label definition was found; the concrete task criterion and implementation mapping are recorded in l3ResourceHandlingReview."
     }
   },
   "mainWorkingTreeGate": {
@@ -231,7 +362,8 @@
     "reason": "The read-only verifier subagents could not start because the account hit its usage limit; the latest message instructed trying again at Sep 15th, 2026 1:21 AM.",
     "attempts": [
       "Anscombe could not start because of the usage limit.",
-      "Boyle, a fresh read-only verifier, also failed to start because of the same usage limit."
+      "Boyle, a fresh read-only verifier, also failed to start because of the same usage limit.",
+      "Einstein, a fresh worker attempted for the follow-up test patch, failed to start because of the same usage limit on 2026-09-11."
     ],
     "mainCoordinatorReview": "The coordinator performed function-by-function static review and command verification, but this is not an independent verifier PASS."
   },
@@ -254,5 +386,20 @@
     "plugins/assistant-recovery/src/index.ts": "6489ad92e69b068f7cd101910f021c70eca5fb17d8dcfed5cc8d0e3485f53657",
     "plugins/assistant-recovery/src/operator.ts": "500c93ae942932436f6e385d2c4bde70a89281a42e7a608541120f1618979a03",
     "plugins/assistant-recovery/tests/operator.spec.ts": "76dcda7d4deb129fed9428f6e705e9a0d3b21eaae7a5b7bcec1fbcb7d5eaceb3"
+  },
+  "currentDeliveryFollowup": {
+    "recordedAt": "2026-09-12T09:11:16.533551+00:00",
+    "baseCommit": "89751c3250180a3efc267d92bb69af1b6b0880c0",
+    "status": "passed",
+    "scope": "Delivery and Automations 04700 parent rejection assertions; historical SQLite implementation evidence above remains scoped to its original baseline.",
+    "independentScopedReview": "holdout_code_verify PASS on the two test assertions, not a renewed whole-implementation review",
+    "rootCommand": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+    "exitCode": 0,
+    "log": "/tmp/dsh-rsi-wip-root-final-v2-20260912.log",
+    "logSha256": "a4362f9da0e7d3625c6949949af36a9069e147c75ff69322938b44ffeb92aa3e",
+    "testsPassed": 5154,
+    "testsSkipped": 1,
+    "dryRunPacks": 33,
+    "evidence": "wp04-independent-holdout-provider-2026-09-12.json"
   }
 }

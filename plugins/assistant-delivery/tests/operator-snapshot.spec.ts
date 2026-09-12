@@ -473,6 +473,8 @@ describe('side-effect-free active Lark owner snapshot', () => {
     expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally(larkQuery(fixture.path)), 'unsafe-parent')
     await chmod(fixture.root, 0o500)
     expect(inspectActiveLarkOwnerBindingsLocally(larkQuery(fixture.path)).bindings).toHaveLength(1)
+    await chmod(fixture.root, 0o4700)
+    expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally(larkQuery(fixture.path)), 'unsafe-parent')
     await chmod(fixture.root, 0o700)
     const linkedParent = await mkdtemp(join(tmpdir(), 'delivery-lark-operator-linked-parent-')); roots.push(linkedParent)
     await rm(linkedParent, { recursive: true, force: true })
