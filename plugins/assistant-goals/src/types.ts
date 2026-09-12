@@ -198,6 +198,16 @@ export interface OwnerAuthorizedRepairInput {
   expiresAt: number
 }
 
+/** Host-held authorization to resume the original repair Goal without minting a replacement. */
+export interface OwnerAuthorizedRepairResumeInput extends OwnerAuthorizedRepairInput {
+  repair: {
+    sessionId: string
+    goalId: string
+    nativeGoalId: string
+    definitionDigest: string
+  }
+}
+
 /** Owner-authorized lifecycle change for the currently bound native goal. */
 export interface GoalControlInput {
   goalId: string

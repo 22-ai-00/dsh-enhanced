@@ -1,0 +1,136 @@
+{
+  "date": "2026-09-12",
+  "baseCommit": "95b60d679972a7813de8a30617058767b61eec99",
+  "delivery": "dev increment after published 0.1.31; no new npm release",
+  "capability": "Resume a safely checkpointed authorized repair in its original Session and native Goal under the remaining budget and original deadline.",
+  "boundaries": [
+    "Durable fence binds authorization, iteration, Session, process generation, PID namespace and absolute deadline.",
+    "Cold Linux takeover requires the old process to be proven gone in the same PID namespace and no pending model/tool effects. Same-process reattachment requires prior release.",
+    "Tool completion clears its durable pending intent only after the native Session result is flushed.",
+    "A native or repair cancellation at normal model-stream return retains the pending effect even when the adapter returns without throwing.",
+    "Current owner, route, source evidence, profile, Policy, original native identity/revision/rounds and cumulative usage remain required.",
+    "Active/disarmed Goals can continue; completed Goals only reattach for evidence. Human pause, block, clear, expiry, revision or definition drift cannot be silently rearmed.",
+    "Legacy records without a fence, unfinished external requests, uncertain capture/comparison and unavailable process proof remain unknown. No TTL takeover or duplicate repair creation."
+  ],
+  "runtimeIntegration": {
+    "command": "pnpm exec vitest run tests/repair-restart-runtime.spec.ts --reporter=dot",
+    "passed": 2,
+    "actualComponents": [
+      "separate Node processes and SIGKILL",
+      "Jsonl SessionPersistence",
+      "AgentLoop",
+      "native Goal service and round driver",
+      "AssistantGoals and independent verifier",
+      "SkillStore and OwnerRepairAgentRuntime"
+    ],
+    "fixtureComponents": [
+      "deterministic LlmAdapter",
+      "owner route and Policy",
+      "source failure evidence and Skills capability facade"
+    ],
+    "assertions": [
+      "first round execution, step acceptance and exact whole-goal not-achieved assessment settled before termination",
+      "same continuation, Session, business Goal, native Goal and definition",
+      "original first-round settlement preserved",
+      "two rounds; cumulative 4 model calls and 2 tool calls",
+      "original absolute deadline preserved and execution fence advanced",
+      "second process writes and independently verifies a real artifact",
+      "live lease holder rejects a competing process"
+    ],
+    "earlierFailure": {
+      "log": "/tmp/dsh-repair-checkpoint-final-fixture.log",
+      "exitCode": 1,
+      "observed": "Second native round performed tool work but remained blocked at the round limit. Another instrumented run identified a pending whole-goal contract with attempts=0; its local log was later overwritten by the worker and is not presented as retained evidence.",
+      "correction": "Add a controlled regression for joining an in-flight verifier tick and guarantee one fresh post-admission cycle. The checkpoint now also waits for first-round whole-goal not-achieved acceptance, not merely a step receipt."
+    },
+    "status": "passed",
+    "exitCode": 0,
+    "log": "/tmp/dsh-goals-repair-resume-final-v2.log",
+    "logSha256": "b9b7cf1df8f0b8b15969cf88150c9a4fa3a6e09072b85df890fed36ccf6cf30a"
+  },
+  "independentReview": {
+    "result": "PASS",
+    "method": "separate read-only native verifier reviewed final source, matching frozen hashes, and actual targeted logs; full-check completion remains required",
+    "retainedConditions": [
+      "same authorized native Goal and Session",
+      "unchanged remaining budget and absolute deadline",
+      "no takeover of a live or unconfirmed effect holder",
+      "whole-goal receipt required for completion"
+    ]
+  },
+  "traexReview": {
+    "model": "Doubao-Seed-2.1-Pro",
+    "result": "incomplete",
+    "exitCode": -15,
+    "log": "/tmp/dsh-repair-resume-traex-review-v4.log",
+    "reason": "The read-only source review exceeded its 240-second limit and was terminated. It is not a model-recovery test or a review PASS."
+  },
+  "verification": {
+    "fullCheck": {
+      "command": "CI=true pnpm check",
+      "status": "passed",
+      "log": "/tmp/dsh-repair-checkpoint-check-v2.log",
+      "sessionId": 5792,
+      "frozenInputs": {
+        "plugins/assistant-goals/src/outcome.ts": "4f554dcd9dc8bb204322de538ebb8c640383b7ccd7216a5afc0dec5b56678f14",
+        "plugins/assistant-goals/src/service.ts": "d0b838be26ddb704dfaafb2db529a87250428c38f09c2e7b91eea2d35395b80b",
+        "plugins/assistant-goals/src/types.ts": "a274a183a3cd4eca304807c1135692ca98523659ce4f98b38928855bf0c004d1",
+        "plugins/assistant-goals/tests/outcome-runtime.spec.ts": "ac47972e31d1c3c107d42c9dda35de09ae74dd1109390f50bd79053ac3570ca5",
+        "plugins/assistant-skills/src/repair-agent.ts": "67b7bc5b28a62e24231cef5bf499c0c4c3c5a35a1f82ad8116bf1f498c184b0a",
+        "plugins/assistant-skills/src/repair-runtime.ts": "b74f30fb9f28b2fa842d1b449886ce1dc5fae4879e62f61a0f6be0e1706d013b",
+        "plugins/assistant-skills/src/service.ts": "225ef943dda9cec43220c9081d5dd3e6a2912a47682ba2e556c5052db43c11f0",
+        "plugins/assistant-skills/src/store.ts": "7d3ecadb177449d833f6af4f1932d5bbe1d556a82ff3e68acb11d03147baf814",
+        "plugins/assistant-skills/tests/repair-agent.spec.ts": "779758eb7abe3cdd0766bdebf82fa1a0ed3659fb7d9a07b99232f172a33f1944",
+        "plugins/assistant-skills/tests/repair-runtime.spec.ts": "c36782f2ef5a1fb0be181cb9c40d088967e70d09991d6357b5bc06705b0ff794",
+        "plugins/assistant-goals/tests/owner-repair-resume.spec.ts": "6e920e46a1907a37ca00c9bee2aa76d17541367b1edd9bc375af9ebaab1145f0",
+        "plugins/assistant-skills/src/repair-process.ts": "0b9c38ed6217594274ccd5a15ae2bbc45e3b05a075f1b9d7526b483b6d422c45",
+        "plugins/assistant-skills/tests/repair-execution-fence.spec.ts": "a2e6c51bf4f9e41a5d48fc3631784bf81c34bd9190b50d25110f5f159c17fa76",
+        "scripts/fixtures/repair-restart-runtime-child.mjs": "f69754cec9c6ea34e3ac1b4e669dfda8c3bd9b840e93f9b4ae236f7434c7f622",
+        "tests/repair-restart-runtime.spec.ts": "16f4de66c4c95c23c09213de21d273c5a0601e797a871632571a9dc0e0e142fc"
+      },
+      "exitCode": 0,
+      "logSha256": "4e1e37ed3d08f212ec56bc4cfafe3c2a6245c21f74459abffadcac99c5347168",
+      "passed": 5285,
+      "skipped": 42,
+      "failed": 0,
+      "testGroups": 34,
+      "dryRunPacks": 33,
+      "frozenInputsUnchanged": true,
+      "manifestValidation": "passed",
+      "lint": "zero warnings",
+      "typecheck": "passed",
+      "build": "passed",
+      "repairProcessModulePacked": true
+    },
+    "previousFullCheck": {
+      "command": "CI=true pnpm check",
+      "log": "/tmp/dsh-repair-checkpoint-check.log",
+      "status": "interrupted",
+      "exitCode": 143,
+      "reason": "Stopped the superseded check after the final focused runtime case reproduced missing whole-goal acceptance; it is not a passing full check."
+    },
+    "controlledRegressions": [
+      "native/repair signal abort after the terminal provider chunk retains pendingModel=1 after handle disposal",
+      "a real verifier cycle blocked behind a controlled HTTP gate is joined by a newly admitted outcome; a fresh cycle processes the new contract"
+    ],
+    "targeted": {
+      "outcomeRuntimePassed": 13,
+      "nativeChildPassed": 2,
+      "goalsAndSkillsTypecheck": "passed",
+      "goalsAndSkillsBuild": "passed",
+      "repairAgentIncludingNativeAndRepairCancellationPassed": 7
+    }
+  },
+  "limitations": [
+    "Live-model crash recovery and the full production Skills-to-feedback journey were not exercised by this deterministic runtime test.",
+    "Cold takeover is Linux-only and cannot establish arbitrary external subprocess cleanup.",
+    "This change is not included in the immutable published v0.1.31 packages.",
+    "The full RSI roadmap and remaining real-task generalization are retained."
+  ],
+  "fullGoal": {
+    "verified": 3,
+    "implementing": 13,
+    "pending": 2,
+    "status": "active"
+  }
+}

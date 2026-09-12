@@ -17,6 +17,24 @@ function stage(store: SkillStore, record: SkillRepairContinuation, states: reado
 afterEach(() => vi.useRealTimers())
 
 describe('repair continuation runtime', () => {
+  test('reacquires the original repair once before inspecting it without creating another Goal', async () => {
+    const store = new SkillStore(':memory:'), record = stage(store, created(store), ['source-confirmed', 'creating-repair', 'repairing'])
+    const order: string[] = [], createRepair = vi.fn()
+    const runtime = new RepairContinuationRuntime(store, ports({ createRepair, ensureRepair: async () => { order.push('resume') }, inspectRepair: async () => { order.push('inspect'); return 'achieved' } }))
+    await Promise.all([runtime.tick(scope, record.id), runtime.tick(scope, record.id)])
+    expect(order).toEqual(['resume', 'inspect']); expect(createRepair).not.toHaveBeenCalled()
+    expect(store.getRepairContinuation(scope, record.id)?.state).toBe('repair-achieved')
+    await runtime.dispose(); store.close()
+  })
+  test('an unconfirmed recovery remains unknown without dispatching capture or replacement work', async () => {
+    const store = new SkillStore(':memory:'), record = stage(store, created(store), ['source-confirmed', 'creating-repair', 'repairing', 'repair-achieved'])
+    const capture = vi.fn(), createRepair = vi.fn()
+    const runtime = new RepairContinuationRuntime(store, ports({ capture, createRepair, ensureRepair: async () => { throw new Error('old worker still owns execution') } }))
+    await expect(runtime.tick(scope, record.id)).rejects.toThrow('old worker still owns execution')
+    expect(store.getRepairContinuation(scope, record.id)).toMatchObject({ state: 'unknown', checkpoint: { failure: 'repair-recovery-unconfirmed' } })
+    await runtime.tick(scope, record.id); expect(capture).not.toHaveBeenCalled(); expect(createRepair).not.toHaveBeenCalled()
+    await runtime.dispose(); store.close()
+  })
   test('checkpoints every durable result and advances one finite phase per tick', async () => {
     const store = new SkillStore(':memory:'), runtime = new RepairContinuationRuntime(store, ports()); let record = created(store)
     for (const state of ['source-confirmed', 'repairing', 'repair-achieved', 'candidate-staged', 'watching', 'complete'] as const) {

@@ -11,7 +11,7 @@ import { acceptanceCanonicalJson, acceptanceDigest, validateTaskAcceptanceContra
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { GoalStore } from './store.js'
-import type { FailureCaptureGoalIdentity, GoalCheckpoint, GoalControlInput, GoalExecutionRun, GoalRecord, GoalScope, GoalTaskContext, HostFailureEvidenceObservation, HostFailureEvidenceSummary, HostFailureTriggerEvidence, NativeGoalState, OwnerAuthorizedRepairInput, OwnerFailureCaptureSummaryInput, OwnerFailureTriggerInput, OwnerGoalExecutionSnapshotInput, OwnerGoalRunProof, OwnerGoalRunProofInput } from './types.js'
+import type { FailureCaptureGoalIdentity, GoalCheckpoint, GoalControlInput, GoalExecutionRun, GoalRecord, GoalScope, GoalTaskContext, HostFailureEvidenceObservation, HostFailureEvidenceSummary, HostFailureTriggerEvidence, NativeGoalState, OwnerAuthorizedRepairInput, OwnerAuthorizedRepairResumeInput, OwnerFailureCaptureSummaryInput, OwnerFailureTriggerInput, OwnerGoalExecutionSnapshotInput, OwnerGoalRunProof, OwnerGoalRunProofInput } from './types.js'
 import { registerGoalTools } from './tools.js'
 import { GoalExecutionRuntime } from './execution.js'
 import { buildGoalFeedback, type GoalFeedback } from './feedback.js'
@@ -102,6 +102,11 @@ const same = (left: unknown, right: unknown): boolean => {
   try { return acceptanceCanonicalJson(left) === acceptanceCanonicalJson(right) } catch { return false }
 }
 const detached = <T>(value: T): Readonly<T> => Object.freeze(JSON.parse(JSON.stringify(value)) as T)
+/** A fresh Host process can attest the same durable source with a new generation. */
+const stableRepairTrigger = (trigger: HostFailureTriggerEvidence) => {
+  const { attestedAt: _attestedAt, evidence, ...stable } = trigger
+  return { ...stable, evidence: { producer: evidence.producer } }
+}
 function ownerSnapshotInput(value: unknown): value is OwnerGoalExecutionSnapshotInput {
   if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
   const input = value as Record<string, unknown>; const names = Object.getOwnPropertyNames(input)
@@ -165,6 +170,21 @@ function ownerAuthorizedRepairInput(value: unknown): value is OwnerAuthorizedRep
     && input.scope !== null && typeof input.scope === 'object' && input.trigger !== null && typeof input.trigger === 'object'
     && Number.isSafeInteger(input.maxGoalRounds) && (input.maxGoalRounds as number) > 0
     && Number.isSafeInteger(input.expiresAt)
+}
+function ownerAuthorizedRepairResumeInput(value: unknown): value is OwnerAuthorizedRepairResumeInput {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
+  const input = value as Record<string, unknown>, descriptors = Object.getOwnPropertyDescriptors(input)
+  if (Object.keys(input).length !== 9 || !['authorizationId', 'authorizationDigest', 'ownerRouteId', 'scope', 'trigger', 'objective', 'maxGoalRounds', 'expiresAt', 'repair'].every(key => Object.hasOwn(input, key))
+    || !Object.values(descriptors).every(descriptor => descriptor.enumerable && 'value' in descriptor)) return false
+  const { repair, ...base } = input
+  if (!ownerAuthorizedRepairInput(base)) return false
+  const string = (item: unknown) => typeof item === 'string' && item.length > 0 && item.length <= 16_384
+  return Object.keys(input).length === 9 && Object.hasOwn(input, 'repair')
+    && repair !== null && typeof repair === 'object' && !Array.isArray(repair) && Object.getPrototypeOf(repair) === Object.prototype
+    && Object.getOwnPropertySymbols(repair).length === 0
+    && Object.keys(repair).length === 4 && ['sessionId', 'goalId', 'nativeGoalId', 'definitionDigest'].every(key => Object.hasOwn(repair, key))
+    && Object.values(Object.getOwnPropertyDescriptors(repair)).every(descriptor => descriptor.enumerable && 'value' in descriptor && string(descriptor.value))
+    && /^[a-f0-9]{64}$/u.test((repair as Record<string, unknown>).definitionDigest as string)
 }
 
 export class AssistantGoalsService extends Service {
@@ -1290,6 +1310,73 @@ export class AssistantGoalsService extends Service {
       return record
     } catch (error) {
       if (this.ctx.get('goals')?.get(agent) !== undefined) throw new Error('assistant-goals: native goal created but repair indexing is partial or unknown; inspect before retrying', { cause: error })
+      binding.dispose(); throw error
+    }
+  }
+
+  /** Host-only continuation of the same durable repair Goal. Never creates a replacement Goal or budget. */
+  resumeOwnerAuthorizedRepair = async (agent: Agent, value: OwnerAuthorizedRepairResumeInput, currentAuthority: () => void): Promise<GoalRecord> => {
+    if (!this.#active || !ownerAuthorizedRepairResumeInput(value) || typeof currentAuthority !== 'function') throw new Error('assistant-goals: invalid owner repair resume input')
+    const input = detached(value)
+    const authorized = () => {
+      const producer = this.ctx.get('assistantSkills' as never, false) as { ownsOwnerAuthorizedRepairResume?(input: OwnerAuthorizedRepairResumeInput, callback: () => void): boolean } | undefined
+      if (producer?.ownsOwnerAuthorizedRepairResume?.(input, currentAuthority) !== true) throw new Error('assistant-goals: repair resume capability unavailable')
+      currentAuthority()
+    }
+    authorized()
+    if (agent.session.header.cwd !== input.scope.workspace || agent.session.header.agentPreset !== input.scope.preset
+      || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-goals: exact repair Agent scope required')
+    if (input.scope.principalId !== input.trigger.scope.principalId || input.scope.principalRecordId !== input.trigger.scope.principalRecordId
+      || input.scope.principalVersion !== input.trigger.scope.principalVersion || input.scope.workspace !== input.trigger.scope.workspace || input.scope.preset !== input.trigger.scope.preset
+      || input.objective !== input.trigger.taskFamily.objective || !Number.isSafeInteger(input.maxGoalRounds) || input.maxGoalRounds < 1
+      || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now()) throw new Error('assistant-goals: invalid owner repair resume bounds')
+    if (input.trigger.protocol !== 'assistant-skills/host-failure-trigger/v1' || input.trigger.failures.some(item => item.goal.sessionId === String(agent.session.id))) throw new Error('assistant-goals: repair resume source or session mismatch')
+    if (input.repair.sessionId !== String(agent.session.id)) throw new Error('assistant-goals: original repair session required')
+    authorized()
+    const observed = await this.inspectOwnerFailureTrigger({ ownerRouteId: input.ownerRouteId, principalId: input.scope.principalId,
+      workspace: input.scope.workspace, preset: input.scope.preset, taskFamilyId: input.trigger.taskFamily.id,
+      failures: input.trigger.failures.map(item => ({ sessionId: item.goal.sessionId, goalId: item.goal.id })), minimumOccurrences: input.trigger.triggerCondition.minimumOccurrences })
+    authorized()
+    if (!same(stableRepairTrigger(observed), stableRepairTrigger(input.trigger))) throw new Error('assistant-goals: repair resume trigger changed')
+    if (Date.now() >= input.expiresAt) throw new Error('assistant-goals: owner repair authorization expired')
+    const native = this.ctx.get('goals')
+    const stored = this.#store.get(input.scope, input.repair.goalId)
+    const current = native?.get(agent)
+    if (native === undefined || stored === undefined || current === undefined
+      || stored.native.sessionId !== input.repair.sessionId || stored.native.goalId !== input.repair.nativeGoalId
+      || stored.definition.digest !== input.repair.definitionDigest || stored.definition.objective !== input.objective
+      || stored.native.objective !== input.objective || stored.native.maxGoalRounds !== input.maxGoalRounds
+      || String(current.id) !== input.repair.nativeGoalId || current.objective !== input.objective || current.maxGoalRounds !== input.maxGoalRounds
+      || current.revision !== stored.native.revision || current.roundsStarted !== stored.native.roundsStarted
+      || current.phase !== stored.native.phase || !['active', 'complete'].includes(current.phase)
+      || current.phase !== 'complete' && current.roundsStarted >= current.maxGoalRounds) throw new Error('assistant-goals: exact resumable repair Goal is unavailable')
+    const policy = this.ctx.get('assistantPolicy') as AssistantPolicyService | undefined
+    if (policy?.evaluateAgent(agent, 'observe', { kind: 'goal', id: 'business-context' }).effect !== 'allow'
+      || current.phase !== 'complete' && policy.evaluateAgent(agent, 'execute', { kind: 'goal', id: 'business-context' }).effect !== 'allow'
+      || this.#budget === undefined || !this.#budget.hasMeter(agent.options) || this.#outcome === undefined) throw new Error('assistant-goals: repair resume policy, meter or outcome unavailable')
+    let active = true
+    const routeReceipt = this.ctx.get('assistantDelivery')?.validateOwnerRoute({ authorityId: input.ownerRouteId, principalId: input.scope.principalId, workspace: input.scope.workspace, agentPreset: input.scope.preset })
+    if (!routeReceipt) throw new Error('assistant-goals: repair owner route unavailable')
+    const binding = { scope: detached(input.scope) as GoalScope, ownerRouteId: input.ownerRouteId, expiresAt: input.expiresAt, routeReceipt, currentAuthority: authorized,
+      dispose: () => { active = false; if (this.#ownerRepairBindings.get(agent) === binding) this.#ownerRepairBindings.delete(agent) } }
+    if (this.#ownerRepairBindings.has(agent)) throw new Error('assistant-goals: repair resume is already bound to this Agent')
+    this.#ownerRepairBindings.set(agent, binding)
+    agent.ctx.effect(() => () => binding.dispose(), 'assistant-goals.owner-repair-resume-binding')
+    try {
+      authorized(); this.#scope(agent, 'observe'); if (current.phase !== 'complete') this.#scope(agent, 'execute')
+      if (current.phase === 'complete') return stored
+      authorized(); if (!active || Date.now() >= input.expiresAt) throw new Error('assistant-goals: repair resume authority changed before native resume')
+      native.resume(agent, { id: current.id, revision: current.revision })
+      authorized(); if (!active || Date.now() >= input.expiresAt) throw new Error('assistant-goals: native repair resumed but owner authority changed; inspect before retrying')
+      const record = this.#observe(agent, false)
+      if (record === undefined || record.id !== input.repair.goalId || record.definition.digest !== input.repair.definitionDigest
+        || record.native.goalId !== input.repair.nativeGoalId || record.native.revision !== current.revision + 1 || record.native.phase !== 'active') {
+        throw new Error('assistant-goals: native repair resumed but indexing is partial or unknown; inspect before retrying')
+      }
+      return record
+    } catch (error) {
+      const after = native.get(agent)
+      if (after !== undefined && after.id === current.id && after.revision !== current.revision) throw new Error('assistant-goals: native repair resume outcome is partial or unknown; inspect before retrying', { cause: error })
       binding.dispose(); throw error
     }
   }

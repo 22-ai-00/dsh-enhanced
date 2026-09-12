@@ -42,8 +42,11 @@ class GoalsBridge implements TaskAcceptanceProducer {
   inspectAcceptedExecution = (contract: TaskAcceptanceContract) => this.runtime.inspect(contract)
 }
 
-async function proofServer(ready: () => boolean = () => true): Promise<string> {
-  const server = createServer((_request, response) => { response.statusCode = ready() ? 200 : 503; response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ id: 'proof', state: { ready: true } })) })
+async function proofServer(ready: () => boolean = () => true, beforeResponse?: () => Promise<void>): Promise<string> {
+  const server = createServer(async (_request, response) => {
+    await beforeResponse?.()
+    response.statusCode = ready() ? 200 : 503; response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ id: 'proof', state: { ready: true } }))
+  })
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); servers.push(server)
   const address = server.address(); if (address === null || typeof address === 'string') throw new Error('missing proof server address')
   return `http://127.0.0.1:${address.port}/objects/{id}`
@@ -81,8 +84,8 @@ function run(value: GoalRecord, now: number): GoalExecutionRun {
 async function runtimeHarness(paths: { verifier: string; outcome: string }, current: () => GoalRecord, runs: () => readonly GoalExecutionRun[], ready: () => boolean = () => true,
   assertDependencies: (record: GoalRecord) => void = parent => {
     if (parent.checkpoint.dependencies.length > 0) throw new Error('unexpected dependency')
-  }) {
-  const url = await proofServer(ready)
+  }, beforeResponse?: () => Promise<void>) {
+  const url = await proofServer(ready, beforeResponse)
   const authorityInput = { kind: 'readback' as const, id: 'target', urlTemplate: url, objectIdPointer: '/id', timeoutMs: 1_000, maxResponseBytes: 1_024, allowHttpLoopback: true }
   const [authority] = createVerifierAuthorities({ authorities: [authorityInput] }); if (authority === undefined) throw new Error('missing readback authority')
   const ctx = new Context(); contexts.push(ctx)
@@ -99,6 +102,32 @@ async function runtimeHarness(paths: { verifier: string; outcome: string }, curr
 }
 
 describe('GoalOutcomeRuntime durable crash recovery', () => {
+  it('runs a post-admission verifier cycle after its first tick joins an in-flight cycle', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'goal-outcome-coalesced-tick-')); roots.push(root)
+    let current = record(root); const initial = run(current, Date.now()), agent = {} as Agent
+    let nativeRuns: readonly GoalExecutionRun[] = [], completions = 0
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const f = await runtimeHarness({ verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcome.sqlite') }, () => current, () => nativeRuns,
+      () => true, undefined, () => gate)
+    f.ctx.provide('goals' as never, { get: () => ({ id: current.native.goalId, revision: current.native.revision }), complete: () => {
+      completions++; current = { ...current, native: { ...current.native, phase: 'complete', revision: current.native.revision + 1 } }
+    } } as never)
+    f.runtime.bind(current); f.runtime.prepare(agent, initial)
+    const older = { ...initial, dispatchedAt: Date.now(), execution: { status: 'succeeded' as const, quiescent: true, completedAt: Date.now() } }
+    nativeRuns = [older]
+    const olderSettled = f.runtime.settled(agent, older, () => {})
+    await vi.waitFor(() => expect(f.verifier.health().pendingVerification).toBe(1))
+    const next = { ...initial, intent: { ...initial.intent, runId: 'run-b', task: { ...initial.intent.task, ref: 'run-b', runId: 'run-b' } } }
+    f.runtime.prepare(agent, next)
+    const durable = { ...next, dispatchedAt: Date.now(), execution: { status: 'succeeded' as const, quiescent: true, completedAt: Date.now() } }
+    nativeRuns = [older, durable]
+    const settled = f.runtime.settled(agent, durable, () => {})
+    release(); await Promise.all([olderSettled, settled])
+    expect(completions).toBeGreaterThanOrEqual(1)
+    expect(f.runtime.view(current)).toMatchObject({ status: 'achieved', nativeCompletion: 'complete' })
+  })
+
   it.each(['active', 'paused'] as const)('late verification nudge completes only an eligible live goal (%s)', async phase => {
     const root = await mkdtemp(join(tmpdir(), 'goal-outcome-late-receipt-')); roots.push(root)
     let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock)

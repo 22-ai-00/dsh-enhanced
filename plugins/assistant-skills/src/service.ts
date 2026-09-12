@@ -6,7 +6,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { SkillProviderControl } from '@deepseek-ai/dsh-skill'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import type { AssistantGoalsService, GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput } from '@dsh-enhanced/assistant-goals'
+import type { AssistantGoalsService, GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput, OwnerAuthorizedRepairResumeInput } from '@dsh-enhanced/assistant-goals'
 import type { AssistantEvaluationService, EvaluationCanonicalLearningEvidenceTuple, EvaluationHostScope, TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import Schema from '@deepseek-ai/schemastery'
@@ -22,7 +22,7 @@ import { canaryAdmissionMatches, inspectProspectiveQualification, qualifyHoldout
 import { materializeCanaryAdmission } from './repair-admission.js'
 import { validateRepairProfiles, type RepairContinuationProfile } from './repair-profile.js'
 import { RepairContinuationRuntime } from './repair-runtime.js'
-import { OwnerRepairAgentRuntime } from './repair-agent.js'
+import { OwnerRepairAgentRuntime, type OwnerRepairAgentInput } from './repair-agent.js'
 import { enqueueRepairFeedback, type RepairFeedbackMilestone } from './repair-feedback.js'
 import type { SkillRepairContinuation, SkillRepairNextIterationInput, SkillRepairAuthorizationInput } from './store.js'
 import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRun, type SkillRunStep, type StoredSkillDefinition, type SkillCapture, type SkillDeployment, type SkillDeploymentInput, type SkillWatchObservationResult } from './store.js'
@@ -859,6 +859,14 @@ export class AssistantSkillsService extends Service {
       return this.#repairProfile(record).maxGoalRounds === input.maxGoalRounds
     } catch { return false }
   }
+  ownsOwnerAuthorizedRepairResume = (input: OwnerAuthorizedRepairResumeInput, callback: () => void): boolean => {
+    if (!this.ownsOwnerAuthorizedRepair(input, callback)) return false
+    const record = this.#store.getRepairContinuation(input.scope, input.authorizationId)
+    const repair = record?.checkpoint.repair as { sessionId?: string; goalId?: string } | undefined
+    return !!record && ['repairing', 'repair-achieved', 'capturing', 'candidate-staged', 'comparing', 'watching'].includes(record.state)
+      && repair?.sessionId === input.repair.sessionId && repair.goalId === input.repair.goalId
+      && this.#repairAgents?.ownsResume(input, callback) === true
+  }
   #repairProfileAt(record: SkillRepairContinuation, iteration: number): RepairContinuationProfile {
     const entry = record.authorization.profileSequence?.[iteration - 1]
       ?? (iteration === 1 ? { id: record.authorization.profileId, digest: record.authorization.profileDigest } : undefined)
@@ -1057,9 +1065,20 @@ export class AssistantSkillsService extends Service {
       }
     }).catch(() => undefined).finally(() => { this.#repairTask = undefined })
   }
+  #repairAgentInput(record: SkillRepairContinuation, trigger: HostFailureTriggerEvidence): OwnerRepairAgentInput {
+    const profile = this.#repairProfile(record), primary = this.#repairProfileAt(record, 1)
+    const usage = this.#store.repairUsage(record.scope, record.id)
+    const callback = () => this.#assertRepair(record)
+    this.#repairAssertions.set(record.id, { callback, triggerDigest: acceptanceDigest(trigger) })
+    return { ...profile, id: record.id, iteration: record.iteration, maxModelCalls: primary.maxModelCalls, maxToolCalls: primary.maxToolCalls,
+      initialModelCalls: usage.modelCalls, initialToolCalls: usage.toolCalls,
+      recordUsage: kind => { this.#store.chargeRepairUsage(record.scope, record.id, kind, kind === 'model' ? primary.maxModelCalls : primary.maxToolCalls) },
+      authorizationDigest: record.authorizationDigest, ownerRouteId: record.authorization.ownerRouteId,
+      trigger, objective: trigger.taskFamily.objective, expiresAt: record.authorization.expiresAt, assertCurrent: callback }
+  }
   #installRepairRuntime(ctx: Context): void {
     ctx.inject(['tools', 'agents', 'sessions', 'llm', 'systemPrompt', 'assistantGoals', 'assistantPolicy', 'assistantDelivery', 'assistantVerifier'], runtime => {
-      const agents = new OwnerRepairAgentRuntime(runtime)
+      const agents = new OwnerRepairAgentRuntime(runtime, this.#store)
       const driver = new RepairContinuationRuntime(this.#store, {
         assertCurrent: record => this.#assertRepair(record),
         inspectTrigger: async (record, signal) => {
@@ -1069,14 +1088,17 @@ export class AssistantSkillsService extends Service {
           return this.#goals().inspectOwnerFailureTrigger({ ownerRouteId: locator.ownerRouteId, principalId: locator.principalId, workspace: locator.workspace, preset: locator.preset, taskFamilyId: profile.taskFamilyId, failures: [{ goalId: locator.goalId, sessionId: locator.sessionId }], minimumOccurrences: 1 }, signal)
         },
         createRepair: async (record, evidence, signal) => {
-          const profile = this.#repairProfile(record), primary = this.#repairProfileAt(record, 1), trigger = evidence as HostFailureTriggerEvidence
-          const usage = this.#store.repairUsage(record.scope, record.id)
-          const callback = () => this.#assertRepair(record)
-          this.#repairAssertions.set(record.id, { callback, triggerDigest: acceptanceDigest(trigger) })
-          return agents.create({ ...profile, id: record.id, iteration: record.iteration, maxModelCalls: primary.maxModelCalls, maxToolCalls: primary.maxToolCalls,
-            initialModelCalls: usage.modelCalls, initialToolCalls: usage.toolCalls,
-            recordUsage: kind => { this.#store.chargeRepairUsage(record.scope, record.id, kind, kind === 'model' ? primary.maxModelCalls : primary.maxToolCalls) }, authorizationDigest: record.authorizationDigest, ownerRouteId: record.authorization.ownerRouteId,
-            trigger, objective: trigger.taskFamily.objective, expiresAt: record.authorization.expiresAt, assertCurrent: callback }, signal)
+          return agents.create(this.#repairAgentInput(record, evidence as HostFailureTriggerEvidence), signal)
+        },
+        ensureRepair: async (record, signal) => {
+          const locator = this.#repairLocator(record, true)
+          if (agents.get(locator.sessionId)) return
+          const snapshot = this.#goals().inspectOwnerGoalExecution(locator)
+          const stored = snapshot.storedGoal
+          await agents.resume(this.#repairAgentInput(record, record.checkpoint.trigger as HostFailureTriggerEvidence), {
+            sessionId: locator.sessionId, goalId: locator.goalId, nativeGoalId: stored.nativeAtLastObservation.goalId,
+            definitionDigest: stored.definition.digest,
+          }, signal)
         },
         inspectRepair: async (record, signal) => {
           const locator = this.#repairLocator(record, true), snapshot = this.#goals().inspectOwnerGoalExecution(locator)
@@ -1142,12 +1164,9 @@ export class AssistantSkillsService extends Service {
       })
       this.#repairAgents = agents; this.#repairRuntime = driver
       for (const record of this.#store.listRepairContinuations()) {
-        // An in-flight native repair cannot be recreated from a cached transcript.
-        // Until its Agent can be reacquired with verified quiescence, surface the
-        // interruption immediately rather than leaving it "running" until expiry.
-        if (['repairing', 'repair-achieved', 'candidate-staged'].includes(record.state)) {
-          this.#store.transitionRepairContinuation(record.scope, record.id, record.revision, 'unknown', { ...record.checkpoint, failure: 'repair-agent-interrupted' })
-        } else driver.recover(record.scope, record.id)
+        // Dispatches without a durable result are not replayable. Existing
+        // repair Sessions are reattached by ensureRepair under their fence.
+        driver.recover(record.scope, record.id)
       }
       runtime.tools.register(defineTool({ name: 'skill_repair_arm', description: 'Authorize a bounded autonomous repair sequence starting from an exact owner Goal using configured profiles. After independent failure evidence, a separate native Goal synthesizes a repair; only independent acceptance and prospective comparison can deploy a finite canary. Requires the current human request. Followups require the frozen profile sequence and a new independently failed task after promotion; budgets and expiry cannot be renewed.',
         parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, source_session_id: { type: 'string' }, profile_id: { type: 'string', required: true }, owner_route_id: { type: 'string', required: true }, invocation_id: { type: 'string', required: true }, expires_at: { type: 'integer', required: true }, notify: { type: 'boolean', description: 'Send finite repair results to this exact current owner route Session.' } }, output,

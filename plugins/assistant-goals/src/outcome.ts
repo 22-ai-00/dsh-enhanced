@@ -188,7 +188,16 @@ export class GoalOutcomeRuntime {
     if (valid) this.#fences.set(accepted.contractId, { agent, check })
     await registration.completed(accepted)
     if (this.#registration !== registration) throw new Error('assistant-goals: assessment verifier changed')
-    await this.ctx.get('assistantVerifier', false)!.tick()
+    const verifier = this.ctx.get('assistantVerifier', false)!
+    // The first call can join a tick that selected its one job before this
+    // assessment was admitted. The verifier registers its slot-clearing
+    // finally before returning the promise, so awaiting it lets the second
+    // call start or join a bounded post-admission cycle.
+    await verifier.tick()
+    if (this.#registration !== registration || this.#ready() !== registration) throw new Error('assistant-goals: assessment verifier changed')
+    if (valid) check()
+    if (this.#registration !== registration || this.#ready() !== registration) throw new Error('assistant-goals: assessment verifier changed')
+    await verifier.tick()
     if (!valid) return
     check()
     if (this.#ready() !== registration) throw new Error('assistant-goals: assessment verifier changed')

@@ -197,11 +197,10 @@ with current background send Policy. It freezes that Session and route receipt
 for iteration and final-result notices through Delivery’s durable Outbox. Stable
 keys deduplicate notices across runtime ticks and restarts.
 
-Armed waits and deployed watches survive restart. A restart during dispatch, or
-before the native repair Agent can be safely reacquired, surfaces `unknown`
-without creating a second repair. Automatic resumption of an interrupted repair
-Agent is not implemented. Status includes the exact repair Session/Goal and
-candidate/deployment references. The `test:web-owner:real-repair` journey checks
+Armed waits and deployed watches survive restart. Safe repair checkpoints can
+also resume under the conditions below; uncertain dispatches surface `unknown`
+without creating a second repair. Status includes the exact repair Session/Goal
+and candidate/deployment references. The `test:web-owner:real-repair` journey checks
 two successive improvements, future-task promotion, original-session feedback
 and absence of replay after completion and restart. `skill_repair_revoke` stops the remaining continuation; completed
 filesystem effects or a deployed version require their existing explicit
@@ -209,3 +208,27 @@ rollback controls. Repair Agents use the configured workspace, model route and
 tool authority, and may write files there; they are not an OS sandbox. Calls and
 deadlines are finite; token or monetary accounting still depends on the route's
 registered meter. No installation script or credential authority is added.
+
+### Repair checkpoint recovery
+
+The dev increment after v0.1.31 persists an execution fence per authorized repair
+iteration. A cold Linux Host may reacquire it only when the prior process is
+proven gone in the same PID namespace and no model or tool effect remains
+pending. Tool completion also requires its native Session result to be flushed.
+Successful disposal permits reattachment in the same process. Expiry alone never
+permits takeover. Missing legacy execution records, unreadable process identity,
+different PID namespaces and unfinished external work remain unconfirmed.
+
+Reattachment loads the original Session and native Goal, revalidates current
+owner, route, source, profile and Policy, and retains cumulative call counts,
+native rounds and the original absolute deadline. Only an active, disarmed Goal
+can resume execution; completed Goals can be reattached for evidence processing.
+Human-paused, blocked, cleared, changed or expired Goals are not automatically
+rearmed. Interrupted capture/comparison dispatches remain `unknown`.
+
+The cross-process test kills a Host after a completed first round and its
+independent acceptance, then verifies that a second Host finishes the same Goal
+and writes a real artifact within the remaining budget. It uses the pinned
+SessionPersistence, native Goal driver and repair runtime with a deterministic
+model adapter and fixture owner/policy evidence. It does not establish live-model
+crash recovery, arbitrary subprocess cleanup or cross-platform cold recovery.
