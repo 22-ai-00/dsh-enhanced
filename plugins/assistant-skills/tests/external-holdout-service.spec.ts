@@ -14,8 +14,10 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { inspect } from 'node:util'
 import { afterEach, expect, test } from 'vitest'
 import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { canonicalEvaluationHostScope, canonicalEvaluationScope, evaluationLearningProjectionDigest } from '@dsh-enhanced/assistant-evaluation'
 import { failureSummaryEvidenceDigest, type HostFailureEvidenceSummary } from '../src/definition.ts'
 import { AssistantSkillsService } from '../src/service.ts'
 import { generatorDigest, prospectiveGeneratorDigest } from '../src/prospective-holdout.ts'
@@ -80,7 +82,11 @@ test('skill_qualify uses one external process attempt, persists unknown, and exp
   const plugin = await ctx.plugin(AssistantSkillsService, { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], comparisons: [{ id: 'external', version: 1, scope, stateRoot: comparisonStateRoot, image: execution.image, dockerPath: execution.dockerPath, command: execution.command, artifactPath: execution.artifactPath, expiresAt: execution.expiresAt, maxComparisons: 1, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1, minimumEvaluationGain: 0.1, cases: [{ id: 'replay', kind: 'replay', inputs: {}, files: [], stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: '', expectedStdout: '', expectedExitCode: 0 }] }], externalHoldouts: [{ id: 'external', version: 1, scope, execution: { ...execution, stateRoot }, authority: { executable: process.execPath, args: [script, marker], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), datasetDigest: digest('dataset') }, maxComparisons: 1 }, { id: 'cancelled', version: 1, scope, execution: { ...execution, stateRoot: cancelledStateRoot }, authority: { executable: process.execPath, args: [script, marker, 'hold'], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), datasetDigest: digest('dataset') }, maxComparisons: 1 }, { id: 'prospective', version: 1, scope, execution: { ...execution, stateRoot: prospectiveStateRoot }, authority: { executable: process.execPath, args: [script, marker, 'prospective'], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest }, maxComparisons: 1 }, { id: 'foreign', version: 1, scope: { ...scope, principalId: 'foreign', principalRecordId: 'foreign-record' }, execution: { ...execution, stateRoot: foreignStateRoot }, authority: { executable: process.execPath, args: [script, marker, 'foreign'], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), datasetDigest: digest('foreign-dataset') }, maxComparisons: 1 }] })
   cleanups.push(() => plugin.dispose())
   const execute = (name: string, toolArguments: object, signal = new AbortController().signal) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: toolArguments, signal, agent: owner })
-  const json = async (name: string, toolArguments: object) => JSON.parse(((await execute(name, toolArguments)).value as { context: string }).context)
+  const json = async (name: string, toolArguments: object) => {
+    const result = await execute(name, toolArguments)
+    expect(result.isError, inspect(result)).toBe(false)
+    return JSON.parse((result.value as { context: string }).context)
+  }
   const profileIdDescription = (name: string) => {
     const parameters = ctx.tools.get(name)!.parameters as Record<string, unknown>
     const properties = parameters.properties as Record<string, unknown> | undefined
@@ -131,6 +137,13 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('repeated failures q
   const outcomeProfile = { id: 'topology-outcome', version: 1, digest: digest('topology-outcome') }, evidenceNow = Date.now()
   const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope, goal: { id: 'repair-goal', definition: { version: 1, digest: goalDefinitionDigest, objective }, sessionId: 'repair-session', nativeGoalId: 'repair-native' }, runId: 'repair-run', turn: 1, acceptance: { contractId: 'repair-contract', contractDigest: digest('repair-contract'), receiptDigest: digest('repair-receipt'), verifiedAt: evidenceNow - 1000, validUntil: evidenceNow + 120000 }, steps: [{ id: 'write-topology', toolName: 'write', arguments: { file_path: 'topology.mjs', content: wrongTopologyImplementation } }], failedObservations: [] }
   const snapshots = new Map<string, unknown>()
+  const canonicalOutcomes = new Map<string, any>()
+  const canonicalListeners = new Set<(notice: unknown) => void>()
+  let canonicalWatermark = 0
+  const currentCanonical = (assessmentId: string) => {
+    const value = canonicalOutcomes.get(assessmentId)
+    return value && { ...structuredClone(value), scopeWatermark: canonicalWatermark }
+  }
   const failureSummaryReads: unknown[] = []
   const failureLocators = [{ sessionId: 'failure-session-b', goalId: 'failure-goal-b' }, { sessionId: 'failure-session-a', goalId: 'failure-goal-a' }]
   const failures = [...failureLocators].reverse().map((locator, index) => ({ goal: { id: locator.goalId, definition: source.goal.definition, sessionId: locator.sessionId, nativeGoalId: `failure-native-${index + 1}` }, runId: `failure-run-${index + 1}`, execution: { status: 'succeeded' as const, quiescent: true as const }, outcome: 'not-achieved' as const,
@@ -157,6 +170,31 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('repeated failures q
         outcomeProfile, steps: [{ id: `call-${input.runId}`, name: 'skill_run', arguments: { goal_id: input.goalId, name: 'topology-order', version: 2, inputs_json: inputsJson, invocation_id: invocationId }, outcome: 'succeeded' as const }] }
       return { ...payload, traceDigest: acceptanceDigest(payload) }
     } } as never)
+  ctx.provide('assistantEvaluation' as never, {
+    canonicalHostScope: (input: { workspace: string; preset: string }) => canonicalEvaluationHostScope(input),
+    isTrustedTaskLearningProjectionReceipt: (value: any) => {
+      try {
+        const current = currentCanonical(value?.projection?.subjectRef)
+        return current !== undefined && evaluationLearningProjectionDigest(value) === value.projection.digest
+          && acceptanceDigest(current) === acceptanceDigest(value)
+      } catch { return false }
+    },
+    getTrustedGoalOutcomeLearningProjection: (input: { scope: { workspace: string; preset: string }; assessmentId: string }) => {
+      const value = currentCanonical(input.assessmentId)
+      return value && value.scope !== undefined && (value.scope as { workspace: string; preset: string }).workspace === input.scope.workspace
+        && (value.scope as { workspace: string; preset: string }).preset === input.scope.preset ? value : undefined
+    },
+    withTrustedCanonicalTaskWriterFence: (input: { scope: { workspace: string; preset: string }; scopeWatermark: number; evidence: readonly { subjectKind: string; subjectRef: string; version: number; digest: string; disposition: 'upsert' | 'retract' }[] }, callback: () => unknown) => {
+      const matched = canonicalWatermark === input.scopeWatermark && input.evidence.every(expected => {
+        const current = currentCanonical(expected.subjectRef) as { scope?: { workspace: string; preset: string }; projection?: { subjectKind: string; subjectRef: string; version: number; digest: string; disposition: string } } | undefined
+        return current?.scope?.workspace === input.scope.workspace && current.scope.preset === input.scope.preset
+          && expected.subjectKind === current.projection?.subjectKind && expected.subjectRef === current.projection.subjectRef
+          && expected.version === current.projection.version && expected.digest === current.projection.digest && expected.disposition === current.projection.disposition
+      })
+      return matched ? { matched: true, value: callback() } : { matched: false, reason: 'evidence-changed' }
+    },
+    onTrustedTaskChange: (listener: (notice: unknown) => void) => { canonicalListeners.add(listener); return () => canonicalListeners.delete(listener) },
+  } as never)
   // Explicit independent-acceptance fixtures exercise the production watch consumer.
   // CLI qualification above/below executes real programs; these Goal outcomes do not claim a real verifier run.
   const acceptRun = (run: { goalId: string; goalExecutionRunId: string }, achieved: boolean) => {
@@ -171,6 +209,14 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('repeated failures q
       executionRuns: [{ intent: { runId: run.goalExecutionRunId, scope, task: { kind: 'goal-step', goal: { ...goal, nativeRevision: 1 } } }, dispatchedAt: now - 1000, execution }],
       outcomeAssessments: [{ triggerRunId: run.goalExecutionRunId, contract, dispatchedAt: now - 1000, execution }],
       acceptedTasks: [{ contractId: contract.id, state: 'done', contract, receipt, verifierExecutionObservation: { ...execution, executionRef: contract.task.ref } }] })
+    const evaluationScope = { workspace: root, preset: 'primary' }, scopeKey = canonicalEvaluationScope(evaluationScope).scopeKey, assessmentId = contract.task.ref
+    const evaluationExecution = { outcomeId: `evaluation-execution-${run.goalId}`, status: 'succeeded' as const, source: { kind: 'evaluator' as const, id: 'assistant-verifier' }, evidence: [{ kind: 'goal-outcome' as const, ref: assessmentId }], occurredAt: now, evaluator: { id: 'assistant-verifier', version: '1' } }
+    const evaluationObjective = { outcomeId: `evaluation-objective-${run.goalId}`, status: achieved ? 'achieved' as const : 'not-achieved' as const, source: { kind: 'evaluator' as const, id: 'assistant-verifier' }, evidence: [{ kind: 'goal-outcome' as const, ref: assessmentId }], occurredAt: now, evaluator: { id: 'assistant-verifier', version: '1' } }
+    const projectionBase = { subjectKind: 'goal-outcome' as const, subjectRef: assessmentId, disposition: 'upsert' as const, evidenceOutcomeId: evaluationObjective.outcomeId }
+    const projection = { ...projectionBase, version: 1, digest: evaluationLearningProjectionDigest({ scopeKey, situation: `goal:${run.goalId}:definition:1`, execution: evaluationExecution, objective: evaluationObjective, projection: projectionBase }) }
+    canonicalWatermark++
+    canonicalOutcomes.set(assessmentId, { triggerOutcomeId: evaluationObjective.outcomeId, scope: evaluationScope, scopeKey, scopeWatermark: canonicalWatermark, situation: `goal:${run.goalId}:definition:1`, execution: evaluationExecution, objective: evaluationObjective, projection })
+    for (const listener of canonicalListeners) listener({ subjectKind: 'goal-outcome', subjectRef: assessmentId })
     ctx.emit('assistant-verifier/receipt', { taskKind: 'goal-outcome' } as never)
   }
 
@@ -179,7 +225,11 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('repeated failures q
   const baseConfig = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['read', 'write'] }
   let plugin = await ctx.plugin(AssistantSkillsService, baseConfig); cleanups.push(() => plugin.dispose())
   const execute = (name: string, toolArguments: object) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: toolArguments, signal: new AbortController().signal, agent: owner })
-  const json = async (name: string, toolArguments: object) => JSON.parse(((await execute(name, toolArguments)).value as { context: string }).context)
+  const json = async (name: string, toolArguments: object) => {
+    const result = await execute(name, toolArguments)
+    expect(result.isError, inspect(result)).toBe(false)
+    return JSON.parse((result.value as { context: string }).context)
+  }
   const parent = await json('skill_save', { goal_id: 'repair-goal', name: 'topology-order', description: 'baseline topology implementation', bindings_json: '[]', expected_version: 0 })
   source.steps[0]!.arguments = { file_path: 'topology.mjs', content: topologyImplementation }
   const candidate = await json('skill_failure_candidate', { owner_route_id: route.authorityId, failure_locators: failureLocators.map(locator => ({ session_id: locator.sessionId, goal_id: locator.goalId })), minimum_occurrences: 2, repair_goal_id: source.goal.id, repair_session_id: source.goal.sessionId, task_family_id: 'dependency-topological-order', name: 'topology-order', description: 'deterministic topological ordering', bindings_json: JSON.stringify([{ name: 'implementation', stepId: 'write-topology', path: '/content' }]), parent_version: 1 })

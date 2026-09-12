@@ -291,6 +291,8 @@ describe('read-only Automations operator snapshot', () => {
     expectCode(() => inspectAutomationsOperatorSnapshot(target), 'unsafe-parent')
     await chmod(state, 0o500)
     expect(inspectAutomationsOperatorSnapshot(target).records).toEqual([])
+    await chmod(state, 0o4700)
+    expectCode(() => inspectAutomationsOperatorSnapshot(target), 'unsafe-parent')
     await chmod(state, 0o700)
 
     const ancestorRoot = await mkdtemp(join(tmpdir(), 'automations-operator-ancestor-')); roots.push(ancestorRoot)
