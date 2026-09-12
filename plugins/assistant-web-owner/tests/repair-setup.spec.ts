@@ -72,6 +72,25 @@ test('rejects a foreign profile scope before producing a patch', async () => {
   expect(() => prepareRepairAdmission(f.input, f.source, f.effective, JSON.stringify({ ownerRouteId: 'owner-route', externalHoldouts: [f.holdout], repairProfiles: [foreign] }))).toThrow('scope')
 })
 
+test.each([{ inject: ['assistantVerifier'] }, { inject: { assistantVerifier: {} } }])('waits for configured Isolation and preserves existing injection %j', async ({ inject }) => {
+  const f = await configured(), effective = parseDocument(f.effective).toJS() as any[]
+  effective.push({ id: 'dsh-enhanced-assistant-isolation', name: '@dsh-enhanced/assistant-isolation' })
+  effective.find(row => row.id === 'dsh-enhanced-assistant-skills').inject = inject
+  const admission = JSON.stringify({ ownerRouteId: 'owner-route', externalHoldouts: [f.holdout], repairProfiles: [f.profile('primary')] })
+  const planned = prepareRepairAdmission(f.input, f.source, JSON.stringify(effective), admission)
+  const skills = (parseDocument(planned.patch).toJS() as any[]).find(row => row.id === 'dsh-enhanced-assistant-skills')
+  expect(skills.inject).toEqual(Array.isArray(inject) ? ['assistantVerifier', 'assistantIsolation'] : { assistantVerifier: {}, assistantIsolation: {} })
+  expect(prepareRepairAdmission(f.input, planned.patch, JSON.stringify(effective), admission).patch).toBe(planned.patch)
+})
+
+test('does not add an unavailable dependency for disabled Isolation', async () => {
+  const f = await configured(), effective = parseDocument(f.effective).toJS() as any[]
+  effective.push({ id: 'dsh-enhanced-assistant-isolation', disabled: true })
+  const admission = JSON.stringify({ ownerRouteId: 'owner-route', externalHoldouts: [f.holdout], repairProfiles: [f.profile('primary')] })
+  const result = prepareRepairAdmission(f.input, f.source, JSON.stringify(effective), admission)
+  expect((parseDocument(result.patch).toJS() as any[]).find(row => row.id === 'dsh-enhanced-assistant-skills').inject).toBeUndefined()
+})
+
 test('rejects a missing exact profile owner without changing the database or patch', async () => {
   const f = await configured(); const path = join(f.input.dshHome, 'profiles', f.input.profile, 'cordis.patch.yml'); const admission = join(f.input.dshHome, 'repair.json')
   await writeFile(path, f.source); await writeFile(admission, JSON.stringify({ ownerRouteId: 'owner-route', externalHoldouts: [f.holdout], repairProfiles: [f.profile('primary')] }), { mode: 0o600 }); await chmod(admission, 0o600)

@@ -69,6 +69,27 @@ export function prepareRepairAdmission(input: WebOwnerSetupInput, source: string
   let repair: unknown = skills.get('repairProfiles', true); if (repair === undefined) { repair = doc.createNode([]); skills.set('repairProfiles', repair as never) }
   if (!isSeq(repair)) fail('repairProfiles must be a sequence')
   for (const value of task.repairProfiles) { const same = repair.items.filter(item => isMap(item) && item.get('id') === value.id) as YAMLMap[]; if (same.length > 1 || (same[0] && !isDeepStrictEqual(same[0].toJSON(), value))) fail('repair profile conflicts with existing configuration'); if (!same[0]) repair.add(doc.createNode(value)) }
+  // When this deployment includes Isolation, its controller must be ready
+  // before Skills can recover or start work. Keep this a composition edge;
+  // ordinary Skills installations do not acquire an intrinsic Isolation peer.
+  const effectiveDoc = parseDocument(effective)
+  if (effectiveDoc.errors.length || !isSeq(effectiveDoc.contents)) fail('effective profile is not a sequence')
+  const effectiveRows = effectiveDoc.contents.items
+  const hasId = (item: unknown, id: string): item is YAMLMap => isMap(item) && (item as YAMLMap).get('id') === id
+  const localIsolation = rows.items.find(item => hasId(item, 'dsh-enhanced-assistant-isolation')) as YAMLMap | undefined
+  const inheritedIsolation = effectiveRows.find(item => hasId(item, 'dsh-enhanced-assistant-isolation')) as YAMLMap | undefined
+  if ((localIsolation || inheritedIsolation) && (localIsolation?.get('disabled') ?? inheritedIsolation?.get('disabled')) !== true) {
+    const skillsRow = rows.items.find(item => hasId(item, 'dsh-enhanced-assistant-skills')) as YAMLMap
+    const inherited = effectiveRows.find(item => hasId(item, 'dsh-enhanced-assistant-skills')) as YAMLMap | undefined
+    const existing = skillsRow.get('inject', true) ?? inherited?.get('inject', true)
+    const inject = existing === undefined ? doc.createNode([]) : existing.clone()
+    if (isSeq(inject)) {
+      if (!(inject.toJSON() as unknown[]).includes('assistantIsolation')) (inject as YAMLSeq).add('assistantIsolation')
+    } else if (isMap(inject)) {
+      if (!inject.has('assistantIsolation')) inject.set('assistantIsolation', doc.createNode({}))
+    } else fail('Skills inject must be a sequence or mapping')
+    skillsRow.set('inject', inject)
+  }
   return { patch: doc.toString({ lineWidth: 0 }), id: task.repairProfiles.map(value => value.id).join(', '), databasePath: base.databasePath, owner: current }
 }
 async function privateJson(path: string, workspace: string): Promise<string> {

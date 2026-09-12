@@ -42,6 +42,8 @@ if (!['template', 'topology'].includes(selectedFamily)) throw new Error('DSH_REA
 const task = selectedFamily === 'topology' ? topologyRepairTask : templateTask
 const nextTask = selectedFamily === 'template' ? templateNextTask : undefined
 const repairIterations = nextTask ? 2 : 1
+const restartCheckpoint = process.env.DSH_REAL_REPAIR_RESTART
+if (restartCheckpoint !== undefined && restartCheckpoint !== 'repair-achieved') throw new Error('DSH_REAL_REPAIR_RESTART must be repair-achieved')
 const exec = promisify(execFile)
 
 function projectKey(cwd) {
@@ -121,8 +123,10 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
   if (!/^sha256:[a-f0-9]{64}$/u.test(process.env.DSH_HOLDOUT_TEST_IMAGE ?? '')) throw new Error('DSH_HOLDOUT_TEST_IMAGE must pin the installed authority image')
   const deliveryPath = join(home, 'assistant-delivery/state.sqlite'), goalsPath = join(home, 'assistant-goals/web.sqlite')
   const verifierPath = join(home, 'assistant-verifier/verification.sqlite'), skillsPath = join(home, 'assistant-skills/skills.sqlite')
+  const isolationPath = join(home, 'assistant-isolation/ledger.sqlite')
   const http = [], frames = [], transport = [], streams = new Map(), contexts = [], approvals = [], rejected = []
-  let authorizedRepairSessions = []
+  let authorizedRepairSessions = [], checkpointRestart
+  const readModelEvents = async () => (await readFile(modelLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
   let host, activePage = page, starts = 0, failed = false, activeSession, workspaceId, patch, patchPath, owner, route
   const setControl = async (phase, sessionId, expectedCalls = []) => {
     activeSession = sessionId
@@ -397,6 +401,58 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
     activeSession = baselineSession
     await prompt(`Authorize the configured autonomous repair once using skill_repair_arm with ${JSON.stringify(armArgs)}. Then end your turn. The Host owns subsequent repair, independent verification and canary qualification.`)
     const continuation = () => parsedRows(skillsPath, 'skill_repair_continuations', 'continuation_json').find(item => item.id === continuationId)
+    const usage = () => query(skillsPath, 'SELECT model_calls,tool_calls FROM skill_repair_usage WHERE id=?', continuationId)[0]
+    const repairLease = () => {
+      const rows = query(skillsPath, 'SELECT lease_json FROM skill_repair_execution WHERE id=? AND iteration=1', continuationId)
+      expect(rows.length).toBeLessThanOrEqual(1)
+      return rows[0] && JSON.parse(rows[0].lease_json)
+    }
+    if (restartCheckpoint) {
+      // Observe production state only. The model has completed its native Goal,
+      // but capture, comparison, canary and owner feedback have not run yet.
+      // No test writes a checkpoint, supplies a repair or renews authorization.
+      let before
+      await expect.poll(async () => {
+        await approve()
+        const current = continuation()
+        if (current && ['rejected', 'revoked', 'expired', 'unknown', 'capturing', 'candidate-staged', 'comparing', 'watching'].includes(current.state)) {
+          throw new Error(`repair checkpoint unavailable: ${current.state}`)
+        }
+        if (current?.state !== restartCheckpoint) return false
+        const lease = repairLease(), repair = current.checkpoint.repair
+        if (!lease || lease.state !== 'active' || lease.pendingModel !== 0 || lease.pendingTool !== 0) return false
+        const stored = query(goalsPath, 'SELECT native_json,definition_json FROM goal_records WHERE id=?', repair.goalId)[0]
+        const native = stored && JSON.parse(stored.native_json)
+        if (native?.phase !== 'complete') return false
+        const result = outcome(verifierPath, repair.goalId)
+        if (result?.job?.receipt?.objectiveStatus !== 'achieved') return false
+        const isolationController = query(isolationPath, 'SELECT owner_id,fence,expires_at FROM isolation_controller WHERE singleton=1')[0]
+        before = { record: current, lease, native, definition: JSON.parse(stored.definition_json), usage: usage(), hostPid: host.pid, isolationController }
+        before.termination = await host.terminate()
+        await writeFile(testInfo.outputPath(`host-${starts}-terminated.log`), host.log(), { mode: 0o600 })
+        host = undefined
+        return true
+      }, { message: 'cold stop after real repair outcome, before candidate capture', timeout: 360000, intervals: [50] }).toBe(true)
+      expect(before).toBeDefined()
+      expect(before.termination).toMatchObject({ sent: true, signal: 'SIGKILL', closed: true, closeSignal: 'SIGKILL' })
+      // Prove the exact observed checkpoint survived the kill, without an
+      // orderly disposer releasing the old lease or a racing capture starting.
+      expect(continuation()).toEqual(before.record)
+      expect(repairLease()).toEqual(before.lease)
+      expect(usage()).toEqual(before.usage)
+      expect(parsedRows(skillsPath, 'skill_candidates', 'candidate_json')).toHaveLength(0)
+      expect(parsedRows(skillsPath, 'skill_comparisons', 'comparison_json')).toHaveLength(0)
+      await expect.poll(() => existsSync(`/proc/${before.lease.process.pid}`), { timeout: 10000 }).toBe(false)
+      const repairDispatches = (await readModelEvents()).filter(item => item.event === 'dispatch' && item.sessionId === repairSession).length
+      before.nativeGoalMessages = (await sessionEvents(home, workspace, repairSession)).filter(event => event.type === 'user/message' && event.data?.source?.kind === 'goal').length
+      expect(before.nativeGoalMessages).toBeGreaterThan(0)
+      expect(before.isolationController.expires_at).toBeGreaterThan(Date.now())
+      await writeFile(testInfo.outputPath('checkpoint-before.json'), JSON.stringify({ ...before, repairDispatches }, null, 2), { mode: 0o600 })
+      await open(true)
+      expect(host.pid).not.toBe(before.hostPid)
+      await restoreSession(baselineSession, /Confirm this session is ready/u)
+      checkpointRestart = { before, repairDispatches }
+    }
     await expect.poll(async () => {
       await approve()
       const record = continuation()
@@ -404,6 +460,28 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
       return record?.state
     }, { message: 'autonomous native repair and prospective canary', timeout: 360000, intervals: [500, 1000] }).toBe('watching')
     const record = continuation()
+    if (checkpointRestart) {
+      const { before, repairDispatches } = checkpointRestart, lease = repairLease()
+      expect(record.authorization).toEqual(before.record.authorization)
+      expect(record.authorizationDigest).toBe(before.record.authorizationDigest)
+      expect(record.iteration).toBe(before.record.iteration)
+      expect(record.checkpoint.repair).toEqual(before.record.checkpoint.repair)
+      expect(lease).toMatchObject({ authorizationId: before.lease.authorizationId, authorizationDigest: before.lease.authorizationDigest,
+        iteration: before.lease.iteration, sessionId: before.lease.sessionId, deadlineAt: before.lease.deadlineAt,
+        fence: before.lease.fence + 1, pendingModel: 0, pendingTool: 0 })
+      expect(lease.process).not.toEqual(before.lease.process)
+      expect(usage()).toEqual(before.usage)
+      const stored = query(goalsPath, 'SELECT native_json,definition_json FROM goal_records WHERE id=?', record.checkpoint.repair.goalId)[0]
+      expect(JSON.parse(stored.native_json)).toEqual(before.native)
+      expect(JSON.parse(stored.definition_json)).toEqual(before.definition)
+      expect((await readModelEvents()).filter(item => item.event === 'dispatch' && item.sessionId === repairSession)).toHaveLength(repairDispatches)
+      const isolationController = query(isolationPath, 'SELECT owner_id,fence,expires_at FROM isolation_controller WHERE singleton=1')[0]
+      expect(isolationController.fence).toBe(before.isolationController.fence + 1)
+      expect(isolationController.owner_id).not.toBe(before.isolationController.owner_id)
+      expect(Date.now()).toBeGreaterThanOrEqual(before.isolationController.expires_at)
+      checkpointRestart.after = { lease, usage: usage(), state: record.state, repair: record.checkpoint.repair, isolationController }
+      await writeFile(testInfo.outputPath('checkpoint-after.json'), JSON.stringify(checkpointRestart.after, null, 2), { mode: 0o600 })
+    }
     expect(record.checkpoint.repair.sessionId).toBe(repairSession)
     const repairGoal = record.checkpoint.repair.goalId
     expect(repairGoal).not.toBe(failureGoal)
@@ -491,7 +569,6 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
     await expect.poll(() => requiredNotices.every(key => noticeRows().some(item => item.idempotency_key === key && item.status === 'accepted')), { message: 'each repair iteration and final result delivered to original owner session', timeout: 30000 }).toBe(true)
     for (const notice of noticeRows()) expect(notice).toMatchObject({ binding_id: binding.id, status: 'accepted', attempt_count: 1 })
     const generatedArtifactDigest = createHash('sha256').update(await readFile(join(workspace, task.artifactPath))).digest('hex')
-    const usage = () => query(skillsPath, 'SELECT model_calls,tool_calls FROM skill_repair_usage WHERE id=?', continuationId)[0]
     const finalUsage = usage()
     expect(finalUsage.model_calls).toBeLessThanOrEqual(repairProfile.maxModelCalls)
     expect(finalUsage.tool_calls).toBeLessThanOrEqual(repairProfile.maxToolCalls)
@@ -505,12 +582,12 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
       expect(nativeSources.length).toBeGreaterThan(0)
       expect(nativeSources.every(event => event.data?.source?.kind === 'goal')).toBe(true)
       expect(nativeSources.every(event => event.data.source.round > 0)).toBe(true)
+      if (checkpointRestart && round.iteration === 1) expect(nativeSources).toHaveLength(checkpointRestart.before.nativeGoalMessages)
       const calls = events.filter(event => event.type === 'tool/call')
       expect(calls.some(event => event.data.name === 'write')).toBe(true)
       expect(calls.every(event => repairProfile.allowedTools.includes(event.data.name))).toBe(true)
       round.toolNames = calls.map(event => event.data.name)
     }
-    const readModelEvents = async () => (await readFile(modelLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
     const beforeRestart = await readModelEvents()
     const dispatches = beforeRestart.filter(item => item.event === 'dispatch')
     expect(dispatches.every(item => item.provider === route.provider && item.model === route.model)).toBe(true)
@@ -538,9 +615,9 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
         failureReceiptDigest: round.failureReceiptDigest, repairReceiptDigest: round.repairReceiptDigest,
         candidateDefinitionDigest: acceptanceDigest(round.candidate.definition), quality: round.comparison.result.quality,
         datasetDigest: round.comparison.result.receipt.datasetDigest, promotion: round.promotion, toolNames: round.toolNames,
-      })), usage: finalUsage, feedback: noticeRows(), generatedArtifactDigest, completedRestartNoReplay: true,
+      })), usage: finalUsage, feedback: noticeRows(), generatedArtifactDigest, completedRestartNoReplay: true, checkpointRestart,
       initialArtifact: 'shared unfinished scaffold', suppliedRepairedSource: false, installedRepairAdmissionIdempotent: true,
-      limitations: ['bounded two-profile workflow improvement', 'no mid-repair restart proof', 'delivery accepted does not mean user read'],
+      limitations: ['bounded two-profile workflow improvement', checkpointRestart ? 'native Goal already complete at cold checkpoint; unfinished native Goal restart requires separate proof' : 'no mid-repair restart proof', 'delivery accepted does not mean user read'],
     }, null, 2), { mode: 0o600 })
   } catch (error) { failed = true; throw error } finally {
     await stop().catch(() => {})
