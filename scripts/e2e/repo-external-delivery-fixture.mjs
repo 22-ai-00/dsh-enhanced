@@ -30,6 +30,7 @@ function literalDeliveryPath(node, home) {
 /** Real signed UDS server/Core/Ledger. GitHub transport and same-UID peer hook are fixtures. */
 export async function prepareExternalRepositoryFixture(home, patchPath, env, { sessionId, workspace, objective, source }) {
   if (process.env.DSH_REPO_VERIFIED_DELIVERY !== 'fixture' || process.env.DSH_REPO_EVENT_SOURCE !== undefined) throw new Error('external repository fixture requires fixture delivery and no event source')
+  if (process.platform !== 'linux') throw new Error('external repository fixture requires the Linux protected-file credential backend')
   const actionsRoot = join(home, 'external-repository-broker'), keysRoot = join(actionsRoot, 'keys')
   await mkdir(keysRoot, { recursive: true, mode: 0o700 })
   const delivery = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-delivery/lib/index.js')).href)

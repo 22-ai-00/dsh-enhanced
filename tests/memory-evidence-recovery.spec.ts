@@ -13,7 +13,7 @@ import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { PersonalMemoryService } from '../plugins/personal-memory/src/service.ts'
 import { DatabaseSync } from 'node:sqlite'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -97,7 +97,9 @@ async function prompt(handle: AgentHandle, text: string) {
 
 test.each(['current-owner', 'changed-owner', 'revoked-owner', 'denied-tool', 'changed-original', 'denied-file', 'pipeline-deny', 'restricted-tool', 'unregistered-tool', 'missing-file', 'missing-anchor', 'missing-source', 'budgeted-execute', 'budgeted-file', 'retargeted-file'] as const)(
   'native original evidence survives prune and disk reopen: %s', async mode => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-tool-evidence-'))
+    // Policy grants use the filesystem provider's canonical execution path.
+    // macOS temporary paths can otherwise retain the /var -> /private/var alias.
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-tool-evidence-')))
     roots.push(root)
     await writeFile(join(root, 'journal.txt'), `report-start:${'a'.repeat(12_000)}NEEDLE=journal-v2${'b'.repeat(12_000)}:report-end`)
     const id = SessionId('original-evidence-session')

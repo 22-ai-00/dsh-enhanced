@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -12,7 +12,7 @@ const roots: string[] = []
 let now = 2_000_000
 
 async function fixture(): Promise<{ config: ExternalBrokerCoreConfig; secret: string }> {
-  const root = await mkdtemp(join(tmpdir(), 'external-broker-core-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'external-broker-core-'))); roots.push(root)
   const credentials = join(root, 'credentials'); await mkdir(credentials, { mode: 0o700 }); await chmod(credentials, 0o700)
   const secret = 'github_pat_external_broker_only'; const secretPath = join(credentials, 'github.token'); await writeFile(secretPath, secret, { mode: 0o600 }); await chmod(secretPath, 0o600)
   const grant = withBrokerGrantDigest({
@@ -45,7 +45,8 @@ function admin(config: ExternalBrokerCoreConfig, intent: BrokerAdminIntent, requ
 
 afterEach(async () => { now = 2_000_000; vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-describe('ExternalBrokerCore', () => {
+// This core fixture uses the Linux protected-file credential backend.
+describe.skipIf(process.platform !== 'linux')('ExternalBrokerCore', () => {
   it('rejects a credential below a writable non-sticky ancestor', async () => {
     const { config } = await fixture(), unsafe = join(config.statePath, '..', 'unsafe'), credentialDirectory = join(unsafe, 'private'), credentialPath = join(credentialDirectory, 'token')
     await mkdir(credentialDirectory, { recursive: true, mode: 0o700 }); await chmod(unsafe, 0o777); await chmod(credentialDirectory, 0o700); await writeFile(credentialPath, 'hidden', { mode: 0o600 })

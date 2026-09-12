@@ -265,7 +265,7 @@ describe('supervised lifecycle v3 invariants', () => {
     expect(valid({ ...manifest, state: 'prepared', servicePhase: 'stopped' })).toBe(false)
   })
 
-  test('v3 recovery loader rejects malformed service acceptance before external mutation', async () => {
+  test.skipIf(process.platform !== 'linux')('v3 recovery loader rejects malformed service acceptance before external mutation', async () => {
     const f = await lifecycleFixture({
       effectiveScenario: 'supervised',
       systemd: { units: [
@@ -416,7 +416,7 @@ function runRestart(args: readonly string[], dshHome: string, platform?: string)
 }
 
 async function temporaryDshHome(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-enhanced-installer-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-enhanced-installer-')))
   temporaryRoots.push(root)
   return root
 }
@@ -463,7 +463,7 @@ interface RemoteBootstrapFixture {
 async function remoteBootstrapFixture(
   replacements: Partial<RemoteBootstrapFixture['assets']> = {},
 ): Promise<RemoteBootstrapFixture> {
-  const root = await temporaryDshHome()
+  const root = await realpath(await temporaryDshHome())
   const assetDirectory = join(root, 'release-assets')
   const fakeBin = join(root, 'bin')
   const temporaryDirectory = join(root, 'tmp')
@@ -2024,6 +2024,10 @@ afterEach(async () => {
 })
 
 describe('one-click installers', () => {
+  // These invoke the Linux lifecycle executor itself: its systemd, /proc,
+  // bwrap, renameat2, and flock contracts cannot be exercised on macOS.
+  // Keep the installer, launchd, and pure configuration tests below portable.
+  describe.skipIf(process.platform !== 'linux')('Linux lifecycle executor integration', () => {
   test('offline upgrade swaps one validated home while preserving custom configuration and durable task state', async () => {
     const f = await lifecycleFixture()
     const patchBefore = await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')
@@ -5692,6 +5696,7 @@ describe('one-click installers', () => {
     const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
     expect(manifest).toMatchObject({ version: 2, operation: 'upgrade', profile: 'web' })
   }, 15_000)
+  })
 
   test('lifecycle transactions reject state paths outside the snapshotted DSH_HOME', async () => {
     const root = await temporaryDshHome()
@@ -6077,6 +6082,7 @@ esac
     const logPath = join(root, 'npm.log')
     const profileLogPath = join(root, 'profile.log')
     await mkdir(fakeBin, { recursive: true })
+    await symlink(process.execPath, join(fakeBin, 'node'))
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 printf '%s\\n' "$*" >> "$NPM_LOG"
 case "$2" in

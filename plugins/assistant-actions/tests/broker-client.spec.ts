@@ -1,6 +1,6 @@
 import { generateKeyPairSync } from 'node:crypto'
 import { chmodSync, unlinkSync } from 'node:fs'
-import { chmod, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -33,7 +33,7 @@ afterEach(async () => {
 })
 
 async function socketServer(handler: (socket: Socket) => void): Promise<{ root: string; path: string; server: Server }> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-broker-client-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'abc-'))); roots.push(root)
   const path = join(root, 'broker.sock')
   const server = createServer(handler)
   await new Promise<void>((resolvePromise, rejectPromise) => { server.once('error', rejectPromise); server.listen(path, resolvePromise) })
@@ -60,7 +60,7 @@ function expectClientError(value: unknown, code: string, dispatchState: string):
 }
 
 describe('requestGitHubBroker', () => {
-  it('uses Linux SO_PEERCRED by default for a real Unix-domain peer', async () => {
+  it.runIf(process.platform === 'linux')('uses Linux SO_PEERCRED by default for a real Unix-domain peer', async () => {
     const fixture = await socketServer(socket => {
       const greeting = hello(); socket.write(encodeBrokerFrame(greeting, 2 * 1024 * 1024))
       readOne(socket, value => {

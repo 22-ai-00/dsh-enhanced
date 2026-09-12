@@ -1,7 +1,7 @@
 import { generateKeyPairSync, type KeyObject } from 'node:crypto'
 import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { chmod, lstat, mkdir, mkdtemp, rm, symlink, unlink } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, realpath, rm, symlink, unlink } from 'node:fs/promises'
 import { createConnection, createServer, type Server, type Socket } from 'node:net'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -35,7 +35,7 @@ afterEach(async () => {
 })
 
 async function privateSocketPath(mode = 0o700): Promise<string> {
-  const outer = await mkdtemp(join(tmpdir(), 'actions-broker-server-'))
+  const outer = await realpath(await mkdtemp(join(tmpdir(), 'abs-')))
   const root = join(outer, 'runtime')
   await mkdir(root, { mode }); await chmod(root, mode)
   roots.push(outer)
@@ -105,7 +105,7 @@ async function nextFrame(socket: Socket): Promise<unknown> {
 }
 
 describe('GitHubBrokerServer', () => {
-  it('serves PR follow-up through the signed socket and durable core without replaying after restart', async () => {
+  it.runIf(process.platform === 'linux')('serves PR follow-up through the signed socket and durable core without replaying after restart', async () => {
     const path = await privateSocketPath(), root = dirname(path), tokenPath = join(root, 'credentials', 'token')
     await mkdir(dirname(tokenPath), { mode: 0o700 })
     const secret = 'github_pat_socket_read_fixture'
@@ -372,7 +372,7 @@ describe('GitHubBrokerServer', () => {
   })
 
   it('rejects unsafe parents and fails closed instead of fabricating peer credentials', async () => {
-    const outer = await mkdtemp(join(tmpdir(), 'actions-broker-unsafe-')); roots.push(outer)
+    const outer = await realpath(await mkdtemp(join(tmpdir(), 'actions-broker-unsafe-'))); roots.push(outer)
     await chmod(outer, 0o755)
     await expect(start({ path: join(outer, 'broker.sock') })).rejects.toMatchObject({ code: 'unsafe-parent' } satisfies Partial<GitHubBrokerServerError>)
   })

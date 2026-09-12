@@ -7,7 +7,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createHash, generateKeyPairSync } from 'node:crypto'
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs'
-import { access, chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -69,7 +69,7 @@ function response(actionId: string, status: 'succeeded' | 'failed' | 'unknown', 
 }
 
 async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDispatch>(async (_options, intent, _signal) => response(intent.actionId, 'succeeded')), grantOverrides?: (root: string) => Partial<BrokerGrantProjection>) {
-  const root = await mkdtemp(join(tmpdir(), 'actions-external-')), ctx = new Context(), agent = ownerAgent(ctx, root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-external-'))), ctx = new Context(), agent = ownerAgent(ctx, root)
   const localCommit = vi.fn(), localWorkflow = { branch: vi.fn(), pullRequest: vi.fn(), inspect: vi.fn() }, localCompensation = { capture: vi.fn(), commit: vi.fn() }
   let policyAllowed = true
   const policy = { isPreauthorizedTool: () => true, registerPreauthorizedTool: () => () => {}, evaluateAgent: () => ({ effect: policyAllowed ? 'allow' : 'deny' }), authorizeAgent: () => ({ effect: policyAllowed ? 'allow' : 'deny' }) }
@@ -88,7 +88,7 @@ async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDi
 
 describe('external broker configuration', () => {
   it('defaults to embedded compatibility and rejects mixed or malformed external authority', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'actions-config-')); cleanups.push(async () => rm(root, { recursive: true, force: true }))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-config-'))); cleanups.push(async () => rm(root, { recursive: true, force: true }))
     expect(validateConfig({ stateRoot: join(root, 'state') }).broker.mode).toBe('embedded-compat')
     const external = await externalConfig(root)
     expect(validateConfig(external)).toMatchObject({ broker: { mode: 'external-unix-v1', requestTimeoutMs: 30_000, helloTtlMs: 30_000 }, grants: [] })
@@ -100,7 +100,7 @@ describe('external broker configuration', () => {
   })
 
   it('rejects a key beneath an unsafe writable ancestor', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'actions-key-ancestor-')); cleanups.push(async () => rm(root, { recursive: true, force: true }))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-key-ancestor-'))); cleanups.push(async () => rm(root, { recursive: true, force: true }))
     const unsafe = join(root, 'unsafe'), keyRoot = join(unsafe, 'keys'), keyPath = join(keyRoot, 'client.pem')
     await mkdir(keyRoot, { recursive: true, mode: 0o700 }); await chmod(unsafe, 0o770); await chmod(keyRoot, 0o700)
     const key = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }); await writeFile(keyPath, key, { mode: 0o600 })
@@ -108,7 +108,7 @@ describe('external broker configuration', () => {
   })
 
   it('rejects replacement of the direct key parent after opening the key', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'actions-key-parent-race-')); cleanups.push(async () => rm(root, { recursive: true, force: true }))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-key-parent-race-'))); cleanups.push(async () => rm(root, { recursive: true, force: true }))
     const keyRoot = join(root, 'keys'), moved = join(root, 'keys-old'), keyPath = join(keyRoot, 'client.pem')
     mkdirSync(keyRoot, { mode: 0o700 }); const key = generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }); writeFileSync(keyPath, key, { mode: 0o600 })
     expect(() => readPinnedKeyFile(keyPath, 'private', { afterAncestorSnapshot() { renameSync(keyRoot, moved); mkdirSync(keyRoot, { mode: 0o700 }); writeFileSync(keyPath, key, { mode: 0o600 }) } })).toThrow(/key ancestor changed/)
@@ -233,7 +233,7 @@ describe('external broker Host facade', () => {
 
 describe('Cordis mode lifecycle', () => {
   it('owns embedded service under Keychain availability and reloads it on provider replacement', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'actions-lifecycle-')), ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-lifecycle-'))), ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
     ctx.provide('assistantPolicy' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never)
     await ctx.plugin(plugin, { stateRoot: join(root, 'state') })
     expect(ctx.get('assistantActions', false)).toBeUndefined()
@@ -245,7 +245,7 @@ describe('Cordis mode lifecycle', () => {
   })
 
   it('mounts external mode without Keychain and never creates the Host state root', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'actions-external-lifecycle-')), ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-external-lifecycle-'))), ctx = new Context(); cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
     ctx.provide('assistantPolicy' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never)
     const config = await externalConfig(root, [])
     const mounted = await ctx.plugin(plugin, config); const service = ctx.assistantActions

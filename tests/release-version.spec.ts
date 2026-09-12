@@ -1129,6 +1129,12 @@ describe('release version workflow', () => {
       + ' && pnpm --filter @dsh-enhanced/assistant-isolation run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-verifier run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-automations run build'
+      + ' && pnpm --filter @dsh-enhanced/preference-learning run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-health run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-evolution run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-growth-experiments run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-heartbeat run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-recovery run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-goals run build',
     )
     expect(manifest.scripts.test).toBe('pnpm run build && pnpm run test:built')
