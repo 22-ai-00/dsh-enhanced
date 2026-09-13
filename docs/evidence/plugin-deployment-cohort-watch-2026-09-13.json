@@ -4,10 +4,10 @@
   "date": "2026-09-13",
   "recordedAt": "2026-09-13T12:33:46Z",
   "baseCommit": "5d6ad547bb2061fc6972b70c09ffc665afa4f2d2",
-  "status": "engineering-slice-validated",
-  "completeWorkPackage": false,
+  "status": "passed-original-wp15-acceptance",
+  "completeWorkPackage": true,
   "workingTreeState": {
-    "state": "WP15 guidance/workflow/skill/plugin cohort coverage source, package tests and final repository gate settled",
+    "state": "WP15 closed against its original clauses after independent adversarial review PASS; matrix and ledger rows updated in the same closure commit",
     "sourceHashesAreProvisional": false,
     "mustRehashAfterFinalRootGate": false,
     "unrelatedDirtyWorkExcluded": []
@@ -19,12 +19,19 @@
   ],
   "workPackages": {
     "strengthened": ["15"],
-    "statusChanged": false,
-    "wp15": "implementing",
+    "statusChanged": true,
+    "wp15": "verified",
     "totals": {
-      "verified": 3,
-      "implementing": 13,
+      "verified": 5,
+      "implementing": 11,
       "pending": 2
+    },
+    "snapshotNote": "Totals are post-closure global work-package counts as of this WP15 closure on 2026-09-13; the earlier 3/13/2 was the frozen-source snapshot at baseCommit 5d6ad54.",
+    "closure": {
+      "closedAt": "2026-09-13T13:04:29Z",
+      "basis": "All four original WP15 clauses are exercised by really-run tests on real SQLite/CLI engineering paths across guidance, skill, workflow and plugin cohorts; multi-cohort production traffic and long-term quality distributions were explicitly excluded from first-version closure by the original boundary.",
+      "independentReview": "adversarial read-only review PASS: 0 BLOCK / 0 HIGH; two MEDIUM documentation-sync items (matrix WP15 row, uncommitted evidence wording) resolved in the closure commit; low items recorded as follow-up notes.",
+      "docsCommits": ["9f96df1 (initial evidence record)", "closure commit carries the workflow.evidence precision fix, status/closure fields, matrix and ledger updates"]
     }
   },
   "cohortCoverage": {
@@ -33,7 +40,8 @@
       "regressionAutoClose": "plugins/assistant-evolution/tests/store.spec.ts post-promotion evidence correction: only a correction to a frozen subject retires the rule; second frozen-subject correction does not audit or roll back again",
       "retractionRollback": "plugins/assistant-evolution/tests/store.spec.ts 'retracting an exact frozen subject retires the rule and the retirement survives restart' (commit 5d6ad54): pure retract of a frozen subject retires the adopted rule, leaves no active rule, single audit row after SQLite restart",
       "positiveEvidenceNonChurn": "commit 9157dc8 test: positive evidence for an unfrozen subject, a different situation/subject kind and withdrawal of an unrelated subject leave the active rule untouched",
-      "restartContinues": "retired rule readback after store close/reopen in both post-promotion correction tests; rule adoption/restart round-trips elsewhere in the same suite"
+      "restartContinues": "retired rule readback after store close/reopen in both post-promotion correction tests; rule adoption/restart round-trips elsewhere in the same suite",
+      "semanticsNote": "For this cohort 'rollback' is retirement of the active rule that depended on a frozen taskRevision plus an evidence-correction-rollback audit row; there is no versioned deployment artifact to roll back, so this is the cohort-appropriate equivalent of the plugin ledger terminal state."
     },
     "skill": {
       "mechanism": "assistant-skills finite-canary watch proof plus deployment store continuously revalidates the exact canonical goal-outcome revision; canonical replacement, retract invalidation and deployment reconciliation commit in one Skills writer transaction under the Evaluation writer fence.",
@@ -42,7 +50,7 @@
     },
     "workflow": {
       "mechanism": "A verified-workflow repair source (protocol assistant-goals/verified-workflow-source/v1) is validated by capture-expansion and persisted as an ordinary SkillDefinition via SkillStore.save; its canary, promotion, deployment and watch lifecycle therefore execute through the exact same skill watch/deployment tables and canonical revision monitor as skills, with the workflow steps frozen inside the definition digest.",
-      "evidence": "shared code path asserted by the canonical revision monitor suite; no separate workflow-only watch store exists",
+      "evidence": "shared code path, not a parallel store: every fixture definition in plugins/assistant-skills/tests/store.spec.ts is constructed by createDefinition from a VerifiedWorkflowSource, so the canary, promotion, canonical replacement, exact rollback and restart tests in that suite (318 package tests) execute against workflow-sourced definitions; capture-expansion.spec.ts additionally saves a workflow definition through SkillStore.save and drives skill_run replay and retirement",
       "scope": "workflows captured through the verified-workflow repair source; workflows imported outside that source are not claimed"
     },
     "plugin": {
@@ -51,7 +59,7 @@
       "regressionAutoClose": "plugins/plugin-control-plane/tests/state.spec.ts 'a signed regressed Host observation closes the exact version and rejects later evidence'",
       "retractionRollback": "plugins/plugin-control-plane/tests/state.spec.ts owner retraction tests: direct retraction from watching and retraction after regression closure both close-retracted, reopen the gap without a candidateId, and delete the plan claim; duplicate retract rejected",
       "positiveEvidenceNonChurn": "plugins/plugin-control-plane/tests/state.spec.ts 'positive healthy evidence accumulates but never closes'",
-      "restartContinues": "plugins/plugin-control-plane/tests/state.spec.ts watch-survives-restart test plus the v11-to-v12 chain migration backfill test (historical activated plans backfill a watching row without fabricated evidence and continue observing)",
+      "restartContinues": "plugins/plugin-control-plane/tests/state.spec.ts watch-survives-restart test plus the v11-to-v12 chain migration backfill test (historical activated plans backfill a watching row without fabricated evidence and continue observing); the post-activation deployment cohort watch describe contains 9 tests in total, the ninth being the migration backfill",
       "bindingAndTrust": "observations and retractions bind installationId/planId/planDigest/activationId/fence plus the exact package/version/integrity triple; wrong exact triple, foreign/forged signatures, non-advancing host generations and stale watch revisions are rejected; TTL default 30000 (observation) and 900000 (retraction); retraction.decidedAt >= plan.createdAt",
       "idempotency": "operation_receipts envelope makes observation/retraction submission idempotent; historical replay returns the historical snapshot; same key different input rejected",
       "operatorSurface": "CLI watch-observe/watch-retract/watch-show (commit 60738bc) with trust routing host-attestation vs approval; e2e cli.spec.ts covers healthy+regressed close, retraction gap reopen, and a pre-signature wrong-version override rejected on exact binding",
@@ -132,6 +140,7 @@
     "Skill/workflow monitoring remains qualified to the deterministic canonical goal-outcome family; guidance monitoring covers rules backed by frozen Evaluation task-learning tuples.",
     "No long-term real quality distribution, multi-cohort production traffic or real owner channel (Lark/Web) cohort acceptance is observed; the original WP15 did not require them for first-version closure.",
     "assistant-health cohort signals are degraded (attention) signals; wiring a live control-plane Provider into the runtime health aggregation belongs to the production adapter work packages.",
-    "WP15 remains implementing and the global work-package counts remain 3 verified, 13 implementing and 2 pending."
+    "WP15 is verified against its original clauses on 2026-09-13 after independent review PASS; the global work-package counts are now 5 verified, 11 implementing and 2 pending. Workflow cohort coverage is structural (createDefinition is the sole SkillDefinition constructor and enforces the verified-workflow-source protocol); an independent workflow guard test is a follow-up if imports outside that source are ever opened.",
+    "Review follow-up notes: holdout-authority.spec.ts showed one concurrency-sensitive flake under default parallelism but passes single-worker and isolated (WP14 pre-existing, unrelated); production cohorts, multi-cohort parallel traffic, long-term distributions and physical plugin eviction remain future enhancements."
   ]
 }
