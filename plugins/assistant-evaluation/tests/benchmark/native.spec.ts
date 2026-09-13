@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { developmentCases, developmentCorpus, developmentDataset } from '../../src/benchmark/corpus.js'
 import { createNativeBenchmarkExecutor, nativeBenchmarkPlan, type NativeBenchmarkConfig } from '../../src/benchmark/native.js'
@@ -122,20 +122,30 @@ describe('native AgentLoop benchmark plan', () => {
   it('cancels a hanging provider and runner records timeout before a hung disposer settles', async () => {
     const input = config(); input.budget.durationMs = 20; const plan = nativeBenchmarkPlan(input); let providerSawAbort = false; let releaseDispose!: () => void
     const disposeGate = new Promise<void>(resolve => { releaseDispose = resolve })
+    let providerEntered!: () => void
+    const entered = new Promise<void>(resolve => { providerEntered = resolve })
     class HangingAdapter extends LlmAdapter {
       override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-        await new Promise<void>(resolve => options.signal?.addEventListener('abort', () => { providerSawAbort = true; resolve() }, { once: true }))
+        await new Promise<void>(resolve => {
+          options.signal?.addEventListener('abort', () => { providerSawAbort = true; resolve() }, { once: true })
+          providerEntered()
+        })
         yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'ABORTED', message: 'aborted' } } }
       }
     }
     const store = new BenchmarkStore(':memory:')
+    // The assertion concerns cancellation during generation. Initialization
+    // need not finish within 20ms on every host before that scenario starts.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
       const running = runBenchmark(store, plan, createNativeBenchmarkExecutor(input, async () => ({ adapter: new HangingAdapter(), inputTokenUpperBound: () => 4, dispose: () => disposeGate })))
+      await entered
+      await vi.advanceTimersByTimeAsync(input.budget.durationMs)
       const results = await running
       expect(results).toHaveLength(1); expect(results[0]!.reason).toBe('timeout'); expect(providerSawAbort).toBe(true)
       const frozen = store.results(plan.id); releaseDispose(); await Promise.resolve(); await Promise.resolve()
       expect(store.results(plan.id)).toEqual(frozen)
-    } finally { releaseDispose?.(); store.close() }
+    } finally { releaseDispose?.(); vi.useRealTimers(); store.close() }
   })
 
   it('rejects a completed observation when binding cleanup fails', async () => {
