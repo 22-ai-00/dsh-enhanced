@@ -1,6 +1,6 @@
 import { spawn, execFile } from 'node:child_process'
 import { generateKeyPairSync, createHash, randomUUID } from 'node:crypto'
-import { mkdtemp, writeFile, rm, chmod, stat, symlink } from 'node:fs/promises'
+import { mkdtemp, realpath, writeFile, rm, chmod, stat, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +21,7 @@ const cli = fileURLToPath(new URL('../lib/holdout-cli.js', import.meta.url))
 const dataset = { id: 'operator-echo-cases', version: '1', cases: ['replay', 'evaluation', 'regression'].map((kind, index) => ({ id: `case-${index}`, kind, stdin: `${kind}\n`, expectedStdout: `${kind}\n`, expectedExitCode: 0 })) }
 afterEach(async () => { for (const close of closes.splice(0)) await close(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 async function setup(container = false, prospective = false, generator: ProspectiveGeneratorName = 'order-summary/v1', maxToolCalls = 4) {
-  const root = await mkdtemp(join(tmpdir(), 'holdout-cli-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'holdout-cli-'))); roots.push(root)
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const prefix = container ? '/authority' : root
   await writeFile(join(root, 'key.pem'), privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
@@ -253,7 +253,7 @@ const authorityImage = process.env.DSH_HOLDOUT_TEST_IMAGE ?? ''
 test.skipIf(![image, authorityImage].every(value => /^sha256:[a-f0-9]{64}$/u.test(value)))('separate authority and candidate containers judge real outputs without mounting answers or keys into the candidate', async () => {
   const config = await setup(true, false, 'order-summary/v1', 5), docker = process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', name = `dsh-holdout-test-${randomUUID()}`
   const client = await openHoldoutProcess({ executable: docker, publicKey: config.publicKey, datasetDigest: acceptanceDigest(dataset), args: ['run', '--rm', '-i', '--name', name, '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', `${process.getuid!()}:${process.getgid!()}`, '--pids-limit', '32', '--memory', '128m', '--cpus', '1', '--mount', `type=bind,source=${resolve(cli, '..')},target=/runtime,readonly`, '--mount', `type=bind,source=${config.root},target=/authority`, '--entrypoint', '/usr/local/bin/node', authorityImage, '/runtime/holdout-cli.js', '--config', '/authority/config.json'] }, new AbortController().signal)
-  const stateRoot = await mkdtemp(join(tmpdir(), 'holdout-candidates-')); roots.push(stateRoot)
+  const stateRoot = await realpath(await mkdtemp(join(tmpdir(), 'holdout-candidates-'))); roots.push(stateRoot)
   const scope = { principalId: 'operator', principalRecordId: 'owner', principalVersion: 1, workspace: '/author-workspace', preset: 'primary' }
   const skill = (content: string) => createDefinition({ protocol: 'assistant-goals/verified-workflow-source/v1', scope, goal: { id: 'fixture-source', definition: { version: 1, digest: sha('fixture-definition'), objective: 'Echo stdin.' }, sessionId: 'fixture-session', nativeGoalId: 'fixture-native' }, runId: 'fixture-run', turn: 1,
     acceptance: { contractId: 'fixture-contract', contractDigest: sha('fixture-contract'), receiptDigest: sha('fixture-receipt'), verifiedAt: 1, validUntil: 2 }, steps: [

@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { generateKeyPairSync } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -17,7 +17,7 @@ const dataset: HoldoutDataset = { id: 'private', version: '1', cases: [
   { id: 'evaluation', kind: 'evaluation', stdin: 'e', expectedStdout: 'e', expectedExitCode: 0 },
   { id: 'regression', kind: 'regression', stdin: 'g', expectedStdout: 'g', expectedExitCode: 0 },
 ] }
-async function stateRoot() { const root = await mkdtemp(join(tmpdir(), 'holdout-qualification-')); roots.push(root); await chmod(root, 0o700); return root }
+async function stateRoot() { const root = await realpath(await mkdtemp(join(tmpdir(), 'holdout-qualification-'))); roots.push(root); await chmod(root, 0o700); return root }
 function skill(workspace: string, content: string) {
   const scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }
   return createDefinition({ protocol: 'assistant-goals/verified-workflow-source/v1', scope, goal: { id: 'goal', definition: { version: 1, digest: digest('a'), objective: 'write' }, sessionId: 'session', nativeGoalId: 'native' }, runId: 'run', turn: 1,

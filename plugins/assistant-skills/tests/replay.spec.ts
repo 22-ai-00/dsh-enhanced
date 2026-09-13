@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -7,7 +7,7 @@ import { replaySkill } from '../src/replay.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
-async function root() { const value = await mkdtemp(join(tmpdir(), 'skills-replay-')); roots.push(value); return value }
+async function root() { const value = await realpath(await mkdtemp(join(tmpdir(), 'skills-replay-'))); roots.push(value); return value }
 function definition(steps: { id: string; toolName: string; arguments: unknown }[], allowedTools: readonly string[] = ['read', 'write', 'edit']) {
   const workspace = '/source-workspace'; const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }, goal: { id: 'source', definition: { version: 1, digest: 'a'.repeat(64), objective: 'source' }, sessionId: 'session', nativeGoalId: 'native' }, runId: 'run', turn: 1, acceptance: { contractId: 'contract', contractDigest: 'b'.repeat(64), receiptDigest: 'c'.repeat(64), verifiedAt: 1, validUntil: 2 }, steps }
   return createDefinition(source, { name: 'replay-file', description: 'Replay files.', bindings: steps[0]?.toolName === 'write' ? [{ name: 'message', stepId: steps[0]!.id, path: '/content' }] : [] }, allowedTools)

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -11,7 +11,7 @@ import { inspectAutonomyOwner, inspectAutonomyProfile } from '../src/doctor.js'
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function fixture() {
-  const home = mkdtempSync(join(tmpdir(), 'autonomy-doctor-')); roots.push(home)
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'autonomy-doctor-'))); roots.push(home)
   const workspace = join(home, 'workspace'); mkdirSync(workspace)
   const databasePath = join(home, 'delivery', 'state.sqlite')
   const principal = { channel: 'web', account: 'web', tenant: 'local', user: 'operator' }

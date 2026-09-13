@@ -6,7 +6,7 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { generateKeyPairSync } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
@@ -36,9 +36,9 @@ function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id):
   return value
 }
 async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image, repair = false, repairIterations = 1) {
-  const root = await mkdtemp(join(tmpdir(), 'assistant-skills-service-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-service-')))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
-  const comparisonRoot = comparison ? await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-')) : undefined
+  const comparisonRoot = comparison ? await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-'))) : undefined
   if (comparisonRoot) { await chmod(comparisonRoot, 0o700); cleanups.push(() => rm(comparisonRoot, { recursive: true, force: true })) }
   const ctx = new Context(); cleanups.push(() => ctx.fiber.restart())
   const owner = makeAgent(ctx, root, ownerAgentId, ownerSessionId), foreign = makeAgent(ctx, root, 'other-session')
@@ -790,7 +790,7 @@ async function revisionDeploymentFixture(canaryRuns = 1, maxRuns = 2, successor 
   const repair = successor ? f.ctx.assistantSkills.armRepair(f.owner, { goalId: 'source-goal', profileId: 'repair-profile', ownerRouteId: 'owner-route', invocationId: `successor-${Math.random()}`, expiresAt }) : undefined
   f.source.goal.definition.digest = 'd'.repeat(64)
   const candidate = result(await f.candidate(1))
-  const stateRoot = await mkdtemp(join(tmpdir(), 'assistant-skills-revision-canary-')); await chmod(stateRoot, 0o700)
+  const stateRoot = await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-revision-canary-'))); await chmod(stateRoot, 0o700)
   cleanups.push(() => rm(stateRoot, { recursive: true, force: true }))
   const keys = generateKeyPairSync('ed25519')
   const taskFamily = { goalDefinitionDigest: candidate.definition.source.goalDefinitionDigest, outcomeProfile: { id: 'profile', version: 1, digest: 'a'.repeat(64) } }
