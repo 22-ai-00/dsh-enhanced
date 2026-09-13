@@ -1,0 +1,62 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-13",
+  "status": "passed-real-model-with-fixture-github",
+  "sourceCommit": "052de5b2866ee44353d1494b343a011b955c84ea",
+  "runtime": {
+    "command": "DSH_E2E_HOST_VERSION=0.1.5-rc.1 DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture DSH_REPO_DELIVERY_MODE=commit DSH_REPO_REQUIRE_PREAUTHORIZED=1 DSH_REPO_RETAIN_FAILURE=1 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs --output=/tmp/dsh-bounded-permissions-real-v2-artifacts",
+    "exitCode": 0,
+    "durationMinutes": 4.9,
+    "artifacts": "/tmp/dsh-bounded-permissions-real-v2-artifacts/repo-autonomy-real-formal--92374-ry-isolated-repository-task",
+    "proofSha256": "3cd741e878420a3fa1fd9b40f86b3db9302f09ca7fc7f91a31c6f97637ca7d1f",
+    "uiApprovalAcknowledgements": 0,
+    "modelDispatches": 13,
+    "modelSettlements": 13,
+    "modelErrorFinishes": 1,
+    "toolDispatches": 16,
+    "toolErrors": 0,
+    "finalGoalPhase": "complete",
+    "finalOutcome": "achieved",
+    "wakes": [
+      {
+        "id": "goal-event-wake-goal-event-wait-7470c06a68d97ba48b41ab03afa1c275308ca66256a0b2a012e20988052e3d88",
+        "state": "succeeded"
+      },
+      {
+        "id": "goal-event-wake-goal-event-wait-b8d42919ed3a1dd8ca1fb7365696094401498a29218178ce1b6b74dd6f34a3aa",
+        "state": "succeeded"
+      }
+    ],
+    "restart": {
+      "sameGoal": true,
+      "sameSourceJobEvidence": true,
+      "sameModelAndToolDispatches": true,
+      "replyVisible": true,
+      "waitedThenRestarted": true
+    },
+    "feedback": "native-session-reply"
+  },
+  "engineering": {
+    "fullCheckSource": "965675baae05a7f19a9d89fa301b8432f53f8720",
+    "fullCheckExitCode": 0,
+    "passedTests": 5418,
+    "conditionalSkipped": 42,
+    "dryRunPacks": 33,
+    "fullCheckLogSha256": "4fa2f6b67e894c25356e841035cee02b29b2593d9b17d9f4093e73b1714ecf0d",
+    "followupAdmissionTestsPassed": 28,
+    "followupTypecheckExitCode": 0
+  },
+  "failureFixed": {
+    "firstRuntimeExitCode": 1,
+    "log": "/tmp/dsh-bounded-permissions-real-v1.log",
+    "cause": "A textless completed Web wake required a completion notice; generated admission lacked its exact source/owner/binding send permission. Policy audit 1775 denied send immediately before wake settlement became unknown.",
+    "fixCommit": "052de5b2866ee44353d1494b343a011b955c84ea"
+  },
+  "limits": [
+    "GitHub delivery, events and CI readback use explicit fixtures; no live GitHub write is claimed.",
+    "The successful v2 run produced a native Session reply; the textless notice branch is covered by Policy regression and existing Delivery tests, not that real run.",
+    "One model request finished with error before the task ultimately succeeded; all 13 settlements do not mean 13 successful requests.",
+    "Call and duration limits are enforced; token/USD hard limits remain unproven.",
+    "The final versioned release candidate still requires complete repository verification."
+  ]
+}
