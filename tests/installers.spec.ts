@@ -7631,6 +7631,91 @@ fi
     expect(result.stdout).not.toContain('--refresh-agent-policy')
   })
 
+  test.each([localInstaller, npmInstaller].flatMap(installer => [
+    { installer, profile: 'web', mode: 'missing', extra: [] },
+    { installer, profile: 'personal-web', mode: 'missing', extra: [] },
+    { installer, profile: 'web', mode: 'registered', extra: [] },
+    { installer, profile: 'web', mode: 'failed', extra: [] },
+    { installer, profile: 'web', mode: 'invisible', extra: [] },
+    { installer, profile: 'web', mode: 'missing', extra: ['--no-service'] },
+    { installer, profile: 'web', mode: 'missing', extra: ['--lark', 'skip'] },
+  ]))('reconciles launchd registration in $installer ($profile, $mode, $extra)', async ({ installer, profile, mode, extra }) => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const fakeBin = join(root, 'bin')
+    const setupDirectory = join(dshHome, 'profiles', profile, 'node_modules', '.bin')
+    const logPath = join(root, 'commands.log')
+    const registered = join(root, 'registered')
+    await mkdir(fakeBin)
+    await mkdir(setupDirectory, { recursive: true })
+    await configureExistingLark(dshHome, profile)
+    const patchPath = join(dshHome, 'profiles', profile, 'cordis.patch.yml')
+    const originalPatch = await readFile(patchPath, 'utf8')
+    await writeFile(logPath, '')
+    if (mode === 'registered') await writeFile(registered, '')
+    await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; exit 0; fi
+# The Host peer-materialization fixture is unrelated to service registration.
+if [[ "\${1:-}" == '--input-type=module' ]]; then exit 0; fi
+exec "$FIXTURE_REAL_NODE" "$@"
+`)
+    await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.33"\\n'; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.5-rc.1\\n'; exit 0; fi
+printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'launchctl'), `#!/bin/bash
+printf 'launchctl %s\\n' "$*" >> "$INSTALL_LOG"
+[[ "$1" == 'print' && "$2" == "gui/$(id -u)/ai.deepseek.dsh.profile.$FIXTURE_PROFILE" && -f "$REGISTERED" ]]
+`)
+    await writeExecutable(join(setupDirectory, 'dsh-lark-setup'), `#!/bin/bash
+printf 'lark-setup %s\\n' "$*" >> "$INSTALL_LOG"
+[[ "$*" == "--profile $FIXTURE_PROFILE --install-service" ]] || exit 9
+# Reproduce a job disappearing after the initial setup, before final doctor.
+if [[ ! -f "$SETUP_ONCE" ]]; then touch "$SETUP_ONCE"; exit 0; fi
+if [[ "$REGISTER_MODE" == 'failed' ]]; then printf 'bootstrap denied\\n' >&2; exit 5; fi
+if [[ "$REGISTER_MODE" != 'invisible' ]]; then touch "$REGISTERED"; fi
+`)
+    const result = runInstaller(installer, [
+      '--scenario', 'lark', '--profile', profile, '--yes', '--model', 'skip', '--model-route', 'skip', ...extra,
+    ], dshHome, 'Darwin', {
+      PATH: `${fakeBin}:/usr/bin:/bin`,
+      FIXTURE_REAL_NODE: process.execPath,
+      FIXTURE_PROFILE: profile,
+      INSTALL_LOG: logPath,
+      REGISTERED: registered,
+      SETUP_ONCE: join(root, 'setup-once'),
+      REGISTER_MODE: mode,
+    })
+    const log = await readFile(logPath, 'utf8')
+    const optedOut = extra.length > 0
+    const failed = mode === 'failed' || mode === 'invisible'
+    expect(result.status, result.stderr).toBe(failed ? 1 : 0)
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    const calls = log.split('\n').filter(line => line.startsWith('lark-setup '))
+    expect(calls).toHaveLength(optedOut ? 0 : mode === 'registered' ? 1 : 2)
+    expect(calls.every(line => line === `lark-setup --profile ${profile} --install-service`)).toBe(true)
+    if (optedOut) {
+      expect(log).not.toContain('launchctl')
+    } else if (failed) {
+      expect(result.stdout).not.toContain('安装流程完成')
+      expect(result.stderr).toContain(mode === 'failed' ? 'bootstrap denied' : '仍不可见')
+    } else {
+      expect(result.stdout).toContain('doctor：profile、channel 与常驻服务均已通过检查')
+      expect(log.trim().split('\n').at(-1)).toBe(`launchctl print gui/${process.getuid!()}/ai.deepseek.dsh.profile.${profile}`)
+      if (mode === 'missing') expect(result.stdout).toContain('launchd 注册已完成')
+      else expect(result.stdout).not.toContain('正在自动注册')
+    }
+  })
+
   test('recognizes a home-layer Lark binding as the effective profile binding', async () => {
     const dshHome = await temporaryDshHome()
     await writeFile(join(dshHome, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel
