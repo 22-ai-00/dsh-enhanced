@@ -1,0 +1,126 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-13",
+  "status": "passed-original-wp14-acceptance",
+  "completeWorkPackage": true,
+  "workPackage": "WP14",
+  "scope": "Original WP14 acceptance: real historical-input replay of baseline/candidate with independent quality acceptance — shadow, sealed prospective holdout, same-budget comparison, finite canary and automatic promotion, with the independent-verification, gain and regression gates passing simultaneously on a real TraeX chain. Stronger physical-isolation and multi-family breadth remain follow-up and are recorded as limits, not re-derived into this verdict.",
+  "source": {
+    "baseCommit": "7557023",
+    "keyImplementations": [
+      "plugins/assistant-skills/src/comparison.ts — deterministic same-budget baseline/candidate replay and the three promotion gates",
+      "plugins/assistant-skills/src/external-holdout.ts — sealed prospective holdout binding",
+      "plugins/assistant-skills/src/holdout-authority.ts — pinned-key after-freeze attestation authority",
+      "plugins/assistant-skills/src/holdout-qualification.ts:206 — attested-after-freeze is derived only when the receipt is complete and candidateChecksPassed && evaluationGain > 0 && criticalRegressionsPassed all hold, otherwise it falls back to unproven",
+      "plugins/assistant-skills/src/store.ts — finite-canary deployment state"
+    ]
+  },
+  "command": "playwright test --config scripts/e2e/playwright-real-repair.config.mjs",
+  "run": {
+    "log": "/tmp/dsh-wp14-rerun.log",
+    "logSha256": "afdf1342a5aed3f69561b2ecf206d4d4f9f33312e38c45301a85e395e02dddf7",
+    "exit": 0,
+    "result": "1 passed (6.1m) — real TraeX autonomously improves one workflow twice and delivers the bounded result",
+    "provider": "traex-agent",
+    "model": "gpt-5.6-terra",
+    "api": "acp",
+    "hostVersion": "0.1.5-rc.1",
+    "family": "template"
+  },
+  "criteria": [
+    {
+      "requirement": "Real replay of historical inputs for both baseline and candidate (no supplied repaired source)",
+      "result": "PASS",
+      "basis": "proof.initialArtifact is a shared unfinished scaffold; proof.suppliedRepairedSource=false; both rounds replay the same historical task through deterministic native-file-tool repair; proof.completedRestartNoReplay=true"
+    },
+    {
+      "requirement": "Independent quality acceptance: shadow comparison with no external side effects",
+      "result": "PASS",
+      "basis": "comparison receipt complete with modelCalls:0 during comparison; candidate generation used only native file tools (toolNames per round: read, write, read); replay runs under network none/read-only/cap-drop/private-root container boundaries with the pinned authority image (DSH_HOLDOUT_TEST_IMAGE sha256 pin enforced by the spec); negative double-container coverage proves no dataset/key/socket mount"
+    },
+    {
+      "requirement": "Sealed prospective holdout bound after freeze",
+      "result": "PASS",
+      "basis": "both rounds record heldoutIndependence='attested-after-freeze' with distinct frozen dataset digests (10fa202c…/772013c…); attestation means the freeze binding precedes CSPRNG generation of the private fixed-semantics cells, generator and dataset digests are signed, and the pinned-key authority releases answers cell-by-cell — deterministic replay cannot pre-read answers"
+    },
+    {
+      "requirement": "Same-budget positive gain",
+      "result": "PASS",
+      "basis": "each round quality.evaluationGain=1 with evaluationGainObserved=true under identical bounded budgets (maxModelCalls 32 / maxToolCalls 64 control envelope); total chain usage model_calls=8, tool_calls=6"
+    },
+    {
+      "requirement": "Critical regression gate",
+      "result": "PASS",
+      "basis": "quality.criticalRegressionsPassed=true and candidateChecksPassed=true in both rounds"
+    },
+    {
+      "requirement": "Finite canary then automatic promotion",
+      "result": "PASS",
+      "basis": "each promoted deployment went through state 'canary' with canaryRuns=1/maxRuns=2 before promotion; promotion sessions and timestamps are recorded per round (promotedAt 1789306649887, 1789306777284); five owner feedback receipts (finite-canary/iteration-success x2 plus final-success) were accepted and idempotent"
+    },
+    {
+      "requirement": "All three gates (independent verification, gain, regression) pass together; failure never promotes and falls back to unproven",
+      "result": "PASS",
+      "basis": "the observed chain promoted with all three gates true; the negative branch is unit-covered: holdout-qualification.spec.ts:105 asserts candidateChecksPassed=false/evaluationGain=-1/evaluationGainObserved=false/criticalRegressionsPassed=false derives heldoutIndependence='unproven'; comparison.spec.ts:25 and holdout-cli.spec.ts:272 pin promotionAuthorized=false with unproven independence; holdout-qualification.ts:206 is the single conjunctive derivation"
+    }
+  ],
+  "chain": {
+    "iterations": 2,
+    "rounds": [
+      {
+        "iteration": 1,
+        "version": 2,
+        "comparisonId": "skill-comparison-2a582c77bc4d876140b753dba364875e0805497e2783d3c67f3af734472bc932",
+        "deploymentId": "skill-deployment-1a045154851420f13c9c0b46ef23ee98b17426bad2bfa0323d1712b12831bc4e",
+        "datasetDigest": "10fa202ca57419dd581517966ba1bf6486238ce26a2f7f5aa4500495c07cc27a",
+        "quality": {
+          "candidateChecksPassed": true,
+          "evaluationGain": 1,
+          "evaluationGainObserved": true,
+          "criticalRegressionsPassed": true,
+          "heldoutIndependence": "attested-after-freeze"
+        }
+      },
+      {
+        "iteration": 2,
+        "version": 3,
+        "comparisonId": "skill-comparison-efff9e3c150ec19e3dcc3ec6678e007352bb90bbd779fd98680500c6d1da809a",
+        "deploymentId": "skill-deployment-b327d0dea65bcd34429434218840d9d62f5a1259fa7b0e77618d5d32d92a443a4",
+        "datasetDigest": "772013c803743c2ade74f6489e7d4d631033e9b92d76f7d8a977f9b0ff1f16f6",
+        "quality": {
+          "candidateChecksPassed": true,
+          "evaluationGain": 1,
+          "evaluationGainObserved": true,
+          "criticalRegressionsPassed": true,
+          "heldoutIndependence": "attested-after-freeze"
+        }
+      }
+    ]
+  },
+  "artifacts": {
+    "directory": ".cache/web-owner-real-repair-e2e/web-owner-real-repair-real-b3d6d-delivers-the-bounded-result",
+    "files": {
+      "proof.json": "dc807fec561681876c898cc0f1f5a1ae95e2486aa1e946fb489d5c6701c863e7",
+      "model.jsonl": "859ac26dd8dcd0c809d079a7806d41a460b10b73806298d58527cfdb4185f11d"
+    },
+    "generatedArtifactDigest": "6e406c0399eef70774c469f4446c02d3028f9ec155b8305039f477de993c3814"
+  },
+  "independentReview": {
+    "decision": "PASS",
+    "blocking": 0,
+    "high": 0,
+    "medium": 0,
+    "basis": "Adversarial re-check against the original WP14 clause verified the real TraeX rerun artifacts, the attested-after-freeze derivation on both rounds, the same-budget positive gain, the critical regression gate, finite-canary-before-promotion ordering, idempotent owner feedback, and the unit-covered unproven fallback on three-gate failure (10 checks total).",
+    "nonBlockingLow": [
+      "service.ts hard-gate error string lacks a literal unit test",
+      "no mid-repair cold-start restart proof on this chain (completedRestartNoReplay covers restart-after-completion)",
+      "TraeX exposes only call-count budgets; token/monetary cost is not observable, and the proven task domain covers two task families"
+    ]
+  },
+  "limits": [
+    "attested-after-freeze certifies only that the freeze binding preceded fixed-semantics CSPRNG cell generation, with signed generator/dataset digests and pinned-key per-cell answer release; it does not attest an independent process, that Docker flags were actually enforced by the kernel, real-time filesystem permissions, OS/kernel isolation, dockerd/kernel trustworthiness, or independence from model training history",
+    "the local comparison path, sealed binding path and pre-provisioned external dataset comparison paths remain unproven for stronger physical/network isolation; this observed chain is the prospective authority path only",
+    "TraeX budgets are call counts; token and monetary cost cannot be observed",
+    "the real prospective chain has been re-observed on the template family here; the broader 3–5 high-frequency task families remain under WP13 acceptance and must not be inferred from this run"
+  ]
+}
