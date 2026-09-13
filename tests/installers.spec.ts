@@ -7183,8 +7183,12 @@ printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
     expect(acknowledged.stderr).toContain('支持 DSH >=0.1.2-rc.1 <0.2.0')
     expect(acknowledged.stdout).not.toContain('@deepseek-ai/dsh@0.1.0-rc.8')
 
+    const sourcePin = readFileSync(installerLibrary, 'utf8').match(/^DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='([^']+)'$/mu)?.[1]
+    expect(sourcePin).toBeDefined()
     const override = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], dshHome, undefined, {
-      DSH_ENHANCED_PINNED_HOST_VERSION: '0.1.5-rc.1',
+      // The equality guard must reject any explicit pin different from the
+      // source pin, independent of future default version updates.
+      DSH_ENHANCED_PINNED_HOST_VERSION: `${sourcePin!}-tampered`,
     })
     expect(override.status).toBe(2)
     expect(override.stderr).toContain('Host pin 与安装逻辑不一致')
