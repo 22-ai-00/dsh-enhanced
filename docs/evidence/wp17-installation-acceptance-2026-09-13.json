@@ -1,0 +1,73 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-13",
+  "status": "passed-original-wp17-acceptance",
+  "completeWorkPackage": true,
+  "workPackage": "WP17",
+  "scope": "Original repository-level installation acceptance; additional platform hardening remains follow-up",
+  "source": {
+    "implementationCommit": "06d749e4d37e28a8b48d327b07cc9c654dbb53e9",
+    "installerTag": "v0.1.32",
+    "installerSha256": "7a58ae7aad9b9b4937d385ee0da51dc9a498b58c0ac34354ff314ccac38e03ea",
+    "dshVersion": "0.1.5-rc.1",
+    "managedBundles": 14,
+    "profileBundles": 16,
+    "npmCohortVersion": "0.1.32"
+  },
+  "criteria": [
+    {
+      "requirement": "A fresh temporary profile completes an example Goal after formal installation",
+      "evidence": "direct-commit-event-resume-2026-09-13.json",
+      "result": "real TraeX model, fresh install-local.sh autonomy profile, independent achieved Goal outcome, 1 passed (5.7m)"
+    },
+    {
+      "requirement": "Missing dependencies produce an actionable repair",
+      "evidence": "tests/installers.spec.ts: repairs the legacy Evolution-to-Evaluation bundle closure",
+      "result": "actual installer reports the missing Evaluation bundle and concrete package path; root pnpm check passed"
+    },
+    {
+      "requirement": "Repeating the complete installer preserves custom configuration and existing tasks",
+      "command": "DSH_HOME=/tmp/dsh-repeat-install-real-bW9Gnq/home DSH_ENHANCED_WEB_PORT=43193 bash /tmp/dsh-0.1.32-npm-install.gcCULt/install-npm.sh --scenario autonomy --workspace /tmp/dsh-repeat-install-real-bW9Gnq/workspace --isolation-image sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 --no-service --model skip --model-route skip --lark skip --yes",
+      "firstExit": 0,
+      "secondExit": 0,
+      "controlledTaskSetup": "GoalStore imported from installed assistant-goals; observe a bounded active Goal and setFocus; task is fixture data, not a native UI session or model-created task",
+      "result": {
+        "uniqueStableBundles": true,
+        "profileByteStable": true,
+        "settingsByteStable": true,
+        "goalRowsStable": true,
+        "focusStable": true,
+        "goalFilesByteStable": true
+      }
+    }
+  ],
+  "artifacts": {
+    "directory": "/tmp/dsh-repeat-install-real-bW9Gnq",
+    "files": {
+      "before-repeat.json": "c25f2df02040ffc000be5c77e66aa2484c66006c660c0681d91c1d70bd782b49",
+      "after-repeat.json": "7ed460eeb72b2567158520c03f6d701842668e44c7e5e43622b67e927c8c8ab7",
+      "repeat-install-result.json": "c3bc4d79aa3b58e7535bf52ad24aeba38e850008462335bcad61463b77194d18",
+      "first-install.log": "85b93887d896198373429bab632936d2e86381068a5bd64e84e8f6b659d1302b",
+      "second-install.log": "ee3657052e111ed5d1dda252021fc25ecc9aaeedc6b72b568a080d948b0d572e"
+    },
+    "regression": "tests/installers-fresh-profile.spec.ts",
+    "regressionSha256": "0888f3505af622b474f631da768b03990f4f38e9844b5805d3e2fc29b89815e6"
+  },
+  "independentReview": {
+    "decision": "PASS",
+    "basis": "Compared original WP17 criteria, formal real Goal artifacts, missing-dependency assertions, and both real npm install logs/snapshots"
+  },
+  "limits": [
+    "Task preservation probe seeds valid GoalStore fixture data; it does not create a native DSH UI session or run a model during repeated installation.",
+    "Private Skills and Proactive paths avoid default-state migration; arbitrary existing homes and old-state migration are not proven.",
+    "Isolation ledger bytes change for probe lifecycle audit; before snapshot does not contain grant rows, so grantBudgetStable is a probe assertion, not independently reconstructed evidence of spent-budget preservation.",
+    "Real systemd/Lark, live-WAL and a complete upgrade/uninstall sequence remain follow-up hardening; existing doctor/upgrade/uninstall artifacts and their separate tests remain in scope.",
+    "No calendar observation period is required for this closure."
+  ],
+  "regressionVerification": {
+    "command": "pnpm exec vitest run tests/installers-fresh-profile.spec.ts",
+    "exitCode": 0,
+    "log": "/tmp/dsh-repeat-install-final-tests.log",
+    "fileLintExitCode": 0
+  }
+}
