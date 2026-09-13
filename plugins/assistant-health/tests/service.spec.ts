@@ -584,6 +584,49 @@ describe('assistant health service', () => {
     expect(JSON.stringify(fixture.service.report(agent()))).not.toContain('SENTINEL-CONTROL-PLANE')
   })
 
+  test('surfaces closed-regressed and retracted plugin deployment cohorts as degraded signals', () => {
+    const fixture = harness({
+      requiredProviders: ['pluginControlPlane'],
+      controlPlaneHealth: {
+        gaps: 1, readyPlans: 0, activeActivations: 1, failed: 0, rollbackPending: 0,
+        watchingActivations: 1, closedRegressed: 1, closedRetracted: 2,
+      },
+    })
+
+    expect(fixture.service.readiness()).toEqual({
+      ready: true,
+      warnings: [
+        'provider-degraded:pluginControlPlane:capability-cohort-regressed',
+        'provider-degraded:pluginControlPlane:capability-cohort-retracted',
+      ],
+    })
+    expect(fixture.service.report(agent())).toMatchObject({
+      severity: 'degraded',
+      providers: expect.arrayContaining([
+        { id: 'pluginControlPlane', status: 'ready', metrics: {
+          gaps: 1, readyPlans: 0, activeActivations: 1, failed: 0, rollbackPending: 0,
+          watchingActivations: 1, closedRegressed: 1, closedRetracted: 2,
+        } },
+      ]),
+    })
+  })
+
+  test('accepts a pre-v12 control plane health payload without cohort counters', () => {
+    const fixture = harness({
+      requiredProviders: ['pluginControlPlane'],
+      controlPlaneHealth: {
+        gaps: 2, readyPlans: 1, activeActivations: 1, failed: 3, rollbackPending: 0,
+      },
+    })
+
+    expect(fixture.service.readiness()).toEqual({ ready: true, warnings: [] })
+    expect(fixture.service.report(agent()).providers).toContainEqual({
+      id: 'pluginControlPlane', status: 'ready', metrics: {
+        gaps: 2, readyPlans: 1, activeActivations: 1, failed: 3, rollbackPending: 0,
+      },
+    })
+  })
+
   test('fails closed on incomplete or malformed growth and capability health contracts', () => {
     for (const fixture of [
       harness({
