@@ -131,7 +131,7 @@ describe('prepareAutonomyProfile', () => {
   })
 
   it('rejects existing ancestor symlink escapes and accepts nonexistent nested state paths', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'web-owner-autonomy-paths-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'web-owner-autonomy-paths-')))
     try {
       const dshHome = join(root, 'home'); const outside = join(root, 'outside')
       await mkdir(dshHome); await mkdir(outside); await symlink(outside, join(dshHome, 'link'))
@@ -164,7 +164,7 @@ describe('prepareAutonomyProfile', () => {
   })
 
   it('serializes canonical paths through safe ancestor aliases and rejects symbolic-link leaves', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'web-owner-autonomy-alias-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'web-owner-autonomy-alias-')))
     try {
       const physical = join(root, 'physical'); const alias = join(root, 'alias')
       await mkdir(physical); await symlink(physical, alias)
@@ -184,7 +184,7 @@ describe('prepareAutonomyProfile', () => {
   })
 
   it('preserves explicit published defaults and refuses to orphan inherited SQLite state', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'web-owner-autonomy-existing-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'web-owner-autonomy-existing-')))
     try {
       const home = join(root, 'home'); const dshHome = join(home, '.dsh'); await mkdir(home); await mkdir(dshHome)
       const effective = rows(dshHome); const localInput = { ...input, dshHome, workspace: join(root, 'workspace') }
@@ -207,7 +207,7 @@ describe('prepareAutonomyProfile', () => {
   })
 
   it('canonicalizes every nested Skills stateRoot and rejects nested escapes', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'web-owner-autonomy-nested-'))
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'web-owner-autonomy-nested-')))
     try {
       const physical = join(root, 'physical'); const alias = join(root, 'alias'); const outside = join(root, 'outside')
       await mkdir(physical); await mkdir(outside); await symlink(physical, alias); await symlink(outside, join(physical, 'escape'))
