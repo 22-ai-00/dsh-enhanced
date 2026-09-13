@@ -43,6 +43,8 @@ DSH's “everything is a plugin” model means that every composable extension e
 
 ## Verification
 
+Deliver in capability-sized commits. Once an independently usable capability passes its relevant checks and independent review, commit it and push it to `dev` before starting another main capability. Parallel work should converge on that delivery; keep unfinished work out of its commit. Prepare bulk version changes only when the release is ready, in a separate release commit. A capability commit does not replace the full repository verification required before final delivery or publication.
+
 Run `pnpm check` from the repository root. Completion requires manifest validation, zero lint warnings, successful typechecking and tests, a clean build, and a successful dry-run pack for every plugin. Inspect the dry-run file list whenever package boundaries or `files` change.
 
 Keep changes scoped to the requested plugin or shared contract. Generated output (`lib/`, coverage, tarballs, caches) stays untracked.
