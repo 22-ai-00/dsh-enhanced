@@ -4,7 +4,7 @@ import { constants as fsConstants, lstatSync } from 'node:fs'
 import { cp, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Ed25519ApprovalAuthority, loadPrivateApprovalInput, parseApprovalReceipt } from './approval.js'
 import { Ed25519HostAttestationAuthority, parseHostAttestationReceipt } from './attestation.js'
@@ -16,7 +16,7 @@ import { verifyApprovedPackagesInLockfile } from './lockfile.js'
 import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthority, Ed25519SourceReleaseAuthorizationAuthority,
   invokeSourcePublishReconciliationAdapter, invokeSourceReleaseAdapter, parseSourcePublishReconciliationReceipt,
   parseSourceReleaseAuthorization, parseSourceReleaseReceipt } from './release.js'
-import { ControlPlaneStore, expectedSourceRelease } from './store.js'
+import { ControlPlaneStore, controlPlaneDigest, expectedSourceRelease } from './store.js'
 import { inheritedEnvironment, loadTrustConfig, openTrustedExecutable, resolveTrustKey, verifyOpenTrustedExecutable,
   type OpenTrustedExecutable, type PluginControlTrustConfig } from './trust.js'
 import type { ActivationRetractionAuthority, ActivationRetractionReceipt, ApprovalReceipt, HostAttestationReceipt,
@@ -196,6 +196,33 @@ function assertPlanTrust(plan: PluginActivationPlan, trust: PluginControlTrustCo
     || plan.target.profilePath !== join(trust.dshHome, 'profiles', plan.profile)) {
     throw new ControlPlaneCliError('ACTIVATION_BINDING', 'plan does not match the registered installation, ledger, target, and executor')
   }
+}
+
+const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+
+// Mirrors the service-layer canonical target rule: the profiles directory and
+// the target profile must be one canonical non-symlinked directory tree under
+// the owner-bound DSH_HOME (a still-missing profile is accepted only when its
+// parent directory is itself canonical).
+async function canonicalProfileTarget(trust: PluginControlTrustConfig, profile: string): Promise<PluginActivationPlan['target']> {
+  if (!profilePattern.test(profile) || profile.normalize('NFC').trim() !== profile) {
+    throw new ControlPlaneCliError('INVALID_ARGUMENT', 'profile must already be bounded canonical text')
+  }
+  const profiles = join(trust.dshHome, 'profiles')
+  if (await realpath(profiles) !== resolve(profiles)) throw new ControlPlaneCliError('FILESYSTEM_STATE', 'profiles directory is not canonical')
+  const profilePath = join(profiles, profile)
+  try {
+    const metadata = await lstat(profilePath)
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || await realpath(profilePath) !== resolve(profilePath)) {
+      throw new ControlPlaneCliError('FILESYSTEM_STATE', 'target profile must be a canonical directory')
+    }
+  } catch (error) {
+    if (!(typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT')) throw error
+    if (await realpath(dirname(profilePath)) !== resolve(dirname(profilePath)) || basename(profilePath) !== profile) {
+      throw new ControlPlaneCliError('FILESYSTEM_STATE', 'missing target profile parent is not canonical')
+    }
+  }
+  return Object.freeze({ dshHome: trust.dshHome, profile, profilePath })
 }
 
 async function openCurrentTrustedExecutable(path: string, trustedRunningNode: boolean): Promise<OpenTrustedExecutable> {
@@ -1045,6 +1072,37 @@ async function releaseReconcile(argv: readonly string[]): Promise<void> {
   } finally { store.close() }
 }
 
+async function activationPlan(argv: readonly string[]): Promise<void> {
+  const trust = await commandTrust(argv)
+  const store = new ControlPlaneStore({ path: trust.ledger.path })
+  try {
+    const sourcePlanId = option(argv, '--source-plan')
+    const profile = option(argv, '--profile')
+    const idempotencyKey = option(argv, '--idempotency-key')
+    const ttlMs = optionalOption(argv, '--ttl-ms') === undefined ? 900_000 : integerOption(argv, '--ttl-ms')
+    const source = store.getSourcePlan(sourcePlanId)
+    if (source.status !== 'release-complete') {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'activation plan requires a release-complete source plan')
+    }
+    const released = store.sourceReleaseCandidate(sourcePlanId)
+    const loaded = await loadCatalogWithMetadata(trust.catalog.path)
+    const admitted = loaded.catalog.entries.find(entry => entry.id === released.id)
+    if (admitted === undefined
+      || controlPlaneDigest({ schemaVersion: 1, entries: [admitted] }) !== controlPlaneDigest({ schemaVersion: 1, entries: [released] })) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'released candidate is not the exact admitted owner catalog entry')
+    }
+    if (!discover(loaded.catalog, source.gapSnapshot.capability).some(entry => entry.id === released.id)) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'admitted candidate does not match the released gap capability')
+    }
+    const target = await canonicalProfileTarget(trust, profile)
+    const receipt = store.createPlan({ candidate: admitted, catalog: { digest: loaded.digest, provenance: loaded.provenance },
+      matchedCapabilities: admitted.capabilities, profile, target, installationId: trust.installationId, ledger: trust.ledger,
+      executor: { id: trust.executor.id, version: trust.executor.version, path: trust.executor.path, sha256: trust.executor.sha256 },
+      ttlMs, gapId: source.gapId, idempotencyKey })
+    process.stdout.write(`${JSON.stringify(receipt)}\n`)
+  } finally { store.close() }
+}
+
 export async function runPluginControl(argv = process.argv.slice(2)): Promise<void> {
   rejectCommandSuppliedTrust(argv)
   const command = argv[0]
@@ -1073,5 +1131,6 @@ export async function runPluginControl(argv = process.argv.slice(2)): Promise<vo
   if (command === 'release-step') return releaseStep(argv)
   if (command === 'release-attest') return releaseAttest(argv)
   if (command === 'release-reconcile') return releaseReconcile(argv)
-  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|watch-observe|watch-retract|watch-show|source-plan|scaffold|release-start|release-request|release-step|release-attest|release-reconcile>')
+  if (command === 'activation-plan') return activationPlan(argv)
+  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|watch-observe|watch-retract|watch-show|source-plan|scaffold|release-start|release-request|release-step|release-attest|release-reconcile|activation-plan>')
 }
