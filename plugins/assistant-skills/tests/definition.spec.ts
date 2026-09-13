@@ -30,6 +30,9 @@ describe('skill definitions', () => {
 
   it('rejects untrusted traces, unsafe bindings, and invalid invocation inputs', () => {
     expect(() => createDefinition(source([]), { name: 'empty', description: 'x' }, [])).toThrow()
+    // The verified-workflow-source protocol is the sole SkillDefinition entry point;
+    // workflows imported through any other channel can never share the watch/deployment path.
+    expect(() => createDefinition({ ...source(), protocol: 'assistant-goals/imported-workflow/v1' } as unknown as VerifiedWorkflowSource, { name: 'imported', description: 'x' }, ['files_read'])).toThrow()
     expect(() => createDefinition(source([{ id: 'goal', toolName: 'goal_control', arguments: {} }]), { name: 'blocked', description: 'x' }, ['goal_control'])).toThrow()
     expect(() => createDefinition(source([{ id: 'other', toolName: 'files_read', arguments: {} }]), { name: 'not-allowed', description: 'x' }, [])).toThrow()
     expect(() => createDefinition(source(), { name: 'bad_name', description: 'x' }, ['files_read'])).toThrow()
