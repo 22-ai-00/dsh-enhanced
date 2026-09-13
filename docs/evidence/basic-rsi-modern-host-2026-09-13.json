@@ -5,22 +5,23 @@
   "milestone": "Modern Host: one real workflow improved twice and delivered to the original Web session",
   "completeWorkPackage": false,
   "source": {
-    "baseCommit": "d1642f4e3d03db3f8c7144ad695b29931e567e73",
-    "state": "v4 development candidate before final whole-goal compact-feedback and snapshot-admission additions",
-    "harnessCommit": "49c357f",
-    "notes": "The subsequent 616c114 feedback commit has separate 58-test verification; this v4 run does not claim to exercise its later whole-goal criteria and repair admission additions."
+    "runtimeCommit": "d8fb41ca6771f1b5feb1435e5d9234da90eba7be",
+    "testOnlyCommit": "3708ebff86ad32fe9ced926c6149c4c0d9514901",
+    "state": "final 0.1.32 runtime candidate; built libraries frozen throughout v5",
+    "harnessCommit": "49c357f5f052f315b8cfa2e96f2776bf8a86729c",
+    "notes": "Includes compact whole-goal feedback, repair snapshot admission, and unowned request failure propagation. The concurrent 3708ebf commit changes only platform test fixtures; no runtime or built library changed during this run."
   },
   "command": {
     "shell": "DSH_E2E_HOST_VERSION=0.1.5-rc.1 DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_CAPTURE_RETAIN_FAILURE=1 pnpm test:web-owner:real-repair",
     "exitCode": 0,
     "testsPassed": 1,
-    "duration": "5.7 minutes",
-    "log": "/tmp/dsh-rsi-modern-host-v4.log"
+    "duration": "6.0 minutes",
+    "log": "/tmp/dsh-rsi-modern-host-v5.log"
   },
   "artifacts": {
-    "directory": "/tmp/dsh-rsi-modern-host-v4-artifacts/web-owner-real-repair-real-b3d6d-delivers-the-bounded-result",
-    "proofSha256": "8c405c156d9aa27b8882bf471028fe51419a7c1cba0d0e7ca1076b64e03eaae8",
-    "modelSha256": "92be382e002315a80f4e5b72aa87df62693bb9a52ec3ae5e36801b01795d2d95"
+    "directory": "/tmp/dsh-rsi-modern-host-v5-artifacts/web-owner-real-repair-real-b3d6d-delivers-the-bounded-result",
+    "proofSha256": "e061276068ffe1b7fa94e7a41ce36594222c29849e2677d8d176bd477ce3bfc0",
+    "modelSha256": "defb54edecbd3b923e9b3e83ace3ac0071dda1e1bd9f9de7d1ca7f7795e22d56"
   },
   "proof": {
     "capability": "real-traex-two-round-bounded-rsi",
@@ -30,38 +31,38 @@
       "model": "gpt-5.6-terra",
       "api": "acp",
       "command": "traex",
-      "cwd": "/tmp/dsh-real-owner-repair-LsXtAQ/workspace"
+      "cwd": "/tmp/dsh-real-owner-repair-Kr21VN/workspace"
     },
     "hostVersion": "0.1.5-rc.1",
     "scope": {
       "principalId": "web/web/local/operator",
-      "principalRecordId": "principal_cd4832d8-e2b6-4f8c-91b1-c56e0ff87739",
+      "principalRecordId": "principal_dc784e25-2839-4b94-a13f-026a4958d943",
       "principalVersion": 1,
-      "workspace": "/tmp/dsh-real-owner-repair-LsXtAQ/workspace",
+      "workspace": "/tmp/dsh-real-owner-repair-Kr21VN/workspace",
       "preset": "standard"
     },
     "baseline": {
-      "sessionId": "session-eacb7b28-d904-48cf-ab8c-0b8865f3612d",
-      "goalId": "a408ba694b306416bbdb31294fb89301b8e6ba3a08a742c7c42a8e11cc713cc8",
+      "sessionId": "session-979f080d-2d7f-42a9-8c78-393e4e8b6ef4",
+      "goalId": "86d2dea1bbf860117df6733187458d01ed965ac2359bcd9ec57da39a5fcdc6b6",
       "version": 1
     },
-    "continuationId": "skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41",
+    "continuationId": "skill-repair-c4018045db948403bdf8dbab6e3b784e9d7454656f4c48003f07104d23556e76",
     "state": "complete",
     "iterations": 2,
     "rounds": [
       {
         "iteration": 1,
-        "sourceSession": "session-7e9d6610-c0ee-4b83-8d01-d244abb55f62",
-        "sourceGoal": "89401d996f211d6e5b67375faca957876eaa95a9b927a1a32ac8e909655c0657",
-        "repairSession": "owner-repair-2730fb606dd0fb38541c79dad8ceba332b6b05e8",
-        "repairGoal": "4670fed653c129c5a3d794933984a6c191b4171185ab136110ad2148dc057fd2",
-        "candidateId": "skill-candidate-c8b7da5d24a7e6be8565a460ae6cf887e2816b37d7096917d7c80cd370959834",
-        "comparisonId": "skill-comparison-74ff1bb2814b3f4ae32df5f324414ca301c086ca9f4c978c5ff5a11e6d6c4ff0",
-        "deploymentId": "skill-deployment-6bd6041ac6b3a915c86f01206f471c130c0f3acd9a8a965cf858fe6c5c9d1223",
+        "sourceSession": "session-76eddf33-7fb7-4fda-805a-dc3a7ed7e527",
+        "sourceGoal": "3445a5c3504e904dfd7f5e188808caf1b7481403f0f6cfe627a5790714b83123",
+        "repairSession": "owner-repair-65914d3faf2bc1fa60a8fdd4a9fd2b0af3667281",
+        "repairGoal": "b5731070d87e4277965934f020fd1c92e6805344e27ed572377211be04f36424",
+        "candidateId": "skill-candidate-886ccbb5b21e919777aa41d182bdb5494167f748418e0e9729fb4eab5ac0621d",
+        "comparisonId": "skill-comparison-2ecc9d83f4858e25814100dee7a487b82e5a9946f00dfa06418b8fe4332b2132",
+        "deploymentId": "skill-deployment-14a45af3ac8976b0206bea612725a018f4a5791cd926e1df0ab6f0b94f7c2340",
         "version": 2,
-        "failureReceiptDigest": "494466d7d1e39e882667a1a46efa62bbb4b5c01452d577ceb6c28bf12abb644e",
-        "repairReceiptDigest": "f50921d4277b922cb3c8ddbaeb06ce0ef04e10d27fa4b1ed7cd610b75c1c29b5",
-        "candidateDefinitionDigest": "c60ddf0bb899469c3a60c38ff84f27404e1b5069b288f1ea8e33faebf27e544b",
+        "failureReceiptDigest": "483f9e15dd41435a944fa9fcd46b68f2ab3d6fa4025dcea2b26723a1f4c933d4",
+        "repairReceiptDigest": "f870c96906f0d679a6d27065ee894e54e31b70614ce5b6019c9020d90a5719f5",
+        "candidateDefinitionDigest": "f18e10a6f3ae387cb0416e88fad5ca9912a1a5a97b9d920a2efc75aa415b1199",
         "quality": {
           "candidateChecksPassed": true,
           "evaluationGain": 1,
@@ -69,11 +70,11 @@
           "criticalRegressionsPassed": true,
           "heldoutIndependence": "unproven"
         },
-        "datasetDigest": "39f2bcb095a95df96f955d85a7637a18e11083169f647ed58a34aa8a2cc20ff9",
+        "datasetDigest": "770db63fb8f26ba6015880e9efdb3511504a7fc20bf0f1e90fb47d22d613d363",
         "promotion": {
-          "sessionId": "session-02980f2e-e2cf-4aa2-9ef3-8b5d07008b97",
-          "goalId": "c63ce96831163ed45f54b9cf32a42867e7b4dea4f7c47b50f46d336340a2e8cb",
-          "promotedAt": 1789269869484
+          "sessionId": "session-8871e74f-e02b-4d27-8779-cfe08ad2971d",
+          "goalId": "e34b7486a8402484ec745930992d5684acb690cf594b0f90c89528c9597dca9d",
+          "promotedAt": 1789272671540
         },
         "toolNames": [
           "read",
@@ -84,17 +85,17 @@
       },
       {
         "iteration": 2,
-        "sourceSession": "session-29f2fd55-c48d-40d8-8993-9afc2c73006b",
-        "sourceGoal": "a5018ff568be44fd5a4cfcd20bdfb0caa2a2a9c41148702cd5f0bf3644d62446",
-        "repairSession": "owner-repair-4288bf87f54ce5c272e9efe7b45a68dee66fd429",
-        "repairGoal": "dd648d490b4021cec1090a614f973fc8af928c407af662fdf37aa35552405f68",
-        "candidateId": "skill-candidate-3afacd34108fbeb666be2206642aa06a6682b2a1be3a193f2b73b2f01e2cf9fd",
-        "comparisonId": "skill-comparison-be270424f3200770bf4959a43e1729f5b19791b121dd4415f127d4c527319073",
-        "deploymentId": "skill-deployment-7c3bcf81850403cf0696164b7bcbf92f490c247c632d0bcad8e1ea1ef46fe56b",
+        "sourceSession": "session-74c7432a-a860-468f-995b-b1a1239cc82f",
+        "sourceGoal": "7fa69481260d5988609ce5cffac3616aa63e4acad78fc17307dca01c727948a1",
+        "repairSession": "owner-repair-c6e84d52be749ecb29f09fe8c737cb4e1ea6f51f",
+        "repairGoal": "aeb3dbf22d49396e956de87fcdb03ac39bef0752db02bf4f53a44333a9c75329",
+        "candidateId": "skill-candidate-95aee166ba5306ace03aacb37b163468bfbd19c5f7131fba73a29d97edb278a1",
+        "comparisonId": "skill-comparison-f9b930993d2efe4e0a4a7d2ff5b4c4af602fbb0f8f423efb8ce25274c26d496c",
+        "deploymentId": "skill-deployment-705005674bb3627c73cd95f8552220bc7411f4e1907e236ee473873a4f0eac49",
         "version": 3,
-        "failureReceiptDigest": "1992a703a9311e296bc1a2f4850f81efb6444471c1ef93915e41957cd584ff8e",
-        "repairReceiptDigest": "96321283832657ba22d0fc914eca9cc2140f04c85ac28a39cefd5a41214e75a2",
-        "candidateDefinitionDigest": "706cb86f2dd7e6e1bb8038b737d1bfcf97c17720c22b43678e103503b9c48a8e",
+        "failureReceiptDigest": "8344920b184e4439364d45f372edb5a6ecaf9a1abb59a83dd9de15672123f10d",
+        "repairReceiptDigest": "ed223d80f4eee73315be082a0b5cd9ea52836fbe27a25ef8b12a65ee6023edcc",
+        "candidateDefinitionDigest": "1460c692b60be53de9abc54b61614a31dfeab13cb0326f1dc057873e47a14c38",
         "quality": {
           "candidateChecksPassed": true,
           "evaluationGain": 1,
@@ -102,56 +103,57 @@
           "criticalRegressionsPassed": true,
           "heldoutIndependence": "unproven"
         },
-        "datasetDigest": "cc726ffe4475112d9c91b7905963cce1181de5b891f8888b6c96d64ffd029ff9",
+        "datasetDigest": "bf53598490269bb97d70dbdb08f1efbc00d9d6018be4392b4a02dfa1596dc682",
         "promotion": {
-          "sessionId": "session-f98e8d75-5ff8-4488-8f40-9c92afe89b60",
-          "goalId": "a466afd2d9b0626fae548d5a2e5778858c39f3b5129b9d4c9465a48e23f9f1e5",
-          "promotedAt": 1789269981047
+          "sessionId": "session-a92f7b61-ba91-4868-9ca2-ed2e1b659bfa",
+          "goalId": "a081cde18a2efd2777d40dc1138de40fcc084c11dbf13111e27571007bfe6a1a",
+          "promotedAt": 1789272795345
         },
         "toolNames": [
           "read",
-          "write"
+          "write",
+          "read"
         ],
-        "goalContextSnapshots": 3
+        "goalContextSnapshots": 4
       }
     ],
     "usage": {
-      "model_calls": 7,
-      "tool_calls": 5
+      "model_calls": 8,
+      "tool_calls": 6
     },
     "feedback": [
       {
-        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:1:finite-canary",
+        "idempotency_key": "repair-feedback:skill-repair-c4018045db948403bdf8dbab6e3b784e9d7454656f4c48003f07104d23556e76:1:finite-canary",
         "status": "accepted",
         "attempt_count": 1,
-        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+        "binding_id": "binding_9c43cea8-6823-43e0-bf31-d5ac5c14a04f"
       },
       {
-        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:1:iteration-success",
+        "idempotency_key": "repair-feedback:skill-repair-c4018045db948403bdf8dbab6e3b784e9d7454656f4c48003f07104d23556e76:1:iteration-success",
         "status": "accepted",
         "attempt_count": 1,
-        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+        "binding_id": "binding_9c43cea8-6823-43e0-bf31-d5ac5c14a04f"
       },
       {
-        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:2:finite-canary",
+        "idempotency_key": "repair-feedback:skill-repair-c4018045db948403bdf8dbab6e3b784e9d7454656f4c48003f07104d23556e76:2:finite-canary",
         "status": "accepted",
         "attempt_count": 1,
-        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+        "binding_id": "binding_9c43cea8-6823-43e0-bf31-d5ac5c14a04f"
       },
       {
-        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:2:iteration-success",
+        "idempotency_key": "repair-feedback:skill-repair-c4018045db948403bdf8dbab6e3b784e9d7454656f4c48003f07104d23556e76:2:iteration-success",
         "status": "accepted",
         "attempt_count": 1,
-        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+        "binding_id": "binding_9c43cea8-6823-43e0-bf31-d5ac5c14a04f"
       },
       {
-        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:2:final-success",
+        "idempotency_key": "repair-feedback:skill-repair-c4018045db948403bdf8dbab6e3b784e9d7454656f4c48003f07104d23556e76:2:final-success",
         "status": "accepted",
         "attempt_count": 1,
-        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+        "binding_id": "binding_9c43cea8-6823-43e0-bf31-d5ac5c14a04f"
       }
     ],
-    "generatedArtifactDigest": "f691c626298236fc3ed50fbeb2a9fa191f45213f1177ed8303ee2bd50d9cc848",
+    "generatedArtifactDigest": "3aa8f00aa71a2b3af269a9caab43f224f428eb03275d5828851380c888d721e7",
     "completedRestartNoReplay": true,
     "initialArtifact": "shared unfinished scaffold",
     "suppliedRepairedSource": false,
@@ -164,14 +166,15 @@
   },
   "independentReview": {
     "verdict": "PASS",
-    "modelDispatches": 27,
-    "repairModelCalls": 7,
-    "repairToolCalls": 5,
+    "modelDispatches": 28,
+    "repairModelCalls": 8,
+    "repairToolCalls": 6,
     "acceptedFeedback": 5,
     "goalContextSnapshots": [
       4,
-      3
-    ]
+      4
+    ],
+    "notes": "Independently checked model route, repair receipts, subsequent-task promotion, native session Goal context, accepted feedback, and completed-restart no replay. Exact event counts describe this observed run, not fixed future regression expectations."
   },
   "limitations": [
     "Public operator-frozen task families; heldout independence remains unproven.",
