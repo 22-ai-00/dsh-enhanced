@@ -4,7 +4,7 @@ import { OwnerRepairAgentRuntime, type OwnerRepairAgentInput } from '../src/repa
 import { SkillStore } from '../src/store.js'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -50,7 +50,9 @@ test('rejects malformed or expired repair bootstrap before creating an Agent', a
 })
 
 test('production repair runtime confines native file tools before their delegate, including symlink escapes', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'repair-workspace-'))
+  // Exercise the configured symlink and its canonical target, including on
+  // macOS where tmpdir() itself can use the /var -> /private/var alias.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'repair-workspace-')))
   const privateRoot = await mkdtemp(join(tmpdir(), 'repair-private-'))
   await writeFile(join(root, 'artifact.txt'), 'repairable')
   await writeFile(join(privateRoot, 'holdout.txt'), 'private')
