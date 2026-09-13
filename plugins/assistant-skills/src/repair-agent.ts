@@ -149,8 +149,8 @@ export class OwnerRepairAgentRuntime {
       if (agents === undefined || goals === undefined || policy === undefined) throw new Error('assistant-skills: repair Agent dependencies unavailable')
       const options = {
         agentOptions: { provider: input.provider, model: input.model, maxTokens: input.maxOutputTokens }, signal: combined,
-        setup: async (agentCtx: Agent['ctx']) => {
-          const agent = agentCtx.agent
+        setup: async (agentCtx: Agent['ctx'], preparedAgent?: Agent) => {
+          const agent = preparedAgent ?? agentCtx.agent
           if (agent === undefined) throw new Error('assistant-skills: unpublished repair Agent is unavailable')
           input.assertCurrent(); combined.throwIfAborted()
           this.#assertLease(key)

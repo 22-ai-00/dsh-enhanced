@@ -29,6 +29,29 @@ describe('dsh-enhanced-assistant-web-owner', () => {
     expect(patch).toContain("name: '@dsh-enhanced/assistant-web-owner'")
   })
 
+  it('constructs an added-Host-dependency controller only after the owner facade is active', async () => {
+    const ctx = new Context()
+    const fileUploads = { name: 'host-current-file-uploads' }
+    ctx.provide('fileUploads', fileUploads)
+    let observed: unknown
+    try {
+      await ctx.plugin({ async apply(owner: Context) {
+        const scoped = owner.extend()
+        scoped.provide('agents', { name: 'owner-scoped-agents' })
+        // A current Host controller has gained fileUploads.  Installing it as
+        // a child preserves the exact current inject list; awaiting this child
+        // here would deadlock on the parent-owned agents facade.
+        scoped.inject(['agents', 'fileUploads'], active => {
+          observed = { agents: active.get('agents'), fileUploads: active.get('fileUploads') }
+        })
+      } })
+      await Promise.resolve()
+      expect(observed).toEqual({ agents: { name: 'owner-scoped-agents' }, fileUploads })
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('builds an owner-scoped copy of the upstream Web client', () => {
     const output = mkdtempSync(join(tmpdir(), 'assistant-web-owner-client-'))
     try {

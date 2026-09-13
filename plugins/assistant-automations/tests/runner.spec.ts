@@ -203,6 +203,24 @@ async function harness(options: {
 }
 
 describe('fresh rc.1 automation Agent runner', () => {
+  test('uses the prepared Agent supplied by the newer setup ABI', async () => {
+    const fixture = await harness({ requestedTools: [] })
+    const create = fixture.ctx.agents.create.bind(fixture.ctx.agents)
+    vi.spyOn(fixture.ctx.agents, 'create').mockImplementation(async options => create({
+      ...options,
+      setup: async agentCtx => {
+        const setup = options.setup as unknown as (ctx: Agent['ctx'], prepared?: Agent) => Promise<unknown>
+        const newerAbiContext = new Proxy(agentCtx, {
+          get(target, key, receiver) { return key === 'agent' ? undefined : Reflect.get(target, key, receiver) },
+        })
+        await setup(newerAbiContext, agentCtx.agent)
+      },
+    }))
+
+    await expect(fixture.runner.run(input(definition({ allowedTools: [] })))).resolves.toMatchObject({ outcome: 'succeeded' })
+    await fixture.ctx.fiber.restart()
+  })
+
   test('publishes a Host-derived execution mode before session-start observers run', async () => {
     const production = await harness({ requestedTools: [] })
     await production.runner.run(input(definition({ allowedTools: [] })))
