@@ -299,6 +299,48 @@ llm-pi-ai:
     expect(() => parseGoalAdmissionTask(repositoryTask({ outcome: { ...outcome, minApprovals: 2 }, acceptance: 'goal-step', maxActions: 20 }))).toThrow('approvals')
   })
 
+  test('direct commit outcome keeps artifact acceptance and requires explicit matching delivery mode', async () => {
+    const now = Date.now(), f = await fixture(now)
+    const outcome = { mode: 'commit', requiredChecks: [{ name: 'verify', appId: 15368 }], timeoutMs: 10_000, freshnessMs: 30_000 }
+    const delivery = { expiresAt: now + 300_000, acceptance: 'goal-step', openPullRequest: false, maxActions: 4, outcome }
+    const value = repositoryTask(delivery)
+    const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), repositoryEffective(f.effective), value, f.snapshot, now)
+    const verifier = config(plan.patch, 'dsh-enhanced-assistant-verifier')
+    const authority = verifier.authorities.find((a: { kind: string }) => a.kind === 'repository-commit-readback')
+    expect(authority).toMatchObject({ requiredChecks: outcome.requiredChecks, repository: 'octo/example', branch: 'automation/result', grantId: `${plan.admissionId}-repository` })
+    expect(authority).not.toHaveProperty('reviewerIds')
+    expect(authority).not.toHaveProperty('mode')
+    expect(verifier.profiles.find((p: { taskKind: string }) => p.taskKind === 'goal-step').criteria[0].kind).toBe('isolated-process-behavior')
+    expect(config(plan.patch, 'dsh-enhanced-assistant-actions').grants[0].repoWorkflow.allowPullRequest).toBe(false)
+    expect(prepareGoalAdmission(f.input, plan.patch, repositoryEffective(f.effective), value, f.snapshot, now).patch).toBe(plan.patch)
+    for (const invalid of [{ openPullRequest: true }, { acceptance: 'goal-outcome' }, { maxActions: 3 },
+      { outcome: { ...outcome, mode: undefined } }, { outcome: { ...outcome, mode: 'automatic' } },
+      { outcome: { ...outcome, reviewerIds: [], minApprovals: 0 } }]) {
+      expect(() => parseGoalAdmissionTask(repositoryTask({ ...delivery, ...invalid }))).toThrow()
+    }
+  })
+
+  test('direct external event admission has finite two-inspection cost and no PR authority', async () => {
+    const now = Date.now(), f = await fixture(now)
+    const outcome = { mode: 'commit', requiredChecks: [{ name: 'verify', appId: 15368 }], timeoutMs: 10_000, freshnessMs: 30_000 }
+    const events = { maxPolls: 4, maxFires: 1, pollIntervalMs: 1000, requestTimeoutMs: 1000 }
+    const delivery = { credentialHandle: undefined, externalGrantId: 'operator-repository-grant', expiresAt: now + 300_000, acceptance: 'goal-step', openPullRequest: false, maxActions: 22, outcome, events }
+    const directGrant = (grant: Record<string, unknown>) => {
+      grant.maxActions = 22; grant.maxCostUnits = 22
+      grant.allowedOperations = ['commit', 'inspect']; grant.allowedInspectKinds = ['repository', 'branch', 'file', 'commit-checks']
+    }
+    const effective = externalRepositoryEffective(f.effective, f.input, f.snapshot, now, directGrant)
+    const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), effective, repositoryTask(delivery), f.snapshot, now, undefined, eventSupport)
+    expect(config(plan.patch, 'dsh-enhanced-event-triggers').triggers[0]).toMatchObject({ deliveryMode: 'commit', baseBranch: 'main', externalGrant: { id: 'operator-repository-grant', revision: 7 } })
+    expect(config(plan.patch, 'dsh-enhanced-assistant-actions').externalGrants).toEqual(config(effective, 'dsh-enhanced-assistant-actions').externalGrants)
+    expect(prepareGoalAdmission(f.input, plan.patch, effective, repositoryTask(delivery), f.snapshot, now + 1, undefined, eventSupport).patch).toBe(plan.patch)
+    const insufficient = externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { directGrant(grant); grant.maxCostUnits = 21 })
+    expect(() => prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), insufficient, repositoryTask(delivery), f.snapshot, now, undefined, eventSupport)).toThrow('observation and outcome cost')
+    expect(() => parseGoalAdmissionTask(repositoryTask({ ...delivery, maxActions: 21 }))).toThrow('task limit')
+    const withPr = externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { directGrant(grant); grant.allowedOperations = ['commit', 'inspect', 'pull-request'] })
+    expect(() => prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), withPr, repositoryTask(delivery), f.snapshot, now, undefined, eventSupport)).toThrow('exactly match')
+  })
+
   test('v2 admits an operator-projected external repository grant without deriving credentials or grant authority', async () => {
     const now = Date.now(), f = await fixture(now)
     const outcome = { requiredChecks: [{ name: 'tests', appId: 42 }], reviewerIds: [7], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 30_000 }

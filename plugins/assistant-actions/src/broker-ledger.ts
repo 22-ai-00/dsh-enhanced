@@ -22,7 +22,7 @@ const DIGEST = /^[0-9a-f]{64}$/u
 
 export type BrokerTerminalStatus = 'succeeded' | 'failed' | 'unknown'
 export type BrokerRequestStatus = 'prepared' | 'dispatched' | BrokerTerminalStatus
-export type BrokerInspectKind = 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews'
+export type BrokerInspectKind = 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews' | 'commit-checks'
 
 export interface ExternalGitHubGrant extends BrokerGrantAuthorityUnsigned {
   digest: string

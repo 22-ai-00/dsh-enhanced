@@ -91,3 +91,5 @@ SQLite schema v4 为 outbox 增加持久单调序号，从 v3 原位迁移并保
 ## 兼容性与参考
 
 以 DSH `0.1.2-rc.1` 验证。设计借鉴 `dsh-sentinel@833a4e9` 的 baseline/edge/cooldown 与 fire-before-delivery watermark，但没有安装或复制其 JSONL、shell command、弱租约或 capability URL 设计。
+
+`github-repository` 来源可显式设置 `deliveryMode: commit`，保留 `baseBranch` 作为授权范围元数据。此时只读取目标分支及其提交的 check-runs，不要求 PR 或 reviewer；拒绝 PR 编号与评审字段。省略 deliveryMode 保留原行为与旧配置摘要。重启后沿用持久序号，重复 CI 状态不重复产生事件。事件是唤醒信号，最终完成状态仍由绑定真实交付收据的独立验收决定。

@@ -35,6 +35,7 @@ export interface RepositoryEventObservationInput {
   repository: string
   branch: string
   baseBranch: string
+  deliveryMode?: 'commit' | 'pull-request'
   owner: { workspace: string; preset: string; principalId: string; principalRecordId: string; principalVersion: number; ownerRouteId: string; expiresAt: number; budgetId: string }
   goal?: { id: string; sessionId: string; nativeGoalId: string; definitionVersion: number; definitionDigest: string }
 }
@@ -46,7 +47,7 @@ export interface NormalizedRepositoryEventObservationInput extends RepositoryEve
 
 /** Copies the small Host-only capability before any await or service lookup. */
 export function normalizeRepositoryEventObservationInput(value: unknown): NormalizedRepositoryEventObservationInput {
-  const input = exact(value, ['version', 'triggerId', 'grantId', 'grantRevision', 'grantDigest', 'repository', 'branch', 'baseBranch', 'owner', ...(plain(value) && Object.hasOwn(value, 'goal') ? ['goal'] : [])], 'input')
+  const input = exact(value, ['version', 'triggerId', 'grantId', 'grantRevision', 'grantDigest', 'repository', 'branch', 'baseBranch', 'owner', ...(plain(value) && Object.hasOwn(value, 'goal') ? ['goal'] : []), ...(plain(value) && Object.hasOwn(value, 'deliveryMode') ? ['deliveryMode'] : [])], 'input')
   if (input.version !== 1) throw new Error('assistant-actions: invalid repository event version')
   const owner = exact(input.owner, ['workspace', 'preset', 'principalId', 'principalRecordId', 'principalVersion', 'ownerRouteId', 'expiresAt', 'budgetId'], 'owner')
   const base = {
@@ -55,11 +56,13 @@ export function normalizeRepositoryEventObservationInput(value: unknown): Normal
     owner: Object.freeze({ workspace: text(owner.workspace, 'owner.workspace', 1024), preset: text(owner.preset, 'owner.preset'), principalId: text(owner.principalId, 'owner.principalId'), principalRecordId: text(owner.principalRecordId, 'owner.principalRecordId'), principalVersion: integer(owner.principalVersion, 'owner.principalVersion'), ownerRouteId: text(owner.ownerRouteId, 'owner.ownerRouteId'), expiresAt: integer(owner.expiresAt, 'owner.expiresAt'), budgetId: text(owner.budgetId, 'owner.budgetId') }),
   }
   if (!DIGEST.test(base.grantDigest) || !REPOSITORY.test(base.repository) || base.branch === base.baseBranch) throw new Error('assistant-actions: invalid repository event scope')
-  if (input.goal === undefined) return Object.freeze(base)
+  if (input.deliveryMode !== undefined && input.deliveryMode !== 'commit' && input.deliveryMode !== 'pull-request') throw new Error('assistant-actions: invalid repository event delivery mode')
+  const mode: { deliveryMode?: 'commit' | 'pull-request' } = input.deliveryMode === undefined ? {} : { deliveryMode: input.deliveryMode as 'commit' | 'pull-request' }
+  if (input.goal === undefined) return Object.freeze({ ...base, ...mode })
   const goal = exact(input.goal, ['id', 'sessionId', 'nativeGoalId', 'definitionVersion', 'definitionDigest'], 'goal')
   const normalizedGoal = Object.freeze({ id: text(goal.id, 'goal.id'), sessionId: text(goal.sessionId, 'goal.sessionId'), nativeGoalId: text(goal.nativeGoalId, 'goal.nativeGoalId'), definitionVersion: integer(goal.definitionVersion, 'goal.definitionVersion'), definitionDigest: text(goal.definitionDigest, 'goal.definitionDigest', 80) })
   if (!DIGEST.test(normalizedGoal.definitionDigest)) throw new Error('assistant-actions: invalid repository event goal')
-  return Object.freeze({ ...base, goal: normalizedGoal })
+  return Object.freeze({ ...base, ...mode, goal: normalizedGoal })
 }
 
 export function repositoryEventFingerprint(value: unknown): string {
@@ -118,4 +121,18 @@ export function repositoryEventSemanticFingerprint(input: NormalizedRepositoryEv
   const semanticReviews = list(reviews, 'reviews').map(item => ({ id: item.id as number, state: item.state as string, commitOid: item.commit_id as string, reviewer: (item.user as Record<string, unknown>).id as number }))
   return repositoryEventFingerprint({ protocol: 'assistant-actions/repository-event/v1', repository: input.repository, branch: input.branch, headOid,
     pullRequest: { number: pr.number, state: pr.state, merged: pr.merged }, checks: semanticChecks, reviews: semanticReviews })
+}
+
+/** Canonical direct-commit observation: exact branch head and exact OID checks only. */
+export function repositoryEventCommitSemanticFingerprint(input: NormalizedRepositoryEventObservationInput, headOid: string, checks: unknown): string {
+  if (!OID.test(headOid) || !plain(checks) || checks.repository !== input.repository || checks.headOid !== headOid || checks.truncated !== false || checks.untrusted !== true || !Array.isArray(checks.items) || checks.items.length > 20) throw new Error('assistant-actions: repository event observation scope changed')
+  const rows = checks.items.map(item => {
+    if (!plain(item) || !plain(item.app) || !Number.isSafeInteger(item.id) || (item.id as number) < 1 || typeof item.name !== 'string' || typeof item.status !== 'string'
+      || !['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending'].includes(item.status) || item.conclusion !== null && (typeof item.conclusion !== 'string' || !['success', 'failure', 'neutral', 'cancelled', 'skipped', 'timed_out', 'action_required', 'stale', 'startup_failure'].includes(item.conclusion))
+      || item.head_sha !== headOid || !Number.isSafeInteger(item.app.id) || (item.app.id as number) < 1) throw new Error('assistant-actions: repository event checks malformed')
+    return { id: item.id as number, name: item.name, state: item.status, conclusion: item.conclusion as string | null, headOid: item.head_sha as string, appId: item.app.id as number }
+  })
+  if (new Set(rows.map(row => row.id)).size !== rows.length) throw new Error('assistant-actions: repository event checks mixed')
+  rows.sort((left, right) => left.id - right.id)
+  return repositoryEventFingerprint({ protocol: 'assistant-actions/repository-event/v1', repository: input.repository, branch: input.branch, headOid, checks: rows })
 }

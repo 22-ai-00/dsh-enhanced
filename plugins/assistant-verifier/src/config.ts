@@ -79,7 +79,7 @@ export function compileAcceptanceProfiles(config: Config): Readonly<{
     for (const criterion of contract.criteria) {
       const authority = authorities.find(item => item.id === criterion.authority.id && item.digest === criterion.authority.digest)
       const expected = criterion.kind === 'isolated-process-behavior' ? 'isolated-runner' : criterion.kind === 'process-behavior' ? 'runner' : criterion.kind === 'document-citations' ? 'document' : 'readback'
-      if (authority?.kind !== expected && !(contract.task.kind === 'goal-outcome' && criterion.kind === 'target-readback' && authority?.kind === 'repository-readback' && criterion.objectId === `${authority.repository}:${authority.branch}`)) throw new Error('assistant-verifier: acceptance profile authority is unavailable or changed')
+      if (authority?.kind !== expected && !(contract.task.kind === 'goal-outcome' && criterion.kind === 'target-readback' && (authority?.kind === 'repository-readback' || authority?.kind === 'repository-commit-readback') && criterion.objectId === `${authority.repository}:${authority.branch}`)) throw new Error('assistant-verifier: acceptance profile authority is unavailable or changed')
       if (criterion.kind === 'isolated-process-behavior' && authority.kind === 'isolated-runner'
         && !authority.testSets.some(set => set.id === criterion.testSetId)) throw new Error('assistant-verifier: isolated test set unavailable')
     }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRepositoryReadback, validateRepositoryReadbackRequirements } from '../src/repository-readback.ts'
+import { normalizeRepositoryCommitReadback, normalizeRepositoryReadback, validateRepositoryReadbackRequirements } from '../src/repository-readback.ts'
 
 const repository = 'owner/repository'
 const branch = 'delivery/goal-1'
@@ -82,5 +82,23 @@ describe('repository readback requirements', () => {
     expect(() => validateRepositoryReadbackRequirements({ ...requirements, minApprovals: 2 })).toThrow('invalid repository readback requirements')
     expect(() => validateRepositoryReadbackRequirements({ ...requirements, requiredChecks: [] })).toThrow('invalid repository readback requirements')
     expect(validateRepositoryReadbackRequirements({ ...requirements, requiredChecks: [{ name: 'x'.repeat(256), appId: 7 }] }).requiredChecks[0]!.name).toHaveLength(256)
+  })
+})
+
+describe('direct repository commit readback normalization', () => {
+  const direct = (overrides: Record<string, unknown> = {}) => normalizeRepositoryCommitReadback({ repository, branch, commitOid,
+    requirements: { requiredChecks: requirements.requiredChecks }, branchSnapshot: { name: branch, commit: { sha: commitOid } },
+    checks: { repository, headOid: commitOid, items: [check()], truncated: false, untrusted: true }, ...overrides })
+
+  it('accepts only exact current-head required fixed-app checks', () => {
+    expect(direct()).toEqual({ mode: 'commit', objectId: `${repository}:${branch}`, headOid: commitOid, ci: 'passed', ready: true })
+    expect(direct({ branchSnapshot: { name: branch, commit: { sha: oldOid } } })).toMatchObject({ headOid: '', ci: 'unknown', ready: false })
+    expect(direct({ checks: { repository, headOid: commitOid, items: [check({ app: { id: 8 } })], truncated: false, untrusted: true } })).toMatchObject({ ci: 'pending', ready: false })
+  })
+
+  it('fails closed for truncated, wrong-head, and duplicate checks', () => {
+    expect(direct({ checks: { repository, headOid: commitOid, items: [check()], truncated: true, untrusted: true } })).toMatchObject({ ci: 'unknown', ready: false })
+    expect(direct({ checks: { repository, headOid: oldOid, items: [check()], truncated: false, untrusted: true } })).toMatchObject({ ci: 'unknown', ready: false })
+    expect(direct({ checks: { repository, headOid: commitOid, items: [check(), check({ id: 2 })], truncated: false, untrusted: true } })).toMatchObject({ ci: 'unknown', ready: false })
   })
 })

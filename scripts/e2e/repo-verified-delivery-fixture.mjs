@@ -9,6 +9,7 @@ import { readCredential } from '../../plugins/credentials-keychain/lib/providers
 export const name = 'repo-verified-delivery-transport-fixture'
 export const inject = ['assistantActions']
 const initialOid = '1'.repeat(40)
+const directCommitMode = () => process.env.DSH_REPO_DELIVERY_MODE === 'commit'
 
 /** Shared REST-shaped remote state for the event/acceptance transport fixtures. */
 export function repositoryFixtureSnapshot() {
@@ -17,7 +18,7 @@ export function repositoryFixtureSnapshot() {
   const commit = rows.find(row => row.kind === 'commit'), created = rows.find(row => row.kind === 'pr')
   const ready = !!(process.env.DSH_REPO_EVENT_STATE && existsSync(process.env.DSH_REPO_EVENT_STATE) && JSON.parse(readFileSync(process.env.DSH_REPO_EVENT_STATE, 'utf8')).ready)
   const headOid = commit?.commitOid ?? initialOid
-  const pullRequest = created ? { number: 17, state: 'open', merged: false, head: { ref: 'automation/fix', sha: headOid, repo: { full_name: 'fixture/orders' } }, base: { ref: 'main', repo: { full_name: 'fixture/orders' } } } : null
+  const pullRequest = !directCommitMode() && created ? { number: 17, state: 'open', merged: false, head: { ref: 'automation/fix', sha: headOid, repo: { full_name: 'fixture/orders' } }, base: { ref: 'main', repo: { full_name: 'fixture/orders' } } } : null
   const checks = [{ id: 1, name: 'tests', app: { id: 7 }, head_sha: headOid, status: ready ? 'completed' : 'in_progress', conclusion: ready ? 'success' : null }]
   const reviews = ready && pullRequest ? [{ id: 1, user: { id: 42 }, commit_id: headOid, state: 'APPROVED' }] : []
   return { ready, headOid, pullRequest, checks, reviews }
@@ -44,6 +45,7 @@ export function apply(ctx) {
       if (process.env.DSH_REPO_EVENT_STATE) {
         const state = repositoryFixtureSnapshot()
         const observed = input.kind === 'branch' ? { name: input.grant.branch, commit: { sha: state.headOid }, untrusted: true }
+          : input.kind === 'commit-checks' ? { repository: input.grant.repository, headOid: state.headOid, items: state.checks, truncated: false, untrusted: true }
           : input.kind === 'pull-request' ? state.pullRequest
           : { pullRequest: state.pullRequest, headOid: state.headOid, items: input.kind === 'checks' ? state.checks : state.reviews, truncated: false, untrusted: true }
         appendFileSync(`${file}.readbacks`, `${JSON.stringify({ kind: input.kind, ready: state.ready, headOid: state.headOid, at: Date.now() })}\n`, { mode: 0o600 })
@@ -63,6 +65,7 @@ export function apply(ctx) {
 }
 
 export async function prepareRepositoryFixture(home, patchPath, env) {
+  const directCommit = directCommitMode()
   const patch = parseDocument(await readFile(patchPath, 'utf8'))
   const find = (node, id) => {
     if (isMap(node)) {
@@ -95,6 +98,9 @@ export async function prepareRepositoryFixture(home, patchPath, env) {
   await writeFile(patchPath, String(patch), { mode: 0o600 })
   return { repository: 'fixture/orders', baseBranch: 'main', branch: 'automation/fix', paths: ['summarize.mjs'],
     credentialHandle: 'repo-fixture', expiresAt: Math.min(isolation.expiresAt, Date.now() + 420000),
-    maxActions: process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? 100 : 8, maxTotalBytes: 1048576, openPullRequest: true,
-    ...(process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? { acceptance: 'goal-step', outcome: { requiredChecks: [{ name: 'tests', appId: 7 }], reviewerIds: [42], minApprovals: 1, timeoutMs: 10000, freshnessMs: 30000 }, events: { credentialHandle: 'repo-fixture', maxPolls: 180, maxFires: 4, pollIntervalMs: 2000, requestTimeoutMs: 10000 } } : {}) }
+    maxActions: process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? 100 : 8, maxTotalBytes: 1048576, openPullRequest: !directCommit,
+    ...(process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? { acceptance: 'goal-step', outcome: directCommit
+      ? { mode: 'commit', requiredChecks: [{ name: 'tests', appId: 7 }], timeoutMs: 10000, freshnessMs: 30000 }
+      : { requiredChecks: [{ name: 'tests', appId: 7 }], reviewerIds: [42], minApprovals: 1, timeoutMs: 10000, freshnessMs: 30000 },
+    events: { credentialHandle: 'repo-fixture', maxPolls: 180, maxFires: 4, pollIntervalMs: 2000, requestTimeoutMs: 10000 } } : {}) }
 }

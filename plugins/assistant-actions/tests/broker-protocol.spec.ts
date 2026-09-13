@@ -193,7 +193,7 @@ describe('broker action authentication', () => {
     expect(() => verifyBrokerAdminRequest(adminRequest, signedHello, adminKeys.publicKey, { now: signedHello.expiresAt })).toThrowError(/hello expired/)
   })
 
-  it('validates exact file, branch, pull-request, checks and reviews DTOs with a precise base scope', () => {
+  it('validates exact file, branch, pull-request, checks, reviews, and commit-checks DTOs with a precise scope', () => {
     const signedHello = hello()
     const cases: Array<{ payload: BrokerRequestIntent['payload']; observed: unknown }> = [
       { payload: { kind: 'branch' }, observed: { name: 'main', commit: { sha: 'e'.repeat(40) }, untrusted: true } },
@@ -201,6 +201,7 @@ describe('broker action authentication', () => {
       { payload: { kind: 'pull-request', pullRequestNumber: 7 }, observed: { number: 7, state: 'open', merged: false, head: { ref: 'main', sha: 'e'.repeat(40), repo: { full_name: 'owner/repository' } }, base: { ref: 'base', repo: { full_name: 'owner/repository' } }, untrusted: true } },
       { payload: { kind: 'checks', pullRequestNumber: 7 }, observed: { pullRequest: { number: 7, state: 'open', merged: false, head: { ref: 'main', sha: 'e'.repeat(40), repo: { full_name: 'owner/repository' } }, base: { ref: 'base', repo: { full_name: 'owner/repository' } } }, headOid: 'e'.repeat(40), items: [{ id: 1, name: 'CI', status: 'completed', conclusion: 'success', head_sha: 'e'.repeat(40), app: { id: 2 } }], truncated: false, untrusted: true } },
       { payload: { kind: 'reviews', pullRequestNumber: 7 }, observed: { pullRequest: { number: 7, state: 'open', merged: false, head: { ref: 'main', sha: 'e'.repeat(40), repo: { full_name: 'owner/repository' } }, base: { ref: 'base', repo: { full_name: 'owner/repository' } } }, headOid: 'e'.repeat(40), items: [{ id: 1, state: 'APPROVED', commit_id: 'e'.repeat(40), user: { id: 2 }, submitted_at: '2026-09-12T00:00:00Z' }], truncated: false, untrusted: true } },
+      { payload: { kind: 'commit-checks', commitOid: 'e'.repeat(40) }, observed: { repository: 'owner/repository', headOid: 'e'.repeat(40), items: [{ id: 1, name: 'CI', status: 'completed', conclusion: 'success', head_sha: 'e'.repeat(40), app: { id: 2 } }], truncated: false, untrusted: true } },
     ]
     for (const [index, item] of cases.entries()) {
       const request = createBrokerClientRequest({ ...intent(), destination: ['pull-request', 'checks', 'reviews'].includes((item.payload as { kind: string }).kind) ? { ...intent().destination, baseBranch: 'base' } : intent().destination, operation: 'inspect', payload: item.payload }, signedHello, client, 'client-key-1', clientKeys.privateKey, `inspect-${index}`)

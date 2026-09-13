@@ -52,7 +52,7 @@ export interface ActionResult {
 }
 export interface BranchRequest { grantId: string; idempotencyKey: string; baseHeadOid: string }
 export interface PullRequestRequest { grantId: string; idempotencyKey: string; expectedHeadOid: string; title: string; body: string }
-export interface InspectRequest { grantId: string; kind: 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews'; path?: string; pullRequestNumber?: number }
+export interface InspectRequest { grantId: string; kind: 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews' | 'commit-checks'; path?: string; pullRequestNumber?: number; commitOid?: string }
 export interface InspectOperation extends InspectRequest { operation: 'inspect'; idempotencyKey: string }
 export type WorkflowRequest = CommitRequest | BranchRequest | PullRequestRequest | InspectOperation
 export type ActionKind = 'commit' | 'branch' | 'pull-request' | 'inspect'

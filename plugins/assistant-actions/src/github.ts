@@ -568,11 +568,11 @@ export async function createPullRequestOnGitHub(input: { actionId: string; grant
   return reply?.status === 201 && body ? { actionId: input.actionId, status: 'succeeded', pullRequestNumber: body.number as number } : unknown(input.actionId)
 }
 
-export async function inspectGitHub(input: { grant: ActionGrant; kind: 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews'; path?: string; pullRequestNumber?: number; token: string; signal: AbortSignal }, transport?: RestTransport): Promise<{ observed: Record<string, unknown> } | undefined> {
+export async function inspectGitHub(input: { grant: ActionGrant; kind: 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews' | 'commit-checks'; path?: string; pullRequestNumber?: number; commitOid?: string; token: string; signal: AbortSignal }, transport?: RestTransport): Promise<{ observed: Record<string, unknown> } | undefined> {
   const isPr = ['pull-request', 'checks', 'reviews'].includes(input.kind)
   const suffix = input.kind === 'repository' ? '' : input.kind === 'branch' ? `/branches/${encodeURIComponent(input.grant.branch)}`
     : input.kind === 'file' && input.path && input.grant.paths.includes(input.path) ? `/contents/${input.path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(input.grant.branch)}`
-      : isPr && input.grant.repoWorkflow && positiveInteger(input.pullRequestNumber) ? `/pulls/${input.pullRequestNumber}` : undefined
+      : input.kind === 'commit-checks' && oid(input.commitOid) ? `/commits/${input.commitOid}/check-runs?per_page=20` : isPr && input.grant.repoWorkflow && positiveInteger(input.pullRequestNumber) ? `/pulls/${input.pullRequestNumber}` : undefined
   if (suffix === undefined) return undefined
   const reply = await rest(`/${repoPath(input.grant)}${suffix}`, 'GET', input.token, undefined, input.signal, transport)
   const body = record(reply?.body)
@@ -583,6 +583,13 @@ export async function inspectGitHub(input: { grant: ActionGrant; kind: 'reposito
     const commit = record(body.commit)
     return body.name === input.grant.branch && oid(commit?.sha)
       ? { observed: { name: input.grant.branch, commit: { sha: commit.sha }, untrusted: true } } : undefined
+  }
+  if (input.kind === 'commit-checks') {
+    const items = record(body)?.check_runs, total = record(body)?.total_count
+    if (!Array.isArray(items) || items.length > 20 || typeof total !== 'number' || !Number.isSafeInteger(total) || total < items.length || !oid(input.commitOid)) return undefined
+    const projected = items.map(item => checkObservation(item, input.commitOid!))
+    if (projected.some(item => item === undefined)) return undefined
+    return { observed: { repository: input.grant.repository, headOid: input.commitOid, items: projected as Record<string, unknown>[], truncated: reply.hasNextPage || total > items.length || items.length === 20, untrusted: true } }
   }
   const pullRequest = isPr ? pullRequestObservation(body, input.grant, input.pullRequestNumber) : undefined
   if (isPr && !pullRequest) return undefined

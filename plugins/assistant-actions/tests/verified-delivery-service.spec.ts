@@ -23,13 +23,13 @@ import type { ActionGrant } from '../src/types.ts'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 const oid = 'a'.repeat(40)
-async function fixture(acceptance?: 'goal-step', external = false) {
+async function fixture(acceptance?: 'goal-step', external = false, direct = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'avd-'))); const ctx = new Context(); const id = SessionId('owner-session')
   await writeFile(join(root, 'secret'), 'fixture-secret', { mode: 0o600 })
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: root, agentPreset: 'primary' })
   const agent: Agent = { id, options: { provider: 'test', model: 'test' }, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(agent as any).ctx = createScope(ctx, agent).ctx; session.append('turn/start', { turn: 1 }); session.append('approval/policy', { policy: 'ask' })
-  const grant: ActionGrant = { id: 'verified', revision: 1, principalDigest: createHash('sha256').update('owner').digest('hex'), principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', repository: 'owner/repository', branch: 'fix', paths: ['artifacts/release.txt'], credentialHandle: 'github', expiresAt: Date.now() + 60_000, maxActions: 12, maxTotalBytes: 100_000, repoWorkflow: { baseBranch: 'main', allowBranchCreate: true, allowPullRequest: true }, verifiedDelivery: { ownerRouteId: 'route', budgetId: 'budget', ...(acceptance ? { acceptance } : {}) } }
+  const grant: ActionGrant = { id: 'verified', revision: 1, principalDigest: createHash('sha256').update('owner').digest('hex'), principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', repository: 'owner/repository', branch: 'fix', paths: ['artifacts/release.txt'], credentialHandle: 'github', expiresAt: Date.now() + 60_000, maxActions: 12, maxTotalBytes: 100_000, repoWorkflow: { baseBranch: 'main', allowBranchCreate: true, allowPullRequest: !direct }, verifiedDelivery: { ownerRouteId: 'route', budgetId: 'budget', ...(acceptance ? { acceptance } : {}) } }
   const agents = new Map<string, Agent>([[id, agent]]); let route = { principalRecordId: 'record', principalVersion: 1, bindingVersion: 1, generation: 1 }; let receiptVersion = 1
   const verifiedSnapshot = { protocol: 'assistant-goals/verified-artifacts/v1', acceptance: { validUntil: Date.now() + 30_000 }, files: [{ path: 'artifacts/release.txt', content: 'verified source', sha256: 'b'.repeat(64), jobId: 'job' }] }
   const snapshot = () => structuredClone(verifiedSnapshot)
@@ -49,7 +49,9 @@ async function fixture(acceptance?: 'goal-step', external = false) {
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' }, sessionId: 'owner-session', bindingId: 'binding', bindingVersion: 1, bindingGeneration: 1 }), resolveOwnerRoute: () => ({ binding: { id: 'binding', sessionId: 'owner-session' }, snapshot: { bindingVersion: route.bindingVersion, generation: route.generation } }), validateOwnerRoute: () => ({ ...route, receiptVersion }), enqueueOwnerNotification: notifications } as never)
   ctx.provide('assistantGoals' as never, goals as never);
   // Keep freshness aligned with the readback timeout so parallel CI scheduling cannot invalidate a fresh fixture read mid-sample.
-  const repositoryAuthority = { kind: 'repository-readback' as const, id: 'repository', grantId: 'verified', grantRevision: 1, repository: 'owner/repository', branch: 'fix', baseBranch: 'main', requiredChecks: [{ name: 'CI', appId: 7 }], reviewerIds: [42], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 10_000 }
+  const repositoryAuthority = direct
+    ? { kind: 'repository-commit-readback' as const, id: 'repository', grantId: 'verified', grantRevision: 1, repository: 'owner/repository', branch: 'fix', baseBranch: 'main', requiredChecks: [{ name: 'CI', appId: 7 }], timeoutMs: 10_000, freshnessMs: 10_000 }
+    : { kind: 'repository-readback' as const, id: 'repository', grantId: 'verified', grantRevision: 1, repository: 'owner/repository', branch: 'fix', baseBranch: 'main', requiredChecks: [{ name: 'CI', appId: 7 }], reviewerIds: [42], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 10_000 }
   const compiledAuthority = createVerifierAuthorities({ authorities: [repositoryAuthority] })[0]!
   const repositoryCriterion = { id: 'repository', kind: 'target-readback' as const, authority: { id: compiledAuthority.id, digest: compiledAuthority.digest }, objectId: 'owner/repository:fix', expected: [{ pointer: '/ready', value: true }] }
   const verifier = new AssistantVerifierService(ctx, { databasePath: join(root, 'verifier.sqlite'), authorities: [repositoryAuthority], tickIntervalMs: 0, requireAcceptance: true, profiles: [{ id: 'repository-profile', version: 1, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'record', principalVersion: 1 }, taskKind: 'goal-outcome', objective: 'Repository delivery', validityMs: 30_000, bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 }, criteria: [repositoryCriterion] }] })
@@ -57,6 +59,7 @@ async function fixture(acceptance?: 'goal-step', external = false) {
   const commit = vi.fn(async input => ({ actionId: input.actionId, status: 'succeeded' as const, commitOid: 'c'.repeat(40) })); const pullRequest = vi.fn(async input => ({ actionId: input.actionId, status: 'succeeded' as const, pullRequestNumber: 7 }))
   const remotePullRequest = { number: 7, state: 'open', merged: false, head: { ref: 'fix', sha: 'c'.repeat(40), repo: { full_name: 'owner/repository' } }, base: { ref: 'main', repo: { full_name: 'owner/repository' } } }
   const inspect = vi.fn(async ({ kind }: any) => ({ observed: kind === 'branch' ? { name: 'fix', commit: { sha: 'c'.repeat(40) }, untrusted: true }
+    : kind === 'commit-checks' ? { repository: 'owner/repository', headOid: 'c'.repeat(40), items: [{ id: 1, name: 'CI', app: { id: 7 }, head_sha: 'c'.repeat(40), status: 'completed', conclusion: 'success' }], truncated: false, untrusted: true }
     : kind === 'pull-request' ? { ...remotePullRequest, untrusted: true }
       : { pullRequest: remotePullRequest, headOid: 'c'.repeat(40), items: kind === 'checks' ? [{ id: 1, name: 'CI', app: { id: 7 }, head_sha: 'c'.repeat(40), status: 'completed', conclusion: 'success' }]
         : [{ id: 1, user: { id: 42 }, commit_id: 'c'.repeat(40), state: 'APPROVED', submitted_at: '2025-01-01T00:00:00Z' }], truncated: false, untrusted: true } }))
@@ -171,9 +174,9 @@ describe('verified delivery Actions service', () => {
   const stepEvidence = () => ({ storedGoal: { definition: { digest: 'd'.repeat(64), version: 1 }, nativeAtLastObservation: { phase: 'paused', sessionId: 'owner-session', goalId: 'native-goal' } }, outcome: { status: 'not-achieved' },
     executionRuns: [{ intent: { runId: 'run' }, acceptance: { contractId: 'step' }, execution: { status: 'succeeded', quiescent: true } }], acceptedTasks: [{ contractId: 'step', state: 'done' }] })
 
-  const completeStepDelivery = async (f: any, key = 'repository', outcome: 'succeeded' | 'unknown' = 'succeeded') => {
+  const completeStepDelivery = async (f: any, key = 'repository', outcome: 'succeeded' | 'unknown' = 'succeeded', withPullRequest = true) => {
     f.goals.inspectOwnerGoalExecution.mockReturnValue(stepEvidence())
-    await f.execute('action_github_deliver', { grantId: 'verified', idempotencyKey: key, expectedHeadOid: oid, headline: 'Deliver', paths: ['artifacts/release.txt'], pullRequest: { title: 'PR', body: 'body' } })
+    await f.execute('action_github_deliver', { grantId: 'verified', idempotencyKey: key, expectedHeadOid: oid, headline: 'Deliver', paths: ['artifacts/release.txt'], ...(withPullRequest ? { pullRequest: { title: 'PR', body: 'body' } } : {}) })
     expect((await f.activate('assistant-verifier/receipt')).outcome).toBe(outcome)
   }
 
@@ -181,6 +184,28 @@ describe('verified delivery Actions service', () => {
     const f = await fixture('goal-step'); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
     await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).resolves.toEqual({ objectId: 'owner/repository:fix', headOid: 'c'.repeat(40), ci: 'passed', review: 'approved', pullRequest: 'open', ready: true })
     expect(f.inspect).toHaveBeenCalledTimes(4); expect(f.inspect.mock.calls.map((call: any[]) => call[0].kind)).toEqual(['checks', 'reviews', 'pull-request', 'branch'])
+  })
+
+  it.runIf(process.platform === 'linux')('reads a completed accepted direct commit through exactly branch and fixed-OID checks', async () => {
+    const f = await fixture('goal-step', false, true); await completeStepDelivery(f, 'direct', 'succeeded', false); const { authority, contract } = bindRepository(f)
+    await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).resolves.toEqual({ mode: 'commit', objectId: 'owner/repository:fix', headOid: 'c'.repeat(40), ci: 'passed', ready: true })
+    expect(f.pullRequest).not.toHaveBeenCalled()
+    expect(f.inspect.mock.calls.map((call: any[]) => call[0].kind)).toEqual(['commit-checks', 'branch'])
+  })
+
+  it.runIf(process.platform === 'linux')('fails closed for a moved head, truncated direct checks, and revoked direct ownership before acceptance', async () => {
+    const f = await fixture('goal-step', false, true); await completeStepDelivery(f, 'direct-fenced', 'succeeded', false); const { authority, contract } = bindRepository(f)
+    const input = { contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest }
+    let moved = false
+    f.inspect.mockImplementation(async (request: any) => {
+      if (request.kind === 'commit-checks') { moved = true; return { observed: { repository: 'owner/repository', headOid: 'c'.repeat(40), items: [{ id: 1, name: 'CI', app: { id: 7 }, head_sha: 'c'.repeat(40), status: 'completed', conclusion: 'success' }], truncated: false, untrusted: true } } }
+      return { observed: { name: 'fix', commit: { sha: moved ? oid : 'c'.repeat(40) }, untrusted: true } }
+    })
+    await expect(f.read(input)).resolves.toEqual({ mode: 'commit', objectId: 'owner/repository:fix', headOid: '', ci: 'unknown', ready: false })
+    f.inspect.mockImplementation(async (request: any) => request.kind === 'commit-checks' ? { observed: { repository: 'owner/repository', headOid: 'c'.repeat(40), items: [], truncated: true, untrusted: true } } : { observed: { name: 'fix', commit: { sha: 'c'.repeat(40) }, untrusted: true } })
+    await expect(f.read(input)).resolves.toEqual({ mode: 'commit', objectId: 'owner/repository:fix', headOid: 'c'.repeat(40), ci: 'unknown', ready: false })
+    f.changeReceipt()
+    await expect(f.read(input)).rejects.toThrow('authority changed')
   })
 
   it.runIf(process.platform === 'linux')('a real Verifier tick reaches Actions through the Cordis service and issues a fresh achieved receipt', async () => {
@@ -266,6 +291,36 @@ describe('verified delivery Actions service', () => {
       goal: { id: 'goal', sessionId: 'owner-session', nativeGoalId: 'native-goal', definitionVersion: 1, definitionDigest: 'd'.repeat(64) } }, new AbortController().signal)
     expect(observed).toMatchObject({ protocol: 'assistant-actions/repository-event/v1', truthy: true, fingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u) })
     expect(f.inspect).toHaveBeenCalledTimes(4)
+  })
+
+  it.runIf(process.platform === 'linux')('observes a real signed direct external receipt using only branch and commit checks', async () => {
+    const f = await fixture('goal-step', true, true); await completeStepDelivery(f, 'external-direct', 'succeeded', false)
+    const grant = f.broker!.config.externalGrants![0]!
+    const observed = await f.service.readRepositoryEventObservation({ version: 1, deliveryMode: 'commit', triggerId: 'trigger', grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.grantDigest,
+      repository: grant.destination.repository, branch: grant.destination.branch, baseBranch: grant.destination.baseBranch!, owner: { workspace: f.root, preset: 'primary', principalId: 'owner', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: grant.expiresAt, budgetId: 'events' },
+      goal: { id: 'goal', sessionId: 'owner-session', nativeGoalId: 'native-goal', definitionVersion: 1, definitionDigest: 'd'.repeat(64) } }, new AbortController().signal)
+    expect(observed).toMatchObject({ protocol: 'assistant-actions/repository-event/v1', truthy: true, fingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u) })
+    expect(f.inspect.mock.calls.map((call: any[]) => call[0].kind)).toEqual(['branch', 'commit-checks'])
+  })
+
+  it.runIf(process.platform === 'linux')('rejects an altered signed direct commit receipt before external readback', async () => {
+    const f = await fixture('goal-step', true, true); await completeStepDelivery(f, 'external-direct-receipt', 'succeeded', false); const { authority, contract } = bindRepository(f)
+    const db = new DatabaseSync(join(f.root, 'actions', 'verified-delivery.sqlite'))
+    try {
+      const row = db.prepare('SELECT id,result FROM deliveries').get() as { id: string; result: string }
+      const result = JSON.parse(row.result); result.brokerReceipts.commit.response.signature = Buffer.alloc(64).toString('base64url')
+      db.prepare('UPDATE deliveries SET result=? WHERE id=?').run(JSON.stringify(result), row.id)
+    } finally { db.close() }
+    await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).rejects.toThrow()
+    expect(f.inspect).not.toHaveBeenCalled()
+    const dbMissing = new DatabaseSync(join(f.root, 'actions', 'verified-delivery.sqlite'))
+    try {
+      const row = dbMissing.prepare('SELECT id,result FROM deliveries').get() as { id: string; result: string }
+      const result = JSON.parse(row.result); result.brokerReceipts = {}
+      dbMissing.prepare('UPDATE deliveries SET result=? WHERE id=?').run(JSON.stringify(result), row.id)
+    } finally { dbMissing.close() }
+    await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).rejects.toThrow()
+    expect(f.inspect).not.toHaveBeenCalled()
   })
 
   it.runIf(process.platform === 'linux')('rejects altered signed delivery history before external readback', async () => {

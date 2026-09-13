@@ -44,7 +44,10 @@ export interface GitHubRepositoryTriggerConfig extends TriggerBase {
   kind: 'github-repository'
   repository: string
   branch: string
+  /** Delivery/base scope metadata for every repository observation mode. */
   baseBranch: string
+  /** Omitted retains the legacy pull-request observation contract. */
+  deliveryMode?: 'commit' | 'pull-request'
   /** Embedded mode only. Exactly one credentialHandle or externalGrant is required. */
   credentialHandle?: string
   /** External-unix-v1 capability projection; it never contains a credential. */
@@ -97,7 +100,7 @@ export type NormalizedTrigger =
   | (Required<Omit<FileTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
   | (Required<Omit<HttpJsonTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
   | (Required<Omit<WebhookTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
-  | (Required<Omit<GitHubRepositoryTriggerConfig, 'ttlMs' | 'credentialHandle' | 'externalGrant'>> & { ttlMs?: number; credentialHandle?: string; externalGrant?: Readonly<{ id: string; revision: number; digest: string }> })
+  | (Required<Omit<GitHubRepositoryTriggerConfig, 'ttlMs' | 'credentialHandle' | 'externalGrant' | 'deliveryMode'>> & { ttlMs?: number; credentialHandle?: string; externalGrant?: Readonly<{ id: string; revision: number; digest: string }>; deliveryMode?: 'commit' | 'pull-request' })
   | (Required<Omit<LarkCalendarTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
 
 export interface NormalizedConfig {
@@ -133,7 +136,7 @@ const base = {
 
 const triggerSchema = Schema.union([
   Schema.object({ ...base, kind: Schema.const('github-repository').required(), repository: Schema.string().required(),
-    branch: Schema.string().required(), baseBranch: Schema.string().required(), credentialHandle: Schema.string().default(''), externalGrant: Schema.any(),
+    branch: Schema.string().required(), baseBranch: Schema.string().required(), deliveryMode: Schema.union(['commit', 'pull-request'] as const), credentialHandle: Schema.string().default(''), externalGrant: Schema.any(),
     fireWhen: Schema.union(['changed', 'truthy'] as const).default('changed'), debounceMs: Schema.number().step(1).min(0).max(86_400_000).default(0), observer: observerSchema().required() }),
   Schema.object({ ...base, kind: Schema.const('lark-calendar').required(), calendarId: Schema.string().required(),
     startTime: Schema.number().step(1).min(0).required(), endTime: Schema.number().step(1).min(1).required(),
@@ -208,6 +211,15 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
   if (typeof input === 'object' && input !== null && 'webhookListen' in input) {
     throw new Error('event-triggers: built-in webhook listener is not supported; use an authenticated loopback adapter')
   }
+  // Schemas intentionally discard unrelated keys for compatibility.  In direct
+  // commit mode these PR selectors would misleadingly imply that they narrow
+  // the observation, so reject them before schema normalization can erase them.
+  for (const raw of input.triggers ?? []) {
+    if (raw !== null && typeof raw === 'object' && (raw as { kind?: unknown }).kind === 'github-repository' && (raw as { deliveryMode?: unknown }).deliveryMode === 'commit'
+      && ['pullRequestNumber', 'reviewerIds', 'minApprovals'].some(key => Object.hasOwn(raw, key))) {
+      throw new Error('event-triggers: commit GitHub repository observation does not accept pull-request fields')
+    }
+  }
   let parsed: Required<Config>
   try {
     parsed = ConfigSchema(input) as typeof parsed
@@ -242,7 +254,8 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
     }
     if (trigger.kind === 'github-repository') {
       if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(trigger.repository)
-        || trigger.baseBranch === trigger.branch || [trigger.branch, trigger.baseBranch].some(value => value.length === 0 || value.length > 256 || value.trim() !== value || /[\p{Cc}]/u.test(value))) throw new Error('event-triggers: invalid GitHub repository scope')
+        || trigger.branch.length === 0 || trigger.branch.length > 256 || trigger.branch.trim() !== trigger.branch || /[\p{Cc}]/u.test(trigger.branch)) throw new Error('event-triggers: invalid GitHub repository scope')
+      if (trigger.baseBranch === trigger.branch || trigger.baseBranch.length === 0 || trigger.baseBranch.length > 256 || trigger.baseBranch.trim() !== trigger.baseBranch || /[\p{Cc}]/u.test(trigger.baseBranch)) throw new Error('event-triggers: invalid GitHub repository scope')
       const hasCredential = typeof trigger.credentialHandle === 'string' && trigger.credentialHandle.length > 0
       const rawGrant = trigger.externalGrant
       if (hasCredential === (rawGrant !== undefined)) throw new Error('event-triggers: GitHub repository requires exactly one credentialHandle or externalGrant')
