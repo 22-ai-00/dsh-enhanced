@@ -1,0 +1,74 @@
+{
+  "schema": "dsh/rsi-boundary-evidence/v1",
+  "date": "2026-09-13",
+  "status": "passed-component-validation",
+  "sourceCommit": "0199eafe03748258d73af4a3f10fdcae59a7d12f",
+  "change": {
+    "automaticRepairTools": [
+      "read",
+      "write",
+      "edit",
+      "read_image"
+    ],
+    "workspaceOnly": true,
+    "rejectsTraversalAndWorkspaceSymlinks": true,
+    "rechecksAuthorityAfterPathLookup": true
+  },
+  "checks": [
+    {
+      "command": "DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm --filter @dsh-enhanced/assistant-skills exec vitest run",
+      "exitCode": 0,
+      "passed": 320,
+      "conditionalSkipped": 9,
+      "nativeFileToolsExecuted": true,
+      "prospectiveCliAndDockerExecuted": true,
+      "qualificationPreservesSourceArtifactSentinelAndActiveVersion": true
+    },
+    {
+      "command": "DSH_ISOLATION_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm --filter @dsh-enhanced/assistant-skills exec vitest run tests/holdout-cli.spec.ts -t \"separate authority and candidate containers\"",
+      "exitCode": 0,
+      "passed": 1,
+      "filteredOut": 18,
+      "separateContainers": true,
+      "candidateCannotRead": [
+        "authority dataset",
+        "authority private key",
+        "Docker socket"
+      ]
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-skills build",
+      "exitCode": 0
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-skills typecheck",
+      "exitCode": 0
+    }
+  ],
+  "priorRealModelEvidence": "basic-rsi-modern-host-2026-09-13.json",
+  "logs": [
+    {
+      "path": "/tmp/dsh-rsi-boundary-skills-tests.log",
+      "sha256": "1cc809701a84262ec7e9983aa675609a93e98a8df61ec163cd1c814fac4ff6bb"
+    },
+    {
+      "path": "/tmp/dsh-rsi-hidden-boundary-tests.log",
+      "sha256": "a19b9c834cec97b4a47d52988f90b221dc49ddb7ae5c1919e9df6fed69ed0054"
+    },
+    {
+      "path": "/tmp/dsh-rsi-boundary-build.log",
+      "sha256": "460801c7257863d16bb566f9f046cca2a2ad547597d03f32afdea92e8470c564"
+    },
+    {
+      "path": "/tmp/dsh-rsi-boundary-main-types.log",
+      "sha256": "905948ba721d0a0d56a9042d9b115dc7c9db62956b0873930cedee58b54abcd3"
+    }
+  ],
+  "limits": [
+    "The Docker boundary scenarios use synthetic programs and acceptance fixtures, not new real-model calls.",
+    "The existing two-round real-model result remains historical evidence; this change does not rerun that sequence.",
+    "Pathname checks do not isolate a malicious same-UID Host or eliminate check-to-open replacement races.",
+    "The prospective certificate proves generation after candidate freeze, not absence from model training history.",
+    "Full repository validation of the versioned release candidate is required before publication; these component checks do not close the entire 18-work-package roadmap."
+  ]
+}
