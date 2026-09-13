@@ -1,0 +1,372 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-13",
+  "status": "published-and-installed",
+  "version": "0.1.32",
+  "completeWorkPackage": false,
+  "sourceCommit": "180cdff21e4a59cb6e2db007f6dc6cb705259417",
+  "tag": "v0.1.32",
+  "releaseRecordCommit": "8c5187ae14ed570ef7a631a585faeea867c4857e",
+  "ci": {
+    "url": "https://github.com/22-ai-00/dsh-enhanced/actions/runs/34737983206",
+    "linux": "success",
+    "macos": "success",
+    "windowsAcpSmoke": "success"
+  },
+  "release": {
+    "url": "https://github.com/22-ai-00/dsh-enhanced/actions/runs/34738011637",
+    "publish": "success",
+    "record": "success"
+  },
+  "registry": {
+    "checkedAt": "2026-09-13T04:51:40.801Z",
+    "version": "0.1.32",
+    "expectedPackages": 33,
+    "passed": 33,
+    "results": [
+      {
+        "name": "@dsh-enhanced/assistant-growth-contract",
+        "version": "0.1.32",
+        "integrity": "sha512-sTgGqkpbHRIPzTdyOvET5OU6uCQkBgG+5PCAcy7YJLUAZT01ewgsGAMXsxd3bYFpIXjdp+Zj7o7Xr/cSJH5GoA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/llm-route-capabilities",
+        "version": "0.1.32",
+        "integrity": "sha512-Nvwxtdr3rCJLHczy/dq8iqNtm+BnyFeZqizhoJXJVUGj/O83jtxGv+7pDRj7m65seUGb2CxuM/VkgRlx8ssxbA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/task-acceptance-contract",
+        "version": "0.1.32",
+        "integrity": "sha512-jW4WASbQMT2uttw114NW/vjwWoByUuiRTpY8+0CDAONX6LwlPdD1czHepN5LFod+R4XMxq5KVsuEr+yE+hdOSA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/acp",
+        "version": "0.1.32",
+        "integrity": "sha512-elxuQJn0SLX17dH9PnnKopGmO0/62JnGKNCoYpqFy134uNDCuHN2BKSyQcyrBN6L2JHapmu0QVLJy3UoEiKVDA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-actions",
+        "version": "0.1.32",
+        "integrity": "sha512-VoQvw4+j0JRMrV+avQ1BkpJybzVYzFOd2+geXLMTN0ABkaoosi758NNZnDzWhJwqnrb2YHVsUhKn4P69k0BVEQ==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-automations",
+        "version": "0.1.32",
+        "integrity": "sha512-5yb6Pay5Wwgp/7fEIWcvyhsby6RI1LbpXirFSjjiqsYnzi5Vvolk/xTXSKsMncvDk8CTIWYeTWZK36ywLhr7JQ==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-deepseek-budget",
+        "version": "0.1.32",
+        "integrity": "sha512-sZbah38fosB5QlpsRKaDlOJiqd74jC5q/FPKOjkbPh2veo4bUtbRIQXv4+H+DInEUqzMVXW1/KK2C/gyEsX7Aw==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-delivery",
+        "version": "0.1.32",
+        "integrity": "sha512-n08G/kMaygJBEdWPwcAw+/mxghixqiFyo57pA9NCVu3KKd6CAiuTbuWZW9llRYwm3ki86o8A8Rd4c6QiBEbO8g==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-evaluation",
+        "version": "0.1.32",
+        "integrity": "sha512-ahSYJE0kqMNdTgclwUcuNrW3+MaqLtcvduMNoosmAFNT6M5fGH7Dr865Tgz45OV2VVFd0BLdONuBiY+E3VXJ3w==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-evolution",
+        "version": "0.1.32",
+        "integrity": "sha512-0Kmm8bADyC0G8iswEMKsLv6+YmmDANApAI8CorWm5D0v2JUN2TOxtblGiHKG5wTWwvfgTOcRyAPChsL4BoJ4mA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-goals",
+        "version": "0.1.32",
+        "integrity": "sha512-CAKk4HpE6758rigmZYUE7gqTnyymTi/6hqKtjmHu7yu+momx+v5h4xh10MXzATtvIGrDu4upuzvOlPGZi8tafA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-growth-experiments",
+        "version": "0.1.32",
+        "integrity": "sha512-aMO6XYkkzDcGGeZx8xqNz/8kNCKo+XAo8OuNkONnDm3/MwFuvVP60YAsCg8hWmaVhzqUgPRz7j7TR174mL+aqg==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-health",
+        "version": "0.1.32",
+        "integrity": "sha512-7oxY39FLGj8vRJd+8w3corOLRB1fKgms/nJlXVQ3cXIfE62ylF/ObIz/yLu7XYmxVqpDRi7+WK4g+rhzOqv2xg==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-heartbeat",
+        "version": "0.1.32",
+        "integrity": "sha512-5P0VpZNBpuXlUVovWF6W92/45eTkoAq98VyUaVgoPnn3WYHk8yWD0GoJzOp9hqnhzuhHcYw4GDFNKZFgKa6dvA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-isolation",
+        "version": "0.1.32",
+        "integrity": "sha512-JgjHeqgr2ezSrLUUGPnBw2blO8Yf1uKbi090z0BTbcHXij1hyTUMADw1SjZLnoNpDvXoUnVPvgzl3cPJhVqF8w==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-policy",
+        "version": "0.1.32",
+        "integrity": "sha512-JVZ4kEeamoicZkun9+pMB2SR/V9YHRdJV29NgiY59vq4vs6cjEYoVhlPQtYLmxhLBneVEe4jXdQGo7jDkbLc5w==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-proactive",
+        "version": "0.1.32",
+        "integrity": "sha512-ds0boy/r2cDFhac54BCd6VK55xRiyQ77tjrN7/KYbSjWD3URWdoLRIi7bGaDFPWR5aRfdjh2BU2FUjdI5B7JiA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-recovery",
+        "version": "0.1.32",
+        "integrity": "sha512-VV7cCVGex6ee0ATbwYRFLRqruxEv5KylIoaw5xRMMawZuIcBEWntebhdAgunjK3Sm8kqTOFXJuSx4WkALK0jZw==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-skills",
+        "version": "0.1.32",
+        "integrity": "sha512-AljRH5Aw2NuSmI63Y1dIZFMK8rPTqU/WZJX9qrvt9LbqRfyJkGYImFRYuwgImBX8jgr44a+DbQb886w0duKZ5g==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-verifier",
+        "version": "0.1.32",
+        "integrity": "sha512-h7XCOskD4n0jVbDesJGmRBC/0UEhwqRZudAcV+HzjishYkDWPJqdfxcUatePKxX8leX6Z4pDfr7tYnqAtoZWlg==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/assistant-web-owner",
+        "version": "0.1.32",
+        "integrity": "sha512-8czAOxt1uNTlXTIIadhFhSr99jKiYarXv1N3oP/pt7ijsWInvg+wj5FD7pLMVtoA4pxj56yFLY6+o7Org02nYQ==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/coding-subscription-provider",
+        "version": "0.1.32",
+        "integrity": "sha512-odkb6HArIzCxJuX2Cy6AUKac3SBwbn+Lsc2noVsuHWKAIF5ckPKEiw8Gh0CzuHgeIIA/gVl1t3O4n5hwT6hGTQ==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/credentials-keychain",
+        "version": "0.1.32",
+        "integrity": "sha512-VdDK7e/fpYfngbHtLCXz+OO1NAIwFVmOHM0xH3fG+Ighs1M4rP+F5GwpVWpUndrl+bNeQ6ib/VhaE31RIt53Pg==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/event-triggers",
+        "version": "0.1.32",
+        "integrity": "sha512-5fHzEZ9iiDOgxfMoXtkvuwfsiN0dHI8czYYjuJbHZ2QZBp5qZF/MzpjZIaSxZ+5oXzQd7cr7OfMs7c+tLH142w==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/hello",
+        "version": "0.1.32",
+        "integrity": "sha512-f9rQMbskH1yVjqVFPTtF3uds3NO6OJ4Tq3zUK/TGBd5wA/RAvmXPqhhxm0vv4N5kDN4w73iRm1nUh82R00kVCw==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/lark-channel",
+        "version": "0.1.32",
+        "integrity": "sha512-dEUuSuTFLHNnu4gRBmbXgTPMtbhk1RKofJxjSkkvjQCrRpJwhxu0et+BnXjQMw9ewl9JEcYyPkJ8q0kG/DJ/BA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/memory-wiki-bridge",
+        "version": "0.1.32",
+        "integrity": "sha512-vqS2/KZV6QiDuZQP4SPQmZLnMFAZ+LWGHFugLLieJLOAMn7wqEYW7I5i34tDDcXoyWqCphDHWt5tuW0WCTl6XA==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/personal-assistant",
+        "version": "0.1.32",
+        "integrity": "sha512-Z68bX4XxgNfbQw8vGp5DV6EvgBTDCeIYBk32Bd8BnijDTdvC1z1CfaWSEQMLf9bmhgQYln2QWM9Zrn/FwPnZSw==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/personal-memory",
+        "version": "0.1.32",
+        "integrity": "sha512-EciUd5Qo6DE+N7knPiOSLNoLNjuPpRyHyZJYa0niHyuvlJSqw94RCOlbVA2TvFIgkuvNIGtGqo627Ecl5Grwmg==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/personal-wiki",
+        "version": "0.1.32",
+        "integrity": "sha512-SET6kErh04kNCcyJCOUJgNbIsyusbyQAffEwiS51+FRIrXyuTv2lrduRK1QtYno/NvbAnDRvWU6zlnLZm1yOFw==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/plugin-control-plane",
+        "version": "0.1.32",
+        "integrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/preference-learning",
+        "version": "0.1.32",
+        "integrity": "sha512-SOl8yxQ9A1ztZLKCFuaXpqEZc2HwCBh3VgJeBRrOpoqafeFXyUlOFUzfTQPP/6D6IiiHmlmJRMdvt+lRUkuI2g==",
+        "unresolved": [],
+        "ok": true
+      },
+      {
+        "name": "@dsh-enhanced/traex-acp-provider",
+        "version": "0.1.32",
+        "integrity": "sha512-zN+tT7xzZcUePl5Ll/3Bg2hQLj5gvOvACZJ9AWTHbG+d3eZlx2KPTdfU+fmPXdhM38t5potaDurIf3nS1HVtHQ==",
+        "unresolved": [],
+        "ok": true
+      }
+    ]
+  },
+  "installation": {
+    "entry": "https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v0.1.32/scripts/install/install-npm.sh",
+    "scenario": "autonomy",
+    "exitCode": 0,
+    "log": "/tmp/dsh-0.1.32-npm-install.gcCULt/install-with-private-state.log",
+    "logSha256": "66d7e05134f428c6e5e78d707ed601456d2603cc55e9825f9cd43327bb095fb1",
+    "report": {
+      "root": "/tmp/dsh-0.1.32-npm-install.gcCULt",
+      "profile": "/tmp/dsh-0.1.32-npm-install.gcCULt/home/profiles/web",
+      "packages": [
+        {
+          "name": "@dsh-enhanced/assistant-actions",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/assistant-deepseek-budget",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/assistant-delivery",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/assistant-evaluation",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/assistant-goals",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/assistant-isolation",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/assistant-proactive",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/assistant-skills",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/assistant-verifier",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/assistant-web-owner",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/credentials-keychain",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/event-triggers",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/personal-assistant",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        },
+        {
+          "name": "@dsh-enhanced/plugin-control-plane",
+          "range": "0.1.32",
+          "version": "0.1.32"
+        }
+      ],
+      "uniform": true,
+      "privateStateOverrides": [
+        "assistant-skills",
+        "assistant-proactive"
+      ],
+      "modelInvocations": false,
+      "residentServiceInstalled": false
+    },
+    "profileComposition": "passed",
+    "temporaryHostActivation": "passed",
+    "finiteIsolationProbe": "passed",
+    "globalCliBefore": "0.1.5-rc.1",
+    "globalCliAfter": "0.1.5-rc.1",
+    "globalCliVersionCmpExitCode": 0
+  },
+  "precedingObservations": [
+    "The first isolated install fixture used busy port 3080; it was rerun with a private available port without stopping the daily service.",
+    "Registry metadata initially exposed 27, then 30, then 31 packages; final explicit version metadata verification passed all 33. The installer refused an incomplete cohort before modifying the profile.",
+    "The initially empty isolated profile inherited an existing OS-home Skills default path and setup refused automatic redirection. Only the test profile was configured with private Skills and Proactive database paths before retrying successfully. No old database was migrated or removed."
+  ],
+  "realModelEvidence": [
+    "basic-rsi-modern-host-2026-09-13.json",
+    "basic-rsi-topology-modern-host-2026-09-13.json"
+  ],
+  "independentReview": "PASS for publication and the explicit-private-state installation conditions",
+  "limitations": [
+    "Installation smoke required explicit private Skills/Proactive paths because old default state already exists on this machine; it does not prove automatic old-state migration.",
+    "Installation smoke made no model requests and installed no resident service. Real model evidence is recorded separately against the release runtime source.",
+    "Finite isolation diagnostics do not prove external GitHub actions, live resource admission, model budgets, or complete autonomous operation.",
+    "All 18 work packages remain in scope; this is the basic bounded RSI milestone."
+  ]
+}
