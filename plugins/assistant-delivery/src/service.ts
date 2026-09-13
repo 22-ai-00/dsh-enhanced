@@ -164,6 +164,7 @@ const goalOutcomeFeedbackFooter = [
   '目标结果反馈：直接回复本消息并发送 `/feedback achieved`、`/feedback partial` 或 `/feedback not-achieved`。',
   '`helpful` 等只记录偏好，不会被当成目标成败。',
 ].join('\n')
+const goalWakeCompletionNotice = '目标已通过独立验收并完成。'
 
 interface GoalOutcomeFeedbackAuthority {
   issueOwnerGoalOutcomeFeedbackTarget(locator: Readonly<OwnerGoalOutcomeFeedbackLocator>): unknown
@@ -1657,7 +1658,7 @@ export class AssistantDeliveryService extends Service {
     }))
     if (result.outcome === 'succeeded') {
       current()
-      if (input.includeOutput === true && result.quiescent && result.output?.trim()) {
+      if (input.includeOutput === true && result.quiescent) {
         const text = result.output
         this.goalWakeResults.set(input, () => {
           // Re-read the exact owner, binding generation and Session at enqueue,
@@ -1665,12 +1666,16 @@ export class AssistantDeliveryService extends Service {
           const target = current()
           if (target.conversation.channel === 'web') {
             const owner = this.nativeWebOwner
-            // This finalizes the existing, flushed native Session reply. It does
-            // not create a second send or claim that the reply was read.
             if (!this.nativeWebBound || owner === undefined) return denied()
             try { owner.assertSession(target.sessionId) } catch { return denied() }
+            if (typeof text !== 'string' || text.trim().length === 0) {
+              return this.publishScheduledGoalCompletionNotice(input, current, denied)
+            }
+            // This finalizes the existing, flushed native Session reply. It does
+            // not create a second send or claim that the reply was read.
             return Object.freeze({ kind: 'native-session' as const, sessionId: target.sessionId })
           }
+          if (typeof text !== 'string' || text.trim().length === 0) return denied()
           return this.publishScheduledGoalResult(input, text, current, denied)
         })
       }
@@ -1692,6 +1697,60 @@ export class AssistantDeliveryService extends Service {
     current: () => ConversationBinding,
     denied: () => never,
   ): OutboxRecord {
+    const { locator, proof, binding: finalBinding } = this.resolveScheduledGoalOutcome(input, current, denied)
+    const decision = this.policy.authorize({
+      subject: { kind: 'background', id: 'assistant-goals-wake/v1',
+        workspace: finalBinding.workspace, principal: locator.principalId },
+      action: 'send', resource: { kind: 'message', id: finalBinding.id }, context: { initiator: 'background' },
+    }, { idempotencyKey: `message-send:goal-outcome:${proof.proofDigest}:${finalBinding.id}` })
+    if (decision.effect !== 'allow') throw policyDenied(decision)
+    const rendered = `${text}${goalOutcomeFeedbackFooter}`
+    if (Buffer.byteLength(rendered, 'utf8') > this.config.maxTextBytes) {
+      throw new AssistantDeliveryError('runtime-conflict', 'scheduled goal result exceeds the delivery text limit')
+    }
+    const situation = `goal:${locator.goalId}:definition:${proof.goal.definitionVersion}`
+    return this.deliveryStore.enqueueGoalOutcomeTarget({
+      locator, proof,
+      intent: {
+        idempotencyKey: `goal-outcome:${proof.proofDigest}:${finalBinding.id}`,
+        bindingId: finalBinding.id,
+        target: { conversation: finalBinding.conversation, principal: finalBinding.principal },
+        text: rendered, format: 'markdown',
+        metadata: Object.freeze({
+          'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome',
+          'dsh.learning.goalId': locator.goalId, 'dsh.learning.assessmentId': locator.assessmentId,
+          'dsh.learning.runId': proof.runId, 'dsh.learning.situation': situation,
+          'dsh.learning.occurredAt': String(proof.receipt.completedAt),
+          'dsh.learning.objectiveStatus': proof.receipt.objectiveStatus,
+          'dsh.learning.proofDigest': proof.proofDigest,
+        }),
+      },
+    })
+  }
+
+  /** A textless terminal Web wake may notify its original owner, never impersonate a reply. */
+  private publishScheduledGoalCompletionNotice(
+    input: DeliveryGoalWakeInput,
+    current: () => ConversationBinding,
+    denied: () => never,
+  ): OutboxRecord {
+    const { locator, proof, binding } = this.resolveScheduledGoalOutcome(input, current, denied)
+    if (proof.goal.phase !== 'complete' || proof.receipt.objectiveStatus !== 'achieved') return denied()
+    const idempotencyKey = `goal-wake-completion-notice:${proof.proofDigest}:${binding.id}`
+    return this.enqueueOwnerNotification({
+      sourceId: 'assistant-goals-wake/v1', ownerRouteId: locator.ownerRouteId,
+      scope: { principalId: locator.principalId, principalRecordId: locator.principalRecordId,
+        principalVersion: locator.principalVersion, workspace: locator.workspace, preset: locator.preset },
+      sessionId: locator.sessionId, idempotencyKey, text: goalWakeCompletionNotice,
+      expiresAt: Math.min(input.deadlineAt, proof.receipt.validUntil),
+    })
+  }
+
+  private resolveScheduledGoalOutcome(
+    input: DeliveryGoalWakeInput,
+    current: () => ConversationBinding,
+    denied: () => never,
+  ): Readonly<{ locator: Readonly<OwnerGoalOutcomeFeedbackLocator>; proof: Readonly<OwnerGoalOutcomeFeedbackProof>; binding: ConversationBinding }> {
     current()
     let resolved: ReturnType<DeliveryGoalWakeInput['resolveOutcomeFeedbackTarget']>
     try { resolved = input.resolveOutcomeFeedbackTarget() } catch { return denied() }
@@ -1727,34 +1786,7 @@ export class AssistantDeliveryService extends Service {
     if (route.binding.id !== finalBinding.id || route.binding.version !== finalBinding.version
       || route.binding.generation !== finalBinding.generation
       || route.binding.sessionId !== finalBinding.sessionId) return denied()
-    const decision = this.policy.authorize({
-      subject: { kind: 'background', id: 'assistant-goals-wake/v1',
-        workspace: finalBinding.workspace, principal: locator.principalId },
-      action: 'send', resource: { kind: 'message', id: finalBinding.id }, context: { initiator: 'background' },
-    }, { idempotencyKey: `message-send:goal-outcome:${proof.proofDigest}:${finalBinding.id}` })
-    if (decision.effect !== 'allow') throw policyDenied(decision)
-    const rendered = `${text}${goalOutcomeFeedbackFooter}`
-    if (Buffer.byteLength(rendered, 'utf8') > this.config.maxTextBytes) {
-      throw new AssistantDeliveryError('runtime-conflict', 'scheduled goal result exceeds the delivery text limit')
-    }
-    const situation = `goal:${locator.goalId}:definition:${proof.goal.definitionVersion}`
-    return this.deliveryStore.enqueueGoalOutcomeTarget({
-      locator, proof,
-      intent: {
-        idempotencyKey: `goal-outcome:${proof.proofDigest}:${finalBinding.id}`,
-        bindingId: finalBinding.id,
-        target: { conversation: finalBinding.conversation, principal: finalBinding.principal },
-        text: rendered, format: 'markdown',
-        metadata: Object.freeze({
-          'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome',
-          'dsh.learning.goalId': locator.goalId, 'dsh.learning.assessmentId': locator.assessmentId,
-          'dsh.learning.runId': proof.runId, 'dsh.learning.situation': situation,
-          'dsh.learning.occurredAt': String(proof.receipt.completedAt),
-          'dsh.learning.objectiveStatus': proof.receipt.objectiveStatus,
-          'dsh.learning.proofDigest': proof.proofDigest,
-        }),
-      },
-    })
+    return Object.freeze({ locator, proof, binding: finalBinding })
   }
 
   /** Private verifier producer generation; invalidated with this service. */

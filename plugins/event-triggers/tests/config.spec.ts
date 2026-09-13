@@ -37,6 +37,27 @@ describe('event trigger configuration', () => {
     })).toThrow(/configuration|ipv6/i)
   })
 
+  test('accepts an external GitHub grant only with its dedicated owner-bound goal lifetime', () => {
+    const trigger = {
+      id: 'repository', kind: 'github-repository' as const, automationId: 'repository-source', repository: 'owner/repository', branch: 'delivery/fix', baseBranch: 'main',
+      externalGrant: { id: 'operator-grant', revision: 2, digest: 'a'.repeat(64) }, observerLifetime: 'goal' as const,
+      observer: { workspace: '/state', preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: 2_000_000_000_000, budgetId: 'polls' },
+    }
+    expect(normalizeEventTriggersConfig({ databasePath: '/state/events.sqlite', triggers: [trigger] }).triggers[0]).toMatchObject({ externalGrant: trigger.externalGrant, credentialHandle: undefined })
+    const withGrant = (externalGrant: typeof trigger.externalGrant) => normalizeEventTriggersConfig({ databasePath: '/state/events.sqlite', triggers: [{ ...trigger, externalGrant }] })
+    expect(withGrant(Object.assign(Object.create(null), trigger.externalGrant)).triggers[0]).toMatchObject({ externalGrant: trigger.externalGrant })
+    for (const externalGrant of [
+      Object.assign(Object.create(trigger.externalGrant), { a: 1, b: 2, c: 3 }),
+      Object.assign(Object.create({ inherited: true }), trigger.externalGrant),
+      { ...trigger.externalGrant, [Symbol('extra')]: true },
+      Object.defineProperty({ ...trigger.externalGrant }, 'id', { get: () => 'operator-grant' }),
+      Object.defineProperty({ ...trigger.externalGrant }, 'id', { enumerable: false }),
+      { id: 'operator-grant', revision: 2, unrelated: 'a'.repeat(64) },
+    ]) expect(() => withGrant(externalGrant as typeof trigger.externalGrant)).toThrow(/external GitHub grant/i)
+    expect(() => normalizeEventTriggersConfig({ databasePath: '/state/events.sqlite', triggers: [{ ...trigger, credentialHandle: 'github' }] })).toThrow(/exactly one/i)
+    expect(() => normalizeEventTriggersConfig({ databasePath: '/state/events.sqlite', triggers: [{ ...trigger, observerLifetime: 'shared' }] })).toThrow(/goal lifetime/i)
+  })
+
   test('requires a non-default port to be listed as an exact HTTPS origin', () => {
     const trigger = { id: 'api', kind: 'http-json' as const, automationId: 'a',
       url: 'https://api.example.com:8443/state', pointer: '', fireWhen: 'changed' as const,

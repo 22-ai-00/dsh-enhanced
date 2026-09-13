@@ -20,6 +20,7 @@ import { brokerDigest, canonicalBrokerJson, type BrokerOperation, type BrokerCli
 import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, BranchRequest, CommitRequest, CompensationRecord, CompensationRequest, CompensationResult, ExternalActionGrantMirror, InspectRequest, PullRequestRequest, VerifiedDeliveryRequest, WorkflowRequest } from './types.js'
 
 import { captureExternalDeliveryReceipt, verifyExternalDeliveryReceipt, type ExternalDeliveryReceipt } from './external-delivery-receipt.js'
+import { normalizeRepositoryEventObservationInput, repositoryEventBranchHead, repositoryEventPendingFingerprint, repositoryEventSemanticFingerprint, type NormalizedRepositoryEventObservationInput, type RepositoryEventObservationInput } from './repository-event-observation.js'
 
 export { Config }
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -317,6 +318,114 @@ export class AssistantActionsService extends Service {
     supportedOperations: Object.freeze(this.#mode === 'external-unix-v1' ? ['commit', 'pull-request', 'inspect', 'verified-delivery', 'repository-readback'] as const : ['commit', 'branch', 'pull-request', 'inspect', 'compensate', 'verified-delivery', 'repository-readback'] as const),
   })
 
+  /**
+   * Host-only repository observation for EventTriggers.  The caller receives
+   * no remote content: only a deterministic semantic fingerprint after every
+   * authority, lifecycle, receipt, and signed-response boundary has held.
+   */
+  readRepositoryEventObservation = async (raw: RepositoryEventObservationInput, signal: AbortSignal): Promise<{ protocol: 'assistant-actions/repository-event/v1'; fingerprint: string; truthy: true }> => {
+    const input = normalizeRepositoryEventObservationInput(raw)
+    signal.throwIfAborted()
+    const context = () => this.#repositoryEventContext(input)
+    const initial = context()
+    const snapshot = initial.snapshot
+    const stable = () => {
+      const current = context()
+      if (current.snapshot !== snapshot) throw new Error('assistant-actions: repository event authority changed')
+      return current
+    }
+    const invocation = { rootCallId: `repository-event:${randomUUID()}`, callId: `repository-event:${randomUUID()}` }
+    const inspect = async (kind: InspectRequest['kind'], pullRequestNumber?: number): Promise<{ observed: unknown; generation: number; epochs: string }> => {
+      const current = stable()
+      const response = await this.#externalRequest(undefined, current.grant, current.grant.owner, 'inspect', {
+        kind, ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }),
+      }, signal, { rootCallId: invocation.rootCallId, callId: `${invocation.callId}:${kind}` }, `${invocation.callId}:${kind}:${randomUUID()}`, current.authorization)
+      if (response.result.status !== 'succeeded' || response.observed === undefined || response.generation === undefined || response.epochs === undefined) throw new Error('assistant-actions: repository event inspection unavailable')
+      stable()
+      return { observed: response.observed, generation: response.generation, epochs: response.epochs }
+    }
+    // This is deliberately first even before any source is goal-bound: an
+    // external source must establish a real branch baseline, never a synthetic
+    // "no goal" marker.
+    const branch = await inspect('branch')
+    const headOid = repositoryEventBranchHead(branch.observed, input.branch)
+    if (!headOid) throw new Error('assistant-actions: repository event branch observation malformed')
+    if (!input.goal) return Object.freeze({ protocol: 'assistant-actions/repository-event/v1' as const, fingerprint: repositoryEventPendingFingerprint(input, headOid), truthy: true as const })
+    const settled = initial.delivery
+    if (!settled) return Object.freeze({ protocol: 'assistant-actions/repository-event/v1' as const, fingerprint: repositoryEventPendingFingerprint(input, headOid), truthy: true as const })
+    const { outcome, intent } = settled
+    // Reverify the signed historical receipts and accepted artifacts before
+    // using the delivery-selected PR number.  Caller-supplied PR numbers never
+    // cross this boundary.
+    this.#verifyExternalDelivery(intent, outcome)
+    const pullRequestNumber = outcome.pullRequest?.pullRequestNumber
+    const commitOid = outcome.commit.commitOid
+    if (!Number.isSafeInteger(pullRequestNumber) || !commitOid || headOid !== commitOid) return Object.freeze({ protocol: 'assistant-actions/repository-event/v1' as const, fingerprint: repositoryEventPendingFingerprint(input, headOid), truthy: true as const })
+    const verifiedPullRequestNumber = pullRequestNumber as number
+    const pullRequest = await inspect('pull-request', verifiedPullRequestNumber)
+    const checks = await inspect('checks', verifiedPullRequestNumber)
+    const reviews = await inspect('reviews', verifiedPullRequestNumber)
+    if ([pullRequest, checks, reviews].some(value => value.generation !== branch.generation || value.epochs !== branch.epochs)) throw new Error('assistant-actions: repository event broker generation changed')
+    stable()
+    return Object.freeze({ protocol: 'assistant-actions/repository-event/v1' as const,
+      fingerprint: repositoryEventSemanticFingerprint(input, headOid, verifiedPullRequestNumber, pullRequest.observed, checks.observed, reviews.observed), truthy: true as const })
+  }
+
+  #repositoryEventContext(input: NormalizedRepositoryEventObservationInput): { grant: ExternalActionGrantMirror; authorization: ExternalBackgroundAuthorization; snapshot: string; delivery?: { intent: DeliveryIntent; outcome: DeliveryOutcome } } {
+    if (this.#mode !== 'external-unix-v1' || !this.#active) throw new Error('assistant-actions: repository event broker unavailable')
+    const grant = this.#externalGrants.get(input.grantId)
+    if (!grant || grant.revision !== input.grantRevision || grant.grantDigest !== input.grantDigest || grant.expiresAt <= Date.now()
+      || grant.destination.repository !== input.repository || grant.destination.branch !== input.branch || grant.destination.baseBranch !== input.baseBranch
+      || !grant.allowedOperations.includes('inspect') || !['branch', 'pull-request', 'checks', 'reviews'].every(kind => grant.allowedInspectKinds.includes(kind as InspectRequest['kind']))
+      || grant.owner.principalDigest !== principalDigest(input.owner.principalId) || grant.owner.principalRecordId !== input.owner.principalRecordId
+      || grant.owner.principalVersion !== input.owner.principalVersion || grant.owner.workspace !== input.owner.workspace || grant.owner.preset !== input.owner.preset
+      || grant.expiresAt !== input.owner.expiresAt || grant.verifiedDelivery?.ownerRouteId !== input.owner.ownerRouteId) throw new Error('assistant-actions: repository event grant changed')
+    const delivery = this.ctx.get('assistantDelivery')
+    if (!delivery) throw new Error('assistant-actions: repository event delivery unavailable')
+    const route = delivery.validateOwnerRoute({ authorityId: input.owner.ownerRouteId, principalId: input.owner.principalId, workspace: input.owner.workspace, agentPreset: input.owner.preset })
+    const resolved = delivery.resolveOwnerRoute(input.owner.ownerRouteId)
+    if (!route || route.principalRecordId !== input.owner.principalRecordId || route.principalVersion !== input.owner.principalVersion
+      || route.bindingVersion !== grant.owner.bindingVersion || route.generation !== grant.owner.bindingGeneration
+      || grant.owner.bindingId !== resolved?.binding.id || resolved.binding.sessionId !== grant.sessionId) throw new Error('assistant-actions: repository event owner changed')
+    const policy = this.ctx.get('assistantPolicy')
+    if (!policy) throw new Error('assistant-actions: repository event policy unavailable')
+    const eventPolicy = () => policy.evaluate({ subject: { kind: 'background' as const, id: `event-triggers:${input.triggerId}`, workspace: input.owner.workspace, principal: input.owner.principalId },
+      action: 'observe', resource: { kind: 'network' as const, id: `https://api.github.com/repos/${input.repository}` }, context: { initiator: 'background' as const } }).effect === 'allow'
+    const actionPolicy = () => policy.evaluate({ subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-actions', workspace: input.owner.workspace, principal: input.owner.principalId },
+      action: 'execute', resource: { kind: 'tool' as const, id: `action:github:${grant.id}` }, context: { initiator: 'background' as const } }).effect === 'allow'
+    if (!eventPolicy() || !actionPolicy()) throw new Error('assistant-actions: repository event policy denied')
+    let selected: { intent: DeliveryIntent; outcome: DeliveryOutcome } | undefined
+    if (input.goal) {
+      const goals = this.ctx.get('assistantGoals') as { inspectGoalLifecycle?: (value: { scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; goalId: string }) => { definition: { version: number; digest: string }; native: { sessionId: string; goalId: string; phase: 'active' | 'paused' | 'blocked' | 'complete' | 'cleared' } } | undefined } | undefined
+      const lifecycle = goals?.inspectGoalLifecycle?.({ scope: { principalId: input.owner.principalId, principalRecordId: input.owner.principalRecordId, principalVersion: input.owner.principalVersion, workspace: input.owner.workspace, preset: input.owner.preset }, goalId: input.goal.id })
+      if (!lifecycle || lifecycle.definition.version !== input.goal.definitionVersion || lifecycle.definition.digest !== input.goal.definitionDigest
+        || lifecycle.native.sessionId !== input.goal.sessionId || lifecycle.native.goalId !== input.goal.nativeGoalId || ['complete', 'cleared'].includes(lifecycle.native.phase)
+        || grant.sessionId !== input.goal.sessionId || !this.#verified) throw new Error('assistant-actions: repository event goal changed')
+      const latest = this.#verified.latestForGoal(input.goal, grant.id, { principalRecordId: input.owner.principalRecordId, principalVersion: input.owner.principalVersion }, { workspace: input.owner.workspace, preset: input.owner.preset })
+      if (latest?.state === 'succeeded' && latest.outcome?.commit.status === 'succeeded' && latest.outcome.pullRequest?.status === 'succeeded') selected = { intent: latest.intent, outcome: latest.outcome }
+    }
+    const snapshot = digest({ grant: { id: grant.id, revision: grant.revision, digest: grant.grantDigest, expiresAt: grant.expiresAt, owner: grant.owner, destination: grant.destination }, route,
+      goal: input.goal, delivery: selected && { id: selected.intent.id, security: selected.intent.security, outcome: selected.outcome } })
+    const authorization: ExternalBackgroundAuthorization = {
+      sessionId: input.goal?.sessionId ?? grant.sessionId, agentId: `event-triggers:${input.triggerId}`,
+      current: () => { if (this.#repositoryEventContext(input).snapshot !== snapshot) throw new Error('assistant-actions: repository event authority changed') },
+      // Do not retain a Policy proxy across an await; provider replacement is
+      // an authorization boundary, so resolve and validate the complete live
+      // capability again at the broker dispatch gate.
+      authorize: (actionId) => {
+        try {
+          const current = this.#repositoryEventContext(input)
+          if (current.snapshot !== snapshot) return false
+          const livePolicy = this.ctx.get('assistantPolicy')
+          if (!livePolicy) return false
+          return livePolicy.authorize({ subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions', workspace: input.owner.workspace, principal: input.owner.principalId },
+            action: 'execute', resource: { kind: 'tool', id: `action:github:${grant.id}` }, context: { initiator: 'background' } }, { idempotencyKey: `external-action:${actionId}` }).effect === 'allow'
+        } catch { return false }
+      },
+    }
+    return { grant, authorization, snapshot, ...(selected === undefined ? {} : { delivery: selected }) }
+  }
+
   #external(): GitHubBrokerClientOptions {
     if (!this.#active || !this.#externalClient) throw new Error('assistant-actions: external broker unavailable')
     return this.#externalClient
@@ -340,7 +449,7 @@ export class AssistantActionsService extends Service {
   }
 
   async #externalRequest(agent: Agent | undefined, grant: ExternalActionGrantMirror, owner: BrokerRequestIntent['owner'], operation: BrokerOperation, payload: BrokerRequestIntent['payload'],
-    signal: AbortSignal, invocation: ExternalInvocation, idempotencyKey: string, background?: ExternalBackgroundAuthorization): Promise<{ result: ActionResult; observed?: unknown; receipt?: ExternalDeliveryReceipt; generation?: number }> {
+    signal: AbortSignal, invocation: ExternalInvocation, idempotencyKey: string, background?: ExternalBackgroundAuthorization): Promise<{ result: ActionResult; observed?: unknown; receipt?: ExternalDeliveryReceipt; generation?: number; epochs?: string }> {
     signal.throwIfAborted()
     const client = this.#external(), sessionId = background?.sessionId ?? String(agent!.session.id)
     const actionId = this.#externalActionId(grant, sessionId, operation, idempotencyKey)
@@ -383,7 +492,7 @@ export class AssistantActionsService extends Service {
         ...(response.result?.operation === 'commit' ? { commitOid: response.result.commitOid, branch: response.result.branch } : {}),
         ...(response.result?.operation === 'pull-request' ? { pullRequestNumber: response.result.pullRequestNumber, branch: response.result.branch } : {}),
         ...(response.error ? { reason: `external-broker-${response.error.code}` } : {}) }
-      return { result, generation: response.generation, ...(signed ? { receipt: captureExternalDeliveryReceipt(signed.hello, signed.request, response) } : {}), ...(response.status === 'succeeded' && response.result?.operation === 'inspect' ? { observed: structuredClone(response.result.observed) } : {}) }
+      return { result, generation: response.generation, ...(signed && Number.isSafeInteger(signed.hello.policyEpoch) && Number.isSafeInteger(signed.hello.emergencyEpoch) ? { epochs: brokerDigest([signed.hello.policyEpoch, signed.hello.emergencyEpoch]) } : {}), ...(signed ? { receipt: captureExternalDeliveryReceipt(signed.hello, signed.request, response) } : {}), ...(response.status === 'succeeded' && response.result?.operation === 'inspect' ? { observed: structuredClone(response.result.observed) } : {}) }
     } catch (error) {
       if (error instanceof BrokerClientError) return { result: { actionId, status: error.postDispatchUnknown ? 'unknown' : 'failed', reason: `external-broker-${error.code}` } }
       throw error

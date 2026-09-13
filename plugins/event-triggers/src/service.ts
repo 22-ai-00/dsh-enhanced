@@ -33,6 +33,7 @@ import { version } from './version.js'
 import { EventSourceObservers } from './observer.js'
 import { readGitHubRepositoryObservation } from './github-sensor.js'
 import { readLarkCalendarObservation, type LarkCalendarPageReader } from './lark-calendar-sensor.js'
+import type { RepositoryEventObservationPort } from './actions-port.js'
 
 export type EventTriggersErrorCode =
   | 'cooldown'
@@ -118,9 +119,10 @@ export class EventTriggersService extends Service implements EventSourceReader {
     this.policy = policy
     this.automations = automations
     this.credentials = ctx.get('credentialsKeychain') as CredentialsKeychainService | undefined
-    if (this.config.triggers.some(trigger => (trigger.kind === 'webhook' || trigger.kind === 'github-repository')) && this.credentials === undefined) {
+    if (this.config.triggers.some(trigger => trigger.kind === 'webhook' || (trigger.kind === 'github-repository' && trigger.credentialHandle !== undefined)) && this.credentials === undefined) {
       throw new Error('event-triggers: credentialsKeychain is required for authenticated triggers')
     }
+    if (this.config.triggers.some(trigger => trigger.kind === 'github-repository' && trigger.externalGrant !== undefined)) this.currentAssistantActions()
     this.larkCalendarReader = options.larkCalendarReader ?? ctx.get('larkChannel') as LarkChannelCalendarService | undefined
     if (this.config.triggers.some(trigger => trigger.kind === 'lark-calendar') && this.larkCalendarReader === undefined) {
       throw new Error('event-triggers: larkChannel is required for Lark calendar triggers')
@@ -299,7 +301,8 @@ export class EventTriggersService extends Service implements EventSourceReader {
     const timer = setInterval(() => { try { guard() } catch (error) { controller.abort(error) } }, 25)
     timer.unref?.()
     try {
-      return await this.credentials!.withSecret(this.ctx, { handleId: trigger.credentialHandle, purpose: 'github.observe',
+      if (trigger.externalGrant !== undefined) return await this.readExternalGitHubObservation(trigger, controller, guard)
+      return await this.credentials!.withSecret(this.ctx, { handleId: trigger.credentialHandle!, purpose: 'github.observe',
         ttlMs: Math.max(1_000, Math.min(30_000, this.config.requestTimeoutMs)), idempotencyKey: `event-github:${trigger.id}:${randomUUID()}` }, async (token, leaseSignal) => {
         guard()
         const result = await readGitHubRepositoryObservation({ repository: trigger.repository, branch: trigger.branch, baseBranch: trigger.baseBranch, token,
@@ -308,6 +311,38 @@ export class EventTriggersService extends Service implements EventSourceReader {
         guard(); return result
       })
     } finally { clearInterval(timer) }
+  }
+
+  private async readExternalGitHubObservation(trigger: Extract<NormalizedTrigger, { kind: 'github-repository' }>, controller: AbortController, guard: () => void): Promise<SensorObservation> {
+    const grant = trigger.externalGrant!
+    const claim = this.store.goalSourceClaim(trigger.id)
+    if (claim?.retiredAt !== undefined) throw new Error('event-triggers: external GitHub goal source is retired')
+    const owner = trigger.observer
+    if (owner === undefined || trigger.observerLifetime !== 'goal') throw new Error('event-triggers: external GitHub observer is invalid')
+    const input = Object.freeze({ version: 1 as const, triggerId: trigger.id, grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.digest,
+      repository: trigger.repository, branch: trigger.branch, baseBranch: trigger.baseBranch,
+      owner: Object.freeze({ workspace: owner.workspace, preset: owner.preset, principalId: owner.principalId, principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion, ownerRouteId: owner.ownerRouteId, expiresAt: owner.expiresAt, budgetId: owner.budgetId }),
+      ...(claim === undefined ? {} : { goal: Object.freeze({ id: claim.goalId, sessionId: claim.native.sessionId, nativeGoalId: claim.native.goalId, definitionVersion: claim.definition.version, definitionDigest: claim.definition.digest }) }),
+    })
+    guard()
+    const actions = this.currentAssistantActions()
+    const observed = await actions.readRepositoryEventObservation(input, controller.signal)
+    guard()
+    // Cordis creates a new traceable Service proxy on each lookup. Provider
+    // replacement unloads this owned injection and aborts its observations;
+    // compare neither those proxies nor methods bound through them.
+    this.currentAssistantActions()
+    if (!observed || observed.protocol !== 'assistant-actions/repository-event/v1' || observed.truthy !== true
+      || typeof observed.fingerprint !== 'string' || !/^sha256:[a-f0-9]{64}$/u.test(observed.fingerprint)) {
+      throw new Error('event-triggers: assistantActions returned an invalid repository observation')
+    }
+    return Object.freeze({ fingerprint: observed.fingerprint, truthy: true })
+  }
+
+  private currentAssistantActions(): RepositoryEventObservationPort {
+    const actions = this.ctx.get('assistantActions') as RepositoryEventObservationPort | undefined
+    if (!actions || typeof actions.readRepositoryEventObservation !== 'function') throw new Error('event-triggers: active assistantActions repository observation service is required')
+    return actions
   }
 
   private async readLarkCalendarObservation(trigger: Extract<NormalizedTrigger, { kind: 'lark-calendar' }>, controller: AbortController): Promise<SensorObservation> {

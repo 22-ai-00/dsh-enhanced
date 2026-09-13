@@ -328,6 +328,30 @@ llm-pi-ai:
     expect(prepareGoalAdmission(f.input, plan.patch, effective, input, f.snapshot, now + 1).patch).toBe(plan.patch)
   })
 
+  test('external repository events retain issued broker authority and finite observation budgets without Host credentials', async () => {
+    const now = Date.now(), f = await fixture(now)
+    const outcome = { requiredChecks: [{ name: 'tests', appId: 42 }], reviewerIds: [7], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 30_000 }
+    const events = { maxPolls: 4, maxFires: 1, pollIntervalMs: 1000, requestTimeoutMs: 1000 }
+    const input = repositoryTask({ credentialHandle: undefined, externalGrantId: 'operator-repository-grant', expiresAt: now + 300_000, acceptance: 'goal-step', maxActions: 43, outcome, events })
+    const effective = externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { grant.maxActions = 43; grant.maxCostUnits = 63 })
+    const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), effective, input, f.snapshot, now, undefined, eventSupport)
+    const triggerId = `${plan.admissionId}-repository-events`, source = config(plan.patch, 'dsh-enhanced-event-triggers')
+    expect(source.triggers).toEqual([expect.objectContaining({ id: triggerId, kind: 'github-repository', observerLifetime: 'goal',
+      externalGrant: { id: 'operator-repository-grant', revision: 7, digest: 'a'.repeat(64) },
+      observer: expect.objectContaining({ ownerRouteId: plan.admissionId, expiresAt: now + 300_000 }) })])
+    expect(source.triggers[0]).not.toHaveProperty('credentialHandle')
+    expect(plan.patch).not.toContain('credentials-keychain')
+    expect(config(plan.patch, 'dsh-enhanced-assistant-actions').externalGrants).toEqual(config(effective, 'dsh-enhanced-assistant-actions').externalGrants)
+    const { rules, budgets } = config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy
+    expect(rules.some((rule: PolicyRule) => rule.actions?.includes('credential.use'))).toBe(false)
+    expect(budgets).toEqual(expect.arrayContaining([expect.objectContaining({ id: `${triggerId}-polls`, metric: 'repository-observations', limit: 4 })]))
+    expect(prepareGoalAdmission(f.input, plan.patch, effective, input, f.snapshot, now + 1, undefined, eventSupport).patch).toBe(plan.patch)
+    const insufficient = externalRepositoryEffective(f.effective, f.input, f.snapshot, now, grant => { grant.maxActions = 43; grant.maxCostUnits = 62 })
+    expect(() => prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), insufficient, input, f.snapshot, now, undefined, eventSupport)).toThrow('observation and outcome cost')
+    expect(() => parseGoalAdmissionTask(repositoryTask({ credentialHandle: undefined, externalGrantId: 'operator-repository-grant', acceptance: 'goal-step', maxActions: 42, outcome, events }))).toThrow('task limit')
+    expect(() => parseGoalAdmissionTask(repositoryTask({ acceptance: 'goal-step', maxActions: 43, outcome, events }))).toThrow('matching broker or observation credential')
+  })
+
   test('external repository admission rejects mixed credentials and projections outside its exact owner, operation, and readback fence', async () => {
     const now = Date.now(), f = await fixture(now)
     const outcome = { requiredChecks: [{ name: 'tests', appId: 42 }], reviewerIds: [7], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 30_000 }

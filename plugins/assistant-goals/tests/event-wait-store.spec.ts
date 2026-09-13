@@ -35,6 +35,12 @@ describe('goal event wait ledger', () => {
     const store = new GoalEventWaitStore(':memory:'); store.prepare(intent())
     expect(() => store.prepare(intent('event-wait-b'))).toThrow(); store.close()
   })
+  it('reads one exact wait through the immutable native-revision index', () => {
+    const store = new GoalEventWaitStore(':memory:'); const value = intent(); store.prepare(value)
+    expect(store.forNative(value.wake.scope, value.wake.goalId, value.wake.native)).toMatchObject({ intent: value, state: 'waiting' })
+    expect(store.forNative(value.wake.scope, value.wake.goalId, { ...value.wake.native, revision: value.wake.native.revision + 1 })).toBeUndefined()
+    store.close()
+  })
   it('persists a consumed source cursor across restart without changing the frozen intent', async () => {
     const root = await mkdtemp(join(tmpdir(), 'event-wait-cursor-')); roots.push(root); const path = join(root, 'waits.sqlite')
     const first = new GoalEventWaitStore(path); const value = intent(); first.prepare(value); first.advanceCursor(value.id, 9); first.close()

@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { externalEventDigest, parseExternalEventEnvelope, type ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
-import type { GoalRecord, GoalScope } from './types.js'
+import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
 import type { GoalWakeIntent } from './wake-store.js'
 import type { GoalWakeRuntime } from './wake.js'
 import { GoalEventWaitStore, type GoalEventSourceSnapshot, type GoalEventWait, type GoalEventWaitIntent } from './event-wait-store.js'
@@ -120,6 +120,43 @@ export class GoalEventWaitRuntime {
         || !same(wait.intent.wake.native, record.native)) return false
       try { return this.#sourceCurrent(wait.intent) !== undefined && this.#recordCurrent(wait.intent) !== undefined } catch { return false }
     })
+  }
+  /** A current, unique persisted wait may settle only its own quiescent native round. */
+  acceptsPausedOutcomeSettlement(record: GoalRecord, run: GoalExecutionRun): boolean {
+    if (!this.#live || record.native.phase !== 'paused' || run.execution?.status !== 'succeeded' || !run.execution.quiescent) return false
+    const waits = this.#store.list(record.scope, record.id).filter(wait => wait.state === 'waiting'
+      && Date.now() < wait.intent.expiresAt && same(wait.intent.wake.scope, record.scope)
+      && wait.intent.wake.goalId === record.id && same(wait.intent.wake.definition, record.definition)
+      && same(wait.intent.wake.native, record.native))
+    if (waits.length !== 1) return false
+    const wait = waits[0]!
+    if (run.intent.task.goal.id !== record.id || run.intent.task.goal.definitionVersion !== record.definition.version
+      || run.intent.task.goal.definitionDigest !== record.definition.digest || run.intent.task.goal.sessionId !== record.native.sessionId
+      || run.intent.task.goal.nativeGoalId !== record.native.goalId || run.intent.task.goal.nativeRevision + 1 !== record.native.revision
+      || run.intent.admission.round !== record.native.roundsStarted || run.intent.admission.maxGoalRounds !== record.native.maxGoalRounds
+      || !same(run.intent.scope, record.scope)) return false
+    try {
+      if (!this.#sourceCurrent(wait.intent) || !this.#recordCurrent(wait.intent)) return false
+      this.wake.preflight(record)
+      return true
+    } catch { return false }
+  }
+  /** Historical only: a settled wait proves the completed successor round for its parent wake. */
+  acceptsHistoricalPausedOutcomeCompletion(record: GoalRecord,
+    wake: Readonly<{ sessionId: string; goalId: string; revision: number; roundsStarted: number; maxGoalRounds: number }>, run: GoalExecutionRun): boolean {
+    if (!this.#live || record.native.phase !== 'complete' || run.execution?.status !== 'succeeded' || !run.execution.quiescent) return false
+    const waits = this.#store.list(record.scope, record.id).filter(wait => wait.state === 'terminal' && wait.reason === 'settled'
+      && same(wait.intent.wake.scope, record.scope) && wait.intent.wake.goalId === record.id
+      && same(wait.intent.wake.definition, record.definition) && wait.intent.wake.native.sessionId === wake.sessionId
+      && wait.intent.wake.native.goalId === wake.goalId && wait.intent.wake.native.maxGoalRounds === wake.maxGoalRounds
+      && wait.intent.wake.native.revision === wake.revision + 2 && record.native.revision === wait.intent.wake.native.revision + 1
+      && record.native.roundsStarted === wait.intent.wake.native.roundsStarted)
+    if (waits.length !== 1) return false
+    return run.intent.task.goal.id === record.id && run.intent.task.goal.definitionVersion === record.definition.version
+      && run.intent.task.goal.definitionDigest === record.definition.digest && run.intent.task.goal.sessionId === wake.sessionId
+      && run.intent.task.goal.nativeGoalId === wake.goalId && run.intent.task.goal.nativeRevision === wake.revision + 1
+      && run.intent.admission.round === record.native.roundsStarted && run.intent.admission.maxGoalRounds === wake.maxGoalRounds
+      && same(run.intent.scope, record.scope)
   }
   health = () => ({ enabled: true, connected: this.#source !== undefined, reconciliationFailures: this.#failures })
   reconcile(): void {
@@ -302,11 +339,34 @@ export class GoalEventWaitRuntime {
     if (!record) fail()
     // Retirement stops new observation/execution, but does not revoke the
     // already dispatched wake's right to settle its exact completed Goal.
-    if (phase === 'terminal' && wait.state === 'materialized' && record.native.phase === 'complete'
-      && this.wake.inspect(wait.intent.wake.scope, wait.intent.wake.goalId).some(wake => wake.intent.id === wakeIntent.id && wake.state === 'dispatched')) {
+    const dispatched = this.wake.inspect(wait.intent.wake.scope, wait.intent.wake.goalId)
+      .some(wake => wake.intent.id === wakeIntent.id && wake.state === 'dispatched')
+    if (phase === 'terminal' && wait.state === 'materialized' && record.native.phase === 'complete' && dispatched) {
       this.#source?.retireGoalSource?.(this.#claim(wait.intent))
-      if (this.#source?.canSettleGoalSource?.(this.#claim(wait.intent)) === true) return
+      if (this.#source?.canSettleGoalSource?.(this.#claim(wait.intent)) === true) {
+        this.#settleCompletedSuccessor(record, wakeIntent)
+        return
+      }
     }
     if (!this.#sourceCurrent(wait.intent)) fail()
+  }
+
+  /** Settle only the unique, already-current successor wait of a completed dispatched parent wake. */
+  #settleCompletedSuccessor(record: GoalRecord, parent: GoalWakeIntent): void {
+    const revision = parent.native.revision + 2
+    if (record.native.revision !== revision + 1 || record.native.roundsStarted <= parent.native.roundsStarted) return
+    const child = this.#store.forNative(record.scope, record.id, {
+      sessionId: parent.native.sessionId, goalId: parent.native.goalId, revision,
+    })
+    if (child?.state !== 'waiting' || !same(child.intent.wake.scope, record.scope)
+      || child.intent.wake.goalId !== record.id || !same(child.intent.wake.definition, record.definition)
+      || child.intent.wake.native.roundsStarted !== record.native.roundsStarted
+      || child.intent.wake.native.maxGoalRounds !== parent.native.maxGoalRounds
+      || child.intent.wake.native.sessionId !== record.native.sessionId
+      || child.intent.wake.native.goalId !== record.native.goalId
+      || Date.now() >= child.intent.expiresAt
+      || this.#source?.canSettleGoalSource?.(this.#claim(child.intent)) !== true
+      || !this.#recordCurrent(child.intent, false)) return
+    this.#reconcile(child)
   }
 }

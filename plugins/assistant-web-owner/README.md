@@ -154,6 +154,8 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 
 重启 Host 后，在原会话提交与配置一致的目标，并说明需要交付到已授权仓库。模型可查询可用授权、读取目标分支 head、修复隔离产物并登记交付；独立步骤和整体验收通过后由后台提交准确产物、按授权创建 PR，并主动显示最终结果。步骤模式允许原目标保持 active 或 paused。可选 `repositoryDelivery.outcome` 将整体验收绑定到实际提交的 CI/评审新鲜回读；省略时仍使用本地隔离产物条件。设置命令只证明配置和当前身份匹配；凭据是否可用、远端仓库访问和真实 GitHub 提交仍须实际运行验证。本机端到端测试的 GitHub 传输是明确替身，不能视为真实 GitHub 认证成功。
 
+外置 `external-unix-v1` broker 部署使用 `externalGrantId` 替代 `credentialHandle`，并预先安装 operator 签发的精确 grant projection。CLI 核对 owner、Session、仓库、路径、期限、限额与 admission route，不签发 grant、不复制凭据。外置模式的 `events` 仅包含下面的次数和时间字段，省略 `credentialHandle`；事件轮询通过 Actions 的 broker 观察接口执行。配置要求既有 grant 的 `maxActions ≥ 3 + 12 × maxGoalRounds + 4 × maxPolls`、`maxCostUnits ≥ 3 + 18 × maxGoalRounds + 6 × maxPolls`，不会自动扩额或续期。这是最低容量预检；运行时实际调用仍共享 broker 的有限账本。
+
 需要仓库整体验收时，在 `repositoryDelivery` 中设置 `acceptance: "goal-step"`、`openPullRequest: true`，并增加：
 
 ```json

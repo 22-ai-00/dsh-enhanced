@@ -94,7 +94,7 @@ The foreground schedules a wake and the test restarts the actual Host again. Ass
 
 ```sh
 CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
-  DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra \
+  DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra \
   DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture \
   pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs
 ```
@@ -102,6 +102,35 @@ CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
 The installed profile receives an ordinary repair-and-delivery request. The model chooses tools and creates its own finite Goal; the test does not supply trigger IDs, invoke Goal tools or select tool order. After an independently accepted intermediate PR and a durable event wait, it restarts the real Host while CI/review remain pending, returns to the original Session, and changes only the remote fixture state. Assertions bind the resumed Goal and source execution to an event after the saved cursor, require fresh repository outcome evidence for the actual committed head and visible feedback, then check that another restart and unchanged observation create no duplicate event or commit/PR.
 
 GitHub DNS/HTTPS and commit/PR responses are explicit transport substitutes, including the non-production Keychain token. The model route, installer, Policy, Keychain lease, EventTriggers observer/cursor, Goals, Automations, Delivery and Docker verifier run as actual components. This is not live GitHub authentication or remote CI/review evidence. The event experiment allows at most 26 model dispatches with a 300-second task budget; installer and cleanup have a separate test timeout. It needs the exact local Docker image configured in the spec. No ordinary profile is modified, and no provider credential is retained in artifacts.
+
+To exercise the external broker with the same real-model event/restart scenario:
+
+```sh
+CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
+  pnpm exec playwright test --config scripts/e2e/playwright-repo-external-events.config.mjs
+```
+
+This entry uses `traex-agent` (default `gpt-5.6-terra`), the installed production
+EventTriggers/Actions services and a real signed Unix broker with Linux
+`SO_PEERCRED` on both peers. Only the broker GitHub transport is controlled;
+the Host gets no GitHub credential and the event source gets no HTTPS fixture.
+It requires the independently accepted PR, a settled original-goal wait, Host
+restart, a changed CI/review snapshot, fresh outcome verification, source
+retirement and no replay on another restart. Broker and Host use the same UID
+in this local test; it does not prove separate-UID deployment or live GitHub.
+The final result must be visible in the original session. A tool-only final
+round uses the verified Web completion notice; the test checks its acceptance,
+receipt timing and uniqueness, then confirms that another restart preserves
+the result without new model or tool dispatches.
+Artifacts use `.cache/repo-autonomy-external-events-e2e/`.
+
+The [2026-09-13 run](../../docs/evidence/external-event-resume-2026-09-13.json)
+passed with DSH `0.1.5-rc.1` and TraeX `gpt-5.6-terra`: two successful event
+wakes, three native goal rounds, independent achieved verification and a
+native reply visible after restart. That run exercised the native reply path;
+the textless completion-notice fallback is covered by focused tests. A retired
+source still recorded local health failures after correctly stopping remote
+observations; zero health failures are not claimed.
 
 For a failed integration that needs local diagnosis, set `DSH_REPO_RETAIN_FAILURE=1`. The Host and browser still stop, but `retained-environment.json` points to the private temporary profile and original Session so a restart/UI check can reuse it without repeating model work. The default deletes this environment; remove a retained directory after diagnosis because it includes the private test configuration. Startup diagnostics retain only session/header/workspace identifiers, not credentials or model request headers.
 
@@ -112,7 +141,7 @@ For a failed integration that needs local diagnosis, set `DSH_REPO_RETAIN_FAILUR
 ```sh
 CI=true DSH_CAPTURE_RETAIN_FAILURE=1 \
 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
-DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra \
+DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra \
 pnpm test:web-owner:real-capture
 ```
 
@@ -306,3 +335,5 @@ the coordinator records its actual E2E, root-check and independent-review result
 there only after all three have settled.
 
 2026-09-12 首版实际证据采用同一真实运行与独立重启回读的组合验收：两轮修复/晋升已通过，原命令仅最终会话导航断言失败；修正为侧栏实际选择原会话、`aria-selected` 及新 `session/follow` 后，保留环境的独立 Host/Chromium 补验通过，无新增模型调用。原命令的退出 1 及补验退出 0 均保留，未声称修正后的全模型命令重新通过。详见[基本 RSI 两轮记录](../../docs/evidence/basic-rsi-two-round-2026-09-12.json)。
+
+DSH 兼容性：`repo-autonomy-real.spec.mjs` 默认使用独立安装的 `0.1.5-rc.1`，可设置 `DSH_E2E_HOST_VERSION=0.1.2-rc.1` 或同一 0.1 次版本的精确 RC 来验证另一 Host。`node scripts/e2e/session-persistence-compat.mjs /absolute/path/to/dsh` 使用指定新版 CLI 的模块闭包，在临时目录中执行 format 3 审批事件的跨进程写盘、未注册拒绝与冷读恢复；不修改全局 DSH 或日常 profile。

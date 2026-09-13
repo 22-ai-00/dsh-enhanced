@@ -70,7 +70,8 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   })
   ctx.provide('assistantAutomations' as never, { registerHostExecutor: (value: typeof hostExecutor) => { hostExecutor = value; return () => { if (hostExecutor === value) hostExecutor = undefined } }, reconcileSystem,
     inspectSystemOwned: ({ automationId }: { automationId: string }) => ({ definitionHash: automationHashes.get(automationId)?.definitionHash, definition: automationHashes.get(automationId)?.definition, latestTerminalRuns: {} }) } as never)
-  ctx.provide('eventTriggers' as never, { sourceSnapshot: () => ({ protocol: 'dsh-event-source/v1', sourceId: 'event-triggers:file', kind: 'file', version: '1', configDigest: 'a'.repeat(64), target: { automationId: 'automation' }, highWaterSequence: 0 }), firstEventAfter: () => undefined, subscribeSourceChanges: () => () => {} } as never)
+  let sourceExpiresAt = Date.now() + 60_000
+  ctx.provide('eventTriggers' as never, { sourceSnapshot: () => ({ protocol: 'dsh-event-source/v1', sourceId: 'event-triggers:file', kind: 'file', version: '1', configDigest: 'a'.repeat(64), target: { automationId: 'automation' }, highWaterSequence: 0 }), inspectOwnerSources: () => [{ triggerId: 'file', automationId: 'automation', kind: 'file', expiresAt: sourceExpiresAt }], firstEventAfter: () => undefined, subscribeSourceChanges: () => () => {} } as never)
   if (duringGoalChange !== undefined) ctx.on('goal/changed', ({ agent }) => duringGoalChange(agent))
   const path = databasePath ?? join(root, 'goals.sqlite')
   const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, verifyNativeRounds, verifyGoalOutcome,
@@ -83,7 +84,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
     cleanups.push(() => handle.dispose())
     return handle.agent
   }
-  return { ctx, root, path, plugin, owners, human, create, reconcileSystem, resumeScheduledGoal, get hostExecutor() { return hostExecutor }, async dispose(agent: Agent) { await handles.get(agent)?.dispose() }, revokeRoute() { routeAvailable = false }, restoreRoute() { routeAvailable = true },
+  return { ctx, root, path, plugin, owners, human, create, reconcileSystem, resumeScheduledGoal, setSourceExpiresAt(value: number) { sourceExpiresAt = value }, get hostExecutor() { return hostExecutor }, async dispose(agent: Agent) { await handles.get(agent)?.dispose() }, revokeRoute() { routeAvailable = false }, restoreRoute() { routeAvailable = true },
     replaceRouteBinding(value: Partial<NonNullable<typeof routeBinding>>) { if (routeBinding === undefined) throw new Error('missing route binding'); routeBinding = { ...routeBinding, ...value } },
     deny() { allowed = false }, denyAction(action: string) { deniedActions.add(action) }, service: ctx.assistantGoals }
 }
@@ -127,6 +128,11 @@ async function installGoalVerifier(f: Awaited<ReturnType<typeof harness>>, profi
 const checkpoint = { nextStep: 'Check repository state', blockers: [], assumptions: [{ statement: 'Latest build was green', expiresAt: 0 }], evidenceRefs: ['run:one'], dependencies: [] }
 const scheduleBudget = { modelCalls: 2, toolCalls: 2, inputTokens: 1_000, outputTokens: 1_000, durationMs: 60_000, maxOutputTokensPerCall: 500 }
 const scheduleWake = { ownerRouteId: 'route-owner', budgetId: 'wake-budget' }
+function displayedWaitDeadline(snapshot: string): number {
+  const match = /"waitExpiresAt":(\d+)/u.exec(snapshot)
+  if (!match) throw new Error(`missing displayed wait deadline: ${snapshot}`)
+  return Number(match[1])
+}
 
 describe('owner-scoped native goal context', () => {
   it('explains the configured native goal entry only to a live authorized owner turn', async () => {
@@ -228,6 +234,40 @@ describe('owner-scoped native goal context', () => {
     })).rejects.toThrow('event waits require durable wake, budgets and verified outcomes')
   })
 
+  it.each(['source', 'budget', 'outcome', 'wake'] as const)('displays the limiting %s deadline without creating a goal or widening a wait', async limit => {
+    const f = await harness(undefined, undefined, undefined, true, true, 2_000, {
+      preauthorizedCreateMaxRounds: 3, eventWaits: true,
+      executionBudget: { mode: 'calls', modelCalls: 4, toolCalls: 4, durationMs: limit === 'budget' ? 10_000 : 60_000,
+        maxOutputTokensPerCall: 500, routes: [{ provider: 'fixture', model: 'fixture' }] },
+      backgroundWake: { ...scheduleWake, maxDelayMs: limit === 'wake' ? 10_000 : 60_000 },
+    })
+    const agent = await f.create(`wait-cap-${limit}`, 'owner'); f.human.add(agent)
+    const objective = 'Wait within the effective authority'
+    await installGoalVerifier(f, goalProfiles(f.root, objective, { validityMs: limit === 'outcome' ? 10_000 : 60_000 }))
+    const now = Date.now(), clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+    try {
+      f.setSourceExpiresAt(now + (limit === 'source' ? 10_000 : 60_000))
+      const before = f.service.snapshot(agent)
+      expect(before).toContain('"triggerId":"file"')
+      expect(before).not.toMatch(/"waitExpiresAt":/u)
+      expect(f.ctx.goals.get(agent)).toBeUndefined()
+      const record = f.service.create(agent, objective, 2)
+      const data = JSON.parse(f.service.describe(record).split('<business-goal-data>\n')[1]!.split('\n</business-goal-data>')[0]!
+        .replaceAll('&#123;', '{').replaceAll('&#125;', '}').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&'))
+      const deadline = displayedWaitDeadline(f.service.snapshot(agent))
+      expect(deadline).toBe(limit === 'outcome' ? data.goalAcceptance.conditions.expiresAt - 1 : now + 10_000)
+      await expect(f.service.waitForEvent(agent, record.id, record.native.revision, 'file', deadline + 1, new AbortController().signal))
+        .rejects.toThrow('event wait deadline exceeds the goal limits')
+      expect(f.ctx.goals.get(agent)?.phase).toBe('active')
+      expect(f.service.eventWaitsForGoal(agent, record.id)).toEqual([])
+      f.setSourceExpiresAt(now + 999)
+      const unavailable = f.service.snapshot(agent)
+      expect(unavailable).toContain('"waitUnavailable":"deadline-under-1s"')
+      expect(unavailable).not.toMatch(/"waitExpiresAt":/u)
+      expect(f.service.eventWaitsForGoal(agent, record.id)).toEqual([])
+    } finally { clock.mockRestore() }
+  })
+
   it.each(['success', 'storage-failure', 'trailing-tool', 'multiple-steps', 'compressed-persistence'] as const)('drives an admitted native event wait without an owner turn: %s', async scenario => {
     const nativeBudget = { mode: 'calls' as const, modelCalls: 4, toolCalls: 4, durationMs: 60_000, maxOutputTokensPerCall: 500, routes: [{ provider: 'fixture', model: 'fixture' }] }
     const f = await harness(undefined, undefined, undefined, true, true, 2_000, { eventWaits: true, executionBudget: nativeBudget, backgroundWake: scheduleWake }, scenario === 'compressed-persistence')
@@ -254,7 +294,8 @@ describe('owner-scoped native goal context', () => {
         yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'failed_action', arguments: '{}' } }
         yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
       }
-      const argumentsText = JSON.stringify({ goal_id: record.id, expected_revision: record.native.revision, trigger_id: 'file', expires_at: Date.now() + 10_000 })
+      const expiresAt = displayedWaitDeadline(f.service.snapshot(agent))
+      const argumentsText = JSON.stringify({ goal_id: record.id, expected_revision: record.native.revision, trigger_id: 'file', expires_at: expiresAt })
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: ToolCallId('wait-event'), name: 'goal_wait_event', argumentsDelta: argumentsText }
       yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('wait-event'), name: 'goal_wait_event', arguments: argumentsText } }
       if (scenario === 'trailing-tool') {
@@ -269,6 +310,8 @@ describe('owner-scoped native goal context', () => {
     await vi.waitFor(() => expect(calls).toBe(1), { timeout: 2_000 }); await agent.whenIdle()
     record = f.service.create(agent, objective, 2)
     await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    const context = f.service.snapshot(agent), waitExpiresAt = displayedWaitDeadline(context)
+    expect(waitExpiresAt).toBeLessThan(Date.now() + 60_000)
     const expectedCalls = scenario === 'multiple-steps' ? 4 : 2
     try { await vi.waitFor(() => expect(calls).toBe(expectedCalls), { timeout: 2_000 }) } catch {
       throw new Error(JSON.stringify({ native: f.ctx.goals.get(agent), runs: f.service.executionRuns(agent, record.id), events: agent.session.snapshotEvents().map(event => ({ type: event.type, data: event.data })) }))
@@ -303,7 +346,7 @@ describe('owner-scoped native goal context', () => {
       calls += 1
       if (calls === 1) { yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }; yield { type: 'finish', reason: { kind: 'stop' } }; return }
       f.human.delete(agent)
-      const argumentsText = JSON.stringify({ goal_id: record.id, expected_revision: record.native.revision, trigger_id: 'file', expires_at: Date.now() + 10_000 })
+      const argumentsText = JSON.stringify({ goal_id: record.id, expected_revision: record.native.revision, trigger_id: 'file', expires_at: displayedWaitDeadline(f.service.snapshot(agent)) })
       waitIssued = true
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: ToolCallId('settlement-wait-event'), name: 'goal_wait_event', argumentsDelta: argumentsText }
       yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('settlement-wait-event'), name: 'goal_wait_event', arguments: argumentsText } }

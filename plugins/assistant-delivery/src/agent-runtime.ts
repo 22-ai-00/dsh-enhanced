@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { mkdir, stat } from 'node:fs/promises'
+import { isDeepStrictEqual } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import type { CommandDescriptor, CommandRuntime } from '@deepseek-ai/dsh-commands'
 import {
@@ -2743,6 +2744,37 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   }
 
   private installScheduledGoalFences(agent: Agent, input: Readonly<DeliveryGoalWakeInput>): () => void {
+    type PendingGoalStep = Readonly<{ turn: number, step: number, goalId: string, revision: number, round: number }>
+    let pendingGoalStep: PendingGoalStep | undefined
+    const nativeGoalStep = (source: { kind?: unknown, goalId?: unknown, revision?: unknown, round?: unknown }): PendingGoalStep | undefined => {
+      const native = (this.ctx.get('goals') as NativeGoalService | undefined)?.get(agent)
+      const round = source.round
+      if (source.kind !== 'goal' || String(source.goalId) !== input.native.goalId
+        || source.revision !== input.native.revision + 1 || typeof round !== 'number' || !Number.isSafeInteger(round) || round < 1
+        || native === undefined || native.phase !== 'active' || String(native.id) !== input.native.goalId
+        || native.revision !== source.revision || round !== native.roundsStarted + 1) return undefined
+      return { turn: 0, step: 0, goalId: String(source.goalId), revision: source.revision, round }
+    }
+    const durableTurnMessages = (turn: number): SessionEvent[] => {
+      const events = agent.session.snapshotEvents()
+      const start = events.findLast(event => event.type === 'turn/start')
+      if (start?.type !== 'turn/start' || start.data.turn !== turn
+        || events.some(event => event.seq > start.seq && event.type === 'turn/end')) {
+        throw new Error('assistant-delivery: exact native goal turn required')
+      }
+      return events.filter(event => event.seq > start.seq && event.type === 'user/message'
+        && !isScheduledGoalRuntimeContext(event.data.source))
+    }
+    const pendingCurrent = (turn: number, step: number): PendingGoalStep | undefined => {
+      const pending = pendingGoalStep
+      if (pending === undefined || pending.turn !== turn || pending.step !== step) return undefined
+      const native = (this.ctx.get('goals') as NativeGoalService | undefined)?.get(agent)
+      // Only bridge the gap before the accepted goal input is durably folded.
+      // Once any input appears, the ordinary snapshot fence must verify it.
+      if (native === undefined || native.phase !== 'active' || String(native.id) !== pending.goalId
+        || native.revision !== pending.revision || native.roundsStarted !== pending.round - 1) return undefined
+      return pending
+    }
     const goalTurn = (): void => {
       const events = agent.session.snapshotEvents()
       const start = events.findLast(event => event.type === 'turn/start')
@@ -2763,11 +2795,39 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       try { agent.cancel({ kind: 'hook', reason: 'assistant-delivery-scheduled-goal-wake-revoked' }) } catch {}
       throw new Error('assistant-delivery: scheduled goal wake authorization changed')
     }
-    const request = agent.ctx.on('agent/request', async (_payload, next) => {
-      try { goalTurn(); this.assertScheduledGoal(input, agent, 'running') } catch { return reject() }
-      const result = await next()
-      try { goalTurn(); this.assertScheduledGoal(input, agent, 'running') } catch { return reject() }
-      return result
+    const clearPending = (): void => { pendingGoalStep = undefined }
+    input.signal.addEventListener('abort', clearPending, { once: true })
+    const preStep = agent.ctx.on('agent/pre-step', async (payload, next) => {
+      // A pre-step decision is the sole new-Host bridge between the claimed
+      // inbox item and its later durable append.  Never carry it into another
+      // boundary, rejection, replacement, or retry.
+      clearPending()
+      const offered = payload.messages.filter(message => !isScheduledGoalRuntimeContext(message.source))
+      const offeredMessage = offered.length === 1 ? structuredClone(offered[0]) : undefined
+      const decision = await next()
+      if (payload.signal.aborted || input.signal.aborted || decision.kind !== 'enter') return decision
+      const entered = decision.messages.filter(message => !isScheduledGoalRuntimeContext(message.source))
+      if (offeredMessage === undefined || entered.length !== 1
+        || typeof offeredMessage.id !== 'string' || offeredMessage.id.length === 0
+        || !isDeepStrictEqual(entered[0], offeredMessage)) return decision
+      const candidate = nativeGoalStep(entered[0]!.source)
+      if (candidate === undefined) return decision
+      pendingGoalStep = { ...candidate, turn: payload.turn, step: payload.step }
+      return decision
+    }, { prepend: true })
+    const request = agent.ctx.on('agent/request', async (payload, next) => {
+      const assertRequest = (): void => {
+        payload.signal.throwIfAborted()
+        if (durableTurnMessages(payload.turn).length > 0) goalTurn()
+        else if (pendingCurrent(payload.turn, payload.step) === undefined) throw new Error('assistant-delivery: native goal step not admitted')
+        this.assertScheduledGoal(input, agent, 'running')
+      }
+      try {
+        try { assertRequest() } catch { return reject() }
+        const result = await next()
+        try { assertRequest() } catch { return reject() }
+        return result
+      } finally { clearPending() }
     }, { prepend: true })
     const preExecute = agent.ctx.on('tools/pre-execute', async (_payload, next) => {
       try { goalTurn(); this.assertScheduledGoal(input, agent, 'running') }
@@ -2781,7 +2841,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       try { goalTurn(); this.assertScheduledGoal(input, agent, 'running'); return undefined }
       catch { return 'assistant-delivery: scheduled goal wake authorization changed' }
     })
-    return () => { request(); preExecute(); guard() }
+    return () => { input.signal.removeEventListener('abort', clearPending); clearPending(); preStep(); request(); preExecute(); guard() }
   }
 
   private waitForScheduledGoalTerminal(

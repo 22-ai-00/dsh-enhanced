@@ -354,6 +354,8 @@ Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同�
 
 Delivery 只向 Goals 的已注册 Host capability 提供一次受限恢复：它重读当前 owner route、binding、原 Session、GoalId、revision 和 deadline，在重新加载原 Session 后重查状态，仅在 Goals 的 dispatch CAS 成功后恢复原生目标。它不把历史 Session snapshot、runtime context 或任意 `user/message` 当作新的 owner 输入；DSH 会把 runtime context snapshot 持久化为 user-role message，它不能替代人类回合证明。
 
+Web 事件唤醒若仅调用工具、没有最终回复正文，但准确原目标已结算且取得新鲜的独立成功验收，Delivery 会在复核 Goals capability、owner、原会话和发送权限后显示“目标已通过独立验收并完成。”。这是有期限、按验收证明去重的原会话通知，不伪造模型回复，也不授予执行权限；发送前继续检查 owner、binding、route、Policy 和期限。已有正文沿用原生回复；无正文的非 Web 唤醒仍不能生成外部结果消息。
+
 Cordis 按上下文读取 service 时可能产生不同 proxy 对象，Host 不能用对象 `===` 判断同一 Delivery service 或 capability 所属。恢复、撤权、lease 到期、取消和 teardown 只能阻止新的边界动作；它们不证明已有模型、工具、子进程或外部动作已经停止。无法确认终态时返回 unknown，Goals 不自动重放。
 
 ## 权限与数据边界

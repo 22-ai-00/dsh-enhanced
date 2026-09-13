@@ -1095,6 +1095,77 @@ describe('real rc.1 delivery Agent runtime', () => {
     } finally { await access?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
+  test('publishes one exact Web owner notice when a verified completed wake has no final text', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-wake-notice-')); roots.push(root)
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const webConversation = { channel: 'web', account: 'browser', tenant: 'local', kind: 'dm' as const, chat: 'owner-chat' }
+    const ownerId = 'web/browser/local/owner'
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [{ id: 'goal-owner', conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', policyRef: 'web-owner', minimumGeneration: 1 }],
+      policyRules: [{ id: 'goal-wake', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId }, actions: ['wake'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
+        { id: 'goal-send', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } }],
+    })
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    let disposeGoals: (() => void) | undefined
+    try {
+      operator.handoffOwner(webPrincipal)
+      access = fixture.service.bindNativeWebOwner(fixture.ctx, { principal: webPrincipal, workspace: root, preset: 'primary' })
+      const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+      const binding = store.createBinding({ conversation: webConversation, principal: webPrincipal, workspace: root, agentPreset: 'primary', sessionId: 'web-owner-session', policyRef: 'web-owner' })
+      const owner = store.getPrincipal(webPrincipal)!
+      const locator: OwnerGoalOutcomeFeedbackLocator = {
+        protocol: 'assistant-goals/owner-goal-outcome-locator/v1', ownerRouteId: 'goal-owner', principalId: ownerId,
+        principalRecordId: owner.id, principalVersion: owner.version, workspace: root, preset: 'primary',
+        bindingId: binding.id, bindingVersion: binding.version, bindingGeneration: binding.generation,
+        sessionId: binding.sessionId, goalId: 'goal-a', assessmentId: 'assessment-a',
+      }
+      const unsigned = { protocol: 'assistant-goals/owner-goal-outcome-feedback/v1' as const, locator,
+        goal: { definitionVersion: 2, definitionDigest: 'a'.repeat(64), nativeGoalId: 'native-goal-a', phase: 'complete' as const },
+        runId: 'run-a', profile: { id: 'whole-goal', version: 1, digest: 'b'.repeat(64) },
+        contract: { id: 'contract-a', digest: 'c'.repeat(64) }, receipt: { id: 'receipt-a', digest: 'd'.repeat(64),
+          objectiveStatus: 'achieved' as const, completedAt: Date.now() - 10, validUntil: Date.now() + 60_000 } }
+      const proof: OwnerGoalOutcomeFeedbackProof = { ...unsigned, proofDigest: acceptanceDigest(unsigned) }
+      const capabilities = new WeakMap<object, OwnerGoalOutcomeFeedbackProof>()
+      let wake: DeliveryGoalWakeInput
+      const goals = {
+        ownsWakeExecution: (value: unknown) => value === wake,
+        issueOwnerGoalOutcomeFeedbackTarget(value: OwnerGoalOutcomeFeedbackLocator) {
+          if (acceptanceDigest(value) !== acceptanceDigest(locator)) throw new Error('wrong locator')
+          const capability = Object.freeze(Object.create(null) as object); capabilities.set(capability, proof); return capability
+        },
+        resolveOwnerGoalOutcomeFeedbackTarget(capability: object) {
+          const value = capabilities.get(capability); if (value === undefined) throw new Error('stale capability'); return value
+        },
+      }
+      disposeGoals = fixture.ctx.provide('assistantGoals' as never, goals as never)
+      wake = Object.freeze({ attestation: { scope: { workspace: root, preset: 'primary' }, principalId: ownerId,
+        principalLineage: { principalRecordId: owner.id, principalVersion: owner.version }, bindingId: binding.id,
+        bindingVersion: binding.version, bindingGeneration: binding.generation, sessionId: binding.sessionId },
+        native: { goalId: 'native-goal-a', revision: 1 }, deadlineAt: Date.now() + 45_000, signal: new AbortController().signal,
+        includeOutput: true, assertCurrent() {}, beforeResume() {}, async settle() {},
+        resolveOutcomeFeedbackTarget: () => ({ locator, capability: goals.issueOwnerGoalOutcomeFeedbackTarget(locator), proof }),
+      }) satisfies DeliveryGoalWakeInput
+      const runtime = (fixture.service as unknown as { runtime: { resumeScheduledGoal(): unknown } }).runtime
+      vi.spyOn(runtime, 'resumeScheduledGoal').mockResolvedValue({ outcome: 'succeeded', dispatched: true, quiescent: true })
+      await expect(fixture.service.resumeScheduledGoal(wake)).resolves.toMatchObject({ outcome: 'succeeded', quiescent: true })
+      const expired = vi.spyOn(Date, 'now').mockReturnValue(proof.receipt.validUntil)
+      try { expect(() => fixture.service.enqueueScheduledGoalResult(wake)).toThrowError(expect.objectContaining({ code: 'policy-denied' })) } finally { expired.mockRestore() }
+      const first = fixture.service.enqueueScheduledGoalResult(wake)
+      const second = fixture.service.enqueueScheduledGoalResult(wake)
+      if ('kind' in first || 'kind' in second) throw new Error('textless Web wake did not publish a notice')
+      expect(first.id).toBe(second.id)
+      expect(first.intent).toMatchObject({ idempotencyKey: `goal-wake-completion-notice:${proof.proofDigest}:${binding.id}`,
+        text: '目标已通过独立验收并完成。', format: 'plain', metadata: { 'dsh.native-notice': 'v1', 'dsh.native-notice.expiresAt': String(Math.min(wake.deadlineAt, proof.receipt.validUntil)) } })
+      expect(first.intent.metadata?.['dsh.native-notice.sourceId']).toBe('assistant-goals-wake/v1')
+      await disposeGoals(); disposeGoals = undefined
+      await drive(fixture.service)
+      expect(store.getOutbox(first.id)).toMatchObject({ status: 'accepted' })
+      expect(access.notifications(binding.sessionId)).toEqual([expect.objectContaining({ id: first.id, text: '目标已通过独立验收并完成。' })])
+      expect(() => fixture.service.enqueueScheduledGoalResult(wake)).toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    } finally { await disposeGoals?.(); await access?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
   test('delivers and revises an exact scheduled whole-goal result through durable feedback authority', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-outcome-feedback-')); roots.push(root)
     const ownerId = 'lark/bot-1/tenant-a/ou_owner'

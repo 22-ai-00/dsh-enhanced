@@ -30,6 +30,17 @@ describe('dsh-enhanced-event-triggers entrypoint', () => {
     expect(injectOptional).toHaveBeenCalledWith(['credentialsKeychain'], expect.any(Function))
   })
 
+  test('injects assistantActions without Keychain for an external GitHub source', () => {
+    const inject = vi.fn()
+    apply({ inject } as unknown as Context, {
+      databasePath: '/state/events.sqlite',
+      triggers: [{ id: 'repository', kind: 'github-repository', automationId: 'repository-source', repository: 'owner/repository', branch: 'delivery/fix', baseBranch: 'main',
+        externalGrant: { id: 'grant', revision: 1, digest: 'a'.repeat(64) }, observerLifetime: 'goal',
+        observer: { workspace: '/state', preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: 2_000_000_000_000, budgetId: 'polls' } }],
+    })
+    expect(inject).toHaveBeenCalledWith(['assistantActions', 'assistantDelivery'], expect.any(Function))
+  })
+
   test('does not expose its SQLite store as a cross-plugin API', () => {
     expect(entrypoint).not.toHaveProperty('EventTriggerStore')
     expect(entrypoint).not.toHaveProperty('EventTriggerStoreError')

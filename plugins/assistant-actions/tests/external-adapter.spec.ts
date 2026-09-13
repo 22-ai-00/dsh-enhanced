@@ -71,10 +71,13 @@ function response(actionId: string, status: 'succeeded' | 'failed' | 'unknown', 
 async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDispatch>(async (_options, intent, _signal) => response(intent.actionId, 'succeeded')), grantOverrides?: (root: string) => Partial<BrokerGrantProjection>) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'actions-external-'))), ctx = new Context(), agent = ownerAgent(ctx, root)
   const localCommit = vi.fn(), localWorkflow = { branch: vi.fn(), pullRequest: vi.fn(), inspect: vi.fn() }, localCompensation = { capture: vi.fn(), commit: vi.fn() }
-  let policyAllowed = true
-  const policy = { isPreauthorizedTool: () => true, registerPreauthorizedTool: () => () => {}, evaluateAgent: () => ({ effect: policyAllowed ? 'allow' : 'deny' }), authorizeAgent: () => ({ effect: policyAllowed ? 'allow' : 'deny' }) }
+  let policyAllowed = true, actionBudget = Number.POSITIVE_INFINITY
+  const authorize = vi.fn(() => ({ effect: policyAllowed && actionBudget-- > 0 ? 'allow' : 'deny' }))
+  const policy = { isPreauthorizedTool: () => true, registerPreauthorizedTool: () => () => {}, evaluate: () => ({ effect: policyAllowed ? 'allow' : 'deny' }), authorize, evaluateAgent: () => ({ effect: policyAllowed ? 'allow' : 'deny' }), authorizeAgent: () => ({ effect: policyAllowed ? 'allow' : 'deny' }) }
   let currentBinding = 1
-  const delivery = { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' }, bindingId: 'binding', bindingVersion: currentBinding, bindingGeneration: 1, sessionId: String(agent.id) }) }
+  const delivery = { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' }, bindingId: 'binding', bindingVersion: currentBinding, bindingGeneration: 1, sessionId: String(agent.id) }),
+    validateOwnerRoute: () => ({ principalRecordId: 'record', principalVersion: 1, bindingVersion: currentBinding, generation: 1 }),
+    resolveOwnerRoute: () => ({ binding: { id: 'binding', sessionId: String(agent.id) } }) }
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' })
   ctx.provide('agents' as never, { get: (id: string) => id === agent.id ? agent : undefined } as never)
   ctx.provide('assistantPolicy' as never, policy as never); ctx.provide('assistantDelivery' as never, delivery as never)
@@ -82,7 +85,7 @@ async function externalFixture(dispatch: MockExternalDispatch = vi.fn<ExternalDi
   const service = new AssistantActionsService(ctx, config, localCommit as never, localWorkflow as never, localCompensation as never, dispatch as never)
   await new Promise(resolve => setTimeout(resolve, 0))
   const cleanup = async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) }; cleanups.push(cleanup)
-  return { root, ctx, agent, service, config, dispatch, localCommit, localWorkflow, localCompensation, changeBinding: () => { currentBinding++ }, denyPolicy: () => { policyAllowed = false },
+  return { root, ctx, agent, service, config, dispatch, localCommit, localWorkflow, localCompensation, authorize, setActionBudget: (value: number) => { actionBudget = value }, changeBinding: () => { currentBinding++ }, denyPolicy: () => { policyAllowed = false },
     execute: (name: string, args: object) => ctx.tools.execute({ callId: ToolCallId(`${name}-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent }) }
 }
 
@@ -116,6 +119,36 @@ describe('external broker configuration', () => {
 })
 
 describe('external broker Host facade', () => {
+  it('reads a real external branch baseline without Keychain before the first goal claim', async () => {
+    const dispatch = vi.fn<ExternalDispatch>(async (options, intent) => {
+      expect(intent.operation).toBe('inspect'); expect(intent.payload).toEqual({ kind: 'branch' })
+      await options.beforeWrite!({ policyEpoch: 1, emergencyEpoch: 0 } as never, intent as unknown as BrokerClientRequest, new AbortController().signal)
+      const observed = { name: 'main', commit: { sha: 'd'.repeat(40) }, untrusted: true as const }
+      return { ...response(intent.actionId, 'succeeded', 'inspect'), result: { operation: 'inspect', repository: 'owner/repository', branch: 'main', kind: 'branch', observed, observedDigest: brokerDigest(observed) } }
+    })
+    const f = await externalFixture(dispatch, root => ({ destination: { ...projection(root).destination, baseBranch: 'stable' }, verifiedDelivery: { ownerRouteId: 'route', budgetId: 'events' }, allowedInspectKinds: ['branch', 'pull-request', 'checks', 'reviews'] }))
+    const grant = f.config.externalGrants![0]!
+    const observed = await f.service.readRepositoryEventObservation({ version: 1, triggerId: 'trigger', grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.grantDigest,
+      repository: grant.destination.repository, branch: grant.destination.branch, baseBranch: grant.destination.baseBranch!, owner: { workspace: f.root, preset: 'primary', principalId: 'owner', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: grant.expiresAt, budgetId: 'events' } }, new AbortController().signal)
+    expect(observed).toMatchObject({ protocol: 'assistant-actions/repository-event/v1', truthy: true, fingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u) })
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(f.ctx.get('credentialsKeychain', false)).toBeUndefined()
+  })
+
+  it('charges the finite Actions authorization at each external observation dispatch', async () => {
+    const dispatch = vi.fn<ExternalDispatch>(async (options, intent) => {
+      await options.beforeWrite!({ policyEpoch: 1, emergencyEpoch: 0 } as never, intent as unknown as BrokerClientRequest, new AbortController().signal)
+      const observed = { name: 'main', commit: { sha: 'd'.repeat(40) }, untrusted: true as const }
+      return { ...response(intent.actionId, 'succeeded', 'inspect'), result: { operation: 'inspect', repository: 'owner/repository', branch: 'main', kind: 'branch', observed, observedDigest: brokerDigest(observed) } }
+    })
+    const f = await externalFixture(dispatch, root => ({ destination: { ...projection(root).destination, baseBranch: 'stable' }, verifiedDelivery: { ownerRouteId: 'route', budgetId: 'events' }, allowedInspectKinds: ['branch', 'pull-request', 'checks', 'reviews'] }))
+    const grant = f.config.externalGrants![0]!, input = { version: 1 as const, triggerId: 'trigger', grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.grantDigest, repository: grant.destination.repository, branch: grant.destination.branch, baseBranch: grant.destination.baseBranch!, owner: { workspace: f.root, preset: 'primary', principalId: 'owner', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: grant.expiresAt, budgetId: 'events' } }
+    f.setActionBudget(1)
+    await f.service.readRepositoryEventObservation(input, new AbortController().signal)
+    await expect(f.service.readRepositoryEventObservation(input, new AbortController().signal)).rejects.toThrow(/policy denied/i)
+    expect(f.authorize).toHaveBeenCalledTimes(2); expect(dispatch).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['pull-request', 'checks', 'reviews'] as const)('forwards scoped %s inspection with its API budget and without local credentials', async kind => {
     const headOid = 'd'.repeat(40)
     const pullRequest = { number: 42, state: 'open' as const, merged: false,

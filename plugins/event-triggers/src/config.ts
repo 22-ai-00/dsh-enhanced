@@ -45,7 +45,10 @@ export interface GitHubRepositoryTriggerConfig extends TriggerBase {
   repository: string
   branch: string
   baseBranch: string
-  credentialHandle: string
+  /** Embedded mode only. Exactly one credentialHandle or externalGrant is required. */
+  credentialHandle?: string
+  /** External-unix-v1 capability projection; it never contains a credential. */
+  externalGrant?: Readonly<{ id: string; revision: number; digest: string }>
   fireWhen?: FireWhen
   debounceMs?: number
   observer: EventObserverConfig
@@ -94,7 +97,7 @@ export type NormalizedTrigger =
   | (Required<Omit<FileTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
   | (Required<Omit<HttpJsonTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
   | (Required<Omit<WebhookTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
-  | (Required<Omit<GitHubRepositoryTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
+  | (Required<Omit<GitHubRepositoryTriggerConfig, 'ttlMs' | 'credentialHandle' | 'externalGrant'>> & { ttlMs?: number; credentialHandle?: string; externalGrant?: Readonly<{ id: string; revision: number; digest: string }> })
   | (Required<Omit<LarkCalendarTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
 
 export interface NormalizedConfig {
@@ -130,7 +133,7 @@ const base = {
 
 const triggerSchema = Schema.union([
   Schema.object({ ...base, kind: Schema.const('github-repository').required(), repository: Schema.string().required(),
-    branch: Schema.string().required(), baseBranch: Schema.string().required(), credentialHandle: Schema.string().required(),
+    branch: Schema.string().required(), baseBranch: Schema.string().required(), credentialHandle: Schema.string().default(''), externalGrant: Schema.any(),
     fireWhen: Schema.union(['changed', 'truthy'] as const).default('changed'), debounceMs: Schema.number().step(1).min(0).max(86_400_000).default(0), observer: observerSchema().required() }),
   Schema.object({ ...base, kind: Schema.const('lark-calendar').required(), calendarId: Schema.string().required(),
     startTime: Schema.number().step(1).min(0).required(), endTime: Schema.number().step(1).min(1).required(),
@@ -240,7 +243,20 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
     if (trigger.kind === 'github-repository') {
       if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(trigger.repository)
         || trigger.baseBranch === trigger.branch || [trigger.branch, trigger.baseBranch].some(value => value.length === 0 || value.length > 256 || value.trim() !== value || /[\p{Cc}]/u.test(value))) throw new Error('event-triggers: invalid GitHub repository scope')
-      return Object.freeze({ ...trigger, credentialHandle: id(trigger.credentialHandle, 'credentialHandle') })
+      const hasCredential = typeof trigger.credentialHandle === 'string' && trigger.credentialHandle.length > 0
+      const rawGrant = trigger.externalGrant
+      if (hasCredential === (rawGrant !== undefined)) throw new Error('event-triggers: GitHub repository requires exactly one credentialHandle or externalGrant')
+      if (rawGrant !== undefined) {
+        if (!rawGrant || typeof rawGrant !== 'object'
+          || (Object.getPrototypeOf(rawGrant) !== Object.prototype && Object.getPrototypeOf(rawGrant) !== null)
+          || Reflect.ownKeys(rawGrant).length !== 3 || !['id', 'revision', 'digest'].every(key => Object.hasOwn(rawGrant, key))
+          || Object.values(Object.getOwnPropertyDescriptors(rawGrant)).some(descriptor => !descriptor.enumerable || !('value' in descriptor))
+          || typeof rawGrant.id !== 'string' || !Number.isSafeInteger(rawGrant.revision) || rawGrant.revision < 1
+          || typeof rawGrant.digest !== 'string' || !/^[a-f0-9]{64}$/u.test(rawGrant.digest)) throw new Error('event-triggers: invalid external GitHub grant')
+        if (trigger.observerLifetime !== 'goal' || trigger.observer === undefined) throw new Error('event-triggers: external GitHub repository requires observer and goal lifetime')
+        return Object.freeze({ ...trigger, credentialHandle: undefined, externalGrant: Object.freeze({ id: id(rawGrant.id, 'externalGrant.id'), revision: rawGrant.revision, digest: rawGrant.digest }) })
+      }
+      return Object.freeze({ ...trigger, credentialHandle: id(trigger.credentialHandle!, 'credentialHandle'), externalGrant: undefined })
     }
     if (trigger.kind === 'lark-calendar') {
       if (!Number.isSafeInteger(trigger.startTime) || !Number.isSafeInteger(trigger.endTime)

@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-09-13",
+  "capability": "Repository event resumes the original goal after Host restart",
+  "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_REPO_RETAIN_FAILURE=1 pnpm exec playwright test --config scripts/e2e/playwright-repo-external-events.config.mjs",
+  "exitCode": 0,
+  "passed": 1,
+  "runtime": {
+    "@deepseek-ai/dsh": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-session-persistence": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "0.1.5-rc.2",
+    "@deepseek-ai/cordis": "4.0.2"
+  },
+  "model": {
+    "provider": "traex-agent",
+    "model": "gpt-5.6-terra",
+    "api": "acp",
+    "command": "traex"
+  },
+  "repositoryTransport": "fixture with external broker protocol; no live GitHub credentials",
+  "goal": {
+    "phase": "complete",
+    "roundsStarted": 3,
+    "maxGoalRounds": 6
+  },
+  "wait": {
+    "sourceStateBefore": "waiting",
+    "sourceStateAfterRestart": "waiting"
+  },
+  "event": {
+    "snapshotHighWaterSequence": 1,
+    "resumedSequence": 2,
+    "status": "delivered",
+    "wakeStates": [
+      "succeeded",
+      "succeeded"
+    ]
+  },
+  "acceptance": {
+    "achievedReceipts": [
+      {
+        "id": "verification-acceptance-694c97f95a681ffb3917ad1333e1855c38479785203a14110b36d8bad9ad1df6-1",
+        "digest": "d9f8ad35f7dc8a41ecceee27b23a4e9e47e1a01295799d715e206194cdf43ba0",
+        "completedAt": 1789266416508
+      },
+      {
+        "id": "verification-acceptance-39aa4b4d89f6c0e8ed77a93952088df7990ddc7c277112b2cfe2aa7eaf3548a7-1",
+        "digest": "8253b9ad2bb5975d8a3663da00984c94984b72ba2124103edbca5c339722f8f6",
+        "completedAt": 1789266497363
+      }
+    ],
+    "repositoryObjectiveStatus": "achieved"
+  },
+  "feedback": {
+    "kind": "native-session-reply",
+    "visibleAfterRestart": true
+  },
+  "restart": {
+    "sameGoal": true,
+    "sameSourceJobEvidence": true,
+    "sameModelAndToolDispatches": true,
+    "replyVisible": true,
+    "waitedThenRestarted": true
+  },
+  "sourceRetirement": {
+    "retired": true,
+    "automationStatus": "paused"
+  },
+  "artifactSha256": {
+    "proof.json": "a05f677a6f03494a3d85faf9f31282311236ab5f751552d96bff105d55ff0569",
+    "observer.jsonl": "57ff28c0a33c3075a7a2767bc4642640d801ffdbfcc1af827b85b1e534eb150e",
+    "pinned-cli-runtime.json": "cea914d61e3885eb98b2acb5101196f233ee79114bac5699dd9a57f9e3e8bf27",
+    "verifier-controls.json": "90f90649fb71666d2c34b188f43ce179bbec6a9da4ccd384b05a557e97dafa8d"
+  },
+  "relatedChecks": {
+    "deliveryPackageTests": 764,
+    "hostAbiTests": 15,
+    "typecheck": "passed",
+    "lint": "passed",
+    "earlierFullRepositoryCheck": "passed before final Host ABI fix; final fix additionally passed related checks and this real E2E"
+  },
+  "limitations": [
+    "GitHub event and delivery transport uses fixtures; real TraeX model, tools, Host restart, verifier and browser are exercised.",
+    "This run returned a native session reply; the textless completion-notice fallback has unit coverage, not real-model coverage here.",
+    "Revocation, expiry, goal changes and hostile ABI sequences are covered by focused tests, not every case by this real-model run.",
+    "No claim about long-running autonomy or token/USD hard limits.",
+    "The retired source recorded four local health failures while correctly blocking further remote observations, events and model/tool replay; normal retirement health classification remains to improve."
+  ]
+}
