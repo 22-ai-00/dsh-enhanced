@@ -682,6 +682,139 @@ function adopt(target: EvolutionStore, situation: string, baseline: { failures: 
   })
 }
 
+// A later revision of one exact task subject. `retract` carries no outcome,
+// matching the canonical Evaluation withdrawal projection.
+function revise(
+  target: EvolutionStore,
+  situation: string,
+  index: number,
+  version: number,
+  outcome?: 'succeeded' | 'failed',
+): ReturnType<EvolutionStore['applyTaskLearningProjection']> {
+  const subjectRef = JSON.stringify(['evaluation-outcome', situation, index])
+  const common = {
+    scopeKey,
+    scopeWatermark: nextProjectionScopeWatermark(),
+    subjectKind: 'outcome' as const,
+    subjectRef,
+    version,
+    digest: projectionDigest({ scopeKey, subjectRef, situation, outcome: outcome ?? null, version }),
+    situation,
+  }
+  if (outcome === undefined) {
+    return target.applyTaskLearningProjection({
+      ...common,
+      disposition: 'retract' as const,
+      occurredAt: 2_000 + index,
+    })
+  }
+  return target.applyTaskLearningProjection({
+    ...common,
+    disposition: 'upsert' as const,
+    outcome,
+    detail: `attempt ${index} revision ${version}`,
+    evidenceRef: `evaluation:${situation}:${index}:v${version}`,
+    occurredAt: 2_000 + index,
+  })
+}
+
+describe('post-promotion evidence correction', () => {
+  test('unrelated or positive new evidence does not churn active guidance; only a correction to a frozen subject retires it once', () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-evolution-correction-scope-'))
+    roots.push(root)
+    const path = join(root, 'evolution.sqlite')
+    const target = new EvolutionStore({ path, now: () => 1_000 })
+    const situation = 'correction-scope'
+
+    // The adoption window freezes four exact owner-objective task revisions.
+    for (let index = 1; index <= 4; index += 1) observe(target, situation, 'failed', index)
+    const candidate = target.candidates({ ...thresholds, evidenceSampleLimit: 8 })
+      .find(entry => entry.situation === situation && entry.kind === 'adopt')
+    expect(candidate).toBeDefined()
+    expect(candidate!.taskRevisions).toHaveLength(4)
+    const proposal = target.createProposal({
+      idempotencyKey: `adopt:${situation}`,
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: {
+        op: 'adopt' as const,
+        ruleId: `rule-${situation}`,
+        input: { scopeKey, situation, guidance: 'Hold the reviewed evidence window.' },
+        baseline: candidate!.stats,
+        evidence: {
+          sampleEpisodeIds: candidate!.evidence.map(entry => entry.episodeId),
+          digest: candidate!.evidenceDigest,
+          total: candidate!.evidenceTotal,
+          window: 10,
+          scopeWatermark: candidate!.scopeWatermark,
+          taskRevisions: candidate!.taskRevisions,
+        },
+      },
+      expiresAt: 61_000,
+    })
+    target.attachPolicy(proposal.proposalId, `policy-${situation}`)
+    const rule = target.settleProposal({
+      proposalId: proposal.proposalId,
+      policyStatus: 'approved',
+      policyVersion: 2,
+    }).rule!
+    expect(rule).toMatchObject({ status: 'active', version: 1 })
+
+    // New positive evidence for a fifth subject never freezes into the rule.
+    observe(target, situation, 'succeeded', 5)
+    // A different situation and a different subject kind are equally unrelated.
+    observe(target, 'other-situation', 'failed', 6)
+    target.applyTaskLearningProjection({
+      scopeKey,
+      scopeWatermark: nextProjectionScopeWatermark(),
+      subjectKind: 'goal-outcome',
+      subjectRef: JSON.stringify(['evaluation-outcome', situation, 7]),
+      version: 1,
+      digest: projectionDigest({ scopeKey, kind: 'goal-outcome', index: 7 }),
+      disposition: 'upsert',
+      situation,
+      outcome: 'succeeded',
+      detail: 'authoritative goal outcome elsewhere',
+      evidenceRef: 'evaluation:goal-outcome:7',
+      occurredAt: 2_007,
+    })
+    // Withdrawing a subject that was never part of the frozen tuple must not
+    // retire the rule either.
+    revise(target, situation, 5, 2)
+    expect(target.getRule(rule.id)).toMatchObject({ status: 'active', version: 1 })
+    expect(target.activeRule(scopeKey, situation)?.id).toBe(rule.id)
+    expect(target.health()).toMatchObject({ retiredRules: 0, autonomousRollbacks: 0 })
+
+    // Only a correction to an exact frozen subject (index 1) wins after adoption.
+    revise(target, situation, 1, 2, 'succeeded')
+    expect(target.getRule(rule.id)).toMatchObject({ status: 'retired', version: 2 })
+    expect(target.getRule(rule.id)!.retiredReason)
+      .toMatch(/Automatic safe rollback: authoritative Evaluation evidence outcome:.*changed after adoption\./u)
+    expect(target.activeRule(scopeKey, situation)).toBeUndefined()
+    expect(target.health()).toMatchObject({ retiredRules: 1, autonomousRollbacks: 0 })
+
+    // A second frozen-subject correction must not audit or roll back again:
+    // the correction JOIN only matches rules still in status 'active'.
+    revise(target, situation, 2, 2, 'succeeded')
+    expect(target.getRule(rule.id)).toMatchObject({ status: 'retired', version: 2 })
+    target.close()
+
+    const reopened = new EvolutionStore({ path, now: () => 3_000 })
+    expect(reopened.getRule(rule.id)).toMatchObject({ status: 'retired', version: 2 })
+    expect(reopened.listRules(scopeKey, 'active')).toEqual([])
+    reopened.close()
+
+    const raw = new DatabaseSync(path, { readOnly: true })
+    const audits = raw.prepare(`
+      SELECT operation, rule_id AS ruleId, result_version AS resultVersion
+      FROM evolution_audit
+      WHERE operation = 'evidence-correction-rollback'
+    `).all()
+    raw.close()
+    expect(audits).toEqual([{ operation: 'evidence-correction-rollback', ruleId: rule.id, resultVersion: 2 }])
+  })
+})
+
 describe('approval-gated rule changes', () => {
   test('round-trips a complete v2 Policy creation route across SQLite restart', () => {
     const root = mkdtempSync(join(tmpdir(), 'assistant-evolution-route-v2-'))
