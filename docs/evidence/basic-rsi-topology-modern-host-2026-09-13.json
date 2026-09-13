@@ -1,0 +1,135 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-13",
+  "status": "passed-live-modern-host",
+  "milestone": "Second real task family: one bounded topology-workflow improvement",
+  "completeWorkPackage": false,
+  "source": {
+    "runtimeCommit": "d8fb41ca6771f1b5feb1435e5d9234da90eba7be",
+    "releaseSourceCommit": "180cdff21e4a59cb6e2db007f6dc6cb705259417",
+    "notes": "Runtime libraries were unchanged from the final template acceptance; intervening commits only record evidence and repair platform test fixtures."
+  },
+  "command": {
+    "shell": "DSH_REAL_REPAIR_FAMILY=topology DSH_E2E_HOST_VERSION=0.1.5-rc.1 DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_CAPTURE_RETAIN_FAILURE=1 pnpm test:web-owner:real-repair",
+    "exitCode": 0,
+    "testsPassed": 1,
+    "duration": "3.8 minutes",
+    "log": "/tmp/dsh-rsi-topology-modern-host-v1.log"
+  },
+  "artifacts": {
+    "directory": "/tmp/dsh-rsi-topology-modern-host-v1-artifacts/run",
+    "proofSha256": "2896698d5da881925c3ef6594e980718b463ec18994a63a77a92c13411f1cac6",
+    "modelSha256": "9531fec4b95b93b63df3a054566527ce1da27390f8f6061011184c0b7bd57c17"
+  },
+  "proof": {
+    "capability": "real-traex-topology-one-round-bounded-rsi",
+    "family": "topology",
+    "route": {
+      "provider": "traex-agent",
+      "model": "gpt-5.6-terra",
+      "api": "acp",
+      "command": "traex",
+      "cwd": "/tmp/dsh-real-owner-repair-sptTUE/workspace"
+    },
+    "hostVersion": "0.1.5-rc.1",
+    "scope": {
+      "principalId": "web/web/local/operator",
+      "principalRecordId": "principal_bb90e5b5-5471-4147-89ea-b43e53cc4039",
+      "principalVersion": 1,
+      "workspace": "/tmp/dsh-real-owner-repair-sptTUE/workspace",
+      "preset": "standard"
+    },
+    "baseline": {
+      "sessionId": "session-acfe1685-ac63-42c1-9b0a-771625d24e0e",
+      "goalId": "6195aaebb09abe88524c4087088033eb27448f74b2f74a2ce130633febeae01a",
+      "version": 1
+    },
+    "continuationId": "skill-repair-e401e54c340debac624d2500d619daa4e11938aaffa88d45b3fc63105f9f7104",
+    "state": "complete",
+    "iterations": 1,
+    "rounds": [
+      {
+        "iteration": 1,
+        "sourceSession": "session-1d170ff5-aa03-4518-a072-b6b9e846cc97",
+        "sourceGoal": "696570c70855d22a03ec89e10135c9c28db783d832285ec14b77ade0870b590a",
+        "repairSession": "owner-repair-18fde162a296f773760a51fd364ab8aa92d3c2b2",
+        "repairGoal": "a146bdd5d48eb9d2760438fc420aac28c173db0f3bfc2720b8595b282ba76899",
+        "candidateId": "skill-candidate-442994e658395e02ea3eaf05a0397416e73b5750c980d65d077685c1c73b2514",
+        "comparisonId": "skill-comparison-751a84a0ab822372e41e1f404019c8d40f57b7f825fdfc3c63e5cde635ddf78d",
+        "deploymentId": "skill-deployment-575dc5b78aa6f4bdb835936c0d00feef5d594f5ee09b0f9ba9b05ca77ec7bc41",
+        "version": 2,
+        "failureReceiptDigest": "83e3239f89cd5b7cfb434718657d3d558ee6eb12ff9e7f6a2b8e10078147c904",
+        "repairReceiptDigest": "bbddfd16b3c4a9e6410670075bf509c4bf1772506f7546a0293cc9ff832a2c9d",
+        "candidateDefinitionDigest": "26ae3a1dce3c6dede7b38437652f65a2e38eb6cefae5d887efbb805843058215",
+        "quality": {
+          "candidateChecksPassed": true,
+          "evaluationGain": 1,
+          "evaluationGainObserved": true,
+          "criticalRegressionsPassed": true,
+          "heldoutIndependence": "unproven"
+        },
+        "datasetDigest": "01c63e6f5f2814905f59241300253c64a82488eee8937f2a68614e1ee6b793df",
+        "promotion": {
+          "sessionId": "session-fde3f24b-5b8c-4a05-a670-ebf60b328522",
+          "goalId": "057ea4132be9761e53b60c2b2ce4f0a8033c9bf53cea093f6ae458bab7bf5bc7",
+          "promotedAt": 1789273713067
+        },
+        "toolNames": [
+          "read",
+          "write"
+        ],
+        "goalContextSnapshots": 3
+      }
+    ],
+    "usage": {
+      "model_calls": 3,
+      "tool_calls": 2
+    },
+    "feedback": [
+      {
+        "idempotency_key": "repair-feedback:skill-repair-e401e54c340debac624d2500d619daa4e11938aaffa88d45b3fc63105f9f7104:1:finite-canary",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_1666618a-4a3a-4a7a-bc70-bdc3727ccaf4"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-e401e54c340debac624d2500d619daa4e11938aaffa88d45b3fc63105f9f7104:1:iteration-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_1666618a-4a3a-4a7a-bc70-bdc3727ccaf4"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-e401e54c340debac624d2500d619daa4e11938aaffa88d45b3fc63105f9f7104:1:final-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_1666618a-4a3a-4a7a-bc70-bdc3727ccaf4"
+      }
+    ],
+    "generatedArtifactDigest": "fd76818a2f09f729fa99b1b7a85b30515eb40393f22bc44e265ded18395eb657",
+    "completedRestartNoReplay": true,
+    "initialArtifact": "shared unfinished scaffold",
+    "suppliedRepairedSource": false,
+    "installedRepairAdmissionIdempotent": true,
+    "limitations": [
+      "bounded two-profile workflow improvement",
+      "no mid-repair restart proof",
+      "delivery accepted does not mean user read"
+    ]
+  },
+  "independentReview": {
+    "verdict": "PASS",
+    "modelDispatches": 16,
+    "totalToolExecutions": 17,
+    "repairModelCalls": 3,
+    "repairToolCalls": 2,
+    "acceptedFeedback": 3,
+    "notes": "Counts are observed artifacts, not fixed regression expectations. Repair receipt, subsequent-task promotion, owner feedback and completed-restart no replay were independently checked."
+  },
+  "limitations": [
+    "One repair iteration in this task family, not two.",
+    "Public operator-frozen task family; heldout independence remains unproven.",
+    "TraeX budgets count model/tool calls; token and monetary usage are unknown.",
+    "Completion-restart no replay, not mid-repair crash recovery.",
+    "Does not complete all 18 work packages or establish general recursive improvement."
+  ]
+}
