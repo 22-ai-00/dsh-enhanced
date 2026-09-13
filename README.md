@@ -4,13 +4,13 @@
 
 插件覆盖目标管理、主动行动、记忆、消息交付、隔离执行、评测与恢复，并通过 ACP 和模型 provider 接入编码工具及现有模型线路。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。当前基本 RSI 首版面向 Linux 上受监督的单机 profile，仍属实验性能力。DSH 兼容范围为 `>=0.1.2-rc.1 <0.2.0`，同一 `0.1` 次版本内的补丁与后续 RC 可继续使用。
 
-基本 RSI 首版支持同一任务族的有限连续改进：独立确认失败后自主修复，生成技能候选，经过独立比较和后续实际任务验证后晋升，再继续下一轮，并把结果送回原会话。模板渲染任务已取得连续两轮的真实 TraeX 组合验收证据。使用入口见[有限 repair admission](plugins/assistant-web-owner/README.md#有限-repair-admission)，证据和限制见[两轮验收记录](docs/evidence/basic-rsi-two-round-2026-09-12.json)。
+基本 RSI 首版支持同一任务族的有限连续改进：独立确认失败后自主修复，生成技能候选，经过独立比较和后续实际任务验证后晋升，再继续下一轮，并把结果送回原会话。模板渲染任务已取得连续两轮的真实 TraeX 验收证据，并在 DSH `0.1.5-rc.1` 上[完整通过两轮与重启不重放测试](docs/evidence/basic-rsi-modern-host-2026-09-13.json)。使用入口见[有限 repair admission](plugins/assistant-web-owner/README.md#有限-repair-admission)，证据和限制见[两轮验收记录](docs/evidence/basic-rsi-two-round-2026-09-12.json)。
 
-dev 已增加 Linux 安全检查点恢复：确认旧进程退出、没有未结算模型或工具调用后，续接原修复会话和目标，保留原预算与期限；其他中断仍报告 `unknown`，不自动重放。真实 TraeX/Web 已验证：首轮原生修复目标完成后强制终止 Host，重启续接尚未完成的 RSI 流程，最终完成两轮晋升并反馈原会话；这不代表未结算模型或外部调用可重放。见[真实恢复记录](docs/evidence/real-repair-checkpoint-2026-09-12.json)。该增量尚未发布，详见[恢复边界](plugins/assistant-skills/README.md#repair-checkpoint-recovery)；完整 RSI 规划继续保留。
+本版本提供 Linux 安全检查点恢复：确认旧进程退出、没有未结算模型或工具调用后，续接原修复会话和目标，保留原预算与期限；其他中断仍报告 `unknown`，不自动重放。真实 TraeX/Web 已验证：首轮原生修复目标完成后强制终止 Host，重启续接尚未完成的 RSI 流程，最终完成两轮晋升并反馈原会话；这不代表未结算模型或外部调用可重放。见[真实恢复记录](docs/evidence/real-repair-checkpoint-2026-09-12.json)。详见[恢复边界](plugins/assistant-skills/README.md#repair-checkpoint-recovery)；完整 RSI 规划继续保留。
 
 ## 快速开始
 
-要求 Node.js 22.19+（或 24+）、pnpm 11.7.0 和兼容的 DSH `0.1.x`（最低 `0.1.2-rc.1`）。dev 中的安装器默认安装 `0.1.5-rc.1`，已有兼容版本直接复用；`0.2.x` 需重新评估兼容性。已发布的 `v0.1.31` 远程引导器仍使用旧 Host 限制，这些兼容修复尚待下一版发布。安装已发布插件：
+要求 Node.js 22.19+（或 24+）、pnpm 11.7.0 和兼容的 DSH `0.1.x`（最低 `0.1.2-rc.1`）。`0.1.32` 安装器默认安装 `0.1.5-rc.1`，已有兼容版本直接复用；`0.2.x` 需重新评估兼容性。安装插件：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/<plugin-name>
@@ -62,7 +62,7 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
 ```
 
-不便先 clone 仓库时，可一键远程安装。远程引导器会从固定发布 tag 下载并校验 `common.sh`；请求 `--operation upgrade|uninstall` 时，还会从同一个 tag 下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`，三个资产全部通过各自内嵌的 SHA-256 后才允许任何安装代码执行。旧 `v0.1.24` 的 lifecycle helper 摘要为全零，因此它不支持远程 upgrade/uninstall；新发布由 `release:prepare` 为三个实际资产生成独立摘要。当前远程引导器固定到 `v0.1.31`，仍要求 DSH `0.1.2-rc.1`；下一版将采用 dev 已实现的兼容范围。插件安装会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，避免跨包 `latest` 混装：
+不便先 clone 仓库时，可一键远程安装。远程引导器会从固定发布 tag 下载并校验 `common.sh`；请求 `--operation upgrade|uninstall` 时，还会从同一个 tag 下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`，三个资产全部通过各自内嵌的 SHA-256 后才允许任何安装代码执行。旧 `v0.1.24` 的 lifecycle helper 摘要为全零，因此它不支持远程 upgrade/uninstall；新发布由 `release:prepare` 为三个实际资产生成独立摘要。本版本远程引导器固定到 `v0.1.32`，支持上述 DSH `0.1.x` 兼容范围。插件安装会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，避免跨包 `latest` 混装：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
