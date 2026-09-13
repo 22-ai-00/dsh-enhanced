@@ -204,11 +204,24 @@ export class EventTriggersService extends Service implements EventSourceReader {
   }
 
   private async observeTrigger(trigger: Exclude<NormalizedTrigger, WebhookTriggerConfig>): Promise<void> {
+    // A dedicated source that durably retired after a trusted goal completion
+    // has no future observation authority.  It is intentionally absent from
+    // health failures; changed bindings and every non-terminal denial still
+    // take the normal fail-closed path below.
+    if (this.observers.isRetiredGoalSource(trigger.id)) return
     const resource = trigger.kind === 'file'
       ? { kind: 'filesystem' as const, id: trigger.path }
       : { kind: 'network' as const, id: trigger.kind === 'github-repository' ? `https://api.github.com/repos/${trigger.repository}`
         : trigger.kind === 'lark-calendar' ? `lark-calendar:${trigger.calendarId}` : trigger.url }
-    this.observers.assertCurrent(trigger.id)
+    try {
+      this.observers.assertCurrent(trigger.id)
+    } catch (error) {
+      // `assertCurrent()` can itself discover and durably retire a completed
+      // goal between the inexpensive admission check above and Policy.  That
+      // closed state is not a failed sensor observation.
+      if (this.observers.isRetiredGoalSource(trigger.id)) return
+      throw error
+    }
     const decision = this.policy.authorize({
       subject: { kind: 'background', id: `event-triggers:${trigger.id}`, ...(trigger.observer ? { workspace: trigger.observer.workspace, principal: trigger.observer.principalId } : {}) },
       action: 'observe', resource, context: { initiator: 'background' },
@@ -216,9 +229,18 @@ export class EventTriggersService extends Service implements EventSourceReader {
     if (decision.effect !== 'allow') {
       throw new EventTriggersError('policy-denied', `event-triggers policy denied observation: ${decision.reasonCode}`)
     }
-    const observation = await this.startObservation(trigger)
+    let observation: SensorObservation | undefined
+    try {
+      observation = await this.startObservation(trigger)
+    } catch (error) {
+      // Retirement may race a bounded sensor/broker read.  Suppress only its
+      // late result, after the durable matching retirement is visible.
+      if (this.observers.isRetiredGoalSource(trigger.id)) return
+      throw error
+    }
     if (observation === undefined) return
     if (this.shutdown.signal.aborted) throw this.shutdown.signal.reason
+    if (this.observers.isRetiredGoalSource(trigger.id)) return
     this.observers.assertCurrent(trigger.id)
     const occurredAt = this.now()
     const produced = this.store.observe({

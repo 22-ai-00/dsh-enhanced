@@ -224,6 +224,31 @@ describe('GitHub repository trigger service composition', () => {
     expect(JSON.stringify(installed.service.health())).not.toContain('repository-fixture-token')
   })
 
+  it('treats completion discovered by the first poll as a closed retired source', async () => {
+    const f = await fixture(1_000, 'goal')
+    let installed = await f.install()
+    const snapshot = installed.service.sourceSnapshot('repository')
+    const claim = { triggerId: 'repository', scope: f.goal.scope, goalId: f.goal.id, definition: f.goal.definition,
+      native: { sessionId: f.goal.native.sessionId, goalId: f.goal.native.goalId, revision: f.goal.native.revision },
+      configDigest: snapshot.configDigest, automationId: snapshot.target.automationId }
+    expect(installed.service.claimGoalSource(claim)).toBe(true)
+    f.completeGoal()
+    const authorize = vi.spyOn(f.ctx.assistantPolicy, 'authorize')
+    const sensorAuthorizations = () => authorize.mock.calls.filter(([request]) => request.subject.id === 'event-triggers:repository')
+    await expect(installed.service.pollOnce()).resolves.toBeUndefined()
+    expect(f.fetcher).not.toHaveBeenCalled()
+    expect(sensorAuthorizations()).toHaveLength(0)
+    expect(f.ctx.assistantAutomations.inspectSystemOwned({ owner: EVENT_OBSERVER_EXECUTOR, automationId: 'repository-target' })).toMatchObject({ automationStatus: 'paused' })
+    expect(installed.service.health()).toMatchObject({ failingTriggers: 0 })
+    await installed.fiber.dispose()
+    installed = await f.install()
+    await expect(installed.service.pollOnce()).resolves.toBeUndefined()
+    expect(f.fetcher).not.toHaveBeenCalled()
+    expect(sensorAuthorizations()).toHaveLength(0)
+    expect(f.ctx.assistantAutomations.inspectSystemOwned({ owner: EVENT_OBSERVER_EXECUTOR, automationId: 'repository-target' })).toMatchObject({ automationStatus: 'paused' })
+    expect(installed.service.health()).toMatchObject({ failingTriggers: 0 })
+  })
+
   it('drops an observation that finishes after its claimed goal completes, and stays stopped after service restart', async () => {
     const f = await fixture(1_000, 'goal')
     let installed = await f.install()
@@ -232,17 +257,29 @@ describe('GitHub repository trigger service composition', () => {
       native: { sessionId: f.goal.native.sessionId, goalId: f.goal.native.goalId, revision: f.goal.native.revision },
       configDigest: snapshot.configDigest, automationId: snapshot.target.automationId }
     expect(installed.service.claimGoalSource(claim)).toBe(true)
+    const authorize = vi.spyOn(f.ctx.assistantPolicy, 'authorize')
     f.change(); f.hang()
     const polling = installed.service.pollOnce()
     await vi.waitFor(() => expect(f.hasRelease()).toBe(true))
     f.completeGoal(); f.release()
-    await expect(polling).rejects.toThrow()
+    await expect(polling).resolves.toBeUndefined()
     const database = new DatabaseSync(join(f.root, 'events.sqlite'), { readOnly: true })
     expect(database.prepare('SELECT COUNT(*) AS count FROM event_outbox').get()).toEqual({ count: 0 })
     database.close()
     expect(() => installed.service.sourceSnapshot('repository')).toThrow(/retired|changed/)
+    const fetchesAfterRetirement = f.fetcher.mock.calls.length
+    const authorizationsAfterRetirement = authorize.mock.calls.length
+    await installed.service.pollOnce()
+    await installed.service.pollOnce()
+    expect(f.fetcher).toHaveBeenCalledTimes(fetchesAfterRetirement)
+    expect(authorize).toHaveBeenCalledTimes(authorizationsAfterRetirement)
+    expect(installed.service.health()).toMatchObject({ failingTriggers: 0 })
     await installed.fiber.dispose()
     installed = await f.install()
     expect(() => installed.service.sourceSnapshot('repository')).toThrow(/retired|changed/)
+    await installed.service.pollOnce()
+    expect(f.fetcher).toHaveBeenCalledTimes(fetchesAfterRetirement)
+    expect(authorize).toHaveBeenCalledTimes(authorizationsAfterRetirement)
+    expect(installed.service.health()).toMatchObject({ failingTriggers: 0 })
   })
 })

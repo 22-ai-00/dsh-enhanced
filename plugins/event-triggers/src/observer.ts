@@ -130,6 +130,14 @@ export class EventSourceObservers {
     }
   }
 
+  /** A matching durable terminal claim stops sensor admission, not an error. */
+  isRetiredGoalSource(triggerId: string): boolean {
+    const binding = this.bindings.get(triggerId)
+    if (binding === undefined || binding.lifetime !== 'goal') return false
+    const claim = this.store.goalSourceClaim(triggerId)
+    return claim !== undefined && claim.retiredAt !== undefined && this.claimMatches(binding, claim)
+  }
+
   claimGoalSource(input: GoalSourceClaim): boolean {
     const binding = this.bindings.get(input.triggerId)
     if (binding === undefined || binding.lifetime === 'shared') return false
