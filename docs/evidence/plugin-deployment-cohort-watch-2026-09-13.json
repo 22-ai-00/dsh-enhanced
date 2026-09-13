@@ -31,7 +31,7 @@
       "closedAt": "2026-09-13T13:04:29Z",
       "basis": "All four original WP15 clauses are exercised by really-run tests on real SQLite/CLI engineering paths across guidance, skill, workflow and plugin cohorts; multi-cohort production traffic and long-term quality distributions were explicitly excluded from first-version closure by the original boundary.",
       "independentReview": "adversarial read-only review PASS: 0 BLOCK / 0 HIGH; two MEDIUM documentation-sync items (matrix WP15 row, uncommitted evidence wording) resolved in the closure commit; low items recorded as follow-up notes.",
-      "docsCommits": ["9f96df1 (initial evidence record)", "closure commit carries the workflow.evidence precision fix, status/closure fields, matrix and ledger updates"]
+      "docsCommits": ["9f96df1 (initial evidence record)", "639c1f6 (closure: workflow.evidence precision fix, status/closure fields, matrix and ledger updates); this hash-pointer update lands in the immediately following docs commit"]
     }
   },
   "cohortCoverage": {
