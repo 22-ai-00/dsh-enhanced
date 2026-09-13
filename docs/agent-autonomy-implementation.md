@@ -2,7 +2,9 @@
 
 2026-09-13 验收口径纠正：完整工作包按下表原始成功条件逐项关闭，禁止固定维持历史计数。WP15 后续增加的“至少两个真实 cohort / 长期分布”和 WP17 的“真实 systemd / Lark / live-WAL / 完整升级卸载串行场景”保留为后续强化项，不追加为基本 RSI 首版关闭条件。功能、安全边界、独立验收与回滚要求继续保留。按用户最新授权，开发直接提交 dev、通过后合入 main；WP18 采用授权分支直接提交和精确提交 CI/readback，不依赖 PR 或审查账号。
 
-2026-09-13 WP15 关闭：[四 cohort deployment cohort watch 证据](evidence/plugin-deployment-cohort-watch-2026-09-13.json)证明 guidance/skill/workflow/plugin 四 cohort 均以真实执行的工程层测试覆盖原始四条款（exact 版本退化自动关闭或回滚、撤票触发回滚、正向证据不误撤、重启继续观察），独立对抗式复核 PASS（0 BLOCK / 0 HIGH），最终根 gate 退出 0（5,474 passed / 44 skipped / 33 dry-run pack）。plugin 侧为控制面账本终态 + gap 重开 + 不可变 catalog 重激活，不声称强制物理卸载；真实生产 cohort 与长期质量分布按原始边界保留为后续增强。当前完整工作包为 **5 已验证 / 11 实现中 / 2 待做**。
+2026-09-13 WP14 关闭：在真实 TraeX 链上重跑 prospective canary e2e（命令 exit 0，1 passed 6.1m），[after-freeze 证据](evidence/prospective-holdout-after-freeze-2026-09-13.json)记录两轮真实修复（v1→v2→v3，累计 8 次模型 / 6 次工具调用），每轮同预算 evaluationGain=1、关键回归通过、密封 prospective holdout 的 `heldoutIndependence` 均观测为 `attested-after-freeze`（dataset digest 10fa202c…/772013c…），有限 canary（1/2）后自动晋升并各获幂等 owner 反馈；三 gate 任一失败回落 `unproven` 且不晋升，由 holdout-qualification.spec.ts:105、comparison.spec.ts:25、holdout-cli.spec.ts:272 单测钉住。独立对抗式复核 PASS（0 BLOCK / 0 HIGH / 0 MEDIUM，3 LOW 不阻塞）。`attested-after-freeze` 仅证明冻结绑定先于固定语义 CSPRNG 私有题目生成、生成器与数据集 digest 入签名、持钉选公钥权威逐 cell 发答案；不证明独立进程、Docker flags/内核强制、OS 隔离或模型训练历史独立，local/sealed/预置外部数据集路径仍为 `unproven`；TraeX 仅有调用次数预算，token/金额不可观测；3–5 类高频流程广度仍归 WP13。当前完整工作包为 **6 已验证 / 10 实现中 / 2 待做**。
+
+2026-09-13 WP15 关闭：[四 cohort deployment cohort watch 证据](evidence/plugin-deployment-cohort-watch-2026-09-13.json)证明 guidance/skill/workflow/plugin 四 cohort 均以真实执行的工程层测试覆盖原始四条款（exact 版本退化自动关闭或回滚、撤票触发回滚、正向证据不误撤、重启继续观察），独立对抗式复核 PASS（0 BLOCK / 0 HIGH），最终根 gate 退出 0（5,474 passed / 44 skipped / 33 dry-run pack）。plugin 侧为控制面账本终态 + gap 重开 + 不可变 catalog 重激活，不声称强制物理卸载；真实生产 cohort 与长期质量分布按原始边界保留为后续增强。当时完整工作包为 **5 已验证 / 11 实现中 / 2 待做**。
 
 2026-09-13 WP17 关闭：[原始安装验收证据](evidence/wp17-installation-acceptance-2026-09-13.json)覆盖正式新安装到真实 Goal、缺依赖可操作修复、真实 npm 完整重复安装保留自定义配置与既有 GoalStore 任务，独立复核 PASS。当前完整工作包为 **4 已验证 / 12 实现中 / 2 待做**；既有状态迁移、真实服务平台与更完整的升级卸载强化继续保留在后续工作中。
 
