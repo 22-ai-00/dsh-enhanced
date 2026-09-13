@@ -222,6 +222,19 @@ describe('GitHubBrokerServer', () => {
     await expect(new Promise<void>((resolve, reject) => { socket.once('close', () => resolve()); socket.once('data', () => reject(new Error('unexpected hello'))) })).resolves.toBeUndefined()
   })
 
+  it('contains an unauthenticated peer reset during inspection and serves the next signed request', async () => {
+    let release!: () => void
+    const inspected = new Promise<void>(resolve => { release = resolve })
+    const server = await start({ peer: async () => { await inspected; return { uid, gid, pid: process.pid } } })
+    const reset = await connect(server.actionSocketPath)
+    reset.destroy()
+    release()
+    await new Promise<void>(resolve => setTimeout(resolve, 20))
+    await expect(requestGitHubBroker(actionOptions(server.actionSocketPath), intent())).resolves.toMatchObject({ status: 'succeeded', dispatched: true })
+    const startedAt = Date.now(); await server.stop('lifecycle', 100)
+    expect(Date.now() - startedAt).toBeLessThan(500)
+  })
+
   it('enforces first-byte and total deadlines against idle or hung peers', async () => {
     const idle = await start({ firstByteTimeoutMs: 20, frameTimeoutMs: 40, totalTimeoutMs: 80 })
     const socket = await connect(idle.actionSocketPath)

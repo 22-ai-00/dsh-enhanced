@@ -84,13 +84,14 @@ function run(value: GoalRecord, now: number): GoalExecutionRun {
 async function runtimeHarness(paths: { verifier: string; outcome: string }, current: () => GoalRecord, runs: () => readonly GoalExecutionRun[], ready: () => boolean = () => true,
   assertDependencies: (record: GoalRecord) => void = parent => {
     if (parent.checkpoint.dependencies.length > 0) throw new Error('unexpected dependency')
-  }, beforeResponse?: () => Promise<void>) {
+  }, beforeResponse?: () => Promise<void>, acceptsPausedEventWaitSettlement: (record: GoalRecord, run: GoalExecutionRun, agent: Agent) => boolean = () => false,
+  acceptsHistoricalPausedEventWaitCompletion: (record: GoalRecord, wake: { sessionId: string; goalId: string; revision: number; roundsStarted: number; maxGoalRounds: number }, run: GoalExecutionRun) => boolean = () => false) {
   const url = await proofServer(ready, beforeResponse)
   const authorityInput = { kind: 'readback' as const, id: 'target', urlTemplate: url, objectIdPointer: '/id', timeoutMs: 1_000, maxResponseBytes: 1_024, allowHttpLoopback: true }
   const [authority] = createVerifierAuthorities({ authorities: [authorityInput] }); if (authority === undefined) throw new Error('missing readback authority')
   const ctx = new Context(); contexts.push(ctx)
   const bridge = new GoalsBridge(); ctx.provide('assistantGoals' as never, bridge as never)
-  const runtime = new GoalOutcomeRuntime(ctx, paths.outcome, () => current(), () => runs(), 60_000, assertDependencies)
+  const runtime = new GoalOutcomeRuntime(ctx, paths.outcome, () => current(), () => runs(), 60_000, assertDependencies, acceptsPausedEventWaitSettlement, acceptsHistoricalPausedEventWaitCompletion)
   bridge.runtime = runtime
   const value = current()
   const verifier = new AssistantVerifierService(ctx, { databasePath: paths.verifier, tickIntervalMs: 0, requireAcceptance: true, authorities: [authorityInput], profiles: [{
@@ -128,6 +129,42 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
     expect(f.runtime.view(current)).toMatchObject({ status: 'achieved', nativeCompletion: 'complete' })
   })
 
+  it('waits for the exact current assessment verdict when earlier verifier jobs are queued', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'goal-outcome-current-verdict-')); roots.push(root)
+    let current = record(root); const agent = {} as Agent
+    let nativeRuns: readonly GoalExecutionRun[] = []
+    const f = await runtimeHarness({ verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcome.sqlite') }, () => current, () => nativeRuns)
+    f.runtime.bind(current)
+    const prepared = ['run-a', 'run-b', 'run-c'].map(runId => {
+      const initial = run(current, Date.now())
+      const candidate = { ...initial, intent: { ...initial.intent, runId, task: { ...initial.intent.task, ref: runId, runId } } }
+      f.runtime.prepare(agent, candidate)
+      return { ...candidate, dispatchedAt: Date.now(), execution: { status: 'succeeded' as const, quiescent: true, completedAt: Date.now() } }
+    })
+    nativeRuns = prepared
+    const assessments = f.runtime.inspectAssessments(current)
+    const byRun = new Map(assessments.map(item => [item.triggerRunId, item]))
+    const ordered = [...prepared].sort((left, right) => {
+      const leftId = byRun.get(left.intent.runId)?.contract.id
+      const rightId = byRun.get(right.intent.runId)?.contract.id
+      if (leftId === undefined || rightId === undefined) throw new Error('missing prepared assessment')
+      return leftId.localeCompare(rightId)
+    })
+    const currentRun = ordered[2]!
+    const currentAssessment = byRun.get(currentRun.intent.runId)
+    if (currentAssessment === undefined) throw new Error('missing current assessment')
+    const deferredTicks = vi.spyOn(f.verifier, 'tick').mockResolvedValue()
+    const queued = ordered.slice(0, 2).map(item => f.runtime.settled(agent, item, () => {}))
+    await new Promise<void>(resolve => setImmediate(resolve))
+    deferredTicks.mockRestore()
+    await f.runtime.settled(agent, currentRun, () => {})
+    await Promise.all(queued)
+
+    expect(f.verifier.inspectAcceptedTask(currentAssessment.contract.id)).toMatchObject({
+      receipt: { objectiveStatus: 'achieved' },
+    })
+  })
+
   it.each(['active', 'paused'] as const)('late verification nudge completes only an eligible live goal (%s)', async phase => {
     const root = await mkdtemp(join(tmpdir(), 'goal-outcome-late-receipt-')); roots.push(root)
     let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock)
@@ -147,6 +184,39 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
     await f.verifier.tick(); await new Promise<void>(resolve => setImmediate(resolve))
     expect(completions).toBe(phase === 'active' ? 1 : 0)
     await f.verifier.tick(); expect(completions).toBe(phase === 'active' ? 1 : 0)
+  })
+
+  it('completes a fresh achieved round paused by its exact durable event wait', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'goal-outcome-paused-event-wait-')); roots.push(root)
+    let current = record(root); const initial = run(current, Date.now()), agent = {} as Agent
+    let nativeRuns: readonly GoalExecutionRun[] = [], completions = 0
+    const f = await runtimeHarness({ verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcome.sqlite') }, () => current, () => nativeRuns,
+      () => true, undefined, undefined, (value, candidate) => value.native.phase === 'paused'
+        && candidate.intent.runId === initial.intent.runId && candidate.intent.task.goal.nativeRevision + 1 === value.native.revision)
+    f.ctx.provide('goals' as never, { get: () => ({ id: current.native.goalId, revision: current.native.revision }), complete: () => {
+      completions++; current = { ...current, native: { ...current.native, phase: 'complete', revision: current.native.revision + 1 } }
+    } } as never)
+    f.runtime.bind(current); f.runtime.prepare(agent, initial)
+    const durable = { ...initial, dispatchedAt: Date.now(), execution: { status: 'succeeded' as const, quiescent: true, completedAt: Date.now() } }
+    nativeRuns = [durable]
+    current = { ...current, native: { ...current.native, phase: 'paused', revision: current.native.revision + 1 } }
+    await f.runtime.settled(agent, durable, () => {})
+    expect(completions).toBe(1)
+    expect(current.native).toMatchObject({ phase: 'complete', revision: 3 })
+  })
+
+  it('does not complete a manual paused round when no durable event-wait proof accepts it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'goal-outcome-manual-pause-')); roots.push(root)
+    let current = record(root); const initial = run(current, Date.now()), agent = {} as Agent
+    let nativeRuns: readonly GoalExecutionRun[] = [], completions = 0
+    const f = await runtimeHarness({ verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcome.sqlite') }, () => current, () => nativeRuns)
+    f.ctx.provide('goals' as never, { get: () => ({ id: current.native.goalId, revision: current.native.revision }), complete: () => { completions++ } } as never)
+    f.runtime.bind(current); f.runtime.prepare(agent, initial)
+    const durable = { ...initial, dispatchedAt: Date.now(), execution: { status: 'succeeded' as const, quiescent: true, completedAt: Date.now() } }
+    nativeRuns = [durable]
+    current = { ...current, native: { ...current.native, phase: 'paused', revision: current.native.revision + 1 } }
+    await f.runtime.settled(agent, durable, () => {})
+    expect(completions).toBe(0)
   })
 
   it.each(['stale', 'cleared', 'unavailable', 'achieved'] as const)('late verification revalidates an exact %s dependency immediately before completion', async state => {
@@ -227,6 +297,7 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
       execution: { status: 'succeeded' as const, quiescent: true, completedAt: Date.now() } }
     nativeRuns = [durable]
     let checks = 0
+    const tick = change === 'next-round' ? vi.spyOn(fixture.verifier, 'tick') : undefined
     const settlement = fixture.runtime.settled(agent, durable, () => {
       checks += 1
       if (checks === 3) {
@@ -234,8 +305,12 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
         else fixture.ctx.emit('agent/disposed', { agent } as never)
       }
     })
-    if (change === 'next-round') await expect(settlement).rejects.toThrow('assessment round changed')
-    else await settlement
+    if (change === 'next-round') {
+      await expect(settlement).rejects.toThrow('assessment round changed')
+      // A changed native fence must not drive a possibly replaced verifier.
+      expect(tick).not.toHaveBeenCalled()
+      await fixture.verifier.tick()
+    } else await settlement
     expect(fixture.verifier.inspectAcceptedTask(assessment.contract.id)).toMatchObject({ receipt: { objectiveStatus: 'unknown' } })
     expect(await fixture.runtime.inspect(assessment.contract)).toMatchObject({ status: 'unknown', quiescent: false })
   })
@@ -326,5 +401,23 @@ describe('GoalOutcomeRuntime durable crash recovery', () => {
     currentRun.intent.admission.round = 2
     nativeRuns = [{ ...currentRun, dispatchedAt: now + 2, execution: { status: 'succeeded', quiescent: true, completedAt: now + 3 } }, settledOld]
     expect(fixture.runtime.verifiedWakeOutcome(current, wake)).toBeUndefined()
+  })
+
+  it('recognizes a completed successor after a settled exact event wait for wake feedback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'goal-outcome-wake-event-history-')); roots.push(root)
+    let current = { ...record(root, 2), native: { ...record(root, 2).native, roundsStarted: 2 } }
+    const initial = run(current, Date.now()); initial.intent.admission.round = 2
+    let nativeRuns: readonly GoalExecutionRun[] = []
+    const wake = { sessionId: current.native.sessionId, goalId: current.native.goalId, revision: 1, roundsStarted: 1, maxGoalRounds: current.native.maxGoalRounds }
+    const f = await runtimeHarness({ verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcome.sqlite') }, () => current, () => nativeRuns,
+      () => true, undefined, undefined, undefined, (value, candidateWake, candidate) => value.native.phase === 'complete'
+        && candidateWake.revision === wake.revision && candidate.intent.runId === initial.intent.runId)
+    f.runtime.bind(current); f.runtime.prepare({} as Agent, initial)
+    const durable = { ...initial, dispatchedAt: Date.now(), execution: { status: 'succeeded' as const, quiescent: true, completedAt: Date.now() } }
+    nativeRuns = [durable]
+    current = { ...current, native: { ...current.native, phase: 'complete', revision: 4 } }
+    await f.runtime.settled({} as Agent, durable, () => {})
+    expect(f.runtime.verifiedWakeOutcome(current, wake)).toMatchObject({ objectiveStatus: 'achieved', runId: initial.intent.runId })
+    expect(f.runtime.verifiedWakeCompletion(current, wake)).toBe(true)
   })
 })

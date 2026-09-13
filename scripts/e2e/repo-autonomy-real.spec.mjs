@@ -16,6 +16,8 @@ import { prepareExternalRepositoryFixture } from './repo-external-delivery-fixtu
 import { loadLiveRepositoryInput, mergeLiveCredentialHandles } from './repo-live-input.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
+const hostVersion = process.env.DSH_E2E_HOST_VERSION ?? '0.1.5-rc.1'
+if (!/^0\.1\.\d+(?:-rc\.\d+)?$/.test(hostVersion)) throw new Error('DSH_E2E_HOST_VERSION must select an exact compatible Host release')
 const image = 'sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8'
 const verifiedDelivery = process.env.DSH_REPO_VERIFIED_DELIVERY === 'fixture'
 const externalBrokerFixture = process.env.DSH_REPO_EXTERNAL_BROKER === 'fixture'
@@ -24,7 +26,7 @@ const liveInputPath = process.env.DSH_REPO_LIVE_INPUT
 const liveRepositoryEnabled = process.env.DSH_REPO_LIVE_GITHUB === '1' || typeof liveInputPath === 'string'
 if (liveRepositoryEnabled && (typeof liveInputPath !== 'string' || liveInputPath.length === 0)) throw new Error('live repository E2E requires DSH_REPO_LIVE_INPUT')
 if (liveRepositoryEnabled && (verifiedDelivery || process.env.DSH_REPO_EVENT_SOURCE !== undefined)) throw new Error('live repository E2E cannot use fixture transports')
-if (externalBrokerFixture && (!verifiedDelivery || process.env.DSH_REPO_EVENT_SOURCE !== undefined || liveRepositoryEnabled)) throw new Error('external broker fixture requires fixture verified delivery, no events, and no live repository')
+if (externalBrokerFixture && (!verifiedDelivery || ![undefined, 'fixture'].includes(process.env.DSH_REPO_EVENT_SOURCE) || liveRepositoryEnabled)) throw new Error('external broker fixture requires fixture verified delivery, optional fixture events, and no live repository')
 if (liveRepositoryEnabled && setupOnly) throw new Error('setup-only probe does not validate live repository access')
 const repositoryEvents = (verifiedDelivery && process.env.DSH_REPO_EVENT_SOURCE === 'fixture') || liveRepositoryEnabled
 const objective = 'Fix summarize.mjs: read a JSON order array from stdin, ignore orders whose status is "cancelled", sum integer amountCents by currency, and print one JSON object with currency keys in dictionary order followed by a newline.'
@@ -84,17 +86,17 @@ function parseJson(value) {
 }
 
 async function preparePinnedDshCli(temp, env) {
-  // The repository declares the pinned DSH ABI; do not silently exercise a
-  // developer's globally installed CLI with a different session runtime.
+  // Exercise the selected published Host in an independent dependency graph;
+  // never install into or silently use the developer's global CLI/profile.
   const cliRoot = join(temp, 'pinned-dsh-cli')
   await mkdir(cliRoot, { recursive: true, mode: 0o700 })
   await writeFile(join(cliRoot, 'package.json'), JSON.stringify({ private: true }), { mode: 0o600 })
   const bin = join(cliRoot, 'node_modules/.bin')
   await run('pnpm', ['add', '--ignore-workspace', '--dir', cliRoot,
     '--allow-build=@deepseek-ai/dsh-subprocess-local', '--allow-build=@google/genai', '--allow-build=koffi', '--allow-build=node-pty', '--allow-build=protobufjs',
-    '@deepseek-ai/dsh@0.1.2-rc.1'], env, 120_000)
+    `@deepseek-ai/dsh@${hostVersion}`], env, 120_000)
   if (!existsSync(join(bin, 'dsh'))) throw new Error('pinned DSH CLI installation did not provide dsh')
-  if ((await run(join(bin, 'dsh'), ['--version'], env)).trim() !== '0.1.2-rc.1') throw new Error('pinned DSH CLI resolved an unexpected version')
+  if ((await run(join(bin, 'dsh'), ['--version'], env)).trim() !== hostVersion) throw new Error('pinned DSH CLI resolved an unexpected version')
   env.PATH = `${bin}:${env.PATH ?? ''}`
   const dshRoot = join(cliRoot, 'node_modules/@deepseek-ai/dsh')
   const resolvedDshRoot = await realpath(dshRoot)
@@ -332,7 +334,13 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     await page.goto(host.url); await page.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
     await expect.poll(() => http.find(response => new URL(response.url()).pathname === '/api/session/create')).toBeTruthy()
     const create = http.find(response => new URL(response.url()).pathname === '/api/session/create')
-    sessionId = (await create.json()).result.value.sessionId
+    const created = await create.json()
+    expect(created.result?.value?.sessionId, sanitize(JSON.stringify(created))).toBeTruthy()
+    sessionId = created.result.value.sessionId
+    // The HTTP response can precede construction lease settlement. Do not
+    // interrupt that checkpoint and turn a new idle Session into unknown.
+    await expect.poll(() => query(join(home, 'assistant-delivery/state.sqlite'), 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state,
+      { timeout: 30_000 }).toBe('released')
     await host.stop(); await writeFile(testInfo.outputPath('host-initial.log'), host.log(), { mode: 0o600 })
 
     let repository
@@ -360,7 +368,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     }
     if (verifiedDelivery) expect(setup).toContain('Repository: fixture/orders; branch: automation/fix')
     if (liveRepository) expect(setup).toContain(`Repository: ${repository.repository}; branch: ${repository.branch}`)
-    if (verifiedDelivery && repositoryEvents) {
+    if (verifiedDelivery && repositoryEvents && !externalBrokerFixture) {
       // Admission writes the production config.  Only the HTTPS/DNS edge is
       // replaced here; EventTriggers, Keychain, Policy, observer and durable
       // source store remain the installed components.
@@ -435,8 +443,8 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       // response. An unread PR-created edge must wake before this restart.
       if (!(state?.last_observed_at > pullRequest.at) || latest > intent.source.highWaterSequence) return false
       const observations = await sourceObservations()
-      return ['check-runs', 'pulls'].every(suffix => observations.some(item => item.at >= pullRequest.at && item.ready === false
-        && item.headOid === commit.commitOid && item.pullRequest === 17 && item.path.endsWith(`/${suffix}`)))
+      return (externalBrokerFixture ? ['checks', 'pull-request'] : ['check-runs', 'pulls']).every(kind => observations.some(item => item.at >= pullRequest.at && item.ready === false
+        && item.headOid === commit.commitOid && item.pullRequest === 17 && (externalBrokerFixture ? item.kind === kind : item.path.endsWith(`/${kind}`))))
     }
     let waitRestart
     const goal = await waitForCompletion(() => activePage, home, sessionId, approvals, repositoryEvents ? {
@@ -513,7 +521,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
         const brokerRequests = query(join(home, 'external-repository-broker/state.sqlite'), 'SELECT operation,status FROM requests ORDER BY rowid')
         expect(brokerRequests.filter(row => row.operation === 'commit' || row.operation === 'pull-request')).toEqual([{ operation: 'commit', status: 'succeeded' }, { operation: 'pull-request', status: 'succeeded' }])
         const reads = brokerRequests.filter(row => row.operation === 'inspect')
-        expect(reads.length).toBeLessThanOrEqual(6)
+        expect(reads.length).toBeLessThanOrEqual(repositoryEvents ? repository.maxActions - 2 : 6)
         expect(reads.every(row => row.status === 'succeeded')).toBe(true)
       }
       const commit = records[0], pr = records[1]
@@ -534,7 +542,8 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       expect(noticeText).toContain(commit.commitOid)
       expect(noticeText).toContain(String(pr.number))
       await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(noticeText)
-      repositoryDelivery = { transport: 'explicit-fixture-not-live-github', records, state: query(path, 'SELECT id,state,result FROM deliveries'), notices: notices(), noticeText }
+      repositoryDelivery = { transport: externalBrokerFixture ? 'external-unix-v1-with-fixture-github' : 'explicit-fixture-not-live-github', records, state: query(path, 'SELECT id,state,result FROM deliveries'), notices: notices(), noticeText,
+        ...(externalBrokerFixture ? { broker: { requests: query(join(home, 'external-repository-broker/state.sqlite'), 'SELECT operation,status FROM requests ORDER BY rowid'), realLinuxPeerCredentials: true, sameUid: true, eventTransport: repositoryEvents ? 'production-actions-port' : 'none' } } : {}) }
       if (repositoryEvents) {
         expect(waitRestart).toMatchObject({ goalId: goal.id, sourceStateBefore: 'waiting', sourceStateAfterRestart: 'waiting' })
         expect(JSON.parse(await readFile(env.DSH_REPO_EVENT_STATE, 'utf8'))).toEqual({ ready: true })
@@ -613,8 +622,24 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     const response = frames.flatMap(frame => frame.value?.type === 'event' && frame.value.event?.type === 'assistant/message'
       ? [frame.value.event.data] : []).findLast(data => data.turn > 1 && data.message.content.some(block => block.type === 'text' && block.text.trim()))
     const responseText = response?.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
-    expect(responseText?.trim().length).toBeGreaterThan(0)
-    const visibleReply = responseText.split(/\n\s*\n/u)[0].replace(/^#{1,6}\s+/u, '').replace(/[`*_]/gu, '').replace(/\s+/gu, ' ').trim()
+    const outcomeNotices = () => query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json,created_at FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-goals-wake/v1' AND json_extract(intent_json, '$.metadata.\"dsh.native-notice.sessionId\"') = ?", sessionId)
+    if (!responseText?.trim()) await expect.poll(() => outcomeNotices().filter(row => row.status === 'accepted').length).toBe(1)
+    const notices = outcomeNotices()
+    let outcomeNotice
+    if (notices.length > 0) {
+      expect(notices).toHaveLength(1)
+      await expect.poll(() => outcomeNotices()[0]?.status).toBe('accepted')
+      outcomeNotice = outcomeNotices()[0]
+      const intent = JSON.parse(outcomeNotice.intent_json)
+      expect(intent.text).toBe('目标已通过独立验收并完成。')
+      expect(intent.idempotencyKey).toMatch(/^goal-wake-completion-notice:[0-9a-f]{64}:/u)
+      expect(outcomeNotice.created_at).toBeGreaterThanOrEqual(Math.max(...achievedOutcomes.map(receipt => receipt.completedAt)))
+      expect(Number(intent.metadata['dsh.native-notice.expiresAt'])).toBeGreaterThan(outcomeNotice.created_at)
+      expect(intent.metadata['dsh.native-notice.sessionId']).toBe(sessionId)
+    }
+    const finalText = outcomeNotice ? JSON.parse(outcomeNotice.intent_json).text : responseText
+    expect(finalText?.trim().length).toBeGreaterThan(0)
+    const visibleReply = finalText.split(/\n\s*\n/u)[0].replace(/^#{1,6}\s+/u, '').replace(/[`*_]/gu, '').replace(/\s+/gu, ' ').trim()
     expect(prompt.replace(/\s+/gu, ' ')).not.toContain(visibleReply)
     await expect(activePage.getByText(visibleReply, { exact: true })).toBeVisible()
     const sessionTitle = await activePage.getByRole('navigation', { name: 'Session hierarchy' }).getByRole('button').first().innerText()
@@ -627,6 +652,10 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     observePage(activePage, http, transport, streams, frames); await activePage.goto(host.url)
     await selectRestoredSession(activePage, sessionTitle)
     await expect(activePage.getByText(visibleReply, { exact: true })).toBeVisible()
+    if (outcomeNotice) expect(outcomeNotices()).toEqual([outcomeNotice])
+    const afterRestartCalls = (await readFile(observerLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    const dispatches = events => events.filter(item => item.event === 'dispatch' || item.event === 'tool-dispatch')
+    expect(dispatches(afterRestartCalls)).toEqual(dispatches(calls))
     const restored = query(join(home, 'assistant-goals/web.sqlite'), 'SELECT * FROM goal_records WHERE id = ?', goal.id)[0]
     expect({ native: JSON.parse(restored.native_json), scope: JSON.parse(restored.scope_json) }).toEqual({ native, scope })
     expect(createHash('sha256').update(JSON.stringify(query(ledger, "SELECT id, status, artifact_binding_json FROM isolation_jobs WHERE status = 'succeeded' AND artifact_binding_json IS NOT NULL ORDER BY id"))).digest('hex')).toBe(sourceDigest)
@@ -650,7 +679,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT sequence,event_id,occurred_at,status FROM event_outbox WHERE trigger_id LIKE '%repository-events' ORDER BY sequence")).toEqual(repositoryDelivery.eventSource.events)
     }
     await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ route: route.proof, sessionId, goalId: goal.id, scope, native,
-      calls, approvals: approvals.length, sourceJobs, receipts, ...(repositoryDelivery ? { repositoryDelivery } : {}), resultFeedback: { turn: response.turn, visibleReply }, restart: { sameGoal: true, sameSourceJobEvidence: true, replyVisible: true, ...(repositoryEvents ? { waitedThenRestarted: true } : {}) },
+      calls, approvals: approvals.length, sourceJobs, receipts, ...(repositoryDelivery ? { repositoryDelivery } : {}), resultFeedback: { kind: outcomeNotice ? 'verified-native-notice' : 'native-session-reply', ...(response ? { turn: response.turn } : {}), visibleReply, ...(outcomeNotice ? { notice: outcomeNotice } : {}) }, restart: { sameGoal: true, sameSourceJobEvidence: true, sameModelAndToolDispatches: true, replyVisible: true, ...(repositoryEvents ? { waitedThenRestarted: true } : {}) },
       limitation: 'Real gateway integration evidence only; it does not establish a GitHub PR lifecycle, token/USD hard limits, or long-running autonomy.' }, null, 2), { mode: 0o600 })
   } catch (error) { failed = true; throw error } finally {
     try {
@@ -666,7 +695,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       const toolEvents = frames.flatMap(frame => frame.value?.type === 'event' && ['tool/call', 'tool/result'].includes(frame.value.event?.type) ? [frame.value.event] : [])
       await writeFile(testInfo.outputPath('tool-events.json'), sanitize(JSON.stringify(toolEvents, null, 2)), { mode: 0o600 })
       if (failed && !new URL(activePage.url()).searchParams.has('token')) await writeFile(testInfo.outputPath('failure-dom.txt'), sanitize(await activePage.locator('body').innerText().catch(() => '')), { mode: 0o600 })
-    } finally { try { if (host) { await host.stop(); await writeFile(testInfo.outputPath('host.log'), host.log(), { mode: 0o600 }) } } finally {
+    } finally { try { if (host) { await writeFile(testInfo.outputPath('host.log'), host.log(), { mode: 0o600 }); await host.stop() } } finally {
       const retain = failed && process.env.DSH_REPO_RETAIN_FAILURE === '1'
       // Persist this before best-effort server/browser shutdown: a shutdown
       // error must never erase the only inspectable failed profile.

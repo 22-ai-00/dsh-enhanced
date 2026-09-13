@@ -317,6 +317,54 @@ describe('durable goal wake scheduling protocol', () => {
     expect(() => resolve()).toThrow('wake authority is unavailable')
   })
 
+  it('records the bounded result-publication stage when an exact event wake cannot publish', async () => {
+    const f = await harness(); f.proveCompletion(true)
+    const delivery = f.ctx.get('assistantDelivery') as unknown as { goalWakeResultVersion?: () => number; enqueueScheduledGoalResult?: (input: unknown) => unknown }
+    delivery.goalWakeResultVersion = () => 1
+    delivery.enqueueScheduledGoalResult = () => { throw new Error('typed result publication denied') }
+    const scheduled = f.runtime.materialize({ ...intent(f.value), id: 'goal-event-wake-stage-proof', at: Date.now() - 10, expiresAt: Date.now() + 10_000 })
+    await expect(executeWake(f, scheduled)).resolves.toMatchObject({ outcome: 'unknown', failureCode: 'goal-wake-result-publication-unconfirmed' })
+    expect(f.runtime.inspect(f.value.scope, f.value.id)).toMatchObject([{ state: 'unknown' }])
+  })
+
+  it('rejects an extra native revision after Delivery settlement before publication', async () => {
+    const f = await harness(true); f.proveCompletion(true); f.acceptPause(true)
+    const delivery = f.ctx.get('assistantDelivery') as unknown as { goalWakeResultVersion?: () => number; enqueueScheduledGoalResult?: (input: { resolveOutcomeFeedbackTarget(): unknown }) => unknown }
+    delivery.goalWakeResultVersion = () => 1
+    delivery.enqueueScheduledGoalResult = input => input.resolveOutcomeFeedbackTarget()
+    f.resumeScheduledGoal.mockImplementationOnce(async input => {
+      const agent = { session: { id: f.value.native.sessionId } } as Agent
+      input.beforeResume(agent)
+      f.value.native.phase = 'paused'; f.value.native.revision += 2; f.value.native.roundsStarted += 1
+      await input.settle(agent, new AbortController().signal)
+      f.value.native.phase = 'complete'; f.value.native.revision += 1
+      return { outcome: 'succeeded' as const, dispatched: true, quiescent: true }
+    })
+    const scheduled = f.runtime.materialize({ ...intent(f.value), id: 'goal-event-wake-late-terminal', at: Date.now() - 10, expiresAt: Date.now() + 10_000 })
+    await expect(executeWake(f, scheduled)).resolves.toMatchObject({ outcome: 'unknown', failureCode: 'goal-wake-terminal-current-unconfirmed' })
+  })
+
+  it.each(['verified', 'missing-settlement', 'missing-proof', 'not-quiescent'])('publishes only a verified successor of a settled event pause (%s)', async mode => {
+    const f = await harness(true, true); f.proveCompletion(true); f.acceptPause(true)
+    const delivery = f.ctx.get('assistantDelivery') as unknown as { goalWakeResultVersion?: () => number; enqueueScheduledGoalResult?: (input: { resolveOutcomeFeedbackTarget(): unknown }) => unknown }
+    delivery.goalWakeResultVersion = () => 1
+    delivery.enqueueScheduledGoalResult = input => input.resolveOutcomeFeedbackTarget()
+    f.resumeScheduledGoal.mockImplementationOnce(async input => {
+      const agent = { session: { id: f.value.native.sessionId } } as Agent
+      input.beforeResume(agent)
+      Object.assign(f.value.native, { phase: 'paused', revision: f.value.native.revision + 2, roundsStarted: f.value.native.roundsStarted + 1 })
+      if (mode !== 'missing-settlement') await input.settle(agent, new AbortController().signal)
+      expect(f.value.native.phase).toBe('paused')
+      Object.assign(f.value.native, { phase: 'complete', revision: f.value.native.revision + 1 })
+      if (mode === 'missing-proof') f.proveCompletion(false)
+      return { outcome: 'succeeded' as const, dispatched: true, quiescent: mode !== 'not-quiescent' }
+    })
+    const scheduled = f.runtime.materialize({ ...intent(f.value), id: 'goal-event-wake-verified-late-terminal', at: Date.now() - 10, expiresAt: Date.now() + 10_000 })
+    await expect(executeWake(f, scheduled)).resolves.toMatchObject({ outcome: mode === 'verified' ? 'succeeded' : 'unknown' })
+    expect(f.settleCalls).toBe(mode === 'missing-settlement' ? 0 : 1)
+    expect(f.outcomeFeedbackTarget).toHaveBeenCalledTimes(mode === 'verified' ? 1 : 0)
+  })
+
   it('does not publish an older successful assessment when this wake has no exact terminal outcome', async () => {
     const f = await harness()
     f.resumeScheduledGoal.mockImplementationOnce(async input => {

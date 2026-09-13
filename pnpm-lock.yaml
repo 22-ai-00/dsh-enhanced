@@ -1577,6 +1577,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
         version: 4.0.2(@deepseek-ai/cordis-plugin-include@1.0.7)(@deepseek-ai/cordis-plugin-loader@1.0.3)
+      '@dsh-enhanced/assistant-actions':
+        specifier: workspace:*
+        version: link:../assistant-actions
       '@dsh-enhanced/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations

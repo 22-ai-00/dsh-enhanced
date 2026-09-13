@@ -38,7 +38,9 @@ export class GoalOutcomeRuntime {
     private readonly current: (agent: Agent) => GoalRecord,
     private readonly runs: (scope: GoalScope, goalId: string) => readonly GoalExecutionRun[],
     private readonly stepMaxDurationMs: number,
-    private readonly assertDependencies: (record: GoalRecord) => void) {
+    private readonly assertDependencies: (record: GoalRecord) => void,
+    private readonly acceptsPausedEventWaitSettlement: (record: GoalRecord, run: GoalExecutionRun, agent: Agent) => boolean = () => false,
+    private readonly acceptsHistoricalPausedEventWaitCompletion: (record: GoalRecord, wake: Readonly<{ sessionId: string; goalId: string; revision: number; roundsStarted: number; maxGoalRounds: number }>, run: GoalExecutionRun) => boolean = () => false) {
     this.#store = new GoalOutcomeStore(path)
     this.#store.recoverIncomplete()
     ctx.on('assistant-verifier/receipt', notice => {
@@ -164,6 +166,35 @@ export class GoalOutcomeRuntime {
     try { await this.#settle(agent, run, assertCurrent) }
     finally { if (id !== undefined) this.#settling.delete(id) }
   }
+  /** A receipt must bind this dispatched assessment and still be usable now. */
+  #freshVerdict(assessment: GoalOutcomeAssessment): boolean {
+    if (assessment.execution === undefined) return false
+    const readback = this.ctx.get('assistantVerifier', false)?.inspectAcceptedTask(assessment.contract.id)
+    if (readback === null || readback === undefined || readback.receipt === null || !same(readback.contract, assessment.contract)
+      || !same(readback.execution, { ...assessment.execution, executionRef: assessment.contract.task.ref })) return false
+    try {
+      const receipt = validateTaskVerificationReceipt(assessment.contract, readback.receipt)
+      return receipt.completedAt >= assessment.execution.completedAt && receipt.completedAt <= Date.now() && receipt.validUntil > Date.now()
+    } catch { return false }
+  }
+  /** Drive only enough bounded verifier work to obtain this assessment's first verdict. */
+  async #awaitCurrentVerdict(registration: TaskAcceptanceRegistration, assessment: GoalOutcomeAssessment, run: GoalExecutionRun, check: () => void): Promise<boolean> {
+    const deadline = Math.min(assessment.contract.expiresAt, run.intent.admission.expiresAt + assessment.contract.bounds.maxDurationMs)
+    const verifier = this.ctx.get('assistantVerifier', false)!
+    const monotonicDeadline = performance.now() + Math.max(0, deadline - Date.now())
+    while (Date.now() < deadline && performance.now() < monotonicDeadline) {
+      if (this.#registration !== registration || this.#ready() !== registration) throw new Error('assistant-goals: assessment verifier changed')
+      check()
+      if (this.#freshVerdict(assessment)) return true
+      await verifier.tick()
+      if (this.#freshVerdict(assessment)) return true
+      const remaining = Math.max(0, monotonicDeadline - performance.now())
+      if (remaining > 0) await new Promise<void>(resolve => setTimeout(resolve, Math.min(25, remaining)))
+    }
+    // A delayed or unavailable verifier never turns a completed native run into
+    // success. Its durable pending/unknown result remains the only later nudge.
+    return false
+  }
   async #settle(agent: Agent, run: GoalExecutionRun, assertCurrent: () => void): Promise<void> {
     if (!this.#active) return
     const registration = this.#ready()
@@ -185,21 +216,17 @@ export class GoalOutcomeRuntime {
         && record.native.sessionId === assessment.definition.sessionId && record.native.goalId === assessment.definition.nativeGoalId
     } catch { valid = false }
     this.#store.finish(assessment.contract.task.ref, { status: valid ? 'succeeded' : 'unknown', quiescent: valid, completedAt: Date.now() })
+    const settledAssessment = this.#store.getByContract(accepted.contractId)
+    if (settledAssessment === undefined || settledAssessment.execution === undefined) throw new Error('assistant-goals: assessment settlement missing')
     if (valid) this.#fences.set(accepted.contractId, { agent, check })
     await registration.completed(accepted)
     if (this.#registration !== registration) throw new Error('assistant-goals: assessment verifier changed')
-    const verifier = this.ctx.get('assistantVerifier', false)!
-    // The first call can join a tick that selected its one job before this
-    // assessment was admitted. The verifier registers its slot-clearing
-    // finally before returning the promise, so awaiting it lets the second
-    // call start or join a bounded post-admission cycle.
-    await verifier.tick()
-    if (this.#registration !== registration || this.#ready() !== registration) throw new Error('assistant-goals: assessment verifier changed')
-    if (valid) check()
-    if (this.#registration !== registration || this.#ready() !== registration) throw new Error('assistant-goals: assessment verifier changed')
-    await verifier.tick()
-    if (!valid) return
+    if (!valid) { await this.ctx.get('assistantVerifier', false)!.tick(); return }
+    let received: boolean
     check()
+    received = await this.#awaitCurrentVerdict(registration, settledAssessment, run, check)
+    check()
+    if (!received) return
     if (this.#ready() !== registration) throw new Error('assistant-goals: assessment verifier changed')
     const record = this.current(agent)
     const outcome = this.view(record)
@@ -223,9 +250,12 @@ export class GoalOutcomeRuntime {
       && record.native.roundsStarted === run.intent.admission.round
     const exhausted = record.native.revision === run.intent.task.goal.nativeRevision + 1 && record.native.phase === 'blocked'
       && record.native.roundsStarted === run.intent.admission.maxGoalRounds
+    const pausedEventWait = record.native.revision === run.intent.task.goal.nativeRevision + 1 && record.native.phase === 'paused'
+      && record.native.roundsStarted === run.intent.admission.round
+      && this.acceptsPausedEventWaitSettlement(record, run, agent)
     // Pre-step runs before newly claimed goal messages are appended. A later
     // admitted round requires its own assessment; revision alone cannot prove it.
-    if (!exact && !exhausted) return false
+    if (!exact && !exhausted && !pausedEventWait) return false
     const goals = this.ctx.get('goals', false)
     const native = goals?.get(agent)
     if (goals === undefined || native === undefined || String(native.id) !== record.native.goalId || native.revision !== record.native.revision) return false
@@ -246,11 +276,11 @@ export class GoalOutcomeRuntime {
       const phase = record.native.phase
       const expectedOutcome = phase === 'complete' ? 'achieved' : phase === 'blocked' ? 'not-achieved' : undefined
       const directTerminal = record.native.revision === wake.revision + 2
-      const verifiedAfterBlocked = phase === 'complete' && record.native.revision === wake.revision + 3
+      const afterExtraRound = phase === 'complete' && record.native.revision === wake.revision + 3
       if (expectedOutcome === undefined || record.native.sessionId !== wake.sessionId || record.native.goalId !== wake.goalId
         || record.native.maxGoalRounds !== wake.maxGoalRounds || record.native.roundsStarted <= wake.roundsStarted
-        || record.native.roundsStarted > wake.maxGoalRounds || !directTerminal && !verifiedAfterBlocked
-        || (phase === 'blocked' || verifiedAfterBlocked) && record.native.roundsStarted !== wake.maxGoalRounds
+        || record.native.roundsStarted > wake.maxGoalRounds || !directTerminal && !afterExtraRound
+        || phase === 'blocked' && record.native.roundsStarted !== wake.maxGoalRounds
         || record.checkpoint.dependencies.length > 0 && record.checkpoint.dependencyBindings === undefined) return undefined
       const runs = this.runs(record.scope, record.id).filter(item => item.execution?.status === 'succeeded' && item.execution.quiescent
         && item.dispatchedAt !== undefined && same(item.intent.scope, record.scope)
@@ -261,6 +291,9 @@ export class GoalOutcomeRuntime {
         && item.intent.admission.round === record.native.roundsStarted && item.intent.admission.maxGoalRounds === wake.maxGoalRounds)
       if (runs.length !== 1) return undefined
       const run = runs[0]!
+      const verifiedAfterBlocked = afterExtraRound && record.native.roundsStarted === wake.maxGoalRounds
+      const verifiedAfterPausedEventWait = afterExtraRound && this.acceptsHistoricalPausedEventWaitCompletion(record, wake, run)
+      if (afterExtraRound && !verifiedAfterBlocked && !verifiedAfterPausedEventWait) return undefined
       const assessment = this.#store.getByTriggerRun(record.scope, record.id, record.definition.version, run.intent.runId)
       if (assessment === undefined || assessment.execution?.status !== 'succeeded' || !assessment.execution.quiescent
         || !same(assessment.definition.scope, record.scope) || assessment.definition.goalId !== record.id

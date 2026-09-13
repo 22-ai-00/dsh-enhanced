@@ -21,7 +21,7 @@ interface GoalAdmissionTaskBase {
     cases: Array<{ stdin: string; expectedStdout: string; expectedExitCode: number }>
   }
   wake?: { maxDelayMs: number; runTimeoutMs: number; maxRuns: number }
-  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle?: string; externalGrantId?: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step'; events?: { credentialHandle: string; maxPolls: number; maxFires: number; pollIntervalMs: number; requestTimeoutMs: number }; outcome?: Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> }
+  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle?: string; externalGrantId?: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step'; events?: { credentialHandle?: string; maxPolls: number; maxFires: number; pollIntervalMs: number; requestTimeoutMs: number }; outcome?: Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> }
 }
 /** Legacy v1 fixed DeepSeek route. Kept for existing private admission files. */
 export interface GoalAdmissionTaskV1 extends GoalAdmissionTaskBase {
@@ -131,13 +131,15 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
       || value.baseBranch === value.branch || !Number.isSafeInteger(value.expiresAt) || typeof value.openPullRequest !== 'boolean') fail('invalid repository delivery')
     integer(value.maxActions, value.openPullRequest ? 3 : 2, 10_000); integer(value.maxTotalBytes, 1, 64 * 1024 * 1024)
     if (value.events !== undefined) {
-      shape(value.events, ['credentialHandle', 'maxPolls', 'maxFires', 'pollIntervalMs', 'requestTimeoutMs'])
-      if (value.externalGrantId !== undefined || !value.outcome || typeof value.events.credentialHandle !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,199}$/u.test(value.events.credentialHandle)) fail('repository events require outcome and an existing observation credential')
+      shape(value.events, ['maxPolls', 'maxFires', 'pollIntervalMs', 'requestTimeoutMs'], ['credentialHandle'])
+      if (!value.outcome || (value.externalGrantId !== undefined
+        ? value.events.credentialHandle !== undefined
+        : typeof value.events.credentialHandle !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,199}$/u.test(value.events.credentialHandle))) fail('repository events require outcome and the matching broker or observation credential')
       integer(value.events.maxPolls, 2, 10000); integer(value.events.maxFires, 1, 100)
       integer(value.events.pollIntervalMs, 1000, 3600000); integer(value.events.requestTimeoutMs, 100, 30000)
       if (value.events.maxPolls <= value.events.maxFires || input.maxGoalRounds < 2) fail('repository event budget cannot cover observation and continuation')
       // Each native round may create one outcome assessment with up to three verifier attempts.
-      integer(value.maxActions, 3 + 12 * input.maxGoalRounds, 10000)
+      integer(value.maxActions, 3 + 12 * input.maxGoalRounds + (value.externalGrantId === undefined ? 0 : 4 * value.events.maxPolls), 10000)
       if (input.wake && (input.wake as { maxRuns: number }).maxRuns < value.events.maxFires + 1) fail('wake budget must cover delivery and allowed event continuations')
     }
     if (value.outcome !== undefined) {
@@ -174,7 +176,7 @@ function literalInteger(value: unknown): number | undefined {
 /** Accept only the public, credential-free broker projection used for this admission. */
 function externalProjection(value: unknown): {
   id: string; revision: number; grantDigest: string; owner: { principalDigest: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string; bindingId: string; bindingVersion: number; bindingGeneration: number }
-  sessionId: string; destination: { repository: string; branch: string; baseBranch?: string; paths: string[] }; expiresAt: number; maxActions: number; maxTotalBytes: number
+  sessionId: string; destination: { repository: string; branch: string; baseBranch?: string; paths: string[] }; expiresAt: number; maxActions: number; maxTotalBytes: number; maxCostUnits: number
   allowedOperations: string[]; allowedInspectKinds: string[]; verifiedDelivery?: { ownerRouteId: string; budgetId: string; acceptance?: string }
 } {
   const record = (input: unknown, required: string[], optional: string[] = []): Record<string, unknown> => {
@@ -196,7 +198,7 @@ function externalProjection(value: unknown): {
     || !Array.isArray(grant.allowedOperations) || grant.allowedOperations.some(operation => typeof operation !== 'string') || !Array.isArray(grant.allowedInspectKinds) || grant.allowedInspectKinds.some(kind => typeof kind !== 'string')
     || delivery !== undefined && (!text(delivery.ownerRouteId) || !text(delivery.budgetId) || delivery.acceptance !== undefined && !['goal-outcome', 'goal-step'].includes(String(delivery.acceptance)))) fail('invalid external repository grant')
   return { id: grant.id, revision: grant.revision, grantDigest: grant.grantDigest, owner: owner as { principalDigest: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string; bindingId: string; bindingVersion: number; bindingGeneration: number }, sessionId: grant.sessionId,
-    destination: { repository: destination.repository as string, branch: destination.branch as string, ...(destination.baseBranch === undefined ? {} : { baseBranch: destination.baseBranch as string }), paths: [...destination.paths] as string[] }, expiresAt: grant.expiresAt, maxActions: grant.maxActions, maxTotalBytes: grant.maxTotalBytes,
+    destination: { repository: destination.repository as string, branch: destination.branch as string, ...(destination.baseBranch === undefined ? {} : { baseBranch: destination.baseBranch as string }), paths: [...destination.paths] as string[] }, expiresAt: grant.expiresAt, maxActions: grant.maxActions, maxTotalBytes: grant.maxTotalBytes, maxCostUnits: grant.maxCostUnits,
     allowedOperations: [...grant.allowedOperations] as string[], allowedInspectKinds: [...grant.allowedInspectKinds] as string[], ...(delivery === undefined ? {} : { verifiedDelivery: delivery as { ownerRouteId: string; budgetId: string; acceptance?: string } }) }
 }
 function parse(source: string) {
@@ -278,6 +280,9 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
       || !isDeepStrictEqual([...grant.allowedInspectKinds].sort(), expectedInspections.sort())
       || grant.verifiedDelivery === undefined || grant.verifiedDelivery.ownerRouteId !== admissionId
       || grant.verifiedDelivery.budgetId !== `${admissionId}-runs` || (grant.verifiedDelivery.acceptance ?? 'goal-outcome') !== acceptance) fail('external repository grant does not exactly match this admission')
+    // Polls share the daemon's finite authority with delivery and independent
+    // outcome reads. Validate capacity without rewriting the issued grant.
+    if (repository.events && grant.maxCostUnits < 3 + 18 * task.maxGoalRounds + 6 * repository.events.maxPolls) fail('external repository grant cannot cover observation and outcome cost limits')
     return grant
   })()
   const managed = isSeq(verifier.get('profiles', true)) && sequence(verifier.get('profiles', true)).items.some(value => isMap(value) && String(value.get('id')).startsWith('goal-'))
@@ -415,16 +420,19 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
         if (typeof eventSupport?.normalizeEventTriggersConfig !== 'function' || typeof eventSupport.EVENT_OBSERVER_EXECUTOR !== 'string') fail('install matching event-triggers support for repository events')
         const { normalizeEventTriggersConfig, EVENT_OBSERVER_EXECUTOR } = eventSupport
         const events = repository.events, triggerId = `${admissionId}-repository-events`, automationId = `${triggerId}-source`, pollBudgetId = `${triggerId}-polls`, eventBudgetId = `${triggerId}-runs`
-        const eventHandles = keychain!.get('handles', true)
-        if (!isSeq(eventHandles)) fail('repository observation credential handle is unavailable')
-        untagged(eventHandles, 'credential handles')
-        const eventHandle = eventHandles.items.filter(item => isMap(item) && literalString(item.get('id', true)) === events.credentialHandle) as YAMLMap[]
-        if (eventHandle.length !== 1) fail('repository observation credential handle is unavailable')
-        const eventConsumers = eventHandle[0]!.get('consumers', true), eventPurposes = eventHandle[0]!.get('purposes', true)
-        if (!isSeq(eventConsumers) || !isSeq(eventPurposes) || (literalInteger(eventHandle[0]!.get('maxLeaseMs', true)) ?? 0) < events.requestTimeoutMs
-          || !eventConsumers.items.some(item => literalString(item) === 'dsh-enhanced-event-triggers') || !eventPurposes.items.some(item => literalString(item) === 'github.observe')) fail('repository observation handle must authorize event-triggers and github.observe')
+        if (!externalGrant) {
+          const eventHandles = keychain!.get('handles', true)
+          if (!isSeq(eventHandles)) fail('repository observation credential handle is unavailable')
+          untagged(eventHandles, 'credential handles')
+          const eventHandle = eventHandles.items.filter(item => isMap(item) && literalString(item.get('id', true)) === events.credentialHandle) as YAMLMap[]
+          if (eventHandle.length !== 1) fail('repository observation credential handle is unavailable')
+          const eventConsumers = eventHandle[0]!.get('consumers', true), eventPurposes = eventHandle[0]!.get('purposes', true)
+          if (!isSeq(eventConsumers) || !isSeq(eventPurposes) || (literalInteger(eventHandle[0]!.get('maxLeaseMs', true)) ?? 0) < events.requestTimeoutMs
+            || !eventConsumers.items.some(item => literalString(item) === 'dsh-enhanced-event-triggers') || !eventPurposes.items.some(item => literalString(item) === 'github.observe')) fail('repository observation handle must authorize event-triggers and github.observe')
+        }
         const observer = { workspace: input.workspace, preset: input.preset, principalId, principalRecordId: owner.id, principalVersion: owner.version, ownerRouteId: admissionId, expiresAt: repository.expiresAt, budgetId: eventBudgetId }
-        append(eventTriggers!, 'triggers', [{ id: triggerId, automationId, kind: 'github-repository', observerLifetime: 'goal', repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch, credentialHandle: events.credentialHandle,
+        append(eventTriggers!, 'triggers', [{ id: triggerId, automationId, kind: 'github-repository', observerLifetime: 'goal', repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch,
+          ...(externalGrant ? { externalGrant: { id: externalGrant.id, revision: externalGrant.revision, digest: externalGrant.grantDigest } } : { credentialHandle: events.credentialHandle }),
           fireWhen: 'changed', debounceMs: 0, cooldownMs: 0, maxFires: events.maxFires, observer }])
         set(eventTriggers!, 'pollerEnabled', true, [false]); set(eventTriggers!, 'pollIntervalMs', events.pollIntervalMs, [5000]); set(eventTriggers!, 'requestTimeoutMs', events.requestTimeoutMs, [10000])
         set(goals, 'eventWaits', true, [false])
@@ -432,7 +440,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
           { id: eventBudgetId, metric: 'automation-runs', limit: events.maxFires, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }])
         append(policy, 'rules', [
           { id: `${triggerId}-observe`, effect: 'allow', subject: { kind: 'background', id: `event-triggers:${triggerId}`, workspace: input.workspace, principal: principalId }, actions: ['observe'], resource: { kind: 'network', id: `https://api.github.com/repos/${repository.repository}` }, context: { initiators: ['background'] }, budget: { id: pollBudgetId, amount: 1 } },
-          { id: `${triggerId}-credential`, effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: events.credentialHandle }, context: { initiators: ['background'] } },
+          ...(externalGrant ? [] : [{ id: `${triggerId}-credential`, effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: events.credentialHandle! }, context: { initiators: ['background'] } }]),
           { id: `${triggerId}-ingest`, effect: 'allow', subject: { kind: 'external', id: `event-triggers:${triggerId}`, workspace: input.workspace }, actions: ['ingest'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['external'] } },
           { id: `${triggerId}-host`, effect: 'allow', subject: { kind: 'background', id: EVENT_OBSERVER_EXECUTOR, workspace: input.workspace, principal: principalId }, actions: ['observe', 'reconcile', 'execute', 'pause'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['background'] } },
           { id: `${triggerId}-execute`, effect: 'allow', subject: { kind: 'background', id: automationId, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['background'] } },

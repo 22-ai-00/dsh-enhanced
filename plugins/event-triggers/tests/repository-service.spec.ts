@@ -2,13 +2,16 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { Context } from '@deepseek-ai/cordis'
+import { existsSync } from 'node:fs'
+import { Context, Service } from '@deepseek-ai/cordis'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { EventTriggersService } from '../src/service.ts'
 import { EVENT_OBSERVER_EXECUTOR } from '../src/observer.ts'
+import eventTriggersPlugin from '../src/index.ts'
+import type { RepositoryEventObservationPort } from '../src/actions-port.ts'
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -17,6 +20,12 @@ const branch = 'delivery/fix'
 const baseBranch = 'main'
 const head = 'a'.repeat(40)
 
+class RepositoryActionsFixture extends Service {
+  constructor(ctx: Context, readonly readRepositoryEventObservation: RepositoryEventObservationPort['readRepositoryEventObservation']) {
+    super(ctx, 'assistantActions')
+  }
+}
+
 afterEach(async () => {
   await Promise.all(contexts.splice(0).map(context => context.fiber.restart()))
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
@@ -24,7 +33,7 @@ afterEach(async () => {
 
 function response(body: unknown): Response { return new Response(JSON.stringify(body), { status: 200 }) }
 
-async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = 'shared') {
+async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = 'shared', external = false) {
   const root = await mkdtemp(join(tmpdir(), 'event-triggers-repository-service-'))
   roots.push(root)
   const ctx = new Context()
@@ -42,9 +51,6 @@ async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = '
     { id: 'event-ingest', effect: 'allow', subject: { kind: 'external', id: 'event-triggers:repository', workspace: root }, actions: ['ingest'], resource: { kind: 'automation', id: 'repository-target' }, context: { initiators: ['external'] } },
   ] })
   await ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0, allowUnbudgetedExecution: true })
-  await ctx.plugin({ name: 'credentials-keychain-fixture', apply(runtime: Context) {
-    new CredentialsKeychainService(runtime, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'environment', environmentName: 'GITHUB_TOKEN', consumers: ['dsh-enhanced-event-triggers'], purposes: ['github.observe'], maxLeaseMs: 30_000 }] }, { env: { GITHUB_TOKEN: 'repository-fixture-token' } })
-  } })
   let conclusion = 'success'
   let reviewState = 'APPROVED'
   let hang = false; let release: (() => void) | undefined
@@ -59,16 +65,102 @@ async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = '
     if (hang) return await new Promise<Response>((resolve, reject) => { release = () => { hang = false; resolve(result()) }; init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true }) })
     return result()
   })
-  const config = { databasePath: join(root, 'events.sqlite'), pollerEnabled: false, pollIntervalMs: 1_000, requestTimeoutMs, maxBodyBytes: 16_384, triggers: [{ id: 'repository', kind: 'github-repository' as const, automationId: 'repository-target', repository, branch, baseBranch, credentialHandle: 'github', fireWhen: 'changed' as const, debounceMs: 0, cooldownMs: 0, maxFires: 10, observerLifetime: lifetime, observer: { workspace: root, preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: Date.now() + 60_000, budgetId: 'repository-observations' } }] }
+  let removeActions: (() => Promise<void>) | undefined
+  const provideActions = async (reader?: RepositoryEventObservationPort['readRepositoryEventObservation']) => {
+    const actionReader = reader ?? vi.fn(async (_input: unknown, _signal: AbortSignal) => {
+      const result = () => Object.freeze({ protocol: 'assistant-actions/repository-event/v1' as const, fingerprint: `sha256:${(conclusion === 'success' ? 'a' : 'b').repeat(64)}`, truthy: true as const })
+      if (!hang) return result()
+      return await new Promise<ReturnType<typeof result>>(resolvePromise => {
+        release = () => { hang = false; resolvePromise(result()) }
+      })
+    })
+    const fiber = ctx.plugin({ name: 'repository-actions-fixture', apply(runtime: Context) { new RepositoryActionsFixture(runtime, actionReader) } })
+    await fiber
+    removeActions = () => fiber.dispose()
+    return actionReader
+  }
+  if (external) {
+    await provideActions()
+  } else {
+    await ctx.plugin({ name: 'credentials-keychain-fixture', apply(runtime: Context) {
+      new CredentialsKeychainService(runtime, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'environment', environmentName: 'GITHUB_TOKEN', consumers: ['dsh-enhanced-event-triggers'], purposes: ['github.observe'], maxLeaseMs: 30_000 }] }, { env: { GITHUB_TOKEN: 'repository-fixture-token' } })
+    } })
+  }
+  const config = { databasePath: join(root, 'events.sqlite'), pollerEnabled: false, pollIntervalMs: 1_000, requestTimeoutMs, maxBodyBytes: 16_384, triggers: [{ id: 'repository', kind: 'github-repository' as const, automationId: 'repository-target', repository, branch, baseBranch, ...(external ? { externalGrant: { id: 'operator-grant', revision: 1, digest: 'd'.repeat(64) } } : { credentialHandle: 'github' }), fireWhen: 'changed' as const, debounceMs: 0, cooldownMs: 0, maxFires: 10, observerLifetime: external ? 'goal' as const : lifetime, observer: { workspace: root, preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: Date.now() + 60_000, budgetId: 'repository-observations' } }] }
   const install = async () => {
     let service!: EventTriggersService
     const fiber = await ctx.plugin({ name: 'dsh-enhanced-event-triggers', apply(runtime: Context) { service = new EventTriggersService(runtime, config, { fetcher, lookup: async () => [{ address: '93.184.216.34', family: 4 }] }) } })
     return { service, fiber }
   }
-  return { ctx, root, fetcher, install, change: () => { conclusion = 'failure' }, changeReview: () => { reviewState = 'CHANGES_REQUESTED' }, revokeRoute: () => { routeGeneration = 2 }, hang: () => { hang = true }, release: () => release?.(), hasRelease: () => release !== undefined, completeGoal: () => { goal = { ...goal, native: { ...goal.native, revision: 5, phase: 'complete' } } }, goal }
+  const installDefault = async () => {
+    const fiber = await ctx.plugin(eventTriggersPlugin, config)
+    return { service: ctx.get('eventTriggers') as EventTriggersService, fiber }
+  }
+  return { ctx, root, fetcher, install, installDefault, provideActions, removeActions: async () => await removeActions?.(), change: () => { conclusion = 'failure' }, changeReview: () => { reviewState = 'CHANGES_REQUESTED' }, revokeRoute: () => { routeGeneration = 2 }, hang: () => { hang = true }, release: () => release?.(), hasRelease: () => release !== undefined, completeGoal: () => { goal = { ...goal, native: { ...goal.native, revision: 5, phase: 'complete' } } }, goal }
 }
 
 describe('GitHub repository trigger service composition', () => {
+  it('uses the live assistantActions port without a Keychain for an external grant', async () => {
+    const f = await fixture(1_000, 'goal', true), installed = await f.install()
+    await installed.service.pollOnce()
+    expect(f.fetcher).not.toHaveBeenCalled()
+    expect(f.ctx.get('credentialsKeychain', false)).toBeUndefined()
+    const actions = f.ctx.get('assistantActions', false) as { readRepositoryEventObservation: ReturnType<typeof vi.fn> }
+    expect(actions.readRepositoryEventObservation).toHaveBeenCalledWith(expect.objectContaining({ triggerId: 'repository', grantId: 'operator-grant', grantRevision: 1, grantDigest: 'd'.repeat(64), repository, branch, baseBranch }), expect.any(AbortSignal))
+    const baseline = installed.service.sourceSnapshot('repository')
+    const claim = { triggerId: 'repository', scope: f.goal.scope, goalId: f.goal.id, definition: f.goal.definition,
+      native: { sessionId: f.goal.native.sessionId, goalId: f.goal.native.goalId, revision: f.goal.native.revision }, configDigest: baseline.configDigest, automationId: baseline.target.automationId }
+    expect(installed.service.claimGoalSource(claim)).toBe(true)
+    f.change(); await installed.service.pollOnce()
+    expect(actions.readRepositoryEventObservation).toHaveBeenLastCalledWith(expect.objectContaining({ goal: { id: 'goal-one', sessionId: 'session-one', nativeGoalId: 'native-one', definitionVersion: 1, definitionDigest: 'c'.repeat(64) } }), expect.any(AbortSignal))
+    expect(installed.service.firstEventAfter(baseline, 0, Date.now() + 1_000)).toMatchObject({ sequence: 1 })
+  })
+
+  it('suppresses a late external observation when the owner route is revoked', async () => {
+    const f = await fixture(1_000, 'goal', true), installed = await f.install()
+    await installed.service.pollOnce()
+    f.change(); f.hang()
+    const polling = installed.service.pollOnce()
+    await vi.waitFor(() => expect(f.hasRelease()).toBe(true))
+    f.revokeRoute()
+    await expect(polling).rejects.toThrow(/owner route|abort|permission/i)
+    expect(installed.service.health()).toMatchObject({ pendingEvents: 0, retryingEvents: 0, deliveredEvents: 0 })
+  })
+
+  it('rejects a missing or incompatible Actions capability before opening the event store', async () => {
+    for (const missing of [true, false]) {
+      const f = await fixture(1_000, 'goal', true)
+      await f.removeActions()
+      if (!missing) f.ctx.provide('assistantActions' as never, {} as never)
+      await expect(f.install()).rejects.toThrow('active assistantActions repository observation service is required')
+      expect(existsSync(join(f.root, 'events.sqlite'))).toBe(false)
+    }
+  })
+
+  it('reloads the default plugin around assistantActions replacement and rejects the old pending response', async () => {
+    const f = await fixture(1_000, 'goal', true), first = await f.installDefault()
+    expect(f.ctx.get('assistantActions')).not.toBe(f.ctx.get('assistantActions'))
+    await first.service.pollOnce()
+    f.change(); f.hang()
+    const pending = first.service.pollOnce()
+    await vi.waitFor(() => expect(f.hasRelease()).toBe(true))
+    await f.removeActions()
+    await expect(pending).rejects.toThrow(/disposed|abort|assistantActions/i)
+    f.release()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(f.ctx.get('eventTriggers', false)).toBeUndefined()
+    expect(() => first.service.health()).toThrow(/disposed/i)
+    const replacement = vi.fn(async () => Object.freeze({ protocol: 'assistant-actions/repository-event/v1' as const, fingerprint: `sha256:${'b'.repeat(64)}`, truthy: true as const }))
+    await f.provideActions(replacement)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const second = f.ctx.get('eventTriggers') as EventTriggersService
+    expect(second).toBeDefined(); expect(second).not.toBe(first.service)
+    await second.pollOnce()
+    expect(replacement).toHaveBeenCalledOnce()
+    expect(second.sourceSnapshot('repository').highWaterSequence).toBe(1)
+  })
+
   it('supports the minimum request timeout with a valid credential lease', async () => {
     const f = await fixture(100), installed = await f.install()
     await installed.service.pollOnce()

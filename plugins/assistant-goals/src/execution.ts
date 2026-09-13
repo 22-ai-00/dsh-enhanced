@@ -218,11 +218,16 @@ export class GoalExecutionRuntime {
   }
 
   /** Terminal wake checks can run on either side of the asynchronous settlement. */
-  acceptsPausedEventWaitSettlement = (record: GoalRecord, agent?: Agent): boolean => {
+  acceptsPausedEventWaitSettlement = (record: GoalRecord, expected?: GoalExecutionRun, agent?: Agent): boolean => {
     if (!this.#active || record.native.phase !== 'paused') return false
-    if (agent !== undefined && this.#rounds.has(agent)) return this.hasAcceptedPausedEventWait(agent)
+    if (agent !== undefined && this.#rounds.has(agent)) {
+      const round = this.#rounds.get(agent)!
+      return (expected === undefined || round.run.intent.runId === expected.intent.runId)
+        && this.hasAcceptedPausedEventWait(agent)
+    }
     const runs = this.#store?.listForGoal(record.scope, record.id) ?? []
     return runs.some(run => run.execution?.status === 'succeeded' && run.execution.quiescent
+      && (expected === undefined || run.intent.runId === expected.intent.runId)
       && run.intent.task.goal.nativeGoalId === record.native.goalId && run.intent.task.goal.sessionId === record.native.sessionId
       && run.intent.task.goal.nativeRevision + 1 === record.native.revision && run.intent.admission.round === record.native.roundsStarted
       && run.intent.task.goal.definitionVersion === record.definition.version && run.intent.task.goal.definitionDigest === record.definition.digest)

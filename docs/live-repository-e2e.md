@@ -67,7 +67,7 @@ Run without either fixture flag:
 
 ```sh
 CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
-DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra \
+DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra \
 DSH_REPO_LIVE_GITHUB=1 \
 DSH_REPO_LIVE_INPUT=/absolute/private/live-repository.json \
 pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs

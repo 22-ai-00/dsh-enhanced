@@ -289,7 +289,12 @@ export class GitHubBrokerServer {
     const controller = new AbortController()
     const state: ConnectionState = { socket, controller, verified: false, settled: false, totalTimer: timer(() => destroy(state, 'total deadline exceeded'), this.#options.totalTimeoutMs) }
     listener.connections.add(state)
-    socket.once('close', () => { clearTimers(state); listener.connections.delete(state); if (state.verified && !state.settled) controller.abort(new Error('client disconnected')) })
+    const onError = (): void => { destroy(state, 'peer socket error') }
+    socket.on('error', onError)
+    socket.once('close', () => {
+      clearTimers(state); listener.connections.delete(state); socket.off('error', onError)
+      if (!state.settled && !controller.signal.aborted) controller.abort(new Error('client disconnected'))
+    })
     const task = this.#serve(listener.kind, state).finally(() => listener.active.delete(task)); listener.active.add(task)
   }
   async #serve(kind: ListenerKind, state: ConnectionState): Promise<void> {

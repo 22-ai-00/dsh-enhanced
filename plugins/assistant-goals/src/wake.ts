@@ -212,9 +212,13 @@ export class GoalWakeRuntime {
     if (wake.state !== 'scheduled') return this.#result('unknown', 'goal-wake-prior-state', true)
     const intent = wake.intent
     let dispatched = false
+    // Persisted automation diagnostics may identify only this bounded stage;
+    // never serialize thrown values from a Host authority boundary.
+    let stage = 'delivery-resume'
     const signal = AbortSignal.any([input.signal, this.#lifecycle.signal])
     let terminalSettlement: GoalRecord | undefined
     let terminalOutcome: VerifiedWakeOutcome | undefined
+    let waitingSettlement: Readonly<GoalRecord['native']> | undefined
     let capability!: DeliveryGoalWakeCapability
     capability = Object.freeze({ attestation: intent.attestation,
       native: { goalId: intent.native.goalId, revision: intent.native.revision }, deadlineAt: intent.expiresAt, signal,
@@ -242,13 +246,18 @@ export class GoalWakeRuntime {
         if (settled.native.phase === 'complete' || settled.native.phase === 'blocked') {
           terminalSettlement = settled
           terminalOutcome = this.verifiedOutcome(settled, intent.native)
+        } else if (settled.native.phase === 'paused') {
+          waitingSettlement = Object.freeze({ ...settled.native })
         }
       },
       resolveOutcomeFeedbackTarget: () => {
         signal.throwIfAborted()
-        if (!this.#capabilities.has(capability) || !dispatched || this.outcomeFeedbackTarget === undefined
-          || terminalSettlement === undefined || terminalOutcome === undefined
-          || terminalSettlement.native.phase !== 'complete' && terminalSettlement.native.phase !== 'blocked') reject()
+        if (!this.#capabilities.has(capability) || !dispatched || this.outcomeFeedbackTarget === undefined) reject()
+        if (terminalSettlement === undefined || terminalOutcome === undefined) {
+          stage = 'result-publication-terminal-not-captured'
+          reject()
+        }
+        if (terminalSettlement.native.phase !== 'complete' && terminalSettlement.native.phase !== 'blocked') reject()
         const current = this.#current(intent, 'terminal')
         const currentOutcome = this.verifiedOutcome(current, intent.native)
         const wake = this.#store.get(intent.id)
@@ -267,17 +276,34 @@ export class GoalWakeRuntime {
       const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
       if (delivery === undefined) reject()
       const result = await delivery.resumeScheduledGoal(capability)
+      stage = 'delivery-result'
       if (result.dispatched !== dispatched) throw new Error('assistant-goals: wake dispatch disagreement')
       const succeeded = result.outcome === 'succeeded' && result.quiescent && dispatched && !signal.aborted
+      stage = 'terminal-current'
       const settled = succeeded ? this.#current(intent, 'terminal') : undefined
+      // Delivery's final drain may finish verification after settle observed a
+      // valid event pause. Rebind only that pause's exact verified successor;
+      // a missing settle call or a later unrelated revision grants no feedback.
+      if (settled?.native.phase === 'complete' && terminalSettlement === undefined
+        && waitingSettlement?.revision === intent.native.revision + 2
+        && settled.native.revision === waitingSettlement.revision + 1
+        && settled.native.roundsStarted === waitingSettlement.roundsStarted) {
+        const outcome = this.verifiedOutcome(settled, intent.native)
+        if (outcome?.objectiveStatus === 'achieved') {
+          terminalSettlement = settled
+          terminalOutcome = outcome
+        }
+      }
       if (succeeded && settled?.native.phase !== 'paused' && intent.id.startsWith('goal-event-wake-')) {
+        stage = 'result-publication'
         delivery.enqueueScheduledGoalResult(capability)
       }
+      stage = 'wake-finish'
       this.#store.finish(intent.id, succeeded ? 'succeeded' : dispatched ? 'unknown' : 'denied', Date.now())
       return this.#result(succeeded ? 'succeeded' : dispatched ? 'unknown' : 'failed', `goal-wake-${result.outcome}`, dispatched)
     } catch {
       if (this.#live) this.#store.finish(intent.id, dispatched ? 'unknown' : 'denied', Date.now())
-      return this.#result(dispatched ? 'unknown' : 'failed', 'goal-wake-execution-unconfirmed', dispatched)
+      return this.#result(dispatched ? 'unknown' : 'failed', `goal-wake-${stage}-unconfirmed`, dispatched)
     } finally { this.#capabilities.delete(capability) }
   }
 }

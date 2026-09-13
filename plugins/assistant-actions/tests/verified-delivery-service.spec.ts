@@ -34,12 +34,13 @@ async function fixture(acceptance?: 'goal-step', external = false) {
   const verifiedSnapshot = { protocol: 'assistant-goals/verified-artifacts/v1', acceptance: { validUntil: Date.now() + 30_000 }, files: [{ path: 'artifacts/release.txt', content: 'verified source', sha256: 'b'.repeat(64), jobId: 'job' }] }
   const snapshot = () => structuredClone(verifiedSnapshot)
   let registration: any; let proof: any = null
-  const goals = { trustedAcceptanceProducerGeneration: () => 'goals', registerTaskAcceptanceSink: (value: any) => { registration = value; return () => { registration = undefined } }, inspectAcceptedExecution: async () => proof, taskContext: () => ({ goal: { id: 'goal' } }), inspectWorkflowRunContext: vi.fn(() => ({ goalId: 'goal', nativeGoalId: 'native-goal', goalExecutionRunId: 'run', definition: { digest: 'd'.repeat(64), version: 1 } })), inspectOwnerGoalExecution: vi.fn((): any => ({ storedGoal: { definition: { digest: 'd'.repeat(64), version: 1 }, nativeAtLastObservation: { phase: 'complete', sessionId: 'owner-session', goalId: 'native-goal' } }, outcome: { status: 'achieved' } })), inspectOwnerVerifiedArtifacts: vi.fn(() => snapshot()), inspectOwnerAcceptedStepArtifacts: vi.fn(() => ({ ...snapshot(), protocol: 'assistant-goals/accepted-step-artifacts/v1' })) }
+  const goals = { trustedAcceptanceProducerGeneration: () => 'goals', registerTaskAcceptanceSink: (value: any) => { registration = value; return () => { registration = undefined } }, inspectAcceptedExecution: async () => proof, taskContext: () => ({ goal: { id: 'goal' } }), inspectGoalLifecycle: () => ({ definition: { digest: 'd'.repeat(64), version: 1 }, native: { sessionId: 'owner-session', goalId: 'native-goal', phase: 'active' } }), inspectWorkflowRunContext: vi.fn(() => ({ goalId: 'goal', nativeGoalId: 'native-goal', goalExecutionRunId: 'run', definition: { digest: 'd'.repeat(64), version: 1 } })), inspectOwnerGoalExecution: vi.fn((): any => ({ storedGoal: { definition: { digest: 'd'.repeat(64), version: 1 }, nativeAtLastObservation: { phase: 'complete', sessionId: 'owner-session', goalId: 'native-goal' } }, outcome: { status: 'achieved' } })), inspectOwnerVerifiedArtifacts: vi.fn(() => snapshot()), inspectOwnerAcceptedStepArtifacts: vi.fn(() => ({ ...snapshot(), protocol: 'assistant-goals/accepted-step-artifacts/v1' })) }
   const executors: any[] = [], reconciles: any[] = []; const automations = { registerHostExecutor: (executor: any) => { executors.push(executor); return () => {} }, reconcileSystem: (input: any) => { reconciles.push(input); return { definition: input.definition } } }
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', rules: [
     { id: 'agent', effect: 'allow', subject: { kind: 'agent', id: 'primary' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:verified' } },
     { id: 'background', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:verified' } },
+    { id: 'event-observe', effect: 'allow', subject: { kind: 'background', id: 'event-triggers:trigger', workspace: root, principal: 'owner' }, actions: ['observe'], resource: { kind: 'network', id: 'https://api.github.com/repos/owner/repository' } },
     { id: 'credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'github' } },
   ] })
   if (!external) await ctx.plugin(CredentialsKeychainService, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'linux-protected-file', path: join(root, 'secret'), consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }] })
@@ -255,6 +256,16 @@ describe('verified delivery Actions service', () => {
     expect(JSON.stringify(inspected)).toContain('succeeded')
     expect(JSON.stringify(inspected)).not.toContain('signature')
     expect(JSON.stringify(inspected)).not.toContain('server-hello')
+  })
+
+  it.runIf(process.platform === 'linux')('observes only the PR bound by a real signed external delivery', async () => {
+    const f = await fixture('goal-step', true); await completeStepDelivery(f)
+    const grant = f.broker!.config.externalGrants![0]!
+    const observed = await f.service.readRepositoryEventObservation({ version: 1, triggerId: 'trigger', grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.grantDigest,
+      repository: grant.destination.repository, branch: grant.destination.branch, baseBranch: grant.destination.baseBranch!, owner: { workspace: f.root, preset: 'primary', principalId: 'owner', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: grant.expiresAt, budgetId: 'events' },
+      goal: { id: 'goal', sessionId: 'owner-session', nativeGoalId: 'native-goal', definitionVersion: 1, definitionDigest: 'd'.repeat(64) } }, new AbortController().signal)
+    expect(observed).toMatchObject({ protocol: 'assistant-actions/repository-event/v1', truthy: true, fingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u) })
+    expect(f.inspect).toHaveBeenCalledTimes(4)
   })
 
   it.runIf(process.platform === 'linux')('rejects altered signed delivery history before external readback', async () => {
