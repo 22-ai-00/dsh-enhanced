@@ -9,6 +9,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Ed25519ApprovalAuthority, loadPrivateApprovalInput, parseApprovalReceipt } from './approval.js'
 import { Ed25519HostAttestationAuthority, parseHostAttestationReceipt } from './attestation.js'
 import { invokeConfiguredHostAttestor, prepareConfiguredHostAttestation, prepareManualHostAttestation } from './host-attestor.js'
+import { Ed25519ActivationRetractionAuthority, Ed25519PostActivationObservationAuthority,
+  parseActivationRetraction, parsePostActivationObservation } from './post-activation.js'
 import { discover, loadCatalogWithMetadata, previewCatalogAdmission, type CatalogPackage } from './catalog.js'
 import { verifyApprovedPackagesInLockfile } from './lockfile.js'
 import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthority, Ed25519SourceReleaseAuthorizationAuthority,
@@ -17,8 +19,9 @@ import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthor
 import { ControlPlaneStore, expectedSourceRelease } from './store.js'
 import { inheritedEnvironment, loadTrustConfig, openTrustedExecutable, resolveTrustKey, verifyOpenTrustedExecutable,
   type OpenTrustedExecutable, type PluginControlTrustConfig } from './trust.js'
-import type { ApprovalReceipt, HostAttestationReceipt, PlanStatus, PluginActivationPlan, PluginSourcePlan, SourcePublishReconciliationReceipt,
-  SourceReleaseAuthorization, SourceReleaseAuthorizationAuthority, SourceReleaseReceipt } from './types.js'
+import type { ActivationRetractionAuthority, ActivationRetractionReceipt, ApprovalReceipt, HostAttestationReceipt,
+  PlanStatus, PluginActivationPlan, PluginSourcePlan, PostActivationObservationAuthority, PostActivationObservationReceipt,
+  SourcePublishReconciliationReceipt, SourceReleaseAuthorization, SourceReleaseAuthorizationAuthority, SourceReleaseReceipt } from './types.js'
 
 const pluginPattern = /^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 const leaseMs = 30_000
@@ -729,6 +732,58 @@ async function probe(argv: readonly string[]): Promise<void> {
   } finally { if (lock !== undefined) await releaseProfileLock(store, lock); store.close() }
 }
 
+async function watchObserve(argv: readonly string[]): Promise<void> {
+  const trust = await commandTrust(argv)
+  const store = new ControlPlaneStore({ path: trust.ledger.path })
+  try {
+    const receipt = parsePostActivationObservation(JSON.parse(await loadPrivateApprovalInput(resolve(option(argv, '--receipt')), 32_768)) as unknown)
+    assertPlanTrust(store.getPlan(receipt.planId), trust)
+    const result = await store.recordPostActivationObservation({
+      receipt,
+      ...(argv.includes('--expected-revision') ? { expectedRevision: integerOption(argv, '--expected-revision') } : {}),
+      resolveAuthority: (value: PostActivationObservationReceipt): PostActivationObservationAuthority => {
+        const key = resolveTrustKey(trust, 'host-attestation', value.authority, value.keyId)
+        return new Ed25519PostActivationObservationAuthority(key.publicKeyPem, key.authority, key.keyId)
+      },
+      idempotencyKey: `post-activation-observation:${receipt.observationId}` })
+    process.stdout.write(`${JSON.stringify(result)}\n`)
+  } finally { store.close() }
+}
+
+async function watchRetract(argv: readonly string[]): Promise<void> {
+  const trust = await commandTrust(argv)
+  const store = new ControlPlaneStore({ path: trust.ledger.path })
+  try {
+    const receipt = parseActivationRetraction(JSON.parse(await loadPrivateApprovalInput(resolve(option(argv, '--receipt')), 32_768)) as unknown)
+    assertPlanTrust(store.getPlan(receipt.planId), trust)
+    const result = await store.retractActivation({
+      receipt,
+      ...(argv.includes('--expected-revision') ? { expectedRevision: integerOption(argv, '--expected-revision') } : {}),
+      resolveAuthority: (value: ActivationRetractionReceipt): ActivationRetractionAuthority => {
+        const key = resolveTrustKey(trust, 'approval', value.authority, value.keyId)
+        return new Ed25519ActivationRetractionAuthority(key.publicKeyPem, key.authority, key.keyId)
+      },
+      idempotencyKey: `activation-retraction:${receipt.retractionId}` })
+    process.stdout.write(`${JSON.stringify(result)}\n`)
+  } finally { store.close() }
+}
+
+async function watchShow(argv: readonly string[]): Promise<void> {
+  const trust = await commandTrust(argv)
+  const store = new ControlPlaneStore({ path: trust.ledger.path })
+  try {
+    const planId = optionalOption(argv, '--plan-id')
+    if (planId !== undefined) {
+      assertPlanTrust(store.getPlan(planId), trust)
+      process.stdout.write(`${JSON.stringify({ watch: store.getActivationWatch(planId),
+        evidence: store.listActivationWatchEvidence(planId) })}\n`)
+    } else {
+      process.stdout.write(`${JSON.stringify({ watches: store.listActivationWatches(
+        argv.includes('--limit') ? integerOption(argv, '--limit') : undefined) })}\n`)
+    }
+  } finally { store.close() }
+}
+
 async function executable(command: 'git' | 'pnpm', environment: NodeJS.ProcessEnv): Promise<string> {
   const candidates = command === 'git' ? ['/usr/bin/git', '/bin/git'] : [join(dirname(process.execPath), 'pnpm'),
     ...(environment.PATH ?? '').split(delimiter).filter(isAbsolute).map(directory => join(directory, 'pnpm'))]
@@ -1008,6 +1063,9 @@ export async function runPluginControl(argv = process.argv.slice(2)): Promise<vo
   if (command === 'host-request') return hostRequest(argv)
   if (command === 'probe') return probe(argv)
   if (command === 'attest') return attest(argv)
+  if (command === 'watch-observe') return watchObserve(argv)
+  if (command === 'watch-retract') return watchRetract(argv)
+  if (command === 'watch-show') return watchShow(argv)
   if (command === 'source-plan') return sourcePlan(argv)
   if (command === 'scaffold') return scaffold(argv)
   if (command === 'release-start') return releaseStart(argv)
@@ -1015,5 +1073,5 @@ export async function runPluginControl(argv = process.argv.slice(2)): Promise<vo
   if (command === 'release-step') return releaseStep(argv)
   if (command === 'release-attest') return releaseAttest(argv)
   if (command === 'release-reconcile') return releaseReconcile(argv)
-  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|source-plan|scaffold|release-start|release-request|release-step|release-attest|release-reconcile>')
+  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|watch-observe|watch-retract|watch-show|source-plan|scaffold|release-start|release-request|release-step|release-attest|release-reconcile>')
 }

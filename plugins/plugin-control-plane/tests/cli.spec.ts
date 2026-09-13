@@ -12,12 +12,13 @@ import { Ed25519HostAttestationAuthority, hostAttestationEvidenceDigest, hostAtt
 import { exampleIntegrityPinnedCatalog } from '../src/catalog.ts'
 import { checkedSourceSnapshot, runPluginControl } from '../src/cli.ts'
 import { invokeConfiguredHostAttestor, prepareConfiguredHostAttestation } from '../src/host-attestor.ts'
+import { activationRetractionSigningPayload, postActivationEvidenceDigest, postActivationObservationSigningPayload } from '../src/post-activation.ts'
 import { sourceReleaseAuthorizationSigningPayload, sourceReleaseEvidenceDigest, sourceReleaseRequestDigest,
   sourceReleaseSigningPayload } from '../src/release.ts'
 import { controlPlaneDigest, ControlPlaneStore, type CreateActivationPlanInput } from '../src/store.ts'
 import { loadTrustConfig } from '../src/trust.ts'
-import type { ApprovalAuthority, ApprovalReceipt, HostAttestationReceipt, PluginActivationPlan, PluginSourcePlan, SourceReleaseAuthorization,
-  SourceReleaseReceipt, SourceReleaseRequest } from '../src/types.ts'
+import type { ActivationRetractionReceipt, ApprovalAuthority, ApprovalReceipt, HostAttestationReceipt, PluginActivationPlan,
+  PluginSourcePlan, PostActivationObservationReceipt, SourceReleaseAuthorization, SourceReleaseReceipt, SourceReleaseRequest } from '../src/types.ts'
 
 const roots: string[] = []
 const installationId = '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00'
@@ -308,6 +309,40 @@ async function configuredProbe(value: Awaited<ReturnType<typeof fixture>>, plan:
   await withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory,
     HOST_ATTESTOR_MODE: mode, HOST_ATTESTOR_FAIL_PHASE: failedPhase }, () => runPluginControl(['probe', '--plan-id', plan.id,
     '--expected-revision', String(plan.revision), '--expected-fence', String(plan.activation!.fence)]))
+}
+
+async function activatedByProbe(value: Awaited<ReturnType<typeof fixture>>, suffix: string): Promise<PluginActivationPlan> {
+  let plan = await staged(value, suffix)
+  for (let phase = 0; phase < 7; phase += 1) {
+    await configuredProbe(value, plan)
+    const store = new ControlPlaneStore({ path: value.state }); plan = store.getPlan(plan.id); store.close()
+  }
+  expect(plan.status).toBe('activated')
+  return plan
+}
+
+function watchObservationReceipt(plan: PluginActivationPlan, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey'],
+  options: { observationId: string; disposition?: 'healthy' | 'regressed'; hostGeneration: number; overrides?: Record<string, unknown> }): PostActivationObservationReceipt {
+  const disposition = options.disposition ?? 'healthy'
+  const evidence = { kind: 'post-activation-health' as const, checks: 4, failures: disposition === 'regressed' ? 1 : 0, probeDigest: 'b'.repeat(64) }
+  const observedAt = Date.now()
+  const unsigned: Omit<PostActivationObservationReceipt, 'signature'> = { schemaVersion: 1, observationId: options.observationId,
+    authority: 'host-runtime', keyId: 'host-key-1',
+    installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence,
+    package: plan.candidate.package, version: plan.candidate.version, integrity: plan.candidate.integrity,
+    disposition, evidence, evidenceDigest: postActivationEvidenceDigest(evidence),
+    hostGeneration: options.hostGeneration, observedAt, expiresAt: observedAt + 30_000, ...options.overrides }
+  return { ...unsigned, signature: sign(null, Buffer.from(postActivationObservationSigningPayload(unsigned)), privateKey).toString('base64') }
+}
+
+function watchRetractionReceipt(plan: PluginActivationPlan, privateKey: ReturnType<typeof generateKeyPairSync>['privateKey'],
+  retractionId: string): ActivationRetractionReceipt {
+  const decidedAt = Date.now()
+  const unsigned: Omit<ActivationRetractionReceipt, 'signature'> = { schemaVersion: 1, retractionId, authority: 'owner-policy', keyId: 'owner-key-1',
+    installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence,
+    package: plan.candidate.package, version: plan.candidate.version, integrity: plan.candidate.integrity,
+    principal: 'owner@test', reason: 'post-canary regression accepted by owner', decidedAt, expiresAt: decidedAt + 900_000 }
+  return { ...unsigned, signature: sign(null, Buffer.from(activationRetractionSigningPayload(unsigned)), privateKey).toString('base64') }
 }
 
 async function withEnvironment<T>(environment: Record<string, string>, action: () => Promise<T>): Promise<T> {
@@ -704,6 +739,53 @@ describe.sequential('trusted staged CLI', () => {
         sha256: value.trust.hostAttestor.sha256, authority: 'host-runtime', keyId: 'host-key-1' },
       phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } })
     database.close()
+  }, 15_000)
+
+  test('watch-observe accepts signed healthy and regressed Host evidence and closes the exact pinned watch', async () => {
+    const value = await fixture(); const plan = await activatedByProbe(value, 'watch-observe')
+    const healthyPath = join(value.control, 'watch-healthy.json')
+    await writeFile(healthyPath, JSON.stringify(watchObservationReceipt(plan, value.privateKey, { observationId: 'obs-healthy-1', hostGeneration: 8 })), { mode: 0o600 })
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', healthyPath]))
+    let store = new ControlPlaneStore({ path: value.state })
+    expect(store.getActivationWatch(plan.id)).toMatchObject({ state: 'watching', revision: 2, healthyObservations: 1, lastHostGeneration: 8 })
+    store.close()
+    const regressedPath = join(value.control, 'watch-regressed.json')
+    await writeFile(regressedPath, JSON.stringify(watchObservationReceipt(plan, value.privateKey,
+      { observationId: 'obs-regress-1', disposition: 'regressed', hostGeneration: 9 })), { mode: 0o600 })
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', regressedPath]))
+    store = new ControlPlaneStore({ path: value.state })
+    const watch = store.getActivationWatch(plan.id)
+    expect(watch.state).toBe('closed-regressed')
+    expect(watch.close).toMatchObject({ disposition: 'regressed', evidenceId: 'obs-regress-1' })
+    expect(store.getPlan(plan.id).status).toBe('activated')
+    store.close()
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-show', '--plan-id', plan.id]))
+  }, 15_000)
+
+  test('watch-retract accepts the owner receipt, closes the watch and reopens the capability gap', async () => {
+    const value = await fixture(); const plan = await activatedByProbe(value, 'watch-retract')
+    const retractionPath = join(value.control, 'watch-retract.json')
+    await writeFile(retractionPath, JSON.stringify(watchRetractionReceipt(plan, value.privateKey, 'retract-1')), { mode: 0o600 })
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-retract', '--receipt', retractionPath]))
+    const store = new ControlPlaneStore({ path: value.state })
+    expect(store.getActivationWatch(plan.id).state).toBe('closed-retracted')
+    const gap = store.getGap(plan.gapId)
+    expect(gap.status).toBe('open')
+    expect('candidateId' in gap).toBe(false)
+    store.close()
+  }, 15_000)
+
+  test('watch-observe rejects a signed receipt pinned to a different exact version', async () => {
+    const value = await fixture(); const plan = await activatedByProbe(value, 'watch-wrong-exact')
+    const receipt = watchObservationReceipt(plan, value.privateKey,
+      { observationId: 'obs-wrong-version', hostGeneration: 8, overrides: { version: '0.1.4' } })
+    const wrongPath = join(value.control, 'watch-wrong.json')
+    await writeFile(wrongPath, JSON.stringify(receipt), { mode: 0o600 })
+    await expect(withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', wrongPath])))
+      .rejects.toThrow(/exact installation/u)
+    const store = new ControlPlaneStore({ path: value.state })
+    expect(store.getActivationWatch(plan.id)).toMatchObject({ state: 'watching', revision: 1, healthyObservations: 0 })
+    store.close()
   }, 15_000)
 
   test('stays awaiting when no executable attestor is configured while preserving the manual request lane', async () => {
