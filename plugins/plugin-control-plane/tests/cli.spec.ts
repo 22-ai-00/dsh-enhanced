@@ -16,6 +16,7 @@ import { activationRetractionSigningPayload, postActivationEvidenceDigest, postA
 import { sourceReleaseAuthorizationSigningPayload, sourceReleaseEvidenceDigest, sourceReleaseRequestDigest,
   sourceReleaseSigningPayload } from '../src/release.ts'
 import { controlPlaneDigest, ControlPlaneStore, type CreateActivationPlanInput } from '../src/store.ts'
+import { startLocalHttpsRegistry } from '../src/registry-fetch.ts'
 import { loadTrustConfig } from '../src/trust.ts'
 import type { ActivationRetractionReceipt, ApprovalAuthority, ApprovalReceipt, HostAttestationReceipt, PluginActivationPlan,
   PluginSourcePlan, PostActivationObservationReceipt, SourceReleaseAuthorization, SourceReleaseAuthority,
@@ -250,6 +251,52 @@ async function approvedLocal(value: Awaited<ReturnType<typeof fixture>>, suffix:
   const plan = (await store.approve({ planId: created.id, expectedRevision: created.revision, receipt, resolveAuthority: () => authority,
     idempotencyKey: `approval:${suffix}` })).result
   store.close(); return { plan, reference }
+}
+
+// Generates one self-signed certificate for 127.0.0.1 with openssl and returns
+// the PEM key/certificate pair used by the loopback HTTPS registry fixture.
+async function loopbackCertificate(): Promise<{ key: string; cert: string }> {
+  const directory = await mkdtemp(join(tmpdir(), 'plugin-control-tls-')); roots.push(directory)
+  const keyPath = join(directory, 'key.pem'); const certPath = join(directory, 'cert.pem')
+  execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'ed25519', '-nodes', '-keyout', keyPath, '-out', certPath,
+    '-days', '2', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'])
+  return { key: await readFile(keyPath, 'utf8'), cert: await readFile(certPath, 'utf8') }
+}
+
+// Promotes the v2 fixture trust to v4 so activation can bind a real HTTPS
+// release registry: the catalog/registry/adapter lanes are added with the
+// eight release phases unconfigured (activation never executes them), while
+// the approval and host-attestation keys from the v2 fixture are retained.
+async function writeHttpsTrust(value: Awaited<ReturnType<typeof fixture>>, releaseRegistry: Record<string, unknown>): Promise<void> {
+  const catalogPath = join(value.control, 'catalog.json')
+  await writeFile(catalogPath, `${JSON.stringify({ schemaVersion: 1, entries: [] })}\n`, { mode: 0o600 })
+  const releaseKeys = generateKeyPairSync('ed25519'); const releasePublicKeyPem = releaseKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const authorizationKeys = generateKeyPairSync('ed25519'); const authorizationPublicKeyPem = authorizationKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  await writeFile(value.trustPath, `${JSON.stringify({ ...value.trust, schemaVersion: 4, catalog: { id: 'owner-catalog', path: catalogPath },
+    releaseRegistry, releaseReceiptTtlMs: 30_000,
+    releaseAdapters: Object.fromEntries(releasePhases.map(phase => [phase, null])),
+    releaseKeys: [{ authority: 'release-adapter', keyId: 'release-adapter-key', publicKeyPem: releasePublicKeyPem }],
+    releaseAuthorizationKeys: [{ authority: 'release-owner', keyId: 'release-owner-key', publicKeyPem: authorizationPublicKeyPem }] })}\n`,
+    { mode: 0o600 })
+}
+
+async function approvedHttps(value: Awaited<ReturnType<typeof fixture>>, suffix: string, locator: string, registryId = 'fixture-registry'): Promise<PluginActivationPlan> {
+  const bytes = Buffer.from(`https-tarball-${suffix}`)
+  const httpsCandidate = { ...candidate, integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
+    registry: { id: registryId, locator, reference: `${candidate.package}@${candidate.version}` } }
+  const store = new ControlPlaneStore({ path: value.state })
+  const gap = store.recordGap({ idempotencyKey: `gap:${suffix}`, capability: 'health', context: `gap ${suffix}`, expectedValue: 10,
+    frequency: 2, estimatedCost: 2, risk: 0 })
+  const created = store.createPlan({ ...input(value, gap.id, `plan:${suffix}`), candidate: httpsCandidate,
+    catalog: { digest: controlPlaneDigest({ schemaVersion: 1, entries: [httpsCandidate] }), provenance: 'owner-provided-integrity-pinned' } }).result
+  const now = Date.now(); const unsigned: Omit<ApprovalReceipt, 'signature'> = { schemaVersion: 1, approvalId: `approval-${suffix}`,
+    authority: 'owner-policy', keyId: 'owner-key-1', planId: created.id, planDigest: created.digest, decision: 'approved',
+    principal: 'owner@test', decidedAt: now, expiresAt: now + 30_000 }
+  const receipt: ApprovalReceipt = { ...unsigned, signature: sign(null, Buffer.from(approvalSigningPayload(unsigned)), value.privateKey).toString('base64') }
+  const authority = new Ed25519ApprovalAuthority(value.trust.approvalKeys[0]!.publicKeyPem, 'owner-policy', 'owner-key-1')
+  const plan = (await store.approve({ planId: created.id, expectedRevision: created.revision, receipt, resolveAuthority: () => authority,
+    idempotencyKey: `approval:${suffix}` })).result
+  store.close(); return plan
 }
 
 async function readySource(value: Awaited<ReturnType<typeof fixture>>, suffix: string): Promise<PluginSourcePlan> {
@@ -809,6 +856,129 @@ describe.sequential('trusted staged CLI', () => {
       () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(claimed.revision)])))
       .rejects.toThrow('approved local artifact')
     const inspect = new ControlPlaneStore({ path: value.state }); expect(inspect.getPlan(plan.id).status).toBe('rolled-back'); inspect.close()
+  })
+
+  test('downloads a pinned-TLS registry artifact, verifies its approved integrity, and installs from the descriptor cache', async () => {
+    const value = await fixture()
+    const { key, cert } = await loopbackCertificate()
+    const seen: { path: string | undefined; authorization: string | undefined } = { path: undefined, authorization: undefined }
+    const bytes = Buffer.from('https-tarball-registry-download')
+    const server = await startLocalHttpsRegistry({ key, cert, handle(request) {
+      seen.path = request.path; seen.authorization = request.authorization
+      if (request.authorization !== 'Bearer fixture-token') return { status: 401 }
+      return { status: 200, bytes, contentType: 'application/gzip' }
+    } })
+    try {
+      await writeHttpsTrust(value, { id: 'fixture-registry', locator: server.origin, caPins: [cert], tokenEnvironment: 'DSH_TEST_REGISTRY_TOKEN' })
+      const plan = await approvedHttps(value, 'registry-download', server.origin)
+      const claimedStore = new ControlPlaneStore({ path: value.state })
+      const claimed = await claimedStore.claimActivation(claimInput(plan)); claimedStore.close()
+      const cachePath = join(value.dshHome, 'plugin-control', 'activation-artifacts', claimed.activation!.id,
+        `${createHash('sha256').update(candidate.package).digest('hex')}.tgz`)
+      const raw = new DatabaseSync(value.state); raw.prepare('UPDATE activation_plans SET activation_lease_until = 0 WHERE id = ?').run(plan.id); raw.close()
+      const log = join(value.root, 'executor.log')
+      await withEnvironment({ DSH_HOME: value.dshHome, DSH_TEST_REGISTRY_TOKEN: 'fixture-token',
+        DSH_TEST_LOCK: localLockfileForDescriptor(claimed), DSH_TEST_PACKAGES: installedPackages(claimed), DSH_TEST_EXECUTOR_LOG: log },
+      () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(claimed.revision)]))
+      const encodedScope = candidate.package.split('/').map(part => encodeURIComponent(part)).join('/')
+      expect(seen.path).toBe(`/packages/${encodedScope}/${candidate.version}/package.tgz`)
+      expect(seen.authorization).toBe('Bearer fixture-token')
+      const calls = await readFile(log, 'utf8')
+      expect(calls).toMatch(new RegExp(`file:///proc/${process.pid}/fd/[0-9]+`, 'u'))
+      expect(calls).not.toContain('fixture-token')
+      expect(await readFile(cachePath)).toEqual(bytes)
+      expect((await stat(cachePath)).mode & 0o777).toBe(0o400)
+    } finally { await server.close() }
+  })
+
+  test('rejects registry bytes that do not match the approved integrity before any executor invocation', async () => {
+    const value = await fixture()
+    const { key, cert } = await loopbackCertificate()
+    const server = await startLocalHttpsRegistry({ key, cert, handle: () => ({ status: 200, bytes: Buffer.from('tampered-bytes') }) })
+    try {
+      await writeHttpsTrust(value, { id: 'fixture-registry', locator: server.origin, caPins: [cert], tokenEnvironment: null })
+      const plan = await approvedHttps(value, 'registry-tampered', server.origin)
+      const log = join(value.root, 'executor.log')
+      await expect(withEnvironment({ ...activationEnvironment(value, plan), DSH_TEST_EXECUTOR_LOG: log },
+        () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)])))
+        .rejects.toThrow('remote artifact bytes do not match the approved integrity')
+      await expect(readFile(log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      const inspect = new ControlPlaneStore({ path: value.state }); expect(inspect.getPlan(plan.id).status).toBe('rolled-back'); inspect.close()
+    } finally { await server.close() }
+  })
+
+  test('rejects the registry when its bearer token is rejected', async () => {
+    const value = await fixture()
+    const { key, cert } = await loopbackCertificate()
+    const server = await startLocalHttpsRegistry({ key, cert, handle: request =>
+      request.authorization === 'Bearer fixture-token' ? { status: 200, bytes: Buffer.from('x') } : { status: 401 } })
+    try {
+      await writeHttpsTrust(value, { id: 'fixture-registry', locator: server.origin, caPins: [cert], tokenEnvironment: 'DSH_TEST_REGISTRY_TOKEN' })
+      const plan = await approvedHttps(value, 'registry-401', server.origin)
+      await expect(withEnvironment({ ...activationEnvironment(value, plan), DSH_TEST_REGISTRY_TOKEN: 'wrong-token' },
+        () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)])))
+        .rejects.toThrow('registry answered 401')
+    } finally { await server.close() }
+  })
+
+  test('refuses to fetch when the bound token environment variable is absent', async () => {
+    const value = await fixture()
+    const { key, cert } = await loopbackCertificate()
+    let requested = false
+    const server = await startLocalHttpsRegistry({ key, cert, handle: () => { requested = true; return { status: 200, bytes: Buffer.from('x') } } })
+    try {
+      await writeHttpsTrust(value, { id: 'fixture-registry', locator: server.origin, caPins: [cert], tokenEnvironment: 'DSH_TEST_REGISTRY_TOKEN' })
+      const plan = await approvedHttps(value, 'registry-no-token', server.origin)
+      const environment = Object.fromEntries(Object.entries(activationEnvironment(value, plan)).filter(([name]) => name !== 'DSH_TEST_REGISTRY_TOKEN'))
+      await expect(withEnvironment(environment,
+        () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)])))
+        .rejects.toThrow('bound registry token environment variable is missing')
+      expect(requested).toBe(false)
+    } finally { await server.close() }
+  })
+
+  test('rejects a catalog package bound to a registry other than the owner trust root', async () => {
+    const value = await fixture()
+    const { key, cert } = await loopbackCertificate()
+    const server = await startLocalHttpsRegistry({ key, cert, handle: () => ({ status: 200, bytes: Buffer.from('x') }) })
+    try {
+      await writeHttpsTrust(value, { id: 'fixture-registry', locator: server.origin, caPins: [cert], tokenEnvironment: null })
+      const plan = await approvedHttps(value, 'registry-identity', server.origin, 'another-registry')
+      await expect(withEnvironment(activationEnvironment(value, plan),
+        () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)])))
+        .rejects.toThrow('package registry is not the owner-bound release registry')
+    } finally { await server.close() }
+  })
+
+  test('rejects a registry whose TLS certificate is not pinned by the owner trust root', async () => {
+    const value = await fixture()
+    const serverCertificate = await loopbackCertificate(); const pinnedCertificate = await loopbackCertificate()
+    const server = await startLocalHttpsRegistry({ key: serverCertificate.key, cert: serverCertificate.cert,
+      handle: () => ({ status: 200, bytes: Buffer.from('x') }) })
+    try {
+      await writeHttpsTrust(value, { id: 'fixture-registry', locator: server.origin, caPins: [pinnedCertificate.cert], tokenEnvironment: null })
+      const plan = await approvedHttps(value, 'registry-tls', server.origin)
+      await expect(withEnvironment(activationEnvironment(value, plan),
+        () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)])))
+        .rejects.toThrow('registry TLS certificate is not pinned by the owner trust root')
+    } finally { await server.close() }
+  })
+
+  test('refuses trust roots whose release registry binding is malformed', async () => {
+    const value = await fixture()
+    const malformed: Array<{ label: string; registry: Record<string, unknown>; message: string }> = [
+      { label: 'query', registry: { id: 'fixture-registry', locator: 'https://registry.example.invalid/?token=x' }, message: 'bare https origin/path' },
+      { label: 'http', registry: { id: 'fixture-registry', locator: 'http://registry.example.invalid' }, message: 'bare https origin/path' },
+      { label: 'credentials', registry: { id: 'fixture-registry', locator: 'https://owner:secret@registry.example.invalid' }, message: 'bare https origin/path' },
+      { label: 'caPins', registry: { id: 'fixture-registry', locator: 'https://registry.example.invalid', caPins: ['not-a-pem'] }, message: 'must be a PEM certificate' },
+      { label: 'tokenEnvironment', registry: { id: 'fixture-registry', locator: 'https://registry.example.invalid', tokenEnvironment: '1BAD-NAME' },
+        message: 'must name one environment variable' },
+      { label: 'id', registry: { id: '../escape', locator: 'https://registry.example.invalid' }, message: 'releaseRegistry id is invalid' },
+    ]
+    for (const item of malformed) {
+      await writeHttpsTrust(value, item.registry)
+      await expect(loadTrustConfig(value.trustPath), item.label).rejects.toThrow(item.message)
+    }
   })
 
   test('applies a signed failed Host receipt and restores the retained backup', async () => {
