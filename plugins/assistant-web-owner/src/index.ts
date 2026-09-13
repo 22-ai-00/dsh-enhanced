@@ -90,8 +90,13 @@ async function resolveOwnedWorkspace(ctx: Context, config: Config): Promise<Work
 type SessionControllerConstructor = { new(ctx: Context, config: Record<string, never>): BundledSessionController; readonly inject: readonly string[] }
 
 /** Resolve from the Host entrypoint so the controller and AgentLoop share one ABI. */
-async function hostSessionController(): Promise<SessionControllerConstructor> {
-  const hostRequire = createRequire(process.argv[1] ?? import.meta.url)
+export async function resolveHostSessionController(hostEntrypoint = process.argv[1]): Promise<SessionControllerConstructor> {
+  // A global `dsh` is commonly a symlink into its package's lib/bin.js.  The
+  // Host's peer closure is anchored at that canonical entry, not the global
+  // bin directory containing the symlink.
+  const hostRequire = hostEntrypoint === undefined
+    ? createRequire(import.meta.url)
+    : createRequire(await realpath(hostEntrypoint))
   const entry = hostRequire.resolve('@deepseek-ai/dsh-api-session-controller')
   const module = await import(pathToFileURL(entry).href) as { SessionController?: unknown }
   const candidate = module.SessionController
@@ -140,7 +145,7 @@ async function wrapController(ctx: Context, config: Config, access: NativeWebOwn
   // facade keeps its existing isolated-agent ownership and RPC boundary.
   // Its exact inject list must own the nested Context: later Hosts require
   // fileUploads while the supported 0.1.2 Host does not provide that service.
-  const Controller = await hostSessionController()
+  const Controller = await resolveHostSessionController()
   // `scoped` is backed by the currently-loading owner fiber.  Its `agents`
   // provider becomes visible only after this apply callback settles, so do
   // not await the child here: that would make its exact Controller.inject
