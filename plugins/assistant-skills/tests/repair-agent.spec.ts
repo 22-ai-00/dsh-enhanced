@@ -4,6 +4,9 @@ import { OwnerRepairAgentRuntime, type OwnerRepairAgentInput } from '../src/repa
 import { SkillStore } from '../src/store.js'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const scope = { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: '/workspace', preset: 'repair' }
 const input = (): OwnerRepairAgentInput => ({ id: 'authorization-1', authorizationDigest: 'digest', scope, ownerRouteId: 'route',
@@ -44,6 +47,61 @@ test('rejects malformed or expired repair bootstrap before creating an Agent', a
   const malformed = { ...input(), allowedTools: ['read', 'read'] }
   await expect(runtime.create(malformed)).rejects.toThrow(/invalid owner repair Agent input/u)
   await runtime.dispose()
+})
+
+test('production repair runtime confines native file tools before their delegate, including symlink escapes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'repair-workspace-'))
+  const privateRoot = await mkdtemp(join(tmpdir(), 'repair-private-'))
+  await writeFile(join(root, 'artifact.txt'), 'repairable')
+  await writeFile(join(privateRoot, 'holdout.txt'), 'private')
+  await symlink(privateRoot, join(root, 'private-link'))
+  const configuredWorkspace = `${root}-workspace-link`
+  await symlink(root, configuredWorkspace)
+  let dispatch!: (execution: { agent: unknown, name: string, arguments: unknown, signal: AbortSignal, callId: string }, next: () => Promise<{ isError: boolean }>) => Promise<{ isError: boolean }>
+  let delegated = 0
+  let current = true
+  const agent = { session: { id: 'repair-files' }, cancel: vi.fn() }
+  const agentCtx = {
+    effect: (acquire: () => unknown) => acquire(),
+    tools: { schemas: () => [{ name: 'read' }, { name: 'write' }, { name: 'edit' }, { name: 'read_image' }], guard: () => {} },
+    on: (name: string, listener: typeof dispatch) => { if (name === 'tools/execute') dispatch = listener; return () => {} },
+  }
+  const ctx = { effect: () => {}, get: (name: string) => {
+    if (name === 'agents') return { create: async ({ setup, sessionId }: { setup: (ctx: typeof agentCtx, agent: unknown) => Promise<void>, sessionId: string }) => {
+      agent.session.id = sessionId
+      await setup(agentCtx, agent)
+      return { agent, dispose: async () => {} }
+    } }
+    if (name === 'assistantGoals') return { startOwnerAuthorizedRepair: async () => ({ id: 'goal' }) }
+    if (name === 'assistantPolicy') return { bindInitiator: () => () => {} }
+    return undefined
+  } } as unknown as Context
+  const runtime = new OwnerRepairAgentRuntime(ctx)
+  const repairInput = { ...input(), scope: { ...scope, workspace: configuredWorkspace }, trigger: { ...input().trigger, scope: { ...scope, workspace: configuredWorkspace } }, allowedTools: ['read', 'write', 'edit', 'read_image'], maxToolCalls: 4,
+    assertCurrent: () => { if (!current) throw new Error('owner authorization revoked') } }
+  const call = async (name: 'read' | 'write' | 'edit' | 'read_image', file_path: string, arguments_: Record<string, unknown> = {}) => await dispatch({ agent, name, arguments: { file_path, ...arguments_ }, signal: new AbortController().signal, callId: `${name}-${file_path}` }, async () => { delegated++; return { isError: false } })
+  try {
+    await runtime.create(repairInput)
+    await expect(call('read', 'artifact.txt')).resolves.toEqual({ isError: false })
+    await expect(call('write', join(root, 'new/nested-artifact.txt'), { content: 'new' })).resolves.toEqual({ isError: false })
+    await expect(call('edit', 'new-source.txt', { old_string: 'old', new_string: 'new' })).resolves.toEqual({ isError: false })
+    await expect(call('read_image', join(root, 'artifact.txt'))).resolves.toEqual({ isError: false })
+    expect(delegated).toBe(4)
+    for (const [name, filePath, arguments_] of [
+      ['read', join(privateRoot, 'holdout.txt'), {}],
+      ['write', '../private.txt', { content: 'private' }],
+      ['edit', 'private-link/holdout.txt', { old_string: 'private', new_string: 'changed' }],
+    ] as const) await expect(call(name, filePath, arguments_)).rejects.toThrow(/outside its workspace/u)
+    expect(delegated).toBe(4)
+    await expect(dispatch({ agent, name: 'read', arguments: null, signal: new AbortController().signal, callId: 'malformed' }, async () => { delegated++; return { isError: false } })).rejects.toThrow(/invalid owner repair file tool arguments/u)
+    expect(delegated).toBe(4)
+    current = false
+    await expect(call('read', 'artifact.txt')).rejects.toThrow(/authorization revoked/u)
+    expect(delegated).toBe(4)
+  } finally {
+    await runtime.dispose()
+    await rm(configuredWorkspace, { force: true }); await rm(root, { recursive: true, force: true }); await rm(privateRoot, { recursive: true, force: true })
+  }
 })
 
 test.each([

@@ -184,6 +184,19 @@ route, source definition, parent version, expiry and background policy. A
 process-local capability links Goals to the current Skills instance; it is not
 isolation from arbitrary malicious plugins sharing the same Host process.
 
+Repair profiles may grant only the native workspace file tools `read`, `write`,
+`edit`, and `read_image`. Shell, code transport, network, and arbitrary preset
+tools are rejected when an automatic repair profile is loaded because this
+bundle cannot state or enforce their authority as a workspace file boundary.
+For those native file calls, a repair Agent accepts relative paths and absolute
+paths under its configured workspace. It rejects malformed arguments, parent
+traversal, paths outside that workspace, and any symlink traversed below the
+workspace before delegating to the native tool. This is an authorization
+boundary for the repair Agent, not an OS sandbox. The pinned native tool API
+opens a pathname after the check rather than accepting a directory/file
+descriptor, so it cannot prevent a same-UID concurrent replacement between the
+check and native open.
+
 A successor starts only after the prior version is promoted and a distinct
 new task using that version has independently failed under the next configured
 acceptance profile. The source run must have started strictly after the immutable
