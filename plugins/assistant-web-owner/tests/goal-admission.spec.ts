@@ -531,6 +531,17 @@ llm-pi-ai:
     for (const action of ['edit', 'resume', 'clear']) expect(evaluatePolicy(policy, { ...request, action, resource: { kind: 'goal', id: 'business-context' } }).effect).toBe('deny')
   })
 
+  test('authorizes a textless wake completion notice only for the admitted owner binding', async () => {
+    const f = await fixture(); const plan = prepareGoalAdmission(f.input, f.prepared.patch, f.effective, task(), f.snapshot)
+    const policy = compilePolicy(config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy.rules as PolicyRule[])
+    const request = { subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: f.input.workspace, principal: 'web/web/local/operator' }, action: 'send', resource: { kind: 'message', id: f.snapshot.binding.id }, context: { initiator: 'background' } } as const
+    expect(evaluatePolicy(policy, request).effect).toBe('allow')
+    expect(evaluatePolicy(policy, { ...request, resource: { ...request.resource, id: 'other-binding' } }).effect).toBe('deny')
+    for (const changed of [{ id: 'unrelated-source' }, { workspace: `${f.input.workspace}/other` }, { principal: 'web/web/local/other' }]) {
+      expect(evaluatePolicy(policy, { ...request, subject: { ...request.subject, ...changed } }).effect).toBe('deny')
+    }
+  })
+
   test('offline configuration preserves state and rejects revoked owners or non-private task inputs without changing the patch', async () => {
     const f = await fixture(); const path = join(f.input.dshHome, 'task.json')
     await writeFile(path, task(), { mode: 0o600 })
