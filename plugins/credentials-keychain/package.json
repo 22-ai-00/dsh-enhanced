@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/credentials-keychain",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "description": "An audited OS-keychain credential-handle service for trusted DeepSeek Harness plugins.",
   "license": "MIT",
   "type": "module",

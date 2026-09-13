@@ -1,0 +1,183 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-13",
+  "status": "passed-live-modern-host",
+  "milestone": "Modern Host: one real workflow improved twice and delivered to the original Web session",
+  "completeWorkPackage": false,
+  "source": {
+    "baseCommit": "d1642f4e3d03db3f8c7144ad695b29931e567e73",
+    "state": "v4 development candidate before final whole-goal compact-feedback and snapshot-admission additions",
+    "harnessCommit": "49c357f",
+    "notes": "The subsequent 616c114 feedback commit has separate 58-test verification; this v4 run does not claim to exercise its later whole-goal criteria and repair admission additions."
+  },
+  "command": {
+    "shell": "DSH_E2E_HOST_VERSION=0.1.5-rc.1 DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_CAPTURE_RETAIN_FAILURE=1 pnpm test:web-owner:real-repair",
+    "exitCode": 0,
+    "testsPassed": 1,
+    "duration": "5.7 minutes",
+    "log": "/tmp/dsh-rsi-modern-host-v4.log"
+  },
+  "artifacts": {
+    "directory": "/tmp/dsh-rsi-modern-host-v4-artifacts/web-owner-real-repair-real-b3d6d-delivers-the-bounded-result",
+    "proofSha256": "8c405c156d9aa27b8882bf471028fe51419a7c1cba0d0e7ca1076b64e03eaae8",
+    "modelSha256": "92be382e002315a80f4e5b72aa87df62693bb9a52ec3ae5e36801b01795d2d95"
+  },
+  "proof": {
+    "capability": "real-traex-two-round-bounded-rsi",
+    "family": "template",
+    "route": {
+      "provider": "traex-agent",
+      "model": "gpt-5.6-terra",
+      "api": "acp",
+      "command": "traex",
+      "cwd": "/tmp/dsh-real-owner-repair-LsXtAQ/workspace"
+    },
+    "hostVersion": "0.1.5-rc.1",
+    "scope": {
+      "principalId": "web/web/local/operator",
+      "principalRecordId": "principal_cd4832d8-e2b6-4f8c-91b1-c56e0ff87739",
+      "principalVersion": 1,
+      "workspace": "/tmp/dsh-real-owner-repair-LsXtAQ/workspace",
+      "preset": "standard"
+    },
+    "baseline": {
+      "sessionId": "session-eacb7b28-d904-48cf-ab8c-0b8865f3612d",
+      "goalId": "a408ba694b306416bbdb31294fb89301b8e6ba3a08a742c7c42a8e11cc713cc8",
+      "version": 1
+    },
+    "continuationId": "skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41",
+    "state": "complete",
+    "iterations": 2,
+    "rounds": [
+      {
+        "iteration": 1,
+        "sourceSession": "session-7e9d6610-c0ee-4b83-8d01-d244abb55f62",
+        "sourceGoal": "89401d996f211d6e5b67375faca957876eaa95a9b927a1a32ac8e909655c0657",
+        "repairSession": "owner-repair-2730fb606dd0fb38541c79dad8ceba332b6b05e8",
+        "repairGoal": "4670fed653c129c5a3d794933984a6c191b4171185ab136110ad2148dc057fd2",
+        "candidateId": "skill-candidate-c8b7da5d24a7e6be8565a460ae6cf887e2816b37d7096917d7c80cd370959834",
+        "comparisonId": "skill-comparison-74ff1bb2814b3f4ae32df5f324414ca301c086ca9f4c978c5ff5a11e6d6c4ff0",
+        "deploymentId": "skill-deployment-6bd6041ac6b3a915c86f01206f471c130c0f3acd9a8a965cf858fe6c5c9d1223",
+        "version": 2,
+        "failureReceiptDigest": "494466d7d1e39e882667a1a46efa62bbb4b5c01452d577ceb6c28bf12abb644e",
+        "repairReceiptDigest": "f50921d4277b922cb3c8ddbaeb06ce0ef04e10d27fa4b1ed7cd610b75c1c29b5",
+        "candidateDefinitionDigest": "c60ddf0bb899469c3a60c38ff84f27404e1b5069b288f1ea8e33faebf27e544b",
+        "quality": {
+          "candidateChecksPassed": true,
+          "evaluationGain": 1,
+          "evaluationGainObserved": true,
+          "criticalRegressionsPassed": true,
+          "heldoutIndependence": "unproven"
+        },
+        "datasetDigest": "39f2bcb095a95df96f955d85a7637a18e11083169f647ed58a34aa8a2cc20ff9",
+        "promotion": {
+          "sessionId": "session-02980f2e-e2cf-4aa2-9ef3-8b5d07008b97",
+          "goalId": "c63ce96831163ed45f54b9cf32a42867e7b4dea4f7c47b50f46d336340a2e8cb",
+          "promotedAt": 1789269869484
+        },
+        "toolNames": [
+          "read",
+          "write",
+          "read"
+        ],
+        "goalContextSnapshots": 4
+      },
+      {
+        "iteration": 2,
+        "sourceSession": "session-29f2fd55-c48d-40d8-8993-9afc2c73006b",
+        "sourceGoal": "a5018ff568be44fd5a4cfcd20bdfb0caa2a2a9c41148702cd5f0bf3644d62446",
+        "repairSession": "owner-repair-4288bf87f54ce5c272e9efe7b45a68dee66fd429",
+        "repairGoal": "dd648d490b4021cec1090a614f973fc8af928c407af662fdf37aa35552405f68",
+        "candidateId": "skill-candidate-3afacd34108fbeb666be2206642aa06a6682b2a1be3a193f2b73b2f01e2cf9fd",
+        "comparisonId": "skill-comparison-be270424f3200770bf4959a43e1729f5b19791b121dd4415f127d4c527319073",
+        "deploymentId": "skill-deployment-7c3bcf81850403cf0696164b7bcbf92f490c247c632d0bcad8e1ea1ef46fe56b",
+        "version": 3,
+        "failureReceiptDigest": "1992a703a9311e296bc1a2f4850f81efb6444471c1ef93915e41957cd584ff8e",
+        "repairReceiptDigest": "96321283832657ba22d0fc914eca9cc2140f04c85ac28a39cefd5a41214e75a2",
+        "candidateDefinitionDigest": "706cb86f2dd7e6e1bb8038b737d1bfcf97c17720c22b43678e103503b9c48a8e",
+        "quality": {
+          "candidateChecksPassed": true,
+          "evaluationGain": 1,
+          "evaluationGainObserved": true,
+          "criticalRegressionsPassed": true,
+          "heldoutIndependence": "unproven"
+        },
+        "datasetDigest": "cc726ffe4475112d9c91b7905963cce1181de5b891f8888b6c96d64ffd029ff9",
+        "promotion": {
+          "sessionId": "session-f98e8d75-5ff8-4488-8f40-9c92afe89b60",
+          "goalId": "a466afd2d9b0626fae548d5a2e5778858c39f3b5129b9d4c9465a48e23f9f1e5",
+          "promotedAt": 1789269981047
+        },
+        "toolNames": [
+          "read",
+          "write"
+        ],
+        "goalContextSnapshots": 3
+      }
+    ],
+    "usage": {
+      "model_calls": 7,
+      "tool_calls": 5
+    },
+    "feedback": [
+      {
+        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:1:finite-canary",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:1:iteration-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:2:finite-canary",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:2:iteration-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+      },
+      {
+        "idempotency_key": "repair-feedback:skill-repair-e27af2d659fbd31f44059b2c226e2304a7832ae0033b9c9d07d49faaee959e41:2:final-success",
+        "status": "accepted",
+        "attempt_count": 1,
+        "binding_id": "binding_17e47d59-4648-4d65-8f10-b196b9b05695"
+      }
+    ],
+    "generatedArtifactDigest": "f691c626298236fc3ed50fbeb2a9fa191f45213f1177ed8303ee2bd50d9cc848",
+    "completedRestartNoReplay": true,
+    "initialArtifact": "shared unfinished scaffold",
+    "suppliedRepairedSource": false,
+    "installedRepairAdmissionIdempotent": true,
+    "limitations": [
+      "bounded two-profile workflow improvement",
+      "no mid-repair restart proof",
+      "delivery accepted does not mean user read"
+    ]
+  },
+  "independentReview": {
+    "verdict": "PASS",
+    "modelDispatches": 27,
+    "repairModelCalls": 7,
+    "repairToolCalls": 5,
+    "acceptedFeedback": 5,
+    "goalContextSnapshots": [
+      4,
+      3
+    ]
+  },
+  "limitations": [
+    "Public operator-frozen task families; heldout independence remains unproven.",
+    "TraeX budgets count model/tool calls; token and monetary usage are unknown.",
+    "This run proves completion-restart no replay, not mid-repair crash recovery.",
+    "Two repair iterations use separate native repair Goals.",
+    "Does not complete all 18 work packages or establish general recursive improvement."
+  ]
+}

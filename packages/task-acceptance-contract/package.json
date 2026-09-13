@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/task-acceptance-contract",
-  "version": "0.1.31",
+  "version": "0.1.32",
   "description": "Strict immutable acceptance and verification wire contracts for DSH assistant plugins.",
   "license": "MIT",
   "type": "module",

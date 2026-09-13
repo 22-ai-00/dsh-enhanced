@@ -3,7 +3,7 @@
 # Shared implementation for install-local.sh and install-npm.sh.
 # This file is sourced by the two public entrypoints; do not execute it directly.
 
-DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.2-rc.1'
+DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.5-rc.1'
 # The bootstrap pin identifies the pinned installer cohort. Runtime Hosts use
 # the verified compatibility range below, and new installs select its latest
 # independently checked release.
