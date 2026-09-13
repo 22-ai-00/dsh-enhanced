@@ -1,0 +1,137 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-13",
+  "recordedAt": "2026-09-13T12:33:46Z",
+  "baseCommit": "5d6ad547bb2061fc6972b70c09ffc665afa4f2d2",
+  "status": "engineering-slice-validated",
+  "completeWorkPackage": false,
+  "workingTreeState": {
+    "state": "WP15 guidance/workflow/skill/plugin cohort coverage source, package tests and final repository gate settled",
+    "sourceHashesAreProvisional": false,
+    "mustRehashAfterFinalRootGate": false,
+    "unrelatedDirtyWorkExcluded": []
+  },
+  "scope": [
+    "WP15 post-promotion deployment cohort monitoring extended to all four claimed deployment kinds: guidance, workflow, skill and plugin",
+    "Exact-version regression auto-close or rollback, owner retraction rollback, positive evidence non-churn, and restart-continued observation",
+    "Control-plane schema v12 exact-pinned activation watches plus optional health counters consumed by assistant-health"
+  ],
+  "workPackages": {
+    "strengthened": ["15"],
+    "statusChanged": false,
+    "wp15": "implementing",
+    "totals": {
+      "verified": 3,
+      "implementing": 13,
+      "pending": 2
+    }
+  },
+  "cohortCoverage": {
+    "guidance": {
+      "mechanism": "assistant-evolution applies authoritative Evaluation task-learning projections; a correction (upsert replacement or retract withdrawal) to an exact subject in an adopted rule's frozen evidence tuple atomically retires that exact rule version once with an evidence-correction-rollback audit row; unrelated subjects, new positive evidence and withdrawal of non-frozen subjects never churn an active rule.",
+      "regressionAutoClose": "plugins/assistant-evolution/tests/store.spec.ts post-promotion evidence correction: only a correction to a frozen subject retires the rule; second frozen-subject correction does not audit or roll back again",
+      "retractionRollback": "plugins/assistant-evolution/tests/store.spec.ts 'retracting an exact frozen subject retires the rule and the retirement survives restart' (commit 5d6ad54): pure retract of a frozen subject retires the adopted rule, leaves no active rule, single audit row after SQLite restart",
+      "positiveEvidenceNonChurn": "commit 9157dc8 test: positive evidence for an unfrozen subject, a different situation/subject kind and withdrawal of an unrelated subject leave the active rule untouched",
+      "restartContinues": "retired rule readback after store close/reopen in both post-promotion correction tests; rule adoption/restart round-trips elsewhere in the same suite"
+    },
+    "skill": {
+      "mechanism": "assistant-skills finite-canary watch proof plus deployment store continuously revalidates the exact canonical goal-outcome revision; canonical replacement, retract invalidation and deployment reconciliation commit in one Skills writer transaction under the Evaluation writer fence.",
+      "evidence": "docs/evidence/skill-canonical-revision-monitor-2026-09-11.json covers revision replacement, retract, restart and multi-run promotion fence; docs/evidence/repeated-failure-topology-canary-2026-09-10.json covers real CLI/Docker promotion, restart, regression and exact parent rollback",
+      "scope": "qualified deterministic skill family; standalone watches intentionally remain observation-only"
+    },
+    "workflow": {
+      "mechanism": "A verified-workflow repair source (protocol assistant-goals/verified-workflow-source/v1) is validated by capture-expansion and persisted as an ordinary SkillDefinition via SkillStore.save; its canary, promotion, deployment and watch lifecycle therefore execute through the exact same skill watch/deployment tables and canonical revision monitor as skills, with the workflow steps frozen inside the definition digest.",
+      "evidence": "shared code path asserted by the canonical revision monitor suite; no separate workflow-only watch store exists",
+      "scope": "workflows captured through the verified-workflow repair source; workflows imported outside that source are not claimed"
+    },
+    "plugin": {
+      "mechanism": "plugin-control-plane schema v12 opens an exact-pinned activation_watch row when a candidate activates: revision 1, last_host_generation 0, healthy_observations 0, watching state, and the exact package/version/integrity triple frozen from the promoted candidate. Signed post-activation Host observations (Ed25519 host-runtime root) advance the host generation strictly; a regressed disposition closes the exact version as closed-regressed and refuses later evidence. A signed owner retraction (independent Ed25519 owner-policy root) closes the watch as closed-retracted, deletes the gap_plan_claim and reopens the capability gap (open, candidate_id cleared, revision incremented) for the next evolution cycle. Healthy observations only accumulate (revision, last_host_generation, healthy_observations) and never close the watch. The watch, evidence and v11-to-v12 backfill survive store close/reopen, and backfilled historical activations continue accepting observations.",
+      "physicalBoundary": "The dsh executor pins plugins by sha256 in trust.json and `dsh plugin` only adds packages; it exposes no forced uninstall/disable. Plugin 'close/rollback' is therefore honestly the authoritative control-plane ledger terminal state, gap reopening, and reactivation only through an immutable catalog package@version. No forced removal from the host runtime is claimed (commit f617c6c).",
+      "regressionAutoClose": "plugins/plugin-control-plane/tests/state.spec.ts 'a signed regressed Host observation closes the exact version and rejects later evidence'",
+      "retractionRollback": "plugins/plugin-control-plane/tests/state.spec.ts owner retraction tests: direct retraction from watching and retraction after regression closure both close-retracted, reopen the gap without a candidateId, and delete the plan claim; duplicate retract rejected",
+      "positiveEvidenceNonChurn": "plugins/plugin-control-plane/tests/state.spec.ts 'positive healthy evidence accumulates but never closes'",
+      "restartContinues": "plugins/plugin-control-plane/tests/state.spec.ts watch-survives-restart test plus the v11-to-v12 chain migration backfill test (historical activated plans backfill a watching row without fabricated evidence and continue observing)",
+      "bindingAndTrust": "observations and retractions bind installationId/planId/planDigest/activationId/fence plus the exact package/version/integrity triple; wrong exact triple, foreign/forged signatures, non-advancing host generations and stale watch revisions are rejected; TTL default 30000 (observation) and 900000 (retraction); retraction.decidedAt >= plan.createdAt",
+      "idempotency": "operation_receipts envelope makes observation/retraction submission idempotent; historical replay returns the historical snapshot; same key different input rejected",
+      "operatorSurface": "CLI watch-observe/watch-retract/watch-show (commit 60738bc) with trust routing host-attestation vs approval; e2e cli.spec.ts covers healthy+regressed close, retraction gap reopen, and a pre-signature wrong-version override rejected on exact binding",
+      "healthConsumption": "assistant-health schema adds optional-number watchingActivations/closedRegressed/closedRetracted; closed-regressed and closed-retracted cohorts surface as degraded provider signals; pre-v12 payloads without the counters remain valid (commit 5bd61db)"
+    }
+  },
+  "implemented": [
+    "activation_watch and activation_watch_evidence STRICT tables with state compare-and-swap on state+revision and strictly advancing host generation",
+    "Schema v12 chain migration creates watch tables and backfills watching rows for historical activated plans from candidate_json without fabricating evidence",
+    "PluginControlPlaneHealth reports watchingActivations, closedRegressed and closedRetracted alongside the existing five counters",
+    "Ed25519 post-activation observation and activation retraction authorities with separate Host and owner trust roots, exact-binding validation, TTL and temporal checks",
+    "watch-observe, watch-retract and watch-show CLI subcommands routing receipt verification through the correct trust root",
+    "assistant-health consumes the three new counters as optional metrics and projects cohort regression/retraction as degraded readiness warnings"
+  ],
+  "packageValidation": {
+    "pluginControlPlane": {
+      "command": "npx vitest run (package root)",
+      "exitCode": 0,
+      "testsPassed": 187
+    },
+    "assistantEvolution": {
+      "command": "npx vitest run tests/store.spec.ts",
+      "exitCode": 0,
+      "testsPassed": 41
+    },
+    "assistantHealth": {
+      "command": "npx vitest run (package root)",
+      "exitCode": 0,
+      "testsPassed": 51
+    }
+  },
+  "sourceSha256": {
+    "plugins/plugin-control-plane/src/post-activation.ts": "db3d7990b0f98bd0cb30aa8a8a74c29cb336cd3ab64e257896c5bcf1fb340f5f",
+    "plugins/plugin-control-plane/src/store.ts": "753c45d43fef83bf460115fa9964fc9f7c44e89b107192ee7ef44123ef8c6073",
+    "plugins/plugin-control-plane/src/sqlite.ts": "685c576deb710203505b60daf77d57041425cbdce23aad20f1a6939345013955",
+    "plugins/plugin-control-plane/src/types.ts": "f14c6af47df335315d30a2cd6667cc1c7c646bb9d1eff5951a5afdd5abc7d356",
+    "plugins/plugin-control-plane/src/cli.ts": "848529169ffcaf4561715c912366869e01f98c1f1d05174136dd501db3405213",
+    "plugins/plugin-control-plane/src/service.ts": "d1cdc987e0a1c446d0832cd21e5bd432c696d516e6a5fa3e528ac9d74a810bbd",
+    "plugins/plugin-control-plane/tests/state.spec.ts": "e0fdb9d719ee243ffc0db23678fd24d87e0351ebfe4194c25f4aeb403a68d247",
+    "plugins/plugin-control-plane/tests/cli.spec.ts": "8b17c46dfd7991da42337170a1676b830ed0650a372aa7fbc869c3a8573ea7a7",
+    "plugins/plugin-control-plane/tests/post-activation.spec.ts": "d5d7eb216fccbd693b7ca134b0b9f868fda9be53039ae979bcded61575683c99",
+    "plugins/assistant-health/src/service.ts": "0aaa31811d9dda0ea227e983e1b51196b8e106e37cb8fc68e8a83a250ad8c227",
+    "plugins/assistant-health/tests/service.spec.ts": "5f31eba64f3e6af61b8ec4adcbdb43644c38bfb12e78db95f7e73ce8c5498f1b",
+    "plugins/assistant-evolution/tests/store.spec.ts": "cf3014ff2c5f8f1689b33ac1f3c835f4435aa4f06e211f100ba675e74d3af690"
+  },
+  "finalRootGate": {
+    "status": "passed",
+    "command": "CI=true VITEST_MAX_WORKERS=1 pnpm check",
+    "exitCode": 0,
+    "log": "/tmp/dsh-wp15-cohort-coverage-final.log",
+    "sha256": "94195e63dc49891369654879eb185f391e5c04217b3b74ed48f415a6da36b442",
+    "rootTests": {
+      "filesPassed": 37,
+      "testsPassed": 564,
+      "testsSkipped": 2
+    },
+    "aggregateTests": {
+      "filesPassed": 389,
+      "filesSkipped": 12,
+      "testsPassed": 5474,
+      "testsSkipped": 44
+    },
+    "dryRunPacks": 33,
+    "result": "Workspace validation, zero-warning lint, typechecking, tests, build and all dry-run packs passed on the frozen source snapshot at 5d6ad54."
+  },
+  "engineeringFixtureBoundary": {
+    "goalsAndOwnerEvidence": "Controlled Host fixtures and deterministic clocks supply post-activation observations, owner retractions, Evaluation revisions and owner-correction semantics.",
+    "realDeliveryOwnerCorrection": false,
+    "realLarkOwnerCorrection": false,
+    "wholeGoalOwnerCorrectionUi": "missing",
+    "realModel": false,
+    "productionCohort": false,
+    "realPluginRuntimeEnforcement": false
+  },
+  "limitations": [
+    "All four cohort clauses are validated at the control-plane/store engineering layer with real SQLite and real CLI paths; evidence receipts are fixture-signed by test keys, not production Host or owner keys.",
+    "Plugin close and rollback are authoritative ledger terminal states plus gap reopening and immutable catalog reactivation. The pinned dsh executor cannot be forced to uninstall or disable an activated plugin, so no physical runtime eviction is claimed.",
+    "Skill/workflow monitoring remains qualified to the deterministic canonical goal-outcome family; guidance monitoring covers rules backed by frozen Evaluation task-learning tuples.",
+    "No long-term real quality distribution, multi-cohort production traffic or real owner channel (Lark/Web) cohort acceptance is observed; the original WP15 did not require them for first-version closure.",
+    "assistant-health cohort signals are degraded (attention) signals; wiring a live control-plane Provider into the runtime health aggregation belongs to the production adapter work packages.",
+    "WP15 remains implementing and the global work-package counts remain 3 verified, 13 implementing and 2 pending."
+  ]
+}
