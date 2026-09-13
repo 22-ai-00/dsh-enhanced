@@ -1180,6 +1180,13 @@ function sessionResumeFailureCode(error: unknown): string {
   return 'session-resume-unavailable'
 }
 
+function sessionFormatUnsupportedReply(): ModelCommandReply {
+  return {
+    text: '旧会话格式无法由当前 Host 恢复，记录已保留。请使用 /new 开启会话。',
+    format: 'plain',
+  }
+}
+
 function sessionFingerprint(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 8)
 }
@@ -4005,6 +4012,22 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       if (causedByDurableIdentity(error)) {
         return { outcome: 'not-processed', failureCode: 'agent-identity-mismatch', retryable: false }
+      }
+      if (errorChainHasName(error, 'SessionFormatUnsupportedError')) {
+        this.ctx.logger.warn(
+          `assistant-delivery: session-format-unsupported for session ${sessionFingerprint(binding.sessionId)}`,
+        )
+        try {
+          this.options.replyCommand(binding, envelope.eventId, sessionFormatUnsupportedReply())
+          // The durable reply is the only user effect.  Dead-letter the original
+          // inbound event so a legacy format cannot consume the normal retry
+          // budget or produce a second notification.
+          return { outcome: 'not-processed', failureCode: 'session-format-unsupported', retryable: false }
+        } catch {
+          // Do not mark a terminal diagnosis without its owner-authorized,
+          // durable reply; Coordinator may retry this pre-dispatch failure.
+          return { outcome: 'not-processed', failureCode: 'session-format-unsupported-notice-failed', retryable: true }
+        }
       }
       if (error instanceof ImageCapabilityAdmissionError) {
         try {
