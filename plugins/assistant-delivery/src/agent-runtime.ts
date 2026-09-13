@@ -1971,6 +1971,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
 
   private async setupAgent(
     agentCtx: Agent['ctx'],
+    preparedAgent: Agent | undefined,
     workspace: string,
     presetId: string,
     principal: string,
@@ -1978,7 +1979,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     agentPresets: Pick<AgentPresets, 'mount'> | undefined,
     initiator: 'background' | 'external' = 'external',
   ): Promise<void> {
-    const agent = agentCtx.agent
+    const agent = preparedAgent ?? agentCtx.agent
     if (agent === undefined) throw new Error('assistant-delivery: unpublished Agent identity is missing')
     if (agent.session.header.cwd !== workspace || agent.session.header.agentPreset !== presetId) {
       throw new DurableAgentIdentityError(
@@ -2186,9 +2187,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           model: selected.model,
           maxTokens: this.options.maxOutputTokens,
         },
-        setup: async agentCtx => {
+        setup: async (agentCtx, preparedAgent?: Agent) => {
           await this.setupAgent(
             agentCtx,
+            preparedAgent,
             binding.workspace,
             presetId,
             externalPrincipalId(binding.principal),
@@ -2495,9 +2497,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     await ensureWorkspace(workspace)
     const selected = agentSelection(toModelRoute(this.options.getModelSelection(input.envelope.conversation)
       ?? { provider: this.options.provider, model: this.options.model }))
-    const setup = async (agentCtx: Agent['ctx']): Promise<void> => {
+    const setup = async (agentCtx: Agent['ctx'], preparedAgent?: Agent): Promise<void> => {
       await this.setupAgent(
         agentCtx,
+        preparedAgent,
         workspace,
         presetId,
         externalPrincipalId(input.envelope.principal),
@@ -2610,17 +2613,18 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         resumeSessionId: SessionId(binding.sessionId),
         signal: control.controller.signal,
         agentOptions: { provider: selected.provider, model: selected.model, maxTokens: this.options.maxOutputTokens },
-        setup: async agentCtx => {
+        setup: async (agentCtx, preparedAgent?: Agent) => {
           // Restored inbox entries may wake immediately on Session publication.
           // Install the background-only gate before that publication boundary.
-          if (agentCtx.agent === undefined) throw new Error('assistant-delivery: wake Agent missing')
-          releaseFences = this.installScheduledGoalFences(agentCtx.agent, input)
+          const agent = preparedAgent ?? agentCtx.agent
+          if (agent === undefined) throw new Error('assistant-delivery: wake Agent missing')
+          releaseFences = this.installScheduledGoalFences(agent, input)
           await this.setupAgent(
-            agentCtx, binding.workspace, presetId, input.attestation.principalId, selected, presets, 'background',
+            agentCtx, agent, binding.workspace, presetId, input.attestation.principalId, selected, presets, 'background',
           )
           const llm = this.ctx.get('llm')
           if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
-          requireAdapterToolCallProtocol(llm, selected.provider, selected.model, presetId, agentCtx.tools.schemas(agentCtx.agent).length)
+          requireAdapterToolCallProtocol(llm, selected.provider, selected.model, presetId, agentCtx.tools.schemas(preparedAgent ?? agentCtx.agent).length)
         },
       })
       const agent = handle.agent
@@ -3318,9 +3322,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           model: selected.model,
           maxTokens: this.options.maxOutputTokens,
         },
-        setup: async agentCtx => {
+        setup: async (agentCtx, preparedAgent?: Agent) => {
           await this.setupAgent(
             agentCtx,
+            preparedAgent,
             binding.workspace,
             presetId,
             externalPrincipalId(binding.principal),
@@ -3700,9 +3705,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       handle = await this.resumeAgent({ resumeSessionId: SessionId(binding.sessionId), signal,
         agentOptions: { provider: selected.provider, model: selected.model,
           maxTokens: this.options.maxOutputTokens },
-        setup: async agentCtx => {
+        setup: async (agentCtx, preparedAgent?: Agent) => {
           await this.setupAgent(
             agentCtx,
+            preparedAgent,
             binding.workspace,
             presetId,
             externalPrincipalId(binding.principal),
@@ -3716,7 +3722,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             selected.provider,
             selected.model,
             presetId,
-            agentCtx.tools.schemas(agentCtx.agent).length,
+            agentCtx.tools.schemas(preparedAgent ?? agentCtx.agent).length,
           )
         } })
       const agent = handle.agent

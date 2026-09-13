@@ -1,18 +1,20 @@
 import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
-import { SessionController } from '@deepseek-ai/dsh-api-session-controller'
+import { SessionController as BundledSessionController } from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionAddress, SessionControlFrame, SessionCreateRequest, SessionPromptRequest } from '@deepseek-ai/dsh-api-session-controller'
 import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { realpath } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { version } from './version.js'
 import { TYPERT } from './typert.js'
 import { DeliveryNoticesService } from './notices.js'
 
 export const name = 'dsh-enhanced-assistant-web-owner'
 export { version }
-export const inject = [...SessionController.inject, 'assistantDelivery', 'typert']
+export const inject = [...BundledSessionController.inject, 'assistantDelivery', 'typert']
 
 export interface DeliveryNotice {
   readonly id: string
@@ -85,7 +87,21 @@ async function resolveOwnedWorkspace(ctx: Context, config: Config): Promise<Work
   return workspace
 }
 
-function wrapController(ctx: Context, config: Config, access: NativeWebOwnerAccess, originalRegistry: Context['agents'], workspace: Workspace): SessionController {
+type SessionControllerConstructor = { new(ctx: Context, config: Record<string, never>): BundledSessionController; readonly inject: readonly string[] }
+
+/** Resolve from the Host entrypoint so the controller and AgentLoop share one ABI. */
+async function hostSessionController(): Promise<SessionControllerConstructor> {
+  const hostRequire = createRequire(process.argv[1] ?? import.meta.url)
+  const entry = hostRequire.resolve('@deepseek-ai/dsh-api-session-controller')
+  const module = await import(pathToFileURL(entry).href) as { SessionController?: unknown }
+  const candidate = module.SessionController
+  if (typeof candidate !== 'function' || !Array.isArray((candidate as { inject?: unknown }).inject)) {
+    fail('Host SessionController is unavailable')
+  }
+  return candidate as SessionControllerConstructor
+}
+
+async function wrapController(ctx: Context, config: Config, access: NativeWebOwnerAccess, originalRegistry: Context['agents'], workspace: Workspace): Promise<void> {
   const isolated = ctx
   const pendingAdded = new Map<SessionId, unknown>()
   let creating = 0
@@ -120,21 +136,32 @@ function wrapController(ctx: Context, config: Config, access: NativeWebOwnerAcce
     return emit(event, ...args)
   }) as Context['emit'] })
   scoped.provide('agents', ownedAgents(originalRegistry, access))
-  const controller = new SessionController(scoped, {})
-  // Keep the unwrapped methods before installing own properties.  The Typert
-  // gateway resolves a Remote operation with Reflect.get(), so the own
-  // properties below are intentionally what the gateway sees.
-  const native = Object.fromEntries([
+  // The constructor comes from the active Host package, while this scoped
+  // facade keeps its existing isolated-agent ownership and RPC boundary.
+  // Its exact inject list must own the nested Context: later Hosts require
+  // fileUploads while the supported 0.1.2 Host does not provide that service.
+  const Controller = await hostSessionController()
+  // `scoped` is backed by the currently-loading owner fiber.  Its `agents`
+  // provider becomes visible only after this apply callback settles, so do
+  // not await the child here: that would make its exact Controller.inject
+  // list wait on its own parent.  Cordis owns and activates this child after
+  // the provider is live, and reloads it with the active Host inject list.
+  scoped.inject(Controller.inject, controllerCtx => {
+    const controller = new Controller(controllerCtx, {})
+    // Keep the unwrapped methods before installing own properties.  The Typert
+    // gateway resolves a Remote operation with Reflect.get(), so the own
+    // properties below are intentionally what the gateway sees.
+    const native = Object.fromEntries([
     'resolveAgent', 'inspect', 'list', 'search', 'create', 'selectModel', 'rename',
     'attachment', 'updateQueue', 'cancel', 'prompt', 'page', 'follow', 'control',
-  ].map(method => [method, (controller as unknown as Record<string, (...args: unknown[]) => unknown>)[method]!.bind(controller)])) as Record<string, (...args: unknown[]) => unknown>
-  const replace = (method: string, wrapper: (...args: never[]) => unknown) => Object.defineProperty(controller, method, { value: wrapper, enumerable: true, configurable: true, writable: false })
-  const call = (method: string, args: unknown[]) => Reflect.apply(native[method]!, controller, args)
-  replace('resolveAgent', async (id: SessionId) => { assertOwned(access, id); return call('resolveAgent', [id]) })
-  replace('inspect', async (id: SessionId, signal?: AbortSignal) => { assertOwned(access, id); return call('inspect', [id, signal]) })
-  replace('list', async (request: never, signal: AbortSignal) => { const value = await call('list', [request, signal]) as { items: readonly { sessionId: SessionId }[] }; return { ...value, items: value.items.filter(item => access.ownsSession(item.sessionId)) } })
-  replace('search', async (request: never, signal: AbortSignal) => { const value = await call('search', [request, signal]) as { items: readonly { sessionId: SessionId }[] }; return { ...value, items: value.items.filter(item => access.ownsSession(item.sessionId)) } })
-  replace('create', async (request: SessionCreateRequest) => {
+    ].map(method => [method, (controller as unknown as Record<string, (...args: unknown[]) => unknown>)[method]!.bind(controller)])) as Record<string, (...args: unknown[]) => unknown>
+    const replace = (method: string, wrapper: (...args: never[]) => unknown) => Object.defineProperty(controller, method, { value: wrapper, enumerable: true, configurable: true, writable: false })
+    const call = (method: string, args: unknown[]) => Reflect.apply(native[method]!, controller, args)
+    replace('resolveAgent', async (id: SessionId) => { assertOwned(access, id); return call('resolveAgent', [id]) })
+    replace('inspect', async (id: SessionId, signal?: AbortSignal) => { assertOwned(access, id); return call('inspect', [id, signal]) })
+    replace('list', async (request: never, signal: AbortSignal) => { const value = await call('list', [request, signal]) as { items: readonly { sessionId: SessionId }[] }; return { ...value, items: value.items.filter(item => access.ownsSession(item.sessionId)) } })
+    replace('search', async (request: never, signal: AbortSignal) => { const value = await call('search', [request, signal]) as { items: readonly { sessionId: SessionId }[] }; return { ...value, items: value.items.filter(item => access.ownsSession(item.sessionId)) } })
+    replace('create', async (request: SessionCreateRequest) => {
     if (request.workspaceId !== undefined && request.workspaceId !== workspace.id) fail('the configured workspaceId is required')
     if (request.workspaceId !== undefined && request.cwd !== undefined) fail('workspaceId and cwd cannot be combined')
     if (request.cwd !== undefined && request.cwd !== config.workspace) fail('the configured workspace is required')
@@ -150,37 +177,37 @@ function wrapController(ctx: Context, config: Config, access: NativeWebOwnerAcce
       if (added !== undefined) emit('api-session/added', added)
       return value
     } finally { creating -= 1; if (creating === 0) pendingAdded.clear() }
-  })
-  for (const method of ['selectModel', 'rename', 'attachment'] as const) replace(method, async (request: { sessionId: SessionId }) => { assertOwned(access, request.sessionId); return call(method, [request]) })
-  for (const method of ['updateQueue', 'cancel'] as const) replace(method, (request: { sessionId: SessionId }) => { assertOwned(access, request.sessionId); return call(method, [request]) })
-  replace('fork', async (request: { sessionId: SessionId }) => { assertOwned(access, request.sessionId); fail('fork is not supported until a new Web owner binding can be created atomically') })
-  replace('prompt', async (request: SessionPromptRequest, signal: AbortSignal) => {
+    })
+    for (const method of ['selectModel', 'rename', 'attachment'] as const) replace(method, async (request: { sessionId: SessionId }) => { assertOwned(access, request.sessionId); return call(method, [request]) })
+    for (const method of ['updateQueue', 'cancel'] as const) replace(method, (request: { sessionId: SessionId }) => { assertOwned(access, request.sessionId); return call(method, [request]) })
+    replace('fork', async (request: { sessionId: SessionId }) => { assertOwned(access, request.sessionId); fail('fork is not supported until a new Web owner binding can be created atomically') })
+    replace('prompt', async (request: SessionPromptRequest, signal: AbortSignal) => {
     assertOwned(access, request.sessionId); signal.throwIfAborted()
     const resolved = await call('resolveAgent', [request.sessionId]) as { agent?: Agent, error?: unknown }
     if (resolved.agent === undefined) throw resolved.error ?? new Error('session agent could not be resolved')
     if (request.content.some(part => part.type !== 'text')) fail('图片输入尚未接入，请先发送文本')
     const content = request.content
     return access.prompt({ sessionId: request.sessionId, requestId: request.requestId, text: textContent(content), content }, () => Promise.resolve(call('prompt', [request, signal])), signal)
-  })
-  replace('page', async (request: { address: SessionAddress }, signal: AbortSignal) => {
+    })
+    replace('page', async (request: { address: SessionAddress }, signal: AbortSignal) => {
     const id = sessionIdForAddress(request.address)
     assertOwned(access, id)
     const page = await call('page', [request, signal])
     assertOwned(access, id)
     return page
-  })
-  replace('follow', async function* (request: { address: SessionAddress }, signal: AbortSignal) {
+    })
+    replace('follow', async function* (request: { address: SessionAddress }, signal: AbortSignal) {
     const id = sessionIdForAddress(request.address)
     assertOwned(access, id)
     for await (const frame of call('follow', [request, signal]) as AsyncIterable<unknown>) {
       assertOwned(access, id)
       yield frame
     }
+    })
+    replace('control', async function* (signal: AbortSignal) { for await (const frame of call('control', [signal]) as AsyncIterable<SessionControlFrame>) { const filtered = ownedControl(frame, access); if (filtered !== undefined) yield filtered } })
+    replace('openWorkspacePath', async () => fail('opening arbitrary host paths is disabled for the Web owner'))
+    replace('canOpenWorkspacePath', () => false)
   })
-  replace('control', async function* (signal: AbortSignal) { for await (const frame of call('control', [signal]) as AsyncIterable<SessionControlFrame>) { const filtered = ownedControl(frame, access); if (filtered !== undefined) yield filtered } })
-  replace('openWorkspacePath', async () => fail('opening arbitrary host paths is disabled for the Web owner'))
-  replace('canOpenWorkspacePath', () => false)
-  return controller
 }
 
 export async function apply(ctx: Context, input: Config): Promise<void> {
@@ -200,7 +227,7 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
       // capability checks lineage, expiry and current send policy on every call.
       new DeliveryNoticesService(owner, access)
       owner.typert.register(TYPERT)
-      wrapController(owner, config, access, originalRegistry, workspace)
+      await wrapController(owner, config, access, originalRegistry, workspace)
     } catch (error) {
       await access.dispose()
       throw error

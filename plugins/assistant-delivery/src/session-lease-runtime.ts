@@ -8,6 +8,9 @@ import type { SessionLease, SessionLeaseClaim, SessionLeaseTarget } from './sess
 // against its exact member without requiring a nonexistent runtime export.
 const activeFiberState: FiberState.ACTIVE = 2
 
+// 0.1.5 supplies the unpublished Agent explicitly; 0.1.2 supplies it on Context.
+export type CompatibleAgentSetup = (ctx: Context, agent?: Agent) => ReturnType<AgentSetup>
+
 export interface SessionLeasePort {
   leaseMs: number
   /** Whether this durable Session is Delivery-owned and must have a local execution lease. */
@@ -219,13 +222,13 @@ export class DeliverySessionLeases {
     let native: AgentHandle | undefined
     try {
       finishConstruction = lease.enter()
-      native = await factory(async agentCtx => {
-        const agent = agentCtx.agent
+      native = await factory(async (agentCtx, preparedAgent?: Agent) => {
+        const agent = preparedAgent ?? agentCtx.agent
         if (agent === undefined || String(agent.session.id) !== sessionId) throw new SessionLeaseUnavailable('denied')
         lease.attach(agent)
         this.#agents.set(agent, lease)
         prepared = agent
-        const setup = await options.setup?.(agentCtx)
+        const setup = await (options.setup as CompatibleAgentSetup | undefined)?.(agentCtx, agent)
         lease.assertAgent(agent)
         // Preserve the native setup commit and revalidate at publication, not
         // just before the last async setup operation returns.

@@ -46,17 +46,28 @@ test('rejects malformed or expired repair bootstrap before creating an Agent', a
   await runtime.dispose()
 })
 
-test.each(['native', 'repair'])('a %s abort at normal provider return keeps its effect pending after handle disposal', async source => {
+test.each([
+  ['native', 'legacy'],
+  ['repair', 'current'],
+] as const)('a %s abort at normal provider return keeps its effect pending after %s Agent setup', async (source, abi) => {
   const store = new SkillStore(':memory:')
   const record = store.createRepairContinuation(scope, { invocationId: `abort-${source}`, ownerRouteId: 'route', source: { goalId: 'source', sessionId: 'source-session', nativeGoalId: 'source-native', definitionDigest: 'a'.repeat(64) },
     profileId: 'profile', profileDigest: 'b'.repeat(64), skillName: 'repair-skill', parentVersion: 1, parentDigest: 'c'.repeat(64), maxIterations: 1, expiresAt: Date.now() + 60_000 }, {})
   const original = { ...input(), id: record.id, authorizationDigest: record.authorizationDigest, expiresAt: record.authorization.expiresAt, maxDurationMs: 30_000 }
   const repairAbort = new AbortController(), nativeAbort = new AbortController()
   let stream!: (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>
-  const create = async ({ sessionId, setup }: { sessionId: string; setup: (ctx: unknown) => Promise<void> }) => {
+  const create = async ({ sessionId, setup }: { sessionId: string; setup: (ctx: unknown, agent?: unknown) => Promise<void> }) => {
     const agent = { session: { id: sessionId }, cancel: vi.fn() }
-    await setup({ agent, effect: (acquire: () => unknown) => acquire(), tools: { schemas: () => [], guard: () => {} },
-      on: (name: string, listener: typeof stream) => { if (name === 'llm/stream') stream = listener; return () => {} } })
+    const runtime = { effect: (acquire: () => unknown) => acquire(), tools: { schemas: () => [], guard: () => {} },
+      on: (name: string, listener: typeof stream) => { if (name === 'llm/stream') stream = listener; return () => {} } }
+    const agentCtx = abi === 'legacy'
+      ? { ...runtime, agent }
+      : new Proxy(runtime, { get(target, key, receiver) {
+        if (key === 'agent') throw new Error('current Agent setup must use its prepared Agent')
+        return Reflect.get(target, key, receiver)
+      } })
+    if (abi === 'legacy') await setup(agentCtx)
+    else await setup(agentCtx, agent)
     return { agent, dispose: async () => {} }
   }
   const ctx = { effect() {}, get: (name: string) => ({ agents: { create }, assistantGoals: { startOwnerAuthorizedRepair: async () => ({ id: 'goal' }) },

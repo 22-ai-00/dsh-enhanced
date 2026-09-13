@@ -6,7 +6,7 @@ import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AcceptanceHandle } from './acceptance.js'
 import { externalPrincipalId, canonicalPrincipal } from './canonical.js'
 import type { DeliveryStore } from './store.js'
-import { DeliverySessionLeases, SessionLeaseUnavailable, type SessionExecutionLease } from './session-lease-runtime.js'
+import { DeliverySessionLeases, SessionLeaseUnavailable, type SessionExecutionLease, type CompatibleAgentSetup } from './session-lease-runtime.js'
 import type { ConversationBinding, DeliveryOwnerLineage, ExternalPrincipalKey, InboundEnvelope } from './types.js'
 
 export interface NativeWebOwnerConfig {
@@ -183,13 +183,13 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
     }
   }
   #setup(original: CreateAgentOptions['setup']): NonNullable<CreateAgentOptions['setup']> {
-    return async ctx => {
+    return async (ctx, preparedAgent?: Agent) => {
       this.#assertOwner()
-      const agent = ctx.agent
+      const agent = preparedAgent ?? ctx.agent
       if (agent === undefined || agent.session.header.cwd !== this.#config.workspace
         || agent.session.header.agentPreset !== this.#config.preset) throw new SessionLeaseUnavailable('denied')
       ctx.effect(() => this.policy.bindInitiator(agent, 'external', externalPrincipalId(this.#config.principal)))
-      const prepared = await original?.(ctx)
+      const prepared = await (original as CompatibleAgentSetup | undefined)?.(ctx, agent)
       return { commit: () => { this.#assertOwner(); prepared?.commit?.(); this.#assertOwner() } }
     }
   }

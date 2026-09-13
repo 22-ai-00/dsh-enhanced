@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { DeliverySessionLeases, SessionLeaseUnavailable } from '../src/session-lease-runtime.ts'
-import type { SessionLeasePort } from '../src/session-lease-runtime.ts'
+import type { CompatibleAgentSetup, SessionLeasePort } from '../src/session-lease-runtime.ts'
 
 function fixture(resume: (options: ResumeAgentOptions) => Promise<AgentHandle>, nativeFactory = false) {
   const cleanups: (() => Promise<void> | void)[] = []
@@ -42,6 +42,29 @@ function fixture(resume: (options: ResumeAgentOptions) => Promise<AgentHandle>, 
 }
 
 describe('Shared Session factory lifecycle', () => {
+  test.each([false, true])('binds and forwards the unpublished Agent across old/new setup ABI (explicit=%s)', async explicit => {
+    const agent = { session: { id: SessionId('session') }, cancel: vi.fn() } as unknown as Agent
+    const agentCtx = Object.defineProperty({}, 'agent', {
+      get() { if (explicit) throw new Error('agent is not injected'); return agent },
+    }) as Context
+    const commit = vi.fn()
+    const setup = vi.fn((_ctx: Context, _agent?: Agent) => ({ commit }))
+    const f = fixture(async options => {
+      const result = await (options.setup as CompatibleAgentSetup)?.(agentCtx, explicit ? agent : undefined)
+      result?.commit()
+      return { agent, dispose: async () => {} }
+    })
+    try {
+      const handle = await f.leases.resume(f.owner, { resumeSessionId: SessionId('session'), setup })
+      expect(handle.agent).toBe(agent)
+      expect(setup).toHaveBeenCalledOnce()
+      expect(setup.mock.calls[0]?.[0]).toBe(agentCtx)
+      expect(setup.mock.calls[0]?.[1]).toBe(agent)
+      expect(commit).toHaveBeenCalledOnce()
+      await handle.dispose()
+    } finally { f.lease.close() }
+  })
+
   test.each([false, true])('distinguishes a settled native load error from provider replacement=%s', async replaced => {
     const loaded = Promise.withResolvers<AgentHandle>()
     const f = fixture(() => loaded.promise, true)

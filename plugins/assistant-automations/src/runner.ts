@@ -380,13 +380,14 @@ export class DshAutomationRunner implements AutomationRunner {
           maxTokens: definition.maxOutputTokens,
         },
         signal: input.signal,
-        setup: async (agentCtx) => {
+        setup: async (agentCtx, preparedAgent?: Agent) => {
           phase = 'agent-setup'
-          if (agentCtx.agent === undefined) {
+          const agent = preparedAgent ?? agentCtx.agent
+          if (agent === undefined) {
             throw new Error('assistant-automations: unpublished Agent identity is missing during setup')
           }
-          if (agentCtx.agent.session.header.cwd !== definition.workspace
-            || agentCtx.agent.session.header.agentPreset !== presetId) {
+          if (agent.session.header.cwd !== definition.workspace
+            || agent.session.header.agentPreset !== presetId) {
             throw new Error('assistant-automations: background Agent identity does not match the immutable definition')
           }
           agentCtx.provide('assistantAutomationExecution', execution)
@@ -401,7 +402,7 @@ export class DshAutomationRunner implements AutomationRunner {
             modelCalls += 1
             yield* next()
           })
-          const unbindInitiator = this.policy.bindInitiator(agentCtx.agent, 'background')
+          const unbindInitiator = this.policy.bindInitiator(agent, 'background')
           agentCtx.effect(() => unbindInitiator, 'assistant-automations.background-initiator')
           const delivery = this.ctx.get('assistantDelivery') as
             | Pick<AssistantDeliveryService, 'bindAgentApprovalRoute'>
@@ -410,7 +411,7 @@ export class DshAutomationRunner implements AutomationRunner {
           // delivery. Legacy definitions retain their historical route.
           const bindingId = definition.approvalBindingId ?? definition.deliveryBindingId
           if (bindingId !== undefined && typeof delivery?.bindAgentApprovalRoute === 'function') {
-            const unbindApproval = delivery.bindAgentApprovalRoute(agentCtx.agent, { bindingId })
+            const unbindApproval = delivery.bindAgentApprovalRoute(agent, { bindingId })
             agentCtx.effect(() => unbindApproval, 'assistant-automations.approval-route')
           }
           installModelSelection(agentCtx, {
@@ -421,7 +422,7 @@ export class DshAutomationRunner implements AutomationRunner {
             assembled: undefined,
           })
           if (!this.modelOnly) await agentPresets?.mount(agentCtx, presetId)
-          const mountedNames = agentCtx.tools.schemas(agentCtx.agent).map(schema => schema.name)
+          const mountedNames = agentCtx.tools.schemas(agent).map(schema => schema.name)
           for (const name of allowed) {
             if (!mountedNames.includes(name)) {
               throw new Error(`assistant-automations: unknown allowlist tool after preset mount: ${name}`)
@@ -432,7 +433,7 @@ export class DshAutomationRunner implements AutomationRunner {
           // assertion fail closed for any scoped tool outside the contract.
           const denied = globalNames.filter(name => !allowed.has(name))
           if (denied.length > 0) agentCtx.tools.restrict({ deny: denied })
-          const finalSchemas = agentCtx.tools.schemas(agentCtx.agent)
+          const finalSchemas = agentCtx.tools.schemas(agent)
           const outsideAllowlist = finalSchemas.map(schema => schema.name).filter(name => !allowed.has(name))
           if (outsideAllowlist.length > 0) {
             throw new Error(
