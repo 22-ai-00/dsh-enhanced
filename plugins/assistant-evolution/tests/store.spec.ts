@@ -813,6 +813,68 @@ describe('post-promotion evidence correction', () => {
     raw.close()
     expect(audits).toEqual([{ operation: 'evidence-correction-rollback', ruleId: rule.id, resultVersion: 2 }])
   })
+  test('retracting an exact frozen subject retires the rule and the retirement survives restart', () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-evolution-frozen-retract-'))
+    roots.push(root)
+    const path = join(root, 'evolution.sqlite')
+    const target = new EvolutionStore({ path, now: () => 1_000 })
+    const situation = 'frozen-retract'
+
+    // The adoption window freezes four exact owner-objective task revisions.
+    for (let index = 1; index <= 4; index += 1) observe(target, situation, 'failed', index)
+    const candidate = target.candidates({ ...thresholds, evidenceSampleLimit: 8 })
+      .find(entry => entry.situation === situation && entry.kind === 'adopt')
+    expect(candidate).toBeDefined()
+    const proposal = target.createProposal({
+      idempotencyKey: `adopt:${situation}`,
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: {
+        op: 'adopt' as const,
+        ruleId: `rule-${situation}`,
+        input: { scopeKey, situation, guidance: 'Hold the reviewed evidence window.' },
+        baseline: candidate!.stats,
+        evidence: {
+          sampleEpisodeIds: candidate!.evidence.map(entry => entry.episodeId),
+          digest: candidate!.evidenceDigest,
+          total: candidate!.evidenceTotal,
+          window: 10,
+          scopeWatermark: candidate!.scopeWatermark,
+          taskRevisions: candidate!.taskRevisions,
+        },
+      },
+      expiresAt: 61_000,
+    })
+    target.attachPolicy(proposal.proposalId, `policy-${situation}`)
+    const rule = target.settleProposal({
+      proposalId: proposal.proposalId,
+      policyStatus: 'approved',
+      policyVersion: 2,
+    }).rule!
+    expect(rule).toMatchObject({ status: 'active', version: 1 })
+
+    // An owner withdrawal (retract, no replacement outcome) of an exact
+    // subject that was part of the frozen evidence tuple rolls the rule back.
+    revise(target, situation, 1, 2)
+    expect(target.getRule(rule.id)).toMatchObject({ status: 'retired', version: 2 })
+    expect(target.activeRule(scopeKey, situation)).toBeUndefined()
+    target.close()
+
+    const reopened = new EvolutionStore({ path, now: () => 3_000 })
+    expect(reopened.getRule(rule.id)).toMatchObject({ status: 'retired', version: 2 })
+    expect(reopened.listRules(scopeKey, 'active')).toEqual([])
+    reopened.close()
+
+    const raw = new DatabaseSync(path, { readOnly: true })
+    const audits = raw.prepare(`
+      SELECT operation, rule_id AS ruleId, result_version AS resultVersion
+      FROM evolution_audit
+      WHERE operation = 'evidence-correction-rollback'
+    `).all()
+    raw.close()
+    expect(audits).toEqual([{ operation: 'evidence-correction-rollback',
+      ruleId: rule.id, resultVersion: 2 }])
+  })
 })
 
 describe('approval-gated rule changes', () => {
