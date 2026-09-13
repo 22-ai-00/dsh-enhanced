@@ -60,6 +60,8 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
         bindingVersion: routeBinding?.version ?? 1, generation: routeBinding?.generation ?? 1 }
     } } as never)
   ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }),
+    // Older Policy has the registration API but does not recognize context tools.
+    registerPreauthorizedTool: (_caller: Context, tool: { name: string }) => { if (tool.name === 'goal_context') throw new Error('legacy Policy: reserved tool') },
     evaluateAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }), evaluate: () => ({ effect: allowed ? 'allow' : 'deny' }), getBudgetConfig: () => ({ metric: 'automation-runs' }) } as never)
   let hostExecutor: { descriptor: { catalogDigest: string }; execute(input: unknown): Promise<unknown> } | undefined
   const automationHashes = new Map<string, { definition: unknown; definitionHash: string }>()
@@ -201,6 +203,45 @@ describe('owner-scoped native goal context', () => {
     f.denyAction('create'); expect(f.service.preauthorizeCreate(execution)).toBe(false)
   })
 
+  it('preauthorizes existing owner context without an owner turn while retaining focus and scope policy', async () => {
+    const f = await harness()
+    const agent = await f.create('context-owner', 'owner'), other = await f.create('context-other', 'other')
+    f.human.add(agent)
+    const record = f.service.create(agent, 'Inspect the current goal', 2)
+    expect(f.ctx.tools.get('goal_context', agent)).toBeDefined()
+    f.human.delete(agent)
+    const check = (args: unknown, current = agent, signal = new AbortController().signal) =>
+      f.service.preauthorizeContext({ agent: current, arguments: args, signal } as never)
+    expect(check({})).toBe(true)
+    expect(check({ goal_id: record.id })).toBe(true)
+    expect(check({ goal_id: record.id, focus: true })).toBe(true)
+    expect(f.service.focus(agent, record.id).id).toBe(record.id)
+    expect(check({ goal_id: record.id }, other)).toBe(false)
+    expect(check({ goal_id: 'missing' })).toBe(false)
+    expect(check({ focus: true })).toBe(false)
+    expect(check({}, agent, AbortSignal.abort())).toBe(false)
+    f.denyAction('focus')
+    expect(check({ goal_id: record.id, focus: true })).toBe(false)
+    expect(check({ goal_id: record.id })).toBe(true)
+    f.denyAction('inspect')
+    expect(check({})).toBe(false)
+    expect(check({ goal_id: record.id })).toBe(false)
+  })
+
+  it('rejects malformed context authorization without reading getters, and removes it after disposal', async () => {
+    const f = await harness(), agent = await f.create('context-shape', 'owner')
+    const check = (args: unknown) => f.service.preauthorizeContext({ agent, arguments: args, signal: new AbortController().signal } as never)
+    const getter = vi.fn(() => 'hidden')
+    for (const args of [null, [], 'goal', { goal_id: 1 }, { goal_id: '' }, { focus: 'true' }, { unexpected: true },
+      Object.create({ goal_id: 'inherited' }), { [Symbol('hidden')]: 1 },
+      Object.defineProperty({}, 'goal_id', { enumerable: true, get: getter }),
+      Object.defineProperty({}, 'goal_id', { value: 'hidden', enumerable: false })]) expect(check(args)).toBe(false)
+    expect(getter).not.toHaveBeenCalled()
+    expect(check({})).toBe(true)
+    await f.plugin.dispose()
+    expect(check({})).toBe(false)
+  })
+
   it('keeps goal schedule preauthorization disabled by default', async () => {
     const f = await harness()
     expect(f.service.preauthorizedCreateEnabled).toBe(false)
@@ -252,6 +293,8 @@ describe('owner-scoped native goal context', () => {
       expect(before).not.toMatch(/"waitExpiresAt":/u)
       expect(f.ctx.goals.get(agent)).toBeUndefined()
       const record = f.service.create(agent, objective, 2)
+      expect(f.service.preauthorizeEventWait({ agent, arguments: { goal_id: record.id }, signal: new AbortController().signal } as never)).toBe(true)
+      expect(f.service.preauthorizeEventWait({ agent, arguments: { goal_id: 'foreign-goal' }, signal: new AbortController().signal } as never)).toBe(false)
       const data = JSON.parse(f.service.describe(record).split('<business-goal-data>\n')[1]!.split('\n</business-goal-data>')[0]!
         .replaceAll('&#123;', '{').replaceAll('&#125;', '}').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&'))
       const deadline = displayedWaitDeadline(f.service.snapshot(agent))
@@ -260,6 +303,13 @@ describe('owner-scoped native goal context', () => {
         .rejects.toThrow('event wait deadline exceeds the goal limits')
       expect(f.ctx.goals.get(agent)?.phase).toBe('active')
       expect(f.service.eventWaitsForGoal(agent, record.id)).toEqual([])
+      f.setSourceExpiresAt(now + 60_000)
+      // The verifier stamps its own clock; use the actual frozen deadline.
+      // This fixture needs 2s execution + 1s step verification + 1s whole verification.
+      clock.mockReturnValue(data.goalAcceptance.conditions.expiresAt - 3_999)
+      expect(f.service.snapshot(agent)).toContain('"waitUnavailable":"verification-unavailable"')
+      expect(f.service.snapshot(agent)).not.toMatch(/"waitExpiresAt":/u)
+      clock.mockReturnValue(now)
       f.setSourceExpiresAt(now + 999)
       const unavailable = f.service.snapshot(agent)
       expect(unavailable).toContain('"waitUnavailable":"deadline-under-1s"')

@@ -46,5 +46,8 @@ export function registerIsolationTools(ctx: Context, service: AssistantIsolation
     },
   })
   ctx.tools.register(grants); ctx.tools.register(tool)
+  if (ctx.assistantPolicy.contextToolPreauthorizationVersion?.() === 1) {
+    ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, grants, execution => service.preauthorizeDiscovery(execution))
+  }
   ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, tool, execution => service.preauthorize(execution))
 }

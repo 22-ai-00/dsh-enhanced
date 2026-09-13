@@ -1,11 +1,12 @@
 import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import { LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { LlmRuntime, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId, SessionStore } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ApprovalService from '@deepseek-ai/dsh-user-approval'
+import ToolRuntime, { type ToolExecution } from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
@@ -18,7 +19,7 @@ import { isolationPrincipalDigest } from '../src/service.ts'
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 
-async function fixture(discoveryAllowed = true) {
+async function fixture(discoveryAllowed = true, legacyPolicy = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'isolation-grant-discovery-'))); roots.push(root)
   const stateRoot = join(root, 'state'), workspace = join(root, 'workspace'); await Promise.all([mkdir(stateRoot, { recursive: true, mode: 0o700 }), mkdir(workspace)])
   const ctx = new Context(); await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
@@ -32,16 +33,31 @@ async function fixture(discoveryAllowed = true) {
     ...(discoveryAllowed ? [{ id: 'discover', effect: 'allow' as const, actions: ['execute'], resource: { kind: 'tool' as const, id: 'isolation_grants' } }] : []),
     { id: 'run', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: 'isolation:offline' } },
   ] })
+  if (legacyPolicy) {
+    Object.defineProperty(ctx.assistantPolicy, 'contextToolPreauthorizationVersion', { value: undefined })
+    const register = ctx.assistantPolicy.registerPreauthorizedTool.bind(ctx.assistantPolicy)
+    ctx.assistantPolicy.registerPreauthorizedTool = (...args) => {
+      if (args[1].name === 'isolation_grants') throw new Error('legacy Policy: reserved tool')
+      return register(...args)
+    }
+  }
   const now = Date.now()
   const grants = [
     { id: 'offline', revision: 1, principalDigest: isolationPrincipalDigest('owner'), principalRecordId: 'record-owner', principalVersion: 1, workspace, agentPreset: 'primary', expiresAt: now + 60_000, maxRuns: 3, maxTotalDurationMs: 90_000 },
     { id: 'other-owner', revision: 1, principalDigest: isolationPrincipalDigest('other'), principalRecordId: 'record-other', principalVersion: 1, workspace, agentPreset: 'primary', expiresAt: now + 60_000, maxRuns: 3, maxTotalDurationMs: 90_000 },
     { id: 'expired', revision: 1, principalDigest: isolationPrincipalDigest('owner'), principalRecordId: 'record-owner', principalVersion: 1, workspace, agentPreset: 'primary', expiresAt: now - 1, maxRuns: 3, maxTotalDurationMs: 90_000 },
   ]
-  const plugin = await ctx.plugin(IsolationPlugin, { stateRoot, image: `sha256:${'a'.repeat(64)}`, grants }) as unknown as { dispose(): Promise<void> }
+  const config = { stateRoot, image: `sha256:${'a'.repeat(64)}`, grants }
+  const plugin = await ctx.plugin(IsolationPlugin, config) as unknown as { dispose(): Promise<void> }
   const handle = await ctx.agents.create({ sessionId: SessionId('grant-discovery'), meta: { cwd: workspace, agentPreset: 'primary' } })
   owners.set(handle.agent, 'owner')
-  return { root, stateRoot, workspace, ctx, plugin, handle, owners }
+  return { root, stateRoot, workspace, ctx, config, plugin, handle, owners }
+}
+
+let nextDiscoveryCall = 0
+function discoveryExecution(agent: Agent, arguments_: unknown = {}): ToolExecution {
+  const callId = ToolCallId(`grant-discovery-${++nextDiscoveryCall}`)
+  return { callId, rootCallId: callId, token: Symbol('grant-discovery') as never, name: 'isolation_grants', arguments: arguments_, signal: new AbortController().signal, agent }
 }
 
 test('lists only current owner scope grants with remaining boundaries and no authority mutation', async () => {
@@ -75,5 +91,54 @@ test('fails closed for missing owner, foreign scope, and denied discovery Policy
   } finally { await f.handle.dispose(); await f.plugin.dispose(); await f.ctx.fiber.dispose() }
   const denied = await fixture(false)
   try { await expect(denied.ctx.assistantIsolation.discover(denied.handle.agent)).rejects.toThrow(/policy denied/) }
+  finally { await denied.handle.dispose(); await denied.plugin.dispose(); await denied.ctx.fiber.dispose() }
+})
+
+test('keeps grant discovery available with a Policy predating context preauthorization', async () => {
+  const f = await fixture(true, true)
+  try {
+    expect(f.ctx.tools.get('isolation_grants', f.handle.agent)).toBeDefined()
+    expect(f.ctx.tools.get('isolation_run', f.handle.agent)).toBeDefined()
+    expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(false)
+    await expect(f.ctx.assistantIsolation.discover(f.handle.agent)).resolves.toHaveLength(1)
+  } finally { await f.handle.dispose(); await f.plugin.dispose(); await f.ctx.fiber.dispose() }
+})
+
+test('preauthorizes only a current exact-owner grant discovery and unregisters on unload', async () => {
+  const f = await fixture()
+  try {
+    await f.ctx.plugin(ApprovalService, { policy: 'ask' })
+    let asks = 0; f.ctx.on('approval/request', async () => { asks++; return 'rejected' })
+    f.handle.agent.session.append('turn/start', { turn: 1 })
+    f.handle.agent.session.append('approval/policy', { policy: 'ask' })
+    const current = discoveryExecution(f.handle.agent)
+    expect(f.ctx.assistantIsolation.preauthorizeDiscovery(current)).toBe(true)
+    expect(f.ctx.assistantPolicy.isPreauthorizedTool(current)).toBe(true)
+    expect((await f.ctx.tools.execute(current)).isError).toBe(false)
+    expect(asks).toBe(0)
+
+    const foreign = await f.ctx.agents.create({ sessionId: SessionId('grant-discovery-foreign'), meta: { cwd: join(f.workspace, 'other'), agentPreset: 'primary' } })
+    f.owners.set(foreign.agent, 'owner')
+    expect(f.ctx.assistantIsolation.preauthorizeDiscovery(discoveryExecution(foreign.agent))).toBe(false)
+    await foreign.dispose()
+
+    expect(f.ctx.assistantIsolation.preauthorizeDiscovery(discoveryExecution(f.handle.agent, { ignored: true }))).toBe(false)
+    await f.plugin.dispose()
+    expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(false)
+    f.plugin = await f.ctx.plugin(IsolationPlugin, f.config) as unknown as { dispose(): Promise<void> }
+    expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(true)
+
+    const database = new DatabaseSync(join(f.stateRoot, 'ledger.sqlite'))
+    try { database.prepare("UPDATE isolation_grants SET revoked=1 WHERE id='offline'").run() } finally { database.close() }
+    expect(f.ctx.assistantIsolation.preauthorizeDiscovery(discoveryExecution(f.handle.agent))).toBe(false)
+
+    await f.plugin.dispose()
+    expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(false)
+    f.plugin = await f.ctx.plugin(IsolationPlugin, f.config) as unknown as { dispose(): Promise<void> }
+    expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(false)
+  } finally { await f.handle.dispose(); await f.plugin.dispose(); await f.ctx.fiber.dispose() }
+
+  const denied = await fixture(false)
+  try { expect(denied.ctx.assistantIsolation.preauthorizeDiscovery(discoveryExecution(denied.handle.agent))).toBe(false) }
   finally { await denied.handle.dispose(); await denied.plugin.dispose(); await denied.ctx.fiber.dispose() }
 })

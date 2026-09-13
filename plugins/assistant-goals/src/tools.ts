@@ -60,7 +60,9 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
       },
     })
     ctx.tools.register(waitTool)
-    if (service.preauthorizedScheduleEnabled) ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, waitTool, execution => service.preauthorizeEventWait(execution))
+    if (service.preauthorizedScheduleEnabled) ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, waitTool,
+      execution => service.preauthorizeEventWait(execution),
+      { denialReason: 'assistant-goals: event wait is outside the current goal, source, budget or verification-window authority. Inspect goal_context and the current wait limits; approving a tool cannot extend these limits.' })
   }
   const createTool = defineTool({
     name: 'goal_create',
@@ -77,7 +79,7 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
   })
   ctx.tools.register(createTool)
   if (service.preauthorizedCreateEnabled) ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, createTool, execution => service.preauthorizeCreate(execution))
-  ctx.tools.register(defineTool({
+  const contextTool = defineTool({
     name: 'goal_context',
     description: 'Inspect owner-scoped business goal history and next steps. Optional focus supplies context in this session without starting or transferring a native goal. Native completion and cited evidence are not verified success.',
     parameters: { goal_id: { type: 'string' }, focus: { type: 'boolean' } }, output,
@@ -88,7 +90,11 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
       }
       return { context: service.describeForAgent(exec.agent, (args.focus === true ? service.focus(exec.agent, args.goal_id) : service.inspect(exec.agent, args.goal_id)).id) }
     },
-  }))
+  })
+  ctx.tools.register(contextTool)
+  if (ctx.assistantPolicy?.contextToolPreauthorizationVersion?.() === 1) {
+    ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, contextTool, execution => service.preauthorizeContext(execution))
+  }
   ctx.tools.register(defineTool({
     name: 'goal_checkpoint',
     description: 'Save next step, blockers, expiring assumptions, evidence references and goal dependencies using version CAS. These are unverified planning notes; this cannot change the original objective, grant authority or mark success.',

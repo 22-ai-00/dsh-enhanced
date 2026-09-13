@@ -261,6 +261,23 @@ export class AssistantIsolationService extends Service {
     } catch { return false }
   }
 
+  /**
+   * A grant discovery is harmless only while it can report a grant usable by
+   * this exact live owner. Keep the presentation query behind the same live
+   * owner, Policy, expiry and revocation boundaries as isolation_run.
+   */
+  preauthorizeDiscovery = (execution: ToolExecution): boolean => {
+    try {
+      if (execution.signal.aborted || !execution.arguments || typeof execution.arguments !== 'object'
+        || Array.isArray(execution.arguments) || Object.keys(execution.arguments).length !== 0) return false
+      const agent = execution.agent
+      const identity = this.#ownerIdentity(agent)
+      if (this.ctx.get('assistantPolicy')?.evaluateAgent(agent!, 'execute', { kind: 'tool', id: 'isolation_grants' }).effect !== 'allow') return false
+      return this.#config.grants.some(grant => this.#ledger.permitsGrant(identity, grant.id)
+        && this.ctx.get('assistantPolicy')?.evaluateAgent(agent!, 'execute', { kind: 'tool', id: `isolation:${grant.id}` }).effect === 'allow')
+    } catch { return false }
+  }
+
   run = async (agent: Agent | undefined, input: IsolationRequest, signal: AbortSignal): Promise<IsolationResult> => {
     await this.#ready
     signal.throwIfAborted()
