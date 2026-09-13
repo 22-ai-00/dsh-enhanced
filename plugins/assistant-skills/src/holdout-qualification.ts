@@ -53,7 +53,7 @@ export interface HoldoutQualificationInput {
 
 export interface HoldoutQualificationResult {
   readonly receipt: HoldoutReceipt
-  readonly quality: { candidateChecksPassed: boolean; evaluationGain: number | null; evaluationGainObserved: boolean; criticalRegressionsPassed: boolean; heldoutIndependence: 'unproven' }
+  readonly quality: { candidateChecksPassed: boolean; evaluationGain: number | null; evaluationGainObserved: boolean; criticalRegressionsPassed: boolean; heldoutIndependence: 'unproven' | 'attested-after-freeze' }
   readonly modelCalls: 0
   readonly promotionAuthorized: false
   readonly execution: 'native-file-tools-and-isolated-artifact'
@@ -195,12 +195,15 @@ function validReceipt(value: unknown, begin: BeginResult, seen: ReadonlyMap<stri
       && (item.observationDigest === undefined || hex(item.observationDigest)) && (ids.add(item.cellId), true)
   }) && ids.size === begin.cellCount && pairs.size * 2 === begin.cellCount && kinds.size === 3 && [...pairs.values()].every(arms => arms.size === 2 && arms.has(begin.baselineDigest) && arms.has(begin.candidateDigest))
 }
-function quality(receipt: HoldoutReceipt): HoldoutQualificationResult['quality'] {
+function quality(receipt: HoldoutReceipt, attested: boolean): HoldoutQualificationResult['quality'] {
   const rate = (kind: string, arm: string) => { const cells = receipt.cellVerdicts.filter(cell => cell.kind === kind && cell.armDigest === arm); return cells.length ? cells.filter(cell => cell.verdict === 'achieved').length / cells.length : 0 }
   const complete = receipt.complete && receipt.cellVerdicts.every(cell => cell.verdict !== 'unknown')
   const evaluationGain = complete ? rate('evaluation', receipt.candidateDigest) - rate('evaluation', receipt.baselineDigest) : null
-  return { candidateChecksPassed: complete && receipt.cellVerdicts.filter(cell => cell.armDigest === receipt.candidateDigest).every(cell => cell.verdict === 'achieved'), evaluationGain,
-    evaluationGainObserved: evaluationGain !== null && evaluationGain > 0, criticalRegressionsPassed: complete && receipt.cellVerdicts.filter(cell => cell.kind === 'regression' && cell.armDigest === receipt.candidateDigest).every(cell => cell.verdict === 'achieved'), heldoutIndependence: 'unproven' }
+  const candidateChecksPassed = complete && receipt.cellVerdicts.filter(cell => cell.armDigest === receipt.candidateDigest).every(cell => cell.verdict === 'achieved')
+  const criticalRegressionsPassed = complete && receipt.cellVerdicts.filter(cell => cell.kind === 'regression' && cell.armDigest === receipt.candidateDigest).every(cell => cell.verdict === 'achieved')
+  return { candidateChecksPassed, evaluationGain,
+    evaluationGainObserved: evaluationGain !== null && evaluationGain > 0, criticalRegressionsPassed,
+    heldoutIndependence: attested && complete && candidateChecksPassed && evaluationGain !== null && evaluationGain > 0 && criticalRegressionsPassed ? 'attested-after-freeze' : 'unproven' }
 }
 
 export type ProspectiveQualificationContext = Pick<HoldoutQualificationInput, 'scope' | 'baseline' | 'candidate' | 'execution' | 'inputs' | 'files' | 'pinnedPublicKey' | 'canaryAdmission'> & { readonly expectedGeneratorDigest: string }
@@ -230,7 +233,7 @@ export function inspectProspectiveQualification(value: unknown, input: Prospecti
     const saved = receipt as HoldoutReceipt
     const seen = new Map(saved.cellVerdicts.map(cell => [cell.cellId, cell.armDigest]))
     if (!validReceipt(saved, receipt, seen)) return undefined
-    return { receipt: clone(saved), quality: quality(saved), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact', prospectiveHoldout: 'authority-attested-after-freeze',
+    return { receipt: clone(saved), quality: quality(saved, true), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact', prospectiveHoldout: 'authority-attested-after-freeze',
       ...(admissionDigest === undefined ? {} : { admissionDigest }) }
   } catch { return undefined }
 }
@@ -291,7 +294,7 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
     revalidate(); const receiptValue = await request<unknown>(input.transport, 'finish', undefined, input.signal, execution.expiresAt, execution.cellDurationMs)
     if (!validReceipt(receiptValue, begin, seen)) fail('receipt signature or binding is invalid')
     const receipt = receiptValue as HoldoutReceipt
-    return { receipt, quality: quality(receipt), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact',
+    return { receipt, quality: quality(receipt, expectedGeneratorDigest !== undefined), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact',
       ...(expectedGeneratorDigest === undefined ? {} : { prospectiveHoldout: 'authority-attested-after-freeze' as const }),
       ...(canaryAdmission === undefined ? {} : { admissionDigest: digest(canaryAdmission) }) }
   } finally { await runner.close() }
