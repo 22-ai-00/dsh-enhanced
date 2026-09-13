@@ -59,8 +59,10 @@ async function run(mode: string): Promise<Settlement> {
   return await new Promise<Settlement>((resolve, reject) => {
     const timeout = setTimeout(() => { supervisor.kill('SIGKILL'); reject(new Error(`supervisor timeout for ${mode}`)) }, 20_000)
     const finish = (value: Settlement): void => { clearTimeout(timeout); resolve(value) }
-    supervisor.once('error', reject)
-    supervisor.on('message', (message: { type?: string }) => {
+    const fail = (error: Error): void => { clearTimeout(timeout); reject(error) }
+    supervisor.once('error', fail)
+    supervisor.on('message', (message: { type?: string; reason?: string }) => {
+      if (message.type === 'error') { fail(new Error(`supervisor rejected configuration: ${message.reason ?? 'unknown'}`)); return }
       if (message.type === 'ready') { supervisor.send({ type: 'start' }); return }
       if (message.type === 'result') finish(message as Settlement)
     })
@@ -72,7 +74,9 @@ async function run(mode: string): Promise<Settlement> {
   }).finally(async () => { if (supervisor.connected) supervisor.disconnect(); if (!supervisor.killed) supervisor.kill('SIGKILL'); await exited })
 }
 
-describe('supervisor settlement protocol', () => {
+// The real supervisor accepts configuration only on a non-root Linux host.
+const supportedHost = process.platform === 'linux' && typeof process.getuid === 'function' && typeof process.getgid === 'function' && process.getuid() !== 0
+describe.runIf(supportedHost)('supervisor settlement protocol', () => {
   it.each(['nonzero-volume', 'nonzero-create', 'nonzero-start', 'nonzero-cp', 'signal', 'spawnerror', 'overflow', 'exec-signal', 'exec-overflow'])(
     'marks mutation %s as not settled after every CLI closes', async (mode) => {
       const value = await run(mode)
