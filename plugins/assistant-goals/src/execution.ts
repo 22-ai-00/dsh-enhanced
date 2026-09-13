@@ -84,18 +84,28 @@ export class GoalExecutionRuntime {
         return decision
       }, { prepend: true })
       ctx.on('agent/request', async ({ agent, turn, step, signal }, next) => {
+        // This hook observes every Agent request.  It may revoke only a request
+        // that Goals itself admitted or recognized; a foreign child hook error
+        // must propagate without changing that child's lifecycle.
+        let ownsRequest = this.#rounds.get(agent)?.turn === turn
         try {
           if (!this.#active) throw new Error('assistant-goals: inactive execution producer')
-          if (this.#revoked.has(agent)) throw new Error('assistant-goals: cancelled execution cannot resume')
+          if (this.#revoked.has(agent)) {
+            ownsRequest = true
+            throw new Error('assistant-goals: cancelled execution cannot resume')
+          }
           const held = this.#pendingGoalRounds.get(agent)
           const pending = this.#pendingRound(agent, turn, step, signal)
           // A proof is single-use. It may bridge only its own pre-step, or the
           // legacy durable append of that same exact source; it cannot fall
           // back to a different durable goal message.
           if (held !== undefined && pending === undefined && !this.#durablePendingMatches(agent, turn, step, held)) {
+            ownsRequest = true
             throw new Error('assistant-goals: native round is not current')
           }
-          if (!this.#isGoalTurn(agent, turn) && pending === undefined) return await next()
+          const goalTurn = this.#isGoalTurn(agent, turn)
+          if (!goalTurn && pending === undefined) return await next()
+          ownsRequest = true
           await this.#admit(agent, turn, signal, pending?.source)
           const result = await next()
           // A modern Host has not committed the entered batch yet.  The proof
@@ -105,7 +115,7 @@ export class GoalExecutionRuntime {
           this.#assertRound(this.#rounds.get(agent)!)
           return result
         } catch (error) {
-          await this.#failRequest(agent, turn)
+          if (ownsRequest) await this.#failRequest(agent, turn)
           throw error
         } finally {
           this.#clearPendingGoalRound(agent)

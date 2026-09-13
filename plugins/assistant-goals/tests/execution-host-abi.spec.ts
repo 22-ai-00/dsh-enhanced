@@ -15,7 +15,8 @@ function fixture() {
     checkpoint: { nextStep: '', blockers: [], assumptions: [], evidenceRefs: [], dependencies: [] }, version: 1, createdAt: 1, updatedAt: 1 }
   const native: any = { id: 'native-goal', revision: 1, phase: 'active', roundsStarted: 0, maxGoalRounds: 2 }
   let events: any[] = [{ seq: 1, type: 'turn/start', data: { turn: 2 } }]
-  const agent: any = { session: { id: 'session', snapshotEvents: () => events }, cancel: () => undefined }
+  let cancellations = 0
+  const agent: any = { session: { id: 'session', snapshotEvents: () => events }, cancel: () => { cancellations += 1 } }
   const verifier: any = { ownsTaskAcceptanceRegistration: () => true, tick: async () => undefined }
   const ctx: any = {
     logger: { warn: () => {} },
@@ -29,7 +30,7 @@ function fixture() {
     prepare: () => ({ contractId: 'contract', contractDigest: 'a'.repeat(64) }), completed: async () => {} })
   const source = { kind: 'goal' as const, goalId: 'native-goal', revision: 1, round: 1 }
   const message = (value = source) => ({ role: 'user', content: [], source: value })
-  return { agent, dispose: async () => await dispose?.(), record, events: (value: any[]) => { events = value }, handlers, message, native, runtime, source }
+  return { agent, cancellations: () => cancellations, dispose: async () => await dispose?.(), record, events: (value: any[]) => { events = value }, handlers, message, native, runtime, source }
 }
 
 describe('native goal execution Host ABI admission', () => {
@@ -175,5 +176,20 @@ test('does not let a legacy durable message with the same goal source substitute
     f.record.native.roundsStarted = 1
     await expect(f.handlers.get('agent/request')!({ agent: f.agent, turn: 2, step: 1, signal: new AbortController().signal }, async () => ({ provider: 'fixture' })))
       .rejects.toThrow('native round is not current')
+  } finally { await f.dispose() }
+})
+
+
+test('propagates a foreign downstream request failure without cancelling or revoking that Agent', async () => {
+  const f = fixture()
+  try {
+    const request = f.handlers.get('agent/request')!
+    await expect(request({ agent: f.agent, turn: 2, step: 1, signal: new AbortController().signal }, async () => {
+      throw new Error('foreign child hook failed')
+    })).rejects.toThrow('foreign child hook failed')
+    expect(f.cancellations()).toBe(0)
+    await expect(request({ agent: f.agent, turn: 2, step: 2, signal: new AbortController().signal }, async () => ({ provider: 'fixture' })))
+      .resolves.toEqual({ provider: 'fixture' })
+    expect(f.runtime.budgetState(f.agent)).toBeUndefined()
   } finally { await f.dispose() }
 })
