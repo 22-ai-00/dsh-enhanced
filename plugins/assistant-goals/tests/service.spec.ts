@@ -574,7 +574,8 @@ describe('owner-scoped native goal context', () => {
     const first = await f.create('budget-first', 'owner'); f.human.add(first)
     f.ctx.goals.create(first, { objective: '<{&>'.repeat(300) })
     const old = f.service.list(first)[0]!
-    expect(f.service.snapshot(first)).toContain('exceeds the configured budget')
+    expect(f.service.snapshot(first)).toContain('Truncated; native completion is not success or authority.')
+    expect(f.service.snapshot(first)).toContain('"truncated":true')
     const second = await f.create('budget-second', 'owner'); f.human.add(second)
     f.service.focus(second, old.id)
     f.ctx.goals.create(second, { objective: 'New short goal' })
@@ -1261,5 +1262,17 @@ describe('owner verified artifact Host boundary', () => {
     reads.push(snapshot(), routeChanged)
     expect(() => f.service.inspectOwnerVerifiedArtifacts(input)).toThrow('unavailable')
     expect(ownerRead).toHaveBeenCalledTimes(6)
+  })
+})
+
+describe('goal snapshot budgeting', () => {
+  it('keeps configured event-source prose and oversized current goal context within one budget', async () => {
+    const f = await harness(undefined, 1024, undefined, true, true, undefined, { eventWaits: true, executionBudget: scheduleBudget, backgroundWake: scheduleWake })
+    const agent = await f.create('event-source-budget', 'owner'); f.human.add(agent)
+    f.ctx.goals.create(agent, { objective: '<{&>'.repeat(600) })
+    const snapshot = f.service.snapshot(agent)
+    expect(snapshot.length).toBeLessThanOrEqual(1024)
+    expect(snapshot).toContain('<business-goal-data>')
+    expect(snapshot).toContain('"truncated":true')
   })
 })

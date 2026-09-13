@@ -81,6 +81,12 @@ test('requires the original execute authority rather than a separate resume acti
   expect(resume).not.toHaveBeenCalled()
 })
 
+test('requires snapshot feedback authority before resuming an active repair', async () => {
+  const f = await fixture(), resume = vi.spyOn(f.ctx.goals, 'resume'); f.deny('snapshot')
+  await expect(f.ctx.assistantGoals.resumeOwnerAuthorizedRepair(f.agent, f.input, f.authority)).rejects.toThrow(/feedback permission/u)
+  expect(resume).not.toHaveBeenCalled()
+})
+
 test.each(['goal', 'definition'] as const)('rejects a changed repair %s before native resume', async field => {
   const f = await fixture(), resume = vi.spyOn(f.ctx.goals, 'resume')
   if (field === 'goal') f.input.repair.goalId = 'other-goal'
