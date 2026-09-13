@@ -231,7 +231,11 @@ async function waitForCompletion(getPage, home, sessionId, approvals, options = 
     // intentionally does not inspect, filter, reorder, or manufacture tools.
     const page = getPage()
     const allow = page.getByRole('button', { name: 'Allow once', exact: true })
-    if (await allow.count()) { approvals.push({ at: Date.now() }); await allow.click(); continue }
+    if (await allow.count()) {
+      approvals.push({ at: Date.now() })
+      if (process.env.DSH_REPO_REQUIRE_PREAUTHORIZED === '1') fail('the admitted repository task requested an additional tool approval')
+      await allow.click(); continue
+    }
     const input = query(delivery, `SELECT message.status, message.failure_code FROM inbox_messages AS message
       JOIN conversation_bindings AS binding ON binding.id = message.binding_id
       WHERE binding.session_id = ? ORDER BY message.received_at DESC LIMIT 1`, sessionId)[0]

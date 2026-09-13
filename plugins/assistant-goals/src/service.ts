@@ -480,6 +480,25 @@ export class AssistantGoalsService extends Service {
     } catch { return undefined }
   }
 
+  /** Inspect or focus only existing owner-scoped context; never grants native goal control. */
+  preauthorizeContext = (execution: ToolExecution): boolean => {
+    try {
+      if (execution.signal.aborted || !execution.arguments || typeof execution.arguments !== 'object'
+        || Array.isArray(execution.arguments) || Object.getPrototypeOf(execution.arguments) !== Object.prototype
+        || Object.getOwnPropertySymbols(execution.arguments).length !== 0) return false
+      const args = execution.arguments as Record<string, unknown>
+      if (Object.getOwnPropertyNames(args).some(key => !['goal_id', 'focus'].includes(key))
+        || Object.values(Object.getOwnPropertyDescriptors(args)).some(value => !value.enumerable || !('value' in value))
+        || args.goal_id !== undefined && (typeof args.goal_id !== 'string' || args.goal_id.length === 0 || args.goal_id.length > 512)
+        || args.focus !== undefined && typeof args.focus !== 'boolean'
+        || args.focus === true && args.goal_id === undefined) return false
+      const scope = this.#scope(execution.agent, 'inspect', false)
+      this.#scope(execution.agent, 'observe', false)
+      if (args.focus === true) this.#scope(execution.agent, 'focus', false)
+      return args.goal_id === undefined || this.#store.get(scope, args.goal_id as string) !== undefined
+    } catch { return false }
+  }
+
   preauthorizeSchedule = (execution: ToolExecution): boolean => {
     try {
       if (!this.#active || !this.#preauthorizedSchedule || execution.signal.aborted || !execution.agent || !execution.arguments || typeof execution.arguments !== 'object' || Array.isArray(execution.arguments) || Object.getPrototypeOf(execution.arguments) !== Object.prototype || Object.getOwnPropertySymbols(execution.arguments).length !== 0) return false
@@ -773,10 +792,19 @@ export class AssistantGoalsService extends Service {
 
   preauthorizeEventWait = (execution: ToolExecution): boolean => {
     try {
-      if (execution.signal.aborted || this.#eventWait === undefined || !execution.arguments || typeof execution.arguments !== 'object') return false
+      if (execution.signal.aborted || this.#eventWait === undefined || !execution.arguments || typeof execution.arguments !== 'object'
+        || Array.isArray(execution.arguments) || Object.getPrototypeOf(execution.arguments) !== Object.prototype) return false
       const args = execution.arguments as Record<string, unknown>
-      if (!([4, 5].includes(Object.keys(args).length)) || !['goal_id', 'expected_revision', 'trigger_id', 'expires_at', ...(Object.hasOwn(args, 'opportunity_profile') ? ['opportunity_profile'] : [])].every(key => Object.hasOwn(args, key))
-        || Object.getOwnPropertySymbols(args).length !== 0 || Object.values(Object.getOwnPropertyDescriptors(args)).some(value => !value.enumerable || !('value' in value))
+      if (Object.getOwnPropertySymbols(args).length !== 0 || Object.values(Object.getOwnPropertyDescriptors(args)).some(value => !value.enumerable || !('value' in value))
+        || typeof args.goal_id !== 'string' || args.goal_id.length === 0 || args.goal_id.length > 512) return false
+      if (Object.keys(args).length === 1) {
+        const scope = this.#scope(execution.agent, 'inspect', false)
+        this.#scope(execution.agent, 'observe', false)
+        return this.#store.get(scope, args.goal_id) !== undefined
+      }
+      const names = ['goal_id', 'expected_revision', 'trigger_id', 'expires_at', ...(Object.hasOwn(args, 'opportunity_profile') ? ['opportunity_profile'] : [])]
+      if (Object.keys(args).length !== names.length || !names.every(key => Object.hasOwn(args, key))
+        || !Number.isSafeInteger(args.expected_revision) || (args.expected_revision as number) < 1
         || typeof args['trigger_id'] !== 'string' || !Number.isSafeInteger(args['expires_at']) || (args['opportunity_profile'] !== undefined && typeof args['opportunity_profile'] !== 'string')) return false
       const scope = this.#scope(execution.agent, 'wait', false)
       this.#eventSourcePolicy(execution.agent, this.#eventWait.snapshot(args['trigger_id']))
@@ -888,8 +916,13 @@ export class AssistantGoalsService extends Service {
     if (typeof source?.inspectOwnerSources !== 'function') return ''
     const now = Date.now(), budget = record === undefined ? undefined : this.#budget?.preview(record)
     const outcomeExpiry = record === undefined ? undefined : this.#outcome?.view(record).conditions?.expiresAt
+    let verificationReady = true
+    if (record !== undefined && this.#outcome !== undefined) {
+      try { this.#outcome.preflight(scope, record.definition.objective, record) } catch { verificationReady = false }
+    }
     const sources = source.inspectOwnerSources(scope).filter(item => this.ctx.get('assistantPolicy')?.evaluateAgent(agent, 'wait-for-event', { kind: 'automation', id: item.automationId }).effect === 'allow').slice(0, 16).map(item => {
       if (record === undefined || budget === undefined || outcomeExpiry === undefined || this.#wake === undefined) return item
+      if (!verificationReady) return { ...item, waitUnavailable: 'verification-unavailable' as const }
       const waitExpiresAt = Math.min(item.expiresAt, budget.limits.expiresAt, outcomeExpiry - 1, now + this.#wake.config.maxDelayMs)
       return waitExpiresAt - now >= 1_000 ? { ...item, waitExpiresAt } : { ...item, waitUnavailable: 'deadline-under-1s' as const }
     })

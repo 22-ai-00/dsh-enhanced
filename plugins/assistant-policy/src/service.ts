@@ -163,6 +163,7 @@ interface BoundInitiator {
 interface PreauthorizedTool {
   readonly definition: ToolDefinition
   readonly authorize: (execution: ToolExecution) => boolean
+  readonly denialReason?: string
 }
 
 export type NativeFullReviewerReconciliation = 'not-applicable' | 'ready' | 'unavailable'
@@ -325,7 +326,9 @@ export class AssistantPolicyService extends Service {
         // this continuation runs, so authorization must always fold the live
         // three-dimensional state again at the final synchronous boundary.
         if (getApprovalReviewer(agent.session) === 'none') return next()
-        if (this.isPreauthorizedTool(execution)) return next()
+        const preauthorization = this.preauthorizedToolDecision(execution)
+        if (preauthorization?.kind === 'allow') return next()
+        if (preauthorization?.kind === 'deny') return preauthorization
         const risk = classifyToolRisk({
           name: execution.name,
           arguments: execution.arguments,
@@ -366,24 +369,32 @@ export class AssistantPolicyService extends Service {
     return await this.ensureNativeFullReviewer(this.policyContext, session)
   }
 
+  /** Versioned capability for owner-scoped context tools added after the original registration API. */
+  contextToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
+
   /**
    * Register one trusted Host-owned, finite authorization predicate for an
-   * exact live tool definition. This only bypasses this service's risk prompt;
-   * the independent monotonic policy guard still evaluates every execution.
+   * exact live tool definition. The independent monotonic policy guard still
+   * evaluates every execution. A denialReason marks bounds that interactive
+   * approval cannot extend, so a rejected predicate denies without prompting.
    */
   registerPreauthorizedTool(
     caller: Context,
     definition: ToolDefinition,
     authorize: (execution: ToolExecution) => boolean,
+    options?: { denialReason: string },
   ): () => void {
     this.assertActive()
     const expectedCaller = ['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'action_github_compensate', 'action_github_compensation_status'].includes(definition.name) ? 'dsh-enhanced-assistant-actions'
-      : definition.name === 'isolation_run' ? 'dsh-enhanced-assistant-isolation'
-      : ['goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'].includes(definition.name) ? 'dsh-enhanced-assistant-goals' : undefined
+      : ['isolation_run', 'isolation_grants'].includes(definition.name) ? 'dsh-enhanced-assistant-isolation'
+      : ['goal_create', 'goal_context', 'goal_schedule', 'goal_strategy', 'goal_wait_event'].includes(definition.name) ? 'dsh-enhanced-assistant-goals' : undefined
     if (expectedCaller === undefined || caller.fiber.name !== expectedCaller) {
-      throw new Error('assistant-policy: preauthorization is reserved for approved assistant-actions GitHub tools, assistant-isolation isolation_run, or assistant-goals goal_create/goal_schedule/goal_strategy/goal_wait_event')
+      throw new Error('assistant-policy: preauthorization is reserved for approved assistant-actions GitHub tools, assistant-isolation isolation_run/isolation_grants, or assistant-goals goal_create/goal_context/goal_schedule/goal_strategy/goal_wait_event')
     }
-    const entry: PreauthorizedTool = { definition, authorize }
+    if (options !== undefined && (typeof options.denialReason !== 'string' || options.denialReason.trim().length === 0 || options.denialReason.length > 512)) {
+      throw new Error('assistant-policy: invalid preauthorization denial reason')
+    }
+    const entry: PreauthorizedTool = { definition, authorize, ...(options === undefined ? {} : { denialReason: options.denialReason }) }
     this.preauthorizedTools.add(entry)
     let registered = true
     const remove = (): void => {
@@ -405,23 +416,29 @@ export class AssistantPolicyService extends Service {
    * predicate that accepts this still-live execution.
    */
   isPreauthorizedTool(execution: ToolExecution): boolean {
-    if (!this.active || execution.agent === undefined || execution.signal.aborted) return false
+    return this.preauthorizedToolDecision(execution)?.kind === 'allow'
+  }
+
+  private preauthorizedToolDecision(execution: ToolExecution): { kind: 'allow' } | { kind: 'deny'; reason: string } | undefined {
+    if (!this.active || execution.agent === undefined || execution.signal.aborted) return undefined
     let definition: ToolDefinition | undefined
     try {
       definition = this.policyContext.get('tools')?.get(execution.name, execution.agent)
     } catch {
-      return false
+      return undefined
     }
-    if (definition === undefined) return false
+    if (definition === undefined) return undefined
+    let denialReason: string | undefined
     for (const entry of this.preauthorizedTools) {
       if (entry.definition !== definition) continue
       try {
-        if (entry.authorize(execution) === true) return true
+        if (entry.authorize(execution) === true) return { kind: 'allow' }
       } catch {
         // Trusted callers can fail, but a failed grant must never widen access.
       }
+      denialReason ??= entry.denialReason
     }
-    return false
+    return denialReason === undefined ? undefined : { kind: 'deny', reason: denialReason }
   }
 
   private nativeFullCandidate(ctx: Context, session: Session): boolean {

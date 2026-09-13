@@ -527,6 +527,8 @@ llm-pi-ai:
     const request = { subject: { kind: 'agent', id: 'standard', workspace: f.input.workspace, principal: 'web/web/local/operator' }, action: 'execute', context: { initiator: 'background' } } as const
     for (const id of ['isolation_run', 'goal_context', `isolation:${f.profile.grant.id}`]) expect(evaluatePolicy(policy, { ...request, resource: { kind: 'tool', id } }).effect).toBe('allow')
     for (const id of ['action_github_commit', 'goal_control', 'goal_schedule', 'bash', 'unrelated', 'isolation:another-grant']) expect(evaluatePolicy(policy, { ...request, resource: { kind: 'tool', id } }).effect).toBe('deny')
+    expect(evaluatePolicy(policy, { ...request, action: 'focus', resource: { kind: 'goal', id: 'business-context' } }).effect).toBe('allow')
+    for (const action of ['edit', 'resume', 'clear']) expect(evaluatePolicy(policy, { ...request, action, resource: { kind: 'goal', id: 'business-context' } }).effect).toBe('deny')
   })
 
   test('offline configuration preserves state and rejects revoked owners or non-private task inputs without changing the patch', async () => {

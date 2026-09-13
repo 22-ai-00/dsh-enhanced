@@ -103,24 +103,24 @@ afterEach(async () => {
 })
 
 describe('trusted Host tool preauthorization', () => {
-  test('reserves isolation preauthorization to its exact plugin and keeps revoked grants closed', async () => {
+  test.each(['isolation_run', 'isolation_grants'])('reserves %s preauthorization to its exact plugin and keeps revoked grants closed', async name => {
     const current = await fixture()
     let executions = 0
     let active = true
-    const tool = definition('isolation_run', () => { executions += 1 })
+    const tool = definition(name, () => { executions += 1 })
     current.ctx.tools.register(tool)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), tool, () => true)).toThrow(/reserved/)
     current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-isolation'), tool, () => active)
-    expect((await execute(current.ctx, current.owner, 'isolation_run')).isError).toBe(false)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
     expect(current.asks()).toBe(0)
     active = false
-    expect((await execute(current.ctx, current.owner, 'isolation_run')).isError).toBe(true)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
     expect(current.asks()).toBe(1)
     expect(executions).toBe(1)
     await current.ctx.fiber.restart()
   })
 
-  test.each(['goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'])('reserves %s preauthorization to its exact plugin and keeps revoked predicates closed', async name => {
+  test.each(['goal_create', 'goal_context', 'goal_schedule', 'goal_strategy', 'goal_wait_event'])('reserves %s preauthorization to its exact plugin and keeps revoked predicates closed', async name => {
     const current = await fixture()
     let executions = 0
     let active = true
@@ -167,6 +167,30 @@ describe('trusted Host tool preauthorization', () => {
     expect(ungrantedResult.isError, JSON.stringify(ungrantedResult)).toBe(true)
     expect(current.asks()).toBe(1)
     expect(executions).toBe(1)
+    await current.ctx.fiber.restart()
+  })
+
+  test.each(['false', 'throw'] as const)('rejects an expired finite wait before approval when its predicate returns %s', async failure => {
+    const current = await fixture()
+    let executions = 0, active = true
+    const tool = definition('goal_wait_event', () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    const caller = trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals')
+    const remove = current.ctx.assistantPolicy.registerPreauthorizedTool(caller, tool, () => {
+      if (active) return true
+      if (failure === 'throw') throw new Error('frozen verification window expired')
+      return false
+    }, { denialReason: 'The frozen goal deadline cannot cover another wait.' })
+    expect((await execute(current.ctx, current.owner, 'goal_wait_event')).isError).toBe(false)
+    active = false
+    const denied = await execute(current.ctx, current.owner, 'goal_wait_event')
+    expect(denied.isError).toBe(true)
+    expect(JSON.stringify(denied)).toContain('The frozen goal deadline cannot cover another wait.')
+    expect(current.asks()).toBe(0)
+    expect(executions).toBe(1)
+    remove()
+    expect((await execute(current.ctx, current.owner, 'goal_wait_event')).isError).toBe(true)
+    expect(current.asks()).toBe(1)
     await current.ctx.fiber.restart()
   })
 
