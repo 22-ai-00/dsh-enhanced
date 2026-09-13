@@ -271,6 +271,54 @@ async function distinctLoaderBackedReader(): Promise<{
   }
 }
 
+async function modernLoaderBackedReader(): Promise<{
+  service: object
+  module: SessionRegistryModule
+  validate(meta: unknown, events: unknown[]): void
+}> {
+  const root = await mkdtemp(join(tmpdir(), 'assistant-policy-modern-reader-'))
+  roots.add(root)
+  const backendRoot = join(root, 'node_modules/@deepseek-ai/dsh-session-persistence-jsonl')
+  const persistenceRoot = join(backendRoot, 'node_modules/@deepseek-ai/dsh-session-persistence')
+  const sessionRoot = join(persistenceRoot, 'node_modules/@deepseek-ai/dsh-session')
+  await mkdir(join(backendRoot, 'lib'), { recursive: true })
+  await mkdir(sessionRoot, { recursive: true })
+  await Promise.all([
+    writeFile(join(backendRoot, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh-session-persistence-jsonl', type: 'module', exports: './lib/index.js',
+    })),
+    writeFile(join(backendRoot, 'lib/index.js'), 'export default class JsonlSessionPersistence { constructor(ctx) { this.ctx = ctx } }\n'),
+    writeFile(join(persistenceRoot, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh-session-persistence', type: 'module', exports: './index.js',
+    })),
+    writeFile(join(persistenceRoot, 'index.js'), `
+      import { KNOWN_SESSION_EVENT_TYPES, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+      export function assertVersion(meta) {
+        if (meta.version !== SESSION_FORMAT_VERSION) throw new Error('wrong format')
+      }
+      export function validateStoredEvents(meta, events) {
+        assertVersion(meta)
+        for (const event of events) if (!KNOWN_SESSION_EVENT_TYPES.has(event.type)) throw new Error('unknown ' + event.type)
+      }
+    `),
+    writeFile(join(sessionRoot, 'package.json'), JSON.stringify({
+      name: '@deepseek-ai/dsh-session', type: 'module', exports: './index.js',
+    })),
+    writeFile(join(sessionRoot, 'index.js'), 'export const SESSION_FORMAT_VERSION = 3\nexport const KNOWN_SESSION_EVENT_TYPES = new Set(["session/start"])\n'),
+  ])
+  const backendRequire = createRequire(join(backendRoot, 'lib/index.js'))
+  const Backend = backendRequire(join(backendRoot, 'lib/index.js')).default
+  const readerRequire = createRequire(join(persistenceRoot, 'index.js'))
+  return {
+    service: new Backend({ fiber: { entry: {
+      options: { name: '@deepseek-ai/dsh-session-persistence-jsonl' },
+      parent: { tree: { ctx: { baseUrl: `${pathToFileURL(root).href}/` } } },
+    } } }),
+    module: readerRequire('@deepseek-ai/dsh-session'),
+    validate: backendRequire('@deepseek-ai/dsh-session-persistence').validateStoredEvents,
+  }
+}
+
 afterEach(async () => {
   await Promise.all([...contexts].map(ctx => ctx.fiber.restart()))
   contexts.clear()
@@ -279,6 +327,55 @@ afterEach(async () => {
 })
 
 describe('assistant-policy session event registration', () => {
+  test('proves the modern storage validator and its distinct format-3 registry', async () => {
+    const reader = await modernLoaderBackedReader()
+    const ctx = new Context()
+    contexts.add(ctx)
+    ctx.provide('sessionPersistence' as never, reader.service as never)
+    expect(reader.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(false)
+    const registration = registerApprovalReviewerSessionEvent(ctx)
+    await registration.assertReady()
+    expect(registration.isReady()).toBe(true)
+    expect(reader.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(true)
+    const meta = { version: 3 }
+    expect(() => reader.validate(meta, [{ type: REVIEWER_EVENT_TYPE }])).not.toThrow()
+    expect(() => reader.validate(meta, [{ type: 'unknown/required' }])).toThrow('unknown/required')
+    expect([...reader.module.KNOWN_SESSION_EVENT_TYPES].some(type => type.includes('__reader-probe/'))).toBe(false)
+    await ctx.fiber.restart()
+    expect(registration.isReady()).toBe(false)
+    expect(reader.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(true)
+  })
+
+  test('re-proves a replacement modern provider from the same module', async () => {
+    const reader = await modernLoaderBackedReader()
+    const ctx = new Context()
+    contexts.add(ctx)
+    const registration = registerApprovalReviewerSessionEvent(ctx)
+    const first = ctx.plugin((owner: Context) => {
+      owner.provide('sessionPersistence' as never, reader.service as never)
+    })
+    await first
+    await registration.assertReady()
+    expect(registration.isReady()).toBe(true)
+    await first.dispose()
+    expect(registration.isReady()).toBe(false)
+    const replacement = Object.assign(Object.create(Object.getPrototypeOf(reader.service)), reader.service)
+    await ctx.plugin((owner: Context) => {
+      owner.provide('sessionPersistence' as never, replacement as never)
+    })
+    await registration.assertReady()
+    expect(registration.isReady()).toBe(true)
+  })
+
+  test('refuses a lookalike modern service that is not the resolved backend instance', async () => {
+    const reader = await modernLoaderBackedReader()
+    const ctx = new Context()
+    contexts.add(ctx)
+    ctx.provide('sessionPersistence' as never, { ...reader.service } as never)
+    expect(() => registerApprovalReviewerSessionEvent(ctx)).toThrow(/no supported reader oracle/)
+    expect(reader.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(false)
+  })
+
   test('registers the live persistence reader when launcher, reader, and plugin use three distinct registries', async () => {
     const launcher = await distinctHostSessionModule()
     const reader = await distinctLoaderBackedReader()

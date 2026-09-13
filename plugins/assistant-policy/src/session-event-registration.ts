@@ -13,7 +13,8 @@ import { createRequire } from 'node:module'
  */
 const APPROVAL_REVIEWER_EVENT_TYPE = 'assistant-policy/approval-reviewer'
 const READER_PROBE_EVENT_PREFIX = 'assistant-policy/__reader-probe/'
-const SHIMMED_SESSION_FORMAT_VERSION = 0
+const LEGACY_SESSION_FORMAT_VERSION = 0
+const SUPPORTED_SESSION_FORMATS = new Set([LEGACY_SESSION_FORMAT_VERSION, 3])
 const SESSION_REGISTRATIONS_GLOBAL_KEY = '__dshEnhancedApprovalReviewerSessionRegistrationsV1__'
 
 interface MutableEventTypeRegistry extends ReadonlySet<string> {
@@ -37,8 +38,13 @@ interface ValidatedSessionRegistry {
 }
 
 interface EventSupportOracle {
+  readonly formatVersion?: number
   assertEventsSupported(meta: unknown, events: readonly unknown[]): void
 }
+
+// Metadata only: stable identity across contextual service proxies, without
+// retaining a provider Context or acquiring effects on the provider's Fiber.
+const validatorOracles = new WeakMap<object, EventSupportOracle>()
 
 interface PersistenceService {
   readonly coordinator?: unknown
@@ -154,11 +160,16 @@ function loadSessionCandidate(
   }
 }
 
-function loaderReaderCandidate(persistence: PersistenceService): SessionRegistryCandidate {
+function loaderBackendEntrypoint(persistence: PersistenceService): string {
   // cordis-plugin-loader binds the service context to the Entry that imported
   // its backend. Resolving from that same entry reproduces the dependency graph
   // used by PersistenceCoordinator, including a backend-private session copy.
-  const entry = nested(persistence.ctx, 'fiber', 'entry')
+  // Cordis traces ordinary service.ctx reads to the consumer. Its own data
+  // descriptor retains the definition Context, which we inspect only for
+  // Loader metadata; service calls and effects still use the injected proxy.
+  const definitionContext = Object.getOwnPropertyDescriptor(persistence, 'ctx')?.value
+    ?? persistence.ctx
+  const entry = nested(definitionContext, 'fiber', 'entry')
   const backendName = nested(entry, 'options', 'name')
   const baseUrl = nested(entry, 'parent', 'tree', 'ctx', 'baseUrl')
   if (typeof backendName !== 'string' || backendName === '') {
@@ -188,6 +199,11 @@ function loaderReaderCandidate(persistence: PersistenceService): SessionRegistry
       { cause: error },
     )
   }
+  return backendEntrypoint
+}
+
+function loaderReaderCandidate(persistence: PersistenceService): SessionRegistryCandidate {
+  const backendEntrypoint = loaderBackendEntrypoint(persistence)
   const backendRequire = createRequire(backendEntrypoint)
   let coordinatorEntrypoint: string
   try {
@@ -198,12 +214,12 @@ function loaderReaderCandidate(persistence: PersistenceService): SessionRegistry
   } catch (error) {
     throw new Error(
       `cannot resolve the PersistenceCoordinator consumed by live backend `
-      + `${JSON.stringify(backendName)}`,
+      + `${JSON.stringify(backendEntrypoint)}`,
       { cause: error },
     )
   }
   return loadSessionCandidate(
-    `PersistenceCoordinator consumed by live backend ${JSON.stringify(backendName)}`,
+    `Persistence reader consumed by live backend ${JSON.stringify(backendEntrypoint)}`,
     createRequire(coordinatorEntrypoint),
   )
 }
@@ -233,7 +249,7 @@ function launcherCandidate(): SessionRegistryCandidate {
 
 function validateRegistry(candidate: SessionRegistryCandidate): ValidatedSessionRegistry {
   const formatVersion = candidate.module.SESSION_FORMAT_VERSION
-  if (formatVersion !== SHIMMED_SESSION_FORMAT_VERSION) {
+  if (typeof formatVersion !== 'number' || !SUPPORTED_SESSION_FORMATS.has(formatVersion)) {
     throw new Error(
       `${candidate.label} uses unsupported session format v${String(formatVersion)}`,
     )
@@ -251,19 +267,52 @@ function validateRegistry(candidate: SessionRegistryCandidate): ValidatedSession
 
 function supportOracle(persistence: PersistenceService): EventSupportOracle {
   const coordinator = record(persistence.coordinator)
-  if (coordinator === undefined
-    || typeof coordinator.assertEventsSupported !== 'function') {
-    throw new Error(
-      'assistant-policy: live sessionPersistence does not expose the supported '
-      + 'PersistenceCoordinator event-support oracle; refusing unproven registration',
-    )
+  if (coordinator !== undefined && typeof coordinator.assertEventsSupported === 'function') {
+    return coordinator as unknown as EventSupportOracle
   }
-  return coordinator as unknown as EventSupportOracle
+
+  // DSH 0.1.5 replaced PersistenceCoordinator with storage handles. Its JSONL
+  // backend uses the public validateStoredEvents closure on every cold read.
+  // Resolve that closure from the actual mounted backend, not this plugin's
+  // dependency graph or the launcher's potentially different Session copy.
+  const backendEntrypoint = loaderBackendEntrypoint(persistence)
+  const backendRequire = createRequire(backendEntrypoint)
+  const manifest = record(backendRequire('./../package.json'))
+  const backendModule = record(backendRequire(backendEntrypoint))
+  const Backend = backendModule?.default
+  if (manifest?.name !== '@deepseek-ai/dsh-session-persistence-jsonl'
+    || typeof Backend !== 'function' || !(persistence instanceof Backend)) {
+    throw new Error('assistant-policy: live persistence backend has no supported reader oracle')
+  }
+  const module = record(backendRequire('@deepseek-ai/dsh-session-persistence'))
+  const validate = module?.validateStoredEvents
+  const assertVersion = module?.assertVersion
+  const session = loadSessionCandidate('live storage validator', createRequire(
+    backendRequire.resolve('@deepseek-ai/dsh-session-persistence'),
+  ))
+  validateRegistry(session)
+  const formatVersion = session.module.SESSION_FORMAT_VERSION as number
+  if (typeof validate !== 'function' || typeof assertVersion !== 'function') {
+    throw new Error('assistant-policy: live storage validator is unavailable')
+  }
+  const cached = validatorOracles.get(validate)
+  if (cached !== undefined) return cached
+  const oracle: EventSupportOracle = {
+    formatVersion,
+    assertEventsSupported(meta, events) {
+      assertVersion(meta)
+      // The public validator adopts records in place. Probe inputs are owned
+      // here and never taken from a live Session or caller-owned event batch.
+      validate(meta, [...events])
+    },
+  }
+  validatorOracles.set(validate, oracle)
+  return oracle
 }
 
-function probeMeta(): Record<string, unknown> {
+function probeMeta(oracle?: EventSupportOracle): Record<string, unknown> {
   return {
-    version: SHIMMED_SESSION_FORMAT_VERSION,
+    version: oracle?.formatVersion ?? LEGACY_SESSION_FORMAT_VERSION,
     id: `assistant-policy-reader-probe-${randomUUID()}`,
     createdAt: 0,
     cwd: '/',
@@ -316,7 +365,7 @@ function proveReaderRegistry(
   do {
     probeType = `${READER_PROBE_EVENT_PREFIX}${randomUUID()}`
   } while ([...registries.keys()].some(registry => registry.has(probeType)))
-  const meta = probeMeta()
+  const meta = probeMeta(oracle)
   assertRejectedUnknown(oracle, meta, probeType, 'baseline')
 
   const proven: ValidatedSessionRegistry[] = []
@@ -383,7 +432,7 @@ function installRequiredEvent(
         )
       }
     }
-    oracle?.assertEventsSupported(probeMeta(), [probeEvent(APPROVAL_REVIEWER_EVENT_TYPE)])
+    oracle?.assertEventsSupported(probeMeta(oracle), [probeEvent(APPROVAL_REVIEWER_EVENT_TYPE)])
   } catch (error) {
     for (const registry of added) registry.delete(APPROVAL_REVIEWER_EVENT_TYPE)
     throw new Error(
@@ -435,12 +484,14 @@ export function registerApprovalReviewerSessionEvent(
   ctx: Context,
 ): ApprovalReviewerSessionEventRegistration {
   let active = true
+  let readerGeneration = 0
   let provenOracle: EventSupportOracle | undefined
   const installLiveReader = (persistence: PersistenceService): void => {
     // Invalidate the prior proof before touching a replacement. A hot reload
     // may reuse the same coordinator object while swapping the reader hidden
     // behind it; if the new proof fails, object identity alone must not leave
     // the old proof looking current.
+    readerGeneration += 1
     provenOracle = undefined
     installApprovalReviewerEventType(persistence)
     provenOracle = supportOracle(persistence)
@@ -459,9 +510,9 @@ export function registerApprovalReviewerSessionEvent(
       throw new Error('assistant-policy: injected sessionPersistence is unavailable')
     }
     installLiveReader(live)
-    const activationOracle = provenOracle
+    const activationGeneration = readerGeneration
     return () => {
-      if (provenOracle === activationOracle) provenOracle = undefined
+      if (readerGeneration === activationGeneration) provenOracle = undefined
     }
   })
 
