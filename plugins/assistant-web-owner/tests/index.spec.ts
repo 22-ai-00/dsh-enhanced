@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
-import { name, version } from '../src/index.ts'
+import { name, resolveHostSessionController, version } from '../src/index.ts'
 import { TYPERT } from '../src/typert.ts'
 import { DeliveryNoticesService } from '../src/notices.ts'
 
@@ -27,6 +27,39 @@ describe('dsh-enhanced-assistant-web-owner', () => {
     expect(patch).toContain("id: session-controller")
     expect(patch).toContain('disabled: true')
     expect(patch).toContain("name: '@dsh-enhanced/assistant-web-owner'")
+  })
+
+  it('resolves the Host controller through a global dsh symlink canonical entrypoint', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-web-owner-host-controller-'))
+    try {
+      const host = join(root, 'host', 'node_modules', '@deepseek-ai', 'dsh')
+      const controller = join(root, 'host', 'node_modules', '@deepseek-ai', 'dsh-api-session-controller')
+      const globalBin = join(root, 'global-bin')
+      mkdirSync(join(host, 'lib'), { recursive: true })
+      mkdirSync(controller, { recursive: true })
+      mkdirSync(globalBin)
+      writeFileSync(join(host, 'lib', 'bin.js'), '')
+      writeFileSync(join(controller, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-api-session-controller', type: 'module', main: './index.js' }))
+      writeFileSync(join(controller, 'index.js'), "export class SessionController { static inject = ['agents', 'host-current'] }\n")
+      const linked = join(globalBin, 'dsh')
+      symlinkSync(join(host, 'lib', 'bin.js'), linked)
+      const Controller = await resolveHostSessionController(linked)
+      expect(Controller.inject).toEqual(['agents', 'host-current'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('does not fall back to the bundled controller when a present Host entry lacks its controller', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-web-owner-host-controller-missing-'))
+    try {
+      const entry = join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+      mkdirSync(join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib'), { recursive: true })
+      writeFileSync(entry, '')
+      await expect(resolveHostSessionController(entry)).rejects.toThrow(/dsh-api-session-controller|Cannot find module/i)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('constructs an added-Host-dependency controller only after the owner facade is active', async () => {
