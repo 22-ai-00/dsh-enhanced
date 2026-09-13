@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { chmod, mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -17,7 +17,7 @@ const principalDigest = 'a'.repeat(64)
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 async function fixture(leaseMs: number) {
-  const root = await mkdtemp(join(tmpdir(), 'assistant-isolation-controller-startup-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-isolation-controller-startup-')))
   roots.push(root)
   await chmod(root, 0o700)
   const ledger = new IsolationLedger(join(root, 'ledger.sqlite'))

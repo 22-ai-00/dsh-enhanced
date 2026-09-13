@@ -1,6 +1,6 @@
 import { fork } from 'node:child_process'
 import { once } from 'node:events'
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -51,7 +51,7 @@ esac
 }
 
 async function run(mode: string): Promise<Settlement> {
-  const root = await mkdtemp(join(tmpdir(), 'settlement-protocol-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'settlement-protocol-'))); roots.push(root)
   const executable = join(root, 'docker'); const workspace = join(root, 'workspace')
   await writeFile(executable, fakeDocker(mode), { mode: 0o700 }); await chmod(executable, 0o700); await writeFile(workspace, '')
   const supervisor = fork(new URL('../runtime/supervisor.mjs', import.meta.url), [], { serialization: 'json', stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })

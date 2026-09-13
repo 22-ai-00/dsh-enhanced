@@ -76,7 +76,12 @@ describe('holdout child provider transport', () => {
 
   it('accepts fragmented UTF-8 NDJSON and exposes only the explicit child environment', async () => {
     const provider = await open('fragment')
-    await expect(provider.request('manifest', { text: '雪' })).resolves.toEqual({ operation: 'manifest', echo: { text: '雪' }, envKeys: ['HOLDOUT_FIXTURE_MODE', 'LANG', 'LC_ALL'], cwd: '/' })
+    await expect(provider.request('manifest', { text: '雪' })).resolves.toEqual({ operation: 'manifest', echo: { text: '雪' }, envKeys: [
+      'HOLDOUT_FIXTURE_MODE',
+      'LANG',
+      'LC_ALL',
+      ...(process.platform === 'darwin' ? ['__CF_USER_TEXT_ENCODING'] : []),
+    ].sort(), cwd: '/' })
   })
 
   it('enforces one inflight request without poisoning the first request', async () => {

@@ -8,7 +8,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { DatabaseSync } from 'node:sqlite'
-import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -19,7 +19,7 @@ const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 
 async function fixture(discoveryAllowed = true) {
-  const root = await mkdtemp(join(tmpdir(), 'isolation-grant-discovery-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'isolation-grant-discovery-'))); roots.push(root)
   const stateRoot = join(root, 'state'), workspace = join(root, 'workspace'); await Promise.all([mkdir(stateRoot, { recursive: true, mode: 0o700 }), mkdir(workspace)])
   const ctx = new Context(); await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })

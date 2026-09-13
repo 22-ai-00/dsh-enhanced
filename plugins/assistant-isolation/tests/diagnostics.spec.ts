@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -12,7 +12,7 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 const now = () => 10_000
 const identity: IsolationIdentity = { principalDigest: 'a'.repeat(64), principalRecordId: 'record-1', principalVersion: 1, workspace: '/work', agentPreset: 'primary' }
 const grant = (changes: Partial<IsolationGrant> = {}): IsolationGrant => ({ ...identity, id: 'grant-1', revision: 1, expiresAt: 100_000, maxRuns: 2, maxTotalDurationMs: 1_000, ...changes })
-function root(): string { const value = mkdtempSync(join(tmpdir(), 'isolation-diagnostics-')); roots.push(value); return value }
+function root(): string { const value = realpathSync(mkdtempSync(join(tmpdir(), 'isolation-diagnostics-'))); roots.push(value); return value }
 function prepare(ledger: IsolationLedger, key = 'key') {
   return ledger.prepare({ identity, sessionId: 'session-1', grantId: 'grant-1', idempotencyKey: key, requestDigest: `digest-${key}`, durationMs: 500 }).job
 }

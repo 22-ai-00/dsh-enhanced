@@ -58,7 +58,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 import { captureDaemonWitness, processExited, processWitness, validateCreationWitness } from '../src/runtime-witness.ts'
 
 describe('runtime witnesses', () => {
-  it('identifies the current process and proves a reaped child exited', async () => {
+  it.runIf(process.platform === 'linux')('identifies the current process and proves a reaped child exited', async () => {
     const current = await processWitness()
     expect(current).toBeDefined()
     expect(processExited(current!)).toBe(false)
@@ -86,7 +86,7 @@ describe('runtime witnesses', () => {
     })).toThrow('invalid creation witness')
   })
 
-  it('fails closed on unreadable boot metadata and detects a replaced process identity', async () => {
+  it.runIf(process.platform === 'linux')('fails closed on unreadable boot metadata and detects a replaced process identity', async () => {
     const witness = await processWitness()
     expect(witness).toBeDefined()
     fsControl.failure = '/proc/sys/kernel/random/boot_id'
@@ -97,7 +97,7 @@ describe('runtime witnesses', () => {
     expect(processExited(replacement)).toBe(true)
   })
 
-  it('does not treat a missing boot id as an exit, but recognizes another boot', async () => {
+  it.runIf(process.platform === 'linux')('does not treat a missing boot id as an exit, but recognizes another boot', async () => {
     const witness = await processWitness()
     expect(witness).toBeDefined()
     fsControl.failure = '/proc/sys/kernel/random/boot_id'
