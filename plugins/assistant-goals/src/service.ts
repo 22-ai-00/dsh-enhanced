@@ -233,6 +233,9 @@ function ownerAuthorizedRepairResumeInput(value: unknown): value is OwnerAuthori
 }
 
 export class AssistantGoalsService extends Service {
+  // A direct class mount and the published bundle must carry the same trusted
+  // Cordis identity when registering their owned tools with Policy.
+  static { Object.defineProperty(this, 'name', { value: 'dsh-enhanced-assistant-goals' }) }
   static Config = Config
   #store: GoalStore
   #active = true

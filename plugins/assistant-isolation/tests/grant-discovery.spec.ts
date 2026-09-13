@@ -14,12 +14,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 import IsolationPlugin from '../src/index.ts'
-import { isolationPrincipalDigest } from '../src/service.ts'
+import { AssistantIsolationService, isolationPrincipalDigest } from '../src/service.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 
-async function fixture(discoveryAllowed = true, legacyPolicy = false) {
+async function fixture(discoveryAllowed = true, legacyPolicy = false, directClassMount = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'isolation-grant-discovery-'))); roots.push(root)
   const stateRoot = join(root, 'state'), workspace = join(root, 'workspace'); await Promise.all([mkdir(stateRoot, { recursive: true, mode: 0o700 }), mkdir(workspace)])
   const ctx = new Context(); await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
@@ -48,10 +48,11 @@ async function fixture(discoveryAllowed = true, legacyPolicy = false) {
     { id: 'expired', revision: 1, principalDigest: isolationPrincipalDigest('owner'), principalRecordId: 'record-owner', principalVersion: 1, workspace, agentPreset: 'primary', expiresAt: now - 1, maxRuns: 3, maxTotalDurationMs: 90_000 },
   ]
   const config = { stateRoot, image: `sha256:${'a'.repeat(64)}`, grants }
-  const plugin = await ctx.plugin(IsolationPlugin, config) as unknown as { dispose(): Promise<void> }
+  const mountedPlugin = directClassMount ? AssistantIsolationService : IsolationPlugin
+  const plugin = await ctx.plugin(mountedPlugin, config) as unknown as { dispose(): Promise<void> }
   const handle = await ctx.agents.create({ sessionId: SessionId('grant-discovery'), meta: { cwd: workspace, agentPreset: 'primary' } })
   owners.set(handle.agent, 'owner')
-  return { root, stateRoot, workspace, ctx, config, plugin, handle, owners }
+  return { root, stateRoot, workspace, ctx, config, plugin, mountedPlugin, handle, owners }
 }
 
 let nextDiscoveryCall = 0
@@ -104,8 +105,8 @@ test('keeps grant discovery available with a Policy predating context preauthori
   } finally { await f.handle.dispose(); await f.plugin.dispose(); await f.ctx.fiber.dispose() }
 })
 
-test('preauthorizes only a current exact-owner grant discovery and unregisters on unload', async () => {
-  const f = await fixture()
+test.each([false, true])('preauthorizes only a current exact-owner grant discovery and unregisters on unload (direct class mount: %s)', async (directClassMount) => {
+  const f = await fixture(true, false, directClassMount)
   try {
     await f.ctx.plugin(ApprovalService, { policy: 'ask' })
     let asks = 0; f.ctx.on('approval/request', async () => { asks++; return 'rejected' })
@@ -125,7 +126,7 @@ test('preauthorizes only a current exact-owner grant discovery and unregisters o
     expect(f.ctx.assistantIsolation.preauthorizeDiscovery(discoveryExecution(f.handle.agent, { ignored: true }))).toBe(false)
     await f.plugin.dispose()
     expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(false)
-    f.plugin = await f.ctx.plugin(IsolationPlugin, f.config) as unknown as { dispose(): Promise<void> }
+    f.plugin = await f.ctx.plugin(f.mountedPlugin, f.config) as unknown as { dispose(): Promise<void> }
     expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(true)
 
     const database = new DatabaseSync(join(f.stateRoot, 'ledger.sqlite'))
@@ -134,7 +135,7 @@ test('preauthorizes only a current exact-owner grant discovery and unregisters o
 
     await f.plugin.dispose()
     expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(false)
-    f.plugin = await f.ctx.plugin(IsolationPlugin, f.config) as unknown as { dispose(): Promise<void> }
+    f.plugin = await f.ctx.plugin(f.mountedPlugin, f.config) as unknown as { dispose(): Promise<void> }
     expect(f.ctx.assistantPolicy.isPreauthorizedTool(discoveryExecution(f.handle.agent))).toBe(false)
   } finally { await f.handle.dispose(); await f.plugin.dispose(); await f.ctx.fiber.dispose() }
 
