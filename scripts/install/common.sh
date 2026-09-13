@@ -4,10 +4,13 @@
 # This file is sourced by the two public entrypoints; do not execute it directly.
 
 DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.2-rc.1'
-DSH_ENHANCED_DEFAULT_DSH_VERSION="$DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION"
+# The bootstrap pin identifies the pinned installer cohort. Runtime Hosts use
+# the verified compatibility range below, and new installs select its latest
+# independently checked release.
+DSH_ENHANCED_DEFAULT_DSH_VERSION='0.1.5-rc.1'
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
 if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
-  DSH_ENHANCED_VERIFIED_HOST_RANGE='=0.1.2-rc.1'
+  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'
 fi
 DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
   'personal-assistant'
@@ -89,7 +92,7 @@ Options:
   --model-base-url <url>    Custom OpenAI-compatible gateway base URL (custom provider only)
   --model-api <protocol>    openai-completions (default), openai-responses, or anthropic-messages (custom provider only)
   --model-display-name <s>  Optional human label for a custom provider route
-  --dsh-version <version>   Exact supported DSH version (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
+  --dsh-version <version>   Compatible DSH version (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
   --no-service              Do not install or restart the platform resident service
   --yes                     Choose the safe default without the installer menu
   --dry-run                 Print the complete plan without changing the machine
@@ -181,7 +184,24 @@ dsh_enhanced_require_node() {
 
 dsh_enhanced_is_host_version() {
   local version="$1"
-  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+  [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] || return 1
+  local without_build="${version%%+*}"
+  local identifier
+  local -a identifiers=()
+  if [[ "$without_build" == *-* ]]; then
+    IFS=. read -r -a identifiers <<< "${without_build#*-}"
+    for identifier in "${identifiers[@]}"; do
+      if [[ "$identifier" =~ ^[0-9]+$ && "$identifier" == 0?* ]]; then return 1; fi
+    done
+  fi
+  return 0
+}
+
+# Numeric SemVer identifiers may exceed the shell's integer width.
+dsh_enhanced_decimal_gt() {
+  local LC_ALL=C
+  if [[ "${#1}" != "${#2}" ]]; then (( ${#1} > ${#2} )); return; fi
+  [[ "$1" > "$2" ]]
 }
 
 dsh_enhanced_version_ge() {
@@ -209,8 +229,8 @@ dsh_enhanced_version_ge() {
       1) left_identifier="$left_minor"; right_identifier="$right_minor" ;;
       *) left_identifier="$left_patch"; right_identifier="$right_patch" ;;
     esac
-    if (( 10#$left_identifier > 10#$right_identifier )); then return 0; fi
-    if (( 10#$left_identifier < 10#$right_identifier )); then return 1; fi
+    if dsh_enhanced_decimal_gt "$left_identifier" "$right_identifier"; then return 0; fi
+    if dsh_enhanced_decimal_gt "$right_identifier" "$left_identifier"; then return 1; fi
   done
 
   # A stable version has higher precedence than a prerelease with the same
@@ -231,7 +251,7 @@ dsh_enhanced_version_ge() {
     right_identifier="${right_identifiers[$index]}"
     if [[ "$left_identifier" != "$right_identifier" ]]; then
       if [[ "$left_identifier" =~ ^[0-9]+$ && "$right_identifier" =~ ^[0-9]+$ ]]; then
-        (( 10#$left_identifier > 10#$right_identifier ))
+        dsh_enhanced_decimal_gt "$left_identifier" "$right_identifier"
         return
       fi
       [[ "$left_identifier" =~ ^[0-9]+$ ]] && return 1
@@ -258,6 +278,7 @@ dsh_enhanced_version_in_range() {
   local rc_core_strictly_inside='1'
   local -a tokens=()
   [[ -n "$range" ]] || return 1
+  dsh_enhanced_is_host_version "$version" || return 1
   read -r -a tokens <<< "$range"
 
   # Comparator precedence check; runs for stable and prerelease versions alike.
@@ -333,8 +354,8 @@ dsh_enhanced_require_pinned_host_version() {
     dsh_enhanced_fail 2 "安装引导器的 Host pin 与安装逻辑不一致；尚未修改运行时或 profile。"
     return $?
   fi
-  if [[ "$version" != "$DSH_ENHANCED_DEFAULT_DSH_VERSION" ]]; then
-    dsh_enhanced_fail 2 "此安装器仅支持 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION}；收到 ${version:-unknown}。请为本套件使用 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION} 的独立 CLI；不会修改现有全局 DSH。"
+  if ! dsh_enhanced_is_host_version "$version" || ! dsh_enhanced_version_in_range "$version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+    dsh_enhanced_fail 2 "此安装器支持 DSH ${DSH_ENHANCED_VERIFIED_HOST_RANGE}；收到 ${version:-unknown}。请使用兼容的独立 CLI；不会修改现有全局 DSH。"
     return $?
   fi
 }
@@ -343,8 +364,8 @@ dsh_enhanced_reject_incompatible_existing_dsh() {
   local current_version=''
   if command -v dsh >/dev/null 2>&1; then
     current_version="$(dsh --version 2>/dev/null || true)"
-    if [[ "$current_version" != "$DSH_ENHANCED_DEFAULT_DSH_VERSION" ]]; then
-      dsh_enhanced_fail 2 "检测到 DSH ${current_version:-unknown}，但此安装器仅支持 ${DSH_ENHANCED_DEFAULT_DSH_VERSION}。请为本套件使用 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION} 的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
+    if ! dsh_enhanced_is_host_version "$current_version" || ! dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+      dsh_enhanced_fail 2 "检测到 DSH ${current_version:-unknown}，但此安装器支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
       return $?
     fi
   fi
@@ -366,10 +387,10 @@ dsh_enhanced_ensure_dsh() {
     current_version="$(dsh --version 2>/dev/null || true)"
   fi
   if [[ -n "$current_version" ]]; then
-    if [[ "$current_version" == "$target_version" ]]; then
-      printf 'DSH 已安装且版本匹配：%s\n' "$current_version"
+    if dsh_enhanced_is_host_version "$current_version" && dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+      printf 'DSH 已安装且版本兼容：%s\n' "$current_version"
     else
-      dsh_enhanced_fail 2 "检测到 DSH ${current_version}，但此安装器仅支持 ${target_version}。请为本套件使用 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION} 的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
+      dsh_enhanced_fail 2 "检测到 DSH ${current_version}，但此安装器支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
       return $?
     fi
     return 0
@@ -430,8 +451,8 @@ dsh_enhanced_require_existing_runtime() {
     dsh_enhanced_fail 1 '无法读取当前 DSH 版本；尚未开始 profile 生命周期事务。'
     return $?
   fi
-  if [[ "$current_version" != "$DSH_ENHANCED_DEFAULT_DSH_VERSION" ]]; then
-    dsh_enhanced_fail 2 "检测到 DSH ${current_version}，但此安装器仅支持 ${DSH_ENHANCED_DEFAULT_DSH_VERSION}。请为本套件使用 DSH ${DSH_ENHANCED_DEFAULT_DSH_VERSION} 的独立 CLI；不会修改现有全局 DSH。"
+  if ! dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+    dsh_enhanced_fail 2 "检测到 DSH ${current_version}，但此安装器支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改现有全局 DSH。"
     return $?
   fi
   printf '生命周期事务使用现有 DSH：%s；不会修改全局 DSH/pnpm。\n' "$current_version"
@@ -3014,7 +3035,7 @@ NODE
     if [[ "$dry_run" == '1' ]]; then
       printf 'DSH setup peer 闭包：dry-run 不写入 %s/profiles/node_modules。\n' "$dsh_home"
     else
-      dsh_enhanced_heal_host_module_fallback "$dsh_home" "$dsh_version" || return $?
+      dsh_enhanced_heal_host_module_fallback "$dsh_home" "$(dsh --version 2>/dev/null || true)" || return $?
     fi
   fi
   if [[ "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then

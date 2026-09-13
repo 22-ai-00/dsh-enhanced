@@ -2,7 +2,7 @@
 
 `dsh-enhanced` 是基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 **RSI 智能助手插件集合**，围绕 RSI（Recursive Self-Improvement，递归自我改进）提供任务执行、独立验收、反馈学习、技能复用和有限连续改进能力，让助手在明确授权和预算内完成任务，并将成功经验用于后续任务。
 
-插件覆盖目标管理、主动行动、记忆、消息交付、隔离执行、评测与恢复，并通过 ACP 和模型 provider 接入编码工具及现有模型线路。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。当前基本 RSI 首版基于 DSH `0.1.2-rc.1`，面向 Linux 上受监督的单机 profile，仍属实验性能力。
+插件覆盖目标管理、主动行动、记忆、消息交付、隔离执行、评测与恢复，并通过 ACP 和模型 provider 接入编码工具及现有模型线路。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。当前基本 RSI 首版面向 Linux 上受监督的单机 profile，仍属实验性能力。DSH 兼容范围为 `>=0.1.2-rc.1 <0.2.0`，同一 `0.1` 次版本内的补丁与后续 RC 可继续使用。
 
 基本 RSI 首版支持同一任务族的有限连续改进：独立确认失败后自主修复，生成技能候选，经过独立比较和后续实际任务验证后晋升，再继续下一轮，并把结果送回原会话。模板渲染任务已取得连续两轮的真实 TraeX 组合验收证据。使用入口见[有限 repair admission](plugins/assistant-web-owner/README.md#有限-repair-admission)，证据和限制见[两轮验收记录](docs/evidence/basic-rsi-two-round-2026-09-12.json)。
 
@@ -10,7 +10,7 @@ dev 已增加 Linux 安全检查点恢复：确认旧进程退出、没有未结
 
 ## 快速开始
 
-要求 Node.js 22.19+（或 24+）、pnpm 11.7.0 和精确的 DSH `0.1.2-rc.1`。首版不兼容 DSH `0.1.5` 的会话持久化接口；已有其它版本时请为本套件使用独立的匹配 CLI，不要覆盖日常环境。安装已发布插件：
+要求 Node.js 22.19+（或 24+）、pnpm 11.7.0 和兼容的 DSH `0.1.x`（最低 `0.1.2-rc.1`）。dev 中的安装器默认安装 `0.1.5-rc.1`，已有兼容版本直接复用；`0.2.x` 需重新评估兼容性。已发布的 `v0.1.31` 远程引导器仍使用旧 Host 限制，这些兼容修复尚待下一版发布。安装已发布插件：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/<plugin-name>
@@ -62,7 +62,7 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
 ```
 
-不便先 clone 仓库时，可一键远程安装。远程引导器会从固定发布 tag 下载并校验 `common.sh`；请求 `--operation upgrade|uninstall` 时，还会从同一个 tag 下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`，三个资产全部通过各自内嵌的 SHA-256 后才允许任何安装代码执行。旧 `v0.1.24` 的 lifecycle helper 摘要为全零，因此它不支持远程 upgrade/uninstall；新发布由 `release:prepare` 为三个实际资产生成独立摘要。DSH host 固定到首版已验证的 `0.1.2-rc.1`，不同版本在修改 profile 前拒绝，不自动保留较新但不兼容的 Host。插件安装会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，避免跨包 `latest` 混装：
+不便先 clone 仓库时，可一键远程安装。远程引导器会从固定发布 tag 下载并校验 `common.sh`；请求 `--operation upgrade|uninstall` 时，还会从同一个 tag 下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`，三个资产全部通过各自内嵌的 SHA-256 后才允许任何安装代码执行。旧 `v0.1.24` 的 lifecycle helper 摘要为全零，因此它不支持远程 upgrade/uninstall；新发布由 `release:prepare` 为三个实际资产生成独立摘要。当前远程引导器固定到 `v0.1.31`，仍要求 DSH `0.1.2-rc.1`；下一版将采用 dev 已实现的兼容范围。插件安装会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，避免跨包 `latest` 混装：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
