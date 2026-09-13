@@ -119,13 +119,14 @@ test('skill_qualify uses one external process attempt, persists unknown, and exp
   expect(JSON.stringify(status)).not.toMatch(/publicKey|datasetDigest|generatorDigest|authority\.mjs|stateRoot/u)
 })
 
-test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('repeated failures qualify a topology repair, promote its canary, and roll back a bad same-family run across restarts', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'external-holdout-positive-')), stateRoot = await mkdtemp(join(tmpdir(), 'external-holdout-positive-state-'))
-  await chmod(stateRoot, 0o700); cleanups.push(() => rm(root, { recursive: true, force: true }), () => rm(stateRoot, { recursive: true, force: true }))
+test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('qualification leaves the source workspace and pending candidate unchanged before a later topology canary', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'external-holdout-positive-')), stateRoot = await mkdtemp(join(tmpdir(), 'external-holdout-positive-state-')), qualificationStateRoot = await mkdtemp(join(tmpdir(), 'external-holdout-qualification-state-')), authorityRoot = await mkdtemp(join(tmpdir(), 'external-holdout-authority-'))
+  await chmod(stateRoot, 0o700); await chmod(qualificationStateRoot, 0o700); await chmod(authorityRoot, 0o700); cleanups.push(() => rm(root, { recursive: true, force: true }), () => rm(stateRoot, { recursive: true, force: true }), () => rm(qualificationStateRoot, { recursive: true, force: true }), () => rm(authorityRoot, { recursive: true, force: true }))
   const keyPair = generateKeyPairSync('ed25519')
-  const key = join(root, 'key.pem'), authorityConfig = join(root, 'authority.json'), marker = join(root, 'starts'), hook = join(root, 'mark-start.mjs')
+  const key = join(authorityRoot, 'key.pem'), authorityConfig = join(authorityRoot, 'authority.json'), qualificationAuthorityConfig = join(authorityRoot, 'qualification-authority.json'), marker = join(authorityRoot, 'starts'), hook = join(authorityRoot, 'mark-start.mjs')
   await writeFile(key, keyPair.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
-  await writeFile(authorityConfig, JSON.stringify({ prospective: { generator: 'dependency-topological-order/v1' }, privateKeyPath: key, statePath: join(root, 'authority.sqlite'), limits: { maxToolCalls: 2, maxOutputBytes: 1024 } }), { mode: 0o600 })
+  await writeFile(authorityConfig, JSON.stringify({ prospective: { generator: 'dependency-topological-order/v1' }, privateKeyPath: key, statePath: join(authorityRoot, 'authority.sqlite'), limits: { maxToolCalls: 2, maxOutputBytes: 1024 } }), { mode: 0o600 })
+  await writeFile(qualificationAuthorityConfig, JSON.stringify({ prospective: { generator: 'dependency-topological-order/v1' }, privateKeyPath: key, statePath: join(authorityRoot, 'qualification-authority.sqlite'), limits: { maxToolCalls: 2, maxOutputBytes: 1024 } }), { mode: 0o600 })
   await writeFile(hook, `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(marker)}, 'x')`, { mode: 0o600 })
   const ctx = new Context(), owner = agent(ctx, root), scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: root, preset: 'primary' }
   cleanups.push(() => ctx.fiber.restart()); ctx.provide('agents' as never, { get: () => owner, list: () => [owner] } as never)
@@ -244,21 +245,34 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('repeated failures q
   expect(JSON.stringify(candidate)).not.toMatch(/failure-(?:session|goal|native|run)|repair-(?:session|native|run)|contractId|receiptDigest|traceDigest|failureProvenance/u)
   const config = { ...baseConfig, externalHoldouts: [{ id: 'positive', version: 1, scope, execution: { image: candidateImage, dockerPath: '/usr/bin/docker', stateRoot, command: '/usr/local/bin/node /workspace/artifact < /workspace/input', artifactPath: 'topology.mjs', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 20000, verificationDurationMs: 10000 }, authority: { executable: process.execPath, args: ['--import', hook, cli, '--config', authorityConfig], publicKey: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: topologyGeneratorDigest },
     canaryAdmission: { protocol: 'assistant-skills/canary-admission/v1' as const, skillName: 'topology-order', parentDefinitionDigest: acceptanceDigest(parent), candidateDefinitionDigest: candidate.definitionDigest,
-      taskFamily: { goalDefinitionDigest, outcomeProfile } }, maxComparisons: 1 as const }] }
+      taskFamily: { goalDefinitionDigest, outcomeProfile } }, maxComparisons: 1 as const },
+  { id: 'qualification-only', version: 1, scope, execution: { image: candidateImage, dockerPath: '/usr/bin/docker', stateRoot: qualificationStateRoot, command: '/usr/local/bin/node /workspace/artifact < /workspace/input', artifactPath: 'topology.mjs', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 20000, verificationDurationMs: 10000 }, authority: { executable: process.execPath, args: ['--import', hook, cli, '--config', qualificationAuthorityConfig], publicKey: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: topologyGeneratorDigest }, maxComparisons: 1 as const }] }
   await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config)
-  expect(await json('skill_comparison_status', {})).toEqual([expect.objectContaining({ id: 'positive', executionTool: 'skill_qualify', canaryExecutionTool: 'skill_canary' })])
+  expect(await json('skill_comparison_status', {})).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'positive', executionTool: 'skill_qualify', canaryExecutionTool: 'skill_canary' }),
+    expect.objectContaining({ id: 'qualification-only', executionTool: 'skill_qualify' }),
+  ]))
+  const sentinel = join(root, 'qualification-sentinel.txt'), artifact = join(root, 'topology.mjs')
+  await writeFile(sentinel, 'source sentinel'); await writeFile(artifact, 'source artifact')
+  const definitionsBeforeQualification = await json('skill_status', {})
+  const qualified = await json('skill_qualify', { candidate_id: candidate.id, profile_id: 'qualification-only', invocation_id: 'qualification-only' })
+  expect(qualified).toMatchObject({ candidateId: candidate.id, state: 'complete', quality: { candidateChecksPassed: true, evaluationGainObserved: true, criticalRegressionsPassed: true } })
+  expect(await readFile(sentinel, 'utf8')).toBe('source sentinel'); expect(await readFile(artifact, 'utf8')).toBe('source artifact')
+  expect(await json('skill_status', {})).toEqual(definitionsBeforeQualification)
+  expect((await json('skill_candidates', {})).find((entry: { id: string }) => entry.id === candidate.id)).toMatchObject({ state: 'pending' })
+  expect(await readFile(marker, 'utf8')).toBe('x')
   const expiresAt = Date.now() + 60000
   const completed = await execute('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 }); expect(completed.isError).toBe(false)
   const deployed = JSON.parse((completed.value as { context: string }).context)
-  expect(deployed).toMatchObject({ replayed: false, definition: { name: 'topology-order', version: 2, definitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) }, deployment: { state: 'canary', comparisonId: expect.any(String), admissionDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission), taskFamilyDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission.taskFamily), runCount: 0 } })
-  expect(await json('skill_comparison_status', { comparison_id: deployed.deployment.comparisonId })).toMatchObject({ state: 'complete', generatorDigest: topologyGeneratorDigest, admissionDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission), quality: { candidateChecksPassed: true, evaluationGain: 1, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'unproven' } })
+  expect(deployed).toMatchObject({ replayed: false, definition: { name: 'topology-order', version: 2, definitionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) }, deployment: { state: 'canary', comparisonId: expect.any(String), admissionDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission!), taskFamilyDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission!.taskFamily), runCount: 0 } })
+  expect(await json('skill_comparison_status', { comparison_id: deployed.deployment.comparisonId })).toMatchObject({ state: 'complete', generatorDigest: topologyGeneratorDigest, admissionDigest: acceptanceDigest(config.externalHoldouts[0]!.canaryAdmission!), quality: { candidateChecksPassed: true, evaluationGain: 1, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'unproven' } })
   const sensitiveKeys = /"(?:scope|workspace|principalId|principalRecordId|principalVersion|sessionId|nativeGoalId|runId|routeReceipt|ownerRouteId|runIds|observations|input|publicKey|acceptance|receipt[^"]*)":/u
   expect(JSON.stringify(deployed)).not.toMatch(sensitiveKeys)
-  expect(await readFile(marker, 'utf8')).toBe('x'); expect(await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).toMatchObject({ id: deployed.deployment.id, state: 'canary' })
+  expect(await readFile(marker, 'utf8')).toBe('xx'); expect(await json('skill_deployment_status', { deployment_id: deployed.deployment.id })).toMatchObject({ id: deployed.deployment.id, state: 'canary' })
   await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config)
   const replayed = await json('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 })
   expect(replayed).toMatchObject({ replayed: true, definition: { name: 'topology-order', version: 2 }, deployment: { id: deployed.deployment.id, state: 'canary', runCount: 0 } })
-  expect(JSON.stringify(replayed)).not.toMatch(sensitiveKeys); expect(await readFile(marker, 'utf8')).toBe('x')
+  expect(JSON.stringify(replayed)).not.toMatch(sensitiveKeys); expect(await readFile(marker, 'utf8')).toBe('xx')
   const firstRun = await json('skill_run', { goal_id: 'canary-goal', name: 'topology-order', version: 2, inputs_json: '{}', invocation_id: 'first-use' })
   expect(firstRun.state).toBe('succeeded'); expect(await readFile(join(root, 'topology.mjs'), 'utf8')).toBe(topologyImplementation)
   expect((await execute('skill_run', { goal_id: 'too-early', name: 'topology-order', version: 2, inputs_json: '{}', invocation_id: 'too-early' })).isError).toBe(true)
@@ -276,5 +290,5 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('repeated failures q
   const retry = await json('skill_canary', { candidate_id: candidate.id, profile_id: 'positive', invocation_id: 'once', owner_route_id: route.authorityId, expires_at: expiresAt, max_runs: 2, canary_runs: 1 })
   expect(retry).toMatchObject({ replayed: true, deployment: { state: 'rolled-back' } })
   expect(JSON.stringify(retry)).not.toMatch(sensitiveKeys)
-  expect((await json('skill_status', {}))[0].version).toBe(3); expect(await readFile(marker, 'utf8')).toBe('x')
+  expect((await json('skill_status', {}))[0].version).toBe(3); expect(await readFile(marker, 'utf8')).toBe('xx')
 }, 180000)

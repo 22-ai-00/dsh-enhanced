@@ -8,6 +8,7 @@ import type { GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput,
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { RepairExecutionLease, SkillStore } from './store.js'
+import { assertRepairWorkspacePath, repairFilePath } from './repair-workspace-path.js'
 
 export interface OwnerRepairAgentInput {
   id: string
@@ -264,6 +265,10 @@ export class OwnerRepairAgentRuntime {
     agentCtx.on('tools/execute', async (execution, next) => {
       if (execution.agent !== agent) return await next()
       input.assertCurrent(); combined.throwIfAborted()
+      if (execution.name === 'read' || execution.name === 'write' || execution.name === 'edit' || execution.name === 'read_image') {
+        await assertRepairWorkspacePath(input.scope.workspace, repairFilePath(execution.name, execution.arguments))
+        input.assertCurrent(); combined.throwIfAborted(); this.#assertLease(key)
+      }
       const settled = this.#effect(key, 'tool')
       const result = await next()
       if (!result.isError && !execution.signal.aborted) toolsAwaitingLog.set(String(execution.callId), settled)

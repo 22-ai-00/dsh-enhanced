@@ -240,7 +240,7 @@ admission 文件必须是 workspace 外部的 canonical、owner-only（`0600`）
 }
 ```
 
-`externalHoldouts` 中每项必须是完整的已发布 Skills external-holdout profile，不能用上例的占位对象。每个 repair profile 只能使用上述字段；可选 `followupProfileIds` 和 `bindings` 也必须符合 Skills contract。`scope.principalId` 必须为 `web/<profile>/local/operator`，其 record id/version、workspace 与 preset 必须精确匹配当前 owner 和命令参数。`allowedTools` 至少一个，且不能包含 `skill_*`、`goal_create`、`goal_control`、`set_goal` 或 `update_goal`。
+`externalHoldouts` 中每项必须是完整的已发布 Skills external-holdout profile，不能用上例的占位对象。每个 repair profile 只能使用上述字段；可选 `followupProfileIds` 和 `bindings` 也必须符合 Skills contract。`scope.principalId` 必须为 `web/<profile>/local/operator`，其 record id/version、workspace 与 preset 必须精确匹配当前 owner 和命令参数。`allowedTools` 至少一个，自动修复仅支持 `read`、`write`、`edit`、`read_image` 四类原生文件工具；所有文件访问都限定在该 repair profile 的 workspace 内，拒绝越界路径及其下的符号链接。其他工具不能通过自动修复 profile 授权。
 
 命令只读核验 account 精确等于 `--profile` 的 current owner lineage、已有 owner route、Goals 有限 calls execution budget（model calls、tool calls、时长和每次输出上限）及其精确 provider/model route、Skills prospective holdouts 和 Verifier profiles，然后原子合并有限 profiles/holdouts 并保留已有配置键。每个 profile 的 `maxModelCalls`、`maxToolCalls`、`maxDurationMs` 与 `maxOutputTokens` 都不得超过既有 Goals budget 的对应值。已有 TraeX calls budget 即可；该流程不要求 DeepSeek budget bundle。写入前会重新读取有效配置和 owner lineage，任一变化都会拒绝提交；重复完全相同的 admission 不改变 patch 字节。它不创建 Goal、Session、owner、credential、grant 或无限权限。配置成功不是 repair 验收、canary 成功、模型质量或自主改进成功的证据。
 

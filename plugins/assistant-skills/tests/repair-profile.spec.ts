@@ -29,8 +29,12 @@ describe('repair continuation profile configuration', () => {
     expect(() => validateRepairProfiles([profile(override)], [holdout()])).toThrow(/invalid repair profile/)
   })
 
-  test.each(['skill_run', 'skill_repair_arm', 'goal_create', 'goal_control', 'set_goal', 'update_goal'])('blocks repair-model authority %s', tool => {
-    expect(() => validateRepairProfiles([profile({ allowedTools: ['read', tool] })], [holdout()])).toThrow(/tool authority exceeds fixed scope/)
+  test.each(['skill_run', 'skill_repair_arm', 'goal_create', 'goal_control', 'set_goal', 'update_goal', 'bash', 'run_code', 'http_request', 'preset_shell'])('rejects opaque automatic-repair tool %s', tool => {
+    expect(() => validateRepairProfiles([profile({ allowedTools: ['read', tool] })], [holdout()])).toThrow(/only native workspace file tools/)
+  })
+
+  test('accepts the complete constrained native filesystem tool set', () => {
+    expect(validateRepairProfiles([profile({ allowedTools: ['read', 'write', 'edit', 'read_image'] })], [holdout()])[0]?.allowedTools).toEqual(['read', 'write', 'edit', 'read_image'])
   })
 
   test('rejects unknown fields, duplicate scoped ids, and invalid bindings', () => {

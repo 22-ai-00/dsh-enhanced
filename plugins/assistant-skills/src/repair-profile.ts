@@ -3,6 +3,7 @@ import type { GoalScope } from '@dsh-enhanced/assistant-goals'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { ExternalHoldoutProfile } from './external-holdout.js'
 import type { SkillBinding } from './definition.js'
+import { repairFileTools } from './repair-workspace-path.js'
 
 /** Operator configuration. Owner tools select an id; they cannot supply code or evaluator inputs. */
 export interface RepairContinuationProfile {
@@ -32,6 +33,7 @@ const plain = (value: unknown): value is Record<string, unknown> => value !== nu
   && Object.values(Object.getOwnPropertyDescriptors(value)).every(item => item.enumerable && 'value' in item)
 const bounded = (value: unknown, max: number): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !value.includes('\0')
 const integer = (value: unknown, min: number, max: number): boolean => Number.isSafeInteger(value) && Number(value) >= min && Number(value) <= max
+const repairToolNames = new Set<string>(repairFileTools)
 
 export function validateRepairProfiles(values: unknown, holdouts: readonly ExternalHoldoutProfile[]): readonly RepairContinuationProfile[] {
   if (!Array.isArray(values) || values.length > 32) throw new Error('assistant-skills: invalid repair profiles')
@@ -53,8 +55,10 @@ export function validateRepairProfiles(values: unknown, holdouts: readonly Exter
       || value.maxIterations !== undefined && !integer(value.maxIterations, 1, 4)
       || value.followupProfileIds !== undefined && (!Array.isArray(value.followupProfileIds) || value.followupProfileIds.length > (Number(value.maxIterations ?? 1) - 1)
         || value.followupProfileIds.some(id => !bounded(id, 128)) || new Set(value.followupProfileIds).size !== value.followupProfileIds.length)) throw new Error('assistant-skills: invalid repair profile')
-    // The repair model cannot mint goals, authorize continuations, or promote itself.
-    if (value.allowedTools.some(tool => /^(?:skill_|goal_create$|goal_control$|set_goal$|update_goal$)/u.test(tool))) throw new Error('assistant-skills: repair tool authority exceeds fixed scope')
+    // The automatic repair lease promises workspace-contained file authority only.
+    // Shell, network, code-transport, and arbitrary preset tools have opaque
+    // side effects or path semantics and are therefore not repair capabilities.
+    if (value.allowedTools.some(tool => !repairToolNames.has(tool))) throw new Error('assistant-skills: repair profiles support only native workspace file tools (read, write, edit, read_image)')
     if (value.bindings !== undefined && (!Array.isArray(value.bindings) || value.bindings.length > 32 || value.bindings.some(binding => !plain(binding)
       || Object.keys(binding).sort().join(',') !== 'name,path,stepId' || !bounded(binding.name, 128) || !bounded(binding.stepId, 128) || !bounded(binding.path, 1024)))) throw new Error('assistant-skills: invalid repair bindings')
     const holdout = holdouts.find(item => item.id === value.externalHoldoutProfileId && acceptanceDigest(item.scope) === acceptanceDigest(value.scope))
