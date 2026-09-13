@@ -49,6 +49,7 @@ declare module '@deepseek-ai/cordis' { interface Context { assistantIsolation: A
 
 /** Trusted Host broker. Only bounded input copies cross into the job-specific Docker volume. */
 export class AssistantIsolationService extends Service {
+  static { Object.defineProperty(this, 'name', { value: 'dsh-enhanced-assistant-isolation' }) }
   static Config = Config
   readonly #config: ReturnType<typeof validateConfig>
   readonly #ledger: IsolationLedger
