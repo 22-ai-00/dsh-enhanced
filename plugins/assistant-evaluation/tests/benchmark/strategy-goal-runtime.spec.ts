@@ -121,7 +121,7 @@ async function cancellableRuntime(hangDispose = false) {
   }
   const runtime = await createStrategyGoalRuntime({ plan: source, request: { planId: bound.id, dataset: bound.dataset, cell, task: bound.cases[0]!, variant, budget: bound.budget, signal: controller.signal }, task,
     workspace, stateRoot, persona: '', model, factory: () => ({ adapter: new BlockedAdapter(), inputTokenUpperBound: () => 10, dispose: () => hangDispose ? disposing : undefined }),
-    image: `sha256:${'0'.repeat(64)}`, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 25000, stopTimeoutMs: 1000 })
+    image: `sha256:${'0'.repeat(64)}`, dockerPath: process.execPath, stepMaxDurationMs: 25000, stopTimeoutMs: 1000 })
   return { runtime, ready, controller, releaseDispose, wasAborted: () => aborted }
 }
 

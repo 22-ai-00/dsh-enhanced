@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFile } from 'node:child_process'
@@ -17,7 +17,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 const identity = { principalDigest: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/project', agentPreset: 'default' }
 const request = (key: string) => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: key, durationMs: 1000 })
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'isolation-storage-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'isolation-storage-'))); roots.push(root)
   const ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
   const authority = ledger.claimController('host', 30_000)
   ledger.syncGrants([{ ...identity, id: 'grant', revision: 1, expiresAt: Date.now() + 60_000, maxRuns: 10, maxTotalDurationMs: 10_000 }], authority)

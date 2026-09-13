@@ -444,7 +444,7 @@ describe('side-effect-free active Lark owner snapshot', () => {
   })
 
   test('fails closed for missing, corrupt, non-current-schema, symlinked, hardlinked, and non-private storage', async () => {
-    const parent = await mkdtemp(join(tmpdir(), 'delivery-lark-operator-invalid-')); roots.push(parent)
+    const parent = await realpath(await mkdtemp(join(tmpdir(), 'delivery-lark-operator-invalid-'))); roots.push(parent)
     expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally(larkQuery(join(parent, 'missing.sqlite'))), 'database-missing')
     expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally({ ...larkQuery('/relative'), databasePath: 'relative.sqlite' }), 'invalid-path')
     const corrupt = join(parent, 'corrupt.sqlite'); await writeFile(corrupt, 'not sqlite', { mode: 0o600 })
@@ -539,7 +539,8 @@ describe('side-effect-free active Lark owner snapshot', () => {
     writer.close(); fixture.store.close()
   })
 
-  test('rechecks temporary directory permissions through the pinned directory descriptor', async () => {
+  // Descriptor pinning uses Linux /proc/self/fd; portable path checks run above.
+  test.skipIf(process.platform !== 'linux')('rechecks temporary directory permissions through the pinned directory descriptor', async () => {
     const fixture = await larkSeeded()
     const writer = new DatabaseSync(fixture.path); writer.exec('PRAGMA wal_autocheckpoint=0')
     writer.prepare('UPDATE conversation_bindings SET updated_at=updated_at+1, version=version+1 WHERE id=?').run(fixture.binding.id)
@@ -620,7 +621,7 @@ describe('side-effect-free active Lark owner snapshot', () => {
     await finishRaceWorker(race)
   })
 
-  test('H1: full parent ABA around the SQLite open cannot make the snapshot read a same-name malicious database', async () => {
+  test.skipIf(process.platform !== 'linux')('H1: full parent ABA around the SQLite open cannot make the snapshot read a same-name malicious database', async () => {
     const fixture = await larkSeeded(); fixture.store.close()
     // Non-WAL source: close the last connection and clear any sidecars so the
     // operator takes the direct source-fd path.

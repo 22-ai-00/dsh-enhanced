@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,11 +7,12 @@ import { describe, expect, it } from 'vitest'
 import { parseDocument } from 'yaml'
 import { autonomyDockerPath, prepareAutonomyProfile as prepareProfile, validateAutonomyOptions, type AutonomyProfileInput } from '../src/autonomy.ts'
 
+// /var is an OS symlink on macOS; use a virtual home beneath canonical /.
 const input: AutonomyProfileInput = {
-  dshHome: '/var/lib/dsh', profile: 'web', workspace: '/srv/workspace', preset: 'standard',
+  dshHome: '/dsh-autonomy-fixture/home', profile: 'web', workspace: '/srv/workspace', preset: 'standard',
   isolation: { image: `sha256:${'a'.repeat(64)}`, maxRuns: 3, leaseMs: 60_000, maxTotalDurationMs: 120_000 },
 }
-const publishedUserHome = join(tmpdir(), `web-owner-published-defaults-${process.pid}`)
+const publishedUserHome = join(realpathSync(tmpdir()), `web-owner-published-defaults-${process.pid}`)
 const rows = (home = join(publishedUserHome, '.dsh')) => `
 - id: dsh-enhanced-assistant-isolation
   name: '@dsh-enhanced/assistant-isolation'
@@ -49,12 +51,12 @@ describe('prepareAutonomyProfile', () => {
     const patch = prepareAutonomyProfile(input, source, rows(), owner, 1_000)
     expect(patch).toContain('!!js')
     expect(config(patch, 'dsh-enhanced-assistant-actions').grants).toEqual([])
-    expect(config(patch, 'dsh-enhanced-assistant-isolation').stateRoot).toBe('/var/lib/dsh/assistant-isolation/web')
-    expect(config(patch, 'dsh-enhanced-assistant-actions').stateRoot).toBe('/var/lib/dsh/assistant-actions/web')
-    expect(config(patch, 'dsh-enhanced-credentials-keychain').databasePath).toBe('/var/lib/dsh/credentials-keychain/web.sqlite')
-    expect(config(patch, 'dsh-enhanced-assistant-skills')).toEqual({ databasePath: '/var/lib/dsh/assistant-skills/skills.sqlite', allowedTools: ['read', 'write'] })
-    expect(config(patch, 'dsh-enhanced-assistant-proactive')).toEqual({ databasePath: '/var/lib/dsh/assistant-proactive/proactive.sqlite', profiles: [] })
-    expect(`${config(patch, 'dsh-enhanced-assistant-proactive').databasePath}.preparations`).toBe('/var/lib/dsh/assistant-proactive/proactive.sqlite.preparations')
+    expect(config(patch, 'dsh-enhanced-assistant-isolation').stateRoot).toBe('/dsh-autonomy-fixture/home/assistant-isolation/web')
+    expect(config(patch, 'dsh-enhanced-assistant-actions').stateRoot).toBe('/dsh-autonomy-fixture/home/assistant-actions/web')
+    expect(config(patch, 'dsh-enhanced-credentials-keychain').databasePath).toBe('/dsh-autonomy-fixture/home/credentials-keychain/web.sqlite')
+    expect(config(patch, 'dsh-enhanced-assistant-skills')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-skills/skills.sqlite', allowedTools: ['read', 'write'] })
+    expect(config(patch, 'dsh-enhanced-assistant-proactive')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-proactive/proactive.sqlite', profiles: [] })
+    expect(`${config(patch, 'dsh-enhanced-assistant-proactive').databasePath}.preparations`).toBe('/dsh-autonomy-fixture/home/assistant-proactive/proactive.sqlite.preparations')
     expect(config(patch, 'dsh-enhanced-assistant-isolation').grants).toEqual([{
       id: 'autonomy-web', revision: 1, principalDigest: createHash('sha256').update('web/web/local/operator').digest('hex'), principalRecordId: 'owner-record', principalVersion: 7,
       workspace: '/srv/workspace', agentPreset: 'standard', expiresAt: 61_000, maxRuns: 3, maxTotalDurationMs: 120_000,
@@ -88,9 +90,9 @@ describe('prepareAutonomyProfile', () => {
   it('only replaces the published credential default and prevalidates grants without an owner', () => {
     const effective = rows()
     const inherited = prepareAutonomyProfile(input, '- id: dsh-enhanced-credentials-keychain\n  config: { handles: [] }\n', effective)
-    expect(config(inherited, 'dsh-enhanced-credentials-keychain').databasePath).toBe('/var/lib/dsh/credentials-keychain/web.sqlite')
-    const customPath = effective.replace("databasePath: !!js dshHomePath('credentials-keychain/ledger.sqlite')", 'databasePath: /var/lib/dsh/custom/credentials.sqlite')
-    expect(config(prepareAutonomyProfile(input, '[]', customPath), 'dsh-enhanced-credentials-keychain').databasePath).toBe('/var/lib/dsh/custom/credentials.sqlite')
+    expect(config(inherited, 'dsh-enhanced-credentials-keychain').databasePath).toBe('/dsh-autonomy-fixture/home/credentials-keychain/web.sqlite')
+    const customPath = effective.replace("databasePath: !!js dshHomePath('credentials-keychain/ledger.sqlite')", 'databasePath: /dsh-autonomy-fixture/home/custom/credentials.sqlite')
+    expect(config(prepareAutonomyProfile(input, '[]', customPath), 'dsh-enhanced-credentials-keychain').databasePath).toBe('/dsh-autonomy-fixture/home/custom/credentials.sqlite')
     const outside = effective.replace("databasePath: !!js dshHomePath('credentials-keychain/ledger.sqlite')", 'databasePath: /srv/credentials.sqlite')
     expect(() => prepareAutonomyProfile(input, '[]', outside)).toThrow(/Credential databasePath/)
     const arbitraryJs = effective.replace("dshHomePath('credentials-keychain/ledger.sqlite')", "dshHomePath('other.sqlite')")
@@ -102,15 +104,15 @@ describe('prepareAutonomyProfile', () => {
   it('preserves safe custom state databases and rejects paths outside DSH_HOME', () => {
     const custom = `
 - id: dsh-enhanced-assistant-skills
-  config: { databasePath: /var/lib/dsh/custom/learned.sqlite }
+  config: { databasePath: /dsh-autonomy-fixture/home/custom/learned.sqlite }
 - id: dsh-enhanced-assistant-proactive
-  config: { databasePath: /var/lib/dsh/custom/opportunities.sqlite }
+  config: { databasePath: /dsh-autonomy-fixture/home/custom/opportunities.sqlite }
 `
     const effective = rows()
     const patch = prepareAutonomyProfile(input, custom, effective, owner, 1_000)
-    expect(config(patch, 'dsh-enhanced-assistant-skills')).toEqual({ databasePath: '/var/lib/dsh/custom/learned.sqlite', allowedTools: ['read', 'write'] })
-    expect(config(patch, 'dsh-enhanced-assistant-proactive')).toEqual({ databasePath: '/var/lib/dsh/custom/opportunities.sqlite', profiles: [] })
-    for (const value of ['/srv/skills.sqlite', '/var/lib/dsh/assistant-skills/../skills.sqlite', "!!js dshHomePath('assistant-skills/skills.sqlite')"]) {
+    expect(config(patch, 'dsh-enhanced-assistant-skills')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/custom/learned.sqlite', allowedTools: ['read', 'write'] })
+    expect(config(patch, 'dsh-enhanced-assistant-proactive')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/custom/opportunities.sqlite', profiles: [] })
+    for (const value of ['/srv/skills.sqlite', '/dsh-autonomy-fixture/home/assistant-skills/../skills.sqlite', "!!js dshHomePath('assistant-skills/skills.sqlite')"]) {
       const unsafe = effective.replace(join(publishedUserHome, '.dsh', 'assistant-skills.sqlite'), value)
       expect(() => prepareAutonomyProfile(input, '[]', unsafe, owner, 1_000)).toThrow(/Skills databasePath/)
     }
@@ -126,8 +128,8 @@ describe('prepareAutonomyProfile', () => {
   config: { profiles: [{ id: custom }] }
 `
     const patch = prepareAutonomyProfile(input, source, rows(), owner, 1_000)
-    expect(config(patch, 'dsh-enhanced-assistant-skills')).toEqual({ databasePath: '/var/lib/dsh/assistant-skills/skills.sqlite', allowedTools: ['read'] })
-    expect(config(patch, 'dsh-enhanced-assistant-proactive')).toEqual({ databasePath: '/var/lib/dsh/assistant-proactive/proactive.sqlite', profiles: [{ id: 'custom' }] })
+    expect(config(patch, 'dsh-enhanced-assistant-skills')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-skills/skills.sqlite', allowedTools: ['read'] })
+    expect(config(patch, 'dsh-enhanced-assistant-proactive')).toEqual({ databasePath: '/dsh-autonomy-fixture/home/assistant-proactive/proactive.sqlite', profiles: [{ id: 'custom' }] })
   })
 
   it('rejects existing ancestor symlink escapes and accepts nonexistent nested state paths', async () => {

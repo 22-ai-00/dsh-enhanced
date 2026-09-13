@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -19,7 +19,7 @@ const reservation = { memoryMiB: 100, workspaceInodes: 100, maxMemoryMiB: 100, m
 const unknown = (jobId: string): IsolationResult => ({ jobId, status: 'unknown', quiescent: false, stdout: 'retained stdout', stderr: 'retained stderr', artifacts: [], reason: 'docker-creation-unconfirmed' })
 const error = (fn: () => unknown): IsolationLedgerError => { try { fn() } catch (caught) { expect(caught).toBeInstanceOf(IsolationLedgerError); return caught as IsolationLedgerError }; throw new Error('expected ledger error') }
 
-function databasePath(): string { const root = mkdtempSync(join(tmpdir(), 'reconciliation-ledger-')); roots.push(root); chmodSync(root, 0o700); return join(root, 'ledger.sqlite') }
+function databasePath(): string { const root = realpathSync(mkdtempSync(join(tmpdir(), 'reconciliation-ledger-'))); roots.push(root); chmodSync(root, 0o700); return join(root, 'ledger.sqlite') }
 function daemon(process: ProcessWitness, overrides: Partial<DaemonWitness> = {}): DaemonWitness {
   return { process, engineId: 'engine:1', dockerPath: '/usr/bin/docker', socketPath: '/run/docker.sock', pidFile: '/run/docker.pid', ...overrides }
 }
@@ -59,7 +59,7 @@ async function receipt(setup: Awaited<ReturnType<typeof stranded>>, name = setup
   return value
 }
 
-describe('reconciled unknown ledger release', () => {
+describe.runIf(process.platform === 'linux')('reconciled unknown ledger release', () => {
   it('retains an alive supervisor, then releases only after reap while preserving outcome, audit, and grant accounting', async () => {
     const setup = await stranded(true)
     try {

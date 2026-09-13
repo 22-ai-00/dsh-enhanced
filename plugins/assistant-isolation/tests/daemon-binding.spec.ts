@@ -46,7 +46,7 @@ async function daemon() {
   return { process, engineId: 'engine:1', dockerPath: '/usr/bin/docker', socketPath: '/run/docker.sock', pidFile: '/run/docker.pid' }
 }
 
-describe('systemd Docker binding', () => {
+describe.runIf(process.platform === 'linux')('systemd Docker binding', () => {
   it('accepts two identical systemd socket-activation samples', async () => {
     control.responses = [{ code: 0, output: unit('service') }, { code: 0, output: unit('socket') }, { code: 0, output: unit('service') }, { code: 0, output: unit('socket') }]
     await expect(captureSystemdBinding(await daemon())).resolves.toEqual({ kind: 'systemd', serviceInvocationId: id, socketInvocationId: id })

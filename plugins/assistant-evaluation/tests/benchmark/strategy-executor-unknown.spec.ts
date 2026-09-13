@@ -19,7 +19,7 @@ function config(): StrategyBenchmarkConfig {
   return { suite: 'strategy-v1', id: 'strategy-unknown', cases: ['integer-sum'], persona: 'Solve the public task with the admitted Goal and isolated tools.',
     model: { provider: 'unknown-fixture', model: 'fixed', temperature: null, maxOutputTokens: 128, inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null, adapterDigest: 'a'.repeat(64), tokenCounterDigest: 'b'.repeat(64) },
     execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 3 }, budget: { durationMs: 100000, inputTokens: 1000, outputTokens: 2048, toolCalls: 8, costUsdMicros: null }, repeats: 2, seed: 1,
-    image: `sha256:${'0'.repeat(64)}`, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 25000, stopTimeoutMs: 1000,
+    image: `sha256:${'0'.repeat(64)}`, dockerPath: process.execPath, stepMaxDurationMs: 25000, stopTimeoutMs: 1000,
     workspaceDirectory: join(root, 'workspaces'), stateDirectory: join(root, 'state') }
 }
 

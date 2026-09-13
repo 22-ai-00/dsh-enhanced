@@ -7155,7 +7155,9 @@ printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
     expect(await readFile(logPath, 'utf8')).toBe('')
   })
 
-  test('upgrade executes with an installed later compatible Host without changing the global npm toolchain', async () => {
+  // The transaction uses the same Linux-only flock/proc contracts as the
+  // lifecycle integration suite; the version-only checks above are portable.
+  test.skipIf(process.platform !== 'linux')('upgrade executes with an installed later compatible Host without changing the global npm toolchain', async () => {
     const f = await lifecycleFixture()
     const dsh = join(f.fakeBin, 'dsh')
     await writeFile(dsh, (await readFile(dsh, 'utf8')).replace("printf '0.1.2-rc.1\\n'", "printf '0.1.5-rc.1\\n'"))

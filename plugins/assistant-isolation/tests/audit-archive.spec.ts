@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFile } from 'node:child_process'
@@ -17,7 +17,7 @@ const execFileAsync = promisify(execFile)
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const identity: IsolationIdentity = { principalDigest: 'a'.repeat(64), principalRecordId: 'record', principalVersion: 1, workspace: '/work', agentPreset: 'default' }
 const grant: IsolationGrant = { ...identity, id: 'grant', revision: 1, expiresAt: 100_000, maxRuns: 20, maxTotalDurationMs: 20_000 }
-function privateRoot(label: string): string { const root = mkdtempSync(join(tmpdir(), `${label}-`)); chmodSync(root, 0o700); roots.push(root); return root }
+function privateRoot(label: string): string { const root = realpathSync(mkdtempSync(join(tmpdir(), `${label}-`))); chmodSync(root, 0o700); roots.push(root); return root }
 function prepare(stateRoot: string, count = 1): IsolationLedger {
   const ledger = new IsolationLedger(join(stateRoot, 'ledger.sqlite'), { now: () => 10_000 }); ledger.syncGrants([grant])
   for (let index = 0; index < count; index += 1) ledger.prepare({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: `key-${index}`, requestDigest: `digest-${index}`, durationMs: 500 })

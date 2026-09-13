@@ -8,7 +8,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { DatabaseSync } from 'node:sqlite'
-import { mkdtemp, mkdir, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -26,7 +26,7 @@ function nativeTool(name: string) {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'isolation-scoped-presentation-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'isolation-scoped-presentation-'))); roots.push(root)
   const stateRoot = join(root, 'state'), workspace = join(root, 'workspace'), ordinaryWorkspace = join(root, 'ordinary')
   await Promise.all([mkdir(stateRoot, { recursive: true, mode: 0o700 }), mkdir(workspace), mkdir(ordinaryWorkspace)])
   const ctx = new Context(); await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
