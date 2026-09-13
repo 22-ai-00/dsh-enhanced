@@ -1888,6 +1888,45 @@ dsh_enhanced_doctor() {
   printf 'doctor：profile、channel 与常驻服务均已通过检查。\n'
 }
 
+# Reconcile registration at the end of an authorized installation. On macOS,
+# a job can disappear after onboarding/reconfiguration; do not leave the user
+# with a successful setup followed by a missing-service doctor error. Keep the
+# standalone doctor read-only and reuse the service-only setup path so repairing
+# registration cannot reopen credentials or owner onboarding.
+dsh_enhanced_ensure_resident_service() {
+  local profile="$1"
+  local dsh_home="$2"
+  local dry_run="$3"
+  case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in
+    Darwin|darwin) ;;
+    *) return 0 ;;
+  esac
+  local target="gui/$(id -u)/ai.deepseek.dsh.profile.$profile"
+  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-lark-setup"
+  if [[ "$dry_run" == '1' ]]; then
+    printf '常驻服务：将检查 launchd 注册，缺失时自动安装当前 profile 的 LaunchAgent。\n'
+    dsh_enhanced_print_command "$setup_bin" --profile "$profile" --install-service
+    return 0
+  fi
+  if launchctl print "$target" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ ! -x "$setup_bin" ]]; then
+    dsh_enhanced_fail 1 "常驻服务：launchd 服务未注册，且找不到注册入口：$setup_bin"
+    return $?
+  fi
+  printf '常驻服务：检测到 launchd 服务未注册，正在自动注册 %s。\n' "$target"
+  if ! "$setup_bin" --profile "$profile" --install-service; then
+    dsh_enhanced_fail 1 "常驻服务：自动注册 $target 失败；请检查上方 launchd 错误后重试安装。"
+    return $?
+  fi
+  if ! launchctl print "$target" >/dev/null 2>&1; then
+    dsh_enhanced_fail 1 "常驻服务：自动注册后 $target 仍不可见；请在当前 macOS 用户的图形登录会话中重试安装。"
+    return $?
+  fi
+  printf '常驻服务：launchd 注册已完成。\n'
+}
+
 dsh_enhanced_apply_permission_choice() {
   local preset="$1"
   local confirmed="$2"
@@ -3165,6 +3204,7 @@ NODE
   local require_service='0'
   if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
     require_service='1'
+    dsh_enhanced_ensure_resident_service "$profile" "$dsh_home" "$dry_run" || return $?
   fi
   if [[ "$dry_run" == '1' ]]; then
     if [[ "$require_service" == '1' ]]; then
