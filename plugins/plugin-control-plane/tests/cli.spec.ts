@@ -1,6 +1,6 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { chmod, copyFile, cp, link, mkdtemp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, link, mkdtemp, mkdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
@@ -18,7 +18,8 @@ import { sourceReleaseAuthorizationSigningPayload, sourceReleaseEvidenceDigest, 
 import { controlPlaneDigest, ControlPlaneStore, type CreateActivationPlanInput } from '../src/store.ts'
 import { loadTrustConfig } from '../src/trust.ts'
 import type { ActivationRetractionReceipt, ApprovalAuthority, ApprovalReceipt, HostAttestationReceipt, PluginActivationPlan,
-  PluginSourcePlan, PostActivationObservationReceipt, SourceReleaseAuthorization, SourceReleaseReceipt, SourceReleaseRequest } from '../src/types.ts'
+  PluginSourcePlan, PostActivationObservationReceipt, SourceReleaseAuthorization, SourceReleaseAuthority,
+  SourceReleaseAuthorizationAuthority, SourceReleaseReceipt, SourceReleaseRequest } from '../src/types.ts'
 
 const roots: string[] = []
 const installationId = '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00'
@@ -271,6 +272,129 @@ async function readySource(value: Awaited<ReturnType<typeof fixture>>, suffix: s
   store.close(); return ready
 }
 
+// Synthetic but content-faithful release lane support: receipts are accepted
+// with a non-cryptographic stand-in signature (the CLI activation-plan command
+// never verifies release receipts itself, it reads durable applied operations),
+// while the catalog file written for the owner must still byte-match the
+// CatalogEntry reconstructed from the applied build evidence.
+const releaseLaneSignature = Buffer.alloc(64, 7).toString('base64')
+const releaseLaneSignatureDigest = createHash('sha256').update(Buffer.from(releaseLaneSignature, 'base64')).digest('hex')
+const releasePhases = ['pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission'] as const
+const acceptingReleaseAuthority: SourceReleaseAuthority = {
+  async verify(receipt) { const { signature: _signature, ...verified } = receipt
+    return { ...verified, signatureDigest: releaseLaneSignatureDigest } },
+}
+const acceptingReleaseAuthorizationAuthority: SourceReleaseAuthorizationAuthority = {
+  async verify(authorization) { return { ...authorization,
+    signatureDigest: createHash('sha256').update(Buffer.from(authorization.signature, 'base64')).digest('hex') } },
+}
+
+function releaseSuccessEvidence(request: SourceReleaseRequest): SourceReleaseReceipt['evidence'] {
+  if (request.phase === 'pr') return { kind: 'pr', prId: 'pr-1', baseCommit: request.input.baseCommit, headCommit: '2'.repeat(40),
+    treeDigest: request.input.expectedTreeDigest, patchDigest: request.input.expectedPatchDigest, repositoryDigest: '3'.repeat(64) } as never
+  if (request.phase === 'review') return { kind: 'review', prId: request.input.prId, headCommit: request.input.headCommit,
+    reviewId: 'review-1', decision: 'approved', reviewerPrincipalDigest: '4'.repeat(64), prEvidenceDigest: request.input.prEvidenceDigest } as never
+  if (request.phase === 'merge') return { kind: 'merge', prId: request.input.prId, reviewedHeadCommit: request.input.headCommit,
+    reviewId: request.input.reviewId, reviewEvidenceDigest: request.input.reviewEvidenceDigest, mergeCommit: '5'.repeat(40),
+    targetBranch: request.input.targetBranch } as never
+  if (request.phase === 'build') {
+    const tarballSha256 = '6'.repeat(64)
+    return { kind: 'build', isolated: true, reproducibleBuilds: 2, firstBuildSha256: tarballSha256,
+      secondBuildSha256: tarballSha256, mergeEvidenceDigest: request.input.mergeEvidenceDigest, candidateId: request.input.expectedCandidateId,
+      sourceName: request.input.name, packagePath: request.input.expectedPackagePath, packageName: request.input.expectedPackageName,
+      packageVersion: request.input.expectedPackageVersion, tarballPath: '/release/health-helper.tgz', tarballBytes: 123, tarballSha256,
+      tarballIntegrity: `sha512-${Buffer.alloc(64, 6).toString('base64')}`, sbomPath: '/release/sbom.json', sbomSha256: '7'.repeat(64),
+      provenancePath: '/release/provenance.json', provenanceSha256: '8'.repeat(64), mergedCommit: request.input.mergeCommit,
+      dshBaseline: request.input.expectedDshBaseline, capabilities: request.input.expectedCapabilities,
+      authorities: request.input.expectedAuthorities, requires: request.input.expectedRequires } as never
+  }
+  if (request.phase === 'sign') return { kind: 'sign', artifactStatementDigest: controlPlaneDigest(request.input.artifact),
+    artifactSignature: releaseLaneSignature, artifactSignatureDigest: releaseLaneSignatureDigest,
+    buildEvidenceDigest: request.input.buildEvidenceDigest } as never
+  if (request.phase === 'publish') return { kind: 'publish', registryId: request.registry.id,
+    registryReference: request.authorization.releasePolicy.registryReference, packageName: request.input.artifact.packageName,
+    packageVersion: request.input.artifact.packageVersion, tarballSha256: request.input.artifact.tarballSha256,
+    tarballIntegrity: request.input.artifact.tarballIntegrity, artifactStatementDigest: request.input.artifactStatementDigest,
+    artifactSignatureDigest: releaseLaneSignatureDigest, signEvidenceDigest: request.input.signEvidenceDigest, immutable: true } as never
+  if (request.phase === 'registry-verify') return { kind: 'registry-verify', registryId: request.registry.id,
+    registryReference: request.input.registryReference, independentlyDownloaded: true, downloadedBytes: request.input.artifact.tarballBytes,
+    downloadedSha256: request.input.artifact.tarballSha256, downloadedIntegrity: request.input.artifact.tarballIntegrity,
+    artifactStatementDigest: request.input.artifactStatementDigest, artifactSignatureDigest: releaseLaneSignatureDigest,
+    publishEvidenceDigest: request.input.publishEvidenceDigest } as never
+  if (request.phase !== 'catalog-admission') throw new Error('unexpected release phase')
+  return { kind: 'catalog-admission', admissionId: 'admission-1', catalogId: request.catalog.id,
+    beforeCatalogDigest: request.input.expectedBeforeCatalogDigest, afterCatalogDigest: request.input.expectedAfterCatalogDigest,
+    registryReference: request.input.registryReference, artifactStatementDigest: request.input.artifactStatementDigest,
+    artifactSignatureDigest: releaseLaneSignatureDigest, verificationEvidenceDigest: request.input.verificationEvidenceDigest,
+    candidate: request.input.candidate } as never
+}
+
+// Rewrites the v2 fixture trust as v4 with all eight release lanes unconfigured
+// (release state is driven directly through durable store primitives), then
+// advances a ready source plan through all eight applied phases to
+// release-complete and returns the CatalogEntry the owner catalog must admit.
+async function releasedCompleteSource(value: Awaited<ReturnType<typeof fixture>>, suffix: string): Promise<{ plan: PluginSourcePlan; released: CatalogEntryShape }> {
+  const ready = await readySource(value, suffix)
+  const catalogPath = join(value.control, 'catalog.json')
+  const adapterKeys = generateKeyPairSync('ed25519')
+  const adapterPublicKeyPem = adapterKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const authorizationKeys = generateKeyPairSync('ed25519')
+  const authorizationPublicKeyPem = authorizationKeys.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  const now = Date.now()
+  const unsigned: Omit<SourceReleaseAuthorization, 'signature'> = { schemaVersion: 1,
+    kind: 'dsh-source-release-authorization', authorizationId: `release-authorization-${suffix}`, authority: 'release-owner',
+    keyId: 'release-owner-key', planId: ready.id, planDigest: ready.digest, baseCommit: ready.baseCommit,
+    checkedTreeDigest: ready.sourceCheck!.treeDigest, checkedPatchDigest: ready.sourceCheck!.patchDigest, scope: ready.scope,
+    releasePolicy: { targetBranch: 'main', candidateId: ready.name, packageName: '@dsh-enhanced/health-helper',
+      packageVersion: '0.1.0', packagePath: 'plugins/health-helper', dshBaseline: '0.1.0-rc.8', capabilities: ['health'],
+      authorities: ['read-only: health'], requires: [], registryId: 'fixture-registry',
+      registryLocator: 'https://registry.example.invalid', registryReference: '@dsh-enhanced/health-helper@0.1.0',
+      catalogId: 'owner-catalog', catalogPath, minimumReproducibleBuilds: 2 }, authorizedAt: now, expiresAt: now + 60_000 }
+  const authorization: SourceReleaseAuthorization = { ...unsigned,
+    signature: sign(null, Buffer.from(sourceReleaseAuthorizationSigningPayload(unsigned)), authorizationKeys.privateKey).toString('base64') }
+  await writeFile(catalogPath, `${JSON.stringify({ schemaVersion: 1, entries: [] })}\n`, { mode: 0o600 })
+  await writeFile(value.trustPath, `${JSON.stringify({ ...value.trust, schemaVersion: 4, catalog: { id: 'owner-catalog', path: catalogPath },
+    releaseRegistry: { id: 'fixture-registry', locator: 'https://registry.example.invalid' }, releaseReceiptTtlMs: 30_000,
+    releaseAdapters: Object.fromEntries(releasePhases.map(phase => [phase, null])),
+    releaseKeys: [{ authority: 'release-adapter', keyId: 'release-adapter-key', publicKeyPem: adapterPublicKeyPem }],
+    releaseAuthorizationKeys: [{ authority: 'release-owner', keyId: 'release-owner-key', publicKeyPem: authorizationPublicKeyPem }] })}\n`,
+    { mode: 0o600 })
+  const store = new ControlPlaneStore({ path: value.state })
+  try {
+    let plan = (await store.startSourceRelease({ planId: ready.id, expectedRevision: ready.revision, authorization,
+      resolveAuthority: () => acceptingReleaseAuthorizationAuthority, idempotencyKey: `release:start:${suffix}` })).result
+    for (const phase of releasePhases) {
+      expect(plan.status).toBe(`awaiting-${phase}`)
+      const operation = await store.prepareSourceReleaseOperation({ planId: plan.id, expectedRevision: plan.revision,
+        expectedFence: plan.release!.fence, installationId, ledger: value.trust.ledger,
+        registry: { id: 'fixture-registry', locator: 'https://registry.example.invalid' }, catalog: { id: 'owner-catalog', path: catalogPath,
+          ...(phase === 'catalog-admission' ? { expectedBeforeDigest: 'e'.repeat(64), expectedAfterDigest: 'f'.repeat(64) } : {}) },
+        adapter: { id: `fixture-adapter-${phase}`, version: 'fixture-adapter-1', path: value.executor,
+          sha256: value.trust.executor.sha256, interpreter: null, authority: 'release-adapter', keyId: 'release-adapter-key' },
+        receiptTtlMs: 30_000, resolveAuthorizationAuthority: () => acceptingReleaseAuthorizationAuthority })
+      const evidence = releaseSuccessEvidence(operation.request)
+      const observedAt = Date.now()
+      const receiptUnsigned: Omit<SourceReleaseReceipt, 'signature'> = { schemaVersion: 1, receiptId: `receipt:${operation.operationId}`,
+        authority: 'release-adapter', keyId: 'release-adapter-key', installationId, planId: plan.id, planDigest: plan.digest,
+        releaseId: plan.release!.id, fence: plan.release!.fence, operationId: operation.operationId,
+        requestDigest: sourceReleaseRequestDigest(operation.request), phase, outcome: 'passed', evidence,
+        evidenceDigest: controlPlaneDigest(evidence), observedAt, expiresAt: Math.min(observedAt + 30_000, authorization.expiresAt) }
+      const receipt: SourceReleaseReceipt = { ...receiptUnsigned, signature: releaseLaneSignature }
+      await store.runSourceReleaseOperation({ operationId: operation.operationId, expectedRevision: plan.revision,
+        expectedFence: plan.release!.fence, execute: async () => receipt, resolveAuthority: () => acceptingReleaseAuthority,
+        resolveAuthorizationAuthority: () => acceptingReleaseAuthorizationAuthority })
+      plan = (await store.applySourceRelease({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.release!.fence,
+        receipt, resolveAuthority: () => acceptingReleaseAuthority, idempotencyKey: `release:apply:${suffix}:${phase}` })).result
+    }
+    expect(plan.status).toBe('release-complete')
+    const released = store.sourceReleaseCandidate(plan.id)
+    await writeFile(catalogPath, `${JSON.stringify({ schemaVersion: 1, entries: [released] })}\n`, { mode: 0o600 })
+    return { plan, released }
+  } finally { store.close() }
+}
+
+type CatalogEntryShape = ReturnType<ControlPlaneStore['sourceReleaseCandidate']>
+
 async function approvedScaffoldSource(value: Awaited<ReturnType<typeof fixture>>, source: { repository: string; worktree: string },
   suffix: string, name = 'health-helper'): Promise<PluginSourcePlan> {
   const store = new ControlPlaneStore({ path: value.state })
@@ -496,6 +620,81 @@ describe.sequential('trusted staged CLI', () => {
     expect(inspect.getSourcePlan(started.id).status).toBe('awaiting-review')
     expect(inspect.getSourceReleaseOperation(request.operationId).status).toBe('applied')
     inspect.close()
+  })
+
+  async function runActivationPlan(value: Awaited<ReturnType<typeof fixture>>, sourcePlanId: string, profile: string, key: string,
+    extra: readonly string[] = []): Promise<{ receipt: { idempotencyKey: string; result: PluginActivationPlan }; result: PluginActivationPlan; text: string }> {
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['activation-plan', '--source-plan', sourcePlanId,
+      '--profile', profile, '--idempotency-key', key, ...extra]))
+    const calls = vi.mocked(process.stdout.write).mock.calls
+    const text = String(calls.at(-1)![0]!).trim()
+    const receipt = JSON.parse(text) as { idempotencyKey: string; result: PluginActivationPlan }
+    return { receipt, result: receipt.result, text }
+  }
+
+  test('activation-plan binds the exact released admitted candidate, matches the gap and replays the same receipt', async () => {
+    const value = await fixture(); const { plan: source, released } = await releasedCompleteSource(value, 'activation-happy')
+    const first = await runActivationPlan(value, source.id, 'web', 'activation:cli:happy')
+    expect(first.result).toMatchObject({ status: 'pending-approval', kind: 'activation', gapId: source.gapId,
+      candidate: released, profile: 'web', installationId })
+    expect(first.result.candidate).toEqual(released)
+    expect(first.result.dossier).toMatchObject({ catalogProvenance: 'owner-provided-integrity-pinned',
+      matchedCapabilities: released.capabilities })
+    const inspect = new ControlPlaneStore({ path: value.state })
+    expect(inspect.getGap(source.gapId)).toMatchObject({ status: 'matched', candidateId: released.id })
+    const stored = inspect.getPlan(first.result.id)
+    expect(stored).toMatchObject({ status: 'pending-approval', candidate: released })
+    inspect.close()
+    const replay = await runActivationPlan(value, source.id, 'web', 'activation:cli:happy')
+    expect(replay.text).toBe(first.text)
+    expect(replay.result.id).toBe(first.result.id)
+  })
+
+  test('activation-plan rejects a source plan that has not completed release', async () => {
+    const value = await fixture(); const ready = await readySource(value, 'activation-not-released')
+    await expect(runActivationPlan(value, ready.id, 'web', 'activation:cli:not-released'))
+      .rejects.toThrow('activation plan requires a release-complete source plan')
+  })
+
+  test('activation-plan fails closed when the owner catalog does not admit the released candidate', async () => {
+    const value = await fixture(); const { plan: source } = await releasedCompleteSource(value, 'activation-unadmitted')
+    await writeFile(join(value.control, 'catalog.json'), `${JSON.stringify({ schemaVersion: 1, entries: [] })}\n`, { mode: 0o600 })
+    await expect(runActivationPlan(value, source.id, 'web', 'activation:cli:unadmitted'))
+      .rejects.toThrow('released candidate is not the exact admitted owner catalog entry')
+    const inspect = new ControlPlaneStore({ path: value.state })
+    expect(inspect.getGap(source.gapId)).toMatchObject({ status: 'open' })
+    inspect.close()
+  })
+
+  test('activation-plan fails closed when the same-id admitted catalog entry drifted from the released content', async () => {
+    const value = await fixture(); const { plan: source, released } = await releasedCompleteSource(value, 'activation-drifted')
+    const drifted = { ...released, version: '9.9.9',
+      registry: { ...released.registry, reference: '@dsh-enhanced/health-helper@9.9.9' } }
+    await writeFile(join(value.control, 'catalog.json'), `${JSON.stringify({ schemaVersion: 1, entries: [drifted] })}\n`, { mode: 0o600 })
+    await expect(runActivationPlan(value, source.id, 'web', 'activation:cli:drifted'))
+      .rejects.toThrow('released candidate is not the exact admitted owner catalog entry')
+  })
+
+  test('activation-plan rejects malformed profile text and non-canonical symlinked profile targets', async () => {
+    const value = await fixture(); const { plan: source } = await releasedCompleteSource(value, 'activation-bad-profile')
+    await expect(runActivationPlan(value, source.id, '../escape', 'activation:cli:bad-text'))
+      .rejects.toThrow('profile must already be bounded canonical text')
+    await symlink(join(value.dshHome, 'profiles', 'web'), join(value.dshHome, 'profiles', 'linked'))
+    await expect(runActivationPlan(value, source.id, 'linked', 'activation:cli:symlink'))
+      .rejects.toThrow('target profile must be a canonical directory')
+  })
+
+  test('activation-plan rejects a second non-idempotent attempt once the released gap is matched', async () => {
+    const value = await fixture(); const { plan: source } = await releasedCompleteSource(value, 'activation-already-matched')
+    await runActivationPlan(value, source.id, 'web', 'activation:cli:first')
+    await expect(runActivationPlan(value, source.id, 'web', 'activation:cli:second'))
+      .rejects.toThrow('only an open gap can create an activation plan')
+  })
+
+  test('activation-plan rejects a ttl outside the bounded range', async () => {
+    const value = await fixture(); const { plan: source } = await releasedCompleteSource(value, 'activation-bad-ttl')
+    await expect(runActivationPlan(value, source.id, 'web', 'activation:cli:bad-ttl', ['--ttl-ms', '1000']))
+      .rejects.toThrow(/ttlMs|positive integer/u)
   })
 
   test('stages with an allowlisted environment but stops at signed reload attestation instead of claiming activated', async () => {
