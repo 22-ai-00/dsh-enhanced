@@ -231,3 +231,20 @@ admission 文件必须是 workspace 外部的 canonical、owner-only（`0600`）
 `externalHoldouts` 中每项必须是完整的已发布 Skills external-holdout profile，不能用上例的占位对象。每个 repair profile 只能使用上述字段；可选 `followupProfileIds` 和 `bindings` 也必须符合 Skills contract。`scope.principalId` 必须为 `web/<profile>/local/operator`，其 record id/version、workspace 与 preset 必须精确匹配当前 owner 和命令参数。`allowedTools` 至少一个，且不能包含 `skill_*`、`goal_create`、`goal_control`、`set_goal` 或 `update_goal`。
 
 命令只读核验 account 精确等于 `--profile` 的 current owner lineage、已有 owner route、Goals 有限 calls execution budget（model calls、tool calls、时长和每次输出上限）及其精确 provider/model route、Skills prospective holdouts 和 Verifier profiles，然后原子合并有限 profiles/holdouts 并保留已有配置键。每个 profile 的 `maxModelCalls`、`maxToolCalls`、`maxDurationMs` 与 `maxOutputTokens` 都不得超过既有 Goals budget 的对应值。已有 TraeX calls budget 即可；该流程不要求 DeepSeek budget bundle。写入前会重新读取有效配置和 owner lineage，任一变化都会拒绝提交；重复完全相同的 admission 不改变 patch 字节。它不创建 Goal、Session、owner、credential、grant 或无限权限。配置成功不是 repair 验收、canary 成功、模型质量或自主改进成功的证据。
+
+后台修复使用 `background` initiator，普通 owner 的 `external` 规则不适用。除已有的 Goals 创建/观察/执行和文件工具权限外，还需在 profile 的 `assistantPolicy.rules` 中授予当前 owner 的只读目标反馈权限；`--repair-admission` 不会自动扩大 Policy。规则中的 preset、workspace 和 principal 必须替换成实际值：
+
+```yaml
+- id: repair-background-goal-context
+  effect: allow
+  subject:
+    kind: agent
+    id: standard
+    workspace: /absolute/workspace
+    principal: web/web/local/operator
+  actions: [snapshot]
+  resource: { kind: goal, id: business-context }
+  context: { initiators: [background] }
+```
+
+缺少该权限时，新的修复或未完成目标的恢复会在模型调用前拒绝；只有 `read` / `write` 工具的修复仍通过系统上下文取得步骤和整个目标的独立验收反馈。修改配置后重启目标 Host，再授权有限修复。

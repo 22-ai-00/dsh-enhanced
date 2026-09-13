@@ -187,6 +187,8 @@ executionBudget:
 
 实际回合终态和 Session checkpoint 供 Verifier 独立回读；验收结果进入 Evaluation 的独立 `goal-step` 投影。普通前台仍按原始入站消息验收。原生 complete、步骤运行成功和整个业务目标达成分别记录，单个步骤回执不会自动完成业务目标；历史旧定义成功也不能成为新定义的执行权限。启用步骤验收后，`goal_context` 与每次模型上下文提供 `stepFeedback`：重新验证完整合同、回执、owner/scope、定义和真实执行绑定。当前已结算结果与待验收步骤分列，最多回读当前 owner/目标的最新 50 个执行、展示 3 个历史条目；旧定义和过期证据不能当作当前成功。失败条件用于修订计划，未知执行要求先对账，成功步骤仍要求检查目标剩余条件。模型检查点不能覆盖这些结果，反馈建议不授予权限。Host 可用 `executionRuns(agent, goalId)` 和 Verifier `inspectAcceptedTask(contractId)` 取得完整绑定；带权限检查的 `describeForAgent(agent, goalId)` 与工具使用相同反馈路径。
 
+上下文超出 `maxContextChars` 时，Host 提供标明 `truncated` 的完整紧凑 JSON，优先保留当前目标、定义、原生状态、步骤已结算/待验收结果和整体目标失败条件；不再只提示模型调用 `goal_context`。这使仅开放 `read` / `write` 的有限修复也能读取失败反馈。紧凑视图省略历史，按预算缩减条件和文本；极小剩余预算只保留目标标识与未夸大的结果状态。事件来源说明共享同一字符预算，空间不足时省略说明。后台会话仍须显式获得 goal `snapshot` 权限；上下文不授予执行权限。
+
 回合终态持久保存后，运行一次现有 Verifier 的有界检查周期。下个模型上下文组装等待同一 Agent 的上一终态结算，再刷新本插件的上下文；取消信号与期限约束等待。繁忙队列可能仍显示待验收，不承诺一次检查就取得该目标的回执。读取不缓存成功；Verifier 卸载、绑定不匹配或证据无效会明确失去可用验收结果。步骤反馈只能引导后续决策，当前没有独立的调查动作执行器；可选的整体结果核验见下文。
 
 取消、超时或失去授权后，旧 Agent handle 保留拒绝护栏，迟到工具即使用新 signal 也不能继续执行。支持范围是 Delivery 的实际生命周期：结束后释放旧 handle，下一个 owner 回合从同一 Session 创建新的 handle；不能复用被取消的旧 Agent。停止等待不证明不合作工具、子进程或外部动作已终止，相关回执保持 `unknown / quiescent:false`。重启时已 dispatch 且没有终态的 run 记为 unknown，先查证，绝不自动重放；仅 prepared 的意图也不会恢复提交。`health().execution` 分别报告 enabled、verifierConnected 和 activeRounds。
