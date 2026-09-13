@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -23,6 +24,14 @@ interface ActiveRound {
   eventWaitPause?: { goalId: string; revision: number; materialized: boolean }
 }
 
+interface PendingGoalRound {
+  turn: number
+  step: number
+  source: { kind: 'goal'; goalId: string; revision: number; round: number }
+  messageDigest: string
+  removeAbort(): void
+}
+
 /** Observes actual admitted native rounds; never queues prompts or accepts model verdicts. */
 export class GoalExecutionRuntime {
   readonly #generation = randomUUID()
@@ -31,6 +40,8 @@ export class GoalExecutionRuntime {
   readonly #pending = new Set<Promise<void>>()
   readonly #settlements = new WeakMap<Agent, Promise<void>>()
   readonly #revoked = new WeakSet<Agent>()
+  readonly #pendingGoalRounds = new WeakMap<Agent, PendingGoalRound>()
+  readonly #pendingGoalRoundAgents = new Set<Agent>()
   #sink: TaskAcceptanceRegistration | undefined
   #active = true
 
@@ -48,17 +59,56 @@ export class GoalExecutionRuntime {
     if (path !== undefined) {
       this.#store = new GoalExecutionStore(path)
       this.#store.recoverIncomplete()
-      ctx.on('agent/request', async ({ agent, turn, signal }, next) => {
-        if (this.#revoked.has(agent)) throw new Error('assistant-goals: cancelled execution cannot resume')
-        if (!this.#isGoalTurn(agent, turn)) return await next()
+      ctx.on('agent/pre-step', async (payload, next) => {
+        this.#clearPendingGoalRound(payload.agent)
+        // Modern Hosts invoke request before they persist the accepted user
+        // message. Freeze the offered input before downstream interceptors can
+        // mutate it, then carry only this exact one-step proof to request.
+        const offeredSnapshot = structuredClone(payload.messages)
+        const decision = await next()
+        if (!this.#active || payload.signal.aborted || decision.kind !== 'enter') return decision
+        const offered = offeredSnapshot.filter(message => !this.#isRuntimeContext(message.source))
+        const entered = decision.messages.filter(message => !this.#isRuntimeContext(message.source))
+        if (offered.length !== 1 || entered.length !== 1) return decision
+        const source = this.#goalSource(entered[0]!.source)
+        const offeredSource = this.#goalSource(offered[0]!.source)
+        if (source === undefined || offeredSource === undefined || !isDeepStrictEqual(entered[0], offered[0])
+          || acceptanceDigest(source) !== acceptanceDigest(offeredSource)
+          || !this.#pendingSourceCurrent(payload.agent, source)) return decision
+        const abort = () => this.#clearPendingGoalRound(payload.agent)
+        payload.signal.addEventListener('abort', abort, { once: true })
+        this.#pendingGoalRounds.set(payload.agent, { turn: payload.turn, step: payload.step, source,
+          messageDigest: acceptanceDigest(entered[0]!),
+          removeAbort: () => payload.signal.removeEventListener('abort', abort) })
+        this.#pendingGoalRoundAgents.add(payload.agent)
+        return decision
+      }, { prepend: true })
+      ctx.on('agent/request', async ({ agent, turn, step, signal }, next) => {
         try {
-          await this.#admit(agent, turn, signal)
+          if (!this.#active) throw new Error('assistant-goals: inactive execution producer')
+          if (this.#revoked.has(agent)) throw new Error('assistant-goals: cancelled execution cannot resume')
+          const held = this.#pendingGoalRounds.get(agent)
+          const pending = this.#pendingRound(agent, turn, step, signal)
+          // A proof is single-use. It may bridge only its own pre-step, or the
+          // legacy durable append of that same exact source; it cannot fall
+          // back to a different durable goal message.
+          if (held !== undefined && pending === undefined && !this.#durablePendingMatches(agent, turn, step, held)) {
+            throw new Error('assistant-goals: native round is not current')
+          }
+          if (!this.#isGoalTurn(agent, turn) && pending === undefined) return await next()
+          await this.#admit(agent, turn, signal, pending?.source)
           const result = await next()
+          // A modern Host has not committed the entered batch yet.  The proof
+          // must still be this exact pre-step, with no durable input racing in.
+          if (pending !== undefined && (this.#pendingGoalRounds.get(agent) !== pending
+            || this.#pendingRound(agent, turn, step, signal) !== pending)) throw new Error('assistant-goals: native round is not current')
           this.#assertRound(this.#rounds.get(agent)!)
           return result
         } catch (error) {
-          agent.cancel({ kind: 'hook', reason: 'assistant-goals-step-admission-failed' })
+          await this.#failRequest(agent, turn)
           throw error
+        } finally {
+          this.#clearPendingGoalRound(agent)
         }
       })
       ctx.on('tools/pre-execute', async ({ agent }, next) => {
@@ -93,12 +143,14 @@ export class GoalExecutionRuntime {
         }
       })
       ctx.on('agent/disposed', ({ agent }) => {
+        this.#clearPendingGoalRound(agent)
         const round = this.#rounds.get(agent)
         if (round !== undefined) this.#track(this.#finish(round, false))
       })
     }
     ctx.effect(() => async () => {
       this.#active = false
+      for (const agent of this.#pendingGoalRoundAgents) this.#clearPendingGoalRound(agent)
       for (const round of this.#rounds.values()) {
         this.#cancel(round)
         this.#track(this.#finish(round, false))
@@ -233,6 +285,72 @@ export class GoalExecutionRuntime {
       && run.intent.task.goal.definitionVersion === record.definition.version && run.intent.task.goal.definitionDigest === record.definition.digest)
   }
 
+  #isRuntimeContext(source: { kind?: unknown; plugin?: unknown; form?: unknown }): boolean {
+    return (source.kind === 'plugin' && source.plugin === '@deepseek-ai/dsh-system-prompt' && source.form === 'snapshot')
+      || (source.kind === 'skill-catalog' && source.form === 'catalog')
+  }
+
+  #goalSource(source: unknown): PendingGoalRound['source'] | undefined {
+    if (source === null || typeof source !== 'object' || Array.isArray(source)) return undefined
+    const value = source as { kind?: unknown; goalId?: unknown; revision?: unknown; round?: unknown }
+    return value.kind === 'goal' && typeof value.goalId === 'string' && value.goalId.length > 0
+      && typeof value.revision === 'number' && Number.isSafeInteger(value.revision) && value.revision >= 0
+      && typeof value.round === 'number' && Number.isSafeInteger(value.round) && value.round > 0
+      ? { kind: 'goal', goalId: value.goalId, revision: value.revision, round: value.round }
+      : undefined
+  }
+
+  #durableTurnMessages(agent: Agent, turn: number): readonly SessionEvent[] {
+    const events = agent.session.snapshotEvents()
+    const start = events.findLast(event => event.type === 'turn/start' && event.data.turn === turn)
+    return start === undefined ? [] : events.filter(event => event.seq > start.seq && event.type === 'user/message'
+      && !this.#isRuntimeContext(event.data.source))
+  }
+
+  #clearPendingGoalRound(agent: Agent): void {
+    const pending = this.#pendingGoalRounds.get(agent)
+    pending?.removeAbort()
+    this.#pendingGoalRounds.delete(agent)
+    this.#pendingGoalRoundAgents.delete(agent)
+  }
+
+  #durablePendingMatches(agent: Agent, turn: number, step: number, pending: PendingGoalRound): boolean {
+    if (pending.turn !== turn || pending.step !== step) return false
+    const messages = this.#durableTurnMessages(agent, turn)
+    return messages.length === 1 && messages[0]?.type === 'user/message'
+      && acceptanceDigest(messages[0].data) === pending.messageDigest
+      && this.#goalSource(messages[0].data.source) !== undefined
+  }
+
+  async #failRequest(agent: Agent, turn: number): Promise<void> {
+    const round = this.#rounds.get(agent)
+    this.#revoked.add(agent)
+    if (round !== undefined && round.turn === turn) {
+      this.#cancel(round)
+      try { await this.#finish(round, false) } catch {}
+      return
+    }
+    try { agent.cancel({ kind: 'hook', reason: 'assistant-goals-step-admission-failed' }) } catch {}
+  }
+
+  #pendingRound(agent: Agent, turn: number, step: number, signal: AbortSignal): PendingGoalRound | undefined {
+    const pending = this.#pendingGoalRounds.get(agent)
+    if (pending === undefined || pending.turn !== turn || pending.step !== step || signal.aborted
+      || this.#durableTurnMessages(agent, turn).length !== 0 || !this.#pendingSourceCurrent(agent, pending.source)) return undefined
+    return pending
+  }
+
+  #pendingSourceCurrent(agent: Agent, source: PendingGoalRound['source']): boolean {
+    try {
+      const { record } = this.current(agent)
+      const native = this.ctx.get('goals')?.get(agent)
+      return native !== undefined && native.phase === 'active' && String(native.id) === source.goalId && native.revision === source.revision
+        && native.roundsStarted === source.round - 1
+        && record.native.phase === 'active' && record.native.goalId === source.goalId && record.native.sessionId === String(agent.session.id)
+        && record.native.revision === source.revision && record.native.roundsStarted === source.round - 1
+    } catch { return false }
+  }
+
   #isGoalTurn(agent: Agent, turn: number): boolean {
     const events = agent.session.snapshotEvents()
     const start = events.findLast(event => event.type === 'turn/start')
@@ -242,7 +360,7 @@ export class GoalExecutionRuntime {
       && event.data.source.kind === 'goal' && event.data.source.round > 0)
   }
 
-  async #admit(agent: Agent, turn: number, signal: AbortSignal): Promise<void> {
+  async #admit(agent: Agent, turn: number, signal: AbortSignal, pendingSource?: PendingGoalRound['source']): Promise<void> {
     const existing = this.#rounds.get(agent)
     if (existing !== undefined) {
       if (existing.turn === turn) {
@@ -264,10 +382,11 @@ export class GoalExecutionRuntime {
     const start = agent.session.snapshotEvents().findLast(event => event.type === 'turn/start' && event.data.turn === turn)
     const sources = agent.session.snapshotEvents().filter(event => event.type === 'user/message'
       && start !== undefined && event.seq > start.seq && event.data.source.kind === 'goal' && event.data.source.round > 0)
-    const source = sources.length === 1 && sources[0]?.type === 'user/message' ? sources[0].data.source : undefined
+    const source = pendingSource ?? (sources.length === 1 && sources[0]?.type === 'user/message' ? this.#goalSource(sources[0].data.source) : undefined)
     if (source?.kind !== 'goal' || native === undefined || native.id !== source.goalId || native.revision !== source.revision
-      || native.phase !== 'active' || native.roundsStarted !== source.round || record.native.goalId !== String(native.id)
-      || record.native.sessionId !== String(agent.session.id)) throw new Error('assistant-goals: native round is not current')
+      || native.phase !== 'active' || native.roundsStarted !== (pendingSource === undefined ? source.round : source.round - 1) || record.native.goalId !== String(native.id)
+      || record.native.sessionId !== String(agent.session.id) || record.native.revision !== native.revision
+      || record.native.roundsStarted !== native.roundsStarted) throw new Error('assistant-goals: native round is not current')
     const runId = `goal-run-${acceptanceDigest([scope, record.id, String(agent.session.id), turn])}`
     const now = Date.now()
     const dependencies = record.checkpoint.dependencyBindings
