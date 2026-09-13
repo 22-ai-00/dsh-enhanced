@@ -398,6 +398,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
       { id: `${admissionId}-reply`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['reply'], resource: { kind: 'message', id: binding.id }, context: { initiators: ['background'] } },
       { id: `${admissionId}-automation`, effect: 'allow', subject: { kind: 'background', id: '*', workspace: input.workspace, principal: principalId }, actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: 'goal-wake-*' }, context: { initiators: ['background'] } },
       { id: `${admissionId}-resume`, effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: input.workspace, principal: principalId }, actions: ['wake'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
+      { id: `${admissionId}-wake-notice`, effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: input.workspace, principal: principalId }, actions: ['send'], resource: { kind: 'message', id: binding.id }, context: { initiators: ['background'] } },
     ])
     if (task.repositoryDelivery) {
       const repository = task.repositoryDelivery
