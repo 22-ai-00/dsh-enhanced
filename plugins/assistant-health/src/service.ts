@@ -196,7 +196,11 @@ const keys: Record<HealthProviderId, Readonly<Record<string, HealthMetricSpecifi
     traceRevisions: 'number', currentTraces: 'number', exhaustedRollbacks: 'number',
     lastErrorCode: 'optional-code' },
   pluginControlPlane: { gaps: 'number', readyPlans: 'number', activeActivations: 'number',
-    failed: 'number', rollbackPending: 'number' },
+    failed: 'number', rollbackPending: 'number',
+    // Post-activation deployment cohort counters (control-plane schema v12).
+    // Optional while independently-installable control planes roll forward.
+    watchingActivations: 'optional-number', closedRegressed: 'optional-number',
+    closedRetracted: 'optional-number' },
   assistantHeartbeat: { active: 'number', paused: 'number', empty: 'number' },
   larkChannel: { state: ['connected', 'connected-with-gap', 'connecting', 'disabled', 'disconnected', 'reconnecting'],
     gapGeneration: 'number' },
@@ -300,6 +304,14 @@ function operationalAssessments(
     case 'pluginControlPlane':
       add((metric('rollbackPending') as number) > 0,
         'unhealthy', 'capability-rollback-pending', required)
+      // A closed-regressed deployment cohort needs owner attention even
+      // though the exact version is already ledger-closed.
+      add((metric('closedRegressed') as number | undefined ?? 0) > 0,
+        'degraded', 'capability-cohort-regressed')
+      // A retraction closes the watch and reopens its gap for the next
+      // evolution cycle; it is a rollback signal, not a stuck deployment.
+      add((metric('closedRetracted') as number | undefined ?? 0) > 0,
+        'degraded', 'capability-cohort-retracted')
       break
     case 'preferenceLearning':
       add(metric('enabled') === false && required, 'unhealthy', 'disabled', true)
