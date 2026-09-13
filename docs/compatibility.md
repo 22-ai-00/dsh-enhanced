@@ -6,6 +6,8 @@ dev 安装器的支持范围为 `>=0.1.2-rc.1 <0.2.0`：以主版本与次版本
 
 DSH `0.1.5` 的 Agent factory 将尚未发布的 Agent 作为 `setup(ctx, agent)` 的第二参数传入，不再隐式提供 `ctx.agent`。Delivery（包含 native Web owner、Session lease 和背景唤醒）、Automations 与 Skills repair 均优先消费这个确切实例，所有 wrapper 转发它及原有 publication commit；仅在旧 Host 未提供第二参数时回退到旧 Context ABI。身份、owner、Policy、租约和工具限制保持在 publication 之前验证。
 
+新版 AgentLoop 在 `agent/pre-step` 接受输入后，先执行 `agent/request`，再把输入写入 Session。Goals 因此从 pre-step 保存单次、确切 turn/step 的原生目标来源，在首个请求前建立执行准入和预算；来源必须保持原样，并匹配当前 owner、目标 revision 和下一轮序号。请求结束、取消、卸载或不匹配会清除该证明，不能借此重用旧轮次。旧 Host 已先写盘的路径继续读取原生持久来源；升级验收需覆盖首轮技能执行及其预算，而不仅检查目标能创建。
+
 兼容范围检查不等于全部历史数据与功能已完成新版验证。包含旧 `delivery` 来源的 v0 会话需要[离线迁移](../scripts/maintenance/README.md)，原记录会保留。目前已验证启动、会话创建、Policy 事件冷读及旧 Delivery 会话迁移；新版 Host 的事件等待、重启恢复原目标、独立验收和原会话结果展示也已通过[真实 TraeX 验证](evidence/external-event-resume-2026-09-13.json)，其中 GitHub 传输使用测试夹具。
 
 2026-09-12 发布的 `0.1.31` 曾因缺少新版 persistence 适配而固定 Host 为 `0.1.2-rc.1`；这是旧版安装器的限制。新版兼容探针可通过 `node scripts/e2e/session-persistence-compat.mjs /absolute/path/to/dsh` 运行：三个独立进程分别写盘、验证未注册必需事件拒绝、注册后冷读恢复。它只读取指定 CLI 的模块，数据写入临时目录。非 core 安装仍从实际 CLI 所属 manifest 精确解析 `dsh-app-boot`，调用公开 `healProfilesModuleFallback({ installAnchor, home })` 准备 Host peer 闭包；校验的是可执行文件与包的身份，不要求等于默认安装版本。
