@@ -12,6 +12,7 @@ import { invokeConfiguredHostAttestor, prepareConfiguredHostAttestation, prepare
 import { Ed25519ActivationRetractionAuthority, Ed25519PostActivationObservationAuthority,
   parseActivationRetraction, parsePostActivationObservation } from './post-activation.js'
 import { discover, loadCatalogWithMetadata, previewCatalogAdmission, type CatalogPackage } from './catalog.js'
+import { fetchRegistryArtifact, RegistryFetchError } from './registry-fetch.js'
 import { verifyApprovedPackagesInLockfile } from './lockfile.js'
 import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthority, Ed25519SourceReleaseAuthorizationAuthority,
   invokeSourcePublishReconciliationAdapter, invokeSourceReleaseAdapter, parseSourcePublishReconciliationReceipt,
@@ -459,6 +460,16 @@ async function snapshotLocalArtifact(plan: PluginActivationPlan, item: CatalogPa
   } finally { await handle.close() }
   const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`
   if (integrity !== item.integrity) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'local artifact bytes do not match the approved integrity')
+  return await pinActivationArtifactBytes(plan, item, registry, bytes)
+}
+
+// Shared terminus for both artifact source paths (a local file URL and a
+// downloaded registry object): the approved bytes are materialized into an
+// owner-private 0400 cache, then reopened through a pinned file descriptor so
+// the package manager only ever reads /proc/self/fd/N while the control plane
+// re-verifies the bytes after the executor returns.
+async function pinActivationArtifactBytes(plan: PluginActivationPlan, item: CatalogPackage,
+  registry: NonNullable<CatalogPackage['registry']>, bytes: Buffer): Promise<ActivationArtifactSnapshot> {
   const cacheRoot = join(plan.target.dshHome, 'plugin-control', 'activation-artifacts')
   await mkdir(cacheRoot, { recursive: true, mode: 0o700 }); await assertDirectory(cacheRoot)
   const cacheMetadata = await lstat(cacheRoot); const uid = process.getuid?.()
@@ -508,11 +519,38 @@ async function snapshotLocalArtifact(plan: PluginActivationPlan, item: CatalogPa
   } catch (error) { await pinned.close(); throw error }
 }
 
-async function activationPackages(plan: PluginActivationPlan): Promise<{ packages: CatalogPackage[]; snapshots: ActivationArtifactSnapshot[] }> {
+// Remote counterpart of snapshotLocalArtifact. The catalog-approved package
+// is fetched from the single owner-bound release registry over pinned TLS,
+// authorized with a bearer token read from the owner process (never from the
+// trust file or the executor allowlist), and accepted solely on equality with
+// the catalog-approved sha512 integrity. The verified bytes then take the
+// identical 0400-cache + file-descriptor path as a local artifact.
+async function downloadRegistryArtifact(trust: PluginControlTrustConfig, plan: PluginActivationPlan,
+  item: CatalogPackage): Promise<ActivationArtifactSnapshot> {
+  const registry = item.registry
+  if (registry === undefined) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'package registry binding is missing')
+  const bound = trust.releaseRegistry
+  if (bound === undefined || bound.id !== registry.id || bound.locator !== registry.locator) {
+    throw new ControlPlaneCliError('ACTIVATION_BINDING', 'package registry is not the owner-bound release registry')
+  }
+  let bytes: Buffer
+  try {
+    ({ bytes } = await fetchRegistryArtifact({ registry: bound, packageName: item.package, version: item.version }, process.env))
+  } catch (error) {
+    if (error instanceof RegistryFetchError) throw new ControlPlaneCliError('ACTIVATION_BINDING', error.message)
+    throw error
+  }
+  const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`
+  if (integrity !== item.integrity) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'remote artifact bytes do not match the approved integrity')
+  return await pinActivationArtifactBytes(plan, item, registry, bytes)
+}
+
+async function activationPackages(trust: PluginControlTrustConfig, plan: PluginActivationPlan): Promise<{ packages: CatalogPackage[]; snapshots: ActivationArtifactSnapshot[] }> {
   const snapshots: ActivationArtifactSnapshot[] = []
   try {
     for (const item of exactPackages(plan)) {
       if (localArtifactReference(item) !== undefined) snapshots.push(await snapshotLocalArtifact(plan, item))
+      else if (item.registry !== undefined) snapshots.push(await downloadRegistryArtifact(trust, plan, item))
     }
     const byPackage = new Map(snapshots.map(snapshot => [snapshot.package.package, snapshot]))
     return { packages: exactPackages(plan).map(item => byPackage.get(item.package)?.package ?? item), snapshots }
@@ -645,7 +683,7 @@ async function activate(argv: readonly string[]): Promise<void> {
         await stat(plan.target.profilePath)
         await fencedMutation(store, plan, () => cp(plan.target.profilePath, activationPaths.stagePath, { recursive: true, force: false, errorOnExist: true }))
       }
-      const activationArtifacts = await fencedMutation(store, plan, () => activationPackages(plan))
+      const activationArtifacts = await fencedMutation(store, plan, () => activationPackages(trust, plan))
       let pinnedExecutor: OpenTrustedExecutable | undefined
       let pinnedInterpreter: Awaited<ReturnType<typeof executorInterpreter>>
       try {
@@ -974,8 +1012,11 @@ async function prepareRelease(store: ControlPlaneStore, trust: PluginControlTrus
     const preview = previewCatalogAdmission(loaded.catalog, store.sourceReleaseCandidate(plan.id))
     catalog = { ...catalog, expectedBeforeDigest: preview.beforeCatalogDigest, expectedAfterDigest: preview.afterCatalogDigest }
   }
+  // Only {id, locator} leaves the owner host: caPins/tokenEnvironment are
+  // activation-side local trust roots and must never reach a release adapter.
+  const releaseRegistry = { id: trust.releaseRegistry!.id, locator: trust.releaseRegistry!.locator }
   return store.prepareSourceReleaseOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.release!.fence,
-    installationId: trust.installationId, ledger: trust.ledger, registry: trust.releaseRegistry!, catalog, adapter: adapterIdentity,
+    installationId: trust.installationId, ledger: trust.ledger, registry: releaseRegistry, catalog, adapter: adapterIdentity,
     receiptTtlMs: trust.releaseReceiptTtlMs, resolveAuthorizationAuthority: value => releaseAuthorizationAuthority(trust, value) })
 }
 
@@ -1054,7 +1095,8 @@ async function releaseReconcile(argv: readonly string[]): Promise<void> {
     const adapterIdentity = { id: adapter.id, version: adapter.version, path: adapter.path, sha256: adapter.sha256,
       interpreter: adapter.interpreter, authority: adapter.authority, keyId: adapter.keyId }
     const operation = await store.prepareSourcePublishReconciliation({ planId: plan.id, expectedRevision, expectedFence,
-      installationId: trust.installationId, ledger: trust.ledger, registry: trust.releaseRegistry!, adapter: adapterIdentity,
+      installationId: trust.installationId, ledger: trust.ledger,
+      registry: { id: trust.releaseRegistry!.id, locator: trust.releaseRegistry!.locator }, adapter: adapterIdentity,
       receiptTtlMs: trust.releaseReceiptTtlMs, resolveAuthorizationAuthority: value => releaseAuthorizationAuthority(trust, value) })
     const receiptPath = optionalOption(argv, '--receipt')
     const supplied = receiptPath === undefined ? undefined : parseSourcePublishReconciliationReceipt(
