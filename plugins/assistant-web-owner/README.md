@@ -168,6 +168,18 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 
 上述名称和数字应替换为目标仓库实际要求的 check 名称、GitHub App ID 和 reviewer ID。每次验收重新读取 checks、reviews、PR 和 branch，要求同一提交 head、全部指定 checks 成功及足够当前评审通过；pending 或截断结果不能完成目标。至少配置 `maxActions: 7`（读取初始 head、commit、PR、四次验收读取），重试与后续事件需要额外有限次数。总目标时长还须覆盖步骤执行、本地验收和 `outcome.timeoutMs`。
 
+直接提交后等待 CI 时，设置 `openPullRequest: false`、`acceptance: "goal-step"`，并使用以下 outcome；不需要 PR 或审查账号：
+
+```json
+"outcome": {
+  "mode": "commit",
+  "requiredChecks": [{ "name": "verify", "appId": 15368 }],
+  "timeoutMs": 10000, "freshnessMs": 30000
+}
+```
+
+检查名称和 app ID 须对应目标仓库实际 check-run。此模式拒绝 reviewer 字段及 PR 授权混用，独立验收只读取本目标最新成功交付收据的提交 SHA，并复核当前分支仍指向它。单次交付及验收至少需要 4 次 Actions 操作；配置事件时为 `2 + 6 × maxGoalRounds`，外部 broker 另加 `2 × maxPolls`，对应 cost units 相同。外部授权 inspect kinds 为 `repository`、`branch`、`file`、`commit-checks`，操作仅 `commit` 与 `inspect`。省略 outcome.mode 保留原 PR 验收模式。
+
 需要等待 CI/评审变化时，同一 `repositoryDelivery` 可显式增加 `events`：
 
 ```json

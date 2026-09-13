@@ -327,7 +327,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
       return await this.credentials!.withSecret(this.ctx, { handleId: trigger.credentialHandle!, purpose: 'github.observe',
         ttlMs: Math.max(1_000, Math.min(30_000, this.config.requestTimeoutMs)), idempotencyKey: `event-github:${trigger.id}:${randomUUID()}` }, async (token, leaseSignal) => {
         guard()
-        const result = await readGitHubRepositoryObservation({ repository: trigger.repository, branch: trigger.branch, baseBranch: trigger.baseBranch, token,
+        const result = await readGitHubRepositoryObservation({ repository: trigger.repository, branch: trigger.branch, baseBranch: trigger.baseBranch, ...(trigger.deliveryMode === undefined ? {} : { deliveryMode: trigger.deliveryMode }), token,
           maxBodyBytes: this.config.maxBodyBytes, timeoutMs: Math.min(30_000, this.config.requestTimeoutMs), signal: AbortSignal.any([controller.signal, leaseSignal]),
           lookup: this.lookup, ...(this.fetcher ? { fetcher: this.fetcher } : {}), allowIpv6: this.config.ipv6Mode === 'native-only', trackOperation, beforeRequest: guard })
         guard(); return result
@@ -342,7 +342,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
     const owner = trigger.observer
     if (owner === undefined || trigger.observerLifetime !== 'goal') throw new Error('event-triggers: external GitHub observer is invalid')
     const input = Object.freeze({ version: 1 as const, triggerId: trigger.id, grantId: grant.id, grantRevision: grant.revision, grantDigest: grant.digest,
-      repository: trigger.repository, branch: trigger.branch, baseBranch: trigger.baseBranch,
+      repository: trigger.repository, branch: trigger.branch, baseBranch: trigger.baseBranch, ...(trigger.deliveryMode === undefined ? {} : { deliveryMode: trigger.deliveryMode }),
       owner: Object.freeze({ workspace: owner.workspace, preset: owner.preset, principalId: owner.principalId, principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion, ownerRouteId: owner.ownerRouteId, expiresAt: owner.expiresAt, budgetId: owner.budgetId }),
       ...(claim === undefined ? {} : { goal: Object.freeze({ id: claim.goalId, sessionId: claim.native.sessionId, nativeGoalId: claim.native.goalId, definitionVersion: claim.definition.version, definitionDigest: claim.definition.digest }) }),
     })
@@ -687,8 +687,13 @@ export class EventTriggersService extends Service implements EventSourceReader {
   }
 
   private triggerConfigDigest(trigger: NormalizedTrigger): string {
-    const { observerLifetime, ...legacy } = trigger
-    return createHash('sha256').update(stableJson(observerLifetime === 'shared' ? legacy : trigger)).digest('hex')
+    const { observerLifetime, deliveryMode, ...legacy } = trigger as NormalizedTrigger & { deliveryMode?: 'commit' | 'pull-request' }
+    // A missing deliveryMode is the persisted legacy PR contract.  Excluding
+    // its absent property keeps prior source claims and envelopes valid.
+    const value = deliveryMode === undefined
+      ? (observerLifetime === 'shared' ? legacy : { ...legacy, observerLifetime })
+      : (observerLifetime === 'shared' ? { ...legacy, deliveryMode } : trigger)
+    return createHash('sha256').update(stableJson(value)).digest('hex')
   }
 
   private envelope(input: {

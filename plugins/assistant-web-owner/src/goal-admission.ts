@@ -3,12 +3,21 @@ import { isAbsolute, join, normalize } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 import { Config as GoalsConfig, validateGoalStrategyConfig, type GoalCallsBudgetConfig, type GoalTokenBudgetConfig, type GoalStrategyConfig } from '@dsh-enhanced/assistant-goals'
-import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptanceProfile, type VerifierAuthorityInput, type RepositoryReadbackAuthorityInput } from '@dsh-enhanced/assistant-verifier'
+import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptanceProfile, type VerifierAuthorityInput, type RepositoryReadbackAuthorityInput, type RepositoryCommitReadbackAuthorityInput } from '@dsh-enhanced/assistant-verifier'
 import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
 import type { ActiveWebOwnerBindingSnapshot } from '@dsh-enhanced/assistant-delivery'
 import { inspectAutonomyProfile, type AutonomyDoctorProfile } from './doctor.js'
 import * as Actions from '@dsh-enhanced/assistant-actions'
 import { literalPath } from './setup.js'
+
+type RepositoryOutcome = (Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> & { mode?: 'pull-request' })
+  | (Pick<RepositoryCommitReadbackAuthorityInput, 'requiredChecks' | 'timeoutMs' | 'freshnessMs'> & { mode: 'commit' })
+
+function repositoryOutcomeAuthority(outcome: RepositoryOutcome, binding: Pick<RepositoryReadbackAuthorityInput, 'id' | 'grantId' | 'grantRevision' | 'repository' | 'branch' | 'baseBranch'>): RepositoryReadbackAuthorityInput | RepositoryCommitReadbackAuthorityInput {
+  const common = { ...binding, requiredChecks: outcome.requiredChecks, timeoutMs: outcome.timeoutMs, freshnessMs: outcome.freshnessMs }
+  return outcome.mode === 'commit' ? { ...common, kind: 'repository-commit-readback' }
+    : { ...common, kind: 'repository-readback', reviewerIds: outcome.reviewerIds, minApprovals: outcome.minApprovals }
+}
 
 interface GoalAdmissionTaskBase {
   objective: string
@@ -21,7 +30,7 @@ interface GoalAdmissionTaskBase {
     cases: Array<{ stdin: string; expectedStdout: string; expectedExitCode: number }>
   }
   wake?: { maxDelayMs: number; runTimeoutMs: number; maxRuns: number }
-  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle?: string; externalGrantId?: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step'; events?: { credentialHandle?: string; maxPolls: number; maxFires: number; pollIntervalMs: number; requestTimeoutMs: number }; outcome?: Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> }
+  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle?: string; externalGrantId?: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step'; events?: { credentialHandle?: string; maxPolls: number; maxFires: number; pollIntervalMs: number; requestTimeoutMs: number }; outcome?: RepositoryOutcome }
 }
 /** Legacy v1 fixed DeepSeek route. Kept for existing private admission files. */
 export interface GoalAdmissionTaskV1 extends GoalAdmissionTaskBase {
@@ -139,14 +148,17 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
       integer(value.events.pollIntervalMs, 1000, 3600000); integer(value.events.requestTimeoutMs, 100, 30000)
       if (value.events.maxPolls <= value.events.maxFires || input.maxGoalRounds < 2) fail('repository event budget cannot cover observation and continuation')
       // Each native round may create one outcome assessment with up to three verifier attempts.
-      integer(value.maxActions, 3 + 12 * input.maxGoalRounds + (value.externalGrantId === undefined ? 0 : 4 * value.events.maxPolls), 10000)
+      const direct = value.outcome.mode === 'commit'
+      integer(value.maxActions, (direct ? 2 : 3) + (direct ? 6 : 12) * input.maxGoalRounds + (value.externalGrantId === undefined ? 0 : (direct ? 2 : 4) * value.events.maxPolls), 10000)
       if (input.wake && (input.wake as { maxRuns: number }).maxRuns < value.events.maxFires + 1) fail('wake budget must cover delivery and allowed event continuations')
     }
     if (value.outcome !== undefined) {
-      shape(value.outcome, ['requiredChecks', 'reviewerIds', 'minApprovals', 'timeoutMs', 'freshnessMs'])
-      if (value.acceptance !== 'goal-step' || !value.openPullRequest) fail('repository outcome requires explicit goal-step delivery and a pull request')
-      createVerifierAuthorities({ authorities: [{ ...value.outcome, kind: 'repository-readback', id: 'repository-validation', grantId: 'repository-validation', grantRevision: 1, repository: value.repository, branch: value.branch, baseBranch: value.baseBranch }] })
-      integer(value.maxActions, 7, 10_000)
+      const direct = value.outcome.mode === 'commit'
+      shape(value.outcome, direct ? ['mode', 'requiredChecks', 'timeoutMs', 'freshnessMs'] : ['requiredChecks', 'reviewerIds', 'minApprovals', 'timeoutMs', 'freshnessMs'], direct ? [] : ['mode'])
+      if (value.outcome.mode !== undefined && !['commit', 'pull-request'].includes(value.outcome.mode)) fail('invalid repository outcome mode')
+      if (value.acceptance !== 'goal-step' || value.openPullRequest === direct) fail('repository outcome requires explicit goal-step delivery and a matching commit or pull-request mode')
+      createVerifierAuthorities({ authorities: [repositoryOutcomeAuthority(value.outcome, { id: 'repository-validation', grantId: 'repository-validation', grantRevision: 1, repository: value.repository, branch: value.branch, baseBranch: value.baseBranch })] })
+      integer(value.maxActions, direct ? 4 : 7, 10_000)
       if (budget.durationMs <= input.stepMaxDurationMs + verificationWindow + value.outcome.timeoutMs) fail('execution budget cannot cover repository verification')
     }
   }
@@ -270,7 +282,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     const expectedOwner = { principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version,
       workspace: input.workspace, preset: input.preset, bindingId: binding.id, bindingVersion: binding.version, bindingGeneration: binding.generation }
     const expectedOperations = ['commit', 'inspect', ...(repository.openPullRequest ? ['pull-request'] : [])]
-    const expectedInspections = ['repository', 'branch', 'file', ...(repository.outcome ? ['pull-request', 'checks', 'reviews'] : [])]
+    const expectedInspections = ['repository', 'branch', 'file', ...(repository.outcome ? repository.outcome.mode === 'commit' ? ['commit-checks'] : ['pull-request', 'checks', 'reviews'] : [])]
     const acceptance = repository.acceptance ?? 'goal-outcome'
     if (!isDeepStrictEqual(grant.owner, expectedOwner) || grant.sessionId !== binding.sessionId
       || grant.destination.repository !== repository.repository || grant.destination.branch !== repository.branch || grant.destination.baseBranch !== repository.baseBranch
@@ -282,7 +294,8 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
       || grant.verifiedDelivery.budgetId !== `${admissionId}-runs` || (grant.verifiedDelivery.acceptance ?? 'goal-outcome') !== acceptance) fail('external repository grant does not exactly match this admission')
     // Polls share the daemon's finite authority with delivery and independent
     // outcome reads. Validate capacity without rewriting the issued grant.
-    if (repository.events && grant.maxCostUnits < 3 + 18 * task.maxGoalRounds + 6 * repository.events.maxPolls) fail('external repository grant cannot cover observation and outcome cost limits')
+    const direct = repository.outcome?.mode === 'commit'
+    if (repository.events && grant.maxCostUnits < (direct ? 2 : 3) + (direct ? 6 : 18) * task.maxGoalRounds + (direct ? 2 : 6) * repository.events.maxPolls) fail('external repository grant cannot cover observation and outcome cost limits')
     return grant
   })()
   const managed = isSeq(verifier.get('profiles', true)) && sequence(verifier.get('profiles', true)).items.some(value => isMap(value) && String(value.get('id')).startsWith('goal-'))
@@ -310,10 +323,10 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     image: profile.image, dockerPath: profile.dockerPath, command: task.verification.command, expiresAt: profile.grant.expiresAt,
     maxRuns: task.verification.maxRuns, maxTotalDurationMs: task.verification.maxTotalDurationMs, maxDurationMs: task.verification.maxDurationMs,
     maxOutputBytes: task.verification.maxOutputBytes, testSets: [{ id: 'cases', cases: task.verification.cases }] }
-  const remoteAuthority: RepositoryReadbackAuthorityInput | undefined = repository?.outcome === undefined ? undefined : {
-    ...repository.outcome, kind: 'repository-readback', id: `${admissionId}-repository-verify`, grantId: externalGrant?.id ?? `${admissionId}-repository`, grantRevision: externalGrant?.revision ?? 1,
+  const remoteAuthority = repository?.outcome === undefined ? undefined : repositoryOutcomeAuthority(repository.outcome, {
+    id: `${admissionId}-repository-verify`, grantId: externalGrant?.id ?? `${admissionId}-repository`, grantRevision: externalGrant?.revision ?? 1,
     repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch,
-  }
+  })
   const authorities: VerifierAuthorityInput[] = remoteAuthority ? [authority, remoteAuthority] : [authority]
   const compiled = createVerifierAuthorities({ authorities })
   const verificationWindow = task.verification.maxDurationMs * task.verification.cases.length
@@ -432,6 +445,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
         }
         const observer = { workspace: input.workspace, preset: input.preset, principalId, principalRecordId: owner.id, principalVersion: owner.version, ownerRouteId: admissionId, expiresAt: repository.expiresAt, budgetId: eventBudgetId }
         append(eventTriggers!, 'triggers', [{ id: triggerId, automationId, kind: 'github-repository', observerLifetime: 'goal', repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch,
+          ...(repository.outcome?.mode === 'commit' ? { deliveryMode: 'commit' } : {}),
           ...(externalGrant ? { externalGrant: { id: externalGrant.id, revision: externalGrant.revision, digest: externalGrant.grantDigest } } : { credentialHandle: events.credentialHandle }),
           fireWhen: 'changed', debounceMs: 0, cooldownMs: 0, maxFires: events.maxFires, observer }])
         set(eventTriggers!, 'pollerEnabled', true, [false]); set(eventTriggers!, 'pollIntervalMs', events.pollIntervalMs, [5000]); set(eventTriggers!, 'requestTimeoutMs', events.requestTimeoutMs, [10000])

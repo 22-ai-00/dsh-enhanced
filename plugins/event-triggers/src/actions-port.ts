@@ -12,6 +12,8 @@ export interface RepositoryEventObservationPort {
     repository: string
     branch: string
     baseBranch: string
+    /** Omitted retains the original pull-request observation protocol. */
+    deliveryMode?: 'commit' | 'pull-request'
     owner: Readonly<{ workspace: string; preset: string; principalId: string; principalRecordId: string; principalVersion: number; ownerRouteId: string; expiresAt: number; budgetId: string }>
     goal?: Readonly<{ id: string; sessionId: string; nativeGoalId: string; definitionVersion: number; definitionDigest: string }>
   }>, signal: AbortSignal): Promise<Readonly<{ protocol: 'assistant-actions/repository-event/v1'; fingerprint: string; truthy: true }>>

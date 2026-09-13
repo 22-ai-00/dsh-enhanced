@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { normalizeRepositoryEventObservationInput, repositoryEventBranchHead, repositoryEventPendingFingerprint, repositoryEventSemanticFingerprint } from '../src/repository-event-observation.ts'
+import { normalizeRepositoryEventObservationInput, repositoryEventBranchHead, repositoryEventCommitSemanticFingerprint, repositoryEventPendingFingerprint, repositoryEventSemanticFingerprint } from '../src/repository-event-observation.ts'
 
 const input = () => ({ version: 1 as const, triggerId: 'trigger-1', grantId: 'grant-1', grantRevision: 2, grantDigest: 'a'.repeat(64),
   repository: 'owner/repository', branch: 'work', baseBranch: 'main', owner: { workspace: '/workspace', preset: 'default', principalId: 'principal', principalRecordId: 'record', principalVersion: 3, ownerRouteId: 'route', expiresAt: 4_000_000_000_000, budgetId: 'events' } })
@@ -29,6 +29,15 @@ describe('repository event observation normalizer', () => {
   it('rejects malformed owner or goal drift before it can reach a broker', () => {
     expect(() => normalizeRepositoryEventObservationInput({ ...input(), owner: { ...input().owner, principalVersion: 0 } })).toThrow(/invalid repository event/i)
     expect(() => normalizeRepositoryEventObservationInput({ ...input(), goal: { id: 'goal', sessionId: 'session', nativeGoalId: 'native', definitionVersion: 1, definitionDigest: 'BAD' } })).toThrow(/invalid repository event/i)
+  })
+
+  it('fingerprints direct commit checks without admitting a PR-shaped observation', () => {
+    const normalized = normalizeRepositoryEventObservationInput({ ...input(), deliveryMode: 'commit' })
+    const directChecks = { repository: normalized.repository, headOid: oid, items: checks().items, truncated: false, untrusted: true }
+    expect(repositoryEventCommitSemanticFingerprint(normalized, oid, directChecks)).toMatch(/^sha256:[0-9a-f]{64}$/u)
+    expect(() => repositoryEventCommitSemanticFingerprint(normalized, oid, { ...directChecks, truncated: true })).toThrow(/scope changed/i)
+    expect(() => repositoryEventCommitSemanticFingerprint(normalized, oid, { ...directChecks, headOid: 'b'.repeat(40) })).toThrow(/scope changed/i)
+    expect(() => repositoryEventCommitSemanticFingerprint(normalized, oid, { ...directChecks, items: [...directChecks.items, directChecks.items[0]] })).toThrow(/checks mixed/i)
   })
 
   it('fails closed on truncated, mixed-head, or duplicate remote observations', () => {

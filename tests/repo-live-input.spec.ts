@@ -10,6 +10,11 @@ const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 const valid = (expiresAt = Date.now() + 600_000) => ({ version: 2, repository: 'example/e2e-target', baseBranch: 'main', temporaryBranch: 'e2e/source-retirement', paths: ['summarize.mjs'], credentialHandle: 'github-live-e2e', credential: { id: 'github-live-e2e', provider: 'environment', consumers: ['dsh-enhanced-assistant-actions', 'dsh-enhanced-event-triggers'], purposes: ['github.commit', 'github.observe'], maxLeaseMs: 30_000, reference: { environmentName: 'DSH_E2E_GITHUB_TOKEN' } }, expiresAt, maxActions: 75, maxTotalBytes: 1_048_576, requiredChecks: [{ name: 'CI', appId: 7 }], reviewerIds: [42], minApprovals: 1, event: { maxPolls: 30, maxFires: 4, pollIntervalMs: 2_000, requestTimeoutMs: 10_000 } })
 async function input(value: unknown, mode = 0o600) { const root = await mkdtemp(join(tmpdir(), 'repo-live-input-')); roots.push(root); const path = join(root, 'live.json'); await writeFile(path, JSON.stringify(value), { mode }); await chmod(path, mode); return path }
+const direct = () => {
+  const value: Record<string, unknown> = { ...valid(), version: 3, deliveryMode: 'commit', maxActions: 38 }
+  delete value.reviewerIds; delete value.minApprovals
+  return value
+}
 
 describe('live repository E2E input', () => {
   it('accepts a bounded non-secret provider reference for the temporary profile', async () => {
@@ -33,8 +38,16 @@ describe('live repository E2E input', () => {
     await expect(loadLiveRepositoryInput(await input({ ...valid(), event: { ...valid().event, requestTimeoutMs: 30001 } }))).rejects.toThrow(/schema/)
     await expect(loadLiveRepositoryInput(await input({ ...valid(), credential: { ...valid().credential, consumers: ['dsh-enhanced-assistant-actions'] } }))).rejects.toThrow(/not authorized/)
   })
-  it('builds a production-parseable admission without carrying the credential reference', async () => {
-    const live = await loadLiveRepositoryInput(await input(valid()))
+  it('accepts explicit direct delivery and rejects missing or mixed modes before setup', async () => {
+    const value = await loadLiveRepositoryInput(await input(direct()))
+    expect(value.repositoryDelivery).toMatchObject({ openPullRequest: false, acceptance: 'goal-step', outcome: { mode: 'commit' } })
+    expect(value.repositoryDelivery.outcome).not.toHaveProperty('reviewerIds')
+    for (const change of [{ deliveryMode: undefined }, { deliveryMode: 'pull-request' }, { version: 2 }, { reviewerIds: [], minApprovals: 0 }, { maxActions: 37 }]) {
+      await expect(loadLiveRepositoryInput(await input({ ...direct(), ...change }))).rejects.toThrow(/schema/)
+    }
+  })
+  it.each([['pull-request', valid], ['commit', direct]] as const)('builds a production-parseable %s admission without carrying the credential reference', async (_mode, descriptor) => {
+    const live = await loadLiveRepositoryInput(await input(descriptor()))
     const admission = { version: 2, objective: 'Repair one file', route: { provider: 'test', model: 'test' }, maxGoalRounds: 6, stepMaxDurationMs: 120_000,
       executionBudget: { mode: 'calls', modelCalls: 24, toolCalls: 40, durationMs: 300_000, maxOutputTokensPerCall: 1024, routes: [{ provider: 'test', model: 'test' }] },
       verification: { artifactPath: 'summarize.mjs', command: 'node summarize.mjs', maxRuns: 12, maxTotalDurationMs: 240_000, maxDurationMs: 5_000, maxOutputBytes: 4096,

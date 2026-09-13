@@ -10,7 +10,7 @@ complete scenario after the concrete setup failure has been fixed.
 
 The existing repository Playwright scenario can use the production Actions and
 EventTriggers GitHub transports when `DSH_REPO_LIVE_INPUT` names a private JSON
-descriptor. This mode creates a commit and pull request on an already-existing,
+descriptor. The v3 commit mode creates a direct commit on an already-existing,
 isolated test branch in the named repository. It does not create a branch. Do
 not use a production repository or branch.
 
@@ -24,7 +24,8 @@ file; the file contents are never read by the harness.
 
 ```json
 {
-  "version": 2,
+  "version": 3,
+  "deliveryMode": "commit",
   "repository": "example/e2e-target",
   "baseBranch": "main",
   "temporaryBranch": "e2e/source-retirement",
@@ -41,9 +42,7 @@ file; the file contents are never read by the harness.
   "expiresAt": 1790000000000,
   "maxActions": 75,
   "maxTotalBytes": 1048576,
-  "requiredChecks": [{ "name": "CI", "appId": 7 }],
-  "reviewerIds": [42],
-  "minApprovals": 1,
+  "requiredChecks": [{ "name": "verify", "appId": 15368 }],
   "event": { "maxPolls": 180, "maxFires": 4, "pollIntervalMs": 2000, "requestTimeoutMs": 10000 }
 }
 ```
@@ -76,10 +75,14 @@ pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs
 The test rejects a missing, non-private, expired, broad, malformed, or
 fixture-mixed descriptor before installation or model work. It does not run in
 this repository's normal test suite because it commits to the explicitly bounded
-existing test branch and creates a pull request. After delivery it waits for the real event
+existing test branch. After delivery it waits for the real event
 snapshot, a successful wake, the existing repository-readback outcome receipt,
 source retirement, and a final restart that produces no new source event.
 
-This scenario repairs only `summarize.mjs`, matching the production admission contract and its independent verification artifact. Prepare a fresh descriptor immediately before running: at goal setup, its fixed deadline must still be more than six minutes away. Installation and container prechecks consume part of that window; an expired or insufficient authorization is rejected, never extended automatically. The read-only baseline verifies observation access; commit and PR write permissions are established only by the subsequent explicitly authorized delivery attempt.
+This scenario repairs only `summarize.mjs`, matching the production admission contract and its independent verification artifact. Prepare a fresh descriptor immediately before running: at goal setup, its fixed deadline must still be more than six minutes away. Installation and container prechecks consume part of that window; an expired or insufficient authorization is rejected, never extended automatically. The read-only baseline verifies observation access; commit write permission is established only by the subsequent explicitly authorized delivery attempt.
 
-Observation starts during preflight, so its poll budget must cover setup, model execution, and CI/review latency as well as event waiting. The example permits 180 polls at two-second intervals; it does not reserve all polls until the PR exists.
+Observation starts during preflight, so its poll budget must cover setup, model execution, and CI latency as well as event waiting. The example permits 180 polls at two-second intervals; it does not reserve all polls until the commit exists.
+
+Version 3 requires `deliveryMode: "commit"` and rejects reviewer fields; no PR or reviewer account is needed. `requiredChecks` must use actual check-run names and app IDs from the controlled repository, not the workflow title. The example is a GitHub Actions check named `verify`. Only the delivered commit is eligible for outcome verification; an advanced branch head cannot satisfy it. The finite test window requires a check that can finish within that window.
+
+Existing v2 descriptors retain their explicit PR/reviewer behavior. For a real model test with a GitHub transport fixture, use `DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture DSH_REPO_DELIVERY_MODE=commit` with the same Playwright config and without either live input variable. This validates the production Goal, Actions, event, verification and feedback services against a controlled remote response; it is not evidence of a real GitHub write.

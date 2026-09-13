@@ -135,12 +135,13 @@ function grantInput(value: unknown): ActionGrant {
 
 export function normalizeWorkflow(value: unknown): WorkflowRequest {
   if (plain(value) && own(value, 'operation')) {
-    const input = object(value, ['operation', 'grantId', 'idempotencyKey', 'kind'], ['path', 'pullRequestNumber'])
-    if (input.operation !== 'inspect' || !['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'].includes(String(input.kind))) fail('invalid-input')
+    const input = object(value, ['operation', 'grantId', 'idempotencyKey', 'kind'], ['path', 'pullRequestNumber', 'commitOid'])
+    if (input.operation !== 'inspect' || !['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews', 'commit-checks'].includes(String(input.kind))) fail('invalid-input')
     const needsPr = ['pull-request', 'checks', 'reviews'].includes(String(input.kind))
-    if (own(input, 'path') !== (input.kind === 'file') || own(input, 'pullRequestNumber') !== needsPr) fail('invalid-input')
+    const needsCommit = input.kind === 'commit-checks'
+    if (own(input, 'path') !== (input.kind === 'file') || own(input, 'pullRequestNumber') !== needsPr || own(input, 'commitOid') !== needsCommit) fail('invalid-input')
     return Object.freeze({ operation: 'inspect', grantId: text(input.grantId), idempotencyKey: text(input.idempotencyKey), kind: input.kind as import('./types.js').InspectRequest['kind'],
-      ...(input.kind === 'file' ? { path: validPath(input.path) } : {}), ...(needsPr ? { pullRequestNumber: integer(input.pullRequestNumber, 1) } : {}) })
+      ...(input.kind === 'file' ? { path: validPath(input.path) } : {}), ...(needsPr ? { pullRequestNumber: integer(input.pullRequestNumber, 1) } : {}), ...(needsCommit ? { commitOid: (() => { const value = text(input.commitOid, 128); if (!/^[0-9a-f]{40,128}$/iu.test(value)) fail('invalid-input'); return value })() } : {}) })
   }
   if (plain(value) && Object.prototype.hasOwnProperty.call(value, 'baseHeadOid')) {
     const input = object(value, ['grantId', 'idempotencyKey', 'baseHeadOid']); const baseHeadOid = text(input.baseHeadOid, 40)

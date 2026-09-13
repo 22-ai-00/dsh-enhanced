@@ -24,7 +24,8 @@ export async function externalDeliveryFixture(root: string, grant: ActionGrant, 
       workspace: grant.workspace, preset: grant.agentPreset, bindingId: 'binding', bindingVersion: 1, bindingGeneration: 1 }, sessionId: 'owner-session',
     destination: { classification: 'github-repository', repository: grant.repository, branch: grant.branch, baseBranch: grant.repoWorkflow!.baseBranch, paths: grant.paths },
     credentialId: 'github', expiresAt: grant.expiresAt, maxActions: grant.maxActions, maxTotalBytes: grant.maxTotalBytes, maxCostUnits: 100,
-    allowedOperations: ['commit', 'inspect', 'pull-request'], allowedInspectKinds: ['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'],
+    allowedOperations: grant.repoWorkflow!.allowPullRequest ? ['commit', 'inspect', 'pull-request'] : ['commit', 'inspect'],
+    allowedInspectKinds: grant.repoWorkflow!.allowPullRequest ? ['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'] : ['repository', 'branch', 'file', 'commit-checks'],
     verifiedDelivery: grant.verifiedDelivery!, source: { classification: 'internal', provenanceDigest: 'b'.repeat(64) }, policyEpoch: 1, emergencyEpoch: 0 })
   const coreConfig = { instanceId: 'broker', statePath: join(brokerRoot, 'state.sqlite'), grants: [authority], policyEpoch: 1,
     credentials: [{ id: 'github', provider: 'linux-protected-file' as const, path: tokenPath, maxLeaseMs: 30_000 }] }

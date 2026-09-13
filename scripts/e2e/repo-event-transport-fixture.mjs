@@ -15,8 +15,11 @@ export function apply(ctx, config) {
       options.signal.throwIfAborted()
       if (new URL(url).origin !== 'https://api.github.com' || new Headers(options.headers).get('authorization') !== 'Bearer non-production-github-fixture') throw new Error('unexpected repository fixture request')
       const state = repositoryFixtureSnapshot(), path = new URL(url).pathname
-      if (process.env.DSH_REPO_EVENT_SOURCE_LOG) appendFileSync(process.env.DSH_REPO_EVENT_SOURCE_LOG, `${JSON.stringify({ at: Date.now(), path, ready: state.ready, headOid: state.headOid, pullRequest: state.pullRequest?.number ?? null })}\n`, { mode: 0o600 })
-      const body = path.endsWith('/check-runs') ? { total_count: state.checks.length, check_runs: state.checks }
+      const directCommit = process.env.DSH_REPO_DELIVERY_MODE === 'commit'
+      if (process.env.DSH_REPO_EVENT_SOURCE_LOG) appendFileSync(process.env.DSH_REPO_EVENT_SOURCE_LOG, `${JSON.stringify({ at: Date.now(), path, ready: state.ready, headOid: state.headOid, ...(directCommit ? { mode: 'commit' } : { pullRequest: state.pullRequest?.number ?? null }) })}\n`, { mode: 0o600 })
+      const body = path.includes('/branches/') ? { name: 'automation/fix', commit: { sha: state.headOid } }
+        : path.endsWith('/check-runs') ? { total_count: state.checks.length, check_runs: state.checks }
+        : directCommit ? (() => { throw new Error('unexpected direct repository fixture request') })()
         : path.endsWith('/pulls') ? state.pullRequest ? [state.pullRequest] : [] : state.reviews
       return new Response(JSON.stringify(body), { status: 200 })
     },

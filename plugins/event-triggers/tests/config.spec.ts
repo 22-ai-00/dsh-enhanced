@@ -58,6 +58,26 @@ describe('event trigger configuration', () => {
     expect(() => normalizeEventTriggersConfig({ databasePath: '/state/events.sqlite', triggers: [{ ...trigger, observerLifetime: 'shared' }] })).toThrow(/goal lifetime/i)
   })
 
+  test('accepts explicit commit delivery mode while retaining the scoped base branch', () => {
+    const trigger = {
+      id: 'repository-commit', kind: 'github-repository' as const, automationId: 'repository-source', repository: 'owner/repository', branch: 'delivery/fix', baseBranch: 'main', deliveryMode: 'commit' as const,
+      credentialHandle: 'github', observer: { workspace: '/state', preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: 2_000_000_000_000, budgetId: 'polls' },
+    }
+    expect(normalizeEventTriggersConfig({ databasePath: '/state/events.sqlite', triggers: [trigger] }).triggers[0]).toMatchObject({ deliveryMode: 'commit', baseBranch: 'main' })
+  })
+
+  test.each([
+    ['pullRequestNumber', 7],
+    ['reviewerIds', [42]],
+    ['minApprovals', 1],
+  ])('rejects PR-only commit trigger field %s', (field, value) => {
+    const trigger = {
+      id: 'repository-commit', kind: 'github-repository' as const, automationId: 'repository-source', repository: 'owner/repository', branch: 'delivery/fix', baseBranch: 'main', deliveryMode: 'commit' as const,
+      credentialHandle: 'github', observer: { workspace: '/state', preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: 2_000_000_000_000, budgetId: 'polls' }, [field]: value,
+    }
+    expect(() => normalizeEventTriggersConfig({ databasePath: '/state/events.sqlite', triggers: [trigger] } as never)).toThrow(/configuration|event-triggers/i)
+  })
+
   test('requires a non-default port to be listed as an exact HTTPS origin', () => {
     const trigger = { id: 'api', kind: 'http-json' as const, automationId: 'a',
       url: 'https://api.example.com:8443/state', pointer: '', fireWhen: 'changed' as const,

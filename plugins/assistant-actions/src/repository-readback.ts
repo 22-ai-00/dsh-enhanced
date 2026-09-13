@@ -11,6 +11,13 @@ export interface RepositoryReadback {
   review: 'approved' | 'pending' | 'changes-requested' | 'unknown'
   pullRequest: 'open' | 'closed' | 'merged' | 'unknown'
 }
+export interface RepositoryCommitReadback {
+  mode: 'commit'
+  objectId: string
+  headOid: string
+  ci: 'passed' | 'pending' | 'failed' | 'unknown'
+  ready: boolean
+}
 
 const maximumChecks = 20
 const maximumReviews = 30
@@ -119,6 +126,30 @@ function ciStatus(value: unknown, input: Readonly<{ repository: string; branch: 
   return pending ? 'pending' : 'passed'
 }
 
+function commitCiStatus(value: unknown, input: Readonly<{ repository: string; branch: string; commitOid: string; requirements: Pick<RepositoryReadbackRequirements, 'requiredChecks'> }>): RepositoryCommitReadback['ci'] {
+  const observed = exactObject(value, ['repository', 'headOid', 'items', 'truncated', 'untrusted'])
+  if (!observed || observed.repository !== input.repository || observed.headOid !== input.commitOid || observed.truncated !== false || observed.untrusted !== true) return 'unknown'
+  const items = boundedArray(observed.items, maximumChecks)
+  if (!items) return 'unknown'
+  let pending = false
+  for (const requirement of input.requirements.requiredChecks) {
+    const matches: Record<string, unknown>[] = []
+    for (const item of items) {
+      if (!plain(item) || !positiveInteger(item.id) || !validName(item.name) || !plain(item.app) || !positiveInteger(item.app.id) || !oid(item.head_sha) || typeof item.status !== 'string' || (item.conclusion !== null && typeof item.conclusion !== 'string')) return 'unknown'
+      if (item.name === requirement.name && item.app.id === requirement.appId) matches.push(item)
+    }
+    if (matches.length === 0) { pending = true; continue }
+    if (matches.length !== 1) return 'unknown'
+    const check = matches[0]!
+    if (check.head_sha !== input.commitOid) return 'unknown'
+    if (check.status !== 'completed') { pending = true; continue }
+    if (check.conclusion === 'success') continue
+    if (check.conclusion === null) return 'unknown'
+    return 'failed'
+  }
+  return pending ? 'pending' : 'passed'
+}
+
 function reviewStatus(value: unknown, input: Readonly<{ repository: string; branch: string; baseBranch: string; commitOid: string; pullRequestNumber: number; requirements: RepositoryReadbackRequirements }>): RepositoryReadback['review'] {
   const observed = observedList(value, ['pullRequest', 'headOid', 'items', 'truncated', 'untrusted'], input, maximumReviews)
   if (!observed) return 'unknown'
@@ -173,4 +204,15 @@ export function normalizeRepositoryReadback(input: { repository: string; branch:
     review: reviewStatus(input.reviews, scoped),
     pullRequest: pullRequestStatus(input.pullRequest, scoped),
   })
+}
+
+/** Reduces a branch-fixed direct commit receipt and its exact-commit checks. */
+export function normalizeRepositoryCommitReadback(input: { repository: string; branch: string; commitOid: string; requirements: Pick<RepositoryReadbackRequirements, 'requiredChecks'>; checks: unknown; branchSnapshot: unknown }): RepositoryCommitReadback {
+  const empty: RepositoryCommitReadback = { mode: 'commit', objectId: '', headOid: '', ci: 'unknown', ready: false }
+  if (!validName(input.repository) || !repositoryName.test(input.repository) || !validName(input.branch) || `${input.repository}:${input.branch}`.length > maximumText || !oid(input.commitOid)) return empty
+  let requirements: RepositoryReadbackRequirements
+  try { requirements = validateRepositoryReadbackRequirements({ requiredChecks: input.requirements.requiredChecks, reviewerIds: [], minApprovals: 0 }) } catch { return empty }
+  const headOid = branchHead(input.branchSnapshot, { branch: input.branch, commitOid: input.commitOid }) ?? ''
+  const ci = headOid === input.commitOid ? commitCiStatus(input.checks, { repository: input.repository, branch: input.branch, commitOid: input.commitOid, requirements }) : 'unknown'
+  return Object.freeze({ mode: 'commit', objectId: `${input.repository}:${input.branch}`, headOid, ci, ready: headOid === input.commitOid && ci === 'passed' })
 }

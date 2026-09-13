@@ -265,7 +265,7 @@ export interface BrokerDestination { classification: 'github-repository'; reposi
 export interface BrokerBudget { reservationId: string; actions: number; bytes: number; costMetric: 'github-api-units'; maxCostUnits: number }
 export interface BrokerCommitPayload { expectedHeadOid: string; headline: string; files: readonly Readonly<{ path: string; content: string }>[] }
 export interface BrokerPullRequestPayload { expectedHeadOid: string; title: string; body: string }
-export interface BrokerInspectPayload { kind: 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews'; path?: string; pullRequestNumber?: number }
+export interface BrokerInspectPayload { kind: 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews' | 'commit-checks'; path?: string; pullRequestNumber?: number; commitOid?: string }
 export type BrokerOperation = 'commit' | 'inspect' | 'pull-request'
 export type BrokerOperationPayload = BrokerCommitPayload | BrokerInspectPayload | BrokerPullRequestPayload
 export interface BrokerRequestIntent {
@@ -351,7 +351,7 @@ export function normalizeBrokerGrantAuthority(value: unknown): BrokerGrantAuthor
   const normalizedDestination = destination({ classification: rawDestination.classification, repository: rawDestination.repository, branch: rawDestination.branch, ...(rawDestination.baseBranch === undefined ? {} : { baseBranch: rawDestination.baseBranch }) })
   if (!Array.isArray(rawDestination.paths) || rawDestination.paths.length < 1 || rawDestination.paths.length > 128 || !rawDestination.paths.every(validPath) || new Set(rawDestination.paths).size !== rawDestination.paths.length) reject('invalid-message', 'broker grant paths are invalid')
   if (!Array.isArray(input.allowedOperations) || input.allowedOperations.length < 1 || input.allowedOperations.length > 3 || input.allowedOperations.some(value => !['commit', 'inspect', 'pull-request'].includes(String(value))) || new Set(input.allowedOperations).size !== input.allowedOperations.length) reject('invalid-message', 'broker grant operations are invalid')
-  if (!Array.isArray(input.allowedInspectKinds) || input.allowedInspectKinds.length > 6 || input.allowedInspectKinds.some(value => !['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'].includes(String(value))) || new Set(input.allowedInspectKinds).size !== input.allowedInspectKinds.length
+  if (!Array.isArray(input.allowedInspectKinds) || input.allowedInspectKinds.length > 7 || input.allowedInspectKinds.some(value => !['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews', 'commit-checks'].includes(String(value))) || new Set(input.allowedInspectKinds).size !== input.allowedInspectKinds.length
     || input.allowedOperations.includes('inspect') !== (input.allowedInspectKinds.length > 0)) reject('invalid-message', 'broker grant inspect kinds are invalid')
   if (input.allowedInspectKinds.some(kind => ['pull-request', 'checks', 'reviews'].includes(String(kind)))
     && (normalizedDestination.baseBranch === undefined || normalizedDestination.baseBranch === normalizedDestination.branch)) reject('invalid-message', 'broker grant base branch is required for pull request inspection')
@@ -379,7 +379,7 @@ export function normalizeBrokerGrantProjection(value: unknown): BrokerGrantProje
   const normalizedDestination = destination({ classification: rawDestination.classification, repository: rawDestination.repository, branch: rawDestination.branch, ...(rawDestination.baseBranch === undefined ? {} : { baseBranch: rawDestination.baseBranch }) })
   if (!Array.isArray(rawDestination.paths) || rawDestination.paths.length < 1 || rawDestination.paths.length > 128 || !rawDestination.paths.every(validPath) || new Set(rawDestination.paths).size !== rawDestination.paths.length) reject('invalid-message', 'broker grant projection paths are invalid')
   if (!Array.isArray(input.allowedOperations) || input.allowedOperations.length < 1 || input.allowedOperations.length > 3 || input.allowedOperations.some(value => !['commit', 'inspect', 'pull-request'].includes(String(value))) || new Set(input.allowedOperations).size !== input.allowedOperations.length) reject('invalid-message', 'broker grant projection operations are invalid')
-  if (!Array.isArray(input.allowedInspectKinds) || input.allowedInspectKinds.length > 6 || input.allowedInspectKinds.some(value => !['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'].includes(String(value))) || new Set(input.allowedInspectKinds).size !== input.allowedInspectKinds.length
+  if (!Array.isArray(input.allowedInspectKinds) || input.allowedInspectKinds.length > 7 || input.allowedInspectKinds.some(value => !['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews', 'commit-checks'].includes(String(value))) || new Set(input.allowedInspectKinds).size !== input.allowedInspectKinds.length
     || input.allowedOperations.includes('inspect') !== (input.allowedInspectKinds.length > 0)) reject('invalid-message', 'broker grant projection inspect kinds are invalid')
   if (input.allowedInspectKinds.some(kind => ['pull-request', 'checks', 'reviews'].includes(String(kind)))
     && (normalizedDestination.baseBranch === undefined || normalizedDestination.baseBranch === normalizedDestination.branch)) reject('invalid-message', 'broker grant projection base branch is required for pull request inspection')
@@ -460,13 +460,14 @@ function pullRequestPayload(value: unknown): BrokerPullRequestPayload {
 function inspectPayload(value: unknown): BrokerInspectPayload {
   const input = record(value, 'inspect payload')
   const kind = input.kind
-  if (!['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'].includes(String(kind))) reject('invalid-message', 'inspect kind is invalid')
-  const expected = kind === 'file' ? ['kind', 'path'] : ['pull-request', 'checks', 'reviews'].includes(String(kind)) ? ['kind', 'pullRequestNumber'] : ['kind']
+  if (!['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews', 'commit-checks'].includes(String(kind))) reject('invalid-message', 'inspect kind is invalid')
+  const expected = kind === 'file' ? ['kind', 'path'] : ['pull-request', 'checks', 'reviews'].includes(String(kind)) ? ['kind', 'pullRequestNumber'] : kind === 'commit-checks' ? ['kind', 'commitOid'] : ['kind']
   exact(input, expected, 'inspect payload')
   if (kind === 'file') {
     if (!validPath(input.path)) reject('invalid-message', 'inspect path is invalid')
     return Object.freeze({ kind, path: input.path }) as BrokerInspectPayload
   }
+  if (kind === 'commit-checks') return Object.freeze({ kind, commitOid: oid(input.commitOid, 'inspect commitOid') }) as BrokerInspectPayload
   if (expected.length === 2) return Object.freeze({ kind, pullRequestNumber: integer(input.pullRequestNumber, 'inspect pullRequestNumber', 1) }) as BrokerInspectPayload
   return Object.freeze({ kind }) as BrokerInspectPayload
 }
@@ -541,8 +542,9 @@ export interface BrokerPullRequestObservation extends BrokerPullRequestScope { u
 export interface BrokerCheckObservation { id: number; name: string; status: 'queued' | 'in_progress' | 'completed' | 'waiting' | 'requested' | 'pending'; conclusion: string | null; head_sha: string; app: { id: number } }
 export interface BrokerReviewObservation { id: number; state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | 'PENDING'; commit_id: string; user: { id: number }; submitted_at?: string }
 export interface BrokerChecksObservation { pullRequest: BrokerPullRequestScope; headOid: string; items: readonly BrokerCheckObservation[]; truncated: boolean; untrusted: true }
+export interface BrokerCommitChecksObservation { repository: string; headOid: string; items: readonly BrokerCheckObservation[]; truncated: boolean; untrusted: true }
 export interface BrokerReviewsObservation { pullRequest: BrokerPullRequestScope; headOid: string; items: readonly BrokerReviewObservation[]; truncated: boolean; untrusted: true }
-export type BrokerInspectObservation = BrokerRepositoryObservation | BrokerBranchObservation | BrokerFileObservation | BrokerPullRequestObservation | BrokerChecksObservation | BrokerReviewsObservation
+export type BrokerInspectObservation = BrokerRepositoryObservation | BrokerBranchObservation | BrokerFileObservation | BrokerPullRequestObservation | BrokerChecksObservation | BrokerCommitChecksObservation | BrokerReviewsObservation
 export interface BrokerResponseError { code: string }
 export interface BrokerServerResponseUnsigned {
   protocol: typeof GITHUB_BROKER_PROTOCOL
@@ -626,6 +628,17 @@ export function normalizeBrokerInspectObservation(payload: BrokerInspectPayload,
     return Object.freeze({ path: input.path, sha: oid(input.sha, 'file observation sha'), content: input.content, untrusted: truth(input.untrusted, 'file untrusted') })
   }
   if (payload.kind === 'pull-request') return pullRequestScope(value, destination, payload.pullRequestNumber, true) as BrokerPullRequestObservation
+  if (payload.kind === 'commit-checks') {
+    const input = exact(value, ['repository', 'headOid', 'items', 'truncated', 'untrusted'], 'commit-checks observation')
+    const headOid = oid(input.headOid, 'commit-checks headOid')
+    if (input.repository !== destination.repository || payload.commitOid !== headOid || !Array.isArray(input.items) || input.items.length > 20) reject('response-mismatch', 'commit-checks observation scope does not match')
+    const items = Object.freeze(input.items.map((value, index) => {
+      const item = exact(value, ['id', 'name', 'status', 'conclusion', 'head_sha', 'app'], `commit check ${index}`), app = exact(item.app, ['id'], `commit check ${index} app`)
+      if (!['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending'].includes(String(item.status)) || item.conclusion !== null && typeof item.conclusion !== 'string' || item.head_sha !== headOid) reject('invalid-message', 'commit-checks observation is invalid')
+      return Object.freeze({ id: integer(item.id, 'commit check id', 1), name: text(item.name, 'commit check name'), status: item.status as BrokerCheckObservation['status'], conclusion: item.conclusion as string | null, head_sha: oid(item.head_sha, 'commit check head sha'), app: Object.freeze({ id: integer(app.id, 'commit check app id', 1) }) })
+    }))
+    return Object.freeze({ repository: destination.repository, headOid, items, truncated: boolean(input.truncated, 'commit-checks truncated'), untrusted: truth(input.untrusted, 'commit-checks untrusted') })
+  }
   const input = exact(value, ['pullRequest', 'headOid', 'items', 'truncated', 'untrusted'], `${payload.kind} observation`)
   const pullRequest = pullRequestScope(input.pullRequest, destination, payload.pullRequestNumber) as BrokerPullRequestScope
   const headOid = oid(input.headOid, `${payload.kind} headOid`)

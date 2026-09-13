@@ -33,7 +33,7 @@ afterEach(async () => {
 
 function response(body: unknown): Response { return new Response(JSON.stringify(body), { status: 200 }) }
 
-async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = 'shared', external = false) {
+async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = 'shared', external = false, deliveryMode?: 'commit' | 'pull-request') {
   const root = await mkdtemp(join(tmpdir(), 'event-triggers-repository-service-'))
   roots.push(root)
   const ctx = new Context()
@@ -58,6 +58,7 @@ async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = '
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer repository-fixture-token')
     const path = new URL(url).pathname
     const result = () => {
+      if (path.includes('/branches/')) return response({ name: branch, commit: { sha: head } })
       if (path.includes('/check-runs')) return response({ total_count: 1, check_runs: [{ id: 1, name: 'CI', app: { id: 7 }, head_sha: head, status: 'completed', conclusion }] })
       if (path.endsWith('/pulls')) return response([{ number: 7, state: 'open', head: { ref: branch, sha: head, repo: { full_name: repository } }, base: { ref: baseBranch, repo: { full_name: repository } } }])
       return response([{ id: 1, user: { id: 42 }, commit_id: head, state: reviewState }])
@@ -86,7 +87,7 @@ async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = '
       new CredentialsKeychainService(runtime, { databasePath: join(root, 'credentials.sqlite'), handles: [{ id: 'github', provider: 'environment', environmentName: 'GITHUB_TOKEN', consumers: ['dsh-enhanced-event-triggers'], purposes: ['github.observe'], maxLeaseMs: 30_000 }] }, { env: { GITHUB_TOKEN: 'repository-fixture-token' } })
     } })
   }
-  const config = { databasePath: join(root, 'events.sqlite'), pollerEnabled: false, pollIntervalMs: 1_000, requestTimeoutMs, maxBodyBytes: 16_384, triggers: [{ id: 'repository', kind: 'github-repository' as const, automationId: 'repository-target', repository, branch, baseBranch, ...(external ? { externalGrant: { id: 'operator-grant', revision: 1, digest: 'd'.repeat(64) } } : { credentialHandle: 'github' }), fireWhen: 'changed' as const, debounceMs: 0, cooldownMs: 0, maxFires: 10, observerLifetime: external ? 'goal' as const : lifetime, observer: { workspace: root, preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: Date.now() + 60_000, budgetId: 'repository-observations' } }] }
+  const config = { databasePath: join(root, 'events.sqlite'), pollerEnabled: false, pollIntervalMs: 1_000, requestTimeoutMs, maxBodyBytes: 16_384, triggers: [{ id: 'repository', kind: 'github-repository' as const, automationId: 'repository-target', repository, branch, baseBranch, ...(deliveryMode === undefined ? {} : { deliveryMode }), ...(external ? { externalGrant: { id: 'operator-grant', revision: 1, digest: 'd'.repeat(64) } } : { credentialHandle: 'github' }), fireWhen: 'changed' as const, debounceMs: 0, cooldownMs: 0, maxFires: 10, observerLifetime: external ? 'goal' as const : lifetime, observer: { workspace: root, preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: Date.now() + 60_000, budgetId: 'repository-observations' } }] }
   const install = async () => {
     let service!: EventTriggersService
     const fiber = await ctx.plugin({ name: 'dsh-enhanced-event-triggers', apply(runtime: Context) { service = new EventTriggersService(runtime, config, { fetcher, lookup: async () => [{ address: '93.184.216.34', family: 4 }] }) } })
@@ -197,6 +198,25 @@ describe('GitHub repository trigger service composition', () => {
     await installed.service.pollOnce()
     expect(installed.service.sourceSnapshot('repository').highWaterSequence).toBe(2)
     expect(f.ctx.assistantPolicy.health()).toMatchObject({ emergencyStop: false })
+  })
+
+  it('persists direct commit CI changes once and does not replay them after restart', async () => {
+    const f = await fixture(1_000, 'shared', false, 'commit')
+    let installed = await f.install()
+    await installed.service.pollOnce()
+    const baseline = installed.service.sourceSnapshot('repository')
+    expect(f.fetcher).toHaveBeenCalledTimes(2)
+
+    f.change()
+    await installed.service.pollOnce()
+    expect(installed.service.firstEventAfter(baseline, 0, Date.now() + 1_000)).toMatchObject({ sequence: 1, envelope: { trust: { content: 'untrusted', method: 'https-observation' } } })
+    await installed.service.pollOnce()
+    expect(installed.service.sourceSnapshot('repository').highWaterSequence).toBe(1)
+
+    await installed.fiber.dispose()
+    installed = await f.install()
+    await installed.service.pollOnce()
+    expect(installed.service.sourceSnapshot('repository').highWaterSequence).toBe(1)
   })
 
   it('stops polling and hides the source after an explicit persisted source pause', async () => {

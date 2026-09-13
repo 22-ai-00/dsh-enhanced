@@ -60,18 +60,20 @@ export async function loadLiveRepositoryInput(inputPath, now = Date.now()) {
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) fail('path must be a private regular file')
   let value
   try { value = JSON.parse(await readFile(inputPath, 'utf8')) } catch { fail('must contain JSON') }
-  const keys = ['version', 'repository', 'baseBranch', 'temporaryBranch', 'paths', 'credentialHandle', 'credential', 'expiresAt', 'maxActions', 'maxTotalBytes', 'requiredChecks', 'reviewerIds', 'minApprovals', 'event']
-  if (!exact(value, keys) || value.version !== 2 || !repository(value.repository) || !branch(value.baseBranch)
+  const direct = value?.version === 3 && value?.deliveryMode === 'commit'
+  const keys = ['version', 'repository', 'baseBranch', 'temporaryBranch', 'paths', 'credentialHandle', 'credential', 'expiresAt', 'maxActions', 'maxTotalBytes', 'requiredChecks', 'event',
+    ...(direct ? ['deliveryMode'] : ['reviewerIds', 'minApprovals'])]
+  if (!exact(value, keys) || (direct ? value.version !== 3 : value.version !== 2) || !repository(value.repository) || !branch(value.baseBranch)
     || !branch(value.temporaryBranch) || value.temporaryBranch === value.baseBranch || !observationHandle(value.credentialHandle)
     // The real scenario installs a ten-minute isolation grant. Keep the
     // external deadline inside that finite grant and leave setup's six-minute
     // execution-and-wake window intact.
-    || !integer(value.expiresAt, now + 360_000, now + 600_000) || !integer(value.maxActions, 75, 10_000)
+    || !integer(value.expiresAt, now + 360_000, now + 600_000) || !integer(value.maxActions, direct ? 38 : 75, 10_000)
     || !integer(value.maxTotalBytes, 1, 64 * 1024 * 1024) || !Array.isArray(value.paths) || value.paths.length !== 1 || value.paths[0] !== 'summarize.mjs'
     || !value.paths.every(path) || new Set(value.paths).size !== value.paths.length || !Array.isArray(value.requiredChecks)
-    || value.requiredChecks.length < 1 || value.requiredChecks.length > 20 || !Array.isArray(value.reviewerIds)
+    || value.requiredChecks.length < 1 || value.requiredChecks.length > 20 || (!direct && (!Array.isArray(value.reviewerIds)
     || value.reviewerIds.length < 1 || value.reviewerIds.length > 30 || !integer(value.minApprovals, 1, value.reviewerIds.length)
-    || new Set(value.reviewerIds).size !== value.reviewerIds.length || !value.reviewerIds.every(id => integer(id, 1, Number.MAX_SAFE_INTEGER))
+    || new Set(value.reviewerIds).size !== value.reviewerIds.length || !value.reviewerIds.every(id => integer(id, 1, Number.MAX_SAFE_INTEGER))))
     || !exact(value.event, ['maxPolls', 'maxFires', 'pollIntervalMs', 'requestTimeoutMs'])
     || !integer(value.event.maxPolls, 2, 1_000) || !integer(value.event.maxFires, 1, 100) || value.event.maxPolls <= value.event.maxFires
     || !integer(value.event.pollIntervalMs, 1_000, 3_600_000) || !integer(value.event.requestTimeoutMs, 100, 30_000)) fail('schema is invalid')
@@ -84,9 +86,9 @@ export async function loadLiveRepositoryInput(inputPath, now = Date.now()) {
   if (new Set(checks.map(check => `${check.name}\0${check.appId}`)).size !== checks.length) fail('requiredChecks is duplicated')
   const repositoryDelivery = Object.freeze({ repository: value.repository, baseBranch: value.baseBranch, branch: value.temporaryBranch,
     paths: Object.freeze([...value.paths]), credentialHandle: value.credentialHandle, expiresAt: value.expiresAt,
-    maxActions: value.maxActions, maxTotalBytes: value.maxTotalBytes, openPullRequest: true, acceptance: 'goal-step',
-    outcome: Object.freeze({ requiredChecks: Object.freeze(checks), reviewerIds: Object.freeze([...value.reviewerIds]),
-      minApprovals: value.minApprovals, timeoutMs: value.event.requestTimeoutMs, freshnessMs: Math.min(60_000, value.event.requestTimeoutMs * 2) }),
+    maxActions: value.maxActions, maxTotalBytes: value.maxTotalBytes, openPullRequest: !direct, acceptance: 'goal-step',
+    outcome: Object.freeze({ requiredChecks: Object.freeze(checks), ...(direct ? { mode: 'commit' } : { reviewerIds: Object.freeze([...value.reviewerIds]), minApprovals: value.minApprovals }),
+      timeoutMs: value.event.requestTimeoutMs, freshnessMs: Math.min(60_000, value.event.requestTimeoutMs * 2) }),
     events: Object.freeze({ credentialHandle: value.credentialHandle, maxPolls: value.event.maxPolls, maxFires: value.event.maxFires,
       pollIntervalMs: value.event.pollIntervalMs, requestTimeoutMs: value.event.requestTimeoutMs }) })
   return Object.freeze({ credential, repositoryDelivery })

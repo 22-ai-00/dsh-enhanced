@@ -180,7 +180,7 @@ export class AssistantVerifierService extends Service<Config> {
       if (criterion.kind === 'isolated-process-behavior') return true
       return selection.taskKind === 'goal-outcome' && criterion.kind === 'target-readback'
         && criterion.expected.some(value => value.pointer === '/ready' && value.value === true)
-        && this.#compiled.authorities.some(authority => authority.kind === 'repository-readback' && authority.id === criterion.authority.id && authority.digest === criterion.authority.digest && criterion.objectId === `${authority.repository}:${authority.branch}`)
+        && this.#compiled.authorities.some(authority => (authority.kind === 'repository-readback' || authority.kind === 'repository-commit-readback') && authority.id === criterion.authority.id && authority.digest === criterion.authority.digest && criterion.objectId === `${authority.repository}:${authority.branch}`)
     })
   }
 
@@ -189,7 +189,7 @@ export class AssistantVerifierService extends Service<Config> {
     this.#assertActive()
     const contract = this.#store.getContract(contractId)
     const authority = this.#compiled.authorities.find(item => item.id === authorityId && item.digest === authorityDigest)
-    if (!contract || contract.task.kind !== 'goal-outcome' || authority?.kind !== 'repository-readback'
+    if (!contract || contract.task.kind !== 'goal-outcome' || (authority?.kind !== 'repository-readback' && authority?.kind !== 'repository-commit-readback')
       || !contract.criteria.some(item => item.kind === 'target-readback' && item.authority.id === authorityId && item.authority.digest === authorityDigest && item.objectId === `${authority.repository}:${authority.branch}`)
       || contract.expiresAt <= this.#now()) throw new Error('assistant-verifier: repository acceptance binding unavailable')
     return freeze({ contract, authority })
@@ -520,7 +520,7 @@ export class AssistantVerifierService extends Service<Config> {
           contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner,
           task: contract.task, results, startedAt, completedAt: now, validUntil: Math.min(contract.expiresAt, ...contract.criteria.flatMap(criterion => {
             const authority = this.#compiled.authorities.find(item => item.id === criterion.authority.id && item.digest === criterion.authority.digest)
-            return authority?.kind === 'repository-readback' ? [startedAt + authority.freshnessMs] : []
+            return authority?.kind === 'repository-readback' || authority?.kind === 'repository-commit-readback' ? [startedAt + authority.freshnessMs] : []
           })) }
         try { receipt = createTaskVerificationReceipt(contract, payload) }
         catch {

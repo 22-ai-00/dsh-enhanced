@@ -20,6 +20,7 @@ const hostVersion = process.env.DSH_E2E_HOST_VERSION ?? '0.1.5-rc.1'
 if (!/^0\.1\.\d+(?:-rc\.\d+)?$/.test(hostVersion)) throw new Error('DSH_E2E_HOST_VERSION must select an exact compatible Host release')
 const image = 'sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8'
 const verifiedDelivery = process.env.DSH_REPO_VERIFIED_DELIVERY === 'fixture'
+const directFixture = verifiedDelivery && process.env.DSH_REPO_DELIVERY_MODE === 'commit'
 const externalBrokerFixture = process.env.DSH_REPO_EXTERNAL_BROKER === 'fixture'
 const setupOnly = process.env.DSH_REPO_SETUP_ONLY === '1'
 const liveInputPath = process.env.DSH_REPO_LIVE_INPUT
@@ -27,6 +28,7 @@ const liveRepositoryEnabled = process.env.DSH_REPO_LIVE_GITHUB === '1' || typeof
 if (liveRepositoryEnabled && (typeof liveInputPath !== 'string' || liveInputPath.length === 0)) throw new Error('live repository E2E requires DSH_REPO_LIVE_INPUT')
 if (liveRepositoryEnabled && (verifiedDelivery || process.env.DSH_REPO_EVENT_SOURCE !== undefined)) throw new Error('live repository E2E cannot use fixture transports')
 if (externalBrokerFixture && (!verifiedDelivery || ![undefined, 'fixture'].includes(process.env.DSH_REPO_EVENT_SOURCE) || liveRepositoryEnabled)) throw new Error('external broker fixture requires fixture verified delivery, optional fixture events, and no live repository')
+if (externalBrokerFixture && directFixture) throw new Error('direct model fixture currently uses the embedded Actions transport; external broker direct behavior has a separate integration suite')
 if (liveRepositoryEnabled && setupOnly) throw new Error('setup-only probe does not validate live repository access')
 const repositoryEvents = (verifiedDelivery && process.env.DSH_REPO_EVENT_SOURCE === 'fixture') || liveRepositoryEnabled
 const objective = 'Fix summarize.mjs: read a JSON order array from stdin, ignore orders whose status is "cancelled", sum integer amountCents by currency, and print one JSON object with currency keys in dictionary order followed by a newline.'
@@ -146,6 +148,8 @@ function fixtureHasPullRequest(path) {
 }
 
 function unknownExecutionWithoutPullRequest(goalsPath, goalId, fixturePath) {
+  if (directFixture && fixturePath && existsSync(fixturePath)
+    && readFileSync(fixturePath, 'utf8').split('\n').filter(Boolean).some(line => parseJson(line)?.kind === 'commit')) return undefined
   if (fixtureHasPullRequest(fixturePath)) return undefined
   return goalExecutionRuns(goalsPath, goalId).find(row => {
     const execution = parseJson(row.execution_json)
@@ -404,9 +408,9 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     // The owner supplies the failing source as ordinary request content. An
     // isolation job receives only its own inline files, never this Host path.
     const deliveryInstruction = liveRepository
-      ? ` Deliver the independently accepted repair to the authorized repository ${repository.repository}, branch ${repository.branch}, changing only ${repository.paths.join(', ')} and opening its authorized pull request. Inspect the current authorized branch before delivery.`
-      : verifiedDelivery ? ' Arrange delivery of the independently accepted repair to the authorized repository branch and open a pull request. Use the available repository authorization and inspect the current branch before preparing delivery.' : ''
-    const prompt = `Here is the failing starting program:\n\n${buggySource}\n\n${objective} Please work on this as a finite goal. You may investigate and test as needed. The acceptance conditions are the objective above; independent verification is configured separately.${deliveryInstruction}${repositoryEvents ? ' The authorized repository delivery can remain pending while external CI and review finish. Continue the original goal when its configured event source reports a change, and independently inspect the current repository state before deciding whether the result is complete.' : ''}`
+      ? ` Deliver the independently accepted repair to the authorized repository ${repository.repository}, branch ${repository.branch}, changing only ${repository.paths.join(', ')}${repository.openPullRequest ? ' and opening its authorized pull request' : ' with a direct commit; omit the pullRequest option from delivery'}. Inspect the current authorized branch before delivery.`
+      : verifiedDelivery ? ` Arrange delivery of the independently accepted repair to the authorized repository branch ${directFixture ? 'with a direct commit; omit the pullRequest option from delivery' : 'and open a pull request'}. Use the available repository authorization and inspect the current branch before preparing delivery.` : ''
+    const prompt = `Here is the failing starting program:\n\n${buggySource}\n\n${objective} Please work on this as a finite goal. You may investigate and test as needed. The acceptance conditions are the objective above; independent verification is configured separately.${deliveryInstruction}${repositoryEvents ? ` The authorized repository delivery can remain pending while external CI${repository?.openPullRequest ? ' and review' : ''} finish. Continue the original goal when its configured event source reports a change, and independently inspect the current repository state before deciding whether the result is complete.` : ''}`
     await activePage.getByLabel(/Describe what you want to build|Message or run a task/).fill(prompt)
     const sent = activePage.waitForResponse(response => new URL(response.url()).pathname === '/api/session/prompt')
     await activePage.getByRole('button', { name: 'Send message', exact: true }).click(); expect((await sent).status()).toBe(200)
@@ -435,16 +439,18 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
         return query(join(home, 'event-triggers/state.sqlite'), "SELECT trigger_id FROM trigger_state WHERE trigger_id LIKE '%repository-events'").length === 1
       }
       const records = await fixtureRecords(), commit = records.find(item => item.kind === 'commit'), pullRequest = records.find(item => item.kind === 'pr')
-      if (!commit || !pullRequest || pullRequest.headOid !== commit.commitOid || intent.wake?.native?.revision !== currentNative.revision) return false
+      if (!commit || (directFixture ? pullRequest !== undefined : !pullRequest || pullRequest.headOid !== commit.commitOid) || intent.wake?.native?.revision !== currentNative.revision) return false
       const eventDb = join(home, 'event-triggers/state.sqlite')
       const state = query(eventDb, "SELECT last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events' LIMIT 1")[0]
       const latest = query(eventDb, "SELECT MAX(sequence) AS sequence FROM event_outbox WHERE trigger_id LIKE '%repository-events'")[0]?.sequence ?? 0
       // Await the completed pending observation, not just its in-flight HTTP
       // response. An unread PR-created edge must wake before this restart.
-      if (!(state?.last_observed_at > pullRequest.at) || latest > intent.source.highWaterSequence) return false
+      const deliveredAt = directFixture ? commit.at : pullRequest.at
+      if (!(state?.last_observed_at > deliveredAt) || latest > intent.source.highWaterSequence) return false
       const observations = await sourceObservations()
-      return (externalBrokerFixture ? ['checks', 'pull-request'] : ['check-runs', 'pulls']).every(kind => observations.some(item => item.at >= pullRequest.at && item.ready === false
-        && item.headOid === commit.commitOid && item.pullRequest === 17 && (externalBrokerFixture ? item.kind === kind : item.path.endsWith(`/${kind}`))))
+      const expectedReads = directFixture ? ['check-runs'] : externalBrokerFixture ? ['checks', 'pull-request'] : ['check-runs', 'pulls']
+      return expectedReads.every(kind => observations.some(item => item.at >= deliveredAt && item.ready === false
+        && item.headOid === commit.commitOid && (directFixture || item.pullRequest === 17) && (externalBrokerFixture ? item.kind === kind : item.path.endsWith(`/${kind}`))))
     }
     let waitRestart
     const goal = await waitForCompletion(() => activePage, home, sessionId, approvals, repositoryEvents ? {
@@ -468,7 +474,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
           return
         }
         const records = await fixtureRecords()
-        expect(records.map(item => item.kind)).toEqual(['commit', 'pr'])
+        expect(records.map(item => item.kind)).toEqual(directFixture ? ['commit'] : ['commit', 'pr'])
         expect(await readyForRestart({ goal: waitingGoal, native: waitingNative, wait })).toBe(true)
         expect(JSON.parse(wait.intent_json).source.kind).toBe('github-repository')
         expect(waitingNative).toMatchObject({ phase: 'paused', sessionId })
@@ -516,7 +522,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       expect(query(path, 'SELECT state FROM deliveries').length, 'completed artifact goal did not register a repository delivery intent').toBeGreaterThan(0)
       await expect.poll(() => query(path, 'SELECT state FROM deliveries')[0]?.state, { timeout: 65000 }).toBe('succeeded')
       const records = (await readFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
-      expect(records.map(item => item.kind)).toEqual(['commit', 'pr'])
+      expect(records.map(item => item.kind)).toEqual(directFixture ? ['commit'] : ['commit', 'pr'])
       if (externalBrokerFixture) {
         const brokerRequests = query(join(home, 'external-repository-broker/state.sqlite'), 'SELECT operation,status FROM requests ORDER BY rowid')
         expect(brokerRequests.filter(row => row.operation === 'commit' || row.operation === 'pull-request')).toEqual([{ operation: 'commit', status: 'succeeded' }, { operation: 'pull-request', status: 'succeeded' }])
@@ -535,14 +541,15 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
         expect(deliveredSteps.every(receipt => receipt.results.some(result => result.artifactDigest === digest))).toBe(true)
       }
       expect(commit.at).toBeGreaterThanOrEqual(Math.max(...(repositoryEvents ? deliveredSteps : receipts).map(receipt => receipt.completedAt)))
-      expect(pr.headOid).toBe(commit.commitOid)
+      if (directFixture) expect(deliveryIntent.request.pullRequest).toBeUndefined()
+      else expect(pr.headOid).toBe(commit.commitOid)
       const notices = () => query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-actions-verified-delivery/v1'")
       await expect.poll(() => notices().map(row => row.status)).toEqual(['accepted'])
       const noticeText = JSON.parse(notices()[0].intent_json).text
       expect(noticeText).toContain(commit.commitOid)
-      expect(noticeText).toContain(String(pr.number))
+      if (!directFixture) expect(noticeText).toContain(String(pr.number))
       await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(noticeText)
-      repositoryDelivery = { transport: externalBrokerFixture ? 'external-unix-v1-with-fixture-github' : 'explicit-fixture-not-live-github', records, state: query(path, 'SELECT id,state,result FROM deliveries'), notices: notices(), noticeText,
+      repositoryDelivery = { transport: externalBrokerFixture ? 'external-unix-v1-with-fixture-github' : 'explicit-fixture-not-live-github', mode: directFixture ? 'commit' : 'pull-request', records, state: query(path, 'SELECT id,state,result FROM deliveries'), notices: notices(), noticeText,
         ...(externalBrokerFixture ? { broker: { requests: query(join(home, 'external-repository-broker/state.sqlite'), 'SELECT operation,status FROM requests ORDER BY rowid'), realLinuxPeerCredentials: true, sameUid: true, eventTransport: repositoryEvents ? 'production-actions-port' : 'none' } } : {}) }
       if (repositoryEvents) {
         expect(waitRestart).toMatchObject({ goalId: goal.id, sourceStateBefore: 'waiting', sourceStateAfterRestart: 'waiting' })
@@ -584,7 +591,11 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       const delivery = query(path, 'SELECT intent,result FROM deliveries')[0]
       const deliveryIntent = parseJson(delivery?.intent), result = parseJson(delivery?.result)
       expect(result?.commit?.commitOid).toMatch(/^[a-f0-9]{40}$/)
-      expect(result?.pullRequest?.pullRequestNumber).toEqual(expect.any(Number))
+      if (repository.openPullRequest) expect(result?.pullRequest?.pullRequestNumber).toEqual(expect.any(Number))
+      else {
+        expect(result?.pullRequest).toBeUndefined()
+        expect(deliveryIntent?.request?.pullRequest).toBeUndefined()
+      }
       expect(waitRestart).toMatchObject({ goalId: goal.id, sourceStateBefore: 'waiting', sourceStateAfterRestart: 'waiting' })
       expect(deliveryIntent?.security).toMatchObject({ goalId: goal.id, sessionId, nativeGoalId: native.goalId })
       expect(deliveryIntent?.security?.definitionDigest).toMatch(/^[a-f0-9]{64}$/)
@@ -613,7 +624,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
       await expect.poll(() => query(join(home, 'assistant-automations/state.sqlite'), "SELECT status FROM automation_definitions WHERE id LIKE '%repository-events-source'")).toEqual([{ status: 'paused' }])
       const lastObservedAt = query(eventsPath, "SELECT last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events' LIMIT 1")[0]?.last_observed_at
       expect(lastObservedAt).toBeGreaterThan(0)
-      repositoryDelivery = { transport: 'live-github', state: query(path, 'SELECT id,state,result FROM deliveries'), eventSource: {
+      repositoryDelivery = { transport: 'live-github', mode: repository.openPullRequest ? 'pull-request' : 'commit', state: query(path, 'SELECT id,state,result FROM deliveries'), eventSource: {
         waitRestart, resumedEvent, events: sourceEvents(), wakes: query(`${join(home, 'assistant-goals/web.sqlite')}.wakes`, 'SELECT id,state FROM goal_wakes'), sourceRuns: sourceRuns(),
         repositoryOutcome: receipt, retirement: { claim: retirement, lastObservedAt, automationStatus: 'paused' },
       } }
@@ -661,7 +672,7 @@ test(setupOnly ? 'formal autonomy install discovers an idle owner session withou
     expect(createHash('sha256').update(JSON.stringify(query(ledger, "SELECT id, status, artifact_binding_json FROM isolation_jobs WHERE status = 'succeeded' AND artifact_binding_json IS NOT NULL ORDER BY id"))).digest('hex')).toBe(sourceDigest)
     if (verifiedDelivery) {
       expect(query(join(home, 'assistant-actions/web/verified-delivery.sqlite'), 'SELECT id,state,result FROM deliveries')).toEqual(repositoryDelivery.state)
-      expect((await readFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, 'utf8')).trim().split('\n')).toHaveLength(2)
+      expect((await readFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, 'utf8')).trim().split('\n')).toHaveLength(directFixture ? 1 : 2)
       await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(repositoryDelivery.noticeText)
       expect(query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-actions-verified-delivery/v1'")).toEqual(repositoryDelivery.notices)
       if (repositoryEvents) {

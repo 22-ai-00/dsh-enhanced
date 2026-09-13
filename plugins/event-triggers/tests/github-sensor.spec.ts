@@ -22,6 +22,38 @@ function read(fetcher: ReturnType<typeof vi.fn>, extra: Partial<Parameters<typeo
 }
 
 describe('GitHub repository observation sensor', () => {
+  it('pins commit-mode checks to the current branch head without requesting a PR', async () => {
+    const fetcher = vi.fn(async (url: string) => {
+      const path = new URL(url).pathname
+      if (path.includes('/branches/')) return new Response(JSON.stringify({ name: branch, commit: { sha: head } }), { status: 200 })
+      if (path.includes('/check-runs')) return new Response(JSON.stringify(checks), { status: 200 })
+      throw new Error(`unexpected GitHub route ${path}`)
+    })
+    const observed = await read(fetcher, { deliveryMode: 'commit' })
+    expect(observed).toMatchObject({ truthy: true, fingerprint: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u) })
+    expect(fetcher.mock.calls.map(call => call[0])).toEqual([
+      `https://api.github.com/repos/${repository}/branches/${encodeURIComponent(branch)}`,
+      `https://api.github.com/repos/${repository}/commits/${head}/check-runs?per_page=100`,
+    ])
+  })
+
+  it('fails closed when commit-mode check heads do not match the pinned branch head', async () => {
+    const fetcher = vi.fn(async (url: string) => new Response(JSON.stringify(new URL(url).pathname.includes('/branches/')
+      ? { name: branch, commit: { sha: head } }
+      : { ...checks, check_runs: [{ ...checks.check_runs[0], head_sha: 'b'.repeat(40) }] }), { status: 200 }))
+    await expect(read(fetcher, { deliveryMode: 'commit' })).rejects.toThrow('unavailable')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    { ...checks, check_runs: [{ ...checks.check_runs[0], status: 'unknown-status' }] },
+    { ...checks, total_count: 2, check_runs: [checks.check_runs[0], { ...checks.check_runs[0], name: 'duplicate id' }] },
+  ])('fails closed for invalid direct commit check data', async malformed => {
+    const fetcher = vi.fn(async (url: string) => new Response(JSON.stringify(new URL(url).pathname.includes('/branches/')
+      ? { name: branch, commit: { sha: head } } : malformed), { status: 200 }))
+    await expect(read(fetcher, { deliveryMode: 'commit' })).rejects.toThrow('unavailable')
+  })
+
   it('uses the three fixed GitHub endpoints and fixed bearer headers', async () => {
     const fetcher = fixture(), beforeRequest = vi.fn()
     const observed = await read(fetcher, { beforeRequest })

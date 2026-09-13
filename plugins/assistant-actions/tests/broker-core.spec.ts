@@ -19,7 +19,7 @@ async function fixture(): Promise<{ config: ExternalBrokerCoreConfig; secret: st
     protocol: 'assistant-actions/external-github-grant/v1', id: 'grant', revision: 1, clientKeyId: 'client-key',
     owner: { principalDigest: 'a'.repeat(64), principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', preset: 'primary', bindingId: 'binding', bindingVersion: 1, bindingGeneration: 1 }, sessionId: 'session',
     destination: { classification: 'github-repository', repository: 'owner/repository', branch: 'main', baseBranch: 'trunk', paths: ['a.txt'] }, credentialId: 'github', expiresAt: now + 120_000,
-    maxActions: 8, maxTotalBytes: 1_000_000, maxCostUnits: 8, allowedOperations: ['commit', 'inspect', 'pull-request'], allowedInspectKinds: ['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'],
+    maxActions: 8, maxTotalBytes: 1_000_000, maxCostUnits: 8, allowedOperations: ['commit', 'inspect', 'pull-request'], allowedInspectKinds: ['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews', 'commit-checks'],
     client: { kind: 'assistant-actions-host', instanceId: 'host', generation: 1 }, source: { classification: 'internal', provenanceDigest: 'b'.repeat(64) }, policyEpoch: 3, emergencyEpoch: 0,
   } satisfies ExternalGitHubGrantUnsigned)
   return { secret, config: { instanceId: 'broker', statePath: join(root, 'broker.sqlite'), credentials: [{ id: 'github', provider: 'linux-protected-file', path: secretPath, maxLeaseMs: 30_000 }], grants: [grant], policyEpoch: 3, now: () => now } }
@@ -148,7 +148,7 @@ describe.skipIf(process.platform !== 'linux')('ExternalBrokerCore', () => {
     await core.close()
   })
 
-  it('projects grant-bound pull requests, checks, and reviews through the read-only GitHub grant', async () => {
+  it('projects grant-bound pull requests, checks, reviews, and exact commit checks through the read-only GitHub grant', async () => {
     const { config } = await fixture()
     const sha = 'd'.repeat(40)
     const pullRequest = { number: 7, state: 'open', merged: false, head: { ref: 'main', sha, repo: { full_name: 'owner/repository' } }, base: { ref: 'trunk', repo: { full_name: 'owner/repository' } } }
@@ -157,6 +157,7 @@ describe.skipIf(process.platform !== 'linux')('ExternalBrokerCore', () => {
       expect(input.grant.repoWorkflow).toEqual({ baseBranch: 'trunk', allowBranchCreate: false, allowPullRequest: false })
       if (input.kind === 'pull-request') return { observed: { ...pullRequest, untrusted: true } }
       if (input.kind === 'checks') return { observed: { pullRequest, headOid: sha, items: [{ id: 1, name: 'CI', status: 'completed', conclusion: 'success', head_sha: sha, app: { id: 2 } }], truncated: false, untrusted: true } }
+      if (input.kind === 'commit-checks') return { observed: { repository: 'owner/repository', headOid: sha, items: [{ id: 1, name: 'CI', status: 'completed', conclusion: 'success', head_sha: sha, app: { id: 2 } }], truncated: false, untrusted: true } }
       return { observed: { pullRequest, headOid: sha, items: [{ id: 3, state: 'APPROVED', commit_id: sha, user: { id: 4 }, submitted_at: '2026-01-01T00:00:00Z' }], truncated: false, untrusted: true } }
     })
     const core = new ExternalBrokerCore(config, { commit, inspect })
@@ -167,6 +168,15 @@ describe.skipIf(process.platform !== 'linux')('ExternalBrokerCore', () => {
     }
     expect(inspect).toHaveBeenCalledTimes(3)
     expect(commit).not.toHaveBeenCalled()
+    await core.close()
+  })
+
+  it('requires the exact requested OID for direct commit checks', async () => {
+    const { config } = await fixture(), sha = 'd'.repeat(40)
+    const inspect = vi.fn(async () => ({ observed: { repository: 'owner/repository', headOid: sha, items: [], truncated: false, untrusted: true } }))
+    const core = new ExternalBrokerCore(config, { inspect })
+    const result = await core.execute(signed(config, 'inspect', { actionId: 'commit-checks-action', callId: 'commit-checks-call', payload: { kind: 'commit-checks', commitOid: sha }, budget: { reservationId: 'commit-checks-reservation', actions: 1, bytes: 0, costMetric: 'github-api-units', maxCostUnits: 1 } }), new AbortController().signal)
+    expect(result).toMatchObject({ status: 'succeeded', result: { operation: 'inspect', kind: 'commit-checks', observed: { repository: 'owner/repository', headOid: sha } } })
     await core.close()
   })
 

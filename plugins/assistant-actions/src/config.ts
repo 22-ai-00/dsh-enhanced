@@ -43,7 +43,7 @@ const externalGrantSchema = Schema.object({
   source: Schema.object({ classification: Schema.union(['public', 'internal', 'confidential', 'restricted'] as const).required(), provenanceDigest: Schema.string().required() }).required(),
   maxCostUnits: Schema.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).required(),
   allowedOperations: Schema.array(Schema.union(['commit', 'inspect', 'pull-request'] as const)).required(),
-  allowedInspectKinds: Schema.array(Schema.union(['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'] as const)).required(),
+  allowedInspectKinds: Schema.array(Schema.union(['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews', 'commit-checks'] as const)).required(),
   verifiedDelivery: Schema.object({ ownerRouteId: Schema.string().required(), budgetId: Schema.string().required(), acceptance: Schema.union(['goal-outcome', 'goal-step'] as const) }),
 }) as Schema<ExternalActionGrantMirror>
 export const Config: Schema<Config> = Schema.object({
