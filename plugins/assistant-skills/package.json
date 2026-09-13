@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-skills",
-  "version": "0.1.32",
+  "version": "0.1.33",
   "description": "Capture independently accepted tool workflows and replay versioned skills through the current native Goal and tool authority.",
   "license": "MIT",
   "type": "module",
