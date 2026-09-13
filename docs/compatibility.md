@@ -1,6 +1,14 @@
 # 兼容性基线
 
-基本 RSI 首版的已验证 Host 精确为 `@deepseek-ai/dsh@0.1.2-rc.1`。2026-09-12 的真实安装发现，全局 DSH `0.1.5-rc.1` 携带的 `dsh-session-persistence@0.1.5-rc.2` 不再提供 Policy 事件注册所需的 `PersistenceCoordinator.assertEventsSupported`，因此无法按当前可信注册协议激活。安装器固定匹配版本并在修改 profile 前拒绝其它版本；不会跳过事件证明或静默降级用户已有 CLI。非 core 安装在 bundle add 后、setup CLI 前，从该精确 DSH manifest 解析 `@deepseek-ai/dsh-app-boot` 并调用其公开 `healProfilesModuleFallback({ installAnchor, home })`，以准备 profile 外 setup 所需的 Host peer 闭包；该 API 不组合、挂载或启动 profile。扩展支持范围需完成独立的 Host 适配与真实安装验证。
+dev 安装器的支持范围为 `>=0.1.2-rc.1 <0.2.0`：以主版本与次版本作为兼容边界，同一 `0.1.x` 内的补丁版和后续 RC 不再被精确版本检查拦截。默认新安装版为 `0.1.5-rc.1`；已有兼容 CLI 直接复用。`pinnedHostVersion` 是发布安装器默认版本的可复现记录，不是唯一允许的运行时版本。跨次版本需单独适配验证。
+
+编译和工作区测试继续使用最低支持版 `0.1.2-rc.1`，避免无意依赖新接口后破坏旧版；新版 Host 使用独立安装的真实模块闭包验证。Policy 同时支持旧 `PersistenceCoordinator.assertEventsSupported` 和新版 JSONL 的公开 `assertVersion` / `validateStoredEvents`。新版 reader 从实际 Loader 挂载的 backend 模块解析，先证明未知必需事件被拒绝，再证明注册表身份；不把审批事件标成 ignorable。现代 Session format 3 与旧 format 0 各自使用匹配的 registry 和探针。Cordis service 的 `ctx` 会随调用者变化，因此仅从其 own data descriptor 读取定义处的 Loader 元数据；运行时调用与资源仍属于当前注入 Context。
+
+DSH `0.1.5` 的 Agent factory 将尚未发布的 Agent 作为 `setup(ctx, agent)` 的第二参数传入，不再隐式提供 `ctx.agent`。Delivery（包含 native Web owner、Session lease 和背景唤醒）、Automations 与 Skills repair 均优先消费这个确切实例，所有 wrapper 转发它及原有 publication commit；仅在旧 Host 未提供第二参数时回退到旧 Context ABI。身份、owner、Policy、租约和工具限制保持在 publication 之前验证。
+
+兼容范围检查不等于全部历史数据与功能已完成新版验证。包含旧 `delivery` 来源的 v0 会话需要[离线迁移](../scripts/maintenance/README.md)，原记录会保留。新版 Host 的事件唤醒完整流程仍在修复和验证中；目前已验证启动、会话创建、Policy 事件冷读及旧 Delivery 会话迁移。
+
+2026-09-12 发布的 `0.1.31` 曾因缺少新版 persistence 适配而固定 Host 为 `0.1.2-rc.1`；这是旧版安装器的限制。新版兼容探针可通过 `node scripts/e2e/session-persistence-compat.mjs /absolute/path/to/dsh` 运行：三个独立进程分别写盘、验证未注册必需事件拒绝、注册后冷读恢复。它只读取指定 CLI 的模块，数据写入临时目录。非 core 安装仍从实际 CLI 所属 manifest 精确解析 `dsh-app-boot`，调用公开 `healProfilesModuleFallback({ installAnchor, home })` 准备 Host peer 闭包；校验的是可执行文件与包的身份，不要求等于默认安装版本。
 
 Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc.1` 的 `observeSession(..., { projectionMode: 'none' })`，读取完成会话后释放 observation，不创建执行 Agent。缺少服务时返回 `unavailable`；Skills 在服务就绪后重新核验待处理授权。`verified-workflow-source/v1` 可附带只作来源记录、永不重放的 `failedObservations`，成功步骤语义不变。新 owner bridge 的多回合来源以可选 `segments` 保留连续执行记录，v1 顶层仍指向最终验收回合；既有手动单回合 API 不返回该字段。自动提取需成套升级 Goals 与 Skills；`skill_capture(start_native_rounds: true)` 仅在登记成功后使用原生 `concludeTurn()` 交接，默认仍允许同一 owner 回合组合授权。升级验证包括冷会话读取、授权撤销、失败观察隔离和真实目标交接后重启复用。
 

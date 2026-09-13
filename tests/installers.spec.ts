@@ -6065,7 +6065,7 @@ describe('one-click installers', () => {
       mkdir(dirname(copiedHelper), { recursive: true }),
     ])
     await writeFile(join(dshPackage, 'package.json'), JSON.stringify({
-      name: '@deepseek-ai/dsh', version: '0.1.2-rc.1', type: 'module', exports: './lib/bin.js', bin: { dsh: 'lib/bin.js' }, dependencies: { yaml: '^2.9.0' },
+      name: '@deepseek-ai/dsh', version: '0.1.5-rc.1', type: 'module', exports: './lib/bin.js', bin: { dsh: 'lib/bin.js' }, dependencies: { yaml: '^2.9.0' },
     }))
     await writeFile(join(dshPackage, 'lib', 'bin.js'), '')
     await symlink(dirname(yamlManifest), join(dshPackage, 'node_modules', 'yaml'))
@@ -6142,10 +6142,18 @@ describe('one-click installers', () => {
       expect(result.stderr).toContain('must have string id fields')
     }
     const exactManifest = await readFile(join(dshPackage, 'package.json'), 'utf8')
-    await writeFile(join(dshPackage, 'package.json'), exactManifest.replace('0.1.2-rc.1', '0.1.2-rc.2'))
-    const wrongVersion = run(source)
-    expect(wrongVersion.status).not.toBe(0)
-    expect(wrongVersion.stderr).toContain('canonical DSH executable')
+    const withHostVersion = (version: string) => JSON.stringify({ ...JSON.parse(exactManifest), version })
+    for (const version of ['0.1.5-rc.2', '0.1.2-rc.1', '0.1.2-rc.0a', '0.1.2-zeta.1']) {
+      await writeFile(join(dshPackage, 'package.json'), withHostVersion(version))
+      const acceptedVersion = run(source)
+      expect(acceptedVersion.status, `${version}: ${acceptedVersion.stderr}`).toBe(0)
+    }
+    for (const version of ['0.1.2-rc', '0.1.2-rc.0', '0.1.2-rc.01', '0.2.0-rc.1', 'malformed']) {
+      await writeFile(join(dshPackage, 'package.json'), withHostVersion(version))
+      const rejectedVersion = run(source)
+      expect(rejectedVersion.status, version).not.toBe(0)
+      expect(rejectedVersion.stderr).toContain('canonical DSH executable')
+    }
     await writeFile(join(dshPackage, 'package.json'), exactManifest)
     const forgedRoot = join(root, 'forged-host')
     const forgedShim = join(forgedRoot, 'cli', 'node_modules', '.bin', 'dsh')
@@ -6490,7 +6498,7 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('目标 profile：personal-web')
-    expect(result.stdout).toContain('@deepseek-ai/dsh@0.1.2-rc.1')
+    expect(result.stdout).toContain('@deepseek-ai/dsh@0.1.5-rc.1')
     expect(result.stdout).toContain('@dsh-enhanced/personal-assistant@0.2.0')
     expect(result.stdout).toContain('@dsh-enhanced/plugin-control-plane@0.2.0')
     expect(result.stdout).not.toContain('@dsh-enhanced/lark-channel@0.2.0')
@@ -6724,7 +6732,7 @@ printf '%s\\n' '{not-json'
     ], dshHome)
 
     expect(result.status).toBe(2)
-    expect(result.stderr).toContain('仅支持 DSH 0.1.2-rc.1')
+    expect(result.stderr).toContain('支持 DSH >=0.1.2-rc.1 <0.2.0')
   })
 
   test('remote npm installer exports the verified range paired with its pinned common', async () => {
@@ -6968,7 +6976,7 @@ cp "$REMOTE_COMMON" "$4"
     expect(result.status, result.stderr).toBe(0)
   })
 
-  test('keeps an installed DSH when it exactly matches the supported version', async () => {
+  test('keeps an installed DSH when it is within the supported range', async () => {
     const root = await temporaryDshHome()
     const fakeBin = join(root, 'bin')
     const logPath = join(root, 'commands.log')
@@ -6990,7 +6998,7 @@ printf 'npm %s\n' "$*" >> "$INSTALL_LOG"
     })
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('DSH 已安装且版本匹配：0.1.2-rc.1')
+    expect(result.stdout).toContain('DSH 已安装且版本兼容：0.1.2-rc.1')
     expect(await readFile(logPath, 'utf8')).toBe('')
   })
 
@@ -7120,9 +7128,8 @@ if [[ "${'$'}{1:-}" == '--version' ]]; then printf '11.7.0\\n'; else printf 'pnp
     expect(await readFile(join(dshHome, 'profiles', 'node_modules', '.host-fallback-healed'), 'utf8')).toBe('exact-host')
   })
 
-  test('rejects an installed newer DSH before npm, profile, or configuration side effects', async () => {
+  test('keeps a later compatible installed DSH without invoking npm', async () => {
     const root = await temporaryDshHome()
-    const dshHome = join(root, 'dsh-home')
     const fakeBin = join(root, 'bin')
     const logPath = join(root, 'commands.log')
     await mkdir(fakeBin, { recursive: true })
@@ -7135,17 +7142,29 @@ printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
 printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
 `)
 
-    const result = spawnSync('/bin/bash', [localInstaller, '--lark', 'skip'], {
-      cwd: repoRoot,
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_ensure_dsh 0.1.5-rc.1 0 0',
+      'installer-test', installerLibrary,
+    ], {
       encoding: 'utf8',
-      env: { PATH: `${fakeBin}:/usr/bin:/bin`, DSH_HOME: dshHome, INSTALL_LOG: logPath },
+      env: { PATH: `${fakeBin}:/usr/bin:/bin`, INSTALL_LOG: logPath },
     })
 
-    expect(result.status).toBe(2)
-    expect(result.stderr).toContain('检测到 DSH 0.1.5-rc.1')
-    expect(result.stderr).toContain('DSH 0.1.2-rc.1 的独立 CLI')
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('DSH 已安装且版本兼容：0.1.5-rc.1')
     expect(await readFile(logPath, 'utf8')).toBe('')
-    expect(existsSync(dshHome)).toBe(false)
+  })
+
+  test('upgrade executes with an installed later compatible Host without changing the global npm toolchain', async () => {
+    const f = await lifecycleFixture()
+    const dsh = join(f.fakeBin, 'dsh')
+    await writeFile(dsh, (await readFile(dsh, 'utf8')).replace("printf '0.1.2-rc.1\\n'", "printf '0.1.5-rc.1\\n'"))
+    const result = runInstaller(localInstaller, [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--scenario', 'web',
+    ], f.dshHome, undefined, { ...lifecycleEnvironment(f.dshHome, f.fakeBin), PATH: `${f.fakeBin}:${process.env.PATH ?? ''}` })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('生命周期事务使用现有 DSH：0.1.5-rc.1')
+    expect(await readFile(f.operationLog, 'utf8')).not.toContain('npm ')
   })
 
   test('rejects a requested unsupported DSH version even when acknowledgement is supplied', async () => {
@@ -7154,14 +7173,14 @@ printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
       '--dry-run', '--lark', 'skip', '--dsh-version', '0.1.0-rc.8',
     ], dshHome)
     expect(blocked.status).toBe(2)
-    expect(blocked.stderr).toContain('仅支持 DSH 0.1.2-rc.1')
+    expect(blocked.stderr).toContain('支持 DSH >=0.1.2-rc.1 <0.2.0')
     expect(blocked.stdout).not.toContain('dsh plugin')
 
     const acknowledged = runInstaller(localInstaller, [
       '--dry-run', '--lark', 'skip', '--dsh-version', '0.1.0-rc.8', '--ack-unverified-host',
     ], dshHome)
     expect(acknowledged.status).toBe(2)
-    expect(acknowledged.stderr).toContain('仅支持 DSH 0.1.2-rc.1')
+    expect(acknowledged.stderr).toContain('支持 DSH >=0.1.2-rc.1 <0.2.0')
     expect(acknowledged.stdout).not.toContain('@deepseek-ai/dsh@0.1.0-rc.8')
 
     const override = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], dshHome, undefined, {
@@ -7170,6 +7189,17 @@ printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
     expect(override.status).toBe(2)
     expect(override.stderr).toContain('Host pin 与安装逻辑不一致')
     expect(override.stdout).not.toContain('dsh plugin')
+  })
+
+  test('accepts supported 0.1 release candidates and rejects next-line or malformed Host versions', () => {
+    const result = spawnSync('/bin/bash', ['-c', [
+      'source "$1"',
+      'dsh_enhanced_require_pinned_host_version 0.1.5-rc.1',
+      '! dsh_enhanced_require_pinned_host_version 0.2.0-rc.1',
+      '! dsh_enhanced_require_pinned_host_version 0.1.5-rc.1-invalid!',
+    ].join('; '), 'installer-test', installerLibrary], { encoding: 'utf8' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('支持 DSH >=0.1.2-rc.1 <0.2.0')
   })
 
   test('local installer installs the exact supported DSH on a fresh machine and executes build, install, and validation', async () => {
@@ -7188,7 +7218,7 @@ if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'dsh-new'), `#!/bin/bash
-if [[ "\${1:-}" == '--version' ]]; then printf '0.1.2-rc.1\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.5-rc.1\\n'; exit 0; fi
 printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
 if [[ "$*" == *'--no-open --port 0'* ]]; then
   printf 'dsh web: http://127.0.0.1:43210\\n'
@@ -7197,9 +7227,9 @@ fi
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
-if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.2-rc.1\\n'; exit 0; fi
+if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.5-rc.1\\n'; exit 0; fi
 if [[ "\${1:-}" == 'prefix' ]]; then printf '%s\\n' "$FAKE_PREFIX"; exit 0; fi
-if [[ "$*" == 'install --global @deepseek-ai/dsh@0.1.2-rc.1' ]]; then
+if [[ "$*" == 'install --global @deepseek-ai/dsh@0.1.5-rc.1' ]]; then
   cp "$FAKE_BIN/dsh-new" "$FAKE_BIN/dsh"
   chmod 755 "$FAKE_BIN/dsh"
 fi
@@ -7223,7 +7253,7 @@ printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
 
     expect(result.status, result.stderr).toBe(0)
     const log = await readFile(logPath, 'utf8')
-    expect(log).toContain('npm install --global @deepseek-ai/dsh@0.1.2-rc.1')
+    expect(log).toContain('npm install --global @deepseek-ai/dsh@0.1.5-rc.1')
     expect(log).toContain('pnpm install')
     expect(log).toContain('pnpm build')
     expect(log).toContain('dsh plugin --profile web add')

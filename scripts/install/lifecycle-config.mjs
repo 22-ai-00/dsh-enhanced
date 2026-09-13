@@ -21,7 +21,48 @@ const lifecycleMarkers = new Map([
   ['@dsh-enhanced/assistant-evolution', 'supervised'],
 ])
 
-const pinnedHostVersion = '0.1.2-rc.1'
+const prereleaseIdentifiers = value => {
+  if (value === undefined) return undefined
+  const identifiers = value.split('.')
+  if (identifiers.some(identifier => identifier.length === 0 || !/^[0-9A-Za-z-]+$/u.test(identifier)
+    || (/^\d+$/u.test(identifier) && !/^(0|[1-9]\d*)$/u.test(identifier)))) return undefined
+  return identifiers
+}
+
+const comparePrerelease = (left, right) => {
+  if (left === undefined) return right === undefined ? 0 : 1
+  if (right === undefined) return -1
+  const length = Math.max(left.length, right.length)
+  for (let index = 0; index < length; index += 1) {
+    const a = left[index], b = right[index]
+    if (a === undefined) return -1
+    if (b === undefined) return 1
+    if (a === b) continue
+    const aNumeric = /^\d+$/u.test(a), bNumeric = /^\d+$/u.test(b)
+    if (aNumeric && bNumeric) return BigInt(a) < BigInt(b) ? -1 : 1
+    if (aNumeric) return -1
+    if (bNumeric) return 1
+    return a < b ? -1 : 1
+  }
+  return 0
+}
+
+const compatibleHostVersion = value => {
+  if (typeof value !== 'string') return false
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u.exec(value)
+  if (match === null) return false
+  const [, major, minor, patch, prerelease] = match
+  const patchNumber = Number(patch)
+  if (Number(major) !== 0 || Number(minor) !== 1 || patchNumber < 2) return false
+  const identifiers = prereleaseIdentifiers(prerelease)
+  if (prerelease !== undefined && identifiers === undefined) return false
+  // Match common.sh's SemVer range behavior exactly: the floor's same-core
+  // comparator admits any later-precedence prerelease of 0.1.2, while later
+  // patches remain restricted to the verified rc channel.
+  if (prerelease === undefined) return true
+  if (patchNumber === 2) return comparePrerelease(identifiers, ['rc', '1']) >= 0
+  return identifiers[0] === 'rc'
+}
 
 async function hostRequire(dshExecutable) {
   const executable = await realpath(dshExecutable)
@@ -29,7 +70,7 @@ async function hostRequire(dshExecutable) {
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
     const bin = typeof manifest?.bin === 'string' ? manifest.bin : manifest?.bin?.dsh
     const packageRoot = await realpath(dirname(manifestPath))
-    if (manifest?.name !== '@deepseek-ai/dsh' || manifest.version !== pinnedHostVersion || typeof bin !== 'string' || bin.length === 0 || isAbsolute(bin)) return undefined
+    if (manifest?.name !== '@deepseek-ai/dsh' || !compatibleHostVersion(manifest.version) || typeof bin !== 'string' || bin.length === 0 || isAbsolute(bin)) return undefined
     const entry = resolve(packageRoot, bin)
     if (!inside(packageRoot, entry)) return undefined
     const canonicalEntry = await realpath(entry)
