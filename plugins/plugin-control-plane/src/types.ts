@@ -526,10 +526,138 @@ export interface OperationReceipt<T> {
   createdAt: number
 }
 
+/**
+ * Exact post-activation target a watch is pinned to. `integrity` is the
+ * owner-provided immutable package integrity from the admitted catalog; a watch
+ * never silently follows a package that was re-published under the same version.
+ */
+export interface WatchExactTarget {
+  package: string
+  version: string
+  integrity: string
+}
+
+/** Post-activation Host health probe. Unlike pipeline phases it has no exit gate. */
+export interface PostActivationHealthEvidence {
+  kind: 'post-activation-health'
+  checks: number
+  failures: number
+  probeDigest: string
+}
+
+/**
+ * Signed post-activation observation emitted by the deployment-owned Host
+ * authority. `regressed` is independent failure evidence; `healthy` is positive
+ * evidence that must never close a watch on its own.
+ */
+export interface PostActivationObservationReceipt {
+  schemaVersion: 1
+  observationId: string
+  authority: string
+  keyId: string
+  installationId: string
+  planId: string
+  planDigest: string
+  activationId: string
+  fence: number
+  package: string
+  version: string
+  integrity: string
+  disposition: 'regressed' | 'healthy'
+  evidence: PostActivationHealthEvidence
+  evidenceDigest: string
+  hostGeneration: number
+  observedAt: number
+  expiresAt: number
+  signature: string
+}
+
+export interface VerifiedPostActivationObservation extends Omit<PostActivationObservationReceipt, 'signature'> {
+  signatureDigest: string
+}
+
+export interface PostActivationObservationAuthority {
+  verify(receipt: PostActivationObservationReceipt, plan: PluginActivationPlan, exact: WatchExactTarget):
+    Promise<VerifiedPostActivationObservation>
+}
+
+/**
+ * Owner-authoritative withdrawal of a previously activated exact version. It is
+ * signed by an approval root (kept independent of the Host roots by trust config)
+ * and is the only evidence that drives a `retracted` closure.
+ */
+export interface ActivationRetractionReceipt {
+  schemaVersion: 1
+  retractionId: string
+  authority: string
+  keyId: string
+  installationId: string
+  planId: string
+  planDigest: string
+  activationId: string
+  fence: number
+  package: string
+  version: string
+  integrity: string
+  principal: string
+  reason: string
+  decidedAt: number
+  expiresAt: number
+  signature: string
+}
+
+export interface VerifiedActivationRetraction extends Omit<ActivationRetractionReceipt, 'signature'> {
+  signatureDigest: string
+}
+
+export interface ActivationRetractionAuthority {
+  verify(receipt: ActivationRetractionReceipt, plan: PluginActivationPlan, exact: WatchExactTarget):
+    Promise<VerifiedActivationRetraction>
+}
+
+export type ActivationWatchState = 'watching' | 'closed-regressed' | 'closed-retracted'
+
+export interface ActivationWatch {
+  planId: string
+  exact: WatchExactTarget
+  activationId: string
+  fence: number
+  state: ActivationWatchState
+  revision: number
+  startedAt: number
+  updatedAt: number
+  /** Highest Host generation acknowledged by an applied observation. */
+  lastHostGeneration: number
+  /** Count of applied positive (`healthy`) observations; they never close a watch. */
+  healthyObservations: number
+  close?: {
+    disposition: 'regressed' | 'retracted'
+    at: number
+    evidenceId: string
+    signatureDigest: string
+  }
+}
+
+/** One append-only signed post-activation observation read back from the ledger. */
+export interface ActivationWatchEvidenceRecord {
+  observationId: string
+  planId: string
+  disposition: 'regressed' | 'healthy' | 'retracted'
+  receiptDigest: string
+  signatureDigest: string
+  hostGeneration: number
+  failures: number
+  checks: number
+  createdAt: number
+}
+
 export interface PluginControlPlaneHealth {
   gaps: number
   readyPlans: number
   activeActivations: number
   failed: number
   rollbackPending: number
+  watchingActivations: number
+  closedRegressed: number
+  closedRetracted: number
 }

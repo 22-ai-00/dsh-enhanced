@@ -3,7 +3,7 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 11
+export const controlPlaneSchemaVersion = 12
 
 export function controlPlaneOperationReceiptDigest(idempotencyKey: string, operation: string, inputDigest: string,
   resultJson: string, createdAt: number): string {
@@ -253,7 +253,55 @@ function createCurrent(database: DatabaseSync): void {
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX source_publish_reconciliations_release ON source_publish_reconciliations(plan_id, release_fence, created_at);
 
-    PRAGMA user_version = 11;
+    -- Post-activation quality watch for a promoted plugin cohort. A watch is an
+    -- independent lifecycle from the activation state machine: the activated
+    -- state has no exit and its backup/stage are physically removed, so
+    -- post-promotion quality is tracked here against the exact immutable
+    -- package@version+integrity rather than by trying to re-open an activation.
+    CREATE TABLE activation_watch (
+      plan_id TEXT PRIMARY KEY,
+      package_name TEXT NOT NULL,
+      package_version TEXT NOT NULL,
+      package_integrity TEXT NOT NULL,
+      activation_id TEXT NOT NULL,
+      fence INTEGER NOT NULL CHECK(fence >= 1),
+      state TEXT NOT NULL CHECK(state IN ('watching', 'closed-regressed', 'closed-retracted')),
+      revision INTEGER NOT NULL CHECK(revision >= 1),
+      last_host_generation INTEGER NOT NULL DEFAULT 0 CHECK(last_host_generation >= 0),
+      healthy_observations INTEGER NOT NULL DEFAULT 0 CHECK(healthy_observations >= 0),
+      close_disposition TEXT CHECK(close_disposition IS NULL OR close_disposition IN ('regressed', 'retracted')),
+      close_at INTEGER,
+      close_evidence_id TEXT,
+      close_signature_digest TEXT CHECK(close_signature_digest IS NULL OR length(close_signature_digest) = 64),
+      started_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      CHECK(
+        (state = 'watching' AND close_disposition IS NULL AND close_at IS NULL AND close_evidence_id IS NULL AND close_signature_digest IS NULL) OR
+        (state IN ('closed-regressed', 'closed-retracted') AND close_disposition IS NOT NULL AND close_at IS NOT NULL
+          AND close_evidence_id IS NOT NULL AND close_signature_digest IS NOT NULL)
+      ),
+      FOREIGN KEY(plan_id) REFERENCES activation_plans(id) ON DELETE RESTRICT
+    ) STRICT, WITHOUT ROWID;
+
+    -- Append-only signed observations. Positive healthy rows are kept as
+    -- evidence but never close a watch; only a regressed Host observation or an
+    -- owner retraction transitions the watch to a terminal state.
+    CREATE TABLE activation_watch_evidence (
+      observation_id TEXT PRIMARY KEY,
+      plan_id TEXT NOT NULL,
+      disposition TEXT NOT NULL CHECK(disposition IN ('regressed', 'healthy', 'retracted')),
+      receipt_digest TEXT NOT NULL CHECK(length(receipt_digest) = 64),
+      signature_digest TEXT NOT NULL CHECK(length(signature_digest) = 64),
+      receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object'),
+      host_generation INTEGER NOT NULL DEFAULT 0 CHECK(host_generation >= 0),
+      failures INTEGER NOT NULL DEFAULT 0 CHECK(failures >= 0),
+      checks INTEGER NOT NULL DEFAULT 0 CHECK(checks >= 0),
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY(plan_id) REFERENCES activation_watch(plan_id) ON DELETE RESTRICT
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX activation_watch_evidence_plan ON activation_watch_evidence(plan_id, created_at);
+
+    PRAGMA user_version = 12;
   `)
 }
 
@@ -658,6 +706,78 @@ function migrateV10ToV11(database: DatabaseSync): void {
   } catch (error) { database.exec('ROLLBACK'); throw error }
 }
 
+function migrateV11ToV12(database: DatabaseSync): void {
+  // IF NOT EXISTS makes the migration idempotent when a database was created with
+  // the current schema and its user_version was rolled back to exercise the full
+  // migration chain (the v6/v8 fixtures do this). A real v11 database can never
+  // contain these table names, so the guard cannot mask a structurally different
+  // legacy table in production.
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS activation_watch (
+        plan_id TEXT PRIMARY KEY,
+        package_name TEXT NOT NULL,
+        package_version TEXT NOT NULL,
+        package_integrity TEXT NOT NULL,
+        activation_id TEXT NOT NULL,
+        fence INTEGER NOT NULL CHECK(fence >= 1),
+        state TEXT NOT NULL CHECK(state IN ('watching', 'closed-regressed', 'closed-retracted')),
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        last_host_generation INTEGER NOT NULL DEFAULT 0 CHECK(last_host_generation >= 0),
+        healthy_observations INTEGER NOT NULL DEFAULT 0 CHECK(healthy_observations >= 0),
+        close_disposition TEXT CHECK(close_disposition IS NULL OR close_disposition IN ('regressed', 'retracted')),
+        close_at INTEGER,
+        close_evidence_id TEXT,
+        close_signature_digest TEXT CHECK(close_signature_digest IS NULL OR length(close_signature_digest) = 64),
+        started_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        CHECK(
+          (state = 'watching' AND close_disposition IS NULL AND close_at IS NULL AND close_evidence_id IS NULL AND close_signature_digest IS NULL) OR
+          (state IN ('closed-regressed', 'closed-retracted') AND close_disposition IS NOT NULL AND close_at IS NOT NULL
+            AND close_evidence_id IS NOT NULL AND close_signature_digest IS NOT NULL)
+        ),
+        FOREIGN KEY(plan_id) REFERENCES activation_plans(id) ON DELETE RESTRICT
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE IF NOT EXISTS activation_watch_evidence (
+        observation_id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL,
+        disposition TEXT NOT NULL CHECK(disposition IN ('regressed', 'healthy', 'retracted')),
+        receipt_digest TEXT NOT NULL CHECK(length(receipt_digest) = 64),
+        signature_digest TEXT NOT NULL CHECK(length(signature_digest) = 64),
+        receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object'),
+        host_generation INTEGER NOT NULL DEFAULT 0 CHECK(host_generation >= 0),
+        failures INTEGER NOT NULL DEFAULT 0 CHECK(failures >= 0),
+        checks INTEGER NOT NULL DEFAULT 0 CHECK(checks >= 0),
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY(plan_id) REFERENCES activation_watch(plan_id) ON DELETE RESTRICT
+      ) STRICT, WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS activation_watch_evidence_plan ON activation_watch_evidence(plan_id, created_at);
+    `)
+    // Backfill watches for plans already promoted before the watch lifecycle existed.
+    // The exact target is reconstructed from the immutable candidate snapshot pinned
+    // in the plan row (candidate_json), never from a mutable current catalog.
+    const activated = database.prepare(`SELECT id, candidate_json, activation_id, activation_fence, updated_at
+      FROM activation_plans WHERE status = 'activated'`).all() as Array<{
+        id: string; candidate_json: string; activation_id: string | null; activation_fence: number; updated_at: number
+      }>
+    const insert = database.prepare(`INSERT INTO activation_watch (plan_id, package_name, package_version, package_integrity,
+      activation_id, fence, state, revision, last_host_generation, healthy_observations, started_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'watching', 1, 0, 0, ?, ?)`)
+    for (const row of activated) {
+      const candidate = JSON.parse(row.candidate_json) as { package?: unknown; version?: unknown; integrity?: unknown }
+      if (typeof candidate.package !== 'string' || typeof candidate.version !== 'string' || typeof candidate.integrity !== 'string'
+        || typeof row.activation_id !== 'string' || row.activation_fence < 1) {
+        throw new ControlPlaneDatabaseError('unsafe-file', 'legacy activated plan has an invalid immutable candidate binding')
+      }
+      insert.run(row.id, candidate.package, candidate.version, candidate.integrity,
+        row.activation_id, row.activation_fence, row.updated_at, row.updated_at)
+    }
+    database.exec('PRAGMA user_version = 12; COMMIT')
+  } catch (error) { database.exec('ROLLBACK'); throw error }
+}
+
 export function openControlPlaneDatabase(path: string): DatabaseSync {
   prepare(path)
   const database = new DatabaseSync(path)
@@ -677,6 +797,7 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       if (version <= 8) migrateV8ToV9(database)
       if (version <= 9) migrateV9ToV10(database)
       if (version <= 10) migrateV10ToV11(database)
+      if (version <= 11) migrateV11ToV12(database)
     }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database

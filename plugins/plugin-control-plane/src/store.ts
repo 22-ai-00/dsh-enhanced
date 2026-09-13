@@ -7,6 +7,10 @@ import { parseSourcePublishReconciliationReceipt, parseSourcePublishReconciliati
   parseSourceReleaseReceipt, parseSourceReleaseRequest, parseVerifiedSourceReleaseAuthorization } from './release.js'
 import { controlPlaneOperationReceiptDigest, openControlPlaneDatabase } from './sqlite.js'
 import type {
+  ActivationRetractionAuthority,
+  ActivationRetractionReceipt,
+  ActivationWatch,
+  ActivationWatchEvidenceRecord,
   ApprovalAuthority,
   ApprovalReceipt,
   CapabilityGapInput,
@@ -21,6 +25,8 @@ import type {
   PluginActivationPlan,
   PluginControlPlaneHealth,
   PluginSourcePlan,
+  PostActivationObservationAuthority,
+  PostActivationObservationReceipt,
   SourcePublishReconciliationAuthority,
   SourcePublishReconciliationReceipt,
   SourcePublishReconciliationRequest,
@@ -253,6 +259,21 @@ interface SourcePublishReconciliationRow {
   receipt_digest: string | null; receipt_json: string | null; created_at: number; completed_at: number | null; applied_at: number | null
 }
 
+interface WatchRow {
+  plan_id: string; package_name: string; package_version: string; package_integrity: string
+  activation_id: string; fence: number; state: ActivationWatch['state']; revision: number
+  last_host_generation: number; healthy_observations: number
+  close_disposition: 'regressed' | 'retracted' | null; close_at: number | null
+  close_evidence_id: string | null; close_signature_digest: string | null
+  started_at: number; updated_at: number
+}
+
+interface WatchEvidenceRow {
+  observation_id: string; plan_id: string; disposition: ActivationWatchEvidenceRecord['disposition']
+  receipt_digest: string; signature_digest: string; receipt_json: string
+  host_generation: number; failures: number; checks: number; created_at: number
+}
+
 function gapFromRow(row: GapRow): StoredCapabilityGap {
   if (!DIGEST.test(row.input_digest) || !Number.isSafeInteger(row.revision) || row.revision < 1) throw new ControlPlaneStoreError('invalid-state', 'stored capability gap is corrupt')
   return {
@@ -262,6 +283,86 @@ function gapFromRow(row: GapRow): StoredCapabilityGap {
     status: row.status, revision: row.revision, ...(row.candidate_id === null ? {} : { candidateId: row.candidate_id }),
     createdAt: row.created_at, updatedAt: row.updated_at,
   }
+}
+
+function watchFromRow(row: WatchRow): ActivationWatch {
+  const exact = { package: row.package_name, version: row.package_version, integrity: row.package_integrity }
+  const watch: ActivationWatch = {
+    planId: row.plan_id, exact, activationId: row.activation_id, fence: row.fence,
+    state: row.state, revision: row.revision, startedAt: row.started_at, updatedAt: row.updated_at,
+    lastHostGeneration: row.last_host_generation, healthyObservations: row.healthy_observations,
+  }
+  if (row.close_disposition === null) {
+    if (row.state !== 'watching' || row.close_at !== null || row.close_evidence_id !== null || row.close_signature_digest !== null) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored post-activation watch closure is corrupt')
+    }
+  } else {
+    if (row.close_at === null || row.close_evidence_id === null || row.close_signature_digest === null
+      || !DIGEST.test(row.close_signature_digest)
+      || (row.state !== 'closed-regressed' && row.state !== 'closed-retracted')) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored post-activation watch closure is corrupt')
+    }
+    watch.close = { disposition: row.close_disposition, at: row.close_at, evidenceId: row.close_evidence_id, signatureDigest: row.close_signature_digest }
+  }
+  return watch
+}
+
+function watchEvidenceFromRow(row: WatchEvidenceRow): ActivationWatchEvidenceRecord {
+  if (!DIGEST.test(row.receipt_digest) || !DIGEST.test(row.signature_digest)) {
+    throw new ControlPlaneStoreError('invalid-state', 'stored post-activation evidence is corrupt')
+  }
+  return {
+    observationId: row.observation_id, planId: row.plan_id, disposition: row.disposition,
+    receiptDigest: row.receipt_digest, signatureDigest: row.signature_digest, hostGeneration: row.host_generation,
+    failures: row.failures, checks: row.checks, createdAt: row.created_at,
+  }
+}
+
+function watchFromStored(value: unknown): ActivationWatch {
+  const item = objectRecord(value, 'stored post-activation watch')
+  const exactItem = objectRecord(item.exact, 'stored post-activation watch exact target')
+  const watch: ActivationWatch = {
+    planId: boundedString(item.planId, 'planId'),
+    exact: {
+      package: boundedString(exactItem.package, 'package'), version: boundedString(exactItem.version, 'version'),
+      integrity: boundedString(exactItem.integrity, 'integrity'),
+    },
+    activationId: boundedString(item.activationId, 'activationId'),
+    fence: storedInteger(item.fence, 'fence', 1),
+    state: item.state === 'watching' || item.state === 'closed-regressed' || item.state === 'closed-retracted'
+      ? item.state : (() => { throw new ControlPlaneStoreError('invalid-state', 'stored post-activation watch state is corrupt') })(),
+    revision: storedInteger(item.revision, 'revision', 1),
+    startedAt: storedInteger(item.startedAt, 'startedAt', 0),
+    updatedAt: storedInteger(item.updatedAt, 'updatedAt', 0),
+    lastHostGeneration: storedInteger(item.lastHostGeneration, 'lastHostGeneration', 0),
+    healthyObservations: storedInteger(item.healthyObservations, 'healthyObservations', 0),
+  }
+  if (item.close !== undefined) {
+    if (item.close === null) throw new ControlPlaneStoreError('invalid-state', 'stored post-activation watch closure is corrupt')
+    const close = objectRecord(item.close, 'stored post-activation watch closure')
+    if (close.disposition !== 'regressed' && close.disposition !== 'retracted') throw new ControlPlaneStoreError('invalid-state', 'stored post-activation watch closure is corrupt')
+    watch.close = {
+      disposition: close.disposition, at: storedInteger(close.at, 'close.at', 0),
+      evidenceId: boundedString(close.evidenceId, 'close.evidenceId'),
+      signatureDigest: digestField(close.signatureDigest, 'close.signatureDigest'),
+    }
+  }
+  return watch
+}
+
+function boundedString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || value === '') throw new ControlPlaneStoreError('invalid-state', `stored post-activation watch ${label} is corrupt`)
+  return value
+}
+
+function storedInteger(value: unknown, label: string, minimum: number): number {
+  if (!Number.isSafeInteger(value) || Number(value) < minimum) throw new ControlPlaneStoreError('invalid-state', `stored post-activation watch ${label} is corrupt`)
+  return Number(value)
+}
+
+function digestField(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !DIGEST.test(value)) throw new ControlPlaneStoreError('invalid-state', `stored post-activation watch ${label} is corrupt`)
+  return value
 }
 
 function activationFromRow(row: ActivationRow): PluginActivationPlan {
@@ -1110,6 +1211,142 @@ export class ControlPlaneStore {
     } catch (error) { this.#database.exec('ROLLBACK'); throw error }
   }
 
+  // -------------------------------------------------------------------------
+  // Post-activation quality watch (deployment cohort monitoring). This is an
+  // independent lifecycle from the activation state machine: Host-signed
+  // observations append evidence and a `regressed` probe closes the exact
+  // pinned version, while an owner-signed retraction closes the watch and
+  // re-opens the capability gap for re-activation. Healthy evidence is recorded
+  // but can never close a watch.
+  // -------------------------------------------------------------------------
+
+  getActivationWatch(planId: string): ActivationWatch {
+    const row = this.#database.prepare('SELECT * FROM activation_watch WHERE plan_id = ?').get(planId) as WatchRow | undefined
+    if (row === undefined) throw new ControlPlaneStoreError('not-found', 'post-activation watch not found')
+    return watchFromRow(row)
+  }
+
+  listActivationWatches(limit = 50): readonly ActivationWatch[] {
+    const rows = this.#database.prepare('SELECT * FROM activation_watch ORDER BY started_at, plan_id LIMIT ?').all(limit) as unknown as WatchRow[]
+    return rows.map(watchFromRow)
+  }
+
+  listActivationWatchEvidence(planId: string, limit = 100): readonly ActivationWatchEvidenceRecord[] {
+    const rows = this.#database.prepare(`SELECT * FROM activation_watch_evidence WHERE plan_id = ?
+      ORDER BY created_at, observation_id LIMIT ?`).all(planId, limit) as unknown as WatchEvidenceRow[]
+    return rows.map(watchEvidenceFromRow)
+  }
+
+  async recordPostActivationObservation(input: { idempotencyKey: string; expectedRevision?: number;
+    receipt: PostActivationObservationReceipt;
+    resolveAuthority: (receipt: PostActivationObservationReceipt) => PostActivationObservationAuthority }):
+    Promise<OperationReceipt<ActivationWatch>> {
+    const key = bounded(input.idempotencyKey, 'idempotencyKey', 160)
+    if (!KEY.test(key)) throw new ControlPlaneStoreError('invalid-input', 'idempotencyKey has invalid syntax')
+    const inputDigest = controlPlaneDigest({ operation: 'post-activation-observation', planId: input.receipt.planId,
+      observationId: input.receipt.observationId, receipt: input.receipt })
+    const replay = this.#watchReceipt(key, 'post-activation-observation', inputDigest)
+    if (replay !== undefined) return replay
+    const plan = this.getPlan(input.receipt.planId)
+    const watch = this.getActivationWatch(plan.id)
+    if (watch.state !== 'watching') throw new ControlPlaneStoreError('conflict', 'post-activation watch is already closed')
+    if (input.expectedRevision !== undefined && watch.revision !== input.expectedRevision) {
+      throw new ControlPlaneStoreError('conflict', 'post-activation observation targets a stale watch revision')
+    }
+    const verified = await input.resolveAuthority(input.receipt).verify(input.receipt, plan, watch.exact)
+    const now = this.#now()
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.#database.prepare('SELECT * FROM activation_watch WHERE plan_id = ?').get(plan.id) as unknown as WatchRow
+      if (current.state !== 'watching') throw new ControlPlaneStoreError('conflict', 'post-activation watch closed while evidence was verified')
+      if (verified.hostGeneration <= current.last_host_generation) throw new ControlPlaneStoreError('conflict', 'host generation must advance')
+      this.#insertWatchEvidence(verified.observationId, plan.id, verified.disposition, controlPlaneDigest(input.receipt),
+        verified.signatureDigest, verified, verified.hostGeneration, verified.evidence.failures, verified.evidence.checks, now)
+      if (verified.disposition === 'regressed') {
+        const closed = this.#database.prepare(`UPDATE activation_watch SET state = 'closed-regressed', revision = revision + 1,
+          last_host_generation = ?, updated_at = ?, close_disposition = 'regressed', close_at = ?,
+          close_evidence_id = ?, close_signature_digest = ?
+          WHERE plan_id = ? AND state = 'watching' AND revision = ?`).run(verified.hostGeneration, now, now,
+          verified.observationId, verified.signatureDigest, plan.id, current.revision)
+        if (Number(closed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'post-activation regression lost its watch CAS')
+      } else {
+        const acknowledged = this.#database.prepare(`UPDATE activation_watch SET revision = revision + 1, last_host_generation = ?,
+          healthy_observations = healthy_observations + 1, updated_at = ? WHERE plan_id = ? AND state = 'watching' AND revision = ?`).run(
+          verified.hostGeneration, now, plan.id, current.revision)
+        if (Number(acknowledged.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'post-activation observation lost its watch CAS')
+      }
+      const output = this.getActivationWatch(plan.id)
+      const operationReceipt = { idempotencyKey: key, operation: 'post-activation-observation' as const, inputDigest, result: output, createdAt: now }
+      this.#insertReceipt(operationReceipt); this.#database.exec('COMMIT'); return operationReceipt
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  async retractActivation(input: { idempotencyKey: string; expectedRevision?: number;
+    receipt: ActivationRetractionReceipt;
+    resolveAuthority: (receipt: ActivationRetractionReceipt) => ActivationRetractionAuthority }):
+    Promise<OperationReceipt<ActivationWatch>> {
+    const key = bounded(input.idempotencyKey, 'idempotencyKey', 160)
+    if (!KEY.test(key)) throw new ControlPlaneStoreError('invalid-input', 'idempotencyKey has invalid syntax')
+    const inputDigest = controlPlaneDigest({ operation: 'activation-retraction', planId: input.receipt.planId,
+      retractionId: input.receipt.retractionId, receipt: input.receipt })
+    const replay = this.#watchReceipt(key, 'activation-retraction', inputDigest)
+    if (replay !== undefined) return replay
+    const plan = this.getPlan(input.receipt.planId)
+    const watch = this.getActivationWatch(plan.id)
+    if (watch.state === 'closed-retracted') throw new ControlPlaneStoreError('conflict', 'activation is already retracted')
+    if (input.expectedRevision !== undefined && watch.revision !== input.expectedRevision) {
+      throw new ControlPlaneStoreError('conflict', 'activation retraction targets a stale watch revision')
+    }
+    const verified = await input.resolveAuthority(input.receipt).verify(input.receipt, plan, watch.exact)
+    const now = this.#now()
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.#database.prepare('SELECT * FROM activation_watch WHERE plan_id = ?').get(plan.id) as unknown as WatchRow
+      if (current.state === 'closed-retracted') throw new ControlPlaneStoreError('conflict', 'activation retracted while the decision was verified')
+      this.#insertWatchEvidence(verified.retractionId, plan.id, 'retracted', controlPlaneDigest(input.receipt),
+        verified.signatureDigest, verified, current.last_host_generation, 0, 0, now)
+      const closed = this.#database.prepare(`UPDATE activation_watch SET state = 'closed-retracted', revision = revision + 1,
+        updated_at = ?, close_disposition = 'retracted', close_at = ?, close_evidence_id = ?, close_signature_digest = ?
+        WHERE plan_id = ? AND state IN ('watching', 'closed-regressed') AND revision = ?`).run(now, now,
+        verified.retractionId, verified.signatureDigest, plan.id, current.revision)
+      if (Number(closed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'activation retraction lost its watch CAS')
+      // Owner withdrawal re-opens the capability gap so the exact failed version
+      // can only come back via a fresh catalog admission of a repaired package.
+      this.#database.prepare('DELETE FROM gap_plan_claims WHERE gap_id = ? AND plan_id = ?').run(plan.gapId, plan.id)
+      const reopened = this.#database.prepare(`UPDATE capability_gaps SET status = 'open', candidate_id = NULL,
+        revision = revision + 1, updated_at = ? WHERE id = ?`).run(now, plan.gapId)
+      if (Number(reopened.changes) !== 1) throw new ControlPlaneStoreError('invalid-state', 'activation retraction could not reopen its capability gap')
+      const output = this.getActivationWatch(plan.id)
+      const operationReceipt = { idempotencyKey: key, operation: 'activation-retraction' as const, inputDigest, result: output, createdAt: now }
+      this.#insertReceipt(operationReceipt); this.#database.exec('COMMIT'); return operationReceipt
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  #insertWatchEvidence(observationId: string, planId: string, disposition: 'regressed' | 'healthy' | 'retracted',
+    receiptDigest: string, signatureDigest: string, verified: object, hostGeneration: number,
+    failures: number, checks: number, now: number): void {
+    this.#database.prepare(`INSERT INTO activation_watch_evidence (observation_id, plan_id, disposition, receipt_digest,
+      signature_digest, receipt_json, host_generation, failures, checks, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(observationId, planId, disposition, receiptDigest, signatureDigest,
+      JSON.stringify(verified), hostGeneration, failures, checks, now)
+  }
+
+  #watchReceipt(idempotencyKey: string, operation: string, inputDigest: string): OperationReceipt<ActivationWatch> | undefined {
+    const receipt = this.#receipt<unknown>(idempotencyKey, operation, inputDigest)
+    if (receipt === undefined) return undefined
+    const snapshot = watchFromStored(receipt.result)
+    const authoritative = this.getActivationWatch(snapshot.planId)
+    // The watch may have advanced (or closed) after this operation was applied; a
+    // replay returns the snapshot recorded at the time, so only the immutable
+    // exact binding and the monotone revision are cross-checked, not the state.
+    if (controlPlaneDigest(snapshot.exact) !== controlPlaneDigest(authoritative.exact)
+      || snapshot.activationId !== authoritative.activationId || snapshot.fence !== authoritative.fence
+      || snapshot.revision > authoritative.revision || snapshot.updatedAt !== receipt.createdAt) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored watch operation receipt is not bound to authoritative state')
+    }
+    return { ...receipt, result: snapshot }
+  }
+
   #finishActivation(plan: PluginActivationPlan, fence: number, now: number): void {
     const activationId = plan.activation?.id
     if (activationId === undefined) throw new ControlPlaneStoreError('invalid-state', 'terminal activation has no identity')
@@ -1118,6 +1355,17 @@ export class ControlPlaneStore {
     if (plan.status === 'rolled-back') {
       this.#database.prepare('DELETE FROM gap_plan_claims WHERE gap_id = ? AND plan_id = ?').run(plan.gapId, plan.id)
       this.#database.prepare(`UPDATE capability_gaps SET status = 'open', candidate_id = NULL, revision = revision + 1, updated_at = ? WHERE id = ?`).run(now, plan.gapId)
+    } else if (plan.status === 'activated') {
+      // Promotion opens an independent post-activation watch pinned to the exact
+      // immutable package@version+integrity. `activated` has no exit and its
+      // backup/stage are physically removed, so quality-driven closure lives here
+      // rather than in the activation state machine.
+      const result = this.#database.prepare(`INSERT INTO activation_watch (plan_id, package_name, package_version,
+        package_integrity, activation_id, fence, state, revision, last_host_generation, healthy_observations,
+        started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'watching', 1, 0, 0, ?, ?)
+        ON CONFLICT(plan_id) DO NOTHING`).run(plan.id, plan.candidate.package, plan.candidate.version,
+        plan.candidate.integrity, activationId, fence, now, now)
+      if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('invalid-state', 'activated plan has no post-activation watch')
     }
   }
 
@@ -1673,10 +1921,16 @@ export class ControlPlaneStore {
         'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending')) AS active_activations,
       (SELECT count(*) FROM activation_plans WHERE status = 'rolled-back') +
         (SELECT count(*) FROM source_plans WHERE status IN ('local-checks-failed', 'release-failed')) AS failed,
-      (SELECT count(*) FROM activation_plans WHERE status = 'rollback-pending') AS rollback_pending`).get() as {
+      (SELECT count(*) FROM activation_plans WHERE status = 'rollback-pending') AS rollback_pending,
+      (SELECT count(*) FROM activation_watch WHERE state = 'watching') AS watching_activations,
+      (SELECT count(*) FROM activation_watch WHERE state = 'closed-regressed') AS closed_regressed,
+      (SELECT count(*) FROM activation_watch WHERE state = 'closed-retracted') AS closed_retracted`).get() as {
         gaps: number; ready_plans: number; active_activations: number; failed: number; rollback_pending: number
+        watching_activations: number; closed_regressed: number; closed_retracted: number
       }
-    return { gaps: row.gaps, readyPlans: row.ready_plans, activeActivations: row.active_activations, failed: row.failed, rollbackPending: row.rollback_pending }
+    return { gaps: row.gaps, readyPlans: row.ready_plans, activeActivations: row.active_activations, failed: row.failed,
+      rollbackPending: row.rollback_pending, watchingActivations: row.watching_activations,
+      closedRegressed: row.closed_regressed, closedRetracted: row.closed_retracted }
   }
 
   #sourcePlanReceipt(idempotencyKey: string, operation: string, inputDigest: string, planId: string): OperationReceipt<PluginSourcePlan> | undefined {

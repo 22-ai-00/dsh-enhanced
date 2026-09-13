@@ -8,12 +8,15 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { exampleIntegrityPinnedCatalog } from '../src/catalog.ts'
 import { hostAttestationEvidenceDigest, hostAttestationSigningPayload, Ed25519HostAttestationAuthority } from '../src/attestation.ts'
+import { activationRetractionSigningPayload, Ed25519ActivationRetractionAuthority,
+  Ed25519PostActivationObservationAuthority, postActivationEvidenceDigest, postActivationObservationSigningPayload } from '../src/post-activation.ts'
 import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthorizationAuthority,
   sourcePublishReconciliationEvidenceDigest, sourcePublishReconciliationRequestDigest, sourcePublishReconciliationSigningPayload,
   sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
 import { controlPlaneOperationReceiptDigest, controlPlaneSchemaVersion, openControlPlaneDatabase } from '../src/sqlite.ts'
 import { controlPlaneDigest, ControlPlaneStore, type CreateActivationPlanInput } from '../src/store.ts'
-import type { ApprovalAuthority, ApprovalReceipt, HostAttestationReceipt, PluginActivationPlan, PluginSourcePlan, SourceReleaseAuthority,
+import type { ActivationRetractionReceipt, ApprovalAuthority, ApprovalReceipt, HostAttestationReceipt,
+  HostAttestationRequirements, PluginActivationPlan, PluginSourcePlan, PostActivationObservationReceipt, SourceReleaseAuthority,
   SourcePublishReconciliationEvidence, SourcePublishReconciliationReceipt, SourceReleaseAuthorization,
   SourceReleaseAuthorizationAuthority, SourceReleaseReceipt, SourceReleaseRequest } from '../src/types.ts'
 
@@ -60,6 +63,121 @@ async function approved(target: Awaited<ReturnType<typeof fixture>>, suffix: str
 
 const releaseSignature = Buffer.alloc(64, 7).toString('base64')
 const releaseSignatureDigest = createHash('sha256').update(Buffer.from(releaseSignature, 'base64')).digest('hex')
+
+// Host-signed post-activation keys are distinct from the per-test owner approval
+// key: the two trust roots (hostAttestationKeys / approvalKeys) never overlap.
+function hostTrustKey(now: () => number = () => 1_800_000_000_000) {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+  const publicKeyPem = publicKey.export({ format: 'pem', type: 'spki' }) as string
+  return { privateKey, publicKeyPem,
+    authority: new Ed25519HostAttestationAuthority(publicKeyPem, 'host-runtime', 'host-key-1', now),
+    observationAuthority: new Ed25519PostActivationObservationAuthority(publicKeyPem, 'host-runtime', 'host-key-1', {}, now) }
+}
+
+function ownerRetractionTrustKey(now: () => number) {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519')
+  return { privateKey, authority: new Ed25519ActivationRetractionAuthority(
+    publicKey.export({ format: 'pem', type: 'spki' }) as string, 'owner-policy', 'owner-key-1', {}, now) }
+}
+
+const attestationPhases: ReadonlyArray<{ phase: HostAttestationRequirements['kind']; requirements: HostAttestationRequirements; evidence: HostAttestationReceipt['evidence'] }> = [
+  { phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 },
+    evidence: { kind: 'reload', reloaded: true, previousHostGeneration: 0, currentHostGeneration: 7, probeDigest: 'c'.repeat(64) } },
+  { phase: 'readiness', requirements: { kind: 'readiness', minimumChecks: 1 },
+    evidence: { kind: 'readiness', checks: 4, failures: 0, probeDigest: 'd'.repeat(64) } },
+  { phase: 'effect-blocked-replay', requirements: { kind: 'effect-blocked-replay', minimumDeliveryAttempts: 1, minimumToolExecutionAttempts: 1, maximumExternalEffects: 0 },
+    evidence: { kind: 'effect-blocked-replay', deliveryAttempts: 2, deliveryBlocked: 2, toolExecutionAttempts: 2, toolExecutionBlocked: 2, externalEffects: 0, replayDigest: 'e'.repeat(64) } },
+  { phase: 'shadow', requirements: { kind: 'shadow', minimumSamples: 1, maximumMismatches: 0, maximumExternalEffects: 0 },
+    evidence: { kind: 'shadow', samples: 4, mismatches: 0, externalEffects: 0, traceDigest: 'f'.repeat(64) } },
+  { phase: 'canary', requirements: { kind: 'canary', maximumExposures: 1, minimumSamples: 1, maximumFailures: 0 },
+    evidence: { kind: 'canary', exposureId: 'exposure-1', exposures: 1, samples: 4, failures: 0, traceDigest: 'a1'.repeat(32) } },
+  { phase: 'soak', requirements: { kind: 'soak', minimumWindowMs: 1_000, minimumSamples: 1, maximumFailureRate: 0 },
+    evidence: { kind: 'soak', windowStartedAt: 0, windowEndedAt: 0, samples: 4, failures: 0, traceDigest: 'a2'.repeat(32) } },
+  { phase: 'health', requirements: { kind: 'health', minimumChecks: 1, maximumFailures: 0 },
+    evidence: { kind: 'health', checks: 4, failures: 0, probeDigest: 'a3'.repeat(32) } },
+]
+
+// Drives an approved plan through claim + all seven signed Host attestation gates
+// to `activated`, mirroring the real CLI activate/attest sequence without
+// touching the filesystem or the pinned external dsh executable.
+async function promoted(target: Awaited<ReturnType<typeof fixture>>, suffix: string, host = hostTrustKey(target.now)) {
+  let plan = await approved(target, suffix)
+  plan = await target.store.claimActivation(activationClaim(plan))
+  plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, from: 'staging', to: 'awaiting-reload' })
+  let generation = 0
+  for (const [index, spec] of attestationPhases.entries()) {
+    const requirements: HostAttestationRequirements = spec.phase === 'reload'
+      ? { kind: 'reload', previousHostGeneration: target.store.latestHostGeneration(installationId) }
+      : spec.requirements
+    const operation = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision,
+      expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' }, requirements, receiptTtlMs: 10_000 })
+    generation += 1
+    let evidence = spec.evidence
+    if (spec.phase === 'reload') {
+      evidence = { kind: 'reload', reloaded: true, previousHostGeneration: (requirements as { previousHostGeneration: number }).previousHostGeneration,
+        currentHostGeneration: generation, probeDigest: 'c'.repeat(64) }
+    } else if (spec.phase === 'soak') {
+      const windowStart = target.now(); target.setNow(windowStart + 2_000)
+      evidence = { ...evidence, windowStartedAt: windowStart, windowEndedAt: target.now() } as HostAttestationReceipt['evidence']
+    }
+    const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: `host-${suffix}-${spec.phase}`,
+      authority: 'host-runtime', keyId: 'host-key-1', installationId, planId: plan.id, planDigest: plan.digest,
+      activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: operation.operationId,
+      requestDigest: operation.requestDigest, phase: spec.phase as HostAttestationReceipt['phase'], outcome: 'passed',
+      hostGeneration: generation, evidence, evidenceDigest: hostAttestationEvidenceDigest(evidence),
+      observedAt: target.now(), expiresAt: target.now() + 10_000 }
+    const receipt: HostAttestationReceipt = { ...unsigned,
+      signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), host.privateKey).toString('base64') }
+    await target.store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision,
+      expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })
+    const applied = await target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision,
+      expectedFence: plan.activation!.fence, receipt, resolveAuthority: () => host.authority,
+      idempotencyKey: `host:${suffix}:${index}` })
+    plan = applied.result
+  }
+  expect(plan.status).toBe('commit-pending')
+  plan = await target.store.claimActivation({ ...activationClaim(plan) })
+  plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence,
+    from: 'commit-pending', to: 'activated' })
+  expect(plan.status).toBe('activated')
+  return { plan, host, generation }
+}
+
+function watchObservation(
+  host: ReturnType<typeof hostTrustKey>,
+  plan: PluginActivationPlan,
+  options: { observationId: string; disposition?: 'healthy' | 'regressed'; hostGeneration: number; observedAt: number;
+    checks?: number; failures?: number; overrides?: Record<string, unknown> },
+): PostActivationObservationReceipt {
+  const disposition = options.disposition ?? 'healthy'
+  const failures = options.failures ?? (disposition === 'regressed' ? 1 : 0)
+  const evidence = { kind: 'post-activation-health' as const, checks: options.checks ?? 4, failures, probeDigest: 'b'.repeat(64) }
+  const unsigned = {
+    schemaVersion: 1 as const, observationId: options.observationId, authority: 'host-runtime', keyId: 'host-key-1',
+    installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence,
+    package: plan.candidate.package, version: plan.candidate.version, integrity: plan.candidate.integrity,
+    disposition, evidence, evidenceDigest: postActivationEvidenceDigest(evidence),
+    hostGeneration: options.hostGeneration, observedAt: options.observedAt, expiresAt: options.observedAt + 10_000,
+    ...options.overrides,
+  }
+  return { ...unsigned, signature: sign(null, Buffer.from(postActivationObservationSigningPayload(unsigned)), host.privateKey).toString('base64') }
+}
+
+function watchRetraction(
+  owner: ReturnType<typeof ownerRetractionTrustKey>,
+  plan: PluginActivationPlan,
+  options: { retractionId: string; decidedAt: number; overrides?: Record<string, unknown> },
+): ActivationRetractionReceipt {
+  const unsigned = {
+    schemaVersion: 1 as const, retractionId: options.retractionId, authority: 'owner-policy', keyId: 'owner-key-1',
+    installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence,
+    package: plan.candidate.package, version: plan.candidate.version, integrity: plan.candidate.integrity,
+    principal: 'owner@example.test', reason: 'post-canary regression accepted by owner',
+    decidedAt: options.decidedAt, expiresAt: options.decidedAt + 600_000,
+    ...options.overrides,
+  }
+  return { ...unsigned, signature: sign(null, Buffer.from(activationRetractionSigningPayload(unsigned)), owner.privateKey).toString('base64') }
+}
 
 async function reviewedSource(target: Awaited<ReturnType<typeof fixture>>, suffix: string): Promise<PluginSourcePlan> {
   const created = target.store.createSourcePlan({ gapId: gap(target.store, `source-${suffix}`).id, repository: '/canonical/repository',
@@ -982,7 +1100,206 @@ catch { process.stdout.write('busy') } finally { db.close() }`
 
   test('health exposes only fixed aggregate counters', async () => {
     const target = await fixture(); gap(target.store, 'health-counter')
-    expect(target.store.health()).toEqual({ gaps: 1, readyPlans: 0, activeActivations: 0, failed: 0, rollbackPending: 0 })
-    expect(Object.keys(target.store.health()).sort()).toEqual(['activeActivations', 'failed', 'gaps', 'readyPlans', 'rollbackPending'].sort())
+    expect(target.store.health()).toEqual({ gaps: 1, readyPlans: 0, activeActivations: 0, failed: 0, rollbackPending: 0,
+      watchingActivations: 0, closedRegressed: 0, closedRetracted: 0 })
+    expect(Object.keys(target.store.health()).sort()).toEqual(['activeActivations', 'closedRegressed', 'closedRetracted',
+      'failed', 'gaps', 'readyPlans', 'rollbackPending', 'watchingActivations'].sort())
+  })
+
+  describe('post-activation deployment cohort watch', () => {
+    test('promotion opens an exact-pinned watch without mutating the activation state machine', async () => {
+      const target = await fixture(); const { plan } = await promoted(target, 'watch-open')
+      const watch = target.store.getActivationWatch(plan.id)
+      expect(watch).toMatchObject({ planId: plan.id, state: 'watching', revision: 1,
+        lastHostGeneration: 0, healthyObservations: 0, activationId: plan.activation!.id, fence: plan.activation!.fence,
+        exact: { package: candidate.package, version: candidate.version, integrity: candidate.integrity } })
+      expect(watch.close).toBeUndefined()
+      expect(target.store.listActivationWatches()).toHaveLength(1)
+      expect(target.store.listActivationWatchEvidence(plan.id)).toEqual([])
+      expect(target.store.getPlan(plan.id).status).toBe('activated')
+      expect(target.store.health()).toMatchObject({ watchingActivations: 1, closedRegressed: 0, closedRetracted: 0 })
+    })
+
+    test('a signed regressed Host observation closes the exact pinned version and blocks later evidence', async () => {
+      const target = await fixture(); const { plan, host } = await promoted(target, 'watch-regress')
+      target.setNow(target.now() + 1_000)
+      const regressed = watchObservation(host, plan, { observationId: 'obs-regress-1', disposition: 'regressed',
+        hostGeneration: 8, observedAt: target.now() })
+      const receipt = await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:regress:1',
+        receipt: regressed, resolveAuthority: () => host.observationAuthority })
+      expect(receipt.result.state).toBe('closed-regressed')
+      expect(receipt.result.revision).toBe(2)
+      expect(receipt.result.close).toMatchObject({ disposition: 'regressed', evidenceId: 'obs-regress-1' })
+      expect(receipt.result.close?.signatureDigest).toMatch(/^[a-f0-9]{64}$/u)
+      const watch = target.store.getActivationWatch(plan.id)
+      expect(watch.state).toBe('closed-regressed')
+      expect(watch.lastHostGeneration).toBe(8)
+      const evidence = target.store.listActivationWatchEvidence(plan.id)
+      expect(evidence).toHaveLength(1)
+      expect(evidence[0]).toMatchObject({ observationId: 'obs-regress-1', disposition: 'regressed',
+        hostGeneration: 8, failures: 1, checks: 4 })
+      // Closure is a control-plane terminal state, not a physical uninstall: the
+      // activation plan itself stays in its no-exit `activated` state.
+      expect(target.store.getPlan(plan.id).status).toBe('activated')
+      expect(target.store.health()).toMatchObject({ watchingActivations: 0, closedRegressed: 1, closedRetracted: 0 })
+      target.setNow(target.now() + 1_000)
+      const healthy = watchObservation(host, plan, { observationId: 'obs-after-close',
+        hostGeneration: 9, observedAt: target.now() })
+      await expect(target.store.recordPostActivationObservation({ idempotencyKey: 'watch:after-close',
+        receipt: healthy, resolveAuthority: () => host.observationAuthority })).rejects.toThrow(/already closed/u)
+    })
+
+    test('an owner retraction closes the watching deployment, reopens the gap, and deletes its plan claim', async () => {
+      const target = await fixture(); const { plan } = await promoted(target, 'watch-retract')
+      const gapBefore = target.store.getGap(plan.gapId); expect(gapBefore.status).toBe('closed')
+      const owner = ownerRetractionTrustKey(target.now)
+      target.setNow(target.now() + 1_000)
+      const receipt = await target.store.retractActivation({ idempotencyKey: 'watch:retract:1',
+        receipt: watchRetraction(owner, plan, { retractionId: 'retract-1', decidedAt: target.now() }),
+        resolveAuthority: () => owner.authority })
+      expect(receipt.result.state).toBe('closed-retracted')
+      expect(receipt.result.close).toMatchObject({ disposition: 'retracted', evidenceId: 'retract-1' })
+      const reopenedGap = target.store.getGap(plan.gapId)
+      expect(reopenedGap.status).toBe('open')
+      expect('candidateId' in reopenedGap).toBe(false)
+      expect(reopenedGap.revision).toBe(gapBefore.revision + 1)
+      const claims = (new DatabaseSync(target.path).prepare('SELECT count(*) AS count FROM gap_plan_claims WHERE gap_id = ? AND plan_id = ?')
+        .get(plan.gapId, plan.id) as { count: number }).count
+      expect(claims).toBe(0)
+      const evidence = target.store.listActivationWatchEvidence(plan.id)
+      expect(evidence).toHaveLength(1)
+      expect(evidence[0]).toMatchObject({ observationId: 'retract-1', disposition: 'retracted', hostGeneration: 0 })
+      expect(target.store.health()).toMatchObject({ watchingActivations: 0, closedRegressed: 0, closedRetracted: 1 })
+      await expect(target.store.retractActivation({ idempotencyKey: 'watch:retract:2',
+        receipt: watchRetraction(owner, plan, { retractionId: 'retract-2', decidedAt: target.now() }),
+        resolveAuthority: () => owner.authority })).rejects.toThrow(/already retracted/u)
+    })
+
+    test('an owner retraction is still accepted after a regression closure', async () => {
+      const target = await fixture(); const { plan, host } = await promoted(target, 'watch-regress-then-retract')
+      target.setNow(target.now() + 1_000)
+      await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:regress:1',
+        receipt: watchObservation(host, plan, { observationId: 'obs-regress-1', disposition: 'regressed',
+          hostGeneration: 8, observedAt: target.now() }), resolveAuthority: () => host.observationAuthority })
+      const owner = ownerRetractionTrustKey(target.now)
+      const receipt = await target.store.retractActivation({ idempotencyKey: 'watch:retract:1',
+        receipt: watchRetraction(owner, plan, { retractionId: 'retract-1', decidedAt: target.now() }),
+        resolveAuthority: () => owner.authority })
+      expect(receipt.result.state).toBe('closed-retracted')
+      expect(receipt.result.close).toMatchObject({ disposition: 'retracted' })
+      expect(target.store.getGap(plan.gapId).status).toBe('open')
+    })
+
+    test('positive healthy evidence accumulates but never closes the watch', async () => {
+      const target = await fixture(); const { plan, host } = await promoted(target, 'watch-healthy')
+      target.setNow(target.now() + 1_000)
+      const first = await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:healthy:1',
+        receipt: watchObservation(host, plan, { observationId: 'obs-healthy-1', hostGeneration: 8, observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      expect(first.result).toMatchObject({ state: 'watching', revision: 2, healthyObservations: 1, lastHostGeneration: 8 })
+      target.setNow(target.now() + 1_000)
+      const second = await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:healthy:2',
+        receipt: watchObservation(host, plan, { observationId: 'obs-healthy-2', hostGeneration: 9, observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      expect(second.result).toMatchObject({ state: 'watching', revision: 3, healthyObservations: 2, lastHostGeneration: 9 })
+      expect(second.result.close).toBeUndefined()
+      const evidence = target.store.listActivationWatchEvidence(plan.id)
+      expect(evidence.map(item => item.disposition)).toEqual(['healthy', 'healthy'])
+      expect(target.store.health()).toMatchObject({ watchingActivations: 1, closedRegressed: 0, closedRetracted: 0 })
+    })
+
+    test('the watch survives store restart and later regression closure is durable', async () => {
+      const target = await fixture(); const { plan, host } = await promoted(target, 'watch-restart')
+      target.setNow(target.now() + 1_000)
+      await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:healthy:1',
+        receipt: watchObservation(host, plan, { observationId: 'obs-healthy-1', hostGeneration: 8, observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      target.store.close()
+      const reopened = new ControlPlaneStore({ path: target.path, now: target.now }); target.store = reopened
+      expect(reopened.getActivationWatch(plan.id)).toMatchObject({ state: 'watching', revision: 2,
+        healthyObservations: 1, lastHostGeneration: 8 })
+      target.setNow(target.now() + 1_000)
+      await reopened.recordPostActivationObservation({ idempotencyKey: 'watch:regress:1',
+        receipt: watchObservation(host, plan, { observationId: 'obs-regress-1', disposition: 'regressed',
+          hostGeneration: 9, observedAt: target.now() }), resolveAuthority: () => host.observationAuthority })
+      reopened.close()
+      const afterRestart = new ControlPlaneStore({ path: target.path, now: target.now }); target.store = afterRestart
+      expect(afterRestart.getActivationWatch(plan.id).state).toBe('closed-regressed')
+      expect(afterRestart.listActivationWatchEvidence(plan.id)).toHaveLength(2)
+    })
+
+    test('rejects observations outside the exact binding, stale generations, foreign signatures, and stale revisions', async () => {
+      const target = await fixture(); const { plan, host } = await promoted(target, 'watch-reject')
+      target.setNow(target.now() + 1_000)
+      const wrongVersion = watchObservation(host, plan, { observationId: 'obs-wrong-version',
+        hostGeneration: 8, observedAt: target.now(), overrides: { version: '0.1.4' } })
+      await expect(target.store.recordPostActivationObservation({ idempotencyKey: 'watch:wrong-version',
+        receipt: wrongVersion, resolveAuthority: () => host.observationAuthority })).rejects.toThrow(/exact installation/u)
+      const foreign = hostTrustKey(target.now)
+      const forged = watchObservation(foreign, plan, { observationId: 'obs-forged',
+        hostGeneration: 8, observedAt: target.now() })
+      await expect(target.store.recordPostActivationObservation({ idempotencyKey: 'watch:forged',
+        receipt: forged, resolveAuthority: () => host.observationAuthority })).rejects.toThrow(/signature is invalid/u)
+      await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:healthy:1',
+        receipt: watchObservation(host, plan, { observationId: 'obs-healthy-1', hostGeneration: 8, observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      target.setNow(target.now() + 1_000)
+      const staleGeneration = watchObservation(host, plan, { observationId: 'obs-stale-generation',
+        hostGeneration: 8, observedAt: target.now() })
+      await expect(target.store.recordPostActivationObservation({ idempotencyKey: 'watch:stale-generation',
+        receipt: staleGeneration, resolveAuthority: () => host.observationAuthority })).rejects.toThrow(/host generation must advance/u)
+      const fresh = watchObservation(host, plan, { observationId: 'obs-stale-revision',
+        hostGeneration: 9, observedAt: target.now() })
+      await expect(target.store.recordPostActivationObservation({ idempotencyKey: 'watch:stale-revision',
+        expectedRevision: 1, receipt: fresh, resolveAuthority: () => host.observationAuthority })).rejects.toThrow(/stale watch revision/u)
+      expect(target.store.listActivationWatchEvidence(plan.id)).toHaveLength(1)
+    })
+
+    test('idempotent replay returns the original snapshot and never double-applies evidence', async () => {
+      const target = await fixture(); const { plan, host } = await promoted(target, 'watch-replay')
+      target.setNow(target.now() + 1_000)
+      const receipt = watchObservation(host, plan, { observationId: 'obs-healthy-1', hostGeneration: 8, observedAt: target.now() })
+      const first = await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:healthy:1',
+        receipt, resolveAuthority: () => host.observationAuthority })
+      const replay = await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:healthy:1',
+        receipt, resolveAuthority: () => host.observationAuthority })
+      expect(replay).toEqual(first)
+      target.setNow(target.now() + 1_000)
+      await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:healthy:2',
+        receipt: watchObservation(host, plan, { observationId: 'obs-healthy-2', hostGeneration: 9, observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      // Even after the watch advanced, the historical replay keeps its original revision-2 snapshot.
+      const laterReplay = await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:healthy:1',
+        receipt, resolveAuthority: () => host.observationAuthority })
+      expect(laterReplay.result.revision).toBe(2)
+      expect(target.store.listActivationWatchEvidence(plan.id)).toHaveLength(2)
+      const mutated = { ...receipt, observationId: 'obs-reused-key' }
+      await expect(target.store.recordPostActivationObservation({ idempotencyKey: 'watch:healthy:1',
+        receipt: mutated, resolveAuthority: () => host.observationAuthority })).rejects.toThrow(/idempotency key was reused/u)
+    })
+
+    test('migration v11 to v12 backfills exact watches for historically activated plans', async () => {
+      const target = await fixture(); const { plan, host } = await promoted(target, 'watch-migrate-v12')
+      const activatedAt = plan.activation!.updatedAt
+      target.store.close()
+      const legacy = new DatabaseSync(target.path)
+      legacy.exec('DROP TABLE IF EXISTS activation_watch_evidence; DROP TABLE IF EXISTS activation_watch; PRAGMA user_version = 11;')
+      legacy.close(); await chmod(target.path, 0o600)
+      const migrated = openControlPlaneDatabase(target.path)
+      expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(controlPlaneSchemaVersion)
+      expect(migrated.prepare('SELECT package_name, package_version, package_integrity, state, revision, last_host_generation, healthy_observations, started_at, updated_at FROM activation_watch WHERE plan_id = ?')
+        .get(plan.id)).toEqual({ package_name: candidate.package, package_version: candidate.version,
+        package_integrity: candidate.integrity, state: 'watching', revision: 1, last_host_generation: 0,
+        healthy_observations: 0, started_at: activatedAt, updated_at: activatedAt })
+      expect((migrated.prepare('SELECT count(*) AS count FROM activation_watch_evidence').get() as { count: number }).count).toBe(0)
+      migrated.close()
+      // A backfilled watch is a live watch: post-promotion monitoring continues after upgrade.
+      const reopened = new ControlPlaneStore({ path: target.path, now: target.now }); target.store = reopened
+      target.setNow(target.now() + 1_000)
+      const receipt = await reopened.recordPostActivationObservation({ idempotencyKey: 'watch:post-migration:1',
+        receipt: watchObservation(host, plan, { observationId: 'obs-post-migration', hostGeneration: 8, observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      expect(receipt.result).toMatchObject({ state: 'watching', revision: 2, healthyObservations: 1 })
+    })
   })
 })
