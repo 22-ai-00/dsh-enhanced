@@ -1,0 +1,154 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-13",
+  "status": "passed-real-model-with-fixture-github",
+  "milestone": "Direct commit CI wait resumes the original Goal after Host restart",
+  "completeWorkPackage": false,
+  "source": {
+    "commit": "06d749e4d37e28a8b48d327b07cc9c654dbb53e9",
+    "runtimeAndLibrariesFrozen": true
+  },
+  "verification": {
+    "command": "pnpm check",
+    "exitCode": 0,
+    "log": "/tmp/dsh-direct-commit-check.log",
+    "passedTests": 5408,
+    "dryRunPacks": 33
+  },
+  "runtime": {
+    "command": "DSH_E2E_HOST_VERSION=0.1.5-rc.1 DSH_WEB_REAL_PROVIDER=traex-agent DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture DSH_REPO_DELIVERY_MODE=commit DSH_REPO_RETAIN_FAILURE=1 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs --output=/tmp/dsh-direct-commit-real-v1-artifacts",
+    "exitCode": 0,
+    "testsPassed": 1,
+    "duration": "5.7 minutes",
+    "log": "/tmp/dsh-direct-commit-real-v1.log",
+    "artifacts": "/tmp/dsh-direct-commit-real-v1-artifacts/repo-autonomy-real-formal--92374-ry-isolated-repository-task",
+    "proofSha256": "a908444ba031dc08a5b8104877789e53ce166939e8d45e93ddd9c043f3e3cf26",
+    "observerSha256": "084df342b133901e14f96e5837d9d4802128382ce8eef410c500c7daba62c7e2",
+    "hostVersion": "0.1.5-rc.1",
+    "route": {
+      "provider": "traex-agent",
+      "model": "gpt-5.6-terra",
+      "api": "acp",
+      "command": "traex",
+      "cwd": "/tmp/dsh-repo-autonomy-real-gZw6iz/workspace"
+    }
+  },
+  "proof": {
+    "sessionId": "session-cd535830-d790-4fbd-82c4-67317b47b33e",
+    "goalId": "a0a4936a2fc1f0c56905f7add3d0e39abfed7fe754c0115cef8a682b85dff9a8",
+    "nativeGoalId": "goal-05bb245d-3b02-4f14-9b1c-6cdd0e9d7d79",
+    "phase": "complete",
+    "deliveryMode": "commit",
+    "transport": "explicit-fixture-not-live-github",
+    "commits": [
+      {
+        "commitOid": "f34bfb7e403b5b6ec610f87632263aab22aadd1e",
+        "at": 1789277491374
+      }
+    ],
+    "pullRequests": 0,
+    "modelDispatches": 20,
+    "modelSettled": 20,
+    "toolDispatches": 17,
+    "toolFailures": 1,
+    "uiApprovalAcknowledgements": 3,
+    "waitRestart": {
+      "waitId": "goal-event-wait-3670bb8af37fe6ddf407218447cd4b583caf66c9cfe7beab42780ecb8236a640",
+      "goalId": "a0a4936a2fc1f0c56905f7add3d0e39abfed7fe754c0115cef8a682b85dff9a8",
+      "sessionTitle": "Here is the failing starting",
+      "sourceStateBefore": "waiting",
+      "sourceStateAfterRestart": "waiting",
+      "priorWakes": [
+        {
+          "id": "goal-event-wake-goal-event-wait-0d200468015cd8bfb308b847e1fb2ebc693a2e4e8e0ad1f79197d5a4aa89df20",
+          "state": "succeeded"
+        }
+      ],
+      "readyAt": 1789277564936
+    },
+    "highWaterSequence": 1,
+    "events": [
+      {
+        "sequence": 1,
+        "event_id": "event-0d2ca3979eb6d286a542c8b6d4347e060c922d4604e96120ad0ae1344f107a31",
+        "occurred_at": 1789277491474,
+        "status": "delivered"
+      },
+      {
+        "sequence": 2,
+        "event_id": "event-cd4f96f437cf25a7f9d1df4fa69bfe201d2a45792c0bbc1ae886f8f0d1f1067a",
+        "occurred_at": 1789277566641,
+        "status": "delivered"
+      }
+    ],
+    "wakes": [
+      {
+        "id": "goal-event-wake-goal-event-wait-0d200468015cd8bfb308b847e1fb2ebc693a2e4e8e0ad1f79197d5a4aa89df20",
+        "state": "succeeded"
+      },
+      {
+        "id": "goal-event-wake-goal-event-wait-3670bb8af37fe6ddf407218447cd4b583caf66c9cfe7beab42780ecb8236a640",
+        "state": "succeeded"
+      }
+    ],
+    "outcome": {
+      "status": "achieved",
+      "completedAt": 1789277620200,
+      "receiptDigest": "8a8b2b06f6c076688196e5e4f7c4c5eacaa304443d6f4d711438dbcecd913cb1"
+    },
+    "sourceRetired": {
+      "claim": {
+        "trigger_id": "goal-1fea8b3090910935bb112be2-repository-events",
+        "goal_id": "a0a4936a2fc1f0c56905f7add3d0e39abfed7fe754c0115cef8a682b85dff9a8",
+        "session_id": "session-cd535830-d790-4fbd-82c4-67317b47b33e",
+        "native_goal_id": "goal-05bb245d-3b02-4f14-9b1c-6cdd0e9d7d79",
+        "retired_at": 1789277620246
+      },
+      "lastObservedAt": 1789277618730,
+      "automationStatus": "paused"
+    },
+    "commitFeedbackStatuses": [
+      "accepted"
+    ],
+    "resultFeedback": "native-session-reply",
+    "restart": {
+      "sameGoal": true,
+      "sameSourceJobEvidence": true,
+      "sameModelAndToolDispatches": true,
+      "replyVisible": true,
+      "waitedThenRestarted": true
+    }
+  },
+  "limits": [
+    "GitHub mutations and HTTPS responses are explicit controlled transports; this does not prove a live GitHub write or CI lifecycle.",
+    "Harness acknowledged 3 real UI permission requests; this does not prove a single authorization with no further prompts.",
+    "The run proves one bounded task; it does not close WP18 skill reuse, real repository authorization, stop or rollback acceptance.",
+    "Calls and duration are bounded; token or USD hard limits are not established."
+  ],
+  "remoteCi": {
+    "runId": 34740033145,
+    "sourceCommit": "06d749e4d37e28a8b48d327b07cc9c654dbb53e9",
+    "jobs": [
+      {
+        "name": "verify",
+        "id": 103678076957,
+        "conclusion": "success"
+      },
+      {
+        "name": "macos-verify",
+        "id": 103678076944,
+        "conclusion": "success"
+      },
+      {
+        "name": "windows-acp-smoke",
+        "id": 103678076838,
+        "conclusion": "success"
+      }
+    ]
+  },
+  "independentReview": {
+    "source": "PASS",
+    "runtime": "PASS within real TraeX and fixture GitHub scope",
+    "artifactOnlySourceFreezeProof": false
+  }
+}
