@@ -58,7 +58,11 @@ function projectKey(cwd) {
 }
 
 async function sessionEvents(home, workspace, sessionId) {
-  const path = join(home, 'sessions', projectKey(workspace), sessionId, 'session.jsonl.zstd')
+  const directory = join(home, 'sessions', projectKey(workspace), sessionId)
+  // The current generation wins when an older immutable artifact also exists.
+  // Inspect only this test profile's bounded native records for tool provenance.
+  const current = join(directory, 'session.v3.jsonl.zstd')
+  const path = existsSync(current) ? current : join(directory, 'session.jsonl.zstd')
   const info = await lstat(path)
   if (!info.isFile() || info.size > 32 * 1024 * 1024) throw new Error('canary Session artifact is not a bounded regular file')
   const { stdout } = await exec('zstd', ['-q', '-dc', '--', path], { encoding: 'utf8', timeout: 10_000, maxBuffer: 32 * 1024 * 1024, windowsHide: true })
@@ -98,22 +102,22 @@ function toolCalls(frames, sessionId) {
 
 async function assertPinnedDshCli(env) {
   const manifest = JSON.parse(await readFile(join(root, 'release-manifest.json'), 'utf8'))
-  const current = manifest?.current?.pinnedHostVersion, pending = manifest?.pending?.pinnedHostVersion
-  if (typeof current !== 'string' || current.length === 0 || pending !== undefined && (typeof pending !== 'string' || pending !== current)) {
-    throw new Error('real repair requires matching current and pending pinnedHostVersion values in release-manifest.json')
-  }
+  const selected = env.DSH_E2E_HOST_VERSION ?? manifest?.pending?.pinnedHostVersion
+    ?? manifest?.nextPinnedHostVersion ?? manifest?.current?.pinnedHostVersion
+  if (typeof selected !== 'string' || !/^0\.1\.\d+(?:-rc\.\d+)?$/u.test(selected)) throw new Error('DSH_E2E_HOST_VERSION must select an exact compatible Host release')
   let resolved
   try { resolved = (await run('dsh', ['--version'], env)).trim() } catch (error) {
-    throw new Error(`real repair requires dsh ${current} on PATH before starting the Host: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(`real repair requires dsh ${selected} on PATH before starting the Host: ${error instanceof Error ? error.message : String(error)}`)
   }
-  if (resolved !== current) throw new Error(`real repair requires dsh ${current} on PATH before starting the Host; resolved ${resolved || 'no version output'}`)
+  if (resolved !== selected) throw new Error(`real repair requires dsh ${selected} on PATH before starting the Host; resolved ${resolved || 'no version output'}`)
+  return resolved
 }
 
 test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workflow twice and delivers the bounded result' : 'real TraeX autonomously improves the topology workflow and delivers the bounded result', async ({ page, context }, testInfo) => {
   test.setTimeout(1_500_000)
   const preflightEnv = { ...process.env, CI: 'true' }
   if (preflightEnv.DSH_WEB_REAL_PROVIDER !== undefined && preflightEnv.DSH_WEB_REAL_PROVIDER !== 'traex-agent') throw new Error('real repair requires DSH_WEB_REAL_PROVIDER=traex-agent; Codex fallback is forbidden')
-  await assertPinnedDshCli(preflightEnv)
+  const hostVersion = await assertPinnedDshCli(preflightEnv)
   const temp = await mkdtemp(join(tmpdir(), 'dsh-real-owner-repair-'))
   const home = join(temp, 'home'), workspace = join(temp, 'workspace'), modelLog = join(temp, 'model.jsonl'), controlPath = join(temp, 'control.json')
   const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_WEB_REAL_PROVIDER: process.env.DSH_WEB_REAL_PROVIDER ?? 'traex-agent',
@@ -301,7 +305,7 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
       ...['skill_save', 'skill_repair_arm'].map(name => ({ id: `repair-owner-setup-${name}`, effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['execute'], resource: { kind: 'tool', id: name }, context: { initiators: ['external'] } })),
       ...repairPolicy(workspace),
       { id: 'repair-owner-feedback', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-skills', workspace, principal: 'web/web/local/operator' }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } },
-      { id: 'repair-background-goal', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['create', 'observe', 'execute'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
+      { id: 'repair-background-goal', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['create', 'observe', 'execute', 'snapshot'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
       ...['read', 'write', 'edit'].map(name => ({ id: `repair-background-${name}`, effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['execute'], resource: { kind: 'tool', id: name }, context: { initiators: ['background'] } })),
     ])
     route.configurePatch(patch, setConfig)
@@ -583,6 +587,17 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
       expect(nativeSources.every(event => event.data?.source?.kind === 'goal')).toBe(true)
       expect(nativeSources.every(event => event.data.source.round > 0)).toBe(true)
       if (checkpointRestart && round.iteration === 1) expect(nativeSources).toHaveLength(checkpointRestart.before.nativeGoalMessages)
+      // Background repair needs the same authorized, current Goal feedback as
+      // owner turns. A model that can write but cannot see acceptance feedback
+      // cannot correct a failed native round autonomously.
+      const goalContexts = events.filter(event => event.type === 'user/message'
+        && event.data?.source?.plugin === '@deepseek-ai/dsh-system-prompt'
+        && event.data.source.form === 'snapshot').flatMap(event => event.data.source.sections ?? [])
+        .filter(section => section.name === 'assistant-goals:current-context')
+      expect(goalContexts.length, 'repair model receives authorized current Goal context').toBeGreaterThan(0)
+      expect(goalContexts.some(section => section.text.includes(round.repairGoal)
+        && section.text.includes('<business-goal-data>'))).toBe(true)
+      round.goalContextSnapshots = goalContexts.length
       const calls = events.filter(event => event.type === 'tool/call')
       expect(calls.some(event => event.data.name === 'write')).toBe(true)
       expect(calls.every(event => repairProfile.allowedTools.includes(event.data.name))).toBe(true)
@@ -607,7 +622,7 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
     await stop()
     expect((await readModelEvents()).filter(item => item.event === 'dispatch')).toHaveLength(dispatches.length)
     await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ capability: selectedFamily === 'template' ? 'real-traex-two-round-bounded-rsi' : 'real-traex-topology-one-round-bounded-rsi', family: selectedFamily,
-      route: route.proof, scope, baseline: { sessionId: baselineSession, goalId: baselineGoal, version: 1 },
+      route: route.proof, hostVersion, scope, baseline: { sessionId: baselineSession, goalId: baselineGoal, version: 1 },
       continuationId, state: continuation().state, iterations: continuation().iteration, rounds: rounds.map(round => ({
         iteration: round.iteration, sourceSession: round.sourceSession, sourceGoal: round.sourceGoal,
         repairSession: round.repairSession, repairGoal: round.repairGoal, candidateId: round.candidate.id,
@@ -615,6 +630,7 @@ test(selectedFamily === 'template' ? 'real TraeX autonomously improves one workf
         failureReceiptDigest: round.failureReceiptDigest, repairReceiptDigest: round.repairReceiptDigest,
         candidateDefinitionDigest: acceptanceDigest(round.candidate.definition), quality: round.comparison.result.quality,
         datasetDigest: round.comparison.result.receipt.datasetDigest, promotion: round.promotion, toolNames: round.toolNames,
+        goalContextSnapshots: round.goalContextSnapshots,
       })), usage: finalUsage, feedback: noticeRows(), generatedArtifactDigest, completedRestartNoReplay: true, checkpointRestart,
       initialArtifact: 'shared unfinished scaffold', suppliedRepairedSource: false, installedRepairAdmissionIdempotent: true,
       limitations: ['bounded two-profile workflow improvement', checkpointRestart ? 'native Goal already complete at cold checkpoint; unfinished native Goal restart requires separate proof' : 'no mid-repair restart proof', 'delivery accepted does not mean user read'],
