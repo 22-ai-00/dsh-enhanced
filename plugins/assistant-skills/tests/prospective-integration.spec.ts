@@ -49,16 +49,16 @@ test.skipIf(!existsSync('/usr/bin/docker') || !/^sha256:[a-f0-9]{64}$/u.test(ima
   try {
     result = await qualifyHoldout({ baseline, candidate, scope, execution, pinnedPublicKey: profile!.authority.publicKey, expectedGeneratorDigest: profile!.authority.generatorDigest!, transport: client.transport, signal: controller.signal, authorize() {} })
   } finally { await client.close() }
-  expect(result).toMatchObject({ prospectiveHoldout: 'authority-attested-after-freeze', modelCalls: 0, promotionAuthorized: false, quality: { candidateChecksPassed: true, evaluationGain: 1, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'unproven' } })
+  expect(result).toMatchObject({ prospectiveHoldout: 'authority-attested-after-freeze', modelCalls: 0, promotionAuthorized: false, quality: { candidateChecksPassed: true, evaluationGain: 1, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'attested-after-freeze' } })
   const context = { scope, baseline, candidate, execution, pinnedPublicKey: profile!.authority.publicKey, expectedGeneratorDigest: profile!.authority.generatorDigest! }
-  expect(inspectProspectiveQualification(result, context)).toMatchObject({ prospectiveHoldout: 'authority-attested-after-freeze', quality: { heldoutIndependence: 'unproven', evaluationGain: 1 } })
+  expect(inspectProspectiveQualification(result, context)).toMatchObject({ prospectiveHoldout: 'authority-attested-after-freeze', quality: { heldoutIndependence: 'attested-after-freeze', evaluationGain: 1 } })
 
   const restarted = await openHoldoutProcess(profile!.authority, new AbortController().signal)
   try { expect(await restarted.transport.request('finish')).toEqual(result.receipt) } finally { await restarted.close() }
 
   const claimed = structuredClone(result) as unknown as { quality: unknown }
   claimed.quality = { candidateChecksPassed: true, evaluationGain: 100, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'proven' }
-  expect(inspectProspectiveQualification(claimed, context)?.quality.heldoutIndependence).toBe('unproven')
+  expect(inspectProspectiveQualification(claimed, context)?.quality.heldoutIndependence).toBe('attested-after-freeze')
   expect(inspectProspectiveQualification(result, { ...context, candidate: definition(scope, 'printf other') })).toBeUndefined()
   expect(inspectProspectiveQualification(result, { ...context, execution: { ...execution, maxBytes: execution.maxBytes + 1 } })).toBeUndefined()
   expect(inspectProspectiveQualification(result, { ...context, pinnedPublicKey: 'wrong' })).toBeUndefined()
