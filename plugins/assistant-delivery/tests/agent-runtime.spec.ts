@@ -670,6 +670,96 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
   await service.whenIdle()
 }
 
+// Fixed marker phrase from the Host's user-cancelled-tool notice
+// (USER_CANCELLED_TOOL_NOTICE in src/agent-runtime.ts). Kept in sync by intent:
+// these tests pin the model-visible clarification, so a wording change must be
+// deliberate in both places.
+const USER_CANCELLED_NOTICE_MARKER = 'stopped deliberately by the human'
+
+/** Join every dsh-system-prompt snapshot user message visible in one request. */
+function systemPromptSnapshotTexts(request: GenerateOptions): string[] {
+  return request.messages
+    .filter(message => message.source?.kind === 'plugin'
+      && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+    .map(message => message.content.flatMap(block => (block.type === 'text' ? [block.text] : [])).join('\n'))
+}
+
+/** A request carries the user-cancelled-tool clarification iff a snapshot mentions it. */
+function requestHasUserCancelNotice(request: GenerateOptions): boolean {
+  return systemPromptSnapshotTexts(request).some(text => text.includes(USER_CANCELLED_NOTICE_MARKER))
+}
+
+/** Plain text of one model request message. */
+function messageText(message: GenerateOptions['messages'][number]): string {
+  return message.content.flatMap(block => (block.type === 'text' ? [block.text] : [])).join('\n')
+}
+
+/** Index of the latest human inbound user message containing `text`, or -1. */
+function lastHumanTextIndex(request: GenerateOptions, text: string): number {
+  for (let index = request.messages.length - 1; index >= 0; index -= 1) {
+    const message = request.messages[index]!
+    if (message.role === 'user' && message.source.kind === 'delivery' && messageText(message).includes(text)) return index
+  }
+  return -1
+}
+
+/** Indices (in request order) of system-prompt snapshots whose text carries the marker. */
+function userCancelNoticeIndices(request: GenerateOptions): number[] {
+  const indices: number[] = []
+  request.messages.forEach((message, index) => {
+    if (message.source?.kind === 'plugin'
+      && message.source.plugin === '@deepseek-ai/dsh-system-prompt'
+      && messageText(message).includes(USER_CANCELLED_NOTICE_MARKER)) indices.push(index)
+  })
+  return indices
+}
+
+/** Text of the (single) user-cancelled clarification snapshot, or undefined when absent. */
+function userCancelNoticeText(request: GenerateOptions): string | undefined {
+  return systemPromptSnapshotTexts(request).find(text => text.includes(USER_CANCELLED_NOTICE_MARKER))
+}
+
+function* presetProbeToolCallChunks(id: string): Generator<StreamChunk> {
+  yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+  yield { type: 'tool-call-delta', index: 0, id: ToolCallId(id), name: 'preset_probe', argumentsDelta: '{}' }
+  yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(id), name: 'preset_probe', arguments: '{}' } }
+  yield { type: 'finish', reason: { kind: 'tool-calls' } }
+}
+
+function* textStopChunks(text: string): Generator<StreamChunk> {
+  yield { type: 'block-start', index: 0, blockType: 'text' }
+  yield { type: 'text-delta', index: 0, text }
+  yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+  yield { type: 'finish', reason: { kind: 'stop' } }
+}
+
+/**
+ * Mount the real approval service in `ask` mode with an answerer that parks
+ * forever, reproducing a live approval card the human has not answered. The
+ * running foreground tool call stays in its pre-dispatch approval ask until the
+ * turn is aborted out of band; aborting then records the
+ * ABORTED_BEFORE_DISPATCH tool/result observed in the real session.
+ * Returns a promise that resolves on the next durable `approval/asked` event.
+ */
+async function mountPendingApproval(f: Awaited<ReturnType<typeof runtimeHarness>>): Promise<{ nextAsk: () => Promise<void> }> {
+  await f.ctx.plugin(ApprovalService, { policy: 'ask' })
+  let notifyAsk: (() => void) | undefined
+  let waitAsk = new Promise<void>(resolve => { notifyAsk = resolve })
+  f.ctx.on('session/event', (_session, event) => {
+    if (event.type !== 'approval/asked') return
+    const notify = notifyAsk
+    waitAsk = new Promise<void>(resolve => { notifyAsk = resolve })
+    notify?.()
+  })
+  // A prepend answerer that never settles halts the waterfall ahead of Delivery's
+  // own card bridge, leaving the approval decision open (signal abort closes it).
+  f.ctx.on('approval/request', async (_req, next) => {
+    await new Promise<void>(() => {})
+    return next()
+  }, { prepend: true })
+  return { nextAsk: async () => { await waitAsk } }
+}
+
 async function scheduledGoalHarness(root: string, saved: Map<string, SavedSession>, runTimeoutMs = 5_000, verificationTimeoutMs = 1_000, withSkills = false,
   options: { goalOutcomeFeedback?: boolean } = {}) {
   const ownerId = 'lark/bot-1/tenant-a/ou_owner'
@@ -4133,6 +4223,216 @@ describe('real rc.1 delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('after a human-aborted tool attempt, the next request carries a trusted clarification after the new human message', async () => {
+    // Reproduces the real session (delivery-...-g3): the model emitted one tool
+    // call, the approval card stayed open, and the human pressed stop. The loop
+    // committed ABORTED_BEFORE_DISPATCH + turn/end{aborted,user}. The following
+    // human "hi" must surface the Host's fixed clarification as a trusted
+    // system-prompt snapshot, ordered AFTER that human message.
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-user-cancel-notice-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const f = await runtimeHarness(root, saved)
+    const { nextAsk } = await mountPendingApproval(f)
+    const secretArticle = 'https://example.invalid/SECRET-ARTICLE-TOKEN-7f3a'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const request = f.llm.requests.length
+      if (request === 1) {
+        yield* presetProbeToolCallChunks('call-cancel-notice-probe')
+        return
+      }
+      yield* textStopChunks('你好，我在听。')
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-cancel-notice-task', `深入研究 ${secretArticle}`))
+    const firstTick = f.service.tick()
+    await nextAsk()
+    await f.service.acceptInbound(message('evt-cancel-notice-stop', '/stop', 'command'))
+    await firstTick
+    await drive(f.service)
+
+    const sessionId = runtimeStore(f.service).getActiveBinding(conversation)!.sessionId
+    const abortedEvents = saved.get(sessionId)!.events
+    expect(abortedEvents).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'tool/result',
+        data: expect.objectContaining({ error: expect.objectContaining({ code: 'ABORTED_BEFORE_DISPATCH' }) }),
+      }),
+      expect.objectContaining({
+        type: 'turn/end',
+        data: expect.objectContaining({
+          reason: expect.objectContaining({ kind: 'aborted', reason: expect.objectContaining({ kind: 'user' }) }),
+        }),
+      }),
+    ]))
+
+    await f.service.acceptInbound(message('evt-cancel-notice-hi', 'hi'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(2)
+    const nextRequest = f.llm.requests[1]!
+    // The cancelled turn's own request never carried the clarification.
+    expect(requestHasUserCancelNotice(f.llm.requests[0]!)).toBe(false)
+
+    // The next turn's first request carries exactly one trusted snapshot, and it
+    // is ordered AFTER the human's new "hi" message (the loop claims inbox before
+    // projecting runtime context at the step boundary).
+    const humanHiIndex = lastHumanTextIndex(nextRequest, 'hi')
+    const noticeIndices = userCancelNoticeIndices(nextRequest)
+    expect(humanHiIndex).toBeGreaterThanOrEqual(0)
+    expect(noticeIndices).toHaveLength(1)
+    expect(noticeIndices[0]!).toBeGreaterThan(humanHiIndex)
+
+    // The trusted notice is a fixed Host constant: it must not leak the tool
+    // name, arguments, or any untrusted inbound text (the article URL).
+    const noticeText = messageText(nextRequest.messages[noticeIndices[0]!]!)
+    expect(noticeText).toContain('NOT an instruction to retry')
+    expect(noticeText).not.toContain('preset_probe')
+    expect(noticeText).not.toContain('SECRET-ARTICLE-TOKEN')
+    expect(noticeText).not.toContain(secretArticle)
+    await f.ctx.fiber.restart()
+  })
+
+  test('a normally completed turn does not add the user-cancelled clarification', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-user-cancel-notice-clean-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      yield* textStopChunks('这是正常回答。')
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-clean-first', '请正常回答'))
+    await drive(f.service)
+    await f.service.acceptInbound(message('evt-clean-hi', 'hi'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(2)
+    expect(requestHasUserCancelNotice(f.llm.requests[1]!)).toBe(false)
+    await f.ctx.fiber.restart()
+  })
+
+  test('a non-human (hook/lease-lost) abort does not add the clarification even with an aborted-before-dispatch tool', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-user-cancel-notice-hook-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const f = await runtimeHarness(root, saved)
+    const { nextAsk } = await mountPendingApproval(f)
+    let retainedAgent: Agent | undefined
+    f.ctx.on('agent/pre-step', async ({ agent }, next) => {
+      retainedAgent ??= agent
+      return await next()
+    })
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      if (f.llm.requests.length === 1) {
+        yield* presetProbeToolCallChunks('call-hook-abort-probe')
+        return
+      }
+      yield* textStopChunks('已恢复。')
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-hook-task', '请执行工具'))
+    const firstTick = f.service.tick()
+    await nextAsk()
+    // A lease loss is an infrastructure abort (kind 'hook'), not a human stop;
+    // it still lands an aborted-before-dispatch result, but the reason predicate
+    // must distinguish it so the "the human stopped this" notice is not emitted.
+    retainedAgent!.cancel({ kind: 'hook', reason: 'assistant-delivery-session-lease-lost' })
+    await firstTick
+    await drive(f.service)
+
+    const sessionId = runtimeStore(f.service).getActiveBinding(conversation)!.sessionId
+    expect(saved.get(sessionId)!.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'tool/result',
+        data: expect.objectContaining({ error: expect.objectContaining({ code: 'ABORTED_BEFORE_DISPATCH' }) }),
+      }),
+      expect.objectContaining({
+        type: 'turn/end',
+        data: expect.objectContaining({
+          reason: expect.objectContaining({ kind: 'aborted', reason: expect.objectContaining({ kind: 'hook' }) }),
+        }),
+      }),
+    ]))
+
+    await f.service.acceptInbound(message('evt-hook-hi', 'hi'))
+    await drive(f.service)
+    const lastRequest = f.llm.requests.at(-1)!
+    expect(requestHasUserCancelNotice(lastRequest)).toBe(false)
+    await f.ctx.fiber.restart()
+  })
+
+  test('repeated human-aborted turns keep exactly one clarification snapshot instead of stacking', async () => {
+    // Mirrors g3 turns 13-16: the model retries a tool on a no-op "hi", the
+    // human stops it again, then sends another "hi". The clarification text is
+    // identical across turns, so RuntimeContextProjection must not append a new
+    // snapshot — the next request sees exactly one such message, not a stack.
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-user-cancel-notice-dedup-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const f = await runtimeHarness(root, saved)
+    const { nextAsk } = await mountPendingApproval(f)
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const request = f.llm.requests.length
+      if (request <= 2) {
+        yield* presetProbeToolCallChunks(`call-dedup-probe-${request}`)
+        return
+      }
+      yield* textStopChunks('好的，已停止重试。')
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-dedup-task', '抓取这篇文章'))
+    let tick = f.service.tick()
+    await nextAsk()
+    await f.service.acceptInbound(message('evt-dedup-stop-1', '/stop', 'command'))
+    await tick
+    await drive(f.service)
+
+    await f.service.acceptInbound(message('evt-dedup-hi-1', 'hi'))
+    tick = f.service.tick()
+    await nextAsk()
+    await f.service.acceptInbound(message('evt-dedup-stop-2', '/stop', 'command'))
+    await tick
+    await drive(f.service)
+
+    await f.service.acceptInbound(message('evt-dedup-hi-2', 'hi'))
+    await drive(f.service)
+
+    expect(f.llm.requests.length).toBeGreaterThanOrEqual(3)
+    // Both cancellations really happened (distinct calls, two audit/result pairs).
+    const allEvents = [...saved.values()].flatMap(value => value.events)
+    const abortedResults = allEvents.filter(event => event.type === 'tool/result'
+      && event.data.error?.code === 'ABORTED_BEFORE_DISPATCH')
+    expect(abortedResults).toHaveLength(2)
+    expect(allEvents.filter(event => event.type === 'turn/end'
+      && event.data.reason?.kind === 'aborted'
+      && event.data.reason?.reason?.kind === 'user')).toHaveLength(2)
+
+    // The first post-cancel request already carried the clarification, proving the
+    // final assertion below is genuine dedup rather than the notice never existing.
+    const firstAfterCancel = f.llm.requests[1]!
+    const firstNotice = userCancelNoticeText(firstAfterCancel)
+    expect(firstNotice).toBeTruthy()
+
+    const lastRequest = f.llm.requests.at(-1)!
+    const noticeIndices = userCancelNoticeIndices(lastRequest)
+    expect(noticeIndices).toHaveLength(1)
+    // Same fixed text across turns — projection appends no duplicate snapshot.
+    expect(userCancelNoticeText(lastRequest)).toBe(firstNotice)
+    await f.ctx.fiber.restart()
+  })
+
   test('/new is not held by pending presentation progress and suppresses the cancelled old reply', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-new-pending-progress-'))
     roots.push(root)
@@ -4688,6 +4988,10 @@ describe('real rc.1 delivery Agent runtime', () => {
       type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-question', name: 'ask_user_question',
         arguments: '{"questions":[{"question":"secret draft"}]}' },
     }))).toEqual({ kind: 'step', text: '等待您的回答…' })
+    expect(deliveryProgressFromSessionEvent(event({
+      type: 'approval/asked', data: { id: 'approval-1', toolName: 'firecrawl-scrape',
+        callId: 'call-approval', reason: 'assistant-policy: ask-review (unclassified tool)' },
+    }))).toEqual({ kind: 'step', text: '正在确认工具「firecrawl-scrape」的调用权限…' })
     const finished = deliveryProgressFromSessionEvent(event({
       type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1',

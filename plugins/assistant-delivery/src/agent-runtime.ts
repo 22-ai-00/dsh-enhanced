@@ -20,6 +20,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { PermissionPresetService } from '@deepseek-ai/dsh-permission-presets'
 import type {} from '@deepseek-ai/dsh-tool-todo'
+import { TOOL_ABORTED_BEFORE_DISPATCH } from '@deepseek-ai/dsh-tools'
 import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { isAppendSurfaceEvent, SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
@@ -590,6 +591,13 @@ export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryP
   }
   if (event.type === 'assistant/message') {
     return undefined
+  }
+  if (event.type === 'approval/asked') {
+    // approval/asked is appended before the review waterfall runs, so this label
+    // must stay accurate for both the (usually fast) automatic review and a real
+    // human escalation (which additionally renders a separate allow/reject card).
+    // A tool name here is policy-controlled, but bound it like every other field.
+    return { kind: 'step', text: `正在确认工具「${boundedProgressText(event.data.toolName)}」的调用权限…` }
   }
   if (event.type === 'tool/call') {
     if (event.data.name === 'ask_user_question') {
@@ -1370,6 +1378,58 @@ function isScheduledGoalRuntimeContext(source: { kind?: unknown; plugin?: unknow
     || (source.kind === 'skill-catalog' && source.form === 'catalog')
 }
 
+/**
+ * Trusted Host clarification injected after the human deliberately cancels a
+ * tool call before it dispatched.
+ *
+ * Why this exists: when a turn is aborted by the human, the agent loop persists
+ * a `tool/result` pair whose ONLY model-visible text is the bare technical
+ * string "Error: tool call aborted before dispatch" (`isError: true`). The
+ * accurate structured facts — `error.code = ABORTED_BEFORE_DISPATCH` and the
+ * `turn/end` reason `{ aborted, reason: { user } }` — are not surface events,
+ * so the model never sees them. A string of those error-looking results makes a
+ * later no-op message (e.g. "hi") look like "retry the fetch the system kept
+ * interrupting", causing the model to re-fire the cancelled tool unprompted.
+ *
+ * This text is a FIXED Host constant. It never interpolates message content,
+ * tool names, or arguments, so untrusted input cannot flow into the trusted
+ * snapshot. The predicate keys only off structured, Host-owned fields.
+ */
+const USER_CANCELLED_TOOL_NOTICE = [
+  'The most recent turn was stopped deliberately by the human (they pressed stop or declined the tool permission).',
+  'Any earlier tool result reading "Error: tool call aborted before dispatch" is that human cancellation, NOT a tool or system failure and NOT an instruction to retry.',
+  'Do not retry, resume, restart, or continue any tool call or task that was interrupted by that stop.',
+  'Respond only to the human\'s latest message on its own terms. Resume the earlier work only if the human explicitly asks for it again.',
+].join(' ')
+
+/** Whether a `turn/end` reason is a human-initiated abort (stop, /new, or a declined approval). */
+function isUserAbortedTurnEnd(reason: unknown): boolean {
+  return typeof reason === 'object' && reason !== null
+    && (reason as { kind?: unknown }).kind === 'aborted'
+    && typeof (reason as { reason?: unknown }).reason === 'object'
+    && (reason as { reason?: { kind?: unknown } }).reason?.kind === 'user'
+}
+
+/**
+ * Returns the fixed Host clarification when the most recent turn boundary is a
+ * human abort whose turn contains an aborted-before-dispatch tool result;
+ * otherwise `''`. Pure over the supplied events so the projection dedups stable
+ * text across repeated no-op messages and flips to empty once a turn completes.
+ */
+function userCancelledToolNotice(events: readonly SessionEvent[]): string {
+  let lastEnd: Extract<SessionEvent, { type: 'turn/end' }> | undefined
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type === 'turn/end') { lastEnd = event; break }
+  }
+  if (lastEnd === undefined || !isUserAbortedTurnEnd(lastEnd.data.reason)) return ''
+  const abortedBeforeDispatch = events.some(event =>
+    event.type === 'tool/result'
+    && event.data.turn === lastEnd.data.turn
+    && event.data.error?.code === TOOL_ABORTED_BEFORE_DISPATCH)
+  return abortedBeforeDispatch ? USER_CANCELLED_TOOL_NOTICE : ''
+}
+
 export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   readonly dispatchControl = 'explicit' as const
   private readonly activeSessionControls = new Map<string, ActiveSessionControl>()
@@ -1997,6 +2057,32 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     const unbind = this.policy.bindInitiator(agent, initiator, principal)
     agentCtx.effect(() => unbind, `assistant-delivery.${initiator}-initiator`)
     installModelSelection(agentCtx, { current: selected, assembled: undefined })
+    // The trusted post-cancellation clarification is installed LAZILY and only
+    // for a session whose history actually contains a human-aborted turn with an
+    // aborted-before-dispatch tool result. Merely registering a runtime context
+    // flips the system-prompt assembly out of its empty baseline and perturbs the
+    // cold-resume/lease-recovery accounting for EVERY ordinary session (a
+    // permission /stop compensation run has no such tool result, yet regressed
+    // when the context was registered unconditionally). Keep the exact baseline —
+    // no contribution installed at all — until the Host-owned predicate matches.
+    let cancelNoticeInstalled = false
+    const installUserCancelledToolNotice = (): void => {
+      if (cancelNoticeInstalled) return
+      if (!userCancelledToolNotice(agent.session.snapshotEvents())) return
+      cancelNoticeInstalled = true
+      agentCtx.inject(['systemPrompt'], promptCtx => promptCtx.systemPrompt.context({
+        name: 'assistant-delivery:user-cancelled-tool-notice',
+        order: 260,
+        text: () => userCancelledToolNotice(agent.session.snapshotEvents()),
+      }))
+    }
+    // A cold resume may already carry the abort (the real Feishu sequence did).
+    installUserCancelledToolNotice()
+    // A live abort only becomes visible once its turn/end + tool/result land.
+    agentCtx.on('session/event', (eventSession, event) => {
+      if (eventSession !== agent.session) return
+      if (event.type === 'turn/end' || event.type === 'tool/result') installUserCancelledToolNotice()
+    })
     await agentPresets?.mount(agentCtx, presetId)
   }
 
