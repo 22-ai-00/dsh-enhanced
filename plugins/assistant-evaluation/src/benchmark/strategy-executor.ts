@@ -52,7 +52,9 @@ function actualCapabilities(input: Pick<StrategyBenchmarkExecutorOptions, 'perso
 export function createStrategyBenchmarkPlan(value: StrategyBenchmarkConfig): Readonly<StrategyBenchmarkPlan> {
   const config = parseStrategyBenchmarkConfig(value)
   const { capabilities } = actualCapabilities(config)
-  return parseStrategyBenchmarkPlan({ schemaVersion: 1, protocol: strategyBenchmarkProtocol, capabilities, execution: config.execution,
+  // Single source of truth: plan.execution.observationMode is derived from model.observationMode, never read from config.execution.
+  return parseStrategyBenchmarkPlan({ schemaVersion: 1, protocol: strategyBenchmarkProtocol, capabilities,
+    execution: { ...config.execution, observationMode: config.model.observationMode ?? 'enforced-upper-bound-provider-output' },
     benchmark: { schemaVersion: 1, id: config.id, comparison: 'capability', dataset: strategyDevelopmentDataset,
       cases: strategyDevelopmentCases().filter(task => config.cases.includes(task.id)), budget: config.budget, repeats: config.repeats, seed: config.seed,
       variants: [false, true].map(enabled => ({ id: enabled ? 'adaptive-strategy' : 'direct', role: enabled ? 'candidate' : 'baseline',

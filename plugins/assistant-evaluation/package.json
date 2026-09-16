@@ -35,6 +35,14 @@
     "./benchmark/deepseek": {
       "types": "./lib/benchmark/deepseek.d.ts",
       "default": "./lib/benchmark/deepseek.js"
+    },
+    "./benchmark/traex": {
+      "types": "./lib/benchmark/traex.d.ts",
+      "default": "./lib/benchmark/traex.js"
+    },
+    "./benchmark/super-relay": {
+      "types": "./lib/benchmark/super-relay.d.ts",
+      "default": "./lib/benchmark/super-relay.js"
     }
   },
   "files": [
@@ -96,7 +104,10 @@
     "@dsh-enhanced/assistant-goals": ">0.1.24 <0.2.0",
     "@dsh-enhanced/assistant-isolation": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-deepseek-budget": ">=0.1.0 <0.2.0"
+    "@dsh-enhanced/assistant-deepseek-budget": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/traex-acp-provider": ">=0.1.33 <0.2.0",
+    "@dsh-enhanced/assistant-super-relay-budget": ">=0.1.33 <0.2.0",
+    "@dsh-enhanced/llm-route-capabilities": ">=0.1.33 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-agent-loop": {
@@ -170,6 +181,15 @@
     },
     "@dsh-enhanced/assistant-deepseek-budget": {
       "optional": true
+    },
+    "@dsh-enhanced/traex-acp-provider": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-super-relay-budget": {
+      "optional": true
+    },
+    "@dsh-enhanced/llm-route-capabilities": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -199,7 +219,10 @@
     "@deepseek-ai/dsh-subagent": "catalog:",
     "@dsh-enhanced/assistant-goals": "workspace:*",
     "@dsh-enhanced/assistant-isolation": "workspace:*",
-    "@dsh-enhanced/assistant-deepseek-budget": "workspace:*"
+    "@dsh-enhanced/assistant-deepseek-budget": "workspace:*",
+    "@dsh-enhanced/traex-acp-provider": "workspace:*",
+    "@dsh-enhanced/assistant-super-relay-budget": "workspace:*",
+    "@dsh-enhanced/llm-route-capabilities": "workspace:*"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

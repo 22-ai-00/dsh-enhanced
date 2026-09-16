@@ -20,7 +20,7 @@ const model: NativeModelConfig = { provider: 'strategy-fixture', model: 'fixed',
   inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null, adapterDigest: 'a'.repeat(64), tokenCounterDigest: 'b'.repeat(64) }
 function plan(): StrategyBenchmarkPlan {
   const capabilities = { common: { persona: 'a'.repeat(64), tools: 'b'.repeat(64), policy: 'c'.repeat(64), runtime: 'd'.repeat(64) }, strategy: { guide: 'e'.repeat(64), tool: 'f'.repeat(64), policy: '1'.repeat(64), runtime: '2'.repeat(64) } }
-  return { schemaVersion: 1, protocol: strategyBenchmarkProtocol, capabilities, execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 3 }, benchmark: { schemaVersion: 1, id: 'strategy-runtime',
+  return { schemaVersion: 1, protocol: strategyBenchmarkProtocol, capabilities, execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 3, observationMode: 'enforced-upper-bound-provider-output' as const }, benchmark: { schemaVersion: 1, id: 'strategy-runtime',
     comparison: 'capability', dataset: { id: 'public-fixture', version: '1', digest: acceptanceDigest(task), split: 'development' }, cases: [{ id: 'sum', domain: 'code', ...strategyGoalTaskDigests(task) }],
     budget: { durationMs: 100000, inputTokens: 1000, outputTokens: 2048, toolCalls: 8, costUsdMicros: null }, repeats: 2, seed: 1,
     variants: ([false, true] as const).map(enabled => ({ id: enabled ? 'adaptive-strategy' : 'direct', role: enabled ? 'candidate' : 'baseline',

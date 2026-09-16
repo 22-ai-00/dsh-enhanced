@@ -6,6 +6,7 @@ import type { TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhan
 import { benchmarkHash, benchmarkObject, benchmarkSchedule } from './schema.js'
 import { parseStrategyBenchmarkPlan, strategyBenchmarkJournalPlan, strategyBenchmarkPlanDigest } from './strategy-plan.js'
 import type { StrategyBenchmarkMeterSnapshot } from './strategy-meter.js'
+import type { ModelObservationMode } from './native.js'
 import type { BenchmarkBudget, BenchmarkCase, BenchmarkCell, BenchmarkPlan, BenchmarkVariant, BenchmarkVersions } from './types.js'
 import { assertStrategyPolicyConfiguration } from './strategy-policy.js'
 import type { StrategyBenchmarkPlan } from './strategy-plan.js'
@@ -137,12 +138,16 @@ function requestFor(plan: StrategyBenchmarkPlan, cell: BenchmarkCell): StrategyE
   if (!task || !variant) fail('cell has no bound request')
   return { planId: journal.id, dataset: journal.dataset, cell: exact, task, variant, budget: journal.budget }
 }
-function parseMeter(value: unknown): StrategyBenchmarkMeterSnapshot {
+function parseMeter(value: unknown, expectedMode: ModelObservationMode): StrategyBenchmarkMeterSnapshot {
   const raw = keys(evidenceSnapshot(value), ['observationMode', 'budget', 'modelCalls', 'toolCalls', 'activeToolCalls', 'inputTokens', 'outputTokens', 'costUsdMicros', 'heldModelCalls', 'heldInputTokens', 'heldOutputTokens', 'heldCostUsdMicros', 'traces'])
-  if (raw.observationMode !== 'enforced-upper-bound-provider-output' || !Array.isArray(raw.traces) || raw.traces.length > 10_001) fail('invalid meter snapshot')
+  if ((raw.observationMode !== 'enforced-upper-bound-provider-output' && raw.observationMode !== 'observed-call-count') || !Array.isArray(raw.traces) || raw.traces.length > 10_001) fail('invalid meter snapshot')
+  // Cross-check the meter's self-reported mode against the plaintext mode frozen in the plan.
+  if (raw.observationMode !== expectedMode) fail('meter observation mode differs from frozen plan')
+  const callsMode = raw.observationMode === 'observed-call-count'
   const budget = keys(raw.budget, ['durationMs', 'inputTokens', 'outputTokens', 'costUsdMicros', 'toolCalls'])
   for (const name of ['durationMs', 'inputTokens', 'outputTokens', 'toolCalls']) if (!Number.isSafeInteger(budget[name]) || (budget[name] as number) < 0) fail('invalid meter budget')
   if (budget.costUsdMicros !== null && (!Number.isSafeInteger(budget.costUsdMicros) || (budget.costUsdMicros as number) < 0)) fail('invalid meter budget')
+  if (callsMode && (budget.costUsdMicros !== null || budget.inputTokens !== 0)) fail('invalid call-count meter budget')
   for (const name of ['modelCalls', 'toolCalls', 'activeToolCalls', 'inputTokens', 'outputTokens', 'heldModelCalls', 'heldInputTokens', 'heldOutputTokens']) if (!Number.isSafeInteger(raw[name]) || (raw[name] as number) < 0) fail('invalid meter counters')
   if (raw.costUsdMicros !== null && (!Number.isSafeInteger(raw.costUsdMicros) || (raw.costUsdMicros as number) < 0) || raw.heldCostUsdMicros !== null && (!Number.isSafeInteger(raw.heldCostUsdMicros) || (raw.heldCostUsdMicros as number) < 0)) fail('invalid meter cost')
   let calls = 0; let input = 0; let output = 0; let heldCalls = 0; let heldInput = 0; let heldOutput = 0; let heldCost: number | null = raw.heldCostUsdMicros === null ? null : 0; const ids = new Set<number>()
@@ -150,6 +155,23 @@ function parseMeter(value: unknown): StrategyBenchmarkMeterSnapshot {
     const item = keys(trace, ['id', 'sessionId', 'agentId', 'startedAt', 'completedAt', 'phase', 'dispatched', 'reservedInputTokens', 'reservedOutputTokens', 'reservedCostUsdMicros', 'usage', 'reason'])
     if (!Number.isSafeInteger(item.id) || (item.id as number) < 1 || ids.has(item.id as number) || !Number.isSafeInteger(item.startedAt) || (item.startedAt as number) < 0 || item.completedAt !== null && (!Number.isSafeInteger(item.completedAt) || (item.completedAt as number) < (item.startedAt as number)) || !(item.sessionId === null || typeof item.sessionId === 'string') || !(item.agentId === null || typeof item.agentId === 'string') || typeof item.dispatched !== 'boolean' || !['preflight', 'reserved', 'streaming', 'settled', 'retained', 'rejected'].includes(item.phase as string) || !Number.isSafeInteger(item.reservedInputTokens) || !Number.isSafeInteger(item.reservedOutputTokens) || (item.reservedInputTokens as number) < 0 || (item.reservedOutputTokens as number) < 0 || !(item.reservedCostUsdMicros === null || Number.isSafeInteger(item.reservedCostUsdMicros) && (item.reservedCostUsdMicros as number) >= 0) || !(item.reason === null || ['cancelled', 'disposed', 'request-contract', 'input-bound', 'shared-budget', 'stream', 'usage', 'cost', 'tool-budget'].includes(item.reason as string))) fail('invalid meter trace')
     ids.add(item.id as number)
+    if (callsMode) {
+      // Call-count mode never measures tokens or money: every reservation is zero,
+      // cost is null, and a settled trace carries usage=null while still counting one call.
+      if (item.reservedInputTokens !== 0 || item.reservedOutputTokens !== 0 || item.reservedCostUsdMicros !== null || item.usage !== null) fail('invalid call-count meter trace')
+      if (item.phase === 'settled') {
+        if (!item.dispatched || item.completedAt === null || item.reason !== null) fail('invalid settled trace')
+        calls++
+      } else {
+        if (item.phase === 'rejected' && item.dispatched) fail('invalid rejected reservation')
+        if (item.phase === 'preflight' && (item.dispatched || item.completedAt !== null || item.reason !== null)
+          || (item.phase === 'reserved' || item.phase === 'streaming') && (item.completedAt !== null || item.reason !== null)
+          || item.phase === 'streaming' && !item.dispatched
+          || (item.phase === 'retained' || item.phase === 'rejected') && (item.completedAt === null || item.reason === null)) fail('invalid meter phase')
+        if (item.phase === 'reserved' || item.phase === 'streaming' || item.phase === 'retained') heldCalls++
+      }
+      return
+    }
     const reserved = item.reservedInputTokens as number > 0 || item.reservedOutputTokens as number > 0
     if (item.phase === 'settled') {
       if (!item.dispatched || item.completedAt === null || item.reason !== null || !reserved) fail('invalid settled trace')
@@ -167,12 +189,20 @@ function parseMeter(value: unknown): StrategyBenchmarkMeterSnapshot {
       }
     }
   })
-  if (calls !== raw.modelCalls || input !== raw.inputTokens || output !== raw.outputTokens || heldCalls !== raw.heldModelCalls || heldInput !== raw.heldInputTokens || heldOutput !== raw.heldOutputTokens || heldCost !== raw.heldCostUsdMicros || (raw.activeToolCalls as number) > (raw.toolCalls as number)) fail('meter aggregate mismatch')
+  if (callsMode) {
+    if (calls !== raw.modelCalls || heldCalls !== raw.heldModelCalls || (raw.activeToolCalls as number) > (raw.toolCalls as number)
+      || input !== 0 || output !== 0 || heldInput !== 0 || heldOutput !== 0 || heldCost !== null
+      || raw.inputTokens !== 0 || raw.outputTokens !== 0 || raw.costUsdMicros !== null
+      || raw.heldInputTokens !== 0 || raw.heldOutputTokens !== 0 || raw.heldCostUsdMicros !== null) fail('meter aggregate mismatch')
+  } else if (calls !== raw.modelCalls || input !== raw.inputTokens || output !== raw.outputTokens || heldCalls !== raw.heldModelCalls || heldInput !== raw.heldInputTokens || heldOutput !== raw.heldOutputTokens || heldCost !== raw.heldCostUsdMicros || (raw.activeToolCalls as number) > (raw.toolCalls as number)) fail('meter aggregate mismatch')
   return raw as unknown as StrategyBenchmarkMeterSnapshot
 }
 function validateMeterBounds(meter: StrategyBenchmarkMeterSnapshot, plan: StrategyBenchmarkPlan, budget: BenchmarkBudget): void {
   if (meter.modelCalls > plan.execution.modelCalls || meter.heldModelCalls > plan.execution.modelCalls || meter.modelCalls + meter.heldModelCalls > plan.execution.modelCalls
-    || meter.toolCalls > budget.toolCalls || meter.activeToolCalls > meter.toolCalls || meter.inputTokens > budget.inputTokens || meter.heldInputTokens > budget.inputTokens || meter.inputTokens + meter.heldInputTokens > budget.inputTokens
+    || meter.toolCalls > budget.toolCalls || meter.activeToolCalls > meter.toolCalls) fail('meter exceeds bound plan')
+  // Call-count mode has no token or monetary budget; only call/tool bounds are enforceable.
+  if (meter.observationMode === 'observed-call-count') return
+  if (meter.inputTokens > budget.inputTokens || meter.heldInputTokens > budget.inputTokens || meter.inputTokens + meter.heldInputTokens > budget.inputTokens
     || meter.outputTokens > budget.outputTokens || meter.heldOutputTokens > budget.outputTokens || meter.outputTokens + meter.heldOutputTokens > budget.outputTokens
     || meter.traces.some(trace => trace.reservedInputTokens > budget.inputTokens || trace.reservedOutputTokens > plan.execution.maxOutputTokensPerCall)
     || budget.costUsdMicros !== null && (meter.costUsdMicros === null || meter.heldCostUsdMicros === null || meter.costUsdMicros > budget.costUsdMicros || meter.heldCostUsdMicros > budget.costUsdMicros || meter.costUsdMicros + meter.heldCostUsdMicros > budget.costUsdMicros)) fail('meter exceeds bound plan')
@@ -194,13 +224,13 @@ function parseNative(value: unknown): StrategyEvidenceNative {
   raw.receipts.forEach(receipt => { const item = keys(receipt, ['runId', 'taskKind', 'contract', 'receipt', 'quiescent']); const runId = id(item.runId, 'receipt run'); const run = runs.get(runId); if (!run || (item.taskKind !== 'goal-step' && item.taskKind !== 'goal-outcome') || typeof item.quiescent !== 'boolean') fail('invalid receipt lifecycle'); let contract: TaskAcceptanceContract; let proof: TaskVerificationReceipt; try { contract = validateTaskAcceptanceContract(item.contract); proof = validateTaskVerificationReceipt(contract, item.receipt) } catch { fail('invalid acceptance receipt') }; if (contract.task.kind !== 'goal-step' && contract.task.kind !== 'goal-outcome') fail('receipt binding differs'); const assessment = contract.task.kind === 'goal-outcome' ? assessments.get(contract.id) : undefined; if (contractIds.has(contract.id) || receiptIds.has(proof.id) || contract.task.kind !== item.taskKind || contract.task.kind === 'goal-outcome' && (assessment === undefined || !identical(assessment.contract, contract) || assessment.triggerRunId !== runId)) fail('receipt binding differs'); const goal = contract.task.goal; if (goal.id !== parent.goalId || goal.sessionId !== parent.sessionId || goal.nativeGoalId !== parent.nativeGoalId || goal.definitionVersion !== parent.definitionVersion || goal.definitionDigest !== parent.definitionDigest || contract.task.kind === 'goal-step' && contract.task.goal.runId !== runId) fail('receipt binding differs'); contractIds.add(contract.id); receiptIds.add(proof.id) })
   return raw as unknown as StrategyEvidenceNative
 }
-function parse(input: unknown): StrategyEvidenceObject {
+function parse(input: unknown, expectedMode: ModelObservationMode): StrategyEvidenceObject {
   const raw = keys(evidenceSnapshot(input), ['protocol', 'version', 'planDigest', 'request', 'input', 'acceptance', 'versions', 'meter', 'native', 'outcome'])
   if (raw.protocol !== strategyEvidenceProtocol || raw.version !== 1) fail('unsupported protocol')
   benchmarkHash(raw.planDigest); const request = keys(raw.request, ['planId', 'dataset', 'cell', 'task', 'variant', 'budget']); id(request.planId, 'plan id')
   const inputDigest = keys(raw.input, ['digest']); const acceptance = keys(raw.acceptance, ['digest', 'verdict']); benchmarkHash(inputDigest.digest); benchmarkHash(acceptance.digest); const accepted = verdict(acceptance.verdict)
   const outcome = keys(raw.outcome, ['status', 'verdict', 'quiescent']); if ((outcome.status !== 'completed' && outcome.status !== 'unknown') || typeof outcome.quiescent !== 'boolean') fail('invalid outcome'); const result = verdict(outcome.verdict)
-  const native = parseNative(raw.native); const meter = parseMeter(raw.meter)
+  const native = parseNative(raw.native); const meter = parseMeter(raw.meter, expectedMode)
   const attributedSessions = new Set([native.parent.sessionId, ...native.strategies.flatMap(strategy => strategy.children.map(child => child.sessionId))])
   const knownNativeStop = native.runs.length > 0 && native.runs.every(run => run.executionStatus === 'succeeded' && run.quiescent)
     && native.strategies.every(strategy => strategy.outcome !== 'unknown' && strategy.children.every(child => child.quiescent))
@@ -233,7 +263,7 @@ export class StrategyEvidenceStore {
     input = evidenceSnapshot(input)
     const plan = parseStrategyBenchmarkPlan(input.plan); const expected = requestFor(plan, input.request.cell)
     const { plan: _plan, ...unbound } = input
-    const object = parse({ ...unbound, planDigest: strategyBenchmarkPlanDigest(plan) })
+    const object = parse({ ...unbound, planDigest: strategyBenchmarkPlanDigest(plan) }, plan.execution.observationMode)
     if (!identical(object.request, expected) || !identical(object.meter.budget, expected.budget) || object.input.digest !== expected.task.inputDigest || object.acceptance.digest !== expected.task.acceptanceDigest || !identical(object.versions, expected.variant.versions)) fail('request identity drift')
     validateMeterBounds(object.meter, plan, expected.budget)
     return this.#publish(strategyEvidenceProtocol, object)
@@ -250,7 +280,7 @@ export class StrategyEvidenceStore {
   }
   read(planInput: StrategyBenchmarkPlan, cell: BenchmarkCell, digest: string): Readonly<StrategyEvidenceObject> {
     const plan = parseStrategyBenchmarkPlan(planInput); const expected = requestFor(plan, cell)
-    const evidence = parse(this.#readEnvelope(strategyEvidenceProtocol, digest))
+    const evidence = parse(this.#readEnvelope(strategyEvidenceProtocol, digest), plan.execution.observationMode)
     if (evidenceDigest(evidence) !== digest || evidence.planDigest !== strategyBenchmarkPlanDigest(plan) || !identical(evidence.request, expected) || !identical(evidence.meter.budget, expected.budget)
       || evidence.input.digest !== expected.task.inputDigest || evidence.acceptance.digest !== expected.task.acceptanceDigest || !identical(evidence.versions, expected.variant.versions)) fail('evidence binding differs')
     validateMeterBounds(evidence.meter, plan, expected.budget)
@@ -345,7 +375,7 @@ function parseFailure(value: unknown, plan: StrategyBenchmarkPlan, cell: Benchma
       || history.value === null || typeof history.value !== 'object' || Array.isArray(history.value)) fail('invalid historical goal observation')
   }
   if (snapshot.meter !== null) {
-    const meter = parseMeter(snapshot.meter)
+    const meter = parseMeter(snapshot.meter, plan.execution.observationMode)
     if (!identical(meter.budget, expected.budget)) fail('failure meter budget drift')
     validateMeterBounds(meter, plan, expected.budget)
   }

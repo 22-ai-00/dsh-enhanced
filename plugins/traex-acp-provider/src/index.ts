@@ -8,7 +8,7 @@ import { version } from './version.js'
 export const name = 'dsh-enhanced-traex-acp-provider'
 export const inject = ['llm', 'sessions', 'agents']
 
-export { Config, probeTraexReadiness, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter, version }
+export { Config, normalizeConfig, probeTraexReadiness, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter, version }
 export { CatalogObservationCache, catalogCacheKey } from './catalog-cache.js'
 export { ACP_USAGE_DSH_MAPPING_GATE } from './acp-client.js'
 export type { CatalogCacheKeyParts, CachedCatalog } from './catalog-cache.js'

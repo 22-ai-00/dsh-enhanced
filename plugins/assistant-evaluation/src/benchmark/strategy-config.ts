@@ -55,16 +55,27 @@ export function parseStrategyBenchmarkConfig(value: unknown): Readonly<StrategyB
     ...((raw.model !== null && typeof raw.model === 'object' && Object.hasOwn(raw.model, 'outputLimitMode')) ? ['outputLimitMode'] : []),
     ...((raw.model !== null && typeof raw.model === 'object' && Object.hasOwn(raw.model, 'cacheReadUsdMicrosPerMillionTokens')) ? ['cacheReadUsdMicrosPerMillionTokens'] : []),
     ...((raw.model !== null && typeof raw.model === 'object' && Object.hasOwn(raw.model, 'cacheWriteUsdMicrosPerMillionTokens')) ? ['cacheWriteUsdMicrosPerMillionTokens'] : []),
+    ...((raw.model !== null && typeof raw.model === 'object' && Object.hasOwn(raw.model, 'observationMode')) ? ['observationMode'] : []),
   ]) as unknown as NativeModelConfig
   routeId(model.provider, 'provider'); routeId(model.model, 'model')
   benchmarkAssert(model.temperature === null || typeof model.temperature === 'number' && Number.isFinite(model.temperature) && model.temperature >= 0 && model.temperature <= 2, 'invalid temperature')
-  benchmarkAssert((model.inputLimitMode ?? 'upper-bound') === 'upper-bound' && (model.outputLimitMode ?? 'provider') === 'provider', 'strategy requires upper-bound input and provider output limits')
+  // The single source of truth for metering mode; the executor derives plan.execution.observationMode from it.
+  benchmarkAssert(model.observationMode === undefined
+    || model.observationMode === 'enforced-upper-bound-provider-output'
+    || model.observationMode === 'observed-call-count', 'invalid model observation mode')
+  const callCounting = model.observationMode === 'observed-call-count'
+  if (!callCounting) benchmarkAssert((model.inputLimitMode ?? 'upper-bound') === 'upper-bound' && (model.outputLimitMode ?? 'provider') === 'provider', 'strategy requires upper-bound input and provider output limits')
   benchmarkInteger(model.maxOutputTokens, 1, budget.outputTokens)
   benchmarkAssert((model.inputUsdMicrosPerMillionTokens === null) === (model.outputUsdMicrosPerMillionTokens === null), 'both token rates must be present or absent')
   if (model.inputUsdMicrosPerMillionTokens !== null) { rate(model.inputUsdMicrosPerMillionTokens); rate(model.outputUsdMicrosPerMillionTokens) }
   for (const field of ['cacheReadUsdMicrosPerMillionTokens', 'cacheWriteUsdMicrosPerMillionTokens'] as const) if (model[field] !== undefined && model[field] !== null) rate(model[field])
   digest(model.adapterDigest, 'adapter digest'); digest(model.tokenCounterDigest, 'token counter digest')
-  if (budget.costUsdMicros !== null) benchmarkAssert([model.inputUsdMicrosPerMillionTokens, model.outputUsdMicrosPerMillionTokens, model.cacheReadUsdMicrosPerMillionTokens, model.cacheWriteUsdMicrosPerMillionTokens].every(value => value !== null && value !== undefined), 'priced budget requires complete tariff')
+  if (callCounting) {
+    // Call-count mode measures model requests only: no tariffs, no monetary budget, zero input-token budget.
+    // budget.outputTokens is a positive structural placeholder (equal to the per-call cap), never measured.
+    benchmarkAssert(budget.costUsdMicros === null && budget.inputTokens === 0, 'call-count mode requires null cost and zero input-token budget')
+    benchmarkAssert([model.inputUsdMicrosPerMillionTokens, model.outputUsdMicrosPerMillionTokens, model.cacheReadUsdMicrosPerMillionTokens, model.cacheWriteUsdMicrosPerMillionTokens].every(value => value === null || value === undefined), 'call-count mode requires null token tariffs')
+  } else if (budget.costUsdMicros !== null) benchmarkAssert([model.inputUsdMicrosPerMillionTokens, model.outputUsdMicrosPerMillionTokens, model.cacheReadUsdMicrosPerMillionTokens, model.cacheWriteUsdMicrosPerMillionTokens].every(value => value !== null && value !== undefined), 'priced budget requires complete tariff')
 
   const execution = benchmarkObject(raw.execution, ['modelCalls', 'maxOutputTokensPerCall', 'maxGoalRounds']) as StrategyBenchmarkConfig['execution']
   benchmarkInteger(execution.modelCalls, 1, 10_000); benchmarkInteger(execution.maxOutputTokensPerCall, 1, budget.outputTokens); benchmarkInteger(execution.maxGoalRounds, 1, 32)

@@ -134,6 +134,7 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
   const digests = strategyGoalTaskDigests(task)
   benchmarkAssert(digests.inputDigest === input.request.task.inputDigest && digests.acceptanceDigest === input.request.task.acceptanceDigest, 'strategy task differs from frozen case')
   const model = benchmarkSnapshot(input.model)
+  const callCounting = model.observationMode === 'observed-call-count'
   benchmarkAssert(acceptanceDigest(model) === input.request.variant.versions.model, 'strategy model differs from frozen route')
   benchmarkAssert(/^sha256:[a-f0-9]{64}$/u.test(image) && dockerPath.startsWith('/'), 'immutable local image and absolute Docker path required')
   const stopTimeoutMs = input.stopTimeoutMs ?? 10000
@@ -247,7 +248,12 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
     await plugin(ctx, goalsModule.default, { databasePath: join(owner.runtimeRoot, 'goals.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true,
       preauthorizedCreateMaxRounds: limits.maxGoalRounds, stepMaxDurationMs: stepDuration,
       ...(enabled ? { strategy: { maxDurationMs: Math.min(stepDuration, 30000) } } : {}),
-      executionBudget: { ...budget, costUsdMicros: budget.costUsdMicros ?? undefined, modelCalls: limits.modelCalls, maxOutputTokensPerCall: limits.maxOutputTokensPerCall } })
+      // Call-count mode uses the Goals-native calls budget (route whitelist only, no
+      // registered meter); token mode keeps the token-bounded budget shape.
+      executionBudget: callCounting
+        ? { mode: 'calls' as const, modelCalls: limits.modelCalls, toolCalls: budget.toolCalls, durationMs: budget.durationMs,
+            maxOutputTokensPerCall: limits.maxOutputTokensPerCall, routes: [{ provider: model.provider, model: model.model }] }
+        : { ...budget, costUsdMicros: budget.costUsdMicros ?? undefined, modelCalls: limits.modelCalls, maxOutputTokensPerCall: limits.maxOutputTokensPerCall } })
     assertLive()
     const goals = ctx.get('assistantGoals' as never) as unknown as GoalsHost
     goalsHost = goals
@@ -282,7 +288,9 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
     assertLive()
     meter = installStrategyBenchmarkMeter(ctx, { budget, modelCalls: limits.modelCalls, maxOutputTokens: limits.maxOutputTokensPerCall,
       model, binding, signal })
-    goals.registerBudgetMeter({ id: 'benchmark-model', provider: model.provider, model: model.model, inputTokenUpperBound: binding.inputTokenUpperBound?.bind(binding),
+    // The calls budget enforces the {provider,model} route whitelist natively and never
+    // consults a meter; registering one is only meaningful for the token-enforced budget.
+    if (!callCounting) goals.registerBudgetMeter({ id: 'benchmark-model', provider: model.provider, model: model.model, inputTokenUpperBound: binding.inputTokenUpperBound?.bind(binding),
       inputUsdMicrosPerMillionTokens: model.inputUsdMicrosPerMillionTokens, outputUsdMicrosPerMillionTokens: model.outputUsdMicrosPerMillionTokens,
       cacheReadUsdMicrosPerMillionTokens: model.cacheReadUsdMicrosPerMillionTokens, cacheWriteUsdMicrosPerMillionTokens: model.cacheWriteUsdMicrosPerMillionTokens })
     ctx.on('agent/request', async (_payload, next) => ({ ...await next(), maxTokens: limits.maxOutputTokensPerCall,
