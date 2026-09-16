@@ -40,6 +40,15 @@ export interface AutoReviewAssessment {
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_MAX_TOKENS = 512
+// The review stream already aborts at timeoutMs, but abort is cooperative: a
+// gateway stream that ignores cancellation would leave `for await` pending
+// forever (observed on headless Lark turns across several providers). This
+// grace is the independent hard ceiling that lets a non-cooperating stream
+// escalate to the human answerer instead of freezing the approval waterfall.
+// A cooperating stream already returns 'escalate' once its signal aborts, so
+// resolving the same verdict slightly earlier changes nothing; the grace only
+// has to cover abort propagation, not a fresh review budget.
+const HARD_TIMEOUT_GRACE_MS = 250
 const MAX_ARGUMENT_BYTES = 8 * 1_024
 const MAX_INTENT_BYTES = 4 * 1_024
 const MAX_INTENT_MESSAGES = 3
@@ -385,12 +394,53 @@ function reviewSignal(parent: AbortSignal | undefined, timeoutMs: number): {
   }
 }
 
+type ReviewVerdict = 'allow' | 'escalate' | 'stale' | 'cancelled'
+
+/**
+ * Independent hard ceiling for one review. Abort is cooperative, so a gateway
+ * stream that ignores cancellation must not be able to freeze the approval
+ * waterfall: when the soft timeout plus a short grace elapses without the
+ * review settling, we abandon it (its late result is ignored) and escalate so
+ * the downstream human answerer can present a real allow/reject choice.
+ */
+function boundedReview(
+  operation: Promise<ReviewVerdict>,
+  hardMs: number,
+  parent: AbortSignal | undefined,
+): Promise<ReviewVerdict> {
+  if (parent?.aborted) return Promise.resolve('cancelled')
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (value: ReviewVerdict): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      parent?.removeEventListener('abort', onAbort)
+      resolve(value)
+    }
+    const timer = setTimeout(() => finish('escalate'), hardMs)
+    timer.unref?.()
+    const onAbort = (): void => finish('cancelled')
+    parent?.addEventListener('abort', onAbort, { once: true })
+    operation.then(
+      value => finish(value),
+      error => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        parent?.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
+}
+
 async function reviewOnce(
   llm: LlmRuntime,
   request: ApprovalRequest,
   config: ResolvedAutoReviewConfig,
   snapshot: AutoReviewSnapshot,
-): Promise<'allow' | 'escalate' | 'stale' | 'cancelled'> {
+): Promise<ReviewVerdict> {
   const mainRoute = request.agent.session.requestHeader()?.config
   const provider = config.provider ?? mainRoute?.provider
   const model = config.model ?? mainRoute?.model
@@ -452,9 +502,13 @@ export function registerAutoReviewAnswerer(ctx: Context, input: AutoReviewConfig
       if (!config.enabled) return escalateToHuman(request, next)
       const snapshot = autoReviewSnapshot(request)
       if (snapshot === undefined) return fallbackAfterReview(request, next)
-      let outcome: Awaited<ReturnType<typeof reviewOnce>>
+      let outcome: ReviewVerdict
       try {
-        outcome = await reviewOnce(runtimeCtx.llm, request, config, snapshot)
+        outcome = await boundedReview(
+          reviewOnce(runtimeCtx.llm, request, config, snapshot),
+          config.timeoutMs + HARD_TIMEOUT_GRACE_MS,
+          request.signal,
+        )
       } catch {
         return fallbackAfterReview(request, next)
       }
