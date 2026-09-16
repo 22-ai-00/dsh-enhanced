@@ -16,8 +16,8 @@ import type { BenchmarkResult } from './types.js'
 const runtimePackages = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop',
   '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools'] as const
 const help = `dsh-benchmark: public development benchmarks through the native DSH AgentLoop
-  corpus [--suite research-v1|memory-v1|memory-v2|strategy-v1]
-  doctor [--suite research-v1|memory-v1|memory-v2|strategy-v1] [--config FILE]
+  corpus [--suite research-v1|memory-v1|memory-v2|strategy-v1|strategy-v2]
+  doctor [--suite research-v1|memory-v1|memory-v2|strategy-v1|strategy-v2] [--config FILE]
   plan --config FILE [--output FILE]
   run --config FILE --adapter ABSOLUTE_MODULE --database FILE [--output FILE]
   report --database FILE --plan ID [--config FILE] [--output FILE]
@@ -91,7 +91,7 @@ const strategyRuntimePackages = [...runtimePackages, '@deepseek-ai/dsh-goal', '@
   '@dsh-enhanced/assistant-policy', '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-verifier'] as const
 
 async function strategyModules() {
-  try { return await Promise.all([import('./strategy-config.js'), import('./strategy-corpus.js'), import('./strategy-executor.js'), import('./strategy-plan.js'), import('./strategy-projection.js')]) } catch {
+  try { return await Promise.all([import('./strategy-config.js'), import('./strategy-corpus.js'), import('./strategy-executor.js'), import('./strategy-plan.js'), import('./strategy-projection.js'), import('./strategy-corpus-v2.js')]) } catch {
     throw new BenchmarkError('strategy benchmark runtime dependencies are missing; run dsh-benchmark doctor and install the reported host packages')
   }
 }
@@ -115,7 +115,8 @@ async function strategyConfig(value: unknown) {
 }
 
 function isStrategyConfig(value: unknown): boolean {
-  return value !== null && typeof value === 'object' && (value as { suite?: unknown }).suite === 'strategy-v1'
+  const suite = (value !== null && typeof value === 'object' ? (value as { suite?: unknown }).suite : undefined)
+  return suite === 'strategy-v1' || suite === 'strategy-v2'
 }
 
 async function ensureNewOutput(path: string | undefined): Promise<void> {
@@ -139,9 +140,9 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
   if (command === 'corpus') {
     const args = options(argv.slice(1), ['--suite'], [])
     const suite = args.get('--suite') ?? 'research-v1'
-    if (suite === 'strategy-v1') {
-      const [, corpus] = await strategyModules()
-      result = { dataset: corpus.strategyDevelopmentDataset, tasks: corpus.strategyDevelopmentCorpus.map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
+    if (suite === 'strategy-v1' || suite === 'strategy-v2') {
+      const [, , , , , corpusV2] = await strategyModules()
+      result = { dataset: corpusV2.strategyDatasetForSuite(suite), tasks: corpusV2.strategyCorpusForSuite(suite).map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
     } else {
       if (!['research-v1', 'memory-v1', 'memory-v2'].includes(suite)) throw new BenchmarkError('invalid native suite')
       result = { dataset: suite === 'memory-v2' ? memoryDevelopmentDatasetV2 : suite === 'memory-v1' ? memoryDevelopmentDataset : developmentDataset, tasks: (suite === 'memory-v2' ? memoryDevelopmentCorpusV2 : suite === 'memory-v1' ? memoryDevelopmentCorpus : developmentCorpus).map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
@@ -150,7 +151,7 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
     const args = options(argv.slice(1), ['--suite', '--config'], [])
     const suite = args.get('--suite') ?? 'research-v1'
     const require = createRequire(import.meta.url)
-    if (suite === 'strategy-v1') {
+    if (suite === 'strategy-v1' || suite === 'strategy-v2') {
       const configPath = args.get('--config')
       const configured = configPath === undefined ? undefined : await config(configPath)
       const provider = (configured as { model?: { provider?: unknown } } | undefined)?.model?.provider
@@ -202,7 +203,7 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
     if (isStrategyConfig(raw)) {
       const input = await strategyConfig(raw)
       const modules = await strategyModules()
-      const [, corpus, executor, strategyPlan] = modules
+      const [, , executor, strategyPlan, , corpusV2] = modules
       const plan = executor.createStrategyBenchmarkPlan(input)
       const journal = strategyPlan.strategyBenchmarkJournalPlan(plan)
       const cells = benchmarkSchedule(journal)
@@ -229,7 +230,7 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
         try {
           store.create(journal)
           const factory = await adapter(fields.get('--adapter')!, input)
-          const tasks = Object.fromEntries(input.cases.map(caseId => [caseId, corpus.strategyDevelopmentTask(caseId)]))
+          const tasks = Object.fromEntries(input.cases.map(caseId => [caseId, corpusV2.strategyTaskForSuite(input.suite, caseId)]))
           const strategyExecutor = executor.createStrategyBenchmarkExecutor({ plan, tasks, persona: input.persona, model: input.model, factory,
             workspaceDirectory: input.workspaceDirectory, stateDirectory: input.stateDirectory, image: input.image, dockerPath: input.dockerPath,
             stepMaxDurationMs: input.stepMaxDurationMs, ...(input.stopTimeoutMs === undefined ? {} : { stopTimeoutMs: input.stopTimeoutMs }) })
@@ -274,7 +275,7 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
     const store = new BenchmarkStore(database)
     try {
       const plan = store.plan(fields.get('--plan')!)
-      if (plan.dataset.id === 'dsh-strategy-development') {
+      if (plan.dataset.id === 'dsh-strategy-development' || plan.dataset.id === 'dsh-strategy-development-v2') {
         const configPath = fields.get('--config')
         if (configPath === undefined) throw new BenchmarkError('strategy report requires --config to reconstruct and verify evidence')
         const input = await strategyConfig(await config(configPath))
