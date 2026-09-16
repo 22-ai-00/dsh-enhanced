@@ -70,15 +70,28 @@ export interface AcpConfig {
   reasoningEffort?: string
   /** Carry every otherwise-unmapped durable DSH event through ACP `_meta`. */
   includeRawEvents?: boolean
+  /**
+   * Hard ceiling for an ACP client `requestPermission` round trip. The ACP
+   * JSON-RPC call carries no AbortSignal, so a client that never answers would
+   * otherwise park the approval waterfall forever. Defaults to the same
+   * fail-closed 300s authorization lifetime as assistant-delivery.
+   */
+  permissionTtlMs?: number
   /** Runtime-only transport override used by tests and embedded hosts. */
   stream?: Stream
 }
+
+const PERMISSION_TTL_MIN_MS = 1_000
+const PERMISSION_TTL_MAX_MS = 300_000
+const PERMISSION_TTL_DEFAULT_MS = 300_000
 
 export const Config: Schema<AcpConfig> = Schema.object({
   provider: Schema.string(),
   model: Schema.string(),
   reasoningEffort: Schema.string(),
   includeRawEvents: Schema.boolean().default(false),
+  permissionTtlMs: Schema.number().min(PERMISSION_TTL_MIN_MS).max(PERMISSION_TTL_MAX_MS)
+    .default(PERMISSION_TTL_DEFAULT_MS),
 })
 
 interface SessionRecord {
@@ -176,6 +189,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
   const agentPresets = ctx.agentPresets
   const logger = ctx.logger
   const includeRawEvents = config.includeRawEvents ?? false
+  const permissionTtlMs = config.permissionTtlMs ?? PERMISSION_TTL_DEFAULT_MS
   const sessions = new Map<SessionId, SessionRecord>()
   let closed = false
   let conn: AgentSideConnection
@@ -283,16 +297,41 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
   ctx.on('approval/request', (request, next) => {
     const record = ownedRecord(request.agent)
     if (record === undefined || request.callId === undefined) return next()
-    return conn.requestPermission({
-      sessionId: record.agent.session.id,
-      toolCall: { toolCallId: request.callId },
-      options: [
-        { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
-        { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
-      ],
-    }).then(({ outcome }) => {
-      if (outcome.outcome === 'cancelled') return 'cancelled'
-      return outcome.optionId === 'allow-once' ? 'allowed-once' : 'rejected'
+    // Capture after the guard: narrowing does not survive into the Promise
+    // executor closure below.
+    const callId = request.callId
+
+    // The ACP requestPermission JSON-RPC method has no cancellation parameter;
+    // a client that stops responding would otherwise hang the approval
+    // waterfall forever. Bound the wait with the configured TTL and with the
+    // owning request's abort, resolving fail-closed on expiry.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let settled = false
+    return new Promise<'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'>((resolve) => {
+      const finish = (outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        request.signal?.removeEventListener('abort', onAbort)
+        resolve(outcome)
+      }
+      const onAbort = (): void => finish('cancelled')
+      request.signal?.addEventListener('abort', onAbort, { once: true })
+      timer = setTimeout(() => {
+        finish('unavailable')
+      }, permissionTtlMs)
+      timer.unref?.()
+      conn.requestPermission({
+        sessionId: record.agent.session.id,
+        toolCall: { toolCallId: callId },
+        options: [
+          { optionId: 'allow-once', name: 'Allow once', kind: 'allow_once' },
+          { optionId: 'reject-once', name: 'Reject', kind: 'reject_once' },
+        ],
+      }).then(({ outcome }) => {
+        if (outcome.outcome === 'cancelled') return finish('cancelled')
+        return finish(outcome.optionId === 'allow-once' ? 'allowed-once' : 'rejected')
+      }, () => finish('unavailable'))
     })
   })
 

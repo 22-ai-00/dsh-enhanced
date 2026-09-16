@@ -90,7 +90,7 @@ export interface BridgeHarness {
   adapter: ScriptedAdapter
   updates: { sessionId: string; update: CapturedUpdate }[]
   permissionRequests: RequestPermissionRequest[]
-  onPermission: (request: RequestPermissionRequest) => RequestPermissionResponse
+  onPermission: (request: RequestPermissionRequest) => RequestPermissionResponse | Promise<RequestPermissionResponse>
   closeClientTransport(): Promise<void>
   acpFiber: Awaited<ReturnType<Context['plugin']>>
   dispose(): Promise<void>

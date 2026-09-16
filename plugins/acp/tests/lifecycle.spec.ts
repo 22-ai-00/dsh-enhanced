@@ -162,4 +162,13 @@ describe('official ACP permission contracts', () => {
     harness.onPermission = () => { throw new Error('client gone') }
     await expect(harness.ctx.approval.request(request)).resolves.toBe('unavailable')
   })
+
+  it('fails closed at the TTL when the ACP client never answers', async () => {
+    harness = await makeBridgeHarness({ config: { permissionTtlMs: 1_000 } })
+    const request = await ownedRequest()
+    harness.onPermission = () => new Promise<never>(() => {})
+    const started = Date.now()
+    await expect(harness.ctx.approval.request(request)).resolves.toBe('unavailable')
+    expect(Date.now() - started).toBeGreaterThanOrEqual(900)
+  })
 })
