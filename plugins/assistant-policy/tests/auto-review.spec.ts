@@ -26,7 +26,7 @@ import {
   HUMAN_APPROVAL_REASON,
 } from '../src/tool-risk.ts'
 
-type Script = string | Error | 'hang' | (() => Promise<string>)
+type Script = string | Error | 'hang' | 'freeze' | (() => Promise<string>)
 
 class ReviewerAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
@@ -60,6 +60,19 @@ class ReviewerAdapter extends LlmAdapter {
         }
         options.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
       })
+      return
+    }
+    if (script === 'freeze') {
+      // A non-cooperating gateway stream: ignores the abort signal and never
+      // yields, returns, or throws. No timer/handle is retained, so a bare
+      // pending promise cannot keep the event loop alive — only the racing
+      // hard timeout can unblock the approval waterfall.
+      if (options.signal?.aborted === true) {
+        await new Promise<void>(() => {})
+        return
+      }
+      options.signal?.addEventListener('abort', () => {}, { once: true })
+      await new Promise<void>(() => {})
       return
     }
     if (typeof script === 'function') script = await script()
@@ -629,6 +642,18 @@ describe('isolated automatic approval reviewer', () => {
     await expect(timedOut.request()).resolves.toBe('rejected')
     expect(timedOut.fallbackCalls).toBe(1)
     expect(timedOut.fallbackEscalations).toEqual([true])
+  })
+
+  test('hard-bounds a review stream that ignores abort and escalates instead of hanging', async () => {
+    const frozen = await fixture(['freeze'], { autoReview: { timeoutMs: 20 } })
+    const started = Date.now()
+    // Without the independent hard race this never settles (the headless Lark
+    // hang): the stream generator ignores cancellation, so the soft 20ms abort
+    // alone cannot break out of `for await`. It must escalate to the fallback.
+    await expect(frozen.request()).resolves.toBe('rejected')
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(frozen.fallbackCalls).toBe(1)
+    expect(frozen.fallbackEscalations).toEqual([true])
   })
 
   test('uses an optional fixed reviewer route and never reviews user mode', async () => {
