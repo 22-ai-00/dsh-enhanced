@@ -1646,6 +1646,69 @@ describe('assistant delivery Cordis service', () => {
     await ctx.fiber.restart()
   })
 
+  test('fails closed at the TTL when the pre-card durability flush never settles', async () => {
+    vi.useFakeTimers()
+    try {
+      const fixture = await boundApprovalHarness({
+        sessionId: 'approval-stuck-flush',
+        toolApprovalTtlMs: 2_000,
+        flush: () => new Promise<void>(() => {}),
+      })
+      const requestToolApproval = vi.fn(() => new Promise<'allowed-once'>(() => {}))
+      await fixture.service.registerAdapter({
+        channel: 'lark', account: 'bot-1',
+        capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'], toolApprovals: true },
+        start: async () => {}, requestToolApproval,
+        send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
+      })
+
+      const pending = fixture.ctx.approval.request({
+        agent: fixture.agent,
+        toolName: 'write_file',
+        callId: ToolCallId('call-delivery-1'),
+        reason: 'Write the requested file',
+      })
+      await vi.advanceTimersByTimeAsync(2_100)
+
+      await expect(pending).resolves.toBe('unavailable')
+      expect(requestToolApproval).not.toHaveBeenCalled()
+      await fixture.ctx.fiber.restart()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('fails closed at the TTL when the owner adapter never answers', async () => {
+    vi.useFakeTimers()
+    try {
+      const fixture = await boundApprovalHarness({
+        sessionId: 'approval-stuck-adapter',
+        toolApprovalTtlMs: 2_000,
+      })
+      const requestToolApproval = vi.fn(() => new Promise<'allowed-once'>(() => {}))
+      await fixture.service.registerAdapter({
+        channel: 'lark', account: 'bot-1',
+        capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'], toolApprovals: true },
+        start: async () => {}, requestToolApproval,
+        send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
+      })
+
+      const pending = fixture.ctx.approval.request({
+        agent: fixture.agent,
+        toolName: 'write_file',
+        callId: ToolCallId('call-delivery-1'),
+        reason: 'Write the requested file',
+      })
+      await vi.waitFor(() => expect(requestToolApproval).toHaveBeenCalledOnce())
+      await vi.advanceTimersByTimeAsync(2_100)
+
+      await expect(pending).resolves.toBe('unavailable')
+      await fixture.ctx.fiber.restart()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   test('does not release an owner grant after the policy emergency stop is enabled', async () => {
     const fixture = await boundApprovalHarness({ sessionId: 'approval-emergency-stop' })
     let answer!: (outcome: 'allowed-once') => void

@@ -3583,30 +3583,15 @@ export class AssistantDeliveryService extends Service {
         : undefined
     if (reviewRoute === undefined) return reviewer === 'auto-review' ? next() : 'unavailable'
     if (initialRoute.state !== 'bound') return 'unavailable'
-    if (signalAborted(request.signal)) return 'cancelled'
-    let authority: ToolApprovalAuthority | undefined
-    try {
-      authority = this.resolveToolApprovalAuthority(ctx, request)
-    } catch {
-      return 'unavailable'
-    }
-    if (authority === undefined || authority.binding.id !== initialRoute.binding.id) return 'unavailable'
-    const sessions = ctx.get('sessions')
-    if (sessions === undefined) return 'unavailable'
-    try {
-      if (!await sessions.flush(request.agent.session)) return 'unavailable'
-    } catch {
-      return 'unavailable'
-    }
-    if (signalAborted(request.signal)) return 'cancelled'
-    let persisted: ToolApprovalAuthority | undefined
-    try {
-      persisted = this.resolveToolApprovalAuthority(ctx, request)
-    } catch {
-      return 'unavailable'
-    }
-    if (!sameToolApprovalAuthority(authority, persisted)) return 'unavailable'
 
+    // The TTL controller is installed BEFORE every pre-card wait, not just
+    // before the adapter call. resolveToolApprovalAuthority is synchronous, but
+    // the durability `sessions.flush()` between the two authority reads has no
+    // cancellation of its own: a stuck flush listener used to hang the whole
+    // approval waterfall for hours with no card dispatched and no expiry (real
+    // headless-Lark observation). Everything from here on is bounded by the
+    // same fail-closed deadline; abort races resolve 'cancelled' only when the
+    // owning request itself was aborted, otherwise 'unavailable'.
     const operationId = `tool-approval:${randomUUID()}`
     const expiresAt = Date.now() + this.config.toolApprovalTtlMs
     const controller = new AbortController()
@@ -3616,7 +3601,11 @@ export class AssistantDeliveryService extends Service {
       controller.abort(request.signal?.reason)
     }
     request.signal?.addEventListener('abort', onRequestAbort, { once: true })
-    const aborted = new Promise<ApprovalOutcome>(resolve => {
+    if (signalAborted(request.signal)) {
+      request.signal?.removeEventListener('abort', onRequestAbort)
+      return 'cancelled'
+    }
+    const deadlineAbort = new Promise<ApprovalOutcome>(resolve => {
       controller.signal.addEventListener('abort', () => {
         resolve(requestCancelled ? 'cancelled' : 'unavailable')
       }, { once: true })
@@ -3626,26 +3615,62 @@ export class AssistantDeliveryService extends Service {
     }, this.config.toolApprovalTtlMs)
     timeout.unref?.()
     this.toolApprovalControllers.add(controller)
-    const adapterRequest: DeliveryToolApprovalRequest = Object.freeze({
-      operationId,
-      bindingId: authority.binding.id,
-      target: Object.freeze({
-        conversation: Object.freeze({ ...authority.binding.conversation }),
-        principal: Object.freeze({ ...authority.binding.principal }),
-      }),
-      expiresAt,
-      actionHash: authority.actionHash,
-      toolName: request.toolName,
-      callId: authority.callId,
-      ...(request.reason === undefined ? {} : { reason: request.reason }),
-      arguments: authority.arguments,
-    })
+
     let outcome: ApprovalOutcome
+    // Declared outside the try block: the post-race authority re-check below
+    // must compare against the exact authority that dispatched the card.
+    let authority: ToolApprovalAuthority | undefined
     try {
+      const preCard = await Promise.race([
+        (async (): Promise<ToolApprovalAuthority | ApprovalOutcome> => {
+          let authority: ToolApprovalAuthority | undefined
+          try {
+            authority = this.resolveToolApprovalAuthority(ctx, request)
+          } catch {
+            return 'unavailable'
+          }
+          if (authority === undefined || authority.binding.id !== initialRoute.binding.id) return 'unavailable'
+          const sessions = ctx.get('sessions')
+          if (sessions === undefined) return 'unavailable'
+          try {
+            if (!await sessions.flush(request.agent.session)) return 'unavailable'
+          } catch {
+            return 'unavailable'
+          }
+          if (signalAborted(request.signal)) return 'cancelled'
+          let persisted: ToolApprovalAuthority | undefined
+          try {
+            persisted = this.resolveToolApprovalAuthority(ctx, request)
+          } catch {
+            return 'unavailable'
+          }
+          if (!sameToolApprovalAuthority(authority, persisted)) return 'unavailable'
+          return authority
+        })(),
+        deadlineAbort,
+      ])
+      if (typeof preCard === 'string') return preCard
+      const granted: ToolApprovalAuthority = preCard
+      authority = granted
+
+      const adapterRequest: DeliveryToolApprovalRequest = Object.freeze({
+        operationId,
+        bindingId: granted.binding.id,
+        target: Object.freeze({
+          conversation: Object.freeze({ ...granted.binding.conversation }),
+          principal: Object.freeze({ ...granted.binding.principal }),
+        }),
+        expiresAt,
+        actionHash: granted.actionHash,
+        toolName: request.toolName,
+        callId: granted.callId,
+        ...(request.reason === undefined ? {} : { reason: request.reason }),
+        arguments: granted.arguments,
+      })
       const answer = Promise.resolve()
-        .then(() => authority!.adapter.requestToolApproval!(adapterRequest, controller.signal))
+        .then(() => granted.adapter.requestToolApproval!(adapterRequest, controller.signal))
         .then<ApprovalOutcome, ApprovalOutcome>(value => value, () => 'unavailable')
-      outcome = await Promise.race([answer, aborted])
+      outcome = await Promise.race([answer, deadlineAbort])
     } finally {
       clearTimeout(timeout)
       request.signal?.removeEventListener('abort', onRequestAbort)
@@ -3659,7 +3684,7 @@ export class AssistantDeliveryService extends Service {
     } catch {
       return 'unavailable'
     }
-    if (current === undefined || !sameToolApprovalAuthority(authority, current)) return 'unavailable'
+    if (authority === undefined || current === undefined || !sameToolApprovalAuthority(authority, current)) return 'unavailable'
     if (outcome === 'allowed-once') {
       try {
         // The tool guard ran before the native tool raised this approval. Do not
