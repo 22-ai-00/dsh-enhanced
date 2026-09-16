@@ -11,7 +11,7 @@ import { createStrategyGoalRuntime, strategyGoalTaskDigests, type StrategyGoalRu
 import { parseStrategyBenchmarkPlan, strategyBenchmarkCapabilityVersions, strategyBenchmarkJournalPlan, strategyBenchmarkProtocol, strategyBenchmarkRequestLimits, type StrategyBenchmarkPlan } from './strategy-plan.js'
 import { createFixedStrategyCapabilityExpectation, StrategyCapabilityRuntimeHost, assertStrategyCapabilityRuntime, type StrategyCapabilityRuntimeObservation } from './strategy-capabilities.js'
 import { parseStrategyBenchmarkConfig, type StrategyBenchmarkConfig } from './strategy-config.js'
-import { strategyDevelopmentCases, strategyDevelopmentDataset } from './strategy-corpus.js'
+import { strategyCasesForSuite, strategyDatasetForSuite } from './strategy-corpus-v2.js'
 import type { BenchmarkMetrics, BenchmarkObservation, BenchmarkResult } from './types.js'
 
 export interface StrategyBenchmarkExecutorOptions {
@@ -55,8 +55,8 @@ export function createStrategyBenchmarkPlan(value: StrategyBenchmarkConfig): Rea
   // Single source of truth: plan.execution.observationMode is derived from model.observationMode, never read from config.execution.
   return parseStrategyBenchmarkPlan({ schemaVersion: 1, protocol: strategyBenchmarkProtocol, capabilities,
     execution: { ...config.execution, observationMode: config.model.observationMode ?? 'enforced-upper-bound-provider-output' },
-    benchmark: { schemaVersion: 1, id: config.id, comparison: 'capability', dataset: strategyDevelopmentDataset,
-      cases: strategyDevelopmentCases().filter(task => config.cases.includes(task.id)), budget: config.budget, repeats: config.repeats, seed: config.seed,
+    benchmark: { schemaVersion: 1, id: config.id, comparison: 'capability', dataset: strategyDatasetForSuite(config.suite),
+      cases: strategyCasesForSuite(config.suite).filter(task => config.cases.includes(task.id)), budget: config.budget, repeats: config.repeats, seed: config.seed,
       variants: [false, true].map(enabled => ({ id: enabled ? 'adaptive-strategy' : 'direct', role: enabled ? 'candidate' : 'baseline',
         features: { memory: false, planning: false, review: false, growth: false },
         versions: { model: acceptanceDigest(config.model), skills: noSkills, ...strategyBenchmarkCapabilityVersions(capabilities, enabled) } })) } })

@@ -1,12 +1,12 @@
-/** Strict, side-effect-free operator configuration for strategy-v1. */
+/** Strict, side-effect-free operator configuration for the native Goal strategy benchmarks. */
 import type { NativeModelConfig } from './native.js'
 import { isAbsolute, relative } from 'node:path'
-import { strategyDevelopmentCases, strategyDevelopmentTask } from './strategy-corpus.js'
+import { isStrategySuite, strategyCasesForSuite, strategyTaskForSuite, type StrategySuite } from './strategy-corpus-v2.js'
 import { benchmarkAssert, benchmarkInteger, benchmarkObject, benchmarkSnapshot } from './schema.js'
 import type { BenchmarkBudget } from './types.js'
 
 export interface StrategyBenchmarkConfig {
-  suite: 'strategy-v1'
+  suite: StrategySuite
   id: string
   cases: readonly string[]
   persona: string
@@ -38,11 +38,11 @@ export function parseStrategyBenchmarkConfig(value: unknown): Readonly<StrategyB
   const copy = benchmarkSnapshot(value)
   const raw = benchmarkObject(copy, ['suite', 'id', 'cases', 'persona', 'model', 'budget', 'execution', 'repeats', 'seed', 'image', 'dockerPath', 'stepMaxDurationMs', 'workspaceDirectory', 'stateDirectory',
     ...((copy !== null && typeof copy === 'object' && Object.hasOwn(copy, 'stopTimeoutMs')) ? ['stopTimeoutMs'] : [])])
-  benchmarkAssert(raw.suite === 'strategy-v1', 'unsupported strategy suite')
+  benchmarkAssert(isStrategySuite(raw.suite), 'unsupported strategy suite')
   identifier(raw.id, 'strategy benchmark id')
   benchmarkAssert(typeof raw.persona === 'string' && raw.persona.trim().length > 0 && raw.persona.length <= 32_768, 'invalid strategy persona')
   benchmarkAssert(Array.isArray(raw.cases) && raw.cases.length >= 1 && raw.cases.length <= 100, 'invalid strategy cases')
-  const known = new Set(strategyDevelopmentCases().map(task => task.id)); const selected = new Set<string>()
+  const known = new Set(strategyCasesForSuite(raw.suite).map(task => task.id)); const selected = new Set<string>()
   for (const caseId of raw.cases) { identifier(caseId, 'strategy case id'); benchmarkAssert(known.has(caseId) && !selected.has(caseId), 'cases must be unique strategy development cases'); selected.add(caseId) }
 
   const budget = benchmarkObject(raw.budget, ['durationMs', 'inputTokens', 'outputTokens', 'costUsdMicros', 'toolCalls']) as unknown as BenchmarkBudget
@@ -87,7 +87,7 @@ export function parseStrategyBenchmarkConfig(value: unknown): Readonly<StrategyB
   benchmarkInteger(raw.stepMaxDurationMs, 1_000, 300_000)
   benchmarkAssert((raw.stepMaxDurationMs as number) * 3 < budget.durationMs, 'strategy step duration does not fit benchmark duration')
   for (const caseId of selected) {
-    const verification = strategyDevelopmentTask(caseId).verification
+    const verification = strategyTaskForSuite(raw.suite, caseId).verification
     benchmarkAssert(verification.maxDurationMs * verification.cases.length < (raw.stepMaxDurationMs as number), 'strategy verification does not fit execution window')
   }
   if (raw.stopTimeoutMs !== undefined) benchmarkInteger(raw.stopTimeoutMs, 1_000, 30_000)

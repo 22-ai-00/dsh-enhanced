@@ -12,12 +12,12 @@ export interface StrategyDevelopmentCorpusTask {
   examples: readonly { stdin: string; expectedStdout: string }[]
 }
 
-interface AuthoredStrategyTask extends StrategyDevelopmentCorpusTask {
+export interface AuthoredStrategyTask extends StrategyDevelopmentCorpusTask {
   verification: StrategyGoalTask['verification']
 }
 
-const objective = (description: string): string => `Create a POSIX shell program named answer.sh that ${description}`
-const prompt = (value: string, examples: readonly { stdin: string; expectedStdout: string }[]): string => [
+export const objective = (description: string): string => `Create a POSIX shell program named answer.sh that ${description}`
+export const prompt = (value: string, examples: readonly { stdin: string; expectedStdout: string }[]): string => [
   value,
   'Public examples:\n' + examples.map(example => `stdin:\n${example.stdin}\nstdout:\n${example.expectedStdout}`).join('\n'),
   'Create a Goal by calling goal_create with the exact objective stated above.',
@@ -76,7 +76,7 @@ const authored: readonly AuthoredStrategyTask[] = [
   },
 ]
 
-function frozenJson<T>(value: T): T {
+export function frozenJson<T>(value: T): T {
   const copy = JSON.parse(acceptanceCanonicalJson(value)) as T
   const freeze = (entry: unknown): void => {
     if (entry === null || typeof entry !== 'object') return

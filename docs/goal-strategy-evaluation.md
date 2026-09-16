@@ -92,3 +92,27 @@ node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs
 - 触发语义：工具描述写明"on uncertain reasoning or repeated failed criteria"，而四个 `strategy-v1` 任务首轮 `isolation_run` 即被独立 verifier 接受，从未出现失败判据或真实不确定性，故无咨询动机——这是 **corpus 难度/触发语义天花板**。
 
 下一步要测目标机制，必须换更难 corpus（多约束/对抗 verifier，首轮无法过验收）或注入首轮拒绝，使 goal 进入驱动 persona 咨询的状态，再用同一 call-count 配对 harness 复跑，先确认 `native.strategies>0` 与稳定的非 `-g1` 子调用块，才谈得上判断增益；不得靠调 prompt 制造增益。
+
+## strategy-v2 难题开发集
+
+`strategy-v2` 是与 v1 平级的独立公开开发集（dataset id `dsh-strategy-development-v2`），专门用于上一节的下一步：四道多约束、含精确边界陷阱的 POSIX shell 题，使首轮 artifact 有合理概率过不了独立逐字节验收，从而真正驱动失败判据与 persona 咨询。四题为：
+
+1. `session-gap-split`：按相邻事件绝对时间差**严格大于** 300 秒切分会话（恰 300 秒不切）；原始值回退即跨恰好一个午夜（后续比较加 86400）；跨午夜时间戳按 mod 86400 渲染；输出 `start-end count`。
+2. `closed-range-intersection`：按名累积闭区间交集（下界取 max、上界取 min）；`lo === hi` 的单点仍可行，仅 `max(lo) > min(hi)` 才对**任一**名输出唯一一行 `NONE`；否则按名 ASCII 字节序输出。
+3. `greedy-paragraph-wrap`：空行分段、纯空白段忽略；段内所有空白折叠；宽度恰 40 的 greedy 填充（`长度 + 1 + 词长 <= 40` 才同行）；超长词独占不截断；段间恰好一个空行。
+4. `quoted-csv-account-totals`：跳固定表头；双引号列状态机（列内逗号是数据、`""` 是字面引号）；按 (jurisdiction, account) 求整数分和，`-0` 视为 0、恰好归零仍输出；TAB 分隔、整行 ASCII 字节序。
+
+每题只向模型公开 objective、提示和**一个**只演示格式与主规则、不暴露任何陷阱的公开示例；8 个私有验证向量（逐字节 stdin/stdout/exit）只在独立隔离验证时使用。全部 32 个私有向量的期望字节均由 POSIX-sh 参考实现产生，并在冻结 verifier image（dash + busybox awk）内逐字节比对锚定，不是手算结果。v2 的加入不改变 v1 dataset 的任何字节（测试钉死 v1 digest `b9e5dc4d…`），两个 suite 共用同一套 config/executor/runtime/evidence/projection，只在 config 层以 `suite: "strategy-v2"` 选择独立语料与 dataset 身份；私有 verifier 窗口仍须满足全部向量期限之和小于 step 窗口（每题 8×5000ms = 40000ms，故 v2 配置 `stepMaxDurationMs` 必须大于 40000）。
+
+从 [strategy-v2 TraeX 配置模板](examples/strategy-v2-traex.config.json) 开始，命令与 v1 完全对称，只把 `--suite` 换成 `strategy-v2`：
+
+```sh
+dsh-benchmark corpus --suite strategy-v2
+dsh-benchmark doctor --suite strategy-v2 --config ./docs/examples/strategy-v2-traex.config.json
+dsh-benchmark plan --config ./docs/examples/strategy-v2-traex.config.json --output ./private/strategy-v2-plan.json
+dsh-benchmark run --config ./docs/examples/strategy-v2-traex.config.json --adapter /absolute/traex.js --database ./private/strategy-v2.sqlite --output ./private/strategy-v2-report.json
+dsh-benchmark report --database ./private/strategy-v2.sqlite --plan strategy-traex-development-v2 --config ./docs/examples/strategy-v2-traex.config.json --output ./private/strategy-v2-report-copy.json
+```
+
+真实重跑使用与 2026-09-15 完全相同的 call-count 配对 harness（Docker 隔离、`gpt-5.6-terra`、120s/450s、两 repeats、零外部花费），但必须用新的 plan id 与独立 state 根（同 id 不同 dataset/limits 会被 BenchmarkStore 拒绝）。首发只观测两件事：`native.strategies > 0`（strategy 工具被模型真实调用）以及稳定的非 `-g1` persona 子调用块；在此之前不声称任何策略增益，也不得通过修改 prompt 人为制造调用。
+
