@@ -251,6 +251,13 @@ interface NativeGoalService {
 
 interface GoalContinuationWait {
   settle(): Promise<boolean>
+  /**
+   * Pin and report whether a live active+armed native goal is awaiting its
+   * driver continuation. A foreground turn that produced only a tool call
+   * (e.g. `goal_create`) has no reply text but must not be treated as an empty
+   * response: the goal still owns subsequent native rounds.
+   */
+  pinActiveArmedGoal(): boolean
   /** Remaining continuation budget to use for Agent teardown, if it was armed. */
   teardownTimeoutMs(): number | undefined
   /** Recheck cancellation and authority after teardown, before accepting success. */
@@ -1318,16 +1325,18 @@ function finalAssistant(
   truncated: boolean
   stopped: boolean
   hasUnpairedToolCall: boolean
+  hadToolCall: boolean
   failureCode?: string
 } {
   if (expectedTurn === undefined) {
-    return { text: '', completed: false, truncated: false, stopped: false, hasUnpairedToolCall: false }
+    return { text: '', completed: false, truncated: false, stopped: false, hasUnpairedToolCall: false, hadToolCall: false }
   }
   let text = ''
   let completed = false
   let truncated = false
   let stopped = false
   const unpairedToolCalls = new Set<string>()
+  let hadToolCall = false
   let failureCode: string | undefined
   for (const event of events.slice(from)) {
     if (event.type === 'assistant/message' && event.data.turn === expectedTurn) {
@@ -1335,6 +1344,7 @@ function finalAssistant(
         .map(block => block.type === 'text' ? block.text : '').join('')
       for (const block of event.data.message.content) {
         if (block.type === 'tool-call') {
+          hadToolCall = true
           unpairedToolCalls.add(String(block.id))
         }
       }
@@ -1369,6 +1379,7 @@ function finalAssistant(
     truncated,
     stopped,
     hasUnpairedToolCall: unpairedToolCalls.size > 0,
+    hadToolCall,
     ...(failureCode === undefined ? {} : { failureCode }),
   }
 }
@@ -1755,6 +1766,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     if (signal.aborted) aborted()
     return {
       settle: beginSettling,
+      pinActiveArmedGoal: pinArmedGoal,
       teardownTimeoutMs,
       isQuiescent,
       dispose: () => {
@@ -4107,18 +4119,27 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           return { outcome: 'not-processed', failureCode: 'agent-turn-incomplete', retryable: false }
         }
         if (currentEmpty || assembledText.trim() === '') {
-          const hasPartial = bestEffortText.trim() !== ''
-          this.options.replyCommand(binding, envelope.eventId, {
-            text: hasPartial
-              ? truncatedAgentReply(bestEffortText, this.options.maxTextBytes)
-              : emptyAgentReply(this.options.maxTextBytes),
-            format: 'markdown',
-          })
-          publishProgress({
-            kind: 'failed',
-            code: hasPartial ? AGENT_OUTPUT_TRUNCATED_CODE : AGENT_EMPTY_RESPONSE_CODE,
-          })
-          return { outcome: 'processed' }
+          // A tool-only foreground turn can arm a native goal (typically
+          // `goal_create`); the host round driver then continues with its own
+          // rounds and this turn has no user-facing reply text. It must not be
+          // classified as an empty response, which would dispose the armed
+          // continuation fence and cancel the in-flight goal round.
+          if (output.hadToolCall && goalContinuation?.pinActiveArmedGoal()) {
+            // Fall through to the continuation fence below instead of replying.
+          } else {
+            const hasPartial = bestEffortText.trim() !== ''
+            this.options.replyCommand(binding, envelope.eventId, {
+              text: hasPartial
+                ? truncatedAgentReply(bestEffortText, this.options.maxTextBytes)
+                : emptyAgentReply(this.options.maxTextBytes),
+              format: 'markdown',
+            })
+            publishProgress({
+              kind: 'failed',
+              code: hasPartial ? AGENT_OUTPUT_TRUNCATED_CODE : AGENT_EMPTY_RESPONSE_CODE,
+            })
+            return { outcome: 'processed' }
+          }
         }
         break
       }
@@ -4126,15 +4147,17 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // The foreground reply has already crossed its durable reply path.
       // Retain the same Agent afterwards only for the native goal driver; its
       // unknown result must never turn the original reply into a claim that
-      // the business goal was achieved.
-      const learning = await this.options.replyCompletedPreferenceTurn(
-        agent,
-        binding,
-        envelope,
-        { text: assembledText, format: 'markdown' },
-      )
-      if (learning === 'unknown') {
-        this.ctx.logger.warn('assistant-delivery: completed-turn preference projection is ambiguous')
+      // the business goal was achieved. A tool-only turn has no reply text.
+      if (assembledText.trim() !== '') {
+        const learning = await this.options.replyCompletedPreferenceTurn(
+          agent,
+          binding,
+          envelope,
+          { text: assembledText, format: 'markdown' },
+        )
+        if (learning === 'unknown') {
+          this.ctx.logger.warn('assistant-delivery: completed-turn preference projection is ambiguous')
+        }
       }
       if (goalContinuation !== undefined) {
         goalContinuationQuiescent = await goalContinuation.settle()

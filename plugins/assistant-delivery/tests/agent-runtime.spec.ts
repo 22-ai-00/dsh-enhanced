@@ -9447,6 +9447,186 @@ describe('real rc.1 delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('retains a native goal continuation when the owner model turn is a tool-only goal_create', async () => {
+    // Reproduces the real strategy-v1 cell failure: the first settled model
+    // request emitted exactly one paired `goal_create` tool call (zero text,
+    // finish reason tool-calls, start_native_rounds). Delivery must not classify
+    // that as an empty reply and dispose the armed continuation fence, or the
+    // round driver's spliced native round gets cancelled before its request.
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goal-tool-only-create-'))
+    roots.push(root)
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const objective = 'Create a POSIX shell program named answer.sh that sums whitespace-separated integers'
+    const goalPolicy = {
+      id: 'owner-native-goal-tool-only-create', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId },
+      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'execute'],
+      resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] },
+    }
+    const toolPolicy = (name: string) => ({
+      id: `owner-native-goal-tool-only-create-${name}`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: name }, context: { initiators: ['external' as const] },
+    })
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [goalPolicy, toolPolicy('goal_create')], presets: canonicalPermissionPresets,
+      seedDefaultPreset: 'danger-full-access', provideApproval: false, goalContinuationTimeoutMs: 5_000,
+      // The real strategy benchmark owner mounts Delivery with automatic
+      // completion disabled (strategy-owner.ts sets
+      // agentMaxAutoContinuationTurns: 0), so a completed empty owner turn is
+      // classified straight at the empty-turn branch instead of first spawning
+      // a regenerate turn. Mirror that assembly so the regression exercises the
+      // tool-only goal_create pin branch directly.
+      maxAutoContinuationTurns: 0,
+    })
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(native.goalTools as never, {} as never)
+    await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+    // The goal leaves active+armed via the driver's round-limit block, captured
+    // straight off the native goal/changed snapshot rather than reading a
+    // possibly-disposed Agent handle after teardown.
+    let terminalGoal: { phase: string, activation: string, roundsStarted: number, maxGoalRounds: number } | undefined
+    fixture.ctx.on('goal/changed', ({ change }) => {
+      const goal = change.goal
+      if (goal === undefined) return
+      if (goal.phase !== 'active' || goal.activation !== 'armed') terminalGoal = goal
+    })
+    // Gate the single continuation round mid-stream. A real native round is a
+    // long-running task (the session seq 13 cell wrote answer.sh), so while
+    // Delivery evaluates the completed empty owner turn the goal is still
+    // active+armed. An ungated mock stream ends round 1 and lets the driver
+    // round-limit-block the goal *before* Delivery's pin check, which is not
+    // the production ordering being regressed.
+    let releaseContinuationRound!: () => void
+    const continuationRoundGate = new Promise<void>(resolve => { releaseContinuationRound = resolve })
+
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      if (fixture.llm.requests.length !== 0) {
+        // The driver-spliced native round (round 1/1). Admit it as a running
+        // text request, then hold it open until the test releases the gate.
+        fixture.llm.requests.push(options)
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'Working on the answer.sh objective' }
+        await continuationRoundGate
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Working on the answer.sh objective' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      // First (owner) request: one paired goal_create tool call, no text block,
+      // finish tool-calls -- exactly real session seq 13/14.
+      fixture.llm.requests.push(options)
+      const callId = ToolCallId('native-goal-tool-only-create')
+      const args = JSON.stringify({ objective, start_native_rounds: true, max_goal_rounds: 1 })
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id: callId, name: 'goal_create', argumentsDelta: args }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'goal_create', arguments: args } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-native-goal-tool-only-create', 'Create and run the one-round answer.sh goal'))
+    // Drive in the background: it parks in settle() while the gated round runs.
+    const driving = drive(fixture.service)
+    // The owner tool-only turn is retained (not an empty reply), the armed
+    // continuation fence is pinned, and the driver splices native round 1.
+    await vi.waitFor(() => {
+      expect(fixture.llm.requests).toHaveLength(2)
+      expect(fixture.llm.requests[1]?.messages.some(candidate =>
+        candidate.role === 'user' && messageText(candidate).includes('<goal_round>'))).toBe(true)
+    }, { timeout: 5_000 })
+    // While the round is in flight Delivery has emitted no reply and no failure.
+    expect(fixture.sends).toHaveLength(0)
+    expect(fixture.progresses.some(value => value.update.kind === 'failed')).toBe(false)
+    // Releasing the round lets the driver retire round 1/1 and round-limit-block
+    // the goal; the fence settles true and Delivery reports completion.
+    releaseContinuationRound()
+    await driving
+    await vi.waitFor(() => {
+      expect(fixture.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    }, { timeout: 5_000 })
+    // No empty-retry notice was ever sent and the process never failed.
+    expect(fixture.sends).toHaveLength(0)
+    expect(fixture.progresses.some(value => value.update.kind === 'failed')).toBe(false)
+    // The native goal ran exactly its one armed round, then disarmed via the
+    // driver round-limit block rather than being left active.
+    expect(terminalGoal).toMatchObject({
+      phase: 'blocked', activation: 'disarmed', roundsStarted: 1, maxGoalRounds: 1,
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('still sends the empty reply for a model-emitted tool-only goal_create when continuation is disabled', async () => {
+    // Compatibility counter-case: with goalContinuationTimeoutMs left at its
+    // public zero default there is no continuation fence, so the same tool-only
+    // owner turn keeps its historic empty-response handling (a synthesized
+    // retry notice and an agent-empty-response failure) instead of being
+    // retained for a native goal continuation.
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goal-tool-only-disabled-'))
+    roots.push(root)
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const objective = 'Create a goal whose native round must not run from the foreground turn'
+    const goalPolicy = {
+      id: 'owner-native-goal-tool-only-disabled', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId },
+      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'execute'],
+      resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] },
+    }
+    const toolPolicy = (name: string) => ({
+      id: `owner-native-goal-tool-only-disabled-${name}`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: name }, context: { initiators: ['external' as const] },
+    })
+    // Fence dimension: omit goalContinuationTimeoutMs so the public zero
+    // default applies and waitForNativeGoalContinuation() returns undefined.
+    // Keep automatic completion at 0 too (same real strategy-owner assembly as
+    // the retained counterpart) so the only difference between the two cases
+    // is the continuation fence and execution reaches the same empty-turn
+    // branch rather than diverging through an automatic regenerate turn.
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [goalPolicy, toolPolicy('goal_create')], presets: canonicalPermissionPresets,
+      seedDefaultPreset: 'danger-full-access', provideApproval: false,
+      maxAutoContinuationTurns: 0,
+    })
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(native.goalTools as never, {} as never)
+    await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+    const originalStream = fixture.llm.stream.bind(fixture.llm)
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      if (fixture.llm.requests.length !== 0) {
+        yield* originalStream(options)
+        return
+      }
+      fixture.llm.requests.push(options)
+      const callId = ToolCallId('native-goal-tool-only-disabled')
+      const args = JSON.stringify({ objective, start_native_rounds: true, max_goal_rounds: 1 })
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id: callId, name: 'goal_create', argumentsDelta: args }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'goal_create', arguments: args } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-native-goal-tool-only-disabled', 'Create the disabled continuation goal'))
+    await drive(fixture.service)
+
+    // With timeout zero, waitForNativeGoalContinuation() returns undefined, so
+    // no continuation fence is ever pinned or awaited: a tool-only completed
+    // owner turn unconditionally takes the historic empty-response branch.
+    // That output-side contract is the stable distinction and is independent of
+    // whether the independently-running round driver had just spliced its round
+    // (a foreground teardown race, not asserted here).
+    expect(fixture.sends).toHaveLength(1)
+    expect(fixture.sends[0]?.text).toBe('模型本轮未生成可发送的回答。请重试；如果问题较长，也可以拆成更小的步骤。')
+    expect(fixture.progresses.some(value =>
+      value.update.kind === 'failed' && value.update.code === 'agent-empty-response')).toBe(true)
+    expect(fixture.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-empty-response' })
+    await fixture.ctx.fiber.restart()
+  })
+
   test('rechecks owner authorization after a goal tool result before the next model step', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goal-tool-revocation-'))
     roots.push(root)
