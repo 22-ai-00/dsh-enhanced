@@ -8,6 +8,7 @@ import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
@@ -28,7 +29,7 @@ import type { AcceptanceProfile } from '@dsh-enhanced/assistant-verifier'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false, verifyGoalOutcome = false, stepMaxDurationMs?: number,
-  options: Pick<GoalsConfig, 'preauthorizedCreateMaxRounds' | 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits'> = {}, productionPersistence = false) {
+  options: Pick<GoalsConfig, 'preauthorizedCreateMaxRounds' | 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits' | 'strategy'> = {}, productionPersistence = false) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
@@ -76,6 +77,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   ctx.provide('eventTriggers' as never, { sourceSnapshot: () => ({ protocol: 'dsh-event-source/v1', sourceId: 'event-triggers:file', kind: 'file', version: '1', configDigest: 'a'.repeat(64), target: { automationId: 'automation' }, highWaterSequence: 0 }), inspectOwnerSources: () => [{ triggerId: 'file', automationId: 'automation', kind: 'file', expiresAt: sourceExpiresAt }], firstEventAfter: () => undefined, subscribeSourceChanges: () => () => {} } as never)
   if (duringGoalChange !== undefined) ctx.on('goal/changed', ({ agent }) => duringGoalChange(agent))
   const path = databasePath ?? join(root, 'goals.sqlite')
+  if (options.strategy !== undefined) await ctx.plugin(SubagentRuntime as never, {} as never)
   const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, verifyNativeRounds, verifyGoalOutcome,
     ...(maxContextChars === undefined ? {} : { maxContextChars }), ...(stepMaxDurationMs === undefined ? {} : { stepMaxDurationMs }), ...options })
   const create = async (id: string, owner?: string) => {
@@ -1324,5 +1326,194 @@ describe('goal snapshot budgeting', () => {
     expect(snapshot.length).toBeLessThanOrEqual(1024)
     expect(snapshot).toContain('<business-goal-data>')
     expect(snapshot).toContain('"truncated":true')
+  })
+})
+
+describe('goal strategy compare concurrency', () => {
+  const compareBudget = { mode: 'calls' as const, modelCalls: 10, toolCalls: 10, durationMs: 120_000, maxOutputTokensPerCall: 500, routes: [{ provider: 'fixture', model: 'fixture' }] }
+  const compareQuestion = 'Which of the two approaches is sound?'
+  const compareArguments = JSON.stringify({ kind: 'compare', question: compareQuestion, context: 'Two candidate approaches are on the table.' })
+  // Strategy children run with tools stripped and the deployment persona
+  // rewritten to this fixed sentence (see GoalStrategyRuntime), which lets the
+  // shared fixture adapter tell a child stream apart from a parent turn.
+  const childMarker = 'Analyze the supplied material only.'
+  const isStrategyChild = (options: GenerateOptions): boolean => options.system?.includes(childMarker) ?? false
+  const isSkepticalPersona = (options: GenerateOptions): boolean => JSON.stringify(options.messages).includes('independent skeptical analysis')
+  const compareResult = (agent: Agent) => {
+    const blocks = agent.session.snapshotEvents()
+      .filter(event => event.type === 'tool/result')
+      .flatMap(event => event.data.message.content)
+      .filter(block => block.type === 'tool-result' && block.toolCallId === 'compare-call')
+    if (blocks.length !== 1) return undefined
+    const content = blocks[0]!.content
+    const text = typeof content === 'string' ? content
+      : Array.isArray(content) ? content.map(block => block.type === 'text' ? block.text : '').join('') : ''
+    return JSON.parse(text) as { strategyId: string; outcome: string; terminationReason: string; advice: string[]; unverified: boolean
+      children: Array<{ sessionId: string; stopReason: string; quiescent: boolean; diagnostics: { output: string }; usage: { modelCalls: number } }> }
+  }
+
+  it('runs both compare personas with overlapping in-flight streams yet settles advice in deterministic persona order', async () => {
+    const objective = 'Choose between the two approaches'
+    const f = await harness(undefined, undefined, undefined, true, true, 2_000, { executionBudget: compareBudget, strategy: {} })
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-compare-concurrent', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+    let releaseBarrier!: () => void; let releaseAlternative!: () => void
+    let barrierGate!: Promise<void>; let alternativeGate!: Promise<void>
+    let barrierEntered = 0; let activeChildren = 0; let maxConcurrentChildren = 0
+    let parentRequests = 0
+    const seenPersonas: string[] = []
+    const arm = () => {
+      barrierEntered = 0; activeChildren = 0; maxConcurrentChildren = 0
+      barrierGate = new Promise<void>(resolve => { releaseBarrier = resolve })
+      alternativeGate = new Promise<void>(resolve => { releaseAlternative = resolve })
+    }
+    class CompareAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        if (!isStrategyChild(options)) {
+          parentRequests += 1
+          if (parentRequests === 1) {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', index: 0, text: 'ready' }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }; return
+          }
+          f.human.delete(agent)
+          if (parentRequests === 2) {
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('compare-call'), name: 'goal_strategy', argumentsDelta: compareArguments }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('compare-call'), name: 'goal_strategy', arguments: compareArguments } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'noted' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'noted' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        const skeptical = isSkepticalPersona(options)
+        seenPersonas.push(skeptical ? 'skeptical' : 'alternative')
+        activeChildren += 1
+        maxConcurrentChildren = Math.max(maxConcurrentChildren, activeChildren)
+        barrierEntered += 1
+        await barrierGate
+        // Force the alternative persona to finish strictly before the skeptical
+        // one; deterministic advice order must not depend on completion order.
+        if (skeptical) await alternativeGate
+        const text = skeptical ? 'SKEPTICAL-VIEW: the premise is unproven' : 'ALTERNATIVE-VIEW: a simpler design exists'
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        activeChildren -= 1
+        if (!skeptical) releaseAlternative()
+      }
+    }
+    f.ctx.llm.registerAdapter(['fixture'], new CompareAdapter())
+    arm()
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare the native goal driver.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    // Both persona streams must be parked inside the barrier at the same time,
+    // which is only possible under real concurrency; the serial runner reached
+    // barrierEntered === 1 at most.
+    await vi.waitFor(() => expect(barrierEntered).toBe(2), { timeout: 2_000 })
+    expect(maxConcurrentChildren).toBe(2)
+    releaseBarrier()
+    await vi.waitFor(() => expect(compareResult(agent)).toBeDefined(), { timeout: 2_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    const result = compareResult(agent)!
+    expect(seenPersonas.sort()).toEqual(['alternative', 'skeptical'])
+    expect(result.outcome).toBe('advice')
+    expect(result.terminationReason).toBe('completed')
+    expect(result.unverified).toBe(true)
+    expect(result.advice).toEqual(['SKEPTICAL-VIEW: the premise is unproven', 'ALTERNATIVE-VIEW: a simpler design exists'])
+    expect(result.children).toHaveLength(2)
+    expect(result.children.map(child => child.sessionId)).toHaveLength(2)
+    expect(new Set(result.children.map(child => child.sessionId)).size).toBe(2)
+    for (const child of result.children) {
+      expect(child.stopReason).toBe('completed')
+      expect(child.quiescent).toBe(true)
+      expect(child.diagnostics.output).toBe('accepted')
+      expect(child.usage.modelCalls).toBe(1)
+    }
+
+    const durable = f.service.inspectStrategies(agent, record.id)[0]!
+    expect(durable).toMatchObject({ state: 'settled', outcome: 'advice', terminationReason: 'completed', intent: { kind: 'compare', maxChildren: 2 } })
+    expect(durable.children).toHaveLength(2)
+    expect(durable.children.map(child => child.sessionId)).toEqual(result.children.map(child => child.sessionId))
+    expect(durable.outputDigest).toBe(acceptanceDigest(result.advice))
+  })
+
+  it('settles unknown at the strategy deadline and disposes both in-flight personas quiescently', async () => {
+    // The strategy deadline is the minimum of the goal admission, the budget
+    // window and its own maxDurationMs. Driving the deadline from the shortest
+    // component — maxDurationMs at its 1s config floor — keeps the enclosing
+    // native round alive long enough for the unknown outcome to come back as a
+    // tool result instead of being aborted with the whole turn.
+    const f = await harness(undefined, undefined, undefined, true, true, 2_000, { executionBudget: compareBudget, strategy: { maxDurationMs: 1_000 } })
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('strategy-compare-deadline', 'owner'); f.human.add(agent)
+    const objective = 'Compare approaches under a tight strategy deadline'
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+    let parentRequests = 0; let childStarts = 0
+    class DeadlineAdapter extends LlmAdapter {
+      async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        if (!isStrategyChild(options)) {
+          parentRequests += 1
+          if (parentRequests === 1) {
+            yield { type: 'block-start', index: 0, blockType: 'text' }
+            yield { type: 'text-delta', index: 0, text: 'ready' }
+            yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+            yield { type: 'finish', reason: { kind: 'stop' } }; return
+          }
+          f.human.delete(agent)
+          if (parentRequests === 2) {
+            yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index: 0, id: ToolCallId('compare-call'), name: 'goal_strategy', argumentsDelta: compareArguments }
+            yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('compare-call'), name: 'goal_strategy', arguments: compareArguments } }
+            yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+          }
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'noted' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'noted' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        childStarts += 1
+        // Longer than the 1s strategy deadline, but wake immediately on abort
+        // so run disposal does not wait out the full delay.
+        await new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, 1_500)
+          options.signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+        })
+        const text = isSkepticalPersona(options) ? 'late skeptical view' : 'late alternative view'
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+    f.ctx.llm.registerAdapter(['fixture'], new DeadlineAdapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare the native goal driver.' }] }))
+    await vi.waitFor(() => expect(parentRequests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    const record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(childStarts).toBe(2), { timeout: 2_000 })
+    await vi.waitFor(() => expect(compareResult(agent)).toBeDefined(), { timeout: 3_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+
+    const result = compareResult(agent)!
+    expect(result.outcome).toBe('unknown')
+    expect(result.terminationReason).toBe('deadline')
+    expect(result.advice).toEqual([])
+    expect(result.children).toHaveLength(2)
+    for (const child of result.children) expect(child.quiescent).toBe(true)
+    const durable = f.service.inspectStrategies(agent, record.id)[0]!
+    expect(durable).toMatchObject({ state: 'unknown', outcome: 'unknown', terminationReason: 'deadline' })
+    expect(durable.outputDigest).toBeUndefined()
+    expect(durable.children).toHaveLength(2)
   })
 })

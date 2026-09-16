@@ -10875,8 +10875,8 @@ describe('real rc.1 delivery Agent runtime', () => {
     { name: 'runs two real native children under one parent budget', mode: 'normal', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
     { name: 'rejects the second child before its adapter request when the aggregate budget is exhausted', mode: 'quota', modelCalls: 2, adapterCalls: 2, boundChildren: 2, childCalls: 1 },
     { name: 'rejects a real child scoped tool call', mode: 'scoped-tool', modelCalls: 5, adapterCalls: 5, boundChildren: 2, childCalls: 2 },
-    { name: 'cancels an owner-revoked child waiting for its first chunk', mode: 'revoke', modelCalls: 4, adapterCalls: 2, boundChildren: 1, childCalls: 1 },
-    { name: 'disposes a real native run returned after its strategy deadline', mode: 'late-start', modelCalls: 4, adapterCalls: 3, boundChildren: 1, childCalls: 1 },
+    { name: 'cancels an owner-revoked child waiting for its first chunk', mode: 'revoke', modelCalls: 4, adapterCalls: 2, boundChildren: 2, childCalls: 1 },
+    { name: 'disposes a real native run returned after its strategy deadline', mode: 'late-start', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
     { name: 'records an actual adapter stream failure without calling it a budget limit', mode: 'stream-error', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
     { name: 'records missing model usage and retains the dispatched reservation', mode: 'usage-invalid', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
     { name: 'does not attribute another request hook error to budget admission', mode: 'request-hook-error', modelCalls: 4, adapterCalls: 3, boundChildren: 2, childCalls: 1 },
@@ -11063,10 +11063,35 @@ describe('real rc.1 delivery Agent runtime', () => {
       expect(row.outcome, JSON.stringify([...stored.values()].map(s => ({ header: s.meta, events: s.events.filter(e => /error|end/.test(e.type)).slice(-4) })))).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : ['quota', 'stream-error', 'usage-invalid', 'request-hook-error', 'stream-setup-error'].includes(mode) ? 'execution-failed' : 'advice')
       expect(bound).toHaveLength(boundChildren)
       expect(new Set(bound.map(child => child.sessionId)).size).toBe(boundChildren)
-      if (mode === 'quota') expect(bound[1]?.diagnostics?.failure).toEqual({ stage: 'request-limit', dispatched: false })
+      if (mode === 'quota') {
+        // 两个 persona child 并发启动且共享同一预算：它们可能在任一方预留之前
+        // 都通过流式前的 modelCalls 快照预检。串行实现时负者在该快照处被拒
+        // （'request-limit'）；并发下该快照存在竞态，真正权威的拒绝点是预算
+        // 存储的原子预留事务（'reserve'）。这两道闸都严格发生在 adapter 派发
+        // 之前，因此安全契约不变：第二个 child 被拒且从未发出请求
+        // （dispatched:false，且没有多出任何 adapter 调用）。这里钉死具体的
+        // 原子阶段，而不是放宽为“派发前任一阶段”，并强制保留 dispatched:false。
+        expect(bound[1]?.diagnostics?.failure).toEqual({ stage: 'reserve', dispatched: false })
+      }
       if (mode === 'stream-error' || mode === 'usage-invalid') expect(bound[0]?.diagnostics?.failure).toEqual({ stage: mode === 'stream-error' ? 'stream' : 'usage', dispatched: true })
       if (mode === 'request-hook-error') expect(bound[0]?.diagnostics).not.toHaveProperty('failure')
       if (mode === 'stream-setup-error') expect(bound[0]?.diagnostics?.failure).toEqual({ stage: 'stream', dispatched: false })
+      if (mode === 'revoke') {
+        // 并发下两个 persona 都已绑定。owner 吊销必须同时冻结两者：恰好一个在
+        // 等待首个 chunk 的流中被中止（dispatched:true，对应 adapterAborted 与
+        // 唯一一条 held 预留），另一个在派发前即被拒（dispatched:false），绝不
+        // 允许第二个 child 借吊销间隙补发请求（adapterCalls 与 held=1 已共同锁死）。
+        const failures = bound.map(child => child.diagnostics?.failure)
+        expect(failures.every(failure => failure !== undefined)).toBe(true)
+        expect(failures.filter(failure => failure?.dispatched === true)).toHaveLength(1)
+        expect(failures.filter(failure => failure?.dispatched === false)).toHaveLength(1)
+      }
+      if (mode === 'late-start') {
+        // 两个 run 引用都迟到 deadline，但它们各自唯一的请求都在 deadline 窗口内
+        // 合法发出（见 adapterCalls）；deadline 处置是正常超时回收而非预算失败，
+        // 因此两个 child 都不得被记成预算 failure。
+        expect(bound.every(child => child.diagnostics?.failure === undefined)).toBe(true)
+      }
       if (mode === 'scoped-tool') expect(bound.map(child => child.diagnostics?.toolRejections)).toEqual([1, 0])
       if (mode === 'normal') expect(bound.map(child => child.diagnostics)).toEqual([
         { toolRejections: 0, output: 'accepted' }, { toolRejections: 0, output: 'accepted' },
@@ -11083,7 +11108,11 @@ describe('real rc.1 delivery Agent runtime', () => {
     if (mode === 'late-start') {
       const before = fixture.llm.requests.length
       releaseLate!()
-      await vi.waitFor(() => expect(fixture.ctx.agents.get(childAgents[0]!.id)).toBeUndefined(), { timeout: 2000 })
+      // 两个迟到的 run 引用释放后，其 child agent 都必须被回收，且释放动作本身
+      // 不得再触发任何 adapter 请求（窗口内已发出的请求此前已计入 adapterCalls）。
+      for (const child of childAgents) {
+        await vi.waitFor(() => expect(fixture.ctx.agents.get(child.id)).toBeUndefined(), { timeout: 2000 })
+      }
       expect(fixture.llm.requests).toHaveLength(before)
       const check = new DatabaseSync(join(root, 'goals.sqlite.strategies'), { readOnly: true })
       try { expect(check.prepare('SELECT state, outcome FROM goal_strategy_records').get()).toMatchObject({ state: 'unknown', outcome: 'unknown' }) } finally { check.close() }
