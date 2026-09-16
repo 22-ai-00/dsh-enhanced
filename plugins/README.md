@@ -53,6 +53,7 @@
 
 | [assistant-goals](assistant-goals) | `@dsh-enhanced/assistant-goals` | 实验性 | 按 owner 持久保存原生目标的上下文、下一步和阻塞；跨会话检索，完成状态等待独立验收。 |
 | [assistant-deepseek-budget](assistant-deepseek-budget) | `@dsh-enhanced/assistant-deepseek-budget` | 实验性 | 官方 DeepSeek 文本模型的固定路由与持续目标 token 预算计量；保守预留，禁止重定向，不声明硬金额上限。 |
+| [assistant-super-relay-budget](assistant-super-relay-budget) | `@dsh-enhanced/assistant-super-relay-budget` | 实验性 | 固定 Super Relay OpenAI Responses 路由（`auto_model/alwaysday1`）的目标 token 预算计量；真实 usage 计数、费率与金额恒为 null 不估算，凭据经 dsh-credentials 引用，契约到期 fail-closed，每个异步边界硬竞速。 |
 
 | [assistant-web-owner](assistant-web-owner) | `@dsh-enhanced/assistant-web-owner` | 实验性 | 原生 Web 的固定 owner、可信文本回合与 Session 生命周期接入。 |
 

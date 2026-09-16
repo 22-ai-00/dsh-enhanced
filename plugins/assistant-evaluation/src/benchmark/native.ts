@@ -20,6 +20,7 @@ import { type BenchmarkExecutionRequest, type BenchmarkExecutor } from './runner
 import { benchmarkObject, benchmarkSnapshot, benchmarkSchedule, parseBenchmarkPlan } from './schema.js'
 import type { BenchmarkBudget, BenchmarkPlan, BenchmarkObservation } from './types.js'
 
+export type ModelObservationMode = 'enforced-upper-bound-provider-output' | 'observed-call-count'
 export interface NativeModelConfig {
   provider: string
   model: string
@@ -27,6 +28,12 @@ export interface NativeModelConfig {
   inputLimitMode?: 'upper-bound' | 'estimate'
   outputLimitMode?: 'provider' | 'observed'
   maxOutputTokens: number
+  /**
+   * Selects the metering mode for strategy benchmarks. Written once in operator
+   * config and derived verbatim into the frozen plan; the meter and evidence
+   * parser cross-check this same value. Defaults to the token-enforced mode.
+   */
+  observationMode?: ModelObservationMode
   inputUsdMicrosPerMillionTokens: number | null
   outputUsdMicrosPerMillionTokens: number | null
   cacheReadUsdMicrosPerMillionTokens?: number | null

@@ -15,7 +15,7 @@ function fixture(): StrategyBenchmarkPlan {
       variants: [{ id: 'direct', role: 'baseline', versions: { ...versions, ...strategyBenchmarkCapabilityVersions(capabilities, false) }, features: { ...features } },
         { id: 'adaptive-strategy', role: 'candidate', versions: { ...versions, ...strategyBenchmarkCapabilityVersions(capabilities, true) }, features: { ...features } }],
       budget: { durationMs: 1000, inputTokens: 100, outputTokens: 50, costUsdMicros: null, toolCalls: 10 }, repeats: 2, seed: 7 },
-    execution: { modelCalls: 8, maxOutputTokensPerCall: 10, maxGoalRounds: 3 }, capabilities }
+    execution: { modelCalls: 8, maxOutputTokensPerCall: 10, maxGoalRounds: 3, observationMode: 'enforced-upper-bound-provider-output' }, capabilities }
 }
 
 describe('native strategy execution contract', () => {

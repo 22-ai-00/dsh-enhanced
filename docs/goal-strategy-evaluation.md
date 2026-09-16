@@ -47,3 +47,48 @@ node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs
 该入口固定 `deepseek-goal-metered` provider，支持现有生产契约的两个精确模型；契约到期后拒绝计数和派发。每次输入预留 **2,097,152 tokens**，完整响应后按含缓存的实际 usage 结算。这是保守上界，不是预估消耗。模板以最多 16 次调用给每 cell 保留 33,554,432 输入、65,536 输出 tokens；两个比较臂相同。每次输出上限 4,096，全部装配/模型/隔离/清理共 300 秒。金额预算及价格保持 `null`，不声称账户账单硬限。需要更紧预算时，不能用估算值替换上界。
 
 计划和每次父请求的源码核对会额外覆盖实际解析的 DeepSeek 包与 credentials 包。模型线路、输出限制、温度、费用声明、生命周期或契约漂移均拒绝；更换包后需创建新计划，旧报告仍保留历史含义。该入口的本地 transport 替身验证不代表已调用真实供应商，也不证明策略优于直接执行。
+
+## Super Relay Responses 入口（真实 token 计量）
+
+Evaluation 还发布 `@dsh-enhanced/assistant-evaluation/benchmark/super-relay`，以绝对文件路径作为 `--adapter`，固定 `super-relay` provider 与单一 `auto_model/alwaysday1` 模型（网关侧自动路由）。它复用 `assistant-super-relay-budget` 生产 adapter 的 OpenAI **Responses** 请求/回放、完整 usage 校验与对每个不可信异步边界的硬竞速取消逻辑，不自动启用普通 profile 的任何插件。
+
+该路由走与 DeepSeek 平级的 **token 强制计量模式**（`model.observationMode` 用默认值，无需填写）：Responses 响应真实回传 `input_tokens`/`output_tokens`/`total_tokens`（含 cached/reasoning 明细），按完整响应后的实际 usage 结算 input/output token。网关没有公开定价，因此四档费率与 `budget.costUsdMicros` 恒为 `null`——token 如实计量，金钱成本**绝不估算、绝不伪造**；任何非空费率都会被拒绝（"Super Relay tariff is unverified"）。每次输入预留 **200,000 tokens**，这是远低于该网关其他模型百万级窗口的保守 fail-closed 上限，不是对任一请求实际消耗的估算；需要更紧预算时不能用估算值替换上界。
+
+凭证只按引用解析，插件绝不接受明文 key：操作者在运行环境 `export SUPER_RELAY_API_KEY=<真实 key>`（或经 dsh-credentials 配置同名引用），adapter 在每次生产请求时经 `@deepseek-ai/dsh-credentials` 解析当前值，不保留被替换的凭证。
+
+从 [Super Relay 配置模板](examples/strategy-super-relay.config.json) 开始，在同一安装目录解析真实文件及摘要，再填入模板的 `adapterDigest` / `tokenCounterDigest`：
+
+```bash
+node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs"; import { fileURLToPath } from "node:url"; import { createHash } from "node:crypto"; const path = realpathSync(fileURLToPath(import.meta.resolve("@dsh-enhanced/assistant-evaluation/benchmark/super-relay"))); console.log(JSON.stringify({path, sha256:createHash("sha256").update(readFileSync(path)).digest("hex")}));'
+```
+
+计划和每次父请求的源码核对会额外冻结实际解析的 `@dsh-enhanced/assistant-super-relay-budget` 生产 lib 与 `@deepseek-ai/dsh-credentials`。模型线路、输出限制、温度、费用声明、生命周期或协议契约漂移均拒绝；契约（`super-relay-responses-2026-09-14`，**2026-10-14 到期**）到期后拒绝计数和派发，须用真实、非合成探针复核后续期，再创建新计划，旧报告仍保留历史含义。该入口的注入式工程层测试（stub `fetch`、不触网）只验证请求契约与生命周期，**不构成真实供应商证据**；策略是否优于直接执行，只认 Docker 隔离 + 真实 `https://super-relay.byted.org/v1/responses` endpoint 跑出来的配对结果（允许如实记录"无收益/不确定"）。
+
+## TraeX 本地 call-count 入口
+
+Evaluation 还发布 `@dsh-enhanced/assistant-evaluation/benchmark/traex`，同样以绝对文件路径作为 `--adapter`，固定 `traex-agent` provider 与单一 `gpt-5.6-terra` 模型。它复用 WP14 验证过的本机 TraeX ACP 链：`traex` 可执行文件在 `PATH` 上（或经 `TRAEX_COMMAND` 覆盖），登录态来自操作者全局 `~/.trae`，不接 API key、endpoint 或任何凭据值，零外部账户花费。它不自动启用普通 profile 的任何插件。
+
+TraeX 的 ACP 流从不返回 token usage，因此该入口只接受 `model.observationMode: "observed-call-count"` 计量模式，与 DeepSeek 的 token 强制模式平级：一次正常结束（finish reason ∈ `stop`/`tool-calls`/`max-tokens`）的模型请求计一次 `modelCalls`；reserved/聚合 input、output tokens 恒为 0，usage 与 `costUsdMicros` 恒为 `null`，**绝不估算**。若 provider 意外发出 usage chunk，meter 直接判该请求失败而不是静默丢弃可能计费的数据。协调成本只报告 strategy 臂的"额外 model calls"与独立 verifier 的行为结果；token/金钱字段保持 `null`。预算中的 `inputTokens: 0` 与等于单次输出上限的 `outputTokens` 只是满足结构约束的占位值，不代表任何实测 token。
+
+从 [TraeX 配置模板](examples/strategy-traex.config.json) 开始。calls 模式没有费率、金额预算、`inputLimitMode`/`outputLimitMode` 或 token-counter 上界；`adapterDigest` 与 `tokenCounterDigest` 仍必须同时等于 adapter 文件的实际 SHA-256。在同一安装目录解析真实文件及摘要：
+
+```sh
+node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs"; import { fileURLToPath } from "node:url"; import { createHash } from "node:crypto"; const path = realpathSync(fileURLToPath(import.meta.resolve("@dsh-enhanced/assistant-evaluation/benchmark/traex"))); console.log(JSON.stringify({path, sha256:createHash("sha256").update(readFileSync(path)).digest("hex")}));'
+```
+
+运行前确认 TraeX 登录态有效（`probeTraexReadiness`），再使用上文的 `doctor/plan/run/report` 命令并替换配置及 adapter 路径。`plan` 在该模式输出 `observationMode: "observed-call-count"`、`maximumModelCalls`、`maximumToolCalls`，并把所有 token/limit/cost 汇总字段置为 `null`。Goal 侧使用原生 calls 预算（按 `{provider, model}` 精确路由白名单），父 Goal 与两个 advice-only persona 子会话全部落在同一 TraeX 路由上，不重复注册 token meter。
+
+计划与每次父请求的源码核对会额外覆盖实际解析的 `@dsh-enhanced/traex-acp-provider` 生产 lib。计量模式在三处绑定：operator 只在 `model.observationMode` 写一次，executor 派生明文 `plan.execution.observationMode` 进入 plan digest，evidence 解析时交叉断言 meter 自报与冻结计划一致；事后篡改任一副本都会被 digest 或交叉断言捕获。该入口的注入式工程层测试（假 `runText`/`discoverModels`/`verifyAuth`，不触网）只验证请求契约与生命周期，不代表已驱动真实 TraeX 子进程，也不构成策略增益或生产供应商证据。
+
+### 2026-09-15 真实配对 run：persona 零触发的根因终审
+
+在 Docker 隔离 + 真实 TraeX `gpt-5.6-terra`、120s/450s 时间预算下跑完整 16-cell 同预算配对（4 case × 2 repeat × 2 臂），16/16 achieved、零 retained、零伪造 token/cost、`promotionAuthorized=false`，但 **8 ties、Δ0、CI [0,0]，且 advice persona 0/16 触发**，因此该 run **不构成策略增益证据**。证据与对抗复核见 [strategy-traex-real-paired-2026-09-15.json](evidence/strategy-traex-real-paired-2026-09-15.json)。
+
+零触发经代码与真实 transcript 双侧钉死为**模型在天花板 corpus 下自主选择不调用，而非接线/预授权缺陷**：
+
+- `goal_strategy` 是纯模型自主工具，代码无任何自动 spawn 路径；仅 adaptive 臂注册（`tools.ts:21-33` 的 `service.strategyEnabled` 门，`strategy-goal-runtime.ts:149/154/250`），direct 臂从不装配。
+- calls 模式预授权闸放行：`preauthorizeStrategy` 要求 `budget.hasMeter(options)===true`（`service.ts:1001-1008`），而 calls 模式 `hasMeter` 只返回 `#active && #routeAllowed(route)`、不查 meter map（`budget.ts:253-254`），route 对 `{traex-agent,gpt-5.6-terra}` 精确命中白名单（`budget.ts:303`），`#active` 整 run 恒 true（`budget.ts:94/144`，仅 teardown 翻 false）。
+- 真实 transcript 铁证：`cal-state` 下恰好 8 个 adaptive 会话的每个 `request/header.header.tools` 都字面含 `goal_strategy`（每一轮请求都下发），但 8 个会话的 `tool/call` 序列只有 `goal_create -> isolation_run [-> goal_context|goal_checkpoint]`，`goal_strategy` 实际调用 **0/8**；同一活动 native goal round 内其它 goal 工具成功调用，证明 round 活跃、预授权管线正常。
+- 触发语义：工具描述写明"on uncertain reasoning or repeated failed criteria"，而四个 `strategy-v1` 任务首轮 `isolation_run` 即被独立 verifier 接受，从未出现失败判据或真实不确定性，故无咨询动机——这是 **corpus 难度/触发语义天花板**。
+
+下一步要测目标机制，必须换更难 corpus（多约束/对抗 verifier，首轮无法过验收）或注入首轮拒绝，使 goal 进入驱动 persona 咨询的状态，再用同一 call-count 配对 harness 复跑，先确认 `native.strategies>0` 与稳定的非 `-g1` 子调用块，才谈得上判断增益；不得靠调 prompt 制造增益。

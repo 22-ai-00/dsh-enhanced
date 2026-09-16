@@ -14,7 +14,7 @@ const hash = (value: string) => value.repeat(64).slice(0, 64)
 function plan(): StrategyBenchmarkPlan {
   const versions = { model: hash('1'), prompt: hash('2'), skills: hash('3'), tools: hash('4'), policy: hash('5'), runtime: hash('6') }
   const capabilities = { common: { persona: hash('a'), tools: hash('b'), policy: hash('c'), runtime: hash('d') }, strategy: { guide: hash('e'), tool: hash('f'), policy: hash('1'), runtime: hash('2') } }
-  return { schemaVersion: 1, protocol: strategyBenchmarkProtocol, execution: { modelCalls: 3, maxOutputTokensPerCall: 10, maxGoalRounds: 2 }, capabilities,
+  return { schemaVersion: 1, protocol: strategyBenchmarkProtocol, execution: { modelCalls: 3, maxOutputTokensPerCall: 10, maxGoalRounds: 2, observationMode: 'enforced-upper-bound-provider-output' as const }, capabilities,
     benchmark: { schemaVersion: 1, id: 'strategy-evidence', dataset: { id: 'public', version: '1', digest: hash('a'), split: 'development' }, comparison: 'capability',
       cases: [{ id: 'case', domain: 'code', inputDigest: hash('b'), acceptanceDigest: hash('c') }], budget: { durationMs: 1000, inputTokens: 100, outputTokens: 50, costUsdMicros: null, toolCalls: 3 }, repeats: 2, seed: 1,
       variants: [{ id: 'direct', role: 'baseline', features: { memory: false, planning: false, review: false, growth: false }, versions: { ...versions, ...strategyBenchmarkCapabilityVersions(capabilities, false) } },

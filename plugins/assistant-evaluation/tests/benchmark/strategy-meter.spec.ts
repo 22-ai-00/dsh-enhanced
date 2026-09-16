@@ -12,15 +12,18 @@ afterEach(async () => { meters.splice(0).forEach(meter => meter.dispose()); awai
 
 type StreamHook = (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>
 type ToolHook = (execution: { signal?: AbortSignal }, next: () => Promise<unknown>) => Promise<unknown>
-function fixture(input: { calls?: number; tools?: number; cost?: number; abort?: AbortController; upper?: (options: GenerateOptions) => number | Promise<number> } = {}) {
+function fixture(input: { calls?: number; tools?: number; cost?: number; abort?: AbortController; upper?: (options: GenerateOptions) => number | Promise<number>; callMode?: boolean } = {}) {
   const hooks = new Map<string, Function>()
   const ctx = { on(name: string, listener: Function) { hooks.set(name, listener) }, effect() {}, get() { return undefined } } as unknown as Context
   const abort = input.abort ?? new AbortController()
   const meter = installStrategyBenchmarkMeter(ctx, { signal: abort.signal, modelCalls: input.calls ?? 2, maxOutputTokens: 5,
-    budget: { durationMs: 20_000, inputTokens: 20, outputTokens: 10, costUsdMicros: input.cost ?? null, toolCalls: input.tools ?? 2 },
-    model: { provider: 'test', model: 'strategy', temperature: null, inputLimitMode: 'upper-bound', outputLimitMode: 'provider', maxOutputTokens: 5,
-      inputUsdMicrosPerMillionTokens: input.cost === undefined ? null : 1_000_000, outputUsdMicrosPerMillionTokens: input.cost === undefined ? null : 1_000_000,
-      cacheReadUsdMicrosPerMillionTokens: 1_000_000, cacheWriteUsdMicrosPerMillionTokens: 1_000_000, adapterDigest: 'a'.repeat(64), tokenCounterDigest: 'b'.repeat(64) },
+    budget: input.callMode
+      ? { durationMs: 20_000, inputTokens: 0, outputTokens: 5, costUsdMicros: null, toolCalls: input.tools ?? 2 }
+      : { durationMs: 20_000, inputTokens: 20, outputTokens: 10, costUsdMicros: input.cost ?? null, toolCalls: input.tools ?? 2 },
+    model: { provider: 'test', model: 'strategy', temperature: null,
+      ...(input.callMode ? { observationMode: 'observed-call-count' as const, inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null }
+        : { inputLimitMode: 'upper-bound' as const, outputLimitMode: 'provider' as const, inputUsdMicrosPerMillionTokens: input.cost === undefined ? null : 1_000_000, outputUsdMicrosPerMillionTokens: input.cost === undefined ? null : 1_000_000, cacheReadUsdMicrosPerMillionTokens: 1_000_000, cacheWriteUsdMicrosPerMillionTokens: 1_000_000 }),
+      maxOutputTokens: 5, adapterDigest: 'a'.repeat(64), tokenCounterDigest: 'b'.repeat(64) },
     binding: { inputTokenUpperBound: input.upper ?? (() => 3), dispose: () => {}, adapter: {} as never },
   })
   meters.push(meter)
@@ -179,5 +182,23 @@ describe('strategy benchmark outer meter', () => {
     const late = fixture()
     await expect(consume(late.stream(options(), async function* () { yield* complete(); yield { type: 'text-delta', index: 0, text: 'after finish' } }))).rejects.toThrow('stream')
     expect(late.meter.snapshot().heldModelCalls).toBe(1)
+  })
+
+  test('call-count mode attributes a step-level request abort to cancellation, not a bad stream', async () => {
+    const step = new AbortController()
+    const { meter, stream } = fixture({ callMode: true, calls: 4 })
+    // The adapter request is already dispatched (iterator acquired) and still in
+    // flight when the goal round step gate aborts only the request signal; the
+    // outer 300s meter signal stays live. Fail-closed retain must be attributed to
+    // cancellation so the root cause is not mislabelled as a malformed stream.
+    const blocked = consume(stream({ ...options(), signal: step.signal }, async function* () {
+      await new Promise<void>(() => {})
+      yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
+    }))
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    step.abort()
+    await expect(blocked).rejects.toThrow('cancelled')
+    expect(meter.snapshot()).toMatchObject({ heldModelCalls: 1, traces: [{ dispatched: true, phase: 'retained', reason: 'cancelled' }] })
+    expect(() => meter.assertComplete()).toThrow('incomplete')
   })
 })

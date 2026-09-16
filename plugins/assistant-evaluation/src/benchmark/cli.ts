@@ -11,6 +11,7 @@ import { benchmarkPlanDigest, benchmarkSchedule, BenchmarkError } from './schema
 import { BenchmarkStore } from './store.js'
 import { runBenchmark } from './runner.js'
 import type { NativeAdapterFactory, NativeBenchmarkConfig, NativeModelConfig } from './native.js'
+import type { BenchmarkResult } from './types.js'
 
 const runtimePackages = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop',
   '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools'] as const
@@ -90,9 +91,22 @@ const strategyRuntimePackages = [...runtimePackages, '@deepseek-ai/dsh-goal', '@
   '@dsh-enhanced/assistant-policy', '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-verifier'] as const
 
 async function strategyModules() {
-  try { return await Promise.all([import('./strategy-config.js'), import('./strategy-corpus.js'), import('./strategy-executor.js'), import('./strategy-plan.js')]) } catch {
+  try { return await Promise.all([import('./strategy-config.js'), import('./strategy-corpus.js'), import('./strategy-executor.js'), import('./strategy-plan.js'), import('./strategy-projection.js')]) } catch {
     throw new BenchmarkError('strategy benchmark runtime dependencies are missing; run dsh-benchmark doctor and install the reported host packages')
   }
+}
+
+/** Strategy-only evidence projection (cost split + conservative attribution); the shared report shape is untouched. */
+function strategyProjection(modules: Awaited<ReturnType<typeof strategyModules>>,
+  input: Awaited<ReturnType<typeof strategyConfig>>, plan: import('./strategy-plan.js').StrategyBenchmarkPlan,
+  results: readonly BenchmarkResult[]) {
+  const [, , , , projection] = modules
+  return projection.collectStrategyBenchmarkProjection(plan, results, input.stateDirectory, input.workspaceDirectory, {
+    inputUsdMicrosPerMillionTokens: input.model.inputUsdMicrosPerMillionTokens,
+    outputUsdMicrosPerMillionTokens: input.model.outputUsdMicrosPerMillionTokens,
+    cacheReadUsdMicrosPerMillionTokens: input.model.cacheReadUsdMicrosPerMillionTokens ?? null,
+    cacheWriteUsdMicrosPerMillionTokens: input.model.cacheWriteUsdMicrosPerMillionTokens ?? null,
+  })
 }
 
 async function strategyConfig(value: unknown) {
@@ -140,7 +154,14 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
       const configPath = args.get('--config')
       const configured = configPath === undefined ? undefined : await config(configPath)
       const provider = (configured as { model?: { provider?: unknown } } | undefined)?.model?.provider
-      const selectedPackages = [...strategyRuntimePackages, ...(provider === 'deepseek-goal-metered' ? ['@dsh-enhanced/assistant-deepseek-budget', '@deepseek-ai/dsh-credentials'] : [])]
+      const providerPackages = provider === 'deepseek-goal-metered'
+        ? ['@dsh-enhanced/assistant-deepseek-budget', '@deepseek-ai/dsh-credentials']
+        : provider === 'super-relay'
+          ? ['@dsh-enhanced/assistant-super-relay-budget', '@deepseek-ai/dsh-credentials']
+          : provider === 'traex-agent'
+            ? ['@dsh-enhanced/traex-acp-provider']
+            : []
+      const selectedPackages = [...strategyRuntimePackages, ...providerPackages]
       const packages = selectedPackages.map(name => {
         try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }
       })
@@ -180,16 +201,29 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
     const raw = await config(fields.get('--config')!)
     if (isStrategyConfig(raw)) {
       const input = await strategyConfig(raw)
-      const [, corpus, executor, strategyPlan] = await strategyModules()
+      const modules = await strategyModules()
+      const [, corpus, executor, strategyPlan] = modules
       const plan = executor.createStrategyBenchmarkPlan(input)
       const journal = strategyPlan.strategyBenchmarkJournalPlan(plan)
       const cells = benchmarkSchedule(journal)
       if (command === 'plan') {
-        result = { plan, journalPlan: journal, planDigest: benchmarkPlanDigest(journal), plannedCells: cells.length,
-          maximumCostUsdMicros: journal.budget.costUsdMicros === null ? null : (BigInt(cells.length) * BigInt(journal.budget.costUsdMicros)).toString(),
-          inputLimitMode: 'upper-bound', outputLimitMode: 'provider', maximumInputTokens: cells.length * journal.budget.inputTokens,
-          maximumOutputTokens: cells.length * journal.budget.outputTokens, observedInputTokenLimit: cells.length * journal.budget.inputTokens,
-          observedOutputTokenLimit: cells.length * journal.budget.outputTokens }
+        const mode = plan.execution.observationMode
+        result = mode === 'observed-call-count'
+          ? { plan, journalPlan: journal, planDigest: benchmarkPlanDigest(journal), plannedCells: cells.length,
+              observationMode: mode,
+              // Call-count mode measures only settled model requests; token and monetary fields are
+              // structurally null, never estimated. budget.outputTokens is a non-measured placeholder.
+              maximumModelCalls: cells.length * plan.execution.modelCalls,
+              maximumToolCalls: cells.length * journal.budget.toolCalls,
+              maximumCostUsdMicros: null, inputLimitMode: null, outputLimitMode: null,
+              maximumInputTokens: null, maximumOutputTokens: null,
+              observedInputTokenLimit: null, observedOutputTokenLimit: null }
+          : { plan, journalPlan: journal, planDigest: benchmarkPlanDigest(journal), plannedCells: cells.length,
+              observationMode: mode,
+              maximumCostUsdMicros: journal.budget.costUsdMicros === null ? null : (BigInt(cells.length) * BigInt(journal.budget.costUsdMicros)).toString(),
+              inputLimitMode: 'upper-bound', outputLimitMode: 'provider', maximumInputTokens: cells.length * journal.budget.inputTokens,
+              maximumOutputTokens: cells.length * journal.budget.outputTokens, observedInputTokenLimit: cells.length * journal.budget.inputTokens,
+              observedOutputTokenLimit: cells.length * journal.budget.outputTokens }
       } else {
         const store = new BenchmarkStore(resolve(fields.get('--database')!))
         try {
@@ -202,7 +236,7 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
           const results = await runBenchmark(store, journal, strategyExecutor, signal)
           executor.verifyStrategyBenchmarkResults(plan, results, input.stateDirectory, input.workspaceDirectory)
           const report = benchmarkReport(journal, store.results(journal.id))
-          result = report
+          result = { ...report, strategy: strategyProjection(modules, input, plan, results) }
           exitCode = report.complete && report.variants.every(variant => variant.unknown === 0) ? 0 : 2
         } finally { store.close() }
       }
@@ -244,13 +278,17 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
         const configPath = fields.get('--config')
         if (configPath === undefined) throw new BenchmarkError('strategy report requires --config to reconstruct and verify evidence')
         const input = await strategyConfig(await config(configPath))
-        const [, , executor, strategyPlan] = await strategyModules()
+        const modules = await strategyModules()
+        const [, , executor, strategyPlan] = modules
         const strategy = executor.createStrategyBenchmarkPlan(input)
         const journal = strategyPlan.strategyBenchmarkJournalPlan(strategy)
         if (benchmarkPlanDigest(journal) !== benchmarkPlanDigest(plan)) throw new BenchmarkError('strategy report config does not match the stored plan')
-        executor.verifyStrategyBenchmarkResults(strategy, store.results(plan.id), input.stateDirectory, input.workspaceDirectory)
+        const results = store.results(plan.id)
+        executor.verifyStrategyBenchmarkResults(strategy, results, input.stateDirectory, input.workspaceDirectory)
+        result = { ...benchmarkReport(plan, results), strategy: strategyProjection(modules, input, strategy, results) }
+      } else {
+        result = benchmarkReport(plan, store.results(plan.id))
       }
-      result = benchmarkReport(plan, store.results(plan.id))
     } finally { store.close() }
   } else throw new BenchmarkError('unknown benchmark command; use --help')
   const text = `${JSON.stringify(result, null, 2)}\n`

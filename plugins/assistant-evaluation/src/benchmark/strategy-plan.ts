@@ -2,6 +2,7 @@ import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-ac
 import { benchmarkAssert, benchmarkHash, benchmarkInteger, benchmarkObject, benchmarkSchedule, benchmarkSnapshot, parseBenchmarkPlan } from './schema.js'
 import type { BenchmarkExecutionRequest } from './runner.js'
 import type { BenchmarkPlan } from './types.js'
+import type { ModelObservationMode } from './native.js'
 
 export const strategyBenchmarkProtocol = 'dsh-native-goal-strategy-benchmark-v1'
 
@@ -10,6 +11,12 @@ export interface StrategyBenchmarkExecutionLimits {
   modelCalls: number
   maxOutputTokensPerCall: number
   maxGoalRounds: number
+  /**
+   * Metering mode, derived verbatim from `model.observationMode` by the executor and
+   * frozen into the plan digest so evidence can cross-check the meter's self-report.
+   * Plans authored before this field existed default to the token-enforced mode.
+   */
+  observationMode: ModelObservationMode
 }
 
 export interface StrategyBenchmarkPlan {
@@ -46,10 +53,17 @@ export function parseStrategyBenchmarkPlan(value: unknown): Readonly<StrategyBen
   const raw = benchmarkObject(copy, ['schemaVersion', 'protocol', 'benchmark', 'execution', 'capabilities'])
   benchmarkAssert(raw.schemaVersion === 1 && raw.protocol === strategyBenchmarkProtocol, 'unsupported strategy benchmark protocol')
   const benchmark = parseBenchmarkPlan(raw.benchmark)
-  const execution = benchmarkObject(raw.execution, ['modelCalls', 'maxOutputTokensPerCall', 'maxGoalRounds'])
+  // Plans frozen before call-count metering existed omit observationMode; default them to token mode.
+  const hasObservationMode = Object.hasOwn(raw.execution as Record<string, unknown>, 'observationMode')
+  const execution = benchmarkObject(raw.execution, hasObservationMode
+    ? ['modelCalls', 'maxOutputTokensPerCall', 'maxGoalRounds', 'observationMode']
+    : ['modelCalls', 'maxOutputTokensPerCall', 'maxGoalRounds'])
   benchmarkInteger(execution.modelCalls, 1, 10_000)
   benchmarkInteger(execution.maxOutputTokensPerCall, 1, benchmark.budget.outputTokens)
   benchmarkInteger(execution.maxGoalRounds, 1, 100)
+  benchmarkAssert(execution.observationMode === undefined
+    || execution.observationMode === 'enforced-upper-bound-provider-output'
+    || execution.observationMode === 'observed-call-count', 'invalid strategy observation mode')
   benchmarkAssert(benchmark.comparison === 'capability' && benchmark.variants.length === 2, 'strategy benchmark requires exactly two capability arms')
   const direct = benchmark.variants.find(variant => variant.id === 'direct')
   const adaptive = benchmark.variants.find(variant => variant.id === 'adaptive-strategy')
@@ -63,7 +77,10 @@ export function parseStrategyBenchmarkPlan(value: unknown): Readonly<StrategyBen
   // This establishes manifest consistency, not attestation of a loaded runtime.
   // The native executor must compare these same common/strategy descriptors
   // with actual persona, registered tools, Policy and loaded runtime versions.
-  return copy as StrategyBenchmarkPlan
+  const plan: StrategyBenchmarkPlan = hasObservationMode
+    ? copy as StrategyBenchmarkPlan
+    : { ...(copy as Record<string, unknown>), execution: { ...(copy as StrategyBenchmarkPlan).execution, observationMode: 'enforced-upper-bound-provider-output' } } as StrategyBenchmarkPlan
+  return plan
 }
 
 export function strategyBenchmarkPlanDigest(input: StrategyBenchmarkPlan): string {

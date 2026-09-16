@@ -869,12 +869,21 @@ importers:
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
+      '@dsh-enhanced/assistant-super-relay-budget':
+        specifier: workspace:*
+        version: link:../assistant-super-relay-budget
       '@dsh-enhanced/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
+      '@dsh-enhanced/llm-route-capabilities':
+        specifier: workspace:*
+        version: link:../../packages/llm-route-capabilities
       '@dsh-enhanced/personal-memory':
         specifier: workspace:*
         version: link:../personal-memory
+      '@dsh-enhanced/traex-acp-provider':
+        specifier: workspace:*
+        version: link:../traex-acp-provider
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
@@ -1377,6 +1386,34 @@ importers:
       '@dsh-enhanced/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.8(@types/node@22.20.0)(vite@8.2.1(@types/node@22.20.0)(esbuild@0.27.7)(yaml@2.9.0))
+
+  plugins/assistant-super-relay-budget:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: 'catalog:'
+        version: 3.18.2
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 'catalog:'
+        version: 4.0.2(@deepseek-ai/cordis-plugin-include@1.0.7)(@deepseek-ai/cordis-plugin-loader@1.0.3)
+      '@deepseek-ai/dsh-credentials':
+        specifier: 'catalog:'
+        version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))
+      '@deepseek-ai/dsh-llm':
+        specifier: 'catalog:'
+        version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)
+      '@dsh-enhanced/assistant-goals':
+        specifier: workspace:*
+        version: link:../assistant-goals
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
