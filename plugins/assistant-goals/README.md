@@ -204,7 +204,7 @@ executionBudget:
 
 ## 原生策略子任务（可选）
 
-配置 `strategy: {}` 后，已准入的原生目标回合可以通过 `goal_strategy` 调整解题方法：`investigate` 分析给定上下文，`review` 检查推理，`compare` 顺序请求两个独立视角。明确的下一步继续直接执行；调查结果只是 `unverified` 建议，不能代替步骤或整个目标的独立验收，也不能把模型的自我评价作为策略收益。
+配置 `strategy: {}` 后，已准入的原生目标回合可以通过 `goal_strategy` 调整解题方法：`investigate` 分析给定上下文，`review` 检查推理，`compare` 并发请求两个独立视角（skeptical、alternative），按固定 persona 顺序而非完成先后聚合建议，因此并发不改变 `outputDigest` 与确定性；模型调用总数与串行一致，只是移除了人为排队。明确的下一步继续直接执行；调查结果只是 `unverified` 建议，不能代替步骤或整个目标的独立验收，也不能把模型的自我评价作为策略收益。
 
 需要持久 `databasePath`、`verifyNativeRounds: true`、`executionBudget`、当前模型路由的可信 meter，以及 Host `subagents` 服务。Policy 还须允许当前 owner/workspace/preset 的 goal `delegate` 和 tool `goal_strategy`；拒绝规则继续优先。默认不开启，不授予子任务文件、网络工具或通用 owner 身份。这里的调查只分析调用方给出的材料，模型请求会发往父目标同一 provider/model。
 

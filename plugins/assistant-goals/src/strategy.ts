@@ -160,6 +160,11 @@ export class GoalStrategyRuntime {
     signal.throwIfAborted()
     const route = parent.options
     if (!plain(route.provider, 256) || !plain(route.model, 256)) throw new Error('assistant-goals: strategy route is unavailable')
+    // Capture narrowed route fields before the concurrent child closures; TS
+    // does not carry property narrowing into nested async functions.
+    const provider = route.provider
+    const model = route.model
+    const maxTokens = route.maxTokens
     const prompt = this.#prompt(input)
     const personas = input.kind === 'compare' ? ['Give an independent skeptical analysis.', 'Give an independent alternative analysis.'] : ['Give a concise evidence-aware analysis.']
     const prompts = personas.map(persona => `${persona}\n\n${prompt}`)
@@ -171,7 +176,7 @@ export class GoalStrategyRuntime {
     const id = `strategy-${randomUUID()}`
     const prepared = this.#store.prepare({ id, goalId: current.record.id, parentRunId: current.run.intent.runId, parentSessionId: String(parent.session.id),
       definitionVersion: current.record.definition.version, definitionDigest: current.record.definition.digest, scope: current.record.scope,
-      kind: input.kind, requestDigest: acceptanceDigest(input), provider: route.provider, model: route.model,
+      kind: input.kind, requestDigest: acceptanceDigest(input), provider, model,
       maxChildren: input.kind === 'compare' ? 2 : 1, maxDurationMs: expiresAt - now, createdAt: now, expiresAt })
     this.#store.dispatch(id, prepared.record.version, now)
     const controller = new AbortController()
@@ -186,54 +191,68 @@ export class GoalStrategyRuntime {
     // assertions alone cannot observe a revoked owner or policy decision.
     const watchdog = setInterval(() => { try { this.#assertCurrent(parent, current) } catch { parentAuthorityChanged = true; controller.abort() } }, 50)
     watchdog.unref?.()
-    const children: ChildState[] = []
     const advice: string[] = []
     const childPrompts = prompts
+    // Persona order is deterministic (skeptical first, alternative second for
+    // compare); the slot array preserves it independently of completion order.
+    const childSlots: Array<ChildState | undefined> = childPrompts.map(() => undefined)
     let unknown = false
     let parentAuthorityChanged = false
     try {
-      for (const childPrompt of childPrompts) {
-        if (combined.aborted || Date.now() >= expiresAt) { unknown = true; break }
-        const permit: Permit = { id, label: `strategy-${randomUUID()}`, parent, parentRunId: current.run.intent.runId, record: current.record,
-          expiresAt, signal: combined, provider: route.provider, model: route.model, maxTokens: route.maxTokens,
-          prompt: promptBlock(childPrompt), maxDepth: delegationDepthOf(parent) + 1, starting: false, rejected: false, toolRejections: 0 }
-        this.#permits.set(permit.label, permit)
-        const child: ChildState = { sessionId: 'pending', stopReason: 'pending', quiescent: false, output: 'not-observed', permit }
-        children.push(child)
-        try {
-          const started = this.ctx.subagents.start(STRATEGY_PROVIDER, {
-            label: permit.label, prompt: [...permit.prompt], parent, signal: combined,
-            agentOptions: { provider: route.provider, model: route.model, ...(route.maxTokens === undefined ? {} : { maxTokens: route.maxTokens }) }, maxDepth: permit.maxDepth, toolFilter: { allow: [] },
-          })
-          const run = await this.#boundedStart(started, permit, combined, expiresAt)
-          child.run = run; child.sessionId = String(run.id)
-          const result = await bounded(run.result, combined, expiresAt)
-          this.#assertPermit(permit)
-          child.stopReason = result.stopReason
-          if (result.stopReason === 'completed') {
-            const text = outputText(result.output, this.config.maxOutputBytes)
-            if (text !== undefined) { advice.push(text); child.output = 'accepted' }
-            else child.output = 'empty-or-oversized'
+      if (combined.aborted || Date.now() >= expiresAt) unknown = true
+      else {
+        // Independent personas share the same goal budget, deadline, owner
+        // watchdog and abort signal; running them concurrently only removes the
+        // artificial serialization. Each permit/label/run stays isolated and
+        // results are reassembled in persona order below.
+        const tasks = childPrompts.map(async (childPrompt, index): Promise<string | undefined> => {
+          const permit: Permit = { id, label: `strategy-${randomUUID()}`, parent, parentRunId: current.run.intent.runId, record: current.record,
+            expiresAt, signal: combined, provider, model, maxTokens,
+            prompt: promptBlock(childPrompt), maxDepth: delegationDepthOf(parent) + 1, starting: false, rejected: false, toolRejections: 0 }
+          this.#permits.set(permit.label, permit)
+          const child: ChildState = { sessionId: 'pending', stopReason: 'pending', quiescent: false, output: 'not-observed', permit }
+          childSlots[index] = child
+          let text: string | undefined
+          try {
+            const started = this.ctx.subagents.start(STRATEGY_PROVIDER, {
+              label: permit.label, prompt: [...permit.prompt], parent, signal: combined,
+              agentOptions: { provider, model, ...(maxTokens === undefined ? {} : { maxTokens }) }, maxDepth: permit.maxDepth, toolFilter: { allow: [] },
+            })
+            const run = await this.#boundedStart(started, permit, combined, expiresAt)
+            child.run = run; child.sessionId = String(run.id)
+            const result = await bounded(run.result, combined, expiresAt)
+            this.#assertPermit(permit)
+            child.stopReason = result.stopReason
+            if (result.stopReason === 'completed') {
+              text = outputText(result.output, this.config.maxOutputBytes)
+              child.output = text !== undefined ? 'accepted' : 'empty-or-oversized'
+            }
+          } catch {
+            if (combined.aborted || Date.now() >= expiresAt) unknown = true
+            else child.stopReason = 'error'
+          } finally {
+            const run = child.run
+            if (run !== undefined) {
+              child.quiescent = await this.#dispose(run)
+              if (!child.quiescent) unknown = true
+            }
+            permit.rejected = true
+            this.#permits.delete(permit.label)
           }
-        } catch {
-          if (combined.aborted || Date.now() >= expiresAt) unknown = true
-          else child.stopReason = 'error'
-        } finally {
-          const run = child.run
-          if (run !== undefined) {
-            child.quiescent = await this.#dispose(run)
-            if (!child.quiescent) unknown = true
-          }
-          permit.rejected = true
-          this.#permits.delete(permit.label)
-        }
+          return text
+        })
+        // Promise.all preserves slot order, so advice never depends on which
+        // persona finished first; the durable output digest stays deterministic.
+        const texts = await Promise.all(tasks)
+        for (const text of texts) if (text !== undefined) advice.push(text)
       }
     } finally {
       clearTimeout(timer)
       clearInterval(watchdog)
       controller.abort()
       this.#controllers.delete(controller)
-      for (const child of children) {
+      for (const child of childSlots) {
+        if (child === undefined) continue
         child.permit.rejected = true
         this.#permits.delete(child.permit.label)
         if (child.run !== undefined && !child.quiescent) {
@@ -242,6 +261,7 @@ export class GoalStrategyRuntime {
         }
       }
     }
+    const children = childSlots.filter((child): child is ChildState => child !== undefined)
     try {
       // Disposal is the authorization boundary: a changed owner after a result
       // makes the durable outcome unknown rather than reusable advice.
