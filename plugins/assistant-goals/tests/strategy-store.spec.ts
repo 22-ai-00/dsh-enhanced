@@ -3,7 +3,7 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import { describe, expect, it } from 'vitest'
 import { GoalStrategyStore } from '../src/strategy-store.ts'
 import { GoalStoreError } from '../src/types.ts'
@@ -95,8 +95,7 @@ describe('GoalStrategyStore', () => {
     try { expect(reopened.inspect(scope, 'strategy-a')?.terminationReason).toBe('unknown') } finally { reopened.close() }
   })
 
-  it('rolls back schema upgrade when a legacy record cannot be validated', async () => {
-    const path = join(await mkdtemp(join(tmpdir(), 'goal-strategy-invalid-v1-')), 'strategy.sqlite')
+  it('rolls back schema upgrade when a legacy record cannot be validated', async () => {    const path = join(await mkdtemp(join(tmpdir(), 'goal-strategy-invalid-v1-')), 'strategy.sqlite')
     const database = new DatabaseSync(path)
     database.exec(legacySchema)
     database.prepare("INSERT INTO goal_strategy_records(id,intent_json,state,version,children_json,scope_key,goal_id,created_at) VALUES ('invalid','{}','prepared',1,'[]','{}','goal-a',1)").run()
@@ -107,5 +106,103 @@ describe('GoalStrategyStore', () => {
       expect(check.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 1 })
       expect(check.prepare('PRAGMA table_info(goal_strategy_records)').all().map(row => row.name)).not.toContain('termination_reason')
     } finally { check.close() }
+  })
+})
+
+describe('GoalStrategyStore.summarizeAdviceByDefinition', () => {
+  const digestA = 'a'.repeat(64)
+  const digestB = 'b'.repeat(64)
+  const req1 = '1'.repeat(64)
+  const req2 = '2'.repeat(64)
+  const out1 = 'c'.repeat(64)
+  const out2 = 'd'.repeat(64)
+
+  /** Prepare → dispatch → bind child → settle as advice, returning the stored record. */
+  function settleAdvice(
+    store: GoalStrategyStore,
+    input: {
+      id: string
+      goalId: string
+      definitionDigest: string
+      requestDigest: string
+      outputDigest: string
+      createdAt: number
+      completedAt: number
+      scope?: typeof scope
+    },
+  ): void {
+    const usedScope = input.scope ?? scope
+    store.prepare({
+      ...intent(input.id, input.createdAt),
+      goalId: input.goalId,
+      definitionDigest: input.definitionDigest,
+      requestDigest: input.requestDigest,
+      scope: usedScope,
+    })
+    store.dispatch(input.id, 1, input.createdAt + 1)
+    store.bindChild(input.id, 2, `child-${input.id}`, input.createdAt + 2)
+    store.settle(input.id, 3, {
+      children: [child(`child-${input.id}`)],
+      outcome: 'advice',
+      outputDigest: input.outputDigest,
+      quiescent: true,
+      terminationReason: 'completed',
+    }, input.completedAt)
+  }
+
+  it('groups settled advice across goal instances by definition and reports request repetition', () => {
+    const store = new GoalStrategyStore(':memory:')
+    // Definition A: two goal instances, three advice runs; req1 repeats twice
+    // with two distinct outputs, req2 appears once.
+    settleAdvice(store, { id: 's1', goalId: 'goal-1', definitionDigest: digestA, requestDigest: req1, outputDigest: out1, createdAt: 1, completedAt: 10 })
+    settleAdvice(store, { id: 's2', goalId: 'goal-2', definitionDigest: digestA, requestDigest: req1, outputDigest: out2, createdAt: 2, completedAt: 20 })
+    settleAdvice(store, { id: 's3', goalId: 'goal-2', definitionDigest: digestA, requestDigest: req2, outputDigest: out1, createdAt: 3, completedAt: 30 })
+    // Definition B: a single run in another scope's content cluster.
+    settleAdvice(store, { id: 's4', goalId: 'goal-3', definitionDigest: digestB, requestDigest: req2, outputDigest: out2, createdAt: 4, completedAt: 40 })
+
+    const summary = store.summarizeAdviceByDefinition(scope)
+    expect(summary.map(item => item.definitionDigest)).toEqual([digestA, digestB])
+    const a = summary[0]!
+    expect(a.situation).toBe(goalDefinitionSituation(digestA))
+    expect(a.goalInstances).toBe(2)
+    expect(a.adviceRuns).toBe(3)
+    expect(a.distinctRequests).toBe(2)
+    expect(a.requests[0]).toMatchObject({ requestDigest: req1, occurrences: 2, distinctOutputDigests: 2, lastGoalId: 'goal-2', lastCompletedAt: 20 })
+    expect(a.requests[1]).toMatchObject({ requestDigest: req2, occurrences: 1, distinctOutputDigests: 1, lastGoalId: 'goal-2', lastCompletedAt: 30 })
+    store.close()
+  })
+
+  it('excludes non-advice, unsettled, null-output and other-scope rows and never returns plaintext', () => {
+    const store = new GoalStrategyStore(':memory:')
+    settleAdvice(store, { id: 's1', goalId: 'goal-1', definitionDigest: digestA, requestDigest: req1, outputDigest: out1, createdAt: 1, completedAt: 10 })
+    // Prepared but never settled: invisible.
+    store.prepare({ ...intent('s2', 2), definitionDigest: digestA, requestDigest: req1 })
+    // Settled as execution-failed: invisible.
+    store.prepare({ ...intent('s3', 3), definitionDigest: digestA, requestDigest: req1 })
+    store.dispatch('s3', 1, 4)
+    store.bindChild('s3', 2, 'child-s3', 5)
+    store.settle('s3', 3, { children: [child('child-s3')], outcome: 'execution-failed', outputDigest: out1, quiescent: true, terminationReason: 'execution-failed' }, 6)
+    // Advice in a different owner scope: invisible to this scope key.
+    settleAdvice(store, { id: 's4', goalId: 'goal-9', definitionDigest: digestA, requestDigest: req1, outputDigest: out1, createdAt: 7, completedAt: 80, scope: { ...scope, principalId: 'other' } })
+
+    const summary = store.summarizeAdviceByDefinition(scope)
+    expect(summary).toHaveLength(1)
+    expect(summary[0]!.adviceRuns).toBe(1)
+    expect(summary[0]!.goalInstances).toBe(1)
+    const serialized = JSON.stringify(summary)
+    expect(serialized).not.toContain('advice-body')
+    // Only hashes/counts leave the projection.
+    for (const item of summary) for (const request of item.requests) {
+      expect(request.requestDigest).toMatch(/^[a-f0-9]{64}$/u)
+    }
+    store.close()
+  })
+
+  it('rejects invalid limits', () => {
+    const store = new GoalStrategyStore(':memory:')
+    expect(() => store.summarizeAdviceByDefinition(scope, { limit: 0 })).toThrow(GoalStoreError)
+    expect(() => store.summarizeAdviceByDefinition(scope, { limit: 201 })).toThrow(GoalStoreError)
+    expect(() => store.summarizeAdviceByDefinition(scope, { requestLimit: 101 })).toThrow(GoalStoreError)
+    store.close()
   })
 })

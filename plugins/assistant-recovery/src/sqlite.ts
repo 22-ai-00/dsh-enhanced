@@ -13,7 +13,7 @@ import { EMPTY_BOOTSTRAP_ATTESTATION_SET_DIGEST } from './attestation.js'
 
 export { EMPTY_BOOTSTRAP_ATTESTATION_SET_DIGEST } from './attestation.js'
 
-export const recoverySchemaVersion = 4
+export const recoverySchemaVersion = 5
 
 // Existing v1 rows deliberately receive a digest that no current activation
 // plan can produce. They remain auditable, but cannot attest a new schedule.
@@ -99,9 +99,10 @@ function createSchema(database: DatabaseSync): void {
         't1-effects',
         'regression-rollback',
         'incident-review',
+        'strategy-learning',
         'verification'
       )),
-      step_index INTEGER NOT NULL CHECK (step_index >= 0 AND step_index < 7),
+      step_index INTEGER NOT NULL CHECK (step_index >= 0 AND step_index < 8),
       idempotency_key TEXT NOT NULL UNIQUE,
       action_json TEXT NOT NULL CHECK (
         json_valid(action_json) AND json_type(action_json) = 'object' AND length(action_json) <= 2048),
@@ -155,8 +156,135 @@ function createSchema(database: DatabaseSync): void {
       1, 'idle', NULL, 0, 0, '[]', '${EMPTY_BOOTSTRAP_ATTESTATION_SET_DIGEST}', 0
     );
 
-    PRAGMA user_version = 4;
+    PRAGMA user_version = 5;
   `)
+}
+
+// Legacy v1-v3 installs never carried the immutable action receipt columns;
+// their step rows are audit-only and can never be resumed (the run keeps the
+// unmatchable LEGACY_ACTIVATION_PLAN_DIGEST). When the v5 migration encounters
+// such a table it fills the new NOT NULL columns with this fixed non-secret
+// marker rather than fabricating receipts.
+const LEGACY_STATE_DIGEST = '0'.repeat(64)
+const LEGACY_ACTION_JSON = '{"kind":"noop","reasonCode":"legacy-v1-migration"}'
+
+const RECOVERY_STEPS_V5_DDL = `
+  CREATE TABLE recovery_steps_v5 (
+    run_id TEXT NOT NULL,
+    step_id TEXT NOT NULL CHECK (step_id IN (
+      'authority-admission',
+      'ledger-reconcile',
+      'retention-maintenance',
+      't1-effects',
+      'regression-rollback',
+      'incident-review',
+      'strategy-learning',
+      'verification'
+    )),
+    step_index INTEGER NOT NULL CHECK (step_index >= 0 AND step_index < 8),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    action_json TEXT NOT NULL CHECK (
+      json_valid(action_json) AND json_type(action_json) = 'object' AND length(action_json) <= 2048),
+    action_digest TEXT NOT NULL CHECK (length(action_digest) = 64),
+    status TEXT NOT NULL CHECK (status IN ('failed', 'noop', 'started', 'succeeded', 'unknown')),
+    before_digest TEXT NOT NULL CHECK (length(before_digest) = 64),
+    after_digest TEXT CHECK (after_digest IS NULL OR length(after_digest) = 64),
+    result_code TEXT,
+    started_at INTEGER NOT NULL,
+    deadline_at INTEGER NOT NULL CHECK (deadline_at >= started_at),
+    finished_at INTEGER,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    PRIMARY KEY(run_id, step_id),
+    UNIQUE(run_id, step_index),
+    FOREIGN KEY(run_id) REFERENCES recovery_runs(id) ON DELETE RESTRICT,
+    CHECK ((status = 'started') = (
+      finished_at IS NULL
+      AND after_digest IS NULL
+      AND result_code IS NULL
+    )),
+    CHECK (status = 'started' OR (
+      finished_at IS NOT NULL AND after_digest IS NOT NULL AND result_code IS NOT NULL
+    ))
+  ) STRICT, WITHOUT ROWID;
+`
+
+function migrateV4ToV5(database: DatabaseSync): void {
+  // The strategy-learning step is wedged into the catalog before verification.
+  // SQLite cannot alter a CHECK constraint or renumber rows in place, so rebuild
+  // the steps table: verification moves from index 6 to 7, and strategy-learning
+  // takes index 6. Pre-v5 runs carry the older catalog digest and can never be
+  // resumed by v4-runbook code (exactJob pins the digest), so their rows are
+  // preserved for audit only and simply lack a strategy-learning row.
+  //
+  // PRAGMA table_info returns no rows when the table is absent (a v3-only
+  // install that never recorded a step); legacy v1-v3 installs have a minimal
+  // steps table without step_index/action receipts and need synthetic fillers.
+  const columns = database.prepare('PRAGMA table_info(recovery_steps)').all() as { name: string }[]
+  const hasModernTable = columns.length > 0
+  const hasStepIndex = columns.some(column => column.name === 'step_index')
+
+  database.exec(RECOVERY_STEPS_V5_DDL)
+
+  if (hasModernTable) {
+    if (hasStepIndex) {
+      database.exec(`
+        INSERT INTO recovery_steps_v5 (
+          run_id, step_id, step_index, idempotency_key, action_json, action_digest,
+          status, before_digest, after_digest, result_code,
+          started_at, deadline_at, finished_at, version
+        )
+        SELECT
+          run_id, step_id,
+          CASE WHEN step_id = 'verification' THEN step_index + 1 ELSE step_index END,
+          idempotency_key, action_json, action_digest,
+          status, before_digest, after_digest, result_code,
+          started_at, deadline_at, finished_at, version
+        FROM recovery_steps;
+      `)
+    } else {
+      database.exec(`
+        INSERT INTO recovery_steps_v5 (
+          run_id, step_id, step_index, idempotency_key, action_json, action_digest,
+          status, before_digest, after_digest, result_code,
+          started_at, deadline_at, finished_at, version
+        )
+        SELECT
+          run_id, step_id,
+          CASE step_id
+            WHEN 'authority-admission' THEN 0
+            WHEN 'ledger-reconcile' THEN 1
+            WHEN 'retention-maintenance' THEN 2
+            WHEN 't1-effects' THEN 3
+            WHEN 'regression-rollback' THEN 4
+            WHEN 'incident-review' THEN 5
+            WHEN 'verification' THEN 7
+          END,
+          'legacy:' || run_id || ':' || step_id,
+          '${LEGACY_ACTION_JSON}',
+          '${LEGACY_STATE_DIGEST}',
+          'unknown',
+          '${LEGACY_STATE_DIGEST}',
+          '${LEGACY_STATE_DIGEST}',
+          'legacy-v1-run',
+          started_at, deadline_at, deadline_at, 1
+        FROM recovery_steps;
+      `)
+    }
+    database.exec(`
+      DROP TABLE recovery_steps;
+      ALTER TABLE recovery_steps_v5 RENAME TO recovery_steps;
+      CREATE INDEX recovery_steps_incomplete
+        ON recovery_steps(status, started_at, run_id);
+    `)
+  } else {
+    database.exec(`
+      ALTER TABLE recovery_steps_v5 RENAME TO recovery_steps;
+      CREATE INDEX recovery_steps_incomplete
+        ON recovery_steps(status, started_at, run_id);
+    `)
+  }
+
+  database.exec('PRAGMA user_version = 5;')
 }
 
 function migrateV3ToV4(database: DatabaseSync): void {
@@ -260,6 +388,7 @@ export function openRecoveryDatabase(path: string): DatabaseSync {
       if (version === 1) migrateV1ToV2(database)
       if (version <= 2) migrateV2ToV3(database)
       if (version <= 3) migrateV3ToV4(database)
+      if (version <= 4) migrateV4ToV5(database)
       database.exec('COMMIT')
     } catch (error) {
       database.exec('ROLLBACK')

@@ -233,7 +233,11 @@ function context(
     }),
   } as never)
   ctx.provide('assistantEvolution' as never, {
-    hostCandidates: () => [], hostListRules: () => [], hostRollbackOne: () => {},
+    hostCandidates: () => [], hostGoalDefinitionEpisodes: () => [],
+    hostListRules: () => [], hostRollbackOne: () => {},
+  } as never)
+  ctx.provide('assistantGoals' as never, {
+    hostSummarizeAdviceByDefinition: () => [],
   } as never)
   ctx.provide('assistantPreferenceLearning' as never, {
     health: () => ({ ready: true }),
@@ -271,10 +275,10 @@ describe('AssistantRecoveryService', () => {
     expect(automations.record!.definition).toMatchObject({
       schedule: { kind: 'at', at: '9999-12-31T23:59:59.999Z' },
       retrySafety: 'idempotent', maxRetries: 1,
-      timeoutMs: 24_000,
+      timeoutMs: 26_000,
       execution: {
         kind: 'host', executorId: 'assistant-recovery', runbookId: 'supervised-growth/v2',
-        runbookVersion: 3, catalogDigest: RECOVERY_CATALOG_DIGEST, ownerRouteId: 'owner-route',
+        runbookVersion: 4, catalogDigest: RECOVERY_CATALOG_DIGEST, ownerRouteId: 'owner-route',
       },
     })
     const health = ctx.assistantRecovery.health()

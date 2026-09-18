@@ -9,6 +9,7 @@ export const inject = [
   'assistantDelivery',
   'assistantEvaluation',
   'assistantEvolution',
+  'assistantGoals',
   'assistantPreferenceLearning',
   'assistantHealth',
 ]

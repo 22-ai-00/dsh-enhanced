@@ -1,5 +1,5 @@
 export const RECOVERY_RUNBOOK_ID = 'supervised-growth/v2' as const
-export const RECOVERY_RUNBOOK_VERSION = 3 as const
+export const RECOVERY_RUNBOOK_VERSION = 4 as const
 
 export type RecoveryExecutionMode = 'preview' | 'production'
 
@@ -15,6 +15,7 @@ export type RecoveryStepId =
   | 't1-effects'
   | 'regression-rollback'
   | 'incident-review'
+  | 'strategy-learning'
   | 'verification'
 
 export type RecoveryRunStatus = 'failed' | 'running' | 'succeeded' | 'unknown'
@@ -100,6 +101,16 @@ export type RecoveryStepAction =
       automationId: string
       definitionHash: string
       expectedVersion: number
+    }
+  | {
+      /**
+       * Read-only, model-free join of trusted goal-definition failure
+       * episodes with assistant-goals advice repetition. Mints no candidate
+       * and writes nothing outside the Recovery run record. A
+       * `repeatedAndFailing` observation is only a signal for a later,
+       * owner-gated evolution draft.
+       */
+      kind: 'observe-strategy-learning'
     }
   | { kind: 'verify-health' }
   | { kind: 'noop'; reasonCode: string }

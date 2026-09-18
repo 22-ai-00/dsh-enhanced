@@ -15,7 +15,7 @@ describe('dsh-enhanced-assistant-recovery', () => {
   it('publishes the exact Cordis dependency and configuration contract', () => {
     expect(inject).toEqual([
       'assistantAutomations', 'assistantDelivery', 'assistantEvaluation', 'assistantEvolution',
-      'assistantPreferenceLearning', 'assistantHealth',
+      'assistantGoals', 'assistantPreferenceLearning', 'assistantHealth',
     ])
     expect(Config({ databasePath: '/state/recovery.sqlite' })).toMatchObject({
       databasePath: '/state/recovery.sqlite', jobs: [], maxStepDurationMs: 10_000,

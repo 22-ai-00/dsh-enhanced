@@ -15,6 +15,10 @@ import type {
   TrustedDeliveryPresentationProducer,
   TrustedDeliveryPresentationRegistration,
 } from '@dsh-enhanced/assistant-delivery'
+// Type-only, structural dependency (mirrors assistant-recovery): the live
+// assistant-goals service is resolved through the Context at runtime, so the
+// evolution package gains no build/runtime dependency edge and no import cycle.
+import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type {
   ApprovalDispatchRoute,
   ApprovalDispatchRouteV2,
@@ -36,11 +40,18 @@ import {
   supervisedGrowthAnalystProposalIdempotencyKey,
 } from './store.js'
 import { registerEvolutionTools } from './tools.js'
+import {
+  isGoalDefinitionSituation,
+  joinStrategyLearningObservations,
+  toStrategyAdviceSignal,
+} from './strategy-learning.js'
+import type { StrategyAdviceSignal } from './strategy-learning.js'
 import type {
   EvolutionCreationIntent,
   EvolutionCreationInput,
   EvolutionMutation,
   EvolutionProposalMutation,
+  GoalDefinitionEpisodeSummary,
   QualityEvidenceKind,
   RuleCandidate,
   StoredAutonomousRollback,
@@ -153,6 +164,18 @@ export const HOST_RECOVERY_BACKGROUND_ID = 'dsh-enhanced-assistant-recovery'
 /** The only Automation allowed to use the model-visible analyst capability. */
 export const SUPERVISED_GROWTH_ANALYST_AUTOMATION_ID =
   'heartbeat:supervised-growth-analyst' as const
+
+/**
+ * Frozen advice-repetition floor a `goal-definition` adoption must additionally
+ * clear before the supervised-growth analyst is shown a draft. These mirror the
+ * read-only recovery strategy-learning catalog thresholds (minTrustedEpisodes
+ * 3 / minRepeatedAdviceRuns 2); they are duplicated here rather than imported
+ * from assistant-recovery because that package depends on this one, and the
+ * pure observation kernel they gate lives in this package. They are policy
+ * constants, not configuration, and must not be tuned by the growth executor.
+ */
+const STRATEGY_DRAFT_MIN_TRUSTED_EPISODES = 3
+const STRATEGY_DRAFT_MIN_REPEATED_ADVICE_RUNS = 2
 
 const evolutionHostScopeBrand: unique symbol = Symbol('assistant-evolution.host-scope')
 
@@ -406,6 +429,12 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
   private readonly config: Required<Config>
   private readonly now: () => number
   private delivery: EvolutionApprovalDelivery | undefined
+  /**
+   * Optional live assistant-goals handle, used only to read advice repetition
+   * for goal-definition adoption drafts. Resolved dynamically (never a static
+   * inject) so evolution keeps no dependency/ordering edge on the goals plugin.
+   */
+  private goals: Pick<AssistantGoalsService, 'hostSummarizeAdviceByDefinition'> | undefined
   private readonly presentationProducerGeneration = `assistant-evolution-presentation:${randomUUID()}`
   private presentationSink: DeliveryPresentationSinkRegistration | undefined
   private active = true
@@ -434,6 +463,19 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
       this.reconcileApplicationPresentations()
       return () => {
         if (this.delivery === delivery) this.delivery = undefined
+      }
+    })
+
+    // Optional and dynamic, exactly like assistantDelivery: goal-definition
+    // adoption drafts additionally require goals-side advice repetition, but a
+    // deployment without assistant-goals must still activate (those drafts then
+    // fail closed to absent advice instead of breaking the service).
+    ctx.inject(['assistantGoals'], goalsCtx => {
+      const goals = goalsCtx.get('assistantGoals') as
+        Pick<AssistantGoalsService, 'hostSummarizeAdviceByDefinition'>
+      this.goals = goals
+      return () => {
+        if (this.goals === goals) this.goals = undefined
       }
     })
 
@@ -764,16 +806,8 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
     )
     // Even review requires the route that a later proposal will use. This
     // prevents an analyst with no owner destination from minting stale tokens.
-    this.approvalRoute(agent, undefined)
-    const candidate = this.candidatesForScope(execution.scopeKey)
-      .filter(entry => entry.kind === 'adopt')
-      .sort((left, right) => {
-        const rateOrder = right.stats.failures * left.stats.total
-          - left.stats.failures * right.stats.total
-        return rateOrder || right.stats.failures - left.stats.failures
-          || right.stats.total - left.stats.total
-          || left.situation.localeCompare(right.situation)
-      })[0]
+    const route = this.approvalRoute(agent, undefined)
+    const candidate = this.analystAdoptionCandidates(agent!, execution.scopeKey, route)[0]
     if (candidate === undefined) {
       return Object.freeze({ contractVersion: SUPERVISED_GROWTH_ANALYST_CONTRACT_VERSION })
     }
@@ -916,6 +950,29 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
   }): StoredRule[] {
     const scopeKey = this.authorizeHost(input, 'inspect', `rules:${input.status ?? 'all'}`)
     return this.store.listRules(scopeKey, input.status)
+  }
+
+  /**
+   * Agent-free, exact-scope read of trusted goal-definition episode aggregates
+   * for the fixed Host runbook (G2 phase 2 strategy learning).
+   *
+   * This is observation only: the Store returns just the content-bound
+   * situation plus counts over rows the ledger itself marked
+   * `learning_eligible`, and this method mints no candidate, writes no row and
+   * widens no permission. Correlating the aggregates with assistant-goals'
+   * advice repetition stays on the Host side of the seam.
+   */
+  hostGoalDefinitionEpisodes(input: EvolutionHostOperation & {
+    window?: number
+    limit?: number
+  }): readonly GoalDefinitionEpisodeSummary[] {
+    const scopeKey = this.authorizeHost(input, 'inspect', 'goal-definition-episodes')
+    const window = input.window ?? this.config.evaluationWindow
+    return this.store.summarizeGoalDefinitionEpisodes(
+      input.limit === undefined
+        ? { scopeKey, window }
+        : { scopeKey, window, limit: input.limit },
+    )
   }
 
   /**
@@ -1501,6 +1558,110 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
       retireFailureRate: this.config.retireFailureRate,
       limit: this.config.maxCandidates,
       evidenceSampleLimit: this.config.maxEvidenceSamples,
+    })
+  }
+
+  /**
+   * Adoption candidates the supervised-growth analyst is allowed to turn into a
+   * review draft. Non-`goal-definition` candidates pass through unchanged. A
+   * content-bound `goal-definition:<digest>` candidate must additionally clear
+   * the same repeated-and-failing gate the read-only recovery runbook observes:
+   * enough trusted failing episodes AND goals-side evidence that the same advice
+   * keeps recurring. This only *selects* a candidate for the existing
+   * review-token → owner-approval chain; it never adopts, writes a rule or reads
+   * any permission table.
+   *
+   * The episode input is the candidate's own exact adoption window — its
+   * complete `stats` plus the newest bound evidence sample's `occurredAt` — not a
+   * second store query, so the gate can never drift onto rows (e.g. a retired
+   * rule's era) that the candidate's own evidence digest does not cover. The
+   * advice side needs both the live assistant-goals handle and a dispatch route
+   * carrying full principal lineage; absent either, goal-definition drafts fail
+   * closed rather than minting a token with no owner/lineage destination.
+   */
+  private analystAdoptionCandidates(
+    agent: Agent,
+    scopeKey: string,
+    route: { principal: string; dispatch?: ApprovalDispatchRouteV2 },
+  ): RuleCandidate[] {
+    const adoption = this.candidatesForScope(scopeKey).filter(entry => entry.kind === 'adopt')
+    const goalDefinitionSituations = new Set(
+      adoption
+        .map(entry => entry.situation)
+        .filter(situation => isGoalDefinitionSituation(situation)),
+    )
+    if (goalDefinitionSituations.size === 0) {
+      return this.sortAdoptionCandidates(adoption)
+    }
+
+    // Fail closed: advice repetition is unreadable without goals, and the advice
+    // ledger is scoped by the owner's exact principal lineage, which only the
+    // delivery dispatch route carries (a headless route has no dispatch).
+    if (this.goals === undefined || route.dispatch === undefined
+      || route.dispatch.principalRecordId.trim() === ''
+      || typeof route.dispatch.principalVersion !== 'number') {
+      return this.sortAdoptionCandidates(
+        adoption.filter(entry => !goalDefinitionSituations.has(entry.situation)),
+      )
+    }
+
+    const workspace = agent.session.header.cwd
+    const preset = agent.session.header.agentPreset
+    if (workspace === undefined || !isAbsolute(workspace)
+      || preset === undefined || preset.trim() === '') {
+      // authorize() already established this for the analyst call; defending it
+      // here keeps the goals scope construction honest if the method is reused.
+      throw new AssistantEvolutionError('missing-identity', 'goals advice scope requires an absolute workspace and preset')
+    }
+    const goalScope = Object.freeze({
+      principalId: route.dispatch.principal,
+      principalRecordId: route.dispatch.principalRecordId,
+      principalVersion: route.dispatch.principalVersion,
+      workspace,
+      preset,
+    })
+    const advice: readonly StrategyAdviceSignal[] = this.goals
+      .hostSummarizeAdviceByDefinition(goalScope)
+      .map(toStrategyAdviceSignal)
+
+    // One kernel input row per candidate, built strictly from its own window.
+    const episodes: GoalDefinitionEpisodeSummary[] = []
+    for (const candidate of adoption) {
+      if (!goalDefinitionSituations.has(candidate.situation)) continue
+      const total = candidate.stats.total
+      const failures = candidate.stats.failures
+      episodes.push(Object.freeze({
+        situation: candidate.situation,
+        failures,
+        succeeded: total - failures,
+        total,
+        lastOccurredAt: candidate.evidence[0]?.occurredAt ?? 0,
+      }))
+    }
+
+    const repeatedAndFailing = new Set(
+      joinStrategyLearningObservations({
+        episodes,
+        advice,
+        minTrustedEpisodes: STRATEGY_DRAFT_MIN_TRUSTED_EPISODES,
+        minRepeatedAdviceRuns: STRATEGY_DRAFT_MIN_REPEATED_ADVICE_RUNS,
+      })
+        .filter(observation => observation.repeatedAndFailing)
+        .map(observation => observation.situation),
+    )
+
+    return this.sortAdoptionCandidates(adoption.filter(entry =>
+      !goalDefinitionSituations.has(entry.situation)
+      || repeatedAndFailing.has(entry.situation)))
+  }
+
+  private sortAdoptionCandidates(candidates: RuleCandidate[]): RuleCandidate[] {
+    return candidates.slice().sort((left, right) => {
+      const rateOrder = right.stats.failures * left.stats.total
+        - left.stats.failures * right.stats.total
+      return rateOrder || right.stats.failures - left.stats.failures
+        || right.stats.total - left.stats.total
+        || left.situation.localeCompare(right.situation)
     })
   }
 

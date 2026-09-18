@@ -115,8 +115,12 @@ function runtime(overrides: Partial<RecoveryRuntimePorts> = {}): RecoveryRuntime
     },
     evolution: {
       hostCandidates: vi.fn(() => []),
+      hostGoalDefinitionEpisodes: vi.fn(() => []),
       hostListRules: vi.fn(() => []),
       hostRollbackOne: vi.fn(),
+    },
+    goals: {
+      hostSummarizeAdviceByDefinition: vi.fn(() => []),
     },
     preference: {
       health: vi.fn(() => ({ ready: true } as never)),
@@ -166,12 +170,12 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       'authority-admission',
       { kind: 'verify-authority' },
-      'recovery:3:occurrence-1:authority-admission',
+      'recovery:4:occurrence-1:authority-admission',
       new AbortController().signal,
     )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'authority-verified' })
     expect(current.health.hostGlobalSnapshot).toHaveBeenLastCalledWith({
       principal: 'lark/main/tenant/owner',
-      operationId: 'recovery:3:occurrence-1:authority-admission',
+      operationId: 'recovery:4:occurrence-1:authority-admission',
     })
     expect(current.delivery.validateOwnerRoute).toHaveBeenCalledWith({
       authorityId: 'owner-route',
@@ -228,7 +232,7 @@ describe('HostRecoveryRunbookPort', () => {
     } })
     await expect(port(bootstrap).execute(
       context(), 'verification', { kind: 'verify-health' },
-      'recovery:3:occurrence-1:verification', new AbortController().signal,
+      'recovery:4:occurrence-1:verification', new AbortController().signal,
     )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'health-verified' })
 
     const degraded = runtime({ health: {
@@ -242,11 +246,11 @@ describe('HostRecoveryRunbookPort', () => {
     } })
     await expect(port(degraded).execute(
       context(), 'authority-admission', { kind: 'verify-authority' },
-      'recovery:3:occurrence-1:authority-admission', new AbortController().signal,
+      'recovery:4:occurrence-1:authority-admission', new AbortController().signal,
     )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'authority-verified' })
     await expect(port(degraded).execute(
       context(), 'verification', { kind: 'verify-health' },
-      'recovery:3:occurrence-1:verification', new AbortController().signal,
+      'recovery:4:occurrence-1:verification', new AbortController().signal,
     )).rejects.toMatchObject({ code: 'health-not-ready', sideEffectState: 'none' })
   })
 
@@ -269,12 +273,12 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       'ledger-reconcile',
       planned.action,
-      'recovery:3:occurrence-1:ledger-reconcile',
+      'recovery:4:occurrence-1:ledger-reconcile',
       new AbortController().signal,
     )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'quality-projected' })
     expect(reconcileProjection).toHaveBeenCalledWith(expect.objectContaining({
       evaluationId: 'evaluation-7',
-      operationId: 'recovery:3:occurrence-1:ledger-reconcile',
+      operationId: 'recovery:4:occurrence-1:ledger-reconcile',
     }))
   })
 
@@ -292,7 +296,7 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       'ledger-reconcile',
       { kind: 'project-evaluation', evaluationId: 'evaluation-7' },
-      'recovery:3:occurrence-1:ledger-reconcile',
+      'recovery:4:occurrence-1:ledger-reconcile',
       new AbortController().signal,
     )).rejects.toMatchObject({
       code: 'projection-deferred', sideEffectState: 'possible',
@@ -322,20 +326,20 @@ describe('HostRecoveryRunbookPort', () => {
     expect(hostOwnerFence).toHaveBeenCalledWith(expect.objectContaining({
       principal: 'lark/main/tenant/owner',
       principalLineage,
-      operationId: 'recovery:plan:3:occurrence-1:retention-maintenance',
+      operationId: 'recovery:plan:4:occurrence-1:retention-maintenance',
     }))
     await expect(adapter.execute(
       context(),
       'retention-maintenance',
       planned.action,
-      'recovery:3:occurrence-1:retention-maintenance',
+      'recovery:4:occurrence-1:retention-maintenance',
       new AbortController().signal,
     )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'preference-retained' })
     expect(hostMaintainOne).toHaveBeenCalledWith(expect.objectContaining({
       principal: 'lark/main/tenant/owner',
       principalLineage,
       ownerGeneration: preferenceOwnerGeneration,
-      operationId: 'recovery:3:occurrence-1:retention-maintenance',
+      operationId: 'recovery:4:occurrence-1:retention-maintenance',
     }))
   })
 
@@ -345,7 +349,7 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       'retention-maintenance',
       { kind: 'maintain-preferences', limit: 1 },
-      'recovery:3:occurrence-1:retention-maintenance',
+      'recovery:4:occurrence-1:retention-maintenance',
       new AbortController().signal,
     )).rejects.toMatchObject({
       code: 'preference-maintenance-action-unfenced', sideEffectState: 'none',
@@ -378,7 +382,7 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       'retention-maintenance',
       maintenanceAction(),
-      'recovery:3:occurrence-1:retention-maintenance',
+      'recovery:4:occurrence-1:retention-maintenance',
       new AbortController().signal,
     )).rejects.toMatchObject({ code: 'owner-route-lineage-mismatch', sideEffectState: 'none' })
     expect(hostMaintainOne).not.toHaveBeenCalled()
@@ -399,7 +403,7 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       'retention-maintenance',
       maintenanceAction(),
-      'recovery:3:occurrence-1:retention-maintenance',
+      'recovery:4:occurrence-1:retention-maintenance',
       new AbortController().signal,
     )).rejects.toMatchObject({
       code: 'preference-maintenance-receipt-invalid', sideEffectState: 'possible',
@@ -434,7 +438,7 @@ describe('HostRecoveryRunbookPort', () => {
     expect(hostActivationCandidate).toHaveBeenCalledWith(expect.objectContaining({
       principal: 'lark/main/tenant/owner',
       principalLineage,
-      operationId: 'recovery:plan:3:occurrence-1:t1-effects',
+      operationId: 'recovery:plan:4:occurrence-1:t1-effects',
     }))
   })
 
@@ -486,14 +490,14 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       't1-effects',
       activationAction(),
-      'recovery:3:occurrence-1:t1-effects',
+      'recovery:4:occurrence-1:t1-effects',
       new AbortController().signal,
     )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'preference-activated' })
     expect(hostActivateOne).toHaveBeenCalledWith(expect.objectContaining({
       hypothesisId: 'hypothesis-1', expectedVersion: 3,
       ownerGeneration: preferenceOwnerGeneration,
       principalLineage,
-      operationId: 'recovery:3:occurrence-1:t1-effects',
+      operationId: 'recovery:4:occurrence-1:t1-effects',
     }))
   })
 
@@ -538,7 +542,7 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       't1-effects',
       action,
-      'recovery:3:occurrence-1:t1-effects',
+      'recovery:4:occurrence-1:t1-effects',
       new AbortController().signal,
     )).rejects.toMatchObject({
       code: 'preference-activation-receipt-invalid', sideEffectState: 'possible',
@@ -581,7 +585,7 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       't1-effects',
       activationAction(),
-      'recovery:3:occurrence-1:t1-effects',
+      'recovery:4:occurrence-1:t1-effects',
       new AbortController().signal,
     )).rejects.toMatchObject({
       code: 'preference-activation-receipt-invalid', sideEffectState: 'possible',
@@ -606,18 +610,18 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       'regression-rollback',
       { kind: 'rollback-evolution', ruleId: 'rule-1', expectedVersion: 7 },
-      'recovery:3:occurrence-1:regression-rollback',
+      'recovery:4:occurrence-1:regression-rollback',
       new AbortController().signal,
     )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'evolution-rolled-back' })
     expect(hostRollbackOne).toHaveBeenCalledWith(expect.objectContaining({
       ruleId: 'rule-1', expectedVersion: 7,
-      operationId: 'recovery:3:occurrence-1:regression-rollback',
+      operationId: 'recovery:4:occurrence-1:regression-rollback',
     }))
   })
 
   it('replays one atomic circuit-canary receipt after arm and scheduling commit', async () => {
     const probeCircuitAndScheduleCanary = vi.fn(() => ({
-      operationId: 'recovery:3:occurrence-1:incident-review',
+      operationId: 'recovery:4:occurrence-1:incident-review',
       circuit: {
         automationId: 'recovery:sibling', definitionHash: hash('c'),
         state: 'half-open', version: 4,
@@ -636,12 +640,12 @@ describe('HostRecoveryRunbookPort', () => {
         kind: 'probe-automation-circuit', automationId: 'recovery:sibling',
         definitionHash: hash('c'), expectedVersion: 3,
       },
-      'recovery:3:occurrence-1:incident-review',
+      'recovery:4:occurrence-1:incident-review',
       new AbortController().signal,
     )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'circuit-canary-scheduled' })
     expect(probeCircuitAndScheduleCanary).toHaveBeenCalledWith({
       owner: RECOVERY_SYSTEM_OWNER,
-      operationId: 'recovery:3:occurrence-1:incident-review',
+      operationId: 'recovery:4:occurrence-1:incident-review',
       automationId: 'recovery:sibling',
       definitionHash: hash('c'),
       expectedCircuitVersion: 3,
@@ -667,7 +671,7 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       't1-effects',
       activationAction(),
-      'recovery:3:occurrence-1:t1-effects',
+      'recovery:4:occurrence-1:t1-effects',
       controller.signal,
     )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'preference-activated' })
   })
@@ -686,7 +690,7 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       't1-effects',
       activationAction(),
-      'recovery:3:occurrence-1:t1-effects',
+      'recovery:4:occurrence-1:t1-effects',
       new AbortController().signal,
     )).rejects.toMatchObject({ code: 'missing-binding', sideEffectState: 'none' })
     expect(hostActivateOne).not.toHaveBeenCalled()
@@ -716,7 +720,7 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       't1-effects',
       activationAction(),
-      'recovery:3:occurrence-1:t1-effects',
+      'recovery:4:occurrence-1:t1-effects',
       new AbortController().signal,
     )).rejects.toMatchObject({ code: 'owner-route-lineage-mismatch', sideEffectState: 'none' })
     expect(hostActivateOne).not.toHaveBeenCalled()
@@ -745,11 +749,268 @@ describe('HostRecoveryRunbookPort', () => {
       context(),
       't1-effects',
       activationAction(),
-      'recovery:3:occurrence-1:t1-effects',
+      'recovery:4:occurrence-1:t1-effects',
       new AbortController().signal,
     )).rejects.toMatchObject({
       code: 'owner-route-authority-mismatch', sideEffectState: 'none',
     })
     expect(hostActivateOne).not.toHaveBeenCalled()
+  })
+})
+
+const learningDigest = 'a'.repeat(64)
+const otherDigest = 'b'.repeat(64)
+const learningSituation = `goal-definition:${learningDigest}`
+const otherSituation = `goal-definition:${otherDigest}`
+
+function learningRuntime(
+  episodes: Array<{
+    situation: string
+    failures: number
+    succeeded: number
+    total: number
+    lastOccurredAt?: number
+  }>,
+  advice: Array<{
+    situation: string
+    goalInstances: number
+    adviceRuns: number
+    distinctRequests: number
+  }>,
+): RecoveryRuntimePorts {
+  return runtime({
+    evolution: {
+      ...runtime().evolution,
+      hostGoalDefinitionEpisodes: vi.fn(() => episodes.map(value => Object.freeze({
+        situation: value.situation,
+        failures: value.failures,
+        succeeded: value.succeeded,
+        total: value.total,
+        lastOccurredAt: value.lastOccurredAt ?? 4_000,
+      }))),
+    },
+    goals: {
+      hostSummarizeAdviceByDefinition: vi.fn(() => advice.map(value => Object.freeze({
+        situation: value.situation,
+        definitionDigest: value.situation.slice('goal-definition:'.length),
+        goalInstances: value.goalInstances,
+        adviceRuns: value.adviceRuns,
+        distinctRequests: value.distinctRequests,
+        requests: Object.freeze([]),
+      }))),
+    },
+  })
+}
+
+describe('HostRecoveryRunbookPort strategy-learning (read-only step)', () => {
+  it('joins trusted failures with recurring advice and covers observations and frozen floors in both digests', async () => {
+    const current = learningRuntime(
+      [{ situation: learningSituation, failures: 3, succeeded: 0, total: 3, lastOccurredAt: 4_000 }],
+      [{ situation: learningSituation, goalInstances: 2, adviceRuns: 3, distinctRequests: 1 }],
+    )
+    const adapter = port(current)
+
+    const planned = await adapter.plan(
+      context(), 'strategy-learning', new AbortController().signal,
+    )
+    expect(planned.action).toEqual({ kind: 'observe-strategy-learning' })
+    expect(planned.beforeDigest).toMatch(/^[a-f\d]{64}$/u)
+
+    // Goals-side scope is the frozen 5-field GoalScope derived from the owner
+    // route receipt, never the evolution scope token.
+    expect(current.goals.hostSummarizeAdviceByDefinition).toHaveBeenLastCalledWith({
+      principalId: 'lark/main/tenant/owner',
+      principalRecordId: 'principal-row-1',
+      principalVersion: 1,
+      workspace: '/workspace',
+      preset: 'owner',
+    })
+    // Evolution is queried with the canonical branded host scope and a
+    // phase-specific operation id.
+    expect(current.evolution.hostGoalDefinitionEpisodes).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        principal: 'lark/main/tenant/owner',
+        scope: { workspace: '/workspace', preset: 'owner' },
+        operationId: 'recovery:plan:4:occurrence-1:strategy-learning',
+      }),
+    )
+
+    await expect(adapter.execute(
+      context(),
+      'strategy-learning',
+      { kind: 'observe-strategy-learning' },
+      'recovery:4:occurrence-1:strategy-learning',
+      new AbortController().signal,
+    )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'strategy-learning-signals' })
+    expect(current.evolution.hostGoalDefinitionEpisodes).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        operationId: 'recovery:execute:4:occurrence-1:strategy-learning',
+      }),
+    )
+  })
+
+  it('enforces the frozen floors of 3 trusted episodes and 2 repeated advice runs', async () => {
+    // 3 trusted failures but only one repeated advice run: observed, yet not
+    // flagged as a repeated-and-failing learning signal.
+    const oneRepeat = learningRuntime(
+      [{ situation: learningSituation, failures: 3, succeeded: 0, total: 3 }],
+      [{ situation: learningSituation, goalInstances: 1, adviceRuns: 2, distinctRequests: 1 }],
+    )
+    await expect(port(oneRepeat).execute(
+      context(),
+      'strategy-learning',
+      { kind: 'observe-strategy-learning' },
+      'recovery:4:occurrence-1:strategy-learning',
+      new AbortController().signal,
+    )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'strategy-learning-observed' })
+
+    // Below the trusted-episode floor, however strongly the advice repeats:
+    // nothing is observed at all.
+    const belowTrustedFloor = learningRuntime(
+      [{ situation: learningSituation, failures: 2, succeeded: 0, total: 2 }],
+      [{ situation: learningSituation, goalInstances: 1, adviceRuns: 4, distinctRequests: 1 }],
+    )
+    const planned = await port(belowTrustedFloor).plan(
+      context(), 'strategy-learning', new AbortController().signal,
+    )
+    expect(planned.action).toEqual({ kind: 'observe-strategy-learning' })
+    await expect(port(belowTrustedFloor).execute(
+      context(),
+      'strategy-learning',
+      { kind: 'observe-strategy-learning' },
+      'recovery:4:occurrence-1:strategy-learning',
+      new AbortController().signal,
+    )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'strategy-learning-observed' })
+  })
+
+  it('never manufactures an observation from goals-side advice repetition alone', async () => {
+    const current = learningRuntime(
+      [],
+      [{ situation: learningSituation, goalInstances: 2, adviceRuns: 3, distinctRequests: 1 }],
+    )
+    await expect(port(current).execute(
+      context(),
+      'strategy-learning',
+      { kind: 'observe-strategy-learning' },
+      'recovery:4:occurrence-1:strategy-learning',
+      new AbortController().signal,
+    )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'strategy-learning-observed' })
+  })
+
+  it('ignores advice for a different content-bound definition instead of cross-attributing it', async () => {
+    const current = learningRuntime(
+      [{ situation: learningSituation, failures: 3, succeeded: 0, total: 3 }],
+      [{ situation: otherSituation, goalInstances: 2, adviceRuns: 3, distinctRequests: 1 }],
+    )
+    const planned = await port(current).plan(
+      context(), 'strategy-learning', new AbortController().signal,
+    )
+    // The digest is still a 64-hex receipt, but with zero matching advice the
+    // situation cannot be flagged repeated-and-failing.
+    expect(planned.beforeDigest).toMatch(/^[a-f\d]{64}$/u)
+    await expect(port(current).execute(
+      context(),
+      'strategy-learning',
+      { kind: 'observe-strategy-learning' },
+      'recovery:4:occurrence-1:strategy-learning',
+      new AbortController().signal,
+    )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'strategy-learning-observed' })
+  })
+
+  it('fails closed read-only when the live owner route is forbidden, before either ledger is read', async () => {
+    const current = learningRuntime(
+      [{ situation: learningSituation, failures: 3, succeeded: 0, total: 3 }],
+      [{ situation: learningSituation, goalInstances: 2, adviceRuns: 3, distinctRequests: 1 }],
+    )
+    current.delivery.validateOwnerRoute = vi.fn(() => {
+      throw Object.assign(new Error('route forbidden'), { code: 'forbidden' })
+    })
+    await expect(port(current).plan(
+      context(), 'strategy-learning', new AbortController().signal,
+    )).rejects.toMatchObject({ code: 'forbidden', sideEffectState: 'none' })
+    await expect(port(current).execute(
+      context(),
+      'strategy-learning',
+      { kind: 'observe-strategy-learning' },
+      'recovery:4:occurrence-1:strategy-learning',
+      new AbortController().signal,
+    )).rejects.toMatchObject({ code: 'forbidden', sideEffectState: 'none' })
+    expect(current.goals.hostSummarizeAdviceByDefinition).not.toHaveBeenCalled()
+    expect(current.evolution.hostGoalDefinitionEpisodes).not.toHaveBeenCalled()
+  })
+
+  it('fails closed read-only when the goals seam rejects, without querying evolution episodes', async () => {
+    const current = learningRuntime(
+      [{ situation: learningSituation, failures: 3, succeeded: 0, total: 3 }],
+      [],
+    )
+    current.goals.hostSummarizeAdviceByDefinition = vi.fn(() => {
+      throw Object.assign(new Error('not authorized'), { code: 'unauthorized-principal' })
+    })
+    await expect(port(current).plan(
+      context(), 'strategy-learning', new AbortController().signal,
+    )).rejects.toMatchObject({ code: 'unauthorized-principal', sideEffectState: 'none' })
+    expect(current.evolution.hostGoalDefinitionEpisodes).not.toHaveBeenCalled()
+  })
+
+  it('rereads both ledgers at execute time instead of trusting the plan-time snapshot', async () => {
+    let episodesVisible = false
+    const episodesSeam = vi.fn(() => episodesVisible
+      ? [Object.freeze({
+        situation: learningSituation, failures: 3, succeeded: 0, total: 3, lastOccurredAt: 4_000,
+      })]
+      : [])
+    const adviceSeam = vi.fn(() => [Object.freeze({
+      situation: learningSituation,
+      definitionDigest: learningDigest,
+      goalInstances: 2, adviceRuns: 3, distinctRequests: 1, requests: Object.freeze([]),
+    })])
+    const current = runtime({
+      evolution: { ...runtime().evolution, hostGoalDefinitionEpisodes: episodesSeam },
+      goals: { hostSummarizeAdviceByDefinition: adviceSeam },
+    })
+    const adapter = port(current)
+
+    // Plan time: the evolution ledger has no trusted episodes yet.
+    const plannedEmpty = await adapter.plan(
+      context(), 'strategy-learning', new AbortController().signal,
+    )
+    // Execute time: three trusted failures have since been projected. The
+    // receipt must reflect the live read, flagging the signal.
+    episodesVisible = true
+    const plannedSignals = await adapter.plan(
+      context(), 'strategy-learning', new AbortController().signal,
+    )
+    expect(plannedSignals.beforeDigest).not.toBe(plannedEmpty.beforeDigest)
+    await expect(adapter.execute(
+      context(),
+      'strategy-learning',
+      { kind: 'observe-strategy-learning' },
+      'recovery:4:occurrence-1:strategy-learning',
+      new AbortController().signal,
+    )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'strategy-learning-signals' })
+    expect(episodesSeam).toHaveBeenCalledTimes(3)
+    expect(adviceSeam).toHaveBeenCalledTimes(3)
+  })
+
+  it('executes the read-only observation for real in preview mode', async () => {
+    const current = learningRuntime(
+      [{ situation: learningSituation, failures: 3, succeeded: 0, total: 3 }],
+      [{ situation: learningSituation, goalInstances: 2, adviceRuns: 3, distinctRequests: 1 }],
+    )
+    const configured = job({ activationState: 'preview' })
+    const adapter = port(current, configured)
+    const previewContext = context({ executionMode: 'preview' })
+    const planned = await adapter.plan(
+      previewContext, 'strategy-learning', new AbortController().signal,
+    )
+    expect(planned.action).toEqual({ kind: 'observe-strategy-learning' })
+    await expect(adapter.execute(
+      previewContext,
+      'strategy-learning',
+      planned.action,
+      'recovery:4:occurrence-1:strategy-learning',
+      new AbortController().signal,
+    )).resolves.toMatchObject({ status: 'succeeded', resultCode: 'strategy-learning-signals' })
   })
 })

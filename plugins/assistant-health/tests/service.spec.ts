@@ -536,7 +536,8 @@ describe('assistant health service', () => {
       requiredProviders: ['assistantGrowthExperiments'],
       growthExperimentsHealth: {
         candidates: 3, readyCandidates: 1, activeExperiments: 1,
-        rollbackPending: 2, promoted: 4, traceRevisions: 9, currentTraces: 6,
+        rollbackPending: 2, proposedPaused: 0, promoted: 4,
+        traceRevisions: 9, currentTraces: 6,
         exhaustedRollbacks: 1, lastErrorCode: 'canary-timeout',
         workflowPath: '/secret/workflow', principal: 'SENTINEL-GROWTH',
       },
@@ -556,7 +557,8 @@ describe('assistant health service', () => {
     expect(provider).toEqual({
       id: 'assistantGrowthExperiments', status: 'ready', metrics: {
         candidates: 3, readyCandidates: 1, activeExperiments: 1,
-        rollbackPending: 2, promoted: 4, traceRevisions: 9, currentTraces: 6,
+        rollbackPending: 2, proposedPaused: 0, promoted: 4,
+        traceRevisions: 9, currentTraces: 6,
         exhaustedRollbacks: 1, lastErrorCode: 'canary-timeout',
       },
     })

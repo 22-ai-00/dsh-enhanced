@@ -10,9 +10,12 @@ import {
 import {
   canonicalEvolutionHostScope,
   type AssistantEvolutionService,
+  joinStrategyLearningObservations,
   type RuleCandidate,
   type StoredRule,
+  toStrategyAdviceSignal,
 } from '@dsh-enhanced/assistant-evolution'
+import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type {
   AssistantHealthReport,
   AssistantHealthService,
@@ -29,6 +32,7 @@ import type {
 } from './executor.js'
 import { RecoveryPortError } from './executor.js'
 import type { NormalizedRecoveryJob } from './config.js'
+import { RECOVERY_CATALOG } from './catalog.js'
 import {
   RECOVERY_RUNBOOK_VERSION,
   type RecoveryPreferenceMaintenanceAction,
@@ -99,7 +103,11 @@ export interface RecoveryRuntimePorts {
   }
   evaluation: Pick<AssistantEvaluationService, 'health'> & RecoveryEvaluationProjectionPort
   evolution: Pick<AssistantEvolutionService,
-    'hostCandidates' | 'hostListRules' | 'hostRollbackOne'>
+    | 'hostCandidates'
+    | 'hostGoalDefinitionEpisodes'
+    | 'hostListRules'
+    | 'hostRollbackOne'>
+  goals: Pick<AssistantGoalsService, 'hostSummarizeAdviceByDefinition'>
   preference: Pick<PreferenceLearningService,
     'health' | 'hostActivationCandidate' | 'hostActivateOne' | 'hostMaintainOne' | 'hostReview'> & {
     hostOwnerFence(input: {
@@ -274,6 +282,22 @@ function ruleState(rules: readonly StoredRule[]): readonly Readonly<Record<strin
   }))
 }
 
+/**
+ * Frozen observation floors for the strategy-learning step. They live in the
+ * catalog (and are therefore covered by RECOVERY_CATALOG_DIGEST); a malformed
+ * catalog fails closed at module load rather than silently using ad-hoc values.
+ */
+const strategyLearningCatalogStep = RECOVERY_CATALOG.find(step => step.id === 'strategy-learning')
+const { minTrustedEpisodes, minRepeatedAdviceRuns } = strategyLearningCatalogStep?.thresholds ?? {}
+if (!Number.isSafeInteger(minTrustedEpisodes) || (minTrustedEpisodes as number) < 1
+  || !Number.isSafeInteger(minRepeatedAdviceRuns) || (minRepeatedAdviceRuns as number) < 1) {
+  throw new Error('assistant-recovery: strategy-learning catalog thresholds missing or invalid')
+}
+const STRATEGY_LEARNING_THRESHOLDS = Object.freeze({
+  minTrustedEpisodes: minTrustedEpisodes as number,
+  minRepeatedAdviceRuns: minRepeatedAdviceRuns as number,
+})
+
 function validateOwnerRoute(
   context: RecoveryExecutionContext,
   delivery: RecoveryRuntimePorts['delivery'],
@@ -430,6 +454,7 @@ export class HostRecoveryRunbookPort implements RecoveryRunbookPort {
       case 't1-effects': return this.planPreferenceActivation(context)
       case 'regression-rollback': return this.planEvolutionRollback(context)
       case 'incident-review': return this.planCircuitProbe(context)
+      case 'strategy-learning': return this.planStrategyLearning(context)
       case 'verification': return this.planVerification(context, signal)
     }
   }
@@ -450,6 +475,8 @@ export class HostRecoveryRunbookPort implements RecoveryRunbookPort {
       case 'activate-preference': return this.activatePreference(context, action, idempotencyKey, signal)
       case 'rollback-evolution': return this.rollbackEvolution(context, action, idempotencyKey, signal)
       case 'probe-automation-circuit': return this.probeCircuit(context, action, idempotencyKey, signal)
+      case 'observe-strategy-learning':
+        return this.observeStrategyLearning(context, idempotencyKey, signal)
       case 'verify-health': return this.verifyHealth(context, idempotencyKey, signal)
       case 'noop': return Object.freeze({
         status: 'noop', resultCode: action.reasonCode, afterDigest: digest({ stepId, action }),
@@ -645,6 +672,23 @@ export class HostRecoveryRunbookPort implements RecoveryRunbookPort {
       })
     } catch (error) {
       portFailure(error, 'circuit-plan-failed', false)
+    }
+  }
+
+  private planStrategyLearning(context: RecoveryExecutionContext): RecoveryStepPlan {
+    try {
+      const { route, observations } = this.collectStrategyLearningObservations(context, 'plan')
+      return Object.freeze({
+        action: { kind: 'observe-strategy-learning' as const },
+        beforeDigest: digest({
+          scope: context.targetScope,
+          route,
+          thresholds: STRATEGY_LEARNING_THRESHOLDS,
+          observations,
+        }),
+      })
+    } catch (error) {
+      portFailure(error, 'strategy-learning-plan-failed', false)
     }
   }
 
@@ -894,6 +938,72 @@ export class HostRecoveryRunbookPort implements RecoveryRunbookPort {
       })
     } catch (error) {
       portFailure(error, 'circuit-probe-failed', true)
+    }
+  }
+
+  private observeStrategyLearning(
+    context: RecoveryExecutionContext,
+    idempotencyKey: string,
+    signal: AbortSignal,
+  ): RecoveryActionReceipt {
+    try {
+      throwIfAborted(signal)
+      const { route, observations } = this.collectStrategyLearningObservations(context, 'execute')
+      throwIfAborted(signal)
+      const repeatedAndFailing = observations.filter(value => value.repeatedAndFailing).length
+      return Object.freeze({
+        status: 'succeeded',
+        resultCode: repeatedAndFailing === 0 ? 'strategy-learning-observed' : 'strategy-learning-signals',
+        afterDigest: digest({
+          operationId: idempotencyKey,
+          scope: context.targetScope,
+          route,
+          thresholds: STRATEGY_LEARNING_THRESHOLDS,
+          repeatedAndFailing,
+          observations,
+        }),
+      })
+    } catch (error) {
+      portFailure(error, 'strategy-learning-observe-failed', false)
+    }
+  }
+
+  /**
+   * Read-only, model-free collection of trusted goal-definition failure
+   * episodes joined with goals-side advice repetition. Both stores are read at
+   * call time (no plan snapshot is trusted at execute); nothing outside the
+   * Recovery run record is written and no candidate is minted.
+   */
+  private collectStrategyLearningObservations(
+    context: RecoveryExecutionContext,
+    phase: 'execute' | 'plan',
+  ): {
+    route: ReturnType<RecoveryRuntimePorts['delivery']['validateOwnerRoute']>
+    observations: ReturnType<typeof joinStrategyLearningObservations>
+  } {
+    const route = this.validateOwnerRoute(context)
+    const goalScope = Object.freeze({
+      principalId: route.principalId,
+      principalRecordId: route.principalRecordId,
+      principalVersion: route.principalVersion,
+      workspace: route.workspace,
+      preset: route.agentPreset,
+    })
+    const advice = this.runtime.goals.hostSummarizeAdviceByDefinition(goalScope)
+      .map(toStrategyAdviceSignal)
+    const episodes = this.runtime.evolution.hostGoalDefinitionEpisodes({
+      scope: canonicalEvolutionHostScope(context.targetScope),
+      principal: context.principal,
+      operationId: operationId(context, 'strategy-learning', phase),
+    })
+    return {
+      route,
+      observations: joinStrategyLearningObservations({
+        episodes,
+        advice,
+        minTrustedEpisodes: STRATEGY_LEARNING_THRESHOLDS.minTrustedEpisodes,
+        minRepeatedAdviceRuns: STRATEGY_LEARNING_THRESHOLDS.minRepeatedAdviceRuns,
+      }),
     }
   }
 

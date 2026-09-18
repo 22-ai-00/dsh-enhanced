@@ -367,6 +367,105 @@ describe('automation SQLite store', () => {
     fixture.store.close()
   })
 
+  // Engineering-layer pin (not real provider evidence): the owner-anchored
+  // workflow bridge materializes paused Growth-owned automations with a frozen
+  // placeholder cron; these tests pin the fail-closed gate that keeps that
+  // schedule from ever being switched on without an explicit owner schedule
+  // mutation. The "goal success" itself is proven elsewhere by Delivery.
+  describe('owner-anchored placeholder schedule activation gate', () => {
+    const growthOwner = 'assistant-growth-experiments'
+    const placeholderSchedule = { kind: 'cron' as const, expression: '0 0 29 2 *', timezone: 'UTC' }
+    const realSchedule = { kind: 'cron' as const, expression: '7 9 * * *', timezone: 'UTC' }
+    const gateError = expect.objectContaining<Partial<AutomationStoreError>>({
+      code: 'invalid-state',
+      message: expect.stringContaining('placeholder schedule'),
+    })
+
+    test('refuses to reconcile a placeholder Growth-owned automation straight to active', async () => {
+      const fixture = await store()
+      expect(() => fixture.store.reconcileSystemOwned({
+        owner: growthOwner, automationId: 'learned-wf',
+        idempotencyKey: 'learned-wf:direct-active', desiredStatus: 'active',
+        definition: definition({ schedule: placeholderSchedule }),
+      })).toThrowError(gateError)
+      // No row was written: activation refusal is not a partial materialization.
+      expect(fixture.store.get('learned-wf')).toBeUndefined()
+      fixture.store.close()
+    })
+
+    test('materializes the placeholder revision paused and never schedules it', async () => {
+      const fixture = await store(() => Date.parse('2026-08-21T10:07:00.000Z'))
+      const paused = fixture.store.reconcileSystemOwned({
+        owner: growthOwner, automationId: 'learned-wf',
+        idempotencyKey: 'learned-wf:paused', desiredStatus: 'paused',
+        definition: definition({ schedule: placeholderSchedule }),
+      })
+      expect(paused).toMatchObject({ status: 'paused', nextRunAt: undefined })
+      // The placeholder cron is valid and would have a future occurrence if the
+      // row were active, so the empty due set comes from the paused status.
+      expect(fixture.store.materializeDue({
+        now: Date.parse('2028-02-29T00:00:00.000Z'),
+        misfireGraceMs: minute, maxCatchUp: 10,
+      })).toEqual([])
+      fixture.store.close()
+    })
+
+    test('blocks resume while the placeholder schedule is present, then allows activation after a real schedule mutation', async () => {
+      const fixture = await store()
+      const paused = fixture.store.reconcileSystemOwned({
+        owner: growthOwner, automationId: 'learned-wf',
+        idempotencyKey: 'learned-wf:paused', desiredStatus: 'paused',
+        definition: definition({ schedule: placeholderSchedule }),
+      })
+      expect(() => fixture.store.changeApproved({
+        automationId: paused.id, operation: 'resume', expectedVersion: paused.version,
+        idempotencyKey: 'resume:still-placeholder',
+      })).toThrowError(gateError)
+      expect(fixture.store.get(paused.id)).toMatchObject({ status: 'paused' })
+
+      // Explicit owner schedule mutation: reconcile the same Growth-owned row
+      // with a real cron; only then may it run.
+      const activated = fixture.store.reconcileSystemOwned({
+        owner: growthOwner, automationId: 'learned-wf',
+        idempotencyKey: 'learned-wf:real-schedule', desiredStatus: 'active',
+        definition: definition({ schedule: realSchedule }),
+      })
+      expect(activated).toMatchObject({
+        status: 'active',
+        definition: { schedule: realSchedule },
+      })
+      expect(activated.nextRunAt).toBe(Date.parse('2026-08-22T09:07:00.000Z'))
+      fixture.store.close()
+    })
+
+    test('does not gate non-Growth owners or owner-created rows that happen to use the same cron', async () => {
+      const fixture = await store()
+      // A different system owner reconciling the identical cron is unaffected.
+      const systemRow = fixture.store.reconcileSystemOwned({
+        owner: 'assistant-heartbeat', automationId: 'leap-day-heartbeat',
+        idempotencyKey: 'leap-day-heartbeat:active', desiredStatus: 'active',
+        definition: definition({ schedule: placeholderSchedule }),
+      })
+      expect(systemRow).toMatchObject({ status: 'active' })
+      // An owner-created automation (createApproved, no system owner) with the
+      // same cron keeps full owner autonomy, including pause/resume.
+      const ownerRow = fixture.store.createApproved({
+        automationId: 'owner-leap-day', idempotencyKey: 'create:owner-leap-day',
+        definition: definition({ schedule: placeholderSchedule }),
+      })
+      const paused = fixture.store.changeApproved({
+        automationId: ownerRow.id, operation: 'pause', expectedVersion: ownerRow.version,
+        idempotencyKey: 'pause:owner-leap-day',
+      })
+      const resumed = fixture.store.changeApproved({
+        automationId: ownerRow.id, operation: 'resume', expectedVersion: paused.version,
+        idempotencyKey: 'resume:owner-leap-day',
+      })
+      expect(resumed).toMatchObject({ status: 'active', definition: { schedule: placeholderSchedule } })
+      fixture.store.close()
+    })
+  })
+
   test('never claims a normal paused Automation task through either claim path', async () => {
     const fixture = await store(() => 1_000)
     const created = fixture.store.createApproved({

@@ -57,6 +57,7 @@
     "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-evaluation": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/assistant-goals": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
@@ -84,6 +85,9 @@
     "@dsh-enhanced/assistant-evaluation": {
       "optional": true
     },
+    "@dsh-enhanced/assistant-goals": {
+      "optional": true
+    },
     "@dsh-enhanced/assistant-policy": {
       "optional": true
     }
@@ -95,11 +99,13 @@
     "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
+    "@deepseek-ai/dsh-session-projection": "catalog:",
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-evaluation": "workspace:*",
+    "@dsh-enhanced/assistant-goals": "workspace:*",
     "@dsh-enhanced/assistant-verifier": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@types/node": "catalog:",
@@ -107,6 +113,7 @@
     "vitest": "catalog:"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "catalog:"
+    "@deepseek-ai/schemastery": "catalog:",
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
   }
 }

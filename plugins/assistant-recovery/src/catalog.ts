@@ -11,6 +11,14 @@ export interface RecoveryCatalogStep {
   authority: 'host-read' | 't1-bounded-write'
   /** Versioned exact-action/receipt contract covered by the catalog digest. */
   actionContract: string
+  /**
+   * Frozen observation parameters for read-only learning steps. Present in the
+   * frozen catalog object, so the catalog digest covers every numeric floor.
+   */
+  thresholds?: Readonly<{
+    minTrustedEpisodes: number
+    minRepeatedAdviceRuns: number
+  }>
 }
 
 /**
@@ -41,6 +49,11 @@ export const RECOVERY_CATALOG = Object.freeze<readonly RecoveryCatalogStep[]>([
   Object.freeze({
     id: 'incident-review', maximumMutations: 1, authority: 't1-bounded-write',
     actionContract: 'probe-automation-circuit/atomic-production-canary/v2',
+  }),
+  Object.freeze({
+    id: 'strategy-learning', maximumMutations: 0, authority: 'host-read',
+    actionContract: 'observe-strategy-learning/trusted-episodes-advice-join/v4',
+    thresholds: Object.freeze({ minTrustedEpisodes: 3, minRepeatedAdviceRuns: 2 }),
   }),
   Object.freeze({
     id: 'verification', maximumMutations: 0, authority: 'host-read',

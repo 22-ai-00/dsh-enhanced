@@ -7,6 +7,7 @@ import type {
 } from '@dsh-enhanced/assistant-automations'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantEvolutionService } from '@dsh-enhanced/assistant-evolution'
+import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type { AssistantHealthService } from '@dsh-enhanced/assistant-health'
 import {
   RECOVERY_EXECUTOR_CONTRACT_VERSION,
@@ -74,8 +75,8 @@ function stableDigest(value: unknown): string {
 }
 
 function timeoutMs(maxStepDurationMs: number): number {
-  // Seven catalog steps each have independently bounded plan + execute phases.
-  return Math.min(86_400_000, maxStepDurationMs * 14 + RECOVERY_DEADLINE_GRACE_MS)
+  // Eight catalog steps each have independently bounded plan + execute phases.
+  return Math.min(86_400_000, maxStepDurationMs * 16 + RECOVERY_DEADLINE_GRACE_MS)
 }
 
 /** Build the only Host definition Recovery is allowed to reconcile. */
@@ -208,6 +209,7 @@ export class AssistantRecoveryService extends Service {
     'assistantDelivery',
     'assistantEvaluation',
     'assistantEvolution',
+    'assistantGoals',
     'assistantPreferenceLearning',
     'assistantHealth',
   ]
@@ -248,6 +250,7 @@ export class AssistantRecoveryService extends Service {
       const delivery = requiredService<RecoveryRuntimePorts['delivery']>(ctx, 'assistantDelivery')
       const evaluation = requiredService<AssistantEvaluationService>(ctx, 'assistantEvaluation')
       const evolution = requiredService<AssistantEvolutionService>(ctx, 'assistantEvolution')
+      const goals = requiredService<AssistantGoalsService>(ctx, 'assistantGoals')
       const preference = requiredService<RecoveryRuntimePorts['preference']>(
         ctx,
         'assistantPreferenceLearning',
@@ -262,8 +265,9 @@ export class AssistantRecoveryService extends Service {
         'health', 'peekPendingProjection', 'reconcileProjection',
       ])
       requireHostSeams('assistantEvolution', evolution, [
-        'hostCandidates', 'hostListRules', 'hostRollbackOne',
+        'hostCandidates', 'hostGoalDefinitionEpisodes', 'hostListRules', 'hostRollbackOne',
       ])
+      requireHostSeams('assistantGoals', goals, ['hostSummarizeAdviceByDefinition'])
       requireHostSeams('assistantPreferenceLearning', preference, [
         'health', 'hostActivationCandidate', 'hostActivateOne', 'hostMaintainOne',
         'hostOwnerFence', 'hostReview',
@@ -317,7 +321,7 @@ export class AssistantRecoveryService extends Service {
       }
       const jobs = new Map(this.config.jobs.map(job => [recoveryAutomationId(job.id), job]))
       const runtime: RecoveryRuntimePorts = {
-        automations: this.automations, delivery, evaluation, evolution, preference, health,
+        automations: this.automations, delivery, evaluation, evolution, goals, preference, health,
       }
       const runbookPort = new HostRecoveryRunbookPort(
         jobs,

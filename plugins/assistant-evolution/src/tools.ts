@@ -84,6 +84,26 @@ export function registerEvolutionTools(ctx: Context, service: AssistantEvolution
                 },
               },
               proposalExists: { type: 'boolean', required: true },
+              scopeWatermark: { type: 'integer', required: true },
+              taskRevisions: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    subjectKind: {
+                      type: 'string',
+                      required: true,
+                      enum: ['automation-run', 'foreground-turn', 'goal-step', 'goal-outcome', 'outcome'],
+                    },
+                    subjectRef: { type: 'string', required: true },
+                    version: { type: 'integer', required: true },
+                    digest: { type: 'string', required: true },
+                    disposition: { type: 'string', required: true, enum: ['upsert'] },
+                  },
+                },
+              },
             },
           },
         },
@@ -103,6 +123,7 @@ export function registerEvolutionTools(ctx: Context, service: AssistantEvolution
               ...reviewed.candidate,
               sampleEpisodeIds: [...reviewed.candidate.sampleEpisodeIds],
               evidence: reviewed.candidate.evidence.map(entry => ({ ...entry })),
+              taskRevisions: reviewed.candidate.taskRevisions.map(entry => ({ ...entry })),
             },
           }
     },

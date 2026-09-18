@@ -73,7 +73,7 @@ function supervisedProof(protocol: string, schemaVersion: number, extras: Record
 }
 
 function supervisedManifestFixture(phase: string) {
-  const recoveryProof = supervisedProof('assistant-recovery/operator-snapshot/v1', 4, {
+  const recoveryProof = supervisedProof('assistant-recovery/operator-snapshot/v1', 5, {
     bootstrap: { status: 'succeeded', generation: 1, attestationValid: true,
       attestationSetDigest: digest64, attestations: [{ automationId: 'recovery:supervised-growth',
         activationState: 'active', activationNonce: 'old', activationPlanDigest: digest64 }] },
@@ -350,7 +350,7 @@ describe('supervised lifecycle v3 invariants', () => {
       effectiveConfigDigest: digest64, semanticDigest: digest64,
       databasePaths: { delivery: 'delivery.sqlite', automations: 'automations.sqlite', recovery: 'recovery.sqlite' },
       delivery: { ...supervisedProof('assistant-delivery/active-lark-owner-bindings-snapshot/v1', 20), bindings: [{ id: 'binding-1' }] },
-      recovery: { ...supervisedProof('assistant-recovery/operator-snapshot/v1', 4),
+      recovery: { ...supervisedProof('assistant-recovery/operator-snapshot/v1', 5),
         bootstrap: { status: 'running', generation: 0, attestationValid: false, attestationSetDigest: '', attestations: [] } },
       automations: { ...supervisedProof('assistant-automations-operator-snapshot/v1', 15), inFlightCount: 1, inventoryDigest: digest64, storageDigest: digest64, records: [], sidecars: { wal: null, shm: null } },
       managedProjection: { protocol: 'dsh-enhanced/supervised-growth-managed-automations/v1', records: [], digest: digest64 },
@@ -779,7 +779,7 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     }
     return { catalogDigest: digest, plan }
   }
-  const recovery = { protocol: 'assistant-recovery/operator-snapshot/v1', schemaVersion: 4, database, snapshotDigest: digest,
+  const recovery = { protocol: 'assistant-recovery/operator-snapshot/v1', schemaVersion: 5, database, snapshotDigest: digest,
     bootstrap: { status: raw ? 'running' : 'succeeded', generation, attestationValid: !raw,
       attestationSetDigest: raw ? '' : digest, attestations: raw ? [] : [{ automationId: 'recovery:supervised-growth',
         activationState: stage, activationNonce: effectiveNonce, activationPlanDigest: digest }] } }

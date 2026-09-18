@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
-import { RECOVERY_CATALOG_DIGEST, recoveryStepIndex } from './catalog.js'
+import { RECOVERY_CATALOG, RECOVERY_CATALOG_DIGEST, recoveryStepIndex } from './catalog.js'
 import {
   canonicalRecoveryBootstrapAttestationSet,
   EMPTY_BOOTSTRAP_ATTESTATION_SET_DIGEST,
@@ -280,6 +280,7 @@ function normalizedAction(
   switch (raw.kind) {
     case 'verify-authority':
     case 'verify-health':
+    case 'observe-strategy-learning':
       action = Object.freeze({ kind: raw.kind })
       break
     case 'project-evaluation':
@@ -373,6 +374,7 @@ function assertActionMatchesStep(stepId: StoredRecoveryStep['stepId'], action: R
     't1-effects': ['activate-preference', 'noop'],
     'regression-rollback': ['rollback-evolution', 'noop'],
     'incident-review': ['probe-automation-circuit', 'noop'],
+    'strategy-learning': ['observe-strategy-learning', 'noop'],
     verification: ['verify-health', 'noop'],
   }
   if (!expected[stepId].includes(action.kind)) {
@@ -682,7 +684,7 @@ export class RecoveryStore {
                  before_digest, after_digest, result_code, started_at, deadline_at, finished_at, version
           FROM recovery_steps WHERE run_id = ? ORDER BY step_index
         `).all(runId) as unknown as StepRow[]
-        if (rows.length !== 7
+        if (rows.length !== RECOVERY_CATALOG.length
           || rows.some(row => !['noop', 'succeeded'].includes(row.status))) {
           throw new RecoveryStoreError('invalid-state', 'a successful run requires every catalog step to be complete')
         }
