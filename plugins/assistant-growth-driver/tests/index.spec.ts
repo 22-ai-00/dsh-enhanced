@@ -1,0 +1,728 @@
+/**
+ * Engineering-layer integration tests for the opt-in assistant-growth-driver.
+ *
+ * IMPORTANT — these are NOT real external-provider evidence: every model
+ * interaction is served by a scripted in-process LlmAdapter registered for the
+ * 'super-relay' provider and nothing here touches the network or a real Super
+ * Relay account.  What IS exercised for real is the Host control plane:
+ * the frozen realm tool surface, the independent owner-success re-verification
+ * inside assistant-skills, the real sqlite policy/skills stores, the approval
+ * seam and the fail-closed preflight order.
+ */
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { Context } from '@deepseek-ai/cordis'
+import { LlmAdapter, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
+import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
+import { apply, AssistantGrowthDriverService, name, version } from '../src/index.ts'
+import type { OwnerRouteReceipt } from '../src/deposit.ts'
+
+// Contract expiry is unreachable with the wall clock while the pinned contract
+// is still current, so the single assertCurrentContract call is gated through
+// a hoisted switch; every other package export keeps its real implementation.
+const contractState = vi.hoisted(() => ({ expired: false }))
+vi.mock('@dsh-enhanced/assistant-super-relay-budget', async importOriginal => {
+  const actual = await importOriginal<typeof import('@dsh-enhanced/assistant-super-relay-budget')>()
+  return {
+    ...actual,
+    assertCurrentContract(now?: number): void {
+      if (contractState.expired) throw new Error('assistant-super-relay-budget: Super Relay protocol contract has expired')
+      actual.assertCurrentContract(now)
+    },
+  }
+})
+
+const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
+
+const PRESET = 'primary'
+const PRINCIPAL = 'owner-1'
+const RECORD_ID = 'record-owner-1'
+const OWNER_ROUTE = 'owner-route'
+const SKILL_NAME = 'repeat-write-result'
+
+interface Harness {
+  ctx: Context
+  root: string
+  skillsPath: string
+  scope: GoalScope
+  receipts: ReturnType<typeof vi.fn>
+  goalsApi: { inspectOwnerGoals: ReturnType<typeof vi.fn>; inspectOwnerVerifiedWorkflowSource: ReturnType<typeof vi.fn> }
+  approval: { request: ReturnType<typeof vi.fn> }
+  /** Scripted Delivery owner-anchored commit seam (engineering layer; no real Goals/DB behind it). */
+  ownerAnchoredCommit: ReturnType<typeof vi.fn>
+  /** Raw service instance: a traceable-Proxy method call fails ES #private brand checks. */
+  skills: AssistantSkillsService | undefined
+}
+
+function buildReceipt(workspace: string, generation: number): Readonly<OwnerRouteReceipt> {
+  return Object.freeze({
+    receiptVersion: 2,
+    authorityId: OWNER_ROUTE,
+    authorityHash: `anchor-hash-${generation}`,
+    principalId: PRINCIPAL,
+    principalRecordId: RECORD_ID,
+    principalVersion: 1,
+    workspace,
+    agentPreset: PRESET,
+    bindingVersion: 1,
+    generation,
+  })
+}
+
+function ownerScope(workspace: string): GoalScope {
+  return Object.freeze({ principalId: PRINCIPAL, principalRecordId: RECORD_ID, principalVersion: 1, workspace, preset: PRESET })
+}
+
+function goalRecord(workspace: string, sessionId: string, goalId: string, index: number): GoalRecord {
+  const scope = ownerScope(workspace)
+  return Object.freeze({
+    id: goalId,
+    scope,
+    originalObjective: `Repeatable write procedure ${index}`,
+    definition: Object.freeze({ version: 1, digest: `goal-def-${goalId}`, objective: `Repeatable write procedure ${index}` }),
+    native: Object.freeze({
+      sessionId, goalId, revision: 3, objective: `Repeatable write procedure ${index}`,
+      phase: 'complete' as const, roundsStarted: 1, maxGoalRounds: 4, updatedAt: 1_700_000_000_000 + index,
+    }),
+    checkpoint: Object.freeze({ nextStep: 'done', blockers: [], assumptions: [], evidenceRefs: [], dependencies: [] }),
+    version: 1,
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000 + index,
+  })
+}
+
+const LOCATORS = [
+  { sessionId: 'sess-1', goalId: 'goal-1' },
+  { sessionId: 'sess-2', goalId: 'goal-2' },
+  { sessionId: 'sess-3', goalId: 'goal-3' },
+] as const
+
+/**
+ * Fresh, complete owner goal inside the owner-anchored lookback horizon. The
+ * fixed goalRecord() timestamps are 2023-dated and deliberately fall outside
+ * the default 24h lookback, so track tests build these instead. Engineering
+ * layer fixture — not real owner-root Goals evidence.
+ */
+function freshGoalRecord(workspace: string, sessionId: string, goalId: string, index: number, now: number): GoalRecord {
+  const base = goalRecord(workspace, sessionId, goalId, index)
+  const updatedAt = now - index * 1_000
+  return Object.freeze({
+    ...base,
+    native: Object.freeze({ ...base.native, updatedAt }),
+    updatedAt,
+  })
+}
+
+function freshGoals(workspace: string, now: number, count: number): GoalRecord[] {
+  return Array.from({ length: count }, (_, index) =>
+    freshGoalRecord(workspace, `oa-sess-${index + 1}`, `oa-goal-${index + 1}`, index, now))
+}
+
+type ScriptedCommitResult =
+  | { readonly outcome: 'trace-recorded'; readonly revision: number; readonly template: Readonly<Record<string, unknown>>; readonly replayed: boolean }
+  | { readonly outcome: 'abstained'; readonly reason: 'not-reducible'; readonly replayed: false }
+
+const TRACE_RECORDED: ScriptedCommitResult = Object.freeze({ outcome: 'trace-recorded', revision: 1, template: Object.freeze({}), replayed: false })
+const TRACE_REPLAYED: ScriptedCommitResult = Object.freeze({ ...TRACE_RECORDED, replayed: true })
+const ABSTAINED: ScriptedCommitResult = Object.freeze({ outcome: 'abstained', reason: 'not-reducible', replayed: false })
+
+function verifiedSource(workspace: string, sessionId: string, goalId: string): VerifiedWorkflowSource {
+  return Object.freeze({
+    protocol: 'assistant-goals/verified-workflow-source/v1',
+    scope: ownerScope(workspace),
+    goal: Object.freeze({
+      id: goalId,
+      definition: Object.freeze({ version: 1, digest: `goal-def-${goalId}`, objective: `Repeatable procedure for ${goalId}` }),
+      sessionId,
+      nativeGoalId: `native-${goalId}`,
+    }),
+    runId: `goal-run-${goalId}`,
+    turn: 1,
+    acceptance: Object.freeze({
+      contractId: `contract-${goalId}`, contractDigest: `contract-digest-${goalId}`, receiptDigest: `receipt-digest-${goalId}`,
+      verifiedAt: 1_700_000_000_000, validUntil: 1_900_000_000_000,
+    }),
+    steps: Object.freeze([
+      Object.freeze({ id: `write-${goalId}`, toolName: 'write', arguments: Object.freeze({ file_path: `result-${goalId}.sh`, content: `echo verified ${goalId}\n` }) }),
+    ]),
+  })
+}
+
+interface ScriptedTurn { name: string; args: Record<string, unknown> }
+
+/**
+ * Scripted model (engineering layer only — replaces a real Super Relay call):
+ * emits one tool-call turn per scripted entry, then a final stop text turn.
+ * reset() replays the same script for a second wake on the same adapter
+ * instance (registerAdapter binds one process-lifetime adapter per provider).
+ */
+class ScriptedAdapter extends LlmAdapter {
+  calls = 0
+  constructor(private readonly turns: readonly ScriptedTurn[]) { super() }
+  reset(): void { this.calls = 0 }
+  override async *stream(): AsyncIterable<StreamChunk> {
+    const index = this.calls++
+    if (index < this.turns.length) {
+      const turn = this.turns[index]!
+      const id = ToolCallId(`growth-call-${index}`)
+      const argumentsText = JSON.stringify(turn.args)
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id, name: turn.name, argumentsDelta: argumentsText }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: turn.name, arguments: argumentsText } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+      return
+    }
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'growth review complete' } }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+function successTurns(): ScriptedTurn[] {
+  return [
+    { name: 'growth_list_owner_goals', args: {} },
+    ...LOCATORS.map(locator => ({ name: 'growth_read_verified_workflow', args: { session_id: locator.sessionId, goal_id: locator.goalId } })),
+    { name: 'growth_list_skills', args: {} },
+    {
+      name: 'growth_propose_skill_candidate',
+      args: {
+        success_locators: LOCATORS.map(locator => ({ session_id: locator.sessionId, goal_id: locator.goalId })),
+        name: SKILL_NAME,
+        description: 'Re-run the verified repeatable write procedure.',
+      },
+    },
+  ]
+}
+
+interface MountOptions {
+  withPolicy?: boolean
+  budgetLimit?: number
+  rejectedGoals?: ReadonlySet<string>
+  /** When set, every validateOwnerRoute call after the mint returns this generation. */
+  rebindGeneration?: number
+  adapter?: LlmAdapter
+  registerSkills?: boolean
+  /**
+   * Goals returned by inspectOwnerGoals for the owner-anchored track. Defaults
+   * to the fixed 2023-dated LOCATORS, which fall OUTSIDE the default 24h
+   * lookback; pass fresh records (updatedAt near Date.now()) to exercise the
+   * track. Engineering-layer fixtures only — not real Goals evidence.
+   */
+  ownerAnchoredGoals?: readonly GoalRecord[]
+  /** Per-goalId result of Delivery.commitOwnerAnchoredWorkflowTrace. */
+  commitResultById?: ReadonlyMap<string, unknown>
+  /** Goals whose commit throws an AssistantDeliveryError-shaped exception. */
+  commitThrowById?: ReadonlyMap<string, { code: string; message: string }>
+}
+
+const contexts: Context[] = []
+const roots: string[] = []
+
+async function mount(opts: MountOptions = {}): Promise<Harness> {
+  const root = await mkdtemp(join(tmpdir(), 'assistant-growth-driver-'))
+  const ctx = new Context()
+  contexts.push(ctx)
+  roots.push(root)
+
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
+  await ctx.plugin(SessionProjectionRegistry)
+
+  // Fake approval seam: the tools/pre-execute waterfall resolves unknown
+  // growth_* names as `ask`, and ToolRuntime routes that through this channel.
+  const approval = { config: { policy: 'ask' }, request: vi.fn(async () => 'allowed-once' as const) }
+  ctx.provide('approval' as never, approval as never)
+
+  const scope = ownerScope(root)
+  let routeCalls = 0
+  const receipts = vi.fn(() => {
+    routeCalls += 1
+    const generation = opts.rebindGeneration !== undefined && routeCalls > 1 ? opts.rebindGeneration : 1
+    return buildReceipt(root, generation)
+  })
+  // Engineering-layer stand-in for Delivery.commitOwnerAnchoredWorkflowTrace:
+  // it records the locator/authority the driver passed and returns a scripted
+  // outcome. No real Goals re-verification or sqlite projection happens here.
+  const ownerAnchoredCommit = vi.fn(async (input: { locator: { goalId: string } }) => {
+    const thrown = opts.commitThrowById?.get(input.locator.goalId)
+    if (thrown !== undefined) {
+      const error = new Error(thrown.message) as Error & { code?: string }
+      error.code = thrown.code
+      throw error
+    }
+    return opts.commitResultById?.get(input.locator.goalId)
+      ?? { outcome: 'trace-recorded' as const, revision: 1, template: {}, replayed: false }
+  })
+  ctx.provide('assistantDelivery' as never, {
+    validateOwnerRoute: receipts,
+    commitOwnerAnchoredWorkflowTrace: ownerAnchoredCommit,
+  } as never)
+
+  const goalsApi = {
+    inspectOwnerGoals: vi.fn(() => opts.ownerAnchoredGoals
+      ?? LOCATORS.map((locator, index) => goalRecord(root, locator.sessionId, locator.goalId, index))),
+    inspectOwnerVerifiedWorkflowSource: vi.fn(async (input: { sessionId: string; goalId: string }) => {
+      if (opts.rejectedGoals?.has(input.goalId)) throw new OwnerVerifiedWorkflowSourceError('rejected', `assistant-goals: ${input.goalId} is not an owner-root success`)
+      return verifiedSource(root, input.sessionId, input.goalId)
+    }),
+  }
+  ctx.provide('assistantGoals' as never, goalsApi as never)
+
+  if (opts.adapter !== undefined) ctx.llm.registerAdapter(['super-relay'], opts.adapter)
+  await ctx.plugin(AgentLoop, { agents: [] })
+
+  if (opts.withPolicy !== false) {
+    await ctx.plugin(AssistantPolicyService, {
+      databasePath: join(root, 'policy.sqlite'),
+      budgets: [{ id: 'growth-budget', metric: 'automation-runs', limit: opts.budgetLimit ?? 20, periodMs: 60_000, scope: 'subject' }],
+      rules: [
+        {
+          id: 'growth-draft', effect: 'allow',
+          subject: { kind: 'agent', id: PRESET, workspace: root, principal: PRINCIPAL },
+          actions: ['draft'], resource: { kind: 'evolution', id: 'verified-workflows' },
+          context: { initiators: ['background'] },
+        },
+        {
+          id: 'growth-tool-execute', effect: 'allow',
+          subject: { kind: 'agent', id: PRESET, workspace: root, principal: PRINCIPAL },
+          actions: ['execute'], resource: { kind: 'tool', id: 'growth_*' },
+          context: { initiators: ['background'] },
+        },
+      ],
+    })
+  }
+  const skillsService = opts.registerSkills === false
+    ? undefined
+    : new AssistantSkillsService(ctx, { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'] })
+
+  // The skills service registers its global skill_* tools from a cordis inject
+  // callback; wait for that to settle so the growth agent's global snapshot is
+  // taken against the real post-plugin surface.
+  if (opts.registerSkills !== false && opts.withPolicy !== false) {
+    await vi.waitFor(() => {
+      const tools = ctx.get('tools' as never) as { schemas: () => Array<{ name: string }> } | undefined
+      if (tools === undefined || !tools.schemas().some(schema => schema.name === 'skill_save')) {
+        throw new Error('assistant-skills global tools not registered yet')
+      }
+    }, { timeout: 2_000 })
+  }
+
+  return { ctx, root, skillsPath: join(root, 'skills.sqlite'), scope, receipts, goalsApi, approval, ownerAnchoredCommit, skills: skillsService }
+}
+
+afterEach(async () => {
+  contractState.expired = false
+  delete process.env.SUPER_RELAY_API_KEY
+  vi.restoreAllMocks()
+  for (const ctx of contexts.splice(0)) await ctx.fiber.dispose().catch(() => undefined)
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
+
+function tableCounts(h: Harness): { candidates: number; definitions: number; runs: number } {
+  const db = new DatabaseSync(h.skillsPath)
+  try {
+    const count = (table: string) => (db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c
+    return { candidates: count('skill_candidates'), definitions: count('skill_definitions'), runs: count('skill_runs') }
+  } finally { db.close() }
+}
+
+function candidateRows(h: Harness): Array<{ id: string; state: string; name: string }> {
+  const db = new DatabaseSync(h.skillsPath)
+  try {
+    const rows = db.prepare('SELECT candidate_json FROM skill_candidates').all() as Array<{ candidate_json: string }>
+    return rows.map(row => {
+      const candidate = JSON.parse(row.candidate_json) as { id: string; state: string; definition: { name: string } }
+      return { id: candidate.id, state: candidate.state, name: candidate.definition.name }
+    })
+  } finally { db.close() }
+}
+
+function driverConfig(root: string, overrides: Record<string, unknown> = {}) {
+  return {
+    enabled: true,
+    intervalMs: 0,
+    scope: { workspace: root, preset: PRESET, principalId: PRINCIPAL, ownerRouteId: OWNER_ROUTE },
+    ...overrides,
+  }
+}
+
+async function runWake(service: AssistantGrowthDriverService): Promise<void> {
+  // The wake may either resolve normally or surface hook cancellation as a
+  // rejection depending on where the frozen contract trips; health() records
+  // both, so callers assert on health and durable writes instead.
+  try { await service.wake() } catch { /* health() is the source of truth */ }
+}
+
+describe('dsh-enhanced-assistant-growth-driver', () => {
+  it('exposes stable plugin identity', () => {
+    expect(name).toBe('dsh-enhanced-assistant-growth-driver')
+    expect(version).toBe(manifest.version)
+  })
+
+  it('loads disabled through the Cordis entrypoint and never runs', async () => {
+    // apply() IS the Cordis entrypoint; it must accept the empty config.
+    const entryCtx = new Context()
+    contexts.push(entryCtx)
+    expect(() => apply(entryCtx, {})).not.toThrow()
+
+    // Hold a constructor instance on a separate ctx for the health assertions:
+    // a ctx only accepts one registration per service name.
+    const ctx = new Context()
+    contexts.push(ctx)
+    const service = new AssistantGrowthDriverService(ctx, {})
+    await service.wake()
+    expect(service.health()).toMatchObject({ outcome: 'never-run', reason: null, run: null })
+  })
+
+  it('refuses to enable without an explicit frozen owner scope', () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    expect(() => new AssistantGrowthDriverService(ctx, { enabled: true })).toThrow(/owner scope/)
+  })
+
+  it('skips the wake when the owner route cannot be anchored (missing-binding)', async () => {
+    const h = await mount()
+    h.receipts.mockImplementation(() => { throw new Error('assistant-delivery: owner route revoked') })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await runWake(service)
+    expect(service.health()).toMatchObject({ outcome: 'skipped', reason: expect.stringMatching(/^missing-binding:/) })
+    expect(tableCounts(h)).toMatchObject({ candidates: 0 })
+  })
+
+  it('skips fail-closed when the super-relay contract has expired (contract-expired; engineering layer)', async () => {
+    const h = await mount()
+    contractState.expired = true
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await runWake(service)
+    expect(service.health()).toMatchObject({ outcome: 'skipped', reason: expect.stringMatching(/^contract-expired:/) })
+    expect(tableCounts(h)).toMatchObject({ candidates: 0 })
+  })
+
+  it('skips fail-closed when no super-relay credential resolves (missing-credential)', async () => {
+    const h = await mount()
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await runWake(service)
+    expect(service.health()).toMatchObject({ outcome: 'skipped', reason: 'missing-credential' })
+    expect(tableCounts(h)).toMatchObject({ candidates: 0 })
+  })
+
+  it('skips fail-closed when no policy service is mounted (missing-policy)', async () => {
+    const h = await mount({ withPolicy: false })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await runWake(service)
+    expect(service.health()).toMatchObject({ outcome: 'skipped', reason: 'missing-policy' })
+  })
+
+  it('skips fail-closed when the wake budget reservation is rejected (budget-exhausted)', async () => {
+    const h = await mount({ budgetLimit: 5 })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { budgetId: 'growth-budget', budgetAmount: 6 }))
+    await runWake(service)
+    expect(service.health()).toMatchObject({ outcome: 'skipped', reason: expect.stringMatching(/^budget:/) })
+    expect(tableCounts(h)).toMatchObject({ candidates: 0 })
+  })
+
+  it('deposits exactly one pending candidate after 3 distinct verified successes, and never activates (engineering layer, mock provider)', async () => {
+    const turns = successTurns()
+    const adapter = new ScriptedAdapter(turns)
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { budgetId: 'growth-budget', budgetAmount: 1 }))
+    await runWake(service)
+
+    const health = service.health()
+    expect(health.outcome).toBe('ran')
+    expect(health.reason).toBe('succeeded')
+    expect(adapter.calls).toBe(turns.length + 1)
+
+    const counts = tableCounts(h)
+    expect(counts).toMatchObject({ candidates: 1, definitions: 0, runs: 0 })
+    const rows = candidateRows(h)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ state: 'pending', name: SKILL_NAME })
+
+    // Nothing reaches the current-definition table, so skill_run can never see
+    // it.  Read through the RAW service instance: a cordis traceable-Proxy
+    // method call rebinds `this` and fails the store/state #private brand
+    // checks (the driver unwraps the same marker internally before calling in).
+    const skills = h.skills!
+    expect(skills.inspectOwnerActiveSkills(h.scope)).toHaveLength(0)
+    const pending = skills.inspectOwnerSkillCandidates(h.scope)
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).toMatchObject({ state: 'pending' })
+
+    // The Host re-reads each locator independently on top of the model's read
+    // passes: 3 model reads + 3 stage verifications.
+    expect(h.goalsApi.inspectOwnerVerifiedWorkflowSource).toHaveBeenCalledTimes(LOCATORS.length * 2)
+
+    // The background budget reserve→finalize pair is in the audit trail.
+    const audit = (h.ctx.get('assistantPolicy' as never) as unknown as AssistantPolicyService).queryAudit()
+    const reserves = audit.filter(event => event.action === 'budget.reserve')
+    const finalizes = audit.filter(event => event.action === 'budget.finalize')
+    expect(reserves.at(-1)).toMatchObject({ outcome: 'reserved' })
+    expect(finalizes.at(-1)).toMatchObject({ outcome: 'finalized' })
+
+    // Every realm tool execution crossed the (fake) owner approval seam.
+    expect(h.approval.request).toHaveBeenCalled()
+  })
+
+  it('is idempotent: a second identical wake keeps the single pending candidate id', async () => {
+    const adapter = new ScriptedAdapter(successTurns())
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await runWake(service)
+    expect(tableCounts(h)).toMatchObject({ candidates: 1 })
+    const firstId = candidateRows(h)[0]!.id
+
+    adapter.reset()
+    await runWake(service)
+    expect(service.health()).toMatchObject({ outcome: 'ran', reason: 'succeeded' })
+    expect(tableCounts(h)).toMatchObject({ candidates: 1 })
+    const secondRows = candidateRows(h)
+    expect(secondRows).toHaveLength(1)
+    expect(secondRows[0]!.id).toBe(firstId)
+  })
+
+  it('rejects a single-locator proposal even when the model omits minimum_occurrences (Host floor)', async () => {
+    const turns: ScriptedTurn[] = [
+      { name: 'growth_list_owner_goals', args: {} },
+      { name: 'growth_read_verified_workflow', args: { session_id: LOCATORS[0]!.sessionId, goal_id: LOCATORS[0]!.goalId } },
+      { name: 'growth_list_skills', args: {} },
+      {
+        name: 'growth_propose_skill_candidate',
+        // Model tries to stage after one success and omits the threshold arg.
+        args: { success_locators: [LOCATORS[0]], name: SKILL_NAME, description: 'Should be rejected.' },
+      },
+    ]
+    const h = await mount({ adapter: new ScriptedAdapter(turns) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { minRepeatedSuccesses: 3 }))
+    await runWake(service)
+    expect(service.health()).toMatchObject({ outcome: 'ran' })
+    expect(tableCounts(h)).toMatchObject({ candidates: 0, definitions: 0, runs: 0 })
+  })
+
+  it('writes nothing when an offered locator is independently rejected as non-owner-root', async () => {
+    const turns: ScriptedTurn[] = [
+      { name: 'growth_list_owner_goals', args: {} },
+      ...LOCATORS.map(locator => ({ name: 'growth_read_verified_workflow', args: { session_id: locator.sessionId, goal_id: locator.goalId } })),
+      { name: 'growth_list_skills', args: {} },
+      {
+        name: 'growth_propose_skill_candidate',
+        args: {
+          success_locators: LOCATORS.map(locator => ({ session_id: locator.sessionId, goal_id: locator.goalId })),
+          name: SKILL_NAME,
+          description: 'One locator is forged.',
+        },
+      },
+    ]
+    const h = await mount({ adapter: new ScriptedAdapter(turns), rejectedGoals: new Set(['goal-2']) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await runWake(service)
+    expect(service.health()).toMatchObject({ outcome: 'ran' })
+    expect(tableCounts(h)).toMatchObject({ candidates: 0, definitions: 0, runs: 0 })
+  })
+
+  it('fails the whole wake with zero writes when the owner route is re-bound mid-wake', async () => {
+    const h = await mount({ adapter: new ScriptedAdapter(successTurns()), rebindGeneration: 2 })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await runWake(service)
+    const health = service.health()
+    expect(health.outcome).toBe('failed')
+    expect(health.reason).toEqual(expect.stringContaining('owner route changed'))
+    expect(tableCounts(h)).toMatchObject({ candidates: 0, definitions: 0, runs: 0 })
+    // The rebind is detected inside agent setup, before any history is read.
+    expect(h.goalsApi.inspectOwnerVerifiedWorkflowSource).not.toHaveBeenCalled()
+  })
+
+  it('enforces the frozen tool-call budget and the proposal never lands (engineering layer)', async () => {
+    // 6 scripted tool calls, but the frozen contract allows only 2.
+    const h = await mount({ adapter: new ScriptedAdapter(successTurns()) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { maxToolCalls: 2, maxModelCalls: 8 }))
+    await runWake(service)
+    const health = service.health()
+    expect(['ran', 'failed']).toContain(health.outcome)
+    expect(tableCounts(h)).toMatchObject({ candidates: 0, definitions: 0, runs: 0 })
+  })
+})
+
+// Workspace token for owner-anchored fixtures. The driver only reads each
+// enumerated record's id and native.sessionId; scope filtering is Goals' job,
+// so this constant need not equal the harness mount root.
+const OA_WS = 'owner-anchored-ws'
+
+// The owner-anchored track runs purely Host-local (Goals re-read + Delivery
+// commit, no model/network), so these tests need NO scripted LLM adapter and
+// exercise the track ahead of the super-relay credential gate. Every Goals and
+// Delivery response is a scripted engineering-layer fixture — never real
+// owner-root evidence or a real external provider.
+describe('assistant-growth-driver owner-anchored workflow track (engineering layer, not real Goals/provider evidence)', () => {
+  it('leaves the track off by default: zero commits and no ownerAnchored health field', async () => {
+    const h = await mount({ ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 3) })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await runWake(service)
+    expect(h.ownerAnchoredCommit).not.toHaveBeenCalled()
+    expect(service.health().ownerAnchored).toBeUndefined()
+  })
+
+  it('refuses to switch the track on while the driver itself is disabled', () => {
+    const ctx = new Context()
+    contexts.push(ctx)
+    expect(() => new AssistantGrowthDriverService(ctx, { enabled: false, workflowOwnerAnchored: { enabled: true } }))
+      .toThrow(/workflowOwnerAnchored.enabled requires the driver/)
+  })
+
+  it('commits each fresh completed goal passing ONLY a six-key locator plus authority (never a prompt or steps)', async () => {
+    const goals = freshGoals(OA_WS, Date.now(), 3)
+    const h = await mount({ ownerAnchoredGoals: goals })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      workflowOwnerAnchored: { enabled: true, maxCommitsPerWake: 10 },
+    }))
+    await runWake(service)
+
+    const track = service.health().ownerAnchored!
+    expect(track).toMatchObject({ considered: 3, attempted: 3, recorded: 3, replayed: 0, abstained: 0, stopped: null })
+    expect(h.ownerAnchoredCommit).toHaveBeenCalledTimes(3)
+
+    for (const [index, call] of h.ownerAnchoredCommit.mock.calls.entries()) {
+      const payload = call[0] as { locator: Record<string, unknown>; authority: unknown }
+      // Exactly the six locator keys, all anchored to authority/config — the
+      // driver never forwards an objective, raw prompt, tool arguments or a
+      // verdict of its own.
+      expect(Object.keys(payload.locator).sort()).toEqual(['goalId', 'ownerRouteId', 'preset', 'principalId', 'sessionId', 'workspace'])
+      expect(payload.locator).toMatchObject({
+        ownerRouteId: OWNER_ROUTE, principalId: PRINCIPAL, workspace: h.root, preset: PRESET,
+        sessionId: goals[index]!.native.sessionId, goalId: goals[index]!.id,
+      })
+      expect(JSON.stringify(payload)).not.toContain('Repeatable')
+      expect(payload.authority).toBeDefined()
+    }
+  })
+
+  it('ignores goals outside the lookback horizon and non-complete goals (coarse prefilter)', async () => {
+    const now = Date.now()
+    const staleStamp = now - 90_000_000
+    const stale = freshGoals(OA_WS, staleStamp, 2).map((record, index) =>
+      Object.freeze({ ...record, native: Object.freeze({ ...record.native, updatedAt: staleStamp - index }), updatedAt: staleStamp - index }))
+    const pausedBase = freshGoalRecord(OA_WS, 'oa-sess-paused', 'oa-goal-paused', 0, now)
+    const paused = Object.freeze({ ...pausedBase, native: Object.freeze({ ...pausedBase.native, phase: 'paused' as const }) })
+    const fresh = freshGoals(OA_WS, now, 1)
+    const h = await mount({ ownerAnchoredGoals: [...stale, paused, ...fresh] })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      workflowOwnerAnchored: { enabled: true },
+    }))
+    await runWake(service)
+    const track = service.health().ownerAnchored!
+    expect(track.considered).toBe(1)
+    expect(track.attempted).toBe(1)
+    expect(h.ownerAnchoredCommit).toHaveBeenCalledTimes(1)
+    expect((h.ownerAnchoredCommit.mock.calls[0]![0] as { locator: { goalId: string } }).locator.goalId).toBe('oa-goal-1')
+  })
+
+  it('honours maxCommitsPerWake and leaves the rest for a later wake', async () => {
+    const h = await mount({ ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 8) })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      workflowOwnerAnchored: { enabled: true, maxCommitsPerWake: 3 },
+    }))
+    await runWake(service)
+    const track = service.health().ownerAnchored!
+    expect(track).toMatchObject({ considered: 8, attempted: 3, recorded: 3, stopped: null })
+    expect(h.ownerAnchoredCommit).toHaveBeenCalledTimes(3)
+  })
+
+  it('counts replays and not-reducible abstains without failing the track', async () => {
+    const h = await mount({
+      ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 3),
+      commitResultById: new Map<string, ScriptedCommitResult>([
+        ['oa-goal-2', ABSTAINED],
+        ['oa-goal-3', TRACE_REPLAYED],
+      ]),
+    })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      workflowOwnerAnchored: { enabled: true },
+    }))
+    await runWake(service)
+    expect(service.health().ownerAnchored).toMatchObject({
+      considered: 3, attempted: 3, recorded: 1, replayed: 1, abstained: 1, stopped: null,
+    })
+  })
+
+  it('skips a single goal missing its evidence/owner-root binding but keeps scanning the rest', async () => {
+    const h = await mount({
+      ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 3),
+      commitThrowById: new Map([
+        ['oa-goal-2', { code: 'missing-binding', message: 'assistant-delivery: no current achieved acceptance receipt' }],
+      ]),
+    })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      workflowOwnerAnchored: { enabled: true },
+    }))
+    await runWake(service)
+    expect(service.health().ownerAnchored).toMatchObject({
+      considered: 3, attempted: 3, recorded: 2, abstained: 0, stopped: null,
+    })
+  })
+
+  it('fails closed and halts the track when Delivery reports the goals runtime unavailable', async () => {
+    const h = await mount({
+      ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 5),
+      commitThrowById: new Map([
+        ['oa-goal-1', { code: 'runtime-unavailable', message: 'assistant-delivery: goals run proof unavailable' }],
+      ]),
+    })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      workflowOwnerAnchored: { enabled: true },
+    }))
+    await runWake(service)
+    const track = service.health().ownerAnchored!
+    expect(track.attempted).toBe(1)
+    expect(track.recorded).toBe(0)
+    expect(track.stopped).toEqual(expect.stringMatching(/^runtime-unavailable:/))
+    // The first goal halted the track; later goals were never attempted.
+    expect(h.ownerAnchoredCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails closed and records stopped when goals enumeration itself throws (zero commits)', async () => {
+    const h = await mount({ ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 3) })
+    h.goalsApi.inspectOwnerGoals.mockImplementation(() => { throw new Error('assistant-goals: service unavailable') })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      workflowOwnerAnchored: { enabled: true },
+    }))
+    await runWake(service)
+    const track = service.health().ownerAnchored!
+    expect(track).toMatchObject({ considered: 0, attempted: 0, recorded: 0, stopped: expect.stringMatching(/^inspect:/) })
+    expect(h.ownerAnchoredCommit).not.toHaveBeenCalled()
+  })
+
+  it('still runs the model-driven skill gate independently after the owner-anchored track stops (no cross-block)', async () => {
+    const h = await mount({
+      adapter: new ScriptedAdapter(successTurns()),
+      ownerAnchoredGoals: freshGoals(OA_WS, Date.now(), 3),
+      commitThrowById: new Map([['oa-goal-1', { code: 'policy-denied', message: 'assistant-delivery: authority scope mismatch' }]]),
+    })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      budgetId: 'growth-budget', budgetAmount: 1,
+      workflowOwnerAnchored: { enabled: true },
+    }))
+    await runWake(service)
+    const health = service.health()
+    // Owner-anchored track failed closed ...
+    expect(health.ownerAnchored!.stopped).toEqual(expect.stringMatching(/^policy-denied:/))
+    // ... yet the independent skill track still ran to its model result.
+    expect(health.outcome).toBe('ran')
+  })
+})
