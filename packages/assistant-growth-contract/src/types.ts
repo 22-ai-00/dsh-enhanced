@@ -9,6 +9,22 @@ export const GROWTH_EFFECT_BLOCKER_PROTOCOL = 'assistant-automations-effect-bloc
 /** Delivery's built-in model-turn orchestration step; it is not a DSH tool schema. */
 export const WORKFLOW_MODEL_TURN_CATALOG_ID = 'assistant.agent-turn' as const
 
+/**
+ * Placeholder schedule for an owner-anchored template learned from a successful
+ * goal before the owner has chosen when it should recur. It is a valid five-
+ * field cron (00:00 UTC on 29 February), so it passes schedule validation and
+ * stays materializable, but it matches at most one day every four years. The
+ * resulting automation is created paused with the scheduler disabled, so it can
+ * never run until the owner performs an explicit schedule mutation that replaces
+ * it; Automations compares against this frozen value to enforce that gate. It is
+ * deliberately not a new schedule kind.
+ */
+export const WORKFLOW_OWNER_ANCHORED_PLACEHOLDER_SCHEDULE = Object.freeze({
+  kind: 'cron' as const,
+  expression: '0 0 29 2 *',
+  timezone: 'UTC',
+})
+
 export interface WorkflowScope {
   workspace: string
   preset: string
@@ -36,6 +52,19 @@ export type WorkflowTemplatePrivacyAttestation =
   | Readonly<{
       kind: 'owner-explicit'
       limitation: 'deidentification-unproven'
+      attestationId: string
+      attestationDigest: string
+    }>
+  | Readonly<{
+      /**
+       * Learned automatically from a Delivery-reverified owner-root successful
+       * goal. The reusable prompt is the goal's own free objective and has NOT
+       * been proven de-identified, so it never crosses Growth and the resulting
+       * automation stays paused until the owner reviews it and sets a real cron.
+       */
+      kind: 'owner-anchored'
+      limitation: 'deidentification-unproven'
+      provenance: 'owner-goal-success'
       attestationId: string
       attestationDigest: string
     }>
@@ -82,7 +111,7 @@ export interface WorkflowTemplateResolver {
 
 export interface WorkflowTraceEvidence {
   occurredAt: number
-  signal: 'owner-explicit' | 'verified-repetition'
+  signal: 'owner-explicit' | 'verified-repetition' | 'owner-anchored'
   objectiveStatus: 'achieved' | 'unknown'
   ownerBindingId: string
   /** Stable privacy-preserving task identity produced by Delivery. */

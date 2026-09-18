@@ -261,6 +261,26 @@ export function validateWorkflowTemplatePrivacyAttestation(
       attestationDigest: exactGrowthDigest(value['attestationDigest'], 'privacy attestation digest'),
     })
   }
+  if (value['kind'] === 'owner-anchored') {
+    assertExactGrowthKeys(
+      value,
+      ['kind', 'limitation', 'provenance', 'attestationId', 'attestationDigest'],
+      'workflow privacy attestation',
+    )
+    if (value['limitation'] !== 'deidentification-unproven'
+      || value['provenance'] !== 'owner-goal-success') {
+      invalid('owner-anchored privacy provenance is invalid')
+    }
+    return Object.freeze({
+      kind: 'owner-anchored',
+      limitation: 'deidentification-unproven',
+      provenance: 'owner-goal-success',
+      attestationId: canonicalText(value['attestationId'], 'privacy attestation id', 200, {
+        identifier: identifierPattern,
+      }),
+      attestationDigest: exactGrowthDigest(value['attestationDigest'], 'privacy attestation digest'),
+    })
+  }
   invalid('workflow privacy attestation kind is invalid')
 }
 
@@ -381,7 +401,9 @@ export function validateWorkflowTraceEvidence(value: unknown): Readonly<Workflow
   ]
   assertExactGrowthKeys(value, expected, 'workflow trace evidence')
   if (!Number.isSafeInteger(value['occurredAt']) || (value['occurredAt'] as number) < 0
-    || (value['signal'] !== 'owner-explicit' && value['signal'] !== 'verified-repetition')
+    || (value['signal'] !== 'owner-explicit'
+      && value['signal'] !== 'verified-repetition'
+      && value['signal'] !== 'owner-anchored')
     || (value['objectiveStatus'] !== 'achieved' && value['objectiveStatus'] !== 'unknown')) {
     invalid('workflow trace evidence tuple is invalid')
   }
@@ -393,6 +415,11 @@ export function validateWorkflowTraceEvidence(value: unknown): Readonly<Workflow
     && (value['objectiveStatus'] !== 'achieved' || taskEvidenceDigest === undefined
       || template.privacyAttestation.kind !== 'deterministic-deidentification')) {
     invalid('verified repetition requires achieved trusted evidence and proven deterministic deidentification')
+  }
+  if (value['signal'] === 'owner-anchored'
+    && (value['objectiveStatus'] !== 'achieved' || taskEvidenceDigest === undefined
+      || template.privacyAttestation.kind !== 'owner-anchored')) {
+    invalid('owner-anchored evidence requires an achieved owner-root goal and matching owner-anchored attestation')
   }
   return Object.freeze({
     occurredAt: value['occurredAt'] as number,
