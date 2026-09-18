@@ -5,7 +5,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import { revalidateFileEvidence } from './evidence-filesystem.js'
+import { REVALIDATABLE_READ_TOOLS, revalidateFileEvidence } from './evidence-filesystem.js'
 import type {} from '@dsh-enhanced/assistant-goals'
 import type {
   AssistantDeliveryService,
@@ -192,7 +192,7 @@ export class PersonalMemoryService extends Service {
       manifestMaxBytes: config.evidenceManifestMaxBytes,
       manifestLimit: Math.min(config.evidenceManifestLimit, config.maxRecordsPerIdentity),
       scope: (agent, action) => this.evidenceScope(agent, action),
-      allowTool: (agent, name) => name === 'read' && this.ctx.get('tools', false)?.get(name, agent) !== undefined
+      allowTool: (agent, name) => REVALIDATABLE_READ_TOOLS.has(name) && this.ctx.get('tools', false)?.get(name, agent) !== undefined
         && this.policy.authorizeAgent(agent, 'execute', { kind: 'tool', id: name }).effect === 'allow',
       revalidate: (exec, source, anchor) => revalidateFileEvidence(this.ctx, this.policy, exec, source, anchor),
     }) : undefined

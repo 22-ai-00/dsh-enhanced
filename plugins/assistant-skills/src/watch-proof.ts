@@ -1,6 +1,6 @@
 import type { AssistantGoalsService, GoalScope, OwnerGoalRunProof } from '@dsh-enhanced/assistant-goals'
 import type { TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
-import { acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest, goalDefinitionSituation, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import type { SkillRun, SkillWatchCanonicalRevision, SkillWatchObservation, SkillWatchObservationBinding, SkillWatchObservationResult, SkillWatchTaskFamily } from './store.js'
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -130,7 +130,7 @@ export function watchBindingCurrent(snapshot: ReturnType<AssistantGoalsService['
     || receipt.digest !== proof.receiptDigest || receipt.completedAt !== proof.verifiedAt || receipt.validUntil !== proof.validUntil
     || !['achieved', 'not-achieved'].includes(receipt.objectiveStatus)
     || receipt.startedAt < Math.max(run.updatedAt, source.execution.completedAt, assessment.execution.completedAt)) return false
-  return canonical === undefined || canonical.situation === `goal:${run.goalId}:definition:${stored.definition.version}`
+  return canonical === undefined || canonical.situation === goalDefinitionSituation(run.goalDefinitionDigest)
 }
 
 function binding(observation: SkillWatchObservation, subjectRef: string): SkillWatchObservationBinding | undefined {

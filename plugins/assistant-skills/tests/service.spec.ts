@@ -13,12 +13,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
 import { canonicalEvaluationHostScope, canonicalEvaluationScope, evaluationLearningProjectionDigest } from '@dsh-enhanced/assistant-evaluation'
-import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import { SkillComparator, type SkillComparisonProfile } from '../src/comparison.ts'
 import type { ExternalHoldoutProfile } from '../src/external-holdout.ts'
 import { failureSummaryEvidenceDigest, type HostFailureEvidenceSummary, type VerifiedWorkflowSource } from '../src/definition.ts'
 import * as HoldoutQualification from '../src/holdout-qualification.ts'
-import { AssistantSkillsService } from '../src/service.ts'
+import { AssistantSkillsService, type StageSuccessCandidateInput } from '../src/service.ts'
 import { SkillStore } from '../src/store.ts'
 
 const cleanups: (() => Promise<void>)[] = []
@@ -35,7 +35,7 @@ function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id):
   session.append('turn/start', { turn: 1 })
   return value
 }
-async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image, repair = false, repairIterations = 1) {
+async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image, repair = false, repairIterations = 1, repairHoldoutTtlMs = 60000) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-service-')))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const comparisonRoot = comparison ? await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-'))) : undefined
@@ -127,7 +127,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
   ] }] : undefined
   const repairHoldout: ExternalHoldoutProfile = { id: 'repair-holdout', version: 1, scope,
-    execution: { image: `sha256:${'b'.repeat(64)}`, dockerPath: '/usr/bin/docker', stateRoot: `${root}-holdout`, command: 'cat', artifactPath: 'artifact.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 4, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 2000, verificationDurationMs: 1000 },
+    execution: { image: `sha256:${'b'.repeat(64)}`, dockerPath: '/usr/bin/docker', stateRoot: `${root}-holdout`, command: 'cat', artifactPath: 'artifact.sh', expiresAt: Date.now() + repairHoldoutTtlMs, repeats: 2, maxToolCalls: 4, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 2000, verificationDurationMs: 1000 },
     authority: { executable: process.execPath, args: [], publicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest: 'c'.repeat(64) }, maxComparisons: 1,
     canaryAdmissionTemplate: { protocol: 'assistant-skills/canary-admission-template/v1', skillName: 'saved-write', taskFamily: { goalDefinitionDigest: 'd'.repeat(64), outcomeProfile: { id: 'repair-outcome', version: 1, digest: 'e'.repeat(64) } } } }
   if (repair) { ctx.provide('sessions' as never, {} as never); ctx.provide('llm' as never, {} as never) }
@@ -154,9 +154,10 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     const objective = disposition === 'retract' ? undefined : { outcomeId: `evaluation-objective-${goalId}-${input.version}`, status: input.status ?? 'achieved', source: { kind: input.version === 1 ? 'evaluator' as const : 'user-feedback' as const, id: input.version === 1 ? 'assistant-verifier' : 'assistant-delivery/typed-owner-feedback' },
       evidence: [{ kind: 'goal-outcome' as const, ref: subjectRef }], occurredAt: assessment.execution.completedAt, evaluator: { id: input.version === 1 ? 'assistant-verifier' : 'assistant-delivery-owner-feedback', version: input.version === 1 ? '1' : '2' } }
     const projectionBase = { subjectKind: 'goal-outcome' as const, subjectRef, disposition, ...(objective === undefined ? {} : { evidenceOutcomeId: objective.outcomeId }) }
-    const digest = evaluationLearningProjectionDigest({ scopeKey, situation: `goal:${goalId}:definition:1`, execution, ...(objective === undefined ? {} : { objective }), projection: projectionBase })
+    const situation = goalDefinitionSituation('d'.repeat(64))
+    const digest = evaluationLearningProjectionDigest({ scopeKey, situation, execution, ...(objective === undefined ? {} : { objective }), projection: projectionBase })
     canonicalWatermark++
-    canonicalOutcomes.set(input.lookupAssessmentId ?? subjectRef, { triggerOutcomeId: objective?.outcomeId ?? `evaluation-retract-${goalId}-${input.version}`, scope: evaluationScope, scopeKey, scopeWatermark: canonicalWatermark, situation: `goal:${goalId}:definition:1`, execution,
+    canonicalOutcomes.set(input.lookupAssessmentId ?? subjectRef, { triggerOutcomeId: objective?.outcomeId ?? `evaluation-retract-${goalId}-${input.version}`, scope: evaluationScope, scopeKey, scopeWatermark: canonicalWatermark, situation, execution,
       ...(objective === undefined ? {} : { objective }), projection: { ...projectionBase, version: input.version, digest } })
   }
   return { root, scope, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true },
@@ -185,7 +186,15 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
       plugin = await ctx.plugin(AssistantSkillsService, config)
       await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
     },
-    restartWithExternalHoldouts: async (profiles: ExternalHoldoutProfile[]) => { await plugin.dispose(); const retained = (config as { externalHoldouts?: ExternalHoldoutProfile[] }).externalHoldouts?.filter(value => value.id === 'repair-holdout') ?? []; config = { ...config, externalHoldouts: [...profiles, ...retained] }; plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() } }
+    restartWithExternalHoldouts: async (profiles: ExternalHoldoutProfile[]) => { await plugin.dispose(); const retained = (config as { externalHoldouts?: ExternalHoldoutProfile[] }).externalHoldouts?.filter(value => value.id === 'repair-holdout') ?? []; config = { ...config, externalHoldouts: [...profiles, ...retained] }; plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() },
+    // Re-create the service with a different Host Config.allowedTools against
+    // the same persisted database, exercising the constructor-frozen runtime gate.
+    restartWithAllowedTools: async (allowedTools: readonly string[]) => {
+      await plugin.dispose()
+      config = { ...config, allowedTools: [...allowedTools] }
+      plugin = await ctx.plugin(AssistantSkillsService, config)
+      await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
+    } }
 }
 function result(value: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['run']>>) {
   expect(value.isError, JSON.stringify(value)).toBe(false)
@@ -213,6 +222,41 @@ function installFailureHost(f: Awaited<ReturnType<typeof fixture>>, mutate?: (re
 }
 function failureCandidateArgs(extra: Record<string, unknown> = {}) {
   return Object.fromEntries(Object.entries({ owner_route_id: 'owner-route', trigger_goal_id: 'trigger-goal', trigger_session_id: 'trigger-session', repair_goal_id: 'repair-goal', repair_session_id: 'repair-session', task_family_id: 'write-artifact', name: 'saved-write', description: 'Repair writer.', bindings_json: JSON.stringify([{ name: 'message', stepId: 'step-1', path: '/data' }]), parent_version: 1, ...extra }).filter(([, value]) => value !== undefined))
+}
+// Engineering seam (NOT real supplier evidence): the Host-attested verified
+// success producer belongs to assistant-goals; here we only install a per-
+// locator table behind goals.inspectOwnerVerifiedWorkflowSource so the skills
+// deposit gate can be exercised without a live owner Session.  Each locator
+// gets a distinct (sessionId, goalId, runId, contractId) source sharing the
+// fixture's exact owner scope; `behavior` may rewrite one read (forge, scope
+// tampering, thrown errors, mid-read route rebind).
+function successLocatorSet(count: number): readonly { sessionId: string; goalId: string }[] {
+  return Array.from({ length: count }, (_value, index) => ({ sessionId: `sess-${index + 1}`, goalId: `goal-${index + 1}` }))
+}
+function installSuccessHost(f: Awaited<ReturnType<typeof fixture>>, options?: {
+  locators?: readonly { sessionId: string; goalId: string }[]
+  behavior?: (context: { input: { sessionId: string; goalId: string }; read: number; source: VerifiedWorkflowSource }) => VerifiedWorkflowSource | Error | void
+}) {
+  const locators = options?.locators ?? successLocatorSet(3)
+  const sources = new Map(locators.map(locator => {
+    const source: VerifiedWorkflowSource = structuredClone({ ...f.source,
+      goal: { ...f.source.goal, id: locator.goalId, sessionId: locator.sessionId, nativeGoalId: `native-${locator.goalId}` },
+      runId: `run-${locator.goalId}`, acceptance: { ...f.source.acceptance, contractId: `contract-${locator.goalId}` } })
+    return [`${locator.sessionId}${locator.goalId}`, source] as const
+  }))
+  const goals = f.ctx.get('assistantGoals')! as any
+  let reads = 0
+  const successInputs: Array<{ ownerRouteId: string; principalId: string; workspace: string; preset: string; sessionId: string; goalId: string }> = []
+  goals.inspectOwnerVerifiedWorkflowSource = async (input: typeof successInputs[number]) => {
+    reads++; successInputs.push(input)
+    const base = sources.get(`${input.sessionId}${input.goalId}`)
+    if (!base) throw Object.assign(new Error('not completed'), { code: 'pending' })
+    const override = options?.behavior?.({ input, read: reads, source: base })
+    if (override instanceof Error) throw override
+    return structuredClone(override ?? base)
+  }
+  return { locators, sourceFor: (locator: { sessionId: string; goalId: string }) => sources.get(`${locator.sessionId}${locator.goalId}`)!,
+    successReadCount: () => reads, successInputs }
 }
 function sealedProfile(f: Awaited<ReturnType<typeof fixture>>) {
   return { id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
@@ -365,7 +409,10 @@ test.each(['achieved-or-unknown', 'route-drift', 'generation-drift', 'source-dri
       if (kind === 'route-drift') f.rebindRoute()
       if (kind === 'generation-drift') state.generation = 'goals-generation-2'
       if (kind === 'source-drift') state.repair = { ...state.repair, runId: 'changed-repair-run' }
-      if (kind === 'parent-drift') f.ctx.get('assistantSkills')!.save(f.owner, 'source-goal', { name: 'saved-write', description: 'Parent drift.' }, 1)
+      // Go through the raw service instance: ctx.get('assistantSkills') is a
+      // cordis traceable Proxy whose rebound shadow `this` fails the save()
+      // #private brand check, which would mask the intended parent v2 deposit.
+      if (kind === 'parent-drift') (f.ctx.get('assistantSkills' as never) as any)[Symbol.for('cordis.original')].save(f.owner, 'source-goal', { name: 'saved-write', description: 'Parent drift.' }, 1)
     }
     if (read.kind !== 'failure' || read.count !== 1) return
     if (kind === 'evidence-digest-drift') state.summary = { ...state.summary, attestedAt: state.summary.attestedAt + 1 }
@@ -378,6 +425,143 @@ test.each(['achieved-or-unknown', 'route-drift', 'generation-drift', 'source-dri
   if (kind === 'achieved-or-unknown') (f.ctx.get('assistantGoals')! as any).inspectOwnerFailureCaptureSummary = async () => { throw new Error('assistant-goals: exact not-achieved goal outcome is unavailable') }
   expect((await f.execute('skill_failure_candidate', failureCandidateArgs())).isError).toBe(true)
   expect(result(await f.execute('skill_candidates', {}))).toEqual([])
+})
+
+test('a persisted skill is denied at run time when the Host narrows Config.allowedTools after restart', async () => {
+  const f = await fixture(); result(await f.save()); f.human(false)
+  expect(result(await f.run()).state).toBe('succeeded')
+  // The allowlist is frozen in the constructor from Host Config, so a restart with a
+  // narrower policy re-closes a skill that was previously executable.
+  await f.restartWithAllowedTools([])
+  const before = f.dispatches.length
+  const denied = await f.run('narrowed-invocation')
+  expect(denied.isError).toBe(true)
+  // The :1529 allowlist throw is folded into a non-replayable failed run by the executor,
+  // so assert the observable contract: failure surfaced, and the inner step was never
+  // dispatched to ToolRuntime (only the outer skill_run inspection appears).
+  expect(JSON.stringify(denied)).toMatch(/is failed; inspect skill_status/u)
+  // The runtime gate stops the inner step before ToolRuntime dispatches it: only the
+  // outer skill_run inspection is observed, never the now-unauthorized 'write'.
+  expect(f.dispatches.slice(before)).toEqual(['skill_run'])
+  expect(f.dispatches.slice(before)).not.toContain('write')
+  // Re-opening the Host allowlist makes the same persisted definition executable again;
+  // the denial came from current Host policy, not a corrupted skill.
+  await f.restartWithAllowedTools(['write'])
+  expect(result(await f.run('restored-invocation')).state).toBe('succeeded')
+})
+
+test('a narrowed Host allowlist rejects a fresh skill_save draft that reuses a removed tool without staging a version', async () => {
+  const f = await fixture(); result(await f.save())
+  await f.restartWithAllowedTools(['read'])
+  const denied = await f.save()
+  expect(denied.isError).toBe(true)
+  expect(JSON.stringify(denied)).toMatch(/untrusted tool trace/u)
+  const database = new DatabaseSync(join(f.root, 'skills.sqlite'))
+  try {
+    const versions = (database.prepare('SELECT version, retired FROM skill_definitions WHERE scope_key=? AND name=? ORDER BY version')
+      .all(acceptanceDigest(f.scope), 'saved-write') as { version: number; retired: number }[])
+    expect(versions).toEqual([{ version: 1, retired: 0 }])
+  } finally { database.close() }
+})
+
+test('skill_failure_candidate cannot self-grant a tool outside the frozen Host allowlist through its attested repair trace', async () => {
+  const f = await fixture(); result(await f.save())
+  const state = installFailureHost(f)
+  // Phase A: the Host drops 'write'. The extractor reads the Host-attested repair source
+  // but the draft gate rejects it because that trace reuses a tool no longer authorized.
+  await f.restartWithAllowedTools([])
+  const narrowed = await f.execute('skill_failure_candidate', failureCandidateArgs())
+  expect(narrowed.isError).toBe(true)
+  expect(JSON.stringify(narrowed)).toMatch(/untrusted tool trace/u)
+  expect(state.repairReadCount()).toBe(1) // reached the draft gate after the trusted Host read
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([])
+  // Phase B: even if a Host mistakenly names a control tool in its allowlist, controlTool
+  // is a second, independent denial. The extractor submits a control trace, which is still
+  // rejected; staging it can never smuggle goal_/control authority into a skill.
+  state.repair = { ...state.repair, steps: [{ id: 'step-control', toolName: 'create_goal', arguments: { goal_id: 'escalate' } }] }
+  await f.restartWithAllowedTools(['write', 'create_goal'])
+  const control = await f.execute('skill_failure_candidate', failureCandidateArgs())
+  expect(control.isError).toBe(true)
+  expect(JSON.stringify(control)).toMatch(/untrusted tool trace/u)
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([])
+  // Neither rejected trace ever reached ToolRuntime dispatch.
+  expect(f.dispatches.filter(name => name === 'write' || name === 'create_goal')).toEqual([])
+})
+
+test('skill_failure_candidate records an authority-expanding permissionDelta as diagnostic only and never activates or authorizes it', async () => {
+  const f = await fixture(); result(await f.save())
+  const state = installFailureHost(f)
+  // The live parent used only 'write'; the independently attested repair trace adds 'edit'.
+  // The Host allowlist admits both, so the candidate can stage — but staging only projects.
+  state.repair = { ...state.repair, steps: [
+    { id: 'step-1', toolName: 'write', arguments: { file: 'output.txt', data: 'original' } },
+    { id: 'step-repair-escalation', toolName: 'edit', arguments: { file: 'output.txt', data: 'repaired' } },
+  ] }
+  await f.restartWithAllowedTools(['write', 'edit'])
+  const staged = result(await f.execute('skill_failure_candidate', failureCandidateArgs()))
+  expect(staged.state).toBe('pending')
+  expect(staged.parentVersion).toBe(1)
+  const database = new DatabaseSync(join(f.root, 'skills.sqlite'))
+  try {
+    const rows = database.prepare('SELECT candidate_json FROM skill_candidates WHERE scope_key=?').all(acceptanceDigest(f.scope)) as { candidate_json: string }[]
+    const candidates = rows.map(row => JSON.parse(row.candidate_json) as { failureProvenance?: { permissionDelta: unknown } })
+    expect(candidates).toHaveLength(1)
+    expect(candidates[0]!.failureProvenance!.permissionDelta).toEqual({
+      parent: ['write'], candidate: ['edit', 'write'], added: ['edit'], removed: [], expandsAuthority: true,
+    })
+  } finally { database.close() }
+  // The expansion is recorded honestly yet grants nothing: no new live version exists, the
+  // candidate stays pending for the independent owner trial/activate gates, and the added
+  // tool was never dispatched during capture.
+  const database2 = new DatabaseSync(join(f.root, 'skills.sqlite'))
+  try {
+    const versions = (database2.prepare('SELECT version, retired FROM skill_definitions WHERE scope_key=? AND name=? ORDER BY version')
+      .all(acceptanceDigest(f.scope), 'saved-write') as { version: number; retired: number }[])
+    expect(versions).toEqual([{ version: 1, retired: 0 }])
+  } finally { database2.close() }
+  expect(f.dispatches).not.toContain('edit')
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([staged])
+})
+
+test('a staged authority-expanding candidate cannot self-authorize its added tool at trial: the frozen current allowlist denies edit before any dispatch', async () => {
+  // ENGINEERING-LAYER, NOT REAL EXTERNAL-AUTHORITY EVIDENCE: the fixture narrows the Host
+  // Config.allowedTools in-process; it does not exercise a real authorization platform.
+  // It closes the execution-time seam left open by the diagnostic-only test above: a
+  // candidate whose attested provenance ADDS 'edit' is staged, then the CURRENT authority
+  // is narrowed back to the parent tool set and the candidate is actually trialed.
+  const f = await fixture(); result(await f.save())
+  const state = installFailureHost(f)
+  state.repair = { ...state.repair, steps: [
+    { id: 'step-1', toolName: 'write', arguments: { file: 'output.txt', data: 'original' } },
+    { id: 'step-repair-escalation', toolName: 'edit', arguments: { file: 'output.txt', data: 'repaired' } },
+  ] }
+  await f.restartWithAllowedTools(['write', 'edit'])
+  const staged = result(await f.execute('skill_failure_candidate', failureCandidateArgs()))
+  expect(staged).toMatchObject({ state: 'pending', parentVersion: 1 })
+  // The live Host authorization is narrowed: 'edit' is no longer granted even though the
+  // staged candidate still honestly records permissionDelta.added=['edit'].
+  await f.restartWithAllowedTools(['write'])
+  const trial = await f.trial(staged.id)
+  expect(trial.isError).toBe(true)
+  expect(trial.error?.message).toMatch(/is failed/u)
+  // The in-authority parent step really executed once, but the added tool never reached
+  // ToolRuntime: the constructor-frozen allowlist gate (service.ts) throws before
+  // ctx.tools.execute('edit'), so the 'tools/execute' hook never records an edit dispatch
+  // and the unregistered edit body cannot run. The recorded authority expansion is not a grant.
+  expect(f.count()).toBe(1)
+  expect(f.dispatches.filter(name => name === 'edit')).toEqual([])
+  // A failed trial cannot activate the expansion: activate requires a succeeded run, the
+  // candidate stays pending for an independent owner decision, and no new live version exists.
+  const failedRun = /invocation (skill-run-[a-f0-9]+) is failed/u.exec(trial.error?.message ?? '')?.[1]
+  expect(failedRun).toBeDefined()
+  expect((await f.activate(staged.id, failedRun!)).isError).toBe(true)
+  expect(result(await f.execute('skill_candidates', {}))).toMatchObject([{ id: staged.id, state: 'pending' }])
+  const database = new DatabaseSync(join(f.root, 'skills.sqlite'))
+  try {
+    const versions = (database.prepare('SELECT version, retired FROM skill_definitions WHERE scope_key=? AND name=? ORDER BY version')
+      .all(acceptanceDigest(f.scope), 'saved-write') as { version: number; retired: number }[])
+    expect(versions).toEqual([{ version: 1, retired: 0 }])
+  } finally { database.close() }
 })
 
 test('skill_comparison_status redacts private external receipt cells and returns only aggregate quality and public digests', async () => {
@@ -1184,7 +1368,6 @@ test('a later canonical correction can roll back after the originally bound veri
   expect(result(await f.execute('skill_status', {}))[0]).toMatchObject({ version: 3, restoredFromVersion: 1 })
 })
 
-
 test('captures an exact successful skill reuse as fixed bound steps while retaining the original source call', async () => {
   const f = await fixture()
   await f.save()
@@ -1205,7 +1388,6 @@ test('captures an exact successful skill reuse as fixed bound steps while retain
   expect(candidate.definition.steps).toEqual([{ id: expect.stringMatching(/^expanded:[a-f0-9]{64}$/u), toolName: 'write', arguments: { file: 'output.txt', data: 'reused' }, dependsOn: [] }])
   expect(f.count()).toBe(1)
 })
-
 
 test('finite repair arming requires a live human request and exact immutable replay, and survives restart without dispatch', async () => {
   const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, true)
@@ -1237,4 +1419,606 @@ test('repair rejects expired authorization, exposes only scoped configuration, a
   expect(status).toMatchObject({ profiles: [{ id: 'repair-profile', maxIterations: 1 }], continuations: [] })
   expect(JSON.stringify(status)).not.toContain('generatorDigest')
   expect(f.ctx.assistantSkills.ownsOwnerAuthorizedRepair({ authorizationId: 'fake' } as never, () => {})).toBe(false)
+})
+
+// ENGINEERING-LAYER BOUNDARY TEST, NOT REAL EXTERNAL-AUTHORITY EVIDENCE:
+// inputs_json/bindings_json are raw model-controlled tool-argument strings.
+// `parse()` (service.ts:51) is the 256 KiB fail-closed gate shared by
+// skill_save/skill_run/skill_candidate/skill_failure_candidate/skill_trial.
+// It is evaluated while building this.run()/this.save()'s arguments, so it
+// throws before any lookup or dispatch; an oversized payload must never turn
+// into a run row or a delegated native tool call.
+test('model-facing skill tools fail closed on unbounded or malformed JSON arguments before any run', async () => {
+  const f = await fixture()
+  const oversizedObject = 'x'.repeat(262145)
+  const serviceError = /bounded JSON required|invalid JSON shape/u
+  const serviceRejected: Array<[string, string, Record<string, unknown>]> = [
+    ['skill_run oversized inputs_json', 'skill_run', { goal_id: 'g', name: 'saved-write', version: 1, inputs_json: oversizedObject, invocation_id: 'i' }],
+    ['skill_save oversized bindings_json', 'skill_save', { goal_id: 'g', name: 'n', description: 'd', bindings_json: `[${oversizedObject}]`, expected_version: 0 }],
+    ['skill_run at the inclusive 256 KiB bound still parses as an object', 'skill_run', { goal_id: 'g', name: 'saved-write', version: 1, inputs_json: `{"x":"${'y'.repeat(262144 - 8)}"}`, invocation_id: 'i' }],
+    ['skill_run array where an object is required', 'skill_run', { goal_id: 'g', name: 'n', version: 1, inputs_json: '[]', invocation_id: 'i' }],
+    ['skill_save object where an array is required', 'skill_save', { goal_id: 'g', name: 'n', description: 'd', bindings_json: '{}', expected_version: 0 }],
+  ]
+  for (const [label, tool, args] of serviceRejected) {
+    if (label.startsWith('skill_run at the inclusive')) {
+      // Exactly 262144 bytes passes the byte gate; it then fails later on the
+      // absent saved skill, which is a different (domain) error, never the
+      // bounded-JSON gate. This pins the gate's boundary is >, not >=.
+      const atBound = await f.execute(tool, args)
+      expect(atBound.isError, `${label}: ${JSON.stringify(atBound)}`).toBe(true)
+      expect(JSON.stringify(atBound)).not.toMatch(serviceError)
+      continue
+    }
+    const response = await f.execute(tool, args)
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(serviceError)
+  }
+  // A non-string JSON field is stopped one layer earlier by the tool-schema
+  // type gate (before execute()/parse() runs); it is equally fail-closed.
+  const wrongType = await f.execute('skill_run', { goal_id: 'g', name: 'n', version: 1, inputs_json: { x: 1 }, invocation_id: 'i' })
+  expect(wrongType.isError).toBe(true)
+  expect(JSON.stringify(wrongType)).toMatch(/must be a string/u)
+  // A syntactically malformed string also fails closed (a JSON.parse SyntaxError).
+  const malformed = await f.execute('skill_run', { goal_id: 'g', name: 'n', version: 1, inputs_json: '{not json', invocation_id: 'i' })
+  expect(malformed.isError).toBe(true)
+  // The oversized skill_run never reached dispatch: no run row, no write tool.
+  expect(runRows(f.root)).toBe(0)
+  expect(f.dispatches).not.toContain('write')
+})
+
+test('skill_watch fails closed on model-supplied finite-window bounds outside the store gates', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: expires_at/max_runs/failure_threshold are model-written tool
+  // arguments on the public skill_watch tool, fully reachable through the real
+  // tool path. The store's #createWatch is the single fail-closed gate that
+  // keeps a watch finite (past/future 7-day expiry, 1..100 runs, threshold<=runs).
+  const f = await fixture()
+  result(await f.save())
+  result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Second version', bindings_json: JSON.stringify([{ name: 'message', stepId: 'step-1', path: '/data' }]), expected_version: 1 }))
+  const base = { owner_route_id: 'owner-route', name: 'saved-write', version: 2, fallback_version: 1 }
+  const rejected: Array<[string, Record<string, unknown>]> = [
+    ['an already elapsed expiry', { expires_at: Date.now() - 1, max_runs: 2, failure_threshold: 1 }],
+    ['an expiry beyond the seven day ceiling', { expires_at: Date.now() + 7 * 86400000 + 60_000, max_runs: 2, failure_threshold: 1 }],
+    ['a zero run budget', { expires_at: Date.now() + 60_000, max_runs: 0, failure_threshold: 1 }],
+    ['a run budget above 100', { expires_at: Date.now() + 60_000, max_runs: 101, failure_threshold: 1 }],
+    ['a zero failure threshold', { expires_at: Date.now() + 60_000, max_runs: 2, failure_threshold: 0 }],
+    ['a failure threshold above the run budget', { expires_at: Date.now() + 60_000, max_runs: 2, failure_threshold: 3 }],
+  ]
+  for (const [label, window] of rejected) {
+    const response = await f.execute('skill_watch', { ...base, ...window })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/invalid watch/u)
+  }
+  // No rejected window created a durable watch.
+  expect(result(await f.execute('skill_watches', {}))).toEqual([])
+  // The inclusive boundaries (exactly seven days, 100 runs, threshold===runs)
+  // pin that the gates use <= / > exactly, so an in-window watch still works.
+  const admitted = result(await f.execute('skill_watch', { ...base, expires_at: Date.now() + 7 * 86400000, max_runs: 100, failure_threshold: 100 }))
+  expect(admitted.state).toBe('watching')
+  expect(admitted.maxRuns).toBe(100)
+  expect(admitted.failureThreshold).toBe(100)
+})
+
+test('skill_capture fails closed on a model-supplied expiry outside the finite window', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: expires_at is a model-written argument on the public skill_capture
+  // tool, and service.capture() validates the finite window before the policy or
+  // Goals active-goal bridge, so both bounds are reachable through the plain
+  // tool path with no extra fixture.
+  const f = await fixture()
+  const base = { owner_route_id: 'owner-route', goal_id: 'source-goal', name: 'captured-write', description: 'Captured writer.', parent_version: 0 }
+  const rejected: Array<[string, number]> = [
+    ['an already elapsed expiry', Date.now() - 1],
+    ['an expiry beyond the seven day ceiling', Date.now() + 7 * 86400000 + 60_000],
+  ]
+  for (const [label, expiresAt] of rejected) {
+    const response = await f.execute('skill_capture', { ...base, expires_at: expiresAt })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/invalid capture expiry/u)
+  }
+})
+
+test('skill_run fails closed on a model-supplied invocation_id outside the store gate', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: invocation_id is a required model-written string on the public
+  // skill_run tool with no schema maxLength; the store #validateClaim text(…,256)
+  // gate (non-empty, <=256 chars, no Cc controls) is the single fail-closed
+  // boundary that keeps the durable idempotency key well-formed and reachable.
+  const f = await fixture()
+  result(await f.save())
+  const base = { goal_id: 'new-goal', name: 'saved-write', version: 1, inputs_json: '{"message":"reused"}' }
+  const rejected: Array<[string, string]> = [
+    ['an empty invocation_id', ''],
+    ['a 257-character invocation_id', 'i'.repeat(257)],
+    ['an invocation_id carrying a control character', 'bad' + String.fromCharCode(0) + 'id'],
+  ]
+  for (const [label, invocationId] of rejected) {
+    const response = await f.execute('skill_run', { ...base, invocation_id: invocationId })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/invalid invocation/u)
+  }
+  expect(runRows(f.root)).toBe(0)
+  // The 256-character boundary is admitted and durably claimed exactly once.
+  const admitted = result(await f.execute('skill_run', { ...base, invocation_id: 'i'.repeat(256) }))
+  expect(admitted.state).not.toBe('awaiting-native-round')
+  expect(runRows(f.root)).toBe(1)
+})
+
+test('skill_failure_candidate fails closed on model-supplied failure-window integer and length bounds', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: minimum_occurrences and failure_locators entries are model-written
+  // tool arguments with no schema min/max/maxLength; service failureWindow() is
+  // the single fail-closed gate (1..32 count no greater than the locator count,
+  // 1..32 locators, each session_id/goal_id a 1..4096 char string), and it runs
+  // before any Goals Host evidence read.
+  const f = await fixture(); result(await f.save()); const state = installFailureHost(f)
+  const listed = (locators: Array<{ session_id: string; goal_id: string }>, minimumOccurrences: number) =>
+    failureCandidateArgs({ trigger_goal_id: undefined, trigger_session_id: undefined, failure_locators: locators, minimum_occurrences: minimumOccurrences })
+  const many = Array.from({ length: 33 }, (_value, index) => ({ session_id: `session-${index}`, goal_id: `goal-${index}` }))
+  const rejected: Array<[string, Record<string, unknown>]> = [
+    ['a zero minimum occurrence', listed([{ session_id: 's', goal_id: 'g' }], 0)],
+    ['a minimum occurrence above 32 with enough locators', listed(many, 33)],
+    ['an empty locator list', listed([], 1)],
+    ['a 4097-character session id', listed([{ session_id: 's'.repeat(4097), goal_id: 'g' }], 1)],
+    ['a 4097-character goal id', listed([{ session_id: 's', goal_id: 'g'.repeat(4097) }], 1)],
+    ['an empty-string session id', listed([{ session_id: '', goal_id: 'g' }], 1)],
+  ]
+  for (const [label, args] of rejected) {
+    const response = await f.execute('skill_failure_candidate', args)
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/invalid bounded failure locator window/u)
+  }
+  expect(state.failureReadCount()).toBe(0)
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([])
+})
+
+test('skill_repair_arm fails closed on a model-supplied expiry outside the finite window', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: expires_at is a required model-written integer on the public
+  // skill_repair_arm tool with no schema bounds; armRepair validates the past
+  // bound and the min(holdout execution expiry, now+7d) ceiling before the
+  // Goals snapshot read, the parent lookup, or any durable continuation, so
+  // every counterexample is reachable through the plain tool path. The default
+  // repair holdout lives 60s (its execution lifetime binds), while the second
+  // fixture mounts a 30-day holdout so the seven-day cap itself binds.
+  const base = { goal_id: 'source-goal', profile_id: 'repair-profile', owner_route_id: 'owner-route', invocation_id: 'arm-expiry' }
+  const cases: Array<[string, number, number]> = [
+    ['an already elapsed expiry', Date.now() - 1, 60_000],
+    ['an expiry beyond the holdout execution lifetime', Date.now() + 120_000, 60_000],
+    ['an expiry beyond the seven day ceiling', Date.now() + 7 * 86400000 + 60_000, 30 * 86400000],
+  ]
+  for (const [label, expiresAt, holdoutTtlMs] of cases) {
+    const f = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, true, 1, holdoutTtlMs)
+    await expect.poll(() => f.ctx.tools.get('skill_repair_arm')).toBeDefined()
+    const response = await f.execute('skill_repair_arm', { ...base, expires_at: expiresAt })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/finite current repair profile required/u)
+    const status = result(await f.execute('skill_repair_status', {})) as { continuations: unknown[] }
+    expect(status.continuations, label).toEqual([])
+  }
+})
+
+test('skill_retire and skill_rollback fail closed on model-supplied name and version values outside the store gates', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: name and expected_version are required model-written tool
+  // arguments; the tool schemas carry no pattern or numeric bounds, and the
+  // fixture Policy stub authorizes solely from the live Agent, never from
+  // argument content, so every malformed value below reaches the store gates
+  // (store.ts name()/version() helpers at 146-147, #retire at ~545,
+  // #rollback at ~744). A non-integer version never reaches them: the tool
+  // schema integer type rejects it first with INVALID_ARGS, which the second
+  // block pins honestly as the earlier (outer) gate. Rejection must leave v1
+  // discoverable and replayable.
+  const f = await fixture(); result(await f.save())
+  const retireCases: Array<[string, string, number]> = [
+    ['an uppercase skill name', 'Saved_Write', 1],
+    ['a zero expected version', 'saved-write', 0],
+    ['an expected version above the integer ceiling', 'saved-write', 1_000_000_001],
+  ]
+  for (const [label, name, expectedVersion] of retireCases) {
+    const response = await f.execute('skill_retire', { name, expected_version: expectedVersion })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/invalid skill reference/u)
+  }
+  const rollbackCases: Array<[string, string, number, number]> = [
+    ['an illegal skill name', 'saved write', 1, 0],
+    ['a zero expected version', 'saved-write', 0, 0],
+    ['a negative target version', 'saved-write', 1, -1],
+    ['a target version above the integer ceiling', 'saved-write', 1, 1_000_000_001],
+  ]
+  for (const [label, name, expectedVersion, targetVersion] of rollbackCases) {
+    const response = await f.execute('skill_rollback', { name, expected_version: expectedVersion, target_version: targetVersion })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/invalid skill reference/u)
+  }
+  // The outer tool-schema gate on the integer type: fractional values are
+  // rejected before the handler (and therefore before the store version()
+  // range check), so the store fractional branch is unreachable via tools.
+  for (const args of [
+    { name: 'saved-write', expected_version: 1.5 },
+    { name: 'saved-write', expected_version: 1, target_version: 0.5 },
+  ]) {
+    const tool = args.target_version === undefined ? 'skill_retire' : 'skill_rollback'
+    const response = await f.execute(tool, args)
+    expect(response.isError, JSON.stringify(response)).toBe(true)
+    expect(JSON.stringify(response)).toMatch(/must be an integer/u)
+  }
+  // All rejections are pre-mutation: v1 is still the sole active definition and
+  // replay still works, proving no partial retirement/rollback persisted.
+  const definitions = result(await f.execute('skill_status', {})) as Array<{ name: string; version: number; retired?: boolean }>
+  expect(definitions).toEqual([expect.objectContaining({ name: 'saved-write', version: 1 })])
+  expect((await f.run(`post-gate-${Math.random()}`)).isError).toBe(false)
+})
+
+test('opaque reference arguments fail closed on model-supplied ids outside the store text(id,128) gates', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: every *_id an inspect or lifecycle tool accepts is a model-
+  // written string the tool schemas bound only as {type:'string'} (no
+  // minLength/maxLength/pattern). Store text(id,128) (store.ts:148: non-
+  // empty, <=128, no Cc controls) is the single shape gate, and the handlers
+  // below evaluate it while reading their referenced row — before any state
+  // mutation or, where present, before authorization — so each counterexample
+  // is reachable through the plain tool path with an empty fixture. A
+  // well-formed but unknown id instead yields the tool's ordinary empty
+  // result, proving the gate is about id shape, not row existence.
+  const f = await fixture()
+  const nul = String.fromCharCode(0)
+  const long = 'x'.repeat(129)
+  // Empty strings are not a counterexample for every tool: skill_candidates,
+  // skill_status and skill_comparison_status treat a falsy id as "no id given"
+  // and return their list view, so only a non-empty but over-long or
+  // control-character id reaches the store gate there. The tools that pass the
+  // id straight through reject the empty string as well.
+  const cases: Array<[string, RegExp, string[]]> = [
+    ['skill_candidates', /invalid candidate reference/u, [long, `p${nul}`]],
+    ['skill_status', /invalid run reference/u, [long, `r${nul}`]],
+    ['skill_comparison_status', /invalid comparison reference/u, [long, `c${nul}`]],
+    ['skill_deployment_status', /invalid deployment reference/u, ['', long, `d${nul}`]],
+    ['skill_reject', /invalid candidate reference/u, ['', long, `c${nul}`]],
+  ]
+  const idArg: Record<string, string> = {
+    skill_candidates: 'candidate_id',
+    skill_status: 'run_id',
+    skill_deployment_status: 'deployment_id',
+    skill_comparison_status: 'comparison_id',
+    skill_reject: 'candidate_id',
+  }
+  for (const [tool, message, bads] of cases) {
+    for (const bad of bads) {
+      const response = await f.execute(tool, { [idArg[tool]!]: bad })
+      expect(response.isError, `${tool} ${JSON.stringify(bad)}: ${JSON.stringify(response)}`).toBe(true)
+      expect(JSON.stringify(response), `${tool} ${JSON.stringify(bad)}`).toMatch(message)
+    }
+  }
+  // activate reads candidate and run before any authorization or mutation.
+  for (const bad of ['', long]) {
+    const response = await f.execute('skill_activate', { candidate_id: bad, trial_run_id: bad })
+    expect(response.isError, JSON.stringify(response)).toBe(true)
+    expect(JSON.stringify(response)).toMatch(/invalid (candidate|run) reference/u)
+  }
+  // canary validates the candidate id before the configured holdout is even
+  // looked up, so an unusable profile id and valid finite-window integers do
+  // not mask the earlier candidate-reference gate.
+  for (const bad of ['', long, `c${nul}`]) {
+    const response = await f.execute('skill_canary', { candidate_id: bad, profile_id: 'whatever', invocation_id: 'canary-ref', owner_route_id: 'route', expires_at: Date.now() + 60_000, max_runs: 1, canary_runs: 1 })
+    expect(response.isError, JSON.stringify(response)).toBe(true)
+    expect(JSON.stringify(response)).toMatch(/invalid candidate reference/u)
+  }
+  // Well-formed unknown ids never trip the shape gate: the inspect tools that
+  // model a missing row return null. (skill_status for an unknown run id is
+  // different: inspect() yields undefined, which the Host rejects as
+  // non-lossless output — a pre-existing output-contract behaviour outside
+  // this shape gate, so it is not asserted here.)
+  expect(JSON.stringify(await f.execute('skill_candidates', { candidate_id: 'missing' }))).toContain('null')
+  expect(JSON.stringify(await f.execute('skill_deployment_status', { deployment_id: 'missing' }))).toContain('null')
+  expect(JSON.stringify(await f.execute('skill_comparison_status', { comparison_id: 'missing' }))).toContain('null')
+})
+
+test('skill_candidate fails closed on model-written reason/trigger outside the bounded free-text gate', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: the skill_candidate tool schema types `reason`/`trigger` only as
+  // {type:'string', required:true} with no minLength/maxLength, and they do NOT
+  // pass through createDefinition (which bounds only name/description). They
+  // ride untouched into store.stageCandidate, where text(reason,1024) and
+  // text(trigger,1024) (store.ts text(): non-empty, <=1024, no Cc controls) is
+  // the single shape gate, evaluated in the same condition before BEGIN
+  // IMMEDIATE, so every counterexample is reachable through the plain tool
+  // path with a valid name/description and the ordinary fixture.
+  const f = await fixture()
+  const nul = String.fromCharCode(0)
+  const valid = { goal_id: 'source-goal', name: 'saved-write', description: 'Candidate writer.', bindings_json: JSON.stringify([{ name: 'message', stepId: 'step-1', path: '/data' }]), parent_version: 0 }
+  const badFields: Array<['reason' | 'trigger', string, string]> = [
+    ['reason', '', 'empty reason'],
+    ['reason', 'x'.repeat(1025), 'over-long reason'],
+    ['reason', `why${nul}`, 'control-char reason'],
+    ['trigger', '', 'empty trigger'],
+    ['trigger', 'x'.repeat(1025), 'over-long trigger'],
+    ['trigger', `manual${nul}`, 'control-char trigger'],
+  ]
+  for (const [field, bad, label] of badFields) {
+    const response = await f.execute('skill_candidate', { ...valid, reason: field === 'reason' ? bad : 'Owner requested a trial.', trigger: field === 'trigger' ? bad : 'manual review' })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/invalid candidate/u)
+    // Rejection precedes the write transaction: nothing is staged.
+    expect(result(await f.execute('skill_candidates', {})), label).toEqual([])
+  }
+  // The 1024-char boundary is accepted: the gate is about string shape/length,
+  // not about rejecting long-but-bounded owner prose.
+  const bounded = result(await f.execute('skill_candidate', { ...valid, reason: 'r'.repeat(1024), trigger: 't'.repeat(1024) })) as { state: string }
+  expect(bounded.state).toBe('pending')
+  expect(result(await f.execute('skill_candidates', {}))).toHaveLength(1)
+})
+
+test('skill_save/skill_candidate fail closed on a model-written name, description, or binding shape outside the definition gate', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: `name`/`description` are typed only {type:'string'} on both
+  // skill_save and skill_candidate, and `bindings_json` is a free-form string
+  // parsed straight into createDefinition. createDefinition (definition.ts:482)
+  // is the single reachable gate: name must match /^[a-z]([a-z0-9-]{0,62}[a-z0-9])?$/,
+  // description must be text(description,512), at most 8 bindings are allowed,
+  // and each binding name/stepId is shaped and must reference an existing step.
+  // It runs in service.save/stage before #authorize and the store write. The
+  // store's own definitionValid name() check is NOT separately reachable on
+  // this path (createDefinition rejects first) — it stays defence-in-depth and
+  // is not claimed here. A malformed name on EITHER tool therefore rejects with
+  // "invalid definition"; a bad binding set rejects at its own clause.
+  const f = await fixture()
+  const nul = String.fromCharCode(0)
+  const badNames: Array<[string, string]> = [
+    ['UPPER', 'uppercase name'],
+    ['1lead', 'leading digit'],
+    ['has space', 'embedded space'],
+    ['a'.repeat(65), '65-char name (max is 64)'],
+    ['-lead', 'leading hyphen'],
+  ]
+  for (const [bad, label] of badNames) {
+    for (const tool of ['skill_save', 'skill_candidate'] as const) {
+      const args = tool === 'skill_save'
+        ? { goal_id: 'source-goal', name: bad, description: 'Fine description.', bindings_json: '[]', expected_version: 0 }
+        : { goal_id: 'source-goal', name: bad, description: 'Fine description.', bindings_json: '[]', parent_version: 0, reason: 'Owner requested a trial.', trigger: 'manual review' }
+      const response = await f.execute(tool, args)
+      expect(response.isError, `${tool} ${label}: ${JSON.stringify(response)}`).toBe(true)
+      expect(JSON.stringify(response), `${tool} ${label}`).toMatch(/invalid definition/u)
+    }
+  }
+  const badDescriptions: Array<[string, string]> = [
+    ['y'.repeat(513), 'over-long description'],
+    [`d${nul}`, 'control-char description'],
+  ]
+  for (const [bad, label] of badDescriptions) {
+    const response = await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: bad, bindings_json: '[]', expected_version: 0 })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/invalid definition/u)
+  }
+  // Binding-shape gates inside createDefinition: the default fixture admits one
+  // source Goal with a single write step (step-1), so all three are reachable
+  // through the plain skill_save path with an otherwise-valid definition.
+  const bindingBase = { goal_id: 'source-goal', name: 'saved-write', description: 'Write the saved artifact with a typed message.', expected_version: 0 }
+  const bindingRejects: Array<[string, string, RegExp]> = [
+    ['nine bindings (max is 8)', JSON.stringify(Array.from({ length: 9 }, (_v, i) => ({ name: `m${i}`, stepId: 'step-1', path: `/data${i}` }))), /too many bindings/u],
+    ['an uppercase binding name', JSON.stringify([{ name: 'Message', stepId: 'step-1', path: '/data' }]), /invalid binding/u],
+    ['a binding to a missing step', JSON.stringify([{ name: 'message', stepId: 'step-nope', path: '/data' }]), /binding step is missing/u],
+  ]
+  for (const [label, bindingsJson, message] of bindingRejects) {
+    const response = await f.execute('skill_save', { ...bindingBase, bindings_json: bindingsJson })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(message)
+  }
+  // No rejected call created a definition (save) or a candidate.
+  expect(result(await f.execute('skill_status', {}))).toEqual([])
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([])
+  // Boundary values are accepted: 64-char name and 512-char description pass.
+  result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'a'.repeat(64), description: 'z'.repeat(512), bindings_json: '[]', expected_version: 0 }))
+  expect(result(await f.execute('skill_status', {}))).toMatchObject([{ name: 'a'.repeat(64) }])
+})
+
+test('skill_run fails closed on model-supplied skill references and invocation inputs outside the reachable gates', async () => {
+  // ENGINEERING-LAYER FAIL-CLOSED CONTRACT TEST, NOT REAL EXTERNAL-AUTHORITY
+  // EVIDENCE: name/version and inputs_json are model-written tool arguments;
+  // the schema bounds version only as integer (no range) and inputs only as a
+  // string. service.run (service.ts:1405) reads the referenced skill through
+  // store.get(scope, name) WITHOUT passing version, so the store version()
+  // range helper is NOT reachable on this path — a zero, over-ceiling, or
+  // merely non-current version fails the live-equality guard at
+  // service.ts:1406 ("active skill version required"), while an illegal name
+  // trips the get() name() gate first ("invalid skill reference"). After that,
+  // #run calls instantiate (service.ts:1412) BEFORE the Goals Host bridge
+  // (1421), preconditions (1438), or any claim: an undeclared input
+  // (definition.ts:533) or a value whose type is not the bound scalar type
+  // (definition.ts:537) is rejected with no durable run.
+  const f = await fixture()
+  // An illegal name reaches the get() name() gate even with no saved skill.
+  const badName = await f.execute('skill_run', { goal_id: 'new-goal', name: 'Bad Name', version: 1, inputs_json: '{}', invocation_id: 'ref-bad-name' })
+  expect(badName.isError).toBe(true)
+  expect(JSON.stringify(badName)).toMatch(/invalid skill reference/u)
+  expect(runRows(f.root)).toBe(0)
+  // The version() shape/range gate is NOT reachable here (get takes no
+  // version): with no live matching version the equality guard at 1406 fails
+  // closed for version 0, an over-ceiling version, or a merely-wrong one.
+  for (const [label, skillVersion] of [['a zero version', 0], ['an over-ceiling version', 1_000_000_001], ['a non-current version', 7]] as Array<[string, number]>) {
+    const response = await f.execute('skill_run', { goal_id: 'new-goal', name: 'saved-write', version: skillVersion, inputs_json: '{}', invocation_id: `ref-${Math.random()}` })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(/active skill version required/u)
+    expect(runRows(f.root), label).toBe(0)
+  }
+  // The outer tool-schema gate on the integer type: a fractional version is
+  // rejected before the handler, never reaching either store/service gate.
+  const fractional = await f.execute('skill_run', { goal_id: 'new-goal', name: 'saved-write', version: 1.5, inputs_json: '{}', invocation_id: 'ref-fraction' })
+  expect(fractional.isError).toBe(true)
+  expect(JSON.stringify(fractional)).toMatch(/must be an integer/u)
+  expect(runRows(f.root)).toBe(0)
+  // With a saved v1 whose single declared input is the string `message`,
+  // malformed inputs are rejected at instantiate, before Goals or dispatch.
+  result(await f.save())
+  for (const [label, inputsJson, message] of [
+    ['an undeclared input', '{"surprise":1}', /unknown invocation input/u],
+    ['a type-mismatched declared input', '{"message":7}', /invocation input type mismatch/u],
+  ] as Array<[string, string, RegExp]>) {
+    const response = await f.execute('skill_run', { goal_id: `goal-${label.replace(/\W/g, '-')}`, name: 'saved-write', version: 1, inputs_json: inputsJson, invocation_id: `run-${Math.random()}` })
+    expect(response.isError, `${label}: ${JSON.stringify(response)}`).toBe(true)
+    expect(JSON.stringify(response), label).toMatch(message)
+  }
+  expect(runRows(f.root)).toBe(0)
+  // A declared, correctly typed string input still runs, pinning the gate to
+  // input shape rather than the run path itself.
+  expect((await f.run(`post-gate-${Math.random()}`)).isError).toBe(false)
+})
+
+// Engineering-layer coverage of the owner-authorized autonomous growth
+// success deposit (stageOwnerVerifiedSuccessCandidate).  The verified-source
+// producer behind goals.inspectOwnerVerifiedWorkflowSource is a test seam
+// installed by installSuccessHost, NOT real supplier/owner evidence: real
+// owner-root (succeeded, quiescent, non-subagent) attestation is exercised by
+// assistant-goals' own suite and by the growth-driver integration tests.
+const CORDIS_ORIGINAL = Symbol.for('cordis.original')
+function rawSkills(f: Awaited<ReturnType<typeof fixture>>): AssistantSkillsService {
+  return (f.ctx.get('assistantSkills' as never) as unknown as { [CORDIS_ORIGINAL]: AssistantSkillsService })[CORDIS_ORIGINAL]
+}
+function growthAuthority(f: Awaited<ReturnType<typeof fixture>>, overrides: { expiresAt?: number; assertCurrent?: () => void } = {}) {
+  return { id: 'growth-authority', scope: f.scope, ownerRouteId: 'owner-route', expiresAt: Date.now() + 60_000, assertCurrent: () => {}, ...overrides }
+}
+function growthExec(f: Awaited<ReturnType<typeof fixture>>, signal: AbortSignal = new AbortController().signal) {
+  return { agent: f.owner, signal }
+}
+function successDepositInput(locators: readonly { sessionId: string; goalId: string }[], extra: Partial<StageSuccessCandidateInput> = {}): StageSuccessCandidateInput {
+  return { ownerRouteId: 'owner-route', successLocators: locators, minimumOccurrences: locators.length, name: 'grown-write', description: 'Grown repeated writer.', ...extra }
+}
+
+test('growth success deposit stages exactly one pending candidate after three distinct owner-verified successes', async () => {
+  const f = await fixture()
+  const host = installSuccessHost(f)
+  const service = rawSkills(f)
+  const candidate = await service.stageOwnerVerifiedSuccessCandidate(growthExec(f), successDepositInput(host.locators), growthAuthority(f)) as any
+  // Identity + provenance projection: growth trigger carries the distinct-set digest.
+  expect(candidate.id).toMatch(/^skill-candidate-[a-f0-9]{64}$/u)
+  expect(candidate.state).toBe('pending')
+  expect(candidate.parentVersion).toBe(0)
+  expect(candidate.reason).toBe('Host-verified autonomous growth deposit after 3 independently owner-verified repeated successes.')
+  expect(candidate.trigger).toMatch(/^growth-success:3:[a-f0-9]{64}$/u)
+  expect(candidate.definition.name).toBe('grown-write')
+  expect(candidate.definition.steps).toHaveLength(1)
+  expect(candidate.definition.steps[0]!.toolName).toBe('write')
+  // Every locator was independently re-read with the full six-field Host input.
+  expect(host.successReadCount()).toBe(3)
+  expect(host.successInputs).toEqual(host.locators.map(locator => ({ ownerRouteId: 'owner-route', principalId: 'owner', workspace: f.root, preset: 'primary', sessionId: locator.sessionId, goalId: locator.goalId })))
+  // A pending candidate is not a current skill and never reaches skill_runs.
+  expect(service.inspectOwnerActiveSkills(f.scope)).toEqual([])
+  const listed = service.inspectOwnerSkillCandidates(f.scope)
+  expect(listed).toHaveLength(1)
+  expect(listed[0]!.id).toBe(candidate.id)
+  expect(listed[0]!.state).toBe('pending')
+  expect(runRows(f.root)).toBe(0)
+})
+
+test('growth success deposit defaults minimumOccurrences to one for a single locator', async () => {
+  const f = await fixture()
+  const host = installSuccessHost(f, { locators: successLocatorSet(1) })
+  const candidate = await rawSkills(f).stageOwnerVerifiedSuccessCandidate(growthExec(f), successDepositInput(host.locators), growthAuthority(f)) as any
+  expect(candidate.state).toBe('pending')
+  expect(candidate.trigger).toMatch(/^growth-success:1:/u)
+})
+
+test('growth success deposit is idempotent for the same verified input set', async () => {
+  const f = await fixture()
+  const host = installSuccessHost(f)
+  const service = rawSkills(f)
+  const first = await service.stageOwnerVerifiedSuccessCandidate(growthExec(f), successDepositInput(host.locators), growthAuthority(f)) as any
+  const second = await service.stageOwnerVerifiedSuccessCandidate(growthExec(f), successDepositInput(host.locators), growthAuthority(f)) as any
+  expect(second.id).toBe(first.id)
+  expect(service.inspectOwnerSkillCandidates(f.scope)).toHaveLength(1)
+  expect(host.successReadCount()).toBe(6)
+})
+
+test.each([
+  ['an unattested model-suggested locator', { behavior: (context: { input: { sessionId: string } }) => context.input.sessionId === 'ghost' ? new Error('ghost source') : undefined }, () => [{ sessionId: 'sess-1', goalId: 'goal-1' }, { sessionId: 'ghost', goalId: 'ghost-goal' }]],
+  ['a source read that rejects', { behavior: () => Object.assign(new Error('unknown outcome'), { code: 'unknown' }) }, () => successLocatorSet(3)],
+  ['a forged source goal identity', { behavior: (context: { source: VerifiedWorkflowSource }) => ({ ...context.source, goal: { ...context.source.goal, id: `${context.source.goal.id}-forged` } }) }, () => successLocatorSet(3)],
+  ['a sibling-owner source scope', { behavior: (context: { source: VerifiedWorkflowSource }) => ({ ...context.source, scope: { ...context.source.scope, principalRecordId: 'foreign-record' } }) }, () => successLocatorSet(3)],
+  ['a route rebound mid re-read', { behavior: undefined as never, rebindOnRead: 2 }, () => successLocatorSet(3)],
+] as const)('growth success deposit fails closed on %s without writing', async (_label, behaviorOptions, locatorFactory) => {
+  const f = await fixture()
+  const locators = locatorFactory()
+  const host = installSuccessHost(f, { locators, behavior: (context: { input: { sessionId: string }; read: number; source: VerifiedWorkflowSource }) => {
+    if ((behaviorOptions as { rebindOnRead?: number }).rebindOnRead === context.read) f.rebindRoute()
+    return (behaviorOptions as { behavior?: (context: { input: { sessionId: string }; read: number; source: VerifiedWorkflowSource }) => VerifiedWorkflowSource | Error | void }).behavior?.(context)
+  } })
+  await expect(rawSkills(f).stageOwnerVerifiedSuccessCandidate(growthExec(f), successDepositInput(locators), growthAuthority(f))).rejects.toThrow()
+  expect(rawSkills(f).inspectOwnerSkillCandidates(f.scope)).toEqual([])
+  expect(runRows(f.root)).toBe(0)
+  expect(host.successReadCount()).toBeGreaterThan(0)
+})
+
+test('growth success deposit rejects a window asking for more occurrences than locators', async () => {
+  const f = await fixture()
+  const host = installSuccessHost(f)
+  await expect(rawSkills(f).stageOwnerVerifiedSuccessCandidate(growthExec(f),
+    successDepositInput(host.locators, { minimumOccurrences: 4 }), growthAuthority(f))).rejects.toThrow('invalid bounded success locator window')
+  expect(rawSkills(f).inspectOwnerSkillCandidates(f.scope)).toEqual([])
+})
+
+test.each([
+  ['an expired authority', (f: Awaited<ReturnType<typeof fixture>>) => growthAuthority(f, { expiresAt: Date.now() - 1 }), (input: StageSuccessCandidateInput) => input, 'growth success authority unavailable'],
+  ['a stale authority lease', (f: Awaited<ReturnType<typeof fixture>>) => growthAuthority(f, { assertCurrent: () => { throw new Error('owner route changed during growth wake') } }), (input: StageSuccessCandidateInput) => input, 'owner route changed during growth wake'],
+  ['an input bound to another route', (f: Awaited<ReturnType<typeof fixture>>) => growthAuthority(f), (input: StageSuccessCandidateInput) => ({ ...input, ownerRouteId: 'other-route' }), 'growth success input does not match authority'],
+] as const)('growth success deposit rejects %s without writing', async (_label, authorityFactory, inputMutate, message) => {
+  const f = await fixture()
+  const host = installSuccessHost(f)
+  const service = rawSkills(f)
+  await expect(service.stageOwnerVerifiedSuccessCandidate(growthExec(f), inputMutate(successDepositInput(host.locators)), authorityFactory(f))).rejects.toThrow(message)
+  expect(service.inspectOwnerSkillCandidates(f.scope)).toEqual([])
+  expect(runRows(f.root)).toBe(0)
+})
+
+test('growth success deposit fails closed on an already-aborted exec signal', async () => {
+  const f = await fixture()
+  const host = installSuccessHost(f)
+  const controller = new AbortController(); controller.abort()
+  await expect(rawSkills(f).stageOwnerVerifiedSuccessCandidate(growthExec(f, controller.signal), successDepositInput(host.locators), growthAuthority(f))).rejects.toThrow()
+  expect(rawSkills(f).inspectOwnerSkillCandidates(f.scope)).toEqual([])
+  expect(host.successReadCount()).toBe(0)
+})
+
+test('growth success deposit stages against a live current parent version', async () => {
+  const f = await fixture(); result(await f.save())
+  const host = installSuccessHost(f)
+  const candidate = await rawSkills(f).stageOwnerVerifiedSuccessCandidate(growthExec(f),
+    successDepositInput(host.locators, { name: 'saved-write', description: 'Grown parented writer.' }), growthAuthority(f)) as any
+  expect(candidate.state).toBe('pending')
+  expect(candidate.parentVersion).toBe(1)
+  const active = rawSkills(f).inspectOwnerActiveSkills(f.scope)
+  expect(active).toHaveLength(1)
+  expect(active[0]!.name).toBe('saved-write')
+  expect(active[0]!.version).toBe(1)
+  expect(rawSkills(f).inspectOwnerSkillCandidates(f.scope)).toHaveLength(1)
+})
+
+test('growth success deposit refuses to resurrect a retired same-name skill', async () => {
+  const f = await fixture(); result(await f.save())
+  result(await f.execute('skill_retire', { name: 'saved-write', expected_version: 1 }))
+  const host = installSuccessHost(f)
+  await expect(rawSkills(f).stageOwnerVerifiedSuccessCandidate(growthExec(f),
+    successDepositInput(host.locators, { name: 'saved-write', description: 'Would-be resurrection.' }), growthAuthority(f))).rejects.toThrow('version conflict')
+  expect(rawSkills(f).inspectOwnerSkillCandidates(f.scope)).toEqual([])
+})
+
+test('owner skill enumeration distinguishes active skills from pending candidates', async () => {
+  const f = await fixture(); result(await f.save())
+  const service = rawSkills(f)
+  expect(service.inspectOwnerActiveSkills(f.scope)).toHaveLength(1)
+  expect(service.inspectOwnerSkillCandidates(f.scope)).toEqual([])
+  const host = installSuccessHost(f)
+  await service.stageOwnerVerifiedSuccessCandidate(growthExec(f), successDepositInput(host.locators), growthAuthority(f))
+  expect(service.inspectOwnerActiveSkills(f.scope)).toHaveLength(1)
+  expect(service.inspectOwnerSkillCandidates(f.scope)).toHaveLength(1)
+})
+
+test('owner skill enumeration throws once the service has been disposed', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-inactive-')))
+  cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const ctx = new Context()
+  const service = new AssistantSkillsService(ctx, { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'] })
+  await ctx.fiber.dispose()
+  const scope = { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: root, preset: 'primary' }
+  expect(() => service.inspectOwnerActiveSkills(scope)).toThrow('assistant-skills: inactive')
+  expect(() => service.inspectOwnerSkillCandidates(scope)).toThrow('assistant-skills: inactive')
 })

@@ -12,7 +12,7 @@ export function apply(ctx: Context, config: Config = {}): void { new AssistantSk
 export default { name, Config, apply }
 
 export type { RepairContinuationProfile } from './repair-profile.js'
-export type { RepairExecutionAuthority, RepairExecutionContext, StageFailureCandidateInput } from './service.js'
+export type { RepairExecutionAuthority, RepairExecutionContext, StageFailureCandidateInput, OwnerSuccessCandidateAuthority, StageSuccessCandidateInput } from './service.js'
 
 export { validateRepairProfiles } from './repair-profile.js'
 export { validateExternalHoldoutProfiles } from './external-holdout.js'

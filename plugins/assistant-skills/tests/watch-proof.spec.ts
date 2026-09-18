@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { OwnerGoalRunProof } from '@dsh-enhanced/assistant-goals'
 import { canonicalEvaluationScope, evaluationLearningProjectionDigest } from '@dsh-enhanced/assistant-evaluation'
-import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import type { SkillRun } from '../src/store.ts'
 import { soleSkillRunTrace, watchObservation, watchObservationResult } from '../src/watch-proof.ts'
 
@@ -40,8 +40,9 @@ function canonicalOutcome(status: 'achieved' | 'not-achieved', version = 1, disp
   const objective = disposition === 'retract' ? undefined : { outcomeId: `evaluation-objective-${version}`, status, source: { kind: version === 1 ? 'evaluator' as const : 'user-feedback' as const, id: version === 1 ? 'assistant-verifier' : 'assistant-delivery/typed-owner-feedback' },
     evidence: [{ kind: 'goal-outcome' as const, ref: subjectRef }], occurredAt: 600 + version, evaluator: { id: version === 1 ? 'assistant-verifier' : 'assistant-delivery-owner-feedback', version: version === 1 ? '1' : '2' } }
   const projectionBase = { subjectKind: 'goal-outcome' as const, subjectRef, disposition, ...(objective === undefined ? {} : { evidenceOutcomeId: objective.outcomeId }) }
-  const digest = evaluationLearningProjectionDigest({ scopeKey, situation: 'goal:goal:definition:1', execution, ...(objective === undefined ? {} : { objective }), projection: projectionBase })
-  return { triggerOutcomeId: objective?.outcomeId ?? `evaluation-retract-${version}`, scope: evaluationScope, scopeKey, scopeWatermark: version, situation: 'goal:goal:definition:1', execution,
+  const situation = goalDefinitionSituation(run.goalDefinitionDigest!)
+  const digest = evaluationLearningProjectionDigest({ scopeKey, situation, execution, ...(objective === undefined ? {} : { objective }), projection: projectionBase })
+  return { triggerOutcomeId: objective?.outcomeId ?? `evaluation-retract-${version}`, scope: evaluationScope, scopeKey, scopeWatermark: version, situation, execution,
     ...(objective === undefined ? {} : { objective }), projection: { ...projectionBase, version, digest } }
 }
 

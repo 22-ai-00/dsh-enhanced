@@ -12,7 +12,7 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { createDefinition, fileObservationSteps, instantiate, type SkillBinding, type SkillDefinition } from './definition.js'
+import { compensationDirective, createDefinition, evaluatePreconditions, fileObservationSteps, instantiate, type SkillBinding, type SkillDefinition } from './definition.js'
 import { captureFailureCandidateProvenance, captureRunExpansions } from './capture-expansion.js'
 import { validateComparisonProfiles, SkillComparator, type SkillComparisonProfile } from './comparison.js'
 import { watchBindingCurrent, watchObservation, watchObservationResult, watchObservationRevision } from './watch-proof.js'
@@ -30,8 +30,23 @@ import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRun, type S
 export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[]; externalHoldouts?: ExternalHoldoutProfile[]; repairProfiles?: RepairContinuationProfile[] }
 /** Narrow Host-only capability for a finite continuation of a prior owner authorization. */
 export interface RepairExecutionAuthority { readonly id: string; readonly scope: GoalScope; readonly ownerRouteId: string; readonly expiresAt: number; assertCurrent(): void }
+/**
+ * Host-only capability for a single autonomous growth deposit.  It has the
+ * same narrow shape as a repair authority, but it is NOT backed by a repair
+ * continuation record: the growth driver mints it from a frozen configured
+ * owner scope for one bounded wake only.  It can draft a pending candidate and
+ * nothing else — never save/activate/install/retire/rollback.
+ */
+export interface OwnerSuccessCandidateAuthority { readonly id: string; readonly scope: GoalScope; readonly ownerRouteId: string; readonly expiresAt: number; assertCurrent(): void }
 export type RepairExecutionContext = Pick<ToolRunContext, 'agent' | 'signal'>
 export interface StageFailureCandidateInput { readonly ownerRouteId: string; readonly triggerGoalId?: string; readonly triggerSessionId?: string; readonly failureLocators?: unknown; readonly minimumOccurrences?: number; readonly repairGoalId: string; readonly repairSessionId: string; readonly taskFamilyId: string; readonly name: string; readonly description: string; readonly bindings?: readonly SkillBinding[]; readonly parentVersion: number }
+/**
+ * Owner-anchored autonomous success deposit.  Locators are model-suggested
+ * discovery hints only; the Host re-derives every source through
+ * goals.inspectOwnerVerifiedWorkflowSource, so a model cannot forge evidence.
+ * parentVersion is deliberately absent: the Host resolves the current parent.
+ */
+export interface StageSuccessCandidateInput { readonly ownerRouteId: string; readonly successLocators: unknown; readonly minimumOccurrences?: number; readonly name: string; readonly description: string; readonly bindings?: readonly SkillBinding[] }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-skills.sqlite')),
   allowedTools: Schema.array(Schema.string()).default(['read', 'write', 'edit']),
@@ -100,6 +115,36 @@ function failureWindow(input: { triggerGoalId?: unknown; triggerSessionId?: unkn
   const canonical = failures.map(locator => ({ sessionId: locator.sessionId, goalId: locator.goalId }))
     .sort((left, right) => compare(left.sessionId, right.sessionId) || compare(left.goalId, right.goalId))
   return { failures: Object.freeze(canonical.map(locator => Object.freeze(locator))), minimumOccurrences: minimumOccurrences as number }
+}
+/**
+ * Bounded window of model-suggested owner-root success locators for one
+ * autonomous growth deposit.  The locator shape ({sessionId,goalId}) is
+ * identical to a failure locator; only its meaning differs.  Discovery only —
+ * every locator still has to pass an independent owner verified source read.
+ */
+function successWindow(input: { successLocators?: unknown; minimumOccurrences?: unknown }): { successes: readonly FailureLocator[]; minimumOccurrences: number } {
+  const raw = input.successLocators
+  const minimumOccurrences = input.minimumOccurrences ?? 1
+  if (!Array.isArray(raw) || Object.getPrototypeOf(raw) !== Array.prototype || raw.length < 1 || raw.length > 32
+    || Object.getOwnPropertySymbols(raw).length !== 0 || Reflect.ownKeys(raw).length !== raw.length + 1
+    || !Number.isSafeInteger(minimumOccurrences) || (minimumOccurrences as number) < 1 || (minimumOccurrences as number) > 32
+    || (minimumOccurrences as number) > raw.length) {
+    throw new Error('assistant-skills: invalid bounded success locator window')
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(raw), successes: FailureLocator[] = []
+  for (let index = 0; index < raw.length; index++) {
+    const descriptor = descriptors[String(index)]
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor) || !failureLocator(descriptor.value)) {
+      throw new Error('assistant-skills: invalid bounded success locator window')
+    }
+    successes.push(descriptor.value)
+  }
+  const identities = successes.map(locator => acceptanceDigest(locator))
+  if (new Set(identities).size !== identities.length) throw new Error('assistant-skills: duplicate success locator')
+  const compare = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0
+  const canonical = successes.map(locator => ({ sessionId: locator.sessionId, goalId: locator.goalId }))
+    .sort((left, right) => compare(left.sessionId, right.sessionId) || compare(left.goalId, right.goalId))
+  return { successes: Object.freeze(canonical.map(locator => Object.freeze(locator))), minimumOccurrences: minimumOccurrences as number }
 }
 function publicDefinition(definition: SkillDefinition | StoredSkillDefinition) {
   const source = { digest: acceptanceDigest(definition.source), goalDefinitionDigest: definition.source.goal.definition.digest, stepCount: definition.source.steps.length,
@@ -778,6 +823,114 @@ export class AssistantSkillsService extends Service {
   stageOwnerAuthorizedFailureCandidate = (exec: RepairExecutionContext, input: StageFailureCandidateInput, authority: RepairExecutionAuthority) => {
     return this.stageFailureCandidate(exec, input, authority)
   }
+
+  /**
+   * Host-only autonomous SUCCESS deposit for the growth driver.  Unlike the
+   * repair/failure path it is deliberately NOT anchored to a durable repair
+   * continuation: a successful goal creates none.  Instead the caller supplies
+   * a narrow, short-lived OwnerSuccessCandidateAuthority minted from a frozen
+   * configured owner scope, and this method:
+   *   1. validates the authority (live background agent, exact scope, unexpired,
+   *      caller assertCurrent lease) and re-anchors the authenticated owner route
+   *      through delivery.validateOwnerRoute — never trusting a model-supplied id;
+   *   2. independently re-reads EVERY model-suggested locator through
+   *      goals.inspectOwnerVerifiedWorkflowSource (owner-root, succeeded,
+   *      quiescent, double-read), counting DISTINCT (sessionId,goalId);
+   *   3. stages one PENDING candidate only when the distinct verified-success
+   *      count meets minimumOccurrences.  It never writes a current version, so
+   *      skill_run cannot reach it; activation stays behind the existing owner
+   *      gates.  A retired same-name skill or any version conflict fails closed.
+   */
+  async stageOwnerVerifiedSuccessCandidate(exec: RepairExecutionContext, rawInput: StageSuccessCandidateInput, authority: OwnerSuccessCandidateAuthority) {
+    // --- authority + exact owner scope (no repair continuation is consulted) ---
+    exec.signal.throwIfAborted(); this.#lifecycle.signal.throwIfAborted()
+    if (!this.#active || !exec.agent || this.ctx.get('agents')?.get(exec.agent.id) !== exec.agent
+      || !Number.isSafeInteger(authority.expiresAt) || authority.expiresAt <= Date.now()
+      || exec.agent.session.header.cwd !== authority.scope.workspace
+      || exec.agent.session.header.agentPreset !== authority.scope.preset) {
+      throw new Error('assistant-skills: growth success authority unavailable')
+    }
+    authority.assertCurrent()
+    const scope: GoalScope = { principalId: authority.scope.principalId, principalRecordId: authority.scope.principalRecordId,
+      principalVersion: authority.scope.principalVersion, workspace: authority.scope.workspace, preset: authority.scope.preset }
+    const route = this.#watchRoute(scope, authority.ownerRouteId)
+
+    if (rawInput === null || typeof rawInput !== 'object' || rawInput.ownerRouteId !== authority.ownerRouteId) {
+      throw new Error('assistant-skills: growth success input does not match authority')
+    }
+    const window = successWindow(rawInput)
+    const goalsApi = this.#goals()
+    if (typeof goalsApi.inspectOwnerVerifiedWorkflowSource !== 'function') {
+      throw new Error('assistant-skills: upgrade assistant-goals to use growth success deposit')
+    }
+    const signal = AbortSignal.any([exec.signal, this.#lifecycle.signal])
+
+    // --- independent Host re-read of every model-suggested locator ---
+    const sources = await Promise.all(window.successes.map(async locator => {
+      const source = await goalsApi.inspectOwnerVerifiedWorkflowSource(
+        { ownerRouteId: authority.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset,
+          sessionId: locator.sessionId, goalId: locator.goalId }, signal)
+      // The attestation must be for THIS exact owner scope, not a sibling route.
+      if (acceptanceDigest(source.scope) !== acceptanceDigest(scope)) {
+        throw new Error('assistant-skills: verified success source owner mismatch')
+      }
+      return { locator, source }
+    }))
+
+    // Distinct owner-root successes: different native Session AND business goal.
+    // The embedded source carries no cross-goal signature, so the repeat gate is
+    // a count of independently verified locators, never a model claim.
+    const distinct = new Map<string, { sessionId: string; goalId: string; source: typeof sources[number]['source'] }>()
+    for (const item of sources) {
+      const sessionId = item.source.goal.sessionId
+      if (sessionId !== item.locator.sessionId || item.source.goal.id !== item.locator.goalId) {
+        throw new Error('assistant-skills: verified success locator mismatch')
+      }
+      distinct.set(`${sessionId}${item.locator.goalId}`, { sessionId, goalId: item.locator.goalId, source: item.source })
+    }
+    if (distinct.size < window.minimumOccurrences) {
+      throw new Error(`assistant-skills: only ${distinct.size} distinct verified successes; ${window.minimumOccurrences} required`)
+    }
+
+    // --- resolve the current parent; a retired name blocks any new deposit ---
+    const options = { name: rawInput.name, description: rawInput.description, ...(rawInput.bindings === undefined ? {} : { bindings: rawInput.bindings }) }
+    const activeParent = this.#store.get(scope, options.name)
+    const parentVersion = activeParent?.version ?? 0
+    // Build the definition from ONE representative verified source; provenance
+    // below binds the full distinct-success set so the repeat evidence is durable.
+    const representative = [...distinct.values()].sort((left, right) =>
+      left.sessionId < right.sessionId ? -1 : left.sessionId > right.sessionId ? 1
+        : left.goalId < right.goalId ? -1 : left.goalId > right.goalId ? 1 : 0)[0]!
+    const definition = this.#capturedDefinition(representative.source, options, scope)
+
+    // --- re-validate authority/route right before the write ---
+    authority.assertCurrent()
+    this.#watchRoute(scope, authority.ownerRouteId, route)
+    const provenance = Object.freeze({
+      protocol: 'assistant-skills/growth-success-provenance/v1' as const,
+      ownerRouteId: authority.ownerRouteId,
+      distinctSuccessCount: distinct.size,
+      requiredCount: window.minimumOccurrences,
+      successes: [...distinct.values()]
+        .map(value => ({ sessionId: value.sessionId, goalId: value.goalId,
+          sourceDigest: acceptanceDigest(value.source), goalDefinitionDigest: value.source.goal.definition.digest,
+          runId: value.source.runId, acceptanceContractId: value.source.acceptance.contractId }))
+        .sort((left, right) => left.sourceDigest < right.sourceDigest ? -1 : left.sourceDigest > right.sourceDigest ? 1 : 0),
+    })
+    this.#authorize(exec.agent, 'draft', [scope, definition, parentVersion, acceptanceDigest(provenance)])
+    // stageCandidate enforces retired/version conflict and pending idempotency.
+    // The distinct-success set is not stored in the failure-provenance slot
+    // (that shape is repair-specific); its digest is folded into trigger, which
+    // is part of the durable candidate identity formula, making the repeat
+    // evidence tamper-evident without a schema migration.
+    const provenanceDigest = acceptanceDigest(provenance)
+    const reason = `Host-verified autonomous growth deposit after ${distinct.size} independently owner-verified repeated successes.`
+    const trigger = `growth-success:${distinct.size}:${provenanceDigest}`
+    const candidate = this.#store.stageCandidate(scope, definition, {
+      expectedVersion: parentVersion, reason, trigger, expiresAt: Date.now() + this.#candidateTtl,
+    })
+    return this.#preview(scope, candidate)
+  }
   #preview(scope: GoalScope, candidate: SkillCandidate) {
     const parent = candidate.parentVersion ? this.#store.get(scope, candidate.definition.name, candidate.parentVersion) : undefined
     return publicCandidate(candidate, parent)
@@ -787,6 +940,22 @@ export class AssistantSkillsService extends Service {
     if (!id) return this.#store.listCandidates(scope).map(candidate => this.#preview(scope, candidate))
     const candidate = this.#store.getCandidate(scope, id)
     return candidate ? this.#preview(scope, candidate) : null
+  }
+  /**
+   * Host-only read of the active current skills of a delivery-anchored owner
+   * scope.  The caller MUST first establish the scope through
+   * delivery.validateOwnerRoute (exact owner route); this enumeration consumes
+   * no live owner turn and exists for bounded background growth agents.  It is
+   * discovery-only and cannot write.
+   */
+  inspectOwnerActiveSkills(scope: GoalScope) {
+    if (!this.#active) throw new Error('assistant-skills: inactive')
+    return this.#store.list(scope).map(publicDefinition)
+  }
+  /** Host-only read of every skill candidate of a delivery-anchored owner scope. */
+  inspectOwnerSkillCandidates(scope: GoalScope) {
+    if (!this.#active) throw new Error('assistant-skills: inactive')
+    return this.#store.listCandidates(scope).map(candidate => this.#preview(scope, candidate))
   }
   #pending(scope: GoalScope, id: string): SkillCandidate {
     const candidate = this.#store.getCandidate(scope, id)
@@ -1433,7 +1602,9 @@ export class AssistantSkillsService extends Service {
       const tool = candidateId ? 'skill_trial' : 'skill_run'
       return { state: 'awaiting-native-round' as const, performed: false, context: 'No skill step or durable invocation has been claimed or executed; this is not a queued background task.', next: `After the Host starts this Goal's native round, call ${tool} again with this same goal, skill or candidate, inputs, and invocation_id.`, goalId, ...(candidateId ? { candidateId } : {}), skillName: name, version, invocationId, inputs }
     }
-    if (acceptanceDigest(scope) !== acceptanceDigest(current.scope) || goalId === skill.source.goal.id) throw new Error('assistant-skills: fresh owner Goal required')
+    // Consume the typed precondition family rather than an ad-hoc condition so
+    // an unknown/tampered declaration fails closed before a run is claimed.
+    evaluatePreconditions(skill.preconditions, { ownerScopeDigest: acceptanceDigest(scope), currentScopeDigest: acceptanceDigest(current.scope), goalId, sourceGoalId: skill.source.goal.id })
     const identity = acceptanceDigest(current)
     const goalContext = current as typeof current & { nativeGoalId?: string }
     // claim() reconciles a deployed version while holding its transaction.  Do
@@ -1479,6 +1650,9 @@ export class AssistantSkillsService extends Service {
     const completed: SkillRunStep[] = []
     let state: 'succeeded' | 'failed' | 'unknown' = 'unknown'
     let dispatched = false
+    // Resolve the compensation family up front; an unsupported/tampered value
+    // fails closed before any step is dispatched.
+    const compensation = compensationDirective(definition.compensation)
     const revalidate = () => {
       signal.throwIfAborted()
       if (acceptanceDigest(this.#scope(exec.agent, action)) !== acceptanceDigest(scope)
@@ -1526,6 +1700,12 @@ export class AssistantSkillsService extends Service {
           dispatched = false
         }
         revalidate()
+        // Dependency DAG gate: every declared predecessor must have completed
+        // successfully. Topological storage means a missing predecessor can only
+        // result from an earlier failure, at which point the resolved compensation
+        // family stops the remaining steps (the v1 family always does).
+        const succeededById = new Set(completed.filter(entry => entry.state === 'succeeded').map(entry => entry.id))
+        if (compensation.stopRemainingSteps && step.dependsOn.some(dependency => !succeededById.has(dependency))) { state = 'failed'; break stepsLoop }
         if (!this.#allowed.includes(step.toolName)) throw new Error('assistant-skills: current tool allowlist denied')
         dispatched = true
         const result = await exec.agent!.ctx.get('tools')!.execute({ callId: ToolCallId(`${exec.callId}:skill:${index + 1}`), rootCallId: exec.rootCallId, parent: exec.token, agent: exec.agent!, name: step.toolName, arguments: step.arguments, signal })
