@@ -66,6 +66,8 @@
 
 | [assistant-skills](assistant-skills) | `@dsh-enhanced/assistant-skills` | 实验性 | 独立验收任务的私有版本化工具技能、原生发现与新目标复用。 |
 
+| [assistant-growth-driver](assistant-growth-driver) | `@dsh-enhanced/assistant-growth-driver` | 实验性 | Opt-in、默认关闭的主动成长轮：有界后台 Agent 只读回顾 owner 已验收的重复成功，Host 复核后仅沉淀 pending skill candidate；另有独立开关的 owner-anchored workflow 轨（Delivery 持 goals 独立复核真实成功 goal，单条即沉淀 paused automation，占位 cron 未被 owner 显式替换前 store 层禁止激活）；路由钉死 super-relay/alwaysday1，零 activate/install。 |
+
 <!-- plugin-catalog:end -->
 
 状态建议使用“实验性 / Beta / 稳定 / 已弃用”。新增、重命名、弃用或移除插件时必须同步维护此表。
