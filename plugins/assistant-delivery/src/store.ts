@@ -16,6 +16,7 @@ import {
   workflowArgumentShapeDigest,
   workflowScopeKey,
   workflowTraceRevisionDigest,
+  WORKFLOW_OWNER_ANCHORED_PLACEHOLDER_SCHEDULE,
   type ResolvedWorkflowAutomationTemplate,
   type WorkflowAutomationTemplate,
   type WorkflowAutomationTemplateContent,
@@ -410,6 +411,37 @@ interface WorkflowTemplateRow {
   version: number
 }
 
+interface WorkflowOwnerAnchoredTemplateRow {
+  template_ref: string
+  template_digest: string
+  scope_key: string
+  workspace: string
+  preset: string
+  owner_binding_id: string
+  binding_version: number
+  binding_generation: number
+  principal_id: string
+  content_json: string
+  privacy_kind: 'owner-anchored'
+  privacy_attestation_id: string
+  privacy_attestation_digest: string
+  review_receipt_json: string
+  status: 'active' | 'revoked'
+  version: number
+  task_ref: string
+  owner_route_id: string
+  goal_id: string
+  native_goal_id: string
+  session_id: string
+  run_id: string
+  turn: number
+  acceptance_contract_id: string
+  acceptance_receipt_digest: string
+  owner_run_trace_digest: string
+  created_at: number
+  updated_at: number
+}
+
 export interface WorkflowTraceOutboxEntry {
   revision: Readonly<WorkflowTraceRevision>
   status: WorkflowTraceOutboxRow['status']
@@ -457,20 +489,88 @@ export type VerifiedWorkflowTraceFeedbackResult = Readonly<{
       replayed: boolean
     }>)
 
+/** Shared binding/principal anchors every review kind must carry. */
+export interface WorkflowTemplateReviewBinding {
+  bindingId: string
+  bindingVersion: number
+  bindingGeneration: number
+  principalId: string
+}
+
+/**
+ * Review receipt anchored on the live Inbox/Outbox fence for the owner-explicit
+ * and deterministic-deidentification routes stored in workflow_template_registry.
+ */
+export type StoredWorkflowTemplateReview = Readonly<WorkflowTemplateReviewBinding> & (
+  | Readonly<{
+      kind: 'inbox-anchored'
+      reviewInboxId: string
+      sourceInboxId: string
+      sourceOutboxId: string
+    }>
+  | Readonly<{
+      /**
+       * Anchored on a Delivery-reverified owner-root successful Goal run rather
+       * than a live conversation fence. It carries the exact goal/run/acceptance
+       * identity and the owner-run-trace digest instead of inbox/outbox ids.
+       */
+      kind: 'goal-anchored'
+      ownerRouteId: string
+      goalId: string
+      nativeGoalId: string
+      sessionId: string
+      runId: string
+      turn: number
+      acceptanceContractId: string
+      acceptanceReceiptDigest: string
+      ownerRunTraceDigest: string
+      taskRef: string
+    }>
+)
+
 export interface StoredWorkflowTemplate {
   resolved: Readonly<ResolvedWorkflowAutomationTemplate>
-  review: Readonly<{
-    bindingId: string
-    bindingVersion: number
-    bindingGeneration: number
-    principalId: string
-    reviewInboxId: string
-    sourceInboxId: string
-    sourceOutboxId: string
-  }>
+  review: StoredWorkflowTemplateReview
   status: WorkflowTemplateRow['status']
   version: number
 }
+
+/**
+ * Outcome of an owner-anchored workflow learning attempt. A goal that cannot be
+ * honestly reduced to the single `assistant.agent-turn` step Automations can
+ * safely materialize abstains with zero writes rather than emitting a trace.
+ */
+export type CommitOwnerAnchoredWorkflowTraceResult =
+  | Readonly<{
+      outcome: 'trace-recorded'
+      revision: Readonly<WorkflowTraceRevision>
+      template: Readonly<WorkflowAutomationTemplate>
+      replayed: boolean
+    }>
+  | Readonly<{
+      outcome: 'abstained'
+      reason: 'not-reducible'
+      replayed: false
+    }>
+
+/**
+ * The Goals orchestration primitives that are part of goal bookkeeping rather
+ * than owner-facing business/executive tools. A successful native Goal run is
+ * reducible to the single model-turn fingerprint Automations can run only when
+ * every settled call is one of these read/planning/control primitives; any
+ * other tool (Read/Glob/Grep/Bash/Edit/executive MCP tools, ...) means the
+ * learned automation would need a real tool plane that paused materialization
+ * does not provide, so the goal abstains fail-closed.
+ */
+const OWNER_ANCHORED_REDUCIBLE_GOAL_TOOLS = Object.freeze(new Set<string>([
+  'goal_strategy',
+  'goal_schedule',
+  'goal_wait_event',
+  'goal_create',
+  'goal_context',
+  'goal_checkpoint',
+  'goal_control',
+]))
 
 function workflowTraceRevision(row: WorkflowTraceRevisionRow): Readonly<WorkflowTraceRevision> {
   let parsed: unknown
@@ -6523,6 +6623,252 @@ export class DeliveryStore {
     return committed
   }
 
+  /**
+   * Record a workflow learned from one Delivery-reverified owner-root successful
+   * Goal run. Unlike the two conversation-fenced routes, there is no live
+   * Inbox/Outbox: the caller (the Host-only Delivery service method) must have
+   * independently re-fetched the verified Goals source and the owner-run-trace
+   * proof, so this method never accepts a caller-supplied prompt, template, or
+   * proof digest — all of them are rebuilt below from the verified source.
+   *
+   * The goal must be honestly reducible to the single built-in
+   * `assistant.agent-turn` step that paused Growth materialization can run
+   * (exactly one step, zero executable/business tools). Otherwise it abstains
+   * with zero writes. The raw objective is stored only in the new table's
+   * content_json and never enters the trace. Re-submitting the same verified
+   * run deterministically replays its prior revision.
+   */
+  commitOwnerAnchoredWorkflowTrace(input: Readonly<{
+    binding: Readonly<ConversationBinding>
+    ownerRouteId: string
+    scope: Readonly<{ workspace: string; preset: string }>
+    goal: Readonly<{
+      id: string
+      definition: Readonly<{ version: number; digest: string; objective: string }>
+      sessionId: string
+      nativeGoalId: string
+    }>
+    runId: string
+    turn: number
+    acceptance: Readonly<{ contractId: string; receiptDigest: string; verifiedAt: number; validUntil: number }>
+    steps: readonly Readonly<{ id: string; toolName: string }>[]
+    failedObservations?: readonly unknown[]
+    /** Trusted owner-run-trace digest re-fetched by the service via Goals Host proof. */
+    ownerRunTraceDigest: string
+  }>): CommitOwnerAnchoredWorkflowTraceResult {
+    this.assertOpen()
+    const digest64 = /^[a-f0-9]{64}$/u
+    if (typeof input !== 'object' || input === null
+      || typeof input.ownerRouteId !== 'string' || input.ownerRouteId === ''
+      || typeof input.scope?.workspace !== 'string' || typeof input.scope?.preset !== 'string'
+      || typeof input.goal?.id !== 'string' || typeof input.goal?.nativeGoalId !== 'string'
+      || typeof input.goal?.sessionId !== 'string'
+      || !Number.isSafeInteger(input.goal?.definition?.version) || input.goal.definition.version < 1
+      || typeof input.goal?.definition?.digest !== 'string' || !digest64.test(input.goal.definition.digest)
+      || typeof input.goal?.definition?.objective !== 'string' || input.goal.definition.objective === ''
+      || Buffer.byteLength(input.goal?.definition?.objective ?? '', 'utf8') > 8192
+      || typeof input.runId !== 'string' || input.runId === ''
+      || !Number.isSafeInteger(input.turn) || input.turn < 0
+      || typeof input.acceptance?.contractId !== 'string' || input.acceptance.contractId === ''
+      || typeof input.acceptance?.receiptDigest !== 'string' || !digest64.test(input.acceptance.receiptDigest)
+      || !Number.isSafeInteger(input.acceptance?.verifiedAt) || input.acceptance.verifiedAt < 0
+      || !Number.isSafeInteger(input.acceptance?.validUntil) || input.acceptance.validUntil <= input.acceptance?.verifiedAt
+      || typeof input.ownerRunTraceDigest !== 'string' || !digest64.test(input.ownerRunTraceDigest)
+      || !Array.isArray(input.steps) || input.steps.length === 0) {
+      throw new DeliveryStoreError('conflict', 'owner-anchored workflow tuple is invalid')
+    }
+    // Fail-closed reduction gate, evaluated before any write. The learned
+    // automation is a single no-tool model turn, so every settled call in the
+    // successful run must be Goals bookkeeping, and even bounded failed read
+    // probes disqualify this slice rather than being silently dropped.
+    const reducible = input.steps.every(step => typeof step?.id === 'string' && step.id !== ''
+      && typeof step?.toolName === 'string'
+      && OWNER_ANCHORED_REDUCIBLE_GOAL_TOOLS.has(step.toolName))
+      && (input.failedObservations === undefined || input.failedObservations.length === 0)
+    if (!reducible) {
+      return Object.freeze({ outcome: 'abstained', reason: 'not-reducible', replayed: false })
+    }
+    return this.transaction(() => {
+      const binding = this.getBinding(input.binding.id)
+      const owner = binding === undefined ? undefined : this.getPrincipal(binding.principal)
+      if (binding === undefined || binding.status !== 'active'
+        || binding.version !== input.binding.version || binding.generation !== input.binding.generation
+        || JSON.stringify(binding.conversation) !== JSON.stringify(input.binding.conversation)
+        || JSON.stringify(binding.principal) !== JSON.stringify(input.binding.principal)
+        || binding.workspace !== input.binding.workspace || binding.agentPreset !== input.binding.agentPreset
+        || owner?.status !== 'active' || owner.role !== 'owner') {
+        throw new DeliveryStoreError('unauthorized-principal', 'owner-anchored workflow owner binding changed')
+      }
+      if (input.scope.workspace !== binding.workspace || input.scope.preset !== binding.agentPreset) {
+        throw new DeliveryStoreError('invalid-binding', 'owner-anchored workflow scope does not match the owner binding')
+      }
+
+      const anchor = Object.freeze({
+        scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+        bindingId: binding.id,
+        goalId: input.goal.id,
+        definitionVersion: input.goal.definition.version,
+        definitionDigest: input.goal.definition.digest,
+        sessionId: input.goal.sessionId,
+        nativeGoalId: input.goal.nativeGoalId,
+        runId: input.runId,
+        turn: input.turn,
+      })
+      const subjectRef = growthObjectDigest({
+        contract: 'assistant-delivery-owner-anchored-workflow-subject/v1',
+        ...anchor,
+      })
+      const taskRef = growthObjectDigest({
+        contract: 'assistant-delivery-owner-anchored-workflow-task-ref/v1',
+        ...anchor,
+        acceptanceContractId: input.acceptance.contractId,
+        acceptanceReceiptDigest: input.acceptance.receiptDigest,
+      })
+
+      const existing = this.database.prepare(`
+        SELECT * FROM workflow_owner_anchored_templates WHERE task_ref = ?
+      `).get(taskRef) as WorkflowOwnerAnchoredTemplateRow | undefined
+      if (existing !== undefined) {
+        if (existing.goal_id !== input.goal.id || existing.run_id !== input.runId
+          || existing.turn !== input.turn || existing.session_id !== input.goal.sessionId
+          || existing.native_goal_id !== input.goal.nativeGoalId
+          || existing.owner_route_id !== input.ownerRouteId
+          || existing.acceptance_contract_id !== input.acceptance.contractId
+          || existing.acceptance_receipt_digest !== input.acceptance.receiptDigest
+          || existing.owner_run_trace_digest !== input.ownerRunTraceDigest) {
+          throw new DeliveryStoreError('idempotency-conflict', 'owner-anchored task identity was reused with different evidence')
+        }
+        const currentRow = this.database.prepare(`
+          SELECT revision.* FROM workflow_trace_current AS current
+          JOIN workflow_trace_revisions AS revision
+            ON revision.subject_ref = current.subject_ref AND revision.version = current.version
+          WHERE current.subject_ref = ?
+        `).get(subjectRef) as WorkflowTraceRevisionRow | undefined
+        if (currentRow === undefined) {
+          throw new DeliveryStoreError('conflict', 'owner-anchored workflow replay is missing its trace')
+        }
+        const revision = workflowTraceRevision(currentRow)
+        const replayTemplate = revision.evidence?.template
+        if (revision.disposition !== 'upsert' || replayTemplate === undefined
+          || replayTemplate.templateRef !== existing.template_ref
+          || replayTemplate.templateDigest !== existing.template_digest) {
+          throw new DeliveryStoreError('conflict', 'owner-anchored workflow replay trace is inconsistent')
+        }
+        return Object.freeze({ outcome: 'trace-recorded' as const, revision, template: replayTemplate, replayed: true })
+      }
+
+      const content = validateWorkflowAutomationTemplateContent({
+        scope: { workspace: binding.workspace, preset: binding.agentPreset },
+        ownerBindingId: binding.id,
+        principalId: externalPrincipalId(binding.principal),
+        name: 'Owner-anchored workflow',
+        prompt: input.goal.definition.objective,
+        schedule: WORKFLOW_OWNER_ANCHORED_PLACEHOLDER_SCHEDULE,
+        timeoutMs: 60_000,
+        toolCatalogIds: ['assistant.agent-turn'],
+        deliveryBindingId: binding.id,
+      })
+      const templateDigest = workflowAutomationTemplateContentDigest(content)
+      const reviewReceipt = Object.freeze({
+        contractVersion: 1 as const,
+        kind: 'owner-anchored-template-review' as const,
+        limitation: 'deidentification-unproven' as const,
+        provenance: 'owner-goal-success' as const,
+        scheduleUnconfirmed: true as const,
+        templateDigest,
+        bindingId: binding.id,
+        bindingVersion: binding.version,
+        bindingGeneration: binding.generation,
+        principalId: owner.id,
+        ownerRouteId: input.ownerRouteId,
+        goalId: input.goal.id,
+        nativeGoalId: input.goal.nativeGoalId,
+        sessionId: input.goal.sessionId,
+        runId: input.runId,
+        turn: input.turn,
+        acceptanceContractId: input.acceptance.contractId,
+        acceptanceReceiptDigest: input.acceptance.receiptDigest,
+        ownerRunTraceDigest: input.ownerRunTraceDigest,
+        taskRef,
+      })
+      const attestationDigest = growthObjectDigest({
+        contract: 'assistant-delivery-workflow-owner-anchored-template-review/v1',
+        receipt: reviewReceipt,
+      })
+      const templateRef = `workflow-template:${growthObjectDigest({
+        contract: 'assistant-delivery-workflow-template-ref/v3',
+        templateDigest,
+        goalId: input.goal.id,
+        runId: input.runId,
+      })}`
+      const template = validateWorkflowAutomationTemplate({
+        templateRef,
+        templateDigest,
+        privacyAttestation: {
+          kind: 'owner-anchored',
+          limitation: 'deidentification-unproven',
+          provenance: 'owner-goal-success',
+          attestationId: `workflow-owner-anchored:${attestationDigest}`,
+          attestationDigest,
+        },
+      })
+
+      const payload: Omit<WorkflowTraceRevision, 'digest'> = Object.freeze({
+        source: this.workflowTraceSourceAttestation(),
+        scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+        subjectRef,
+        version: 1,
+        disposition: 'upsert' as const,
+        evidence: Object.freeze({
+          occurredAt: input.acceptance.verifiedAt,
+          signal: 'owner-anchored' as const,
+          objectiveStatus: 'achieved' as const,
+          ownerBindingId: binding.id,
+          taskRef,
+          taskEvidenceDigest: input.ownerRunTraceDigest,
+          template,
+          steps: Object.freeze([Object.freeze({
+            catalogId: 'assistant.agent-turn',
+            argumentSchemaDigest: workflowArgumentShapeDigest({ prompt: content.prompt }),
+          })]),
+        }),
+      })
+      const revision = validateWorkflowTraceRevision({
+        ...payload,
+        digest: workflowTraceRevisionDigest(payload),
+      })
+
+      const now = this.now()
+      this.database.prepare(`
+        INSERT INTO workflow_owner_anchored_templates(
+          template_ref, template_digest, scope_key, workspace, preset, owner_binding_id,
+          binding_version, binding_generation, principal_id, content_json, privacy_kind,
+          privacy_attestation_id, privacy_attestation_digest, review_receipt_json, status,
+          version, task_ref, owner_route_id, goal_id, native_goal_id, session_id, run_id, turn,
+          acceptance_contract_id, acceptance_receipt_digest, owner_run_trace_digest,
+          created_at, updated_at
+        ) VALUES (
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'owner-anchored', ?, ?, ?, 'active', 1,
+          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+      `).run(
+        template.templateRef, template.templateDigest, workflowScopeKey(content.scope),
+        content.scope.workspace, content.scope.preset, binding.id,
+        binding.version, binding.generation, owner.id, JSON.stringify(content),
+        template.privacyAttestation.attestationId, template.privacyAttestation.attestationDigest,
+        JSON.stringify(reviewReceipt),
+        taskRef, input.ownerRouteId, input.goal.id, input.goal.nativeGoalId,
+        input.goal.sessionId, input.runId, input.turn, input.acceptance.contractId,
+        input.acceptance.receiptDigest, input.ownerRunTraceDigest, now, now,
+      )
+      const recorded = this.insertWorkflowTraceRevisionInTransaction(revision)
+      if (recorded.replayed) {
+        throw new DeliveryStoreError('version-conflict', 'new owner-anchored workflow unexpectedly replayed a trace version')
+      }
+      return Object.freeze({ outcome: 'trace-recorded' as const, revision, template, replayed: false })
+    })
+  }
+
   private insertVerifiedWorkflowTaskFeedback(input: Readonly<{
     sourceOutboxId: string
     sourceInboxId: string
@@ -6627,7 +6973,7 @@ export class DeliveryStore {
     const row = this.database.prepare(`
       SELECT * FROM workflow_template_registry WHERE template_ref = ?
     `).get(template.templateRef) as WorkflowTemplateRow | undefined
-    if (row === undefined) return undefined
+    if (row === undefined) return this.getOwnerAnchoredWorkflowTemplate(template)
     let contentValue: unknown
     let reviewValue: unknown
     try {
@@ -6745,6 +7091,7 @@ export class DeliveryStore {
     return Object.freeze({
       resolved,
       review: Object.freeze({
+        kind: 'inbox-anchored' as const,
         bindingId: row.owner_binding_id,
         bindingVersion: review['bindingVersion'] as number,
         bindingGeneration: review['bindingGeneration'] as number,
@@ -6752,6 +7099,130 @@ export class DeliveryStore {
         reviewInboxId: row.review_inbox_id,
         sourceInboxId: row.source_inbox_id,
         sourceOutboxId: row.source_outbox_id,
+      }),
+      status: row.status,
+      version: row.version,
+    })
+  }
+
+  /**
+   * Rebuild a template learned from a Delivery-reverified owner-root Goal run.
+   * Every column and receipt field is re-derived and cross-checked; a mismatch
+   * fails closed rather than resolving attacker- or corruption-influenced data.
+   */
+  private getOwnerAnchoredWorkflowTemplate(template: Readonly<WorkflowAutomationTemplate>): StoredWorkflowTemplate | undefined {
+    const row = this.database.prepare(`
+      SELECT * FROM workflow_owner_anchored_templates WHERE template_ref = ?
+    `).get(template.templateRef) as WorkflowOwnerAnchoredTemplateRow | undefined
+    if (row === undefined) return undefined
+    let contentValue: unknown
+    let reviewValue: unknown
+    try {
+      contentValue = JSON.parse(row.content_json) as unknown
+      reviewValue = JSON.parse(row.review_receipt_json) as unknown
+    } catch {
+      throw new DeliveryStoreError('conflict', 'owner-anchored workflow payload is corrupt')
+    }
+    if (typeof reviewValue !== 'object' || reviewValue === null || Array.isArray(reviewValue)) {
+      throw new DeliveryStoreError('conflict', 'owner-anchored workflow review receipt is corrupt')
+    }
+    const review = reviewValue as Record<string, unknown>
+    const content = validateWorkflowAutomationTemplateContent(contentValue)
+    const exactReviewKeys = [
+      'contractVersion', 'kind', 'limitation', 'provenance', 'scheduleUnconfirmed', 'templateDigest',
+      'bindingId', 'bindingVersion', 'bindingGeneration', 'principalId',
+      'ownerRouteId', 'goalId', 'nativeGoalId', 'sessionId', 'runId', 'turn',
+      'acceptanceContractId', 'acceptanceReceiptDigest', 'ownerRunTraceDigest', 'taskRef',
+    ].sort()
+    const bindingVersion = review['bindingVersion']
+    const bindingGeneration = review['bindingGeneration']
+    const turn = review['turn']
+    if (Object.keys(review).sort().some((key, index) => key !== exactReviewKeys[index])
+      || Object.keys(review).length !== exactReviewKeys.length
+      || review['contractVersion'] !== 1
+      || review['kind'] !== 'owner-anchored-template-review'
+      || review['limitation'] !== 'deidentification-unproven'
+      || review['provenance'] !== 'owner-goal-success'
+      || review['scheduleUnconfirmed'] !== true
+      || review['templateDigest'] !== row.template_digest
+      || review['bindingId'] !== row.owner_binding_id
+      || review['principalId'] !== row.principal_id
+      || typeof bindingVersion !== 'number' || !Number.isSafeInteger(bindingVersion) || bindingVersion < 1
+      || typeof bindingGeneration !== 'number' || !Number.isSafeInteger(bindingGeneration) || bindingGeneration < 1
+      || bindingVersion !== row.binding_version || bindingGeneration !== row.binding_generation
+      || review['ownerRouteId'] !== row.owner_route_id
+      || review['goalId'] !== row.goal_id
+      || review['nativeGoalId'] !== row.native_goal_id
+      || review['sessionId'] !== row.session_id
+      || review['runId'] !== row.run_id
+      || review['turn'] !== row.turn
+      || typeof turn !== 'number' || !Number.isSafeInteger(turn) || turn < 0
+      || review['acceptanceContractId'] !== row.acceptance_contract_id
+      || review['acceptanceReceiptDigest'] !== row.acceptance_receipt_digest
+      || review['ownerRunTraceDigest'] !== row.owner_run_trace_digest
+      || review['taskRef'] !== row.task_ref
+      || typeof review['goalId'] !== 'string' || typeof review['nativeGoalId'] !== 'string'
+      || typeof review['sessionId'] !== 'string' || typeof review['runId'] !== 'string'
+      || typeof review['ownerRouteId'] !== 'string'
+      || typeof review['acceptanceContractId'] !== 'string'
+      || typeof review['acceptanceReceiptDigest'] !== 'string'
+      || !/^[a-f0-9]{64}$/u.test(review['acceptanceReceiptDigest'] as string)
+      || !/^[a-f0-9]{64}$/u.test(review['ownerRunTraceDigest'] as string)
+      || !/^[a-f0-9]{64}$/u.test(review['taskRef'] as string)) {
+      throw new DeliveryStoreError('conflict', 'owner-anchored workflow review receipt columns do not match')
+    }
+    const attestationDigest = growthObjectDigest({
+      contract: 'assistant-delivery-workflow-owner-anchored-template-review/v1',
+      receipt: review,
+    })
+    const storedTemplate = validateWorkflowAutomationTemplate({
+      templateRef: row.template_ref,
+      templateDigest: row.template_digest,
+      privacyAttestation: {
+        kind: 'owner-anchored',
+        limitation: 'deidentification-unproven',
+        provenance: 'owner-goal-success',
+        attestationId: row.privacy_attestation_id,
+        attestationDigest: row.privacy_attestation_digest,
+      },
+    })
+    if (JSON.stringify(storedTemplate) !== JSON.stringify(template)
+      || attestationDigest !== row.privacy_attestation_digest
+      || storedTemplate.privacyAttestation.attestationId !== `workflow-owner-anchored:${attestationDigest}`) {
+      throw new DeliveryStoreError('receipt-mismatch', 'owner-anchored workflow attestation is stale')
+    }
+    const contentBinding = this.getBinding(row.owner_binding_id)
+    const resolved = validateResolvedWorkflowAutomationTemplate({
+      contractVersion: 1,
+      template: storedTemplate,
+      ...content,
+    })
+    if (workflowScopeKey(content.scope) !== row.scope_key
+      || content.scope.workspace !== row.workspace || content.scope.preset !== row.preset
+      || content.ownerBindingId !== row.owner_binding_id || content.deliveryBindingId !== row.owner_binding_id
+      || contentBinding === undefined
+      || content.principalId !== externalPrincipalId(contentBinding.principal)
+      || workflowAutomationTemplateContentDigest(content) !== row.template_digest) {
+      throw new DeliveryStoreError('receipt-mismatch', 'owner-anchored workflow content columns do not match')
+    }
+    return Object.freeze({
+      resolved,
+      review: Object.freeze({
+        kind: 'goal-anchored' as const,
+        bindingId: row.owner_binding_id,
+        bindingVersion: row.binding_version,
+        bindingGeneration: row.binding_generation,
+        principalId: row.principal_id,
+        ownerRouteId: row.owner_route_id,
+        goalId: row.goal_id,
+        nativeGoalId: row.native_goal_id,
+        sessionId: row.session_id,
+        runId: row.run_id,
+        turn: row.turn,
+        acceptanceContractId: row.acceptance_contract_id,
+        acceptanceReceiptDigest: row.acceptance_receipt_digest,
+        ownerRunTraceDigest: row.owner_run_trace_digest,
+        taskRef: row.task_ref,
       }),
       status: row.status,
       version: row.version,

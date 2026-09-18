@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DeliveryStore } from '../src/store.ts'
+import { deliverySchemaVersion } from '../src/sqlite.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -67,7 +68,7 @@ describe('session leases', () => {
     const reopened = new DeliveryStore({ path: f.path })
     expect(reopened.getBinding(f.binding.id)?.sessionId).toBe('session-a')
     const inspected = new DatabaseSync(f.path)
-    expect((inspected.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(20)
+    expect((inspected.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(deliverySchemaVersion)
     inspected.close()
     reopened.close()
   })

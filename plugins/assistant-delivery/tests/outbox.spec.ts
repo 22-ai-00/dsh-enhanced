@@ -111,7 +111,7 @@ describe('durable outbox', () => {
     const request = {
       ...target,
       intent: { ...intent('goal-outcome:one', f, 'Verified goal result'), format: 'markdown' as const,
-        metadata: { 'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome' } },
+        metadata: { 'dsh.learning.schemaVersion': '4', 'dsh.learning.kind': 'goal-outcome' } },
     }
     const first = f.store.enqueueGoalOutcomeTarget(request)
     expect(f.store.enqueueGoalOutcomeTarget(request)).toEqual(first)

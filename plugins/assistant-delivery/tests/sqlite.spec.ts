@@ -151,7 +151,7 @@ describe('delivery SQLite boundary', () => {
     raw.close()
 
     const migrated = openDeliveryDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 20 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
     const columns = (migrated.prepare('PRAGMA table_info(delivery_goal_outcome_targets)').all() as Array<{ name: string }>)
       .map(column => column.name)
     expect(columns).toEqual([

@@ -138,6 +138,7 @@ import {
   inspectActiveWebOwnerBindingLocally,
   listActiveIdleWebOwnerBindingsLocally,
 } from '../src/operator-snapshot.ts'
+import { deliverySchemaVersion } from '../src/sqlite.ts'
 import { DeliveryStore } from '../src/store.ts'
 
 const roots: string[] = []
@@ -344,7 +345,7 @@ describe('local active Web owner snapshot', () => {
     expect(inspectActiveWebOwnerBindingLocally(query)).toEqual({ status: 'unavailable' })
     const schema = new DatabaseSync(fixture.path); schema.exec('PRAGMA user_version = 18'); schema.close()
     expect(inspectActiveWebOwnerBindingLocally(query)).toEqual({ status: 'unavailable' })
-    const current = new DatabaseSync(fixture.path); current.exec('PRAGMA user_version = 20'); current.close()
+    const current = new DatabaseSync(fixture.path); current.exec(`PRAGMA user_version = ${deliverySchemaVersion}`); current.close()
     await chmod(fixture.path, 0o644)
     expect(inspectActiveWebOwnerBindingLocally(query)).toEqual({ status: 'unavailable' })
     await chmod(fixture.path, 0o600)
@@ -378,7 +379,7 @@ describe('side-effect-free active Lark owner snapshot', () => {
     expect(await Promise.all(paths.map(fingerprint))).toEqual(before)
     expect(versionAfter).toEqual(versionBefore)
     expect(snapshot).toMatchObject({
-      protocol: 'assistant-delivery/active-lark-owner-bindings-snapshot/v1', schemaVersion: 20,
+      protocol: 'assistant-delivery/active-lark-owner-bindings-snapshot/v1', schemaVersion: deliverySchemaVersion,
       scope: { account: 'primary', tenant: 'personal', workspace: '/work/owner', agentPreset: 'standard' },
       database: { device: expect.any(String), inode: expect.any(String), size: expect.any(String),
         mtimeNs: expect.any(String), digest: expect.stringMatching(/^[a-f0-9]{64}$/u) },
@@ -450,7 +451,7 @@ describe('side-effect-free active Lark owner snapshot', () => {
     const corrupt = join(parent, 'corrupt.sqlite'); await writeFile(corrupt, 'not sqlite', { mode: 0o600 })
     expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally(larkQuery(corrupt)), 'database-corrupt')
 
-    for (const version of [19, 21]) {
+    for (const version of [deliverySchemaVersion - 1, deliverySchemaVersion + 1]) {
       const path = join(parent, `schema-${version}.sqlite`); const schema = new DatabaseSync(path)
       schema.exec(`PRAGMA user_version=${version}`); schema.close(); await chmod(path, 0o600)
       const before = await fingerprint(path)

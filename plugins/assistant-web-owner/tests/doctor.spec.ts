@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
+import { deliverySchemaVersion, ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, describe, expect, it } from 'vitest'
 import { parseDocument, stringify } from 'yaml'
 import { inspectAutonomyOwner, inspectAutonomyProfile } from '../src/doctor.js'
@@ -43,10 +43,10 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     const profile = inspectAutonomyProfile(source, 'web', home)
     const db = new DatabaseSync(databasePath)
     try {
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(20)
-      db.exec('PRAGMA user_version=19')
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(deliverySchemaVersion)
+      db.exec(`PRAGMA user_version=${deliverySchemaVersion - 2}`)
       expect(inspectAutonomyOwner(profile)).toEqual({ status: 'unavailable' })
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(19)
+      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(deliverySchemaVersion - 2)
     } finally { db.close() }
   })
 
