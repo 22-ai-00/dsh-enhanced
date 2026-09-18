@@ -5,6 +5,7 @@ import {
   acceptanceProtocolForTask,
   createTaskAcceptanceContract,
   createTaskVerificationReceipt,
+  goalDefinitionSituation,
   validateGoalArtifactAdmission,
   validateTaskAcceptanceContract,
   validateTaskVerificationReceipt,
@@ -267,5 +268,36 @@ describe('task acceptance contract', () => {
     const target = (value: number) => ({ id: 'target', kind: 'target-readback' as const, authority: { id: 'target-api', digest: sha }, objectId: 'record-1', expected: [{ pointer: '/value', value }] })
     expect(() => createTaskAcceptanceContract({ ...contractInput(), criteria: [target(Number.MAX_SAFE_INTEGER + 1)] })).toThrow(/number/i)
     expect(() => createTaskAcceptanceContract({ ...contractInput(), criteria: [target(Number.MIN_SAFE_INTEGER - 1)] })).toThrow(/number/i)
+  })
+})
+
+describe('goalDefinitionSituation', () => {
+  const digest = acceptanceDigest({ objective: 'ship the weekly report' })
+
+  test('keys solely on the definition digest', () => {
+    expect(goalDefinitionSituation(digest)).toBe(`goal-definition:${digest}`)
+  })
+
+  test('identical objectives produce the identical situation across instances', () => {
+    expect(goalDefinitionSituation(acceptanceDigest({ objective: 'same objective' })))
+      .toBe(goalDefinitionSituation(acceptanceDigest({ objective: 'same objective' })))
+    expect(goalDefinitionSituation(acceptanceDigest({ objective: 'a' })))
+      .not.toBe(goalDefinitionSituation(acceptanceDigest({ objective: 'b' })))
+  })
+
+  test('never collides with a legacy per-instance goal label', () => {
+    const legacy = `goal:goal-instance-7:definition:3`
+    expect(goalDefinitionSituation(digest)).not.toBe(legacy)
+  })
+
+  test.each([
+    ['non-string', 42],
+    ['empty', ''],
+    ['too short', 'a'.repeat(63)],
+    ['too long', 'a'.repeat(65)],
+    ['uppercase hex', 'A'.repeat(64)],
+    ['non-hex', 'z'.repeat(64)],
+  ] as const)('fails closed on a %s digest', (_label, value) => {
+    expect(() => goalDefinitionSituation(value as unknown as string)).toThrow(/SHA-256/i)
   })
 })

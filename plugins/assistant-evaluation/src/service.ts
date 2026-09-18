@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type SkillRegistry from '@deepseek-ai/dsh-skill'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
-import { acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest, goalDefinitionSituation, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import {
   EvaluationStore,
   canonicalEvaluationScope,
@@ -1196,8 +1196,10 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         let situation: string
         if (contract.task.kind === 'foreground-turn') situation = `foreground:${taskRef}`
         else if (contract.task.kind === 'goal-step' || contract.task.kind === 'goal-outcome') {
-          const goal = contract.task.goal
-          situation = `goal:${hostIdentifier(goal.id, 'goal id', 1_000)}:definition:${goal.definitionVersion}`
+          // Cluster by the goal definition *content* digest so the same
+          // objective converges across goal instances, never by the
+          // per-instance id and its monotonically drifting definition version.
+          situation = goalDefinitionSituation(contract.task.goal.definitionDigest)
         } else {
           const projection = this.store.getAutomationRunLearningProjection(scope, taskRef)
           if (projection === undefined || projection.execution === undefined) {
@@ -1425,7 +1427,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       throw new AssistantEvaluationError('forbidden', 'Goals owner proof is invalid')
     }
     const valid = value as Readonly<TrustedGoalOutcomeOwnerProof>
-    const expectedSituation = `goal:${valid.locator.goalId}:definition:${valid.goal.definitionVersion}`
+    const expectedSituation = goalDefinitionSituation(valid.goal.definitionDigest)
     if (claims.subjectKind !== 'goal-outcome' || claims.subjectRef !== valid.locator.assessmentId
       || claims.runId !== valid.locator.assessmentId || claims.scope.workspace !== valid.locator.workspace
       || claims.scope.preset !== valid.locator.preset || claims.situation !== expectedSituation

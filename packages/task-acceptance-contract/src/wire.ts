@@ -130,6 +130,27 @@ export function acceptanceDigest(value: unknown): string {
   return createHash('sha256').update(acceptanceCanonicalJson(value)).digest('hex')
 }
 
+/**
+ * Content-bound learning situation for a goal definition.
+ *
+ * Keys solely on the definition digest (`acceptanceDigest({ objective })` in
+ * assistant-goals), so two goal *instances* carrying the same objective project
+ * onto one situation and can cluster across instances. The per-instance goal id
+ * and its monotonic definition version must never appear here: embedding them
+ * made every instance its own situation and prevented cross-instance learning.
+ *
+ * The shape (`goal-definition:<64 lowercase hex>`) can never equal a legacy
+ * `goal:<id>:definition:<n>` label, so historical ledger rows remain in their
+ * own clusters without any backfill. Fail-closed: a malformed digest throws
+ * rather than producing a key that could silently split a real cluster.
+ */
+export function goalDefinitionSituation(definitionDigest: string): string {
+  if (typeof definitionDigest !== 'string' || !DIGEST.test(definitionDigest)) {
+    fail('invalid-contract', 'goal definitionDigest must be a lowercase SHA-256 digest')
+  }
+  return `goal-definition:${definitionDigest}`
+}
+
 /** Selects v4 only for goal-bound contracts whose complete criteria set is isolated. */
 export function acceptanceProtocolForTask(taskIdentity: AcceptanceTaskIdentity, criteria: readonly AcceptanceCriterion[]): 'task-acceptance/v1' | 'task-acceptance/v2' | 'task-acceptance/v3' | 'task-acceptance/v4' {
   const isolated = criteria.length > 0 && criteria.every(criterion => criterion.kind === 'isolated-process-behavior')

@@ -341,7 +341,7 @@ if (phase === undefined) describe('native event-goal wake', () => {
     const result = fixture.sends.find(intent => intent.metadata?.['dsh.learning.kind'] === 'goal-outcome')
     expect(result).toMatchObject({ idempotencyKey: expect.stringMatching(/^goal-outcome:[a-f0-9]{64}:binding_/u),
       format: 'markdown', text: expect.stringContaining('/feedback not-achieved'), metadata: {
-        'dsh.learning.schemaVersion': '3', 'dsh.learning.goalId': goalId,
+        'dsh.learning.schemaVersion': '4', 'dsh.learning.goalId': goalId,
         'dsh.learning.assessmentId': expect.stringMatching(/^goal-assessment-/u),
         'dsh.learning.objectiveStatus': 'achieved', 'dsh.learning.proofDigest': expect.stringMatching(/^[a-f0-9]{64}$/u),
       } })

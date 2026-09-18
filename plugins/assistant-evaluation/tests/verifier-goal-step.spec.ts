@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import type { AcceptedExecution, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -95,7 +95,7 @@ describe('trusted Verifier goal-step Evaluation sink', () => {
     expect(verifier.inspect(handle.contractId)).toMatchObject({
       receipt: { protocol: 'task-verification/v2', task: task.task, objectiveStatus: 'achieved' },
     })
-    const goalSituation = 'goal:goal-42:definition:7'
+    const goalSituation = goalDefinitionSituation('a'.repeat(64))
     expect(evaluation.queryTasks({ scope: task.scope, situation: goalSituation, limit: 10 })).toEqual([
       expect.objectContaining({ situation: goalSituation, projection: expect.objectContaining({ subjectKind: 'goal-step', subjectRef: 'goal-run-1' }) }),
     ])
@@ -160,11 +160,13 @@ describe('trusted Verifier goal-step Evaluation sink', () => {
     expect(verifier.inspect(unknown.contractId)).toMatchObject({
       receipt: { protocol: 'task-verification/v3', objectiveStatus: 'unknown' },
     })
-    expect(evaluation.queryTasks({ scope, situation: 'goal:goal-42:definition:7', limit: 10 })).toEqual(expect.arrayContaining([
+    const currentDefinitionSituation = goalDefinitionSituation('a'.repeat(64))
+    const oldDefinitionSituation = goalDefinitionSituation('b'.repeat(64))
+    expect(evaluation.queryTasks({ scope, situation: currentDefinitionSituation, limit: 10 })).toEqual(expect.arrayContaining([
       expect.objectContaining({ projection: expect.objectContaining({ subjectKind: 'goal-outcome', subjectRef: 'assessment-achieved' }), objectiveStatus: 'achieved' }),
       expect.objectContaining({ projection: expect.objectContaining({ subjectKind: 'goal-outcome', subjectRef: 'assessment-unknown' }), objectiveStatus: 'unknown' }),
     ]))
-    expect(evaluation.queryTasks({ scope, situation: 'goal:goal-42:definition:6', limit: 10 })).toEqual([
+    expect(evaluation.queryTasks({ scope, situation: oldDefinitionSituation, limit: 10 })).toEqual([
       expect.objectContaining({ projection: expect.objectContaining({ subjectKind: 'goal-outcome', subjectRef: 'assessment-old-definition' }), objectiveStatus: 'achieved' }),
     ])
     const achievedProjection = evaluation.getTrustedGoalOutcomeLearningProjection({
@@ -202,7 +204,7 @@ describe('trusted Verifier goal-step Evaluation sink', () => {
     }) as typeof withdrawn
     for (const candidate of [
       altered({ scopeKey: JSON.stringify([root, 'other']) }),
-      altered({ situation: 'goal:goal-42:definition:999' }),
+      altered({ situation: goalDefinitionSituation('f'.repeat(64)) }),
       altered({ projection: { ...withdrawn.projection, version: withdrawn.projection.version + 1 } }),
       altered({ projection: { ...withdrawn.projection, digest: '0'.repeat(64) } }),
       altered({ projection: { ...withdrawn.projection, disposition: 'upsert' } }),
@@ -263,7 +265,7 @@ describe('trusted Verifier goal-step Evaluation sink', () => {
       ...task('assessment-foreign-owner', 7, 'a'.repeat(64)),
       owner: { principalRecordId: 'owner-2', principalVersion: 1 },
     })).toThrow(/acceptance profile/i)
-    expect(evaluation.queryTasks({ scope, situation: 'goal:goal-42:definition:7', limit: 10 }))
+    expect(evaluation.queryTasks({ scope, situation: currentDefinitionSituation, limit: 10 }))
       .toHaveLength(2)
   })
 
@@ -328,7 +330,7 @@ describe('trusted Verifier goal-step Evaluation sink', () => {
     const registration = delivery.currentRegistration()!
     expect(registration.ownerRevisionProtocol).toBe('owner-objective-revision/v2')
     const base = {
-      scope, situation: 'goal:goal-owner:definition:3', subjectKind: 'goal-outcome' as const,
+      scope, situation: goalDefinitionSituation('a'.repeat(64)), subjectKind: 'goal-outcome' as const,
       subjectRef: 'assessment-owner', runId: 'assessment-owner', outboxId: 'outbox-owner',
       chatId: 'chat-owner', principalId: 'principal-owner', bindingId: 'binding-owner',
       occurredAt: 2_100, goalOutcomeCapability,
@@ -525,7 +527,7 @@ describe('trusted Verifier goal-step Evaluation sink', () => {
     const proof: TrustedGoalOutcomeOwnerProof = { ...unsigned, proofDigest: acceptanceDigest(unsigned) }
     const registration = restartedDelivery.currentRegistration()!
     const base = {
-      scope, situation: 'goal:goal-offline:definition:2', subjectKind: 'goal-outcome' as const,
+      scope, situation: goalDefinitionSituation('b'.repeat(64)), subjectKind: 'goal-outcome' as const,
       subjectRef: 'assessment-offline', runId: 'assessment-offline', outboxId: 'outbox-offline',
       chatId: 'chat-offline', principalId: 'principal-offline', bindingId: 'binding-offline',
       occurredAt: now, goalOutcomeCapability: restartedGoals.issueOwnerTarget(proof),
