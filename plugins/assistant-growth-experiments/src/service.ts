@@ -39,6 +39,7 @@ export const Config = Schema.object({
   maxOperationAttempts: Schema.number().step(1).min(1).max(100).default(8),
   retryBaseMs: Schema.number().step(1).min(1).max(86_400_000).default(1_000),
   retryMaxMs: Schema.number().step(1).min(1).max(86_400_000).default(60_000),
+  promotionMode: Schema.union(['propose-only', 'full'] as const).default('propose-only'),
 }) as Schema<GrowthExperimentConfig>
 
 type NormalizedConfig = Required<GrowthExperimentConfig>
@@ -340,14 +341,35 @@ export class AssistantGrowthExperimentsService extends Service {
       ? validateGrowthAutomationProposalReceipt(raw, identity(experiment))
       : validateGrowthAutomationApprovalReceipt(raw, identity(experiment))
     if (receipt.outcome === 'approved-paused') {
-      const next = stale || this.now() > experiment.deadlineAt ? 'rollback-pending' : 'replay-pending'
+      if (stale || this.now() > experiment.deadlineAt) {
+        const next = 'rollback-pending'
+        this.store.transitionExperiment({
+          experimentId: experiment.id, expectedVersion: experiment.version, expectedState: experiment.state,
+          state: next, operationKind: 'rollback', operationId: `${experiment.id}:rollback`,
+          proposalId: receipt.proposalId,
+          artifact: { id: receipt.artifactId, version: receipt.artifactVersion, digest: receipt.artifactDigest },
+          ...(stale ? { terminalCode: 'evidence-superseded' } : {}),
+        })
+        return
+      }
+      if (this.config.promotionMode === 'propose-only') {
+        // Fail-closed termination: the owner-approved artifact exists but the
+        // experiment stops here. No replay/shadow/canary/promotion ever runs,
+        // so the paused workflow is never promoted to production by this loop.
+        this.store.transitionExperiment({
+          experimentId: experiment.id, expectedVersion: experiment.version, expectedState: experiment.state,
+          state: 'proposed-paused', proposalId: receipt.proposalId,
+          artifact: { id: receipt.artifactId, version: receipt.artifactVersion, digest: receipt.artifactDigest },
+          terminalCode: 'proposed-paused-owner-hold',
+        })
+        return
+      }
+      const next = 'replay-pending'
       this.store.transitionExperiment({
         experimentId: experiment.id, expectedVersion: experiment.version, expectedState: experiment.state,
-        state: next, operationKind: next === 'rollback-pending' ? 'rollback' : 'replay',
-        operationId: `${experiment.id}:${next === 'rollback-pending' ? 'rollback' : 'replay'}`,
+        state: next, operationKind: 'replay', operationId: `${experiment.id}:replay`,
         proposalId: receipt.proposalId,
         artifact: { id: receipt.artifactId, version: receipt.artifactVersion, digest: receipt.artifactDigest },
-        ...(stale ? { terminalCode: 'evidence-superseded' } : {}),
       })
       return
     }
@@ -451,8 +473,8 @@ export class AssistantGrowthExperimentsService extends Service {
 
   private defer(experimentId: string, error: unknown): void {
     const current = this.store.getExperiment(experimentId)
-    if (current === undefined || ['conflicted', 'expired', 'promoted', 'rejected', 'rolled-back']
-      .includes(current.state)) return
+    if (current === undefined || ['conflicted', 'expired', 'proposed-paused', 'promoted', 'rejected',
+      'rolled-back'].includes(current.state)) return
     const attempts = current.attemptCount + 1
     if (attempts >= this.config.maxOperationAttempts && current.state !== 'approval-requesting') {
       if (current.state === 'rollback-pending') {

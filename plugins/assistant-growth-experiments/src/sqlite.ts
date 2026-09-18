@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const growthExperimentsSchemaVersion = 2
+export const growthExperimentsSchemaVersion = 4
 
 export class GrowthExperimentsDatabaseError extends Error {
   constructor(
@@ -105,6 +105,7 @@ function createSchema(database: DatabaseSync): void {
       evidence_count INTEGER NOT NULL CHECK (evidence_count >= 0),
       owner_explicit_count INTEGER NOT NULL CHECK (owner_explicit_count >= 0),
       verified_success_count INTEGER NOT NULL CHECK (verified_success_count >= 0),
+      owner_anchored_count INTEGER NOT NULL DEFAULT 0 CHECK (owner_anchored_count >= 0),
       template_json TEXT NOT NULL CHECK (
         json_valid(template_json) AND json_type(template_json) = 'object'
         AND length(template_json) <= 32768
@@ -136,7 +137,7 @@ function createSchema(database: DatabaseSync): void {
       ),
       state TEXT NOT NULL CHECK (state IN (
         'approval-pending', 'approval-requesting', 'canary-pending', 'conflicted',
-        'expired', 'promoted', 'promotion-pending', 'rejected', 'replay-pending',
+        'expired', 'proposed-paused', 'promoted', 'promotion-pending', 'rejected', 'replay-pending',
         'rollback-pending', 'rolled-back', 'shadow-pending'
       )),
       version INTEGER NOT NULL CHECK (version >= 1),
@@ -176,7 +177,8 @@ function createSchema(database: DatabaseSync): void {
         OR (state = 'canary-pending' AND operation_kind IN ('canary', 'canary-inspection'))
         OR (state = 'promotion-pending' AND operation_kind = 'promotion')
         OR (state = 'rollback-pending' AND operation_kind = 'rollback')
-        OR (state IN ('conflicted', 'expired', 'promoted', 'rejected', 'rolled-back') AND operation_kind IS NULL)
+        OR (state IN ('conflicted', 'expired', 'proposed-paused', 'promoted', 'rejected', 'rolled-back')
+          AND operation_kind IS NULL)
         OR state = 'approval-pending'
       )
     ) STRICT;
@@ -193,7 +195,7 @@ function createSchema(database: DatabaseSync): void {
     ) STRICT;
     INSERT INTO growth_runtime_state(singleton, last_error_code, updated_at) VALUES (1, NULL, 0);
 
-    PRAGMA user_version = 2;
+    PRAGMA user_version = 4;
   `)
 }
 
@@ -225,6 +227,102 @@ export function openGrowthExperimentsDatabase(path: string): DatabaseSync {
         'schema-too-new',
         'assistant-growth-experiments schema 1 contains legacy prompt-bearing templates and is not safely migratable',
       )
+    }
+    let version = row.user_version
+    if (version === 2) {
+      // v2 -> v3: add the terminal 'proposed-paused' experiment state used by
+      // the fail-closed propose-only promotion mode. SQLite cannot widen a
+      // CHECK constraint in place, so rebuild only growth_experiments and copy
+      // every column verbatim; workflow_candidates and the trace tables are
+      // untouched.
+      database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE growth_experiments RENAME TO growth_experiments_v2;
+        CREATE TABLE growth_experiments (
+          id TEXT PRIMARY KEY,
+          candidate_id TEXT NOT NULL,
+          candidate_revision INTEGER NOT NULL CHECK (candidate_revision >= 1),
+          candidate_digest TEXT NOT NULL CHECK (length(candidate_digest) = 64),
+          candidate_json TEXT NOT NULL CHECK (
+            json_valid(candidate_json) AND json_type(candidate_json) = 'object'
+            AND length(candidate_json) <= 65536
+          ),
+          state TEXT NOT NULL CHECK (state IN (
+            'approval-pending', 'approval-requesting', 'canary-pending', 'conflicted',
+            'expired', 'proposed-paused', 'promoted', 'promotion-pending', 'rejected', 'replay-pending',
+            'rollback-pending', 'rolled-back', 'shadow-pending'
+          )),
+          version INTEGER NOT NULL CHECK (version >= 1),
+          operation_id TEXT NOT NULL UNIQUE,
+          operation_kind TEXT CHECK (operation_kind IS NULL OR operation_kind IN (
+            'approval-proposal', 'approval-settlement', 'canary', 'canary-inspection', 'promotion',
+            'replay', 'rollback', 'shadow'
+          )),
+          deadline_at INTEGER NOT NULL CHECK (deadline_at >= 0),
+          canary_exposure_count INTEGER NOT NULL CHECK (canary_exposure_count BETWEEN 0 AND 1),
+          attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+          next_attempt_at INTEGER NOT NULL DEFAULT 0 CHECK (next_attempt_at >= 0),
+          proposal_id TEXT,
+          artifact_id TEXT,
+          artifact_version INTEGER CHECK (artifact_version IS NULL OR artifact_version >= 1),
+          artifact_digest TEXT CHECK (artifact_digest IS NULL OR length(artifact_digest) = 64),
+          terminal_code TEXT,
+          created_at INTEGER NOT NULL CHECK (created_at >= 0),
+          updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
+          FOREIGN KEY(candidate_id) REFERENCES workflow_candidates(id) ON DELETE RESTRICT,
+          CHECK (
+            (artifact_id IS NULL AND artifact_version IS NULL AND artifact_digest IS NULL)
+            OR (artifact_id IS NOT NULL AND artifact_version IS NOT NULL AND artifact_digest IS NOT NULL)
+          ),
+          CHECK (state NOT IN (
+            'replay-pending', 'shadow-pending', 'canary-pending', 'promotion-pending',
+            'rollback-pending', 'promoted', 'rolled-back'
+          ) OR artifact_id IS NOT NULL),
+          CHECK (state != 'approval-pending' OR proposal_id IS NOT NULL),
+          CHECK (operation_kind != 'approval-settlement' OR proposal_id IS NOT NULL),
+          CHECK (operation_kind != 'canary-inspection' OR canary_exposure_count = 1),
+          CHECK (state != 'promoted' OR canary_exposure_count = 1),
+          CHECK (
+            (state = 'approval-requesting' AND operation_kind IN ('approval-proposal', 'approval-settlement'))
+            OR (state = 'replay-pending' AND operation_kind = 'replay')
+            OR (state = 'shadow-pending' AND operation_kind = 'shadow')
+            OR (state = 'canary-pending' AND operation_kind IN ('canary', 'canary-inspection'))
+            OR (state = 'promotion-pending' AND operation_kind = 'promotion')
+            OR (state = 'rollback-pending' AND operation_kind = 'rollback')
+            OR (state IN ('conflicted', 'expired', 'proposed-paused', 'promoted', 'rejected', 'rolled-back')
+              AND operation_kind IS NULL)
+            OR state = 'approval-pending'
+          )
+        ) STRICT;
+        INSERT INTO growth_experiments(
+          id, candidate_id, candidate_revision, candidate_digest, candidate_json, state, version,
+          operation_id, operation_kind, deadline_at, canary_exposure_count, attempt_count, next_attempt_at,
+          proposal_id, artifact_id, artifact_version, artifact_digest, terminal_code, created_at, updated_at
+        )
+        SELECT id, candidate_id, candidate_revision, candidate_digest, candidate_json, state, version,
+          operation_id, operation_kind, deadline_at, canary_exposure_count, attempt_count, next_attempt_at,
+          proposal_id, artifact_id, artifact_version, artifact_digest, terminal_code, created_at, updated_at
+        FROM growth_experiments_v2;
+        DROP TABLE growth_experiments_v2;
+        CREATE INDEX growth_experiments_active
+          ON growth_experiments(state, updated_at, id);
+        CREATE INDEX growth_experiments_candidate
+          ON growth_experiments(candidate_id, created_at DESC, id DESC);
+        PRAGMA user_version = 3;
+        COMMIT;
+      `)
+      version = 3
+    }
+    if (version === 3) {
+      // v3 -> v4: owner-anchored learning produces one ready candidate per
+      // independently re-verified successful owner-root goal (single-item
+      // ready, no repetition gate), so add its own counter. The column is
+      // additive; every existing candidate starts at zero.
+      database.exec(`
+        ALTER TABLE workflow_candidates
+          ADD COLUMN owner_anchored_count INTEGER NOT NULL DEFAULT 0 CHECK (owner_anchored_count >= 0);
+        PRAGMA user_version = 4;
+      `)
     }
     return database
   } catch (error) {

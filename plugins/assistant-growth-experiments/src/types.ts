@@ -28,6 +28,7 @@ export interface WorkflowCandidate {
   evidenceCount: number
   ownerExplicitCount: number
   verifiedSuccessCount: number
+  ownerAnchoredCount: number
   template: Readonly<WorkflowAutomationTemplate>
   steps: readonly Readonly<WorkflowStepFingerprint>[]
   state: WorkflowCandidateState
@@ -37,7 +38,7 @@ export interface WorkflowCandidate {
 
 export type WorkflowCandidateSnapshot = Readonly<Pick<WorkflowCandidate,
   'id' | 'scope' | 'ownerBindingId' | 'signature' | 'revision' | 'evidenceDigest' | 'evidenceCount'
-  | 'ownerExplicitCount' | 'verifiedSuccessCount' | 'template' | 'steps'>>
+  | 'ownerExplicitCount' | 'verifiedSuccessCount' | 'ownerAnchoredCount' | 'template' | 'steps'>>
 
 export type GrowthExperimentState =
   | 'approval-pending'
@@ -45,6 +46,7 @@ export type GrowthExperimentState =
   | 'canary-pending'
   | 'conflicted'
   | 'expired'
+  | 'proposed-paused'
   | 'promoted'
   | 'promotion-pending'
   | 'rejected'
@@ -95,6 +97,13 @@ export interface GrowthExperimentConfig {
   maxOperationAttempts?: number
   retryBaseMs?: number
   retryMaxMs?: number
+  /**
+   * `propose-only` (default, fail-closed): once an owner approves a paused
+   * workflow artifact the experiment terminates at `proposed-paused` and never
+   * runs replay/shadow/canary/promotion. `full` restores the legacy automatic
+   * promotion waterfall (including the single real-production canary).
+   */
+  promotionMode?: 'propose-only' | 'full'
 }
 
 export interface GrowthExperimentHealth {
@@ -102,6 +111,7 @@ export interface GrowthExperimentHealth {
   readyCandidates: number
   activeExperiments: number
   rollbackPending: number
+  proposedPaused: number
   promoted: number
   traceRevisions: number
   currentTraces: number

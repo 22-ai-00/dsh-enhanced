@@ -5,7 +5,9 @@
 > 精确边界会拒绝启动，绝不降级为接受任意 trace 或模型自报。
 
 这是基于可信、版本化工作流证据的持久成长实验控制器：只接受 Delivery 的结构化 trace
-projection，不让原始工具参数离开其 Host 边界；候选经 owner 审批后，依次执行 replay、阻断
+projection，不让原始工具参数离开其 Host 边界；候选经 owner 审批后，**默认（`promotionMode:
+'propose-only'`）停在终态 `approved-paused`**——只沉淀 paused artifact 供 owner 处置，不再继续
+后续阶段。把 `promotionMode` 显式置为 `'full'` 才恢复受监督序列：依次执行 replay、阻断
 全部外部副作用的 shadow、至多一次 production canary，并且只有收到 `trusted + achieved` 评估后
 才使用 Automation CAS 提升。其余路径一律回滚。
 
@@ -33,6 +35,9 @@ dsh --profile web --dump-config
     maxOperationAttempts: 8
     retryBaseMs: 1000
     retryMaxMs: 60000
+    # propose-only（默认）：owner approved-paused 后即进入终态，绝不 replay/canary/promote。
+    # 显式置为 full 才恢复受监督实验序列。
+    promotionMode: propose-only
 ```
 
 ## 证据入口与私有 capability
@@ -61,6 +66,17 @@ Inbox/Outbox 重新证明的 reply 只会得到不可改写的本地 no-trace �
 owner-explicit trace 可以使候选 ready；自动路径则必须累积至少 `minRepeatedSuccesses` 个不同、当前
 有效的 `trusted + achieved` taskRef。重复投影同一 taskRef 不会抬高计数。
 
+第三种信号是 `owner-anchored`（2026-09-18 起，由 `assistant-growth-driver` 的独立开关
+`workflowOwnerAnchored.enabled` opt-in，默认关）：driver 不起模型，只把 locator 交给 Delivery 的
+Host-only `commitOwnerAnchoredWorkflowTrace`；Delivery 自己再调 goals
+`inspectOwnerVerifiedWorkflowSource` 独立重取证据，只接受可归约为单步零工具 agent-turn 的真实
+owner-root 成功 goal，产出 `owner-anchored / deidentification-unproven / provenance
+owner-goal-success` attestation。自由 objective 的 templateDigest 天然互不相同，结构上聚不齐重复
+门，故该信号**单条即让 candidate ready**（不要求 `minRepeatedSuccesses`），后续同样走
+`initialState: paused` 的 owner 批准链；paused artifact 冻结占位 cron `0 0 29 2 *` UTC，Automations
+store 层禁止它在 owner 显式换真 schedule 前转 active（owner 批准 resume 会落 `conflicted`、行保持
+paused）。这是工程层本地证据，不是真实外部平台证据。
+
 trace source 使用导出的 `workflowArgumentShapeDigest(value)`：它只编码 JSON 类型、对象字段和数组
 成员类型集合，标量值、数组长度和顺序不会进入 fingerprint。Delivery 将可复用模板内容保留在私有
 registry，只向 Growth 投影 `templateRef/templateDigest/privacyAttestation`；Growth 不保存 raw prompt。
@@ -70,8 +86,11 @@ registry，只向 Growth 投影 `templateRef/templateDigest/privacyAttestation`�
 
 Automations 实现导出的 `GrowthAutomationPort`。每个跨库动作先持久化 operation intent，再以固定
 `operationId` 调用；同一 operation 必须精确重放同一 receipt，payload 变化即拒绝。审批只能创建
-`initialState: paused` 的 Automation；通过审批后固定顺序为 replay → effect-blocked shadow → 单次
-production canary → trusted `achieved` 检查 → CAS promotion。canary 启动与查询是两个接口：
+`initialState: paused` 的 Automation。在 `propose-only`（默认）下，owner 批准 paused 后实验进入
+终态 `approved-paused`：replay/shadow/canary/promotion 代码保留但不会被调用，后续 tick 也不会
+再唤醒它，批准不产生任何生产暴露。仅当显式配置 `promotionMode: 'full'` 时，批准后才按固定顺序
+replay → effect-blocked shadow → 单次 production canary → trusted `achieved` 检查 → CAS
+promotion。`full` 模式下，canary 启动与查询是两个接口：
 `canaryWorkflowAutomation` 只允许一个固定 exposure operation，pending 状态只能由
 `inspectWorkflowCanary` 查询，不能重新暴露。任一拒绝、过期、证据变化、失败或恢复预算耗尽都会走
 durable rollback，而不是把 paused artifact 留作已启用。

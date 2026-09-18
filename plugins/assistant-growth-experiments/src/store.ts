@@ -84,6 +84,7 @@ interface CandidateRow {
   evidence_count: number
   owner_explicit_count: number
   verified_success_count: number
+  owner_anchored_count: number
   template_json: string
   steps_json: string
   state: WorkflowCandidateState
@@ -165,6 +166,7 @@ function candidate(row: CandidateRow): WorkflowCandidate {
     evidenceCount: row.evidence_count,
     ownerExplicitCount: row.owner_explicit_count,
     verifiedSuccessCount: row.verified_success_count,
+    ownerAnchoredCount: row.owner_anchored_count,
     template: JSON.parse(row.template_json) as WorkflowAutomationTemplate,
     steps: JSON.parse(row.steps_json) as readonly WorkflowStepFingerprint[],
     state: row.state,
@@ -200,8 +202,13 @@ function experiment(row: ExperimentRow): GrowthExperiment {
   })
 }
 
+// Terminal experiment states. `proposed-paused` is terminal for scheduling
+// (it never wakes again) but deliberately keeps its workflow_candidates row in
+// 'running': the candidate must neither return to 'ready' (which would spawn a
+// duplicate experiment) nor be flipped to a rejected/conflicted terminal
+// candidate state, since the owner-approved paused artifact still exists.
 const terminalExperimentStates = new Set<GrowthExperimentState>([
-  'conflicted', 'expired', 'promoted', 'rejected', 'rolled-back',
+  'conflicted', 'expired', 'proposed-paused', 'promoted', 'rejected', 'rolled-back',
 ])
 
 export interface GrowthExperimentsStoreOptions {
@@ -421,6 +428,7 @@ export class GrowthExperimentsStore {
           evidenceCount: candidateValue.evidenceCount,
           ownerExplicitCount: candidateValue.ownerExplicitCount,
           verifiedSuccessCount: candidateValue.verifiedSuccessCount,
+          ownerAnchoredCount: candidateValue.ownerAnchoredCount,
           template: candidateValue.template,
           steps: candidateValue.steps,
         }), operationId, now + input.maxDurationMs, now, now, now,
@@ -449,7 +457,7 @@ export class GrowthExperimentsStore {
     }
     const rows = this.database.prepare(`
       SELECT * FROM growth_experiments WHERE state NOT IN (
-        'conflicted', 'expired', 'promoted', 'rejected', 'rolled-back'
+        'conflicted', 'expired', 'proposed-paused', 'promoted', 'rejected', 'rolled-back'
       ) ORDER BY updated_at, id LIMIT ?
     `).all(limit) as unknown as ExperimentRow[]
     return rows.map(experiment)
@@ -462,7 +470,7 @@ export class GrowthExperimentsStore {
     }
     const rows = this.database.prepare(`
       SELECT * FROM growth_experiments WHERE state NOT IN (
-        'conflicted', 'expired', 'promoted', 'rejected', 'rolled-back'
+        'conflicted', 'expired', 'proposed-paused', 'promoted', 'rejected', 'rolled-back'
       ) AND next_attempt_at <= ? ORDER BY next_attempt_at, updated_at, id LIMIT ?
     `).all(now, limit) as unknown as ExperimentRow[]
     return rows.map(experiment)
@@ -496,15 +504,16 @@ export class GrowthExperimentsStore {
         throw new GrowthExperimentsStoreError('version-conflict', 'growth experiment state changed')
       }
       const allowedTransitions: Readonly<Record<GrowthExperimentState, readonly GrowthExperimentState[]>> = {
-        'approval-requesting': ['approval-requesting', 'approval-pending', 'conflicted', 'expired', 'rejected',
-          'replay-pending', 'rollback-pending'],
+        'approval-requesting': ['approval-requesting', 'approval-pending', 'conflicted', 'expired',
+          'proposed-paused', 'rejected', 'replay-pending', 'rollback-pending'],
         'approval-pending': ['approval-requesting', 'conflicted', 'expired'],
         'replay-pending': ['conflicted', 'shadow-pending', 'rollback-pending'],
         'shadow-pending': ['conflicted', 'canary-pending', 'rollback-pending'],
         'canary-pending': ['conflicted', 'canary-pending', 'promotion-pending', 'rollback-pending'],
         'promotion-pending': ['conflicted', 'promoted', 'rollback-pending'],
         'rollback-pending': ['rolled-back'],
-        conflicted: [], expired: [], promoted: ['rollback-pending'], rejected: [], 'rolled-back': [],
+        conflicted: [], expired: [], 'proposed-paused': [], promoted: ['rollback-pending'], rejected: [],
+        'rolled-back': [],
       }
       if (!allowedTransitions[row.state].includes(input.state)) {
         throw new GrowthExperimentsStoreError('version-conflict', 'growth experiment transition is forbidden')
@@ -572,17 +581,22 @@ export class GrowthExperimentsStore {
         throw new GrowthExperimentsStoreError('version-conflict', 'growth experiment transition lost its fence')
       }
       if (terminalExperimentStates.has(input.state)) {
-        const candidateState: WorkflowCandidateState = input.state === 'promoted'
-          ? 'promoted'
-          : input.state === 'rejected' || input.state === 'expired'
-            ? 'rejected'
-            : input.state === 'rolled-back'
-              ? 'rolled-back'
-              : 'conflicted'
-        this.database.prepare(`
-          UPDATE workflow_candidates SET state = ?, updated_at = ?
-          WHERE id = ? AND revision = ? AND evidence_digest = ? AND state = 'running'
-        `).run(candidateState, now, row.candidate_id, row.candidate_revision, row.candidate_digest)
+        if (input.state === 'proposed-paused') {
+          // Keep the candidate on 'running': it stays occupied (no duplicate
+          // experiment) while the owner-approved paused artifact remains live.
+        } else {
+          const candidateState: WorkflowCandidateState = input.state === 'promoted'
+            ? 'promoted'
+            : input.state === 'rejected' || input.state === 'expired'
+              ? 'rejected'
+              : input.state === 'rolled-back'
+                ? 'rolled-back'
+                : 'conflicted'
+          this.database.prepare(`
+            UPDATE workflow_candidates SET state = ?, updated_at = ?
+            WHERE id = ? AND revision = ? AND evidence_digest = ? AND state = 'running'
+          `).run(candidateState, now, row.candidate_id, row.candidate_revision, row.candidate_digest)
+        }
       }
       output = experiment(this.database.prepare('SELECT * FROM growth_experiments WHERE id = ?')
         .get(row.id) as unknown as ExperimentRow)
@@ -675,8 +689,9 @@ export class GrowthExperimentsStore {
       candidates: scalar('SELECT COUNT(*) AS count FROM workflow_candidates'),
       readyCandidates: scalar("SELECT COUNT(*) AS count FROM workflow_candidates WHERE state = 'ready'"),
       activeExperiments: scalar(`SELECT COUNT(*) AS count FROM growth_experiments WHERE state NOT IN (
-        'conflicted', 'expired', 'promoted', 'rejected', 'rolled-back')`),
+        'conflicted', 'expired', 'proposed-paused', 'promoted', 'rejected', 'rolled-back')`),
       rollbackPending: scalar("SELECT COUNT(*) AS count FROM growth_experiments WHERE state = 'rollback-pending'"),
+      proposedPaused: scalar("SELECT COUNT(*) AS count FROM growth_experiments WHERE state = 'proposed-paused'"),
       promoted: scalar("SELECT COUNT(*) AS count FROM growth_experiments WHERE state = 'promoted'"),
       traceRevisions: scalar('SELECT COUNT(*) AS count FROM workflow_trace_revisions'),
       currentTraces: scalar('SELECT COUNT(*) AS count FROM workflow_trace_current'),
@@ -710,7 +725,7 @@ export class GrowthExperimentsStore {
         this.database.prepare(`
           UPDATE workflow_candidates SET revision = revision + 1, evidence_digest = ?,
             evidence_count = 0, owner_explicit_count = 0, verified_success_count = 0,
-            state = 'retracted', updated_at = ? WHERE id = ?
+            owner_anchored_count = 0, state = 'retracted', updated_at = ? WHERE id = ?
         `).run(digestObject(['workflow-evidence/v1', []]), now, id)
       }
       return id
@@ -751,18 +766,40 @@ export class GrowthExperimentsStore {
       trustedTaskEvidence.set(entry.evidence.taskRef, taskEvidenceDigest)
     }
     const verifiedSuccessCount = trustedTaskEvidence.size
-    const ready = ownerExplicitCount > 0 || verifiedSuccessCount >= this.minRepeatedSuccesses
+    // Owner-anchored learning is single-item ready: each independently
+    // re-verified successful owner-root goal carries its own free-objective
+    // template (hence its own signature), so there is normally one current
+    // trace here. Dedupe by taskRef and reject a conflicting owner-run-trace
+    // digest exactly like the verified-repetition window, defensively.
+    const ownerAnchoredTaskEvidence = new Map<string, string>()
+    for (const entry of parsed) {
+      if (entry.evidence.signal !== 'owner-anchored') continue
+      const taskEvidenceDigest = entry.evidence.taskEvidenceDigest!
+      const previous = ownerAnchoredTaskEvidence.get(entry.evidence.taskRef)
+      if (previous !== undefined && previous !== taskEvidenceDigest) {
+        throw new GrowthExperimentsStoreError(
+          'idempotency-conflict',
+          'one owner-anchored task reference has conflicting run proof evidence',
+        )
+      }
+      ownerAnchoredTaskEvidence.set(entry.evidence.taskRef, taskEvidenceDigest)
+    }
+    const ownerAnchoredCount = ownerAnchoredTaskEvidence.size
+    const ready = ownerExplicitCount > 0
+      || ownerAnchoredCount > 0
+      || verifiedSuccessCount >= this.minRepeatedSuccesses
     const state: WorkflowCandidateState = ready ? 'ready' : 'observing'
     if (existing === undefined) {
       this.database.prepare(`
         INSERT INTO workflow_candidates(
           id, scope_key, workspace, preset, owner_binding_id, signature, revision, evidence_digest, evidence_count,
-          owner_explicit_count, verified_success_count, template_json, steps_json, state, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          owner_explicit_count, verified_success_count, owner_anchored_count, template_json, steps_json,
+          state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, scope.scopeKey, scope.workspace, scope.preset, first.ownerBindingId, signature, evidenceDigest, parsed.length,
-        ownerExplicitCount, verifiedSuccessCount, canonicalJson(first.template), canonicalJson(first.steps),
-        state, now, now,
+        ownerExplicitCount, verifiedSuccessCount, ownerAnchoredCount, canonicalJson(first.template),
+        canonicalJson(first.steps), state, now, now,
       )
       return id
     }
@@ -770,11 +807,12 @@ export class GrowthExperimentsStore {
     this.database.prepare(`
       UPDATE workflow_candidates SET
         revision = revision + 1, evidence_digest = ?, evidence_count = ?, owner_explicit_count = ?,
-        verified_success_count = ?, owner_binding_id = ?, template_json = ?, steps_json = ?, state = ?, updated_at = ?
+        verified_success_count = ?, owner_anchored_count = ?, owner_binding_id = ?, template_json = ?,
+        steps_json = ?, state = ?, updated_at = ?
       WHERE id = ?
     `).run(
-      evidenceDigest, parsed.length, ownerExplicitCount, verifiedSuccessCount, first.ownerBindingId,
-      canonicalJson(first.template), canonicalJson(first.steps), state, now, id,
+      evidenceDigest, parsed.length, ownerExplicitCount, verifiedSuccessCount, ownerAnchoredCount,
+      first.ownerBindingId, canonicalJson(first.template), canonicalJson(first.steps), state, now, id,
     )
     return id
   }
@@ -787,7 +825,7 @@ export class GrowthExperimentsStore {
     const rows = this.database.prepare(`
       SELECT * FROM growth_experiments
       WHERE candidate_id = ? AND candidate_revision = ? AND candidate_digest = ?
-        AND state NOT IN ('conflicted', 'expired', 'rejected', 'rolled-back')
+        AND state NOT IN ('conflicted', 'expired', 'proposed-paused', 'rejected', 'rolled-back')
     `).all(
       candidateRow.id, candidateRow.revision, candidateRow.evidence_digest,
     ) as unknown as ExperimentRow[]
