@@ -1310,7 +1310,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     const result = fixture.service.enqueueScheduledGoalResult(wake)
     if ('kind' in result) throw new Error('external goal result unexpectedly used native-session')
     expect(result.intent).toMatchObject({ format: 'markdown', metadata: {
-      'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome',
+      'dsh.learning.schemaVersion': '4', 'dsh.learning.kind': 'goal-outcome',
       'dsh.learning.goalId': locator.goalId, 'dsh.learning.assessmentId': locator.assessmentId,
     } })
     expect(result.intent.text).toContain('/feedback not-achieved')
@@ -1430,7 +1430,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       item.intent.metadata?.['dsh.learning.kind'] === 'goal-outcome')
     expect(result, JSON.stringify(result)).toMatchObject({ status: 'accepted', providerMessageId: expect.any(String), intent: {
       format: 'markdown', metadata: {
-        'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome',
+        'dsh.learning.schemaVersion': '4', 'dsh.learning.kind': 'goal-outcome',
         'dsh.learning.assessmentId': assessmentId, 'dsh.learning.objectiveStatus': 'achieved',
       },
     } })

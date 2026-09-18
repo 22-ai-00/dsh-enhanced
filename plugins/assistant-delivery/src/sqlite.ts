@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 20
+export const deliverySchemaVersion = 21
 
 const goalOutcomeTargetSchema = `
   CREATE TABLE IF NOT EXISTS delivery_goal_outcome_targets (
@@ -295,6 +295,57 @@ const workflowTraceSchema = `
   ) STRICT;
   CREATE INDEX trusted_delivery_evaluation_due
     ON trusted_delivery_evaluation_outbox(status, next_attempt_at, updated_at, idempotency_key);
+`
+
+/**
+ * Privately-learned workflow templates anchored to a Delivery-reverified
+ * owner-root successful goal (Growth signal `owner-anchored`). Unlike
+ * `workflow_template_registry` there is deliberately NO live Inbox/Outbox
+ * fence: the proof is the goals owner-run trace + accepted contract, so the
+ * anchor columns replace the three NOT NULL inbox/outbox foreign keys. The raw
+ * goal objective stays only here in `content_json` and never crosses Growth.
+ */
+const workflowOwnerAnchoredSchema = `
+  CREATE TABLE IF NOT EXISTS workflow_owner_anchored_templates (
+    template_ref TEXT PRIMARY KEY,
+    template_digest TEXT NOT NULL CHECK (
+      length(template_digest) = 64 AND template_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    scope_key TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    preset TEXT NOT NULL,
+    owner_binding_id TEXT NOT NULL,
+    binding_version INTEGER NOT NULL CHECK (binding_version >= 1),
+    binding_generation INTEGER NOT NULL CHECK (binding_generation >= 1),
+    principal_id TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    privacy_kind TEXT NOT NULL CHECK (privacy_kind = 'owner-anchored'),
+    privacy_attestation_id TEXT NOT NULL UNIQUE,
+    privacy_attestation_digest TEXT NOT NULL CHECK (
+      length(privacy_attestation_digest) = 64
+      AND privacy_attestation_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    review_receipt_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    version INTEGER NOT NULL CHECK (version >= 1),
+    task_ref TEXT NOT NULL UNIQUE CHECK (
+      length(task_ref) = 64 AND task_ref NOT GLOB '*[^0-9a-f]*'
+    ),
+    owner_route_id TEXT NOT NULL,
+    goal_id TEXT NOT NULL,
+    native_goal_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    turn INTEGER NOT NULL CHECK (turn >= 0),
+    acceptance_contract_id TEXT NOT NULL,
+    acceptance_receipt_digest TEXT NOT NULL,
+    owner_run_trace_digest TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (owner_binding_id) REFERENCES conversation_bindings(id)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS workflow_owner_anchored_scope
+    ON workflow_owner_anchored_templates(scope_key, status, updated_at, template_ref);
 `
 
 /**
@@ -998,6 +1049,10 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec(`${goalOutcomeTargetSchema} PRAGMA user_version = 20;`)
     version = 20
   }
+  if (version === 20) {
+    database.exec(`${workflowOwnerAnchoredSchema} PRAGMA user_version = 21;`)
+    version = 21
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1211,7 +1266,9 @@ function migrateObserved(database: DatabaseSync): void {
     ${taskAcceptanceExecutionSchema}
     ${sessionLeaseSchema}
     ${goalOutcomeTargetSchema}
-    PRAGMA user_version = 20;
+
+    ${workflowOwnerAnchoredSchema}
+    PRAGMA user_version = 21;
   `)
 }
 

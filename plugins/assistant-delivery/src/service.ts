@@ -7,7 +7,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { AskUserQuestionAnswer, AskUserQuestionRequest } from '@deepseek-ai/dsh-user-questions'
 import Schema from '@deepseek-ai/schemastery'
-import { acceptanceCanonicalJson } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import {
   approvalReviewerOf,
   isAutoReviewEscalation,
@@ -41,7 +41,12 @@ import {
   InboundCoordinator,
   type InboundMessageProcessor,
 } from './coordinator.js'
-import { DeliveryStore, DeliveryStoreError, type OwnerRouteDispatchGuard } from './store.js'
+import {
+  DeliveryStore,
+  DeliveryStoreError,
+  type CommitOwnerAnchoredWorkflowTraceResult,
+  type OwnerRouteDispatchGuard,
+} from './store.js'
 import { DshDeliveryRuntime } from './agent-runtime.js'
 import { DeliverySessionLeases } from './session-lease-runtime.js'
 import { NativeWebOwner, type NativeWebOwnerConfig, type NativeWebOwnerAccess } from './native-web-owner.js'
@@ -447,6 +452,125 @@ export class AssistantDeliveryError extends Error {
     super(message)
     this.name = 'AssistantDeliveryError'
   }
+}
+
+/**
+ * Structural mirrors of the Goals Host-only evidence shapes. Delivery must not
+ * import `@dsh-enhanced/assistant-goals` types for this seam: goals' public
+ * type surface re-exports Delivery types (its types.ts re-exports from
+ * `@dsh-enhanced/assistant-delivery`), which pulls Delivery's own emitted
+ * lib/*.d.ts back into its build program and fails emit (TS5055). The local
+ * goal-wake-types.ts mirror sets the precedent. These are structural only:
+ * the live Goals service is obtained through ctx.get and runtime-checked, and
+ * Delivery re-fetches every trusted value itself.
+ */
+interface GoalScope {
+  principalId: string
+  principalRecordId: string
+  principalVersion: number
+  workspace: string
+  preset: string
+}
+
+/** Structural mirror of goals' OwnerGoalExecutionSnapshotInput (six keys). */
+interface OwnerGoalExecutionSnapshotInput {
+  ownerRouteId: string
+  principalId: string
+  workspace: string
+  preset: string
+  sessionId: string
+  goalId: string
+}
+
+/** Structural mirror of goals' OwnerGoalRunProofInput (locator plus runId). */
+interface OwnerGoalRunProofInput extends OwnerGoalExecutionSnapshotInput {
+  runId: string
+}
+
+/** Structural mirror of goals' VerifiedWorkflowSource (verified-workflow.ts). */
+interface VerifiedWorkflowSource {
+  protocol: 'assistant-goals/verified-workflow-source/v1'
+  scope: GoalScope
+  goal: {
+    id: string
+    definition: { version: number; digest: string; objective: string }
+    sessionId: string
+    nativeGoalId: string
+  }
+  runId: string
+  turn: number
+  acceptance: {
+    contractId: string
+    contractDigest: string
+    receiptDigest: string
+    verifiedAt: number
+    validUntil: number
+  }
+  steps: readonly { id: string; toolName: string; arguments: unknown }[]
+  failedObservations?: readonly { id: string; toolName: string; arguments: unknown; outcome: 'failed' }[]
+}
+
+/** Structural mirror of goals' OwnerGoalRunProof (types.ts). */
+interface OwnerGoalRunProof {
+  protocol: 'assistant-goals/owner-run-trace/v1'
+  runId: string
+  turn: number
+  nativeRevision: number
+  definitionDigest: string
+  outcomeProfile: { id: string; version: number; digest: string }
+  steps: readonly { id: string; name: string; arguments: unknown; outcome: 'succeeded' | 'failed' }[]
+  traceDigest: string
+}
+
+/**
+ * Structural view of the Goals Host-only evidence capabilities the owner-
+ * anchored workflow bridge needs. Delivery re-fetches every verified value
+ * itself; the growth driver only ever passes a locator.
+ */
+interface OwnerAnchoredGoalsCapability {
+  inspectOwnerVerifiedWorkflowSource(
+    input: Readonly<OwnerGoalExecutionSnapshotInput>,
+    signal?: AbortSignal,
+  ): Promise<VerifiedWorkflowSource>
+  inspectOwnerGoalRunProof(
+    input: Readonly<OwnerGoalRunProofInput>,
+    signal?: AbortSignal,
+  ): Promise<OwnerGoalRunProof>
+}
+
+/**
+ * Structural authority minted by the growth driver for one bounded wake.
+ * Delivery never mints it: the object is only accepted after assertCurrent()
+ * re-anchors the live owner route, and its scope must exactly match the
+ * locator the driver asked to learn from.
+ */
+export interface OwnerAnchoredWorkflowAuthority {
+  readonly id: string
+  readonly scope: Readonly<GoalScope>
+  readonly ownerRouteId: string
+  readonly expiresAt: number
+  assertCurrent(): void
+}
+
+/** Result of one Host-only owner-anchored learning commit. */
+export type CommitOwnerAnchoredWorkflowTraceServiceResult = CommitOwnerAnchoredWorkflowTraceResult
+
+function isOwnerAnchoredGoalsCapability(value: unknown): value is OwnerAnchoredGoalsCapability {
+  return typeof value === 'object' && value !== null
+    && typeof (value as { inspectOwnerVerifiedWorkflowSource?: unknown }).inspectOwnerVerifiedWorkflowSource === 'function'
+    && typeof (value as { inspectOwnerGoalRunProof?: unknown }).inspectOwnerGoalRunProof === 'function'
+}
+
+function isOwnerGoalSnapshotLocator(value: unknown): value is OwnerGoalExecutionSnapshotInput {
+  if (typeof value !== 'object' || value === null) return false
+  const locator = value as Record<string, unknown>
+  return Object.keys(locator).sort().join(',') === 'goalId,ownerRouteId,preset,principalId,sessionId,workspace'
+    && typeof locator['ownerRouteId'] === 'string' && locator['ownerRouteId'] !== ''
+    && typeof locator['principalId'] === 'string' && locator['principalId'] !== ''
+    && typeof locator['workspace'] === 'string' && locator['workspace'] !== ''
+    && typeof locator['preset'] === 'string' && locator['preset'] !== ''
+    && typeof locator['sessionId'] === 'string' && locator['sessionId'] !== ''
+    && typeof locator['goalId'] === 'string' && locator['goalId'] !== ''
 }
 
 const configSchema = Schema.object({
@@ -1708,7 +1832,7 @@ export class AssistantDeliveryService extends Service {
     if (Buffer.byteLength(rendered, 'utf8') > this.config.maxTextBytes) {
       throw new AssistantDeliveryError('runtime-conflict', 'scheduled goal result exceeds the delivery text limit')
     }
-    const situation = `goal:${locator.goalId}:definition:${proof.goal.definitionVersion}`
+    const situation = goalDefinitionSituation(proof.goal.definitionDigest)
     return this.deliveryStore.enqueueGoalOutcomeTarget({
       locator, proof,
       intent: {
@@ -1717,7 +1841,7 @@ export class AssistantDeliveryService extends Service {
         target: { conversation: finalBinding.conversation, principal: finalBinding.principal },
         text: rendered, format: 'markdown',
         metadata: Object.freeze({
-          'dsh.learning.schemaVersion': '3', 'dsh.learning.kind': 'goal-outcome',
+          'dsh.learning.schemaVersion': '4', 'dsh.learning.kind': 'goal-outcome',
           'dsh.learning.goalId': locator.goalId, 'dsh.learning.assessmentId': locator.assessmentId,
           'dsh.learning.runId': proof.runId, 'dsh.learning.situation': situation,
           'dsh.learning.occurredAt': String(proof.receipt.completedAt),
@@ -2350,6 +2474,107 @@ export class AssistantDeliveryService extends Service {
       throw new AssistantDeliveryError('missing-binding', 'workflow approval owner route changed')
     }
     return route
+  }
+
+  /**
+   * Host-only owner-anchored workflow learning bridge. This method is not
+   * registered as an Agent tool (same Host seam as prepareWorkflowApproval):
+   * only the opt-in growth driver invokes it, and only with a locator plus one
+   * bounded-wake authority. Delivery itself re-fetches both the verified Goals
+   * source and the owner-run-trace proof, so the caller can never supply the
+   * objective, steps, acceptance verdict or proof digest — a spoofed driver
+   * learns nothing. A goal that does not honestly reduce to the single
+   * no-tool `assistant.agent-turn` step is returned as `abstained` with zero
+   * writes; the trace is projected through the existing outbox/drain chain.
+   */
+  async commitOwnerAnchoredWorkflowTrace(input: Readonly<{
+    locator: OwnerGoalExecutionSnapshotInput
+    authority: OwnerAnchoredWorkflowAuthority
+  }>): Promise<CommitOwnerAnchoredWorkflowTraceServiceResult> {
+    this.assertActive()
+    if (typeof input !== 'object' || input === null
+      || !isOwnerGoalSnapshotLocator(input.locator)
+      || typeof input.authority !== 'object' || input.authority === null
+      || typeof (input.authority as { assertCurrent?: unknown }).assertCurrent !== 'function') {
+      throw new AssistantDeliveryError('runtime-conflict', 'owner-anchored workflow commit request is invalid')
+    }
+    const { locator, authority } = input
+    authority.assertCurrent()
+    if (authority.ownerRouteId !== locator.ownerRouteId
+      || authority.scope.principalId !== locator.principalId
+      || authority.scope.workspace !== locator.workspace
+      || authority.scope.preset !== locator.preset) {
+      throw new AssistantDeliveryError('policy-denied', 'owner-anchored workflow authority scope does not match its locator')
+    }
+    const goals = this.ctx.get('assistantGoals' as never, false) as unknown
+    if (!isOwnerAnchoredGoalsCapability(goals)) {
+      throw new AssistantDeliveryError('runtime-unavailable', 'owner-anchored workflow goals evidence is unavailable')
+    }
+    let source: VerifiedWorkflowSource
+    try {
+      source = await goals.inspectOwnerVerifiedWorkflowSource(locator)
+    } catch (error) {
+      if ((error as { code?: unknown })?.code === 'unavailable') {
+        throw new AssistantDeliveryError('runtime-unavailable', 'owner-anchored workflow goals observation is unavailable')
+      }
+      throw new AssistantDeliveryError('missing-binding', 'owner-anchored workflow verified source is not available')
+    }
+    let proof: OwnerGoalRunProof
+    try {
+      proof = await goals.inspectOwnerGoalRunProof({ ...locator, runId: source.runId })
+    } catch (error) {
+      if (/unavailable/u.test(error instanceof Error ? error.message : '')) {
+        throw new AssistantDeliveryError('runtime-unavailable', 'owner-anchored workflow run proof is unavailable')
+      }
+      throw new AssistantDeliveryError('missing-binding', 'owner-anchored workflow run proof is not available')
+    }
+    // Re-anchor after every await: the bounded-wake authority and the live
+    // owner route must still be the same generation the driver was minted for.
+    authority.assertCurrent()
+    const route = this.resolveOwnerRoute(locator.ownerRouteId)
+    if (externalPrincipalId(route.binding.principal) !== locator.principalId
+      || route.binding.workspace !== locator.workspace
+      || route.binding.agentPreset !== locator.preset) {
+      throw new AssistantDeliveryError('missing-binding', 'owner-anchored workflow locator does not match the live owner route')
+    }
+    const failedObservations = source.failedObservations ?? []
+    const proofSucceeded = proof.steps.filter(step => step.outcome === 'succeeded')
+    const proofFailed = proof.steps.filter(step => step.outcome === 'failed')
+    // The reduction decision below must cover exactly the settled calls the
+    // trusted run-proof digest covers; a mismatch fails closed.
+    if (source.scope.principalId !== locator.principalId
+      || source.scope.workspace !== locator.workspace || source.scope.preset !== locator.preset
+      || source.goal.id !== locator.goalId || source.goal.sessionId !== locator.sessionId
+      || proof.runId !== source.runId || proof.turn !== source.turn
+      || proof.definitionDigest !== source.goal.definition.digest
+      || !/^[a-f0-9]{64}$/u.test(proof.traceDigest)
+      || proofSucceeded.length !== source.steps.length
+      || proofFailed.length !== failedObservations.length
+      || JSON.stringify(proofSucceeded.map(step => `${step.id}:${step.name}`).sort())
+        !== JSON.stringify(source.steps.map(step => `${step.id}:${step.toolName}`).sort())
+      || JSON.stringify(proofFailed.map(step => step.id).sort())
+        !== JSON.stringify(failedObservations.map(step => step.id).sort())) {
+      throw new AssistantDeliveryError('missing-binding', 'owner-anchored workflow evidence does not match its locator')
+    }
+    const committed = this.deliveryStore.commitOwnerAnchoredWorkflowTrace({
+      binding: route.binding,
+      ownerRouteId: route.authorityId,
+      scope: { workspace: locator.workspace, preset: locator.preset },
+      goal: source.goal,
+      runId: source.runId,
+      turn: source.turn,
+      acceptance: {
+        contractId: source.acceptance.contractId,
+        receiptDigest: source.acceptance.receiptDigest,
+        verifiedAt: source.acceptance.verifiedAt,
+        validUntil: source.acceptance.validUntil,
+      },
+      steps: source.steps.map(step => Object.freeze({ id: step.id, toolName: step.toolName })),
+      ...(failedObservations.length === 0 ? {} : { failedObservations }),
+      ownerRunTraceDigest: proof.traceDigest,
+    })
+    if (committed.outcome === 'trace-recorded') await this.drainWorkflowTraces()
+    return committed
   }
 
   /**
@@ -3302,8 +3527,8 @@ export class AssistantDeliveryService extends Service {
     const metadata = target.intent.metadata
     const locator = durable.locator
     const immutableProof = durable.proof
-    const situation = `goal:${locator.goalId}:definition:${immutableProof.goal.definitionVersion}`
-    if (metadata?.['dsh.learning.schemaVersion'] !== '3'
+    const situation = goalDefinitionSituation(immutableProof.goal.definitionDigest)
+    if (metadata?.['dsh.learning.schemaVersion'] !== '4'
       || metadata['dsh.learning.kind'] !== 'goal-outcome'
       || metadata['dsh.learning.goalId'] !== locator.goalId
       || metadata['dsh.learning.assessmentId'] !== locator.assessmentId
