@@ -97,7 +97,18 @@ describe('independent holdout authority', () => {
   test('fails closed for tampering, expiry, missing exit code, and excessive tool calls', () => {
     const authority = HoldoutAuthority.create(config()); authority.begin(binding)
     const saved = authority.serialize()
-    expect(() => HoldoutAuthority.restore(saved.replace(/"signature":"./u, '"signature":"x'), config())).toThrow(/signature is invalid/)
+    // Deterministically flip the signature's first character. The base64url
+    // signature is key-random, so a fixed replacement letter (e.g. "x") is a
+    // ~1/64 no-op whenever the original first character already equals it; pick
+    // a letter guaranteed to differ and assert the bytes really changed.
+    const firstSignatureChar = JSON.parse(saved).signature[0] as string
+    const replacement = firstSignatureChar === 'A' ? 'B' : 'A'
+    const tampered = saved.replace(
+      `"signature":"${firstSignatureChar}`,
+      `"signature":"${replacement}`,
+    )
+    expect(tampered).not.toBe(saved)
+    expect(() => HoldoutAuthority.restore(tampered, config())).toThrow(/signature is invalid/)
     const issued = authority.next()!
     expect(authority.record({ ...observation(issued.cellId, issued.armDigest), exitCode: null })).toBe('unknown')
     expect(authority.finish().complete).toBe(false)

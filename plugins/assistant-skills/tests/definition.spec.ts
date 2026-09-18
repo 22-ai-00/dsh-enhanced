@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { createDefinition, fileObservationSteps, instantiate, type SkillRunExpansion, type VerifiedWorkflowSource } from '../src/definition.ts'
+import { assertDefinitionProtocol, compensationDirective, createDefinition, evaluatePreconditions, fileObservationSteps, instantiate, validateStepGraph, type SkillRunExpansion, type SkillStep, type VerifiedWorkflowSource } from '../src/definition.ts'
 
 function source(steps: VerifiedWorkflowSource['steps'] = [{ id: 'call-1', toolName: 'files_read', arguments: { path: '/tmp/report.txt', retry: false, limit: 10 } }]): VerifiedWorkflowSource {
   return { protocol: 'assistant-goals/verified-workflow-source/v1', scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/tmp/workspace', preset: 'primary' },
@@ -217,5 +217,70 @@ describe('skill definitions', () => {
     expect(() => derive({ ...value, segments: [{ ...value.segments![0]!, steps: [{ ...write, id: 'repair' }] }, value.segments![1]!] })).toThrow()
     expect(() => derive({ ...value, segments: [{ ...value.segments![0]!, failedObservations: [{ id: 'failed-write', toolName: 'write', arguments: {}, outcome: 'failed' }] }, value.segments![1]!] })).toThrow()
     expect(() => derive({ ...value, segments: [{ ...value.segments![0]!, steps: Array.from({ length: 32 }, (_, index) => ({ ...write, id: `write-${index}` })) }, value.segments![1]!] })).toThrow()
+  })
+})
+
+// Engineering-layer graph/protocol semantics. The multi-dependency graphs below
+// are hand-built fixtures exercising the general DAG validator; createDefinition
+// itself only derives linear happens-before edges from a real verified trace.
+describe('skill dependency DAG and typed protocol semantics', () => {
+  const graph = (steps: readonly SkillStep[]) => () => validateStepGraph(steps)
+  const step = (id: string, dependsOn: readonly string[] = []): SkillStep => ({ id, toolName: 'write', arguments: {}, dependsOn })
+
+  it('accepts an empty graph, a linear chain, and a true multi-dependency DAG in topological order', () => {
+    expect(() => validateStepGraph([])).not.toThrow()
+    expect(() => validateStepGraph([step('a'), step('b', ['a']), step('c', ['a', 'b'])])).not.toThrow()
+    expect(() => validateStepGraph([step('a'), step('b'), step('c', ['a', 'b'])])).not.toThrow()
+  })
+
+  it('rejects duplicate ids, missing/self/later/duplicate dependencies, and cycles', () => {
+    expect(graph([step('a'), step('a')])).toThrow(/dependency graph/u)
+    expect(graph([step('a', ['missing'])])).toThrow(/dependency graph/u)
+    expect(graph([step('a', ['a'])])).toThrow(/dependency graph/u)
+    expect(graph([step('b', ['a']), step('a')])).toThrow(/dependency graph/u)
+    expect(graph([step('a', ['a', 'a'])])).toThrow(/dependency graph/u)
+    // Stored in topological order here, so construct an explicit two-node cycle
+    // via later-reference to prove non-topological storage is rejected.
+    expect(graph([step('a', ['b']), step('b', ['a'])])).toThrow(/dependency graph/u)
+  })
+
+  it('derives only linear happens-before edges from a real captured trace (no fabricated fan-in)', () => {
+    const definition = createDefinition(source([
+      { id: 'a', toolName: 'write', arguments: { file_path: 'a.md', content: '1' } },
+      { id: 'b', toolName: 'write', arguments: { file_path: 'b.md', content: '2' } },
+    ]), { name: 'linear-edges', description: 'Linear derived edges.' }, ['write'])
+    expect(definition.steps.map(s => s.dependsOn)).toEqual([[], ['a']])
+    expect(() => assertDefinitionProtocol(definition)).not.toThrow()
+  })
+
+  it('fails closed on unsupported precondition or compensation declarations', () => {
+    const definition = createDefinition(source(), { name: 'protocol-base', description: 'x', bindings: [{ name: 'path', stepId: 'call-1', path: '/path' }] }, ['files_read'])
+    expect(() => assertDefinitionProtocol({ ...definition, preconditions: 'future-family' as never })).toThrow(/preconditions/u)
+    expect(() => assertDefinitionProtocol({ ...definition, compensation: 'auto-remediate' as never })).toThrow(/compensation/u)
+  })
+
+  it('evaluates the v1 precondition family on owner scope and fresh Goal, rejecting unknown families', () => {
+    const admit = { ownerScopeDigest: 'scope-1', currentScopeDigest: 'scope-1', goalId: 'g2', sourceGoalId: 'g1' }
+    expect(() => evaluatePreconditions('current-owner-policy-and-fresh-goal', admit)).not.toThrow()
+    expect(() => evaluatePreconditions('current-owner-policy-and-fresh-goal', { ...admit, currentScopeDigest: 'scope-2' })).toThrow(/fresh owner Goal/u)
+    expect(() => evaluatePreconditions('current-owner-policy-and-fresh-goal', { ...admit, goalId: 'g1' })).toThrow(/fresh owner Goal/u)
+    expect(() => evaluatePreconditions('future-family' as never, admit)).toThrow(/preconditions/u)
+  })
+
+  it('resolves the v1 stop-and-report compensation and rejects unknown families', () => {
+    expect(compensationDirective('stop-and-report')).toEqual({ kind: 'stop-and-report', stopRemainingSteps: true, reportForOwnerRepair: true })
+    expect(() => compensationDirective('retry-and-continue' as never)).toThrow(/compensation/u)
+  })
+
+  it('instantiate rejects a forged definition whose graph or protocol fields were tampered', () => {
+    const definition = createDefinition(source([
+      { id: 'a', toolName: 'write', arguments: { file_path: 'a.md', content: '1' } },
+      { id: 'b', toolName: 'write', arguments: { file_path: 'b.md', content: '2' } },
+    ]), { name: 'tamper-base', description: 'x' }, ['write'])
+    const forged = (change: (value: any) => void) => { const value = JSON.parse(JSON.stringify(definition)); change(value); return value }
+    // Reorder a dependency to point at a later step: non-topological storage.
+    expect(() => instantiate(forged(v => { v.steps[0]!.dependsOn = ['b']; v.steps[1]!.dependsOn = [] }))).toThrow(/dependency graph/u)
+    expect(() => instantiate(forged(v => { v.preconditions = 'future-family' }))).toThrow(/preconditions/u)
+    expect(() => instantiate(forged(v => { v.compensation = 'auto-remediate' }))).toThrow(/compensation/u)
   })
 })

@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inspect } from 'node:util'
 import { afterEach, expect, test } from 'vitest'
-import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import { canonicalEvaluationHostScope, canonicalEvaluationScope, evaluationLearningProjectionDigest } from '@dsh-enhanced/assistant-evaluation'
 import { failureSummaryEvidenceDigest, type HostFailureEvidenceSummary } from '../src/definition.ts'
 import { AssistantSkillsService } from '../src/service.ts'
@@ -214,9 +214,10 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('qualification leave
     const evaluationExecution = { outcomeId: `evaluation-execution-${run.goalId}`, status: 'succeeded' as const, source: { kind: 'evaluator' as const, id: 'assistant-verifier' }, evidence: [{ kind: 'goal-outcome' as const, ref: assessmentId }], occurredAt: now, evaluator: { id: 'assistant-verifier', version: '1' } }
     const evaluationObjective = { outcomeId: `evaluation-objective-${run.goalId}`, status: achieved ? 'achieved' as const : 'not-achieved' as const, source: { kind: 'evaluator' as const, id: 'assistant-verifier' }, evidence: [{ kind: 'goal-outcome' as const, ref: assessmentId }], occurredAt: now, evaluator: { id: 'assistant-verifier', version: '1' } }
     const projectionBase = { subjectKind: 'goal-outcome' as const, subjectRef: assessmentId, disposition: 'upsert' as const, evidenceOutcomeId: evaluationObjective.outcomeId }
-    const projection = { ...projectionBase, version: 1, digest: evaluationLearningProjectionDigest({ scopeKey, situation: `goal:${run.goalId}:definition:1`, execution: evaluationExecution, objective: evaluationObjective, projection: projectionBase }) }
+    const situation = goalDefinitionSituation(goalDefinitionDigest)
+    const projection = { ...projectionBase, version: 1, digest: evaluationLearningProjectionDigest({ scopeKey, situation, execution: evaluationExecution, objective: evaluationObjective, projection: projectionBase }) }
     canonicalWatermark++
-    canonicalOutcomes.set(assessmentId, { triggerOutcomeId: evaluationObjective.outcomeId, scope: evaluationScope, scopeKey, scopeWatermark: canonicalWatermark, situation: `goal:${run.goalId}:definition:1`, execution: evaluationExecution, objective: evaluationObjective, projection })
+    canonicalOutcomes.set(assessmentId, { triggerOutcomeId: evaluationObjective.outcomeId, scope: evaluationScope, scopeKey, scopeWatermark: canonicalWatermark, situation, execution: evaluationExecution, objective: evaluationObjective, projection })
     for (const listener of canonicalListeners) listener({ subjectKind: 'goal-outcome', subjectRef: assessmentId })
     ctx.emit('assistant-verifier/receipt', { taskKind: 'goal-outcome' } as never)
   }

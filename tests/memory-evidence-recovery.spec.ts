@@ -10,6 +10,7 @@ import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
+import { LocalAttachmentStore } from '@deepseek-ai/dsh-attachment-local'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { PersonalMemoryService } from '../plugins/personal-memory/src/service.ts'
 import { DatabaseSync } from 'node:sqlite'
@@ -24,7 +25,10 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 type Reply = string | { name: string; args: Record<string, unknown> }
 class ScriptAdapter extends LlmAdapter {
   requests: GenerateOptions[] = []
-  constructor(private readonly reply: (request: GenerateOptions, index: number) => Reply) { super() }
+  constructor(private readonly reply: (request: GenerateOptions, index: number) => Reply, private readonly adapterOptions: { imageCapable?: boolean } = {}) { super() }
+  override resolveModel(provider: string, model: string) {
+    return Promise.resolve({ provider, id: model, name: model, ...(this.adapterOptions.imageCapable ? { inputModalities: ['text', 'image'] as const } : {}) })
+  }
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     const reply = this.reply(options, this.requests.length)
     this.requests.push(options)
@@ -44,14 +48,14 @@ class ScriptAdapter extends LlmAdapter {
   }
 }
 
-async function host(root: string, adapter: ScriptAdapter, options: { ownerVersion?: number; revoked?: boolean; denySource?: boolean; denyFile?: boolean; denyPipeline?: boolean; unregistered?: boolean; budgeted?: 'execute' | 'read' } = {}) {
+async function host(root: string, adapter: ScriptAdapter, options: { ownerVersion?: number; revoked?: boolean; denySource?: boolean; denyFile?: boolean; denyPipeline?: boolean; unregistered?: boolean; budgeted?: 'execute' | 'read'; pruneThresholdChars?: number; pruneHeadChars?: number; pruneTailChars?: number; imageStore?: boolean; imageTool?: boolean } = {}) {
   const ctx = new Context()
   try {
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: 'Use current verified evidence.', includeRuntimeContext: true } })
   await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'none', packChunks: false, writeBatchMaxDelayMs: 1 })
   await ctx.plugin(TokenMeter)
-  await ctx.plugin(ToolResultPruner, { thresholdChars: 8_192, headChars: 4_096, tailChars: 1_024 })
+  await ctx.plugin(ToolResultPruner, { thresholdChars: options.pruneThresholdChars ?? 8_192, headChars: options.pruneHeadChars ?? 4_096, tailChars: options.pruneTailChars ?? 1_024 })
   ctx.provide('assistantDelivery', {
     preferencePrincipalForAgent: (agent: Agent) => options.revoked ? undefined : ({
       scope: { workspace: root, preset: 'primary' }, principalId: 'owner:public-fixture',
@@ -67,15 +71,24 @@ async function host(root: string, adapter: ScriptAdapter, options: { ownerVersio
       { id: 'other-file', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root }, actions: ['read'], resource: { kind: 'filesystem', id: join(root, 'other.txt') } },
       { id: 'file', ...(options.budgeted === 'read' ? { budget: { id: 'evidence-reads', amount: 1 } } : {}), effect: options.denyFile ? 'deny' : 'allow', subject: { kind: 'agent', id: 'primary', workspace: root }, actions: ['read'], resource: { kind: 'filesystem', id: join(root, 'journal.txt') } },
       { id: 'source', ...(options.budgeted === 'execute' ? { budget: { id: 'evidence-reads', amount: 1 } } : {}), effect: options.denySource ? 'deny' : 'allow', subject: { kind: 'agent', id: 'primary', workspace: root }, actions: ['execute'], resource: { kind: 'tool', id: 'read' } },
+      ...(options.imageTool ? [
+        { id: 'image-source', effect: 'allow' as const, subject: { kind: 'agent', id: 'primary', workspace: root }, actions: ['execute'], resource: { kind: 'tool', id: 'read_image' } },
+        { id: 'image-file', effect: 'allow' as const, subject: { kind: 'agent', id: 'primary', workspace: root }, actions: ['read'], resource: { kind: 'filesystem', id: join(root, 'diagram.png') } },
+      ] : []),
     ],
   })
   await ctx.plugin(PersonalMemoryService, { databasePath: join(root, 'memory.sqlite'), reconcileIntervalMs: 0 })
+  if (options.imageStore) new LocalAttachmentStore(ctx, {
+    dshHome: join(root, 'dsh-home'), maxImageBytes: 1_024, maxImagesPerMessage: 4,
+    maxMessageImageBytes: 4_096, maxImagePixels: 1_000_000, maxImageDimension: 1_000,
+  })
   await ctx.plugin(LocalFileSystem, { cwd: root })
   if (!options.unregistered) await ctx.plugin(FileTools, { readMaxLineLength: 32_000, readMaxBytes: 64_000 })
+  const trackedTool = options.imageTool ? 'read_image' : 'read'
   let executions = 0
-  ctx.on('tools/execute', async (exec, next) => { if (exec.name === 'read') executions++; return next() })
+  ctx.on('tools/execute', async (exec, next) => { if (exec.name === trackedTool) executions++; return next() })
   if (options.denyPipeline) ctx.on('tools/pre-execute', async (exec, next) =>
-    exec.name === 'read' ? { kind: 'deny', reason: 'resource provider revoked' } : next())
+    exec.name === trackedTool ? { kind: 'deny', reason: 'resource provider revoked' } : next())
   ctx.on('agent/session-start', ({ agent }) => {
     agent.session.append('sandbox/mode', { mode: 'danger-full-access' })
     agent.session.append('approval/policy', { policy: 'never' })
@@ -211,3 +224,125 @@ test.each(['current-owner', 'changed-owner', 'revoked-owner', 'denied-tool', 'ch
     } finally { await handle?.dispose(); await second.ctx.fiber.dispose() }
   },
 )
+
+// A real 1x1 PNG: exercises the actual attachment store, image block, and
+// vision-route gate rather than a synthesized tool result. The local store
+// normalizes it to a 1x1 image/webp, so the envelope honestly reports webp.
+const onePixelPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
+// The "<media> image, WxH px" phrase is assembled only in the text envelope;
+// the adjacent image block keeps mediaType/dimensions as separate fields.
+const IMAGE_ENVELOPE_NEEDLE = 'image/webp image, 1x1 px'
+
+test('read_image evidence survives prune, reopen, and replays through the vision route', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-image-evidence-')))
+  roots.push(root)
+  await writeFile(join(root, 'diagram.png'), Buffer.from(onePixelPngBase64, 'base64'))
+  const id = SessionId('image-evidence-session')
+  // The envelope is ~90+ code points; a 60-char budget prunes its middle while
+  // the adjacent image block is retained. Chosen independently of displayPath
+  // length (20 head + 39 marker + 1 tail === 60 <= 60).
+  const prune = { pruneThresholdChars: 60, pruneHeadChars: 20, pruneTailChars: 1 }
+  const capture = new ScriptAdapter((_request, index) =>
+    index === 0 ? { name: 'read_image', args: { file_path: 'diagram.png' } } : 'Captured a historical diagram.', { imageCapable: true })
+  const first = await host(root, capture, { imageStore: true, imageTool: true, ...prune })
+  let handle: AgentHandle | undefined
+  let reference = ''
+  try {
+    handle = await first.ctx.agents.create({ sessionId: id, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'evidence-fixture', model: 'fixture' } })
+    await prompt(handle, 'Capture the diagram.')
+    expect(first.executions()).toBe(1)
+    // The real pipeline emitted a text envelope beside an image attachment block.
+    const serialized = JSON.stringify(handle.agent.session.deriveMessages())
+    expect(serialized).toContain(IMAGE_ENVELOPE_NEEDLE)
+    expect(serialized).toContain('"type":"image"')
+    const db = new DatabaseSync(join(root, 'memory.sqlite'), { readOnly: true })
+    try {
+      const anchors = db.prepare('SELECT reference, tool_name FROM memory_evidence_anchors').all()
+      expect(anchors).toHaveLength(1)
+      expect(anchors[0]).toMatchObject({ tool_name: 'read_image' })
+      reference = String(anchors[0]!.reference)
+    } finally { db.close() }
+
+    const pruned = first.ctx.toolResultPruner.pruneSession(handle.agent.session)
+    expect(pruned.pruned).toHaveLength(1)
+    expect(JSON.stringify(handle.agent.session.deriveMessages())).not.toContain(IMAGE_ENVELOPE_NEEDLE)
+    expect(await first.ctx.sessions.flush(handle.agent.session)).toBe(true)
+    const raw = await first.ctx.sessionPersistence.readRaw(id)
+    expect(raw?.content).toContain(IMAGE_ENVELOPE_NEEDLE)
+  } finally { await handle?.dispose(); await first.ctx.fiber.dispose() }
+
+  const recovery = new ScriptAdapter((request, index) => {
+    const text = JSON.stringify(request.messages)
+    if (index === 0) {
+      expect(text).toContain(reference)
+      expect(text).toContain('historical-unverified')
+      expect(text).not.toContain(IMAGE_ENVELOPE_NEEDLE)
+      return { name: 'memory_read_evidence', args: { reference, query: '1x1 px', max_chars: 512 } }
+    }
+    // The replay returns a FRESH volatile attachmentId, yet matching rests on
+    // target identity/version rather than the image body, so the historical
+    // envelope text is recoverable verbatim.
+    expect(text, JSON.stringify(request.messages.at(-1))).toContain(IMAGE_ENVELOPE_NEEDLE)
+    expect(text).toContain('matched')
+    expect(text).toContain('historical-unverified')
+    return 'Recovered the historical diagram observation.'
+  }, { imageCapable: true })
+  const second = await host(root, recovery, { imageStore: true, imageTool: true, ...prune })
+  handle = undefined
+  try {
+    handle = await second.ctx.agents.resume({ resumeSessionId: id, agentOptions: { provider: 'evidence-fixture', model: 'fixture' } })
+    await prompt(handle, 'Recover the original diagram observation.')
+    expect(recovery.requests).toHaveLength(2)
+    // Exactly one nested replay of read_image; it must not register a new anchor.
+    expect(second.executions()).toBe(1)
+    const db = new DatabaseSync(join(root, 'memory.sqlite'), { readOnly: true })
+    try {
+      expect(db.prepare('SELECT count(*) AS n FROM memory_evidence_anchors').get()).toMatchObject({ n: 1 })
+    } finally { db.close() }
+  } finally { await handle?.dispose(); await second.ctx.fiber.dispose() }
+})
+
+test('read_image evidence stays unavailable when the recovery route is not image-capable', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-image-evidence-deny-')))
+  roots.push(root)
+  await writeFile(join(root, 'diagram.png'), Buffer.from(onePixelPngBase64, 'base64'))
+  const id = SessionId('image-evidence-deny-session')
+  const prune = { pruneThresholdChars: 60, pruneHeadChars: 20, pruneTailChars: 1 }
+  // The observing session used a vision-capable route, so the anchor is real.
+  const capture = new ScriptAdapter((_request, index) =>
+    index === 0 ? { name: 'read_image', args: { file_path: 'diagram.png' } } : 'Captured a historical diagram.', { imageCapable: true })
+  const first = await host(root, capture, { imageStore: true, imageTool: true, ...prune })
+  let handle: AgentHandle | undefined
+  let reference = ''
+  try {
+    handle = await first.ctx.agents.create({ sessionId: id, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'evidence-fixture', model: 'fixture' } })
+    await prompt(handle, 'Capture the diagram.')
+    const db = new DatabaseSync(join(root, 'memory.sqlite'), { readOnly: true })
+    try {
+      const anchors = db.prepare('SELECT reference FROM memory_evidence_anchors').all()
+      expect(anchors).toHaveLength(1)
+      reference = String(anchors[0]!.reference)
+    } finally { db.close() }
+    first.ctx.toolResultPruner.pruneSession(handle.agent.session)
+    await first.ctx.sessions.flush(handle.agent.session)
+  } finally { await handle?.dispose(); await first.ctx.fiber.dispose() }
+
+  // Recovery runs on a text-only route: production assertImageCapableRoute
+  // refuses the nested read_image replay, so revalidation fails closed.
+  const recovery = new ScriptAdapter((request, index) => {
+    const text = JSON.stringify(request.messages)
+    if (index === 0) return { name: 'memory_read_evidence', args: { reference, query: '1x1 px', max_chars: 512 } }
+    expect(text).toContain('unavailable')
+    expect(text).not.toContain(IMAGE_ENVELOPE_NEEDLE)
+    return 'Historical image evidence is unavailable on this model route.'
+  })
+  const second = await host(root, recovery, { imageStore: true, imageTool: true, ...prune })
+  handle = undefined
+  try {
+    handle = await second.ctx.agents.resume({ resumeSessionId: id, agentOptions: { provider: 'evidence-fixture', model: 'fixture' } })
+    await prompt(handle, 'Recover the original diagram observation.')
+    expect(recovery.requests).toHaveLength(2)
+    // The replay was genuinely attempted once (then refused by the vision gate).
+    expect(second.executions()).toBe(1)
+  } finally { await handle?.dispose(); await second.ctx.fiber.dispose() }
+})

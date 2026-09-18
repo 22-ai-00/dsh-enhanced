@@ -7,6 +7,7 @@ import { isAppendSurfaceEvent } from '@deepseek-ai/dsh-session'
 import type { FsTarget } from '@deepseek-ai/dsh-fs'
 import type { EvidenceAnchor, EvidenceScope, MemoryEvidenceLedger } from './evidence-ledger.js'
 import { originalToolEvidence, pageToolEvidence, type OriginalToolEvidence } from './evidence-runtime.js'
+import { REVALIDATABLE_READ_TOOLS } from './evidence-filesystem.js'
 
 export interface EvidenceReadRequest {
   reference: string
@@ -87,7 +88,7 @@ export class SessionEvidenceBridge {
         // using whoever happens to own the runtime at the time of a later read.
         const scope = options.scope(agent, 'snapshot')
         const source = originalToolEvidence(session, event.seq, options.maxSourceBytes)
-        if (source === undefined || source.toolName !== 'read' || source.failed || observation === undefined
+        if (source === undefined || !REVALIDATABLE_READ_TOOLS.has(source.toolName) || source.failed || observation === undefined
           || observation.callId !== source.callId || !sameScope(observation.scope, scope)) return
         const { eventSeq, toolName, contentDigest, observedAt } = source
         ledger.record(scope, { eventSeq, toolName, callId: source.callId, contentDigest, observedAt,
@@ -175,7 +176,7 @@ function isLiveAgent(ctx: Context, agent: Agent | undefined): agent is Agent {
 
 function isReadExecution(value: object | undefined): value is ToolExecution {
   const execution = value as Partial<ToolExecution> | undefined
-  return execution?.name === 'read' && execution.parent === undefined
+  return execution !== undefined && REVALIDATABLE_READ_TOOLS.has(execution.name as string) && execution.parent === undefined
     && typeof execution.callId === 'string' && execution.agent !== undefined
 }
 

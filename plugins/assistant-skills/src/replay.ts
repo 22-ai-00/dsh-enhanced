@@ -7,7 +7,7 @@ import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import { lstat, mkdir, mkdtemp, realpath, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { fileObservationSteps, instantiate, type SkillDefinition, type SkillStep } from './definition.js'
+import { fileObservationSteps, instantiate, validateStepGraph, type SkillDefinition, type SkillStep } from './definition.js'
 
 export interface ReplayInput { definition: SkillDefinition; inputs: Readonly<Record<string, unknown>>; files: readonly { path: string; content: string }[]; artifactPath: string; stateRoot: string; maxToolCalls: number; maxBytes: number; signal: AbortSignal; authorize: () => void }
 export type ReplayStep =
@@ -87,7 +87,7 @@ export function validateReplayTrace(definition: SkillDefinition, maxToolCalls: n
   const expanded = dispatchSteps(definition)
   if (expanded.length > 32 || expanded.length > maxToolCalls) fail('tool-call limit')
   const ids = new Set<string>(); let parameterBytes = 0
-  return expanded.map(step => {
+  const trace = expanded.map(step => {
     if (!record(step) || !stepId(step.id) || !text(step.toolName) || !record(step.arguments) || ids.has(step.id)) fail('invalid trace')
     ids.add(step.id); parameterBytes += bytes(JSON.stringify(step.arguments))
     if (parameterBytes > maxBytes) fail('byte limit')
@@ -99,6 +99,11 @@ export function validateReplayTrace(definition: SkillDefinition, maxToolCalls: n
     checkedStep(step, definition.source.scope.workspace, '/assistant-skills-validation')
     return { id: step.id, toolName: step.toolName, outcome: 'executed' } as ReplayStep
   })
+  // Graph well-formedness is checked after per-step shape validation so a
+  // malformed/forged step surfaces its specific defect rather than the generic
+  // graph error; the expanded array (provenance nodes included) is the real graph.
+  validateStepGraph(expanded)
+  return trace
 }
 async function total(root: string): Promise<number> {
   let size = 0
@@ -126,15 +131,23 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayResult> {
     if (parameterBytes + await total(root) > input.maxBytes) fail('byte limit')
     ctx = new Context(); await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(FileTools)
     const done: ReplayStep[] = []
+    // Dependency DAG gate: a step dispatches only after every declared
+    // predecessor executed successfully. The v1 stop-and-report compensation is
+    // realized by throwing, which aborts the remaining ordered steps.
+    const succeededSteps = new Set<string>()
     for (const step of steps) {
       input.signal.throwIfAborted(); input.authorize()
-      if (step.trace.outcome === 'omitted-observation') { done.push(step.trace); continue }
+      if (step.dependsOn.some(dependency => !succeededSteps.has(dependency))) fail('dependency predecessor did not succeed')
+      // Deterministic provenance-only observations cannot fail; mark their node
+      // satisfied so a later executable step may legally depend on them.
+      if (step.trace.outcome === 'omitted-observation') { done.push(step.trace); succeededSteps.add(step.id); continue }
       const result = await ctx.tools.execute({ callId: ToolCallId(`skill-replay-${done.length + 1}`), name: step.toolName as 'read' | 'write' | 'edit', arguments: step.arguments, signal: input.signal })
       input.signal.throwIfAborted(); input.authorize()
       const observedAbsent = step.observationAllowsAbsent === true && result.isError && result.error.info?.code === 'FS_NOT_FOUND'
       if (result.isError && !observedAbsent) throw new Error(`assistant-skills: replay ${step.toolName} failed`)
       if (parameterBytes + await total(root) > input.maxBytes) fail('byte limit')
       done.push({ id: step.id, toolName: step.toolName as 'read' | 'write' | 'edit', outcome: 'executed', resultDigest: acceptanceDigest(result.content) })
+      succeededSteps.add(step.id)
     }
     const artifactFile = pathIn(input.artifactPath, workspace, root); const stat = await lstat(artifactFile); if (!stat.isFile() || stat.isSymbolicLink()) fail('invalid artifact'); outcome = { artifact: await readFile(artifactFile, 'utf8'), toolCalls: done.length,
       executedToolCalls: done.filter(step => step.outcome === 'executed').length, omittedObservations: done.filter(step => step.outcome === 'omitted-observation').length, steps: done, quiescent: true }

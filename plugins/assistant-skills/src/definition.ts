@@ -18,6 +18,18 @@ export interface SkillRunExpansion {
   inputsDigest: string
   steps: readonly { id: string; toolName: string; arguments: unknown }[]
 }
+/**
+ * Discriminated precondition families a captured skill may require at dispatch.
+ * The single v1 family admits a run only under the current owner's policy and a
+ * Goal distinct from the one whose historical trace was captured.
+ */
+export type SkillPreconditionKind = 'current-owner-policy-and-fresh-goal'
+/**
+ * Discriminated compensation families governing a run after a step failure.
+ * The single v1 family stops the remaining steps and reports for explicit
+ * owner-directed repair; the executor never self-remediates.
+ */
+export type SkillCompensationKind = 'stop-and-report'
 export interface SkillDefinition {
   protocol: 'assistant-skills/definition/v1'
   name: string
@@ -27,8 +39,8 @@ export interface SkillDefinition {
   steps: readonly SkillStep[]
   fileObservations?: SkillFileObservations
   runExpansions?: readonly SkillRunExpansion[]
-  preconditions: 'current-owner-policy-and-fresh-goal'
-  compensation: 'stop-and-report'
+  preconditions: SkillPreconditionKind
+  compensation: SkillCompensationKind
 }
 
 export type FailureCaptureCategory = 'objective-not-achieved' | 'repeated-not-achieved'
@@ -377,6 +389,93 @@ function sourceProjection(source: VerifiedWorkflowSource) {
   return { steps: segments.flatMap(segment => segment.steps), observations: segments.flatMap(segment => segment.failedObservations ?? []) }
 }
 
+/**
+ * Validate the dependency DAG of a captured step list.
+ *
+ * Edges are general (a step may declare multiple dependencies) but the stored
+ * array is required to be in topological order: every dependency must reference
+ * an earlier step. That single rule simultaneously enforces reference
+ * validity, no self-loop, and acyclicity (the index differences around a cycle
+ * cannot all be negative), and it preserves the positional invariants the
+ * sequential executor and the index-aligned file observations rely on.
+ */
+export function validateStepGraph(steps: readonly Pick<SkillStep, 'id' | 'dependsOn'>[]): void {
+  if (!Array.isArray(steps) || steps.length > 32) fail('assistant-skills: invalid dependency graph')
+  const position = new Map<string, number>()
+  steps.forEach((step, index) => {
+    if (!step || typeof step.id !== 'string' || position.has(step.id)) fail('assistant-skills: invalid dependency graph')
+    position.set(step.id, index)
+  })
+  steps.forEach((step, index) => {
+    if (!Array.isArray(step.dependsOn)) fail('assistant-skills: invalid dependency graph')
+    const seen = new Set<string>()
+    for (const dependency of step.dependsOn) {
+      const at = typeof dependency === 'string' ? position.get(dependency) : undefined
+      if (at === undefined || seen.has(dependency)) fail('assistant-skills: invalid dependency graph')
+      // A dependency on the current or a later step is a self-loop, a cycle, or
+      // non-topological storage; all three would break ordered replay.
+      if (at >= index) fail('assistant-skills: dependency graph must be topologically ordered')
+      seen.add(dependency)
+    }
+  })
+}
+
+/** The single v1 precondition family; kept as a set so unknown values fail closed. */
+const preconditionKinds = new Set<SkillPreconditionKind>(['current-owner-policy-and-fresh-goal'])
+/** The single v1 compensation family; kept as a set so unknown values fail closed. */
+const compensationKinds = new Set<SkillCompensationKind>(['stop-and-report'])
+
+/** Fail closed on the typed protocol-family declarations of any definition. */
+export function assertDefinitionProtocolFamilies(definition: Pick<SkillDefinition, 'preconditions' | 'compensation'>): void {
+  if (!preconditionKinds.has(definition.preconditions as SkillPreconditionKind)) fail('assistant-skills: unsupported skill preconditions')
+  if (!compensationKinds.has(definition.compensation as SkillCompensationKind)) fail('assistant-skills: unsupported skill compensation')
+}
+
+/** Validate the typed protocol fields and dependency graph of any definition. */
+export function assertDefinitionProtocol(definition: Pick<SkillDefinition, 'preconditions' | 'compensation' | 'steps'>): void {
+  assertDefinitionProtocolFamilies(definition)
+  validateStepGraph(definition.steps)
+}
+
+/** Whether steps already carry the v1 edge shape; absent edges are an untrusted-input defect. */
+function stepsCarryGraphShape(steps: readonly SkillStep[]): boolean {
+  return Array.isArray(steps) && steps.every(step => step !== null && typeof step === 'object' && Array.isArray(step.dependsOn))
+}
+
+/** Digests the executor already resolved; the pure gate stays free of Host scope types. */
+export interface SkillPreconditionDecision {
+  /** Policy-scope digest the executor resolved for the current action. */
+  ownerScopeDigest: string
+  /** Policy-scope digest the live Goal run context attests. */
+  currentScopeDigest: string
+  goalId: string
+  /** Goal whose historical trace was captured into the definition. */
+  sourceGoalId: string
+}
+
+/**
+ * Admit a run only when the declared precondition family is satisfied.
+ * The v1 family requires the current owner's policy scope to match and a Goal
+ * distinct from the captured source Goal. Unknown families never admit a run.
+ */
+export function evaluatePreconditions(preconditions: SkillPreconditionKind, decision: SkillPreconditionDecision): void {
+  if (!preconditionKinds.has(preconditions)) fail('assistant-skills: unsupported skill preconditions')
+  if (preconditions === 'current-owner-policy-and-fresh-goal') {
+    if (decision.ownerScopeDigest !== decision.currentScopeDigest || decision.goalId === decision.sourceGoalId) fail('assistant-skills: fresh owner Goal required')
+  }
+}
+
+/** Directive the executor follows once a step has failed. */
+export interface SkillCompensationDirective { kind: SkillCompensationKind; stopRemainingSteps: boolean; reportForOwnerRepair: boolean }
+
+/** Resolve the declared compensation family; the v1 family stops and reports. */
+export function compensationDirective(compensation: SkillCompensationKind): SkillCompensationDirective {
+  if (!compensationKinds.has(compensation)) fail('assistant-skills: unsupported skill compensation')
+  if (compensation === 'stop-and-report') return { kind: 'stop-and-report', stopRemainingSteps: true, reportForOwnerRepair: true }
+  const exhaustive: never = compensation
+  fail(`assistant-skills: unsupported skill compensation ${String(exhaustive)}`)
+}
+
 /** Derive a bounded, parameterizable skill only from an independently verified tool trace. */
 export function createDefinition(source: VerifiedWorkflowSource, options: CreateDefinitionOptions, allowedTools: readonly string[], expansions: readonly SkillRunExpansion[] = []): Readonly<SkillDefinition> {
   if (!json(source) || !json(options) || !source || source.protocol !== 'assistant-goals/verified-workflow-source/v1' || !Array.isArray(source.steps) || source.steps.length === 0 || source.steps.length > 32
@@ -422,6 +521,7 @@ export function createDefinition(source: VerifiedWorkflowSource, options: Create
     ...(observedMutators.length === 0 ? {} : { fileObservations: { protocol: 'assistant-skills/file-observations/v1' as const, beforeSteps: observedMutators.map(step => step.id) } }),
     ...(expansions.length === 0 ? {} : { runExpansions: clone(expansions) }),
     preconditions: 'current-owner-policy-and-fresh-goal', compensation: 'stop-and-report' }
+  assertDefinitionProtocol(definition)
   fileObservations(definition)
   return freeze(definition)
 }
@@ -440,6 +540,13 @@ export function instantiate(definition: SkillDefinition, values: Readonly<Record
     replace(step.arguments, input.path, value)
   }
   if (output.runExpansions !== undefined) expandSkillRuns(sourceProjection(output.source).steps, sourceProjection(output.source).observations, output.runExpansions)
+  // Protocol-family declarations are always fail-closed. The edge graph is only
+  // re-validated when steps still carry the v1 edge shape: a definition whose
+  // steps were wholesale replaced (edges missing) is an untrusted-input defect
+  // whose precise cause belongs to the execution/replay boundary, which runs
+  // strict per-step validation before its own graph gate.
+  assertDefinitionProtocolFamilies(output)
+  if (stepsCarryGraphShape(output.steps)) validateStepGraph(output.steps)
   fileObservations(output)
   if (Buffer.byteLength(JSON.stringify(output.steps.map(step => step.arguments)), 'utf8') > maximumArgumentsBytes) fail('assistant-skills: invocation arguments too large')
   return freeze(output)
