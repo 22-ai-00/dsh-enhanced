@@ -9,7 +9,7 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { GoalBudgetRuntime } from './budget.js'
 import { STRATEGY_PROVIDER } from './strategy-identity.js'
 import { GoalStrategyStore } from './strategy-store.js'
-import type { StrategyChildDiagnostics, StrategyKind, StrategyRecord, StrategyTerminationReason } from './strategy-store.js'
+import type { StrategyAdviceDefinitionSummary, StrategyChildDiagnostics, StrategyKind, StrategyRecord, StrategyTerminationReason } from './strategy-store.js'
 import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
 
 export interface GoalStrategyConfig { maxDurationMs: number; maxPromptBytes: number; maxOutputBytes: number; maxRunsPerGoal: number }
@@ -151,6 +151,12 @@ export class GoalStrategyRuntime {
   }
 
   list = (scope: GoalScope, goalId: string): readonly StrategyRecord[] => { this.#open(); return this.#store.list(scope, goalId) }
+
+  /** Read-only cross-instance advice repetition view for the learning host. */
+  summarizeAdviceByDefinition = (scope: GoalScope): readonly StrategyAdviceDefinitionSummary[] => {
+    this.#open()
+    return this.#store.summarizeAdviceByDefinition(scope)
+  }
 
   async run(parent: Agent, raw: GoalStrategyInput, signal: AbortSignal): Promise<GoalStrategyResult> {
     const input = validateGoalStrategyInput(raw)

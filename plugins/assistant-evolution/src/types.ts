@@ -28,6 +28,27 @@ export type TaskLearningDisposition = 'upsert' | 'retract'
 /** Reserved scope used only for rows that predate scoped evidence. */
 export const legacyEvolutionScope = 'legacy:v1'
 
+/**
+ * Content-bound situation shared with the goals side: `goal-definition:<64hex>`,
+ * where the digest is over the goal objective. It can never collide with the
+ * legacy `goal:<id>:definition:<n>` structural key. Kept dependency-free in
+ * types.ts so even the stripped multi-process worker bundle can validate it.
+ */
+const GOAL_DEFINITION_SITUATION = /^goal-definition:([a-f0-9]{64})$/u
+
+export function isGoalDefinitionSituation(value: unknown): value is string {
+  return typeof value === 'string' && GOAL_DEFINITION_SITUATION.test(value)
+}
+
+/** Read-only trusted-episode aggregate for one content-bound goal definition. */
+export interface GoalDefinitionEpisodeSummary {
+  situation: string
+  failures: number
+  succeeded: number
+  total: number
+  lastOccurredAt: number
+}
+
 export type RuleStatus = 'active' | 'retired'
 
 export type ProposalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'conflicted'

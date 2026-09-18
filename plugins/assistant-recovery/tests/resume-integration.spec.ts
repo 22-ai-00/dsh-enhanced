@@ -156,8 +156,12 @@ describe('Recovery durable Host resume integration', () => {
       },
       evolution: {
         hostCandidates: vi.fn(() => []),
+        hostGoalDefinitionEpisodes: vi.fn(() => []),
         hostListRules: vi.fn(() => []),
         hostRollbackOne: vi.fn(),
+      },
+      goals: {
+        hostSummarizeAdviceByDefinition: vi.fn(() => []),
       },
       preference: {
         health: vi.fn(() => ({ ready: true } as never)),
@@ -213,7 +217,7 @@ describe('Recovery durable Host resume integration', () => {
         ownerGeneration: preferenceOwnerGeneration,
         principalLineage,
       },
-      idempotencyKey: 'recovery:3:occurrence-resume-1:t1-effects',
+      idempotencyKey: 'recovery:4:occurrence-resume-1:t1-effects',
     })
     settlement.mockRestore()
     firstStore.close()
@@ -231,8 +235,8 @@ describe('Recovery durable Host resume integration', () => {
     })
     expect(hostActivationCandidate).toHaveBeenCalledOnce()
     expect(activationCalls).toEqual([
-      { operationId: 'recovery:3:occurrence-resume-1:t1-effects', replayed: false },
-      { operationId: 'recovery:3:occurrence-resume-1:t1-effects', replayed: true },
+      { operationId: 'recovery:4:occurrence-resume-1:t1-effects', replayed: false },
+      { operationId: 'recovery:4:occurrence-resume-1:t1-effects', replayed: true },
     ])
     expect(restartedStore.getRunByOccurrence('occurrence-resume-1')).toMatchObject({
       status: 'succeeded', resultCode: 'runbook-complete',
@@ -304,8 +308,12 @@ describe('Recovery durable Host resume integration', () => {
       },
       evolution: {
         hostCandidates: vi.fn(() => []),
+        hostGoalDefinitionEpisodes: vi.fn(() => []),
         hostListRules: vi.fn(() => []),
         hostRollbackOne: vi.fn(),
+      },
+      goals: {
+        hostSummarizeAdviceByDefinition: vi.fn(() => []),
       },
       preference: {
         health: vi.fn(() => ({ ready: true } as never)),
@@ -351,7 +359,7 @@ describe('Recovery durable Host resume integration', () => {
         ownerGeneration: preferenceOwnerGeneration,
         principalLineage,
       },
-      idempotencyKey: 'recovery:3:occurrence-resume-1:retention-maintenance',
+      idempotencyKey: 'recovery:4:occurrence-resume-1:retention-maintenance',
     })
     settlement.mockRestore()
     firstStore.close()
@@ -364,8 +372,8 @@ describe('Recovery durable Host resume integration', () => {
     })
     expect(hostOwnerFence).toHaveBeenCalledOnce()
     expect(maintenanceCalls).toEqual([
-      { operationId: 'recovery:3:occurrence-resume-1:retention-maintenance', replayed: false },
-      { operationId: 'recovery:3:occurrence-resume-1:retention-maintenance', replayed: true },
+      { operationId: 'recovery:4:occurrence-resume-1:retention-maintenance', replayed: false },
+      { operationId: 'recovery:4:occurrence-resume-1:retention-maintenance', replayed: true },
     ])
     expect(restartedStore.getRunByOccurrence('occurrence-resume-1')).toMatchObject({
       status: 'succeeded', resultCode: 'runbook-complete',

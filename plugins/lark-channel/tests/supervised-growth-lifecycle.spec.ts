@@ -57,7 +57,7 @@ function recoverySnapshot(input: {
   const setDigest = input.stage === 'preview' ? 'e'.repeat(64) : 'f'.repeat(64)
   return Object.freeze({
     protocol: 'assistant-recovery/operator-snapshot/v1',
-    schemaVersion: 4,
+    schemaVersion: 5,
     database: Object.freeze({ device: '1', inode: '2', size: 4096, digest: databaseDigest }),
     bootstrap: Object.freeze({
       status: 'succeeded', generation: input.generation ?? 4, attestationValid: true,

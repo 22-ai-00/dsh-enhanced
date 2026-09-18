@@ -257,6 +257,41 @@ describe('approval-gated automation proposals', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  // Engineering-layer pin (not real provider evidence): an owner-anchored
+  // workflow is materialized paused with a frozen placeholder cron. Even an
+  // explicit owner approval of a `resume` proposal must not switch the
+  // scheduler on while that schedule is still present; the approval settles as
+  // `conflicted` (decision is never re-asked) and the row stays paused until an
+  // owner schedule mutation replaces the cron.
+  test('refuses to activate an owner-approved resume that still carries the owner-anchored placeholder schedule', async () => {
+    const fixture = await harness()
+    const paused = fixture.automations.reconcileSystemOwned({
+      owner: 'assistant-growth-experiments',
+      automationId: 'learned-wf',
+      idempotencyKey: 'learned-wf:paused',
+      desiredStatus: 'paused',
+      definition: {
+        ...definition(),
+        name: 'Owner-anchored workflow',
+        schedule: { kind: 'cron', expression: '0 0 29 2 *', timezone: 'UTC' },
+      },
+    })
+    const resume = fixture.manager.propose({
+      idempotencyKey: 'automation:resume:learned-wf', requester: 'agent:primary',
+      principal: 'owner:lark:123', ttlMs: 60_000,
+      mutation: { op: 'resume', automationId: paused.id, expectedVersion: paused.version },
+    })
+    const settled = fixture.manager.decide({
+      proposalId: resume.proposalId, principal: 'owner:lark:123', expectedVersion: 1,
+      decision: 'approved', reason: 'owner approved without changing the schedule',
+    })
+    expect(settled).toMatchObject({ status: 'conflicted' })
+    expect(fixture.automations.get(paused.id)).toMatchObject({ status: 'paused', version: 1 })
+    fixture.proposals.close()
+    fixture.automations.close()
+    await fixture.ctx.fiber.restart()
+  })
+
   test('marks an approved stale lifecycle snapshot conflicted', async () => {
     const fixture = await harness()
     fixture.automations.createApproved({ automationId: 'auto-review', idempotencyKey: 'seed', definition: definition() })

@@ -24,6 +24,17 @@ export type {
   EvolutionRollbackResult,
 } from './service.js'
 export * from './types.js'
+export {
+  isGoalDefinitionSituation,
+  joinStrategyLearningObservations,
+  toStrategyAdviceSignal,
+} from './strategy-learning.js'
+export type {
+  GoalDefinitionEpisodeSummary,
+  StrategyAdviceSignal,
+  StrategyLearningJoinInput,
+  StrategyLearningObservation,
+} from './strategy-learning.js'
 
 export function apply(ctx: Context, config: Config): void {
   new AssistantEvolutionService(ctx, config)

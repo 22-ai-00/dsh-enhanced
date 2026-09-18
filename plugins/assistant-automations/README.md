@@ -146,6 +146,15 @@ Growth 的 operation 与 paused artifact 账本。部署必须先停止所有旧
 
 `automation_pending` 用于列出仍在等待审批的提案（仅有界元数据，不含 prompt、principal 或主机路径），避免对同一变更重复提案。
 
+## owner-anchored 占位 schedule 的激活门
+
+Growth 的 owner-anchored workflow 证据桥（见 `assistant-growth-driver` 的 `workflowOwnerAnchored` 开关）沉淀的 paused automation 冻结了一条**永不触发的占位 cron**（`0 0 29 2 *`，UTC，2 月 29 日）。它不是新的 schedule kind，只是一条普通合法 cron；其意义由 store 层一道 fail-closed 门赋予：system owner 为 Growth（`assistant-growth-experiments`）且 schedule 与该冻结值逐字段相等的行，**不能经任何路径转 active**——
+
+- owner 批准一条 `resume` 提案时，`changeApproved` 抛 `invalid-state`，提案结算降级为 `conflicted`（不重新询问 owner），automation 行保持 paused、版本不变；
+- 系统侧 `reconcileSystemOwned({ desiredStatus: 'active' })` 直接拒绝（因此 Growth 即使在非默认的 full promotionMode 下也无法自行 promote 占位 artifact）。
+
+解锁方式只有一个：owner 通过既有 system reconcile（upsert，definition hash 变化即原地替换 schedule）或删除后重建，显式给它一条真实 schedule；相等不再成立后激活门自然放行。owner 自有的 `system_owner = NULL` 行、以及其他 system owner 使用完全相同 cron 的行不受此门限制——owner 自主权优先，门只约束 Growth 自己的工件。paused 行本身也永远不会被调度（materialize 只取 active 行）。
+
 ## Proactive 的可选草稿运行
 
 `assistant-proactive` 的 `mode: prepare` 只有 profile 显式提供 `preparation { provider, model, budgetId, maxOutputTokens, timeoutMs }` 时，才经由本插件执行一次真实模型草稿；省略该对象仍是 Proactive 的 metadata-only 记录。该运行不创建 AutomationStore 的 definition、occurrence 或可投递 run，而是为这条准备记录创建独立 Session。它固定 `allowedTools: []`、`maxToolCalls: 0`、`retrySafety: never` 和零重试；原 Goals 目标仍为 `paused`。输出由 Proactive 标为 `unverified-draft`，不代表业务文件被修改、目标执行或独立验收。

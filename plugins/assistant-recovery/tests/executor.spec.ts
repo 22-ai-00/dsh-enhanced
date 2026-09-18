@@ -76,6 +76,7 @@ function actionFor(stepId: RecoveryStepId): RecoveryStepAction {
       definitionHash: hash('c'),
       expectedVersion: 2,
     }
+    case 'strategy-learning': return { kind: 'observe-strategy-learning' }
     case 'verification': return { kind: 'verify-health' }
   }
 }
@@ -124,9 +125,9 @@ describe('RecoveryExecutor', () => {
     expect(port.planned).toEqual(RECOVERY_CATALOG.map(step => step.id))
     expect(port.executed.map(call => call.stepId)).toEqual(port.planned)
     expect(port.executed.map(call => call.idempotencyKey)).toEqual(
-      RECOVERY_CATALOG.map(step => `recovery:3:occurrence-1:${step.id}`),
+      RECOVERY_CATALOG.map(step => `recovery:4:occurrence-1:${step.id}`),
     )
-    expect(result.steps).toHaveLength(7)
+    expect(result.steps).toHaveLength(8)
     store.close()
   })
 
@@ -136,7 +137,7 @@ describe('RecoveryExecutor', () => {
     const result = await new RecoveryExecutor(store, port, 1_000).execute(input({ executionMode: 'preview' }))
 
     expect(result).toMatchObject({ status: 'succeeded', resultCode: 'preview-verified' })
-    expect(port.executed.map(call => call.stepId)).toEqual(['authority-admission', 'verification'])
+    expect(port.executed.map(call => call.stepId)).toEqual(['authority-admission', 'strategy-learning', 'verification'])
     expect(result.steps.filter(step => step.resultCode === 'preview-suppressed')).toHaveLength(5)
     store.close()
   })
@@ -593,10 +594,10 @@ describe('RecoveryExecutor', () => {
       action,
     })
     expect(sinkCalls).toEqual([
-      { idempotencyKey: `recovery:3:occurrence-1:${stepId}`, replayed: false },
-      { idempotencyKey: `recovery:3:occurrence-1:${stepId}`, replayed: true },
+      { idempotencyKey: `recovery:4:occurrence-1:${stepId}`, replayed: false },
+      { idempotencyKey: `recovery:4:occurrence-1:${stepId}`, replayed: true },
     ])
-    expect(sink.get(`recovery:3:occurrence-1:${stepId}`)).toEqual(action)
+    expect(sink.get(`recovery:4:occurrence-1:${stepId}`)).toEqual(action)
     restarted.close()
   })
 
@@ -626,7 +627,7 @@ describe('RecoveryExecutor', () => {
     const run = store.getRunByOccurrence('occurrence-1')!
     const intent = store.getStep(run.id, 't1-effects')!
     expect(intent.status).toBe('started')
-    expect(sinkCalls).toEqual(['recovery:3:occurrence-1:t1-effects'])
+    expect(sinkCalls).toEqual(['recovery:4:occurrence-1:t1-effects'])
     settlement.mockRestore()
     store.close()
 
@@ -643,7 +644,7 @@ describe('RecoveryExecutor', () => {
     })
     expect(replayPort.planned).toEqual([])
     expect(replayPort.executed).toEqual([])
-    expect(sinkCalls).toEqual(['recovery:3:occurrence-1:t1-effects'])
+    expect(sinkCalls).toEqual(['recovery:4:occurrence-1:t1-effects'])
     terminal.mockRestore()
     restarted.close()
 

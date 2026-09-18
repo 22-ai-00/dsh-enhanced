@@ -100,7 +100,12 @@ function receiptCode(value: unknown, sideEffectState: RecoveryPortSideEffectStat
 }
 
 function isMutation(action: RecoveryStepAction): boolean {
-  return !['noop', 'verify-authority', 'verify-health'].includes(action.kind)
+  return ![
+    'noop',
+    'verify-authority',
+    'verify-health',
+    'observe-strategy-learning',
+  ].includes(action.kind)
 }
 
 function isRequiredVerification(stepId: RecoveryStepId): boolean {

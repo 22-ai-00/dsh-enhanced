@@ -1,5 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
-import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import { GoalStoreError } from './types.js'
 import type { GoalScope } from './types.js'
 import { prepareGoalStoreDatabaseFile } from './store.js'
@@ -21,6 +21,38 @@ export interface StrategyRecord {
 export interface StrategyChildDiagnostics { toolRejections: number; output: 'not-observed' | 'accepted' | 'empty-or-oversized'; failure?: StrategyFailure }
 export interface StrategyFailure { stage: 'admission' | 'request-limit' | 'meter' | 'reserve' | 'stream' | 'usage' | 'settlement'; dispatched: boolean }
 export type StrategyTerminationReason = 'deadline' | 'parent-authority-changed' | 'cancelled' | 'execution-failed' | 'unconfirmed-stop' | 'completed' | 'recovered-unknown' | 'unknown'
+
+/**
+ * Read-only repetition view for one advice *request* within a goal-definition
+ * cluster. Only content hashes leave the ledger; advice plaintext never does.
+ */
+export interface StrategyAdviceRequestRepetition {
+  requestDigest: string
+  /** Settled advice runs that carried this exact request. */
+  occurrences: number
+  /** Distinct advice output hashes produced; `occurrences - distinctOutputs` is the repeated-advice count. */
+  distinctOutputDigests: number
+  lastGoalId: string
+  lastCompletedAt: number
+}
+
+/**
+ * Read-only, cross goal-instance aggregation of settled strategy advice for one
+ * content-bound goal definition. `situation` equals the trusted evolution
+ * learning situation (`goal-definition:<definitionDigest>`), so an external
+ * learning host can correlate advice repetition with trusted failure episodes
+ * without either plugin depending on the other.
+ */
+export interface StrategyAdviceDefinitionSummary {
+  situation: string
+  definitionDigest: string
+  /** Distinct goal instances whose settled advice is covered. */
+  goalInstances: number
+  adviceRuns: number
+  distinctRequests: number
+  /** Newest-first, bounded repetition breakdown per request digest. */
+  requests: readonly StrategyAdviceRequestRepetition[]
+}
 
 type Row = { id: string; intent_json: string; state: string; version: number; children_json: string; completed_at: number | null; outcome: string | null; output_digest: string | null; termination_reason: string | null; scope_key: string; goal_id: string; created_at: number }
 type Settlement = { children: Array<{ sessionId: string; stopReason: string; quiescent: boolean; diagnostics: StrategyChildDiagnostics }>; outcome: 'advice' | 'execution-failed' | 'cancelled' | 'unknown'; outputDigest?: string; quiescent: boolean; terminationReason: StrategyTerminationReason }
@@ -204,6 +236,76 @@ export class GoalStrategyStore {
     if (!idPattern.test(goalId) || !positive(limit, 100)) fail('invalid-input'); const key = acceptanceCanonicalJson(scopeInput(scope))
     const rows = this.#database.prepare('SELECT id, intent_json, state, version, children_json, completed_at, outcome, output_digest, termination_reason, scope_key, goal_id, created_at FROM goal_strategy_records WHERE scope_key = ? AND goal_id = ? ORDER BY created_at DESC, id ASC LIMIT ?').all(key, goalId, limit) as Row[]
     return freeze(rows.map(record))
+  }
+  /**
+   * Read-only cross-instance aggregation for the learning host. Groups every
+   * settled advice run in one scope by the goal definition's content digest
+   * (which is exactly the trusted evolution situation key), and reports how
+   * often identical advice *requests* recur and whether they keep producing the
+   * same output. Advice plaintext is never stored here, so only hashes leave.
+   * Purely observational: it takes no writer lock and never mutates the ledger.
+   */
+  summarizeAdviceByDefinition(scope: StrategyScope, options: { limit?: number; requestLimit?: number } = {}): readonly StrategyAdviceDefinitionSummary[] {
+    const key = acceptanceCanonicalJson(scopeInput(scope))
+    const limit = options.limit ?? 100
+    const requestLimit = options.requestLimit ?? 20
+    if (!positive(limit, 200) || !positive(requestLimit, 100)) fail('invalid-input')
+    const rows = this.#database.prepare(`
+      SELECT id, intent_json, state, version, children_json, completed_at, outcome, output_digest,
+        termination_reason, scope_key, goal_id, created_at
+      FROM goal_strategy_records
+      WHERE scope_key = ? AND state = 'settled' AND outcome = 'advice' AND output_digest IS NOT NULL
+      ORDER BY completed_at DESC, id DESC
+      LIMIT ?
+    `).all(key, limit) as Row[]
+    interface RequestAgg { requestDigest: string; occurrences: number; outputs: Set<string>; lastGoalId: string; lastCompletedAt: number }
+    interface DefinitionAgg { definitionDigest: string; goals: Set<string>; adviceRuns: number; requests: Map<string, RequestAgg> }
+    const byDefinition = new Map<string, DefinitionAgg>()
+    for (const row of rows) {
+      const value = record(row)
+      if (value.outcome !== 'advice' || value.outputDigest === undefined || value.completedAt === undefined) continue
+      let agg = byDefinition.get(value.intent.definitionDigest)
+      if (agg === undefined) {
+        agg = { definitionDigest: value.intent.definitionDigest, goals: new Set(), adviceRuns: 0, requests: new Map() }
+        byDefinition.set(value.intent.definitionDigest, agg)
+      }
+      agg.goals.add(value.intent.goalId)
+      agg.adviceRuns += 1
+      let requestAgg = agg.requests.get(value.intent.requestDigest)
+      if (requestAgg === undefined) {
+        requestAgg = { requestDigest: value.intent.requestDigest, occurrences: 0, outputs: new Set(), lastGoalId: value.intent.goalId, lastCompletedAt: value.completedAt }
+        agg.requests.set(value.intent.requestDigest, requestAgg)
+      }
+      requestAgg.occurrences += 1
+      requestAgg.outputs.add(value.outputDigest)
+      if (value.completedAt > requestAgg.lastCompletedAt) {
+        requestAgg.lastCompletedAt = value.completedAt
+        requestAgg.lastGoalId = value.intent.goalId
+      }
+    }
+    return freeze([...byDefinition.values()].map(agg => {
+      const requests = [...agg.requests.values()]
+        .sort((left, right) => right.occurrences - left.occurrences
+          || right.lastCompletedAt - left.lastCompletedAt
+          || left.requestDigest.localeCompare(right.requestDigest))
+        .slice(0, requestLimit)
+        .map(item => freeze({
+          requestDigest: item.requestDigest,
+          occurrences: item.occurrences,
+          distinctOutputDigests: item.outputs.size,
+          lastGoalId: item.lastGoalId,
+          lastCompletedAt: item.lastCompletedAt,
+        }))
+      return freeze({
+        situation: goalDefinitionSituation(agg.definitionDigest),
+        definitionDigest: agg.definitionDigest,
+        goalInstances: agg.goals.size,
+        adviceRuns: agg.adviceRuns,
+        distinctRequests: agg.requests.size,
+        requests,
+      })
+    }).sort((left, right) => right.adviceRuns - left.adviceRuns
+      || left.situation.localeCompare(right.situation)))
   }
   recoverIncomplete(now: number): void {
     if (!time(now)) fail('invalid-input')

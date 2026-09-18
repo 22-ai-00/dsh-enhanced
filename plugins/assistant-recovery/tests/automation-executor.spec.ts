@@ -32,7 +32,7 @@ function spec(overrides: Partial<HostAutomationExecutionSpec> = {}): HostAutomat
     executorId: RECOVERY_EXECUTOR_ID,
     executorContractVersion: RECOVERY_EXECUTOR_CONTRACT_VERSION,
     runbookId: 'supervised-growth/v2',
-    runbookVersion: 3,
+    runbookVersion: 4,
     catalogDigest: RECOVERY_CATALOG_DIGEST,
     targetScope: { workspace: '/workspace', preset: 'owner' },
     scopeDigest: '47dd5233c728db288367a8a04441645b88b26e44e62f06204795c2bf22d80f48',
@@ -72,6 +72,7 @@ function noChangePort(overrides: Partial<RecoveryRunbookPort> = {}): RecoveryRun
   return {
     async plan(_context, stepId) {
       if (stepId === 'authority-admission') return { action: { kind: 'verify-authority' }, beforeDigest: digest('b') }
+      if (stepId === 'strategy-learning') return { action: { kind: 'observe-strategy-learning' }, beforeDigest: digest('b') }
       if (stepId === 'verification') return { action: { kind: 'verify-health' }, beforeDigest: digest('b') }
       return { action: { kind: 'noop', reasonCode: 'no-change' }, beforeDigest: digest('b') }
     },
@@ -90,7 +91,7 @@ describe('RecoveryAutomationExecutor', () => {
   it('accepts only the exact compiled contract and canonical scope digest', () => {
     const executor = harness(noChangePort())
     expect(executor.accepts(spec())).toBe(true)
-    expect(executor.accepts(spec({ runbookVersion: 2 }))).toBe(false)
+    expect(executor.accepts(spec({ runbookVersion: 3 }))).toBe(false)
     expect(executor.accepts(spec({ scopeDigest: digest('0') }))).toBe(false)
   })
 
@@ -122,7 +123,7 @@ describe('RecoveryAutomationExecutor', () => {
     expect(second).toBe(first)
     release()
     await expect(Promise.all([first, second])).resolves.toHaveLength(2)
-    expect(plan).toHaveBeenCalledTimes(7)
+    expect(plan).toHaveBeenCalledTimes(8)
   })
 
   it('reports a committed T1 action conservatively as possible and unsafe to retry', async () => {

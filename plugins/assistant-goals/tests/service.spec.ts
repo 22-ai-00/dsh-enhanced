@@ -1517,3 +1517,45 @@ describe('goal strategy compare concurrency', () => {
     expect(durable.children).toHaveLength(2)
   })
 })
+
+describe('inspectOwnerGoals host-only enumeration', () => {
+  const ownerScope = (root: string) => ({ principalId: 'owner', principalRecordId: 'record-owner', principalVersion: 1, workspace: root, preset: 'primary' })
+
+  it('lists owner goals most-recently-updated first with a bounded limit', async () => {
+    const f = await harness()
+    try {
+      const one = await f.create('g1', 'owner'); f.human.add(one)
+      const two = await f.create('g2', 'owner'); f.human.add(two)
+      const three = await f.create('g3', 'owner'); f.human.add(three)
+      // Each business goal is created synchronously; pin Date.now for exactly
+      // that window so the store's updated_at ordering is deterministic.
+      const clock = vi.spyOn(Date, 'now')
+      clock.mockReturnValue(3_000); const recordOne = f.service.create(one, 'Objective one', 2)
+      clock.mockReturnValue(4_000); const recordTwo = f.service.create(two, 'Objective two', 2)
+      clock.mockReturnValue(5_000); const recordThree = f.service.create(three, 'Objective three', 2)
+      clock.mockRestore()
+      const listed = f.service.inspectOwnerGoals(ownerScope(f.root))
+      expect(listed.map(record => record.id)).toEqual([recordThree.id, recordTwo.id, recordOne.id])
+      expect(listed.map(record => record.updatedAt)).toEqual([5_000, 4_000, 3_000])
+      expect(f.service.inspectOwnerGoals(ownerScope(f.root), 2)).toHaveLength(2)
+      // Non-positive, over-ceiling and fractional limits all clamp to the 50-row cap.
+      for (const limit of [0, -1, 100, 1.5]) expect(f.service.inspectOwnerGoals(ownerScope(f.root), limit)).toHaveLength(3)
+    } finally { vi.restoreAllMocks(); await f.plugin.dispose() }
+  })
+
+  it('returns nothing for a different principal scope', async () => {
+    const f = await harness()
+    const agent = await f.create('g1', 'owner'); f.human.add(agent)
+    f.service.create(agent, 'Objective one', 2)
+    expect(f.service.inspectOwnerGoals({ ...ownerScope(f.root), principalId: 'other', principalRecordId: 'record-other' })).toEqual([])
+    await f.plugin.dispose()
+  })
+
+  it('throws when the service is inactive', async () => {
+    const f = await harness()
+    const agent = await f.create('g1', 'owner'); f.human.add(agent)
+    f.service.create(agent, 'Objective one', 2)
+    await f.plugin.dispose()
+    expect(() => f.service.inspectOwnerGoals(ownerScope(f.root))).toThrow('assistant-goals: service is inactive')
+  })
+})

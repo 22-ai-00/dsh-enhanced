@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
+import { WORKFLOW_OWNER_ANCHORED_PLACEHOLDER_SCHEDULE } from '@dsh-enhanced/assistant-growth-contract'
 import {
   dueOccurrences,
   nextOccurrence,
@@ -283,6 +284,42 @@ function pausedGrowthTaskAdmission(taskAlias: string, definitionAlias: string): 
         )
     )
   `
+}
+
+/**
+ * Fail-closed gate for owner-anchored workflows learned before the owner chose
+ * when they should recur. Delivery materializes them paused with a frozen
+ * placeholder cron (00:00 UTC on 29 February, see the growth contract); the
+ * scheduler must never be switched on for that schedule. A Growth-owned
+ * automation reaches a running state through exactly two seams — an owner
+ * `resume` approval (`changeApproved`) or a system reconcile to `active`
+ * (`reconcileSystemOwned`, including Growth's own promotion) — and both call
+ * this guard first.
+ *
+ * Identification is exact: the row must be system-owned by Growth AND its
+ * normalized schedule must be field-for-field equal to the frozen placeholder.
+ * A different owner (including an owner-created automation with the same cron
+ * string) is unaffected, and once the owner performs an explicit schedule
+ * mutation — reconcile a Growth-owned revision with a real cron, or delete and
+ * recreate — the equality stops holding and activation is allowed. This is not
+ * a new schedule kind.
+ */
+function isOwnerAnchoredPlaceholderSchedule(schedule: AutomationSchedule): boolean {
+  return schedule.kind === 'cron'
+    && schedule.expression === WORKFLOW_OWNER_ANCHORED_PLACEHOLDER_SCHEDULE.expression
+    && schedule.timezone === WORKFLOW_OWNER_ANCHORED_PLACEHOLDER_SCHEDULE.timezone
+}
+
+function assertPlaceholderScheduleCannotActivate(input: {
+  owner: string | null
+  schedule: AutomationSchedule
+}): void {
+  if (input.owner === growthAutomationOwner && isOwnerAnchoredPlaceholderSchedule(input.schedule)) {
+    throw new AutomationStoreError(
+      'invalid-state',
+      'owner-anchored workflow still carries its placeholder schedule; an explicit owner schedule mutation is required before activation',
+    )
+  }
 }
 
 function hash(value: unknown): string {
@@ -1302,6 +1339,13 @@ export class AutomationStore {
     const idempotencyKey = text(input.idempotencyKey, 'idempotencyKey', 500)
     const definition = normalizeAutomationDefinition(input.definition, this.maxPromptBytes, this.maxAllowedTools)
     const desiredStatus = input.desiredStatus ?? 'active'
+    // Creating or reconciling a Growth-owned owner-anchored workflow straight
+    // to active while it still carries the placeholder cron is refused; it must
+    // first be reconciled (or deleted and recreated) with a real schedule. The
+    // paused materialization itself is unaffected.
+    if (desiredStatus === 'active') {
+      assertPlaceholderScheduleCannotActivate({ owner, schedule: definition.schedule })
+    }
     const inputHash = hash({ owner, automationId: id, desiredStatus, definition })
     const definitionHash = hash(definition)
     return this.transaction(() => {
@@ -2120,6 +2164,12 @@ export class AutomationStore {
       }
       if (input.operation === 'resume' && current.status !== 'paused') {
         throw new AutomationStoreError('invalid-state', 'only a paused automation can be resumed')
+      }
+      if (input.operation === 'resume') {
+        assertPlaceholderScheduleCannotActivate({
+          owner: current.owner ?? null,
+          schedule: current.definition.schedule,
+        })
       }
       const status: AutomationStatus = input.operation === 'delete'
         ? 'deleted'

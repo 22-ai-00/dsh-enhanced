@@ -160,7 +160,7 @@ describe('RecoveryStore', () => {
     })
 
     expect(first.step).toMatchObject({
-      idempotencyKey: 'recovery:3:occurrence-1:authority-admission',
+      idempotencyKey: 'recovery:4:occurrence-1:authority-admission',
       status: 'started',
       version: 1,
     })

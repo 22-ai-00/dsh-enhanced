@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type UserMessage } from '@deepseek-ai/dsh-session'
+import { goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import {
   AssistantEvaluationService,
   TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
@@ -24,8 +26,9 @@ import {
   AssistantEvolutionError,
   AssistantEvolutionService,
   canonicalEvolutionHostScope,
+  canonicalEvolutionScope,
 } from '../src/service.ts'
-import { EvolutionStoreError } from '../src/store.ts'
+import { EvolutionStore, EvolutionStoreError } from '../src/store.ts'
 
 const temporaryRoots: string[] = []
 
@@ -498,7 +501,7 @@ describe('assistant evolution service', () => {
     const accepted = fixture.service.projectTrustedEvaluationTaskRevision({ scope, evaluationId: achieved.evaluationId })
     expect(accepted).toMatchObject({ subjectKind: 'goal-outcome', subjectRef: 'assessment-achieved', disposition: 'upsert' })
     expect(fixture.service.projectEvaluationOutcome({ scope: canonicalEvolutionHostScope(scope), evaluationId: achieved.evaluationId }))
-      .toMatchObject({ situation: 'goal:goal-42:definition:7', outcome: 'succeeded' })
+      .toMatchObject({ situation: `goal-definition:${'a'.repeat(64)}`, outcome: 'succeeded' })
 
     const unknown = await complete(task('assessment-unknown'), { status: 'unknown', quiescent: false })
     const retracted = fixture.service.projectTrustedEvaluationTaskRevision({ scope, evaluationId: unknown.evaluationId })
@@ -539,6 +542,64 @@ describe('assistant evolution service', () => {
     expect(() => fixture.service.hostCandidates({
       scope, principal: 'owner:lark:other', operationId: 'growth-run:wrong-owner',
     })).toThrowError(expect.objectContaining<Partial<AssistantEvolutionError>>({ code: 'forbidden' }))
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('Host goal-definition episode observation is authorized read-only and never widens scope', async () => {
+    const fixture = await harness()
+    const scope = canonicalEvolutionHostScope({ workspace: '/work/alpha', preset: 'primary' })
+    const scopeKey = canonicalEvolutionScope('/work/alpha', 'primary')
+    const situationValue = goalDefinitionSituation('a'.repeat(64))
+
+    // Seed trusted, learning-eligible goal-outcome episodes through the
+    // production projection path on a second committed handle to the same file.
+    const writer = new EvolutionStore({ path: join(fixture.root, 'evolution.sqlite') })
+    for (const index of [1, 2, 3]) {
+      const subjectRef = JSON.stringify(['evaluation-outcome', situationValue, index])
+      const valueDigest = createHash('sha256')
+        .update(JSON.stringify({ scopeKey, subjectRef, situation: situationValue, outcome: 'failed' }))
+        .digest('hex')
+      writer.applyTaskLearningProjection({
+        scopeKey,
+        scopeWatermark: index,
+        subjectKind: 'goal-outcome',
+        subjectRef,
+        version: 1,
+        digest: valueDigest,
+        disposition: 'upsert',
+        situation: situationValue,
+        outcome: 'failed',
+        detail: `authoritative outcome ${index}`,
+        evidenceRef: `evaluation:${situationValue}:${index}`,
+        occurredAt: 1_000 + index,
+      })
+    }
+    writer.close()
+
+    const summaries = fixture.service.hostGoalDefinitionEpisodes({
+      scope, principal: 'owner:lark:123', operationId: 'growth-run:goal-episodes:1',
+    })
+    expect(summaries).toEqual([{
+      situation: situationValue,
+      failures: 3,
+      succeeded: 0,
+      total: 3,
+      lastOccurredAt: 1_003,
+    }])
+
+    // The read is still a Host 'inspect' authorization; wrong principal is denied.
+    expect(() => fixture.service.hostGoalDefinitionEpisodes({
+      scope, principal: 'owner:lark:other', operationId: 'growth-run:goal-episodes:denied',
+    })).toThrowError(expect.objectContaining<Partial<AssistantEvolutionError>>({ code: 'forbidden' }))
+    // A forged (non-canonical) scope token is rejected before any read.
+    expect(() => fixture.service.hostGoalDefinitionEpisodes({
+      scope: { ...scope } as typeof scope,
+      principal: 'owner:lark:123', operationId: 'growth-run:goal-episodes:forged',
+    })).toThrowError(expect.objectContaining<Partial<AssistantEvolutionError>>({ code: 'invalid-input' }))
+    // Window/limit validation is inherited from the Store.
+    expect(() => fixture.service.hostGoalDefinitionEpisodes({
+      scope, principal: 'owner:lark:123', operationId: 'growth-run:goal-episodes:bad-window', window: 0,
+    })).toThrow(/window/u)
     await fixture.ctx.fiber.restart()
   })
 

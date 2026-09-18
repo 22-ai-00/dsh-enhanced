@@ -33,9 +33,11 @@ import type {
   TaskLearningProjectionResult,
 } from './types.js'
 import {
+  isGoalDefinitionSituation,
   legacyEvolutionScope,
   SUPERVISED_GROWTH_ANALYST_CONTRACT_VERSION,
 } from './types.js'
+import type { GoalDefinitionEpisodeSummary } from './types.js'
 
 export type EvolutionStoreErrorCode =
   | 'idempotency-conflict'
@@ -1361,6 +1363,63 @@ export class EvolutionStore {
       if (retirement !== undefined) candidates.push(retirement)
     }
     return candidates
+  }
+
+  /**
+   * Read-only aggregate of trusted, learning-eligible episodes keyed by a
+   * content-bound goal definition (`goal-definition:<digest>`). Returns nothing
+   * — mutates nothing, proposes nothing — and exists solely so a host can
+   * correlate trusted failures with assistant-goals' advice repetition.
+   *
+   * Only rows the ledger itself marks `learning_eligible = 1` are read; by the
+   * table constraint that already implies `trust = 'trusted'`, `source =
+   * 'evaluation'` and an objective/verification evidence ref. Self-reported or
+   * operational rows can therefore never enter the projection.
+   */
+  summarizeGoalDefinitionEpisodes(options: {
+    scopeKey: string
+    window: number
+    limit?: number
+  }): readonly GoalDefinitionEpisodeSummary[] {
+    const scopeKey = this.#scopeKey(options.scopeKey)
+    this.#requireWindow(options.window)
+    const limit = options.limit ?? 100
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      throw new EvolutionStoreError('invalid-input', 'summary limit must be between 1 and 200')
+    }
+    const situations = this.#database.prepare(`
+      SELECT DISTINCT situation FROM evolution_episodes
+      WHERE scope_key = ? AND learning_eligible = 1 AND situation LIKE 'goal-definition:%'
+      ORDER BY situation
+      LIMIT ?
+    `).all(scopeKey, limit) as unknown as { situation: string }[]
+    const summaries: GoalDefinitionEpisodeSummary[] = []
+    for (const { situation: raw } of situations) {
+      // LIKE is a coarse prefilter; the exact prefix+digest shape is enforced
+      // here so a sibling situation prefix can never be mistaken for a definition.
+      if (!isGoalDefinitionSituation(raw)) continue
+      const rows = this.#database.prepare(`
+        SELECT outcome, occurred_at FROM evolution_episodes
+        WHERE scope_key = ? AND situation = ? AND learning_eligible = 1
+        ORDER BY occurred_at DESC, id DESC
+        LIMIT ?
+      `).all(scopeKey, raw, options.window) as unknown as
+        Pick<EpisodeRow, 'outcome' | 'occurred_at'>[]
+      let failures = 0
+      let lastOccurredAt = 0
+      for (const row of rows) {
+        if (row.outcome === 'failed') failures += 1
+        if (row.occurred_at > lastOccurredAt) lastOccurredAt = row.occurred_at
+      }
+      summaries.push(Object.freeze({
+        situation: raw,
+        failures,
+        succeeded: rows.length - failures,
+        total: rows.length,
+        lastOccurredAt,
+      }))
+    }
+    return Object.freeze(summaries)
   }
 
   /** Compute the candidate for one exact active rule, independent of list limits. */

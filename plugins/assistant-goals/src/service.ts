@@ -28,6 +28,7 @@ import type { DeliveryGoalWakeInput } from '@dsh-enhanced/assistant-delivery'
 import { GoalOutcomeRuntime, type GoalOutcomeView } from './outcome.js'
 import type { GoalOutcomeAssessment } from './outcome-store.js'
 import { GoalStrategyRuntime, validateGoalStrategyConfig, validateGoalStrategyInput, type GoalStrategyConfig } from './strategy.js'
+import type { StrategyAdviceDefinitionSummary } from './strategy-store.js'
 import { buildGoalStrategyHistory, type GoalStrategyHistory } from './strategy-feedback.js'
 import { failureSummaryEvidenceDigest, OwnerVerifiedWorkflowSourceError, ownerGoalRunProof, verifiedWorkflowSource, verifiedWorkflowSourceChain, type VerifiedWorkflowSource } from './verified-workflow.js'
 import { buildOwnerAcceptedStepArtifacts, buildOwnerVerifiedArtifacts, validateOwnerVerifiedArtifactsInput, type OwnerVerifiedArtifactsInput } from './verified-artifact.js'
@@ -883,6 +884,22 @@ export class AssistantGoalsService extends Service {
     return record
   }
 
+  /**
+   * Host-only read-only enumeration of recent goal records for an exact, already
+   * validated owner scope.  Like inspectGoalLifecycle() it deliberately has no
+   * Agent argument: it never reactivates an ended owner Session and never proves
+   * an outcome by itself.  Callers must first anchor the scope through an
+   * authenticated owner route (delivery.validateOwnerRoute); the durable store
+   * re-validates every scope field.  Enumeration is discovery only — a surfaced
+   * id still has to pass inspectOwnerVerifiedWorkflowSource() before any success
+   * is trusted.
+   */
+  inspectOwnerGoals = (scope: GoalScope, limit = 50): readonly GoalRecord[] => {
+    if (!this.#active) throw new Error('assistant-goals: service is inactive')
+    const bounded = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 50) : 50
+    return this.#store.list(scope, bounded)
+  }
+
   /** Minimal read-only lifecycle projection for exact host-owned source bindings. */
   inspectGoalLifecycle = (input: { scope: GoalScope; goalId: string }) => {
     const record = this.#store.get(input.scope, input.goalId)
@@ -1019,6 +1036,16 @@ export class AssistantGoalsService extends Service {
     return this.#strategy?.list(record.scope, goalId) ?? []
   }
   inspectStrategyAssessments = (agent: Agent | undefined, goalId: string): GoalStrategyHistory | undefined => this.#strategyHistory(this.inspect(agent, goalId))
+
+  /**
+   * Host-only read-only advice-repetition view for the supervised learning
+   * runbook. The strategy ledger exists only when durable strategy execution is
+   * configured; when it is absent there are no advice rows that could repeat,
+   * so an empty summary is the truthful answer rather than an error.
+   */
+  hostSummarizeAdviceByDefinition = (scope: GoalScope): readonly StrategyAdviceDefinitionSummary[] => {
+    return this.#strategy?.summarizeAdviceByDefinition(scope) ?? []
+  }
   #strategyHistory(record: GoalRecord): GoalStrategyHistory | undefined {
     if (!this.#strategy) return undefined
     const verifier = this.ctx.get('assistantVerifier', false)
