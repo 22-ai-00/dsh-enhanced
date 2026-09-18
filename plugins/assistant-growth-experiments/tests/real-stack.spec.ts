@@ -431,6 +431,7 @@ describe('real supervised workflow-growth stack', () => {
       maxOperationAttempts: 3,
       retryBaseMs: 1,
       retryMaxMs: 5,
+      promotionMode: 'full' as const,
     }
     let automationFiber = await ctx.plugin(AssistantAutomationsService, automationConfig)
     let growthFiber = await ctx.plugin(AssistantGrowthExperimentsService, growthConfig)

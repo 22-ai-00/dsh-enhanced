@@ -2,7 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   AssistantGrowthExperimentsService,
   growthPortReceiptDigest,
@@ -14,6 +14,7 @@ import type {
   GrowthAutomationProposalRequest,
   GrowthAutomationProposalReceipt,
   GrowthCanaryInspectionRequest,
+  GrowthExperimentConfig,
   GrowthExperimentIdentity,
   GrowthReplayReceipt,
   WorkflowTraceRevision,
@@ -177,7 +178,8 @@ class FakeAutomations implements GrowthAutomationPort {
   }
 }
 
-function harness(root: string, automations: FakeAutomations, now: () => number) {
+function harness(root: string, automations: FakeAutomations, now: () => number,
+  config: Partial<GrowthExperimentConfig> = {}) {
   const ctx = new Context(); contexts.push(ctx)
   let sink: WorkflowTraceSink | undefined
   ctx.provide('assistantAutomations' as never, automations as never)
@@ -190,7 +192,7 @@ function harness(root: string, automations: FakeAutomations, now: () => number) 
   const service = new AssistantGrowthExperimentsService(ctx, {
     databasePath: join(root, 'growth.sqlite'), tickIntervalMs: 0, minRepeatedSuccesses: 3,
     maxBatchSize: 10, maxExperimentDurationMs: 10_000, maxOperationAttempts: 2,
-    retryBaseMs: 10, retryMaxMs: 100,
+    retryBaseMs: 10, retryMaxMs: 100, ...config,
   }, { now })
   return { ctx, service, get sink() { return sink! } }
 }
@@ -216,7 +218,7 @@ describe('AssistantGrowthExperimentsService', () => {
     const root = mkdtempSync(join(tmpdir(), 'growth-service-')); roots.push(root)
     let clock = 100
     const automations = new FakeAutomations()
-    const value = harness(root, automations, () => clock)
+    const value = harness(root, automations, () => clock, { promotionMode: 'full' })
     const projected = value.sink.projectWorkflowTraceRevision(trace('1'))
     await value.service.whenIdle()
     const candidateId = projected.candidateIds[0]!
@@ -247,7 +249,7 @@ describe('AssistantGrowthExperimentsService', () => {
     const automations = new FakeAutomations()
     automations.proposal = 'approved'
     automations.failAfterProposalSideEffect = true
-    const first = harness(root, automations, () => clock)
+    const first = harness(root, automations, () => clock, { promotionMode: 'full' })
     const projected = first.sink.projectWorkflowTraceRevision(trace('2'))
     await first.service.whenIdle()
     let experiment = first.service.beginCandidateExperiment(projected.candidateIds[0]!)
@@ -256,7 +258,7 @@ describe('AssistantGrowthExperimentsService', () => {
     await first.ctx.fiber.restart()
     contexts.splice(contexts.indexOf(first.ctx), 1)
     clock += 20
-    const second = harness(root, automations, () => clock)
+    const second = harness(root, automations, () => clock, { promotionMode: 'full' })
     await tick(second.service)
     experiment = second.service.getExperiment(experiment.id)!
     expect(experiment.state).toBe('replay-pending')
@@ -268,7 +270,7 @@ describe('AssistantGrowthExperimentsService', () => {
     const root = mkdtempSync(join(tmpdir(), 'growth-rollback-')); roots.push(root)
     let clock = 100
     const failed = new FakeAutomations(); failed.proposal = 'approved'; failed.replayOutcome = 'failed'
-    const first = harness(root, failed, () => clock)
+    const first = harness(root, failed, () => clock, { promotionMode: 'full' })
     const projected = first.sink.projectWorkflowTraceRevision(trace('3'))
     await first.service.whenIdle()
     let experiment = first.service.beginCandidateExperiment(projected.candidateIds[0]!)
@@ -279,7 +281,7 @@ describe('AssistantGrowthExperimentsService', () => {
 
     const staleRoot = mkdtempSync(join(tmpdir(), 'growth-stale-')); roots.push(staleRoot)
     const stalePort = new FakeAutomations(); stalePort.proposal = 'approved'; stalePort.failAfterProposalSideEffect = true
-    const stale = harness(staleRoot, stalePort, () => clock)
+    const stale = harness(staleRoot, stalePort, () => clock, { promotionMode: 'full' })
     const staleProjection = stale.sink.projectWorkflowTraceRevision(trace('4'))
     await stale.service.whenIdle()
     let staleExperiment = stale.service.beginCandidateExperiment(staleProjection.candidateIds[0]!)
@@ -316,7 +318,7 @@ describe('AssistantGrowthExperimentsService', () => {
     let clock = 100
     const automations = new FakeAutomations(); automations.proposal = 'approved'
     automations.poisonWorkflowRefs.add('workflow.7')
-    const value = harness(root, automations, () => clock)
+    const value = harness(root, automations, () => clock, { promotionMode: 'full' })
     const poison = value.sink.projectWorkflowTraceRevision(trace('7'))
     const healthy = value.sink.projectWorkflowTraceRevision(trace('8'))
     await value.service.whenIdle()
@@ -340,7 +342,7 @@ describe('AssistantGrowthExperimentsService', () => {
     automations.proposal = 'approved'
     automations.inspectionPending = 0
     automations.invalidCanaryEvidence = true
-    const value = harness(root, automations, () => clock)
+    const value = harness(root, automations, () => clock, { promotionMode: 'full' })
     const projected = value.sink.projectWorkflowTraceRevision(trace('9'))
     await value.service.whenIdle()
     let experiment = value.service.beginCandidateExperiment(projected.candidateIds[0]!)
@@ -357,5 +359,95 @@ describe('AssistantGrowthExperimentsService', () => {
     experiment = value.service.getExperiment(experiment.id)!
     expect(experiment.state).toBe('rolled-back')
     expect(experiment.canaryExposureCount).toBe(1)
+  })
+
+  // Engineering-layer behaviour (fake automations, no real external provider):
+  // the default fail-closed promotion mode stops the waterfall the moment the
+  // owner approves a paused workflow. Nothing downstream is ever invoked.
+  it('propose-only (default): approved-paused terminates at proposed-paused and never runs the waterfall', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'growth-propose-only-')); roots.push(root)
+    let clock = 100
+    const automations = new FakeAutomations()
+    automations.proposal = 'approved'
+    // Spy on every port past approval; none must be reached in propose-only.
+    const replay = vi.spyOn(automations, 'replayWorkflowAutomation')
+    const shadow = vi.spyOn(automations, 'shadowWorkflowAutomation')
+    const canary = vi.spyOn(automations, 'canaryWorkflowAutomation')
+    const inspect = vi.spyOn(automations, 'inspectWorkflowCanary')
+    const promote = vi.spyOn(automations, 'promoteWorkflowAutomation')
+    const rollback = vi.spyOn(automations, 'rollbackWorkflowAutomation')
+    const value = harness(root, automations, () => clock)
+    const projected = value.sink.projectWorkflowTraceRevision(trace('a'))
+    await value.service.whenIdle()
+    const candidateId = projected.candidateIds[0]!
+    let experiment = value.service.beginCandidateExperiment(candidateId)
+    for (let index = 0; index < 8; index += 1) {
+      clock += 10
+      await tick(value.service)
+    }
+    experiment = value.service.getExperiment(experiment.id)!
+    expect(experiment.state).toBe('proposed-paused')
+    expect(experiment.operationKind).toBeUndefined()
+    expect(experiment.terminalCode).toBe('proposed-paused-owner-hold')
+    expect(experiment).toMatchObject({ artifactVersion: 1, artifactDigest: hex('c') })
+    expect(replay).not.toHaveBeenCalled()
+    expect(shadow).not.toHaveBeenCalled()
+    expect(canary).not.toHaveBeenCalled()
+    expect(inspect).not.toHaveBeenCalled()
+    expect(promote).not.toHaveBeenCalled()
+    expect(rollback).not.toHaveBeenCalled()
+    // The candidate stays 'running' so a duplicate experiment cannot be opened.
+    expect(value.service.getCandidate(candidateId)?.state).toBe('running')
+    expect(value.service.health()).toMatchObject({ activeExperiments: 0, proposedPaused: 1 })
+    // Re-beginning the same still-occupied candidate is idempotent: the same
+    // terminal experiment is returned rather than a second experiment row.
+    const rebegun = value.service.beginCandidateExperiment(candidateId)
+    expect(rebegun.id).toBe(experiment.id)
+    expect(rebegun.state).toBe('proposed-paused')
+  })
+
+  it('propose-only: retracting evidence after the owner hold does not roll back the zero-exposure artifact', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'growth-retract-hold-')); roots.push(root)
+    let clock = 100
+    const automations = new FakeAutomations()
+    automations.proposal = 'approved'
+    const rollback = vi.spyOn(automations, 'rollbackWorkflowAutomation')
+    const value = harness(root, automations, () => clock)
+    const projected = value.sink.projectWorkflowTraceRevision(trace('b'))
+    await value.service.whenIdle()
+    const experiment = value.service.beginCandidateExperiment(projected.candidateIds[0]!)
+    clock += 10
+    await tick(value.service, 3)
+    expect(value.service.getExperiment(experiment.id)?.state).toBe('proposed-paused')
+    value.sink.projectWorkflowTraceRevision(trace('b', 2, 'retract'))
+    await value.service.whenIdle()
+    clock += 20
+    await tick(value.service, 2)
+    expect(value.service.getExperiment(experiment.id)?.state).toBe('proposed-paused')
+    expect(rollback).not.toHaveBeenCalled()
+  })
+
+  it('propose-only: stale/expired approval still fails closed to rollback before the owner hold', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'growth-propose-stale-')); roots.push(root)
+    let clock = 100
+    const automations = new FakeAutomations()
+    automations.proposal = 'approved'
+    // Crash after the proposal side effect leaves the experiment in
+    // approval-requesting so we can retract evidence before settlement.
+    automations.failAfterProposalSideEffect = true
+    const replay = vi.spyOn(automations, 'replayWorkflowAutomation')
+    const value = harness(root, automations, () => clock)
+    const projected = value.sink.projectWorkflowTraceRevision(trace('0'))
+    await value.service.whenIdle()
+    const experiment = value.service.beginCandidateExperiment(projected.candidateIds[0]!)
+    // Evidence is superseded before the approval settlement is observed.
+    value.sink.projectWorkflowTraceRevision(trace('0', 2, 'retract'))
+    await value.service.whenIdle()
+    clock += 20
+    await tick(value.service, 2)
+    const settled = value.service.getExperiment(experiment.id)!
+    expect(settled.state).toBe('rolled-back')
+    expect(settled.terminalCode).toBe('evidence-superseded')
+    expect(replay).not.toHaveBeenCalled()
   })
 })
