@@ -135,10 +135,12 @@ export class AssistantGrowthDriverService extends Service {
     }
   }
 
-  health(): GrowthWakeHealth { return this.#health }
+  // Cordis traces public service calls through a proxy. Bind these entry points
+  // to the owning instance so private state and the wake's Fiber stay intact.
+  health = (): GrowthWakeHealth => this.#health
 
   /** Run one wake immediately (also used by tests / an explicit Host trigger). */
-  wake(): Promise<void> {
+  wake = (): Promise<void> => {
     if (!this.#active || !this.#config.enabled) return Promise.resolve()
     // Coalesce explicit and timer wakes onto the same bounded run. Queueing
     // timer ticks would build an unbounded backlog when a build is slow.
