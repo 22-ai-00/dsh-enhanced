@@ -396,6 +396,16 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     expect(() => new AssistantGrowthDriverService(ctx, { enabled: true })).toThrow(/owner scope/)
   })
 
+  it('supports wake and health through a real injected Cordis service proxy', async () => {
+    const h = await mount()
+    new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    let consumer: Context | undefined
+    await h.ctx.inject(['assistantGrowthDriver' as never], ctx => { consumer = ctx })
+    const proxy = consumer!.get('assistantGrowthDriver' as never) as unknown as Pick<AssistantGrowthDriverService, 'wake' | 'health'>
+    await proxy.wake()
+    expect(proxy.health()).toMatchObject({ outcome: 'skipped', reason: 'missing-credential' })
+  })
+
   it('skips the wake when the owner route cannot be anchored (missing-binding)', async () => {
     const h = await mount()
     h.receipts.mockImplementation(() => { throw new Error('assistant-delivery: owner route revoked') })
