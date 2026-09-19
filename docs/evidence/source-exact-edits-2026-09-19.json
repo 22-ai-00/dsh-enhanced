@@ -1,0 +1,46 @@
+{
+  "kind": "bounded-source-exact-edits",
+  "baseCommit": "0b2a784870998e51837c418f28723ae834d2af9a",
+  "capability": [
+    "exact unique literal edits on committed read snapshots",
+    "same resolved full-file contract for inline and native durable jobs",
+    "optional empty unused input arrays accepted",
+    "invalidated snapshot cannot be reacquired in the same wake"
+  ],
+  "rootCheck": {
+    "command": "CI=true pnpm check",
+    "exitCode": 0,
+    "logSha256": "53201d9862bd1cd38e3fea27fe61726c710b838ca1de90dc5fd35923bd4696fc",
+    "passed": 5872,
+    "skipped": 44,
+    "dryRunPacks": 35,
+    "growthTestsPassed": 64,
+    "newPackFiles": [
+      "lib/source-edits.js",
+      "lib/source-edits.js.map",
+      "lib/source-edits.d.ts",
+      "lib/source-edits.d.ts.map"
+    ]
+  },
+  "finalChecks": {
+    "typecheck": {
+      "command": "pnpm --filter @dsh-enhanced/assistant-growth-driver typecheck",
+      "exitCode": 0
+    },
+    "targetedOxlint": {
+      "exitCode": 0
+    },
+    "gitDiffCheck": {
+      "exitCode": 0
+    }
+  },
+  "independentReview": {
+    "role": "verifier",
+    "verdict": "PASS",
+    "resolvedFinding": "allow one nonempty mode alongside an unused empty array; test both modes"
+  },
+  "limits": [
+    "This check validates the toolkit before integrating the separate personal-memory candidate.",
+    "Unit/static evidence does not establish real-model maintenance success, promotion, or production autonomy."
+  ]
+}

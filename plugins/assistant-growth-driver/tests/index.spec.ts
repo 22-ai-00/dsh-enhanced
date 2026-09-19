@@ -877,6 +877,40 @@ describe('opt-in plugin source proposals', () => {
     expect(tableCounts(h)).toEqual({ candidates: 0, definitions: 0, runs: 0 })
   })
 
+  it.each(['inline', 'durable'] as const)('resolves exact edits to full files before %s source preparation', async preparationMode => {
+    const turns = [
+      sourceTurns[0]!, sourceTurns[1]!,
+      { name: 'plugin_source_read', args: { gap_id: 'gap-1', plugin_name: 'assistant-health', paths: ['README.md', 'src/index.ts'] } },
+      { name: 'plugin_source_prepare', args: {
+        gap_id: 'gap-1', plugin_name: 'assistant-health',
+        files: [{ path: 'tests/new.spec.ts', content: 'new test' }],
+        edits: [{ path: 'README.md', before: 'original', after: 'resolved readme' }, { path: 'src/index.ts', before: 'original', after: 'resolved source' }],
+      } },
+    ]
+    const h = await mount({ adapter: new ScriptedAdapter(turns) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = preparationMode === 'inline' ? sourceService() : {
+      ...sourceService(), canEnqueueSource: () => true,
+      enqueueSourceJob: vi.fn(async (input: Parameters<GrowthSourcePlanePort['enqueueSourceJob']>[0]) => ({
+        id: 'source-job-edits', name: input.name, gapId: input.gapId, baseCommit: input.expectedBaseCommit, status: 'queued' as const, createdAt: 1, expiresAt: 2,
+      })), inspectSourceJob: vi.fn(),
+    }
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      pluginSourceProposals: { ...options(h.root), preparationMode },
+    }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    const call = preparationMode === 'inline'
+      ? source.prepareModifySourcePlan.mock.calls[0]?.[0]
+      : (source as typeof source & { enqueueSourceJob: ReturnType<typeof vi.fn> }).enqueueSourceJob.mock.calls[0]?.[0]
+    expect(call).toMatchObject({ expectedBaseCommit: 'c'.repeat(40), files: [
+      { path: 'tests/new.spec.ts', content: 'new test' },
+      { path: 'README.md', content: 'resolved readme' },
+      { path: 'src/index.ts', content: 'resolved source' },
+    ] })
+  })
+
   it('queues a durable source job with frozen owner data and exposes only scoped status', async () => {
     const durableTurns = [...sourceTurns, { name: 'plugin_source_job_status', args: { id: 'source-job-1' } }]
     const adapter = new ScriptedAdapter(durableTurns)
@@ -956,6 +990,24 @@ describe('opt-in plugin source proposals', () => {
     await service.wake()
     expect(source.inspectSource).toHaveBeenCalledTimes(2)
     expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+  })
+
+  it('invalidates changed cached content for the rest of the wake even if the Agent tries another read', async () => {
+    const reread = { name: 'plugin_source_read', args: { gap_id: 'gap-1', plugin_name: 'assistant-health', paths: ['README.md'] } }
+    const turns = [...sourceTurns.slice(0, 3), reread, reread, sourceTurns[3]!]
+    const h = await mount({ adapter: new ScriptedAdapter(turns) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = sourceService()
+    let reads = 0
+    source.inspectSource.mockImplementation(async input => ({ name: input.name, baseCommit: 'c'.repeat(40),
+      files: [{ path: 'README.md', bytes: 8 }], contents: input.paths.map(path => ({ path, content: ++reads > 1 ? 'drifted' : 'original' })) }))
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(source.inspectSource).toHaveBeenCalledTimes(3)
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
   })
 
   it.each(['../secret.ts', '.env', 'lib/index.js', 'src/../../other.ts'])('rejects source read path %s before calling its provider', async path => {

@@ -17,6 +17,8 @@
 
 ## 已交付能力与整包验收
 
+2026-09-19 真实持久源码提案：Day1 在 189.9 秒内提交 personal-memory 修复候选，队列跨 Cordis Context 重建后，由没有 Agent 服务的原生 Automations Host executor 完成约 17.5 分钟的离线仓库检查与打包，单次执行形成待审批计划并清理容器。容器 5,860 passed / 44 skipped；独立验收由基线 7 项缺陷失败变为候选 16/16 通过。Host 工具能力检查为 5,872 passed / 44 skipped、35 个 dry-run pack；精确源码 edits 保留同一读取 commit、字节限制和完整文件控制面协议。详见[运行证据与边界](live-durable-source-proposal.md)。候选尚未整合进 dev，未批准或发布；该运行配置了私有 low 探针，但未记录请求实际档位，不证明档位执行、同预算收益、运行中进程崩溃恢复或后续任务复用，WP16、WP18 状态不变。
+
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |
 | --- | --- | --- |
 | 基本 RSI 首版：同类任务连续两轮自主修复、比较、有限试用、晋升和结果反馈 | [0.1.32 发布](evidence/release-0.1.32-2026-09-13.json)与[现代 Host 两轮真实模型运行](evidence/basic-rsi-modern-host-2026-09-13.json) | 独立隐藏留出、更多任务族及全部部署类型 |
