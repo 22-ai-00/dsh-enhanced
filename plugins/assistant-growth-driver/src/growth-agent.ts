@@ -11,6 +11,11 @@ import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantSkillsService, SkillBinding } from '@dsh-enhanced/assistant-skills'
 import { GROWTH_MODEL, GROWTH_PROVIDER, type NormalizedGrowthDriverConfig } from './config.js'
 import type { GrowthAuthority } from './deposit.js'
+import {
+  GROWTH_PROTECTED_PLUGIN_DENYLIST,
+  type GrowthSourcePlanePort,
+  type GrowthSourcePreparedFile,
+} from './source-port.js'
 
 /**
  * One bounded growth wake.  This is the frozen-execution sibling of
@@ -28,7 +33,17 @@ const GROWTH_TOOL_NAMES = [
   'growth_list_skills',
   'growth_propose_skill_candidate',
 ] as const
-const ALLOWED_TOOLS: ReadonlySet<string> = new Set(GROWTH_TOOL_NAMES)
+/**
+ * Third capability surface, mounted ONLY when the owner opts into
+ * pluginSourceProposals AND a live pluginControlPlane source port is bound:
+ * read pre-existing control-plane open gaps, and prepare a PENDING modify source plan in
+ * an isolated worktree. Nothing on this surface approves, signs, releases,
+ * activates, installs or reloads.
+ */
+const SOURCE_TOOL_NAMES = [
+  'plugin_source_gaps',
+  'plugin_source_prepare',
+] as const
 // Raw-instance escape hatch of a cordis 4.0.2 traceable Proxy; see index.ts.
 const CORDIS_ORIGINAL_SYMBOL = Symbol.for('cordis.original')
 
@@ -49,6 +64,30 @@ export const GROWTH_PROMPT = [
   '- When there is nothing genuinely repeated worth depositing, simply finish without calling growth_propose_skill_candidate.',
 ].join('\n')
 
+/**
+ * Extra prompt section mounted ONLY when the owner opted into
+ * pluginSourceProposals. It defines the fifth/sixth tools and the hard
+ * boundaries around the isolated modify lane.
+ */
+export const SOURCE_PROPOSALS_PROMPT = [
+  '',
+  'Additional opt-in capability — pending modify proposals for EXISTING plugins:',
+  '5. plugin_source_gaps — list the still-open capability gaps in the owner-configured control-plane ledger. You cannot record, close or claim a gap; proposing against anything not returned here is rejected.',
+  '6. plugin_source_prepare — for one listed open gap, prepare a PENDING modification of an EXISTING plugin under plugins/<plugin_name>/. The Host writes your bounded files into a fresh isolated git worktree, runs the frozen `pnpm install --frozen-lockfile --ignore-scripts --offline`, `pnpm check` and `pnpm pack` gate there, and persists a pending plan carrying the checked digests.',
+  '',
+  'Source-lane hard boundaries:',
+  '- Only files already living under plugins/<plugin_name>/ may be changed; the plugin root and every parent directory must already exist (you cannot create a new plugin or a new top-level directory).',
+  '- The repository, base commit, build timeouts, offline mode and plan TTL are all frozen owner configuration: never supply or infer a repository path, worktree, commit, environment or timeout.',
+  '- The result is ALWAYS a pending-approval plan. You cannot approve, verify, sign, release, activate, install, reload or roll back, and you cannot change any production profile.',
+  '- Never target safety-root plugins (policy, credentials, evaluation, verifier, budget, skills holdout, isolation, owner console, the control plane itself): the Host denylist rejects them regardless of arguments.',
+  '- Respect the per-wake plan cap; when the cap is reached or a gap is not open, stop preparing.',
+].join('\n')
+
+export interface GrowthSourceWakeCounters {
+  readonly prepared: number
+  readonly rejected: number
+}
+
 export interface GrowthAgentRunResult {
   readonly sessionId: string
   readonly outcome: 'succeeded' | 'cancelled' | 'failed' | 'unknown'
@@ -62,6 +101,8 @@ export interface GrowthAgentRunResult {
     modelCalls: number
     toolCalls: number
   }
+  /** Zeroed unless the owner opted into pluginSourceProposals and a source port is bound. */
+  readonly sourceProposals: GrowthSourceWakeCounters
 }
 
 type Goals = Pick<AssistantGoalsService, 'inspectOwnerGoals' | 'inspectOwnerVerifiedWorkflowSource'>
@@ -74,6 +115,12 @@ export interface GrowthAgentInput {
   config: NormalizedGrowthDriverConfig
   goals: Goals
   skills: Skills
+  /**
+   * Bound ONLY when pluginSourceProposals is enabled AND a pluginControlPlane
+   * service is mounted. When undefined, the two source tools are not registered
+   * and the exact-surface contract is the frozen four-tool baseline.
+   */
+  sourcePlane?: GrowthSourcePlanePort
   signal?: AbortSignal
 }
 
@@ -120,8 +167,15 @@ function goalProjection(record: GoalRecord) {
   })
 }
 
-function registerGrowthTools(agent: Agent, input: GrowthAgentInput): void {
+function registerGrowthTools(
+  agent: Agent,
+  input: GrowthAgentInput,
+  sourcePlane: GrowthSourcePlanePort | undefined,
+  sourceCounters: { prepared: number; rejected: number },
+  signal: AbortSignal,
+): void {
   const { authority, config, goals, skills } = input
+  const sourceCfg = config.pluginSourceProposals
   const agentCtx = agent.ctx
   // Registered in the Agent's own realm: invisible to every other session, and
   // disposed with the realm.  The Host services behind them are the only
@@ -199,6 +253,71 @@ function registerGrowthTools(agent: Agent, input: GrowthAgentInput): void {
       },
     })),
   ]
+  if (sourcePlane !== undefined) {
+    let attempts = 0
+    const discovered = new Set<string>()
+    disposers.push(agentCtx.tools.register(defineTool({
+      name: 'plugin_source_gaps',
+      description: 'List open pre-existing control-plane capability gaps available for a pending existing-plugin source proposal.',
+      parameters: {},
+      output: toolOutput,
+      execute: async () => {
+        authority.assertCurrent()
+        signal.throwIfAborted()
+        const gaps = sourcePlane.listOpenGaps().filter(gap => gap.status === 'open' && gap.candidateId === undefined)
+          .slice(0, config.maxReviewsPerWake)
+        discovered.clear()
+        for (const gap of gaps) discovered.add(gap.id)
+        return { context: JSON.stringify(gaps.map(gap => ({ id: gap.id, capability: gap.capability, context: gap.context }))) }
+      },
+    })), agentCtx.tools.register(defineTool({
+      name: 'plugin_source_prepare',
+      description: 'Prepare a checked pending modification for a listed open gap. Only gap_id, plugin_name and bounded plugin-relative files are accepted. The Host controls repository, build environment and limits; approval and release are separate owner actions.',
+      parameters: {
+        gap_id: { type: 'string', required: true },
+        plugin_name: { type: 'string', required: true },
+        files: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+          path: { type: 'string', required: true }, content: { type: 'string', required: true },
+        } } },
+      },
+      output: toolOutput,
+      execute: async (args, exec: ToolRunContext) => {
+        try {
+          authority.assertCurrent()
+          const combined = AbortSignal.any([signal, exec.signal])
+          combined.throwIfAborted()
+          if (attempts >= sourceCfg.maxPlansPerWake) throw new Error('source proposal attempt cap reached')
+          attempts += 1
+          if (!discovered.has(args.gap_id)) throw new Error('source gap must be discovered in this wake')
+          if (!/^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(args.plugin_name)
+            || GROWTH_PROTECTED_PLUGIN_DENYLIST.has(args.plugin_name)) throw new Error('source plugin is invalid or protected')
+          const files: readonly GrowthSourcePreparedFile[] = args.files
+          if (files.length < 1 || files.length > 64 || files.some(file => Buffer.byteLength(file.content, 'utf8') > 65_536)
+            || files.reduce((sum, file) => sum + Buffer.byteLength(file.content, 'utf8'), 0) > 262_144) {
+            throw new Error('source files exceed proposal bounds')
+          }
+          const plan = await sourcePlane.prepareModifySourcePlan({
+            gapId: args.gap_id, name: args.plugin_name, files,
+            repository: sourceCfg.repository!, ttlMs: sourceCfg.planTtlMs,
+            timeoutMs: sourceCfg.isolatedBuildTimeoutMs, offline: sourceCfg.offline,
+            idempotencyKey: `growth-source:${input.wakeId}:${attempts}`,
+            signal: combined, assertCurrent: () => { combined.throwIfAborted(); authority.assertCurrent() },
+          })
+          combined.throwIfAborted()
+          authority.assertCurrent()
+          if (plan.status !== 'pending-approval' || plan.mode !== 'modify' || plan.name !== args.plugin_name || plan.sourceCheck === undefined) {
+            throw new Error('source plane returned an invalid pending modification')
+          }
+          sourceCounters.prepared += 1
+          discovered.delete(args.gap_id)
+          return { context: JSON.stringify({ id: plan.id, name: plan.name, status: plan.status, mode: plan.mode, sourceCheck: plan.sourceCheck }) }
+        } catch (error) {
+          sourceCounters.rejected += 1
+          throw error
+        }
+      },
+    })))
+  }
   agentCtx.effect(() => () => disposers.forEach(dispose => dispose()), 'assistant-growth-driver.realm-tools')
 }
 
@@ -247,6 +366,9 @@ function summarize(events: readonly unknown[], signal: AbortSignal, modelCalls: 
  */
 export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Promise<GrowthAgentRunResult> {
   const { authority, config } = input
+  const sourcePlane = config.pluginSourceProposals.enabled ? input.sourcePlane : undefined
+  const allowedTools: ReadonlySet<string> = new Set([...GROWTH_TOOL_NAMES, ...(sourcePlane === undefined ? [] : SOURCE_TOOL_NAMES)])
+  const sourceCounters = { prepared: 0, rejected: 0 }
   const agents = ctx.get('agents')
   const sessions = ctx.get('sessions')
   const tools = ctx.get('tools')
@@ -293,15 +415,15 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         agentCtx.effect(() => policy.bindInitiator(agent, 'background', authority.scope.principalId), 'assistant-growth-driver.initiator')
         agentCtx.effect(() => installModelSelection(agentCtx, { current: { provider: GROWTH_PROVIDER, model: GROWTH_MODEL }, assembled: undefined }), 'assistant-growth-driver.model-selection')
 
-        registerGrowthTools(agent, input)
+        registerGrowthTools(agent, input, sourcePlane, sourceCounters, combined)
 
         // Deliberately NO preset mount: a preset would bring its own tool realm
         // that restrict() cannot remove.  The entire surface is the four tools.
-        const denied = globalNames.filter(name => !ALLOWED_TOOLS.has(name))
+        const denied = globalNames.filter(name => !allowedTools.has(name))
         if (denied.length > 0) agentCtx.tools.restrict({ deny: denied })
         const finalNames = agentCtx.tools.schemas(agent).map(schema => schema.name)
-        const outsideAllowlist = finalNames.filter(name => !ALLOWED_TOOLS.has(name))
-        if (outsideAllowlist.length > 0 || finalNames.length !== ALLOWED_TOOLS.size) {
+        const outsideAllowlist = finalNames.filter(name => !allowedTools.has(name))
+        if (outsideAllowlist.length > 0 || finalNames.length !== allowedTools.size) {
           throw new Error(`assistant-growth-driver: growth Agent tool surface is not exactly the frozen allowlist: ${outsideAllowlist.join(', ')}`)
         }
         const pinnedDigest = acceptanceDigest(agentCtx.tools.schemas(agent).sort((a, b) => a.name.localeCompare(b.name)))
@@ -309,7 +431,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
           const assembly = await next()
           if (context.agent !== agent) return assembly
-          return { ...assembly, tools: assembly.tools.filter(tool => ALLOWED_TOOLS.has(tool.name)).sort((a, b) => a.name.localeCompare(b.name)) }
+          return { ...assembly, tools: assembly.tools.filter(tool => allowedTools.has(tool.name)).sort((a, b) => a.name.localeCompare(b.name)) }
         })
 
         agentCtx.on('llm/stream', async function* (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) {
@@ -333,7 +455,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         agentCtx.tools.guard(execution => {
           try { authority.assertCurrent() } catch (error) { agent.cancel({ kind: 'hook', reason: 'assistant-growth-driver-authority-expired' }); throw error }
           combined.throwIfAborted()
-          if (!ALLOWED_TOOLS.has(execution.name) || totalToolCalls >= config.maxToolCalls) {
+          if (!allowedTools.has(execution.name) || totalToolCalls >= config.maxToolCalls) {
             agent.cancel({ kind: 'hook', reason: 'assistant-growth-driver-tool-limit' })
             return 'assistant-growth-driver: tool request rejected by the frozen allowlist'
           }
@@ -348,13 +470,13 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
     combined.addEventListener('abort', abort, { once: true })
     try {
       agent.followup(createUserMessage({
-        content: [{ type: 'text', text: GROWTH_PROMPT }],
+        content: [{ type: 'text', text: GROWTH_PROMPT + (sourcePlane === undefined ? '' : SOURCE_PROPOSALS_PROMPT) }],
         source: { kind: 'plugin', plugin: '@dsh-enhanced/assistant-growth-driver', form: 'notice', summary: 'Growth review wake' },
       }))
       await agent.whenIdle()
       const summary = summarize(agent.session.snapshotEvents(), combined, modelCalls, totalToolCalls)
       await sessions.flush(agent.session)
-      return { sessionId: String(sessionId), ...summary }
+      return { sessionId: String(sessionId), ...summary, sourceProposals: Object.freeze({ ...sourceCounters }) }
     } finally {
       combined.removeEventListener('abort', abort)
     }

@@ -4,6 +4,9 @@
 
 2026-09-13 交付更新：基本 RSI `0.1.32` 已[发布并完成独立状态路径下的 npm 安装验证](evidence/release-0.1.32-2026-09-13.json)，同一模板任务族[两轮真实改进](evidence/basic-rsi-modern-host-2026-09-13.json)和拓扑任务[一次真实改进](evidence/basic-rsi-topology-modern-host-2026-09-13.json)通过。全部工作包范围保留；状态应逐项按原始成功条件更新，不以既有计数为约束。按用户最新要求，开发交付直接提交 `dev`、验证后合码 `main`；真实仓库后续验收采用授权分支直接提交与精确提交的 CI/readback，不再把 PR 或审查账号设为交付门槛。
 
+2026-09-19 源码提案更新：Control Plane 新增既有插件的 `modify` 待审批路径，使用独立 worktree、不可变 Git 快照和无 Host 挂载的离线 Docker 构建，检查摘要与构建证据绑定到 owner 审批 digest。Growth Driver 通过 Cordis 可选注入接入，只在显式开启且构建器已配置时增加 gap 枚举/源码提案两个工具；仍不提供批准、发布或生产启用工具。覆盖服务替换、卸载取消、并发拒绝、数据库迁移和失败不入库；[真实本地 Docker 探针](evidence/source-preparation-docker-2026-09-19.json)验证合成包的离线 install/check/pack 与无 Host 路径/凭据边界。该证据不代表真实模型生成补丁、完整仓库隔离构建、远程发布或生产启用，WP16、WP18 状态保持待做。
+
+
 ## 已交付能力与整包验收
 
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |

@@ -22,7 +22,7 @@ dsh --profile web --dump-config
 每次唤醒（`intervalMs > 0` 的 unref timer，或显式调用 `wake()`）：
 
 1. **Preflight（不触网、不起 Agent）**：用配置中冻结的 owner scope 经 `assistantDelivery.validateOwnerRoute` 重新锚定真实 owner route 并铸造一枚短-lived authority（寿命 `≤ maxDurationMs`，硬顶 300000ms，每次使用都重新校验 route，route 漂移即整轮作废）；校验 super-relay 契约仍 current；解析凭据引用（只验存在，不打印）；确认 policy 服务在线；可选地预留 owner 配置的后台预算。
-2. **有界后台 Agent**：照 `assistant-skills` repair-agent 的冻结范式运行——`llm/stream` 逐请求钉 provider/model/maxTokens/tools digest，`tools.guard` 白名单 + 双预算计数，system-prompt 按身份过滤，`deadline = min(expiresAt, now + maxDurationMs)` 到点 abort。刻意**不挂载任何 preset**：Agent 的完整工具面恰好是下面四个 `growth_*` realm 工具，多一个可见工具都在发请求前 fail-closed。
+2. **有界后台 Agent**：照 `assistant-skills` repair-agent 的冻结范式运行——`llm/stream` 逐请求钉 provider/model/maxTokens/tools digest，`tools.guard` 白名单 + 双预算计数，system-prompt 按身份过滤，`deadline = min(expiresAt, now + maxDurationMs)` 到点 abort。刻意**不挂载任何 preset**：默认工具面恰好是下面四个 `growth_*` realm 工具；显式开启源码提案且 control-plane 服务在线且配置了构建器时增加两个 `plugin_source_*` 工具。任何其它可见工具都会在发请求前被拒绝。
    - `growth_list_owner_goals`：列最近的 owner-root goal（只读投影）。
    - `growth_read_verified_workflow`：读一条已完成 goal 的**脱敏**摘要；Host 独立复核 owner-root（非 subagent、无 parent session、delegationDepth=0）、whole-goal succeeded 且 quiescent，cwd/preset 精确匹配；不返回步骤参数与验收回执。
    - `growth_list_skills`：列该 owner 的 active skill 与 pending candidate，避免重名。
@@ -47,6 +47,12 @@ dsh --profile web --dump-config
 | `apiKeyEnv` | `SUPER_RELAY_API_KEY` | **只收凭据引用名**（`[A-Z_][A-Z0-9_]*`）：优先经 credentials 服务解析该引用，回退到同名环境变量。绝不接受明文 key，不打印值。 |
 | `workflowOwnerAnchored.enabled` | `false` | owner-anchored workflow 轨独立开关；置 `true` 时要求驱动本体 `enabled: true` 且已声明 `scope`，否则启动报错。 |
 | `workflowOwnerAnchored.maxCommitsPerWake` | `5` | 单轮最多尝试提交的候选数（1–50）；goals/delivery 不可用、authority/route 漂移即中断本轮。幂等重放代价很低。 |
+| `pluginSourceProposals.enabled` | `false` | 开启后通过可选 `pluginControlPlane` 服务准备既有插件的 pending 修改提案。缺少该服务或构建器未配置时仍保持四工具基线。 |
+| `pluginSourceProposals.repository` | 无 | 开启时必填的绝对规范仓库路径；由 owner 配置，模型不可传入。 |
+| `pluginSourceProposals.maxPlansPerWake` | `1` | 每轮构建尝试上限（1–5）；失败也占一次，避免失败循环反复消耗资源。 |
+| `pluginSourceProposals.isolatedBuildTimeoutMs` | `180000` | 请求的构建时间上限（60000–240000ms）；控制面可进一步收窄，单轮 authority 到期仍会取消。 |
+| `pluginSourceProposals.offline` | `true` | 源码提案必须离线构建；`false` 配置会拒绝。镜像须预先准备依赖。 |
+| `pluginSourceProposals.planTtlMs` | `86400000` | 待批 worktree 保留期限（15 分钟–24 小时）。 |
 | `workflowOwnerAnchored.lookbackMs` | `86400000` | 只枚举该回看窗口内更新过的 owner goal（1 分钟–7 天）。 |
 
 super-relay 自身的 5 个键（`enabled` / `apiKeyEnv` / `timeoutMs` / `maxResponseBytes` / `defaultMaxTokens`）在 `assistant-super-relay-budget` 插件上配置；driver 不重复定义。
@@ -107,11 +113,31 @@ rules:
 - `health().ownerAnchored`（仅该轨启用且本轮跑过时存在）给本地轨计数：`considered`（窗口内完成的 goal）/ `attempted`（实际尝试提交）/ `recorded`（新沉淀）/ `replayed`（幂等重放）/ `abstained`（多工具等无法归约为单步 agent-turn，诚实跳过）/ `stopped`（非空时为 fail-closed 中断原因，如 `inspect:*`、`authority:*`、`runtime-unavailable:*`）。
 - 停用：把 `enabled` 置回 `false`（或移除插件配置）即恢复休眠，不影响已经 staged 的 pending candidate——它们仍只由 owner 在既有 skills/automations 审批面处理。
 
+## 既有插件源码提案
+
+另行安装同批 `plugin-control-plane`，按其 README 配置 owner trust 和隔离构建镜像，再给 driver 增加：
+
+```yaml
+pluginSourceProposals:
+  enabled: true
+  repository: /abs/path/to/dsh-enhanced
+  maxPlansPerWake: 1
+  isolatedBuildTimeoutMs: 180000
+  offline: true
+  planTtlMs: 86400000
+```
+
+这段是 driver 完整配置的补充。DSH patch 的 `config` 为整值替换，覆盖配置时必须同时保留 `enabled`、`scope` 和其它需要的值。Policy 还需对相同 owner、workspace、preset 和 `background` initiator 授予 `execute` / `tool:plugin_source_*`。
+
+Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已有的开放 gap，再通过 `plugin_source_prepare` 提交 `gap_id`、`plugin_name` 和插件相对路径的文件内容。这些 gap 是控制面现有记录，并不携带逐条 owner-route 来源证明；多 owner 部署须隔离各自的账本。每轮最多枚举 `maxReviewsPerWake` 条、提交 `maxPlansPerWake` 次；模型不能给仓库路径、命令、镜像、环境、TTL、审批或发布参数。每次最多 64 个文件、单文件 64 KiB、合计 256 KiB。安全根插件由 driver 和控制面同时拒绝。
+
+Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。成功时仅返回待审批 plan id 与检查摘要；owner 仍需通过控制面的签名审批、源码复核和发布流程处理。模型看不到 worktree 路径或构建日志。检查失败、owner route 漂移、provider 移除、插件卸载或本轮到期均终止本次操作。`health().run.sourceProposals` 提供本轮 `prepared` / `rejected` 数量；可选 provider 更换后下一轮重新绑定，旧轮次不会跨代继续写入。
+
 ## 权限与数据
 
 - 网络：仅经 pinned super-relay 路由产生到 super-relay 端点的出站模型请求；无其他外联。
-- 文件系统：driver 自身无文件系统访问；pending candidate 由 `assistant-skills` 写入其既有 SQLite 库。
-- 子进程、浏览器、安装脚本：无。
+- 文件系统：driver 自身不写文件；skill candidate 由 Skills 入库，源码提案经 Control Plane 写入其私有 worktree 和 SQLite。
+- 子进程：源码轨开启时委托 Control Plane 调用 Git 与隔离容器构建；构建权属于 owner 配置的 Control Plane，见其权限说明。driver 无浏览器能力。
 - 凭据：只读解析一次凭据引用（存在性检查），不持久化、不回显、不入日志。
 - 审批/策略：每次沉淀与每个工具调用都在 service 边界经 `assistant-policy`；空规则默认拒绝。产物仅 pending，零 activate/install。
 
@@ -120,7 +146,7 @@ rules:
 - 不自主发起/执行 goal、不提议 guidance、不记 capability gap。
 - 不 activate / install / retire / rollback、不扩权、不改 policy 规则表、不碰预算上限与急停等安全根。
 - owner-anchored 轨只提交 locator：证据（objective、步骤、验收结论）一律由 Delivery 持 goals 独立重取，driver 不接受调用方自带 prompt，也不自造 trace source/authority。
-- 插件代码自改的隔离构建/source lane/owner 签/HMR reload 仍为独立第二期，不在本插件内。
+- 源码轨只到经过检查的 pending 提案；owner 签名、发布、生产启用和 HMR reload 由独立控制面处理。
 - owner-anchored 轨的证据是 Delivery 在进程内对真实 goals SQLite 的独立复核（工程层）；真实 super-relay 端到端与真实外部平台深评测均不在本期，前者仅由 owner 显式 opt-in 后手动触发一次。
 
 ## 兼容性
