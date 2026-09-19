@@ -1,8 +1,11 @@
 import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { memoryKnowledgeText, normalizeMemoryKnowledge } from './knowledge.js'
+import { tokenizeMemory } from './tokenize.js'
 
 export const memorySchemaVersion = 6
+export const memoryTokenizerIndexVersion = 1
 
 export class MemoryDatabaseError extends Error {
   constructor(
@@ -316,6 +319,9 @@ function createFresh(database: DatabaseSync): void {
   createV3Indexes(database)
   migrateV4ToV5(database)
   migrateV5ToV6(database)
+  database.exec(`
+    INSERT INTO schema_meta(key, value) VALUES ('tokenizer-index-version', '${memoryTokenizerIndexVersion}');
+  `)
 }
 
 function migrateV3ToV4(database: DatabaseSync): void {
@@ -435,6 +441,35 @@ function migrateV2ToV3(database: DatabaseSync): void {
   `)
 }
 
+function rebuildMemoryTokenIndex(database: DatabaseSync): void {
+  const rows = database.prepare(
+    'SELECT id, content, knowledge_json FROM memory_records WHERE status = \'active\'',
+  ).all() as Array<{ id: string, content: string, knowledge_json: string | null }>
+
+  database.prepare('DELETE FROM memory_tokens').run()
+  const insertToken = database.prepare('INSERT INTO memory_tokens(memory_id, token) VALUES (?, ?)')
+  for (const row of rows) {
+    const knowledge = row.knowledge_json === null
+      ? undefined
+      : normalizeMemoryKnowledge(JSON.parse(row.knowledge_json) as unknown)
+    const tokens = tokenizeMemory(`${row.content}\n${memoryKnowledgeText(knowledge)}`)
+    for (const token of tokens) insertToken.run(row.id, token)
+  }
+}
+
+function migrateTokenizerIndex(database: DatabaseSync): void {
+  const row = database.prepare(
+    "SELECT value FROM schema_meta WHERE key = 'tokenizer-index-version'",
+  ).get() as { value: string } | undefined
+  if (row?.value === String(memoryTokenizerIndexVersion)) return
+
+  rebuildMemoryTokenIndex(database)
+  database.prepare(`
+    INSERT INTO schema_meta(key, value) VALUES ('tokenizer-index-version', ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(String(memoryTokenizerIndexVersion))
+}
+
 function migrate(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE')
   try {
@@ -459,6 +494,7 @@ function migrate(database: DatabaseSync): void {
       row = database.prepare('PRAGMA user_version').get() as { user_version: number }
       if (row.user_version === 5) migrateV5ToV6(database)
     }
+    migrateTokenizerIndex(database)
     database.exec('COMMIT')
   } catch (error) {
     database.exec('ROLLBACK')
