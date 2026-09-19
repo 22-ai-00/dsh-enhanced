@@ -390,6 +390,22 @@ function canonicalFileUrl(value: unknown, label: string): { url: string; path: s
   return { url: value, path }
 }
 
+function canonicalBareHttpsUrl(value: unknown, label: string): URL {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 8_192
+    || value !== value.normalize('NFC').trim() || /[\\\\?#]/u.test(value)
+    || [...value].some(character => character.charCodeAt(0) <= 0x20 || character.charCodeAt(0) === 0x7f)
+    || /%(?:2e|2f|5c|25)|%(?![a-f0-9]{2})/iu.test(value)) {
+    throw new Error(`plugin-control-plane: ${label} must be a canonical bare HTTPS URL`)
+  }
+  let url: URL
+  try { url = new URL(value) } catch { throw new Error(`plugin-control-plane: ${label} must be a canonical bare HTTPS URL`) }
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== ''
+    || url.href !== value || url.pathname.includes('//')) {
+    throw new Error(`plugin-control-plane: ${label} must be a canonical bare HTTPS URL`)
+  }
+  return url
+}
+
 function catalogRegistry(value: unknown, packageName: string, version: string, label: string): CatalogRegistryArtifact {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error(`plugin-control-plane: ${label}.registry must be an object`)
@@ -414,10 +430,16 @@ function catalogRegistry(value: unknown, packageName: string, version: string, l
   let locator: URL
   try { locator = new URL(item.locator) } catch { throw new Error(`plugin-control-plane: ${label}.registry.locator is invalid`) }
   if (locator.protocol !== 'https:' || locator.username !== '' || locator.password !== '' || locator.search !== '' || locator.hash !== ''
-    || (locator.href !== item.locator && locator.href !== `${item.locator}/`) || item.reference !== `${packageName}@${version}`) {
+    || (locator.href !== item.locator && locator.href !== `${item.locator}/`)) {
     throw new Error(`plugin-control-plane: ${label}.registry must use a bounded HTTPS registry package reference`)
   }
-  return Object.freeze({ id, locator: item.locator, reference: item.reference })
+  if (item.reference === `${packageName}@${version}`) return Object.freeze({ id, locator: item.locator, reference: item.reference })
+  const reference = canonicalBareHttpsUrl(item.reference, `${label}.registry.reference`)
+  const prefix = locator.pathname.endsWith('/') ? locator.pathname : `${locator.pathname}/`
+  if (reference.origin !== locator.origin || !reference.pathname.startsWith(prefix)) {
+    throw new Error(`plugin-control-plane: ${label}.registry.reference must be under its HTTPS registry locator`)
+  }
+  return Object.freeze({ id, locator: item.locator, reference: reference.href })
 }
 
 function catalogPackage(value: unknown, label: string): CatalogPackage {

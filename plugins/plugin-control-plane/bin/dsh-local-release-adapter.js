@@ -375,10 +375,36 @@ function registryConfig(value) {
 function registryPublicationPath(registry, packageName, packageVersion) {
   return join(registry.root, 'packages', encodeURIComponent(packageName), packageVersion, 'publication.json')
 }
-function catalogConfig(value) {
-  const item = object(value, 'catalog config'); exactKeys(item, ['id', 'path', 'helper', 'interpreter'], 'catalog config')
+function catalogHttps(value, label) {
+  const raw = text(value, label)
+  let url
+  try { url = new URL(raw) } catch { fail(`${label} is invalid`) }
+  if (url.protocol !== 'https:' || url.href !== raw || url.username || url.password || /[\\?#\s]/u.test(raw)
+    || /%(?:2e|2f|5c|25)|%(?![a-f0-9]{2})/iu.test(raw) || url.pathname.includes('//')) fail(`${label} must be canonical bare HTTPS`)
+  return url
+}
+function catalogRegistryConfig(config) {
+  if (config.registry?.protocol !== 'npm') return registryConfig(config.registry)
+  if (config.phase !== 'catalog-admission') fail('npm registry is only valid for catalog admission in the local adapter')
+  const item = object(config.registry, 'npm catalog registry')
+  exactKeys(item, ['protocol', 'id', 'locator', 'signer'], 'npm catalog registry')
+  const id = text(item.id, 'registry id', ID); const locator = catalogHttps(item.locator, 'registry locator').href
+  const signer = loadPublicIdentity(item.signer, 'artifact signer'); const ownKey = createPublicKey(config.privateKey)
+  for (const identity of [signer, config.authorizationAuthority, config.registryVerifier]) {
+    if (identity === undefined || identity.publicKey.equals(ownKey)
+      || (identity.authority === config.authority && identity.keyId === config.keyId)) fail('npm catalog authority must be independent')
+  }
+  return { protocol: 'npm', id, locator, signer }
+}
+function catalogConfig(value, npm = false) {
+  const item = object(value, 'catalog config'); exactKeys(item, ['id', 'path', 'helper', npm ? 'interpreterModule' : 'interpreter'], 'catalog config')
   const id = text(item.id, 'catalog id', ID); const path = canonicalPath(item.path, 'catalog path')
   const helper = object(item.helper, 'catalog admission helper'); exactKeys(helper, ['path', 'sha256'], 'catalog admission helper')
+  if (npm) {
+    const interpreterModule = object(item.interpreterModule, 'catalog interpreter module')
+    exactKeys(interpreterModule, ['path', 'sha256'], 'catalog interpreter module')
+    return { id, path, helper, interpreterModule }
+  }
   const interpreter = object(item.interpreter, 'catalog helper interpreter'); exactKeys(interpreter, ['path', 'sha256'], 'catalog helper interpreter')
   inspectExecutable(interpreter, 'catalog helper interpreter')
   return { id, path, helper, interpreter }
@@ -679,7 +705,8 @@ function validateCatalogRegistryVerificationReceipt(request, config) {
     || !ID.test(verificationRegistry.id) || typeof verificationRegistry.locator !== 'string'
     || !ID.test(verificationCatalog.id) || typeof verificationCatalog.path !== 'string' || !isAbsolute(verificationCatalog.path)
     || !ID.test(verificationAdapter.id) || !ID.test(verificationAdapter.authority) || !ID.test(verificationAdapter.keyId)
-    || verificationAdapter.version !== LOCAL_RELEASE_ADAPTER_VERSION || typeof verificationAdapter.path !== 'string'
+    || verificationAdapter.version !== (config.registry?.protocol === 'npm' ? 'dsh-npm-registry-adapter-1' : LOCAL_RELEASE_ADAPTER_VERSION)
+    || typeof verificationAdapter.path !== 'string'
     || !isAbsolute(verificationAdapter.path) || !DIGEST.test(verificationAdapter.sha256)
     || (verificationInterpreter !== null && (!isAbsolute(verificationInterpreter.path) || !DIGEST.test(verificationInterpreter.sha256)))
     || receipt.schemaVersion !== 1 || receipt.phase !== 'registry-verify' || receipt.outcome !== 'passed'
@@ -744,7 +771,7 @@ function validatePhasePolicy(request, config) {
     buildConfig(config.build)
   }
   if (request.phase === 'publish' || request.phase === 'registry-verify' || request.phase === 'catalog-admission') {
-    const registry = registryConfig(config.registry)
+    const registry = request.phase === 'catalog-admission' ? catalogRegistryConfig(config) : registryConfig(config.registry)
     if (registry.id !== policy.registryId || registry.locator !== request.registry.locator) fail('registry adapter is not bound to the authorized registry')
   }
 }
@@ -1153,11 +1180,36 @@ function registryVerifyPhase(request, config, context) {
     publishEvidenceDigest: input.publishEvidenceDigest }
 }
 
+async function runNpmCatalogHelper(catalog, input) {
+  // Both shipped modules are pinned. Importing verified bytes also avoids
+  // resolving an unpinned relative module through a filesystem URL.
+  const pinned = []
+  try {
+    const helper = openPinnedFile(catalog.helper, 'catalog helper', 1_048_576, false); pinned.push(helper)
+    const dependency = openPinnedFile(catalog.interpreterModule, 'catalog interpreter module', 1_048_576, false); pinned.push(dependency)
+    const helperBytes = inheritedDescriptorBytes(helper.descriptor, 'catalog helper', 1_048_576)
+    const dependencyBytes = inheritedDescriptorBytes(dependency.descriptor, 'catalog interpreter module', 1_048_576)
+    if (sha256Bytes(helperBytes) !== helper.sha256 || sha256Bytes(dependencyBytes) !== dependency.sha256) fail('catalog module changed before import')
+    const source = new TextDecoder('utf-8', { fatal: true }).decode(helperBytes)
+    const importPattern = /from\s+(['"])\.\/catalog-interpreter\.js\1/gu
+    if ([...source.matchAll(importPattern)].length !== 1) fail('catalog helper dependency contract changed')
+    const dependencyUrl = `data:text/javascript;base64,${dependencyBytes.toString('base64')}`
+    const boundSource = source.replace(importPattern, `from '${dependencyUrl}'`)
+    const module = await import(`data:text/javascript;base64,${Buffer.from(boundSource).toString('base64')}`)
+    if (typeof module.admitCatalogCandidate !== 'function') fail('catalog admission helper is unavailable')
+    return object(await module.admitCatalogCandidate(input), 'catalog helper result')
+  } finally {
+    try { for (const entry of pinned) verifyPinnedFile(entry, 'catalog pinned module') }
+    finally { for (const entry of pinned) closePinnedFile(entry) }
+  }
+}
+
 async function catalogAdmissionPhase(request, config, registryVerificationReceipt, hooks = {}) {
-  const input = object(request.input, 'catalog admission input'); const catalog = catalogConfig(config.catalog)
+  const registry = catalogRegistryConfig(config)
+  const input = object(request.input, 'catalog admission input'); const catalog = catalogConfig(config.catalog, registry.protocol === 'npm')
   const { id, path } = catalog
   if (request.catalog.id !== id || request.catalog.path !== path) fail('catalog request targets a different owner catalog')
-  const registry = registryConfig(config.registry); const signed = verifySignedArtifact(input, registry, true)
+  const signed = verifySignedArtifact(input, registry, true)
   const expectedBeforeDigest = text(input.expectedBeforeCatalogDigest, 'expected catalog digest', DIGEST)
   const expectedAfterDigest = text(input.expectedAfterCatalogDigest, 'expected after catalog digest', DIGEST)
   if (registryVerificationReceipt === undefined) fail('catalog admission has no verified registry receipt')
@@ -1170,12 +1222,21 @@ async function catalogAdmissionPhase(request, config, registryVerificationReceip
   if (digest(candidate) !== digest(expectedCandidate)) fail('catalog candidate does not match the signed artifact')
   const reference = text(input.registryReference, 'registry reference')
   if (request.authorization.releasePolicy.registryReference !== reference) fail('catalog registry reference is not owner-authorized')
-  let registryPath
-  try { registryPath = fileURLToPath(reference) } catch { fail('catalog registry reference is not a local file URL') }
-  const registryBytes = readBounded(registryPath, 'catalog registry object')
-  if (!realpathSync(registryPath).startsWith(`${join(registry.root, 'packages')}${sep}`)
-    || sha256Bytes(registryBytes) !== input.artifact.tarballSha256 || sha512Integrity(registryBytes) !== input.artifact.tarballIntegrity) {
-    fail('catalog registry reference does not contain the signed artifact')
+  if (registry.protocol === 'npm') {
+    const base = catalogHttps(registry.locator, 'registry locator'); const target = catalogHttps(reference, 'registry reference')
+    if (base.origin !== target.origin || !target.pathname.startsWith(`${base.pathname.replace(/\/+$/u, '')}/`)) fail('npm catalog reference escapes its registry')
+    const policy = request.authorization.releasePolicy
+    for (const key of ['candidateId', 'packageName', 'packageVersion', 'packagePath', 'dshBaseline', 'capabilities', 'authorities', 'requires']) {
+      if (digest(input.artifact[key]) !== digest(policy[key])) fail('npm catalog artifact differs from owner release policy')
+    }
+  } else {
+    let registryPath
+    try { registryPath = fileURLToPath(reference) } catch { fail('catalog registry reference is not a local file URL') }
+    const registryBytes = readBounded(registryPath, 'catalog registry object')
+    if (!realpathSync(registryPath).startsWith(`${join(registry.root, 'packages')}${sep}`)
+      || sha256Bytes(registryBytes) !== input.artifact.tarballSha256 || sha512Integrity(registryBytes) !== input.artifact.tarballIntegrity) {
+      fail('catalog registry reference does not contain the signed artifact')
+    }
   }
   assertUnexpired(request, 'catalog admission')
   const helperInput = { catalog: { id, path }, registry: { id: registry.id, locator: registry.locator },
@@ -1187,10 +1248,13 @@ const helper=await import('file:///proc/self/fd/3');const input=JSON.parse(readF
 if(typeof helper.admitCatalogCandidate!=='function')throw new Error('catalog admission helper is unavailable');
 process.stdout.write(JSON.stringify(await helper.admitCatalogCandidate(input))+'\\n');`
   let result
-  const stdout = runPinnedNodeModule(catalog.interpreter, catalog.helper, helperSource, dirname(path), Buffer.from(JSON.stringify(helperInput)), {
-    beforeSpawn: hooks.beforeCatalogHelperSpawn, afterSpawn: hooks.afterCatalogHelperSpawn, afterFinally: hooks.afterCatalogHelperFinally,
-  })
-  result = object(JSON.parse(stdout.toString('utf8')), 'catalog helper result')
+  if (registry.protocol === 'npm') result = await runNpmCatalogHelper(catalog, helperInput)
+  else {
+    const stdout = runPinnedNodeModule(catalog.interpreter, catalog.helper, helperSource, dirname(path), Buffer.from(JSON.stringify(helperInput)), {
+      beforeSpawn: hooks.beforeCatalogHelperSpawn, afterSpawn: hooks.afterCatalogHelperSpawn, afterFinally: hooks.afterCatalogHelperFinally,
+    })
+    result = object(JSON.parse(stdout.toString('utf8')), 'catalog helper result')
+  }
   if (result.evidence.afterCatalogDigest !== expectedAfterDigest) fail('catalog admission produced an unauthorized after digest')
   return { ...result.evidence, registryReference: reference, artifactStatementDigest: signed.statementDigest,
     artifactSignatureDigest: signed.signatureDigest, verificationEvidenceDigest, candidate }

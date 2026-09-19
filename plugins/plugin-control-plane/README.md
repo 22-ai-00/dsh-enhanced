@@ -249,6 +249,8 @@ owner 可以用 `release-request` 导出当前 durable phase request、用 `rele
 - 在独立 download root 复制并重新验证 registry bytes；
 - 复用 Control Plane catalog helper 执行 request-bound before/after digest CAS admission。
 
+catalog-admission 可显式配置 `registry.protocol: "npm"`，接收独立 npm verifier 的 v1 签名回执并准入其精确 HTTPS tarball 地址。该分支仍只写 owner 本地 catalog，不联网；以继承 FD 重验已签 artifact，固定 `catalog.js` 和 `catalog-interpreter.js` 两份模块字节，在 adapter 进程内调用既有 CAS helper。catalog、verifier、signer 和 owner 使用独立权限配置；catalog receipt key 必须与其他三个角色不同。随后正式 activation 再次下载时，地址和完整性摘要都必须与已批准 catalog 一致。旧 `package@version` 逻辑引用保持兼容。配置与边界见 [npm catalog 指南](../../docs/npm-catalog-admission.md)。
+
 adapter 的 stdout 只有一个签名 JSON receipt，stderr 不打印 request 或 secret；它还会用 config 中固定的 release-authorization 公钥重新验签。每个 phase 在 owner-private state directory 永久绑定 operationId + requestDigest：完全相同请求重放同一 receipt，同 id 不同 payload 拒绝。`registry-verify` 副本还实现 `reconcile`，同时核对 immutable tarball 和 publication record，并用自己的独立 key 签发 `exists-match` / `absent` / `unknown` / `digest-conflict` evidence。该参考实现不访问网络，也不等同于 GitHub/npm adapter；需要远端 PR/registry 的部署应提供遵循相同 request/receipt 与幂等协议的 owner adapter。
 
 ## 权限

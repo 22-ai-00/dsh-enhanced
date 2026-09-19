@@ -521,8 +521,13 @@ async function downloadRegistryArtifact(trust: PluginControlTrustConfig, plan: P
   }
   let bytes: Buffer
   try {
-    ({ bytes } = await fetchRegistryArtifact({ registry: bound, packageName: item.package, version: item.version, expectedIntegrity: item.integrity }, process.env))
+    const fetched = await fetchRegistryArtifact({ registry: bound, packageName: item.package, version: item.version, expectedIntegrity: item.integrity }, process.env)
+    bytes = fetched.bytes
+    if (registry.reference.startsWith('https:') && fetched.reference !== registry.reference) {
+      throw new ControlPlaneCliError('ACTIVATION_BINDING', 'remote artifact reference does not match the approved exact HTTPS reference')
+    }
   } catch (error) {
+    if (error instanceof ControlPlaneCliError) throw error
     if (error instanceof RegistryFetchError) throw new ControlPlaneCliError('ACTIVATION_BINDING', error.message)
     throw error
   }

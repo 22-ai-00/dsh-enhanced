@@ -1,11 +1,12 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:https'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { startLocalHttpsRegistry } from '../src/registry-fetch.ts'
+import { loadCatalogWithMetadata, previewCatalogAdmission } from '../src/catalog.ts'
 import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthority,
   invokeSourcePublishReconciliationAdapter, invokeSourceReleaseAdapter, parseSourcePublishReconciliationRequest,
   parseSourceReleaseRequest, sourceArtifactSigningPayload, sourceArtifactStatementDigest,
@@ -71,6 +72,7 @@ async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' = 'match'
     provenancePath: join(root, 'provenance.json'), provenanceSha256: sha('{"build":1}'), mergedCommit: 'a'.repeat(40),
     dshBaseline: '0.1.0', capabilities: ['health'], authorities: ['read-only: health'], requires: [] }
   await writeFile(artifact.tarballPath, bytes, { mode: 0o600 }); await writeFile(artifact.sbomPath, '{}', { mode: 0o600 }); await writeFile(artifact.provenancePath, '{"build":1}', { mode: 0o600 })
+  const catalogDirectory = join(root, 'catalog'); await mkdir(catalogDirectory, { mode: 0o700 })
   const now = Date.now()
   const authorizationUnsigned = { schemaVersion: 1 as const, kind: 'dsh-source-release-authorization' as const, authorizationId: 'authorization-1',
     authority: owner.public.authority, keyId: owner.public.keyId, planId: 'plan-1', planDigest: 'b'.repeat(64), baseCommit: 'a'.repeat(40),
@@ -78,7 +80,7 @@ async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' = 'match'
     releasePolicy: { targetBranch: 'dev', candidateId: artifact.candidateId, packageName: artifact.packageName, packageVersion: artifact.packageVersion,
       packagePath: artifact.packagePath, dshBaseline: artifact.dshBaseline, capabilities: artifact.capabilities, authorities: artifact.authorities,
       requires: [], registryId: 'npm', registryLocator: config.registry.locator, registryReference: `${server.origin}/package.tgz`,
-      catalogId: 'catalog-1', catalogPath: join(root, 'catalog.json'), minimumReproducibleBuilds: 2 }, authorizedAt: now - 1_000, expiresAt: now + 60_000 }
+      catalogId: 'catalog-1', catalogPath: join(catalogDirectory, 'catalog.json'), minimumReproducibleBuilds: 2 }, authorizedAt: now - 1_000, expiresAt: now + 60_000 }
   const authorizationSignature = sign(null, Buffer.from(sourceReleaseAuthorizationSigningPayload(authorizationUnsigned)), owner.privateKey).toString('base64')
   const authorization = { ...authorizationUnsigned, signature: authorizationSignature, signatureDigest: sha(Buffer.from(authorizationSignature, 'base64')) }
   const adapter = { id: config.id, version: 'dsh-npm-registry-adapter-1', path: adapterPath, sha256: sha(await readFile(adapterPath)), interpreter,
@@ -107,7 +109,77 @@ async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' = 'match'
   return { root, config, saveConfig, trust, release, reconcile, plan, publicPem, verifier, owner, signer, seen, artifact, authorization, slow }
 }
 
+async function catalogFixture() {
+  const f = await fixture(); const verification = await invokeSourceReleaseAdapter(f.trust, f.release)
+  if (f.release.phase !== 'registry-verify') throw new Error('missing verifier request')
+  const root = join(f.root, 'catalog-role'); await mkdir(root, { mode: 0o700 })
+  const key = generateKeyPairSync('ed25519'); const privateKeyPath = join(root, 'catalog.key')
+  await writeFile(privateKeyPath, key.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
+  const executablePath = join(root, 'adapter.js'); await copyFile(new URL('../bin/dsh-local-release-adapter.js', import.meta.url), executablePath); await chmod(executablePath, 0o700)
+  const pin = async (name: string) => {
+    const path = join(root, name); await copyFile(new URL(`../lib/${name}`, import.meta.url), path); await chmod(path, 0o600)
+    return { path, sha256: sha(await readFile(path)) }
+  }
+  const catalogPath = f.release.catalog.path; await writeFile(catalogPath, '{"schemaVersion":1,"entries":[]}', { mode: 0o600 })
+  const stateRoot = join(root, 'state'); await mkdir(stateRoot, { mode: 0o700 })
+  const config = { schemaVersion: 1, id: 'npm-catalog', phase: 'catalog-admission', executablePath,
+    authority: 'catalog-authority', keyId: 'catalog-key', privateKeyPath, authorizationAuthority: f.owner.public,
+    registryVerifier: f.verifier.public, stateRoot,
+    registry: { protocol: 'npm', id: f.release.registry.id, locator: f.release.registry.locator, signer: f.signer.public },
+    catalog: { id: f.release.catalog.id, path: catalogPath, helper: await pin('catalog.js'), interpreterModule: await pin('catalog-interpreter.js') } }
+  const configPath = join(root, 'config.json'); const save = () => writeFile(configPath, JSON.stringify(config), { mode: 0o600 }); await save()
+  vi.stubEnv('DSH_RELEASE_CATALOG_ADMISSION_CONFIG', configPath)
+  const adapter = { id: config.id, version: 'dsh-local-release-adapter-1', path: executablePath, sha256: sha(await readFile(executablePath)),
+    interpreter: f.release.adapter.interpreter, authority: config.authority, keyId: config.keyId }
+  const a = f.artifact; const candidate = { id: a.candidateId, package: a.packageName, version: a.packageVersion, integrity: a.tarballIntegrity,
+    registry: { ...f.release.registry, reference: f.release.input.registryReference }, requires: a.requires, dshBaseline: a.dshBaseline,
+    capabilities: a.capabilities, authorities: a.authorities }
+  const preview = previewCatalogAdmission({ schemaVersion: 1, entries: [] }, candidate)
+  const request = parseSourceReleaseRequest({ ...f.release, phase: 'catalog-admission', operationId: 'catalog-operation', requestedAt: Date.now(),
+    plan: { ...f.release.plan, revision: f.release.plan.revision + 1 }, adapter, input: { artifact: a,
+      artifactStatementDigest: f.release.input.artifactStatementDigest, artifactSignature: f.release.input.artifactSignature,
+      registryReference: f.release.input.registryReference, registryVerificationRequest: f.release, registryVerificationReceipt: verification,
+      verificationEvidenceDigest: verification.evidenceDigest, expectedBeforeCatalogDigest: preview.beforeCatalogDigest,
+      expectedAfterCatalogDigest: preview.afterCatalogDigest, candidate } })
+  const trust = { ...f.trust, releaseAdapters: { ...f.trust.releaseAdapters, 'catalog-admission': { ...adapter,
+    timeoutMs: 15_000, environmentAllowlist: ['DSH_RELEASE_CATALOG_ADMISSION_CONFIG'] } } } as PluginControlTrustConfig
+  return { ...f, catalogConfig: config, saveCatalogConfig: save, catalogPath, catalogRequest: request, catalogTrust: trust,
+    catalogPublicKey: key.publicKey.export({ type: 'spki', format: 'pem' }).toString(), candidate, preview }
+}
+
 describe.skipIf(process.platform !== 'linux')('pinned npm registry verifier adapter', () => {
+  test('admits the actual npm verifier receipt into the owner catalog and replays without rewriting', async () => {
+    const f = await catalogFixture(); const receipt = await invokeSourceReleaseAdapter(f.catalogTrust, f.catalogRequest)
+    const plan = { ...f.plan, revision: f.catalogRequest.plan.revision }
+    await expect(new Ed25519SourceReleaseAuthority(f.catalogPublicKey, 'catalog-authority', 'catalog-key', Date.now,
+      (authority, keyId) => authority === f.config.authority && keyId === f.config.keyId ? f.publicPem : undefined)
+      .verify(receipt, plan, f.catalogRequest)).resolves.toMatchObject({ outcome: 'passed', phase: 'catalog-admission' })
+    const loaded = await loadCatalogWithMetadata(f.catalogPath)
+    expect(loaded.digest).toBe(f.preview.afterCatalogDigest); expect(loaded.catalog.entries).toEqual([f.candidate])
+    const inode = (await stat(f.catalogPath)).ino
+    expect(await invokeSourceReleaseAdapter(f.catalogTrust, f.catalogRequest)).toEqual(receipt)
+    expect((await stat(f.catalogPath)).ino).toBe(inode); expect(f.seen).toHaveLength(2)
+  })
+  test('refuses a forged npm verification receipt before catalog mutation', async () => {
+    const f = await catalogFixture(); if (f.catalogRequest.phase !== 'catalog-admission') throw new Error('missing catalog request')
+    const before = await readFile(f.catalogPath); const receipt = f.catalogRequest.input.registryVerificationReceipt
+    const request = { ...f.catalogRequest, input: { ...f.catalogRequest.input,
+      registryVerificationReceipt: { ...receipt, signature: Buffer.alloc(64, 1).toString('base64') } } }
+    await expect(invokeSourceReleaseAdapter(f.catalogTrust, request)).rejects.toThrow(/catalog-admission:FAILED/)
+    expect(await readFile(f.catalogPath)).toEqual(before); expect(f.seen).toHaveLength(2)
+  })
+  test('pins the catalog helper dependency before admitting a remote artifact', async () => {
+    const f = await catalogFixture(); const before = await readFile(f.catalogPath)
+    await writeFile(f.catalogConfig.catalog.interpreterModule.path, 'throw new Error("changed dependency")')
+    await expect(invokeSourceReleaseAdapter(f.catalogTrust, f.catalogRequest)).rejects.toThrow(/catalog-admission:FAILED/)
+    expect(await readFile(f.catalogPath)).toEqual(before)
+  })
+  test('rejects npm catalog key reuse by the artifact signer', async () => {
+    const f = await catalogFixture(); const before = await readFile(f.catalogPath)
+    f.catalogConfig.privateKeyPath = f.signer.privateKeyPath; await f.saveCatalogConfig()
+    await expect(invokeSourceReleaseAdapter(f.catalogTrust, f.catalogRequest)).rejects.toThrow(/catalog-admission:FAILED/)
+    expect(await readFile(f.catalogPath)).toEqual(before)
+  })
   test('verifies signed artifact FDs against a real TLS npm download and reuses its exact receipt', async () => {
     const f = await fixture(); const receipt = await invokeSourceReleaseAdapter(f.trust, f.release)
     expect(receipt.outcome).toBe('passed'); expect(receipt.evidence).toMatchObject({ kind: 'registry-verify', downloadedSha256: f.artifact.tarballSha256 })
