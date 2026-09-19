@@ -535,11 +535,12 @@ async function catalogAdmissionFixture() {
   return { plan, request, evidence, registryKeys, catalogKeys, receipt: signedReceipt(request, evidence, catalogKeys.privateKey) }
 }
 
-async function realAdapterInvocationFixture(replaceDuringCapabilities = false): Promise<{
+async function realAdapterInvocationFixture(replaceDuringCapabilities = false, treeMode?: 'timeout' | 'overflow'): Promise<{
   trust: PluginControlTrustConfig
   request: Extract<SourceReleaseRequest, { phase: 'publish' }>
   receipt: SourceReleaseReceipt
   markerPath: string
+  descendantPidPath: string
 }> {
   const root = await canonicalMkdtemp('plugin-release-invocation-'); roots.push(root); await chmod(root, 0o700)
   const dshHome = join(root, 'dsh-home'); await mkdir(dshHome, { mode: 0o700 })
@@ -549,11 +550,13 @@ async function realAdapterInvocationFixture(replaceDuringCapabilities = false): 
   const adapterPath = join(root, 'adapter.mjs'); const evilPath = join(root, 'evil.mjs')
   const retainedAdapterPath = join(root, 'adapter-retained.mjs')
   const markerPath = join(root, 'evil-marker'); const receiptPath = join(root, 'receipt.json')
+  const descendantPidPath = join(root, 'descendant.pid')
   const expectedArtifactBytes = await Promise.all([artifact.tarballPath, artifact.sbomPath, artifact.provenancePath]
     .map(async path => (await readFile(path)).toString('base64')))
   const script = [
     '#!' + nodePath,
     "import { readFileSync, renameSync } from 'node:fs'",
+    "import { spawn } from 'node:child_process'",
     'const command = process.argv[2]',
     'const receiptPath = ' + JSON.stringify(receiptPath),
     "if (command === '--version') process.stdout.write('fixture-release-adapter-1\\n')",
@@ -564,6 +567,13 @@ async function realAdapterInvocationFixture(replaceDuringCapabilities = false): 
     ] : []),
     "  process.stdout.write('{\"schemaVersion\":1,\"artifactInput\":\"inherited-fd-v1\"}\\n')",
     "} else if (command === 'release') {",
+    ...(treeMode === undefined ? [] : [
+      '  const descendant = spawn(process.execPath, ["--input-type=module", "-e", ' + JSON.stringify(
+        `import {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(descendantPidPath)},String(process.pid));setInterval(()=>{},20);process.send('ready');`) + '], {stdio:["ignore","inherit","ignore","ipc"]})',
+      "  await new Promise(resolve => descendant.once('message', resolve)); descendant.disconnect(); descendant.unref()",
+      ...(treeMode === 'overflow' ? ["  process.stdout.write('x'.repeat(1_048_576))"] : []),
+      '  await new Promise(() => setInterval(() => {}, 20))',
+    ]),
     "  const names = ['DSH_RELEASE_TARBALL_FD', 'DSH_RELEASE_SBOM_FD', 'DSH_RELEASE_PROVENANCE_FD']",
     "  if (names.map(name => process.env[name]).join(',') !== '3,4,5') throw new Error('missing inherited artifact descriptors')",
     '  const expected = ' + JSON.stringify(expectedArtifactBytes),
@@ -658,7 +668,12 @@ async function realAdapterInvocationFixture(replaceDuringCapabilities = false): 
     releaseAuthorizationKeys: [{ authority: authorization.authority, keyId: authorization.keyId, publicKeyPem: publicKeyPem(ownerKeys.publicKey) }],
   }
   await writeFile(trustPath, JSON.stringify(rawTrust), { mode: 0o600 }); await chmod(trustPath, 0o600)
-  return { trust: await loadTrustConfig(trustPath), request, receipt, markerPath }
+  return { trust: await loadTrustConfig(trustPath), request, receipt, markerPath, descendantPidPath }
+}
+
+async function stopFixtureDescendant(path: string): Promise<void> {
+  try { process.kill(Number(await readFile(path, 'utf8')), 'SIGKILL') }
+  catch (error) { if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error }
 }
 
 afterEach(async () => {
@@ -667,6 +682,20 @@ afterEach(async () => {
 afterAll(async () => { if (cachedInterpreterRoot !== undefined) await rm(cachedInterpreterRoot, { recursive: true, force: true }) })
 
 describe('descriptor-pinned release adapter invocation', () => {
+  test.runIf(process.platform === 'linux').each([['timeout', 'TIMEOUT'], ['overflow', 'OUTPUT_LIMIT']] as const)(
+    'maps %s only after stopping a descendant that retained adapter stdout', async (mode, code) => {
+      const fixture = await realAdapterInvocationFixture(false, mode)
+      const trust = { ...fixture.trust, releaseAdapters: { ...fixture.trust.releaseAdapters,
+        publish: { ...fixture.trust.releaseAdapters!.publish!, timeoutMs: 1_000 } } }
+      try {
+        await expect(invokeSourceReleaseAdapter(trust, fixture.request)).rejects.toMatchObject({ name: 'ReleaseAdapterError', code, phase: 'publish' })
+        const pid = Number(await readFile(fixture.descendantPidPath, 'utf8'))
+        let running = false
+        try { const stat = await readFile(`/proc/${pid}/stat`, 'utf8'); running = !['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]!) }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        expect(running).toBe(false)
+      } finally { await stopFixtureDescendant(fixture.descendantPidPath) }
+    })
   test.runIf(process.platform === 'linux')('executes an artifact phase through pinned script, interpreter, and inherited FDs', async () => {
     const fixture = await realAdapterInvocationFixture()
 

@@ -29,6 +29,8 @@
 
 2026-09-19 npm 发布组件：owner 配置的独立 publish 角色从已签 artifact FD 构造 npm 载荷，发送前持久化操作标记，单次 HTTPS PUT 后沿用原有发布回执/歧义/独立对账状态。真实本地 TLS 覆盖上传→独立读回、丢失 ACK、取消/重启不重发与配置漂移；两个历史 npm 包通过只读载荷构造验证。详见[发布契约与证据](npm-publish-adapter.md)。尚未执行真实 npm 写入、生产 Host 启用或完整监测/回滚，WP16、WP18 状态不变。
 
+2026-09-19 adapter 生命周期修复：真实子进程复现了 timeout 只杀主进程、孙进程持有 stdout 导致控制面继续挂起的问题。Host/release runner 现共用 Linux 进程组回收，正常退出也清理同组后台 helper，清理与输出排空均有界，失败不推进签名操作。详见[契约和证据](control-plane-adapter-lifetime.md)。该修复覆盖存活 runner 的进程所有权；主动脱组、Host 被强杀后的资源恢复及真实七阶段 Host attestor 仍需外部监督/独立观测，WP16、WP18 状态不变。
+
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |
 | --- | --- | --- |
 | 基本 RSI 首版：同类任务连续两轮自主修复、比较、有限试用、晋升和结果反馈 | [0.1.32 发布](evidence/release-0.1.32-2026-09-13.json)与[现代 Host 两轮真实模型运行](evidence/basic-rsi-modern-host-2026-09-13.json) | 独立隐藏留出、更多任务族及全部部署类型 |

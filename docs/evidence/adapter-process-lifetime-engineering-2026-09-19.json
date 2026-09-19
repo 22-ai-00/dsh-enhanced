@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "kind": "adapter-process-lifetime-engineering-validation",
+  "date": "2026-09-19",
+  "baseCommit": "50180f745374857172971adad0f86c4d5b422704",
+  "capability": "Bounded Linux process-group ownership for descriptor-pinned release and Host-attestor commands, including normal leader exit.",
+  "runtimeDigests": {
+    "plugins/plugin-control-plane/src/adapter-process.ts": "13c5d5e1e7603bbdf490bbc067d6ab47c88162d1f52be0b6bc2886cccd54b0da",
+    "plugins/plugin-control-plane/src/host-attestor.ts": "32de52fd4aa9780219fda4a3eb6802f32191a3d92c2e935c9dad682778e3805e",
+    "plugins/plugin-control-plane/src/release.ts": "e2acdb44f7470b01e59133404a9b418346967dec04e9f95175acb433e144abfd",
+    "plugins/plugin-control-plane/lib/adapter-process.js": "285aa47e5aa1a310f0463fa5ddfdfe7e3d0b2f112b03329c029055137c015e74",
+    "plugins/plugin-control-plane/lib/host-attestor.js": "96cb9cd9802876c5f5af282b6f67b9f8ca1687d51fc30fd069fe2a1a54ad0951",
+    "plugins/plugin-control-plane/lib/release.js": "045a0faf6078518203433817433d0f1711d602bb812b982df6a95317e548168b",
+    "plugins/plugin-control-plane/tests/adapter-process.spec.ts": "c83bfb5aa958fccb6e867c3c200a7e7f4761fe2714c03c11fbff33dedeaf4cfc",
+    "plugins/plugin-control-plane/tests/host-attestor.spec.ts": "5243294cef42b5ea568dc8a14b491b48774acf00081a333ed774cf51fa8a0c8b",
+    "plugins/plugin-control-plane/tests/release.spec.ts": "a05872956954a9201114d586bfc1aae6d9e9df6f4dea3507d6c9fca7ca7c6f1c"
+  },
+  "baseline": {
+    "scope": "Controlled local subprocess fixture against the preceding compiled Host runner; fixture descendant explicitly terminated afterward.",
+    "command": "node /tmp/dsh-attestor-process-baseline.mjs",
+    "exitCode": 0,
+    "scriptSha256": "7dc086b4b3dc268052982acf80fb849405ffaaca5722cca978349eff5489021c",
+    "observation": {
+      "baseCommit": "50180f745374857172971adad0f86c4d5b422704",
+      "configuredTimeoutMs": 800,
+      "observationDelayMs": 2500,
+      "hungAfterDeadline": true,
+      "descendantAlive": true,
+      "hostAttestorLibSha256": "013d6151dad46b10bd7223516419702153e31a1f9a6c3310cb43611480711c6d",
+      "afterFixtureCleanup": "TIMEOUT"
+    },
+    "observationSha256": "17e59ae33e2d4ab28bdd567c6d47a2d7f1eb32dd4b72c1b002ff23d2fec38f7f"
+  },
+  "rootCheck": {
+    "command": "pnpm check",
+    "exitCode": 0,
+    "logSha256": "777790a0955b3f95b379782e548fd2a7d6deef13b61a82992755e2cf51702b93",
+    "passed": 5969,
+    "skipped": 44,
+    "summaries": 36,
+    "controlPlanePassed": 380,
+    "dryRunPacks": 35,
+    "packInspection": [
+      "lib/adapter-process.js",
+      "lib/adapter-process.d.ts",
+      "lib/host-attestor.js",
+      "lib/release.js",
+      "bin/dsh-plugin-control.js",
+      "bin/dsh-local-release-adapter.js",
+      "bin/dsh-npm-registry-adapter.js",
+      "cordis.patch.yml",
+      "README.md",
+      "LICENSE"
+    ],
+    "sourceCoverage": "The final root package tests and final build include the monotonic deadline and bounded-work rejection-handler fixes. Final focused lint and typecheck also cover those fixes. Documentation and this evidence were finalized after the gate."
+  },
+  "focusedChecks": [
+    {
+      "command": "pnpm exec vitest run tests/adapter-process.spec.ts tests/host-attestor.spec.ts tests/release.spec.ts --testTimeout=15000",
+      "cwd": "plugins/plugin-control-plane",
+      "exitCode": 0,
+      "passed": 44,
+      "files": 3,
+      "logSha256": "63c2520493bbdcade873c1af147f529bc9480aabd8aa2702252b87574c7c6c86",
+      "scope": "Precedes two final deadline/late-rejection fixes; final root tests cover them."
+    },
+    {
+      "command": "pnpm exec oxlint --deny-warnings plugins/plugin-control-plane/src/adapter-process.ts plugins/plugin-control-plane/src/host-attestor.ts plugins/plugin-control-plane/src/release.ts plugins/plugin-control-plane/tests/adapter-process.spec.ts plugins/plugin-control-plane/tests/host-attestor.spec.ts plugins/plugin-control-plane/tests/release.spec.ts",
+      "exitCode": 0,
+      "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/plugin-control-plane typecheck",
+      "exitCode": 0,
+      "logSha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    }
+  ],
+  "baseCommitCi": {
+    "url": "https://github.com/22-ai-00/dsh-enhanced/actions/runs/35468767463",
+    "headSha": "50180f745374857172971adad0f86c4d5b422704",
+    "conclusion": "success",
+    "jobs": {
+      "linux": "success",
+      "macos": "success",
+      "windows": "success"
+    },
+    "scope": "Preceding npm publication capability only; does not replace this commit CI."
+  },
+  "limits": [
+    "Same-process-group descendants are reclaimed; setsid or other process-group escapes require external containment. Tests explicitly clean escaped fixture processes.",
+    "Cleanup requires the runner to remain alive. Host/CLI SIGKILL, machine power loss and external supervisor recovery are not established.",
+    "Terminating a helper does not reverse an already submitted registry, catalog or Host operation; durable reconciliation remains required.",
+    "Real process ownership tests run on Linux. Descriptor-only mocks retain portability coverage but do not prove process-group behavior on other platforms.",
+    "No production registry mutation, Host activation, complete WP16/WP18 cycle, or cross-task improvement is claimed."
+  ],
+  "independentReview": {
+    "role": "verifier",
+    "verdict": "PASS",
+    "highOrBlockFindings": 0,
+    "scope": [
+      "Read-only review of bounded Linux group reclamation, descriptor preservation, error mapping, late output/deadline handling and real subprocess tests.",
+      "Independent focused lint and final source/build digest, full-check log, dry-run file list and documentation/evidence boundary verification."
+    ]
+  }
+}
