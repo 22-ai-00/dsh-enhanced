@@ -1,5 +1,5 @@
-import { spawn } from 'node:child_process'
 import { realpath } from 'node:fs/promises'
+import { ControlledProcessError, executeControlledProcess } from './adapter-process.js'
 import { parseHostAttestationReceipt } from './attestation.js'
 import { ControlPlaneStore, ControlPlaneStoreError } from './store.js'
 import { inheritedHostAttestorEnvironment, openTrustedExecutable, verifyOpenTrustedExecutable,
@@ -77,33 +77,20 @@ async function execute(executable: OpenTrustedExecutable, interpreter: OpenTrust
   try { await realpath('/proc/self/fd') } catch {
     throw new HostAttestorError('FAILED', 'descriptor-pinned Host attestors require /proc/self/fd')
   }
-  return new Promise((resolve, reject) => {
-    const command = interpreter === undefined ? '/proc/self/fd/3' : '/proc/self/fd/4'
-    const commandArguments = interpreter === undefined ? [...args] : ['/proc/self/fd/3', ...args]
-    const stdio: Array<'pipe' | 'ignore' | number> = ['pipe', 'pipe', 'ignore', executable.handle.fd]
-    if (interpreter !== undefined) stdio.push(interpreter.handle.fd)
-    const child = spawn(command, commandArguments, { env: environment, shell: false, stdio })
-    const chunks: Buffer[] = []; let bytes = 0; let timedOut = false; let outputLimit = false; let settled = false
-    const fail = (error: Error): void => { if (!settled) { settled = true; reject(error) } }
-    child.stdout!.on('data', (chunk: Buffer) => {
-      bytes += chunk.length
-      if (bytes > maximumOutput) { outputLimit = true; child.kill('SIGKILL') } else chunks.push(chunk)
-    })
-    child.once('error', () => fail(new HostAttestorError('FAILED', 'registered Host attestor could not start')))
-    child.once('close', code => {
-      if (settled) return
-      settled = true
-      if (timedOut) reject(new HostAttestorError('TIMEOUT', 'registered Host attestor exceeded its deadline'))
-      else if (outputLimit) reject(new HostAttestorError('OUTPUT_LIMIT', 'registered Host attestor exceeded its output bound'))
-      else if (code !== 0) reject(new HostAttestorError('FAILED', 'registered Host attestor returned a non-zero status'))
-      else resolve(Buffer.concat(chunks).toString('utf8'))
-    })
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, timeoutMs)
-    child.once('close', () => clearTimeout(timer))
-    child.stdin!.on('error', () => { /* early exit is classified by error/close */ })
-    if (input === undefined) child.stdin!.end()
-    else child.stdin!.end(input, 'utf8')
-  })
+  const command = interpreter === undefined ? '/proc/self/fd/3' : '/proc/self/fd/4'
+  const commandArguments = interpreter === undefined ? [...args] : ['/proc/self/fd/3', ...args]
+  const stdio: Array<'pipe' | 'ignore' | number> = ['pipe', 'pipe', 'ignore', executable.handle.fd]
+  if (interpreter !== undefined) stdio.push(interpreter.handle.fd)
+  try {
+    return await executeControlledProcess({ command, args: commandArguments, env: environment, stdio,
+      stdin: input, timeoutMs, maximumOutput })
+  } catch (error) {
+    if (!(error instanceof ControlledProcessError)) throw error
+    if (error.code === 'TIMEOUT') throw new HostAttestorError('TIMEOUT', 'registered Host attestor exceeded its deadline')
+    if (error.code === 'OUTPUT_LIMIT') throw new HostAttestorError('OUTPUT_LIMIT', 'registered Host attestor exceeded its output bound')
+    throw new HostAttestorError('FAILED', error.code === 'NON_ZERO'
+      ? 'registered Host attestor returned a non-zero status' : 'registered Host attestor could not be safely reclaimed')
+  }
 }
 
 export async function invokeConfiguredHostAttestor(trust: PluginControlTrustConfig,

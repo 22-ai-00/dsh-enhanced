@@ -1,9 +1,9 @@
-import { spawn } from 'node:child_process'
 import { createHash, createPublicKey, verify } from 'node:crypto'
 import { constants as fsConstants } from 'node:fs'
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises'
 import { dirname, isAbsolute, posix, resolve } from 'node:path'
 import { catalogAdmissionId, parseCatalog, type CapabilityCatalog, type CatalogEntry } from './catalog.js'
+import { ControlledProcessError, executeControlledProcess } from './adapter-process.js'
 import { ControlPlaneStoreError } from './store.js'
 import { inheritedReleaseAdapterEnvironment, openTrustedExecutable, verifyOpenTrustedExecutable,
   type OpenTrustedExecutable, type PluginControlTrustConfig } from './trust.js'
@@ -1103,26 +1103,21 @@ async function executePinned(executable: OpenTrustedExecutable, interpreter: Ope
   inherited: readonly FileHandle[] = []): Promise<string> {
   if (process.platform !== 'linux') throw new ReleaseAdapterError('FAILED', phase, 'descriptor-pinned adapters require Linux')
   try { await realpath('/proc/self/fd') } catch { throw new ReleaseAdapterError('FAILED', phase, 'descriptor-pinned adapters require /proc/self/fd') }
-  return new Promise((resolvePromise, reject) => {
-    const executableFd = 3 + inherited.length; const interpreterFd = interpreter === undefined ? undefined : executableFd + 1
-    const command = `/proc/self/fd/${interpreterFd ?? executableFd}`
-    const commandArguments = interpreter === undefined ? [...args] : [`/proc/self/fd/${executableFd}`, ...args]
-    const stdio: Array<'pipe' | 'ignore' | number> = ['pipe', 'pipe', 'ignore', ...inherited.map(handle => handle.fd), executable.handle.fd]
-    if (interpreter !== undefined) stdio.push(interpreter.handle.fd)
-    const child = spawn(command, commandArguments, { env: environment, shell: false, stdio })
-    const chunks: Buffer[] = []; let bytes = 0; let timedOut = false; let outputLimit = false; let settled = false
-    child.stdout!.on('data', (chunk: Buffer) => { bytes += chunk.length; if (bytes > maximumOutput) { outputLimit = true; child.kill('SIGKILL') } else chunks.push(chunk) })
-    child.once('error', () => { if (!settled) { settled = true; reject(new ReleaseAdapterError('FAILED', phase, 'adapter could not start')) } })
-    child.once('close', code => {
-      if (settled) return; settled = true
-      if (timedOut) reject(new ReleaseAdapterError('TIMEOUT', phase, 'adapter exceeded its deadline'))
-      else if (outputLimit) reject(new ReleaseAdapterError('OUTPUT_LIMIT', phase, 'adapter exceeded its output bound'))
-      else if (code !== 0) reject(new ReleaseAdapterError('FAILED', phase, 'adapter returned a non-zero status'))
-      else resolvePromise(Buffer.concat(chunks).toString('utf8'))
-    })
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, timeoutMs); child.once('close', () => clearTimeout(timer))
-    child.stdin!.end(stdin, 'utf8')
-  })
+  const executableFd = 3 + inherited.length; const interpreterFd = interpreter === undefined ? undefined : executableFd + 1
+  const command = `/proc/self/fd/${interpreterFd ?? executableFd}`
+  const commandArguments = interpreter === undefined ? [...args] : [`/proc/self/fd/${executableFd}`, ...args]
+  const stdio: Array<'pipe' | 'ignore' | number> = ['pipe', 'pipe', 'ignore', ...inherited.map(handle => handle.fd), executable.handle.fd]
+  if (interpreter !== undefined) stdio.push(interpreter.handle.fd)
+  try {
+    return await executeControlledProcess({ command, args: commandArguments, env: environment, stdio,
+      stdin, timeoutMs, maximumOutput })
+  } catch (error) {
+    if (!(error instanceof ControlledProcessError)) throw error
+    if (error.code === 'TIMEOUT') throw new ReleaseAdapterError('TIMEOUT', phase, 'adapter exceeded its deadline')
+    if (error.code === 'OUTPUT_LIMIT') throw new ReleaseAdapterError('OUTPUT_LIMIT', phase, 'adapter exceeded its output bound')
+    throw new ReleaseAdapterError('FAILED', phase, error.code === 'NON_ZERO'
+      ? 'adapter returned a non-zero status' : 'adapter could not be safely reclaimed')
+  }
 }
 
 async function assertPinnedAdapterCapabilities(executable: OpenTrustedExecutable, interpreter: OpenTrustedExecutable | undefined,

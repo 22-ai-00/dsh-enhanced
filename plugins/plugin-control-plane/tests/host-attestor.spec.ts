@@ -20,8 +20,11 @@ vi.mock('node:fs/promises', async importOriginal => {
 const originalPlatform = process.platform
 const roots: string[] = []
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
+const emulatedPid = 2_147_483_647
+let restoreProcessKill: (() => void) | undefined
 
 afterEach(async () => {
+  restoreProcessKill?.(); restoreProcessKill = undefined
   Object.defineProperty(process, 'platform', { value: originalPlatform })
   vi.mocked(spawn).mockReset()
   vi.mocked(realpath).mockReset()
@@ -61,6 +64,11 @@ async function emulateLinuxProcfs(): Promise<void> {
   Object.defineProperty(process, 'platform', { value: 'linux' })
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')
   vi.mocked(realpath).mockImplementation(async path => path === '/proc/self/fd' ? '/proc/self/fd' : actual.realpath(path))
+  const kill = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+    if (pid !== -emulatedPid || signal !== 0) throw new Error('unexpected signal in descriptor-only fixture')
+    throw Object.assign(new Error('emulated process group has exited'), { code: 'ESRCH' })
+  })
+  restoreProcessKill = () => kill.mockRestore()
 }
 
 describe('Host attestor descriptor lifetime', () => {
@@ -81,9 +89,11 @@ describe('Host attestor descriptor lifetime', () => {
         descriptors.add(interpreterFd)
         expect(descriptorText(interpreterFd)).toBe('trusted interpreter\n')
       }
-      const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), kill: vi.fn() })
+      const child = Object.assign(new EventEmitter(), { pid: emulatedPid, stdin: new PassThrough(), stdout: new PassThrough(), kill: vi.fn() })
       queueMicrotask(() => {
         child.stdout.emit('data', Buffer.from(calls === 1 ? 'test-1\n' : 'not-json'))
+        child.stdout.emit('end')
+        child.emit('exit', 0)
         child.emit('close', 0)
       })
       return child as unknown as ChildProcess
@@ -101,7 +111,7 @@ describe('Host attestor descriptor lifetime', () => {
     let selectedReplacement = false
     vi.mocked(spawn).mockImplementation(((command: string, _args: string[], options: { stdio: unknown[] }) => {
       calls += 1
-      const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), kill: vi.fn() })
+      const child = Object.assign(new EventEmitter(), { pid: emulatedPid, stdin: new PassThrough(), stdout: new PassThrough(), kill: vi.fn() })
       void (async () => {
         await Promise.resolve()
         if (calls === 1) {
@@ -113,11 +123,14 @@ describe('Host attestor descriptor lifetime', () => {
           selectedReplacement = selected.includes('replacement executable')
         }
         child.stdout.emit('data', Buffer.from(calls === 1 ? 'test-1\n' : '{}'))
+        child.stdout.emit('end')
+        child.emit('exit', 0)
         child.emit('close', 0)
       })()
       return child as unknown as ChildProcess
     }) as typeof spawn)
     await expect(invokeConfiguredHostAttestor(value.trust, value.request)).rejects.toBeDefined()
+    expect(calls).toBe(2)
     expect(selectedReplacement).toBe(false)
   })
 
