@@ -19,9 +19,12 @@ remain recorded. The successful run configured the private `low` probe, but
 effective per-request reasoning selection was not recorded. Changed settings
 and tool contracts prevent a controlled improvement claim.
 
-This result ends at a pending plan. Its source is retained for review and is
-not yet integrated into `personal-memory` on `dev`. Integration followups are
-an explicit old-writer stop requirement and a stronger reopen regression test.
+This run ended at a pending plan. Its implementation was subsequently
+[integrated after review](evidence/personal-memory-integration-2026-09-19.json)
+with an explicit old-writer stop requirement, a stronger reopen test and a
+transaction failure/retry test. The tokenizer and migration implementation
+bytes match the accepted Day1 candidate; these owner followups change only
+documentation and tests. The original Control Plane plan was not self-approved.
 Publication, activation, process-crash recovery and later-task reuse remain
 outside this evidence.
 

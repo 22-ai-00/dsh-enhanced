@@ -45,7 +45,7 @@ dsh --profile web --dump-config
 
 ## 行为与工具
 
-- `memory_search`：显式检索当前 agent 可见的四个域；ASCII 与中文 unigram/bigram 均可召回，排序和 tie-break 确定，读取不更新任何计数。
+- `memory_search`：显式检索当前 agent 可见的四个域；ASCII 词元（含紧邻 CJK 的 Latin 词元）与相邻 CJK unigram/bigram 均可召回；标点、空白或 Latin 文本两侧的 CJK 不会组成人工 bigram。排序和 tie-break 确定，读取不更新任何计数。
 - `memory_search_confirmed`：面向后台复盘的窄查询；服务端固定只返回非敏感、`user-confirmed` 的 `instruction` / `preference`，调用方不能通过参数放宽 trust、kind 或 sensitivity。
 - `memory_manage`：只创建 add/replace/remove 提案，返回完整 diff、proposal id、TTL 和版本；它没有直接提交路径，也不接受模型提供 principal 或 TTL。principal、workspace 和飞书投递 binding 必须来自当前 Agent 的 authenticated Delivery owner route，TTL 来自可信配置；没有活动绑定时 fail closed。
 - `ctx.personalMemory.decideProposal(...)`：供绑定 owner 的可信通道/UI 决定提案。principal、版本、决定内容和理由均受幂等/CAS 约束。
@@ -93,6 +93,10 @@ JSONL 冷恢复只使用先前 owner 绑定的索引，不按新 owner 回填旧
 ## 数据与一致性
 
 SQLite 使用 WAL、`busy_timeout`、外键、FULL synchronous 和前向 schema 版本；目录为 `0700`，数据库为 `0600`。记录包含 stable id、内容哈希、provenance、trust、confidence、sensitivity、TTL、supersedes、可选 knowledge 和 version。replace/remove 在批准后重新读取 target version 并以 CAS 提交；审批与内存位于两个数据库，若进程恰好在 policy 批准后退出，可用原决定安全重放。并发变化会把提案标为 `conflicted`，不会覆盖新值。
+
+Schema 版本仍为 6；词法索引版本独立记录在 `schema_meta` 的 `tokenizer-index-version`。重新打开旧库时会在启动迁移事务内按当前 tokenizer 仅重建 active 记录的 `memory_tokens`（内容加 knowledge 文本），不复活 removed 记录，也不改变 identity、schema 版本或审计数据；每个索引版本只重建一次。
+
+升级前必须停止所有仍会写入同一数据库的旧 Host；受管部署使用安装器已有的 stop/quiescence 屏障，手动部署须确认全部旧 writer 已退出。迁移后不得让旧 tokenizer 再写入此库；回退旧版本须按数据恢复流程使用匹配版本的数据库备份。
 
 创建提案时先在 Memory 数据库持久化 creation intent，再调用 Policy 原子创建 proposal + dispatch，最后在
 同一个本地事务 attach Policy ID 并删除 intent。任一步崩溃后，reconcile 都能从 intent 自动续做，不依赖

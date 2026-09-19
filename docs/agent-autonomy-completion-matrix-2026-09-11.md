@@ -17,7 +17,9 @@
 
 ## 已交付能力与整包验收
 
-2026-09-19 真实持久源码提案：Day1 在 189.9 秒内提交 personal-memory 修复候选，队列跨 Cordis Context 重建后，由没有 Agent 服务的原生 Automations Host executor 完成约 17.5 分钟的离线仓库检查与打包，单次执行形成待审批计划并清理容器。容器 5,860 passed / 44 skipped；独立验收由基线 7 项缺陷失败变为候选 16/16 通过。Host 工具能力检查为 5,872 passed / 44 skipped、35 个 dry-run pack；精确源码 edits 保留同一读取 commit、字节限制和完整文件控制面协议。详见[运行证据与边界](live-durable-source-proposal.md)。候选尚未整合进 dev，未批准或发布；该运行配置了私有 low 探针，但未记录请求实际档位，不证明档位执行、同预算收益、运行中进程崩溃恢复或后续任务复用，WP16、WP18 状态不变。
+2026-09-19 真实持久源码提案：Day1 在 189.9 秒内提交 personal-memory 修复候选，队列跨 Cordis Context 重建后，由没有 Agent 服务的原生 Automations Host executor 完成约 17.5 分钟的离线仓库检查与打包，单次执行形成待审批计划并清理容器。容器 5,860 passed / 44 skipped；独立验收由基线 7 项缺陷失败变为候选 16/16 通过。Host 工具能力检查为 5,872 passed / 44 skipped、35 个 dry-run pack；精确源码 edits 保留同一读取 commit、字节限制和完整文件控制面协议。详见[运行证据与边界](live-durable-source-proposal.md)。该验收以待审批计划为终点，未批准或发布；该运行配置了私有 low 探针，但未记录请求实际档位，不证明档位执行、同预算收益、运行中进程崩溃恢复或后续任务复用，WP16、WP18 状态不变。
+
+2026-09-19 memory 修复整合：经开发复核，将上述 Day1 候选的 tokenizer 与事务索引迁移实现原样整合；保留 schema 6，独立记录索引版本。补充了旧 writer 停止/数据库回退前提、重开不重复重建，以及插入失败时回滚并可重试的测试。沿用已有安装器与 Cordis 停止/释放流程。来源逐文件摘要、独立验收复用依据和完整检查结果见[整合证据](evidence/personal-memory-integration-2026-09-19.json)。这是受授权的仓库代码整合，原 Control Plane 计划仍为历史待审批记录，未执行模型自审批、发布或生产启用；WP16、WP18 状态不变。
 
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |
 | --- | --- | --- |
