@@ -660,6 +660,62 @@ exit 0
     expect((await lstat(fresh.worktree)).isDirectory()).toBe(true)
   }, 60_000)
 
+  it('binds source inspection to preparation and rejects stale HEAD before creating a worktree', async () => {
+    const value = await trustFixture()
+    const service = makeService(value)
+    await installFakePnpm(value.root)
+    const source = await modifyRepositoryFixture(value.root)
+    const inspection = await service.inspectSource({ repository: source.repository, name: 'health-helper', paths: ['src/index.ts'] })
+    const gap = await recordGap(service, 'inspected')
+    const input = { gapId: gap.id, name: 'health-helper', repository: source.repository,
+      expectedBaseCommit: inspection.baseCommit, files: [{ path: 'src/index.ts', content: '// replacement\n' }], idempotencyKey: 'source:inspected' }
+    execFileSync('/usr/bin/git', ['-C', source.repository, 'commit', '--allow-empty', '-m', 'new head'])
+    await expect(service.prepareModifySourcePlan(input)).rejects.toThrow('stale')
+    expect(await linkedWorktrees(source.repository, process.env)).toEqual([source.repository])
+    expect(service.gaps(50).find(row => row.id === gap.id)?.candidateId).toBeUndefined()
+    const fresh = await service.inspectSource({ repository: source.repository, name: 'health-helper', paths: ['src/index.ts'] })
+    const plan = await service.prepareModifySourcePlan({ ...input, expectedBaseCommit: fresh.baseCommit })
+    expect(plan.baseCommit).toBe(fresh.baseCommit)
+    expect(plan.status).toBe('pending-approval')
+    expect(execFileSync('/usr/bin/git', ['-C', plan.worktree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(fresh.baseCommit)
+  })
+
+  it('starts the inspection deadline before awaiting a stalled authority fence', async () => {
+    const value = await trustFixture()
+    const service = makeService(value)
+    const deadline = new AbortController()
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      expect(ms).toBe(15_000)
+      return deadline.signal
+    })
+    const inspection = service.inspectSource({ repository: value.root, name: 'health-helper', paths: [],
+      assertCurrent: () => new Promise<void>(() => {}) }).catch(error => error)
+    expect(timeout).toHaveBeenCalledOnce()
+    await new Promise(resolve => setImmediate(resolve))
+    deadline.abort(new Error('inspection deadline'))
+    expect((await inspection).message).toBe('inspection deadline')
+    await contexts.pop()!.fiber.dispose()
+  })
+
+  it('tracks inspection from admission through async Fiber teardown', async () => {
+    const value = await trustFixture()
+    const service = makeService(value)
+    const ctx = contexts.pop()!
+    let release!: () => void
+    const paused = new Promise<void>(resolve => { release = resolve })
+    const input = { repository: value.root, name: 'health-helper', paths: [], assertCurrent: () => paused }
+    const inspecting = service.inspectSource(input).catch(error => error)
+    await expect(service.inspectSource(input)).rejects.toThrow('still draining')
+    let disposed = false
+    const disposing = ctx.fiber.dispose().then(() => { disposed = true })
+    await new Promise(resolve => setImmediate(resolve))
+    await disposing
+    expect(disposed).toBe(true)
+    release()
+    expect(await inspecting).toBeInstanceOf(Error)
+    await expect(service.inspectSource(input)).rejects.toThrow()
+  })
+
   it('rejects concurrent preparations and drains worktree cleanup before Fiber disposal completes', async () => {
     const value = await trustFixture()
     const service = makeService(value)

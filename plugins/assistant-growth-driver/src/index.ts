@@ -107,17 +107,23 @@ export class AssistantGrowthDriverService extends Service {
       // when the control plane is absent or is being replaced.
       ctx.inject(['pluginControlPlane' as never], sourceCtx => {
         const abort = new AbortController()
-        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan'> & { gaps(limit: number): readonly GrowthSourceGap[]; canPrepareSource?: () => boolean }
+        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSource'> & { gaps(limit: number): readonly GrowthSourceGap[]; canPrepareSource?: () => boolean }
         const current = (): SourceService => {
           abort.signal.throwIfAborted()
           return sourceCtx.get('pluginControlPlane' as never) as unknown as SourceService
         }
         const provider = current()
-        if (typeof provider.canPrepareSource !== 'function' || !provider.canPrepareSource()) return
+        if (typeof provider.canPrepareSource !== 'function' || !provider.canPrepareSource() || typeof provider.inspectSource !== 'function') return
         const binding = {
           signal: abort.signal,
           port: {
             listOpenGaps: () => current().gaps(50),
+            inspectSource: async (input: Parameters<GrowthSourcePlanePort['inspectSource']>[0]) => {
+              const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
+              return current().inspectSource({ ...input, signal,
+                assertCurrent: () => { signal.throwIfAborted(); current(); input.assertCurrent() },
+              })
+            },
             prepareModifySourcePlan: async (input: Parameters<GrowthSourcePlanePort['prepareModifySourcePlan']>[0]) => {
               const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
               return current().prepareModifySourcePlan({ ...input, signal,

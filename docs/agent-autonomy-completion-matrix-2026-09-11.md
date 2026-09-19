@@ -7,6 +7,8 @@
 2026-09-19 源码提案更新：Control Plane 新增既有插件的 `modify` 待审批路径，使用独立 worktree、不可变 Git 快照和无 Host 挂载的离线 Docker 构建，检查摘要与构建证据绑定到 owner 审批 digest。Growth Driver 通过 Cordis 可选注入接入，只在显式开启且构建器已配置时增加 gap 枚举/源码提案两个工具；仍不提供批准、发布或生产启用工具。覆盖服务替换、卸载取消、并发拒绝、数据库迁移和失败不入库；[真实本地 Docker 探针](evidence/source-preparation-docker-2026-09-19.json)验证合成包的离线 install/check/pack 与无 Host 路径/凭据边界。该证据不代表真实模型生成补丁、完整仓库隔离构建、远程发布或生产启用，WP16、WP18 状态保持待做。
 
 
+2026-09-19 源码上下文更新：Growth Driver 增加受限 `plugin_source_read`，先读取目标插件的已提交文本，再把修改绑定到 Host 缓存的同一 Git commit；既有文件未读或 HEAD 已变更均拒绝准备。Control Plane 的读取子进程、异步检查和完整请求受取消与截止时间约束，Fiber 卸载等待收尾；[Git 读取与真实 Docker 构建组合探针](evidence/source-context-docker-2026-09-19.json)确认读取版本与构建 base 一致。此阶段模型接线仍由 scripted Agent 测试证明，尚无真实模型源码改进或生产发布证据。
+
 ## 已交付能力与整包验收
 
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |

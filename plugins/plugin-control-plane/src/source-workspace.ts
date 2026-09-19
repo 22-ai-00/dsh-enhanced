@@ -83,10 +83,12 @@ export interface RunLocalOptions {
   capture?: boolean
   maximumOutput?: number
   timeoutMs?: number
+  signal?: AbortSignal
 }
 
 export interface RunLocalResult {
   stdout: string
+  stdoutBuffer: Buffer
   stderrTail: string
   durationMs: number
   logDigest: string
@@ -99,6 +101,7 @@ async function runLocalBounded(command: 'git' | 'pnpm', args: readonly string[],
   const maximumOutput = options.maximumOutput ?? DEFAULT_COMMAND_OUTPUT_BYTES
   const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS
   return new Promise((resolvePromise, reject) => {
+    options.signal?.throwIfAborted()
     const child = spawn(executable, args, { cwd, env: environment, stdio: ['ignore', 'pipe', 'pipe'], shell: false })
     const stdout: Buffer[] = []
     const stderrChunks: Buffer[] = []
@@ -118,14 +121,17 @@ async function runLocalBounded(command: 'git' | 'pnpm', args: readonly string[],
       }
     })
     const started = Date.now()
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, timeoutMs)
-    child.once('error', () => { clearTimeout(timer); reject(new ControlPlaneCliError('EXECUTOR_FAILED', `local ${command} could not start`)) })
+    const cancel = (): void => { child.kill('SIGKILL') }
+    const timer = setTimeout(() => { timedOut = true; cancel() }, timeoutMs)
+    options.signal?.addEventListener('abort', cancel, { once: true })
+    child.once('error', () => { clearTimeout(timer); options.signal?.removeEventListener('abort', cancel); reject(new ControlPlaneCliError('EXECUTOR_FAILED', `local ${command} could not start`)) })
     child.once('close', code => {
-      clearTimeout(timer)
+      clearTimeout(timer); options.signal?.removeEventListener('abort', cancel)
       const durationMs = Date.now() - started
-      const stdoutText = Buffer.concat(stdout).toString('utf8')
+      const stdoutBuffer = Buffer.concat(stdout); const stdoutText = stdoutBuffer.toString('utf8')
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8').slice(-COMMAND_TAIL_BYTES)
       const logDigest = createHash('sha256').update(stdoutText).update('\0').update(stderrTail).digest('hex')
+      if (options.signal?.aborted) { reject(options.signal.reason); return }
       if (timedOut) {
         reject(new ControlPlaneCliError('EXECUTOR_TIMEOUT', `local ${command} ${JSON.stringify(args[0] ?? '')} exceeded its ${timeoutMs}ms deadline (log ${logDigest})`))
         return
@@ -139,9 +145,14 @@ async function runLocalBounded(command: 'git' | 'pnpm', args: readonly string[],
           `local ${command} ${JSON.stringify(args[0] ?? '')} exited ${code} (log ${logDigest})${stderrTail === '' ? '' : `: ${stderrTail.trimEnd()}`}`))
         return
       }
-      resolvePromise({ stdout: stdoutText, stderrTail, durationMs, logDigest })
+      resolvePromise({ stdout: stdoutText, stdoutBuffer, stderrTail, durationMs, logDigest })
     })
   })
+}
+
+export async function runLocalBuffer(command: 'git' | 'pnpm', args: readonly string[], cwd: string,
+  environment: NodeJS.ProcessEnv, options: RunLocalOptions = {}): Promise<Buffer> {
+  return (await runLocalBounded(command, args, cwd, environment, { ...options, capture: true })).stdoutBuffer
 }
 
 export async function runLocalCommand(command: 'git' | 'pnpm', args: readonly string[], cwd: string,

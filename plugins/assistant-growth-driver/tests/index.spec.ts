@@ -754,17 +754,27 @@ describe('opt-in plugin source proposals', () => {
   const sourceArgs = { gap_id: 'gap-1', plugin_name: 'assistant-health', files: [{ path: 'README.md', content: 'proposed docs' }] }
   const sourceTurns = [
     { name: 'plugin_source_gaps', args: {} },
+    { name: 'plugin_source_read', args: { gap_id: 'gap-1', plugin_name: 'assistant-health', paths: [] } },
+    { name: 'plugin_source_read', args: { gap_id: 'gap-1', plugin_name: 'assistant-health', paths: ['README.md'] } },
     { name: 'plugin_source_prepare', args: sourceArgs },
   ]
   const options = (root: string) => ({ enabled: true, repository: root, maxPlansPerWake: 1 })
   function sourceService() {
     return {
       canPrepareSource: () => true,
+      inspectSource: vi.fn(async (input: Parameters<GrowthSourcePlanePort['inspectSource']>[0]) => {
+        input.signal.throwIfAborted()
+        input.assertCurrent()
+        return { name: input.name, baseCommit: 'c'.repeat(40),
+          files: [{ path: 'README.md', bytes: 8 }, { path: 'src/index.ts', bytes: 8 }],
+          contents: input.paths.map(path => ({ path, content: 'original' })),
+        }
+      }),
       gaps: vi.fn(() => [{ id: 'gap-1', capability: 'health', context: 'owner gap', status: 'open' as const, createdAt: 1 }]),
       prepareModifySourcePlan: vi.fn(async (input: Parameters<GrowthSourcePlanePort['prepareModifySourcePlan']>[0]) => {
         input.signal.throwIfAborted()
         input.assertCurrent()
-        return { id: 'pending-source-1', status: 'pending-approval', name: input.name, mode: 'modify',
+        return { id: 'pending-source-1', status: 'pending-approval', name: input.name, mode: 'modify', baseCommit: input.expectedBaseCommit,
           sourceCheck: { treeDigest: 'a'.repeat(64), patchDigest: 'b'.repeat(64), checkedAt: 1 } }
       }),
     }
@@ -816,17 +826,95 @@ describe('opt-in plugin source proposals', () => {
     await service.wake()
     expect(service.health().outcome).toBe('ran')
     expect(service.health().run?.sourceProposals).toEqual({ prepared: 1, rejected: 0 })
-    expect(adapter.surfaces[0]).toHaveLength(6)
+    expect(adapter.surfaces[0]).toHaveLength(7)
     expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
     expect(source.prepareModifySourcePlan.mock.calls[0]?.[0]).toMatchObject({
       gapId: 'gap-1', name: 'assistant-health', repository: h.root, files: sourceArgs.files,
-      offline: true, ttlMs: 86_400_000, timeoutMs: 180_000,
+      offline: true, ttlMs: 86_400_000, timeoutMs: 180_000, expectedBaseCommit: 'c'.repeat(40),
     })
+    expect(source.inspectSource.mock.calls[0]?.[0]).toMatchObject({ repository: h.root, name: 'assistant-health', paths: [] })
+    expect(source.inspectSource.mock.calls[0]?.[0].baseCommit).toBeUndefined()
+    expect(source.inspectSource.mock.calls[1]?.[0]).toMatchObject({ baseCommit: 'c'.repeat(40), paths: ['README.md'] })
     expect(tableCounts(h)).toEqual({ candidates: 0, definitions: 0, runs: 0 })
   })
 
+
+  it('keeps the four-tool baseline for an older provider without source inspection', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    h.ctx.provide('pluginControlPlane' as never, { ...sourceService(), inspectSource: undefined } as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(adapter.surfaces[0]).toHaveLength(4)
+  })
+
+  it.each(['no-read', 'manifest-only', 'unread-file'])('rejects preparation without relevant inspected content: %s', async mode => {
+    const turns = mode === 'no-read' ? [sourceTurns[0]!, sourceTurns[3]!]
+      : mode === 'manifest-only' ? [sourceTurns[0]!, sourceTurns[1]!, sourceTurns[3]!]
+        : [...sourceTurns.slice(0, 3), { name: 'plugin_source_prepare', args: { ...sourceArgs, files: [{ path: 'src/index.ts', content: 'replacement' }] } }]
+    const h = await mount({ adapter: new ScriptedAdapter(turns) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = sourceService()
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 1 })
+  })
+
+  it('does not accept a changed base from a later source read', async () => {
+    const h = await mount({ adapter: new ScriptedAdapter(sourceTurns) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = sourceService()
+    let reads = 0
+    source.inspectSource.mockImplementation(async input => ({ name: input.name, baseCommit: (++reads === 1 ? 'c' : 'd').repeat(40),
+      files: [{ path: 'README.md', bytes: 8 }], contents: input.paths.map(path => ({ path, content: 'original' })) }))
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(source.inspectSource).toHaveBeenCalledTimes(2)
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+  })
+
+  it.each(['../secret.ts', '.env', 'lib/index.js', 'src/../../other.ts'])('rejects source read path %s before calling its provider', async path => {
+    const h = await mount({ adapter: new ScriptedAdapter([sourceTurns[0]!, { name: 'plugin_source_read',
+      args: { gap_id: 'gap-1', plugin_name: 'assistant-health', paths: [path] } }]) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = sourceService()
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(source.inspectSource).not.toHaveBeenCalled()
+  })
+
+  it('cancels source reads when the optional provider is removed', async () => {
+    const h = await mount({ adapter: new ScriptedAdapter(sourceTurns) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = sourceService()
+    let signal: AbortSignal | undefined
+    source.inspectSource.mockImplementation(input => new Promise((_resolve, reject) => {
+      signal = input.signal
+      input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })
+    }))
+    const provider = h.ctx.plugin({ name: 'source-inspection-fixture', apply: ctx => { ctx.provide('pluginControlPlane' as never, source as never) } })
+    await provider
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    const wake = service.wake()
+    await vi.waitFor(() => expect(signal).toBeDefined())
+    await provider.dispose()
+    await wake
+    expect(signal?.aborted).toBe(true)
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+  })
+
   it('caps attempts even after a build rejection and never calls approval/release capabilities', async () => {
-    const adapter = new ScriptedAdapter([...sourceTurns, sourceTurns[1]!])
+    const adapter = new ScriptedAdapter([...sourceTurns, sourceTurns[3]!])
     const h = await mount({ adapter })
     process.env.SUPER_RELAY_API_KEY = 'test-key'
     const source = sourceService()
@@ -881,7 +969,7 @@ describe('opt-in plugin source proposals', () => {
     await new Promise(resolve => setImmediate(resolve))
     adapter.reset()
     await service.wake()
-    expect(adapter.surfaces.at(-1)).toHaveLength(6)
+    expect(adapter.surfaces.at(-1)).toHaveLength(7)
     expect(replacement.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
     expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
     expect(service.health().run?.sourceProposals).toEqual({ prepared: 1, rejected: 0 })

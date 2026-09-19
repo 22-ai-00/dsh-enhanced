@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { inspectSourceContext } from '../../plugins/plugin-control-plane/lib/source-context.js'
 import { runDockerPreparedChecks } from '../../plugins/plugin-control-plane/lib/source-build.js'
 
 const image = process.env.DSH_SOURCE_BUILD_IMAGE
@@ -34,6 +35,10 @@ try {
   git('add', '--all'); git('-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture')
   const baseCommit = git('rev-parse', 'HEAD')
   await writeFile(join(pluginRoot, 'index.js'), 'export const patched = true\n')
+  const inspected = await inspectSourceContext({ repository, name: 'smoke-helper', paths: ['index.js'], baseCommit,
+    environment: env, signal: AbortSignal.timeout(15_000), assertCurrent: async () => {} })
+  assert.equal(inspected.baseCommit, baseCommit)
+  assert.equal(inspected.contents[0].content, 'export const patched = false\n', 'inspection must read the committed base, not dirty candidate bytes')
   const config = { dockerPath: '/usr/bin/docker', image, timeoutMs: 60_000,
     memoryMiB: 512, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 262_144 }
   const result = await runDockerPreparedChecks({ config, worktree: repository, baseCommit, name: 'smoke-helper',
@@ -46,8 +51,8 @@ try {
   const containers = execFileSync('/usr/bin/docker', ['ps', '-aq', '--filter', 'name=dsh-source-prepare-'], { encoding: 'utf8' }).trim()
   assert.equal(containers, '', 'source preparation containers must be removed')
   const evidence = { kind: 'real-local-docker-source-preparation-smoke', image, passed: true,
-    checkedAt: new Date().toISOString(), baseCommit, result,
-    assertions: ['nonroot', 'no-host-path', 'no-git-metadata', 'no-docker-socket', 'no-forwarded-secret', 'readonly-root', 'patched-input-checked', 'container-removed'],
+    checkedAt: new Date().toISOString(), baseCommit, inspectedBaseCommit: inspected.baseCommit, result,
+    assertions: ['committed-source-read', 'read-base-matches-build-base', 'nonroot', 'no-host-path', 'no-git-metadata', 'no-docker-socket', 'no-forwarded-secret', 'readonly-root', 'patched-input-checked', 'container-removed'],
     limits: ['synthetic local package; no full repository build', 'no real model or owner route', 'no registry publication or production activation'] }
   if (process.env.DSH_SOURCE_BUILD_EVIDENCE) await writeFile(resolve(process.env.DSH_SOURCE_BUILD_EVIDENCE), JSON.stringify(evidence, null, 2) + '\n')
   process.stdout.write(JSON.stringify(evidence, null, 2) + '\n')
