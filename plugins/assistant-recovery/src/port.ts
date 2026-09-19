@@ -15,7 +15,7 @@ import {
   type StoredRule,
   toStrategyAdviceSignal,
 } from '@dsh-enhanced/assistant-evolution'
-import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
+import type { AssistantGoalsAdvicePort } from './goals-port.js'
 import type {
   AssistantHealthReport,
   AssistantHealthService,
@@ -107,7 +107,7 @@ export interface RecoveryRuntimePorts {
     | 'hostGoalDefinitionEpisodes'
     | 'hostListRules'
     | 'hostRollbackOne'>
-  goals: Pick<AssistantGoalsService, 'hostSummarizeAdviceByDefinition'>
+  goals: AssistantGoalsAdvicePort
   preference: Pick<PreferenceLearningService,
     'health' | 'hostActivationCandidate' | 'hostActivateOne' | 'hostMaintainOne' | 'hostReview'> & {
     hostOwnerFence(input: {

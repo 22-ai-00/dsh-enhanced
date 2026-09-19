@@ -24,6 +24,7 @@ import {
 } from '../src/source-workspace.ts'
 import { PluginControlPlaneService } from '../src/service.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
+import type { SourceBuildConfig } from '../src/source-build.ts'
 import type { ApprovalReceipt, PluginSourcePlan } from '../src/types.ts'
 
 const installationId = '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00'
@@ -231,7 +232,7 @@ class ToolsStub extends Service {
   register(): void { /* the control-plane tool registrar only calls ctx.tools.register */ }
 }
 
-function makeService(value: TrustFixture): PluginControlPlaneService {
+function makeService(value: TrustFixture, sourceBuild: Partial<SourceBuildConfig> = {}): PluginControlPlaneService {
   const ctx = new Context(); contexts.push(ctx)
   new ToolsStub(ctx)
   return new PluginControlPlaneService(ctx, {
@@ -239,7 +240,7 @@ function makeService(value: TrustFixture): PluginControlPlaneService {
     statePath: value.statePath,
     trustPath: value.trustPath,
     sourceBuild: { dockerPath: join(value.root, 'bin', 'docker'), image: 'fixture/source-build@sha256:' + 'a'.repeat(64),
-      timeoutMs: 180_000, memoryMiB: 256, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 65_536 },
+      timeoutMs: 180_000, memoryMiB: 256, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 65_536, ...sourceBuild },
   })
 }
 
@@ -495,6 +496,28 @@ exit 0
       repository: source.repository, files: [{ path: 'src/index.ts', content: 'x' }],
       idempotencyKey: 'source:modify:closed' })).rejects.toMatchObject({ code: 'SOURCE_BOUNDARY' } as Partial<ControlPlaneCliError>)
   }, 60_000)
+
+  it('persists full Docker evidence for an owner-selected repository build and enforces its caller ceiling', async () => {
+    const value = await trustFixture()
+    const service = makeService(value, { profile: 'repository', timeoutMs: 1_800_000 })
+    const shell = await installFakePnpm(value.root)
+    const source = await modifyRepositoryFixture(value.root)
+    const gap = await recordGap(service, 'repository-budget')
+    const input = { gapId: gap.id, name: 'health-helper', repository: source.repository,
+      files: [{ path: 'src/index.ts', content: '// owner repository build\n' }], idempotencyKey: 'source:repository-budget' }
+    await expect(service.prepareModifySourcePlan({ ...input, timeoutMs: 1_800_001 }))
+      .rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    const plan = await withEnvironment({ DSH_HOME: value.dshHome, PATH: `${shell.binDir}${delimiter}${process.env.PATH ?? ''}` },
+      () => service.prepareModifySourcePlan({ ...input, timeoutMs: 1_800_000 }))
+    expect(plan.status).toBe('pending-approval')
+    const args = plan.preparedEvidence!.commands[0]!.args
+    expect(args.length).toBeGreaterThan(32)
+    expect(args).toContain('CI=true')
+    expect(args.some(arg => arg.startsWith('dsh.source.tree='))).toBe(true)
+    expect(args.at(-1)).toContain('checked check pnpm check')
+    const store = new ControlPlaneStore({ path: value.state })
+    try { expect(store.getSourcePlan(plan.id).preparedEvidence).toEqual(plan.preparedEvidence) } finally { store.close() }
+  }, 30_000)
 
   it('advances a clean matching approved modify plan to ready via owner CLI verify-prepared', async () => {
     const value = await trustFixture()

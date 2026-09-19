@@ -175,9 +175,10 @@ export class PluginControlPlaneService extends Service {
     if (!Number.isSafeInteger(ttlMs) || ttlMs < 900_000 || ttlMs > 86_400_000) {
       throw new ControlPlaneCliError('INVALID_ARGUMENT', 'ttlMs must be an integer within 900000..86400000')
     }
+    const maximumTimeoutMs = this.config.sourceBuild?.profile === 'repository' ? 1_800_000 : 240_000
     const timeoutMs = input.timeoutMs ?? 180_000
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > 240_000) {
-      throw new ControlPlaneCliError('INVALID_ARGUMENT', 'timeoutMs must be an integer within 60000..240000')
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 60_000 || timeoutMs > maximumTimeoutMs) {
+      throw new ControlPlaneCliError('INVALID_ARGUMENT', `timeoutMs must be an integer within 60000..${maximumTimeoutMs}`)
     }
     const offline = input.offline ?? true
     const environment = inheritedEnvironment(trust)

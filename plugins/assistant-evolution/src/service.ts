@@ -15,10 +15,7 @@ import type {
   TrustedDeliveryPresentationProducer,
   TrustedDeliveryPresentationRegistration,
 } from '@dsh-enhanced/assistant-delivery'
-// Type-only, structural dependency (mirrors assistant-recovery): the live
-// assistant-goals service is resolved through the Context at runtime, so the
-// evolution package gains no build/runtime dependency edge and no import cycle.
-import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
+import type { AssistantGoalsAdvicePort } from './goals-port.js'
 import type {
   ApprovalDispatchRoute,
   ApprovalDispatchRouteV2,
@@ -434,7 +431,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
    * for goal-definition adoption drafts. Resolved dynamically (never a static
    * inject) so evolution keeps no dependency/ordering edge on the goals plugin.
    */
-  private goals: Pick<AssistantGoalsService, 'hostSummarizeAdviceByDefinition'> | undefined
+  private goals: AssistantGoalsAdvicePort | undefined
   private readonly presentationProducerGeneration = `assistant-evolution-presentation:${randomUUID()}`
   private presentationSink: DeliveryPresentationSinkRegistration | undefined
   private active = true
@@ -471,8 +468,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
     // deployment without assistant-goals must still activate (those drafts then
     // fail closed to absent advice instead of breaking the service).
     ctx.inject(['assistantGoals'], goalsCtx => {
-      const goals = goalsCtx.get('assistantGoals') as
-        Pick<AssistantGoalsService, 'hostSummarizeAdviceByDefinition'>
+      const goals = goalsCtx.get('assistantGoals') as AssistantGoalsAdvicePort
       this.goals = goals
       return () => {
         if (this.goals === goals) this.goals = undefined

@@ -5,7 +5,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/p
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { runDockerPreparedChecks, type SourceBuildConfig } from '../src/source-build.ts'
+import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from '../src/source-build.ts'
 
 const indices = vi.hoisted(() => [] as string[])
 vi.mock('node:fs/promises', async importOriginal => {
@@ -20,7 +20,7 @@ vi.mock('node:fs/promises', async importOriginal => {
 const roots: string[] = []
 afterEach(async () => { indices.length = 0; for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 const marker = `printf 'DSH_PREPARED_PACK\\thelper-1.0.0-rc.1.tgz\\t13\\t${'d'.repeat(64)}\\tv24.0.0\\t11.7.0\\n'`
-async function fixture(run = marker, control = 'exit 0') {
+async function fixture(run = marker, control = 'exit 0', override: Partial<SourceBuildConfig> = {}, version = "printf '%s\\n' '29.4.1/linux/amd64'") {
   const root = await mkdtemp(join(tmpdir(), 'source-builder-test-')); roots.push(root)
   const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', 'helper')
   await mkdir(plugin, { recursive: true })
@@ -32,10 +32,10 @@ async function fixture(run = marker, control = 'exit 0') {
   const baseCommit = git('rev-parse', 'HEAD')
   await writeFile(join(plugin, 'index.js'), 'new')
   const dockerPath = join(root, 'docker')
-  await writeFile(dockerPath, `#!/bin/sh\nif [ "$1" = run ]; then\ncat >/dev/null\n${run}\nelse\n${control}\nfi\n`)
+  await writeFile(dockerPath, `#!/bin/sh\nif [ "$1" = run ]; then\nprintf '%s\\n' "$@" > "$0.args"\ncat >/dev/null\n${run}\nelif [ "$1" = version ]; then\n${version}\nelse\n${control}\nfi\n`)
   await chmod(dockerPath, 0o700)
   const config: SourceBuildConfig = { dockerPath, image: `sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
-    memoryMiB: 512, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 4_096 }
+    memoryMiB: 512, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 4_096, ...override }
   return { root, repository, plugin, dockerPath, config, input: { config, worktree: repository, baseCommit,
     name: 'helper', scope: ['plugins/helper'], environment, signal: new AbortController().signal,
     assertCurrent: async () => {}, preparedAt: Date.now() } }
@@ -46,6 +46,100 @@ it('records the immutable prerelease package version and configured image', asyn
   const result = await runDockerPreparedChecks(f.input)
   expect(result.evidence.pack.version).toBe('1.0.0-rc.1')
   expect(result.evidence.commands[0]?.args).toContain(f.config.image)
+  expect(result.evidence.commands[0]?.args).not.toContain('systempaths=unconfined')
+  expect(result.evidence.commands[0]?.args.some(arg => arg.startsWith('/sys:'))).toBe(false)
+})
+
+it('rejects larger limits unless the owner explicitly selects the repository profile', () => {
+  const base: SourceBuildConfig = { dockerPath: '/usr/bin/docker', image: `sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
+    memoryMiB: 128, cpus: 0.25, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4_096 }
+  expect(() => validateSourceBuildConfig({ ...base, timeoutMs: 240_001 })).toThrow(/configuration is invalid/)
+  expect(() => validateSourceBuildConfig({ ...base, temporaryMiB: 33 })).toThrow(/configuration is invalid/)
+  expect(() => validateSourceBuildConfig({ ...base, profile: 'repo' as never })).toThrow(/configuration is invalid/)
+  expect(() => validateSourceBuildConfig({ ...base, profile: 'repository', timeoutMs: 1_800_000, memoryMiB: 16_384,
+    cpus: 16, pidsLimit: 1_024, workspaceMiB: 8_192, temporaryMiB: 4_096 })).not.toThrow()
+  expect(() => validateSourceBuildConfig({ ...base, profile: 'repository', temporaryMiB: Number.NaN })).toThrow(/configuration is invalid/)
+})
+
+it('passes repository profile resource and deterministic test environment flags to Docker evidence', async () => {
+  const f = await fixture(marker, 'exit 0', { profile: 'repository', timeoutMs: 1_800_000, memoryMiB: 16_384,
+    cpus: 16, pidsLimit: 1_024, workspaceMiB: 8_192, temporaryMiB: 2_048 })
+  const result = await runDockerPreparedChecks(f.input)
+  const argv = await readFile(`${f.dockerPath}.args`, 'utf8')
+  expect(argv).toContain('--memory\n16384m\n')
+  expect(argv).toContain('--cpus\n16\n')
+  expect(argv).toContain('--pids-limit\n1024\n')
+  expect(argv).toContain('/workspace:rw,nosuid,nodev,mode=1777,size=8192m,exec')
+  expect(argv).toContain('/tmp:rw,nosuid,nodev,mode=1777,size=2048m,exec')
+  expect(argv).toContain('CI=true')
+  expect(argv).toContain('VITEST_MAX_WORKERS=1')
+  expect(argv).not.toContain('systempaths=unconfined')
+  expect(result.evidence.commands[0]?.args).toEqual(expect.arrayContaining([
+    '--memory', '16384m', '--cpus', '16', '--pids-limit', '1024',
+    '--env', 'CI=true', '--env', 'VITEST_MAX_WORKERS=1',
+  ]))
+})
+
+it('rejects repository seccomp escalation unless the exact repository configuration is used', () => {
+  const base: SourceBuildConfig = { dockerPath: '/usr/bin/docker', image: `sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
+    memoryMiB: 128, cpus: 0.25, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4_096 }
+  expect(() => validateSourceBuildConfig({ ...base, repositorySandbox: { seccompPath: '/tmp/profile.json' } })).toThrow(/configuration is invalid/)
+  expect(() => validateSourceBuildConfig({ ...base, profile: 'repository', repositorySandbox: { seccompPath: '/tmp/profile.json', extra: true } as never })).toThrow(/configuration is invalid/)
+  expect(() => validateSourceBuildConfig({ ...base, profile: 'repository', repositorySandbox: { seccompPath: 'relative.json' } })).toThrow(/configuration is invalid/)
+})
+
+it('uses only an approved copied repository seccomp profile after exact Docker runtime gating', async () => {
+  const f = await fixture(marker, 'exit 0', { profile: 'repository', repositorySandbox: { seccompPath: join(process.cwd(), 'placeholder') } })
+  const profile = join(f.root, 'repository-seccomp.json')
+  await writeFile(profile, await readFile(new URL('../../../scripts/isolation/source-builder-seccomp.json', import.meta.url)))
+  f.config.repositorySandbox = { seccompPath: profile }
+  const result = await runDockerPreparedChecks(f.input)
+  const argv = await readFile(`${f.dockerPath}.args`, 'utf8')
+  const copied = argv.match(/seccomp=(.+)/u)?.[1]?.trim()
+  expect(copied).toMatch(/dsh-source-build-index-/)
+  expect(copied).not.toBe(profile)
+  expect(argv).toContain(`dsh.source.seccomp.sha256=b1e4b5b709578785bd2aff4a3a344301997571ad0e8ae5747aec176571ddc342`)
+  expect(result.evidence.commands[0]?.args).toContain(`seccomp=${copied}`)
+  expect(result.evidence.commands[0]?.args).toEqual(expect.arrayContaining([
+    'systempaths=unconfined', '/sys:ro,nosuid,nodev,noexec,size=1m',
+    '--cap-drop', 'ALL', '--user', '65534:65534', '--read-only', '--network', 'none', 'no-new-privileges',
+  ]))
+  await expect(lstat(copied!)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('rejects an unapproved Docker runtime before archiving repository source', async () => {
+  const f = await fixture(marker, 'exit 0', { profile: 'repository', repositorySandbox: { seccompPath: join(process.cwd(), 'placeholder') } }, "printf '%s\\n' '29.4.0/linux/amd64'")
+  const profile = join(f.root, 'repository-seccomp.json')
+  await writeFile(profile, await readFile(new URL('../../../scripts/isolation/source-builder-seccomp.json', import.meta.url)))
+  f.config.repositorySandbox = { seccompPath: profile }
+  await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/approved Docker runtime/)
+  await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('rejects a repository seccomp profile whose bytes do not match the approved digest', async () => {
+  const f = await fixture(marker, 'exit 0', { profile: 'repository', repositorySandbox: { seccompPath: join(process.cwd(), 'placeholder') } })
+  const profile = join(f.root, 'repository-seccomp.json')
+  await writeFile(profile, '{"defaultAction":"SCMP_ACT_ALLOW"}\n')
+  f.config.repositorySandbox = { seccompPath: profile }
+  await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/digest is not approved/)
+  await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('cancels a runtime preflight without starting an archive or container', async () => {
+  const f = await fixture(marker, 'exit 0', { profile: 'repository', repositorySandbox: { seccompPath: '/unused/profile.json' } },
+    ': > "$0.version-started"\nexec /bin/sleep 60')
+  const abort = new AbortController()
+  const pending = runDockerPreparedChecks({ ...f.input, signal: abort.signal })
+  void pending.catch(() => undefined)
+  try {
+    await vi.waitFor(async () => { expect((await lstat(`${f.dockerPath}.version-started`)).isFile()).toBe(true) })
+    const started = Date.now()
+    abort.abort()
+    await expect(pending).rejects.toThrow(/cancelled/)
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(indices).toHaveLength(0)
+    await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
+  } finally { abort.abort(); await pending.catch(() => undefined) }
 })
 
 it.each([

@@ -7,7 +7,7 @@ import type {
 } from '@dsh-enhanced/assistant-automations'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantEvolutionService } from '@dsh-enhanced/assistant-evolution'
-import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
+import type { AssistantGoalsAdvicePort } from './goals-port.js'
 import type { AssistantHealthService } from '@dsh-enhanced/assistant-health'
 import {
   RECOVERY_EXECUTOR_CONTRACT_VERSION,
@@ -250,7 +250,7 @@ export class AssistantRecoveryService extends Service {
       const delivery = requiredService<RecoveryRuntimePorts['delivery']>(ctx, 'assistantDelivery')
       const evaluation = requiredService<AssistantEvaluationService>(ctx, 'assistantEvaluation')
       const evolution = requiredService<AssistantEvolutionService>(ctx, 'assistantEvolution')
-      const goals = requiredService<AssistantGoalsService>(ctx, 'assistantGoals')
+      const goals = requiredService<AssistantGoalsAdvicePort>(ctx, 'assistantGoals')
       const preference = requiredService<RecoveryRuntimePorts['preference']>(
         ctx,
         'assistantPreferenceLearning',
