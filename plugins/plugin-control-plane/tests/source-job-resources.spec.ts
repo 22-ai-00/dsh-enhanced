@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
@@ -8,7 +8,7 @@ import { createIsolatedWorktree, removeSourceJobWorktree } from '../src/source-w
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'source-job-resources-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'source-job-resources-'))); roots.push(root)
   const repository = join(root, 'repo'); const stateRoot = join(root, 'private')
   await mkdir(repository); await mkdir(stateRoot, { mode: 0o700 })
   const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-C', repository, ...args], { encoding: 'utf8' }).trim()

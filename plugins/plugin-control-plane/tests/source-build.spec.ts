@@ -1,7 +1,7 @@
 // Engineering fixtures run a fake Docker executable. These tests exercise Host
 // admission, process bounds and daemon failure handling, not OS isolation.
 import { execFileSync } from 'node:child_process'
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -21,7 +21,7 @@ const roots: string[] = []
 afterEach(async () => { indices.length = 0; for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 const marker = `printf 'DSH_PREPARED_PACK\\thelper-1.0.0-rc.1.tgz\\t13\\t${'d'.repeat(64)}\\tv24.0.0\\t11.7.0\\n'`
 async function fixture(run = marker, control = 'exit 0', override: Partial<SourceBuildConfig> = {}, version = "printf '%s\\n' '29.4.1/linux/amd64'") {
-  const root = await mkdtemp(join(tmpdir(), 'source-builder-test-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'source-builder-test-'))); roots.push(root)
   const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', 'helper')
   await mkdir(plugin, { recursive: true })
   await writeFile(join(plugin, 'package.json'), '{"name":"helper","version":"1.0.0-rc.1"}')

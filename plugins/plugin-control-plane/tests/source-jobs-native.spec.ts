@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -33,7 +33,7 @@ function evidence(): SourcePreparedEvidence {
 }
 
 async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean } = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'cp-native-source-jobs-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-native-source-jobs-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true }); await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export {}\n')
   execFileSync('/usr/bin/git', ['init', root]); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.email', 'test@example.invalid']); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.name', 'Test']); execFileSync('/usr/bin/git', ['-C', root, 'add', '.']); execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', 'fixture'])
   const head = execFileSync('/usr/bin/git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()

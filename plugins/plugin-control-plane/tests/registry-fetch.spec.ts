@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
@@ -12,8 +12,9 @@ import { fetchRegistryArtifact, startLocalHttpsRegistry } from '../src/registry-
 const roots: string[] = []
 async function certificate() {
   const root = await mkdtemp(join(tmpdir(), 'registry-fetch-')); roots.push(root)
-  const key = join(root, 'key.pem'); const cert = join(root, 'cert.pem')
-  execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'ed25519', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'])
+  const key = join(root, 'key.pem'); const cert = join(root, 'cert.pem'); const config = join(root, 'openssl.cnf')
+  await writeFile(config, '[req]\nprompt = no\ndistinguished_name = subject\n\n[subject]\nCN = 127.0.0.1\n\n[v3_req]\nsubjectAltName = IP:127.0.0.1\n')
+  execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-config', config, '-extensions', 'v3_req'])
   return { key: await readFile(key, 'utf8'), cert: await readFile(cert, 'utf8') }
 }
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
