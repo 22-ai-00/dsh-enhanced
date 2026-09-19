@@ -94,6 +94,27 @@ dsh-plugin-control activate \
 
 `activate` 只完成 staging：固定 DSH executable 的 canonical path、owner/root ownership、不可被 group/other 写入、inode 和 SHA-256；用无 shell 的 argv 安装 dossier 中精确 `package@version`；结构化核对 lockfile integrity；保留原 profile backup；最后停在 `awaiting-reload`。
 
+### 从 npm 下载已批准制品
+
+trust schema v3/v4 的 `releaseRegistry` 可以显式选择 npm 读取协议：
+
+```json
+{
+  "id": "npm-public",
+  "locator": "https://registry.npmjs.org",
+  "protocol": "npm",
+  "tokenEnvironment": null
+}
+```
+
+catalog 中的 registry id/locator 必须与 owner trust 相同，并预先固定精确包版本及 SHA-512 integrity。CLI 读取 npm 的 `/{encoded-package}/{version}` 元数据，核对 name/version 与该 integrity，再从元数据的 `dist.tarball` 独立下载和计算摘要。元数据不能更换已批准摘要；不使用 tag、版本范围或 SHA-1 回退。校验后的字节进入既有 `0400` 缓存和打开的文件描述符，再由固定 DSH executor 安装并核对 lockfile。成功仍停在 `awaiting-reload`，后续使用原有 Host attestation、有限试用和观察流程。
+
+下载只允许同一 HTTPS origin 且位于 locator 路径下的地址；重定向、跨域/CDN、查询参数、URL 凭据和路径混淆均拒绝。整个元数据与 tarball 下载共用 120 秒期限，元数据最多 2 MiB，tarball 最多 256 MiB。可选 `caPins` 配置可信 CA；省略时使用系统 TLS 信任。私有 registry 可绑定 `tokenEnvironment`，token 仅从 owner 进程该变量读取，不读取 `.npmrc`，不传给 DSH executor。需要其他 origin 的 registry 尚不支持此模式。
+
+省略 `protocol` 或设为 `dsh` 保持原有 `/packages/<分段编码包名>/<version>/package.tgz` 布局；省略字段也保持旧 trust 的规范化摘要不变。协议不会自动探测或失败降级。
+
+本能力支持现有 catalog 的 npm 制品下载，不签发 source-release receipt、不发布包，也不验证 npm/Sigstore provenance。后续远端 release adapter 必须分别绑定 owner 签名证据与 npm 实际观测，不能把本地预期签名冒充 registry 返回的签名。可复现的只读验证见 [npm readback](../../docs/npm-registry-readback.md)。
+
 ## 固定 Host attestor 执行契约
 
 配置 `hostAttestor` 后，每个 awaited phase 由 owner CLI 单步推进。可执行 attestor 与已固定摘要的解释器会以 `O_NOFOLLOW` 打开，贯穿版本探测和实际 attestation 保持相同文件描述符，并通过 Linux `/proc/self/fd` 启动；结束后复核 inode 与摘要。缺少 Linux/procfs 时拒绝执行，不回退到可被替换的 pathname，其他平台可使用人工 attestation。描述符固定防止路径替换选中另一 inode，不能隔离同 UID 进程对文件内容或信任配置的修改，生产信任根仍需独立 owner/broker 权限边界。

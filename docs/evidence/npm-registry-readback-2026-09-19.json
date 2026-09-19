@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "kind": "npm-registry-readback",
+  "startedAt": "2026-09-19T18:37:16.494Z",
+  "baseCommit": "85177bc35026eef525a951ad3311f3bfdd0d17d9",
+  "expectedIntegritySource": {
+    "path": "docs/evidence/release-0.1.32-2026-09-13.json",
+    "sha256": "a7fd2581b1831ccdc37ad65b88ef396bb234239479a9386134f216529f3d3774",
+    "releaseSourceCommit": "180cdff21e4a59cb6e2db007f6dc6cb705259417"
+  },
+  "runtimeDigests": {
+    "plugins/plugin-control-plane/src/registry-fetch.ts": "cff9b157137247f197532bc69064785078680c9b2eb786b26e67fbecc909a7dd",
+    "plugins/plugin-control-plane/lib/registry-fetch.js": "d275745ae0f8db5ba8bb84cf66bda98554b6e80ebecf9f7167c252d45e20c9b5",
+    "scripts/e2e/npm-registry-readback.mjs": "06ff871a2d20329c78df23893dadd95b5b55c8dad9b6e3b7396566e7c523148a"
+  },
+  "registry": {
+    "id": "npm-public",
+    "locator": "https://registry.npmjs.org",
+    "protocol": "npm",
+    "caPins": [],
+    "tokenEnvironment": null
+  },
+  "authority": "anonymous-https-read-only",
+  "results": [
+    {
+      "packageName": "@dsh-enhanced/plugin-control-plane",
+      "version": "0.1.32",
+      "expectedIntegrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+      "downloadedIntegrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+      "downloadedSha256": "caf9918a9bc2cf65c5eb0f5e154960137d5b0210ff2013cf2c44879bb6343266",
+      "downloadedBytes": 195256,
+      "reference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+      "durationMs": 529,
+      "passed": true
+    },
+    {
+      "packageName": "@dsh-enhanced/personal-memory",
+      "version": "0.1.32",
+      "expectedIntegrity": "sha512-EciUd5Qo6DE+N7knPiOSLNoLNjuPpRyHyZJYa0niHyuvlJSqw94RCOlbVA2TvFIgkuvNIGtGqo627Ecl5Grwmg==",
+      "downloadedIntegrity": "sha512-EciUd5Qo6DE+N7knPiOSLNoLNjuPpRyHyZJYa0niHyuvlJSqw94RCOlbVA2TvFIgkuvNIGtGqo627Ecl5Grwmg==",
+      "downloadedSha256": "6b0a8663e3fc256cb73f2e840a30073de7641ba9bb5b360838a080e98a4b5f9d",
+      "downloadedBytes": 96602,
+      "reference": "https://registry.npmjs.org/@dsh-enhanced/personal-memory/-/personal-memory-0.1.32.tgz",
+      "durationMs": 476,
+      "passed": true
+    }
+  ],
+  "passed": true,
+  "limits": [
+    "No publication, owner signing, source-release receipt, installation, Host activation or rollback was exercised.",
+    "Network success does not establish full WP16 delivery or npm/Sigstore provenance verification."
+  ],
+  "mismatchedExpectedIntegrityRejected": true,
+  "finishedAt": "2026-09-19T18:37:17.736Z"
+}

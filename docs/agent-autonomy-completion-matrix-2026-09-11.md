@@ -21,6 +21,8 @@
 
 2026-09-19 memory 修复整合：经开发复核，将上述 Day1 候选的 tokenizer 与事务索引迁移实现原样整合；保留 schema 6，独立记录索引版本。补充了旧 writer 停止/数据库回退前提、重开不重复重建，以及插入失败时回滚并可重试的测试。沿用已有安装器与 Cordis 停止/释放流程。来源逐文件摘要、独立验收复用依据和完整检查结果见[整合证据](evidence/personal-memory-integration-2026-09-19.json)。这是受授权的仓库代码整合，原 Control Plane 计划仍为历史待审批记录，未执行模型自审批、发布或生产启用；WP16、WP18 状态不变。
 
+2026-09-19 npm 制品读取：Control Plane 新增显式 `npm` 协议，以 owner catalog 的精确版本/SHA-512 校验 npm 元数据和独立下载，再复用既有缓存描述符与 DSH staging。真实匿名读取的两个 0.1.32 制品匹配历史发布记录；详见[读取契约与证据](npm-registry-readback.md)。未执行 source-release 签名/发布或生产 Host 启用；owner 签名与 npm 观测的协议关联、完整有限启用/监测/回滚仍需后续完成，WP16、WP18 状态不变。
+
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |
 | --- | --- | --- |
 | 基本 RSI 首版：同类任务连续两轮自主修复、比较、有限试用、晋升和结果反馈 | [0.1.32 发布](evidence/release-0.1.32-2026-09-13.json)与[现代 Host 两轮真实模型运行](evidence/basic-rsi-modern-host-2026-09-13.json) | 独立隐藏留出、更多任务族及全部部署类型 |
