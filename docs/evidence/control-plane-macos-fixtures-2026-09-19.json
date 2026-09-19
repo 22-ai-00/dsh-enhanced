@@ -1,0 +1,79 @@
+{
+  "kind": "control-plane-cross-platform-test-fixtures",
+  "baseCommit": "288a75ee577306b013a36b036feb4f3587034a19",
+  "observedCiFailure": {
+    "run": "https://github.com/22-ai-00/dsh-enhanced/actions/runs/35462697418",
+    "jobId": 105949286962,
+    "platform": "macOS",
+    "conclusion": "failure",
+    "failedTests": 71,
+    "sourceFixtureFailures": 35,
+    "registryFixtureFailures": 36,
+    "causes": [
+      "Five source suites derived paths from macOS tmpdir aliases; production correctly requires canonical paths.",
+      "The registry certificate fixture requested Ed25519 from Apple LibreSSL 3.3, which reported Unknown algorithm ed25519."
+    ]
+  },
+  "changes": [
+    "Canonicalize each source fixture root with realpath before deriving repository, executable and durable-state paths.",
+    "Generate fresh RSA-2048/SHA-256 registry test certificates with an OpenSSL config containing the loopback IP SAN."
+  ],
+  "localReproduction": {
+    "platform": "Linux",
+    "condition": "TMPDIR is a symlink to a canonical directory",
+    "baselineCommand": "TMPDIR=<alias> pnpm --filter @dsh-enhanced/plugin-control-plane exec vitest run tests/source-context.spec.ts -t 'reads committed Git blobs'",
+    "baselineExitCode": 1,
+    "baselineFailed": 1,
+    "baselineError": "repository path must be canonical",
+    "fixedCommand": "TMPDIR=<alias> pnpm --dir plugins/plugin-control-plane exec vitest run tests/source-build.spec.ts tests/source-context.spec.ts tests/source-job-resources.spec.ts tests/source-jobs-native.spec.ts tests/source-jobs.spec.ts",
+    "fixedExitCode": 0,
+    "fixedPassed": 40,
+    "fixedFiles": 5,
+    "fixedLogSha256": "eb76e0c8d41b1e795ece926d914580844831d9de1f0191c0e9dd3e29fb686ea3",
+    "independentExecution": true
+  },
+  "limits": [
+    "Production code, strict canonical-path admission, real HTTPS validation and all existing test assertions are unchanged.",
+    "Linux symlink reproduction is not a macOS execution result; the exact pushed commit requires a fresh CI observation.",
+    "This fixture repair does not establish production release/activation, agent improvement, or WP16/WP18 completion."
+  ],
+  "registryFixtureTests": {
+    "command": "pnpm --dir plugins/plugin-control-plane exec vitest run tests/registry-fetch.spec.ts",
+    "exitCode": 0,
+    "passed": 36,
+    "files": 1,
+    "independentExecution": true,
+    "logSha256": "6ec9ff7fcae1a1d1ccd4904b823c504f28ba3879b77706cf5e86cf69ab3136ab"
+  },
+  "postEditChecks": [
+    {
+      "command": "pnpm --filter @dsh-enhanced/plugin-control-plane typecheck",
+      "exitCode": 0
+    },
+    {
+      "command": "pnpm exec oxlint --deny-warnings plugins/plugin-control-plane/tests/registry-fetch.spec.ts",
+      "exitCode": 0
+    }
+  ],
+  "rootCheck": {
+    "command": "pnpm check",
+    "exitCode": 0,
+    "logSha256": "077e4696bcd472460a17ba464a6d5ee14e4b361972298bac82eafdeb01646daa",
+    "passed": 5914,
+    "skipped": 44,
+    "summaries": 36,
+    "controlPlanePassed": 325,
+    "dryRunPacks": 35,
+    "certificateFixtureTiming": "The certificate-only edit landed after root lint/typecheck and before the Control Plane test phase. Post-edit targeted lint and package typecheck also passed."
+  },
+  "independentReview": {
+    "role": "verifier",
+    "verdict": "PASS",
+    "scope": [
+      "six fixture-only changes and unchanged production guards",
+      "independent Linux alias and registry TLS tests",
+      "completed root log counts/hash and evidence consistency"
+    ],
+    "remoteMacosResult": "pending"
+  }
+}

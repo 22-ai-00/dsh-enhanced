@@ -1,6 +1,6 @@
 import * as childProcess from 'node:child_process'
 import { execFileSync } from 'node:child_process'
-import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -16,7 +16,7 @@ const roots: string[] = []
 afterEach(async () => { vi.resetAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'cp-source-context-')); roots.push(root)
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-context-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
   await writeFile(join(root, 'plugins', 'health-helper', 'README.md'), '# helper\n')
