@@ -138,6 +138,8 @@ request 固定：installation id、ledger id/path、plan id/digest、activation 
 
 Host attestor 与 release adapter 的每次命令共用受控进程组：超时、输出超限及主进程正常/异常退出都会清理同组后代，核对主进程退出，并有界排空 stdout。清理无法证实时返回失败，不以遗留管道的 `close` 无限等待。该机制依赖 runner 存活，不能包含主动 `setsid()` 脱组进程，也不撤回远端已接受的操作；具体期限、恢复边界与回归证据见 [adapter 生命周期](../../docs/control-plane-adapter-lifetime.md)。
 
+随包的 `bin/dsh-systemd-host-attestor.js` 提供 Linux/systemd 的真实 **reload** 适配：先用 `probe --prepare-only` 取得确切持久请求，再由主人私有配置授权其摘要；重启前记录操作，重复调用仅重放或观测对账。它核验 fresh InvocationID/MainPID 与稳定窗口，按 installation 共享 Host 代次，仅推进至 `awaiting-readiness`。部署配置、权限和未覆盖阶段见 [systemd Host attestor](../../docs/systemd-host-attestor.md)。
+
 phase operation 在子进程启动前持久化。子进程执行期间持有 SQLite 跨进程 writer mutex；成功 receipt 在释放 mutex 前持久化。因此并发 worker 不会创建第二个 canary exposure。若进程在 receipt 提交前崩溃，恢复 worker 使用相同 operation id 重试，依赖上述外部幂等契约取回同一结果。
 
 ## Phase proof，而不是命令标签

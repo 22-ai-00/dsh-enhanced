@@ -1276,6 +1276,24 @@ describe.sequential('trusted staged CLI', () => {
     store.close()
   }, 15_000)
 
+  test('prepares the exact configured Host request without invoking or advancing the attestor', async () => {
+    const value = await fixture(); const plan = await staged(value, 'prepare-configured-host')
+    const args = ['probe', '--prepare-only', '--plan-id', plan.id, '--expected-revision', String(plan.revision),
+      '--expected-fence', String(plan.activation!.fence)]
+    vi.mocked(process.stdout.write).mockClear()
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(args))
+    const first = String(vi.mocked(process.stdout.write).mock.calls.at(-1)![0])
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(args))
+    expect(String(vi.mocked(process.stdout.write).mock.calls.at(-1)![0])).toBe(first)
+    expect(JSON.parse(first)).toMatchObject({ phase: 'reload', issuer: { mode: 'configured-executable' },
+      plan: { id: plan.id, digest: plan.digest }, activation: { id: plan.activation!.id, fence: plan.activation!.fence } })
+    const store = new ControlPlaneStore({ path: value.state })
+    try { expect(store.getPlan(plan.id).status).toBe('awaiting-reload') } finally { store.close() }
+    const db = new DatabaseSync(value.state)
+    try { expect(db.prepare('SELECT status FROM host_attestation_operations WHERE plan_id = ?').get(plan.id)).toMatchObject({ status: 'pending' }) } finally { db.close() }
+    await expect(readFile(join(value.attestorDirectory, 'host-generation'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('stays awaiting when no executable attestor is configured while preserving the manual request lane', async () => {
     const value = await fixture(); const plan = await staged(value, 'no-attestor')
     await writeFile(value.trustPath, JSON.stringify({ ...value.trust, hostAttestor: null }), { mode: 0o600 })
