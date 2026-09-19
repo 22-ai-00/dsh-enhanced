@@ -10,6 +10,7 @@ import { Config, normalizeConfig, type AssistantGrowthDriverConfig } from './con
 import { mintGrowthAuthority, type GrowthAuthority, type GrowthDeliveryPort } from './deposit.js'
 import { runGrowthAgent, type GrowthAgentRunResult } from './growth-agent.js'
 import { version } from './version.js'
+import type { GrowthSourceGap, GrowthSourcePlanePort } from './source-port.js'
 
 export const name = 'dsh-enhanced-assistant-growth-driver'
 export { version, Config, normalizeConfig }
@@ -80,27 +81,58 @@ export class AssistantGrowthDriverService extends Service {
   static inject = ['assistantGoals', 'assistantSkills', 'assistantPolicy', 'assistantDelivery', 'agents', 'sessions', 'tools', 'llm']
 
   readonly #config: ReturnType<typeof normalizeConfig>
-  #timer: ReturnType<typeof setInterval> | undefined
   #flight: Promise<void> | undefined
   #active = true
+  readonly #abort = new AbortController()
+  #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal } | undefined
   #health: GrowthWakeHealth = { lastWakeAt: null, outcome: 'never-run', reason: null, run: null }
 
   constructor(ctx: Context, input: AssistantGrowthDriverConfig = {}) {
     super(ctx, 'assistantGrowthDriver')
     this.#config = normalizeConfig(input)
-    if (!this.#config.enabled) {
-      ctx.effect(() => async () => { this.#active = false }, 'assistant-growth-driver.runtime')
-      return
-    }
-    if (this.#config.intervalMs > 0) {
-      this.#timer = setInterval(() => this.#queueWake(), this.#config.intervalMs)
-      this.#timer.unref?.()
-    }
-    ctx.effect(() => async () => {
-      this.#active = false
-      if (this.#timer !== undefined) clearInterval(this.#timer)
-      await this.#flight
+    ctx.effect(() => {
+      const timer = this.#config.enabled && this.#config.intervalMs > 0
+        ? setInterval(() => { void this.wake().catch(() => undefined) }, this.#config.intervalMs) : undefined
+      timer?.unref?.()
+      return async () => {
+        this.#active = false
+        if (timer !== undefined) clearInterval(timer)
+        this.#abort.abort(new Error('assistant-growth-driver: disposed'))
+        await this.#flight
+      }
     }, 'assistant-growth-driver.runtime')
+    if (this.#config.pluginSourceProposals.enabled) {
+      // Optional provider lives in a nested injection. Its generation owns the
+      // source capability and cancellation; the outer driver remains usable
+      // when the control plane is absent or is being replaced.
+      ctx.inject(['pluginControlPlane' as never], sourceCtx => {
+        const abort = new AbortController()
+        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan'> & { gaps(limit: number): readonly GrowthSourceGap[]; canPrepareSource?: () => boolean }
+        const current = (): SourceService => {
+          abort.signal.throwIfAborted()
+          return sourceCtx.get('pluginControlPlane' as never) as unknown as SourceService
+        }
+        const provider = current()
+        if (typeof provider.canPrepareSource !== 'function' || !provider.canPrepareSource()) return
+        const binding = {
+          signal: abort.signal,
+          port: {
+            listOpenGaps: () => current().gaps(50),
+            prepareModifySourcePlan: async (input: Parameters<GrowthSourcePlanePort['prepareModifySourcePlan']>[0]) => {
+              const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
+              return current().prepareModifySourcePlan({ ...input, signal,
+                assertCurrent: () => { signal.throwIfAborted(); current(); input.assertCurrent() },
+              })
+            },
+          } satisfies GrowthSourcePlanePort,
+        }
+        this.#sourceBinding = binding
+        sourceCtx.effect(() => () => {
+          abort.abort(new Error('assistant-growth-driver: source provider changed'))
+          if (this.#sourceBinding === binding) this.#sourceBinding = undefined
+        }, 'assistant-growth-driver.source-provider')
+      })
+    }
   }
 
   health(): GrowthWakeHealth { return this.#health }
@@ -108,13 +140,12 @@ export class AssistantGrowthDriverService extends Service {
   /** Run one wake immediately (also used by tests / an explicit Host trigger). */
   wake(): Promise<void> {
     if (!this.#active || !this.#config.enabled) return Promise.resolve()
-    return this.#runWake()
-  }
-
-  #queueWake(): void {
-    if (!this.#active) return
-    // Serialize wakes: a long review must never overlap the next timer tick.
-    this.#flight = (this.#flight ?? Promise.resolve()).catch(() => undefined).then(() => this.#runWake().catch(() => undefined))
+    // Coalesce explicit and timer wakes onto the same bounded run. Queueing
+    // timer ticks would build an unbounded backlog when a build is slow.
+    if (this.#flight !== undefined) return this.#flight
+    const flight = this.#runWake().finally(() => { if (this.#flight === flight) this.#flight = undefined })
+    this.#flight = flight
+    return flight
   }
 
   async #resolveCredential(): Promise<boolean> {
@@ -195,7 +226,11 @@ export class AssistantGrowthDriverService extends Service {
 
     try {
       agentSubmitted = true
-      const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, goals, skills })
+      const source = this.#sourceBinding
+      const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, goals, skills,
+        ...(source === undefined ? {} : { sourcePlane: source.port }),
+        signal: source === undefined ? this.#abort.signal : AbortSignal.any([this.#abort.signal, source.signal]),
+      })
       if (reservationId !== undefined) { policy.finalize(reservationId, config.budgetAmount!); reservationSettled = true }
       this.#health = { lastWakeAt: startedAt, outcome: 'ran', reason: run.outcome, run, ownerAnchored }
     } catch (error) {
@@ -297,4 +332,4 @@ export function apply(ctx: Context, input: AssistantGrowthDriverConfig = {}): vo
   new AssistantGrowthDriverService(ctx, input)
 }
 
-export default { name, Config, apply, version }
+export default { name, Config, inject: AssistantGrowthDriverService.inject, apply, version }

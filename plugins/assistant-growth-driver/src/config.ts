@@ -1,3 +1,4 @@
+import { isAbsolute, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 
 /**
@@ -32,6 +33,29 @@ export interface WorkflowOwnerAnchoredConfig {
   lookbackMs?: number
 }
 
+/**
+ * The plugin source-proposal track is the third, independently switched growth
+ * capability. It is opt-in and fail-closed even when the driver itself is
+ * enabled: the growth agent may then prepare PENDING modify source plans in
+ * isolated worktrees, but it can never approve, sign, release, activate,
+ * install or reload anything. Every build-shaping value (repository path,
+ * timeouts, TTL, offline flag) is frozen owner configuration — the model can
+ * never supply a repository, worktree, base commit or environment.
+ */
+export interface PluginSourceProposalsConfig {
+  enabled?: boolean
+  /** Canonical absolute path of the dsh-enhanced repository the patches target. Required when enabled. */
+  repository?: string
+  /** Hard cap on prepared modify plans in one wake (rate limit); idempotent replays are cheap. */
+  maxPlansPerWake?: number
+  /** Per-command bounded timeout for the frozen install/check/pack gate. */
+  isolatedBuildTimeoutMs?: number
+  /** Run pnpm install fully offline (the owner must warm the store beforehand). */
+  offline?: boolean
+  /** Pending-plan TTL: how long the isolated worktree waits for owner action. */
+  planTtlMs?: number
+}
+
 export interface AssistantGrowthDriverConfig {
   enabled?: boolean
   /** 0 = no periodic wake; the driver only runs when explicitly triggered. */
@@ -51,6 +75,7 @@ export interface AssistantGrowthDriverConfig {
   apiKeyEnv?: string
   scope?: GrowthOwnerScopeConfig
   workflowOwnerAnchored?: WorkflowOwnerAnchoredConfig
+  pluginSourceProposals?: PluginSourceProposalsConfig
 }
 
 export interface NormalizedWorkflowOwnerAnchoredConfig {
@@ -59,11 +84,21 @@ export interface NormalizedWorkflowOwnerAnchoredConfig {
   readonly lookbackMs: number
 }
 
-export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored'>> {
+export interface NormalizedPluginSourceProposalsConfig {
+  readonly enabled: boolean
+  readonly repository: string | null
+  readonly maxPlansPerWake: number
+  readonly isolatedBuildTimeoutMs: number
+  readonly offline: boolean
+  readonly planTtlMs: number
+}
+
+export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored' | 'pluginSourceProposals'>> {
   readonly budgetId: string | null
   readonly budgetAmount: number | null
   readonly scope: GrowthOwnerScopeConfig | null
   readonly workflowOwnerAnchored: NormalizedWorkflowOwnerAnchoredConfig
+  readonly pluginSourceProposals: NormalizedPluginSourceProposalsConfig
 }
 
 const fields = new Set([
@@ -81,6 +116,7 @@ const fields = new Set([
   'apiKeyEnv',
   'scope',
   'workflowOwnerAnchored',
+  'pluginSourceProposals',
 ])
 
 const ref = Schema.string().pattern(/^[A-Z_][A-Z0-9_]*$/u)
@@ -111,6 +147,20 @@ const workflowOwnerAnchoredObjectSchema = Schema.object({
 const workflowOwnerAnchoredSchema = workflowOwnerAnchoredObjectSchema
   .default(undefined as unknown as WorkflowOwnerAnchoredConfig) as Schema<WorkflowOwnerAnchoredConfig | undefined>
 
+// Same missing-object default rationale as workflowOwnerAnchoredSchema above.
+const pluginSourceProposalsObjectSchema = Schema.object({
+  enabled: Schema.boolean().default(false),
+  repository: boundedText(4_096),
+  maxPlansPerWake: Schema.natural().min(1).max(5).default(1),
+  // Security root: the isolated build gate must finish well inside the 300000 ms
+  // growth authority lifetime; bounds mirror the control-plane service limits.
+  isolatedBuildTimeoutMs: Schema.natural().min(60_000).max(240_000).default(180_000),
+  offline: Schema.boolean().default(true),
+  planTtlMs: Schema.natural().min(900_000).max(86_400_000).default(86_400_000),
+}) as unknown as Schema<PluginSourceProposalsConfig>
+const pluginSourceProposalsSchema = pluginSourceProposalsObjectSchema
+  .default(undefined as unknown as PluginSourceProposalsConfig) as Schema<PluginSourceProposalsConfig | undefined>
+
 const schema = Schema.object({
   enabled: Schema.boolean().default(false),
   intervalMs: Schema.natural().min(0).max(86_400_000).default(0),
@@ -128,6 +178,7 @@ const schema = Schema.object({
   apiKeyEnv: ref.default(DEFAULT_API_KEY_ENV),
   scope: scopeSchema,
   workflowOwnerAnchored: workflowOwnerAnchoredSchema,
+  pluginSourceProposals: pluginSourceProposalsSchema,
 }) as Schema<AssistantGrowthDriverConfig>
 
 export const Config = new Proxy(schema, {
@@ -161,6 +212,14 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
       maxCommitsPerWake: config.workflowOwnerAnchored?.maxCommitsPerWake ?? 5,
       lookbackMs: config.workflowOwnerAnchored?.lookbackMs ?? 86_400_000,
     }),
+    pluginSourceProposals: Object.freeze({
+      enabled: config.pluginSourceProposals?.enabled ?? false,
+      repository: config.pluginSourceProposals?.repository?.normalize('NFC').trim() ?? null,
+      maxPlansPerWake: config.pluginSourceProposals?.maxPlansPerWake ?? 1,
+      isolatedBuildTimeoutMs: config.pluginSourceProposals?.isolatedBuildTimeoutMs ?? 180_000,
+      offline: config.pluginSourceProposals?.offline ?? true,
+      planTtlMs: config.pluginSourceProposals?.planTtlMs ?? 86_400_000,
+    }),
   })
   if (normalized.enabled && !normalized.scope) throw new Error('assistant-growth-driver: enabled requires an explicit owner scope')
   if (normalized.workflowOwnerAnchored.enabled && !normalized.enabled) {
@@ -168,6 +227,22 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
   }
   if (normalized.workflowOwnerAnchored.enabled && !normalized.scope) {
     throw new Error('assistant-growth-driver: workflowOwnerAnchored.enabled requires an explicit owner scope')
+  }
+  if (normalized.pluginSourceProposals.enabled) {
+    if (!normalized.enabled) {
+      throw new Error('assistant-growth-driver: pluginSourceProposals.enabled requires the driver itself to be enabled')
+    }
+    if (!normalized.scope) {
+      throw new Error('assistant-growth-driver: pluginSourceProposals.enabled requires an explicit owner scope')
+    }
+    if (!normalized.pluginSourceProposals.offline) throw new Error('assistant-growth-driver: source preparation requires offline mode')
+    const repository = normalized.pluginSourceProposals.repository
+    // Canonical TEXT only here (the control-plane service performs the realpath
+    // canonicalization against the live filesystem at prepare time): absolute,
+    // non-empty and free of '.'/'..' normalization segments.
+    if (repository === null || !isAbsolute(repository) || resolve(repository) !== repository) {
+      throw new Error('assistant-growth-driver: pluginSourceProposals.repository must be a canonical absolute path when enabled')
+    }
   }
   if ((normalized.budgetId === null) !== (normalized.budgetAmount === null)) {
     throw new Error('assistant-growth-driver: budgetId and budgetAmount must be configured together')

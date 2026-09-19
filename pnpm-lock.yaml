@@ -1045,6 +1045,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.2
+      '@dsh-enhanced/plugin-control-plane':
+        specifier: '>=0.1.33 <0.2.0'
+        version: link:../plugin-control-plane
       '@dsh-enhanced/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract

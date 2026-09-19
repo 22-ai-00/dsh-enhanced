@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
-import { LlmAdapter, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
@@ -22,8 +22,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
 import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
-import { apply, AssistantGrowthDriverService, name, version } from '../src/index.ts'
+import plugin, { apply, AssistantGrowthDriverService, name, normalizeConfig, version } from '../src/index.ts'
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
+import type { GrowthSourcePlanePort } from '../src/source-port.ts'
 
 // Contract expiry is unreachable with the wall clock while the pinned contract
 // is still current, so the single assertCurrentContract call is gated through
@@ -166,9 +167,11 @@ interface ScriptedTurn { name: string; args: Record<string, unknown> }
  */
 class ScriptedAdapter extends LlmAdapter {
   calls = 0
+  surfaces: string[][] = []
   constructor(private readonly turns: readonly ScriptedTurn[]) { super() }
   reset(): void { this.calls = 0 }
-  override async *stream(): AsyncIterable<StreamChunk> {
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.surfaces.push((options.tools ?? []).map(tool => tool.name).sort())
     const index = this.calls++
     if (index < this.turns.length) {
       const turn = this.turns[index]!
@@ -293,6 +296,12 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
           id: 'growth-tool-execute', effect: 'allow',
           subject: { kind: 'agent', id: PRESET, workspace: root, principal: PRINCIPAL },
           actions: ['execute'], resource: { kind: 'tool', id: 'growth_*' },
+          context: { initiators: ['background'] },
+        },
+        {
+          id: 'source-tool-execute', effect: 'allow',
+          subject: { kind: 'agent', id: PRESET, workspace: root, principal: PRINCIPAL },
+          actions: ['execute'], resource: { kind: 'tool', id: 'plugin_source_*' },
           context: { initiators: ['background'] },
         },
       ],
@@ -724,5 +733,174 @@ describe('assistant-growth-driver owner-anchored workflow track (engineering lay
     expect(health.ownerAnchored!.stopped).toEqual(expect.stringMatching(/^policy-denied:/))
     // ... yet the independent skill track still ran to its model result.
     expect(health.outcome).toBe('ran')
+  })
+})
+
+
+// The control-plane port below is an engineering fixture. It checks the native
+// Agent/tool/Policy/Cordis wiring; Docker and checked-plan persistence have
+// their own control-plane tests and are not simulated as production evidence.
+describe('opt-in plugin source proposals', () => {
+  const sourceArgs = { gap_id: 'gap-1', plugin_name: 'assistant-health', files: [{ path: 'README.md', content: 'proposed docs' }] }
+  const sourceTurns = [
+    { name: 'plugin_source_gaps', args: {} },
+    { name: 'plugin_source_prepare', args: sourceArgs },
+  ]
+  const options = (root: string) => ({ enabled: true, repository: root, maxPlansPerWake: 1 })
+  function sourceService() {
+    return {
+      canPrepareSource: () => true,
+      gaps: vi.fn(() => [{ id: 'gap-1', capability: 'health', context: 'owner gap', status: 'open' as const, createdAt: 1 }]),
+      prepareModifySourcePlan: vi.fn(async (input: Parameters<GrowthSourcePlanePort['prepareModifySourcePlan']>[0]) => {
+        input.signal.throwIfAborted()
+        input.assertCurrent()
+        return { id: 'pending-source-1', status: 'pending-approval', name: input.name, mode: 'modify',
+          sourceCheck: { treeDigest: 'a'.repeat(64), patchDigest: 'b'.repeat(64), checkedAt: 1 } }
+      }),
+    }
+  }
+
+  it('publishes intrinsic service dependencies on the actual default plugin', () => {
+    expect(plugin.inject).toEqual(AssistantGrowthDriverService.inject)
+    expect(plugin.inject).not.toContain('pluginControlPlane')
+  })
+
+  it('rejects missing/noncanonical repository and online preparation config before resources', () => {
+    for (const repository of [undefined, '', 'relative', '/a/../b']) {
+      expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { enabled: true, repository } }))).toThrow(/repository/)
+    }
+    expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), offline: false } }))).toThrow(/offline/)
+  })
+
+  it.each([false, true])('keeps four tools when source enabled=%s but its peer is absent', async enabled => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: { ...options(h.root), enabled } }))
+    await service.wake()
+    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 0 })
+    expect(adapter.surfaces[0]).toHaveLength(4)
+    expect(adapter.surfaces[0]?.every(name => name.startsWith('growth_'))).toBe(true)
+  })
+
+  it('keeps the baseline when the installed source provider has no configured builder', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    h.ctx.provide('pluginControlPlane' as never, { ...sourceService(), canPrepareSource: () => false } as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(adapter.surfaces[0]).toHaveLength(4)
+    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 0 })
+  })
+
+  it('late-binds the optional provider and forwards only frozen Host settings to one pending plan', async () => {
+    const adapter = new ScriptedAdapter(sourceTurns)
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    const source = sourceService()
+    await h.ctx.plugin({ name: 'source-fixture', apply: ctx => { ctx.provide('pluginControlPlane' as never, source as never) } })
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(service.health().outcome).toBe('ran')
+    expect(service.health().run?.sourceProposals).toEqual({ prepared: 1, rejected: 0 })
+    expect(adapter.surfaces[0]).toHaveLength(6)
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
+    expect(source.prepareModifySourcePlan.mock.calls[0]?.[0]).toMatchObject({
+      gapId: 'gap-1', name: 'assistant-health', repository: h.root, files: sourceArgs.files,
+      offline: true, ttlMs: 86_400_000, timeoutMs: 180_000,
+    })
+    expect(tableCounts(h)).toEqual({ candidates: 0, definitions: 0, runs: 0 })
+  })
+
+  it('caps attempts even after a build rejection and never calls approval/release capabilities', async () => {
+    const adapter = new ScriptedAdapter([...sourceTurns, sourceTurns[1]!])
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = sourceService()
+    source.prepareModifySourcePlan.mockRejectedValue(new Error('isolated check failed'))
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
+    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 2 })
+  })
+
+  it.each(['assistant-policy', 'assistant-skills', '../outside'])('refuses protected/invalid target %s before calling the Host', async plugin_name => {
+    const adapter = new ScriptedAdapter([sourceTurns[0]!, { name: 'plugin_source_prepare', args: { ...sourceArgs, plugin_name } }])
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = sourceService()
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 1 })
+  })
+
+  it('coalesces explicit wakes and cancels on provider replacement before binding the new generation', async () => {
+    const adapter = new ScriptedAdapter(sourceTurns)
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = sourceService()
+    let observedSignal: AbortSignal | undefined
+    source.prepareModifySourcePlan.mockImplementation(input => new Promise((_resolve, reject) => {
+      observedSignal = input.signal
+      input.signal.addEventListener('abort', () => reject(input.signal.reason), { once: true })
+    }))
+    const provider = h.ctx.plugin({ name: 'source-fixture', apply: ctx => { ctx.provide('pluginControlPlane' as never, source as never) } })
+    await provider
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    await new Promise(resolve => setImmediate(resolve))
+    const first = service.wake()
+    expect(service.wake()).toBe(first)
+    await vi.waitFor(() => expect(observedSignal).toBeDefined())
+    await provider.dispose()
+    await first
+    expect(observedSignal?.aborted).toBe(true)
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
+    adapter.reset()
+    await service.wake()
+    expect(adapter.surfaces.at(-1)).toHaveLength(4)
+    const replacement = sourceService()
+    await h.ctx.plugin({ name: 'replacement-source-fixture', apply: ctx => { ctx.provide('pluginControlPlane' as never, replacement as never) } })
+    await new Promise(resolve => setImmediate(resolve))
+    adapter.reset()
+    await service.wake()
+    expect(adapter.surfaces.at(-1)).toHaveLength(6)
+    expect(replacement.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
+    expect(service.health().run?.sourceProposals).toEqual({ prepared: 1, rejected: 0 })
+  })
+
+  it('aborts and drains the active build before the driver Fiber finishes disposal', async () => {
+    const h = await mount({ adapter: new ScriptedAdapter(sourceTurns) })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = sourceService()
+    let signal: AbortSignal | undefined
+    let settled = false
+    source.prepareModifySourcePlan.mockImplementation(input => new Promise((_resolve, reject) => {
+      signal = input.signal
+      input.signal.addEventListener('abort', () => { settled = true; reject(input.signal.reason) }, { once: true })
+    }))
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    let service: AssistantGrowthDriverService | undefined
+    const driver = h.ctx.plugin({ name: 'owned-growth-driver', apply: ctx => {
+      service = new AssistantGrowthDriverService(ctx, driverConfig(h.root, { pluginSourceProposals: options(h.root) }))
+    } })
+    await driver
+    await new Promise(resolve => setImmediate(resolve))
+    const wake = service!.wake()
+    await vi.waitFor(() => expect(signal).toBeDefined())
+    await driver.dispose()
+    expect(signal?.aborted).toBe(true)
+    expect(settled).toBe(true)
+    await wake
+    await service!.wake()
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
   })
 })
