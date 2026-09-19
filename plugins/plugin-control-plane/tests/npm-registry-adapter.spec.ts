@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { createServer } from 'node:https'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { startLocalHttpsRegistry } from '../src/registry-fetch.ts'
+import { controlPlaneDigest } from '../src/store.ts'
 import { loadCatalogWithMetadata, previewCatalogAdmission } from '../src/catalog.ts'
 import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthority,
   invokeSourcePublishReconciliationAdapter, invokeSourceReleaseAdapter, parseSourcePublishReconciliationRequest,
@@ -19,7 +20,7 @@ const sha = (value: string | Buffer) => createHash('sha256').update(value).diges
 const sri = (value: Buffer) => `sha512-${createHash('sha512').update(value).digest('base64')}`
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(closes.splice(0).map(close => close())); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' = 'match') {
+async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' | 'publish' | 'publish-drop' | 'publish-slow' = 'match') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'npm-release-verifier-'))); roots.push(root); await chmod(root, 0o700)
   const native = await realpath(process.execPath); const node = join(root, 'node'); await copyFile(native, node); await chmod(node, 0o700)
   const interpreter = { path: node, sha256: sha(await readFile(node)) }
@@ -35,11 +36,46 @@ async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' = 'match'
   const key = join(root, 'tls.key'); const cert = join(root, 'tls.pem'); const openssl = join(root, 'openssl.cnf')
   await writeFile(openssl, '[req]\nprompt=no\ndistinguished_name=subject\n[subject]\nCN=127.0.0.1\n[ext]\nsubjectAltName=IP:127.0.0.1\n')
   execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-sha256', '-nodes', '-keyout', key, '-out', cert, '-days', '1', '-config', openssl, '-extensions', 'ext'], { stdio: 'ignore' })
-  const bytes = Buffer.from('owner-signed-tarball'); const served = mode === 'conflict' ? Buffer.from('conflicting-npm-version') : bytes
+  let bytes = Buffer.from('owner-signed-tarball')
+  if (mode.startsWith('publish')) {
+    const stage = join(root, 'packed'); await mkdir(join(stage, 'package'), { recursive: true, mode: 0o700 })
+    await writeFile(join(stage, 'package', 'package.json'), JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '1.2.3',
+      dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { prepublishOnly: 'exit 91' } }))
+    const tarball = join(stage, 'package.tgz'); execFileSync('/usr/bin/tar', ['-czf', tarball, '-C', stage, 'package'])
+    bytes = await readFile(tarball)
+  }
+  const served = mode === 'conflict' ? Buffer.from('conflicting-npm-version') : bytes
   const seen: string[] = []
   const slow = { opened: false, closed: false }
+  const publication = { attempts: 0, authorization: '', body: undefined as Record<string, unknown> | undefined, stored: undefined as Buffer | undefined }
   const tls = { key: await readFile(key, 'utf8'), cert: await readFile(cert, 'utf8') }
-  const server: { origin: string; close: () => Promise<void> } = mode === 'slow' ? await (async () => {
+  const server: { origin: string; close: () => Promise<void> } = mode.startsWith('publish') ? await (async () => {
+    const nodeServer = createServer(tls, (request, response) => {
+      seen.push(request.url!)
+      if (request.method === 'PUT') {
+        publication.attempts++; publication.authorization = request.headers.authorization ?? ''
+        const chunks: Buffer[] = []; request.on('data', chunk => chunks.push(chunk))
+        request.on('end', () => {
+          publication.body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+          const attachments = publication.body._attachments as Record<string, { data: string }>
+          publication.stored = Buffer.from(Object.values(attachments)[0]!.data, 'base64')
+          if (mode === 'publish-drop') { response.destroy(); return }
+          if (mode === 'publish-slow') { slow.opened = true; response.on('close', () => { slow.closed = true }); return }
+          response.writeHead(201, { 'content-type': 'application/json' }); response.end('{"ok":true}')
+        }); return
+      }
+      if (!publication.stored) { response.writeHead(404); response.end(); return }
+      if (request.url === '/%40dsh-enhanced%2Fhealth-helper/1.2.3') {
+        response.writeHead(200, { 'content-type': 'application/json' }); response.end(JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '1.2.3',
+          dist: { integrity: sri(publication.stored), tarball: `${server.origin}/package.tgz` } })); return
+      }
+      if (request.url === '/package.tgz') { response.writeHead(200); response.end(publication.stored); return }
+      response.writeHead(404); response.end()
+    })
+    await new Promise<void>(resolve => nodeServer.listen(0, '127.0.0.1', resolve))
+    const address = nodeServer.address(); if (address === null || typeof address === 'string') throw new Error('missing publish server address')
+    return { origin: `https://127.0.0.1:${address.port}`, close: async () => { nodeServer.closeAllConnections(); await new Promise<void>(resolve => nodeServer.close(() => resolve())) } }
+  })() : mode === 'slow' ? await (async () => {
     const nodeServer = createServer(tls, (request, response) => {
       seen.push(request.url!); slow.opened = true
       response.on('close', () => { slow.closed = true })
@@ -106,7 +142,7 @@ async function fixture(mode: 'match' | 'conflict' | 'missing' | 'slow' = 'match'
     repository: root, worktree: root, baseCommit: authorization.baseCommit, name: artifact.sourceName, generatorDigest: '4'.repeat(64),
     scope: authorization.scope, release: { id: 'release-1', fence: 1, updatedAt: now } }
   const publicPem = verifier.publicKey.export({ type: 'spki', format: 'pem' }).toString()
-  return { root, config, saveConfig, trust, release, reconcile, plan, publicPem, verifier, owner, signer, seen, artifact, authorization, slow }
+  return { root, config, saveConfig, trust, release, reconcile, plan, publicPem, verifier, owner, signer, seen, artifact, authorization, slow, publication, identity }
 }
 
 async function catalogFixture() {
@@ -146,6 +182,102 @@ async function catalogFixture() {
   return { ...f, catalogConfig: config, saveCatalogConfig: save, catalogPath, catalogRequest: request, catalogTrust: trust,
     catalogPublicKey: key.publicKey.export({ type: 'spki', format: 'pem' }).toString(), candidate, preview }
 }
+
+async function publisherFixture(mode: 'publish' | 'publish-drop' | 'publish-slow' = 'publish') {
+  const f = await fixture(mode)
+  if (f.release.phase !== 'registry-verify') throw new Error('missing verifier request')
+  const root = join(f.root, 'publish-role'); await mkdir(root, { mode: 0o700 })
+  const publisher = await f.identity('npm-publisher')
+  const executablePath = join(root, 'adapter.js'); await copyFile(new URL('../bin/dsh-npm-registry-adapter.js', import.meta.url), executablePath); await chmod(executablePath, 0o700)
+  const helperPath = join(root, 'npm-publish.mjs'); await copyFile(new URL('../lib/npm-publish.js', import.meta.url), helperPath); await chmod(helperPath, 0o600)
+  const stateRoot = join(root, 'state'); await mkdir(stateRoot, { mode: 0o700 })
+  const tokenPath = join(root, 'npm.token'); await writeFile(tokenPath, 'fixture-token\n', { mode: 0o600 })
+  const config = { ...f.config, id: 'npm-publisher', phase: 'publish', executablePath, stateRoot,
+    authority: publisher.public.authority, keyId: publisher.public.keyId, privateKeyPath: publisher.privateKeyPath,
+    registry: { ...f.config.registry, helper: { path: helperPath, sha256: sha(await readFile(helperPath)) }, tokenPath, tag: 'next' } }
+  const configPath = join(root, 'config.json'); const save = () => writeFile(configPath, JSON.stringify(config), { mode: 0o600 }); await save()
+  vi.stubEnv('DSH_RELEASE_PUBLISH_CONFIG', configPath)
+  const adapter = { ...f.release.adapter, id: config.id, path: executablePath, sha256: sha(await readFile(executablePath)),
+    authority: config.authority, keyId: config.keyId }
+  const request = parseSourceReleaseRequest({ ...f.release, phase: 'publish', operationId: 'publish-operation',
+    adapter, plan: { ...f.release.plan, revision: 6 }, input: { artifact: f.artifact,
+      artifactStatementDigest: f.release.input.artifactStatementDigest, artifactSignature: f.release.input.artifactSignature,
+      signEvidenceDigest: 'f'.repeat(64) } })
+  const trust = { ...f.trust, releaseAdapters: { ...f.trust.releaseAdapters, publish: { ...adapter, timeoutMs: 15_000,
+    environmentAllowlist: ['DSH_RELEASE_PUBLISH_CONFIG'] } } } as PluginControlTrustConfig
+  return { ...f, publisher, publisherConfig: config, savePublisherConfig: save, publisherRequest: request, publisherTrust: trust,
+    publisherPublicKey: publisher.publicKey.export({ type: 'spki', format: 'pem' }).toString() }
+}
+
+describe.skipIf(process.platform !== 'linux')('pinned npm publish adapter', () => {
+  test('uploads the authorized scoped tarball once, signs its ACK, and independently verifies the stored bytes', async () => {
+    const f = await publisherFixture(); const receipt = await invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)
+    expect(receipt).toMatchObject({ outcome: 'passed', evidence: { kind: 'publish', immutable: true, registryReference: f.authorization.releasePolicy.registryReference } })
+    await expect(new Ed25519SourceReleaseAuthority(f.publisherPublicKey, f.publisherConfig.authority, f.publisherConfig.keyId)
+      .verify(receipt, { ...f.plan, revision: 6 }, f.publisherRequest)).resolves.toMatchObject({ outcome: 'passed' })
+    expect(f.publication.attempts).toBe(1); expect(f.publication.authorization).toBe('Bearer fixture-token')
+    expect(f.seen).toEqual(['/@dsh-enhanced%2fhealth-helper'])
+    expect(f.publication.body).toMatchObject({ access: 'public', 'dist-tags': { next: '1.2.3' }, versions: { '1.2.3': {
+      name: f.artifact.packageName, version: f.artifact.packageVersion, dist: { tarball: f.authorization.releasePolicy.registryReference,
+        integrity: f.artifact.tarballIntegrity } } } })
+    expect(f.publication.stored).toEqual(await readFile(f.artifact.tarballPath))
+    expect(JSON.stringify(receipt)).not.toContain('fixture-token')
+    expect(await invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)).toEqual(receipt)
+    expect(f.publication.attempts).toBe(1)
+    if (f.release.phase !== 'registry-verify') throw new Error('missing verifier request')
+    const verificationRequest = { ...f.release, input: { ...f.release.input, publishEvidenceDigest: receipt.evidenceDigest } }
+    const verification = await invokeSourceReleaseAdapter(f.publisherTrust, verificationRequest)
+    await expect(new Ed25519SourceReleaseAuthority(f.publicPem, f.config.authority, f.config.keyId)
+      .verify(verification, f.plan, verificationRequest)).resolves.toMatchObject({ outcome: 'passed' })
+    expect(verification.evidence).toMatchObject({ kind: 'registry-verify', downloadedSha256: f.artifact.tarballSha256, publishEvidenceDigest: receipt.evidenceDigest })
+    expect(f.publication.attempts).toBe(1); expect(f.seen).toHaveLength(3)
+  })
+  test('reconciles a dropped ACK through the independent verifier without sending another PUT', async () => {
+    const f = await publisherFixture('publish-drop'); const receipt = await invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)
+    expect(receipt).toMatchObject({ outcome: 'ambiguous', evidence: { kind: 'publish-ambiguity' } })
+    await expect(new Ed25519SourceReleaseAuthority(f.publisherPublicKey, f.publisherConfig.authority, f.publisherConfig.keyId)
+      .verify(receipt, { ...f.plan, revision: 6 }, f.publisherRequest)).resolves.toMatchObject({ outcome: 'ambiguous' })
+    expect(await invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)).toEqual(receipt)
+    const request = parseSourcePublishReconciliationRequest({ ...f.reconcile, ambiguousPublish: { operationId: receipt.operationId,
+      receiptId: receipt.receiptId, receiptDigest: controlPlaneDigest(receipt), evidenceDigest: receipt.evidenceDigest } })
+    const observation = await invokeSourcePublishReconciliationAdapter(f.publisherTrust, request)
+    await expect(new Ed25519SourcePublishReconciliationAuthority(f.publicPem, f.config.authority, f.config.keyId)
+      .verify(observation, f.plan, request)).resolves.toMatchObject({ evidence: { outcome: 'exists-match' } })
+    expect(f.publication.attempts).toBe(1); expect(f.seen).toHaveLength(3)
+  })
+  test('returns ambiguity from a durable dispatch marker when the cached receipt was lost', async () => {
+    const f = await publisherFixture(); await invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)
+    const directory = join(f.publisherConfig.stateRoot, 'operations', sha(f.publisherRequest.operationId))
+    await rm(join(directory, 'receipt.json'))
+    expect(await invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)).toMatchObject({ outcome: 'ambiguous' })
+    expect(f.publication.attempts).toBe(1)
+  })
+  test('Host cancellation closes the socket and a restarted adapter never resubmits the operation', async () => {
+    const f = await publisherFixture('publish-slow'); f.publisherTrust.releaseAdapters!.publish!.timeoutMs = 2_500
+    await expect(invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)).rejects.toThrow(/TIMED_OUT|TIMEOUT/)
+    expect(f.slow.opened).toBe(true)
+    await vi.waitFor(() => expect(f.slow.closed).toBe(true), { timeout: 1_000 })
+    expect(await invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)).toMatchObject({ outcome: 'ambiguous' })
+    expect(f.publication.attempts).toBe(1)
+  })
+  test.each(['signature', 'helper', 'token'] as const)('rejects invalid %s before dispatch', async failure => {
+    const f = await publisherFixture(); let request = f.publisherRequest
+    if (request.phase !== 'publish') throw new Error('missing publish request')
+    if (failure === 'signature') request = { ...request, input: { ...request.input, artifactSignature: Buffer.alloc(64, 1).toString('base64') } }
+    if (failure === 'helper') { f.publisherConfig.registry.helper.sha256 = '0'.repeat(64); await f.savePublisherConfig() }
+    if (failure === 'token') await chmod(f.publisherConfig.registry.tokenPath, 0o644)
+    await expect(invokeSourceReleaseAdapter(f.publisherTrust, request)).rejects.toThrow(/publish:FAILED/)
+    expect(f.publication.attempts).toBe(0)
+    await expect(lstat(join(f.publisherConfig.stateRoot, 'operations', sha(request.operationId), 'publish-dispatched.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  test('refuses changed owner tag or request identity under the same dispatched operation', async () => {
+    const f = await publisherFixture(); await invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)
+    await expect(invokeSourceReleaseAdapter(f.publisherTrust, { ...f.publisherRequest, attempt: 2 })).rejects.toThrow(/publish:FAILED/)
+    f.publisherConfig.registry.tag = 'latest'; await f.savePublisherConfig()
+    await expect(invokeSourceReleaseAdapter(f.publisherTrust, f.publisherRequest)).rejects.toThrow(/publish:FAILED/)
+    expect(f.publication.attempts).toBe(1)
+  })
+})
 
 describe.skipIf(process.platform !== 'linux')('pinned npm registry verifier adapter', () => {
   test('admits the actual npm verifier receipt into the owner catalog and replays without rewriting', async () => {

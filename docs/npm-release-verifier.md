@@ -83,4 +83,4 @@ Reproduce after building Control Plane:
 DSH_NPM_VERIFIER_LIVE=1 node scripts/e2e/npm-release-verifier-readback.mjs --output /tmp/new-npm-verifier-evidence.json
 ```
 
-This adapter supplies remote readback and signed verification. A production publish adapter, remote catalog admission, real owner key custody, finite Host enablement, monitoring and rollback remain separate WP16 work. This component does not establish a complete production release cycle or cross-task agent improvement.
+This adapter supplies remote readback and signed verification. The separate [publication component](npm-publish-adapter.md) and [npm catalog admission](npm-catalog-admission.md) now implement adjacent contracts. Authorized production publication, real owner key custody, finite Host enablement, monitoring and rollback remain WP16 work. This component does not establish a complete production release cycle or cross-task agent improvement.
