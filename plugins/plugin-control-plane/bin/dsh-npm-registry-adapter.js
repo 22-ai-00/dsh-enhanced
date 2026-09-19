@@ -1,12 +1,12 @@
 #!/usr/bin/node
-/** Owner-configured, anonymous npm verification. No publish or installation authority. */
+/** Owner-configured npm publish or independent verification. No installation authority. */
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto'
 import { closeSync, constants as fsConstants, existsSync, fsyncSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const NPM_REGISTRY_ADAPTER_VERSION = 'dsh-npm-registry-adapter-1'
-const PHASES = new Set(['registry-verify'])
+const PHASES = new Set(['registry-verify', 'publish'])
 const DIGEST = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
@@ -58,6 +58,9 @@ function ensurePrivateSubdirectory(root, components, label) {
     current = join(current, component)
     if (!existsSync(current)) mkdirSync(current, { mode: 0o700 })
     privateDirectory(current, label)
+    // Persist every ancestor directory entry before an irreversible dispatch.
+    // Also sync existing entries: a previous attempt may have stopped at mkdir.
+    fsyncDirectory(dirname(current))
   }
   return current
 }
@@ -238,7 +241,8 @@ function validateRequest(request, config) {
   const authorization = validateAuthorization(request)
   verifyAuthorizationSignature(authorization, config)
   const input = object(request.input, `${request.phase} input`)
-  exactKeys(input, ['artifact', 'artifactStatementDigest', 'artifactSignature', 'registryReference', 'publishEvidenceDigest'], 'registry verification input')
+  exactKeys(input, request.phase === 'publish' ? ['artifact', 'artifactStatementDigest', 'artifactSignature', 'signEvidenceDigest']
+    : ['artifact', 'artifactStatementDigest', 'artifactSignature', 'registryReference', 'publishEvidenceDigest'], 'registry phase input')
   return { authorization }
 }
 function verifierContext(request, config, reconcile) {
@@ -383,22 +387,28 @@ function httpsBase(value, label) {
   if (url.protocol !== 'https:' || url.username !== '' || url.password !== '' || url.href !== raw) fail(`${label} must be canonical bare HTTPS`)
   return url
 }
-function registryConfig(value) {
+function registryConfig(value, phase = 'registry-verify') {
   const item = object(value, 'npm registry config')
-  exactKeys(item, ['protocol', 'id', 'locator', 'signer', 'helper', 'caPins', 'timeoutMs'], 'npm registry config')
+  exactKeys(item, ['protocol', 'id', 'locator', 'signer', 'helper', 'caPins', 'timeoutMs',
+    ...(phase === 'publish' ? ['tokenPath', 'tag'] : [])], 'npm registry config')
   if (item.protocol !== 'npm') fail('registry protocol must be explicit npm')
   text(item.id, 'registry id', ID); httpsBase(item.locator, 'registry locator')
   if (!Number.isSafeInteger(item.timeoutMs) || item.timeoutMs < 1 || item.timeoutMs > 120_000) fail('registry timeout is invalid')
   if (!Array.isArray(item.caPins) || item.caPins.length > 16 || item.caPins.some(pin => typeof pin !== 'string' || pin.length > 16_384 || !pin.includes('BEGIN CERTIFICATE'))) fail('registry CA pins are invalid')
   const signer = loadPublicIdentity(item.signer, 'artifact signer')
+  if (phase === 'publish') {
+    text(item.tokenPath, 'publisher token path')
+    if (!isAbsolute(item.tokenPath)) fail('publisher token path must be absolute')
+    text(item.tag, 'owner publish tag', /^[a-z][a-z0-9-]{0,63}$/u)
+  }
   const opened = openPinnedFile(item.helper, 'registry helper', 1_048_576); closePinnedFile(opened)
   return { ...item, signer }
 }
-function loadConfig(environment) {
-  const path = privateFile(environment.DSH_RELEASE_REGISTRY_VERIFY_CONFIG, 'registry verifier config')
+function loadConfig(environment, phase) {
+  const path = privateFile(phase === 'publish' ? environment.DSH_RELEASE_PUBLISH_CONFIG : environment.DSH_RELEASE_REGISTRY_VERIFY_CONFIG, 'registry adapter config')
   const config = readOwnerJson(path, 'registry verifier config')
   exactKeys(config, ['schemaVersion', 'id', 'phase', 'executablePath', 'authority', 'keyId', 'privateKeyPath', 'authorizationAuthority', 'stateRoot', 'registry'], 'registry verifier config')
-  if (config.schemaVersion !== 1 || config.phase !== 'registry-verify') fail('unsupported verifier configuration')
+  if (config.schemaVersion !== 1 || config.phase !== phase || !PHASES.has(phase)) fail('unsupported registry adapter configuration')
   for (const key of ['id', 'authority', 'keyId']) text(config[key], key, ID)
   canonicalPath(config.executablePath, 'adapter executable')
   const stateRoot = canonicalPath(config.stateRoot, 'state root'); privateDirectory(stateRoot, 'state root')
@@ -406,7 +416,7 @@ function loadConfig(environment) {
   const privateKey = createPrivateKey(readBounded(privateKeyPath, 'verifier signing key', 16_384))
   if (privateKey.asymmetricKeyType !== 'ed25519') fail('verifier signing key must be Ed25519')
   const authorizationAuthority = loadPublicIdentity(config.authorizationAuthority, 'release authorization authority')
-  const registry = registryConfig(config.registry)
+  const registry = registryConfig(config.registry, phase)
   const publicKey = createPublicKey(privateKey)
   if (publicKey.equals(authorizationAuthority.publicKey) || publicKey.equals(registry.signer.publicKey)
     || (config.authority === registry.signer.authority && config.keyId === registry.signer.keyId)
@@ -427,7 +437,8 @@ function validateBindings(request, config, reconcile) {
     || request.registry.id !== registry.id || request.registry.locator !== registry.locator) fail('request binding or validity interval is invalid')
   const interpreter = request.adapter.interpreter
   if (realpathSync(interpreter.path) !== realpathSync(process.execPath) || interpreter.sha256 !== runningInterpreterDigest()) fail('request interpreter path differs from running interpreter')
-  const reference = reconcile ? request.expectedRegistryReference : request.input.registryReference
+  const reference = reconcile ? request.expectedRegistryReference : request.phase === 'publish'
+    ? authorization.releasePolicy.registryReference : request.input.registryReference
   const target = httpsBase(reference, 'registry reference'); const base = httpsBase(registry.locator, 'registry locator')
   if (target.origin !== base.origin || !target.pathname.startsWith(`${base.pathname.replace(/\/+$/u, '')}/`)
     || reference !== authorization.releasePolicy.registryReference) fail('registry reference escapes the authorized registry')
@@ -442,7 +453,8 @@ function validateBindings(request, config, reconcile) {
       || digest(artifact.authorities) !== digest(policy.authorities) || digest(artifact.requires) !== digest(policy.requires)) fail('artifact differs from owner-authorized release policy')
     if (!Number.isSafeInteger(artifact.tarballBytes) || artifact.tarballBytes < 1 || artifact.tarballBytes > MAX_ARTIFACT_BYTES) fail('artifact byte count is invalid')
     canonicalIntegrity(artifact.tarballIntegrity); text(artifact.tarballSha256, 'artifact digest', DIGEST)
-    text(request.input.publishEvidenceDigest, 'publish evidence digest', DIGEST)
+    if (request.phase === 'publish') text(request.input.signEvidenceDigest, 'sign evidence digest', DIGEST)
+    else text(request.input.publishEvidenceDigest, 'publish evidence digest', DIGEST)
   }
 }
 function canonicalIntegrity(value) {
@@ -499,6 +511,52 @@ function reconciliationEvidence(request, observed) {
     ambiguousPublishReceiptDigest: request.ambiguousPublish.receiptDigest }
   return { ...evidence, detailDigest: digest(evidence) }
 }
+async function publishReceipt(request, config, context, signed) {
+  const artifact = signed.artifact; const registry = config.registryValue
+  const reference = request.authorization.releasePolicy.registryReference
+  const ambiguous = reason => signedReceipt(request, config, context.requestDigest, {
+    kind: 'publish-ambiguity', registryId: registry.id, packageName: artifact.packageName, packageVersion: artifact.packageVersion,
+    tarballSha256: artifact.tarballSha256, detailDigest: digest({ reason }),
+  }, 'ambiguous')
+  const markerPath = join(context.directory, 'publish-dispatched.json')
+  if (existsSync(markerPath)) {
+    const marker = readOwnerJson(markerPath, 'publication dispatch marker')
+    if (marker.schemaVersion !== 1 || marker.operationId !== request.operationId || marker.requestDigest !== context.requestDigest
+      || marker.registryReference !== reference || !DIGEST.test(marker.bodySha256)) fail('publication dispatch marker is not bound to the request')
+    return ambiguous('previous-dispatch-requires-independent-reconciliation')
+  }
+  const pinned = openPinnedFile(registry.helper, 'npm publication helper', 1_048_576)
+  try {
+    const bytes = inheritedDescriptorBytes(pinned.descriptor, 'npm publication helper', 1_048_576)
+    if (sha256Bytes(bytes) !== pinned.sha256) fail('publication helper changed before import')
+    const helper = await import(`data:text/javascript;base64,${bytes.toString('base64')}`)
+    if (typeof helper.prepareNpmPublish !== 'function' || typeof helper.sendNpmPublish !== 'function') fail('npm publication helper contract is unavailable')
+    const prepared = await helper.prepareNpmPublish({ locator: registry.locator, packageName: artifact.packageName,
+      version: artifact.packageVersion, tarball: signed.tarball, tag: registry.tag, expectedRegistryReference: reference })
+    if (!Buffer.isBuffer(prepared.body) || prepared.body.length < 1 || prepared.body.length > 402_653_184) fail('publication payload exceeds its bound')
+    const base = httpsBase(registry.locator, 'registry locator'); const target = new URL(base)
+    target.pathname = `${base.pathname.replace(/\/+$/u, '')}/${artifact.packageName.replace('/', '%2f')}`
+    if (prepared.url !== target.href) fail('publication helper selected an unauthorized endpoint')
+    const tokenPath = privateFile(registry.tokenPath, 'npm publisher token', 16_384)
+    const token = new TextDecoder('utf-8', { fatal: true }).decode(readBounded(tokenPath, 'npm publisher token', 16_384)).trim()
+    if (!token || /[^\x21-\x7e]/u.test(token)) fail('npm publisher token is invalid')
+    assertUnexpired(request, 'npm publish preparation')
+    immutableJson(markerPath, { schemaVersion: 1, operationId: request.operationId, requestDigest: context.requestDigest,
+      registryReference: reference, bodySha256: sha256Bytes(prepared.body), dispatchedAt: Date.now() }, 0o600)
+    let result
+    try {
+      const timeoutMs = Math.min(registry.timeoutMs, request.authorization.expiresAt - Date.now())
+      if (timeoutMs < 1) return ambiguous('authorization-expired-after-dispatch-mark')
+      result = await helper.sendNpmPublish({ url: prepared.url, body: prepared.body, token, caPins: registry.caPins, timeoutMs })
+    } catch { return ambiguous('publication-transport-did-not-confirm') }
+    if (result?.outcome !== 'accepted' || !DIGEST.test(result.detailDigest)) return ambiguous('publication-acknowledgment-is-unknown')
+    return signedReceipt(request, config, context.requestDigest, { kind: 'publish', registryId: registry.id,
+      registryReference: reference, packageName: artifact.packageName, packageVersion: artifact.packageVersion,
+      tarballSha256: artifact.tarballSha256, tarballIntegrity: artifact.tarballIntegrity,
+      artifactStatementDigest: signed.statementDigest, artifactSignatureDigest: signed.signatureDigest,
+      signEvidenceDigest: request.input.signEvidenceDigest, immutable: true })
+  } finally { try { verifyPinnedFile(pinned, 'npm publication helper') } finally { closePinnedFile(pinned) } }
+}
 function readRequest() {
   const chunks = []; let total = 0
   while (true) {
@@ -513,7 +571,10 @@ export async function runNpmRegistryAdapter(argv = process.argv.slice(2), enviro
   if (argv.length === 1 && argv[0] === '--version') { process.stdout.write(`${NPM_REGISTRY_ADAPTER_VERSION}\n`); return }
   if (argv.length === 1 && argv[0] === '--capabilities') { process.stdout.write('{"schemaVersion":1,"artifactInput":"inherited-fd-v1"}\n'); return }
   if (argv.length !== 1 || !['release', 'reconcile'].includes(argv[0])) fail('usage: dsh-npm-registry-adapter <--version|--capabilities|release|reconcile>')
-  const config = loadConfig(environment); const request = readRequest(); const reconcile = argv[0] === 'reconcile'
+  const request = readRequest(); const reconcile = argv[0] === 'reconcile'
+  const phase = reconcile ? 'registry-verify' : request.phase
+  if (!PHASES.has(phase)) fail('unsupported npm registry phase')
+  const config = loadConfig(environment, phase)
   if (reconcile) validateReconciliationRequest(request, config)
   else validateRequest(request, config)
   validateBindings(request, config, reconcile)
@@ -524,16 +585,19 @@ export async function runNpmRegistryAdapter(argv = process.argv.slice(2), enviro
     process.stdout.write(`${JSON.stringify(context.cached)}\n`); return
   }
   try {
-    const observed = await observation(request, config)
     let receipt
-    if (reconcile) receipt = signedReconciliationReceipt(request, config, context.requestDigest, reconciliationEvidence(request, observed))
+    if (!reconcile && request.phase === 'publish') receipt = await publishReceipt(request, config, context, signed)
     else {
-      if (observed === null || observed.observedTarballSha256 !== signed.artifact.tarballSha256
-        || observed.observedTarballIntegrity !== signed.artifact.tarballIntegrity || observed.downloadedBytes !== signed.artifact.tarballBytes) fail('npm download does not match the exact signed artifact')
-      receipt = signedReceipt(request, config, context.requestDigest, { kind: 'registry-verify', registryId: request.registry.id,
-        registryReference: observed.registryReference, independentlyDownloaded: true, downloadedBytes: observed.downloadedBytes,
-        downloadedSha256: observed.observedTarballSha256, downloadedIntegrity: observed.observedTarballIntegrity,
-        artifactStatementDigest: signed.statementDigest, artifactSignatureDigest: signed.signatureDigest, publishEvidenceDigest: request.input.publishEvidenceDigest })
+      const observed = await observation(request, config)
+      if (reconcile) receipt = signedReconciliationReceipt(request, config, context.requestDigest, reconciliationEvidence(request, observed))
+      else {
+        if (observed === null || observed.observedTarballSha256 !== signed.artifact.tarballSha256
+          || observed.observedTarballIntegrity !== signed.artifact.tarballIntegrity || observed.downloadedBytes !== signed.artifact.tarballBytes) fail('npm download does not match the exact signed artifact')
+        receipt = signedReceipt(request, config, context.requestDigest, { kind: 'registry-verify', registryId: request.registry.id,
+          registryReference: observed.registryReference, independentlyDownloaded: true, downloadedBytes: observed.downloadedBytes,
+          downloadedSha256: observed.observedTarballSha256, downloadedIntegrity: observed.observedTarballIntegrity,
+          artifactStatementDigest: signed.statementDigest, artifactSignatureDigest: signed.signatureDigest, publishEvidenceDigest: request.input.publishEvidenceDigest })
+      }
     }
     immutableJson(context.receiptPath, { requestDigest: context.requestDigest, receipt }, 0o600)
     const persisted = readOwnerJson(context.receiptPath, 'persisted verifier receipt')

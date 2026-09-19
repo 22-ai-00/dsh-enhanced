@@ -27,6 +27,8 @@
 
 2026-09-19 npm catalog 准入：既有 catalog-admission adapter 通过显式 npm 配置消费独立 registry 验签回执，复用原子 CAS/journal，把精确 HTTPS tarball 引用写入 owner catalog；activation 在摘要之外核对实际下载地址。真实 npm 0.1.32 制品已完成独立验签→临时 catalog 准入→回读及同操作重放，详见[契约与证据](npm-catalog-admission.md)。授权/构建声明和 catalog 为临时夹具，未执行真实发布、生产 catalog 写入或 Host 启用；WP16、WP18 状态不变。
 
+2026-09-19 npm 发布组件：owner 配置的独立 publish 角色从已签 artifact FD 构造 npm 载荷，发送前持久化操作标记，单次 HTTPS PUT 后沿用原有发布回执/歧义/独立对账状态。真实本地 TLS 覆盖上传→独立读回、丢失 ACK、取消/重启不重发与配置漂移；两个历史 npm 包通过只读载荷构造验证。详见[发布契约与证据](npm-publish-adapter.md)。尚未执行真实 npm 写入、生产 Host 启用或完整监测/回滚，WP16、WP18 状态不变。
+
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |
 | --- | --- | --- |
 | 基本 RSI 首版：同类任务连续两轮自主修复、比较、有限试用、晋升和结果反馈 | [0.1.32 发布](evidence/release-0.1.32-2026-09-13.json)与[现代 Host 两轮真实模型运行](evidence/basic-rsi-modern-host-2026-09-13.json) | 独立隐藏留出、更多任务族及全部部署类型 |
