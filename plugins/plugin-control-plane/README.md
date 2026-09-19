@@ -2,6 +2,8 @@
 
 记录能力缺口与 ROI、匹配 owner 固定的 catalog，并在权威审批后执行可恢复的隔离激活。Agent 只能发现候选、记录缺口和创建计划；签名审批、profile 变更和 Host attestation CLI 都不会注册成模型工具。
 
+可选 `runtimeObserver` 提供 owner-only、HMAC 认证的本地 Unix socket，读取实际 Loader/Fiber 与服务归属；socket、连接和密钥缓冲区由 Cordis 注入 Fiber 管理。该配置会读取私有认证 key 并创建本地 socket，不新增模型工具或签名权限；调用方与 Host 共享受信 owner 身份，不构成同 UID/同进程隔离。详见[配置、权限与证据](../../docs/runtime-observer.md)。
+
 ## 安装
 
 ```sh

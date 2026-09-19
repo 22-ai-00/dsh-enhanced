@@ -21,6 +21,7 @@ import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth
 import { registerPluginControlTools } from './tools.js'
 import { SourceJobRuntime, validateSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
 import type { SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
+import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer.js'
 
 export interface Config {
   catalogPath: string
@@ -31,12 +32,15 @@ export interface Config {
   sourceBuild?: SourceBuildConfig
   /** Explicit, expiring Host authority for work that outlives a model wake. */
   sourceJobs?: SourceJobsConfig
+  /** Explicit owner-only observation channel; no signing or activation authority. */
+  runtimeObserver?: RuntimeObserverConfig
 }
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   sourceBuild: Schema.any(),
   sourceJobs: Schema.any(),
+  runtimeObserver: Schema.any(),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' { interface Context { pluginControlPlane: PluginControlPlaneService } }
@@ -57,7 +61,7 @@ async function canonicalTarget(dshHome: string, profile: string): Promise<Plugin
 
 export class PluginControlPlaneService extends Service {
   static Config = schema
-  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs'>> & Pick<Config, 'sourceBuild' | 'sourceJobs'>
+  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver'>
   private readonly store: ControlPlaneStore
   private readonly abort = new AbortController()
   private readonly sourceBuilds = new Set<Promise<unknown>>()
@@ -68,6 +72,7 @@ export class PluginControlPlaneService extends Service {
   constructor(ctx: Context, input: Config) {
     super(ctx, 'pluginControlPlane')
     this.config = structuredClone(schema(input)) as typeof this.config
+    if (this.config.runtimeObserver !== undefined) validateRuntimeObserverConfig(this.config.runtimeObserver)
     if (this.config.sourceBuild !== undefined) validateSourceBuildConfig(this.config.sourceBuild)
     if (this.config.sourceJobs !== undefined) {
       validateSourceJobsConfig(this.config.sourceJobs, this.config.sourceBuild)
@@ -82,6 +87,7 @@ export class PluginControlPlaneService extends Service {
       this.store.close()
     }, 'plugin-control-plane.store')
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
+    if (this.config.runtimeObserver !== undefined) installRuntimeObserver(ctx, this.config.runtimeObserver)
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never], jobsCtx => {
       jobsCtx.effect(() => {
         const current = <K extends keyof SourceJobPorts>(key: K): SourceJobPorts[K] => jobsCtx.get((key === 'automations' ? 'assistantAutomations' : 'assistantDelivery') as never) as unknown as SourceJobPorts[K]

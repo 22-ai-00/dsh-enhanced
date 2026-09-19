@@ -82,6 +82,8 @@
 
 2026-09-19 systemd reload adapter：新增随 Control Plane 发布的 owner-configured executable，复用既有 configured request、签名回执与 CAS；精确请求摘要授权、重启前持久记录、未知结果只观察对账、跨 profile 的 installation 全局 generation。真实临时 systemd user service 验证 fresh InvocationID/MainPID 与不重复重启；另在独立 home/profile 用真实 DSH 0.1.5-rc.2 的 Web 模板验证重启前后 invocation-bound 启动标记，见[真实 DSH reload 证据](evidence/systemd-real-dsh-reload-2026-09-19.json)。未加载候选插件，不能证明 candidate readiness。实现与边界见 [systemd Host attestor](systemd-host-attestor.md)；WP16、WP18 状态不变。
 
+2026-09-19 live runtime observer：Control Plane 可选 owner-only 观测通道从当前 Loader 读取精确条目、Fiber 激活实例、依赖提供者和服务归属；认证挑战与 observer-local epoch 防止把旧样本或同 UID Fiber 重启混为当前实例。真实 DSH 临时 profile 验证 Policy Fiber/service active、Host 停止后 socket 释放、下一实例禁用后 inactive，见[契约与证据](runtime-observer.md)。这是签名前的运行时观测输入；尚未接独立 readiness signer，不证明 artifact 字节、业务质量或完整生产启用。WP16、WP18 状态不变。
+
 ## 总结
 
 当前已封闭的是可信学习输入与独立任务验收基线（WP01–WP03）、2026-09-13 在真实 TraeX prospective canary 链上按原始条款关闭的独立质量验收 WP14、按原始条款验收的安装工作包 WP17，以及 2026-09-13 经四 cohort 独立复核关闭的推广后 deployment cohort 质量监控 WP15。WP04–WP13 均已有可运行的生产路径组件，但各自仍缺工作包级的真实收益、真实外部系统、部署类型或覆盖广度之一；WP16 和 WP18 还没有满足其端到端定义的生产闭环。因此，仓库当前不能宣称“18 项完成”，也不能把 `pnpm check`、fixture、合成留出、fake systemd、本地 HTTP transport 或局部真实模型运行合并推导为生产自治完成。

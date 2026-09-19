@@ -173,3 +173,16 @@ Prospective holdout profile 现有三个任务族：order-summary（v1/v2）、t
 ### Durable source-check Host integration
 
 `plugin-control-plane` optional `sourceJobs` uses the current `assistant-automations` Host executor registration, system reconcile, activation metadata and `inspectSystemOwned` production-terminal projection, plus Delivery v2 `validateOwnerRoute`. Its peer floor is `0.1.33`; capability checks still reject binaries missing these exact seams (including earlier builds carrying that same development version). These peers are late-bound through an owned nested Cordis injection. The pinned Cordis/Loader/Include baseline is unchanged. Growth's durable enqueue API is optional and checked at runtime; older control planes continue to support inline preparation only.
+
+### Live Loader runtime observer
+
+Control Plane's optional `runtimeObserver` consumes the installed Cordis 4.0.2
+and Loader 1.0.3 `resolve`, entry/Fiber fields and reflection realm/store APIs.
+Loader is an optional Host peer, late-bound through owned injection; missing
+Loader keeps observation unavailable without disabling ordinary Control Plane.
+No upstream version changes. `Fiber.uid` can survive config restart, so the
+observer also tracks current `Fiber.store` identity per observer instance.
+The same-owner Linux UDS/HMAC channel is opt-in and does not issue readiness
+receipts. Upgrade checks must retain pending injection, provider/Loader
+replacement, same-Fiber restart, isolated service ownership, async socket
+teardown and actual DSH process observation. See [contract](runtime-observer.md).
