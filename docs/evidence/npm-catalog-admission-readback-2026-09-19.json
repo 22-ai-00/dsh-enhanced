@@ -1,0 +1,540 @@
+{
+  "schemaVersion": 1,
+  "kind": "npm-catalog-admission-readback",
+  "baseCommit": "2eb5a52b807192995a5bb690c13c3296ffbbe5c0",
+  "startedAt": "2026-09-19T20:05:47.294Z",
+  "runtimeDigests": {
+    "plugins/plugin-control-plane/src/registry-fetch.ts": "a7dab385e2dfcb491b0bc1a9c62293679c8f4cbd398a999120e3a72075b40d52",
+    "plugins/plugin-control-plane/lib/registry-fetch.js": "7bdb75370620014a6d3273131d602fb42d1a8c1a0e0fc992a71be717fea72941",
+    "plugins/plugin-control-plane/src/release.ts": "5e5407bc9cbdb833165e4bef072e84de1c923ede13e15641ad19571a89b5afc3",
+    "plugins/plugin-control-plane/lib/release.js": "a8bb0bb62e4d246579812dc3876f9e39b2ef3fc867a1e417aafe65267ae41d92",
+    "plugins/plugin-control-plane/bin/dsh-npm-registry-adapter.js": "01b0a70486a6c6432d916cc5d511f98c31d62107309202e1a9155b1d3f6d33f7",
+    "scripts/e2e/npm-catalog-admission-readback.mjs": "c9dc1b2e8e80196c4f44b5419d29022186eecd7976e8694da7b9b8a75b7cbc86",
+    "plugins/plugin-control-plane/bin/dsh-local-release-adapter.js": "06a579c6cd526a1255b7725707026ad73b7ab8966af89fd36be05eb3703b5ea9",
+    "plugins/plugin-control-plane/src/catalog.ts": "29df1544cda3fbb51f64b3ee26316c0556fbbcd584f73277074615fbb8164591",
+    "plugins/plugin-control-plane/lib/catalog.js": "d6d7425cb809dd9a042d847d5521a9187558b4051f518327445914bb3fe430d6",
+    "plugins/plugin-control-plane/src/catalog-interpreter.ts": "93a5bd6a7addd7ba07d59377380df0dd3304e851afe2322c02e89a00012d1944",
+    "plugins/plugin-control-plane/lib/catalog-interpreter.js": "3c11038c0adaae4243d1411a66db7c3f9db8126360d96e75c801e14e64cfbf56"
+  },
+  "baseline": {
+    "path": "docs/evidence/release-0.1.32-2026-09-13.json",
+    "sha256": "a7fd2581b1831ccdc37ad65b88ef396bb234239479a9386134f216529f3d3774",
+    "packageName": "@dsh-enhanced/plugin-control-plane",
+    "version": "0.1.32",
+    "integrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg=="
+  },
+  "authority": "anonymous HTTPS reads and temporary local catalog writes with disposable owner/signer/verifier/catalog identities",
+  "passed": true,
+  "limits": [
+    "The authorization, signed artifact statement, SBOM and provenance are readback fixtures; they do not prove a real approved build or publication.",
+    "Only registry metadata/tarball bytes are real external observations. The local catalog and authorization are disposable; expected integrity is historical committed evidence.",
+    "No publish, install, production key use, Host activation, rollback, or WP16/WP18 completion is claimed."
+  ],
+  "verifierPublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAxK0HgSBIqjM2GCWChh2iV17Az0JHNsJv6tCvPZP0yAY=\n-----END PUBLIC KEY-----\n",
+  "ownerPublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAMNSCeQtr4PhkRM9SIGuOuIP/39HGjQnTh1X378gYTrQ=\n-----END PUBLIC KEY-----\n",
+  "artifactSignerPublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAufnair/KLgC+ulgQOgwxyj2djdry9nHtFI53D8pkesc=\n-----END PUBLIC KEY-----\n",
+  "catalogPublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAp03TnElhFyzkWdvNFtB/6IQoPI0Yzlh2SYPsQ1UFb1I=\n-----END PUBLIC KEY-----\n",
+  "release": {
+    "request": {
+      "schemaVersion": 1,
+      "kind": "dsh-source-release-request",
+      "operationId": "live-registry-verification",
+      "attempt": 1,
+      "requestedAt": 1789848349554,
+      "receiptTtlMs": 60000,
+      "installationId": "018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00",
+      "ledger": {
+        "id": "readback-ledger",
+        "path": "/tmp/npm-verifier-live-bWX5kq/ledger.sqlite"
+      },
+      "plan": {
+        "id": "readback-plan",
+        "digest": "3ff2d609c9ddab5dec98aa71a1f8ba1248419726ba0ba9397612dae4e6a0922f",
+        "revision": 7
+      },
+      "release": {
+        "id": "readback-release",
+        "fence": 1
+      },
+      "authorization": {
+        "schemaVersion": 1,
+        "kind": "dsh-source-release-authorization",
+        "authorizationId": "readback-authorization",
+        "authority": "readback-owner",
+        "keyId": "readback-owner-key",
+        "planId": "readback-plan",
+        "planDigest": "3ff2d609c9ddab5dec98aa71a1f8ba1248419726ba0ba9397612dae4e6a0922f",
+        "baseCommit": "180cdff21e4a59cb6e2db007f6dc6cb705259417",
+        "checkedTreeDigest": "5c052e55639ea5f4acd9fcbfb10e9c70f2d8db3e1cb2fb384f4d4201e62582f1",
+        "checkedPatchDigest": "96d327a156f53ccbe2560fd1b4cc5c47c4f357e3b4529f15f845922d3ef02f35",
+        "scope": [
+          "plugins/plugin-control-plane"
+        ],
+        "releasePolicy": {
+          "targetBranch": "dev",
+          "candidateId": "plugin-control-plane",
+          "packageName": "@dsh-enhanced/plugin-control-plane",
+          "packageVersion": "0.1.32",
+          "packagePath": "plugins/plugin-control-plane",
+          "dshBaseline": "0.1.0",
+          "capabilities": [
+            "readback"
+          ],
+          "authorities": [
+            "anonymous-registry-read"
+          ],
+          "requires": [],
+          "registryId": "npm-public",
+          "registryLocator": "https://registry.npmjs.org/",
+          "registryReference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+          "catalogId": "readback-catalog",
+          "catalogPath": "/tmp/npm-verifier-live-bWX5kq/catalog/catalog.json",
+          "minimumReproducibleBuilds": 2
+        },
+        "authorizedAt": 1789848348554,
+        "expiresAt": 1789848469554,
+        "signature": "W04n0kpoSaKV6LanmQTlBHg/77Weqcz7oS0/lxnWLTwBHQGH9VOa8P5TQDhhUerOtoaJ5U4dIukrTNfdvx4+Aw==",
+        "signatureDigest": "6604575c7f967c414f3d8e0ad4d6743079f2cd01c684b1dc091a2ac159890926"
+      },
+      "adapter": {
+        "id": "readback-verifier",
+        "version": "dsh-npm-registry-adapter-1",
+        "path": "/tmp/npm-verifier-live-bWX5kq/adapter.js",
+        "sha256": "01b0a70486a6c6432d916cc5d511f98c31d62107309202e1a9155b1d3f6d33f7",
+        "interpreter": {
+          "path": "/tmp/npm-verifier-live-bWX5kq/node",
+          "sha256": "0a60ee85e22e52daede22c3cd27d3185becbdab180cf3c3c935130ce7b117d45"
+        },
+        "authority": "readback-verifier",
+        "keyId": "readback-verifier-key"
+      },
+      "registry": {
+        "id": "npm-public",
+        "locator": "https://registry.npmjs.org/"
+      },
+      "catalog": {
+        "id": "readback-catalog",
+        "path": "/tmp/npm-verifier-live-bWX5kq/catalog/catalog.json"
+      },
+      "phase": "registry-verify",
+      "input": {
+        "artifact": {
+          "candidateId": "plugin-control-plane",
+          "sourceName": "plugin-control-plane",
+          "packagePath": "plugins/plugin-control-plane",
+          "packageName": "@dsh-enhanced/plugin-control-plane",
+          "packageVersion": "0.1.32",
+          "tarballPath": "/tmp/npm-verifier-live-bWX5kq/package.tgz",
+          "tarballBytes": 195256,
+          "tarballSha256": "caf9918a9bc2cf65c5eb0f5e154960137d5b0210ff2013cf2c44879bb6343266",
+          "tarballIntegrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+          "sbomPath": "/tmp/npm-verifier-live-bWX5kq/sbom.json",
+          "sbomSha256": "2ab4cbc23f5d2a2dfe43bb3f2f8c608f76d86a888dbdd76e4cca913a59787f8d",
+          "provenancePath": "/tmp/npm-verifier-live-bWX5kq/provenance.json",
+          "provenanceSha256": "2ab4cbc23f5d2a2dfe43bb3f2f8c608f76d86a888dbdd76e4cca913a59787f8d",
+          "mergedCommit": "180cdff21e4a59cb6e2db007f6dc6cb705259417",
+          "dshBaseline": "0.1.0",
+          "capabilities": [
+            "readback"
+          ],
+          "authorities": [
+            "anonymous-registry-read"
+          ],
+          "requires": []
+        },
+        "artifactStatementDigest": "b6a8b24aeb40a1cede178e7e1b87d562870d6e925bd14228082d4100d50bea49",
+        "artifactSignature": "8Br4EMuvS/4uDkwf7l34bbz6vA9/0Wa8AvO2RbHUtIdiSZ9kdh0yzeX4gUAT1UntYLk8/OCtzSrlSH/UkFdQCA==",
+        "registryReference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+        "publishEvidenceDigest": "80cbfe4c730447743a28df92a2e8325eba7dfa5956761c7377c292c9a9060b12"
+      }
+    },
+    "receipt": {
+      "schemaVersion": 1,
+      "receiptId": "receipt-2fcec8e2ec71e1734e3627877076383d",
+      "authority": "readback-verifier",
+      "keyId": "readback-verifier-key",
+      "installationId": "018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00",
+      "planId": "readback-plan",
+      "planDigest": "3ff2d609c9ddab5dec98aa71a1f8ba1248419726ba0ba9397612dae4e6a0922f",
+      "releaseId": "readback-release",
+      "fence": 1,
+      "operationId": "live-registry-verification",
+      "requestDigest": "89ab763adbc16d6b5e51bf0f116ed1b4fda1de9583ae26a5f1689b7a4660c057",
+      "phase": "registry-verify",
+      "outcome": "passed",
+      "evidence": {
+        "kind": "registry-verify",
+        "registryId": "npm-public",
+        "registryReference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+        "independentlyDownloaded": true,
+        "downloadedBytes": 195256,
+        "downloadedSha256": "caf9918a9bc2cf65c5eb0f5e154960137d5b0210ff2013cf2c44879bb6343266",
+        "downloadedIntegrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+        "artifactStatementDigest": "b6a8b24aeb40a1cede178e7e1b87d562870d6e925bd14228082d4100d50bea49",
+        "artifactSignatureDigest": "17a63aa4e4a30a92b3c3346209760085fc26d311ebda14c1226e8d239fa6a896",
+        "publishEvidenceDigest": "80cbfe4c730447743a28df92a2e8325eba7dfa5956761c7377c292c9a9060b12"
+      },
+      "evidenceDigest": "a1fd6c297c92d23256ee574717e5b223bfc923502a5f941348888dbecf1822bc",
+      "observedAt": 1789848351328,
+      "expiresAt": 1789848411328,
+      "signature": "hCyAnkQL7GftN4gM+V67iYG74V/MVPJiK5hPyyqjdxTyzq+b8Oh3lT3tiRk/OPJeX+mhmHapueE64bJdr4hmDg=="
+    }
+  },
+  "catalogAdmission": {
+    "request": {
+      "schemaVersion": 1,
+      "kind": "dsh-source-release-request",
+      "operationId": "live-catalog-admission",
+      "attempt": 1,
+      "requestedAt": 1789848351901,
+      "receiptTtlMs": 60000,
+      "installationId": "018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00",
+      "ledger": {
+        "id": "readback-ledger",
+        "path": "/tmp/npm-verifier-live-bWX5kq/ledger.sqlite"
+      },
+      "plan": {
+        "id": "readback-plan",
+        "digest": "3ff2d609c9ddab5dec98aa71a1f8ba1248419726ba0ba9397612dae4e6a0922f",
+        "revision": 8
+      },
+      "release": {
+        "id": "readback-release",
+        "fence": 1
+      },
+      "authorization": {
+        "schemaVersion": 1,
+        "kind": "dsh-source-release-authorization",
+        "authorizationId": "readback-authorization",
+        "authority": "readback-owner",
+        "keyId": "readback-owner-key",
+        "planId": "readback-plan",
+        "planDigest": "3ff2d609c9ddab5dec98aa71a1f8ba1248419726ba0ba9397612dae4e6a0922f",
+        "baseCommit": "180cdff21e4a59cb6e2db007f6dc6cb705259417",
+        "checkedTreeDigest": "5c052e55639ea5f4acd9fcbfb10e9c70f2d8db3e1cb2fb384f4d4201e62582f1",
+        "checkedPatchDigest": "96d327a156f53ccbe2560fd1b4cc5c47c4f357e3b4529f15f845922d3ef02f35",
+        "scope": [
+          "plugins/plugin-control-plane"
+        ],
+        "releasePolicy": {
+          "targetBranch": "dev",
+          "candidateId": "plugin-control-plane",
+          "packageName": "@dsh-enhanced/plugin-control-plane",
+          "packageVersion": "0.1.32",
+          "packagePath": "plugins/plugin-control-plane",
+          "dshBaseline": "0.1.0",
+          "capabilities": [
+            "readback"
+          ],
+          "authorities": [
+            "anonymous-registry-read"
+          ],
+          "requires": [],
+          "registryId": "npm-public",
+          "registryLocator": "https://registry.npmjs.org/",
+          "registryReference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+          "catalogId": "readback-catalog",
+          "catalogPath": "/tmp/npm-verifier-live-bWX5kq/catalog/catalog.json",
+          "minimumReproducibleBuilds": 2
+        },
+        "authorizedAt": 1789848348554,
+        "expiresAt": 1789848469554,
+        "signature": "W04n0kpoSaKV6LanmQTlBHg/77Weqcz7oS0/lxnWLTwBHQGH9VOa8P5TQDhhUerOtoaJ5U4dIukrTNfdvx4+Aw==",
+        "signatureDigest": "6604575c7f967c414f3d8e0ad4d6743079f2cd01c684b1dc091a2ac159890926"
+      },
+      "adapter": {
+        "id": "readback-catalog",
+        "version": "dsh-local-release-adapter-1",
+        "path": "/tmp/npm-verifier-live-bWX5kq/catalog-role/adapter.js",
+        "sha256": "06a579c6cd526a1255b7725707026ad73b7ab8966af89fd36be05eb3703b5ea9",
+        "interpreter": {
+          "path": "/tmp/npm-verifier-live-bWX5kq/node",
+          "sha256": "0a60ee85e22e52daede22c3cd27d3185becbdab180cf3c3c935130ce7b117d45"
+        },
+        "authority": "readback-catalog",
+        "keyId": "readback-catalog-key"
+      },
+      "registry": {
+        "id": "npm-public",
+        "locator": "https://registry.npmjs.org/"
+      },
+      "catalog": {
+        "id": "readback-catalog",
+        "path": "/tmp/npm-verifier-live-bWX5kq/catalog/catalog.json"
+      },
+      "phase": "catalog-admission",
+      "input": {
+        "artifact": {
+          "candidateId": "plugin-control-plane",
+          "sourceName": "plugin-control-plane",
+          "packagePath": "plugins/plugin-control-plane",
+          "packageName": "@dsh-enhanced/plugin-control-plane",
+          "packageVersion": "0.1.32",
+          "tarballPath": "/tmp/npm-verifier-live-bWX5kq/package.tgz",
+          "tarballBytes": 195256,
+          "tarballSha256": "caf9918a9bc2cf65c5eb0f5e154960137d5b0210ff2013cf2c44879bb6343266",
+          "tarballIntegrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+          "sbomPath": "/tmp/npm-verifier-live-bWX5kq/sbom.json",
+          "sbomSha256": "2ab4cbc23f5d2a2dfe43bb3f2f8c608f76d86a888dbdd76e4cca913a59787f8d",
+          "provenancePath": "/tmp/npm-verifier-live-bWX5kq/provenance.json",
+          "provenanceSha256": "2ab4cbc23f5d2a2dfe43bb3f2f8c608f76d86a888dbdd76e4cca913a59787f8d",
+          "mergedCommit": "180cdff21e4a59cb6e2db007f6dc6cb705259417",
+          "dshBaseline": "0.1.0",
+          "capabilities": [
+            "readback"
+          ],
+          "authorities": [
+            "anonymous-registry-read"
+          ],
+          "requires": []
+        },
+        "artifactStatementDigest": "b6a8b24aeb40a1cede178e7e1b87d562870d6e925bd14228082d4100d50bea49",
+        "artifactSignature": "8Br4EMuvS/4uDkwf7l34bbz6vA9/0Wa8AvO2RbHUtIdiSZ9kdh0yzeX4gUAT1UntYLk8/OCtzSrlSH/UkFdQCA==",
+        "registryReference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+        "registryVerificationRequest": {
+          "schemaVersion": 1,
+          "kind": "dsh-source-release-request",
+          "operationId": "live-registry-verification",
+          "attempt": 1,
+          "requestedAt": 1789848349554,
+          "receiptTtlMs": 60000,
+          "installationId": "018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00",
+          "ledger": {
+            "id": "readback-ledger",
+            "path": "/tmp/npm-verifier-live-bWX5kq/ledger.sqlite"
+          },
+          "plan": {
+            "id": "readback-plan",
+            "digest": "3ff2d609c9ddab5dec98aa71a1f8ba1248419726ba0ba9397612dae4e6a0922f",
+            "revision": 7
+          },
+          "release": {
+            "id": "readback-release",
+            "fence": 1
+          },
+          "authorization": {
+            "schemaVersion": 1,
+            "kind": "dsh-source-release-authorization",
+            "authorizationId": "readback-authorization",
+            "authority": "readback-owner",
+            "keyId": "readback-owner-key",
+            "planId": "readback-plan",
+            "planDigest": "3ff2d609c9ddab5dec98aa71a1f8ba1248419726ba0ba9397612dae4e6a0922f",
+            "baseCommit": "180cdff21e4a59cb6e2db007f6dc6cb705259417",
+            "checkedTreeDigest": "5c052e55639ea5f4acd9fcbfb10e9c70f2d8db3e1cb2fb384f4d4201e62582f1",
+            "checkedPatchDigest": "96d327a156f53ccbe2560fd1b4cc5c47c4f357e3b4529f15f845922d3ef02f35",
+            "scope": [
+              "plugins/plugin-control-plane"
+            ],
+            "releasePolicy": {
+              "targetBranch": "dev",
+              "candidateId": "plugin-control-plane",
+              "packageName": "@dsh-enhanced/plugin-control-plane",
+              "packageVersion": "0.1.32",
+              "packagePath": "plugins/plugin-control-plane",
+              "dshBaseline": "0.1.0",
+              "capabilities": [
+                "readback"
+              ],
+              "authorities": [
+                "anonymous-registry-read"
+              ],
+              "requires": [],
+              "registryId": "npm-public",
+              "registryLocator": "https://registry.npmjs.org/",
+              "registryReference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+              "catalogId": "readback-catalog",
+              "catalogPath": "/tmp/npm-verifier-live-bWX5kq/catalog/catalog.json",
+              "minimumReproducibleBuilds": 2
+            },
+            "authorizedAt": 1789848348554,
+            "expiresAt": 1789848469554,
+            "signature": "W04n0kpoSaKV6LanmQTlBHg/77Weqcz7oS0/lxnWLTwBHQGH9VOa8P5TQDhhUerOtoaJ5U4dIukrTNfdvx4+Aw==",
+            "signatureDigest": "6604575c7f967c414f3d8e0ad4d6743079f2cd01c684b1dc091a2ac159890926"
+          },
+          "adapter": {
+            "id": "readback-verifier",
+            "version": "dsh-npm-registry-adapter-1",
+            "path": "/tmp/npm-verifier-live-bWX5kq/adapter.js",
+            "sha256": "01b0a70486a6c6432d916cc5d511f98c31d62107309202e1a9155b1d3f6d33f7",
+            "interpreter": {
+              "path": "/tmp/npm-verifier-live-bWX5kq/node",
+              "sha256": "0a60ee85e22e52daede22c3cd27d3185becbdab180cf3c3c935130ce7b117d45"
+            },
+            "authority": "readback-verifier",
+            "keyId": "readback-verifier-key"
+          },
+          "registry": {
+            "id": "npm-public",
+            "locator": "https://registry.npmjs.org/"
+          },
+          "catalog": {
+            "id": "readback-catalog",
+            "path": "/tmp/npm-verifier-live-bWX5kq/catalog/catalog.json"
+          },
+          "phase": "registry-verify",
+          "input": {
+            "artifact": {
+              "candidateId": "plugin-control-plane",
+              "sourceName": "plugin-control-plane",
+              "packagePath": "plugins/plugin-control-plane",
+              "packageName": "@dsh-enhanced/plugin-control-plane",
+              "packageVersion": "0.1.32",
+              "tarballPath": "/tmp/npm-verifier-live-bWX5kq/package.tgz",
+              "tarballBytes": 195256,
+              "tarballSha256": "caf9918a9bc2cf65c5eb0f5e154960137d5b0210ff2013cf2c44879bb6343266",
+              "tarballIntegrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+              "sbomPath": "/tmp/npm-verifier-live-bWX5kq/sbom.json",
+              "sbomSha256": "2ab4cbc23f5d2a2dfe43bb3f2f8c608f76d86a888dbdd76e4cca913a59787f8d",
+              "provenancePath": "/tmp/npm-verifier-live-bWX5kq/provenance.json",
+              "provenanceSha256": "2ab4cbc23f5d2a2dfe43bb3f2f8c608f76d86a888dbdd76e4cca913a59787f8d",
+              "mergedCommit": "180cdff21e4a59cb6e2db007f6dc6cb705259417",
+              "dshBaseline": "0.1.0",
+              "capabilities": [
+                "readback"
+              ],
+              "authorities": [
+                "anonymous-registry-read"
+              ],
+              "requires": []
+            },
+            "artifactStatementDigest": "b6a8b24aeb40a1cede178e7e1b87d562870d6e925bd14228082d4100d50bea49",
+            "artifactSignature": "8Br4EMuvS/4uDkwf7l34bbz6vA9/0Wa8AvO2RbHUtIdiSZ9kdh0yzeX4gUAT1UntYLk8/OCtzSrlSH/UkFdQCA==",
+            "registryReference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+            "publishEvidenceDigest": "80cbfe4c730447743a28df92a2e8325eba7dfa5956761c7377c292c9a9060b12"
+          }
+        },
+        "registryVerificationReceipt": {
+          "schemaVersion": 1,
+          "receiptId": "receipt-2fcec8e2ec71e1734e3627877076383d",
+          "authority": "readback-verifier",
+          "keyId": "readback-verifier-key",
+          "installationId": "018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00",
+          "planId": "readback-plan",
+          "planDigest": "3ff2d609c9ddab5dec98aa71a1f8ba1248419726ba0ba9397612dae4e6a0922f",
+          "releaseId": "readback-release",
+          "fence": 1,
+          "operationId": "live-registry-verification",
+          "requestDigest": "89ab763adbc16d6b5e51bf0f116ed1b4fda1de9583ae26a5f1689b7a4660c057",
+          "phase": "registry-verify",
+          "outcome": "passed",
+          "evidence": {
+            "kind": "registry-verify",
+            "registryId": "npm-public",
+            "registryReference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+            "independentlyDownloaded": true,
+            "downloadedBytes": 195256,
+            "downloadedSha256": "caf9918a9bc2cf65c5eb0f5e154960137d5b0210ff2013cf2c44879bb6343266",
+            "downloadedIntegrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+            "artifactStatementDigest": "b6a8b24aeb40a1cede178e7e1b87d562870d6e925bd14228082d4100d50bea49",
+            "artifactSignatureDigest": "17a63aa4e4a30a92b3c3346209760085fc26d311ebda14c1226e8d239fa6a896",
+            "publishEvidenceDigest": "80cbfe4c730447743a28df92a2e8325eba7dfa5956761c7377c292c9a9060b12"
+          },
+          "evidenceDigest": "a1fd6c297c92d23256ee574717e5b223bfc923502a5f941348888dbecf1822bc",
+          "observedAt": 1789848351328,
+          "expiresAt": 1789848411328,
+          "signature": "hCyAnkQL7GftN4gM+V67iYG74V/MVPJiK5hPyyqjdxTyzq+b8Oh3lT3tiRk/OPJeX+mhmHapueE64bJdr4hmDg=="
+        },
+        "verificationEvidenceDigest": "a1fd6c297c92d23256ee574717e5b223bfc923502a5f941348888dbecf1822bc",
+        "expectedBeforeCatalogDigest": "e13d010a6007fa2889ca3ee584f5259a09ff8f9bf5f3ab62ff2f264eef882047",
+        "expectedAfterCatalogDigest": "0c542e4855249422bf60797450cd91faae34bd82833384d5c7a015042644f814",
+        "candidate": {
+          "id": "plugin-control-plane",
+          "package": "@dsh-enhanced/plugin-control-plane",
+          "version": "0.1.32",
+          "integrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+          "registry": {
+            "id": "npm-public",
+            "locator": "https://registry.npmjs.org/",
+            "reference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz"
+          },
+          "requires": [],
+          "dshBaseline": "0.1.0",
+          "capabilities": [
+            "readback"
+          ],
+          "authorities": [
+            "anonymous-registry-read"
+          ]
+        }
+      }
+    },
+    "receipt": {
+      "schemaVersion": 1,
+      "receiptId": "receipt-68df4b4f253931d16f0f0d52615c10dd",
+      "authority": "readback-catalog",
+      "keyId": "readback-catalog-key",
+      "installationId": "018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00",
+      "planId": "readback-plan",
+      "planDigest": "3ff2d609c9ddab5dec98aa71a1f8ba1248419726ba0ba9397612dae4e6a0922f",
+      "releaseId": "readback-release",
+      "fence": 1,
+      "operationId": "live-catalog-admission",
+      "requestDigest": "48123f6dd79af0fad92373c1f4d5f17a016fb07b19965be0c58e11f8a9bdefe6",
+      "phase": "catalog-admission",
+      "outcome": "passed",
+      "evidence": {
+        "kind": "catalog-admission",
+        "admissionId": "catalog-admission-fd41d59ec98b7b537170d1a44fa987e5162957a3247174021eaf093fa7a0dc2e",
+        "catalogId": "readback-catalog",
+        "beforeCatalogDigest": "e13d010a6007fa2889ca3ee584f5259a09ff8f9bf5f3ab62ff2f264eef882047",
+        "afterCatalogDigest": "0c542e4855249422bf60797450cd91faae34bd82833384d5c7a015042644f814",
+        "registryReference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz",
+        "artifactStatementDigest": "b6a8b24aeb40a1cede178e7e1b87d562870d6e925bd14228082d4100d50bea49",
+        "artifactSignatureDigest": "17a63aa4e4a30a92b3c3346209760085fc26d311ebda14c1226e8d239fa6a896",
+        "verificationEvidenceDigest": "a1fd6c297c92d23256ee574717e5b223bfc923502a5f941348888dbecf1822bc",
+        "candidate": {
+          "id": "plugin-control-plane",
+          "package": "@dsh-enhanced/plugin-control-plane",
+          "version": "0.1.32",
+          "integrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+          "registry": {
+            "id": "npm-public",
+            "locator": "https://registry.npmjs.org/",
+            "reference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz"
+          },
+          "requires": [],
+          "dshBaseline": "0.1.0",
+          "capabilities": [
+            "readback"
+          ],
+          "authorities": [
+            "anonymous-registry-read"
+          ]
+        }
+      },
+      "evidenceDigest": "412628004cbb8362d2565df392aaf767f5473bd6582a63298bbba4c1e323b99b",
+      "observedAt": 1789848351901,
+      "expiresAt": 1789848411901,
+      "signature": "O0m4BWN6iAtypXx4zNfU4c5pkkj04CR0zI1oFN0o4HihSuLhJQTveCRUAYnlFKefx8CQ17ApxQwsUHLJN++BCg=="
+    },
+    "observedCatalog": {
+      "schemaVersion": 1,
+      "entries": [
+        {
+          "id": "plugin-control-plane",
+          "package": "@dsh-enhanced/plugin-control-plane",
+          "version": "0.1.32",
+          "integrity": "sha512-PkYL/Ff8aq9CQMK5b957noHWojHWy6EttEup/Hhw/QzBNEkR9UD+ny/G7EsPjTloGkB7kPl3UkvsYe59zkTpYg==",
+          "registry": {
+            "id": "npm-public",
+            "locator": "https://registry.npmjs.org/",
+            "reference": "https://registry.npmjs.org/@dsh-enhanced/plugin-control-plane/-/plugin-control-plane-0.1.32.tgz"
+          },
+          "requires": [],
+          "dshBaseline": "0.1.0",
+          "capabilities": [
+            "readback"
+          ],
+          "authorities": [
+            "anonymous-registry-read"
+          ]
+        }
+      ]
+    },
+    "observedDigest": "0c542e4855249422bf60797450cd91faae34bd82833384d5c7a015042644f814",
+    "replayedSameReceipt": true
+  },
+  "disposablePrivateStateRemoved": true,
+  "finishedAt": "2026-09-19T20:05:53.782Z"
+}

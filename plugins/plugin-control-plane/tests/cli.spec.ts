@@ -280,10 +280,11 @@ async function writeHttpsTrust(value: Awaited<ReturnType<typeof fixture>>, relea
     { mode: 0o600 })
 }
 
-async function approvedHttps(value: Awaited<ReturnType<typeof fixture>>, suffix: string, locator: string, registryId = 'fixture-registry'): Promise<PluginActivationPlan> {
+async function approvedHttps(value: Awaited<ReturnType<typeof fixture>>, suffix: string, locator: string, registryId = 'fixture-registry',
+  reference = `${candidate.package}@${candidate.version}`): Promise<PluginActivationPlan> {
   const bytes = Buffer.from(`https-tarball-${suffix}`)
   const httpsCandidate = { ...candidate, integrity: `sha512-${createHash('sha512').update(bytes).digest('base64')}`,
-    registry: { id: registryId, locator, reference: `${candidate.package}@${candidate.version}` } }
+    registry: { id: registryId, locator, reference } }
   const store = new ControlPlaneStore({ path: value.state })
   const gap = store.recordGap({ idempotencyKey: `gap:${suffix}`, capability: 'health', context: `gap ${suffix}`, expectedValue: 10,
     frequency: 2, estimatedCost: 2, risk: 0 })
@@ -380,7 +381,7 @@ function releaseSuccessEvidence(request: SourceReleaseRequest): SourceReleaseRec
 // (release state is driven directly through durable store primitives), then
 // advances a ready source plan through all eight applied phases to
 // release-complete and returns the CatalogEntry the owner catalog must admit.
-async function releasedCompleteSource(value: Awaited<ReturnType<typeof fixture>>, suffix: string): Promise<{ plan: PluginSourcePlan; released: CatalogEntryShape }> {
+async function releasedCompleteSource(value: Awaited<ReturnType<typeof fixture>>, suffix: string, registry = { locator: 'https://registry.example.invalid', reference: '@dsh-enhanced/health-helper@0.1.0' }): Promise<{ plan: PluginSourcePlan; released: CatalogEntryShape }> {
   const ready = await readySource(value, suffix)
   const catalogPath = join(value.control, 'catalog.json')
   const adapterKeys = generateKeyPairSync('ed25519')
@@ -395,13 +396,13 @@ async function releasedCompleteSource(value: Awaited<ReturnType<typeof fixture>>
     releasePolicy: { targetBranch: 'main', candidateId: ready.name, packageName: '@dsh-enhanced/health-helper',
       packageVersion: '0.1.0', packagePath: 'plugins/health-helper', dshBaseline: '0.1.0-rc.8', capabilities: ['health'],
       authorities: ['read-only: health'], requires: [], registryId: 'fixture-registry',
-      registryLocator: 'https://registry.example.invalid', registryReference: '@dsh-enhanced/health-helper@0.1.0',
+      registryLocator: registry.locator, registryReference: registry.reference,
       catalogId: 'owner-catalog', catalogPath, minimumReproducibleBuilds: 2 }, authorizedAt: now, expiresAt: now + 60_000 }
   const authorization: SourceReleaseAuthorization = { ...unsigned,
     signature: sign(null, Buffer.from(sourceReleaseAuthorizationSigningPayload(unsigned)), authorizationKeys.privateKey).toString('base64') }
   await writeFile(catalogPath, `${JSON.stringify({ schemaVersion: 1, entries: [] })}\n`, { mode: 0o600 })
   await writeFile(value.trustPath, `${JSON.stringify({ ...value.trust, schemaVersion: 4, catalog: { id: 'owner-catalog', path: catalogPath },
-    releaseRegistry: { id: 'fixture-registry', locator: 'https://registry.example.invalid' }, releaseReceiptTtlMs: 30_000,
+    releaseRegistry: { id: 'fixture-registry', locator: registry.locator }, releaseReceiptTtlMs: 30_000,
     releaseAdapters: Object.fromEntries(releasePhases.map(phase => [phase, null])),
     releaseKeys: [{ authority: 'release-adapter', keyId: 'release-adapter-key', publicKeyPem: adapterPublicKeyPem }],
     releaseAuthorizationKeys: [{ authority: 'release-owner', keyId: 'release-owner-key', publicKeyPem: authorizationPublicKeyPem }] })}\n`,
@@ -414,7 +415,7 @@ async function releasedCompleteSource(value: Awaited<ReturnType<typeof fixture>>
       expect(plan.status).toBe(`awaiting-${phase}`)
       const operation = await store.prepareSourceReleaseOperation({ planId: plan.id, expectedRevision: plan.revision,
         expectedFence: plan.release!.fence, installationId, ledger: value.trust.ledger,
-        registry: { id: 'fixture-registry', locator: 'https://registry.example.invalid' }, catalog: { id: 'owner-catalog', path: catalogPath,
+        registry: { id: 'fixture-registry', locator: registry.locator }, catalog: { id: 'owner-catalog', path: catalogPath,
           ...(phase === 'catalog-admission' ? { expectedBeforeDigest: 'e'.repeat(64), expectedAfterDigest: 'f'.repeat(64) } : {}) },
         adapter: { id: `fixture-adapter-${phase}`, version: 'fixture-adapter-1', path: value.executor,
           sha256: value.trust.executor.sha256, interpreter: null, authority: 'release-adapter', keyId: 'release-adapter-key' },
@@ -697,6 +698,19 @@ describe.sequential('trusted staged CLI', () => {
     expect(replay.result.id).toBe(first.result.id)
   })
 
+  test('activation-plan preserves the released exact npm tarball reference across store restart', async () => {
+    const value = await fixture()
+    const reference = 'https://registry.example.invalid/npm/health-helper-0.1.0.tgz'
+    const { plan: source, released } = await releasedCompleteSource(value, 'activation-npm', {
+      locator: 'https://registry.example.invalid/npm/', reference })
+    const first = await runActivationPlan(value, source.id, 'web', 'activation:cli:npm')
+    expect(first.result).toMatchObject({ status: 'pending-approval', candidate: released, gapId: source.gapId })
+    expect(first.result.candidate.registry?.reference).toBe(reference)
+    const restarted = new ControlPlaneStore({ path: value.state })
+    try { expect(restarted.getPlan(first.result.id).candidate.registry?.reference).toBe(reference) }
+    finally { restarted.close() }
+  })
+
   test('activation-plan rejects a source plan that has not completed release', async () => {
     const value = await fixture(); const ready = await readySource(value, 'activation-not-released')
     await expect(runActivationPlan(value, ready.id, 'web', 'activation:cli:not-released'))
@@ -911,7 +925,7 @@ describe.sequential('trusted staged CLI', () => {
       const locator = `${server.origin}/registry`
       await writeHttpsTrust(value, { id: 'fixture-registry', locator, protocol: 'npm', caPins: [cert], tokenEnvironment: 'DSH_TEST_REGISTRY_TOKEN' })
       expect((await loadTrustConfig(value.trustPath)).releaseRegistry?.protocol).toBe('npm')
-      const plan = await approvedHttps(value, 'npm-download', locator)
+      const plan = await approvedHttps(value, 'npm-download', locator, 'fixture-registry', `${server.origin}${tarballPath}`)
       const claimedStore = new ControlPlaneStore({ path: value.state })
       const claimed = await claimedStore.claimActivation(claimInput(plan)); claimedStore.close()
       const cachePath = join(value.dshHome, 'plugin-control', 'activation-artifacts', claimed.activation!.id,
@@ -928,6 +942,37 @@ describe.sequential('trusted staged CLI', () => {
       expect(await readFile(log, 'utf8')).toMatch(new RegExp(`file:///proc/${process.pid}/fd/[0-9]+`, 'u'))
       const inspect = new ControlPlaneStore({ path: value.state })
       expect(inspect.getPlan(plan.id).status).toBe('awaiting-reload'); inspect.close()
+    } finally { await server.close() }
+  })
+
+  test('rejects an npm tarball URL substitution with the approved digest before executor invocation', async () => {
+    const value = await fixture(); const { key, cert } = await loopbackCertificate()
+    const bytes = Buffer.from('https-tarball-npm-exact-substitution')
+    const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`
+    const seen: string[] = []
+    const approvedPath = '/registry/artifacts/approved-health.tgz'
+    const substitutedPath = '/registry/artifacts/substituted-health.tgz'
+    const server = await startLocalHttpsRegistry({ key, cert, handle(request) {
+      seen.push(request.path)
+      const metadataPath = `/registry/${encodeURIComponent(candidate.package)}/${candidate.version}`
+      if (request.path === metadataPath) return { status: 200, contentType: 'application/json', bytes: Buffer.from(JSON.stringify({
+        name: candidate.package, version: candidate.version, dist: { tarball: `${server.origin}${substitutedPath}`, integrity },
+      })) }
+      if (request.path === substitutedPath) return { status: 200, bytes, contentType: 'application/octet-stream' }
+      return { status: 404 }
+    } })
+    try {
+      const locator = `${server.origin}/registry`
+      await writeHttpsTrust(value, { id: 'fixture-registry', locator, protocol: 'npm', caPins: [cert], tokenEnvironment: null })
+      const plan = await approvedHttps(value, 'npm-exact-substitution', locator, 'fixture-registry', `${server.origin}${approvedPath}`)
+      const log = join(value.root, 'executor.log')
+      await expect(withEnvironment({ ...activationEnvironment(value, plan), DSH_TEST_EXECUTOR_LOG: log },
+        () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)])))
+        .rejects.toThrow('remote artifact reference does not match the approved exact HTTPS reference')
+      expect(seen).toEqual([`/registry/${encodeURIComponent(candidate.package)}/${candidate.version}`, substitutedPath])
+      await expect(readFile(log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      const inspect = new ControlPlaneStore({ path: value.state })
+      expect(inspect.getPlan(plan.id).status).toBe('rolled-back'); inspect.close()
     } finally { await server.close() }
   })
 

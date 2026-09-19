@@ -241,6 +241,27 @@ describe('owner-private catalog CAS admission', () => {
     expect(() => previewCatalogAdmission(value.catalog, changedReference)).toThrow('immutable object')
   })
 
+  test('admits a canonical exact HTTPS npm tarball reference and rejects ambiguous or out-of-bound URLs', () => {
+    const locator = 'https://registry.example.invalid/npm'
+    const reference = 'https://registry.example.invalid/npm/artifacts/released-plugin-1.2.3.tgz'
+    const exact = candidate({ registry: { id: 'npm-registry', locator, reference } })
+    expect(() => parseCatalog({ schemaVersion: 1, entries: [exact] })).not.toThrow()
+
+    for (const rejected of [
+      'https://other.example.invalid/npm/artifacts/released-plugin-1.2.3.tgz',
+      'https://registry.example.invalid/npm//artifacts/released-plugin-1.2.3.tgz',
+      'https://registry.example.invalid/other/released-plugin-1.2.3.tgz',
+      'https://registry.example.invalid/npm/../other/released-plugin-1.2.3.tgz',
+      'https://registry.example.invalid/npm/%252e%252e/other/released-plugin-1.2.3.tgz',
+      'https://registry.example.invalid/npm/artifact.tgz?token=secret',
+      'https://registry.example.invalid/npm/artifact.tgz#fragment',
+      'https://registry.example.invalid/npm\\artifact.tgz',
+    ]) {
+      expect(() => parseCatalog({ schemaVersion: 1, entries: [candidate({ registry: { id: 'npm-registry', locator, reference: rejected } })] }))
+        .toThrow()
+    }
+  })
+
   test('fails closed when the request-bound transition journal is missing or tampered', async () => {
     const missing = await fixture(); const missingRequest = input(missing.path, missing.catalog, candidate())
     await admitCatalogCandidate(missingRequest)
