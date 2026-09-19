@@ -213,7 +213,7 @@ async function assertOwnerDirectory(path: string): Promise<void> {
  * falls back to deleting the directory.
  */
 export async function createIsolatedWorktree(input: {
-  stateRoot: string; repository: string; baseCommit: string; environment: NodeJS.ProcessEnv
+  stateRoot: string; repository: string; baseCommit: string; environment: NodeJS.ProcessEnv; worktreeName?: string
 }): Promise<IsolatedWorktree> {
   if (!/^[a-f0-9]{40}$/u.test(input.baseCommit)) throw new ControlPlaneCliError('INVALID_ARGUMENT', 'base commit must be a 40-hex commit id')
   await mkdir(input.stateRoot, { recursive: true, mode: 0o700 })
@@ -223,16 +223,27 @@ export async function createIsolatedWorktree(input: {
   const verified = (await runLocalCommand('git', ['rev-parse', '--verify', `${input.baseCommit}^{commit}`], repository,
     input.environment, { capture: true })).trim()
   if (verified !== input.baseCommit) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'base commit did not resolve to itself')
-  const worktree = await mkdtemp(join(input.stateRoot, 'worktree-'))
+  if (input.worktreeName !== undefined && !/^worktree-job-[a-f0-9]{64}$/u.test(input.worktreeName)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'invalid durable worktree name')
+  const worktree = input.worktreeName === undefined
+    ? await mkdtemp(join(input.stateRoot, 'worktree-')) : join(input.stateRoot, input.worktreeName)
+  // Exclusive creation: a crash residue never becomes a fresh build workspace.
+  if (input.worktreeName !== undefined) await mkdir(worktree, { mode: 0o700 })
   try {
     await runLocalCommand('git', ['worktree', 'add', '--detach', worktree, input.baseCommit], repository, input.environment)
   } catch (error) {
-    await rm(worktree, { recursive: true, force: true })
+    if (input.worktreeName === undefined) await rm(worktree, { recursive: true, force: true })
+    // Durable acquisition failures retain ambiguous residue for explicit
+    // reconciliation; its persisted job remains unknown and occupies capacity.
     throw error
   }
   let removed = false
   const remove = async (): Promise<void> => {
     if (removed) return
+    if (input.worktreeName !== undefined) {
+      await removeSourceJobWorktree({ ...input, repository, worktree })
+      removed = true
+      return
+    }
     removed = true
     try {
       await runLocalCommand('git', ['worktree', 'remove', '--force', worktree], repository, input.environment)
@@ -245,6 +256,43 @@ export async function createIsolatedWorktree(input: {
   return { worktree: await realpath(worktree), remove }
 }
 
+/** Host-only reconciliation of the exact durable resource; never rebuilds it. */
+export async function removeSourceJobWorktree(input: {
+  stateRoot: string; repository: string; worktree: string; baseCommit: string; environment: NodeJS.ProcessEnv
+}): Promise<void> {
+  if (dirname(input.worktree) !== resolve(input.stateRoot)
+    || !/^worktree-job-[a-f0-9]{64}$/u.test(input.worktree.slice(input.stateRoot.length + 1))) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable worktree is outside its private root')
+  }
+  await mkdir(input.stateRoot, { recursive: true, mode: 0o700 })
+  await assertOwnerDirectory(input.stateRoot)
+  const metadata = await lstat(input.worktree).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return undefined
+    throw error
+  })
+  if (metadata !== undefined) {
+    await assertOwnerDirectory(input.worktree)
+    const listing = await runLocalCommand('git', ['worktree', 'list', '--porcelain', '-z'], input.repository, input.environment, { capture: true })
+    const registration = listing.split('\0\0').find(entry => entry.split('\0')[0] === `worktree ${input.worktree}`)
+    if (registration === undefined) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable worktree registration is unproven; operator inspection required')
+    } else {
+      if (!registration.split('\0').includes(`HEAD ${input.baseCommit}`)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable worktree base identity changed')
+      const common = async (cwd: string): Promise<string> => (await runLocalCommand('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], cwd, input.environment, { capture: true })).trim()
+      const top = (await runLocalCommand('git', ['rev-parse', '--show-toplevel'], input.worktree, input.environment, { capture: true })).trim()
+      if (top !== input.worktree || await common(input.worktree) !== await common(input.repository)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable worktree repository identity changed')
+      await runLocalCommand('git', ['worktree', 'remove', '--force', input.worktree], input.repository, input.environment)
+    }
+  }
+  await runLocalCommand('git', ['worktree', 'prune'], input.repository, input.environment)
+  const listing = await runLocalCommand('git', ['worktree', 'list', '--porcelain', '-z'], input.repository, input.environment, { capture: true })
+  const remains = await lstat(input.worktree).then(() => true, (error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return false
+    throw error
+  })
+  if (remains || listing.split('\0').includes(`worktree ${input.worktree}`)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable worktree cleanup is unproven')
+}
+
 /**
  * Write a bounded set of plugin files through O_NOFOLLOW handles. Every path is
  * constrained to plugins/<name>/; the plugin root must already exist at the
@@ -255,13 +303,21 @@ export async function writeScopedPluginFiles(input: {
   worktree: string; name: string; files: readonly ScopedPluginFile[]
 }): Promise<void> {
   const { worktree, name, files } = input
+  validateScopedPluginFiles(files)
+  await writeValidatedPluginFiles(worktree, name, files)
+}
+
+/** Validate bytes and paths before persisting a durable source job. */
+export function validateScopedPluginFiles(files: readonly ScopedPluginFile[]): void {
+  if (!Array.isArray(files)) throw new ControlPlaneCliError('INVALID_ARGUMENT', 'prepared files must be an array')
   if (files.length < 1 || files.length > MAX_PREPARED_FILES) {
     throw new ControlPlaneCliError('INVALID_ARGUMENT', `a prepared modification must carry 1..${MAX_PREPARED_FILES} files`)
   }
   const seen = new Set<string>()
   let totalBytes = 0
   for (const file of files) {
-    const normalized = file.path.normalize('NFC')
+    if (file === null || typeof file !== 'object' || typeof file.path !== 'string' || typeof file.content !== 'string') throw new ControlPlaneCliError('INVALID_ARGUMENT', 'prepared file must contain text path and content')
+    const normalized: string = file.path.normalize('NFC')
     if (normalized === '' || isAbsolute(normalized) || normalized.includes('\\')
       || normalized.split('/').some(segment => segment === '' || segment === '.' || segment === '..')) {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', `prepared file path escapes the plugin tree: ${JSON.stringify(file.path)}`)
@@ -276,6 +332,9 @@ export async function writeScopedPluginFiles(input: {
     totalBytes += bytes
     if (totalBytes > MAX_PREPARED_TOTAL_BYTES) throw new ControlPlaneCliError('INVALID_ARGUMENT', `prepared files exceed the ${MAX_PREPARED_TOTAL_BYTES}-byte total bound`)
   }
+}
+
+async function writeValidatedPluginFiles(worktree: string, name: string, files: readonly ScopedPluginFile[]): Promise<void> {
   const pluginRoot = resolve(worktree, 'plugins', name)
   const rootMetadata = await lstat(pluginRoot).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT') return undefined

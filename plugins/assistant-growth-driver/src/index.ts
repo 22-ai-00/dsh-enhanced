@@ -84,7 +84,7 @@ export class AssistantGrowthDriverService extends Service {
   #flight: Promise<void> | undefined
   #active = true
   readonly #abort = new AbortController()
-  #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal } | undefined
+  #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal; available: () => boolean } | undefined
   #health: GrowthWakeHealth = { lastWakeAt: null, outcome: 'never-run', reason: null, run: null }
 
   constructor(ctx: Context, input: AssistantGrowthDriverConfig = {}) {
@@ -107,15 +107,32 @@ export class AssistantGrowthDriverService extends Service {
       // when the control plane is absent or is being replaced.
       ctx.inject(['pluginControlPlane' as never], sourceCtx => {
         const abort = new AbortController()
-        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSource'> & { gaps(limit: number): readonly GrowthSourceGap[]; canPrepareSource?: () => boolean }
+        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSource' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
+          gaps(limit: number): readonly GrowthSourceGap[]
+          canPrepareSource?: () => boolean
+          canEnqueueSource?: () => boolean
+        }
         const current = (): SourceService => {
           abort.signal.throwIfAborted()
           return sourceCtx.get('pluginControlPlane' as never) as unknown as SourceService
         }
         const provider = current()
-        if (typeof provider.canPrepareSource !== 'function' || !provider.canPrepareSource() || typeof provider.inspectSource !== 'function') return
+        const durable = this.#config.pluginSourceProposals.preparationMode === 'durable'
+        // Bind API seams, not this generation's availability. Automations can
+        // appear after the control plane: canEnqueueSource then changes from
+        // false to true without a control-plane reload.
+        const seamsPresent = durable
+          ? typeof provider.canEnqueueSource === 'function' && typeof provider.enqueueSourceJob === 'function' && typeof provider.inspectSourceJob === 'function'
+          : typeof provider.canPrepareSource === 'function' && typeof provider.prepareModifySourcePlan === 'function'
+        if (!seamsPresent || typeof provider.inspectSource !== 'function') return
         const binding = {
           signal: abort.signal,
+          available: () => {
+            try {
+              const live = current()
+              return durable ? live.canEnqueueSource?.() === true : live.canPrepareSource?.() === true
+            } catch { return false }
+          },
           port: {
             listOpenGaps: () => current().gaps(50),
             inspectSource: async (input: Parameters<GrowthSourcePlanePort['inspectSource']>[0]) => {
@@ -130,6 +147,16 @@ export class AssistantGrowthDriverService extends Service {
                 assertCurrent: () => { signal.throwIfAborted(); current(); input.assertCurrent() },
               })
             },
+            enqueueSourceJob: async (input: Parameters<GrowthSourcePlanePort['enqueueSourceJob']>[0]) => {
+              const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
+              // Do not add route/configuration/timeout fields here. The
+              // control-plane durable authority owns those independently.
+              return current().enqueueSourceJob({ ...input, signal,
+                assertCurrent: () => { signal.throwIfAborted(); current(); input.assertCurrent() },
+              })
+            },
+            inspectSourceJob: (input: Parameters<GrowthSourcePlanePort['inspectSourceJob']>[0]) =>
+              current().inspectSourceJob(input),
           } satisfies GrowthSourcePlanePort,
         }
         this.#sourceBinding = binding
@@ -234,7 +261,8 @@ export class AssistantGrowthDriverService extends Service {
 
     try {
       agentSubmitted = true
-      const source = this.#sourceBinding
+      const bound = this.#sourceBinding
+      const source = bound !== undefined && bound.available() ? bound : undefined
       const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, goals, skills,
         ...(source === undefined ? {} : { sourcePlane: source.port }),
         signal: source === undefined ? this.#abort.signal : AbortSignal.any([this.#abort.signal, source.signal]),

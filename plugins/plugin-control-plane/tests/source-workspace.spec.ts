@@ -11,6 +11,7 @@ import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { lstatSync } from 'node:fs'
 import { Context, Service } from '@deepseek-ai/cordis'
+import type { AssistantAutomationsService, HostAutomationExecutor } from '@dsh-enhanced/assistant-automations'
 import { afterAll, afterEach, beforeEach, describe as baseDescribe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload } from '../src/approval.ts'
 import { runPluginControl } from '../src/cli.ts'
@@ -317,6 +318,62 @@ afterEach(async () => {
 afterAll(async () => { if (cachedInterpreterRoot !== undefined) await rm(cachedInterpreterRoot, { recursive: true, force: true }) })
 
 describe.sequential('prepared modify source workspaces (engineering-layer, not vendor evidence)', () => {
+  it('late-binds durable source jobs through the default Cordis service and drains an old peer executor', async () => {
+    const value = await trustFixture()
+    const shell = await installFakePnpm(value.root)
+    const source = await modifyRepositoryFixture(value.root)
+    const ctx = new Context(); contexts.push(ctx)
+    new ToolsStub(ctx)
+    const config = {
+      catalogPath: join(value.control, 'catalog.json'), statePath: value.statePath, trustPath: value.trustPath,
+      sourceBuild: { dockerPath: join(shell.binDir, 'docker'), image: 'fixture/source-build@sha256:' + 'a'.repeat(64), timeoutMs: 180_000, memoryMiB: 256, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 65_536 },
+      sourceJobs: { authorityId: 'source-jobs-fixture', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: source.repository,
+        ownerRouteId: 'route-1', principalId: 'owner-1', workspace: value.root, preset: 'primary', budgetId: 'source-runs', budgetAmount: 1 },
+    }
+    const mounted = ctx.plugin(PluginControlPlaneService, config)
+    await mounted
+    const service = ctx.get('pluginControlPlane') as PluginControlPlaneService
+    expect(service.canEnqueueSource()).toBe(false)
+
+    let executor: HostAutomationExecutor | undefined
+    let activation: { definitionHash: string; activationNonce: string; ownerRouteId: string } | undefined
+    const automations = {
+      registerHostExecutor(value: HostAutomationExecutor): () => void { executor = value; return () => { executor = undefined } },
+      reconcileSystem(input: Parameters<AssistantAutomationsService['reconcileSystem']>[0]): ReturnType<AssistantAutomationsService['reconcileSystem']> {
+        if (input.desiredStatus === 'paused') activation = { definitionHash: 'a'.repeat(64), activationNonce: input.definition.execution!.activationNonce, ownerRouteId: input.definition.execution!.ownerRouteId }
+        return {} as ReturnType<AssistantAutomationsService['reconcileSystem']>
+      },
+      inspectSystemOwnedActivation(): ReturnType<AssistantAutomationsService['inspectSystemOwnedActivation']> { return activation },
+      inspectSystemOwned(): ReturnType<AssistantAutomationsService['inspectSystemOwned']> {
+        return { latestTerminalRuns: {} } as ReturnType<AssistantAutomationsService['inspectSystemOwned']>
+      },
+    } satisfies Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
+    const delivery = { validateOwnerRoute: () => ({ receiptVersion: 2 as const, authorityId: 'route-1', authorityHash: 'b'.repeat(64), principalId: 'owner-1',
+      principalRecordId: 'record-1', principalVersion: 1, workspace: value.root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }) }
+    const peer = ctx.plugin({ name: 'source-jobs-peers', apply(peerCtx) {
+      peerCtx.provide('assistantAutomations' as never, automations as never)
+      peerCtx.provide('assistantDelivery' as never, delivery as never)
+    } })
+    await peer
+    await vi.waitFor(() => expect(service.canEnqueueSource()).toBe(true))
+    const gap = await recordGap(service, 'durable-late-bind')
+    const job = await service.enqueueSourceJob({ gapId: gap.id, name: 'health-helper', repository: source.repository,
+      files: [{ path: 'src/index.ts', content: '// queued only\n' }], idempotencyKey: 'durable:late-bind', expectedBaseCommit: source.head, ttlMs: 900_000,
+      owner: { ownerRouteId: 'route-1', principalId: 'owner-1', principalRecordId: 'record-1', principalVersion: 1, workspace: value.root, preset: 'primary' },
+      signal: new AbortController().signal, assertCurrent: () => undefined })
+    expect(job.status).toBe('queued')
+    expect(executor).toBeDefined()
+    expect(await readFile(shell.logPath, 'utf8').catch(() => '')).toBe('')
+    const captured = executor!
+    await peer.dispose()
+    expect(service.canEnqueueSource()).toBe(false)
+    const result = await captured.execute({ occurrenceId: 'old-peer', automationId: job.id, definitionHash: activation!.definitionHash,
+      executionMode: 'production', targetScope: { workspace: value.root, preset: 'primary' }, principal: 'owner-1', ownerRouteId: 'route-1',
+      activationNonce: activation!.activationNonce, catalogDigest: captured.descriptor.catalogDigest, signal: new AbortController().signal })
+    expect(result.outcome).toBe('failed')
+    await ctx.fiber.dispose()
+  })
+
   it('rejects scoped file paths that escape, duplicate or exceed the bounds', async () => {
     const value = await trustFixture()
     const source = await modifyRepositoryFixture(value.root)

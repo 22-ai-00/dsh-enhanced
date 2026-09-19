@@ -175,17 +175,45 @@ sourceBuild:
   outputBytes: 65536
 ```
 
-`sourceBuild.profile` defaults to `standard`, whose existing maximum build timeout is 4 minutes and whose `/tmp` tmpfs is fixed at 32 MiB. An owner may explicitly set `profile: repository` for a full repository `pnpm check`; only that profile permits a timeout up to 30 minutes, memory up to 16 GiB, 16 CPUs, 1024 PIDs, an 8 GiB workspace tmpfs and a 4 GiB `/tmp` tmpfs (default 2 GiB). The repository profile explicitly permits execution from both bounded tmpfs mounts, needed by native build tools and temporary executable test fixtures; the standard profile retains Docker’s default no-exec mounts. The repository profile also fixes `CI=true` and `VITEST_MAX_WORKERS=1` inside the container. The caller cannot select a profile or increase these limits: its timeout is capped by the owner configuration. Cancellation, deadline expiry, output overflow, or Fiber disposal kills the preparation client, waits for archive/build processes, and proves named-container absence before any pending plan is stored. There is no durable resume for an interrupted preparation.
+`sourceBuild.profile` defaults to `standard`, whose existing maximum build timeout is 4 minutes and whose `/tmp` tmpfs is fixed at 32 MiB. An owner may explicitly set `profile: repository` for a full repository `pnpm check`; only that profile permits a timeout up to 30 minutes, memory up to 16 GiB, 16 CPUs, 1024 PIDs, an 8 GiB workspace tmpfs and a 4 GiB `/tmp` tmpfs (default 2 GiB). The repository profile explicitly permits execution from both bounded tmpfs mounts, needed by native build tools and temporary executable test fixtures; the standard profile retains Docker’s default no-exec mounts. The repository profile also fixes `CI=true` and `VITEST_MAX_WORKERS=1` inside the container. The caller cannot select a profile or increase these limits: its timeout is capped by the owner configuration. Cancellation, deadline expiry, output overflow, or Fiber disposal kills the preparation client, waits for archive/build processes, and proves named-container absence before any pending plan is stored. Interrupted builds are never automatically replayed; the optional durable Host lane below records their status and resource identity.
 
 `repositorySandbox: { seccompPath: /absolute/owner/path/source-builder-seccomp.json }` is a separate repository-only opt-in for the existing nested Bubblewrap integration tests. It requires the approved profile digest and Docker Server `29.4.1/linux/amd64`; other bytes or runtimes fail before candidate execution. It permits additional namespace/mount syscalls, removes Docker's masked/read-only system-path lists, and hides `/sys` behind an empty read-only tmpfs. This expands the outer container's `/proc` visibility and kernel surface; it is not equivalent to Docker's default policy. UID 65534, zero capabilities, no-new-privileges, offline execution, read-only root, and no Host bind mounts remain mandatory. See the [profile provenance and limits](../../scripts/isolation/README.md#nested-sandbox-profile). Omitting this option retains Docker's default system-path restrictions, including in repository mode.
 
 `dockerPath` 必须是 canonical、owner/root-owned 且不可被 group/world 写的可执行文件。镜像要包含 UID 65534 可执行的 Node、pnpm 和可用的离线 store；pnpm 的 cache 必须定位到可写 tmpfs；离线 store 由镜像中的只读种子复制到 workspace tmpfs，供 pnpm 11 写入其 SQLite 索引；未配置时 `canPrepareSource()` 返回 false，修改准备请求 fail closed。
 
-完整仓库镜像的 owner 构建脚本见 [source builder](../../scripts/isolation/README.md)。它只传入依赖清单和 lockfile，在联网构建阶段预取依赖；候选源码进入容器时仍禁网、无 Host 挂载。`repository` profile 仅扩大 owner 配置的检查预算，不延长 Growth Driver 的 5 分钟授权。当前没有把长检查转成可恢复后台作业的桥接，因此不能据此宣称模型已支持长时间仓库修复。
+完整仓库镜像的 owner 构建脚本见 [source builder](../../scripts/isolation/README.md)。它只传入依赖清单和 lockfile，在联网构建阶段预取依赖；候选源码进入容器时仍禁网、无 Host 挂载。`repository` profile 仅扩大 owner 配置的检查预算，不延长 Growth Driver 的 5 分钟授权。长检查可通过下述持久 Host 任务提交；入队不代表检查通过或源码已改进。
+
+### 持久源码检查任务（可选）
+
+Growth Driver 设置 `pluginSourceProposals.preparationMode: durable` 后，`plugin_source_prepare` 只提交任务，`plugin_source_job_status` 回读当前 owner 的状态。控制面还必须配置独立于模型回合的有限 Host 授权：
+
+```yaml
+sourceJobs:
+  authorityId: repo-source-checks-2026-09
+  expiresAt: 1790000000000 # 示例：替换为 owner 批准的绝对 Unix 毫秒期限
+  maxSubmissions: 3
+  repository: /absolute/canonical/repository
+  ownerRouteId: configured-delivery-owner-route
+  principalId: configured-principal
+  workspace: /absolute/owner/workspace
+  preset: primary
+  budgetId: source-check-runs
+  budgetAmount: 1
+```
+
+还需安装兼容的 `assistant-delivery` 和 `assistant-automations` Host peers；后者显式开启现有 scheduler，Policy 允许该 scope 下的 `plugin-control-plane-source` reconcile 及对应后台任务 execute，并配置 `source-check-runs` 的 `automation-runs` 预算。此预算计执行次数，不代表模型 token/费用预算。缺少 peer 或授权时不执行。`sourceBuild` 决定镜像和检查上限，模型不能改写队列权限、owner、路径或构建限制。
+
+任务先冻结完整 Delivery v2 回执、trust 摘要、gap revision/digest、read base、文件内容及构建配置，再以 **paused → 绑定规范化 definition hash → active** 注册到 Automations 的一次性 Host executor。源码只存控制面私有 SQLite；Automation definition 和模型状态投影不包含文件内容。相同 authority 的期限、配置和累计提交上限不可重置；同 key 不同内容拒绝。全账本同时最多一个 `queued/running/unknown` 任务。
+
+模型回合结束不会取消已接受的 Host 任务。Host 自己受授权绝对期限、构建时限、Automations lease、取消和 Cordis provider 生命周期约束。成功时，job `prepared`、gap claim 和已有 `pending-approval` plan 在同一 SQLite 事务提交。原模型授权仍最多 300 秒；不新增模型循环或调度器。
+
+重启重接尚未 claim 的任务；已 claim 的任务转为 `unknown`，保留资源槽且不自动重跑。状态回读、入队和启动时核对 Automations 的精确生产终态，将预算/Policy 等在 executor 前发生的终结写回 `failed`。Host-only `reconcileSourceJob({id, owner})` 可对 `unknown` 进行资源核对：按容器标签、镜像、ID 删除并证明不存在，验证 worktree 的 Git 注册、base 和仓库归属后删除。归属不明、daemon 不可达或残留路径未注册时保留 `unknown`，需要 operator 检查；同一 route/principal record/version/workspace/preset 的新会话绑定仍可查看和清理旧任务；执行继续要求原完整回执精确匹配。该方法不暴露给模型，也不重跑候选。每个 statePath 使用单一控制面 Host 实例。
+
+这些能力只准备待审批提案。工程层 native scheduler/Policy/SQLite 集成测试不等于真实模型执行整仓修复或生产发布验收。
 
 成功准备返回 `pending-approval`，不会自动发布。owner 按已有签名审批流程处理后，用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest，才能进入人工 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 13 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 14 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 owner 可以用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。publish 超时等不确定结果必须先进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。
 

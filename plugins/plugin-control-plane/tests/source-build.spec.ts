@@ -5,7 +5,7 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/p
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from '../src/source-build.ts'
+import { removeSourceJobContainer, runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from '../src/source-build.ts'
 
 const indices = vi.hoisted(() => [] as string[])
 vi.mock('node:fs/promises', async importOriginal => {
@@ -187,4 +187,36 @@ it('removes the immutable index if malformed package metadata fails before Docke
   await expect(runDockerPreparedChecks(f.input)).rejects.toThrow()
   expect(indices).toHaveLength(1)
   await expect(lstat(indices[0]!)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('records the preallocated job identity and refuses to reuse an existing durable container', async () => {
+  const sourceJob = { id: `source-job-${'b'.repeat(64)}`, containerName: `dsh-source-job-${'b'.repeat(64)}` }
+  const f = await fixture()
+  const result = await runDockerPreparedChecks({ ...f.input, sourceJob })
+  expect(result.evidence.commands[0]!.args).toContain(`dsh.source.job=${sourceJob.id}`)
+  expect(result.evidence.commands[0]!.args).toContain(sourceJob.containerName)
+  const occupied = await fixture(marker, 'echo occupied')
+  await expect(runDockerPreparedChecks({ ...occupied.input, sourceJob })).rejects.toThrow(/already exists/)
+  await expect(lstat(`${occupied.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
+  for (const index of indices) await expect(lstat(index)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it.each([true, false])('reconciles only the exact image and job labeled container (matching=%s)', async matching => {
+  const f = await fixture()
+  const job = { id: `source-job-${'b'.repeat(64)}`, containerName: `dsh-source-job-${'b'.repeat(64)}` }
+  const containerId = 'c'.repeat(64)
+  const inspected = JSON.stringify([containerId, `/${job.containerName}`, f.config.image, matching ? job.id : 'foreign-job'])
+  await writeFile(f.dockerPath, `#!/bin/sh\ncase "$1" in\ncontainer) if [ ! -f "$0.removed" ]; then echo container; fi;;\ninspect) printf '%s\\n' '${inspected}';;\nrm) printf '%s\\n' "$@" > "$0.removed";;\nesac\n`)
+  if (matching) {
+    await removeSourceJobContainer(f.config, job)
+    expect(await readFile(`${f.dockerPath}.removed`, 'utf8')).toBe(`rm\n-f\n${containerId}\n`)
+  } else {
+    await expect(removeSourceJobContainer(f.config, job)).rejects.toThrow(/ownership mismatch/)
+    await expect(lstat(`${f.dockerPath}.removed`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }
+})
+
+it('keeps durable resource state unknown when daemon absence cannot be established', async () => {
+  const f = await fixture(marker, 'exit 1')
+  await expect(removeSourceJobContainer(f.config, { id: `source-job-${'b'.repeat(64)}`, containerName: `dsh-source-job-${'b'.repeat(64)}` })).rejects.toThrow(/absence is unproven/)
 })
