@@ -521,7 +521,7 @@ async function downloadRegistryArtifact(trust: PluginControlTrustConfig, plan: P
   }
   let bytes: Buffer
   try {
-    ({ bytes } = await fetchRegistryArtifact({ registry: bound, packageName: item.package, version: item.version }, process.env))
+    ({ bytes } = await fetchRegistryArtifact({ registry: bound, packageName: item.package, version: item.version, expectedIntegrity: item.integrity }, process.env))
   } catch (error) {
     if (error instanceof RegistryFetchError) throw new ControlPlaneCliError('ACTIVATION_BINDING', error.message)
     throw error

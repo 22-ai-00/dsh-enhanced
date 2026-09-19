@@ -891,6 +891,69 @@ describe.sequential('trusted staged CLI', () => {
     } finally { await server.close() }
   })
 
+  test('stages an npm exact version through approved metadata and the descriptor cache', async () => {
+    const value = await fixture(); const { key, cert } = await loopbackCertificate()
+    const bytes = Buffer.from('https-tarball-npm-download')
+    const integrity = `sha512-${createHash('sha512').update(bytes).digest('base64')}`
+    const seen: Array<{ path: string; authorization: string | undefined }> = []
+    const metadataPath = `/registry/${encodeURIComponent(candidate.package)}/${candidate.version}`
+    const tarballPath = '/registry/artifacts/health.tgz'
+    const server = await startLocalHttpsRegistry({ key, cert, handle(request) {
+      seen.push({ path: request.path, authorization: request.authorization })
+      if (request.authorization !== 'Bearer fixture-token') return { status: 401 }
+      if (request.path === metadataPath) return { status: 200, contentType: 'application/json',
+        bytes: Buffer.from(JSON.stringify({ name: candidate.package, version: candidate.version,
+          dist: { tarball: `${server.origin}${tarballPath}`, integrity } })) }
+      if (request.path === tarballPath) return { status: 200, bytes, contentType: 'application/octet-stream' }
+      return { status: 404 }
+    } })
+    try {
+      const locator = `${server.origin}/registry`
+      await writeHttpsTrust(value, { id: 'fixture-registry', locator, protocol: 'npm', caPins: [cert], tokenEnvironment: 'DSH_TEST_REGISTRY_TOKEN' })
+      expect((await loadTrustConfig(value.trustPath)).releaseRegistry?.protocol).toBe('npm')
+      const plan = await approvedHttps(value, 'npm-download', locator)
+      const claimedStore = new ControlPlaneStore({ path: value.state })
+      const claimed = await claimedStore.claimActivation(claimInput(plan)); claimedStore.close()
+      const cachePath = join(value.dshHome, 'plugin-control', 'activation-artifacts', claimed.activation!.id,
+        `${createHash('sha256').update(candidate.package).digest('hex')}.tgz`)
+      const raw = new DatabaseSync(value.state); raw.prepare('UPDATE activation_plans SET activation_lease_until = 0 WHERE id = ?').run(plan.id); raw.close()
+      const log = join(value.root, 'executor.log')
+      await withEnvironment({ DSH_HOME: value.dshHome, DSH_TEST_REGISTRY_TOKEN: 'fixture-token',
+        DSH_TEST_LOCK: localLockfileForDescriptor(claimed), DSH_TEST_PACKAGES: installedPackages(claimed), DSH_TEST_EXECUTOR_LOG: log },
+      () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(claimed.revision)]))
+      expect(seen).toEqual([{ path: metadataPath, authorization: 'Bearer fixture-token' },
+        { path: tarballPath, authorization: 'Bearer fixture-token' }])
+      expect(await readFile(cachePath)).toEqual(bytes)
+      expect((await stat(cachePath)).mode & 0o777).toBe(0o400)
+      expect(await readFile(log, 'utf8')).toMatch(new RegExp(`file:///proc/${process.pid}/fd/[0-9]+`, 'u'))
+      const inspect = new ControlPlaneStore({ path: value.state })
+      expect(inspect.getPlan(plan.id).status).toBe('awaiting-reload'); inspect.close()
+    } finally { await server.close() }
+  })
+
+  test('rejects npm metadata that substitutes another integrity before download or executor invocation', async () => {
+    const value = await fixture(); const { key, cert } = await loopbackCertificate()
+    const seen: string[] = []
+    const server = await startLocalHttpsRegistry({ key, cert, handle(request) {
+      seen.push(request.path)
+      return { status: 200, contentType: 'application/json', bytes: Buffer.from(JSON.stringify({
+        name: candidate.package, version: candidate.version, dist: { tarball: `${server.origin}/artifact.tgz`,
+          integrity: `sha512-${createHash('sha512').update('substitute').digest('base64')}` },
+      })) }
+    } })
+    try {
+      await writeHttpsTrust(value, { id: 'fixture-registry', locator: server.origin, protocol: 'npm', caPins: [cert], tokenEnvironment: null })
+      const plan = await approvedHttps(value, 'npm-substituted', server.origin)
+      const log = join(value.root, 'executor.log')
+      await expect(withEnvironment({ ...activationEnvironment(value, plan), DSH_TEST_EXECUTOR_LOG: log },
+        () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)]))).rejects.toThrow(/integrity/u)
+      expect(seen).toEqual([`/${encodeURIComponent(candidate.package)}/${candidate.version}`])
+      await expect(readFile(log, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+      const inspect = new ControlPlaneStore({ path: value.state })
+      expect(inspect.getPlan(plan.id).status).toBe('rolled-back'); inspect.close()
+    } finally { await server.close() }
+  })
+
   test('rejects registry bytes that do not match the approved integrity before any executor invocation', async () => {
     const value = await fixture()
     const { key, cert } = await loopbackCertificate()
@@ -964,9 +1027,20 @@ describe.sequential('trusted staged CLI', () => {
     } finally { await server.close() }
   })
 
+  test('retains the legacy registry trust shape when protocol is omitted', async () => {
+    const value = await fixture()
+    const registry = { id: 'fixture-registry', locator: 'https://registry.example.invalid' }
+    await writeHttpsTrust(value, registry)
+    expect((await loadTrustConfig(value.trustPath)).releaseRegistry).toEqual({ ...registry, caPins: [], tokenEnvironment: null })
+    await writeHttpsTrust(value, { ...registry, protocol: 'dsh' })
+    expect((await loadTrustConfig(value.trustPath)).releaseRegistry?.protocol).toBe('dsh')
+  })
+
   test('refuses trust roots whose release registry binding is malformed', async () => {
     const value = await fixture()
     const malformed: Array<{ label: string; registry: Record<string, unknown>; message: string }> = [
+      { label: 'protocol', registry: { id: 'fixture-registry', locator: 'https://registry.example.invalid', protocol: 'auto' }, message: 'protocol must be dsh or npm' },
+      { label: 'null-protocol', registry: { id: 'fixture-registry', locator: 'https://registry.example.invalid', protocol: null }, message: 'protocol must be dsh or npm' },
       { label: 'query', registry: { id: 'fixture-registry', locator: 'https://registry.example.invalid/?token=x' }, message: 'bare https origin/path' },
       { label: 'http', registry: { id: 'fixture-registry', locator: 'http://registry.example.invalid' }, message: 'bare https origin/path' },
       { label: 'credentials', registry: { id: 'fixture-registry', locator: 'https://owner:secret@registry.example.invalid' }, message: 'bare https origin/path' },
