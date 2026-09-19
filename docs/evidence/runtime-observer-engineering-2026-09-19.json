@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "kind": "runtime-observer-engineering-validation",
+  "date": "2026-09-19",
+  "baseCommit": "199ebd165d980cfb0f55c71a2ae165984a9f8288",
+  "capability": "Optional owner-authenticated live Loader/Fiber observation within the existing Control Plane bundle, with Cordis-owned socket lifecycle and no signing or activation authority.",
+  "runtimeDigests": {
+    "plugins/plugin-control-plane/src/runtime-observer.ts": "351a3607206de4d496f33a1d3ef7a933172a917bca2f6bf09cab63d6de25e4fb",
+    "plugins/plugin-control-plane/src/service.ts": "c5a352b95c362499aee5e71504d366e9065c9ba41af8f54210cdb24e6321d1fc",
+    "plugins/plugin-control-plane/src/index.ts": "e50eab929cc8106b6ab703dcd2bcbdaf4190b2e5d81e731840d87a9f91b2b6d4",
+    "plugins/plugin-control-plane/lib/runtime-observer.js": "62a3c7ec348649f1f725eef78102abefe4693751a6ba3f63f87f1af70fe6d3f5",
+    "plugins/plugin-control-plane/tests/runtime-observer.spec.ts": "6eb86e755299eed78a0545f6ebf2da790442a8c6232c2eae4e3121edee2b938c",
+    "plugins/plugin-control-plane/package.json": "1b09b4bb0a4887ae6c8a5fec8d1fb6af85dbd006f4f1c61ed50f85a218be160f",
+    "pnpm-lock.yaml": "8241f8e446c1ef09c964c55537a31dd479a2f0444d71d192f01a158430e1da09",
+    "scripts/e2e/runtime-observer-real-dsh.mjs": "43d77b88ba27f31ca2bafc848b14db2f8399bd0ecf5f2072ef01458af096e331"
+  },
+  "pinnedRuntime": {
+    "cordis": "4.0.2",
+    "loader": "1.0.3",
+    "include": "1.0.7",
+    "controlPlaneCordisPeer": "^4.0.2",
+    "optionalLoaderPeer": "^1.0.3",
+    "node": "24.7.0"
+  },
+  "rootCheck": {
+    "command": "pnpm check",
+    "exitCode": 0,
+    "logSha256": "f167f9cdc5b574629555ab27ddb8081097c6808ca29530afd1700597d851222d",
+    "passed": 6002,
+    "skipped": 44,
+    "summaries": 36,
+    "controlPlanePassed": 413,
+    "controlPlaneFiles": 24,
+    "dryRunPacks": 35,
+    "packInspection": [
+      "lib/runtime-observer.js",
+      "lib/runtime-observer.d.ts",
+      "lib/service.js",
+      "lib/index.js",
+      "bin/dsh-plugin-control.js",
+      "bin/dsh-systemd-host-attestor.js",
+      "cordis.patch.yml",
+      "package.json",
+      "README.md",
+      "LICENSE"
+    ],
+    "sourceCoverage": "Final root package tests, build and pack include the root-provider uid=0 fix and all 16 added tests. Final focused lint/typecheck cover those changes; final validate covers the tightened Cordis peer floor added after root gate startup. Documentation and evidence were finalized after the gate."
+  },
+  "focusedChecks": [
+    {
+      "command": "pnpm exec vitest run tests/runtime-observer.spec.ts --testTimeout=15000",
+      "cwd": "plugins/plugin-control-plane",
+      "exitCode": 0,
+      "passed": 16,
+      "files": 1,
+      "durationSeconds": 1.66,
+      "logSha256": "d95deb78dcb7de57d016932a0a1e795eeee0399682f38dfb28e3731bc5a09af5"
+    },
+    {
+      "command": "pnpm exec oxlint --deny-warnings plugins/plugin-control-plane/src/runtime-observer.ts plugins/plugin-control-plane/tests/runtime-observer.spec.ts plugins/plugin-control-plane/src/service.ts plugins/plugin-control-plane/src/index.ts scripts/e2e/runtime-observer-real-dsh.mjs",
+      "exitCode": 0,
+      "logSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/plugin-control-plane typecheck",
+      "exitCode": 0,
+      "logSha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    },
+    {
+      "command": "pnpm run validate",
+      "exitCode": 0,
+      "plugins": 32,
+      "sharedPackages": 3,
+      "logSha256": "33fba858810dcc2d90def297b9be5b35f77b8ebfc163d53c7c124faec0f0b042"
+    }
+  ],
+  "realDshFixture": {
+    "command": "DSH_RUNTIME_OBSERVER_FIXTURE=1 DSH_RUNTIME_OBSERVER_DSH=/home/jiataorui/.npm-global/bin/dsh node scripts/e2e/runtime-observer-real-dsh.mjs --output /tmp/dsh-runtime-observer-real-final.json",
+    "exitCode": 0,
+    "evidence": "docs/evidence/runtime-observer-real-dsh-2026-09-19.json",
+    "evidenceSha256": "ff6281bf0fab68c089f5187d1045bc22c80f199084a631844a7c149c2fd1662c",
+    "runtimeDigestMapping": {
+      "observer": "plugins/plugin-control-plane/lib/runtime-observer.js",
+      "controlEntry": "plugins/plugin-control-plane/lib/index.js",
+      "candidateEntry": "plugins/assistant-policy/lib/index.js"
+    },
+    "cleanupReadback": "systemctl --user list-units --all --plain --no-legend dsh-profile-observer-fixture-* returned no units, exit 0."
+  },
+  "baseCommitCi": {
+    "url": "https://github.com/22-ai-00/dsh-enhanced/actions/runs/35472743449",
+    "headSha": "199ebd165d980cfb0f55c71a2ae165984a9f8288",
+    "jobs": {
+      "verify": "success",
+      "macos-verify": "success",
+      "windows-acp-smoke": "success"
+    },
+    "scope": "Previous systemd reload capability only, not this pending capability."
+  },
+  "independentReview": {
+    "role": "independent read-only reviewer (native explorer)",
+    "verdict": "PASS",
+    "selectionLimit": "New native worker/verifier activation was unavailable because the thread limit was reached; an existing independent explorer performed read-only review.",
+    "resolvedFinding": "Post-listen server errors now join the same idempotent teardown as owner/Loader disposal; real server error injection tests endpoint release and a fresh observer generation.",
+    "highOrBlockFindings": 0,
+    "scope": [
+      "Read-only review of Cordis ownership, exact Loader/Fiber state, provider and service realms, root provider uid=0, store epochs, authentication and bounded IPC lifecycle.",
+      "Final source/build/evidence digest mapping, real DSH fixture, focused checks, root gate and dry-run package contents; documentation explicitly excludes readiness signing and artifact/quality proof."
+    ]
+  },
+  "limits": [
+    "This component does not issue HostAttestationReceipt or advance Control Plane. Readiness signing, artifact pins and supervisor generation/request/fence binding are still required.",
+    "The HMAC channel authenticates a shared key holder, not kernel peer credentials. This version requires the trusted caller and Host to share an owner identity. It is not hostile same-UID or same-process isolation.",
+    "ACTIVE is a Loader/Fiber lifecycle fact, not plugin quality, loaded artifact byte identity or dependency version evidence. Observer-local store epochs do not count unseen intermediate transitions.",
+    "The real fixture loads built local Control Plane/Policy entries by file URL, not an npm-installed candidate. No model call, publication, production activation or complete WP16/WP18 cycle is claimed.",
+    "Unexpected Host death can leave a stale socket; only the deployment owner may remove it after establishing that the old process/listener is gone."
+  ],
+  "resolvedDevelopmentFindings": [
+    {
+      "kind": "typecheck",
+      "finding": "The pinned FiberState is an ambient const enum, unusable as a runtime import under verbatimModuleSyntax.",
+      "resolution": "Use the documented pinned ACTIVE=2 value and verify behavior against actual Cordis lifecycle tests."
+    },
+    {
+      "kind": "fixture",
+      "finding": "Pinned Loader 1.0.3 fallback bare imports resolve relative to Loader, unlike the newer sibling resolver; initial temporary-package tests failed to resolve their package.",
+      "resolution": "Tests use a real relative module entry resolved from the temporary profile, while the DSH fixture loads actual built package entries by explicit file URL. No production resolver is replaced."
+    },
+    {
+      "kind": "independent-review",
+      "finding": "Post-listen server errors did not invoke complete teardown.",
+      "resolution": "One idempotent closeTask handles owner disposal, Loader replacement and server error; a native-listener error test proves endpoint release and rebind."
+    },
+    {
+      "kind": "main-review",
+      "finding": "Root-owned Host dependencies legitimately have Fiber uid=0.",
+      "resolution": "Accept zero for active provider identities, require positive UID for a candidate entry, and cover actual root Context.provide in a regression test."
+    }
+  ]
+}

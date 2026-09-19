@@ -56,12 +56,16 @@
     "@deepseek-ai/schemastery": "catalog:"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.3",
     "@deepseek-ai/dsh-tools": ">=0.1.2-rc.1 <0.2.0",
     "@dsh-enhanced/assistant-automations": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">=0.1.33 <0.2.0"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/cordis-plugin-loader": {
+      "optional": true
+    },
     "@deepseek-ai/cordis": {
       "optional": true
     },
@@ -76,6 +80,7 @@
     }
   },
   "devDependencies": {
+    "@deepseek-ai/cordis-plugin-loader": "catalog:",
     "@deepseek-ai/cordis": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
     "@types/node": "catalog:",
