@@ -159,6 +159,8 @@ dsh-plugin-control attest \
 
 `prepareModifySourcePlan` 是另一条待审批修改路径：它只接受现有非保护插件树内的有界文件集，并用临时 Git index 生成精确 tree 后以 `git archive` stdin 传入 owner 配置的 Docker image。容器没有 Host bind mount、网络、特权或调用者环境，使用只读根、非 root UID、`cap-drop=ALL`、`no-new-privileges`、固定 CPU/内存/PID/tmpfs 限制和离线 `pnpm install --ignore-scripts`、`pnpm check`、`pnpm pack`。镜像必须由 registry manifest digest 或本地 image content ID 固定，并预热离线 pnpm store。控制面在持久化前重算 tree/patch digest；任意漂移、取消、超时或容器失败都会删除 worktree 而不创建计划。`.git`、`.gitattributes` 与 `.gitmodules` 不能通过该路径修改。
 
+`inspectSource` 只从当前 `HEAD` 的 Git objects 读取非保护插件的已跟踪普通文本文件；它不读取工作树。调用者可先请求空 `paths` 获得有界 manifest，再将返回的 `baseCommit` 用作读取和 `prepareModifySourcePlan.expectedBaseCommit` 的精确绑定。HEAD 已移动、二进制/生成/隐藏路径、symlink、submodule 或越界路径都会被拒绝。清单最多 1024 条，内容最多 64 个文件、单文件 64 KiB、合计 256 KiB；返回真实 blob 大小并支持普通可执行文本文件。整个读取请求从服务入口起受 15 秒截止时间控制；取消会终止正在运行的 Git 子进程，异步权限检查的迟到结果不再生效，Fiber 卸载等待请求收尾。
+
 Host patch config 在启用修改准备前必须提供 `sourceBuild`，例如：
 
 ```yaml

@@ -22,7 +22,7 @@ dsh --profile web --dump-config
 每次唤醒（`intervalMs > 0` 的 unref timer，或显式调用 `wake()`）：
 
 1. **Preflight（不触网、不起 Agent）**：用配置中冻结的 owner scope 经 `assistantDelivery.validateOwnerRoute` 重新锚定真实 owner route 并铸造一枚短-lived authority（寿命 `≤ maxDurationMs`，硬顶 300000ms，每次使用都重新校验 route，route 漂移即整轮作废）；校验 super-relay 契约仍 current；解析凭据引用（只验存在，不打印）；确认 policy 服务在线；可选地预留 owner 配置的后台预算。
-2. **有界后台 Agent**：照 `assistant-skills` repair-agent 的冻结范式运行——`llm/stream` 逐请求钉 provider/model/maxTokens/tools digest，`tools.guard` 白名单 + 双预算计数，system-prompt 按身份过滤，`deadline = min(expiresAt, now + maxDurationMs)` 到点 abort。刻意**不挂载任何 preset**：默认工具面恰好是下面四个 `growth_*` realm 工具；显式开启源码提案且 control-plane 服务在线且配置了构建器时增加两个 `plugin_source_*` 工具。任何其它可见工具都会在发请求前被拒绝。
+2. **有界后台 Agent**：照 `assistant-skills` repair-agent 的冻结范式运行——`llm/stream` 逐请求钉 provider/model/maxTokens/tools digest，`tools.guard` 白名单 + 双预算计数，system-prompt 按身份过滤，`deadline = min(expiresAt, now + maxDurationMs)` 到点 abort。刻意**不挂载任何 preset**：默认工具面恰好是下面四个 `growth_*` realm 工具；显式开启源码提案且 control-plane 服务在线且配置了构建器时增加三个 `plugin_source_*` 工具。任何其它可见工具都会在发请求前被拒绝。
    - `growth_list_owner_goals`：列最近的 owner-root goal（只读投影）。
    - `growth_read_verified_workflow`：读一条已完成 goal 的**脱敏**摘要；Host 独立复核 owner-root（非 subagent、无 parent session、delegationDepth=0）、whole-goal succeeded 且 quiescent，cwd/preset 精确匹配；不返回步骤参数与验收回执。
    - `growth_list_skills`：列该 owner 的 active skill 与 pending candidate，避免重名。
@@ -129,7 +129,11 @@ pluginSourceProposals:
 
 这段是 driver 完整配置的补充。DSH patch 的 `config` 为整值替换，覆盖配置时必须同时保留 `enabled`、`scope` 和其它需要的值。Policy 还需对相同 owner、workspace、preset 和 `background` initiator 授予 `execute` / `tool:plugin_source_*`。
 
-Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已有的开放 gap，再通过 `plugin_source_prepare` 提交 `gap_id`、`plugin_name` 和插件相对路径的文件内容。这些 gap 是控制面现有记录，并不携带逐条 owner-route 来源证明；多 owner 部署须隔离各自的账本。每轮最多枚举 `maxReviewsPerWake` 条、提交 `maxPlansPerWake` 次；模型不能给仓库路径、命令、镜像、环境、TTL、审批或发布参数。每次最多 64 个文件、单文件 64 KiB、合计 256 KiB。安全根插件由 driver 和控制面同时拒绝。
+Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已有的开放 gap，通过 `plugin_source_read` 列出并读取目标插件在 Git 提交中的文本源码，最后通过 `plugin_source_prepare` 提交 `gap_id`、`plugin_name` 和插件相对路径的文件内容。这些 gap 是控制面现有记录，并不携带逐条 owner-route 来源证明；多 owner 部署须隔离各自的账本。每轮最多枚举 `maxReviewsPerWake` 条、提交 `maxPlansPerWake` 次；模型不能给仓库路径、命令、镜像、环境、TTL、审批或发布参数。每次最多 64 个文件、单文件 64 KiB、合计 256 KiB。安全根插件由 driver 和控制面同时拒绝。
+
+`plugin_source_read` 接收 `gap_id`、`plugin_name`、`paths`；`paths: []` 返回文件清单，再按需读取源码、测试、README、package.json 和 patch。只读取已提交的文本，不读取工作区改动、未跟踪文件、符号链接、隐藏文件或生成目录。单文件最多 64 KiB，每轮内容累计最多 256 KiB，并受现有工具调用次数与运行时限控制。读取的内容属于不可信数据，不能改变工具权限。
+
+Host 在本轮内按 gap 与插件保存首次读取的 commit，后续读取和准备均绑定该 commit；HEAD 变化即拒绝旧上下文。替换既有文件前必须读取原内容，可在已有目录中增加源码或测试文件。模型不能指定 commit，也不能只凭文件清单覆盖未读文件。服务提供者更换后读上下文与待执行动作一并失效；未提供源码读取接口的旧版 control-plane 保持四工具基础模式。
 
 Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。成功时仅返回待审批 plan id 与检查摘要；owner 仍需通过控制面的签名审批、源码复核和发布流程处理。模型看不到 worktree 路径或构建日志。检查失败、owner route 漂移、provider 移除、插件卸载或本轮到期均终止本次操作。`health().run.sourceProposals` 提供本轮 `prepared` / `rejected` 数量；可选 provider 更换后下一轮重新绑定，旧轮次不会跨代继续写入。
 

@@ -14,6 +14,7 @@ import {
 } from './source-workspace.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
+import { awaitSourceSignal, inspectSourceContext, type SourceInspection } from './source-context.js'
 import { inheritedEnvironment, loadTrustConfig } from './trust.js'
 import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
 import { registerPluginControlTools } from './tools.js'
@@ -54,6 +55,7 @@ export class PluginControlPlaneService extends Service {
   private readonly store: ControlPlaneStore
   private readonly abort = new AbortController()
   private readonly sourceBuilds = new Set<Promise<unknown>>()
+  private readonly sourceInspections = new Set<Promise<unknown>>()
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'pluginControlPlane')
@@ -61,7 +63,7 @@ export class PluginControlPlaneService extends Service {
     if (this.config.sourceBuild !== undefined) validateSourceBuildConfig(this.config.sourceBuild)
     if (![this.config.catalogPath, this.config.statePath, this.config.trustPath].every(isAbsolute)) throw new Error('plugin-control-plane: catalogPath, statePath and trustPath must be absolute')
     this.store = new ControlPlaneStore({ path: join(this.config.statePath, 'control.sqlite') })
-    ctx.effect(() => async () => { this.abort.abort(); await Promise.allSettled(this.sourceBuilds); this.store.close() }, 'plugin-control-plane.store')
+    ctx.effect(() => async () => { this.abort.abort(); await Promise.allSettled([...this.sourceBuilds, ...this.sourceInspections]); this.store.close() }, 'plugin-control-plane.store')
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
   }
 
@@ -84,6 +86,24 @@ export class PluginControlPlaneService extends Service {
   gaps(limit: number): readonly StoredCapabilityGap[] { return this.store.listGaps(limit) }
   health(): PluginControlPlaneHealth { return this.store.health() }
   canPrepareSource(): boolean { return this.config.sourceBuild !== undefined }
+
+  async inspectSource(input: { repository: string; name: string; paths: readonly string[]; baseCommit?: string; signal?: AbortSignal; assertCurrent?: () => void | Promise<void> }): Promise<SourceInspection> {
+    this.abort.signal.throwIfAborted()
+    if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'another source operation is still draining')
+    const signal = AbortSignal.any([this.abort.signal, ...(input.signal === undefined ? [] : [input.signal]), AbortSignal.timeout(15_000)])
+    const operation = this.inspectSourceOwned({ ...input, signal })
+    this.sourceInspections.add(operation)
+    void operation.then(() => this.sourceInspections.delete(operation), () => this.sourceInspections.delete(operation))
+    return operation
+  }
+
+  private async inspectSourceOwned(input: Parameters<PluginControlPlaneService['inspectSource']>[0]): Promise<SourceInspection> {
+    const signal = input.signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, input.signal])
+    const assertCurrent = async (): Promise<void> => { signal.throwIfAborted(); await awaitSourceSignal(signal, () => input.assertCurrent?.()); signal.throwIfAborted() }
+    await assertCurrent()
+    const trust = await awaitSourceSignal(signal, () => this.boundTrust())
+    return inspectSourceContext({ ...input, environment: inheritedEnvironment(trust), signal, assertCurrent })
+  }
 
   async plan(candidateId: string, profile: string, idempotencyKey: string, gapId: string): Promise<PluginActivationPlan> {
     const gap = this.store.getGap(gapId)
@@ -122,11 +142,12 @@ export class PluginControlPlaneService extends Service {
     ttlMs?: number
     timeoutMs?: number
     offline?: boolean
+    expectedBaseCommit?: string
     signal?: AbortSignal
     assertCurrent?: () => void | Promise<void>
   }): Promise<PluginSourcePlan> {
     this.abort.signal.throwIfAborted()
-    if (this.sourceBuilds.size !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'another isolated source preparation is still draining')
+    if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'another source operation is still draining')
     const operation = this.prepareModifySourcePlanOwned(input)
     this.sourceBuilds.add(operation)
     void operation.then(() => this.sourceBuilds.delete(operation), () => this.sourceBuilds.delete(operation))
@@ -163,6 +184,7 @@ export class PluginControlPlaneService extends Service {
     const baseCommit = (await runLocalCommand('git', ['rev-parse', 'HEAD'], repository, environment, { capture: true })).trim()
     await assertCurrent()
     if (!/^[a-f0-9]{40}$/u.test(baseCommit)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository HEAD is not a 40-hex commit id')
+    if (input.expectedBaseCommit !== undefined && input.expectedBaseCommit !== baseCommit) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source base commit is stale')
 
     const stateRoot = join(this.config.statePath, 'source-worktrees')
     const isolated = await createIsolatedWorktree({ stateRoot, repository, baseCommit, environment })

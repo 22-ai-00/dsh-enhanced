@@ -59,7 +59,24 @@ export interface GrowthSourcePreparedPlan {
   readonly sourceCheck?: { readonly treeDigest: string; readonly patchDigest: string; readonly checkedAt: number }
 }
 
+export interface GrowthSourceSnapshot {
+  readonly name: string
+  readonly baseCommit: string
+  /** Complete eligible committed-text manifest; omission must never mean a file is new. */
+  readonly files: readonly { readonly path: string; readonly bytes: number }[]
+  readonly contents: readonly GrowthSourcePreparedFile[]
+}
+
 export interface GrowthSourcePlanePort {
+  /** Read committed text only; paths=[] discovers the bounded plugin manifest. */
+  inspectSource(input: {
+    repository: string
+    name: string
+    paths: readonly string[]
+    baseCommit?: string
+    signal: AbortSignal
+    assertCurrent: () => void
+  }): Promise<GrowthSourceSnapshot>
   /** Enumerate recently recorded gaps; the caller filters to still-open ones. */
   listOpenGaps(): readonly GrowthSourceGap[]
   /**
@@ -74,6 +91,7 @@ export interface GrowthSourcePlanePort {
     repository: string
     files: readonly GrowthSourcePreparedFile[]
     idempotencyKey: string
+    expectedBaseCommit: string
     ttlMs: number
     timeoutMs: number
     offline: boolean
