@@ -1,10 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { constants as fsConstants, lstatSync } from 'node:fs'
-import { cp, lstat, mkdir, mkdtemp, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
+import { cp, lstat, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Ed25519ApprovalAuthority, loadPrivateApprovalInput, parseApprovalReceipt } from './approval.js'
 import { Ed25519HostAttestationAuthority, parseHostAttestationReceipt } from './attestation.js'
@@ -18,6 +17,8 @@ import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthor
   invokeSourcePublishReconciliationAdapter, invokeSourceReleaseAdapter, parseSourcePublishReconciliationReceipt,
   parseSourceReleaseAuthorization, parseSourceReleaseReceipt } from './release.js'
 import { ControlPlaneStore, controlPlaneDigest, expectedSourceRelease } from './store.js'
+import { ControlPlaneCliError } from './errors.js'
+import { changedSourcePaths, checkedSourceSnapshot, gcPreparedModifyWorktrees, runLocalCommand, sourcePathAllowed } from './source-workspace.js'
 import { inheritedEnvironment, loadTrustConfig, openTrustedExecutable, resolveTrustKey, verifyOpenTrustedExecutable,
   type OpenTrustedExecutable, type PluginControlTrustConfig } from './trust.js'
 import type { ActivationRetractionAuthority, ActivationRetractionReceipt, ApprovalReceipt, HostAttestationReceipt,
@@ -29,24 +30,9 @@ const leaseMs = 30_000
 const pluginCatalogScope = 'plugins/README.md'
 const maximumActivationArtifactBytes = 268_435_456
 
-export type ControlPlaneCliErrorCode =
-  | 'ACTIVATION_BINDING'
-  | 'EXECUTOR_FAILED'
-  | 'EXECUTOR_OUTPUT_LIMIT'
-  | 'EXECUTOR_TIMEOUT'
-  | 'FILESYSTEM_STATE'
-  | 'HOST_ATTESTATION_REQUIRED'
-  | 'HOST_ATTESTOR_NOT_CONFIGURED'
-  | 'INVALID_ARGUMENT'
-  | 'LOCK_CONFLICT'
-  | 'SOURCE_BOUNDARY'
-
-export class ControlPlaneCliError extends Error {
-  constructor(readonly code: ControlPlaneCliErrorCode, message: string) {
-    super(`plugin-control-plane[${code}]: ${message}`)
-    this.name = 'ControlPlaneCliError'
-  }
-}
+// checkedSourceSnapshot stays importable from this module for the CLI test
+// suite; the implementation now lives in source-workspace.ts.
+export { checkedSourceSnapshot }
 
 function option(argv: readonly string[], name: string): string {
   const index = argv.indexOf(name); const value = index === -1 ? undefined : argv[index + 1]
@@ -849,25 +835,6 @@ async function watchShow(argv: readonly string[]): Promise<void> {
   } finally { store.close() }
 }
 
-async function executable(command: 'git' | 'pnpm', environment: NodeJS.ProcessEnv): Promise<string> {
-  const candidates = command === 'git' ? ['/usr/bin/git', '/bin/git'] : [join(dirname(process.execPath), 'pnpm'),
-    ...(environment.PATH ?? '').split(delimiter).filter(isAbsolute).map(directory => join(directory, 'pnpm'))]
-  const uid = process.getuid?.()
-  for (const candidate of candidates) {
-    try {
-      const canonical = await realpath(candidate); const value = await lstat(canonical); const directory = await lstat(dirname(canonical))
-      if (value.isFile() && !value.isSymbolicLink() && (value.mode & 0o111) !== 0 && (value.mode & 0o022) === 0
-        && (uid === undefined || value.uid === 0 || value.uid === uid) && directory.isDirectory() && (directory.mode & 0o002) === 0) return canonical
-    } catch { /* next */ }
-  }
-  throw new ControlPlaneCliError('SOURCE_BOUNDARY', `registered local ${command} executable is unavailable`)
-}
-
-async function localCommand(command: 'git' | 'pnpm', args: readonly string[], cwd: string, environment: NodeJS.ProcessEnv, capture = false, maximumOutput?: number): Promise<string> {
-  return runBounded({ executable: await executable(command, environment), args, cwd, environment, capture,
-    ...(maximumOutput === undefined ? {} : { maximumOutput }) })
-}
-
 function sourceScope(name: string): readonly string[] { return [pluginCatalogScope, `plugins/${name}`].sort() }
 
 function assertExactSourceScope(plan: PluginSourcePlan): void {
@@ -877,41 +844,6 @@ function assertExactSourceScope(plan: PluginSourcePlan): void {
   }
 }
 
-async function changedSourcePaths(worktree: string, baseCommit: string, environment: NodeJS.ProcessEnv): Promise<readonly string[]> {
-  const tracked = await localCommand('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', 'diff', '--no-renames',
-    '--name-only', '-z', baseCommit, '--'], worktree, environment, true, 8_388_608)
-  const untracked = await localCommand('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', 'ls-files', '--others',
-    '--exclude-standard', '-z'], worktree, environment, true, 8_388_608)
-  return [...new Set(`${tracked}${untracked}`.split('\0').filter(Boolean))].sort()
-}
-
-function sourcePathAllowed(path: string, plan: PluginSourcePlan): boolean {
-  const pluginRoot = `plugins/${plan.name}`
-  return path === pluginCatalogScope || path === pluginRoot || path.startsWith(`${pluginRoot}/`)
-}
-
-export async function checkedSourceSnapshot(worktree: string, baseCommit: string, scopeInput: readonly string[], environment: NodeJS.ProcessEnv): Promise<{
-  checkedTreeDigest: string; checkedPatchDigest: string
-}> {
-  const temporary = await mkdtemp(join(tmpdir(), 'dsh-plugin-control-index-'))
-  try {
-    const scope = [...new Set(scopeInput.map(value => value.normalize('NFC').trim()))].sort()
-    if (scope.length === 0 || scope.some(value => value === '')) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'checked source scope is invalid')
-    const snapshotEnvironment = { ...environment, GIT_INDEX_FILE: join(temporary, 'index') }
-    await localCommand('git', ['read-tree', baseCommit], worktree, snapshotEnvironment)
-    await localCommand('git', ['--literal-pathspecs', 'add', '--all', '--', ...scope], worktree, snapshotEnvironment)
-    const tree = await localCommand('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', 'ls-files', '--stage', '-z',
-      '--', ...scope], worktree, snapshotEnvironment, true, 8_388_608)
-    const patch = await localCommand('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', 'diff', '--cached', '--binary',
-      '--full-index', '--no-color', baseCommit, '--', ...scope], worktree, snapshotEnvironment, true, 8_388_608)
-    const binding = `${baseCommit}\0${JSON.stringify(scope)}\0`
-    return {
-      checkedTreeDigest: createHash('sha256').update('dsh-source-tree-v2\0').update(binding).update(tree).digest('hex'),
-      checkedPatchDigest: createHash('sha256').update('dsh-source-patch-v2\0').update(binding).update(patch).digest('hex'),
-    }
-  } finally { await rm(temporary, { recursive: true, force: true }) }
-}
-
 async function sourcePlan(argv: readonly string[]): Promise<void> {
   const trust = await commandTrust(argv)
   const store = new ControlPlaneStore({ path: trust.ledger.path })
@@ -919,10 +851,10 @@ async function sourcePlan(argv: readonly string[]): Promise<void> {
     const repository = await realpath(resolve(option(argv, '--repository'))); const worktree = await realpath(resolve(option(argv, '--worktree')))
     const name = option(argv, '--name'); if (!pluginPattern.test(name)) throw new ControlPlaneCliError('INVALID_ARGUMENT', 'plugin name is invalid')
     const environment = inheritedEnvironment(trust)
-    const worktrees = (await localCommand('git', ['worktree', 'list', '--porcelain'], repository, environment, true)).split('\n')
+    const worktrees = (await runLocalCommand('git', ['worktree', 'list', '--porcelain'], repository, environment, { capture: true })).split('\n')
       .filter(line => line.startsWith('worktree ')).map(line => resolve(line.slice('worktree '.length)))
     if (worktrees.length < 2 || worktrees[0] === worktree || !worktrees.includes(worktree)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source plan requires a linked non-primary worktree')
-    const baseCommit = (await localCommand('git', ['rev-parse', 'HEAD'], worktree, environment, true)).trim()
+    const baseCommit = (await runLocalCommand('git', ['rev-parse', 'HEAD'], worktree, environment, { capture: true })).trim()
     const generator = join(repository, 'scripts', 'create-plugin.mjs'); const generatorDigest = createHash('sha256').update(await readSafeFile(generator, 1_048_576)).digest('hex')
     const output = store.createSourcePlan({ gapId: option(argv, '--gap-id'), repository, worktree, baseCommit, name,
       generatorDigest, scope: sourceScope(name), ttlMs: 900_000, idempotencyKey: option(argv, '--idempotency-key') })
@@ -937,19 +869,22 @@ async function scaffold(argv: readonly string[]): Promise<void> {
   let plan: PluginSourcePlan | undefined
   try {
     plan = store.getSourcePlan(option(argv, '--plan-id'))
+    if (plan.mode !== 'create') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'scaffold only serves create source plans; modify plans are verified, not locally scaffolded')
     if (plan.status !== 'approved' || plan.revision !== integerOption(argv, '--expected-revision')) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'exact approved source plan revision is required')
     assertExactSourceScope(plan)
     if (await realpath(plan.repository) !== plan.repository || await realpath(plan.worktree) !== plan.worktree) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source paths changed')
     const environment = inheritedEnvironment(trust)
-    if ((await localCommand('git', ['rev-parse', 'HEAD'], plan.worktree, environment, true)).trim() !== plan.baseCommit
+    if ((await runLocalCommand('git', ['rev-parse', 'HEAD'], plan.worktree, environment, { capture: true })).trim() !== plan.baseCommit
       || createHash('sha256').update(await readSafeFile(join(plan.repository, 'scripts', 'create-plugin.mjs'), 1_048_576)).digest('hex') !== plan.generatorDigest
-      || (await localCommand('git', ['status', '--porcelain'], plan.worktree, environment, true)).trim() !== '') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source plan base, generator or clean-worktree binding changed')
+      || (await runLocalCommand('git', ['status', '--porcelain'], plan.worktree, environment, { capture: true })).trim() !== '') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source plan base, generator or clean-worktree binding changed')
     plan = store.beginSourceChecks({ planId: plan.id, expectedRevision: plan.revision })
     try {
-      await localCommand('pnpm', ['create:plugin', plan.name], plan.worktree, environment)
-      await localCommand('pnpm', ['check'], plan.worktree, environment)
+      // Uncaptured commands: stdout is drained and discarded without a byte
+      // bound, exactly like the legacy localCommand scaffold path.
+      await runLocalCommand('pnpm', ['create:plugin', plan.name], plan.worktree, environment)
+      await runLocalCommand('pnpm', ['check'], plan.worktree, environment)
       const changes = await changedSourcePaths(plan.worktree, plan.baseCommit, environment)
-      const outsideScope = changes.find(path => !sourcePathAllowed(path, plan!))
+      const outsideScope = changes.find(path => !sourcePathAllowed(path, plan!.name, plan!.mode))
       if (outsideScope !== undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', `source generator changed files outside its approved scope: ${JSON.stringify(outsideScope)}`)
       const checked = await checkedSourceSnapshot(plan.worktree, plan.baseCommit, plan.scope, environment)
       plan = store.finishSourceChecks({ planId: plan.id, expectedRevision: plan.revision, succeeded: true, ...checked })
@@ -958,6 +893,62 @@ async function scaffold(argv: readonly string[]): Promise<void> {
       throw error
     }
     process.stdout.write(`${JSON.stringify(plan)}\n`)
+  } finally { store.close() }
+}
+
+async function sourceVerifyPrepared(argv: readonly string[]): Promise<void> {
+  const trust = await commandTrust(argv)
+  const store = new ControlPlaneStore({ path: trust.ledger.path })
+  try {
+    const planId = option(argv, '--plan-id')
+    const expectedRevision = integerOption(argv, '--expected-revision')
+    const plan = store.getSourcePlan(planId)
+    if (plan.mode !== 'modify') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'verify-prepared only serves modify source plans; create plans are locally scaffolded')
+    if (plan.status !== 'approved' || plan.revision !== expectedRevision) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'exact approved modify source plan revision is required')
+    }
+    if (plan.sourceCheck === undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'approved modify plan is missing its bound checked digests')
+    if (plan.scope.length !== 1 || plan.scope[0] !== `plugins/${plan.name}`) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'modify plan scope must be exactly its own plugin tree')
+    }
+    if (await realpath(plan.repository) !== plan.repository || await realpath(plan.worktree) !== plan.worktree) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source paths drifted from their canonical bindings')
+    }
+    const environment = inheritedEnvironment(trust)
+    // The prepared patch lives in the worktree as deliberately uncommitted
+    // changes, so a clean-tree assertion would reject every valid plan. The
+    // owner-side proof is instead: nobody committed over the base commit, every
+    // changed/untracked path stays inside the plugin scope, and the tree/patch
+    // digests recomputed on this exact directory equal the bound checked
+    // digests byte for byte.
+    if ((await runLocalCommand('git', ['rev-parse', 'HEAD'], plan.worktree, environment, { capture: true })).trim() !== plan.baseCommit) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared worktree HEAD drifted from the bound base commit')
+    }
+    const changes = await changedSourcePaths(plan.worktree, plan.baseCommit, environment)
+    const outsideScope = changes.find(path => !sourcePathAllowed(path, plan.name, plan.mode))
+    if (outsideScope !== undefined) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `prepared modification holds files outside its approved scope: ${JSON.stringify(outsideScope)}`)
+    }
+    const checked = await checkedSourceSnapshot(plan.worktree, plan.baseCommit, plan.scope, environment)
+    if (checked.checkedTreeDigest !== plan.sourceCheck.treeDigest
+      || checked.checkedPatchDigest !== plan.sourceCheck.patchDigest) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'recomputed prepared digests do not match the bound checked digests')
+    }
+    const receipt = store.verifyPreparedSourcePlan({ planId: plan.id, expectedRevision: plan.revision,
+      recheckedTreeDigest: checked.checkedTreeDigest, recheckedPatchDigest: checked.checkedPatchDigest })
+    process.stdout.write(`${JSON.stringify(receipt)}\n`)
+  } finally { store.close() }
+}
+
+async function sourceGc(argv: readonly string[]): Promise<void> {
+  const trust = await commandTrust(argv)
+  const store = new ControlPlaneStore({ path: trust.ledger.path })
+  try {
+    // The ledger path is owner-bound to <statePath>/control.sqlite; command
+    // callers are forbidden from supplying a state root, so derive it here.
+    const result = await gcPreparedModifyWorktrees({ store, statePath: dirname(trust.ledger.path),
+      environment: inheritedEnvironment(trust), now: Date.now() })
+    process.stdout.write(`${JSON.stringify(result)}\n`)
   } finally { store.close() }
 }
 
@@ -1168,11 +1159,16 @@ export async function runPluginControl(argv = process.argv.slice(2)): Promise<vo
   if (command === 'watch-show') return watchShow(argv)
   if (command === 'source-plan') return sourcePlan(argv)
   if (command === 'scaffold') return scaffold(argv)
+  if (command === 'source') {
+    if (argv[1] === 'verify-prepared') return sourceVerifyPrepared(argv)
+    if (argv[1] === 'gc') return sourceGc(argv)
+    throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control source <verify-prepared|gc>')
+  }
   if (command === 'release-start') return releaseStart(argv)
   if (command === 'release-request') return releaseRequest(argv)
   if (command === 'release-step') return releaseStep(argv)
   if (command === 'release-attest') return releaseAttest(argv)
   if (command === 'release-reconcile') return releaseReconcile(argv)
   if (command === 'activation-plan') return activationPlan(argv)
-  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|watch-observe|watch-retract|watch-show|source-plan|scaffold|release-start|release-request|release-step|release-attest|release-reconcile|activation-plan>')
+  throw new ControlPlaneCliError('INVALID_ARGUMENT', 'usage: dsh-plugin-control <discover|show|approve|activate|host-request|probe|attest|watch-observe|watch-retract|watch-show|source-plan|scaffold|source verify-prepared|source gc|release-start|release-request|release-step|release-attest|release-reconcile|activation-plan>')
 }

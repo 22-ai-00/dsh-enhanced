@@ -108,6 +108,7 @@ function sourcePlan(overrides: Partial<PluginSourcePlan> = {}): PluginSourcePlan
     baseCommit: commit('a'),
     name: releasePolicy.candidateId,
     generatorDigest: digest('3'),
+    mode: 'create',
     scope: ['plugins/health-helper'],
     sourceCheck: { treeDigest: digest('4'), patchDigest: digest('5'), checkedAt: now - 2_000 },
     ...overrides,

@@ -135,6 +135,7 @@ export interface PluginActivationPlan {
 export type SourceReleasePhase = 'pr' | 'review' | 'merge' | 'build' | 'sign' | 'publish' | 'registry-verify' | 'catalog-admission'
 
 export type SourcePlanStatus =
+  | 'expired'
   | 'pending-approval'
   | 'approved'
   | 'running-local-checks'
@@ -168,9 +169,19 @@ export interface PluginSourcePlan {
   baseCommit: string
   name: string
   generatorDigest: string
+  /**
+   * 'create' scaffolds a brand-new plugin after approval (the legacy flow);
+   * 'modify' prepares a bounded patch for an *existing* plugin before approval,
+   * carrying its frozen-build evidence while still pending. Modify bindings
+   * include mode, checked digests, and evidence in the immutable plan digest;
+   * legacy create-plan digests retain their existing shape.
+   */
+  mode: 'create' | 'modify'
   scope: readonly string[]
   approval?: VerifiedApprovalReceipt
   sourceCheck?: SourceCheckEvidence
+  /** Present only for 'modify' plans: frozen, offline, ignore-scripts build evidence captured at pending time. */
+  preparedEvidence?: SourcePreparedEvidence
   releaseAuthorization?: VerifiedSourceReleaseAuthorization
   release?: {
     id: string
@@ -186,6 +197,39 @@ export interface SourceCheckEvidence {
   treeDigest: string
   patchDigest: string
   checkedAt: number
+}
+
+/**
+ * Content-free evidence that a 'modify' patch was produced and validated inside
+ * an isolated worktree under a frozen, offline, ignore-scripts build, captured
+ * while the plan is still pending owner approval. It never embeds source,
+ * logs or secrets: command output is reduced to a bounded-tail sha256 digest.
+ */
+export interface SourcePreparedEvidence {
+  schemaVersion: 1
+  kind: 'dsh-source-prepared-evidence'
+  environment: {
+    npmConfigIgnoreScripts: true
+    frozenLockfile: true
+    offline: boolean
+    nodeVersion: string
+    pnpmVersion: string
+  }
+  commands: readonly {
+    command: string
+    args: readonly string[]
+    exitCode: 0
+    durationMs: number
+    /** sha256 over the bounded captured tail of stdout/stderr. */
+    logDigest: string
+  }[]
+  pack: {
+    name: string
+    version: string
+    sizeBytes: number
+    sha256: string
+  }
+  preparedAt: number
 }
 
 export interface SourceReleasePolicy {

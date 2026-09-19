@@ -6,6 +6,8 @@ export const name = 'dsh-enhanced-plugin-control-plane'
 export { PluginControlPlaneService, version }
 export { Config } from './service.js'
 export * from './catalog.js'
+export * from './errors.js'
+export * from './source-workspace.js'
 export * from './approval.js'
 export * from './attestation.js'
 export * from './host-attestor.js'

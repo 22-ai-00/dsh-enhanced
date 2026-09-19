@@ -157,6 +157,28 @@ dsh-plugin-control attest \
 
 `source-plan` / `scaffold` 只在 owner 审批的 linked、clean worktree 和固定 generator digest 上生成插件并运行 `pnpm check`。local checks 使用临时 Git index 对 exact scope 计算 staged tree/patch digest，不污染工作树的真实 index。owner 必须在 checks 之后为 exact source digests、scope 和 release policy 签发独立 authorization，随后才能执行 `release-start`。
 
+`prepareModifySourcePlan` 是另一条待审批修改路径：它只接受现有非保护插件树内的有界文件集，并用临时 Git index 生成精确 tree 后以 `git archive` stdin 传入 owner 配置的 Docker image。容器没有 Host bind mount、网络、特权或调用者环境，使用只读根、非 root UID、`cap-drop=ALL`、`no-new-privileges`、固定 CPU/内存/PID/tmpfs 限制和离线 `pnpm install --ignore-scripts`、`pnpm check`、`pnpm pack`。镜像必须由 registry manifest digest 或本地 image content ID 固定，并预热离线 pnpm store。控制面在持久化前重算 tree/patch digest；任意漂移、取消、超时或容器失败都会删除 worktree 而不创建计划。`.git`、`.gitattributes` 与 `.gitmodules` 不能通过该路径修改。
+
+Host patch config 在启用修改准备前必须提供 `sourceBuild`，例如：
+
+```yaml
+sourceBuild:
+  dockerPath: /usr/bin/docker
+  image: sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  timeoutMs: 180000
+  memoryMiB: 512
+  cpus: 1
+  pidsLimit: 64
+  workspaceMiB: 512
+  outputBytes: 65536
+```
+
+`dockerPath` 必须是 canonical、owner/root-owned 且不可被 group/world 写的可执行文件。镜像要包含 UID 65534 可执行的 Node、pnpm 和可用的离线 store；pnpm 的 store/cache 必须定位到可写 tmpfs，预置依赖可由镜像中的只读种子复制进去；未配置时 `canPrepareSource()` 返回 false，修改准备请求 fail closed。
+
+成功准备返回 `pending-approval`，不会自动发布。owner 按已有签名审批流程处理后，用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest，才能进入人工 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
+
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 13 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+
 owner 可以用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。publish 超时等不确定结果必须先进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。
 
 随包发布的 `bin/dsh-local-release-adapter.js` 是 local-only 的通用参考 adapter；trust 中每个 phase 必须安装为不同 canonical 文件/inode，并使用不同 adapter id、authority 与 receipt key；脚本副本可以共享同一个固定、只读的 Node interpreter。各副本的 owner-private config 还应给出不同 state directory。它实现：
