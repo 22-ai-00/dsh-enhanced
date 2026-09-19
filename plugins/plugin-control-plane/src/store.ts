@@ -435,8 +435,8 @@ function preparedEvidenceFromStored(value: unknown): SourcePreparedEvidence {
     const command = objectRecord(entry, `stored source prepared evidence command ${index}`)
     exactKeys(command, ['command', 'args', 'exitCode', 'durationMs', 'logDigest'], `stored source prepared evidence command ${index}`)
     if (typeof command['command'] !== 'string' || command['command'] === '' || command['command'].length > 64
-      || !Array.isArray(command['args']) || command['args'].length > 32
-      || command['args'].some(arg => typeof arg !== 'string' || arg.length > 256)
+      || !Array.isArray(command['args']) || command['args'].length > 64
+      || command['args'].some(arg => typeof arg !== 'string' || arg.length > 4096)
       || command['exitCode'] !== 0
       || !Number.isSafeInteger(command['durationMs']) || Number(command['durationMs']) < 0
       || !DIGEST.test(String(command['logDigest']))) {

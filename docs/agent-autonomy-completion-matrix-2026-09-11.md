@@ -11,6 +11,8 @@
 
 2026-09-19 真实源码提案验收：[`super-relay / auto_model/alwaysday1` 的真实运行](evidence/day1-source-proposal-2026-09-19.json)通过原生 Growth Driver/Agent/Policy，6 次模型调用读取合成 clamp 插件并修复边界错误，真实离线 Docker check/pack 通过，SQLite 持久化同一 read base 的 `pending-approval` 计划。独立复核 PASS。该证据覆盖真实模型到源码提案的单任务路径；owner 路由/历史/工具审批为夹具，未执行批准、发布、生产启用或收益比较，WP16、WP18 状态不变。
 
+2026-09-19 完整仓库隔离检查：owner 调用的 repository profile 已在固定镜像内完成离线 install → 根 `pnpm check` → Control Plane pack，实际耗时约 18.4 分钟；Host 与容器均为 5,829 passed / 44 skipped，Host 的 35 个 dry-run pack 成功。已修复 Evolution/Recovery 对 Goals 类型产物的干净构建循环依赖，并通过正式 runner 的真实嵌套 Bubblewrap 探针。详见[构建与边界证据](evidence/source-repository-check-2026-09-19.json)。嵌套沙箱为 owner 显式配置：固定 seccomp/runtime，移除 Docker system-path masks 并用空只读 tmpfs 遮蔽 `/sys`；保留非 root、零 capabilities、无网络及无 Host 挂载，但不宣称与默认 `/proc` 遮罩等价。该运行是完整工作区工程检查，没有真实模型仓库补丁、持久 Host 作业或生产发布；Growth Driver 的 300 秒权限不变，WP16、WP18 状态不变。
+
 ## 已交付能力与整包验收
 
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |
