@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "kind": "systemd-reload-attestor-local-supervisor-fixture",
+  "observedAt": "2026-09-19T21:49:30.597Z",
+  "systemdVersion": "systemd 252 (252.30-1~deb12u2)",
+  "before": {
+    "MainPID": "2735165",
+    "InvocationID": "0250aff72cb34aa4ab844f247b941fe6"
+  },
+  "after": {
+    "MainPID": "2735363",
+    "InvocationID": "970b97ac568c4cc38145262425c104fb"
+  },
+  "afterReplay": {
+    "MainPID": "2735363",
+    "InvocationID": "970b97ac568c4cc38145262425c104fb"
+  },
+  "signedReceiptVerified": true,
+  "byteIdenticalReplay": true,
+  "hostGeneration": 1,
+  "runtimeDigests": {
+    "attestor": "e73445a410efc0c909c0007d8b0a78eadddee1f803a9e1efa636cb5338e0a9a0",
+    "processHelper": "285aa47e5aa1a310f0463fa5ddfdfe7e3d0b2f112b03329c029055137c015e74",
+    "systemctl": "a0c3be725cd8ada98d7d520702bc1856f5e9e743df2be9faff4a1778493aae67",
+    "interpreter": "0a60ee85e22e52daede22c3cd27d3185becbdab180cf3c3c935130ce7b117d45"
+  },
+  "limits": [
+    "A unique transient user service containing an idle Node process; not a real DSH Host or candidate plugin.",
+    "No production service/profile was modified; no readiness, remaining activation phases, rollout or rollback proof."
+  ],
+  "fixtureRemoved": true
+}

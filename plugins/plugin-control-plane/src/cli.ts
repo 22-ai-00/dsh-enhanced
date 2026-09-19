@@ -764,6 +764,10 @@ async function probe(argv: readonly string[]): Promise<void> {
       throw new ControlPlaneCliError('ACTIVATION_BINDING', 'configured Host probe targets a stale revision/fence')
     }
     const operation = prepareConfiguredHostAttestation(store, plan, trust)
+    if (argv.includes('--prepare-only')) {
+      process.stdout.write(`${JSON.stringify(operation.request)}\n`)
+      return
+    }
     const resolveAuthority = (value: HostAttestationReceipt): Ed25519HostAttestationAuthority => {
       const key = resolveTrustKey(trust, 'host-attestation', value.authority, value.keyId)
       return new Ed25519HostAttestationAuthority(key.publicKeyPem, key.authority, key.keyId)
