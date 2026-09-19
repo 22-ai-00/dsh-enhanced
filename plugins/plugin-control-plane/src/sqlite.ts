@@ -3,7 +3,7 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 12
+export const controlPlaneSchemaVersion = 13
 
 export function controlPlaneOperationReceiptDigest(idempotencyKey: string, operation: string, inputDigest: string,
   resultJson: string, createdAt: number): string {
@@ -120,8 +120,9 @@ function createCurrent(database: DatabaseSync): void {
       plugin_name TEXT NOT NULL,
       generator_digest TEXT NOT NULL CHECK(length(generator_digest) = 64),
       scope_json TEXT NOT NULL CHECK(json_valid(scope_json) AND json_type(scope_json) = 'array'),
+      mode TEXT NOT NULL DEFAULT 'create' CHECK(mode IN ('create', 'modify')),
       status TEXT NOT NULL CHECK(status IN (
-        'pending-approval', 'approved', 'running-local-checks', 'ready-for-human-review', 'local-checks-failed',
+        'expired', 'pending-approval', 'approved', 'running-local-checks', 'ready-for-human-review', 'local-checks-failed',
         'awaiting-pr', 'awaiting-review', 'awaiting-merge', 'awaiting-build', 'awaiting-sign', 'awaiting-publish',
         'awaiting-registry-verify', 'awaiting-catalog-admission', 'release-complete', 'release-failed', 'publish-ambiguous'
       )),
@@ -132,6 +133,8 @@ function createCurrent(database: DatabaseSync): void {
       checked_tree_digest TEXT CHECK(checked_tree_digest IS NULL OR (length(checked_tree_digest) = 64 AND checked_tree_digest NOT GLOB '*[^a-f0-9]*')),
       checked_patch_digest TEXT CHECK(checked_patch_digest IS NULL OR (length(checked_patch_digest) = 64 AND checked_patch_digest NOT GLOB '*[^a-f0-9]*')),
       checked_at INTEGER,
+      prepared_evidence_json TEXT CHECK(prepared_evidence_json IS NULL OR
+        (json_valid(prepared_evidence_json) AND json_type(prepared_evidence_json) = 'object')),
       release_authorization_json TEXT CHECK(release_authorization_json IS NULL OR (json_valid(release_authorization_json) AND json_type(release_authorization_json) = 'object')),
       release_authorization_digest TEXT CHECK(release_authorization_digest IS NULL OR length(release_authorization_digest) = 64),
       release_id TEXT,
@@ -143,6 +146,10 @@ function createCurrent(database: DatabaseSync): void {
       updated_at INTEGER NOT NULL,
       CHECK((checked_tree_digest IS NULL AND checked_patch_digest IS NULL AND checked_at IS NULL) OR
         (checked_tree_digest IS NOT NULL AND checked_patch_digest IS NOT NULL AND checked_at IS NOT NULL)),
+      CHECK(mode = 'create' OR
+        (checked_tree_digest IS NOT NULL AND checked_patch_digest IS NOT NULL AND checked_at IS NOT NULL)),
+      CHECK((mode = 'create' AND prepared_evidence_json IS NULL) OR
+        (mode = 'modify' AND prepared_evidence_json IS NOT NULL)),
       CHECK((release_authorization_json IS NULL AND release_authorization_digest IS NULL) OR
         (release_authorization_json IS NOT NULL AND release_authorization_digest IS NOT NULL)),
       FOREIGN KEY(gap_id) REFERENCES capability_gaps(id) ON DELETE RESTRICT
@@ -301,7 +308,7 @@ function createCurrent(database: DatabaseSync): void {
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX activation_watch_evidence_plan ON activation_watch_evidence(plan_id, created_at);
 
-    PRAGMA user_version = 12;
+    PRAGMA user_version = 13;
   `)
 }
 
@@ -778,6 +785,82 @@ function migrateV11ToV12(database: DatabaseSync): void {
   } catch (error) { database.exec('ROLLBACK'); throw error }
 }
 
+function migrateV12ToV13(database: DatabaseSync): void {
+  // Add the 'modify' source-plan mode: a growth executor may prepare a patch for
+  // an *existing* plugin in an isolated worktree and attach its frozen-build
+  // evidence while the plan is still pending owner approval. SQLite cannot widen
+  // a CHECK in place, so rebuild source_plans and copy every column verbatim;
+  // every pre-existing row is backfilled to mode='create' with no prepared
+  // evidence. Existing rows are all create-mode and retain their immutable
+  // digest. Build the replacement under a temporary name before dropping the
+  // parent, then rename it into place: renaming the old parent would rewrite
+  // dependent foreign-key declarations to the temporary name.
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    CREATE TABLE source_plans_v13 (
+      id TEXT PRIMARY KEY,
+      plan_digest TEXT NOT NULL UNIQUE CHECK(length(plan_digest) = 64),
+      gap_id TEXT NOT NULL,
+      gap_snapshot_json TEXT NOT NULL CHECK(json_valid(gap_snapshot_json) AND json_type(gap_snapshot_json) = 'object'),
+      repository TEXT NOT NULL,
+      worktree TEXT NOT NULL,
+      base_commit TEXT NOT NULL CHECK(length(base_commit) = 40),
+      plugin_name TEXT NOT NULL,
+      generator_digest TEXT NOT NULL CHECK(length(generator_digest) = 64),
+      scope_json TEXT NOT NULL CHECK(json_valid(scope_json) AND json_type(scope_json) = 'array'),
+      mode TEXT NOT NULL DEFAULT 'create' CHECK(mode IN ('create', 'modify')),
+      status TEXT NOT NULL CHECK(status IN (
+        'expired', 'pending-approval', 'approved', 'running-local-checks', 'ready-for-human-review', 'local-checks-failed',
+        'awaiting-pr', 'awaiting-review', 'awaiting-merge', 'awaiting-build', 'awaiting-sign', 'awaiting-publish',
+        'awaiting-registry-verify', 'awaiting-catalog-admission', 'release-complete', 'release-failed', 'publish-ambiguous'
+      )),
+      revision INTEGER NOT NULL CHECK(revision >= 1),
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+      approval_json TEXT CHECK(approval_json IS NULL OR json_valid(approval_json)),
+      checked_tree_digest TEXT CHECK(checked_tree_digest IS NULL OR (length(checked_tree_digest) = 64 AND checked_tree_digest NOT GLOB '*[^a-f0-9]*')),
+      checked_patch_digest TEXT CHECK(checked_patch_digest IS NULL OR (length(checked_patch_digest) = 64 AND checked_patch_digest NOT GLOB '*[^a-f0-9]*')),
+      checked_at INTEGER,
+      prepared_evidence_json TEXT CHECK(prepared_evidence_json IS NULL OR
+        (json_valid(prepared_evidence_json) AND json_type(prepared_evidence_json) = 'object')),
+      release_authorization_json TEXT CHECK(release_authorization_json IS NULL OR (json_valid(release_authorization_json) AND json_type(release_authorization_json) = 'object')),
+      release_authorization_digest TEXT CHECK(release_authorization_digest IS NULL OR length(release_authorization_digest) = 64),
+      release_id TEXT,
+      release_fence INTEGER NOT NULL DEFAULT 0 CHECK(release_fence >= 0),
+      release_failure_phase TEXT CHECK(release_failure_phase IS NULL OR release_failure_phase IN (
+        'pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission'
+      )),
+      release_failure_code TEXT,
+      updated_at INTEGER NOT NULL,
+      CHECK((checked_tree_digest IS NULL AND checked_patch_digest IS NULL AND checked_at IS NULL) OR
+        (checked_tree_digest IS NOT NULL AND checked_patch_digest IS NOT NULL AND checked_at IS NOT NULL)),
+      CHECK(mode = 'create' OR
+        (checked_tree_digest IS NOT NULL AND checked_patch_digest IS NOT NULL AND checked_at IS NOT NULL)),
+      CHECK((mode = 'create' AND prepared_evidence_json IS NULL) OR
+        (mode = 'modify' AND prepared_evidence_json IS NOT NULL)),
+      CHECK((release_authorization_json IS NULL AND release_authorization_digest IS NULL) OR
+        (release_authorization_json IS NOT NULL AND release_authorization_digest IS NOT NULL)),
+      FOREIGN KEY(gap_id) REFERENCES capability_gaps(id) ON DELETE RESTRICT
+    ) STRICT;
+    INSERT INTO source_plans_v13 (id, plan_digest, gap_id, gap_snapshot_json, repository, worktree, base_commit,
+      plugin_name, generator_digest, scope_json, mode, status, revision, created_at, expires_at, approval_json,
+      checked_tree_digest, checked_patch_digest, checked_at, prepared_evidence_json,
+      release_authorization_json, release_authorization_digest, release_id, release_fence,
+      release_failure_phase, release_failure_code, updated_at)
+      SELECT id, plan_digest, gap_id, gap_snapshot_json, repository, worktree, base_commit, plugin_name,
+        generator_digest, scope_json, 'create', status, revision, created_at, expires_at, approval_json,
+        checked_tree_digest, checked_patch_digest, checked_at, NULL,
+        release_authorization_json, release_authorization_digest, release_id, release_fence,
+        release_failure_phase, release_failure_code, updated_at FROM source_plans;
+    DROP TABLE source_plans;
+    ALTER TABLE source_plans_v13 RENAME TO source_plans;
+    PRAGMA user_version = 13;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `)
+}
+
 export function openControlPlaneDatabase(path: string): DatabaseSync {
   prepare(path)
   const database = new DatabaseSync(path)
@@ -798,6 +881,7 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       if (version <= 9) migrateV9ToV10(database)
       if (version <= 10) migrateV10ToV11(database)
       if (version <= 11) migrateV11ToV12(database)
+      if (version <= 12) migrateV12ToV13(database)
     }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
