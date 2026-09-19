@@ -1,0 +1,711 @@
+{
+  "kind": "real-day1-durable-source-job",
+  "root": "/tmp/dsh-source-durable-ufeyea",
+  "passed": true,
+  "checkedAt": "2026-09-19T17:30:43.963Z",
+  "repository": "/data00/home/jiataorui/work/github/dsh-enhanced",
+  "baseCommit": "0b2a784870998e51837c418f28723ae834d2af9a",
+  "image": "sha256:b48863fec65a0c950eae4fce5e27105403c28e267d383234756fc8c99bf1968a",
+  "task": {
+    "name": "personal-memory",
+    "capability": "Reliable mixed-script lexical memory recall and persisted index upgrade",
+    "context": "The real personal-memory plugin loses Latin tokens embedded next to CJK: a memory containing DeepSeek\u63d2\u4ef6 cannot be found by querying deepseek. Its tokenizer also creates artificial CJK bigrams across punctuation, whitespace, and intervening non-CJK text. Fix both behaviors while preserving NFKC normalization, lowercase, deduplication, sorted output, and existing non-CJK word token behavior. Existing persistent v6 memory_tokens must also be upgraded transactionally and idempotently when reopened: reindex active records using content plus memoryKnowledgeText(knowledge), without reviving removed records, changing identity/version/audit data, or weakening namespace isolation. Owner design decision: this is an index algorithm migration with no table layout change. Keep DB schema version 6 and track the tokenizer-index version independently in existing schema_meta. Rebuild only once per index version inside the startup migration transaction, then persist the index-version marker. Add regression tests and concise README documentation. Read the file manifest first, then batch src/tokenize.ts, src/sqlite.ts, src/knowledge.ts, README.md and tests/retrieval.spec.ts in ONE read call. Existing test files need no modifications: add a new focused regression file under tests/. Use plugin_source_prepare.edits with unique exact before/after text for long existing files such as sqlite.ts and README.md. Use files for added regression files and the short tokenizer. The Host reconstructs complete candidate files from the pinned read snapshot. Never repeat a whole long file when an exact edit suffices. src/store.ts is over the source tool per-file bound; its current #replaceTokens deletes old tokens and inserts tokenizeMemory(content), with callers supplying `${content}\\n${memoryKnowledgeText(knowledge)}`; search uses tokenizeMemory(query), intersects stored memory_tokens before phrase ranking. Preserve those call sites. Existing migration tests assert schema 6, which remains valid because the table layout is unchanged. Keep all changes inside plugins/personal-memory. Prepare one durable pending modification. Do not claim owner approval, release, activation or successful independent evaluation; the Host will run those checks separately. No repeated skill history exists in this fixture; use the source proposal tools.",
+    "digest": "808f8740ac082ee2d041f02605a98e01bedc8f7908358e3e754ce1f64fffce9b"
+  },
+  "stages": [
+    {
+      "stage": "wake-start",
+      "at": 1789839044091
+    },
+    {
+      "stage": "model-call",
+      "at": 1789839044113
+    },
+    {
+      "stage": "model-call",
+      "at": 1789839048738
+    },
+    {
+      "stage": "model-call",
+      "at": 1789839052544
+    },
+    {
+      "stage": "model-call",
+      "at": 1789839057892
+    },
+    {
+      "stage": "model-call",
+      "at": 1789839217084
+    },
+    {
+      "stage": "model-call",
+      "at": 1789839224001
+    },
+    {
+      "stage": "wake-end",
+      "at": 1789839233951
+    },
+    {
+      "stage": "teardown-queued",
+      "at": 1789839233953
+    },
+    {
+      "stage": "rebind-no-agent",
+      "at": 1789839233978
+    },
+    {
+      "stage": "native-tick-first",
+      "at": 1789839235078
+    },
+    {
+      "stage": "docker-check-wait",
+      "at": 1789839235101
+    },
+    {
+      "stage": "host-check-start",
+      "at": 1789839235103
+    },
+    {
+      "stage": "host-check-end",
+      "at": 1789840283299
+    },
+    {
+      "stage": "native-tick-second",
+      "at": 1789840283310
+    },
+    {
+      "stage": "passed",
+      "at": 1789840283342
+    }
+  ],
+  "modelCalls": [
+    {
+      "provider": "super-relay",
+      "model": "auto_model/alwaysday1",
+      "maxTokens": 8192,
+      "tools": [
+        "growth_list_owner_goals",
+        "growth_list_skills",
+        "growth_propose_skill_candidate",
+        "growth_read_verified_workflow",
+        "plugin_source_gaps",
+        "plugin_source_job_status",
+        "plugin_source_prepare",
+        "plugin_source_read"
+      ],
+      "startedAt": 1789839044113,
+      "chunks": 64,
+      "chunkTypes": {
+        "block-start": 4,
+        "reasoning-delta": 51,
+        "block-end": 4,
+        "tool-call-delta": 3,
+        "usage": 1,
+        "finish": 1
+      },
+      "textCharacters": 0,
+      "argumentCharacters": 6,
+      "reasoningCharacters": 256,
+      "settled": true,
+      "usage": {
+        "inputTokens": 2481,
+        "outputTokens": 96,
+        "totalTokens": 2577
+      },
+      "finishReason": {
+        "kind": "tool-calls"
+      },
+      "endedAt": 1789839048721
+    },
+    {
+      "provider": "super-relay",
+      "model": "auto_model/alwaysday1",
+      "maxTokens": 8192,
+      "tools": [
+        "growth_list_owner_goals",
+        "growth_list_skills",
+        "growth_propose_skill_candidate",
+        "growth_read_verified_workflow",
+        "plugin_source_gaps",
+        "plugin_source_job_status",
+        "plugin_source_prepare",
+        "plugin_source_read"
+      ],
+      "startedAt": 1789839048738,
+      "chunks": 31,
+      "chunkTypes": {
+        "block-start": 2,
+        "reasoning-delta": 24,
+        "block-end": 2,
+        "tool-call-delta": 1,
+        "usage": 1,
+        "finish": 1
+      },
+      "textCharacters": 0,
+      "argumentCharacters": 101,
+      "reasoningCharacters": 108,
+      "settled": true,
+      "usage": {
+        "inputTokens": 1265,
+        "outputTokens": 120,
+        "totalTokens": 3233,
+        "cacheReadTokens": 1848
+      },
+      "finishReason": {
+        "kind": "tool-calls"
+      },
+      "endedAt": 1789839052525
+    },
+    {
+      "provider": "super-relay",
+      "model": "auto_model/alwaysday1",
+      "maxTokens": 8192,
+      "tools": [
+        "growth_list_owner_goals",
+        "growth_list_skills",
+        "growth_propose_skill_candidate",
+        "growth_read_verified_workflow",
+        "plugin_source_gaps",
+        "plugin_source_job_status",
+        "plugin_source_prepare",
+        "plugin_source_read"
+      ],
+      "startedAt": 1789839052544,
+      "chunks": 24,
+      "chunkTypes": {
+        "block-start": 2,
+        "reasoning-delta": 17,
+        "block-end": 2,
+        "tool-call-delta": 1,
+        "usage": 1,
+        "finish": 1
+      },
+      "textCharacters": 0,
+      "argumentCharacters": 195,
+      "reasoningCharacters": 61,
+      "settled": true,
+      "usage": {
+        "inputTokens": 903,
+        "outputTokens": 145,
+        "totalTokens": 3920,
+        "cacheReadTokens": 2872
+      },
+      "finishReason": {
+        "kind": "tool-calls"
+      },
+      "endedAt": 1789839057863
+    },
+    {
+      "provider": "super-relay",
+      "model": "auto_model/alwaysday1",
+      "maxTokens": 8192,
+      "tools": [
+        "growth_list_owner_goals",
+        "growth_list_skills",
+        "growth_propose_skill_candidate",
+        "growth_read_verified_workflow",
+        "plugin_source_gaps",
+        "plugin_source_job_status",
+        "plugin_source_prepare",
+        "plugin_source_read"
+      ],
+      "startedAt": 1789839057892,
+      "chunks": 2803,
+      "chunkTypes": {
+        "block-start": 2,
+        "reasoning-delta": 2796,
+        "block-end": 2,
+        "tool-call-delta": 1,
+        "usage": 1,
+        "finish": 1
+      },
+      "textCharacters": 0,
+      "argumentCharacters": 9879,
+      "reasoningCharacters": 12695,
+      "settled": true,
+      "usage": {
+        "inputTokens": 19387,
+        "outputTokens": 5925,
+        "totalTokens": 28184,
+        "cacheReadTokens": 2872
+      },
+      "finishReason": {
+        "kind": "tool-calls"
+      },
+      "endedAt": 1789839217045
+    },
+    {
+      "provider": "super-relay",
+      "model": "auto_model/alwaysday1",
+      "maxTokens": 8192,
+      "tools": [
+        "growth_list_owner_goals",
+        "growth_list_skills",
+        "growth_propose_skill_candidate",
+        "growth_read_verified_workflow",
+        "plugin_source_gaps",
+        "plugin_source_job_status",
+        "plugin_source_prepare",
+        "plugin_source_read"
+      ],
+      "startedAt": 1789839217084,
+      "chunks": 72,
+      "chunkTypes": {
+        "block-start": 2,
+        "reasoning-delta": 65,
+        "block-end": 2,
+        "tool-call-delta": 1,
+        "usage": 1,
+        "finish": 1
+      },
+      "textCharacters": 0,
+      "argumentCharacters": 85,
+      "reasoningCharacters": 333,
+      "settled": true,
+      "usage": {
+        "inputTokens": 7006,
+        "outputTokens": 158,
+        "totalTokens": 28468,
+        "cacheReadTokens": 21304
+      },
+      "finishReason": {
+        "kind": "tool-calls"
+      },
+      "endedAt": 1789839223993
+    },
+    {
+      "provider": "super-relay",
+      "model": "auto_model/alwaysday1",
+      "maxTokens": 8192,
+      "tools": [
+        "growth_list_owner_goals",
+        "growth_list_skills",
+        "growth_propose_skill_candidate",
+        "growth_read_verified_workflow",
+        "plugin_source_gaps",
+        "plugin_source_job_status",
+        "plugin_source_prepare",
+        "plugin_source_read"
+      ],
+      "startedAt": 1789839224001,
+      "chunks": 295,
+      "chunkTypes": {
+        "block-start": 2,
+        "reasoning-delta": 19,
+        "text-delta": 270,
+        "block-end": 2,
+        "usage": 1,
+        "finish": 1
+      },
+      "textCharacters": 927,
+      "argumentCharacters": 0,
+      "reasoningCharacters": 89,
+      "settled": true,
+      "usage": {
+        "inputTokens": 1219,
+        "outputTokens": 290,
+        "totalTokens": 28957,
+        "cacheReadTokens": 27448
+      },
+      "finishReason": {
+        "kind": "stop"
+      },
+      "endedAt": 1789839233945
+    }
+  ],
+  "toolCalls": [
+    {
+      "name": "growth_list_owner_goals",
+      "argumentsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "growth_list_skills",
+      "argumentsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "plugin_source_gaps",
+      "argumentsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "plugin_source_read",
+      "argumentsDigest": "e6de315f49eec88e3b1c4356b58262a71a46780b6d8e025f220a2a8ad5cbfcbb"
+    },
+    {
+      "name": "plugin_source_read",
+      "argumentsDigest": "36397b76315b82116b2acc6a2c0eb3c465fde036110f986577146fd39984603a"
+    },
+    {
+      "name": "plugin_source_prepare",
+      "argumentsDigest": "716db9a51390e5855d1a8a33c7754415df96896e67b824c70a645705ed0e630c"
+    },
+    {
+      "name": "plugin_source_job_status",
+      "argumentsDigest": "4497603a254c71da2aca0df9f59d47f19a5f232188bf0f6d356d6c88eaa0966b"
+    }
+  ],
+  "candidateFiles": [
+    {
+      "path": "src/tokenize.ts",
+      "sha256": "601c1c004095c4b9cae57a32060604ce05487722a9d0f1e0c2cb7bd5fdc6423b",
+      "bytes": 967,
+      "content": "const cjk = /[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}]/u\nconst mixedScriptSegments =\n  /[^\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}]+|[\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}]+/gu\n\nexport function tokenizeMemory(content: string): string[] {\n  const normalized = content.normalize('NFKC').toLocaleLowerCase('en-US')\n  const tokens = new Set<string>()\n\n  for (const match of normalized.matchAll(/[\\p{Letter}\\p{Number}_-]+/gu)) {\n    for (const segment of match[0].match(mixedScriptSegments) ?? []) {\n      if (!cjk.test(segment)) {\n        tokens.add(segment)\n        continue\n      }\n\n      const characters = [...segment]\n      for (let index = 0; index < characters.length; index += 1) {\n        tokens.add(characters[index]!)\n        if (index + 1 < characters.length) tokens.add(`${characters[index]}${characters[index + 1]}`)\n      }\n    }\n  }\n\n  return [...tokens].sort()\n}\n"
+    },
+    {
+      "path": "tests/tokenizer-migration.spec.ts",
+      "sha256": "bf53c9d269bacdf2ae0d90f862f09887c09f75108c3f5b565a8a3fe476f026b4",
+      "bytes": 4395,
+      "content": "import { DatabaseSync } from 'node:sqlite'\nimport { mkdtemp, rm } from 'node:fs/promises'\nimport { tmpdir } from 'node:os'\nimport { join } from 'node:path'\nimport { afterEach, describe, expect, test } from 'vitest'\nimport { MemoryStore } from '../src/store.ts'\nimport { tokenizeMemory } from '../src/tokenize.ts'\nimport type { MemoryEntryInput, MemoryIdentity, MemoryOwnerNamespace } from '../src/types.ts'\n\nconst temporaryRoots: string[] = []\nconst namespace: MemoryOwnerNamespace = {\n  mode: 'delivery',\n  principalDigest: 'a'.repeat(64),\n  principalRecordId: 'principal-a',\n  principalVersion: 1,\n}\nconst identity: MemoryIdentity = { owner: 'user', scope: 'user-global' }\n\nasync function databasePath() {\n  const root = await mkdtemp(join(tmpdir(), 'personal-memory-tokenizer-'))\n  temporaryRoots.push(root)\n  return join(root, 'memory.sqlite')\n}\n\nfunction entry(content: string, overrides: Partial<MemoryEntryInput> = {}): MemoryEntryInput {\n  return {\n    kind: 'fact',\n    content,\n    sensitivity: 'private',\n    trust: 'user-confirmed',\n    confidence: 1,\n    provenance: { source: 'user', observedAt: 10_000 },\n    ...overrides,\n  }\n}\n\nfunction add(memory: MemoryStore, content: string, overrides: Partial<MemoryEntryInput> = {}) {\n  return memory.applyApprovedMutation({\n    op: 'add',\n    idempotencyKey: `add:${content}`,\n    namespace,\n    identity,\n    entry: entry(content, overrides),\n  })\n}\n\nafterEach(async () => {\n  await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))\n})\n\ndescribe('mixed-script memory tokenizer', () => {\n  test('keeps Latin tokens adjacent to CJK and only forms adjacent CJK bigrams', () => {\n    const tokens = tokenizeMemory('DeepSeek\u63d2\u4ef6\uff0c\u5496\u5561')\n\n    expect(tokens).toEqual(expect.arrayContaining(['deepseek', '\u63d2', '\u4ef6', '\u63d2\u4ef6', '\u5496', '\u5561', '\u5496\u5561']))\n    expect(tokens).not.toContain('\u4ef6\u5496')\n    expect(tokenizeMemory('\u63d2\u4ef6a\u5496\u5561')).not.toContain('\u4ef6\u5496')\n  })\n\n  test('rebuilds a v6 token index once from active content and knowledge', async () => {\n    const path = await databasePath()\n    const memory = new MemoryStore({ path, now: () => 100_000 })\n    const active = add(memory, 'DeepSeek\u63d2\u4ef6\u5de5\u4f5c\u6d41', {\n      knowledge: { claim: { key: 'workflow.index', value: 'knowledge espresso' } },\n    })\n    const removed = add(memory, 'Legacy removed token')\n    memory.applyApprovedMutation({\n      op: 'remove',\n      namespace,\n      identity,\n      idempotencyKey: 'remove-legacy',\n      id: removed.id,\n      expectedVersion: removed.version,\n    })\n    memory.close()\n\n    // Simulate a schema-6 database written by the previous tokenizer, including\n    // stale tokens and no independent tokenizer-index marker.\n    const legacy = new DatabaseSync(path)\n    legacy.exec('BEGIN IMMEDIATE')\n    legacy.prepare('DELETE FROM memory_tokens').run()\n    legacy.prepare('INSERT INTO memory_tokens(memory_id, token) VALUES (?, ?)').run(active.id, 'legacy-active')\n    legacy.prepare('INSERT INTO memory_tokens(memory_id, token) VALUES (?, ?)').run(removed.id, 'legacy-removed')\n    legacy.prepare(\"DELETE FROM schema_meta WHERE key = 'tokenizer-index-version'\").run()\n    legacy.exec('COMMIT')\n    legacy.close()\n\n    const migrated = new MemoryStore({ path, now: () => 100_000 })\n    expect(migrated.search({ context: { workspace: '/work/alpha', agentPreset: 'primary', namespace }, query: 'deepseek' }))\n      .toHaveLength(1)\n    expect(migrated.search({ context: { workspace: '/work/alpha', agentPreset: 'primary', namespace }, query: 'espresso' }))\n      .toHaveLength(1)\n    expect(migrated.search({ context: { workspace: '/work/alpha', agentPreset: 'primary', namespace }, query: 'legacy-active' }))\n      .toEqual([])\n    expect(migrated.search({ context: { workspace: '/work/alpha', agentPreset: 'primary', namespace }, query: 'legacy-removed' }))\n      .toEqual([])\n    migrated.close()\n\n    // Reopening an already-marked database is idempotent and does not rebuild removed tokens.\n    const reopened = new MemoryStore({ path, now: () => 100_000 })\n    expect(reopened.search({ context: { workspace: '/work/alpha', agentPreset: 'primary', namespace }, query: 'deepseek' }))\n      .toHaveLength(1)\n    expect(reopened.search({ context: { workspace: '/work/alpha', agentPreset: 'primary', namespace }, query: 'legacy-removed' }))\n      .toEqual([])\n    reopened.close()\n  })\n})\n"
+    },
+    {
+      "path": "src/sqlite.ts",
+      "sha256": "76156a7f27cec0521f009373367d1e5ffbc685693f4efb4ea255d88bc45f2ac5",
+      "bytes": 22771,
+      "content": "import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'\nimport { dirname, isAbsolute } from 'node:path'\nimport { DatabaseSync } from 'node:sqlite'\nimport { memoryKnowledgeText, normalizeMemoryKnowledge } from './knowledge.js'\nimport { tokenizeMemory } from './tokenize.js'\n\nexport const memorySchemaVersion = 6\nexport const memoryTokenizerIndexVersion = 1\n\nexport class MemoryDatabaseError extends Error {\n  constructor(\n    readonly code: 'invalid-path' | 'schema-too-new' | 'unsafe-file',\n    message: string,\n  ) {\n    super(message)\n    this.name = 'MemoryDatabaseError'\n  }\n}\n\nconst namespaceColumns = `\n  namespace_mode TEXT NOT NULL CHECK (namespace_mode IN ('delivery', 'headless', 'legacy-quarantine')),\n  namespace_key TEXT NOT NULL,\n  principal_digest TEXT,\n  principal_record_id TEXT,\n  principal_version INTEGER,\n  headless_lineage_id TEXT,\n  headless_lineage_version INTEGER`\n\nconst namespaceConstraint = `CHECK (\n  (namespace_mode = 'legacy-quarantine' AND namespace_key = 'legacy-v2'\n    AND principal_digest IS NULL AND principal_record_id IS NULL AND principal_version IS NULL\n    AND headless_lineage_id IS NULL AND headless_lineage_version IS NULL)\n  OR\n  (namespace_mode = 'delivery' AND length(namespace_key) = 64\n    AND namespace_key NOT GLOB '*[^0-9a-f]*'\n    AND length(principal_digest) = 64 AND principal_digest NOT GLOB '*[^0-9a-f]*'\n    AND principal_record_id IS NOT NULL AND principal_record_id <> '' AND principal_version >= 1\n    AND headless_lineage_id IS NULL AND headless_lineage_version IS NULL)\n  OR\n  (namespace_mode = 'headless' AND length(namespace_key) = 64\n    AND namespace_key NOT GLOB '*[^0-9a-f]*'\n    AND length(principal_digest) = 64 AND principal_digest NOT GLOB '*[^0-9a-f]*'\n    AND principal_record_id IS NULL AND principal_version IS NULL\n    AND headless_lineage_id IS NOT NULL AND headless_lineage_id <> ''\n    AND headless_lineage_version >= 1)\n)`\n\nfunction createV3Tables(database: DatabaseSync): void {\n  database.exec(`\n    CREATE TABLE memory_records (\n      id TEXT PRIMARY KEY,\n      ${namespaceColumns},\n      owner TEXT NOT NULL CHECK (owner IN ('user', 'agent')),\n      scope TEXT NOT NULL CHECK (scope IN ('user-global', 'workspace')),\n      workspace TEXT NOT NULL,\n      agent_preset TEXT NOT NULL,\n      kind TEXT NOT NULL CHECK (kind IN ('fact', 'preference', 'instruction', 'experience')),\n      content TEXT NOT NULL,\n      content_hash TEXT NOT NULL,\n      sensitivity TEXT NOT NULL CHECK (sensitivity IN ('private', 'sensitive')),\n      trust TEXT NOT NULL CHECK (trust IN ('user-confirmed', 'agent-observed', 'external')),\n      confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),\n      provenance_json TEXT NOT NULL,\n      supersedes TEXT,\n      expires_at INTEGER,\n      status TEXT NOT NULL CHECK (status IN ('active', 'removed')),\n      created_at INTEGER NOT NULL,\n      updated_at INTEGER NOT NULL,\n      version INTEGER NOT NULL CHECK (version >= 1),\n      ${namespaceConstraint}\n    ) STRICT;\n\n    CREATE TABLE memory_tokens (\n      memory_id TEXT NOT NULL,\n      token TEXT NOT NULL,\n      weight REAL NOT NULL DEFAULT 1,\n      PRIMARY KEY (memory_id, token),\n      FOREIGN KEY (memory_id) REFERENCES memory_records(id) ON DELETE CASCADE\n    ) STRICT;\n\n    CREATE TABLE memory_proposals (\n      id TEXT PRIMARY KEY,\n      ${namespaceColumns},\n      policy_proposal_id TEXT NOT NULL UNIQUE,\n      idempotency_key TEXT NOT NULL,\n      requester TEXT NOT NULL,\n      principal TEXT NOT NULL,\n      mutation_hash TEXT NOT NULL,\n      mutation_json TEXT NOT NULL,\n      promotion_json TEXT,\n      status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'conflicted')),\n      not_after INTEGER NOT NULL,\n      expires_at INTEGER NOT NULL,\n      result_memory_id TEXT,\n      created_at INTEGER NOT NULL,\n      updated_at INTEGER NOT NULL,\n      version INTEGER NOT NULL DEFAULT 1,\n      ${namespaceConstraint}\n    ) STRICT;\n\n    CREATE TABLE memory_proposal_intents (\n      id TEXT PRIMARY KEY,\n      ${namespaceColumns},\n      idempotency_key TEXT NOT NULL,\n      requester TEXT NOT NULL,\n      principal TEXT NOT NULL,\n      mutation_hash TEXT NOT NULL,\n      mutation_json TEXT NOT NULL,\n      promotion_json TEXT,\n      ttl_ms INTEGER NOT NULL CHECK (ttl_ms > 0),\n      not_after INTEGER NOT NULL,\n      dispatch_json TEXT,\n      created_at INTEGER NOT NULL,\n      updated_at INTEGER NOT NULL,\n      ${namespaceConstraint}\n    ) STRICT;\n\n    CREATE TABLE memory_audit (\n      sequence INTEGER PRIMARY KEY AUTOINCREMENT,\n      ${namespaceColumns},\n      idempotency_key TEXT NOT NULL,\n      mutation_hash TEXT NOT NULL,\n      operation TEXT NOT NULL,\n      memory_id TEXT NOT NULL,\n      result_version INTEGER NOT NULL,\n      occurred_at INTEGER NOT NULL,\n      ${namespaceConstraint}\n    ) STRICT;\n\n    CREATE TABLE memory_promotion_results (\n      promotion_id TEXT NOT NULL,\n      promotion_generation INTEGER NOT NULL CHECK (promotion_generation >= 1),\n      request_digest TEXT NOT NULL CHECK (length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'),\n      ${namespaceColumns},\n      owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1),\n      contract_version INTEGER NOT NULL CHECK (contract_version = 1),\n      result_version INTEGER NOT NULL CHECK (result_version >= 1),\n      status TEXT NOT NULL CHECK (status IN ('confirmed', 'rejected', 'expired', 'conflicted', 'stale-owner')),\n      memory_proposal_id TEXT NOT NULL UNIQUE,\n      memory_proposal_version INTEGER NOT NULL CHECK (memory_proposal_version >= 1),\n      occurred_at INTEGER NOT NULL,\n      receipt_digest TEXT NOT NULL CHECK (length(receipt_digest) = 64 AND receipt_digest NOT GLOB '*[^0-9a-f]*'),\n      memory_record_id TEXT,\n      memory_record_version INTEGER,\n      memory_record_digest TEXT,\n      state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),\n      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),\n      last_error TEXT,\n      created_at INTEGER NOT NULL,\n      updated_at INTEGER NOT NULL,\n      PRIMARY KEY (promotion_id, promotion_generation),\n      CHECK (\n        (status = 'confirmed' AND memory_record_id IS NOT NULL AND memory_record_version >= 1\n          AND length(memory_record_digest) = 64 AND memory_record_digest NOT GLOB '*[^0-9a-f]*')\n        OR\n        (status <> 'confirmed' AND memory_record_id IS NULL\n          AND memory_record_version IS NULL AND memory_record_digest IS NULL)\n      ),\n      ${namespaceConstraint}\n    ) STRICT;\n\n    CREATE TABLE memory_promotion_cancellations (\n      promotion_id TEXT NOT NULL,\n      promotion_generation INTEGER NOT NULL CHECK (promotion_generation >= 1),\n      request_digest TEXT NOT NULL CHECK (length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'),\n      principal_record_id TEXT NOT NULL CHECK (principal_record_id <> ''),\n      principal_version INTEGER NOT NULL CHECK (principal_version >= 1),\n      owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1),\n      cancellation_digest TEXT NOT NULL CHECK (\n        length(cancellation_digest) = 64 AND cancellation_digest NOT GLOB '*[^0-9a-f]*'\n      ),\n      reason TEXT NOT NULL CHECK (reason IN ('forget', 'owner-rotated', 'superseded')),\n      occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0),\n      receipt_digest TEXT NOT NULL CHECK (\n        length(receipt_digest) = 64 AND receipt_digest NOT GLOB '*[^0-9a-f]*'\n      ),\n      created_at INTEGER NOT NULL,\n      updated_at INTEGER NOT NULL,\n      PRIMARY KEY (promotion_id, promotion_generation)\n    ) STRICT;\n  `)\n}\n\nfunction createV4CompensationTable(database: DatabaseSync): void {\n  database.exec(`\n    CREATE TABLE memory_promotion_compensations (\n      promotion_id TEXT NOT NULL,\n      promotion_generation INTEGER NOT NULL CHECK (promotion_generation >= 1),\n      request_digest TEXT NOT NULL CHECK (\n        length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'\n      ),\n      cancellation_digest TEXT NOT NULL CHECK (\n        length(cancellation_digest) = 64 AND cancellation_digest NOT GLOB '*[^0-9a-f]*'\n      ),\n      memory_proposal_id TEXT NOT NULL,\n      memory_proposal_version INTEGER NOT NULL CHECK (memory_proposal_version >= 1),\n      memory_record_id TEXT NOT NULL,\n      memory_record_version INTEGER NOT NULL CHECK (memory_record_version >= 1),\n      memory_record_digest TEXT NOT NULL CHECK (\n        length(memory_record_digest) = 64 AND memory_record_digest NOT GLOB '*[^0-9a-f]*'\n      ),\n      removed_record_version INTEGER NOT NULL CHECK (removed_record_version >= 2),\n      compensated_at INTEGER NOT NULL CHECK (compensated_at >= 0),\n      PRIMARY KEY (promotion_id, promotion_generation)\n    ) STRICT;\n  `)\n}\n\nfunction createV6EvidenceTable(database: DatabaseSync): void {\n  database.exec(`\n    CREATE TABLE memory_evidence_anchors (\n      reference TEXT PRIMARY KEY CHECK (\n        reference GLOB 'dsh-evidence:v1:*'\n        AND length(reference) = 80\n        AND substr(reference, 17) NOT GLOB '*[^0-9a-f]*'\n      ),\n      ${namespaceColumns},\n      workspace TEXT NOT NULL CHECK (workspace <> ''),\n      agent_preset TEXT NOT NULL CHECK (agent_preset <> ''),\n      session_id TEXT NOT NULL CHECK (session_id <> ''),\n      event_seq INTEGER NOT NULL CHECK (event_seq >= 0),\n      tool_name TEXT NOT NULL CHECK (tool_name <> ''),\n      source_path TEXT NOT NULL,\n      source_target_digest TEXT NOT NULL CHECK (length(source_target_digest) = 64 AND source_target_digest NOT GLOB '*[^0-9a-f]*'),\n      call_id TEXT NOT NULL CHECK (call_id <> ''),\n      content_digest TEXT NOT NULL CHECK (\n        length(content_digest) = 64 AND content_digest NOT GLOB '*[^0-9a-f]*'\n      ),\n      observed_at INTEGER NOT NULL CHECK (observed_at >= 0),\n      ${namespaceConstraint},\n      UNIQUE(namespace_key, workspace, agent_preset, session_id, event_seq)\n    ) STRICT;\n\n    CREATE INDEX memory_evidence_anchors_scope_newest\n      ON memory_evidence_anchors(namespace_key, workspace, agent_preset, observed_at DESC, reference DESC);\n  `)\n}\n\nfunction createV3Indexes(database: DatabaseSync): void {\n  database.exec(`\n    CREATE INDEX memory_records_scope\n      ON memory_records(namespace_key, owner, scope, workspace, agent_preset, status, updated_at DESC);\n    CREATE INDEX memory_records_hash\n      ON memory_records(namespace_key, owner, scope, workspace, agent_preset, content_hash, status);\n    CREATE INDEX memory_tokens_token ON memory_tokens(token, memory_id);\n    CREATE UNIQUE INDEX memory_proposals_idempotency\n      ON memory_proposals(namespace_key, idempotency_key);\n    CREATE INDEX memory_proposals_reconcile\n      ON memory_proposals(namespace_mode, status, updated_at, id);\n    CREATE UNIQUE INDEX memory_proposal_intents_idempotency\n      ON memory_proposal_intents(namespace_key, idempotency_key);\n    CREATE INDEX memory_proposal_intents_reconcile\n      ON memory_proposal_intents(namespace_mode, updated_at, id);\n    CREATE UNIQUE INDEX memory_audit_idempotency\n      ON memory_audit(namespace_key, idempotency_key);\n    CREATE INDEX memory_promotion_results_pending\n      ON memory_promotion_results(state, updated_at, promotion_id, promotion_generation);\n  `)\n}\n\nfunction assertSafeFile(path: string): void {\n  const stat = lstatSync(path)\n  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1) {\n    throw new MemoryDatabaseError('unsafe-file', 'memory database must be one regular, unlinked file')\n  }\n  if ((stat.mode & 0o077) !== 0) {\n    throw new MemoryDatabaseError('unsafe-file', 'memory database permissions must not allow group or other access')\n  }\n  const uid = process.getuid?.()\n  if (uid !== undefined && stat.uid !== uid) {\n    throw new MemoryDatabaseError('unsafe-file', 'memory database must be owned by the current OS user')\n  }\n}\n\nfunction preparePrivateFile(path: string): void {\n  mkdirSync(dirname(path), { recursive: true, mode: 0o700 })\n  try {\n    const descriptor = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600)\n    closeSync(descriptor)\n  } catch (error) {\n    if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error\n  }\n  assertSafeFile(path)\n  for (const sidecar of [`${path}-wal`, `${path}-shm`]) {\n    try {\n      assertSafeFile(sidecar)\n    } catch (error) {\n      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error\n    }\n  }\n}\n\nconst walRetryWait = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))\n\nfunction enableWal(database: DatabaseSync): void {\n  const deadline = Date.now() + 5_000\n  while (true) {\n    try {\n      const row = database.prepare('PRAGMA journal_mode = WAL').get() as { journal_mode: string }\n      if (row.journal_mode.toLowerCase() !== 'wal') {\n        throw new Error(`memory database refused WAL mode: ${row.journal_mode}`)\n      }\n      return\n    } catch (error) {\n      const retryable = error instanceof Error && /database is (?:busy|locked)/i.test(error.message)\n      if (!retryable || Date.now() >= deadline) throw error\n      Atomics.wait(walRetryWait, 0, 0, 10)\n    }\n  }\n}\n\nfunction createFresh(database: DatabaseSync): void {\n  database.exec(`\n    CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;\n    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '6');\n  `)\n  createV3Tables(database)\n  createV4CompensationTable(database)\n  createV3Indexes(database)\n  migrateV4ToV5(database)\n  migrateV5ToV6(database)\n  database.exec(`\n    INSERT INTO schema_meta(key, value) VALUES ('tokenizer-index-version', '${memoryTokenizerIndexVersion}');\n  `)\n}\n\nfunction migrateV3ToV4(database: DatabaseSync): void {\n  createV4CompensationTable(database)\n  database.exec(`\n    UPDATE schema_meta SET value = '4' WHERE key = 'schema-version';\n    PRAGMA user_version = 4;\n  `)\n}\n\nfunction migrateV4ToV5(database: DatabaseSync): void {\n  database.exec(`\n    ALTER TABLE memory_records ADD COLUMN knowledge_json TEXT;\n    UPDATE schema_meta SET value = '5' WHERE key = 'schema-version';\n    PRAGMA user_version = 5;\n  `)\n}\n\nfunction migrateV5ToV6(database: DatabaseSync): void {\n  createV6EvidenceTable(database)\n  database.exec(`\n    UPDATE schema_meta SET value = '6' WHERE key = 'schema-version';\n    PRAGMA user_version = 6;\n  `)\n}\n\nfunction migrateV1ToV2(database: DatabaseSync): void {\n  database.exec(`\n    CREATE INDEX memory_proposals_reconcile\n      ON memory_proposals(status, updated_at, id);\n    CREATE TABLE memory_proposal_intents (\n      id TEXT PRIMARY KEY,\n      idempotency_key TEXT NOT NULL UNIQUE,\n      requester TEXT NOT NULL,\n      principal TEXT NOT NULL,\n      mutation_hash TEXT NOT NULL,\n      mutation_json TEXT NOT NULL,\n      ttl_ms INTEGER NOT NULL CHECK (ttl_ms > 0),\n      dispatch_source_id TEXT,\n      dispatch_binding_id TEXT,\n      dispatch_workspace TEXT,\n      dispatch_principal TEXT,\n      created_at INTEGER NOT NULL,\n      updated_at INTEGER NOT NULL,\n      CHECK (\n        (dispatch_source_id IS NULL AND dispatch_binding_id IS NULL\n          AND dispatch_workspace IS NULL AND dispatch_principal IS NULL)\n        OR\n        (dispatch_source_id IS NOT NULL AND dispatch_binding_id IS NOT NULL\n          AND dispatch_workspace IS NOT NULL AND dispatch_principal IS NOT NULL)\n      )\n    ) STRICT;\n    CREATE INDEX memory_proposal_intents_reconcile\n      ON memory_proposal_intents(updated_at, id);\n    UPDATE schema_meta SET value = '2' WHERE key = 'schema-version';\n    PRAGMA user_version = 2;\n  `)\n}\n\nfunction migrateV2ToV3(database: DatabaseSync): void {\n  database.exec(`\n    ALTER TABLE memory_records RENAME TO memory_records_v2;\n    ALTER TABLE memory_tokens RENAME TO memory_tokens_v2;\n    ALTER TABLE memory_proposals RENAME TO memory_proposals_v2;\n    ALTER TABLE memory_proposal_intents RENAME TO memory_proposal_intents_v2;\n    ALTER TABLE memory_audit RENAME TO memory_audit_v2;\n  `)\n  createV3Tables(database)\n  database.exec(`\n    INSERT INTO memory_records(\n      id, namespace_mode, namespace_key, principal_digest, principal_record_id, principal_version,\n      headless_lineage_id, headless_lineage_version, owner, scope, workspace, agent_preset,\n      kind, content, content_hash, sensitivity, trust, confidence, provenance_json, supersedes, expires_at,\n      status, created_at, updated_at, version\n    ) SELECT id, 'legacy-quarantine', 'legacy-v2', NULL, NULL, NULL, NULL, NULL, owner, scope, workspace,\n      agent_preset, kind, content, content_hash, sensitivity, trust, confidence, provenance_json, supersedes,\n      expires_at, status, created_at, updated_at, version FROM memory_records_v2;\n    INSERT INTO memory_tokens(memory_id, token, weight)\n      SELECT memory_id, token, weight FROM memory_tokens_v2;\n    INSERT INTO memory_proposals(\n      id, namespace_mode, namespace_key, principal_digest, principal_record_id, principal_version,\n      headless_lineage_id, headless_lineage_version, policy_proposal_id, idempotency_key,\n      requester, principal, mutation_hash, mutation_json, promotion_json, status, not_after, expires_at, result_memory_id,\n      created_at, updated_at, version\n    ) SELECT id, 'legacy-quarantine', 'legacy-v2', NULL, NULL, NULL, NULL, NULL, policy_proposal_id,\n      idempotency_key, requester, principal, mutation_hash, mutation_json, NULL,\n      CASE WHEN status = 'pending' THEN 'conflicted' ELSE status END, expires_at, expires_at, result_memory_id,\n      created_at, updated_at, CASE WHEN status = 'pending' THEN version + 1 ELSE version END\n      FROM memory_proposals_v2;\n    INSERT INTO memory_proposal_intents(\n      id, namespace_mode, namespace_key, principal_digest, principal_record_id, principal_version,\n      headless_lineage_id, headless_lineage_version, idempotency_key, requester, principal,\n      mutation_hash, mutation_json, promotion_json, ttl_ms, not_after, dispatch_json, created_at, updated_at\n    ) SELECT id, 'legacy-quarantine', 'legacy-v2', NULL, NULL, NULL, NULL, NULL, idempotency_key, requester,\n      principal, mutation_hash, mutation_json, NULL, ttl_ms, created_at + ttl_ms,\n      CASE WHEN dispatch_source_id IS NULL THEN NULL ELSE json_object(\n        'sourceId', dispatch_source_id, 'bindingId', dispatch_binding_id,\n        'workspace', dispatch_workspace, 'principal', dispatch_principal) END, created_at, updated_at\n      FROM memory_proposal_intents_v2;\n    INSERT INTO memory_audit(\n      sequence, namespace_mode, namespace_key, principal_digest, principal_record_id, principal_version,\n      headless_lineage_id, headless_lineage_version, idempotency_key, mutation_hash,\n      operation, memory_id, result_version, occurred_at\n    ) SELECT sequence, 'legacy-quarantine', 'legacy-v2', NULL, NULL, NULL, NULL, NULL, idempotency_key,\n      mutation_hash, operation, memory_id, result_version, occurred_at FROM memory_audit_v2;\n\n    DROP TABLE memory_tokens_v2;\n    DROP TABLE memory_records_v2;\n    DROP TABLE memory_proposals_v2;\n    DROP TABLE memory_proposal_intents_v2;\n    DROP TABLE memory_audit_v2;\n  `)\n  createV3Indexes(database)\n  database.exec(`\n    UPDATE schema_meta SET value = '3' WHERE key = 'schema-version';\n    PRAGMA user_version = 3;\n  `)\n}\n\nfunction rebuildMemoryTokenIndex(database: DatabaseSync): void {\n  const rows = database.prepare(\n    'SELECT id, content, knowledge_json FROM memory_records WHERE status = \\'active\\'',\n  ).all() as Array<{ id: string, content: string, knowledge_json: string | null }>\n\n  database.prepare('DELETE FROM memory_tokens').run()\n  const insertToken = database.prepare('INSERT INTO memory_tokens(memory_id, token) VALUES (?, ?)')\n  for (const row of rows) {\n    const knowledge = row.knowledge_json === null\n      ? undefined\n      : normalizeMemoryKnowledge(JSON.parse(row.knowledge_json) as unknown)\n    const tokens = tokenizeMemory(`${row.content}\\n${memoryKnowledgeText(knowledge)}`)\n    for (const token of tokens) insertToken.run(row.id, token)\n  }\n}\n\nfunction migrateTokenizerIndex(database: DatabaseSync): void {\n  const row = database.prepare(\n    \"SELECT value FROM schema_meta WHERE key = 'tokenizer-index-version'\",\n  ).get() as { value: string } | undefined\n  if (row?.value === String(memoryTokenizerIndexVersion)) return\n\n  rebuildMemoryTokenIndex(database)\n  database.prepare(`\n    INSERT INTO schema_meta(key, value) VALUES ('tokenizer-index-version', ?)\n    ON CONFLICT(key) DO UPDATE SET value = excluded.value\n  `).run(String(memoryTokenizerIndexVersion))\n}\n\nfunction migrate(database: DatabaseSync): void {\n  database.exec('BEGIN IMMEDIATE')\n  try {\n    let row = database.prepare('PRAGMA user_version').get() as { user_version: number }\n    if (row.user_version > memorySchemaVersion) {\n      throw new MemoryDatabaseError(\n        'schema-too-new',\n        `memory schema ${row.user_version} is newer than supported schema ${memorySchemaVersion}`,\n      )\n    }\n    if (row.user_version === 0) {\n      createFresh(database)\n      database.exec('PRAGMA user_version = 6')\n    } else {\n      if (row.user_version === 1) migrateV1ToV2(database)\n      row = database.prepare('PRAGMA user_version').get() as { user_version: number }\n      if (row.user_version === 2) migrateV2ToV3(database)\n      row = database.prepare('PRAGMA user_version').get() as { user_version: number }\n      if (row.user_version === 3) migrateV3ToV4(database)\n      row = database.prepare('PRAGMA user_version').get() as { user_version: number }\n      if (row.user_version === 4) migrateV4ToV5(database)\n      row = database.prepare('PRAGMA user_version').get() as { user_version: number }\n      if (row.user_version === 5) migrateV5ToV6(database)\n    }\n    migrateTokenizerIndex(database)\n    database.exec('COMMIT')\n  } catch (error) {\n    database.exec('ROLLBACK')\n    throw error\n  }\n}\n\nexport function openMemoryDatabase(path: string): DatabaseSync {\n  if (path !== ':memory:' && !isAbsolute(path)) {\n    throw new MemoryDatabaseError('invalid-path', 'memory database path must be absolute')\n  }\n  if (path !== ':memory:') preparePrivateFile(path)\n  const database = new DatabaseSync(path)\n  try {\n    database.exec('PRAGMA foreign_keys = ON')\n    database.exec('PRAGMA busy_timeout = 5000')\n    database.exec('PRAGMA synchronous = FULL')\n    database.exec('PRAGMA secure_delete = ON')\n    migrate(database)\n    if (path !== ':memory:') {\n      enableWal(database)\n      chmodSync(path, 0o600)\n      for (const sidecar of [`${path}-wal`, `${path}-shm`]) {\n        try {\n          chmodSync(sidecar, 0o600)\n          assertSafeFile(sidecar)\n        } catch (error) {\n          if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error\n        }\n      }\n    }\n    return database\n  } catch (error) {\n    database.close()\n    throw error\n  }\n}\n"
+    },
+    {
+      "path": "README.md",
+      "sha256": "7101bd165d2535fb67d3d01ba357cb29aa377d40e491b466430a85c3156a5390",
+      "bytes": 18285,
+      "content": "# @dsh-enhanced/personal-memory\n\n\u9762\u5411\u4e2a\u4eba\u52a9\u7406\u7684\u77ed\u671f\u4e0a\u4e0b\u6587\u4e4b\u5916\u957f\u671f\u8bb0\u5fc6\uff1a\u4fdd\u5b58\u7b80\u77ed\u4e14\u7a33\u5b9a\u7684\u4e8b\u5b9e\u3001\u504f\u597d\u3001\u7ea6\u5b9a\u548c\u7ecf\u9a8c\uff0c\u6309 user/agent \u4e0e user-global/workspace \u53cc\u7ef4\u9694\u79bb\uff0c\u901a\u8fc7 `assistant-policy` \u7684\u6301\u4e45\u5ba1\u6279\u63d0\u6848\u5199\u5165\u3002\u7814\u7a76\u8d44\u6599\u3001\u6587\u6863\u548c\u9879\u76ee\u77e5\u8bc6\u4e0d\u5c5e\u4e8e\u8fd9\u91cc\uff0c\u5e94\u4ea4\u7ed9 `personal-wiki`\u3002\n\n## \u5b89\u88c5\n\n\u672c\u63d2\u4ef6\u8981\u6c42 `@dsh-enhanced/assistant-policy` \u5df2\u7ecf\u6302\u8f7d\u5e76\u63d0\u4f9b `ctx.assistantPolicy`\u3002\u751f\u4ea7\u73af\u5883\u8fd8\u5e94\u7ec4\u5408\n`@dsh-enhanced/assistant-delivery`\uff0c\u7531\u5f53\u524d Agent \u4f1a\u8bdd\u7ed1\u5b9a\u7684 owner \u79c1\u804a\u6d3e\u751f\u5ba1\u6279 principal\u3001workspace\n\u548c\u6295\u9012 binding\uff1a\n\n```sh\ndsh plugin --profile web add @dsh-enhanced/assistant-policy\ndsh plugin --profile web add @dsh-enhanced/assistant-delivery\ndsh plugin --profile web add @dsh-enhanced/personal-memory\ndsh --profile web --dump-config\n```\n\n\u4e0a\u9762\u7684 Policy \u7247\u6bb5\u53ea\u8986\u76d6 Memory \u81ea\u8eab\u7684\u524d\u53f0\u6743\u9650\uff0c\u4e0d\u8db3\u4ee5\u53d1\u9001\u6216\u70b9\u51fb\u5ba1\u6279\u5361\u3002\u751f\u4ea7\u98de\u4e66\u95ed\u73af\u5e94\u8fd0\u884c\n`dsh-lark-setup --profile web --create-app --allow-agent-tools`\uff1b\u5411\u5bfc\u4f1a\u4e3a exact owner binding \u5199\u5165\n`dsh-enhanced-personal-memory` \u7684 `approval.send` \u4e0e owner `approval.decide` \u89c4\u5219\u3002\u82e5\u624b\u5de5\u7ef4\u62a4 Policy\uff0c\u5fc5\u987b\n\u63d0\u4f9b\u540c\u7b49\u7cbe\u786e\u7684 source\u3001workspace\u3001principal \u4e0e binding \u9650\u5236\uff0c\u4e0d\u80fd\u4f7f\u7528\u901a\u914d owner \u6216 workspace\u3002\n\n\u9ed8\u8ba4\u6570\u636e\u5e93\u4f4d\u4e8e `$DSH_HOME/personal-memory/memory.sqlite`\u3002\u5355\u72ec\u5b89\u88c5\u540e\u7684 policy \u9ed8\u8ba4\u6ca1\u6709 allow \u89c4\u5219\uff0c\u6240\u4ee5\u8bb0\u5fc6\u641c\u7d22\u3001\u5feb\u7167\u548c\u63d0\u6848\u90fd\u4f1a fail closed\uff1b\u9700\u8981\u5728 profile \u4e2d\u6309\u5b9e\u9645 preset \u4e0e\u7edd\u5bf9 workspace \u653e\u884c\uff1a\n\n```yaml\n- id: dsh-enhanced-assistant-policy\n  name: '@dsh-enhanced/assistant-policy'\n  config:\n    databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')\n    rules:\n      - id: allow-primary-memory-service\n        effect: allow\n        subject: { kind: agent, id: primary, workspace: /absolute/workspace }\n        actions: [export, propose, search, snapshot]\n        resource: { kind: memory, id: \"*\" }\n        context: { initiators: [foreground] }\n      - id: allow-primary-memory-tools\n        effect: allow\n        subject: { kind: agent, id: primary, workspace: /absolute/workspace }\n        actions: [execute]\n        resource: { kind: tool, id: memory_* }\n        context: { initiators: [foreground] }\n    budgets: []\n```\n\n## \u884c\u4e3a\u4e0e\u5de5\u5177\n\n- `memory_search`\uff1a\u663e\u5f0f\u68c0\u7d22\u5f53\u524d agent \u53ef\u89c1\u7684\u56db\u4e2a\u57df\uff1bASCII \u8bcd\u5143\uff08\u542b\u7d27\u90bb CJK \u7684 Latin \u8bcd\u5143\uff09\u4e0e\u76f8\u90bb CJK unigram/bigram \u5747\u53ef\u53ec\u56de\uff1b\u6807\u70b9\u3001\u7a7a\u767d\u6216 Latin \u6587\u672c\u4e24\u4fa7\u7684 CJK \u4e0d\u4f1a\u7ec4\u6210\u4eba\u5de5 bigram\u3002\u6392\u5e8f\u548c tie-break \u786e\u5b9a\uff0c\u8bfb\u53d6\u4e0d\u66f4\u65b0\u4efb\u4f55\u8ba1\u6570\u3002\n- `memory_search_confirmed`\uff1a\u9762\u5411\u540e\u53f0\u590d\u76d8\u7684\u7a84\u67e5\u8be2\uff1b\u670d\u52a1\u7aef\u56fa\u5b9a\u53ea\u8fd4\u56de\u975e\u654f\u611f\u3001`user-confirmed` \u7684 `instruction` / `preference`\uff0c\u8c03\u7528\u65b9\u4e0d\u80fd\u901a\u8fc7\u53c2\u6570\u653e\u5bbd trust\u3001kind \u6216 sensitivity\u3002\n- `memory_manage`\uff1a\u53ea\u521b\u5efa add/replace/remove \u63d0\u6848\uff0c\u8fd4\u56de\u5b8c\u6574 diff\u3001proposal id\u3001TTL \u548c\u7248\u672c\uff1b\u5b83\u6ca1\u6709\u76f4\u63a5\u63d0\u4ea4\u8def\u5f84\uff0c\u4e5f\u4e0d\u63a5\u53d7\u6a21\u578b\u63d0\u4f9b principal \u6216 TTL\u3002principal\u3001workspace \u548c\u98de\u4e66\u6295\u9012 binding \u5fc5\u987b\u6765\u81ea\u5f53\u524d Agent \u7684 authenticated Delivery owner route\uff0cTTL \u6765\u81ea\u53ef\u4fe1\u914d\u7f6e\uff1b\u6ca1\u6709\u6d3b\u52a8\u7ed1\u5b9a\u65f6 fail closed\u3002\n- `ctx.personalMemory.decideProposal(...)`\uff1a\u4f9b\u7ed1\u5b9a owner \u7684\u53ef\u4fe1\u901a\u9053/UI \u51b3\u5b9a\u63d0\u6848\u3002principal\u3001\u7248\u672c\u3001\u51b3\u5b9a\u5185\u5bb9\u548c\u7406\u7531\u5747\u53d7\u5e42\u7b49/CAS \u7ea6\u675f\u3002\n- `ctx.personalMemory.exportJson(agent)`\uff1a\u5bfc\u51fa\u7248\u672c\u5316 JSON\uff0c\u4e0d\u5305\u542b\u54c8\u5e0c\u3001\u72b6\u6001\u3001\u65f6\u95f4\u6233\u3001token \u8868\u6216\u5ba1\u8ba1\u8868\u3002\n- `ctx.personalMemory.proposeImport(...)`\uff1a\u5148\u9a8c\u8bc1\u6574\u4e2a\u6709\u754c\u6587\u6863\uff0c\u518d\u4e3a\u6bcf\u6761\u8bb0\u5f55\u521b\u5efa\u5ba1\u6279\u63d0\u6848\uff1bAgent \u8def\u5f84\u540c\u6837\u7531 Delivery \u6d3e\u751f\u5ba1\u6279 authority\uff0c\u672a\u6279\u51c6\u524d\u4e0d\u4f1a\u5199\u5165 memory record\u3002\u4ec5\u5728\u672a\u7ec4\u5408 Delivery \u7684\u53ef\u4fe1\u672c\u5730/headless \u96c6\u6210\u4e2d\uff0c\u7a0b\u5e8f\u5316\u8c03\u7528\u65b9\u53ef\u4ee5\u663e\u5f0f\u4f20\u5165 principal\uff1b\u4e00\u65e6 Delivery \u53ef\u7528\u5c31\u4e0d\u80fd\u7528\u8be5\u5b57\u6bb5\u8986\u76d6\u7ed1\u5b9a owner\u3002\n\n\u5b89\u88c5\u4e86\u539f\u751f `systemPrompt` \u670d\u52a1\u65f6\uff0c\u6bcf\u6b21\u6a21\u578b\u6b65\u9aa4\u7ec4\u88c5\u4e0a\u4e0b\u6587\u90fd\u4f1a\u91cd\u65b0\u68c0\u67e5\u5f53\u524d owner\u3001Policy \u548c\u8bb0\u5fc6\u72b6\u6001\uff0c\u5e76\u4ece Session \u5f53\u524d\u6709\u6548\u6d88\u606f\u4e2d\u63d0\u53d6\u6700\u8fd1\u7684\u7528\u6237\u8f93\u5165\u6216 Automation \u4efb\u52a1\uff08\u6700\u591a 2048 \u5b57\u7b26\uff09\u8fdb\u884c\u5173\u952e\u8bcd\u53ec\u56de\u3002\u4efb\u52a1\u76f8\u5173\u8bb0\u5f55\u4f18\u5148\uff0c\u518d\u8865\u5145\u7528\u6237\u786e\u8ba4\u7684\u504f\u597d\u4e0e\u7ea6\u5b9a\uff1b\u5de5\u5177\u7ed3\u679c\u3001\u5386\u53f2\u5feb\u7167\u548c\u81ea\u52a8\u8865\u5168\u6587\u672c\u4e0d\u4f1a\u66ff\u4ee3\u5f53\u524d\u4efb\u52a1\u3002\u53ec\u56de\u5408\u5e76 user-global\u3001\u5f53\u524d workspace\u3001\u5f53\u524d agent-global \u548c\u5f53\u524d agent-workspace\uff0c\u53d7 top-K\u3001\u5b57\u8282\u548c\u7c97\u7565 token \u4e09\u91cd\u9884\u7b97\u7ea6\u675f\uff1b`sensitive` \u8bb0\u5f55\u5728 top-K \u4e4b\u524d\u6392\u9664\u3002\u6bcf\u6761\u5305\u542b id\u3001\u7248\u672c\u3001\u6765\u6e90\u3001\u89c2\u6d4b\u65f6\u95f4\u53ca\u53ef\u9009\u539f\u59cb\u5f15\u7528\u3001\u5931\u6548\u65f6\u95f4\u4e0e\u66ff\u4ee3\u5173\u7cfb\u3002\u539f\u751f\u5de5\u5177\u8bc1\u636e\u6062\u590d\u89c1\u4e0b\u8282\uff1b\u666e\u901a Memory \u53ec\u56de\u4e0d\u81ea\u52a8\u6279\u51c6\u5386\u53f2\u5de5\u5177\u5185\u5bb9\u3002\n\n\u540c\u4e00 Host \u5b89\u88c5 `assistant-goals` \u65f6\uff0cMemory \u8fd8\u4f1a\u5728\u6bcf\u6b65\u8bfb\u53d6\u53ef\u9009 `taskContext()`\uff0c\u6309\u5f53\u524d\u6b65\u9aa4 \u2192 \u6700\u8fd1\u7528\u6237\u8f93\u5165 \u2192 \u76ee\u6807 objective \u7684\u987a\u5e8f\u53ec\u56de\u5e76\u53bb\u91cd\uff0c\u518d\u8865\u786e\u8ba4\u7684\u504f\u597d\u548c\u7ea6\u5b9a\u3002Goals \u6bcf\u6b21\u68c0\u67e5 live owner \u4e0e `snapshot` \u6388\u6743\uff1bMemory \u518d\u6838\u5bf9 principal record/version/digest\u3001workspace \u548c preset\uff0c\u4e0d\u80fd\u7531\u6a21\u578b\u9009\u62e9\u522b\u4eba\u7684 namespace\u3002\u540c owner \u7684\u663e\u5f0f focus \u53ef\u63d0\u4f9b\u8de8\u4f1a\u8bdd\u68c0\u7d22\u4e0a\u4e0b\u6587\uff0c\u4f46\u4e0d\u8f6c\u79fb\u539f\u751f Goal \u6267\u884c\u6743\u3002checkpoint \u7684 nextStep \u4ec5\u662f\u89c4\u5212\u6587\u672c\uff0c\u7528\u4f5c\u68c0\u7d22\u5173\u952e\u8bcd\uff0c\u4e0d\u6210\u4e3a\u53ef\u4fe1\u4e8b\u5b9e\u6216\u65b0\u6743\u9650\u3002\n\n\u8be5\u7ec4\u5408\u7684\u53ef\u9009 peer \u4e3a `@dsh-enhanced/assistant-goals >=0.1.0 <0.2.0`\uff1b\u5b83\u4e0d\u4f1a\u81ea\u52a8\u542f\u7528 Goals\u3002\u65e7\u7248\u672c\u672a\u63d0\u4f9b `goal-task-context/v1`\u3001\u670d\u52a1\u7f3a\u5931/\u5378\u8f7d\u3001\u8bfb\u53d6\u5931\u8d25\u6216\u8eab\u4efd\u4e0d\u5339\u914d\u65f6\u7ee7\u7eed\u6309\u539f\u7528\u6237 query \u53ec\u56de\u3002\u6bcf\u4e2a query \u5b57\u6bb5\u6700\u591a 2048 \u5b57\u7b26\uff0c\u5408\u5e76\u7ed3\u679c\u4ecd\u5171\u7528\u539f\u6709 top-K\u3001\u5b57\u8282\u548c token \u9884\u7b97\u3002\u539f\u751f AgentLoop \u56de\u5f52\u8986\u76d6\u6b65\u9aa4\u6539\u53d8\u548c\u8bb0\u5fc6\u64a4\u56de\u540e\u7684\u4e0b\u4e00\u6b21\u6a21\u578b\u8bf7\u6c42\uff1b\u8fd9\u8bc1\u660e\u52a8\u6001\u68c0\u7d22\u63a5\u7ebf\uff0c\u4e0d\u4ee3\u8868\u5df2\u7ecf\u6d4b\u5f97\u771f\u5b9e\u6a21\u578b\u51b3\u7b56\u6536\u76ca\u3002\n\n\u5185\u5bb9\u88ab\u5305\u5728 `<memory_source>` \u4e2d\u5e76\u660e\u786e\u6807\u4e3a\u201c\u4e0d\u53ef\u4fe1\u6570\u636e\u800c\u975e\u6307\u4ee4\u201d\uff1bXML \u5143\u5b57\u7b26\u548c\u6a21\u677f\u82b1\u62ec\u53f7\u5728\u9884\u7b97\u8ba1\u7b97\u524d\u8f6c\u4e49\u3002\u539f\u751f Host \u6301\u4e45\u4fdd\u5b58\u53d1\u751f\u53d8\u5316\u7684\u65b0\u5feb\u7167\uff0c\u7528\u5b83\u53d6\u4ee3\u5148\u524d\u5feb\u7167\u7684\u6709\u6548\u8bed\u4e49\uff1b\u64a4\u56de\u3001\u8fc7\u671f\u6216\u6743\u9650\u64a4\u9500\u4f1a\u5f71\u54cd\u4e0b\u4e00\u6b65\u7684\u5f53\u524d\u5feb\u7167\uff0c**\u4e0d\u4f1a\u5220\u9664 Session \u4e2d\u5df2\u7ecf\u63d0\u4f9b\u8fc7\u7684\u5386\u53f2\u5feb\u7167\u3001\u5de5\u5177\u7ed3\u679c\u6216\u6a21\u578b\u8f93\u51fa**\u3002\u56e0\u6b64\u4e0d\u80fd\u628a\u672c\u529f\u80fd\u5f53\u4f5c\u4f1a\u8bdd\u5386\u53f2\u7684\u6570\u636e\u64e6\u9664\u6216\u8de8 owner \u4f1a\u8bdd\u8fc1\u79fb\u4fdd\u62a4\u3002\u6ca1\u6709 `systemPrompt` \u7684\u7a0b\u5e8f\u5316\u96c6\u6210\u4fdd\u7559\u65e7\u7684 `agent/session-start` \u4e00\u6b21\u6027\u51bb\u7ed3\u5feb\u7167\uff0c\u4e0d\u80fd\u627f\u8bfa\u9010\u6b65\u66f4\u65b0\u3002`memory_search`\u3001`memory_search_confirmed` \u4e0e `memory_manage` \u7684\u6a21\u578b\u53ef\u89c1\u7ed3\u679c\u4e5f\u4f7f\u7528\u6709\u754c\u3001\u8f6c\u4e49\u7684\u72ec\u7acb framing\u3002\u7f3a\u5c11\u7edd\u5bf9 cwd\u3001agent preset \u6216\u5df2\u9a8c\u8bc1 owner \u65f6\u4e0d\u641c\u7d22\u3001\u4e0d\u63d0\u6848\u3001\u4e0d\u8d21\u732e\u65b0\u5feb\u7167\uff0c\u4e5f\u4e0d\u4f1a\u9000\u5316\u5230\u5171\u4eab\u57df\u3002\n\n## \u538b\u7f29\u540e\u7684\u539f\u59cb\u6587\u4ef6\u8bc1\u636e\n\n\u9ed8\u8ba4\u542f\u7528 `toolEvidence` \u65f6\uff0c\u63d2\u4ef6\u53ea\u7d22\u5f15\u5f53\u524d\u53ef\u4fe1 owner \u7531\u6a21\u578b\u76f4\u63a5\u8c03\u7528\u7684\u539f\u751f\u6210\u529f `read` \u7ed3\u679c\uff1b`run_code`/PTC \u5b50\u8c03\u5ea6\u53ca\u5176\u4ed6\u5d4c\u5957\u8c03\u7528\u6682\u4e0d\u7d22\u5f15\u3002\u8bb0\u5f55\u7ed1\u5b9a owner namespace/version\u3001workspace\u3001preset\u3001Session\u3001\u539f\u59cb\u4e8b\u4ef6\u5e8f\u53f7\u3001call id\u3001\u539f\u59cb FS \u89c2\u6d4b\u7684\u89c4\u8303\u8def\u5f84/\u76ee\u6807\u8eab\u4efd\u6458\u8981\u548c\u5185\u5bb9\u6458\u8981\uff1b\u6458\u8981\u540c\u65f6\u8986\u76d6\u539f\u59cb\u53c2\u6570\u4e0e\u6a21\u578b\u53ef\u89c1\u7ed3\u679c\u3002\u590d\u5236\u7684 result\u3001\u538b\u7f29 replacement\u3001Memory \u5de5\u5177\u3001\u5176\u4ed6\u81ea\u5b9a\u4e49\u5de5\u5177\u3001shell \u548c\u56fe\u7247\u5747\u4e0d\u6210\u4e3a\u65b0\u539f\u59cb\u8bc1\u636e\u3002\u539f\u6587\u53ea\u5b58\u5728\u4e8e\u539f\u751f Session\uff0c\u4e0d\u53e6\u5b58\u5165 Memory\uff0c\u4e5f\u4e0d\u81ea\u52a8\u83b7\u5f97\u957f\u671f\u8bb0\u5fc6\u5ba1\u6279\u3002\n\n\u539f\u751f pruner/compaction \u628a\u539f\u59cb\u7ed3\u679c\u79fb\u51fa\u5f53\u524d\u4e0a\u4e0b\u6587\u540e\uff0c\u6bcf\u6b65\u6700\u591a\u6ce8\u5165\u6709\u754c `<session_tool_evidence>` \u5f15\u7528\u6e05\u5355\u3002`memory_read_evidence` \u63a5\u53d7\u7cbe\u786e `reference`\uff0c\u6309 `offset` \u5206\u9875\uff0c\u6216\u7528\u6700\u957f 256 \u5b57\u7b26\u7684 `query` \u5b9a\u4f4d\uff08\u4e24\u8005\u4e92\u65a5\uff09\uff1b\u6bcf\u9875\u6700\u591a 4096 UTF-16 code units\uff0c\u4fdd\u7559\u5b8c\u6574 Unicode \u5b57\u7b26\u3002\u5b83\u68c0\u67e5\u539f\u59cb\u4e8b\u4ef6\u53ca\u6458\u8981\uff0c\u518d\u901a\u8fc7\u5f53\u524d FS provider \u89e3\u6790\u539f\u8def\u5f84\u3001\u6821\u9a8c\u666e\u901a\u6587\u4ef6\u53ca\u5176\u4e0e\u539f\u59cb FS \u89c2\u6d4b\u7684\u8eab\u4efd\u4e00\u81f4\u6027\uff0c\u4ee5\u89c4\u8303\u7edd\u5bf9 `processPath` \u68c0\u67e5 Policy `read / filesystem` \u6743\u9650\uff0c\u5e76\u901a\u8fc7\u5f53\u524d ToolRuntime \u5d4c\u5957\u6267\u884c\u53ea\u8bfb `read`\u3002\u539f\u5de5\u5177\u7684\u4f5c\u7528\u57df\u9650\u5236\u3001\u6b63\u5e38 guard\u3001\u53d6\u6d88\u4fe1\u53f7\u5747\u7ee7\u7eed\u751f\u6548\uff1b\u8fd4\u56de\u524d\u518d\u6b21\u68c0\u67e5 owner\u3001\u670d\u52a1\u4ee3\u9645\u3001\u5de5\u5177\u6ce8\u518c\u3001\u8def\u5f84\u522b\u540d\u548c\u8bfb\u53d6\u671f\u95f4\u7684\u6587\u4ef6\u7248\u672c\u3002\u9700\u8981 Host \u63d0\u4f9b `fs` \u4e0e `read`\uff1b\u672c\u5305\u4e0d\u4f1a\u81ea\u52a8\u5b89\u88c5\u6216\u542f\u7528\u6587\u4ef6\u7cfb\u7edf\u63d2\u4ef6\u3002\n\n`integrity: matched` \u4ec5\u8bc1\u660e\u5386\u53f2\u89c2\u5bdf\u548c\u539f\u59cb\u53c2\u6570\u672a\u88ab\u4fee\u6539\u3002\u8f93\u51fa\u4ecd\u6807\u8bb0 `freshness: historical-unverified`\uff1a\u5f53\u524d\u6388\u6743\u68c0\u67e5\u4e2d\u7684\u91cd\u8bfb\u4e0d\u628a\u65e7\u6b63\u6587\u53d8\u4e3a\u5f53\u524d\u4e8b\u5b9e\uff1b\u5e94\u663e\u5f0f\u8bfb\u53d6\u5f53\u524d\u5185\u5bb9\u518d\u51b3\u7b56\u3002\u6587\u4ef6\u5220\u9664\u3001\u5f53\u524d\u8d44\u6e90/\u5de5\u5177\u6743\u9650\u64a4\u9500\u3001\u5de5\u5177\u5378\u8f7d\u3001\u6458\u8981\u4e0d\u7b26\u548c\u4efb\u4e00\u68c0\u67e5\u5931\u8d25\u5747\u4e0d\u8fd4\u56de\u5386\u53f2\u6b63\u6587\u3002\u6587\u4ef6\u8def\u5f84\u6388\u6743\u5e94\u663e\u5f0f\u914d\u7f6e\uff0c\u4f8b\u5982\u5141\u8bb8 `actions: [read]`\u3001`resource: {kind: filesystem, id: /absolute/workspace/journal.txt}`\uff1b\u53ea\u5141\u8bb8\u5de5\u5177\u540d\u79f0\u4e0d\u8db3\u4ee5\u6388\u4e88\u5386\u53f2\u6b63\u6587\u8bbf\u95ee\u3002\u539f\u59cb `read` \u7684 execute \u548c\u6587\u4ef6 read \u82e5\u4f9d\u8d56\u9884\u7b97\uff0c\u5f53\u524d\u56de\u8bfb\u56e0\u7f3a\u5c11\u72ec\u7acb\u9884\u7559\u51ed\u8bc1\u800c\u4fdd\u5b88\u62d2\u7edd\uff0c\u5199\u5165\u6388\u6743\u5ba1\u8ba1\u4f46\u4e0d\u9884\u7559/\u6d88\u8d39\u9884\u7b97\u3002\n\nJSONL \u51b7\u6062\u590d\u53ea\u4f7f\u7528\u5148\u524d owner \u7ed1\u5b9a\u7684\u7d22\u5f15\uff0c\u4e0d\u6309\u65b0 owner \u56de\u586b\u65e7\u4f1a\u8bdd\u3002\u6bcf\u4e2a owner/workspace/preset \u6700\u591a\u4fdd\u7559 `maxRecordsPerIdentity` \u6761\u5f15\u7528\uff0c\u8de8 Session \u6dd8\u6c70\u6700\u65e7\u89c2\u5bdf\u3002\u7d22\u5f15\u548c Session \u6ca1\u6709\u8de8\u5e93\u539f\u5b50\u4e8b\u52a1\uff1aSession \u7f3a\u5931\u65f6\u5f15\u7528\u4e0d\u53ef\u7528\uff1b\u7d22\u5f15\u7f3a\u5931\u65f6\u4e0d\u81ea\u52a8\u4ece\u5386\u53f2\u8865\u5efa\u3002\u7d22\u5f15\u4e0d\u662f\u5386\u53f2\u6570\u636e\u64e6\u9664\u673a\u5236\uff0c\u4e0d\u652f\u6301\u8de8 owner \u8fc1\u79fb\uff0c\u4e0d\u80fd\u9694\u79bb\u540c\u8fdb\u7a0b\u53d7\u4fe1\u4efb\u63d2\u4ef6\u6216\u540c UID \u4fee\u6539\u4e24\u4e2a\u5b58\u50a8\u7684\u4ee3\u7801\u3002\u81ea\u5b9a\u4e49\u8fdc\u7aef FS provider \u53ef\u80fd\u6267\u884c\u7f51\u7edc\u8bfb\u53d6\uff1b\u5176\u6388\u6743\u548c\u8d44\u6e90\u8fb9\u754c\u7531\u8be5 provider \u4e0e\u6b63\u5e38\u5de5\u5177\u7ba1\u7ebf\u8d1f\u8d23\u3002\n\n## \u9002\u7528\u6761\u4ef6\u3001\u53cd\u4f8b\u4e0e\u4e8b\u5b9e\u5206\u6b67\n\n`memory_manage` \u7684 entry \u53ef\u5e26\u6709\u754c `knowledge`\uff0c\u4f8b\u5982\uff1a\n\n```json\n{\n  \"applicability\": [\"\u4ec5\u9002\u7528\u4e8e schema v2\uff0c\u4e14\u8fc1\u79fb\u65e5\u5fd7\u5df2\u6838\u9a8c\"],\n  \"counterexamples\": [\"schema v1 \u6ca1\u6709\u8fc1\u79fb\u65e5\u5fd7\uff1b\u66fe\u56e0\u7167\u642c\u6b64\u6d41\u7a0b\u6062\u590d\u5931\u8d25\"],\n  \"claim\": { \"key\": \"atlas.recovery.mode\", \"value\": \"journal\" }\n}\n```\n\n\u6761\u4ef6\u548c\u53cd\u4f8b\u5404\u6700\u591a 4 \u6761\uff0c\u6bcf\u6761 1\u2013256 UTF-8 \u5b57\u8282\uff1bclaim key \u662f 1\u2013128 \u5b57\u7b26\u7684\u5c0f\u5199 ASCII \u6807\u8bc6\u7b26\uff08\u5b57\u6bcd\u3001\u6570\u5b57\u3001`.`\u3001`_`\u3001`:`\u3001`-`\uff09\uff0cvalue \u6700\u591a 256 UTF-8 \u5b57\u8282\u3002\u5185\u5bb9\u4e0e\u5b8c\u6574 knowledge \u5171\u7528 `maxContentBytes`\u3002\u5b8c\u6574\u5b57\u6bb5\u8fdb\u5165\u5ba1\u6279 diff\u3001\u5e42\u7b49\u6307\u7eb9\u3001\u7248\u672c CAS \u548c\u4fdd\u5b58\u7ed3\u679c\uff1b\u4fee\u6539\u6761\u4ef6\u6216\u53cd\u4f8b\u9700\u8981\u65b0\u7684\u63d0\u6848\uff0c\u4e0d\u80fd\u590d\u7528\u539f\u5ba1\u6279\u3002\u6761\u4ef6\u4e0d\u540c\u7684\u540c\u6587\u7ecf\u9a8c\u53ef\u5206\u522b\u4fdd\u5b58\uff0c\u4e0d\u4f1a\u56e0\u6b63\u6587\u76f8\u540c\u800c\u88ab\u53bb\u91cd\u3002\n\n\u68c0\u7d22\u4e5f\u7d22\u5f15\u6761\u4ef6\u3001\u53cd\u4f8b\u548c claim\uff0c\u6240\u4ee5\u5f53\u524d\u4efb\u52a1\u80fd\u627e\u5230\u76f8\u5173\u7684\u5931\u8d25\u7ecf\u9a8c\u3002\u5feb\u7167\u548c\u5de5\u5177\u7ed3\u679c\u4fdd\u7559\u8fd9\u4e9b\u539f\u6587\u53ca provenance\uff1b\u5feb\u7167\u660e\u786e\u6807\u8bb0\u9002\u7528\u6027\u5c1a\u672a\u6838\u9a8c\u3002\u5173\u952e\u8bcd\u547d\u4e2d\u53ea\u8bf4\u660e\u76f8\u5173\uff0c\u4e0d\u8bc1\u660e\u6761\u4ef6\u6210\u7acb\uff0c\u4e5f\u4e0d\u4f1a\u81ea\u52a8\u628a\u67d0\u6761\u7ecf\u9a8c\u5224\u4e3a\u4e8b\u5b9e\u6216\u8d4b\u4e88\u65b0\u6743\u9650\u3002\n\n\u6bcf\u6b21\u68c0\u7d22\u4e0e\u5feb\u7167\u7684\u6392\u540d\u3001\u72b6\u6001\u548c\u51b2\u7a81\u4f19\u4f34\u4f7f\u7528\u540c\u4e00 SQLite \u8bfb\u89c6\u56fe\uff0c\u4e0d\u963b\u585e\u5176\u4ed6 WAL writer\uff1b\u5e76\u53d1\u4fee\u6539\u4f1a\u5728\u4e0b\u4e00\u6b21\u8bfb\u53d6\u4f53\u73b0\u3002\u540c\u4e00\u53ef\u89c1 claim key \u6709\u4e0d\u540c\u8bb0\u5f55\u503c\u65f6\uff0c\u5feb\u7167\u4f1a\u5171\u540c\u5448\u73b0\u6765\u6e90\u548c\u6761\u4ef6\uff1b\u9884\u7b97\u65e0\u6cd5\u5bb9\u7eb3\u6240\u6709\u76f8\u5173\u8bb0\u5f55\u65f6\uff0c\u53ea\u7ed9\u51fa\u5206\u6b67\u63d0\u793a\u4e0e\u6709\u754c\u8bb0\u5f55\u5f15\u7528\uff0c\u4e0d\u7559\u4e0b\u770b\u4f3c\u65e0\u4e89\u8bae\u7684\u5355\u4e00\u6b63\u6587\u3002\u663e\u5f0f\u641c\u7d22\u7684 `disagreement` \u5305\u542b key\u3001\u8bb0\u5f55\u6570\u53ca\u6700\u591a 4 \u4e2a\u8bb0\u5f55 ID\uff0c\u5728 query/top-K \u622a\u65ad\u524d\u8ba1\u7b97\u3002\u81ea\u52a8\u8865\u5145\u7684\u5206\u6b67\u4fe1\u606f\u4ec5\u6765\u81ea\u5f53\u524d owner/scope \u5185\u6709\u6548\u3001\u975e\u654f\u611f\u7684\u8bb0\u5f55\uff1b\u64a4\u56de\u3001\u5230\u671f\u548c\u8eab\u4efd\u53d8\u66f4\u4f1a\u5728\u4e0b\u6b21\u8bfb\u53d6\u751f\u6548\u3002\u76f8\u540c key \u7684\u4e0d\u540c\u503c\u53ef\u80fd\u6e90\u4e8e\u4e0d\u540c\u9002\u7528\u6761\u4ef6\uff0c\u5e94\u6838\u5bf9\u5f53\u524d\u7cfb\u7edf\u548c\u539f\u59cb\u8bc1\u636e\uff1b\u672c\u529f\u80fd\u4e0d\u89e3\u6790\u4efb\u610f\u81ea\u7136\u8bed\u8a00\u77db\u76fe\uff0c\u4e5f\u4e0d\u81ea\u884c\u51b3\u5b9a\u54ea\u4e2a\u503c\u6b63\u786e\u3002\n\n\u5e26 knowledge \u7684\u5bfc\u51fa\u6587\u6863\u4f7f\u7528\u7248\u672c 2\uff0c\u5bfc\u5165\u4ecd\u987b\u9010\u6761\u6279\u51c6\uff1b\u6ca1\u6709 knowledge \u7684\u5bfc\u51fa\u7ee7\u7eed\u4f7f\u7528\u7248\u672c 1\uff0c\u5f53\u524d\u7248\u672c\u540c\u65f6\u63a5\u53d7\u4e24\u79cd\u683c\u5f0f\u3002\u65e7 reader \u4f1a\u62d2\u7edd\u7248\u672c 2\uff0c\u907f\u514d\u6084\u6084\u4e22\u6389\u6761\u4ef6\u540e\u590d\u7528\u7ecf\u9a8c\u3002\u5347\u7ea7\u5230\u6570\u636e\u5e93 schema 6 \u524d\u5e94\u505c\u6b62\u65e7 Host writer\uff1bv4\u2192v5 \u65b0\u589e nullable knowledge \u5217\uff0cv5\u2192v6 \u65b0\u589e\u72ec\u7acb\u5de5\u5177\u8bc1\u636e\u7d22\u5f15\u8868\uff0c\u4fdd\u7559\u65e7\u8bb0\u5f55\u3001pending \u63d0\u6848\u548c\u65e2\u6709\u56de\u6267\u6307\u7eb9\uff0c\u4e0d\u80fd\u8ba9\u65e7\u7248\u672c\u7ee7\u7eed\u5199\u5165\u65b0\u5e93\u3002\n\n## \u6570\u636e\u4e0e\u4e00\u81f4\u6027\n\nSQLite \u4f7f\u7528 WAL\u3001`busy_timeout`\u3001\u5916\u952e\u3001FULL synchronous \u548c\u524d\u5411 schema \u7248\u672c\uff1b\u76ee\u5f55\u4e3a `0700`\uff0c\u6570\u636e\u5e93\u4e3a `0600`\u3002\u8bb0\u5f55\u5305\u542b stable id\u3001\u5185\u5bb9\u54c8\u5e0c\u3001provenance\u3001trust\u3001confidence\u3001sensitivity\u3001TTL\u3001supersedes\u3001\u53ef\u9009 knowledge \u548c version\u3002Schema \u7248\u672c\u4ecd\u4e3a 6\uff1b\u8bcd\u6cd5\u7d22\u5f15\u7248\u672c\u72ec\u7acb\u8bb0\u5f55\u5728 `schema_meta` \u7684 `tokenizer-index-version`\u3002\u91cd\u65b0\u6253\u5f00\u65e7\u5e93\u65f6\u4f1a\u5728\u542f\u52a8\u8fc1\u79fb\u4e8b\u52a1\u5185\u6309\u5f53\u524d tokenizer \u4ec5\u91cd\u5efa active \u8bb0\u5f55\u7684 `memory_tokens`\uff08\u5185\u5bb9\u52a0 knowledge \u6587\u672c\uff09\uff0c\u4e0d\u590d\u6d3b removed \u8bb0\u5f55\uff0c\u4e5f\u4e0d\u6539\u53d8 identity\u3001schema \u7248\u672c\u6216\u5ba1\u8ba1\u6570\u636e\uff1b\u6bcf\u4e2a\u7d22\u5f15\u7248\u672c\u53ea\u91cd\u5efa\u4e00\u6b21\u3002replace/remove \u5728\u6279\u51c6\u540e\u91cd\u65b0\u8bfb\u53d6 target version \u5e76\u4ee5 CAS \u63d0\u4ea4\uff1b\u5ba1\u6279\u4e0e\u5185\u5b58\u4f4d\u4e8e\u4e24\u4e2a\u6570\u636e\u5e93\uff0c\u82e5\u8fdb\u7a0b\u6070\u597d\u5728 policy \u6279\u51c6\u540e\u9000\u51fa\uff0c\u53ef\u7528\u539f\u51b3\u5b9a\u5b89\u5168\u91cd\u653e\u3002\u5e76\u53d1\u53d8\u5316\u4f1a\u628a\u63d0\u6848\u6807\u4e3a `conflicted`\uff0c\u4e0d\u4f1a\u8986\u76d6\u65b0\u503c\u3002\n\n\u521b\u5efa\u63d0\u6848\u65f6\u5148\u5728 Memory \u6570\u636e\u5e93\u6301\u4e45\u5316 creation intent\uff0c\u518d\u8c03\u7528 Policy \u539f\u5b50\u521b\u5efa proposal + dispatch\uff0c\u6700\u540e\u5728\n\u540c\u4e00\u4e2a\u672c\u5730\u4e8b\u52a1 attach Policy ID \u5e76\u5220\u9664 intent\u3002\u4efb\u4e00\u6b65\u5d29\u6e83\u540e\uff0creconcile \u90fd\u80fd\u4ece intent \u81ea\u52a8\u7eed\u505a\uff0c\u4e0d\u4f9d\u8d56\n\u539f Agent turn \u6216\u4eba\u5de5\u91cd\u53d1\u3002\u6062\u590d\u4f7f\u7528 Policy \u7684\u539f\u5b50 recover-or-create\uff1a\u540c\u4e00\u4e2a `BEGIN IMMEDIATE` \u5148\u5339\u914d\nrequester\u3001principal\u3001action\u3001resource\u3001\u7edd\u5bf9 deadline\u3001diff\u3001summary \u548c exact dispatch route\uff1b\u82e5\u5df2\u6709\u63d0\u6848\uff0c\n\u5373\u4f7f deadline \u5df2\u8fc7\u4e5f\u8fd4\u56de\u65e2\u6709\u7ec8\u6001\uff0c\u82e5\u5c1a\u65e0\u63d0\u6848\u5219\u53ea\u5728 deadline \u524d\u521b\u5efa\u3002deadline \u540e Policy \u4f1a\u6c38\u4e45 tombstone\n\u8be5\u5e42\u7b49\u952e\uff0c\u666e\u901a propose \u4e5f\u4e0d\u80fd\u590d\u6d3b\u6216\u7559\u4e0b\u5b64\u513f\u5ba1\u6279\u5361\uff1bMemory \u968f\u540e\u628a intent \u6301\u4e45\u6807\u4e3a `conflicted`\u3002pending\n\u626b\u63cf\u4f7f\u7528\u6301\u4e45 round-robin \u987a\u5e8f\uff1b\u4e00\u9875\u672a\u51b3\u5b9a\u63d0\u6848\u4e0d\u4f1a\u997f\u6b7b\u540e\u9875\u5df2\u51b3\u63d0\u6848\u3002\u5df2\u7ecf attach Policy ID \u7684\u672c\u5730\u63d0\u6848\u53ea\u6309\n\u8be5 ID \u505a\u53ea\u8bfb\u6062\u590d\uff1bPolicy \u884c\u7f3a\u5931\u4f1a durable conflict\uff0c\u7edd\u4e0d\u91cd\u65b0\u521b\u5efa proposal/dispatch\u3002proposal \u4e0e intent \u7684\n\u5224\u5b9a\u4e5f\u5728\u540c\u4e00\u4e2a\u672c\u5730\u5199\u4e8b\u52a1\u4e2d\u5b8c\u6210\uff0c\u907f\u514d\u591a\u8fdb\u7a0b\u4ea4\u9519\u7559\u4e0b\u53cc\u72b6\u6001\u6216 poison intent\u3002\u65e7 schema \u7684 crash-gap intent\n\u5148\u505a scoped read-only lookup\uff1b\u786e\u6709\u65e7 Policy \u884c\u65f6\u7cbe\u786e\u56de\u653e\u539f TTL/dispatch\uff0c\u5426\u5219\u56de\u5230\u7edd\u5bf9 deadline \u7684\u539f\u5b50\u6062\u590d\u3002\n\nJSON \u5bfc\u5165\u662f\u4e00\u7ec4\u72ec\u7acb\u3001\u53ef\u91cd\u653e\u7684\u63d0\u6848\uff0c\u4e0d\u627f\u8bfa\u8de8\u6240\u6709\u8bb0\u5f55\u7684\u4e00\u6b21\u6027\u6279\u51c6\u6216\u5168\u6279\u539f\u5b50\u63d0\u4ea4\u3002SQLite \u4ec5\u627f\u8bfa\u5355\u673a\u591a\u8fde\u63a5\u8bed\u4e49\uff0c\u4e0d\u7528\u4e8e\u591a\u4e3b\u673a\u5171\u4eab\u6587\u4ef6\u7cfb\u7edf\u3002\n\n## \u914d\u7f6e\u4e0a\u9650\n\n| \u5b57\u6bb5 | \u9ed8\u8ba4\u503c | \u4f5c\u7528 |\n|---|---:|---|\n| `approvalMode` | `delivery-required` | \u751f\u4ea7\u9ed8\u8ba4\u8981\u6c42 authenticated Delivery route\uff1b\u4ec5\u53ef\u4fe1\u672c\u5730/headless \u96c6\u6210\u53ef\u663e\u5f0f\u8bbe\u4e3a `delivery-or-headless` \u5e76\u4f20 principal |\n| `maxContentBytes` | 4096 | \u5355\u6761\u5185\u5bb9\u6700\u5927 UTF-8 \u5b57\u8282\u6570 |\n| `maxRecordsPerIdentity` | 1000 | \u6bcf\u4e2a\u5b8c\u6574\u8eab\u4efd\u57df\u7684\u6d3b\u52a8\u8bb0\u5f55\u4e0a\u9650 |\n| `searchLimit` | 20 | \u672a\u663e\u5f0f\u6307\u5b9a\u65f6\u7684\u641c\u7d22\u4e0a\u9650 |\n| `snapshotLimit` | 20 | \u5f53\u524d\u5feb\u7167\u8bb0\u5f55\u4e0a\u9650 |\n| `snapshotMaxBytes` | 8192 | \u5feb\u7167\u6700\u5927 UTF-8 \u5b57\u8282\u6570 |\n| `snapshotMaxTokens` | 2048 | \u5feb\u7167\u7c97\u7565 token \u4e0a\u9650 |\n| `toolEvidence` | `true` | \u7d22\u5f15\u5f53\u524d\u6210\u529f\u7684\u539f\u751f `read`\uff0c\u63d0\u4f9b\u538b\u7f29\u540e\u5386\u53f2\u539f\u6587\u56de\u8bfb |\n| `evidenceMaxSourceBytes` | 1048576 | \u539f\u59cb\u53c2\u6570\u4e0e\u7ed3\u679c\u603b\u5b57\u8282\u4e0a\u9650\uff0c\u6700\u5927 4194304 |\n| `evidenceManifestMaxBytes` | 2048 | \u5f15\u7528\u6e05\u5355\u6700\u5927 UTF-8 \u5b57\u8282\u6570\uff0c\u6700\u5927 8192 |\n| `evidenceManifestLimit` | 8 | \u6e05\u5355\u6700\u591a\u5f15\u7528\u6570\uff0c\u6700\u5927 20\uff0c\u540c\u65f6\u53d7\u6bcf\u8eab\u4efd\u8bb0\u5f55\u4e0a\u9650\u9650\u5236 |\n| `defaultProposalTtlMs` | 900000 | \u9ed8\u8ba4\u63d0\u6848\u6709\u6548\u671f\uff0815 \u5206\u949f\uff09 |\n| `maxImportRecords` | 100 | \u5355\u6b21\u5bfc\u5165\u6700\u5927\u8bb0\u5f55\u6570 |\n| `reconcileIntervalMs` | 15000 | \u63d0\u4ea4\u201c\u4f1a\u8bdd\u7ed3\u675f\u540e\u624d\u88ab\u6279\u51c6\u201d\u7684\u63d0\u6848\u7684\u8f6e\u8be2\u95f4\u9694\uff1b`0` \u5173\u95ed\u5b9a\u65f6\u5668\uff0c\u4e0a\u9650\u4e3a Node timer \u7684 `2147483647` ms |\n| `reconcileLimit` | 50 | \u6bcf\u8f6e reconcile \u68c0\u67e5\u7684\u672c\u5730\u5f85\u51b3\u63d0\u6848\u4e0a\u9650 |\n\n## \u5ef6\u8fdf\u5ba1\u6279\u7684\u63d0\u4ea4\u95ed\u73af\n\n`memory_manage` \u53ea\u521b\u5efa\u63d0\u6848\uff0c\u6c38\u4e0d\u76f4\u63a5\u5199\u5165\u3002\u63d0\u6848\u4e0e Policy \u7684 durable approval-dispatch route \u5728\u540c\u4e00\u4e8b\u52a1\u521b\u5efa\uff0cDelivery \u4f1a\u628a Policy \u51bb\u7ed3\u7684 summary/diff/\u7248\u672c\u6295\u9012\u7ed9 exact owner binding\u3002\u5ba1\u6279\u53ef\u80fd\u53d1\u751f\u5728\u539f turn \u7ed3\u675f\u4e4b\u540e\uff08\u4f8b\u5982\u51e0\u5206\u949f\u540e\u5728\u98de\u4e66\u5361\u7247\u4e0a\u70b9\u51fb\uff09\uff0c\u56e0\u6b64\u672c\u63d2\u4ef6\u4f1a\u5468\u671f\u6027\u8c03\u7528 `reconcileProposals()`\uff1a\u8bfb\u53d6 policy \u8d26\u672c\u4e2d\u8be5\u63d0\u6848\u7684**\u7ec8\u6001**\uff0c\u518d\u7528\u4e0e `decideProposal` \u5b8c\u5168\u76f8\u540c\u7684\u4e8b\u52a1\u8def\u5f84\u63d0\u4ea4\u3002\n\n\u4e09\u6761\u8fb9\u754c\uff1a\n\n- **\u4e0d\u63a8\u65ad\u6279\u51c6**\uff1apending \u4ecd\u7136\u662f pending\uff1b\u53ea\u6709 policy \u8d26\u672c\u7ed9\u51fa `approved`/`rejected` \u624d\u843d\u76d8\u3002\n- **\u5e42\u7b49**\uff1a\u91cd\u590d reconcile \u4e0d\u4f1a\u91cd\u590d\u5199\u5165\u6216\u91cd\u590d\u7ed3\u7b97\uff0c\u91cd\u542f\u540e\u540c\u6837\u5b89\u5168\u3002\n- **\u5b8c\u6574\u6821\u9a8c**\uff1a\u63d0\u4ea4\u524d\u91cd\u65b0\u6821\u9a8c proposal id\u3001requester\u3001principal\u3001action\u3001resource\u3001summary\u3001diff hash\u3001expiry\u3001\u7248\u672c\u4e0e decider\uff1b\u4efb\u4e00\u5b57\u6bb5\u4e0d\u7b26\u4f1a\u628a\u672c\u5730\u63d0\u6848\u6301\u4e45\u6807\u4e3a `conflicted`\uff0c\u7edd\u4e0d\u5199 memory\u3002\n- **\u4e0d\u590d\u6d3b intent**\uff1aPolicy \u5728\u4e00\u4e2a\u4e8b\u52a1\u5185\u5b8c\u6210 existing-exact / create-before-deadline / abandon-after-deadline \u4e09\u9009\u4e00\uff1babandonment tombstone \u4f1a\u963b\u6b62\u5176\u4ed6\u8fdb\u7a0b\u968f\u540e\u521b\u5efa\u5b64\u513f dispatch\u3002\n- **\u4e0d\u53cd\u5411\u8c03\u7528**\uff1apolicy \u4ece\u4e0d\u56de\u8c03\u672c\u63d2\u4ef6\uff1b\u65b9\u5411\u59cb\u7ec8\u662f\u672c\u63d2\u4ef6\u8bfb\u53d6 policy\u3002\n\n\u9700\u8981\u5b8c\u5168\u7531\u5bbf\u4e3b\u9a71\u52a8\u65f6\uff0c\u628a `reconcileIntervalMs` \u8bbe\u4e3a `0` \u5e76\u81ea\u884c\u8c03\u7528 `reconcileProposals()`\u3002\u53ef\u4fe1\u7684\u65e0 Delivery\n\u96c6\u6210\u8fd8\u5fc5\u987b\u663e\u5f0f\u914d\u7f6e `approvalMode: delivery-or-headless`\uff1bDelivery \u70ed\u91cd\u8f7d\u6216\u5c1a\u672a\u5c31\u7eea\u4e0d\u4f1a\u8ba9\u751f\u4ea7\u9ed8\u8ba4\u81ea\u52a8\n\u964d\u7ea7\u4e3a caller-supplied principal\u3002\n\n## \u6743\u9650\u4e0e\u975e\u76ee\u6807\n\n- \u6587\u4ef6\u7cfb\u7edf\uff1a\u8bfb\u5199\u914d\u7f6e\u7684 SQLite \u6570\u636e\u5e93\u53ca\u5176 WAL/SHM \u8f85\u52a9\u6587\u4ef6\uff1b\u5de5\u5177\u8bc1\u636e\u529f\u80fd\u53e6\u8bfb\u53d6\u5f53\u524d Session \u539f\u59cb\u4e8b\u4ef6\uff0c\u5e76\u7ecf Host FS \u4e0e\u539f\u751f `read` \u7ba1\u7ebf\u91cd\u8bfb\u663e\u5f0f\u6388\u6743\u6587\u4ef6\u3002\u5b83\u4e0d\u5199\u7528\u6237\u6587\u4ef6\u3002\n- \u7f51\u7edc\uff1a\u672c\u63d2\u4ef6\u4e0d\u76f4\u63a5\u53d1\u7f51\u7edc\u8bf7\u6c42\uff1b\u5de5\u5177\u8bc1\u636e\u91cd\u8bfb\u53ef\u8c03\u7528 Host \u914d\u7f6e\u7684\u8fdc\u7aef FS provider\u3002\u7ec4\u5408 Delivery \u65f6\u53ea\u5199 durable dispatch\uff0c\u7531 channel \u63d2\u4ef6\u8d1f\u8d23\u53d1\u9001\u5ba1\u6279\u5361\u7247\u3002\n- \u5b50\u8fdb\u7a0b\u3001\u51ed\u636e\u3001\u6d4f\u89c8\u5668\u3001\u5b89\u88c5\u811a\u672c\uff1a\u65e0\u3002\n- \u6570\u636e\u654f\u611f\u6027\uff1a`sensitive` \u53ea\u8868\u793a\u7981\u6b62\u73af\u5883\u5feb\u7167\uff1b\u663e\u5f0f\u3001\u5df2\u6388\u6743\u7684\u641c\u7d22\u4ecd\u53ef\u80fd\u628a\u5185\u5bb9\u53d1\u9001\u7ed9\u5f53\u524d\u6a21\u578b\u3002\u771f\u6b63\u7684\u5bc6\u7801/API key \u5e94\u653e\u5728\u540e\u7eed `credentials-keychain`\uff0c\u4e0d\u8981\u5199\u5165 memory\u3002\n- \u975e\u76ee\u6807\uff1a\u5411\u91cf\u6570\u636e\u5e93\u3001\u81ea\u52a8\u65e0\u5ba1\u6279\u5199\u5165\u3001\u81ea\u52a8\u9057\u5fd8/dreaming\u3001\u77e5\u8bc6\u56fe\u8c31\u3001Wiki \u957f\u6587\u3001\u8de8\u8bbe\u5907\u540c\u6b65\u548c\u591a\u7528\u6237 ACL\u3002\n\n## \u517c\u5bb9\u6027\n\n\u5df2\u9488\u5bf9 DeepSeek Harness `0.1.2-rc.1` \u9a8c\u8bc1\u3002\u8be6\u89c1\u4ed3\u5e93[\u517c\u5bb9\u6027\u57fa\u7ebf](../../docs/compatibility.md)\u3002\n"
+    }
+  ],
+  "limits": [
+    "fixture uses one owner route and no approval, release, publication, or activation",
+    "schema-4 fixture binds a local empty catalog; it does not exercise release adapters",
+    "queued Context replacement in one Node process; running crash recovery is not exercised",
+    "owner route, empty goal/skill history and tool approval are fixtures",
+    "owner instrumentation records the private Host preparation method without changing its outcome"
+  ],
+  "runtimeDigests": {
+    "scripts/e2e/source-model-durable-smoke.mjs": "cde3640c6a4db7a0f03b97abe7f8ee72b024d428b8c1cfac5d390b5733dcff2a",
+    "scripts/e2e/source-model-control-fixture.mjs": "44ad6b0dd386960ba4c562107bc8c069ab7bcb4453675073e6554c3c89e57c93",
+    "plugins/assistant-growth-driver/lib/growth-agent.js": "591df9ab6cac7bdaa55ee6c5353c52ca81305e37d42def9acb2bdd223db99c86",
+    "plugins/assistant-growth-driver/lib/source-edits.js": "d7a68e00eb753bf9c747fdedc4dcefa976d537814b805952f72117fc1baffeb5",
+    "plugins/plugin-control-plane/lib/source-jobs.js": "c4059d1b7bc574d01d93afcedd1cb1f1e18c0c5d666294012fcd41e9832beb7f"
+  },
+  "trustFileDigest": "f0d88b9a95b2c80528f95219465c8d7b1abd1c7ce1a2c11e8456a0bf8f8abf16",
+  "route": {
+    "provider": "super-relay",
+    "model": "auto_model/alwaysday1",
+    "api": "openai-responses"
+  },
+  "reasoningProbe": {
+    "requested": "low",
+    "mapping": {
+      "low": "low"
+    },
+    "gatewayEnforcementVerified": false
+  },
+  "reads": [
+    {
+      "name": "personal-memory",
+      "baseCommit": "0b2a784870998e51837c418f28723ae834d2af9a",
+      "paths": []
+    },
+    {
+      "name": "personal-memory",
+      "baseCommit": "0b2a784870998e51837c418f28723ae834d2af9a",
+      "paths": [
+        "src/tokenize.ts",
+        "src/sqlite.ts",
+        "src/knowledge.ts",
+        "README.md",
+        "tests/retrieval.spec.ts"
+      ]
+    }
+  ],
+  "wake": {
+    "lastWakeAt": 1789839044091,
+    "outcome": "ran",
+    "reason": "succeeded",
+    "run": {
+      "sessionId": "growth-71ade81c8c1fb501e3e642eb0772abf3dabc7e5e",
+      "outcome": "succeeded",
+      "output": "## Review complete\n\n- **Skill candidates:** none proposed. There are no completed owner-root goals, so no independently verified repeated procedures are available.\n- **Existing skills:** no active or pending skills found.\n- **Plugin source gap:** reviewed `personal-memory` gap `gap-cba06ae5-30b0-4556-b410-73f6478517fc`.\n- **Modification prepared:** queued durable job `source-job-48bbcc76406d2372f23a6bba57ad2f66484823683a6c47fa562d8aad9bc4ca2b`.\n\nThe proposal addresses:\n  - Latin token recall adjacent to CJK text.\n  - CJK bigrams only for adjacent CJK characters.\n  - Independent `tokenizer-index-version` in `schema_meta`.\n  - One-time transactional rebuild of active records from content plus knowledge.\n  - Idempotent reopening without reviving removed records.\n  - Regression coverage and README documentation.\n\nCurrent job status is **queued**; this is not approval, completion, activation, or independent evaluation.",
+      "usage": {
+        "inputTokens": 32261,
+        "outputTokens": 6734,
+        "cacheReadTokens": 56344,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 0,
+        "modelCalls": 6,
+        "toolCalls": 7
+      },
+      "sourceProposals": {
+        "queued": 1,
+        "prepared": 0,
+        "rejected": 0
+      }
+    }
+  },
+  "queued": {
+    "id": "source-job-48bbcc76406d2372f23a6bba57ad2f66484823683a6c47fa562d8aad9bc4ca2b",
+    "status": "queued",
+    "baseCommit": "0b2a784870998e51837c418f28723ae834d2af9a",
+    "trustDigest": "80bee8642d734e065bcf11be2b9932f907023ca40e67b00745e86b6ddef7451b",
+    "ownerDigest": "c076afce1fc36ebeb966b91578d56230a1865a1562ef37e1ad369f50418f70a0",
+    "containerName": "dsh-source-job-48bbcc76406d2372f23a6bba57ad2f66484823683a6c47fa562d8aad9bc4ca2b",
+    "worktree": "/tmp/dsh-source-durable-ufeyea/dsh-home/plugin-control/plans/source-worktrees/worktree-job-48bbcc76406d2372f23a6bba57ad2f66484823683a6c47fa562d8aad9bc4ca2b"
+  },
+  "preparedPlan": {
+    "schemaVersion": 1,
+    "kind": "source",
+    "id": "source-d4d4a139-8ce9-4595-ac73-8706c9cdd8eb",
+    "gapId": "gap-cba06ae5-30b0-4556-b410-73f6478517fc",
+    "gapSnapshot": {
+      "revision": 1,
+      "inputDigest": "1439c90ac921ced17756eb79884c09735ee420e2f0474de1ef74777695226d61",
+      "roi": 90,
+      "capability": "Reliable mixed-script lexical memory recall and persisted index upgrade"
+    },
+    "repository": "/data00/home/jiataorui/work/github/dsh-enhanced",
+    "worktree": "/tmp/dsh-source-durable-ufeyea/dsh-home/plugin-control/plans/source-worktrees/worktree-job-48bbcc76406d2372f23a6bba57ad2f66484823683a6c47fa562d8aad9bc4ca2b",
+    "baseCommit": "0b2a784870998e51837c418f28723ae834d2af9a",
+    "name": "personal-memory",
+    "generatorDigest": "2267fd71074f698e2b0010048d66bb8ed4924f2bf6f990fa10b0765a6b820dba",
+    "scope": [
+      "plugins/personal-memory"
+    ],
+    "createdAt": 1789840283295,
+    "expiresAt": 1789843883295,
+    "mode": "modify",
+    "digest": "ae5797dc3e3a26fa454011b40dcc5fbb74d60439c33acc38983955e8ec6227f1",
+    "status": "pending-approval",
+    "revision": 1,
+    "sourceCheck": {
+      "treeDigest": "1679a62c597ffaf3688555fb17f6ce69543f2a1bafed40cdbd4f6b54cf86bcbd",
+      "patchDigest": "e8e42d5bde712da717f0b689dbf5ef7bc446fd6bc32a7a4f5c63a6cbd43227c0",
+      "checkedAt": 1789840283202
+    },
+    "preparedEvidence": {
+      "schemaVersion": 1,
+      "kind": "dsh-source-prepared-evidence",
+      "environment": {
+        "npmConfigIgnoreScripts": true,
+        "frozenLockfile": true,
+        "offline": true,
+        "nodeVersion": "v22.23.2",
+        "pnpmVersion": "11.7.0"
+      },
+      "commands": [
+        {
+          "command": "docker",
+          "args": [
+            "run",
+            "-i",
+            "--pull",
+            "never",
+            "--name",
+            "dsh-source-job-48bbcc76406d2372f23a6bba57ad2f66484823683a6c47fa562d8aad9bc4ca2b",
+            "--label",
+            "dsh.source.tree=387ba320190f1493c9af4986f88f8f5cea8a074b",
+            "--label",
+            "dsh.source.job=source-job-48bbcc76406d2372f23a6bba57ad2f66484823683a6c47fa562d8aad9bc4ca2b",
+            "--label",
+            "dsh.source.seccomp.sha256=b1e4b5b709578785bd2aff4a3a344301997571ad0e8ae5747aec176571ddc342",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            "65534:65534",
+            "--pids-limit",
+            "1024",
+            "--memory",
+            "16384m",
+            "--memory-swap",
+            "16384m",
+            "--cpus",
+            "8",
+            "--tmpfs",
+            "/workspace:rw,nosuid,nodev,mode=1777,size=4096m,exec",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,mode=1777,size=2048m,exec",
+            "--workdir",
+            "/workspace",
+            "--env",
+            "PLUGIN_ROOT=plugins/personal-memory",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PATH=/usr/local/bin:/usr/bin:/bin",
+            "--env",
+            "CI=true",
+            "--env",
+            "VITEST_MAX_WORKERS=1",
+            "--security-opt",
+            "seccomp=/tmp/dsh-source-build-index-swSA64/repository-seccomp.json",
+            "--security-opt",
+            "systempaths=unconfined",
+            "--tmpfs",
+            "/sys:ro,nosuid,nodev,noexec,size=1m",
+            "--entrypoint",
+            "/bin/sh",
+            "sha256:b48863fec65a0c950eae4fce5e27105403c28e267d383234756fc8c99bf1968a",
+            "-ceu",
+            "set -eu; checked() { phase=\"$1\"; shift; if \"$@\" >\"/tmp/$phase.log\" 2>&1; then return 0; else code=$?; printf \"source build phase failed: %s\\n\" \"$phase\" >&2; tail -c 8192 \"/tmp/$phase.log\" >&2; return \"$code\"; fi; }; umask 077; mkdir -p /workspace; tar -x -C /workspace; cd /workspace; checked install pnpm install --offline --frozen-lockfile --ignore-scripts; checked check pnpm check; mkdir -p /workspace/.dsh-pack; cd \"$PLUGIN_ROOT\"; checked pack pnpm pack --pack-destination /workspace/.dsh-pack; set -- /workspace/.dsh-pack/*.tgz; test \"$#\" = 1; pack=\"$1\"; printf \"DSH_PREPARED_PACK\\t%s\\t%s\\t%s\\t%s\\t%s\\n\" \"${pack##*/}\" \"$(wc -c < \"$pack\" | tr -d \" \")\" \"$(sha256sum \"$pack\" | cut -d \" \" -f1)\" \"$(node --version)\" \"$(pnpm --version)\""
+          ],
+          "exitCode": 0,
+          "durationMs": 1047805,
+          "logDigest": "a149dc60cbe81bc866bd684c46231804b314d33cfe44f8e5c47d5401884d527a"
+        }
+      ],
+      "pack": {
+        "name": "dsh-enhanced-personal-memory-0.1.33.tgz",
+        "version": "0.1.33",
+        "sizeBytes": 98855,
+        "sha256": "5de20aca304b18ff703a4ac8edd3c3b2d0a6d49c2e38de091b950da3be801b98"
+      },
+      "preparedAt": 1789839235289
+    }
+  },
+  "remount": {
+    "noAgent": true,
+    "finalJob": {
+      "status": "prepared",
+      "occurrence_id": "occ-92345c0490f8f70936d039a8eb76c27be6506c27fccb9fe63a82d1102ced270b"
+    },
+    "plan": {
+      "status": "pending-approval",
+      "base_commit": "0b2a784870998e51837c418f28723ae834d2af9a"
+    },
+    "occurrences": 1,
+    "nativeRuns": [
+      {
+        "status": "succeeded",
+        "occurrence_id": "occ-92345c0490f8f70936d039a8eb76c27be6506c27fccb9fe63a82d1102ced270b",
+        "execution_mode": "production",
+        "diagnostic_json": "{\"schemaVersion\":1,\"failureClass\":\"none\",\"failurePhase\":\"none\",\"failureCode\":\"none\",\"promptSubmissionState\":\"not-applicable\",\"sideEffectState\":\"possible\",\"retryability\":\"unsafe\",\"budgetSettlementState\":\"finalized\"}"
+      }
+    ],
+    "preparedEvidence": {
+      "schemaVersion": 1,
+      "kind": "dsh-source-prepared-evidence",
+      "environment": {
+        "npmConfigIgnoreScripts": true,
+        "frozenLockfile": true,
+        "offline": true,
+        "nodeVersion": "v22.23.2",
+        "pnpmVersion": "11.7.0"
+      },
+      "commands": [
+        {
+          "command": "docker",
+          "args": [
+            "run",
+            "-i",
+            "--pull",
+            "never",
+            "--name",
+            "dsh-source-job-48bbcc76406d2372f23a6bba57ad2f66484823683a6c47fa562d8aad9bc4ca2b",
+            "--label",
+            "dsh.source.tree=387ba320190f1493c9af4986f88f8f5cea8a074b",
+            "--label",
+            "dsh.source.job=source-job-48bbcc76406d2372f23a6bba57ad2f66484823683a6c47fa562d8aad9bc4ca2b",
+            "--label",
+            "dsh.source.seccomp.sha256=b1e4b5b709578785bd2aff4a3a344301997571ad0e8ae5747aec176571ddc342",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            "65534:65534",
+            "--pids-limit",
+            "1024",
+            "--memory",
+            "16384m",
+            "--memory-swap",
+            "16384m",
+            "--cpus",
+            "8",
+            "--tmpfs",
+            "/workspace:rw,nosuid,nodev,mode=1777,size=4096m,exec",
+            "--tmpfs",
+            "/tmp:rw,nosuid,nodev,mode=1777,size=2048m,exec",
+            "--workdir",
+            "/workspace",
+            "--env",
+            "PLUGIN_ROOT=plugins/personal-memory",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "PATH=/usr/local/bin:/usr/bin:/bin",
+            "--env",
+            "CI=true",
+            "--env",
+            "VITEST_MAX_WORKERS=1",
+            "--security-opt",
+            "seccomp=/tmp/dsh-source-build-index-swSA64/repository-seccomp.json",
+            "--security-opt",
+            "systempaths=unconfined",
+            "--tmpfs",
+            "/sys:ro,nosuid,nodev,noexec,size=1m",
+            "--entrypoint",
+            "/bin/sh",
+            "sha256:b48863fec65a0c950eae4fce5e27105403c28e267d383234756fc8c99bf1968a",
+            "-ceu",
+            "set -eu; checked() { phase=\"$1\"; shift; if \"$@\" >\"/tmp/$phase.log\" 2>&1; then return 0; else code=$?; printf \"source build phase failed: %s\\n\" \"$phase\" >&2; tail -c 8192 \"/tmp/$phase.log\" >&2; return \"$code\"; fi; }; umask 077; mkdir -p /workspace; tar -x -C /workspace; cd /workspace; checked install pnpm install --offline --frozen-lockfile --ignore-scripts; checked check pnpm check; mkdir -p /workspace/.dsh-pack; cd \"$PLUGIN_ROOT\"; checked pack pnpm pack --pack-destination /workspace/.dsh-pack; set -- /workspace/.dsh-pack/*.tgz; test \"$#\" = 1; pack=\"$1\"; printf \"DSH_PREPARED_PACK\\t%s\\t%s\\t%s\\t%s\\t%s\\n\" \"${pack##*/}\" \"$(wc -c < \"$pack\" | tr -d \" \")\" \"$(sha256sum \"$pack\" | cut -d \" \" -f1)\" \"$(node --version)\" \"$(pnpm --version)\""
+          ],
+          "exitCode": 0,
+          "durationMs": 1047805,
+          "logDigest": "a149dc60cbe81bc866bd684c46231804b314d33cfe44f8e5c47d5401884d527a"
+        }
+      ],
+      "pack": {
+        "name": "dsh-enhanced-personal-memory-0.1.33.tgz",
+        "version": "0.1.33",
+        "sizeBytes": 98855,
+        "sha256": "5de20aca304b18ff703a4ac8edd3c3b2d0a6d49c2e38de091b950da3be801b98"
+      },
+      "preparedAt": 1789839235289
+    },
+    "containerAbsent": true,
+    "pendingWorktreeRetained": true,
+    "originalPluginUnchanged": true
+  },
+  "ownerAudit": {
+    "commandExitCode": 0,
+    "rawEvidenceSha256": "fe9b02fb4b49b4e63bce3cf61a2fe41a6223731b356a4b547f7d162919142ea9",
+    "independentAcceptance": "personal-memory-source-acceptance-2026-09-19.json",
+    "toolkitCheck": "source-exact-edits-2026-09-19.json",
+    "earlierFailedAttempts": "day1-memory-source-failed-attempts-2026-09-19.json",
+    "containerTestObservation": {
+      "method": "read-only docker exec cat /tmp/check.log after all test summaries and during final build",
+      "logSha256": "8c63a173b9871458e870e991b4301b820fcde09f470645895b8ead94e476bbc7",
+      "passed": 5860,
+      "skipped": 44,
+      "summaries": 36
+    },
+    "reviewFollowups": [
+      "Candidate implementation passed static review under the existing stop/quiescence upgrade barrier.",
+      "Before integration, add an explicit old-writer stop precondition to README and strengthen the reopen test with a version-marker assertion and distinguishable token sentinel."
+    ],
+    "integrationStatus": "Pending plan retained; personal-memory source has not been integrated into dev.",
+    "harnessChangesAfterRunStarted": [
+      "Record options.reasoningEffort in future per-call evidence and clarify configuration-probe comments; no control-flow or outcome change.",
+      "Clarify fixture version comment."
+    ],
+    "limits": [
+      "The private native Pi configuration was set to low, but the run did not record effective per-request reasoning selection or wire effort. Neither gateway enforcement nor a causal performance gain is established.",
+      "Queued Context replacement occurred in one process; no running-job process-crash proof.",
+      "Owner route, history and tool approvals are fixtures; no approval, signing, publication or activation was executed.",
+      "One deterministic repair does not establish later-task reuse or WP16/WP18 completion."
+    ],
+    "independentReview": {
+      "verdict": "PASS",
+      "scope": "native durable pending-plan proof, immutable acceptance binding, current SQLite readback, exact container absence, unchanged target plugin, and documentation boundaries",
+      "unverified": [
+        "effective reasoning effort",
+        "approval/publication/activation",
+        "running-process crash recovery",
+        "later-task reuse"
+      ]
+    }
+  }
+}

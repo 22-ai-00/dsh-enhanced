@@ -1,0 +1,4260 @@
+{
+  "kind": "independent-personal-memory-source-acceptance",
+  "frozenBeforeGeneration": {
+    "harnessSha256": "47f399e04decc3cbd830d3006311fe577379c907f49a916442896c68f3c31ece",
+    "baselineEvidence": {
+      "contract": "personal-memory-source-acceptance/v1",
+      "repository": "/data00/home/jiataorui/work/github/dsh-enhanced",
+      "candidate": null,
+      "inputDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "artifactDigest": "829b19ee2da7ada03414fb084b490b1df05b80be5415cc81d81340f9683c9d38",
+      "scriptDigest": "47f399e04decc3cbd830d3006311fe577379c907f49a916442896c68f3c31ece",
+      "checkedAt": "2026-09-19T17:01:42.680Z",
+      "limits": [
+        "operator-held deterministic engineering cases, not a signed production holdout",
+        "candidate observations remain untrusted; source review and regression checks are separate gates"
+      ],
+      "frozenBaseline": {
+        "path": "/tmp/personal-memory-source-baseline.json.baseline.mjs",
+        "sha256": "be94219e22d94a506ce2e905415337a4bda5917031d74e86fbccaa73de5ec94e",
+        "bytes": 425227
+      },
+      "image": "sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8",
+      "receipt": {
+        "jobId": "f7ba04ed-540f-4d07-b913-58451c01de53",
+        "status": "succeeded",
+        "quiescent": true,
+        "exitCode": 0
+      },
+      "observation": {
+        "ids": {
+          "keep": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1",
+          "removed": "68b7fede-702d-41e2-9945-ecef4612395d",
+          "fresh": "2bf0655d-121f-45bb-ae85-c117187982f7"
+        },
+        "before": {
+          "records": [
+            {
+              "id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+              "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "active",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 1,
+              "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+            },
+            {
+              "id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Removed\u4ee4\u724c",
+              "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "removed",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 2,
+              "knowledge_json": null
+            }
+          ],
+          "audit": [
+            {
+              "sequence": 1,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "keep",
+              "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+              "operation": "add",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1",
+              "result_version": 1,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 2,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "remove",
+              "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+              "operation": "add",
+              "memory_id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "result_version": 1,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 3,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "remove-record",
+              "mutation_hash": "bf9101091cb66251b87570788ac6f8d371580a3a22d284117f0ea23ca1297918",
+              "operation": "remove",
+              "memory_id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "result_version": 2,
+              "occurred_at": 100000
+            }
+          ],
+          "tokens": [
+            {
+              "token": "cache",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "mode",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "writeback",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0a",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0a\u6d77",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0d\u9002",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4eac",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4eac\u4e0a",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4ef6",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4ef6\u6545",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5317",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5317\u4eac",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u590d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u590d\u65e7",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5b58",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5b58\u5317",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6062",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6062\u590d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u63d2",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u63d2\u4ef6",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6545",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6545\u969c",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u65e7",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u65e7\u7248",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6d77",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6d77\u63d2",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7248",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7248\u4e0d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7528",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7f13",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7f13\u5b58",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u9002",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u9002\u7528",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u969c",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u969c\u6062",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            }
+          ],
+          "version": 6,
+          "meta": "6"
+        },
+        "tokenCases": [
+          {
+            "value": "\uff21\uff22\uff23\u7f13\u5b58\uff0c\u4e0a\u6d77 Quartz\u63d2\u4ef6",
+            "tokens": [
+              "\u4e0a",
+              "\u4e0a\u6d77",
+              "\u4ef6",
+              "\u5b58",
+              "\u5b58\u4e0a",
+              "\u63d2",
+              "\u63d2\u4ef6",
+              "\u6d77",
+              "\u6d77\u63d2",
+              "\u7f13",
+              "\u7f13\u5b58"
+            ]
+          },
+          {
+            "value": "\u7532 \u4e59",
+            "tokens": [
+              "\u4e59",
+              "\u7532",
+              "\u7532\u4e59"
+            ]
+          },
+          {
+            "value": "\u7532\uff0c\u4e59",
+            "tokens": [
+              "\u4e59",
+              "\u7532",
+              "\u7532\u4e59"
+            ]
+          },
+          {
+            "value": "\u7532Latin\u4e59",
+            "tokens": [
+              "\u4e59",
+              "\u7532",
+              "\u7532\u4e59"
+            ]
+          },
+          {
+            "value": "\u65e5\u672c\u8a9e",
+            "tokens": [
+              "\u65e5",
+              "\u65e5\u672c",
+              "\u672c",
+              "\u672c\u8a9e",
+              "\u8a9e"
+            ]
+          },
+          {
+            "value": "Hello-world_42",
+            "tokens": [
+              "hello-world_42"
+            ]
+          },
+          {
+            "value": "\uff21\uff22\uff23\u7f13\u5b58 \uff21\uff22\uff23\u7f13\u5b58",
+            "tokens": [
+              "\u5b58",
+              "\u5b58\u7f13",
+              "\u7f13",
+              "\u7f13\u5b58"
+            ]
+          }
+        ],
+        "migrated": {
+          "records": [
+            {
+              "id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+              "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "active",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 1,
+              "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+            },
+            {
+              "id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Removed\u4ee4\u724c",
+              "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "removed",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 2,
+              "knowledge_json": null
+            }
+          ],
+          "audit": [
+            {
+              "sequence": 1,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "keep",
+              "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+              "operation": "add",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1",
+              "result_version": 1,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 2,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "remove",
+              "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+              "operation": "add",
+              "memory_id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "result_version": 1,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 3,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "remove-record",
+              "mutation_hash": "bf9101091cb66251b87570788ac6f8d371580a3a22d284117f0ea23ca1297918",
+              "operation": "remove",
+              "memory_id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "result_version": 2,
+              "occurred_at": 100000
+            }
+          ],
+          "tokens": [
+            {
+              "token": "cache",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "mode",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "writeback",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0a",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0a\u6d77",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0d\u9002",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4eac",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4eac\u4e0a",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4ef6",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4ef6\u6545",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5317",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5317\u4eac",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u590d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u590d\u65e7",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5b58",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5b58\u5317",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6062",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6062\u590d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u63d2",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u63d2\u4ef6",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6545",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6545\u969c",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u65e7",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u65e7\u7248",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6d77",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6d77\u63d2",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7248",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7248\u4e0d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7528",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7f13",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7f13\u5b58",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u9002",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u9002\u7528",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u969c",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u969c\u6062",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            }
+          ],
+          "version": 6,
+          "meta": "6"
+        },
+        "legacy": [],
+        "knowledge": [],
+        "foreign": [],
+        "removed": [],
+        "fresh": [],
+        "cjk": [
+          "2bf0655d-121f-45bb-ae85-c117187982f7",
+          "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+        ],
+        "after": {
+          "records": [
+            {
+              "id": "2bf0655d-121f-45bb-ae85-c117187982f7",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Zephyr\u63d2\u4ef6 \u6771\u4eac\u3002\u5927\u962a",
+              "content_hash": "519876a8f42a6167556e8606861e2ce1697f38f2e3c0c1acb76a1899cb0acb7d",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "active",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 1,
+              "knowledge_json": null
+            },
+            {
+              "id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+              "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "active",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 1,
+              "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+            },
+            {
+              "id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Removed\u4ee4\u724c",
+              "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "removed",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 2,
+              "knowledge_json": null
+            }
+          ],
+          "audit": [
+            {
+              "sequence": 1,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "keep",
+              "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+              "operation": "add",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1",
+              "result_version": 1,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 2,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "remove",
+              "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+              "operation": "add",
+              "memory_id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "result_version": 1,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 3,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "remove-record",
+              "mutation_hash": "bf9101091cb66251b87570788ac6f8d371580a3a22d284117f0ea23ca1297918",
+              "operation": "remove",
+              "memory_id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "result_version": 2,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 4,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "fresh",
+              "mutation_hash": "cb5d95e7097ceccbd9e6769da19dec9f107612c0709147d62291a1fd93c5cab4",
+              "operation": "add",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7",
+              "result_version": 1,
+              "occurred_at": 100000
+            }
+          ],
+          "tokens": [
+            {
+              "token": "\u4eac",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u4eac\u5927",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u4ef6",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u4ef6\u6771",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u5927",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u5927\u962a",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u63d2",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u63d2\u4ef6",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u6771",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u6771\u4eac",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u962a",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "cache",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "mode",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "writeback",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0a",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0a\u6d77",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0d\u9002",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4eac",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4eac\u4e0a",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4ef6",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4ef6\u6545",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5317",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5317\u4eac",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u590d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u590d\u65e7",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5b58",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5b58\u5317",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6062",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6062\u590d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u63d2",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u63d2\u4ef6",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6545",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6545\u969c",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u65e7",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u65e7\u7248",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6d77",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6d77\u63d2",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7248",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7248\u4e0d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7528",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7f13",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7f13\u5b58",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u9002",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u9002\u7528",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u969c",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u969c\u6062",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            }
+          ],
+          "version": 6,
+          "meta": "6"
+        },
+        "again": [],
+        "reopened": {
+          "records": [
+            {
+              "id": "2bf0655d-121f-45bb-ae85-c117187982f7",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Zephyr\u63d2\u4ef6 \u6771\u4eac\u3002\u5927\u962a",
+              "content_hash": "519876a8f42a6167556e8606861e2ce1697f38f2e3c0c1acb76a1899cb0acb7d",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "active",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 1,
+              "knowledge_json": null
+            },
+            {
+              "id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+              "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "active",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 1,
+              "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+            },
+            {
+              "id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "owner": "user",
+              "scope": "workspace",
+              "workspace": "/work/holdout",
+              "agent_preset": "",
+              "kind": "fact",
+              "content": "Removed\u4ee4\u724c",
+              "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+              "sensitivity": "private",
+              "trust": "user-confirmed",
+              "confidence": 1,
+              "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+              "supersedes": null,
+              "expires_at": null,
+              "status": "removed",
+              "created_at": 100000,
+              "updated_at": 100000,
+              "version": 2,
+              "knowledge_json": null
+            }
+          ],
+          "audit": [
+            {
+              "sequence": 1,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "keep",
+              "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+              "operation": "add",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1",
+              "result_version": 1,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 2,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "remove",
+              "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+              "operation": "add",
+              "memory_id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "result_version": 1,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 3,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "remove-record",
+              "mutation_hash": "bf9101091cb66251b87570788ac6f8d371580a3a22d284117f0ea23ca1297918",
+              "operation": "remove",
+              "memory_id": "68b7fede-702d-41e2-9945-ecef4612395d",
+              "result_version": 2,
+              "occurred_at": 100000
+            },
+            {
+              "sequence": 4,
+              "namespace_mode": "delivery",
+              "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+              "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "principal_record_id": "holdout-owner",
+              "principal_version": 7,
+              "headless_lineage_id": null,
+              "headless_lineage_version": null,
+              "idempotency_key": "fresh",
+              "mutation_hash": "cb5d95e7097ceccbd9e6769da19dec9f107612c0709147d62291a1fd93c5cab4",
+              "operation": "add",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7",
+              "result_version": 1,
+              "occurred_at": 100000
+            }
+          ],
+          "tokens": [
+            {
+              "token": "\u4eac",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u4eac\u5927",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u4ef6",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u4ef6\u6771",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u5927",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u5927\u962a",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u63d2",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u63d2\u4ef6",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u6771",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u6771\u4eac",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "\u962a",
+              "memory_id": "2bf0655d-121f-45bb-ae85-c117187982f7"
+            },
+            {
+              "token": "cache",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "mode",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "writeback",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0a",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0a\u6d77",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4e0d\u9002",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4eac",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4eac\u4e0a",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4ef6",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u4ef6\u6545",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5317",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5317\u4eac",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u590d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u590d\u65e7",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5b58",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u5b58\u5317",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6062",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6062\u590d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u63d2",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u63d2\u4ef6",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6545",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6545\u969c",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u65e7",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u65e7\u7248",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6d77",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u6d77\u63d2",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7248",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7248\u4e0d",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7528",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7f13",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u7f13\u5b58",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u9002",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u9002\u7528",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u969c",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            },
+            {
+              "token": "\u969c\u6062",
+              "memory_id": "32c0e05b-fce8-4997-82ae-2dc9d8286ba1"
+            }
+          ],
+          "version": 6,
+          "meta": "6"
+        }
+      },
+      "cases": [
+        {
+          "name": "legacy-v6-fixture",
+          "pass": true
+        },
+        {
+          "name": "nfkc-mixed-latin-cjk",
+          "pass": false
+        },
+        {
+          "name": "no-bigrams-across-space-punctuation-latin",
+          "pass": false
+        },
+        {
+          "name": "contiguous-cjk-bigrams",
+          "pass": true
+        },
+        {
+          "name": "existing-ascii-word-semantics",
+          "pass": true
+        },
+        {
+          "name": "sorted-unique",
+          "pass": true
+        },
+        {
+          "name": "legacy-mixed-latin-recall",
+          "pass": false
+        },
+        {
+          "name": "legacy-knowledge-mixed-recall",
+          "pass": false
+        },
+        {
+          "name": "fresh-mixed-latin-recall",
+          "pass": false
+        },
+        {
+          "name": "fresh-cjk-recall",
+          "pass": true
+        },
+        {
+          "name": "foreign-namespace-excluded",
+          "pass": true
+        },
+        {
+          "name": "removed-record-excluded",
+          "pass": true
+        },
+        {
+          "name": "legacy-boundary-index-rebuilt",
+          "pass": false
+        },
+        {
+          "name": "record-and-audit-preserved-by-migration",
+          "pass": true
+        },
+        {
+          "name": "schema-consistent",
+          "pass": true
+        },
+        {
+          "name": "reopen-idempotent",
+          "pass": false
+        }
+      ],
+      "pass": false
+    }
+  },
+  "provenanceRepair": "After generation, input loading changed from current plugin files to immutable Git blobs. Launcher and evaluate function bodies stayed byte-identical; both bound runs share expectationsDigest. Baseline bundle was not regenerated.",
+  "baseline": {
+    "contract": "personal-memory-source-acceptance/v1",
+    "repository": "/data00/home/jiataorui/work/github/dsh-enhanced",
+    "candidate": null,
+    "source": {
+      "baseCommit": "0b2a784870998e51837c418f28723ae834d2af9a",
+      "lockDigest": "9d17844fb1e7729d74f935759ee376b115a8f90e4ca9dafa35751996dd833fb2",
+      "files": [
+        {
+          "path": "package.json",
+          "sha256": "366fb9b1b40f6e7bb0e0226ae6522a63ff71b61828379eced180a4cc00b50a32"
+        },
+        {
+          "path": "src/evidence-filesystem.ts",
+          "sha256": "c7e9e5213e800892673fb8d96531a0b8bc5a92ffcb0e3633bd0c3fe495e84e79"
+        },
+        {
+          "path": "src/evidence-ledger.ts",
+          "sha256": "133693f4ae0efc884afc75b720d2d211ab81e9e96d47dacee2820397df5c28df"
+        },
+        {
+          "path": "src/evidence-runtime.ts",
+          "sha256": "299346c4d937e92b49ade178c63297a831eb72d67a2a4659e9f78d7fd6c8d7ee"
+        },
+        {
+          "path": "src/evidence-service.ts",
+          "sha256": "721149c3a3c87d0d89b0c709813b360bc49b9d7f0ab58b73cb631e2ff668e32a"
+        },
+        {
+          "path": "src/index.ts",
+          "sha256": "b6aa48a93a8d4152fa6966510a38b2685d06faf9e832e75243914fd80c574ab9"
+        },
+        {
+          "path": "src/knowledge.ts",
+          "sha256": "d481c80fdcc8013f3b5401a98550891dcb5ec329df484d4e09151566421512d6"
+        },
+        {
+          "path": "src/promotion.ts",
+          "sha256": "ce57771e51823dca3e31db4576e3a97ba0b9bb971106bcdee81219ec2af5c735"
+        },
+        {
+          "path": "src/proposals.ts",
+          "sha256": "47d3050fb5c74bacd32d98fe1c08f8c41e9217e762c3b4ae4a8742a7119d8f2f"
+        },
+        {
+          "path": "src/service.ts",
+          "sha256": "60cd79351f443a618f04176327b4b8e4959c9684449496caeba27dfcb551c28c"
+        },
+        {
+          "path": "src/sqlite.ts",
+          "sha256": "0b74e4f0ec3263c9e64f6673c0192483740fd61c8fcb096a34962633e40b50fb"
+        },
+        {
+          "path": "src/store.ts",
+          "sha256": "8a66b0519cf0aa72a09160229f519e0de2060bf10e6bee0a550b1347819d3955"
+        },
+        {
+          "path": "src/tokenize.ts",
+          "sha256": "f7dd9d9913281b9317a0caf10e05b815b6a994847244eb0c6eed02b350d13bf3"
+        },
+        {
+          "path": "src/tools.ts",
+          "sha256": "6360f2cb2ac93b2a90867b818ff4ed53f54fe62b149eb36cd837b6e121c61345"
+        },
+        {
+          "path": "src/types.ts",
+          "sha256": "b35559aaf71861cbc4a1a7402da5bfee8148810e60abb4b233a57487a25d7ee1"
+        },
+        {
+          "path": "src/version.ts",
+          "sha256": "b89492f1416b11e0a9140944aa3752078c51379c8fb25ecf0dbf682ab4ab4b55"
+        }
+      ]
+    },
+    "expectationsDigest": "12b5c3aeb93ce636cc82597e5da61986ef8d0d66cdd3d72083e5019352fb8cd8",
+    "inputDigest": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "artifactDigest": "ec803a58d4c82058e75cd8e048add0636ba22ac991c66b6ab01462205239f97c",
+    "scriptDigest": "a24adcf29433c135c3a964122ddac1eff55a3c1164113c7141fcdb0063902d51",
+    "checkedAt": "2026-09-19T17:34:15.913Z",
+    "limits": [
+      "operator-held deterministic engineering cases, not a signed production holdout",
+      "candidate observations remain untrusted; source review and regression checks are separate gates"
+    ],
+    "frozenBaseline": {
+      "path": "/tmp/personal-memory-source-baseline.json.baseline.mjs",
+      "sha256": "be94219e22d94a506ce2e905415337a4bda5917031d74e86fbccaa73de5ec94e",
+      "bytes": 425227
+    },
+    "image": "sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8",
+    "receipt": {
+      "jobId": "7650cf8b-c7f1-479c-b8b6-7dde4e8906db",
+      "status": "succeeded",
+      "quiescent": true,
+      "exitCode": 0
+    },
+    "observation": {
+      "ids": {
+        "keep": "fb17196d-8e06-4169-b1be-4453e3debc38",
+        "removed": "4ede9621-45a5-4082-a191-74f68f931caa",
+        "fresh": "29028851-8a0b-4901-bea2-164cfc3fa348"
+      },
+      "before": {
+        "records": [
+          {
+            "id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Removed\u4ee4\u724c",
+            "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "removed",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 2,
+            "knowledge_json": null
+          },
+          {
+            "id": "fb17196d-8e06-4169-b1be-4453e3debc38",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+            "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+          }
+        ],
+        "audit": [
+          {
+            "sequence": 1,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "keep",
+            "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+            "operation": "add",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 2,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove",
+            "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+            "operation": "add",
+            "memory_id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 3,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove-record",
+            "mutation_hash": "5ec92b0ec9b3468e2d10eeb5a8a58684c6e154e9bfd97dbc6d457c7517783cf0",
+            "operation": "remove",
+            "memory_id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "result_version": 2,
+            "occurred_at": 100000
+          }
+        ],
+        "tokens": [
+          {
+            "token": "cache",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "mode",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "writeback",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0a",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0a\u6d77",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0d\u9002",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4eac\u4e0a",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4ef6\u6545",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5317",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5317\u4eac",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u590d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u590d\u65e7",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5b58",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5b58\u5317",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6062",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6062\u590d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6545",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6545\u969c",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u65e7",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u65e7\u7248",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6d77",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6d77\u63d2",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7248",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7248\u4e0d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7528",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7f13",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7f13\u5b58",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u9002",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u9002\u7528",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u969c",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u969c\u6062",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          }
+        ],
+        "version": 6,
+        "meta": "6"
+      },
+      "tokenCases": [
+        {
+          "value": "\uff21\uff22\uff23\u7f13\u5b58\uff0c\u4e0a\u6d77 Quartz\u63d2\u4ef6",
+          "tokens": [
+            "\u4e0a",
+            "\u4e0a\u6d77",
+            "\u4ef6",
+            "\u5b58",
+            "\u5b58\u4e0a",
+            "\u63d2",
+            "\u63d2\u4ef6",
+            "\u6d77",
+            "\u6d77\u63d2",
+            "\u7f13",
+            "\u7f13\u5b58"
+          ]
+        },
+        {
+          "value": "\u7532 \u4e59",
+          "tokens": [
+            "\u4e59",
+            "\u7532",
+            "\u7532\u4e59"
+          ]
+        },
+        {
+          "value": "\u7532\uff0c\u4e59",
+          "tokens": [
+            "\u4e59",
+            "\u7532",
+            "\u7532\u4e59"
+          ]
+        },
+        {
+          "value": "\u7532Latin\u4e59",
+          "tokens": [
+            "\u4e59",
+            "\u7532",
+            "\u7532\u4e59"
+          ]
+        },
+        {
+          "value": "\u65e5\u672c\u8a9e",
+          "tokens": [
+            "\u65e5",
+            "\u65e5\u672c",
+            "\u672c",
+            "\u672c\u8a9e",
+            "\u8a9e"
+          ]
+        },
+        {
+          "value": "Hello-world_42",
+          "tokens": [
+            "hello-world_42"
+          ]
+        },
+        {
+          "value": "\uff21\uff22\uff23\u7f13\u5b58 \uff21\uff22\uff23\u7f13\u5b58",
+          "tokens": [
+            "\u5b58",
+            "\u5b58\u7f13",
+            "\u7f13",
+            "\u7f13\u5b58"
+          ]
+        }
+      ],
+      "migrated": {
+        "records": [
+          {
+            "id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Removed\u4ee4\u724c",
+            "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "removed",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 2,
+            "knowledge_json": null
+          },
+          {
+            "id": "fb17196d-8e06-4169-b1be-4453e3debc38",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+            "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+          }
+        ],
+        "audit": [
+          {
+            "sequence": 1,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "keep",
+            "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+            "operation": "add",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 2,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove",
+            "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+            "operation": "add",
+            "memory_id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 3,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove-record",
+            "mutation_hash": "5ec92b0ec9b3468e2d10eeb5a8a58684c6e154e9bfd97dbc6d457c7517783cf0",
+            "operation": "remove",
+            "memory_id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "result_version": 2,
+            "occurred_at": 100000
+          }
+        ],
+        "tokens": [
+          {
+            "token": "cache",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "mode",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "writeback",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0a",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0a\u6d77",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0d\u9002",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4eac\u4e0a",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4ef6\u6545",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5317",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5317\u4eac",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u590d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u590d\u65e7",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5b58",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5b58\u5317",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6062",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6062\u590d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6545",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6545\u969c",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u65e7",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u65e7\u7248",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6d77",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6d77\u63d2",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7248",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7248\u4e0d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7528",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7f13",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7f13\u5b58",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u9002",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u9002\u7528",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u969c",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u969c\u6062",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          }
+        ],
+        "version": 6,
+        "meta": "6"
+      },
+      "legacy": [],
+      "knowledge": [],
+      "foreign": [],
+      "removed": [],
+      "fresh": [],
+      "cjk": [
+        "29028851-8a0b-4901-bea2-164cfc3fa348",
+        "fb17196d-8e06-4169-b1be-4453e3debc38"
+      ],
+      "after": {
+        "records": [
+          {
+            "id": "29028851-8a0b-4901-bea2-164cfc3fa348",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Zephyr\u63d2\u4ef6 \u6771\u4eac\u3002\u5927\u962a",
+            "content_hash": "519876a8f42a6167556e8606861e2ce1697f38f2e3c0c1acb76a1899cb0acb7d",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": null
+          },
+          {
+            "id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Removed\u4ee4\u724c",
+            "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "removed",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 2,
+            "knowledge_json": null
+          },
+          {
+            "id": "fb17196d-8e06-4169-b1be-4453e3debc38",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+            "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+          }
+        ],
+        "audit": [
+          {
+            "sequence": 1,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "keep",
+            "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+            "operation": "add",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 2,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove",
+            "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+            "operation": "add",
+            "memory_id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 3,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove-record",
+            "mutation_hash": "5ec92b0ec9b3468e2d10eeb5a8a58684c6e154e9bfd97dbc6d457c7517783cf0",
+            "operation": "remove",
+            "memory_id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "result_version": 2,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 4,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "fresh",
+            "mutation_hash": "cb5d95e7097ceccbd9e6769da19dec9f107612c0709147d62291a1fd93c5cab4",
+            "operation": "add",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348",
+            "result_version": 1,
+            "occurred_at": 100000
+          }
+        ],
+        "tokens": [
+          {
+            "token": "\u4eac",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u4eac\u5927",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u4ef6\u6771",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u5927",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u5927\u962a",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u6771",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u6771\u4eac",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u962a",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "cache",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "mode",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "writeback",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0a",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0a\u6d77",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0d\u9002",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4eac\u4e0a",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4ef6\u6545",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5317",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5317\u4eac",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u590d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u590d\u65e7",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5b58",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5b58\u5317",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6062",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6062\u590d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6545",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6545\u969c",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u65e7",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u65e7\u7248",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6d77",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6d77\u63d2",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7248",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7248\u4e0d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7528",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7f13",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7f13\u5b58",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u9002",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u9002\u7528",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u969c",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u969c\u6062",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          }
+        ],
+        "version": 6,
+        "meta": "6"
+      },
+      "again": [],
+      "reopened": {
+        "records": [
+          {
+            "id": "29028851-8a0b-4901-bea2-164cfc3fa348",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Zephyr\u63d2\u4ef6 \u6771\u4eac\u3002\u5927\u962a",
+            "content_hash": "519876a8f42a6167556e8606861e2ce1697f38f2e3c0c1acb76a1899cb0acb7d",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": null
+          },
+          {
+            "id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Removed\u4ee4\u724c",
+            "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "removed",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 2,
+            "knowledge_json": null
+          },
+          {
+            "id": "fb17196d-8e06-4169-b1be-4453e3debc38",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+            "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+          }
+        ],
+        "audit": [
+          {
+            "sequence": 1,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "keep",
+            "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+            "operation": "add",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 2,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove",
+            "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+            "operation": "add",
+            "memory_id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 3,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove-record",
+            "mutation_hash": "5ec92b0ec9b3468e2d10eeb5a8a58684c6e154e9bfd97dbc6d457c7517783cf0",
+            "operation": "remove",
+            "memory_id": "4ede9621-45a5-4082-a191-74f68f931caa",
+            "result_version": 2,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 4,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "fresh",
+            "mutation_hash": "cb5d95e7097ceccbd9e6769da19dec9f107612c0709147d62291a1fd93c5cab4",
+            "operation": "add",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348",
+            "result_version": 1,
+            "occurred_at": 100000
+          }
+        ],
+        "tokens": [
+          {
+            "token": "\u4eac",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u4eac\u5927",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u4ef6\u6771",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u5927",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u5927\u962a",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u6771",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u6771\u4eac",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "\u962a",
+            "memory_id": "29028851-8a0b-4901-bea2-164cfc3fa348"
+          },
+          {
+            "token": "cache",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "mode",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "writeback",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0a",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0a\u6d77",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4e0d\u9002",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4eac\u4e0a",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u4ef6\u6545",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5317",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5317\u4eac",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u590d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u590d\u65e7",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5b58",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u5b58\u5317",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6062",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6062\u590d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6545",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6545\u969c",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u65e7",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u65e7\u7248",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6d77",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u6d77\u63d2",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7248",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7248\u4e0d",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7528",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7f13",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u7f13\u5b58",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u9002",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u9002\u7528",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u969c",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          },
+          {
+            "token": "\u969c\u6062",
+            "memory_id": "fb17196d-8e06-4169-b1be-4453e3debc38"
+          }
+        ],
+        "version": 6,
+        "meta": "6"
+      }
+    },
+    "cases": [
+      {
+        "name": "legacy-v6-fixture",
+        "pass": true
+      },
+      {
+        "name": "nfkc-mixed-latin-cjk",
+        "pass": false
+      },
+      {
+        "name": "no-bigrams-across-space-punctuation-latin",
+        "pass": false
+      },
+      {
+        "name": "contiguous-cjk-bigrams",
+        "pass": true
+      },
+      {
+        "name": "existing-ascii-word-semantics",
+        "pass": true
+      },
+      {
+        "name": "sorted-unique",
+        "pass": true
+      },
+      {
+        "name": "legacy-mixed-latin-recall",
+        "pass": false
+      },
+      {
+        "name": "legacy-knowledge-mixed-recall",
+        "pass": false
+      },
+      {
+        "name": "fresh-mixed-latin-recall",
+        "pass": false
+      },
+      {
+        "name": "fresh-cjk-recall",
+        "pass": true
+      },
+      {
+        "name": "foreign-namespace-excluded",
+        "pass": true
+      },
+      {
+        "name": "removed-record-excluded",
+        "pass": true
+      },
+      {
+        "name": "legacy-boundary-index-rebuilt",
+        "pass": false
+      },
+      {
+        "name": "record-and-audit-preserved-by-migration",
+        "pass": true
+      },
+      {
+        "name": "schema-consistent",
+        "pass": true
+      },
+      {
+        "name": "reopen-idempotent",
+        "pass": false
+      }
+    ],
+    "pass": false
+  },
+  "candidate": {
+    "contract": "personal-memory-source-acceptance/v1",
+    "repository": "/data00/home/jiataorui/work/github/dsh-enhanced",
+    "candidate": "/tmp/day1-memory-durable-attempt5.json",
+    "source": {
+      "baseCommit": "0b2a784870998e51837c418f28723ae834d2af9a",
+      "lockDigest": "9d17844fb1e7729d74f935759ee376b115a8f90e4ca9dafa35751996dd833fb2",
+      "files": [
+        {
+          "path": "package.json",
+          "sha256": "366fb9b1b40f6e7bb0e0226ae6522a63ff71b61828379eced180a4cc00b50a32"
+        },
+        {
+          "path": "src/evidence-filesystem.ts",
+          "sha256": "c7e9e5213e800892673fb8d96531a0b8bc5a92ffcb0e3633bd0c3fe495e84e79"
+        },
+        {
+          "path": "src/evidence-ledger.ts",
+          "sha256": "133693f4ae0efc884afc75b720d2d211ab81e9e96d47dacee2820397df5c28df"
+        },
+        {
+          "path": "src/evidence-runtime.ts",
+          "sha256": "299346c4d937e92b49ade178c63297a831eb72d67a2a4659e9f78d7fd6c8d7ee"
+        },
+        {
+          "path": "src/evidence-service.ts",
+          "sha256": "721149c3a3c87d0d89b0c709813b360bc49b9d7f0ab58b73cb631e2ff668e32a"
+        },
+        {
+          "path": "src/index.ts",
+          "sha256": "b6aa48a93a8d4152fa6966510a38b2685d06faf9e832e75243914fd80c574ab9"
+        },
+        {
+          "path": "src/knowledge.ts",
+          "sha256": "d481c80fdcc8013f3b5401a98550891dcb5ec329df484d4e09151566421512d6"
+        },
+        {
+          "path": "src/promotion.ts",
+          "sha256": "ce57771e51823dca3e31db4576e3a97ba0b9bb971106bcdee81219ec2af5c735"
+        },
+        {
+          "path": "src/proposals.ts",
+          "sha256": "47d3050fb5c74bacd32d98fe1c08f8c41e9217e762c3b4ae4a8742a7119d8f2f"
+        },
+        {
+          "path": "src/service.ts",
+          "sha256": "60cd79351f443a618f04176327b4b8e4959c9684449496caeba27dfcb551c28c"
+        },
+        {
+          "path": "src/sqlite.ts",
+          "sha256": "0b74e4f0ec3263c9e64f6673c0192483740fd61c8fcb096a34962633e40b50fb"
+        },
+        {
+          "path": "src/store.ts",
+          "sha256": "8a66b0519cf0aa72a09160229f519e0de2060bf10e6bee0a550b1347819d3955"
+        },
+        {
+          "path": "src/tokenize.ts",
+          "sha256": "f7dd9d9913281b9317a0caf10e05b815b6a994847244eb0c6eed02b350d13bf3"
+        },
+        {
+          "path": "src/tools.ts",
+          "sha256": "6360f2cb2ac93b2a90867b818ff4ed53f54fe62b149eb36cd837b6e121c61345"
+        },
+        {
+          "path": "src/types.ts",
+          "sha256": "b35559aaf71861cbc4a1a7402da5bfee8148810e60abb4b233a57487a25d7ee1"
+        },
+        {
+          "path": "src/version.ts",
+          "sha256": "b89492f1416b11e0a9140944aa3752078c51379c8fb25ecf0dbf682ab4ab4b55"
+        }
+      ]
+    },
+    "expectationsDigest": "12b5c3aeb93ce636cc82597e5da61986ef8d0d66cdd3d72083e5019352fb8cd8",
+    "inputDigest": "61ca440e68622a69591cdf7f8783bbc6264e0cff47770ee0c256c7b9f822f534",
+    "artifactDigest": "d522d1ed21b2aedc4a5fe71b882f458bf5afb5df23312ce00a74ed3970f799cd",
+    "scriptDigest": "a24adcf29433c135c3a964122ddac1eff55a3c1164113c7141fcdb0063902d51",
+    "checkedAt": "2026-09-19T17:34:55.490Z",
+    "limits": [
+      "operator-held deterministic engineering cases, not a signed production holdout",
+      "candidate observations remain untrusted; source review and regression checks are separate gates"
+    ],
+    "frozenBaseline": {
+      "path": "/tmp/personal-memory-source-baseline.json.baseline.mjs",
+      "sha256": "be94219e22d94a506ce2e905415337a4bda5917031d74e86fbccaa73de5ec94e",
+      "bytes": 425227
+    },
+    "image": "sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8",
+    "receipt": {
+      "jobId": "830539a0-71f3-4cd0-99f0-bfea25496ed5",
+      "status": "succeeded",
+      "quiescent": true,
+      "exitCode": 0
+    },
+    "observation": {
+      "ids": {
+        "keep": "068d25bc-8868-42bc-82c3-e217531a11cd",
+        "removed": "7c143f76-757a-453a-97c4-ef257a7e3779",
+        "fresh": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+      },
+      "before": {
+        "records": [
+          {
+            "id": "068d25bc-8868-42bc-82c3-e217531a11cd",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+            "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+          },
+          {
+            "id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Removed\u4ee4\u724c",
+            "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "removed",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 2,
+            "knowledge_json": null
+          }
+        ],
+        "audit": [
+          {
+            "sequence": 1,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "keep",
+            "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+            "operation": "add",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 2,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove",
+            "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+            "operation": "add",
+            "memory_id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 3,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove-record",
+            "mutation_hash": "c7849f78d9e34eeb51a60bcc855ad47e56cdbac80f69c6d095c337486adb76cd",
+            "operation": "remove",
+            "memory_id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "result_version": 2,
+            "occurred_at": 100000
+          }
+        ],
+        "tokens": [
+          {
+            "token": "cache",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "mode",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "writeback",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0a",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0a\u6d77",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0d\u9002",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4eac\u4e0a",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4ef6\u6545",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5317",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5317\u4eac",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u590d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u590d\u65e7",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5b58",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5b58\u5317",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6062",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6062\u590d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6545",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6545\u969c",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u65e7",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u65e7\u7248",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6d77",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6d77\u63d2",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7248",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7248\u4e0d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7528",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7f13",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7f13\u5b58",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u9002",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u9002\u7528",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u969c",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u969c\u6062",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          }
+        ],
+        "version": 6,
+        "meta": "6"
+      },
+      "tokenCases": [
+        {
+          "value": "\uff21\uff22\uff23\u7f13\u5b58\uff0c\u4e0a\u6d77 Quartz\u63d2\u4ef6",
+          "tokens": [
+            "abc",
+            "quartz",
+            "\u4e0a",
+            "\u4e0a\u6d77",
+            "\u4ef6",
+            "\u5b58",
+            "\u63d2",
+            "\u63d2\u4ef6",
+            "\u6d77",
+            "\u7f13",
+            "\u7f13\u5b58"
+          ]
+        },
+        {
+          "value": "\u7532 \u4e59",
+          "tokens": [
+            "\u4e59",
+            "\u7532"
+          ]
+        },
+        {
+          "value": "\u7532\uff0c\u4e59",
+          "tokens": [
+            "\u4e59",
+            "\u7532"
+          ]
+        },
+        {
+          "value": "\u7532Latin\u4e59",
+          "tokens": [
+            "latin",
+            "\u4e59",
+            "\u7532"
+          ]
+        },
+        {
+          "value": "\u65e5\u672c\u8a9e",
+          "tokens": [
+            "\u65e5",
+            "\u65e5\u672c",
+            "\u672c",
+            "\u672c\u8a9e",
+            "\u8a9e"
+          ]
+        },
+        {
+          "value": "Hello-world_42",
+          "tokens": [
+            "hello-world_42"
+          ]
+        },
+        {
+          "value": "\uff21\uff22\uff23\u7f13\u5b58 \uff21\uff22\uff23\u7f13\u5b58",
+          "tokens": [
+            "abc",
+            "\u5b58",
+            "\u7f13",
+            "\u7f13\u5b58"
+          ]
+        }
+      ],
+      "migrated": {
+        "records": [
+          {
+            "id": "068d25bc-8868-42bc-82c3-e217531a11cd",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+            "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+          },
+          {
+            "id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Removed\u4ee4\u724c",
+            "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "removed",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 2,
+            "knowledge_json": null
+          }
+        ],
+        "audit": [
+          {
+            "sequence": 1,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "keep",
+            "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+            "operation": "add",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 2,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove",
+            "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+            "operation": "add",
+            "memory_id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 3,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove-record",
+            "mutation_hash": "c7849f78d9e34eeb51a60bcc855ad47e56cdbac80f69c6d095c337486adb76cd",
+            "operation": "remove",
+            "memory_id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "result_version": 2,
+            "occurred_at": 100000
+          }
+        ],
+        "tokens": [
+          {
+            "token": "cache",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "mode",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "nimbus",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "quartz",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "writeback",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0a",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0a\u6d77",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0d\u9002",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5317",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5317\u4eac",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u590d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5b58",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6062",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6062\u590d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6545",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6545\u969c",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u65e7",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u65e7\u7248",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6d77",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7248",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7528",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7f13",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7f13\u5b58",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u9002",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u9002\u7528",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u969c",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u969c\u6062",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          }
+        ],
+        "version": 6,
+        "meta": "6"
+      },
+      "legacy": [
+        "068d25bc-8868-42bc-82c3-e217531a11cd"
+      ],
+      "knowledge": [
+        "068d25bc-8868-42bc-82c3-e217531a11cd"
+      ],
+      "foreign": [],
+      "removed": [],
+      "fresh": [
+        "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+      ],
+      "cjk": [
+        "2cad8406-9a2a-4155-9b43-279adc5ef29a",
+        "068d25bc-8868-42bc-82c3-e217531a11cd"
+      ],
+      "after": {
+        "records": [
+          {
+            "id": "068d25bc-8868-42bc-82c3-e217531a11cd",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+            "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+          },
+          {
+            "id": "2cad8406-9a2a-4155-9b43-279adc5ef29a",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Zephyr\u63d2\u4ef6 \u6771\u4eac\u3002\u5927\u962a",
+            "content_hash": "519876a8f42a6167556e8606861e2ce1697f38f2e3c0c1acb76a1899cb0acb7d",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": null
+          },
+          {
+            "id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Removed\u4ee4\u724c",
+            "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "removed",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 2,
+            "knowledge_json": null
+          }
+        ],
+        "audit": [
+          {
+            "sequence": 1,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "keep",
+            "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+            "operation": "add",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 2,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove",
+            "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+            "operation": "add",
+            "memory_id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 3,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove-record",
+            "mutation_hash": "c7849f78d9e34eeb51a60bcc855ad47e56cdbac80f69c6d095c337486adb76cd",
+            "operation": "remove",
+            "memory_id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "result_version": 2,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 4,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "fresh",
+            "mutation_hash": "cb5d95e7097ceccbd9e6769da19dec9f107612c0709147d62291a1fd93c5cab4",
+            "operation": "add",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a",
+            "result_version": 1,
+            "occurred_at": 100000
+          }
+        ],
+        "tokens": [
+          {
+            "token": "cache",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "mode",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "nimbus",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "quartz",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "writeback",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0a",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0a\u6d77",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0d\u9002",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5317",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5317\u4eac",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u590d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5b58",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6062",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6062\u590d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6545",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6545\u969c",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u65e7",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u65e7\u7248",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6d77",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7248",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7528",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7f13",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7f13\u5b58",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u9002",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u9002\u7528",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u969c",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u969c\u6062",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "zephyr",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u5927",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u5927\u962a",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u6771",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u6771\u4eac",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u962a",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          }
+        ],
+        "version": 6,
+        "meta": "6"
+      },
+      "again": [
+        "068d25bc-8868-42bc-82c3-e217531a11cd"
+      ],
+      "reopened": {
+        "records": [
+          {
+            "id": "068d25bc-8868-42bc-82c3-e217531a11cd",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Quartz\u7f13\u5b58 \u5317\u4eac\uff0c\u4e0a\u6d77",
+            "content_hash": "d0ae0136f04c44f0c4e526c83495ceb7b957eacdfca86a57a9b20350333250a0",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": "{\"applicability\":[\"Nimbus\u63d2\u4ef6 \u6545\u969c\u6062\u590d\"],\"counterexamples\":[\"\u65e7\u7248 \u4e0d\u9002\u7528\"],\"claim\":{\"key\":\"cache.mode\",\"value\":\"writeback\"}}"
+          },
+          {
+            "id": "2cad8406-9a2a-4155-9b43-279adc5ef29a",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Zephyr\u63d2\u4ef6 \u6771\u4eac\u3002\u5927\u962a",
+            "content_hash": "519876a8f42a6167556e8606861e2ce1697f38f2e3c0c1acb76a1899cb0acb7d",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "active",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 1,
+            "knowledge_json": null
+          },
+          {
+            "id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "owner": "user",
+            "scope": "workspace",
+            "workspace": "/work/holdout",
+            "agent_preset": "",
+            "kind": "fact",
+            "content": "Removed\u4ee4\u724c",
+            "content_hash": "5ba4498c48651788a35f2a3a5c5868241d61911483f73a2ea62674ad13e532ae",
+            "sensitivity": "private",
+            "trust": "user-confirmed",
+            "confidence": 1,
+            "provenance_json": "{\"source\":\"holdout\",\"observedAt\":1000}",
+            "supersedes": null,
+            "expires_at": null,
+            "status": "removed",
+            "created_at": 100000,
+            "updated_at": 100000,
+            "version": 2,
+            "knowledge_json": null
+          }
+        ],
+        "audit": [
+          {
+            "sequence": 1,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "keep",
+            "mutation_hash": "eb5b342ba0505bbeaead8651c7465d2f82b051a6d131e1be0cb036952b2a3e26",
+            "operation": "add",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 2,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove",
+            "mutation_hash": "edf124dcb30c710ef38cb7aa3a928eb692a95d32d189e4194de0dc8abccdd544",
+            "operation": "add",
+            "memory_id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "result_version": 1,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 3,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "remove-record",
+            "mutation_hash": "c7849f78d9e34eeb51a60bcc855ad47e56cdbac80f69c6d095c337486adb76cd",
+            "operation": "remove",
+            "memory_id": "7c143f76-757a-453a-97c4-ef257a7e3779",
+            "result_version": 2,
+            "occurred_at": 100000
+          },
+          {
+            "sequence": 4,
+            "namespace_mode": "delivery",
+            "namespace_key": "87cf4c59b8b5664f39b1bbd2d56afd01ecc207a68d9a42c381af123691568559",
+            "principal_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "principal_record_id": "holdout-owner",
+            "principal_version": 7,
+            "headless_lineage_id": null,
+            "headless_lineage_version": null,
+            "idempotency_key": "fresh",
+            "mutation_hash": "cb5d95e7097ceccbd9e6769da19dec9f107612c0709147d62291a1fd93c5cab4",
+            "operation": "add",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a",
+            "result_version": 1,
+            "occurred_at": 100000
+          }
+        ],
+        "tokens": [
+          {
+            "token": "cache",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "mode",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "nimbus",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "quartz",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "writeback",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0a",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0a\u6d77",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4e0d\u9002",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5317",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5317\u4eac",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u590d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u5b58",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6062",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6062\u590d",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6545",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6545\u969c",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u65e7",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u65e7\u7248",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u6d77",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7248",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7528",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7f13",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u7f13\u5b58",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u9002",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u9002\u7528",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u969c",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "\u969c\u6062",
+            "memory_id": "068d25bc-8868-42bc-82c3-e217531a11cd"
+          },
+          {
+            "token": "zephyr",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u4eac",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u4ef6",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u5927",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u5927\u962a",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u63d2",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u63d2\u4ef6",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u6771",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u6771\u4eac",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          },
+          {
+            "token": "\u962a",
+            "memory_id": "2cad8406-9a2a-4155-9b43-279adc5ef29a"
+          }
+        ],
+        "version": 6,
+        "meta": "6"
+      }
+    },
+    "cases": [
+      {
+        "name": "legacy-v6-fixture",
+        "pass": true
+      },
+      {
+        "name": "nfkc-mixed-latin-cjk",
+        "pass": true
+      },
+      {
+        "name": "no-bigrams-across-space-punctuation-latin",
+        "pass": true
+      },
+      {
+        "name": "contiguous-cjk-bigrams",
+        "pass": true
+      },
+      {
+        "name": "existing-ascii-word-semantics",
+        "pass": true
+      },
+      {
+        "name": "sorted-unique",
+        "pass": true
+      },
+      {
+        "name": "legacy-mixed-latin-recall",
+        "pass": true
+      },
+      {
+        "name": "legacy-knowledge-mixed-recall",
+        "pass": true
+      },
+      {
+        "name": "fresh-mixed-latin-recall",
+        "pass": true
+      },
+      {
+        "name": "fresh-cjk-recall",
+        "pass": true
+      },
+      {
+        "name": "foreign-namespace-excluded",
+        "pass": true
+      },
+      {
+        "name": "removed-record-excluded",
+        "pass": true
+      },
+      {
+        "name": "legacy-boundary-index-rebuilt",
+        "pass": true
+      },
+      {
+        "name": "record-and-audit-preserved-by-migration",
+        "pass": true
+      },
+      {
+        "name": "schema-consistent",
+        "pass": true
+      },
+      {
+        "name": "reopen-idempotent",
+        "pass": true
+      }
+    ],
+    "pass": true
+  },
+  "negativeCliChecks": {
+    "mismatchedQueueBase": "exit 1 before staging or dispatch",
+    "missingCandidateBase": "exit 1 before staging or dispatch"
+  },
+  "limits": [
+    "finite engineering acceptance, not a signed production holdout",
+    "no concurrent old/new tokenizer writer guarantee; upgrade requires existing stop/quiescence barrier",
+    "this file alone does not establish the long repository build, approval, publication, activation, or later-task reuse"
+  ]
+}

@@ -22,11 +22,11 @@ function publicKey(authority, keyId) {
 }
 
 /**
- * Mount a production PluginControlPlaneService with a minimal schema-v1 owner
- * trust root. The supplied Context remains owned by the caller, so dispose()
- * deliberately does not restart or dispose that Context.
+ * Mount a production PluginControlPlaneService with a minimal versioned owner
+ * trust root. dispose() awaits only this service's Fiber; the supplied Context
+ * remains owned by the caller.
  */
-export async function createSourceModelControlFixture({ root, repository, image, ctx }) {
+export async function createSourceModelControlFixture({ root, repository, image, ctx, trustSchemaVersion = 1, reuseTrust = false, serviceConfig }) {
   if (ctx === undefined || ctx === null) throw new TypeError('createSourceModelControlFixture requires the caller Context')
   if (typeof root !== 'string' || typeof repository !== 'string' || typeof image !== 'string' || !imagePattern.test(image)) {
     throw new TypeError('createSourceModelControlFixture requires absolute root, repository, and immutable image')
@@ -42,12 +42,15 @@ export async function createSourceModelControlFixture({ root, repository, image,
   await writeFile(executorPath, executorBytes, { mode: 0o700 })
   await chmod(executorPath, 0o700)
   const canonicalExecutor = await realpath(executorPath)
+  if (![1, 4].includes(trustSchemaVersion)) throw new TypeError('createSourceModelControlFixture supports trust schema 1 or 4')
   const catalogPath = join(control, 'catalog.json')
-  await writeFile(catalogPath, JSON.stringify({ schemaVersion: 1, entries: [] }) + '\n', { mode: 0o600 })
-  await chmod(catalogPath, 0o600)
+  if (!reuseTrust) {
+    await writeFile(catalogPath, JSON.stringify({ schemaVersion: 1, entries: [] }) + '\n', { mode: 0o600 })
+    await chmod(catalogPath, 0o600)
+  }
   const trustPath = join(control, 'trust.json')
   const trust = {
-    schemaVersion: 1,
+    schemaVersion: trustSchemaVersion,
     installationId,
     dshHome,
     ledger: { id: ledgerId, path: join(statePath, 'control.sqlite') },
@@ -57,15 +60,33 @@ export async function createSourceModelControlFixture({ root, repository, image,
     },
     approvalKeys: [publicKey('source-model-fixture', 'approval')],
     hostAttestationKeys: [publicKey('source-model-fixture', 'host-attestation')],
+    ...(trustSchemaVersion === 4 ? {
+      hostPolicy: { readinessMinimumChecks: 1, effectBlockedMinimumDeliveryAttempts: 1, effectBlockedMinimumToolExecutionAttempts: 1,
+        shadowMinimumSamples: 1, shadowMaximumMismatches: 0, canaryMinimumSamples: 1, canaryMaximumFailures: 0,
+        soakMinimumWindowMs: 60_000, soakMinimumSamples: 10, soakMaximumFailureRate: 0, healthMinimumChecks: 1,
+        healthMaximumFailures: 0, receiptTtlMs: 30_000 },
+      hostAttestor: null,
+      catalog: { id: 'source-model-fixture-catalog', path: await realpath(catalogPath) },
+      releaseRegistry: { id: 'source-model-fixture-registry', locator: 'https://registry.example.invalid' },
+      releaseReceiptTtlMs: 30_000,
+      releaseAdapters: { pr: null, review: null, merge: null, build: null, sign: null, publish: null, 'registry-verify': null, 'catalog-admission': null },
+      releaseKeys: [publicKey('source-model-fixture', 'release')],
+      releaseAuthorizationKeys: [publicKey('source-model-fixture', 'release-authorization')],
+    } : {}),
   }
-  await writeFile(trustPath, JSON.stringify(trust, null, 2) + '\n', { mode: 0o600 })
-  await chmod(trustPath, 0o600)
-  const service = new PluginControlPlaneService(ctx, {
+  if (!reuseTrust) {
+    await writeFile(trustPath, JSON.stringify(trust, null, 2) + '\n', { mode: 0o600 })
+    await chmod(trustPath, 0o600)
+  }
+  const defaults = {
     catalogPath: await realpath(catalogPath), statePath, trustPath: await realpath(trustPath),
     sourceBuild: {
       dockerPath: '/usr/bin/docker', image, timeoutMs: 60_000, memoryMiB: 512,
       cpus: 1, pidsLimit: 64, workspaceMiB: 256, outputBytes: 65_536,
     },
-  })
-  return Object.freeze({ ctx, service, statePath, trustPath: await realpath(trustPath), dispose: async () => {} })
+  }
+  const fiber = ctx.plugin(PluginControlPlaneService, serviceConfig === undefined ? defaults : serviceConfig(defaults))
+  await fiber
+  const service = ctx.get('pluginControlPlane')
+  return Object.freeze({ ctx, service, statePath, catalogPath: await realpath(catalogPath), trustPath: await realpath(trustPath), dispose: () => fiber.dispose() })
 }

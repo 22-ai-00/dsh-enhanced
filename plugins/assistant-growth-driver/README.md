@@ -116,6 +116,8 @@ rules:
 
 ## 既有插件源码提案
 
+源码审阅与技能沉淀分别执行：启用本能力后，即使没有历史完成目标，也会检查已登记的开放 gap。重复、独立验收成功仍是技能候选的必要条件；源码候选按 gap、读取版本、权限和隔离检查规则准入。
+
 另行安装同批 `plugin-control-plane`，按其 README 配置 owner trust 和隔离构建镜像，再给 driver 增加：
 
 ```yaml
@@ -131,11 +133,11 @@ pluginSourceProposals:
 
 这段是 driver 完整配置的补充。DSH patch 的 `config` 为整值替换，覆盖配置时必须同时保留 `enabled`、`scope` 和其它需要的值。Policy 还需对相同 owner、workspace、preset 和 `background` initiator 授予 `execute` / `tool:plugin_source_*`。
 
-Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已有的开放 gap，通过 `plugin_source_read` 列出并读取目标插件在 Git 提交中的文本源码，最后通过 `plugin_source_prepare` 提交 `gap_id`、`plugin_name` 和插件相对路径的文件内容。这些 gap 是控制面现有记录，并不携带逐条 owner-route 来源证明；多 owner 部署须隔离各自的账本。每轮最多枚举 `maxReviewsPerWake` 条、提交 `maxPlansPerWake` 次；模型不能给仓库路径、命令、镜像、环境、TTL、审批或发布参数。每次最多 64 个文件、单文件 64 KiB、合计 256 KiB。安全根插件由 driver 和控制面同时拒绝。
+Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已有的开放 gap，通过 `plugin_source_read` 列出并读取目标插件在 Git 提交中的文本源码，最后通过 `plugin_source_prepare` 提交 `gap_id`、`plugin_name` 与两种互补的修改输入：新增短文件或完整替换用 `files: [{path, content}]`；已读的长既有文件用 `edits: [{path, before, after}]`。每个 `before` 必须在本轮缓存的原始文本中精确且唯一地出现，编辑按原始偏移处理，且不能重叠；`files` 与 `edits` 可以一起使用，但路径必须互不相同。Host 先展开为完整文件再交给 Control Plane，模型不会从确认结果取回缓存源码。这些 gap 是控制面现有记录，并不携带逐条 owner-route 来源证明；多 owner 部署须隔离各自的账本。至少提供一种非空输入；两种输入合计最多 64 项，单个完整内容、`before`、`after` 与最终每个文件最多 64 KiB，最终完整文件最多 64 个、合计 256 KiB。模型不能给仓库路径、命令、镜像、环境、TTL、审批或发布参数。安全根插件由 driver 和控制面同时拒绝。
 
 `plugin_source_read` 接收 `gap_id`、`plugin_name`、`paths`；`paths: []` 返回文件清单，再按需读取源码、测试、README、package.json 和 patch。只读取已提交的文本，不读取工作区改动、未跟踪文件、符号链接、隐藏文件或生成目录。单文件最多 64 KiB，每轮内容累计最多 256 KiB，并受现有工具调用次数与运行时限控制。读取的内容属于不可信数据，不能改变工具权限。
 
-Host 在本轮内按 gap 与插件保存首次读取的 commit，后续读取和准备均绑定该 commit；HEAD 变化即拒绝旧上下文。替换既有文件前必须读取原内容，可在已有目录中增加源码或测试文件。模型不能指定 commit，也不能只凭文件清单覆盖未读文件。服务提供者更换后读上下文与待执行动作一并失效；未提供源码读取接口的旧版 control-plane 保持四工具基础模式。
+Host 在本轮内按 gap 与插件保存首次读取的 commit，后续读取和准备均绑定该 commit；HEAD 变化即拒绝旧上下文。同一文件在同一 commit 的再次读取若内容漂移也会拒绝。完整替换既有文件前必须读取原内容；精确编辑只能作用于已读的既有文件，可在已有目录中增加源码或测试文件。模型不能指定 commit，也不能只凭文件清单覆盖未读文件。服务提供者更换后读上下文与待执行动作一并失效；未提供源码读取接口的旧版 control-plane 保持四工具基础模式。
 
 Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。`inline` 成功时仅返回待审批 plan id 与检查摘要；`durable` 成功时只返回 content-free job id/status，Host 接受队列后继续以它自己的 durable authority 运行，即使模型 wake 随后到期也不会伪造为 prepared。`plugin_source_job_status` 只在 durable 模式出现，并用当前 Growth authority 的 owner scope 查询 job。owner 仍需通过控制面的签名审批、源码复核和发布流程处理。模型看不到 worktree 路径或构建日志。检查失败、owner route 漂移、provider 移除、插件卸载或本轮到期均终止尚未被 Host 接受的操作。`health().run.sourceProposals` 分别提供 `queued`、`prepared` / `rejected` 数量；可选 provider 更换后下一轮重新绑定，旧轮次不会跨代继续写入。
 
