@@ -49,8 +49,9 @@ dsh --profile web --dump-config
 | `workflowOwnerAnchored.maxCommitsPerWake` | `5` | 单轮最多尝试提交的候选数（1–50）；goals/delivery 不可用、authority/route 漂移即中断本轮。幂等重放代价很低。 |
 | `pluginSourceProposals.enabled` | `false` | 开启后通过可选 `pluginControlPlane` 服务准备既有插件的 pending 修改提案。缺少该服务或构建器未配置时仍保持四工具基线。 |
 | `pluginSourceProposals.repository` | 无 | 开启时必填的绝对规范仓库路径；由 owner 配置，模型不可传入。 |
-| `pluginSourceProposals.maxPlansPerWake` | `1` | 每轮构建尝试上限（1–5）；失败也占一次，避免失败循环反复消耗资源。 |
-| `pluginSourceProposals.isolatedBuildTimeoutMs` | `180000` | 请求的构建时间上限（60000–240000ms）；控制面可进一步收窄，单轮 authority 到期仍会取消。 |
+| `pluginSourceProposals.preparationMode` | `inline` | `inline` 保持本轮隔离构建；`durable` 只把已读、冻结 base 的内容排入 Control Plane 自己的持久队列。队列 authority、构建超时和执行生命周期都由 Control Plane 配置，独立于模型 wake。 |
+| `pluginSourceProposals.maxPlansPerWake` | `1` | 每轮源码提案尝试上限（1–5）；inline 的 prepared 与 durable 的 queued 都占用此预算，失败也占一次。 |
+| `pluginSourceProposals.isolatedBuildTimeoutMs` | `180000` | 仅 `inline` 使用的构建时间上限（60000–240000ms）；控制面可进一步收窄，单轮 authority 到期仍会取消。`durable` 使用控制面 `sourceBuild.timeoutMs`。 |
 | `pluginSourceProposals.offline` | `true` | 源码提案必须离线构建；`false` 配置会拒绝。镜像须预先准备依赖。 |
 | `pluginSourceProposals.planTtlMs` | `86400000` | 待批 worktree 保留期限（15 分钟–24 小时）。 |
 | `workflowOwnerAnchored.lookbackMs` | `86400000` | 只枚举该回看窗口内更新过的 owner goal（1 分钟–7 天）。 |
@@ -120,6 +121,7 @@ rules:
 ```yaml
 pluginSourceProposals:
   enabled: true
+  preparationMode: durable # 删除或设为 inline 时保持当前同步构建行为
   repository: /abs/path/to/dsh-enhanced
   maxPlansPerWake: 1
   isolatedBuildTimeoutMs: 180000
@@ -135,7 +137,7 @@ Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已
 
 Host 在本轮内按 gap 与插件保存首次读取的 commit，后续读取和准备均绑定该 commit；HEAD 变化即拒绝旧上下文。替换既有文件前必须读取原内容，可在已有目录中增加源码或测试文件。模型不能指定 commit，也不能只凭文件清单覆盖未读文件。服务提供者更换后读上下文与待执行动作一并失效；未提供源码读取接口的旧版 control-plane 保持四工具基础模式。
 
-Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。成功时仅返回待审批 plan id 与检查摘要；owner 仍需通过控制面的签名审批、源码复核和发布流程处理。模型看不到 worktree 路径或构建日志。检查失败、owner route 漂移、provider 移除、插件卸载或本轮到期均终止本次操作。`health().run.sourceProposals` 提供本轮 `prepared` / `rejected` 数量；可选 provider 更换后下一轮重新绑定，旧轮次不会跨代继续写入。
+Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。`inline` 成功时仅返回待审批 plan id 与检查摘要；`durable` 成功时只返回 content-free job id/status，Host 接受队列后继续以它自己的 durable authority 运行，即使模型 wake 随后到期也不会伪造为 prepared。`plugin_source_job_status` 只在 durable 模式出现，并用当前 Growth authority 的 owner scope 查询 job。owner 仍需通过控制面的签名审批、源码复核和发布流程处理。模型看不到 worktree 路径或构建日志。检查失败、owner route 漂移、provider 移除、插件卸载或本轮到期均终止尚未被 Host 接受的操作。`health().run.sourceProposals` 分别提供 `queued`、`prepared` / `rejected` 数量；可选 provider 更换后下一轮重新绑定，旧轮次不会跨代继续写入。
 
 ## 权限与数据
 

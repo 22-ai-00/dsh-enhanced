@@ -138,7 +138,11 @@ export async function runDockerPreparedChecks(input: {
   signal: AbortSignal
   assertCurrent: () => Promise<void>
   preparedAt: number
+  /** Frozen before resource acquisition by the durable Host job. */
+  sourceJob?: { id: string; containerName: string }
 }): Promise<SourceBuildResult> {
+  if (input.sourceJob !== undefined && (!/^source-job-[a-f0-9]{64}$/u.test(input.sourceJob.id)
+    || input.sourceJob.containerName !== `dsh-${input.sourceJob.id}`)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'invalid durable container identity')
   validateSourceBuildConfig(input.config); const limits = sourceBuildLimits(input.config); const dockerPath = await verifiedDockerPath(input.config.dockerPath); await input.assertCurrent()
   if (input.config.repositorySandbox !== undefined) {
     const version = await dockerControl(dockerPath, ['version', '--format', '{{.Server.Version}}/{{.Server.Os}}/{{.Server.Arch}}'], input.signal)
@@ -162,9 +166,15 @@ export async function runDockerPreparedChecks(input: {
     await input.assertCurrent()
     input.signal.throwIfAborted()
   } catch (error) { await snapshot.cleanup(); throw error }
-  const container = `dsh-source-prepare-${randomUUID()}`
+  const container = input.sourceJob?.containerName ?? `dsh-source-prepare-${randomUUID()}`
+  if (input.sourceJob !== undefined) {
+    try {
+      const existing = await dockerControl(dockerPath, ['container', 'ls', '--all', '--quiet', '--filter', `name=^/${container}$`], input.signal)
+      if (existing.code !== 0 || existing.stdout.trim() !== '') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable source container already exists or cannot be inspected')
+    } catch (error) { await snapshot.cleanup(); throw error }
+  }
   const script = 'set -eu; checked() { phase="$1"; shift; if "$@" >"/tmp/$phase.log" 2>&1; then return 0; else code=$?; printf "source build phase failed: %s\\n" "$phase" >&2; tail -c 8192 "/tmp/$phase.log" >&2; return "$code"; fi; }; umask 077; mkdir -p /workspace; tar -x -C /workspace; cd /workspace; checked install pnpm install --offline --frozen-lockfile --ignore-scripts; checked check pnpm check; mkdir -p /workspace/.dsh-pack; cd "$PLUGIN_ROOT"; checked pack pnpm pack --pack-destination /workspace/.dsh-pack; set -- /workspace/.dsh-pack/*.tgz; test "$#" = 1; pack="$1"; printf "DSH_PREPARED_PACK\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "${pack##*/}" "$(wc -c < "$pack" | tr -d " ")" "$(sha256sum "$pack" | cut -d " " -f1)" "$(node --version)" "$(pnpm --version)"'
-  const args = ['run', '-i', '--pull', 'never', '--name', container, '--label', `dsh.source.tree=${snapshot.tree}`, ...(seccomp === undefined ? [] : ['--label', `dsh.source.seccomp.sha256=${seccomp.digest}`]), '--network', 'none', '--read-only', '--cap-drop', 'ALL',
+  const args = ['run', '-i', '--pull', 'never', '--name', container, '--label', `dsh.source.tree=${snapshot.tree}`, ...(input.sourceJob === undefined ? [] : ['--label', `dsh.source.job=${input.sourceJob.id}`]), ...(seccomp === undefined ? [] : ['--label', `dsh.source.seccomp.sha256=${seccomp.digest}`]), '--network', 'none', '--read-only', '--cap-drop', 'ALL',
     '--security-opt', 'no-new-privileges', '--user', '65534:65534', '--pids-limit', String(input.config.pidsLimit),
     '--memory', `${input.config.memoryMiB}m`, '--memory-swap', `${input.config.memoryMiB}m`, '--cpus', String(input.config.cpus),
     '--tmpfs', `/workspace:rw,nosuid,nodev,mode=1777,size=${input.config.workspaceMiB}m${limits.profile === 'repository' ? ',exec' : ''}`, '--tmpfs', `/tmp:rw,nosuid,nodev,mode=1777,size=${limits.temporaryMiB}m${limits.profile === 'repository' ? ',exec' : ''}`,
@@ -224,9 +234,30 @@ export async function runDockerPreparedChecks(input: {
     try {
       // Failed inspect is ambiguous (daemon loss also exits nonzero). Require
       // a successful exact-name listing from the daemon to prove absence.
-      await ensureContainerRemoved(dockerPath, container)
+      if (input.sourceJob === undefined) await ensureContainerRemoved(dockerPath, container)
+      else await removeSourceJobContainer(input.config, input.sourceJob)
     } finally { await snapshot.cleanup() }
   }
+}
+
+/** Reconcile only a labeled, image-bound durable container, then prove absence. */
+export async function removeSourceJobContainer(config: SourceBuildConfig, job: { id: string; containerName: string }): Promise<void> {
+  if (!/^source-job-[a-f0-9]{64}$/u.test(job.id) || job.containerName !== `dsh-${job.id}`) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'invalid durable container identity')
+  validateSourceBuildConfig(config)
+  const path = await verifiedDockerPath(config.dockerPath)
+  const list = (): Promise<{ code: number | null; stdout: string }> => dockerControl(path, ['container', 'ls', '--all', '--quiet', '--filter', `name=^/${job.containerName}$`])
+  const before = await list()
+  if (before.code !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable container absence is unproven')
+  if (before.stdout.trim() !== '') {
+    const inspected = await dockerControl(path, ['inspect', '--format', '[{{json .Id}},{{json .Name}},{{json .Config.Image}},{{json (index .Config.Labels "dsh.source.job")}}]', job.containerName])
+    if (inspected.code !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable container identity is unproven')
+    const value: unknown = JSON.parse(inspected.stdout)
+    if (!Array.isArray(value) || value.length !== 4 || typeof value[0] !== 'string' || !/^[a-f0-9]{64}$/u.test(value[0])
+      || value[1] !== `/${job.containerName}` || value[2] !== config.image || value[3] !== job.id) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable container ownership mismatch')
+    await dockerControl(path, ['rm', '-f', value[0]])
+  }
+  const after = await list()
+  if (after.code !== 0 || after.stdout.trim() !== '') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable container cleanup is unproven')
 }
 
 async function dockerControl(path: string, args: string[], signal?: AbortSignal): Promise<{ code: number | null; stdout: string }> {

@@ -1,11 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import { isAbsolute } from 'node:path'
+import { basename, isAbsolute } from 'node:path'
 import { discover, parseCatalog, type CatalogEntry, type LoadedCapabilityCatalog } from './catalog.js'
 import { parseApprovalReceipt } from './approval.js'
 import { parseSourcePublishReconciliationReceipt, parseSourcePublishReconciliationRequest, parseSourceReleaseAuthorization,
   parseSourceReleaseReceipt, parseSourceReleaseRequest, parseVerifiedSourceReleaseAuthorization } from './release.js'
 import { controlPlaneOperationReceiptDigest, openControlPlaneDatabase } from './sqlite.js'
+import { validateSourceBuildConfig } from './source-build.js'
+import { validateScopedPluginFiles } from './source-workspace.js'
+import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
 import type {
   ActivationRetractionAuthority,
   ActivationRetractionReceipt,
@@ -249,6 +252,13 @@ interface SourceRow {
   release_authorization_json: string | null; release_authorization_digest: string | null
   release_id: string | null; release_fence: number; release_failure_phase: SourceReleasePhase | null
   release_failure_code: string | null; updated_at: number
+}
+
+interface SourceJobRow {
+  id: string; automation_id: string; authority_id: string; idempotency_key: string
+  intent_json: string; intent_digest: string; status: SourceJobStatus; revision: number
+  created_at: number; expires_at: number; definition_hash: string | null; occurrence_id: string | null
+  plan_id: string | null; failure_code: string | null; updated_at: number
 }
 
 interface HostAttestationOperationRow {
@@ -669,6 +679,8 @@ export interface CreateSourcePlanInput {
     checkedAt: number
     evidence: SourcePreparedEvidence
   }
+  /** Durable completion fence for a background source job. */
+  sourceJob?: SourceJobCompletion
 }
 
 export interface PrepareSourceReleaseOperationInput {
@@ -841,6 +853,88 @@ function releaseArtifact(evidence: SourceReleaseSuccessEvidence): SourceReleaseA
     capabilities: evidence.capabilities, authorities: evidence.authorities, requires: evidence.requires }
 }
 
+function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
+  const intent = objectRecord(value, 'source job intent')
+  exactKeys(intent, ['authority', 'owner', 'ownerDigest', 'trustDigest', 'repository', 'name', 'gapId', 'gapRevision', 'gapDigest',
+    'baseCommit', 'files', 'ttlMs', 'build', 'worktree', 'containerName'], 'source job intent')
+  const authority = objectRecord(intent['authority'], 'source job authority')
+  exactKeys(authority, ['id', 'digest', 'expiresAt', 'maxSubmissions'], 'source job authority')
+  const owner = objectRecord(intent['owner'], 'source job owner')
+  exactKeys(owner, ['receiptVersion', 'authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion',
+    'workspace', 'agentPreset', 'bindingVersion', 'generation'], 'source job owner')
+  if (typeof authority['id'] !== 'string' || !KEY.test(authority['id']) || typeof authority['digest'] !== 'string' || !DIGEST.test(authority['digest'])
+    || !Number.isSafeInteger(authority['expiresAt']) || Number(authority['expiresAt']) < 0
+    || !Number.isSafeInteger(authority['maxSubmissions']) || Number(authority['maxSubmissions']) < 1 || Number(authority['maxSubmissions']) > 1_000
+    || owner['receiptVersion'] !== 2 || typeof owner['authorityId'] !== 'string' || typeof owner['authorityHash'] !== 'string' || !DIGEST.test(owner['authorityHash'])
+    || typeof owner['principalId'] !== 'string' || typeof owner['principalRecordId'] !== 'string' || !Number.isSafeInteger(owner['principalVersion'])
+    || typeof owner['workspace'] !== 'string' || typeof owner['agentPreset'] !== 'string' || !Number.isSafeInteger(owner['bindingVersion'])
+    || !Number.isSafeInteger(owner['generation']) || typeof intent['ownerDigest'] !== 'string' || !DIGEST.test(intent['ownerDigest'] as string)
+    || typeof intent['trustDigest'] !== 'string' || !DIGEST.test(intent['trustDigest'] as string)
+    || typeof intent['repository'] !== 'string' || !isAbsolute(intent['repository'] as string)
+    || typeof intent['worktree'] !== 'string' || !isAbsolute(intent['worktree'] as string)
+    || typeof intent['name'] !== 'string' || !PLUGIN_NAME.test(intent['name'] as string)
+    || typeof intent['gapId'] !== 'string' || !KEY.test(intent['gapId'] as string) || !Number.isSafeInteger(intent['gapRevision']) || Number(intent['gapRevision']) < 1
+    || typeof intent['gapDigest'] !== 'string' || !DIGEST.test(intent['gapDigest'] as string)
+    || typeof intent['baseCommit'] !== 'string' || !COMMIT.test(intent['baseCommit'] as string)
+    || !Array.isArray(intent['files']) || intent['files'].length === 0 || intent['files'].length > 64
+    || !Number.isSafeInteger(intent['ttlMs']) || Number(intent['ttlMs']) < 60_000 || Number(intent['ttlMs']) > 86_400_000
+    || typeof intent['containerName'] !== 'string' || !/^dsh-source-job-[a-f0-9]{64}$/u.test(intent['containerName'] as string)) {
+    throw new ControlPlaneStoreError('invalid-input', 'source job intent is invalid')
+  }
+  if (Number(owner['principalVersion']) < 1 || Number(owner['bindingVersion']) < 1 || Number(owner['generation']) < 1) {
+    throw new ControlPlaneStoreError('invalid-input', 'source job owner version is invalid')
+  }
+  if (controlPlaneDigest(owner) !== intent['ownerDigest']) throw new ControlPlaneStoreError('invalid-input', 'source job owner digest is invalid')
+  const files = intent['files'].map((item, index) => {
+    const file = objectRecord(item, `source job file ${index}`)
+    exactKeys(file, ['path', 'content'], `source job file ${index}`)
+    if (typeof file['path'] !== 'string' || file['path'] === '' || file['path'].length > 512 || file['path'].startsWith('/')
+      || file['path'].split('/').some(part => part === '' || part === '.' || part === '..')
+      || typeof file['content'] !== 'string' || Buffer.byteLength(file['content']) > 65_536) {
+      throw new ControlPlaneStoreError('invalid-input', 'source job file is invalid')
+    }
+    return Object.freeze({ path: file['path'], content: file['content'] })
+  })
+  if (new Set(files.map(file => file.path)).size !== files.length) throw new ControlPlaneStoreError('invalid-input', 'source job files are duplicated')
+  try { validateScopedPluginFiles(files) }
+  catch { throw new ControlPlaneStoreError('invalid-input', 'source job files are invalid') }
+  try { validateSourceBuildConfig(intent['build'] as SourceJobIntent['build']) }
+  catch { throw new ControlPlaneStoreError('invalid-input', 'source job build configuration is invalid') }
+  return Object.freeze({ authority: Object.freeze({ id: authority['id'], digest: authority['digest'], expiresAt: Number(authority['expiresAt']), maxSubmissions: Number(authority['maxSubmissions']) }),
+    owner: Object.freeze({ receiptVersion: 2, authorityId: owner['authorityId'] as string, authorityHash: owner['authorityHash'] as string,
+      principalId: owner['principalId'] as string, principalRecordId: owner['principalRecordId'] as string, principalVersion: Number(owner['principalVersion']),
+      workspace: owner['workspace'] as string, agentPreset: owner['agentPreset'] as string, bindingVersion: Number(owner['bindingVersion']), generation: Number(owner['generation']) }),
+    ownerDigest: intent['ownerDigest'] as string, trustDigest: intent['trustDigest'] as string, repository: intent['repository'] as string,
+    name: intent['name'] as string, gapId: intent['gapId'] as string, gapRevision: Number(intent['gapRevision']), gapDigest: intent['gapDigest'] as string,
+    baseCommit: intent['baseCommit'] as string, files: Object.freeze(files), ttlMs: Number(intent['ttlMs']), build: intent['build'] as SourceJobIntent['build'],
+    worktree: intent['worktree'] as string, containerName: intent['containerName'] as string })
+}
+
+function sourceJobFromRow(row: SourceJobRow): SourceJobRecord {
+  let intent: SourceJobIntent
+  try { intent = sourceJobIntentFromStored(JSON.parse(row.intent_json) as unknown) }
+  catch (error) { if (error instanceof ControlPlaneStoreError) throw error; throw new ControlPlaneStoreError('invalid-state', 'stored source job intent is corrupt') }
+  if (!DIGEST.test(row.intent_digest) || controlPlaneDigest(intent) !== row.intent_digest || row.authority_id !== intent.authority.id
+    || row.expires_at !== intent.authority.expiresAt || !KEY.test(row.idempotency_key) || !Number.isSafeInteger(row.revision) || row.revision < 1
+    || !Number.isSafeInteger(row.created_at) || !Number.isSafeInteger(row.updated_at) || row.updated_at < row.created_at
+    || !['queued', 'running', 'prepared', 'failed', 'unknown'].includes(row.status)
+    || (row.definition_hash !== null && !DIGEST.test(row.definition_hash)) || (row.occurrence_id !== null && !KEY.test(row.occurrence_id))
+    || (row.plan_id !== null && !/^source-[a-f0-9-]{36}$/u.test(row.plan_id)) || (row.failure_code !== null && !KEY.test(row.failure_code))) {
+    throw new ControlPlaneStoreError('invalid-state', 'stored source job is corrupt')
+  }
+  const active = row.status === 'queued' || row.status === 'running' || row.status === 'unknown'
+  if ((row.status === 'queued' && (row.occurrence_id !== null || row.plan_id !== null || row.failure_code !== null))
+    || (row.status === 'running' && (row.definition_hash === null || row.occurrence_id === null || row.plan_id !== null || row.failure_code !== null))
+    || (row.status === 'prepared' && (row.definition_hash === null || row.occurrence_id === null || row.plan_id === null || row.failure_code !== null))
+    || (row.status === 'unknown' && (row.definition_hash === null || row.occurrence_id === null || row.plan_id !== null || row.failure_code === null))
+    || (row.status === 'failed' && (row.plan_id !== null || row.failure_code === null))
+    || (!active && row.status !== 'prepared' && row.plan_id !== null)) throw new ControlPlaneStoreError('invalid-state', 'stored source job state is corrupt')
+  return Object.freeze({ id: row.id, automationId: row.automation_id, idempotencyKey: row.idempotency_key, intent, intentDigest: row.intent_digest,
+    status: row.status, revision: row.revision, createdAt: row.created_at, expiresAt: row.expires_at, updatedAt: row.updated_at,
+    ...(row.definition_hash === null ? {} : { definitionHash: row.definition_hash }), ...(row.occurrence_id === null ? {} : { occurrenceId: row.occurrence_id }),
+    ...(row.plan_id === null ? {} : { planId: row.plan_id }), ...(row.failure_code === null ? {} : { failureCode: row.failure_code }) })
+}
+
 export class ControlPlaneStore {
   readonly #database: DatabaseSync
   readonly #now: () => number
@@ -954,8 +1048,105 @@ export class ControlPlaneStore {
     return activationFromRow(row)
   }
 
+  enqueueSourceJob(input: { id: string; automationId: string; idempotencyKey: string; intent: SourceJobIntent }): SourceJobRecord {
+    if (!/^source-job-[a-f0-9]{64}$/u.test(input.id) || input.automationId !== input.id) {
+      throw new ControlPlaneStoreError('invalid-input', 'source job identity is invalid')
+    }
+    const idempotencyKey = bounded(input.idempotencyKey, 'idempotencyKey', 160)
+    if (!KEY.test(idempotencyKey)) throw new ControlPlaneStoreError('invalid-input', 'source job idempotencyKey has invalid syntax')
+    const intent = sourceJobIntentFromStored(input.intent); const intentDigest = controlPlaneDigest(intent); const now = this.#now()
+    if (intent.containerName !== `dsh-${input.id}` || basename(intent.worktree) !== `worktree-job-${input.id.slice('source-job-'.length)}`) {
+      throw new ControlPlaneStoreError('invalid-input', 'source job resource identity is invalid')
+    }
+    if (now >= intent.authority.expiresAt) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const prior = this.#database.prepare('SELECT * FROM source_jobs WHERE authority_id = ? AND idempotency_key = ?')
+        .get(intent.authority.id, idempotencyKey) as unknown as SourceJobRow | undefined
+      if (prior !== undefined) {
+        const record = sourceJobFromRow(prior)
+        if (record.intentDigest !== intentDigest || record.id !== input.id || record.automationId !== input.automationId) {
+          throw new ControlPlaneStoreError('conflict', 'source job idempotency key was reused with different input')
+        }
+        this.#database.exec('COMMIT'); return record
+      }
+      const authority = this.#database.prepare('SELECT * FROM source_job_authorities WHERE authority_id = ?').get(intent.authority.id) as {
+        authority_digest: string; expires_at: number; max_submissions: number; submissions: number
+      } | undefined
+      if (authority !== undefined && (authority.authority_digest !== intent.authority.digest || authority.expires_at !== intent.authority.expiresAt
+        || authority.max_submissions !== intent.authority.maxSubmissions)) {
+        throw new ControlPlaneStoreError('conflict', 'source job authority configuration is immutable')
+      }
+      if (authority !== undefined && authority.submissions >= authority.max_submissions) throw new ControlPlaneStoreError('invalid-state', 'source job authority submission quota is exhausted')
+      if (authority === undefined) {
+        this.#database.prepare(`INSERT INTO source_job_authorities (authority_id, authority_digest, expires_at, max_submissions, submissions)
+          VALUES (?, ?, ?, ?, 0)`).run(intent.authority.id, intent.authority.digest, intent.authority.expiresAt, intent.authority.maxSubmissions)
+      }
+      this.#database.prepare('UPDATE source_job_authorities SET submissions = submissions + 1 WHERE authority_id = ? AND submissions < max_submissions')
+        .run(intent.authority.id)
+      this.#database.prepare(`INSERT INTO source_jobs (id, automation_id, authority_id, idempotency_key, intent_json, intent_digest,
+        status, revision, created_at, expires_at, definition_hash, occurrence_id, plan_id, failure_code, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, NULL, NULL, NULL, NULL, ?)`).run(input.id, input.automationId, intent.authority.id,
+        idempotencyKey, JSON.stringify(intent), intentDigest, now, intent.authority.expiresAt, now)
+      const record = this.getSourceJob(input.id)
+      if (record === undefined) throw new ControlPlaneStoreError('invalid-state', 'inserted source job could not be read')
+      this.#database.exec('COMMIT'); return record
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  getSourceJob(id: string): SourceJobRecord | undefined {
+    const row = this.#database.prepare('SELECT * FROM source_jobs WHERE id = ?').get(id) as unknown as SourceJobRow | undefined
+    return row === undefined ? undefined : sourceJobFromRow(row)
+  }
+
+  getSourceJobByAutomation(automationId: string): SourceJobRecord | undefined {
+    const row = this.#database.prepare('SELECT * FROM source_jobs WHERE automation_id = ?').get(automationId) as unknown as SourceJobRow | undefined
+    return row === undefined ? undefined : sourceJobFromRow(row)
+  }
+
+  /** Outstanding jobs sort first so restart reconciliation cannot be hidden by history. */
+  listSourceJobs(limit = 100): readonly SourceJobRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ControlPlaneStoreError('invalid-input', 'source job limit must be 1..100')
+    return (this.#database.prepare(`SELECT * FROM source_jobs ORDER BY CASE WHEN status IN ('queued', 'running', 'unknown') THEN 0 ELSE 1 END,
+      created_at DESC, id DESC LIMIT ?`).all(limit) as unknown as SourceJobRow[]).map(sourceJobFromRow)
+  }
+
+  bindSourceJobDefinition(input: { id: string; revision: number; definitionHash: string }): SourceJobRecord {
+    if (!Number.isSafeInteger(input.revision) || input.revision < 1 || !DIGEST.test(input.definitionHash)) throw new ControlPlaneStoreError('invalid-input', 'source job definition binding is invalid')
+    const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET definition_hash = ?, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND revision = ? AND status = 'queued' AND definition_hash IS NULL AND expires_at > ?`).run(input.definitionHash, now, input.id, input.revision, now)
+    if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source job definition binding lost its queued CAS')
+    return this.getSourceJob(input.id)!
+  }
+
+  claimSourceJob(input: { id: string; revision: number; definitionHash: string; occurrenceId: string }): SourceJobRecord {
+    if (!Number.isSafeInteger(input.revision) || input.revision < 1 || !DIGEST.test(input.definitionHash) || !KEY.test(input.occurrenceId)) {
+      throw new ControlPlaneStoreError('invalid-input', 'source job claim is invalid')
+    }
+    const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET status = 'running', occurrence_id = ?, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND revision = ? AND status = 'queued' AND definition_hash = ? AND occurrence_id IS NULL AND expires_at > ?`).run(input.occurrenceId, now, input.id, input.revision, input.definitionHash, now)
+    if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source job claim lost its queued CAS')
+    return this.getSourceJob(input.id)!
+  }
+
+  settleSourceJob(input: { id: string; revision: number; status: 'failed' | 'unknown'; failureCode: string }): SourceJobRecord {
+    if (!Number.isSafeInteger(input.revision) || input.revision < 1 || (input.status !== 'failed' && input.status !== 'unknown') || !KEY.test(input.failureCode)) throw new ControlPlaneStoreError('invalid-input', 'source job settlement is invalid')
+    const permitted = input.status === 'unknown' ? "status = 'running'" : "status IN ('queued', 'running', 'unknown')"
+    const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET status = ?, failure_code = ?, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND revision = ? AND ${permitted}`).run(input.status, input.failureCode, now, input.id, input.revision)
+    if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source job settlement lost its state CAS')
+    return this.getSourceJob(input.id)!
+  }
+
+  interruptSourceJobs(): number {
+    const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET status = 'unknown', failure_code = 'interrupted',
+      revision = revision + 1, updated_at = ? WHERE status = 'running'`).run(now)
+    return Number(result.changes)
+  }
+
   createSourcePlan(input: CreateSourcePlanInput): OperationReceipt<PluginSourcePlan> {
     const mode = input.mode ?? 'create'
+    if (input.sourceJob !== undefined && mode !== 'modify') throw new ControlPlaneStoreError('invalid-input', 'source jobs only complete checked modify plans')
     const key = bounded(input.idempotencyKey, 'idempotencyKey', 160); const name = bounded(input.name, 'name', 64)
     if (!KEY.test(key) || !PLUGIN_NAME.test(name) || !COMMIT.test(input.baseCommit) || !DIGEST.test(input.generatorDigest)
       || input.scope.length === 0 || input.scope.length > 32) throw new ControlPlaneStoreError('invalid-input', 'source plan binding is invalid')
@@ -980,9 +1171,16 @@ export class ControlPlaneStore {
     if (controlPlaneDigest(scope) !== controlPlaneDigest(expectedSourceScope(name, mode))) {
       throw new ControlPlaneStoreError('invalid-input', 'source plan scope must bind exactly the paths allowed for its mode')
     }
+    if (input.sourceJob !== undefined && (!Number.isSafeInteger(input.sourceJob.jobRevision) || input.sourceJob.jobRevision < 1
+      || !KEY.test(input.sourceJob.jobId) || !KEY.test(input.sourceJob.occurrenceId))) {
+      throw new ControlPlaneStoreError('invalid-input', 'source job completion is invalid')
+    }
     const requestBinding = { operation: 'create-source-plan', gapId: input.gapId, repository: input.repository,
       worktree: input.worktree, baseCommit: input.baseCommit, name, generatorDigest: input.generatorDigest, scope, ttlMs: input.ttlMs }
-    const inputDigest = controlPlaneDigest(mode === 'modify' ? { ...requestBinding, mode, prepared: input.prepared } : requestBinding)
+    const sourceJobBinding = input.sourceJob === undefined ? undefined : { jobId: input.sourceJob.jobId, jobRevision: input.sourceJob.jobRevision,
+      occurrenceId: input.sourceJob.occurrenceId }
+    const inputDigest = controlPlaneDigest({ ...(mode === 'modify' ? { ...requestBinding, mode, prepared: input.prepared } : requestBinding),
+      ...(sourceJobBinding === undefined ? {} : { sourceJob: sourceJobBinding }) })
     const prior = this.#sourcePlanReceiptByKey(key, 'create-source-plan', inputDigest)
     if (prior !== undefined) return prior
     const gap = this.getGap(input.gapId); if (gap.status !== 'open' || gap.candidateId !== undefined) {
@@ -999,6 +1197,21 @@ export class ControlPlaneStore {
       : immutable)
     this.#database.exec('BEGIN IMMEDIATE')
     try {
+      const currentGap = this.getGap(gap.id)
+      if (currentGap.revision !== gap.revision || currentGap.inputDigest !== gap.inputDigest || currentGap.status !== 'open'
+        || currentGap.candidateId !== undefined) throw new ControlPlaneStoreError('conflict', 'capability gap changed before source plan creation')
+      let sourceJob: SourceJobRecord | undefined
+      if (sourceJobBinding !== undefined) {
+        sourceJob = this.getSourceJob(sourceJobBinding.jobId)
+        if (sourceJob === undefined || sourceJob.status !== 'running' || sourceJob.revision !== sourceJobBinding.jobRevision
+          || sourceJob.occurrenceId !== sourceJobBinding.occurrenceId || sourceJob.intent.gapId !== gap.id
+          || sourceJob.intent.gapRevision !== currentGap.revision || sourceJob.intent.gapDigest !== controlPlaneDigest(currentGap)
+          || sourceJob.intent.baseCommit !== input.baseCommit || sourceJob.intent.name !== name
+          || sourceJob.intent.repository !== input.repository || sourceJob.intent.worktree !== input.worktree || sourceJob.intent.ttlMs !== input.ttlMs) {
+          throw new ControlPlaneStoreError('conflict', 'source job completion lost its immutable running binding')
+        }
+        if (now >= sourceJob.expiresAt) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
+      }
       this.#database.prepare('INSERT INTO gap_plan_claims (gap_id, plan_id, plan_kind, claimed_at) VALUES (?, ?, ?, ?)').run(gap.id, id, 'source', now)
       // 'modify' rows carry their checked digests and frozen-build evidence from
       // creation; 'create' rows leave all four columns NULL until the
@@ -1011,7 +1224,15 @@ export class ControlPlaneStore {
         input.generatorDigest, JSON.stringify(scope), mode, now, expiresAt,
         input.prepared?.treeDigest ?? null, input.prepared?.patchDigest ?? null, input.prepared?.checkedAt ?? null,
         preparedEvidence === undefined ? null : JSON.stringify(preparedEvidence), now)
-      this.#database.prepare(`UPDATE capability_gaps SET status = 'matched', revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?`).run(now, gap.id, gap.revision)
+      const matched = this.#database.prepare(`UPDATE capability_gaps SET status = 'matched', revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?`).run(now, gap.id, gap.revision)
+      if (Number(matched.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'capability gap changed while source plan was created')
+      if (sourceJob !== undefined) {
+        const occurrenceId = sourceJob.occurrenceId
+        if (occurrenceId === undefined) throw new ControlPlaneStoreError('invalid-state', 'running source job has no occurrence')
+        const prepared = this.#database.prepare(`UPDATE source_jobs SET status = 'prepared', plan_id = ?, revision = revision + 1, updated_at = ?
+          WHERE id = ? AND status = 'running' AND revision = ? AND occurrence_id = ?`).run(id, now, sourceJob.id, sourceJob.revision, occurrenceId)
+        if (Number(prepared.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source job completion lost its prepared CAS')
+      }
       const plan = this.getSourcePlan(id); const receipt = { idempotencyKey: key, operation: 'create-source-plan', inputDigest, result: plan, createdAt: now }
       this.#insertReceipt(receipt); this.#database.exec('COMMIT'); return receipt
     } catch (error) { this.#database.exec('ROLLBACK'); throw error }

@@ -44,6 +44,8 @@ export interface WorkflowOwnerAnchoredConfig {
  */
 export interface PluginSourceProposalsConfig {
   enabled?: boolean
+  /** Inline builds during the model wake; durable queues Host-owned work. */
+  preparationMode?: 'inline' | 'durable'
   /** Canonical absolute path of the dsh-enhanced repository the patches target. Required when enabled. */
   repository?: string
   /** Hard cap on prepared modify plans in one wake (rate limit); idempotent replays are cheap. */
@@ -86,6 +88,7 @@ export interface NormalizedWorkflowOwnerAnchoredConfig {
 
 export interface NormalizedPluginSourceProposalsConfig {
   readonly enabled: boolean
+  readonly preparationMode: 'inline' | 'durable'
   readonly repository: string | null
   readonly maxPlansPerWake: number
   readonly isolatedBuildTimeoutMs: number
@@ -150,6 +153,7 @@ const workflowOwnerAnchoredSchema = workflowOwnerAnchoredObjectSchema
 // Same missing-object default rationale as workflowOwnerAnchoredSchema above.
 const pluginSourceProposalsObjectSchema = Schema.object({
   enabled: Schema.boolean().default(false),
+  preparationMode: Schema.union(['inline', 'durable']).default('inline'),
   repository: boundedText(4_096),
   maxPlansPerWake: Schema.natural().min(1).max(5).default(1),
   // Security root: the isolated build gate must finish well inside the 300000 ms
@@ -214,6 +218,7 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     }),
     pluginSourceProposals: Object.freeze({
       enabled: config.pluginSourceProposals?.enabled ?? false,
+      preparationMode: config.pluginSourceProposals?.preparationMode ?? 'inline',
       repository: config.pluginSourceProposals?.repository?.normalize('NFC').trim() ?? null,
       maxPlansPerWake: config.pluginSourceProposals?.maxPlansPerWake ?? 1,
       isolatedBuildTimeoutMs: config.pluginSourceProposals?.isolatedBuildTimeoutMs ?? 180_000,

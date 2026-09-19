@@ -3,7 +3,7 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 13
+export const controlPlaneSchemaVersion = 14
 
 export function controlPlaneOperationReceiptDigest(idempotencyKey: string, operation: string, inputDigest: string,
   resultJson: string, createdAt: number): string {
@@ -64,6 +64,7 @@ function createCurrent(database: DatabaseSync): void {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     ) STRICT;
+
 
     CREATE TABLE activation_plans (
       id TEXT PRIMARY KEY,
@@ -154,6 +155,42 @@ function createCurrent(database: DatabaseSync): void {
         (release_authorization_json IS NOT NULL AND release_authorization_digest IS NOT NULL)),
       FOREIGN KEY(gap_id) REFERENCES capability_gaps(id) ON DELETE RESTRICT
     ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS source_job_authorities (
+      authority_id TEXT PRIMARY KEY,
+      authority_digest TEXT NOT NULL CHECK(length(authority_digest) = 64),
+      expires_at INTEGER NOT NULL,
+      max_submissions INTEGER NOT NULL CHECK(max_submissions >= 1),
+      submissions INTEGER NOT NULL CHECK(submissions >= 0 AND submissions <= max_submissions)
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE IF NOT EXISTS source_jobs (
+      id TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL UNIQUE,
+      authority_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      intent_json TEXT NOT NULL CHECK(json_valid(intent_json) AND json_type(intent_json) = 'object'),
+      intent_digest TEXT NOT NULL CHECK(length(intent_digest) = 64),
+      status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'prepared', 'failed', 'unknown')),
+      revision INTEGER NOT NULL CHECK(revision >= 1),
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      definition_hash TEXT,
+      occurrence_id TEXT,
+      plan_id TEXT UNIQUE,
+      failure_code TEXT,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(authority_id, idempotency_key),
+      FOREIGN KEY(authority_id) REFERENCES source_job_authorities(authority_id) ON DELETE RESTRICT,
+      FOREIGN KEY(plan_id) REFERENCES source_plans(id) ON DELETE RESTRICT,
+      CHECK((status = 'queued' AND occurrence_id IS NULL AND plan_id IS NULL AND failure_code IS NULL)
+        OR (status = 'running' AND definition_hash IS NOT NULL AND occurrence_id IS NOT NULL AND plan_id IS NULL AND failure_code IS NULL)
+        OR (status = 'prepared' AND definition_hash IS NOT NULL AND occurrence_id IS NOT NULL AND plan_id IS NOT NULL AND failure_code IS NULL)
+        OR (status = 'failed' AND plan_id IS NULL AND failure_code IS NOT NULL)
+        OR (status = 'unknown' AND definition_hash IS NOT NULL AND occurrence_id IS NOT NULL AND plan_id IS NULL AND failure_code IS NOT NULL))
+    ) STRICT;
+    CREATE UNIQUE INDEX IF NOT EXISTS source_jobs_single_active ON source_jobs((1)) WHERE status IN ('queued', 'running', 'unknown');
+    CREATE INDEX IF NOT EXISTS source_jobs_created ON source_jobs(created_at, id);
 
     CREATE TABLE gap_plan_claims (
       gap_id TEXT PRIMARY KEY,
@@ -308,7 +345,7 @@ function createCurrent(database: DatabaseSync): void {
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX activation_watch_evidence_plan ON activation_watch_evidence(plan_id, created_at);
 
-    PRAGMA user_version = 13;
+    PRAGMA user_version = 14;
   `)
 }
 
@@ -861,6 +898,49 @@ function migrateV12ToV13(database: DatabaseSync): void {
   `)
 }
 
+function migrateV13ToV14(database: DatabaseSync): void {
+  database.exec(`
+    BEGIN IMMEDIATE;
+    CREATE TABLE IF NOT EXISTS source_job_authorities (
+      authority_id TEXT PRIMARY KEY,
+      authority_digest TEXT NOT NULL CHECK(length(authority_digest) = 64),
+      expires_at INTEGER NOT NULL,
+      max_submissions INTEGER NOT NULL CHECK(max_submissions >= 1),
+      submissions INTEGER NOT NULL CHECK(submissions >= 0 AND submissions <= max_submissions)
+    ) STRICT, WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS source_jobs (
+      id TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL UNIQUE,
+      authority_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      intent_json TEXT NOT NULL CHECK(json_valid(intent_json) AND json_type(intent_json) = 'object'),
+      intent_digest TEXT NOT NULL CHECK(length(intent_digest) = 64),
+      status TEXT NOT NULL CHECK(status IN ('queued', 'running', 'prepared', 'failed', 'unknown')),
+      revision INTEGER NOT NULL CHECK(revision >= 1),
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      definition_hash TEXT,
+      occurrence_id TEXT,
+      plan_id TEXT UNIQUE,
+      failure_code TEXT,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(authority_id, idempotency_key),
+      FOREIGN KEY(authority_id) REFERENCES source_job_authorities(authority_id) ON DELETE RESTRICT,
+      FOREIGN KEY(plan_id) REFERENCES source_plans(id) ON DELETE RESTRICT,
+      CHECK((status = 'queued' AND occurrence_id IS NULL AND plan_id IS NULL AND failure_code IS NULL)
+        OR (status = 'running' AND definition_hash IS NOT NULL AND occurrence_id IS NOT NULL AND plan_id IS NULL AND failure_code IS NULL)
+        OR (status = 'prepared' AND definition_hash IS NOT NULL AND occurrence_id IS NOT NULL AND plan_id IS NOT NULL AND failure_code IS NULL)
+        OR (status = 'failed' AND plan_id IS NULL AND failure_code IS NOT NULL)
+        OR (status = 'unknown' AND definition_hash IS NOT NULL AND occurrence_id IS NOT NULL AND plan_id IS NULL AND failure_code IS NOT NULL))
+    ) STRICT;
+    CREATE UNIQUE INDEX IF NOT EXISTS source_jobs_single_active ON source_jobs((1)) WHERE status IN ('queued', 'running', 'unknown');
+    CREATE INDEX IF NOT EXISTS source_jobs_created ON source_jobs(created_at, id);
+    PRAGMA user_version = 14;
+    COMMIT;
+  `)
+}
+
+
 export function openControlPlaneDatabase(path: string): DatabaseSync {
   prepare(path)
   const database = new DatabaseSync(path)
@@ -882,6 +962,7 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       if (version <= 10) migrateV10ToV11(database)
       if (version <= 11) migrateV11ToV12(database)
       if (version <= 12) migrateV12ToV13(database)
+      if (version <= 13) migrateV13ToV14(database)
     }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database

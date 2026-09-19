@@ -59,6 +59,31 @@ export interface GrowthSourcePreparedPlan {
   readonly sourceCheck?: { readonly treeDigest: string; readonly patchDigest: string; readonly checkedAt: number }
 }
 
+/** Content-free projection of a Host-owned durable source job. */
+export interface SourceJobProjection {
+  readonly id: string
+  readonly name: string
+  readonly gapId: string
+  readonly baseCommit: string
+  readonly status: 'queued' | 'running' | 'prepared' | 'failed' | 'unknown'
+  readonly createdAt: number
+  readonly expiresAt: number
+  readonly planId?: string
+  readonly failureCode?: string
+}
+
+/** @deprecated Prefer SourceJobProjection; retained for local source-port compatibility. */
+export type GrowthSourceJobProjection = SourceJobProjection
+
+export interface GrowthSourceJobOwner {
+  readonly ownerRouteId: string
+  readonly principalId: string
+  readonly principalRecordId: string
+  readonly principalVersion: number
+  readonly workspace: string
+  readonly preset: string
+}
+
 export interface GrowthSourceSnapshot {
   readonly name: string
   readonly baseCommit: string
@@ -98,10 +123,26 @@ export interface GrowthSourcePlanePort {
     signal: AbortSignal
     assertCurrent: () => void
   }): Promise<GrowthSourcePreparedPlan>
+  /** Queue Host-owned source preparation that outlives the model wake. */
+  enqueueSourceJob(input: {
+    gapId: string
+    name: string
+    repository: string
+    files: readonly GrowthSourcePreparedFile[]
+    idempotencyKey: string
+    expectedBaseCommit: string
+    ttlMs: number
+    owner: GrowthSourceJobOwner
+    signal: AbortSignal
+    assertCurrent: () => void
+  }): Promise<SourceJobProjection>
+  /** Read a content-free durable-job status under the live Growth owner. */
+  inspectSourceJob(input: { id: string; owner: GrowthSourceJobOwner }): SourceJobProjection
 }
 
 /** Per-wake counters surfaced into driver health by the index.ts adapter. */
 export interface GrowthSourcePlaneStats {
+  queued: number
   prepared: number
   rejected: number
 }

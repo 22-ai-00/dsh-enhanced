@@ -18,6 +18,8 @@ export * from './sqlite.js'
 export * from './store.js'
 export * from './types.js'
 export * from './trust.js'
+export type * from './source-job-types.js'
+export type { EnqueueSourceJobInput, SourceJobCaller } from './source-jobs.js'
 
 export function apply(ctx: Context, config: Config): void {
   new PluginControlPlaneService(ctx, config)

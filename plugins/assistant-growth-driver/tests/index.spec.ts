@@ -790,6 +790,7 @@ describe('opt-in plugin source proposals', () => {
       expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { enabled: true, repository } }))).toThrow(/repository/)
     }
     expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), offline: false } }))).toThrow(/offline/)
+    expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), preparationMode: 'later' } }))).toThrow()
   })
 
   it.each([false, true])('keeps four tools when source enabled=%s but its peer is absent', async enabled => {
@@ -798,7 +799,7 @@ describe('opt-in plugin source proposals', () => {
     process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: { ...options(h.root), enabled } }))
     await service.wake()
-    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 0 })
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 0 })
     expect(adapter.surfaces[0]).toHaveLength(4)
     expect(adapter.surfaces[0]?.every(name => name.startsWith('growth_'))).toBe(true)
   })
@@ -812,7 +813,45 @@ describe('opt-in plugin source proposals', () => {
     await new Promise(resolve => setImmediate(resolve))
     await service.wake()
     expect(adapter.surfaces[0]).toHaveLength(4)
-    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 0 })
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 0 })
+  })
+
+  it('keeps the baseline when durable source enqueue authority is unavailable', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    h.ctx.provide('pluginControlPlane' as never, sourceService() as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      pluginSourceProposals: { ...options(h.root), preparationMode: 'durable' },
+    }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(adapter.surfaces[0]).toHaveLength(4)
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 0 })
+  })
+
+  it('uses durable source seams after their live authority becomes available without provider reload', async () => {
+    const adapter = new ScriptedAdapter(sourceTurns)
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    let available = false
+    const source = {
+      ...sourceService(), canEnqueueSource: () => available,
+      enqueueSourceJob: vi.fn(async (input: Parameters<GrowthSourcePlanePort['enqueueSourceJob']>[0]) => ({
+        id: 'late-job', name: input.name, gapId: input.gapId, baseCommit: input.expectedBaseCommit, status: 'queued' as const, createdAt: 1, expiresAt: 2,
+      })),
+      inspectSourceJob: vi.fn(),
+    }
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { pluginSourceProposals: { ...options(h.root), preparationMode: 'durable' } }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(adapter.surfaces[0]).toHaveLength(4)
+    available = true
+    adapter.reset()
+    await service.wake()
+    expect(adapter.surfaces.at(-1)).toHaveLength(8)
+    expect(source.enqueueSourceJob).toHaveBeenCalledTimes(1)
   })
 
   it('late-binds the optional provider and forwards only frozen Host settings to one pending plan', async () => {
@@ -825,7 +864,7 @@ describe('opt-in plugin source proposals', () => {
     await new Promise(resolve => setImmediate(resolve))
     await service.wake()
     expect(service.health().outcome).toBe('ran')
-    expect(service.health().run?.sourceProposals).toEqual({ prepared: 1, rejected: 0 })
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 1, rejected: 0 })
     expect(adapter.surfaces[0]).toHaveLength(7)
     expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
     expect(source.prepareModifySourcePlan.mock.calls[0]?.[0]).toMatchObject({
@@ -836,6 +875,45 @@ describe('opt-in plugin source proposals', () => {
     expect(source.inspectSource.mock.calls[0]?.[0].baseCommit).toBeUndefined()
     expect(source.inspectSource.mock.calls[1]?.[0]).toMatchObject({ baseCommit: 'c'.repeat(40), paths: ['README.md'] })
     expect(tableCounts(h)).toEqual({ candidates: 0, definitions: 0, runs: 0 })
+  })
+
+  it('queues a durable source job with frozen owner data and exposes only scoped status', async () => {
+    const durableTurns = [...sourceTurns, { name: 'plugin_source_job_status', args: { id: 'source-job-1' } }]
+    const adapter = new ScriptedAdapter(durableTurns)
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = {
+      ...sourceService(),
+      canEnqueueSource: () => true,
+      enqueueSourceJob: vi.fn(async (input: Parameters<GrowthSourcePlanePort['enqueueSourceJob']>[0]) => {
+        input.signal.throwIfAborted()
+        input.assertCurrent()
+        return { id: 'source-job-1', name: input.name, gapId: input.gapId, baseCommit: input.expectedBaseCommit,
+          status: 'queued' as const, createdAt: 1, expiresAt: 2 }
+      }),
+      inspectSourceJob: vi.fn((input: Parameters<GrowthSourcePlanePort['inspectSourceJob']>[0]) => ({
+        id: input.id, name: 'assistant-health', gapId: 'gap-1', baseCommit: 'c'.repeat(40),
+        status: 'queued' as const, createdAt: 1, expiresAt: 2,
+      })),
+    }
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      pluginSourceProposals: { ...options(h.root), preparationMode: 'durable' },
+    }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 0 })
+    expect(adapter.surfaces[0]).toHaveLength(8)
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+    expect(source.enqueueSourceJob).toHaveBeenCalledWith(expect.objectContaining({
+      gapId: 'gap-1', name: 'assistant-health', repository: h.root, expectedBaseCommit: 'c'.repeat(40), ttlMs: 86_400_000,
+      owner: { ownerRouteId: OWNER_ROUTE, principalId: PRINCIPAL, principalRecordId: RECORD_ID, principalVersion: 1, workspace: h.root, preset: PRESET },
+    }))
+    expect(source.enqueueSourceJob.mock.calls[0]?.[0]).not.toHaveProperty('timeoutMs')
+    expect(source.inspectSourceJob).toHaveBeenCalledWith({
+      id: 'source-job-1',
+      owner: { ownerRouteId: OWNER_ROUTE, principalId: PRINCIPAL, principalRecordId: RECORD_ID, principalVersion: 1, workspace: h.root, preset: PRESET },
+    })
   })
 
 
@@ -862,7 +940,7 @@ describe('opt-in plugin source proposals', () => {
     await new Promise(resolve => setImmediate(resolve))
     await service.wake()
     expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
-    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 1 })
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
   })
 
   it('does not accept a changed base from a later source read', async () => {
@@ -924,7 +1002,7 @@ describe('opt-in plugin source proposals', () => {
     await new Promise(resolve => setImmediate(resolve))
     await service.wake()
     expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
-    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 2 })
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 2 })
   })
 
   it.each(['assistant-policy', 'assistant-skills', '../outside'])('refuses protected/invalid target %s before calling the Host', async plugin_name => {
@@ -937,7 +1015,7 @@ describe('opt-in plugin source proposals', () => {
     await new Promise(resolve => setImmediate(resolve))
     await service.wake()
     expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
-    expect(service.health().run?.sourceProposals).toEqual({ prepared: 0, rejected: 1 })
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
   })
 
   it('coalesces explicit wakes and cancels on provider replacement before binding the new generation', async () => {
@@ -972,7 +1050,7 @@ describe('opt-in plugin source proposals', () => {
     expect(adapter.surfaces.at(-1)).toHaveLength(7)
     expect(replacement.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
     expect(source.prepareModifySourcePlan).toHaveBeenCalledTimes(1)
-    expect(service.health().run?.sourceProposals).toEqual({ prepared: 1, rejected: 0 })
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 1, rejected: 0 })
   })
 
   it('aborts and drains the active build before the driver Fiber finishes disposal', async () => {

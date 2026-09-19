@@ -13,6 +13,8 @@
 
 2026-09-19 完整仓库隔离检查：owner 调用的 repository profile 已在固定镜像内完成离线 install → 根 `pnpm check` → Control Plane pack，实际耗时约 18.4 分钟；Host 与容器均为 5,829 passed / 44 skipped，Host 的 35 个 dry-run pack 成功。已修复 Evolution/Recovery 对 Goals 类型产物的干净构建循环依赖，并通过正式 runner 的真实嵌套 Bubblewrap 探针。详见[构建与边界证据](evidence/source-repository-check-2026-09-19.json)。嵌套沙箱为 owner 显式配置：固定 seccomp/runtime，移除 Docker system-path masks 并用空只读 tmpfs 遮蔽 `/sys`；保留非 root、零 capabilities、无网络及无 Host 挂载，但不宣称与默认 `/proc` 遮罩等价。该运行是完整工作区工程检查，没有真实模型仓库补丁、持久 Host 作业或生产发布；Growth Driver 的 300 秒权限不变，WP16、WP18 状态不变。
 
+2026-09-19 持久源码任务更新：Growth Driver 的显式 `durable` 模式把冻结源码交给已有 Automations Host executor，控制面独立管理有限期限/提交次数、完整 owner/trust 绑定和源码意图；检查成功时原子提交 job、gap claim 与待审批计划。原生 Automations/Policy 工程集成覆盖正常调度、预算拒绝回写和重启不重复执行，未知资源核对归属后才释放占用。模型权限仍为 300 秒。详见[配置与边界](../plugins/plugin-control-plane/README.md#持久源码检查任务可选)和[验收记录](evidence/durable-source-jobs-2026-09-19.json)；本批没有真实模型驱动长任务、真实生产发布或收益评测，WP16、WP18 状态不变。
+
 ## 已交付能力与整包验收
 
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |

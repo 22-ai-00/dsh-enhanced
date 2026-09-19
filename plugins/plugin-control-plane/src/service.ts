@@ -1,4 +1,5 @@
 import { lstat, realpath } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -18,6 +19,8 @@ import { awaitSourceSignal, inspectSourceContext, type SourceInspection } from '
 import { inheritedEnvironment, loadTrustConfig } from './trust.js'
 import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
 import { registerPluginControlTools } from './tools.js'
+import { SourceJobRuntime, validateSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
+import type { SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
 
 export interface Config {
   catalogPath: string
@@ -26,11 +29,14 @@ export interface Config {
   proposalTtlMs?: number
   /** Optional for legacy deployments; required by prepareModifySourcePlan. */
   sourceBuild?: SourceBuildConfig
+  /** Explicit, expiring Host authority for work that outlives a model wake. */
+  sourceJobs?: SourceJobsConfig
 }
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   sourceBuild: Schema.any(),
+  sourceJobs: Schema.any(),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' { interface Context { pluginControlPlane: PluginControlPlaneService } }
@@ -51,20 +57,59 @@ async function canonicalTarget(dshHome: string, profile: string): Promise<Plugin
 
 export class PluginControlPlaneService extends Service {
   static Config = schema
-  private readonly config: Required<Omit<Config, 'sourceBuild'>> & Pick<Config, 'sourceBuild'>
+  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs'>> & Pick<Config, 'sourceBuild' | 'sourceJobs'>
   private readonly store: ControlPlaneStore
   private readonly abort = new AbortController()
   private readonly sourceBuilds = new Set<Promise<unknown>>()
   private readonly sourceInspections = new Set<Promise<unknown>>()
+  private sourceRuntime: SourceJobRuntime | undefined
+  private readonly sourceRuntimes = new Set<SourceJobRuntime>()
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'pluginControlPlane')
-    this.config = schema(input) as Required<Omit<Config, 'sourceBuild'>> & Pick<Config, 'sourceBuild'>
+    this.config = structuredClone(schema(input)) as typeof this.config
     if (this.config.sourceBuild !== undefined) validateSourceBuildConfig(this.config.sourceBuild)
+    if (this.config.sourceJobs !== undefined) {
+      validateSourceJobsConfig(this.config.sourceJobs, this.config.sourceBuild)
+      if (realpathSync(this.config.sourceJobs.repository) !== this.config.sourceJobs.repository) throw new Error('plugin-control-plane: sourceJobs.repository must be canonical')
+    }
     if (![this.config.catalogPath, this.config.statePath, this.config.trustPath].every(isAbsolute)) throw new Error('plugin-control-plane: catalogPath, statePath and trustPath must be absolute')
     this.store = new ControlPlaneStore({ path: join(this.config.statePath, 'control.sqlite') })
-    ctx.effect(() => async () => { this.abort.abort(); await Promise.allSettled([...this.sourceBuilds, ...this.sourceInspections]); this.store.close() }, 'plugin-control-plane.store')
+    ctx.effect(() => async () => {
+      this.abort.abort()
+      await Promise.allSettled([...this.sourceRuntimes].map(runtime => runtime.close()))
+      await Promise.allSettled([...this.sourceBuilds, ...this.sourceInspections])
+      this.store.close()
+    }, 'plugin-control-plane.store')
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
+    if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never], jobsCtx => {
+      jobsCtx.effect(() => {
+        const current = <K extends keyof SourceJobPorts>(key: K): SourceJobPorts[K] => jobsCtx.get((key === 'automations' ? 'assistantAutomations' : 'assistantDelivery') as never) as unknown as SourceJobPorts[K]
+        for (const method of ['registerHostExecutor', 'reconcileSystem', 'inspectSystemOwnedActivation', 'inspectSystemOwned'] as const) {
+          if (typeof current('automations')[method] !== 'function') throw new Error(`plugin-control-plane: durable source jobs require assistantAutomations.${method}`)
+        }
+        if (typeof current('delivery').validateOwnerRoute !== 'function') throw new Error('plugin-control-plane: durable source jobs require Delivery v2 owner validation')
+        const runtime = new SourceJobRuntime({ config: this.config.sourceJobs!, build: this.config.sourceBuild!, statePath: this.config.statePath, store: this.store,
+          ports: {
+            automations: {
+              registerHostExecutor: executor => current('automations').registerHostExecutor(executor),
+              reconcileSystem: request => current('automations').reconcileSystem(request),
+              inspectSystemOwnedActivation: request => current('automations').inspectSystemOwnedActivation(request),
+              inspectSystemOwned: request => current('automations').inspectSystemOwned(request),
+            },
+            delivery: { validateOwnerRoute: request => current('delivery').validateOwnerRoute(request) },
+          }, trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent),
+        })
+        runtime.start()
+        this.sourceRuntimes.add(runtime)
+        this.sourceRuntime = runtime
+        return async () => {
+          if (this.sourceRuntime === runtime) this.sourceRuntime = undefined
+          await runtime.close()
+          this.sourceRuntimes.delete(runtime)
+        }
+      }, 'plugin-control-plane.source-jobs')
+    })
   }
 
   private async boundTrust(): Promise<Awaited<ReturnType<typeof loadTrustConfig>>> {
@@ -86,6 +131,38 @@ export class PluginControlPlaneService extends Service {
   gaps(limit: number): readonly StoredCapabilityGap[] { return this.store.listGaps(limit) }
   health(): PluginControlPlaneHealth { return this.store.health() }
   canPrepareSource(): boolean { return this.config.sourceBuild !== undefined }
+  canEnqueueSource(): boolean { return this.sourceRuntime?.available() === true && !this.abort.signal.aborted }
+
+  // Bind Host entry points: Cordis service proxies must not become resource owners.
+  enqueueSourceJob = async (input: EnqueueSourceJobInput): Promise<SourceJobProjection> => {
+    this.abort.signal.throwIfAborted()
+    const runtime = this.sourceRuntime
+    if (runtime === undefined || !runtime.available()) throw new Error('plugin-control-plane: durable source jobs unavailable')
+    if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new Error('plugin-control-plane: another source operation is draining')
+    const operation = runtime.enqueue(input)
+    this.sourceInspections.add(operation)
+    try { return await operation } finally { this.sourceInspections.delete(operation) }
+  }
+
+  inspectSourceJob = (input: { id: string; owner: SourceJobCaller }): SourceJobProjection => {
+    if (this.sourceRuntime === undefined) throw new Error('plugin-control-plane: durable source jobs unavailable')
+    return this.sourceRuntime.inspect(input)
+  }
+
+  reconcileSourceJob = (input: { id: string; owner: SourceJobCaller }): Promise<SourceJobProjection> => {
+    if (this.sourceRuntime === undefined || this.sourceBuilds.size !== 0) throw new Error('plugin-control-plane: durable source jobs unavailable or still draining')
+    return this.sourceRuntime.reconcileUnknown(input)
+  }
+
+  private async prepareSourceJob(job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>): Promise<PluginSourcePlan> {
+    this.abort.signal.throwIfAborted()
+    if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new Error('plugin-control-plane: another source operation is draining')
+    const intent = job.intent
+    const operation = this.prepareModifySourcePlanOwned({ gapId: intent.gapId, name: intent.name, repository: intent.repository, files: intent.files,
+      idempotencyKey: `source-job-plan:${job.id}`, expectedBaseCommit: intent.baseCommit, ttlMs: intent.ttlMs, timeoutMs: intent.build.timeoutMs, offline: true, signal, assertCurrent }, job)
+    this.sourceBuilds.add(operation)
+    try { return await operation } finally { this.sourceBuilds.delete(operation) }
+  }
 
   async inspectSource(input: { repository: string; name: string; paths: readonly string[]; baseCommit?: string; signal?: AbortSignal; assertCurrent?: () => void | Promise<void> }): Promise<SourceInspection> {
     this.abort.signal.throwIfAborted()
@@ -154,7 +231,7 @@ export class PluginControlPlaneService extends Service {
     return operation
   }
 
-  private async prepareModifySourcePlanOwned(input: Parameters<PluginControlPlaneService['prepareModifySourcePlan']>[0]): Promise<PluginSourcePlan> {
+  private async prepareModifySourcePlanOwned(input: Parameters<PluginControlPlaneService['prepareModifySourcePlan']>[0], sourceJob?: SourceJobRecord): Promise<PluginSourcePlan> {
     const signal = input.signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, input.signal])
     const assertCurrent = async (): Promise<void> => { signal.throwIfAborted(); await input.assertCurrent?.(); signal.throwIfAborted() }
     await assertCurrent()
@@ -188,7 +265,8 @@ export class PluginControlPlaneService extends Service {
     if (input.expectedBaseCommit !== undefined && input.expectedBaseCommit !== baseCommit) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source base commit is stale')
 
     const stateRoot = join(this.config.statePath, 'source-worktrees')
-    const isolated = await createIsolatedWorktree({ stateRoot, repository, baseCommit, environment })
+    const isolated = await createIsolatedWorktree({ stateRoot, repository, baseCommit, environment,
+      ...(sourceJob === undefined ? {} : { worktreeName: basename(sourceJob.intent.worktree) }) })
     try {
       await writeScopedPluginFiles({ worktree: isolated.worktree, name, files: input.files })
       await assertCurrent()
@@ -197,13 +275,14 @@ export class PluginControlPlaneService extends Service {
       const configured = this.config.sourceBuild
       const checked = await runDockerPreparedChecks({ config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
         worktree: isolated.worktree, baseCommit, name, scope: [`plugins/${name}`], environment, signal,
-        assertCurrent, preparedAt: Date.now() })
+        assertCurrent, preparedAt: Date.now(), ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName } }) })
       await assertCurrent()
       // The worktree survives success: the owner recomputes its digests on this
       // exact directory during `source verify-prepared`.
       return this.store.createSourcePlan({ gapId: input.gapId, repository, worktree: isolated.worktree, baseCommit,
         name, generatorDigest: MODIFY_GENERATOR_DIGEST, scope: [`plugins/${name}`], mode: 'modify', ttlMs,
         idempotencyKey: input.idempotencyKey,
+        ...(sourceJob === undefined ? {} : { sourceJob: { jobId: sourceJob.id, jobRevision: sourceJob.revision, occurrenceId: sourceJob.occurrenceId! } }),
         prepared: { treeDigest: checked.treeDigest, patchDigest: checked.patchDigest, checkedAt: checked.checkedAt, evidence: checked.evidence } }).result
     } catch (error) {
       await isolated.remove()
