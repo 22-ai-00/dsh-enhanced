@@ -1,0 +1,270 @@
+{
+  "kind": "real-day1-native-source-proposal",
+  "checkedAt": "2026-09-19T14:10:10.861Z",
+  "passed": true,
+  "route": {
+    "provider": "super-relay",
+    "model": "auto_model/alwaysday1",
+    "api": "openai-responses"
+  },
+  "image": "dsh-local-source-preparation-smoke@sha256:9e753cb929c1057697cfcb8df3d12e9820f5bc1d2996d6dc7d3338fe9d58258b",
+  "baseCommit": "14a544acba6bcd80d2e8d2143015ff9ef929b792",
+  "observations": {
+    "modelCalls": [
+      {
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1",
+        "maxTokens": 4096,
+        "toolNames": [
+          "growth_list_owner_goals",
+          "growth_list_skills",
+          "growth_propose_skill_candidate",
+          "growth_read_verified_workflow",
+          "plugin_source_gaps",
+          "plugin_source_prepare",
+          "plugin_source_read"
+        ]
+      },
+      {
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1",
+        "maxTokens": 4096,
+        "toolNames": [
+          "growth_list_owner_goals",
+          "growth_list_skills",
+          "growth_propose_skill_candidate",
+          "growth_read_verified_workflow",
+          "plugin_source_gaps",
+          "plugin_source_prepare",
+          "plugin_source_read"
+        ]
+      },
+      {
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1",
+        "maxTokens": 4096,
+        "toolNames": [
+          "growth_list_owner_goals",
+          "growth_list_skills",
+          "growth_propose_skill_candidate",
+          "growth_read_verified_workflow",
+          "plugin_source_gaps",
+          "plugin_source_prepare",
+          "plugin_source_read"
+        ]
+      },
+      {
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1",
+        "maxTokens": 4096,
+        "toolNames": [
+          "growth_list_owner_goals",
+          "growth_list_skills",
+          "growth_propose_skill_candidate",
+          "growth_read_verified_workflow",
+          "plugin_source_gaps",
+          "plugin_source_prepare",
+          "plugin_source_read"
+        ]
+      },
+      {
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1",
+        "maxTokens": 4096,
+        "toolNames": [
+          "growth_list_owner_goals",
+          "growth_list_skills",
+          "growth_propose_skill_candidate",
+          "growth_read_verified_workflow",
+          "plugin_source_gaps",
+          "plugin_source_prepare",
+          "plugin_source_read"
+        ]
+      },
+      {
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1",
+        "maxTokens": 4096,
+        "toolNames": [
+          "growth_list_owner_goals",
+          "growth_list_skills",
+          "growth_propose_skill_candidate",
+          "growth_read_verified_workflow",
+          "plugin_source_gaps",
+          "plugin_source_prepare",
+          "plugin_source_read"
+        ]
+      }
+    ],
+    "toolCalls": [
+      {
+        "name": "growth_list_owner_goals",
+        "argumentsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      {
+        "name": "growth_list_skills",
+        "argumentsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      {
+        "name": "plugin_source_gaps",
+        "argumentsDigest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+      },
+      {
+        "name": "plugin_source_read",
+        "argumentsDigest": "409cdf3b164fa1e35f6ba172172356a6cf94fc699cc0de85c1d4ab609c049ae3"
+      },
+      {
+        "name": "plugin_source_read",
+        "argumentsDigest": "88c6d481c394ff144fd95683aede200c2f705ec007be96f1a5153fb0f4f47c68"
+      },
+      {
+        "name": "plugin_source_prepare",
+        "argumentsDigest": "424f8dfc9d8db8958d3f2b30e23ba38940bfc153c9cbceea22279408f24d0ed1"
+      }
+    ],
+    "reads": [
+      {
+        "name": "clamp-helper",
+        "baseCommit": "14a544acba6bcd80d2e8d2143015ff9ef929b792",
+        "paths": []
+      },
+      {
+        "name": "clamp-helper",
+        "baseCommit": "14a544acba6bcd80d2e8d2143015ff9ef929b792",
+        "paths": [
+          "README.md",
+          "src/index.js",
+          "package.json",
+          "cordis.patch.yml"
+        ]
+      }
+    ],
+    "preparations": [
+      {
+        "expectedBaseCommit": "14a544acba6bcd80d2e8d2143015ff9ef929b792",
+        "files": [
+          {
+            "content": "export function clamp(value, minimum, maximum) {\n  if (value < minimum) return minimum\n  if (value > maximum) return maximum\n  return value\n}\nexport default { name: 'dsh-enhanced-clamp-helper', apply(ctx) { ctx.provide('clamp', clamp) } }\n",
+            "path": "src/index.js"
+          }
+        ],
+        "plan": {
+          "schemaVersion": 1,
+          "kind": "source",
+          "id": "source-81b6eef0-bf5b-4df4-963d-a7cef21e6062",
+          "gapId": "gap-413af970-884c-4301-a06b-bba93b1eb175",
+          "gapSnapshot": {
+            "revision": 1,
+            "inputDigest": "587c23c6a723f4eff91dc2472ecadc03232a6327dd95e9281863cf8dd557f25c",
+            "roi": 900,
+            "capability": "clamp finite numbers to inclusive bounds"
+          },
+          "repository": "/tmp/dsh-source-model-RSLq67/repository",
+          "worktree": "/tmp/dsh-source-model-RSLq67/dsh-home/plugin-control/plans/source-worktrees/worktree-wKyj6e",
+          "baseCommit": "14a544acba6bcd80d2e8d2143015ff9ef929b792",
+          "name": "clamp-helper",
+          "generatorDigest": "2267fd71074f698e2b0010048d66bb8ed4924f2bf6f990fa10b0765a6b820dba",
+          "scope": [
+            "plugins/clamp-helper"
+          ],
+          "createdAt": 1789826998479,
+          "expiresAt": 1789913398479,
+          "mode": "modify",
+          "digest": "6385401e0b7dbdb3bd0f92fcbea10246880deaed340ea0576019ab207192927b",
+          "status": "pending-approval",
+          "revision": 1,
+          "sourceCheck": {
+            "treeDigest": "54847a781228fde7c158b96f9b26c6fd83c045ab5ba60e297a7adae0e82034bc",
+            "patchDigest": "b657504551c17360081610cf67c0652a2b96cae969983723d01ea04675e437df",
+            "checkedAt": 1789826998430
+          },
+          "preparedEvidence": {
+            "schemaVersion": 1,
+            "kind": "dsh-source-prepared-evidence",
+            "environment": {
+              "npmConfigIgnoreScripts": true,
+              "frozenLockfile": true,
+              "offline": true,
+              "nodeVersion": "v22.23.2",
+              "pnpmVersion": "11.4.0"
+            },
+            "commands": [
+              {
+                "command": "docker",
+                "args": [
+                  "run",
+                  "--network",
+                  "none",
+                  "--read-only",
+                  "--cap-drop",
+                  "ALL",
+                  "dsh-local-source-preparation-smoke@sha256:9e753cb929c1057697cfcb8df3d12e9820f5bc1d2996d6dc7d3338fe9d58258b",
+                  "3fc76a24fb1d106289972375309db9a6a871c164"
+                ],
+                "exitCode": 0,
+                "durationMs": 2491,
+                "logDigest": "62195a65e1afeec815d6f5a3b4fe018e9ca47d09fe4be859cdee28b96e123a25"
+              }
+            ],
+            "pack": {
+              "name": "dsh-enhanced-clamp-helper-1.0.0.tgz",
+              "version": "1.0.0",
+              "sizeBytes": 608,
+              "sha256": "b4d2c321dadc00265f4bd8f0981e8a7d507f769cb8f21790adc6c9aa01ab14e3"
+            },
+            "preparedAt": 1789826995918
+          }
+        }
+      }
+    ]
+  },
+  "health": {
+    "lastWakeAt": 1789826961690,
+    "outcome": "ran",
+    "reason": "succeeded",
+    "run": {
+      "sessionId": "growth-88b9e6a96f651b3e29ad7e23d995646032ef4b59",
+      "outcome": "succeeded",
+      "output": "Review complete.\n\n**Skill lane:** `growth_list_owner_goals` returned no owner-root goals, and there are no active or pending skills. With zero independently verified successes — let alone the required number of distinct repeated ones — no skill candidate was proposed, per the hard boundaries.\n\n**Source lane (opt-in):** One open control-plane gap was listed for the existing `clamp-helper` plugin (\"clamp finite numbers to inclusive bounds\"). I inspected the committed files at the pinned base commit `14a544ac…` and found `src/index.js` returned its input unchanged:\n\n```js\nexport function clamp(value, minimum, maximum) { return value }\n```\n\nI prepared one bounded pending modification (plan `source-81b6eef0-bf5b-4df4-963d-a7cef21e6062`, status **pending-approval**) replacing only `src/index.js` with a correct inclusive-bounds implementation while preserving the native Cordis default plugin export unchanged:\n\n```js\nexport function clamp(value, minimum, maximum) {\n  if (value < minimum) return minimum\n  if (value > maximum) return maximum\n  return value\n}\n```\n\nChecked tree/patch digests were persisted by the Host. The plan remains pending owner approval — I cannot approve, activate, install, or release it, and no further gaps are open.",
+      "usage": {
+        "inputTokens": 6247,
+        "outputTokens": 1570,
+        "cacheReadTokens": 11288,
+        "cacheWriteTokens": 0,
+        "reasoningTokens": 0,
+        "modelCalls": 6,
+        "toolCalls": 6
+      },
+      "sourceProposals": {
+        "prepared": 1,
+        "rejected": 0
+      }
+    }
+  },
+  "limits": [
+    "synthetic clamp task; no full repository improvement",
+    "owner route, history and tool approval are fixtures",
+    "no owner approval, remote publication or production activation"
+  ],
+  "assertions": [
+    "baseline-failed",
+    "real-day1-model",
+    "native-seven-tool-agent",
+    "committed-source-read",
+    "same-read-and-plan-base",
+    "model-written-patch",
+    "real-offline-docker-check-pack",
+    "persisted-pending-only",
+    "original-repository-unchanged"
+  ],
+  "execution": {
+    "exitCode": 0,
+    "implementationCommit": "40975ab103ce15ba52cb5976706db5d2d5e60e33",
+    "logSha256": "92f6a6de8fec094c73798ecbd4ced04053ed53e2eabd4826653ecdd3fd160645",
+    "scriptSha256": {
+      "scripts/e2e/source-model-smoke.mjs": "e1badea190b0025fa0eaea9a65e06e1f2121d87a00897027f568697cb3a3b7f7",
+      "scripts/e2e/source-model-control-fixture.mjs": "379f3164ad856c012d92a140252dc5a9761c7c907749414dfe958bb18e13ca2b"
+    },
+    "independentReview": "PASS; real-model and Docker evidence, synthetic owner/task limits reviewed"
+  }
+}
