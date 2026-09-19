@@ -350,3 +350,20 @@ DSH_SOURCE_BUILD_IMAGE='your-local-builder@sha256:<immutable-digest>' \
 The image must already exist locally and expose executable Node, pnpm, tar, sha256sum and standard POSIX utilities to UID 65534. Corepack shims whose pnpm cache exists only under `/root` are insufficient. The smoke uses a dependency-free synthetic repository; a production image additionally needs an offline dependency store for the target repository's pinned pnpm version. No image pull, package download, Host bind mount, model call, publication or production profile mutation is part of this command.
 
 This probe runs the actual source builder in Docker and asserts a nonroot user, read-only root, absent Host paths/Git metadata/Docker socket/forwarded sentinel, exact patched source consumption, successful offline install/check/pack, and container removal. `DSH_SOURCE_BUILD_EVIDENCE=/absolute/path.json` optionally saves its result. It does not establish full repository build success, model patch quality, remote release, or production activation. Its generated worktree is removed on exit.
+
+
+## Real day1 source proposal
+
+```sh
+DSH_SOURCE_MODEL_LIVE=1 \
+DSH_WEB_REAL_SOURCE_HOME="$HOME/.dsh" \
+DSH_SOURCE_BUILD_IMAGE='your-local-builder@sha256:<64-hex-digest>' \
+DSH_SOURCE_MODEL_EVIDENCE=/tmp/day1-source-proof.json \
+  node scripts/e2e/source-model-smoke.mjs
+```
+
+Build the workspace first (`pnpm build`). The script uses the existing `super-relay` / `auto_model/alwaysday1` route and credential reference through `prepareRealRoute`; it never changes that source profile or writes its key into evidence. It resolves the native pi adapter from the installed DSH package; set `DSH_SOURCE_MODEL_DSH_PACKAGE` to that installation's absolute `package.json` path when it differs from the local default. The tested installation uses pi adapter/runtime `0.1.2-rc.1` and Cordis `4.0.2`, matching the workspace runtime.
+
+One wake permits at most 12 model calls, 20 tool calls, 4,096 output tokens per request, and 240 seconds. It provides a broken synthetic clamp plugin in a temporary Git repository, a fixture owner route and empty history, and a one-wake Policy budget. The actual Growth Driver's seven-tool surface lets the real model inspect the committed source and propose one patch; the production Control Plane runs offline Docker checks and persists a pending plan. Assertions compare read/plan base commits, model patch, successful check/pack evidence, SQLite pending state, and unchanged original source. The temporary Context and repository are disposed on exit.
+
+This proves a real-model source-proposal path on one synthetic task. Owner authentication/history and the tool-approval channel are fixtures; it does not prove general repository repair, owner approval, registry publication, production activation, or sustained RSI benefit. Successful local evidence: [2026-09-19 day1 run](../../docs/evidence/day1-source-proposal-2026-09-19.json).

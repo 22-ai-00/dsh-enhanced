@@ -9,6 +9,8 @@
 
 2026-09-19 源码上下文更新：Growth Driver 增加受限 `plugin_source_read`，先读取目标插件的已提交文本，再把修改绑定到 Host 缓存的同一 Git commit；既有文件未读或 HEAD 已变更均拒绝准备。Control Plane 的读取子进程、异步检查和完整请求受取消与截止时间约束，Fiber 卸载等待收尾；[Git 读取与真实 Docker 构建组合探针](evidence/source-context-docker-2026-09-19.json)确认读取版本与构建 base 一致。此阶段模型接线仍由 scripted Agent 测试证明，尚无真实模型源码改进或生产发布证据。
 
+2026-09-19 真实源码提案验收：[`super-relay / auto_model/alwaysday1` 的真实运行](evidence/day1-source-proposal-2026-09-19.json)通过原生 Growth Driver/Agent/Policy，6 次模型调用读取合成 clamp 插件并修复边界错误，真实离线 Docker check/pack 通过，SQLite 持久化同一 read base 的 `pending-approval` 计划。独立复核 PASS。该证据覆盖真实模型到源码提案的单任务路径；owner 路由/历史/工具审批为夹具，未执行批准、发布、生产启用或收益比较，WP16、WP18 状态不变。
+
 ## 已交付能力与整包验收
 
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |
