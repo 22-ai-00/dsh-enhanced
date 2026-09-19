@@ -23,6 +23,8 @@
 
 2026-09-19 npm 制品读取：Control Plane 新增显式 `npm` 协议，以 owner catalog 的精确版本/SHA-512 校验 npm 元数据和独立下载，再复用既有缓存描述符与 DSH staging。真实匿名读取的两个 0.1.32 制品匹配历史发布记录；详见[读取契约与证据](npm-registry-readback.md)。未执行 source-release 签名/发布或生产 Host 启用；owner 签名与 npm 观测的协议关联、完整有限启用/监测/回滚仍需后续完成，WP16、WP18 状态不变。
 
+2026-09-19 npm 发布验签组件：新增 owner 配置的 `registry-verify` / `reconcile` adapter，使用独立 verifier 密钥、固定 helper 字节和既有持久操作身份；v2 对账回执分开记录 owner 预期与 npm 实际观测，404/不完整读取保持 unknown。真实 npm 0.1.32 制品的普通验签和对账回执均通过验证；owner 授权、签名声明与发布历史为明确的临时夹具。详见[组件契约和原始证据](npm-release-verifier.md)。生产发布、远程 catalog admission、有限启用/监测/回滚仍未完成，WP16、WP18 状态不变。
+
 | 用户可用能力 | 已取得的证据 | 尚不覆盖的范围 |
 | --- | --- | --- |
 | 基本 RSI 首版：同类任务连续两轮自主修复、比较、有限试用、晋升和结果反馈 | [0.1.32 发布](evidence/release-0.1.32-2026-09-13.json)与[现代 Host 两轮真实模型运行](evidence/basic-rsi-modern-host-2026-09-13.json) | 独立隐藏留出、更多任务族及全部部署类型 |

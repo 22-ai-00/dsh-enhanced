@@ -26,8 +26,10 @@ import {
 import { defaultHostAttestationPolicy, loadTrustConfig, resolveTrustKey, type PluginControlTrustConfig } from '../src/trust.ts'
 import type {
   PluginSourcePlan,
-  SourcePublishReconciliationEvidence,
+  SourcePublishReconciliationEvidenceV1,
   SourcePublishReconciliationReceipt,
+  SourcePublishReconciliationReceiptV1,
+  SourceNpmPublishReconciliationEvidence,
   SourcePublishReconciliationRequest,
   SourceReleaseArtifact,
   SourceReleaseAuthorization,
@@ -323,8 +325,8 @@ function reconciliationRequest(
 
 function matchingReconciliationEvidence(
   request: SourcePublishReconciliationRequest,
-  overrides: Partial<SourcePublishReconciliationEvidence> = {},
-): SourcePublishReconciliationEvidence {
+  overrides: Partial<SourcePublishReconciliationEvidenceV1> = {},
+): SourcePublishReconciliationEvidenceV1 {
   return {
     kind: 'publish-reconciliation',
     outcome: 'exists-match',
@@ -349,10 +351,10 @@ function matchingReconciliationEvidence(
 
 function signedReconciliationReceipt(
   request: SourcePublishReconciliationRequest,
-  evidence: SourcePublishReconciliationEvidence,
+  evidence: SourcePublishReconciliationEvidenceV1,
   privateKey: KeyObject,
-): SourcePublishReconciliationReceipt {
-  const unsigned: Omit<SourcePublishReconciliationReceipt, 'signature'> = {
+): SourcePublishReconciliationReceiptV1 {
+  const unsigned: Omit<SourcePublishReconciliationReceiptV1, 'signature'> = {
     schemaVersion: 1,
     kind: 'dsh-source-publish-reconciliation-receipt',
     receiptId: 'publish-reconciliation-receipt-1',
@@ -372,6 +374,48 @@ function signedReconciliationReceipt(
   }
   return { ...unsigned,
     signature: sign(null, Buffer.from(sourcePublishReconciliationSigningPayload(unsigned)), privateKey).toString('base64') }
+}
+
+function npmReconciliationRequest(plan: PluginSourcePlan, authorization: VerifiedSourceReleaseAuthorization):
+{ request: SourcePublishReconciliationRequest; plan: PluginSourcePlan } {
+  const tarballReference = 'https://registry.example.test/tarballs/health-helper-1.2.3.tgz'
+  const npmAuthorization: VerifiedSourceReleaseAuthorization = { ...authorization, releasePolicy: {
+    ...authorization.releasePolicy, registryReference: tarballReference,
+  } }
+  const npmPlan: PluginSourcePlan = { ...plan, releaseAuthorization: npmAuthorization }
+  const base = reconciliationRequest(plan, authorization)
+  return { plan: npmPlan, request: parseSourcePublishReconciliationRequest({ ...base,
+    authorization: npmAuthorization, expectedRegistryReference: tarballReference,
+  }) }
+}
+
+function matchingNpmReconciliationEvidence(request: SourcePublishReconciliationRequest, overrides: Partial<SourceNpmPublishReconciliationEvidence> = {}): SourceNpmPublishReconciliationEvidence {
+  return {
+    kind: 'npm-publish-reconciliation', outcome: 'exists-match', registryId: request.registry.id,
+    registryReference: request.expectedRegistryReference, packageName: request.artifact.packageName,
+    packageVersion: request.artifact.packageVersion, expectedTarballSha256: request.artifact.tarballSha256,
+    expectedTarballIntegrity: request.artifact.tarballIntegrity,
+    expectedArtifactStatementDigest: request.expectedArtifactStatementDigest,
+    expectedArtifactSignatureDigest: request.expectedArtifactSignatureDigest,
+    observedTarballSha256: request.artifact.tarballSha256, observedTarballIntegrity: request.artifact.tarballIntegrity,
+    ambiguousPublishOperationId: request.ambiguousPublish.operationId,
+    ambiguousPublishReceiptDigest: request.ambiguousPublish.receiptDigest, detailDigest: digest('a'),
+    metadataReference: 'https://registry.example.test/%40dsh-enhanced%2Fhealth-helper/1.2.3',
+    metadataIntegrity: request.artifact.tarballIntegrity, downloadedBytes: 123,
+    ...overrides,
+  }
+}
+
+function signedNpmReconciliationReceipt(request: SourcePublishReconciliationRequest, evidence: SourceNpmPublishReconciliationEvidence,
+  privateKey: KeyObject): SourcePublishReconciliationReceipt {
+  const unsigned = {
+    schemaVersion: 2 as const, kind: 'dsh-source-publish-reconciliation-receipt' as const,
+    receiptId: 'npm-publish-reconciliation-receipt-1', authority: request.adapter.authority, keyId: request.adapter.keyId,
+    installationId: request.installationId, planId: request.plan.id, planDigest: request.plan.digest, releaseId: request.release.id,
+    fence: request.release.fence, operationId: request.operationId, requestDigest: sourcePublishReconciliationRequestDigest(request), evidence,
+    evidenceDigest: sourcePublishReconciliationEvidenceDigest(evidence), observedAt: now, expiresAt: now + 5_000,
+  }
+  return { ...unsigned, signature: sign(null, Buffer.from(sourcePublishReconciliationSigningPayload(unsigned)), privateKey).toString('base64') }
 }
 
 async function artifactFixture(): Promise<SourceReleaseArtifact> {
@@ -958,6 +1002,63 @@ describe('signed publish reconciliation protocol', () => {
     })
   })
 
+  test('parses and verifies signed npm v2 match, conflict, and unknown observations', async () => {
+    const fixture = await verifiedAuthorizationFixture()
+    const npm = npmReconciliationRequest(fixture.plan, fixture.authorization)
+    const keys = generateKeyPairSync('ed25519')
+    const authority = new Ed25519SourcePublishReconciliationAuthority(
+      publicKeyPem(keys.publicKey), npm.request.adapter.authority, npm.request.adapter.keyId, () => now + 100,
+    )
+    const match = signedNpmReconciliationReceipt(npm.request, matchingNpmReconciliationEvidence(npm.request), keys.privateKey)
+    const conflict = signedNpmReconciliationReceipt(npm.request, matchingNpmReconciliationEvidence(npm.request, {
+      outcome: 'digest-conflict', observedTarballSha256: digest('c'),
+    }), keys.privateKey)
+    const unknown = signedNpmReconciliationReceipt(npm.request, matchingNpmReconciliationEvidence(npm.request, {
+      outcome: 'unknown', registryReference: null, metadataReference: null, metadataIntegrity: null, downloadedBytes: null,
+      observedTarballSha256: null, observedTarballIntegrity: null,
+    }), keys.privateKey)
+
+    expect(parseSourcePublishReconciliationReceipt(match)).toEqual(match)
+    await expect(authority.verify(match, npm.plan, npm.request)).resolves.toMatchObject({ schemaVersion: 2,
+      evidence: { kind: 'npm-publish-reconciliation', outcome: 'exists-match' } })
+    await expect(authority.verify(conflict, npm.plan, npm.request)).resolves.toMatchObject({ evidence: { outcome: 'digest-conflict' } })
+    await expect(authority.verify(unknown, npm.plan, npm.request)).resolves.toMatchObject({ evidence: { outcome: 'unknown' } })
+  })
+
+  test('rejects npm v2 absent, fabricated owner observations, and mismatched npm bindings', async () => {
+    const fixture = await verifiedAuthorizationFixture()
+    const npm = npmReconciliationRequest(fixture.plan, fixture.authorization)
+    const keys = generateKeyPairSync('ed25519')
+    const authority = new Ed25519SourcePublishReconciliationAuthority(
+      publicKeyPem(keys.publicKey), npm.request.adapter.authority, npm.request.adapter.keyId, () => now + 100,
+    )
+    const valid = signedNpmReconciliationReceipt(npm.request, matchingNpmReconciliationEvidence(npm.request), keys.privateKey)
+    expect(() => parseSourcePublishReconciliationReceipt({ ...valid, evidence: { ...valid.evidence, outcome: 'absent' } }))
+      .toThrow('npm publish reconciliation evidence outcome is invalid')
+    expect(() => parseSourcePublishReconciliationReceipt({ ...valid, evidence: { ...valid.evidence,
+      observedArtifactStatementDigest: digest('f') } })).toThrow('npm publish reconciliation evidence has unknown or missing fields')
+    expect(() => parseSourcePublishReconciliationReceipt({ ...valid, schemaVersion: 1 })).toThrow()
+    for (const override of [
+      { registryReference: 'https://registry.example.test/%252fescape.tgz' },
+      { registryReference: 'https://registry.example.test/%zz.tgz' },
+      { registryReference: 'https://registry.example.test/package.tgz?token=credential' },
+      { downloadedBytes: 268_435_457 },
+    ]) {
+      expect(() => parseSourcePublishReconciliationReceipt(signedNpmReconciliationReceipt(npm.request,
+        matchingNpmReconciliationEvidence(npm.request, override), keys.privateKey))).toThrow()
+    }
+    for (const evidence of [
+      matchingNpmReconciliationEvidence(npm.request, { metadataIntegrity: `sha512-${Buffer.alloc(64, 4).toString('base64')}` }),
+      matchingNpmReconciliationEvidence(npm.request, { registryReference: 'https://registry.example.test/tarballs/other.tgz' }),
+      matchingNpmReconciliationEvidence(npm.request, { metadataReference: 'https://registry.example.test/%40dsh-enhanced%2Fhealth-helper/9.9.9' }),
+    ]) {
+      await expect(authority.verify(signedNpmReconciliationReceipt(npm.request, evidence, keys.privateKey), npm.plan, npm.request))
+        .rejects.toThrow(/(npm exists-match reconciliation does not prove|(?:publish|npm) reconciliation receipt is not bound)/)
+    }
+    const changedRequest = parseSourcePublishReconciliationRequest({ ...npm.request, receiptTtlMs: 6_000 })
+    await expect(authority.verify(valid, npm.plan, changedRequest)).rejects.toThrow('not bound to the exact ambiguous publish and artifact')
+  })
+
   test('rejects tampered ambiguous-publish receipt and evidence digests', async () => {
     const fixture = await verifiedAuthorizationFixture()
     const request = reconciliationRequest(fixture.plan, fixture.authorization)
@@ -993,7 +1094,7 @@ describe('signed publish reconciliation protocol', () => {
       publicKeyPem(keys.publicKey), request.adapter.authority, request.adapter.keyId, () => now + 100,
     )
     const changedIntegrity = `sha512-${Buffer.alloc(64, 10).toString('base64')}`
-    const cases: readonly SourcePublishReconciliationEvidence[] = [
+    const cases: readonly SourcePublishReconciliationEvidenceV1[] = [
       matchingReconciliationEvidence(request, { expectedTarballSha256: digest('b'), observedTarballSha256: digest('b') }),
       matchingReconciliationEvidence(request, { expectedTarballIntegrity: changedIntegrity, observedTarballIntegrity: changedIntegrity }),
       matchingReconciliationEvidence(request, { registryReference: '@dsh-enhanced/health-helper@9.9.9' }),
@@ -1012,7 +1113,7 @@ describe('signed publish reconciliation protocol', () => {
     const authority = new Ed25519SourcePublishReconciliationAuthority(
       publicKeyPem(keys.publicKey), request.adapter.authority, request.adapter.keyId, () => now + 100,
     )
-    const cases: readonly [SourcePublishReconciliationEvidence, string][] = [
+    const cases: readonly [SourcePublishReconciliationEvidenceV1, string][] = [
       [matchingReconciliationEvidence(request, { observedTarballSha256: digest('b') }),
         'exists-match reconciliation does not prove the exact artifact'],
       [matchingReconciliationEvidence(request, { outcome: 'absent', registryReference: null, observedTarballIntegrity: null,

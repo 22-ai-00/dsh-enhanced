@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "kind": "npm-release-verifier-engineering-validation",
+  "date": "2026-09-19",
+  "baseCommit": "608e360398912266da23dd3e32fb5761bad79457",
+  "capability": "Anonymous exact npm artifact readback through the existing owner-configured release adapter, including signed v2 reconciliation in the existing Control Plane state machine.",
+  "rootCheck": {
+    "command": "pnpm check",
+    "exitCode": 0,
+    "logSha256": "6c67c610b7844cf41926690f37ea27b43c2631273649a813da9b76b1e90810ac",
+    "passed": 5931,
+    "skipped": 44,
+    "summaries": 36,
+    "controlPlanePassed": 342,
+    "dryRunPacks": 35,
+    "packInspection": "Control Plane dry-run file list includes bin/dsh-npm-registry-adapter.js and lib/registry-fetch.js.",
+    "testEditTiming": "The three npm v2 SQLite tests landed after root lint/typecheck and before the Control Plane test phase. Post-edit targeted lint and package typecheck passed."
+  },
+  "targetedChecks": [
+    {
+      "command": "pnpm --dir plugins/plugin-control-plane exec vitest run tests/npm-registry-adapter.spec.ts",
+      "exitCode": 0,
+      "passed": 12,
+      "logSha256": "c7749e5716ff56c1fde32fc14eb1c8caafed48dd0bd31db706216fe40e41b22f"
+    },
+    {
+      "command": "pnpm --dir plugins/plugin-control-plane exec vitest run tests/state.spec.ts -t 'npm v2'",
+      "exitCode": 0,
+      "passed": 3,
+      "filtered": 48,
+      "logSha256": "f1e3bf4a5e49722d2f8a498aaeb8de8364539c8c4960aa2b9e2d9fb4bfcc2215"
+    }
+  ],
+  "liveReadback": {
+    "command": "DSH_NPM_VERIFIER_LIVE=1 node scripts/e2e/npm-release-verifier-readback.mjs --output /tmp/dsh-npm-release-verifier-live-2026-09-19.json",
+    "exitCode": 0,
+    "evidencePath": "docs/evidence/npm-release-verifier-readback-2026-09-19.json",
+    "evidenceSha256": "52b1755ca2209fcc7552557ba10092ca276ec15416f4a316b33a7d66f4531359",
+    "package": "@dsh-enhanced/plugin-control-plane@0.1.32",
+    "downloadedBytes": 195256,
+    "independentReview": "Saved owner authorization, artifact signature, v1 release receipt and v2 reconciliation receipt verify with retained public keys; current runtime digests and historical baseline SRI agree."
+  },
+  "platformFixtureFollowup": {
+    "observedRun": "https://github.com/22-ai-00/dsh-enhanced/actions/runs/35463659657",
+    "observedCommit": "608e360398912266da23dd3e32fb5761bad79457",
+    "macosJobId": 105951871233,
+    "remainingMacosFailures": 2,
+    "cause": "Repository seccomp production admission correctly requires linux x64; two fixture expectations assumed that gate was passed on macOS.",
+    "change": "Assert the Host platform rejection and no container invocation on unsupported Hosts; retain Linux exact-profile/digest checks.",
+    "independentReadOnlyReview": "PASS",
+    "fixedMacosExecution": "pending exact pushed-commit CI"
+  },
+  "independentReview": {
+    "role": "verifier",
+    "verdict": "PASS",
+    "scope": [
+      "Read-only review of adapter lifecycle, request binding, legacy/v2 receipt semantics and platform fixture assertions.",
+      "Independent verification of saved public-key signatures, baseline SRI and current runtime digests.",
+      "Completed root check log, targeted test logs, dry-run package contents and evidence limits."
+    ]
+  },
+  "limits": [
+    "Real network evidence covers anonymous reads only; owner authorization, artifact signature, auxiliary build files and ambiguous publish history use disposable fixtures.",
+    "No production publish, catalog admission, Host activation, monitoring or rollback was exercised.",
+    "No complete WP16 production cycle, WP18 repository loop or cross-task agent improvement is claimed.",
+    "Local full check ran on Linux; repaired macOS behavior requires exact pushed-commit CI."
+  ]
+}

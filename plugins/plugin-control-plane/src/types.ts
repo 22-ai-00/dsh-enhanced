@@ -399,7 +399,8 @@ export interface SourcePublishReconciliationRequest {
   expectedRegistryReference: string
 }
 
-export interface SourcePublishReconciliationEvidence {
+/** The original adapter-defined reconciliation evidence wire format. */
+export interface SourcePublishReconciliationEvidenceV1 {
   kind: 'publish-reconciliation'
   outcome: 'exists-match' | 'absent' | 'unknown' | 'digest-conflict'
   registryId: string
@@ -419,8 +420,77 @@ export interface SourcePublishReconciliationEvidence {
   detailDigest: string
 }
 
-export interface SourcePublishReconciliationReceipt {
+/** Independently observed npm registry metadata and tarball evidence. */
+export interface SourceNpmPublishReconciliationEvidence {
+  kind: 'npm-publish-reconciliation'
+  outcome: 'exists-match' | 'unknown' | 'digest-conflict'
+  registryId: string
+  registryReference: string | null
+  packageName: string
+  packageVersion: string
+  expectedTarballSha256: string
+  expectedTarballIntegrity: string
+  expectedArtifactStatementDigest: string
+  expectedArtifactSignatureDigest: string
+  observedTarballSha256: string | null
+  observedTarballIntegrity: string | null
+  ambiguousPublishOperationId: string
+  ambiguousPublishReceiptDigest: string
+  detailDigest: string
+  metadataReference: string | null
+  metadataIntegrity: string | null
+  downloadedBytes: number | null
+}
+
+export type SourcePublishReconciliationEvidence = SourcePublishReconciliationEvidenceV1 | SourceNpmPublishReconciliationEvidence
+
+export interface SourcePublishReconciliationReceiptV1 {
   schemaVersion: 1
+  kind: 'dsh-source-publish-reconciliation-receipt'
+  receiptId: string
+  authority: string
+  keyId: string
+  installationId: string
+  planId: string
+  planDigest: string
+  releaseId: string
+  fence: number
+  operationId: string
+  requestDigest: string
+  evidence: SourcePublishReconciliationEvidenceV1
+  evidenceDigest: string
+  observedAt: number
+  expiresAt: number
+  signature: string
+}
+
+export interface SourceNpmPublishReconciliationReceipt {
+  schemaVersion: 2
+  kind: 'dsh-source-publish-reconciliation-receipt'
+  receiptId: string
+  authority: string
+  keyId: string
+  installationId: string
+  planId: string
+  planDigest: string
+  releaseId: string
+  fence: number
+  operationId: string
+  requestDigest: string
+  evidence: SourceNpmPublishReconciliationEvidence
+  evidenceDigest: string
+  observedAt: number
+  expiresAt: number
+  signature: string
+}
+
+/**
+ * Compatibility surface for callers which constructed the original receipt as
+ * an object before selecting a schema. Parsers enforce the schema/evidence
+ * pairing; use the named V1/V2 receipt types when narrowing is useful.
+ */
+export interface SourcePublishReconciliationReceipt {
+  schemaVersion: 1 | 2
   kind: 'dsh-source-publish-reconciliation-receipt'
   receiptId: string
   authority: string
@@ -439,7 +509,7 @@ export interface SourcePublishReconciliationReceipt {
   signature: string
 }
 
-export interface VerifiedSourcePublishReconciliationReceipt extends Omit<SourcePublishReconciliationReceipt, 'signature'> {
+export type VerifiedSourcePublishReconciliationReceipt = Omit<SourcePublishReconciliationReceipt, 'signature'> & {
   signatureDigest: string
 }
 

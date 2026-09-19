@@ -22,6 +22,21 @@ export interface FetchedRegistryArtifact {
   reference: string
 }
 
+// Registry observations are not owner approval. Reconciliation compares these
+// independently obtained bytes with the already authorized release statement.
+export interface ObservedNpmArtifact extends FetchedRegistryArtifact {
+  metadataReference: string
+  metadataIntegrity: string
+}
+
+interface RegistryArtifactRequest {
+  registry: RegistryBinding
+  packageName: string
+  version: string
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
 const artifactLimit = 268_435_456
 const metadataLimit = 2_097_152
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/u
@@ -158,14 +173,7 @@ function tarball(metadata: unknown, base: URL, name: string, version: string, ex
   return url
 }
 
-export async function fetchRegistryArtifact(request: {
-  registry: RegistryBinding
-  packageName: string
-  version: string
-  expectedIntegrity?: string
-  signal?: AbortSignal
-  timeoutMs?: number
-}, environment: NodeJS.ProcessEnv): Promise<FetchedRegistryArtifact> {
+function validateRequest(request: RegistryArtifactRequest): { base: URL; deadline: number; protocol: 'dsh' | 'npm' } {
   if (!packagePattern.test(request.packageName)) error('registry package name is invalid')
   if (!versionPattern.test(request.version)) error('registry version is not an exact immutable version')
   if (request.timeoutMs !== undefined && (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1 || request.timeoutMs > 120_000)) error('registry timeout is invalid')
@@ -174,20 +182,42 @@ export async function fetchRegistryArtifact(request: {
   const base = bareHttps(request.registry.locator, 'registry locator')
   const deadline = performance.now() + (request.timeoutMs ?? 120_000)
   assertLive(deadline, request.signal)
+  return { base, deadline, protocol }
+}
+
+async function observeNpm(request: RegistryArtifactRequest, environment: NodeJS.ProcessEnv, base: URL, deadline: number,
+  expected?: string): Promise<ObservedNpmArtifact> {
+  const root = base.pathname.endsWith('/') ? base.pathname : `${base.pathname}/`
+  const metadata = await fetchOne(atPath(base, `${root}${encodeURIComponent(request.packageName)}/${request.version}`), request.registry, environment, metadataLimit, deadline, request.signal)
+  let parsed: unknown
+  try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(metadata.bytes)) } catch { return error('npm metadata is invalid') }
+  const metadataIntegrity = (parsed as { dist?: { integrity?: string } } | null)?.dist?.integrity
+  const url = tarball(parsed, base, request.packageName, request.version, expected ?? metadataIntegrity!)
+  const hash = expectedSri(metadataIntegrity)
+  const result = await fetchOne(url, request.registry, environment, artifactLimit, deadline, request.signal)
+  if (!createHash('sha512').update(result.bytes).digest().equals(hash)) error('npm artifact integrity does not match the owner expectation or registry metadata')
+  assertLive(deadline, request.signal)
+  return { ...result, metadataReference: metadata.reference, metadataIntegrity: metadataIntegrity! }
+}
+
+export async function observeNpmRegistryArtifact(request: RegistryArtifactRequest,
+  environment: NodeJS.ProcessEnv): Promise<ObservedNpmArtifact> {
+  const { base, deadline, protocol } = validateRequest(request)
+  if (protocol !== 'npm') error('npm observation requires explicit npm protocol')
+  return await observeNpm(request, environment, base, deadline)
+}
+
+export async function fetchRegistryArtifact(request: RegistryArtifactRequest & { expectedIntegrity?: string },
+  environment: NodeJS.ProcessEnv): Promise<FetchedRegistryArtifact> {
+  const { base, deadline, protocol } = validateRequest(request)
   if (protocol === 'dsh') {
     const encoded = request.packageName.split('/').map(encodeURIComponent).join('/')
     const root = base.pathname.replace(/\/+$/u, '')
     return await fetchOne(atPath(base, `${root}/packages/${encoded}/${request.version}/package.tgz`), request.registry, environment, artifactLimit, deadline, request.signal)
   }
   const expected = request.expectedIntegrity!
-  const hash = expectedSri(expected)
-  const root = base.pathname.endsWith('/') ? base.pathname : `${base.pathname}/`
-  const metadata = await fetchOne(atPath(base, `${root}${encodeURIComponent(request.packageName)}/${request.version}`), request.registry, environment, metadataLimit, deadline, request.signal)
-  let parsed: unknown
-  try { parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(metadata.bytes)) } catch { return error('npm metadata is invalid') }
-  const result = await fetchOne(tarball(parsed, base, request.packageName, request.version, expected), request.registry, environment, artifactLimit, deadline, request.signal)
-  if (!createHash('sha512').update(result.bytes).digest().equals(hash)) error('npm artifact integrity does not match the owner expectation')
-  assertLive(deadline, request.signal)
+  expectedSri(expected)
+  const { metadataReference: _metadataReference, metadataIntegrity: _metadataIntegrity, ...result } = await observeNpm(request, environment, base, deadline, expected)
   return result
 }
 

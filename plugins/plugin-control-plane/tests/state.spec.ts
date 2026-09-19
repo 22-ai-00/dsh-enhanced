@@ -191,7 +191,7 @@ async function reviewedSource(target: Awaited<ReturnType<typeof fixture>>, suffi
     checkedTreeDigest: 'c'.repeat(64), checkedPatchDigest: 'd'.repeat(64) })
 }
 
-function releaseAuthorization(plan: PluginSourcePlan, now: number, root: string) {
+function releaseAuthorization(plan: PluginSourcePlan, now: number, root: string, registryReference = '@dsh-enhanced/health-helper@0.1.0') {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const unsigned: Omit<SourceReleaseAuthorization, 'signature'> = { schemaVersion: 1, kind: 'dsh-source-release-authorization',
     authorizationId: `release-auth-${plan.id.slice(-12)}`, authority: 'release-owner', keyId: 'release-owner-key',
@@ -199,7 +199,7 @@ function releaseAuthorization(plan: PluginSourcePlan, now: number, root: string)
     checkedPatchDigest: plan.sourceCheck!.patchDigest, scope: plan.scope, releasePolicy: { targetBranch: 'main',
       candidateId: plan.name, packageName: '@dsh-enhanced/health-helper', packageVersion: '0.1.0', packagePath: 'plugins/health-helper',
       dshBaseline: '0.1.0', capabilities: ['health'], authorities: ['read-only: health'], requires: [], registryId: 'npm',
-      registryLocator: 'https://registry.example.test', registryReference: '@dsh-enhanced/health-helper@0.1.0',
+      registryLocator: 'https://registry.example.test', registryReference,
       catalogId: 'owner-catalog', catalogPath: join(root, 'catalog.json'), minimumReproducibleBuilds: 2 },
     authorizedAt: now, expiresAt: now + 30_000 }
   const authorization: SourceReleaseAuthorization = { ...unsigned,
@@ -208,8 +208,8 @@ function releaseAuthorization(plan: PluginSourcePlan, now: number, root: string)
     publicKey.export({ format: 'pem', type: 'spki' }), 'release-owner', 'release-owner-key', () => now) }
 }
 
-async function startedSource(target: Awaited<ReturnType<typeof fixture>>, suffix: string): Promise<PluginSourcePlan> {
-  const reviewed = await reviewedSource(target, suffix); const signed = releaseAuthorization(reviewed, target.now(), target.root)
+async function startedSource(target: Awaited<ReturnType<typeof fixture>>, suffix: string, registryReference?: string): Promise<PluginSourcePlan> {
+  const reviewed = await reviewedSource(target, suffix); const signed = releaseAuthorization(reviewed, target.now(), target.root, registryReference)
   return (await target.store.startSourceRelease({ planId: reviewed.id, expectedRevision: reviewed.revision,
     authorization: signed.authorization, resolveAuthority: () => signed.authority, idempotencyKey: `release:start:${suffix}` })).result
 }
@@ -324,7 +324,7 @@ async function advanceTo(target: Awaited<ReturnType<typeof fixture>>, plan: Plug
 }
 
 async function reconcile(target: Awaited<ReturnType<typeof fixture>>, plan: PluginSourcePlan,
-  outcome: SourcePublishReconciliationEvidence['outcome'], idempotencyKey: string): Promise<PluginSourcePlan> {
+  outcome: SourcePublishReconciliationEvidence['outcome'], idempotencyKey: string, npm = false): Promise<PluginSourcePlan> {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const authorizationAuthority = acceptingAuthorizationAuthority
   const operation = await target.store.prepareSourcePublishReconciliation({ planId: plan.id, expectedRevision: plan.revision,
@@ -332,7 +332,7 @@ async function reconcile(target: Awaited<ReturnType<typeof fixture>>, plan: Plug
     registry: { id: 'npm', locator: 'https://registry.example.test' }, adapter: { id: 'registry-reconciler', version: '1.0.0',
       path: join(target.root, 'registry-reconciler'), sha256: '8'.repeat(64), interpreter: null, authority: 'registry-verifier', keyId: 'registry-key' },
     receiptTtlMs: 10_000, resolveAuthorizationAuthority: () => authorizationAuthority })
-  const request = operation.request; const evidence: SourcePublishReconciliationEvidence = { kind: 'publish-reconciliation', outcome,
+  const request = operation.request; let evidence: SourcePublishReconciliationEvidence = { kind: 'publish-reconciliation', outcome,
     registryId: request.registry.id, registryReference: outcome === 'absent' || outcome === 'unknown' ? null : request.expectedRegistryReference,
     packageName: request.artifact.packageName, packageVersion: request.artifact.packageVersion,
     expectedTarballSha256: request.artifact.tarballSha256, expectedTarballIntegrity: request.artifact.tarballIntegrity,
@@ -347,7 +347,14 @@ async function reconcile(target: Awaited<ReturnType<typeof fixture>>, plan: Plug
       : outcome === 'digest-conflict' ? request.expectedArtifactSignatureDigest : null,
     ambiguousPublishOperationId: request.ambiguousPublish.operationId, ambiguousPublishReceiptDigest: request.ambiguousPublish.receiptDigest,
     detailDigest: 'e'.repeat(64) }
-  const unsigned: Omit<SourcePublishReconciliationReceipt, 'signature'> = { schemaVersion: 1,
+  if (npm) {
+    if (outcome === 'absent') throw new Error('npm cannot prove absence')
+    const { observedArtifactStatementDigest: _statement, observedArtifactSignatureDigest: _signature, ...common } = evidence
+    evidence = { ...common, kind: 'npm-publish-reconciliation', outcome,
+      metadataReference: outcome === 'unknown' ? null : `${request.registry.locator}/${encodeURIComponent(request.artifact.packageName)}/${request.artifact.packageVersion}`,
+      metadataIntegrity: common.observedTarballIntegrity, downloadedBytes: outcome === 'unknown' ? null : 1 }
+  }
+  const unsigned: Omit<SourcePublishReconciliationReceipt, 'signature'> = { schemaVersion: npm ? 2 : 1,
     kind: 'dsh-source-publish-reconciliation-receipt', receiptId: `reconcile:${operation.operationId}`, authority: 'registry-verifier',
     keyId: 'registry-key', installationId: request.installationId, planId: request.plan.id, planDigest: request.plan.digest,
     releaseId: request.release.id, fence: request.release.fence, operationId: request.operationId,
@@ -679,6 +686,35 @@ catch { process.stdout.write('busy') } finally { db.close() }`
     const terminal = await reconcile(conflictTarget, conflict, 'digest-conflict', 'release:reconcile:conflict')
     expect(terminal).toMatchObject({ status: 'release-failed', release: { failureCode: 'publish-digest-conflict' } })
     expect(conflictTarget.store.getGap(terminal.gapId).status).toBe('matched')
+  })
+
+  test.each(['exists-match', 'unknown', 'digest-conflict'] as const)('persists npm v2 %s through the existing release state machine and restart', async outcome => {
+    const target = await fixture()
+    let plan = await advanceTo(target, await startedSource(target, `npm-${outcome}`, 'https://registry.example.test/package.tgz'), 'publish')
+    const operation = await target.store.prepareSourceReleaseOperation(releaseEnvironment(target.root, plan, 'publish'))
+    if (operation.request.phase !== 'publish') throw new Error('wrong fixture phase')
+    const artifact = operation.request.input.artifact
+    const receipt = releaseReceipt(operation.request, { kind: 'publish-ambiguity', registryId: 'npm', packageName: artifact.packageName,
+      packageVersion: artifact.packageVersion, tarballSha256: artifact.tarballSha256, detailDigest: 'a'.repeat(64) }, 'ambiguous')
+    await target.store.runSourceReleaseOperation({ operationId: operation.operationId, expectedRevision: plan.revision,
+      expectedFence: 1, execute: async () => receipt, resolveAuthority: () => acceptingReleaseAuthority,
+      resolveAuthorizationAuthority: () => acceptingAuthorizationAuthority })
+    plan = (await target.store.applySourceRelease({ planId: plan.id, expectedRevision: plan.revision, expectedFence: 1,
+      receipt, resolveAuthority: () => acceptingReleaseAuthority, idempotencyKey: 'npm:ambiguous' })).result
+    const reconciled = await reconcile(target, plan, outcome, `npm:reconcile:${outcome}`, true)
+    const status = outcome === 'exists-match' ? 'awaiting-registry-verify' : outcome === 'unknown' ? 'publish-ambiguous' : 'release-failed'
+    expect(reconciled).toMatchObject({ status, revision: plan.revision + 1, release: { fence: 1 } })
+    target.store.close()
+    const reopened = new ControlPlaneStore({ path: target.path, now: target.now })
+    try {
+      expect(reopened.getSourcePlan(plan.id)).toEqual(reconciled)
+      if (outcome === 'exists-match') {
+        const next = await reopened.prepareSourceReleaseOperation(releaseEnvironment(target.root, reconciled, 'registry-verify'))
+        expect(next.request).toMatchObject({ phase: 'registry-verify', input: { artifact } })
+      } else {
+        await expect(reopened.prepareSourceReleaseOperation(releaseEnvironment(target.root, reconciled, 'publish'))).rejects.toThrow()
+      }
+    } finally { reopened.close() }
   })
 
   test('fails closed when durable release requests, receipts, or row bindings are tampered', async () => {

@@ -238,6 +238,8 @@ sourceJobs:
 
 owner 可以用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。publish 超时等不确定结果必须先进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。
 
+`bin/dsh-npm-registry-adapter.js` 提供匿名 npm 的 `registry-verify` / `reconcile` 实现，沿用上述命令与状态机。它在 Linux Host 的固定 adapter/Node 进程中，从已校验字节加载固定下载 helper，读取 owner 私有配置、验签公钥和独立 verifier 私钥，写入私有操作记录；网络权限仅为配置的 HTTPS origin/path 下的 GET，不读取 `.npmrc` 或环境凭据。它不发布、安装或启用插件，也不提供模型工具。配置格式、文件权限、预算与退出清理见 [npm verifier 指南](../../docs/npm-release-verifier.md)。npm 对账使用 v2 签名回执，分别记录 owner 预期和实际 metadata/tarball 观测；404 或不完整读取保持 `unknown`，不会据此自动重发发布。旧 v1 回执继续使用原有语义。
+
 随包发布的 `bin/dsh-local-release-adapter.js` 是 local-only 的通用参考 adapter；trust 中每个 phase 必须安装为不同 canonical 文件/inode，并使用不同 adapter id、authority 与 receipt key；脚本副本可以共享同一个固定、只读的 Node interpreter。各副本的 owner-private config 还应给出不同 state directory。它实现：
 
 - local bare Git remote 上的 immutable PR ref、由 owner-private exact review decision 驱动的独立 review receipt，以及 target-ref compare-and-swap merge；
