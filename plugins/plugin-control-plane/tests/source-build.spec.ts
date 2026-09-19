@@ -88,11 +88,16 @@ it('rejects repository seccomp escalation unless the exact repository configurat
   expect(() => validateSourceBuildConfig({ ...base, profile: 'repository', repositorySandbox: { seccompPath: 'relative.json' } })).toThrow(/configuration is invalid/)
 })
 
-it('uses only an approved copied repository seccomp profile after exact Docker runtime gating', async () => {
+it('admits an approved copied seccomp profile only on a supported Host after Docker runtime gating', async () => {
   const f = await fixture(marker, 'exit 0', { profile: 'repository', repositorySandbox: { seccompPath: join(process.cwd(), 'placeholder') } })
   const profile = join(f.root, 'repository-seccomp.json')
   await writeFile(profile, await readFile(new URL('../../../scripts/isolation/source-builder-seccomp.json', import.meta.url)))
   f.config.repositorySandbox = { seccompPath: profile }
+  if (process.platform !== 'linux' || process.arch !== 'x64') {
+    await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/repository seccomp requires linux x64/)
+    await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
+    return
+  }
   const result = await runDockerPreparedChecks(f.input)
   const argv = await readFile(`${f.dockerPath}.args`, 'utf8')
   const copied = argv.match(/seccomp=(.+)/u)?.[1]?.trim()
@@ -116,12 +121,13 @@ it('rejects an unapproved Docker runtime before archiving repository source', as
   await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
 })
 
-it('rejects a repository seccomp profile whose bytes do not match the approved digest', async () => {
+it('rejects repository seccomp at the Host gate or the approved digest gate before container start', async () => {
   const f = await fixture(marker, 'exit 0', { profile: 'repository', repositorySandbox: { seccompPath: join(process.cwd(), 'placeholder') } })
   const profile = join(f.root, 'repository-seccomp.json')
   await writeFile(profile, '{"defaultAction":"SCMP_ACT_ALLOW"}\n')
   f.config.repositorySandbox = { seccompPath: profile }
-  await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/digest is not approved/)
+  await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(process.platform === 'linux' && process.arch === 'x64'
+    ? /digest is not approved/ : /repository seccomp requires linux x64/)
   await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
 })
 

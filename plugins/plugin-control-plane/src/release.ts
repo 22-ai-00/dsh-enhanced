@@ -11,7 +11,11 @@ import type {
   PluginSourcePlan,
   SourcePublishReconciliationAuthority,
   SourcePublishReconciliationEvidence,
+  SourcePublishReconciliationEvidenceV1,
   SourcePublishReconciliationReceipt,
+  SourcePublishReconciliationReceiptV1,
+  SourceNpmPublishReconciliationEvidence,
+  SourceNpmPublishReconciliationReceipt,
   SourcePublishReconciliationRequest,
   SourceReleaseArtifact,
   SourceReleaseAuthorization,
@@ -275,7 +279,7 @@ export function parseSourcePublishReconciliationRequest(value: unknown): SourceP
   return request
 }
 
-function parseSourcePublishReconciliationEvidence(value: unknown): SourcePublishReconciliationEvidence {
+function parseSourcePublishReconciliationEvidenceV1(value: unknown): SourcePublishReconciliationEvidenceV1 {
   const item = record(value, 'source publish reconciliation evidence')
   exact(item, ['kind', 'outcome', 'registryId', 'registryReference', 'packageName', 'packageVersion', 'expectedTarballSha256',
     'expectedTarballIntegrity', 'expectedArtifactStatementDigest', 'expectedArtifactSignatureDigest',
@@ -290,8 +294,8 @@ function parseSourcePublishReconciliationEvidence(value: unknown): SourcePublish
     if (raw === null) return null
     return integrity(raw, 'observedTarballIntegrity')
   }
-  const evidence: SourcePublishReconciliationEvidence = { kind: 'publish-reconciliation',
-    outcome: item.outcome as SourcePublishReconciliationEvidence['outcome'], registryId: text(item.registryId, 'registryId'),
+  const evidence: SourcePublishReconciliationEvidenceV1 = { kind: 'publish-reconciliation',
+    outcome: item.outcome as SourcePublishReconciliationEvidenceV1['outcome'], registryId: text(item.registryId, 'registryId'),
     registryReference: item.registryReference === null ? null : opaqueLine(item.registryReference, 'registryReference'),
     packageName: text(item.packageName, 'packageName', PACKAGE), packageVersion: text(item.packageVersion, 'packageVersion', VERSION),
     expectedTarballSha256: digestText(item.expectedTarballSha256, 'expectedTarballSha256'),
@@ -327,6 +331,71 @@ function parseSourcePublishReconciliationEvidence(value: unknown): SourcePublish
   return Object.freeze(evidence)
 }
 
+function bareHttpsUrl(value: unknown, label: string, allowEncodedSlash = false): string {
+  const raw = opaqueLine(value, label)
+  let parsed: URL
+  try { parsed = new URL(raw) } catch { throw new ControlPlaneStoreError('invalid-input', `${label} is invalid`) }
+  const canonical = raw === parsed.href || (parsed.pathname === '/' && raw === parsed.href.slice(0, -1))
+  if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' || parsed.search !== '' || parsed.hash !== ''
+    || !canonical || /%(?:25|5c|2e)|%(?![a-f0-9]{2})/iu.test(parsed.pathname) || (!allowEncodedSlash && /%2f/iu.test(parsed.pathname))
+    || parsed.pathname.includes('//')) {
+    throw new ControlPlaneStoreError('invalid-input', `${label} is not a bare canonical HTTPS URL`)
+  }
+  return raw
+}
+
+function parseSourceNpmPublishReconciliationEvidence(value: unknown): SourceNpmPublishReconciliationEvidence {
+  const item = record(value, 'npm publish reconciliation evidence')
+  exact(item, ['kind', 'outcome', 'registryId', 'registryReference', 'packageName', 'packageVersion', 'expectedTarballSha256',
+    'expectedTarballIntegrity', 'expectedArtifactStatementDigest', 'expectedArtifactSignatureDigest', 'observedTarballSha256',
+    'observedTarballIntegrity', 'ambiguousPublishOperationId', 'ambiguousPublishReceiptDigest', 'detailDigest',
+    'metadataReference', 'metadataIntegrity', 'downloadedBytes'], 'npm publish reconciliation evidence')
+  if (item.kind !== 'npm-publish-reconciliation' || !['exists-match', 'unknown', 'digest-conflict'].includes(String(item.outcome))) {
+    throw new ControlPlaneStoreError('invalid-input', 'npm publish reconciliation evidence outcome is invalid')
+  }
+  const nullableDigest = (raw: unknown, label: string): string | null => raw === null ? null : digestText(raw, label)
+  const nullableIntegrity = (raw: unknown, label: string): string | null => raw === null ? null : integrity(raw, label)
+  const nullableUrl = (raw: unknown, label: string, allowEncodedSlash = false): string | null => raw === null ? null
+    : bareHttpsUrl(raw, label, allowEncodedSlash)
+  const evidence = {
+    kind: 'npm-publish-reconciliation' as const,
+    outcome: item.outcome as 'exists-match' | 'unknown' | 'digest-conflict',
+    registryId: text(item.registryId, 'registryId'), registryReference: nullableUrl(item.registryReference, 'registryReference'),
+    packageName: text(item.packageName, 'packageName', PACKAGE), packageVersion: text(item.packageVersion, 'packageVersion', VERSION),
+    expectedTarballSha256: digestText(item.expectedTarballSha256, 'expectedTarballSha256'),
+    expectedTarballIntegrity: integrity(item.expectedTarballIntegrity, 'expectedTarballIntegrity'),
+    expectedArtifactStatementDigest: digestText(item.expectedArtifactStatementDigest, 'expectedArtifactStatementDigest'),
+    expectedArtifactSignatureDigest: digestText(item.expectedArtifactSignatureDigest, 'expectedArtifactSignatureDigest'),
+    observedTarballSha256: nullableDigest(item.observedTarballSha256, 'observedTarballSha256'),
+    observedTarballIntegrity: nullableIntegrity(item.observedTarballIntegrity, 'observedTarballIntegrity'),
+    ambiguousPublishOperationId: text(item.ambiguousPublishOperationId, 'ambiguousPublishOperationId'),
+    ambiguousPublishReceiptDigest: digestText(item.ambiguousPublishReceiptDigest, 'ambiguousPublishReceiptDigest'),
+    detailDigest: digestText(item.detailDigest, 'detailDigest'), metadataReference: nullableUrl(item.metadataReference, 'metadataReference', true),
+    metadataIntegrity: nullableIntegrity(item.metadataIntegrity, 'metadataIntegrity'),
+    downloadedBytes: item.downloadedBytes === null ? null : integer(item.downloadedBytes, 'downloadedBytes', 1),
+  } satisfies SourceNpmPublishReconciliationEvidence
+  if (evidence.downloadedBytes !== null && evidence.downloadedBytes > 268_435_456) {
+    throw new ControlPlaneStoreError('invalid-input', 'downloadedBytes must be a bounded integer')
+  }
+  const fullyObserved = evidence.registryReference !== null && evidence.metadataReference !== null && evidence.metadataIntegrity !== null
+    && evidence.downloadedBytes !== null && evidence.observedTarballSha256 !== null && evidence.observedTarballIntegrity !== null
+    && evidence.metadataIntegrity === evidence.observedTarballIntegrity
+  if (evidence.outcome === 'exists-match' && (!fullyObserved || evidence.observedTarballSha256 !== evidence.expectedTarballSha256
+    || evidence.observedTarballIntegrity !== evidence.expectedTarballIntegrity)) {
+    throw new ControlPlaneStoreError('invalid-input', 'npm exists-match reconciliation does not prove the exact artifact')
+  }
+  if (evidence.outcome === 'digest-conflict' && (!fullyObserved || (evidence.observedTarballSha256 === evidence.expectedTarballSha256
+    && evidence.observedTarballIntegrity === evidence.expectedTarballIntegrity))) {
+    throw new ControlPlaneStoreError('invalid-input', 'npm digest-conflict reconciliation does not prove a conflicting artifact')
+  }
+  if (evidence.outcome === 'unknown' && (evidence.registryReference !== null || evidence.metadataReference !== null
+    || evidence.metadataIntegrity !== null || evidence.downloadedBytes !== null || evidence.observedTarballSha256 !== null
+    || evidence.observedTarballIntegrity !== null)) {
+    throw new ControlPlaneStoreError('invalid-input', 'npm unknown reconciliation contains observed registry state')
+  }
+  return Object.freeze(evidence)
+}
+
 export function sourcePublishReconciliationRequestDigest(value: SourcePublishReconciliationRequest): string { return digest(value) }
 export function sourcePublishReconciliationEvidenceDigest(value: SourcePublishReconciliationEvidence): string { return digest(value) }
 
@@ -334,17 +403,22 @@ export function parseSourcePublishReconciliationReceipt(value: unknown): SourceP
   const item = record(value, 'source publish reconciliation receipt')
   exact(item, ['schemaVersion', 'kind', 'receiptId', 'authority', 'keyId', 'installationId', 'planId', 'planDigest', 'releaseId',
     'fence', 'operationId', 'requestDigest', 'evidence', 'evidenceDigest', 'observedAt', 'expiresAt', 'signature'], 'source publish reconciliation receipt')
-  if (item.schemaVersion !== 1 || item.kind !== 'dsh-source-publish-reconciliation-receipt') {
+  if ((item.schemaVersion !== 1 && item.schemaVersion !== 2) || item.kind !== 'dsh-source-publish-reconciliation-receipt') {
     throw new ControlPlaneStoreError('invalid-input', 'unsupported source publish reconciliation receipt schema')
   }
-  const evidence = parseSourcePublishReconciliationEvidence(item.evidence)
-  const receipt: SourcePublishReconciliationReceipt = { schemaVersion: 1, kind: 'dsh-source-publish-reconciliation-receipt',
+  const evidence = item.schemaVersion === 1 ? parseSourcePublishReconciliationEvidenceV1(item.evidence)
+    : parseSourceNpmPublishReconciliationEvidence(item.evidence)
+  if ((item.schemaVersion === 1 && evidence.kind !== 'publish-reconciliation')
+    || (item.schemaVersion === 2 && evidence.kind !== 'npm-publish-reconciliation')) {
+    throw new ControlPlaneStoreError('invalid-input', 'publish reconciliation receipt schema and evidence kind disagree')
+  }
+  const receipt = { schemaVersion: item.schemaVersion, kind: 'dsh-source-publish-reconciliation-receipt' as const,
     receiptId: text(item.receiptId, 'receiptId'), authority: text(item.authority, 'authority'), keyId: text(item.keyId, 'keyId'),
     installationId: text(item.installationId, 'installationId', /^[a-f0-9-]{36}$/u), planId: text(item.planId, 'planId'),
     planDigest: digestText(item.planDigest, 'planDigest'), releaseId: text(item.releaseId, 'releaseId'), fence: integer(item.fence, 'fence', 1),
     operationId: text(item.operationId, 'operationId'), requestDigest: digestText(item.requestDigest, 'requestDigest'), evidence,
     evidenceDigest: digestText(item.evidenceDigest, 'evidenceDigest'), observedAt: integer(item.observedAt, 'observedAt'),
-    expiresAt: integer(item.expiresAt, 'expiresAt'), signature: signature(item.signature, 'publish reconciliation receipt signature') }
+    expiresAt: integer(item.expiresAt, 'expiresAt'), signature: signature(item.signature, 'publish reconciliation receipt signature') } as SourcePublishReconciliationReceipt
   if (receipt.expiresAt <= receipt.observedAt || receipt.evidenceDigest !== sourcePublishReconciliationEvidenceDigest(evidence)) {
     throw new ControlPlaneStoreError('invalid-input', 'publish reconciliation evidence digest or validity interval is invalid')
   }
@@ -356,8 +430,23 @@ function canonicalReconciliationReceipt(receipt: SourcePublishReconciliationRece
   return canonical(fields)
 }
 
-export function sourcePublishReconciliationSigningPayload(receipt: Omit<SourcePublishReconciliationReceipt, 'signature'>): string {
+export function sourcePublishReconciliationSigningPayload(receipt: Omit<SourcePublishReconciliationReceiptV1, 'signature'>
+  | Omit<SourceNpmPublishReconciliationReceipt, 'signature'> | Omit<SourcePublishReconciliationReceipt, 'signature'>): string {
   return canonicalReconciliationReceipt({ ...receipt, signature: '' })
+}
+
+function npmRegistryBase(locator: string): URL {
+  const raw = bareHttpsUrl(locator, 'registry.locator')
+  const parsed = new URL(raw)
+  if (!parsed.pathname.endsWith('/')) parsed.pathname = `${parsed.pathname}/`
+  return parsed
+}
+
+function npmUrlUnderBase(reference: string, base: URL, label: string): void {
+  const parsed = new URL(reference)
+  if (parsed.origin !== base.origin || !parsed.pathname.startsWith(base.pathname)) {
+    throw new ControlPlaneStoreError('conflict', `${label} is not under the configured npm registry`)
+  }
 }
 
 export class Ed25519SourcePublishReconciliationAuthority implements SourcePublishReconciliationAuthority {
@@ -381,8 +470,9 @@ export class Ed25519SourcePublishReconciliationAuthority implements SourcePublis
       || evidence.expectedTarballIntegrity !== request.artifact.tarballIntegrity
       || evidence.expectedArtifactStatementDigest !== request.expectedArtifactStatementDigest
       || evidence.expectedArtifactSignatureDigest !== request.expectedArtifactSignatureDigest
-      || (evidence.outcome === 'exists-match' && (evidence.observedArtifactStatementDigest !== request.expectedArtifactStatementDigest
-        || evidence.observedArtifactSignatureDigest !== request.expectedArtifactSignatureDigest))
+      || (evidence.kind === 'publish-reconciliation' && evidence.outcome === 'exists-match'
+        && (evidence.observedArtifactStatementDigest !== request.expectedArtifactStatementDigest
+          || evidence.observedArtifactSignatureDigest !== request.expectedArtifactSignatureDigest))
       || evidence.ambiguousPublishOperationId !== request.ambiguousPublish.operationId
       || evidence.ambiguousPublishReceiptDigest !== request.ambiguousPublish.receiptDigest
       || (evidence.registryReference !== null && evidence.registryReference !== request.expectedRegistryReference)) {
@@ -392,6 +482,16 @@ export class Ed25519SourcePublishReconciliationAuthority implements SourcePublis
       || now > request.authorization.expiresAt || receipt.expiresAt > request.authorization.expiresAt
       || receipt.expiresAt - receipt.observedAt > request.receiptTtlMs) {
       throw new ControlPlaneStoreError('expired', 'publish reconciliation receipt is outside its request-bound validity interval')
+    }
+    if (evidence.kind === 'npm-publish-reconciliation') {
+      const base = npmRegistryBase(request.registry.locator)
+      const metadataReference = `${base.href}${encodeURIComponent(request.artifact.packageName)}/${request.artifact.packageVersion}`
+      if (evidence.registryReference !== null) npmUrlUnderBase(evidence.registryReference, base, 'registryReference')
+      if (evidence.metadataReference !== null) npmUrlUnderBase(evidence.metadataReference, base, 'metadataReference')
+      if ((evidence.registryReference !== null && evidence.registryReference !== request.expectedRegistryReference)
+        || (evidence.metadataReference !== null && evidence.metadataReference !== metadataReference)) {
+        throw new ControlPlaneStoreError('conflict', 'npm reconciliation receipt is not bound to the exact npm registry URLs')
+      }
     }
     const signatureBytes = Buffer.from(receipt.signature, 'base64')
     if (!verify(null, Buffer.from(canonicalReconciliationReceipt(receipt)), createPublicKey(this.publicKey), signatureBytes)) {
