@@ -4,6 +4,16 @@
 
 This repository is a pnpm monorepo of independently publishable DeepSeek Harness plugins. DSH composes a profile from bundle patch layers; each package under `plugins/*` must therefore remain a self-contained installable bundle, while `packages/*` contains ordinary shared libraries that are never auto-enabled.
 
+## Self-iteration principles
+
+- Build a self-iterating DSH tool/plugin agent. Models are replaceable suppliers; agent identity, history, and versioned capabilities must survive supplier changes. Freeze the approved supplier, budget, and acceptance contract per run.
+- Reuse DSH's native agent loop and Cordis composition, injection, effects, and reload lifecycle. Connect task feedback → candidate skill/tool/plugin → independent verification → bounded rollout → observation/rollback; avoid duplicate loops or goal state machines.
+- Keep acceptance rules and held-out tasks outside candidate write authority. Promote from fresh, independently checked outcomes; model self-ratings and successful tool exits alone do not establish success.
+- Prove improvement through reuse on new tasks: compare baseline and candidate on a fixed, versioned task set with the same supplier and budget; record quality, cost, latency, and regressions. Retain failed attempts as evidence.
+- Link actions and peer claims to agent/run identity, capability versions, and original evidence. Combine pre-action policy with post-action observation; keep changes bounded and reversible, reconcile unknown outcomes before retrying, and stay within existing owner authorization.
+
+Rationale and development priorities: [research note](docs/research-dsh-plugin-self-iteration-2026-09-19.md).
+
 ## Start here
 
 1. Read [docs/creating-a-plugin.md](docs/creating-a-plugin.md) when adding or restructuring a plugin. The step is complete when its package, patch, tests, README, and catalog row all exist.
