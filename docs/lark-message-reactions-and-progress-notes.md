@@ -205,75 +205,11 @@ OpenClaw 的飞书扩展具有独立的 reaction 模块：添加时返回并保�
 
 但它使用 `/open-apis/im/v1/message_cot` 原始路径并直接转发 `reasoning-delta` 和工具信息，见 [`runtime.ts`](https://github.com/omdsh-dev/dsh-lark/blob/632807d9abafbb866a5e208a0298eff21c7856d1/src/runtime.ts#L30-L33)。该端点未出现在本次核对到的飞书公开 Node/Channel SDK 文档中，因此不应作为首版的稳定依赖；其原始推理内容策略也不应照搬。应只借鉴传输与状态管理架构，将载荷替换为经过安全映射的 `ProgressSnapshot`。
 
-## 5. 推荐落地架构
+## 当前维护入口
 
-### 5.1 Reaction lifecycle service
+旧架构提案、未采用的配置样例和阶段验收清单已移除。当前实现使用原生 `message_cot` 与 best-effort reaction；最终回复由 Delivery Outbox 结算，飞书接受回复后才添加 `DONE`。私聊详情受 Delivery 授权和脱敏限长约束，群聊只显示状态；任何会话均不外发 reasoning/thinking。
 
-新增一个只接受强类型操作的内部服务，不向模型暴露任意 reaction API：
+- [配置与权限](../plugins/lark-channel/README.md)、[应用安装](../plugins/lark-channel/docs/setup.md)。
+- [进度安全边界](../plugins/lark-channel/docs/progress-security.md)、[运行与排障](../plugins/lark-channel/docs/operations.md)。
 
-```ts
-type ReactionPhase = "accepted" | "completed";
-
-type ReactionIntent = {
-  accountId: string;
-  messageId: string;
-  sourceEventId: string;
-  phase: ReactionPhase;
-};
-```
-
-服务内部映射：`accepted -> Get`、`completed -> DONE`，并持久化：
-
-- 幂等键：`accountId/messageId/phase`；
-- 创建返回的 `reaction_id`；
-- `pending/succeeded/failed-permanent` 状态、尝试次数和最后错误；
-- 是否允许重试以及下次执行时间。
-
-应在 `DeliveryAdapterContext.accept()` 返回 `duplicate=false` 后创建 `accepted` intent；`completed` intent 则由“任务成功且最终回答可靠入队/发送成功”的明确事件创建。网络调用异步执行，不应阻塞飞书 WebSocket 的事件处理时限。
-
-### 5.2 与 Delivery Outbox 的关系
-
-优先方案是扩展现有持久化投递体系，使同一会话 lane 能承载受限的 channel side effect：
-
-```text
-outbox: final reply
-outbox: reaction(DONE)
-```
-
-这样可以保证最终回答先于 `DONE`。如果暂时不扩展通用 Outbox，也至少要使用一个本地持久化 reaction job 表，而不是裸 `void client...create()`。
-
-进度更新不必全部持久化：只需保存卡片 ID、最新序号和终态；中间 snapshot 可以合并丢弃。最终回答和 `DONE` 不能依赖进度卡片是否成功。
-
-### 5.3 配置建议
-
-```yaml
-reactions:
-  enabled: true
-  acceptedEmoji: Get
-  completedEmoji: DONE
-  removeAcceptedOnComplete: false
-
-progress:
-  enabled: true
-  createDelayMs: 1200
-  updateThrottleMs: 1000
-  showPublicReasoningSummary: false
-  maxSteps: 8
-  maxSummaryChars: 500
-```
-
-`acceptedEmoji` / `completedEmoji` 即使暴露配置，也必须通过飞书表情白名单校验。`showPublicReasoningSummary` 默认关闭；开启后也只能接收供应商明确提供的公开 reasoning summary。
-
-## 6. 当前实现与后续验收清单
-
-- [x] 一键建应用加入 `im:message.reactions:write_only`，README 给出已有应用补权限/重新发布步骤。
-- [x] 收到合法且非重复的消息，Inbox 成功后只添加一次 `Get`；死信和重放不添加。
-- [x] 成功产生并由飞书接受最终回答后添加一次 `DONE`。
-- [x] 无最终回复、任务失败或最终回答发送失败时不添加 `DONE`。
-- [x] reaction 和原生进度失败不会阻断 agent 执行及最终回答。
-- [ ] 如果删除 `Get`，只按已保存的 `reaction_id` 删除自己的 reaction。
-- [ ] 覆盖 `231015`、限流、网络超时、消息撤回、机器人失权和进程重启。
-- [ ] 进度卡片更新经过节流与合并，终态只发生一次。
-- [x] 类型边界和测试保证不转发原始 CoT/reasoning、系统提示、工具参数/原始结果和凭据。
-- [x] 原生进度失败时，最终 Delivery Outbox 仍能发送完整答案。
-- [ ] 在真实已补 scope 的飞书应用上完成 `Get -> 安全进度 -> 最终回复 -> DONE` 端到端验收。
+上文 API 和第三方方案保留为历史设计依据，其中公开推理摘要、通用进度卡片和独立 reaction 账本的建议不代表现有接口或待实现承诺。真实租户验收须按当前配置执行，不能从旧清单推导。
