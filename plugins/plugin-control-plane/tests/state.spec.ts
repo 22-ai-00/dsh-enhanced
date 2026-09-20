@@ -986,6 +986,108 @@ catch { process.stdout.write('busy') } finally { db.close() }`
     database.close()
   })
 
+  test('migration marks an in-flight Host exposure for recovery without inventing mutable file pins', async () => {
+    const target = await fixture(); const approvedPlan = await approved(target, 'rollback-migration')
+    const claimed = await target.store.claimActivation(activationClaim(approvedPlan))
+    const awaiting = target.store.advanceActivation({ planId: claimed.id, expectedRevision: claimed.revision,
+      fence: claimed.activation!.fence, from: 'staging', to: 'awaiting-reload' })
+    const prepared = target.store.prepareHostAttestationOperation({ planId: awaiting.id, expectedRevision: awaiting.revision,
+      expectedFence: awaiting.activation!.fence, issuer: { mode: 'owner-manual' }, requirements: { kind: 'reload', previousHostGeneration: 0 }, receiptTtlMs: 10_000 })
+    target.store.close()
+    const raw = new DatabaseSync(target.path)
+    raw.exec(`PRAGMA foreign_keys = OFF; ALTER TABLE activation_plans DROP COLUMN activation_target_baseline_json;
+      ALTER TABLE activation_plans DROP COLUMN host_recovery_required; ALTER TABLE activation_plans DROP COLUMN rollback_profile_restored;
+      ALTER TABLE host_attestations RENAME TO host_attestations_new;
+      CREATE TABLE host_attestations (plan_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health')),
+      receipt_id TEXT NOT NULL UNIQUE, receipt_digest TEXT NOT NULL, receipt_json TEXT NOT NULL, host_generation INTEGER NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(plan_id, phase)) STRICT, WITHOUT ROWID;
+      INSERT INTO host_attestations SELECT * FROM host_attestations_new; DROP TABLE host_attestations_new; ALTER TABLE host_attestation_operations RENAME TO host_attestation_operations_new;
+      CREATE TABLE host_attestation_operations (plan_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health')),
+      operation_id TEXT NOT NULL UNIQUE, binding_digest TEXT NOT NULL, request_digest TEXT NOT NULL, request_json TEXT NOT NULL, status TEXT NOT NULL,
+      receipt_digest TEXT, receipt_json TEXT, created_at INTEGER NOT NULL, completed_at INTEGER, applied_at INTEGER, PRIMARY KEY(plan_id, phase)) STRICT, WITHOUT ROWID;
+      INSERT INTO host_attestation_operations SELECT * FROM host_attestation_operations_new; DROP TABLE host_attestation_operations_new; PRAGMA user_version = 14; PRAGMA foreign_keys = ON`)
+    raw.close()
+    const reopened = new ControlPlaneStore({ path: target.path, now: target.now }); target.store = reopened
+    expect(reopened.getPlan(awaiting.id).activation).toMatchObject({ hostRecoveryRequired: true })
+    expect(reopened.getPlan(awaiting.id).activation?.targetBaselineFiles).toBeUndefined()
+    const migrated = new DatabaseSync(target.path)
+    expect((migrated.prepare("SELECT sql FROM sqlite_master WHERE name = 'host_attestations'").get() as { sql: string }).sql).toContain("'rollback'")
+    expect(migrated.prepare('SELECT operation_id, status FROM host_attestation_operations WHERE operation_id = ?').get(prepared.operationId))
+      .toEqual({ operation_id: prepared.operationId, status: 'pending' })
+    migrated.close()
+  })
+
+  test('requires a marked, signed physical rollback and reopens the gap exactly once', async () => {
+    const target = await fixture(); const host = hostTrustKey(target.now); const approvedPlan = await approved(target, 'physical-rollback')
+    let plan = await target.store.claimActivation(activationClaim(approvedPlan))
+    const baselineFiles = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(name => ({ path: join(plan.target.profilePath, name), sha256: null }))
+    plan = target.store.recordActivationTargetBaseline({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, existed: true, baselineFiles })
+    plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, from: 'staging', to: 'awaiting-reload' })
+    const reload = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+      issuer: { mode: 'owner-manual' }, requirements: { kind: 'reload', previousHostGeneration: 0 }, receiptTtlMs: 10_000 })
+    const failedEvidence = { kind: 'reload' as const, reloaded: false, previousHostGeneration: 0, currentHostGeneration: 1, probeDigest: 'a'.repeat(64) }
+    const failedUnsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'rollback-failed-reload', authority: 'host-runtime', keyId: 'host-key-1', installationId,
+      planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: reload.operationId, requestDigest: reload.requestDigest,
+      phase: 'reload', outcome: 'failed', hostGeneration: 1, evidence: failedEvidence, evidenceDigest: hostAttestationEvidenceDigest(failedEvidence), observedAt: target.now(), expiresAt: target.now() + 10_000 }
+    const failedReload: HostAttestationReceipt = { ...failedUnsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(failedUnsigned)), host.privateKey).toString('base64') }
+    await target.store.runHostAttestationOperation({ operationId: reload.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => failedReload, resolveAuthority: () => host.authority })
+    plan = (await target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt: failedReload, resolveAuthority: () => host.authority, idempotencyKey: 'rollback:failed-reload' })).result
+    expect(plan).toMatchObject({ status: 'rollback-pending', activation: { hostRecoveryRequired: true, failureCode: 'host-attestation-failed' } })
+    expect(() => target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, from: 'rollback-pending', to: 'rolled-back' })).toThrow()
+    expect(() => target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' },
+      requirements: { kind: 'rollback', previousHostGeneration: 1, action: 'restore', baselineFiles, minimumChecks: 1 }, receiptTtlMs: 10_000 })).toThrow('durably restored')
+    plan = await target.store.claimActivation(activationClaim(plan))
+    expect(() => target.store.markRollbackProfileRestored({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence + 1 })).toThrow()
+    plan = target.store.markRollbackProfileRestored({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence })
+    await expect(target.store.claimActivation(activationClaim(plan))).rejects.toThrow('physical Host rollback')
+    expect(() => target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' },
+      requirements: { kind: 'rollback', previousHostGeneration: 1, action: 'stop', baselineFiles, minimumChecks: 1 }, receiptTtlMs: 10_000 })).toThrow('baseline')
+    expect(() => target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' },
+      requirements: { kind: 'rollback', previousHostGeneration: 1, action: 'restore', baselineFiles: [...baselineFiles.slice(0, 2), { ...baselineFiles[2]!, sha256: 'c'.repeat(64) }], minimumChecks: 1 }, receiptTtlMs: 10_000 })).toThrow('baseline')
+    const recovery = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' },
+      requirements: { kind: 'rollback', previousHostGeneration: 1, action: 'restore', baselineFiles, minimumChecks: 1 }, receiptTtlMs: 10_000 })
+    const evidence = { kind: 'rollback' as const, action: 'restore' as const, previousHostGeneration: 1, currentHostGeneration: 2, checks: 1, failures: 0, profileRestored: true, probeDigest: 'b'.repeat(64) }
+    const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'rollback-restored', authority: 'host-runtime', keyId: 'host-key-1', installationId,
+      planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: recovery.operationId, requestDigest: recovery.requestDigest,
+      phase: 'rollback', outcome: 'passed', hostGeneration: 2, evidence, evidenceDigest: hostAttestationEvidenceDigest(evidence), observedAt: target.now(), expiresAt: target.now() + 10_000 }
+    const receipt: HostAttestationReceipt = { ...unsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), host.privateKey).toString('base64') }
+    const failedRecoveryUnsigned = { ...unsigned, receiptId: 'rollback-recovery-failed', outcome: 'failed' as const }
+    const failedRecovery: HostAttestationReceipt = { ...failedRecoveryUnsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(failedRecoveryUnsigned)), host.privateKey).toString('base64') }
+    await expect(target.store.runHostAttestationOperation({ operationId: recovery.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+      execute: async () => failedRecovery, resolveAuthority: () => host.authority })).rejects.toThrow('cannot consume')
+    expect(target.store.getHostAttestationOperation(recovery.operationId).status).toBe('pending')
+    await target.store.runHostAttestationOperation({ operationId: recovery.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })
+    const applied = await target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt, resolveAuthority: () => host.authority, idempotencyKey: 'rollback:restore' })
+    expect(applied.result).toMatchObject({ status: 'rolled-back', activation: { failureCode: 'host-attestation-failed' } })
+    expect(target.store.getGap(plan.gapId).status).toBe('open')
+    target.store.close(); const reopened = new ControlPlaneStore({ path: target.path, now: target.now }); target.store = reopened
+    await expect(reopened.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt,
+      resolveAuthority: () => { throw new Error('replay must not verify') }, idempotencyKey: 'rollback:restore' })).resolves.toEqual(applied)
+  })
+
+  test('accepts only a signed stop recovery for an originally absent profile', async () => {
+    const target = await fixture(); const host = hostTrustKey(target.now); const approvedPlan = await approved(target, 'physical-stop')
+    const claimed = await target.store.claimActivation(activationClaim(approvedPlan)); target.store.close()
+    const raw = new DatabaseSync(target.path)
+    raw.prepare(`UPDATE activation_plans SET status = 'rollback-pending', activation_target_existed = 0, activation_target_baseline_json = '[]', host_recovery_required = 1,
+      activation_lease_until = ?, failure_code = 'host-attestation-failed' WHERE id = ?`).run(target.now() + 5_000, claimed.id); raw.close()
+    const store = new ControlPlaneStore({ path: target.path, now: target.now }); target.store = store
+    let plan = store.getPlan(claimed.id)
+    target.setNow(target.now() + 5_001)
+    expect(() => store.markRollbackProfileRestored({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence })).toThrow('lost')
+    plan = await store.claimActivation(activationClaim(plan))
+    plan = store.markRollbackProfileRestored({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence })
+    const operation = store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' },
+      requirements: { kind: 'rollback', previousHostGeneration: 0, action: 'stop', baselineFiles: [], minimumChecks: 1 }, receiptTtlMs: 10_000 })
+    const evidence = { kind: 'rollback' as const, action: 'stop' as const, previousHostGeneration: 0, currentHostGeneration: 1, checks: 1, failures: 0, profileRestored: true, probeDigest: 'd'.repeat(64) }
+    const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'rollback-stop', authority: 'host-runtime', keyId: 'host-key-1', installationId,
+      planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: operation.operationId, requestDigest: operation.requestDigest,
+      phase: 'rollback', outcome: 'passed', hostGeneration: 1, evidence, evidenceDigest: hostAttestationEvidenceDigest(evidence), observedAt: target.now(), expiresAt: target.now() + 10_000 }
+    const receipt: HostAttestationReceipt = { ...unsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), host.privateKey).toString('base64') }
+    await store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })
+    expect((await store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt,
+      resolveAuthority: () => host.authority, idempotencyKey: 'rollback:stop' })).result.status).toBe('rolled-back')
+  })
+
   test('rejects coordinated activation approval-row tampering before allocating an activation fence', async () => {
     const target = await fixture(); const approvedPlan = await approved(target, 'approval-row-tamper')
     target.store.close(); const database = new DatabaseSync(target.path)

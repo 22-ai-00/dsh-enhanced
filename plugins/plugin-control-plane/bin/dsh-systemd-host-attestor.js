@@ -1,12 +1,12 @@
 #!/usr/bin/node
 // Owner-operated supervisor boundary. This executable never runs in the Host Fiber.
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto'
-import { closeSync, constants as F, existsSync, fsyncSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync } from 'node:fs'
+import { closeSync, constants as F, existsSync, fsyncSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statfsSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
-export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-3'
+export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-4'
 const DIGEST = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const UNIT_PROPERTIES = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory', 'User', 'Group', 'Type', 'KillMode']
@@ -74,24 +74,48 @@ function pin(spec, label, executable = false) {
   if (executable && (lstatSync(spec.path).mode & 0o111) === 0) fail(`${label} is not executable`)
   return spec
 }
+function baselinePin(spec) {
+  object(spec, ['path', 'sha256'], 'baseline pin')
+  if (spec.sha256 !== null) return pin(spec, 'baseline file')
+  text(spec.path, 'absent baseline path')
+  if (!isAbsolute(spec.path) || resolve(spec.path) !== spec.path) fail('absent baseline path is invalid')
+  canonicalPath(dirname(spec.path), 'baseline parent')
+  try { lstatSync(spec.path) } catch (error) { if (error.code === 'ENOENT') return spec; throw error }
+  fail('originally absent baseline file exists')
+}
 function runningHash(path) {
   const match = path.match(/^\/proc\/self\/fd\/(\d+)$/u)
   return hash(match ? descriptorBytes(Number(match[1]), 268435456) : readSafe(path, 268435456))
 }
 function parseJson(bytes, label) { try { return JSON.parse(bytes.toString('utf8')) } catch { fail(`${label} JSON is invalid`) } }
 
+function assertAbsentProfile(path) {
+  text(path, 'absent profile')
+  if (!isAbsolute(path) || resolve(path) !== path || path === '/') fail('absent profile path is invalid')
+  canonicalPath(dirname(path), 'profile parent')
+  try { lstatSync(path) } catch (error) { if (error.code === 'ENOENT') return; throw error }
+  fail('originally absent profile still exists')
+}
+function validateReadiness(ready, profilePath, withReload) {
+  object(ready, ['client', 'observer', 'deploymentFiles', ...(withReload ? ['reloadOperationId'] : [])], 'readiness')
+  pin(ready.client, 'observer client')
+  if (!Array.isArray(ready.deploymentFiles) || !ready.deploymentFiles.length || ready.deploymentFiles.length > 128) fail('deployment pins required')
+  for (const spec of ready.deploymentFiles) pin(spec, 'deployment file')
+  if (new Set(ready.deploymentFiles.map(spec => spec.path)).size !== ready.deploymentFiles.length) fail('duplicate deployment pin')
+  if (ready.observer?.profilePath !== profilePath) fail('observer profile differs')
+}
 function loadConfig(environment, request) {
   const config = parseJson(readSafe(environment.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG, 65536, true), 'config')
   object(config, ['schemaVersion', 'authority', 'keyId', 'privateKeyPath', 'stateRoot', 'executable', 'interpreter', 'processHelper',
     'systemctl', 'scope', 'unit', 'unitProperties', 'profileFiles', 'authorization', 'timeoutMs', 'stableWindowMs', 'pollIntervalMs',
-    ...(config.schemaVersion === 2 ? ['readiness'] : [])], 'config')
-  if (![1, 2].includes(config.schemaVersion)) fail('config schema is unsupported')
+    ...([2, 3].includes(config.schemaVersion) ? ['readiness'] : [])], 'config')
+  if (![1, 2, 3].includes(config.schemaVersion)) fail('config schema is unsupported')
   text(config.authority, 'authority', ID); text(config.keyId, 'keyId', ID)
   integer(config.timeoutMs, 'timeout', 1000, 60000); integer(config.stableWindowMs, 'stable window', 50, 10000)
   integer(config.pollIntervalMs, 'poll interval', 25, 1000)
   if (config.stableWindowMs + config.pollIntervalMs >= config.timeoutMs) fail('window exceeds deadline')
   if (!['user', 'system'].includes(config.scope)) fail('unsupported supervisor scope')
-  const auth = object(config.authorization, ['installationId', 'ledger', 'profile', 'plan', 'activation', config.schemaVersion === 1 ? 'previousHostGeneration' : 'hostGeneration', 'requestDigest', 'notBefore', 'expiresAt'], 'authorization')
+  const auth = object(config.authorization, ['installationId', 'ledger', 'profile', 'plan', 'activation', config.schemaVersion === 2 ? 'hostGeneration' : 'previousHostGeneration', 'requestDigest', 'notBefore', 'expiresAt'], 'authorization')
   text(auth.requestDigest, 'authorized request digest', DIGEST)
   if (digest(request) !== auth.requestDigest) fail('exact request is not authorized')
   object(auth.ledger, ['id', 'path'], 'ledger'); object(auth.profile, ['name', 'path'], 'profile')
@@ -99,22 +123,25 @@ function loadConfig(environment, request) {
   text(auth.installationId, 'installation', /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u)
   for (const value of [auth.ledger.id, auth.plan.id, auth.activation.id]) text(value, 'identity', ID)
   text(auth.plan.digest, 'plan digest', DIGEST); text(auth.profile.name, 'profile name', /^[a-z0-9][a-z0-9-]{0,63}$/u)
-  canonicalPath(auth.profile.path, 'profile'); canonicalPath(auth.ledger.path, 'ledger')
+  if (config.schemaVersion === 3 && request.requirements?.action === 'stop') assertAbsentProfile(auth.profile.path)
+  else canonicalPath(auth.profile.path, 'profile')
+  canonicalPath(auth.ledger.path, 'ledger')
   if (basename(auth.profile.path) !== auth.profile.name || basename(dirname(auth.profile.path)) !== 'profiles') fail('profile path and name differ')
   integer(auth.activation.fence, 'fence', 1)
-  integer(config.schemaVersion === 1 ? auth.previousHostGeneration : auth.hostGeneration, 'authorized generation', config.schemaVersion === 1 ? 0 : 1, Number.MAX_SAFE_INTEGER - 1)
+  integer(config.schemaVersion === 2 ? auth.hostGeneration : auth.previousHostGeneration, 'authorized generation', config.schemaVersion === 2 ? 1 : 0, Number.MAX_SAFE_INTEGER - 1)
   integer(auth.notBefore, 'authorization start'); integer(auth.expiresAt, 'authorization expiry', auth.notBefore + 1)
   if (config.unit !== `dsh-profile-${auth.profile.name}.service`) fail('unit does not bind the profile')
   object(config.unitProperties, UNIT_PROPERTIES, 'unit properties')
   for (const property of UNIT_PROPERTIES) text(config.unitProperties[property], property)
   if (!['simple', 'exec', 'notify'].includes(config.unitProperties.Type) || config.unitProperties.KillMode !== 'control-group') fail('unsupported unit lifecycle')
-  if (!Array.isArray(config.profileFiles) || config.profileFiles.length < 3 || config.profileFiles.length > 32) fail('profile pins are invalid')
+  const stopping = config.schemaVersion === 3 && request.requirements?.action === 'stop'
+  if (!Array.isArray(config.profileFiles) || config.profileFiles.length < (stopping ? 0 : 3) || config.profileFiles.length > (stopping ? 0 : 32)) fail('profile pins are invalid')
   const paths = config.profileFiles.map(spec => {
-    pin(spec, 'profile file')
+    if (config.schemaVersion === 3) baselinePin(spec); else pin(spec, 'profile file')
     if (!within(auth.profile.path, spec.path)) fail('profile pin is outside profile')
     return spec.path
   })
-  if (new Set(paths).size !== paths.length || !['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].every(name => paths.includes(join(auth.profile.path, name)))) fail('profile manifest, lockfile and patch pins are required')
+  if (new Set(paths).size !== paths.length || (!stopping && !['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].every(name => paths.includes(join(auth.profile.path, name))))) fail('profile manifest, lockfile and patch pins are required')
   privateDirectory(config.stateRoot)
   for (const path of [environment.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG, config.privateKeyPath, config.stateRoot]) {
     if (within(auth.profile.path, path)) fail('attestor authority must be outside the candidate profile')
@@ -128,10 +155,21 @@ function loadConfig(environment, request) {
   if (config.systemctl.interpreter !== null) pin(config.systemctl.interpreter, 'systemctl interpreter', true)
   object(request, ['schemaVersion', 'kind', 'operationId', 'requestedAt', 'receiptTtlMs', 'installationId', 'ledger', 'plan', 'activation', 'profile', 'issuer', 'phase', 'requirements'], 'request')
   if (request.schemaVersion !== 1 || request.kind !== 'dsh-host-attestation-request'
-    || request.phase !== (config.schemaVersion === 1 ? 'reload' : 'readiness')) fail('phase does not match configured authority')
+    || request.phase !== (config.schemaVersion === 1 ? 'reload' : config.schemaVersion === 2 ? 'readiness' : 'rollback')) fail('phase does not match configured authority')
   if (config.schemaVersion === 1) {
     object(request.requirements, ['kind', 'previousHostGeneration'], 'requirements')
     if (request.requirements.kind !== 'reload' || request.requirements.previousHostGeneration !== auth.previousHostGeneration) fail('generation is not authorized')
+  } else if (config.schemaVersion === 3) {
+    const requirements = object(request.requirements, ['kind', 'previousHostGeneration', 'action', 'baselineFiles', 'minimumChecks'], 'rollback requirements')
+    if (requirements.kind !== 'rollback' || !['restore', 'stop'].includes(requirements.action)
+      || requirements.previousHostGeneration !== auth.previousHostGeneration
+      || canonical(requirements.baselineFiles) !== canonical(config.profileFiles)) fail('rollback baseline or action is not authorized')
+    integer(requirements.minimumChecks, 'minimum checks', 1, 256)
+    if (stopping) { if (config.readiness !== null) fail('stop cannot request runtime readiness') }
+    else {
+      if (config.profileFiles.length !== 3) fail('rollback requires exactly three baseline pins')
+      validateReadiness(config.readiness, auth.profile.path, false)
+    }
   } else {
     object(request.requirements, ['kind', 'minimumChecks'], 'requirements')
     if (request.requirements.kind !== 'readiness') fail('readiness requirements required')
@@ -161,7 +199,8 @@ function assertCurrent(config, request) {
   if (request.requestedAt < auth.notBefore || request.requestedAt > now || now > auth.expiresAt) fail('authorization expired or not yet valid')
 }
 function assertProfile(config) {
-  for (const spec of config.profileFiles) pin(spec, 'profile file')
+  if (config.schemaVersion === 3 && config.readiness === null) assertAbsentProfile(config.authorization.profile.path)
+  for (const spec of config.profileFiles) { if (config.schemaVersion === 3) baselinePin(spec); else pin(spec, 'profile file') }
   for (const spec of config.readiness?.deploymentFiles ?? []) pin(spec, 'deployment file')
 }
 function remaining(deadline) { const value = Math.floor(deadline - performance.now()); if (value <= 0) fail('observation deadline exceeded; outcome needs reconciliation'); return value }
@@ -193,8 +232,8 @@ async function command(config, execute, args, deadline) {
     return result
   } finally { for (const fd of descriptors) closeSync(fd) }
 }
-async function observe(config, execute, deadline) {
-  const keys = [...STATUS_PROPERTIES, ...UNIT_PROPERTIES]
+async function observe(config, execute, deadline, allowRemoved = false) {
+  const keys = [...STATUS_PROPERTIES, ...UNIT_PROPERTIES, ...(config.schemaVersion === 3 ? ['Job'] : [])]
   const source = await command(config, execute, ['show', config.unit, '--no-pager', ...keys.map(key => `--property=${key}`)], deadline)
   const fields = {}
   for (const line of source.trimEnd().split('\n')) {
@@ -202,15 +241,24 @@ async function observe(config, execute, deadline) {
     if (separator < 0 || !keys.includes(key) || Object.hasOwn(fields, key)) fail('invalid or duplicate supervisor property')
     fields[key] = line.slice(separator + 1)
   }
+  const removed = allowRemoved && config.schemaVersion === 3 && config.readiness === null && fields.LoadState === 'not-found'
+  // systemd omits service-only properties once a transient unit is unloaded.
+  if (removed) for (const key of UNIT_PROPERTIES) if (!Object.hasOwn(fields, key)) fields[key] = ''
   object(fields, keys, 'supervisor observation')
-  if (fields.Id !== config.unit || fields.LoadState !== 'loaded') fail('unit identity or load state changed')
-  fields.ExecStart = normalizeExecStart(fields.ExecStart)
-  for (const key of UNIT_PROPERTIES) if (fields[key] !== config.unitProperties[key]) fail('effective unit configuration drifted')
+  if (fields.Id !== config.unit || (!removed && fields.LoadState !== 'loaded')) fail('unit identity or load state changed')
+  if (removed) {
+    if (fields.ActiveState !== 'inactive' || fields.SubState !== 'dead' || fields.MainPID !== '0'
+      || fields.ControlPID !== '0' || fields.ControlGroup !== '' || !['', '0'].includes(fields.Job)) fail('removed unit retains runtime state')
+  } else {
+    fields.ExecStart = normalizeExecStart(fields.ExecStart)
+    for (const key of UNIT_PROPERTIES) if (fields[key] !== config.unitProperties[key]) fail('effective unit configuration drifted')
+  }
   for (const key of ['MainPID', 'ControlPID', 'NRestarts']) {
     if (!/^(0|[1-9]\d*)$/u.test(fields[key])) fail('invalid supervisor counter')
     fields[key] = integer(Number(fields[key]), key)
   }
-  if (!/^\/[A-Za-z0-9_.@:/\\-]+$/u.test(fields.ControlGroup) || fields.ControlGroup.includes('..')) fail('invalid unit cgroup')
+  if (!(config.schemaVersion === 3 && fields.ControlGroup === '' && fields.MainPID === 0 && fields.ControlPID === 0)
+    && (!/^\/[A-Za-z0-9_.@:/\\-]+$/u.test(fields.ControlGroup) || fields.ControlGroup.includes('..'))) fail('invalid unit cgroup')
   const memberships = readFileSync('/proc/self/cgroup', 'utf8').trim().split('\n')
   let ownHierarchyObserved = false
   for (const line of memberships) {
@@ -218,10 +266,11 @@ async function observe(config, execute, deadline) {
     if (match && (match[1] === '' || match[1].split(',').includes('name=systemd'))) {
       if (!match[2].startsWith('/') || match[2].includes('..')) fail('cannot establish attestor cgroup membership')
       ownHierarchyObserved = true
-      if (within(fields.ControlGroup, match[2])) fail('attestor must run outside the target service cgroup')
+      if (fields.ControlGroup && within(fields.ControlGroup, match[2])) fail('attestor must run outside the target service cgroup')
     }
   }
   if (!ownHierarchyObserved) fail('cannot establish attestor cgroup membership')
+  if (config.schemaVersion === 3 && !['', '0'].includes(fields.Job)) fail('unit has an unsettled supervisor job')
   assertProfile(config)
   return fields
 }
@@ -382,6 +431,178 @@ async function attestReadiness(request, config, privateKey, db, execute, deadlin
     return cachedReceipt(db.prepare('SELECT * FROM readiness WHERE operation_id = ?').get(request.operationId), request, config, privateKey)
   })
 }
+function assertRetiredProcess(prior) {
+  if (prior.MainPID === 0) return
+  try { process.kill(prior.MainPID, 0) } catch (error) { if (error.code === 'ESRCH') return; throw error }
+  fail('prior Host process still exists')
+}
+function visibleCgroupMount(path) {
+  const unified = statfsSync('/sys/fs/cgroup').type === 0x63677270
+  const root = unified ? '/sys/fs/cgroup' : '/sys/fs/cgroup/systemd'
+  if (!unified && statfsSync(root).type !== 0x27e0eb) fail('systemd cgroup mount is unavailable')
+  const own = readFileSync('/proc/self/cgroup', 'utf8').trim().split('\n')
+    .map(line => line.match(/^\d+:([^:]*):(.*)$/u)).find(match => match && (unified ? match[1] === '' : match[1].split(',').includes('name=systemd')))?.[2]
+  if (!own || !own.startsWith('/') || own.includes('..')) fail('cannot map attestor cgroup hierarchy')
+  const parent = dirname(path)
+  if (own === '/' && parent === '/') fail('root-only cgroup namespace cannot prove target visibility')
+  const members = readFileSync(join(root, own, unified ? 'cgroup.procs' : 'tasks'), 'utf8').trim().split('\n')
+  if (!members.includes(String(process.pid))) fail('cgroup mount does not map the attestor process')
+  const anchor = join(root, parent)
+  if (realpathSync(anchor) !== anchor || !lstatSync(anchor).isDirectory()
+    || statfsSync(anchor).type !== statfsSync(root).type) fail('target cgroup parent is not visible on the supervisor hierarchy')
+  return { root, unified }
+}
+function assertEmptyCgroup(path) {
+  if (!path) return
+  // Only actual kernel cgroup mounts count as evidence. cgroup v2 populated
+  // covers descendants; legacy systemd uses its named v1 hierarchy instead.
+  const { root, unified } = visibleCgroupMount(path)
+  if (unified) {
+    let events
+    try { events = readFileSync(join(root, path, 'cgroup.events'), 'utf8') }
+    catch (error) { if (error.code === 'ENOENT') return; throw error }
+    if (events.length > 4096 || events.split('\n').filter(line => line === 'populated 0').length !== 1
+      || events.split('\n').some(line => line.startsWith('populated ') && line !== 'populated 0')) fail('stopped service retains cgroup processes')
+  } else {
+    let visited = 0
+    const visit = directory => {
+      if (++visited > 256) fail('systemd cgroup subtree exceeds bound')
+      let entries
+      try { entries = readdirSync(directory, { withFileTypes: true }) }
+      catch (error) { if (error.code === 'ENOENT') return; throw error }
+      if (readFileSync(join(directory, 'tasks'), 'utf8').trim()) fail('stopped service retains cgroup tasks')
+      for (const entry of entries) if (entry.isDirectory()) visit(join(directory, entry.name))
+    }
+    visit(join(root, path))
+  }
+}
+function latestRecovery(db, row) {
+  const latest = db.prepare('SELECT operation_id FROM reloads WHERE scope_id = ? ORDER BY generation DESC LIMIT 1').get(row.scope_id)
+  if (!latest || latest.operation_id !== row.operation_id) fail('recovery generation was superseded')
+}
+async function recoveryRuntime(config, request, successor, execute, deadline, retained) {
+  const ready = config.readiness
+  const bytes = readSafe(ready.client.path, 1048576)
+  if (hash(bytes) !== ready.client.sha256) fail('observer client changed')
+  const client = await import(`data:text/javascript;base64,${bytes.toString('base64')}`)
+  client.validateRuntimeObserverConfig(ready.observer)
+  const observerDigest = client.runtimeConfigDigest(ready.observer)
+  const channelDigest = hash(readSafe(ready.observer.keyPath, 32, true))
+  let runtime; let started; const samples = []; const challenges = new Set()
+  for (;;) {
+    assertCurrent(config, request); remaining(deadline)
+    if (canonical(await observe(config, execute, deadline)) !== canonical(successor)) fail('recovery supervisor changed')
+    if (hash(readSafe(ready.observer.keyPath, 32, true)) !== channelDigest) fail('observer key changed')
+    const queriedAt = Date.now()
+    // After restart the observer may still be starting. No observation failure
+    // becomes proof: only a complete later authenticated stable window counts.
+    let sample
+    try { sample = await client.queryRuntimeObserver({ ...ready.observer, signal: AbortSignal.timeout(remaining(deadline)) }) }
+    catch (error) {
+      if (runtime !== undefined) throw error
+      remaining(deadline)
+      await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(config.pollIntervalMs, remaining(deadline))))
+      continue
+    }
+    if (sample.profilePath !== request.profile.path || sample.observerConfigDigest !== observerDigest
+      || sample.processId !== successor.MainPID || sample.invocationId !== successor.InvocationID
+      || sample.observedAt < queriedAt || sample.observedAt > Date.now() || challenges.has(sample.challenge)
+      || sample.entries.length !== ready.observer.targets.length) fail('restored runtime identity differs')
+    challenges.add(sample.challenge)
+    for (const target of ready.observer.targets) {
+      const entry = sample.entries.find(item => item.entryId === target.entryId)
+      if (!entry || entry.module !== target.module || entry.configDigest !== target.configDigest || entry.active !== true
+        || !entry.instance || [...entry.dependencies, ...entry.services].some(service => !service.instance)
+        || canonical(entry.services.map(service => service.name).sort()) !== canonical([...target.services].sort())) fail('restored candidate is not ready')
+    }
+    const { challenge: _challenge, observedAt: _observedAt, ...identity } = sample
+    if (runtime === undefined) { runtime = identity; started = performance.now() }
+    else if (canonical(identity) !== canonical(runtime)) fail('restored runtime changed during observation')
+    if (retained && (canonical(identity) !== canonical(retained.runtime) || channelDigest !== retained.channelDigest)) fail('cached recovery runtime changed')
+    samples.push({ challenge: sample.challenge, observedAt: sample.observedAt, digest: digest(sample) })
+    if (canonical(await observe(config, execute, deadline)) !== canonical(successor)) fail('recovery supervisor changed during query')
+    if (samples.length >= Math.max(2, request.requirements.minimumChecks) && performance.now() - started >= config.stableWindowMs) break
+    if (samples.length >= 256) fail('recovery runtime sample limit exceeded')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(config.pollIntervalMs, remaining(deadline))))
+  }
+  if (hash(readSafe(ready.observer.keyPath, 32, true)) !== channelDigest) fail('observer key changed')
+  return { runtime, channelDigest, samples }
+}
+async function attestRollback(request, config, privateKey, db, execute, deadline) {
+  const existing = db.prepare('SELECT * FROM reloads WHERE operation_id = ?').get(request.operationId)
+  if (existing) { cachedReceipt(existing, request, config, privateKey); latestRecovery(db, existing) }
+  const observed = await observe(config, execute, deadline, Boolean(existing))
+  if (observed.ControlGroup) visibleCgroupMount(observed.ControlGroup)
+  const scopeId = digest({ installation: request.installationId })
+  const reserved = transaction(db, () => {
+    const row = db.prepare('SELECT * FROM reloads WHERE operation_id = ?').get(request.operationId)
+    if (row) { cachedReceipt(row, request, config, privateKey); latestRecovery(db, row); return { row, dispatch: false } }
+    const latest = db.prepare('SELECT * FROM reloads WHERE scope_id = ? ORDER BY generation DESC LIMIT 1').get(scopeId)
+    if (latest && (latest.receipt === null || latest.generation !== request.requirements.previousHostGeneration)) fail('previous generation is unresolved or stale')
+    const generation = request.requirements.previousHostGeneration + 1
+    const activationId = digest({ purpose: 'rollback', plan: request.plan, activation: request.activation })
+    db.prepare('INSERT INTO reloads(operation_id, request_digest, config_digest, scope_id, generation, activation_id, prior, request, config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(request.operationId, digest(request), digest(config), scopeId, generation, activationId, canonical(observed), canonical(request), canonical(config))
+    return { row: db.prepare('SELECT * FROM reloads WHERE operation_id = ?').get(request.operationId), dispatch: true }
+  })
+  const row = reserved.row; const prior = parseJson(Buffer.from(row.prior), 'prior recovery observation')
+  const cached = cachedReceipt(row, request, config, privateKey)
+  const retained = cached ? parseJson(Buffer.from(row.observation), 'cached recovery observation') : undefined
+  if (retained && cached.evidence.probeDigest !== digest(retained)) fail('cached recovery observation differs')
+  if (reserved.dispatch) {
+    syncDirectory(config.stateRoot); assertCurrent(config, request); assertProfile(config); latestRecovery(db, row)
+    await command(config, execute, [request.requirements.action === 'restore' ? 'restart' : 'stop', config.unit, '--no-ask-password', '--job-mode=fail'], deadline)
+  }
+  let successor; let stableAt; let samples = 0
+  for (;;) {
+    assertCurrent(config, request); remaining(deadline); latestRecovery(db, row)
+    const current = await observe(config, execute, deadline, true)
+    const settled = request.requirements.action === 'restore'
+      ? active(current) && current.InvocationID !== prior.InvocationID && current.MainPID !== prior.MainPID
+      : current.ActiveState === 'inactive' && current.SubState === 'dead' && current.MainPID === 0 && current.ControlPID === 0
+    if (settled) {
+      assertRetiredProcess(prior)
+      if (request.requirements.action === 'stop') { assertEmptyCgroup(prior.ControlGroup); assertEmptyCgroup(current.ControlGroup) }
+      if (successor === undefined) { successor = current; stableAt = performance.now() }
+      else if (canonical(successor) !== canonical(current)) fail('recovered supervisor changed during observation')
+      if (retained && canonical(current) !== canonical(retained.successor)) fail('cached recovery supervisor changed')
+      samples++
+      if (samples >= Math.max(2, request.requirements.minimumChecks) && performance.now() - stableAt >= config.stableWindowMs) break
+    } else if (successor !== undefined || cached) fail('recovered supervisor is no longer settled')
+    if (samples >= 256) fail('recovery supervisor sample limit exceeded')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(config.pollIntervalMs, remaining(deadline))))
+  }
+  const runtime = request.requirements.action === 'restore'
+    ? await recoveryRuntime(config, request, successor, execute, deadline, retained?.runtimeObservation) : null
+  assertRetiredProcess(prior); assertProfile(config); assertCurrent(config, request); remaining(deadline)
+  const observation = { schemaVersion: 1, requestDigest: digest(request), configDigest: digest(config), prior, successor,
+    samples, runtimeObservation: runtime, stableWindowMs: config.stableWindowMs, observedAt: Date.now() }
+  const evidence = { kind: 'rollback', action: request.requirements.action, previousHostGeneration: request.requirements.previousHostGeneration,
+    currentHostGeneration: row.generation, checks: runtime?.samples.length ?? samples, failures: 0, profileRestored: true, probeDigest: digest(observation) }
+  const unsigned = { schemaVersion: 2, receiptId: `receipt:${request.operationId}`, authority: config.authority, keyId: config.keyId,
+    installationId: request.installationId, planId: request.plan.id, planDigest: request.plan.digest,
+    activationId: request.activation.id, fence: request.activation.fence, operationId: request.operationId,
+    requestDigest: digest(request), phase: 'rollback', outcome: 'passed', hostGeneration: row.generation,
+    evidence, evidenceDigest: digest(evidence), observedAt: observation.observedAt,
+    expiresAt: Math.min(observation.observedAt + request.receiptTtlMs, config.authorization.expiresAt) }
+  if (unsigned.expiresAt <= unsigned.observedAt) fail('authorization expired before signing')
+  return transaction(db, () => {
+    latestRecovery(db, row); assertCurrent(config, request); remaining(deadline)
+    const current = db.prepare('SELECT * FROM reloads WHERE operation_id = ?').get(request.operationId)
+    const replay = cachedReceipt(current, request, config, privateKey)
+    if (replay) {
+      const priorObservation = parseJson(Buffer.from(current.observation), 'concurrent recovery observation')
+      if (replay.evidence.probeDigest !== digest(priorObservation) || canonical(priorObservation.successor) !== canonical(successor)
+        || canonical(priorObservation.runtimeObservation?.runtime) !== canonical(runtime?.runtime)
+        || priorObservation.runtimeObservation?.channelDigest !== runtime?.channelDigest) fail('concurrent recovery binding differs')
+      return replay
+    }
+    const receipt = { ...unsigned, signature: sign(null, Buffer.from(canonical(unsigned)), privateKey).toString('base64') }
+    db.prepare('UPDATE reloads SET observation = ?, receipt = ? WHERE operation_id = ? AND receipt IS NULL')
+      .run(canonical(observation), canonical(receipt), request.operationId)
+    return cachedReceipt(db.prepare('SELECT * FROM reloads WHERE operation_id = ?').get(request.operationId), request, config, privateKey)
+  })
+}
 async function attest(request, config, privateKey) {
   const helperBytes = readSafe(config.processHelper.path, 1048576)
   if (hash(helperBytes) !== config.processHelper.sha256) fail('process helper changed')
@@ -390,6 +611,7 @@ async function attest(request, config, privateKey) {
   const deadline = performance.now() + config.timeoutMs
   const db = journal(config)
   try {
+    if (request.phase === 'rollback') return await attestRollback(request, config, privateKey, db, execute, deadline)
     if (request.phase === 'readiness') return await attestReadiness(request, config, privateKey, db, execute, deadline)
     const existing = db.prepare('SELECT * FROM reloads WHERE operation_id = ?').get(request.operationId)
     if (existing) { const receipt = cachedReceipt(existing, request, config, privateKey); if (receipt) return receipt }
@@ -456,7 +678,7 @@ export async function runSystemdHostAttestor(argv = process.argv.slice(2), envir
   let bytes = 0; const chunks = []
   for await (const chunk of process.stdin) { bytes += chunk.length; if (bytes > 65536) fail('request exceeds byte limit'); chunks.push(chunk) }
   const request = parseJson(Buffer.concat(chunks), 'request')
-  if (!['reload', 'readiness'].includes(request?.phase)) fail('only reload and readiness requests are supported')
+  if (!['reload', 'readiness', 'rollback'].includes(request?.phase)) fail('only reload, readiness and rollback requests are supported')
   const { config, privateKey } = loadConfig(environment, request)
   return attest(request, config, privateKey)
 }

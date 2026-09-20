@@ -1,0 +1,142 @@
+{
+  "schemaVersion": 1,
+  "kind": "systemd-physical-rollback-engineering-validation",
+  "date": "2026-09-20",
+  "baseCommit": "fb672cd5aa0693bbcbc8e51860b6918193c08fe5",
+  "capability": "Immutable baseline and pre-exposure recovery obligation; CLI file restoration remains pending until a signed external supervisor proof restores a ready DSH Host or stops an originally absent profile.",
+  "runtimeDigests": {
+    "plugins/plugin-control-plane/bin/dsh-systemd-host-attestor.js": "2e49fe7b24c2e0e3f5912ffe912e954571f75942b4643569653ce10986f6620b",
+    "scripts/e2e/systemd-readiness-real-dsh.mjs": "9ad314c4bc1185ac8e9650b55570af68bf55b675bbd09ac3d9d20608c904032e",
+    "scripts/e2e/systemd-reload-attestor.mjs": "373d1059115661fc370149eb5c67041c839e6f2b3f7c69dfd49f02eea232267b",
+    "plugins/plugin-control-plane/src/types.ts": "433c506295ca38afb58fe6bd71a19a710b85c23b70eb0bc867ec55c67579d8aa",
+    "plugins/plugin-control-plane/src/store.ts": "60149d6a7af6368d84e0014ca934d006d977008897a2be5afb28155796bdeef1",
+    "plugins/plugin-control-plane/src/sqlite.ts": "73ded5beef3ad4504c6bbbf7b197a45780cc58b14a73ac642de337d3620c4c86",
+    "plugins/plugin-control-plane/src/attestation.ts": "724035f7e365fdb465517b8eca28372e9dd17e4657c07a02f21aea4d3fd72e88",
+    "plugins/plugin-control-plane/src/cli.ts": "c69728b0ef0827d015268015f41c3c4db3f932baa28da05cd45ed56a9600575f",
+    "plugins/plugin-control-plane/src/host-attestor.ts": "e3c27efcc0132ad312f6e4dda6f5ddfe7c910151cd23aced74a3ac4220a74b8b",
+    "plugins/plugin-control-plane/tests/state.spec.ts": "504fa8cd85520be972fab9c4e81b54fbe380354594bdf25d296c0e085e26e5c0",
+    "plugins/plugin-control-plane/tests/cli.spec.ts": "22cd1808fcae8b8ea64f501a4cb0d94922510950b980095f310c2832ad516d55",
+    "plugins/plugin-control-plane/tests/systemd-host-attestor.spec.ts": "e9d378bc6089e46479eb99020e6b3f6226219317dac0672e96a4423741916c6d",
+    "plugins/plugin-control-plane/lib/store.js": "3e2e94c276cf2ab804c6720b7849bbc955f3f5924aa98f0e9e9bb5741b427cec",
+    "plugins/plugin-control-plane/lib/cli.js": "547329aa5a1bb40787096be4ef35371c2cb1867182cef9a05ad2117711e796bf",
+    "plugins/plugin-control-plane/lib/attestation.js": "5febb0105dfd33a9bdaf692ea2cff797b344490096448d4cce03e18e26f17d26",
+    "plugins/plugin-control-plane/lib/runtime-observer.js": "ad2b2cadc5ab61242d5cbe281839fd584f7050cc9ba09433f872d2bc9d16f2bb",
+    "plugins/plugin-control-plane/lib/runtime-observer-protocol.js": "85923416842544f74700a4fbdd8d2a865fe7c528edd3f40de43f738e6522fd64",
+    "plugins/plugin-control-plane/lib/adapter-process.js": "285aa47e5aa1a310f0463fa5ddfdfe7e3d0b2f112b03329c029055137c015e74"
+  },
+  "rootCheck": {
+    "command": "pnpm check",
+    "nodeVersion": "24.7.0",
+    "status": "passed",
+    "logPath": "/tmp/dsh-rollback-root-check.log",
+    "exitCode": 0,
+    "terminalSessionId": 56019,
+    "terminalChunkId": "fa1e29",
+    "confirmedAt": "2026-09-20T01:20:11.220763+00:00",
+    "logSha256": "99204e4781f9e122cc815128e5a3c9dc34f10eecd9ac51605f758dddca7f9041",
+    "summaries": 36,
+    "testsPassed": 6037,
+    "testsSkipped": 44,
+    "filesPassed": 421,
+    "filesSkipped": 12,
+    "dryRunPacks": 35,
+    "controlPlanePackInspected": true
+  },
+  "focusedChecks": [
+    {
+      "scope": "state",
+      "nodeVersion": "24.7.0",
+      "exitCode": 0,
+      "passed": 54,
+      "logSha256": "0e1008cfdf859e12e33230ababa7b88b2d4facd2948cbafc49911dd2f946448a"
+    },
+    {
+      "scope": "cli",
+      "nodeVersion": "24.7.0",
+      "exitCode": 0,
+      "passed": 61,
+      "logSha256": "1bb7709306ddefa6ab868c7a0cd2901be4d19d6858ea336b5193b272d0524245"
+    },
+    {
+      "scope": "migration",
+      "nodeVersion": "24.7.0",
+      "exitCode": 0,
+      "passed": 1,
+      "logSha256": "2ff7d2e83d3fe3a55416327007917136a6958cc73e16dcfb68cf36ebabac7e14"
+    },
+    {
+      "scope": "systemd recovery with visibility proof",
+      "nodeVersion": "24.7.0",
+      "exitCode": 0,
+      "passed": 14,
+      "skipped": 32,
+      "logSha256": "10e008e4a70e1383c12c538b3752b384a83ebe8c41dac15390591b98f8145cc7"
+    },
+    {
+      "scope": "earlier full systemd suite before visibility guard",
+      "nodeVersion": "24.7.0",
+      "exitCode": 0,
+      "passed": 45,
+      "logSha256": "55eb3789a9319408021099fbb24970021b332565a7ecf1890cf3aa13cd9b6a50"
+    }
+  ],
+  "realDsh": [
+    {
+      "action": "restore",
+      "exitCode": 0,
+      "evidence": "docs/evidence/systemd-rollback-restore-real-dsh-2026-09-20.json",
+      "sha256": "510da47aba3950829851da4071074548cfa3630d57e360498fa0716f48236a2d",
+      "observedAt": "2026-09-20T01:04:58.336Z",
+      "checks": 5,
+      "finalStatus": "rolled-back",
+      "fixtureRemoved": true
+    },
+    {
+      "action": "stop",
+      "exitCode": 0,
+      "evidence": "docs/evidence/systemd-rollback-stop-real-dsh-2026-09-20.json",
+      "sha256": "9a9f9913a540d5229bea65fc64fb98de24cb1d57d6832a47c4dc806f8b4fd6e0",
+      "observedAt": "2026-09-20T01:04:53.422Z",
+      "checks": 6,
+      "finalStatus": "rolled-back",
+      "fixtureRemoved": true
+    }
+  ],
+  "independentReview": {
+    "status": "PASS",
+    "agent": "physical_rollback_verify",
+    "completedAt": "2026-09-20T01:20:21.787198+00:00",
+    "scope": "Read-only review of final recovery contracts, migration, supervisor implementation, runtime hashes and real DSH restore/stop evidence; root session 56019 exit 0 confirmed by coordinator terminal polling.",
+    "limitations": "Disposable local fixtures do not prove future production state or all systemd/cgroup deployments."
+  },
+  "limits": [
+    "Disposable real DSH/systemd profiles with local built plugins; initial catalog and package installation are fixture inputs, not npm publication or a production deployment.",
+    "Baseline core-file pins and declared deployment files are not an inventory of every module; runtime readiness is not behavioral quality.",
+    "Recovery cannot reverse external messages or database migrations; competing privileged writers must be serialized by the owner.",
+    "Missing original pins on migrated in-flight activations require owner recovery; historical terminal records are not backfilled with physical claims.",
+    "Later effect-blocked replay/shadow/canary/soak/health deployment observers and WP18 real repository reuse remain incomplete."
+  ],
+  "offlineVerification": {
+    "exitCode": 0,
+    "logSha256": "de9361242029af4b1788d200a5c13a30aa757708848ab257d08deea1a8500671",
+    "scope": "Per arm: three historical signatures, two probe preimages, ten current runtime hashes plus deployed shebang rewrite, exact request/plan/fence and terminal persisted recovery; original authorization is not renewed."
+  },
+  "priorFindings": [
+    {
+      "scope": "first full systemd run",
+      "passed": 38,
+      "failed": 3,
+      "exitCode": 1,
+      "reason": "Implementation initially required cgroup v2; actual machine uses the legacy systemd hierarchy. Added kernel filesystem and recursive task observation for v1.",
+      "logSha256": "0993f10207be5ebe8cce6dd50170237168ad05e7d3752b18b9bc5c4ae7c4e39b"
+    },
+    {
+      "scope": "real DSH integration",
+      "reason": "Real empty Job output and transient-unit unload needed explicit handling; neither was treated as successful recovery until independently observed. Earlier failures retained in /tmp/dsh-rollback-* logs."
+    },
+    {
+      "scope": "independent review",
+      "reason": "Moved durable recovery requirement before profile promotion; added original-file absence pins, genuine v14 migration coverage and mapped cgroup visibility guard."
+    }
+  ]
+}

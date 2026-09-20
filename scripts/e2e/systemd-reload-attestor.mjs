@@ -80,7 +80,7 @@ try {
   const request = { schemaVersion: 1, kind: 'dsh-host-attestation-request', operationId: `host-operation-${randomUUID()}`,
     requestedAt: now, receiptTtlMs: 60000, installationId: randomUUID(), ledger: { id: 'fixture-ledger', path: ledgerPath },
     plan: { id: 'fixture-plan', digest: 'a'.repeat(64) }, activation: { id: 'fixture-activation', fence: 1 },
-    profile: { name, path: profile }, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-3',
+    profile: { name, path: profile }, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-4',
       ...executable, interpreter: node, authority: 'fixture-supervisor', keyId: 'fixture-key' }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } }
   const config = { schemaVersion: 1, authority: 'fixture-supervisor', keyId: 'fixture-key', privateKeyPath, stateRoot: join(owner, 'state'),
     executable, interpreter: node, processHelper: helper, systemctl: { ...await pinned('/usr/bin/systemctl'), interpreter: null }, scope: 'user', unit, unitProperties, profileFiles,

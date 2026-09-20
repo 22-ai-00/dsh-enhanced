@@ -90,4 +90,6 @@
 
 2026-09-20 readiness 失败接线：systemd attestor v3 对稳定、认证通过且身份匹配的 inactive Fiber 签发 failed receipt；认证/身份错误、状态漂移及通道故障仍不签。真实 DSH 正负两臂通过现有 ControlPlaneStore 的 durable request、验签和 CAS，分别到达 `awaiting-effect-blocked-replay` 与 `rollback-pending`，重开账本保持结果。catalog、owner approval 与 staging 为明确夹具，未做 npm 安装、CLI 文件恢复或实际 Host 回滚；WP16、WP18 状态不变。完整验证与限制见[本批证据](evidence/systemd-readiness-negative-engineering-2026-09-20.json)。
 
+2026-09-20 物理 Host 回退接线：schema 15 在 profile 对 Host 可见前持久化回退要求和原始 core 文件摘要。CLI 恢复文件后保持 `rollback-pending`；systemd attestor v4 通过实际旧 Host 就绪或原本不存在 profile 的停服证据推进 `rolled-back`，重试复用同一操作且不重复 restart/stop。临时真实 DSH 两臂覆盖 CLI 文件恢复、签名验收和账本重开；catalog 与初始安装仍为夹具，未完成完整生产发布或后续任务复用，WP16、WP18 状态不变。见[本批工程证据](evidence/systemd-rollback-engineering-2026-09-20.json)。
+
 当前已封闭的是可信学习输入与独立任务验收基线（WP01–WP03）、2026-09-13 在真实 TraeX prospective canary 链上按原始条款关闭的独立质量验收 WP14、按原始条款验收的安装工作包 WP17，以及 2026-09-13 经四 cohort 独立复核关闭的推广后 deployment cohort 质量监控 WP15。WP04–WP13 均已有可运行的生产路径组件，但各自仍缺工作包级的真实收益、真实外部系统、部署类型或覆盖广度之一；WP16 和 WP18 还没有满足其端到端定义的生产闭环。因此，仓库当前不能宣称“18 项完成”，也不能把 `pnpm check`、fixture、合成留出、fake systemd、本地 HTTP transport 或局部真实模型运行合并推导为生产自治完成。

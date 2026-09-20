@@ -207,12 +207,18 @@ function activationSnapshotFromStored(value: unknown): PluginActivationPlan {
   let activation: PluginActivationPlan['activation']
   if (item['activation'] !== undefined) {
     const stored = objectRecord(item['activation'], 'stored activation identity')
-    const activationOptional = ['targetOriginallyExisted', 'failureCode'].filter(key => Object.hasOwn(stored, key))
+    const activationOptional = ['targetOriginallyExisted', 'targetBaselineFiles', 'hostRecoveryRequired', 'rollbackProfileRestored', 'failureCode'].filter(key => Object.hasOwn(stored, key))
     exactKeys(stored, ['id', 'fence', 'updatedAt', ...activationOptional], 'stored activation identity')
     if (typeof stored['id'] !== 'string' || !KEY.test(stored['id']) || !Number.isSafeInteger(stored['fence'])
       || Number(stored['fence']) < 1 || !Number.isSafeInteger(stored['updatedAt'])
       || Number(stored['updatedAt']) < Number(item['createdAt'])
       || (stored['targetOriginallyExisted'] !== undefined && typeof stored['targetOriginallyExisted'] !== 'boolean')
+      || (stored['targetBaselineFiles'] !== undefined && (!Array.isArray(stored['targetBaselineFiles']) || ![0, 3].includes(stored['targetBaselineFiles'].length)
+        || stored['targetBaselineFiles'].some(file => typeof file !== 'object' || file === null || Array.isArray(file)
+          || Object.keys(file as object).sort().join('\0') !== 'path\0sha256' || typeof (file as { path?: unknown }).path !== 'string'
+          || !isAbsolute((file as { path: string }).path) || ((file as { sha256?: unknown }).sha256 !== null && !DIGEST.test((file as { sha256: string }).sha256)))))
+      || (stored['hostRecoveryRequired'] !== undefined && stored['hostRecoveryRequired'] !== true)
+      || (stored['rollbackProfileRestored'] !== undefined && stored['rollbackProfileRestored'] !== true)
       || (stored['failureCode'] !== undefined && typeof stored['failureCode'] !== 'string')) {
       throw new ControlPlaneStoreError('invalid-state', 'stored activation identity is corrupt')
     }
@@ -239,7 +245,8 @@ interface ActivationRow {
   ledger_id: string; ledger_path: string; executor_id: string; executor_version: string; executor_path: string
   executor_digest: string; status: PlanStatus; revision: number; created_at: number; expires_at: number
   approval_json: string | null; approval_receipt_json: string | null; activation_id: string | null; activation_fence: number
-  activation_lease_until: number | null; activation_target_existed: number | null; failure_code: string | null; updated_at: number
+  activation_lease_until: number | null; activation_target_existed: number | null; activation_target_baseline_json: string | null
+  host_recovery_required: number; rollback_profile_restored: number; failure_code: string | null; updated_at: number
 }
 
 interface SourceRow {
@@ -408,11 +415,25 @@ function activationFromRow(row: ActivationRow): PluginActivationPlan {
     catch { throw new ControlPlaneStoreError('invalid-state', 'stored activation approval is corrupt') }
     approval = verifiedApprovalFromStored(storedApproval, row.id, row.plan_digest, row.created_at, row.expires_at)
   }
+  let baselineFiles: readonly { path: string; sha256: string | null }[] | undefined
+  if (row.activation_target_baseline_json !== null) {
+    let value: unknown
+    try { value = JSON.parse(row.activation_target_baseline_json) as unknown } catch { throw new ControlPlaneStoreError('invalid-state', 'stored activation baseline is corrupt') }
+    const expectedPaths = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(name => `${row.target_path}/${name}`)
+    if (!Array.isArray(value) || ![0, 3].includes(value.length) || value.some((item, index) => typeof item !== 'object' || item === null || Array.isArray(item)
+      || Object.keys(item as object).sort().join('\0') !== 'path\0sha256' || typeof (item as { path?: unknown }).path !== 'string'
+      || !isAbsolute((item as { path: string }).path) || (value.length === 3 && (item as { path: string }).path !== expectedPaths[index])
+      || ((item as { sha256?: unknown }).sha256 !== null && !DIGEST.test((item as { sha256: string }).sha256)))) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored activation baseline is corrupt')
+    }
+    baselineFiles = value as readonly { path: string; sha256: string | null }[]
+  }
   const requiresApproval = row.status !== 'pending-approval'
   const requiresActivation = !['pending-approval', 'approved'].includes(row.status)
   if (requiresApproval !== (approval !== undefined) || requiresActivation !== (row.activation_id !== null)
     || (row.activation_id === null && (row.activation_fence !== 0 || row.activation_lease_until !== null
-      || row.activation_target_existed !== null || row.failure_code !== null))
+      || row.activation_target_existed !== null || row.activation_target_baseline_json !== null || row.host_recovery_required !== 0
+      || row.rollback_profile_restored !== 0 || row.failure_code !== null))
     || (row.activation_id !== null && (!KEY.test(row.activation_id) || row.activation_fence < 1))
     || (['rolled-back', 'activated'].includes(row.status) && row.activation_lease_until !== null)) {
     throw new ControlPlaneStoreError('invalid-state', 'stored activation state is corrupt or incomplete')
@@ -422,6 +443,9 @@ function activationFromRow(row: ActivationRow): PluginActivationPlan {
     ...(approval === undefined ? {} : { approval }),
     ...(row.activation_id === null ? {} : { activation: { id: row.activation_id, fence: row.activation_fence,
       ...(row.activation_target_existed === null ? {} : { targetOriginallyExisted: row.activation_target_existed === 1 }),
+      ...(baselineFiles === undefined ? {} : { targetBaselineFiles: baselineFiles }),
+      ...(row.host_recovery_required === 0 ? {} : { hostRecoveryRequired: true }),
+      ...(row.rollback_profile_restored === 0 ? {} : { rollbackProfileRestored: true }),
       ...(row.failure_code === null ? {} : { failureCode: row.failure_code }), updatedAt: row.updated_at } }),
   }
 }
@@ -711,6 +735,7 @@ const expectedAttestation: Readonly<Record<string, { phase: HostAttestationPhase
   'awaiting-canary': { phase: 'canary', next: 'awaiting-soak' },
   'awaiting-soak': { phase: 'soak', next: 'awaiting-health' },
   'awaiting-health': { phase: 'health', next: 'commit-pending' },
+  'rollback-pending': { phase: 'rollback', next: 'rolled-back' },
 })
 
 export function expectedHostAttestation(status: PlanStatus): { phase: HostAttestationPhase; next: PlanStatus } | undefined {
@@ -1370,6 +1395,8 @@ export class ControlPlaneStore {
           'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
           'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending') LIMIT 1`).get(plan.target.profilePath, plan.id)
         if (targetOwner !== undefined) throw new ControlPlaneStoreError('conflict', 'target profile already has an active activation')
+      } else if (plan.status === 'rollback-pending' && plan.activation?.rollbackProfileRestored) {
+        throw new ControlPlaneStoreError('invalid-state', 'physical Host rollback recovery is pending')
       } else if (!(recoverable && Number(row.activation_lease_until ?? 0) < now)) throw new ControlPlaneStoreError('invalid-state', 'activation plan cannot be claimed')
       const activationId = row.activation_id ?? `activation-${randomUUID()}`; const status = plan.status === 'approved' ? 'staging' : plan.status
       const result = this.#database.prepare(`UPDATE activation_plans SET status = ?, revision = revision + 1, activation_id = ?,
@@ -1389,7 +1416,8 @@ export class ControlPlaneStore {
     return this.getPlan(input.planId)
   }
 
-  recordActivationTargetBaseline(input: { planId: string; expectedRevision: number; fence: number; existed: boolean }): PluginActivationPlan {
+  recordActivationTargetBaseline(input: { planId: string; expectedRevision: number; fence: number; existed: boolean;
+    baselineFiles: readonly { path: string; sha256: string | null }[] }): PluginActivationPlan {
     const now = this.#now()
     this.#database.exec('BEGIN IMMEDIATE')
     try {
@@ -1398,18 +1426,44 @@ export class ControlPlaneStore {
       const plan = activationFromRow(row)
       if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.fence || plan.status !== 'staging'
         || Number(row.activation_lease_until ?? 0) < now) throw new ControlPlaneStoreError('conflict', 'activation lost its claim before recording the target baseline')
-      if (row.activation_target_existed !== null && (row.activation_target_existed === 1) !== input.existed) {
+      const expectedPaths = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(name => `${plan.target.profilePath}/${name}`)
+      if (input.baselineFiles.length !== (input.existed ? 3 : 0) || input.baselineFiles.some((file, index) => file.path !== expectedPaths[index]
+        || (file.sha256 !== null && !DIGEST.test(file.sha256)))) throw new ControlPlaneStoreError('invalid-input', 'activation target baseline is invalid')
+      const baseline = JSON.stringify(input.baselineFiles)
+      if (row.activation_target_existed !== null && ((row.activation_target_existed === 1) !== input.existed
+        || row.activation_target_baseline_json !== baseline)) {
         throw new ControlPlaneStoreError('conflict', 'activation target baseline is immutable')
       }
       if (row.activation_target_existed === null) {
-        this.#database.prepare(`UPDATE activation_plans SET activation_target_existed = ?, updated_at = ?
-          WHERE id = ? AND revision = ? AND activation_fence = ? AND activation_target_existed IS NULL`).run(
-          input.existed ? 1 : 0, now, plan.id, plan.revision, input.fence)
+        this.#database.prepare(`UPDATE activation_plans SET activation_target_existed = ?, activation_target_baseline_json = ?, updated_at = ?
+          WHERE id = ? AND revision = ? AND activation_fence = ? AND activation_target_existed IS NULL AND activation_target_baseline_json IS NULL`).run(
+          input.existed ? 1 : 0, baseline, now, plan.id, plan.revision, input.fence)
       }
       const result = this.getPlan(plan.id)
       this.#database.exec('COMMIT')
       return result
     } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  /** Freeze recovery obligation before the profile can become Host-visible. */
+  markActivationHostExposure(input: { planId: string; expectedRevision: number; fence: number }): PluginActivationPlan {
+    const now = this.#now()
+    const result = this.#database.prepare(`UPDATE activation_plans SET host_recovery_required = 1, updated_at = ?
+      WHERE id = ? AND revision = ? AND activation_fence = ? AND status = 'staging'
+        AND activation_target_baseline_json IS NOT NULL AND activation_target_existed IS NOT NULL
+        AND activation_lease_until >= ?`).run(now, input.planId, input.expectedRevision, input.fence, now)
+    if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'Host exposure lost its claim or original baseline')
+    return this.getPlan(input.planId)
+  }
+
+  markRollbackProfileRestored(input: { planId: string; expectedRevision: number; fence: number }): PluginActivationPlan {
+    const now = this.#now()
+    const result = this.#database.prepare(`UPDATE activation_plans SET rollback_profile_restored = 1, activation_lease_until = NULL, updated_at = ?
+      WHERE id = ? AND revision = ? AND activation_fence = ? AND status = 'rollback-pending'
+        AND host_recovery_required = 1 AND rollback_profile_restored = 0 AND activation_target_baseline_json IS NOT NULL
+        AND activation_lease_until >= ?`).run(now, input.planId, input.expectedRevision, input.fence, now)
+    if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'rollback restoration marker lost its fence or baseline')
+    return this.getPlan(input.planId)
   }
 
   /**
@@ -1483,6 +1537,18 @@ export class ControlPlaneStore {
           throw new ControlPlaneStoreError('conflict', 'reload operation does not bind the durable prior Host generation')
         }
       }
+      if (expected.phase === 'rollback') {
+        if (!plan.activation?.hostRecoveryRequired || !plan.activation.rollbackProfileRestored || plan.activation.targetBaselineFiles === undefined) {
+          throw new ControlPlaneStoreError('invalid-state', 'rollback physical recovery has not been durably restored and bound')
+        }
+        const previous = this.latestHostGeneration(plan.installationId)
+        if (input.requirements.kind !== 'rollback' || input.requirements.previousHostGeneration !== previous
+          || input.requirements.baselineFiles.length !== plan.activation.targetBaselineFiles.length
+          || controlPlaneDigest(input.requirements.baselineFiles) !== controlPlaneDigest(plan.activation.targetBaselineFiles)
+          || input.requirements.action !== (plan.activation.targetOriginallyExisted ? 'restore' : 'stop')) {
+          throw new ControlPlaneStoreError('conflict', 'rollback operation does not bind the durable recovery baseline')
+        }
+      }
       const operationId = `host-operation-${randomUUID()}`
       const request: HostAttestationRequest = { schemaVersion: 1, kind: 'dsh-host-attestation-request', operationId,
         requestedAt: now, receiptTtlMs: input.receiptTtlMs, installationId: plan.installationId, ledger: plan.ledger, plan: { id: plan.id, digest: plan.digest },
@@ -1540,6 +1606,9 @@ export class ControlPlaneStore {
       if (operation.receipt !== undefined) { this.#database.exec('COMMIT'); return operation.receipt }
       const receipt = await input.execute(operation.request)
       await input.resolveAuthority(receipt).verify(receipt, plan, operation.request)
+      if (operation.phase === 'rollback' && receipt.outcome !== 'passed') {
+        throw new ControlPlaneStoreError('conflict', 'failed physical rollback receipt cannot consume the durable recovery operation')
+      }
       const now = this.#now()
       const result = this.#database.prepare(`UPDATE host_attestation_operations SET status = 'completed', receipt_digest = ?,
         receipt_json = ?, completed_at = ? WHERE operation_id = ? AND status = 'pending' AND request_digest = ?`).run(
@@ -1560,9 +1629,11 @@ export class ControlPlaneStore {
         activation_lease_until = CASE
           WHEN ? IN ('rolled-back', 'activated', 'awaiting-reload') THEN NULL
           ELSE activation_lease_until END,
+        host_recovery_required = CASE WHEN ? = 'awaiting-reload' THEN 1 ELSE host_recovery_required END,
         failure_code = COALESCE(?, failure_code), updated_at = ?
-        WHERE id = ? AND revision = ? AND activation_fence = ? AND status = ? AND activation_lease_until >= ?`).run(
-        input.to, input.to, input.failureCode ?? null, now, input.planId, input.expectedRevision, input.fence, input.from, now)
+        WHERE id = ? AND revision = ? AND activation_fence = ? AND status = ? AND activation_lease_until >= ?
+          AND NOT (? = 'rolled-back' AND host_recovery_required = 1)`).run(
+        input.to, input.to, input.to, input.failureCode ?? null, now, input.planId, input.expectedRevision, input.fence, input.from, now, input.to)
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'activation transition lost its CAS/fencing claim')
       const plan = this.getPlan(input.planId)
       if (input.to === 'rolled-back' || input.to === 'activated') {
@@ -1585,7 +1656,7 @@ export class ControlPlaneStore {
       const expectedFailure = input.receipt.outcome === 'passed' ? undefined : 'host-attestation-failed'
       if (replay.result.status !== expectedStatus || replay.result.revision !== input.expectedRevision + 1
         || replay.result.activation?.id !== input.receipt.activationId || replay.result.activation.fence !== input.expectedFence
-        || replay.result.activation.failureCode !== expectedFailure || replay.result.activation.updatedAt !== replay.createdAt) {
+        || (input.receipt.phase !== 'rollback' && replay.result.activation.failureCode !== expectedFailure) || replay.result.activation.updatedAt !== replay.createdAt) {
         throw new ControlPlaneStoreError('invalid-state', 'stored Host attestation operation receipt is corrupt')
       }
       return replay
@@ -1617,6 +1688,7 @@ export class ControlPlaneStore {
         WHERE operation_id = ? AND status = 'completed' AND receipt_digest = ?`).run(now, operation.operationId, controlPlaneDigest(input.receipt))
       if (Number(applied.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'Host attestation operation lost its apply CAS')
       const output = this.getPlan(plan.id)
+      if (nextStatus === 'rolled-back') this.#finishActivation(output, input.expectedFence, now)
       const operationReceipt = { idempotencyKey: input.idempotencyKey, operation: 'host-attestation', inputDigest, result: output, createdAt: now }
       this.#insertReceipt(operationReceipt); this.#database.exec('COMMIT'); return operationReceipt
     } catch (error) { this.#database.exec('ROLLBACK'); throw error }

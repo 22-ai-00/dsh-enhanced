@@ -189,7 +189,7 @@ teardown and actual DSH process observation. See [contract](runtime-observer.md)
 
 ### External systemd readiness signer
 
-The shipped systemd attestor version is `dsh-systemd-host-attestor-3`. Schema-1
+The shipped systemd attestor version is `dsh-systemd-host-attestor-4`. Schema-1
 reload config remains supported; schema-2 selects readiness with an exact
 observer config, pinned node-only protocol helper and deployment files. The
 existing Host request/receipt and Control Plane state schemas do not change.
@@ -202,3 +202,15 @@ Version 3 signs stable authenticated inactive entries as failed readiness;
 identity/authentication failures remain unsigned. Existing schemas and the
 Control Plane failure transition are retained. Upgrade checks also cover
 negative receipt replay and refusal to replace a cached failure with success.
+
+### Physical Host rollback (Control Plane schema 15)
+
+Schema 15 adds immutable original core-file pins, a sticky physical recovery
+requirement and a durable file-restoration marker. `rollback` extends the
+existing schema-1 Host request/schema-2 signed receipt; schema-3 systemd
+configuration explicitly authorizes either baseline restore plus authenticated
+readiness, or profile absence plus stable stop. Older attestors reject this
+phase. Historical terminal records remain historical; migration does not
+synthesize missing baseline pins for in-flight plans. See
+[physical rollback](systemd-host-attestor.md#physical-rollback) for restart
+reconciliation, cgroup and observer deployment requirements.
