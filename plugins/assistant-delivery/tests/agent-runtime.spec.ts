@@ -3094,7 +3094,10 @@ describe('real rc.1 delivery Agent runtime', () => {
     } finally { await fixture.ctx.fiber.restart() }
   })
 
-  test('routes real accepted foreground owner corrections and withdrawal to canonical Evaluation without reviving stale feedback', async () => {
+  test.each([
+    { hasAcceptanceProfile: true, kind: 'profiled' },
+    { hasAcceptanceProfile: false, kind: 'ordinary' },
+  ])('routes owner corrections and withdrawal from a $kind foreground task to canonical Evaluation without reviving stale feedback', async ({ hasAcceptanceProfile }) => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-foreground-owner-evaluation-'))
     roots.push(root)
     const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
@@ -3104,26 +3107,34 @@ describe('real rc.1 delivery Agent runtime', () => {
       const pairing = fixture.service.issuePairing('test', principal)
       fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
       const owner = runtimeStore(fixture.service).getPrincipal(principal)!
-      await writeFile(join(root, 'report.md'), 'Confirmed result')
       const authority = { kind: 'document' as const, id: 'sources',
         sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
       const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
       const objective = 'Evaluate foreground owner feedback.'
       let evaluation = await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
-      await fixture.ctx.plugin(AssistantVerifierService, {
-        databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: true, authorities: [authority],
-        profiles: [{ id: 'foreground-owner', version: 1, scope: { workspace: root, preset: 'primary' },
-          owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'foreground-turn', objective,
-          validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
-          criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest },
-            artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
-        }],
-      })
+      if (hasAcceptanceProfile) {
+        await writeFile(join(root, 'report.md'), 'Confirmed result')
+        await fixture.ctx.plugin(AssistantVerifierService, {
+          databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: true, authorities: [authority],
+          profiles: [{ id: 'foreground-owner', version: 1, scope: { workspace: root, preset: 'primary' },
+            owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'foreground-turn', objective,
+            validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+            criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest },
+              artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
+          }],
+        })
+      }
       const accepted = await fixture.service.acceptInbound(message('evt-foreground-owner-source', objective))
       await drive(fixture.service)
-      await fixture.ctx.assistantVerifier.tick()
-      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
-        .toMatchObject({ executionStatus: 'succeeded', objectiveStatus: 'achieved' })
+      if (hasAcceptanceProfile) {
+        await fixture.ctx.assistantVerifier.tick()
+        expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
+          .toMatchObject({ executionStatus: 'succeeded', objectiveStatus: 'achieved' })
+      } else {
+        // A completed model call is execution evidence only.  An ordinary task
+        // has no canonical outcome until the authenticated owner gives feedback.
+        expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })).toEqual([])
+      }
       const route = { authorityId: 'learning-owner', principalId: 'lark/bot-1/tenant-a/ou_owner', workspace: root, agentPreset: 'primary' }
       const source = () => {
         const scope = fixture.ctx.assistantEvaluation.canonicalHostScope({ workspace: root, preset: 'primary' })
@@ -3131,15 +3142,17 @@ describe('real rc.1 delivery Agent runtime', () => {
         expect(page.items).toHaveLength(1)
         return fixture.service.inspectOwnerForegroundLearningTask({ ...route, outcomeId: page.items[0]!.receipt.triggerOutcomeId })
       }
-      const initial = source()
       expect(fixture.llm.requests[0]).toMatchObject({ provider: 'mock', model: 'delivery-model', reasoningEffort: 'low' })
-      expect(initial).toMatchObject({ judgement: 'independent-verifier',
-        canonical: { objective: { status: 'achieved' }, projection: { disposition: 'upsert' } },
-        source: { inboxId: accepted.inboxId, objective, truncated: false, quiescent: true,
-          modelSelectionState: 'frozen', modelSelection: { provider: fixture.llm.requests[0]!.provider,
-            model: fixture.llm.requests[0]!.model, reasoningEffort: fixture.llm.requests[0]!.reasoningEffort } } })
-      expect(() => fixture.service.inspectOwnerForegroundLearningTask({ ...route, principalId: 'someone-else',
-        outcomeId: initial!.canonical.triggerOutcomeId })).toThrow()
+      let initial = hasAcceptanceProfile ? source() : undefined
+      if (hasAcceptanceProfile) {
+        expect(initial).toMatchObject({ judgement: 'independent-verifier',
+          canonical: { objective: { status: 'achieved' }, projection: { disposition: 'upsert' } },
+          source: { inboxId: accepted.inboxId, objective, truncated: false, quiescent: true,
+            modelSelectionState: 'frozen', modelSelection: { provider: fixture.llm.requests[0]!.provider,
+              model: fixture.llm.requests[0]!.model, reasoningEffort: fixture.llm.requests[0]!.reasoningEffort } } })
+        expect(() => fixture.service.inspectOwnerForegroundLearningTask({ ...route, principalId: 'someone-else',
+          outcomeId: initial!.canonical.triggerOutcomeId })).toThrow()
+      }
       const replyToProviderMessageId = replyProviderMessageId(fixture.service, 'evt-foreground-owner-source')
       const feedback = async (eventId: string, command: string) => {
         const input = { ...message(eventId, `/feedback ${command}`, 'command'), metadata: { replyToProviderMessageId } }
@@ -3154,8 +3167,15 @@ describe('real rc.1 delivery Agent runtime', () => {
       await feedback('evt-foreground-owner-initial', 'not-achieved')
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
         .toMatchObject({ objectiveStatus: 'not-achieved', projection: { subjectKind: 'foreground-turn', subjectRef: accepted.inboxId } })
-      expect(source()).toMatchObject({ judgement: 'owner-feedback', ownerRevision: { version: 1, action: 'initial' },
-        canonical: { objective: { status: 'not-achieved' } } })
+      const ownerFeedback = source()
+      expect(ownerFeedback).toMatchObject({ judgement: 'owner-feedback', ownerRevision: { version: 1, action: 'initial' },
+        canonical: { objective: { status: 'not-achieved' } },
+        source: { inboxId: accepted.inboxId, truncated: false, quiescent: true,
+          modelSelectionState: 'frozen', modelSelection: { provider: fixture.llm.requests[0]!.provider,
+            model: fixture.llm.requests[0]!.model, reasoningEffort: fixture.llm.requests[0]!.reasoningEffort } } })
+      initial ??= ownerFeedback
+      expect(() => fixture.service.inspectOwnerForegroundLearningTask({ ...route, principalId: 'someone-else',
+        outcomeId: ownerFeedback!.canonical.triggerOutcomeId })).toThrow()
       const correction = await feedback('evt-foreground-owner-correct', 'correct 1 not-achieved achieved')
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
         .toMatchObject({ objectiveStatus: 'achieved' })
@@ -3186,6 +3206,97 @@ describe('real rc.1 delivery Agent runtime', () => {
       await drive(fixture.service)
       expect(fixture.service.validateOwnerRoute(route).principalVersion).toBeGreaterThan(owner.version)
       expect(source()).toBeUndefined()
+    } finally { await fixture.ctx.fiber.restart() }
+  })
+
+  test('marks an ordinary foreground task model snapshot inconsistent across a rerouted continuation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-ordinary-foreground-model-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [{ id: 'ordinary-owner', conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }],
+    })
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+      let requestCount = 0
+      fixture.ctx.on('agent/request', async (_payload, next) => {
+        const config = await next()
+        requestCount += 1
+        return requestCount === 2 ? { ...config, provider: 'alternate', model: 'precise' } : config
+      })
+      const original = fixture.llm.stream.bind(fixture.llm)
+      vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+        if (fixture.llm.requests.length === 0) {
+          fixture.llm.requests.push(options)
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'Partial ordinary reply ' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Partial ordinary reply ' } }
+          yield { type: 'finish', reason: { kind: 'max-tokens' } }
+          return
+        }
+        yield* original(options)
+      })
+
+      const task = await fixture.service.acceptInbound(message('evt-ordinary-foreground-model', 'Complete this ordinary task.'))
+      await drive(fixture.service)
+      expect(fixture.llm.requests).toEqual([expect.objectContaining({ provider: 'mock', model: 'delivery-model', reasoningEffort: 'low' })])
+      expect(fixture.alternate.requests).toEqual([expect.objectContaining({ provider: 'alternate', model: 'precise', reasoningEffort: 'high' })])
+      const database = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try {
+        expect(database.prepare(`SELECT model_selection_state, model_provider, model_id, model_reasoning_effort
+          FROM delivery_foreground_executions WHERE inbox_id = ?`).get(task.inboxId)).toEqual({
+          model_selection_state: 'inconsistent', model_provider: null, model_id: null, model_reasoning_effort: null,
+        })
+      } finally { database.close() }
+
+      const replyToProviderMessageId = replyProviderMessageId(fixture.service, 'evt-ordinary-foreground-model')
+      await fixture.service.acceptInbound({ ...message('evt-ordinary-foreground-model-feedback', '/feedback not-achieved', 'command'),
+        metadata: { replyToProviderMessageId } })
+      await drive(fixture.service)
+      const scope = fixture.ctx.assistantEvaluation.canonicalHostScope({ workspace: root, preset: 'primary' })
+      const [projection] = fixture.ctx.assistantEvaluation.listTrustedTaskLearningProjections({ scope, limit: 1 }).items
+      expect(projection).toBeDefined()
+      const source = fixture.service.inspectOwnerForegroundLearningTask({
+        authorityId: 'ordinary-owner', principalId: 'lark/bot-1/tenant-a/ou_owner', workspace: root, agentPreset: 'primary',
+        outcomeId: projection!.receipt.triggerOutcomeId,
+      })
+      expect(source).toMatchObject({ judgement: 'owner-feedback', canonical: { objective: { status: 'not-achieved' } },
+        source: { inboxId: task.inboxId, quiescent: true, truncated: false, modelSelectionState: 'inconsistent' } })
+      expect(source?.source.modelSelection).toBeUndefined()
+    } finally { await fixture.ctx.fiber.restart() }
+  })
+
+  test('refuses owner feedback for an ordinary foreground execution that settled unknown', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-ordinary-foreground-unknown-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [{ id: 'ordinary-owner', conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }],
+    })
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+      const task = await fixture.service.acceptInbound(message('evt-ordinary-foreground-unknown', 'Complete this ordinary task.'))
+      await drive(fixture.service)
+      // Model the durable post-dispatch outcome of a failed reply-boundary
+      // teardown. Owner feedback must not upgrade it into a usable task result.
+      const database = new DatabaseSync(join(root, 'delivery.sqlite'))
+      try {
+        expect(database.prepare(`UPDATE delivery_foreground_executions
+          SET status = 'unknown', quiescent = 0 WHERE inbox_id = ?`).run(task.inboxId).changes).toBe(1)
+      } finally { database.close() }
+
+      const replyToProviderMessageId = replyProviderMessageId(fixture.service, 'evt-ordinary-foreground-unknown')
+      await fixture.service.acceptInbound({ ...message('evt-ordinary-foreground-unknown-feedback', '/feedback not-achieved', 'command'),
+        metadata: { replyToProviderMessageId } })
+      await drive(fixture.service)
+      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })).toEqual([])
+      const receipt = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try {
+        expect(receipt.prepare('SELECT status, quiescent FROM delivery_foreground_executions WHERE inbox_id = ?').get(task.inboxId))
+          .toEqual({ status: 'unknown', quiescent: 0 })
+      } finally { receipt.close() }
     } finally { await fixture.ctx.fiber.restart() }
   })
 
@@ -6312,6 +6423,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     })
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
     await fixture.service.acceptInbound(message(
       'evt-verified-workflow-source',
       'prepare daily workspace status summary',
@@ -6327,6 +6439,11 @@ describe('real rc.1 delivery Agent runtime', () => {
       metadata: { replyToProviderMessageId: sourceProviderMessageId },
     })
     await drive(fixture.service)
+
+    expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })).toEqual([
+      expect.objectContaining({ objectiveStatus: 'achieved',
+        projection: expect.objectContaining({ subjectKind: 'foreground-turn', subjectRef: sourceInbox.id }) }),
+    ])
 
     expect(traces).toEqual([expect.objectContaining({
       disposition: 'upsert',

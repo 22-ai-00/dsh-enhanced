@@ -1129,6 +1129,9 @@ export class AssistantDeliveryService extends Service {
         prepareForegroundTaskAcceptance: (binding, envelope) => this.prepareForegroundTaskAcceptance(binding, envelope),
         completeForegroundTaskAcceptance: (handle, input) => this.completeForegroundTaskAcceptance(handle, input),
         recordForegroundTaskModelSelection: (handle, input) => this.deliveryStore.recordForegroundTaskModelSelection({ contractId: handle.contractId, ...input }),
+        beginForegroundTaskExecution: (binding, envelope) => this.beginForegroundTaskExecution(binding, envelope),
+        recordForegroundExecutionModelSelection: (inboxId, input) => this.deliveryStore.recordForegroundExecutionModelSelection({ inboxId, ...input }),
+        completeForegroundTaskExecution: (inboxId, input) => this.deliveryStore.finishForegroundTaskExecution({ inboxId, ...input, completedAt: Date.now() }),
         modelPickerTtlMs: config.modelPickerTtlMs,
         permissionPickerTtlMs: config.permissionPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
@@ -1973,6 +1976,22 @@ export class AssistantDeliveryService extends Service {
       live = false
       if (this.acceptanceSink?.token === token) this.acceptanceSink = undefined
     }
+  }
+
+  private beginForegroundTaskExecution(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): string | undefined {
+    const owner = this.ownerLineageForBinding(binding)
+    if (owner === undefined) return undefined
+    const inbox = this.deliveryStore.getInboxByProviderEvent(envelope.channel, envelope.account, envelope.eventId)
+    if (!inbox || inbox.status !== 'claimed' || inbox.bindingId !== binding.id
+      || JSON.stringify(inbox.envelope) !== JSON.stringify(envelope)) {
+      throw new AssistantDeliveryError('missing-binding', 'foreground execution lacks an authenticated owner inbox')
+    }
+    this.deliveryStore.bindForegroundTaskExecution({ inboxId: inbox.id,
+      scope: { workspace: binding.workspace, preset: binding.agentPreset }, owner, binding, dispatchedAt: Date.now() })
+    return inbox.id
   }
 
   private prepareForegroundTaskAcceptance(
@@ -3344,12 +3363,11 @@ export class AssistantDeliveryService extends Service {
       if (goalOutcomeTarget === undefined) return 'invalid-target'
       return await this.dispatchGoalOutcomeFeedback(binding, inbox, target, parsed, goalOutcomeTarget)
     }
-    // Ordinary Agent replies have no learning metadata.  They are eligible
-    // only for Delivery's local, atomic verified-workflow receipt; the Store
-    // rebuilds the full Inbox/Outbox fence and abstains unless the source text
-    // selects a closed deterministic-deidentification template.  Do not route
-    // these judgements through Evaluation: they are task proof for workflow
-    // repetition, not a cross-plugin quality vote.
+    // Ordinary Agent replies have no learning metadata. A completed Host
+    // execution permits an authenticated owner revision in Evaluation. The
+    // separate local workflow path rebuilds its Inbox/Outbox fence and abstains
+    // unless the source selects a closed deterministic-deidentification template;
+    // legacy replies without an execution receipt retain that local path.
     if (metadata?.['dsh.learning.kind'] !== 'automation-run') {
       const sourceEventId = target.intent.replyToEventId
       if (typeof sourceEventId !== 'string') return 'invalid-target'
@@ -3366,7 +3384,16 @@ export class AssistantDeliveryService extends Service {
         owner: lineage,
         bindingId: binding.id,
       })
-      const canonicalForeground = accepted !== null
+      const foreground = lineage === undefined ? null : this.deliveryStore.inspectForegroundExecutionForOwner({
+        inboxId: sourceInbox.id, scope: { workspace: binding.workspace, preset: binding.agentPreset },
+        owner: lineage, bindingId: binding.id, bindingVersion: binding.version, bindingGeneration: binding.generation,
+      })
+      // The owner labels the objective, not whether Host work has stopped.
+      // Do not let Evaluation's delivery producer turn an unknown execution
+      // into a succeeded one merely because its reply reached the user.
+      if ([foreground, accepted].some(execution => execution !== null
+        && (execution.status !== 'succeeded' || !execution.quiescent))) return 'invalid-target'
+      const canonicalForeground = foreground !== null || accepted !== null
       const projectForegroundOwner = async (inspectOnly: boolean) => {
         const sink = this.evaluationSink
         if (sink === undefined || lineage === undefined) return undefined
@@ -3408,7 +3435,7 @@ export class AssistantDeliveryService extends Service {
       }
       if (canonicalForeground && this.evaluationSink === undefined) return 'unavailable'
       try {
-        // Evaluation commits first for accepted foreground tasks. If the sink
+        // Evaluation commits first for recorded foreground tasks. If the sink
         // is unavailable, never acknowledge a Delivery-only success; a replay
         // can safely repeat the opaque command and then repair local workflow
         // evidence after the canonical owner revision is durable.
@@ -4426,19 +4453,23 @@ export class AssistantDeliveryService extends Service {
       || externalPrincipalId(binding.principal) !== owner.principalId
       || JSON.stringify(inbox.envelope.principal) !== JSON.stringify(binding.principal)
       || JSON.stringify(inbox.envelope.conversation) !== JSON.stringify(binding.conversation)) return undefined
-    const execution = this.deliveryStore.inspectForegroundAcceptedExecutionForOwner({ inboxId: inbox.id,
+    const accepted = this.deliveryStore.inspectForegroundAcceptedExecutionForOwner({ inboxId: inbox.id,
       scope: { workspace: owner.workspace, preset: owner.agentPreset }, bindingId: binding.id,
       owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion } })
+    const execution = this.deliveryStore.inspectForegroundExecutionForOwner({ inboxId: inbox.id,
+      scope: { workspace: owner.workspace, preset: owner.agentPreset }, bindingId: binding.id,
+      bindingVersion: binding.version, bindingGeneration: binding.generation,
+      owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion } }) ?? accepted
     if (execution === null) return undefined
     const verifierComponent = (component: Pick<NonNullable<TrustedTaskLearningProjectionReceipt['objective']>, 'source' | 'evidence' | 'evaluator'>) =>
-      component.source.kind === 'evaluator' && component.source.id === 'assistant-verifier'
+      accepted !== null && component.source.kind === 'evaluator' && component.source.id === 'assistant-verifier'
       && component.evaluator.id === 'assistant-verifier' && component.evaluator.version === '1'
       && component.evidence.some(ref => ref.kind === 'foreground-turn' && ref.ref === inbox.id)
-      && component.evidence.some(ref => ref.kind === 'execution' && ref.ref === execution.executionRef)
+      && component.evidence.some(ref => ref.kind === 'execution' && ref.ref === accepted.executionRef)
       && component.evidence.some(ref => ref.kind === 'acceptance-contract'
-        && ref.ref === execution.contractId && ref.digest === execution.contractDigest)
+        && ref.ref === accepted.contractId && ref.digest === accepted.contractDigest)
     if (canonical.execution !== undefined && (!verifierComponent(canonical.execution)
-      || canonical.execution.status !== execution.status)) return undefined
+      || canonical.execution.status !== accepted?.status)) return undefined
     let judgement: OwnerForegroundLearningTask['judgement'] = 'unresolved'
     let ownerRevision: OwnerForegroundLearningTask['ownerRevision']
     const objective = canonical.objective
@@ -4462,6 +4493,10 @@ export class AssistantDeliveryService extends Service {
       if (!verifierComponent(objective)) return undefined
       judgement = 'independent-verifier'
     }
+    // Generic execution receipts establish task provenance, never goal success.
+    // Without an acceptance contract, only authenticated typed owner feedback
+    // may turn a completed ordinary conversation into a learning source.
+    if (accepted === null && judgement !== 'owner-feedback') return undefined
     // Fence cross-ledger reads before handing any task text to the consumer.
     if (!evaluation.isTrustedTaskLearningProjectionReceipt(canonical)
       || acceptanceCanonicalJson(owner) !== acceptanceCanonicalJson(this.validateOwnerRoute(routeInput))) return undefined
