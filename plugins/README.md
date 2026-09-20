@@ -44,7 +44,7 @@
 | [assistant-skills](assistant-skills) | `@dsh-enhanced/assistant-skills` | 实验性 | 独立验收任务的私有版本化工具技能、原生发现与新目标复用。 |
 | [assistant-evolution](assistant-evolution) | `@dsh-enhanced/assistant-evolution` | 实验性 | 审批门控的行为自演化：按证据提出 guidance，经 owner 批准后注入；只允许对 Host 证明已退化的 exact rule 自动回滚，不能自我采用、扩权或原地改写。 |
 | [assistant-growth-experiments](assistant-growth-experiments) | `@dsh-enhanced/assistant-growth-experiments` | 实验性（supervised 场景包含） | 审批后的工作流 replay/shadow/单次 canary、晋升与撤回；已接入真实 Automations 服务及组合测试。core/lark 不默认安装，阶段通过不单独证明能力相对基线改善。 |
-| [assistant-growth-driver](assistant-growth-driver) | `@dsh-enhanced/assistant-growth-driver` | 实验性 | Opt-in、默认关闭的主动成长轮：有界后台 Agent 只读回顾 owner 已验收的重复成功，Host 复核后仅沉淀 pending skill candidate；另有独立开关的 owner-anchored workflow 轨（Delivery 持 goals 独立复核真实成功 goal，单条即沉淀 paused automation，占位 cron 未被 owner 显式替换前 store 层禁止激活）；路由钉死 super-relay/alwaysday1，零 activate/install。 |
+| [assistant-growth-driver](assistant-growth-driver) | `@dsh-enhanced/assistant-growth-driver` | 实验性 | 可按真实 owner 任务反馈自动创建持久成长作业，复用 Automations 调度，默认继承来源实际模型、支持固定覆盖；有界技能/工作流及源码候选生成。当前产物仍待采用，尚未贯通完整自我迭代闭环。 |
 
 ## 安全、治理与运维
 

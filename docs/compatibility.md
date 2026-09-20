@@ -176,6 +176,8 @@ Prospective holdout profile 现有三个任务族：order-summary（v1/v2）、t
 
 `plugin-control-plane` optional `sourceJobs` uses the current `assistant-automations` Host executor registration, system reconcile, activation metadata and `inspectSystemOwned` production-terminal projection, plus Delivery v2 `validateOwnerRoute`. Its peer floor is `0.1.33`; capability checks still reject binaries missing these exact seams (including earlier builds carrying that same development version). These peers are late-bound through an owned nested Cordis injection. The pinned Cordis/Loader/Include baseline is unchanged. Growth's durable enqueue API is optional and checked at runtime; older control planes continue to support inline preparation only.
 
+Growth `usageLearning` uses same-release Evaluation schema 12 canonical feed/writer fences, Delivery schema 22 accepted-task model snapshots and owner source inspection, and native Automations Host executors. Its peer floor for those services is `0.1.33`; earlier development builds with that version still require the exact APIs. Evaluation/Automations are late-bound optional peers, not auto-enabled bundles. Delivery captures `request/header` after pinned DSH `llm.prepareCall()` applies defaults; proposed `agent/request` options are insufficient. Old accepted executions retain a missing model snapshot, never a guessed current route. Upgrade checks cover migration, adapter defaults, model changes, native scheduling, correction/retraction and interrupted-job recovery.
+
 ### Live Loader runtime observer
 
 Control Plane's optional `runtimeObserver` consumes the installed Cordis 4.0.2

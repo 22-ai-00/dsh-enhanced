@@ -69,6 +69,8 @@ plugins/<name>/
 
 Delivery 内置运行时通过同一 schema 19 Session lease 表序列化 active binding 的恢复与绑定前 construction，Session ID 是最终排他键。新会话的持久身份在 binding 写入前就固定，released orphan 不允许换主体接管。生命周期由原生 AgentLoop 驱动；lease 不负责调度，过期的 dispatched/unknown 也不授予恢复权限。Goals wake 已接入同一 gate，与前台共享排他，再按既有 Automations 的持久任务意图派发。
 
+Growth 的可选 `usageLearning` 使用 Evaluation canonical feed 与 Delivery owner 来源校验，把真实前台结果转成持久复盘意图；它只保存消费游标和作业快照，不复制结果账本。Evaluation writer fence 内同步提交游标与意图，原生 Automations 拥有每分钟恢复扫描、一次性作业、执行准入和预算。模型在来源任务实际请求时固定并持久保存，后台恢复不重新读取用户当前模型选择。queued 可恢复，派发后的 unknown 不自动重放；纠正、撤回及 owner 换代在模型/工具边界阻止旧来源继续使用。当前复盘可生成既有候选，候选的自主采用仍是后续接线。
+
 
 ## 离线隔离执行
 
