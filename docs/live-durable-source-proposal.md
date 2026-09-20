@@ -1,32 +1,10 @@
 # Real model → durable source check
 
-## Recorded engineering result
+## Evidence boundary
 
-The 2026-09-19 Day1 run
-queued a real `personal-memory` repair in 189.9 seconds. A fresh Context without
-an Agent claimed the same durable job exactly once, completed the offline
-repository check and pack in 17.5 minutes, and retained a `pending-approval`
-plan with no remaining container. The candidate's isolated repository tests
-passed 5,860 cases with 44 skips. The separate Host toolkit check passed 5,872
-cases with 44 skips and 35 dry-run packs.
+A bounded Day1 run produced a `personal-memory` repair, and a fresh Host Context completed the durable offline check and retained a `pending-approval` plan. Independent acceptance rejected the frozen baseline and accepted the candidate. The repair was subsequently integrated after review; the original plan was not self-approved.
 
-The independent acceptance
-failed seven defect cases on the frozen baseline and passed all 16 cases on the
-candidate. Input staging was corrected after generation to read immutable Git
-blobs; the pre-generation launcher and assertions stayed byte-identical. The
-four earlier failed attempts
-remain recorded. The successful run configured the private `low` probe, but
-effective per-request reasoning selection was not recorded. Changed settings
-and tool contracts prevent a controlled improvement claim.
-
-This run ended at a pending plan. Its implementation was subsequently
-integrated after review
-with an explicit old-writer stop requirement, a stronger reopen test and a
-transaction failure/retry test. The tokenizer and migration implementation
-bytes match the accepted Day1 candidate; these owner followups change only
-documentation and tests. The original Control Plane plan was not self-approved.
-Publication, activation, process-crash recovery and later-task reuse remain
-outside this evidence.
+This establishes the source-proposal and durable-check path. It does not establish autonomous publication, activation, process-crash recovery, or later-task improvement. Changed settings and tool contracts prevent a controlled gain claim. Current delivery and remaining acceptance are maintained in [RSI status](rsi-status.md); superseded timings and test-count snapshots remain in Git history, and raw runs stay local.
 
 ## Harness
 

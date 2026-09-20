@@ -32,7 +32,7 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 
 恢复不隐式重放：完整 journal 与完整 completion marker 可以离线递归重验，且不会重新启动 authority 或 delegate；unknown 直接返回。completed prefix、stale running intent、无 finish marker 的 completed journal，以及 marker/plan/evidence 漂移均在 provider startup 前失败关闭。v1 没有 durable provider resume token。尤其在最后一个 cell，finish marker 先于 runner 的 SQLite `finish()` 发布；若进程在两者之间真实崩溃，重启会保留 running intent，operator 必须确认旧执行已经停止，再显式 `BenchmarkStore.interrupt()` 记为 unknown，不能把 marker 当作 SQLite 成功终态。
 
-`openHoldoutProvider()` 使用一条串行 NDJSON stdio session，固定 child `cwd` 为 `/`，完全替换为 operator 显式 environment，不继承 Host environment，并对帧、stderr、ready/request/close/kill 设置上限。它要求 executable 是绝对 canonical pathname，但没有把 executable fd/inode 绑定到 `spawn`，无法抵抗校验后的 pathname 替换。当前集成测试的 authority 是仓库 fixture 启动的同 UID synthetic child；它证明真实子进程 transport、签名协议、持久化边界和重启重验行为，不证明独立 UID/账号/机器、真实 operator holdout、真实模型调用或线上收益。WP04 因此仍为实现中。
+`openHoldoutProvider()` 使用一条串行 NDJSON stdio session，固定 child `cwd` 为 `/`，完全替换为 operator 显式 environment，不继承 Host environment，并对帧、stderr、ready/request/close/kill 设置上限。它要求 executable 是绝对 canonical pathname，但没有把 executable fd/inode 绑定到 `spawn`，无法抵抗校验后的 pathname 替换。当前集成测试的 authority 是仓库 fixture 启动的同 UID synthetic child；它证明真实子进程 transport、签名协议、持久化边界和重启重验行为，不证明独立 UID/账号/机器、真实 operator holdout、真实模型调用或线上收益。WP04 因此仍为实现中。 POSIX 同组后代可由清理路径收敛，但进程组数值复用和脱组后代不属于强 OS containment 保证。
 
 
 ## 原生开发集入口
@@ -66,13 +66,6 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 `inputTokenUpperBound` 属于可信 Host 合约，不是本 SDK 内置的模型 tokenizer。适配器应提供与其序列化一致的可靠上界，关闭提供商内部重试，并遵循 DSH 的计量：非缓存输入、cache read、cache write 为互斥分项，三者之和为总输入；reasoning 是 output 的子集。总输入、输出、各分项、totalTokens 的一致性与整数溢出均被核验。若只使用字节估算，必须显式选择 `inputLimitMode: "estimate"`；该模式不声称输入上界，不接受金额预算。返回量超过预留值时记录 unknown 并停止，不能回溯撤销该次远端消费。运行时版本摘要包含协议与安装包版本，不是完整可执行文件供应链证明。
 
 
-## 首轮真实模型证据
-
-2026-09-06 使用用户 web 现有模型配置，执行两题、两 persona、各两次的完整配对计划。8 次均取得完整观测，共输入 2,084 / 输出 164 tokens，金额未知；两方案均通过 2/4，配对收益为 0。计算题未满足完整答案/引用验收，注入题通过。首轮只保存答案摘要，无法从报告进一步区分答案计算错误与引用缺漏；后续需要增加不泄露隐藏答案的独立判定诊断，不能猜测失败原因或修改判定器将这批失败改成成功。
-
-该历史运行的脱敏计划与结果包含逐 cell 计量、验收摘要和完整报告；原始文件留本地，不随仓库分发。前两次适配器接线失败均按 unknown 保留，修复后另建完整计划。该次运行使用当时匹配的 runtime，不验证当前 web profile 的安装与交互路径。小样本公开开发题的零差异区间不代表没有泛化差异，也不能作为推广或高权限自治授权依据。
-
-
 ## Memory 的真实检索对照
 
 使用 `suite: "memory-v2"` 与以下两个变体；两组 persona 必须完全相同，baseline 的 memory 为 false、candidate 为 true。任务列表由 `dsh-benchmark corpus --suite memory-v2` 给出。公开输入摘要覆盖当前任务、资料、全部记忆 fixture（包括不可见和撤回项）与快照预算，验收对象单独绑定，模型输入不含 oracle。
@@ -103,8 +96,8 @@ Host adapter 负责创建干净且等价的执行环境、载入确切变体、�
 `memory-v1` 保留首轮公开试验的原始题目与判定，可按原计划复现。`memory-v2` 是单独版本，明确当前资料 ID、Memory provenance URI 与 `claim:<key>` 的引用约定；改进题目说明后必须建立新计划，不会重写 v1 的失败结果。
 
 
-## Memory 真实模型开发试验
+## 历史实验的证据边界
 
-2026-09-07 使用同一 `codex-subscription/gpt-5.6-terra`，两个冻结版本各执行 24 次无工具请求。v1 的严格答案与引用验收为 baseline 2/12、candidate 1/12；候选核心答案正确但引用格式多不满足要求，保留原判定。v2 在新题目版本中明确来源 ID/URI/claim marker 约定，得到 baseline 2/12、candidate 12/12（10 对改善、2 对持平，无未知）。完整计划、逐 cell 答案与计量留在本地原始证据中；此处保留历史结论，不代表当前版本重新验证。这只是公开开发题中的检索可用性收益，不是隐藏留出或基础模型智能提升证据。
+早期公开开发集实验包括 persona 配对持平，以及 Memory 检索在修订引用约定后的开发题上改善。它们使用历史供应和版本，只支持当时任务上的有限结论，不是当前版本验收、隐藏留出或基础模型提升证据。逐轮时间、计量和诊断从 Git 历史或本地原始证据查阅；旧失败和 unknown 不改判、不重放。
 
-provider startup 取消、迟到资源清理、POSIX 同组后代清理、独立 Node 清理等待及 startup cleanup 错误传播有回归覆盖；进程组数值复用和脱组后代不属于强 OS containment 保证。当前工程验证统一见 [RSI 当前状态](rsi-status.md)。
+当前供应为 `super-relay / auto_model/alwaysday1`；真实技能复用入口见[原生技能复用](native-skill-reuse.md)，最新结果、工程验证和剩余门槛统一见 [RSI 当前状态](rsi-status.md)。
