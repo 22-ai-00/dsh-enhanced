@@ -2,7 +2,7 @@
 
 `plugin-control-plane/bin/dsh-systemd-host-attestor.js` is shipped in the
 Control Plane bundle. It implements the existing configured Host executable
-contract, version `dsh-systemd-host-attestor-2`, for **reload and readiness** on Linux.
+contract, version `dsh-systemd-host-attestor-3`, for **reload and readiness** on Linux.
 It uses the existing signed receipt, request, fence and activation state
 machine. It creates no Cordis plugin, AgentLoop, model tool or scheduler.
 
@@ -163,10 +163,23 @@ checks require:
 - systemd's full current successor tuple both before and after each query;
 - observer PID/InvocationID matching that tuple, the exact profile and observer
   config digest, a fresh challenge and an in-query timestamp;
-- every selected entry active with exact module/config and required services;
+- every selected entry present with exact module/config and required service names;
 - unchanged observer identity, candidate instance epochs and all dependency and
   service provider instances throughout the window;
 - unchanged channel key and profile/deployment file pins.
+
+If every selected entry is active with live dependency/service instances, the
+receipt is `passed`. A stable authenticated entry with `active: false` instead
+counts as a failed check and produces a signed `failed` receipt after the same
+minimum checks and stable window. Inactive entries may have null Fiber,
+dependency or service instances; these establish that the configured capability
+is not ready. Missing entries, module/config mismatch, failed authentication,
+supervisor drift, changing runtime state or query failures remain unconfirmed
+and produce no receipt. They must not be converted into a signed failure.
+
+A failed readiness receipt enters the existing Control Plane rollback path.
+The current CLI restores profile files; it does not prove that the running Host
+has loaded the restored profile. Physical Host rollback remains a separate gap.
 
 The signed readiness `probeDigest` covers the reload receipt digest and successor,
 request/config digests, channel key digest, stable runtime identity, sample
@@ -183,9 +196,10 @@ Unknown outcomes never acquire restart authority.
 
 ### Version and journal migration
 
-Version 2 retains schema-1 reload configuration and adds schema-2 readiness.
+Version 2 added schema-2 readiness while retaining schema-1 reload configuration.
+Version 3 retains both schemas and adds signed stable-negative readiness.
 Its executable/version pins must be updated through owner configuration before
-preparing requests. Pending version-1 requests cannot be silently converted;
+preparing requests. Pending older-version requests cannot be silently converted;
 retain their pinned binary for reconciliation. The journal adds nullable raw
 request/config columns transactionally. Historical reload rows lacking this
 context remain valid historical reload records but cannot authorize readiness;
@@ -254,10 +268,23 @@ and independent review evidence is recorded in the
 profile with actual Control Plane observer and Policy candidate entries. It
 checks signed reload → signed readiness, independent signature verification,
 byte-identical readiness replay without another Host restart, and refusal after
-the Host is replaced with the candidate disabled. It uses fixture requests,
-not an actual Control Plane activation CAS or npm-installed candidate. The
+the Host is replaced with the candidate state changed. The historical v2
 [recorded real DSH run](evidence/systemd-readiness-real-dsh-2026-09-19.json)
-retains both signed receipts and the readiness probe preimage.
+used fixture requests without Control Plane CAS and retains both signed
+receipts and the readiness probe preimage.
 The [readiness engineering validation](evidence/systemd-readiness-engineering-2026-09-19.json)
 records the full repository check, package inspection, prior failures and
 independent review for this capability.
+
+The current v3 fixture uses the existing Control Plane store for signed approval,
+durable requests, receipt verification and phase CAS, then reopens the ledger.
+Set `DSH_READINESS_EXPECT_INACTIVE=1` to start with the candidate disabled and
+require signed failed readiness plus durable `rollback-pending`; otherwise the
+active candidate must reach `awaiting-effect-blocked-replay`. Catalog integrity,
+approval authority and profile staging are explicit fixture inputs. This does
+not execute npm installation, CLI profile restoration or physical Host rollback.
+The [active-candidate run](evidence/systemd-readiness-positive-real-dsh-2026-09-20.json)
+and [inactive-candidate run](evidence/systemd-readiness-negative-real-dsh-2026-09-20.json)
+retain signed receipts, probe preimages and the actual phase transitions.
+Full-check, independent-review and prior-failure records are in the
+[v3 engineering evidence](evidence/systemd-readiness-negative-engineering-2026-09-20.json).

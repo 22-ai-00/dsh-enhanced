@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
-export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-2'
+export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-3'
 const DIGEST = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const UNIT_PROPERTIES = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory', 'User', 'Group', 'Type', 'KillMode']
@@ -313,7 +313,7 @@ async function attestReadiness(request, config, privateKey, db, execute, deadlin
   const cached = cachedReceipt(reserved, request, config, privateKey)
   const retained = cached ? parseJson(Buffer.from(reserved.observation), 'readiness observation') : undefined
   if (retained && (cached.evidence.probeDigest !== digest(retained) || canonical(retained.reload) !== canonical(reload))) fail('retained readiness binding differs')
-  let stable; let started; const samples = []; const challenges = new Set()
+  let stable; let started; let failures = 0; const samples = []; const challenges = new Set()
   for (;;) {
     assertCurrent(config, request); remaining(deadline)
     if (canonical(boundReload(db, request, config, privateKey)) !== canonical(reload)) fail('reload changed during readiness')
@@ -327,17 +327,26 @@ async function attestReadiness(request, config, privateKey, db, execute, deadlin
       || sample.observedAt < queryStarted || sample.observedAt > Date.now() || challenges.has(sample.challenge)
       || sample.entries.length !== ready.observer.targets.length) fail('observer identity or freshness differs')
     challenges.add(sample.challenge)
+    let sampleFailed = false
     for (const target of ready.observer.targets) {
       const entry = sample.entries.find(item => item.entryId === target.entryId)
-      if (!entry?.active || !entry.instance || entry.module !== target.module || entry.configDigest !== target.configDigest
-        || canonical(entry.services.map(service => service.name).sort()) !== canonical([...target.services].sort())
-        || [...entry.dependencies, ...entry.services].some(service => !service.instance)) fail('candidate is not ready')
+      if (!entry || entry.module !== target.module || entry.configDigest !== target.configDigest
+        || canonical(entry.services.map(service => service.name).sort()) !== canonical([...target.services].sort())) fail('candidate identity differs')
+      if (entry.active === true) {
+        if (!entry.instance || [...entry.dependencies, ...entry.services].some(service => !service.instance)) fail('active candidate is not ready')
+      } else if (entry.active === false) {
+        // A disabled or pending Fiber has no instance by contract.  It is a
+        // signed negative result only after the complete authenticated identity
+        // remains stable for the full window; malformed identities still abort.
+        sampleFailed = true
+      } else fail('candidate active state is invalid')
     }
     const { challenge: _challenge, observedAt: _observedAt, ...identity } = sample
     if (stable === undefined) { stable = identity; started = performance.now() }
     else if (canonical(identity) !== canonical(stable)) fail('runtime instance changed during readiness')
     if (retained && canonical(identity) !== canonical(retained.runtime)) fail('cached readiness runtime changed')
     samples.push({ challenge: sample.challenge, observedAt: sample.observedAt, digest: digest(sample) })
+    if (sampleFailed) failures++
     const after = await observe(config, execute, deadline)
     if (canonical(after) !== canonical(reload.successor)) fail('supervisor changed during runtime query')
     if (samples.length >= Math.max(2, request.requirements.minimumChecks) && performance.now() - started >= config.stableWindowMs) break
@@ -348,11 +357,11 @@ async function attestReadiness(request, config, privateKey, db, execute, deadlin
   if (hash(readSafe(ready.observer.keyPath, 32, true)) !== channelDigest) fail('observer key changed')
   const observation = { schemaVersion: 1, requestDigest: digest(request), configDigest: digest(config), reload,
     channelDigest, runtime: stable, samples, stableWindowMs: config.stableWindowMs, observedAt: Date.now() }
-  const evidence = { kind: 'readiness', checks: samples.length, failures: 0, probeDigest: digest(observation) }
+  const evidence = { kind: 'readiness', checks: samples.length, failures, probeDigest: digest(observation) }
   const unsigned = { schemaVersion: 2, receiptId: `receipt:${request.operationId}`, authority: config.authority, keyId: config.keyId,
     installationId: request.installationId, planId: request.plan.id, planDigest: request.plan.digest,
     activationId: request.activation.id, fence: request.activation.fence, operationId: request.operationId,
-    requestDigest: digest(request), phase: 'readiness', outcome: 'passed', hostGeneration: reload.generation,
+    requestDigest: digest(request), phase: 'readiness', outcome: failures === 0 ? 'passed' : 'failed', hostGeneration: reload.generation,
     evidence, evidenceDigest: digest(evidence), observedAt: observation.observedAt,
     expiresAt: Math.min(observation.observedAt + request.receiptTtlMs, config.authorization.expiresAt) }
   if (unsigned.expiresAt <= unsigned.observedAt) fail('authorization expired before signing')

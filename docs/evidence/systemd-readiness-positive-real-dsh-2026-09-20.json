@@ -1,0 +1,612 @@
+{
+  "schemaVersion": 1,
+  "kind": "systemd-readiness-real-dsh-fixture",
+  "observedAt": "2026-09-20T00:13:46.076Z",
+  "dshVersion": "0.1.5-rc.2",
+  "dshCliSha256": "0ff7f1d72c4e0cbe14001709c81e20a04b70464118a7f78568952988e28f2ac5",
+  "candidatePackage": "@dsh-enhanced/assistant-policy",
+  "candidateVersion": "0.1.33",
+  "initialCandidateDisabled": false,
+  "runtimeDigests": {
+    "observer": "ad2b2cadc5ab61242d5cbe281839fd584f7050cc9ba09433f872d2bc9d16f2bb",
+    "attestor": "97fd700d94c8b5a6803a7a28f278f7c90579a9c2ffe2ec752dee67e1ba6caa30",
+    "observerClient": "85923416842544f74700a4fbdd8d2a865fe7c528edd3f40de43f738e6522fd64",
+    "processHelper": "285aa47e5aa1a310f0463fa5ddfdfe7e3d0b2f112b03329c029055137c015e74",
+    "controlEntry": "5467c2030f733eb3e9539e55d8060b27eecf92010a294d065b494b6b906a3ac3",
+    "candidateEntry": "d0f468112df59c56dd4c297dffa7beff79e67654e41f5b0dd36037b617daf88d"
+  },
+  "active": {
+    "supervisor": {
+      "MainPID": "540873",
+      "ActiveState": "active",
+      "InvocationID": "da8f48e8be1748d4aacd693dc8a08779"
+    },
+    "observation": {
+      "schemaVersion": 1,
+      "kind": "dsh-runtime-observation",
+      "observerId": "72dc1c6e-21d0-44cc-834a-57c200e03010",
+      "observerConfigDigest": "e36d951728d0276a1a509ade51cb1f2399ae901e3fbfd7274965ba3da0e56252",
+      "challenge": "1f7e706f54e7df8405d54ce22d1c8094439aabd8615e49d74b51e57200d6f6d3",
+      "processId": 540873,
+      "invocationId": "da8f48e8be1748d4aacd693dc8a08779",
+      "profilePath": "/tmp/dsh-ready-sHM2LU/home/profiles/readiness-fixture-540789-8003f5ba",
+      "observedAt": 1789863211831,
+      "entries": [
+        {
+          "entryId": "include:observed-candidate",
+          "module": "file:///data00/home/jiataorui/work/github/dsh-enhanced/plugins/assistant-policy/lib/index.js",
+          "configDigest": "56b3e2a73db982f8b1c53818ce922f18fa93a351487ea5cb60a921830bd2e9f4",
+          "active": true,
+          "instance": {
+            "uid": 115,
+            "epoch": 1
+          },
+          "dependencies": [],
+          "services": [
+            {
+              "name": "assistantPolicy",
+              "instance": {
+                "uid": 115,
+                "epoch": 1
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "replay": {
+    "supervisor": {
+      "MainPID": "540873",
+      "ActiveState": "active",
+      "InvocationID": "da8f48e8be1748d4aacd693dc8a08779"
+    },
+    "observation": {
+      "schemaVersion": 1,
+      "kind": "dsh-runtime-observation",
+      "observerId": "72dc1c6e-21d0-44cc-834a-57c200e03010",
+      "observerConfigDigest": "e36d951728d0276a1a509ade51cb1f2399ae901e3fbfd7274965ba3da0e56252",
+      "challenge": "d93800db7de73d7f04451efeab7f8da0ff5c3f7841a62d5945be73c594505210",
+      "processId": 540873,
+      "invocationId": "da8f48e8be1748d4aacd693dc8a08779",
+      "profilePath": "/tmp/dsh-ready-sHM2LU/home/profiles/readiness-fixture-540789-8003f5ba",
+      "observedAt": 1789863211853,
+      "entries": [
+        {
+          "entryId": "include:observed-candidate",
+          "module": "file:///data00/home/jiataorui/work/github/dsh-enhanced/plugins/assistant-policy/lib/index.js",
+          "configDigest": "56b3e2a73db982f8b1c53818ce922f18fa93a351487ea5cb60a921830bd2e9f4",
+          "active": true,
+          "instance": {
+            "uid": 115,
+            "epoch": 1
+          },
+          "dependencies": [],
+          "services": [
+            {
+              "name": "assistantPolicy",
+              "instance": {
+                "uid": 115,
+                "epoch": 1
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "successor": {
+    "supervisor": {
+      "MainPID": "542052",
+      "ActiveState": "active",
+      "InvocationID": "bcf79b34c2e54d3dbcfea9b633b263ec"
+    },
+    "observation": {
+      "schemaVersion": 1,
+      "kind": "dsh-runtime-observation",
+      "observerId": "6e90dda5-9490-469d-9c01-4890d15ba602",
+      "observerConfigDigest": "e36d951728d0276a1a509ade51cb1f2399ae901e3fbfd7274965ba3da0e56252",
+      "challenge": "f6398d0efead47ffbefc554a21409dce1944c4c47faa32d5589b8166234f67e6",
+      "processId": 542052,
+      "invocationId": "bcf79b34c2e54d3dbcfea9b633b263ec",
+      "profilePath": "/tmp/dsh-ready-sHM2LU/home/profiles/readiness-fixture-540789-8003f5ba",
+      "observedAt": 1789863218214,
+      "entries": [
+        {
+          "entryId": "include:observed-candidate",
+          "module": "file:///data00/home/jiataorui/work/github/dsh-enhanced/plugins/assistant-policy/lib/index.js",
+          "configDigest": "56b3e2a73db982f8b1c53818ce922f18fa93a351487ea5cb60a921830bd2e9f4",
+          "active": true,
+          "instance": {
+            "uid": 115,
+            "epoch": 1
+          },
+          "dependencies": [],
+          "services": [
+            {
+              "name": "assistantPolicy",
+              "instance": {
+                "uid": 115,
+                "epoch": 1
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "afterReadiness": {
+    "MainPID": "542052",
+    "ActiveState": "active",
+    "InvocationID": "bcf79b34c2e54d3dbcfea9b633b263ec"
+  },
+  "replacement": {
+    "supervisor": {
+      "MainPID": "543196",
+      "ActiveState": "active",
+      "InvocationID": "afa8e10b67064f95811789aa18d1317f"
+    },
+    "observation": {
+      "schemaVersion": 1,
+      "kind": "dsh-runtime-observation",
+      "observerId": "e6efb442-ab1c-47a8-85d6-fa1b3b738c32",
+      "observerConfigDigest": "e36d951728d0276a1a509ade51cb1f2399ae901e3fbfd7274965ba3da0e56252",
+      "challenge": "91d6baafa55c3b6ff6b5bfe5799538822e2b0ef5a1ef51fee31895905e5df4dd",
+      "processId": 543196,
+      "invocationId": "afa8e10b67064f95811789aa18d1317f",
+      "profilePath": "/tmp/dsh-ready-sHM2LU/home/profiles/readiness-fixture-540789-8003f5ba",
+      "observedAt": 1789863226012,
+      "entries": [
+        {
+          "entryId": "include:observed-candidate",
+          "module": "file:///data00/home/jiataorui/work/github/dsh-enhanced/plugins/assistant-policy/lib/index.js",
+          "configDigest": "56b3e2a73db982f8b1c53818ce922f18fa93a351487ea5cb60a921830bd2e9f4",
+          "active": false,
+          "instance": null,
+          "dependencies": [],
+          "services": [
+            {
+              "name": "assistantPolicy",
+              "instance": null
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "reloadReceipt": {
+    "activationId": "activation-c4666df3-14a6-4274-b581-8ac592e5a908",
+    "authority": "fixture-owner",
+    "evidence": {
+      "currentHostGeneration": 1,
+      "kind": "reload",
+      "previousHostGeneration": 0,
+      "probeDigest": "19f25cbdab9c70baeb9d1742087ad774c536a79c37ff68238ca45a2ae683c411",
+      "reloaded": true
+    },
+    "evidenceDigest": "468864f86a2cab942e1743c01ed80917a027c142417d1047bdc5a86d97865cb8",
+    "expiresAt": 1789863332274,
+    "fence": 1,
+    "hostGeneration": 1,
+    "installationId": "753062f0-a387-4d2f-8b67-24b83323e7c1",
+    "keyId": "fixture-key",
+    "observedAt": 1789863214360,
+    "operationId": "host-operation-2d1de568-16d7-4ef3-9256-56f2d3c26c03",
+    "outcome": "passed",
+    "phase": "reload",
+    "planDigest": "ab8988d9cc004c64978ae44fcc35096395622e5abc202f7403ec7e9a0c9b9219",
+    "planId": "plugin-3cd3f59f-7a0e-4213-af92-ec8ccddbe2de",
+    "receiptId": "receipt:host-operation-2d1de568-16d7-4ef3-9256-56f2d3c26c03",
+    "requestDigest": "5a7ef42d9bc6ce020fbc8cb9e4caf32174d16e044b2dfe038ffc3fc8bc2d921e",
+    "schemaVersion": 2,
+    "signature": "oTTyyU6yMXQve9hcRGkzPf6WdWd9uEUIXI3qODCR4QzOsmdbJHbktACv0d4Lonm8e1lZWqCuTHecCW8a2GdHAA=="
+  },
+  "readinessReceipt": {
+    "activationId": "activation-c4666df3-14a6-4274-b581-8ac592e5a908",
+    "authority": "fixture-owner",
+    "evidence": {
+      "checks": 5,
+      "failures": 0,
+      "kind": "readiness",
+      "probeDigest": "b180cde6f208b3af1369d3717ce5751bb0eb1a9cc792bf5e81abfd34f0e62581"
+    },
+    "evidenceDigest": "a66a953c112b1932802e80f8de4a1c2165d4287ec7f6b3671abdd56b18094ff2",
+    "expiresAt": 1789863332274,
+    "fence": 1,
+    "hostGeneration": 1,
+    "installationId": "753062f0-a387-4d2f-8b67-24b83323e7c1",
+    "keyId": "fixture-key",
+    "observedAt": 1789863219237,
+    "operationId": "host-operation-e1ae2251-4c7f-4644-82f4-72a480bee5ae",
+    "outcome": "passed",
+    "phase": "readiness",
+    "planDigest": "ab8988d9cc004c64978ae44fcc35096395622e5abc202f7403ec7e9a0c9b9219",
+    "planId": "plugin-3cd3f59f-7a0e-4213-af92-ec8ccddbe2de",
+    "receiptId": "receipt:host-operation-e1ae2251-4c7f-4644-82f4-72a480bee5ae",
+    "requestDigest": "fd1cabe914b04d6a11e722cf1d7e4de720a4c1331e89d1614b4122727939449a",
+    "schemaVersion": 2,
+    "signature": "zsTtzQSJgxcnZE8+NPzsX5XCVGP6coLV9+UQoqdAI8h296XYgE9qAL2sZkeblWoy82tpKsDeoLRKWAupDFtXAA=="
+  },
+  "signedObservation": {
+    "channelDigest": "7bb6b9b1274b715b29ce45a3ea9411390fe30c4c3506484a769db7494829193a",
+    "configDigest": "042af94505b6fdbaf888d004d30178082691cd96259bb001ab7512c87de60f44",
+    "observedAt": 1789863219237,
+    "reload": {
+      "generation": 1,
+      "operationId": "host-operation-2d1de568-16d7-4ef3-9256-56f2d3c26c03",
+      "receiptDigest": "d56fc8917e8caf124db3e25465daf22a42439ca9f96e41f14660ee292b8186f5",
+      "successor": {
+        "ActiveState": "active",
+        "ControlGroup": "/user.slice/user-1001.slice/user@1001.service/app.slice/dsh-profile-readiness-fixture-540789-8003f5ba.service",
+        "ControlPID": 0,
+        "DropInPaths": "",
+        "Environment": "DSH_HOME=/tmp/dsh-ready-sHM2LU/home HOME=/tmp/dsh-ready-sHM2LU DSH_TELEMETRY_DISABLED=1",
+        "ExecStart": "{ path=/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node ; argv[]=/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node /data00/home/jiataorui/.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/bin.js --profile readiness-fixture-540789-8003f5ba --host 127.0.0.1 --port 0 --no-open ; ignore_errors=no ; }",
+        "FragmentPath": "/run/user/1001/systemd/transient/dsh-profile-readiness-fixture-540789-8003f5ba.service",
+        "Group": "",
+        "Id": "dsh-profile-readiness-fixture-540789-8003f5ba.service",
+        "InvocationID": "bcf79b34c2e54d3dbcfea9b633b263ec",
+        "KillMode": "control-group",
+        "LoadState": "loaded",
+        "MainPID": 542052,
+        "NRestarts": 0,
+        "SubState": "running",
+        "Type": "exec",
+        "User": "",
+        "WorkingDirectory": "/tmp/dsh-ready-sHM2LU/home"
+      }
+    },
+    "requestDigest": "fd1cabe914b04d6a11e722cf1d7e4de720a4c1331e89d1614b4122727939449a",
+    "runtime": {
+      "entries": [
+        {
+          "active": true,
+          "configDigest": "56b3e2a73db982f8b1c53818ce922f18fa93a351487ea5cb60a921830bd2e9f4",
+          "dependencies": [],
+          "entryId": "include:observed-candidate",
+          "instance": {
+            "epoch": 1,
+            "uid": 115
+          },
+          "module": "file:///data00/home/jiataorui/work/github/dsh-enhanced/plugins/assistant-policy/lib/index.js",
+          "services": [
+            {
+              "instance": {
+                "epoch": 1,
+                "uid": 115
+              },
+              "name": "assistantPolicy"
+            }
+          ]
+        }
+      ],
+      "invocationId": "bcf79b34c2e54d3dbcfea9b633b263ec",
+      "kind": "dsh-runtime-observation",
+      "observerConfigDigest": "e36d951728d0276a1a509ade51cb1f2399ae901e3fbfd7274965ba3da0e56252",
+      "observerId": "6e90dda5-9490-469d-9c01-4890d15ba602",
+      "processId": 542052,
+      "profilePath": "/tmp/dsh-ready-sHM2LU/home/profiles/readiness-fixture-540789-8003f5ba",
+      "schemaVersion": 1
+    },
+    "samples": [
+      {
+        "challenge": "d011043d8b5617cd2d5d9154be8fc9708928f63f1393faa068a263140a5a156a",
+        "digest": "1fee49f8a62d905578331df54943eea116e6ac5653b315a32d944845937f20f1",
+        "observedAt": 1789863218685
+      },
+      {
+        "challenge": "0ab16f27a9e111a1669013064b60d3e28c25d4319870042679bed2fe1f675dd9",
+        "digest": "ec7d1f69325ca9fe15d18945c39df973892e1e4caf0385c197dd708ed853a877",
+        "observedAt": 1789863218819
+      },
+      {
+        "challenge": "6fa51e4eca74e69a33ad1011d90b53dfd0daef6860ac0d793025f93003148be0",
+        "digest": "c89ac26454a38d892e4078cff6b0434c91b2138ca4bd178f506ae8dcb46b5e4a",
+        "observedAt": 1789863218960
+      },
+      {
+        "challenge": "f23c175418e44316220fd881ab80bc69cce864f4ee7044f2af21725f7df7ec28",
+        "digest": "4a40194116c7548fba12a33d4f257877decb61d1c6fa831f63f0d900ec09d865",
+        "observedAt": 1789863219092
+      },
+      {
+        "challenge": "4c4af4fb18eef2aac5e7aabb7353235cd850f0c6d7d2424666ccd3d1eddd8bb8",
+        "digest": "a9a6e65b37713392ee231a322875ab853f180a9994f1667a77da434b18289e51",
+        "observedAt": 1789863219223
+      }
+    ],
+    "schemaVersion": 1,
+    "stableWindowMs": 500
+  },
+  "receiptPublicKey": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAQ1Kx4yEc5aOerfsmtmS9vhTcdkmvwsa04ik8JyKQAUs=\n-----END PUBLIC KEY-----\n",
+  "plan": {
+    "schemaVersion": 4,
+    "kind": "activation",
+    "id": "plugin-3cd3f59f-7a0e-4213-af92-ec8ccddbe2de",
+    "gapId": "gap-0e5e4a4b-01b4-4d97-b73e-02f5ec3e9098",
+    "gapSnapshot": {
+      "revision": 1,
+      "inputDigest": "c70486b3d3d20bc85b330d0e466a01bd0c0ce014de809cbe4dc076be9471896d",
+      "roi": 1,
+      "capability": "policy"
+    },
+    "profile": "readiness-fixture-540789-8003f5ba",
+    "candidate": {
+      "id": "assistant-policy",
+      "package": "@dsh-enhanced/assistant-policy",
+      "version": "0.1.33",
+      "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+      "requires": [],
+      "dshBaseline": "0.1.5-rc.2",
+      "capabilities": [
+        "policy"
+      ],
+      "authorities": [
+        "filesystem: disposable policy fixture"
+      ]
+    },
+    "dossier": {
+      "catalogDigest": "5e9860e31982954fbcdc0e0280649f0bd943de9a25492ff79b12277baa82fb2a",
+      "catalogProvenance": "owner-provided-integrity-pinned",
+      "matchedCapabilities": [
+        "policy"
+      ],
+      "authorities": [
+        "filesystem: disposable policy fixture"
+      ],
+      "packages": [
+        {
+          "package": "@dsh-enhanced/assistant-policy",
+          "version": "0.1.33",
+          "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+        }
+      ]
+    },
+    "installationId": "753062f0-a387-4d2f-8b67-24b83323e7c1",
+    "ledger": {
+      "id": "3b6a77aa-07ad-4751-b802-6f4c6420564e",
+      "path": "/tmp/dsh-ready-sHM2LU/owner/external-ledger.sqlite"
+    },
+    "target": {
+      "dshHome": "/tmp/dsh-ready-sHM2LU/home",
+      "profile": "readiness-fixture-540789-8003f5ba",
+      "profilePath": "/tmp/dsh-ready-sHM2LU/home/profiles/readiness-fixture-540789-8003f5ba"
+    },
+    "executor": {
+      "id": "dsh",
+      "version": "0.1.5-rc.2",
+      "path": "/data00/home/jiataorui/.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
+      "sha256": "0ff7f1d72c4e0cbe14001709c81e20a04b70464118a7f78568952988e28f2ac5"
+    },
+    "createdAt": 1789863212278,
+    "expiresAt": 1789863512278,
+    "digest": "ab8988d9cc004c64978ae44fcc35096395622e5abc202f7403ec7e9a0c9b9219",
+    "status": "awaiting-reload",
+    "revision": 4,
+    "approval": {
+      "schemaVersion": 1,
+      "approvalId": "fixture-approval",
+      "authority": "fixture-approval",
+      "keyId": "approval-key",
+      "planId": "plugin-3cd3f59f-7a0e-4213-af92-ec8ccddbe2de",
+      "planDigest": "ab8988d9cc004c64978ae44fcc35096395622e5abc202f7403ec7e9a0c9b9219",
+      "decision": "approved",
+      "principal": "fixture-owner",
+      "decidedAt": 1789863212280,
+      "expiresAt": 1789863332274,
+      "signatureDigest": "f779b3dbde29fc5c6d186040a5578e6519008879074b84a9602304aa03afdf46"
+    },
+    "activation": {
+      "id": "activation-c4666df3-14a6-4274-b581-8ac592e5a908",
+      "fence": 1,
+      "updatedAt": 1789863212286
+    }
+  },
+  "controlPlane": {
+    "transitions": [
+      {
+        "phase": "reload",
+        "outcome": "passed",
+        "before": {
+          "status": "awaiting-reload",
+          "revision": 4
+        },
+        "after": {
+          "status": "awaiting-readiness",
+          "revision": 5
+        }
+      },
+      {
+        "phase": "readiness",
+        "outcome": "passed",
+        "before": {
+          "status": "awaiting-readiness",
+          "revision": 5
+        },
+        "after": {
+          "status": "awaiting-effect-blocked-replay",
+          "revision": 6
+        }
+      }
+    ],
+    "finalPlan": {
+      "schemaVersion": 4,
+      "kind": "activation",
+      "id": "plugin-3cd3f59f-7a0e-4213-af92-ec8ccddbe2de",
+      "gapId": "gap-0e5e4a4b-01b4-4d97-b73e-02f5ec3e9098",
+      "gapSnapshot": {
+        "revision": 1,
+        "inputDigest": "c70486b3d3d20bc85b330d0e466a01bd0c0ce014de809cbe4dc076be9471896d",
+        "roi": 1,
+        "capability": "policy"
+      },
+      "profile": "readiness-fixture-540789-8003f5ba",
+      "candidate": {
+        "id": "assistant-policy",
+        "package": "@dsh-enhanced/assistant-policy",
+        "version": "0.1.33",
+        "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        "requires": [],
+        "dshBaseline": "0.1.5-rc.2",
+        "capabilities": [
+          "policy"
+        ],
+        "authorities": [
+          "filesystem: disposable policy fixture"
+        ]
+      },
+      "dossier": {
+        "catalogDigest": "5e9860e31982954fbcdc0e0280649f0bd943de9a25492ff79b12277baa82fb2a",
+        "catalogProvenance": "owner-provided-integrity-pinned",
+        "matchedCapabilities": [
+          "policy"
+        ],
+        "authorities": [
+          "filesystem: disposable policy fixture"
+        ],
+        "packages": [
+          {
+            "package": "@dsh-enhanced/assistant-policy",
+            "version": "0.1.33",
+            "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+          }
+        ]
+      },
+      "installationId": "753062f0-a387-4d2f-8b67-24b83323e7c1",
+      "ledger": {
+        "id": "3b6a77aa-07ad-4751-b802-6f4c6420564e",
+        "path": "/tmp/dsh-ready-sHM2LU/owner/external-ledger.sqlite"
+      },
+      "target": {
+        "dshHome": "/tmp/dsh-ready-sHM2LU/home",
+        "profile": "readiness-fixture-540789-8003f5ba",
+        "profilePath": "/tmp/dsh-ready-sHM2LU/home/profiles/readiness-fixture-540789-8003f5ba"
+      },
+      "executor": {
+        "id": "dsh",
+        "version": "0.1.5-rc.2",
+        "path": "/data00/home/jiataorui/.npm-global/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
+        "sha256": "0ff7f1d72c4e0cbe14001709c81e20a04b70464118a7f78568952988e28f2ac5"
+      },
+      "createdAt": 1789863212278,
+      "expiresAt": 1789863512278,
+      "digest": "ab8988d9cc004c64978ae44fcc35096395622e5abc202f7403ec7e9a0c9b9219",
+      "status": "awaiting-effect-blocked-replay",
+      "revision": 6,
+      "approval": {
+        "schemaVersion": 1,
+        "approvalId": "fixture-approval",
+        "authority": "fixture-approval",
+        "keyId": "approval-key",
+        "planId": "plugin-3cd3f59f-7a0e-4213-af92-ec8ccddbe2de",
+        "planDigest": "ab8988d9cc004c64978ae44fcc35096395622e5abc202f7403ec7e9a0c9b9219",
+        "decision": "approved",
+        "principal": "fixture-owner",
+        "decidedAt": 1789863212280,
+        "expiresAt": 1789863332274,
+        "signatureDigest": "f779b3dbde29fc5c6d186040a5578e6519008879074b84a9602304aa03afdf46"
+      },
+      "activation": {
+        "id": "activation-c4666df3-14a6-4274-b581-8ac592e5a908",
+        "fence": 1,
+        "updatedAt": 1789863219262
+      }
+    },
+    "persistedAfterReopen": true
+  },
+  "requests": {
+    "reload": {
+      "schemaVersion": 1,
+      "kind": "dsh-host-attestation-request",
+      "operationId": "host-operation-2d1de568-16d7-4ef3-9256-56f2d3c26c03",
+      "requestedAt": 1789863212288,
+      "receiptTtlMs": 120000,
+      "installationId": "753062f0-a387-4d2f-8b67-24b83323e7c1",
+      "ledger": {
+        "id": "3b6a77aa-07ad-4751-b802-6f4c6420564e",
+        "path": "/tmp/dsh-ready-sHM2LU/owner/external-ledger.sqlite"
+      },
+      "plan": {
+        "id": "plugin-3cd3f59f-7a0e-4213-af92-ec8ccddbe2de",
+        "digest": "ab8988d9cc004c64978ae44fcc35096395622e5abc202f7403ec7e9a0c9b9219"
+      },
+      "activation": {
+        "id": "activation-c4666df3-14a6-4274-b581-8ac592e5a908",
+        "fence": 1
+      },
+      "profile": {
+        "name": "readiness-fixture-540789-8003f5ba",
+        "path": "/tmp/dsh-ready-sHM2LU/home/profiles/readiness-fixture-540789-8003f5ba"
+      },
+      "issuer": {
+        "mode": "configured-executable",
+        "id": "systemd-fixture",
+        "version": "dsh-systemd-host-attestor-3",
+        "path": "/data00/home/jiataorui/work/github/dsh-enhanced/plugins/plugin-control-plane/bin/dsh-systemd-host-attestor.js",
+        "sha256": "97fd700d94c8b5a6803a7a28f278f7c90579a9c2ffe2ec752dee67e1ba6caa30",
+        "interpreter": {
+          "path": "/tmp/dsh-ready-sHM2LU/owner/node",
+          "sha256": "0a60ee85e22e52daede22c3cd27d3185becbdab180cf3c3c935130ce7b117d45"
+        },
+        "authority": "fixture-owner",
+        "keyId": "fixture-key"
+      },
+      "phase": "reload",
+      "requirements": {
+        "kind": "reload",
+        "previousHostGeneration": 0
+      }
+    },
+    "readiness": {
+      "schemaVersion": 1,
+      "kind": "dsh-host-attestation-request",
+      "operationId": "host-operation-e1ae2251-4c7f-4644-82f4-72a480bee5ae",
+      "requestedAt": 1789863218225,
+      "receiptTtlMs": 120000,
+      "installationId": "753062f0-a387-4d2f-8b67-24b83323e7c1",
+      "ledger": {
+        "id": "3b6a77aa-07ad-4751-b802-6f4c6420564e",
+        "path": "/tmp/dsh-ready-sHM2LU/owner/external-ledger.sqlite"
+      },
+      "plan": {
+        "id": "plugin-3cd3f59f-7a0e-4213-af92-ec8ccddbe2de",
+        "digest": "ab8988d9cc004c64978ae44fcc35096395622e5abc202f7403ec7e9a0c9b9219"
+      },
+      "activation": {
+        "id": "activation-c4666df3-14a6-4274-b581-8ac592e5a908",
+        "fence": 1
+      },
+      "profile": {
+        "name": "readiness-fixture-540789-8003f5ba",
+        "path": "/tmp/dsh-ready-sHM2LU/home/profiles/readiness-fixture-540789-8003f5ba"
+      },
+      "issuer": {
+        "mode": "configured-executable",
+        "id": "systemd-fixture",
+        "version": "dsh-systemd-host-attestor-3",
+        "path": "/data00/home/jiataorui/work/github/dsh-enhanced/plugins/plugin-control-plane/bin/dsh-systemd-host-attestor.js",
+        "sha256": "97fd700d94c8b5a6803a7a28f278f7c90579a9c2ffe2ec752dee67e1ba6caa30",
+        "interpreter": {
+          "path": "/tmp/dsh-ready-sHM2LU/owner/node",
+          "sha256": "0a60ee85e22e52daede22c3cd27d3185becbdab180cf3c3c935130ce7b117d45"
+        },
+        "authority": "fixture-owner",
+        "keyId": "fixture-key"
+      },
+      "phase": "readiness",
+      "requirements": {
+        "kind": "readiness",
+        "minimumChecks": 3
+      }
+    }
+  },
+  "byteIdenticalReadinessReplay": true,
+  "staleReplayRejected": true,
+  "socketRemovedOnHostStop": true,
+  "limits": [
+    "Actual DSH process with local built Control Plane and Policy package entries, referenced by file URL in a disposable profile; no npm install/publication or candidate artifact byte attestation.",
+    "Existing Control Plane store performs signed approval and reload/readiness request/receipt CAS; catalog integrity, owner approval and profile staging are controlled fixture inputs, not actual npm artifact installation or CLI activation.",
+    "Negative readiness stops at rollback-pending; no profile restoration, physical Host rollback, behavioral quality proof, model call or production activation."
+  ],
+  "fixtureRemoved": true
+}
