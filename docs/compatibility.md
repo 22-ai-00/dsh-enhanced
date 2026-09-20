@@ -186,3 +186,15 @@ The same-owner Linux UDS/HMAC channel is opt-in and does not issue readiness
 receipts. Upgrade checks must retain pending injection, provider/Loader
 replacement, same-Fiber restart, isolated service ownership, async socket
 teardown and actual DSH process observation. See [contract](runtime-observer.md).
+
+### External systemd readiness signer
+
+The shipped systemd attestor version is `dsh-systemd-host-attestor-2`. Schema-1
+reload config remains supported; schema-2 selects readiness with an exact
+observer config, pinned node-only protocol helper and deployment files. The
+existing Host request/receipt and Control Plane state schemas do not change.
+Its private journal transactionally adds raw reload request/config columns;
+legacy rows without retained context cannot authorize readiness. Pending old
+executable/version requests require their original pinned binary for
+reconciliation. Upgrade checks include real observer queries, signed reload
+binding, global generation supersession, drift refusal and unchanged replay.

@@ -5,9 +5,9 @@ view of selected live Loader entries. It uses the existing DSH Host and Cordis
 lifecycle. It creates no AgentLoop, model tool, scheduler, signing authority
 or additional activation state machine.
 
-This is observation input for a future external readiness signer. It does
-not issue a `HostAttestationReceipt` or advance an activation. The existing
-systemd attestor still supports reload only.
+This is observation input for the external [systemd readiness signer](systemd-host-attestor.md#readiness-configuration-and-evidence). The observer itself does
+not issue a `HostAttestationReceipt` or advance an activation. The signer owns
+request, deployment and supervisor binding outside the Host Fiber.
 
 ## Configuration
 

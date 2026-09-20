@@ -82,7 +82,9 @@
 
 2026-09-19 systemd reload adapter：新增随 Control Plane 发布的 owner-configured executable，复用既有 configured request、签名回执与 CAS；精确请求摘要授权、重启前持久记录、未知结果只观察对账、跨 profile 的 installation 全局 generation。真实临时 systemd user service 验证 fresh InvocationID/MainPID 与不重复重启；另在独立 home/profile 用真实 DSH 0.1.5-rc.2 的 Web 模板验证重启前后 invocation-bound 启动标记，见[真实 DSH reload 证据](evidence/systemd-real-dsh-reload-2026-09-19.json)。未加载候选插件，不能证明 candidate readiness。实现与边界见 [systemd Host attestor](systemd-host-attestor.md)；WP16、WP18 状态不变。
 
-2026-09-19 live runtime observer：Control Plane 可选 owner-only 观测通道从当前 Loader 读取精确条目、Fiber 激活实例、依赖提供者和服务归属；认证挑战与 observer-local epoch 防止把旧样本或同 UID Fiber 重启混为当前实例。真实 DSH 临时 profile 验证 Policy Fiber/service active、Host 停止后 socket 释放、下一实例禁用后 inactive，见[契约与证据](runtime-observer.md)。这是签名前的运行时观测输入；尚未接独立 readiness signer，不证明 artifact 字节、业务质量或完整生产启用。WP16、WP18 状态不变。
+2026-09-19 live runtime observer：Control Plane 可选 owner-only 观测通道从当前 Loader 读取精确条目、Fiber 激活实例、依赖提供者和服务归属；认证挑战与 observer-local epoch 防止把旧样本或同 UID Fiber 重启混为当前实例。真实 DSH 临时 profile 验证 Policy Fiber/service active、Host 停止后 socket 释放、下一实例禁用后 inactive，见[契约与证据](runtime-observer.md)。这是签名前的运行时观测输入；后续独立 readiness signer 见下条；不证明 artifact 字节、业务质量或完整生产启用。WP16、WP18 状态不变。
+
+2026-09-19 readiness signer：同一 owner-configured systemd attestor 新增只读 readiness 阶段，将最新已签 reload、精确请求上下文、实际 systemd successor 与多次 HMAC Loader/Fiber 样本绑定到签名 probeDigest；复用既有回执和激活状态机。磁盘部署 pins 不等于内存代码证明，active Fiber 不等于业务质量。[真实 DSH 临时 profile](evidence/systemd-readiness-real-dsh-2026-09-19.json)验证签名 reload→readiness、重复不重启、替换 Host 并禁用候选后拒绝旧请求；此处使用受控请求并独立验签，未执行 Control Plane CAS 或 npm 安装。WP16、WP18 状态不变。
 
 ## 总结
 

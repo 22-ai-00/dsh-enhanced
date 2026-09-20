@@ -1,17 +1,20 @@
 import { spawn } from 'node:child_process'
-import { createHash, generateKeyPairSync } from 'node:crypto'
+import { createHash, createHmac, generateKeyPairSync, randomBytes } from 'node:crypto'
 import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterAll, afterEach, describe, expect, test } from 'vitest'
 import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest } from '../src/attestation.ts'
 import { invokeConfiguredHostAttestor } from '../src/host-attestor.ts'
+import { runtimeConfigDigest } from '../src/runtime-observer-protocol.ts'
 import type { PluginControlTrustConfig } from '../src/trust.ts'
 import type { HostAttestationReceipt, HostAttestationRequest, PluginActivationPlan } from '../src/types.ts'
 
 const roots: string[] = []
 const children = new Set<ReturnType<typeof spawn>>()
+const servers = new Set<Server>()
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
 let interpreterRoot: string | undefined
 let interpreterPin: { path: string; sha256: string } | undefined
@@ -27,6 +30,8 @@ afterAll(async () => { if (interpreterRoot) await rm(interpreterRoot, { recursiv
 afterEach(async () => {
   for (const child of children) if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
   children.clear()
+  await Promise.all([...servers].map(server => new Promise<void>(resolveClose => server.close(() => resolveClose()))))
+  servers.clear()
   for (const root of roots.splice(0)) {
     try { process.kill(Number(await readFile(join(root, 'restart.pid'), 'utf8')), 'SIGKILL') } catch { /* fixture already stopped */ }
     await rm(root, { recursive: true, force: true })
@@ -51,7 +56,7 @@ async function fixture(mode = 'success') {
     ExecStart: `{ path=${interpreter.path} ; argv[]=${interpreter.path} dsh --profile test --no-open ; ignore_errors=no ; }`,
     Environment: `DSH_HOME=${join(root, 'home')}`, WorkingDirectory: join(root, 'home'), User: '', Group: '', Type: 'simple', KillMode: 'control-group' }
   const old = { Id: 'dsh-profile-test.service', LoadState: 'loaded', ActiveState: 'active', SubState: 'running',
-    MainPID: '12001', ControlPID: '0', InvocationID: '1'.repeat(32), NRestarts: '0', ControlGroup: '/fixture/dsh-profile-test.service', ...unitProperties }
+    MainPID: String(process.pid - 1), ControlPID: '0', InvocationID: '1'.repeat(32), NRestarts: '0', ControlGroup: '/fixture/dsh-profile-test.service', ...unitProperties }
   await writeFile(join(root, 'observation.json'), JSON.stringify(old), { mode: 0o600 })
   await writeFile(join(root, 'mode'), mode)
   const systemctlPath = join(root, 'systemctl.mjs')
@@ -84,7 +89,7 @@ if(args[1]==='show') {
   const request: HostAttestationRequest = { schemaVersion: 1, kind: 'dsh-host-attestation-request', operationId: 'host-operation-fixture',
     requestedAt: now, receiptTtlMs: 30000, installationId: config.authorization.installationId,
     ledger: config.authorization.ledger, plan: config.authorization.plan, activation: config.authorization.activation,
-    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-1',
+    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-2',
       ...executable, interpreter, authority: config.authority, keyId: config.keyId }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } }
   config.authorization.requestDigest = hostAttestationRequestDigest(request); await save()
   const start = (value: unknown = request) => {
@@ -98,13 +103,164 @@ if(args[1]==='show') {
     return { child, result }
   }
   const restarts = async () => (await readFile(join(root, 'restarts'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).length
-  const verify = async (receipt: HostAttestationReceipt) => new Ed25519HostAttestationAuthority(keys.publicKey.export({ type: 'spki', format: 'pem' }), config.authority, config.keyId)
-    .verify(receipt, { id: 'plan', digest: 'a'.repeat(64), installationId: request.installationId,
-      activation: { id: 'activation', fence: 1 }, createdAt: now - 1000 } as PluginActivationPlan, request)
-  return { root, config, configPath, request, save, start, restarts, verify }
+  const verifyRequest = async (receipt: HostAttestationReceipt, value: HostAttestationRequest) => new Ed25519HostAttestationAuthority(keys.publicKey.export({ type: 'spki', format: 'pem' }), config.authority, config.keyId)
+    .verify(receipt, { id: 'plan', digest: 'a'.repeat(64), installationId: value.installationId,
+      activation: { id: 'activation', fence: 1 }, createdAt: now - 1000 } as PluginActivationPlan, value)
+  const verify = async (receipt: HostAttestationReceipt) => verifyRequest(receipt, request)
+  return { root, config, configPath, request, save, start, restarts, verify, verifyRequest }
+}
+
+async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 'stable' | 'epoch-drift' | 'wrong-context' | 'replayed-challenge' = 'stable') {
+  const reload = await f.start().result; expect(reload.code, reload.stderr).toBe(0)
+  const config = f.config as unknown as { schemaVersion: 2; profileFiles: Array<{ path: string; sha256: string }>; readiness: {
+    client: { path: string; sha256: string }; observer: unknown; deploymentFiles: Array<{ path: string; sha256: string }>; reloadOperationId: string
+  }; authorization: { profile: { path: string }; previousHostGeneration?: number; hostGeneration?: number; requestDigest: string; expiresAt: number } }
+  const keyPath = join(f.root, 'owner', 'observer.key'); const socketPath = join(f.root, 'owner', 'observer.sock')
+  await writeFile(keyPath, randomBytes(32), { mode: 0o600 })
+  const clientPath = resolve('lib/runtime-observer-protocol.js')
+  const observer = { socketPath, keyPath, profilePath: config.authorization.profile.path,
+    targets: [{ entryId: 'candidate', module: './node_modules/observer-fixture/index.js', configDigest: 'a'.repeat(64), services: ['candidateService'] }] }
+  config.schemaVersion = 2
+  delete config.authorization.previousHostGeneration
+  config.authorization.hostGeneration = 1
+  config.readiness = { client: { path: await realpath(clientPath), sha256: sha(await readFile(clientPath)) }, observer,
+    deploymentFiles: config.profileFiles, reloadOperationId: f.request.operationId }
+  const request: HostAttestationRequest = { ...f.request, operationId: 'host-readiness-fixture', phase: 'readiness', requirements: { kind: 'readiness', minimumChecks: 2 } }
+  config.authorization.requestDigest = hostAttestationRequestDigest(request)
+  await f.save()
+  const key = await readFile(keyPath); let samples = 0; let behavior = mode
+  const server = createServer(socket => {
+    let source = ''
+    socket.on('data', chunk => { source += chunk.toString('utf8') })
+    socket.on('end', () => {
+      try {
+        const incoming = JSON.parse(source)
+        const requestMac = createHmac('sha256', key).update(`dsh-runtime-request/v1\n${JSON.stringify(incoming.challenge)}`).digest('hex')
+        if (incoming.schemaVersion !== 1 || incoming.mac !== requestMac) throw new Error('invalid request HMAC')
+        samples++
+        const challenge = behavior === 'replayed-challenge' ? 'f'.repeat(64) : incoming.challenge
+        const epoch = behavior === 'epoch-drift' ? samples : 1
+        const invocationId = behavior === 'wrong-context' ? '3'.repeat(32) : '2'.repeat(32)
+        const instance = { uid: 101, epoch }
+        const target = observer.targets[0]!
+        const observation = { schemaVersion: 1, kind: 'dsh-runtime-observation', observerId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          observerConfigDigest: runtimeConfigDigest(observer), challenge, processId: process.pid, invocationId,
+          profilePath: observer.profilePath, observedAt: Date.now(), entries: [{ entryId: 'candidate', module: target.module,
+            configDigest: target.configDigest, active: true, instance, dependencies: [{ name: 'loader', instance }],
+            services: [{ name: 'candidateService', instance }] }] }
+        const mac = createHmac('sha256', key).update(`dsh-runtime-response/v1\n${JSON.stringify(observation)}`).digest('hex')
+        socket.end(`${JSON.stringify({ observation, mac })}\n`)
+      } catch { socket.destroy() }
+    })
+  })
+  servers.add(server)
+  await new Promise<void>((resolveListen, reject) => { server.once('error', reject); server.listen(socketPath, () => { server.off('error', reject); resolveListen() }) })
+  await chmod(socketPath, 0o600)
+  return { request, observer, start: () => f.start(request), samples: () => samples,
+    setBehavior: (value: typeof mode) => { behavior = value } }
 }
 
 describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', () => {
+  // These two integration cases compose three bounded subprocess operations
+  // plus interpreter setup. Their aggregate deadline must exceed the suite's
+  // 15 s default; individual attestor/runner deadlines remain unchanged.
+  test('binds readiness to the latest signed reload over the HMAC observer channel and replays without restart', async () => {
+    const f = await fixture()
+    // Exercise the on-disk v1 journal migration before recording this reload.
+    const journalPath = join(f.config.stateRoot, 'reload.sqlite')
+    const legacy = new DatabaseSync(journalPath)
+    legacy.exec(`CREATE TABLE reloads (
+      operation_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL, config_digest TEXT NOT NULL,
+      scope_id TEXT NOT NULL, generation INTEGER NOT NULL, activation_id TEXT NOT NULL,
+      prior TEXT NOT NULL, observation TEXT, receipt TEXT,
+      UNIQUE(scope_id, generation), UNIQUE(scope_id, activation_id));`)
+    legacy.close(); await chmod(journalPath, 0o600)
+    const ready = await readinessFixture(f)
+    const first = await ready.start().result
+    expect(first.code, first.stderr).toBe(0)
+    const receipt = JSON.parse(first.stdout); await f.verifyRequest(receipt, ready.request)
+    expect(receipt).toMatchObject({ phase: 'readiness', hostGeneration: 1, evidence: { kind: 'readiness', checks: expect.any(Number), failures: 0 } })
+    expect(receipt.evidence.checks).toBeGreaterThanOrEqual(2)
+    const replay = await ready.start().result
+    expect(replay.code, replay.stderr).toBe(0); expect(replay.stdout).toBe(first.stdout)
+    expect(await f.restarts()).toBe(1); expect(ready.samples()).toBeGreaterThanOrEqual(4)
+  }, 30_000)
+
+  test('signs readiness through the descriptor-pinned Host runner', async () => {
+    const f = await fixture(); const ready = await readinessFixture(f)
+    const prior = process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG
+    process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = f.configPath
+    try {
+      const trust = { hostAttestor: { ...ready.request.issuer, timeoutMs: 10000, environmentAllowlist: ['DSH_SYSTEMD_HOST_ATTESTOR_CONFIG'] } } as unknown as PluginControlTrustConfig
+      const throughRunner = await invokeConfiguredHostAttestor(trust, ready.request)
+      await f.verifyRequest(throughRunner, ready.request)
+      const replay = await ready.start().result
+      expect(replay.code, replay.stderr).toBe(0)
+      // The runner parses/validates into its public receipt field order; raw
+      // executable stdout byte equality is checked separately above.
+      expect(throughRunner).toEqual(JSON.parse(replay.stdout))
+      expect(await f.restarts()).toBe(1)
+    } finally { if (prior === undefined) delete process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG; else process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = prior }
+  }, 30_000)
+
+  test.each(['epoch-drift', 'wrong-context', 'replayed-challenge'] as const)('rejects %s observer output without another restart', async mode => {
+    const f = await fixture(); const ready = await readinessFixture(f, mode)
+    const result = await ready.start().result
+    expect(result.code).toBe(1); expect(result.stdout).toBe('')
+    expect(await f.restarts()).toBe(1)
+  })
+
+  test.each(['missing', 'legacy', 'superseded'] as const)('refuses readiness when the retained reload is %s', async state => {
+    const f = await fixture(); const ready = await readinessFixture(f)
+    const db = new DatabaseSync(join(f.config.stateRoot, 'reload.sqlite'))
+    try {
+      if (state === 'missing') db.exec('DELETE FROM reloads')
+      else if (state === 'legacy') db.exec('UPDATE reloads SET request = NULL')
+      else db.exec(`INSERT INTO reloads(operation_id, request_digest, config_digest, scope_id, generation, activation_id, prior)
+        SELECT 'pending-generation', request_digest, config_digest, scope_id, 2, 'pending-activation', prior FROM reloads`)
+    } finally { db.close() }
+    const result = await ready.start().result
+    expect(result.code).toBe(1); expect(result.stdout).toBe(''); expect(await f.restarts()).toBe(1)
+  })
+
+  test('refuses a cached readiness receipt after its observed runtime identity drifts', async () => {
+    const f = await fixture(); const ready = await readinessFixture(f)
+    const first = await ready.start().result; expect(first.code, first.stderr).toBe(0)
+    ready.setBehavior('epoch-drift')
+    const second = await ready.start().result
+    expect(second.code).toBe(1); expect(second.stdout).toBe(''); expect(await f.restarts()).toBe(1)
+  })
+
+  test('concurrent first readiness calls return byte-identical receipts without another reload', async () => {
+    const f = await fixture(); const ready = await readinessFixture(f)
+    const results = await Promise.all([ready.start().result, ready.start().result])
+    expect(results.every(result => result.code === 0), JSON.stringify(results)).toBe(true)
+    expect(results[0]!.stdout).toBe(results[1]!.stdout); expect(await f.restarts()).toBe(1)
+  })
+
+  test('rejects a changed observer client pin, deployment pin, legacy request and expired authorization before readiness', async () => {
+    const f = await fixture(); const ready = await readinessFixture(f)
+    const config = f.config as unknown as { readiness: { client: { sha256: string }; deploymentFiles: Array<{ path: string; sha256: string }> }; authorization: {
+      requestDigest: string; expiresAt: number; plan: { id: string; digest: string }
+    } }
+    config.readiness.client.sha256 = '0'.repeat(64); await f.save()
+    expect((await ready.start().result).code).toBe(1)
+    config.readiness.client.sha256 = sha(await readFile(resolve('lib/runtime-observer-protocol.js')))
+    config.readiness.deploymentFiles[0]!.sha256 = '0'.repeat(64); await f.save()
+    expect((await ready.start().result).code).toBe(1)
+    config.readiness.deploymentFiles[0]!.sha256 = sha(await readFile(config.readiness.deploymentFiles[0]!.path)); await f.save()
+    const legacy = { ...ready.request, requirements: { kind: 'reload', previousHostGeneration: 0 } } as unknown as HostAttestationRequest
+    config.authorization.requestDigest = hostAttestationRequestDigest(legacy); await f.save()
+    expect((await f.start(legacy).result).code).toBe(1)
+    const wrongContext = { ...ready.request, plan: { id: 'other-plan', digest: 'b'.repeat(64) } }
+    config.authorization.plan = wrongContext.plan; config.authorization.requestDigest = hostAttestationRequestDigest(wrongContext); await f.save()
+    expect((await f.start(wrongContext).result).code).toBe(1)
+    config.authorization.plan = ready.request.plan
+    config.authorization.requestDigest = hostAttestationRequestDigest(ready.request); config.authorization.expiresAt = Date.now() - 1; await f.save()
+    expect((await ready.start().result).code).toBe(1)
+    expect(await f.restarts()).toBe(1)
+  })
+
   test('signs exact reload evidence and replays a byte-identical receipt without restarting', async () => {
     const f = await fixture(); const first = await f.start().result
     expect(first.code, first.stderr).toBe(0)
