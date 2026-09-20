@@ -22,7 +22,7 @@ const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean } = {}) {
+async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -74,7 +74,7 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
     ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'source-runs', budgetAmount: 1 }
   const delivery = { validateOwnerRoute: vi.fn(receipt) }
   const approvePrepared = vi.fn(async (_job: SourceJobRecord, _signal: AbortSignal) => {})
-  const createRuntime = () => new SourceJobRuntime({ config, build, statePath: root, store, ports: { automations: automations as never, delivery },
+  const createRuntime = () => new SourceJobRuntime({ config, build: { ...build, ...(options.versioning ? { versioning: 'patch' as const } : {}) }, statePath: root, store, ports: { automations: automations as never, delivery },
     ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}) })
   const runtime = createRuntime()
   runtime.start()
@@ -84,6 +84,25 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
 }
 
 describe('durable source-job runtime', () => {
+  it('freezes Host versioning in the native job and rejects model-owned version files before enqueue', async () => {
+    const f = await fixture({ versioning: true })
+    try {
+      for (const path of ['package.json', 'src/version.ts']) {
+        expect(() => f.runtime.enqueue({ gapId: f.gap.id, name: 'health-helper', repository: f.root,
+          files: [{ path, content: 'caller version' }], idempotencyKey: `reserved:${path.replaceAll('/', '-')}`,
+          expectedBaseCommit: f.head, ttlMs: 900_000, owner: OWNER, signal: new AbortController().signal,
+          assertCurrent: () => undefined })).toThrow()
+      }
+      expect(f.store.listSourceJobs()).toEqual([])
+      const queued = await f.enqueue()
+      expect(f.store.getSourceJob(queued.id)?.intent.build.versioning).toBe('patch')
+      await f.runtime.close()
+      const restarted = f.createRuntime(); restarted.start()
+      try { expect(f.store.getSourceJob(queued.id)?.intent.build.versioning).toBe('patch') }
+      finally { await restarted.close() }
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
   it.each([false, true])('recovers a prepared approval without replaying its build (source changed: %s)', async changed => {
     const f = await fixture({ typed: true, approvals: true })
     let restarted: SourceJobRuntime | undefined

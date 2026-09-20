@@ -13,6 +13,7 @@ import { approvalSigningPayload, parseApprovalReceipt } from './approval.js'
 import { PREPARED_SOURCE_BUILD_SCRIPT } from './source-build.js'
 import { controlPlaneDigest, readOwnerPreparedSourcePlan } from './store.js'
 import { PROTECTED_PLUGIN_DENYLIST, changedSourcePaths, checkedSourceSnapshot, runLocalCommand } from './source-workspace.js'
+import { verifyManagedPatchVersion } from './source-versioning.js'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { ApprovalReceipt, PluginSourcePlan } from './types.js'
 
@@ -50,6 +51,8 @@ export interface SourceApprovalAuthorityConfig {
     maxChangedFiles: number
     maxChangedBytes: number
     receiptTtlMs: number
+    /** Independently authorize only the deterministic Host-owned version delta. */
+    versioning?: 'patch'
   }
 }
 
@@ -150,7 +153,9 @@ export function validateSourceApprovalAuthorityConfig(value: unknown): asserts v
   const item = record(value); exactKeys(item, ['schemaVersion', 'authority', 'keyId', 'keyPath', 'statePath', 'controlDatabasePath', 'grant'])
   if (item.schemaVersion !== 1) fail()
   const grant = record(item.grant)
-  exactKeys(grant, ['id', 'expiresAt', 'maxApprovals', 'repository', 'worktreeRoot', 'owner', 'plugins', 'maxChangedFiles', 'maxChangedBytes', 'receiptTtlMs'])
+  exactKeys(grant, ['id', 'expiresAt', 'maxApprovals', 'repository', 'worktreeRoot', 'owner', 'plugins', 'maxChangedFiles', 'maxChangedBytes', 'receiptTtlMs',
+    ...(Object.hasOwn(grant, 'versioning') ? ['versioning'] : [])])
+  if (Object.hasOwn(grant, 'versioning') && grant.versioning !== 'patch') fail()
   text(item.authority); text(item.keyId); const keyPath = pathText(item.keyPath); const statePath = pathText(item.statePath); const controlDatabasePath = pathText(item.controlDatabasePath)
   if (new Set([keyPath, statePath, controlDatabasePath]).size !== 3) fail()
   text(grant.id); integer(grant.expiresAt, 1); integer(grant.maxApprovals, 1, 10_000); pathText(grant.repository); pathText(grant.worktreeRoot)
@@ -193,10 +198,17 @@ async function validateWorktree(plan: PluginSourcePlan, config: SourceApprovalAu
   if (!isAbsolute(repositoryCommon) || !isAbsolute(worktreeCommon) || realpathSync(repositoryCommon) !== realpathSync(worktreeCommon)) fail()
   const paths = await changedSourcePaths(worktree, plan.baseCommit, environment)
   if (paths.length === 0 || paths.length > config.grant.maxChangedFiles) fail()
+  const manifestPath = `plugins/${plan.name}/package.json`
+  if (config.grant.versioning === 'patch') {
+    if (!paths.includes(manifestPath) || !paths.includes(`plugins/${plan.name}/src/version.ts`)) fail()
+    const managed = await verifyManagedPatchVersion({ worktree, baseCommit: plan.baseCommit, name: plan.name, environment })
+    if (plan.preparedEvidence?.pack.version !== managed.version) fail()
+  }
   let bytes = 0
   for (const path of paths) {
     const match = SOURCE_FILE.exec(path)
-    if (!match || match[1] !== plan.name || SOURCE_TEST_PATH.test(path)) fail()
+    const managedManifest = config.grant.versioning === 'patch' && path === manifestPath
+    if (!managedManifest && (!match || match[1] !== plan.name || SOURCE_TEST_PATH.test(path))) fail()
     const target = resolve(worktree, path)
     if (relative(worktree, target).startsWith(`..${sep}`) || target === worktree) fail()
     let stat: ReturnType<typeof lstatSync>

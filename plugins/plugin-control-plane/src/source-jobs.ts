@@ -5,6 +5,7 @@ import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomat
 import { controlPlaneDigest, type ControlPlaneStore } from './store.js'
 import { awaitSourceSignal, inspectSourceContext } from './source-context.js'
 import { assertPluginModificationAllowed, removeSourceJobWorktree, validateScopedPluginFiles, type ScopedPluginFile } from './source-workspace.js'
+import { assertManagedVersionPaths } from './source-versioning.js'
 import { removeSourceJobContainer, type SourceBuildConfig } from './source-build.js'
 import { inheritedEnvironment, type loadTrustConfig } from './trust.js'
 import type { PluginSourcePlan } from './types.js'
@@ -148,6 +149,7 @@ export class SourceJobRuntime {
 
   enqueue(input: EnqueueSourceJobInput): Promise<SourceJobProjection> {
     validateScopedPluginFiles(input.files)
+    if (this.options.build.versioning === 'patch') assertManagedVersionPaths(input.files)
     return this.track(this.enqueueOwned({ ...input, files: structuredClone(input.files), owner: structuredClone(input.owner) }))
   }
 
@@ -156,6 +158,7 @@ export class SourceJobRuntime {
     const assertCurrent = async (): Promise<void> => { signal.throwIfAborted(); await awaitSourceSignal(signal, input.assertCurrent); this.withGapSource(input.gapId, this.assertCaller(input.owner), () => {}); if (!this.available()) throw new Error('source job authority unavailable'); signal.throwIfAborted() }
     await assertCurrent()
     validateScopedPluginFiles(input.files)
+    if (this.options.build.versioning === 'patch') assertManagedVersionPaths(input.files)
     assertPluginModificationAllowed(input.name)
     if (typeof input.idempotencyKey !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(input.idempotencyKey)
       || !Number.isSafeInteger(input.ttlMs) || input.ttlMs < 900_000 || input.ttlMs > 86_400_000) throw new Error('invalid source job request')

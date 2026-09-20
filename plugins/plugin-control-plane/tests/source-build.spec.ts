@@ -56,6 +56,8 @@ it('rejects larger limits unless the owner explicitly selects the repository pro
   expect(() => validateSourceBuildConfig({ ...base, timeoutMs: 240_001 })).toThrow(/configuration is invalid/)
   expect(() => validateSourceBuildConfig({ ...base, temporaryMiB: 33 })).toThrow(/configuration is invalid/)
   expect(() => validateSourceBuildConfig({ ...base, profile: 'repo' as never })).toThrow(/configuration is invalid/)
+  expect(() => validateSourceBuildConfig({ ...base, versioning: 'minor' as never })).toThrow(/configuration is invalid/)
+  expect(() => validateSourceBuildConfig({ ...base, versioning: 'patch' })).not.toThrow()
   expect(() => validateSourceBuildConfig({ ...base, profile: 'repository', timeoutMs: 1_800_000, memoryMiB: 16_384,
     cpus: 16, pidsLimit: 1_024, workspaceMiB: 8_192, temporaryMiB: 4_096 })).not.toThrow()
   expect(() => validateSourceBuildConfig({ ...base, profile: 'repository', temporaryMiB: Number.NaN })).toThrow(/configuration is invalid/)

@@ -13,9 +13,11 @@ import {
   createIsolatedWorktree,
   gcPreparedModifyWorktrees,
   runLocalCommand,
+  validateScopedPluginFiles,
   writeScopedPluginFiles,
   type ScopedPluginFile,
 } from './source-workspace.js'
+import { assertManagedVersionPaths, managedPatchVersionFiles, verifyManagedPatchVersion } from './source-versioning.js'
 import { requestSourceApproval, validateSourceApprovalClientConfig, type SourceApprovalClientConfig } from './source-approval-client.js'
 import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
@@ -330,6 +332,8 @@ export class PluginControlPlaneService extends Service {
     const name = input.name.normalize('NFC').trim()
     if (!/^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(name)) throw new ControlPlaneCliError('INVALID_ARGUMENT', 'plugin name is invalid')
     assertPluginModificationAllowed(name)
+    validateScopedPluginFiles(input.files)
+    if (this.config.sourceBuild?.versioning === 'patch') assertManagedVersionPaths(input.files)
     // Re-validate the gap reservation immediately before doing the work: the
     // store re-checks under BEGIN IMMEDIATE, but failing early avoids building
     // a patch against a gap that is already matched or closed.
@@ -364,10 +368,21 @@ export class PluginControlPlaneService extends Service {
       if (this.config.sourceBuild === undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'isolated source build runner is not configured')
       if (!offline) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'isolated source builds must remain offline')
       const configured = this.config.sourceBuild
+      const versionInput = { worktree: isolated.worktree, baseCommit, name, environment, signal, assertCurrent }
+      const managed = configured.versioning === 'patch' ? await managedPatchVersionFiles(versionInput) : undefined
+      if (managed !== undefined) {
+        await assertCurrent()
+        await writeScopedPluginFiles({ worktree: isolated.worktree, name, files: managed.files })
+        await verifyManagedPatchVersion(versionInput)
+      }
       const checked = await runDockerPreparedChecks({ config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
         worktree: isolated.worktree, baseCommit, name, scope: [`plugins/${name}`], environment, signal,
         assertCurrent, preparedAt: Date.now(), ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName } }) })
       await assertCurrent()
+      if (managed !== undefined) {
+        await verifyManagedPatchVersion(versionInput)
+        if (checked.evidence.pack.version !== managed.version) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared artifact does not carry the Host-managed version')
+      }
       // The worktree survives success: the owner recomputes its digests on this
       // exact directory during `source verify-prepared`.
       return this.taskGaps.withCurrent(input.gapId, gapOwner, () => this.store.createSourcePlan({ gapId: input.gapId, repository, worktree: isolated.worktree, baseCommit,
