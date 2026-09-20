@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 11
+export const evaluationSchemaVersion = 12
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -92,6 +92,16 @@ const scopeWatermarkSchema = `
     watermark INTEGER NOT NULL CHECK (watermark >= 0),
     updated_at INTEGER NOT NULL
   ) STRICT, WITHOUT ROWID;
+`
+
+const taskProjectionFeedSchema = `
+  CREATE TABLE IF NOT EXISTS evaluation_task_projection_feed_heads (
+    subject_key TEXT PRIMARY KEY REFERENCES evaluation_task_projections(subject_key) ON DELETE RESTRICT,
+    scope_key TEXT NOT NULL,
+    watermark INTEGER NOT NULL CHECK (watermark >= 1)
+  ) STRICT, WITHOUT ROWID;
+  CREATE UNIQUE INDEX IF NOT EXISTS evaluation_task_projection_feed_scope_watermark
+    ON evaluation_task_projection_feed_heads(scope_key, watermark);
 `
 
 const taskProjectionViewSchema = `
@@ -582,6 +592,41 @@ function migrate(database: DatabaseSync): void {
         DROP TABLE evaluation_task_projections_v10;
         UPDATE evaluation_schema_meta SET value = '11' WHERE key = 'schema-version';
         PRAGMA user_version = 11;
+      `)
+    }
+    if (schemaVersion(database) === 11) {
+      // Historical projections had a scope fence but no cursorable head. Give
+      // every existing canonical subject a stable new watermark exactly once.
+      const overflow = database.prepare(`
+        SELECT 1 FROM evaluation_scope_watermarks watermark
+        JOIN (
+          SELECT scope_key, COUNT(*) AS count FROM evaluation_task_projections
+          WHERE learning_version >= 1 AND learning_digest IS NOT NULL GROUP BY scope_key
+        ) projection ON projection.scope_key = watermark.scope_key
+        WHERE watermark.watermark > ${Number.MAX_SAFE_INTEGER} - projection.count LIMIT 1
+      `).get()
+      if (overflow !== undefined) throw new Error('evaluation projection feed watermark overflow')
+      database.exec(`
+        ${taskProjectionFeedSchema}
+        INSERT INTO evaluation_scope_watermarks(scope_key, watermark, updated_at)
+        SELECT scope_key, 0, MAX(updated_at) FROM evaluation_task_projections
+        GROUP BY scope_key ON CONFLICT(scope_key) DO NOTHING;
+        INSERT INTO evaluation_task_projection_feed_heads(subject_key, scope_key, watermark)
+        SELECT projection.subject_key, projection.scope_key,
+          existing.watermark + ROW_NUMBER() OVER (PARTITION BY projection.scope_key ORDER BY projection.subject_key)
+        FROM evaluation_task_projections projection
+        JOIN evaluation_outcomes primary_outcome ON primary_outcome.id = projection.primary_outcome_id
+        JOIN evaluation_scope_watermarks existing ON existing.scope_key = projection.scope_key
+        WHERE primary_outcome.trust = 'trusted'
+          AND projection.learning_version >= 1 AND projection.learning_digest IS NOT NULL
+        ON CONFLICT(subject_key) DO NOTHING;
+        UPDATE evaluation_scope_watermarks
+        SET watermark = watermark + (
+          SELECT COUNT(*) FROM evaluation_task_projection_feed_heads head
+          WHERE head.scope_key = evaluation_scope_watermarks.scope_key
+        );
+        UPDATE evaluation_schema_meta SET value = '12' WHERE key = 'schema-version';
+        PRAGMA user_version = 12;
       `)
     }
     if (schemaVersion(database) !== evaluationSchemaVersion) {

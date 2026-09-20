@@ -181,6 +181,14 @@ export interface TrustedTaskLearningProjectionReceipt {
   }>
 }
 
+/** A restart-safe incremental view of current trusted canonical task heads. */
+export interface TrustedTaskLearningProjectionFeedPage {
+  items: readonly Readonly<{ watermark: number; receipt: TrustedTaskLearningProjectionReceipt }>[]
+  nextCursor: Readonly<{ scopeKey: string; watermark: number }>
+  scopeWatermark: number
+  hasMore: boolean
+}
+
 /** Exact current task identity frozen into an Evolution evidence window. */
 export interface EvaluationLearningEvidenceTuple {
   subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'

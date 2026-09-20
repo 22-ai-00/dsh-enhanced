@@ -3075,7 +3075,9 @@ describe('real rc.1 delivery Agent runtime', () => {
   test('routes real accepted foreground owner corrections and withdrawal to canonical Evaluation without reviving stale feedback', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-foreground-owner-evaluation-'))
     roots.push(root)
-    const fixture = await runtimeHarness(root, new Map())
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      ownerRoutes: [{ id: 'learning-owner', conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }],
+    })
     try {
       const pairing = fixture.service.issuePairing('test', principal)
       fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
@@ -3100,6 +3102,19 @@ describe('real rc.1 delivery Agent runtime', () => {
       await fixture.ctx.assistantVerifier.tick()
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
         .toMatchObject({ executionStatus: 'succeeded', objectiveStatus: 'achieved' })
+      const route = { authorityId: 'learning-owner', principalId: 'lark/bot-1/tenant-a/ou_owner', workspace: root, agentPreset: 'primary' }
+      const source = () => {
+        const scope = fixture.ctx.assistantEvaluation.canonicalHostScope({ workspace: root, preset: 'primary' })
+        const page = fixture.ctx.assistantEvaluation.listTrustedTaskLearningProjections({ scope, limit: 1 })
+        expect(page.items).toHaveLength(1)
+        return fixture.service.inspectOwnerForegroundLearningTask({ ...route, outcomeId: page.items[0]!.receipt.triggerOutcomeId })
+      }
+      const initial = source()
+      expect(initial).toMatchObject({ judgement: 'independent-verifier',
+        canonical: { objective: { status: 'achieved' }, projection: { disposition: 'upsert' } },
+        source: { inboxId: accepted.inboxId, objective, truncated: false } })
+      expect(() => fixture.service.inspectOwnerForegroundLearningTask({ ...route, principalId: 'someone-else',
+        outcomeId: initial!.canonical.triggerOutcomeId })).toThrow()
       const replyToProviderMessageId = replyProviderMessageId(fixture.service, 'evt-foreground-owner-source')
       const feedback = async (eventId: string, command: string) => {
         const input = { ...message(eventId, `/feedback ${command}`, 'command'), metadata: { replyToProviderMessageId } }
@@ -3114,16 +3129,34 @@ describe('real rc.1 delivery Agent runtime', () => {
       await feedback('evt-foreground-owner-initial', 'not-achieved')
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
         .toMatchObject({ objectiveStatus: 'not-achieved', projection: { subjectKind: 'foreground-turn', subjectRef: accepted.inboxId } })
+      expect(source()).toMatchObject({ judgement: 'owner-feedback', ownerRevision: { version: 1, action: 'initial' },
+        canonical: { objective: { status: 'not-achieved' } } })
       const correction = await feedback('evt-foreground-owner-correct', 'correct 1 not-achieved achieved')
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
         .toMatchObject({ objectiveStatus: 'achieved' })
+      expect(source()).toMatchObject({ judgement: 'owner-feedback', ownerRevision: { version: 2, action: 'correct' },
+        canonical: { objective: { status: 'achieved' } } })
       await feedback('evt-foreground-owner-withdraw', 'withdraw 2 achieved')
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
         .toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
+      expect(source()).toMatchObject({ judgement: 'owner-feedback', ownerRevision: { version: 3, action: 'withdraw' },
+        canonical: { objective: { status: 'unknown' }, projection: { disposition: 'retract' } } })
       await expect(fixture.service.acceptInbound(correction)).resolves.toMatchObject({ duplicate: true })
       await drive(fixture.service)
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
         .toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
+      await fixture.service.acceptInbound(message('evt-learning-new-session', '/new', 'command'))
+      await drive(fixture.service)
+      expect(source()).toMatchObject({ source: { sessionId: initial!.source.sessionId },
+        ownerRevision: { version: 3, action: 'withdraw' } })
+      const store = runtimeStore(fixture.service)
+      store.revokePrincipal(owner.id, owner.version)
+      expect(source).toThrow()
+      ;(store as unknown as { handoffOwner(input: typeof principal): unknown }).handoffOwner(principal)
+      await fixture.service.acceptInbound(message('evt-learning-owner-restored', '/new', 'command'))
+      await drive(fixture.service)
+      expect(fixture.service.validateOwnerRoute(route).principalVersion).toBeGreaterThan(owner.version)
+      expect(source()).toBeUndefined()
     } finally { await fixture.ctx.fiber.restart() }
   })
 

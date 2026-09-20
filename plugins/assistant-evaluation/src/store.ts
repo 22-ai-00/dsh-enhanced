@@ -37,6 +37,7 @@ import type {
   StoredSelfAssessment,
   StoredOutcome,
   TrustedTaskLearningProjectionReceipt,
+  TrustedTaskLearningProjectionFeedPage,
   TrustedGoalOutcomeOwnerProof,
 } from './types.js'
 
@@ -691,7 +692,7 @@ export class EvaluationStore {
             VALUES (?, 'pending', 0, ?, NULL, NULL, ?, ?)
             ON CONFLICT(evaluation_id) DO NOTHING
           `).run(winner.id, winner.recorded_at, winner.recorded_at, winner.recorded_at)
-          this.#advanceScopeWatermark(winner.scope_key, winner.recorded_at)
+          this.#advanceScopeWatermark(winner.scope_key, winner.recorded_at, verifierSubject.key)
         }
         row = winner
         changed = true
@@ -875,7 +876,7 @@ export class EvaluationStore {
           VALUES (?, 'pending', 0, ?, NULL, NULL, ?, ?)
           ON CONFLICT(evaluation_id) DO NOTHING
         `).run(winner.id, winner.recorded_at, winner.recorded_at, winner.recorded_at)
-        this.#advanceScopeWatermark(winner.scope_key, winner.recorded_at)
+        this.#advanceScopeWatermark(winner.scope_key, winner.recorded_at, winnerSubject.key)
       }
       this.#database.exec('COMMIT')
       return ownerCommand === undefined ? stored(winner) : this.ownerCommandResult(stored(winner))
@@ -1168,6 +1169,73 @@ export class EvaluationStore {
       throw new EvaluationStoreError('invalid-input', 'canonical task learning projection is corrupt')
     }
     return receipt
+  }
+
+  listTaskLearningProjectionFeed(
+    scopeInput: EvaluationScope,
+    afterInput: { scopeKey: string; watermark: number } | undefined,
+    limitInput = 100,
+  ): TrustedTaskLearningProjectionFeedPage {
+    const { scope, scopeKey } = canonicalEvaluationScope(scopeInput)
+    if (!Number.isSafeInteger(limitInput) || limitInput < 1 || limitInput > 100) throw new EvaluationStoreError('invalid-input', 'projection feed limit must be between 1 and 100')
+    if (afterInput !== undefined && (!afterInput || typeof afterInput !== 'object' || Array.isArray(afterInput)
+      || Object.getPrototypeOf(afterInput) !== Object.prototype || Object.getOwnPropertySymbols(afterInput).length !== 0
+      || Object.keys(afterInput).length !== 2 || !Object.hasOwn(afterInput, 'scopeKey') || !Object.hasOwn(afterInput, 'watermark')
+      || afterInput.scopeKey !== scopeKey || !Number.isSafeInteger(afterInput.watermark) || afterInput.watermark < 0)) {
+      throw new EvaluationStoreError('invalid-input', 'projection feed cursor is invalid')
+    }
+    const after = afterInput === undefined ? 0 : afterInput.watermark
+    this.#database.exec('BEGIN')
+    try {
+      const watermarkRow = this.#database.prepare('SELECT watermark FROM evaluation_scope_watermarks WHERE scope_key = ?').get(scopeKey) as { watermark: number } | undefined
+      const scopeWatermark = watermarkRow?.watermark ?? 0
+      if (!Number.isSafeInteger(scopeWatermark) || scopeWatermark < 0 || after > scopeWatermark) throw new EvaluationStoreError('invalid-input', 'projection feed cursor is ahead of scope')
+      const rows = this.#database.prepare(`
+        SELECT head.watermark, (
+          SELECT outbox.evaluation_id FROM evaluation_projection_outbox outbox
+          JOIN evaluation_outcomes audit ON audit.id = outbox.evaluation_id
+          WHERE audit.task_subject_key = projection.subject_key AND audit.trust = 'trusted'
+          ORDER BY audit.recorded_at DESC, audit.id DESC LIMIT 1
+        ) AS trigger_outcome_id
+        FROM evaluation_task_projection_feed_heads head
+        JOIN evaluation_task_projections projection ON projection.subject_key = head.subject_key
+        WHERE head.scope_key = ? AND head.watermark > ?
+        ORDER BY head.watermark LIMIT ?
+      `).all(scopeKey, after, limitInput + 1) as { watermark: number; trigger_outcome_id: string | null }[]
+      const selected = rows.slice(0, limitInput).map(row => {
+        const receipt = row.trigger_outcome_id === null ? undefined : this.getTaskLearningProjection(scope, row.trigger_outcome_id)
+        if (receipt === undefined) throw new EvaluationStoreError('invalid-input', 'projection feed head is not trusted')
+        return Object.freeze({ watermark: row.watermark, receipt })
+      })
+      const next = selected.at(-1)?.watermark ?? after
+      const page = Object.freeze({ items: Object.freeze(selected), nextCursor: Object.freeze({ scopeKey, watermark: next }), scopeWatermark, hasMore: rows.length > limitInput })
+      this.#database.exec('COMMIT')
+      return page
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  inspectTaskOwnerRevision(scopeInput: EvaluationScope, outcomeIdInput: string, principalRecordIdInput: string, principalVersionInput: number): Readonly<{ outcomeId: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objectiveStatus: string }> | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const outcomeId = boundedText(outcomeIdInput, 'outcomeId', 200)
+    const principalRecordId = boundedText(principalRecordIdInput, 'principalRecordId', 4_096)
+    if (!Number.isSafeInteger(principalVersionInput) || principalVersionInput < 1) throw new EvaluationStoreError('invalid-input', 'principalVersion must be a positive safe integer')
+    const receipt = this.getTaskLearningProjection(scopeInput, outcomeId)
+    if (!receipt || receipt.projection.evidenceOutcomeId === undefined) return undefined
+    const row = this.#database.prepare(`
+      SELECT revision.outcome_id, revision.version, revision.action, outcome.objective_status
+      FROM evaluation_owner_revisions revision
+      JOIN evaluation_outcomes outcome ON outcome.id = revision.outcome_id
+      JOIN evaluation_task_projections projection ON projection.subject_key = revision.subject_key
+      WHERE revision.outcome_id = ? AND revision.lineage = ? AND projection.scope_key = ?
+        AND projection.objective_outcome_id = revision.outcome_id
+        AND NOT EXISTS (
+          SELECT 1 FROM evaluation_owner_revisions newer
+          WHERE newer.subject_key = revision.subject_key AND newer.lineage = revision.lineage
+            AND newer.version > revision.version
+        )
+      ORDER BY revision.version DESC LIMIT 1
+    `).get(receipt.projection.evidenceOutcomeId, JSON.stringify([principalRecordId, principalVersionInput]), scopeKey) as { outcome_id: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objective_status: string } | undefined
+    return row === undefined ? undefined : Object.freeze({ outcomeId: row.outcome_id, version: row.version, action: row.action, objectiveStatus: row.objective_status })
   }
 
   /**
@@ -1534,7 +1602,7 @@ export class EvaluationStore {
           current.updated_at,
           current.updated_at,
         )
-        this.#advanceScopeWatermark(current.scope_key, current.updated_at)
+        this.#advanceScopeWatermark(current.scope_key, current.updated_at, subjectKey)
       }
       this.#database.exec('COMMIT')
     } catch (error) {
@@ -1678,7 +1746,7 @@ export class EvaluationStore {
     return { learningVersionChanged: projection.learning_version === 0 || learningVersionChanged }
   }
 
-  #advanceScopeWatermark(scopeKey: string, updatedAt: number): number {
+  #advanceScopeWatermark(scopeKey: string, updatedAt: number, subjectKey: string): number {
     this.#database.prepare(`
       INSERT INTO evaluation_scope_watermarks(scope_key, watermark, updated_at)
       VALUES (?, 1, ?)
@@ -1692,6 +1760,11 @@ export class EvaluationStore {
     if (!Number.isSafeInteger(row.watermark) || row.watermark < 1) {
       throw new EvaluationStoreError('invalid-input', 'canonical scope watermark overflow')
     }
+    this.#database.prepare(`
+      INSERT INTO evaluation_task_projection_feed_heads(subject_key, scope_key, watermark)
+      VALUES (?, ?, ?)
+      ON CONFLICT(subject_key) DO UPDATE SET scope_key = excluded.scope_key, watermark = excluded.watermark
+    `).run(subjectKey, scopeKey, row.watermark)
     return row.watermark
   }
 
