@@ -22,7 +22,7 @@ const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { typed?: boolean; fence?: boolean } = {}) {
+async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -73,16 +73,40 @@ async function fixture(options: { typed?: boolean; fence?: boolean } = {}) {
   const config = { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: root,
     ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'source-runs', budgetAmount: 1 }
   const delivery = { validateOwnerRoute: vi.fn(receipt) }
+  const approvePrepared = vi.fn(async (_job: SourceJobRecord, _signal: AbortSignal) => {})
   const createRuntime = () => new SourceJobRuntime({ config, build, statePath: root, store, ports: { automations: automations as never, delivery },
-    ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare })
+    ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}) })
   const runtime = createRuntime()
   runtime.start()
   const enqueue = (signal = new AbortController().signal, key = 'job:one') => runtime.enqueue({ gapId: gap.id, name: 'health-helper', repository: root, files: [{ path: 'src/index.ts', content: 'export const changed = true\n' }], idempotencyKey: key, expectedBaseCommit: head, ttlMs: 900_000, owner: OWNER, signal, assertCurrent: () => undefined })
-  return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, withGapSourceFence,
+  return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, approvePrepared, withGapSourceFence,
     setSourceCurrent: (value: boolean) => { sourceCurrent = value }, get executor() { return executor }, activation: (_id: string) => activation!, enqueue, head }
 }
 
 describe('durable source-job runtime', () => {
+  it.each([false, true])('recovers a prepared approval without replaying its build (source changed: %s)', async changed => {
+    const f = await fixture({ typed: true, approvals: true })
+    let restarted: SourceJobRuntime | undefined
+    try {
+      const queued = await f.enqueue(), active = f.activation(queued.id)
+      f.approvePrepared.mockRejectedValueOnce(new Error('authority response unavailable'))
+      const outcome = await f.executor!.execute({ occurrenceId: 'prepared-approval', automationId: queued.id, definitionHash: active.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(outcome.outcome).toBe('unknown')
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'prepared' })
+      expect(f.prepare).toHaveBeenCalledTimes(1)
+      expect(f.approvePrepared).toHaveBeenCalledTimes(1)
+      await f.runtime.close()
+      f.setSourceCurrent(!changed)
+      restarted = f.createRuntime(); restarted.start()
+      await new Promise(resolve => setImmediate(resolve))
+      await restarted.close()
+      expect(f.prepare).toHaveBeenCalledTimes(1)
+      expect(f.approvePrepared).toHaveBeenCalledTimes(changed ? 1 : 2)
+    } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
+  })
+
   it('rejects a typed task-failure gap when the Host provenance fence is unavailable', async () => {
     const f = await fixture({ typed: true, fence: false })
     try {

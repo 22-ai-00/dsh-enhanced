@@ -22,6 +22,7 @@
 - Control Plane 已有 npm 发布/独立读回/catalog adapter，以及 systemd reload、readiness、物理 rollback 的签名与持久操作组件。认证有限回放端点支持晚到 Ed25519 授权：readiness 落账后，将真实 schema-2 请求交给同一 DSH CLI `0.1.5-rc.2` Host 执行，保持 PID/InvocationID、候选 Fiber 与部署文件不变。完成态重启失效，SIGKILL 中断后保留 unknown；同 scope 换 operation 或重新签发 grant 不能恢复派发权限。其输出不证明全局 `externalEffects = 0`，不能代替独立签名。
 - Host request schema 2 固定同一 activation/fence 下前一阶段的完整签名回执摘要与 generation，并在 dispatch、apply 时复核；普通阶段不能换代。systemd attestor v5 已通过真实 reload/readiness 与物理 restore 探针。旧 schema-1 已应用历史可作为前驱，未完成操作必须先用原兼容版本对账；此改动仍不提供独立副作用观测。
 - Skills 已接入同进程 Host 受限委派：来源重新验证后，将冻结的活动技能或 pending 候选临时挂载到全新 owner scope，经原生 `skill_run` 执行；持久 cell reservation 与调用记录阻止换调用键或重启重放。来源和接收方重载、撤权、到期及取消均保留失败或 unknown。Evaluation 原生模型 cell 与冻结后独立任务已接入，12-cell Docker 工程验证两臂各 6 次达成，候选实际复用 6 次、质量平局。Day1 同预算收益比较仍待完成；见[接线指南](native-skill-reuse.md)。
+- 普通 owner 失败源码候选可经部署时配置的有限审批器自动批准：精确源码、owner、期限与累计额度受约束，最终提交复查当前反馈，持久作业重启只恢复审批。此步骤仍不发布或启用候选；普通使用中的采用、观察与回滚尚待贯通。
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
 
 真实同预算收益仍未验收；历史 Day1 unknown 保持原判、不重放，未知用量不计零。固定模型探针不再作为开发主线，后续优先完成日常使用中的验证、采用和观察能力。
@@ -55,7 +56,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. 在已接通的真实反馈→持久复盘→owner 私有失败 gap→源码候选之上，连接有界修复授权，去除逐 Goal 手动 arm。若走 Skills 修复，普通前台来源须经 owner 授权的 Host 入口创建真实原生 Goal，不能伪造现有修复契约要求的来源 Goal；调度继续复用 Automations。
+1. 在已接通的真实反馈→持久复盘→owner 私有失败 gap→源码候选之上，在有限源码审批之上接通精确 artifact 的采用授权，去除逐 Goal 手动 arm。若走 Skills 修复，普通前台来源须经 owner 授权的 Host 入口创建真实原生 Goal，不能伪造现有修复契约要求的来源 Goal；调度继续复用 Automations。
 2. 接通成长触发 → 自主修复/技能或插件候选 → 独立验证 → 已授权范围内采用 → 后续真实使用观察与回滚。复用既有 Skills、Growth Driver 和 Control Plane；仅停留在 pending 提案不算完整交付。
 3. 提供可安装的日常使用配置，明确正常入口、针对成长能力范围的一次授权、预算、停止和恢复方式。模型保持可替换供应，成长状态随 Agent 持久化；无需为每个来源 Goal 手动 arm，或为每个任务重新编排固定场景。自动调用预设场景仍不能替代这一目标。
 4. 保留上表未完成验收与真实发布/外部系统边界。WP16 的独立副作用观测、签名和推广恢复，以及 WP18 的精确提交 CI/readback，按日常自迭代链路所需逐项接入；测试夹具不能代替生产授权或真实收益。
@@ -65,6 +66,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
+- 有限源码审批已通过独立复核：相关 6 文件 68 项通过，补充冻结 trust 校验后 Host 单文件 10 项通过；类型、lint、manifest、构建与 Control Plane dry-run pack 通过。真实 Git/SQLite/子进程/Ed25519 的 compiled client→FD CLI→审批器及跨进程重放通过；构建证据使用 fixture，此结果不证明自动采用。默认整包运行出现 27 项 5 秒超时；22 项在限制并发后通过，剩余 5 项旧 systemd 测试在单 worker、20 秒测试时限下通过，生产期限未改。完整仓库门禁仍以之后的 `pnpm check` 为准。
 - 普通前台反馈入口：Delivery 整包 791 项、Web Owner 76 项通过，类型、构建、lint、manifest 与 Delivery dry-run pack 通过。覆盖无需验收 profile 的 owner 反馈、实际模型、多模型不混用、纠正/撤回、`/new` 历史读取、身份换代、unknown 拒绝改判、schema 22→23 迁移和崩溃不重派；原生 AgentLoop 使用本地脚本模型，尚不作为自动采用或生产收益证据。
 - 真实失败来源链已通过独立代码与证据复核。定向检查：Growth 整包 83 项通过；Control Plane store/来源 fence/Host 准备与迁移相关 106 项、durable source job 与原生调度 15 项通过。覆盖 exact owner gap、全局列表隔离、反馈变化、最终提交冲突、重启和 unknown 不重放；两包类型、构建、lint、manifest 与 dry-run pack 通过。测试使用本地脚本模型与隔离构建夹具，不作为真实供应商效果或自动采用证据。
 - 最近全仓 `pnpm check` 通过 manifest、lint、类型和构建，在 Web Owner 的 2 个安装诊断测试处停止：只读 doctor 遗漏了 Delivery schema 22，已同步；Web Owner 整包 76 项通过。此前 Evaluation 迁移 fixture 的外键问题已修复，整包 344 项通过、10 项跳过。完整门禁尚未通过，剩余测试与全包 dry-run pack 待下一次完整检查确认。

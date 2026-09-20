@@ -1,3 +1,4 @@
+import { generateKeyPairSync, sign } from 'node:crypto'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,7 +7,8 @@ import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assis
 import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, expect, test, vi } from 'vitest'
 import { OwnerTaskFailureGaps } from '../src/owner-task-gaps.ts'
-import { ControlPlaneStore } from '../src/store.ts'
+import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
+import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
 
 // Real Evaluation canonical projections/fences and CP persistence. Delivery's
 // proof lookup is a fixture; its native owner verification is tested in Delivery.
@@ -106,4 +108,49 @@ test('a correction after preparation starts prevents the final admitted commit',
   expect(() => f.gateway.withCurrent(gap.id, f.owner, commit)).toThrow()
   expect(commit).not.toHaveBeenCalled()
   expect(f.store.getGap(gap.id).status).toBe('open')
+})
+
+async function approvalFixture() {
+  const f = await fixture(), gap = f.gateway.record(f.source())
+  const plan = f.gateway.withCurrent(gap.id, f.owner, () => f.store.createSourcePlan({ gapId: gap.id,
+    repository: f.root, worktree: join(f.root, 'worktree'), baseCommit: 'a'.repeat(40), name: 'health-helper',
+    generatorDigest: MODIFY_GENERATOR_DIGEST, scope: ['plugins/health-helper'], mode: 'modify', ttlMs: 60_000,
+    idempotencyKey: 'prepared', prepared: { treeDigest: 'b'.repeat(64), patchDigest: 'c'.repeat(64), checkedAt: Date.now(),
+      evidence: { schemaVersion: 1, kind: 'dsh-source-prepared-evidence', environment: { npmConfigIgnoreScripts: true,
+        frozenLockfile: true, offline: true, nodeVersion: 'test', pnpmVersion: 'test' },
+      commands: [{ command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 1, logDigest: 'd'.repeat(64) }],
+      pack: { name: 'health-helper', version: '1.0.0', sizeBytes: 1, sha256: 'e'.repeat(64) }, preparedAt: Date.now() } },
+  }).result)
+  const keys = generateKeyPairSync('ed25519')
+  const unsigned = { schemaVersion: 1 as const, approvalId: 'approval', authority: 'authority', keyId: 'key',
+    planId: plan.id, planDigest: plan.digest, decision: 'approved' as const, principal: 'owner', decidedAt: Date.now(), expiresAt: plan.expiresAt }
+  const receipt = { ...unsigned, signature: sign(null, Buffer.from(approvalSigningPayload(unsigned)), keys.privateKey).toString('base64') }
+  const authority = new Ed25519ApprovalAuthority(keys.publicKey.export({ type: 'spki', format: 'pem' }), 'authority', 'key')
+  const input = { planId: plan.id, expectedRevision: plan.revision, receipt, resolveAuthority: () => authority,
+    idempotencyKey: 'approve', withSourceFence: <T>(callback: () => T): T => f.gateway.withCurrent(gap.id, f.owner, callback) }
+  return { ...f, plan, input, authority }
+}
+
+test('source approval requires a fresh Host fence even with a valid signature and on receipt replay', async () => {
+  const f = await approvalFixture()
+  const { withSourceFence: _fence, ...unfenced } = f.input
+  await expect(f.store.approveSource(unfenced)).rejects.toThrow('Host admission')
+  expect(f.store.getSourcePlan(f.plan.id).status).toBe('pending-approval')
+  const approved = await f.store.approveSource(f.input)
+  expect(approved.result.status).toBe('approved')
+  expect(await f.store.approveSource(f.input)).toEqual(approved)
+  f.append('corrected-approval', 'inbox-1', 'achieved')
+  await expect(f.store.approveSource(f.input)).rejects.toThrow()
+})
+
+test('feedback corrected during asynchronous signature verification blocks the final source approval commit', async () => {
+  const f = await approvalFixture()
+  const verify = f.authority.verify.bind(f.authority)
+  vi.spyOn(f.authority, 'verify').mockImplementationOnce(async (...args) => {
+    const result = await verify(...args)
+    f.append('corrected-during-signature', 'inbox-1', 'achieved')
+    return result
+  })
+  await expect(f.store.approveSource(f.input)).rejects.toThrow()
+  expect(f.store.getSourcePlan(f.plan.id)).toMatchObject({ status: 'pending-approval', revision: 1 })
 })

@@ -5,7 +5,7 @@ import { discover, parseCatalog, type CatalogEntry, type LoadedCapabilityCatalog
 import { parseApprovalReceipt } from './approval.js'
 import { parseSourcePublishReconciliationReceipt, parseSourcePublishReconciliationRequest, parseSourceReleaseAuthorization,
   parseSourceReleaseReceipt, parseSourceReleaseRequest, parseVerifiedSourceReleaseAuthorization } from './release.js'
-import { controlPlaneOperationReceiptDigest, openControlPlaneDatabase } from './sqlite.js'
+import { controlPlaneOperationReceiptDigest, controlPlaneSchemaVersion, openControlPlaneDatabase } from './sqlite.js'
 import { validateSourceBuildConfig } from './source-build.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
@@ -1058,6 +1058,42 @@ function sourceJobFromRow(row: SourceJobRow): SourceJobRecord {
     ...(row.plan_id === null ? {} : { planId: row.plan_id }), ...(row.failure_code === null ? {} : { failureCode: row.failure_code }) })
 }
 
+function readOwnerTaskFailureReference(database: DatabaseSync, gapId: string): OwnerTaskFailureReference | undefined {
+  if (typeof gapId !== 'string' || !KEY.test(gapId)) throw new ControlPlaneStoreError('invalid-input', 'gap id is invalid')
+  const row = database.prepare('SELECT reference_json, reference_digest FROM owner_task_failure_gaps WHERE gap_id = ?')
+    .get(gapId) as OwnerTaskFailureGapRow | undefined
+  const gap = database.prepare('SELECT idempotency_key FROM capability_gaps WHERE id = ?').get(gapId) as { idempotency_key: string } | undefined
+  if (row === undefined) {
+    if (gap?.idempotency_key.startsWith('owner-task-failure:')) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap sidecar is missing')
+    return undefined
+  }
+  if (gap?.idempotency_key !== `owner-task-failure:${row.reference_digest}`) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap identity is corrupt')
+  if (!DIGEST.test(row.reference_digest)) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap digest is corrupt')
+  let reference: OwnerTaskFailureReference
+  try { reference = ownerTaskFailureReferenceFromStored(JSON.parse(row.reference_json) as unknown, 'invalid-state') }
+  catch (error) { if (error instanceof ControlPlaneStoreError) throw error; throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap reference is corrupt') }
+  if (controlPlaneDigest(reference) !== row.reference_digest) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap digest is corrupt')
+  return reference
+}
+
+/** Read-only broker seam: parse existing authoritative rows without opening a migrating Store. */
+export function readOwnerPreparedSourcePlan(database: DatabaseSync, planId: string): {
+  plan: PluginSourcePlan; source: OwnerTaskFailureReference
+} {
+  if (database.prepare('PRAGMA user_version').get()?.user_version !== controlPlaneSchemaVersion
+    || typeof planId !== 'string' || !KEY.test(planId)) {
+    throw new ControlPlaneStoreError('invalid-state', 'source authorization database or plan identity is invalid')
+  }
+  const row = database.prepare('SELECT * FROM source_plans WHERE id = ?').get(planId) as unknown as SourceRow | undefined
+  if (!row) throw new ControlPlaneStoreError('not-found', 'source authorization plan is absent')
+  const plan = sourceFromRow(row)
+  const source = readOwnerTaskFailureReference(database, plan.gapId)
+  if (!source || plan.mode !== 'modify' || !plan.sourceCheck || !plan.preparedEvidence) {
+    throw new ControlPlaneStoreError('invalid-state', 'source authorization requires an owner-bound prepared modification')
+  }
+  return { plan, source }
+}
+
 export class ControlPlaneStore {
   readonly #database: DatabaseSync
   readonly #now: () => number
@@ -1146,21 +1182,7 @@ export class ControlPlaneStore {
   }
 
   getOwnerTaskFailureReference(gapId: string): OwnerTaskFailureReference | undefined {
-    if (typeof gapId !== 'string' || !KEY.test(gapId)) throw new ControlPlaneStoreError('invalid-input', 'gap id is invalid')
-    const row = this.#database.prepare('SELECT reference_json, reference_digest FROM owner_task_failure_gaps WHERE gap_id = ?')
-      .get(gapId) as OwnerTaskFailureGapRow | undefined
-    const gap = this.#database.prepare('SELECT idempotency_key FROM capability_gaps WHERE id = ?').get(gapId) as { idempotency_key: string } | undefined
-    if (row === undefined) {
-      if (gap?.idempotency_key.startsWith('owner-task-failure:')) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap sidecar is missing')
-      return undefined
-    }
-    if (gap?.idempotency_key !== `owner-task-failure:${row.reference_digest}`) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap identity is corrupt')
-    if (!DIGEST.test(row.reference_digest)) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap digest is corrupt')
-    let reference: OwnerTaskFailureReference
-    try { reference = ownerTaskFailureReferenceFromStored(JSON.parse(row.reference_json) as unknown, 'invalid-state') }
-    catch (error) { if (error instanceof ControlPlaneStoreError) throw error; throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap reference is corrupt') }
-    if (controlPlaneDigest(reference) !== row.reference_digest) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap digest is corrupt')
-    return reference
+    return readOwnerTaskFailureReference(this.#database, gapId)
   }
 
   withOwnerTaskFailureGapAdmission<T>(gapId: string, callback: () => T): T {
@@ -1315,6 +1337,14 @@ export class ControlPlaneStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ControlPlaneStoreError('invalid-input', 'source job limit must be 1..100')
     return (this.#database.prepare(`SELECT * FROM source_jobs ORDER BY CASE WHEN status IN ('queued', 'running', 'unknown') THEN 0 ELSE 1 END,
       created_at DESC, id DESC LIMIT ?`).all(limit) as unknown as SourceJobRow[]).map(sourceJobFromRow)
+  }
+
+  /** Pending approvals have their own bounded recovery query, independent of job history. */
+  listPreparedSourceApprovalJobs(): readonly SourceJobRecord[] {
+    return (this.#database.prepare(`SELECT j.* FROM source_jobs j JOIN source_plans p ON p.id = j.plan_id
+      JOIN owner_task_failure_gaps g ON g.gap_id = p.gap_id
+      WHERE j.status = 'prepared' AND p.status = 'pending-approval' AND p.expires_at > ?
+      ORDER BY j.created_at, j.id LIMIT 1000`).all(this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
   }
 
   bindSourceJobDefinition(input: { id: string; revision: number; definitionHash: string }): SourceJobRecord {
@@ -1501,12 +1531,16 @@ export class ControlPlaneStore {
     return this.#approvePlan('activation', input) as Promise<OperationReceipt<PluginActivationPlan>>
   }
 
-  async approveSource(input: { planId: string; expectedRevision: number; receipt: ApprovalReceipt; resolveAuthority: (receipt: ApprovalReceipt) => ApprovalAuthority; idempotencyKey: string }): Promise<OperationReceipt<PluginSourcePlan>> {
+  async approveSource(input: { withSourceFence?: <T>(callback: () => T) => T; planId: string; expectedRevision: number; receipt: ApprovalReceipt; resolveAuthority: (receipt: ApprovalReceipt) => ApprovalAuthority; idempotencyKey: string }): Promise<OperationReceipt<PluginSourcePlan>> {
     return this.#approvePlan('source', input) as Promise<OperationReceipt<PluginSourcePlan>>
   }
 
-  async #approvePlan(kind: 'activation' | 'source', input: { planId: string; expectedRevision: number; receipt: ApprovalReceipt; resolveAuthority: (receipt: ApprovalReceipt) => ApprovalAuthority; idempotencyKey: string }): Promise<OperationReceipt<PluginActivationPlan | PluginSourcePlan>> {
+  async #approvePlan(kind: 'activation' | 'source', input: { withSourceFence?: <T>(callback: () => T) => T; planId: string; expectedRevision: number; receipt: ApprovalReceipt; resolveAuthority: (receipt: ApprovalReceipt) => ApprovalAuthority; idempotencyKey: string }): Promise<OperationReceipt<PluginActivationPlan | PluginSourcePlan>> {
     const inputDigest = controlPlaneDigest({ operation: 'approve-plan', kind, planId: input.planId, expectedRevision: input.expectedRevision, receipt: input.receipt })
+    const withCurrentSource = <T>(gapId: string, callback: () => T): T => {
+      const commit = () => { if (kind === 'source') this.#assertOwnerTaskFailureGapAdmission(gapId); return callback() }
+      return kind === 'source' && input.withSourceFence ? input.withSourceFence(commit) : commit()
+    }
     if (kind === 'source') {
       const prior = this.#sourcePlanReceipt(input.idempotencyKey, 'approve-plan', inputDigest, input.planId)
       if (prior !== undefined) {
@@ -1519,7 +1553,7 @@ export class ControlPlaneStore {
           || prior.result.releaseAuthorization !== undefined || prior.result.release !== undefined) {
           throw new ControlPlaneStoreError('invalid-state', 'stored source approval receipt is corrupt')
         }
-        return prior
+        return withCurrentSource(prior.result.gapId, () => prior)
       }
     } else {
       const prior = this.#activationPlanReceipt(input.idempotencyKey, 'approve-plan', inputDigest, input.planId)
@@ -1532,23 +1566,25 @@ export class ControlPlaneStore {
     }
     const plan = kind === 'activation' ? this.getPlan(input.planId) : this.getSourcePlan(input.planId)
     const verified = await input.resolveAuthority(input.receipt).verify(input.receipt, plan)
-    if (plan.revision !== input.expectedRevision) throw new ControlPlaneStoreError('conflict', 'plan revision conflict')
-    if (plan.status !== 'pending-approval') throw new ControlPlaneStoreError('invalid-state', 'plan is not pending approval')
-    if (this.#now() > plan.expiresAt || verified.decision !== 'approved') throw new ControlPlaneStoreError(verified.decision === 'approved' ? 'expired' : 'invalid-state', 'plan approval is not currently applicable')
-    const table = kind === 'activation' ? 'activation_plans' : 'source_plans'; const now = this.#now()
-    this.#database.exec('BEGIN IMMEDIATE')
-    try {
-      const statement = this.#database.prepare(`UPDATE ${table} SET status = 'approved', revision = revision + 1, approval_json = ?,
-        ${kind === 'activation' ? 'approval_receipt_json = ?,' : ''} updated_at = ?
-        WHERE id = ? AND status = 'pending-approval' AND revision = ? AND plan_digest = ?`)
-      const result = kind === 'activation'
-        ? statement.run(JSON.stringify(verified), JSON.stringify(input.receipt), now, plan.id, input.expectedRevision, plan.digest)
-        : statement.run(JSON.stringify(verified), now, plan.id, input.expectedRevision, plan.digest)
-      if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'plan changed while approval was being applied')
-      const output = kind === 'activation' ? this.getPlan(plan.id) : this.getSourcePlan(plan.id)
-      const receipt = { idempotencyKey: input.idempotencyKey, operation: 'approve-plan', inputDigest, result: output, createdAt: now }
-      this.#insertReceipt(receipt); this.#database.exec('COMMIT'); return receipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    return withCurrentSource(plan.gapId, () => {
+      if (plan.revision !== input.expectedRevision) throw new ControlPlaneStoreError('conflict', 'plan revision conflict')
+      if (plan.status !== 'pending-approval') throw new ControlPlaneStoreError('invalid-state', 'plan is not pending approval')
+      if (this.#now() > plan.expiresAt || this.#now() > verified.expiresAt || verified.decision !== 'approved') throw new ControlPlaneStoreError(verified.decision === 'approved' ? 'expired' : 'invalid-state', 'plan approval is not currently applicable')
+      const table = kind === 'activation' ? 'activation_plans' : 'source_plans'; const now = this.#now()
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        const statement = this.#database.prepare(`UPDATE ${table} SET status = 'approved', revision = revision + 1, approval_json = ?,
+          ${kind === 'activation' ? 'approval_receipt_json = ?,' : ''} updated_at = ?
+          WHERE id = ? AND status = 'pending-approval' AND revision = ? AND plan_digest = ?`)
+        const result = kind === 'activation'
+          ? statement.run(JSON.stringify(verified), JSON.stringify(input.receipt), now, plan.id, input.expectedRevision, plan.digest)
+          : statement.run(JSON.stringify(verified), now, plan.id, input.expectedRevision, plan.digest)
+        if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'plan changed while approval was being applied')
+        const output = kind === 'activation' ? this.getPlan(plan.id) : this.getSourcePlan(plan.id)
+        const receipt = { idempotencyKey: input.idempotencyKey, operation: 'approve-plan', inputDigest, result: output, createdAt: now }
+        this.#insertReceipt(receipt); this.#database.exec('COMMIT'); return receipt
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    })
   }
 
   async claimActivation(input: { planId: string; expectedRevision: number; leaseMs: number;
