@@ -198,7 +198,7 @@ config schema 1 selects reload, schema 2 readiness, and schema 3 physical
 rollback. It now requires Host request schema 2 with an immutable predecessor
 receipt binding. Readiness independently matches that binding against the
 signer's retained signed reload. Signed receipt schema 2 and Control Plane
-database schema 15 remain unchanged.
+database schema 15 introduced physical rollback; schema 16 retains that contract.
 
 Normal phase requests bind the previous passed/applied receipt in the same
 activation/fence, including its full signed digest and Host generation. The
@@ -214,6 +214,10 @@ supersession, restart, failed-receipt identity checks, actual observer queries,
 signed reload/readiness, and physical recovery. Stable authenticated inactive
 entries produce failed readiness; identity/authentication failures remain
 unsigned, and a cached failure cannot become success.
+
+### Owner task failure gaps (Control Plane schema 16)
+
+Schema 16 adds a private gap source sidecar and preserves existing plans/releases. Automatic Growth source reviews require the same-release Control Plane `recordOwnerTaskFailureGap` Host API plus Delivery source inspection and Evaluation canonical writer fences; optional Evaluation peer floor is `0.1.33`. Exact API checks still matter for older development builds with the same version. Missing peers block task-bound preparation but leave legacy manual gaps usable. Upgrade verification covers v15 preservation, owner isolation, source retraction/correction, synchronous admission and durable-job recovery. Full owner receipts are frozen: a new session binding/generation invalidates old work.
 
 ### Physical Host rollback (Control Plane schema 15)
 

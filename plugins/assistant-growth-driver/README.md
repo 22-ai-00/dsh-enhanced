@@ -141,7 +141,7 @@ pluginSourceProposals:
 
 这段是 driver 完整配置的补充。DSH patch 的 `config` 为整值替换，覆盖配置时必须同时保留 `enabled`、`scope` 和其它需要的值。Policy 还需对相同 owner、workspace、preset 和 `background` initiator 授予 `execute` / `tool:plugin_source_*`。
 
-Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已有的开放 gap，通过 `plugin_source_read` 列出并读取目标插件在 Git 提交中的文本源码，最后通过 `plugin_source_prepare` 提交 `gap_id`、`plugin_name` 与两种互补的修改输入：新增短文件或完整替换用 `files: [{path, content}]`；已读的长既有文件用 `edits: [{path, before, after}]`。每个 `before` 必须在本轮缓存的原始文本中精确且唯一地出现，编辑按原始偏移处理，且不能重叠；`files` 与 `edits` 可以一起使用，但路径必须互不相同。Host 先展开为完整文件再交给 Control Plane，模型不会从确认结果取回缓存源码。这些 gap 是控制面现有记录，并不携带逐条 owner-route 来源证明；多 owner 部署须隔离各自的账本。至少提供一种非空输入；两种输入合计最多 64 项，单个完整内容、`before`、`after` 与最终每个文件最多 64 KiB，最终完整文件最多 64 个、合计 256 KiB。模型不能给仓库路径、命令、镜像、环境、TTL、审批或发布参数。安全根插件由 driver 和控制面同时拒绝。
+Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已有的开放 gap，通过 `plugin_source_read` 列出并读取目标插件在 Git 提交中的文本源码，最后通过 `plugin_source_prepare` 提交 `gap_id`、`plugin_name` 与两种互补的修改输入：新增短文件或完整替换用 `files: [{path, content}]`；已读的长既有文件用 `edits: [{path, before, after}]`。每个 `before` 必须在本轮缓存的原始文本中精确且唯一地出现，编辑按原始偏移处理，且不能重叠；`files` 与 `edits` 可以一起使用，但路径必须互不相同。Host 先展开为完整文件再交给 Control Plane，模型不会从确认结果取回缓存源码。普通手动 wake 读取既有手工 gap，这类记录没有逐条 owner 来源证明，多 owner 部署仍须隔离手工账本。启用下述 `usageLearning` 时只读取本次可信失败的专属 gap，绝不退回全局列表。至少提供一种非空输入；两种输入合计最多 64 项，单个完整内容、`before`、`after` 与最终每个文件最多 64 KiB，最终完整文件最多 64 个、合计 256 KiB。模型不能给仓库路径、命令、镜像、环境、TTL、审批或发布参数。安全根插件由 driver 和控制面同时拒绝。
 
 `plugin_source_read` 接收 `gap_id`、`plugin_name`、`paths`；`paths: []` 返回文件清单，再按需读取源码、测试、README、package.json 和 patch。只读取已提交的文本，不读取工作区改动、未跟踪文件、符号链接、隐藏文件或生成目录。单文件最多 64 KiB，每轮内容累计最多 256 KiB，并受现有工具调用次数与运行时限控制。读取的内容属于不可信数据，不能改变工具权限。
 
@@ -169,7 +169,11 @@ usageLearning:
 
 同进程 Evaluation 变化即时扫描，原生每分钟 scan 负责重启及其他进程写入的恢复；scan 自身不调用模型。只处理精确 owner、已结束且 quiescent、未截断的前台可信结果（独立 Verifier 或已认证 owner 反馈），排除 Automation/后台成长自己的结果，避免递归触发。缺模型快照或多请求模型不一致且没有固定覆盖时不发起作业。相同 canonical 修订只接纳一次；纠正/撤回使旧排队作业失效，运行中的作业在模型/工具边界重查来源。原始记录和评价仍由 Evaluation 持有。
 
-`usageHealth()` 返回连接、扫描错误与各状态数量，不返回任务正文。queued 可在重启后恢复；running 中断转 unknown，不自动重跑。配置、owner 身份/route 或来源变化会阻止旧作业继续。停用 `usageLearning` 会卸载执行器并中止本代工作；持久作业不会被清除。它目前自动驱动有界复盘和现有候选生成，尚不创建任意修复 Goal、不自动生成 capability gap，也不代表候选已验证、采用或带来收益。
+`usageHealth()` 返回连接、扫描错误与各状态数量，不返回任务正文。queued 可在重启后恢复；running 中断转 unknown，不自动重跑。配置、owner 身份/route 或来源变化会阻止旧作业继续。停用 `usageLearning` 会卸载执行器并中止本代工作；持久作业不会被清除。它目前自动驱动有界复盘和候选生成，尚不创建任意修复 Goal；完成复盘不代表候选已采用或带来收益。
+
+同时启用 `pluginSourceProposals` 后，可信 `not-achieved` 前台结果会在模型启动前自动登记 Control Plane 私有 gap，无需预先人工登记。Host 重新读取 Delivery 来源，在 Evaluation writer fence 内记录 owner、任务修订和来源摘要；gap 不保存任务原文，默认 ROI 为未知占位值 0。成功、unknown、撤回、未结束及截断来源不产生失败 gap。新控制面接口缺失时失败关闭，不读取全局手工 gap。
+
+源码检查、最终计划提交及 durable job 的排队、恢复和执行都重新核对来源。完整 owner receipt 固定后，`/new` 导致 binding/generation 变化也会停止旧任务。纠正或撤回后保留历史引用，禁止旧来源继续产出计划；旧 pending plan 的自动授权采用与持续观察尚待接通。此能力只产生有检查证据的 pending plan，不会自行发布或启用插件。
 
 ## 权限与数据
 

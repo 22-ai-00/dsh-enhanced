@@ -7,8 +7,9 @@ import { DatabaseSync } from 'node:sqlite'
 import type { HostAutomationExecutor, SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
-import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
+import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
 import type { SourceJobRecord } from '../src/source-job-types.ts'
+import type { PluginSourcePlan } from '../src/types.ts'
 import * as sourceBuild from '../src/source-build.ts'
 
 const roots: string[] = []
@@ -21,7 +22,7 @@ const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture() {
+async function fixture(options: { typed?: boolean; fence?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -29,7 +30,11 @@ async function fixture() {
   execFileSync('/usr/bin/git', ['-C', root, 'add', '.']); execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', 'fixture'])
   const head = execFileSync('/usr/bin/git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
   const store = new ControlPlaneStore({ path: join(root, 'control.sqlite') })
-  const gap = store.recordGap({ idempotencyKey: 'gap:source-job', capability: 'health', context: 'runtime', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+  const gap = options.typed === true
+    ? store.recordOwnerTaskFailureGap({ schemaVersion: 1, owner: receipt(), outcomeId: 'outcome-source-job',
+      projection: { subjectKind: 'foreground-turn', subjectRef: 'inbox-source-job', version: 1, digest: hex('projection-source-job'), disposition: 'upsert' },
+      sourceDigest: hex('source-job-reference') })
+    : store.recordGap({ idempotencyKey: 'gap:source-job', capability: 'health', context: 'runtime', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
   let executor: HostAutomationExecutor | undefined
   let activation: { definitionHash: string; activationNonce: string; ownerRouteId: string } | undefined
   const reconciles: SystemAutomationReconcileInput[] = []
@@ -45,23 +50,98 @@ async function fixture() {
     inspectSystemOwned: vi.fn(() => ({ latestTerminalRuns: {} })),
   }
   const trust = { dshHome: '/dsh', executor: { environmentAllowlist: [] } }
-  const prepare = vi.fn(async (job: SourceJobRecord, _signal: AbortSignal, assertCurrent: () => Promise<void>) => {
+  let sourceCurrent = true
+  // This fixture models the service gateway only: production obtains this
+  // proof from Evaluation's canonical writer fence, never from this boolean.
+  const gapSourceFence = <T>(gapId: string, owner: ReturnType<typeof receipt>, callback: () => T): T => {
+      if (gapId !== gap.id || controlPlaneDigest(owner) !== controlPlaneDigest(receipt()) || !sourceCurrent) {
+        throw new Error('typed source is no longer current')
+      }
+      return store.withOwnerTaskFailureGapAdmission(gapId, callback)
+    }
+  const withGapSourceFence: typeof gapSourceFence | undefined = options.typed === true && options.fence !== false
+    ? vi.fn(gapSourceFence) as typeof gapSourceFence
+    : undefined
+  const prepare = vi.fn(async (job: SourceJobRecord, _signal: AbortSignal, assertCurrent: () => Promise<void>): Promise<PluginSourcePlan> => {
     await assertCurrent()
-    return store.createSourcePlan({ gapId: job.intent.gapId, repository: job.intent.repository, worktree: job.intent.worktree,
+    const create = () => store.createSourcePlan({ gapId: job.intent.gapId, repository: job.intent.repository, worktree: job.intent.worktree,
       baseCommit: job.intent.baseCommit, name: job.intent.name, generatorDigest: MODIFY_GENERATOR_DIGEST, scope: [`plugins/${job.intent.name}`], mode: 'modify', ttlMs: job.intent.ttlMs,
       idempotencyKey: `source-job-plan:${job.id}`, sourceJob: { jobId: job.id, jobRevision: job.revision, occurrenceId: job.occurrenceId! },
       prepared: { treeDigest: 'b'.repeat(64), patchDigest: 'c'.repeat(64), checkedAt: Date.now(), evidence: evidence() } }).result
+    return options.typed === true ? withGapSourceFence!(job.intent.gapId, job.intent.owner, create) : create()
   })
   const config = { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: root,
     ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'source-runs', budgetAmount: 1 }
   const delivery = { validateOwnerRoute: vi.fn(receipt) }
-  const runtime = new SourceJobRuntime({ config, build, statePath: root, store, ports: { automations: automations as never, delivery }, trust: async () => trust as any, prepare })
+  const createRuntime = () => new SourceJobRuntime({ config, build, statePath: root, store, ports: { automations: automations as never, delivery },
+    ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare })
+  const runtime = createRuntime()
   runtime.start()
   const enqueue = (signal = new AbortController().signal, key = 'job:one') => runtime.enqueue({ gapId: gap.id, name: 'health-helper', repository: root, files: [{ path: 'src/index.ts', content: 'export const changed = true\n' }], idempotencyKey: key, expectedBaseCommit: head, ttlMs: 900_000, owner: OWNER, signal, assertCurrent: () => undefined })
-  return { root, store, gap, runtime, delivery, trust, automations, reconciles, prepare, get executor() { return executor }, activation: (_id: string) => activation!, enqueue, head }
+  return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, withGapSourceFence,
+    setSourceCurrent: (value: boolean) => { sourceCurrent = value }, get executor() { return executor }, activation: (_id: string) => activation!, enqueue, head }
 }
 
 describe('durable source-job runtime', () => {
+  it('rejects a typed task-failure gap when the Host provenance fence is unavailable', async () => {
+    const f = await fixture({ typed: true, fence: false })
+    try {
+      await expect(f.enqueue()).rejects.toThrow(/provenance service unavailable/)
+      expect(f.store.listSourceJobs()).toEqual([])
+      expect(f.prepare).not.toHaveBeenCalled()
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  it('settles a queued typed task-failure source job before dispatch when its source is no longer current', async () => {
+    const f = await fixture({ typed: true })
+    try {
+      const queued = await f.enqueue()
+      f.setSourceCurrent(false)
+      const activation = f.activation(queued.id)
+      const outcome = await f.executor!.execute({ occurrenceId: 'typed-preflight', automationId: queued.id, definitionHash: activation.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: activation.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(outcome.outcome).toBe('failed')
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'failed' })
+      expect(f.prepare).not.toHaveBeenCalled()
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  it('marks a claimed typed task-failure job unknown when the source changes during preparation', async () => {
+    const f = await fixture({ typed: true })
+    try {
+      const queued = await f.enqueue()
+      f.prepare.mockImplementationOnce(async (_job, _signal, assertCurrent) => {
+        f.setSourceCurrent(false)
+        await assertCurrent()
+        throw new Error('unreachable after source fence rejection')
+      })
+      const activation = f.activation(queued.id)
+      const outcome = await f.executor!.execute({ occurrenceId: 'typed-claimed', automationId: queued.id, definitionHash: activation.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: activation.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(outcome.outcome).toBe('unknown')
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'unknown' })
+      expect(f.store.getSourceJob(queued.id)?.planId).toBeUndefined()
+      expect(f.prepare).toHaveBeenCalledTimes(1)
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  it('settles a queued typed task-failure job on restart when its source is no longer current', async () => {
+    const f = await fixture({ typed: true })
+    try {
+      const queued = await f.enqueue()
+      await f.runtime.close()
+      f.setSourceCurrent(false)
+      const restarted = f.createRuntime()
+      restarted.start()
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'failed' })
+      expect(f.store.getSourceJob(queued.id)?.planId).toBeUndefined()
+      expect(f.prepare).not.toHaveBeenCalled()
+      await restarted.close()
+    } finally { try { await f.runtime.close() } catch {} f.store.close() }
+  })
+
   it('aborts and drains a claimed Host execution before closing its ledger', async () => {
     const f = await fixture()
     try {

@@ -120,6 +120,7 @@ export interface GrowthSourcePlanePort {
     ttlMs: number
     timeoutMs: number
     offline: boolean
+    owner?: GrowthSourceJobOwner
     signal: AbortSignal
     assertCurrent: () => void
   }): Promise<GrowthSourcePreparedPlan>

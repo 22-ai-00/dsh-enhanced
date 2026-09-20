@@ -14,9 +14,9 @@
 
 - 发布基线仍为 `0.1.32`；`dev` 工作区版本为 `0.1.33`，后续开发不等于已发布。安装器和 Host 兼容范围见[兼容性说明](compatibility.md)与[发布账本](../release-manifest.json)。
 - 下一版 npm 的发布门槛是：安装部署后，在既有授权内由真实使用持续驱动修复、验证、采用与观察/回滚，并通过完整发布检查。用户已同意达到该门槛后重新发布；当前中间能力尚不满足条件。
-- 日常使用中的工具/插件自迭代尚未贯通。普通 Lark 已有低风险偏好自动学习；Growth `usageLearning` 已可根据已验收前台任务结果自动调度持久复盘、使用现有候选工具，仍止于 pending 产物。Skills 有限修复链仍需对精确来源 Goal 手动 `skill_repair_arm`；真实失败形成新能力缺口、受授权修复、采用及持续观察仍待接通。
+- 日常使用中的工具/插件自迭代尚未贯通。普通 Lark 已有低风险偏好自动学习；Growth `usageLearning` 已可根据已验收前台任务结果自动调度持久复盘；启用源码轨时，可信失败会自动形成 owner 私有修复缺口并进入源码候选工具，仍止于 pending 产物。Skills 有限修复链仍需对精确来源 Goal 手动 `skill_repair_arm`；既有授权下的独立验证、采用及持续观察仍待接通。
 - 成长与修复的模型默认继承来源，可配置固定覆盖。Delivery schema 22 在 DSH 最终 `request/header` 保存来源实际 provider/model/effort，包括 adapter 默认值；用户随后切换模型不改变历史任务。旧任务无快照或同任务多模型时不猜测。自动 Growth 作业保存该快照，queued 可恢复，已派发但中断的任务保持 unknown、不重放；Skills 沿用其修复授权中的冻结选择。
-- Evaluation 的可信 canonical feed 包含纠正/撤回；Delivery 核对精确 owner 身份与原始任务，支持 `/new` 后读取旧任务并拒绝身份换代继承。Growth 在 writer fence 内落游标/意图，复用 Automations 扫描、调度和预算；每次模型/工具调用重查来源，排除后台结果递归触发。当前只处理具备可信结果与明确归属的前台任务；模型结束或工具退出本身不构成学习依据。
+- Evaluation 的可信 canonical feed 包含纠正/撤回；Delivery 核对精确 owner 身份与原始任务，支持 `/new` 后读取旧任务并拒绝身份换代继承。Growth 在 writer fence 内落游标/意图，复用 Automations 扫描、调度和预算；每次模型/工具调用重查来源，排除后台结果递归触发。Control Plane schema 16 保留精确 owner/canonical 来源引用，自动源码轨只读取本次缺口，检查与最终计划提交重验来源；`/new` 改变完整 owner receipt 后停止旧工作。当前只处理具备可信结果与明确归属的前台任务；模型结束或工具退出本身不构成学习依据。
 - 基本 RSI 已在限定任务族跑通真实修复、独立比较、后续任务 canary、两轮晋升与安全检查点恢复。它不证明任意任务都能自我改进，也不允许重放未结算的模型或外部调用。
 - Day1 已经通过原生 Agent/Growth Driver 提交源码修复候选，独立 Host 作业完成离线仓库检查并形成待审批计划；其中 personal-memory 修复经开发复核整合。待审批提案不等于自主发布或生产启用。
 - Control Plane 已有 npm 发布/独立读回/catalog adapter，以及 systemd reload、readiness、物理 rollback 的签名与持久操作组件。认证有限回放端点支持晚到 Ed25519 授权：readiness 落账后，将真实 schema-2 请求交给同一 DSH CLI `0.1.5-rc.2` Host 执行，保持 PID/InvocationID、候选 Fiber 与部署文件不变。完成态重启失效，SIGKILL 中断后保留 unknown；同 scope 换 operation 或重新签发 grant 不能恢复派发权限。其输出不证明全局 `externalEffects = 0`，不能代替独立签名。
@@ -57,7 +57,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. 在已接通的真实任务反馈→持久 Growth 复盘之上，让真实失败直接形成可追溯的能力缺口或修复任务，无需 operator 预先登记 gap 或为每个 Goal 手动 arm。若走 Skills 修复，普通前台来源须经 owner 授权的 Host 入口创建真实原生 Goal，不能伪造现有修复契约要求的来源 Goal；调度继续复用 Automations。
+1. 在已接通的真实反馈→持久复盘→owner 私有失败 gap→源码候选之上，连接有界修复授权，去除逐 Goal 手动 arm。若走 Skills 修复，普通前台来源须经 owner 授权的 Host 入口创建真实原生 Goal，不能伪造现有修复契约要求的来源 Goal；调度继续复用 Automations。
 2. 接通成长触发 → 自主修复/技能或插件候选 → 独立验证 → 已授权范围内采用 → 后续真实使用观察与回滚。复用既有 Skills、Growth Driver 和 Control Plane；仅停留在 pending 提案不算完整交付。
 3. 提供可安装的日常使用配置，明确正常入口、针对成长能力范围的一次授权、预算、停止和恢复方式。模型保持可替换供应，成长状态随 Agent 持久化；无需为每个来源 Goal 手动 arm，或为每个任务重新编排固定场景。自动调用预设场景仍不能替代这一目标。
 4. 保留上表未完成验收与真实发布/外部系统边界。WP16 的独立副作用观测、签名和推广恢复，以及 WP18 的精确提交 CI/readback，按日常自迭代链路所需逐项接入；测试夹具不能代替生产授权或真实收益。
@@ -67,9 +67,8 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 自动 Growth 消费者通过独立复核：整包 80 项通过，包括原生 Automations→原生 AgentLoop 本地模型适配器、来源模型冻结、缺模型不猜、重启/去重、纠正/撤回、预算拒绝、背压和卸载 drain；Delivery 最终请求模型、切换/续写及迁移等定向 9 项通过。类型检查、构建、lint、manifest 和 Growth dry-run pack 通过。本批全仓 `pnpm check` 在 Evaluation 的 4 个旧版本迁移测试处停止：降级 fixture 误留 v12 专用反馈索引外键，已修正；Evaluation 整包 344 项通过、10 项跳过，类型与 lint 通过。完整门禁仍待重跑；这些检查不证明自我修复/采用已交付。
-- 可信结果增量读取与 owner 来源关联通过独立复核：Evaluation feed/writer-fence 9 项、Delivery 实际反馈修订与身份换代集成 1 项通过；Delivery owner-route 34 项通过，两包类型检查/构建、相关 lint 与 manifest 校验通过。覆盖 v11→v12 数据保留、重启、跨连接分页更新及撤回；未调用真实模型，尚未验证自动修复/采用闭环，也未重跑全仓门禁。
-- 本次模型继承改动通过独立复核：Growth 68 项、Delivery owner-route 34 项、Skills 410 项通过（11 项跳过）；三包类型检查与构建通过，相关 lint、manifest 校验和 Growth dry-run pack 通过。未调用真实模型，未重跑全仓检查；普通使用触发与真实跨重启 Repair Agent 验收仍待接通。最近一次全仓 `pnpm check` 是此前回合时间能力的基线：6,135 项通过、50 项跳过、35 个包 dry-run pack 通过；该结果不替代本次最终交付前的全仓门禁。
+- 真实失败来源链已通过独立代码与证据复核。定向检查：Growth 整包 83 项通过；Control Plane store/来源 fence/Host 准备与迁移相关 106 项、durable source job 与原生调度 15 项通过。覆盖 exact owner gap、全局列表隔离、反馈变化、最终提交冲突、重启和 unknown 不重放；两包类型、构建、lint、manifest 与 dry-run pack 通过。测试使用本地脚本模型与隔离构建夹具，不作为真实供应商效果或自动采用证据。
+- 上轮全仓 `pnpm check` 在 Evaluation 的 4 个旧版本迁移测试处停止：降级 fixture 误留 v12 专用反馈索引外键，已修正并独立复核；Evaluation 整包 344 项通过、10 项跳过。当前完整门禁正在重跑，尚未确认通过。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 - 未结算 generation 测试修复 `e33a6ae` 已通过 Linux、macOS 与 Windows 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35494781155)。测试用真实派发后丢失确认建立持久未结算状态，检查新 operation 不再重启。该跨平台结论不覆盖之后的新改动。
 

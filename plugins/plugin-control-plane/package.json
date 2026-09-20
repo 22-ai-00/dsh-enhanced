@@ -61,7 +61,8 @@
     "@deepseek-ai/dsh-tools": ">=0.1.2-rc.1 <0.2.0",
     "@dsh-enhanced/assistant-automations": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">=0.1.33 <0.2.0",
-    "@deepseek-ai/dsh-scope": ">=0.1.2-rc.1 <0.2.0"
+    "@deepseek-ai/dsh-scope": ">=0.1.2-rc.1 <0.2.0",
+    "@dsh-enhanced/assistant-evaluation": ">=0.1.33 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis-plugin-loader": {
@@ -81,6 +82,9 @@
     },
     "@deepseek-ai/dsh-scope": {
       "optional": true
+    },
+    "@dsh-enhanced/assistant-evaluation": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -93,6 +97,7 @@
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@deepseek-ai/dsh-scope": "catalog:"
+    "@deepseek-ai/dsh-scope": "catalog:",
+    "@dsh-enhanced/assistant-evaluation": "workspace:*"
   }
 }

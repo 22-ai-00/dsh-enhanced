@@ -58,6 +58,7 @@ export class SourceJobRuntime {
   private active = false
   constructor(private readonly options: {
     config: SourceJobsConfig; build: SourceBuildConfig; statePath: string; store: ControlPlaneStore; ports: SourceJobPorts
+    withGapSourceFence?: <T>(gapId: string, owner: SourceJobOwnerReceipt, callback: () => T) => T
     trust: () => Promise<Trust>
     prepare: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<PluginSourcePlan>
   }) {
@@ -118,9 +119,16 @@ export class SourceJobRuntime {
     return owner
   }
 
+  private withGapSource<T>(gapId: string, owner: SourceJobOwnerReceipt, callback: () => T): T {
+    if (this.options.store.getOwnerTaskFailureReference(gapId) === undefined) return callback()
+    if (!this.options.withGapSourceFence) throw new Error('source job task provenance service unavailable')
+    return this.options.withGapSourceFence(gapId, owner, callback)
+  }
+
   private assertOwner(job: SourceJobRecord): void {
     if (!this.available() || job.expiresAt <= Date.now() || job.intent.authority.digest !== this.authorityDigest
       || job.intent.authority.id !== this.options.config.authorityId || controlPlaneDigest(this.receipt()) !== job.intent.ownerDigest) throw new Error('source job authority changed or expired')
+    this.withGapSource(job.intent.gapId, job.intent.owner, () => {})
   }
 
   enqueue(input: EnqueueSourceJobInput): Promise<SourceJobProjection> {
@@ -130,7 +138,7 @@ export class SourceJobRuntime {
 
   private async enqueueOwned(input: EnqueueSourceJobInput): Promise<SourceJobProjection> {
     const signal = AbortSignal.any([input.signal, this.abort.signal, AbortSignal.timeout(15_000)])
-    const assertCurrent = async (): Promise<void> => { signal.throwIfAborted(); await awaitSourceSignal(signal, input.assertCurrent); this.assertCaller(input.owner); if (!this.available()) throw new Error('source job authority unavailable'); signal.throwIfAborted() }
+    const assertCurrent = async (): Promise<void> => { signal.throwIfAborted(); await awaitSourceSignal(signal, input.assertCurrent); this.withGapSource(input.gapId, this.assertCaller(input.owner), () => {}); if (!this.available()) throw new Error('source job authority unavailable'); signal.throwIfAborted() }
     await assertCurrent()
     validateScopedPluginFiles(input.files)
     assertPluginModificationAllowed(input.name)
@@ -165,7 +173,7 @@ export class SourceJobRuntime {
     }
     await assertCurrent()
     // Synchronous acceptance and registration: no Agent signal is persisted.
-    const job = this.options.store.enqueueSourceJob({ id, automationId: id, idempotencyKey: input.idempotencyKey, intent })
+    const job = this.withGapSource(gap.id, owner, () => this.options.store.enqueueSourceJob({ id, automationId: id, idempotencyKey: input.idempotencyKey, intent }))
     if (job.status === 'queued') this.scheduleOrFail(job)
     return projection(this.options.store.getSourceJob(id)!)
   }
@@ -186,6 +194,7 @@ export class SourceJobRuntime {
   private refreshQueued(job: SourceJobRecord): SourceJobRecord {
     if (job.status !== 'queued') return job
     let code: string | undefined
+    try { this.withGapSource(job.intent.gapId, job.intent.owner, () => {}) } catch { code = 'source-job-task-source-changed' }
     if (job.expiresAt <= Date.now()) code = 'source-job-expired'
     else if (job.definitionHash !== undefined) {
       const health = this.options.ports.automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })

@@ -876,6 +876,13 @@ describe('opt-in plugin source proposals', () => {
         }
       }),
       gaps: vi.fn(() => [{ id: 'gap-1', capability: 'health', context: 'owner gap', status: 'open' as const, createdAt: 1 }]),
+      // This is deliberately a Host fixture, rather than a model-facing
+      // recorder.  Automatic usage reviews must receive their one gap from
+      // this owner/source-bound seam, never from the legacy global `gaps()`
+      // listing used by manual wakes below.
+      recordOwnerTaskFailureGap: vi.fn(() => ({
+        id: 'gap-1', capability: 'task-failure', context: 'owner task failure', status: 'open' as const, createdAt: 1,
+      })),
       prepareModifySourcePlan: vi.fn(async (input: Parameters<GrowthSourcePlanePort['prepareModifySourcePlan']>[0]) => {
         input.signal.throwIfAborted()
         input.assertCurrent()
@@ -884,6 +891,125 @@ describe('opt-in plugin source proposals', () => {
       }),
     }
   }
+
+  async function startUsageReview(input: {
+    h: Harness
+    source: ReturnType<typeof sourceService> | Record<string, unknown>
+    objectiveStatus: 'achieved' | 'not-achieved'
+  }): Promise<AssistantGrowthDriverService> {
+    const { h, source, objectiveStatus } = input
+    await h.ctx.plugin(AssistantEvaluationService, { databasePath: join(h.root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+    await h.ctx.plugin(AssistantAutomationsService, {
+      databasePath: join(h.root, 'automations.sqlite'), runsPath: join(h.root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0,
+    })
+    const evaluation = h.ctx.assistantEvaluation
+    const producer = new EvaluationStore({ path: join(h.root, 'evaluation.sqlite') })
+    const task = producer.append({
+      scope: { workspace: h.root, preset: PRESET }, situation: 'foreground:real-task',
+      executionStatus: 'succeeded', objectiveStatus, deliveryStatus: 'delivered', trust: 'trusted',
+      source: { kind: 'evaluator', id: 'assistant-verifier' }, evaluator: { id: 'assistant-verifier', version: '1' },
+      evidence: [{ kind: 'foreground-turn', ref: 'real-task' }, { kind: 'acceptance-contract', ref: 'contract' }, { kind: 'verification-receipt', ref: 'receipt' }],
+      metrics: {}, occurredAt: Date.now(), idempotencyKey: `source-usage-${objectiveStatus}-${Math.random()}`,
+    })
+    producer.close()
+    const learning = {
+      protocol: 'assistant-delivery/owner-foreground-learning/v1' as const,
+      owner: buildReceipt(h.root, 1),
+      canonical: evaluation.getTrustedTaskLearningProjection({
+        scope: evaluation.canonicalHostScope({ workspace: h.root, preset: PRESET }), outcomeId: task.id,
+      }),
+      judgement: 'independent-verifier' as const,
+      source: {
+        sessionId: 'real-session', inboxId: 'real-task', objective: 'The actual user report has a missing total.',
+        truncated: false, quiescent: true, modelSelectionState: 'frozen' as const,
+        modelSelection: { provider: 'conversation-provider', model: 'original-task-model' },
+      },
+    }
+    h.learningSource.mockReturnValue(learning)
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      budgetId: 'growth-budget', budgetAmount: 1,
+      pluginSourceProposals: options(h.root),
+      usageLearning: { enabled: true, databasePath: join(h.root, 'usage.sqlite') },
+    }))
+    await vi.waitFor(() => expect(service.usageHealth()).toMatchObject({ connected: true, counts: { queued: 1 } }))
+    await new Promise(resolve => setTimeout(resolve, 1_100))
+    for (let i = 0; i < 3; i += 1) {
+      await h.ctx.assistantAutomations.tick()
+      await h.ctx.assistantAutomations.whenIdle()
+    }
+    return service
+  }
+
+  it('turns a trusted failed foreground task into its exact owner gap, without exposing another owner global gap', async () => {
+    const turns = [
+      { name: 'plugin_source_gaps', args: {} },
+      { name: 'plugin_source_read', args: { gap_id: 'owner-failure-gap', plugin_name: 'assistant-health', paths: [] } },
+      { name: 'plugin_source_read', args: { gap_id: 'owner-failure-gap', plugin_name: 'assistant-health', paths: ['README.md'] } },
+      { name: 'plugin_source_prepare', args: { ...sourceArgs, gap_id: 'owner-failure-gap' } },
+    ]
+    const adapter = new ScriptedAdapter(turns)
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = sourceService()
+    const ownGap = { id: 'owner-failure-gap', capability: 'missing-total', context: 'only this owner task may repair the total', status: 'open' as const, createdAt: 1 }
+    source.gaps.mockReturnValue([{ id: 'other-owner-gap', capability: 'private', context: 'OTHER OWNER GLOBAL CONTEXT', status: 'open', createdAt: 1 }])
+    source.recordOwnerTaskFailureGap.mockReturnValue(ownGap)
+    const prompts: string[] = []
+    h.ctx.on('llm/stream', async function* (options, next) { prompts.push(JSON.stringify(options.messages)); yield* next() })
+
+    const service = await startUsageReview({ h, source, objectiveStatus: 'not-achieved' })
+
+    expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
+    expect(source.recordOwnerTaskFailureGap).toHaveBeenCalled()
+    const records = (source.recordOwnerTaskFailureGap.mock.calls as unknown as Array<[unknown]>).map(([value]) => value)
+    expect(records.every(value => value === records[0])).toBe(true)
+    expect(records[0]).toMatchObject({
+      protocol: 'assistant-delivery/owner-foreground-learning/v1',
+      owner: buildReceipt(h.root, 1),
+      canonical: { objective: { status: 'not-achieved' } },
+      source: { sessionId: 'real-session', inboxId: 'real-task' },
+    })
+    expect(source.gaps).not.toHaveBeenCalled()
+    expect(source.prepareModifySourcePlan).toHaveBeenCalledWith(expect.objectContaining({
+      gapId: 'owner-failure-gap', owner: expect.objectContaining({ workspace: h.root, principalId: PRINCIPAL }),
+    }))
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 1, rejected: 0 })
+    expect(prompts.join('\n')).toContain('only this owner task may repair the total')
+    expect(prompts.join('\n')).not.toContain('OTHER OWNER GLOBAL CONTEXT')
+  })
+
+  it('does not record or expose global gaps for an achieved trusted foreground task', async () => {
+    const adapter = new ScriptedAdapter([{ name: 'plugin_source_gaps', args: {} }])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = sourceService()
+    source.gaps.mockReturnValue([{ id: 'other-owner-gap', capability: 'private', context: 'OTHER OWNER GLOBAL CONTEXT', status: 'open', createdAt: 1 }])
+    const prompts: string[] = []
+    h.ctx.on('llm/stream', async function* (options, next) { prompts.push(JSON.stringify(options.messages)); yield* next() })
+
+    const service = await startUsageReview({ h, source, objectiveStatus: 'achieved' })
+
+    expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
+    expect(source.recordOwnerTaskFailureGap).not.toHaveBeenCalled()
+    expect(source.gaps).not.toHaveBeenCalled()
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+    expect(prompts.join('\n')).not.toContain('OTHER OWNER GLOBAL CONTEXT')
+  })
+
+  it('fails closed for a failed automatic review when the control plane lacks the owner-task-gap seam', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = sourceService()
+    const { recordOwnerTaskFailureGap: _missing, ...olderProvider } = source
+    olderProvider.gaps.mockReturnValue([{ id: 'other-owner-gap', capability: 'private', context: 'OTHER OWNER GLOBAL CONTEXT', status: 'open', createdAt: 1 }])
+
+    const service = await startUsageReview({ h, source: olderProvider, objectiveStatus: 'not-achieved' })
+
+    expect(service.usageHealth()).toMatchObject({ counts: { unknown: 1 } })
+    expect(olderProvider.gaps).not.toHaveBeenCalled()
+    expect(olderProvider.prepareModifySourcePlan).not.toHaveBeenCalled()
+    expect(adapter.requests).toHaveLength(0)
+    expect(service.health()).toMatchObject({ outcome: 'failed', reason: expect.stringContaining('owner task gap API unavailable') })
+  })
 
   it('publishes intrinsic service dependencies on the actual default plugin', () => {
     expect(plugin.inject).toEqual(AssistantGrowthDriverService.inject)

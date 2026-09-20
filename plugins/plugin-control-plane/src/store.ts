@@ -9,6 +9,7 @@ import { controlPlaneOperationReceiptDigest, openControlPlaneDatabase } from './
 import { validateSourceBuildConfig } from './source-build.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
+import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
 import type {
   ActivationRetractionAuthority,
   ActivationRetractionReceipt,
@@ -238,6 +239,11 @@ interface GapRow extends Record<string, unknown> {
   id: string; idempotency_key: string; input_digest: string; capability: string; context: string
   expected_value: number; frequency: number; estimated_cost: number; risk: number; roi: number
   status: StoredCapabilityGap['status']; candidate_id: string | null; revision: number; created_at: number; updated_at: number
+}
+
+interface OwnerTaskFailureGapRow {
+  reference_json: string
+  reference_digest: string
 }
 
 interface ActivationRow {
@@ -960,6 +966,73 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
     worktree: intent['worktree'] as string, containerName: intent['containerName'] as string })
 }
 
+function exactInputRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new ControlPlaneStoreError('invalid-input', `${label} is invalid`)
+  }
+  return value as Record<string, unknown>
+}
+
+function exactInputKeys(value: Record<string, unknown>, fields: readonly string[], label: string): void {
+  if (Object.keys(value).sort().join('\0') !== [...fields].sort().join('\0')) {
+    throw new ControlPlaneStoreError('invalid-input', `${label} has unknown or missing fields`)
+  }
+}
+
+function exactText(value: unknown, field: string, maximum = 512): string {
+  if (typeof value !== 'string' || bounded(value, field, maximum) !== value) {
+    throw new ControlPlaneStoreError('invalid-input', `${field} is invalid`)
+  }
+  return value
+}
+
+function ownerTaskFailureReferenceFromStored(value: unknown, errorCode: 'invalid-input' | 'invalid-state' = 'invalid-input'): OwnerTaskFailureReference {
+  try {
+    const reference = errorCode === 'invalid-input' ? exactInputRecord(value, 'owner task failure reference') : objectRecord(value, 'owner task failure reference')
+    const keys = errorCode === 'invalid-input' ? exactInputKeys : exactKeys
+    keys(reference, ['schemaVersion', 'owner', 'outcomeId', 'projection', 'sourceDigest'], 'owner task failure reference')
+    const owner = errorCode === 'invalid-input' ? exactInputRecord(reference['owner'], 'owner task failure owner') : objectRecord(reference['owner'], 'owner task failure owner')
+    keys(owner, ['receiptVersion', 'authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion',
+      'workspace', 'agentPreset', 'bindingVersion', 'generation'], 'owner task failure owner')
+    const projection = errorCode === 'invalid-input' ? exactInputRecord(reference['projection'], 'owner task failure projection') : objectRecord(reference['projection'], 'owner task failure projection')
+    const projectionFields = ['subjectKind', 'subjectRef', 'version', 'digest', 'disposition',
+      ...(Object.hasOwn(projection, 'evidenceOutcomeId') ? ['evidenceOutcomeId'] : [])]
+    keys(projection, projectionFields, 'owner task failure projection')
+    const text = errorCode === 'invalid-input' ? exactText : (item: unknown, field: string, maximum?: number) => {
+      if (typeof item !== 'string' || bounded(item, field, maximum) !== item) throw new ControlPlaneStoreError('invalid-state', `${field} is invalid`)
+      return item
+    }
+    if (reference['schemaVersion'] !== 1 || owner['receiptVersion'] !== 2
+      || !KEY.test(text(owner['authorityId'], 'owner authorityId', 160)) || !DIGEST.test(text(owner['authorityHash'], 'owner authorityHash', 64))
+      || !isAbsolute(text(owner['workspace'], 'owner workspace', 4_096)) || !KEY.test(text(owner['agentPreset'], 'owner agentPreset', 160))
+      || !KEY.test(text(reference['outcomeId'], 'outcomeId', 160)) || projection['subjectKind'] !== 'foreground-turn'
+      || !KEY.test(text(projection['subjectRef'], 'projection subjectRef', 160)) || projection['disposition'] !== 'upsert'
+      || !DIGEST.test(text(projection['digest'], 'projection digest', 64)) || !DIGEST.test(text(reference['sourceDigest'], 'sourceDigest', 64))
+      || !Number.isSafeInteger(owner['principalVersion']) || Number(owner['principalVersion']) < 1
+      || !Number.isSafeInteger(owner['bindingVersion']) || Number(owner['bindingVersion']) < 1
+      || !Number.isSafeInteger(owner['generation']) || Number(owner['generation']) < 1
+      || !Number.isSafeInteger(projection['version']) || Number(projection['version']) < 1) {
+      throw new ControlPlaneStoreError(errorCode, 'owner task failure reference is invalid')
+    }
+    const principalId = text(owner['principalId'], 'owner principalId', 512)
+    const principalRecordId = text(owner['principalRecordId'], 'owner principalRecordId', 512)
+    if (projection['evidenceOutcomeId'] !== undefined && !KEY.test(text(projection['evidenceOutcomeId'], 'projection evidenceOutcomeId', 160))) {
+      throw new ControlPlaneStoreError(errorCode, 'owner task failure reference is invalid')
+    }
+    return Object.freeze({ schemaVersion: 1, owner: Object.freeze({ receiptVersion: 2,
+      authorityId: owner['authorityId'] as string, authorityHash: owner['authorityHash'] as string,
+      principalId, principalRecordId, principalVersion: Number(owner['principalVersion']), workspace: owner['workspace'] as string,
+      agentPreset: owner['agentPreset'] as string, bindingVersion: Number(owner['bindingVersion']), generation: Number(owner['generation']) }),
+    outcomeId: reference['outcomeId'] as string, projection: Object.freeze({ subjectKind: 'foreground-turn',
+      subjectRef: projection['subjectRef'] as string, version: Number(projection['version']), digest: projection['digest'] as string,
+      disposition: 'upsert', ...(projection['evidenceOutcomeId'] === undefined ? {} : { evidenceOutcomeId: projection['evidenceOutcomeId'] as string }) }),
+    sourceDigest: reference['sourceDigest'] as string })
+  } catch (error) {
+    if (error instanceof ControlPlaneStoreError) throw error
+    throw new ControlPlaneStoreError(errorCode, 'owner task failure reference is invalid')
+  }
+}
+
 function sourceJobFromRow(row: SourceJobRow): SourceJobRecord {
   let intent: SourceJobIntent
   try { intent = sourceJobIntentFromStored(JSON.parse(row.intent_json) as unknown) }
@@ -988,6 +1061,7 @@ function sourceJobFromRow(row: SourceJobRow): SourceJobRecord {
 export class ControlPlaneStore {
   readonly #database: DatabaseSync
   readonly #now: () => number
+  #ownerTaskFailureGapAdmission: string | undefined
 
   constructor(options: ControlPlaneStoreOptions) { this.#database = openControlPlaneDatabase(options.path); this.#now = options.now ?? Date.now }
   close(): void { this.#database.close() }
@@ -1000,6 +1074,9 @@ export class ControlPlaneStore {
       risk: finite(input.risk, 'risk', 0, 1),
     }
     if (!KEY.test(normalized.idempotencyKey)) throw new ControlPlaneStoreError('invalid-input', 'idempotencyKey has invalid syntax')
+    if (normalized.idempotencyKey.startsWith('owner-task-failure:')) {
+      throw new ControlPlaneStoreError('invalid-input', 'owner task failure gap keys are reserved')
+    }
     const inputDigest = controlPlaneDigest(normalized)
     const prior = this.#database.prepare('SELECT * FROM capability_gaps WHERE idempotency_key = ?').get(normalized.idempotencyKey) as unknown as GapRow | undefined
     if (prior !== undefined) {
@@ -1029,7 +1106,84 @@ export class ControlPlaneStore {
 
   listGaps(limit = 20): readonly StoredCapabilityGap[] {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ControlPlaneStoreError('invalid-input', 'gap limit must be 1..100')
-    return (this.#database.prepare(`SELECT * FROM capability_gaps WHERE status = 'open' ORDER BY roi DESC, created_at, id LIMIT ?`).all(limit) as unknown as GapRow[]).map(gapFromRow)
+    return (this.#database.prepare(`SELECT gap.* FROM capability_gaps gap
+      WHERE gap.status = 'open' AND gap.idempotency_key NOT LIKE 'owner-task-failure:%'
+        AND NOT EXISTS (SELECT 1 FROM owner_task_failure_gaps sidecar WHERE sidecar.gap_id = gap.id)
+      ORDER BY gap.roi DESC, gap.created_at, gap.id LIMIT ?`).all(limit) as unknown as GapRow[]).map(gapFromRow)
+  }
+
+  recordOwnerTaskFailureGap(referenceInput: OwnerTaskFailureReference): StoredCapabilityGap {
+    const reference = ownerTaskFailureReferenceFromStored(referenceInput)
+    const referenceDigest = controlPlaneDigest(reference)
+    const idempotencyKey = `owner-task-failure:${referenceDigest}`
+    const normalized = { idempotencyKey, capability: 'foreground-task-repair',
+      context: 'Owner-verified foreground task failure. Private source reference retained.',
+      expectedValue: 0, frequency: 1, estimatedCost: 1, risk: 1 }
+    const inputDigest = controlPlaneDigest(normalized)
+    const now = this.#now(); const id = `gap-${randomUUID()}`
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const prior = this.#database.prepare('SELECT * FROM capability_gaps WHERE idempotency_key = ?').get(idempotencyKey) as unknown as GapRow | undefined
+      if (prior !== undefined) {
+        if (prior.input_digest !== inputDigest) throw new ControlPlaneStoreError('conflict', 'owner task failure gap idempotency is corrupt')
+        const stored = this.getOwnerTaskFailureReference(prior.id)
+        if (stored === undefined || controlPlaneDigest(stored) !== referenceDigest) {
+          throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap sidecar is corrupt')
+        }
+        this.#database.exec('COMMIT')
+        return gapFromRow(prior)
+      }
+      this.#database.prepare(`INSERT INTO capability_gaps (id, idempotency_key, input_digest, capability, context,
+        expected_value, frequency, estimated_cost, risk, roi, status, candidate_id, revision, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 0, 1, 1, 1, 0, 'open', NULL, 1, ?, ?)`).run(
+        id, idempotencyKey, inputDigest, normalized.capability, normalized.context, now, now)
+      this.#database.prepare(`INSERT INTO owner_task_failure_gaps (gap_id, reference_json, reference_digest)
+        VALUES (?, ?, ?)`).run(id, JSON.stringify(reference), referenceDigest)
+      const gap = this.getGap(id)
+      this.#database.exec('COMMIT')
+      return gap
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  getOwnerTaskFailureReference(gapId: string): OwnerTaskFailureReference | undefined {
+    if (typeof gapId !== 'string' || !KEY.test(gapId)) throw new ControlPlaneStoreError('invalid-input', 'gap id is invalid')
+    const row = this.#database.prepare('SELECT reference_json, reference_digest FROM owner_task_failure_gaps WHERE gap_id = ?')
+      .get(gapId) as OwnerTaskFailureGapRow | undefined
+    const gap = this.#database.prepare('SELECT idempotency_key FROM capability_gaps WHERE id = ?').get(gapId) as { idempotency_key: string } | undefined
+    if (row === undefined) {
+      if (gap?.idempotency_key.startsWith('owner-task-failure:')) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap sidecar is missing')
+      return undefined
+    }
+    if (gap?.idempotency_key !== `owner-task-failure:${row.reference_digest}`) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap identity is corrupt')
+    if (!DIGEST.test(row.reference_digest)) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap digest is corrupt')
+    let reference: OwnerTaskFailureReference
+    try { reference = ownerTaskFailureReferenceFromStored(JSON.parse(row.reference_json) as unknown, 'invalid-state') }
+    catch (error) { if (error instanceof ControlPlaneStoreError) throw error; throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap reference is corrupt') }
+    if (controlPlaneDigest(reference) !== row.reference_digest) throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap digest is corrupt')
+    return reference
+  }
+
+  withOwnerTaskFailureGapAdmission<T>(gapId: string, callback: () => T): T {
+    if (typeof gapId !== 'string' || !KEY.test(gapId) || typeof callback !== 'function') {
+      throw new ControlPlaneStoreError('invalid-input', 'owner task failure gap admission is invalid')
+    }
+    if (callback.constructor.name === 'AsyncFunction') throw new ControlPlaneStoreError('invalid-input', 'owner task failure gap admission must be synchronous')
+    if (this.#ownerTaskFailureGapAdmission !== undefined) throw new ControlPlaneStoreError('conflict', 'owner task failure gap admission is already active')
+    if (this.getOwnerTaskFailureReference(gapId) === undefined) throw new ControlPlaneStoreError('not-found', 'owner task failure gap is absent')
+    this.#ownerTaskFailureGapAdmission = gapId
+    try {
+      const result = callback()
+      if (typeof (result as { then?: unknown } | null)?.then === 'function') {
+        throw new ControlPlaneStoreError('invalid-input', 'owner task failure gap admission must be synchronous')
+      }
+      return result
+    } finally { this.#ownerTaskFailureGapAdmission = undefined }
+  }
+
+  #assertOwnerTaskFailureGapAdmission(gapId: string): void {
+    if (this.getOwnerTaskFailureReference(gapId) !== undefined && this.#ownerTaskFailureGapAdmission !== gapId) {
+      throw new ControlPlaneStoreError('invalid-state', 'owner task failure gap requires Host admission')
+    }
   }
 
   createPlan(input: CreateActivationPlanInput): OperationReceipt<PluginActivationPlan> {
@@ -1046,6 +1200,7 @@ export class ControlPlaneStore {
     const requestBinding = { operation: 'create-activation-plan', gapId: input.gapId, candidate, catalog: input.catalog,
       matchedCapabilities, profile, target: input.target, installationId: input.installationId,
       ledger: input.ledger, executor: input.executor, ttlMs: input.ttlMs }
+    this.#assertOwnerTaskFailureGapAdmission(input.gapId)
     const inputDigest = controlPlaneDigest(requestBinding)
     const prior = this.#activationPlanReceiptByKey(idempotencyKey, 'create-activation-plan', inputDigest)
     if (prior !== undefined) return prior
@@ -1105,6 +1260,7 @@ export class ControlPlaneStore {
     const idempotencyKey = bounded(input.idempotencyKey, 'idempotencyKey', 160)
     if (!KEY.test(idempotencyKey)) throw new ControlPlaneStoreError('invalid-input', 'source job idempotencyKey has invalid syntax')
     const intent = sourceJobIntentFromStored(input.intent); const intentDigest = controlPlaneDigest(intent); const now = this.#now()
+    this.#assertOwnerTaskFailureGapAdmission(intent.gapId)
     if (intent.containerName !== `dsh-${input.id}` || basename(intent.worktree) !== `worktree-job-${input.id.slice('source-job-'.length)}`) {
       throw new ControlPlaneStoreError('invalid-input', 'source job resource identity is invalid')
     }
@@ -1227,6 +1383,7 @@ export class ControlPlaneStore {
     }
     const requestBinding = { operation: 'create-source-plan', gapId: input.gapId, repository: input.repository,
       worktree: input.worktree, baseCommit: input.baseCommit, name, generatorDigest: input.generatorDigest, scope, ttlMs: input.ttlMs }
+    this.#assertOwnerTaskFailureGapAdmission(input.gapId)
     const sourceJobBinding = input.sourceJob === undefined ? undefined : { jobId: input.sourceJob.jobId, jobRevision: input.sourceJob.jobRevision,
       occurrenceId: input.sourceJob.occurrenceId }
     const inputDigest = controlPlaneDigest({ ...(mode === 'modify' ? { ...requestBinding, mode, prepared: input.prepared } : requestBinding),
