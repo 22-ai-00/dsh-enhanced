@@ -56,8 +56,8 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。代码基线 `5cfc3c8` 及本次文档整理后的本地 `pnpm check` 均退出 0：6,106 项通过、44 项跳过，35 个包完成 dry-run pack（32 个插件、3 个共享库）。这些是工程验证，不是生产自治验收。
+- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。代码基线 `5cfc3c8` 及本次未结算 generation 回归修复后的本地 `pnpm check` 均退出 0：6,106 项通过、44 项跳过，35 个包完成 dry-run pack（32 个插件、3 个共享库）。这些是工程验证，不是生产自治验收。
 - 该代码基线的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
-- `5cfc3c8` 的跨平台 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35492941267) 已结算：Windows ACP smoke 与 macOS 仓库检查通过，Linux 失败。失败位于 `systemd-host-attestor.spec.ts` 的“未结算 generation 不得被新 operation 越过”测试：首次重启计数预期 1、实际 0；本地同项通过，差异原因尚待定位，不能声明跨平台全通过。
+- 未改测试的 `ec68525` 已通过 Linux、macOS 与 Windows 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35493903546)；此前 `5cfc3c8` 的 [Linux CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35492941267) 曾失败。失败位于 `systemd-host-attestor.spec.ts` 的“未结算 generation 不得被新 operation 越过”测试：首次重启计数预期 1、实际 0。原用例用 1.5 秒总超时构造未结算状态，期限可能在派发前耗尽；现改为真实派发后丢失确认，检查持久账本的 generation 与空 receipt，并要求新 operation 命中明确的未结算拒绝分支且不再重启。修复的跨平台结论仍待自身提交的 CI，不能由本地通过替代。
 
 原始运行 JSON、日志和临时身份留本地或 CI artifacts，仓库只保留命令、结论和限制。确需供可重复探针使用的固定输入留在 `scripts/e2e/fixtures/`，不从本次网络结果反推预期值。

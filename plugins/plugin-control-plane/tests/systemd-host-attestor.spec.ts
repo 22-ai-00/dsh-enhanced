@@ -540,12 +540,26 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     await writeFile(path, JSON.stringify(observation)); expect((await f.start().result).code).toBe(1); expect(await f.restarts()).toBe(0)
   })
   test('does not allow a newly authorized operation to leapfrog an unresolved generation', async () => {
-    const f = await fixture('unchanged'); f.config.timeoutMs = 1500; await f.save()
-    expect((await f.start().result).code).toBe(1); expect(await f.restarts()).toBe(1)
+    // The supervisor receives restart, then its acknowledgement is lost. This
+    // leaves the production journal's reserved generation unresolved without
+    // relying on a deadline that may expire while descriptor pins are hashed.
+    const f = await fixture('lost-ack')
+    const first = await f.start().result
+    expect(first.code, first.stderr).toBe(1); expect(first.stdout).toBe('')
+    expect(first.stderr).toContain('systemd Host attestor')
+    expect(await f.restarts()).toBe(1)
+    const db = new DatabaseSync(join(f.config.stateRoot, 'reload.sqlite'), { readOnly: true })
+    try {
+      const row = db.prepare('SELECT generation, receipt FROM reloads WHERE operation_id = ?').get(f.request.operationId) as { generation: number; receipt: string | null }
+      expect(row).toEqual({ generation: 1, receipt: null })
+    } finally { db.close() }
     f.request.operationId = 'host-operation-next'; f.request.requirements = { kind: 'reload', previousHostGeneration: 1 }
     f.request.activation.id = 'activation-next'; f.config.authorization.previousHostGeneration = 1
     f.config.authorization.requestDigest = hostAttestationRequestDigest(f.request); await f.save()
-    expect((await f.start().result).code).toBe(1); expect(await f.restarts()).toBe(1)
+    const second = await f.start().result
+    expect(second.code, second.stderr).toBe(1); expect(second.stdout).toBe('')
+    expect(second.stderr).toContain('previous generation is unresolved or stale')
+    expect(await f.restarts()).toBe(1)
   })
   test('advances installation generations across alternating profiles', async () => {
     const a = await fixture(); const b = await fixture()
