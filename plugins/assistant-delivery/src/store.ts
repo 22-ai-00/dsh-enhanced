@@ -4080,13 +4080,51 @@ export class DeliveryStore {
     }
   }
 
+  recordForegroundTaskModelSelection(input: { contractId: string; provider: string; model: string; reasoningEffort?: string }): void {
+    this.assertOpen()
+    if (typeof input.contractId !== 'string' || input.contractId.length === 0 || input.contractId.length > 512
+      || typeof input.provider !== 'string' || typeof input.model !== 'string'
+      || (input.reasoningEffort !== undefined && typeof input.reasoningEffort !== 'string')) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground model selection is invalid')
+    }
+    const provider = modelRoutePart(input.provider, 'provider')
+    const model = modelRoutePart(input.model, 'model')
+    const effort = input.reasoningEffort === undefined ? null : modelRoutePart(input.reasoningEffort, 'effort')
+    this.transaction(() => {
+      const current = this.database.prepare(`SELECT status, model_selection_state, model_provider, model_id, model_reasoning_effort
+        FROM delivery_task_acceptance_executions WHERE contract_id = ?`).get(input.contractId) as {
+          status: string; model_selection_state: string; model_provider: string | null; model_id: string | null; model_reasoning_effort: string | null
+        } | undefined
+      if (current === undefined) throw new DeliveryStoreError('invalid-binding', 'foreground acceptance is absent')
+      if (current.status !== 'pending') throw new DeliveryStoreError('conflict', 'foreground acceptance model selection is no longer writable')
+      if (current.model_selection_state === 'missing') {
+        const changed = this.database.prepare(`UPDATE delivery_task_acceptance_executions
+          SET model_selection_state = 'frozen', model_provider = ?, model_id = ?, model_reasoning_effort = ?
+          WHERE contract_id = ? AND status = 'pending' AND model_selection_state = 'missing'`).run(provider, model, effort, input.contractId)
+        if (changed.changes !== 1) throw new DeliveryStoreError('conflict', 'foreground acceptance model selection changed')
+        return
+      }
+      if (current.model_selection_state === 'frozen') {
+        if (current.model_provider === provider && current.model_id === model && current.model_reasoning_effort === effort) return
+        const changed = this.database.prepare(`UPDATE delivery_task_acceptance_executions
+          SET model_selection_state = 'inconsistent', model_provider = NULL, model_id = NULL, model_reasoning_effort = NULL
+          WHERE contract_id = ? AND status = 'pending' AND model_selection_state = 'frozen'`).run(input.contractId)
+        if (changed.changes !== 1) throw new DeliveryStoreError('conflict', 'foreground acceptance model selection changed')
+        return
+      }
+      if (current.model_selection_state !== 'inconsistent') {
+        throw new DeliveryStoreError('conflict', 'foreground acceptance model selection state is invalid')
+      }
+    })
+  }
+
   inspectForegroundAcceptedExecution(contract: AcceptanceContract): AcceptedExecution | null {
     const row = this.database.prepare(`SELECT * FROM delivery_task_acceptance_executions
       WHERE contract_id = ?`).get(contract.id) as {
         inbox_id: string; contract_id: string; contract_digest: string; workspace: string; preset: string
         principal_record_id: string; principal_version: number; binding_id: string; binding_version: number
         binding_generation: number; dispatched_at: number; status: AcceptedExecution['status']; quiescent: number
-        completed_at: number | null; execution_ref: string | null
+        completed_at: number | null; execution_ref: string | null; model_selection_state: 'missing' | 'frozen' | 'inconsistent'; model_provider: string | null; model_id: string | null; model_reasoning_effort: string | null
       } | undefined
     if (row === undefined || row.contract_digest !== contract.digest || contract.task.kind !== 'foreground-turn'
       || contract.task.ref !== row.inbox_id || row.workspace !== contract.scope.workspace || row.preset !== contract.scope.preset
@@ -4094,7 +4132,8 @@ export class DeliveryStore {
       || row.completed_at === null || row.execution_ref === null) return null
     return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest,
       dispatchedAt: row.dispatched_at, status: row.status, quiescent: row.quiescent === 1,
-      completedAt: row.completed_at, executionRef: row.execution_ref })
+      completedAt: row.completed_at, executionRef: row.execution_ref, modelSelectionState: row.model_selection_state,
+      ...(row.model_selection_state === 'frozen' && row.model_provider && row.model_id ? { modelSelection: Object.freeze({ provider: row.model_provider, model: row.model_id, ...(row.model_reasoning_effort === null ? {} : { reasoningEffort: row.model_reasoning_effort }) }) } : {}) })
   }
 
   /**
@@ -4108,7 +4147,7 @@ export class DeliveryStore {
     owner: { principalRecordId: string; principalVersion: number }
     bindingId: string
   }): AcceptedExecution | null {
-    const row = this.database.prepare(`SELECT contract_id, contract_digest, dispatched_at, status, quiescent, completed_at, execution_ref
+    const row = this.database.prepare(`SELECT contract_id, contract_digest, dispatched_at, status, quiescent, completed_at, execution_ref, model_selection_state, model_provider, model_id, model_reasoning_effort
       FROM delivery_task_acceptance_executions
       WHERE inbox_id = ? AND workspace = ? AND preset = ? AND principal_record_id = ?
         AND principal_version = ? AND binding_id = ?`).get(
@@ -4116,12 +4155,13 @@ export class DeliveryStore {
       input.owner.principalVersion, input.bindingId,
     ) as {
       contract_id: string; contract_digest: string; dispatched_at: number; status: AcceptedExecution['status']
-      quiescent: number; completed_at: number | null; execution_ref: string | null
+      quiescent: number; completed_at: number | null; execution_ref: string | null; model_selection_state: 'missing' | 'frozen' | 'inconsistent'; model_provider: string | null; model_id: string | null; model_reasoning_effort: string | null
     } | undefined
     if (row === undefined || row.completed_at === null || row.execution_ref !== input.inboxId) return null
     return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest,
       dispatchedAt: row.dispatched_at, status: row.status, quiescent: row.quiescent === 1,
-      completedAt: row.completed_at, executionRef: row.execution_ref })
+      completedAt: row.completed_at, executionRef: row.execution_ref, modelSelectionState: row.model_selection_state,
+      ...(row.model_selection_state === 'frozen' && row.model_provider && row.model_id ? { modelSelection: Object.freeze({ provider: row.model_provider, model: row.model_id, ...(row.model_reasoning_effort === null ? {} : { reasoningEffort: row.model_reasoning_effort }) }) } : {}) })
   }
 
   renewInboxClaim(input: {

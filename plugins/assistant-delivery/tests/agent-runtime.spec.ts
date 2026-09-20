@@ -2996,15 +2996,22 @@ describe('real rc.1 delivery Agent runtime', () => {
   })
 
   test.each([
-    { report: 'Confirmed result', automaticCompletion: false },
-    { report: 'Unrelated result', automaticCompletion: false },
-    { report: 'Confirmed result', automaticCompletion: true },
-    { report: 'Unrelated result', automaticCompletion: true },
-  ])('freezes foreground acceptance before the model and independently measures $report (continuation=$automaticCompletion)', async ({ report, automaticCompletion }) => {
+    { report: 'Confirmed result', automaticCompletion: false, switchRouteDuringCompletion: false },
+    { report: 'Unrelated result', automaticCompletion: false, switchRouteDuringCompletion: false },
+    { report: 'Confirmed result', automaticCompletion: true, switchRouteDuringCompletion: false },
+    { report: 'Unrelated result', automaticCompletion: true, switchRouteDuringCompletion: false },
+    { report: 'Confirmed result', automaticCompletion: true, switchRouteDuringCompletion: true },
+  ])('freezes foreground acceptance before the model and independently measures $report (continuation=$automaticCompletion, reroute=$switchRouteDuringCompletion)', async ({ report, automaticCompletion, switchRouteDuringCompletion }) => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-acceptance-'))
     roots.push(root)
     const fixture = await runtimeHarness(root, new Map())
     try {
+      let requestCount = 0
+      if (switchRouteDuringCompletion) fixture.ctx.on('agent/request', async (_payload, next) => {
+        const config = await next()
+        requestCount += 1
+        return requestCount === 2 ? { ...config, provider: 'alternate', model: 'precise' } : config
+      })
       const pairing = fixture.service.issuePairing('test', principal)
       fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
       const owner = runtimeStore(fixture.service).getPrincipal(principal)!
@@ -3053,7 +3060,22 @@ describe('real rc.1 delivery Agent runtime', () => {
       const input = message('evt-acceptance-report', objective)
       const inbox = await fixture.service.acceptInbound(input)
       await drive(fixture.service)
-      expect(fixture.llm.requests).toHaveLength(automaticCompletion ? 2 : 1)
+      expect(fixture.llm.requests.length + fixture.alternate.requests.length).toBe(automaticCompletion ? 2 : 1)
+      if (switchRouteDuringCompletion) {
+        expect(fixture.llm.requests).toEqual(expect.arrayContaining([
+          expect.objectContaining({ provider: 'mock', model: 'delivery-model', reasoningEffort: 'low' }),
+        ]))
+        expect(fixture.alternate.requests).toEqual([
+          expect.objectContaining({ provider: 'alternate', model: 'precise', reasoningEffort: 'high' }),
+        ])
+        const database = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+        try {
+          expect(database.prepare(`SELECT model_selection_state, model_provider, model_id, model_reasoning_effort
+            FROM delivery_task_acceptance_executions WHERE contract_id = ?`).get(accepted!.id)).toEqual({
+            model_selection_state: 'inconsistent', model_provider: null, model_id: null, model_reasoning_effort: null,
+          })
+        } finally { database.close() }
+      }
       expect(accepted?.task.ref).toBe(inbox.inboxId)
       await fixture.ctx.assistantVerifier.tick()
       expect(fixture.ctx.assistantVerifier.inspect(accepted!.id)).toMatchObject({
@@ -3067,7 +3089,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       await fixture.service.acceptInbound(input)
       await drive(fixture.service)
       await fixture.ctx.assistantVerifier.tick()
-      expect(fixture.llm.requests).toHaveLength(automaticCompletion ? 2 : 1)
+      expect(fixture.llm.requests.length + fixture.alternate.requests.length).toBe(automaticCompletion ? 2 : 1)
       expect(fixture.ctx.assistantEvaluation.health().outcomes).toBe(1)
     } finally { await fixture.ctx.fiber.restart() }
   })
@@ -3110,9 +3132,12 @@ describe('real rc.1 delivery Agent runtime', () => {
         return fixture.service.inspectOwnerForegroundLearningTask({ ...route, outcomeId: page.items[0]!.receipt.triggerOutcomeId })
       }
       const initial = source()
+      expect(fixture.llm.requests[0]).toMatchObject({ provider: 'mock', model: 'delivery-model', reasoningEffort: 'low' })
       expect(initial).toMatchObject({ judgement: 'independent-verifier',
         canonical: { objective: { status: 'achieved' }, projection: { disposition: 'upsert' } },
-        source: { inboxId: accepted.inboxId, objective, truncated: false } })
+        source: { inboxId: accepted.inboxId, objective, truncated: false, quiescent: true,
+          modelSelectionState: 'frozen', modelSelection: { provider: fixture.llm.requests[0]!.provider,
+            model: fixture.llm.requests[0]!.model, reasoningEffort: fixture.llm.requests[0]!.reasoningEffort } } })
       expect(() => fixture.service.inspectOwnerForegroundLearningTask({ ...route, principalId: 'someone-else',
         outcomeId: initial!.canonical.triggerOutcomeId })).toThrow()
       const replyToProviderMessageId = replyProviderMessageId(fixture.service, 'evt-foreground-owner-source')
@@ -3145,9 +3170,13 @@ describe('real rc.1 delivery Agent runtime', () => {
       await drive(fixture.service)
       expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
         .toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
+      await fixture.service.acceptInbound(message('evt-learning-switch-model', '/model use alternate/precise', 'command'))
+      await drive(fixture.service)
+      expect(fixture.service.inspectOwnerModelSelection(route)).toEqual({ provider: 'alternate', model: 'precise' })
       await fixture.service.acceptInbound(message('evt-learning-new-session', '/new', 'command'))
       await drive(fixture.service)
-      expect(source()).toMatchObject({ source: { sessionId: initial!.source.sessionId },
+      expect(source()).toMatchObject({ source: { sessionId: initial!.source.sessionId,
+        modelSelection: { provider: 'mock', model: 'delivery-model', reasoningEffort: 'low' } },
         ownerRevision: { version: 3, action: 'withdraw' } })
       const store = runtimeStore(fixture.service)
       store.revokePrincipal(owner.id, owner.version)
