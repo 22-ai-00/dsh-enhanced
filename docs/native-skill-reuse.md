@@ -25,6 +25,7 @@ Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的
 ## 生命周期与证据边界
 
 - 定义只存在于当前 recipient 服务内存，不写入普通 active/candidate 表。持久 `skill_delegated_arms` 只保留绑定及一次性 scope/cell reservation；执行复用现有 `skill_runs`、checkpoint、finish 和 unknown 防重放逻辑。
+- 来源中成功的 `goal_context({})`、精确来源 Goal 的只读 `goal_context`（`focus` 缺省或 false）及合法 `goal_checkpoint` 保留在原始证据中，不成为复用步骤。改变 focus、引用其他 Goal、非法参数及失败/unknown 调用仍按原门禁拒绝；捕获必须至少留下一个受允许的实际工作步骤。
 - 同一 capability 只能挂载一次，来源服务生命周期内同一 plan/cell 只签发一次。同一 recipient 数据库的 reservation 在重启后仍拒绝重新挂载；没有 live capability 时不能恢复执行。全局重派约束仍依赖上层 Evaluation 记录。
 - 来源版本、候选父版本、owner route、Policy 和原始验收在调用及每个嵌套步骤前后复核。来源服务或其 Goals/Policy/Delivery 依赖卸载会撤销 grant；到期、recipient 卸载、外部取消和 disposer 均传播 AbortSignal。
 - 取消停止等待并抑制晚到结果；它不证明不合作的外部工具已停止。已派发但无法确认的调用保留 unknown，评测不能报告 quiescent 或成功。外部资源停机证据须由相应原生运行时提供。
@@ -65,7 +66,7 @@ node scripts/e2e/native-skill-day1.mjs
 
 凭据使用运行环境的 `SUPER_RELAY_API_KEY` 引用；若需已有 DSH 本地凭据服务，同时设置 `DSH_NATIVE_SKILL_CREDENTIALS_MODULE`（可信 provider 的绝对 JS 路径）与 `DSH_NATIVE_SKILL_CREDENTIALS_PATH`（凭据文件绝对路径）。文件内容不会写入证据。可用 `DSH_NATIVE_SKILL_DOCKER` 指定绝对 Docker 路径，默认 `/usr/bin/docker`。
 
-探针固定同一 Day1 工厂，传输请求时限 180 秒、原生 step 240 秒、每 cell 总期限 900 秒，输出每次最多 4,096 tokens；来源训练与两臂使用相同预算。来源经原生 Goal 验收后才捕获候选，随后运行 3 种冻结后任务 × 2 次重复 × 2 臂。脚本、供应工件、传输配置和训练证据均纳入摘要；运行期间不要修改或重建不同版本的已部署模块。总运行上限 55 分钟，SIGINT/SIGTERM 触发已有取消与关闭路径。
+探针固定同一 Day1 工厂，传输请求时限 180 秒、原生 Goal 回合（`stepMaxDurationMs`）240 秒、每 cell 总期限 900 秒，输出每次最多 4,096 tokens；来源训练与两臂使用相同预算。来源经原生 Goal 验收后才捕获候选，随后运行 3 种冻结后任务 × 2 次重复 × 2 臂。脚本、供应工件、传输配置和训练证据均纳入摘要；运行期间不要修改或重建不同版本的已部署模块。总运行上限 55 分钟，SIGINT/SIGTERM 触发已有取消与关闭路径。回合期限覆盖该轮所有模型和工具调用；它不会随每次调用重置。期限中断了已派发请求且 usage 未结算时，该实验保持 unknown，即使本地最后一个产物作业成功也不能据此捕获候选。
 
 `input.json`、`training.json`、`comparison/completion.json` 和 `summary.json` 保存在该私有目录；失败保存 `failure.json`，传输异常另存仅含错误码、时长和取消状态的 `transport-errors.jsonl`。未完整结算 usage 时保持 unknown 与预留，不自动重试；最终报告不完整则进程退出 1。新实验必须显式选择新目录并保留旧失败，不能把新实验当作对旧 unknown 的重放或结算。报告不授权激活或晋升，也不将请求次数或 fixture 成功冒充真实收益。
 

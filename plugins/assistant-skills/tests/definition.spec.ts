@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { assertDefinitionProtocol, compensationDirective, createDefinition, evaluatePreconditions, fileObservationSteps, instantiate, validateStepGraph, type SkillRunExpansion, type SkillStep, type VerifiedWorkflowSource } from '../src/definition.ts'
+import { assertDefinitionProtocol, compensationDirective, createDefinition, evaluatePreconditions, fileObservationSteps, instantiate, validateStepGraph, type CreateDefinitionOptions, type SkillRunExpansion, type SkillStep, type VerifiedWorkflowSource } from '../src/definition.ts'
 
 function source(steps: VerifiedWorkflowSource['steps'] = [{ id: 'call-1', toolName: 'files_read', arguments: { path: '/tmp/report.txt', retry: false, limit: 10 } }]): VerifiedWorkflowSource {
   return { protocol: 'assistant-goals/verified-workflow-source/v1', scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/tmp/workspace', preset: 'primary' },
@@ -57,6 +57,26 @@ describe('skill definitions', () => {
   it('permits only Host-allowlisted parameterless native get_goal reads', () => {
     const definition = createDefinition(source([{ id: 'goal-read', toolName: 'get_goal', arguments: {} }]), { name: 'goal-read', description: 'Read current Goal.' }, ['get_goal'])
     expect(definition.steps).toEqual([{ id: 'goal-read', toolName: 'get_goal', arguments: {}, dependsOn: [] }])
+  })
+
+  it('keeps only exact source goal_context reads in provenance and never replays them', () => {
+    const read = { id: 'context', toolName: 'goal_context', arguments: { goal_id: 'goal', focus: false } }
+    const write = { id: 'write', toolName: 'write', arguments: { file: 'result.txt', data: 'done' } }
+    const derive = (steps: VerifiedWorkflowSource['steps'], options: CreateDefinitionOptions = { name: 'source-context', description: 'Keep the source context read.' }) => createDefinition(source(steps), options, ['write', 'goal_context'])
+    const definition = derive([read, write])
+    expect(definition.source.steps).toEqual([read, write])
+    expect(definition.steps).toEqual([{ ...write, dependsOn: [] }])
+    expect(derive([{ id: 'catalog', toolName: 'goal_context', arguments: {} }, write], { name: 'catalog-context', description: 'Keep the current owner catalog read.' }).steps).toEqual([{ ...write, dependsOn: [] }])
+    expect(derive([{ id: 'source-context', toolName: 'goal_context', arguments: { goal_id: 'goal' } }, write], { name: 'source-context-id', description: 'Keep the exact source Goal read.' }).steps).toEqual([{ ...write, dependsOn: [] }])
+    for (const arguments_ of [{ goal_id: 'foreign' }, { goal_id: 1 }, { goal_id: 'goal', focus: true }, { goal_id: 'goal', focus: 'false' }, { goal_id: 'goal', focus: undefined }, { goal_id: 'goal', extra: true }]) {
+      expect(() => derive([{ id: 'context', toolName: 'goal_context', arguments: arguments_ }, write], { name: 'rejected-context', description: 'Reject a non-source context read.' })).toThrow()
+    }
+    expect(() => derive([{ id: 'context', toolName: 'goal_context', arguments: { goal_id: 'goal' } }], { name: 'no-executable-context', description: 'A skipped read cannot be a workflow.' })).toThrow(/executable/u)
+    expect(() => derive([read, write], { name: 'bound-context', description: 'A skipped read cannot bind.', bindings: [{ name: 'goal', stepId: 'context', path: '/goal_id' }] })).toThrow(/binding step/u)
+    expect(() => derive([read, { ...write, id: 'context' }], { name: 'duplicate-context', description: 'A skipped read still consumes its unique trace ID.' })).toThrow(/bounded/u)
+    for (const outcome of ['failed', 'unknown'] as const) {
+      expect(() => createDefinition({ ...source([write]), failedObservations: [{ id: 'context-observation', toolName: 'goal_context', arguments: { goal_id: 'goal' }, outcome }] as never }, { name: 'failed-context', description: 'Reject failed Goal context observations.' }, ['write', 'goal_context'])).toThrow(/observation/u)
+    }
   })
 
   it('preserves trusted failed read-only observations without replaying them as steps', () => {
