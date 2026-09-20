@@ -4,7 +4,7 @@
 
 ## 项目方向
 
-构建利用 DSH 原生 AgentLoop 与 Cordis 组合、注入、资源归属和重载能力的自我迭代工具/插件智能体。模型是可替换供应；当前获准的真实模型线路为 `super-relay / auto_model/alwaysday1`。每轮固定供应、预算与验收标准，保留身份、任务历史和能力版本。
+构建利用 DSH 原生 AgentLoop 与 Cordis 组合、注入、资源归属和重载能力的自我迭代工具/插件智能体。模型是可替换供应；自我修复/迭代默认继承用户会话或来源任务的实际模型，可显式配置固定模型覆盖，`super-relay / auto_model/alwaysday1` 是可用供应之一。每轮固定供应、预算与验收标准，持久修复记录解析后的选路供恢复使用，保留身份、任务历史和能力版本。
 
 闭环为：任务反馈 → 技能/工具/插件候选 → 独立验证 → 有限推广 → 新任务复用 → 观察与回滚。验收和留出集须在候选写权限之外。研究依据见[自迭代原则](research-dsh-plugin-self-iteration-2026-09-19.md)，开发约束见 [AGENTS.md](../AGENTS.md)。
 
@@ -14,6 +14,7 @@
 
 - 发布基线仍为 `0.1.32`；`dev` 工作区版本为 `0.1.33`，后续开发不等于已发布。安装器和 Host 兼容范围见[兼容性说明](compatibility.md)与[发布账本](../release-manifest.json)。
 - 日常使用中的工具/插件自迭代尚未贯通。普通 Lark 已有低风险偏好自动学习；Skills 的有限修复链仍需对精确来源 Goal 手动 `skill_repair_arm`，Growth Driver 默认休眠且止于 pending 候选。优先补齐真实会话反馈到受授权修复、采用与持续观察的自动入口；偏好学习和手动演示不能替代这一交付。
+- 成长与修复的模型默认继承会话，可配置固定覆盖。Growth 周期入口读取外部会话持久选择，Host 可传来源 Agent 读取实际请求；原生 Web 无来源时不猜模型。Skills 将解析后的选择存入修复授权，恢复时沿用。Growth 的来源 Agent 接口尚待接入普通使用触发链。
 - 基本 RSI 已在限定任务族跑通真实修复、独立比较、后续任务 canary、两轮晋升与安全检查点恢复。它不证明任意任务都能自我改进，也不允许重放未结算的模型或外部调用。
 - Day1 已经通过原生 Agent/Growth Driver 提交源码修复候选，独立 Host 作业完成离线仓库检查并形成待审批计划；其中 personal-memory 修复经开发复核整合。待审批提案不等于自主发布或生产启用。
 - Control Plane 已有 npm 发布/独立读回/catalog adapter，以及 systemd reload、readiness、物理 rollback 的签名与持久操作组件。认证有限回放端点支持晚到 Ed25519 授权：readiness 落账后，将真实 schema-2 请求交给同一 DSH CLI `0.1.5-rc.2` Host 执行，保持 PID/InvocationID、候选 Fiber 与部署文件不变。完成态重启失效，SIGKILL 中断后保留 unknown；同 scope 换 operation 或重新签发 grant 不能恢复派发权限。其输出不证明全局 `externalEffects = 0`，不能代替独立签名。
@@ -64,7 +65,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 原生回合时间上下文已通过独立代码复核；根 `pnpm check` 退出 0：6,135 项通过、50 项跳过，零 lint 警告、类型检查、构建及 35 个包的 dry-run pack 完成（32 个插件、3 个共享库）。Goals 定向测试 71/71；Docker 回归 9/9，最终文案版本的来源捕获/复用单项再次通过，覆盖实际模型输入与持久 admission 一致、期限不重置及独立验收；命令见[接线指南](native-skill-reuse.md)。这些使用固定适配器的工程检查不证明真实模型收益或日常自主成长。后续按能力做必要定向验证与独立复核，最终交付或发布前完成全仓检查；不反复扩大固定场景实验。
+- 本次模型继承改动通过独立复核：Growth 68 项、Delivery owner-route 34 项、Skills 410 项通过（11 项跳过）；三包类型检查与构建通过，相关 lint、manifest 校验和 Growth dry-run pack 通过。未调用真实模型，未重跑全仓检查；普通使用触发与真实跨重启 Repair Agent 验收仍待接通。最近一次全仓 `pnpm check` 是此前回合时间能力的基线：6,135 项通过、50 项跳过、35 个包 dry-run pack 通过；该结果不替代本次最终交付前的全仓门禁。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 - 未结算 generation 测试修复 `e33a6ae` 已通过 Linux、macOS 与 Windows 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35494781155)。测试用真实派发后丢失确认建立持久未结算状态，检查新 operation 不再重启。该跨平台结论不覆盖之后的新改动。
 

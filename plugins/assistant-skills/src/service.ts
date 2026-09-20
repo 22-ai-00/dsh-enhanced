@@ -81,6 +81,13 @@ function exactArguments(value: unknown, allowed: readonly string[]): Record<stri
   const args = plainArguments(value); if (!args || Object.keys(args).some(key => !allowed.includes(key))) return undefined
   return args
 }
+function repairModelRoute(value: unknown): value is { provider: string; model: string; reasoningEffort?: string } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const route = value as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
+  return typeof route.provider === 'string' && route.provider.length > 0 && route.provider.length <= 256 && !route.provider.includes('\0')
+    && typeof route.model === 'string' && route.model.length > 0 && route.model.length <= 256 && !route.model.includes('\0')
+    && (route.reasoningEffort === undefined || typeof route.reasoningEffort === 'string' && route.reasoningEffort.length > 0 && route.reasoningEffort.length <= 256 && !route.reasoningEffort.includes('\0'))
+}
 interface FailureLocator { sessionId: string; goalId: string }
 function failureLocator(value: unknown): value is FailureLocator {
   const locator = plainArguments(value)
@@ -1192,6 +1199,18 @@ export class AssistantSkillsService extends Service {
     return profile
   }
   #repairProfile(record: SkillRepairContinuation): RepairContinuationProfile { return this.#repairProfileAt(record, record.iteration) }
+  /**
+   * New authorizations persist this exact route.  Legacy records predate the
+   * field, so they may run only when their still-digest-bound profile supplied
+   * an explicit pair; inherited routes must never be selected again on resume.
+   */
+  #repairModelSelection(record: SkillRepairContinuation): { provider: string; model: string; reasoningEffort?: string } {
+    const frozen = record.authorization.modelSelection
+    if (frozen) return frozen
+    const primary = this.#repairProfileAt(record, 1)
+    if (primary.provider !== undefined && primary.model !== undefined) return { provider: primary.provider, model: primary.model }
+    throw new Error('assistant-skills: legacy inherited repair model selection unavailable')
+  }
   #repairSource(record: SkillRepairContinuation): SkillRepairAuthorizationInput['source'] {
     if (record.iteration === 1) return record.authorization.source
     const source = record.checkpoint.source as SkillRepairAuthorizationInput['source'] | undefined
@@ -1277,6 +1296,13 @@ export class AssistantSkillsService extends Service {
     const holdout = profile && this.inspectRepairProfile(profile.externalHoldoutProfileId, scope)
     if (!this.#repairRuntime || !profile || !holdout?.profile.canaryAdmissionTemplate || !Number.isSafeInteger(input.expiresAt)
       || input.expiresAt <= Date.now() || input.expiresAt > Math.min(holdout.profile.execution.expiresAt, Date.now() + 604800000)) throw new Error('assistant-skills: finite current repair profile required')
+    const selected = profile.provider === undefined
+      ? this.ctx.get('assistantDelivery', false)?.inspectOwnerModelSelection({ authorityId: input.ownerRouteId, principalId: scope.principalId,
+        workspace: scope.workspace, agentPreset: scope.preset, sourceAgent: agent! })
+      : { provider: profile.provider, model: profile.model! }
+    if (!repairModelRoute(selected)) throw new Error('assistant-skills: exact current repair model selection required')
+    const modelSelection = { provider: selected.provider, model: selected.model,
+      ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) }
     const parent = this.#store.get(scope, profile.skillName)
     const sessionId = input.sessionId ?? String(agent!.session.id)
     const snapshot = this.#goals().inspectOwnerGoalExecution({ ownerRouteId: input.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId, goalId: input.goalId })
@@ -1286,7 +1312,8 @@ export class AssistantSkillsService extends Service {
     const profileSequence = sequenceIds.map(id => {
       const next = this.#repairProfiles.find(value => value.id === id && acceptanceDigest(value.scope) === acceptanceDigest(scope))
       const nextHoldout = next && this.inspectRepairProfile(next.externalHoldoutProfileId, scope)
-      if (!next || !nextHoldout || next.skillName !== profile.skillName || next.provider !== profile.provider || next.model !== profile.model
+      if (!next || !nextHoldout || next.skillName !== profile.skillName
+        || next.provider !== undefined && (next.provider !== modelSelection.provider || next.model !== modelSelection.model)
         || next.allowedTools.some(tool => !profile.allowedTools.includes(tool)) || next.maxOutputTokens > profile.maxOutputTokens || next.maxGoalRounds > profile.maxGoalRounds || next.maxDurationMs > profile.maxDurationMs
         || input.expiresAt > nextHoldout.profile.execution.expiresAt) throw new Error('assistant-skills: followup profile exceeds the frozen repair authority')
       return { id, digest: acceptanceDigest([next, nextHoldout.digest]) }
@@ -1304,7 +1331,7 @@ export class AssistantSkillsService extends Service {
     const authorization: SkillRepairAuthorizationInput = { invocationId: input.invocationId, ownerRouteId: input.ownerRouteId,
       source: { goalId: input.goalId, sessionId, nativeGoalId: snapshot.storedGoal.nativeAtLastObservation.goalId, definitionDigest: snapshot.storedGoal.definition.digest },
       profileId: profile.id, profileDigest: acceptanceDigest([profile, holdout.digest]), skillName: profile.skillName,
-      parentVersion: parent.version, parentDigest: acceptanceDigest(parent), maxIterations: profile.maxIterations ?? 1, expiresAt: input.expiresAt,
+      parentVersion: parent.version, parentDigest: acceptanceDigest(parent), maxIterations: profile.maxIterations ?? 1, expiresAt: input.expiresAt, modelSelection,
       ...(profileSequence.length > 1 ? { profileSequence } : {}), ...(feedbackAuthority ? { feedbackAuthority } : {}) }
     for (const action of ['draft', 'compare', 'canary', 'watch'] as const) {
       this.#scope(agent, action); this.#authorize(agent, action, ['repair-arm', scope, authorization, route])
@@ -1383,10 +1410,11 @@ export class AssistantSkillsService extends Service {
   }
   #repairAgentInput(record: SkillRepairContinuation, trigger: HostFailureTriggerEvidence): OwnerRepairAgentInput {
     const profile = this.#repairProfile(record), primary = this.#repairProfileAt(record, 1)
+    const modelSelection = this.#repairModelSelection(record)
     const usage = this.#store.repairUsage(record.scope, record.id)
     const callback = () => this.#assertRepair(record)
     this.#repairAssertions.set(record.id, { callback, triggerDigest: acceptanceDigest(trigger) })
-    return { ...profile, id: record.id, iteration: record.iteration, maxModelCalls: primary.maxModelCalls, maxToolCalls: primary.maxToolCalls,
+    return { ...profile, ...modelSelection, id: record.id, iteration: record.iteration, maxModelCalls: primary.maxModelCalls, maxToolCalls: primary.maxToolCalls,
       initialModelCalls: usage.modelCalls, initialToolCalls: usage.toolCalls,
       recordUsage: kind => { this.#store.chargeRepairUsage(record.scope, record.id, kind, kind === 'model' ? primary.maxModelCalls : primary.maxToolCalls) },
       authorizationDigest: record.authorizationDigest, ownerRouteId: record.authorization.ownerRouteId,

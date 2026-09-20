@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { Context } from '@deepseek-ai/cordis'
-import { installModelSelection, type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
+import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -9,7 +9,7 @@ import type { GoalRecord, VerifiedWorkflowSource } from '@dsh-enhanced/assistant
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantSkillsService, SkillBinding } from '@dsh-enhanced/assistant-skills'
-import { GROWTH_MODEL, GROWTH_PROVIDER, type NormalizedGrowthDriverConfig } from './config.js'
+import type { NormalizedGrowthDriverConfig } from './config.js'
 import type { GrowthAuthority } from './deposit.js'
 import {
   GROWTH_PROTECTED_PLUGIN_DENYLIST,
@@ -98,6 +98,7 @@ export interface GrowthSourceWakeCounters {
 }
 
 export interface GrowthAgentRunResult {
+  readonly model: Readonly<ModelSelection>
   readonly sessionId: string
   readonly outcome: 'succeeded' | 'cancelled' | 'failed' | 'unknown'
   readonly output: string
@@ -122,6 +123,7 @@ export interface GrowthAgentInput {
   wakeId: string
   authority: GrowthAuthority
   config: NormalizedGrowthDriverConfig
+  model: Readonly<ModelSelection>
   goals: Goals
   skills: Skills
   /**
@@ -482,7 +484,7 @@ function summarize(events: readonly unknown[], signal: AbortSignal, modelCalls: 
  * and any extra visible tool fails closed before the prompt is submitted.
  */
 export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Promise<GrowthAgentRunResult> {
-  const { authority, config } = input
+  const { authority, config, model } = input
   const sourcePlane = config.pluginSourceProposals.enabled ? input.sourcePlane : undefined
   const allowedTools: ReadonlySet<string> = new Set([...GROWTH_TOOL_NAMES, ...(sourcePlane === undefined ? [] : config.pluginSourceProposals.preparationMode === 'durable' ? DURABLE_SOURCE_TOOL_NAMES : SOURCE_TOOL_NAMES)])
   const sourceCounters = { queued: 0, prepared: 0, rejected: 0 }
@@ -518,7 +520,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
     handle = await agents.create({
       sessionId,
       meta: { cwd: authority.scope.workspace, agentPreset: authority.scope.preset },
-      agentOptions: { provider: GROWTH_PROVIDER, model: GROWTH_MODEL, maxTokens: config.maxOutputTokens },
+      agentOptions: { ...model, maxTokens: config.maxOutputTokens },
       signal: combined,
       setup: async (agentCtx: Agent['ctx'], preparedAgent?: Agent) => {
         const agent = preparedAgent ?? agentCtx.agent
@@ -530,7 +532,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
         combined.throwIfAborted()
         // Background principal before anything else can run.
         agentCtx.effect(() => policy.bindInitiator(agent, 'background', authority.scope.principalId), 'assistant-growth-driver.initiator')
-        agentCtx.effect(() => installModelSelection(agentCtx, { current: { provider: GROWTH_PROVIDER, model: GROWTH_MODEL }, assembled: undefined }), 'assistant-growth-driver.model-selection')
+        agentCtx.effect(() => installModelSelection(agentCtx, { current: model, assembled: undefined }), 'assistant-growth-driver.model-selection')
 
         registerGrowthTools(agent, input, sourcePlane, sourceCounters, combined)
 
@@ -556,7 +558,8 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
           authority.assertCurrent()
           combined.throwIfAborted()
           options.signal?.throwIfAborted()
-          if (options.provider !== GROWTH_PROVIDER || options.model !== GROWTH_MODEL
+          if (options.provider !== model.provider || options.model !== model.model
+            || model.reasoningEffort !== undefined && options.reasoningEffort !== model.reasoningEffort
             || options.maxTokens === undefined || options.maxTokens > config.maxOutputTokens
             || acceptanceDigest(options.tools ?? []) !== pinnedDigest
             || modelCalls >= config.maxModelCalls) {
@@ -593,7 +596,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
       await agent.whenIdle()
       const summary = summarize(agent.session.snapshotEvents(), combined, modelCalls, totalToolCalls)
       await sessions.flush(agent.session)
-      return { sessionId: String(sessionId), ...summary, sourceProposals: Object.freeze({ ...sourceCounters }) }
+      return { sessionId: String(sessionId), model, ...summary, sourceProposals: Object.freeze({ ...sourceCounters }) }
     } finally {
       combined.removeEventListener('abort', abort)
     }

@@ -3,13 +3,10 @@ import Schema from '@deepseek-ai/schemastery'
 
 /**
  * The growth driver is opt-in and fail-closed: it never runs until `enabled`
- * is explicitly true and a concrete owner scope is declared.  The model route
- * is pinned to super-relay / always day one and cannot be overridden through
- * configuration — growth runs must never silently fall back to another route.
+ * is explicitly true and a concrete owner scope is declared. Model selection
+ * follows the owner's conversation unless an explicit fixed pair overrides it.
  */
 
-export const GROWTH_PROVIDER = 'super-relay' as const
-export const GROWTH_MODEL = 'auto_model/alwaysday1' as const
 export const DEFAULT_API_KEY_ENV = 'SUPER_RELAY_API_KEY' as const
 
 export interface GrowthOwnerScopeConfig {
@@ -69,6 +66,11 @@ export interface AssistantGrowthDriverConfig {
   maxToolCalls?: number
   maxOutputTokens?: number
   maxDurationMs?: number
+  /** Omit both to inherit the owner conversation; specify both for a fixed route. */
+  provider?: string
+  model?: string
+  /** Optional effort for an explicitly configured fixed route. */
+  reasoningEffort?: string
   /** Optional policy budget id; when unset no budget reservation is made. */
   budgetId?: string
   /** Reserved amount in the owner-configured budget metric; required when budgetId is set. */
@@ -96,7 +98,11 @@ export interface NormalizedPluginSourceProposalsConfig {
   readonly planTtlMs: number
 }
 
-export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored' | 'pluginSourceProposals'>> {
+export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'provider' | 'model' | 'reasoningEffort' | 'apiKeyEnv' | 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored' | 'pluginSourceProposals'>> {
+  readonly provider: string | null
+  readonly model: string | null
+  readonly reasoningEffort: string | null
+  readonly apiKeyEnv: string | null
   readonly budgetId: string | null
   readonly budgetAmount: number | null
   readonly scope: GrowthOwnerScopeConfig | null
@@ -114,6 +120,9 @@ const fields = new Set([
   'maxToolCalls',
   'maxOutputTokens',
   'maxDurationMs',
+  'provider',
+  'model',
+  'reasoningEffort',
   'budgetId',
   'budgetAmount',
   'apiKeyEnv',
@@ -177,9 +186,12 @@ const schema = Schema.object({
   maxOutputTokens: Schema.natural().min(1).max(32_768).default(8_192),
   // Security root: a growth authority may never live longer than 300000 ms.
   maxDurationMs: Schema.natural().min(1_000).max(300_000).default(120_000),
+  provider: boundedText(256),
+  model: boundedText(256),
+  reasoningEffort: boundedText(128),
   budgetId: Schema.string().min(1).max(128),
   budgetAmount: Schema.natural().min(1).max(1_000_000_000),
-  apiKeyEnv: ref.default(DEFAULT_API_KEY_ENV),
+  apiKeyEnv: ref,
   scope: scopeSchema,
   workflowOwnerAnchored: workflowOwnerAnchoredSchema,
   pluginSourceProposals: pluginSourceProposalsSchema,
@@ -207,9 +219,12 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     maxToolCalls: config.maxToolCalls ?? 24,
     maxOutputTokens: config.maxOutputTokens ?? 8_192,
     maxDurationMs: config.maxDurationMs ?? 120_000,
+    provider: config.provider ?? null,
+    model: config.model ?? null,
+    reasoningEffort: config.reasoningEffort ?? null,
     budgetId: config.budgetId ?? null,
     budgetAmount: config.budgetAmount ?? null,
-    apiKeyEnv: config.apiKeyEnv ?? DEFAULT_API_KEY_ENV,
+    apiKeyEnv: config.apiKeyEnv ?? null,
     scope: config.scope ? Object.freeze({ ...config.scope }) : null,
     workflowOwnerAnchored: Object.freeze({
       enabled: config.workflowOwnerAnchored?.enabled ?? false,
@@ -227,6 +242,20 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     }),
   })
   if (normalized.enabled && !normalized.scope) throw new Error('assistant-growth-driver: enabled requires an explicit owner scope')
+  if ((normalized.provider === null) !== (normalized.model === null)) {
+    throw new Error('assistant-growth-driver: provider and model must be configured together')
+  }
+  if (normalized.reasoningEffort !== null && normalized.provider === null) {
+    throw new Error('assistant-growth-driver: reasoningEffort requires an explicit provider and model')
+  }
+  for (const value of [normalized.provider, normalized.model, normalized.reasoningEffort]) {
+    if (value !== null && (value.trim() !== value || value.length === 0 || [...value].some(character => {
+      const code = character.codePointAt(0)!
+      return code <= 31 || code === 127
+    }))) {
+      throw new Error('assistant-growth-driver: invalid model route')
+    }
+  }
   if (normalized.workflowOwnerAnchored.enabled && !normalized.enabled) {
     throw new Error('assistant-growth-driver: workflowOwnerAnchored.enabled requires the driver itself to be enabled')
   }

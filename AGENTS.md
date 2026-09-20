@@ -7,6 +7,7 @@ This repository is a pnpm monorepo of independently publishable DeepSeek Harness
 ## Self-iteration principles
 
 - Build a self-iterating DSH tool/plugin agent. Models are replaceable suppliers; agent identity, history, and versioned capabilities must survive supplier changes. Freeze the approved supplier, budget, and acceptance contract per run.
+- Self-repair and growth inherit the triggering conversation/task model by default; allow an explicit fixed model override. Persist the resolved selection for durable work and never silently switch suppliers during recovery.
 - Reuse DSH's native agent loop and Cordis composition, injection, effects, and reload lifecycle. Connect task feedback → candidate skill/tool/plugin → independent verification → bounded rollout → observation/rollback; avoid duplicate loops or goal state machines.
 - Deliver self-iteration during ordinary user use: authenticated task outcomes, corrections, and repeated work must drive durable learning and authorized capability updates without developer orchestration. Fixed scenarios are regression evidence; repeated hand-run probes do not deliver this capability.
 - Keep acceptance rules and held-out tasks outside candidate write authority. Promote from fresh, independently checked outcomes; model self-ratings and successful tool exits alone do not establish success.

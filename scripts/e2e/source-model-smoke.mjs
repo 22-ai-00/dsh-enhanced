@@ -109,7 +109,7 @@ assert.equal(clamp(10, 2, 2), 2); assert.equal(clamp(-10, 2, 2), 2);
   const gap = service.recordGap({ idempotencyKey: 'source-model-clamp-gap', capability: 'clamp finite numbers to inclusive bounds',
     context: 'Existing plugin clamp-helper has a broken clamp function in src/index.js: it returns the input unchanged. Read the README and source, then fix clamp(value, minimum, maximum) for finite inputs with minimum <= maximum. Preserve the native Cordis default plugin. Prepare one pending source modification. No repeated skill history exists in this fixture; use the separate source-proposal capability.',
     expectedValue: 100, frequency: 10, estimatedCost: 1, risk: 0.1 })
-  const driver = new AssistantGrowthDriverService(ctx, { enabled: true, scope, intervalMs: 0, maxDurationMs: 240000, maxModelCalls: 12, maxToolCalls: 20, maxOutputTokens: 4096,
+  const driver = new AssistantGrowthDriverService(ctx, { enabled: true, provider: 'super-relay', model: 'auto_model/alwaysday1', scope, intervalMs: 0, maxDurationMs: 240000, maxModelCalls: 12, maxToolCalls: 20, maxOutputTokens: 4096,
     apiKeyEnv: routeConfig.apiKeyEnv, budgetId: 'source-smoke-wake', budgetAmount: 1,
     pluginSourceProposals: { enabled: true, repository, maxPlansPerWake: 1, isolatedBuildTimeoutMs: 60000 } })
   await new Promise(resolvePromise => setImmediate(resolvePromise))

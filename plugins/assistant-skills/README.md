@@ -142,11 +142,16 @@ expand tool/model authority, or reset cumulative model/tool call budgets.
 
 A repair profile contains `id`, exact `scope` (principal id, record id/version,
 workspace and preset), `skillName`, `taskFamilyId`, `description`, optional typed
-capture `bindings`, `externalHoldoutProfileId`, `provider`, `model`,
+capture `bindings`, `externalHoldoutProfileId`, optional paired `provider` and `model`,
 `allowedTools`, `maxGoalRounds`, `maxModelCalls`, `maxToolCalls`,
 `maxOutputTokens`, `maxDurationMs`, `canaryRuns`, and `maxCanaryRuns`, plus optional
 `maxIterations` and `followupProfileIds`. Each followup uses the same owner, skill
-and model route with no broader tool, output, round or duration limits.
+and model route with no broader tool, output, round or duration limits. Supplying
+both route fields pins that override. Omitting both makes `skill_repair_arm`
+read the authenticated source Agent's latest native request header, then freeze
+its provider, model, and explicit reasoning effort in the authorization. A
+restart resumes that frozen route and never selects a Host default; a partial
+provider/model configuration is rejected.
 The selected external holdout must use a prospective `generatorDigest` and
 `canaryAdmissionTemplate`:
 

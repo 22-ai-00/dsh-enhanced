@@ -131,6 +131,8 @@ ownerRoutes:
 
 `resolveOwnerRoute(id)` 每次从 binding ledger 读取该 conversation 的当前 active binding，只接受 active owner，且要求 principal、workspace、agent preset、policyRef 全部逐项相等、generation 不低于显式 floor；`/new` 产生的同 lineage 下一代可单调前进，任一身份或作用域漂移都会 fail closed。authority 只存在于 Host 配置和 service API，不注册为 Agent 工具、不进入 prompt，也不能由成长系统自行创建或修改。
 
+`inspectOwnerModelSelection()` 在同一 owner route 校验后提供模型快照，供修复与成长继承。传入 `sourceAgent` 时读取匹配 binding 的 Session 最新原生 `request/header`，避免初始 Agent options 已过期；未传入时读取外部会话的持久模型选择或其 Delivery 默认配置。原生 Web 的模型由 DSH 管理，必须提供来源 Agent；该接口不替它猜测模型。返回值仅含 provider/model/可选 reasoning effort，不含会话内容或凭据。
+
 `enqueueBackgroundRoute()` 的 Policy resource 固定为精确的 `message/route:<authorityId>`，subject 同时带配置中的 workspace 与 canonical owner principal；部署规则不需要、也不应为这条控制路径授予 message 通配符。Policy 通过后，Delivery 会在同一个 `BEGIN IMMEDIATE` 事务内重新解析 active binding 并写 Outbox，封住授权期间 `/new` 的竞态。claim 时还会在同一写事务内重新验证 authority、source hash、完整 owner scope、generation floor 与当前 exact Policy；route 被删除、修改或撤权时不会调用 adapter，而是写入带 `owner-route-*` failure code 的 terminal Outbox 和 `outbox_attempts` 审计 receipt。
 
 显式 Policy deny 表示 T3 撤权并永久 dead；Policy 检查本身抛错（例如 SQLite busy、滚动部署中的短暂不可用）不等同撤权。claim 前发生时，消息保持 `retry_wait`、`attemptCount` 不增加并暴露 `owner-route-policy-check-failed`；claim 后、adapter I/O 前发生时，当前 not-sent attempt 进入带退避的 `retry_wait`。两者都不会调用 provider，Policy 恢复后可自动继续。锁顺序也保持单向：enqueue 的 Policy 写在进入 Delivery 事务前已经完成；claim 只有 Delivery→Policy 的同步检查，没有持有 Policy 写事务再进入 Delivery 的反向路径。运维可用 `pendingOutbox` 加该 failure code 定位持续锁冲突，而不丢失唯一告警。
