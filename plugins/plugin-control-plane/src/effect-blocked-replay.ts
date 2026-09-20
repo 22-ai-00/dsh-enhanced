@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import type { ToolExecution, ToolExecutionInput } from '@deepseek-ai/dsh-tools'
 import { createRuntimeSampler } from './runtime-observer.js'
 import { runtimeConfigDigest, validateRuntimeObserverConfig, type RuntimeObservation, type RuntimeObserverConfig } from './runtime-observer-protocol.js'
@@ -106,7 +107,7 @@ export class EffectBlockedReplayRuntime {
   constructor(private readonly ctx: Context, input: RuntimeObserverConfig) {
     validateRuntimeObserverConfig(input)
     this.config = structuredClone(input)
-    if (ctx.agent !== undefined) fail('runtime must belong to a Host Fiber, not an Agent')
+    if (scopeOf(ctx) !== undefined) fail('runtime must belong to an unscoped Host Fiber, not an Agent')
     if (typeof ctx.tools?.guard !== 'function' || !ctx.get('loader', false)) fail('native Tools and Loader required')
     this.delivery()
     this.providers = ['tools', 'loader', 'assistantDelivery', 'agents'].map(name => {
@@ -155,7 +156,7 @@ export class EffectBlockedReplayRuntime {
     const { cases, caseDigest } = validateReplayCases(input.cases)
     const agent = input.handle.agent
     if (!agent || typeof input.handle.dispose !== 'function' || agent.status !== 'idle'
-      || agent.ctx.agent !== agent || this.states.has(agent)) fail('fresh idle native Agent handle required')
+      || scopeOf(agent.ctx) !== agent || this.states.has(agent)) fail('fresh idle native Agent handle required')
     if (agent.inbox.hasPending || agent.session.snapshotEvents().some(event =>
       ['turn/start', 'user/message', 'assistant/message', 'tool/result'].includes(event.type))) fail('replay requires an unused Agent session')
     this.assertProviders()

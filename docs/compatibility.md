@@ -221,9 +221,13 @@ Control Plane's opt-in `EffectBlockedReplayRuntime` requires the same-build
 Delivery `blockAgentRepliesForReplay()` API. It feature-detects that method;
 earlier binaries, including earlier `0.1.33` development builds, cannot supply
 it. It consumes the pinned DSH ToolRuntime monotonic `guard()` contract and
-native `AgentHandle.dispose()`, with the Agent association read from the own
-`agent.ctx.agent` property rather than Cordis `ctx.get('agent')`.
-No dependency baseline, database or Host attestation schema changes.
+native `AgentHandle.dispose()`. Agent identity uses the public `scopeOf()` API
+from a declared `@deepseek-ai/dsh-scope` Host peer, retaining the `0.1.2-rc.1`
+baseline. The runtime owner must be unscoped and the Agent context must carry
+that exact Agent key. The peer must share the Host's module instance because
+scope tags use a module-local Symbol. Neither `ctx.agent` (removed in the
+tested `0.1.5-rc.2` Host) nor `ctx.get('agent')` is a portable scope check.
+No database or Host attestation schema changes.
 Provider replacement, Loader/Fiber epoch drift, earlier native denial,
 cancellation, extra calls and teardown failure must remain refusal cases.
 See [component contract](effect-blocked-replay.md); observations alone do not
@@ -233,5 +237,8 @@ Optional `replayEndpoint` uses the pinned native Agent registry factory and
 memoized `AgentHandle.dispose()`. It requires Linux private Unix sockets and
 Node's SQLite runtime, with a separate application-identified replay journal.
 Endpoint replacement invalidates cached runtime observations; it never resets
-durable dispatch admission. No dependency, Control Plane ledger schema or
-signed Host receipt schema changes accompany this endpoint.
+durable dispatch admission. Actual CLI `0.1.5-rc.2` with its own peer closure
+passed completed-cache/restart-stale and SIGKILL/restart-unknown probes; each
+operation created one Agent and did not redispatch. A hard-killed Host's socket
+needs supervisor-owned cleanup after quiescence; the journal must survive.
+Control Plane ledger and signed Host receipt schemas remain unchanged.

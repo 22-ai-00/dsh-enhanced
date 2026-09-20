@@ -190,6 +190,9 @@ async function rollbackFixture(action: 'restore' | 'stop' = 'stop', mode = 'succ
     f.config.profileFiles = []
     Object.assign(f.config, { readiness: null })
   } else {
+    // Restore verifies both supervisor and runtime windows, with repeated
+    // descriptor-pinned interpreter hashing. Allow that work under suite load.
+    f.config.timeoutMs = 10000
     const value = f.config as unknown as { readiness: { reloadOperationId?: string } }
     delete value.readiness.reloadOperationId
   }

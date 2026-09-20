@@ -70,7 +70,14 @@ async function fixture() {
   const mount = async () => {
     const fiber = ctx.plugin({ name: 'endpoint-owner', apply(ownerCtx) { installReplayEndpoint(ownerCtx, config) } })
     await fiber
-    await expect.poll(async () => { try { return (await lstat(config.runtime.socketPath)).isSocket() } catch { return false } }).toBe(true)
+    await expect.poll(async () => {
+      try {
+        // bind creates the pathname before the endpoint finishes chmod.
+        // Readiness must meet the same owner/mode contract as the client.
+        const stat = await lstat(config.runtime.socketPath)
+        return stat.isSocket() && stat.uid === process.getuid!() && (stat.mode & 0o077) === 0
+      } catch { return false }
+    }).toBe(true)
     return fiber
   }
   const query = (action: 'execute' | 'query', overrides = {}) => queryReplayEndpoint({ socketPath: config.runtime.socketPath,
