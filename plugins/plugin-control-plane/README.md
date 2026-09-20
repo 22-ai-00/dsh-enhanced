@@ -402,7 +402,34 @@ sourceAdoptions:
 
 使用 systemd 重启目标 Host 时，控制面应运行在目标 Host 之外，避免目标重启中断自己的部署作业。采用使用独立 SQLite 连接，并复用现有 profile 锁和跨进程文件操作互斥；同一 Service 一次执行一个采用任务。任务来源在异步操作前后重验，取消或失败后保留恢复义务。物理恢复不依赖已撤回的来源授权；已暴露 profile 仍须取得原 Host 的独立 rollback 回执才结算。trust 绑定变化、无法确认资源释放或签名服务不可用时保留待恢复状态。Cordis 卸载取消并等待采用工作，随后关闭其连接。
 
-当前安装器尚未提供这个双 Host 部署：源码作业仍依赖所在 Host 的实时 Delivery/Evaluation 校验，单纯共享 SQLite 不能传递目标 Host 的当前 owner 与反馈写入屏障。跨 Host 的认证接线和安装配置仍须实现。现有 systemd attestor 只签发 reload/readiness/rollback；其余行为验收阶段也需要真实独立观测，不能用进程就绪代替。因此仅填写上述配置尚不能完成生产自动采用。
+需要重启目标 Host 的部署，应在目标的 `sourceAdoptions` 中增加以下 `handoff`，并在采用签名器的 `grant.handoff` 配置完全相同的值：
+
+```yaml
+handoff:
+  schemaVersion: 1
+  coordinatorId: assistant-deployer
+  maximumWindowMs: 900000
+  commit: target-host
+```
+
+这些条款进入不可变计划摘要，由现有采用审批签名覆盖。目标在当前 owner 反馈写入屏障内创建持久交接；期限取计划、审批回执和窗口上限的最小值，恢复或重复调用不会续期。外部 Host 共享精确 ledger/trust，单独配置：
+
+```yaml
+adoptionCoordinator:
+  coordinatorId: assistant-deployer
+  scope:
+    workspace: /srv/dsh/workspace
+    preset: assistant
+    principalId: owner
+    ownerRouteId: owner-route
+  timeoutMs: 300000
+```
+
+协调器必须运行在另一进程和独立 systemd unit；它不能同时配置目标的 `sourceJobs`、`sourceAdoptions`、`runtimeObserver` 或 `replayEndpoint`。只需连接所在 Host 的 Automations，复用原生每分钟调度、owner/Policy 和预算，每轮至多推进一个交接；空队列仍有扫描调度开销。`coordinatorId` 是绑定标识，不提供 OS 隔离或替代 ledger 文件权限。停用调度或耗尽原生预算也会暂停自动恢复，恢复前需先核对未知外部操作。
+
+协调器沿现有安装和签名检查路径推进，到 `commit-pending` 停止。目标恢复后由其原生源码 continuation 重验当前 owner、反馈和信任，再完成启用；已撤销或过期交接只能进入既有回退。目标卸载不会撤销已交出的任务；未知 Host 派发仍须精确签名对账，不能自动重派。目标离线期间无法即时获知反馈纠正，允许暴露的最长授权窗口由上述期限限制；回退完成时间仍取决于协调器可用性和签名服务。
+
+当前安装器尚未提供这个双 Host 配置。现有 systemd attestor 只签发 reload/readiness/rollback；其余行为验收阶段仍需要真实独立观测，不能用进程就绪代替。组件接线不等于生产自动采用闭环，npm 发布仍须等待实际部署验收。
 
 这提供自动采用的执行链。目标 Host 可另配 `foregroundDeployments: { attestorJournalPath: /srv/dsh-owner/supervisor/reload.sqlite }`，同时启用 `runtimeObserver`，并挂载 Delivery。路径须指向 systemd attestor 实际的私有 SQLite journal；配置只授予读取已签名 readiness 记录的权限，不包含签名密钥。目标 Host 与外部部署协调器需使用同一精确控制面账本和 trust 绑定；当前实现要求同 UID 的私有文件读取，不能据此声称独立 UID 隔离。
 
@@ -410,7 +437,7 @@ schema 20 的 `foreground_deployments` 在真实 owner 前台任务开始和完�
 
 Host 可用 `inspectOwnerForegroundDeployment()` 按与 Delivery 学习来源查询相同的参数读取归因；它重验当前可信任务，保持原学习来源摘要不变。记录证明该任务处于这一部署实例下，不证明调用过某个工具或该版本导致了结果，也不会把正常结束计作质量成功。读取结果作为质量依据仍需消费当前 canonical 反馈与撤回，并在最终写入时使用 writer fence。可选 `taskObservations` 已接通有限批次的当前反馈、签名观察与物理回退；可安装日常使用配置及端到端部署验收仍待完成，此能力不代表 npm 发布验收通过。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 22 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 23 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 非 owner-task 来源的计划可用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。adapter 返回签名 publish 歧义回执后进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。派发后没有签名回执则保持 unknown，不自动重跑；普通 owner-task 来源的全部阶段必须通过 Host 当前来源校验。
 

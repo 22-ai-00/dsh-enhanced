@@ -105,7 +105,7 @@ supervisor fixture uses `/usr/bin/systemctl` directly.
 
 ## Dispatch, observation and recovery
 
-Control Plane schema 22 commits a dispatch claim before invoking this executable,
+Control Plane schema 22 and later commit a dispatch claim before invoking this executable,
 then releases its own database writer lock. A second `probe` never invokes a
 claimed operation whose receipt is missing. Retrieve the original request's
 signed receipt from the owner-controlled attestor and submit it with

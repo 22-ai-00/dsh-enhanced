@@ -1,3 +1,4 @@
+import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
 import { lstat, realpath } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -61,6 +62,8 @@ export interface Config {
   sourceReleaseExecution?: SourceReleaseExecutionConfig
   /** Finite owner adoption of an exact completed repair into a configured profile. */
   sourceAdoptions?: SourceAdoptionConfig
+  /** External Host only: advance signed handoffs until target-owned final commit. */
+  adoptionCoordinator?: AdoptionCoordinatorConfig
   /** Explicit owner-only observation channel; no signing or activation authority. */
   runtimeObserver?: RuntimeObserverConfig
   /** Capture real owner foreground tasks against signed, currently loaded deployments. */
@@ -79,6 +82,7 @@ const schema = Schema.object({
   sourceReleases: Schema.any(),
   sourceReleaseExecution: Schema.any(),
   sourceAdoptions: Schema.any(),
+  adoptionCoordinator: Schema.any(),
   runtimeObserver: Schema.any(),
   foregroundDeployments: Schema.any(),
   taskObservations: Schema.any(),
@@ -103,7 +107,7 @@ async function canonicalTarget(dshHome: string, profile: string): Promise<Plugin
 
 export class PluginControlPlaneService extends Service {
   static Config = schema
-  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>
+  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>
   private readonly store: ControlPlaneStore
   private readonly taskGaps: OwnerTaskFailureGaps
   private readonly abort = new AbortController()
@@ -150,6 +154,12 @@ export class PluginControlPlaneService extends Service {
     if (this.config.sourceReleaseExecution !== undefined) {
       validateSourceReleaseExecutionConfig(this.config.sourceReleaseExecution)
       if (!this.config.sourceReleases) throw new Error('plugin-control-plane: sourceReleaseExecution requires sourceReleases')
+    }
+    if (this.config.adoptionCoordinator !== undefined) {
+      validateAdoptionCoordinatorConfig(this.config.adoptionCoordinator)
+      if (this.config.sourceJobs || this.config.sourceAdoptions || this.config.runtimeObserver || this.config.replayEndpoint) {
+        throw new Error('plugin-control-plane: adoptionCoordinator requires a separate Host from target source jobs and observation')
+      }
     }
     if (this.config.sourceAdoptions !== undefined) {
       validateSourceAdoptionConfig(this.config.sourceAdoptions)
@@ -201,6 +211,34 @@ export class PluginControlPlaneService extends Service {
         return () => fiber.dispose()
       } : undefined)
     if (this.config.replayEndpoint !== undefined) installReplayEndpoint(ctx, this.config.replayEndpoint)
+    if (this.config.adoptionCoordinator !== undefined) ctx.inject(['assistantAutomations' as never], coordinatorCtx => {
+      coordinatorCtx.effect(async () => {
+        const snapshot = foregroundTrustSnapshot(this.config.trustPath), trust = await this.boundTrust()
+        this.abort.signal.throwIfAborted()
+        const store = new ControlPlaneStore({ path: trust.ledger.path, adoptionCoordinatorId: this.config.adoptionCoordinator!.coordinatorId })
+        const automations = () => coordinatorCtx.get('assistantAutomations' as never) as unknown as AssistantAutomationsService
+        let runtime: AdoptionCoordinatorRuntime | undefined
+        try {
+          runtime = new AdoptionCoordinatorRuntime({ config: this.config.adoptionCoordinator!, store, trust,
+            assertCurrent: () => {
+              this.abort.signal.throwIfAborted()
+              if (foregroundTrustSnapshot(this.config.trustPath) !== snapshot) throw new Error('adoption coordinator trust changed')
+            },
+            automations: {
+              registerHostExecutor: input => automations().registerHostExecutor(input),
+              reconcileSystem: input => automations().reconcileSystem(input),
+              inspectSystemOwnedActivation: input => automations().inspectSystemOwnedActivation(input),
+            },
+          })
+          runtime.start()
+          return () => runtime!.close()
+        } catch (error) {
+          if (runtime) await runtime.close()
+          else store.close()
+          throw error
+        }
+      }, 'plugin-control-plane.adoption-coordinator')
+    })
     if (this.config.taskObservations !== undefined) ctx.inject(['assistantAutomations', 'assistantDelivery', 'assistantEvaluation'] as never[], observerCtx => {
       observerCtx.effect(async () => {
         const snapshot = foregroundTrustSnapshot(this.config.trustPath), trust = await this.boundTrust()

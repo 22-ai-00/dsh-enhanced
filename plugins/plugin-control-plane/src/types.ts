@@ -1,4 +1,5 @@
 import type { CatalogEntry, CatalogPackage } from './catalog.js'
+import type { AdoptionHandoffTerms } from './adoption-handoff.js'
 
 export type PlanStatus =
   | 'pending-approval'
@@ -133,6 +134,7 @@ export interface PluginActivationPlan {
     matchedCapabilities: readonly string[]
     authorities: readonly string[]
     packages: readonly CatalogPackage[]
+    handoff?: AdoptionHandoffTerms
   }
   installationId: string
   ledger: { id: string; path: string }

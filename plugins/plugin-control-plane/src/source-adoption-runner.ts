@@ -1,4 +1,5 @@
 /** Host-owned continuation from a completed source release into normal activation. */
+import { validateAdoptionHandoffTerms, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import { lstat, realpath } from 'node:fs/promises'
 import { basename, dirname, join, resolve } from 'node:path'
 import { Ed25519ApprovalAuthority, parseApprovalReceipt } from './approval.js'
@@ -17,18 +18,20 @@ export interface SourceAdoptionConfig {
   planTtlMs: number
   timeoutMs: number
   authority: SourceApprovalClientConfig
+  handoff?: AdoptionHandoffTerms
 }
 
 export function validateSourceAdoptionConfig(value: unknown): asserts value is SourceAdoptionConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('plugin-control-plane: invalid source adoption config')
   const item = value as Record<string, unknown>
-  if (Object.keys(item).sort().join('\0') !== ['authority', 'planTtlMs', 'profile', 'timeoutMs'].join('\0')
+  if (Object.keys(item).sort().join('\0') !== ['authority', ...(Object.hasOwn(item, 'handoff') ? ['handoff'] : []), 'planTtlMs', 'profile', 'timeoutMs'].join('\0')
     || typeof item.profile !== 'string' || item.profile.normalize('NFC').trim() !== item.profile || !PROFILE.test(item.profile)
     || !Number.isSafeInteger(item.planTtlMs) || Number(item.planTtlMs) < 60_000 || Number(item.planTtlMs) > 86_400_000
     || !Number.isSafeInteger(item.timeoutMs) || Number(item.timeoutMs) < 1_000 || Number(item.timeoutMs) > 3_600_000) {
     throw new Error('plugin-control-plane: invalid source adoption config')
   }
   validateSourceApprovalClientConfig(item.authority)
+  if (Object.hasOwn(item, 'handoff')) validateAdoptionHandoffTerms(item.handoff)
 }
 
 function same(left: unknown, right: unknown): boolean { return controlPlaneDigest(left) === controlPlaneDigest(right) }
@@ -128,9 +131,10 @@ export async function adoptSourceRelease(options: {
       plan = options.withSourceFence(() => options.store.createPlan({ candidate: admitted, catalog: { digest: catalog.digest, provenance: catalog.provenance }, matchedCapabilities: admitted.capabilities,
         profile: options.config.profile, target, installationId: options.trust.installationId, ledger: options.trust.ledger,
         executor: { id: options.trust.executor.id, version: options.trust.executor.version, path: options.trust.executor.path, sha256: options.trust.executor.sha256 },
-        ttlMs: options.config.planTtlMs, gapId: source.gapId, sourcePlanId: source.id, idempotencyKey: `source-adoption:${source.id}` }).result)
+        ttlMs: options.config.planTtlMs, gapId: source.gapId, sourcePlanId: source.id, ...(options.config.handoff ? { handoff: options.config.handoff } : {}), idempotencyKey: `source-adoption:${source.id}` }).result)
     }
     assertPlanBinding(plan, source.id, options.trust, target, catalog, admitted); created = plan; trustBound = true
+    if (!same(plan.dossier.handoff ?? null, options.config.handoff ?? null)) throw new Error('plugin-control-plane: adoption handoff configuration changed')
     let requestedApproval = false
     for (let step = 0; step < 32; step++) {
       await options.assertCurrent(); signal.throwIfAborted()
@@ -151,6 +155,15 @@ export async function adoptSourceRelease(options: {
         await options.assertCurrent(); signal.throwIfAborted()
         plan = (await options.store.approve({ planId: current.id, expectedRevision: current.revision, receipt,
           resolveAuthority: value => authority(options.trust, value), idempotencyKey: `source-adoption-approval:${receipt.approvalId}`, withSourceFence: options.withSourceFence })).result
+      } else if (options.config.handoff) {
+        if (current.status === 'approved') {
+          options.withSourceFence(() => options.store.prepareAdoptionHandoff({ planId: current.id, expectedRevision: current.revision }))
+        } else if (current.status === 'commit-pending') {
+          options.store.assertAdoptionHandoff(current.id)
+          return await activatePluginPlan({ store: options.store, trust: options.trust, planId: current.id, expectedRevision: current.revision, signal })
+        }
+        // The external native continuation owns staging, probes and recovery.
+        return options.store.getPlan(current.id)
       } else if (current.status === 'rollback-pending' && current.activation?.rollbackProfileRestored) {
         plan = await probePluginPlan({ store: options.store, trust: options.trust, planId: current.id, expectedRevision: current.revision, expectedFence: current.activation.fence, signal })
       } else if (current.status === 'approved' || current.status === 'staging' || current.status === 'commit-pending' || current.status === 'rollback-pending') {
@@ -164,7 +177,12 @@ export async function adoptSourceRelease(options: {
     return options.store.getPlan(plan.id)
   } catch (error) {
     if (created !== undefined && trustBound) {
-      try { await recoverAwaiting(options.store, options.trust, options.store.getPlan(created.id), options.config.timeoutMs) } catch { /* preserve the triggering failure */ }
+      try {
+        if (created.dossier.handoff) {
+          // Unloading the target must not cancel the durable handoff it just made.
+          if (!options.signal?.aborted) options.store.revokeAdoptionHandoff(created.id)
+        } else await recoverAwaiting(options.store, options.trust, options.store.getPlan(created.id), options.config.timeoutMs)
+      } catch { /* preserve the triggering failure */ }
     }
     throw error
   }

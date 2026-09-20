@@ -341,7 +341,7 @@ export class SourceJobRuntime {
     let plan: PluginSourcePlan
     try { plan = this.options.store.getSourcePlan(job.planId) } catch { return false }
     const adoption = plan.status === 'release-complete' ? this.options.store.findSourceAdoption(plan.id) : undefined
-    const recovery = adoption !== undefined && ['staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'].includes(adoption.status)
+    const recovery = adoption !== undefined && ((adoption.status === 'approved' && adoption.dossier.handoff !== undefined) || ['staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'].includes(adoption.status))
     if (recovery) return this.options.adoptReleased !== undefined
     if (job.intent.authority.digest !== this.authorityDigest || job.intent.authority.id !== this.options.config.authorityId) return false
     try { this.assertOwner(job) } catch { return false }
@@ -361,7 +361,7 @@ export class SourceJobRuntime {
   private continuationSignalTimeoutMs(job: SourceJobRecord): number {
     if (job.planId) {
       const plan = this.options.store.getSourcePlan(job.planId), adoption = plan.status === 'release-complete' ? this.options.store.findSourceAdoption(plan.id) : undefined
-      if (adoption && ['staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'].includes(adoption.status)) return this.continuationTimeoutMs()
+      if (adoption && ((adoption.status === 'approved' && adoption.dossier.handoff !== undefined) || ['staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'].includes(adoption.status))) return this.continuationTimeoutMs()
     }
     return Math.max(1, Math.min(this.continuationTimeoutMs(), this.options.config.expiresAt - Date.now()))
   }

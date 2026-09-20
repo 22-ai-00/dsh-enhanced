@@ -3,7 +3,12 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 22
+export const controlPlaneSchemaVersion = 23
+
+const adoptionHandoffsSchema = `CREATE TABLE IF NOT EXISTS adoption_handoffs (
+ plan_id TEXT PRIMARY KEY REFERENCES activation_plans(id) ON DELETE RESTRICT, plan_digest TEXT NOT NULL CHECK(length(plan_digest)=64), coordinator_id TEXT NOT NULL,
+ created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, revoked_at INTEGER, CHECK(expires_at > created_at)
+) STRICT, WITHOUT ROWID;`
 
 const hostAttestationDispatchesSchema = `CREATE TABLE IF NOT EXISTS host_attestation_dispatches (
   operation_id TEXT PRIMARY KEY REFERENCES host_attestation_operations(operation_id) ON DELETE RESTRICT,
@@ -1167,6 +1172,9 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
             CASE WHEN status = 'pending' THEN NULL ELSE completed_at END FROM host_attestation_operations;
         PRAGMA user_version = 22; COMMIT;`)
     } else database.exec(hostAttestationDispatchesSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 23) {
+      database.exec(`BEGIN IMMEDIATE; ${adoptionHandoffsSchema} PRAGMA user_version = 23; COMMIT;`)
+    } else database.exec(adoptionHandoffsSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {
