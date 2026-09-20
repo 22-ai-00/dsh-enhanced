@@ -60,6 +60,7 @@ export class SourceJobRuntime {
     config: SourceJobsConfig; build: SourceBuildConfig; statePath: string; store: ControlPlaneStore; ports: SourceJobPorts
     withGapSourceFence?: <T>(gapId: string, owner: SourceJobOwnerReceipt, callback: () => T) => T
     trust: () => Promise<Trust>
+    approvePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     prepare: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<PluginSourcePlan>
   }) {
     validateSourceJobsConfig(options.config, options.build)
@@ -75,6 +76,20 @@ export class SourceJobRuntime {
     }
     this.unregister = this.options.ports.automations.registerHostExecutor(executor)
     this.active = true
+    if (this.options.approvePrepared) {
+      // Only replay the idempotent approval request, never a completed build.
+      // Each failed request leaves its pending plan available for Host inspection/retry.
+      this.track((async () => {
+        for (const job of this.options.store.listPreparedSourceApprovalJobs()) {
+          if (this.abort.signal.aborted) break
+          try {
+            this.assertOwner(job)
+            const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(10_000, job.expiresAt - Date.now())))])
+            await this.options.approvePrepared!(job, signal)
+          } catch { /* pending plan retained */ }
+        }
+      })())
+    }
     // Reconcile only queued intents. A previous claim is unknown and never replayed.
     for (let job of this.options.store.listSourceJobs(100)) {
       if (job.status !== 'queued') continue
@@ -268,6 +283,10 @@ export class SourceJobRuntime {
       await assertCurrent()
       await this.options.prepare(owned, signal, assertCurrent)
       if (this.options.store.getSourceJob(owned.id)?.status !== 'prepared') throw new Error('source job completion was not committed')
+      if (this.options.approvePrepared && this.options.store.getOwnerTaskFailureReference(owned.intent.gapId)) {
+        this.assertOwner(owned)
+        await this.options.approvePrepared(this.options.store.getSourceJob(owned.id)!, signal)
+      }
       return { outcome: 'succeeded', failureClass: 'none', failurePhase: 'none', failureCode: 'none', sideEffectState: 'possible', retryability: 'unsafe' }
     } catch {
       const current = this.options.store.getSourceJob(job.id)

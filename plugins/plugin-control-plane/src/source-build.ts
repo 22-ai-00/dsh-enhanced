@@ -38,6 +38,9 @@ const imageDigest = /^(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}$/u
 const marker = /^DSH_PREPARED_PACK\t([^\t\n]+)\t([0-9]+)\t([a-f0-9]{64})\t([^\t\n]+)\t([^\t\n]+)$/mu
 const repositorySeccompSha256 = 'b1e4b5b709578785bd2aff4a3a344301997571ad0e8ae5747aec176571ddc342'
 
+/** Exact in-container command recorded in prepared source evidence. */
+export const PREPARED_SOURCE_BUILD_SCRIPT = 'set -eu; checked() { phase="$1"; shift; if "$@" >"/tmp/$phase.log" 2>&1; then return 0; else code=$?; printf "source build phase failed: %s\\n" "$phase" >&2; tail -c 8192 "/tmp/$phase.log" >&2; return "$code"; fi; }; umask 077; mkdir -p /workspace; tar -x -C /workspace; cd /workspace; checked install pnpm install --offline --frozen-lockfile --ignore-scripts; checked check pnpm check; mkdir -p /workspace/.dsh-pack; cd "$PLUGIN_ROOT"; checked pack pnpm pack --pack-destination /workspace/.dsh-pack; set -- /workspace/.dsh-pack/*.tgz; test "$#" = 1; pack="$1"; printf "DSH_PREPARED_PACK\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "${pack##*/}" "$(wc -c < "$pack" | tr -d " ")" "$(sha256sum "$pack" | cut -d " " -f1)" "$(node --version)" "$(pnpm --version)"'
+
 interface SourceBuildLimits {
   profile: 'standard' | 'repository'
   temporaryMiB: number
@@ -173,7 +176,7 @@ export async function runDockerPreparedChecks(input: {
       if (existing.code !== 0 || existing.stdout.trim() !== '') throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'durable source container already exists or cannot be inspected')
     } catch (error) { await snapshot.cleanup(); throw error }
   }
-  const script = 'set -eu; checked() { phase="$1"; shift; if "$@" >"/tmp/$phase.log" 2>&1; then return 0; else code=$?; printf "source build phase failed: %s\\n" "$phase" >&2; tail -c 8192 "/tmp/$phase.log" >&2; return "$code"; fi; }; umask 077; mkdir -p /workspace; tar -x -C /workspace; cd /workspace; checked install pnpm install --offline --frozen-lockfile --ignore-scripts; checked check pnpm check; mkdir -p /workspace/.dsh-pack; cd "$PLUGIN_ROOT"; checked pack pnpm pack --pack-destination /workspace/.dsh-pack; set -- /workspace/.dsh-pack/*.tgz; test "$#" = 1; pack="$1"; printf "DSH_PREPARED_PACK\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "${pack##*/}" "$(wc -c < "$pack" | tr -d " ")" "$(sha256sum "$pack" | cut -d " " -f1)" "$(node --version)" "$(pnpm --version)"'
+  const script = PREPARED_SOURCE_BUILD_SCRIPT
   const args = ['run', '-i', '--pull', 'never', '--name', container, '--label', `dsh.source.tree=${snapshot.tree}`, ...(input.sourceJob === undefined ? [] : ['--label', `dsh.source.job=${input.sourceJob.id}`]), ...(seccomp === undefined ? [] : ['--label', `dsh.source.seccomp.sha256=${seccomp.digest}`]), '--network', 'none', '--read-only', '--cap-drop', 'ALL',
     '--security-opt', 'no-new-privileges', '--user', '65534:65534', '--pids-limit', String(input.config.pidsLimit),
     '--memory', `${input.config.memoryMiB}m`, '--memory-swap', `${input.config.memoryMiB}m`, '--cpus', String(input.config.cpus),

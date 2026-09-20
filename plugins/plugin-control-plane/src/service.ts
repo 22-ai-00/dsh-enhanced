@@ -16,10 +16,12 @@ import {
   writeScopedPluginFiles,
   type ScopedPluginFile,
 } from './source-workspace.js'
-import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from './store.js'
+import { requestSourceApproval, validateSourceApprovalClientConfig, type SourceApprovalClientConfig } from './source-approval-client.js'
+import { Ed25519ApprovalAuthority } from './approval.js'
+import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { awaitSourceSignal, inspectSourceContext, type SourceInspection } from './source-context.js'
-import { inheritedEnvironment, loadTrustConfig } from './trust.js'
+import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.js'
 import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
 import { registerPluginControlTools } from './tools.js'
 import { SourceJobRuntime, validateSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
@@ -37,6 +39,8 @@ export interface Config {
   sourceBuild?: SourceBuildConfig
   /** Explicit, expiring Host authority for work that outlives a model wake. */
   sourceJobs?: SourceJobsConfig
+  /** Optional finite owner authority; only approves prepared task-bound source, never deploys it. */
+  sourceApprovals?: SourceApprovalClientConfig
   /** Explicit owner-only observation channel; no signing or activation authority. */
   runtimeObserver?: RuntimeObserverConfig
   /** Owner-pinned finite native replay; separate from the read-only observer. */
@@ -47,6 +51,7 @@ const schema = Schema.object({
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   sourceBuild: Schema.any(),
   sourceJobs: Schema.any(),
+  sourceApprovals: Schema.any(),
   runtimeObserver: Schema.any(),
   replayEndpoint: Schema.any(),
 }) as Schema<Config>
@@ -69,12 +74,13 @@ async function canonicalTarget(dshHome: string, profile: string): Promise<Plugin
 
 export class PluginControlPlaneService extends Service {
   static Config = schema
-  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver' | 'replayEndpoint'>
+  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'runtimeObserver' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'runtimeObserver' | 'replayEndpoint'>
   private readonly store: ControlPlaneStore
   private readonly taskGaps: OwnerTaskFailureGaps
   private readonly abort = new AbortController()
   private readonly sourceBuilds = new Set<Promise<unknown>>()
   private readonly sourceInspections = new Set<Promise<unknown>>()
+  private readonly sourceApprovalFlights = new Set<Promise<unknown>>()
   private sourceRuntime: SourceJobRuntime | undefined
   private readonly sourceRuntimes = new Set<SourceJobRuntime>()
 
@@ -92,6 +98,7 @@ export class PluginControlPlaneService extends Service {
         finally { observerKey.fill(0); replayKey.fill(0) }
       }
     }
+    if (this.config.sourceApprovals !== undefined) validateSourceApprovalClientConfig(this.config.sourceApprovals)
     if (this.config.sourceBuild !== undefined) validateSourceBuildConfig(this.config.sourceBuild)
     if (this.config.sourceJobs !== undefined) {
       validateSourceJobsConfig(this.config.sourceJobs, this.config.sourceBuild)
@@ -110,13 +117,13 @@ export class PluginControlPlaneService extends Service {
     ctx.effect(() => async () => {
       this.abort.abort()
       await Promise.allSettled([...this.sourceRuntimes].map(runtime => runtime.close()))
-      await Promise.allSettled([...this.sourceBuilds, ...this.sourceInspections])
+      await Promise.allSettled([...this.sourceBuilds, ...this.sourceInspections, ...this.sourceApprovalFlights])
       this.store.close()
     }, 'plugin-control-plane.store')
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
     if (this.config.runtimeObserver !== undefined) installRuntimeObserver(ctx, this.config.runtimeObserver)
     if (this.config.replayEndpoint !== undefined) installReplayEndpoint(ctx, this.config.replayEndpoint)
-    if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never], jobsCtx => {
+    if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never, ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : [])], jobsCtx => {
       jobsCtx.effect(() => {
         const current = <K extends keyof SourceJobPorts>(key: K): SourceJobPorts[K] => jobsCtx.get((key === 'automations' ? 'assistantAutomations' : 'assistantDelivery') as never) as unknown as SourceJobPorts[K]
         for (const method of ['registerHostExecutor', 'reconcileSystem', 'inspectSystemOwnedActivation', 'inspectSystemOwned'] as const) {
@@ -133,6 +140,10 @@ export class PluginControlPlaneService extends Service {
             },
             delivery: { validateOwnerRoute: request => current('delivery').validateOwnerRoute(request) },
           }, withGapSourceFence: (gapId, owner, callback) => this.taskGaps.withCurrent(gapId, owner, callback),
+          ...(this.config.sourceApprovals ? { approvePrepared: async (job: SourceJobRecord, signal: AbortSignal) => {
+            if (!job.planId) throw new Error('source job has no prepared plan')
+            await this.requestOwnerSourceApproval({ planId: job.planId, signal, expectedTrustDigest: job.intent.trustDigest })
+          } } : {}),
           trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent),
         })
         runtime.start()
@@ -166,6 +177,40 @@ export class PluginControlPlaneService extends Service {
   recordOwnerTaskFailureGap = (source: OwnerForegroundLearningTask): StoredCapabilityGap => {
     this.abort.signal.throwIfAborted()
     return this.taskGaps.record(source)
+  }
+
+  /** Host-only idempotent approval under a preconfigured finite authority. */
+  requestOwnerSourceApproval = async (input: { planId: string; signal?: AbortSignal; expectedTrustDigest?: string }): Promise<PluginSourcePlan> => {
+    this.abort.signal.throwIfAborted()
+    const config = this.config.sourceApprovals
+    if (!config) throw new Error('plugin-control-plane: source approval authority unavailable')
+    const signal = AbortSignal.any([this.abort.signal, ...(input.signal ? [input.signal] : [])])
+    const operation = (async () => {
+      const plan = this.store.getSourcePlan(input.planId)
+      const source = this.store.getOwnerTaskFailureReference(plan.gapId)
+      if (!source || plan.mode !== 'modify' || !plan.sourceCheck || !plan.preparedEvidence) throw new Error('source approval requires a prepared owner task repair')
+      signal.throwIfAborted()
+      this.taskGaps.withCurrent(plan.gapId, source.owner, () => {})
+      if (plan.status === 'approved') return plan
+      if (plan.status !== 'pending-approval') throw new Error('source plan is not pending approval')
+      const trust = await this.boundTrust()
+      if (input.expectedTrustDigest !== undefined && controlPlaneDigest(trust) !== input.expectedTrustDigest) throw new Error('source job approval trust changed')
+      const receipt = await requestSourceApproval(config, { protocol: 'dsh-source-approval/v1', planId: plan.id,
+        planDigest: plan.digest, sourceReferenceDigest: controlPlaneDigest(source) }, signal)
+      signal.throwIfAborted()
+      if (controlPlaneDigest(await this.boundTrust()) !== controlPlaneDigest(trust)) throw new Error('source approval trust changed')
+      const key = resolveTrustKey(trust, 'approval', receipt.authority, receipt.keyId)
+      const result = await this.store.approveSource({ planId: plan.id, expectedRevision: plan.revision, receipt,
+        resolveAuthority: () => new Ed25519ApprovalAuthority(key.publicKeyPem, key.authority, key.keyId),
+        idempotencyKey: `source-authority:${plan.id}`, withSourceFence: callback => {
+          signal.throwIfAborted()
+          return this.taskGaps.withCurrent(plan.gapId, source.owner, callback)
+        } })
+      return result.result
+    })()
+    // The child has a bounded timeout and is drained before the store closes.
+    this.sourceApprovalFlights.add(operation)
+    try { return await operation } finally { this.sourceApprovalFlights.delete(operation) }
   }
 
   recordGap(input: CapabilityGapInput): StoredCapabilityGap { return this.store.recordGap(input) }

@@ -238,9 +238,66 @@ sourceJobs:
 
 重启重接尚未 claim 的任务；已 claim 的任务转为 `unknown`，保留资源槽且不自动重跑。状态回读、入队和启动时核对 Automations 的精确生产终态，将预算/Policy 等在 executor 前发生的终结写回 `failed`。Host-only `reconcileSourceJob({id, owner})` 可对 `unknown` 进行资源核对：按容器标签、镜像、ID 删除并证明不存在，验证 worktree 的 Git 注册、base 和仓库归属后删除。归属不明、daemon 不可达或残留路径未注册时保留 `unknown`，需要 operator 检查；同一 route/principal record/version/workspace/preset 的新会话绑定仍可查看和清理旧任务；执行继续要求原完整回执精确匹配。该方法不暴露给模型，也不重跑候选。每个 statePath 使用单一控制面 Host 实例。
 
-这些能力只准备待审批提案。工程层 native scheduler/Policy/SQLite 集成测试不等于真实模型执行整仓修复或生产发布验收。
+默认只准备待审批提案；配置下述有限审批后，真实 owner 失败来源的持久作业可继续审批。工程层 native scheduler/Policy/SQLite 集成测试不等于真实模型执行整仓修复或生产发布验收。
 
-成功准备返回 `pending-approval`，不会自动发布。owner 按已有签名审批流程处理后，用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest，才能进入人工 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
+成功准备返回 `pending-approval`，不会自动发布。普通 gap 可用已有签名审批流程；owner 任务来源必须通过 Host 当前来源 fence 审批，离线 CLI 签名本身不能代替该校验。审批后，用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest，才能进入人工 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
+
+### 普通任务修复的有限审批
+
+可选 `sourceApprovals` 将持久 `sourceJobs` 的准备结果接到 owner 配置的有限签名器：
+
+```yaml
+sourceApprovals:
+  executable:
+    path: /opt/dsh/control-plane/bin/dsh-source-approval-authority.js
+    sha256: <wrapper-sha256>
+  interpreter:
+    path: /opt/node/bin/node
+    sha256: <node-sha256>
+  configPath: /private/owner/source-approval.json
+  timeoutMs: 10000
+```
+
+签名器配置示例（所有占位符须替换；配置、私钥、账本及其父目录由 owner 私有持有；仓库可为不可被其他用户写入的 0755 目录）：
+
+```json
+{
+  "schemaVersion": 1,
+  "authority": "owner-source",
+  "keyId": "source-key",
+  "keyPath": "/private/owner/source-key.pem",
+  "statePath": "/private/owner/source-approval.sqlite",
+  "controlDatabasePath": "/private/dsh/control/control.sqlite",
+  "grant": {
+    "id": "tool-repair-1",
+    "expiresAt": 1800000000000,
+    "maxApprovals": 5,
+    "repository": "/work/dsh-enhanced",
+    "worktreeRoot": "/private/dsh/control/source-worktrees",
+    "owner": {
+      "authorityId": "<delivery-route>",
+      "authorityHash": "<route-sha256>",
+      "principalId": "<owner>",
+      "principalRecordId": "<principal-record>",
+      "principalVersion": 1,
+      "workspace": "/work/user",
+      "agentPreset": "primary"
+    },
+    "plugins": ["personal-memory"],
+    "maxChangedFiles": 4,
+    "maxChangedBytes": 65536,
+    "receiptTtlMs": 60000
+  }
+}
+```
+
+在 Control Plane trust 的 `approvalKeys` 登记对应 Ed25519 公钥；该 key 不用于 release authorization、发布或 Host attestation。owner 字段取实际 Delivery 回执，不由模型生成。grant id 的配置与 key 指纹不可变，额度和已签回执落入独立 SQLite；重启及同一请求重试不重置额度、不延长签名期限。
+
+签名器只读 schema 16 控制面库，重新验证完整来源摘要、owner、期限、仓库及 worktree 归属、检查证据和当前 tree/patch。只允许白名单非保护插件 `src/` 下的普通 `.ts/.js/.mts/.mjs` 源文件修改；测试目录、manifest、脚本、lockfile 和保护插件不在授权范围。工程检查证据不构成业务目标达成证明。
+
+持久作业在 `prepared` 落账后调用审批，Host 在验签后以 Delivery/Evaluation 当前来源 writer fence 提交 `approved`。纠正、撤回、身份/会话换代、取消或 trust 变化均阻止提交。审批失败保留 pending 计划和已完成构建；重启恢复最多 1000 个 pending 的 owner 作业，仍核对原 sourceJobs 授权和 owner，只重试审批。单次 helper 至多 10 秒；卸载会等待子进程清理并丢弃迟到结果。Host 可调用 `requestOwnerSourceApproval({planId, signal?})` 显式重试；该方法不暴露为模型工具。inline 准备仍只返回 pending。
+
+此客户端要求 Linux `/proc`；wrapper 和 Node 均须是 canonical 路径、可执行且只有一个硬链接的 owner/root 文件，不能由其他用户写入。按文件描述符固定两者字节；完整已安装库仍须由 owner 控制，wrapper hash 不覆盖导入库。子进程是执行和清理边界，同 UID 运行不构成私钥隔离；若模型可任意执行 Host 代码，应将签名器置于独立身份边界，通过 owner 固定的代理执行文件调用。签名器不执行候选源码。审批完成只进入 `approved`；后续精确 artifact 验证、采用和观察/回滚仍走各自授权链路。
 
 单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 16 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
@@ -273,7 +330,7 @@ Host-only `recordOwnerTaskFailureGap(source)` 将经 Delivery 再验证的 foreg
 
 ## 权限
 
-- 插件 Host service：读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceBuild`/`sourceJobs` 时创建隔离 worktree 并调用 owner 配置的离线容器构建。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。
+- 插件 Host service：启用 `sourceApprovals` 时执行固定的 owner helper（可读其配置、私钥和私有审批账本），Host 只消费签名回执；读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceBuild`/`sourceJobs` 时创建隔离 worktree 并调用 owner 配置的离线容器构建。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。
 - owner CLI `activate`：读取/复制/rename/恢复 DSH profile，并执行固定 DSH executable。
 - owner CLI `probe`：执行固定 Host attestor，只有严格 allowlist 环境；不读取 attestation 私钥，不使用 shell或网络客户端。
 - owner CLI `scaffold`：仅在审批绑定的 linked worktree 中运行固定边界内的 `git` / `pnpm`。
