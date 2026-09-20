@@ -198,7 +198,7 @@ config schema 1 selects reload, schema 2 readiness, and schema 3 physical
 rollback. It now requires Host request schema 2 with an immutable predecessor
 receipt binding. Readiness independently matches that binding against the
 signer's retained signed reload. Signed receipt schema 2 and Control Plane
-database schema 15 introduced physical rollback; schema 16 retains that contract.
+database schema 15 introduced physical rollback; schema 17 retains that contract.
 
 Normal phase requests bind the previous passed/applied receipt in the same
 activation/fence, including its full signed digest and Host generation. The
@@ -214,6 +214,10 @@ supersession, restart, failed-receipt identity checks, actual observer queries,
 signed reload/readiness, and physical recovery. Stable authenticated inactive
 entries produce failed readiness; identity/authentication failures remain
 unsigned, and a cached failure cannot become success.
+
+### Post-activation physical rollback (Control Plane schema 17)
+
+Schema 17 retains installed core-file checkpoints and target deployment ordering. Signed post-activation regression or owner retraction can enter the existing physical rollback lifecycle, preserving the original activation receipt. The latest successful deployment retains its previous profile; superseded backups are retired only after a successor succeeds. Legacy terminal plans have no synthesized checkpoint and cannot use this automatic path. Upgrade checks cover v16 migration, current/backup core-file drift, target supersession and ABA, restart during restoration, signed Host recovery, and replay of the original observation. The source approval helper must use the same schema-compatible package build.
 
 ### Owner task failure gaps (Control Plane schema 16)
 

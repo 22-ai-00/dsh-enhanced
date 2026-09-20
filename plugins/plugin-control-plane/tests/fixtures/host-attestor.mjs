@@ -40,12 +40,13 @@ if (existsSync(cachePath)) {
 const observations = JSON.parse(readFileSync(join(root, 'observations.json'), 'utf8'))
 const mode = process.env.HOST_ATTESTOR_MODE ?? 'passed'
 const generationPath = join(root, 'host-generation')
-const priorGeneration = existsSync(generationPath) ? Number(readFileSync(generationPath, 'utf8')) : request.requirements.previousHostGeneration ?? 0
+const priorGeneration = Math.max(existsSync(generationPath) ? Number(readFileSync(generationPath, 'utf8')) : 0,
+  request.requirements.previousHostGeneration ?? 0)
 const operationGenerationPath = join(root, `${request.operationId}.generation`)
-const hostGeneration = request.phase === 'reload'
+const hostGeneration = request.phase === 'reload' || request.phase === 'rollback'
   ? existsSync(operationGenerationPath) ? Number(readFileSync(operationGenerationPath, 'utf8')) : priorGeneration + 1
   : priorGeneration
-if (request.phase === 'reload') {
+if (request.phase === 'reload' || request.phase === 'rollback') {
   if (!existsSync(operationGenerationPath)) writeFileSync(operationGenerationPath, String(hostGeneration), { mode: 0o600, flag: 'wx' })
   writeFileSync(generationPath, String(Math.max(priorGeneration, hostGeneration)), { mode: 0o600 })
 }
@@ -68,6 +69,14 @@ else if (request.phase === 'canary') {
   const soak = { ...observations.soak, windowStartedAt: request.requestedAt,
     windowEndedAt: request.requestedAt + request.requirements.minimumWindowMs }
   evidence = { kind: 'soak', ...soak, traceDigest: digest(soak) }
+}
+else if (request.phase === 'rollback') {
+  const files = request.requirements.baselineFiles
+  const profileRestored = request.requirements.action === 'stop' ? !existsSync(request.profile.path)
+    : files.every(file => file.sha256 === null ? !existsSync(file.path)
+      : existsSync(file.path) && createHash('sha256').update(readFileSync(file.path)).digest('hex') === file.sha256)
+  evidence = { kind: 'rollback', action: request.requirements.action, previousHostGeneration: request.requirements.previousHostGeneration,
+    currentHostGeneration: hostGeneration, checks: 1, failures: profileRestored ? 0 : 1, profileRestored, probeDigest: digest(files) }
 }
 else evidence = { kind: 'health', ...observations.health, probeDigest: digest(observations.health) }
 
@@ -105,4 +114,5 @@ const receipt = { ...unsigned, signature }
 const temporary = `${cachePath}.tmp-${process.pid}`
 writeFileSync(temporary, JSON.stringify({ requestDigest, receipt }), { mode: 0o600 })
 renameSync(temporary, cachePath)
+if (mode === 'lost-reply' && request.phase === 'rollback') process.exit(70)
 process.stdout.write(`${JSON.stringify(receipt)}\n`)

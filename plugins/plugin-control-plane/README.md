@@ -160,7 +160,7 @@ phase operation 在子进程启动前持久化。子进程执行期间持有 SQL
 
 每类 evidence 还带有探针/回放/trace digest。Control Plane 验证签名、结构、请求绑定、TTL 和 policy 阈值；它不会假装自己能独立观察部署。真正的 reload、流量、effect interception 和健康观测由 owner/deployment-controlled attestor 实现，并由其私钥为声明负责。测试目录中的 fixture attestor 只用于真实子进程集成测试，不进入发布包，也不是生产探针。
 
-任一有效签名 receipt 返回 `outcome: failed` 时，计划进入 fenced `rollback-pending` 并自动恢复原 profile；一旦进入过 `awaiting-reload`，恢复文件后仍保持 pending，必须由绑定原始 baseline 的 `rollback` 签名回执证明旧 Host 就绪或原本不存在的 profile 已停服，才能结束回退。只有七个部署 phase 全部通过，backup 清理和终态 CAS 完成后才是 `activated`。格式错误、错误 key/digest/phase/evidence、过期 receipt 或未配置 attestor 都保持当前 awaiting 状态。
+任一有效签名 receipt 返回 `outcome: failed` 时，计划进入 fenced `rollback-pending` 并自动恢复原 profile；一旦进入过 `awaiting-reload`，恢复文件后仍保持 pending，必须由绑定原始 baseline 的 `rollback` 签名回执证明旧 Host 就绪或原本不存在的 profile 已停服，才能结束回退。只有七个部署 phase 全部通过、保存已安装 profile 的核心文件摘要并完成终态 CAS 后才是 `activated`；上一版 backup 保留供使用后回退。格式错误、错误 key/digest/phase/evidence、过期 receipt 或未配置 attestor 都保持当前 awaiting 状态。
 
 ## 人工 Host attestation
 
@@ -181,6 +181,14 @@ dsh-plugin-control attest \
 ```
 
 人工路径使用相同 operation、evidence validator、Ed25519 verifier 和 CAS，不是弱化旁路。旧的 schema-v1 `evidenceDigest`-only Host receipt 会被拒绝，因为它不能证明 phase 语义。
+
+## 使用后的退化与物理回退
+
+`watch-observe --receipt <file>` 接受 Host 签名的精确版本观察；healthy 仅记账，regressed 会恢复上一版；同一运行中的 Host 可连续提交不同的签名观察，无需为每次观察重启。`watch-retract --receipt <file>` 接受 owner 签名的撤回并走同一恢复路径。两者输出保留 watch 操作回执，另外返回当前 `activation`。配置了 Host attestor 时，命令继续调用既有 `rollback` phase；只有签名回执证明旧 Host 恢复就绪（或原 profile 不存在时已停服），计划才成为 `rolled-back`。未配置签名器时保留 `rollback-pending`，可通过 `host-request`/`attest` 完成。
+
+schema 17 在成功启用前保存 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 的摘要，恢复前同时核对当前版与保留的原版核心文件。核心文件漂移、较新的部署已生效、目标存在进行中的部署或旧计划缺少恢复检查点时，拒绝覆盖。摘要不是整个目录的不可变证明，也不替代进程、凭据与文件写权限隔离。回退按 rename 分步恢复；相同签名触发可在重启后继续，未知的 Host 外部操作仍须原有对账，不创建新 operation 绕过。
+
+成功部署保留自己的上一版备份，并清理同一目标已被它取代的旧备份；新部署失败不会提前删除旧备份。最初的 `activated` 回执保留，后续回退另存终态记录。迁移不为历史部署捏造备份或摘要。此入口接收可信签名观察；普通用户任务的版本归因、自动观察签发和候选自动采用仍需接线。
 
 ## 源码能力 lane 和边界
 
@@ -293,13 +301,13 @@ sourceApprovals:
 
 在 Control Plane trust 的 `approvalKeys` 登记对应 Ed25519 公钥；该 key 不用于 release authorization、发布或 Host attestation。owner 字段取实际 Delivery 回执，不由模型生成。grant id 的配置与 key 指纹不可变，额度和已签回执落入独立 SQLite；重启及同一请求重试不重置额度、不延长签名期限。
 
-签名器只读 schema 16 控制面库，重新验证完整来源摘要、owner、期限、仓库及 worktree 归属、检查证据和当前 tree/patch。只允许白名单非保护插件 `src/` 下的普通 `.ts/.js/.mts/.mjs` 源文件修改；测试目录、manifest、脚本、lockfile 和保护插件不在授权范围。工程检查证据不构成业务目标达成证明。
+签名器只读当前 schema 17 控制面库，重新验证完整来源摘要、owner、期限、仓库及 worktree 归属、检查证据和当前 tree/patch。只允许白名单非保护插件 `src/` 下的普通 `.ts/.js/.mts/.mjs` 源文件修改；测试目录、manifest、脚本、lockfile 和保护插件不在授权范围。工程检查证据不构成业务目标达成证明。
 
 持久作业在 `prepared` 落账后调用审批，Host 在验签后以 Delivery/Evaluation 当前来源 writer fence 提交 `approved`。纠正、撤回、身份/会话换代、取消或 trust 变化均阻止提交。审批失败保留 pending 计划和已完成构建；重启恢复最多 1000 个 pending 的 owner 作业，仍核对原 sourceJobs 授权和 owner，只重试审批。单次 helper 至多 10 秒；卸载会等待子进程清理并丢弃迟到结果。Host 可调用 `requestOwnerSourceApproval({planId, signal?})` 显式重试；该方法不暴露为模型工具。inline 准备仍只返回 pending。
 
 此客户端要求 Linux `/proc`；wrapper 和 Node 均须是 canonical 路径、可执行且只有一个硬链接的 owner/root 文件，不能由其他用户写入。按文件描述符固定两者字节；完整已安装库仍须由 owner 控制，wrapper hash 不覆盖导入库。子进程是执行和清理边界，同 UID 运行不构成私钥隔离；若模型可任意执行 Host 代码，应将签名器置于独立身份边界，通过 owner 固定的代理执行文件调用。签名器不执行候选源码。审批完成只进入 `approved`；后续精确 artifact 验证、采用和观察/回滚仍走各自授权链路。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 16 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 17 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 owner 可以用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。publish 超时等不确定结果必须先进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。
 
