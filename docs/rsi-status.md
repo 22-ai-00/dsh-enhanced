@@ -55,6 +55,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。本批 `pnpm check` 退出 0：6,070 项通过、44 项跳过、35 个包的 dry-run pack（32 个插件、3 个共享库）。回放端点/账本/运行时定向 28 项通过；这些是工程验证，不是生产自治完成证明。
+- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。代码基线 `cd7bbce` 的 `pnpm check` 退出 0：6,070 项通过、44 项跳过、35 个包的 dry-run pack（32 个插件、3 个共享库）。回放端点/账本/运行时定向 28 项通过；这些是工程验证，不是生产自治完成证明。
+- 同一代码提交的 [GitHub CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35487013866) 已于 2026-09-20 完成：Linux、macOS 仓库检查与 Windows ACP smoke 均通过。该结论只绑定 `cd7bbce`，后续提交须核对各自 CI。
 
 原始运行 JSON、日志和临时身份留本地或 CI artifacts，仓库只保留命令、结论和限制。确需供可重复探针使用的固定输入留在 `scripts/e2e/fixtures/`，不从本次网络结果反推预期值。

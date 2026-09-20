@@ -1,9 +1,11 @@
 # CLIProxyAPI 对两个 provider 插件的第一手证据复核
 
+> 历史研究，事实截点为 2026-08-18。以下优先级和本地源码分析保留当时的设计依据；当前实现以 [Coding provider](../plugins/coding-subscription-provider/README.md) 和 [TraeX provider](../plugins/traex-acp-provider/README.md) 的 README 为准。
+
 ## 范围与复核基线
 
 - CLIProxyAPI 锁定在 2026-08-18 的提交 [`d3a5988fc07d96f90cb1c2e3b2b7dfb9c2a310e0`](https://github.com/router-for-me/CLIProxyAPI/tree/d3a5988fc07d96f90cb1c2e3b2b7dfb9c2a310e0)。以下外部链接全部固定到该提交，避免分支后续变化污染结论。
-- 本项目按当前工作区快照复核；两个目标插件已由提交 `4ceacf7` 纳入仓库。本文用本地相对路径和行号指向当前实现。
+- 本项目按研究时的工作区快照复核；两个目标插件当时已由提交 `4ceacf7` 纳入仓库。本地相对路径指向仍维护的文件，历史行号不作为当前实现位置的保证。
 - 证据只取 CLIProxyAPI 官方仓库与本仓库源码、测试和文档。重点是判断哪些机制可迁移，而不是比较两个项目的功能数量。
 
 ## 结论先行

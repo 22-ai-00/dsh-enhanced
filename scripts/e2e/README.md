@@ -1,4 +1,8 @@
-# Native Web owner browser regression
+# Integration probes
+
+These opt-in probes have separate prerequisites and evidence boundaries; they are not all run by `pnpm check`. Current project progress is maintained in [RSI status](../../docs/rsi-status.md). Raw results stay in ignored local directories or CI artifacts.
+
+## Native Web owner browser regression
 
 Run from the repository root after `CI=true pnpm build`, with DSH `0.1.2-rc.1` on PATH and a Playwright Chromium installation:
 
@@ -365,3 +369,16 @@ Build the workspace first (`pnpm build`). The script uses the existing `super-re
 One wake permits at most 12 model calls, 20 tool calls, 4,096 output tokens per request, and 240 seconds. It provides a broken synthetic clamp plugin in a temporary Git repository, a fixture owner route and empty history, and a one-wake Policy budget. The actual Growth Driver's seven-tool surface lets the real model inspect the committed source and propose one patch; the production Control Plane runs offline Docker checks and persists a pending plan. Assertions compare read/plan base commits, model patch, successful check/pack evidence, SQLite pending state, and unchanged original source. The temporary Context and repository are disposed on exit.
 
 This proves a real-model source-proposal path on one synthetic task. Owner authentication/history and the tool-approval channel are fixtures; it does not prove general repository repair, owner approval, registry publication, production activation, or sustained RSI benefit. Successful local evidence: 2026-09-19 day1 run.
+
+For the durable source-job probe against a frozen real repository, including the Day1 personal-memory candidate and separate Host check, use [Real model → durable source check](../../docs/live-durable-source-proposal.md).
+
+## Authenticated replay on a real DSH Host
+
+After `pnpm build`, on Linux with a working systemd user manager:
+
+```sh
+DSH_REPLAY_FIXTURE=1 DSH_REPLAY_DSH=/absolute/path/to/dsh \
+  node scripts/e2e/replay-endpoint-real-dsh.mjs --output /tmp/replay-host.json
+```
+
+The probe creates temporary Hosts and exercises authenticated replay, completion caching, restart invalidation and crash recovery without duplicate dispatch. It was verified with CLI `0.1.5-rc.2`; it does not call a model or activate a production profile. Native tool/Delivery blocking does not establish global zero external effects or an independent signed activation receipt. Prerequisites, cleanup and evidence limits are documented in [effect-blocked replay](../../docs/effect-blocked-replay.md).
