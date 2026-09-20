@@ -67,7 +67,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 自动 Growth 消费者通过独立复核：整包 80 项通过，包括原生 Automations→原生 AgentLoop 本地模型适配器、来源模型冻结、缺模型不猜、重启/去重、纠正/撤回、预算拒绝、背压和卸载 drain；Delivery 最终请求模型、切换/续写及迁移等定向 9 项通过。类型检查、构建、lint、manifest 和 Growth dry-run pack 通过。本批全仓 `pnpm check` 尚待确认；定向测试不证明完整自我修复/采用已交付。
+- 自动 Growth 消费者通过独立复核：整包 80 项通过，包括原生 Automations→原生 AgentLoop 本地模型适配器、来源模型冻结、缺模型不猜、重启/去重、纠正/撤回、预算拒绝、背压和卸载 drain；Delivery 最终请求模型、切换/续写及迁移等定向 9 项通过。类型检查、构建、lint、manifest 和 Growth dry-run pack 通过。本批全仓 `pnpm check` 在 Evaluation 的 4 个旧版本迁移测试处停止：降级 fixture 误留 v12 专用反馈索引外键，已修正；Evaluation 整包 344 项通过、10 项跳过，类型与 lint 通过。完整门禁仍待重跑；这些检查不证明自我修复/采用已交付。
 - 可信结果增量读取与 owner 来源关联通过独立复核：Evaluation feed/writer-fence 9 项、Delivery 实际反馈修订与身份换代集成 1 项通过；Delivery owner-route 34 项通过，两包类型检查/构建、相关 lint 与 manifest 校验通过。覆盖 v11→v12 数据保留、重启、跨连接分页更新及撤回；未调用真实模型，尚未验证自动修复/采用闭环，也未重跑全仓门禁。
 - 本次模型继承改动通过独立复核：Growth 68 项、Delivery owner-route 34 项、Skills 410 项通过（11 项跳过）；三包类型检查与构建通过，相关 lint、manifest 校验和 Growth dry-run pack 通过。未调用真实模型，未重跑全仓检查；普通使用触发与真实跨重启 Repair Agent 验收仍待接通。最近一次全仓 `pnpm check` 是此前回合时间能力的基线：6,135 项通过、50 项跳过、35 个包 dry-run pack 通过；该结果不替代本次最终交付前的全仓门禁。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
