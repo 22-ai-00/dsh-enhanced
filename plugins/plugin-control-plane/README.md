@@ -282,4 +282,6 @@ adapter 的 stdout 只有一个签名 JSON receipt，stderr 不打印 request �
 
 Host 可显式使用 `EffectBlockedReplayRuntime`，复用当前 Loader、ToolRuntime 和 Delivery，消费专用原生 AgentHandle。固定有限 case 经原生单向 guard 阻止工具 body，或经真实 Delivery reply 准入阻止 Outbox 写入；逐次记录调用摘要，持续核对候选和服务 Fiber 代次，回收 Agent 后才返回。它不调用模型，不自动启用，也不增加模型工具。
 
-这是未签名的进程内观察组件，不能单独推进启用状态。调用者负责可信 case/请求配置，外部签名器、持久操作恢复和独立副作用读回仍需后续接线。权限限于读取 owner observer 配置所需路径/密钥、当前 Loader 状态、原生工具管线与 Delivery 方法；原生钩子本身仍有 Host 权限，组件不提供 OS/网络隔离。完整生命周期、边界及示例见[组件契约](../../docs/effect-blocked-replay.md)。
+可选 `replayEndpoint` 将 owner 固定请求和用例接入独立 HMAC Unix socket；客户端只可执行或查询该操作。SQLite 在创建原生 Agent 前持久准入，未知结果不重跑，缓存结果重验当前 Loader/Fiber；实例重建后返回 stale。配置、状态目录、socket 与 32 字节密钥都由 owner 管理，观测通道与执行通道使用不同密钥。
+
+这是未签名的观察组件，不能单独推进启用状态。外部签名器、未知操作的外部对账和独立副作用读回仍需后续接线。权限包括 owner 配置路径/密钥读取、私有 journal 写入、Unix socket、当前 Loader 状态、原生 Agent 创建/回收、工具管线与 Delivery 方法；原生钩子仍有 Host 权限，组件不提供 OS/网络隔离。完整生命周期、边界及示例见[组件契约](../../docs/effect-blocked-replay.md)。
