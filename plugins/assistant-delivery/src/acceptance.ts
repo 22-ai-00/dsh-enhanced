@@ -25,4 +25,6 @@ export interface AcceptedExecution {
   readonly quiescent: boolean
   readonly completedAt: number
   readonly executionRef: string
+  readonly modelSelectionState: 'missing' | 'frozen' | 'inconsistent'
+  readonly modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }>
 }

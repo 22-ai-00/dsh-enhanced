@@ -413,7 +413,7 @@ export interface OwnerForegroundLearningTask {
   readonly canonical: TrustedTaskLearningProjectionReceipt
   readonly judgement: 'independent-verifier' | 'owner-feedback' | 'unresolved'
   readonly ownerRevision?: Readonly<{ version: number; action: 'initial' | 'correct' | 'withdraw' }>
-  readonly source: Readonly<{ sessionId: string; inboxId: string; objective: string; truncated: boolean }>
+  readonly source: Readonly<{ sessionId: string; inboxId: string; objective: string; truncated: boolean; quiescent: boolean; modelSelectionState: 'missing' | 'frozen' | 'inconsistent'; modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }> }>
 }
 
 export interface Config {
@@ -1128,6 +1128,7 @@ export class AssistantDeliveryService extends Service {
         maxTextBytes: config.maxTextBytes,
         prepareForegroundTaskAcceptance: (binding, envelope) => this.prepareForegroundTaskAcceptance(binding, envelope),
         completeForegroundTaskAcceptance: (handle, input) => this.completeForegroundTaskAcceptance(handle, input),
+        recordForegroundTaskModelSelection: (handle, input) => this.deliveryStore.recordForegroundTaskModelSelection({ contractId: handle.contractId, ...input }),
         modelPickerTtlMs: config.modelPickerTtlMs,
         permissionPickerTtlMs: config.permissionPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
@@ -4468,7 +4469,8 @@ export class AssistantDeliveryService extends Service {
     return Object.freeze({ protocol: 'assistant-delivery/owner-foreground-learning/v1', owner, canonical, judgement,
       ...(ownerRevision === undefined ? {} : { ownerRevision }),
       source: Object.freeze({ sessionId: binding.sessionId, inboxId: inbox.id,
-        objective: objectiveText.slice(0, 4096), truncated: objectiveText.length > 4096 }) })
+        objective: objectiveText.slice(0, 4096), truncated: objectiveText.length > 4096, quiescent: execution.quiescent,
+        modelSelectionState: execution.modelSelectionState, ...(execution.modelSelection === undefined ? {} : { modelSelection: execution.modelSelection }) }) })
   }
 
   /**

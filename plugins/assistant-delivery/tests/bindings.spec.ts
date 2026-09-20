@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DeliveryStore } from '../src/store.ts'
 import type { ConversationRef, ExternalPrincipalKey } from '../src/types.ts'
@@ -113,26 +114,90 @@ describe('conversation bindings', () => {
     }
     store.bindForegroundTaskAcceptance({ inboxId: inbox.id, contractId: contract.id, contractDigest: contract.digest,
       scope: contract.scope, owner: contract.owner, binding, dispatchedAt: 1_000 })
+    expect(store.inspectForegroundAcceptedExecution(contract)).toBeNull()
+    store.recordForegroundTaskModelSelection({ contractId: contract.id, provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' })
+    store.recordForegroundTaskModelSelection({ contractId: contract.id, provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' })
     expect(() => store.bindForegroundTaskAcceptance({ inboxId: inbox.id, contractId: contract.id,
       contractDigest: 'b'.repeat(64), scope: contract.scope, owner: contract.owner, binding, dispatchedAt: 1_000 }))
       .toThrowError(expect.objectContaining({ code: 'idempotency-conflict' }))
     store.finishForegroundTaskAcceptance({ contractId: contract.id, status: 'succeeded', quiescent: true, completedAt: 1_001 })
     expect(store.inspectForegroundAcceptedExecution(contract)).toEqual(expect.objectContaining({
       contractId: contract.id, dispatchedAt: 1_000, status: 'succeeded', quiescent: true, executionRef: inbox.id,
+      modelSelectionState: 'frozen', modelSelection: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' },
     }))
+    expect(() => store.recordForegroundTaskModelSelection({ contractId: contract.id,
+      provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' })).toThrowError(expect.objectContaining({ code: 'conflict' }))
     expect(store.inspectForegroundAcceptedExecutionForOwner({
       inboxId: inbox.id, scope: contract.scope, owner: contract.owner, bindingId: binding.id,
     })).toEqual(expect.objectContaining({ contractId: contract.id, executionRef: inbox.id }))
     expect(store.inspectForegroundAcceptedExecutionForOwner({
       inboxId: inbox.id, scope: contract.scope, owner: { ...contract.owner, principalVersion: contract.owner.principalVersion + 1 }, bindingId: binding.id,
     })).toBeNull()
+    store.finishInbox({ inboxId: claim.record.id, ownerId: 'test-owner', fencingToken: claim.fencingToken, outcome: 'processed' })
+    const legacyInbox = store.acceptInbound({ channel: 'lark', account: 'bot-1', eventId: 'evt-acceptance-missing-route', occurredAt: 2,
+      principal, conversation, kind: 'text', text: 'legacy route unavailable' }).record
+    store.queueInbox(legacyInbox.id, binding.id)
+    const legacyClaim = store.claimInbox({ ownerId: 'test-owner-legacy', leaseMs: 10_000, limit: 1, maxAttempts: 3 })[0]
+    expect(legacyClaim?.record.id).toBe(legacyInbox.id)
+    const legacyContract = { ...contract, id: 'contract-foreground-missing-route', digest: 'c'.repeat(64),
+      task: { kind: 'foreground-turn' as const, ref: legacyInbox.id } }
+    store.bindForegroundTaskAcceptance({ inboxId: legacyInbox.id, contractId: legacyContract.id,
+      contractDigest: legacyContract.digest, scope: legacyContract.scope, owner: legacyContract.owner, binding, dispatchedAt: 1_002 })
+    store.finishForegroundTaskAcceptance({ contractId: legacyContract.id, status: 'succeeded', quiescent: true, completedAt: 1_003 })
+    expect(store.inspectForegroundAcceptedExecution(legacyContract)).toEqual(expect.objectContaining({ modelSelectionState: 'missing' }))
+    expect(() => store.recordForegroundTaskModelSelection({ contractId: legacyContract.id, provider: 'provider-a', model: 'model-a' }))
+      .toThrowError(expect.objectContaining({ code: 'conflict' }))
     store.close()
 
     const reopened = new DeliveryStore({ path })
-    expect(reopened.inspectForegroundAcceptedExecution(contract)).toEqual(expect.objectContaining({ status: 'succeeded' }))
+    expect(reopened.inspectForegroundAcceptedExecution(contract)).toEqual(expect.objectContaining({ status: 'succeeded', modelSelection: { provider: 'provider-a', model: 'model-a', reasoningEffort: 'high' } }))
     expect(reopened.inspectForegroundAcceptedExecution({ ...contract, task: { kind: 'foreground-turn', ref: 'other' } })).toBeNull()
     reopened.close()
     void claim
+  })
+
+  test('keeps an accepted execution inconsistent after distinct live request routes', async () => {
+    const { store } = await fixture()
+    authorize(store)
+    const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'session-inconsistent', policyRef: 'owner-dm' })
+    const inbox = store.acceptInbound({ channel: 'lark', account: 'bot-1', eventId: 'evt-inconsistent', occurredAt: 1,
+      principal, conversation, kind: 'text', text: 'route consistency' }).record
+    store.queueInbox(inbox.id, binding.id)
+    store.claimInbox({ ownerId: 'test-owner', leaseMs: 10_000, limit: 1, maxAttempts: 3 })
+    const owner = store.getPrincipal(principal)!
+    const contract = { id: 'contract-inconsistent', digest: 'b'.repeat(64), scope: { workspace: '/work/alpha', preset: 'primary' },
+      owner: { principalRecordId: owner.id, principalVersion: owner.version }, task: { kind: 'foreground-turn' as const, ref: inbox.id }, objective: 'route consistency' }
+    store.bindForegroundTaskAcceptance({ inboxId: inbox.id, contractId: contract.id, contractDigest: contract.digest,
+      scope: contract.scope, owner: contract.owner, binding, dispatchedAt: 1 })
+    store.recordForegroundTaskModelSelection({ contractId: contract.id, provider: 'provider-a', model: 'model-a', reasoningEffort: 'low' })
+    store.recordForegroundTaskModelSelection({ contractId: contract.id, provider: 'provider-b', model: 'model-b', reasoningEffort: 'high' })
+    store.recordForegroundTaskModelSelection({ contractId: contract.id, provider: 'provider-a', model: 'model-a', reasoningEffort: 'low' })
+    store.finishForegroundTaskAcceptance({ contractId: contract.id, status: 'succeeded', quiescent: true, completedAt: 2 })
+    expect(store.inspectForegroundAcceptedExecution(contract)).toEqual(expect.objectContaining({ modelSelectionState: 'inconsistent' }))
+    expect(store.inspectForegroundAcceptedExecution(contract)?.modelSelection).toBeUndefined()
+    store.close()
+  })
+
+  test('migrates a v21 foreground acceptance table once and leaves legacy routes missing', async () => {
+    const { path, store } = await fixture()
+    store.close()
+    const database = new DatabaseSync(path)
+    try {
+      database.exec(`ALTER TABLE delivery_task_acceptance_executions DROP COLUMN model_reasoning_effort;
+        ALTER TABLE delivery_task_acceptance_executions DROP COLUMN model_id;
+        ALTER TABLE delivery_task_acceptance_executions DROP COLUMN model_provider;
+        ALTER TABLE delivery_task_acceptance_executions DROP COLUMN model_selection_state;
+        PRAGMA user_version = 21;`)
+    } finally { database.close() }
+    const migrated = new DeliveryStore({ path })
+    migrated.close()
+    const inspected = new DatabaseSync(path, { readOnly: true })
+    const columns = (inspected.prepare('PRAGMA table_info(delivery_task_acceptance_executions)').all() as Array<{ name: string }>)
+      .map(row => row.name)
+    expect(columns).toEqual(expect.arrayContaining(['model_selection_state', 'model_provider', 'model_id', 'model_reasoning_effort']))
+    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 22 })
+    inspected.close()
   })
 
   test('/new preserves old history and atomically increments generation', async () => {

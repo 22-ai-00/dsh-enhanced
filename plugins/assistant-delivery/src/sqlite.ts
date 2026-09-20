@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 21
+export const deliverySchemaVersion = 22
 
 const goalOutcomeTargetSchema = `
   CREATE TABLE IF NOT EXISTS delivery_goal_outcome_targets (
@@ -47,6 +47,27 @@ const sessionLeaseSchema = `
   ) STRICT;
 `
 
+const taskAcceptanceExecutionSchemaV21 = `
+  CREATE TABLE IF NOT EXISTS delivery_task_acceptance_executions (
+    inbox_id TEXT PRIMARY KEY REFERENCES inbox_messages(id),
+    contract_id TEXT NOT NULL UNIQUE,
+    contract_digest TEXT NOT NULL CHECK(length(contract_digest) = 64),
+    workspace TEXT NOT NULL,
+    preset TEXT NOT NULL,
+    principal_record_id TEXT NOT NULL,
+    principal_version INTEGER NOT NULL CHECK(principal_version >= 1),
+    binding_id TEXT NOT NULL REFERENCES conversation_bindings(id),
+    binding_version INTEGER NOT NULL CHECK(binding_version >= 1),
+    binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+    dispatched_at INTEGER NOT NULL CHECK(dispatched_at >= 0),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'succeeded', 'failed', 'timed-out', 'cancelled', 'unknown')),
+    quiescent INTEGER NOT NULL CHECK(quiescent IN (0, 1)),
+    completed_at INTEGER,
+    execution_ref TEXT,
+    CHECK((status = 'pending') = (completed_at IS NULL AND execution_ref IS NULL))
+  ) STRICT;
+`
+
 const taskAcceptanceExecutionSchema = `
   CREATE TABLE IF NOT EXISTS delivery_task_acceptance_executions (
     inbox_id TEXT PRIMARY KEY REFERENCES inbox_messages(id),
@@ -64,6 +85,10 @@ const taskAcceptanceExecutionSchema = `
     quiescent INTEGER NOT NULL CHECK(quiescent IN (0, 1)),
     completed_at INTEGER,
     execution_ref TEXT,
+    model_selection_state TEXT NOT NULL DEFAULT 'missing' CHECK(model_selection_state IN ('missing', 'frozen', 'inconsistent')),
+    model_provider TEXT,
+    model_id TEXT,
+    model_reasoning_effort TEXT,
     CHECK((status = 'pending') = (completed_at IS NULL AND execution_ref IS NULL))
   ) STRICT;
 `
@@ -812,6 +837,27 @@ function migratePreferenceProjectionLane(database: DatabaseSync): void {
   `)
 }
 
+function migrateTaskAcceptanceModelSelection(database: DatabaseSync): void {
+  const additions = [
+    ['model_selection_state', "TEXT NOT NULL DEFAULT 'missing' CHECK(model_selection_state IN ('missing', 'frozen', 'inconsistent'))"],
+    ['model_provider', 'TEXT'],
+    ['model_id', 'TEXT'],
+    ['model_reasoning_effort', 'TEXT'],
+  ] as const
+  for (const [column, definition] of additions) {
+    if (!hasColumn(database, 'delivery_task_acceptance_executions', column)) {
+      database.exec(`ALTER TABLE delivery_task_acceptance_executions ADD COLUMN ${column} ${definition};`)
+    }
+  }
+  const malformed = database.prepare(`SELECT 1 FROM delivery_task_acceptance_executions
+    WHERE model_selection_state NOT IN ('missing', 'frozen', 'inconsistent')
+      OR (model_selection_state = 'missing' AND (model_provider IS NOT NULL OR model_id IS NOT NULL OR model_reasoning_effort IS NOT NULL))
+      OR (model_selection_state = 'frozen' AND (model_provider IS NULL OR model_id IS NULL))
+      OR (model_selection_state = 'inconsistent' AND (model_provider IS NOT NULL OR model_id IS NOT NULL OR model_reasoning_effort IS NOT NULL))
+    LIMIT 1`).get()
+  if (malformed !== undefined) throw new DeliveryDatabaseError('schema-too-new', 'delivery foreground model-selection migration found malformed state')
+}
+
 function migrateObserved(database: DatabaseSync): void {
   const row = database.prepare('PRAGMA user_version').get() as { user_version: number }
   let version = row.user_version
@@ -1038,7 +1084,7 @@ function migrateObserved(database: DatabaseSync): void {
     version = 17
   }
   if (version === 17) {
-    database.exec(`${taskAcceptanceExecutionSchema} PRAGMA user_version = 18;`)
+    database.exec(`${taskAcceptanceExecutionSchemaV21} PRAGMA user_version = 18;`)
     version = 18
   }
   if (version === 18) {
@@ -1052,6 +1098,11 @@ function migrateObserved(database: DatabaseSync): void {
   if (version === 20) {
     database.exec(`${workflowOwnerAnchoredSchema} PRAGMA user_version = 21;`)
     version = 21
+  }
+  if (version === 21) {
+    migrateTaskAcceptanceModelSelection(database)
+    database.exec('PRAGMA user_version = 22;')
+    version = 22
   }
   if (version === deliverySchemaVersion) return
   database.exec(`
@@ -1268,7 +1319,7 @@ function migrateObserved(database: DatabaseSync): void {
     ${goalOutcomeTargetSchema}
 
     ${workflowOwnerAnchoredSchema}
-    PRAGMA user_version = 21;
+    PRAGMA user_version = 22;
   `)
 }
 

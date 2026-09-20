@@ -125,6 +125,7 @@ interface DshDeliveryRuntimeOptions {
     handle: AcceptanceHandle,
     input: { status: 'succeeded' | 'failed' | 'timed-out' | 'cancelled' | 'unknown'; quiescent: boolean },
   ): Promise<void>
+  recordForegroundTaskModelSelection(handle: AcceptanceHandle, input: { provider: string; model: string; reasoningEffort?: string }): void
   permissionPickerTtlMs: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
   /** Atomically remove a stale explicit effort without overwriting a newer model choice. */
@@ -3844,6 +3845,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let handle: AgentHandle | undefined
     let dispatched = false
     let acceptance: AcceptanceHandle | undefined
+    let removeAcceptanceRequest: (() => void) | undefined
     let acceptanceSucceeded = false
     let goalContinuation: GoalContinuationWait | undefined
     let goalContinuationQuiescent = true
@@ -3949,6 +3951,14 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // host driver is otherwise free to claim its first round at idle.
       goalContinuation = this.waitForNativeGoalContinuation(binding, envelope, agent, signal)
       acceptance = this.options.prepareForegroundTaskAcceptance(binding, envelope)
+      if (acceptance !== undefined) removeAcceptanceRequest = this.ctx.on('session/event', (session, event) => {
+        if (session !== agent.session || event.type !== 'request/header') return
+        // `agent/request` exposes the candidate route.  The native loop writes
+        // this header only after `llm.prepareCall()` has applied adapter
+        // defaults such as reasoning effort, which is the route actually sent
+        // to the provider.
+        this.options.recordForegroundTaskModelSelection(acceptance!, event.data.header.config)
+      })
       markDispatching()
       // Once the durable marker exists, even a synchronous followup failure is ambiguous:
       // implementations may enqueue before throwing, so no retry is safe.
@@ -4220,6 +4230,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       return { outcome: 'not-processed', failureCode: 'agent-resume-failed', retryable: true }
     } finally {
       removeAbort?.()
+      removeAcceptanceRequest?.()
       removeProgress?.()
       progressOpen = false
       let disposed = false
