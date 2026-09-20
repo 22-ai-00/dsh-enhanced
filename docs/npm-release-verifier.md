@@ -73,9 +73,9 @@ The existing Control Plane checks receipt signatures, request digest, owner bind
 
 Local tests exercise real TLS, both signed receipt protocols, altered authority/helper/configuration, receipt replay, lock failure/retry and Host timeout socket closure. Run `pnpm check` for the full repository gate.
 
-The [engineering validation record](evidence/npm-release-verifier-engineering-2026-09-19.json) records the completed Linux repository gate, targeted checks and independent review separately from the live registry observations.
+The engineering validation record records the completed Linux repository gate, targeted checks and independent review separately from the live registry observations.
 
-The [real npm readback record](evidence/npm-release-verifier-readback-2026-09-19.json) contains both signed receipt protocols for `@dsh-enhanced/plugin-control-plane@0.1.32`. Its 195,256 downloaded bytes match the SHA-512 in the earlier committed release record. The adapter independently fetched the real registry artifact for each verification; authorization, owner signature, auxiliary build files and ambiguous-publish history were explicit disposable fixtures. Public keys and full receipts are retained; private keys/state were removed.
+The real npm readback record contains both signed receipt protocols for `@dsh-enhanced/plugin-control-plane@0.1.32`. Its 195,256 downloaded bytes match the SHA-512 in the earlier committed release record. The adapter independently fetched the real registry artifact for each verification; authorization, owner signature, auxiliary build files and ambiguous-publish history were explicit disposable fixtures. Public keys and full receipts are retained; private keys/state were removed.
 
 Reproduce after building Control Plane:
 

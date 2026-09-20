@@ -16,7 +16,7 @@ if (args.length !== 2 || args[0] !== '--output') throw new Error('Usage: npm-cat
 const repository = fileURLToPath(new URL('../../', import.meta.url)); const output = resolve(args[1])
 const sha = value => createHash('sha256').update(value).digest('hex')
 const baseCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim()
-const baselinePath = 'docs/evidence/release-0.1.32-2026-09-13.json'
+const baselinePath = 'scripts/e2e/fixtures/npm-release-0.1.32.json'
 const baselineBytes = execFileSync('git', ['show', `${baseCommit}:${baselinePath}`], { cwd: repository })
 const baseline = JSON.parse(baselineBytes)
 const approved = baseline.registry.results.find(item => item.name === '@dsh-enhanced/plugin-control-plane' && item.version === '0.1.32' && item.ok)

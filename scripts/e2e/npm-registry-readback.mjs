@@ -15,7 +15,7 @@ const output = resolve(args[1])
 const sha256 = value => createHash('sha256').update(value).digest('hex')
 const git = (...argv) => execFileSync('git', argv, { cwd: root, encoding: 'utf8' }).trim()
 const baseCommit = git('rev-parse', 'HEAD')
-const baselinePath = 'docs/evidence/release-0.1.32-2026-09-13.json'
+const baselinePath = 'scripts/e2e/fixtures/npm-release-0.1.32.json'
 const baselineBytes = execFileSync('git', ['show', `${baseCommit}:${baselinePath}`], { cwd: root })
 const baseline = JSON.parse(baselineBytes)
 const paths = ['plugins/plugin-control-plane/src/registry-fetch.ts', 'plugins/plugin-control-plane/lib/registry-fetch.js',

@@ -82,7 +82,7 @@ node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs
 
 ### 2026-09-15 真实配对 run：persona 零触发的根因终审
 
-在 Docker 隔离 + 真实 TraeX `gpt-5.6-terra`、120s/450s 时间预算下跑完整 16-cell 同预算配对（4 case × 2 repeat × 2 臂），16/16 achieved、零 retained、零伪造 token/cost、`promotionAuthorized=false`，但 **8 ties、Δ0、CI [0,0]，且 advice persona 0/16 触发**，因此该 run **不构成策略增益证据**。证据与对抗复核见 [strategy-traex-real-paired-2026-09-15.json](evidence/strategy-traex-real-paired-2026-09-15.json)。
+在 Docker 隔离 + 真实 TraeX `gpt-5.6-terra`、120s/450s 时间预算下跑完整 16-cell 同预算配对（4 case × 2 repeat × 2 臂），16/16 achieved、零 retained、零伪造 token/cost、`promotionAuthorized=false`，但 **8 ties、Δ0、CI [0,0]，且 advice persona 0/16 触发**，因此该 run **不构成策略增益证据**。证据与对抗复核见 strategy-traex-real-paired-2026-09-15.json。
 
 零触发经代码与真实 transcript 双侧钉死为**模型在天花板 corpus 下自主选择不调用，而非接线/预授权缺陷**：
 

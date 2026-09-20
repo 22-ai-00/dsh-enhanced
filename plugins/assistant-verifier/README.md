@@ -2,7 +2,7 @@
 
 独立核对事先确定的任务验收条件，分别记录执行状态与目标是否达成。验收契约、验证任务和结果回执保存在本地 SQLite，验证重试不会重新执行原任务。
 
-当前已接通前台、Automations 的 AgentLoop 生产入口和 Goals 的可选原生回合入口，以及 Evaluation canonical 判断和前台/Automation owner 反馈修订，尚未正式发布。工程验证与完整自治目标的剩余工作见 [实施账本](../../docs/agent-autonomy-implementation.md)。
+当前已接通前台、Automations 的 AgentLoop 生产入口和 Goals 的可选原生回合入口，以及 Evaluation canonical 判断和前台/Automation owner 反馈修订，已发布基线与开发增量以根发布账本为准；完整自治目标的剩余工作见 [RSI 当前状态](../../docs/rsi-status.md)。
 
 ## 安装与默认行为
 

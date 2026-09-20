@@ -220,4 +220,4 @@ Anthropic 技术文档允许 `claude -p` 使用订阅登录，但其法律与合
 - Grok Build `1.0.5`
 - Cursor CLI 目录入口 `--list-models`；生成仍不列入已验证基线
 
-仓库级依赖与 clean-room 快照见[兼容基线](compatibility.md)，协议设计背景见[Codex 路由调研](grok-bot-codex-router-research.md)。
+仓库级依赖与 clean-room 快照见[兼容基线](compatibility.md)，当前使用入口见 [Provider README](../plugins/coding-subscription-provider/README.md)。
