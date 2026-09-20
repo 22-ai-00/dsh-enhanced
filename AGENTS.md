@@ -62,3 +62,4 @@ Keep changes scoped to the requested plugin or shared contract. Generated output
 Keep raw runtime evidence, JSON dumps, and logs local (for example, ignored `docs/evidence/`) or in CI artifacts; commit only concise verification commands, results, and limitations.
 
 Maintain current progress in [docs/rsi-status.md](docs/rsi-status.md); remove superseded progress snapshots instead of appending another history ledger.
+When behavior changes, update its maintained guide and incoming links; keep dated research as rationale, never as current implementation status.

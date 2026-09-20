@@ -64,7 +64,7 @@ Cordis patch 覆盖不是深合并；手工覆盖嵌套 provider 时，请保留
 
 | 权限 | 插件行为 |
 |---|---|
-| 文件系统 | Codex direct 读取安全的 auth 文件，并可能在 401 刷新后以 CAS + 同目录原子替换写回；图片仅经宿主 attachment service 读取。CLI 模式校验 live session 与 canonical cwd 后把该 cwd 交给外部客户端；Codex CLI 使用 read-only sandbox。 |
+| 文件系统 | Codex direct 读取安全的 auth 文件，并可能在 401 刷新后比较原文件、以同目录原子替换写回；跨进程并发保护仅为 best-effort。图片仅经宿主 attachment service 读取。CLI 模式校验 live session 与 canonical cwd 后把该 cwd 交给外部客户端；Codex CLI 使用 read-only sandbox。 |
 | 网络 | Codex direct 固定请求 `https://chatgpt.com/backend-api/codex/responses`，仅在 401 刷新时请求 `https://auth.openai.com/oauth/token`。CLI 模式由官方客户端连接其登录、推理、更新或遥测服务。 |
 | 子进程 | direct 不启动 Codex CLI/App Server。CLI 模式使用 `shell: false` 启动配置的单个客户端；模型目录探针不会提交 prompt。POSIX 取消整个进程组，Windows 只能 best-effort 终止直接子进程。 |
 | 凭据 | direct 只接受本机 ChatGPT session，不回退 API Key，也不向响应或日志暴露 token。CLI 凭据由官方客户端管理；已知 API Key、第三方 base URL 和云路由变量不会传给子进程。 |
@@ -95,7 +95,6 @@ Codex direct 会把对话、tool schema、tool result，以及 attachment servic
 
 - [详细配置、认证、协议与限制](../../docs/coding-subscription-provider-reference.md)
 - [兼容基线](../../docs/compatibility.md)
-- [当前 Provider 参考](../../docs/coding-subscription-provider-reference.md)
-- [插件生态与 Hermes/OpenClaw 对比](../../docs/dsh-personal-assistant-plugin-landscape.md)
+- [历史插件生态与 Hermes/OpenClaw 对比](../../docs/dsh-personal-assistant-plugin-landscape.md)
 
 运行与发布验证统一使用仓库根目录的 `pnpm check`。

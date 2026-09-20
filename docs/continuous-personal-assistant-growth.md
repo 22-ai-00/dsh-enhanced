@@ -137,12 +137,12 @@ replay → shadow → canary
 ## 包边界
 
 - `assistant-evaluation`：Outcome/Evaluation 权威账本、汇总、健康、scope 内 review 与独立低信任自评。
-- `assistant-evolution`：当前从可信 Automation execution episode 生成行为 guidance 候选并保留 exact exposure 归因；后续改为消费 Evaluation 的 objective/latest projection。采用自由文本 guidance 仍需 owner 审批，确定性退化回滚可按 T1 自治。
+- `assistant-evolution`：消费 Evaluation 的 canonical task projection，在 writer fence 内核验修订与 scope watermark；前台自报和 Automation 执行状态只作 operational audit。采用自由文本 guidance 仍需 owner 审批，撤票和确定性退化按 exact version 关闭或回滚，详见 [Evolution](../plugins/assistant-evolution/README.md)。
 - `personal-memory`：确认后的短期之外个人事实、偏好与约束。
 - `preference-learning`：使用 Host 固定 T0–T3 catalog 消费 typed feedback 和 Delivery 私有证明的完成对话行为，维护 claim/effect 分离、可衰减和可删除的偏好假设；已认证 owner 的明确选择可立即控制固定 T1，普通行为必须达到更高连续阈值，T2 只形成 proposal，T3 拒绝进入学习层。
 - `assistant-automations`：冷启动可恢复的执行和评测触发器，不拥有学习结论。
 - `assistant-health`：统一健康投影、阈值和告警信号，不直接修复。
-- 后续 `assistant-recovery`：只执行版本化固定 runbook、circuit breaker 和回滚请求。
+- `assistant-recovery`：已有版本化固定 Host runbook、持久 intent、恢复对账与回滚请求；模型不能选择步骤或扩大授权，详见 [Recovery](../plugins/assistant-recovery/README.md)。
 - `plugin-control-plane`：能力发现、完整性固定、staging、canary 与版本提升。
 - `assistant-policy`：权限、预算、审批、紧急停止和不可绕过的外部约束。
 

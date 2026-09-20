@@ -168,4 +168,4 @@ traex --sandbox read-only --ask-for-approval never acp serve
 - Cordis `^4.0.1`
 - Agent Client Protocol SDK `0.25.1`，protocol version `1`
 
-进一步阅读：[两个 provider 的 ACP 边界与优化调研](../../docs/cliproxyapi-provider-optimization-research.md)、[兼容基线](../../docs/compatibility.md)。
+进一步阅读：[Provider 设计依据与来源](../../docs/cliproxyapi-provider-evidence-review.md)、[兼容基线](../../docs/compatibility.md)。

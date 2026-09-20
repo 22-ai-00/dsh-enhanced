@@ -1,5 +1,7 @@
 # 原生 Goal 策略评测
 
+当前真实验收使用 `super-relay / auto_model/alwaysday1`，入口见下文 [Super Relay](#super-relay-responses-入口真实-token-计量)。其它 adapter 保留为可选能力与历史实验复现入口；项目进展统一见 [RSI 当前状态](rsi-status.md)。
+
 `strategy-v1` 是一个独立的公开开发集比较：`direct` 使用原生 Goal 和隔离产物验收，`adaptive-strategy` 在相同模型、persona、预算和非策略能力下额外获得真实 `goal_strategy`。它不复用旧的单次、无工具 native suite。
 
 开发集有四道公开合成代码题：整数汇总、合并相交或接触区间、按频次再字典序输出词频，以及带无解标记的依赖拓扑排序。它们用于验证装配与比较流程，不是 holdout，也没有真实模型收益结论。模型只接收每题的公开 objective、提示和公开示例；私有 verifier vectors 只在独立隔离验证时使用。
@@ -80,13 +82,7 @@ node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs
 
 计划与每次父请求的源码核对会额外覆盖实际解析的 `@dsh-enhanced/traex-acp-provider` 生产 lib。计量模式在三处绑定：operator 只在 `model.observationMode` 写一次，executor 派生明文 `plan.execution.observationMode` 进入 plan digest，evidence 解析时交叉断言 meter 自报与冻结计划一致；事后篡改任一副本都会被 digest 或交叉断言捕获。该入口的注入式工程层测试（假 `runText`/`discoverModels`/`verifyAuth`，不触网）只验证请求契约与生命周期，不代表已驱动真实 TraeX 子进程，也不构成策略增益或生产供应商证据。
 
-### 2026-09-15 真实配对 run：persona 零触发的根因终审
-
-在 Docker 隔离 + 真实 TraeX `gpt-5.6-terra`、120s/450s 时间预算下跑完整 16-cell 同预算配对（4 case × 2 repeat × 2 臂），16/16 achieved、零 retained、零伪造 token/cost、`promotionAuthorized=false`，但 **8 ties、Δ0、CI [0,0]，且 advice persona 0/16 触发**，因此该 run **不构成策略增益证据**。原始 JSON 与对抗复核留本地；以下保留该次运行的诊断，不作为当前提交的复验结果。
-
-该次诊断确认 adaptive 会话拿到了 `goal_strategy` 工具和所需预授权，但四个 `strategy-v1` 任务首轮即通过独立 verifier，模型没有调用咨询工具。该记录支持“这组任务未触发目标机制”，不能证明策略无用，也不能证明更难的任务必然触发咨询。
-
-这一结果促成了下文独立版本的 `strategy-v2` 开发集。实际比较仍须先观测 `native.strategies>0` 与稳定的非 `-g1` persona 子调用块，再判断收益；不得靠调 prompt 制造增益。
+历史 TraeX 的 v1 配对实验未调用咨询工具，两臂结果持平，不构成策略增益证据；它只有调用次数预算，不能宣称 token 或金额预算相等。详细诊断保留在 Git 历史。后续比较需同时报告机制是否被实际调用及独立验收结果，不能靠调 prompt 制造增益。
 
 ## strategy-v2 难题开发集
 
@@ -109,4 +105,4 @@ dsh-benchmark run --config ./docs/examples/strategy-v2-traex.config.json --adapt
 dsh-benchmark report --database ./private/strategy-v2.sqlite --plan strategy-traex-development-v2 --config ./docs/examples/strategy-v2-traex.config.json --output ./private/strategy-v2-report-copy.json
 ```
 
-真实重跑使用与 2026-09-15 完全相同的 call-count 配对 harness（Docker 隔离、`gpt-5.6-terra`、120s/450s、两 repeats、零外部花费），但必须用新的 plan id 与独立 state 根（同 id 不同 dataset/limits 会被 BenchmarkStore 拒绝）。首发只观测两件事：`native.strategies > 0`（strategy 工具被模型真实调用）以及稳定的非 `-g1` persona 子调用块；在此之前不声称任何策略增益，也不得通过修改 prompt 人为制造调用。
+上面的 TraeX 模板用于复现该 adapter 的调用次数模式。当前 Day1 验收应从 Super Relay 模板配置独立的 `strategy-v2` 计划，并满足上述验证窗口要求；使用新的 plan id 与独立 state 根，同 id 不同 dataset/limits 会被 BenchmarkStore 拒绝。冻结相同供应和预算，记录实际 token、延迟、独立验收以及 `native.strategies`/persona 子调用；金额不可得时保持 `null`。公开开发集上的机制调用和成功率不能替代独立新任务上的技能复用收益。
