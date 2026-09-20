@@ -57,7 +57,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。Skills 委派的独立复核已通过；根 `pnpm check` 退出 0：6,114 项通过、44 项跳过，构建及 35 个包的 dry-run pack 完成（32 个插件、3 个共享库），Skills 包包含新的委派模块。之后补入的非合作工具晚到结果测试单独通过，证明取消后账本仍保持 unknown；这些是工程验证，不是模型收益或生产自治验收。
+- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。已提交基线 `e5620b7` 的 Skills 委派独立复核已通过；该基线的根 `pnpm check` 退出 0：6,114 项通过、44 项跳过，构建及 35 个包的 dry-run pack 完成（32 个插件、3 个共享库），Skills 包包含新的委派模块。之后补入的非合作工具晚到结果测试单独通过，证明取消后账本仍保持 unknown；这些是工程验证，不是模型收益或生产自治验收；不覆盖之后的提交或未提交开发。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 - 未结算 generation 测试修复 `e33a6ae` 已通过 Linux、macOS 与 Windows 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35494781155)。测试用真实派发后丢失确认建立持久未结算状态，检查新 operation 不再重启。该跨平台结论不覆盖之后的新改动。
 
