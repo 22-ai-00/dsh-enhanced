@@ -54,6 +54,8 @@ node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs
 
 Evaluation 还发布 `@dsh-enhanced/assistant-evaluation/benchmark/super-relay`，以绝对文件路径作为 `--adapter`，固定 `super-relay` provider 与单一 `auto_model/alwaysday1` 模型（网关侧自动路由）。它复用 `assistant-super-relay-budget` 生产 adapter 的 OpenAI **Responses** 请求/回放、完整 usage 校验与对每个不可信异步边界的硬竞速取消逻辑，不自动启用普通 profile 的任何插件。
 
+缺省 `createNativeAdapter` 保持每次请求 60 秒时限。可信 Host 可先调用 `createSuperRelayNativeAdapterFactory({ timeoutMs: 180000 })`，固定 1,000–300,000 毫秒范围内的请求时限，来源与两臂均使用同一工厂。把该配置写入受信 adapter 工件并纳入其摘要；CLI 可从这个固定配置的模块导出 `createNativeAdapter`，然后按该模块重新生成计划。请求时限不会延长 Goal step 或整个 cell 的期限，也不会启用自动重试。调整时限属于新实验；旧调用的未结算用量和 unknown 记录必须保留。
+
 该路由走与 DeepSeek 平级的 **token 强制计量模式**（`model.observationMode` 用默认值，无需填写）：Responses 响应真实回传 `input_tokens`/`output_tokens`/`total_tokens`（含 cached/reasoning 明细），按完整响应后的实际 usage 结算 input/output token。网关没有公开定价，因此四档费率与 `budget.costUsdMicros` 恒为 `null`——token 如实计量，金钱成本**绝不估算、绝不伪造**；任何非空费率都会被拒绝（"Super Relay tariff is unverified"）。每次输入预留 **200,000 tokens**，这是远低于该网关其他模型百万级窗口的保守 fail-closed 上限，不是对任一请求实际消耗的估算；需要更紧预算时不能用估算值替换上界。
 
 凭证只按引用解析，插件绝不接受明文 key：操作者在运行环境 `export SUPER_RELAY_API_KEY=<真实 key>`（或经 dsh-credentials 配置同名引用），adapter 在每次生产请求时经 `@deepseek-ai/dsh-credentials` 解析当前值，不保留被替换的凭证。

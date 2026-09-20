@@ -13,13 +13,13 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import type { NativeAdapterBinding, NativeModelConfig } from './native.js'
+import type { NativeAdapterBinding, NativeAdapterFactory, NativeModelConfig } from './native.js'
 
 type SuperRelayCredentialResolver = { resolve(reference: unknown): Promise<{ value: string } | undefined> }
 type ProductionAdapter = LlmAdapter & { shutdown(): void }
 interface SuperRelayRuntime {
   SuperRelayGoalMeteredAdapter: new (
-    config: { defaultMaxTokens: number },
+    config: { defaultMaxTokens: number; timeoutMs: number },
     dependencies: { credentialResolver(): SuperRelayCredentialResolver | undefined },
   ) => ProductionAdapter
   SUPER_RELAY_RESPONSES_CONTRACT: { expiresAt: string }
@@ -130,8 +130,31 @@ class FrozenSuperRelayAdapter extends LlmAdapter {
   }
 }
 
-/** Create the trusted native benchmark binding for the fixed Super Relay route. */
+export interface SuperRelayNativeAdapterOptions { timeoutMs?: number }
+
+/** Freeze the transport deadline before creating any source or comparison cell. */
+export function createSuperRelayNativeAdapterFactory(options: Readonly<SuperRelayNativeAdapterOptions> = {}): NativeAdapterFactory {
+  if (options === null || typeof options !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(options))) {
+    throw new Error('assistant-evaluation: invalid Super Relay adapter options')
+  }
+  for (const key of Reflect.ownKeys(options)) {
+    const descriptor = Object.getOwnPropertyDescriptor(options, key)!
+    if (key !== 'timeoutMs' || !('value' in descriptor)) throw new Error('assistant-evaluation: invalid Super Relay adapter options')
+  }
+  const configuredTimeout = Object.getOwnPropertyDescriptor(options, 'timeoutMs')?.value
+  const timeoutMs = configuredTimeout === undefined ? 60_000 : configuredTimeout
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 300_000) {
+    throw new Error('assistant-evaluation: invalid Super Relay request timeout')
+  }
+  return (model, environment) => createConfiguredAdapter(model, environment, timeoutMs)
+}
+
+/** Default CLI binding retains the production 60-second request deadline. */
 export async function createNativeAdapter(model: Readonly<NativeModelConfig>, environment: Readonly<{ ctx: Context; workspace: string }>): Promise<NativeAdapterBinding> {
+  return createConfiguredAdapter(model, environment, 60_000)
+}
+
+async function createConfiguredAdapter(model: Readonly<NativeModelConfig>, environment: Readonly<{ ctx: Context; workspace: string }>, timeoutMs: number): Promise<NativeAdapterBinding> {
   // 变量 import 避免 evaluation→super-relay-budget 的声明期构建环；真实包由操作者
   // 在跑 run 前安装并经 `dsh-benchmark doctor` 探测，工程层/类型层不依赖其已链接。
   // moduleId 显式宽化为 string，使 tsc 不做字面量模块解析（包尚未链接时不报 TS2307），
@@ -141,11 +164,12 @@ export async function createNativeAdapter(model: Readonly<NativeModelConfig>, en
   validateModel(model)
   assertCurrentContract(relay.SUPER_RELAY_RESPONSES_CONTRACT.expiresAt)
   const frozenModel = Object.freeze({ ...model })
-  // 生产默认值仍生效（60s 超时、4MiB 响应上限）；此处不暴露任何 fetch/now/endpoint/
+  // 请求时限由可信 Host 在工厂创建前固定；4MiB 响应上限仍取生产默认值。
+  // 此处不暴露任何 fetch/now/endpoint/
   // 环境覆写，也绝不接受明文 key，凭证只经 dsh-credentials 按 SUPER_RELAY_API_KEY 引用解析。
-  // 只传 defaultMaxTokens：其余配置项由生产 normalizeConfig 补默认，enabled 仅在 cordis
+  // 其余配置项由生产 normalizeConfig 补默认，enabled 仅在 cordis
   // apply 入口门控、adapter 本身不读取。
-  const production = new relay.SuperRelayGoalMeteredAdapter({ defaultMaxTokens: frozenModel.maxOutputTokens }, {
+  const production = new relay.SuperRelayGoalMeteredAdapter({ defaultMaxTokens: frozenModel.maxOutputTokens, timeoutMs }, {
     credentialResolver: () => environment.ctx.get('credentials' as never) as SuperRelayCredentialResolver | undefined,
   })
   if (!(production instanceof LlmAdapter) || typeof production.shutdown !== 'function') throw new Error('assistant-evaluation: Super Relay adapter runtime is incompatible')

@@ -1,6 +1,6 @@
 /**
  * 工程层测试（非真实外部证据）：
- * super-relay-budget 包尚未在本评测安装目录链接，这里用 vitest virtual mock 拦截
+ * 这里用 vitest mock 拦截
  * `@dsh-enhanced/assistant-super-relay-budget` 动态 import，注入一个最小生产 adapter
  * 替身（不触网）。它只验证 evaluation host binding 的接线：runtime 结构校验、模型/
  * 路由冻结、契约过期、dispose、凭证逐请求解析。真实 Responses 协议与 usage 解析由
@@ -17,6 +17,8 @@ const hoisted = vi.hoisted(() => ({
   model: 'auto_model/alwaysday1',
   expires: '2026-10-14T00:00:00.000Z',
   lastCredentialResolver: undefined as ((() => unknown) | undefined),
+  lastConfig: undefined as unknown,
+  instances: 0,
 }))
 const PROVIDER = hoisted.provider
 const MODEL = hoisted.model
@@ -29,8 +31,10 @@ vi.mock('@dsh-enhanced/assistant-super-relay-budget', async () => {
   const { LlmAdapter } = await import('@deepseek-ai/dsh-llm')
   // 生产 adapter 必须是 LlmAdapter 实例（createNativeAdapter 有 instanceof 断言）。
   class FakeProduction extends LlmAdapter {
-    constructor(_config: unknown, deps: { credentialResolver(): unknown }) {
+    constructor(config: unknown, deps: { credentialResolver(): unknown }) {
       super()
+      hoisted.instances++
+      hoisted.lastConfig = config
       hoisted.lastCredentialResolver = deps.credentialResolver
     }
     override async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -58,7 +62,7 @@ vi.mock('@dsh-enhanced/assistant-super-relay-budget', async () => {
   }
 })
 
-import { createNativeAdapter } from '../../src/benchmark/super-relay.js'
+import { createNativeAdapter, createSuperRelayNativeAdapterFactory } from '../../src/benchmark/super-relay.js'
 import type { NativeModelConfig } from '../../src/benchmark/native.js'
 
 const model = (): NativeModelConfig => ({
@@ -92,6 +96,7 @@ afterEach(() => { vi.restoreAllMocks() })
 describe('Super Relay native benchmark adapter（工程层替身，非真实供应商证据）', () => {
   it('冻结固定路由并把真实 usage 透传、输入上界为 200000', async () => {
     const binding = await createNativeAdapter(model(), { ctx: new Context(), workspace: '/unused' })
+    expect(hoisted.lastConfig).toEqual({ defaultMaxTokens: 4096, timeoutMs: 60_000 })
     const chunks = await collect(binding.adapter.stream(request()))
     expect(chunks.find(c => c.type === 'usage')).toMatchObject({ usage: { inputTokens: 11, outputTokens: 7, totalTokens: 18 } })
     expect(binding.inputTokenUpperBound?.(request())).toBe(200_000)
@@ -99,6 +104,35 @@ describe('Super Relay native benchmark adapter（工程层替身，非真实供�
     await expect(binding.adapter.listModels(PROVIDER)).resolves.toMatchObject([{ id: MODEL }])
     await expect(binding.adapter.resolveModel(PROVIDER, MODEL)).resolves.toMatchObject({ id: MODEL })
     binding.dispose()
+  })
+
+  it('同一 Host 工厂固定显式时限，不受调用方修改影响', async () => {
+    const options = { timeoutMs: 180_000 }
+    const factory = createSuperRelayNativeAdapterFactory(options)
+    options.timeoutMs = 1_000
+    for (let arm = 0; arm < 2; arm++) {
+      const binding = await factory(model(), { ctx: new Context(), workspace: '/unused' })
+      expect(hoisted.lastConfig).toEqual({ defaultMaxTokens: 4096, timeoutMs: 180_000 })
+      expect(binding.adapter.providerRetryPolicy(PROVIDER)).toMatchObject({ maxRetries: 0 })
+      await binding.dispose()
+    }
+  })
+
+  it('工厂缺省时限为 60 秒', async () => {
+    const binding = await createSuperRelayNativeAdapterFactory()(model(), { ctx: new Context(), workspace: '/unused' })
+    expect(hoisted.lastConfig).toEqual({ defaultMaxTokens: 4096, timeoutMs: 60_000 })
+    await binding.dispose()
+  })
+
+  it('创建工厂前拒绝未知字段、访问器和无界时限', () => {
+    const instances = hoisted.instances
+    let getterCalls = 0
+    const invalid: unknown[] = [null, [], true, '180000', { endpoint: 'https://example.invalid' },
+      ...[null, 0, 999, 300001, 1.5, NaN, Infinity, '180000'].map(timeoutMs => ({ timeoutMs })),
+      { get timeoutMs() { getterCalls++; return 180000 } }]
+    for (const options of invalid) expect(() => createSuperRelayNativeAdapterFactory(options as { timeoutMs?: number })).toThrow()
+    expect(getterCalls).toBe(0)
+    expect(hoisted.instances).toBe(instances)
   })
 
   it('生产 adapter 收到的 credentialResolver 在调用时回连当前 ctx 的 credentials 服务', async () => {
