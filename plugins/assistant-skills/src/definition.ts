@@ -370,6 +370,14 @@ function sourceCheckpoint(value: unknown, goalId: string): boolean {
       && typeof item.statement === 'string' && Number.isSafeInteger(item.expires_at) && item.expires_at > 0)
 }
 
+/** A source-Goal read is provenance only; it can never become a reusable step. */
+function sourceGoalContext(value: unknown, goalId: string): boolean {
+  if (!json(value) || !value || typeof value !== 'object' || Array.isArray(value)) return false
+  const args = value as Record<string, unknown>, keys = Object.keys(args)
+  return keys.every(key => key === 'goal_id' || key === 'focus')
+    && (keys.length === 0 || args.goal_id === goalId && (keys.length === 1 || args.focus === false))
+}
+
 /** Multi-round provenance is explicit; the v1 top-level still names the final accepted run. */
 function sourceProjection(source: VerifiedWorkflowSource) {
   if (source.segments === undefined) return { steps: source.steps, observations: source.failedObservations ?? [] }
@@ -489,6 +497,7 @@ export function createDefinition(source: VerifiedWorkflowSource, options: Create
   const executable = expandedSteps.filter(step => {
     if (!step || !text(step.id, 256) || !text(step.toolName, 256) || !json(step.arguments)) fail('assistant-skills: untrusted tool trace')
     if (step.toolName === 'goal_checkpoint' && sourceCheckpoint(step.arguments, source.goal.id)) return false
+    if (step.toolName === 'goal_context' && sourceGoalContext(step.arguments, source.goal.id)) return false
     // The current owner's parameterless catalog inspection informs the source
     // task but is not executable workflow authority. Retain it in provenance.
     if (step.toolName === 'skill_status' && step.arguments !== null && typeof step.arguments === 'object'

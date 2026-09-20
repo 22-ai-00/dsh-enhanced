@@ -23,8 +23,8 @@ async function options(cellId: string): Promise<Omit<NativeSkillGoalOptions, 'fa
     image: process.env.DSH_ISOLATION_TEST_IMAGE ?? `sha256:${'0'.repeat(64)}`, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 25000, signal: new AbortController().signal }
 }
 class Adapter extends LlmAdapter {
-  calls = 0; ran = false
-  constructor(readonly ctx: Context, readonly reuse: boolean) { super() }
+  calls = 0; ran = false; inspected = false; checkpointed = false
+  constructor(readonly ctx: Context, readonly reuse: boolean, readonly sourcePlanning = false) { super() }
   override providerInfo(id: string) { return { id, name: id } }
   override async resolveModel(provider: string, id: string) { return { provider, id, name: id, inputModalities: ['text' as const] } }
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -32,13 +32,20 @@ class Adapter extends LlmAdapter {
     expect(JSON.stringify(options.messages)).not.toContain('19 23')
     const agent = this.ctx.agents.currentInitiator()!
     const native = (this.ctx.get('goals' as never) as unknown as { get(agent: unknown): { roundsStarted: number } | undefined }).get(agent)
-    const business = this.ctx.get('assistantGoals' as never) as unknown as { list(agent: unknown): { id: string }[] }
+    const business = this.ctx.get('assistantGoals' as never) as unknown as { list(agent: unknown): { id: string; version: number }[] }
     let name: string | undefined; let args: object = {}
     if (!native) { name = 'goal_create'; args = { objective: task.objective, max_goal_rounds: 2 } }
-    else if (native.roundsStarted > 0 && !this.ran) {
+    else if (native.roundsStarted > 0 && this.sourcePlanning && !this.inspected) {
+      this.inspected = true
+      name = 'goal_context'; args = { goal_id: business.list(agent)[0]!.id }
+    } else if (native.roundsStarted > 0 && !this.ran) {
       this.ran = true
       if (this.reuse) { name = 'skill_run'; args = { goal_id: business.list(agent)[0]!.id, name: 'add-integers', version: 1, inputs_json: '{}', invocation_id: 'one-reuse' } }
       else { name = 'isolation_run'; args = { grant_id: 'benchmark-work', idempotency_key: 'source-artifact', command: 'cp source answer.sh', files: [{ path: 'source', content: 'read a b; printf "%s" "$((a + b))"' }], artifacts: ['answer.sh'], timeout_ms: 15000 } }
+    } else if (native.roundsStarted > 0 && this.sourcePlanning && !this.checkpointed) {
+      this.checkpointed = true
+      const current = business.list(agent)[0]!
+      name = 'goal_checkpoint'; args = { goal_id: current.id, expected_version: current.version, next_step: 'Await independent verification.', blockers: [], assumptions: [], evidence_refs: [], dependencies: [] }
     }
     if (name) {
       const id = ToolCallId(`call-${this.calls}`), json = JSON.stringify(args)
@@ -53,11 +60,11 @@ class Adapter extends LlmAdapter {
     yield { type: 'finish', reason: { kind: name ? 'tool-calls' : 'stop' } }
   }
 }
-const factory = (reuse: boolean): NativeSkillGoalOptions['factory'] => (_model, { ctx }) => ({ adapter: new Adapter(ctx, reuse), inputTokenUpperBound: () => 10, dispose() {} })
+const factory = (reuse: boolean, sourcePlanning = false): NativeSkillGoalOptions['factory'] => (_model, { ctx }) => ({ adapter: new Adapter(ctx, reuse, sourcePlanning), inputTokenUpperBound: () => 10, dispose() {} })
 const rawService = <T>(value: T): T => (value as T & { [key: symbol]: T })[Symbol.for('cordis.original')] ?? value
 
 test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('captures an independently achieved native source and reuses its exact skill in a fresh Goal', async () => {
-  const source = await createNativeSkillGoalRuntime({ ...await options('source'), factory: factory(false), source: { name: 'add-integers', description: 'Create a reusable integer addition program.', validityMs: 600000 } })
+  const source = await createNativeSkillGoalRuntime({ ...await options('source'), factory: factory(false, true), source: { name: 'add-integers', description: 'Create a reusable integer addition program.', validityMs: 600000 } })
   cleanups.push(source.close)
   const first = await source.execute()
   expect(first.snapshot).toMatchObject({ outcome: { status: 'achieved' } })
@@ -67,6 +74,11 @@ test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('captures an independently ac
   expect(captured.selection.candidateId).toBeTypeOf('string')
   expect(captured.origin.model).toEqual(model)
   expect(captured.origin.result).toEqual(first)
+  expect(first.toolCalls.map(call => call.name)).toEqual(expect.arrayContaining(['goal_context', 'goal_checkpoint']))
+  expect(captured.snapshot.definition).toMatchObject({
+    source: { steps: [{ toolName: 'goal_context' }, { toolName: 'isolation_run' }, { toolName: 'goal_checkpoint' }] },
+    steps: [{ toolName: 'isolation_run' }],
+  })
   const candidate = await createNativeSkillGoalRuntime({ ...await options('candidate'), factory: factory(true), arm: { captured, planDigest: 'c'.repeat(64), variantId: 'candidate' } })
   cleanups.push(candidate.close)
   const second = await candidate.execute()
@@ -78,6 +90,8 @@ test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('captures an independently ac
   expect(second.delegation!.sourceDigest).toBe(captured.snapshot.sourceDigest)
   expect(candidate.readAcceptedArtifact().content).toBe(source.readAcceptedArtifact().content)
   expect(second.toolCalls.map(call => call.name)).toContain('isolation_run')
+  expect(second.toolCalls.map(call => call.name)).not.toContain('goal_context')
+  expect(second.toolCalls.map(call => call.name)).not.toContain('goal_checkpoint')
   await candidate.close(); await source.close()
   expect(candidate.snapshot().cleanup).toBe('succeeded')
   expect(source.snapshot().cleanup).toBe('succeeded')

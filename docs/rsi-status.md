@@ -18,7 +18,7 @@
 - Skills 已接入同进程 Host 受限委派：来源重新验证后，将冻结的活动技能或 pending 候选临时挂载到全新 owner scope，经原生 `skill_run` 执行；持久 cell reservation 与调用记录阻止换调用键或重启重放。来源和接收方重载、撤权、到期及取消均保留失败或 unknown。Evaluation 原生模型 cell 与冻结后独立任务已接入，12-cell Docker 工程验证两臂各 6 次达成，候选实际复用 6 次、质量平局。Day1 同预算收益比较仍待完成；见[接线指南](native-skill-reuse.md)。
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
 
-最新 Day1 原生技能实验：固定 180 秒请求时限的[真实探针](native-skill-reuse.md#真实-day1-探针)已完成来源 Goal 的独立验收，5 次调用全部结算（输入 40,692、输出 8,529 tokens）。随后 `goal_checkpoint` 的 Policy 拒绝记录使工作流来源校验失败，尚未产生候选或进入双臂比较；其依赖参数也误用了描述文字。该次捕获失败路径的 runtime 清理报告 unknown，旧运行不能改判为已释放资源。本段修复为 checkpoint 增加精确 owner/Policy/CAS 预授权和参数说明，并分别结算捕获业务拒绝与资源处置失败；新版真实模型实验仍待执行，尚不构成复用收益。此前两次 30/60 秒中断的未结算用量继续保留，不计作零、不重放。
+最新 Day1 原生技能实验仍未进入双臂比较。checkpoint 修复后的来源曾独立达成（4 次调用全部结算），但成功的 `goal_context` 被 Skills 误判为不可捕获的控制操作；现已将合法上下文读取保留为来源证据、排除出复用步骤，并通过真实 Docker 回归。新实验经历三次本地测试失败后，产物作业成功，但原生 Goal 回合达到 240 秒期限，最后一次模型调用用量未结算：6 次已结算调用计输入 58,073、输出 9,689 tokens，另 1 次保留 unknown 及预留；整体 Goal 验收为 unknown，未进入捕获或比较，本地 runtime 清理确认成功。后续需检查原生回合的预算与收束机制，再做新任务比较；旧 unknown 和失败记录不改判、不重放，未知用量不计零。
 
 ## 工作包验收
 
@@ -59,7 +59,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- checkpoint 精确预授权与捕获清理结算已通过独立复核；根 `pnpm check` 退出 0：6,131 项通过、50 项跳过，零 lint 警告、类型检查、构建及 35 个包的 dry-run pack 完成（32 个插件、3 个共享库）。专项 Docker 回归 8/8，覆盖捕获业务拒绝、创建失败、disposer 失败与晚到清理；Goals/Policy 独立回归分别 74/74、25/25。Day1 探针保留新目录准入、固定请求时限和未结算调用不重放约束。原生技能双臂的 Docker 工程基线 `fdbe9b1` 覆盖来源捕获、候选复用与 12-cell 比较；命令见[接线指南](native-skill-reuse.md)。工程检查不证明真实复用收益或生产自治。后续改动仍须完成相关测试、独立复核与根检查，再提交、推送 `dev`。
+- 来源上下文捕获修复已通过独立复核；根 `pnpm check` 退出 0：6,132 项通过、50 项跳过，零 lint 警告、类型检查、构建及 35 个包的 dry-run pack 完成（32 个插件、3 个共享库）。Skills 定义专项 24/24，Docker 回归 9/9，覆盖上下文与 checkpoint 仅作来源证据、候选实际复用、12-cell 比较及捕获清理失败边界；命令见[接线指南](native-skill-reuse.md)。工程检查不证明真实复用收益或生产自治。后续改动仍须完成相关测试、独立复核与根检查，再提交、推送 `dev`。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 - 未结算 generation 测试修复 `e33a6ae` 已通过 Linux、macOS 与 Windows 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35494781155)。测试用真实派发后丢失确认建立持久未结算状态，检查新 operation 不再重启。该跨平台结论不覆盖之后的新改动。
 
