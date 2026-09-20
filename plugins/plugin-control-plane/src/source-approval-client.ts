@@ -102,7 +102,7 @@ function assertNotAborted(signal: AbortSignal | undefined): void {
 }
 
 async function execute(executable: OpenTrustedExecutable, interpreter: OpenTrustedExecutable | undefined,
-  configPath: string, input: string, timeoutMs: number): Promise<string> {
+  configPath: string, input: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {
   if (process.platform !== 'linux') throw new SourceApprovalClientError('FAILED', 'descriptor-pinned source approval requires Linux')
   try { await realpath('/proc/self/fd') } catch {
     throw new SourceApprovalClientError('FAILED', 'descriptor-pinned source approval requires /proc/self/fd')
@@ -116,9 +116,10 @@ async function execute(executable: OpenTrustedExecutable, interpreter: OpenTrust
       // The authority reads its own owner-private config.  No caller
       // environment, credentials, or model/provider settings cross this edge.
       env: { LANG: 'C', LC_ALL: 'C', TZ: 'UTC', PATH: '/usr/bin:/bin' },
-      stdio, stdin: input, timeoutMs, maximumOutput: MAX_OUTPUT_BYTES })
+      stdio, stdin: input, timeoutMs, maximumOutput: MAX_OUTPUT_BYTES, ...(signal ? { signal } : {}) })
   } catch (error) {
     if (!(error instanceof ControlledProcessError)) throw error
+    if (error.code === 'ABORTED') throw new SourceApprovalClientError('ABORTED', 'source authority request was aborted')
     if (error.code === 'TIMEOUT') throw new SourceApprovalClientError('TIMEOUT', 'source approval authority exceeded its deadline')
     if (error.code === 'OUTPUT_LIMIT') throw new SourceApprovalClientError('OUTPUT_LIMIT', 'source approval authority exceeded its output bound')
     throw new SourceApprovalClientError('FAILED', error.code === 'NON_ZERO'
@@ -129,8 +130,13 @@ async function execute(executable: OpenTrustedExecutable, interpreter: OpenTrust
 // Shared descriptor-pinned transport; protocol-specific wrappers validate the receipt.
 export async function requestSourceAuthorityReceipt<T>(config: SourceApprovalClientConfig, request: SourceAuthorityRequest,
   parseReceipt: (value: unknown) => T, signal?: AbortSignal): Promise<T> {
-  validateSourceApprovalClientConfig(config)
   assertRequest(request)
+  return requestPinnedAuthorityReceipt(config, request, parseReceipt, signal)
+}
+
+export async function requestPinnedAuthorityReceipt<T>(config: SourceApprovalClientConfig, request: unknown,
+  parseReceipt: (value: unknown) => T, signal?: AbortSignal): Promise<T> {
+  validateSourceApprovalClientConfig(config)
   assertNotAborted(signal)
   const input = JSON.stringify(request)
   if (Buffer.byteLength(input) > MAX_INPUT_BYTES) throw new SourceApprovalClientError('FAILED', 'source approval request exceeds its input bound')
@@ -141,7 +147,7 @@ export async function requestSourceAuthorityReceipt<T>(config: SourceApprovalCli
     interpreter = config.interpreter === undefined ? undefined
       : await openTrustedExecutable(config.interpreter.path, config.interpreter.sha256)
     assertNotAborted(signal)
-    const output = await execute(executable, interpreter, config.configPath, input, config.timeoutMs)
+    const output = await execute(executable, interpreter, config.configPath, input, config.timeoutMs, signal)
     await verifyOpenTrustedExecutable(executable)
     if (interpreter !== undefined) await verifyOpenTrustedExecutable(interpreter)
     assertNotAborted(signal)

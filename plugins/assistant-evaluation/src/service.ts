@@ -676,6 +676,15 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     return this.store.getAutomationRunLearningProjection(exactEvaluationHostScope(input.scope), input.runId)
   }
 
+  /** Host-only lookup by the persisted Delivery execution identity. */
+  getTrustedForegroundLearningProjection(input: {
+    scope: EvaluationHostScope; inboxId: string
+  }): TrustedTaskLearningProjectionReceipt | undefined {
+    this.assertActive()
+    return this.store.getForegroundLearningProjection(exactEvaluationHostScope(input.scope),
+      hostIdentifier(input.inboxId, 'inboxId', 1_000))
+  }
+
   /** Host-only exact canonical whole-goal proof, addressed by assessment id. */
   getTrustedGoalOutcomeLearningProjection(input: {
     scope: EvaluationHostScope

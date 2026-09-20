@@ -3,7 +3,19 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 20
+export const controlPlaneSchemaVersion = 21
+
+const taskObservationsSchema = `CREATE TABLE IF NOT EXISTS task_observation_batches (
+  id TEXT PRIMARY KEY, lane TEXT NOT NULL, plan_id TEXT NOT NULL REFERENCES activation_plans(id) ON DELETE RESTRICT,
+  batch_json TEXT NOT NULL CHECK(json_valid(batch_json) AND json_type(batch_json) = 'object'),
+  batch_digest TEXT NOT NULL CHECK(length(batch_digest) = 64),
+  state TEXT NOT NULL CHECK(state IN ('pending','signed','applied','stale')),
+  receipt_json TEXT CHECK(receipt_json IS NULL OR (json_valid(receipt_json) AND json_type(receipt_json) = 'object')),
+  receipt_digest TEXT CHECK(receipt_digest IS NULL OR length(receipt_digest) = 64),
+  created_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS task_observation_batches_lane ON task_observation_batches(lane, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS task_observation_batches_open_lane ON task_observation_batches(lane) WHERE state IN ('pending','signed');`
 
 const foregroundDeploymentsSchema = `CREATE TABLE IF NOT EXISTS foreground_deployments (
   inbox_id TEXT PRIMARY KEY,
@@ -1131,6 +1143,9 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 20) {
       database.exec(`BEGIN IMMEDIATE; ${foregroundDeploymentsSchema} PRAGMA user_version = 20; COMMIT;`)
     } else database.exec(foregroundDeploymentsSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 21) {
+      database.exec(`BEGIN IMMEDIATE; ${taskObservationsSchema} PRAGMA user_version = 21; COMMIT;`)
+    } else database.exec(taskObservationsSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

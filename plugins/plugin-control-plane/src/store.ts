@@ -11,6 +11,8 @@ import { validateScopedPluginFiles } from './source-workspace.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
 import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
 import { assertForegroundDeployment, assertForegroundTask, type ForegroundDeploymentRecord } from './foreground-deployment.js'
+import { assertTaskObservationBatch, getTaskObservationRecord, readTaskObservationContext } from './task-observation-store.js'
+import type { TaskObservationBatch, TaskObservationRecord } from './task-observation-types.js'
 import type {
   ActivationRetractionAuthority,
   ActivationRetractionReceipt,
@@ -2122,6 +2124,68 @@ export class ControlPlaneStore {
     if (result.changes !== 1) throw new ControlPlaneStoreError('conflict', 'foreground deployment completion lost its fence')
   }
 
+  listObservedForegroundDeployments(profilePath: string, limit = 1000): readonly ForegroundDeploymentRecord[] {
+    if (!isAbsolute(profilePath) || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new ControlPlaneStoreError('invalid-input', 'foreground deployment query is invalid')
+    const rows = this.#database.prepare(`SELECT deployment.record_json, deployment.record_digest, deployment.plan_id FROM foreground_deployments deployment
+      JOIN activation_plans plan ON plan.id = deployment.plan_id WHERE plan.target_path = ?
+        AND json_extract(deployment.record_json, '$.state') = 'observed'
+      ORDER BY json_extract(deployment.record_json, '$.execution.completedAt') DESC LIMIT ?`).all(profilePath, limit) as Array<{record_json:string;record_digest:string;plan_id:string}>
+    return rows.map(row => { const record = JSON.parse(row.record_json) as ForegroundDeploymentRecord; assertForegroundDeployment(record)
+      if (record.state !== 'observed' || controlPlaneDigest(record) !== row.record_digest || record.readiness.planId !== row.plan_id) throw new ControlPlaneStoreError('invalid-state', 'stored foreground deployment changed')
+      return record })
+  }
+
+  putTaskObservation(batch: TaskObservationBatch): TaskObservationRecord {
+    assertTaskObservationBatch(batch)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      if (batch.createdAt > this.#now() || batch.expiresAt <= this.#now()) throw new ControlPlaneStoreError('expired', 'task observation is outside its validity interval')
+      const prior = this.getTaskObservation(batch.id)
+      if (prior) {
+        if (prior.batch.digest !== batch.digest) throw new ControlPlaneStoreError('conflict', 'task observation identity reused')
+        this.#database.exec('COMMIT'); return prior
+      }
+      const encoded = JSON.stringify(batch)
+      this.#database.prepare('INSERT INTO task_observation_batches (id,lane,plan_id,batch_json,batch_digest,state,created_at) VALUES (?,?,?,?,?,?,?)').run(batch.id,batch.lane,batch.planId,encoded,controlPlaneDigest(batch),'pending',batch.createdAt)
+      readTaskObservationContext(this.#database, batch.id)
+      this.#database.exec('COMMIT'); return Object.freeze({ batch, state: 'pending' })
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  getTaskObservation(id: string): TaskObservationRecord | undefined { return getTaskObservationRecord(this.#database, id) }
+  assertCurrentTaskObservation(id: string): void { readTaskObservationContext(this.#database, id) }
+  listTaskObservations(lane: string, limit = 100): readonly TaskObservationRecord[] {
+    if (!KEY.test(lane) || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new ControlPlaneStoreError('invalid-input', 'task observation list is invalid')
+    const rows = this.#database.prepare(`SELECT batch_json,batch_digest,state,receipt_json FROM task_observation_batches WHERE lane=?
+      ORDER BY CASE WHEN state='pending' THEN 0 WHEN state='signed' THEN 1
+        WHEN state='applied' AND json_extract(receipt_json,'$.disposition')='regressed' THEN 2 WHEN state='applied' THEN 3 ELSE 4 END, created_at DESC LIMIT ?`).all(lane,limit) as Array<{batch_json:string;batch_digest:string;state:string;receipt_json:string|null}>
+    return rows.map(row => getTaskObservationRecord(this.#database, JSON.parse(row.batch_json).id)!)
+  }
+  hasAppliedTaskObservationVote(lane: string, inboxId: string, projectionDigest: string): boolean {
+    return this.#database.prepare(`SELECT 1 FROM task_observation_batches batch, json_each(batch.batch_json, '$.votes') vote
+      WHERE batch.lane=? AND batch.state='applied' AND json_extract(vote.value,'$.inboxId')=?
+        AND json_extract(vote.value,'$.projection.digest')=? LIMIT 1`).get(lane, inboxId, projectionDigest) !== undefined
+  }
+  signTaskObservation(id: string, receipt: PostActivationObservationReceipt): TaskObservationRecord {
+    const record = this.getTaskObservation(id); if (!record || record.state === 'stale' || record.batch.expiresAt <= this.#now()) throw new ControlPlaneStoreError('conflict', 'task observation cannot be signed')
+    const plan = this.getPlan(record.batch.planId), failures = record.batch.votes.filter(vote => vote.status === 'not-achieved').length
+    if (receipt.observationId !== record.batch.id || receipt.evidence.probeDigest !== record.batch.digest
+      || receipt.installationId !== record.batch.installationId || receipt.planId !== plan.id || receipt.planDigest !== plan.digest
+      || receipt.activationId !== plan.activation?.id || receipt.fence !== plan.activation?.fence
+      || receipt.package !== plan.candidate.package || receipt.version !== plan.candidate.version || receipt.integrity !== plan.candidate.integrity
+      || receipt.hostGeneration !== record.batch.hostGeneration || receipt.evidence.checks !== record.batch.votes.length
+      || receipt.evidence.failures !== failures || (receipt.disposition === 'regressed') !== (failures > 0)
+      || receipt.expiresAt <= this.#now()) throw new ControlPlaneStoreError('conflict', 'task observation receipt does not bind its exact batch')
+    if (record.receipt && controlPlaneDigest(record.receipt) !== controlPlaneDigest(receipt)) throw new ControlPlaneStoreError('conflict', 'task observation signature changed')
+    const changed = this.#database.prepare("UPDATE task_observation_batches SET state='signed',receipt_json=?,receipt_digest=? WHERE id=? AND state='pending'").run(JSON.stringify(receipt),controlPlaneDigest(receipt),id)
+    if (changed.changes !== 1 && record.state !== 'signed') throw new ControlPlaneStoreError('conflict', 'task observation signing lost its fence')
+    return this.getTaskObservation(id)!
+  }
+  staleTaskObservation(id: string): TaskObservationRecord {
+    this.#database.prepare("UPDATE task_observation_batches SET state='stale' WHERE id=? AND state IN ('pending','signed')").run(id)
+    const result = this.getTaskObservation(id); if (!result) throw new ControlPlaneStoreError('not-found', 'task observation absent'); return result
+  }
+
   latestHostGeneration(installationId: string): number {
     if (!UUID.test(installationId)) throw new ControlPlaneStoreError('invalid-input', 'installation id is invalid')
     const row = this.#database.prepare(`SELECT max(generation) AS generation FROM (
@@ -2396,8 +2460,8 @@ export class ControlPlaneStore {
     return rows.map(watchEvidenceFromRow)
   }
 
-  async recordPostActivationObservation(input: { idempotencyKey: string; expectedRevision?: number;
-    receipt: PostActivationObservationReceipt;
+  async recordPostActivationObservation(input: { idempotencyKey: string; expectedRevision?: number; taskObservationId?: string;
+    withSourceFence?: <T>(callback: () => T) => T; receipt: PostActivationObservationReceipt;
     resolveAuthority: (receipt: PostActivationObservationReceipt) => PostActivationObservationAuthority }):
     Promise<OperationReceipt<ActivationWatch>> {
     const key = bounded(input.idempotencyKey, 'idempotencyKey', 160)
@@ -2414,30 +2478,58 @@ export class ControlPlaneStore {
     }
     const verified = await input.resolveAuthority(input.receipt).verify(input.receipt, plan, watch.exact)
     const now = this.#now()
-    this.#database.exec('BEGIN IMMEDIATE')
-    try {
-      const current = this.#database.prepare('SELECT * FROM activation_watch WHERE plan_id = ?').get(plan.id) as unknown as WatchRow
-      if (current.state !== 'watching') throw new ControlPlaneStoreError('conflict', 'post-activation watch closed while evidence was verified')
-      if (verified.hostGeneration < current.last_host_generation) throw new ControlPlaneStoreError('conflict', 'host generation regressed')
-      this.#insertWatchEvidence(verified.observationId, plan.id, verified.disposition, controlPlaneDigest(input.receipt),
-        verified.signatureDigest, verified, verified.hostGeneration, verified.evidence.failures, verified.evidence.checks, now)
-      if (verified.disposition === 'regressed') {
-        const closed = this.#database.prepare(`UPDATE activation_watch SET state = 'closed-regressed', revision = revision + 1,
-          last_host_generation = ?, updated_at = ?, close_disposition = 'regressed', close_at = ?,
-          close_evidence_id = ?, close_signature_digest = ?
-          WHERE plan_id = ? AND state = 'watching' AND revision = ?`).run(verified.hostGeneration, now, now,
-          verified.observationId, verified.signatureDigest, plan.id, current.revision)
-        if (Number(closed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'post-activation regression lost its watch CAS')
-      } else {
-        const acknowledged = this.#database.prepare(`UPDATE activation_watch SET revision = revision + 1, last_host_generation = ?,
-          healthy_observations = healthy_observations + 1, updated_at = ? WHERE plan_id = ? AND state = 'watching' AND revision = ?`).run(
-          verified.hostGeneration, now, plan.id, current.revision)
-        if (Number(acknowledged.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'post-activation observation lost its watch CAS')
+    if (input.taskObservationId !== undefined) {
+      const task = this.getTaskObservation(input.taskObservationId)
+      if (!task || task.state !== 'signed' || !task.receipt || task.batch.expiresAt <= now
+        || task.batch.planId !== plan.id || task.batch.planDigest !== plan.digest
+        || task.receipt.observationId !== verified.observationId || controlPlaneDigest(task.receipt) !== controlPlaneDigest(input.receipt)
+        || task.batch.hostGeneration !== verified.hostGeneration || task.batch.votes.length !== verified.evidence.checks
+        || task.batch.votes.filter(vote => vote.status === 'not-achieved').length !== verified.evidence.failures
+        || (verified.disposition === 'regressed') !== (verified.evidence.failures > 0)) {
+        throw new ControlPlaneStoreError('conflict', 'task observation receipt differs from its signed batch')
       }
-      const output = this.getActivationWatch(plan.id)
-      const operationReceipt = { idempotencyKey: key, operation: 'post-activation-observation' as const, inputDigest, result: output, createdAt: now }
-      this.#insertReceipt(operationReceipt); this.#database.exec('COMMIT'); return operationReceipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    }
+    const commit = (): OperationReceipt<ActivationWatch> => {
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        if (input.taskObservationId !== undefined) {
+          const context = readTaskObservationContext(this.#database, input.taskObservationId)
+          if (context.record.state !== 'signed' || context.record.batch.expiresAt <= this.#now()
+            || context.record.batch.id !== verified.observationId || context.record.batch.digest !== verified.evidence.probeDigest
+            || verified.expiresAt <= this.#now()) throw new ControlPlaneStoreError('expired', 'task observation is no longer current')
+        }
+        const current = this.#database.prepare('SELECT * FROM activation_watch WHERE plan_id = ?').get(plan.id) as unknown as WatchRow
+        if (current.state !== 'watching') throw new ControlPlaneStoreError('conflict', 'post-activation watch closed while evidence was verified')
+        if (verified.hostGeneration < current.last_host_generation) throw new ControlPlaneStoreError('conflict', 'host generation regressed')
+        this.#insertWatchEvidence(verified.observationId, plan.id, verified.disposition, controlPlaneDigest(input.receipt),
+          verified.signatureDigest, verified, verified.hostGeneration, verified.evidence.failures, verified.evidence.checks, now)
+        if (verified.disposition === 'regressed') {
+          const closed = this.#database.prepare(`UPDATE activation_watch SET state = 'closed-regressed', revision = revision + 1,
+            last_host_generation = ?, updated_at = ?, close_disposition = 'regressed', close_at = ?,
+            close_evidence_id = ?, close_signature_digest = ?
+            WHERE plan_id = ? AND state = 'watching' AND revision = ?`).run(verified.hostGeneration, now, now,
+            verified.observationId, verified.signatureDigest, plan.id, current.revision)
+          if (Number(closed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'post-activation regression lost its watch CAS')
+        } else {
+          const acknowledged = this.#database.prepare(`UPDATE activation_watch SET revision = revision + 1, last_host_generation = ?,
+            healthy_observations = healthy_observations + 1, updated_at = ? WHERE plan_id = ? AND state = 'watching' AND revision = ?`).run(
+            verified.hostGeneration, now, plan.id, current.revision)
+          if (Number(acknowledged.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'post-activation observation lost its watch CAS')
+        }
+        const output = this.getActivationWatch(plan.id)
+        if (input.taskObservationId !== undefined) {
+          const changed = this.#database.prepare("UPDATE task_observation_batches SET state='applied' WHERE id=? AND state='signed' AND receipt_digest=?")
+            .run(input.taskObservationId, controlPlaneDigest(input.receipt))
+          if (changed.changes !== 1) throw new ControlPlaneStoreError('conflict', 'task observation apply lost its fence')
+        }
+        const operationReceipt = { idempotencyKey: key, operation: 'post-activation-observation' as const, inputDigest, result: output, createdAt: now }
+        this.#insertReceipt(operationReceipt); this.#database.exec('COMMIT'); return operationReceipt
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    }
+    if (input.taskObservationId !== undefined && input.withSourceFence === undefined) {
+      throw new ControlPlaneStoreError('conflict', 'task observation apply requires the current source fence')
+    }
+    return input.withSourceFence ? input.withSourceFence(commit) : commit()
   }
 
   async retractActivation(input: { idempotencyKey: string; expectedRevision?: number;

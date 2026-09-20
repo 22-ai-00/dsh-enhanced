@@ -145,9 +145,18 @@ describe('assistant evaluation service', () => {
     }
     delivery.append({ ...base, objectiveStatus: 'achieved', idempotencyKey: 'foreground:initial',
       ownerCommand: { operationId: 'foreground:one', principalRecordId: 'owner-record', principalVersion: 1, action: 'initial' } })
+    const hostScope = service.canonicalHostScope(scope)
+    const initial = service.getTrustedForegroundLearningProjection({ scope: hostScope, inboxId })!
+    expect(initial.projection).toMatchObject({ subjectKind: 'foreground-turn', subjectRef: inboxId, disposition: 'upsert' })
+    expect(initial.objective?.status).toBe('achieved')
+    expect(service.getTrustedForegroundLearningProjection({ scope: hostScope, inboxId: 'missing' })).toBeUndefined()
+    expect(service.getTrustedForegroundLearningProjection({ scope: service.canonicalHostScope({ ...scope, preset: 'other' }), inboxId })).toBeUndefined()
     delivery.append({ ...base, objectiveStatus: 'unknown', idempotencyKey: 'foreground:withdraw',
       ownerCommand: { operationId: 'foreground:two', principalRecordId: 'owner-record', principalVersion: 1,
         action: 'withdraw', expectedVersion: 1, previousStatus: 'achieved' } })
+    const withdrawn = service.getTrustedForegroundLearningProjection({ scope: hostScope, inboxId })!
+    expect(withdrawn.projection.disposition).toBe('retract')
+    expect(withdrawn.projection.version).toBeGreaterThan(initial.projection.version)
     expect(service.queryTasks({ scope })[0]).toMatchObject({
       projection: { subjectKind: 'foreground-turn', subjectRef: inboxId, learningDisposition: 'retract' },
       objectiveStatus: 'unknown',

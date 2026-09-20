@@ -777,7 +777,16 @@ async function finishCommit(store: ControlPlaneStore, plan: PluginActivationPlan
   return committed
 }
 
-async function rollbackClosedWatch(store: ControlPlaneStore, trust: PluginControlTrustConfig, planId: string): Promise<PluginActivationPlan> {
+/**
+ * Complete physical recovery after a closed post-activation watch. The caller
+ * owns the Store lifetime. Once recovery has claimed the activation, rollback
+ * deliberately drains its filesystem work even when the caller is cancelled;
+ * cancellation only interrupts the configured attestor subprocess.
+ */
+export async function rollbackPluginWatch(input: { store: ControlPlaneStore; trust: PluginControlTrustConfig;
+  planId: string; signal?: AbortSignal }): Promise<PluginActivationPlan> {
+  const { store, trust, planId, signal } = input
+  throwIfAborted(signal)
   let plan = store.getPlan(planId)
   assertPlanTrust(plan, trust)
   plan = store.beginPostActivationRollback({ planId, expectedRevision: plan.revision })
@@ -791,6 +800,7 @@ async function rollbackClosedWatch(store: ControlPlaneStore, trust: PluginContro
     finally { if (lock !== undefined) await releaseProfileLock(store, lock) }
   }
   if (trust.hostAttestor === undefined) return plan
+  throwIfAborted(signal)
   const operation = prepareConfiguredHostAttestation(store, plan, trust)
   const resolveAuthority = (receipt: HostAttestationReceipt): Ed25519HostAttestationAuthority => {
     const key = resolveTrustKey(trust, 'host-attestation', receipt.authority, receipt.keyId)
@@ -798,7 +808,7 @@ async function rollbackClosedWatch(store: ControlPlaneStore, trust: PluginContro
   }
   const receipt = await store.runHostAttestationOperation({ operationId: operation.operationId,
     expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
-    execute: request => invokeConfiguredHostAttestor(trust, request), resolveAuthority })
+    execute: request => invokeConfiguredHostAttestor(trust, request, signal), resolveAuthority })
   return (await store.applyHostAttestation({ planId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
     receipt, idempotencyKey: `host-attestation:${operation.operationId}`, resolveAuthority })).result
 }
@@ -1048,7 +1058,7 @@ async function watchObserve(argv: readonly string[]): Promise<void> {
         return new Ed25519PostActivationObservationAuthority(key.publicKeyPem, key.authority, key.keyId)
       },
       idempotencyKey: `post-activation-observation:${receipt.observationId}` })
-    const activation = receipt.disposition === 'regressed' ? await rollbackClosedWatch(store, trust, receipt.planId) : undefined
+    const activation = receipt.disposition === 'regressed' ? await rollbackPluginWatch({ store, trust, planId: receipt.planId }) : undefined
     process.stdout.write(`${JSON.stringify({ ...result, ...(activation === undefined ? {} : { activation }) })}\n`)
   } finally { store.close() }
 }
@@ -1067,7 +1077,7 @@ async function watchRetract(argv: readonly string[]): Promise<void> {
         return new Ed25519ActivationRetractionAuthority(key.publicKeyPem, key.authority, key.keyId)
       },
       idempotencyKey: `activation-retraction:${receipt.retractionId}` })
-    const activation = await rollbackClosedWatch(store, trust, receipt.planId)
+    const activation = await rollbackPluginWatch({ store, trust, planId: receipt.planId })
     process.stdout.write(`${JSON.stringify({ ...result, activation })}\n`)
   } finally { store.close() }
 }

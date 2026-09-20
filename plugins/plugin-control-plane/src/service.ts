@@ -3,6 +3,10 @@ import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
+import { TaskObservationRuntime, validateTaskObservationConfig } from './task-observation-runtime.js'
+import type { TaskObservationConfig } from './task-observation-types.js'
+import { rollbackPluginWatch } from './cli.js'
 import type { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
 import { OwnerTaskFailureGaps } from './owner-task-gaps.js'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -61,6 +65,8 @@ export interface Config {
   runtimeObserver?: RuntimeObserverConfig
   /** Capture real owner foreground tasks against signed, currently loaded deployments. */
   foregroundDeployments?: ForegroundDeploymentConfig
+  /** Finite trusted task feedback observations scheduled by native Automations. */
+  taskObservations?: TaskObservationConfig
   /** Owner-pinned finite native replay; separate from the read-only observer. */
   replayEndpoint?: ReplayEndpointConfig
 }
@@ -75,6 +81,7 @@ const schema = Schema.object({
   sourceAdoptions: Schema.any(),
   runtimeObserver: Schema.any(),
   foregroundDeployments: Schema.any(),
+  taskObservations: Schema.any(),
   replayEndpoint: Schema.any(),
 }) as Schema<Config>
 
@@ -96,7 +103,7 @@ async function canonicalTarget(dshHome: string, profile: string): Promise<Plugin
 
 export class PluginControlPlaneService extends Service {
   static Config = schema
-  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'foregroundDeployments' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'foregroundDeployments' | 'replayEndpoint'>
+  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>
   private readonly store: ControlPlaneStore
   private readonly taskGaps: OwnerTaskFailureGaps
   private readonly abort = new AbortController()
@@ -117,6 +124,12 @@ export class PluginControlPlaneService extends Service {
     if (this.config.foregroundDeployments !== undefined) {
       validateForegroundDeploymentConfig(this.config.foregroundDeployments)
       if (!this.config.runtimeObserver) throw new Error('plugin-control-plane: foregroundDeployments requires runtimeObserver')
+    }
+    if (this.config.taskObservations !== undefined) {
+      validateTaskObservationConfig(this.config.taskObservations)
+      if (!this.config.foregroundDeployments || this.config.taskObservations.profilePath !== this.config.runtimeObserver?.profilePath) {
+        throw new Error('plugin-control-plane: taskObservations requires foregroundDeployments on the same profile')
+      }
     }
     if (this.config.replayEndpoint !== undefined) {
       validateReplayEndpointConfig(this.config.replayEndpoint)
@@ -188,6 +201,47 @@ export class PluginControlPlaneService extends Service {
         return () => fiber.dispose()
       } : undefined)
     if (this.config.replayEndpoint !== undefined) installReplayEndpoint(ctx, this.config.replayEndpoint)
+    if (this.config.taskObservations !== undefined) ctx.inject(['assistantAutomations', 'assistantDelivery', 'assistantEvaluation'] as never[], observerCtx => {
+      observerCtx.effect(async () => {
+        const snapshot = foregroundTrustSnapshot(this.config.trustPath), trust = await this.boundTrust()
+        this.abort.signal.throwIfAborted()
+        const store = new ControlPlaneStore({ path: trust.ledger.path })
+        const evaluation = () => observerCtx.get('assistantEvaluation' as never) as unknown as AssistantEvaluationService
+        const delivery = () => observerCtx.get('assistantDelivery' as never) as unknown as AssistantDeliveryService
+        const automations = () => observerCtx.get('assistantAutomations' as never) as unknown as AssistantAutomationsService
+        let runtime: TaskObservationRuntime | undefined
+        try {
+          runtime = new TaskObservationRuntime({ config: this.config.taskObservations!, store, trust,
+            assertCurrent: () => {
+              this.abort.signal.throwIfAborted()
+              if (foregroundTrustSnapshot(this.config.trustPath) !== snapshot) throw new Error('task observation trust changed')
+            },
+            evaluation: {
+              canonicalHostScope: input => evaluation().canonicalHostScope(input),
+              getTrustedForegroundLearningProjection: input => evaluation().getTrustedForegroundLearningProjection(input),
+              withTrustedCanonicalTaskWriterFence: (input, callback) => evaluation().withTrustedCanonicalTaskWriterFence(input, callback),
+              onTrustedTaskChange: callback => evaluation().onTrustedTaskChange(callback),
+            },
+            delivery: {
+              validateOwnerRoute: input => delivery().validateOwnerRoute(input),
+              inspectOwnerForegroundLearningTask: input => delivery().inspectOwnerForegroundLearningTask(input),
+            },
+            automations: {
+              registerHostExecutor: input => automations().registerHostExecutor(input),
+              reconcileSystem: input => automations().reconcileSystem(input),
+              inspectSystemOwnedActivation: input => automations().inspectSystemOwnedActivation(input),
+            },
+            rollback: (planId, signal) => rollbackPluginWatch({ store, trust, planId, signal }),
+          })
+          runtime.start()
+          return () => runtime!.close()
+        } catch (error) {
+          if (runtime) await runtime.close()
+          else store.close()
+          throw error
+        }
+      }, 'plugin-control-plane.task-observations')
+    })
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never,
       ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : []),
       ...(this.config.sourceReleaseExecution?.independentReview ? ['assistantVerifier', 'agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'] as never[] : [])], jobsCtx => {
