@@ -81,7 +81,7 @@ export function validateSourceApprovalClientConfig(value: unknown): asserts valu
 }
 
 export interface SourceAuthorityRequest extends Omit<SourceApprovalRequest, 'protocol'> {
-  protocol: 'dsh-source-approval/v1' | 'dsh-source-release-authorization/v1'
+  protocol: 'dsh-source-approval/v1' | 'dsh-source-release-authorization/v1' | 'dsh-source-adoption/v1'
 }
 
 function assertRequest(value: unknown): asserts value is SourceAuthorityRequest {
@@ -90,7 +90,7 @@ function assertRequest(value: unknown): asserts value is SourceAuthorityRequest 
     throw new SourceApprovalClientError('FAILED', 'source approval request is invalid')
   }
   const item = value as Record<string, unknown>
-  if (!['dsh-source-approval/v1', 'dsh-source-release-authorization/v1'].includes(String(item.protocol)) || typeof item.planId !== 'string' || typeof item.planDigest !== 'string'
+  if (!['dsh-source-approval/v1', 'dsh-source-release-authorization/v1', 'dsh-source-adoption/v1'].includes(String(item.protocol)) || typeof item.planId !== 'string' || typeof item.planDigest !== 'string'
     || typeof item.sourceReferenceDigest !== 'string' || !ID.test(item.planId)
     || !DIGEST.test(item.planDigest) || !DIGEST.test(item.sourceReferenceDigest)) {
     throw new SourceApprovalClientError('FAILED', 'source approval request is invalid')

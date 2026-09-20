@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { spawn } from 'node:child_process'
 import { constants as fsConstants, lstatSync } from 'node:fs'
 import { cp, lstat, mkdir, open, readFile, realpath, rename, rm, stat } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
@@ -18,6 +17,7 @@ import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthor
   parseSourceReleaseAuthorization, parseSourceReleaseReceipt } from './release.js'
 import { ControlPlaneStore, controlPlaneDigest, expectedSourceRelease } from './store.js'
 import { ControlPlaneCliError } from './errors.js'
+import { ControlledProcessError, executeControlledProcess } from './adapter-process.js'
 import { changedSourcePaths, checkedSourceSnapshot, gcPreparedModifyWorktrees, runLocalCommand, sourcePathAllowed, verifyPreparedSourceWorktree } from './source-workspace.js'
 import { inheritedEnvironment, loadTrustConfig, openTrustedExecutable, resolveTrustKey, verifyOpenTrustedExecutable,
   type OpenTrustedExecutable, type PluginControlTrustConfig } from './trust.js'
@@ -29,6 +29,21 @@ const pluginPattern = /^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 const leaseMs = 30_000
 const pluginCatalogScope = 'plugins/README.md'
 const maximumActivationArtifactBytes = 268_435_456
+
+class ActivationCancelledError extends Error {
+  constructor() { super('plugin activation was cancelled'); this.name = 'ActivationCancelledError' }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new ActivationCancelledError()
+}
+
+async function checked<T>(signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
+  throwIfAborted(signal)
+  const value = await work()
+  throwIfAborted(signal)
+  return value
+}
 
 // checkedSourceSnapshot stays importable from this module for the CLI test
 // suite; the implementation now lives in source-workspace.ts.
@@ -327,19 +342,30 @@ async function executorInterpreter(executable: OpenTrustedExecutable): Promise<{
   return { executable: interpreter, arguments: argument === undefined ? [] : [argument] }
 }
 
-async function runBounded(input: { executable: string; args: readonly string[]; cwd?: string; environment: NodeJS.ProcessEnv;
+async function runBounded(input: { executable: string; args: readonly string[]; environment: NodeJS.ProcessEnv;
   store?: ControlPlaneStore; plan?: PluginActivationPlan; capture?: boolean; maximumOutput?: number;
-  pinnedExecutable?: OpenTrustedExecutable; pinnedInterpreter?: Awaited<ReturnType<typeof executorInterpreter>> }): Promise<string> {
+  pinnedExecutable?: OpenTrustedExecutable; pinnedInterpreter?: Awaited<ReturnType<typeof executorInterpreter>>;
+  signal?: AbortSignal | undefined }): Promise<string> {
   const execute = async (): Promise<string> => {
-    const ownedExecutable = input.plan === undefined || input.pinnedExecutable !== undefined ? undefined
-      : await openTrustedExecutable(input.executable, input.plan.executor.sha256)
-    const executable = input.pinnedExecutable ?? ownedExecutable
+    const activationPlan = input.plan
+    let ownedExecutable: OpenTrustedExecutable | undefined
+    let executable: OpenTrustedExecutable | undefined
     let interpreter = input.pinnedInterpreter
     let result = ''
     let failure: unknown
     try {
-      if (executable !== undefined && interpreter === undefined) interpreter = await executorInterpreter(executable)
-      result = await new Promise((resolvePromise, reject) => {
+      throwIfAborted(input.signal)
+      if (activationPlan !== undefined && input.pinnedExecutable === undefined) {
+        ownedExecutable = await openTrustedExecutable(input.executable, activationPlan.executor.sha256)
+        throwIfAborted(input.signal)
+      }
+      executable = input.pinnedExecutable ?? ownedExecutable
+      if (executable !== undefined && interpreter === undefined) {
+        interpreter = await executorInterpreter(executable)
+        throwIfAborted(input.signal)
+      }
+      throwIfAborted(input.signal)
+      result = await executeControlledProcess((() => {
         let command = input.executable
         let stdio: Array<'ignore' | 'pipe' | number> = ['ignore', 'pipe', 'ignore']
         if (executable !== undefined) {
@@ -357,23 +383,11 @@ async function runBounded(input: { executable: string; args: readonly string[]; 
         if (executable !== undefined && interpreter !== undefined) {
           commandArguments = [...interpreter.arguments, `/proc/self/fd/${3}`, ...commandArguments]
         }
-        const child = spawn(command, commandArguments, { cwd: input.cwd, env: input.environment, stdio, shell: false })
-        const chunks: Buffer[] = []; let bytes = 0; let outputLimit = false; let timedOut = false
-        child.stdout!.on('data', (chunk: Buffer) => {
-          if (!input.capture) return
-          bytes += chunk.length
-          if (bytes > (input.maximumOutput ?? 65_536)) { outputLimit = true; child.kill('SIGKILL') } else chunks.push(chunk)
-        })
-        const timeout = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, 60_000)
-        child.once('error', () => { clearTimeout(timeout); reject(new ControlPlaneCliError('EXECUTOR_FAILED', 'registered executor could not start')) })
-        child.once('close', code => {
-          clearTimeout(timeout)
-          if (timedOut) reject(new ControlPlaneCliError('EXECUTOR_TIMEOUT', 'registered executor exceeded its deadline'))
-          else if (outputLimit) reject(new ControlPlaneCliError('EXECUTOR_OUTPUT_LIMIT', 'registered executor exceeded its output bound'))
-          else if (code !== 0) reject(new ControlPlaneCliError('EXECUTOR_FAILED', 'registered executor returned a non-zero status'))
-          else resolvePromise(input.capture ? Buffer.concat(chunks).toString('utf8') : '')
-        })
-      })
+        return { command, args: commandArguments, env: input.environment, stdio,
+          stdin: '', timeoutMs: 60_000, maximumOutput: input.maximumOutput ?? 65_536,
+          ...(input.signal === undefined ? {} : { signal: input.signal }) }
+      })())
+      throwIfAborted(input.signal)
     } catch (error) { failure = error }
     try {
       if (executable !== undefined) await verifyPinnedDescriptor(executable)
@@ -384,8 +398,16 @@ async function runBounded(input: { executable: string; args: readonly string[]; 
       if (input.pinnedInterpreter === undefined && interpreter !== undefined) await interpreter.executable.handle.close()
       await ownedExecutable?.handle.close()
     }
+    throwIfAborted(input.signal)
+    if (failure instanceof ControlledProcessError) {
+      if (failure.code === 'ABORTED') throw new ActivationCancelledError()
+      if (failure.code === 'TIMEOUT') throw new ControlPlaneCliError('EXECUTOR_TIMEOUT', 'registered executor exceeded its deadline')
+      if (failure.code === 'OUTPUT_LIMIT') throw new ControlPlaneCliError('EXECUTOR_OUTPUT_LIMIT', 'registered executor exceeded its output bound')
+      throw new ControlPlaneCliError('EXECUTOR_FAILED', failure.code === 'NON_ZERO'
+        ? 'registered executor returned a non-zero status' : 'registered executor could not start or be safely reclaimed')
+    }
     if (failure !== undefined) throw failure
-    return result
+    return input.capture ? result : ''
   }
   return input.store !== undefined && input.plan !== undefined
     ? input.store.withActivationFileSystemGuard({ planId: input.plan.id, expectedRevision: input.plan.revision,
@@ -763,7 +785,7 @@ async function rollbackClosedWatch(store: ControlPlaneStore, trust: PluginContro
   if (plan.status === 'rolled-back') return plan
   if (!plan.activation?.rollbackProfileRestored) {
     plan = await store.claimActivation({ planId, expectedRevision: plan.revision, leaseMs,
-      resolveApprovalAuthority: receipt => activationApprovalAuthority(trust, receipt) })
+      resolveApprovalAuthority: receipt => activationClaimAuthority(trust, plan, receipt) })
     let lock: ProfileLock | undefined = await acquireProfileLock(store, plan)
     try { plan = await finishRollback(store, plan, lock); lock = undefined }
     finally { if (lock !== undefined) await releaseProfileLock(store, lock) }
@@ -801,82 +823,115 @@ async function approve(argv: readonly string[]): Promise<void> {
 
 function activationApprovalAuthority(trust: PluginControlTrustConfig, receipt: ApprovalReceipt): Ed25519ApprovalAuthority {
   const key = resolveTrustKey(trust, 'approval', receipt.authority, receipt.keyId)
+  return new Ed25519ApprovalAuthority(key.publicKeyPem, key.authority, key.keyId)
+}
+
+function recoveryActivationApprovalAuthority(trust: PluginControlTrustConfig, receipt: ApprovalReceipt): Ed25519ApprovalAuthority {
+  const key = resolveTrustKey(trust, 'approval', receipt.authority, receipt.keyId)
+  // A rollback is physical recovery for a previously admitted activation. It
+  // verifies the original bounded receipt at its decision time and does not
+  // authorize a new forward deployment after that receipt has expired.
   return new Ed25519ApprovalAuthority(key.publicKeyPem, key.authority, key.keyId, () => receipt.decidedAt)
+}
+
+function activationClaimAuthority(trust: PluginControlTrustConfig, plan: PluginActivationPlan, receipt: ApprovalReceipt): Ed25519ApprovalAuthority {
+  return plan.status === 'rollback-pending'
+    ? recoveryActivationApprovalAuthority(trust, receipt)
+    : activationApprovalAuthority(trust, receipt)
+}
+
+export async function activatePluginPlan(input: { store: ControlPlaneStore; trust: PluginControlTrustConfig;
+  planId: string; expectedRevision: number; signal?: AbortSignal }): Promise<PluginActivationPlan> {
+  const { store, trust, planId, expectedRevision, signal } = input
+  let lock: ProfileLock | undefined
+  try {
+    throwIfAborted(signal)
+    let plan = store.getPlan(planId); assertPlanTrust(plan, trust)
+    if (plan.status === 'activated') { await checked(signal, () => cleanupRetiredBackups(store, plan)); return plan }
+    if (plan.status === 'rollback-pending' && plan.activation?.rollbackProfileRestored) {
+      if (plan.revision !== expectedRevision) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'activation targets a stale revision')
+      return plan
+    }
+    // Claim and lock form one durable recovery boundary.  Do not let an abort
+    // between their awaits escape before the staging try/catch owns rollback.
+    plan = await store.claimActivation({ planId: plan.id, expectedRevision, leaseMs,
+      resolveApprovalAuthority: receipt => activationClaimAuthority(trust, plan, receipt) })
+    lock = await acquireProfileLock(store, plan)
+    const activationPaths = paths(plan)
+    if (plan.status === 'rollback-pending') { const output = await finishRollback(store, plan, lock); lock = undefined; return output }
+    if (plan.status === 'commit-pending') {
+      return await finishCommit(store, plan)
+    }
+    if (plan.status !== 'staging') throw new ControlPlaneCliError('HOST_ATTESTATION_REQUIRED', 'activation is awaiting a signed Host attestation')
+    try {
+      await checked(signal, () => assertDirectory(trust.dshHome)); await checked(signal, () => assertDirectory(join(trust.dshHome, 'profiles'))); await checked(signal, () => assertDirectory(plan.target.profilePath, true))
+      const environment = inheritedEnvironment(trust)
+      if (plan.activation?.targetOriginallyExisted === undefined) {
+        if (await checked(signal, () => directoryExists(activationPaths.backupPath)) || await checked(signal, () => directoryExists(activationPaths.stagePath))) {
+          throw new ControlPlaneCliError('FILESYSTEM_STATE', 'unbound activation residue requires owner recovery')
+        }
+        const existed = await checked(signal, () => directoryExists(plan.target.profilePath))
+        const baselineFiles = existed ? await checked(signal, () => fencedMutation(store, plan, () => captureRollbackBaseline({ ...plan, activation: { ...plan.activation!, targetOriginallyExisted: true } }))) : []
+        plan = store.recordActivationTargetBaseline({ planId: plan.id, expectedRevision: plan.revision,
+          fence: plan.activation!.fence, existed, baselineFiles })
+      }
+      await checked(signal, () => restoreTarget(store, plan, activationPaths.backupPath))
+      await checked(signal, () => fencedMutation(store, plan, () => rm(activationPaths.stagePath, { recursive: true, force: true })))
+      if (plan.activation!.targetOriginallyExisted) {
+        await checked(signal, () => stat(plan.target.profilePath))
+        await checked(signal, () => fencedMutation(store, plan, () => cp(plan.target.profilePath, activationPaths.stagePath, { recursive: true, force: false, errorOnExist: true })))
+      }
+      let activationArtifacts: Awaited<ReturnType<typeof activationPackages>> | undefined
+      let pinnedExecutor: OpenTrustedExecutable | undefined
+      let pinnedInterpreter: Awaited<ReturnType<typeof executorInterpreter>>
+      try {
+        // Retain newly opened artifact descriptors before the post-await abort
+        // check so this disposer owns them on cancellation.
+        throwIfAborted(signal)
+        await fencedMutation(store, plan, async () => { activationArtifacts = await activationPackages(trust, plan) })
+        throwIfAborted(signal)
+        throwIfAborted(signal); pinnedExecutor = await openTrustedExecutable(trust.executor.path, plan.executor.sha256); throwIfAborted(signal)
+        pinnedInterpreter = await executorInterpreter(pinnedExecutor); throwIfAborted(signal)
+        const executor = { pinnedExecutable: pinnedExecutor, pinnedInterpreter }
+        const version = (await runBounded({ executable: trust.executor.path, args: ['--version'], environment, store, plan, capture: true, signal, ...executor })).trim()
+        if (version !== plan.candidate.dshBaseline) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'registered executor baseline differs from the approved dossier')
+        await runBounded({ executable: trust.executor.path, args: ['plugin', '--profile', activationPaths.stageProfile, 'add',
+          ...activationArtifacts!.packages.map(installSpec)], environment, store, plan, signal, ...executor })
+        await checked(signal, () => Promise.all(activationArtifacts!.snapshots.map(verifyActivationArtifactSnapshot)))
+        const lockfileSource = await checked(signal, () => readSafeFile(join(activationPaths.stagePath, 'pnpm-lock.yaml'), 8 * 1024 * 1024))
+        verifyApprovedPackagesInLockfile(lockfileSource, activationArtifacts!.packages, activationPaths.stagePath)
+        await checked(signal, () => verifyInstalledPackages(activationPaths.stagePath, activationArtifacts!.packages))
+        // Configuration materialization is a staging integrity check only. It is
+        // deliberately not called readiness, reload, shadow, canary or health.
+        await runBounded({ executable: trust.executor.path, args: ['--profile', activationPaths.stageProfile, '--dump-config'],
+          environment, store, plan, signal, ...executor })
+      } finally {
+        if (activationArtifacts !== undefined) await closeActivationArtifactSnapshots(activationArtifacts.snapshots)
+        if (pinnedInterpreter !== undefined) await pinnedInterpreter.executable.handle.close()
+        await pinnedExecutor?.handle.close()
+      }
+      plan = store.markActivationHostExposure({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence })
+      throwIfAborted(signal)
+      if (plan.activation!.targetOriginallyExisted) await checked(signal, () => fencedMutation(store, plan, () => rename(plan.target.profilePath, activationPaths.backupPath)))
+      await checked(signal, () => fencedMutation(store, plan, () => rename(activationPaths.stagePath, plan.target.profilePath)))
+      plan = advance(store, plan, 'awaiting-reload')
+      return plan
+    } catch (error) {
+      plan = advance(store, plan, 'rollback-pending', error instanceof ActivationCancelledError ? 'activation-cancelled'
+        : error instanceof ControlPlaneCliError ? error.code.toLowerCase().replaceAll('_', '-') : 'activation-failed')
+      await finishRollback(store, plan, lock); lock = undefined
+      throw error
+    }
+  } finally { if (lock !== undefined) await releaseProfileLock(store, lock) }
 }
 
 async function activate(argv: readonly string[]): Promise<void> {
   const trust = await commandTrust(argv)
   const store = new ControlPlaneStore({ path: trust.ledger.path })
-  let lock: ProfileLock | undefined
   try {
-    let plan = store.getPlan(option(argv, '--plan-id')); assertPlanTrust(plan, trust)
-    if (plan.status === 'activated') { await cleanupRetiredBackups(store, plan); process.stdout.write(`${JSON.stringify(plan)}\n`); return }
-    if (plan.status === 'rollback-pending' && plan.activation?.rollbackProfileRestored) {
-      if (plan.revision !== integerOption(argv, '--expected-revision')) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'activation targets a stale revision')
-      process.stdout.write(`${JSON.stringify(plan)}\n`); return
-    }
-    plan = await store.claimActivation({ planId: plan.id, expectedRevision: integerOption(argv, '--expected-revision'), leaseMs,
-      resolveApprovalAuthority: receipt => activationApprovalAuthority(trust, receipt) })
-    lock = await acquireProfileLock(store, plan)
-    const activationPaths = paths(plan)
-    if (plan.status === 'rollback-pending') { process.stdout.write(`${JSON.stringify(await finishRollback(store, plan, lock))}\n`); lock = undefined; return }
-    if (plan.status === 'commit-pending') {
-      process.stdout.write(`${JSON.stringify(await finishCommit(store, plan))}\n`); return
-    }
-    if (plan.status !== 'staging') throw new ControlPlaneCliError('HOST_ATTESTATION_REQUIRED', 'activation is awaiting a signed Host attestation')
-    await assertDirectory(trust.dshHome); await assertDirectory(join(trust.dshHome, 'profiles')); await assertDirectory(plan.target.profilePath, true)
-    const environment = inheritedEnvironment(trust)
-    try {
-      if (plan.activation?.targetOriginallyExisted === undefined) {
-        if (await directoryExists(activationPaths.backupPath) || await directoryExists(activationPaths.stagePath)) {
-          throw new ControlPlaneCliError('FILESYSTEM_STATE', 'unbound activation residue requires owner recovery')
-        }
-        const existed = await directoryExists(plan.target.profilePath)
-        const baselineFiles = existed ? await fencedMutation(store, plan, () => captureRollbackBaseline({ ...plan, activation: { ...plan.activation!, targetOriginallyExisted: true } })) : []
-        plan = store.recordActivationTargetBaseline({ planId: plan.id, expectedRevision: plan.revision,
-          fence: plan.activation!.fence, existed, baselineFiles })
-      }
-      await restoreTarget(store, plan, activationPaths.backupPath)
-      await fencedMutation(store, plan, () => rm(activationPaths.stagePath, { recursive: true, force: true }))
-      if (plan.activation!.targetOriginallyExisted) {
-        await stat(plan.target.profilePath)
-        await fencedMutation(store, plan, () => cp(plan.target.profilePath, activationPaths.stagePath, { recursive: true, force: false, errorOnExist: true }))
-      }
-      const activationArtifacts = await fencedMutation(store, plan, () => activationPackages(trust, plan))
-      let pinnedExecutor: OpenTrustedExecutable | undefined
-      let pinnedInterpreter: Awaited<ReturnType<typeof executorInterpreter>>
-      try {
-        pinnedExecutor = await openTrustedExecutable(trust.executor.path, plan.executor.sha256)
-        pinnedInterpreter = await executorInterpreter(pinnedExecutor)
-        const executor = { pinnedExecutable: pinnedExecutor, pinnedInterpreter }
-        const version = (await runBounded({ executable: trust.executor.path, args: ['--version'], environment, store, plan, capture: true, ...executor })).trim()
-        if (version !== plan.candidate.dshBaseline) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'registered executor baseline differs from the approved dossier')
-        await runBounded({ executable: trust.executor.path, args: ['plugin', '--profile', activationPaths.stageProfile, 'add',
-          ...activationArtifacts.packages.map(installSpec)], environment, store, plan, ...executor })
-        await Promise.all(activationArtifacts.snapshots.map(verifyActivationArtifactSnapshot))
-        const lockfileSource = await readSafeFile(join(activationPaths.stagePath, 'pnpm-lock.yaml'), 8 * 1024 * 1024)
-        verifyApprovedPackagesInLockfile(lockfileSource, activationArtifacts.packages, activationPaths.stagePath)
-        await verifyInstalledPackages(activationPaths.stagePath, activationArtifacts.packages)
-        // Configuration materialization is a staging integrity check only. It is
-        // deliberately not called readiness, reload, shadow, canary or health.
-        await runBounded({ executable: trust.executor.path, args: ['--profile', activationPaths.stageProfile, '--dump-config'],
-          environment, store, plan, ...executor })
-      } finally {
-        await closeActivationArtifactSnapshots(activationArtifacts.snapshots)
-        if (pinnedInterpreter !== undefined) await pinnedInterpreter.executable.handle.close()
-        await pinnedExecutor?.handle.close()
-      }
-      plan = store.markActivationHostExposure({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence })
-      if (plan.activation!.targetOriginallyExisted) await fencedMutation(store, plan, () => rename(plan.target.profilePath, activationPaths.backupPath))
-      await fencedMutation(store, plan, () => rename(activationPaths.stagePath, plan.target.profilePath))
-      plan = advance(store, plan, 'awaiting-reload')
-      process.stdout.write(`${JSON.stringify(plan)}\n`)
-    } catch (error) {
-      plan = advance(store, plan, 'rollback-pending', error instanceof ControlPlaneCliError ? error.code.toLowerCase().replaceAll('_', '-') : 'activation-failed')
-      await finishRollback(store, plan, lock); lock = undefined
-      throw error
-    }
-  } finally { if (lock !== undefined) await releaseProfileLock(store, lock); store.close() }
+    const result = await activatePluginPlan({ store, trust, planId: option(argv, '--plan-id'), expectedRevision: integerOption(argv, '--expected-revision') })
+    process.stdout.write(`${JSON.stringify(result)}\n`)
+  } finally { store.close() }
 }
 
 async function attest(argv: readonly string[]): Promise<void> {
@@ -898,7 +953,7 @@ async function attest(argv: readonly string[]): Promise<void> {
     let plan = store.getPlan(result.result.id); assertPlanTrust(plan, trust)
     if (plan.status === 'rollback-pending' || plan.status === 'commit-pending') {
       plan = await store.claimActivation({ planId: plan.id, expectedRevision: plan.revision, leaseMs,
-        resolveApprovalAuthority: receipt => activationApprovalAuthority(trust, receipt) }); lock = await acquireProfileLock(store, plan)
+        resolveApprovalAuthority: receipt => activationClaimAuthority(trust, plan, receipt) }); lock = await acquireProfileLock(store, plan)
       if (plan.status === 'rollback-pending') { plan = await finishRollback(store, plan, lock); lock = undefined }
       else {
         plan = await finishCommit(store, plan)
@@ -919,40 +974,64 @@ async function hostRequest(argv: readonly string[]): Promise<void> {
   } finally { store.close() }
 }
 
-async function probe(argv: readonly string[]): Promise<void> {
-  const trust = await commandTrust(argv)
+async function probePluginPlanResult(input: { store: ControlPlaneStore; trust: PluginControlTrustConfig;
+  planId: string; expectedRevision: number; expectedFence: number; signal?: AbortSignal }): Promise<{ plan: PluginActivationPlan; result: Awaited<ReturnType<ControlPlaneStore['applyHostAttestation']>> }> {
+  const { store, trust, planId, expectedRevision, expectedFence, signal } = input
   if (trust.hostAttestor === undefined) throw new ControlPlaneCliError('HOST_ATTESTOR_NOT_CONFIGURED', 'deployment has no owner-configured Host attestor; activation remains awaiting its current phase')
-  const store = new ControlPlaneStore({ path: trust.ledger.path }); let lock: ProfileLock | undefined
+  let lock: ProfileLock | undefined
   try {
-    const plan = store.getPlan(option(argv, '--plan-id')); assertPlanTrust(plan, trust)
-    const expectedRevision = integerOption(argv, '--expected-revision'); const expectedFence = integerOption(argv, '--expected-fence')
+    throwIfAborted(signal)
+    const plan = store.getPlan(planId); assertPlanTrust(plan, trust)
     if (plan.revision !== expectedRevision || plan.activation?.fence !== expectedFence) {
       throw new ControlPlaneCliError('ACTIVATION_BINDING', 'configured Host probe targets a stale revision/fence')
     }
     const operation = prepareConfiguredHostAttestation(store, plan, trust)
-    if (argv.includes('--prepare-only')) {
-      process.stdout.write(`${JSON.stringify(operation.request)}\n`)
-      return
-    }
+    throwIfAborted(signal)
     const resolveAuthority = (value: HostAttestationReceipt): Ed25519HostAttestationAuthority => {
       const key = resolveTrustKey(trust, 'host-attestation', value.authority, value.keyId)
       return new Ed25519HostAttestationAuthority(key.publicKeyPem, key.authority, key.keyId)
     }
-    const receipt = await store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision, expectedFence,
-      execute: request => invokeConfiguredHostAttestor(trust, request), resolveAuthority })
-    const result = await store.applyHostAttestation({ planId: plan.id, expectedRevision, expectedFence, receipt,
-      idempotencyKey: `host-attestation:${operation.operationId}`, resolveAuthority })
+    const receipt = await checked(signal, () => store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision, expectedFence,
+      execute: request => invokeConfiguredHostAttestor(trust, request, signal), resolveAuthority }))
+    const result = await checked(signal, () => store.applyHostAttestation({ planId: plan.id, expectedRevision, expectedFence, receipt,
+      idempotencyKey: `host-attestation:${operation.operationId}`, resolveAuthority }))
     let output = result.result
     if (output.status === 'rollback-pending' || output.status === 'commit-pending') {
+      // Once physical recovery/commit is durable, complete it under the
+      // profile lock instead of leaving a claimed plan on a late abort.
       output = await store.claimActivation({ planId: output.id, expectedRevision: output.revision, leaseMs,
-        resolveApprovalAuthority: receipt => activationApprovalAuthority(trust, receipt) }); lock = await acquireProfileLock(store, output)
+        resolveApprovalAuthority: receipt => activationClaimAuthority(trust, output, receipt) }); lock = await acquireProfileLock(store, output)
       if (output.status === 'rollback-pending') { output = await finishRollback(store, output, lock); lock = undefined }
       else {
         output = await finishCommit(store, output)
       }
     }
-    process.stdout.write(`${JSON.stringify({ ...result, result: output })}\n`)
-  } finally { if (lock !== undefined) await releaseProfileLock(store, lock); store.close() }
+    return { plan: output, result }
+  } finally { if (lock !== undefined) await releaseProfileLock(store, lock) }
+}
+
+export async function probePluginPlan(input: { store: ControlPlaneStore; trust: PluginControlTrustConfig;
+  planId: string; expectedRevision: number; expectedFence: number; signal?: AbortSignal }): Promise<PluginActivationPlan> {
+  return (await probePluginPlanResult(input)).plan
+}
+
+async function probe(argv: readonly string[]): Promise<void> {
+  const trust = await commandTrust(argv)
+  if (trust.hostAttestor === undefined) throw new ControlPlaneCliError('HOST_ATTESTOR_NOT_CONFIGURED', 'deployment has no owner-configured Host attestor; activation remains awaiting its current phase')
+  const store = new ControlPlaneStore({ path: trust.ledger.path })
+  try {
+    const planId = option(argv, '--plan-id'); const expectedRevision = integerOption(argv, '--expected-revision'); const expectedFence = integerOption(argv, '--expected-fence')
+    if (argv.includes('--prepare-only')) {
+      const plan = store.getPlan(planId); assertPlanTrust(plan, trust)
+      if (plan.revision !== expectedRevision || plan.activation?.fence !== expectedFence) {
+        throw new ControlPlaneCliError('ACTIVATION_BINDING', 'configured Host probe targets a stale revision/fence')
+      }
+      process.stdout.write(`${JSON.stringify(prepareConfiguredHostAttestation(store, plan, trust).request)}\n`)
+      return
+    }
+    const outcome = await probePluginPlanResult({ store, trust, planId, expectedRevision, expectedFence })
+    process.stdout.write(`${JSON.stringify({ ...outcome.result, result: outcome.plan })}\n`)
+  } finally { store.close() }
 }
 
 async function watchObserve(argv: readonly string[]): Promise<void> {

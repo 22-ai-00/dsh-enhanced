@@ -3,7 +3,15 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 18
+export const controlPlaneSchemaVersion = 19
+
+const sourceAdoptionsSchema = `CREATE TABLE IF NOT EXISTS source_adoptions (
+  source_plan_id TEXT PRIMARY KEY REFERENCES source_plans(id) ON DELETE RESTRICT,
+  activation_plan_id TEXT NOT NULL UNIQUE REFERENCES activation_plans(id) ON DELETE RESTRICT,
+  binding_json TEXT NOT NULL CHECK(json_valid(binding_json) AND json_type(binding_json) = 'object'),
+  binding_digest TEXT NOT NULL CHECK(length(binding_digest) = 64),
+  created_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;`
 
 export function controlPlaneOperationReceiptDigest(idempotencyKey: string, operation: string, inputDigest: string,
   resultJson: string, createdAt: number): string {
@@ -1110,6 +1118,9 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       if (version <= 16) migrateV16ToV17(database)
       if (version <= 17) migrateV17ToV18(database)
     }
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 19) {
+      database.exec(`BEGIN IMMEDIATE; ${sourceAdoptionsSchema} PRAGMA user_version = 19; COMMIT;`)
+    } else database.exec(sourceAdoptionsSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

@@ -77,7 +77,8 @@ export function prepareConfiguredHostAttestation(store: ControlPlaneStore, plan:
 
 async function execute(executable: OpenTrustedExecutable, interpreter: OpenTrustedExecutable | undefined,
   args: readonly string[], environment: NodeJS.ProcessEnv,
-  timeoutMs: number, input: string | undefined, maximumOutput: number): Promise<string> {
+  timeoutMs: number, input: string | undefined, maximumOutput: number, signal?: AbortSignal): Promise<string> {
+  if (signal?.aborted) throw new HostAttestorError('FAILED', 'registered Host attestor was cancelled')
   if (process.platform !== 'linux') throw new HostAttestorError('FAILED', 'descriptor-pinned Host attestors require Linux')
   try { await realpath('/proc/self/fd') } catch {
     throw new HostAttestorError('FAILED', 'descriptor-pinned Host attestors require /proc/self/fd')
@@ -88,7 +89,7 @@ async function execute(executable: OpenTrustedExecutable, interpreter: OpenTrust
   if (interpreter !== undefined) stdio.push(interpreter.handle.fd)
   try {
     return await executeControlledProcess({ command, args: commandArguments, env: environment, stdio,
-      stdin: input, timeoutMs, maximumOutput })
+      stdin: input, timeoutMs, maximumOutput, ...(signal === undefined ? {} : { signal }) })
   } catch (error) {
     if (!(error instanceof ControlledProcessError)) throw error
     if (error.code === 'TIMEOUT') throw new HostAttestorError('TIMEOUT', 'registered Host attestor exceeded its deadline')
@@ -99,7 +100,7 @@ async function execute(executable: OpenTrustedExecutable, interpreter: OpenTrust
 }
 
 export async function invokeConfiguredHostAttestor(trust: PluginControlTrustConfig,
-  request: HostAttestationRequest): Promise<HostAttestationReceipt> {
+  request: HostAttestationRequest, signal?: AbortSignal): Promise<HostAttestationReceipt> {
   const attestor = trust.hostAttestor
   if (attestor === undefined) throw new HostAttestorError('NOT_CONFIGURED', 'no owner-configured Host attestor is registered')
   if (request.issuer.mode !== 'configured-executable' || request.issuer.id !== attestor.id
@@ -109,19 +110,24 @@ export async function invokeConfiguredHostAttestor(trust: PluginControlTrustConf
     || request.issuer.keyId !== attestor.keyId) throw new HostAttestorError('FAILED', 'durable request is not bound to the configured Host attestor')
   let executable: OpenTrustedExecutable | undefined
   let interpreter: OpenTrustedExecutable | undefined
+  let receipt: HostAttestationReceipt | undefined
   try {
+    if (signal?.aborted) throw new HostAttestorError('FAILED', 'registered Host attestor was cancelled')
     executable = await openTrustedExecutable(attestor.path, attestor.sha256)
+    if (signal?.aborted) throw new HostAttestorError('FAILED', 'registered Host attestor was cancelled')
     interpreter = attestor.interpreter === null ? undefined
       : await openTrustedExecutable(attestor.interpreter.path, attestor.interpreter.sha256)
+    if (signal?.aborted) throw new HostAttestorError('FAILED', 'registered Host attestor was cancelled')
     const environment = inheritedHostAttestorEnvironment(trust)
-    const version = (await execute(executable, interpreter, ['--version'], environment, attestor.timeoutMs, undefined, 1_024)).trim()
+    const version = (await execute(executable, interpreter, ['--version'], environment, attestor.timeoutMs, undefined, 1_024, signal)).trim()
     if (version !== attestor.version) throw new HostAttestorError('VERSION_MISMATCH', 'registered Host attestor reported a different version')
-    const receiptSource = await execute(executable, interpreter, ['attest'], environment, attestor.timeoutMs, `${JSON.stringify(request)}\n`, 65_536)
+    const receiptSource = await execute(executable, interpreter, ['attest'], environment, attestor.timeoutMs, `${JSON.stringify(request)}\n`, 65_536, signal)
     await verifyOpenTrustedExecutable(executable)
     if (interpreter !== undefined) await verifyOpenTrustedExecutable(interpreter)
+    if (signal?.aborted) throw new HostAttestorError('FAILED', 'registered Host attestor was cancelled')
     let parsed: unknown
     try { parsed = JSON.parse(receiptSource) as unknown } catch { throw new HostAttestorError('FAILED', 'registered Host attestor did not return one JSON receipt') }
-    return parseHostAttestationReceipt(parsed)
+    receipt = parseHostAttestationReceipt(parsed)
   } catch (error) {
     if (error instanceof HostAttestorError || error instanceof ControlPlaneStoreError) throw error
     throw new HostAttestorError('EXECUTABLE_CHANGED', 'registered Host attestor descriptor identity could not be retained')
@@ -129,4 +135,7 @@ export async function invokeConfiguredHostAttestor(trust: PluginControlTrustConf
     try { await interpreter?.handle.close() }
     finally { await executable?.handle.close() }
   }
+  if (signal?.aborted) throw new HostAttestorError('FAILED', 'registered Host attestor was cancelled')
+  if (receipt === undefined) throw new HostAttestorError('FAILED', 'registered Host attestor did not return a receipt')
+  return receipt
 }
