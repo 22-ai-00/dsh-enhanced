@@ -22,6 +22,8 @@ import { registerPluginControlTools } from './tools.js'
 import { SourceJobRuntime, validateSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
 import type { SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
 import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer.js'
+import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig } from './replay-endpoint.js'
+import { readPrivateRuntimeObserverKey } from './runtime-observer-protocol.js'
 
 export interface Config {
   catalogPath: string
@@ -34,6 +36,8 @@ export interface Config {
   sourceJobs?: SourceJobsConfig
   /** Explicit owner-only observation channel; no signing or activation authority. */
   runtimeObserver?: RuntimeObserverConfig
+  /** Owner-pinned finite native replay; separate from the read-only observer. */
+  replayEndpoint?: ReplayEndpointConfig
 }
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
@@ -41,6 +45,7 @@ const schema = Schema.object({
   sourceBuild: Schema.any(),
   sourceJobs: Schema.any(),
   runtimeObserver: Schema.any(),
+  replayEndpoint: Schema.any(),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' { interface Context { pluginControlPlane: PluginControlPlaneService } }
@@ -61,7 +66,7 @@ async function canonicalTarget(dshHome: string, profile: string): Promise<Plugin
 
 export class PluginControlPlaneService extends Service {
   static Config = schema
-  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver'>
+  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver' | 'replayEndpoint'>
   private readonly store: ControlPlaneStore
   private readonly abort = new AbortController()
   private readonly sourceBuilds = new Set<Promise<unknown>>()
@@ -73,6 +78,16 @@ export class PluginControlPlaneService extends Service {
     super(ctx, 'pluginControlPlane')
     this.config = structuredClone(schema(input)) as typeof this.config
     if (this.config.runtimeObserver !== undefined) validateRuntimeObserverConfig(this.config.runtimeObserver)
+    if (this.config.replayEndpoint !== undefined) {
+      validateReplayEndpointConfig(this.config.replayEndpoint)
+      if (this.config.runtimeObserver !== undefined) {
+        const observer = this.config.runtimeObserver, replay = this.config.replayEndpoint.runtime
+        if (observer.socketPath === replay.socketPath || observer.keyPath === replay.keyPath) throw new Error('plugin-control-plane: replay requires a separate socket and key')
+        const observerKey = readPrivateRuntimeObserverKey(observer.keyPath), replayKey = readPrivateRuntimeObserverKey(replay.keyPath)
+        try { if (observerKey.equals(replayKey)) throw new Error('plugin-control-plane: replay requires distinct key material') }
+        finally { observerKey.fill(0); replayKey.fill(0) }
+      }
+    }
     if (this.config.sourceBuild !== undefined) validateSourceBuildConfig(this.config.sourceBuild)
     if (this.config.sourceJobs !== undefined) {
       validateSourceJobsConfig(this.config.sourceJobs, this.config.sourceBuild)
@@ -88,6 +103,7 @@ export class PluginControlPlaneService extends Service {
     }, 'plugin-control-plane.store')
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
     if (this.config.runtimeObserver !== undefined) installRuntimeObserver(ctx, this.config.runtimeObserver)
+    if (this.config.replayEndpoint !== undefined) installReplayEndpoint(ctx, this.config.replayEndpoint)
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never], jobsCtx => {
       jobsCtx.effect(() => {
         const current = <K extends keyof SourceJobPorts>(key: K): SourceJobPorts[K] => jobsCtx.get((key === 'automations' ? 'assistantAutomations' : 'assistantDelivery') as never) as unknown as SourceJobPorts[K]

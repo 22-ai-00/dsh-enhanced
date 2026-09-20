@@ -56,12 +56,35 @@ interface RunState {
 }
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/u
 const DENIAL = 'plugin-control-plane: effect-blocked replay tool denial'
-const fail = (message: string): never => { throw new Error(`effect-blocked replay: ${message}`) }
+function fail(message: string): never { throw new Error(`effect-blocked replay: ${message}`) }
 
 /** Runtime identity excludes freshness/challenge fields, never entry/provider epochs. */
 export function replayRuntimeDigest(sample: RuntimeObservation): string {
   return runtimeConfigDigest({ observerId: sample.observerId, observerConfigDigest: sample.observerConfigDigest,
     processId: sample.processId, invocationId: sample.invocationId, profilePath: sample.profilePath, entries: sample.entries })
+}
+
+export function validateReplayCases(input: unknown): { cases: ReplayCase[]; caseDigest: string } {
+  // Validate before taking ownership. JSON getters, cycles and oversized input
+  // are rejected by the bounded digest, then cloned to freeze the case set.
+  const caseDigest = runtimeConfigDigest(input)
+  const cases = structuredClone(input)
+  if (!Array.isArray(cases) || cases.length < 2 || cases.length > 32
+    || !cases.some(value => value?.kind === 'tool') || !cases.some(value => value?.kind === 'delivery')) fail('two to 32 cases of both effect classes required')
+  const ids = new Set<string>()
+  for (const item of cases) {
+    if (!item || typeof item.id !== 'string' || !ID.test(item.id) || ids.has(item.id)) fail('case identity is invalid or repeated')
+    ids.add(item.id)
+    if (item.kind === 'tool') {
+      if (typeof item.name !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,99}$/u.test(item.name)
+        || !item.arguments || typeof item.arguments !== 'object' || Array.isArray(item.arguments)
+        || Object.keys(item).sort().join(',') !== 'arguments,id,kind,name') fail('tool case invalid')
+    } else if (item.kind === 'delivery') {
+      if (typeof item.text !== 'string' || !item.text.length || Buffer.byteLength(item.text) > 4096
+        || Object.keys(item).sort().join(',') !== 'id,kind,text') fail('delivery case invalid')
+    } else fail('unknown effect class')
+  }
+  return { cases, caseDigest }
 }
 
 /**
@@ -129,25 +152,7 @@ export class EffectBlockedReplayRuntime {
     if (this.closed || this.operations.size >= 1024 || typeof input.operationId !== 'string' || !ID.test(input.operationId)
       || !/^[a-f0-9]{64}$/u.test(input.requestDigest) || this.operations.has(input.operationId)) fail('closed, duplicate or invalid operation')
     if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > Date.now() + 60_000) fail('deadline must be within 60 seconds')
-    // Validate before taking ownership. JSON getters, cycles and oversized input
-    // are rejected by the bounded digest, then cloned to freeze the case set.
-    const caseDigest = runtimeConfigDigest(input.cases)
-    const cases = structuredClone(input.cases)
-    if (!Array.isArray(cases) || cases.length < 2 || cases.length > 32
-      || !cases.some(value => value.kind === 'tool') || !cases.some(value => value.kind === 'delivery')) fail('two to 32 cases of both effect classes required')
-    const ids = new Set<string>()
-    for (const item of cases) {
-      if (!item || typeof item.id !== 'string' || !ID.test(item.id) || ids.has(item.id)) fail('case identity is invalid or repeated')
-      ids.add(item.id)
-      if (item.kind === 'tool') {
-        if (typeof item.name !== 'string' || !/^[A-Za-z][A-Za-z0-9_-]{0,99}$/u.test(item.name)
-          || !item.arguments || typeof item.arguments !== 'object' || Array.isArray(item.arguments)
-          || Object.keys(item).sort().join(',') !== 'arguments,id,kind,name') fail('tool case invalid')
-      } else if (item.kind === 'delivery') {
-        if (typeof item.text !== 'string' || !item.text.length || Buffer.byteLength(item.text) > 4096
-          || Object.keys(item).sort().join(',') !== 'id,kind,text') fail('delivery case invalid')
-      } else fail('unknown effect class')
-    }
+    const { cases, caseDigest } = validateReplayCases(input.cases)
     const agent = input.handle.agent
     if (!agent || typeof input.handle.dispose !== 'function' || agent.status !== 'idle'
       || agent.ctx.agent !== agent || this.states.has(agent)) fail('fresh idle native Agent handle required')
@@ -247,6 +252,15 @@ export class EffectBlockedReplayRuntime {
     if (replayRuntimeDigest(this.sample(randomBytes(32).toString('hex'))) !== result!.runtimeDigest) fail('candidate changed during Agent cleanup')
     result!.completedAt = Date.now()
     return structuredClone(result)
+  }
+
+  /** Cached observations remain usable only in this exact sampler/provider generation. */
+  isCurrent(result: EffectBlockedReplayResult): boolean {
+    if (this.closed) return false
+    try {
+      this.assertProviders()
+      return replayRuntimeDigest(this.sample(randomBytes(32).toString('hex'))) === result.runtimeDigest
+    } catch { return false }
   }
 
   private assertProviders(): void {

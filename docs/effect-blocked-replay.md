@@ -83,15 +83,77 @@ the snapshot includes bounded, immutable per-attempt records. Closing, expiry,
 attempt exhaustion and Agent Fiber teardown never restore sending permission.
 The same fence covers ordinary replies and completed preference-turn replies.
 
+## Authenticated finite endpoint
+
+Optional Control Plane `replayEndpoint` configuration mounts a Cordis child
+with `tools`, `loader`, `assistantDelivery`, and `agents` injection:
+
+```ts
+replayEndpoint: {
+  runtime: { socketPath, keyPath, profilePath, targets },
+  journalPath: '/owner-private/replay.sqlite',
+  authority: {
+    operationId, requestDigest, notBefore, expiresAt,
+    cases: [
+      { id: 'tool-1', kind: 'tool', name: 'candidate_tool', arguments: {} },
+      { id: 'reply-1', kind: 'delivery', text: 'blocked reply' },
+    ],
+  },
+  agent: { cwd, preset, provider, model },
+  timeoutMs: 30_000,
+}
+```
+
+The owner fixes one operation and case set, a maximum 24-hour authority window,
+and a 100–60,000 ms execution deadline. The native Agent uses the configured
+preset and model selection; the endpoint submits no model prompt and does not
+override Policy. Existing startup hooks and tool registrations still apply.
+Agent creation and arbitrary hooks are outside the two replay effect boundaries.
+
+Socket/key and journal paths must be outside the candidate profile in canonical,
+private directories. The key is 32 random bytes in an owner-only file. When
+`runtimeObserver` is also configured, its socket and key material must be distinct.
+Callers of the exported install helpers must preserve this separation too.
+Unix modes and HMAC do not isolate a malicious same-UID process; that requires
+separate deployment identities and protected owner state.
+
+`queryReplayEndpoint({ socketPath, keyPath, action, operationId, requestDigest,
+timeoutMs, signal })` supports `execute` and read-only `query`, authenticated by
+a fresh HMAC challenge. Clients cannot submit cases, results or counters. There
+is no automatic retry or model tool. Connections and message sizes are bounded.
+Owner unload closes admission, cancels work, awaits native cleanup, then removes
+its own socket and closes SQLite; cancellation remains cooperative.
+
+Before Agent creation, a private SQLite WAL/FULL journal durably reserves the
+operation and exact config/request/case digests. Only the first reservation can
+dispatch. Concurrent requests, lost acknowledgements and process restarts
+cannot regain that permission:
+
+| Status | Meaning |
+| --- | --- |
+| `not-started` | Query found no reservation. |
+| `unknown` | Reserved without a confirmed completed observation; never automatically rerun. |
+| `completed` | Stored result still matches the current sampler and provider generation. |
+| `stale` | A stored completion exists but endpoint/provider/candidate identity changed. |
+
+A completed response preserves the original observation. Restarting the
+endpoint changes its sampler identity, making stored completion stale. Expired
+authority refuses both actions. Failed or cancelled runs stay unknown. Removing
+the journal or assigning a new operation to bypass uncertainty is not recovery;
+an owner must reconcile the prior operation externally.
+
 ## Verification
 
 Verified on Linux with Node 24.7.0 on 2026-09-20:
 
 - `pnpm check` exited 0: manifest validation, zero-warning lint, typechecking,
-  6,053 tests passed (44 skipped), clean build and 35 plugin dry-run packs.
+  6,069 tests passed (44 skipped), clean build and 35 package dry-run packs (32 plugins and 3 shared libraries).
 - The native replay suite passed all 11 cases; the Delivery reply fence suite
-  passed all 5 cases. Full package suites passed 459 and 777 tests respectively.
-- Pack lists include both new runtime modules and declarations alongside the
+  passed all 5 cases. Full package suites passed 475 and 777 tests respectively.
+- Endpoint and journal suites passed 11 and 5 cases, including authenticated
+  native execution, concurrent admission, timeout/unload, persistent unknown,
+  stale cached results and durable request/case binding checks.
+- Pack lists include the runtime, endpoint/protocol and journal modules and declarations alongside the
   required package files. Raw run data and logs stay local or in CI artifacts.
 
 These checks cover the component boundaries described here; the native replay
@@ -110,9 +172,12 @@ Host APIs, filesystem/network access, subprocesses, or a malicious same-UID
 plugin. Cordis service routing and Fiber ownership are not OS isolation.
 No global `externalEffects = 0` claim is derived from these observations.
 
-The next integration must put immutable cases and durable admission outside
-candidate write authority, authenticate a finite Host endpoint, independently
-bind systemd/Loader identity and collect fresh external observations, then sign
-the existing exact Host request. Unknown execution must reconcile without a
-second dispatch. Shadow, canary, soak, health, post-promotion physical recovery
-and WP18 repository reuse remain separate work.
+The next integration must deploy immutable cases and durable admission outside
+candidate write authority, independently bind systemd/Loader identity and
+collect fresh external observations, then sign the existing exact Host request.
+The successful attestation contract requires `externalEffects = 0`; native
+denials alone cannot establish it. The endpoint therefore issues no signed
+receipt and does not advance activation. External observer and endpoint samplers
+have different epoch namespaces: compare stability within each channel and bind
+process/invocation/profile/module/config identity across channels. Shadow, canary,
+soak, health, post-promotion physical recovery and WP18 reuse remain separate work.
