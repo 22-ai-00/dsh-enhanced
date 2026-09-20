@@ -1362,8 +1362,16 @@ describe.sequential('trusted staged CLI', () => {
     const operation = db.prepare("SELECT operation_id, request_json, status FROM host_attestation_operations WHERE plan_id = ? AND phase = 'rollback'").get(plan.id)!
     expect(operation.status).toBe('pending')
     const generation = await readFile(join(value.attestorDirectory, 'host-generation'), 'utf8')
-    await withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory },
-      () => runPluginControl(['watch-observe', '--receipt', receiptPath]))
+    const restoredMarker = await readFile(join(value.profile, 'marker'), 'utf8')
+    await expect(withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory },
+      () => runPluginControl(['watch-observe', '--receipt', receiptPath]))).rejects.toThrow('unknown')
+    await expect(readFile(join(value.profile, 'marker'), 'utf8')).resolves.toBe(restoredMarker)
+    const cached = JSON.parse(await readFile(join(value.attestorDirectory, `${operation.operation_id}.json`), 'utf8')) as { receipt: HostAttestationReceipt }
+    const recoveredPath = join(value.control, 'recovered-host-receipt.json')
+    await writeFile(recoveredPath, JSON.stringify(cached.receipt), { mode: 0o600 })
+    const pending = new ControlPlaneStore({ path: value.state }); const current = pending.getPlan(plan.id); pending.close()
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['attest', '--plan-id', plan.id,
+      '--expected-revision', String(current.revision), '--expected-fence', String(current.activation!.fence), '--receipt', recoveredPath]))
     expect(db.prepare("SELECT operation_id, request_json, status FROM host_attestation_operations WHERE plan_id = ? AND phase = 'rollback'").get(plan.id))
       .toMatchObject({ ...operation, status: 'applied' })
     db.close()
@@ -1479,7 +1487,7 @@ describe.sequential('trusted staged CLI', () => {
     await expect(readFile(join(value.profile, 'marker'), 'utf8')).resolves.toBe('original')
   })
 
-  test('reuses one durable canary operation after crash-before-commit and the external issuer rejects changed payload', async () => {
+  test('reconciles a lost canary receipt without redispatch and the external issuer rejects changed payload', async () => {
     const value = await fixture(); let plan = await staged(value, 'canary-crash')
     for (let index = 0; index < 4; index += 1) {
       await configuredProbe(value, plan)
@@ -1487,20 +1495,31 @@ describe.sequential('trusted staged CLI', () => {
     }
     expect(plan.status).toBe('awaiting-canary')
     const trust = await loadTrustConfig(value.trustPath); const beforeCrash = new ControlPlaneStore({ path: value.state })
-    const operation = prepareConfiguredHostAttestation(beforeCrash, plan, trust); beforeCrash.close()
+    const operation = prepareConfiguredHostAttestation(beforeCrash, plan, trust)
     const request = operation.request
     if (request.schemaVersion !== 2) throw new Error('new Host operation must use schema v2')
-    await withEnvironment({ HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory, HOST_ATTESTOR_MODE: 'passed', HOST_ATTESTOR_FAIL_PHASE: '' },
-      () => invokeConfiguredHostAttestor(trust, request))
+    const authority = new Ed25519HostAttestationAuthority(value.trust.hostAttestationKeys[0]!.publicKeyPem, 'host-runtime', 'host-key-1')
+    let retainedReceipt: HostAttestationReceipt | undefined
+    await expect(withEnvironment({ HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory, HOST_ATTESTOR_MODE: 'passed', HOST_ATTESTOR_FAIL_PHASE: '' },
+      () => beforeCrash.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision,
+        expectedFence: plan.activation!.fence, resolveAuthority: () => authority, execute: async exact => {
+          retainedReceipt = await invokeConfiguredHostAttestor(trust, exact)
+          throw new Error('lost receipt response')
+        } }))).rejects.toThrow('lost receipt response')
+    beforeCrash.close()
     await expect(readFile(join(value.attestorDirectory, 'canary-exposures'), 'utf8')).resolves.toBe('1')
     await expect(withEnvironment({ HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory, HOST_ATTESTOR_MODE: 'passed', HOST_ATTESTOR_FAIL_PHASE: '' },
       () => invokeConfiguredHostAttestor(trust, { ...request, profile: { ...request.profile, name: 'changed' } }))).rejects.toThrow('non-zero')
-    await configuredProbe(value, plan)
+    await expect(configuredProbe(value, plan)).rejects.toThrow(/unknown/u)
+    const receiptPath = join(value.control, 'retained-canary-receipt.json')
+    await writeFile(receiptPath, JSON.stringify(retainedReceipt), { mode: 0o600 })
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['attest', '--plan-id', plan.id,
+      '--expected-revision', String(plan.revision), '--expected-fence', String(plan.activation!.fence), '--receipt', receiptPath]))
     await expect(readFile(join(value.attestorDirectory, 'canary-exposures'), 'utf8')).resolves.toBe('1')
     const recovered = new ControlPlaneStore({ path: value.state }); expect(recovered.getPlan(plan.id).status).toBe('awaiting-soak'); recovered.close()
   }, 15_000)
 
-  test('serializes concurrent canary workers behind one durable operation and one exposure', async () => {
+  test('reserves one canary exposure while allowing unrelated writers and rejecting another dispatch', async () => {
     const value = await fixture(); let plan = await staged(value, 'canary-concurrent')
     for (let index = 0; index < 4; index += 1) {
       await configuredProbe(value, plan)
@@ -1517,7 +1536,13 @@ describe.sequential('trusted staged CLI', () => {
         const contender = `const { DatabaseSync } = require('node:sqlite'); const database = new DatabaseSync(process.argv[1]);
           database.exec('PRAGMA busy_timeout=0'); try { database.exec('BEGIN IMMEDIATE'); process.stdout.write('acquired'); database.exec('ROLLBACK') }
           catch { process.stdout.write('busy') } finally { database.close() }`
-        expect(execFileSync(process.execPath, ['-e', contender, value.state], { encoding: 'utf8' })).toBe('busy')
+        expect(execFileSync(process.execPath, ['-e', contender, value.state], { encoding: 'utf8' })).toBe('acquired')
+        const other = new ControlPlaneStore({ path: value.state })
+        try {
+          await expect(other.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision,
+            expectedFence: plan.activation!.fence, resolveAuthority: () => authority,
+            execute: async () => { throw new Error('duplicate dispatch') } })).rejects.toThrow(/unknown/u)
+        } finally { other.close() }
         return invokeConfiguredHostAttestor(trust, request)
       },
     }))

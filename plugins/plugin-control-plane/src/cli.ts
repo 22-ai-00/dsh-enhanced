@@ -745,6 +745,7 @@ async function restoreObservedTarget(store: ControlPlaneStore, plan: PluginActiv
 
 async function cleanupRestoredStage(store: ControlPlaneStore, plan: PluginActivationPlan): Promise<void> {
   await store.withExclusiveWrite(async () => {
+    store.assertNoClaimedHostAttestation(plan.id)
     const current = store.getPlan(plan.id)
     if (!current.activation?.rollbackProfileRestored || current.activation.fence !== plan.activation?.fence) {
       throw new ControlPlaneCliError('FILESYSTEM_STATE', 'rollback restoration marker changed before stage cleanup')
@@ -952,12 +953,15 @@ async function attest(argv: readonly string[]): Promise<void> {
     const receipt = parseHostAttestationReceipt(JSON.parse(await loadPrivateApprovalInput(resolve(option(argv, '--receipt')), 32_768)) as unknown)
     const planId = option(argv, '--plan-id'); const expectedRevision = integerOption(argv, '--expected-revision')
     const expectedFence = integerOption(argv, '--expected-fence'); const initial = store.getPlan(planId); assertPlanTrust(initial, trust)
+    if (receipt.planId !== planId || receipt.planDigest !== initial.digest) {
+      throw new ControlPlaneCliError('ACTIVATION_BINDING', 'Host receipt does not target the requested activation plan')
+    }
     const resolveAuthority = (value: typeof receipt): Ed25519HostAttestationAuthority => {
       const key = resolveTrustKey(trust, 'host-attestation', value.authority, value.keyId)
       return new Ed25519HostAttestationAuthority(key.publicKeyPem, key.authority, key.keyId)
     }
-    await store.runHostAttestationOperation({ operationId: receipt.operationId, expectedRevision, expectedFence,
-      execute: async () => receipt, resolveAuthority })
+    await store.acceptHostAttestationReceipt({ operationId: receipt.operationId, expectedRevision, expectedFence,
+      receipt, resolveAuthority })
     const result = await store.applyHostAttestation({ planId, expectedRevision, expectedFence, receipt,
       idempotencyKey: `host-attestation:${receipt.operationId}`, resolveAuthority })
     let plan = store.getPlan(result.result.id); assertPlanTrust(plan, trust)

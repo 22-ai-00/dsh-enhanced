@@ -189,7 +189,7 @@ test('rejects a correctly signed normal-phase receipt that changes Host generati
   await expect(target.store.runHostAttestationOperation({ operationId: readiness.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })).rejects.toThrow('changed generation')
   const failedUnsigned = { ...unsigned, receiptId: 'drift-readiness-failed', outcome: 'failed' as const }
   const failedReceipt = { ...failedUnsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(failedUnsigned)), host.privateKey).toString('base64') }
-  await expect(target.store.runHostAttestationOperation({ operationId: readiness.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => failedReceipt, resolveAuthority: () => host.authority })).rejects.toThrow('changed generation')
+  await expect(target.store.acceptHostAttestationReceipt({ operationId: readiness.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt: failedReceipt, resolveAuthority: () => host.authority })).rejects.toThrow('changed generation')
   expect(target.store.getHostAttestationOperation(readiness.operationId).status).toBe('pending')
 })
 
@@ -1113,7 +1113,8 @@ catch { process.stdout.write('busy') } finally { db.close() }`
       expectedFence: awaiting.activation!.fence, issuer: { mode: 'owner-manual' }, requirements: { kind: 'reload', previousHostGeneration: 0 }, receiptTtlMs: 10_000 })
     target.store.close()
     const raw = new DatabaseSync(target.path)
-    raw.exec(`PRAGMA foreign_keys = OFF; ALTER TABLE activation_plans DROP COLUMN activation_target_baseline_json;
+    raw.exec(`PRAGMA foreign_keys = OFF; DROP TABLE host_attestation_dispatches;
+      ALTER TABLE activation_plans DROP COLUMN activation_target_baseline_json;
       ALTER TABLE activation_plans DROP COLUMN host_recovery_required; ALTER TABLE activation_plans DROP COLUMN rollback_profile_restored;
       ALTER TABLE host_attestations RENAME TO host_attestations_new;
       CREATE TABLE host_attestations (plan_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health')),
@@ -1191,7 +1192,9 @@ catch { process.stdout.write('busy') } finally { db.close() }`
     await expect(target.store.runHostAttestationOperation({ operationId: recovery.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
       execute: async () => failedRecovery, resolveAuthority: () => host.authority })).rejects.toThrow('cannot consume')
     expect(target.store.getHostAttestationOperation(recovery.operationId).status).toBe('pending')
-    await target.store.runHostAttestationOperation({ operationId: recovery.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })
+    await expect(target.store.runHostAttestationOperation({ operationId: recovery.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+      execute: async () => receipt, resolveAuthority: () => host.authority })).rejects.toThrow('unknown')
+    await target.store.acceptHostAttestationReceipt({ operationId: recovery.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt, resolveAuthority: () => host.authority })
     const applied = await target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt, resolveAuthority: () => host.authority, idempotencyKey: 'rollback:restore' })
     expect(applied.result).toMatchObject({ status: 'rolled-back', activation: { failureCode: 'host-attestation-failed' } })
     expect(target.store.getGap(plan.gapId).status).toBe('open')

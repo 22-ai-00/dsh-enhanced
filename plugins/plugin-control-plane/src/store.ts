@@ -297,6 +297,7 @@ interface SourceReleaseDispatchRow {
   claimed_at: number
   completed_at: number | null
 }
+interface HostAttestationDispatchRow { operation_id: string; status: 'claimed' | 'completed'; claimed_at: number; completed_at: number | null }
 
 interface SourcePublishReconciliationRow {
   plan_id: string; release_id: string; release_fence: number; attempt: number; operation_id: string
@@ -2045,6 +2046,69 @@ export class ControlPlaneStore {
     return hostOperationFromRow(row)
   }
 
+  getHostAttestationDispatchStatus(operationId: string): 'claimed' | 'completed' | undefined {
+    const row = this.#database.prepare('SELECT * FROM host_attestation_dispatches WHERE operation_id = ?').get(operationId) as unknown as HostAttestationDispatchRow | undefined
+    if (!row) return undefined
+    if (!['claimed', 'completed'].includes(row.status) || !Number.isSafeInteger(row.claimed_at) || row.claimed_at < 0
+      || (row.status === 'claimed') !== (row.completed_at === null)) throw new ControlPlaneStoreError('invalid-state', 'stored Host attestation dispatch is corrupt')
+    return row.status
+  }
+
+  assertNoClaimedHostAttestation(planId: string): void {
+    const claimed = this.#database.prepare(`SELECT 1 FROM host_attestation_operations operation JOIN host_attestation_dispatches dispatch
+      ON dispatch.operation_id = operation.operation_id WHERE operation.plan_id = ? AND dispatch.status = 'claimed' LIMIT 1`).get(planId)
+    if (claimed !== undefined) throw new ControlPlaneStoreError('conflict', 'Host attestation dispatch outcome is unknown')
+  }
+
+  /** Retain an exact signed Host receipt without dispatching or advancing the plan. */
+  async acceptHostAttestationReceipt(input: { operationId: string; expectedRevision: number; expectedFence: number;
+    receipt: HostAttestationReceipt; resolveAuthority: (receipt: HostAttestationReceipt) => HostAttestationAuthority; requireCurrentSource?: boolean }): Promise<HostAttestationReceipt> {
+    const operation = this.getHostAttestationOperation(input.operationId), plan = this.getPlan(operation.planId)
+    const expected = expectedAttestation[plan.status]
+    if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.expectedFence || expected?.phase !== operation.phase
+      || operation.requestDigest !== controlPlaneDigest(operation.request) || input.receipt.operationId !== operation.operationId) {
+      throw new ControlPlaneStoreError('conflict', 'Host attestation receipt lost its exact operation binding')
+    }
+    if (operation.receipt !== undefined) {
+      if (controlPlaneDigest(operation.receipt) !== controlPlaneDigest(input.receipt)) throw new ControlPlaneStoreError('conflict', 'Host attestation receipt changed after completion')
+      return operation.receipt
+    }
+    const request = this.#assertHostAttestationChain(operation, plan)
+    await input.resolveAuthority(input.receipt).verify(input.receipt, plan, request)
+    if (operation.phase !== 'reload' && operation.phase !== 'rollback' && input.receipt.hostGeneration !== request.predecessor!.hostGeneration) {
+      throw new ControlPlaneStoreError('conflict', 'non-transition Host receipt changed generation from its predecessor')
+    }
+    if (operation.phase === 'rollback' && input.receipt.outcome !== 'passed') throw new ControlPlaneStoreError('conflict', 'failed physical rollback receipt cannot settle recovery')
+    const commit = (): HostAttestationReceipt => {
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        const current = this.getPlan(plan.id), currentOperation = this.getHostAttestationOperation(operation.operationId)
+        if (current.revision !== input.expectedRevision || current.activation?.fence !== input.expectedFence
+          || expectedAttestation[current.status]?.phase !== currentOperation.phase || currentOperation.requestDigest !== operation.requestDigest) {
+          throw new ControlPlaneStoreError('conflict', 'Host attestation receipt became stale')
+        }
+        this.#assertHostAttestationChain(currentOperation, current)
+        if (currentOperation.receipt !== undefined) {
+          if (controlPlaneDigest(currentOperation.receipt) !== controlPlaneDigest(input.receipt)) {
+            throw new ControlPlaneStoreError('conflict', 'Host attestation receipt changed after completion')
+          }
+          this.#database.exec('COMMIT'); return currentOperation.receipt
+        }
+        const dispatch = this.getHostAttestationDispatchStatus(operation.operationId)
+        if (dispatch === 'completed') throw new ControlPlaneStoreError('conflict', 'Host attestation dispatch completed without its receipt')
+        const now = this.#now(), updated = this.#database.prepare(`UPDATE host_attestation_operations SET status='completed',receipt_digest=?,receipt_json=?,completed_at=?
+          WHERE operation_id=? AND status='pending' AND request_digest=?`).run(controlPlaneDigest(input.receipt), JSON.stringify(input.receipt), now, operation.operationId, operation.requestDigest)
+        if (Number(updated.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'Host attestation receipt completion lost its claim')
+        if (dispatch === 'claimed') {
+          const completed = this.#database.prepare("UPDATE host_attestation_dispatches SET status='completed',completed_at=? WHERE operation_id=? AND status='claimed'").run(now, operation.operationId)
+          if (Number(completed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'Host attestation dispatch completion lost its claim')
+        }
+        this.#database.exec('COMMIT'); return input.receipt
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    }
+    return input.requireCurrentSource ? this.#withActivationSource(plan.id, commit) : commit()
+  }
+
   /** Same synchronous transaction owns current-profile selection and capture. */
   withForegroundDeployment<T>(task: ForegroundDeploymentRecord['task'], profilePath: string,
     callback: (plan: PluginActivationPlan, operation: HostAttestationOperation) => T): T {
@@ -2289,44 +2353,36 @@ export class ControlPlaneStore {
     return request
   }
 
-  /**
-   * Keep the SQLite writer mutex for the complete external attestor call. The
-   * operation id was committed before this method, so process death retries the
-   * same request while concurrent workers cannot cause a second canary call.
-   */
+  /** Reserve once before external I/O; unknown results require signed receipt reconciliation. */
   async runHostAttestationOperation(input: { operationId: string; expectedRevision: number; expectedFence: number;
     execute: (request: HostAttestationRequest) => Promise<HostAttestationReceipt>;
     resolveAuthority: (receipt: HostAttestationReceipt) => HostAttestationAuthority }): Promise<HostAttestationReceipt> {
-    try { this.#database.exec('BEGIN IMMEDIATE') } catch { throw new ControlPlaneStoreError('conflict', 'Host attestation single-flight is held') }
-    try {
-      const operation = this.getHostAttestationOperation(input.operationId)
-      const plan = this.getPlan(operation.planId); const expected = expectedAttestation[plan.status]
-      if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.expectedFence
-        || expected?.phase !== operation.phase || operation.requestDigest !== controlPlaneDigest(operation.request)) {
-        throw new ControlPlaneStoreError('conflict', 'Host attestation operation lost its plan revision/fence/phase')
-      }
-      this.assertOwnerActivationSource(plan.id)
-      const request = this.#assertHostAttestationChain(operation, plan)
-      if (operation.receipt !== undefined) { this.#database.exec('COMMIT'); return operation.receipt }
-      const receipt = await input.execute(request)
-      await input.resolveAuthority(receipt).verify(receipt, plan, request)
-      if (operation.phase !== 'reload' && operation.phase !== 'rollback'
-        && receipt.hostGeneration !== request.predecessor!.hostGeneration) {
-        throw new ControlPlaneStoreError('conflict', 'non-transition Host receipt changed generation from its predecessor')
-      }
-      if (operation.phase === 'rollback' && receipt.outcome !== 'passed') {
-        throw new ControlPlaneStoreError('conflict', 'failed physical rollback receipt cannot consume the durable recovery operation')
-      }
-      return this.#withActivationSource(plan.id, () => {
-      const now = this.#now()
-      const result = this.#database.prepare(`UPDATE host_attestation_operations SET status = 'completed', receipt_digest = ?,
-        receipt_json = ?, completed_at = ? WHERE operation_id = ? AND status = 'pending' AND request_digest = ?`).run(
-        controlPlaneDigest(receipt), JSON.stringify(receipt), now, operation.operationId, operation.requestDigest)
-      if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'Host attestation operation completion lost its single-flight')
-      this.#database.exec('COMMIT')
-      return receipt
+    const claim = (): { operation: HostAttestationOperation; plan: PluginActivationPlan; request: HostAttestationRequest } => {
+      const candidate = this.getHostAttestationOperation(input.operationId)
+      return this.#withActivationSource(candidate.planId, () => {
+        this.#database.exec('BEGIN IMMEDIATE')
+        try {
+          const operation = this.getHostAttestationOperation(input.operationId), plan = this.getPlan(operation.planId), expected = expectedAttestation[plan.status]
+          if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.expectedFence || expected?.phase !== operation.phase || operation.requestDigest !== controlPlaneDigest(operation.request)) throw new ControlPlaneStoreError('conflict', 'Host attestation operation lost its plan revision/fence/phase')
+          const request = this.#assertHostAttestationChain(operation, plan)
+          if (operation.receipt) { this.#database.exec('COMMIT'); return { operation, plan, request } }
+          if (this.getHostAttestationDispatchStatus(operation.operationId) !== undefined) throw new ControlPlaneStoreError('conflict', 'Host attestation outcome is unknown; receipt reconciliation is required')
+          this.#database.prepare("INSERT INTO host_attestation_dispatches (operation_id,status,claimed_at,completed_at) VALUES (?,'claimed',?,NULL)").run(operation.operationId, this.#now())
+          this.#database.exec('COMMIT'); return { operation, plan, request }
+        } catch (error) { this.#database.exec('ROLLBACK'); throw error }
       })
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    }
+    const { operation, plan, request } = claim()
+    if (operation.receipt) return operation.receipt
+    const receipt = await input.execute(request)
+    await input.resolveAuthority(receipt).verify(receipt, plan, request)
+    if (operation.phase !== 'reload' && operation.phase !== 'rollback' && receipt.hostGeneration !== request.predecessor!.hostGeneration) throw new ControlPlaneStoreError('conflict', 'non-transition Host receipt changed generation from its predecessor')
+    if (operation.phase === 'rollback' && receipt.outcome !== 'passed') throw new ControlPlaneStoreError('conflict', 'failed physical rollback receipt cannot consume the durable recovery operation')
+    // Normal dispatches must still be current when their external result is
+    // settled.  The public accept path is deliberately narrower: it records
+    // an exact signed fact for an already-unknown dispatch so recovery can
+    // later choose rollback without replaying the external action.
+    return this.acceptHostAttestationReceipt({ operationId: operation.operationId, expectedRevision: input.expectedRevision, expectedFence: input.expectedFence, receipt, resolveAuthority: input.resolveAuthority, requireCurrentSource: true })
   }
 
   /** Stop an exposed deployment between phases, or after its previous installer lease expired. */
@@ -2335,6 +2391,9 @@ export class ControlPlaneStore {
     if (!KEY.test(code)) throw new ControlPlaneStoreError('invalid-input', 'invalid rollback failure code')
     const result = this.#database.prepare(`UPDATE activation_plans SET status = 'rollback-pending', revision = revision + 1,
       failure_code = ?, activation_lease_until = NULL, updated_at = ? WHERE id = ? AND revision = ? AND activation_fence = ?
+      AND NOT EXISTS (SELECT 1 FROM host_attestation_operations operation JOIN host_attestation_dispatches dispatch
+        ON dispatch.operation_id = operation.operation_id WHERE operation.plan_id = activation_plans.id
+          AND dispatch.status = 'claimed')
       AND (status IN ('awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
         'awaiting-canary', 'awaiting-soak', 'awaiting-health')
         OR (status IN ('staging', 'commit-pending') AND COALESCE(activation_lease_until, 0) < ?))`).run(code, this.#now(), input.planId, input.expectedRevision, input.fence, this.#now())
