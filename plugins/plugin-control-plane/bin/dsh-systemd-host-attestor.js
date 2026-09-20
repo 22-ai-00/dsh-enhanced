@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
-export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-1'
+export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-2'
 const DIGEST = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const UNIT_PROPERTIES = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory', 'User', 'Group', 'Type', 'KillMode']
@@ -83,14 +83,15 @@ function parseJson(bytes, label) { try { return JSON.parse(bytes.toString('utf8'
 function loadConfig(environment, request) {
   const config = parseJson(readSafe(environment.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG, 65536, true), 'config')
   object(config, ['schemaVersion', 'authority', 'keyId', 'privateKeyPath', 'stateRoot', 'executable', 'interpreter', 'processHelper',
-    'systemctl', 'scope', 'unit', 'unitProperties', 'profileFiles', 'authorization', 'timeoutMs', 'stableWindowMs', 'pollIntervalMs'], 'config')
-  if (config.schemaVersion !== 1) fail('config schema is unsupported')
+    'systemctl', 'scope', 'unit', 'unitProperties', 'profileFiles', 'authorization', 'timeoutMs', 'stableWindowMs', 'pollIntervalMs',
+    ...(config.schemaVersion === 2 ? ['readiness'] : [])], 'config')
+  if (![1, 2].includes(config.schemaVersion)) fail('config schema is unsupported')
   text(config.authority, 'authority', ID); text(config.keyId, 'keyId', ID)
   integer(config.timeoutMs, 'timeout', 1000, 60000); integer(config.stableWindowMs, 'stable window', 50, 10000)
   integer(config.pollIntervalMs, 'poll interval', 25, 1000)
   if (config.stableWindowMs + config.pollIntervalMs >= config.timeoutMs) fail('window exceeds deadline')
   if (!['user', 'system'].includes(config.scope)) fail('unsupported supervisor scope')
-  const auth = object(config.authorization, ['installationId', 'ledger', 'profile', 'plan', 'activation', 'previousHostGeneration', 'requestDigest', 'notBefore', 'expiresAt'], 'authorization')
+  const auth = object(config.authorization, ['installationId', 'ledger', 'profile', 'plan', 'activation', config.schemaVersion === 1 ? 'previousHostGeneration' : 'hostGeneration', 'requestDigest', 'notBefore', 'expiresAt'], 'authorization')
   text(auth.requestDigest, 'authorized request digest', DIGEST)
   if (digest(request) !== auth.requestDigest) fail('exact request is not authorized')
   object(auth.ledger, ['id', 'path'], 'ledger'); object(auth.profile, ['name', 'path'], 'profile')
@@ -100,7 +101,8 @@ function loadConfig(environment, request) {
   text(auth.plan.digest, 'plan digest', DIGEST); text(auth.profile.name, 'profile name', /^[a-z0-9][a-z0-9-]{0,63}$/u)
   canonicalPath(auth.profile.path, 'profile'); canonicalPath(auth.ledger.path, 'ledger')
   if (basename(auth.profile.path) !== auth.profile.name || basename(dirname(auth.profile.path)) !== 'profiles') fail('profile path and name differ')
-  integer(auth.activation.fence, 'fence', 1); integer(auth.previousHostGeneration, 'previous generation', 0, Number.MAX_SAFE_INTEGER - 1)
+  integer(auth.activation.fence, 'fence', 1)
+  integer(config.schemaVersion === 1 ? auth.previousHostGeneration : auth.hostGeneration, 'authorized generation', config.schemaVersion === 1 ? 0 : 1, Number.MAX_SAFE_INTEGER - 1)
   integer(auth.notBefore, 'authorization start'); integer(auth.expiresAt, 'authorization expiry', auth.notBefore + 1)
   if (config.unit !== `dsh-profile-${auth.profile.name}.service`) fail('unit does not bind the profile')
   object(config.unitProperties, UNIT_PROPERTIES, 'unit properties')
@@ -125,9 +127,22 @@ function loadConfig(environment, request) {
   pin({ path: config.systemctl.path, sha256: config.systemctl.sha256 }, 'systemctl', true)
   if (config.systemctl.interpreter !== null) pin(config.systemctl.interpreter, 'systemctl interpreter', true)
   object(request, ['schemaVersion', 'kind', 'operationId', 'requestedAt', 'receiptTtlMs', 'installationId', 'ledger', 'plan', 'activation', 'profile', 'issuer', 'phase', 'requirements'], 'request')
-  if (request.schemaVersion !== 1 || request.kind !== 'dsh-host-attestation-request' || request.phase !== 'reload') fail('only reload requests are supported')
-  object(request.requirements, ['kind', 'previousHostGeneration'], 'requirements')
-  if (request.requirements.kind !== 'reload' || request.requirements.previousHostGeneration !== auth.previousHostGeneration) fail('generation is not authorized')
+  if (request.schemaVersion !== 1 || request.kind !== 'dsh-host-attestation-request'
+    || request.phase !== (config.schemaVersion === 1 ? 'reload' : 'readiness')) fail('phase does not match configured authority')
+  if (config.schemaVersion === 1) {
+    object(request.requirements, ['kind', 'previousHostGeneration'], 'requirements')
+    if (request.requirements.kind !== 'reload' || request.requirements.previousHostGeneration !== auth.previousHostGeneration) fail('generation is not authorized')
+  } else {
+    object(request.requirements, ['kind', 'minimumChecks'], 'requirements')
+    if (request.requirements.kind !== 'readiness') fail('readiness requirements required')
+    integer(request.requirements.minimumChecks, 'minimum checks', 1, 256)
+    const ready = object(config.readiness, ['client', 'observer', 'deploymentFiles', 'reloadOperationId'], 'readiness')
+    text(ready.reloadOperationId, 'reload operation', ID); pin(ready.client, 'observer client')
+    if (!Array.isArray(ready.deploymentFiles) || !ready.deploymentFiles.length || ready.deploymentFiles.length > 128) fail('deployment pins required')
+    for (const spec of ready.deploymentFiles) pin(spec, 'deployment file')
+    if (new Set(ready.deploymentFiles.map(spec => spec.path)).size !== ready.deploymentFiles.length) fail('duplicate deployment pin')
+    if (ready.observer?.profilePath !== auth.profile.path) fail('observer profile differs')
+  }
   text(request.operationId, 'operation', ID)
   if (request.operationId.length > 152) fail('operation is too long for receipt identity')
   integer(request.requestedAt, 'requestedAt'); integer(request.receiptTtlMs, 'receipt TTL', 1, 3600000)
@@ -145,7 +160,10 @@ function assertCurrent(config, request) {
   const now = Date.now(); const auth = config.authorization
   if (request.requestedAt < auth.notBefore || request.requestedAt > now || now > auth.expiresAt) fail('authorization expired or not yet valid')
 }
-function assertProfile(config) { for (const spec of config.profileFiles) pin(spec, 'profile file') }
+function assertProfile(config) {
+  for (const spec of config.profileFiles) pin(spec, 'profile file')
+  for (const spec of config.readiness?.deploymentFiles ?? []) pin(spec, 'deployment file')
+}
 function remaining(deadline) { const value = Math.floor(deadline - performance.now()); if (value <= 0) fail('observation deadline exceeded; outcome needs reconciliation'); return value }
 function normalizeExecStart(value) {
   // systemctl appends per-invocation runtime fields after ignore_errors.
@@ -221,8 +239,15 @@ function journal(config) {
       CREATE TABLE IF NOT EXISTS reloads (
         operation_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL, config_digest TEXT NOT NULL,
         scope_id TEXT NOT NULL, generation INTEGER NOT NULL, activation_id TEXT NOT NULL,
-        prior TEXT NOT NULL, observation TEXT, receipt TEXT,
+        prior TEXT NOT NULL, observation TEXT, receipt TEXT, request TEXT, config TEXT,
         UNIQUE(scope_id, generation), UNIQUE(scope_id, activation_id));`)
+    transaction(db, () => {
+      const columns = db.prepare('PRAGMA table_info(reloads)').all().map(column => column.name)
+      for (const name of ['request', 'config']) if (!columns.includes(name)) db.exec(`ALTER TABLE reloads ADD COLUMN ${name} TEXT`)
+      db.exec(`CREATE TABLE IF NOT EXISTS readiness (
+        operation_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL, config_digest TEXT NOT NULL,
+        reload_id TEXT NOT NULL UNIQUE, observation TEXT, receipt TEXT);`)
+    })
     syncDirectory(config.stateRoot)
     return db
   } catch { db.close(); fail('private supervisor journal could not be opened') }
@@ -239,6 +264,115 @@ function cachedReceipt(row, request, config, privateKey) {
   if (Date.now() > receipt.expiresAt) fail('cached receipt expired; owner reconciliation required')
   return receipt
 }
+function boundReload(db, request, config, privateKey) {
+  const row = db.prepare('SELECT * FROM reloads WHERE scope_id = ? ORDER BY generation DESC LIMIT 1')
+    .get(digest({ installation: request.installationId }))
+  if (!row || row.operation_id !== config.readiness.reloadOperationId || row.generation !== config.authorization.hostGeneration
+    || !row.receipt || !row.observation || !row.request || !row.config) fail('latest reload is unresolved, superseded or lacks retained context')
+  const priorRequest = parseJson(Buffer.from(row.request), 'reload request')
+  const priorConfig = parseJson(Buffer.from(row.config), 'reload config')
+  for (const field of ['installationId', 'ledger', 'profile', 'plan', 'activation']) {
+    if (canonical(priorRequest[field]) !== canonical(request[field])) fail('reload context differs')
+  }
+  for (const field of ['authority', 'keyId', 'privateKeyPath', 'stateRoot', 'scope', 'unit', 'unitProperties', 'profileFiles', 'systemctl']) {
+    if (canonical(priorConfig[field]) !== canonical(config[field])) fail('reload deployment differs')
+  }
+  const receipt = cachedReceipt(row, priorRequest, priorConfig, privateKey)
+  const observation = parseJson(Buffer.from(row.observation), 'reload observation')
+  if (priorRequest.phase !== 'reload' || priorRequest.operationId !== row.operation_id
+    || receipt.phase !== 'reload' || receipt.outcome !== 'passed' || receipt.hostGeneration !== row.generation
+    || receipt.operationId !== row.operation_id || receipt.installationId !== request.installationId
+    || receipt.planId !== request.plan.id || receipt.planDigest !== request.plan.digest
+    || receipt.activationId !== request.activation.id || receipt.fence !== request.activation.fence
+    || receipt.authority !== config.authority || receipt.keyId !== config.keyId
+    || receipt.evidenceDigest !== digest(receipt.evidence) || receipt.evidence.kind !== 'reload'
+    || receipt.evidence.reloaded !== true || receipt.evidence.currentHostGeneration !== row.generation
+    || receipt.evidence.previousHostGeneration !== priorRequest.requirements.previousHostGeneration
+    || receipt.evidence.probeDigest !== digest(observation) || observation.requestDigest !== row.request_digest
+    || observation.configDigest !== row.config_digest || !active(observation.successor)) fail('reload evidence binding is invalid')
+  return { operationId: row.operation_id, generation: row.generation, receiptDigest: digest(receipt), successor: observation.successor }
+}
+
+async function attestReadiness(request, config, privateKey, db, execute, deadline) {
+  const ready = config.readiness
+  const bytes = readSafe(ready.client.path, 1048576)
+  if (hash(bytes) !== ready.client.sha256) fail('observer client changed')
+  const client = await import(`data:text/javascript;base64,${bytes.toString('base64')}`)
+  client.validateRuntimeObserverConfig(ready.observer)
+  const observerDigest = client.runtimeConfigDigest(ready.observer)
+  // Pin the channel key as well as its configured path for this entire attempt.
+  const channelDigest = hash(readSafe(ready.observer.keyPath, 32, true))
+  const reload = boundReload(db, request, config, privateKey)
+  const reserved = transaction(db, () => {
+    const row = db.prepare('SELECT * FROM readiness WHERE operation_id = ?').get(request.operationId)
+    if (row) { cachedReceipt(row, request, config, privateKey); return row }
+    db.prepare('INSERT INTO readiness(operation_id, request_digest, config_digest, reload_id) VALUES (?, ?, ?, ?)')
+      .run(request.operationId, digest(request), digest(config), reload.operationId)
+    return db.prepare('SELECT * FROM readiness WHERE operation_id = ?').get(request.operationId)
+  })
+  const cached = cachedReceipt(reserved, request, config, privateKey)
+  const retained = cached ? parseJson(Buffer.from(reserved.observation), 'readiness observation') : undefined
+  if (retained && (cached.evidence.probeDigest !== digest(retained) || canonical(retained.reload) !== canonical(reload))) fail('retained readiness binding differs')
+  let stable; let started; const samples = []; const challenges = new Set()
+  for (;;) {
+    assertCurrent(config, request); remaining(deadline)
+    if (canonical(boundReload(db, request, config, privateKey)) !== canonical(reload)) fail('reload changed during readiness')
+    const before = await observe(config, execute, deadline)
+    if (canonical(before) !== canonical(reload.successor)) fail('supervisor no longer matches the reload successor')
+    if (hash(readSafe(ready.observer.keyPath, 32, true)) !== channelDigest) fail('observer key changed')
+    const queryStarted = Date.now()
+    const sample = await client.queryRuntimeObserver({ ...ready.observer, signal: AbortSignal.timeout(remaining(deadline)) })
+    if (sample.profilePath !== request.profile.path || sample.observerConfigDigest !== observerDigest
+      || sample.processId !== before.MainPID || sample.invocationId !== before.InvocationID
+      || sample.observedAt < queryStarted || sample.observedAt > Date.now() || challenges.has(sample.challenge)
+      || sample.entries.length !== ready.observer.targets.length) fail('observer identity or freshness differs')
+    challenges.add(sample.challenge)
+    for (const target of ready.observer.targets) {
+      const entry = sample.entries.find(item => item.entryId === target.entryId)
+      if (!entry?.active || !entry.instance || entry.module !== target.module || entry.configDigest !== target.configDigest
+        || canonical(entry.services.map(service => service.name).sort()) !== canonical([...target.services].sort())
+        || [...entry.dependencies, ...entry.services].some(service => !service.instance)) fail('candidate is not ready')
+    }
+    const { challenge: _challenge, observedAt: _observedAt, ...identity } = sample
+    if (stable === undefined) { stable = identity; started = performance.now() }
+    else if (canonical(identity) !== canonical(stable)) fail('runtime instance changed during readiness')
+    if (retained && canonical(identity) !== canonical(retained.runtime)) fail('cached readiness runtime changed')
+    samples.push({ challenge: sample.challenge, observedAt: sample.observedAt, digest: digest(sample) })
+    const after = await observe(config, execute, deadline)
+    if (canonical(after) !== canonical(reload.successor)) fail('supervisor changed during runtime query')
+    if (samples.length >= Math.max(2, request.requirements.minimumChecks) && performance.now() - started >= config.stableWindowMs) break
+    if (samples.length >= 256) fail('readiness sample limit exceeded')
+    await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(config.pollIntervalMs, remaining(deadline))))
+  }
+  assertCurrent(config, request); assertProfile(config); remaining(deadline)
+  if (hash(readSafe(ready.observer.keyPath, 32, true)) !== channelDigest) fail('observer key changed')
+  const observation = { schemaVersion: 1, requestDigest: digest(request), configDigest: digest(config), reload,
+    channelDigest, runtime: stable, samples, stableWindowMs: config.stableWindowMs, observedAt: Date.now() }
+  const evidence = { kind: 'readiness', checks: samples.length, failures: 0, probeDigest: digest(observation) }
+  const unsigned = { schemaVersion: 2, receiptId: `receipt:${request.operationId}`, authority: config.authority, keyId: config.keyId,
+    installationId: request.installationId, planId: request.plan.id, planDigest: request.plan.digest,
+    activationId: request.activation.id, fence: request.activation.fence, operationId: request.operationId,
+    requestDigest: digest(request), phase: 'readiness', outcome: 'passed', hostGeneration: reload.generation,
+    evidence, evidenceDigest: digest(evidence), observedAt: observation.observedAt,
+    expiresAt: Math.min(observation.observedAt + request.receiptTtlMs, config.authorization.expiresAt) }
+  if (unsigned.expiresAt <= unsigned.observedAt) fail('authorization expired before signing')
+  return transaction(db, () => {
+    assertCurrent(config, request); remaining(deadline)
+    if (canonical(boundReload(db, request, config, privateKey)) !== canonical(reload)) fail('reload superseded before signing')
+    const row = db.prepare('SELECT * FROM readiness WHERE operation_id = ?').get(request.operationId)
+    const replay = cachedReceipt(row, request, config, privateKey)
+    if (replay) {
+      const prior = parseJson(Buffer.from(row.observation), 'readiness observation')
+      if (replay.evidence.probeDigest !== digest(prior) || canonical(prior.runtime) !== canonical(stable)
+        || canonical(prior.reload) !== canonical(reload) || prior.channelDigest !== channelDigest) fail('concurrent readiness binding differs')
+      return replay
+    }
+    const receipt = { ...unsigned, signature: sign(null, Buffer.from(canonical(unsigned)), privateKey).toString('base64') }
+    db.prepare('UPDATE readiness SET observation = ?, receipt = ? WHERE operation_id = ? AND receipt IS NULL')
+      .run(canonical(observation), canonical(receipt), request.operationId)
+    return cachedReceipt(db.prepare('SELECT * FROM readiness WHERE operation_id = ?').get(request.operationId), request, config, privateKey)
+  })
+}
 async function attest(request, config, privateKey) {
   const helperBytes = readSafe(config.processHelper.path, 1048576)
   if (hash(helperBytes) !== config.processHelper.sha256) fail('process helper changed')
@@ -247,6 +381,7 @@ async function attest(request, config, privateKey) {
   const deadline = performance.now() + config.timeoutMs
   const db = journal(config)
   try {
+    if (request.phase === 'readiness') return await attestReadiness(request, config, privateKey, db, execute, deadline)
     const existing = db.prepare('SELECT * FROM reloads WHERE operation_id = ?').get(request.operationId)
     if (existing) { const receipt = cachedReceipt(existing, request, config, privateKey); if (receipt) return receipt }
     const observed = await observe(config, execute, deadline)
@@ -261,8 +396,8 @@ async function attest(request, config, privateKey) {
       const latest = db.prepare('SELECT * FROM reloads WHERE scope_id = ? ORDER BY generation DESC LIMIT 1').get(scopeId)
       if (latest && (latest.receipt === null || latest.generation !== request.requirements.previousHostGeneration)) fail('previous generation is unresolved or stale')
       const generation = request.requirements.previousHostGeneration + 1
-      db.prepare('INSERT INTO reloads(operation_id, request_digest, config_digest, scope_id, generation, activation_id, prior) VALUES (?, ?, ?, ?, ?, ?, ?)')
-        .run(request.operationId, digest(request), digest(config), scopeId, generation, activationId, canonical(observed))
+      db.prepare('INSERT INTO reloads(operation_id, request_digest, config_digest, scope_id, generation, activation_id, prior, request, config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(request.operationId, digest(request), digest(config), scopeId, generation, activationId, canonical(observed), canonical(request), canonical(config))
       return { row: db.prepare('SELECT * FROM reloads WHERE operation_id = ?').get(request.operationId), dispatch: true }
     })
     const replay = cachedReceipt(reserved.row, request, config, privateKey); if (replay) return replay
@@ -312,7 +447,7 @@ export async function runSystemdHostAttestor(argv = process.argv.slice(2), envir
   let bytes = 0; const chunks = []
   for await (const chunk of process.stdin) { bytes += chunk.length; if (bytes > 65536) fail('request exceeds byte limit'); chunks.push(chunk) }
   const request = parseJson(Buffer.concat(chunks), 'request')
-  if (request?.phase !== 'reload') fail('only reload requests are supported')
+  if (!['reload', 'readiness'].includes(request?.phase)) fail('only reload and readiness requests are supported')
   const { config, privateKey } = loadConfig(environment, request)
   return attest(request, config, privateKey)
 }

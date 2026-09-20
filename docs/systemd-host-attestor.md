@@ -1,17 +1,18 @@
-# Owner-operated systemd Host reload attestor
+# Owner-operated systemd Host attestor
 
 `plugin-control-plane/bin/dsh-systemd-host-attestor.js` is shipped in the
 Control Plane bundle. It implements the existing configured Host executable
-contract, version `dsh-systemd-host-attestor-1`, for **reload only** on Linux.
+contract, version `dsh-systemd-host-attestor-2`, for **reload and readiness** on Linux.
 It uses the existing signed receipt, request, fence and activation state
 machine. It creates no Cordis plugin, AgentLoop, model tool or scheduler.
 
 The owner-operated executable restarts one explicitly authorized systemd
 service, observes a fresh stable invocation and signs a schema-2 reload
-receipt. Control Plane can then advance to `awaiting-readiness`. Unsupported
-phases are rejected before acquiring supervisor authority. A running service
-does not establish that the candidate's Fiber is active or its behavior is
-correct; readiness and the other five gates still require their own evidence.
+receipt. Control Plane can then advance to `awaiting-readiness`. Readiness
+uses authenticated live Loader/Fiber observations bound to that signed reload,
+and can advance the existing state machine to `awaiting-effect-blocked-replay`.
+Other phases are rejected before acquiring supervisor authority. Neither a
+running service nor an active candidate establishes behavioral quality.
 
 ## Preparing an exact authorized request
 
@@ -41,7 +42,7 @@ correct; readiness and the other five gates still require their own evidence.
    target service's cgroup. The existing Control Plane authority verifies the
    signed receipt and applies the normal CAS transition.
 
-## Configuration contract
+## Reload configuration contract
 
 All fields are required; unknown fields are rejected. Config, private key and
 state directory must be canonical, owner-private, and outside the candidate
@@ -98,7 +99,7 @@ supervisor fixture uses `/usr/bin/systemctl` directly.
 Before dispatch the attestor validates config/request/pins, reads exact unit
 identity and requires a stable active/running prior instance. It rejects a
 target cgroup containing itself. It then commits the operation, request/config
-digests, prior observation and reserved generation to a private SQLite
+digests, full request/config, prior observation and reserved generation to a private SQLite
 WAL/FULL journal, syncing its parent directory before supervisor I/O.
 
 Only the transaction that first reserves the operation can submit `restart`.
@@ -121,6 +122,75 @@ supervisor journal. A new operation cannot bypass an unresolved predecessor.
 Initial attachment may seed from the owner's approved previous generation;
 deleting or replacing this journal is not a recovery procedure.
 
+## Readiness configuration and evidence
+
+Use the same configured executable and private supervisor journal. After reload,
+prepare the next exact request using `probe --prepare-only`, then provision:
+
+```text
+schemaVersion: 2
+# All schema-1 base fields remain required, except authorization changes below.
+authorization:
+  installationId, ledger, profile, plan, activation,
+  hostGeneration, requestDigest, notBefore, expiresAt
+readiness:
+  reloadOperationId: exact completed reload operation
+  client: { path, sha256 } # shipped lib/runtime-observer-protocol.js
+  observer: { socketPath, keyPath, profilePath, targets }
+  deploymentFiles: [{ path, sha256 }, ...]
+```
+
+The observer config is the exact [runtime observer configuration](runtime-observer.md)
+installed in the target Host. Its helper imports only Node builtins and is
+hash-checked before data-URL import; the receipt key stays in the external
+attestor. Declare 1–128 unique deployment file pins covering the candidate entry,
+package manifest and other owner-required artifacts. These are declared disk
+input checks, not proof of loaded memory bytes or a complete dependency inventory.
+The request's `minimumChecks` must be 1–256; counts are never silently reduced.
+All queries, subprocesses and delays share the configured finite deadline.
+
+Readiness requires the installation's latest reserved reload operation to be
+completed, still unexpired, and equal to `reloadOperationId` and `hostGeneration`.
+It verifies the retained reload signature, request/config digests, observation
+probe digest and exact installation, ledger, profile, plan and activation/fence.
+A later reload in any profile of the installation, even unresolved, invalidates
+this binding. Deployment properties, supervisor identity and profile pins must
+match the signed reload. No readiness path calls `restart`.
+
+For at least `max(2, minimumChecks)` fresh HMAC queries over `stableWindowMs`,
+checks require:
+
+- systemd's full current successor tuple both before and after each query;
+- observer PID/InvocationID matching that tuple, the exact profile and observer
+  config digest, a fresh challenge and an in-query timestamp;
+- every selected entry active with exact module/config and required services;
+- unchanged observer identity, candidate instance epochs and all dependency and
+  service provider instances throughout the window;
+- unchanged channel key and profile/deployment file pins.
+
+The signed readiness `probeDigest` covers the reload receipt digest and successor,
+request/config digests, channel key digest, stable runtime identity, sample
+challenges/timestamps/digests, window and observation time. The receipt uses the
+reload generation without incrementing it. Existing Control Plane verification
+checks its signature and minimum-count/zero-failure contract; these additional
+bindings are enforced by this owner-configured attestor.
+
+The private journal reserves one readiness operation per reload. Retries only
+observe; a completed retry must still match the retained runtime and reload,
+then returns the byte-identical original receipt without extending expiry.
+Concurrent calls converge on that receipt; drift or expiry refuses replay.
+Unknown outcomes never acquire restart authority.
+
+### Version and journal migration
+
+Version 2 retains schema-1 reload configuration and adds schema-2 readiness.
+Its executable/version pins must be updated through owner configuration before
+preparing requests. Pending version-1 requests cannot be silently converted;
+retain their pinned binary for reconciliation. The journal adds nullable raw
+request/config columns transactionally. Historical reload rows lacking this
+context remain valid historical reload records but cannot authorize readiness;
+do not synthesize their missing context or delete the journal to bypass it.
+
 ## Authority and evidence limits
 
 - The signing key and supervisor control belong to the deployment owner.
@@ -130,7 +200,7 @@ deleting or replacing this journal is not a recovery procedure.
   and protected configuration for that boundary.
 - Observation establishes a fresh instance with the pinned effective
   configuration. It does not prove causal attribution to one particular
-  systemd job, atomicity against another administrator, plugin readiness,
+  systemd job, atomicity against another administrator, behavioral quality,
   effect blocking, canary quality, health or physical rollback.
 - Keep other deployment writers serialized while the operation runs. Killing
   the local helper cannot revoke a restart already accepted by systemd. If the
@@ -179,3 +249,15 @@ The [recorded supervisor run](evidence/systemd-reload-supervisor-fixture-2026-09
 contains actual before/after/replay identities and runtime digests. Full-check
 and independent review evidence is recorded in the
 [engineering validation](evidence/systemd-host-attestor-engineering-2026-09-19.json).
+
+`scripts/e2e/systemd-readiness-real-dsh.mjs` runs an opt-in disposable DSH Web
+profile with actual Control Plane observer and Policy candidate entries. It
+checks signed reload → signed readiness, independent signature verification,
+byte-identical readiness replay without another Host restart, and refusal after
+the Host is replaced with the candidate disabled. It uses fixture requests,
+not an actual Control Plane activation CAS or npm-installed candidate. The
+[recorded real DSH run](evidence/systemd-readiness-real-dsh-2026-09-19.json)
+retains both signed receipts and the readiness probe preimage.
+The [readiness engineering validation](evidence/systemd-readiness-engineering-2026-09-19.json)
+records the full repository check, package inspection, prior failures and
+independent review for this capability.
