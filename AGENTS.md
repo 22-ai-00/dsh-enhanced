@@ -8,8 +8,9 @@ This repository is a pnpm monorepo of independently publishable DeepSeek Harness
 
 - Build a self-iterating DSH tool/plugin agent. Models are replaceable suppliers; agent identity, history, and versioned capabilities must survive supplier changes. Freeze the approved supplier, budget, and acceptance contract per run.
 - Reuse DSH's native agent loop and Cordis composition, injection, effects, and reload lifecycle. Connect task feedback → candidate skill/tool/plugin → independent verification → bounded rollout → observation/rollback; avoid duplicate loops or goal state machines.
+- Deliver self-iteration during ordinary user use: authenticated task outcomes, corrections, and repeated work must drive durable learning and authorized capability updates without developer orchestration. Fixed scenarios are regression evidence; repeated hand-run probes do not deliver this capability.
 - Keep acceptance rules and held-out tasks outside candidate write authority. Promote from fresh, independently checked outcomes; model self-ratings and successful tool exits alone do not establish success.
-- Prove improvement through reuse on new tasks: compare baseline and candidate on a fixed, versioned task set with the same supplier and budget; record quality, cost, latency, and regressions. Retain failed attempts as evidence.
+- Judge improvement through subsequent real user tasks and recorded quality, cost, latency, and regressions. Use bounded, versioned comparisons with the same supplier and budget when needed; retain failed attempts without turning repeated benchmark runs into the development objective.
 - Link actions and peer claims to agent/run identity, capability versions, and original evidence. Combine pre-action policy with post-action observation; keep changes bounded and reversible, reconcile unknown outcomes before retrying, and stay within existing owner authorization.
 
 Rationale and development priorities: [research note](docs/research-dsh-plugin-self-iteration-2026-09-19.md).
@@ -54,6 +55,8 @@ DSH's “everything is a plugin” model means that every composable extension e
 ## Verification
 
 Deliver in capability-sized commits. Once an independently usable capability passes its relevant checks and independent review, commit it and push it to `dev` before starting another main capability. Parallel work should converge on that delivery; keep unfinished work out of its commit. Prepare bulk version changes only when the release is ready, in a separate release commit. A capability commit does not replace the full repository verification required before final delivery or publication.
+
+Keep development checks focused on changed behavior and concrete remaining risks. Do not repeatedly run fixed live-model scenarios; prioritize shipping the ordinary-use self-repair and self-iteration path.
 
 Run `pnpm check` from the repository root. Completion requires manifest validation, zero lint warnings, successful typechecking and tests, a clean build, and a successful dry-run pack for every plugin. Inspect the dry-run file list whenever package boundaries or `files` change.
 

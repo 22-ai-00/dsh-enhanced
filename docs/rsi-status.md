@@ -8,9 +8,12 @@
 
 闭环为：任务反馈 → 技能/工具/插件候选 → 独立验证 → 有限推广 → 新任务复用 → 观察与回滚。验收和留出集须在候选写权限之外。研究依据见[自迭代原则](research-dsh-plugin-self-iteration-2026-09-19.md)，开发约束见 [AGENTS.md](../AGENTS.md)。
 
+**当前开发目标：让 Agent 在用户日常使用中自我修复、自我迭代。** 一次配置与授权后，正常会话中的失败、纠正、重复任务及后续结果应自动进入持久成长流程，由 Agent 在既有授权和预算内形成、验证、采用改进，并观察和回滚；用户无需逐次调用捕获、修复或比较工具。固定场景仅用于必要回归，不再以反复手动运行模型探针作为开发主线。
+
 ## 当前交付边界
 
 - 发布基线仍为 `0.1.32`；`dev` 工作区版本为 `0.1.33`，后续开发不等于已发布。安装器和 Host 兼容范围见[兼容性说明](compatibility.md)与[发布账本](../release-manifest.json)。
+- 日常使用中的工具/插件自迭代尚未贯通。普通 Lark 已有低风险偏好自动学习；Skills 的有限修复链仍需对精确来源 Goal 手动 `skill_repair_arm`，Growth Driver 默认休眠且止于 pending 候选。优先补齐真实会话反馈到受授权修复、采用与持续观察的自动入口；偏好学习和手动演示不能替代这一交付。
 - 基本 RSI 已在限定任务族跑通真实修复、独立比较、后续任务 canary、两轮晋升与安全检查点恢复。它不证明任意任务都能自我改进，也不允许重放未结算的模型或外部调用。
 - Day1 已经通过原生 Agent/Growth Driver 提交源码修复候选，独立 Host 作业完成离线仓库检查并形成待审批计划；其中 personal-memory 修复经开发复核整合。待审批提案不等于自主发布或生产启用。
 - Control Plane 已有 npm 发布/独立读回/catalog adapter，以及 systemd reload、readiness、物理 rollback 的签名与持久操作组件。认证有限回放端点支持晚到 Ed25519 授权：readiness 落账后，将真实 schema-2 请求交给同一 DSH CLI `0.1.5-rc.2` Host 执行，保持 PID/InvocationID、候选 Fiber 与部署文件不变。完成态重启失效，SIGKILL 中断后保留 unknown；同 scope 换 operation 或重新签发 grant 不能恢复派发权限。其输出不证明全局 `externalEffects = 0`，不能代替独立签名。
@@ -18,7 +21,9 @@
 - Skills 已接入同进程 Host 受限委派：来源重新验证后，将冻结的活动技能或 pending 候选临时挂载到全新 owner scope，经原生 `skill_run` 执行；持久 cell reservation 与调用记录阻止换调用键或重启重放。来源和接收方重载、撤权、到期及取消均保留失败或 unknown。Evaluation 原生模型 cell 与冻结后独立任务已接入，12-cell Docker 工程验证两臂各 6 次达成，候选实际复用 6 次、质量平局。Day1 同预算收益比较仍待完成；见[接线指南](native-skill-reuse.md)。
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
 
-最新 Day1 原生技能实验仍未进入双臂比较。checkpoint 修复后的来源曾独立达成（4 次调用全部结算），但成功的 `goal_context` 被 Skills 误判为不可捕获的控制操作；现已将合法上下文读取保留为来源证据、排除出复用步骤，并通过真实 Docker 回归。新实验经历三次本地测试失败后，产物作业成功，但原生 Goal 回合达到 240 秒期限，最后一次模型调用用量未结算：6 次已结算调用计输入 58,073、输出 9,689 tokens，另 1 次保留 unknown 及预留；整体 Goal 验收为 unknown，未进入捕获或比较，本地 runtime 清理确认成功。后续需检查原生回合的预算与收束机制，再做新任务比较；旧 unknown 和失败记录不改判、不重放，未知用量不计零。
+Day1 原生技能的真实双臂比较仍待完成。最近来源实验的产物作业成功，但整个原生 Goal 回合达到 240 秒期限：6 次模型调用已结算，另 1 次用量 unknown 并保留预留；整体 Goal 验收为 unknown，未进入捕获或比较，本地 runtime 清理确认成功。旧失败和 unknown 不改判、不重放，未知用量不计零。
+
+Goals 已通过现有 SystemPrompt/`goal_context` 提供 `roundTiming`：首个请求只见配置上限，回合准入后的请求可见同一持久 run 的准确截止与剩余时间。Docker 回归已核对模型实际输入与持久 admission 一致，并验证正常结束后仍由独立验收完成 Goal；这不延长预算，也不证明真实收益。固定 Day1 探针暂不继续运行；下一步交付日常使用驱动的成长接线。
 
 ## 工作包验收
 
@@ -49,17 +54,17 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. WP16 晚到回放授权已接线；下一步为同一真实请求接入独立副作用观测与签名，再补齐 shadow/canary/soak/health 与推广后恢复。原生工具/回复阻断不能证明全局 `externalEffects = 0`；继续沿既有请求和 CAS 状态机接线。
-2. 在真实受授权环境完成 build→publish→verify→enable→monitor→rollback；生产授权与凭据尚不能由测试夹具代替。
-3. 为 WP18 在受控真实仓库完成事件到精确提交 CI/readback，再用同供应、同预算的新任务证明技能复用收益；同时验证停止、unknown 对账与回滚。
-4. 继续逐项关闭 WP04–WP13 的真实收益、覆盖广度和外部系统验收缺口。
+1. 打通普通 authenticated owner 会话/任务结果 → 持久成长触发。沿 Delivery、Evaluation 与原生 Goal 读取真实使用反馈，支持重启恢复、去重和 unknown 对账；不要求用户手动运行评测脚本。
+2. 接通成长触发 → 自主修复/技能或插件候选 → 独立验证 → 已授权范围内采用 → 后续真实使用观察与回滚。复用既有 Skills、Growth Driver 和 Control Plane；仅停留在 pending 提案不算完整交付。
+3. 提供可安装的日常使用配置，明确正常入口、针对成长能力范围的一次授权、预算、停止和恢复方式。模型保持可替换供应，成长状态随 Agent 持久化；无需为每个来源 Goal 手动 arm，或为每个任务重新编排固定场景。自动调用预设场景仍不能替代这一目标。
+4. 保留上表未完成验收与真实发布/外部系统边界。WP16 的独立副作用观测、签名和推广恢复，以及 WP18 的精确提交 CI/readback，按日常自迭代链路所需逐项接入；测试夹具不能代替生产授权或真实收益。
 
 ## 开发入口与验证
 
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 来源上下文捕获修复已通过独立复核；根 `pnpm check` 退出 0：6,132 项通过、50 项跳过，零 lint 警告、类型检查、构建及 35 个包的 dry-run pack 完成（32 个插件、3 个共享库）。Skills 定义专项 24/24，Docker 回归 9/9，覆盖上下文与 checkpoint 仅作来源证据、候选实际复用、12-cell 比较及捕获清理失败边界；命令见[接线指南](native-skill-reuse.md)。工程检查不证明真实复用收益或生产自治。后续改动仍须完成相关测试、独立复核与根检查，再提交、推送 `dev`。
+- 原生回合时间上下文已通过独立代码复核；根 `pnpm check` 退出 0：6,135 项通过、50 项跳过，零 lint 警告、类型检查、构建及 35 个包的 dry-run pack 完成（32 个插件、3 个共享库）。Goals 定向测试 71/71；Docker 回归 9/9，最终文案版本的来源捕获/复用单项再次通过，覆盖实际模型输入与持久 admission 一致、期限不重置及独立验收；命令见[接线指南](native-skill-reuse.md)。这些使用固定适配器的工程检查不证明真实模型收益或日常自主成长。后续按能力做必要定向验证与独立复核，最终交付或发布前完成全仓检查；不反复扩大固定场景实验。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 - 未结算 generation 测试修复 `e33a6ae` 已通过 Linux、macOS 与 Windows 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35494781155)。测试用真实派发后丢失确认建立持久未结算状态，检查新 operation 不再重启。该跨平台结论不覆盖之后的新改动。
 
