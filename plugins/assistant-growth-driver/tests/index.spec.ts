@@ -48,6 +48,7 @@ const PRINCIPAL = 'owner-1'
 const RECORD_ID = 'record-owner-1'
 const OWNER_ROUTE = 'owner-route'
 const SKILL_NAME = 'repeat-write-result'
+const CORDIS_ORIGINAL = Symbol.for('cordis.original')
 
 interface Harness {
   ctx: Context
@@ -307,9 +308,9 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
       ],
     })
   }
-  const skillsService = opts.registerSkills === false
-    ? undefined
-    : new AssistantSkillsService(ctx, { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'] })
+  if (opts.registerSkills !== false) {
+    await ctx.plugin(AssistantSkillsService, { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'] })
+  }
 
   // The skills service registers its global skill_* tools from a cordis inject
   // callback; wait for that to settle so the growth agent's global snapshot is
@@ -323,7 +324,10 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
     }, { timeout: 2_000 })
   }
 
-  return { ctx, root, skillsPath: join(root, 'skills.sqlite'), scope, receipts, goalsApi, approval, ownerAnchoredCommit, skills: skillsService }
+  const skills = opts.registerSkills === false
+    ? undefined
+    : (ctx.get('assistantSkills' as never) as unknown as { [CORDIS_ORIGINAL]: AssistantSkillsService })[CORDIS_ORIGINAL]
+  return { ctx, root, skillsPath: join(root, 'skills.sqlite'), scope, receipts, goalsApi, approval, ownerAnchoredCommit, skills }
 }
 
 afterEach(async () => {

@@ -16,6 +16,13 @@ export type { RepairExecutionAuthority, RepairExecutionContext, StageFailureCand
 
 export { validateRepairProfiles } from './repair-profile.js'
 export { validateExternalHoldoutProfiles } from './external-holdout.js'
+export { openHoldoutProcess } from './external-holdout.js'
+export { verifyProspectiveBenchmarkManifest } from './holdout-authority.js'
+export { verifyProspectiveCertificate } from './prospective-holdout.js'
+export { verifyHoldoutReceipt } from './holdout-qualification.js'
+export type { BeginResult, ProspectiveBenchmarkManifest, ProspectiveBenchmarkManifestCase, ProspectiveBenchmarkManifestCell, QualificationBinding } from './holdout-authority.js'
+export type { ProspectiveHoldoutCertificate } from './prospective-holdout.js'
+export type { IssuedHoldoutCells } from './holdout-qualification.js'
 
 export type { BenchmarkArmSelection, BenchmarkArmSnapshot, BenchmarkArmCapability, BenchmarkArmMount } from './delegated-arm.js'
 export type { SkillDelegatedArmBinding } from './store.js'

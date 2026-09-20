@@ -46,7 +46,7 @@ export interface HoldoutQualificationInput {
   readonly expectedDatasetDigest?: string
   readonly expectedGeneratorDigest?: string
   readonly canaryAdmission?: CanaryAdmission
-  readonly transport: { request(operation: 'begin' | 'next' | 'record' | 'finish', value?: unknown, signal?: AbortSignal): Promise<unknown> }
+  readonly transport: { request(operation: 'begin' | 'manifest' | 'next' | 'record' | 'finish', value?: unknown, signal?: AbortSignal): Promise<unknown> }
   readonly signal: AbortSignal
   readonly authorize: () => void
 }
@@ -60,6 +60,9 @@ export interface HoldoutQualificationResult {
   readonly prospectiveHoldout?: 'authority-attested-after-freeze'
   readonly admissionDigest?: string
 }
+
+/** Cells actually issued by the authority, keyed by cell id and bound arm digest. */
+export type IssuedHoldoutCells = ReadonlyMap<string, string>
 
 const digest = (value: unknown) => acceptanceDigest(value)
 const fail = (message: string): never => { throw new Error(`assistant-skills: holdout qualification ${message}`) }
@@ -173,11 +176,17 @@ function toolCalls(replay: ReplayResult, definition: SkillDefinition) {
     return step.outcome === 'executed' ? { name: step.toolName, inputDigest, outputDigest: step.resultDigest } : { name: step.toolName, inputDigest }
   })
 }
-function validReceipt(value: unknown, begin: BeginResult, seen: ReadonlyMap<string, string>): value is HoldoutReceipt {
+/**
+ * Verifies the final signed authority receipt against a previously verified
+ * begin response and the cells actually issued to the evaluator. The caller
+ * supplies the authority public-key pin; the receipt key is never trusted.
+ */
+export function verifyHoldoutReceipt(value: unknown, begin: BeginResult, seen: IssuedHoldoutCells, pinnedPublicKey: string): value is HoldoutReceipt {
+  if (typeof pinnedPublicKey !== 'string' || pinnedPublicKey.length === 0 || begin.publicKey !== pinnedPublicKey) return false
   if (!plain(value)) return false
   const data = value as unknown as HoldoutReceipt
   const hasAdmission = Object.hasOwn(data, 'admissionDigest')
-  if (!verifyHoldoutSignature(data as unknown as Record<string, unknown>, begin.publicKey) || data.sessionId !== begin.sessionId || data.planDigest !== begin.planDigest || data.datasetDigest !== begin.datasetDigest || data.publicKey !== begin.publicKey
+  if (!verifyHoldoutSignature(data as unknown as Record<string, unknown>, pinnedPublicKey) || data.sessionId !== begin.sessionId || data.planDigest !== begin.planDigest || data.datasetDigest !== begin.datasetDigest || data.publicKey !== pinnedPublicKey
     || hasAdmission !== Object.hasOwn(begin, 'admissionDigest') || data.scopeDigest !== begin.scopeDigest || data.baselineDigest !== begin.baselineDigest || data.candidateDigest !== begin.candidateDigest || data.budgetDigest !== begin.budgetDigest || data.admissionDigest !== begin.admissionDigest
     || data.expiresAt !== begin.expiresAt || data.repeats !== begin.repeats || !same(data.limits, begin.limits) || data.cellCount !== begin.cellCount || typeof data.complete !== 'boolean'
     || !same(data.prospective ?? null, begin.prospective ?? null)
@@ -232,7 +241,7 @@ export function inspectProspectiveQualification(value: unknown, input: Prospecti
       || !Array.isArray((receipt as HoldoutReceipt).cellVerdicts)) return undefined
     const saved = receipt as HoldoutReceipt
     const seen = new Map(saved.cellVerdicts.map(cell => [cell.cellId, cell.armDigest]))
-    if (!validReceipt(saved, receipt, seen)) return undefined
+    if (!verifyHoldoutReceipt(saved, receipt, seen, input.pinnedPublicKey)) return undefined
     return { receipt: clone(saved), quality: quality(saved, true), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact', prospectiveHoldout: 'authority-attested-after-freeze',
       ...(admissionDigest === undefined ? {} : { admissionDigest }) }
   } catch { return undefined }
@@ -292,7 +301,7 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
       if (recorded === 'unknown' || !observed.quiescent || observed.status === 'unknown' || observed.status === 'cancelled' || observed.status === 'timed-out') break
     }
     revalidate(); const receiptValue = await request<unknown>(input.transport, 'finish', undefined, input.signal, execution.expiresAt, execution.cellDurationMs)
-    if (!validReceipt(receiptValue, begin, seen)) fail('receipt signature or binding is invalid')
+    if (!verifyHoldoutReceipt(receiptValue, begin, seen, pinnedPublicKey)) fail('receipt signature or binding is invalid')
     const receipt = receiptValue as HoldoutReceipt
     return { receipt, quality: quality(receipt, expectedGeneratorDigest !== undefined), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact',
       ...(expectedGeneratorDigest === undefined ? {} : { prospectiveHoldout: 'authority-attested-after-freeze' as const }),

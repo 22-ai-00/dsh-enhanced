@@ -118,7 +118,7 @@ export async function openHoldoutProcess(authority: ExternalHoldoutProfile['auth
   const handshakeTimer = setTimeout(() => fail('authority ready deadline exceeded'), 10000)
   try { if (signal.aborted) abort(); await handshake } catch (error) { await close(); throw error } finally { clearTimeout(handshakeTimer) }
   return { close, transport: { async request(operation, value, requestSignal) {
-    if (failed || closing || ended || pending || !['begin', 'next', 'record', 'finish'].includes(operation)) throw new Error('assistant-skills: holdout pipe unavailable')
+    if (failed || closing || ended || pending || !['begin', 'manifest', 'next', 'record', 'finish'].includes(operation)) throw new Error('assistant-skills: holdout pipe unavailable')
     signal.throwIfAborted(); requestSignal?.throwIfAborted()
     const id = `request-${++serial}`, body = JSON.stringify({ id, operation, ...(value === undefined ? {} : { value }) }) + '\n'
     if (Buffer.byteLength(body) > 1048576) throw new Error('assistant-skills: holdout request too large')

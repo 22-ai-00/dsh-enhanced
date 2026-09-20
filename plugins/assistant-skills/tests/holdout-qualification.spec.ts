@@ -7,7 +7,7 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { createDefinition } from '../src/definition.ts'
 import { HoldoutAuthority, type HoldoutDataset } from '../src/holdout-authority.ts'
 import { createProspectiveCertificate, generateProspectiveDataset, prospectiveGeneratorDigest } from '../src/prospective-holdout.ts'
-import { inspectProspectiveQualification, qualifyHoldout, type HoldoutQualificationInput } from '../src/holdout-qualification.ts'
+import { inspectProspectiveQualification, qualifyHoldout, verifyHoldoutReceipt, type HoldoutQualificationInput } from '../src/holdout-qualification.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -59,6 +59,23 @@ test('does not execute or record an unsigned next cell', async () => {
     throw new Error('unexpected request')
   } } })).rejects.toThrow(/next cell signature/)
   expect(records).toBe(0)
+})
+
+test('verifies a complete final receipt only with an explicit pinned key and issued-cell map', () => {
+  const keys = generateKeyPairSync('ed25519'), authority = HoldoutAuthority.create({ dataset, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 } })
+  const frozen = { scopeDigest: digest('a'), baselineDigest: digest('b'), candidateDigest: digest('c'), budgetDigest: digest('d'), expiresAt: Date.now() + 60_000, repeats: 2 }
+  const begin = authority.begin(frozen), issued = new Map<string, string>()
+  while (true) {
+    const cell = authority.next(); if (!cell) break
+    issued.set(cell.cellId, cell.armDigest)
+    const expected = dataset.cases.find(item => item.stdin === cell.stdin)!
+    authority.record({ cellId: cell.cellId, armDigest: cell.armDigest, stdout: expected.expectedStdout, exitCode: expected.expectedExitCode, quiescent: true, status: 'completed', artifactDigest: digest('e'), toolCalls: [] })
+  }
+  const receipt = authority.finish(), key = keys.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+  expect(verifyHoldoutReceipt(receipt, begin, issued, key)).toBe(true)
+  expect(verifyHoldoutReceipt(receipt, begin, issued, generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString())).toBe(false)
+  expect(verifyHoldoutReceipt({ ...receipt, cellVerdicts: receipt.cellVerdicts.slice(1) }, begin, issued, key)).toBe(false)
+  expect(verifyHoldoutReceipt(receipt, begin, new Map(), key)).toBe(false)
 })
 
 test('rejects a response for a different pinned dataset before issuing any cell', async () => {

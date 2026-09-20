@@ -71,6 +71,30 @@ export interface BeginResult {
   readonly prospective?: ProspectiveHoldoutCertificate
 }
 
+export interface ProspectiveBenchmarkManifestCase {
+  readonly id: string
+  readonly kind: HoldoutCaseKind
+  readonly inputDigest: string
+  readonly acceptanceDigest: string
+}
+
+export interface ProspectiveBenchmarkManifestCell {
+  readonly cellId: string
+  readonly armDigest: string
+  readonly caseId: string
+  readonly kind: HoldoutCaseKind
+  readonly repeat: number
+}
+
+/** Signed, answer-free prospective benchmark plan for a native evaluator. */
+export interface ProspectiveBenchmarkManifest {
+  readonly protocol: 'assistant-skills/prospective-benchmark-manifest/v1'
+  readonly begin: BeginResult
+  readonly cases: readonly ProspectiveBenchmarkManifestCase[]
+  readonly cells: readonly ProspectiveBenchmarkManifestCell[]
+  readonly signature: string
+}
+
 export interface SignedCell {
   readonly sessionId: string
   readonly planDigest: string
@@ -154,7 +178,9 @@ function signature(payload: unknown, privateKey: AuthorityOptions['privateKey'])
 }
 function validDigest(value: unknown): value is string { return typeof value === 'string' && digestPattern.test(value) }
 function assert(condition: unknown, message: string): asserts condition { if (!condition) throw new Error(`holdout-authority: ${message}`) }
-function exact(value: unknown, required: readonly string[], optional: readonly string[] = []): boolean {
+function exact<T extends object>(value: T, required: readonly string[], optional?: readonly string[]): value is T
+function exact(value: unknown, required: readonly string[], optional?: readonly string[]): value is Record<string, unknown>
+function exact(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length) return false
   const descriptors = Object.getOwnPropertyDescriptors(value)
   return required.every(key => Object.hasOwn(descriptors, key)) && Object.entries(descriptors).every(([key, descriptor]) => (required.includes(key) || optional.includes(key)) && descriptor.enumerable && 'value' in descriptor)
@@ -197,6 +223,9 @@ function bindingFromBegin(begin: BeginResult): QualificationBinding {
   return { scopeDigest: begin.scopeDigest, baselineDigest: begin.baselineDigest, candidateDigest: begin.candidateDigest, budgetDigest: begin.budgetDigest,
     ...(begin.admissionDigest === undefined ? {} : { admissionDigest: begin.admissionDigest }), expiresAt: begin.expiresAt, repeats: begin.repeats }
 }
+
+function inputDigest(stdin: string): string { return createHash('sha256').update(Buffer.from(stdin, 'utf8')).digest('hex') }
+function acceptanceDigest(expectedStdout: string, expectedExitCode: number): string { return sha256({ expectedStdout, expectedExitCode }) }
 
 /** A synchronous, stateful authority. It has no Cordis dependency and never claims an OS seal or promotion authority. */
 export class HoldoutAuthority {
@@ -281,6 +310,22 @@ export class HoldoutAuthority {
     this.#begin = Object.freeze({ sessionId, planDigest, datasetDigest: this.#datasetDigest, publicKey: this.#publicKey, ...binding, limits: this.#limits, cellCount: cells.length, ...(this.#prospective ? { prospective: this.#prospective } : {}) })
     this.#cells = cells
     return { ...this.#begin }
+  }
+
+  /**
+   * Returns the prospective plan after freeze and before any private input is
+   * issued. The manifest intentionally contains only commitments to inputs and
+   * expected outcomes, never either value itself.
+   */
+  manifest(): ProspectiveBenchmarkManifest {
+    this.assertBegun()
+    assert(this.#begin!.prospective !== undefined, 'prospective manifest requires a prospective qualification')
+    assert(!this.#stopped && this.#now() < this.#begin!.expiresAt, 'prospective manifest is unavailable after expiry or stop')
+    assert(!this.#cells.some(cell => cell.issued), 'prospective manifest is unavailable after cell issuance')
+    const cases = this.#dataset.cases.map(item => ({ id: item.id, kind: item.kind, inputDigest: inputDigest(item.stdin), acceptanceDigest: acceptanceDigest(item.expectedStdout, item.expectedExitCode) }))
+    const cells = this.#cells.map(({ cellId, armDigest, caseId, kind, repeat }) => ({ cellId, armDigest, caseId, kind, repeat }))
+    const unsigned = { protocol: 'assistant-skills/prospective-benchmark-manifest/v1' as const, begin: this.#begin!, cases, cells }
+    return { ...unsigned, signature: signature(unsigned, this.#privateKey) }
   }
 
   next(): SignedCell | undefined {
@@ -370,5 +415,49 @@ export class HoldoutAuthority {
 /** Verifies a signed next-cell or receipt payload with the public key emitted by begin. */
 export function verifyHoldoutSignature(payload: Record<string, unknown>, publicKey: string): boolean {
   const { signature: value, ...unsigned } = payload
-  return typeof value === 'string' && typeof publicKey === 'string' && verify(null, Buffer.from(canonical(unsigned)), publicKey, Buffer.from(value, 'base64url'))
+  try { return typeof value === 'string' && typeof publicKey === 'string' && verify(null, Buffer.from(canonical(unsigned)), publicKey, Buffer.from(value, 'base64url')) } catch { return false }
+}
+
+/** Strictly verifies an answer-free manifest against its frozen authority pins. */
+export function verifyProspectiveBenchmarkManifest(value: unknown, expectedBinding: QualificationBinding, pinnedPublicKey: string, expectedGeneratorDigest: string): value is ProspectiveBenchmarkManifest {
+  if (!exact(value, ['protocol', 'begin', 'cases', 'cells', 'signature']) || value.protocol !== 'assistant-skills/prospective-benchmark-manifest/v1'
+    || typeof value.signature !== 'string' || value.signature.length < 32 || value.signature.length > 512
+    || !validDigest(expectedGeneratorDigest)) return false
+  const manifest = value
+  const begin = manifest.begin
+  if (!exact(begin, ['sessionId', 'planDigest', 'datasetDigest', 'publicKey', 'scopeDigest', 'baselineDigest', 'candidateDigest', 'budgetDigest', 'expiresAt', 'repeats', 'limits', 'cellCount', 'prospective'], ['admissionDigest'])) return false
+  const { expiresAt, repeats } = begin
+  if (typeof begin.sessionId !== 'string' || begin.sessionId.length < 1 || begin.sessionId.length > 128 || !validDigest(begin.planDigest) || !validDigest(begin.datasetDigest)
+    || begin.publicKey !== pinnedPublicKey || !validDigest(begin.scopeDigest) || !validDigest(begin.baselineDigest) || !validDigest(begin.candidateDigest) || !validDigest(begin.budgetDigest)
+    || begin.admissionDigest !== undefined && !validDigest(begin.admissionDigest) || begin.baselineDigest === begin.candidateDigest
+    || !Number.isSafeInteger(expiresAt) || typeof repeats !== 'number' || !Number.isInteger(repeats) || repeats < 2 || repeats > 4
+    || !Number.isSafeInteger(begin.cellCount) || !exact(begin.limits, ['maxToolCalls', 'maxOutputBytes'])) return false
+  const verifiedBegin = begin as unknown as BeginResult
+  const binding = bindingFromBegin(verifiedBegin)
+  try { validateLimits(begin.limits as unknown as HoldoutLimits) } catch { return false }
+  if (canonical(binding) !== canonical(expectedBinding) || !verifyProspectiveCertificate(begin.prospective, expectedBinding, pinnedPublicKey, expectedGeneratorDigest)
+    || begin.prospective.datasetDigest !== begin.datasetDigest) return false
+  if (!Array.isArray(manifest.cases) || manifest.cases.length < 3 || manifest.cases.length > 12 || !Array.isArray(manifest.cells) || manifest.cells.length !== verifiedBegin.cellCount || manifest.cells.length !== manifest.cases.length * verifiedBegin.repeats * 2) return false
+  const cases: ProspectiveBenchmarkManifestCase[] = []
+  const caseIds = new Set<string>(), caseKinds = new Set<HoldoutCaseKind>()
+  for (const item of manifest.cases) {
+    if (!exact(item, ['id', 'kind', 'inputDigest', 'acceptanceDigest']) || typeof item.id !== 'string' || item.id.length < 1 || item.id.length > 128 || caseIds.has(item.id)
+      || !kinds.includes(item.kind as HoldoutCaseKind) || !validDigest(item.inputDigest) || !validDigest(item.acceptanceDigest)) return false
+    caseIds.add(item.id); caseKinds.add(item.kind as HoldoutCaseKind); cases.push(item as unknown as ProspectiveBenchmarkManifestCase)
+  }
+  if (caseKinds.size !== kinds.length) return false
+  const expectedCells: ProspectiveBenchmarkManifestCell[] = []
+  let index = 0
+  for (let repeat = 1; repeat <= verifiedBegin.repeats; repeat++) for (const item of cases) {
+    const arms = (index++ % 2 === 0) ? [binding.baselineDigest, binding.candidateDigest] : [binding.candidateDigest, binding.baselineDigest]
+    for (const armDigest of arms) expectedCells.push({ cellId: `cell-${expectedCells.length + 1}`, armDigest, caseId: item.id, kind: item.kind, repeat })
+  }
+  for (let index = 0; index < manifest.cells.length; index++) {
+    const cell = manifest.cells[index], expected = expectedCells[index]
+    if (!exact(cell, ['cellId', 'armDigest', 'caseId', 'kind', 'repeat']) || canonical(cell) !== canonical(expected)) return false
+  }
+  const cells = manifest.cells as unknown as ProspectiveBenchmarkManifestCell[]
+  const planDigest = sha256({ sessionId: begin.sessionId, datasetDigest: begin.datasetDigest, binding, limits: begin.limits, cells })
+  if (planDigest !== begin.planDigest) return false
+  return verifyHoldoutSignature(manifest, pinnedPublicKey)
 }

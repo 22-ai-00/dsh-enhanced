@@ -15,8 +15,10 @@
 - Day1 已经通过原生 Agent/Growth Driver 提交源码修复候选，独立 Host 作业完成离线仓库检查并形成待审批计划；其中 personal-memory 修复经开发复核整合。待审批提案不等于自主发布或生产启用。
 - Control Plane 已有 npm 发布/独立读回/catalog adapter，以及 systemd reload、readiness、物理 rollback 的签名与持久操作组件。认证有限回放端点支持晚到 Ed25519 授权：readiness 落账后，将真实 schema-2 请求交给同一 DSH CLI `0.1.5-rc.2` Host 执行，保持 PID/InvocationID、候选 Fiber 与部署文件不变。完成态重启失效，SIGKILL 中断后保留 unknown；同 scope 换 operation 或重新签发 grant 不能恢复派发权限。其输出不证明全局 `externalEffects = 0`，不能代替独立签名。
 - Host request schema 2 固定同一 activation/fence 下前一阶段的完整签名回执摘要与 generation，并在 dispatch、apply 时复核；普通阶段不能换代。systemd attestor v5 已通过真实 reload/readiness 与物理 restore 探针。旧 schema-1 已应用历史可作为前驱，未完成操作必须先用原兼容版本对账；此改动仍不提供独立副作用观测。
-- Skills 已接入同进程 Host 受限委派：来源重新验证后，将冻结的活动技能或 pending 候选临时挂载到全新 owner scope，经原生 `skill_run` 执行；持久 cell reservation 与调用记录阻止换调用键或重启重放。来源和接收方重载、撤权、到期及取消均保留失败或 unknown。当前是原生评测接线能力，Evaluation 模型 cell、冻结后独立任务及 Day1 同预算收益比较仍待接入；见[接线指南](native-skill-reuse.md)。
+- Skills 已接入同进程 Host 受限委派：来源重新验证后，将冻结的活动技能或 pending 候选临时挂载到全新 owner scope，经原生 `skill_run` 执行；持久 cell reservation 与调用记录阻止换调用键或重启重放。来源和接收方重载、撤权、到期及取消均保留失败或 unknown。Evaluation 原生模型 cell 与冻结后独立任务已接入，12-cell Docker 工程验证两臂各 6 次达成，候选实际复用 6 次、质量平局。Day1 同预算收益比较仍待完成；见[接线指南](native-skill-reuse.md)。
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
+
+最新 Day1 原生技能实验：两次独立来源任务均在创建 Goal 后出现模型调用未结算 usage，未产生可复用候选，也未进入双臂比较。第二次将步骤时限从 30 秒提高到 120 秒，调用仍在约 60 秒结束且用量未知。两次均确认本地 runtime 已关闭；未知用量保留预留额度，不计作零，也不重放原调用。后续先核查模型传输时限与结算，再进行新的同预算实验。
 
 ## 工作包验收
 
@@ -57,7 +59,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。已提交基线 `e5620b7` 的 Skills 委派独立复核已通过；该基线的根 `pnpm check` 退出 0：6,114 项通过、44 项跳过，构建及 35 个包的 dry-run pack 完成（32 个插件、3 个共享库），Skills 包包含新的委派模块。之后补入的非合作工具晚到结果测试单独通过，证明取消后账本仍保持 unknown；这些是工程验证，不是模型收益或生产自治验收；不覆盖之后的提交或未提交开发。
+- 本次原生技能双臂评测及权限接线已通过独立复核；根 `pnpm check` 退出 0：6,123 项通过、46 项跳过，零 lint 警告、类型检查、构建及 35 个包的 dry-run pack 完成（32 个插件、3 个共享库）。Evaluation 包包含新的原生技能 Host 入口、运行时和共享 Goal 模块。另以真实 Docker 完成来源捕获、候选复用与 12-cell 双臂测试；命令见[接线指南](native-skill-reuse.md)。这些是工程验证，不证明真实模型收益或生产自治。后续改动仍须完成相关测试、独立复核与根检查，再提交、推送 `dev`。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 - 未结算 generation 测试修复 `e33a6ae` 已通过 Linux、macOS 与 Windows 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35494781155)。测试用真实派发后丢失确认建立持久未结算状态，检查新 operation 不再重启。该跨平台结论不覆盖之后的新改动。
 

@@ -1,7 +1,5 @@
 /** Native Goal + isolated artifact assembly. This does not attest a complete comparison. */
 import { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
-import { join } from 'node:path'
 import { acceptanceDigest, type TaskAcceptanceContract, type TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import type { NativeAdapterFactory, NativeAdapterBinding, NativeModelConfig } from './native.js'
 import type { BenchmarkExecutionRequest } from './runner.js'
@@ -10,6 +8,7 @@ import { strategyBenchmarkRequestLimits, type StrategyBenchmarkPlan } from './st
 import { installStrategyBenchmarkMeter, type StrategyBenchmarkMeter } from './strategy-meter.js'
 import { StrategyEvidenceStore, strategyEvidenceProtocol, type StrategyEvidenceNative } from './strategy-evidence.js'
 import { createBenchmarkStrategyOwnerRuntime, type BenchmarkStrategyOwnerRuntime } from './strategy-owner.js'
+import { installNativeGoalServices, type NativeGoalsHost } from './native-goal-services.js'
 
 export interface StrategyGoalTask {
   objective: string
@@ -69,14 +68,6 @@ export interface StrategyGoalRuntimeControl {
   close(): Promise<void>
   snapshot(): Readonly<StrategyGoalRuntimeLifecycleSnapshot>
 }
-interface GoalsHost {
-  list(agent: Agent): readonly { id: string; native: { sessionId: string; objective: string } }[]
-  registerBudgetMeter(input: unknown): () => void
-  whenIdle(): Promise<void>
-  inspectOwnerGoalExecution(input: { ownerRouteId: string; principalId: string; workspace: string; preset: string; sessionId: string; goalId: string }): Readonly<Record<string, unknown>>
-}
-type PluginConstructor = new (ctx: Context, config: never) => unknown
-const plugin = (ctx: Context, value: unknown, config: unknown = {}) => ctx.plugin(value as PluginConstructor, config as never)
 
 interface GoalSourceSnapshot {
   storedGoal: { id: string; definition: { version: number; digest: string }; nativeAtLastObservation: { sessionId: string; goalId: string; phase: string } }
@@ -161,7 +152,7 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
   let stage: StrategyGoalRuntimeLifecycleSnapshot['stage'] = 'setup'
   let cleanupState: StrategyGoalRuntimeLifecycleSnapshot['cleanup'] = 'pending'
   let acceptLateBinding = true
-  let goalsHost: GoalsHost | undefined
+  let goalsHost: NativeGoalsHost | undefined
   let ownerRoute: { id: string; principalId: string } | undefined
   let factoryPending: Promise<void> | undefined
   let bindingDisposeFlight: Promise<void> | undefined
@@ -231,55 +222,13 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
       assertLive()
     }
     assertLive()
-    // Literal package names with dynamic loading keep service declarations out of
-    // the Evaluation ↔ Goals/Verifier/Delivery bootstrap dependency cycle.
-    const names = ['@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver', '@deepseek-ai/dsh-subagent',
-      '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-verifier']
-    const [native, tools, driver, subagents, goalsModule, isolationModule, verifierModule] = await Promise.all(names.map(name => import(name)))
-    assertLive()
-    await plugin(ctx, native.default)
-    assertLive()
-    await plugin(ctx, { inject: tools.inject, apply: tools.apply })
-    assertLive()
-    await plugin(ctx, { inject: driver.inject, apply: driver.apply })
-    assertLive()
-    await plugin(ctx, subagents.SubagentRuntime)
-    assertLive()
-    await plugin(ctx, goalsModule.default, { databasePath: join(owner.runtimeRoot, 'goals.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true,
-      preauthorizedCreateMaxRounds: limits.maxGoalRounds, stepMaxDurationMs: stepDuration,
-      ...(enabled ? { strategy: { maxDurationMs: Math.min(stepDuration, 30000) } } : {}),
-      // Call-count mode uses the Goals-native calls budget (route whitelist only, no
-      // registered meter); token mode keeps the token-bounded budget shape.
-      executionBudget: callCounting
-        ? { mode: 'calls' as const, modelCalls: limits.modelCalls, toolCalls: budget.toolCalls, durationMs: budget.durationMs,
-            maxOutputTokensPerCall: limits.maxOutputTokensPerCall, routes: [{ provider: model.provider, model: model.model }] }
-        : { ...budget, costUsdMicros: budget.costUsdMicros ?? undefined, modelCalls: limits.modelCalls, maxOutputTokensPerCall: limits.maxOutputTokensPerCall } })
-    assertLive()
-    const goals = ctx.get('assistantGoals' as never) as unknown as GoalsHost
+    const installed = await installNativeGoalServices({ ctx, owner, model, budget,
+      limits: { modelCalls: limits.modelCalls, maxOutputTokensPerCall: limits.maxOutputTokensPerCall, maxGoalRounds: limits.maxGoalRounds, observationMode: model.observationMode },
+      task, image, dockerPath, stepMaxDurationMs: stepDuration, enabledStrategy: enabled, assertLive })
+    const goals = installed.goals
     goalsHost = goals
-    benchmarkAssert(typeof goals?.inspectOwnerGoalExecution === 'function', 'upgrade Goals: owner execution snapshot API required')
-    const lineage = owner.pairOwner()
-    const principalId = owner.principalId
-    const ownerRouteId = owner.ownerRouteId
+    const principalId = installed.principalId, ownerRouteId = installed.ownerRouteId
     ownerRoute = { id: ownerRouteId, principalId }
-    const expiresAt = Date.now() + budget.durationMs
-    await plugin(ctx, isolationModule.default, { stateRoot: join(owner.runtimeRoot, 'isolation'), image, dockerPath,
-      limits: { maxDurationMs: Math.min(stepDuration, 300000) }, grants: [{ id: 'benchmark-work', revision: 1,
-        principalDigest: isolationModule.isolationPrincipalDigest(principalId), ...lineage, workspace: owner.workspace, agentPreset: preset,
-        expiresAt, maxRuns: Math.max(1, budget.toolCalls), maxTotalDurationMs: budget.durationMs }] })
-    assertLive()
-    const authority = { kind: 'isolated-runner', id: 'benchmark-verification', stateRoot: join(owner.runtimeRoot, 'verification-jobs'),
-      image, dockerPath, command: task.verification.command, expiresAt,
-      maxRuns: Math.min(10000, (limits.maxGoalRounds * 2 + 2) * task.verification.cases.length), maxTotalDurationMs: budget.durationMs,
-      maxDurationMs: task.verification.maxDurationMs, maxOutputBytes: task.verification.maxOutputBytes,
-      testSets: [{ id: 'cases', cases: task.verification.cases }] }
-    const compiled = verifierModule.createVerifierAuthorities({ authorities: [authority] })[0]
-    await plugin(ctx, verifierModule.AssistantVerifierService, { databasePath: join(owner.runtimeRoot, 'verifier.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
-      authorities: [authority], profiles: ['goal-step', 'goal-outcome'].map(taskKind => ({ id: `benchmark-${taskKind}`, version: 1, taskKind,
-        objective: task.objective, scope: { workspace: owner!.workspace, preset }, owner: lineage, validityMs: budget.durationMs,
-        bounds: { maxDurationMs: stepDuration, maxEvidenceBytes: 8192 }, criteria: [{ id: 'artifact-behavior', kind: 'isolated-process-behavior',
-          authority: { id: compiled.id, digest: compiled.digest }, artifactPath: task.artifactPath, testSetId: 'cases' }] })) })
-    assertLive()
     const factoryPromise = Promise.resolve().then(() => factory(model, { ctx, workspace: owner!.workspace }))
     factoryPending = factoryPromise.then(async late => {
       if (!acceptLateBinding || signal.aborted) await disposeBinding(late)
