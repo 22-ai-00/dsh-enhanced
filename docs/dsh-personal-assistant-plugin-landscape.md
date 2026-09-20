@@ -71,18 +71,9 @@
 - [`@deepseek-ai/dsh-mcp-client`](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/mcp/mcp-client/README.md)：支持 stdio / Streamable HTTP MCP 和重连，但未挂入 base；当前主要注册 tools，不消费 MCP resources/prompts。
 - [`@deepseek-ai/dsh-schedule`](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/docs/subsystems/schedule.md)：支持 `after`、绝对时间和不小于 5 分钟的 fixed-rate 重复计划，事件持久化；但 `deliveryMode` 只有 `session-local`，原会话必须活着。冷会话只在重新打开后补跑，没有 cron 表达式、独立外部投递和真正冷启动执行。
 
-## 本仓库已经具备什么
+## 本仓库的当前入口
 
-本仓库的[插件目录](../plugins/README.md)有四个独立 bundle，均有 patch、README、LICENSE、测试和发布边界，但都仍标为 experimental：
-
-| 插件 | 对个人助理的价值 | 结论 |
-| --- | --- | --- |
-| [`@dsh-enhanced/acp`](../plugins/acp/README.md) | 把 DSH 暴露成 ACP stdio agent，支持 preset/model/effort、权限事件和 session reuse | 适合接入编辑器/ACP 客户端；不是 Telegram/飞书等常驻消息网关 |
-| [`@dsh-enhanced/coding-subscription-provider`](../plugins/coding-subscription-provider/README.md) | 把本机 Codex、Claude Code、Cursor、Grok 登录态桥接为 DSH LLM route | 可提高模型上限/降低重复订阅；Codex 最稳，Claude 有合规提示，Cursor/Grok 为 beta；它把整段 DSH 对话封成一次外部 coding-agent 调用，不等同于原生完整 agent 语义 |
-| [`@dsh-enhanced/traex-acp-provider`](../plugins/traex-acp-provider/README.md) | 通过 ACP 把 TraeX 作为模型 provider | 只建议只读/受控工具；每次新进程/会话，没有原生 session resume 与完整 UI/plan 事件 |
-| hello | 模板与冒烟示例 | 不提供个人助理业务能力 |
-
-这意味着本仓库已经能解决“用更强 coding model”和“从 ACP 客户端访问”的一部分问题，尚未拥有记忆、冷调度或 IM gateway。
+当前 bundle、配置与安装命令见[插件目录](../plugins/README.md)，实现进展和未完成验收统一见 [RSI 当前状态](rsi-status.md)。早期四插件库存与建设流水已移除；下文第三方对比、候选组合和建议均保留为研究截点时的设计依据，不作为当前缺口或安装建议。
 
 ## 与 OpenClaw / Hermes 的能力差距
 
@@ -160,7 +151,7 @@ Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、
 - 增加 reviewer/eval 工作流：重要输出由另一模型/agent 复核，而不是让同一模型自评。
 - 通道进程、scheduler 和记忆服务分别做健康检查、备份恢复和支出告警。
 
-## 建议开发 backlog
+## 研究截点时的建设建议
 
 ### P0：没有这些，就还不是可靠个人助理
 

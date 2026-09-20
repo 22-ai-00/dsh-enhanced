@@ -1,7 +1,7 @@
 # CLIProxyAPI 对两个 Provider 插件的改进：历史研究快照
 
 > 调研日期：2026-08-18  
-> 本文记录 2026-08-18 的研究与当时落地状态，不是当前进展。当前配置和行为见两个 provider 的 README 与源码；文末 Phase 记录仅用于解释设计背景。
+> 本文记录 2026-08-18 的研究与当时落地状态，不是当前进展。当前配置和行为见两个 provider 的 README 与源码。
 > 对象仓库：[`router-for-me/CLIProxyAPI`](https://github.com/router-for-me/CLIProxyAPI)  
 > 复核提交：`d3a5988fc07d96f90cb1c2e3b2b7dfb9c2a310e0`  
 > 对照对象：`@dsh-enhanced/coding-subscription-provider`、`@dsh-enhanced/traex-acp-provider`  
@@ -502,31 +502,3 @@ CLIProxyAPI:
 - 第一手证据复核（配套）：[docs/cliproxyapi-provider-evidence-review.md](cliproxyapi-provider-evidence-review.md)
 - DSH 当前 ACP event mapper：[plugins/acp/src/codec.ts](../plugins/acp/src/codec.ts)
 - 插件独立发布与共享包边界：[docs/architecture.md](architecture.md)
-
-## 9. 落地记录（Phase A + B）
-
-针对 DSH `@deepseek-ai/dsh-llm` rc.6/rc.7（契约仅 `finish.replayState` 由 `unknown` 收紧为 `ReplayEnvelope`，两插件均不发该字段，无影响）已实现以下内容，全部为**内部诊断侧信道**：不改任何对外 `LlmError`/`TraexAcpError` code 与 cause，保持 `maxRetries: 0`，不读凭据、不落敏感内容。
-
-**coding-subscription-provider**
-
-- `src/process.ts`：导出 `PromptSubmissionState` / `CliLifecyclePhase` / `ProviderFailureContext`；新增 `SpawnedProcess` 的 `spawn` 监听驱动三态提交状态（spawn→`submitted`，ENOENT→`not-submitted`，无 spawn 却有输出→`unknown`）；`RunCliTextOptions.onSettled` 可选回调**成功/失败各恰好报告一次**（try/catch 包裹），并覆盖 pre-abort、同步 spawn 抛错等 pre-spawn 失败（报 `not-submitted`）。parser 重构为 `decode → 每 provider decoder（codex/claude/cursor/grok）→ 归一化事件 → reducer`，行为与断言不变。
-- `src/adapter.ts`：`RouteFailureContext`（含 `auth`/`preflight` 阶段、adapter 拥有的 `assistantTextForwarded`、稳定 `RouteOutcome` 分类）；`buildPrompt` 置于 preflight 守护内（超长 prompt 等失败报 `not-submitted`+`preflight`）；成功路径也报 `outcome: 'ok'`。
-- `src/index.ts`：接上生产 sink——`onSettled` 按 outcome 走 `ctx.logger.debug`(ok)/`info`(失败)，仅记录脱敏生命周期字段。
-- `tests/fixtures/README.md`：真实 CLI 版本 fixture 标注为 **PENDING CAPTURE**（需已登录环境、消耗额度、显式授权、提交前脱敏）。
-
-**traex-acp-provider**
-
-- `src/acp-client.ts`：导出 `PromptSubmissionState` / `TeardownState` / `TraexLifecyclePhase` / `ProviderFailureContext` / `CatalogObservation`；跟踪 phase、`promptSubmissionState`（在 `client.prompt()` 前置 `submitted`）、`teardownState`；`onSettled` 在结算（成功+失败）恰好报告一次，并覆盖 validate 失败、pre-abort、同步 spawn 抛错等 pre-spawn 失败（报 `not-submitted`）；`onCatalogObserved` 报告**完全非权威**的 catalog 观测（不参与 `resolveModel`/`listModels`、不 gate 请求、不含任何 env 值）。**保留** teardown 语义：成功仍等待有界 teardown，`closeSession` 失败仍以错误结算。`PromptResponse.usage` 口径未验证，暂不映射、不发 `usage` chunk。
-- `src/adapter.ts`：`RouteFailureContext` + `assistantTextForwarded` + 稳定 `RouteOutcome`；`buildPrompt` preflight 守护；成功报 `outcome: 'ok'`，透传 `onCatalogObserved`。
-- `src/index.ts`：接上生产 sink——`onSettled`（按 outcome debug/info）与 `onCatalogObserved`（debug，仅模型**数量**，不含任何 model id 原文）。
-- `src/config.ts` + `README.md`：`models` 注释/文档改为明确的**部署者 allowlist（插件策略，非 DSH 要求）**。
-
-**回调合同（经多轮复核修正）**：`onSettled` 语义明确为「每次 invocation 结算**恰好一次**，成功失败都调用」。两个 adapter 用 `try/finally` + `reported` guard 保证:即使消费者在 `block-start` 或某个 text delta 后提前 `return()`,也恰好上报一次;TraeX 最早的 pre-auth `signal.aborted` 抛出也纳入 guard 上报。`RouteOutcome` 提供稳定失败分类（`aborted`/`timeout`/`auth-required`/`not-found`/`protocol`/`process`/`output-limit`/`line-limit`/`io`/`preflight`/…），使 abort 与 auth failure、本地安全限额与 provider/process 失败互不混淆，为 Phase C health/cooldown 预留可路由信号。coding 的 output-limit/line-limit/stream-io 已带稳定 `cause`,公开 `LlmError` code 不变。TraeX catalog 生产日志只记录模型**数量**,不落未净化的 ACP model id。
-
-**尚未做（Phase B 未完成项）**：真实 CLI 版本 fixture（`tests/fixtures/README.md` 标 PENDING CAPTURE，需授权采集）、normalized reducer 的 version profile、TraeX catalog **cache**（当前只有非权威 observation hook + 数量日志）、ACP `PromptResponse.usage` 的 typed snapshot 保留、latency/TTFT 计时。coding 亦尚无显式 teardownState（仅 phase=child-close + exit/signal）。
-
-**未启动（按计划）**：Phase C（按失败域的 negative cache/cooldown，默认关；本地 TTL 不写入 `providerRetryAfterMs`）、Phase D（catalog 驱动 `listModels()`+`llm/adapters-updated`、pre-prompt fallback、session resume、shared runtime）、ACP usage 的 DSH 映射。
-
-**准确定性**：Phase A 完成；Phase B 仅 parser 分层 + catalog observation 子阶段完成，**不能称 Phase B 完成**。
-
-**验证**：`pnpm check` 全绿（validate 4 插件 / oxlint 零告警 / typecheck / 测试 coding 67+TraeX 79+acp 28+hello 2 = 176 / build / 4 插件 dry-run pack）。测试结果与仓库要求的 Node 引擎（`^22.19.0 || >=24.0.0`）无关、可跨环境复现；具体运行 Node 版本随执行环境而定，低于该范围时会出现 engine 警告但不影响本套检查通过。

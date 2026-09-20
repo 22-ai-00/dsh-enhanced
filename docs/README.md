@@ -25,6 +25,9 @@
 - [RSI 当前状态](rsi-status.md)：唯一进展入口，保留 18 项验收条件、当前边界与剩余工作。
 - [自迭代研究与开发原则](research-dsh-plugin-self-iteration-2026-09-19.md)：模型供应、DSH 原生组合、独立验收与新任务复用。
 - [持续成长设计](continuous-personal-assistant-growth.md)：反馈、偏好、评测指标和长期成功条件。
+- [目标编排](goal-orchestration-design.md)：原生执行、独立验收、持久唤醒与事件等待。
+- [固定任务评测](benchmark-implementation.md)、[执行策略评测](goal-strategy-evaluation.md)：固定供应与预算的比较方法及证据限制。
+- [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)：可复现入口与当前验证边界。
 - [插件生态研究](dsh-personal-assistant-plugin-landscape.md)：历史方案与设计参考，当前包列表见[插件目录](../plugins/README.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[阻断回放](effect-blocked-replay.md)：当前发布/启用组件契约与验证限制。
 
@@ -36,7 +39,3 @@
 
 - [飞书连接与会话模型选择](lark-channel-open-source-design-notes.md)：官方与社区实现的设计取舍。
 - [消息 Reaction 与安全进度展示](lark-message-reactions-and-progress-notes.md)：API、权限、隐私和进度状态研究。
-
-## 历史实施计划
-
-[`superpowers/plans`](superpowers/plans/) 保存个人助理各插件与阶段性修复的历史实施计划。它们用于追溯设计过程；当前行为仍以代码、插件 README 和上述维护文档为准。
