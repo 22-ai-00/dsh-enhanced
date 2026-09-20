@@ -11,8 +11,7 @@
 2. [`awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/588e49808284c589073ef2eefdf9260c2913a9dc/README.md) 在本次快照共有 **1,691 条插件行**（README 有 1,694 个 Markdown 列表项，其中 3 个是目录链接），质量高于 topic 搜索；但其[收录规则](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/588e49808284c589073ef2eefdf9260c2913a9dc/contributing.md)明确是结构与维护活跃度的人工检查，不是运行兼容、安全或生产质量认证。
 3. 研究所述 DSH `0.1.2-rc.1` 已经提供会话持久化、skills、目标/计划、subagent、workflow、后台 jobs、工具审批、sandbox、Web/Search 等大部分“智能体骨架”。不要重复开发这些基础件。
 4. 当时列出的“OpenClaw / Hermes 式个人助理”建设需求是：**正式长期记忆接口与默认实现、会话关闭后仍可执行的持久调度、统一消息网关、后台任务的权限/预算/审计与插件隔离**。
-5. 事实截点时建议的个人落地候选是：DSH rc.8 + 本仓库模型桥接（可选）+ `dsh-memento` + `dsh-routines` + `dsh-lark-channel`（或小型 Telegram 插件）+ 官方 MCP client overlay + `dsh-pilot`（按需）+ 内置 sandbox/approval + `dsh-taintguard`（纵深防御）。迁移到研究所述 `0.1.2-rc.1` 前必须逐个重验第三方插件。
-6. “达到 Claude 级智能”不是多装记忆插件就能得到。上限主要来自基础模型、上下文组织、工具可靠性、任务分解/复核和评测闭环；记忆与主动性主要改善连续性和执行覆盖，不能把弱模型直接变成强模型。
+5. 第三方插件的版本与兼容判断仅对应下表固定快照；本项目当前安装入口和验收目标见文末。模型供应变化不能替代工具可靠性、任务复核和新任务复用的评测。
 
 ## 研究方法与真实性门槛
 
@@ -73,7 +72,7 @@
 
 ## 本仓库的当前入口
 
-当前 bundle、配置与安装命令见[插件目录](../plugins/README.md)，实现进展和未完成验收统一见 [RSI 当前状态](rsi-status.md)。早期四插件库存与建设流水已移除；下文第三方对比、候选组合和建议均保留为研究截点时的设计依据，不作为当前缺口或安装建议。
+当前 bundle、配置与安装命令见[插件目录](../plugins/README.md)，实现进展和未完成验收统一见 [RSI 当前状态](rsi-status.md)。早期四插件库存与建设流水已移除；下文第三方对比与候选审查均保留为研究截点时的设计依据，不作为当前缺口或安装建议。
 
 ## 与 OpenClaw / Hermes 的能力差距
 
@@ -93,9 +92,9 @@ Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、
 | 语音/移动/设备节点 | 很薄 | 语音、移动 companion、设备能力 | P2 |
 | 插件隔离/供应链 | Cordis 插件进程内执行 | 两者也仍有 native plugin 信任边界 | **共同高风险，DSH 应 P0 加固** |
 
-## 候选插件分档清单
+## 历史候选审查
 
-### A. 推荐进入个人试运行组合
+### A. 当时进入试运行候选的插件
 
 “推荐”表示源码/安装结构/测试证据相对完整，仍要 pin 版本并在隔离 profile 中验收。
 
@@ -107,7 +106,7 @@ Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、
 | 浏览器 | [`dsh-pilot` 0.1.1](https://github.com/Viger1/dsh-pilot/tree/65340d67a4de840205b9e8d00debed3180e87ad8) | bundle、build、6 个测试文件、GitHub workflow；peer 用 `*`，能安装但版本约束过松 | Playwright/Chrome 高权限；origin 在网络层拦截，未知站点跟随 DSH approval，无审批渠道 fail closed，密码字段默认拒绝 | **按需安装**。优于只在 tool entry 检查 URL；持久浏览器 profile 默认不要开 |
 | Prompt-injection 纵深防御 | [`dsh-taintguard` 0.1.0](https://github.com/sashankh/dsh-taintguard/tree/421e6726d9d0865e36fbe00a12a263409390dc11) | peer `^0.1.0-rc.6` 覆盖当时验证的 rc.8，但按标准 semver 不接受研究所述 `0.1.2-rc.1`；需先更新 peer 并重新验证；typecheck/test/CI，有 AgentDojo eval | 不读文件、不联网、不落盘；按来源 sticky taint 后 gate 高危工具。官方 eval 同时承认 97.6% consequential calls 被 gate，误拦很粗 | 只作 sandbox/最小权限之后的**纵深防御**；无人值守明确设 deny，不要宣传成完备防注入 |
 
-### B. 备选：适合特定目标，先做小范围验证
+### B. 当时保留的特定场景备选
 
 | 领域 | 候选 | 优点 | 为什么不是默认推荐 |
 | --- | --- | --- | --- |
@@ -118,7 +117,7 @@ Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、
 | Telegram 最小桥 | [`@loserfox/telegram` 0.1.0](https://github.com/LoserFox/telegram/tree/a0a9ca11e427b62217250e2e561f6ad3c49d13f2) | 小而清晰、per-chat session、白名单默认拒绝、token 脱敏 | 无测试脚本；仅文本/私聊/long polling；投递失败无重试/账本；部分 peer 仍是早期 rc.1 | 个人 DM 可快速试，不适合承担关键提醒投递保证 |
 | 共享可见浏览器 | [`dsh-builtin-browser` 0.1.15](https://github.com/wqty123/dsh-browser/tree/9ffe5d6c0d782f3c489d342943fee56d22d6d283) | 20 个工具、Electron 可见窗口、人可接管、cookie/下载/历史、动作白名单 | 无测试脚本；Electron 与 cookie/页面 JS/下载权限很高；peer 从 rc.1；动作白名单不是站点/数据流安全边界 | 必须要“同屏接管”才选；通常优先 dsh-pilot 的 origin fence |
 
-### C. 暂缓：结构可能可装，但当前证据或风险不适合主助理
+### C. 当时因证据或权限边界暂缓的插件
 
 | 插件 | 暂缓原因 |
 | --- | --- |
@@ -129,77 +128,13 @@ Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、
 | [`messaging-core`](https://github.com/534119219/dsh-messaging/tree/f1c3399ef40e3f419161d153e997d6f30576a627) | 一包声称 27 渠道，有 bundle 与大量 adapter 代码，但仓库主要是编译 `lib/`、无测试，安装流程仍偏手工 file dependency；配置向导还明确提示 secret 输入不隐藏。广度远超可核验深度。 |
 | [`dsh-im-channel` 0.2.1](https://github.com/shrekcg/dsh-im-channel/tree/fb64263341fba403a051b3c3fa9875933c425f8c) | 有源码/测试/CI，诚实标注仅飞书/Telegram 较完整；但架构包含独立 bridge、子进程调用 headless profile、额外 session package 与 40 个飞书工具，安装/权限/故障面明显大于 `dsh-lark-channel`。 |
 
-## 推荐组合
+## 后续开发入口
 
-### 最小可用个人助理（先跑通闭环）
+早期推荐安装组合、P0–P2 建设清单和重复验收门槛已由当前文档取代，历史内容可从 Git 查询：
 
-1. **DSH `0.1.2-rc.1` base**：使用现成 session、skill、plan、subagent、jobs、sandbox/approval。
-2. **模型**：先用官方 provider；如果确实拥有对应订阅，再选本仓库 `coding-subscription-provider` 的 Codex route。不要同时启多个未验证 beta route。
-3. **记忆**：只装 `dsh-memento`，默认 `writePolicy=ask`；导入少量稳定偏好，不自动吞整个历史。
-4. **通道**：国内首选 `dsh-lark-channel`，只允许本人 DM、一个 workspaceRoot、最小飞书 scopes；境外简单场景可先用最小 Telegram bridge。
-5. **主动性**：`dsh-routines` 常驻，先做“每日摘要写文件 + 发到同一通道”一个 routine；所有 unattended approval 自动拒绝。
-6. **外部能力**：按需挂官方 MCP client，只接日历/任务/只读文档；写邮件、发消息、支付、删除必须显式审批。
-7. **安全**：内置 sandbox + approval 是主边界；`dsh-taintguard` 只作附加层。固定 package version/commit，独立系统用户运行，备份 `$DSH_HOME` 和 memory DB。
-
-这个组合已经能实现：跨会话记住偏好、在 IM 中持续对话、按日主动运行任务、使用文件/Web/MCP、必要时分派 subagent；但它还不是“手机离线也保证准时送达”的产品级服务。
-
-### 进阶组合（验证最小版稳定后）
-
-- 增加 `dsh-sentinel`：监控 CI、长任务、目录或 API 状态，触发 dormant session followup。
-- 增加 `dsh-pilot`：让助理处理需要登录/表单的网页；独立浏览器 profile，不复用主浏览器 cookie。
-- 记忆如果以代码项目为中心，可从 memento **迁移**到 Hindsight；团队共享/图谱学习再评估 Co-Engram。不要并装三个记忆写入器。
-- 增加 reviewer/eval 工作流：重要输出由另一模型/agent 复核，而不是让同一模型自评。
-- 通道进程、scheduler 和记忆服务分别做健康检查、备份恢复和支出告警。
-
-## 研究截点时的建设建议
-
-### P0：没有这些，就还不是可靠个人助理
-
-| 项目 | 交付定义 |
-| --- | --- |
-| 官方 `ctx.memory` seam + 安全默认 provider | profile/semantic/episodic 三层；来源、时间、置信度、scope、TTL；写入 approval；检索预算；冲突/删除/导出；compaction flush；迁移与备份。让 memento/Hindsight/OpenViking 都能实现同一契约 |
-| 冷启动持久 scheduler | 独立于 live session；cron/timezone/one-shot；fresh session；missed-run 策略、幂等键、并发/重试/取消、run history；模型/权限快照；投递 outbox；系统服务部署模板 |
-| 统一 channel gateway seam | inbound identity/pairing/allowlist、chat↔session mapping、附件、streaming、approval cards、delivery receipt/retry/dedup/outbox；先实现 Lark + Telegram，不追求首版 27 渠道 |
-| 后台权限与成本控制 | foreground/background 分离 policy；tool/category/origin/recipient allow-deny-ask；时间/Token/金额/网络 egress budget；秘密只在执行器解析；完整审计与 emergency stop |
-| 插件供应链与隔离 | manifest 声明 fs/network/subprocess/credential/browser/install-script authority；安装前 diff；lockfile/hash/signature；高风险插件 child process/container；明确“sandbox 不保护 Host plugin” |
-
-### P1：从能用变成好用
-
-| 项目 | 交付定义 |
-| --- | --- |
-| 事件触发总线 | file/process/HTTP/webhook/calendar/mail/queue adapters，持久 cursor、debounce、cooldown、fire budget、at-least-once + dedup；可吸收 sentinel 的成熟语义 |
-| 记忆 consolidation/dreaming | 后台提炼、去重、矛盾检测、遗忘/衰减、人工 review inbox、可回滚；必须经过 prompt-injection 扫描和来源信任分层 |
-| Session search | SQLite FTS/混合检索默认可配，引用回原消息，不把完整历史无界塞入 prompt |
-| Browser/computer-use 标准 seam | origin/network fence、下载/上传策略、credential broker、可视接管、动作录像/回放；browser provider 可替换 |
-| 可观测与恢复 | scheduler/channel/memory health、队列积压、token/费用、失败率；崩溃恢复、备份验证、升级兼容矩阵和 canary profile |
-| 模型路由与评测 | 按任务风险/复杂度选模型；planner/executor/reviewer；真实个人任务集、工具成功率、记忆准确率、主动提醒准点率、安全回归集 |
-
-### P2：接近 OpenClaw/Hermes 的完整产品形态
-
-- 语音输入/转写/合成、移动 companion、设备节点和位置/相机等显式授权能力。
-- 自主创建/改进 skill，但必须 proposal → tests/eval → 人审 → 版本化启用 → 自动回滚，禁止无审查自修改生产 skill。
-- 多人/多租户身份与记忆隔离、跨设备同步和端到端数据驻留策略。
-- GUI onboarding、权限体检、插件权限 diff、灾备导入导出与一键停机。
-
-## 关键风险与实施原则
-
-1. **不要并装同类核心插件。** 两个 memory writer 会重复注入/写入、污染召回；两个 gateway 会争抢 session mapping；两个 scheduler 会重复执行。
-2. **Host 插件就是本机代码。** 它可以绕过模型工具 sandbox 直接读文件、联网、spawn；README 写“安全”不是隔离证据。
-3. **主动性放大权限。** 同一个 `bash`，用户盯着时和凌晨无人值守时不是同一风险等级。后台 profile 应默认 deny，单独列白名单和预算。
-4. **记忆是数据供应链。** 网页、邮件和群消息可把 prompt injection 固化成长期记忆；必须保存来源并把外部内容当不可信引用，而非系统指令。
-5. **版本固定。** DSH 还在 rc；每次升级研究所述 `0.1.2-rc.1` 基线都应在 canary profile 回放 memory、schedule、channel、approval 和 recovery 测试。
-6. **能力不等于智能。** 优先提升高质量模型路由、工具正确率和评测闭环；不要用无限 heartbeat、自改 skill 或大规模自动记忆制造“很主动”的假象。
-
-## 建议的验收门槛
-
-在把组合称为“个人助理”之前，至少通过以下场景：
-
-- 重启 DSH 后准确恢复聊天映射、长期偏好和未完成的 schedule；重复重启不重复发消息。
-- 电脑睡眠跨过三个触发点后，按配置只补跑一次或逐条补跑，且审计清楚。
-- 恶意网页/邮件要求上传密钥时，browser → memory → scheduler → channel 全链路仍阻止外发。
-- 非 allowlist 用户、转发 approval card、伪造 webhook、DNS rebinding、重复平台 event 都不能触发动作。
-- token 失效、网络断开、模型 429、消息平台 5xx、磁盘满、DB 损坏时有 bounded retry、dead letter 和告警。
-- 可导出/删除某条记忆并证明不再召回；可恢复备份；可查看每条主动动作的模型、prompt、工具、权限决定、费用与投递结果。
+- 安装与能力选择：[根 README](../README.md)、[插件目录](../plugins/README.md)。
+- DSH/Cordis 组合与资源生命周期：[仓库架构](architecture.md)、[开发约束](../AGENTS.md)。
+- 自迭代闭环与成功条件：[持续成长设计](continuous-personal-assistant-growth.md)、[RSI 当前状态](rsi-status.md)。
 
 ## 来源索引
 

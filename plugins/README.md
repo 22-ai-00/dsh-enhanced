@@ -1,6 +1,6 @@
 # 插件目录
 
-每个条目都是可独立安装、发布的 DSH bundle；按职责分组如下。
+每个条目都是可独立安装、发布的 DSH bundle；按职责分组如下。发布版本见[发布账本](../release-manifest.json)，当前开发进展和验收边界见 [RSI 状态](../docs/rsi-status.md)。
 
 ## Agent 与模型接入
 
@@ -9,6 +9,8 @@
 | [acp](acp) | `@dsh-enhanced/acp` | 实验性 | 原生优先的 ACP stdio bridge，支持四种 DSH Agent 预设、动态模型/推理等级、富事件映射与可选原始事件出口。 |
 | [coding-subscription-provider](coding-subscription-provider) | `@dsh-enhanced/coding-subscription-provider` | 实验性 | 将本机已登录的 Codex、Claude Code、Cursor Agent 与 Grok Build 编程套餐注册为 DSH 模型 provider；四者动态发现模型，Codex/Claude/Grok 支持逐模型 reasoning effort。 |
 | [traex-acp-provider](traex-acp-provider) | `@dsh-enhanced/traex-acp-provider` | 实验性 | 让 DSH 作为 ACP client 调用本机 TraeX coding agent，并实时发现可选模型及逐模型 reasoning effort。 |
+| [assistant-deepseek-budget](assistant-deepseek-budget) | `@dsh-enhanced/assistant-deepseek-budget` | 实验性 | 官方 DeepSeek 文本模型的固定路由与持续目标 token 预算计量；保守预留，禁止重定向，不声明硬金额上限。 |
+| [assistant-super-relay-budget](assistant-super-relay-budget) | `@dsh-enhanced/assistant-super-relay-budget` | 实验性 | 固定 Super Relay OpenAI Responses 路由（`auto_model/alwaysday1`）的目标 token 预算计量；真实 usage 计数、费率与金额恒为 null 不估算，凭据经 dsh-credentials 引用，契约到期 fail-closed，每个异步边界硬竞速。 |
 
 ## 个人助理核心
 
@@ -16,6 +18,8 @@
 |---|---|---|---|
 | [assistant-policy](assistant-policy) | `@dsh-enhanced/assistant-policy` | 实验性 | 个人助理的默认拒绝授权、硬预算、审批提案和脱敏审计边界。 |
 | [assistant-evaluation](assistant-evaluation) | `@dsh-enhanced/assistant-evaluation` | 实验性 | 区分执行、目标与投递的本地评测账本；Host 写可信事实，模型只能在精确 scope 内追加独立的低信任自评。 |
+| [assistant-verifier](assistant-verifier) | `@dsh-enhanced/assistant-verifier` | 实验性 | 事前冻结 AgentLoop 任务验收，独立核对结果并记录可信反馈修订。 |
+| [assistant-goals](assistant-goals) | `@dsh-enhanced/assistant-goals` | 实验性 | 按 owner 持久保存原生目标的上下文、下一步和阻塞；跨会话检索，完成状态等待独立验收。 |
 | [preference-learning](preference-learning) | `@dsh-enhanced/preference-learning` | 实验性 | 从有界 typed feedback 形成可衰减偏好假设；只允许 Host 固定目录中的 T1 局部偏好临时生效并自动回滚，不把推断伪装成长期 Memory。 |
 | [personal-memory](personal-memory) | `@dsh-enhanced/personal-memory` | 实验性 | 有界、分域、审批写入的个人助理长期记忆。 |
 | [personal-wiki](personal-wiki) | `@dsh-enhanced/personal-wiki` | 实验性 | 以 Markdown 为真源、支持中文检索与审批写入的个人知识库。 |
@@ -27,9 +31,20 @@
 | 插件 | 包 | 状态 | 说明 |
 |---|---|---|---|
 | [assistant-delivery](assistant-delivery) | `@dsh-enhanced/assistant-delivery` | 实验性 | 不含厂商 SDK 的持久消息核心：配对、会话绑定、inbox/outbox、receipt、重试与未知发送对账。 |
+| [assistant-web-owner](assistant-web-owner) | `@dsh-enhanced/assistant-web-owner` | 实验性 | 原生 Web 的固定 owner、可信文本回合与 Session 生命周期接入。 |
 | [lark-channel](lark-channel) | `@dsh-enhanced/lark-channel` | 实验性 | 飞书/Lark 长连接薄适配器：持久化后应答、`Get`/`DONE` 状态、脱敏执行进度、模型/审批卡片、安全 onboarding 与 launchd/systemd/Windows Task 常驻。 |
 | [assistant-heartbeat](assistant-heartbeat) | `@dsh-enhanced/assistant-heartbeat` | 实验性 | 复用 Automations 的 active-hours 主动巡检、scratch CAS、busy coalescing 与成本硬界限。 |
 | [event-triggers](event-triggers) | `@dsh-enhanced/event-triggers` | 实验性 | 持久化 file、HTTPS/JSON、GitHub 仓库状态与 HMAC webhook 事件，支持有限 owner 授权观察与目标等待来源。 |
+| [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性 | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；实际执行仍经 Goals 验收。 |
+
+## 技能与持续成长
+
+| 插件 | 包 | 状态 | 说明 |
+|---|---|---|---|
+| [assistant-skills](assistant-skills) | `@dsh-enhanced/assistant-skills` | 实验性 | 独立验收任务的私有版本化工具技能、原生发现与新目标复用。 |
+| [assistant-evolution](assistant-evolution) | `@dsh-enhanced/assistant-evolution` | 实验性 | 审批门控的行为自演化：按证据提出 guidance，经 owner 批准后注入；只允许对 Host 证明已退化的 exact rule 自动回滚，不能自我采用、扩权或原地改写。 |
+| [assistant-growth-experiments](assistant-growth-experiments) | `@dsh-enhanced/assistant-growth-experiments` | 实验性（supervised 场景包含） | 审批后的工作流 replay/shadow/单次 canary、晋升与撤回；已接入真实 Automations 服务及组合测试。core/lark 不默认安装，阶段通过不单独证明能力相对基线改善。 |
+| [assistant-growth-driver](assistant-growth-driver) | `@dsh-enhanced/assistant-growth-driver` | 实验性 | Opt-in、默认关闭的主动成长轮：有界后台 Agent 只读回顾 owner 已验收的重复成功，Host 复核后仅沉淀 pending skill candidate；另有独立开关的 owner-anchored workflow 轨（Delivery 持 goals 独立复核真实成功 goal，单条即沉淀 paused automation，占位 cron 未被 owner 显式替换前 store 层禁止激活）；路由钉死 super-relay/alwaysday1，零 activate/install。 |
 
 ## 安全、治理与运维
 
@@ -37,10 +52,10 @@
 |---|---|---|---|
 | [credentials-keychain](credentials-keychain) | `@dsh-enhanced/credentials-keychain` | 实验性 | macOS Keychain/Linux Secret Service/Windows DPAPI/单变量 provider、policy gate、TTL/撤销和 secret-free lease 审计。 |
 | [memory-wiki-bridge](memory-wiki-bridge) | `@dsh-enhanced/memory-wiki-bridge` | 实验性 | 只通过公开 service 生成带稳定 provenance 的 Memory↔Wiki 审批提案。 |
-| [assistant-evolution](assistant-evolution) | `@dsh-enhanced/assistant-evolution` | 实验性 | 审批门控的行为自演化：按证据提出 guidance，经 owner 批准后注入；只允许对 Host 证明已退化的 exact rule 自动回滚，不能自我采用、扩权或原地改写。 |
 | [assistant-health](assistant-health) | `@dsh-enhanced/assistant-health` | 实验性 | 聚合 provider 自有 health seam 的脱敏 liveness/readiness/详细报告。 |
 | [assistant-recovery](assistant-recovery) | `@dsh-enhanced/assistant-recovery` | 实验性 | 无模型、固定 catalog、带幂等步骤账本的 `supervised-growth/v2` Host 恢复控制面。 |
-| [assistant-growth-experiments](assistant-growth-experiments) | `@dsh-enhanced/assistant-growth-experiments` | 实验性（supervised 场景包含） | 审批后的工作流 replay/shadow/单次 canary、晋升与撤回；已接入真实 Automations 服务及组合测试。core/lark 不默认安装，阶段通过不单独证明能力相对基线改善。 |
+| [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux Docker 执行、私有审计与外部撤销；生产磁盘配额及动作代理待补。 |
+| [assistant-actions](assistant-actions) | `@dsh-enhanced/assistant-actions` | 实验性 | 有限 owner 授权的 GitHub 动作；内嵌兼容模式保留 PR/check/review inspection，外部 v1 broker 仅支持 expected-head commit 与 repository/branch/file inspection。Host projection 携带保守 allowlist；外部 broker 以双向 Linux `SO_PEERCRED` pin 和独立 action/admin sockets 隔离数据面/控制面，并保留 admin 容量；action group/ACL 可接入独立 Host UID。独立 UID、service-manager unit、key、credential 与基础设施仍由部署方提供。 |
 | [plugin-control-plane](plugin-control-plane) | `@dsh-enhanced/plugin-control-plane` | 实验性 | 按能力发现、owner 审批、隔离验证与原子启用 bundle；源码创建/修改只允许 linked Git worktree + `pnpm check` + PR。 |
 
 ## 示例与开发
@@ -48,25 +63,6 @@
 | 插件 | 包 | 状态 | 说明 |
 |---|---|---|---|
 | [hello](hello) | `@dsh-enhanced/hello` | 示例 | 最小可安装 bundle，用于验证仓库契约和开发链路。 |
-
-| [assistant-verifier](assistant-verifier) | `@dsh-enhanced/assistant-verifier` | 实验性 | 事前冻结 AgentLoop 任务验收，独立核对结果并记录可信反馈修订。 |
-
-| [assistant-goals](assistant-goals) | `@dsh-enhanced/assistant-goals` | 实验性 | 按 owner 持久保存原生目标的上下文、下一步和阻塞；跨会话检索，完成状态等待独立验收。 |
-| [assistant-deepseek-budget](assistant-deepseek-budget) | `@dsh-enhanced/assistant-deepseek-budget` | 实验性 | 官方 DeepSeek 文本模型的固定路由与持续目标 token 预算计量；保守预留，禁止重定向，不声明硬金额上限。 |
-| [assistant-super-relay-budget](assistant-super-relay-budget) | `@dsh-enhanced/assistant-super-relay-budget` | 实验性 | 固定 Super Relay OpenAI Responses 路由（`auto_model/alwaysday1`）的目标 token 预算计量；真实 usage 计数、费率与金额恒为 null 不估算，凭据经 dsh-credentials 引用，契约到期 fail-closed，每个异步边界硬竞速。 |
-
-| [assistant-web-owner](assistant-web-owner) | `@dsh-enhanced/assistant-web-owner` | 实验性 | 原生 Web 的固定 owner、可信文本回合与 Session 生命周期接入。 |
-
-| [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux Docker 执行、私有审计与外部撤销；生产磁盘配额及动作代理待补。 |
-
-| [assistant-actions](assistant-actions) | `@dsh-enhanced/assistant-actions` | 实验性 | 有限 owner 授权的 GitHub 动作；内嵌兼容模式保留 PR/check/review inspection，外部 v1 broker 仅支持 expected-head commit 与 repository/branch/file inspection。Host projection 携带保守 allowlist；外部 broker 以双向 Linux `SO_PEERCRED` pin 和独立 action/admin sockets 隔离数据面/控制面，并保留 admin 容量；action group/ACL 可接入独立 Host UID。独立 UID、service-manager unit、key、credential 与基础设施仍由部署方提供。 |
-
-
-| [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性 | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；实际执行仍经 Goals 验收。 |
-
-| [assistant-skills](assistant-skills) | `@dsh-enhanced/assistant-skills` | 实验性 | 独立验收任务的私有版本化工具技能、原生发现与新目标复用。 |
-
-| [assistant-growth-driver](assistant-growth-driver) | `@dsh-enhanced/assistant-growth-driver` | 实验性 | Opt-in、默认关闭的主动成长轮：有界后台 Agent 只读回顾 owner 已验收的重复成功，Host 复核后仅沉淀 pending skill candidate；另有独立开关的 owner-anchored workflow 轨（Delivery 持 goals 独立复核真实成功 goal，单条即沉淀 paused automation，占位 cron 未被 owner 显式替换前 store 层禁止激活）；路由钉死 super-relay/alwaysday1，零 activate/install。 |
 
 <!-- plugin-catalog:end -->
 

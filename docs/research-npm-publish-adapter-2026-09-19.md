@@ -9,8 +9,8 @@ Implementation status: the publish adapter, independent registry readback,
 release verifier, and catalog admission are now implemented. Use the current
 [adapter guide](npm-publish-adapter.md), [readback protocol](npm-registry-readback.md),
 [release verifier](npm-release-verifier.md), and [catalog admission](npm-catalog-admission.md).
-The recommendation below records the original design; it is not an outstanding
-implementation checklist or evidence of a real registry publication.
+This note retains protocol sources and design rationale; it is not an
+outstanding implementation checklist or evidence of a real registry publication.
 
 ## Observed facts
 
@@ -105,61 +105,14 @@ implementation checklist or evidence of a real registry publication.
   a 401/OTP challenge is an owner-action-required error unless an approved
   owner credential mode is configured.
 
-## Minimal implementation recommendation
+## Implemented contract
 
-Add an independent, owner-configured npm adapter only for the current
-`publish` phase.  The request must be accepted only when its signed artifact
-and owner authorization exactly bind the configured HTTPS registry base,
-package name, version, and adapter identity. The owner-private configuration
-fixes the dist-tag and token-file authentication; its digest is frozen with
-the operation. Read the tarball bytes from the inherited, verified descriptors, recompute
-SHA-256/SHA-512/SHA-1 before serializing the documented PUT JSON, then make one
-bounded HTTPS PUT to the escaped package endpoint.
-
-This is a constrained npm PUT adapter, not a byte-for-byte npm CLI clone.  Its
-policy must use the owner-authorized HTTPS `expectedRegistryReference` as
-`dist.tarball`, under the configured base, rather than copying npm CLI's HTTP
-downgrade.  It must also use the owner-authorized dist-tag, rather than allowing
-`manifest.tag` to override it.  The independent verifier must subsequently
-read back the public registry's actual metadata URL and tarball URL/bytes;
-the PUT acknowledgement does not prove either persisted reference or content.
-
-Persist a dispatch marker before the socket is opened, keyed to the existing
-operation id and request digest.  Do not send a second PUT for that operation.
-A definitive HTTP success is only a transport acknowledgement; record the
-existing successful publish evidence only when the adapter's configured
-success contract is met.  Any missing ACK, timeout, TLS/socket error, 3xx,
-409/version conflict, or response that cannot prove the preexisting version is
-the same authorized artifact becomes the existing `publish-ambiguity` path.
-Only the separate configured verifier may read package-version metadata,
-download the tarball independently, and issue the existing reconciliation
-receipt.  This uses the current state machine rather than adding another one.
-
-The verifier should GET `registryBase + encodedPackageName + "/" + version`
-using the exact URL convention already enforced by `release.ts`, validate that
-metadata's `dist.integrity` equals the authorized SRI and that its tarball URL
-remains under the owner-configured registry, then download the tarball with
-redirects disabled, bounded size/time, and recompute both recorded digests.
-It must return `exists-match`, `digest-conflict`, or `unknown`; it must not
-return `absent` as permission to retry a dispatched remote publish.
-
-## Must reject or report unknown
-
-Reject: non-HTTPS registry; URL userinfo, query, fragment, or a base/metadata/
-tarball URL outside the owner-configured base; noncanonical package or version;
-missing/mismatched artifact bytes or digests; unsupported auth mode; private
-manifest; unapproved tag; a scoped restricted-access mismatch; redirect; and
-any request whose authorization/operation marker differs from the first send.
-
-Report publish ambiguity (then independently reconcile): timeout, disconnect,
-incomplete HTTP response, or any status other than 200/201. A complete empty
-200/201 body is a valid transport ACK, matching npm's `ignoreBody` contract.
-The verifier returns `unknown` for unparseable remote metadata, metadata/tarball retrieval
-failure, metadata pointing outside the base, and any uncertain version-conflict
-response. Report `digest-conflict` when independently observed tarball or
-integrity differs. The publisher's `immutable: true` uses the configured npm
-version-identity contract; the ACK does not prove persisted bytes. Independent
-readback is still required before catalog admission.
+The original implementation plan and rejection checklist have been superseded
+by the maintained [publication contract](npm-publish-adapter.md#exact-artifact-and-dispatch-contract)
+and [independent verification guide](npm-release-verifier.md). They define
+artifact validation, the single dispatch marker, ambiguous outcomes, and
+registry readback. Use those guides when changing or deploying the adapter;
+Git history retains the original proposal.
 
 ## Verification boundary
 
