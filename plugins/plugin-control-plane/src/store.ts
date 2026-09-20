@@ -288,6 +288,13 @@ interface SourceReleaseOperationRow {
   created_at: number; completed_at: number | null; applied_at: number | null
 }
 
+interface SourceReleaseDispatchRow {
+  operation_id: string
+  status: 'claimed' | 'completed'
+  claimed_at: number
+  completed_at: number | null
+}
+
 interface SourcePublishReconciliationRow {
   plan_id: string; release_id: string; release_fence: number; attempt: number; operation_id: string
   binding_digest: string; request_digest: string; request_json: string; status: SourceReleaseOperation['status']
@@ -726,6 +733,8 @@ export interface CreateSourcePlanInput {
 }
 
 export interface PrepareSourceReleaseOperationInput {
+  /** Host-only, synchronous owner admission for owner-task source plans. */
+  withSourceFence?: <T>(callback: () => T) => T
   planId: string
   expectedRevision: number
   expectedFence: number
@@ -1351,11 +1360,13 @@ export class ControlPlaneStore {
   }
 
   /** Prepared owner continuations have a bounded recovery query, independent of job history. */
-  listPreparedSourceApprovalJobs(includeRelease = false): readonly SourceJobRecord[] {
+  listPreparedSourceApprovalJobs(includeRelease = false, includeExecution = false): readonly SourceJobRecord[] {
     return (this.#database.prepare(`SELECT j.* FROM source_jobs j JOIN source_plans p ON p.id = j.plan_id
       JOIN owner_task_failure_gaps g ON g.gap_id = p.gap_id
-      WHERE j.status = 'prepared' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))) AND p.expires_at > ?
-      ORDER BY j.created_at, j.id LIMIT 1000`).all(includeRelease ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
+      WHERE j.status = 'prepared' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))
+        OR (? = 1 AND p.status IN ('awaiting-pr', 'awaiting-review', 'awaiting-merge', 'awaiting-build', 'awaiting-sign', 'awaiting-publish',
+          'awaiting-registry-verify', 'awaiting-catalog-admission'))) AND p.expires_at > ?
+      ORDER BY j.created_at, j.id LIMIT 1000`).all(includeRelease ? 1 : 0, includeExecution ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
   }
 
   bindSourceJobDefinition(input: { id: string; revision: number; definitionHash: string }): SourceJobRecord {
@@ -2473,45 +2484,55 @@ export class ControlPlaneStore {
   }
 
   async prepareSourceReleaseOperation(input: PrepareSourceReleaseOperationInput): Promise<SourceReleaseOperation> {
-    const now = this.#now()
-    this.#database.exec('BEGIN IMMEDIATE')
-    try {
-      const plan = this.getSourcePlan(input.planId); const expected = expectedSourceRelease(plan.status)
-      if (expected === undefined) throw new ControlPlaneStoreError('invalid-state', 'source plan is not awaiting a release operation')
-      if (plan.revision !== input.expectedRevision || plan.release?.fence !== input.expectedFence) {
-        throw new ControlPlaneStoreError('conflict', 'source release operation targets a stale revision/fence')
-      }
-      if (plan.releaseAuthorization === undefined || plan.sourceCheck === undefined) {
-        throw new ControlPlaneStoreError('invalid-state', 'source release operation has no durable post-check authorization')
-      }
-      await reverifySourceReleaseAuthorization(plan.releaseAuthorization, plan, input.resolveAuthorizationAuthority)
-      this.#assertReleaseEnvironment(input, expected.phase)
-      const previous = this.#previousReleaseEvidence(plan, expected.phase)
-      const priorRow = this.#database.prepare(`SELECT * FROM source_release_operations WHERE plan_id = ? AND phase = ?
-        ORDER BY attempt DESC LIMIT 1`).get(plan.id, expected.phase) as unknown as SourceReleaseOperationRow | undefined
-      const attempt = priorRow !== undefined && priorRow.release_fence === plan.release.fence
-        ? priorRow.attempt : (priorRow?.attempt ?? 0) + 1
-      if (priorRow !== undefined && priorRow.release_fence === plan.release.fence) {
-        const prior = sourceReleaseOperationFromRow(priorRow)
-        const expectedRequest = this.#sourceReleaseRequest(plan, expected.phase, prior.operationId, prior.attempt,
-          prior.request.requestedAt, input, previous)
-        if (prior.bindingDigest !== controlPlaneDigest(releaseRequestBinding(expectedRequest))) {
-          throw new ControlPlaneStoreError('conflict', 'durable release operation payload changed for the same phase/fence')
+    const withCurrentSource = <T>(gapId: string, callback: () => T): T => {
+      const commit = () => { this.#assertOwnerTaskFailureGapAdmission(gapId); return callback() }
+      return input.withSourceFence ? input.withSourceFence(commit) : commit()
+    }
+    const plan = this.getSourcePlan(input.planId); const expected = expectedSourceRelease(plan.status)
+    if (expected === undefined) throw new ControlPlaneStoreError('invalid-state', 'source plan is not awaiting a release operation')
+    if (plan.revision !== input.expectedRevision || plan.release?.fence !== input.expectedFence) {
+      throw new ControlPlaneStoreError('conflict', 'source release operation targets a stale revision/fence')
+    }
+    if (plan.releaseAuthorization === undefined || plan.sourceCheck === undefined) {
+      throw new ControlPlaneStoreError('invalid-state', 'source release operation has no durable post-check authorization')
+    }
+    withCurrentSource(plan.gapId, () => {})
+    await reverifySourceReleaseAuthorization(plan.releaseAuthorization, plan, input.resolveAuthorizationAuthority)
+    return withCurrentSource(plan.gapId, () => {
+      const now = this.#now()
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        const current = this.getSourcePlan(plan.id); const currentExpected = expectedSourceRelease(current.status)
+        if (current.revision !== input.expectedRevision || current.release?.fence !== input.expectedFence
+          || current.status !== plan.status || current.digest !== plan.digest || currentExpected?.phase !== expected.phase) {
+          throw new ControlPlaneStoreError('conflict', 'source release operation changed during authorization verification')
         }
-        this.#database.exec('COMMIT')
-        return prior
-      }
-      const operationId = `release-operation-${randomUUID()}`
-      const request = this.#sourceReleaseRequest(plan, expected.phase, operationId, attempt, now, input, previous)
-      const bindingDigest = controlPlaneDigest(releaseRequestBinding(request))
-      this.#database.prepare(`INSERT INTO source_release_operations (plan_id, phase, release_id, release_fence, attempt,
-        operation_id, binding_digest, request_digest, request_json, status, receipt_digest, receipt_json, created_at, completed_at, applied_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, NULL, NULL)`).run(plan.id, expected.phase,
-        plan.release.id, plan.release.fence, attempt, operationId, bindingDigest, controlPlaneDigest(request), JSON.stringify(request), now)
-      const operation = this.getSourceReleaseOperation(operationId)
-      this.#database.exec('COMMIT')
-      return operation
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+        this.#assertReleaseEnvironment(input, expected.phase)
+        const previous = this.#previousReleaseEvidence(current, expected.phase)
+        const priorRow = this.#database.prepare(`SELECT * FROM source_release_operations WHERE plan_id = ? AND phase = ?
+          ORDER BY attempt DESC LIMIT 1`).get(current.id, expected.phase) as unknown as SourceReleaseOperationRow | undefined
+        const attempt = priorRow !== undefined && priorRow.release_fence === current.release.fence
+          ? priorRow.attempt : (priorRow?.attempt ?? 0) + 1
+        if (priorRow !== undefined && priorRow.release_fence === current.release.fence) {
+          const prior = sourceReleaseOperationFromRow(priorRow)
+          const expectedRequest = this.#sourceReleaseRequest(current, expected.phase, prior.operationId, prior.attempt,
+            prior.request.requestedAt, input, previous)
+          if (prior.bindingDigest !== controlPlaneDigest(releaseRequestBinding(expectedRequest))) {
+            throw new ControlPlaneStoreError('conflict', 'durable release operation payload changed for the same phase/fence')
+          }
+          this.#database.exec('COMMIT'); return prior
+        }
+        const operationId = `release-operation-${randomUUID()}`
+        const request = this.#sourceReleaseRequest(current, expected.phase, operationId, attempt, now, input, previous)
+        const bindingDigest = controlPlaneDigest(releaseRequestBinding(request))
+        this.#database.prepare(`INSERT INTO source_release_operations (plan_id, phase, release_id, release_fence, attempt,
+          operation_id, binding_digest, request_digest, request_json, status, receipt_digest, receipt_json, created_at, completed_at, applied_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, NULL, NULL)`).run(current.id, expected.phase,
+          current.release.id, current.release.fence, attempt, operationId, bindingDigest, controlPlaneDigest(request), JSON.stringify(request), now)
+        const operation = this.getSourceReleaseOperation(operationId)
+        this.#database.exec('COMMIT'); return operation
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    })
   }
 
   getSourceReleaseOperation(operationId: string): SourceReleaseOperation {
@@ -2520,11 +2541,40 @@ export class ControlPlaneStore {
     return sourceReleaseOperationFromRow(row)
   }
 
+  findSourceReleaseOperation(planId: string, phase: SourceReleasePhase, fence: number): SourceReleaseOperation | undefined {
+    const row = this.#database.prepare(`SELECT * FROM source_release_operations WHERE plan_id = ? AND phase = ?
+      AND release_fence = ? ORDER BY attempt DESC LIMIT 1`).get(planId, phase, fence) as unknown as SourceReleaseOperationRow | undefined
+    return row === undefined ? undefined : sourceReleaseOperationFromRow(row)
+  }
+
+  getSourceReleaseDispatchStatus(operationId: string): 'claimed' | 'completed' | undefined {
+    const row = this.#database.prepare('SELECT * FROM source_release_dispatches WHERE operation_id = ?').get(operationId) as unknown as SourceReleaseDispatchRow | undefined
+    if (row === undefined) return undefined
+    if ((row.status !== 'claimed' && row.status !== 'completed') || !Number.isSafeInteger(row.claimed_at) || row.claimed_at < 0
+      || (row.status === 'claimed') !== (row.completed_at === null)
+      || (row.completed_at !== null && (!Number.isSafeInteger(row.completed_at) || row.completed_at < row.claimed_at))) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored source release dispatch is corrupt')
+    }
+    return row.status
+  }
+
   sourceReleaseCandidate(planId: string): CatalogEntry {
     const plan = this.getSourcePlan(planId)
     if (plan.status !== 'release-complete') {
       throw new ControlPlaneStoreError('invalid-state', 'source candidate is not admitted until release completes')
     }
+    return this.#releaseCandidate(plan)
+  }
+
+  previewSourceReleaseCandidate(planId: string): CatalogEntry {
+    const plan = this.getSourcePlan(planId)
+    if (plan.status !== 'awaiting-catalog-admission') {
+      throw new ControlPlaneStoreError('invalid-state', 'source candidate is not ready for catalog admission')
+    }
+    return this.#releaseCandidate(plan)
+  }
+
+  #releaseCandidate(plan: PluginSourcePlan): CatalogEntry {
     const row = this.#database.prepare(`SELECT * FROM source_release_operations WHERE plan_id = ? AND phase = 'build'
       AND status = 'applied' ORDER BY attempt DESC LIMIT 1`).get(plan.id) as unknown as SourceReleaseOperationRow | undefined
     if (row === undefined) throw new ControlPlaneStoreError('invalid-state', 'source release has no applied build artifact')
@@ -2542,37 +2592,130 @@ export class ControlPlaneStore {
       capabilities: artifact.capabilities, authorities: artifact.authorities, requires: artifact.requires }] }).entries[0]!
   }
 
-  async runSourceReleaseOperation(input: { operationId: string; expectedRevision: number; expectedFence: number;
+  async runSourceReleaseOperation(input: { withSourceFence?: <T>(callback: () => T) => T; operationId: string; expectedRevision: number; expectedFence: number;
     execute: (request: SourceReleaseRequest) => Promise<SourceReleaseReceipt>;
     resolveAuthority: (receipt: SourceReleaseReceipt) => SourceReleaseAuthority;
     resolveAuthorizationAuthority: (authorization: SourceReleaseAuthorization) => SourceReleaseAuthorizationAuthority }): Promise<SourceReleaseReceipt> {
-    try { this.#database.exec('BEGIN IMMEDIATE') } catch { throw new ControlPlaneStoreError('conflict', 'source release single-flight is held') }
-    try {
-      const operation = this.getSourceReleaseOperation(input.operationId)
-      const plan = this.getSourcePlan(operation.planId); const expected = expectedSourceRelease(plan.status)
-      if (plan.revision !== input.expectedRevision || plan.release?.fence !== input.expectedFence
-        || operation.fence !== input.expectedFence || expected?.phase !== operation.phase
-        || operation.requestDigest !== controlPlaneDigest(operation.request)) {
+    const withCurrentSource = <T>(gapId: string, callback: () => T): T => {
+      const commit = () => { this.#assertOwnerTaskFailureGapAdmission(gapId); return callback() }
+      return input.withSourceFence ? input.withSourceFence(commit) : commit()
+    }
+    const operation = this.getSourceReleaseOperation(input.operationId)
+    const plan = this.getSourcePlan(operation.planId)
+    const assertCurrent = (current: PluginSourcePlan, currentOperation: SourceReleaseOperation): void => {
+      const currentExpected = expectedSourceRelease(current.status)
+      if (current.revision !== input.expectedRevision || current.release?.fence !== input.expectedFence
+        || currentOperation.fence !== input.expectedFence || currentExpected?.phase !== currentOperation.phase
+        || currentOperation.requestDigest !== controlPlaneDigest(currentOperation.request)) {
         throw new ControlPlaneStoreError('conflict', 'source release operation lost its plan revision/fence/phase')
       }
-      if (operation.receipt !== undefined) { this.#database.exec('COMMIT'); return operation.receipt }
-      await reverifySourceReleaseAuthorization(operation.request.authorization, plan, input.resolveAuthorizationAuthority)
-      const receipt = await input.execute(operation.request)
-      await input.resolveAuthority(receipt).verify(receipt, plan, operation.request)
-      const now = this.#now()
-      const result = this.#database.prepare(`UPDATE source_release_operations SET status = 'completed', receipt_digest = ?,
-        receipt_json = ?, completed_at = ? WHERE operation_id = ? AND status = 'pending' AND request_digest = ?
-          AND release_fence = ?`).run(controlPlaneDigest(receipt), JSON.stringify(receipt), now, operation.operationId,
-        operation.requestDigest, input.expectedFence)
-      if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source release completion lost its single-flight')
-      this.#database.exec('COMMIT')
-      return receipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    }
+    assertCurrent(plan, operation)
+    if (operation.receipt !== undefined) return withCurrentSource(plan.gapId, () => operation.receipt!)
+    withCurrentSource(plan.gapId, () => {})
+    await reverifySourceReleaseAuthorization(operation.request.authorization, plan, input.resolveAuthorizationAuthority)
+    const claimed = withCurrentSource(plan.gapId, () => {
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        const current = this.getSourcePlan(plan.id); const currentOperation = this.getSourceReleaseOperation(operation.operationId)
+        assertCurrent(current, currentOperation)
+        if (currentOperation.receipt !== undefined) { this.#database.exec('COMMIT'); return false }
+        const dispatch = this.#database.prepare('SELECT * FROM source_release_dispatches WHERE operation_id = ?').get(operation.operationId) as unknown as SourceReleaseDispatchRow | undefined
+        if (dispatch !== undefined) {
+          this.getSourceReleaseDispatchStatus(operation.operationId)
+          throw new ControlPlaneStoreError('conflict', 'source release operation outcome is unknown; receipt reconciliation is required')
+        }
+        this.#database.prepare(`INSERT INTO source_release_dispatches (operation_id, status, claimed_at, completed_at)
+          VALUES (?, 'claimed', ?, NULL)`).run(operation.operationId, this.#now())
+        this.#database.exec('COMMIT'); return true
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    })
+    if (!claimed) return this.getSourceReleaseOperation(operation.operationId).receipt!
+    const receipt = await input.execute(operation.request)
+    await input.resolveAuthority(receipt).verify(receipt, plan, operation.request)
+    return withCurrentSource(plan.gapId, () => {
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        const current = this.getSourcePlan(plan.id); const currentOperation = this.getSourceReleaseOperation(operation.operationId)
+        assertCurrent(current, currentOperation)
+        const dispatch = this.#database.prepare('SELECT * FROM source_release_dispatches WHERE operation_id = ?').get(operation.operationId) as unknown as SourceReleaseDispatchRow | undefined
+        if (dispatch === undefined || dispatch.status !== 'claimed') throw new ControlPlaneStoreError('conflict', 'source release completion lost its dispatch claim')
+        const now = this.#now()
+        const result = this.#database.prepare(`UPDATE source_release_operations SET status = 'completed', receipt_digest = ?,
+          receipt_json = ?, completed_at = ? WHERE operation_id = ? AND status = 'pending' AND request_digest = ?
+            AND release_fence = ?`).run(controlPlaneDigest(receipt), JSON.stringify(receipt), now, operation.operationId,
+          operation.requestDigest, input.expectedFence)
+        if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source release completion lost its single-flight')
+        const completed = this.#database.prepare(`UPDATE source_release_dispatches SET status = 'completed', completed_at = ?
+          WHERE operation_id = ? AND status = 'claimed'`).run(now, operation.operationId)
+        if (Number(completed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source release completion lost its dispatch claim')
+        this.#database.exec('COMMIT'); return receipt
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    })
   }
 
-  async applySourceRelease(input: { planId: string; expectedRevision: number; expectedFence: number;
+  /**
+   * Reconciles a signed receipt for a durably claimed dispatch without
+   * invoking an adapter again. This is the only recovery path for a lost
+   * adapter response.
+   */
+  async acceptSourceReleaseReceipt(input: { withSourceFence?: <T>(callback: () => T) => T; operationId: string; expectedRevision: number; expectedFence: number;
+    receipt: SourceReleaseReceipt; resolveAuthority: (receipt: SourceReleaseReceipt) => SourceReleaseAuthority;
+    resolveAuthorizationAuthority: (authorization: SourceReleaseAuthorization) => SourceReleaseAuthorizationAuthority }): Promise<SourceReleaseReceipt> {
+    const withCurrentSource = <T>(gapId: string, callback: () => T): T => {
+      const commit = () => { this.#assertOwnerTaskFailureGapAdmission(gapId); return callback() }
+      return input.withSourceFence ? input.withSourceFence(commit) : commit()
+    }
+    const operation = this.getSourceReleaseOperation(input.operationId), plan = this.getSourcePlan(operation.planId)
+    const assertCurrent = (current: PluginSourcePlan, currentOperation: SourceReleaseOperation): void => {
+      const expected = expectedSourceRelease(current.status)
+      if (current.revision !== input.expectedRevision || current.release?.fence !== input.expectedFence
+        || currentOperation.fence !== input.expectedFence || expected?.phase !== currentOperation.phase
+        || currentOperation.requestDigest !== controlPlaneDigest(currentOperation.request)) {
+        throw new ControlPlaneStoreError('conflict', 'source release receipt lost its plan revision/fence/phase')
+      }
+    }
+    assertCurrent(plan, operation)
+    if (operation.receipt !== undefined) {
+      if (controlPlaneDigest(operation.receipt) !== controlPlaneDigest(input.receipt)) throw new ControlPlaneStoreError('conflict', 'source release receipt differs from completed operation')
+      return withCurrentSource(plan.gapId, () => operation.receipt!)
+    }
+    withCurrentSource(plan.gapId, () => {})
+    await reverifySourceReleaseAuthorization(operation.request.authorization, plan, input.resolveAuthorizationAuthority)
+    await input.resolveAuthority(input.receipt).verify(input.receipt, plan, operation.request)
+    return withCurrentSource(plan.gapId, () => {
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        const current = this.getSourcePlan(plan.id), currentOperation = this.getSourceReleaseOperation(operation.operationId)
+        assertCurrent(current, currentOperation)
+        if (currentOperation.receipt !== undefined) {
+          if (controlPlaneDigest(currentOperation.receipt) !== controlPlaneDigest(input.receipt)) throw new ControlPlaneStoreError('conflict', 'source release receipt differs from completed operation')
+          this.#database.exec('COMMIT'); return currentOperation.receipt
+        }
+        const dispatch = this.#database.prepare('SELECT * FROM source_release_dispatches WHERE operation_id = ?').get(operation.operationId) as unknown as SourceReleaseDispatchRow | undefined
+        if (dispatch !== undefined && dispatch.status !== 'claimed') throw new ControlPlaneStoreError('conflict', 'source release receipt has no unresolved dispatch claim')
+        const now = this.#now()
+        const result = this.#database.prepare(`UPDATE source_release_operations SET status = 'completed', receipt_digest = ?, receipt_json = ?, completed_at = ?
+          WHERE operation_id = ? AND status = 'pending' AND request_digest = ? AND release_fence = ?`).run(
+          controlPlaneDigest(input.receipt), JSON.stringify(input.receipt), now, operation.operationId, operation.requestDigest, input.expectedFence)
+        if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source release receipt lost its completion CAS')
+        if (dispatch !== undefined) {
+          const completed = this.#database.prepare(`UPDATE source_release_dispatches SET status = 'completed', completed_at = ?
+            WHERE operation_id = ? AND status = 'claimed'`).run(now, operation.operationId)
+          if (Number(completed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source release receipt lost its dispatch claim')
+        }
+        this.#database.exec('COMMIT'); return input.receipt
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    })
+  }
+
+  async applySourceRelease(input: { withSourceFence?: <T>(callback: () => T) => T; planId: string; expectedRevision: number; expectedFence: number;
     receipt: SourceReleaseReceipt; resolveAuthority: (receipt: SourceReleaseReceipt) => SourceReleaseAuthority;
     idempotencyKey: string }): Promise<OperationReceipt<PluginSourcePlan>> {
+    const withCurrentSource = <T>(gapId: string, callback: () => T): T => {
+      const commit = () => { this.#assertOwnerTaskFailureGapAdmission(gapId); return callback() }
+      return input.withSourceFence ? input.withSourceFence(commit) : commit()
+    }
     const key = bounded(input.idempotencyKey, 'idempotencyKey', 160)
     if (!KEY.test(key)) throw new ControlPlaneStoreError('invalid-input', 'idempotencyKey has invalid syntax')
     const inputDigest = controlPlaneDigest({ operation: 'source-release', planId: input.planId, expectedRevision: input.expectedRevision,
@@ -2591,7 +2734,7 @@ export class ControlPlaneStore {
         || replay.result.release.updatedAt !== replay.createdAt) {
         throw new ControlPlaneStoreError('invalid-state', 'stored source release apply receipt is corrupt')
       }
-      return replay
+      return withCurrentSource(replay.result.gapId, () => replay)
     }
     const plan = this.getSourcePlan(input.planId); const expected = expectedSourceRelease(plan.status)
     if (expected === undefined) throw new ControlPlaneStoreError('invalid-state', 'source plan is not awaiting a release receipt')
@@ -2604,6 +2747,7 @@ export class ControlPlaneStore {
       || controlPlaneDigest(operation.receipt) !== controlPlaneDigest(input.receipt)) {
       throw new ControlPlaneStoreError('conflict', 'release receipt was not completed by the durable fenced phase operation')
     }
+    withCurrentSource(plan.gapId, () => {})
     const verified = await input.resolveAuthority(input.receipt).verify(input.receipt, plan, operation.request)
     let nextStatus: SourcePlanStatus
     let failurePhase: SourceReleasePhase | null = null; let failureCode: string | null = null
@@ -2617,18 +2761,31 @@ export class ControlPlaneStore {
         ? `${verified.evidence.code}${verified.evidence.remoteState === 'unchanged' ? '' : `:${verified.evidence.remoteState}`}` : 'release-failed'
     }
     const now = this.#now()
-    this.#database.exec('BEGIN IMMEDIATE')
-    try {
+    return withCurrentSource(plan.gapId, () => {
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+      const current = this.getSourcePlan(plan.id)
+      const currentExpected = expectedSourceRelease(current.status)
+      if (current.revision !== input.expectedRevision || current.release?.fence !== input.expectedFence
+        || current.status !== plan.status || current.digest !== plan.digest || currentExpected?.phase !== expected.phase) {
+        throw new ControlPlaneStoreError('conflict', 'source release receipt changed during verification')
+      }
+      const currentOperation = this.getSourceReleaseOperation(input.receipt.operationId)
+      if (currentOperation.planId !== current.id || currentOperation.phase !== expected.phase || currentOperation.fence !== input.expectedFence
+        || currentOperation.status !== 'completed' || currentOperation.receipt === undefined
+        || controlPlaneDigest(currentOperation.receipt) !== controlPlaneDigest(input.receipt)) {
+        throw new ControlPlaneStoreError('conflict', 'release receipt changed during verification')
+      }
       const result = this.#database.prepare(`UPDATE source_plans SET status = ?, revision = revision + 1,
         release_failure_phase = ?, release_failure_code = ?, updated_at = ?
         WHERE id = ? AND status = ? AND revision = ? AND release_id = ? AND release_fence = ?`).run(
-        nextStatus, failurePhase, failureCode, now, plan.id, plan.status, plan.revision, plan.release.id, input.expectedFence)
+        nextStatus, failurePhase, failureCode, now, current.id, current.status, current.revision, current.release.id, input.expectedFence)
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source release receipt lost its plan CAS')
       const applied = this.#database.prepare(`UPDATE source_release_operations SET status = 'applied', applied_at = ?
         WHERE operation_id = ? AND status = 'completed' AND receipt_digest = ? AND release_fence = ?`).run(
-        now, operation.operationId, controlPlaneDigest(input.receipt), input.expectedFence)
+        now, currentOperation.operationId, controlPlaneDigest(input.receipt), input.expectedFence)
       if (Number(applied.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source release operation lost its apply CAS')
-      const output = this.getSourcePlan(plan.id)
+      const output = this.getSourcePlan(current.id)
       if (nextStatus === 'release-complete') {
         const candidateId = verified.evidence.kind === 'catalog-admission' ? verified.evidence.candidate.id : undefined
         if (candidateId === undefined) throw new ControlPlaneStoreError('invalid-state', 'release completion has no admitted candidate')
@@ -2645,7 +2802,8 @@ export class ControlPlaneStore {
       this.#insertReceipt(operationReceipt)
       this.#database.exec('COMMIT')
       return operationReceipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    })
   }
 
   async prepareSourcePublishReconciliation(input: PrepareSourcePublishReconciliationInput): Promise<SourcePublishReconciliationOperation> {

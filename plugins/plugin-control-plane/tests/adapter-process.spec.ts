@@ -63,6 +63,22 @@ async function fixture(mode: string) {
 }
 
 describe.skipIf(process.platform !== 'linux')('adapter process ownership', () => {
+  test('does not spawn a cancelled request', async () => {
+    const f = await fixture('timeout'), controller = new AbortController()
+    controller.abort()
+    await expect(executeControlledProcess({ command: process.execPath, args: [f.path], env: {},
+      stdio: ['pipe', 'pipe', 'ignore'], stdin: '', timeoutMs: 10_000, maximumOutput: 4096, signal: controller.signal }))
+      .rejects.toMatchObject({ code: 'ABORTED' })
+    await expect(readFile(join(f.root, 'parent.pid'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  test('cancellation waits until the running writer and descendant are stopped', async () => {
+    const f = await fixture('timeout'), controller = new AbortController()
+    const flight = executeControlledProcess({ command: process.execPath, args: [f.path], env: {},
+      stdio: ['pipe', 'pipe', 'ignore'], stdin: '', timeoutMs: 10_000, maximumOutput: 4096, signal: controller.signal })
+    const rejected = expect(flight).rejects.toMatchObject({ code: 'ABORTED' })
+    await expect.poll(async () => { try { return (await readFile(join(f.root, 'child.pid'), 'utf8')).length > 0 } catch { return false } }).toBe(true)
+    controller.abort(); await rejected; await f.stopped()
+  })
   test('preserves inherited descriptors and request stdin without taking caller FD ownership', async () => {
     const f = await fixture('descriptor'); const input = join(f.root, 'input'); await writeFile(input, 'artifact')
     const handle = await open(input, 'r')

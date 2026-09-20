@@ -3,7 +3,7 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 17
+export const controlPlaneSchemaVersion = 18
 
 export function controlPlaneOperationReceiptDigest(idempotencyKey: string, operation: string, inputDigest: string,
   resultJson: string, createdAt: number): string {
@@ -264,6 +264,19 @@ function createCurrent(database: DatabaseSync): void {
       FOREIGN KEY(plan_id) REFERENCES source_plans(id) ON DELETE RESTRICT
     ) STRICT, WITHOUT ROWID;
 
+    -- A release adapter can mutate an external registry.  Its durable dispatch
+    -- claim is deliberately separate from the signed receipt: after a crash
+    -- between dispatch and receipt persistence, the outcome is unknown and
+    -- must be reconciled rather than executed again.
+    CREATE TABLE source_release_dispatches (
+      operation_id TEXT PRIMARY KEY REFERENCES source_release_operations(operation_id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK(status IN ('claimed', 'completed')),
+      claimed_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      CHECK((status = 'claimed' AND completed_at IS NULL) OR
+        (status = 'completed' AND completed_at IS NOT NULL AND completed_at >= claimed_at))
+    ) STRICT, WITHOUT ROWID;
+
     CREATE TABLE operation_receipts (
       idempotency_key TEXT PRIMARY KEY,
       operation TEXT NOT NULL,
@@ -374,7 +387,7 @@ function createCurrent(database: DatabaseSync): void {
     ) STRICT, WITHOUT ROWID;
     INSERT INTO activation_deployment_sequence (singleton, next_exposure_order) VALUES (1, 1);
 
-    PRAGMA user_version = 17;
+    PRAGMA user_version = 18;
   `)
 }
 
@@ -1042,6 +1055,33 @@ function migrateV16ToV17(database: DatabaseSync): void {
   `)
 }
 
+function migrateV17ToV18(database: DatabaseSync): void {
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    CREATE TABLE IF NOT EXISTS source_release_dispatches (
+      operation_id TEXT PRIMARY KEY REFERENCES source_release_operations(operation_id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK(status IN ('claimed', 'completed')),
+      claimed_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      CHECK((status = 'claimed' AND completed_at IS NULL) OR
+        (status = 'completed' AND completed_at IS NOT NULL AND completed_at >= claimed_at))
+    ) STRICT, WITHOUT ROWID;
+    -- A v17 pending operation may already have reached an external adapter
+    -- before this binary could persist its signed receipt. Preserve that
+    -- uncertainty; do not infer that dispatch is safe to repeat.
+    INSERT OR IGNORE INTO source_release_dispatches (operation_id, status, claimed_at, completed_at)
+      SELECT operation_id,
+        CASE WHEN status = 'pending' THEN 'claimed' ELSE 'completed' END,
+        created_at,
+        CASE WHEN status = 'pending' THEN NULL ELSE completed_at END
+      FROM source_release_operations;
+    PRAGMA user_version = 18;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `)
+}
+
 
 export function openControlPlaneDatabase(path: string): DatabaseSync {
   prepare(path)
@@ -1068,6 +1108,7 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       if (version <= 14) migrateV14ToV15(database)
       if (version <= 15) migrateV15ToV16(database)
       if (version <= 16) migrateV16ToV17(database)
+      if (version <= 17) migrateV17ToV18(database)
     }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database

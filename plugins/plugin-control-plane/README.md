@@ -307,7 +307,7 @@ sourceApprovals:
 
 在 Control Plane trust 的 `approvalKeys` 登记对应 Ed25519 公钥；该 key 不用于 release authorization、发布或 Host attestation。owner 字段取实际 Delivery 回执，不由模型生成。grant id 的配置与 key 指纹不可变，额度和已签回执落入独立 SQLite；重启及同一请求重试不重置额度、不延长签名期限。
 
-签名器只读当前 schema 17 控制面库，重新验证完整来源摘要、owner、期限、仓库及 worktree 归属、检查证据和当前 tree/patch。默认只允许白名单非保护插件 `src/` 下的普通 `.ts/.js/.mts/.mjs` 源文件修改；`grant.versioning: "patch"` 仅额外允许上述 Host 管理的 manifest 版本变化。测试目录、其他 manifest 字段、脚本、lockfile 和保护插件不在授权范围。工程检查证据不构成业务目标达成证明。
+签名器只读当前 schema 18 控制面库，重新验证完整来源摘要、owner、期限、仓库及 worktree 归属、检查证据和当前 tree/patch。默认只允许白名单非保护插件 `src/` 下的普通 `.ts/.js/.mts/.mjs` 源文件修改；`grant.versioning: "patch"` 仅额外允许上述 Host 管理的 manifest 版本变化。测试目录、其他 manifest 字段、脚本、lockfile 和保护插件不在授权范围。工程检查证据不构成业务目标达成证明。
 
 持久作业在 `prepared` 落账后调用审批，Host 在验签后以 Delivery/Evaluation 当前来源 writer fence 提交 `approved`。纠正、撤回、身份/会话换代、取消或 trust 变化均阻止提交。审批失败保留 pending 计划和已完成构建；重启恢复最多 1000 个 pending 的 owner 作业，仍核对原 sourceJobs 授权和 owner，只重试审批。单次 helper 至多 10 秒；卸载会等待子进程清理并丢弃迟到结果。Host 可调用 `requestOwnerSourceApproval({planId, signal?})` 显式重试；该方法不暴露为模型工具。inline 准备仍只返回 pending。
 
@@ -353,11 +353,29 @@ sourceReleases:
 
 签名器独立重读当前控制面库、owner 来源、源码范围、构建证据、Git 摘要及版本。grant/config/key 指纹和累计签发数持久保存；重试和进程重启只返回同一回执，不重扣额度、不延长有效期。Host 在最终提交及重放时再检查当前反馈，纠正、撤回、身份变化、取消、trust 漂移均阻止接续。重启可从 `pending-approval`、`approved` 或 `ready-for-human-review` 接续；已进入 release 的计划不重新签发。单次 Host 接续最多 30 秒，卸载等待受控进程清理并丢弃迟到结果。
 
-此步骤只自动开始既有 release 状态机。独立 review、各阶段推进、activation 与普通任务版本观察仍待接线，不会上传公共 npm 或直接启用候选。
+此授权配置只负责开始既有 release 状态机；自动推进须另行启用下述执行配置。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 17 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+### 已授权本地发布的自动推进
 
-owner 可以用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。publish 超时等不确定结果必须先进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。
+```yaml
+sourceReleaseExecution:
+  reviewDecisionRoot: /private/owner/review-decisions
+  timeoutMs: 900000
+```
+
+此配置依赖 `sourceReleases`，沿用 trust schema v4 中八个固定 `releaseAdapters` 和本地 `file:` registry。原生 Automations 作业获批后，Host 依次接续 PR、review、merge、build、sign、publish、registry verify 与 catalog admission；最多推进八个既有阶段，不创建额外定时器。`timeoutMs` 为本次接续总上限（1 秒至 30 分钟），各 adapter 保留自身时限。源码检查和 release 构建是两个原有检查阶段，恢复不会重做已完成阶段。
+
+review decision 仍由独立审查方产生：Host 只读 canonical、无 symlink、owner 私有目录下的 `<prId>.json`，其内容须符合现有 local adapter 的 `dsh-local-review-decision` 格式并精确绑定 PR id、base/head commit 和 PR evidence digest。配置的 `reviewDecisionRoot` 须与 review adapter 读取目录一致。缺失时保持 `awaiting-review`，不派发 review；格式错误或绑定变化则拒绝。独立审查方完成后调用 Host-only `advanceOwnerSourceRelease({ planId, signal?, expectedTrustDigest? })` 即可在当前进程继续，不要求重启。该入口不是模型工具，也不生成 approved decision。部署须把 decision 写权限、审查输入和审查执行环境与候选写权限分开；同 UID 的目录权限本身不证明进程隔离。
+
+当前尚未提供自动独立审查 producer 或其部署接线；仅配置本段并不能得到无人介入的 review。后续采用授权、activation 和普通任务版本观察也仍待接通。这里的 publish 仅面向获准本地 registry，不上传公共 npm。
+
+schema 18 在 adapter 派发前持久登记 operation claim；验签和子进程执行期间不持有 SQLite 写事务。当前 owner 来源、取消、trust 和阶段 CAS 在执行边界及回执应用前重查。超时、崩溃或响应丢失后，已 claim 且无回执的 operation 保持 unknown，重启不重新执行。已完成回执直接接续应用，catalog 已写而账本未确认时也不重新计算旧 preview。独立取得精确签名回执后，可通过 `advanceOwnerSourceRelease({ planId, receipt, ... })` 对账并继续；它只验签回执，不重新运行丢失响应的动作。无法取得可信回执时保留 unknown。
+
+升级到 schema 18 会将历史 pending release operation 保守视为可能已派发，要求回执对账；不会把旧 pending 当作新动作。源码作业的 prepared 恢复覆盖等待中的 release 阶段，并继续检查原 owner 和冻结 trust。Cordis 卸载取消接续、终止并回收 adapter 进程组、等待在途工作后关闭数据库；脱离进程组的进程仍须由部署的 OS 隔离边界管理。
+
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 18 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+
+非 owner-task 来源的计划可用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。adapter 返回签名 publish 歧义回执后进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。派发后没有签名回执则保持 unknown，不自动重跑；普通 owner-task 来源的全部阶段必须通过 Host 当前来源校验。
 
 `bin/dsh-npm-registry-adapter.js` 的独立 verifier 部署提供匿名 npm `registry-verify` / `reconcile`，沿用上述命令与状态机。它在 Linux Host 的固定 adapter/Node 进程中，从已校验字节加载固定下载 helper，读取 owner 私有配置、验签公钥和独立 verifier 私钥，写入私有操作记录；该角色网络权限仅为配置的 HTTPS origin/path 下的 GET，不读取 `.npmrc` 或环境凭据。配置格式、文件权限、预算与退出清理见 [npm verifier 指南](../../docs/npm-release-verifier.md)。npm 对账使用 v2 签名回执，分别记录 owner 预期和实际 metadata/tarball 观测；404 或不完整读取保持 `unknown`，不会据此自动重发发布。旧 v1 回执继续使用原有语义。
 

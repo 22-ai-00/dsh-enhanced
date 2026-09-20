@@ -22,6 +22,7 @@ import { assertManagedVersionPaths, managedPatchVersionFiles, verifyManagedPatch
 import { requestSourceApproval, validateSourceApprovalClientConfig, type SourceApprovalClientConfig } from './source-approval-client.js'
 import { requestSourceReleaseAuthorization, validateSourceReleaseClientConfig, type SourceReleaseClientConfig } from './source-release-client.js'
 import { Ed25519SourceReleaseAuthorizationAuthority } from './release.js'
+import { advanceSourceRelease, sourceReleaseAuthorities, validateSourceReleaseExecutionConfig, type SourceReleaseExecutionConfig } from './source-release-runner.js'
 import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
@@ -48,6 +49,8 @@ export interface Config {
   sourceApprovals?: SourceApprovalClientConfig
   /** Optional separate finite authority for entering the local release state machine. */
   sourceReleases?: SourceReleaseClientConfig
+  /** Explicit execution of configured local phases; independent review stays external. */
+  sourceReleaseExecution?: SourceReleaseExecutionConfig
   /** Explicit owner-only observation channel; no signing or activation authority. */
   runtimeObserver?: RuntimeObserverConfig
   /** Owner-pinned finite native replay; separate from the read-only observer. */
@@ -60,6 +63,7 @@ const schema = Schema.object({
   sourceJobs: Schema.any(),
   sourceApprovals: Schema.any(),
   sourceReleases: Schema.any(),
+  sourceReleaseExecution: Schema.any(),
   runtimeObserver: Schema.any(),
   replayEndpoint: Schema.any(),
 }) as Schema<Config>
@@ -82,7 +86,7 @@ async function canonicalTarget(dshHome: string, profile: string): Promise<Plugin
 
 export class PluginControlPlaneService extends Service {
   static Config = schema
-  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'runtimeObserver' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'runtimeObserver' | 'replayEndpoint'>
+  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'runtimeObserver' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'runtimeObserver' | 'replayEndpoint'>
   private readonly store: ControlPlaneStore
   private readonly taskGaps: OwnerTaskFailureGaps
   private readonly abort = new AbortController()
@@ -90,6 +94,7 @@ export class PluginControlPlaneService extends Service {
   private readonly sourceInspections = new Set<Promise<unknown>>()
   private readonly sourceApprovalFlights = new Set<Promise<unknown>>()
   private readonly sourceReleaseFlights = new Set<Promise<unknown>>()
+  private readonly sourceReleaseAdvances = new Map<string, Promise<PluginSourcePlan>>()
   private sourceRuntime: SourceJobRuntime | undefined
   private readonly sourceRuntimes = new Set<SourceJobRuntime>()
 
@@ -112,6 +117,10 @@ export class PluginControlPlaneService extends Service {
     if (this.config.sourceReleases !== undefined) {
       validateSourceReleaseClientConfig(this.config.sourceReleases)
       if (!this.config.sourceApprovals || this.config.sourceBuild?.versioning !== 'patch') throw new Error('plugin-control-plane: sourceReleases requires sourceApprovals and Host patch versioning')
+    }
+    if (this.config.sourceReleaseExecution !== undefined) {
+      validateSourceReleaseExecutionConfig(this.config.sourceReleaseExecution)
+      if (!this.config.sourceReleases) throw new Error('plugin-control-plane: sourceReleaseExecution requires sourceReleases')
     }
     if (this.config.sourceJobs !== undefined) {
       validateSourceJobsConfig(this.config.sourceJobs, this.config.sourceBuild)
@@ -161,6 +170,11 @@ export class PluginControlPlaneService extends Service {
             if (!job.planId) throw new Error('source job has no prepared plan')
             await this.requestOwnerSourceRelease({ planId: job.planId, signal, expectedTrustDigest: job.intent.trustDigest })
           } } : {}),
+          ...(this.config.sourceReleaseExecution ? { releaseTimeoutMs: this.config.sourceReleaseExecution.timeoutMs,
+            advanceReleased: async (job: SourceJobRecord, signal: AbortSignal) => {
+              if (!job.planId) throw new Error('source job has no release plan')
+              await this.advanceOwnerSourceRelease({ planId: job.planId, signal, expectedTrustDigest: job.intent.trustDigest })
+            } } : {}),
           trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent),
         })
         runtime.start()
@@ -272,6 +286,39 @@ export class PluginControlPlaneService extends Service {
     })()
     this.sourceReleaseFlights.add(operation)
     try { return await operation } finally { this.sourceReleaseFlights.delete(operation) }
+  }
+
+  /** Host-only continuation, also used by an independent reviewer after its decision is ready. */
+  advanceOwnerSourceRelease = async (input: { planId: string; signal?: AbortSignal; expectedTrustDigest?: string; receipt?: import('./types.js').SourceReleaseReceipt }): Promise<PluginSourcePlan> => {
+    this.abort.signal.throwIfAborted()
+    const config = this.config.sourceReleaseExecution
+    if (!config) throw new Error('plugin-control-plane: source release execution unavailable')
+    if (this.sourceReleaseAdvances.has(input.planId)) throw new Error('source release continuation already running')
+    const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(config.timeoutMs), ...(input.signal ? [input.signal] : [])])
+    const operation = (async () => {
+      const plan = this.store.getSourcePlan(input.planId), source = this.store.getOwnerTaskFailureReference(plan.gapId)
+      if (!source || plan.mode !== 'modify' || !plan.release) throw new Error('source release continuation requires an owner repair release')
+      const withSourceFence = <T>(callback: () => T): T => { signal.throwIfAborted(); return this.taskGaps.withCurrent(plan.gapId, source.owner, callback) }
+      withSourceFence(() => {})
+      const trust = await this.boundTrust(), trustDigest = controlPlaneDigest(trust)
+      if (input.expectedTrustDigest !== undefined && trustDigest !== input.expectedTrustDigest) throw new Error('source release continuation trust changed')
+      const assertCurrent = async (): Promise<void> => {
+        withSourceFence(() => {})
+        if (controlPlaneDigest(await this.boundTrust()) !== trustDigest) throw new Error('source release continuation trust changed')
+        withSourceFence(() => {})
+      }
+      if (input.receipt) {
+        if (input.receipt.planId !== plan.id) throw new Error('release reconciliation receipt targets another plan')
+        await assertCurrent()
+        const { authorize, authority } = sourceReleaseAuthorities(trust)
+        await this.store.acceptSourceReleaseReceipt({ operationId: input.receipt.operationId, expectedRevision: plan.revision,
+          expectedFence: plan.release.fence, receipt: input.receipt, resolveAuthority: authority,
+          resolveAuthorizationAuthority: authorize, withSourceFence })
+      }
+      return advanceSourceRelease({ store: this.store, planId: plan.id, trust, config, signal, assertCurrent, withSourceFence })
+    })()
+    this.sourceReleaseAdvances.set(input.planId, operation); this.sourceReleaseFlights.add(operation)
+    try { return await operation } finally { this.sourceReleaseAdvances.delete(input.planId); this.sourceReleaseFlights.delete(operation) }
   }
 
   recordGap(input: CapabilityGapInput): StoredCapabilityGap { return this.store.recordGap(input) }

@@ -1091,7 +1091,7 @@ export class Ed25519SourceReleaseAuthority implements SourceReleaseAuthority {
   }
 }
 
-export type ReleaseAdapterErrorCode = 'NOT_CONFIGURED' | 'FAILED' | 'OUTPUT_LIMIT' | 'TIMEOUT' | 'VERSION_MISMATCH' | 'EXECUTABLE_CHANGED'
+export type ReleaseAdapterErrorCode = 'ABORTED' | 'NOT_CONFIGURED' | 'FAILED' | 'OUTPUT_LIMIT' | 'TIMEOUT' | 'VERSION_MISMATCH' | 'EXECUTABLE_CHANGED'
 export class ReleaseAdapterError extends Error {
   constructor(readonly code: ReleaseAdapterErrorCode, readonly phase: SourceReleasePhase, message: string) {
     super(`plugin-control-plane release-adapter[${phase}:${code}]: ${message}`); this.name = 'ReleaseAdapterError'
@@ -1100,7 +1100,8 @@ export class ReleaseAdapterError extends Error {
 
 async function executePinned(executable: OpenTrustedExecutable, interpreter: OpenTrustedExecutable | undefined, args: readonly string[],
   environment: NodeJS.ProcessEnv, timeoutMs: number, stdin: string | undefined, maximumOutput: number, phase: SourceReleasePhase,
-  inherited: readonly FileHandle[] = []): Promise<string> {
+  inherited: readonly FileHandle[] = [], signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted()
   if (process.platform !== 'linux') throw new ReleaseAdapterError('FAILED', phase, 'descriptor-pinned adapters require Linux')
   try { await realpath('/proc/self/fd') } catch { throw new ReleaseAdapterError('FAILED', phase, 'descriptor-pinned adapters require /proc/self/fd') }
   const executableFd = 3 + inherited.length; const interpreterFd = interpreter === undefined ? undefined : executableFd + 1
@@ -1110,9 +1111,10 @@ async function executePinned(executable: OpenTrustedExecutable, interpreter: Ope
   if (interpreter !== undefined) stdio.push(interpreter.handle.fd)
   try {
     return await executeControlledProcess({ command, args: commandArguments, env: environment, stdio,
-      stdin, timeoutMs, maximumOutput })
+      stdin, timeoutMs, maximumOutput, ...(signal ? { signal } : {}) })
   } catch (error) {
     if (!(error instanceof ControlledProcessError)) throw error
+    if (error.code === 'ABORTED') throw new ReleaseAdapterError('ABORTED', phase, 'adapter cancelled')
     if (error.code === 'TIMEOUT') throw new ReleaseAdapterError('TIMEOUT', phase, 'adapter exceeded its deadline')
     if (error.code === 'OUTPUT_LIMIT') throw new ReleaseAdapterError('OUTPUT_LIMIT', phase, 'adapter exceeded its output bound')
     throw new ReleaseAdapterError('FAILED', phase, error.code === 'NON_ZERO'
@@ -1122,8 +1124,8 @@ async function executePinned(executable: OpenTrustedExecutable, interpreter: Ope
 
 async function assertPinnedAdapterCapabilities(executable: OpenTrustedExecutable, interpreter: OpenTrustedExecutable | undefined,
   adapter: NonNullable<NonNullable<PluginControlTrustConfig['releaseAdapters']>[SourceReleasePhase]>, phase: SourceReleasePhase,
-  environment: NodeJS.ProcessEnv): Promise<void> {
-  const source = await executePinned(executable, interpreter, ['--capabilities'], environment, adapter.timeoutMs, undefined, 1_024, phase)
+  environment: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<void> {
+  const source = await executePinned(executable, interpreter, ['--capabilities'], environment, adapter.timeoutMs, undefined, 1_024, phase, [], signal)
   let value: unknown
   try { value = JSON.parse(source) as unknown } catch { throw new ReleaseAdapterError('FAILED', phase, 'adapter did not declare the pinned-fd contract') }
   const item = typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
@@ -1151,30 +1153,34 @@ async function withPinnedAdapter<T>(adapter: NonNullable<NonNullable<PluginContr
   }
 }
 
-export async function invokeSourceReleaseAdapter(trust: PluginControlTrustConfig, request: SourceReleaseRequest): Promise<SourceReleaseReceipt> {
+export async function invokeSourceReleaseAdapter(trust: PluginControlTrustConfig, request: SourceReleaseRequest, signal?: AbortSignal): Promise<SourceReleaseReceipt> {
+  signal?.throwIfAborted()
   const parsedRequest = parseSourceReleaseRequest(request)
   const adapter = trust.releaseAdapters?.[parsedRequest.phase]
   if (adapter === undefined) throw new ReleaseAdapterError('NOT_CONFIGURED', parsedRequest.phase, 'no owner-configured adapter is registered')
   const identity = { id: adapter.id, version: adapter.version, path: adapter.path, sha256: adapter.sha256,
     interpreter: adapter.interpreter, authority: adapter.authority, keyId: adapter.keyId }
   if (digest(identity) !== digest(parsedRequest.adapter)) throw new ReleaseAdapterError('FAILED', parsedRequest.phase, 'durable request is not bound to the configured adapter')
-  return withPinnedAdapter(adapter, parsedRequest.phase, async (executable, interpreter) => {
+  const receipt = await withPinnedAdapter(adapter, parsedRequest.phase, async (executable, interpreter) => {
     const environment = inheritedReleaseAdapterEnvironment(trust, parsedRequest.phase)
-    const version = (await executePinned(executable, interpreter, ['--version'], environment, adapter.timeoutMs, undefined, 1_024, parsedRequest.phase)).trim()
+    const version = (await executePinned(executable, interpreter, ['--version'], environment, adapter.timeoutMs, undefined, 1_024, parsedRequest.phase, [], signal)).trim()
     if (version !== adapter.version) throw new ReleaseAdapterError('VERSION_MISMATCH', parsedRequest.phase, 'adapter reported a different version')
-    await assertPinnedAdapterCapabilities(executable, interpreter, adapter, parsedRequest.phase, environment)
+    await assertPinnedAdapterCapabilities(executable, interpreter, adapter, parsedRequest.phase, environment, signal)
     const artifact = 'artifact' in parsedRequest.input ? await openArtifactSnapshot(parsedRequest.input.artifact) : undefined
     try {
       const artifactEnvironment = artifact === undefined ? environment : { ...environment, DSH_RELEASE_TARBALL_FD: '3',
         DSH_RELEASE_SBOM_FD: '4', DSH_RELEASE_PROVENANCE_FD: '5' }
       const source = await executePinned(executable, interpreter, ['release'], artifactEnvironment, adapter.timeoutMs,
-        `${JSON.stringify(parsedRequest)}\n`, 262_144, parsedRequest.phase, artifact?.handles ?? [])
+        `${JSON.stringify(parsedRequest)}\n`, 262_144, parsedRequest.phase, artifact?.handles ?? [], signal)
       if (artifact !== undefined) await verifyOpenArtifactSnapshot(artifact)
       let value: unknown
       try { value = JSON.parse(source) as unknown } catch { throw new ReleaseAdapterError('FAILED', parsedRequest.phase, 'adapter did not return one JSON receipt') }
+      signal?.throwIfAborted()
       return parseSourceReleaseReceipt(value)
     } finally { if (artifact !== undefined) await Promise.all(artifact.handles.map(async handle => handle.close())) }
   })
+  signal?.throwIfAborted()
+  return receipt
 }
 
 export async function invokeSourcePublishReconciliationAdapter(trust: PluginControlTrustConfig,
