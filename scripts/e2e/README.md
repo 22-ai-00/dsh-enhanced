@@ -381,4 +381,18 @@ DSH_REPLAY_FIXTURE=1 DSH_REPLAY_DSH=/absolute/path/to/dsh \
   node scripts/e2e/replay-endpoint-real-dsh.mjs --output /tmp/replay-host.json
 ```
 
-The probe creates temporary Hosts and exercises authenticated replay, completion caching, restart invalidation and crash recovery without duplicate dispatch. It was verified with CLI `0.1.5-rc.2`; it does not call a model or activate a production profile. Native tool/Delivery blocking does not establish global zero external effects or an independent signed activation receipt. Prerequisites, cleanup and evidence limits are documented in [effect-blocked replay](../../docs/effect-blocked-replay.md).
+The probe creates temporary Hosts and exercises late signed replay grants, completion caching, restart invalidation and crash recovery without duplicate dispatch. Both restarted Hosts reject renewed grants and alternate operations under the same authority scope; its readiness predecessors are explicitly synthetic. It was verified with CLI `0.1.5-rc.2`; it does not call a model or activate a production profile. Native tool/Delivery blocking does not establish global zero external effects or an independent signed activation receipt. Prerequisites, cleanup and evidence limits are documented in [effect-blocked replay](../../docs/effect-blocked-replay.md).
+
+To exercise the actual Control Plane request chain on the same live Host:
+
+```sh
+DSH_READINESS_FIXTURE=1 DSH_READINESS_DSH=/absolute/path/to/dsh \
+  node scripts/e2e/systemd-readiness-real-dsh.mjs --output /tmp/readiness-replay.json
+```
+
+The default active-candidate branch applies signed reload/readiness, prepares
+the real replay request, signs a short-lived grant outside the Host, and checks
+native replay without changing PID, invocation, candidate Fiber or signed
+profile pins. It retains `awaiting-effect-blocked-replay`. Both fixtures resolve
+Control Plane's native peers from the actual CLI closure via
+`real-host-control-package.mjs`; they do not mix separate `dsh-scope` instances.

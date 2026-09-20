@@ -13,7 +13,7 @@
 - 发布基线仍为 `0.1.32`；`dev` 工作区版本为 `0.1.33`，后续开发不等于已发布。安装器和 Host 兼容范围见[兼容性说明](compatibility.md)与[发布账本](../release-manifest.json)。
 - 基本 RSI 已在限定任务族跑通真实修复、独立比较、后续任务 canary、两轮晋升与安全检查点恢复。它不证明任意任务都能自我改进，也不允许重放未结算的模型或外部调用。
 - Day1 已经通过原生 Agent/Growth Driver 提交源码修复候选，独立 Host 作业完成离线仓库检查并形成待审批计划；其中 personal-memory 修复经开发复核整合。待审批提案不等于自主发布或生产启用。
-- Control Plane 已有 npm 发布/独立读回/catalog adapter，以及 systemd reload、readiness、物理 rollback 的签名与持久操作组件。认证有限回放端点已在真实 DSH CLI `0.1.5-rc.2` 临时 Host 验证：完成态重启失效，SIGKILL 中断后保留 unknown 且不重复派发。其输出不证明全局 `externalEffects = 0`，不能代替独立签名。
+- Control Plane 已有 npm 发布/独立读回/catalog adapter，以及 systemd reload、readiness、物理 rollback 的签名与持久操作组件。认证有限回放端点支持晚到 Ed25519 授权：readiness 落账后，将真实 schema-2 请求交给同一 DSH CLI `0.1.5-rc.2` Host 执行，保持 PID/InvocationID、候选 Fiber 与部署文件不变。完成态重启失效，SIGKILL 中断后保留 unknown；同 scope 换 operation 或重新签发 grant 不能恢复派发权限。其输出不证明全局 `externalEffects = 0`，不能代替独立签名。
 - Host request schema 2 固定同一 activation/fence 下前一阶段的完整签名回执摘要与 generation，并在 dispatch、apply 时复核；普通阶段不能换代。systemd attestor v5 已通过真实 reload/readiness 与物理 restore 探针。旧 schema-1 已应用历史可作为前驱，未完成操作必须先用原兼容版本对账；此改动仍不提供独立副作用观测。
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
 
@@ -46,7 +46,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. 先补齐 WP16 回放端点的晚到签名授权：真实请求在 readiness 落账后才生成，现有启动时固定摘要无法直接串接。保持同一 Host 实例及已签部署输入，再接独立副作用观测和签名，补齐 shadow/canary/soak/health 与推广后恢复；沿既有请求和 CAS 状态机接线。
+1. WP16 晚到回放授权已接线；下一步为同一真实请求接入独立副作用观测与签名，再补齐 shadow/canary/soak/health 与推广后恢复。原生工具/回复阻断不能证明全局 `externalEffects = 0`；继续沿既有请求和 CAS 状态机接线。
 2. 在真实受授权环境完成 build→publish→verify→enable→monitor→rollback；生产授权与凭据尚不能由测试夹具代替。
 3. 为 WP18 在受控真实仓库完成事件到精确提交 CI/readback，再用同供应、同预算的新任务证明技能复用收益；同时验证停止、unknown 对账与回滚。
 4. 继续逐项关闭 WP04–WP13 的真实收益、覆盖广度和外部系统验收缺口。
@@ -56,9 +56,8 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。当前代码（含 Policy 并发迁移夹具修复）的本地 `pnpm check` 退出 0：6,088 项通过、44 项跳过、35 个包的 dry-run pack（32 个插件、3 个共享库），其中 Control Plane 为 494 项、Policy 为 216 项通过。Host request schema 2 / attestor v5 的定向测试覆盖旧凭证保留、前驱替换、普通阶段换代与异步验签竞争；这些是工程验证，不是生产自治完成证明。
-- 真实 DSH CLI `0.1.5-rc.2` 的 `systemd-readiness-real-dsh.mjs` 默认探针与 `DSH_READINESS_ROLLBACK=restore` 探针均退出 0；运行摘要与当前实现哈希一致。签名正确但代次替换的 synthetic negative receipt 被拒绝且未推进状态；它不构成外部副作用观测。命令与边界见 [Host 签名器](systemd-host-attestor.md)。
-- 最近已完成的跨平台 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35489862536) 绑定 `eda330e`：Linux、macOS 仓库检查与 Windows ACP smoke 全部通过。Policy 迁移夹具修复提交 `be350db` 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35490776384) 在本次核对时仍运行中，不能沿用前一提交的通过结论。
-- Policy 并发迁移夹具已针对 macOS `COMMIT` 锁竞争增加 5 秒 busy timeout 和异常清理；Linux 定向 18 项与独立读锁探针通过。macOS 修复结论等待上述 CI。
+- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。当前代码（含晚到签名授权、journal v2 与准入等待后的到期检查）的本地 `pnpm check` 退出 0：6,106 项通过、44 项跳过、35 个包的 dry-run pack（32 个插件、3 个共享库），其中 Control Plane 为 512 项、Policy 为 216 项通过。回放端点、签名 grant 和 journal 的定向 34 项覆盖签名/作用域、并发、迁移、重启与准入期间到期；到期回归在修复前实际创建 1 个 Agent、修复后为 0。Host request schema 2 / attestor v5 继续覆盖前驱绑定与普通阶段不得换代；这些是工程验证，不是生产自治完成证明。
+- 真实 DSH CLI `0.1.5-rc.2` 的 `systemd-readiness-real-dsh.mjs` 默认探针、`DSH_READINESS_ROLLBACK=restore` 及 `replay-endpoint-real-dsh.mjs` 均退出 0；运行摘要与当前构建哈希一致。真实 readiness→grant→回放保持同一 Host/部署且不推进 activation；重启后的同 scope 新 operation 和重签 grant 均实际执行拒绝检查。签名正确但代次替换的 synthetic negative receipt 被拒绝且未推进状态；它不构成外部副作用观测。命令与边界见 [Host 签名器](systemd-host-attestor.md)。
+- Policy 迁移夹具修复提交 `be350db` 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35490776384) 已确认 Linux、macOS 仓库检查和 Windows ACP smoke 均通过，macOS `COMMIT` 锁竞争修复得到自身提交的复验。本段晚到授权的跨平台结论须以新提交的 CI 为准。
 
 原始运行 JSON、日志和临时身份留本地或 CI artifacts，仓库只保留命令、结论和限制。确需供可重复探针使用的固定输入留在 `scripts/e2e/fixtures/`，不从本次网络结果反推预期值。

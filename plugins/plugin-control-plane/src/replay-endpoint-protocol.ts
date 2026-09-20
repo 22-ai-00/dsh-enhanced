@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { assertReplayGrant, validateReplaySignedAuthority, type ReplayGrant, type ReplaySignedAuthority } from './replay-grant.js'
 import { lstatSync, realpathSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { dirname, isAbsolute, resolve } from 'node:path'
@@ -7,20 +8,26 @@ import { assertRuntimeObservation, assertRuntimeObserverExact as exact, assertRu
   equalRuntimeObserverMac, privateRuntimeObserverDirectory, readPrivateRuntimeObserverKey, runtimeConfigDigest,
   runtimeObserverMac, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer-protocol.js'
 
+export interface ReplayFixedAuthority {
+  operationId: string; requestDigest: string; notBefore: number; expiresAt: number; cases: ReplayCase[]
+}
 export interface ReplayEndpointConfig {
   runtime: RuntimeObserverConfig
   journalPath: string
-  authority: { operationId: string; requestDigest: string; notBefore: number; expiresAt: number; cases: ReplayCase[] }
+  authority: ReplayFixedAuthority | ReplaySignedAuthority
   agent: { cwd: string; preset: string; provider: string; model: string }
   timeoutMs: number
 }
-export interface ReplayEndpointRequest {
-  schemaVersion: 1
+interface ReplayEndpointRequestBase {
   action: 'execute' | 'query'
   operationId: string
   requestDigest: string
   challenge: string
 }
+export type ReplayEndpointRequest = ReplayEndpointRequestBase & (
+  | { schemaVersion: 1 }
+  | { schemaVersion: 2; grant: ReplayGrant }
+)
 export interface ReplayEndpointResponse {
   schemaVersion: 1
   challenge: string
@@ -31,6 +38,7 @@ export interface ReplayEndpointResponse {
   observedAt: number
 }
 export const REPLAY_MAX_BYTES = 131_072
+export const REPLAY_REQUEST_MAX_BYTES = 65_536
 export const REPLAY_REQUEST_DOMAIN = 'dsh-effect-replay-request/v1'
 export const REPLAY_RESPONSE_DOMAIN = 'dsh-effect-replay-response/v1'
 const HEX = /^[a-f0-9]{64}$/u
@@ -46,12 +54,17 @@ export function validateReplayEndpointConfig(value: unknown): asserts value is R
     || value.journalPath === runtime.profilePath || value.journalPath.startsWith(runtime.profilePath + '/')
     || value.journalPath === runtime.socketPath || value.journalPath === runtime.keyPath) replayEndpointFail()
   privateRuntimeObserverDirectory(dirname(value.journalPath))
-  exact(value.authority, ['operationId', 'requestDigest', 'notBefore', 'expiresAt', 'cases'])
-  text(value.authority.operationId, ID); text(value.authority.requestDigest, HEX)
-  for (const key of ['notBefore', 'expiresAt']) if (!Number.isSafeInteger(value.authority[key]) || (value.authority[key] as number) <= 0) replayEndpointFail()
-  if ((value.authority.expiresAt as number) <= (value.authority.notBefore as number)
-    || (value.authority.expiresAt as number) - (value.authority.notBefore as number) > 86_400_000) replayEndpointFail()
-  validateReplayCases(value.authority.cases)
+  if (isReplaySignedAuthority(value.authority)) {
+    validateReplaySignedAuthority(value.authority)
+    if (value.authority.scope.profile.path !== runtime.profilePath) replayEndpointFail()
+  } else {
+    exact(value.authority, ['operationId', 'requestDigest', 'notBefore', 'expiresAt', 'cases'])
+    text(value.authority.operationId, ID); text(value.authority.requestDigest, HEX)
+    for (const key of ['notBefore', 'expiresAt']) if (!Number.isSafeInteger(value.authority[key]) || (value.authority[key] as number) <= 0) replayEndpointFail()
+    if ((value.authority.expiresAt as number) <= (value.authority.notBefore as number)
+      || (value.authority.expiresAt as number) - (value.authority.notBefore as number) > 86_400_000) replayEndpointFail()
+    validateReplayCases(value.authority.cases)
+  }
   exact(value.agent, ['cwd', 'preset', 'provider', 'model'])
   if (typeof value.agent.cwd !== 'string' || !isAbsolute(value.agent.cwd) || realpathSync(value.agent.cwd) !== value.agent.cwd
     || !lstatSync(value.agent.cwd).isDirectory()) replayEndpointFail()
@@ -62,9 +75,16 @@ export function validateReplayEndpointConfig(value: unknown): asserts value is R
   if (!Number.isSafeInteger(value.timeoutMs) || (value.timeoutMs as number) < 100 || (value.timeoutMs as number) > 60_000) replayEndpointFail()
 }
 
+export function isReplaySignedAuthority(value: unknown): value is ReplaySignedAuthority {
+  return typeof value === 'object' && value !== null && 'mode' in value && value.mode === 'signed'
+}
+
 export function assertReplayEndpointRequest(value: unknown): asserts value is ReplayEndpointRequest {
-  exact(value, ['schemaVersion', 'action', 'operationId', 'requestDigest', 'challenge'])
-  if (value.schemaVersion !== 1 || !['execute', 'query'].includes(value.action as string)) replayEndpointFail()
+  runtimeConfigDigest(value)
+  const signed = typeof value === 'object' && value !== null && 'schemaVersion' in value && value.schemaVersion === 2
+  exact(value, ['schemaVersion', 'action', 'operationId', 'requestDigest', 'challenge', ...(signed ? ['grant'] : [])])
+  if ((!signed && value.schemaVersion !== 1) || !['execute', 'query'].includes(value.action as string)) replayEndpointFail()
+  if (signed) assertReplayGrant(value.grant)
   text(value.operationId, ID); text(value.requestDigest, HEX); text(value.challenge, HEX)
 }
 
@@ -101,14 +121,15 @@ export function assertReplayEndpointResponse(value: unknown): asserts value is R
 
 /** Explicit execute or read-only query; disconnect/timeout never causes an automatic retry. */
 export async function queryReplayEndpoint(input: { socketPath: string; keyPath: string; action: 'execute' | 'query';
-  operationId: string; requestDigest: string; timeoutMs: number; signal?: AbortSignal }): Promise<ReplayEndpointResponse> {
+  operationId: string; requestDigest: string; grant?: ReplayGrant; timeoutMs: number; signal?: AbortSignal }): Promise<ReplayEndpointResponse> {
   if (process.platform !== 'linux' || !Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 100 || input.timeoutMs > 65_000) replayEndpointFail()
   privateRuntimeObserverDirectory(dirname(input.socketPath))
   const before = lstatSync(input.socketPath)
   if (!before.isSocket() || before.uid !== process.getuid!() || (before.mode & 0o077) !== 0 || realpathSync(input.socketPath) !== input.socketPath) replayEndpointFail()
-  const request: ReplayEndpointRequest = { schemaVersion: 1, action: input.action, operationId: input.operationId,
+  const request: ReplayEndpointRequest = { ...(input.grant ? { schemaVersion: 2 as const, grant: input.grant } : { schemaVersion: 1 as const }), action: input.action, operationId: input.operationId,
     requestDigest: input.requestDigest, challenge: randomBytes(32).toString('hex') }
   assertReplayEndpointRequest(request)
+  if (Buffer.byteLength(JSON.stringify(request)) + 100 > REPLAY_REQUEST_MAX_BYTES) replayEndpointFail()
   const key = readPrivateRuntimeObserverKey(input.keyPath)
   const signal = AbortSignal.any([AbortSignal.timeout(input.timeoutMs), ...(input.signal ? [input.signal] : [])])
   try {

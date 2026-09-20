@@ -155,6 +155,80 @@ supervisor must prove the old process group has stopped and remove only that
 Host's stale socket inode. The endpoint deliberately does not unlink an
 existing socket or reset the journal on startup.
 
+### Late signed authority
+
+For a real activation chain, the replay request is prepared only after the
+readiness receipt has been applied. Configure the endpoint before the signed
+reload with an Ed25519 **public** trust anchor instead of a fixed operation:
+
+```ts
+authority: {
+  mode: 'signed', authority, keyId, publicKeyPem,
+  scope: { installationId, ledger, plan, activation, profile },
+  notBefore, expiresAt, maximumGrantMs: 60_000,
+  cases,
+}
+```
+
+`ledger` is `{ id, path }`, `plan` is `{ id, digest }`, `activation` is `{ id,
+fence }`, and `profile` is `{ name, path }`. These are the exact Control Plane
+identities, known before reload. The authority window is at most 24 hours;
+each grant lasts at most `maximumGrantMs` (100–60,000 ms), inside both that
+window and the prepared request's receipt TTL. Cases remain immutable startup
+configuration and must meet the request's minimum tool and reply counts.
+
+After applying readiness, the external owner prepares the schema-2
+`effect-blocked-replay` request, checks its exact signed readiness predecessor
+and independently observes the live Host. The owner signs this envelope with
+its private key, kept outside the Host:
+
+```ts
+const unsigned = {
+  schemaVersion: 1, kind: 'dsh-effect-replay-grant', authority, keyId,
+  request, // full prepared schema-2 request, including readiness predecessor
+  endpointDigest: runtimeConfigDigest(replayEndpoint),
+  caseDigest: validateReplayCases(replayEndpoint.authority.cases).caseDigest,
+  processId, invocationId, notBefore, expiresAt,
+}
+const grant = {
+  ...unsigned,
+  signature: sign(null, Buffer.from(replayGrantSigningPayload(unsigned)), privateKey)
+    .toString('base64'),
+}
+await queryReplayEndpoint({ socketPath, keyPath, action: 'execute',
+  operationId: request.operationId, requestDigest: hostAttestationRequestDigest(request),
+  grant, timeoutMs: 16_000 })
+```
+
+The signed client uses wire request schema 2; legacy fixed-operation clients
+retain schema 1. HMAC still authenticates transport. The Ed25519 grant binds
+owner scope, the full request, static endpoint configuration, cases, PID and
+systemd invocation ID (or `null` outside systemd). Execution checks the current
+Host identity before admission; the endpoint neither signs grants nor verifies
+that readiness was applied in the external ledger. That check belongs to the
+owner signing authority. Request predecessor shape alone is not proof of a
+readiness receipt's authenticity.
+
+Journal schema 2 atomically reserves the operation and grant digest under one
+scope digest **before Agent creation**. After any SQLite lock/fsync wait, the
+endpoint checks expiry again before running Agent startup hooks; an expired
+reservation remains unknown. A scope can admit only one operation;
+changing the operation ID, expiry, signature, key or config cannot reclaim that
+scope in the same journal. Existing schema-1 rows migrate as fixed operations
+and cannot be adopted by a signed grant. No reset or grant-replacement API is
+provided. Keep the journal outside candidate write authority. Migration is
+one-way: a schema-1-only endpoint cannot reopen schema 2. A deployment rollback
+must retain a compatible journal reader and reconcile unknown work; deleting,
+replacing or downgrading the journal is not a safe recovery procedure.
+
+A read-only query may use the original, still-valid grant after Host replacement
+to inspect `unknown` or `stale`; execute rejects a changed PID/invocation.
+Expiry rejects both actions, so subsequent reconciliation uses owner-controlled
+ledger inspection. A same-process endpoint reload retains the reservation and
+makes completed observations stale. Candidate/provider stability during each
+replay is checked by the existing runtime sampler; a grant is not an OS sandbox
+or an independent attestation of all effects between readiness and replay.
+
 ### Actual DSH Host probe
 
 After building the workspace, run the opt-in Linux/systemd user fixture:
@@ -168,13 +242,15 @@ It creates disposable profiles and four actual DSH processes. The Control
 Plane copy resolves native peers from that CLI's dependency closure. A fixture
 startup hook registers the probe tool; no preset mounting or model prompt is
 required. The owner independently binds process IDs and systemd invocation
-IDs, checks authentication rejection, completed-result caching, `stale` after
+IDs, issues a late signed grant, checks authentication rejection, completed-result caching, `stale` after
 restart, and SIGKILL during pre-execute followed by persistent `unknown`.
+Requests in this standalone restart fixture have synthetic readiness predecessors;
+the complete readiness chain is exercised by the probe below.
 Each operation creates exactly one Agent and executes zero probe tool bodies;
 the same journal survives restart. Dead socket cleanup is explicit owner
 recovery after supervisor quiescence. Temporary profiles and units are removed.
 
-This probe passed with DSH CLI `0.1.5-rc.2` on 2026-09-20. It uses local built
+The probe uses local built
 packages and a controlled probe, so it does not establish npm artifact identity,
 model quality, independent global effect observation or production activation.
 
@@ -216,12 +292,14 @@ No global `externalEffects = 0` claim is derived from these observations.
 The next integration must deploy immutable cases and durable admission outside
 candidate write authority, independently bind systemd/Loader identity and
 collect fresh external observations, then sign the existing exact Host request.
-There is also an authorization timing gap: the current endpoint freezes its
-operation/request digest in startup Config, while a real schema-2 replay request
-can only be prepared after readiness is applied. The standalone endpoint fixture
-uses a preselected digest; it does not establish that full chain. A late owner
-signature must bind the prepared request without changing the signed deployment
-files or restarting the Host; no such grant path is implemented yet.
+The late signed grant closes the startup authorization timing gap without
+changing the deployment files or restarting the Host after readiness. The opt-in
+`systemd-readiness-real-dsh.mjs` default probe applies signed reload/readiness,
+prepares the actual replay request, signs a grant externally, executes it on the
+same Host, and checks unchanged PID, invocation, observer/Fiber identities and
+profile pins. It retains the exact grant, request and native observation locally.
+The plan remains `awaiting-effect-blocked-replay`; this probe does not issue a
+successful effect attestation. See [Host probe commands](systemd-host-attestor.md).
 The successful attestation contract requires `externalEffects = 0`; native
 denials alone cannot establish it. The endpoint therefore issues no signed
 receipt and does not advance activation. External observer and endpoint samplers
