@@ -68,6 +68,8 @@ node scripts/e2e/native-skill-day1.mjs
 
 探针固定同一 Day1 工厂，传输请求时限 180 秒、原生 Goal 回合（`stepMaxDurationMs`）240 秒、每 cell 总期限 900 秒，输出每次最多 4,096 tokens；来源训练与两臂使用相同预算。来源经原生 Goal 验收后才捕获候选，随后运行 3 种冻结后任务 × 2 次重复 × 2 臂。脚本、供应工件、传输配置和训练证据均纳入摘要；运行期间不要修改或重建不同版本的已部署模块。总运行上限 55 分钟，SIGINT/SIGTERM 触发已有取消与关闭路径。回合期限覆盖该轮所有模型和工具调用；它不会随每次调用重置。期限中断了已派发请求且 usage 未结算时，该实验保持 unknown，即使本地最后一个产物作业成功也不能据此捕获候选。
 
+Goals 经原生 SystemPrompt 与 `goal_context` 提供 `roundTiming`：首次上下文组装早于回合准入，只展示配置上限；准入后的上下文展示同一持久 run 的截止时间、观察时间和剩余毫秒。它与全目标累计 `executionBudget` 分列，帮助模型在期限内正常结束回合并交给 Host 独立验收。这只是当次上下文快照，不会延长期限、终止远端在途请求或将产物成功改判为 Goal 达成。
+
 `input.json`、`training.json`、`comparison/completion.json` 和 `summary.json` 保存在该私有目录；失败保存 `failure.json`，传输异常另存仅含错误码、时长和取消状态的 `transport-errors.jsonl`。未完整结算 usage 时保持 unknown 与预留，不自动重试；最终报告不完整则进程退出 1。新实验必须显式选择新目录并保留旧失败，不能把新实验当作对旧 unknown 的重放或结算。报告不授权激活或晋升，也不将请求次数或 fixture 成功冒充真实收益。
 
 ## 当前验收范围

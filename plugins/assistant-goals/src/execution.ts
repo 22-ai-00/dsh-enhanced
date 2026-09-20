@@ -32,6 +32,11 @@ interface PendingGoalRound {
   removeAbort(): void
 }
 
+export interface GoalRoundTiming {
+  maxDurationMs: number
+  active?: { runId: string; round: number; issuedAt: number; expiresAt: number; observedAt: number; remainingMs: number }
+}
+
 /** Observes actual admitted native rounds; never queues prompts or accepts model verdicts. */
 export class GoalExecutionRuntime {
   readonly #generation = randomUUID()
@@ -49,7 +54,7 @@ export class GoalExecutionRuntime {
     private readonly ctx: Context,
     path: string | undefined,
     private readonly maxDurationMs: number,
-    private readonly current: (agent: Agent) => { scope: GoalScope; record: GoalRecord },
+    private readonly current: (agent: Agent, consume?: boolean) => { scope: GoalScope; record: GoalRecord },
     private readonly outcome?: {
       prepare(agent: Agent, run: GoalExecutionRun): void
       settled(agent: Agent, run: GoalExecutionRun, assertCurrent: () => void): Promise<void>
@@ -231,6 +236,25 @@ export class GoalExecutionRuntime {
     && (this.#rounds.has(agent) || this.#settlements.has(agent))
   whenIdle = async (): Promise<void> => { while (this.#pending.size) await Promise.all(this.#pending) }
   health = () => ({ enabled: this.#store !== undefined, verifierConnected: this.#sink !== undefined, activeRounds: this.#rounds.size })
+  /** Read-only timing for this exact Agent's current admitted native round. */
+  roundTiming = (agent: Agent | undefined, record: GoalRecord | undefined): Readonly<GoalRoundTiming> | undefined => {
+    if (this.#store === undefined) return undefined
+    const timing: GoalRoundTiming = { maxDurationMs: this.maxDurationMs }
+    if (agent === undefined || record === undefined) return Object.freeze(timing)
+    const round = this.#rounds.get(agent)
+    const observedAt = Date.now()
+    if (round === undefined || round.finishing || round.terminal !== undefined || round.run.dispatchedAt === undefined || round.run.execution !== undefined
+      || observedAt < round.run.intent.admission.issuedAt || observedAt >= round.run.intent.admission.expiresAt) return Object.freeze(timing)
+    try { this.#assertRound(round, false, false) } catch { return Object.freeze(timing) }
+    const task = round.run.intent.task.goal
+    if (acceptanceDigest(record.scope) !== acceptanceDigest(round.run.intent.scope)
+      || record.id !== task.id || record.definition.version !== task.definitionVersion || record.definition.digest !== task.definitionDigest
+      || record.native.sessionId !== String(agent.session.id) || record.native.sessionId !== task.sessionId
+      || record.native.goalId !== task.nativeGoalId || record.native.revision !== task.nativeRevision || record.native.phase !== 'active') return Object.freeze(timing)
+    return Object.freeze({ ...timing, active: Object.freeze({ runId: round.run.intent.runId, round: round.run.intent.admission.round,
+      issuedAt: round.run.intent.admission.issuedAt, expiresAt: round.run.intent.admission.expiresAt, observedAt,
+      remainingMs: round.run.intent.admission.expiresAt - observedAt }) })
+  }
   budgetState = (agent: Agent): { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal } | undefined => {
     if (this.#revoked.has(agent)) throw new Error('assistant-goals: cancelled execution cannot resume')
     const round = this.#rounds.get(agent)
@@ -435,11 +459,11 @@ export class GoalExecutionRuntime {
     }
   }
 
-  #assertRound(round: ActiveRound, terminal = false): void {
+  #assertRound(round: ActiveRound, terminal = false, consume = true): void {
     if (!this.#active || this.#sink !== round.registration || round.signal.aborted
       || this.#revoked.has(round.agent)
       || Date.now() >= round.run.intent.admission.expiresAt) throw new Error('assistant-goals: step admission expired')
-    const { scope, record } = this.current(round.agent)
+    const { scope, record } = this.current(round.agent, consume)
     this.assertDependencies(record)
     const exactRevision = record.native.revision === round.run.intent.task.goal.nativeRevision
     const terminalTransition = terminal && record.native.revision === round.run.intent.task.goal.nativeRevision + 1
