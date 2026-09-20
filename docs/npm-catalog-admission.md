@@ -51,7 +51,7 @@ After release completion, the existing `activation-plan` and `activate` commands
 
 The adapter integration tests join a real loopback TLS npm download, signed verification, catalog admission, independent receipt checking and replay. CLI tests verify exact-address staging and refusal of same-digest address substitution before executor invocation. Existing catalog crash/CAS tests remain the authority for the underlying journal mechanism.
 
-The engineering validation record records the completed Linux repository gate, focused checks, package contents, independent review and preceding commit's cross-platform CI.
+Current delivery status and verification limits are maintained in [RSI status](rsi-status.md). Raw gate logs and readback receipts stay local or in CI artifacts.
 
 After building Control Plane, the following probe reads a historical published package from real npm and admits it into a disposable local catalog:
 
