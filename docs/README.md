@@ -27,9 +27,11 @@
 - [持续成长设计](continuous-personal-assistant-growth.md)：反馈、偏好、评测指标和长期成功条件。
 - [目标编排](goal-orchestration-design.md)：原生执行、独立验收、持久唤醒与事件等待。
 - [固定任务评测](benchmark-implementation.md)、[执行策略评测](goal-strategy-evaluation.md)：固定供应与预算的比较方法及证据限制。
+- [技能比较配置](skill-comparison-profiles.md)、[独立留出验收](skill-holdout-authority.md)：原生重放、冻结后生成任务、签名验收与有限 canary。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)：可复现入口与当前验证边界。
 - [插件生态研究](dsh-personal-assistant-plugin-landscape.md)：历史方案与设计参考，当前包列表见[插件目录](../plugins/README.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[阻断回放](effect-blocked-replay.md)：当前发布/启用组件契约与验证限制。
+- [发布 adapter](npm-publish-adapter.md)、[独立发布验签](npm-release-verifier.md)、[catalog 准入](npm-catalog-admission.md)、[registry 读回](npm-registry-readback.md)：发布组件与可复现探针；[adapter 生命周期](control-plane-adapter-lifetime.md)说明进程归属、取消和清理边界。
 
 原始运行 JSON 和日志留本地或 CI artifacts；当前文档只记录可复现命令、验证结论及限制。过期交接快照和实施流水从 Git 历史查询。
 

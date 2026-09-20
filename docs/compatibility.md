@@ -81,7 +81,7 @@ Delivery Session 排他按同一 `0.1.2-rc.1` AgentLoop factory 的实际生命�
 
 Web Session 排他回归使用 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1` 的真实 `SessionController`，并在根开发依赖固定同版本的 AgentDefaultModel、SessionQuery 和 TypertRegistry；它们不作为 Delivery 的新运行时依赖发布。实际 `follow()` 在冷快照 yield 后通过原生 AgentLoop 恢复 Session，`prompt(request, signal)` 既能借用这个新 Agent，也能借用正在执行的同一 Agent。Delivery 通过持久归属检查拒绝前者，通过原生 `agent/inbox/inserted` / `claimed` 的 direct-user 输入取消后者的租约；不能把消息来源标签当作对任意 Host 插件的隔离。升级时必须重跑 cold follow、live prompt 取消后不重放、普通未托管 Web Session 正常执行三项回归。
 
-上述测试直接调用生产 Controller 与 Session persistence coordinator，模型为确定性 adapter，未验证浏览器认证、HTTP/WS 传输或完整 Web owner 产品入口。取消 Agent 不会自动释放 Web Controller 持有的会话生命周期，因此取消后不能假定 Delivery 已能重新取得该 Session。当前 Web 的身份关联、恢复准入和 teardown 还需一起接入；仅替换 create/prompt/cancel 无法覆盖内部历史恢复和 Typert Agent lookup。
+上述 Controller 测试使用确定性 adapter，其范围不包含浏览器认证或 HTTP/WS；独立浏览器验证入口见下文 Web owner。取消 Agent 不会自动释放 Web Controller 持有的会话生命周期，因此取消后不能假定 Delivery 已能重新取得该 Session。Web owner 已在 Controller 构造边界接入身份关联、恢复准入与 teardown；升级时须一起验证，不能只覆盖 create/prompt/cancel。
 
 共享 factory 生命周期依赖同一版本 `CreateAgentOptions.setup` / `ResumeAgentOptions.setup` 的 `AgentSetupCommit`、原生回滚等待及 memoized `AgentHandle.dispose()`。Delivery 包装器在 setup 内绑定 lease，并在调用方 commit 前后重查；冷加载也计为在途。通过 `ownerCtx.reflect.trace()` 调用共享原始 registry，保留调用方 owner fiber，支持后续在 Controller 构造处提供限定作用域的 registry facade，不能创建第二个 AgentRegistry/factory。调用方卸载时额外 await 原生 disposer；不根据 `agent/disposed` 通知单独推断 quiescent。此 seam 目前仍为内部实现，未向普通 Web 请求开放 owner 授权。
 
@@ -92,11 +92,11 @@ construction 自身的 owner effect 把卸载记入不可复位的组合取消�
 上述 factory 代次证明限定于官方 AgentLoop 向当前 AgentRegistry 注册 factory 的标准生命周期；其 setFactory effect 随 provider fiber 清理。AgentRegistry 没有公开私有 factory 槽的变更通知，不宣称追踪任意 Host 代码脱离该生命周期更换 factory 的行为。
 
 
-### 可选原生 Web owner（2026-09-07）
+### 可选原生 Web owner
 
 `assistant-web-owner` 的生产边界以 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1` 与 Cordis `4.0.2` 实际实现验证：保留原 Controller 的 Remote 原型元数据，在构造入口提供独立 fiber 的受限 Agent facade；`SessionSkillCatalog` 必须在其构造时加 owner gate，`api-session/*` 也必须在全局 ApiRemotes 转发前过滤。不能用简单 Proxy 包装原 registry（Cordis trace 可能还原原始服务），也不能在已运行 Controller 上仅覆盖 prompt。bundle patch 通过禁用原行再插入新行替换，`name` 本身不是可改写字段。
 
-Delivery 的新集成测试显式使用同版本 `dsh-api-gateway` 与 `dsh-api-remotes`，覆盖真实 Gateway 调用和两个 `$events` 消费者；不据此声称浏览器或 HTTP/WS 验收。新增包尚未发布，也未改动本机实际 `web` profile。
+Delivery 集成测试显式使用同版本 `dsh-api-gateway` 与 `dsh-api-remotes`，覆盖真实 Gateway 调用和两个 `$events` 消费者；浏览器和 HTTP/WS 由独立命令验证。`assistant-web-owner` 已包含在当前 `0.1.32` 发布基线中，安装、离线 owner 配置与验证入口见[插件说明](../plugins/assistant-web-owner/README.md)；发布记录见[发布账本](../release-manifest.json)。
 
 Web client 与工作区接线：本包构建期复用 `dsh-api-session-controller@0.1.2-rc.1` 的完整 browser factory，仅替换注册模块 ID，并携带原 MIT 文本；原 Host row 禁用后不会自动提供 client graph row，必须由本包声明 `dsh.client` 和 `./client`。构建校验上游版本、模块格式、依赖元数据，升级后须重新核验 UI 的模块引用。`dsh-workspace` 作为可选 Host peer，使用同版本 `resolveByPath/create/get` 与 canonical `Workspace.path`；不直接改写原生存储。每次创建重查配置中的 workspaceId/path，并交给原生 Controller 完成关联。配置路径与 realpath 不同会报错，不能悄悄改变 Delivery/Policy scope 键。
 
