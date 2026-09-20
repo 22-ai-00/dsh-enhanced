@@ -218,7 +218,7 @@ sourceBuild:
 
 使用有限审批器时还须显式配置 `grant.versioning: "patch"`。审批器独立核对基准与候选，manifest 除版本外的名称、依赖、脚本等字段必须完全一致，运行时版本文件只允许规范常量；生成的两个文件计入文件数及字节预算。未启用该 grant 时仍拒绝 manifest 修改。变更已有不可变 grant 配置须使用新 grant id；变更持久作业授权须使用新的 `sourceJobs.authorityId`。
 
-同一基准的多个候选会得到相同下一版本，不提供覆盖已发布版本的权限。后续采用流程须串行推进获准源码基准；现有 registry/catalog 冲突检查继续拒绝版本复用。此选项只准备可区分版本的候选，自动发布和采用仍需后续接线，不会为每次修复发布公共 npm 包。
+同一基准的多个候选会得到相同下一版本，不提供覆盖已发布版本的权限。后续采用流程须串行推进获准源码基准；现有 registry/catalog 冲突检查继续拒绝版本复用。此选项只准备可区分版本的候选，自动发布和采用需显式启用下述有限授权与执行配置，不会为每次修复发布公共 npm 包。
 
 `sourceBuild.profile` defaults to `standard`, whose existing maximum build timeout is 4 minutes and whose `/tmp` tmpfs is fixed at 32 MiB. An owner may explicitly set `profile: repository` for a full repository `pnpm check`; only that profile permits a timeout up to 30 minutes, memory up to 16 GiB, 16 CPUs, 1024 PIDs, an 8 GiB workspace tmpfs and a 4 GiB `/tmp` tmpfs (default 2 GiB). The repository profile explicitly permits execution from both bounded tmpfs mounts, needed by native build tools and temporary executable test fixtures; the standard profile retains Docker’s default no-exec mounts. The repository profile also fixes `CI=true` and `VITEST_MAX_WORKERS=1` inside the container. The caller cannot select a profile or increase these limits: its timeout is capped by the owner configuration. Cancellation, deadline expiry, output overflow, or Fiber disposal kills the preparation client, waits for archive/build processes, and proves named-container absence before any pending plan is stored. Interrupted builds are never automatically replayed; the optional durable Host lane below records their status and resource identity.
 
@@ -374,7 +374,7 @@ sourceReleaseExecution:
 
 review decision 仍由独立审查方产生：Host 只读 canonical、无 symlink、owner 私有目录下的 `<prId>.json`，其内容须符合现有 local adapter 的 `dsh-local-review-decision` 格式并精确绑定 PR id、base/head commit 和 PR evidence digest。配置的 `reviewDecisionRoot` 须与 review adapter 读取目录一致。缺失时保持 `awaiting-review`，不派发 review；格式错误或绑定变化则拒绝。独立审查方完成后调用 Host-only `advanceOwnerSourceRelease({ planId, signal?, expectedTrustDigest? })` 即可在当前进程继续，不要求重启。该入口不是模型工具；decision 由独立 Verifier 或外部审查方生成。部署须把 decision 写权限、审查输入和审查执行环境与候选写权限分开；同 UID 的目录权限本身不证明进程隔离。
 
-启用 `independentReview: true` 后，现有持久作业会在缺少 decision 时调用另行有限授权的 [Verifier 源码审查](../assistant-verifier/README.md#独立源码审查)。它使用固定 bare Git 仓库和新的无工具原生 Agent，默认继承来源任务的确切模型，也可固定审查模型。Verifier 的 decision root 必须与这里相同；服务或模型不可用时在 PR 前等待，依赖移除会停止对应作业。审查完成后仍通过原有签名 review adapter 和八阶段检查。后续精确制品采用授权、activation 和普通任务版本观察仍待接通；这里的 publish 仅面向获准本地 registry，不上传公共 npm。
+启用 `independentReview: true` 后，现有持久作业会在缺少 decision 时调用另行有限授权的 [Verifier 源码审查](../assistant-verifier/README.md#独立源码审查)。它使用固定 bare Git 仓库和新的无工具原生 Agent，默认继承来源任务的确切模型，也可固定审查模型。Verifier 的 decision root 必须与这里相同；服务或模型不可用时在 PR 前等待，依赖移除会停止对应作业。审查完成后仍通过原有签名 review adapter 和八阶段检查。后续精确制品采用与普通任务版本观察已有下述可选配置，完整部署仍待验收；这里的 publish 仅面向获准本地 registry，不上传公共 npm。
 
 schema 18 在 adapter 派发前持久登记 operation claim；验签和子进程执行期间不持有 SQLite 写事务。当前 owner 来源、取消、trust 和阶段 CAS 在执行边界及回执应用前重查。超时、崩溃或响应丢失后，已 claim 且无回执的 operation 保持 unknown，重启不重新执行。已完成回执直接接续应用，catalog 已写而账本未确认时也不重新计算旧 preview。独立取得精确签名回执后，可通过 `advanceOwnerSourceRelease({ planId, receipt, ... })` 对账并继续；它只验签回执，不重新运行丢失响应的动作。无法取得可信回执时保留 unknown。
 
@@ -417,6 +417,8 @@ handoff:
 ```yaml
 adoptionCoordinator:
   coordinatorId: assistant-deployer
+  budgetId: adoption-coordinator-runs
+  budgetAmount: 1
   scope:
     workspace: /srv/dsh/workspace
     preset: assistant
@@ -425,7 +427,7 @@ adoptionCoordinator:
   timeoutMs: 300000
 ```
 
-协调器必须运行在另一进程和独立 systemd unit；它不能同时配置目标的 `sourceJobs`、`sourceAdoptions`、`runtimeObserver` 或 `replayEndpoint`。只需连接所在 Host 的 Automations，复用原生每分钟调度、owner/Policy 和预算，每轮至多推进一个交接；空队列仍有扫描调度开销。`coordinatorId` 是绑定标识，不提供 OS 隔离或替代 ledger 文件权限。停用调度或耗尽原生预算也会暂停自动恢复，恢复前需先核对未知外部操作。
+协调器必须运行在另一进程和独立 systemd unit；它不能同时配置目标的 `sourceJobs`、`sourceAdoptions`、`runtimeObserver` 或 `replayEndpoint`。只需连接所在 Host 的 Automations，复用原生每分钟调度、owner/Policy 和预算，每轮至多推进一个交接；空队列仍消耗一次配置的调度预算。`budgetId/budgetAmount` 必填，对应 Policy budget 使用 `automation-runs` metric 与有限周期额度，建议 `subject` scope，以稳定的协调器 automation id 聚合。Policy 账本按 scope、metric 和周期计量，仅换 budget id 不会分池；同一 Host 的其他任务应明确选择共用或分开额度。旧配置升级时须补齐，不能打开 `allowUnbudgetedExecution` 代替。`coordinatorId` 是绑定标识，不提供 OS 隔离或替代 ledger 文件权限。停用调度或耗尽原生预算也会暂停自动恢复，恢复前需先核对未知外部操作。
 
 协调器沿现有安装和签名检查路径推进，到 `commit-pending` 停止。目标恢复后由其原生源码 continuation 重验当前 owner、反馈和信任，再完成启用；已撤销或过期交接只能进入既有回退。目标卸载不会撤销已交出的任务；未知 Host 派发仍须精确签名对账，不能自动重派。目标离线期间无法即时获知反馈纠正，允许暴露的最长授权窗口由上述期限限制；回退完成时间仍取决于协调器可用性和签名服务。
 
@@ -498,10 +500,12 @@ Host 可显式使用 `EffectBlockedReplayRuntime`，复用当前 Loader、ToolRu
 
 ### 真实使用中的部署观察
 
-目标 Host 可启用下面的可选项，依赖同一 profile 的 `foregroundDeployments`、Delivery、Evaluation 和 Automations。调度由原生 Automations 的每分钟 cron 执行；配置期间扫描至多最近 1,000 条有效部署任务，不调用模型，不产生新的 AgentLoop。该窗口之外的任务不参与观察。
+目标 Host 可启用下面的可选项，依赖同一 profile 的 `foregroundDeployments`、Delivery、Evaluation 和 Automations。调度由原生 Automations 的每分钟 cron 执行；配置期间扫描至多最近 1,000 条有效部署任务，不调用模型，不产生新的 AgentLoop。该窗口之外的任务不参与观察。`budgetId/budgetAmount` 必填，对应有限周期的 Policy `automation-runs` 预算，建议 `subject` scope，以稳定观察任务 id 计量，避免与模型复盘共用 scope/metric/周期；仅换 budget id 不会分池。空队列也消耗一次调度额度。此预算与签名器的 `maximumObservations` 是两种独立限制。预算耗尽会暂停观察签发及其自动回退接续，原恢复义务仍保留；升级旧配置须补齐预算。
 
 ```yaml
 taskObservations:
+  budgetId: plugin-task-observation-runs
+  budgetAmount: 1
   policy:
     id: owner-plugin-watch-1
     expiresAt: 1790000000000 # 替换为有限授权截止时间（毫秒）

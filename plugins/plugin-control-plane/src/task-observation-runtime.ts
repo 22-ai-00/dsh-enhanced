@@ -32,7 +32,7 @@ export function validateTaskObservationConfig(config: TaskObservationConfig): vo
   const integer = (value: number, min: number, max: number): boolean => Number.isSafeInteger(value) && value >= min && value <= max
   const text = (value: string): boolean => typeof value === 'string' && value.length > 0 && value.length <= 4096
     && value.normalize('NFC').trim() === value && !/[\p{Cc}]/u.test(value)
-  if (!exact(config, 'authority,policy,profilePath,scope,timeoutMs')
+  if (!exact(config, 'authority,budgetAmount,budgetId,policy,profilePath,scope,timeoutMs')
     || !exact(config.policy, 'expiresAt,id,lookbackMs,maximumChecks,maximumObservations,minimumChecks')
     || !exact(config.scope, 'ownerRouteId,preset,principalId,workspace')
     || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(config.policy.id)
@@ -40,6 +40,7 @@ export function validateTaskObservationConfig(config: TaskObservationConfig): vo
     || !integer(config.policy.maximumObservations, 1, 1000)
     || !integer(config.policy.minimumChecks, 1, 32) || !integer(config.policy.maximumChecks, config.policy.minimumChecks, 32)
     || !integer(config.policy.lookbackMs, 1000, 30 * 86_400_000) || !integer(config.timeoutMs, 1000, 300_000)
+    || !text(config.budgetId) || config.budgetId.length > 128 || !integer(config.budgetAmount, 1, 10_000_000)
     || !Object.values(config.scope).every(text) || !text(config.profilePath)
     || ![config.profilePath, config.scope.workspace].every(path => isAbsolute(path) && resolve(path) === path)) throw new Error('invalid taskObservations configuration')
   validateSourceApprovalClientConfig(config.authority)
@@ -221,10 +222,10 @@ export class TaskObservationRuntime {
   }
 
   private definition(): HostAutomationDefinition {
-    const { scope, timeoutMs } = this.options.config
+    const { scope, timeoutMs, budgetId, budgetAmount } = this.options.config
     return { name: 'Observe deployed plugin task feedback', schedule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
       workspace: scope.workspace, agentPreset: scope.preset, timeoutMs, misfire: { kind: 'latest' }, overlap: 'skip',
-      retrySafety: 'never', maxRetries: 0, principal: scope.principalId,
+      retrySafety: 'never', maxRetries: 0, principal: scope.principalId, budgetId, budgetAmount,
       execution: { kind: 'host', executorId: EXECUTOR, executorContractVersion: 1, runbookId: 'observe', runbookVersion: 1,
         catalogDigest: CATALOG, targetScope: { workspace: scope.workspace, preset: scope.preset },
         scopeDigest: controlPlaneDigest([scope.workspace, scope.preset]), ownerRouteId: scope.ownerRouteId, activationNonce: this.activationNonce } }

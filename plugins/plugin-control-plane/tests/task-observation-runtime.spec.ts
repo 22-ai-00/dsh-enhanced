@@ -7,7 +7,7 @@ import type { HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-e
 import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import * as release from '../src/release.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
-import { TaskObservationRuntime } from '../src/task-observation-runtime.ts'
+import { TaskObservationRuntime, validateTaskObservationConfig } from '../src/task-observation-runtime.ts'
 import { Ed25519PostActivationObservationAuthority, postActivationEvidenceDigest, postActivationObservationSigningPayload } from '../src/post-activation.ts'
 import type { TaskObservationBatch } from '../src/task-observation-types.ts'
 import { foregroundDeploymentFixture, cleanupForegroundDeploymentFixtures } from './helpers/foreground-deployment.ts'
@@ -16,6 +16,16 @@ vi.mock('../src/release.ts', async original => ({ ...await original<typeof relea
 const runtimes: TaskObservationRuntime[] = []
 const evaluations: EvaluationStore[] = []
 afterEach(async () => { for (const runtime of runtimes.splice(0)) await runtime.close(); for (const store of evaluations.splice(0)) store.close(); await cleanupForegroundDeploymentFixtures() })
+
+test('requires a bounded native automation budget before task-observation startup', () => {
+  const valid = { policy: { id: 'finite-policy', expiresAt: Date.now() + 300_000, maximumObservations: 3, minimumChecks: 1, maximumChecks: 3, lookbackMs: 60_000 },
+    scope: { ownerRouteId: 'owner-route', principalId: 'owner', workspace: '/workspace', preset: 'primary' }, profilePath: '/workspace/profiles/primary', timeoutMs: 30_000,
+    budgetId: 'observation-runs', budgetAmount: 1, authority: { executable: { path: '/tmp/pinned-authority', sha256: 'f'.repeat(64) }, configPath: '/tmp/authority.json', timeoutMs: 1_000 } }
+  expect(() => validateTaskObservationConfig(valid)).not.toThrow()
+  const { budgetId: _budgetId, ...missingBudget } = valid
+  expect(() => validateTaskObservationConfig(missingBudget as never)).toThrow('invalid taskObservations')
+  expect(() => validateTaskObservationConfig({ ...valid, budgetAmount: 0 })).toThrow('invalid taskObservations')
+})
 
 async function fixture(status: 'achieved' | 'not-achieved' = 'achieved') {
   const f = await foregroundDeploymentFixture()
@@ -60,7 +70,7 @@ async function fixture(status: 'achieved' | 'not-achieved' = 'achieved') {
   const request = vi.fn(async (batch: TaskObservationBatch) => signBatch(batch))
   const config = { policy: { id: 'finite-policy', expiresAt: Date.now() + 300_000, maximumObservations: 3,
     minimumChecks: 1, maximumChecks: 3, lookbackMs: 60_000 }, scope: { ownerRouteId: owner.authorityId,
-    principalId: owner.principalId, workspace: f.root, preset: 'primary' }, profilePath: f.plan.target.profilePath, timeoutMs: 30_000,
+    principalId: owner.principalId, workspace: f.root, preset: 'primary' }, profilePath: f.plan.target.profilePath, timeoutMs: 30_000, budgetId: 'observation-runs', budgetAmount: 3,
     authority: { executable: { path: '/tmp/pinned-authority', sha256: 'f'.repeat(64) }, configPath: '/tmp/authority.json', timeoutMs: 1000 } }
   const options: ConstructorParameters<typeof TaskObservationRuntime>[0] = { config, trust, store: new ControlPlaneStore({ path: f.plan.ledger.path }),
     evaluation: { canonicalHostScope: value => value as never,
@@ -80,7 +90,7 @@ async function fixture(status: 'achieved' | 'not-achieved' = 'achieved') {
     definitionHash: 'definition-hash', catalogDigest: executor.descriptor.catalogDigest, ownerRouteId: owner.authorityId,
     principal: owner.principalId, targetScope: { workspace: f.root, preset: 'primary' }, signal: new AbortController().signal } as HostAutomationExecutorInput)
   return { ...f, record, source, owner, runtime, makeRuntime, execute, request, signBatch, rollback, unregister, unsubscribe,
-    scheduleStatus: () => scheduleStatus, lane: controlPlaneDigest({ scope: config.scope, profilePath: config.profilePath }), withdraw: () => {
+    scheduleStatus: () => scheduleStatus, definition: () => definition, lane: controlPlaneDigest({ scope: config.scope, profilePath: config.profilePath }), withdraw: () => {
       evaluation.append(envelope('unknown', 'withdraw'), { principalRecordId: owner.principalRecordId, principalVersion: 1,
         action: 'withdraw', operationId: 'withdraw', expectedVersion: 1, previousStatus: status })
       source = { ...source, canonical: evaluation.getForegroundLearningProjection(source.canonical.scope, f.task.inboxId)! }
@@ -90,6 +100,7 @@ async function fixture(status: 'achieved' | 'not-achieved' = 'achieved') {
 
 test('native cron signs current distinct tasks once; restart does not count completed votes again', async () => {
   const f = await fixture()
+  expect(f.definition()).toMatchObject({ budgetId: 'observation-runs', budgetAmount: 3 })
   expect(f.store.listTaskObservations(f.lane)).toHaveLength(1)
   expect((await f.execute()).outcome).toBe('succeeded')
   expect(f.store.getActivationWatch(f.plan.id).healthyObservations).toBe(1)

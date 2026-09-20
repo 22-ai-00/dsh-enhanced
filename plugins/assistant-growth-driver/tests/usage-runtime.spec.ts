@@ -12,15 +12,16 @@ import { UsageLearningRuntime, type UsageReviewInput, type UsageReviewResult } f
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { vi.useRealTimers(); for (const dispose of cleanup.splice(0).reverse()) await dispose() })
-async function fixture(options: { fixed?: boolean; missing?: boolean; budget?: boolean; maxPending?: number } = {}) {
+async function fixture(options: { fixed?: boolean; missing?: boolean; budget?: boolean; maxPending?: number; scanBudgetLimit?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'growth-usage-'))
   const ctx = new Context()
   const scope = { workspace: root, preset: 'primary', principalId: 'owner', ownerRouteId: 'owner-route' }
   const owner = { receiptVersion: 2 as const, authorityId: scope.ownerRouteId, authorityHash: 'a'.repeat(64),
     principalId: scope.principalId, principalRecordId: 'record', principalVersion: 1,
     workspace: root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }
-  new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), budgets: options.budget === false ? [] : [
-    { id: 'growth-budget', metric: 'automation-runs', limit: 10, periodMs: 60_000, scope: 'global' }], rules: [
+  const policy = new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), budgets: [
+    { id: 'growth-scan-budget', metric: 'automation-runs', limit: options.scanBudgetLimit ?? 10, periodMs: 86_400_000, scope: 'subject' },
+    ...(options.budget === false ? [] : [{ id: 'growth-budget', metric: 'automation-runs', limit: 10, periodMs: 86_400_000, scope: 'global' as const }])], rules: [
     { id: 'usage-reconcile', effect: 'allow', subject: { kind: 'background', id: 'assistant-growth-usage', workspace: root, principal: 'owner' },
       actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
     { id: 'usage-execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: root, principal: 'owner' },
@@ -44,7 +45,7 @@ async function fixture(options: { fixed?: boolean; missing?: boolean; budget?: b
   }
   const config = normalizeConfig({ enabled: true, scope, budgetId: 'growth-budget', budgetAmount: 1,
     ...(options.fixed ? { provider: 'fixed', model: 'repair' } : {}),
-    usageLearning: { enabled: true, databasePath: join(root, 'usage.sqlite'), maxPending: options.maxPending ?? 16 } })
+    usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(root, 'usage.sqlite'), maxPending: options.maxPending ?? 16 } })
   const review = vi.fn<(input: UsageReviewInput) => Promise<UsageReviewResult>>(async input => { input.assertCurrent(); return 'reviewed' })
   const runtimes: UsageLearningRuntime[] = []
   const create = () => {
@@ -65,7 +66,7 @@ async function fixture(options: { fixed?: boolean; missing?: boolean; budget?: b
     for (let i = 0; i < 3; i += 1) { await automations.tick(); await automations.whenIdle() }
   }
   cleanup.push(async () => { for (const runtime of runtimes) await runtime.close(); producer.close(); await ctx.fiber.restart(); await rm(root, { recursive: true, force: true }) })
-  return { ctx, config, owner, evaluation, automations, sourceModel, review, create, append, tick }
+  return { ctx, config, owner, policy, evaluation, automations, sourceModel, review, create, append, tick }
 }
 
 test('native Automations dispatches one durable review of real canonical feedback and never replays it', async () => {
@@ -131,6 +132,10 @@ test('the native periodic scan discovers later cross-process feedback without a 
   f.append('later')
   const now = Date.now(); vi.setSystemTime(now + 65_000)
   await f.automations.tick(); await f.automations.whenIdle()
+  const scanId = f.automations.listSystemOwned({ owner: 'assistant-growth-usage' })
+    .find(row => row.automationId.startsWith('usage-scan-'))!.automationId
+  expect(f.automations.inspectSystemOwned({ owner: 'assistant-growth-usage', automationId: scanId })
+    .latestTerminalRuns.production).toMatchObject({ status: 'succeeded', diagnostic: { budgetSettlementState: 'finalized' } })
   expect(runtime.health().counts).toEqual({ queued: 1 })
   vi.setSystemTime(now + 67_000)
   await f.automations.tick(); await f.automations.whenIdle()
@@ -140,9 +145,44 @@ test('the native periodic scan discovers later cross-process feedback without a 
 
 test('automatic learning requires its owner scope, budget and native scheduling', () => {
   expect(normalizeConfig({}).usageLearning.enabled).toBe(false)
-  expect(() => normalizeConfig({ usageLearning: { enabled: true, databasePath: '/tmp/usage.sqlite' } })).toThrow(/usageLearning/)
+  expect(() => normalizeConfig({ usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: '/tmp/usage.sqlite' } })).toThrow(/usageLearning/)
   expect(() => normalizeConfig({ enabled: true, scope: { workspace: '/work', preset: 'p', principalId: 'u', ownerRouteId: 'r' },
-    budgetId: 'b', budgetAmount: 1, intervalMs: 1000, usageLearning: { enabled: true, databasePath: '/tmp/usage.sqlite' } })).toThrow(/intervalMs/)
+    budgetId: 'b', budgetAmount: 1, intervalMs: 1000, usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: '/tmp/usage.sqlite' } })).toThrow(/intervalMs/)
+})
+
+test.each([
+  {}, { scanBudgetId: 'scan' }, { scanBudgetAmount: 1 },
+  { scanBudgetId: ' ', scanBudgetAmount: 1 }, { scanBudgetId: 'scan', scanBudgetAmount: 0 },
+  { scanBudgetId: 'scan', scanBudgetAmount: 1.5 }, { scanBudgetId: 'scan', scanBudgetAmount: 10_000_001 },
+])('requires an explicit valid discovery budget: %j', scan => {
+  expect(() => normalizeConfig({ enabled: true,
+    scope: { workspace: '/work', preset: 'p', principalId: 'u', ownerRouteId: 'r' },
+    budgetId: 'reviews', budgetAmount: 1,
+    usageLearning: { enabled: true, databasePath: '/tmp/usage.sqlite', ...scan },
+  })).toThrow()
+})
+
+test('native discovery stops at its budget without spending the review allocation', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-09-20T00:00:10Z'))
+  const f = await fixture({ scanBudgetLimit: 1 }); const runtime = f.create()
+  const reserve = vi.spyOn(f.policy, 'reserve')
+  const scanId = f.automations.listSystemOwned({ owner: 'assistant-growth-usage' })[0]!.automationId
+  const latest = () => f.automations.inspectSystemOwned({ owner: 'assistant-growth-usage', automationId: scanId })
+    .latestTerminalRuns.production
+  vi.setSystemTime(new Date('2026-09-20T00:01:10Z'))
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(latest()).toMatchObject({ status: 'succeeded', diagnostic: { budgetSettlementState: 'finalized' } })
+  vi.setSystemTime(new Date('2026-09-20T00:02:10Z'))
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(latest()).toMatchObject({ diagnostic: { budgetSettlementState: 'not-reserved' } })
+  expect(reserve.mock.results.at(-1)).toMatchObject({ type: 'throw', value: expect.objectContaining({ code: 'budget-exhausted' }) })
+  expect(f.review).not.toHaveBeenCalled()
+  // A local trusted notification can still queue a review using its separate allocation.
+  f.append('local'); runtime.scan()
+  vi.setSystemTime(new Date('2026-09-20T00:02:12Z'))
+  await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.review).toHaveBeenCalledTimes(1)
 })
 
 test('provider disposal aborts and drains a running review before closing its store', async () => {

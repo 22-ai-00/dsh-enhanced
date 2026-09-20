@@ -18,6 +18,8 @@ export interface AdoptionCoordinatorConfig {
   coordinatorId: string
   scope: { workspace: string; preset: string; principalId: string; ownerRouteId: string }
   timeoutMs: number
+  budgetId: string
+  budgetAmount: number
 }
 
 export function validateAdoptionCoordinatorConfig(value: unknown): asserts value is AdoptionCoordinatorConfig {
@@ -28,11 +30,14 @@ export function validateAdoptionCoordinatorConfig(value: unknown): asserts value
     && Object.keys(record).sort().join(',') === [...keys].sort().join(',')
   const text = (item: unknown) => typeof item === 'string' && item.length > 0 && item.length <= 4096
     && item.normalize('NFC').trim() === item && !/[\p{Cc}]/u.test(item)
-  if (!exact(config, ['coordinatorId', 'scope', 'timeoutMs']) || !exact(scope, ['workspace', 'preset', 'principalId', 'ownerRouteId'])
+  if (!exact(config, ['coordinatorId', 'scope', 'timeoutMs', 'budgetId', 'budgetAmount']) || !exact(scope, ['workspace', 'preset', 'principalId', 'ownerRouteId'])
     || !text(config.coordinatorId) || typeof config.coordinatorId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(config.coordinatorId)
     || !Object.values(scope).every(text) || typeof scope.workspace !== 'string' || !isAbsolute(scope.workspace)
     || resolve(scope.workspace) !== scope.workspace || !Number.isSafeInteger(config.timeoutMs) || typeof config.timeoutMs !== 'number'
-    || config.timeoutMs < 1_000 || config.timeoutMs > 300_000) {
+    || config.timeoutMs < 1_000 || config.timeoutMs > 300_000 || !text(config.budgetId)
+    || typeof config.budgetId !== 'string' || config.budgetId.length > 128
+    || !Number.isSafeInteger(config.budgetAmount) || typeof config.budgetAmount !== 'number'
+    || config.budgetAmount < 1 || config.budgetAmount > 10_000_000) {
     throw new Error('plugin-control-plane: invalid adoption coordinator configuration')
   }
 }
@@ -190,10 +195,10 @@ export class AdoptionCoordinatorRuntime {
     this.options.assertCurrent()
   }
   private definition(): HostAutomationDefinition {
-    const { scope, timeoutMs } = this.options.config
+    const { scope, timeoutMs, budgetId, budgetAmount } = this.options.config
     return { name: 'Coordinate plugin adoption handoffs', schedule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
       workspace: scope.workspace, agentPreset: scope.preset, timeoutMs, misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0,
-      principal: scope.principalId, execution: { kind: 'host', executorId: EXECUTOR, executorContractVersion: 1, runbookId: 'coordinate', runbookVersion: 1,
+      principal: scope.principalId, budgetId, budgetAmount, execution: { kind: 'host', executorId: EXECUTOR, executorContractVersion: 1, runbookId: 'coordinate', runbookVersion: 1,
         catalogDigest: CATALOG, targetScope: { workspace: scope.workspace, preset: scope.preset }, scopeDigest: controlPlaneDigest([scope.workspace, scope.preset]),
         ownerRouteId: scope.ownerRouteId, activationNonce: this.activationNonce } }
   }

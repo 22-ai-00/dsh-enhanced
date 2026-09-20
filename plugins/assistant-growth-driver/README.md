@@ -1,6 +1,6 @@
 # @dsh-enhanced/assistant-growth-driver
 
-默认关闭的有界后台成长驱动。可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；启用源码轨后可准备已有 gap 对应的插件修改提案。当前自动入口已接通，修复后的自主采用与持续观察仍需后续接线，`reviewed` 仅表示本次成长复盘结束。
+默认关闭的有界后台成长驱动。可通过 `usageLearning` 让真实前台任务结果自动触发持久成长作业，或由 Host 显式唤醒。Agent 回顾 owner 的已验收成功、沉淀 pending 技能候选；启用源码轨后可准备已有 gap 对应的插件修改提案。当前自动入口已接通，修复后的有限采用与持续观察需另配 Control Plane；可安装部署与独立行为验收仍未贯通，`reviewed` 仅表示本次成长复盘结束。
 
 同一插件内还有**第二条、独立开关**的学习轨 `workflowOwnerAnchored`（默认关闭）：它不起模型、不触网，只在本地枚举最近完成的 owner-root goal，把 locator（不含任何 prompt/步骤/验收结论）交给 `assistant-delivery`；由 Delivery 自己再调 goals 的 `inspectOwnerVerifiedWorkflowSource` 独立复核（owner-root、whole-goal succeeded 且 quiescent、cwd/preset 精确匹配），只接受可诚实归约为**单步零工具 agent-turn** 的 goal，通过后经 content-free trace v2 沉淀为 workflow growth candidate，并由 Growth 以 **paused** automation 落库待 owner 批准。自由 objective 无法跨任务聚齐重复门，故该轨**单条即沉淀**：每个独立复核通过的成功 goal 产一条独立 paused 候选。候选带冻结的**占位 cron**（`0 0 29 2 *` UTC，由 store 的激活门阻断执行）；automations 在 store 层 fail-closed——Growth 所属且仍带占位 schedule 的 workflow 无法经 owner 批准 `resume` 或系统 reconcile 转 active，必须先由 owner 显式做一次 schedule mutation（换真 cron）。该轨同样零 approve/activate/install。
 
@@ -161,11 +161,15 @@ budgetAmount: 1
 usageLearning:
   enabled: true
   databasePath: /absolute/private/assistant-growth.sqlite
+  scanBudgetId: growth-discovery-runs
+  scanBudgetAmount: 1
   maxPending: 16
   lookbackMs: 86400000
 ```
 
 保留前文 `scope` 和模型/工具预算；按需保留源码轨配置。安装并挂载 `assistant-evaluation` 与 `assistant-automations`，启用 Automations scheduler。Policy 需允许 background 主体 `assistant-growth-usage` 对相同 workspace/principal 的 `automation:*` 执行 `reconcile`，并允许对应后台作业的 `execute`。使用全局或 owner 聚合的周期预算限制持续成长总消耗；每个 review 由原生 Automations 预留一次预算，driver 不重复扣取。已有 `growth_*` 与可选 `plugin_source_*` 工具规则仍适用。
+
+`scanBudgetId/scanBudgetAmount` 是启用时的必填配置；对应 Policy budget 的 metric 为 `automation-runs`，扫描建议用 `subject` scope（每个 owner scope 的 scan automation id 稳定）。每分钟扫描即使队列为空也需要预算；例如每天最多 1,440 次扫描可配置 `limit: 1440, periodMs: 86400000, scope: subject`。模型复盘继续使用顶层 `workspace/global` 聚合预算。Policy 账本按 scope、metric 和周期计量，仅换 budget id 不会分开额度；扫描用 `subject`、复盘用 `workspace/global` 可以避免扫描占用模型额度。扫描预算耗尽暂停跨进程发现，同进程通知仍可登记候选，但 review 仍须通过自己的预算；不要开启 `allowUnbudgetedExecution` 绕过配置。升级已启用配置须补齐扫描预算，旧排队作业因配置摘要变化停止，不自动重放。
 
 同进程 Evaluation 变化即时扫描，原生每分钟 scan 负责重启及其他进程写入的恢复；scan 自身不调用模型。只处理精确 owner、已结束且 quiescent、未截断的前台可信结果（独立 Verifier 或已认证 owner 反馈），内置 Delivery 普通对话可在回复具体消息的 `/feedback not-achieved` 后触发，无需预先配置任务验收 profile；单纯模型结束不会生成可信结果。排除 Automation/后台成长自己的结果，避免递归触发。缺模型快照或多请求模型不一致且没有固定覆盖时不发起作业。相同 canonical 修订只接纳一次；纠正/撤回使旧排队作业失效，运行中的作业在模型/工具边界重查来源。原始记录和评价仍由 Evaluation 持有。
 
@@ -173,7 +177,7 @@ usageLearning:
 
 同时启用 `pluginSourceProposals` 后，可信 `not-achieved` 前台结果会在模型启动前自动登记 Control Plane 私有 gap，无需预先人工登记。Host 重新读取 Delivery 来源，在 Evaluation writer fence 内记录 owner、任务修订和来源摘要；gap 不保存任务原文，默认 ROI 为未知占位值 0。成功、unknown、撤回、未结束及截断来源不产生失败 gap。新控制面接口缺失时失败关闭，不读取全局手工 gap。
 
-源码检查、最终计划提交及 durable job 的排队、恢复和执行都重新核对来源。完整 owner receipt 固定后，`/new` 导致 binding/generation 变化也会停止旧任务。纠正或撤回后保留历史引用，禁止旧来源继续产出计划；旧 pending plan 的自动授权采用与持续观察尚待接通。此能力只产生有检查证据的 pending plan，不会自行发布或启用插件。
+源码检查、最终计划提交及 durable job 的排队、恢复和执行都重新核对来源。完整 owner receipt 固定后，`/new` 导致 binding/generation 变化也会停止旧任务。纠正或撤回后保留历史引用，禁止旧来源继续产出计划。Driver 负责候选生成；后续有限审批、发布、独立审查、采用与真实任务观察由另行配置的 [Control Plane](../plugin-control-plane/README.md) 接续。组件已接线，可安装部署与独立行为验收尚未贯通，不能据此宣称生产自迭代已完成。
 
 ## 权限与数据
 

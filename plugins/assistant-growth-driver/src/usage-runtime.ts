@@ -165,7 +165,8 @@ export class UsageLearningRuntime {
         : { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
       workspace: scope.workspace, agentPreset: scope.preset, timeoutMs: job ? this.config.maxDurationMs + 5000 : 30_000,
       misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0, principal: scope.principalId,
-      ...(job ? { budgetId: this.config.budgetId!, budgetAmount: this.config.budgetAmount! } : {}),
+      ...(job ? { budgetId: this.config.budgetId!, budgetAmount: this.config.budgetAmount! }
+        : { budgetId: this.config.usageLearning.scanBudgetId!, budgetAmount: this.config.usageLearning.scanBudgetAmount! }),
       execution: { kind: 'host', executorId: EXECUTOR, executorContractVersion: 1, runbookId: job ? 'review' : 'scan',
         runbookVersion: 1, catalogDigest: CATALOG, targetScope: { workspace: scope.workspace, preset: scope.preset },
         scopeDigest: acceptanceDigest([scope.workspace, scope.preset]), ownerRouteId: scope.ownerRouteId,
