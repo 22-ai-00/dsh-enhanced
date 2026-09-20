@@ -390,6 +390,8 @@ pnpm --dir plugins/assistant-delivery pack --dry-run
 
 旧 foreground receipt 未保存 principal version：仅当前仍为同一 record 的初始 v1 身份可修订；身份已更新时保守拒绝继承旧判断修订权。新记录完整保存 record+version。
 
+Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果绑定到精确 owner。它核对当前 route、原始 Inbox/binding、已验收执行和 principal record/version，再区分独立 Verifier 与 owner 的纠正/撤回；只有核对成功才返回来源 Session、最多 4096 字符的原任务正文及 canonical receipt。`/new` 前的同 owner 任务可被识别，主体身份变更不能继承旧任务权限。该接口仅供发现前台学习来源，尚不自动调度修复，也不授予执行或采用权限；消费者写入前仍须使用 Evaluation 的 canonical writer fence。
+
 
 ## 原生 Web owner 接入
 

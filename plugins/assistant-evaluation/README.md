@@ -169,6 +169,8 @@ Goals 的独立 Verifier v2 回执使用 `goal-step` 任务身份，按 `goal:<g
 
 Host 可通过 `getTrustedAutomationRunLearningProjection({ scope, runId })` 精确读取一个 run 的 ready canonical learning projection，无需扫描受 limit 限制的原始 audit 列表。不存在或 objective-conflict 时不返回证明；返回值沿用同一 canonical projection、revision、digest 和 scope watermark。调用方须检查 disposition 和执行/目标状态，并在产生依赖该证据的写入时使用 `withTrustedLearningWriterFence`。
 
+`listTrustedTaskLearningProjections({ scope, after, limit })` 提供同一 scope 内当前 trusted canonical heads 的可重启增量读取，包含 retract；同一任务的中间修订可能合并。cursor 必须带该 exact scope key 与已观察 watermark，limit 为 1–100；future、跨 scope 或畸形 cursor 被拒绝。每个 canonical 更新在同一 SQLite writer transaction 更新 head 与 scope watermark；分页读取使用一致快照。schema 12 为既有可信任务一次性分配新 watermark，保留原证据和 canonical version/digest；后续重启不重复分配。scope 不证明 owner 归属；`inspectTrustedTaskOwnerRevision()` 只返回当前 canonical objective 对应的精确 principal record/version 最新修订。消费者仍须独立确认任务 owner，并在写入前用 receipt 校验与 writer fence；读取接口不授予执行权限。
+
 `withTrustedCanonicalLearningWriterFence` 为依赖 Evaluation canonical 状态本身的 Host 写入提供同样的 scope watermark、精确 task tuple 和同步写锁校验，但不要求投递给 Evolution 的 outbox 已完成。`withTrustedLearningWriterFence` 继续为 Evolution 依赖方保留 projection-pending gate；两者都不会代替或伪造 outbox 投递。
 
 `getTrustedGoalOutcomeLearningProjection({ scope, assessmentId })` 是 whole-goal 消费者的 Host-only 精确读取入口。它只接受 `canonicalEvaluationHostScope()` 产生的 token，并且只查询相同 canonical workspace/preset 下 subject 恰为 `goal-outcome/<assessmentId>` 的当前 projection；缺失或跨 scope 返回 `undefined`。返回的 `version`、`digest`、`disposition` 与 scope watermark 是 Evaluation 当前状态，不把原始 immutable Verifier receipt 永久视为事实。该入口只证明 assessment 的 canonical 状态；owner、Goal、Session、run 和 outcome profile 的关联仍须由调用方从 Goals 的当前 Host snapshot 独立证明。

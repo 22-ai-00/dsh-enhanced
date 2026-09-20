@@ -8,6 +8,7 @@ export { AssistantDeliveryService, Config, DeliveryAdapterRegistryStoppedError, 
 export type {
   CommitOwnerAnchoredWorkflowTraceServiceResult,
   DeliveryInboundRuntime,
+  OwnerForegroundLearningTask,
 } from './service.js'
 export type {
   DeliveryGoalWakeInput, DeliveryGoalWakeResult, OwnerGoalOutcomeFeedbackLocator,

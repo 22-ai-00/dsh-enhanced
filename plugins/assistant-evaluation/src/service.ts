@@ -39,6 +39,7 @@ import type {
   TrustedVerifierEvaluationRegistration,
   TrustedOutcomeReceipt,
   TrustedTaskLearningProjectionReceipt,
+  TrustedTaskLearningProjectionFeedPage,
 } from './types.js'
 import {
   executionStatuses,
@@ -643,6 +644,27 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     this.assertActive()
     const scope = exactEvaluationHostScope(input.scope)
     return this.store.getTaskLearningProjection(scope, hostOutcomeId(input.outcomeId))
+  }
+
+  listTrustedTaskLearningProjections(input: {
+    scope: EvaluationHostScope
+    after?: { scopeKey: string; watermark: number }
+    limit?: number
+  }): TrustedTaskLearningProjectionFeedPage {
+    this.assertActive()
+    return this.store.listTaskLearningProjectionFeed(exactEvaluationHostScope(input.scope), input.after, input.limit ?? 100)
+  }
+
+  inspectTrustedTaskOwnerRevision(input: {
+    scope: EvaluationHostScope
+    outcomeId: string
+    principalRecordId: string
+    principalVersion: number
+  }): Readonly<{ outcomeId: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objectiveStatus: string }> | undefined {
+    this.assertActive()
+    const scope = exactEvaluationHostScope(input.scope)
+    return this.store.inspectTaskOwnerRevision(scope, hostOutcomeId(input.outcomeId),
+      hostIdentifier(input.principalRecordId, 'principalRecordId', 4_096), input.principalVersion)
   }
 
   /** Host-only exact canonical run proof; conflicted tasks have no ready proof. */

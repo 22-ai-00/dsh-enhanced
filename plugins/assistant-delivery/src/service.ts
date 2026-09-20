@@ -18,9 +18,12 @@ import {
 } from '@dsh-enhanced/assistant-policy'
 import {
   TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
+  type AssistantEvaluationService,
+  type TrustedTaskLearningProjectionReceipt,
   type TrustedDeliveryEvaluationClaims,
   type TrustedDeliveryEvaluationRegistration,
 } from '@dsh-enhanced/assistant-evaluation'
+
 import {
   ASSISTANT_GROWTH_CONTRACT_VERSION,
   growthObjectDigest,
@@ -401,6 +404,16 @@ function validateLearningControlReceipt(
 
 function containsReservedLearningMetadata(metadata: Readonly<Record<string, string>> | undefined): boolean {
   return metadata !== undefined && Object.keys(metadata).some(key => key.startsWith(learningMetadataPrefix))
+}
+
+/** Owner-bound discovery evidence, not permission to execute or adopt a repair. */
+export interface OwnerForegroundLearningTask {
+  readonly protocol: 'assistant-delivery/owner-foreground-learning/v1'
+  readonly owner: Readonly<OwnerRouteValidationReceipt>
+  readonly canonical: TrustedTaskLearningProjectionReceipt
+  readonly judgement: 'independent-verifier' | 'owner-feedback' | 'unresolved'
+  readonly ownerRevision?: Readonly<{ version: number; action: 'initial' | 'correct' | 'withdraw' }>
+  readonly source: Readonly<{ sessionId: string; inboxId: string; objective: string; truncated: boolean }>
 }
 
 export interface Config {
@@ -4383,6 +4396,79 @@ export class AssistantDeliveryService extends Service {
       ?? { provider: this.config.agentProvider, model: this.config.agentModel }
     return Object.freeze({ provider: selected.provider, model: selected.model,
       ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) })
+  }
+
+  /**
+   * Resolve one canonical foreground result against its actual owner lineage.
+   * Evaluation's workspace/preset scope alone does not establish ownership.
+   * Historical Sessions remain eligible after /new, but not after owner ABA.
+   */
+  inspectOwnerForegroundLearningTask(input: {
+    authorityId: string
+    principalId: string
+    workspace: string
+    agentPreset: string
+    outcomeId: string
+  }): Readonly<OwnerForegroundLearningTask> | undefined {
+    this.assertActive()
+    const routeInput = { authorityId: input.authorityId, principalId: input.principalId,
+      workspace: input.workspace, agentPreset: input.agentPreset }
+    const owner = this.validateOwnerRoute(routeInput)
+    const evaluation = this.context.get('assistantEvaluation' as never, false) as AssistantEvaluationService | undefined
+    if (!evaluation || typeof evaluation.inspectTrustedTaskOwnerRevision !== 'function') return undefined
+    const scope = evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
+    const canonical = evaluation.getTrustedTaskLearningProjection({ scope, outcomeId: input.outcomeId })
+    if (!canonical || canonical.projection.subjectKind !== 'foreground-turn') return undefined
+    const inbox = this.deliveryStore.getInbox(canonical.projection.subjectRef)
+    const binding = inbox?.bindingId === undefined ? undefined : this.deliveryStore.getBinding(inbox.bindingId)
+    if (!inbox || !binding || binding.workspace !== owner.workspace || binding.agentPreset !== owner.agentPreset
+      || externalPrincipalId(binding.principal) !== owner.principalId
+      || JSON.stringify(inbox.envelope.principal) !== JSON.stringify(binding.principal)
+      || JSON.stringify(inbox.envelope.conversation) !== JSON.stringify(binding.conversation)) return undefined
+    const execution = this.deliveryStore.inspectForegroundAcceptedExecutionForOwner({ inboxId: inbox.id,
+      scope: { workspace: owner.workspace, preset: owner.agentPreset }, bindingId: binding.id,
+      owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion } })
+    if (execution === null) return undefined
+    const verifierComponent = (component: Pick<NonNullable<TrustedTaskLearningProjectionReceipt['objective']>, 'source' | 'evidence' | 'evaluator'>) =>
+      component.source.kind === 'evaluator' && component.source.id === 'assistant-verifier'
+      && component.evaluator.id === 'assistant-verifier' && component.evaluator.version === '1'
+      && component.evidence.some(ref => ref.kind === 'foreground-turn' && ref.ref === inbox.id)
+      && component.evidence.some(ref => ref.kind === 'execution' && ref.ref === execution.executionRef)
+      && component.evidence.some(ref => ref.kind === 'acceptance-contract'
+        && ref.ref === execution.contractId && ref.digest === execution.contractDigest)
+    if (canonical.execution !== undefined && (!verifierComponent(canonical.execution)
+      || canonical.execution.status !== execution.status)) return undefined
+    let judgement: OwnerForegroundLearningTask['judgement'] = 'unresolved'
+    let ownerRevision: OwnerForegroundLearningTask['ownerRevision']
+    const objective = canonical.objective
+    if (objective?.source.kind === 'user-feedback') {
+      if (objective.source.id !== 'assistant-delivery/typed-owner-feedback') return undefined
+      const revision = evaluation.inspectTrustedTaskOwnerRevision({ scope, outcomeId: input.outcomeId,
+        principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion })
+      if (!revision || revision.outcomeId !== objective.outcomeId || revision.objectiveStatus !== objective.status) return undefined
+      const outboxRefs = objective.evidence.filter(ref => ref.kind === 'delivery-outbox')
+      if (outboxRefs.length !== 1) return undefined
+      const outbox = this.deliveryStore.getOutbox(outboxRefs[0]!.ref)
+      if (!outbox || outbox.intent.bindingId !== binding.id
+        || outbox.intent.idempotencyKey !== `inbound:${inbox.id}:reply`
+        || outbox.intent.replyToEventId !== inbox.envelope.eventId
+        || JSON.stringify(outbox.intent.target.principal) !== JSON.stringify(binding.principal)
+        || JSON.stringify(outbox.intent.target.conversation) !== JSON.stringify(binding.conversation)
+        || !['accepted', 'delivered', 'read'].includes(outbox.status)) return undefined
+      judgement = 'owner-feedback'
+      ownerRevision = Object.freeze({ version: revision.version, action: revision.action })
+    } else if (objective !== undefined) {
+      if (!verifierComponent(objective)) return undefined
+      judgement = 'independent-verifier'
+    }
+    // Fence cross-ledger reads before handing any task text to the consumer.
+    if (!evaluation.isTrustedTaskLearningProjectionReceipt(canonical)
+      || acceptanceCanonicalJson(owner) !== acceptanceCanonicalJson(this.validateOwnerRoute(routeInput))) return undefined
+    const objectiveText = inbox.envelope.text
+    return Object.freeze({ protocol: 'assistant-delivery/owner-foreground-learning/v1', owner, canonical, judgement,
+      ...(ownerRevision === undefined ? {} : { ownerRevision }),
+      source: Object.freeze({ sessionId: binding.sessionId, inboxId: inbox.id,
+        objective: objectiveText.slice(0, 4096), truncated: objectiveText.length > 4096 }) })
   }
 
   /**
