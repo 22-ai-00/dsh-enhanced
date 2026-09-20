@@ -52,6 +52,22 @@ Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的
 
 当前 transport 复用 Skills 的受限 NDJSON 子进程协议；authority 是可信 Host 程序，继承该进程的环境和 cwd。私有文件目录隔离及候选的无 Host 挂载容器，不构成独立 UID/机器部署证明。插件内使用这些 Host API 时，须将整个实验的取消与 `close()` 绑定到调用方 Cordis effect。
 
+## 真实 Day1 探针
+
+先运行 `pnpm build`，准备已存在、包含 `/bin/sh` 与 `node` 的不可变本地 Docker 镜像。使用 [native-skill-day1.mjs](../scripts/e2e/native-skill-day1.mjs) 在全新私有目录运行；父目录须已存在，探针拒绝覆盖或恢复已有实验，不拉取镜像、不安装插件、不修改日常 profile。
+
+```sh
+DSH_NATIVE_SKILL_EVIDENCE_ROOT=/absolute/private/new-experiment \
+DSH_NATIVE_SKILL_IMAGE=sha256:LOCAL_IMMUTABLE_IMAGE \
+node scripts/e2e/native-skill-day1.mjs
+```
+
+凭据使用运行环境的 `SUPER_RELAY_API_KEY` 引用；若需已有 DSH 本地凭据服务，同时设置 `DSH_NATIVE_SKILL_CREDENTIALS_MODULE`（可信 provider 的绝对 JS 路径）与 `DSH_NATIVE_SKILL_CREDENTIALS_PATH`（凭据文件绝对路径）。文件内容不会写入证据。可用 `DSH_NATIVE_SKILL_DOCKER` 指定绝对 Docker 路径，默认 `/usr/bin/docker`。
+
+探针固定同一 Day1 工厂，传输请求时限 180 秒、原生 step 240 秒、每 cell 总期限 900 秒，输出每次最多 4,096 tokens；来源训练与两臂使用相同预算。来源经原生 Goal 验收后才捕获候选，随后运行 3 种冻结后任务 × 2 次重复 × 2 臂。脚本、供应工件、传输配置和训练证据均纳入摘要；运行期间不要修改或重建不同版本的已部署模块。总运行上限 55 分钟，SIGINT/SIGTERM 触发已有取消与关闭路径。
+
+`input.json`、`training.json`、`comparison/completion.json` 和 `summary.json` 保存在该私有目录；失败保存 `failure.json`，传输异常另存仅含错误码、时长和取消状态的 `transport-errors.jsonl`。未完整结算 usage 时保持 unknown 与预留，不自动重试；最终报告不完整则进程退出 1。新实验必须显式选择新目录并保留旧失败，不能把新实验当作对旧 unknown 的重放或结算。报告不授权激活或晋升，也不将请求次数或 fixture 成功冒充真实收益。
+
 ## 当前验收范围
 
 真实 Docker 工程测试覆盖：来源 native Goal→独立验收→SessionQuery 捕获→12 个新 Goal 的双臂比较，候选 6 次实际技能复用；两臂各 6 次达成、质量平局。另覆盖 usage/输出/预算/训练证据篡改、unknown 报告、重跑拒绝与取消清理。这些使用确定性适配器，不证明真实模型收益。

@@ -2,6 +2,10 @@
 
 These opt-in probes have separate prerequisites and evidence boundaries; they are not all run by `pnpm check`. Current project progress is maintained in [RSI status](../../docs/rsi-status.md). Raw results stay in ignored local directories or CI artifacts.
 
+## Real Day1 native skill comparison
+
+`native-skill-day1.mjs` runs the approved Super Relay Day1 route through a native source Goal, captures an independently accepted skill, and compares baseline/candidate in 12 fresh Goal cells with signed after-freeze tasks. It requires a fresh private evidence root, an immutable local Docker image containing `sh` and `node`, and the existing credential reference. The fixed request deadline is 180 seconds; source and comparison use the same supplier, factory and cell budget. Unknown usage is retained, existing experiment directories cannot resume, and the report grants no promotion. Commands, cancellation and evidence boundaries are in [native skill reuse](../../docs/native-skill-reuse.md#真实-day1-探针).
+
 ## Native Web owner browser regression
 
 Run from the repository root after `CI=true pnpm build`, with DSH `0.1.2-rc.1` on PATH and a Playwright Chromium installation:
