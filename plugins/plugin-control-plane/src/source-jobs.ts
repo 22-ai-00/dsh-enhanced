@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, join, resolve } from 'node:path'
 import { realpath } from 'node:fs/promises'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
@@ -14,6 +14,9 @@ import type { SourceJobIntent, SourceJobOwnerReceipt, SourceJobProjection, Sourc
 export const SOURCE_JOB_OWNER = 'plugin-control-plane-source'
 const EXECUTOR = 'plugin-control-plane-source-check'
 const CATALOG = controlPlaneDigest({ executor: EXECUTOR, version: 1, operation: 'isolated-check-pending-plan' })
+const CONTINUATION_EXECUTOR = 'plugin-control-plane-source-continuations-v1'
+const CONTINUATION_CATALOG = controlPlaneDigest({ executor: CONTINUATION_EXECUTOR, version: 1, operation: 'continue-prepared-source-plan' })
+const CONTINUATION_AUTOMATION = 'source-job-prepared-continuations'
 
 export interface SourceJobCaller {
   ownerRouteId: string; principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string
@@ -55,8 +58,15 @@ export class SourceJobRuntime {
   private readonly flights = new Set<Promise<unknown>>()
   private readonly authorityDigest: string
   private unregister?: () => void
+  private unregisterContinuation?: () => void
   private closing?: Promise<void>
   private active = false
+  private readonly generation = randomUUID()
+  private readonly continuationNonce: string
+  private readonly continuing = new Set<string>()
+  private continuationCursor = 0
+  private continuationStatus: 'active' | 'paused' | undefined
+  private continuationTransition = 0
   constructor(private readonly options: {
     config: SourceJobsConfig; build: SourceBuildConfig; statePath: string; store: ControlPlaneStore; ports: SourceJobPorts
     withGapSourceFence?: <T>(gapId: string, owner: SourceJobOwnerReceipt, callback: () => T) => T
@@ -71,6 +81,7 @@ export class SourceJobRuntime {
   }) {
     validateSourceJobsConfig(options.config, options.build)
     this.authorityDigest = controlPlaneDigest({ config: options.config, build: options.build })
+    this.continuationNonce = controlPlaneDigest({ authority: this.authorityDigest, generation: this.generation })
   }
 
   start(): void {
@@ -80,20 +91,26 @@ export class SourceJobRuntime {
       accepts: spec => spec.executorId === EXECUTOR && spec.executorContractVersion === 1 && spec.catalogDigest === CATALOG && spec.runbookId === EXECUTOR && spec.runbookVersion === 1,
       execute: input => this.track(this.execute(input)),
     }
-    this.unregister = this.options.ports.automations.registerHostExecutor(executor)
-    this.active = true
-    if (this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased) {
-      // Resume owner authorizations and durable release phases, never a completed source build.
-      // Release dispatch claims prevent replay of unresolved external actions.
-      this.track((async () => {
-        for (const job of this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined, this.options.adoptReleased !== undefined)) {
-          if (this.abort.signal.aborted) break
-          try {
-            const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min((this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0) + (this.options.advanceReleased ? (this.options.releaseTimeoutMs ?? 40_000) + 40_000 : this.options.releasePrepared ? 40_000 : 10_000), job.expiresAt - Date.now())))])
-            await this.continuePrepared(job, signal)
-          } catch { /* pending plan retained */ }
-        }
-      })())
+    try {
+      this.unregister = this.options.ports.automations.registerHostExecutor(executor)
+      if (this.hasContinuations()) this.unregisterContinuation = this.options.ports.automations.registerHostExecutor({
+        descriptor: { executorId: CONTINUATION_EXECUTOR, contractVersion: 1, catalogDigest: CONTINUATION_CATALOG },
+        accepts: spec => spec.executorId === CONTINUATION_EXECUTOR && spec.executorContractVersion === 1 && spec.catalogDigest === CONTINUATION_CATALOG
+          && spec.runbookId === CONTINUATION_EXECUTOR && spec.runbookVersion === 1,
+        execute: input => this.track(this.executeContinuations(input)),
+      })
+      this.active = true
+      // Recovery is admitted exclusively through a production cron occurrence.
+      // Reading this local durable query intentionally performs no authority call.
+      this.reconcileContinuations()
+    } catch (error) {
+      this.active = false
+      // Registration is transactional from this runtime's point of view: an
+      // unregistration fault cannot leave the other executor registered or
+      // obscure the original registration failure.
+      try { this.unregisterContinuation?.() } catch { /* original error wins */ }
+      try { this.unregister?.() } catch { /* original error wins */ }
+      throw error
     }
     // Reconcile only queued intents. A previous claim is unknown and never replayed.
     for (let job of this.options.store.listSourceJobs(100)) {
@@ -107,29 +124,44 @@ export class SourceJobRuntime {
 
   private async continuePrepared(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
     if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
+    if (this.continuing.has(job.id)) return
+    this.continuing.add(job.id)
+    try { await this.continuePreparedLocked(job, signal) } finally { this.continuing.delete(job.id) }
+  }
+
+  private async continuePreparedLocked(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
+    if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
+    const planId = job.planId
+    const current = this.options.store.getSourceJob(job.id)
+    if (current?.status !== 'prepared' || current.planId !== planId) throw new Error('source job continuation changed')
+    job = current
+    const initial = this.options.store.getSourcePlan(planId)
+    // An ordinary grant or plan must not be advanced after expiry. Adoption has
+    // its own durable post-release path and is deliberately retained below.
+    if (initial.expiresAt <= Date.now() && initial.status !== 'release-complete') throw new Error('source job continuation expired')
     const assertCurrent = async (): Promise<void> => {
       signal.throwIfAborted(); this.assertOwner(job)
       if (controlPlaneDigest(await this.options.trust()) !== job.intent.trustDigest) throw new Error('source job continuation trust changed')
       signal.throwIfAborted(); this.assertOwner(job)
     }
-    if (this.options.adoptReleased && this.options.store.getSourcePlan(job.planId).status === 'release-complete') {
+    if (this.options.adoptReleased && this.options.store.getSourcePlan(planId).status === 'release-complete') {
       await this.options.adoptReleased(job, signal, assertCurrent)
       return
     }
     await assertCurrent()
-    if (this.options.store.getSourcePlan(job.planId).status === 'pending-approval' && this.options.approvePrepared) {
+    if (this.options.store.getSourcePlan(planId).status === 'pending-approval' && this.options.approvePrepared) {
       await this.options.approvePrepared(job, signal)
     }
-    const status = this.options.store.getSourcePlan(job.planId).status
+    const status = this.options.store.getSourcePlan(planId).status
     if (this.options.releasePrepared && (status === 'approved' || status === 'ready-for-human-review')) {
       await assertCurrent()
       await this.options.releasePrepared(job, signal)
     }
-    if (this.options.advanceReleased && expectedSourceRelease(this.options.store.getSourcePlan(job.planId).status)) {
+    if (this.options.advanceReleased && expectedSourceRelease(this.options.store.getSourcePlan(planId).status)) {
       await assertCurrent()
       await this.options.advanceReleased(job, signal)
     }
-    if (this.options.adoptReleased && this.options.store.getSourcePlan(job.planId).status === 'release-complete') {
+    if (this.options.adoptReleased && this.options.store.getSourcePlan(planId).status === 'release-complete') {
       await assertCurrent()
       await this.options.adoptReleased(job, signal, assertCurrent)
     }
@@ -140,9 +172,16 @@ export class SourceJobRuntime {
   close(): Promise<void> {
     return this.closing ??= (async () => {
       this.active = false
-      this.unregister?.()
-      this.abort.abort(new Error('source job provider disposed'))
-      await Promise.allSettled(this.flights)
+      try {
+        const current = this.options.ports.automations.inspectSystemOwnedActivation({ owner: SOURCE_JOB_OWNER, automationId: CONTINUATION_AUTOMATION })
+        if (current?.activationNonce === this.continuationNonce) this.options.ports.automations.reconcileSystem({ owner: SOURCE_JOB_OWNER,
+          automationId: CONTINUATION_AUTOMATION, idempotencyKey: `${CONTINUATION_AUTOMATION}:${this.generation}:pause`, desiredStatus: 'paused', definition: this.continuationDefinition() })
+      } finally {
+        this.abort.abort(new Error('source job provider disposed'))
+        try { this.unregisterContinuation?.() } finally {
+          try { this.unregister?.() } finally { await Promise.allSettled(this.flights) }
+        }
+      }
     })()
   }
 
@@ -286,6 +325,96 @@ export class SourceJobRuntime {
     automations.reconcileSystem({ owner: SOURCE_JOB_OWNER, automationId: job.automationId, idempotencyKey: `${job.id}:activate`, desiredStatus: 'active', definition })
   }
 
+  private hasContinuations(): boolean {
+    return !!(this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
+  }
+
+  private continuationJobs(): readonly SourceJobRecord[] {
+    if (!this.hasContinuations()) return []
+    return this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined, this.options.adoptReleased !== undefined)
+      .filter(job => this.eligibleContinuation(job))
+  }
+
+  /** Admission reads durable state and validates the current owner; it never invokes continuation approval or release hooks. */
+  private eligibleContinuation(job: SourceJobRecord): boolean {
+    if (!job.planId || job.status !== 'prepared') return false
+    let plan: PluginSourcePlan
+    try { plan = this.options.store.getSourcePlan(job.planId) } catch { return false }
+    const adoption = plan.status === 'release-complete' ? this.options.store.findSourceAdoption(plan.id) : undefined
+    const recovery = adoption !== undefined && ['staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'].includes(adoption.status)
+    if (recovery) return this.options.adoptReleased !== undefined
+    if (job.intent.authority.digest !== this.authorityDigest || job.intent.authority.id !== this.options.config.authorityId) return false
+    try { this.assertOwner(job) } catch { return false }
+    if (plan.expiresAt <= Date.now()) return false
+    if (plan.status === 'pending-approval') return this.options.approvePrepared !== undefined
+    if (plan.status === 'approved' || plan.status === 'ready-for-human-review') return this.options.releasePrepared !== undefined
+    if (expectedSourceRelease(plan.status)) return this.options.advanceReleased !== undefined
+    return plan.status === 'release-complete' && this.options.adoptReleased !== undefined
+  }
+
+  private continuationTimeoutMs(): number {
+    const release = this.options.releaseTimeoutMs ?? 40_000, adoption = this.options.adoptionTimeoutMs ?? 60_000
+    const needed = (this.options.adoptReleased ? adoption : 0) + (this.options.advanceReleased ? release + 40_000 : this.options.releasePrepared ? 40_000 : 10_000)
+    return Math.max(10_000, needed)
+  }
+
+  private continuationSignalTimeoutMs(job: SourceJobRecord): number {
+    if (job.planId) {
+      const plan = this.options.store.getSourcePlan(job.planId), adoption = plan.status === 'release-complete' ? this.options.store.findSourceAdoption(plan.id) : undefined
+      if (adoption && ['staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'].includes(adoption.status)) return this.continuationTimeoutMs()
+    }
+    return Math.max(1, Math.min(this.continuationTimeoutMs(), this.options.config.expiresAt - Date.now()))
+  }
+
+  private continuationDefinition(): HostAutomationDefinition {
+    const config = this.options.config
+    return { name: 'Continue prepared source plans', schedule: { kind: 'cron', expression: '* * * * *', timezone: 'UTC' },
+      workspace: config.workspace, agentPreset: config.preset, timeoutMs: this.continuationTimeoutMs(), misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0,
+      principal: config.principalId, ...(config.budgetId === undefined ? {} : { budgetId: config.budgetId, budgetAmount: config.budgetAmount! }),
+      execution: { kind: 'host', executorId: CONTINUATION_EXECUTOR, executorContractVersion: 1, runbookId: CONTINUATION_EXECUTOR, runbookVersion: 1,
+        catalogDigest: CONTINUATION_CATALOG, targetScope: { workspace: config.workspace, preset: config.preset }, scopeDigest: controlPlaneDigest([config.workspace, config.preset]),
+        ownerRouteId: config.ownerRouteId, activationNonce: this.continuationNonce } }
+  }
+
+  /** Reconciliation only changes native activation; it never calls an authority. */
+  private reconcileContinuations(force = false): void {
+    if (!this.active || !this.hasContinuations()) return
+    const definition = this.continuationDefinition(), desiredStatus = this.continuationJobs().length ? 'active' as const : 'paused' as const
+    if (!force && desiredStatus === this.continuationStatus) return
+    this.options.ports.automations.reconcileSystem({ owner: SOURCE_JOB_OWNER, automationId: CONTINUATION_AUTOMATION,
+      idempotencyKey: `${CONTINUATION_AUTOMATION}:${this.generation}:${++this.continuationTransition}:${desiredStatus}`, desiredStatus, definition })
+    this.continuationStatus = desiredStatus
+  }
+
+  private async executeContinuations(input: HostAutomationExecutorInput): Promise<HostAutomationExecutorResult> {
+    const failure = (unknown: boolean): HostAutomationExecutorResult => ({ outcome: unknown ? 'unknown' : 'failed', failureClass: unknown ? 'unknown' : 'configuration', failurePhase: 'host-execution', failureCode: 'source-continuation-rejected', sideEffectState: unknown ? 'unknown' : 'none', retryability: unknown ? 'unsafe' : 'after-intervention' })
+    try {
+      const registration = this.options.ports.automations.inspectSystemOwnedActivation({ owner: SOURCE_JOB_OWNER, automationId: CONTINUATION_AUTOMATION })
+      if (!this.hasContinuations() || !this.active || input.executionMode !== 'production' || input.automationId !== CONTINUATION_AUTOMATION
+        || input.activationNonce !== this.continuationNonce || input.catalogDigest !== CONTINUATION_CATALOG || input.definitionHash !== registration?.definitionHash
+        || registration.activationNonce !== this.continuationNonce || input.ownerRouteId !== this.options.config.ownerRouteId || input.principal !== this.options.config.principalId
+        || input.targetScope.workspace !== this.options.config.workspace || input.targetScope.preset !== this.options.config.preset) throw new Error('source continuation dispatch changed')
+      const jobs = this.continuationJobs()
+      let unsettled = false
+      if (jobs.length) {
+        // One budget-admitted occurrence advances one durable row. The cursor
+        // is intentionally in-memory; a restart returning to the first row is
+        // safe because every release transition remains independently claimed.
+        const job = jobs[this.continuationCursor++ % jobs.length]!
+        const signal = AbortSignal.any([this.abort.signal, input.signal, AbortSignal.timeout(this.continuationSignalTimeoutMs(job))])
+        signal.throwIfAborted()
+        try { await this.continuePrepared(job, signal); signal.throwIfAborted() } catch {
+          // The durable release claim decides whether an external action was
+          // dispatched.  Do not report this uncertain continuation as success.
+          unsettled = true
+        }
+      }
+      this.reconcileContinuations()
+      if (unsettled) return { outcome: 'unknown', failureClass: 'infrastructure', failurePhase: 'host-execution', failureCode: 'source-continuation-unsettled', sideEffectState: 'unknown', retryability: 'unsafe' }
+      return { outcome: 'succeeded', failureClass: 'none', failurePhase: 'none', failureCode: 'none', sideEffectState: 'possible', retryability: 'unsafe' }
+    } catch { return failure(this.abort.signal.aborted || input.signal.aborted) }
+  }
+
   private scheduleOrFail(job: SourceJobRecord): void {
     try { this.schedule(job) } catch {
       const current = this.options.store.getSourceJob(job.id)
@@ -321,8 +450,10 @@ export class SourceJobRuntime {
       await this.options.prepare(owned, signal, assertCurrent)
       if (this.options.store.getSourceJob(owned.id)?.status !== 'prepared') throw new Error('source job completion was not committed')
       if ((this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased) && this.options.store.getOwnerTaskFailureReference(owned.intent.gapId)) {
+        this.reconcileContinuations()
         this.assertOwner(owned)
         await this.continuePrepared(this.options.store.getSourceJob(owned.id)!, signal)
+        this.reconcileContinuations()
       }
       return { outcome: 'succeeded', failureClass: 'none', failurePhase: 'none', failureCode: 'none', sideEffectState: 'possible', retryability: 'unsafe' }
     } catch {
