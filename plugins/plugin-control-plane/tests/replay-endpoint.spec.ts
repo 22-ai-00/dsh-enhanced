@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { generateKeyPairSync, randomBytes, sign } from 'node:crypto'
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,8 +11,11 @@ import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { afterEach, expect, test as nativeTest } from 'vitest'
-import { installReplayEndpoint, queryReplayEndpoint, type ReplayEndpointConfig } from '../src/replay-endpoint.js'
+import { afterEach, expect, test as nativeTest, vi } from 'vitest'
+import { installReplayEndpoint, queryReplayEndpoint, type ReplayEndpointConfig, type ReplayFixedAuthority } from '../src/replay-endpoint.js'
+import { replayGrantSigningPayload, type ReplayGrant, type ReplaySignedAuthority } from '../src/replay-grant.js'
+import { hostAttestationRequestDigest } from '../src/attestation.js'
+import type { HostAttestationRequest } from '../src/types.js'
 import { runtimeConfigDigest } from '../src/runtime-observer.js'
 import { ReplayJournal } from '../src/replay-journal.js'
 import { PluginControlPlaneService } from '../src/service.js'
@@ -37,7 +40,7 @@ async function fixture() {
   const candidate = join(profile, 'candidate.js')
   await writeFile(join(profile, 'package.json'), '{"type":"module"}')
   await writeFile(candidate, "export default { name: 'candidate', apply(ctx) { ctx.provide('replayCandidate', {}) } }\n")
-  const config: ReplayEndpointConfig = {
+  const config: ReplayEndpointConfig & { authority: ReplayFixedAuthority } = {
     runtime: { socketPath: join(owner, 'replay.sock'), keyPath, profilePath: profile,
       targets: [{ entryId: 'candidate', module: './candidate.js', configDigest: runtimeConfigDigest({}), services: ['replayCandidate'] }] },
     journalPath: join(owner, 'replay.sqlite'), timeoutMs: 5000,
@@ -67,8 +70,8 @@ async function fixture() {
   await ctx.plugin(Loader)
   const entry = { id: 'candidate', name: './candidate.js', config: {} }
   await ctx.loader.create(entry); await ctx.loader.await()
-  const mount = async () => {
-    const fiber = ctx.plugin({ name: 'endpoint-owner', apply(ownerCtx) { installReplayEndpoint(ownerCtx, config) } })
+  const mount = async (endpointConfig: ReplayEndpointConfig = config) => {
+    const fiber = ctx.plugin({ name: 'endpoint-owner', apply(ownerCtx) { installReplayEndpoint(ownerCtx, endpointConfig) } })
     await fiber
     await expect.poll(async () => {
       try {
@@ -211,5 +214,113 @@ test('Control Plane refuses shared key material between mutation and read-only c
     runtimeObserver: { ...f.config.runtime, socketPath: join(f.root, 'owner', 'observer.sock'), keyPath: observerKey },
     replayEndpoint: f.config,
   })).toThrow('distinct key material')
+  expect(f.creates()).toBe(0)
+})
+
+async function signedFixture() {
+  const f = await fixture()
+  const keys = generateKeyPairSync('ed25519')
+  const now = Date.now()
+  const scope: ReplaySignedAuthority['scope'] = {
+    installationId: '11111111-1111-4111-8111-111111111111',
+    ledger: { id: '22222222-2222-4222-8222-222222222222', path: join(f.root, 'owner', 'control.sqlite') },
+    plan: { id: 'plan', digest: 'b'.repeat(64) }, activation: { id: 'activation', fence: 1 },
+    profile: { name: 'profile', path: f.config.runtime.profilePath },
+  }
+  const config: ReplayEndpointConfig = { ...f.config, authority: { mode: 'signed', authority: 'owner', keyId: 'key',
+    publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), scope,
+    notBefore: now - 5000, expiresAt: now + 60000, maximumGrantMs: 30000, cases: f.config.authority.cases } }
+  const request: HostAttestationRequest = { schemaVersion: 2, kind: 'dsh-host-attestation-request', operationId: 'late-op',
+    requestedAt: now - 1000, receiptTtlMs: 60000, ...scope, issuer: { mode: 'owner-manual' }, phase: 'effect-blocked-replay',
+    requirements: { kind: 'effect-blocked-replay', minimumDeliveryAttempts: 1, minimumToolExecutionAttempts: 1, maximumExternalEffects: 0 },
+    predecessor: { operationId: 'ready-op', receiptId: 'ready-receipt', phase: 'readiness', receiptDigest: 'c'.repeat(64), hostGeneration: 1 } }
+  const unsigned: Omit<ReplayGrant, 'signature'> = { schemaVersion: 1, kind: 'dsh-effect-replay-grant', authority: 'owner', keyId: 'key',
+    request, endpointDigest: runtimeConfigDigest(config), caseDigest: runtimeConfigDigest(config.authority.cases),
+    processId: process.pid, invocationId: /^[a-f0-9]{32}$/u.test(process.env.INVOCATION_ID ?? '') ? process.env.INVOCATION_ID! : null,
+    notBefore: now - 500, expiresAt: now + 29500 }
+  const grant = (overrides: Partial<Omit<ReplayGrant, 'signature'>> = {}, privateKey = keys.privateKey): ReplayGrant => {
+    const body = { ...structuredClone(unsigned), ...overrides }
+    return { ...body, signature: sign(null, Buffer.from(replayGrantSigningPayload(body)), privateKey).toString('base64') }
+  }
+  const query = (action: 'execute' | 'query', signed: ReplayGrant | undefined = grant()) => f.query(action, {
+    operationId: signed?.request.operationId ?? request.operationId,
+    requestDigest: hostAttestationRequestDigest(signed?.request ?? request), ...(signed ? { grant: signed } : {}),
+  })
+  return { ...f, signedConfig: config, request, grant, signedQuery: query, mountSigned: () => f.mount(config) }
+}
+
+test('late signed authority executes on the already mounted endpoint once, without changing its config', async () => {
+  const f = await signedFixture(); const configDigest = runtimeConfigDigest(f.signedConfig)
+  await f.mountSigned()
+  await expect(f.query('execute', { operationId: f.request.operationId, requestDigest: hostAttestationRequestDigest(f.request) })).rejects.toThrow()
+  expect(f.creates()).toBe(0)
+  const grant = f.grant()
+  expect((await f.signedQuery('query', grant)).status).toBe('not-started')
+  const results = await Promise.all([f.signedQuery('execute', grant), f.signedQuery('execute', grant)])
+  const completed = results.find(result => result.status === 'completed')!
+  expect(completed.result?.requestDigest).toBe(hostAttestationRequestDigest(f.request))
+  expect(completed.result?.attempts.map(attempt => attempt.blockedAt)).toEqual(['native-tool-guard', 'delivery-reply-admission'])
+  expect((await f.signedQuery('query', grant)).result).toEqual(completed.result)
+  expect(runtimeConfigDigest(f.signedConfig)).toBe(configDigest)
+  expect(f.creates()).toBe(1); expect(f.bodies()).toBe(0)
+})
+
+test('signed endpoint rejects forgery, wrong Host, request, scope, config, cases and expiry before Agent creation', async () => {
+  const f = await signedFixture(); await f.mountSigned()
+  const badGrants = [
+    f.grant({}, generateKeyPairSync('ed25519').privateKey),
+    f.grant({ processId: process.pid + 1 }), f.grant({ invocationId: 'f'.repeat(32) }),
+    f.grant({ endpointDigest: 'e'.repeat(64) }), f.grant({ caseDigest: 'e'.repeat(64) }),
+    f.grant({ request: { ...f.request, activation: { ...f.request.activation, fence: 2 } } }),
+    f.grant({ expiresAt: Date.now() - 1 }),
+  ]
+  for (const grant of badGrants) await expect(f.signedQuery('execute', grant)).rejects.toThrow()
+  const altered = f.grant(); altered.request.predecessor!.receiptDigest = 'd'.repeat(64)
+  await expect(f.signedQuery('execute', altered)).rejects.toThrow()
+  const good = f.grant()
+  await expect(f.query('execute', { operationId: good.request.operationId, requestDigest: 'e'.repeat(64), grant: good })).rejects.toThrow()
+  expect(f.creates()).toBe(0); expect(f.bodies()).toBe(0)
+})
+
+test('signed unknown survives endpoint replacement and refuses a freshly signed alternate operation or grant', async () => {
+  const f = await signedFixture()
+  f.ctx.on('tools/pre-execute', async () => ({ kind: 'deny', reason: 'fixture earlier guard' }))
+  const fiber = await f.mountSigned(); const grant = f.grant()
+  expect((await f.signedQuery('execute', grant)).status).toBe('unknown')
+  await fiber.dispose(); await f.mountSigned()
+  expect((await f.signedQuery('execute', grant)).status).toBe('unknown')
+  expect((await f.signedQuery('query', grant)).status).toBe('unknown')
+  for (const changed of [f.grant({ expiresAt: grant.expiresAt - 1 }), f.grant({ request: { ...f.request, operationId: 'new-operation' } })]) {
+    await expect(f.signedQuery('execute', changed)).rejects.toThrow()
+    await expect(f.signedQuery('query', changed)).rejects.toThrow()
+  }
+  expect(f.creates()).toBe(1); expect(f.bodies()).toBe(0)
+})
+
+test('signed completed observations become stale on endpoint reload and are never redispatched', async () => {
+  const f = await signedFixture(); const fiber = await f.mountSigned(); const grant = f.grant()
+  expect((await f.signedQuery('execute', grant)).status).toBe('completed')
+  await fiber.dispose(); await f.mountSigned()
+  expect((await f.signedQuery('query', grant)).status).toBe('stale')
+  expect((await f.signedQuery('execute', grant)).status).toBe('stale')
+  expect(f.creates()).toBe(1)
+})
+
+test('a grant expiring during durable admission never creates an Agent or runs startup hooks', async () => {
+  const f = await signedFixture(); await f.mountSigned(); const grant = f.grant()
+  const reserve = ReplayJournal.prototype.reserve
+  let clock: ReturnType<typeof vi.spyOn> | undefined
+  const admission = vi.spyOn(ReplayJournal.prototype, 'reserve').mockImplementation(function (this: ReplayJournal, ...args) {
+    const result = reserve.apply(this, args)
+    // SQLite lock acquisition/fsync can consume the entire short grant window.
+    clock = vi.spyOn(Date, 'now').mockReturnValue(grant.expiresAt)
+    return result
+  })
+  try {
+    expect((await f.signedQuery('execute', grant)).status).toBe('unknown')
+    expect(f.creates()).toBe(0); expect(f.bodies()).toBe(0)
+  } finally { admission.mockRestore(); clock?.mockRestore() }
+  expect((await f.signedQuery('query', grant)).status).toBe('unknown')
+  expect((await f.signedQuery('execute', grant)).status).toBe('unknown')
   expect(f.creates()).toBe(0)
 })

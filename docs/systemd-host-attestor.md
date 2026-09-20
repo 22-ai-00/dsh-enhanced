@@ -287,6 +287,11 @@ approval authority and profile staging are explicit fixture inputs. The default
 readiness branch stops there; `DSH_READINESS_ROLLBACK=restore|stop` additionally
 exercises CLI profile restoration/removal and physical Host recovery as described
 below. Neither branch performs npm installation.
+The active-candidate default branch also mounts a replay endpoint before the
+signed reload, then signs the actual prepared replay request after readiness.
+It checks native replay with unchanged PID/invocation, observer/Fiber identities
+and deployment pins, retaining `awaiting-effect-blocked-replay`. The endpoint
+observation is unsigned and does not attest global absence of external effects.
 The fixture retains signed receipts, probe preimages and actual phase
 transitions locally. Current engineering verification is summarized in
 [RSI status](rsi-status.md); historical verification is available in Git history.

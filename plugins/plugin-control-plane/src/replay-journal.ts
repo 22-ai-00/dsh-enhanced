@@ -17,7 +17,20 @@ function checkFile(path: string): void {
 function optionalFile(path: string): void {
   try { checkFile(path) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
 }
-interface Row { binding_digest: string; request_digest: string; case_digest: string; result_json: string | null; result_digest: string | null }
+interface Row { binding_digest: string; request_digest: string; case_digest: string; result_json: string | null; result_digest: string | null; admission_mode: 'fixed' | 'signed' }
+interface GrantRow { scope_digest: string; grant_digest: string; operation_id: string }
+export interface ReplayAuthorization { scopeDigest: string; grantDigest: string }
+
+function authorization(value: unknown): ReplayAuthorization | undefined {
+  if (value === undefined) return undefined
+  if (!value || typeof value !== 'object' || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)) fail()
+  const descriptors = Object.getOwnPropertyDescriptors(value)
+  if (Reflect.ownKeys(descriptors).length !== 2) fail()
+  const scope = descriptors.scopeDigest, grant = descriptors.grantDigest
+  if (!scope || !grant || !('value' in scope) || !('value' in grant) || typeof scope.value !== 'string' || typeof grant.value !== 'string') fail()
+  identity('authorization', scope.value); identity('authorization', grant.value)
+  return { scopeDigest: scope.value, grantDigest: grant.value }
+}
 
 /** A reserved operation never regains dispatch authority, including after process death. */
 export class ReplayJournal {
@@ -45,12 +58,24 @@ export class ReplayJournal {
         if (version === 0 && app === 0 && this.db.prepare('SELECT name FROM sqlite_master').all().length === 0) {
           this.db.exec(`CREATE TABLE replay_operations (
             operation_id TEXT PRIMARY KEY, binding_digest TEXT NOT NULL, request_digest TEXT NOT NULL, case_digest TEXT NOT NULL,
-            result_json TEXT, result_digest TEXT,
+            result_json TEXT, result_digest TEXT, admission_mode TEXT NOT NULL,
             CHECK((result_json IS NULL AND result_digest IS NULL) OR
               (json_valid(result_json) AND length(result_digest) = 64))
           ) STRICT, WITHOUT ROWID;
-          PRAGMA application_id = ${APP_ID}; PRAGMA user_version = 1;`)
-        } else if (version !== 1 || app !== APP_ID) fail()
+          CREATE TABLE replay_grants (
+            scope_digest TEXT PRIMARY KEY, grant_digest TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE,
+            FOREIGN KEY(operation_id) REFERENCES replay_operations(operation_id)
+          ) STRICT, WITHOUT ROWID;
+          PRAGMA application_id = ${APP_ID}; PRAGMA user_version = 2;`)
+        } else if (version === 1 && app === APP_ID) {
+          // Version 1 had only fixed-operation admission. Existing rows remain fixed.
+          this.db.exec(`ALTER TABLE replay_operations ADD COLUMN admission_mode TEXT NOT NULL DEFAULT 'fixed';
+            CREATE TABLE replay_grants (
+              scope_digest TEXT PRIMARY KEY, grant_digest TEXT NOT NULL, operation_id TEXT NOT NULL UNIQUE,
+              FOREIGN KEY(operation_id) REFERENCES replay_operations(operation_id)
+            ) STRICT, WITHOUT ROWID;
+            PRAGMA user_version = 2;`)
+        } else if (version !== 2 || app !== APP_ID) fail()
         this.db.exec('COMMIT; PRAGMA journal_mode = WAL;')
       } catch (error) { try { this.db.exec('ROLLBACK') } catch { /* A completed commit cannot be rolled back. */ } throw error }
       this.checkFiles()
@@ -69,11 +94,13 @@ export class ReplayJournal {
     const fd = openSync(dirname(this.path), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
     try { if (!fstatSync(fd).isDirectory()) fail(); fsyncSync(fd) } finally { closeSync(fd) }
   }
-  get(operationId: string, bindingDigest: string): { status: 'admitted' | 'completed'; result: EffectBlockedReplayResult | null } | undefined {
-    identity(operationId, bindingDigest); this.checkFiles()
-    const row = this.db.prepare('SELECT binding_digest, request_digest, case_digest, result_json, result_digest FROM replay_operations WHERE operation_id = ?').get(operationId) as Row | undefined
-    if (!row) return
-    if (row.binding_digest !== bindingDigest) fail()
+  private operation(operationId: string): Row | undefined {
+    return this.db.prepare('SELECT binding_digest, request_digest, case_digest, result_json, result_digest, admission_mode FROM replay_operations WHERE operation_id = ?').get(operationId) as Row | undefined
+  }
+  private grantForOperation(operationId: string): GrantRow | undefined {
+    return this.db.prepare('SELECT scope_digest, grant_digest, operation_id FROM replay_grants WHERE operation_id = ?').get(operationId) as GrantRow | undefined
+  }
+  private result(operationId: string, row: Row): { status: 'admitted' | 'completed'; result: EffectBlockedReplayResult | null } {
     if (row.result_json === null) { if (row.result_digest !== null) fail(); return { status: 'admitted', result: null } }
     if (Buffer.byteLength(row.result_json) > 65_536) fail()
     const result = JSON.parse(row.result_json) as EffectBlockedReplayResult
@@ -84,18 +111,54 @@ export class ReplayJournal {
       || result.schemaVersion !== 1 || result.kind !== 'dsh-effect-blocked-replay-observation' || result.quiescent !== true) fail()
     return { status: 'completed', result }
   }
-  reserve(operationId: string, bindingDigest: string, requestDigest: string, caseDigest: string): boolean {
+  get(operationId: string, bindingDigest: string, signed?: ReplayAuthorization): { status: 'admitted' | 'completed'; result: EffectBlockedReplayResult | null } | undefined {
+    const auth = authorization(signed)
+    identity(operationId, bindingDigest); this.checkFiles()
+    if (auth) {
+      const grant = this.db.prepare('SELECT scope_digest, grant_digest, operation_id FROM replay_grants WHERE scope_digest = ?').get(auth.scopeDigest) as GrantRow | undefined
+      if (!grant) { if (this.operation(operationId)) fail(); return }
+      if (grant.grant_digest !== auth.grantDigest || grant.operation_id !== operationId) fail()
+      const row = this.operation(operationId)
+      if (!row || row.admission_mode !== 'signed' || row.binding_digest !== bindingDigest) fail()
+      return this.result(operationId, row)
+    }
+    const row = this.operation(operationId)
+    if (!row) return
+    if (row.admission_mode !== 'fixed' || this.grantForOperation(operationId) || row.binding_digest !== bindingDigest) fail()
+    return this.result(operationId, row)
+  }
+  reserve(operationId: string, bindingDigest: string, requestDigest: string, caseDigest: string, signed?: ReplayAuthorization): boolean {
+    const auth = authorization(signed)
     identity(operationId, bindingDigest); this.checkFiles()
     identity(operationId, requestDigest); identity(operationId, caseDigest)
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      const existing = this.get(operationId, bindingDigest)
-      const pins = this.db.prepare('SELECT request_digest, case_digest FROM replay_operations WHERE operation_id = ?').get(operationId) as Row | undefined
-      if (pins && (pins.request_digest !== requestDigest || pins.case_digest !== caseDigest)) fail()
-      if (!existing) this.db.prepare('INSERT INTO replay_operations(operation_id, binding_digest, request_digest, case_digest) VALUES (?, ?, ?, ?)').run(operationId, bindingDigest, requestDigest, caseDigest)
+      if (auth) {
+        const grant = this.db.prepare('SELECT scope_digest, grant_digest, operation_id FROM replay_grants WHERE scope_digest = ?').get(auth.scopeDigest) as GrantRow | undefined
+        if (grant) {
+          if (grant.grant_digest !== auth.grantDigest || grant.operation_id !== operationId) fail()
+          const existing = this.operation(operationId)
+          if (!existing || existing.admission_mode !== 'signed' || existing.binding_digest !== bindingDigest
+            || existing.request_digest !== requestDigest || existing.case_digest !== caseDigest) fail()
+          this.db.exec('COMMIT'); this.syncDirectory(); return false
+        }
+        if (this.operation(operationId)) fail()
+        this.db.prepare("INSERT INTO replay_operations(operation_id, binding_digest, request_digest, case_digest, admission_mode) VALUES (?, ?, ?, ?, 'signed')")
+          .run(operationId, bindingDigest, requestDigest, caseDigest)
+        this.db.prepare('INSERT INTO replay_grants(scope_digest, grant_digest, operation_id) VALUES (?, ?, ?)').run(auth.scopeDigest, auth.grantDigest, operationId)
+      } else {
+        const existing = this.operation(operationId)
+        if (existing) {
+          if (existing.admission_mode !== 'fixed' || this.grantForOperation(operationId) || existing.binding_digest !== bindingDigest
+            || existing.request_digest !== requestDigest || existing.case_digest !== caseDigest) fail()
+          this.db.exec('COMMIT'); this.syncDirectory(); return false
+        }
+        this.db.prepare("INSERT INTO replay_operations(operation_id, binding_digest, request_digest, case_digest, admission_mode) VALUES (?, ?, ?, ?, 'fixed')")
+          .run(operationId, bindingDigest, requestDigest, caseDigest)
+      }
       this.db.exec('COMMIT')
       this.syncDirectory()
-      return !existing
+      return true
     } catch (error) { try { this.db.exec('ROLLBACK') } catch { /* A completed commit cannot be rolled back. */ } throw error }
   }
   complete(operationId: string, bindingDigest: string, result: EffectBlockedReplayResult): void {
@@ -106,12 +169,15 @@ export class ReplayJournal {
     if (result.operationId !== operationId || result.kind !== 'dsh-effect-blocked-replay-observation' || result.quiescent !== true) fail()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      const prior = this.get(operationId, bindingDigest)
-      const pins = this.db.prepare('SELECT request_digest, case_digest FROM replay_operations WHERE operation_id = ?').get(operationId) as Row | undefined
-      if (!pins || result.requestDigest !== pins.request_digest || result.caseDigest !== pins.case_digest) fail()
+      const pins = this.operation(operationId)
+      if (!pins || (pins.admission_mode !== 'fixed' && pins.admission_mode !== 'signed') || pins.binding_digest !== bindingDigest
+        || (pins.admission_mode === 'signed' && !this.grantForOperation(operationId))
+        || (pins.admission_mode === 'fixed' && this.grantForOperation(operationId))
+        || result.requestDigest !== pins.request_digest || result.caseDigest !== pins.case_digest) fail()
       assertReplayEndpointResponse({ schemaVersion: 1, challenge: '0'.repeat(64), operationId,
         requestDigest: pins.request_digest, status: 'completed', result, observedAt: Date.now() })
-      if (!prior || (prior.result && runtimeConfigDigest(prior.result) !== digest)) fail()
+      const prior = this.result(operationId, pins)
+      if (prior.result && runtimeConfigDigest(prior.result) !== digest) fail()
       if (!prior.result) this.db.prepare('UPDATE replay_operations SET result_json = ?, result_digest = ? WHERE operation_id = ? AND result_json IS NULL')
         .run(JSON.stringify(result), digest, operationId)
       this.db.exec('COMMIT')

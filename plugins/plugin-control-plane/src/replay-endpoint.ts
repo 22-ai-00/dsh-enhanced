@@ -3,14 +3,16 @@ import { chmod, lstat, unlink } from 'node:fs/promises'
 import { createServer, type Socket } from 'node:net'
 import type { Context } from '@deepseek-ai/cordis'
 import { EffectBlockedReplayRuntime, validateReplayCases, type EffectBlockedReplayInput } from './effect-blocked-replay.js'
+import { verifyReplayGrant } from './replay-grant.js'
 import { ReplayJournal } from './replay-journal.js'
-import { assertReplayEndpointRequest, assertReplayEndpointResponse, REPLAY_MAX_BYTES, REPLAY_REQUEST_DOMAIN,
-  REPLAY_RESPONSE_DOMAIN, replayEndpointFail, validateReplayEndpointConfig,
+import { assertReplayEndpointRequest, assertReplayEndpointResponse, REPLAY_MAX_BYTES, REPLAY_REQUEST_MAX_BYTES, REPLAY_REQUEST_DOMAIN,
+  REPLAY_RESPONSE_DOMAIN, replayEndpointFail, isReplaySignedAuthority, validateReplayEndpointConfig,
   type ReplayEndpointConfig, type ReplayEndpointRequest, type ReplayEndpointResponse } from './replay-endpoint-protocol.js'
 import { assertRuntimeObserverExact, equalRuntimeObserverMac, readPrivateRuntimeObserverKey,
   runtimeConfigDigest, runtimeObserverMac } from './runtime-observer-protocol.js'
 
-export { queryReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig, type ReplayEndpointResponse } from './replay-endpoint-protocol.js'
+export { queryReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig, type ReplayFixedAuthority, type ReplayEndpointResponse } from './replay-endpoint-protocol.js'
+export * from './replay-grant.js'
 
 /** Opt-in mutation endpoint: a single immutable owner operation, never a model tool. */
 export function installReplayEndpoint(ctx: Context, input: ReplayEndpointConfig): void {
@@ -29,8 +31,8 @@ export function installReplayEndpoint(ctx: Context, input: ReplayEndpointConfig)
       const sockets = new Set<Socket>()
       let closing = false
       let identity: Awaited<ReturnType<typeof lstat>> | undefined
-      const respond = (request: ReplayEndpointRequest): ReplayEndpointResponse => {
-        const row = journal!.get(request.operationId, bindingDigest)
+      const respond = (request: ReplayEndpointRequest, authorization?: { scopeDigest: string; grantDigest: string }): ReplayEndpointResponse => {
+        const row = journal!.get(request.operationId, bindingDigest, authorization)
         const result = row?.result ?? null
         const current = result !== null && runtime!.isCurrent(result)
         const response: ReplayEndpointResponse = { schemaVersion: 1, challenge: request.challenge,
@@ -41,14 +43,31 @@ export function installReplayEndpoint(ctx: Context, input: ReplayEndpointConfig)
         return response
       }
       const dispatch = async (request: ReplayEndpointRequest, signal: AbortSignal): Promise<ReplayEndpointResponse> => {
-        if (closing || request.operationId !== config.authority.operationId || request.requestDigest !== config.authority.requestDigest
-          || Date.now() < config.authority.notBefore || Date.now() >= config.authority.expiresAt) replayEndpointFail()
-        if (request.action === 'query') return respond(request)
+        if (closing) replayEndpointFail()
+        let authorization: { scopeDigest: string; grantDigest: string } | undefined
+        let authorityExpiresAt = config.authority.expiresAt
+        if (isReplaySignedAuthority(config.authority)) {
+          if (request.schemaVersion !== 2) replayEndpointFail()
+          const verified = verifyReplayGrant(request.grant, config.authority, {
+            endpointDigest: bindingDigest, caseDigest, profilePath: config.runtime.profilePath,
+            operationId: request.operationId, requestDigest: request.requestDigest,
+          }, Date.now())
+          authorization = { scopeDigest: verified.scopeDigest, grantDigest: verified.grantDigest }
+          authorityExpiresAt = verified.expiresAt
+          if (request.action === 'execute' && (request.grant.processId !== process.pid
+            || request.grant.invocationId !== (/^[a-f0-9]{32}$/u.test(process.env.INVOCATION_ID ?? '') ? process.env.INVOCATION_ID! : null))) replayEndpointFail()
+        } else if (request.schemaVersion !== 1 || request.operationId !== config.authority.operationId
+          || request.requestDigest !== config.authority.requestDigest || Date.now() < config.authority.notBefore
+          || Date.now() >= config.authority.expiresAt) replayEndpointFail()
+        if (request.action === 'query') return respond(request, authorization)
         signal.throwIfAborted()
-        if (!journal!.reserve(request.operationId, bindingDigest, config.authority.requestDigest, caseDigest)) return respond(request)
+        if (!journal!.reserve(request.operationId, bindingDigest, request.requestDigest, caseDigest, authorization)) return respond(request, authorization)
         // No failure after this durable admission may regain create/dispatch authority.
         let handle: EffectBlockedReplayInput['handle'] | undefined
-        const expiresAt = Math.min(config.authority.expiresAt, Date.now() + config.timeoutMs)
+        const expiresAt = Math.min(authorityExpiresAt, Date.now() + config.timeoutMs)
+        // Durable admission may wait for SQLite locks/fsync past the authority window.
+        // Keep its reservation unknown without running any Agent startup hook.
+        if (Date.now() >= expiresAt) return respond(request, authorization)
         const executionSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, expiresAt - Date.now()))])
         try {
           handle = await endpointCtx.agents.create({
@@ -67,7 +86,7 @@ export function installReplayEndpoint(ctx: Context, input: ReplayEndpointConfig)
           // Native handles memoize disposal. Also reclaim if validation rejected before handoff.
           if (handle) await handle.dispose()
         }
-        return respond(request)
+        return respond(request, authorization)
       }
       const server = createServer({ allowHalfOpen: true }, socket => {
         if (closing || sockets.size >= 8) { socket.destroy(); return }
@@ -78,7 +97,7 @@ export function installReplayEndpoint(ctx: Context, input: ReplayEndpointConfig)
         socket.once('close', () => { clearTimeout(deadline); disconnected.abort(); sockets.delete(socket) })
         let bytes = Buffer.alloc(0), received = false
         socket.on('data', chunk => {
-          if (received || bytes.length + chunk.length > 2048) { socket.destroy(); return }
+          if (received || bytes.length + chunk.length > REPLAY_REQUEST_MAX_BYTES) { socket.destroy(); return }
           bytes = Buffer.concat([bytes, chunk])
           if (!bytes.includes(10)) return
           received = true

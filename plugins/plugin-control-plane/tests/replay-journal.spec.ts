@@ -6,6 +6,7 @@ import { afterEach, expect, test as nativeTest } from 'vitest'
 import { ReplayJournal } from '../src/replay-journal.js'
 import type { EffectBlockedReplayResult } from '../src/effect-blocked-replay.js'
 import { replayRuntimeDigest } from '../src/effect-blocked-replay.js'
+import { runtimeConfigDigest } from '../src/runtime-observer-protocol.js'
 
 const test = nativeTest.skipIf(process.platform !== 'linux')
 const roots: string[] = []
@@ -16,6 +17,8 @@ function fixture() {
   return { root, path: join(root, 'replay.sqlite') }
 }
 const binding = 'b'.repeat(64), request = 'a'.repeat(64), cases = 'c'.repeat(64)
+const scope = 'd'.repeat(64), grant = 'e'.repeat(64)
+const signed = { scopeDigest: scope, grantDigest: grant }
 function result(): EffectBlockedReplayResult {
   const runtime: EffectBlockedReplayResult['runtime'] = { schemaVersion: 1, kind: 'dsh-runtime-observation',
     observerId: '0d0e7740-8f99-451a-8fa8-614c26eb5626', observerConfigDigest: 'd'.repeat(64), challenge: 'e'.repeat(64),
@@ -58,6 +61,69 @@ test('completion is immutable, validates pinned request/cases, and survives reop
   try { expect(reopened.get('op', binding)?.result?.sessionId).toBe('fixture') } finally { reopened.close() }
 })
 
+function createV1(path: string, completed = false): void {
+  const db = new DatabaseSync(path)
+  db.exec(`CREATE TABLE replay_operations (
+    operation_id TEXT PRIMARY KEY, binding_digest TEXT NOT NULL, request_digest TEXT NOT NULL, case_digest TEXT NOT NULL,
+    result_json TEXT, result_digest TEXT,
+    CHECK((result_json IS NULL AND result_digest IS NULL) OR (json_valid(result_json) AND length(result_digest) = 64))
+  ) STRICT, WITHOUT ROWID;
+  PRAGMA application_id = 1146311248; PRAGMA user_version = 1;`)
+  const observed = result()
+  db.prepare('INSERT INTO replay_operations(operation_id, binding_digest, request_digest, case_digest, result_json, result_digest) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('op', binding, request, cases, completed ? JSON.stringify(observed) : null, completed ? runtimeConfigDigest(observed) : null)
+  db.close()
+}
+
+test('migrates v1 unknown and completed fixed rows without granting signed admission', () => {
+  for (const completed of [false, true]) {
+    const f = fixture(); createV1(f.path, completed); chmodSync(f.path, 0o600)
+    const journal = new ReplayJournal(f.path)
+    try {
+      expect(journal.get('op', binding)?.status).toBe(completed ? 'completed' : 'admitted')
+      expect(() => journal.get('op', binding, signed)).toThrow()
+      expect(() => journal.reserve('op', binding, request, cases, signed)).toThrow()
+      expect(() => journal.reserve('op', binding, request, cases)).not.toThrow()
+    } finally { journal.close() }
+    const raw = new DatabaseSync(f.path)
+    try { expect((raw.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2) } finally { raw.close() }
+  }
+})
+
+test('signed scope binds exactly one grant and operation across SQLite connections', () => {
+  const f = fixture(), first = new ReplayJournal(f.path), second = new ReplayJournal(f.path)
+  const other = { scopeDigest: 'f'.repeat(64), grantDigest: grant }
+  try {
+    expect(first.get('missing', binding, signed)).toBeUndefined()
+    expect(first.reserve('op', binding, request, cases, signed)).toBe(true)
+    expect(second.reserve('op', binding, request, cases, signed)).toBe(false)
+    expect(second.get('op', binding, signed)).toEqual({ status: 'admitted', result: null })
+    expect(() => second.get('op', binding)).toThrow()
+    expect(() => second.get('missing', binding, signed)).toThrow()
+    expect(() => second.get('op', binding, { scopeDigest: scope, grantDigest: 'f'.repeat(64) })).toThrow()
+    expect(() => second.reserve('other', binding, request, cases, signed)).toThrow()
+    expect(() => second.reserve('op', binding, request, cases, other)).toThrow()
+    expect(() => second.reserve('other', binding, request, cases, signed)).toThrow()
+  } finally { first.close(); second.close() }
+})
+
+test('signed unknown and completed operations survive reopen', () => {
+  const f = fixture(), first = new ReplayJournal(f.path)
+  try {
+    expect(first.reserve('op', binding, request, cases, signed)).toBe(true)
+  } finally { first.close() }
+  const admitted = new ReplayJournal(f.path)
+  try {
+    expect(admitted.get('op', binding, signed)).toEqual({ status: 'admitted', result: null })
+    admitted.complete('op', binding, result())
+  } finally { admitted.close() }
+  const completed = new ReplayJournal(f.path)
+  try {
+    expect(completed.get('op', binding, signed)?.status).toBe('completed')
+    expect(() => completed.get('op', binding)).toThrow()
+  } finally { completed.close() }
+})
+
 test('rejects foreign databases and untrusted filesystem identities', () => {
   const f = fixture()
   const foreign = new DatabaseSync(f.path); foreign.exec('CREATE TABLE other(x)'); foreign.close(); chmodSync(f.path, 0o600)
@@ -97,5 +163,19 @@ test('rejects accessor payload before evaluation or completion', () => {
     expect(() => journal.complete('op', binding, observed)).toThrow()
     expect(invoked).toBe(false)
     expect(journal.get('op', binding)?.status).toBe('admitted')
+  } finally { journal.close() }
+})
+
+test('rejects accessor authorization before evaluating a digest getter', () => {
+  const f = fixture(), journal = new ReplayJournal(f.path)
+  let invoked = false
+  const malicious = Object.defineProperties({}, {
+    scopeDigest: { enumerable: true, get() { invoked = true; return scope } },
+    grantDigest: { enumerable: true, value: grant },
+  })
+  try {
+    expect(() => journal.get('op', binding, malicious as never)).toThrow()
+    expect(() => journal.reserve('op', binding, request, cases, malicious as never)).toThrow()
+    expect(invoked).toBe(false)
   } finally { journal.close() }
 })

@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 // Explicitly opt-in, temporary Host/profile only. No model calls or production writes.
+import assert from 'node:assert/strict'
+import { createRequire } from 'node:module'
+import { prepareRealHostControlPackage } from './real-host-control-package.mjs'
+import { queryReplayEndpoint, replayGrantSigningPayload } from '../../plugins/plugin-control-plane/lib/replay-endpoint.js'
 import { execFile, spawn } from 'node:child_process'
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto'
 import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { queryRuntimeObserver, runtimeConfigDigest } from '../../plugins/plugin-control-plane/lib/runtime-observer.js'
 import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest, hostAttestationEvidenceDigest, hostAttestationSigningPayload } from '../../plugins/plugin-control-plane/lib/attestation.js'
@@ -31,7 +35,9 @@ const name = `readiness-fixture-${process.pid}-${randomUUID().slice(0, 8)}`
 const profile = join(home, 'profiles', name); const unit = `dsh-profile-${name}.service`
 const dsh = await realpath(process.env.DSH_READINESS_DSH)
 const node = await realpath(process.execPath)
-const controlUrl = new URL('../../plugins/plugin-control-plane/lib/index.js', import.meta.url)
+let controlUrl
+let controlBuild
+let peerPackages
 const candidateUrl = new URL('../../plugins/assistant-policy/lib/index.js', import.meta.url)
 const supervisor = async args => (await run('/usr/bin/systemctl', ['--user', ...args], { timeout: 15000, maxBuffer: 65536 })).stdout
 async function cleanupUnit() {
@@ -48,18 +54,27 @@ let evidence
 let store
 try {
   await mkdir(owner, { mode: 0o700 }); await mkdir(join(home, 'profiles'), { recursive: true })
+  ;({ controlUrl, controlBuild, peerPackages } = await prepareRealHostControlPackage(dsh, join(owner, 'control-package')))
   const env = { PATH: '/usr/bin:/bin', HOME: root, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }
   const dshVersion = (await run(node, [dsh, '--version'], { env, timeout: 10000 })).stdout.trim()
   await run(node, [dsh, '--profile', name, '--from-default-profile', 'web', '--dump-config'], { env, timeout: 30000, maxBuffer: 1048576 })
   const keyPath = join(owner, 'observer.key'); await writeFile(keyPath, randomBytes(32), { mode: 0o600 })
-  const candidateConfig = { databasePath: join(owner, 'policy.sqlite'), autoReview: { enabled: false }, rules: [], budgets: [] }
+  // The fixture permits its synthetic tool up to the monotonic replay guard.
+  const candidateConfig = { databasePath: join(owner, 'policy.sqlite'), toolDefaultEffect: 'allow', autoReview: { enabled: false }, rules: [], budgets: [] }
   const config = { socketPath: join(owner, 'observer.sock'), keyPath, profilePath: profile,
     targets: [{ entryId: 'include:observed-candidate', module: candidateUrl.href,
       configDigest: runtimeConfigDigest(candidateConfig), services: ['assistantPolicy'] }] }
+  let replayEndpoint
+  let replayProbeRow
   const patch = disabled => [{ insert: [
     { id: 'observer-control', name: controlUrl.href, config: { catalogPath: join(owner, 'catalog.json'), trustPath: join(owner, 'trust.json'),
-      statePath: join(owner, 'state'), runtimeObserver: config } },
+      statePath: join(owner, 'state'), runtimeObserver: config, ...(replayEndpoint ? { replayEndpoint } : {}) } },
     { id: 'observed-candidate', name: candidateUrl.href, config: candidateConfig, disabled },
+    ...(replayProbeRow ? [
+      { id: 'replay-delivery', disabled, name: new URL('../../plugins/assistant-delivery/lib/index.js', import.meta.url).href, inject: ['assistantPolicy'],
+        config: { databasePath: join(owner, 'delivery.sqlite'), spoolPath: join(owner, 'spool'), defaultWorkspace: root, schedulerEnabled: false } },
+      replayProbeRow,
+    ] : []),
   ] }]
   const patchPath = join(profile, 'cordis.patch.yml')
   await writeFile(patchPath, JSON.stringify(patch(!initialRuntimeActive)), { mode: 0o600 })
@@ -134,6 +149,29 @@ try {
     await cp(profile, join(home, 'profiles', `.${name}.plugin-backup-${suffix}`), { recursive: true })
     await writeFile(patchPath, JSON.stringify(patch(true)), { mode: 0o600 })
   }
+  const grantKeys = generateKeyPairSync('ed25519')
+  const replayAuditPath = join(owner, 'replay-audit.jsonl')
+  if (!initialCandidateDisabled) {
+    const probePath = join(profile, 'replay-probe.mjs')
+    await copyFile(new URL('./fixtures/replay-host-probe.mjs', import.meta.url), probePath)
+    replayProbeRow = { id: 'replay-probe', name: pathToFileURL(probePath).href,
+      config: { toolsModule: pathToFileURL(createRequire(dsh).resolve('@deepseek-ai/dsh-tools')).href, auditPath: replayAuditPath, mode: 'complete' } }
+    const replayKeyPath = join(owner, 'replay.key'); await writeFile(replayKeyPath, randomBytes(32), { mode: 0o600 })
+    replayEndpoint = {
+      runtime: { ...config, socketPath: join(owner, 'replay.sock'), keyPath: replayKeyPath },
+      journalPath: join(owner, 'replay.sqlite'), timeoutMs: 15000,
+      authority: { mode: 'signed', authority: 'fixture-replay-owner', keyId: 'replay-key',
+        publicKeyPem: grantKeys.publicKey.export({ type: 'spki', format: 'pem' }),
+        scope: { installationId: plan.installationId, ledger: plan.ledger, plan: { id: plan.id, digest: plan.digest },
+          activation: { id: plan.activation.id, fence: plan.activation.fence }, profile: { name, path: profile } },
+        notBefore: now - 1000, expiresAt: now + 120000, maximumGrantMs: 60000,
+        cases: [{ id: 'tool', kind: 'tool', name: 'endpoint_probe', arguments: {} },
+          { id: 'reply', kind: 'delivery', text: 'fixture blocked reply' }] },
+      agent: { cwd: root, preset: 'standard', provider: 'fixture-unused', model: 'fixture-unused' },
+    }
+    // Staging precedes the signed reload. No deployment input changes after readiness.
+    await writeFile(patchPath, JSON.stringify(patch(false)), { mode: 0o600 })
+  }
   plan = store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence, from: 'staging', to: 'awaiting-reload' })
   const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-5', ...executable,
     interpreter, authority: 'fixture-owner', keyId: 'fixture-key' }
@@ -203,11 +241,44 @@ try {
   if (JSON.stringify(readinessReplay) !== JSON.stringify(readinessReceipt)) throw new Error('readiness replay differs')
   const afterReadiness = await identity()
   if (JSON.stringify(afterReadiness) !== JSON.stringify(successor.supervisor)) throw new Error('readiness restarted the Host')
+  let lateReplay
   let generationSubstitution
   if (plan.status === 'awaiting-effect-blocked-replay') {
     const request = prepare({ kind: 'effect-blocked-replay', minimumDeliveryAttempts: 1,
       minimumToolExecutionAttempts: 1, maximumExternalEffects: 0 })
     if (request.predecessor?.receiptDigest !== controlPlaneDigest(readinessReceipt)) throw new Error('replay does not bind actual readiness')
+    const replayBinding = { operationId: request.operationId, requestDigest: hostAttestationRequestDigest(request) }
+    const query = (action, grant) => queryReplayEndpoint({ socketPath: replayEndpoint.runtime.socketPath,
+      keyPath: replayEndpoint.runtime.keyPath, action, ...replayBinding, ...(grant ? { grant } : {}), timeoutMs: 16000 })
+    await assert.rejects(query('execute'))
+    const notBefore = Date.now()
+    const unsignedGrant = { schemaVersion: 1, kind: 'dsh-effect-replay-grant', authority: replayEndpoint.authority.authority,
+      keyId: replayEndpoint.authority.keyId, request, endpointDigest: runtimeConfigDigest(replayEndpoint),
+      caseDigest: runtimeConfigDigest(replayEndpoint.authority.cases), processId: Number(afterReadiness.MainPID),
+      invocationId: afterReadiness.InvocationID, notBefore, expiresAt: Math.min(notBefore + 60000, replayEndpoint.authority.expiresAt) }
+    const grant = { ...unsignedGrant, signature: sign(null, Buffer.from(replayGrantSigningPayload(unsignedGrant)), grantKeys.privateKey).toString('base64') }
+    assert.equal((await query('query', grant)).status, 'not-started')
+    const pinsBefore = await Promise.all(reloadConfig.profileFiles.map(pin => pinned(pin.path)))
+    assert.deepEqual(pinsBefore, reloadConfig.profileFiles)
+    const completed = await query('execute', grant)
+    assert.equal(completed.status, 'completed')
+    assert.equal(completed.result.requestDigest, replayBinding.requestDigest)
+    assert.equal(completed.result.caseDigest, unsignedGrant.caseDigest)
+    assert.equal(completed.result.runtime.processId, unsignedGrant.processId)
+    assert.equal(completed.result.runtime.invocationId, unsignedGrant.invocationId)
+    assert.deepEqual(completed.result.attempts.map(attempt => attempt.blockedAt), ['native-tool-guard', 'delivery-reply-admission'])
+    assert.deepEqual((await query('execute', grant)).result, completed.result)
+    assert.deepEqual(await identity(), afterReadiness)
+    assert.deepEqual(await Promise.all(reloadConfig.profileFiles.map(pin => pinned(pin.path))), pinsBefore)
+    const afterReplay = await observe(true)
+    assert.equal(afterReplay.observation.observerId, successor.observation.observerId)
+    assert.deepEqual(afterReplay.observation.entries, successor.observation.entries)
+    const replayAudit = (await readFile(replayAuditPath, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(replayAudit.filter(row => row.kind === 'create').length, 1)
+    assert.equal(replayAudit.filter(row => row.kind === 'tool-body').length, 0)
+    assert.deepEqual(store.getPlan(plan.id), plan)
+    assert.equal(plan.status, 'awaiting-effect-blocked-replay')
+    lateReplay = { grant, completed, afterReplay, replayAudit, pinsBefore, sameHostAndDeployment: true, activationUnchanged: true }
     // Deliberately fabricated negative input, not an external-effect observation.
     // A valid owner signature must not authorize switching the observed Host generation.
     const invalidEvidence = { kind: 'effect-blocked-replay', deliveryAttempts: 1, deliveryBlocked: 1,
@@ -301,7 +372,7 @@ try {
   }
   evidence = { schemaVersion: 1, kind: rollbackAction ? 'systemd-rollback-real-dsh-fixture' : 'systemd-readiness-real-dsh-fixture', observedAt: new Date().toISOString(), dshVersion,
     dshCliSha256: sha(await readFile(dsh)), candidatePackage: '@dsh-enhanced/assistant-policy',
-    candidateVersion, initialCandidateDisabled, rollbackAction, recoveryEvidence,
+    candidateVersion, initialCandidateDisabled, rollbackAction, recoveryEvidence, controlBuild, peerPackages, lateReplay,
     runtimeDigests: { observer: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/runtime-observer.js', import.meta.url))),
       attestor: sha(await readFile(attestorSource)), deployedAttestor: executable.sha256, observerClient: readinessConfig.readiness.client.sha256, processHelper: processHelper.sha256,
       controlCli: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/cli.js', import.meta.url))),
