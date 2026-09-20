@@ -17,9 +17,7 @@ export interface TaskAcceptanceRegistration {
   completed(handle: AcceptanceHandle): Promise<void>
 }
 export interface AcceptanceContract extends AcceptanceTask { readonly id: string; readonly digest: string }
-export interface AcceptedExecution {
-  readonly contractId: string
-  readonly contractDigest: string
+export interface ForegroundExecution {
   readonly dispatchedAt: number
   readonly status: 'succeeded' | 'failed' | 'timed-out' | 'cancelled' | 'unknown'
   readonly quiescent: boolean
@@ -27,4 +25,9 @@ export interface AcceptedExecution {
   readonly executionRef: string
   readonly modelSelectionState: 'missing' | 'frozen' | 'inconsistent'
   readonly modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }>
+}
+
+export interface AcceptedExecution extends ForegroundExecution {
+  readonly contractId: string
+  readonly contractDigest: string
 }

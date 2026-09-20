@@ -390,7 +390,7 @@ pnpm --dir plugins/assistant-delivery pack --dry-run
 
 旧 foreground receipt 未保存 principal version：仅当前仍为同一 record 的初始 v1 身份可修订；身份已更新时保守拒绝继承旧判断修订权。新记录完整保存 record+version。
 
-Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果绑定到精确 owner。它核对当前 route、原始 Inbox/binding、已验收执行和 principal record/version，再区分独立 Verifier 与 owner 的纠正/撤回；只有核对成功才返回来源 Session、最多 4096 字符的原任务正文及 canonical receipt。来源带 `modelSelectionState`：`frozen` 才返回实际原生 `request/header` 已物化的 provider/model/可选 reasoning effort；`missing` 表示历史执行未采到调用快照，`inconsistent` 表示同一 accepted execution 出现不同实际路由。后两者不猜测当前会话或部署默认模型。schema v22 保留旧行的 `missing` 状态，且终态执行不能事后补写路由。`/new` 前的同 owner 任务可被识别，主体身份变更不能继承旧任务权限。该接口仅供发现前台学习来源，尚不自动调度修复，也不授予执行或采用权限；消费者写入前仍须使用 Evaluation 的 canonical writer fence。
+Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果绑定到精确 owner。它核对当前 route、原始 Inbox/binding、Host 执行回执和 principal record/version，再区分独立 Verifier 与 owner 的纠正/撤回；只有核对成功才返回来源 Session、最多 4096 字符的原任务正文及 canonical receipt。来源带 `modelSelectionState`：`frozen` 才返回实际原生 `request/header` 已物化的 provider/model/可选 reasoning effort；`missing` 表示历史执行未采到调用快照，`inconsistent` 表示同一前台执行出现不同实际路由。后两者不猜测当前会话或部署默认模型。schema v23 为内置 Delivery 运行时的普通 owner 对话增加独立执行回执：无需预设验收 profile，回复具体消息的 `/feedback not-achieved`、更正或撤回也能进入 canonical 前台结果。记录只证明任务归属、实际模型和执行已停止，不能证明目标达成；没有验收契约时只接受已认证的 typed owner 反馈。这类新任务的目标结果反馈要求 Evaluation 可用，先提交 canonical 修订再更新本地 workflow；服务缺失时明确返回不可用，不确认仅有本地记录的成功。偏好反馈和没有执行回执的历史 workflow 路径保持原行为。旧 acceptance 回执继续兼容，旧普通任务不回填，终态执行不能事后补写路由。此入口覆盖内置外部渠道运行时；原生 Web 和自定义运行时不能据此推断已接通。`/new` 前的同 owner 任务可被识别，主体身份变更不能继承旧任务权限。该接口仅供发现前台学习来源，尚不自动调度修复，也不授予执行或采用权限；消费者写入前仍须使用 Evaluation 的 canonical writer fence。
 
 
 ## 原生 Web owner 接入

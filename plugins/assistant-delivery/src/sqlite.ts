@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 22
+export const deliverySchemaVersion = 23
 
 const goalOutcomeTargetSchema = `
   CREATE TABLE IF NOT EXISTS delivery_goal_outcome_targets (
@@ -91,6 +91,37 @@ const taskAcceptanceExecutionSchema = `
     model_reasoning_effort TEXT,
     CHECK((status = 'pending') = (completed_at IS NULL AND execution_ref IS NULL))
   ) STRICT;
+`
+
+/** A non-contract execution receipt for every authenticated owner foreground turn. */
+const foregroundExecutionSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_foreground_executions (
+    inbox_id TEXT PRIMARY KEY REFERENCES inbox_messages(id),
+    workspace TEXT NOT NULL,
+    preset TEXT NOT NULL,
+    principal_record_id TEXT NOT NULL REFERENCES delivery_principals(id),
+    principal_version INTEGER NOT NULL CHECK(principal_version >= 1),
+    binding_id TEXT NOT NULL REFERENCES conversation_bindings(id),
+    binding_version INTEGER NOT NULL CHECK(binding_version >= 1),
+    binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+    dispatched_at INTEGER NOT NULL CHECK(dispatched_at >= 0),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'succeeded', 'failed', 'timed-out', 'cancelled', 'unknown')),
+    quiescent INTEGER NOT NULL CHECK(quiescent IN (0, 1)),
+    completed_at INTEGER,
+    execution_ref TEXT,
+    model_selection_state TEXT NOT NULL DEFAULT 'missing' CHECK(model_selection_state IN ('missing', 'frozen', 'inconsistent')),
+    model_provider TEXT,
+    model_id TEXT,
+    model_reasoning_effort TEXT,
+    CHECK((status = 'pending' AND completed_at IS NULL AND execution_ref IS NULL)
+      OR (status != 'pending' AND completed_at IS NOT NULL AND completed_at >= dispatched_at AND execution_ref IS NOT NULL AND execution_ref = inbox_id)),
+    CHECK(quiescent = 0 OR status = 'succeeded'),
+    CHECK((model_selection_state = 'missing' AND model_provider IS NULL AND model_id IS NULL AND model_reasoning_effort IS NULL)
+      OR (model_selection_state = 'frozen' AND model_provider IS NOT NULL AND model_id IS NOT NULL)
+      OR (model_selection_state = 'inconsistent' AND model_provider IS NULL AND model_id IS NULL AND model_reasoning_effort IS NULL))
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS delivery_foreground_execution_owner
+    ON delivery_foreground_executions(principal_record_id, principal_version, workspace, preset, binding_id);
 `
 
 const ownerObjectiveRevisionSchema = `
@@ -1104,6 +1135,12 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec('PRAGMA user_version = 22;')
     version = 22
   }
+  if (version === 22) {
+    // Do not synthesize ordinary-use receipts from acceptance contracts: an
+    // old accepted task was not necessarily captured as a general execution.
+    database.exec(`${foregroundExecutionSchema} PRAGMA user_version = 23;`)
+    version = 23
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1315,11 +1352,12 @@ function migrateObserved(database: DatabaseSync): void {
 
     ${ownerObjectiveRevisionSchema}
     ${taskAcceptanceExecutionSchema}
+    ${foregroundExecutionSchema}
     ${sessionLeaseSchema}
     ${goalOutcomeTargetSchema}
 
     ${workflowOwnerAnchoredSchema}
-    PRAGMA user_version = 22;
+    PRAGMA user_version = 23;
   `)
 }
 

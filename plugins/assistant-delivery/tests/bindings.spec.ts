@@ -196,7 +196,7 @@ describe('conversation bindings', () => {
     const columns = (inspected.prepare('PRAGMA table_info(delivery_task_acceptance_executions)').all() as Array<{ name: string }>)
       .map(row => row.name)
     expect(columns).toEqual(expect.arrayContaining(['model_selection_state', 'model_provider', 'model_id', 'model_reasoning_effort']))
-    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 22 })
+    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 23 })
     inspected.close()
   })
 

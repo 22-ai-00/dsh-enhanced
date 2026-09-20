@@ -126,6 +126,9 @@ interface DshDeliveryRuntimeOptions {
     input: { status: 'succeeded' | 'failed' | 'timed-out' | 'cancelled' | 'unknown'; quiescent: boolean },
   ): Promise<void>
   recordForegroundTaskModelSelection(handle: AcceptanceHandle, input: { provider: string; model: string; reasoningEffort?: string }): void
+  beginForegroundTaskExecution(binding: Readonly<ConversationBinding>, envelope: Readonly<InboundEnvelope>): string | undefined
+  recordForegroundExecutionModelSelection(inboxId: string, input: { provider: string; model: string; reasoningEffort?: string }): void
+  completeForegroundTaskExecution(inboxId: string, input: { status: 'succeeded' | 'unknown'; quiescent: boolean }): void
   permissionPickerTtlMs: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
   /** Atomically remove a stale explicit effort without overwriting a newer model choice. */
@@ -3845,6 +3848,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let handle: AgentHandle | undefined
     let dispatched = false
     let acceptance: AcceptanceHandle | undefined
+    let foregroundExecution: string | undefined
     let removeAcceptanceRequest: (() => void) | undefined
     let acceptanceSucceeded = false
     let goalContinuation: GoalContinuationWait | undefined
@@ -3951,13 +3955,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // host driver is otherwise free to claim its first round at idle.
       goalContinuation = this.waitForNativeGoalContinuation(binding, envelope, agent, signal)
       acceptance = this.options.prepareForegroundTaskAcceptance(binding, envelope)
-      if (acceptance !== undefined) removeAcceptanceRequest = this.ctx.on('session/event', (session, event) => {
+      foregroundExecution = this.options.beginForegroundTaskExecution(binding, envelope)
+      if (acceptance !== undefined || foregroundExecution !== undefined) removeAcceptanceRequest = this.ctx.on('session/event', (session, event) => {
         if (session !== agent.session || event.type !== 'request/header') return
         // `agent/request` exposes the candidate route.  The native loop writes
         // this header only after `llm.prepareCall()` has applied adapter
         // defaults such as reasoning effort, which is the route actually sent
         // to the provider.
-        this.options.recordForegroundTaskModelSelection(acceptance!, event.data.header.config)
+        if (foregroundExecution !== undefined) this.options.recordForegroundExecutionModelSelection(foregroundExecution, event.data.header.config)
+        if (acceptance !== undefined) this.options.recordForegroundTaskModelSelection(acceptance, event.data.header.config)
       })
       markDispatching()
       // Once the durable marker exists, even a synchronous followup failure is ambiguous:
@@ -4245,6 +4251,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       } finally {
         acceptanceSucceeded = acceptanceSucceeded && disposed && !signal.aborted
           && (goalContinuation?.isQuiescent() ?? true)
+        if (foregroundExecution !== undefined) {
+          try {
+            this.options.completeForegroundTaskExecution(foregroundExecution, {
+              status: acceptanceSucceeded ? 'succeeded' : 'unknown', quiescent: acceptanceSucceeded,
+            })
+          } catch (error) {
+            this.ctx.logger.warn(`assistant-delivery: foreground execution completion failed: ${String(error)}`)
+          }
+        }
         if (acceptance !== undefined) {
           try {
             await this.options.completeForegroundTaskAcceptance(acceptance, {

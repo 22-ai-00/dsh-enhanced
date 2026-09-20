@@ -167,7 +167,7 @@ usageLearning:
 
 保留前文 `scope` 和模型/工具预算；按需保留源码轨配置。安装并挂载 `assistant-evaluation` 与 `assistant-automations`，启用 Automations scheduler。Policy 需允许 background 主体 `assistant-growth-usage` 对相同 workspace/principal 的 `automation:*` 执行 `reconcile`，并允许对应后台作业的 `execute`。使用全局或 owner 聚合的周期预算限制持续成长总消耗；每个 review 由原生 Automations 预留一次预算，driver 不重复扣取。已有 `growth_*` 与可选 `plugin_source_*` 工具规则仍适用。
 
-同进程 Evaluation 变化即时扫描，原生每分钟 scan 负责重启及其他进程写入的恢复；scan 自身不调用模型。只处理精确 owner、已结束且 quiescent、未截断的前台可信结果（独立 Verifier 或已认证 owner 反馈），排除 Automation/后台成长自己的结果，避免递归触发。缺模型快照或多请求模型不一致且没有固定覆盖时不发起作业。相同 canonical 修订只接纳一次；纠正/撤回使旧排队作业失效，运行中的作业在模型/工具边界重查来源。原始记录和评价仍由 Evaluation 持有。
+同进程 Evaluation 变化即时扫描，原生每分钟 scan 负责重启及其他进程写入的恢复；scan 自身不调用模型。只处理精确 owner、已结束且 quiescent、未截断的前台可信结果（独立 Verifier 或已认证 owner 反馈），内置 Delivery 普通对话可在回复具体消息的 `/feedback not-achieved` 后触发，无需预先配置任务验收 profile；单纯模型结束不会生成可信结果。排除 Automation/后台成长自己的结果，避免递归触发。缺模型快照或多请求模型不一致且没有固定覆盖时不发起作业。相同 canonical 修订只接纳一次；纠正/撤回使旧排队作业失效，运行中的作业在模型/工具边界重查来源。原始记录和评价仍由 Evaluation 持有。
 
 `usageHealth()` 返回连接、扫描错误与各状态数量，不返回任务正文。queued 可在重启后恢复；running 中断转 unknown，不自动重跑。配置、owner 身份/route 或来源变化会阻止旧作业继续。停用 `usageLearning` 会卸载执行器并中止本代工作；持久作业不会被清除。它目前自动驱动有界复盘和候选生成，尚不创建任意修复 Goal；完成复盘不代表候选已采用或带来收益。
 

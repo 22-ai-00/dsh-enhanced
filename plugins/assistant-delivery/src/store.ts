@@ -60,7 +60,7 @@ import {
   type OwnerGoalOutcomeFeedbackLocator,
   type OwnerGoalOutcomeFeedbackProof,
 } from './goal-wake-types.js'
-import type { AcceptanceContract, AcceptedExecution } from './acceptance.js'
+import type { AcceptanceContract, AcceptedExecution, ForegroundExecution } from './acceptance.js'
 import { openDeliveryDatabase } from './sqlite.js'
 import type { SessionLease, SessionLeaseClaim, SessionLeaseTarget } from './session-lease-types.js'
 import {
@@ -4164,6 +4164,144 @@ export class DeliveryStore {
       ...(row.model_selection_state === 'frozen' && row.model_provider && row.model_id ? { modelSelection: Object.freeze({ provider: row.model_provider, model: row.model_id, ...(row.model_reasoning_effort === null ? {} : { reasoningEffort: row.model_reasoning_effort }) }) } : {}) })
   }
 
+  /** Immutable pre-prompt receipt for an authenticated owner foreground turn. */
+  bindForegroundTaskExecution(input: {
+    inboxId: string
+    scope: { workspace: string; preset: string }
+    owner: { principalRecordId: string; principalVersion: number }
+    binding: Pick<ConversationBinding, 'id' | 'version' | 'generation'>
+    dispatchedAt: number
+  }): void {
+    this.assertOpen()
+    if (!Number.isSafeInteger(input.dispatchedAt) || input.dispatchedAt < 0
+      || !Number.isSafeInteger(input.owner.principalVersion) || input.owner.principalVersion < 1
+      || !Number.isSafeInteger(input.binding.version) || input.binding.version < 1
+      || !Number.isSafeInteger(input.binding.generation) || input.binding.generation < 1) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground execution binding is invalid')
+    }
+    const text = [input.inboxId, input.scope.workspace, input.scope.preset, input.owner.principalRecordId, input.binding.id]
+    if (text.some(value => typeof value !== 'string' || value.trim() === '' || Buffer.byteLength(value, 'utf8') > 4_096)) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground execution binding text is invalid')
+    }
+    this.transaction(() => {
+      if (this.database.prepare('SELECT 1 FROM delivery_foreground_executions WHERE inbox_id = ?').get(input.inboxId) !== undefined) {
+        throw new DeliveryStoreError('idempotency-conflict', 'foreground task has already crossed its dispatch boundary')
+      }
+      const admitted = this.database.prepare(`
+        SELECT inbox.id FROM inbox_messages AS inbox
+        JOIN conversation_bindings AS binding ON binding.id = inbox.binding_id
+        JOIN delivery_principals AS principal ON principal.id = binding.principal_id
+        WHERE inbox.id = ? AND inbox.status = 'claimed' AND inbox.binding_id = ?
+          AND binding.status = 'active' AND binding.version = ? AND binding.generation = ?
+          AND principal.status = 'active' AND principal.role = 'owner'
+          AND principal.id = ? AND principal.version = ?
+          AND binding.workspace = ? AND binding.agent_preset = ?
+      `).get(input.inboxId, input.binding.id, input.binding.version, input.binding.generation,
+        input.owner.principalRecordId, input.owner.principalVersion, input.scope.workspace, input.scope.preset)
+      if (admitted === undefined) throw new DeliveryStoreError('invalid-binding', 'foreground execution is not bound to the claimed owner inbox')
+      this.database.prepare(`INSERT INTO delivery_foreground_executions(
+        inbox_id, workspace, preset, principal_record_id, principal_version, binding_id, binding_version,
+        binding_generation, dispatched_at, status, quiescent
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)`).run(
+        input.inboxId, input.scope.workspace, input.scope.preset, input.owner.principalRecordId,
+        input.owner.principalVersion, input.binding.id, input.binding.version, input.binding.generation, input.dispatchedAt,
+      )
+    })
+  }
+
+  finishForegroundTaskExecution(input: {
+    inboxId: string
+    status: ForegroundExecution['status']
+    quiescent: boolean
+    completedAt: number
+  }): void {
+    this.assertOpen()
+    if (typeof input.quiescent !== 'boolean'
+      || !['succeeded', 'failed', 'timed-out', 'cancelled', 'unknown'].includes(input.status)
+      || !Number.isSafeInteger(input.completedAt) || input.completedAt < 0) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground execution completion is invalid')
+    }
+    const status = input.quiescent && input.status === 'succeeded' ? 'succeeded' : 'unknown'
+    const quiescent = status === 'succeeded' ? 1 : 0
+    const changed = this.database.prepare(`UPDATE delivery_foreground_executions
+      SET status = ?, quiescent = ?, completed_at = ?, execution_ref = inbox_id
+      WHERE inbox_id = ? AND status = 'pending' AND dispatched_at <= ?`).run(status, quiescent, input.completedAt, input.inboxId, input.completedAt)
+    if (changed.changes !== 1) {
+      const current = this.database.prepare('SELECT status, quiescent, completed_at FROM delivery_foreground_executions WHERE inbox_id = ?')
+        .get(input.inboxId) as { status: string; quiescent: number; completed_at: number } | undefined
+      if (current?.status === status && current.quiescent === quiescent && current.completed_at === input.completedAt) return
+      throw new DeliveryStoreError('conflict', 'foreground execution is absent or its completion changed')
+    }
+  }
+
+  recordForegroundExecutionModelSelection(input: { inboxId: string; provider: string; model: string; reasoningEffort?: string }): void {
+    this.assertOpen()
+    if (typeof input.inboxId !== 'string' || input.inboxId.length === 0 || input.inboxId.length > 512
+      || typeof input.provider !== 'string' || typeof input.model !== 'string'
+      || (input.reasoningEffort !== undefined && typeof input.reasoningEffort !== 'string')) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground execution model selection is invalid')
+    }
+    const provider = modelRoutePart(input.provider, 'provider')
+    const model = modelRoutePart(input.model, 'model')
+    const effort = input.reasoningEffort === undefined ? null : modelRoutePart(input.reasoningEffort, 'effort')
+    this.transaction(() => {
+      const current = this.database.prepare(`SELECT status, model_selection_state, model_provider, model_id, model_reasoning_effort
+        FROM delivery_foreground_executions WHERE inbox_id = ?`).get(input.inboxId) as {
+          status: string; model_selection_state: string; model_provider: string | null; model_id: string | null; model_reasoning_effort: string | null
+        } | undefined
+      if (current === undefined) throw new DeliveryStoreError('invalid-binding', 'foreground execution is absent')
+      if (current.status !== 'pending') throw new DeliveryStoreError('conflict', 'foreground execution model selection is no longer writable')
+      if (current.model_selection_state === 'missing') {
+        const changed = this.database.prepare(`UPDATE delivery_foreground_executions
+          SET model_selection_state = 'frozen', model_provider = ?, model_id = ?, model_reasoning_effort = ?
+          WHERE inbox_id = ? AND status = 'pending' AND model_selection_state = 'missing'`).run(provider, model, effort, input.inboxId)
+        if (changed.changes !== 1) throw new DeliveryStoreError('conflict', 'foreground execution model selection changed')
+        return
+      }
+      if (current.model_selection_state === 'frozen') {
+        if (current.model_provider === provider && current.model_id === model && current.model_reasoning_effort === effort) return
+        const changed = this.database.prepare(`UPDATE delivery_foreground_executions
+          SET model_selection_state = 'inconsistent', model_provider = NULL, model_id = NULL, model_reasoning_effort = NULL
+          WHERE inbox_id = ? AND status = 'pending' AND model_selection_state = 'frozen'`).run(input.inboxId)
+        if (changed.changes !== 1) throw new DeliveryStoreError('conflict', 'foreground execution model selection changed')
+        return
+      }
+      if (current.model_selection_state !== 'inconsistent') throw new DeliveryStoreError('conflict', 'foreground execution model selection state is invalid')
+    })
+  }
+
+  inspectForegroundExecutionForOwner(input: {
+    inboxId: string
+    scope: { workspace: string; preset: string }
+    owner: { principalRecordId: string; principalVersion: number }
+    bindingId: string
+    bindingVersion: number
+    bindingGeneration: number
+  }): ForegroundExecution | null {
+    const row = this.database.prepare(`SELECT execution.dispatched_at, execution.status, execution.quiescent, execution.completed_at, execution.execution_ref,
+        execution.model_selection_state, execution.model_provider, execution.model_id, execution.model_reasoning_effort,
+        execution.binding_version AS execution_binding_version,
+        binding.status AS current_binding_status, binding.version AS current_binding_version, binding.generation AS current_binding_generation
+      FROM delivery_foreground_executions AS execution
+      JOIN conversation_bindings AS binding ON binding.id = execution.binding_id
+      WHERE execution.inbox_id = ? AND execution.workspace = ? AND execution.preset = ? AND execution.principal_record_id = ? AND execution.principal_version = ?
+        AND execution.binding_id = ? AND execution.binding_generation = ?`).get(
+      input.inboxId, input.scope.workspace, input.scope.preset, input.owner.principalRecordId, input.owner.principalVersion,
+      input.bindingId, input.bindingGeneration,
+    ) as {
+      dispatched_at: number; status: ForegroundExecution['status']; quiescent: number; completed_at: number | null; execution_ref: string | null
+      model_selection_state: 'missing' | 'frozen' | 'inconsistent'; model_provider: string | null; model_id: string | null; model_reasoning_effort: string | null
+      execution_binding_version: number; current_binding_status: ConversationBinding['status']; current_binding_version: number; current_binding_generation: number
+    } | undefined
+    if (row === undefined || row.current_binding_version !== input.bindingVersion || row.current_binding_generation !== input.bindingGeneration
+      || (row.execution_binding_version !== row.current_binding_version
+        && !(row.current_binding_status === 'revoked' && row.execution_binding_version + 1 === row.current_binding_version))
+      || row.completed_at === null || row.execution_ref !== input.inboxId) return null
+    return Object.freeze({ dispatchedAt: row.dispatched_at, status: row.status, quiescent: row.quiescent === 1,
+      completedAt: row.completed_at, executionRef: row.execution_ref, modelSelectionState: row.model_selection_state,
+      ...(row.model_selection_state === 'frozen' && row.model_provider && row.model_id ? { modelSelection: Object.freeze({ provider: row.model_provider, model: row.model_id, ...(row.model_reasoning_effort === null ? {} : { reasoningEffort: row.model_reasoning_effort }) }) } : {}) })
+  }
+
   renewInboxClaim(input: {
     inboxId: string
     ownerId: string
@@ -4257,8 +4395,9 @@ export class DeliveryStore {
           : existingPermissionRecovery === undefined
             ? undefined
             : permissionDispatchRecoveryCode(existingPermissionRecovery)
-        const acceptedDispatch = this.database.prepare('SELECT inbox_id FROM delivery_task_acceptance_executions WHERE inbox_id = ?').get(row.id) !== undefined
-        const ambiguous = acceptedDispatch || row.failure_code === 'native-admission' || row.failure_code === 'native-dispatch-started'
+        const foregroundDispatch = this.database.prepare(`SELECT inbox_id FROM delivery_task_acceptance_executions WHERE inbox_id = ?
+          UNION ALL SELECT inbox_id FROM delivery_foreground_executions WHERE inbox_id = ? LIMIT 1`).get(row.id, row.id) !== undefined
+        const ambiguous = foregroundDispatch || row.failure_code === 'native-admission' || row.failure_code === 'native-dispatch-started'
           || (row.failure_code === 'dispatch-started'
           && permissionRecovery === undefined && !feedbackRecovery && !learningRecovery && !workflowRecovery)
         const exhausted = row.attempt_count >= input.maxAttempts
