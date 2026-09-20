@@ -108,6 +108,54 @@ async function readSafeFile(path: string, maximum: number): Promise<string> {
   return readFile(path, 'utf8')
 }
 
+const rollbackCoreFiles = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'] as const
+
+async function captureRollbackBaseline(plan: PluginActivationPlan): Promise<readonly { path: string; sha256: string | null }[]> {
+  if (!plan.activation?.targetOriginallyExisted) return []
+  return Promise.all(rollbackCoreFiles.map(async name => {
+    const path = join(plan.target.profilePath, name)
+    let observed = false
+    try {
+      const pathname = await lstat(path, { bigint: true }); observed = true
+      const uid = process.getuid?.()
+      if (!pathname.isFile() || pathname.nlink !== 1n || pathname.size > 16n * 1024n * 1024n || (pathname.mode & 0o022n) !== 0n
+        || (uid !== undefined && pathname.uid !== 0n && pathname.uid !== BigInt(uid)) || await realpath(path) !== path) {
+        throw new ControlPlaneCliError('FILESYSTEM_STATE', 'rollback baseline file is unsafe')
+      }
+      const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK)
+      try {
+        const before = await handle.stat({ bigint: true })
+        if (!before.isFile() || before.dev !== pathname.dev || before.ino !== pathname.ino || before.size !== pathname.size
+          || before.mtimeNs !== pathname.mtimeNs || before.ctimeNs !== pathname.ctimeNs) {
+          throw new ControlPlaneCliError('FILESYSTEM_STATE', 'rollback baseline pathname changed')
+        }
+        const bytes = await handle.readFile(); const after = await handle.stat({ bigint: true }); const finalPath = await lstat(path, { bigint: true })
+        if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size || before.mtimeNs !== after.mtimeNs
+          || before.ctimeNs !== after.ctimeNs || BigInt(bytes.length) !== before.size || before.dev !== finalPath.dev
+          || before.ino !== finalPath.ino || await realpath(path) !== path) {
+          throw new ControlPlaneCliError('FILESYSTEM_STATE', 'rollback baseline file changed during read')
+        }
+        return { path, sha256: createHash('sha256').update(bytes).digest('hex') }
+      } finally { await handle.close() }
+    }
+    catch (error) {
+      if (!observed && typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') return { path, sha256: null }
+      throw error
+    }
+  }))
+}
+
+async function verifyRollbackBaseline(plan: PluginActivationPlan): Promise<void> {
+  const baseline = plan.activation?.targetBaselineFiles
+  if (baseline === undefined || baseline.length !== (plan.activation?.targetOriginallyExisted ? 3 : 0)) {
+    throw new ControlPlaneCliError('FILESYSTEM_STATE', 'activation rollback baseline is missing')
+  }
+  const actual = await captureRollbackBaseline(plan)
+  if (JSON.stringify(actual) !== JSON.stringify(baseline)) {
+    throw new ControlPlaneCliError('FILESYSTEM_STATE', 'restored profile does not match its durable rollback baseline')
+  }
+}
+
 async function readOwnerPrivateFile(path: string, maximum: number): Promise<string> {
   const value = await lstat(path); const uid = process.getuid?.()
   if (!value.isFile() || value.isSymbolicLink() || value.nlink !== 1 || (value.mode & 0o077) !== 0
@@ -611,8 +659,11 @@ function advance(store: ControlPlaneStore, plan: PluginActivationPlan, to: PlanS
 async function finishRollback(store: ControlPlaneStore, plan: PluginActivationPlan, lock: ProfileLock): Promise<PluginActivationPlan> {
   const activationPaths = paths(plan)
   await restoreTarget(store, plan, activationPaths.backupPath)
+  await fencedMutation(store, plan, () => verifyRollbackBaseline(plan))
   await fencedMutation(store, plan, () => rm(activationPaths.stagePath, { recursive: true, force: true }))
-  const terminal = advance(store, plan, 'rolled-back')
+  const terminal = plan.activation?.hostRecoveryRequired
+    ? store.markRollbackProfileRestored({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence })
+    : advance(store, plan, 'rolled-back')
   await releaseProfileLock(store, lock)
   return terminal
 }
@@ -647,6 +698,10 @@ async function activate(argv: readonly string[]): Promise<void> {
   try {
     let plan = store.getPlan(option(argv, '--plan-id')); assertPlanTrust(plan, trust)
     if (plan.status === 'activated') { process.stdout.write(`${JSON.stringify(plan)}\n`); return }
+    if (plan.status === 'rollback-pending' && plan.activation?.rollbackProfileRestored) {
+      if (plan.revision !== integerOption(argv, '--expected-revision')) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'activation targets a stale revision')
+      process.stdout.write(`${JSON.stringify(plan)}\n`); return
+    }
     plan = await store.claimActivation({ planId: plan.id, expectedRevision: integerOption(argv, '--expected-revision'), leaseMs,
       resolveApprovalAuthority: receipt => activationApprovalAuthority(trust, receipt) })
     lock = await acquireProfileLock(store, plan)
@@ -665,8 +720,10 @@ async function activate(argv: readonly string[]): Promise<void> {
         if (await directoryExists(activationPaths.backupPath) || await directoryExists(activationPaths.stagePath)) {
           throw new ControlPlaneCliError('FILESYSTEM_STATE', 'unbound activation residue requires owner recovery')
         }
+        const existed = await directoryExists(plan.target.profilePath)
+        const baselineFiles = existed ? await fencedMutation(store, plan, () => captureRollbackBaseline({ ...plan, activation: { ...plan.activation!, targetOriginallyExisted: true } })) : []
         plan = store.recordActivationTargetBaseline({ planId: plan.id, expectedRevision: plan.revision,
-          fence: plan.activation!.fence, existed: await directoryExists(plan.target.profilePath) })
+          fence: plan.activation!.fence, existed, baselineFiles })
       }
       await restoreTarget(store, plan, activationPaths.backupPath)
       await fencedMutation(store, plan, () => rm(activationPaths.stagePath, { recursive: true, force: true }))
@@ -698,6 +755,7 @@ async function activate(argv: readonly string[]): Promise<void> {
         if (pinnedInterpreter !== undefined) await pinnedInterpreter.executable.handle.close()
         await pinnedExecutor?.handle.close()
       }
+      plan = store.markActivationHostExposure({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence })
       if (plan.activation!.targetOriginallyExisted) await fencedMutation(store, plan, () => rename(plan.target.profilePath, activationPaths.backupPath))
       await fencedMutation(store, plan, () => rename(activationPaths.stagePath, plan.target.profilePath))
       plan = advance(store, plan, 'awaiting-reload')

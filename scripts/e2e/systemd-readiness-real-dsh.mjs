@@ -2,7 +2,7 @@
 // Explicitly opt-in, temporary Host/profile only. No model calls or production writes.
 import { execFile, spawn } from 'node:child_process'
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto'
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,7 +19,10 @@ if (process.env.DSH_READINESS_FIXTURE !== '1' || !process.env.DSH_READINESS_DSH 
 }
 const output = process.argv[process.argv.indexOf('--output') + 1]
 if (!process.argv.includes('--output') || !output) throw new Error('--output is required')
-const initialCandidateDisabled = process.env.DSH_READINESS_EXPECT_INACTIVE === '1'
+const rollbackAction = process.env.DSH_READINESS_ROLLBACK
+if (rollbackAction !== undefined && !['restore', 'stop'].includes(rollbackAction)) throw new Error('DSH_READINESS_ROLLBACK must be restore or stop')
+const initialCandidateDisabled = rollbackAction !== undefined || process.env.DSH_READINESS_EXPECT_INACTIVE === '1'
+const initialRuntimeActive = rollbackAction === 'restore' || !initialCandidateDisabled
 const run = promisify(execFile)
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ready-')))
@@ -31,6 +34,15 @@ const node = await realpath(process.execPath)
 const controlUrl = new URL('../../plugins/plugin-control-plane/lib/index.js', import.meta.url)
 const candidateUrl = new URL('../../plugins/assistant-policy/lib/index.js', import.meta.url)
 const supervisor = async args => (await run('/usr/bin/systemctl', ['--user', ...args], { timeout: 15000, maxBuffer: 65536 })).stdout
+async function cleanupUnit() {
+    // Successful stop may unload a transient unit. Prove absence/inactivity
+    // before accepting cleanup; do not mask other supervisor errors.
+    try { await supervisor(['stop', unit]) } catch (error) {
+      const state = await supervisor(['show', unit, '--property=LoadState', '--property=ActiveState', '--property=MainPID'])
+      if (!state.includes('LoadState=not-found') || !state.includes('ActiveState=inactive') || !state.includes('MainPID=0')) throw error
+    }
+    await supervisor(['reset-failed', unit]).catch(() => {})
+}
 let dispatched = false
 let evidence
 let store
@@ -50,7 +62,7 @@ try {
     { id: 'observed-candidate', name: candidateUrl.href, config: candidateConfig, disabled },
   ] }]
   const patchPath = join(profile, 'cordis.patch.yml')
-  await writeFile(patchPath, JSON.stringify(patch(initialCandidateDisabled)), { mode: 0o600 })
+  await writeFile(patchPath, JSON.stringify(patch(!initialRuntimeActive)), { mode: 0o600 })
   // Mark possible dispatch before crossing the supervisor boundary, so finally
   // also attempts stop if systemd-run's acknowledgement is lost.
   dispatched = true
@@ -74,15 +86,18 @@ try {
     const logs = (await run('/usr/bin/journalctl', ['--user', '-u', unit, '--no-pager', '--quiet', '--output=cat', '--lines=25'], { timeout: 5000, maxBuffer: 65536 })).stdout
     throw new Error(`runtime fixture failed: ${String(last)}\n${logs}`)
   }
-  const active = await observe(!initialCandidateDisabled)
-  const replay = await observe(!initialCandidateDisabled)
+  const active = await observe(initialRuntimeActive)
+  const replay = await observe(initialRuntimeActive)
   if (JSON.stringify(active.observation.entries) !== JSON.stringify(replay.observation.entries)
     || active.observation.observerId !== replay.observation.observerId
     || active.observation.challenge === replay.observation.challenge) throw new Error('stable fresh-challenge sampling failed')
   const pinned = async path => ({ path: await realpath(path), sha256: sha(await readFile(path)) })
   const privateNode = join(owner, 'node'); await copyFile(node, privateNode); await chmod(privateNode, 0o700)
   const interpreter = await pinned(privateNode)
-  const executable = await pinned(fileURLToPath(new URL('../../plugins/plugin-control-plane/bin/dsh-systemd-host-attestor.js', import.meta.url)))
+  const attestorSource = fileURLToPath(new URL('../../plugins/plugin-control-plane/bin/dsh-systemd-host-attestor.js', import.meta.url))
+  const deployedAttestor = join(owner, 'attestor.mjs')
+  await writeFile(deployedAttestor, (await readFile(attestorSource, 'utf8')).replace('#!/usr/bin/node', `#!${interpreter.path}`), { mode: 0o700 })
+  const executable = await pinned(deployedAttestor)
   const processHelper = await pinned(fileURLToPath(new URL('../../plugins/plugin-control-plane/lib/adapter-process.js', import.meta.url)))
   const keys = generateKeyPairSync('ed25519'); const privateKeyPath = join(owner, 'receipt.pem')
   await writeFile(privateKeyPath, keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
@@ -110,8 +125,17 @@ try {
     receipt: { ...approval, signature: sign(null, Buffer.from(approvalSigningPayload(approval)), approvalKeys.privateKey).toString('base64') },
     resolveAuthority: () => approvalAuthority })).result
   plan = await store.claimActivation({ planId: plan.id, expectedRevision: plan.revision, leaseMs: 30000, resolveApprovalAuthority: () => approvalAuthority })
+  await writeFile(join(profile, 'pnpm-lock.yaml'), 'lockfileVersion: "9.0"\n', { mode: 0o600, flag: 'wx' }).catch(error => { if (error.code !== 'EEXIST') throw error })
+  const baselineFiles = rollbackAction === 'stop' ? [] : await Promise.all(['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(file => pinned(join(profile, file))))
+  plan = store.recordActivationTargetBaseline({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence,
+    existed: rollbackAction !== 'stop', baselineFiles })
+  if (rollbackAction === 'restore') {
+    const suffix = plan.activation.id.replace(/[^A-Za-z0-9-]/gu, '').slice(-36)
+    await cp(profile, join(home, 'profiles', `.${name}.plugin-backup-${suffix}`), { recursive: true })
+    await writeFile(patchPath, JSON.stringify(patch(true)), { mode: 0o600 })
+  }
   plan = store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence, from: 'staging', to: 'awaiting-reload' })
-  const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-3', ...executable,
+  const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-4', ...executable,
     interpreter, authority: 'fixture-owner', keyId: 'fixture-key' }
   const prepare = requirements => store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision,
     expectedFence: plan.activation.fence, issuer, requirements, receiptTtlMs: 120000 }).request
@@ -176,33 +200,93 @@ try {
   const db = new DatabaseSync(join(stateRoot, 'reload.sqlite'), { readOnly: true })
   let signedObservation
   try { signedObservation = JSON.parse(db.prepare('SELECT observation FROM readiness').get().observation) } finally { db.close() }
+  let recoveryEvidence
+  let replacement
+  if (rollbackAction) {
+    const controlDir = join(home, 'plugin-control'); await mkdir(controlDir, { mode: 0o700 })
+    const { mode: _mode, ...hostAttestor } = issuer
+    const trust = { schemaVersion: 2, installationId: plan.installationId, dshHome: home, ledger: plan.ledger,
+      executor: { ...plan.executor, environmentAllowlist: [] },
+      hostPolicy: { readinessMinimumChecks: 3, effectBlockedMinimumDeliveryAttempts: 1, effectBlockedMinimumToolExecutionAttempts: 1,
+        shadowMinimumSamples: 1, shadowMaximumMismatches: 0, canaryMinimumSamples: 1, canaryMaximumFailures: 0,
+        soakMinimumWindowMs: 1000, soakMinimumSamples: 1, soakMaximumFailureRate: 0, healthMinimumChecks: 3,
+        healthMaximumFailures: 0, receiptTtlMs: 120000 },
+      hostAttestor: { ...hostAttestor, environmentAllowlist: ['DSH_SYSTEMD_HOST_ATTESTOR_CONFIG'], timeoutMs: 30000 },
+      approvalKeys: [{ authority: 'fixture-approval', keyId: 'approval-key', publicKeyPem: approvalKeys.publicKey.export({ type: 'spki', format: 'pem' }) }],
+      hostAttestationKeys: [{ authority: issuer.authority, keyId: issuer.keyId, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }) }] }
+    await writeFile(join(controlDir, 'trust.json'), JSON.stringify(trust), { mode: 0o600 })
+    const cliPath = fileURLToPath(new URL('../../plugins/plugin-control-plane/bin/dsh-plugin-control.js', import.meta.url))
+    const cli = async args => JSON.parse((await run(node, [cliPath, ...args],
+      { env: { ...env, DSH_SYSTEMD_HOST_ATTESTOR_CONFIG: configPath }, timeout: 40000, maxBuffer: 1048576 })).stdout)
+    plan = await cli(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)])
+    if (plan.status !== 'rollback-pending' || !plan.activation.rollbackProfileRestored) throw new Error('filesystem recovery falsely terminalized plan')
+    const filesRestoredPlan = plan
+    const args = ['probe', '--plan-id', plan.id, '--expected-revision', String(plan.revision), '--expected-fence', String(plan.activation.fence)]
+    const request = await cli([...args, '--prepare-only'])
+    if (request.requirements.action !== rollbackAction || controlPlaneDigest(request.requirements.baselineFiles) !== controlPlaneDigest(baselineFiles)) throw new Error('rollback request does not bind original baseline')
+    const ownerConfig = { ...reloadConfig, schemaVersion: 3, profileFiles: baselineFiles,
+      authorization: { ...reloadConfig.authorization, activation: request.activation,
+        previousHostGeneration: request.requirements.previousHostGeneration, requestDigest: hostAttestationRequestDigest(request) },
+      readiness: rollbackAction === 'restore' ? { observer: config, client: readinessConfig.readiness.client,
+        deploymentFiles: readinessConfig.readiness.deploymentFiles } : null }
+    await writeFile(configPath, JSON.stringify(ownerConfig), { mode: 0o600 })
+    let result
+    try { result = await cli(args) } catch (error) {
+      // Reconcile the same request for diagnostic stderr; never submit a new operation.
+      try { await invoke(request, ownerConfig) } catch (diagnostic) { throw new Error(`${String(error)}; reconciliation: ${String(diagnostic)}`) }
+      throw error
+    }
+    plan = result.result
+    if (plan.status !== 'rolled-back') throw new Error('physical recovery did not complete ledger rollback')
+    const receipt = store.getHostAttestationOperation(request.operationId).receipt
+    await authority.verify(receipt, plan, request)
+    const physical = rollbackAction === 'restore' ? await observe(true) : await identity()
+    if (rollbackAction === 'stop' && (physical.ActiveState !== 'inactive' || physical.MainPID !== '0')) throw new Error('removed profile left live Host')
+    const repeated = await invoke(request, ownerConfig)
+    if (controlPlaneDigest(repeated) !== controlPlaneDigest(receipt)) throw new Error('recovery receipt replay differs')
+    const recoveryDb = new DatabaseSync(join(stateRoot, 'reload.sqlite'), { readOnly: true })
+    let observation
+    try { observation = JSON.parse(recoveryDb.prepare('SELECT observation FROM reloads WHERE operation_id = ?').get(request.operationId).observation) }
+    finally { recoveryDb.close() }
+    store.close(); store = new ControlPlaneStore({ path: ledgerPath })
+    if (controlPlaneDigest(store.getPlan(plan.id)) !== controlPlaneDigest(plan)) throw new Error('physical recovery did not survive reopen')
+    recoveryEvidence = { action: rollbackAction, filesRestoredPlan, request, receipt, observation, physical,
+      cliRestoreAndProbe: true, persistedAfterReopen: true, identicalReceiptReplay: true }
+    replacement = physical
+  } else {
   await supervisor(['stop', unit])
   try { await lstat(config.socketPath); throw new Error('Host stop retained the observer socket') }
   catch (error) { if (error.code !== 'ENOENT') throw error }
   await writeFile(patchPath, JSON.stringify(patch(!initialCandidateDisabled)), { mode: 0o600 })
   await launch()
-  const replacement = await observe(initialCandidateDisabled)
+  replacement = await observe(initialCandidateDisabled)
   if (active.observation.observerId === replacement.observation.observerId
     || active.observation.invocationId === replacement.observation.invocationId) throw new Error('Host instance did not change')
   const rejected = await invoke(readinessRequest, readinessConfig, true)
   if (!rejected.rejected) throw new Error('stale readiness receipt replay was accepted')
-  evidence = { schemaVersion: 1, kind: 'systemd-readiness-real-dsh-fixture', observedAt: new Date().toISOString(), dshVersion,
+  }
+  evidence = { schemaVersion: 1, kind: rollbackAction ? 'systemd-rollback-real-dsh-fixture' : 'systemd-readiness-real-dsh-fixture', observedAt: new Date().toISOString(), dshVersion,
     dshCliSha256: sha(await readFile(dsh)), candidatePackage: '@dsh-enhanced/assistant-policy',
-    candidateVersion, initialCandidateDisabled,
+    candidateVersion, initialCandidateDisabled, rollbackAction, recoveryEvidence,
     runtimeDigests: { observer: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/runtime-observer.js', import.meta.url))),
-      attestor: executable.sha256, observerClient: readinessConfig.readiness.client.sha256, processHelper: processHelper.sha256,
+      attestor: sha(await readFile(attestorSource)), deployedAttestor: executable.sha256, observerClient: readinessConfig.readiness.client.sha256, processHelper: processHelper.sha256,
+      controlCli: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/cli.js', import.meta.url))),
+      controlStore: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/store.js', import.meta.url))),
+      controlAttestation: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/attestation.js', import.meta.url))),
+      fixtureScript: sha(await readFile(fileURLToPath(import.meta.url))),
       controlEntry: sha(await readFile(fileURLToPath(controlUrl))), candidateEntry: sha(await readFile(fileURLToPath(candidateUrl))) },
     active, replay, successor, afterReadiness, replacement, reloadReceipt, readinessReceipt, signedObservation,
     receiptPublicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }), plan: initialPlan,
     controlPlane: { transitions, finalPlan: plan, persistedAfterReopen: true },
     requests: { reload: reloadRequest, readiness: readinessRequest },
-    byteIdenticalReadinessReplay: true, staleReplayRejected: true, socketRemovedOnHostStop: true,
+    byteIdenticalReadinessReplay: true, staleReplayRejected: rollbackAction ? undefined : true, socketRemovedOnHostStop: rollbackAction ? undefined : true,
     limits: ['Actual DSH process with local built Control Plane and Policy package entries, referenced by file URL in a disposable profile; no npm install/publication or candidate artifact byte attestation.',
       'Existing Control Plane store performs signed approval and reload/readiness request/receipt CAS; catalog integrity, owner approval and profile staging are controlled fixture inputs, not actual npm artifact installation or CLI activation.',
-      'Negative readiness stops at rollback-pending; no profile restoration, physical Host rollback, behavioral quality proof, model call or production activation.'] }
+      rollbackAction ? 'CLI restores/removes fixture profile, then descriptor-pinned supervisor attestor proves physical recovery. Initial catalog/artifact installation is fixture input; no production activation, npm publication, model call or behavioral quality proof.'
+        : 'Negative readiness stops at rollback-pending; no profile restoration, physical Host rollback, behavioral quality proof, model call or production activation.'] }
 } finally {
   store?.close()
-  if (dispatched) { await supervisor(['stop', unit]); await supervisor(['reset-failed', unit]).catch(() => {}) }
+  if (dispatched) await cleanupUnit()
   await rm(root, { recursive: true, force: true })
 }
 evidence.fixtureRemoved = true

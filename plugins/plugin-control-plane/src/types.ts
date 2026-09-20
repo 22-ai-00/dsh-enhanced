@@ -16,7 +16,7 @@ export type PlanStatus =
   | 'activated'
   | 'rolled-back'
 
-export type HostAttestationPhase = 'reload' | 'readiness' | 'effect-blocked-replay' | 'shadow' | 'canary' | 'soak' | 'health'
+export type HostAttestationPhase = 'reload' | 'readiness' | 'effect-blocked-replay' | 'shadow' | 'canary' | 'soak' | 'health' | 'rollback'
 
 export interface HostAttestationPolicy {
   readinessMinimumChecks: number
@@ -42,6 +42,7 @@ export type HostAttestationRequirements =
   | { kind: 'canary'; maximumExposures: 1; minimumSamples: number; maximumFailures: number }
   | { kind: 'soak'; minimumWindowMs: number; minimumSamples: number; maximumFailureRate: number }
   | { kind: 'health'; minimumChecks: number; maximumFailures: number }
+  | { kind: 'rollback'; previousHostGeneration: number; action: 'restore' | 'stop'; baselineFiles: readonly { path: string; sha256: string | null }[]; minimumChecks: number }
 
 export interface HostAttestationRequest {
   schemaVersion: 1
@@ -70,6 +71,7 @@ export type HostAttestationEvidence =
   | { kind: 'canary'; exposureId: string; exposures: number; samples: number; failures: number; traceDigest: string }
   | { kind: 'soak'; windowStartedAt: number; windowEndedAt: number; samples: number; failures: number; traceDigest: string }
   | { kind: 'health'; checks: number; failures: number; probeDigest: string }
+  | { kind: 'rollback'; action: 'restore' | 'stop'; previousHostGeneration: number; currentHostGeneration: number; checks: number; failures: number; profileRestored: boolean; probeDigest: string }
 
 export interface CapabilityGapInput {
   idempotencyKey: string
@@ -127,6 +129,12 @@ export interface PluginActivationPlan {
     fence: number
     /** Durable baseline used to distinguish restore-from-backup from remove-on-rollback. */
     targetOriginallyExisted?: boolean
+    /** Exact core profile files captured before staging; absent files use null. */
+    targetBaselineFiles?: readonly { path: string; sha256: string | null }[]
+    /** Once a Host-visible profile was installed, signed physical recovery is required. */
+    hostRecoveryRequired?: boolean
+    /** Durable filesystem restore marker. It never itself completes Host recovery. */
+    rollbackProfileRestored?: boolean
     failureCode?: string
     updatedAt: number
   }

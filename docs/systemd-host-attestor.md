@@ -2,7 +2,7 @@
 
 `plugin-control-plane/bin/dsh-systemd-host-attestor.js` is shipped in the
 Control Plane bundle. It implements the existing configured Host executable
-contract, version `dsh-systemd-host-attestor-3`, for **reload and readiness** on Linux.
+contract, version `dsh-systemd-host-attestor-4`, for **reload, readiness and physical rollback** on Linux.
 It uses the existing signed receipt, request, fence and activation state
 machine. It creates no Cordis plugin, AgentLoop, model tool or scheduler.
 
@@ -276,7 +276,7 @@ The [readiness engineering validation](evidence/systemd-readiness-engineering-20
 records the full repository check, package inspection, prior failures and
 independent review for this capability.
 
-The current v3 fixture uses the existing Control Plane store for signed approval,
+The recorded v3 fixture uses the existing Control Plane store for signed approval,
 durable requests, receipt verification and phase CAS, then reopens the ledger.
 Set `DSH_READINESS_EXPECT_INACTIVE=1` to start with the candidate disabled and
 require signed failed readiness plus durable `rollback-pending`; otherwise the
@@ -288,3 +288,88 @@ and [inactive-candidate run](evidence/systemd-readiness-negative-real-dsh-2026-0
 retain signed receipts, probe preimages and the actual phase transitions.
 Full-check, independent-review and prior-failure records are in the
 [v3 engineering evidence](evidence/systemd-readiness-negative-engineering-2026-09-20.json).
+
+## Physical rollback
+
+Schema-15 Control Plane captures immutable hashes (including explicit file
+absence) of the original `package.json`, `pnpm-lock.yaml` and
+`cordis.patch.yml` before staging. Before making the staged profile Host-visible, the CLI permanently
+requires physical recovery if activation later fails. CLI restores the
+backup tree, or removes an originally absent profile, verifies the captured
+core files, then persists `rollbackProfileRestored`. It releases the filesystem
+lease and keeps `rollback-pending`; the activation fence is now fixed.
+Changing current trust configuration cannot remove this requirement.
+
+Prepare the rollback request with the same `probe --prepare-only` command.
+Its requirements bind `action: restore | stop`, the original `baselineFiles`,
+`previousHostGeneration` and `minimumChecks`. Provision a **schema-3** private
+attestor config with the same common fields as reload:
+
+- `authorization.previousHostGeneration` and exact `requestDigest` bind the
+  prepared recovery operation and its current activation fence.
+- For `restore`, `profileFiles` equals the three original baseline pins. Each pin may explicitly record file absence with `sha256: null`;
+  absence is checked before dispatch and throughout observation. `readiness` contains `client`,
+  `observer` and `deploymentFiles`, as in schema 2, without `reloadOperationId`.
+  The restored profile must already provide the authenticated observer and
+  the owner-selected baseline Loader entries/services.
+- For `stop`, `profileFiles` is empty and `readiness` is `null`. The profile
+  must be absent, including no dangling symlink; its real parent must exist.
+
+Run `probe` to execute the prepared operation. The private supervisor journal
+reserves the next installation generation before one restart or stop. Lost
+acknowledgements and process death replay the same operation by observation
+only. An unresolved previous generation blocks recovery until reconciled.
+A successful restore requires a fresh stable Host PID/invocation, retirement
+of the prior PID, unchanged baseline files, and authenticated ready baseline
+Fibers/services for the complete observation window. Stop requires stable
+`inactive/dead`, zero main/control PIDs, no pending supervisor job, retirement
+of the prior PID, and no remaining tasks in the unit cgroup subtree. A transient unit may
+become `not-found` after stop; this is accepted only after the same operation
+has durably observed its loaded original unit, with inactive/zero-PID state
+and retirement checks against that retained original cgroup.
+
+The cgroup check uses the actual kernel filesystem: unified v2
+`cgroup.events: populated 0`, or recursive `tasks` reads in the legacy
+`/sys/fs/cgroup/systemd` hierarchy. A removed cgroup is accepted as removed;
+permission and other read errors fail. Kernel semantics are documented in
+[cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html#organizing-processes-and-threads)
+and [legacy cgroups](https://docs.kernel.org/admin-guide/cgroup-v1/cgroups.html).
+The attestor verifies its own PID in the mounted hierarchy and requires the
+original unit’s parent cgroup to remain visible on that kernel filesystem. An
+invisible parent, root-only ambiguous namespace, or mismapped hierarchy is
+refused; a missing leaf alone does not establish visibility. The supervisor
+and attestor must see the same host cgroup hierarchy.
+
+Only a signed passing recovery receipt advances `rolled-back` and reopens
+the capability gap. Failed, unavailable or ambiguous recovery remains
+pending. Cached recovery receipts are returned byte-identically only after
+fresh supervisor/runtime revalidation; they cannot be replayed after expiry,
+runtime drift or a newer generation. No retry automatically issues another
+restart/stop. Separate external writers must be serialized by the owner; the
+receipt proves the bounded observation window, not perpetual future state.
+
+Pre-Host staging failures retain filesystem-only rollback. Historical
+terminal records are unchanged; migrated in-flight plans have no invented
+baseline and require owner recovery if their original pins are unavailable.
+Core-file pins and declared deployment pins do not inventory every dependency
+or reverse database migrations, delivered messages or other external effects.
+
+The opt-in disposable fixture covers both actions through actual CLI file
+restoration and descriptor-pinned `probe`:
+
+```sh
+DSH_READINESS_FIXTURE=1 \
+DSH_READINESS_DSH=/absolute/path/to/dsh \
+DSH_READINESS_ROLLBACK=restore \
+node scripts/e2e/systemd-readiness-real-dsh.mjs --output /tmp/restore.json
+# Repeat with DSH_READINESS_ROLLBACK=stop for an originally absent profile.
+```
+
+Initial package/catalog installation remains a fixture input. This is not
+production publication or proof of behavioral improvement.
+
+Recorded real DSH evidence: [restore](evidence/systemd-rollback-restore-real-dsh-2026-09-20.json),
+[stop](evidence/systemd-rollback-stop-real-dsh-2026-09-20.json), and
+[engineering checks](evidence/systemd-rollback-engineering-2026-09-20.json).
+Each arm retains the signed recovery request/receipt and observation preimage,
+CLI-restored pending plan, final persisted plan, and exact runtime hashes.

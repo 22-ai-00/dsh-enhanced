@@ -3,7 +3,7 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 14
+export const controlPlaneSchemaVersion = 15
 
 export function controlPlaneOperationReceiptDigest(idempotencyKey: string, operation: string, inputDigest: string,
   resultJson: string, createdAt: number): string {
@@ -98,6 +98,9 @@ function createCurrent(database: DatabaseSync): void {
       activation_fence INTEGER NOT NULL DEFAULT 0 CHECK(activation_fence >= 0),
       activation_lease_until INTEGER,
       activation_target_existed INTEGER CHECK(activation_target_existed IN (0, 1)),
+      activation_target_baseline_json TEXT CHECK(activation_target_baseline_json IS NULL OR (json_valid(activation_target_baseline_json) AND json_type(activation_target_baseline_json) = 'array')),
+      host_recovery_required INTEGER NOT NULL DEFAULT 0 CHECK(host_recovery_required IN (0, 1)),
+      rollback_profile_restored INTEGER NOT NULL DEFAULT 0 CHECK(rollback_profile_restored IN (0, 1)),
       failure_code TEXT,
       updated_at INTEGER NOT NULL,
       FOREIGN KEY(gap_id) REFERENCES capability_gaps(id) ON DELETE RESTRICT
@@ -200,9 +203,9 @@ function createCurrent(database: DatabaseSync): void {
       FOREIGN KEY(gap_id) REFERENCES capability_gaps(id) ON DELETE RESTRICT
     ) STRICT, WITHOUT ROWID;
 
-    CREATE TABLE host_attestations (
+    CREATE TABLE IF NOT EXISTS host_attestations (
       plan_id TEXT NOT NULL,
-      phase TEXT NOT NULL CHECK(phase IN ('reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health')),
+      phase TEXT NOT NULL CHECK(phase IN ('reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health', 'rollback')),
       receipt_id TEXT NOT NULL UNIQUE,
       receipt_digest TEXT NOT NULL CHECK(length(receipt_digest) = 64),
       receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object'),
@@ -212,9 +215,9 @@ function createCurrent(database: DatabaseSync): void {
       FOREIGN KEY(plan_id) REFERENCES activation_plans(id) ON DELETE RESTRICT
     ) STRICT, WITHOUT ROWID;
 
-    CREATE TABLE host_attestation_operations (
+    CREATE TABLE IF NOT EXISTS host_attestation_operations (
       plan_id TEXT NOT NULL,
-      phase TEXT NOT NULL CHECK(phase IN ('reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health')),
+      phase TEXT NOT NULL CHECK(phase IN ('reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health', 'rollback')),
       operation_id TEXT NOT NULL UNIQUE,
       binding_digest TEXT NOT NULL CHECK(length(binding_digest) = 64),
       request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
@@ -345,7 +348,7 @@ function createCurrent(database: DatabaseSync): void {
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX activation_watch_evidence_plan ON activation_watch_evidence(plan_id, created_at);
 
-    PRAGMA user_version = 14;
+    PRAGMA user_version = 15;
   `)
 }
 
@@ -940,6 +943,40 @@ function migrateV13ToV14(database: DatabaseSync): void {
   `)
 }
 
+function migrateV14ToV15(database: DatabaseSync): void {
+  const columns = new Set((database.prepare('PRAGMA table_info(activation_plans)').all() as Array<{ name: string }>).map(row => row.name))
+  const hasRollbackPhase = (database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'host_attestations'").get() as { sql?: string } | undefined)?.sql?.includes("'rollback'") === true
+  database.exec(`
+    BEGIN IMMEDIATE;
+    ${columns.has('activation_target_baseline_json') ? '' : "ALTER TABLE activation_plans ADD COLUMN activation_target_baseline_json TEXT CHECK(activation_target_baseline_json IS NULL OR (json_valid(activation_target_baseline_json) AND json_type(activation_target_baseline_json) = 'array'));"}
+    ${columns.has('host_recovery_required') ? '' : 'ALTER TABLE activation_plans ADD COLUMN host_recovery_required INTEGER NOT NULL DEFAULT 0 CHECK(host_recovery_required IN (0, 1));'}
+    ${columns.has('rollback_profile_restored') ? '' : 'ALTER TABLE activation_plans ADD COLUMN rollback_profile_restored INTEGER NOT NULL DEFAULT 0 CHECK(rollback_profile_restored IN (0, 1));'}
+    -- Older active Host states have no trustworthy core-file baseline. Keep them
+    -- pending recovery, never manufacture a baseline from mutable files.
+    UPDATE activation_plans SET host_recovery_required = 1
+      WHERE status IN ('awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending');
+    ${hasRollbackPhase ? '' : 'ALTER TABLE host_attestations RENAME TO host_attestations_v14;'}
+    CREATE TABLE IF NOT EXISTS host_attestations (
+      plan_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health', 'rollback')),
+      receipt_id TEXT NOT NULL UNIQUE, receipt_digest TEXT NOT NULL CHECK(length(receipt_digest) = 64),
+      receipt_json TEXT NOT NULL CHECK(json_valid(receipt_json) AND json_type(receipt_json) = 'object'), host_generation INTEGER NOT NULL CHECK(host_generation >= 1),
+      created_at INTEGER NOT NULL, PRIMARY KEY(plan_id, phase), FOREIGN KEY(plan_id) REFERENCES activation_plans(id) ON DELETE RESTRICT
+    ) STRICT, WITHOUT ROWID;
+    ${hasRollbackPhase ? '' : 'INSERT INTO host_attestations SELECT * FROM host_attestations_v14; DROP TABLE host_attestations_v14;'}
+    ${hasRollbackPhase ? '' : 'ALTER TABLE host_attestation_operations RENAME TO host_attestation_operations_v14;'}
+    CREATE TABLE IF NOT EXISTS host_attestation_operations (
+      plan_id TEXT NOT NULL, phase TEXT NOT NULL CHECK(phase IN ('reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health', 'rollback')),
+      operation_id TEXT NOT NULL UNIQUE, binding_digest TEXT NOT NULL CHECK(length(binding_digest) = 64), request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+      request_json TEXT NOT NULL CHECK(json_valid(request_json) AND json_type(request_json) = 'object'), status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'applied')),
+      receipt_digest TEXT CHECK(receipt_digest IS NULL OR length(receipt_digest) = 64), receipt_json TEXT CHECK(receipt_json IS NULL OR (json_valid(receipt_json) AND json_type(receipt_json) = 'object')),
+      created_at INTEGER NOT NULL, completed_at INTEGER, applied_at INTEGER, PRIMARY KEY(plan_id, phase), FOREIGN KEY(plan_id) REFERENCES activation_plans(id) ON DELETE RESTRICT
+    ) STRICT, WITHOUT ROWID;
+    ${hasRollbackPhase ? '' : 'INSERT INTO host_attestation_operations SELECT * FROM host_attestation_operations_v14; DROP TABLE host_attestation_operations_v14;'}
+    PRAGMA user_version = 15;
+    COMMIT;
+  `)
+}
+
 
 export function openControlPlaneDatabase(path: string): DatabaseSync {
   prepare(path)
@@ -963,6 +1000,7 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       if (version <= 11) migrateV11ToV12(database)
       if (version <= 12) migrateV12ToV13(database)
       if (version <= 13) migrateV13ToV14(database)
+      if (version <= 14) migrateV14ToV15(database)
     }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database

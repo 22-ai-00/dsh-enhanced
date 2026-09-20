@@ -1118,8 +1118,46 @@ describe.sequential('trusted staged CLI', () => {
     await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['attest', '--plan-id', awaiting.id,
       '--expected-revision', String(awaiting.revision), '--expected-fence', String(awaiting.activation!.fence),
       '--receipt', receiptPath]))
-    const terminal = new ControlPlaneStore({ path: value.state }); expect(terminal.getPlan(plan.id).status).toBe('rolled-back'); terminal.close()
+    const terminal = new ControlPlaneStore({ path: value.state }); expect(terminal.getPlan(plan.id).status).toBe('rollback-pending'); terminal.close()
     await expect(readFile(join(value.profile, 'marker'), 'utf8')).resolves.toBe('original')
+  })
+
+  test('keeps physical rollback pending when promotion fails after the stage was installed', async () => {
+    const value = await fixture(); const plan = await approved(value, 'post-promotion-failure')
+    const original = ControlPlaneStore.prototype.advanceActivation; let injected = false
+    const spy = vi.spyOn(ControlPlaneStore.prototype, 'advanceActivation').mockImplementation(function (this: ControlPlaneStore, input) {
+      if (!injected && input.from === 'staging' && input.to === 'awaiting-reload') {
+        injected = true; throw new Error('forced post-promotion transition failure')
+      }
+      return original.call(this, input)
+    })
+    try {
+      await expect(withEnvironment(activationEnvironment(value, plan),
+        () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)]))).rejects.toThrow('forced post-promotion')
+    } finally { spy.mockRestore() }
+    const store = new ControlPlaneStore({ path: value.state }); const pending = store.getPlan(plan.id); store.close()
+    expect(pending).toMatchObject({ status: 'rollback-pending', activation: { hostRecoveryRequired: true, rollbackProfileRestored: true } })
+    await expect(readFile(join(value.profile, 'marker'), 'utf8')).resolves.toBe('original')
+  })
+
+  test('refuses the rollback marker when the restored core-file baseline drifts', async () => {
+    const value = await fixture(); const plan = await approved(value, 'rollback-baseline-drift')
+    await withEnvironment(activationEnvironment(value, plan), () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)]))
+    const inspect = new ControlPlaneStore({ path: value.state }); const awaiting = inspect.getPlan(plan.id)
+    const operation = inspect.prepareHostAttestationOperation({ planId: awaiting.id, expectedRevision: awaiting.revision, expectedFence: awaiting.activation!.fence,
+      issuer: { mode: 'owner-manual' }, requirements: { kind: 'reload', previousHostGeneration: 0 }, receiptTtlMs: 30_000 }); inspect.close()
+    const suffix = awaiting.activation!.id.replace(/[^A-Za-z0-9-]/gu, '').slice(-36)
+    await writeFile(join(value.dshHome, 'profiles', `.web.plugin-backup-${suffix}`, 'package.json'), '{"drift":true}\n')
+    const evidence = { kind: 'reload' as const, reloaded: false, previousHostGeneration: 0, currentHostGeneration: 1, probeDigest: 'd'.repeat(64) }
+    const now = Date.now(); const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'rollback-baseline-drift-reload', authority: 'host-runtime', keyId: 'host-key-1', installationId,
+      planId: awaiting.id, planDigest: awaiting.digest, activationId: awaiting.activation!.id, fence: awaiting.activation!.fence, phase: 'reload', outcome: 'failed',
+      operationId: operation.operationId, requestDigest: operation.requestDigest, hostGeneration: 1, evidence, evidenceDigest: hostAttestationEvidenceDigest(evidence), observedAt: now, expiresAt: now + 30_000 }
+    const receipt: HostAttestationReceipt = { ...unsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), value.privateKey).toString('base64') }
+    const receiptPath = join(value.control, 'rollback-baseline-drift.json'); await writeFile(receiptPath, JSON.stringify(receipt), { mode: 0o600 })
+    await expect(withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['attest', '--plan-id', awaiting.id,
+      '--expected-revision', String(awaiting.revision), '--expected-fence', String(awaiting.activation!.fence), '--receipt', receiptPath]))).rejects.toThrow('does not match')
+    const store = new ControlPlaneStore({ path: value.state }); expect(store.getPlan(plan.id)).toMatchObject({ status: 'rollback-pending', activation: { hostRecoveryRequired: true } })
+    expect(store.getPlan(plan.id).activation?.rollbackProfileRestored).toBeUndefined(); store.close()
   })
 
   test('removes a promoted profile on rollback when the target originally did not exist', async () => {
@@ -1145,14 +1183,19 @@ describe.sequential('trusted staged CLI', () => {
       '--expected-revision', String(awaiting.revision), '--expected-fence', String(awaiting.activation!.fence),
       '--receipt', receiptPath]))
     await expect(readFile(join(value.profile, 'pnpm-lock.yaml'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    const terminal = new ControlPlaneStore({ path: value.state }); expect(terminal.getPlan(plan.id).status).toBe('rolled-back'); terminal.close()
+    const terminal = new ControlPlaneStore({ path: value.state }); expect(terminal.getPlan(plan.id).status).toBe('rollback-pending'); terminal.close()
   })
 
   test('recovers a crash between profile backup rename and stage promotion with a new fence', async () => {
     const value = await fixture(); const approvedPlan = await approved(value, 'crash-rename')
     const store = new ControlPlaneStore({ path: value.state }); let claimed = await store.claimActivation(claimInput(approvedPlan, 5_000))
+    const baselineFiles = await Promise.all(['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(async name => {
+      const path = join(value.profile, name)
+      try { return { path, sha256: createHash('sha256').update(await readFile(path)).digest('hex') } }
+      catch (error) { if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') return { path, sha256: null }; throw error }
+    }))
     claimed = store.recordActivationTargetBaseline({ planId: claimed.id, expectedRevision: claimed.revision,
-      fence: claimed.activation!.fence, existed: true }); store.close()
+      fence: claimed.activation!.fence, existed: true, baselineFiles }); store.close()
     const suffix = claimed.activation!.id.replace(/[^A-Za-z0-9-]/gu, '').slice(-36)
     const backup = join(value.dshHome, 'profiles', `.web.plugin-backup-${suffix}`); const stage = join(value.dshHome, 'profiles', `stage-${suffix}`)
     await rename(value.profile, backup); await mkdir(stage); await writeFile(join(stage, 'partial'), 'crash residue')
@@ -1316,7 +1359,7 @@ describe.sequential('trusted staged CLI', () => {
   test('automatically restores the profile after a valid signed failed probe', async () => {
     const value = await fixture(); const plan = await staged(value, 'configured-failure')
     await configuredProbe(value, plan, 'failed', 'reload')
-    const store = new ControlPlaneStore({ path: value.state }); expect(store.getPlan(plan.id).status).toBe('rolled-back'); store.close()
+    const store = new ControlPlaneStore({ path: value.state }); expect(store.getPlan(plan.id).status).toBe('rollback-pending'); store.close()
     await expect(readFile(join(value.profile, 'marker'), 'utf8')).resolves.toBe('original')
   })
 

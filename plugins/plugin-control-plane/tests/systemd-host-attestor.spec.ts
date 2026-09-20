@@ -1,9 +1,10 @@
+import { readFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createHash, createHmac, generateKeyPairSync, randomBytes } from 'node:crypto'
 import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterAll, afterEach, describe, expect, test } from 'vitest'
 import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest } from '../src/attestation.ts'
@@ -55,8 +56,10 @@ async function fixture(mode = 'success') {
   const unitProperties = { FragmentPath: join(root, 'test.service'), DropInPaths: '',
     ExecStart: `{ path=${interpreter.path} ; argv[]=${interpreter.path} dsh --profile test --no-open ; ignore_errors=no ; }`,
     Environment: `DSH_HOME=${join(root, 'home')}`, WorkingDirectory: join(root, 'home'), User: '', Group: '', Type: 'simple', KillMode: 'control-group' }
+  const ownCgroup = readFileSync('/proc/self/cgroup', 'utf8').trim().split('\n').map(line => line.match(/^\d+:([^:]*):(.*)$/u))
+    .find(match => match && (match[1] === '' || match[1]!.split(',').includes('name=systemd')))![2]!
   const old = { Id: 'dsh-profile-test.service', LoadState: 'loaded', ActiveState: 'active', SubState: 'running',
-    MainPID: String(process.pid - 1), ControlPID: '0', InvocationID: '1'.repeat(32), NRestarts: '0', ControlGroup: '/fixture/dsh-profile-test.service', ...unitProperties }
+    MainPID: String(process.pid - 1), ControlPID: '0', InvocationID: '1'.repeat(32), NRestarts: '0', ControlGroup: join(dirname(ownCgroup), 'dsh-profile-test.service'), ...unitProperties }
   await writeFile(join(root, 'observation.json'), JSON.stringify(old), { mode: 0o600 })
   await writeFile(join(root, 'mode'), mode)
   const systemctlPath = join(root, 'systemctl.mjs')
@@ -66,15 +69,23 @@ const root=${JSON.stringify(root)};const mode=readFileSync(root+'/mode','utf8');
 const args=process.argv.slice(2);const data=JSON.parse(readFileSync(root+'/observation.json','utf8'));
 appendFileSync(root+'/calls',JSON.stringify(args)+'\\n');
 if(args[1]==='show') {
+  if(args.includes('--property=Job')) data.Job=mode==='pending-job'?'12':'';
   if(mode==='duplicate') process.stdout.write('Id='+data.Id+'\\n');
   process.stdout.write(Object.entries(data).map(([k,v])=>k+'='+v).join('\\n')+'\\n');
 } else if(args[1]==='restart') {
   appendFileSync(root+'/restarts','restart\\n');writeFileSync(root+'/restart.pid',String(process.pid));
   if(mode!=='unchanged') {data.InvocationID=data.InvocationID==='1'.repeat(32)?'2'.repeat(32):'3'.repeat(32);data.MainPID=String(Number(data.MainPID)+1);}
+  try { data.MainPID=readFileSync(root+'/recovery-pid','utf8'); } catch {}
   if(mode==='drift') data.Environment='DSH_HOME=/other';
   writeFileSync(root+'/observation.json',JSON.stringify(data));
   if(mode==='lost-ack') process.exitCode=7;
   if(mode==='wait') setInterval(()=>{},100);
+} else if(args[1]==='stop') {
+  appendFileSync(root+'/stops','stop\\n');
+  if(mode!=='unchanged') {data.ActiveState='inactive';data.SubState='dead';data.MainPID='0';data.ControlPID='0';data.ControlGroup='';data.InvocationID='';}
+  if(mode==='unloaded') {data.LoadState='not-found';delete data.ExecStart;}
+  writeFileSync(root+'/observation.json',JSON.stringify(data));
+  if(mode==='lost-ack') process.exitCode=7;
 } else process.exitCode=64;
 `, { mode: 0o700 })
   const now = Date.now()
@@ -89,7 +100,7 @@ if(args[1]==='show') {
   const request: HostAttestationRequest = { schemaVersion: 1, kind: 'dsh-host-attestation-request', operationId: 'host-operation-fixture',
     requestedAt: now, receiptTtlMs: 30000, installationId: config.authorization.installationId,
     ledger: config.authorization.ledger, plan: config.authorization.plan, activation: config.authorization.activation,
-    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-3',
+    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-4',
       ...executable, interpreter, authority: config.authority, keyId: config.keyId }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } }
   config.authorization.requestDigest = hostAttestationRequestDigest(request); await save()
   const start = (value: unknown = request) => {
@@ -110,7 +121,7 @@ if(args[1]==='show') {
   return { root, config, configPath, request, save, start, restarts, verify, verifyRequest }
 }
 
-async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 'stable' | 'epoch-drift' | 'wrong-context' | 'replayed-challenge' | 'wrong-mac' | 'inactive' | 'inactive-then-active' | 'bad-identity' | 'disconnected' = 'stable') {
+async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 'stable' | 'epoch-drift' | 'wrong-context' | 'replayed-challenge' | 'wrong-mac' | 'inactive' | 'inactive-then-active' | 'bad-identity' | 'disconnected' | 'rollback' = 'stable') {
   const reload = await f.start().result; expect(reload.code, reload.stderr).toBe(0)
   const config = f.config as unknown as { schemaVersion: 2; profileFiles: Array<{ path: string; sha256: string }>; readiness: {
     client: { path: string; sha256: string }; observer: unknown; deploymentFiles: Array<{ path: string; sha256: string }>; reloadOperationId: string
@@ -141,7 +152,8 @@ async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 's
         samples++
         const challenge = behavior === 'replayed-challenge' ? 'f'.repeat(64) : incoming.challenge
         const epoch = behavior === 'epoch-drift' ? samples : 1
-        const invocationId = behavior === 'wrong-context' ? '3'.repeat(32) : '2'.repeat(32)
+        const invocationId = behavior === 'rollback' ? JSON.parse(readFileSync(join(f.root, 'observation.json'), 'utf8')).InvocationID
+          : behavior === 'wrong-context' ? '3'.repeat(32) : '2'.repeat(32)
         const inactive = behavior === 'inactive' || (behavior === 'inactive-then-active' && samples === 1)
         const instance = inactive ? null : { uid: 101, epoch }
         const target = observer.targets[0]!
@@ -162,7 +174,129 @@ async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 's
     setBehavior: (value: typeof mode) => { behavior = value } }
 }
 
+async function rollbackFixture(action: 'restore' | 'stop' = 'stop', mode = 'success') {
+  const f = await fixture()
+  const ready = action === 'restore' ? await readinessFixture(f, 'rollback') : undefined
+  const observed = JSON.parse(await readFile(join(f.root, 'observation.json'), 'utf8'))
+  observed.MainPID = '99999999' // absent PID; rollback must independently prove prior process exit
+  await writeFile(join(f.root, 'observation.json'), JSON.stringify(observed))
+  await writeFile(join(f.root, 'mode'), mode)
+  await writeFile(join(f.root, 'recovery-pid'), String(process.pid))
+  f.config.schemaVersion = 3
+  Reflect.deleteProperty(f.config.authorization, 'hostGeneration')
+  f.config.authorization.previousHostGeneration = action === 'restore' ? 1 : 0
+  if (action === 'stop') {
+    await rm(f.request.profile.path, { recursive: true })
+    f.config.profileFiles = []
+    Object.assign(f.config, { readiness: null })
+  } else {
+    const value = f.config as unknown as { readiness: { reloadOperationId?: string } }
+    delete value.readiness.reloadOperationId
+  }
+  const request: HostAttestationRequest = { ...f.request, operationId: 'rollback-operation', phase: 'rollback',
+    requirements: { kind: 'rollback', action, previousHostGeneration: f.config.authorization.previousHostGeneration,
+      baselineFiles: f.config.profileFiles, minimumChecks: 2 } }
+  f.config.authorization.requestDigest = hostAttestationRequestDigest(request); await f.save()
+  const stops = async () => (await readFile(join(f.root, 'stops'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).length
+  return { ...f, ready, request, stops, startRollback: () => f.start(request) }
+}
+
 describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', () => {
+  test.each(['restore', 'stop'] as const)('attests physical %s and reconciles byte-identical replay without another action', async action => {
+    const f = await rollbackFixture(action)
+    const first = await f.startRollback().result; expect(first.code, first.stderr).toBe(0)
+    const receipt = JSON.parse(first.stdout); await f.verifyRequest(receipt, f.request)
+    expect(receipt).toMatchObject({ phase: 'rollback', outcome: 'passed', hostGeneration: action === 'restore' ? 2 : 1,
+      evidence: { action, profileRestored: true, failures: 0 } })
+    const replay = await f.startRollback().result; expect(replay.code, replay.stderr).toBe(0); expect(replay.stdout).toBe(first.stdout)
+    expect(await f.restarts()).toBe(action === 'restore' ? 2 : 0); expect(await f.stops()).toBe(action === 'stop' ? 1 : 0)
+  }, 30_000)
+
+  test.each(['restore', 'stop'] as const)('reconciles lost %s acknowledgement without redispatch', async action => {
+    const f = await rollbackFixture(action, 'lost-ack')
+    const first = await f.startRollback().result; expect(first.code).toBe(1); expect(first.stdout).toBe('')
+    const later = await f.startRollback().result; expect(later.code, later.stderr).toBe(0)
+    await f.verifyRequest(JSON.parse(later.stdout), f.request)
+    expect(await f.restarts()).toBe(action === 'restore' ? 2 : 0); expect(await f.stops()).toBe(action === 'stop' ? 1 : 0)
+  }, 30_000)
+
+  test('does not stop when the originally absent profile has reappeared', async () => {
+    const f = await rollbackFixture(); await mkdir(f.request.profile.path)
+    const result = await f.startRollback().result; expect(result.code).toBe(1); expect(await f.stops()).toBe(0)
+  })
+
+  test('does not sign stop while the prior Host process remains alive', async () => {
+    const f = await rollbackFixture()
+    const observed = JSON.parse(await readFile(join(f.root, 'observation.json'), 'utf8')); observed.MainPID = String(process.pid)
+    await writeFile(join(f.root, 'observation.json'), JSON.stringify(observed))
+    const result = await f.startRollback().result; expect(result.code).toBe(1); expect(result.stdout).toBe('')
+    expect(result.stderr).toContain('prior Host process still exists'); expect(await f.stops()).toBe(1)
+  })
+
+  test('rejects stale cached stop after a successor starts and after a newer generation is reserved', async () => {
+    const f = await rollbackFixture(); const result = await f.startRollback().result; expect(result.code, result.stderr).toBe(0)
+    const path = join(f.root, 'observation.json'); const observed = JSON.parse(await readFile(path, 'utf8'))
+    await writeFile(path, JSON.stringify({ ...observed, ActiveState: 'active', SubState: 'running', MainPID: String(process.pid), InvocationID: '3'.repeat(32) }))
+    expect((await f.startRollback().result).code).toBe(1)
+    await writeFile(path, JSON.stringify(observed))
+    const db = new DatabaseSync(join(f.config.stateRoot, 'reload.sqlite'))
+    try { db.exec(`INSERT INTO reloads(operation_id,request_digest,config_digest,scope_id,generation,activation_id,prior)
+      SELECT 'newer',request_digest,config_digest,scope_id,generation+1,'newer',prior FROM reloads`) } finally { db.close() }
+    const stale = await f.startRollback().result; expect(stale.code).toBe(1); expect(stale.stderr).toContain('superseded')
+    expect(await f.stops()).toBe(1)
+  }, 30_000)
+
+  test('rejects restored profile drift and inactive runtime without signing recovery', async () => {
+    const f = await rollbackFixture('restore'); f.ready!.setBehavior('inactive')
+    const result = await f.startRollback().result; expect(result.code).toBe(1); expect(result.stdout).toBe('')
+    expect(await f.restarts()).toBe(2)
+    await writeFile(f.config.profileFiles[0]!.path, 'changed')
+    const drift = await f.startRollback().result; expect(drift.code).toBe(1); expect(await f.restarts()).toBe(2)
+  }, 30_000)
+
+  test('proves stop of a transient unit that disappears after dispatch', async () => {
+    const f = await rollbackFixture('stop', 'unloaded')
+    const first = await f.startRollback().result; expect(first.code, first.stderr).toBe(0)
+    const replay = await f.startRollback().result; expect(replay.code, replay.stderr).toBe(0); expect(replay.stdout).toBe(first.stdout)
+    expect(await f.stops()).toBe(1)
+  }, 30_000)
+
+  test('refuses unsettled supervisor jobs before recovery dispatch', async () => {
+    const f = await rollbackFixture('stop', 'pending-job')
+    const result = await f.startRollback().result; expect(result.code).toBe(1); expect(result.stderr).toContain('unsettled')
+    expect(await f.stops()).toBe(0)
+  })
+
+  test('verifies explicit baseline-file absence throughout restored runtime observation', async () => {
+    const f = await rollbackFixture('restore')
+    const missing = f.config.profileFiles[1]!
+    const ready = f.config as unknown as { readiness: { deploymentFiles: Array<{ path: string; sha256: string }> } }
+    ready.readiness.deploymentFiles = [f.config.profileFiles[0]!]
+    await rm(missing.path); Object.assign(missing, { sha256: null })
+    f.config.authorization.requestDigest = hostAttestationRequestDigest(f.request); await f.save()
+    const first = await f.startRollback().result; expect(first.code, first.stderr).toBe(0)
+    await f.verifyRequest(JSON.parse(first.stdout), f.request)
+    await writeFile(missing.path, 'reappeared')
+    const replay = await f.startRollback().result; expect(replay.code).toBe(1); expect(replay.stdout).toBe('')
+    expect(await f.restarts()).toBe(2)
+  }, 30_000)
+
+  test('cached restore rejects changed authenticated runtime without redispatch', async () => {
+    const f = await rollbackFixture('restore'); const first = await f.startRollback().result; expect(first.code, first.stderr).toBe(0)
+    f.ready!.setBehavior('epoch-drift')
+    const replay = await f.startRollback().result; expect(replay.code).toBe(1); expect(replay.stdout).toBe('')
+    expect(await f.restarts()).toBe(2)
+  }, 30_000)
+
+  test('rejects an invisible supervisor cgroup hierarchy before stopping', async () => {
+    const f = await rollbackFixture()
+    const path = join(f.root, 'observation.json'); const observed = JSON.parse(await readFile(path, 'utf8'))
+    observed.ControlGroup = '/missing-hierarchy-fixture/target.service'
+    await writeFile(path, JSON.stringify(observed))
+    const result = await f.startRollback().result; expect(result.code).toBe(1); expect(result.stdout).toBe('')
+    expect(await f.stops()).toBe(0)
+  })
+
   // These two integration cases compose three bounded subprocess operations
   // plus interpreter setup. Their aggregate deadline must exceed the suite's
   // 15 s default; individual attestor/runner deadlines remain unchanged.

@@ -12,7 +12,7 @@ import type {
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const DIGEST = /^[a-f0-9]{64}$/u
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
-const phases = new Set(['reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health'])
+const phases = new Set(['reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health', 'rollback'])
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
@@ -97,6 +97,15 @@ function parseEvidence(value: unknown): HostAttestationEvidence {
     if (failures > checks) throw new ControlPlaneStoreError('invalid-input', 'health failures exceed checks')
     return { kind, checks, failures, probeDigest: text(item.probeDigest, 'probeDigest', DIGEST) }
   }
+  if (kind === 'rollback') {
+    exact(item, ['kind', 'action', 'previousHostGeneration', 'currentHostGeneration', 'checks', 'failures', 'profileRestored', 'probeDigest'], 'rollback evidence')
+    if ((item.action !== 'restore' && item.action !== 'stop') || typeof item.profileRestored !== 'boolean') throw new ControlPlaneStoreError('invalid-input', 'rollback evidence fields are invalid')
+    const checks = integer(item.checks, 'checks'); const failures = integer(item.failures, 'failures')
+    if (failures > checks) throw new ControlPlaneStoreError('invalid-input', 'rollback failures exceed checks')
+    return { kind, action: item.action, previousHostGeneration: integer(item.previousHostGeneration, 'previousHostGeneration'),
+      currentHostGeneration: integer(item.currentHostGeneration, 'currentHostGeneration', 1), checks, failures,
+      profileRestored: item.profileRestored, probeDigest: text(item.probeDigest, 'probeDigest', DIGEST) }
+  }
   throw new ControlPlaneStoreError('invalid-input', 'host attestation evidence kind is invalid')
 }
 
@@ -164,6 +173,10 @@ function assertPassedEvidence(receipt: HostAttestationReceipt, request: HostAtte
       && evidence.windowStartedAt >= request.requestedAt && evidence.windowEndedAt <= receipt.observedAt
   } else if (evidence.kind === 'health' && requirements.kind === 'health') {
     passed = evidence.checks >= requirements.minimumChecks && evidence.failures <= requirements.maximumFailures
+  } else if (evidence.kind === 'rollback' && requirements.kind === 'rollback') {
+    passed = evidence.action === requirements.action && evidence.previousHostGeneration === requirements.previousHostGeneration
+      && evidence.currentHostGeneration === receipt.hostGeneration && evidence.currentHostGeneration > requirements.previousHostGeneration
+      && evidence.checks >= requirements.minimumChecks && evidence.failures === 0 && evidence.profileRestored
   }
   if (!passed) throw new ControlPlaneStoreError('invalid-input', `passed ${request.phase} receipt does not satisfy its signed evidence contract`)
 }

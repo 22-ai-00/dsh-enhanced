@@ -36,12 +36,13 @@ export function hostRequirements(policy: HostAttestationPolicy, phase: HostAttes
     minimumSamples: policy.canaryMinimumSamples, maximumFailures: policy.canaryMaximumFailures }
   if (phase === 'soak') return { kind: phase, minimumWindowMs: policy.soakMinimumWindowMs,
     minimumSamples: policy.soakMinimumSamples, maximumFailureRate: policy.soakMaximumFailureRate }
-  return { kind: phase, minimumChecks: policy.healthMinimumChecks, maximumFailures: policy.healthMaximumFailures }
+  if (phase === 'health') return { kind: phase, minimumChecks: policy.healthMinimumChecks, maximumFailures: policy.healthMaximumFailures }
+  throw new HostAttestorError('FAILED', 'rollback requirements must be bound to the durable recovery marker')
 }
 
 function expectedPhase(plan: PluginActivationPlan): HostAttestationPhase {
   const status = plan.status.startsWith('awaiting-') ? plan.status.slice('awaiting-'.length) : ''
-  if (!['reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health'].includes(status)) {
+  if (!['reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health', 'rollback'].includes(status)) {
     throw new HostAttestorError('FAILED', 'plan is not awaiting a Host phase')
   }
   return status as HostAttestationPhase
@@ -49,10 +50,14 @@ function expectedPhase(plan: PluginActivationPlan): HostAttestationPhase {
 
 function prepare(store: ControlPlaneStore, plan: PluginActivationPlan, trust: PluginControlTrustConfig,
   issuer: HostAttestationRequest['issuer']): HostAttestationOperation {
-  const phase = expectedPhase(plan)
+  const phase = plan.status === 'rollback-pending' && plan.activation?.hostRecoveryRequired ? 'rollback' : expectedPhase(plan)
+  const requirements = phase === 'rollback'
+    ? { kind: 'rollback' as const, previousHostGeneration: store.latestHostGeneration(plan.installationId), action: plan.activation?.targetOriginallyExisted ? 'restore' as const : 'stop' as const,
+      baselineFiles: plan.activation?.targetBaselineFiles ?? [], minimumChecks: trust.hostPolicy.healthMinimumChecks }
+    : hostRequirements(trust.hostPolicy, phase, store.latestHostGeneration(plan.installationId))
   return store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision,
     expectedFence: plan.activation!.fence, issuer,
-    requirements: hostRequirements(trust.hostPolicy, phase, store.latestHostGeneration(plan.installationId)),
+    requirements,
     receiptTtlMs: trust.hostPolicy.receiptTtlMs })
 }
 

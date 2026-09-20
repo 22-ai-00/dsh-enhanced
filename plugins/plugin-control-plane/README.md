@@ -158,7 +158,7 @@ phase operation 在子进程启动前持久化。子进程执行期间持有 SQL
 
 每类 evidence 还带有探针/回放/trace digest。Control Plane 验证签名、结构、请求绑定、TTL 和 policy 阈值；它不会假装自己能独立观察部署。真正的 reload、流量、effect interception 和健康观测由 owner/deployment-controlled attestor 实现，并由其私钥为声明负责。测试目录中的 fixture attestor 只用于真实子进程集成测试，不进入发布包，也不是生产探针。
 
-任一有效签名 receipt 返回 `outcome: failed` 时，计划进入 fenced `rollback-pending` 并自动恢复原 profile；只有七个 phase 全部通过，backup 清理和终态 CAS 完成后才是 `activated`。格式错误、错误 key/digest/phase/evidence、过期 receipt 或未配置 attestor 都保持当前 awaiting 状态。
+任一有效签名 receipt 返回 `outcome: failed` 时，计划进入 fenced `rollback-pending` 并自动恢复原 profile；一旦进入过 `awaiting-reload`，恢复文件后仍保持 pending，必须由绑定原始 baseline 的 `rollback` 签名回执证明旧 Host 就绪或原本不存在的 profile 已停服，才能结束回退。只有七个部署 phase 全部通过，backup 清理和终态 CAS 完成后才是 `activated`。格式错误、错误 key/digest/phase/evidence、过期 receipt 或未配置 attestor 都保持当前 awaiting 状态。
 
 ## 人工 Host attestation
 
@@ -240,7 +240,7 @@ sourceJobs:
 
 成功准备返回 `pending-approval`，不会自动发布。owner 按已有签名审批流程处理后，用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest，才能进入人工 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 14 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 15 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 owner 可以用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。publish 超时等不确定结果必须先进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。
 
@@ -275,3 +275,5 @@ adapter 的 stdout 只有一个签名 JSON receipt，stderr 不打印 request �
 - local artifact activation 在安装期间持续持有已验证 cache inode，并把 `/proc/<control-plane-pid>/fd/<n>` reference 交给 DSH；registered DSH executor 及其解释器也从已验证 descriptor 启动。该路径是 Linux-only，且不会把 `release-complete` 视为 activation。
 
 兼容性见仓库 [compatibility baseline](../../docs/compatibility.md)。Node.js 要求 `^22.19.0 || >=24.0.0`（使用 `node:sqlite`）。
+
+物理 Host 回退使用随包 systemd attestor v4 的 schema-3 配置，复用 `probe --prepare-only` / `probe`。回退前固定原始三份 core 文件摘要；文件恢复后固定 fence，重试同一个持久化操作只重新观察，不再次 restart/stop。原 profile 不存在时只允许 stop。详情与环境约束见[操作文档](../../docs/systemd-host-attestor.md#physical-rollback)。
