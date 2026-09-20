@@ -12,6 +12,7 @@ import type { IsolatedVerifierRunner } from '@dsh-enhanced/assistant-isolation'
 import type { AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration, VerifierEvaluationRegistration } from './host.js'
 import { AcceptanceStore } from './store.js'
 import type { Execution } from './store.js'
+import { SourceReviewRuntime, validateSourceReviewConfig, type SourceReviewInput, type SourceReviewSelection } from './source-review.js'
 
 export { Config } from './config.js'
 
@@ -131,10 +132,13 @@ export class AssistantVerifierService extends Service<Config> {
   #awaitingCursor = ''
   #outboxCursor = ''
   #active = true
+  #sourceReviewer: SourceReviewRuntime | undefined
+  readonly #sourceReviewers = new Set<SourceReviewRuntime>()
 
   constructor(ctx: Context, config: Config, options: { now?: () => number } = {}) {
     super(ctx, 'assistantVerifier')
     const normalized = Config(config)
+    const sourceReviews = normalized.sourceReviews === undefined ? undefined : validateSourceReviewConfig(normalized.sourceReviews)
     this.#compiled = compileAcceptanceProfiles(normalized)
     this.#now = options.now ?? Date.now
     this.#requireAcceptance = normalized.requireAcceptance ?? false
@@ -160,8 +164,30 @@ export class AssistantVerifierService extends Service<Config> {
       this.#evaluation = undefined
       await this.#running?.catch(() => {})
       await Promise.allSettled([...this.#isolatedRunners.values()].map(async runner => (await runner).close()))
+      await Promise.allSettled([...this.#sourceReviewers].map(reviewer => reviewer.close()))
       this.#store.close()
     }, 'assistant-verifier.database')
+    if (sourceReviews) ctx.inject(['agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'], injected => {
+      injected.effect(() => {
+        if (!this.#active) return () => {}
+        const reviewer = new SourceReviewRuntime(injected, sourceReviews, normalized.databasePath)
+        this.#sourceReviewer = reviewer; this.#sourceReviewers.add(reviewer)
+        return async () => {
+          if (this.#sourceReviewer === reviewer) this.#sourceReviewer = undefined
+          await reviewer.close(); this.#sourceReviewers.delete(reviewer)
+        }
+      }, 'assistant-verifier.source-review')
+    })
+  }
+
+  /** Host-only capability probe, including the exact decision directory. */
+  canReviewSourceRepair = (input: SourceReviewSelection): boolean => this.#active && this.#sourceReviewer?.available(input) === true
+
+  /** No model tool exposes this entry or the private decision writer. */
+  reviewSourceRepair = (input: SourceReviewInput) => {
+    this.#assertActive()
+    if (!this.#sourceReviewer) throw new Error('assistant-verifier: source review services unavailable')
+    return this.#sourceReviewer.run(input)
   }
 
   ownsTaskAcceptanceRegistration = (registration: TaskAcceptanceRegistration): boolean => {

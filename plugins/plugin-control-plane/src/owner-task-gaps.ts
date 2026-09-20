@@ -58,6 +58,13 @@ export class OwnerTaskFailureGaps {
     return this.fence(reference, () => this.store.recordOwnerTaskFailureGap(reference))
   }
 
+  /** Private Host snapshot; objective and actual model never enter the public gap. */
+  snapshot(gapId: string, owner: SourceJobOwnerReceipt): OwnerForegroundLearningTask {
+    const reference = this.store.getOwnerTaskFailureReference(gapId)
+    if (!reference) throw new Error('task repair source unavailable')
+    return this.withCurrent(gapId, owner, () => structuredClone(this.read(reference, this.ports())))
+  }
+
   withCurrent<T>(gapId: string, owner: SourceJobCaller | SourceJobOwnerReceipt | undefined, callback: () => T): T {
     const reference = this.store.getOwnerTaskFailureReference(gapId)
     if (!reference) return callback()

@@ -24,7 +24,7 @@
 - Skills 已接入同进程 Host 受限委派：来源重新验证后，将冻结的活动技能或 pending 候选临时挂载到全新 owner scope，经原生 `skill_run` 执行；持久 cell reservation 与调用记录阻止换调用键或重启重放。来源和接收方重载、撤权、到期及取消均保留失败或 unknown。Evaluation 原生模型 cell 与冻结后独立任务已接入，12-cell Docker 工程验证两臂各 6 次达成，候选实际复用 6 次、质量平局。Day1 同预算收益比较仍待完成；见[接线指南](native-skill-reuse.md)。
 - 普通 owner 失败源码候选可经部署时配置的有限审批器自动批准：精确源码、owner、期限与累计额度受约束，最终提交复查当前反馈，持久作业重启只恢复审批。此步骤仍不发布或启用候选；普通使用中的采用、观察与回滚尚待贯通。
 - 修复候选可显式启用 Host 补丁版本管理：从基准 Git 提交生成 package/runtime 版本，在冻结检查树前纳入构建与审批；有限审批器须单独授权并核对其余 manifest 字段不变。相同基准仍会产生相同版本，自动采用还须串行推进获准源码，不能覆盖 registry/catalog 中的既有版本。
-- 普通 owner 修复获批后，可用独立的有限本地发布授权自动进入既有 `awaiting-pr`：Host 重查源码，外部签名器固定版本、registry/catalog、配额和有效期，最终提交再次检查当前反馈。持久作业重启可接续审批/授权及未完成发布，不重建源码候选或重复签发；可显式启用 Host 自动推进八个既有本地 release 阶段；缺少独立 review decision 时等待，由独立审查方调用 Host 接续入口唤醒。schema 18 派发前持久 claim，未知不重派，精确签名回执可对账。自动独立审查 producer、启用与普通任务观察仍待接通。
+- 普通 owner 修复获批后，可用独立的有限本地发布授权自动进入既有 `awaiting-pr`：Host 重查源码，外部签名器固定版本、registry/catalog、配额和有效期，最终提交再次检查当前反馈。持久作业重启可接续审批/授权及未完成发布，不重建源码候选或重复签发；可显式启用 Host 自动推进八个既有本地 release 阶段；可另配 Verifier 有限源码审查：从精确 bare Git PR 读取补丁，用全新无工具原生 Agent 生成 decision，再接续既有签名阶段。默认模型继承来源任务，可固定 override；未知调用不重派，终态可恢复同一 decision。schema 18 发布派发前持久 claim，精确签名回执可对账。精确制品启用与普通任务观察仍待接通。
 - Control Plane 使用后的签名退化/撤回已接入原有物理回退：成功启用保留上一版，核对当前版和备份核心文件，恢复后须由 Host 签名确认旧版就绪或停服；支持 rename 中断与回执丢失恢复，拒绝覆盖较新的部署。schema 17 保留部署顺序与安装摘要，旧记录不补造恢复能力。普通前台结果的版本归因及自动签发观察仍待接通。
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
 
@@ -59,7 +59,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. 在真实反馈→持久复盘→owner 私有失败 gap→源码候选→有限审批/发布授权之上，接通独立 review producer 到 Host 接续入口的唤醒，以及精确 artifact 的采用授权，去除逐 Goal 手动 arm。若走 Skills 修复，普通前台来源须经 owner 授权的 Host 入口创建真实原生 Goal，不能伪造现有修复契约要求的来源 Goal；调度继续复用 Automations。
+1. 在真实反馈→持久复盘→owner 私有失败 gap→源码候选→有限审批/发布授权之上，在已接入的独立源码 review 之上，接通精确 artifact 的采用授权，去除逐 Goal 手动 arm。若走 Skills 修复，普通前台来源须经 owner 授权的 Host 入口创建真实原生 Goal，不能伪造现有修复契约要求的来源 Goal；调度继续复用 Automations。
 2. 接通成长触发 → 自主修复/技能或插件候选 → 独立验证 → 已授权范围内采用 → 后续真实使用观察与回滚。复用既有 Skills、Growth Driver 和 Control Plane；仅停留在 pending 提案不算完整交付。
 3. 提供可安装的日常使用配置，明确正常入口、针对成长能力范围的一次授权、预算、停止和恢复方式。模型保持可替换供应，成长状态随 Agent 持久化；无需为每个来源 Goal 手动 arm，或为每个任务重新编排固定场景。自动调用预设场景仍不能替代这一目标。
 4. 保留上表未完成验收与真实发布/外部系统边界。WP16 的独立副作用观测、签名和推广恢复，以及 WP18 的精确提交 CI/readback，按日常自迭代链路所需逐项接入；测试夹具不能代替生产授权或真实收益。
@@ -69,7 +69,8 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 有限授权与 Host 本地发布驱动已通过独立复核：Control Plane 整包采集 624 项，619 项通过、5 项触及默认 5 秒超时；按仓库门禁的 `--testTimeout=15000` 复验 systemd 文件，47 项全过。新增 v17→v18 派发迁移 1 项、最终 release/迁移定向 31 项通过；类型、构建、全仓 lint、manifest 和 Control Plane dry-run pack 通过。真实 SQLite/Ed25519 测试覆盖八阶段、review 等待/唤醒入口、未知不重派、签名回执对账及 catalog 已写未落账恢复；子进程取消/回收另有真实进程测试。adapter/构建/审查结果使用夹具，未执行真实发布/部署，也不证明自动独立审查 producer 或普通使用闭环已完成。
+- 自动独立源码审查：Verifier 整包 111 项、Control Plane 来源/Host/发布接续/原生作业定向 78 项通过；两包类型、构建和 dry-run pack、全仓 lint 与 manifest 通过。真实 bare Git、SQLite 与原生 AgentLoop 覆盖精确补丁、默认模型继承/固定 override、空工具、完整回合、owner/插件/额度准入、未知不重派、终态恢复和依赖退出。模型与 release adapter 使用本地脚本，未执行真实部署或 npm 发布；后续真实任务采用闭环仍未完成。
+- 有限授权与 Host 本地发布驱动已通过独立复核：Control Plane 整包采集 624 项，619 项通过、5 项触及默认 5 秒超时；按仓库门禁的 `--testTimeout=15000` 复验 systemd 文件，47 项全过。新增 v17→v18 派发迁移 1 项、最终 release/迁移定向 31 项通过；类型、构建、全仓 lint、manifest 和 Control Plane dry-run pack 通过。真实 SQLite/Ed25519 测试覆盖八阶段、review 等待/唤醒入口、未知不重派、签名回执对账及 catalog 已写未落账恢复；子进程取消/回收另有真实进程测试。adapter/构建/审查结果使用夹具，未执行真实发布/部署，也不证明普通使用闭环已完成。
 - Host 候选版本管理通过独立复核：含原生持久作业的定向 65 项与独立审批客户端相关 69 项通过。真实仓库临时 worktree 中 `personal-memory` 从 `0.1.33` 生成 `0.1.34`，仅两个版本文件变化，32 个插件和 3 个共享包的 manifest 校验通过。构建链测试使用夹具，未调用真实模型，也不作为自动采用或 npm 发布证据。
 - 启用后物理回退通过独立复核，覆盖同 Host 连续观察、真实文件恢复、三种 rename 断点、回执丢失、并发/后继部署与 ABA 拒绝、核心文件漂移、旧库迁移和原始回执保留。Host 使用签名子进程夹具，未据此宣称真实 systemd 或生产端到端通过。
 - 有限源码审批已通过独立复核：真实 Git/SQLite/子进程/Ed25519 的 compiled client→FD CLI→审批器及跨进程重放通过；构建证据使用 fixture，此结果不证明自动采用。当前整包测试结果见下方全仓门禁。

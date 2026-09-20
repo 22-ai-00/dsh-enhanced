@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import type { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
 import { OwnerTaskFailureGaps } from './owner-task-gaps.js'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -49,7 +50,7 @@ export interface Config {
   sourceApprovals?: SourceApprovalClientConfig
   /** Optional separate finite authority for entering the local release state machine. */
   sourceReleases?: SourceReleaseClientConfig
-  /** Explicit execution of configured local phases; independent review stays external. */
+  /** Explicit local phase execution, optionally requesting separately authorized review. */
   sourceReleaseExecution?: SourceReleaseExecutionConfig
   /** Explicit owner-only observation channel; no signing or activation authority. */
   runtimeObserver?: RuntimeObserverConfig
@@ -145,7 +146,9 @@ export class PluginControlPlaneService extends Service {
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
     if (this.config.runtimeObserver !== undefined) installRuntimeObserver(ctx, this.config.runtimeObserver)
     if (this.config.replayEndpoint !== undefined) installReplayEndpoint(ctx, this.config.replayEndpoint)
-    if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never, ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : [])], jobsCtx => {
+    if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never,
+      ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : []),
+      ...(this.config.sourceReleaseExecution?.independentReview ? ['assistantVerifier', 'agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'] as never[] : [])], jobsCtx => {
       jobsCtx.effect(() => {
         const current = <K extends keyof SourceJobPorts>(key: K): SourceJobPorts[K] => jobsCtx.get((key === 'automations' ? 'assistantAutomations' : 'assistantDelivery') as never) as unknown as SourceJobPorts[K]
         for (const method of ['registerHostExecutor', 'reconcileSystem', 'inspectSystemOwnedActivation', 'inspectSystemOwned'] as const) {
@@ -298,6 +301,15 @@ export class PluginControlPlaneService extends Service {
     const operation = (async () => {
       const plan = this.store.getSourcePlan(input.planId), source = this.store.getOwnerTaskFailureReference(plan.gapId)
       if (!source || plan.mode !== 'modify' || !plan.release) throw new Error('source release continuation requires an owner repair release')
+      const reviewerAvailable = (operationId?: string) => {
+        const reviewer = this.ctx.get('assistantVerifier' as never) as AssistantVerifierService | undefined
+        const snapshot = this.taskGaps.snapshot(plan.gapId, source.owner)
+        return reviewer?.canReviewSourceRepair?.({ decisionRoot: config.reviewDecisionRoot, owner: snapshot.owner, name: plan.name,
+          ...(operationId === undefined ? {} : { operationId }),
+          ...(snapshot.source.modelSelectionState === 'frozen' && snapshot.source.modelSelection
+            ? { modelSelection: snapshot.source.modelSelection } : {}) }) === true
+      }
+      if (config.independentReview && plan.status === 'awaiting-pr' && !reviewerAvailable() && !input.receipt) return plan
       const withSourceFence = <T>(callback: () => T): T => { signal.throwIfAborted(); return this.taskGaps.withCurrent(plan.gapId, source.owner, callback) }
       withSourceFence(() => {})
       const trust = await this.boundTrust(), trustDigest = controlPlaneDigest(trust)
@@ -315,7 +327,23 @@ export class PluginControlPlaneService extends Service {
           expectedFence: plan.release.fence, receipt: input.receipt, resolveAuthority: authority,
           resolveAuthorizationAuthority: authorize, withSourceFence })
       }
-      return advanceSourceRelease({ store: this.store, planId: plan.id, trust, config, signal, assertCurrent, withSourceFence })
+      return advanceSourceRelease({ store: this.store, planId: plan.id, trust, config, signal, assertCurrent, withSourceFence,
+        review: async (request, currentPlan) => {
+          const reviewer = this.ctx.get('assistantVerifier' as never) as AssistantVerifierService | undefined
+          if (!reviewer || typeof reviewer.reviewSourceRepair !== 'function' || !reviewerAvailable(request.operationId)) return
+          const snapshot = this.taskGaps.snapshot(plan.gapId, source.owner)
+          await reviewer.reviewSourceRepair({ request: {
+            protocol: 'dsh-source-review/v1', operationId: request.operationId,
+            planId: currentPlan.id, planDigest: currentPlan.digest, releaseId: request.release.id,
+            fence: request.release.fence, revision: request.plan.revision, name: currentPlan.name,
+            ...request.input, checkedTreeDigest: request.authorization.checkedTreeDigest,
+            checkedPatchDigest: request.authorization.checkedPatchDigest, scope: request.authorization.scope,
+            source: { owner: snapshot.owner, outcomeId: source.outcomeId, sourceDigest: source.sourceDigest,
+              objective: snapshot.source.objective,
+              ...(snapshot.source.modelSelectionState === 'frozen' && snapshot.source.modelSelection
+                ? { modelSelection: snapshot.source.modelSelection } : {}) },
+          }, signal, withSourceFence })
+        } })
     })()
     this.sourceReleaseAdvances.set(input.planId, operation); this.sourceReleaseFlights.add(operation)
     try { return await operation } finally { this.sourceReleaseAdvances.delete(input.planId); this.sourceReleaseFlights.delete(operation) }
