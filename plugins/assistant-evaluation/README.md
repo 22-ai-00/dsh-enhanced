@@ -78,8 +78,8 @@ projection 保存选中的 execution/objective/delivery component id，原始两
 
 - **文件系统：** 创建数据库父目录并写入本地 SQLite；新数据库目录使用 `0700`、数据库使用 `0600`。现有数据库若为符号链接、硬链接、非当前用户所有或对 group/other 开放，会拒绝启动。数据库启用 WAL、`synchronous=FULL`、迁移版本检查和 5 秒 busy timeout。
 - **网络：** 默认 Evaluation 插件无网络访问；显式调用 experimental benchmark SDK 时，模型 delegate 或独立 holdout authority 是否联网由可信 Host/operator 的部署决定，SDK 本身只使用进程内调用或 stdio transport。
-- **子进程：** 默认 Evaluation 插件不创建子进程；显式调用 `./benchmark/holdout` 的 `openHoldoutProvider()` 才会启动 operator 指定的 authority executable。
-- **凭据：** 默认 Evaluation 插件不读取凭据；holdout provider 只收到 operator 显式给出的精确 environment，不继承 Host 环境，delegate 所需凭据仍由可信 Host 自行装配和撤销。
+- **子进程：** 默认 Evaluation 插件不创建子进程；显式调用 `./benchmark/holdout` 的 `openHoldoutProvider()` 会启动 operator 指定的 authority executable；`./benchmark/skills` 还会通过 Isolation 启动 Docker 验收作业。
+- **凭据：** 默认 Evaluation 插件不读取凭据；`./benchmark/holdout` provider 只收到 operator 显式给出的精确 environment，不继承 Host 环境。`./benchmark/skills` 使用的 Skills authority transport 继承 Host 环境；模型 delegate 所需凭据由可信 Host 自行装配和撤销。
 - **浏览器：** 无。
 - **install script：** 无；仅有标准 TypeScript build/prepack 和仓库发布保护脚本。
 
@@ -201,3 +201,9 @@ Legacy schema 7 owner rows are adopted lazily through the exact Host delivery ca
 The optional `./benchmark/deepseek` export supplies the trusted `createNativeAdapter` entry for strategy-v1. Explicitly install the matching `assistant-deepseek-budget` Host peer and provide the `DEEPSEEK_API_KEY` credential reference in the current credentials service or process environment. The factory registers no services or profile configuration; disposal shuts down its adapter. It uses the existing fixed HTTPS production transport and sends public task context and tool messages to that provider. No subprocess, credential file scan, model-generated adapter or automatic retry is added.
 
 The input reserve is the production contract's conservative 2,097,152-token upper bound per request; prices remain unknown. Use the [DeepSeek example and instructions](../../docs/goal-strategy-evaluation.md#deepseek-生产模型入口), rather than the small generic fixture budget. Source commitments include the selected DeepSeek and credentials packages. Runtime readiness, online model access and measured strategy benefit remain separate evidence.
+
+## 原生技能复用比较
+
+`./benchmark/skills` 提供 `createNativeSkillGoalRuntime`、`runNativeSkillBenchmark` 和 `nativeSkillBenchmarkReport`。它复用原生 DSH Goal、Skills 委派、BenchmarkStore 和 prospective authority；冻结同供应/预算后才生成隐藏任务，最终签名验收后才计算成功率。训练用量单列，unknown 不重派，报告不授权晋升。来源服务需保持存活，所有实验资源需显式关闭；详见[接线与证据边界](../../docs/native-skill-reuse.md)。
+
+此入口显式写入私有 runtime、SQLite 和逐 cell 原始证据，并使用 Skills 的 NDJSON authority transport（继承 Host 环境/cwd）；默认 Evaluation bundle 的权限不变。真实模型凭据由调用方提供，候选只有隔离执行能力。

@@ -137,6 +137,23 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
+  test.each(['skill_run', 'skill_status'])('reserves %s preauthorization to the mounted assistant-skills Fiber and keeps revoked predicates closed', async name => {
+    const current = await fixture()
+    let executions = 0
+    let active = true
+    const tool = definition(name, () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, tool, () => true)).toThrow(/reserved/)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-skills'), tool, () => active)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
+    expect(current.asks()).toBe(0)
+    active = false
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
+    expect(current.asks()).toBe(1)
+    expect(executions).toBe(1)
+    await current.ctx.fiber.restart()
+  })
+
   test.each([
     'action_github_commit',
     'action_github_branch',

@@ -12,7 +12,7 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { createDefinition } from '../src/definition.ts'
 import { qualifyHoldout } from '../src/holdout-qualification.ts'
 import { openHoldoutProcess } from '../src/external-holdout.ts'
-import { verifyHoldoutSignature, type BeginResult, type HoldoutReceipt, type SignedCell } from '../src/holdout-authority.ts'
+import { verifyHoldoutSignature, verifyProspectiveBenchmarkManifest, type BeginResult, type HoldoutReceipt, type SignedCell } from '../src/holdout-authority.ts'
 import { generatorDigest, prospectiveGeneratorDigest, verifyProspectiveCertificate, type ProspectiveGeneratorName } from '../src/prospective-holdout.ts'
 
 const exec = promisify(execFile), roots: string[] = [], closes: (() => Promise<void>)[] = []
@@ -79,6 +79,31 @@ test('prospective inspection does not generate a dataset and begin returns a bin
   expect(verifyProspectiveCertificate(begin.prospective, frozen, config.publicKey, generatorDigest)).toBe(true)
   expect(begin.datasetDigest).toBe(begin.prospective!.datasetDigest)
   expect(JSON.stringify(begin)).not.toMatch(/expectedStdout|stdin/u)
+})
+
+test('prospective CLI emits signed commitments after freeze and rejects manifest after next', async () => {
+  const config = await setup(false, true)
+  const client = connect(process.execPath, [cli, '--config', join(config.root, 'config.json')]); await client.read()
+  const frozen = binding(), begin = (await client.request('begin', frozen)).value as BeginResult
+  expect(await client.request('manifest', {})).toMatchObject({ ok: false, error: 'holdout-request-rejected' })
+  const response = await client.request('manifest')
+  expect(response.ok).toBe(true)
+  expect(JSON.stringify(response.value)).not.toMatch(/expectedStdout|stdin/u)
+  expect(verifyProspectiveBenchmarkManifest(response.value, frozen, config.publicKey, generatorDigest)).toBe(true)
+  expect((await client.request('next')).ok).toBe(true)
+  expect(await client.request('manifest')).toMatchObject({ ok: false, error: 'holdout-request-rejected' })
+  expect(begin.prospective).toBeDefined()
+})
+
+test('external holdout transport forwards the answer-free manifest operation', async () => {
+  const config = await setup(false, true), controller = new AbortController()
+  const client = await openHoldoutProcess({ executable: process.execPath, args: [cli, '--config', join(config.root, 'config.json')], publicKey: config.publicKey, generatorDigest }, controller.signal)
+  const frozen = binding()
+  try {
+    await client.transport.request('begin', frozen)
+    const manifest = await client.transport.request('manifest')
+    expect(verifyProspectiveBenchmarkManifest(manifest, frozen, config.publicKey, generatorDigest)).toBe(true)
+  } finally { await client.close() }
 })
 
 test('v2 inspection pins its generator without consuming state and rejects generator changes on restore', async () => {

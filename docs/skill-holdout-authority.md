@@ -97,6 +97,7 @@ The CLI writes a `ready` message using protocol `assistant-skills/holdout-ipc/v1
 | Operation | Input | Result |
 | --- | --- | --- |
 | `begin` | Exact scope/baseline/candidate/budget SHA-256 digests, finite `expiresAt`, `repeats` (2–4) | Frozen public identity, actual limits and cell count; no answers or inputs |
+| `manifest` | None; prospective mode only, before any cell is issued | Signed answer-free case commitments and complete cell mapping, bound to the after-freeze certificate |
 | `next` | None | One signed cell with its arm digest and stdin; no expected output |
 | `record` | Exact cell/arm, actual stdout, exit code or null, quiescent/status, artifact digest, bounded tool-call observations | Authority-derived achieved/not-achieved/unknown |
 | `finish` | None | Signed public receipt with per-cell verdicts, observation digests and `complete`; no input/output bodies |

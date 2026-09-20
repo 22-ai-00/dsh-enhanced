@@ -5,7 +5,7 @@ import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-ses
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { defineTool, type ToolDefinition, type ToolExecution } from '@deepseek-ai/dsh-tools'
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { generateKeyPairSync } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
@@ -35,7 +35,7 @@ function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id):
   session.append('turn/start', { turn: 1 })
   return value
 }
-async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image, repair = false, repairIterations = 1, repairHoldoutTtlMs = 60000) {
+async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId, externalHoldouts?: (input: { root: string; scope: object }) => any[], comparisonImage = image, repair = false, repairIterations = 1, repairHoldoutTtlMs = 60000, sourceTool: 'write' | 'isolation_run' = 'write') {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-service-')))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const comparisonRoot = comparison ? await realpath(await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-'))) : undefined
@@ -52,10 +52,12 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     validateOwnerRoute: (input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }) => routeLive && input.authorityId === 'owner-route' && input.principalId === 'owner' && input.workspace === root && input.agentPreset === 'primary' ? { authorityId: input.authorityId, principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: root, agentPreset: 'primary', bindingVersion: routeVersion, generation: 1 } : undefined } as never)
   const charges: string[] = []
   ctx.provide('assistantVerifier' as never, {} as never)
-  ctx.provide('assistantPolicy' as never, { evaluate: () => ({ effect: backgroundAllowed ? 'allow' : 'deny' }), authorize: () => ({ effect: backgroundAllowed && !budgetDenied ? 'allow' : 'deny' }), evaluateAgent: () => ({ effect: live ? 'allow' : 'deny' }), authorizeAgent: (_agent: Agent, _action: string, _resource: unknown, options: { idempotencyKey: string }) => { charges.push(options.idempotencyKey); return { effect: live && !budgetDenied ? 'allow' : 'deny' } } } as never)
+  const preauthorizations: { definition: ToolDefinition; authorize: (execution: ToolExecution) => boolean }[] = []
+  ctx.provide('assistantPolicy' as never, { evaluate: () => ({ effect: backgroundAllowed ? 'allow' : 'deny' }), authorize: () => ({ effect: backgroundAllowed && !budgetDenied ? 'allow' : 'deny' }), evaluateAgent: () => ({ effect: live ? 'allow' : 'deny' }), authorizeAgent: (_agent: Agent, _action: string, _resource: unknown, options: { idempotencyKey: string }) => { charges.push(options.idempotencyKey); return { effect: live && !budgetDenied ? 'allow' : 'deny' } }, delegatedSkillToolPreauthorizationVersion: () => 1 as const,
+    registerPreauthorizedTool: (_caller: Context, definition: ToolDefinition, authorize: (execution: ToolExecution) => boolean) => { const entry = { definition, authorize }; preauthorizations.push(entry); return () => { const index = preauthorizations.indexOf(entry); if (index >= 0) preauthorizations.splice(index, 1) } } } as never)
   const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope, goal: { id: 'source-goal', definition: { version: 1, digest: 'a'.repeat(64), objective: 'Write a source artifact' }, sessionId: ownerSession, nativeGoalId: 'native-source-goal' },
     runId: 'verified-run', turn: 1, acceptance: { contractId: 'contract', contractDigest: 'b'.repeat(64), receiptDigest: 'c'.repeat(64), verifiedAt: Date.now(), validUntil: Date.now() + 60000 },
-    steps: [{ id: 'step-1', toolName: 'write', arguments: comparison ? { file_path: 'result.sh', content: '#!/bin/sh\nread x\nprintf wrong' } : { file: 'output.txt', data: 'original' } }, ...(twoSteps ? [{ id: 'step-2', toolName: 'write', arguments: { file: 'second.txt', data: 'second' } }] : [])], failedObservations: [] as { id: string; toolName: string; arguments: unknown; outcome: 'failed' }[] }
+    steps: [{ id: 'step-1', toolName: sourceTool, arguments: sourceTool === 'isolation_run' ? { data: 'original' } : comparison ? { file_path: 'result.sh', content: '#!/bin/sh\nread x\nprintf wrong' } : { file: 'output.txt', data: 'original' } }, ...(twoSteps ? [{ id: 'step-2', toolName: 'write', arguments: { file: 'second.txt', data: 'second' } }] : [])], failedObservations: [] as { id: string; toolName: string; arguments: unknown; outcome: 'failed' }[] }
   let verified: { goalId: string; runId: string; steps: unknown[] } | Error | undefined
   // These are Host source/admission seams, not independent acceptance fixtures.
   // Goals tests and the real Web scenario validate the provenance producer.
@@ -120,6 +122,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
   ctx.tools.register(defineTool({ name: 'write', description: 'Fixture filesystem writer', parameters: comparison ? { file_path: { type: 'string', required: true }, content: { type: 'string', required: true } } : { file: { type: 'string', required: true }, data: { type: 'string', required: true } },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async (args, runtime) => { count++; if (writeGate) await (ignoreWriteAbort ? writeGate : Promise.race([writeGate, new Promise<void>((_resolve, reject) => runtime.signal.addEventListener('abort', () => reject(runtime.signal.reason), { once: true }))])); await writeFile(join(root, comparison ? args.file_path as string : args.file as string), comparison ? args.content as string : args.data as string); if (revokeAfterWrite) live = false; return 'written' } }))
+  if (sourceTool === 'isolation_run') ctx.tools.register(defineTool({ name: 'isolation_run', description: 'Fixture isolated execution marker', parameters: { data: { type: 'string', required: true } }, output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async () => 'isolated' }))
   const dispatches: string[] = []; const lineage: { name: string; root: string; nested: boolean }[] = []
   ctx.on('tools/execute', async (exec, next) => { dispatches.push(exec.name); lineage.push({ name: exec.name, root: exec.rootCallId, nested: exec.parent !== undefined }); return next() })
   ctx.on('tools/pre-execute', async (exec, next) => exec.name === 'write' && deniedTool ? { kind: 'deny', reason: 'fixture current permission revoked' } : next())
@@ -134,7 +137,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     canaryAdmissionTemplate: { protocol: 'assistant-skills/canary-admission-template/v1', skillName: 'saved-write', taskFamily: { goalDefinitionDigest: 'd'.repeat(64), outcomeProfile: { id: 'repair-outcome', version: 1, digest: 'e'.repeat(64) } } } }
   if (repair) { ctx.provide('sessions' as never, {} as never); ctx.provide('llm' as never, {} as never) }
   const repairProfile = { scope, skillName: 'saved-write', taskFamilyId: 'repair-family', description: 'Repair saved write', externalHoldoutProfileId: 'repair-holdout', provider: 'fixture', model: 'fixture', allowedTools: ['write'], maxGoalRounds: 2, maxModelCalls: 4, maxToolCalls: 4, maxOutputTokens: 128, maxDurationMs: 30000, canaryRuns: 1, maxCanaryRuns: 2 }
-  let config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}), ...(repair ? { externalHoldouts: [repairHoldout], repairProfiles: [{ id: 'repair-profile', ...repairProfile, ...(repairIterations > 1 ? { maxIterations: repairIterations, followupProfileIds: ['repair-followup'] } : {}) }, ...(repairIterations > 1 ? [{ id: 'repair-followup', ...repairProfile }] : [])] } : {}) }
+  let config = { databasePath: join(root, 'skills.sqlite'), allowedTools: [sourceTool] as string[], ...(comparison ? { comparisons: comparisons! } : {}), ...(externalHoldouts ? { externalHoldouts: externalHoldouts({ root, scope }) } : {}), ...(repair ? { externalHoldouts: [repairHoldout], repairProfiles: [{ id: 'repair-profile', ...repairProfile, ...(repairIterations > 1 ? { maxIterations: repairIterations, followupProfileIds: ['repair-followup'] } : {}) }, ...(repairIterations > 1 ? [{ id: 'repair-followup', ...repairProfile }] : [])] } : {}) }
   let plugin = await ctx.plugin(AssistantSkillsService, config)
   await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
   const execute = (name: string, args: unknown, agent = owner) => agent.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
@@ -162,7 +165,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     canonicalOutcomes.set(input.lookupAssessmentId ?? subjectRef, { triggerOutcomeId: objective?.outcomeId ?? `evaluation-retract-${goalId}-${input.version}`, scope: evaluationScope, scopeKey, scopeWatermark: canonicalWatermark, situation, execution,
       ...(objective === undefined ? {} : { objective }), projection: { ...projectionBase, version: input.version, digest } })
   }
-  return { root, scope, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true }, holdWrite: (ignoreAbort = false) => { ignoreWriteAbort = ignoreAbort; writeGate = new Promise(resolve => { releaseWriteGate = resolve }) }, releaseWrite: () => { releaseWriteGate?.(); writeGate = undefined; releaseWriteGate = undefined; ignoreWriteAbort = false },
+  return { root, scope, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, preauthorizations, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true }, holdWrite: (ignoreAbort = false) => { ignoreWriteAbort = ignoreAbort; writeGate = new Promise(resolve => { releaseWriteGate = resolve }) }, releaseWrite: () => { releaseWriteGate?.(); writeGate = undefined; releaseWriteGate = undefined; ignoreWriteAbort = false },
     source, candidate, trial, activate, rollback, unloadGoals: () => disposeGoals(), enableAutomaticSource: () => { automaticSource = { ...source, goal: { ...source.goal, definition: { ...source.goal.definition, digest: automaticDefinitionDigest } } } }, setAutomaticSource: (value: typeof source = source) => { automaticSource = structuredClone(value) }, addFailedReadObservation: () => { source.failedObservations.push({ id: 'missing-read', toolName: 'read', arguments: { file: 'missing.txt' }, outcome: 'failed' }) }, requireSessionQuery: () => { bridgeRequiresSessionQuery = true }, provideSessionQuery: () => { sessionQueryReady = true; ctx.provide('sessionQuery' as never, {} as never) }, changeAutomaticDefinition: () => { automaticDefinitionDigest = 'e'.repeat(64) }, holdAutomaticSource: () => { automaticGate = new Promise(resolve => { releaseAutomaticGate = resolve }) }, releaseAutomaticSource: () => { releaseAutomaticGate?.(); automaticGate = undefined; releaseAutomaticGate = undefined }, setAutomaticSourceError: () => { automaticSource = Object.assign(new Error('unknown outcome'), { code: 'unknown' }) }, setVerifiedTrial: (goalId: string, runId: string, args: unknown, extraSteps: unknown[] = []) => { verified = { goalId, runId, steps: [{ toolName: 'skill_trial', arguments: args }, ...extraSteps] } }, setVerifiedTrialSteps: (goalId: string, runId: string, steps: unknown[]) => { verified = { goalId, runId, steps } }, clearVerifiedTrial: () => { verified = undefined }, failVerifiedTrial: () => { verified = new Error('fixture acceptance proof expired') }, setSnapshot: (goalId: string, runId: string, status: 'achieved' | 'not-achieved', options: { expired?: boolean; validForMs?: number; wrongRun?: boolean; wrongNative?: boolean; wrongOwner?: boolean; wrongProfile?: boolean; unknownExecution?: boolean; future?: boolean; tampered?: boolean } = {}) => {
       const now = Date.now(), goal = { id: goalId, definitionVersion: 1, definitionDigest: 'd'.repeat(64), sessionId: ownerSession, nativeGoalId: options.wrongNative ? 'foreign-native' : `native-${goalId}` }
       const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v3', id: `outcome-${goalId}`, task: { kind: 'goal-outcome', ref: `assessment-${goalId}`, goal: { ...goal, assessmentId: `assessment-${goalId}` } },
@@ -1910,6 +1913,35 @@ test('delegates a frozen benchmark arm through the native ToolRuntime without ac
   expect(rawSkills(recipient).inspectOwnerActiveSkills(recipient.scope)).toEqual([])
   expect(result(await recipient.execute('skill_status', { run_id: run.id }))).toMatchObject({ id: run.id, delegationDigest: mounted.bindingDigest })
   mounted.dispose()
+})
+
+test('preauthorizes only an exact live isolation-only benchmark delegation', async () => {
+  const ordinarySource = await fixture(), ordinaryRecipient = await fixture()
+  result(await ordinarySource.save())
+  const ordinaryArm = await delegatedArm(ordinarySource, ordinaryRecipient)
+  const ordinaryMounted = await ordinaryArm.target.mountBenchmarkArm(ordinaryArm.capability, ordinaryArm.binding)
+  const ordinaryGrant = ordinaryRecipient.preauthorizations.find(entry => entry.definition.name === 'skill_run')
+  expect(ordinaryGrant).toBeDefined()
+  const execution = (agent: Agent, arguments_: Record<string, unknown>, name = 'skill_run'): ToolExecution => ({
+    callId: ToolCallId(`delegated-preauthorization-${Math.random()}`), rootCallId: ToolCallId(`delegated-preauthorization-root-${Math.random()}`), name, arguments: arguments_, signal: new AbortController().signal, agent, token: Symbol('delegated-preauthorization') as never,
+  })
+  expect(ordinaryGrant!.authorize(execution(ordinaryRecipient.owner, { goal_id: 'new-goal', name: 'saved-write', version: 1, inputs_json: '{"message":"ordinary"}', invocation_id: 'ordinary' }))).toBe(false)
+  ordinaryMounted.dispose()
+
+  const source = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, false, 1, 60000, 'isolation_run')
+  const recipient = await fixture(false, false, 'owner-session', 'owner-session', undefined, image, false, 1, 60000, 'isolation_run')
+  result(await source.save())
+  const arm = await delegatedArm(source, recipient)
+  const grant = recipient.preauthorizations.find(entry => entry.definition.name === 'skill_run')
+  expect(grant).toBeDefined()
+  const exact = () => execution(recipient.owner, { goal_id: 'new-goal', name: 'saved-write', version: 1, inputs_json: '{"message":"isolated"}', invocation_id: 'isolated' })
+  // No mount, a version mismatch, and a disposed mount all fail closed.
+  expect(grant!.authorize(exact())).toBe(false)
+  const mounted = await arm.target.mountBenchmarkArm(arm.capability, arm.binding)
+  expect(grant!.authorize(execution(recipient.owner, { goal_id: 'new-goal', name: 'saved-write', version: 2, inputs_json: '{"message":"isolated"}', invocation_id: 'isolated' }))).toBe(false)
+  expect(grant!.authorize(exact())).toBe(true)
+  mounted.dispose()
+  expect(grant!.authorize(exact())).toBe(false)
 })
 
 test('binds benchmark delegation to its source, route, recipient and exact pending candidate without activation', async () => {

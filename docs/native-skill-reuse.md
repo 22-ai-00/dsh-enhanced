@@ -1,6 +1,6 @@
 # 原生技能复用评测接线
 
-Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的已验证技能或待评测候选，挂载到一个全新评测 scope，供模型通过原生 `skill_run` 调用。模型供应、独立任务生成、预算计量、结果验收和统计仍由 Evaluation 评测入口负责。
+Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的已验证技能或待评测候选，挂载到一个全新评测 scope，供模型通过原生 `skill_run` 调用。Evaluation 的 `./benchmark/skills` Host 入口负责原生模型单元、冻结后独立任务、预算计量、结果验收和统计；导入本身不会启用插件或启动进程。
 
 ## Host 调用顺序
 
@@ -30,8 +30,36 @@ Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的
 - 取消停止等待并抑制晚到结果；它不证明不合作的外部工具已停止。已派发但无法确认的调用保留 unknown，评测不能报告 quiescent 或成功。外部资源停机证据须由相应原生运行时提供。
 - 此接口不授予候选激活、生产发布、密封任务或验收签名权限。recipient 工具表和 Policy 应只开放本次任务所需能力。
 
+## Evaluation Host 入口
+
+从 `@dsh-enhanced/assistant-evaluation/benchmark/skills` 导入：
+
+- `createNativeSkillGoalRuntime(options)`：创建一个真实 DSH Goal 单元。`execute()` 返回独立 Goal 观察、Host usage、工具调用和技能执行记录。来源单元配置 `source: { name, description, validityMs }`；达成后调用 `captureVerifiedSkill()`，通过真实 SessionQuery/Goals 重新验证，沉淀 pending 候选。来源服务必须持续存活。
+- `runNativeSkillBenchmark(config, captured, factory, signal)`：使用同一个可信模型工厂运行 baseline/candidate。`config` 固定 persona、model、budget、execution、公开 task、不可变 image、Docker 路径、步骤时限、repeats（2–4）、seed、expiresAt、独立 authority 和 verification。供应、预算、任务与 persona 必须匹配 captured.origin；训练用量单独返回，不混入复用单元。
+- `nativeSkillBenchmarkReport(evidence, pinnedPublicKey, generatorDigest)`：离线重验 `completion.json`，重算报告；不启动模型、authority 或 Docker。
+
+`stateRoot`、`workspaceRoot` 必须是独立的私有绝对目录，state 也不能位于来源 workspace 内。来源 runtime 的 workspace/stateRoot 由调用者预先创建为 `0700`。模型工厂负责装配凭据服务和适配器；模型仅见公开程序规格和允许的原生工具，不接收独立验收输入、答案、私钥或 authority 路径。
+
+协调顺序是：
+
+1. 重新验证 live 来源，冻结模型、预算、候选、训练证据和已部署模块摘要。
+2. authority `begin` 持久冻结后生成随机任务；`manifest` 返回签名 case/cell 摘要，不暴露答案。核验生成器、公钥与完整调度顺序。
+3. 在现有 `BenchmarkStore` 占用 cell 后，领取签名输入并启动全新 owner/Goal。baseline 不提供 Skills，candidate 临时挂载精确委派；两臂使用相同预算。
+4. 独立 Goal smoke 验收后读回产物，关闭原 runtime，再由 `IsolatedVerifierRunner` 在独立容器执行隐藏输入。
+5. 保存私有逐 cell 观察；未签名的 `record` 响应不能成为成功结论。执行账本保留 provisional unknown verdict，只有最终签名 receipt、观察摘要与原生计量均通过重验后，才计算质量报告。
+
+`complete` 同时要求全部单元已记录、独立 authority 完整、执行已确认且没有 unknown。重跑同一实验不会重新派发；不要更换数据库、authority state 或 scope 绕过 reservation。`reuse` 只列出确实成功调用委派技能的单元；模型未使用技能不能算作复用。报告始终 `promotionAuthorized: false`。
+
+当前 transport 复用 Skills 的受限 NDJSON 子进程协议；authority 是可信 Host 程序，继承该进程的环境和 cwd。私有文件目录隔离及候选的无 Host 挂载容器，不构成独立 UID/机器部署证明。插件内使用这些 Host API 时，须将整个实验的取消与 `close()` 绑定到调用方 Cordis effect。
+
 ## 当前验收范围
 
-Store 与服务测试覆盖来源检查、真实 native ToolRuntime 调用、摘要/recipient 替换、取消、重载和持久防重放；测试中的 Goals 来源与准入是 Host seam fixture，不能作为真实独立验收或模型收益证据。
+真实 Docker 工程测试覆盖：来源 native Goal→独立验收→SessionQuery 捕获→12 个新 Goal 的双臂比较，候选 6 次实际技能复用；两臂各 6 次达成、质量平局。另覆盖 usage/输出/预算/训练证据篡改、unknown 报告、重跑拒绝与取消清理。这些使用确定性适配器，不证明真实模型收益。
 
-尚须接入 Evaluation 的原生模型 cell delegate，并运行固定 `super-relay / auto_model/alwaysday1`、固定预算的双臂新任务比较。现有 signed holdout 在冻结 plan 时已固定 case 摘要，之后交付输入不证明任务在冻结后生成；该要求须接入 Skills prospective authority 的 freeze-before-generation 证书。完成这些步骤前，WP04/WP13/WP18 仍未验收。
+```sh
+DSH_ISOLATION_TEST_IMAGE=sha256:LOCAL_IMMUTABLE_IMAGE \
+pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run \
+  tests/benchmark/native-skills-runtime.spec.ts tests/benchmark/native-skills.spec.ts
+```
+
+真实 Day1 的同预算结果和剩余验收统一见 [RSI 当前状态](rsi-status.md)。任务在冻结后生成的证书只证明该次生成顺序，不证明模型训练数据独立；WP04/WP13/WP18 的任务广度和真实收益门槛仍保留。

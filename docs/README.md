@@ -21,7 +21,7 @@
 
 ## RSI 状态与设计
 
-- [原生技能复用评测接线](native-skill-reuse.md)：来源验证、受限 Host 委派及尚待完成的真实双臂评测。
+- [原生技能复用评测接线](native-skill-reuse.md)：来源验证、受限 Host 委派、原生双臂评测与签名留出报告。
 - [RSI 当前状态](rsi-status.md)：唯一进展入口，保留 18 项验收条件、当前边界与剩余工作。
 - [自迭代研究与开发原则](research-dsh-plugin-self-iteration-2026-09-19.md)：模型供应、DSH 原生组合、独立验收与新任务复用。
 - [持续成长设计](continuous-personal-assistant-growth.md)：反馈、偏好、评测指标和长期成功条件。

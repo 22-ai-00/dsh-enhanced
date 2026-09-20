@@ -1,9 +1,12 @@
-import { generateKeyPairSync } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { describe, expect, test } from 'vitest'
-import { HoldoutAuthority, verifyHoldoutSignature, type CellObservation, type HoldoutDataset } from '../src/holdout-authority.ts'
+import { HoldoutAuthority, verifyHoldoutSignature, verifyProspectiveBenchmarkManifest, type CellObservation, type HoldoutDataset } from '../src/holdout-authority.ts'
 import { createProspectiveCertificate, generateProspectiveDataset, generatorDigest, prospectiveDatasetDigest, prospectiveGeneratorDigest, verifyProspectiveCertificate } from '../src/prospective-holdout.ts'
 
 const hex = (letter: string) => letter.repeat(64)
+const canonical = (value: unknown): string => value === null || typeof value !== 'object' ? JSON.stringify(value)
+  : Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
+    : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`
 const dataset: HoldoutDataset = {
   id: 'private-suite', version: '1', cases: [
     { id: 'r', kind: 'replay', stdin: 'replay secret', expectedStdout: 'replay ok', expectedExitCode: 0 },
@@ -28,6 +31,41 @@ describe('independent holdout authority', () => {
     expect(verifyProspectiveCertificate(certificate, binding, generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest)).toBe(false)
     const authority = HoldoutAuthority.create({ dataset: prospectiveDataset, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 }, prospective: certificate, now: () => 1 })
     expect(authority.begin(binding).prospective).toEqual(certificate)
+  })
+
+  test('signs answer-free prospective commitments only before the first issued cell', () => {
+    const prospectiveDataset = generateProspectiveDataset(), frozen = { ...binding, expiresAt: Date.now() + 60_000 }
+    const certificate = createProspectiveCertificate(frozen, prospectiveDataset, keys.privateKey, '123e4567-e89b-42d3-a456-426614174010')
+    const authority = HoldoutAuthority.create({ dataset: prospectiveDataset, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 }, prospective: certificate })
+    const manifest = authority.begin(frozen) && authority.manifest()
+    const publicKey = keys.publicKey.export({ type: 'spki', format: 'pem' }).toString()
+    expect(verifyProspectiveBenchmarkManifest(manifest, frozen, publicKey, certificate.generatorDigest)).toBe(true)
+    const wrongBegin = { ...manifest.begin, datasetDigest: hex('e') }
+    wrongBegin.planDigest = createHash('sha256').update(canonical({ sessionId: wrongBegin.sessionId, datasetDigest: wrongBegin.datasetDigest, binding: frozen, limits: wrongBegin.limits, cells: manifest.cells })).digest('hex')
+    const { signature: _signature, ...body } = { ...manifest, begin: wrongBegin }
+    const resigned = { ...body, signature: sign(null, Buffer.from(canonical(body)), keys.privateKey).toString('base64url') }
+    expect(verifyHoldoutSignature(resigned as unknown as Record<string, unknown>, publicKey)).toBe(true)
+    expect(verifyProspectiveBenchmarkManifest(resigned, frozen, publicKey, certificate.generatorDigest)).toBe(false)
+    expect(JSON.stringify(manifest)).not.toMatch(/expectedStdout|stdin/u)
+    expect(manifest.cases).toHaveLength(prospectiveDataset.cases.length)
+    expect(manifest.cells).toHaveLength(prospectiveDataset.cases.length * frozen.repeats * 2)
+    expect(verifyProspectiveBenchmarkManifest({ ...manifest, begin: { ...manifest.begin, budgetDigest: hex('f') } }, frozen, publicKey, certificate.generatorDigest)).toBe(false)
+    expect(verifyProspectiveBenchmarkManifest(manifest, frozen, publicKey, hex('f'))).toBe(false)
+    expect(verifyProspectiveBenchmarkManifest({ ...manifest, cells: [{ ...manifest.cells[0]!, armDigest: hex('f') }, ...manifest.cells.slice(1)] }, frozen, publicKey, certificate.generatorDigest)).toBe(false)
+    expect(verifyProspectiveBenchmarkManifest({ ...manifest, cells: [...manifest.cells.slice(0, -1), manifest.cells[0]!] }, frozen, publicKey, certificate.generatorDigest)).toBe(false)
+    const replacement = manifest.signature[0] === 'A' ? 'B' : 'A'
+    expect(verifyProspectiveBenchmarkManifest({ ...manifest, signature: `${replacement}${manifest.signature.slice(1)}` }, frozen, publicKey, certificate.generatorDigest)).toBe(false)
+    authority.next()
+    expect(() => authority.manifest()).toThrow(/after cell issuance/)
+    const fixed = HoldoutAuthority.create(config(() => Date.now()))
+    fixed.begin({ ...binding, expiresAt: Date.now() + 60_000 })
+    expect(() => fixed.manifest()).toThrow(/requires a prospective qualification/)
+    let clock = 1
+    const expiringCertificate = createProspectiveCertificate(binding, prospectiveDataset, keys.privateKey, '123e4567-e89b-42d3-a456-426614174011')
+    const expiring = HoldoutAuthority.create({ dataset: prospectiveDataset, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 }, prospective: expiringCertificate, now: () => clock })
+    expiring.begin(binding); clock = binding.expiresAt
+    expect(expiring.next()).toBeUndefined()
+    expect(() => expiring.manifest()).toThrow(/expiry or stop/)
   })
 
   test('supports amountCents v2 with negative and empty cases under its own generator pin', () => {

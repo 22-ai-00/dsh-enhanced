@@ -116,6 +116,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
             if (row.controller !== controller || row.lease_until <= Date.now()) throw new Error('authority-controller-lost')
             let result: unknown
             if (request.operation === 'begin' && authority) result = authority.begin(request.value as QualificationBinding)
+            else if (request.operation === 'manifest' && request.value === undefined && authority) result = authority.manifest()
             else if (request.operation === 'next' && request.value === undefined && authority) result = authority.next() ?? null
             else if (request.operation === 'record' && authority) result = authority.record(request.value as CellObservation)
             else if (request.operation === 'finish' && request.value === undefined && authority) result = authority.finish()

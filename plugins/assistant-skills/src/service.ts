@@ -1,7 +1,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
-import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { SkillProviderControl } from '@deepseek-ai/dsh-skill'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
@@ -237,6 +237,7 @@ function trialProofSteps(steps: readonly { toolName: string; arguments: unknown 
 /** Fixed tool compositions run in the original native Goal; no new AgentLoop or scheduler. */
 export class AssistantSkillsService extends Service {
   static Config = Config
+  static { Object.defineProperty(this, 'name', { value: 'dsh-enhanced-assistant-skills' }) }
   static readonly #benchmarkCapabilities = new WeakMap<BenchmarkArmCapability, { recipient: object; scope: GoalScope; binding: SkillDelegatedArmBinding; snapshot: BenchmarkArmSnapshot; controller: AbortController; signal: AbortSignal; assertCurrent(): void; refresh(signal: AbortSignal): Promise<void>; consumed: boolean }>()
   static readonly #benchmarkRecipients = new WeakMap<object, AssistantSkillsService>()
   readonly #benchmarkIdentity = Object.freeze({})
@@ -301,11 +302,15 @@ export class AssistantSkillsService extends Service {
       runtime.tools.register(defineTool({ name: 'skill_save', description: 'Save the exact successful tool trace of this owner session’s independently achieved Goal as a private versioned skill. Requires the current human request. Historical acceptance is provenance, never permission or acceptance for a future run.',
         parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string', description: 'JSON array of {name,stepId,path}; path is a scalar argument JSON pointer. Empty array keeps the original arguments.' }, expected_version: { type: 'integer' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.save(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[] }, args.expected_version ?? 0)) }) }))
-      runtime.tools.register(defineTool({ name: 'skill_run', description: 'Replay a saved skill’s fixed tool steps in a fresh native Goal. If the current owner Goal is active but has no admitted native round, this returns awaiting-native-round with no steps or durable run, ends the turn, and the next native round must repeat the same invocation_id. Every nested call retains native permissions, approvals, cancellation and budgets. Tool success still requires fresh independent Goal acceptance.',
+      const delegatedRun = defineTool({ name: 'skill_run', description: 'Replay a saved skill’s fixed tool steps in a fresh native Goal. If the current owner Goal is active but has no admitted native round, this returns awaiting-native-round with no steps or durable run, ends the turn, and the next native round must repeat the same invocation_id. Every nested call retains native permissions, approvals, cancellation and budgets. Tool success still requires fresh independent Goal acceptance.',
         parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, version: { type: 'integer', required: true }, inputs_json: { type: 'string', description: 'JSON object with only declared typed input parameters.' }, invocation_id: { type: 'string', required: true } }, output,
-        execute: async (args, exec) => ({ context: JSON.stringify(await this.run(exec, args.goal_id, args.name, args.version, parse(args.inputs_json ?? '{}'), args.invocation_id)) }) }))
-      runtime.tools.register(defineTool({ name: 'skill_status', description: 'Read this owner’s active saved skill definitions, typed inputs and source acceptance, or inspect a specific durable invocation. Success means steps executed, not Goal achievement.', parameters: { run_id: { type: 'string' } }, output,
-        execute: async (args, exec) => ({ context: JSON.stringify(this.inspect(exec.agent, args.run_id)) }) }))
+        execute: async (args, exec) => ({ context: JSON.stringify(await this.run(exec, args.goal_id, args.name, args.version, parse(args.inputs_json ?? '{}'), args.invocation_id)) }) })
+      runtime.tools.register(delegatedRun)
+      if (runtime.assistantPolicy.delegatedSkillToolPreauthorizationVersion?.() === 1) runtime.assistantPolicy.registerPreauthorizedTool(runtime, delegatedRun, execution => this.#preauthorizeBenchmarkTool(execution))
+      const delegatedStatus = defineTool({ name: 'skill_status', description: 'Read this owner’s active saved skill definitions, typed inputs and source acceptance, or inspect a specific durable invocation. Success means steps executed, not Goal achievement.', parameters: { run_id: { type: 'string' } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.inspect(exec.agent, args.run_id)) }) })
+      runtime.tools.register(delegatedStatus)
+      if (runtime.assistantPolicy.delegatedSkillToolPreauthorizationVersion?.() === 1) runtime.assistantPolicy.registerPreauthorizedTool(runtime, delegatedStatus, execution => this.#preauthorizeBenchmarkTool(execution))
       runtime.tools.register(defineTool({ name: 'skill_retire', description: 'Retire the current saved skill version following the current authenticated owner request. Pending steps recheck retirement; past effects remain and require explicit repair.', parameters: { name: { type: 'string', required: true }, expected_version: { type: 'integer', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.retire(exec.agent, args.name, args.expected_version)) }) }))
     })
@@ -520,6 +525,22 @@ export class AssistantSkillsService extends Service {
   }
   #capturedDefinition(source: import('./definition.js').VerifiedWorkflowSource, options: { name: string; description: string; bindings?: readonly SkillBinding[] }, scope: GoalScope) {
     return createDefinition(source, options, this.#allowed, captureRunExpansions(source, scope, this.#store))
+  }
+  /** Only a live delegated, isolation-only workflow may cross Isolation's tool gate. */
+  #preauthorizeBenchmarkTool(execution: Readonly<ToolExecution>): boolean {
+    try {
+      if (execution.signal.aborted || !['skill_run', 'skill_status'].includes(execution.name)) return false
+      const scope = this.#scope(execution.agent, execution.name === 'skill_run' ? 'run' : 'inspect')
+      const mounted = this.#mountedBenchmarkArms.get(acceptanceDigest(scope))
+      if (!mounted || mounted.skill.steps.some(step => step.toolName !== 'isolation_run')) return false
+      mounted.assertCurrent()
+      const args = plainArguments(execution.arguments)
+      if (!args) return false
+      if (execution.name === 'skill_status') return Object.keys(args).every(key => key === 'run_id') && (args.run_id === undefined
+        || typeof args.run_id === 'string' && this.#store.getRun(scope, args.run_id)?.delegationDigest === mounted.bindingDigest)
+      return Object.keys(args).length === 5 && typeof args.goal_id === 'string' && typeof args.inputs_json === 'string' && typeof args.invocation_id === 'string'
+        && args.name === mounted.skill.name && args.version === mounted.skill.version
+    } catch { return false }
   }
   inspect(agent: Agent | undefined, runId?: string) {
     const scope = this.#scope(agent, 'inspect')
