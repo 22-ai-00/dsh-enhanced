@@ -18,6 +18,8 @@ export interface SourceBuildConfig {
   pidsLimit: number
   workspaceMiB: number
   outputBytes: number
+  /** Host-owned package/runtime version bump before the checked tree is frozen. */
+  versioning?: 'patch'
   /** Owner-only opt-in for the larger, full-repository check budget. */
   profile?: 'standard' | 'repository'
   /** Writable /tmp tmpfs size. Defaults to 32 MiB for standard, 2048 MiB for repository. */
@@ -53,6 +55,7 @@ function sourceBuildLimits(config: SourceBuildConfig): SourceBuildLimits {
 
 export function validateSourceBuildConfig(config: SourceBuildConfig): void {
   if (config === null || typeof config !== 'object' || Array.isArray(config) || (config.profile !== undefined && config.profile !== 'standard' && config.profile !== 'repository')
+    || (config.versioning !== undefined && config.versioning !== 'patch')
     || (config.temporaryMiB !== undefined && !Number.isSafeInteger(config.temporaryMiB))
     || (config.repositorySandbox !== undefined && (config.profile !== 'repository' || typeof config.repositorySandbox !== 'object' || config.repositorySandbox === null
       || Array.isArray(config.repositorySandbox) || Object.getPrototypeOf(config.repositorySandbox) !== Object.prototype

@@ -9,6 +9,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { PluginControlPlaneService } from '../src/service.ts'
 import * as workspace from '../src/source-workspace.ts'
 import * as build from '../src/source-build.ts'
+import * as versioning from '../src/source-versioning.ts'
 import { approvalSigningPayload } from '../src/approval.ts'
 import * as approvalClient from '../src/source-approval-client.ts'
 import * as trust from '../src/trust.ts'
@@ -18,12 +19,13 @@ import * as trust from '../src/trust.ts'
 vi.mock('../src/source-workspace.ts', async original => ({ ...await original<typeof workspace>(),
   createIsolatedWorktree: vi.fn(), writeScopedPluginFiles: vi.fn(), runLocalCommand: vi.fn() }))
 vi.mock('../src/source-build.ts', async original => ({ ...await original<typeof build>(), runDockerPreparedChecks: vi.fn() }))
+vi.mock('../src/source-versioning.ts', async original => ({ ...await original<typeof versioning>(), managedPatchVersionFiles: vi.fn(), verifyManagedPatchVersion: vi.fn() }))
 vi.mock('../src/trust.ts', async original => ({ ...await original<typeof trust>(), loadTrustConfig: vi.fn(), inheritedEnvironment: vi.fn(() => ({})) }))
 vi.mock('../src/source-approval-client.ts', async original => ({ ...await original<typeof approvalClient>(), requestSourceApproval: vi.fn() }))
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.resetAllMocks() })
 
-async function fixture(approvals = false) {
+async function fixture(approvals = false, managedVersion = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-task-source-service-'))), ctx = new Context()
   cleanup.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   const owner = { receiptVersion: 2 as const, authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner',
@@ -47,12 +49,16 @@ async function fixture(approvals = false) {
   const evidence = { schemaVersion: 1 as const, kind: 'dsh-source-prepared-evidence' as const,
     environment: { npmConfigIgnoreScripts: true as const, frozenLockfile: true as const, offline: true, nodeVersion: 'test', pnpmVersion: 'test' },
     commands: [{ command: 'pnpm', args: ['check'], exitCode: 0 as const, durationMs: 1, logDigest: 'e'.repeat(64) }],
-    pack: { name: 'helper', version: '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) }, preparedAt: Date.now() }
+    pack: { name: 'helper', version: managedVersion ? '1.0.1' : '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) }, preparedAt: Date.now() }
   const checked = { treeDigest: 'd'.repeat(64), patchDigest: 'e'.repeat(64), checkedAt: Date.now(), evidence }
   vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
+  vi.mocked(versioning.managedPatchVersionFiles).mockResolvedValue({ baseVersion: '1.0.0', version: '1.0.1', files: [
+    { path: 'package.json', content: '{"version":"1.0.1"}\n' }, { path: 'src/version.ts', content: "export const version = '1.0.1'\n" }] })
+  vi.mocked(versioning.verifyManagedPatchVersion).mockResolvedValue({ baseVersion: '1.0.0', version: '1.0.1' })
   const service = new PluginControlPlaneService(ctx, { statePath, catalogPath, trustPath,
     ...(approvals ? { sourceApprovals: { executable: { path: join(root, "authority.js"), sha256: "f".repeat(64) }, configPath: join(root, "authority.json"), timeoutMs: 1000 } } : {}),
     sourceBuild: { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
+      ...(managedVersion ? { versioning: 'patch' as const } : {}),
       memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } })
   const gap = service.recordOwnerTaskFailureGap(structuredClone(source))
   const caller = { ownerRouteId: owner.authorityId, principalId: owner.principalId, principalRecordId: owner.principalRecordId,
@@ -70,6 +76,36 @@ test('commits a checked task-bound proposal through the Host fence', async () =>
   expect((await f.service.prepareModifySourcePlan(f.request)).status).toBe('pending-approval')
   expect(f.count()).toBe(1)
   expect(f.remove).not.toHaveBeenCalled()
+})
+
+test('prepares the Host version before isolated checks and retains it in the owner-bound plan', async () => {
+  const f = await fixture(false, true), written = new Map<string, string>()
+  vi.mocked(workspace.writeScopedPluginFiles).mockImplementation(async input => { for (const file of input.files) written.set(file.path, file.content) })
+  vi.mocked(build.runDockerPreparedChecks).mockImplementation(async () => {
+    expect(written.get('src/index.ts')).toBe('export {}')
+    expect(JSON.parse(written.get('package.json')!).version).toBe('1.0.1')
+    expect(written.get('src/version.ts')).toBe("export const version = '1.0.1'\n")
+    return f.checked
+  })
+  const plan = await f.service.prepareModifySourcePlan(f.request)
+  expect(plan).toMatchObject({ status: 'pending-approval', preparedEvidence: { pack: { version: '1.0.1' } } })
+  expect(f.count()).toBe(1)
+})
+
+test.each(['package.json', 'src/version.ts'])('caller cannot supply Host-managed %s', async path => {
+  const f = await fixture(false, true)
+  await expect(f.service.prepareModifySourcePlan({ ...f.request, files: [{ path, content: 'caller data' }] })).rejects.toThrow()
+  expect(workspace.createIsolatedWorktree).not.toHaveBeenCalled()
+  expect(f.count()).toBe(0)
+})
+
+test.each(['artifact', 'files'] as const)('discards the prepared plan when managed version %s drift during checks', async drift => {
+  const f = await fixture(false, true)
+  if (drift === 'artifact') f.checked.evidence.pack.version = '1.0.0'
+  else vi.mocked(versioning.verifyManagedPatchVersion).mockResolvedValueOnce({ baseVersion: '1.0.0', version: '1.0.1' })
+    .mockRejectedValueOnce(new Error('version changed during build'))
+  await expect(f.service.prepareModifySourcePlan(f.request)).rejects.toThrow(/version/u)
+  expect(f.count()).toBe(0); expect(f.remove).toHaveBeenCalledOnce()
 })
 
 test('rejects a guessed task gap without caller ownership before acquiring a worktree', async () => {

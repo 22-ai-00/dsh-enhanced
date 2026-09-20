@@ -9,6 +9,7 @@ import { Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { authorizePreparedSource, validateSourceApprovalAuthorityConfig, type SourceApprovalAuthorityConfig } from '../src/source-approval-authority.ts'
 import { PREPARED_SOURCE_BUILD_SCRIPT } from '../src/source-build.ts'
 import { checkedSourceSnapshot } from '../src/source-workspace.ts'
+import { managedPatchVersionFiles } from '../src/source-versioning.ts'
 import { controlPlaneDigest, ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
 import type { OwnerTaskFailureReference } from '../src/owner-task-gap-types.ts'
 import type { SourcePreparedEvidence } from '../src/types.ts'
@@ -43,16 +44,23 @@ function evidence(now: number): SourcePreparedEvidence {
     pack: { name: 'health-helper.tgz', version: '0.1.0', sizeBytes: 1, sha256: hex('4') }, preparedAt: now }
 }
 
-async function fixture(beforePlan?: { path: string; content: string }) {
+async function fixture(beforePlan?: { path: string; content: string }, managedVersion = false, packagedVersion?: string) {
   const root = await mkdtemp(join(tmpdir(), 'source-approval-authority-')); roots.push(root)
   const repository = join(root, 'repository'); await mkdir(join(repository, 'plugins', 'health-helper', 'src'), { recursive: true, mode: 0o700 })
   await git(repository, 'init', '-q'); await git(repository, 'config', 'user.email', 'tests@example.invalid'); await git(repository, 'config', 'user.name', 'Tests')
   await writeFile(join(repository, 'plugins', 'health-helper', 'src', 'tool.ts'), 'export const value = 1\n', { encoding: 'utf8', mode: 0o600 })
+  await writeFile(join(repository, 'plugins', 'health-helper', 'package.json'), `${JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '0.1.0',
+    dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { build: 'tsc' } }, null, 2)}\n`, { mode: 0o600 })
+  await writeFile(join(repository, 'plugins', 'health-helper', 'src', 'version.ts'), "export const version = '0.1.0'\n", { mode: 0o600 })
   await git(repository, 'add', '.'); await git(repository, 'commit', '-qm', 'base')
   const baseCommit = (await git(repository, 'rev-parse', 'HEAD')).trim()
   const worktreeRoot = join(root, 'worktrees'); const worktree = join(worktreeRoot, 'prepared')
   await mkdir(worktreeRoot, { mode: 0o700 }); await git(repository, 'worktree', 'add', '--detach', worktree, baseCommit)
   await chmod(worktree, 0o700)
+  if (managedVersion) {
+    const managed = await managedPatchVersionFiles({ worktree, baseCommit, name: 'health-helper', environment })
+    for (const file of managed.files) await writeFile(join(worktree, 'plugins', 'health-helper', file.path), file.content, { mode: 0o600 })
+  }
   const source = join(worktree, 'plugins', 'health-helper', 'src', 'tool.ts')
   await writeFile(source, 'export const value = 2\n', { encoding: 'utf8', mode: 0o600 })
   if (beforePlan !== undefined) await writeFile(join(worktree, beforePlan.path), beforePlan.content, { encoding: 'utf8', mode: 0o600 })
@@ -61,13 +69,15 @@ async function fixture(beforePlan?: { path: string; content: string }) {
   await writeFile(keyPath, key.privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 }); await chmod(keyPath, 0o600)
   const reference = owner('one'); const gap = store.recordOwnerTaskFailureGap(reference)
   const snapshot = await checkedSourceSnapshot(worktree, baseCommit, ['plugins/health-helper'], environment)
+  const checkedEvidence = evidence(now)
+  checkedEvidence.pack.version = packagedVersion ?? (managedVersion ? '0.1.1' : '0.1.0')
   const makePlan = (suffix: string, sourceReference = reference) => {
     const source = suffix === 'one' ? sourceReference : { ...sourceReference, outcomeId: `outcome-${suffix}`,
       projection: { ...sourceReference.projection, subjectRef: `turn-${suffix}` } }
     const targetGap = suffix === 'one' ? gap : store.recordOwnerTaskFailureGap(source)
     const plan = store.withOwnerTaskFailureGapAdmission(targetGap.id, () => store.createSourcePlan({ gapId: targetGap.id, repository, worktree,
       baseCommit, name: 'health-helper', generatorDigest: MODIFY_GENERATOR_DIGEST, scope: ['plugins/health-helper'], mode: 'modify', ttlMs: 120_000,
-      idempotencyKey: `source-authority-${suffix}`, prepared: { treeDigest: snapshot.checkedTreeDigest, patchDigest: snapshot.checkedPatchDigest, checkedAt: now, evidence: evidence(now) } }).result)
+      idempotencyKey: `source-authority-${suffix}`, prepared: { treeDigest: snapshot.checkedTreeDigest, patchDigest: snapshot.checkedPatchDigest, checkedAt: now, evidence: checkedEvidence } }).result)
     return { plan, source }
   }
   const initial = makePlan('one'); const plan = initial.plan
@@ -77,12 +87,33 @@ async function fixture(beforePlan?: { path: string; content: string }) {
       owner: { authorityId: reference.owner.authorityId, authorityHash: reference.owner.authorityHash, principalId: reference.owner.principalId,
         principalRecordId: reference.owner.principalRecordId, principalVersion: reference.owner.principalVersion,
         workspace: reference.owner.workspace, agentPreset: reference.owner.agentPreset }, plugins: ['health-helper'],
-      maxChangedFiles: 8, maxChangedBytes: 4096, receiptTtlMs: 30_000, ...overrides } })
+      maxChangedFiles: 8, maxChangedBytes: 4096, receiptTtlMs: 30_000, ...(managedVersion ? { versioning: 'patch' as const } : {}), ...overrides } })
   const request = { protocol: 'dsh-source-approval/v1' as const, planId: plan.id, planDigest: plan.digest, sourceReferenceDigest: controlPlaneDigest(initial.source) }
   return { root, worktree, source, store, key, reference, plan, makePlan, config, request, now }
 }
 
 describe.runIf(process.platform === 'linux')('finite source approval authority', { timeout: 20_000 }, () => {
+  it('independently approves only an opted-in Host version delta and matching checked artifact', async () => {
+    const value = await fixture(undefined, true)
+    const legacy = value.config(); delete legacy.grant.versioning
+    await expect(authorizePreparedSource(legacy, value.request)).rejects.toThrow('refused')
+    const receipt = await authorizePreparedSource(value.config(), value.request)
+    expect(receipt.planDigest).toBe(value.plan.digest)
+    expect(value.plan.preparedEvidence?.pack.version).toBe('0.1.1')
+    const mismatch = await fixture(undefined, true, '0.1.2')
+    await expect(authorizePreparedSource(mismatch.config(), mismatch.request)).rejects.toThrow('refused')
+    const unstamped = await fixture()
+    await expect(authorizePreparedSource(unstamped.config({ versioning: 'patch' }), unstamped.request)).rejects.toThrow('refused')
+  })
+
+  it.each(['scripts', 'name', 'dependencies', 'runtime'] as const)('rejects a checked but unauthorized %s change beside the version bump', async field => {
+    const manifest = { name: '@dsh-enhanced/health-helper', version: '0.1.1', dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { build: 'tsc' } }
+    const value = await fixture(field === 'runtime' ? { path: 'plugins/health-helper/src/version.ts', content: "export const version = '0.1.1'\nconsole.log('candidate code')\n" }
+      : { path: 'plugins/health-helper/package.json', content: `${JSON.stringify({ ...manifest,
+        ...(field === 'scripts' ? { scripts: { build: 'candidate-command' } } : field === 'name' ? { name: '@dsh-enhanced/other' } : { dependencies: { other: '1.0.0' } }) })}\n` }, true)
+    await expect(authorizePreparedSource(value.config(), value.request)).rejects.toThrow('refused')
+  })
+
   it('signs a freshly checked owner-bound plan once, replays across restart, and has a standard-verifiable receipt', async () => {
     const value = await fixture(); const config = value.config()
     const first = await authorizePreparedSource(config, value.request)
