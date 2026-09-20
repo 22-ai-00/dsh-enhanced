@@ -7,7 +7,7 @@ import { readdir, readFile } from 'node:fs/promises'
  * cleanup boundary, not a sandbox: a helper which calls setsid(2) can leave
  * that group and is outside the guarantee made here.
  */
-export type ControlledProcessErrorCode = 'START' | 'TIMEOUT' | 'OUTPUT_LIMIT' | 'NON_ZERO' | 'CLEANUP'
+export type ControlledProcessErrorCode = 'START' | 'TIMEOUT' | 'OUTPUT_LIMIT' | 'NON_ZERO' | 'CLEANUP' | 'ABORTED'
 
 export class ControlledProcessError extends Error {
   constructor(readonly code: ControlledProcessErrorCode, message: string) {
@@ -17,6 +17,7 @@ export class ControlledProcessError extends Error {
 }
 
 export interface ControlledProcessOptions {
+  signal?: AbortSignal
   command: string
   args: readonly string[]
   env: NodeJS.ProcessEnv
@@ -143,6 +144,7 @@ async function reclaimGroup(groupId: number, deadline: number): Promise<void> {
 }
 
 export async function executeControlledProcess(options: ControlledProcessOptions): Promise<string> {
+  if (options.signal?.aborted) throw new ControlledProcessError('ABORTED', 'helper process cancelled')
   if (process.platform !== 'linux') throw new ControlledProcessError('START', 'controlled helper processes require Linux')
   return new Promise((resolve, reject) => {
     let child
@@ -168,6 +170,7 @@ export async function executeControlledProcess(options: ControlledProcessOptions
     const finish = (error: ControlledProcessError | undefined, output?: string): void => {
       if (settled) return
       settled = true
+      options.signal?.removeEventListener('abort', onAbort)
       if (timer !== undefined) clearTimeout(timer)
       child.stdout?.destroy()
       child.stdin?.destroy()
@@ -186,7 +189,8 @@ export async function executeControlledProcess(options: ControlledProcessOptions
         // not accept a scan race as successful termination.
         if (!leaderExited) await bounded(leaderExit, cleanupDeadline)
         if (!leaderExited) throw new ControlledProcessError('CLEANUP', 'could not observe the helper leader exit')
-        if (cause === 'TIMEOUT') finish(new ControlledProcessError('TIMEOUT', 'helper process exceeded its deadline'))
+        if (cause === 'ABORTED') finish(new ControlledProcessError('ABORTED', 'helper process cancelled'))
+        else if (cause === 'TIMEOUT') finish(new ControlledProcessError('TIMEOUT', 'helper process exceeded its deadline'))
         else if (cause === 'OUTPUT_LIMIT') finish(new ControlledProcessError('OUTPUT_LIMIT', 'helper process exceeded its output bound'))
         else if (cause === 'NON_ZERO') finish(new ControlledProcessError('NON_ZERO', 'helper process returned a non-zero status'))
         else if (cause === 'START') finish(new ControlledProcessError('START', 'helper process could not start or its output failed'))
@@ -200,7 +204,8 @@ export async function executeControlledProcess(options: ControlledProcessOptions
           // stream error can therefore win while the bounded receipt drain is
           // pending; never turn that late cause into a successful receipt.
           const finalCause = currentCause()
-          if (finalCause === 'TIMEOUT') finish(new ControlledProcessError('TIMEOUT', 'helper process exceeded its deadline'))
+          if (finalCause === 'ABORTED') finish(new ControlledProcessError('ABORTED', 'helper process cancelled'))
+          else if (finalCause === 'TIMEOUT') finish(new ControlledProcessError('TIMEOUT', 'helper process exceeded its deadline'))
           else if (finalCause === 'OUTPUT_LIMIT') finish(new ControlledProcessError('OUTPUT_LIMIT', 'helper process exceeded its output bound'))
           else if (finalCause === 'NON_ZERO') finish(new ControlledProcessError('NON_ZERO', 'helper process returned a non-zero status'))
           else if (finalCause === 'START') finish(new ControlledProcessError('START', 'helper process could not start or its output failed'))
@@ -239,6 +244,9 @@ export async function executeControlledProcess(options: ControlledProcessOptions
     // inherit stdout.  The group scan and fixed cleanup deadline are.
     child.once('close', () => { if (!leaderExited && cause === undefined) terminate('START') })
     child.stdin?.on('error', () => { /* EPIPE is classified from exit/timeout. */ })
+    const onAbort = (): void => terminate('ABORTED')
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    if (options.signal?.aborted) onAbort()
     timer = setTimeout(() => terminate('TIMEOUT'), options.timeoutMs)
     try { child.stdin?.end(options.stdin, 'utf8') } catch { terminate('START') }
   })

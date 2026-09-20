@@ -262,3 +262,9 @@ passed completed-cache/restart-stale and SIGKILL/restart-unknown probes; each
 operation created one Agent and did not redispatch. A hard-killed Host's socket
 needs supervisor-owned cleanup after quiescence; the journal must survive.
 Control Plane ledger and signed Host receipt schemas remain unchanged.
+
+### Durable source release dispatch (Control Plane schema 18)
+
+Schema 18 adds a dispatch claim beside each immutable source release operation. Host execution uses short SQLite transactions around asynchronous signature checks and adapter execution. Claimed operations without receipts remain unknown across restart; only an exact verified receipt can reconcile them, without executing the adapter again. Migration conservatively claims every historical pending operation because older versions cannot prove it was never dispatched. Existing completed/applied receipts remain recoverable.
+
+Owner-task release preparation, dispatch, receipt reconciliation and application require the live Host source fence. Offline CLI commands remain available for other source plans. The optional local phase driver consumes the existing independent review decision contract; it does not produce review decisions or activate the admitted artifact.

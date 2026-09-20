@@ -696,6 +696,22 @@ describe('descriptor-pinned release adapter invocation', () => {
         expect(running).toBe(false)
       } finally { await stopFixtureDescendant(fixture.descendantPidPath) }
     })
+  test.runIf(process.platform === 'linux')('cancels a pinned release and drains its process group before rejecting', async () => {
+    const fixture = await realAdapterInvocationFixture(false, 'timeout'), abort = new AbortController()
+    const trust = { ...fixture.trust, releaseAdapters: { ...fixture.trust.releaseAdapters,
+      publish: { ...fixture.trust.releaseAdapters!.publish!, timeoutMs: 10_000 } } }
+    const flight = invokeSourceReleaseAdapter(trust, fixture.request, abort.signal)
+    const rejected = expect(flight).rejects.toMatchObject({ name: 'ReleaseAdapterError', code: 'ABORTED' })
+    try {
+      await expect.poll(async () => { try { return Number(await readFile(fixture.descendantPidPath, 'utf8')) > 0 } catch { return false } }).toBe(true)
+      abort.abort(); await rejected
+      const pid = Number(await readFile(fixture.descendantPidPath, 'utf8'))
+      let active = false
+      try { const stat = await readFile(`/proc/${pid}/stat`, 'utf8'); active = !['Z', 'X'].includes(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0]!) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+      expect(active).toBe(false)
+    } finally { abort.abort(); await flight.catch(() => {}); await stopFixtureDescendant(fixture.descendantPidPath) }
+  })
   test.runIf(process.platform === 'linux')('executes an artifact phase through pinned script, interpreter, and inherited FDs', async () => {
     const fixture = await realAdapterInvocationFixture()
 

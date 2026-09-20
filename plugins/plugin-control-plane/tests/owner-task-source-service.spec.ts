@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { ControlPlaneStore } from '../src/store.ts'
 import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
+import * as releaseRunner from '../src/source-release-runner.ts'
 import * as releaseClient from '../src/source-release-client.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
@@ -27,10 +28,11 @@ vi.mock('../src/source-versioning.ts', async original => ({ ...await original<ty
 vi.mock('../src/trust.ts', async original => ({ ...await original<typeof trust>(), loadTrustConfig: vi.fn(), inheritedEnvironment: vi.fn(() => ({})) }))
 vi.mock('../src/source-approval-client.ts', async original => ({ ...await original<typeof approvalClient>(), requestSourceApproval: vi.fn() }))
 vi.mock('../src/source-release-client.ts', async original => ({ ...await original<typeof releaseClient>(), requestSourceReleaseAuthorization: vi.fn() }))
+vi.mock('../src/source-release-runner.ts', async original => ({ ...await original<typeof releaseRunner>(), advanceSourceRelease: vi.fn() }))
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.resetAllMocks() })
 
-async function fixture(approvals = false, managedVersion = false, releases = false) {
+async function fixture(approvals = false, managedVersion = false, releases = false, execution = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-task-source-service-'))), ctx = new Context()
   cleanup.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   const owner = { receiptVersion: 2 as const, authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner',
@@ -64,6 +66,7 @@ async function fixture(approvals = false, managedVersion = false, releases = fal
   const service = new PluginControlPlaneService(ctx, { statePath, catalogPath, trustPath,
     ...(approvals ? { sourceApprovals: { executable: { path: join(root, "authority.js"), sha256: "f".repeat(64) }, configPath: join(root, "authority.json"), timeoutMs: 1000 } } : {}),
     ...(releases ? { sourceReleases: { executable: { path: join(root, 'release-authority.js'), sha256: 'a'.repeat(64) }, configPath: join(root, 'release-authority.json'), timeoutMs: 1000 } } : {}),
+    ...(execution ? { sourceReleaseExecution: { reviewDecisionRoot: root, timeoutMs: 30_000 } } : {}),
     sourceBuild: { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
       ...(managedVersion ? { versioning: 'patch' as const } : {}),
       memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } })
@@ -145,8 +148,8 @@ test('a final commit fence conflict removes the worktree and leaves no plan', as
   expect(f.remove).toHaveBeenCalledOnce()
 })
 
-async function signedApprovalFixture(releases = false) {
-  const f = await fixture(true, releases, releases), plan = await f.service.prepareModifySourcePlan(f.request)
+async function signedApprovalFixture(releases = false, execution = false) {
+  const f = await fixture(true, releases, releases, execution), plan = await f.service.prepareModifySourcePlan(f.request)
   const keys = generateKeyPairSync('ed25519')
   const bound = await trust.loadTrustConfig('ignored')
   vi.mocked(trust.loadTrustConfig).mockResolvedValue({ ...bound, approvalKeys: [{ authority: 'authority', keyId: 'key',
@@ -206,8 +209,8 @@ test('durable approval rejects a changed frozen job trust before invoking the he
 })
 
 
-async function signedReleaseFixture() {
-  const f = await signedApprovalFixture(true)
+async function signedReleaseFixture(execution = false) {
+  const f = await signedApprovalFixture(true, execution)
   await f.service.requestOwnerSourceApproval({ planId: f.plan.id })
   const keys = generateKeyPairSync('ed25519'), bound = await trust.loadTrustConfig('ignored')
   const registry = { id: 'local-registry', locator: pathToFileURL(join(f.root, 'registry')).href, caPins: [], tokenEnvironment: null }
@@ -294,4 +297,36 @@ test('release helper late response is drained and discarded when the Host unload
   const disposal = f.ctx.fiber.dispose().then(() => { disposed = true })
   await new Promise(resolve => setImmediate(resolve)); expect(disposed).toBe(false)
   finish(); await Promise.all([disposal, rejected])
+})
+
+
+test('Host release execution stops on frozen trust or owner changes, including after async work', async () => {
+  const f = await signedReleaseFixture(true)
+  const started = await f.service.requestOwnerSourceRelease({ planId: f.plan.id })
+  vi.mocked(releaseRunner.advanceSourceRelease).mockImplementation(async options => { await options.assertCurrent(); return started })
+  await expect(f.service.advanceOwnerSourceRelease({ planId: f.plan.id, expectedTrustDigest: 'a'.repeat(64) })).rejects.toThrow('trust changed')
+  expect(releaseRunner.advanceSourceRelease).not.toHaveBeenCalled()
+  expect(await f.service.advanceOwnerSourceRelease({ planId: f.plan.id })).toEqual(started)
+  vi.mocked(releaseRunner.advanceSourceRelease).mockImplementationOnce(async options => {
+    f.owner.generation += 1; await options.assertCurrent(); return started
+  })
+  await expect(f.service.advanceOwnerSourceRelease({ planId: f.plan.id })).rejects.toThrow('changed')
+})
+
+test('Host unload aborts and drains a single release continuation', async () => {
+  const f = await signedReleaseFixture(true)
+  const started = await f.service.requestOwnerSourceRelease({ planId: f.plan.id })
+  let entered!: () => void, finish!: () => void
+  const ready = new Promise<void>(resolve => { entered = resolve }), stopped = new Promise<void>(resolve => { finish = resolve })
+  vi.mocked(releaseRunner.advanceSourceRelease).mockImplementationOnce(async options => {
+    entered(); await new Promise<void>(resolve => options.signal.addEventListener('abort', () => resolve(), { once: true }))
+    await stopped; await options.assertCurrent(); return started
+  })
+  const first = f.service.advanceOwnerSourceRelease({ planId: f.plan.id }), rejected = expect(first).rejects.toThrow()
+  await ready
+  await expect(f.service.advanceOwnerSourceRelease({ planId: f.plan.id })).rejects.toThrow('already running')
+  let disposed = false
+  const disposal = f.ctx.fiber.dispose().then(() => { disposed = true })
+  await new Promise(resolve => setImmediate(resolve)); expect(disposed).toBe(false)
+  finish(); await rejected; await disposal
 })

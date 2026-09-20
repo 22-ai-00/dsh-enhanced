@@ -1148,9 +1148,15 @@ async function prepareRelease(store: ControlPlaneStore, trust: PluginControlTrus
   let catalog: { id: string; path: string; expectedBeforeDigest?: string; expectedAfterDigest?: string } =
     { id: trust.catalog.id, path: trust.catalog.path }
   if (expected.phase === 'catalog-admission') {
-    const loaded = await loadCatalogWithMetadata(trust.catalog.path)
-    const preview = previewCatalogAdmission(loaded.catalog, store.sourceReleaseCandidate(plan.id))
-    catalog = { ...catalog, expectedBeforeDigest: preview.beforeCatalogDigest, expectedAfterDigest: preview.afterCatalogDigest }
+    const prior = store.findSourceReleaseOperation(plan.id, expected.phase, plan.release!.fence)
+    if (prior?.request.phase === 'catalog-admission') {
+      catalog = { ...catalog, expectedBeforeDigest: prior.request.input.expectedBeforeCatalogDigest,
+        expectedAfterDigest: prior.request.input.expectedAfterCatalogDigest }
+    } else {
+      const loaded = await loadCatalogWithMetadata(trust.catalog.path)
+      const preview = previewCatalogAdmission(loaded.catalog, store.previewSourceReleaseCandidate(plan.id))
+      catalog = { ...catalog, expectedBeforeDigest: preview.beforeCatalogDigest, expectedAfterDigest: preview.afterCatalogDigest }
+    }
   }
   // Only {id, locator} leaves the owner host: caPins/tokenEnvironment are
   // activation-side local trust roots and must never reach a release adapter.
@@ -1211,7 +1217,7 @@ async function releaseAttest(argv: readonly string[]): Promise<void> {
     const operation = await prepareRelease(store, trust, plan)
     const receipt = parseSourceReleaseReceipt(JSON.parse(await readOwnerPrivateFile(resolve(option(argv, '--receipt')), 262_144)) as unknown)
     if (receipt.operationId !== operation.operationId) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'release receipt does not target the durable operation')
-    await store.runSourceReleaseOperation({ operationId: operation.operationId, expectedRevision, expectedFence, execute: async () => receipt,
+    await store.acceptSourceReleaseReceipt({ operationId: operation.operationId, expectedRevision, expectedFence, receipt,
       resolveAuthority: value => releaseAuthority(trust, value),
       resolveAuthorizationAuthority: value => releaseAuthorizationAuthority(trust, value) })
     const result = await store.applySourceRelease({ planId: plan.id, expectedRevision, expectedFence, receipt,

@@ -621,7 +621,7 @@ describe('bound durable control-plane state', () => {
         const probe = `const { DatabaseSync } = require('node:sqlite'); const db = new DatabaseSync(process.argv[1]);
 db.exec('PRAGMA busy_timeout=100'); try { db.exec('BEGIN IMMEDIATE'); process.stdout.write('acquired'); db.exec('ROLLBACK') }
 catch { process.stdout.write('busy') } finally { db.close() }`
-        expect(execFileSync(process.execPath, ['-e', probe, target.path], { encoding: 'utf8' })).toBe('busy')
+        expect(execFileSync(process.execPath, ['-e', probe, target.path], { encoding: 'utf8' })).toBe('acquired')
         return receipt
       }, resolveAuthority: () => acceptingReleaseAuthority, resolveAuthorizationAuthority: () => acceptingAuthorizationAuthority })
     recovered.close()
