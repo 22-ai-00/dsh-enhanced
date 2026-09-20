@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { ControlPlaneStore } from '../src/store.ts'
 import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
+import * as adoptionRunner from '../src/source-adoption-runner.ts'
 import * as releaseRunner from '../src/source-release-runner.ts'
 import * as releaseClient from '../src/source-release-client.ts'
 import { DatabaseSync } from 'node:sqlite'
@@ -29,6 +30,7 @@ vi.mock('../src/trust.ts', async original => ({ ...await original<typeof trust>(
 vi.mock('../src/source-approval-client.ts', async original => ({ ...await original<typeof approvalClient>(), requestSourceApproval: vi.fn() }))
 vi.mock('../src/source-release-client.ts', async original => ({ ...await original<typeof releaseClient>(), requestSourceReleaseAuthorization: vi.fn() }))
 vi.mock('../src/source-release-runner.ts', async original => ({ ...await original<typeof releaseRunner>(), advanceSourceRelease: vi.fn() }))
+vi.mock('../src/source-adoption-runner.ts', async original => ({ ...await original<typeof adoptionRunner>(), adoptSourceRelease: vi.fn() }))
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.resetAllMocks() })
 
@@ -68,6 +70,7 @@ async function fixture(approvals = false, managedVersion = false, releases = fal
     ...(approvals ? { sourceApprovals: { executable: { path: join(root, "authority.js"), sha256: "f".repeat(64) }, configPath: join(root, "authority.json"), timeoutMs: 1000 } } : {}),
     ...(releases ? { sourceReleases: { executable: { path: join(root, 'release-authority.js'), sha256: 'a'.repeat(64) }, configPath: join(root, 'release-authority.json'), timeoutMs: 1000 } } : {}),
     ...(execution ? { sourceReleaseExecution: { reviewDecisionRoot: root, timeoutMs: 30_000, ...(review ? { independentReview: true } : {}) } } : {}),
+    ...(execution ? { sourceAdoptions: { profile: 'assistant', planTtlMs: 60_000, timeoutMs: 60_000, authority: { executable: { path: join(root, 'adoption.js'), sha256: 'a'.repeat(64) }, configPath: join(root, 'adoption.json'), timeoutMs: 1000 } } } : {}),
     sourceBuild: { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
       ...(managedVersion ? { versioning: 'patch' as const } : {}),
       memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } })
@@ -356,4 +359,35 @@ test('independent review waits before PR until its exact root and inherited mode
   expect(reviewSourceRepair.mock.calls[0]![0]).toMatchObject({ request: { protocol: 'dsh-source-review/v1', planId: started.id,
     source: { owner: f.owner, objective: 'private task', modelSelection: f.source.source.modelSelection },
     checkedTreeDigest: f.authorization.checkedTreeDigest, checkedPatchDigest: f.authorization.checkedPatchDigest } })
+})
+
+
+// The runner owns exact release/activation validation (real signed integration in
+// source-adoption-store.spec); these tests isolate Host connection and lifetime.
+test.each(['source', 'unload'] as const)('adoption owns and drains its dedicated connection when %s ends authority', async boundary => {
+  const f = await signedReleaseFixture(true)
+  await f.service.requestOwnerSourceRelease({ planId: f.plan.id })
+  const raw = new DatabaseSync(f.databasePath)
+  try { raw.prepare("UPDATE source_plans SET status = 'release-complete' WHERE id = ?").run(f.plan.id) } finally { raw.close() }
+  let finish!: () => void, entered!: () => void
+  const ready = new Promise<void>(resolve => { entered = resolve })
+  let dedicated: ControlPlaneStore | undefined
+  vi.mocked(adoptionRunner.adoptSourceRelease).mockImplementationOnce(async input => {
+    dedicated = input.store
+    await input.assertCurrent()
+    input.withSourceFence(() => expect(input.store.getSourcePlan(f.plan.id).status).toBe('release-complete'))
+    entered(); await new Promise<void>(resolve => { finish = resolve })
+    // The connection remains open until this worker settles, even on unload.
+    expect(input.store.getSourcePlan(f.plan.id).id).toBe(f.plan.id)
+    await input.assertCurrent()
+    throw new Error('fixture must reject before forward deployment')
+  })
+  const flight = f.service.adoptOwnerSourceRelease({ sourcePlanId: f.plan.id }), rejected = expect(flight).rejects.toThrow()
+  await ready
+  await expect(f.service.adoptOwnerSourceRelease({ sourcePlanId: f.plan.id })).rejects.toThrow('already running')
+  let disposed: Promise<void> | undefined
+  if (boundary === 'source') f.owner.generation += 1
+  else disposed = Promise.resolve(f.ctx.fiber.dispose())
+  finish(); await rejected; await disposed
+  expect(() => dedicated!.getSourcePlan(f.plan.id)).toThrow()
 })

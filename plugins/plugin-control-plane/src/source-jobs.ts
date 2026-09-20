@@ -65,6 +65,8 @@ export class SourceJobRuntime {
     releasePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     advanceReleased?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     releaseTimeoutMs?: number
+    adoptReleased?: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<void>
+    adoptionTimeoutMs?: number
     prepare: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<PluginSourcePlan>
   }) {
     validateSourceJobsConfig(options.config, options.build)
@@ -80,15 +82,14 @@ export class SourceJobRuntime {
     }
     this.unregister = this.options.ports.automations.registerHostExecutor(executor)
     this.active = true
-    if (this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased) {
+    if (this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased) {
       // Resume owner authorizations and durable release phases, never a completed source build.
       // Release dispatch claims prevent replay of unresolved external actions.
       this.track((async () => {
-        for (const job of this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined)) {
+        for (const job of this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined, this.options.adoptReleased !== undefined)) {
           if (this.abort.signal.aborted) break
           try {
-            this.assertOwner(job)
-            const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(this.options.advanceReleased ? (this.options.releaseTimeoutMs ?? 40_000) + 40_000 : this.options.releasePrepared ? 40_000 : 10_000, job.expiresAt - Date.now())))])
+            const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min((this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0) + (this.options.advanceReleased ? (this.options.releaseTimeoutMs ?? 40_000) + 40_000 : this.options.releasePrepared ? 40_000 : 10_000), job.expiresAt - Date.now())))])
             await this.continuePrepared(job, signal)
           } catch { /* pending plan retained */ }
         }
@@ -105,12 +106,15 @@ export class SourceJobRuntime {
   }
 
   private async continuePrepared(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
-    this.assertOwner(job)
     if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
     const assertCurrent = async (): Promise<void> => {
       signal.throwIfAborted(); this.assertOwner(job)
       if (controlPlaneDigest(await this.options.trust()) !== job.intent.trustDigest) throw new Error('source job continuation trust changed')
       signal.throwIfAborted(); this.assertOwner(job)
+    }
+    if (this.options.adoptReleased && this.options.store.getSourcePlan(job.planId).status === 'release-complete') {
+      await this.options.adoptReleased(job, signal, assertCurrent)
+      return
     }
     await assertCurrent()
     if (this.options.store.getSourcePlan(job.planId).status === 'pending-approval' && this.options.approvePrepared) {
@@ -124,6 +128,10 @@ export class SourceJobRuntime {
     if (this.options.advanceReleased && expectedSourceRelease(this.options.store.getSourcePlan(job.planId).status)) {
       await assertCurrent()
       await this.options.advanceReleased(job, signal)
+    }
+    if (this.options.adoptReleased && this.options.store.getSourcePlan(job.planId).status === 'release-complete') {
+      await assertCurrent()
+      await this.options.adoptReleased(job, signal, assertCurrent)
     }
   }
 
@@ -255,7 +263,7 @@ export class SourceJobRuntime {
   private definition(job: SourceJobRecord): HostAutomationDefinition {
     const config = this.options.config
     return { name: `Source check: ${job.intent.name}`, schedule: { kind: 'at', at: new Date(job.createdAt + 1000).toISOString() },
-      workspace: config.workspace, agentPreset: config.preset, timeoutMs: job.intent.build.timeoutMs + 120_000 + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0),
+      workspace: config.workspace, agentPreset: config.preset, timeoutMs: job.intent.build.timeoutMs + 120_000 + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0),
       misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0, principal: config.principalId,
       ...(config.budgetId === undefined ? {} : { budgetId: config.budgetId, budgetAmount: config.budgetAmount! }),
       execution: { kind: 'host', executorId: EXECUTOR, executorContractVersion: 1, runbookId: EXECUTOR, runbookVersion: 1, catalogDigest: CATALOG,
@@ -290,7 +298,7 @@ export class SourceJobRuntime {
     const failure = (unknown: boolean): HostAutomationExecutorResult => ({ outcome: unknown ? 'unknown' : 'failed', failureClass: unknown ? 'unknown' : 'configuration', failurePhase: 'host-execution', failureCode: 'source-job-rejected', sideEffectState: unknown ? 'unknown' : 'none', retryability: unknown ? 'unsafe' : 'after-intervention' })
     if (job === undefined || job.status !== 'queued') return failure(job?.status === 'unknown' || job?.status === 'running')
     let claimed = false
-    const signal = AbortSignal.any([input.signal, this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(job.intent.build.timeoutMs + 120_000 + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0), job.expiresAt - Date.now())))])
+    const signal = AbortSignal.any([input.signal, this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(job.intent.build.timeoutMs + 120_000 + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0), job.expiresAt - Date.now())))])
     try {
       this.assertOwner(job)
       signal.throwIfAborted()
@@ -312,7 +320,7 @@ export class SourceJobRuntime {
       await assertCurrent()
       await this.options.prepare(owned, signal, assertCurrent)
       if (this.options.store.getSourceJob(owned.id)?.status !== 'prepared') throw new Error('source job completion was not committed')
-      if ((this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased) && this.options.store.getOwnerTaskFailureReference(owned.intent.gapId)) {
+      if ((this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased) && this.options.store.getOwnerTaskFailureReference(owned.intent.gapId)) {
         this.assertOwner(owned)
         await this.continuePrepared(this.options.store.getSourceJob(owned.id)!, signal)
       }

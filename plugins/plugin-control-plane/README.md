@@ -188,7 +188,7 @@ dsh-plugin-control attest \
 
 schema 17 在成功启用前保存 `package.json`、`pnpm-lock.yaml`、`cordis.patch.yml` 的摘要，恢复前同时核对当前版与保留的原版核心文件。核心文件漂移、较新的部署已生效、目标存在进行中的部署或旧计划缺少恢复检查点时，拒绝覆盖。摘要不是整个目录的不可变证明，也不替代进程、凭据与文件写权限隔离。回退按 rename 分步恢复；相同签名触发可在重启后继续，未知的 Host 外部操作仍须原有对账，不创建新 operation 绕过。
 
-成功部署保留自己的上一版备份，并清理同一目标已被它取代的旧备份；新部署失败不会提前删除旧备份。最初的 `activated` 回执保留，后续回退另存终态记录。迁移不为历史部署捏造备份或摘要。此入口接收可信签名观察；普通用户任务的版本归因、自动观察签发和候选自动采用仍需接线。
+成功部署保留自己的上一版备份，并清理同一目标已被它取代的旧备份；新部署失败不会提前删除旧备份。最初的 `activated` 回执保留，后续回退另存终态记录。迁移不为历史部署捏造备份或摘要。此入口接收可信签名观察；普通用户任务的版本归因和自动观察签发仍需接线；已发布 owner 修复可通过下述有限采用配置接入。
 
 ## 源码能力 lane 和边界
 
@@ -307,7 +307,7 @@ sourceApprovals:
 
 在 Control Plane trust 的 `approvalKeys` 登记对应 Ed25519 公钥；该 key 不用于 release authorization、发布或 Host attestation。owner 字段取实际 Delivery 回执，不由模型生成。grant id 的配置与 key 指纹不可变，额度和已签回执落入独立 SQLite；重启及同一请求重试不重置额度、不延长签名期限。
 
-签名器只读当前 schema 18 控制面库，重新验证完整来源摘要、owner、期限、仓库及 worktree 归属、检查证据和当前 tree/patch。默认只允许白名单非保护插件 `src/` 下的普通 `.ts/.js/.mts/.mjs` 源文件修改；`grant.versioning: "patch"` 仅额外允许上述 Host 管理的 manifest 版本变化。测试目录、其他 manifest 字段、脚本、lockfile 和保护插件不在授权范围。工程检查证据不构成业务目标达成证明。
+签名器只读当前 schema 19 控制面库，重新验证完整来源摘要、owner、期限、仓库及 worktree 归属、检查证据和当前 tree/patch。默认只允许白名单非保护插件 `src/` 下的普通 `.ts/.js/.mts/.mjs` 源文件修改；`grant.versioning: "patch"` 仅额外允许上述 Host 管理的 manifest 版本变化。测试目录、其他 manifest 字段、脚本、lockfile 和保护插件不在授权范围。工程检查证据不构成业务目标达成证明。
 
 持久作业在 `prepared` 落账后调用审批，Host 在验签后以 Delivery/Evaluation 当前来源 writer fence 提交 `approved`。纠正、撤回、身份/会话换代、取消或 trust 变化均阻止提交。审批失败保留 pending 计划和已完成构建；重启恢复最多 1000 个 pending 的 owner 作业，仍核对原 sourceJobs 授权和 owner，只重试审批。单次 helper 至多 10 秒；卸载会等待子进程清理并丢弃迟到结果。Host 可调用 `requestOwnerSourceApproval({planId, signal?})` 显式重试；该方法不暴露为模型工具。inline 准备仍只返回 pending。
 
@@ -374,7 +374,31 @@ schema 18 在 adapter 派发前持久登记 operation claim；验签和子进程
 
 升级到 schema 18 会将历史 pending release operation 保守视为可能已派发，要求回执对账；不会把旧 pending 当作新动作。源码作业的 prepared 恢复覆盖等待中的 release 阶段，并继续检查原 owner 和冻结 trust。Cordis 卸载取消接续、终止并回收 adapter 进程组、等待在途工作后关闭数据库；脱离进程组的进程仍须由部署的 OS 隔离边界管理。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 18 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+### 已发布 owner 修复的有限采用
+
+在 `sourceReleaseExecution` 之上可选配置：
+
+```yaml
+sourceAdoptions:
+  profile: assistant
+  planTtlMs: 900000
+  timeoutMs: 600000
+  authority:
+    executable: { path: /opt/dsh/bin/dsh-source-adoption-authority.js, sha256: <sha256> }
+    interpreter: { path: /usr/bin/node, sha256: <sha256> }
+    configPath: /srv/dsh-owner/adoption-authority.json
+    timeoutMs: 10000
+```
+
+`dsh-source-adoption-authority` 使用独立 owner 私有配置和 Ed25519 key；公钥进入 trust 的 `approvalKeys`。配置为 `schemaVersion: 1`、`authority`、`keyId`、`keyPath`、`statePath`、`controlDatabasePath` 和 `grant`。grant 固定 `id`、`expiresAt`、`maxAdoptions`、稳定 owner 身份（与源码发布授权相同）、`installationId`、完整 `ledger/target/executor`、`catalogPath`、`receiptTtlMs` 和 `policies`。每条 policy 固定 `candidateId/packageName/dshBaseline/capabilities/authorities/requires/registryId/registryLocator`；版本、完整性与 registry reference 从精确完成的 release 读取。保护插件不在此授权范围。相同 grant 的配置/key 不可替换，重试返回同一回执且不延长期限。
+
+原生源码作业在 `release-complete` 后自动接续：绑定原 owner 任务、精确 release 制品与 profile，申请有限采用回执，再调用与 CLI 相同的安装、Host 签名检查和物理回退实现。schema 19 的 `source_adoptions` 保证一条源码计划只对应一条激活计划；普通任务失败无需给插件添加虚假的通用修复 capability。Host 入口 `adoptOwnerSourceRelease({ sourcePlanId, signal?, expectedTrustDigest? })` 可继续已有记录，不暴露为模型工具。恢复不重建已发布制品、不重新审批已批准的激活。
+
+使用 systemd 重启目标 Host 时，控制面应运行在目标 Host 之外，避免目标重启中断自己的部署作业。采用使用独立 SQLite 连接，并复用现有 profile 锁和跨进程文件操作互斥；同一 Service 一次执行一个采用任务。任务来源在异步操作前后重验，取消或失败后保留恢复义务。物理恢复不依赖已撤回的来源授权；已暴露 profile 仍须取得原 Host 的独立 rollback 回执才结算。trust 绑定变化、无法确认资源释放或签名服务不可用时保留待恢复状态。Cordis 卸载取消并等待采用工作，随后关闭其连接。
+
+这提供自动采用的执行链。后续普通用户任务归因到精确部署版本、自动签发观察证据及持续回退尚需接线；未据此宣称部署后的完整自迭代或 npm 发布验收通过。
+
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 19 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 非 owner-task 来源的计划可用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。adapter 返回签名 publish 歧义回执后进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。派发后没有签名回执则保持 unknown，不自动重跑；普通 owner-task 来源的全部阶段必须通过 Host 当前来源校验。
 

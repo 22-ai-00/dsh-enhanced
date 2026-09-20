@@ -24,7 +24,7 @@ const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean } = {}) {
+async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean; execution?: boolean; adoption?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -87,18 +87,27 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
   })
   const releasePrepared = vi.fn(async (_job: SourceJobRecord, _signal: AbortSignal) => {})
   const advanceReleased = vi.fn(async (_job: SourceJobRecord, _signal: AbortSignal) => {})
+  const adoptionForward = vi.fn()
+  const adoptReleased = vi.fn(async (_job: SourceJobRecord, _signal: AbortSignal, assertCurrent: () => Promise<void>) => {
+    await assertCurrent(); adoptionForward()
+  })
   const createRuntime = () => new SourceJobRuntime({ config, build: { ...build, ...(options.versioning ? { versioning: 'patch' as const } : {}) }, statePath: root, store, ports: { automations: automations as never, delivery },
-    ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}), ...(options.releases ? { releasePrepared } : {}), ...(options.execution ? { advanceReleased, releaseTimeoutMs: 60_000 } : {}) })
+    ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}), ...(options.releases ? { releasePrepared } : {}), ...(options.execution ? { advanceReleased, releaseTimeoutMs: 60_000 } : {}), ...(options.adoption ? { adoptReleased, adoptionTimeoutMs: 60_000 } : {}) })
   const runtime = createRuntime()
   runtime.start()
   const enqueue = (signal = new AbortController().signal, key = 'job:one') => runtime.enqueue({ gapId: gap.id, name: 'health-helper', repository: root, files: [{ path: 'src/index.ts', content: 'export const changed = true\n' }], idempotencyKey: key, expectedBaseCommit: head, ttlMs: 900_000, owner: OWNER, signal, assertCurrent: () => undefined })
-  return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, approvePrepared, releasePrepared, advanceReleased, withGapSourceFence,
+  return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, approvePrepared, releasePrepared, advanceReleased, adoptReleased, adoptionForward, withGapSourceFence,
     setSourceCurrent: (value: boolean) => { sourceCurrent = value }, get executor() { return executor }, activation: (_id: string) => activation!, enqueue, head }
 }
 
 describe('durable source-job runtime', () => {
-  it.each([false, true])('continues native prepared releases without reauthorizing on restart (source changed: %s)', async changed => {
-    const f = await fixture({ typed: true, approvals: true, releases: true, execution: true })
+  it.each([{ changed: false, adoption: false }, { changed: true, adoption: false }, { changed: false, adoption: true }, { changed: true, adoption: true }])('continues native prepared work without rebuilding on restart (%j)', async ({ changed, adoption }) => {
+    const f = await fixture({ typed: true, approvals: true, releases: true, execution: true, adoption })
+    if (adoption) f.advanceReleased.mockImplementationOnce(async job => {
+      // Release signatures are tested by source-release-runner; isolate the native job continuation boundary here.
+      const db = new DatabaseSync(join(f.root, 'control.sqlite'))
+      try { db.prepare("UPDATE source_plans SET status = 'release-complete' WHERE id = ?").run(job.planId!) } finally { db.close() }
+    })
     let restarted: SourceJobRuntime | undefined
     try {
       f.releasePrepared.mockImplementationOnce(async job => {
@@ -126,7 +135,11 @@ describe('durable source-job runtime', () => {
       await f.runtime.close(); f.setSourceCurrent(!changed)
       restarted = f.createRuntime(); restarted.start()
       await new Promise(resolve => setImmediate(resolve)); await restarted.close()
-      expect(f.advanceReleased).toHaveBeenCalledTimes(changed ? 1 : 2)
+      expect(f.advanceReleased).toHaveBeenCalledTimes(adoption || changed ? 1 : 2)
+      if (adoption) {
+        expect(f.adoptReleased).toHaveBeenCalledTimes(2)
+        expect(f.adoptionForward).toHaveBeenCalledTimes(changed ? 1 : 2)
+      }
       expect(f.prepare).toHaveBeenCalledTimes(1); expect(f.approvePrepared).toHaveBeenCalledTimes(1); expect(f.releasePrepared).toHaveBeenCalledTimes(1)
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
   })

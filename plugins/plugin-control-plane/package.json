@@ -9,7 +9,8 @@
   "bin": {
     "dsh-plugin-control": "./bin/dsh-plugin-control.js",
     "dsh-source-approval-authority": "./bin/dsh-source-approval-authority.js",
-    "dsh-source-release-authority": "./bin/dsh-source-release-authority.js"
+    "dsh-source-release-authority": "./bin/dsh-source-release-authority.js",
+    "dsh-source-adoption-authority": "./bin/dsh-source-adoption-authority.js"
   },
   "exports": {
     ".": {

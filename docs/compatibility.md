@@ -270,3 +270,10 @@ Schema 18 adds a dispatch claim beside each immutable source release operation. 
 Owner-task release preparation, dispatch, receipt reconciliation and application require the live Host source fence. Offline CLI commands remain available for other source plans. The optional local phase driver consumes the existing independent review decision contract; it does not produce review decisions or activate the admitted artifact.
 
 Verifier 可选源码审查复用已固定 DSH `agents.create`、`installModelSelection`、Session、ToolRuntime 与 SystemPrompt：新旧 `setup(ctx, agent?)` 均支持，不挂 preset，模型请求检查 provider/model/effort、完整 system prompt 和空工具面；依赖缺失时仅此能力等待。工程验证使用原生 AgentLoop 与本地脚本 adapter，不代表真实供应商质量或生产采用验收。
+
+
+### Owner source adoption (Control Plane schema 19)
+
+Schema 19 adds `source_adoptions`, binding one completed owner source release to one activation plan, its exact candidate and original task reference. Existing activation and signed receipt formats remain unchanged. Older binaries reject this newer ledger; retain the current binary for pending deployment recovery.
+
+Optional `sourceAdoptions` extends the same native source job into finite activation approval and the shared CLI deployment engine. Forward activation requires the current Host owner-source fence; rollback remains possible after source withdrawal. Installer work uses a dedicated connection and the existing SQLite/profile mutex protocol. Ordinary task version attribution and signed post-deployment observations remain separate unfinished integration work.
