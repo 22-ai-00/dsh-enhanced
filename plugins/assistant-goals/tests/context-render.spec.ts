@@ -62,4 +62,12 @@ describe('compact goal context', () => {
     expect(decode(context)).toMatchObject({ truncated: true, id: record.id, outcome: 'awaiting-verification' })
     expect(context).not.toContain('"achieved"')
   })
+
+  test('keeps a whole live round timing object at the normal compact budget and omits active timing as a whole', () => {
+    const timing = { maxDurationMs: 60_000, active: { runId: 'run-live', round: 2, issuedAt: 1_000, expiresAt: 61_000, observedAt: 2_000, remainingMs: 59_000 } }
+    const normal: any = decode(renderCompactGoalContext(record, undefined, undefined, 1024, timing))
+    expect(normal.roundTiming).toEqual(timing)
+    const smallest: any = decode(renderCompactGoalContext(record, undefined, undefined, 256, timing))
+    if (smallest.roundTiming !== undefined) expect(smallest.roundTiming).toEqual({ maxDurationMs: 60_000 })
+  })
 })

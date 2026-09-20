@@ -508,6 +508,18 @@ describe('owner-scoped native goal context', () => {
     expect(f.service.taskContext(agent)).toBeUndefined()
   })
 
+  it('renders round timing only when native round verification is configured', async () => {
+    const disabled = await harness(); const disabledAgent = await disabled.create('timing-disabled', 'owner'); disabled.human.add(disabledAgent)
+    disabled.service.create(disabledAgent, 'Do not claim an unverified deadline')
+    expect(disabled.service.snapshot(disabledAgent)).not.toContain('roundTiming')
+
+    const enabled = await harness(undefined, undefined, undefined, true); const enabledAgent = await enabled.create('timing-enabled', 'owner'); enabled.human.add(enabledAgent)
+    const record = enabled.service.create(enabledAgent, 'Show the configured native round duration')
+    expect(enabled.service.snapshot(enabledAgent)).toContain('"roundTiming":&#123;"maxDurationMs":60000&#125;')
+    expect(enabled.service.describeForAgent(enabledAgent, record.id)).toContain('"roundTiming":&#123;"maxDurationMs":60000&#125;')
+    expect(enabled.service.snapshot(enabledAgent)).not.toContain('"active":')
+  })
+
   it('projects bounded dependency status into task and model context without treating native completion as achievement', async () => {
     const f = await harness(undefined, 4096)
     const dependencyAgent = await f.create('task-context-dependency', 'owner')

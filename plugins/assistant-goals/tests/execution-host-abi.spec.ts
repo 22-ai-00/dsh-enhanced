@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { GoalExecutionRuntime } from '../src/execution.ts'
 
@@ -16,6 +16,7 @@ function fixture() {
   const native: any = { id: 'native-goal', revision: 1, phase: 'active', roundsStarted: 0, maxGoalRounds: 2 }
   let events: any[] = [{ seq: 1, type: 'turn/start', data: { turn: 2 } }]
   let cancellations = 0
+  const currentConsumes: boolean[] = []
   const agent: any = { session: { id: 'session', snapshotEvents: () => events }, cancel: () => { cancellations += 1 } }
   const verifier: any = { ownsTaskAcceptanceRegistration: () => true, tick: async () => undefined }
   const ctx: any = {
@@ -25,12 +26,12 @@ function fixture() {
     inject: (_names: unknown, callback: (value: any) => unknown) => callback({ tools: { guard: () => () => {} } }),
     effect: (callback: () => () => Promise<void>) => { dispose = callback() },
   }
-  const runtime = new GoalExecutionRuntime(ctx, ':memory:', 60_000, () => ({ scope, record }))
+  const runtime = new GoalExecutionRuntime(ctx, ':memory:', 60_000, (_agent, consume = true) => { currentConsumes.push(consume); return { scope, record } })
   runtime.register({ protocol: 'assistant-verifier/host-producer/v1', generation: runtime.generation(), owner: verifier, requiresAcceptance: true,
     prepare: () => ({ contractId: 'contract', contractDigest: 'a'.repeat(64) }), completed: async () => {} })
   const source = { kind: 'goal' as const, goalId: 'native-goal', revision: 1, round: 1 }
   const message = (value = source) => ({ role: 'user', content: [], source: value })
-  return { agent, cancellations: () => cancellations, dispose: async () => await dispose?.(), record, events: (value: any[]) => { events = value }, handlers, message, native, runtime, source }
+  return { agent, cancellations: () => cancellations, currentConsumes, dispose: async () => await dispose?.(), record, events: (value: any[]) => { events = value }, handlers, message, native, runtime, source }
 }
 
 describe('native goal execution Host ABI admission', () => {
@@ -42,6 +43,39 @@ describe('native goal execution Host ABI admission', () => {
       await pre({ agent: f.agent, messages: [input], turn: 2, step: 1, signal: new AbortController().signal }, async () => ({ kind: 'enter', messages: [input] }))
       await expect(request({ agent: f.agent, turn: 2, step: 1, signal: new AbortController().signal }, async () => ({ provider: 'fixture' }))).resolves.toEqual({ provider: 'fixture' })
       expect(f.runtime.budgetState(f.agent)?.run.intent.admission).toMatchObject({ round: 1 })
+    } finally { await f.dispose() }
+  })
+
+  test('projects only the exact live admitted round timing without extending its deadline', async () => {
+    const f = fixture()
+    try {
+      expect(f.runtime.roundTiming(f.agent, f.record)).toEqual({ maxDurationMs: 60_000 })
+      const input = f.message()
+      await f.handlers.get('agent/pre-step')!({ agent: f.agent, messages: [input], turn: 2, step: 1, signal: new AbortController().signal }, async () => ({ kind: 'enter', messages: [input] }))
+      await f.handlers.get('agent/request')!({ agent: f.agent, turn: 2, step: 1, signal: new AbortController().signal }, async () => ({ provider: 'fixture' }))
+      const first = f.runtime.roundTiming(f.agent, f.record)
+      expect(first).toMatchObject({ maxDurationMs: 60_000, active: { runId: expect.any(String), round: 1, issuedAt: expect.any(Number), expiresAt: expect.any(Number), observedAt: expect.any(Number), remainingMs: expect.any(Number) } })
+      if (first?.active === undefined) throw new Error('expected active round timing')
+      expect(first.active!.remainingMs).toBe(first.active!.expiresAt - first.active!.observedAt)
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(first.active!.observedAt + 1)
+      let later
+      try { later = f.runtime.roundTiming(f.agent, f.record) } finally { clock.mockRestore() }
+      if (later?.active === undefined) throw new Error('expected later active round timing')
+      expect(later.active).toMatchObject({ runId: first.active!.runId, issuedAt: first.active!.issuedAt, expiresAt: first.active!.expiresAt, observedAt: first.active!.observedAt + 1, remainingMs: first.active!.remainingMs - 1 })
+      expect(f.runtime.roundTiming({ session: { id: 'foreign' } } as any, f.record)).toEqual({ maxDurationMs: 60_000 })
+      for (const foreignRecord of [
+        { ...f.record, scope: { ...f.record.scope, workspace: '/foreign' } },
+        { ...f.record, definition: { ...f.record.definition, version: 2 } },
+        { ...f.record, native: { ...f.record.native, sessionId: 'focused-other-session' } },
+        { ...f.record, native: { ...f.record.native, revision: 2 } },
+      ]) expect(f.runtime.roundTiming(f.agent, foreignRecord)).toEqual({ maxDurationMs: 60_000 })
+      expect(f.runtime.roundTiming(f.agent, { ...f.record, native: { ...f.record.native, phase: 'complete' } })).toEqual({ maxDurationMs: 60_000 })
+      const expiredClock = vi.spyOn(Date, 'now').mockReturnValue(first.active!.expiresAt)
+      try { expect(f.runtime.roundTiming(f.agent, f.record)).toEqual({ maxDurationMs: 60_000 }) } finally { expiredClock.mockRestore() }
+      expect(f.currentConsumes.at(-1)).toBe(false)
+      await f.handlers.get('agent/disposed')!({ agent: f.agent }, async () => undefined)
+      await f.runtime.whenIdle()
+      expect(f.runtime.roundTiming(f.agent, f.record)).toEqual({ maxDurationMs: 60_000 })
     } finally { await f.dispose() }
   })
 

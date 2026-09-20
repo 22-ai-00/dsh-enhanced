@@ -22,8 +22,13 @@ async function options(cellId: string): Promise<Omit<NativeSkillGoalOptions, 'fa
     budget: { durationMs: 100000, inputTokens: 1000, outputTokens: 2048, toolCalls: 12, costUsdMicros: null }, execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 2 },
     image: process.env.DSH_ISOLATION_TEST_IMAGE ?? `sha256:${'0'.repeat(64)}`, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 25000, signal: new AbortController().signal }
 }
+interface RoundTiming {
+  maxDurationMs: number
+  active?: { runId: string; round: number; issuedAt: number; expiresAt: number; observedAt: number; remainingMs: number }
+}
 class Adapter extends LlmAdapter {
   calls = 0; ran = false; inspected = false; checkpointed = false
+  readonly roundContexts: Array<RoundTiming | undefined> = []
   constructor(readonly ctx: Context, readonly reuse: boolean, readonly sourcePlanning = false) { super() }
   override providerInfo(id: string) { return { id, name: id } }
   override async resolveModel(provider: string, id: string) { return { provider, id, name: id, inputModalities: ['text' as const] } }
@@ -31,7 +36,17 @@ class Adapter extends LlmAdapter {
     this.calls++
     expect(JSON.stringify(options.messages)).not.toContain('19 23')
     const agent = this.ctx.agents.currentInitiator()!
-    const native = (this.ctx.get('goals' as never) as unknown as { get(agent: unknown): { roundsStarted: number } | undefined }).get(agent)
+    const native = (this.ctx.get('goals' as never) as unknown as { get(agent: unknown): { roundsStarted: number; phase: string } | undefined }).get(agent)
+    if (this.sourcePlanning && native && native.roundsStarted > 0) {
+      const source = options.messages.findLast(message => message.source.kind === 'plugin'
+        && message.source.plugin === '@deepseek-ai/dsh-system-prompt' && message.source.form === 'snapshot')?.source
+      const context = source?.kind === 'plugin' && source.form === 'snapshot'
+        ? source.sections.find(section => section.name === 'assistant-goals:current-context')?.text : undefined
+      expect(context).toBeDefined()
+      const json = context!.split('<business-goal-data>\n')[1]!.split('\n</business-goal-data>')[0]!
+        .replaceAll('&#123;', '{').replaceAll('&#125;', '}').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&')
+      this.roundContexts.push((JSON.parse(json) as { roundTiming?: RoundTiming }).roundTiming)
+    }
     const business = this.ctx.get('assistantGoals' as never) as unknown as { list(agent: unknown): { id: string; version: number }[] }
     let name: string | undefined; let args: object = {}
     if (!native) { name = 'goal_create'; args = { objective: task.objective, max_goal_rounds: 2 } }
@@ -53,6 +68,7 @@ class Adapter extends LlmAdapter {
       yield { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: json }
       yield { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: json } }
     } else {
+      if (this.sourcePlanning && this.checkpointed) expect(native?.phase).toBe('active')
       const text = 'The program is ready for independent checks.'
       yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text }; yield { type: 'block-end', index: 0, block: { type: 'text', text } }
     }
@@ -64,10 +80,28 @@ const factory = (reuse: boolean, sourcePlanning = false): NativeSkillGoalOptions
 const rawService = <T>(value: T): T => (value as T & { [key: symbol]: T })[Symbol.for('cordis.original')] ?? value
 
 test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('captures an independently achieved native source and reuses its exact skill in a fresh Goal', async () => {
-  const source = await createNativeSkillGoalRuntime({ ...await options('source'), factory: factory(false, true), source: { name: 'add-integers', description: 'Create a reusable integer addition program.', validityMs: 600000 } })
+  let sourceAdapter!: Adapter
+  const source = await createNativeSkillGoalRuntime({ ...await options('source'), factory: (_model, { ctx }) => ({
+    adapter: sourceAdapter = new Adapter(ctx, false, true), inputTokenUpperBound: () => 10, dispose() {},
+  }), source: { name: 'add-integers', description: 'Create a reusable integer addition program.', validityMs: 600000 } })
   cleanups.push(source.close)
   const first = await source.execute()
   expect(first.snapshot).toMatchObject({ outcome: { status: 'achieved' } })
+  // DSH assembles the first prompt before admission. Later requests must see
+  // that exact persisted round deadline, never a fresh per-call allowance.
+  expect(sourceAdapter.roundContexts[0]).toEqual({ maxDurationMs: 25000 })
+  const active = sourceAdapter.roundContexts.slice(1).map(value => value!.active!)
+  expect(active.length).toBeGreaterThanOrEqual(3)
+  for (const timing of active) {
+    expect(timing).toMatchObject({ round: 1, runId: active[0]!.runId, issuedAt: active[0]!.issuedAt, expiresAt: active[0]!.expiresAt })
+    expect(timing.expiresAt - timing.issuedAt).toBe(25000)
+    expect(timing.remainingMs).toBe(timing.expiresAt - timing.observedAt)
+    expect(timing.remainingMs).toBeGreaterThan(0)
+  }
+  expect(active.at(-1)!.remainingMs).toBeLessThan(active[0]!.remainingMs)
+  expect(first.snapshot.executionRuns).toEqual(expect.arrayContaining([expect.objectContaining({ intent: expect.objectContaining({
+    runId: active[0]!.runId, admission: expect.objectContaining({ issuedAt: active[0]!.issuedAt, expiresAt: active[0]!.expiresAt }),
+  }) })]))
   expect(first.capabilities.every(value => !value.toolNames.includes('skill_run'))).toBe(true)
   const captured = await source.captureVerifiedSkill()
   expect(captured.selection).toMatchObject({ version: 1, skillName: 'add-integers' })
