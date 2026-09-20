@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
+import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantGoalsService, OwnerGoalExecutionSnapshotInput } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
-import { assertCurrentContract } from '@dsh-enhanced/assistant-super-relay-budget'
-import { Config, normalizeConfig, type AssistantGrowthDriverConfig } from './config.js'
+import { Config, DEFAULT_API_KEY_ENV, normalizeConfig, type AssistantGrowthDriverConfig } from './config.js'
 import { mintGrowthAuthority, type GrowthAuthority, type GrowthDeliveryPort } from './deposit.js'
 import { runGrowthAgent, type GrowthAgentRunResult } from './growth-agent.js'
 import { version } from './version.js'
@@ -68,8 +69,8 @@ function unwrapService<T>(service: T): T {
 /**
  * Opt-in, fail-closed periodic growth driver.  Every wake:
  *   1. re-anchors the frozen configured owner scope against Delivery;
- *   2. verifies the pinned super-relay contract is still current and that a
- *      credential reference resolves (never touching the network);
+ *   2. freezes the conversation's model (or explicit fixed override), applying
+ *      supplier-specific credential/contract checks only to that supplier;
  *   3. optionally reserves an owner-configured background budget;
  *   4. runs ONE bounded background agent that may only read history and
  *      propose a paused skill candidate through Host re-verification.
@@ -173,25 +174,28 @@ export class AssistantGrowthDriverService extends Service {
   health = (): GrowthWakeHealth => this.#health
 
   /** Run one wake immediately (also used by tests / an explicit Host trigger). */
-  wake = (): Promise<void> => {
+  wake = (input: { sourceAgent?: Agent } = {}): Promise<void> => {
     if (!this.#active || !this.#config.enabled) return Promise.resolve()
     // Coalesce explicit and timer wakes onto the same bounded run. Queueing
     // timer ticks would build an unbounded backlog when a build is slow.
     if (this.#flight !== undefined) return this.#flight
-    const flight = this.#runWake().finally(() => { if (this.#flight === flight) this.#flight = undefined })
+    const flight = this.#runWake(input).finally(() => { if (this.#flight === flight) this.#flight = undefined })
     this.#flight = flight
     return flight
   }
 
-  async #resolveCredential(): Promise<boolean> {
-    const env = this.#config.apiKeyEnv
+  async #resolveCredential(provider: string): Promise<boolean> {
+    const env = this.#config.apiKeyEnv ?? (provider === 'super-relay' ? DEFAULT_API_KEY_ENV : null)
+    // Other adapters own their credentials; do not require a Super Relay key
+    // merely because the growth plugin happens to be installed.
+    if (env === null) return true
     const credentials = this.ctx.get('credentials' as never, false) as CredentialService | undefined
     const resolved = credentials === undefined ? undefined : (await credentials.resolve(credentialRef(env)))?.value
     const key = resolved ?? process.env[env]
     return typeof key === 'string' && key.length > 0
   }
 
-  async #runWake(): Promise<void> {
+  async #runWake(input: { sourceAgent?: Agent }): Promise<void> {
     const wakeId = `growth-wake-${Date.now()}-${randomUUID()}`
     const startedAt = Date.now()
     const config = this.#config
@@ -199,7 +203,7 @@ export class AssistantGrowthDriverService extends Service {
       this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-scope', run: null }
       return
     }
-    const delivery = unwrapService(this.ctx.get('assistantDelivery')) as Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'commitOwnerAnchoredWorkflowTrace'>
+    const delivery = unwrapService(this.ctx.get('assistantDelivery')) as Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'commitOwnerAnchoredWorkflowTrace' | 'inspectOwnerModelSelection'>
     const policy = unwrapService(this.ctx.get('assistantPolicy' as never, false)) as Policy | undefined
     const goals = unwrapService(this.ctx.get('assistantGoals' as never)) as unknown as Pick<AssistantGoalsService, 'inspectOwnerGoals' | 'inspectOwnerVerifiedWorkflowSource'>
     const skills = unwrapService(this.ctx.get('assistantSkills' as never)) as unknown as Pick<AssistantSkillsService, 'inspectOwnerActiveSkills' | 'inspectOwnerSkillCandidates' | 'stageOwnerVerifiedSuccessCandidate'>
@@ -212,6 +216,21 @@ export class AssistantGrowthDriverService extends Service {
       this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `missing-binding:${errorMessage(error)}`, run: null }
       return
     }
+    let model: Readonly<ModelSelection> | undefined
+    let modelFailure: string | undefined
+    try {
+      const selected = config.provider !== null && config.model !== null
+        ? { provider: config.provider, model: config.model,
+          ...(config.reasoningEffort === null ? {} : { reasoningEffort: config.reasoningEffort }) }
+        : delivery.inspectOwnerModelSelection({ authorityId: config.scope.ownerRouteId,
+          principalId: config.scope.principalId, workspace: config.scope.workspace,
+          agentPreset: config.scope.preset,
+          ...(input.sourceAgent === undefined ? {} : { sourceAgent: input.sourceAgent }) })
+      if (!selected.provider || !selected.model) throw new Error('owner model selection is unavailable')
+      model = Object.freeze({ provider: selected.provider, model: selected.model,
+        ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(selected.reasoningEffort) }) })
+      authority.assertCurrent()
+    } catch (error) { modelFailure = errorMessage(error) }
     // Owner-anchored workflow learning is a separate, purely Host-local track.
     // It needs only the anchored owner authority and performs no model/network
     // call, so it runs before the super-relay credential/budget gates. Failure
@@ -222,13 +241,20 @@ export class AssistantGrowthDriverService extends Service {
         startedAt, authority, goals, delivery: delivery as unknown as GrowthDeliveryPort,
       })
     }
+    if (model === undefined || modelFailure !== undefined) {
+      this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `missing-model:${modelFailure ?? 'unavailable'}`, run: null, ownerAnchored }
+      return
+    }
     try {
-      assertCurrentContract()
+      if (model.provider === 'super-relay') {
+        const { assertCurrentContract } = await import('@dsh-enhanced/assistant-super-relay-budget')
+        assertCurrentContract()
+      }
     } catch (error) {
       this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `contract-expired:${errorMessage(error)}`, run: null, ownerAnchored }
       return
     }
-    if (!await this.#resolveCredential()) {
+    if (!await this.#resolveCredential(model.provider)) {
       this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: 'missing-credential', run: null, ownerAnchored }
       return
     }
@@ -263,7 +289,7 @@ export class AssistantGrowthDriverService extends Service {
       agentSubmitted = true
       const bound = this.#sourceBinding
       const source = bound !== undefined && bound.available() ? bound : undefined
-      const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, goals, skills,
+      const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, model, goals, skills,
         ...(source === undefined ? {} : { sourcePlane: source.port }),
         signal: source === undefined ? this.#abort.signal : AbortSignal.any([this.#abort.signal, source.signal]),
       })

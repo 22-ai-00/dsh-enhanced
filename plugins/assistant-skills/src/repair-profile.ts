@@ -14,8 +14,12 @@ export interface RepairContinuationProfile {
   description: string
   bindings?: readonly SkillBinding[]
   externalHoldoutProfileId: string
-  provider: string
-  model: string
+  /**
+   * An explicit pair pins a repair route.  Omitting both makes armRepair freeze
+   * the authenticated source Agent's last native request route instead.
+   */
+  provider?: string
+  model?: string
   allowedTools: readonly string[]
   maxGoalRounds: number
   maxModelCalls: number
@@ -45,7 +49,9 @@ export function validateRepairProfiles(values: unknown, holdouts: readonly Exter
       || !bounded(value.scope.workspace, 4096) || !isAbsolute(value.scope.workspace) || !bounded(value.scope.preset, 4096)
       || !bounded(value.id, 128) || !bounded(value.taskFamilyId, 128) || !bounded(value.description, 4096)
       || !bounded(value.skillName, 64) || !/^[a-z](?:[a-z0-9-]{0,62}[a-z0-9])?$/u.test(value.skillName)
-      || !bounded(value.provider, 256) || !bounded(value.model, 256) || !bounded(value.externalHoldoutProfileId, 128)
+      || (value.provider === undefined) !== (value.model === undefined)
+      || value.provider !== undefined && !bounded(value.provider, 256)
+      || value.model !== undefined && !bounded(value.model, 256) || !bounded(value.externalHoldoutProfileId, 128)
       || !Array.isArray(value.allowedTools) || value.allowedTools.length < 1 || value.allowedTools.length > 32
       || value.allowedTools.some(tool => !bounded(tool, 128) || !/^[a-zA-Z][a-zA-Z0-9_-]*$/u.test(tool))
       || new Set(value.allowedTools).size !== value.allowedTools.length

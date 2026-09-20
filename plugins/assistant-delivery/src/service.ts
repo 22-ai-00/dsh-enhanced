@@ -4348,6 +4348,43 @@ export class AssistantDeliveryService extends Service {
     })
   }
 
+  /** Host-only snapshot of the model selected for this owner's external conversation. */
+  inspectOwnerModelSelection(input: {
+    authorityId: string
+    principalId: string
+    workspace: string
+    agentPreset: string
+    sourceAgent?: Agent
+  }): Readonly<ModelRouteRef> {
+    this.validateOwnerRoute(input)
+    const { binding } = this.resolveOwnerRoute(input.authorityId)
+    if (input.sourceAgent !== undefined) {
+      const session = input.sourceAgent.session
+      if (String(session.id) !== binding.sessionId || session.header.cwd !== binding.workspace
+        || session.header.agentPreset !== binding.agentPreset) {
+        throw new AssistantDeliveryError('missing-binding', 'growth source session does not match the owner route')
+      }
+      // Request headers reflect native model-selection hooks; agent.options
+      // can still contain the initial route after the user changes models.
+      const request = session.snapshotEvents().findLast(event => event.type === 'request/header')
+      const selected = request?.type === 'request/header' ? request.data.header.config : undefined
+      if (!selected?.provider || !selected.model) {
+        throw new AssistantDeliveryError('missing-binding', 'growth source session has no resolved model request')
+      }
+      return Object.freeze({ provider: selected.provider, model: selected.model,
+        ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) })
+    }
+    // Native Web sessions own their model selection in DSH, not this external
+    // conversation ledger. Never substitute Delivery defaults for those sessions.
+    if (binding.conversation.channel === 'web') {
+      throw new AssistantDeliveryError('missing-binding', 'native Web model selection requires a source session')
+    }
+    const selected: ModelRouteRef = this.deliveryStore.getModelSelection(binding.conversation)
+      ?? { provider: this.config.agentProvider, model: this.config.agentModel }
+    return Object.freeze({ provider: selected.provider, model: selected.model,
+      ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }) })
+  }
+
   /**
    * Enqueue against a stable Host-owned route rather than a session binding.
    * Policy is evaluated against the exact `route:<authorityId>` resource. The

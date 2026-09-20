@@ -37,6 +37,16 @@ describe('repair continuation profile configuration', () => {
     expect(validateRepairProfiles([profile({ allowedTools: ['read', 'write', 'edit', 'read_image'] })], [holdout()])[0]?.allowedTools).toEqual(['read', 'write', 'edit', 'read_image'])
   })
 
+  test('allows an omitted route for arm-time native inheritance, but rejects a partial override', () => {
+    const configured = profile(), { provider: _provider, model: _model, ...withoutRoute } = configured
+    const inherited = validateRepairProfiles([withoutRoute], [holdout()])[0]
+    expect(inherited).toMatchObject({ id: 'repair' })
+    expect(inherited).not.toHaveProperty('provider')
+    expect(inherited).not.toHaveProperty('model')
+    expect(() => validateRepairProfiles([profile({ provider: 'provider', model: undefined })], [holdout()])).toThrow(/invalid repair profile/)
+    expect(() => validateRepairProfiles([profile({ provider: undefined, model: 'model' })], [holdout()])).toThrow(/invalid repair profile/)
+  })
+
   test('rejects unknown fields, duplicate scoped ids, and invalid bindings', () => {
     expect(() => validateRepairProfiles([{ ...profile(), injected: true }], [holdout()])).toThrow(/invalid repair profile/)
     expect(() => validateRepairProfiles([profile(), profile()], [holdout()])).toThrow(/duplicate repair profile/)

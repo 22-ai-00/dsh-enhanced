@@ -108,6 +108,8 @@ export interface SkillRepairAuthorizationInput {
   parentDigest: string
   maxIterations: number
   expiresAt: number
+  /** Frozen at arm time. Undefined is accepted only for legacy fixed-route records. */
+  modelSelection?: { provider: string; model: string; reasoningEffort?: string }
   profileSequence?: readonly { id: string; digest: string }[]
   feedbackAuthority?: { sessionId: string; expiresAt: number; routeReceipt: unknown }
 }
@@ -274,11 +276,18 @@ function candidateOptions(value: unknown): value is SkillCandidateOptions {
 function repairAuthorization(value: unknown): value is SkillRepairAuthorizationInput {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !json(value)) return false
   const input = value as SkillRepairAuthorizationInput
-  if (!Object.keys(input).every(key => ['invocationId', 'ownerRouteId', 'source', 'profileId', 'profileDigest', 'skillName', 'parentVersion', 'parentDigest', 'maxIterations', 'expiresAt', 'profileSequence', 'feedbackAuthority'].includes(key))
+  if (!Object.keys(input).every(key => ['invocationId', 'ownerRouteId', 'source', 'profileId', 'profileDigest', 'skillName', 'parentVersion', 'parentDigest', 'maxIterations', 'expiresAt', 'modelSelection', 'profileSequence', 'feedbackAuthority'].includes(key))
     || !['invocationId', 'ownerRouteId', 'source', 'profileId', 'profileDigest', 'skillName', 'parentVersion', 'parentDigest', 'maxIterations', 'expiresAt'].every(key => Object.hasOwn(input, key))
     || !text(input.invocationId, 256) || !text(input.ownerRouteId, 256) || !text(input.profileId, 256) || !digest(input.profileDigest)
     || !name(input.skillName) || !version(input.parentVersion) || !digest(input.parentDigest) || !Number.isSafeInteger(input.maxIterations) || input.maxIterations < 1 || input.maxIterations > 4
     || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > Date.now() + 7 * 86400000) return false
+  if (input.modelSelection !== undefined) {
+    const selection = input.modelSelection
+    if (!selection || typeof selection !== 'object' || Array.isArray(selection) || !json(selection)
+      || !Object.keys(selection).every(key => ['provider', 'model', 'reasoningEffort'].includes(key))
+      || !Object.hasOwn(selection, 'provider') || !Object.hasOwn(selection, 'model') || !text(selection.provider, 256) || !text(selection.model, 256)
+      || selection.reasoningEffort !== undefined && !text(selection.reasoningEffort, 256)) return false
+  }
   if (input.profileSequence !== undefined && (!Array.isArray(input.profileSequence) || input.profileSequence.length !== input.maxIterations
     || input.profileSequence.some(item => !item || typeof item !== 'object' || Object.keys(item).length !== 2 || !text(item.id, 128) || !digest(item.digest))
     || input.profileSequence[0]?.id !== input.profileId || input.profileSequence[0]?.digest !== input.profileDigest)) return false

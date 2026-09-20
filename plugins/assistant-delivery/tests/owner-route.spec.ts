@@ -1,4 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -150,6 +151,43 @@ async function dispose(fixture: Fixture): Promise<void> {
 }
 
 describe('stable owner route authority', () => {
+  test('inherits the exact owner conversation model selection, including after restart', async () => {
+    const f = await fixture()
+    pairAndBind(f)
+    const input = { authorityId: authority.id, principalId: 'lark/bot-1/tenant-a/ou_owner',
+      workspace: '/work/alpha', agentPreset: 'primary' }
+    expect(f.service.inspectOwnerModelSelection(input)).toEqual({ provider: 'deepseek-official', model: 'deepseek-v4-flash' })
+    f.store.setModelSelection(conversation, { provider: 'chosen-provider', model: 'chosen-model', reasoningEffort: 'high' })
+    const selected = f.service.inspectOwnerModelSelection(input)
+    expect(selected).toEqual({ provider: 'chosen-provider', model: 'chosen-model', reasoningEffort: 'high' })
+    expect(Object.isFrozen(selected)).toBe(true)
+    expect(() => f.service.inspectOwnerModelSelection({ ...input, principalId: 'another-owner' })).toThrow(/scope/)
+    await f.ctx.fiber.restart()
+    contexts.delete(f.ctx)
+    const restarted = await mount(f.root)
+    expect(restarted.service.inspectOwnerModelSelection(input)).toEqual(selected)
+  })
+
+  test('inherits a source session request header instead of stale Agent creation options', async () => {
+    const f = await fixture()
+    pairAndBind(f)
+    const input = { authorityId: authority.id, principalId: 'lark/bot-1/tenant-a/ou_owner',
+      workspace: '/work/alpha', agentPreset: 'primary' }
+    const sourceAgent = { options: { provider: 'initial', model: 'old' }, session: {
+      id: 'delivery-session-1', header: { cwd: '/work/alpha', agentPreset: 'primary' },
+      snapshotEvents: () => [{ type: 'request/header', data: { header: {
+        config: { provider: 'actual', model: 'selected', reasoningEffort: 'high' },
+      } } }],
+    } } as unknown as Agent
+    expect(f.service.inspectOwnerModelSelection({ ...input, sourceAgent })).toEqual({
+      provider: 'actual', model: 'selected', reasoningEffort: 'high',
+    })
+    const wrong = { ...sourceAgent, session: { ...sourceAgent.session, id: 'another-session' } } as unknown as Agent
+    expect(() => f.service.inspectOwnerModelSelection({ ...input, sourceAgent: wrong })).toThrow(/source session/)
+    const empty = { ...sourceAgent, session: { ...sourceAgent.session, snapshotEvents: () => [] } } as unknown as Agent
+    expect(() => f.service.inspectOwnerModelSelection({ ...input, sourceAgent: empty })).toThrow(/no resolved model/)
+  })
+
   test('resolves the current exact owner binding and follows monotonic /new generations', async () => {
     const f = await fixture()
     const first = pairAndBind(f)

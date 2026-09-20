@@ -56,6 +56,7 @@ interface Harness {
   skillsPath: string
   scope: GoalScope
   receipts: ReturnType<typeof vi.fn>
+  modelSelection: ReturnType<typeof vi.fn>
   goalsApi: { inspectOwnerGoals: ReturnType<typeof vi.fn>; inspectOwnerVerifiedWorkflowSource: ReturnType<typeof vi.fn> }
   approval: { request: ReturnType<typeof vi.fn> }
   /** Scripted Delivery owner-anchored commit seam (engineering layer; no real Goals/DB behind it). */
@@ -168,10 +169,15 @@ interface ScriptedTurn { name: string; args: Record<string, unknown> }
  */
 class ScriptedAdapter extends LlmAdapter {
   calls = 0
+  requests: Array<{ provider: string; model: string; reasoningEffort?: string }> = []
+  onRequest?: () => void
   surfaces: string[][] = []
   constructor(private readonly turns: readonly ScriptedTurn[]) { super() }
   reset(): void { this.calls = 0 }
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests.push({ provider: options.provider, model: options.model,
+      ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }) })
+    this.onRequest?.()
     this.surfaces.push((options.tools ?? []).map(tool => tool.name).sort())
     const index = this.calls++
     if (index < this.turns.length) {
@@ -213,6 +219,7 @@ interface MountOptions {
   /** When set, every validateOwnerRoute call after the mint returns this generation. */
   rebindGeneration?: number
   adapter?: LlmAdapter
+  provider?: string
   registerSkills?: boolean
   /**
    * Goals returned by inspectOwnerGoals for the owner-anchored track. Defaults
@@ -264,8 +271,10 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
     return opts.commitResultById?.get(input.locator.goalId)
       ?? { outcome: 'trace-recorded' as const, revision: 1, template: {}, replayed: false }
   })
+  const modelSelection = vi.fn(() => ({ provider: 'super-relay', model: 'auto_model/alwaysday1' }))
   ctx.provide('assistantDelivery' as never, {
     validateOwnerRoute: receipts,
+    inspectOwnerModelSelection: modelSelection,
     commitOwnerAnchoredWorkflowTrace: ownerAnchoredCommit,
   } as never)
 
@@ -279,7 +288,7 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
   }
   ctx.provide('assistantGoals' as never, goalsApi as never)
 
-  if (opts.adapter !== undefined) ctx.llm.registerAdapter(['super-relay'], opts.adapter)
+  if (opts.adapter !== undefined) ctx.llm.registerAdapter([opts.provider ?? 'super-relay'], opts.adapter)
   await ctx.plugin(AgentLoop, { agents: [] })
 
   if (opts.withPolicy !== false) {
@@ -327,7 +336,7 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
   const skills = opts.registerSkills === false
     ? undefined
     : (ctx.get('assistantSkills' as never) as unknown as { [CORDIS_ORIGINAL]: AssistantSkillsService })[CORDIS_ORIGINAL]
-  return { ctx, root, skillsPath: join(root, 'skills.sqlite'), scope, receipts, goalsApi, approval, ownerAnchoredCommit, skills }
+  return { ctx, root, skillsPath: join(root, 'skills.sqlite'), scope, receipts, modelSelection, goalsApi, approval, ownerAnchoredCommit, skills }
 }
 
 afterEach(async () => {
@@ -374,6 +383,57 @@ async function runWake(service: AssistantGrowthDriverService): Promise<void> {
 }
 
 describe('dsh-enhanced-assistant-growth-driver', () => {
+  it('inherits the owner conversation model, freezes it for the wake, and rereads it next wake', async () => {
+    const adapter = new ScriptedAdapter([{ name: 'growth_list_owner_goals', args: {} }])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const selected = { provider: 'conversation-provider', model: 'conversation-model' }
+    h.modelSelection.mockReturnValue(selected)
+    adapter.onRequest = () => { selected.model = 'next-model' }
+    // An unrelated supplier's expired contract and absent credential must not
+    // disable the conversation's own adapter.
+    contractState.expired = true
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await service.wake()
+    expect(service.health()).toMatchObject({ outcome: 'ran', reason: 'succeeded',
+      run: { model: { provider: 'conversation-provider', model: 'conversation-model' } } })
+    expect(adapter.requests).toHaveLength(2)
+    expect(adapter.requests.every(request => request.model === 'conversation-model')).toBe(true)
+    adapter.reset()
+    await service.wake()
+    expect(adapter.requests.slice(2).every(request => request.model === 'next-model')).toBe(true)
+  })
+
+  it('uses an explicit fixed model without reading or depending on conversation model selection', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter, provider: 'repair-provider' })
+    h.modelSelection.mockImplementation(() => { throw new Error('no source model') })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      provider: 'repair-provider', model: 'repair-model',
+    }))
+    await service.wake()
+    expect(adapter.requests).toEqual([{ provider: 'repair-provider', model: 'repair-model' }])
+    expect(h.modelSelection).not.toHaveBeenCalled()
+    expect(service.health()).toMatchObject({ outcome: 'ran', reason: 'succeeded' })
+  })
+
+  it('does not invent a default model when inherited selection is unavailable', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter })
+    h.modelSelection.mockImplementation(() => { throw new Error('source unavailable') })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
+    await service.wake()
+    expect(service.health()).toMatchObject({ outcome: 'skipped', reason: 'missing-model:source unavailable' })
+    expect(adapter.calls).toBe(0)
+  })
+
+  it('requires a complete fixed model pair and rejects malformed routes', () => {
+    expect(normalizeConfig({})).toMatchObject({ provider: null, model: null, apiKeyEnv: null })
+    expect(() => normalizeConfig({ provider: 'provider' })).toThrow(/together/)
+    expect(() => normalizeConfig({ model: 'model' })).toThrow(/together/)
+    expect(() => normalizeConfig({ reasoningEffort: 'high' })).toThrow(/explicit provider/)
+    expect(() => normalizeConfig({ provider: ' bad ', model: 'model' })).toThrow(/invalid model/)
+  })
+
   it('exposes stable plugin identity', () => {
     expect(name).toBe('dsh-enhanced-assistant-growth-driver')
     expect(version).toBe(manifest.version)
@@ -557,16 +617,16 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     expect(tableCounts(h)).toMatchObject({ candidates: 0, definitions: 0, runs: 0 })
   })
 
-  it('fails the whole wake with zero writes when the owner route is re-bound mid-wake', async () => {
+  it('skips before model dispatch with zero writes when the owner route is re-bound during selection', async () => {
     const h = await mount({ adapter: new ScriptedAdapter(successTurns()), rebindGeneration: 2 })
     process.env.SUPER_RELAY_API_KEY = 'test-key'
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root))
     await runWake(service)
     const health = service.health()
-    expect(health.outcome).toBe('failed')
+    expect(health.outcome).toBe('skipped')
     expect(health.reason).toEqual(expect.stringContaining('owner route changed'))
     expect(tableCounts(h)).toMatchObject({ candidates: 0, definitions: 0, runs: 0 })
-    // The rebind is detected inside agent setup, before any history is read.
+    // The rebind is detected while freezing the route, before any history is read.
     expect(h.goalsApi.inspectOwnerVerifiedWorkflowSource).not.toHaveBeenCalled()
   })
 

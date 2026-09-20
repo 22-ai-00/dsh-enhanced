@@ -163,7 +163,7 @@ try {
     } finally { call.endedAt = Date.now() }
   })
   const gap = cp.recordGap({ idempotencyKey: 'day1-personal-memory-source', capability: task.capability, context: task.context, expectedValue: 100, frequency: 1, estimatedCost: 1, risk: 0.1 })
-  const driver = new AssistantGrowthDriverService(first, { enabled: true, scope, intervalMs: 0, maxDurationMs: 240_000, maxModelCalls: 12, maxToolCalls: 20, maxOutputTokens: 8_192, apiKeyEnv: routeConfig.apiKeyEnv, budgetId: 'source-model-wakes', budgetAmount: 1, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository, maxPlansPerWake: 1, isolatedBuildTimeoutMs: 60_000, offline: true, planTtlMs: 3_600_000 } })
+  const driver = new AssistantGrowthDriverService(first, { enabled: true, provider: 'super-relay', model: 'auto_model/alwaysday1', scope, intervalMs: 0, maxDurationMs: 240_000, maxModelCalls: 12, maxToolCalls: 20, maxOutputTokens: 8_192, apiKeyEnv: routeConfig.apiKeyEnv, budgetId: 'source-model-wakes', budgetAmount: 1, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository, maxPlansPerWake: 1, isolatedBuildTimeoutMs: 60_000, offline: true, planTtlMs: 3_600_000 } })
   await new Promise(resolvePromise => setImmediate(resolvePromise)); mark('wake-start'); await driver.wake(); mark('wake-end')
   const health = driver.health(); proof.wake = health;
   assert.ok(proof.modelCalls.length > 0 && proof.modelCalls.every(call => call.provider === 'super-relay' && call.model === 'auto_model/alwaysday1' && call.tools.length === 8))

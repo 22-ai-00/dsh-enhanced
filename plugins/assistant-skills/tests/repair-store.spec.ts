@@ -12,7 +12,8 @@ const scope = { principalId: 'owner-a', principalRecordId: 'record-a', principal
 const otherScope = { ...scope, principalId: 'owner-b', principalRecordId: 'record-b' }
 function input(overrides: Partial<SkillRepairAuthorizationInput> = {}): SkillRepairAuthorizationInput {
   return { invocationId: 'repair-invocation', ownerRouteId: 'owner-route', source: { goalId: 'goal', sessionId: 'session', nativeGoalId: 'native-goal', definitionDigest: 'a'.repeat(64) },
-    profileId: 'profile', profileDigest: 'b'.repeat(64), skillName: 'read-report', parentVersion: 1, parentDigest: 'c'.repeat(64), maxIterations: 2, expiresAt: Date.now() + 60_000, ...overrides }
+    profileId: 'profile', profileDigest: 'b'.repeat(64), skillName: 'read-report', parentVersion: 1, parentDigest: 'c'.repeat(64), maxIterations: 2, expiresAt: Date.now() + 60_000,
+    modelSelection: { provider: 'owner-provider', model: 'owner-model' }, ...overrides }
 }
 async function database() { const root = await mkdtemp(join(tmpdir(), 'assistant-skills-repair-')); roots.push(root); return join(root, 'skills.sqlite') }
 function toWatching(store: SkillStore, value: ReturnType<SkillStore['createRepairContinuation']>) {
@@ -51,6 +52,7 @@ describe('SkillStore repair continuations', () => {
     first.close(); second.close()
     const reopened = new SkillStore(path)
     expect(reopened.getRepairContinuation(scope, created.id)).toEqual(advanced)
+    expect(reopened.getRepairContinuation(scope, created.id)?.authorization.modelSelection).toEqual({ provider: 'owner-provider', model: 'owner-model' })
     reopened.close()
   })
 
@@ -93,6 +95,8 @@ describe('SkillStore repair continuations', () => {
     const store = new SkillStore(':memory:')
     expect(() => store.createRepairContinuation(scope, input({ maxIterations: 5 }), {})).toThrow(/invalid/u)
     expect(() => store.createRepairContinuation(scope, input({ parentDigest: 'nope' }), {})).toThrow(/invalid/u)
+    expect(() => store.createRepairContinuation(scope, input({ modelSelection: { provider: 'owner-provider', model: '' } }), {})).toThrow(/invalid/u)
+    expect(() => store.createRepairContinuation(scope, input({ modelSelection: { provider: 'owner-provider', model: 'owner-model', extra: true } as never }), {})).toThrow(/invalid/u)
     expect(() => store.createRepairContinuation(scope, input(), Number.POSITIVE_INFINITY)).toThrow(/invalid/u)
     const created = store.createRepairContinuation(scope, input(), {})
     const accessor = Object.create(null, { value: { enumerable: true, get: () => 'bad' } })

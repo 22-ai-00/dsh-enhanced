@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
-import { type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { GoalScope, HostFailureTriggerEvidence, OwnerAuthorizedRepairInput, OwnerAuthorizedRepairResumeInput } from '@dsh-enhanced/assistant-goals'
 import type { AssistantGoalsService } from '@dsh-enhanced/assistant-goals'
@@ -21,6 +21,7 @@ export interface OwnerRepairAgentInput {
   expiresAt: number
   provider: string
   model: string
+  reasoningEffort?: string
   maxModelCalls: number
   maxToolCalls: number
   maxOutputTokens: number
@@ -43,6 +44,7 @@ const sessionIdFor = (authorizationId: string) => SessionId(`owner-repair-${crea
 function validate(input: OwnerRepairAgentInput): void {
   if (!validText(input.id) || !validText(input.authorizationDigest) || !validText(input.ownerRouteId)
     || !validText(input.objective, 16_384) || !validText(input.provider) || !validText(input.model)
+    || input.reasoningEffort !== undefined && !validText(input.reasoningEffort, 256)
     || !validCount(input.maxGoalRounds) || !validCount(input.maxModelCalls) || !validCount(input.maxToolCalls, 0)
     || !validCount(input.maxOutputTokens) || !validCount(input.maxDurationMs) || !Number.isSafeInteger(input.expiresAt)
     || input.expiresAt <= Date.now() || typeof input.assertCurrent !== 'function'
@@ -149,7 +151,7 @@ export class OwnerRepairAgentRuntime {
       const policy = this.ctx.get('assistantPolicy' as never, false) as Policy | undefined
       if (agents === undefined || goals === undefined || policy === undefined) throw new Error('assistant-skills: repair Agent dependencies unavailable')
       const options = {
-        agentOptions: { provider: input.provider, model: input.model, maxTokens: input.maxOutputTokens }, signal: combined,
+        agentOptions: { provider: input.provider, model: input.model, ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(input.reasoningEffort) }), maxTokens: input.maxOutputTokens }, signal: combined,
         setup: async (agentCtx: Agent['ctx'], preparedAgent?: Agent) => {
           const agent = preparedAgent ?? agentCtx.agent
           if (agent === undefined) throw new Error('assistant-skills: unpublished repair Agent is unavailable')
@@ -221,7 +223,8 @@ export class OwnerRepairAgentRuntime {
     const policy = this.ctx.get('assistantPolicy' as never, false) as Policy | undefined
     if (policy === undefined) throw new Error('assistant-skills: repair policy changed')
     agentCtx.effect(() => policy.bindInitiator(agent, 'background', input.scope.principalId), 'assistant-skills.owner-repair-initiator')
-    agentCtx.effect(() => installModelSelection(agentCtx, { current: { provider: input.provider, model: input.model }, assembled: undefined }), 'assistant-skills.owner-repair-model')
+    agentCtx.effect(() => installModelSelection(agentCtx, { current: { provider: input.provider, model: input.model,
+      ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(input.reasoningEffort) }) }, assembled: undefined }), 'assistant-skills.owner-repair-model')
     const allowed = new Set(input.allowedTools)
     const schemaDigests = this.#toolSchemaDigests
     const key = String(agent.session.id)
@@ -240,7 +243,9 @@ export class OwnerRepairAgentRuntime {
       // The native loop stamps this immutable Session id on every request.
       if (options.sessionId !== agent.session.id) { yield* next(); return }
       input.assertCurrent(); combined.throwIfAborted(); options.signal?.throwIfAborted(); assertLease()
-      if (options.provider !== input.provider || options.model !== input.model || options.maxTokens === undefined || options.maxTokens > input.maxOutputTokens || acceptanceDigest(options.tools ?? []) !== schemaDigests.get(String(agent.session.id)) || calls++ >= input.maxModelCalls) {
+      if (options.provider !== input.provider || options.model !== input.model
+        || input.reasoningEffort !== undefined && options.reasoningEffort !== input.reasoningEffort
+        || options.maxTokens === undefined || options.maxTokens > input.maxOutputTokens || acceptanceDigest(options.tools ?? []) !== schemaDigests.get(String(agent.session.id)) || calls++ >= input.maxModelCalls) {
         agent.cancel({ kind: 'hook', reason: 'assistant-skills-owner-repair-model-limit' })
         throw new Error('assistant-skills: owner repair model request rejected')
       }

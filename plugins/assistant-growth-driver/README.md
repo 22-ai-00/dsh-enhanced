@@ -4,11 +4,11 @@ Opt-in、默认关闭的「主动成长轮」驱动：没有新消息时周期�
 
 同一插件内还有**第二条、独立开关**的学习轨 `workflowOwnerAnchored`（默认关闭）：它不起模型、不触网，只在本地枚举最近完成的 owner-root goal，把 locator（不含任何 prompt/步骤/验收结论）交给 `assistant-delivery`；由 Delivery 自己再调 goals 的 `inspectOwnerVerifiedWorkflowSource` 独立复核（owner-root、whole-goal succeeded 且 quiescent、cwd/preset 精确匹配），只接受可诚实归约为**单步零工具 agent-turn** 的 goal，通过后经 content-free trace v2 沉淀为 workflow growth candidate，并由 Growth 以 **paused** automation 落库待 owner 批准。自由 objective 无法跨任务聚齐重复门，故该轨**单条即沉淀**：每个独立复核通过的成功 goal 产一条独立 paused 候选。候选带冻结的**占位 cron**（`0 0 29 2 *` UTC，2 月 29 日永不触发）；automations 在 store 层 fail-closed——Growth 所属且仍带占位 schedule 的 workflow 无法经 owner 批准 `resume` 或系统 reconcile 转 active，必须先由 owner 显式做一次 schedule mutation（换真 cron）。该轨同样零 approve/activate/install。
 
-模型路由在代码中钉死为 `super-relay` / `auto_model/alwaysday1`，不能通过配置改写；凭据缺失、super-relay 契约过期或 owner route 漂移时，本轮 fail-closed 跳过（写入 `health()` 原因），绝不换路由、不降级到其他模型、不自启用。owner-anchored 轨本身不产生模型请求，但它与 skill 轨共用同一枚有界 authority 与同一组 preflight。
+模型默认继承 owner 会话：任务触发时 Host 调用 `wake({ sourceAgent })`，从匹配 owner binding 的 Session 最新 `request/header` 读取实际 provider/model/reasoning effort；周期唤醒读取 Delivery 持久会话选择，未选模型时使用该外部会话的 Delivery 默认模型。原生 Web 会话需传入来源 Agent；没有来源时跳过，不猜测 Web 的模型。可同时配置 `provider` / `model` 固定覆盖。每轮复制并冻结选路，用户后续切换只影响下一轮；`health().run.model` 记录本轮使用的模型。Growth wake 本身尚无持久续跑；这里只保证单轮不换供应。模型不可用或 owner route 漂移时跳过或失败，不自动更换供应。
 
 ## 安装
 
-先装好 `assistant-delivery`、`assistant-goals`、`assistant-skills`、`assistant-policy` 与 `assistant-super-relay-budget`，再安装本包：
+先装好 `assistant-delivery`、`assistant-goals`、`assistant-skills`、`assistant-policy` 和所用模型 adapter，再安装本包。只有选用 super-relay 时才需要安装并启用 `assistant-super-relay-budget`：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/assistant-growth-driver
@@ -21,7 +21,7 @@ dsh --profile web --dump-config
 
 每次唤醒（`intervalMs > 0` 的 unref timer，或显式调用 `wake()`）：
 
-1. **Preflight（不触网、不起 Agent）**：用配置中冻结的 owner scope 经 `assistantDelivery.validateOwnerRoute` 重新锚定真实 owner route 并铸造一枚短-lived authority（寿命 `≤ maxDurationMs`，硬顶 300000ms，每次使用都重新校验 route，route 漂移即整轮作废）；校验 super-relay 契约仍 current；解析凭据引用（只验存在，不打印）；确认 policy 服务在线；可选地预留 owner 配置的后台预算。
+1. **Preflight（不触网、不起 Agent）**：用配置中冻结的 owner scope 经 `assistantDelivery.validateOwnerRoute` 重新锚定真实 owner route 并铸造一枚短-lived authority（寿命 `≤ maxDurationMs`，硬顶 300000ms，每次使用都重新校验 route，route 漂移即整轮作废）；读取并冻结所选模型；仅使用 super-relay 时检查其契约和默认凭据引用，其他供应由对应 DSH adapter 管理凭据；确认 policy 服务在线；可选地预留 owner 配置的后台预算。
 2. **有界后台 Agent**：照 `assistant-skills` repair-agent 的冻结范式运行——`llm/stream` 逐请求钉 provider/model/maxTokens/tools digest，`tools.guard` 白名单 + 双预算计数，system-prompt 按身份过滤，`deadline = min(expiresAt, now + maxDurationMs)` 到点 abort。刻意**不挂载任何 preset**：默认工具面恰好是下面四个 `growth_*` realm 工具；显式开启源码提案且 control-plane 服务在线且配置了构建器时增加三个 `plugin_source_*` 工具。任何其它可见工具都会在发请求前被拒绝。
    - `growth_list_owner_goals`：列最近的 owner-root goal（只读投影）。
    - `growth_read_verified_workflow`：读一条已完成 goal 的**脱敏**摘要；Host 独立复核 owner-root（非 subagent、无 parent session、delegationDepth=0）、whole-goal succeeded 且 quiescent，cwd/preset 精确匹配；不返回步骤参数与验收回执。
@@ -44,7 +44,9 @@ dsh --profile web --dump-config
 | `maxModelCalls` / `maxToolCalls` / `maxOutputTokens` | `8` / `24` / `8192` | 单轮预算，到顶即 abort/cancel。 |
 | `maxDurationMs` | `120000` | 单轮墙钟上限，**硬顶 300000ms**（安全根，配置不可越过）。 |
 | `budgetId` / `budgetAmount` | 均无 | 必须**同时出现**；配置后每轮先经 policy `reserve` 预留后台预算，Agent 已提交则保守 finalize、未提交才 release。 |
-| `apiKeyEnv` | `SUPER_RELAY_API_KEY` | **只收凭据引用名**（`[A-Z_][A-Z0-9_]*`）：优先经 credentials 服务解析该引用，回退到同名环境变量。绝不接受明文 key，不打印值。 |
+| `provider` / `model` | 继承会话 | 同时配置以固定修复/成长模型；只配置一个会拒绝。不会自动回退到 Day1。 |
+| `reasoningEffort` | 继承会话；固定模型时用供应默认 | 只有同时配置固定 provider/model 时可覆盖。 |
+| `apiKeyEnv` | 随供应 | 可选凭据引用名；未设置时，super-relay 使用 `SUPER_RELAY_API_KEY`，其他供应由对应 adapter 管理。引用优先经 credentials 解析，再读同名环境变量；不接受或打印明文 key。 |
 | `workflowOwnerAnchored.enabled` | `false` | owner-anchored workflow 轨独立开关；置 `true` 时要求驱动本体 `enabled: true` 且已声明 `scope`，否则启动报错。 |
 | `workflowOwnerAnchored.maxCommitsPerWake` | `5` | 单轮最多尝试提交的候选数（1–50）；goals/delivery 不可用、authority/route 漂移即中断本轮。幂等重放代价很低。 |
 | `pluginSourceProposals.enabled` | `false` | 开启后通过可选 `pluginControlPlane` 服务准备既有插件的 pending 修改提案。缺少该服务或构建器未配置时仍保持四工具基线。 |
@@ -71,7 +73,9 @@ super-relay 自身的 5 个键（`enabled` / `apiKeyEnv` / `timeoutMs` / `maxRes
         intervalMs: 3600000
         minRepeatedSuccesses: 3
         maxDurationMs: 120000
-        apiKeyEnv: SUPER_RELAY_API_KEY
+        # 默认继承会话；需要固定模型时添加以下两项：
+        # provider: super-relay
+        # model: auto_model/alwaysday1
         scope:
           workspace: /abs/path/to/owner/workspace
           preset: primary
@@ -143,7 +147,7 @@ Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。`
 
 ## 权限与数据
 
-- 网络：仅经 pinned super-relay 路由产生到 super-relay 端点的出站模型请求；无其他外联。
+- 网络：经本轮冻结的 DSH 模型 adapter 发出请求，目标及凭据由该供应配置决定；没有模型之外的网络工具。
 - 文件系统：driver 自身不写文件；skill candidate 由 Skills 入库，源码提案经 Control Plane 写入其私有 worktree 和 SQLite。
 - 子进程：源码轨开启时委托 Control Plane 调用 Git 与隔离容器构建；构建权属于 owner 配置的 Control Plane，见其权限说明。driver 无浏览器能力。
 - 凭据：只读解析一次凭据引用（存在性检查），不持久化、不回显、不入日志。
