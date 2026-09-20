@@ -19,7 +19,7 @@ import type { ExternalHoldoutProfile } from '../src/external-holdout.ts'
 import { failureSummaryEvidenceDigest, type HostFailureEvidenceSummary, type VerifiedWorkflowSource } from '../src/definition.ts'
 import * as HoldoutQualification from '../src/holdout-qualification.ts'
 import { AssistantSkillsService, type StageSuccessCandidateInput } from '../src/service.ts'
-import { SkillStore } from '../src/store.ts'
+import { SkillStore, type SkillDelegatedArmBinding } from '../src/store.ts'
 
 const cleanups: (() => Promise<void>)[] = []
 const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
@@ -44,6 +44,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
   const owner = makeAgent(ctx, root, ownerAgentId, ownerSessionId), foreign = makeAgent(ctx, root, 'other-session')
   const ownerSession = String(owner.session.id)
   let live = true, routeLive = true, routeVersion = 1, backgroundAllowed = true, human = true, admitted = true, deniedTool = false, revokeAfterWrite = false, budgetDenied = false, count = 0
+  let writeGate: Promise<void> | undefined, releaseWriteGate: (() => void) | undefined, ignoreWriteAbort = false
   const scope = { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: root, preset: 'primary' }
   const principal = (agent: Agent) => live ? { principalId: agent === owner ? 'owner' : 'foreign', principalLineage: { principalRecordId: agent === owner ? 'owner-record' : 'foreign-record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } } : undefined
   ctx.provide('agents' as never, { get: (id: string) => [owner, foreign].find(agent => agent.id === id), list: () => [owner, foreign] } as never)
@@ -69,7 +70,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
   let automaticSource: typeof source | Error | undefined, automaticDefinitionDigest = 'd'.repeat(64)
   let bridgeRequiresSessionQuery = false, sessionQueryReady = false
   let automaticGate: Promise<void> | undefined, releaseAutomaticGate: (() => void) | undefined
-  ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source,
+  const goalsProvider = { ctx, [Service.tracker]: { associate: 'assistantGoals', property: 'ctx' }, inspectVerifiedWorkflowSource: () => source,
     inspectOwnerVerifiedWorkflowSource: async () => { await automaticGate; if (bridgeRequiresSessionQuery && !sessionQueryReady) throw Object.assign(new Error('session query unavailable'), { code: 'unavailable' }); if (automaticSource instanceof Error) throw automaticSource; if (!automaticSource) throw Object.assign(new Error('not completed'), { code: 'pending' }); return automaticSource },
     inspectActiveWorkflowCaptureContext: (agent: Agent, goalId: string) => { if (!human || agent !== owner) throw new Error('active owner Goal unavailable'); return { scope, goalId, sessionId: ownerSession, nativeGoalId: `native-${goalId}`, definition: { digest: 'd'.repeat(64) } } },
     inspectWorkflowRunContext: (_agent: Agent, goalId: string) => { if (!admitted) throw new Error('round not admitted'); return { scope, goalId, sessionId: ownerSession, goalExecutionRunId: `goal-execution-${goalId}`, nativeGoalId: `native-${goalId}`, definition: { version: 1, digest: 'd'.repeat(64) } } },
@@ -86,7 +87,8 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     // Successor tests install a concrete trusted failure trigger after their
     // seeded continuation reaches watching; keeping this absent holds arming.
     inspectOwnerFailureTrigger: async () => undefined,
-  } as never)
+  } as never
+  const disposeGoals = ctx.provide('assistantGoals' as never, goalsProvider)
   ctx.provide('assistantEvaluation' as never, {
     canonicalHostScope: (input: { workspace: string; preset: string }) => canonicalEvaluationHostScope(input),
     isTrustedTaskLearningProjectionReceipt: (value: any) => {
@@ -117,7 +119,7 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
   await new Promise<void>(resolve => setImmediate(resolve))
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
   ctx.tools.register(defineTool({ name: 'write', description: 'Fixture filesystem writer', parameters: comparison ? { file_path: { type: 'string', required: true }, content: { type: 'string', required: true } } : { file: { type: 'string', required: true }, data: { type: 'string', required: true } },
-    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async args => { count++; await writeFile(join(root, comparison ? args.file_path as string : args.file as string), comparison ? args.content as string : args.data as string); if (revokeAfterWrite) live = false; return 'written' } }))
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async (args, runtime) => { count++; if (writeGate) await (ignoreWriteAbort ? writeGate : Promise.race([writeGate, new Promise<void>((_resolve, reject) => runtime.signal.addEventListener('abort', () => reject(runtime.signal.reason), { once: true }))])); await writeFile(join(root, comparison ? args.file_path as string : args.file as string), comparison ? args.content as string : args.data as string); if (revokeAfterWrite) live = false; return 'written' } }))
   const dispatches: string[] = []; const lineage: { name: string; root: string; nested: boolean }[] = []
   ctx.on('tools/execute', async (exec, next) => { dispatches.push(exec.name); lineage.push({ name: exec.name, root: exec.rootCallId, nested: exec.parent !== undefined }); return next() })
   ctx.on('tools/pre-execute', async (exec, next) => exec.name === 'write' && deniedTool ? { kind: 'deny', reason: 'fixture current permission revoked' } : next())
@@ -160,8 +162,8 @@ async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'own
     canonicalOutcomes.set(input.lookupAssessmentId ?? subjectRef, { triggerOutcomeId: objective?.outcomeId ?? `evaluation-retract-${goalId}-${input.version}`, scope: evaluationScope, scopeKey, scopeWatermark: canonicalWatermark, situation, execution,
       ...(objective === undefined ? {} : { objective }), projection: { ...projectionBase, version: input.version, digest } })
   }
-  return { root, scope, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true },
-    source, candidate, trial, activate, rollback, enableAutomaticSource: () => { automaticSource = { ...source, goal: { ...source.goal, definition: { ...source.goal.definition, digest: automaticDefinitionDigest } } } }, addFailedReadObservation: () => { source.failedObservations.push({ id: 'missing-read', toolName: 'read', arguments: { file: 'missing.txt' }, outcome: 'failed' }) }, requireSessionQuery: () => { bridgeRequiresSessionQuery = true }, provideSessionQuery: () => { sessionQueryReady = true; ctx.provide('sessionQuery' as never, {} as never) }, changeAutomaticDefinition: () => { automaticDefinitionDigest = 'e'.repeat(64) }, holdAutomaticSource: () => { automaticGate = new Promise(resolve => { releaseAutomaticGate = resolve }) }, releaseAutomaticSource: () => { releaseAutomaticGate?.(); automaticGate = undefined; releaseAutomaticGate = undefined }, setAutomaticSourceError: () => { automaticSource = Object.assign(new Error('unknown outcome'), { code: 'unknown' }) }, setVerifiedTrial: (goalId: string, runId: string, args: unknown, extraSteps: unknown[] = []) => { verified = { goalId, runId, steps: [{ toolName: 'skill_trial', arguments: args }, ...extraSteps] } }, setVerifiedTrialSteps: (goalId: string, runId: string, steps: unknown[]) => { verified = { goalId, runId, steps } }, clearVerifiedTrial: () => { verified = undefined }, failVerifiedTrial: () => { verified = new Error('fixture acceptance proof expired') }, setSnapshot: (goalId: string, runId: string, status: 'achieved' | 'not-achieved', options: { expired?: boolean; validForMs?: number; wrongRun?: boolean; wrongNative?: boolean; wrongOwner?: boolean; wrongProfile?: boolean; unknownExecution?: boolean; future?: boolean; tampered?: boolean } = {}) => {
+  return { root, scope, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true }, holdWrite: (ignoreAbort = false) => { ignoreWriteAbort = ignoreAbort; writeGate = new Promise(resolve => { releaseWriteGate = resolve }) }, releaseWrite: () => { releaseWriteGate?.(); writeGate = undefined; releaseWriteGate = undefined; ignoreWriteAbort = false },
+    source, candidate, trial, activate, rollback, unloadGoals: () => disposeGoals(), enableAutomaticSource: () => { automaticSource = { ...source, goal: { ...source.goal, definition: { ...source.goal.definition, digest: automaticDefinitionDigest } } } }, setAutomaticSource: (value: typeof source = source) => { automaticSource = structuredClone(value) }, addFailedReadObservation: () => { source.failedObservations.push({ id: 'missing-read', toolName: 'read', arguments: { file: 'missing.txt' }, outcome: 'failed' }) }, requireSessionQuery: () => { bridgeRequiresSessionQuery = true }, provideSessionQuery: () => { sessionQueryReady = true; ctx.provide('sessionQuery' as never, {} as never) }, changeAutomaticDefinition: () => { automaticDefinitionDigest = 'e'.repeat(64) }, holdAutomaticSource: () => { automaticGate = new Promise(resolve => { releaseAutomaticGate = resolve }) }, releaseAutomaticSource: () => { releaseAutomaticGate?.(); automaticGate = undefined; releaseAutomaticGate = undefined }, setAutomaticSourceError: () => { automaticSource = Object.assign(new Error('unknown outcome'), { code: 'unknown' }) }, setVerifiedTrial: (goalId: string, runId: string, args: unknown, extraSteps: unknown[] = []) => { verified = { goalId, runId, steps: [{ toolName: 'skill_trial', arguments: args }, ...extraSteps] } }, setVerifiedTrialSteps: (goalId: string, runId: string, steps: unknown[]) => { verified = { goalId, runId, steps } }, clearVerifiedTrial: () => { verified = undefined }, failVerifiedTrial: () => { verified = new Error('fixture acceptance proof expired') }, setSnapshot: (goalId: string, runId: string, status: 'achieved' | 'not-achieved', options: { expired?: boolean; validForMs?: number; wrongRun?: boolean; wrongNative?: boolean; wrongOwner?: boolean; wrongProfile?: boolean; unknownExecution?: boolean; future?: boolean; tampered?: boolean } = {}) => {
       const now = Date.now(), goal = { id: goalId, definitionVersion: 1, definitionDigest: 'd'.repeat(64), sessionId: ownerSession, nativeGoalId: options.wrongNative ? 'foreign-native' : `native-${goalId}` }
       const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v3', id: `outcome-${goalId}`, task: { kind: 'goal-outcome', ref: `assessment-${goalId}`, goal: { ...goal, assessmentId: `assessment-${goalId}` } },
         scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: options.wrongOwner ? 'foreign-record' : 'owner-record', principalVersion: 1 }, objective: 'Check reused skill result', profile: { id: options.wrongProfile ? 'foreign-profile' : 'profile', version: 1, digest: 'a'.repeat(64) },
@@ -1874,6 +1876,124 @@ const CORDIS_ORIGINAL = Symbol.for('cordis.original')
 function rawSkills(f: Awaited<ReturnType<typeof fixture>>): AssistantSkillsService {
   return (f.ctx.get('assistantSkills' as never) as unknown as { [CORDIS_ORIGINAL]: AssistantSkillsService })[CORDIS_ORIGINAL]
 }
+function tracedSkills(f: Awaited<ReturnType<typeof fixture>>): AssistantSkillsService {
+  const first = f.ctx.get('assistantSkills' as never) as unknown as AssistantSkillsService
+  const second = f.ctx.get('assistantSkills' as never) as unknown as AssistantSkillsService
+  expect(first).not.toBe(second)
+  return first
+}
+async function delegatedArm(source: Awaited<ReturnType<typeof fixture>>, recipient: Awaited<ReturnType<typeof fixture>>, selection: { skillName?: string; version?: number; candidateId?: string } = {}) {
+  source.setAutomaticSource()
+  const issuer = tracedSkills(source), target = tracedSkills(recipient)
+  const armSelection = { scope: source.scope, ownerRouteId: 'owner-route', skillName: selection.skillName ?? 'saved-write', version: selection.version ?? 1, ...(selection.candidateId === undefined ? {} : { candidateId: selection.candidateId }) }
+  const snapshot = await issuer.inspectOwnerBenchmarkArm(armSelection)
+  const binding: SkillDelegatedArmBinding = { protocol: 'assistant-skills/delegated-arm/v1', planDigest: acceptanceDigest({ source: source.root, recipient: recipient.root }), cellId: `cell-${selection.candidateId ?? 'active'}`, variantId: 'native-tool-runtime',
+    definitionDigest: snapshot.definitionDigest, sourceDigest: snapshot.sourceDigest, recipientScopeDigest: acceptanceDigest(recipient.scope), skillName: snapshot.definition.name, version: snapshot.version, expiresAt: snapshot.expiresAt }
+  const capability = await issuer.mintBenchmarkArm({ selection: armSelection, recipient: target, recipientScope: recipient.scope, recipientOwnerRouteId: 'owner-route', binding })
+  return { issuer, target, armSelection, snapshot, binding, capability }
+}
+
+test('delegates a frozen benchmark arm through the native ToolRuntime without activating it for the recipient', async () => {
+  const source = await fixture(), recipient = await fixture()
+  result(await source.save())
+  const arm = await delegatedArm(source, recipient)
+  await expect(arm.issuer.mintBenchmarkArm({ selection: arm.armSelection, recipient: arm.target, recipientScope: source.scope, recipientOwnerRouteId: 'owner-route', binding: arm.binding })).rejects.toThrow(/route|delegation/)
+  await expect(arm.target.mountBenchmarkArm(JSON.parse(JSON.stringify(arm.capability)), arm.binding)).rejects.toThrow(/unrecognized benchmark capability/)
+  await expect(arm.target.mountBenchmarkArm(arm.capability, { ...arm.binding, cellId: 'replaced-cell' })).rejects.toThrow(/unrecognized benchmark capability/)
+  await expect(arm.issuer.mountBenchmarkArm(arm.capability, arm.binding)).rejects.toThrow(/unrecognized benchmark capability/)
+  const mounted = await arm.target.mountBenchmarkArm(arm.capability, arm.binding)
+  await expect(arm.target.mountBenchmarkArm(arm.capability, arm.binding)).rejects.toThrow(/unrecognized benchmark capability/)
+  const run = result(await recipient.run('delegated-native'))
+  expect(run).toMatchObject({ state: 'succeeded', delegationDigest: mounted.bindingDigest, skillName: 'saved-write', version: 1 })
+  expect(recipient.count()).toBe(1); expect(recipient.dispatches).toContain('write')
+  expect(await readFile(join(recipient.root, 'output.txt'), 'utf8')).toBe('reused')
+  expect(rawSkills(recipient).inspectOwnerActiveSkills(recipient.scope)).toEqual([])
+  expect(result(await recipient.execute('skill_status', { run_id: run.id }))).toMatchObject({ id: run.id, delegationDigest: mounted.bindingDigest })
+  mounted.dispose()
+})
+
+test('binds benchmark delegation to its source, route, recipient and exact pending candidate without activation', async () => {
+  const source = await fixture(), recipient = await fixture()
+  result(await source.save())
+  const candidate = result(await source.candidate(1))
+  const candidateArm = await delegatedArm(source, recipient, { version: 2, candidateId: candidate.id })
+  const mounted = await candidateArm.target.mountBenchmarkArm(candidateArm.capability, candidateArm.binding)
+  const run = result(await recipient.execute('skill_run', { goal_id: 'candidate-goal', name: 'saved-write', version: 2, inputs_json: '{"message":"candidate"}', invocation_id: 'candidate-arm' }))
+  expect(run).toMatchObject({ state: 'succeeded', delegationDigest: mounted.bindingDigest, version: 2 })
+  expect(rawSkills(source).inspectOwnerActiveSkills(source.scope)).toMatchObject([{ name: 'saved-write', version: 1 }])
+  expect(rawSkills(source).inspectOwnerSkillCandidates(source.scope)).toMatchObject([{ id: candidate.id, state: 'pending' }])
+  mounted.dispose()
+  const routeBound = await delegatedArm(source, recipient)
+  source.revokeRoute()
+  await expect(routeBound.target.mountBenchmarkArm(routeBound.capability, routeBound.binding)).rejects.toThrow(/benchmark|route/)
+  const driftSource = await fixture(), driftRecipient = await fixture()
+  result(await driftSource.save())
+  const drift = await delegatedArm(driftSource, driftRecipient)
+  driftSource.setAutomaticSource({ ...driftSource.source, runId: 'drifted-source-run' })
+  await expect(drift.target.mountBenchmarkArm(drift.capability, drift.binding)).rejects.toThrow(/benchmark provenance changed|benchmark source changed/)
+  const retiredSource = await fixture(), retiredRecipient = await fixture()
+  result(await retiredSource.save())
+  const retired = await delegatedArm(retiredSource, retiredRecipient)
+  await retired.target.mountBenchmarkArm(retired.capability, retired.binding)
+  result(await retiredSource.execute('skill_retire', { name: 'saved-write', expected_version: 1 }))
+  expect((await retiredRecipient.run('retired-source')).isError).toBe(true)
+  expect(retiredRecipient.count()).toBe(0)
+})
+
+test('issuer unload aborts a pending delegated native tool run, keeps it unknown, and restart cannot remount it', async () => {
+  const source = await fixture(), recipient = await fixture()
+  result(await source.save())
+  const arm = await delegatedArm(source, recipient), mounted = await arm.target.mountBenchmarkArm(arm.capability, arm.binding)
+  recipient.holdWrite()
+  const pending = recipient.run('delegated-pending')
+  await expect.poll(() => recipient.count()).toBe(1)
+  await source.restart()
+  expect((await pending).isError).toBe(true)
+  const runId = `skill-run-${acceptanceDigest([recipient.scope, String(recipient.owner.session.id), 'delegated-pending'])}`
+  expect(result(await recipient.execute('skill_status', { run_id: runId }))).toMatchObject({ id: runId, state: 'unknown', delegationDigest: mounted.bindingDigest })
+  recipient.releaseWrite()
+  await recipient.restart()
+  expect((await recipient.run('after-restart')).isError).toBe(true)
+  source.setAutomaticSource()
+  const remint = await delegatedArm(source, recipient)
+  await expect(remint.target.mountBenchmarkArm(remint.capability, remint.binding)).rejects.toThrow(/delegated arm unavailable/)
+})
+
+test('recipient provider removal and mount disposal abort pending delegated tools without waiting for a late tool result', async () => {
+  for (const action of ['provider', 'dispose'] as const) {
+    const source = await fixture(), recipient = await fixture()
+    result(await source.save())
+    const arm = await delegatedArm(source, recipient), mounted = await arm.target.mountBenchmarkArm(arm.capability, arm.binding)
+    recipient.holdWrite()
+    try {
+      const pending = recipient.run(`pending-${action}`)
+      await expect.poll(() => recipient.count()).toBe(1)
+      if (action === 'provider') recipient.unloadGoals(); else mounted.dispose()
+      const response = await pending
+      expect(response.isError).toBe(true)
+      const runId = `skill-run-${acceptanceDigest([recipient.scope, String(recipient.owner.session.id), `pending-${action}`])}`
+      expect(rawSkills(recipient).inspect(recipient.owner, runId)).toMatchObject({ id: runId, state: 'unknown', delegationDigest: mounted.bindingDigest })
+    } finally { recipient.releaseWrite() }
+  }
+})
+
+test('a noncooperative delegated tool cannot replace unknown with its late success after mount disposal', async () => {
+  const source = await fixture(), recipient = await fixture()
+  result(await source.save())
+  const arm = await delegatedArm(source, recipient), mounted = await arm.target.mountBenchmarkArm(arm.capability, arm.binding)
+  recipient.holdWrite(true)
+  try {
+    const pending = recipient.run('noncooperative-dispose')
+    await expect.poll(() => recipient.count()).toBe(1)
+    mounted.dispose()
+    const runId = `skill-run-${acceptanceDigest([recipient.scope, String(recipient.owner.session.id), 'noncooperative-dispose'])}`
+    await expect.poll(() => (rawSkills(recipient).inspect(recipient.owner, runId) as { state?: string } | undefined)?.state).toBe('unknown')
+    recipient.releaseWrite()
+    expect((await pending).isError).toBe(true)
+    expect(rawSkills(recipient).inspect(recipient.owner, runId)).toMatchObject({ id: runId, state: 'unknown', delegationDigest: mounted.bindingDigest })
+    expect(recipient.count()).toBe(1)
+  } finally { recipient.releaseWrite() }
+})
 function growthAuthority(f: Awaited<ReturnType<typeof fixture>>, overrides: { expiresAt?: number; assertCurrent?: () => void } = {}) {
   return { id: 'growth-authority', scope: f.scope, ownerRouteId: 'owner-route', expiresAt: Date.now() + 60_000, assertCurrent: () => {}, ...overrides }
 }

@@ -18,6 +18,7 @@ export interface SkillRun {
   state: SkillRunState
   steps: readonly SkillRunStep[]
   candidateId?: string
+  delegationDigest?: string
   goalExecutionRunId?: string
   goalDefinitionDigest?: string
   nativeGoalId?: string
@@ -26,7 +27,20 @@ export interface SkillRun {
 }
 export interface SkillRunClaim {
   invocationId: string; goalId: string; sessionId: string; skillName: string; version: number; inputs: Readonly<Record<string, unknown>>
-  candidateId?: string; goalExecutionRunId?: string; goalDefinitionDigest?: string; nativeGoalId?: string
+  candidateId?: string; delegationDigest?: string; goalExecutionRunId?: string; goalDefinitionDigest?: string; nativeGoalId?: string
+}
+/** A one-shot native benchmark arm. Its definition is never promoted into the skill directory. */
+export interface SkillDelegatedArmBinding {
+  protocol: 'assistant-skills/delegated-arm/v1'
+  planDigest: string
+  cellId: string
+  variantId: string
+  definitionDigest: string
+  sourceDigest: string
+  recipientScopeDigest: string
+  skillName: string
+  version: number
+  expiresAt: number
 }
 export interface StoredSkillDefinition extends SkillDefinition { version: number; parentVersion: number | null; retired: boolean; createdAt: number; updatedAt: number; restoredFromVersion?: number }
 export interface SkillCandidate {
@@ -153,6 +167,14 @@ function deploymentId(scope: unknown, candidateId: string, comparisonId: string,
 function repairContinuationId(scope: unknown, input: SkillRepairAuthorizationInput): string { return `skill-repair-${acceptanceDigest([scope, input.ownerRouteId, input.invocationId])}` }
 function definitionValid(definition: unknown): definition is SkillDefinition { return !!definition && typeof definition === 'object' && (definition as SkillDefinition).protocol === 'assistant-skills/definition/v1' && name((definition as SkillDefinition).name) && json(definition) }
 function digest(value: unknown): value is string { return typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value) }
+function delegatedArmBinding(value: unknown): value is SkillDelegatedArmBinding {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !json(value)) return false
+  const binding = value as SkillDelegatedArmBinding
+  return Object.keys(binding).length === 10 && binding.protocol === 'assistant-skills/delegated-arm/v1'
+    && digest(binding.planDigest) && text(binding.cellId, 256) && text(binding.variantId, 256)
+    && digest(binding.definitionDigest) && digest(binding.sourceDigest) && digest(binding.recipientScopeDigest)
+    && name(binding.skillName) && version(binding.version) && Number.isSafeInteger(binding.expiresAt)
+}
 function canonicalRevision(value: unknown): value is SkillWatchCanonicalRevision {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !json(value)) return false
   const revision = value as SkillWatchCanonicalRevision
@@ -317,6 +339,7 @@ export class SkillStore {
     this.#db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=250;
       CREATE TABLE IF NOT EXISTS skill_definitions(scope_key TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL, retired INTEGER NOT NULL, definition_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(scope_key,name,version)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_runs(id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, identity_json TEXT NOT NULL, run_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('running','succeeded','failed','unknown'))) STRICT;
+      CREATE TABLE IF NOT EXISTS skill_delegated_arms(scope_key TEXT PRIMARY KEY, plan_digest TEXT NOT NULL, cell_id TEXT NOT NULL, binding_digest TEXT NOT NULL, binding_json TEXT NOT NULL, UNIQUE(plan_digest,cell_id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_candidates(scope_key TEXT NOT NULL, id TEXT NOT NULL, candidate_json TEXT NOT NULL, PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_comparisons(scope_key TEXT NOT NULL,id TEXT NOT NULL,profile_id TEXT NOT NULL,identity_json TEXT NOT NULL,comparison_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('running','complete','unknown')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_watches(scope_key TEXT NOT NULL,id TEXT NOT NULL,watch_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('watching','rolled-back','expired','revoked','superseded','exhausted')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
@@ -351,9 +374,25 @@ export class SkillStore {
     this.#db.prepare("UPDATE skill_deployments SET state='blocked', deployment_json=json_set(deployment_json, '$.state', 'blocked', '$.updatedAt', ?) WHERE state IN ('canary','promoted') AND EXISTS (SELECT 1 FROM json_each(skill_deployments.deployment_json, '$.runIds') claimed JOIN skill_runs run ON run.id=claimed.value AND run.scope_key=skill_deployments.scope_key WHERE run.state IN ('unknown','failed'))").run(Date.now())
     this.#db.prepare("UPDATE skill_comparisons SET state='unknown', comparison_json=json_set(comparison_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
     this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS skill_runs_one_active ON skill_runs(scope_key,json_extract(identity_json,'$.sessionId'),json_extract(identity_json,'$.goalId')) WHERE state='running'")
+    this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS skill_runs_one_delegated_arm ON skill_runs(scope_key,json_extract(identity_json,'$.delegationDigest')) WHERE json_extract(identity_json,'$.delegationDigest') IS NOT NULL")
     this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS skill_comparisons_one_active ON skill_comparisons(scope_key) WHERE state='running'")
   }
   close(): void { this.#db.close() }
+  reserveDelegatedArm(scope: object, binding: SkillDelegatedArmBinding): void {
+    const key = scopeKey(scope)
+    if (!delegatedArmBinding(binding) || binding.recipientScopeDigest !== acceptanceDigest(scope) || binding.expiresAt <= Date.now()) fail('assistant-skills: invalid delegated arm')
+    const saved = clone(binding), bindingDigest = acceptanceDigest(saved)
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const existing = this.#delegatedArm(key)
+      const cell = this.#db.prepare('SELECT scope_key FROM skill_delegated_arms WHERE plan_digest=? AND cell_id=?').get(saved.planDigest, saved.cellId) as { scope_key: string } | undefined
+      if (existing || cell || this.#db.prepare('SELECT 1 FROM skill_definitions WHERE scope_key=? LIMIT 1').get(key)
+        || this.#db.prepare('SELECT 1 FROM skill_candidates WHERE scope_key=? LIMIT 1').get(key)
+        || this.#db.prepare('SELECT 1 FROM skill_runs WHERE scope_key=? LIMIT 1').get(key)) fail('assistant-skills: delegated arm unavailable')
+      this.#db.prepare('INSERT INTO skill_delegated_arms VALUES(?,?,?,?,?)').run(key, saved.planDigest, saved.cellId, bindingDigest, JSON.stringify(saved))
+      this.#db.exec('COMMIT')
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
   inspectRepairExecution(scope: object, id: string, iteration: number): RepairExecutionLease | undefined {
     const key = scopeKey(scope)
     if (!text(id, 128) || !version(iteration)) fail('assistant-skills: invalid repair execution reference')
@@ -964,19 +1003,37 @@ export class SkillStore {
       this.#insertDefinition(key, restored); const saved = { ...watch, state: 'rolled-back' as const, rollbackVersion: restored.version, updatedAt: Date.now() }; this.#putWatch(key, saved); return saved
   }
   claim(scope: object, input: SkillRunClaim): { claimed: boolean; run: SkillRun } {
+    return this.#claim(scope, input)
+  }
+  claimDelegated(scope: object, input: SkillRunClaim, bindingDigest: string): { claimed: boolean; run: SkillRun } {
+    if (!digest(bindingDigest)) fail('assistant-skills: invalid delegated claim')
+    return this.#claim(scope, input, bindingDigest)
+  }
+  #claim(scope: object, input: SkillRunClaim, delegationDigest?: string): { claimed: boolean; run: SkillRun } {
     const key = scopeKey(scope); this.#validateClaim(scope, input)
     const id = runId(scope, input.sessionId, input.invocationId)
     const identity = clone({ invocationId: input.invocationId, goalId: input.goalId, sessionId: input.sessionId, skillName: input.skillName, version: input.version, inputs: input.inputs, ...(input.goalExecutionRunId === undefined ? {} : { goalExecutionRunId: input.goalExecutionRunId }),
-      ...(input.goalDefinitionDigest === undefined ? {} : { goalDefinitionDigest: input.goalDefinitionDigest }), ...(input.nativeGoalId === undefined ? {} : { nativeGoalId: input.nativeGoalId }), ...(input.candidateId === undefined ? {} : { candidateId: input.candidateId }) })
+      ...(input.goalDefinitionDigest === undefined ? {} : { goalDefinitionDigest: input.goalDefinitionDigest }), ...(input.nativeGoalId === undefined ? {} : { nativeGoalId: input.nativeGoalId }), ...(input.candidateId === undefined ? {} : { candidateId: input.candidateId }),
+      ...(delegationDigest === undefined ? {} : { delegationDigest }) })
     this.#db.exec('BEGIN IMMEDIATE')
     try {
-      if (input.candidateId !== undefined) this.#validateTrialClaim(key, input)
+      const arm = this.#delegatedArm(key)
+      if (delegationDigest === undefined) {
+        if (arm) fail('assistant-skills: delegated arm requires delegated claim')
+        if (input.candidateId !== undefined) this.#validateTrialClaim(key, input)
+      } else {
+        if (!arm || arm.bindingDigest !== delegationDigest || arm.binding.expiresAt <= Date.now() || input.candidateId !== undefined
+          || arm.binding.skillName !== input.skillName || arm.binding.version !== input.version) fail('assistant-skills: delegated claim unavailable')
+      }
       const existing = this.#db.prepare('SELECT identity_json,run_json FROM skill_runs WHERE id=? AND scope_key=?').get(id, key) as { identity_json: string; run_json: string } | undefined
       if (existing) {
         if (acceptanceDigest(identity) !== acceptanceDigest(JSON.parse(existing.identity_json))) fail('assistant-skills: invocation conflict')
         this.#db.exec('COMMIT'); return { claimed: false, run: clone(JSON.parse(existing.run_json) as SkillRun) }
       }
-      if (input.candidateId === undefined) {
+      if (delegationDigest !== undefined && this.#db.prepare("SELECT 1 FROM skill_runs WHERE scope_key=? AND json_extract(identity_json,'$.delegationDigest')=? LIMIT 1").get(key, delegationDigest)) {
+        fail('assistant-skills: delegated arm invocation already consumed')
+      }
+      if (delegationDigest === undefined && input.candidateId === undefined) {
         const active = this.#latest(key, input.skillName)
         if (!active || active.retired || active.version !== input.version) fail('assistant-skills: inactive skill version')
         const deployment = this.#deploymentForVersion(key, input.skillName, input.version)
@@ -1202,9 +1259,16 @@ export class SkillStore {
     const row = this.#db.prepare('SELECT run_json FROM skill_runs WHERE scope_key=? AND id=?').get(key, id) as { run_json: string } | undefined
     return row === undefined ? undefined : JSON.parse(row.run_json) as SkillRun
   }
+  #delegatedArm(key: string): { bindingDigest: string; binding: SkillDelegatedArmBinding } | undefined {
+    const row = this.#db.prepare('SELECT binding_digest,binding_json FROM skill_delegated_arms WHERE scope_key=?').get(key) as { binding_digest: string; binding_json: string } | undefined
+    if (!row) return undefined
+    const binding = JSON.parse(row.binding_json) as unknown
+    if (!digest(row.binding_digest) || !delegatedArmBinding(binding) || acceptanceDigest(binding) !== row.binding_digest) fail('assistant-skills: delegated arm corrupt')
+    return { bindingDigest: row.binding_digest, binding }
+  }
   #validateClaim(_scope: object, input: SkillRunClaim): void {
     if (!input || !text(input.invocationId, 256) || !text(input.goalId, 256) || !text(input.sessionId, 512) || !name(input.skillName) || !version(input.version) || !input.inputs || typeof input.inputs !== 'object' || Array.isArray(input.inputs) || !json(input.inputs)
-      || input.goalExecutionRunId !== undefined && !text(input.goalExecutionRunId, 256) || input.goalDefinitionDigest !== undefined && !/^[a-f0-9]{64}$/u.test(input.goalDefinitionDigest) || input.nativeGoalId !== undefined && !text(input.nativeGoalId, 256) || input.candidateId !== undefined && !text(input.candidateId, 128)
+      || input.goalExecutionRunId !== undefined && !text(input.goalExecutionRunId, 256) || input.goalDefinitionDigest !== undefined && !/^[a-f0-9]{64}$/u.test(input.goalDefinitionDigest) || input.nativeGoalId !== undefined && !text(input.nativeGoalId, 256) || input.candidateId !== undefined && !text(input.candidateId, 128) || input.delegationDigest !== undefined
       || input.candidateId !== undefined && input.goalExecutionRunId === undefined) fail('assistant-skills: invalid invocation')
     if (input.candidateId !== undefined) return
   }

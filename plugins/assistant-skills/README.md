@@ -37,6 +37,12 @@ Distinct successful invocations of the same skill retain their own bound inputs 
 
 Successful, schema-valid `todo_write` planning updates and parameterless `skill_status` catalog reads remain in source provenance and are omitted from reusable action steps. They cannot be parameter binding targets. Failed source probes remain provenance only; they do not grant an absent-file exception.
 
+## Host benchmark delegation
+
+For a fresh native evaluation cell, `inspectOwnerBenchmarkArm` rechecks the original owner Goal provenance, `mintBenchmarkArm` binds an opaque capability to one recipient and frozen cell, and `mountBenchmarkArm` makes that exact arm available to the recipient's `skill_run`/`skill_status`. Definitions remain in memory; durable cell reservations and the existing skill invocation journal prevent restart replay. Source/recipient authorization, five-minute maximum grant lifetime, native Goal admission, per-step provenance rechecks, cancellation, and tool permissions remain required. This grants no candidate activation or publication authority. Abort suppresses late results but does not prove external work stopped.
+
+The Host must reserve the cell in the outer Evaluation ledger before minting, retain source services, close the mount with the recipient runtime, and bind actual skill runs to independent verdicts and measured usage. The API alone is not evidence of model-backed improvement. See the repository guide `docs/native-skill-reuse.md` for the binding contract and remaining integration work.
+
 ## Owner-preauthorized capture
 
 During the current authenticated owner turn that creates an active Goal, `skill_capture(owner_route_id, goal_id, name, description, parent_version, expires_at, start_native_rounds?)` can register one finite capture for that exact owner Session and native Goal. `owner_route_id` is an explicitly configured public owner-route identifier. It records the owner-route receipt, immutable Goal definition digest, native Goal identity, and current parent version/digest. The explicit expiry is at most seven days. With the optional `start_native_rounds: true`, a successful registration ends the owner turn and hands the Goal to the Host native driver for execution and later extraction. On registration failure, or when omitted or `false`, the turn stays open so the owner can compose other authorized schedule or wait work. The capture does not create an AgentLoop or execute Goal work. Registration grants no replay, comparison, trial, activation, or broader tool authority.

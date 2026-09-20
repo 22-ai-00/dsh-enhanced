@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDefinition, failureSummaryEvidenceDigest, type HostFailureEvidenceSummary, type VerifiedWorkflowSource } from '../src/definition.ts'
 import { captureFailureCandidateProvenance } from '../src/capture-expansion.ts'
 import { SkillStore } from '../src/store.ts'
-import type { SkillCandidate, SkillDeploymentAdmission } from '../src/store.ts'
+import type { SkillCandidate, SkillDelegatedArmBinding, SkillDeploymentAdmission } from '../src/store.ts'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 
 const roots: string[] = []
@@ -34,6 +34,10 @@ function failureCandidate(parent: ReturnType<SkillStore['save']>) {
   return { definition, provenance: captureFailureCandidateProvenance(summary, repair, scope, parent, definition) }
 }
 async function database() { const root = await mkdtemp(join(tmpdir(), 'assistant-skills-')); roots.push(root); return join(root, 'skills.sqlite') }
+function delegatedArm(target = scope): SkillDelegatedArmBinding {
+  return { protocol: 'assistant-skills/delegated-arm/v1', planDigest: '1'.repeat(64), cellId: 'benchmark-cell', variantId: 'candidate-a', definitionDigest: '2'.repeat(64), sourceDigest: '3'.repeat(64),
+    recipientScopeDigest: acceptanceDigest(target), skillName: 'delegated-read', version: 7, expiresAt: Date.now() + 60_000 }
+}
 function qualifiedDeployment(store: SkillStore, canaryRuns = 1) {
   store.save(scope, definition())
   const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Improve.', trigger: 'owner', expiresAt: Date.now() + 60_000 })
@@ -406,6 +410,69 @@ describe('SkillStore', () => {
     expect(reopened.finish(scope, later.run.id, 'succeeded', [{ id: 'read', state: 'succeeded' }])).toMatchObject({ state: 'succeeded' })
     expect(() => reopened.finish(scope, later.run.id, 'failed', [])).toThrow(/run state conflict/)
     expect(reopened.getRun(otherScope, later.run.id)).toBeUndefined(); reopened.close()
+  })
+
+  it('reserves a native delegated arm durably and admits only its exact one-shot run', async () => {
+    const path = await database(), binding = delegatedArm(), bindingDigest = acceptanceDigest(binding)
+    const first = new SkillStore(path)
+    expect(() => first.reserveDelegatedArm(otherScope, binding)).toThrow(/invalid delegated arm/)
+    expect(() => first.reserveDelegatedArm(scope, { ...binding, expiresAt: Date.now() - 1 })).toThrow(/invalid delegated arm/)
+    first.reserveDelegatedArm(scope, binding)
+    expect(first.list(scope)).toEqual([]); expect(first.listCandidates(scope)).toEqual([])
+    const raw = new DatabaseSync(path, { readOnly: true })
+    try { expect(raw.prepare('SELECT count(*) AS count FROM skill_definitions').get()).toEqual({ count: 0 }) } finally { raw.close() }
+    const input = { invocationId: 'delegated-invocation', goalId: 'delegated-goal', sessionId: 'delegated-session', skillName: binding.skillName, version: binding.version, inputs: {} }
+    expect(() => first.claim(scope, input)).toThrow(/requires delegated claim/)
+    const candidate = first.stageCandidate(scope, definition(), { expectedVersion: 0, reason: 'Trial.', trigger: 'test', expiresAt: Date.now() + 60_000 })
+    expect(() => first.claim(scope, { ...input, candidateId: candidate.id, goalExecutionRunId: 'trial' })).toThrow(/requires delegated claim/)
+    expect(() => first.claimDelegated(otherScope, input, bindingDigest)).toThrow(/unavailable/)
+    expect(() => first.claimDelegated(scope, input, '0'.repeat(64))).toThrow(/unavailable/)
+    expect(() => first.claimDelegated(scope, { ...input, skillName: 'other-skill' }, bindingDigest)).toThrow(/unavailable/)
+    expect(() => first.claimDelegated(scope, { ...input, version: binding.version + 1 }, bindingDigest)).toThrow(/unavailable/)
+    expect(() => first.claimDelegated(scope, { ...input, candidateId: candidate.id, goalExecutionRunId: 'trial' }, bindingDigest)).toThrow(/unavailable/)
+    const claimed = first.claimDelegated(scope, input, bindingDigest)
+    expect(claimed).toMatchObject({ claimed: true, run: { delegationDigest: bindingDigest, skillName: binding.skillName, version: binding.version } })
+    expect(first.claimDelegated(scope, input, bindingDigest)).toMatchObject({ claimed: false, run: { id: claimed.run.id, delegationDigest: bindingDigest } })
+    first.finish(scope, claimed.run.id, 'unknown', [])
+    expect(() => first.claimDelegated(scope, { ...input, invocationId: 'replacement-invocation' }, bindingDigest)).toThrow(/already consumed/)
+    first.close()
+    const reopened = new SkillStore(path)
+    expect(() => reopened.reserveDelegatedArm(scope, binding)).toThrow(/delegated arm unavailable/)
+    expect(reopened.claimDelegated(scope, input, bindingDigest)).toMatchObject({ claimed: false, run: { id: claimed.run.id, state: 'unknown' } })
+    reopened.close()
+    const second = new SkillStore(':memory:')
+    second.reserveDelegatedArm(otherScope, delegatedArm(otherScope))
+    expect(() => second.reserveDelegatedArm(scope, binding)).toThrow(/delegated arm unavailable/)
+    second.close()
+  })
+
+  it('expires a reserved delegated arm before claim', () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+    try {
+      const store = new SkillStore(':memory:'), binding = { ...delegatedArm(), expiresAt: Date.now() + 1 }, input = { invocationId: 'expired-delegated', goalId: 'goal', sessionId: 'session', skillName: binding.skillName, version: binding.version, inputs: {} }
+      store.reserveDelegatedArm(scope, binding); vi.advanceTimersByTime(2)
+      expect(() => store.claimDelegated(scope, input, acceptanceDigest(binding))).toThrow(/delegated claim unavailable/)
+      store.close()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('consumes each delegated arm after its first succeeded or failed invocation', () => {
+    const store = new SkillStore(':memory:')
+    const failedBinding = { ...delegatedArm(otherScope), planDigest: '4'.repeat(64), cellId: 'failed-cell' }, failedDigest = acceptanceDigest(failedBinding)
+    const failedInput = { invocationId: 'failed-first', goalId: 'failed-goal', sessionId: 'failed-session', skillName: failedBinding.skillName, version: failedBinding.version, inputs: {} }
+    store.reserveDelegatedArm(otherScope, failedBinding)
+    const failed = store.claimDelegated(otherScope, failedInput, failedDigest); store.finish(otherScope, failed.run.id, 'failed', [])
+    expect(() => store.claimDelegated(otherScope, { ...failedInput, invocationId: 'failed-replay' }, failedDigest)).toThrow(/already consumed/)
+    const succeededScope = { ...scope, principalId: 'owner-c', principalRecordId: 'record-c' }
+    const succeededBinding = { ...delegatedArm(succeededScope), planDigest: '5'.repeat(64), cellId: 'succeeded-cell' }, succeededDigest = acceptanceDigest(succeededBinding)
+    const succeededInput = { invocationId: 'succeeded-first', goalId: 'succeeded-goal', sessionId: 'succeeded-session', skillName: succeededBinding.skillName, version: succeededBinding.version, inputs: {} }
+    store.reserveDelegatedArm(succeededScope, succeededBinding)
+    const succeeded = store.claimDelegated(succeededScope, succeededInput, succeededDigest); store.finish(succeededScope, succeeded.run.id, 'succeeded', [])
+    expect(store.claimDelegated(succeededScope, succeededInput, succeededDigest)).toMatchObject({ claimed: false, run: { id: succeeded.run.id, state: 'succeeded' } })
+    expect(() => store.claimDelegated(succeededScope, { ...succeededInput, invocationId: 'succeeded-replay' }, succeededDigest)).toThrow(/already consumed/)
+    expect(() => store.claimDelegated(succeededScope, { ...succeededInput, goalId: 'other-goal', invocationId: 'other-goal-id' }, succeededDigest)).toThrow(/already consumed/)
+    expect(() => store.claimDelegated(succeededScope, { ...succeededInput, sessionId: 'other-session', invocationId: 'other-session-id' }, succeededDigest)).toThrow(/already consumed/)
+    store.close()
   })
 
   it('fences replacement invocation IDs for running or unknown work in the same skill Goal, including candidate trials', () => {
