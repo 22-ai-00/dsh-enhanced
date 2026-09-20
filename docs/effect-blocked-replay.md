@@ -219,6 +219,12 @@ No global `externalEffects = 0` claim is derived from these observations.
 The next integration must deploy immutable cases and durable admission outside
 candidate write authority, independently bind systemd/Loader identity and
 collect fresh external observations, then sign the existing exact Host request.
+There is also an authorization timing gap: the current endpoint freezes its
+operation/request digest in startup Config, while a real schema-2 replay request
+can only be prepared after readiness is applied. The standalone endpoint fixture
+uses a preselected digest; it does not establish that full chain. A late owner
+signature must bind the prepared request without changing the signed deployment
+files or restarting the Host; no such grant path is implemented yet.
 The successful attestation contract requires `externalEffects = 0`; native
 denials alone cannot establish it. The endpoint therefore issues no signed
 receipt and does not advance activation. External observer and endpoint samplers
