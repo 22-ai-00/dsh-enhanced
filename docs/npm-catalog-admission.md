@@ -51,7 +51,7 @@ After release completion, the existing `activation-plan` and `activate` commands
 
 The adapter integration tests join a real loopback TLS npm download, signed verification, catalog admission, independent receipt checking and replay. CLI tests verify exact-address staging and refusal of same-digest address substitution before executor invocation. Existing catalog crash/CAS tests remain the authority for the underlying journal mechanism.
 
-The [engineering validation record](evidence/npm-catalog-admission-engineering-2026-09-19.json) records the completed Linux repository gate, focused checks, package contents, independent review and preceding commit's cross-platform CI.
+The engineering validation record records the completed Linux repository gate, focused checks, package contents, independent review and preceding commit's cross-platform CI.
 
 After building Control Plane, the following probe reads a historical published package from real npm and admits it into a disposable local catalog:
 
@@ -61,4 +61,4 @@ DSH_NPM_CATALOG_LIVE=1 node scripts/e2e/npm-catalog-admission-readback.mjs --out
 
 The probe retains public keys, requests, receipts, the observed catalog and runtime digests, then removes its private keys and temporary state. Its authorization, artifact statement and build auxiliaries are fixtures; it does not prove a real approved source build or publish. No production catalog, Host activation, monitoring or rollback is exercised. WP16 and WP18 still require their complete authorized external workflows.
 
-The [2026-09-19 readback](evidence/npm-catalog-admission-readback-2026-09-19.json) passed against the historical `@dsh-enhanced/plugin-control-plane@0.1.32` artifact (195,256 bytes). The npm receipt and catalog receipt were both checked by the production Ed25519 authorities, and the catalog's independently reread digest matched the authorized after-state. Replaying the same operation returned the same receipt. This is a real registry read followed by a disposable local catalog admission, with the fixture limits above.
+The 2026-09-19 readback passed against the historical `@dsh-enhanced/plugin-control-plane@0.1.32` artifact (195,256 bytes). The npm receipt and catalog receipt were both checked by the production Ed25519 authorities, and the catalog's independently reread digest matched the authorized after-state. Replaying the same operation returned the same receipt. This is a real registry read followed by a disposable local catalog admission, with the fixture limits above.

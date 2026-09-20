@@ -124,7 +124,7 @@ receipt timing and uniqueness, then confirms that another restart preserves
 the result without new model or tool dispatches.
 Artifacts use `.cache/repo-autonomy-external-events-e2e/`.
 
-The [2026-09-13 run](../../docs/evidence/external-event-resume-2026-09-13.json)
+The 2026-09-13 run
 passed with DSH `0.1.5-rc.1` and TraeX `gpt-5.6-terra`: two successful event
 wakes, three native goal rounds, independent achieved verification and a
 native reply visible after restart. That run exercised the native reply path;
@@ -328,13 +328,11 @@ separate from `pnpm check`. It covers only the selected bounded repair flow;
 mid-repair recovery, broader recursive improvement, long-running autonomy and
 the remaining RSI roadmap require separate evidence.
 
-This is an implementation description, not a current PASS report. The expected
-two-round evidence is scheduled at
-[`docs/evidence/basic-rsi-two-round-2026-09-12.json`](../../docs/evidence/basic-rsi-two-round-2026-09-12.json);
-the coordinator records its actual E2E, root-check and independent-review result
-there only after all three have settled.
-
-2026-09-12 首版实际证据采用同一真实运行与独立重启回读的组合验收：两轮修复/晋升已通过，原命令仅最终会话导航断言失败；修正为侧栏实际选择原会话、`aria-selected` 及新 `session/follow` 后，保留环境的独立 Host/Chromium 补验通过，无新增模型调用。原命令的退出 1 及补验退出 0 均保留，未声称修正后的全模型命令重新通过。详见[基本 RSI 两轮记录](../../docs/evidence/basic-rsi-two-round-2026-09-12.json)。
+This is an implementation description, not a current PASS report. Store each
+run's raw E2E output, root-check log and independent-review data locally or as
+CI artifacts. The repository keeps concise outcomes and limits in
+[RSI current status](../../docs/rsi-status.md); historical navigation failures
+and later successful runs must not be presented as one unqualified command pass.
 
 DSH 兼容性：`repo-autonomy-real.spec.mjs` 默认使用独立安装的 `0.1.5-rc.1`，可设置 `DSH_E2E_HOST_VERSION=0.1.2-rc.1` 或同一 0.1 次版本的精确 RC 来验证另一 Host。`node scripts/e2e/session-persistence-compat.mjs /absolute/path/to/dsh` 使用指定新版 CLI 的模块闭包，在临时目录中执行 format 3 审批事件的跨进程写盘、未注册拒绝与冷读恢复；不修改全局 DSH 或日常 profile。
 
@@ -366,4 +364,4 @@ Build the workspace first (`pnpm build`). The script uses the existing `super-re
 
 One wake permits at most 12 model calls, 20 tool calls, 4,096 output tokens per request, and 240 seconds. It provides a broken synthetic clamp plugin in a temporary Git repository, a fixture owner route and empty history, and a one-wake Policy budget. The actual Growth Driver's seven-tool surface lets the real model inspect the committed source and propose one patch; the production Control Plane runs offline Docker checks and persists a pending plan. Assertions compare read/plan base commits, model patch, successful check/pack evidence, SQLite pending state, and unchanged original source. The temporary Context and repository are disposed on exit.
 
-This proves a real-model source-proposal path on one synthetic task. Owner authentication/history and the tool-approval channel are fixtures; it does not prove general repository repair, owner approval, registry publication, production activation, or sustained RSI benefit. Successful local evidence: [2026-09-19 day1 run](../../docs/evidence/day1-source-proposal-2026-09-19.json).
+This proves a real-model source-proposal path on one synthetic task. Owner authentication/history and the tool-approval channel are fixtures; it does not prove general repository repair, owner approval, registry publication, production activation, or sustained RSI benefit. Successful local evidence: 2026-09-19 day1 run.

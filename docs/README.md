@@ -14,21 +14,21 @@
 - [安装脚本](../scripts/install/README.md)：本地/远程安装、场景选择、升级、重启和凭据边界。
 - [ACP Windows 兼容性复查](acp-windows-compatibility.md)：原生 Windows 支持现状和限制。
 
-## Provider 调研
+## Provider 参考与历史研究
 
 - [Coding subscription provider 详细参考](coding-subscription-provider-reference.md)：完整配置、认证门禁、传输协议、错误码与已知限制。
 - [CLIProxyAPI 第一手证据复核](cliproxyapi-provider-evidence-review.md)：两个 provider 的上游证据与可采用边界。
-- [CLIProxyAPI Provider 优化调研](cliproxyapi-provider-optimization-research.md)：更完整的历史方案与实现建议。
-- [Grok Bot Codex 路由调研](grok-bot-codex-router-research.md)：Codex 路由模式的历史研究。
+- [CLIProxyAPI Provider 优化调研](cliproxyapi-provider-optimization-research.md)：2026-08-18 历史研究快照；不作为当前实现进度。
 
-## 个人助理设计
+## RSI 状态与设计
 
-- [自治智能体落地与验收账本](agent-autonomy-implementation.md)：完整路线的实现工作包、依赖、当前进度与逐项验收证据。
-- [高智能自治智能体现状与路线](agent-intelligence-autonomy-roadmap-2026-09-06.md)：2026-09-06 源码审计、智能与主动性缺口、高权限隔离设计和分阶段验收。
-- [自主成长专项证据](agent-growth-gap-evidence-2026-09-06.md)：学习真源、工作流实验、晋升与推广后质量反馈的具体实现边界。
-- [插件生态研究与建设清单](dsh-personal-assistant-plugin-landscape.md)：社区方案、能力拆分和风险对照。
-- [全自研插件路线图](dsh-personal-assistant-self-built-plugin-roadmap.md)：个人助理的总体边界、阶段和未实现项。
-- [持续成长的个人助理](continuous-personal-assistant-growth.md)：自评测、偏好学习、改进循环、自治等级和长期验收目标。
+- [RSI 当前状态](rsi-status.md)：唯一进展入口，保留 18 项验收条件、当前边界与剩余工作。
+- [自迭代研究与开发原则](research-dsh-plugin-self-iteration-2026-09-19.md)：模型供应、DSH 原生组合、独立验收与新任务复用。
+- [持续成长设计](continuous-personal-assistant-growth.md)：反馈、偏好、评测指标和长期成功条件。
+- [插件生态研究](dsh-personal-assistant-plugin-landscape.md)：历史方案与设计参考，当前包列表见[插件目录](../plugins/README.md)。
+- [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[阻断回放](effect-blocked-replay.md)：当前发布/启用组件契约与验证限制。
+
+原始运行 JSON 和日志留本地或 CI artifacts；当前文档只记录可复现命令、验证结论及限制。过期交接快照和实施流水从 Git 历史查询。
 
 ## 飞书历史研究
 

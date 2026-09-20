@@ -62,7 +62,7 @@ must retain their durable operation identities and reconcile unknown external
 outcomes before any new attempt. Process-group cleanup alone does not prove
 DSH readiness, canary quality, production activation or rollback.
 
-## Verification and next Host integration
+## Verification and Host integration
 
 Real subprocess tests cover timeout/overflow with inherited stdout, nonzero
 exit, successful leaders leaving attached or background descendants, escaped
@@ -71,14 +71,13 @@ ownership. Both public runner paths are exercised; the existing Host
 descriptor tests retain independent pathname-swap coverage.
 
 Baseline observations, source digests, full-check results and review scope are
-recorded in the [engineering evidence](evidence/adapter-process-lifetime-engineering-2026-09-19.json).
+recorded in the engineering evidence.
 
-The next production Host attestor can reuse the existing Control Plane
-`probe` → signed receipt → CAS seam. The supervised installer provides useful
-DSH startup and systemd InvocationID observations, but is not itself this
-attestor. A runtime implementation must bind the exact unit/profile/plan/fence,
-hold its key outside candidate authority, persist each operation before a
-restart, observe a fresh Host identity, and establish readiness from the
-actual managed Host. The remaining replay/shadow/canary/soak/health gates need
-their own measured evidence. Recovery bootstrap and Health counters cannot
-stand in for all seven activation phases.
+The [systemd Host attestor](systemd-host-attestor.md) now uses the existing
+`probe` → signed receipt → CAS seam for reload, readiness and physical rollback.
+It persists operations before supervisor dispatch and binds the exact unit,
+profile, plan, fence and invocation, with a separately held signing key.
+[Native replay and its finite endpoint](effect-blocked-replay.md) provide
+unsigned observations. Replay signing and the shadow/canary/soak/health gates
+still need independent measured evidence; recovery bootstrap and Health counters
+cannot replace those observations.

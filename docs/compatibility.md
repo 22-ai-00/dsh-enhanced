@@ -8,7 +8,7 @@ DSH `0.1.5` 的 Agent factory 将尚未发布的 Agent 作为 `setup(ctx, agent)
 
 新版 AgentLoop 在 `agent/pre-step` 接受输入后，先执行 `agent/request`，再把输入写入 Session。Goals 因此从 pre-step 保存单次、确切 turn/step 的原生目标来源，在首个请求前建立执行准入和预算；来源必须保持原样，并匹配当前 owner、目标 revision 和下一轮序号。请求结束、取消、卸载或不匹配会清除该证明，不能借此重用旧轮次。旧 Host 已先写盘的路径继续读取原生持久来源；升级验收需覆盖首轮技能执行及其预算，而不仅检查目标能创建。
 
-兼容范围检查不等于全部历史数据与功能已完成新版验证。包含旧 `delivery` 来源的 v0 会话需要[离线迁移](../scripts/maintenance/README.md)，原记录会保留。目前已验证启动、会话创建、Policy 事件冷读及旧 Delivery 会话迁移；新版 Host 的事件等待、重启恢复原目标、独立验收和原会话结果展示也已通过[真实 TraeX 验证](evidence/external-event-resume-2026-09-13.json)，其中 GitHub 传输使用测试夹具。
+兼容范围检查不等于全部历史数据与功能已完成新版验证。包含旧 `delivery` 来源的 v0 会话需要[离线迁移](../scripts/maintenance/README.md)，原记录会保留。目前已验证启动、会话创建、Policy 事件冷读及旧 Delivery 会话迁移；新版 Host 的事件等待、重启恢复原目标、独立验收和原会话结果展示也已通过真实 TraeX 验证，其中 GitHub 传输使用测试夹具。
 
 2026-09-12 发布的 `0.1.31` 曾因缺少新版 persistence 适配而固定 Host 为 `0.1.2-rc.1`；这是旧版安装器的限制。新版兼容探针可通过 `node scripts/e2e/session-persistence-compat.mjs /absolute/path/to/dsh` 运行：三个独立进程分别写盘、验证未注册必需事件拒绝、注册后冷读恢复。它只读取指定 CLI 的模块，数据写入临时目录。非 core 安装仍从实际 CLI 所属 manifest 精确解析 `dsh-app-boot`，调用公开 `healProfilesModuleFallback({ installAnchor, home })` 准备 Host peer 闭包；校验的是可执行文件与包的身份，不要求等于默认安装版本。
 
@@ -49,9 +49,9 @@ Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc
 - Grok 协议：Grok Build `1.0.5`（目录使用 `initialize._meta.modelState`；headless 生成使用 `--verbatim`、显式空工具集过滤，以及原生 `streaming-json` 的 `text.data` / `end` / `error` 事件）
 - Cursor CLI：模型目录入口使用官方 `--list-models`，生成预设固定 `--print --output-format stream-json --mode=ask` 且不传 `--force`；当前环境未安装 Cursor，仓库尚无目标版本的真实脱敏 fixture，因此该生成路径是未验证的实验性兼容，不属于已验证基线，也未宣称支持 headless effort。Ask 模式仍可能做只读搜索，不等于纯模型 API 或 OS 强沙箱；只有严格 DSH 信封会投影为 Harness 工具调用。
 - 飞书官方 Node SDK `@larksuiteoapi/node-sdk@1.73.0`：该版本原生 `WSClient` 只分发 `type=event`，会丢弃飞书长连接送达的 `type=card` callback；插件安装了一个有边界测试的兼容桥，将完整分片交给同一 `EventDispatcher` 并按官方帧格式 ACK。schema 2.0 整卡更新包装为 `{ card: { type: 'raw', data: card } }`。最终回答把顶级 GFM 表格映射为原生 Table；飞书限制单卡最多 5 个表格、单表最多 50 列，超限内容转为 Markdown 列表，格式拒绝时精确回退原始纯文本。Table 的自适应行高要求飞书客户端 `>=7.33`，旧客户端应升级后再验证长单元格展示。`normalizeCardAction()` 提供 `action.option`，provider→model→effort 级联的三个 `select_static` 均使用独立 callback，并在每次回调后原位重绘；不能把这些即时 callback 控件嵌进 CardKit `form` 再用 `form_submit`，也不依赖 raw `action.form_value`。v3 HMAC token 绑定 operation、binding、chat、expiry、动作、revision 与 provider/model/effort；Delivery 以 schema v5 CAS 拒绝旧 revision，并原子提交确认结算、选择与 Outbox 回复。确认 handler 在持久领取 operation 后立即响应，带租约和 fencing token 的 worker 可在重启后恢复实时模型解析，并在提交前重新核对 principal 与 Policy。图片使用独立的 bounded SDK client；总 deadline 覆盖 tenant token cache miss 和资源 GET，底层 token HTTP 也有硬超时。卡片固定使用 `config.update_multi: true`。这些约束和回调返回链路均有边界测试；升级 SDK 或本协议后必须新发 `/model` 做真实飞书卡片冒烟，旧 v1/v2 卡片不可复用。
-- 本次 Delivery、Automations、Evaluation、Evolution、Growth Experiments、Recovery、Heartbeat 以及 supervised `lark-channel` setup 共同依赖新的确定性 Host seam；已发布的 `0.1.7` 内部包不包含完整集合。因此消费当前切片新 API 的 packed peer ranges 明确要求 `>0.1.7`，而不是虚构一个尚未发布的最低版本。唯一保留的旧接口下限是 Automations→Evolution 的 durable outcome recorder，已按 tag 复核为 `>=0.1.3`；可选的新 guidance 会 feature-detect 并保留 legacy no-guidance 行为，不扩大权限。仓库的 `release:prepare` 会在首次发布前统一提升所有包；npm 安装器默认把完整 supervised bundle 集合固定到安装器自身的精确发布版本，再执行 preview→active 激活。
+- 内部 Host API 的最低版本以各包 `peerDependencies` 为准；可选 peer 只控制安装，不等于可选 Cordis injection。npm 安装器通过 anchor 解析一个精确版本，再预检并安装整个所选 bundle cohort，避免不同包分别解析 `latest` 而混装；开发分支的新 API 不能假定已存在于当前 npm 版本。
 
-### WP17 supervised service-aware lifecycle（实现中，2026-09-11）
+### Supervised service-aware lifecycle
 
 当前 WP17 实现 checkout-local 的 Linux `systemd --user`、installer-managed `supervised` profile upgrade 与 uninstall。两条路径都要求 Node.js、`flock`、Perl、固定的 `/usr/bin/python3`、bubblewrap、可用的 user manager，以及与用户 systemd 配置同文件系统的 canonical `DSH_HOME`。source profile 必须已经安装同一发行 cohort 中提供只读 Delivery owner、Recovery、Automations 与 supervised lifecycle/attestation seam 的版本；能力探测在 registry、Store 或 systemd mutation 前失败关闭，停服后的验证只读绑定快照，绝不通过打开 Store 触发迁移。
 
@@ -61,7 +61,7 @@ preview 使用 fresh UUID 和新 package catalog，在 no-network bubblewrap 中
 
 supervised uninstall 只停用目标 profile 的本地受管能力：事务停止并收容经证明归属该 canonical home 的 unit，归档目标 profile 的完整目录树，再用 installer-clean 的同名 Web profile 替换 live target。clean target 不再要求 Lark、Health 或 supervised active attestation，只通过 fresh InvocationID、对应 journal ready marker 和稳定窗口组成的通用 readiness；原 active unit 恢复，原 inactive unit 保持停止。uninstall 不访问 npm registry 或 pnpm store，也不撤销凭据、owner binding、Session、Goal、数据库或其它共享/外置状态。完整 profile-tree 归档不等于整个 home 的逐字节证明，后续重装或共享同一状态库的其它 profile 仍可能解释这些保留状态。
 
-WP17 仍保持 **implementing**，权威总数仍为 **3 已验证 / 13 实现中 / 2 待做**。supervised uninstall 的冻结 installer suite 为 276 passed / 1 conditional skip；持久日志 `/tmp/dsh-wp17-supervised-uninstall-installers-final.log` 的 SHA-256 为 `23b2929a9c0dda35e47a9debf84016ee410374360e19494bc7e197868b61579c`。最终根 `CI=true VITEST_MAX_WORKERS=1 pnpm check` 退出 0：根测试 31 files / 490 passed / 1 conditional skip，递归 package tests、build 与 33 个 dry-run pack 均通过；日志 `/tmp/dsh-wp17-supervised-uninstall-root-check.log` 的 SHA-256 为 `e6b56ed674ee8733463ccf043e044c3ac89d276aa2aa2923461792bd7ec73146`。最终独立 release review 为 0 BLOCK / 0 HIGH。当前测试只证明 checkout-local 的主要成功、失败、guardian 和恢复 fixtures；尚未证明一次完整真实 supervised `DSH_HOME` upgrade/uninstall、真实 `systemd --user` 生命周期、真实 Lark WebSocket/云端凭据、三库 live-WAL 经 lifecycle copy 的集成、真实 DSH/Cordis `--patch --dump-config` overlay precedence、所有可能 crash window 或远程发布资产。同 UID 对手在事务执行中替换 transaction path 不属于当前强安全证明。`v0.1.24` 远程 bootstrap 的 lifecycle helpers 仍是 zero sentinel，因此远程 upgrade/uninstall 在下载或执行前失败关闭。`--no-service`、外部 supervisor、macOS 和 Windows 仍不支持，不能据此声明 WP17 或完整自治目标已完成。
+WP17 的原始安装范围已经验收，详见 [RSI 当前状态](rsi-status.md)。上述 supervised 生命周期的工程测试不等于所有真实部署组合已验收；真实 systemd/Lark、跨库 live-WAL、更多 crash window 和平台覆盖继续作为强化项。远程 bootstrap 使用已发布标签与摘要固定的生命周期 helper，当前默认发布版为 `0.1.32`；旧 `v0.1.24` 缺少 helper，会在执行前拒绝。该 supervised 路径仍不支持 `--no-service`、外部 supervisor、macOS 或 Windows。
 
 DSH 尚处于预发布阶段，插件机制可能发生破坏性变化。`pnpm-workspace.yaml` 的 catalog 和各插件 `peerDependencies` 是实际依赖范围的源；本页记录人工验证过的 DSH 基线。
 
@@ -228,3 +228,10 @@ Provider replacement, Loader/Fiber epoch drift, earlier native denial,
 cancellation, extra calls and teardown failure must remain refusal cases.
 See [component contract](effect-blocked-replay.md); observations alone do not
 authorize activation or establish absence of arbitrary external effects.
+
+Optional `replayEndpoint` uses the pinned native Agent registry factory and
+memoized `AgentHandle.dispose()`. It requires Linux private Unix sockets and
+Node's SQLite runtime, with a separate application-identified replay journal.
+Endpoint replacement invalidates cached runtime observations; it never resets
+durable dispatch admission. No dependency, Control Plane ledger schema or
+signed Host receipt schema changes accompany this endpoint.

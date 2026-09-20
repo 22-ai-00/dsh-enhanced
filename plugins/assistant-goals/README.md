@@ -230,7 +230,7 @@ executionBudget:
 
 ## 兼容性
 
-见 [仓库基线](../../docs/compatibility.md) 和 [完整落地账本](../../docs/agent-autonomy-implementation.md)。测试使用确定性模型和 transport，不代表真实 Web 部署或智能收益已验收。
+见 [仓库基线](../../docs/compatibility.md) 和 [RSI 当前状态](../../docs/rsi-status.md)。测试使用确定性模型和 transport，不代表真实 Web 部署或智能收益已验收。
 
 ## 整体目标验收
 

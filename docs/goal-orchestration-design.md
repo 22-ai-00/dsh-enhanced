@@ -2,7 +2,7 @@
 
 > `fdcee5c` 的跨设备检查点曾将 Delivery 有界续跑保存为 WIP。接手后的边界修复和可选原生回合独立验收、累计预算、一次性持久唤醒均有实现切片；这不等于跨日生产运行或全部业务目标独立验收已经完成。
 
-本设计延续 [完整落地账本](agent-autonomy-implementation.md) 的工作包 05、08、17。当前切片涵盖 owner 目标创建、业务上下文、原生生命周期控制、Delivery 有界续跑、v2 独立执行契约、期限、真实回读和一次性 wake；长期授权 lease、跨日生产运行验证与完整业务目标验收仍须实现，不能因设计存在而记为完成。
+本设计延续 [RSI 当前状态](rsi-status.md) 的工作包 05、08、17。当前切片涵盖 owner 目标创建、业务上下文、原生生命周期控制、Delivery 有界续跑、v2 独立执行契约、期限、真实回读和一次性 wake；长期授权 lease、跨日生产运行验证与完整业务目标验收仍须实现，不能因设计存在而记为完成。
 
 ## 一次性 wake 的持久边界
 
@@ -89,16 +89,10 @@ GoalStore 与 Session 不构成一个原子数据库。协议须采用持久执�
 
 当前立即执行协议先保存私有执行意图和验收绑定，flush 原 Session 后标记 dispatch，再放行首个模型请求；后续模型步骤复用同一 run。终态需要真实 turn/end 和成功 checkpoint，取消/不确定清理保留 unknown。恢复不重放旧 run。执行账本为 Goals 数据库旁的 `.executions` 文件，用户目标历史库迁移到 schema 2，Evaluation schema 11 分别识别 goal-step 与 goal-outcome。配置与权限详见 Goals README。以上机制依赖 Delivery 结束时释放旧 Agent、后续从原 Session 创建新 handle；取消后的旧 handle 继续拒绝迟到动作。
 
-## 原生累计预算切片（2026-09-06）
+## 原生预算与持久唤醒
 
-可选 `executionBudget` 已接到原生回合：业务目标级不可变上限和绝对期限跨定义编辑、pause/resume 与重启保留；模型调用前持久预留，可信完整 usage 后结算，不确定结果保留全额。输入上界与费用声明来自精确 provider/model 的 Host-only meter，缺失声明拒绝；普通前台不计入。该能力需要 `verifyNativeRounds`，默认不启用，不预装生产计量器。
+可选 `executionBudget` 已接入原生回合：不可变上限与绝对期限跨编辑、pause/resume 和重启保留；调用前预留，可信 usage 后结算，未知结果保留预留。精确 provider/model 的 Host meter 提供声明；配置见 [Goals](../plugins/assistant-goals/README.md)。
 
-持久唤醒仍待实现。Automations 的 Host executor/reconcileSystem 可以复用现有 occurrence、task lease 和 owner/definition 校验；但 task lease 只排他同一调度任务，不能阻止同 Session 前台入站。安全接线还需 Delivery 受保护的后台恢复入口、共享持久 Session fence、同 owner record/version 与 Session/GoalId/revision 重查，以及 dispatch 前的 run intent CAS。普通 Automation runner 新建 Session，前台 `currentPreferenceTurn` 又必须证明真实人类入站，二者均不能直接冒充后台原 Session 恢复。未知已 dispatch 仍只对账、不重放。
+`goal_schedule` 与 `backgroundWake` 已通过现有 Automations Host executor 持久调度，Delivery 使用受保护的后台 owner capability 恢复原 Session。准入重查 owner、Session/Goal、definition/revision、预算和 wake 执行意图；重启后由 `reconcileSystem` 对账，unknown 不重放。实现入口见 [Goals service](../plugins/assistant-goals/src/service.ts) 与[工具注册](../plugins/assistant-goals/src/tools.ts)。
 
-Session lease 设计还必须保证同一 Session 不能从另一 binding 取得并行租约；仅按 binding ID 建主键不足以构成该保证。租约到期只代表持有者失去后续提交权限，不能证明已 dispatch 的外部动作停止。持久状态须区分未 dispatch 的可重取意图与需要对账的 dispatched/unknown；旧执行无法证明 quiescent 时，不能仅因超时启动同 Session 的替代执行。
-
-## Session 排他接线（2026-09-06）
-
-Delivery schema 19 已为内置前台、权限/compact 和首次/new construction 接入同一 Session ID 主键 lease。claim 与续约重读绑定及主体，fence 单调；有效持有者导致等待，未知执行禁止接管。released construction 的不可变会话身份防止 binding 提交前窗口被另一主体复用。正常 handle 清理和在途流/工具结束才释放；提前返回先记 unknown，同一原持有者迟到的完整清理可以结算，重启没有这份证明则继续保持 unknown。等待 Session 的 Inbox 不扣业务重试次数，审计 fence 仍递增。
-
-这一层已供当前内置运行时使用；尚未暴露 Goals 后台 owner capability，也尚未把 Automations 的持久 wake 交付到同一 runtime。完整后台恢复继续要求原目标授权、Session/GoalId/revision/definition、预算与 wake run intent 一起核对。不能因为排他基础完成，就将跨日目标闭环记为通过。
+前台和后台共用按 Session ID 排他的持久 lease。过期只撤销旧持有者的提交权限，不能证明已派发工作停止；旧执行未证实回收时不能启动替代执行。完整跨日真实业务目标和长期收益仍按 [WP05 验收条件](rsi-status.md#工作包验收)推进，不以局部机制通过替代。

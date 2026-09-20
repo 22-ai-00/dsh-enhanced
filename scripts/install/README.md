@@ -14,7 +14,7 @@ pnpm approve-builds koffi
 
 macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；若 `ai.deepseek.dsh.profile.<profile>` 未注册，会自动调用当前 profile 的服务注册入口并再次确认，再执行健康检查，无需手动运行 `launchctl bootstrap`。修复复用服务注册入口，不启动新的飞书 onboarding；已有中断的 setup 事务仍由原入口恢复。`--no-service`、`--lark skip` 以及不管理常驻服务的场景保持跳过；独立 `doctor.sh` 仍只检查。注册失败会保留具体错误并停止安装。
 
-当前真实验收范围：`v0.1.31` 已完成 Linux `autonomy` 的远程全新安装；本批候选 v4 完成真实 `.30 → .31` 升级、隔离 Host 启动及事务提交；补齐预检约束后的最终冻结候选 v6 完成 `.31 → .31` 重复升级，尚未用最终源码重跑跨版本升级。两次运行均确认 14 个受管包同版本，选定配置和状态文件、暂停目标及其检查点保持不变。这份升级修复纳入 `0.1.32`；旧 `v0.1.31` 远程 helper 不具备同样能力。升级证据和验证限制见[完整升级记录](../../docs/evidence/lifecycle-npm-prepared-upgrade-2026-09-12.json)。
+当前真实验收范围：`v0.1.31` 已完成 Linux `autonomy` 的远程全新安装；本批候选 v4 完成真实 `.30 → .31` 升级、隔离 Host 启动及事务提交；补齐预检约束后的最终冻结候选 v6 完成 `.31 → .31` 重复升级，尚未用最终源码重跑跨版本升级。两次运行均确认 14 个受管包同版本，选定配置和状态文件、暂停目标及其检查点保持不变。这份升级修复纳入 `0.1.32`；旧 `v0.1.31` 远程 helper 不具备同样能力。升级证据和验证限制见完整升级记录。
 
 `0.1.32` 安装器先确保 Node.js、pnpm 和兼容的 DSH。兼容范围为 `>=0.1.2-rc.1 <0.2.0`，包含后续 `0.1.x` 的 RC；默认新安装版为 `0.1.5-rc.1`。已有兼容 CLI 直接复用，不做全局升级或降级。跨到 `0.2.x` 或无法识别的版本会在修改 profile 前拒绝。`v0.1.31` 的旧远程引导器固定旧 Host；使用本版本引导器可采用上述兼容范围。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
 
@@ -87,7 +87,7 @@ Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 r
 
 `web` 是实验入口：它安装 core、Delivery、Goals 与 Web owner，并在第一次配置组合/activation probe 前运行 profile 内的 `dsh-web-owner-setup`，使用 `web/account=<profile>/tenant=local/user=operator` 的固定本机 owner。bundle add 后、所有 setup CLI 前，安装器会从已验证的精确 DSH 包调用公开的 `healProfilesModuleFallback`，在 `$DSH_HOME/profiles/node_modules` 准备 Host peer 闭包；这一步不组合、挂载或启动 profile。它不接入 Lark、不启动常驻服务，也不提高原生权限默认值。该入口尚不代表完整自治或真实模型验收；仍应按部署的模型、权限和工作区边界单独验证。Web owner 复用有效的 Delivery databasePath（默认是 `$DSH_HOME/assistant-delivery/state.sqlite`），不会替换或复活已有 owner；若另一 profile 的 Lark 也共享该数据库，setup 会拒绝，需使用独立的 `DSH_HOME`。为避免同一 profile 的 owner 语义混杂，已有启用 Lark channel、`--lark configure|keep`，或 `--agent-tools` 非 `preserve` 时会被拒绝。
 
-`autonomy` 是显式选择的实验性离线执行入口，安装 Web 场景以及 Isolation、Actions、Keychain、Evaluation、Verifier、Event Triggers、Proactive 和 Skills。后面三者没有匹配授权时保持静默：不会自动创建任务、续期或发起网络请求。基本 RSI 首版包含有限 repair admission 与同一任务族的两轮改进验收；完整自治规划仍在推进，使用边界见[两轮验收记录](../../docs/evidence/basic-rsi-two-round-2026-09-12.json)。
+`autonomy` 是显式选择的实验性离线执行入口，安装 Web 场景以及 Isolation、Actions、Keychain、Evaluation、Verifier、Event Triggers、Proactive 和 Skills。后面三者没有匹配授权时保持静默：不会自动创建任务、续期或发起网络请求。基本 RSI 首版包含有限 repair admission 与同一任务族的两轮改进验收；完整自治规划仍在推进，使用边界见两轮验收记录。
 
 ```sh
 ./scripts/install/install-local.sh --scenario autonomy --workspace "$PWD" \

@@ -178,8 +178,9 @@ supervisor drift, changing runtime state or query failures remain unconfirmed
 and produce no receipt. They must not be converted into a signed failure.
 
 A failed readiness receipt enters the existing Control Plane rollback path.
-The current CLI restores profile files; it does not prove that the running Host
-has loaded the restored profile. Physical Host rollback remains a separate gap.
+The CLI restores profile files and retains `rollback-pending`. The signed
+[physical rollback](#physical-rollback) phase then independently verifies the
+restored Host or stopped originally absent profile before advancing the ledger.
 
 The signed readiness `probeDigest` covers the reload receipt digest and successor,
 request/config digests, channel key digest, stable runtime identity, sample
@@ -252,27 +253,27 @@ supervisor integration evidence, not a deployed DSH Host or plugin evaluation.
 The same script accepts `DSH_SYSTEMD_FIXTURE_DSH=/absolute/path/to/dsh` to boot
 the actual shipped Web template in a new temporary home/profile. It waits for
 the invocation-bound Web startup marker before and after restart. The
-[real DSH run](evidence/systemd-real-dsh-reload-2026-09-19.json) used
+real DSH run used
 `0.1.5-rc.2` and proved fresh supervisor identity, independently verified signed
 reload receipt, and unchanged instance on replay. It loaded no candidate
 plugin and made no model request. Its startup observations are additional
 test evidence, not a signed readiness phase. The transient service has a
 finite runtime limit and is stopped and removed by the fixture.
 
-The [recorded supervisor run](evidence/systemd-reload-supervisor-fixture-2026-09-19.json)
+The recorded supervisor run
 contains actual before/after/replay identities and runtime digests. Full-check
 and independent review evidence is recorded in the
-[engineering validation](evidence/systemd-host-attestor-engineering-2026-09-19.json).
+engineering validation.
 
 `scripts/e2e/systemd-readiness-real-dsh.mjs` runs an opt-in disposable DSH Web
 profile with actual Control Plane observer and Policy candidate entries. It
 checks signed reload → signed readiness, independent signature verification,
 byte-identical readiness replay without another Host restart, and refusal after
 the Host is replaced with the candidate state changed. The historical v2
-[recorded real DSH run](evidence/systemd-readiness-real-dsh-2026-09-19.json)
+recorded real DSH run
 used fixture requests without Control Plane CAS and retains both signed
 receipts and the readiness probe preimage.
-The [readiness engineering validation](evidence/systemd-readiness-engineering-2026-09-19.json)
+The readiness engineering validation
 records the full repository check, package inspection, prior failures and
 independent review for this capability.
 
@@ -283,11 +284,11 @@ require signed failed readiness plus durable `rollback-pending`; otherwise the
 active candidate must reach `awaiting-effect-blocked-replay`. Catalog integrity,
 approval authority and profile staging are explicit fixture inputs. This does
 not execute npm installation, CLI profile restoration or physical Host rollback.
-The [active-candidate run](evidence/systemd-readiness-positive-real-dsh-2026-09-20.json)
-and [inactive-candidate run](evidence/systemd-readiness-negative-real-dsh-2026-09-20.json)
+The active-candidate run
+and inactive-candidate run
 retain signed receipts, probe preimages and the actual phase transitions.
 Full-check, independent-review and prior-failure records are in the
-[v3 engineering evidence](evidence/systemd-readiness-negative-engineering-2026-09-20.json).
+v3 engineering evidence.
 
 ## Physical rollback
 
@@ -368,8 +369,8 @@ node scripts/e2e/systemd-readiness-real-dsh.mjs --output /tmp/restore.json
 Initial package/catalog installation remains a fixture input. This is not
 production publication or proof of behavioral improvement.
 
-Recorded real DSH evidence: [restore](evidence/systemd-rollback-restore-real-dsh-2026-09-20.json),
-[stop](evidence/systemd-rollback-stop-real-dsh-2026-09-20.json), and
-[engineering checks](evidence/systemd-rollback-engineering-2026-09-20.json).
+Recorded real DSH evidence: restore,
+stop, and
+engineering checks.
 Each arm retains the signed recovery request/receipt and observation preimage,
 CLI-restored pending plan, final persisted plan, and exact runtime hashes.

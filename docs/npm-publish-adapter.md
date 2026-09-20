@@ -129,7 +129,7 @@ a production npm write, real owner key custody or production Host activation.
 WP16's authorized production release/enable/monitor/rollback and WP18's
 cross-task improvement acceptance remain open.
 
-The [read-only preparation record](evidence/npm-publish-preparation-readback-2026-09-19.json)
+The read-only preparation record
 also checks actual historical `plugin-control-plane` and `personal-memory`
 0.1.32 tarballs against integrity values in the committed release record.
 Both parse and round-trip through the prepared npm attachment; the sender is
@@ -140,6 +140,6 @@ After building Control Plane, reproduce with:
 DSH_NPM_PUBLISH_PREPARATION_LIVE=1 node scripts/e2e/npm-publish-preparation-readback.mjs --output /tmp/npm-preparation.json
 ```
 
-The [engineering validation record](evidence/npm-publish-adapter-engineering-2026-09-19.json)
+The engineering validation record
 records the completed repository gate, package inspection and independent
 review separately from these read-only registry observations.

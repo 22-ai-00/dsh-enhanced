@@ -102,14 +102,14 @@ same-UID Fiber restart, disabled entries, foreign service ownership, late
 Loader binding, authentication, cancellation, endpoint collision, server
 error and async teardown against the installed runtime.
 
-The [real DSH fixture](evidence/runtime-observer-real-dsh-2026-09-19.json)
+The real DSH fixture
 uses DSH 0.1.5-rc.2, local built Control Plane and Policy package entries,
 a temporary Web profile and transient systemd user service. It checks an
 active Policy Fiber/service, stable fresh-challenge samples, actual PID and
 InvocationID, socket removal on Host stop, and inactive state after disabling
 the candidate in the next Host instance. It makes no model request and changes
 no existing production profile or service. Reproduction is in
-`scripts/e2e/runtime-observer-real-dsh.mjs`; [engineering validation](evidence/runtime-observer-engineering-2026-09-19.json)
+`scripts/e2e/runtime-observer-real-dsh.mjs`; engineering validation
 records the root gate and independent review.
 
 Observation does not attest installed artifact bytes, transitive dependency
@@ -117,6 +117,7 @@ versions, behavioral quality or uninterrupted availability between samples.
 It reports configured module selection and current framework state. Malicious
 same-process plugins can mutate framework state or steal same-identity
 credentials: Cordis is not a hostile-JavaScript isolation boundary.
-Readiness signing must still bind independent deployment pins, exact durable
-request, activation fence and supervisor generation, and retain its own
-protected receipt key. WP16 and WP18 remain incomplete.
+[Systemd readiness signing](systemd-host-attestor.md#readiness-configuration-and-evidence) consumes this
+channel together with independent deployment pins, the durable request,
+activation fence and supervisor generation. Its signing key is separate from
+the observation key. WP16 and WP18 remain incomplete.

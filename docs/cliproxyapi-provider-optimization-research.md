@@ -1,8 +1,7 @@
-# CLIProxyAPI 对两个 Provider 插件的改进调研（最终版）
+# CLIProxyAPI 对两个 Provider 插件的改进：历史研究快照
 
 > 调研日期：2026-08-18  
-> 版本：final（Agent-T 主笔，经 Agent-C 三轮第一手证据交叉复核后定稿）  
-> 落地状态：Phase A 完成；Phase B 仅完成 parser 分层与 catalog observation 子阶段（真实 fixture / catalog cache / usage 保留 / latency-TTFT 未做）。详见文末「落地记录」。  
+> 本文记录 2026-08-18 的研究与当时落地状态，不是当前进展。当前配置和行为见两个 provider 的 README 与源码；文末 Phase 记录仅用于解释设计背景。
 > 对象仓库：[`router-for-me/CLIProxyAPI`](https://github.com/router-for-me/CLIProxyAPI)  
 > 复核提交：`d3a5988fc07d96f90cb1c2e3b2b7dfb9c2a310e0`  
 > 对照对象：`@dsh-enhanced/coding-subscription-provider`、`@dsh-enhanced/traex-acp-provider`  

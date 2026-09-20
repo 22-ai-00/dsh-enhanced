@@ -95,7 +95,7 @@ Codex direct 会把对话、tool schema、tool result，以及 attachment servic
 
 - [详细配置、认证、协议与限制](../../docs/coding-subscription-provider-reference.md)
 - [兼容基线](../../docs/compatibility.md)
-- [Codex 路由调研](../../docs/grok-bot-codex-router-research.md)
+- [当前 Provider 参考](../../docs/coding-subscription-provider-reference.md)
 - [插件生态与 Hermes/OpenClaw 对比](../../docs/dsh-personal-assistant-plugin-landscape.md)
 
 运行与发布验证统一使用仓库根目录的 `pnpm check`。

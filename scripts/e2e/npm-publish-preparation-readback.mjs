@@ -14,7 +14,7 @@ if (args.length !== 2 || args[0] !== '--output') throw new Error('Usage: npm-pub
 const root = fileURLToPath(new URL('../../', import.meta.url)); const output = resolve(args[1])
 const sha = value => createHash('sha256').update(value).digest('hex')
 const baseCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
-const baselinePath = 'docs/evidence/release-0.1.32-2026-09-13.json'
+const baselinePath = 'scripts/e2e/fixtures/npm-release-0.1.32.json'
 const baselineBytes = execFileSync('git', ['show', `${baseCommit}:${baselinePath}`], { cwd: root })
 const baseline = JSON.parse(baselineBytes)
 const paths = ['plugins/plugin-control-plane/src/npm-publish.ts', 'plugins/plugin-control-plane/lib/npm-publish.js',
