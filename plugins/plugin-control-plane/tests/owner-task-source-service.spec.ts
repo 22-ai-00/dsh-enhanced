@@ -2,6 +2,10 @@ import { generateKeyPairSync, sign } from 'node:crypto'
 import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { ControlPlaneStore } from '../src/store.ts'
+import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
+import * as releaseClient from '../src/source-release-client.ts'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
@@ -17,15 +21,16 @@ import * as trust from '../src/trust.ts'
 // Host integration: real CP persistence, scripted Delivery/Evaluation and build
 // ports. Native canonical fences have separate owner-task-gaps.spec coverage.
 vi.mock('../src/source-workspace.ts', async original => ({ ...await original<typeof workspace>(),
-  createIsolatedWorktree: vi.fn(), writeScopedPluginFiles: vi.fn(), runLocalCommand: vi.fn() }))
+  createIsolatedWorktree: vi.fn(), writeScopedPluginFiles: vi.fn(), runLocalCommand: vi.fn(), verifyPreparedSourceWorktree: vi.fn() }))
 vi.mock('../src/source-build.ts', async original => ({ ...await original<typeof build>(), runDockerPreparedChecks: vi.fn() }))
 vi.mock('../src/source-versioning.ts', async original => ({ ...await original<typeof versioning>(), managedPatchVersionFiles: vi.fn(), verifyManagedPatchVersion: vi.fn() }))
 vi.mock('../src/trust.ts', async original => ({ ...await original<typeof trust>(), loadTrustConfig: vi.fn(), inheritedEnvironment: vi.fn(() => ({})) }))
 vi.mock('../src/source-approval-client.ts', async original => ({ ...await original<typeof approvalClient>(), requestSourceApproval: vi.fn() }))
+vi.mock('../src/source-release-client.ts', async original => ({ ...await original<typeof releaseClient>(), requestSourceReleaseAuthorization: vi.fn() }))
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.resetAllMocks() })
 
-async function fixture(approvals = false, managedVersion = false) {
+async function fixture(approvals = false, managedVersion = false, releases = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-task-source-service-'))), ctx = new Context()
   cleanup.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   const owner = { receiptVersion: 2 as const, authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner',
@@ -52,11 +57,13 @@ async function fixture(approvals = false, managedVersion = false) {
     pack: { name: 'helper', version: managedVersion ? '1.0.1' : '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) }, preparedAt: Date.now() }
   const checked = { treeDigest: 'd'.repeat(64), patchDigest: 'e'.repeat(64), checkedAt: Date.now(), evidence }
   vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
+  vi.mocked(workspace.verifyPreparedSourceWorktree).mockResolvedValue({ checkedTreeDigest: checked.treeDigest, checkedPatchDigest: checked.patchDigest })
   vi.mocked(versioning.managedPatchVersionFiles).mockResolvedValue({ baseVersion: '1.0.0', version: '1.0.1', files: [
     { path: 'package.json', content: '{"version":"1.0.1"}\n' }, { path: 'src/version.ts', content: "export const version = '1.0.1'\n" }] })
   vi.mocked(versioning.verifyManagedPatchVersion).mockResolvedValue({ baseVersion: '1.0.0', version: '1.0.1' })
   const service = new PluginControlPlaneService(ctx, { statePath, catalogPath, trustPath,
     ...(approvals ? { sourceApprovals: { executable: { path: join(root, "authority.js"), sha256: "f".repeat(64) }, configPath: join(root, "authority.json"), timeoutMs: 1000 } } : {}),
+    ...(releases ? { sourceReleases: { executable: { path: join(root, 'release-authority.js'), sha256: 'a'.repeat(64) }, configPath: join(root, 'release-authority.json'), timeoutMs: 1000 } } : {}),
     sourceBuild: { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
       ...(managedVersion ? { versioning: 'patch' as const } : {}),
       memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } })
@@ -68,7 +75,7 @@ async function fixture(approvals = false, managedVersion = false) {
   const count = () => { const db = new DatabaseSync(join(statePath, 'control.sqlite')); try {
     return (db.prepare('SELECT count(*) AS count FROM source_plans').get() as { count: number }).count
   } finally { db.close() } }
-  return { service, source, owner, fence, remove, checked, request, count, ctx }
+  return { service, source, owner, fence, remove, checked, request, count, ctx, root, databasePath: join(statePath, 'control.sqlite') }
 }
 
 test('commits a checked task-bound proposal through the Host fence', async () => {
@@ -138,8 +145,8 @@ test('a final commit fence conflict removes the worktree and leaves no plan', as
   expect(f.remove).toHaveBeenCalledOnce()
 })
 
-async function signedApprovalFixture() {
-  const f = await fixture(true), plan = await f.service.prepareModifySourcePlan(f.request)
+async function signedApprovalFixture(releases = false) {
+  const f = await fixture(true, releases, releases), plan = await f.service.prepareModifySourcePlan(f.request)
   const keys = generateKeyPairSync('ed25519')
   const bound = await trust.loadTrustConfig('ignored')
   vi.mocked(trust.loadTrustConfig).mockResolvedValue({ ...bound, approvalKeys: [{ authority: 'authority', keyId: 'key',
@@ -196,4 +203,95 @@ test('durable approval rejects a changed frozen job trust before invoking the he
   const f = await signedApprovalFixture()
   await expect(f.service.requestOwnerSourceApproval({ planId: f.plan.id, expectedTrustDigest: '0'.repeat(64) })).rejects.toThrow('source job approval trust changed')
   expect(approvalClient.requestSourceApproval).not.toHaveBeenCalled()
+})
+
+
+async function signedReleaseFixture() {
+  const f = await signedApprovalFixture(true)
+  await f.service.requestOwnerSourceApproval({ planId: f.plan.id })
+  const keys = generateKeyPairSync('ed25519'), bound = await trust.loadTrustConfig('ignored')
+  const registry = { id: 'local-registry', locator: pathToFileURL(join(f.root, 'registry')).href, caPins: [], tokenEnvironment: null }
+  vi.mocked(trust.loadTrustConfig).mockResolvedValue({ ...bound, schemaVersion: 4, releaseRegistry: registry,
+    catalog: { ...bound.catalog, id: 'local-catalog' }, releaseAuthorizationKeys: [{ authority: 'release-authority', keyId: 'release-key',
+      publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }) }] } as Awaited<ReturnType<typeof trust.loadTrustConfig>>)
+  const unsigned = { schemaVersion: 1 as const, kind: 'dsh-source-release-authorization' as const, authorizationId: 'finite-release',
+    authority: 'release-authority', keyId: 'release-key', planId: f.plan.id, planDigest: f.plan.digest, baseCommit: f.plan.baseCommit,
+    checkedTreeDigest: f.plan.sourceCheck!.treeDigest, checkedPatchDigest: f.plan.sourceCheck!.patchDigest, scope: f.plan.scope,
+    releasePolicy: { targetBranch: 'candidate', candidateId: f.plan.name, packageName: `@dsh-enhanced/${f.plan.name}`, packageVersion: '1.0.1',
+      packagePath: `plugins/${f.plan.name}`, dshBaseline: '0.1.5', capabilities: ['helper'], authorities: ['filesystem'], requires: [],
+      registryId: registry.id, registryLocator: registry.locator, registryReference: `${registry.locator}/packages/helper/1.0.1/package.tgz`,
+      catalogId: 'local-catalog', catalogPath: bound.catalog.path, minimumReproducibleBuilds: 2 }, authorizedAt: Date.now(), expiresAt: f.plan.expiresAt }
+  const authorization = { ...unsigned, signature: sign(null, Buffer.from(sourceReleaseAuthorizationSigningPayload(unsigned)), keys.privateKey).toString('base64') }
+  vi.mocked(releaseClient.requestSourceReleaseAuthorization).mockResolvedValue(authorization)
+  const status = () => { const store = new ControlPlaneStore({ path: f.databasePath }); try { return store.getSourcePlan(f.plan.id).status } finally { store.close() } }
+  return { ...f, authorization, status }
+}
+
+test('automatically rechecks approved owner source and starts the existing release once under its separate grant', async () => {
+  const f = await signedReleaseFixture()
+  const started = await f.service.requestOwnerSourceRelease({ planId: f.plan.id })
+  expect(started).toMatchObject({ status: 'awaiting-pr', revision: 4, release: { fence: 1 } })
+  expect(workspace.verifyPreparedSourceWorktree).toHaveBeenCalledOnce()
+  expect(await f.service.requestOwnerSourceRelease({ planId: f.plan.id })).toEqual(started)
+  expect(releaseClient.requestSourceReleaseAuthorization).toHaveBeenCalledOnce()
+  // The durable Store replay cannot be used to bypass Host source admission.
+  const store = new ControlPlaneStore({ path: f.databasePath })
+  try { await expect(store.startSourceRelease({ planId: f.plan.id, expectedRevision: 3, authorization: f.authorization,
+    resolveAuthority: () => { throw new Error('replay must not verify again') },
+    idempotencyKey: 'source-release-authorization:finite-release' })).rejects.toThrow('Host admission') } finally { store.close() }
+  f.owner.generation += 1
+  await expect(f.service.requestOwnerSourceRelease({ planId: f.plan.id })).rejects.toThrow('changed')
+})
+
+test.each(['source', 'cancel', 'trust', 'policy'] as const)('does not start release when %s changes while the authority signs', async changed => {
+  const f = await signedReleaseFixture(), abort = new AbortController()
+  vi.mocked(releaseClient.requestSourceReleaseAuthorization).mockImplementationOnce(async () => {
+    if (changed === 'source') f.owner.generation += 1
+    if (changed === 'cancel') abort.abort()
+    if (changed === 'trust') vi.mocked(trust.loadTrustConfig).mockResolvedValue({ ...await trust.loadTrustConfig('ignored'), installationId: 'changed' })
+    return changed === 'policy' ? { ...f.authorization, releasePolicy: { ...f.authorization.releasePolicy, catalogId: 'different' } } : f.authorization
+  })
+  await expect(f.service.requestOwnerSourceRelease({ planId: f.plan.id, signal: abort.signal })).rejects.toThrow()
+  expect(f.status()).toBe('ready-for-human-review')
+})
+
+test('late source changes after signature verification still prevent the release commit', async () => {
+  const f = await signedReleaseFixture()
+  const verify = Ed25519SourceReleaseAuthorizationAuthority.prototype.verify
+  const spy = vi.spyOn(Ed25519SourceReleaseAuthorizationAuthority.prototype, 'verify').mockImplementationOnce(async function (this: Ed25519SourceReleaseAuthorizationAuthority, ...args) {
+    const result = await verify.apply(this, args)
+    f.owner.generation += 1
+    return result
+  })
+  try { await expect(f.service.requestOwnerSourceRelease({ planId: f.plan.id })).rejects.toThrow('changed') }
+  finally { spy.mockRestore() }
+  expect(f.status()).toBe('ready-for-human-review')
+})
+
+test('release verification rejects source drift and frozen trust changes before asking for authorization', async () => {
+  const f = await signedReleaseFixture()
+  await expect(f.service.requestOwnerSourceRelease({ planId: f.plan.id, expectedTrustDigest: '0'.repeat(64) })).rejects.toThrow('trust changed')
+  vi.mocked(workspace.verifyPreparedSourceWorktree).mockRejectedValueOnce(new Error('prepared source changed'))
+  await expect(f.service.requestOwnerSourceRelease({ planId: f.plan.id })).rejects.toThrow('source changed')
+  expect(f.status()).toBe('approved')
+  expect(releaseClient.requestSourceReleaseAuthorization).not.toHaveBeenCalled()
+  const store = new ControlPlaneStore({ path: f.databasePath })
+  try { expect(() => store.verifyPreparedSourcePlan({ planId: f.plan.id, expectedRevision: 2,
+    recheckedTreeDigest: f.plan.sourceCheck!.treeDigest, recheckedPatchDigest: f.plan.sourceCheck!.patchDigest })).toThrow('Host admission') }
+  finally { store.close() }
+})
+
+test('release helper late response is drained and discarded when the Host unloads', async () => {
+  const f = await signedReleaseFixture()
+  let finish!: () => void, entered!: () => void
+  const ready = new Promise<void>(resolve => { entered = resolve })
+  vi.mocked(releaseClient.requestSourceReleaseAuthorization).mockImplementationOnce(async () => {
+    entered(); await new Promise<void>(resolve => { finish = resolve }); return f.authorization
+  })
+  const flight = f.service.requestOwnerSourceRelease({ planId: f.plan.id }), rejected = expect(flight).rejects.toThrow()
+  await ready
+  let disposed = false
+  const disposal = f.ctx.fiber.dispose().then(() => { disposed = true })
+  await new Promise(resolve => setImmediate(resolve)); expect(disposed).toBe(false)
+  finish(); await Promise.all([disposal, rejected])
 })

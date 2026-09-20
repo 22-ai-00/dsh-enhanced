@@ -1350,12 +1350,12 @@ export class ControlPlaneStore {
       created_at DESC, id DESC LIMIT ?`).all(limit) as unknown as SourceJobRow[]).map(sourceJobFromRow)
   }
 
-  /** Pending approvals have their own bounded recovery query, independent of job history. */
-  listPreparedSourceApprovalJobs(): readonly SourceJobRecord[] {
+  /** Prepared owner continuations have a bounded recovery query, independent of job history. */
+  listPreparedSourceApprovalJobs(includeRelease = false): readonly SourceJobRecord[] {
     return (this.#database.prepare(`SELECT j.* FROM source_jobs j JOIN source_plans p ON p.id = j.plan_id
       JOIN owner_task_failure_gaps g ON g.gap_id = p.gap_id
-      WHERE j.status = 'prepared' AND p.status = 'pending-approval' AND p.expires_at > ?
-      ORDER BY j.created_at, j.id LIMIT 1000`).all(this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
+      WHERE j.status = 'prepared' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))) AND p.expires_at > ?
+      ORDER BY j.created_at, j.id LIMIT 1000`).all(includeRelease ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
   }
 
   bindSourceJobDefinition(input: { id: string; revision: number; definitionHash: string }): SourceJobRecord {
@@ -2376,7 +2376,7 @@ export class ControlPlaneStore {
    * ready-for-human-review without ever entering running-local-checks. No
    * approval, signature or release authority is reachable from this method.
    */
-  verifyPreparedSourcePlan(input: { planId: string; expectedRevision: number
+  verifyPreparedSourcePlan(input: { withSourceFence?: <T>(callback: () => T) => T; planId: string; expectedRevision: number
     recheckedTreeDigest: string; recheckedPatchDigest: string }): OperationReceipt<PluginSourcePlan> {
     if (!DIGEST.test(input.recheckedTreeDigest) || !DIGEST.test(input.recheckedPatchDigest)) {
       throw new ControlPlaneStoreError('invalid-input', 'rechecked source digests must be 64-char hex')
@@ -2393,27 +2393,35 @@ export class ControlPlaneStore {
     if (plan.sourceCheck.treeDigest !== input.recheckedTreeDigest || plan.sourceCheck.patchDigest !== input.recheckedPatchDigest) {
       throw new ControlPlaneStoreError('conflict', 'rechecked source tree or patch drifted from the prepared evidence')
     }
-    this.#database.exec('BEGIN IMMEDIATE')
-    try {
-      const result = this.#database.prepare(`UPDATE source_plans SET status = 'ready-for-human-review', revision = revision + 1, updated_at = ?
-        WHERE id = ? AND revision = ? AND status = 'approved' AND mode = 'modify'
-          AND checked_tree_digest = ? AND checked_patch_digest = ? AND plan_digest = ?`).run(
-        now, plan.id, input.expectedRevision, input.recheckedTreeDigest, input.recheckedPatchDigest, plan.digest)
-      if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source plan changed while prepared verification was applied')
-      const output = this.getSourcePlan(plan.id)
-      const inputDigest = controlPlaneDigest({ operation: 'source-verify-prepared', planId: output.id,
-        planDigest: output.digest, recheckedTreeDigest: input.recheckedTreeDigest, recheckedPatchDigest: input.recheckedPatchDigest })
-      const receipt = { idempotencyKey: `source-verify-prepared:${output.id}:${output.revision}`,
-        operation: 'source-verify-prepared', inputDigest, result: output, createdAt: now }
-      this.#insertReceipt(receipt)
-      this.#database.exec('COMMIT')
-      return receipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    const commit = (): OperationReceipt<PluginSourcePlan> => {
+      this.#assertOwnerTaskFailureGapAdmission(plan.gapId)
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        const result = this.#database.prepare(`UPDATE source_plans SET status = 'ready-for-human-review', revision = revision + 1, updated_at = ?
+          WHERE id = ? AND revision = ? AND status = 'approved' AND mode = 'modify'
+            AND checked_tree_digest = ? AND checked_patch_digest = ? AND plan_digest = ?`).run(
+          now, plan.id, input.expectedRevision, input.recheckedTreeDigest, input.recheckedPatchDigest, plan.digest)
+        if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source plan changed while prepared verification was applied')
+        const output = this.getSourcePlan(plan.id)
+        const inputDigest = controlPlaneDigest({ operation: 'source-verify-prepared', planId: output.id,
+          planDigest: output.digest, recheckedTreeDigest: input.recheckedTreeDigest, recheckedPatchDigest: input.recheckedPatchDigest })
+        const receipt = { idempotencyKey: `source-verify-prepared:${output.id}:${output.revision}`,
+          operation: 'source-verify-prepared', inputDigest, result: output, createdAt: now }
+        this.#insertReceipt(receipt)
+        this.#database.exec('COMMIT')
+        return receipt
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    }
+    return input.withSourceFence ? input.withSourceFence(commit) : commit()
   }
 
   async startSourceRelease(input: { planId: string; expectedRevision: number; authorization: SourceReleaseAuthorization;
     resolveAuthority: (authorization: SourceReleaseAuthorization) => SourceReleaseAuthorizationAuthority;
-    idempotencyKey: string }): Promise<OperationReceipt<PluginSourcePlan>> {
+    idempotencyKey: string; withSourceFence?: <T>(callback: () => T) => T }): Promise<OperationReceipt<PluginSourcePlan>> {
+    const withCurrentSource = <T>(gapId: string, callback: () => T): T => {
+      const commit = () => { this.#assertOwnerTaskFailureGapAdmission(gapId); return callback() }
+      return input.withSourceFence ? input.withSourceFence(commit) : commit()
+    }
     const key = bounded(input.idempotencyKey, 'idempotencyKey', 160)
     if (!KEY.test(key)) throw new ControlPlaneStoreError('invalid-input', 'idempotencyKey has invalid syntax')
     const inputDigest = controlPlaneDigest({ operation: 'start-source-release', planId: input.planId,
@@ -2432,33 +2440,36 @@ export class ControlPlaneStore {
         || controlPlaneDigest(replay.result.releaseAuthorization) !== controlPlaneDigest(verifiedAuthorization)) {
         throw new ControlPlaneStoreError('invalid-state', 'stored source release start receipt is corrupt')
       }
-      return replay
+      return withCurrentSource(replay.result.gapId, () => replay)
     }
     const plan = this.getSourcePlan(input.planId)
     if (plan.revision !== input.expectedRevision) throw new ControlPlaneStoreError('conflict', 'source release authorization targets a stale plan revision')
     if (plan.status !== 'ready-for-human-review' || plan.sourceCheck === undefined) {
-      throw new ControlPlaneStoreError('invalid-state', 'source release requires completed checks and fresh human review')
+      throw new ControlPlaneStoreError('invalid-state', 'source release requires verified source and a release authorization')
     }
+    withCurrentSource(plan.gapId, () => {})
     const verified = await input.resolveAuthority(input.authorization).verify(input.authorization, plan)
     const now = this.#now()
     if (now > plan.expiresAt || now > verified.expiresAt) throw new ControlPlaneStoreError('expired', 'source release authorization is no longer applicable')
-    this.#database.exec('BEGIN IMMEDIATE')
-    try {
-      const releaseId = `release-${randomUUID()}`
-      const result = this.#database.prepare(`UPDATE source_plans SET status = 'awaiting-pr', revision = revision + 1,
-        release_authorization_json = ?, release_authorization_digest = ?, release_id = ?, release_fence = release_fence + 1,
-        release_failure_phase = NULL, release_failure_code = NULL, updated_at = ?
-        WHERE id = ? AND status = 'ready-for-human-review' AND revision = ? AND plan_digest = ?
-          AND checked_tree_digest = ? AND checked_patch_digest = ? AND release_id IS NULL`).run(
-        JSON.stringify(verified), controlPlaneDigest(verified), releaseId, now, plan.id, input.expectedRevision, plan.digest,
-        plan.sourceCheck.treeDigest, plan.sourceCheck.patchDigest)
-      if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source plan changed while release authorization was applied')
-      const output = this.getSourcePlan(plan.id)
-      const operationReceipt = { idempotencyKey: key, operation: 'start-source-release', inputDigest, result: output, createdAt: now }
-      this.#insertReceipt(operationReceipt)
-      this.#database.exec('COMMIT')
-      return operationReceipt
-    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    return withCurrentSource(plan.gapId, () => {
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        const releaseId = `release-${randomUUID()}`
+        const result = this.#database.prepare(`UPDATE source_plans SET status = 'awaiting-pr', revision = revision + 1,
+          release_authorization_json = ?, release_authorization_digest = ?, release_id = ?, release_fence = release_fence + 1,
+          release_failure_phase = NULL, release_failure_code = NULL, updated_at = ?
+          WHERE id = ? AND status = 'ready-for-human-review' AND revision = ? AND plan_digest = ?
+            AND checked_tree_digest = ? AND checked_patch_digest = ? AND release_id IS NULL`).run(
+          JSON.stringify(verified), controlPlaneDigest(verified), releaseId, now, plan.id, input.expectedRevision, plan.digest,
+          plan.sourceCheck!.treeDigest, plan.sourceCheck!.patchDigest)
+        if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source plan changed while release authorization was applied')
+        const output = this.getSourcePlan(plan.id)
+        const operationReceipt = { idempotencyKey: key, operation: 'start-source-release', inputDigest, result: output, createdAt: now }
+        this.#insertReceipt(operationReceipt)
+        this.#database.exec('COMMIT')
+        return operationReceipt
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    })
   }
 
   async prepareSourceReleaseOperation(input: PrepareSourceReleaseOperationInput): Promise<SourceReleaseOperation> {

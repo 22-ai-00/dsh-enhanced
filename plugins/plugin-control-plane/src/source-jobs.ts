@@ -62,6 +62,7 @@ export class SourceJobRuntime {
     withGapSourceFence?: <T>(gapId: string, owner: SourceJobOwnerReceipt, callback: () => T) => T
     trust: () => Promise<Trust>
     approvePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
+    releasePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     prepare: (job: SourceJobRecord, signal: AbortSignal, assertCurrent: () => Promise<void>) => Promise<PluginSourcePlan>
   }) {
     validateSourceJobsConfig(options.config, options.build)
@@ -77,16 +78,16 @@ export class SourceJobRuntime {
     }
     this.unregister = this.options.ports.automations.registerHostExecutor(executor)
     this.active = true
-    if (this.options.approvePrepared) {
-      // Only replay the idempotent approval request, never a completed build.
+    if (this.options.approvePrepared || this.options.releasePrepared) {
+      // Resume idempotent owner authorizations, never a completed build.
       // Each failed request leaves its pending plan available for Host inspection/retry.
       this.track((async () => {
-        for (const job of this.options.store.listPreparedSourceApprovalJobs()) {
+        for (const job of this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined)) {
           if (this.abort.signal.aborted) break
           try {
             this.assertOwner(job)
-            const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(10_000, job.expiresAt - Date.now())))])
-            await this.options.approvePrepared!(job, signal)
+            const signal = AbortSignal.any([this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(this.options.releasePrepared ? 40_000 : 10_000, job.expiresAt - Date.now())))])
+            await this.continuePrepared(job, signal)
           } catch { /* pending plan retained */ }
         }
       })())
@@ -98,6 +99,25 @@ export class SourceJobRuntime {
         const current = this.options.store.getSourceJob(job.id)
         if (current?.status === 'queued') this.options.store.settleSourceJob({ id: current.id, revision: current.revision, status: 'failed', failureCode: 'source-job-reconcile-rejected' })
       }
+    }
+  }
+
+  private async continuePrepared(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
+    this.assertOwner(job)
+    if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
+    const assertCurrent = async (): Promise<void> => {
+      signal.throwIfAborted(); this.assertOwner(job)
+      if (controlPlaneDigest(await this.options.trust()) !== job.intent.trustDigest) throw new Error('source job continuation trust changed')
+      signal.throwIfAborted(); this.assertOwner(job)
+    }
+    await assertCurrent()
+    if (this.options.store.getSourcePlan(job.planId).status === 'pending-approval' && this.options.approvePrepared) {
+      await this.options.approvePrepared(job, signal)
+    }
+    const status = this.options.store.getSourcePlan(job.planId).status
+    if (this.options.releasePrepared && (status === 'approved' || status === 'ready-for-human-review')) {
+      await assertCurrent()
+      await this.options.releasePrepared(job, signal)
     }
   }
 
@@ -286,9 +306,9 @@ export class SourceJobRuntime {
       await assertCurrent()
       await this.options.prepare(owned, signal, assertCurrent)
       if (this.options.store.getSourceJob(owned.id)?.status !== 'prepared') throw new Error('source job completion was not committed')
-      if (this.options.approvePrepared && this.options.store.getOwnerTaskFailureReference(owned.intent.gapId)) {
+      if ((this.options.approvePrepared || this.options.releasePrepared) && this.options.store.getOwnerTaskFailureReference(owned.intent.gapId)) {
         this.assertOwner(owned)
-        await this.options.approvePrepared(this.options.store.getSourceJob(owned.id)!, signal)
+        await this.continuePrepared(this.options.store.getSourceJob(owned.id)!, signal)
       }
       return { outcome: 'succeeded', failureClass: 'none', failurePhase: 'none', failureCode: 'none', sideEffectState: 'possible', retryability: 'unsafe' }
     } catch {

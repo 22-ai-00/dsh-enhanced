@@ -88,7 +88,7 @@ function integer(value: unknown, minimum: number, maximum = Number.MAX_SAFE_INTE
   return value as number
 }
 
-function canonicalSafePath(path: string, kind: 'file' | 'directory', createFile = false): string {
+export function sourceAuthorityCanonicalSafePath(path: string, kind: 'file' | 'directory', createFile = false): string {
   const uid = process.getuid?.()
   const parent = dirname(path)
   let parentStat: ReturnType<typeof lstatSync>
@@ -107,7 +107,7 @@ function canonicalSafePath(path: string, kind: 'file' | 'directory', createFile 
   return path
 }
 
-function canonicalRepository(path: string): string {
+export function sourceAuthorityCanonicalRepository(path: string): string {
   const uid = process.getuid?.()
   let stat: ReturnType<typeof lstatSync>
   try { stat = lstatSync(path) } catch { fail() }
@@ -116,8 +116,8 @@ function canonicalRepository(path: string): string {
   return path
 }
 
-function readSafeFile(path: string, maximum: number): Buffer {
-  canonicalSafePath(path, 'file')
+export function sourceAuthorityReadSafeFile(path: string, maximum: number): Buffer {
+  sourceAuthorityCanonicalSafePath(path, 'file')
   const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
   try {
     const before = fstatSync(fd, { bigint: true }); const named = lstatSync(path, { bigint: true })
@@ -135,7 +135,7 @@ function equivalentOwner(left: SourceJobOwnerReceipt, right: SourceApprovalAutho
     && left.principalVersion === right.principalVersion && left.workspace === right.workspace && left.agentPreset === right.agentPreset
 }
 
-function sourceEnvironment(): NodeJS.ProcessEnv {
+export function sourceAuthorityEnvironment(): NodeJS.ProcessEnv {
   const path = process.env.PATH
   if (path === undefined || path === '') fail()
   return Object.freeze({ PATH: path, LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
@@ -168,8 +168,8 @@ export function validateSourceApprovalAuthorityConfig(value: unknown): asserts v
   integer(grant.maxChangedFiles, 1, 256); integer(grant.maxChangedBytes, 1, 16 * 1024 * 1024); integer(grant.receiptTtlMs, 1_000, 86_400_000)
 }
 
-function validatePrepared(plan: PluginSourcePlan, now: number): void {
-  if (plan.status !== 'pending-approval' || plan.mode !== 'modify' || plan.sourceCheck === undefined || plan.preparedEvidence === undefined
+export function sourceAuthorityValidatePrepared(plan: PluginSourcePlan, now: number, status: PluginSourcePlan['status'] = 'pending-approval'): void {
+  if (plan.status !== status || plan.mode !== 'modify' || plan.sourceCheck === undefined || plan.preparedEvidence === undefined
     || now > plan.expiresAt || plan.preparedEvidence.preparedAt > plan.sourceCheck.checkedAt || plan.sourceCheck.checkedAt > plan.createdAt
     || plan.preparedEvidence.preparedAt > now || plan.preparedEvidence.environment.npmConfigIgnoreScripts !== true
     || plan.preparedEvidence.environment.frozenLockfile !== true || plan.preparedEvidence.environment.offline !== true
@@ -184,22 +184,26 @@ function validatePrepared(plan: PluginSourcePlan, now: number): void {
     || command.args.at(-1) !== PREPARED_SOURCE_BUILD_SCRIPT) fail()
 }
 
-async function validateWorktree(plan: PluginSourcePlan, config: SourceApprovalAuthorityConfig): Promise<void> {
-  if (!COMMIT.test(plan.baseCommit) || PROTECTED_PLUGIN_DENYLIST.has(plan.name) || !config.grant.plugins.includes(plan.name)) fail()
-  const repository = canonicalRepository(config.grant.repository); const worktreeRoot = canonicalSafePath(config.grant.worktreeRoot, 'directory')
-  const worktree = canonicalSafePath(plan.worktree, 'directory')
+export interface SourceAuthorityWorktreeGrant {
+  repository: string; worktreeRoot: string; plugins: readonly string[]; maxChangedFiles: number; maxChangedBytes: number; versioning?: 'patch'
+}
+
+export async function sourceAuthorityValidateWorktree(plan: PluginSourcePlan, grant: SourceAuthorityWorktreeGrant): Promise<void> {
+  if (!COMMIT.test(plan.baseCommit) || PROTECTED_PLUGIN_DENYLIST.has(plan.name) || !grant.plugins.includes(plan.name)) fail()
+  const repository = sourceAuthorityCanonicalRepository(grant.repository); const worktreeRoot = sourceAuthorityCanonicalSafePath(grant.worktreeRoot, 'directory')
+  const worktree = sourceAuthorityCanonicalSafePath(plan.worktree, 'directory')
   const worktreeRelative = relative(worktreeRoot, worktree)
   if (plan.repository !== repository || worktreeRelative === '' || worktreeRelative === '..' || worktreeRelative.startsWith(`..${sep}`) || isAbsolute(worktreeRelative)) fail()
-  const environment = sourceEnvironment()
+  const environment = sourceAuthorityEnvironment()
   const head = (await runLocalCommand('git', ['rev-parse', '--verify', 'HEAD^{commit}'], worktree, environment, { capture: true })).trim()
   if (head !== plan.baseCommit) fail()
   const repositoryCommon = (await runLocalCommand('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], repository, environment, { capture: true })).trim()
   const worktreeCommon = (await runLocalCommand('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], worktree, environment, { capture: true })).trim()
   if (!isAbsolute(repositoryCommon) || !isAbsolute(worktreeCommon) || realpathSync(repositoryCommon) !== realpathSync(worktreeCommon)) fail()
   const paths = await changedSourcePaths(worktree, plan.baseCommit, environment)
-  if (paths.length === 0 || paths.length > config.grant.maxChangedFiles) fail()
+  if (paths.length === 0 || paths.length > grant.maxChangedFiles) fail()
   const manifestPath = `plugins/${plan.name}/package.json`
-  if (config.grant.versioning === 'patch') {
+  if (grant.versioning === 'patch') {
     if (!paths.includes(manifestPath) || !paths.includes(`plugins/${plan.name}/src/version.ts`)) fail()
     const managed = await verifyManagedPatchVersion({ worktree, baseCommit: plan.baseCommit, name: plan.name, environment })
     if (plan.preparedEvidence?.pack.version !== managed.version) fail()
@@ -207,7 +211,7 @@ async function validateWorktree(plan: PluginSourcePlan, config: SourceApprovalAu
   let bytes = 0
   for (const path of paths) {
     const match = SOURCE_FILE.exec(path)
-    const managedManifest = config.grant.versioning === 'patch' && path === manifestPath
+    const managedManifest = grant.versioning === 'patch' && path === manifestPath
     if (!managedManifest && (!match || match[1] !== plan.name || SOURCE_TEST_PATH.test(path))) fail()
     const target = resolve(worktree, path)
     if (relative(worktree, target).startsWith(`..${sep}`) || target === worktree) fail()
@@ -215,7 +219,7 @@ async function validateWorktree(plan: PluginSourcePlan, config: SourceApprovalAu
     try { stat = lstatSync(target) } catch { fail() }
     if (!stat.isFile() || stat.isSymbolicLink() || realpathSync(target) !== target) fail()
     bytes += stat.size
-    if (bytes > config.grant.maxChangedBytes) fail()
+    if (bytes > grant.maxChangedBytes) fail()
   }
   const checked = await checkedSourceSnapshot(worktree, plan.baseCommit, plan.scope, environment)
   if (checked.checkedTreeDigest !== plan.sourceCheck!.treeDigest || checked.checkedPatchDigest !== plan.sourceCheck!.patchDigest) fail()
@@ -224,7 +228,7 @@ async function validateWorktree(plan: PluginSourcePlan, config: SourceApprovalAu
 interface StoredApproval { request_digest: string; grant_id: string; config_digest: string; plan_id: string; plan_digest: string; receipt_json: string; receipt_digest: string }
 
 function openLedger(path: string): DatabaseSync {
-  canonicalSafePath(path, 'file', true)
+  sourceAuthorityCanonicalSafePath(path, 'file', true)
   const database = new DatabaseSync(path)
   database.exec(`PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;
     CREATE TABLE IF NOT EXISTS source_approval_grants (
@@ -250,8 +254,8 @@ export async function authorizePreparedSource(configInput: SourceApprovalAuthori
   try {
     validateSourceApprovalAuthorityConfig(configInput); const config = configInput; const request = validateRequest(requestInput)
     if (Date.now() >= config.grant.expiresAt) fail()
-    const sourcePath = canonicalSafePath(config.controlDatabasePath, 'file')
-    const keyBytes = readSafeFile(config.keyPath, MAX_KEY_BYTES)
+    const sourcePath = sourceAuthorityCanonicalSafePath(config.controlDatabasePath, 'file')
+    const keyBytes = sourceAuthorityReadSafeFile(config.keyPath, MAX_KEY_BYTES)
     let privateKey: ReturnType<typeof createPrivateKey>
     try { privateKey = createPrivateKey(keyBytes) } catch { fail() }
     if (privateKey.asymmetricKeyType !== 'ed25519') fail()
@@ -264,7 +268,7 @@ export async function authorizePreparedSource(configInput: SourceApprovalAuthori
       source = readOwnerPreparedSourcePlan(database, request.planId)
       if (source.plan.digest !== request.planDigest || controlPlaneDigest(source.source) !== request.sourceReferenceDigest
         || !equivalentOwner(source.source.owner, config.grant.owner)) fail()
-      validatePrepared(source.plan, Date.now()); await validateWorktree(source.plan, config)
+      sourceAuthorityValidatePrepared(source.plan, Date.now()); await sourceAuthorityValidateWorktree(source.plan, config.grant)
       const final = readOwnerPreparedSourcePlan(database, request.planId)
       if (final.plan.digest !== source.plan.digest || controlPlaneDigest(final.source) !== controlPlaneDigest(source.source) || final.plan.status !== 'pending-approval') fail()
     } finally { database.close() }
@@ -274,7 +278,7 @@ export async function authorizePreparedSource(configInput: SourceApprovalAuthori
       ledger.exec('BEGIN IMMEDIATE')
       try {
         const now = Date.now(); if (now >= config.grant.expiresAt) fail()
-        validatePrepared(source.plan, now)
+        sourceAuthorityValidatePrepared(source.plan, now)
         const receiptExpiry = Math.min(now + config.grant.receiptTtlMs, config.grant.expiresAt, source.plan.expiresAt)
         if (receiptExpiry <= now) fail()
         const grant = ledger.prepare('SELECT config_digest, key_fingerprint FROM source_approval_grants WHERE grant_id = ?').get(config.grant.id) as { config_digest: string; key_fingerprint: string } | undefined
@@ -320,7 +324,7 @@ async function readOneRequest(): Promise<unknown> {
 export async function runSourceApprovalAuthority(argv = process.argv.slice(2)): Promise<void> {
   try {
     if (argv.length !== 2 || argv[0] !== '--config') fail()
-    const configPath = pathText(argv[1]); const configBytes = readSafeFile(configPath, MAX_CONFIG_BYTES)
+    const configPath = pathText(argv[1]); const configBytes = sourceAuthorityReadSafeFile(configPath, MAX_CONFIG_BYTES)
     let config: unknown; try { config = JSON.parse(configBytes.toString('utf8')) as unknown } catch { fail() }
     const request = await readOneRequest(); const receipt = await authorizePreparedSource(config as SourceApprovalAuthorityConfig, request as SourceApprovalRequest)
     process.stdout.write(`${JSON.stringify(receipt)}\n`)

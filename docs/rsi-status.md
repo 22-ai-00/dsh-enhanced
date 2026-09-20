@@ -24,6 +24,7 @@
 - Skills 已接入同进程 Host 受限委派：来源重新验证后，将冻结的活动技能或 pending 候选临时挂载到全新 owner scope，经原生 `skill_run` 执行；持久 cell reservation 与调用记录阻止换调用键或重启重放。来源和接收方重载、撤权、到期及取消均保留失败或 unknown。Evaluation 原生模型 cell 与冻结后独立任务已接入，12-cell Docker 工程验证两臂各 6 次达成，候选实际复用 6 次、质量平局。Day1 同预算收益比较仍待完成；见[接线指南](native-skill-reuse.md)。
 - 普通 owner 失败源码候选可经部署时配置的有限审批器自动批准：精确源码、owner、期限与累计额度受约束，最终提交复查当前反馈，持久作业重启只恢复审批。此步骤仍不发布或启用候选；普通使用中的采用、观察与回滚尚待贯通。
 - 修复候选可显式启用 Host 补丁版本管理：从基准 Git 提交生成 package/runtime 版本，在冻结检查树前纳入构建与审批；有限审批器须单独授权并核对其余 manifest 字段不变。相同基准仍会产生相同版本，自动采用还须串行推进获准源码，不能覆盖 registry/catalog 中的既有版本。
+- 普通 owner 修复获批后，可用独立的有限本地发布授权自动进入既有 `awaiting-pr`：Host 重查源码，外部签名器固定版本、registry/catalog、配额和有效期，最终提交再次检查当前反馈。持久作业重启只接续审批/授权，不重建或重复签发；后续独立 review、release 阶段推进及启用仍待接通。
 - Control Plane 使用后的签名退化/撤回已接入原有物理回退：成功启用保留上一版，核对当前版和备份核心文件，恢复后须由 Host 签名确认旧版就绪或停服；支持 rename 中断与回执丢失恢复，拒绝覆盖较新的部署。schema 17 保留部署顺序与安装摘要，旧记录不补造恢复能力。普通前台结果的版本归因及自动签发观察仍待接通。
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
 
@@ -58,7 +59,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. 在已接通的真实反馈→持久复盘→owner 私有失败 gap→源码候选之上，在有限源码审批之上接通精确 artifact 的采用授权，去除逐 Goal 手动 arm。若走 Skills 修复，普通前台来源须经 owner 授权的 Host 入口创建真实原生 Goal，不能伪造现有修复契约要求的来源 Goal；调度继续复用 Automations。
+1. 在真实反馈→持久复盘→owner 私有失败 gap→源码候选→有限审批/发布授权之上，接通独立 review、既有 release 阶段推进与精确 artifact 的采用授权，去除逐 Goal 手动 arm。若走 Skills 修复，普通前台来源须经 owner 授权的 Host 入口创建真实原生 Goal，不能伪造现有修复契约要求的来源 Goal；调度继续复用 Automations。
 2. 接通成长触发 → 自主修复/技能或插件候选 → 独立验证 → 已授权范围内采用 → 后续真实使用观察与回滚。复用既有 Skills、Growth Driver 和 Control Plane；仅停留在 pending 提案不算完整交付。
 3. 提供可安装的日常使用配置，明确正常入口、针对成长能力范围的一次授权、预算、停止和恢复方式。模型保持可替换供应，成长状态随 Agent 持久化；无需为每个来源 Goal 手动 arm，或为每个任务重新编排固定场景。自动调用预设场景仍不能替代这一目标。
 4. 保留上表未完成验收与真实发布/外部系统边界。WP16 的独立副作用观测、签名和推广恢复，以及 WP18 的精确提交 CI/readback，按日常自迭代链路所需逐项接入；测试夹具不能代替生产授权或真实收益。
@@ -68,12 +69,13 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
+- 有限本地发布授权接续已通过独立复核：最终定向 92 项通过；独立复核覆盖 CLI/状态机等 204 项，并对最终授权器追加 6 项复验。类型、全仓 lint、manifest 与 Control Plane dry-run pack 通过，包内含新签名器入口。覆盖真实 Git/SQLite/Ed25519、额度耗尽、过期不续签、重启接续、撤回与并发变化；构建证据仍为 fixture，只验收到 `awaiting-pr`，未运行真实发布/部署。
 - Host 候选版本管理通过独立复核：含原生持久作业的定向 65 项与独立审批客户端相关 69 项通过。真实仓库临时 worktree 中 `personal-memory` 从 `0.1.33` 生成 `0.1.34`，仅两个版本文件变化，32 个插件和 3 个共享包的 manifest 校验通过。构建链测试使用夹具，未调用真实模型，也不作为自动采用或 npm 发布证据。
 - 启用后物理回退通过独立复核，覆盖同 Host 连续观察、真实文件恢复、三种 rename 断点、回执丢失、并发/后继部署与 ABA 拒绝、核心文件漂移、旧库迁移和原始回执保留。Host 使用签名子进程夹具，未据此宣称真实 systemd 或生产端到端通过。
 - 有限源码审批已通过独立复核：真实 Git/SQLite/子进程/Ed25519 的 compiled client→FD CLI→审批器及跨进程重放通过；构建证据使用 fixture，此结果不证明自动采用。当前整包测试结果见下方全仓门禁。
 - 普通前台反馈入口：Delivery 整包 791 项、Web Owner 76 项通过，类型、构建、lint、manifest 与 Delivery dry-run pack 通过。覆盖无需验收 profile 的 owner 反馈、实际模型、多模型不混用、纠正/撤回、`/new` 历史读取、身份换代、unknown 拒绝改判、schema 22→23 迁移和崩溃不重派；原生 AgentLoop 使用本地脚本模型，尚不作为自动采用或生产收益证据。
 - 真实失败来源链已通过独立代码与证据复核。定向检查：Growth 整包 83 项通过；Control Plane store/来源 fence/Host 准备与迁移相关 106 项、durable source job 与原生调度 15 项通过。覆盖 exact owner gap、全局列表隔离、反馈变化、最终提交冲突、重启和 unknown 不重放；两包类型、构建、lint、manifest 与 dry-run pack 通过。测试使用本地脚本模型与隔离构建夹具，不作为真实供应商效果或自动采用证据。
-- 最近全仓 `pnpm check` 已通过：manifest 校验、零 lint 警告、类型、构建、6,249 项测试通过（50 项跳过），以及全部 32 个插件和 3 个共享包的 dry-run pack。Control Plane 整包 586 项通过；此前 Evaluation 迁移 fixture 与 Web Owner 安装诊断问题不再阻塞门禁。此结果是工程检查，日常自动采用及生产端到端验收仍以本页交付边界为准。
+- 基线 `eccd7c0` 的全仓 `pnpm check` 已通过（不含后续有限发布授权接续）：manifest 校验、零 lint 警告、类型、构建、6,249 项测试通过（50 项跳过），以及全部 32 个插件和 3 个共享包的 dry-run pack。Control Plane 整包 586 项通过；此前 Evaluation 迁移 fixture 与 Web Owner 安装诊断问题不再阻塞门禁。此结果是工程检查，日常自动采用及生产端到端验收仍以本页交付边界为准。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 - 未结算 generation 测试修复 `e33a6ae` 已通过 Linux、macOS 与 Windows 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35494781155)。测试用真实派发后丢失确认建立持久未结算状态，检查新 operation 不再重启。该跨平台结论不覆盖之后的新改动。
 

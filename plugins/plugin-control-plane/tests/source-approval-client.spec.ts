@@ -6,6 +6,8 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { requestSourceApproval, SourceApprovalClientError, validateSourceApprovalClientConfig,
   type SourceApprovalClientConfig, type SourceApprovalRequest } from '../src/source-approval-client.ts'
 
+import { requestSourceReleaseAuthorization } from '../src/source-release-client.ts'
+
 const roots: string[] = []
 const digest = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
 const request: SourceApprovalRequest = { protocol: 'dsh-source-approval/v1', planId: 'source-plan-1',
@@ -87,5 +89,35 @@ describe('source approval client', () => {
       configPath: '/tmp/config.json', timeoutMs: 1, extra: true })).toThrow(SourceApprovalClientError)
     expect(() => validateSourceApprovalClientConfig({ executable: { path: '/tmp/authority', sha256: 'a'.repeat(64) },
       configPath: '/tmp/config\n.json', timeoutMs: 1 })).toThrow(SourceApprovalClientError)
+  })
+})
+
+
+describe.runIf(process.platform === 'linux')('shared source authority transport purpose binding', () => {
+  const releaseRequest = { ...request, protocol: 'dsh-source-release-authorization/v1' as const }
+  const authorization = { schemaVersion: 1, kind: 'dsh-source-release-authorization', authorizationId: 'release-1', authority: 'release-owner', keyId: 'release-key',
+    planId: request.planId, planDigest: request.planDigest, baseCommit: 'c'.repeat(40), checkedTreeDigest: 'd'.repeat(64), checkedPatchDigest: 'e'.repeat(64),
+    scope: ['plugins/helper'], authorizedAt: 1, expiresAt: 2, signature: Buffer.alloc(64).toString('base64'), releasePolicy: {
+      targetBranch: 'repair', candidateId: 'helper', packageName: '@dsh-enhanced/helper', packageVersion: '1.0.1', packagePath: 'plugins/helper',
+      dshBaseline: '0.1.5', capabilities: ['helper'], authorities: ['filesystem'], requires: [], registryId: 'local', registryLocator: 'file:///registry',
+      registryReference: 'file:///registry/packages/helper/1.0.1/package.tgz', catalogId: 'catalog', catalogPath: '/private/catalog.json', minimumReproducibleBuilds: 2 } }
+
+  test('passes only the release protocol and reads the exact authorization through pinned descriptors', async () => {
+    const value = await fixture(`let input = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', value => input += value);
+      process.stdin.on('end', () => { if (JSON.parse(input).protocol !== 'dsh-source-release-authorization/v1' || process.argv[1] !== '/proc/self/fd/3') process.exit(19);
+        process.stdout.write(${JSON.stringify(JSON.stringify(authorization))}); });`)
+    await expect(requestSourceReleaseAuthorization(value.config, releaseRequest)).resolves.toMatchObject({ authorizationId: 'release-1', planId: request.planId })
+  })
+
+  test.each(['approval', 'wrong-plan', 'malformed'] as const)('release client rejects %s output before Host admission', async kind => {
+    const output = kind === 'approval' ? receipt() : JSON.stringify(kind === 'wrong-plan' ? { ...authorization, planId: 'different' } : {})
+    const value = await fixture(`process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(${JSON.stringify(output)}));`)
+    await expect(requestSourceReleaseAuthorization(value.config, releaseRequest)).rejects.toMatchObject({ code: 'FAILED' })
+  })
+
+  test('purpose-specific wrappers reject the other protocol before opening an executable', async () => {
+    const value = await fixture('process.exit(19)')
+    await expect(requestSourceApproval(value.config, releaseRequest as unknown as SourceApprovalRequest)).rejects.toMatchObject({ code: 'FAILED' })
+    await expect(requestSourceReleaseAuthorization(value.config, request as unknown as typeof releaseRequest)).rejects.toMatchObject({ code: 'FAILED' })
   })
 })
