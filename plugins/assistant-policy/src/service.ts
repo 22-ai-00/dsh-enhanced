@@ -371,6 +371,8 @@ export class AssistantPolicyService extends Service {
 
   /** Versioned capability for owner-scoped context tools added after the original registration API. */
   contextToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
+  /** Exact current-owner goal checkpoints may opt into a separate admission contract. */
+  checkpointToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
   /** Exact Skills definitions may authorize only their live isolated benchmark delegation. */
   delegatedSkillToolPreauthorizationVersion = (): 1 => { this.assertActive(); return 1 }
 
@@ -389,7 +391,7 @@ export class AssistantPolicyService extends Service {
     this.assertActive()
     const expectedCaller = ['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'action_github_compensate', 'action_github_compensation_status'].includes(definition.name) ? 'dsh-enhanced-assistant-actions'
       : ['isolation_run', 'isolation_grants'].includes(definition.name) ? 'dsh-enhanced-assistant-isolation'
-      : ['goal_create', 'goal_context', 'goal_schedule', 'goal_strategy', 'goal_wait_event'].includes(definition.name) ? 'dsh-enhanced-assistant-goals'
+      : ['goal_create', 'goal_context', 'goal_schedule', 'goal_strategy', 'goal_wait_event', 'goal_checkpoint'].includes(definition.name) ? 'dsh-enhanced-assistant-goals'
       : ['skill_run', 'skill_status'].includes(definition.name) ? 'dsh-enhanced-assistant-skills' : undefined
     if (expectedCaller === undefined || caller.fiber.name !== expectedCaller) {
       throw new Error('assistant-policy: preauthorization is reserved for approved assistant-actions GitHub tools, assistant-isolation tools, assistant-goals tools, or assistant-skills skill_run/skill_status')

@@ -115,12 +115,17 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
   let stage = 'setup', cleanup: 'pending' | 'succeeded' | 'unknown' = 'pending', stopped = false, started = false, setupSettled = false
   let goal: { id: string; sessionId: string } | undefined, delegation: NativeSkillMountBinding | null = null, result: NativeSkillGoalResult | null = null
   let captureFlight: Promise<NativeCapturedSkill> | undefined
+  let captureCleanup: 'not-started' | 'pending' | 'succeeded' | 'unknown' = 'not-started'
   let mountDelegated: (() => Promise<void>) | undefined
   const capabilities: NativeSkillCapabilityObservation[] = [], skillRuns: Readonly<Record<string, unknown>>[] = []
   const toolCalls: { name: string; inputDigest: string; outputDigest: string }[] = []
   const live = () => { signal.throwIfAborted(); benchmarkAssert(!stopped, 'native skill runtime closed') }
   const disposeAdapter = (value?: NativeAdapterBinding) => disposeAdapterFlight ??= Promise.resolve().then(() => value?.dispose())
   const disposeMount = (value?: { dispose(): void }) => disposeMountFlight ??= Promise.resolve().then(() => value?.dispose())
+  const disposeCapture = async (handle: { dispose(): void | Promise<void> }): Promise<void> => {
+    try { await handle.dispose(); captureCleanup = 'succeeded' }
+    catch (error) { captureCleanup = 'unknown'; throw error }
+  }
   const snapshot = () => ({ runtimeRoot: owner?.runtimeRoot ?? null, stage, meter: meter?.snapshot() ?? null, result, cleanup })
   const close = (): Promise<void> => {
     if (closeFlight) return closeFlight
@@ -128,9 +133,12 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
     // Factory, delegated mount, and capture can all outlive the foreground
     // operation. Drain each one so a late resource is disposed before a
     // successful close is reported.
-    const drainedCapture = captureFlight?.catch(error => {
-      if (signal.aborted && error === signal.reason) return
-      throw error
+    // A rejected source/authority check is an operation result. Cleanup still
+    // waits for that exact flight and separately requires an observed disposer.
+    // If Agent creation rejects before returning its handle, no cleanup proof
+    // is available; keep unknown even if a native factory later cleans up.
+    const drainedCapture = captureFlight?.catch(() => {}).then(() => {
+      benchmarkAssert(captureCleanup === 'not-started' || captureCleanup === 'succeeded', 'native skill capture cleanup unconfirmed')
     }) ?? Promise.resolve()
     const work = Promise.allSettled([owner?.shutdown() ?? ctx.fiber.dispose(), ...(adapter ? [disposeAdapter(adapter)] : []), ...(mount ? [disposeMount(mount)] : []), factoryPending ?? Promise.resolve(), mountPending ?? Promise.resolve(), drainedCapture]).then(async values => {
       await Promise.resolve()
@@ -266,6 +274,7 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
         // Delivery disposes the original foreground Agent at completion. Use
         // the existing growth-deposit contract from an inert, owned background
         // Agent. No prompt, native Goal, model request or invented trace is made.
+        captureCleanup = 'pending'
         const handle = await ctx.agents.create({ sessionId: SessionId(`skill-capture-${acceptanceDigest([scope, frozen.cellId]).slice(0, 40)}`),
           meta: { cwd: scope.workspace, agentPreset: scope.preset }, signal: captureSignal,
           agentOptions: { provider: frozen.model.provider, model: frozen.model.model, maxTokens: frozen.execution.maxOutputTokensPerCall },
@@ -282,7 +291,7 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
           candidate = await raw(skills).stageOwnerVerifiedSuccessCandidate({ agent: handle.agent, signal: captureSignal }, { ownerRouteId: runtime.ownerRouteId, successLocators: [{ sessionId: goal.sessionId, goalId: goal.id }], minimumOccurrences: 1, name: frozen.source.name, description: frozen.source.description },
             { id: `benchmark-source-${frozen.cellId}`, scope, ownerRouteId: runtime.ownerRouteId, expiresAt: Date.now() + 10000, assertCurrent })
           assertCurrent()
-        } finally { await handle.dispose() }
+        } finally { await disposeCapture(handle) }
         const selection: NativeSkillSelection = { scope, ownerRouteId: runtime.ownerRouteId, skillName: frozen.source.name, version: candidate.parentVersion + 1, candidateId: candidate.id }
         const snapshot = await skills.inspectOwnerBenchmarkArm(selection, captureSignal)
         return Object.freeze({ source: skills, selection, snapshot, origin: Object.freeze({ model: frozen.model, budget: frozen.budget, execution: frozen.execution,

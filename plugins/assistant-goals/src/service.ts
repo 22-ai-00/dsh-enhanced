@@ -83,6 +83,23 @@ function excerptGoalContext(value: unknown, length: number): string {
   return typeof value === 'string' ? value.slice(0, length) : ''
 }
 
+/** Check untrusted tool input without invoking getters or inheriting prototype data. */
+function plainJsonData(value: unknown): boolean {
+  if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) return Number.isFinite(value as number) || typeof value !== 'number'
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
+    const names = Object.getOwnPropertyNames(value)
+    if (!names.includes('length') || names.some(name => name !== 'length' && !/^(?:0|[1-9][0-9]*)$/u.test(name))) return false
+    for (let index = 0; index < value.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor) || !plainJsonData(descriptor.value)) return false
+    }
+    return names.length === value.length + 1
+  }
+  if (!value || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return false
+  return Object.values(Object.getOwnPropertyDescriptors(value)).every(descriptor => descriptor.enumerable && 'value' in descriptor && plainJsonData(descriptor.value))
+}
+
 /** A complete, low-volume current-state projection when full history cannot fit. */
 export function renderCompactGoalContext(record: GoalRecord, verification: GoalFeedback | undefined, goalAcceptance: GoalOutcomeView | undefined, maxChars: number): string {
   const compactRun = (run: GoalFeedback['verification']['current'], includeCriteria: boolean, textLimit: number) => run === null ? null : {
@@ -500,6 +517,34 @@ export class AssistantGoalsService extends Service {
       this.#scope(execution.agent, 'observe', false)
       if (args.focus === true) this.#scope(execution.agent, 'focus', false)
       return args.goal_id === undefined || this.#store.get(scope, args.goal_id as string) !== undefined
+    } catch { return false }
+  }
+
+  /** Read-only admission for one exact current-owner checkpoint CAS. */
+  preauthorizeCheckpoint = (execution: ToolExecution): boolean => {
+    try {
+      if (!this.#active || execution.signal.aborted || !execution.agent || !execution.arguments || typeof execution.arguments !== 'object'
+        || Array.isArray(execution.arguments) || Object.getPrototypeOf(execution.arguments) !== Object.prototype || Object.getOwnPropertySymbols(execution.arguments).length !== 0) return false
+      const args = execution.arguments as Record<string, unknown>; const names = Object.getOwnPropertyNames(args)
+      if (names.length !== 7 || !['goal_id', 'expected_version', 'next_step', 'blockers', 'assumptions', 'evidence_refs', 'dependencies'].every(key => names.includes(key))
+        || !plainJsonData(args)) return false
+      if (!Array.isArray(args.assumptions) || args.assumptions.some(item => !item || typeof item !== 'object' || Array.isArray(item)
+        || Object.getPrototypeOf(item) !== Object.prototype || Object.getOwnPropertyNames(item).length !== 2
+        || !['statement', 'expires_at'].every(key => Object.hasOwn(item, key)))) return false
+      const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
+      if (delivery?.preferencePrincipalForAgent(execution.agent) === undefined) return false
+      const scope = this.#scope(execution.agent, 'checkpoint', false)
+      this.#scope(execution.agent, 'observe', false)
+      const checkpoint: GoalCheckpoint = {
+        nextStep: args.next_step as string, blockers: args.blockers as string[],
+        assumptions: (args.assumptions as Array<{ statement: string; expires_at: number }>).map(item => ({ statement: item.statement, expiresAt: item.expires_at })),
+        evidenceRefs: args.evidence_refs as string[], dependencies: args.dependencies as string[],
+      }
+      const record = this.#store.preflightCheckpoint(scope, args.goal_id as string, args.expected_version as number, checkpoint)
+      const native = this.ctx.get('goals')?.get(execution.agent)
+      return native !== undefined && record.native.sessionId === String(execution.agent.session.id) && record.native.goalId === String(native.id)
+        && record.native.revision === native.revision && record.native.phase === native.phase && record.native.roundsStarted === native.roundsStarted
+        && record.native.maxGoalRounds === native.maxGoalRounds && record.native.objective === native.objective
     } catch { return false }
   }
 

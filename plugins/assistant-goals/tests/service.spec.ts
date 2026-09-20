@@ -29,7 +29,7 @@ import type { AcceptanceProfile } from '@dsh-enhanced/assistant-verifier'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false, verifyGoalOutcome = false, stepMaxDurationMs?: number,
-  options: Pick<GoalsConfig, 'preauthorizedCreateMaxRounds' | 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits' | 'strategy'> = {}, productionPersistence = false) {
+  options: Pick<GoalsConfig, 'preauthorizedCreateMaxRounds' | 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits' | 'strategy'> = {}, productionPersistence = false, realPolicy = false) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
@@ -60,10 +60,16 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
       return { authorityId, principalId, principalRecordId: `record-${principalId}`, principalVersion: 1, workspace, agentPreset,
         bindingVersion: routeBinding?.version ?? 1, generation: routeBinding?.generation ?? 1 }
     } } as never)
-  ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }),
-    // Older Policy has the registration API but does not recognize context tools.
-    registerPreauthorizedTool: (_caller: Context, tool: { name: string }) => { if (tool.name === 'goal_context') throw new Error('legacy Policy: reserved tool') },
-    evaluateAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }), evaluate: () => ({ effect: allowed ? 'allow' : 'deny' }), getBudgetConfig: () => ({ metric: 'automation-runs' }) } as never)
+  if (realPolicy) {
+    const policyPath = new URL('../../assistant-policy/src/service.ts', import.meta.url)
+    const { AssistantPolicyService } = await import(policyPath.href) as { AssistantPolicyService: new (...args: any[]) => unknown }
+    await ctx.plugin(AssistantPolicyService as never, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', rules: [{ id: 'goals-owner', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: 'owner' }, actions: ['create', 'observe', 'checkpoint', 'inspect'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['foreground'] } }] } as never)
+  } else {
+    ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }),
+      // Older Policy has the registration API but does not recognize context tools.
+      registerPreauthorizedTool: (_caller: Context, tool: { name: string }) => { if (tool.name === 'goal_context' || tool.name === 'goal_checkpoint') throw new Error('legacy Policy: reserved tool') },
+      evaluateAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }), evaluate: () => ({ effect: allowed ? 'allow' : 'deny' }), getBudgetConfig: () => ({ metric: 'automation-runs' }) } as never)
+  }
   let hostExecutor: { descriptor: { catalogDigest: string }; execute(input: unknown): Promise<unknown> } | undefined
   const automationHashes = new Map<string, { definition: unknown; definitionHash: string }>()
   const reconcileSystem = vi.fn((input: { automationId: string; definition: unknown }) => {
@@ -83,6 +89,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   const create = async (id: string, owner?: string) => {
     const handle = await ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'fixture', model: 'fixture' } })
     if (owner !== undefined) owners.set(handle.agent, owner)
+    if (realPolicy && owner !== undefined) ctx.assistantPolicy.bindInitiator(handle.agent, 'foreground', owner)
     if (owner !== undefined) routeBinding = { id: `binding-${handle.agent.session.id}`, version: 1, generation: 1, sessionId: String(handle.agent.session.id), workspace: root, agentPreset: 'primary' }
     handles.set(handle.agent, handle)
     cleanups.push(() => handle.dispose())
@@ -139,6 +146,43 @@ function displayedWaitDeadline(snapshot: string): number {
 }
 
 describe('owner-scoped native goal context', () => {
+  it('preauthorizes one exact live checkpoint through real Policy and ToolRuntime without mutating its preflight', async () => {
+    const f = await harness(undefined, undefined, undefined, false, false, undefined, {}, false, true)
+    const agent = await f.create('checkpoint-owner', 'owner'); f.human.add(agent)
+    const record = f.service.create(agent, 'Record verified source context', 2)
+    const args = { goal_id: record.id, expected_version: record.version, next_step: 'Read the independently verified source.', blockers: [], assumptions: [], evidence_refs: ['source:verified'], dependencies: [] }
+    const execution = (arguments_: unknown, candidate = agent, signal = new AbortController().signal) => ({ callId: ToolCallId(`checkpoint-${Math.random()}`), rootCallId: ToolCallId(`checkpoint-root-${Math.random()}`), name: 'goal_checkpoint', arguments: arguments_, signal, agent: candidate, token: Symbol('checkpoint') as never })
+    const policy = f.ctx.assistantPolicy as unknown as { isPreauthorizedTool(value: unknown): boolean }
+    expect(policy.isPreauthorizedTool(execution(args))).toBe(true)
+    expect((await f.ctx.tools.execute(execution(args))).isError).toBe(false)
+    expect(f.service.inspect(agent, record.id)).toMatchObject({ version: record.version + 1, checkpoint: { nextStep: args.next_step } })
+    expect(policy.isPreauthorizedTool(execution(args))).toBe(false)
+
+    const foreign = await f.create('checkpoint-foreign', 'other'); f.human.add(foreign)
+    expect(policy.isPreauthorizedTool(execution({ ...args, expected_version: record.version + 1 }, foreign))).toBe(false)
+    const sameOwnerOtherSession = await f.create('checkpoint-same-owner-other-session', 'owner'); f.human.add(sameOwnerOtherSession)
+    expect(policy.isPreauthorizedTool(execution({ ...args, expected_version: record.version + 1 }, sameOwnerOtherSession))).toBe(false)
+    const cancelled = new AbortController(); cancelled.abort()
+    expect(policy.isPreauthorizedTool(execution({ ...args, expected_version: record.version + 1 }, agent, cancelled.signal))).toBe(false)
+    const before = f.service.inspect(agent, record.id)
+    const assumptions: unknown[] = [], getter = vi.fn(() => ({ statement: 'must not read', expires_at: 0 }))
+    Object.defineProperty(assumptions, '0', { enumerable: true, get: getter })
+    Object.defineProperty(assumptions, 'length', { value: 1 })
+    expect(policy.isPreauthorizedTool(execution({ ...args, expected_version: before.version, assumptions }))).toBe(false)
+    expect(getter).not.toHaveBeenCalled()
+    expect(policy.isPreauthorizedTool(execution({ ...args, expected_version: before.version, assumptions: [{ statement: 'bounded', expires_at: 0, extra: 'forged' }] }))).toBe(false)
+    expect(f.service.inspect(agent, record.id)).toEqual(before)
+    f.owners.delete(agent)
+    expect(policy.isPreauthorizedTool(execution({ ...args, expected_version: before.version }))).toBe(false)
+  })
+
+  it('rejects checkpoint preauthorization when observe permission is absent', async () => {
+    const f = await harness(); const agent = await f.create('checkpoint-observe-denied', 'owner'); f.human.add(agent)
+    const record = f.service.create(agent, 'Observe permission must remain required', 2)
+    f.denyAction('observe')
+    expect(f.service.preauthorizeCheckpoint({ callId: ToolCallId('checkpoint-observe-denied'), rootCallId: ToolCallId('checkpoint-observe-denied'), name: 'goal_checkpoint', arguments: { goal_id: record.id, expected_version: record.version, next_step: 'No write', blockers: [], assumptions: [], evidence_refs: [], dependencies: [] }, signal: new AbortController().signal, agent, token: Symbol('checkpoint-observe-denied') as never })).toBe(false)
+  })
+
   it('explains the configured native goal entry only to a live authorized owner turn', async () => {
     const f = await harness(undefined, undefined, undefined, true, true, undefined, { preauthorizedCreateMaxRounds: 3, executionBudget: scheduleBudget })
     const owner = await f.create('entry-owner', 'owner'), other = await f.create('entry-other')

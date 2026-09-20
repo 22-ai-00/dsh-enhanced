@@ -377,6 +377,21 @@ export class GoalStore {
     return freeze({ ...checkpoint, dependencyBindings: bindings })
   }
 
+  #checkpointPreflight(scope: GoalScope, id: string, expectedVersion: number, requested: GoalCheckpoint): GoalRecord {
+    const found = this.#read(id)
+    if (!found) throw new GoalStoreError('not-found')
+    if (!same(found.scope, scope)) throw new GoalStoreError('not-found')
+    if (found.version !== expectedVersion) fail('conflict')
+    this.#validateDependencies(scope, id, requested)
+    return found
+  }
+
+  /** Read-only checkpoint admission used by a preauthorization predicate. */
+  preflightCheckpoint(scopeValue: GoalScope, idValue: string, expectedVersion: number, checkpointValue: GoalCheckpoint): GoalRecord {
+    const scope = scopeInput(scopeValue); const id = text(idValue, 512); integer(expectedVersion, 1); const requested = checkpointInput(checkpointValue)
+    return this.#checkpointPreflight(scope, id, expectedVersion, requested)
+  }
+
   observe(scopeValue: GoalScope, nativeValue: NativeGoalState, allowCreate: boolean): GoalRecord | undefined {
     const scope = scopeInput(scopeValue); const native = nativeInput(nativeValue); const id = idFor(native)
     return this.#transaction(() => {
@@ -448,12 +463,7 @@ export class GoalStore {
   checkpoint(scopeValue: GoalScope, idValue: string, expectedVersion: number, checkpointValue: GoalCheckpoint): GoalRecord {
     const scope = scopeInput(scopeValue); const id = text(idValue, 512); integer(expectedVersion, 1); const requested = checkpointInput(checkpointValue)
     return this.#transaction(() => {
-      const found = this.#read(id)
-      if (!found) throw new GoalStoreError('not-found')
-      if (!same(found.scope, scope)) throw new GoalStoreError('not-found')
-      const existing: GoalRecord = found
-      if (existing.version !== expectedVersion) fail('conflict')
-      this.#validateDependencies(scope, id, requested)
+      const existing = this.#checkpointPreflight(scope, id, expectedVersion, requested)
       const checkpoint = this.#bindDependencies(scope, requested)
       const updatedAt = Math.max(existing.updatedAt, Date.now())
       const next: GoalRecord = freeze({ ...existing, checkpoint, version: existing.version + 1, updatedAt })
