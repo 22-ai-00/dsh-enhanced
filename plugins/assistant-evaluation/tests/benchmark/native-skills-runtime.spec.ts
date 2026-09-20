@@ -54,6 +54,7 @@ class Adapter extends LlmAdapter {
   }
 }
 const factory = (reuse: boolean): NativeSkillGoalOptions['factory'] => (_model, { ctx }) => ({ adapter: new Adapter(ctx, reuse), inputTokenUpperBound: () => 10, dispose() {} })
+const rawService = <T>(value: T): T => (value as T & { [key: symbol]: T })[Symbol.for('cordis.original')] ?? value
 
 test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE)('captures an independently achieved native source and reuses its exact skill in a fresh Goal', async () => {
   const source = await createNativeSkillGoalRuntime({ ...await options('source'), factory: factory(false), source: { name: 'add-integers', description: 'Create a reusable integer addition program.', validityMs: 600000 } })
@@ -91,6 +92,70 @@ test('rejects an invalid budget before starting an adapter factory', async () =>
   } })).rejects.toThrow('invalid benchmark integer')
   expect(factoryCalls).toBe(0)
 })
+
+test('preserves a capture admission failure without treating it as a cleanup failure', async () => {
+  const source = await createNativeSkillGoalRuntime({ ...await options('capture-without-result'), factory: factory(false),
+    source: { name: 'add-integers', description: 'Create an integer addition program.', validityMs: 600000 } })
+  cleanups.push(source.close)
+  await expect(source.captureVerifiedSkill()).rejects.toThrow('live accepted source runtime required')
+  await expect(source.close()).resolves.toBeUndefined()
+  expect(source.snapshot().cleanup).toBe('succeeded')
+  expect(source.snapshot().meter?.modelCalls).toBe(0)
+})
+
+test.skipIf(!process.env.DSH_ISOLATION_TEST_IMAGE).each(['rejected', 'creation-failed', 'disposer-failed', 'late'] as const)('settles actual capture resources independently of the %s operation', async mode => {
+  let context!: Context
+  const source = await createNativeSkillGoalRuntime({ ...await options(`capture-${mode}`), stopTimeoutMs: 1000,
+    factory: (selected, environment) => { context = environment.ctx; return factory(false)(selected, environment) },
+    source: { name: 'add-integers', description: 'Create an integer addition program.', validityMs: 600000 } })
+  cleanups.push(() => source.close().catch(() => {}))
+  expect((await source.execute()).snapshot).toMatchObject({ outcome: { status: 'achieved' } })
+  const calls = source.snapshot().meter!.modelCalls
+  const skills = rawService(context.get('assistantSkills' as never)) as unknown as { stageOwnerVerifiedSuccessCandidate(): Promise<never> }
+  const rejected = new Error('source evidence rejected')
+  let started!: () => void, release!: () => void
+  const begun = new Promise<void>(resolve => { started = resolve })
+  const held = new Promise<void>(resolve => { release = resolve })
+  skills.stageOwnerVerifiedSuccessCandidate = async () => {
+    started()
+    if (mode === 'late') await held
+    throw rejected
+  }
+  let captureId: string | undefined
+  context.on('agent/created', ({ agent }) => { if (String(agent.session.id).startsWith('skill-capture-')) captureId = String(agent.id) })
+  const registry = rawService(context.agents)
+  if (mode === 'disposer-failed' || mode === 'creation-failed') {
+    const create = registry.create
+    registry.create = async function (options) {
+      const handle = await create.call(this, options)
+      if (mode === 'creation-failed') { await handle.dispose(); throw new Error('capture creation rejected') }
+      return { ...handle, dispose: async () => { await handle.dispose(); throw new Error('capture disposer rejected') } }
+    }
+  }
+  const capture = source.captureVerifiedSkill()
+  // Observe immediately so deliberate delayed failures cannot become unhandled rejections.
+  const captureFailure = capture.catch(error => error)
+  if (mode !== 'creation-failed') await begun
+  if (mode === 'late') {
+    await expect(source.close()).rejects.toThrow('shutdown deadline')
+    expect(source.snapshot().cleanup).toBe('unknown')
+    release()
+  }
+  const failure = await captureFailure
+  expect(captureId).toBeTypeOf('string')
+  if (mode === 'disposer-failed') expect(failure.message).toBe('capture disposer rejected')
+  else if (mode === 'creation-failed') expect(failure.message).toBe('capture creation rejected')
+  else expect(failure).toBe(rejected)
+  expect(registry.get(captureId as never)).toBeUndefined()
+  if (mode === 'rejected') {
+    await expect(source.close()).resolves.toBeUndefined()
+    expect(source.snapshot().cleanup).toBe('succeeded')
+  } else {
+    await expect(source.close()).rejects.toThrow()
+    expect(source.snapshot().cleanup).toBe('unknown')
+  }
+  expect(source.snapshot().meter!.modelCalls).toBe(calls)
+}, 120000)
 
 test('records unknown cleanup and disposes a factory binding that arrives after cancellation', async () => {
   const abort = new AbortController()

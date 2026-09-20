@@ -75,6 +75,8 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
 
 这是 `goal_checkpoint` 的参数；`expires_at` 是 Unix 毫秒时间，示例 0 表示已到期。版本变化会拒绝旧写入，应重新读取再决定是否更新。依赖只能指向相同 owner record/version、workspace 和 preset 的业务目标，不允许重复、自依赖或环。调用方只提交业务 Goal ID；Host 在同一个 CAS 事务内把依赖冻结为当时准确的 definition version/digest，不能由模型指定或覆盖。旧数据库中只有 ID 的依赖保持 `stale`（`reason=legacy-unbound`），必须在新的 owner checkpoint 中重新绑定，重启时不会静默追认。
 
+同一发行集合的 Policy 和 Goals 支持 checkpoint 预授权时，只有当前已认证 owner、当前 Session 和原生 Goal 精确绑定的七个完整参数可以跳过本次审批；预检只读取当前记录、版本和依赖图，不写入任何状态。实际执行仍重新进行 Policy、owner 和事务 CAS 校验；撤权、取消、旧版本或任何定义/依赖变化都会拒绝。checkpoint 仍不请求验收，也不把未验证的证据或来源视为成功。
+
 `goal_context` 和动态 `goal-task-context/v1` 会展示当前依赖状态。只有冻结定义仍一致、最新独立 whole-goal 回执为 `achieved`、且原生依赖目标已 complete 时才是 `achieved`；否则区分 `pending`、`failed`、`unknown`、`cleared` 和 `stale`。`stale` 的 reason 区分 `definition-changed` 与 `legacy-unbound`。原生 complete 本身不等于 achieved，缺少 Verifier/Outcome 服务也只能是 unknown。
 
 所有执行恢复入口都要求全部依赖为准确 achieved：包括新的原生自治回合、主人发起的 `goal_control resume`、`goal_schedule` 和 `goal_wait_event`。系统在准入、Session flush 后、wake 持久化前、Delivery resume 前、运行中和终态结算边界重复核验，并将有序依赖绑定写入 execution/wake identity。派发前变化会拒绝且不启动模型/工具；派发后变化保留 unknown 且不自动重放。重启后的未派发 wake 只在 Verifier/Outcome 再次就绪后有界重试并重新核验；过期 wake 终止为 denied。主人当前回合的检查、编辑和清理仍按原 Policy 执行，本门控不会自行授予新的动作权限。

@@ -28,6 +28,7 @@ Skills 提供同一可信 Host 进程内的受限委派接口：从原 owner 的
 - 同一 capability 只能挂载一次，来源服务生命周期内同一 plan/cell 只签发一次。同一 recipient 数据库的 reservation 在重启后仍拒绝重新挂载；没有 live capability 时不能恢复执行。全局重派约束仍依赖上层 Evaluation 记录。
 - 来源版本、候选父版本、owner route、Policy 和原始验收在调用及每个嵌套步骤前后复核。来源服务或其 Goals/Policy/Delivery 依赖卸载会撤销 grant；到期、recipient 卸载、外部取消和 disposer 均传播 AbortSignal。
 - 取消停止等待并抑制晚到结果；它不证明不合作的外部工具已停止。已派发但无法确认的调用保留 unknown，评测不能报告 quiescent 或成功。外部资源停机证据须由相应原生运行时提供。
+- 来源捕获的业务结果与资源清理分别结算：`close()` 等待同一次捕获结束，并确认捕获 Agent 的 disposer 成功。来源证据被拒绝仍是捕获失败，但不单独使清理变成 unknown；创建未返回可处置 handle、disposer 失败或关闭超时仍为 unknown，晚到结果不能改判。
 - 此接口不授予候选激活、生产发布、密封任务或验收签名权限。recipient 工具表和 Policy 应只开放本次任务所需能力。
 
 ## Evaluation Host 入口

@@ -51,6 +51,18 @@ describe('GoalStore', () => {
     reopened.close()
   })
 
+  it('preflights the exact checkpoint CAS and dependency graph without writing', () => {
+    const store = new GoalStore(':memory:')
+    const dependency = store.observe(scope(), native({ sessionId: 'dependency-session', goalId: 'dependency-goal' }), true)!
+    const record = store.observe(scope(), native(), true)!
+    expect(store.preflightCheckpoint(scope(), record.id, record.version, checkpoint({ dependencies: [dependency.id] }))).toEqual(record)
+    expect(store.get(scope(), record.id)).toEqual(record)
+    expect(() => store.preflightCheckpoint(scope(), record.id, record.version, checkpoint({ dependencies: ['missing'] }))).toThrow(GoalStoreError)
+    const dependent = store.checkpoint(scope(), record.id, record.version, checkpoint({ dependencies: [dependency.id] }))
+    expect(() => store.preflightCheckpoint(scope(), dependent.id, record.version, checkpoint())).toThrow(GoalStoreError)
+    store.close()
+  })
+
   it('preserves creation objective and only advances non-stale native snapshots', () => {
     const store = new GoalStore(':memory:')
     store.observe(scope(), native(), true)!

@@ -95,9 +95,9 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
   if (ctx.assistantPolicy?.contextToolPreauthorizationVersion?.() === 1) {
     ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, contextTool, execution => service.preauthorizeContext(execution))
   }
-  ctx.tools.register(defineTool({
+  const checkpointTool = defineTool({
     name: 'goal_checkpoint',
-    description: 'Save next step, blockers, expiring assumptions, evidence references and goal dependencies using version CAS. These are unverified planning notes; this cannot change the original objective, grant authority or mark success.',
+    description: 'Save next step, blockers, expiring assumptions, evidence references and goal dependencies using version CAS. expected_version comes from goal_context. assumptions.expires_at is Unix epoch milliseconds. dependencies must be existing same-owner business goal IDs, or [] when none; put dependency descriptions and evidence in evidence_refs. A checkpoint is planning only and never requests or establishes acceptance.',
     parameters: {
       goal_id: { type: 'string', required: true }, expected_version: { type: 'integer', required: true },
       next_step: { type: 'string', required: true },
@@ -113,7 +113,12 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
         nextStep: args.next_step, blockers: args.blockers, assumptions: args.assumptions.map(item => ({ statement: item.statement, expiresAt: item.expires_at })), evidenceRefs: args.evidence_refs, dependencies: args.dependencies,
       })) }
     },
-  }))
+  })
+  ctx.tools.register(checkpointTool)
+  const checkpointPolicy = ctx.assistantPolicy as typeof ctx.assistantPolicy & { checkpointToolPreauthorizationVersion?: () => 1 }
+  if (checkpointPolicy?.checkpointToolPreauthorizationVersion?.() === 1) {
+    checkpointPolicy.registerPreauthorizedTool?.(ctx, checkpointTool, execution => service.preauthorizeCheckpoint(execution))
+  }
   ctx.tools.register(defineTool({
     name: 'goal_control',
     description: 'Edit, pause, resume, or clear the current session native goal that is bound to this business goal. Requires a live authenticated owner turn and Policy permission for the requested operation. expected_revision is the native goal revision; clearing retains the business goal tombstone and history.',
