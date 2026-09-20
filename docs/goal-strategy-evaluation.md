@@ -82,20 +82,15 @@ node --input-type=module -e 'import { readFileSync, realpathSync } from "node:fs
 
 ### 2026-09-15 真实配对 run：persona 零触发的根因终审
 
-在 Docker 隔离 + 真实 TraeX `gpt-5.6-terra`、120s/450s 时间预算下跑完整 16-cell 同预算配对（4 case × 2 repeat × 2 臂），16/16 achieved、零 retained、零伪造 token/cost、`promotionAuthorized=false`，但 **8 ties、Δ0、CI [0,0]，且 advice persona 0/16 触发**，因此该 run **不构成策略增益证据**。证据与对抗复核见 strategy-traex-real-paired-2026-09-15.json。
+在 Docker 隔离 + 真实 TraeX `gpt-5.6-terra`、120s/450s 时间预算下跑完整 16-cell 同预算配对（4 case × 2 repeat × 2 臂），16/16 achieved、零 retained、零伪造 token/cost、`promotionAuthorized=false`，但 **8 ties、Δ0、CI [0,0]，且 advice persona 0/16 触发**，因此该 run **不构成策略增益证据**。原始 JSON 与对抗复核留本地；以下保留该次运行的诊断，不作为当前提交的复验结果。
 
-零触发经代码与真实 transcript 双侧钉死为**模型在天花板 corpus 下自主选择不调用，而非接线/预授权缺陷**：
+该次诊断确认 adaptive 会话拿到了 `goal_strategy` 工具和所需预授权，但四个 `strategy-v1` 任务首轮即通过独立 verifier，模型没有调用咨询工具。该记录支持“这组任务未触发目标机制”，不能证明策略无用，也不能证明更难的任务必然触发咨询。
 
-- `goal_strategy` 是纯模型自主工具，代码无任何自动 spawn 路径；仅 adaptive 臂注册（`tools.ts:21-33` 的 `service.strategyEnabled` 门，`strategy-goal-runtime.ts:149/154/250`），direct 臂从不装配。
-- calls 模式预授权闸放行：`preauthorizeStrategy` 要求 `budget.hasMeter(options)===true`（`service.ts:1001-1008`），而 calls 模式 `hasMeter` 只返回 `#active && #routeAllowed(route)`、不查 meter map（`budget.ts:253-254`），route 对 `{traex-agent,gpt-5.6-terra}` 精确命中白名单（`budget.ts:303`），`#active` 整 run 恒 true（`budget.ts:94/144`，仅 teardown 翻 false）。
-- 真实 transcript 铁证：`cal-state` 下恰好 8 个 adaptive 会话的每个 `request/header.header.tools` 都字面含 `goal_strategy`（每一轮请求都下发），但 8 个会话的 `tool/call` 序列只有 `goal_create -> isolation_run [-> goal_context|goal_checkpoint]`，`goal_strategy` 实际调用 **0/8**；同一活动 native goal round 内其它 goal 工具成功调用，证明 round 活跃、预授权管线正常。
-- 触发语义：工具描述写明"on uncertain reasoning or repeated failed criteria"，而四个 `strategy-v1` 任务首轮 `isolation_run` 即被独立 verifier 接受，从未出现失败判据或真实不确定性，故无咨询动机——这是 **corpus 难度/触发语义天花板**。
-
-下一步要测目标机制，必须换更难 corpus（多约束/对抗 verifier，首轮无法过验收）或注入首轮拒绝，使 goal 进入驱动 persona 咨询的状态，再用同一 call-count 配对 harness 复跑，先确认 `native.strategies>0` 与稳定的非 `-g1` 子调用块，才谈得上判断增益；不得靠调 prompt 制造增益。
+这一结果促成了下文独立版本的 `strategy-v2` 开发集。实际比较仍须先观测 `native.strategies>0` 与稳定的非 `-g1` persona 子调用块，再判断收益；不得靠调 prompt 制造增益。
 
 ## strategy-v2 难题开发集
 
-`strategy-v2` 是与 v1 平级的独立公开开发集（dataset id `dsh-strategy-development-v2`），专门用于上一节的下一步：四道多约束、含精确边界陷阱的 POSIX shell 题，使首轮 artifact 有合理概率过不了独立逐字节验收，从而真正驱动失败判据与 persona 咨询。四题为：
+`strategy-v2` 是与 v1 平级的独立公开开发集（dataset id `dsh-strategy-development-v2`），包含四道多约束、含精确边界陷阱的 POSIX shell 题，用于观测失败判据与 persona 咨询。题目更难本身不证明模型会调用策略工具或取得收益。四题为：
 
 1. `session-gap-split`：按相邻事件绝对时间差**严格大于** 300 秒切分会话（恰 300 秒不切）；原始值回退即跨恰好一个午夜（后续比较加 86400）；跨午夜时间戳按 mod 86400 渲染；输出 `start-end count`。
 2. `closed-range-intersection`：按名累积闭区间交集（下界取 max、上界取 min）；`lo === hi` 的单点仍可行，仅 `max(lo) > min(hi)` 才对**任一**名输出唯一一行 `NONE`；否则按名 ASCII 字节序输出。
@@ -115,4 +110,3 @@ dsh-benchmark report --database ./private/strategy-v2.sqlite --plan strategy-tra
 ```
 
 真实重跑使用与 2026-09-15 完全相同的 call-count 配对 harness（Docker 隔离、`gpt-5.6-terra`、120s/450s、两 repeats、零外部花费），但必须用新的 plan id 与独立 state 根（同 id 不同 dataset/limits 会被 BenchmarkStore 拒绝）。首发只观测两件事：`native.strategies > 0`（strategy 工具被模型真实调用）以及稳定的非 `-g1` persona 子调用块；在此之前不声称任何策略增益，也不得通过修改 prompt 人为制造调用。
-

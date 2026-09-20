@@ -270,29 +270,23 @@ test evidence, not a signed readiness phase. The transient service has a
 finite runtime limit and is stopped and removed by the fixture.
 
 The recorded supervisor run
-contains actual before/after/replay identities and runtime digests. Full-check
-and independent review evidence is recorded in the
-engineering validation.
+contains actual before/after/replay identities and runtime digests. Current
+repository verification is summarized in [RSI status](rsi-status.md).
 
 `scripts/e2e/systemd-readiness-real-dsh.mjs` runs an opt-in disposable DSH Web
 profile with actual Control Plane observer and Policy candidate entries. It
 checks signed reload → signed readiness, independent signature verification,
 byte-identical readiness replay without another Host restart, and refusal after
-the Host is replaced with the candidate state changed. The historical v2
-recorded real DSH run
-used fixture requests without Control Plane CAS and retains both signed
-receipts and the readiness probe preimage.
-The readiness engineering validation
-records the full repository check, package inspection, prior failures and
-independent review for this capability.
-
-The recorded v3 fixture uses the existing Control Plane store for signed approval,
+the Host is replaced with the candidate state changed.
+The fixture uses the existing Control Plane store for signed approval,
 durable requests, receipt verification and phase CAS, then reopens the ledger.
 Set `DSH_READINESS_EXPECT_INACTIVE=1` to start with the candidate disabled and
 require signed failed readiness plus durable `rollback-pending`; otherwise the
 active candidate must reach `awaiting-effect-blocked-replay`. Catalog integrity,
-approval authority and profile staging are explicit fixture inputs. This does
-not execute npm installation, CLI profile restoration or physical Host rollback.
+approval authority and profile staging are explicit fixture inputs. The default
+readiness branch stops there; `DSH_READINESS_ROLLBACK=restore|stop` additionally
+exercises CLI profile restoration/removal and physical Host recovery as described
+below. Neither branch performs npm installation.
 The fixture retains signed receipts, probe preimages and actual phase
 transitions locally. Current engineering verification is summarized in
 [RSI status](rsi-status.md); historical verification is available in Git history.

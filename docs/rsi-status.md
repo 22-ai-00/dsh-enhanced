@@ -58,7 +58,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
 - 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。当前代码（含 Policy 并发迁移夹具修复）的本地 `pnpm check` 退出 0：6,088 项通过、44 项跳过、35 个包的 dry-run pack（32 个插件、3 个共享库），其中 Control Plane 为 494 项、Policy 为 216 项通过。Host request schema 2 / attestor v5 的定向测试覆盖旧凭证保留、前驱替换、普通阶段换代与异步验签竞争；这些是工程验证，不是生产自治完成证明。
 - 真实 DSH CLI `0.1.5-rc.2` 的 `systemd-readiness-real-dsh.mjs` 默认探针与 `DSH_READINESS_ROLLBACK=restore` 探针均退出 0；运行摘要与当前实现哈希一致。签名正确但代次替换的 synthetic negative receipt 被拒绝且未推进状态；它不构成外部副作用观测。命令与边界见 [Host 签名器](systemd-host-attestor.md)。
-- Host 验证链提交 `eda330e` 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35489862536) 已完成：Linux、macOS 仓库检查与 Windows ACP smoke 全部通过。结论仅绑定该提交，后续改动须核对自身 CI。
-- 文档提交 `2d4b228` 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35488175203) 曾在 macOS 的 schema-v0 并发迁移测试中，于测试锁的 `COMMIT` 处报 `database is locked`。夹具现使用与生产相同的 5 秒 SQLite busy timeout，并在异常路径释放连接和 worker；生产迁移代码及旧 schema 断言不变。Linux 账本定向 18 项通过，独立读锁探针验证了无等待时报错、有等待时提交成功；修复仍需在自身提交的 macOS CI 复验。
+- 最近已完成的跨平台 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35489862536) 绑定 `eda330e`：Linux、macOS 仓库检查与 Windows ACP smoke 全部通过。Policy 迁移夹具修复提交 `be350db` 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35490776384) 在本次核对时仍运行中，不能沿用前一提交的通过结论。
+- Policy 并发迁移夹具已针对 macOS `COMMIT` 锁竞争增加 5 秒 busy timeout 和异常清理；Linux 定向 18 项与独立读锁探针通过。macOS 修复结论等待上述 CI。
 
 原始运行 JSON、日志和临时身份留本地或 CI artifacts，仓库只保留命令、结论和限制。确需供可重复探针使用的固定输入留在 `scripts/e2e/fixtures/`，不从本次网络结果反推预期值。
