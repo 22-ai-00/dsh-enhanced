@@ -21,6 +21,7 @@ type MigrationWorkerResult =
   | { ok: false; error: { name?: string; code?: string; message?: string } }
 
 function migrationWorker(path: string, phase: SharedArrayBuffer): {
+  worker: Worker
   ready: Promise<void>
   result: Promise<MigrationWorkerResult>
 } {
@@ -42,25 +43,46 @@ function migrationWorker(path: string, phase: SharedArrayBuffer): {
       if (code !== 0) reject(new Error(`policy migration worker exited with code ${code}`))
     })
   })
-  return { ready, result }
+  // The parent also awaits this promise in the success path. Retaining a
+  // rejection handler prevents an intentionally terminated worker in a parent
+  // cleanup path from becoming an unhandled rejection.
+  void result.catch(() => {})
+  return { worker, ready, result }
 }
 
 async function concurrentlyMigrate(path: string): Promise<MigrationWorkerResult[]> {
-  // Keep a writer open so every worker reaches the migration lock from the same
-  // on-disk version. This deterministically exercises lock-wait revalidation.
-  const migrationLock = new DatabaseSync(path)
-  migrationLock.exec('BEGIN IMMEDIATE')
-  const phase = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2)
-  const first = migrationWorker(path, phase)
-  const second = migrationWorker(path, phase)
-  await Promise.all([first.ready, second.ready])
-  expect(Atomics.load(new Int32Array(phase), 0)).toBe(2)
-  Atomics.store(new Int32Array(phase), 1, 1)
-  Atomics.notify(new Int32Array(phase), 1, 2)
-  await new Promise(resolve => setTimeout(resolve, 100))
-  migrationLock.exec('COMMIT')
-  migrationLock.close()
-  return Promise.all([first.result, second.result])
+  // Keep a writer open so each worker starts from the same on-disk version.
+  // `ready` only confirms the worker reached its test gate; it does not prove
+  // that it has reached SQLite's migration lock.
+  let migrationLock: DatabaseSync | undefined
+  let first: ReturnType<typeof migrationWorker> | undefined
+  let second: ReturnType<typeof migrationWorker> | undefined
+  let committed = false
+  try {
+    migrationLock = new DatabaseSync(path)
+    migrationLock.exec('PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE')
+    const phase = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2)
+    first = migrationWorker(path, phase)
+    second = migrationWorker(path, phase)
+    await Promise.all([first.ready, second.ready])
+    expect(Atomics.load(new Int32Array(phase), 0)).toBe(2)
+    Atomics.store(new Int32Array(phase), 1, 1)
+    Atomics.notify(new Int32Array(phase), 1, 2)
+    // Give both openers a chance to contend, but rely on the bounded SQLite
+    // busy handler rather than treating this delay as a lock-arrival proof.
+    await new Promise(resolve => setTimeout(resolve, 100))
+    migrationLock.exec('COMMIT')
+    committed = true
+    return await Promise.all([first.result, second.result])
+  } finally {
+    if (migrationLock !== undefined) {
+      if (!committed) {
+        try { migrationLock.exec('ROLLBACK') } catch { /* transaction may be closed */ }
+      }
+      migrationLock.close()
+    }
+    await Promise.allSettled([first?.worker.terminate(), second?.worker.terminate()].filter((item): item is Promise<number> => item !== undefined))
+  }
 }
 
 function seedLegacyVersion(path: string, version: 1 | 2 | 3 | 5): void {
