@@ -12,6 +12,7 @@ import { mintGrowthAuthority, type GrowthAuthority, type GrowthDeliveryPort } fr
 import { runGrowthAgent, type GrowthAgentRunResult } from './growth-agent.js'
 import { version } from './version.js'
 import type { GrowthSourceGap, GrowthSourcePlanePort } from './source-port.js'
+import { UsageLearningRuntime, type UsageReviewInput, type UsageReviewResult } from './usage-runtime.js'
 
 export const name = 'dsh-enhanced-assistant-growth-driver'
 export { version, Config, normalizeConfig }
@@ -87,6 +88,7 @@ export class AssistantGrowthDriverService extends Service {
   readonly #abort = new AbortController()
   #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal; available: () => boolean } | undefined
   #health: GrowthWakeHealth = { lastWakeAt: null, outcome: 'never-run', reason: null, run: null }
+  #usage: UsageLearningRuntime | undefined
 
   constructor(ctx: Context, input: AssistantGrowthDriverConfig = {}) {
     super(ctx, 'assistantGrowthDriver')
@@ -102,6 +104,20 @@ export class AssistantGrowthDriverService extends Service {
         await this.#flight
       }
     }, 'assistant-growth-driver.runtime')
+    if (this.#config.usageLearning.enabled) {
+      ctx.inject(['assistantEvaluation', 'assistantAutomations'], usageCtx => {
+        const usage = new UsageLearningRuntime(this.#config, {
+          evaluation: usageCtx.assistantEvaluation, automations: usageCtx.assistantAutomations,
+          delivery: usageCtx.assistantDelivery, review: input => this.#reviewUsage(input),
+        })
+        usageCtx.effect(() => async () => {
+          if (this.#usage === usage) this.#usage = undefined
+          await usage.close()
+        }, 'assistant-growth-driver.usage-learning')
+        this.#usage = usage
+        usage.start()
+      })
+    }
     if (this.#config.pluginSourceProposals.enabled) {
       // Optional provider lives in a nested injection. Its generation owns the
       // source capability and cancellation; the outer driver remains usable
@@ -172,6 +188,21 @@ export class AssistantGrowthDriverService extends Service {
   // Cordis traces public service calls through a proxy. Bind these entry points
   // to the owning instance so private state and the wake's Fiber stay intact.
   health = (): GrowthWakeHealth => this.#health
+  usageHealth = () => this.#usage?.health() ?? { enabled: this.#config.usageLearning.enabled, connected: false }
+
+  async #reviewUsage(input: UsageReviewInput): Promise<UsageReviewResult> {
+    // Unlike timer nudges, a durable job must run its own frozen source, never
+    // coalesce onto an unrelated manual wake and report that wake as its result.
+    while (this.#flight !== undefined) { await this.#flight; input.assertCurrent() }
+    input.assertCurrent()
+    let outcome: UsageReviewResult = 'unknown'
+    const flight = this.#runWake({ usage: input }).then(() => {
+      outcome = this.#health.outcome === 'ran' && this.#health.run?.outcome === 'succeeded' ? 'reviewed' : 'unknown'
+    }).finally(() => { if (this.#flight === flight) this.#flight = undefined })
+    this.#flight = flight
+    await flight
+    return outcome
+  }
 
   /** Run one wake immediately (also used by tests / an explicit Host trigger). */
   wake = (input: { sourceAgent?: Agent } = {}): Promise<void> => {
@@ -195,8 +226,8 @@ export class AssistantGrowthDriverService extends Service {
     return typeof key === 'string' && key.length > 0
   }
 
-  async #runWake(input: { sourceAgent?: Agent }): Promise<void> {
-    const wakeId = `growth-wake-${Date.now()}-${randomUUID()}`
+  async #runWake(input: { sourceAgent?: Agent; usage?: UsageReviewInput }): Promise<void> {
+    const wakeId = input.usage?.id ?? `growth-wake-${Date.now()}-${randomUUID()}`
     const startedAt = Date.now()
     const config = this.#config
     if (!config.scope) {
@@ -212,6 +243,11 @@ export class AssistantGrowthDriverService extends Service {
     let authority
     try {
       authority = mintGrowthAuthority(delivery as unknown as GrowthDeliveryPort, config.scope, startedAt + config.maxDurationMs)
+      if (input.usage) {
+        const base = authority, usage = input.usage
+        authority = Object.freeze({ ...base, assertCurrent() { base.assertCurrent(); usage.assertCurrent() } })
+        authority.assertCurrent()
+      }
     } catch (error) {
       this.#health = { lastWakeAt: startedAt, outcome: 'skipped', reason: `missing-binding:${errorMessage(error)}`, run: null }
       return
@@ -219,13 +255,13 @@ export class AssistantGrowthDriverService extends Service {
     let model: Readonly<ModelSelection> | undefined
     let modelFailure: string | undefined
     try {
-      const selected = config.provider !== null && config.model !== null
+      const selected = input.usage?.model ?? (config.provider !== null && config.model !== null
         ? { provider: config.provider, model: config.model,
           ...(config.reasoningEffort === null ? {} : { reasoningEffort: config.reasoningEffort }) }
         : delivery.inspectOwnerModelSelection({ authorityId: config.scope.ownerRouteId,
           principalId: config.scope.principalId, workspace: config.scope.workspace,
           agentPreset: config.scope.preset,
-          ...(input.sourceAgent === undefined ? {} : { sourceAgent: input.sourceAgent }) })
+          ...(input.sourceAgent === undefined ? {} : { sourceAgent: input.sourceAgent }) }))
       if (!selected.provider || !selected.model) throw new Error('owner model selection is unavailable')
       model = Object.freeze({ provider: selected.provider, model: selected.model,
         ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(selected.reasoningEffort) }) })
@@ -266,7 +302,7 @@ export class AssistantGrowthDriverService extends Service {
     let reservationId: string | undefined
     let reservationSettled = false
     let agentSubmitted = false
-    if (config.budgetId !== null && config.budgetAmount !== null) {
+    if (input.usage === undefined && config.budgetId !== null && config.budgetAmount !== null) {
       try {
         const reservation = policy.reserve({
           budgetId: config.budgetId,
@@ -291,7 +327,9 @@ export class AssistantGrowthDriverService extends Service {
       const source = bound !== undefined && bound.available() ? bound : undefined
       const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, model, goals, skills,
         ...(source === undefined ? {} : { sourcePlane: source.port }),
-        signal: source === undefined ? this.#abort.signal : AbortSignal.any([this.#abort.signal, source.signal]),
+        ...(input.usage === undefined ? {} : { feedback: input.usage.source }),
+        signal: AbortSignal.any([this.#abort.signal, ...(source === undefined ? [] : [source.signal]),
+          ...(input.usage === undefined ? [] : [input.usage.signal])]),
       })
       if (reservationId !== undefined) { policy.finalize(reservationId, config.budgetAmount!); reservationSettled = true }
       this.#health = { lastWakeAt: startedAt, outcome: 'ran', reason: run.outcome, run, ownerAnchored }

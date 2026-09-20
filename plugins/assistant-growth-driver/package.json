@@ -1,7 +1,7 @@
 {
   "name": "@dsh-enhanced/assistant-growth-driver",
   "version": "0.1.0",
-  "description": "Opt-in bounded background growth agent that deposits paused skill candidates from owner-verified successes.",
+  "description": "Bounded growth agent with durable reviews driven by owner-verified task feedback and frozen source models.",
   "license": "MIT",
   "type": "module",
   "main": "./lib/index.js",
@@ -61,12 +61,14 @@
     "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-session": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-tools": ">=0.1.2-rc.1 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-delivery": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-goals": ">=0.1.25 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-skills": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-super-relay-budget": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/plugin-control-plane": ">=0.1.33 <0.2.0"
+    "@dsh-enhanced/plugin-control-plane": ">=0.1.33 <0.2.0",
+    "@dsh-enhanced/assistant-evaluation": ">=0.1.33 <0.2.0",
+    "@dsh-enhanced/assistant-automations": ">=0.1.33 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -107,6 +109,12 @@
     },
     "@dsh-enhanced/plugin-control-plane": {
       "optional": true
+    },
+    "@dsh-enhanced/assistant-evaluation": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-automations": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -129,6 +137,8 @@
     "@dsh-enhanced/assistant-super-relay-budget": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "@dsh-enhanced/assistant-evaluation": "workspace:*",
+    "@dsh-enhanced/assistant-automations": "workspace:*"
   }
 }

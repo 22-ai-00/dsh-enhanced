@@ -80,6 +80,8 @@ export interface AssistantGrowthDriverConfig {
   scope?: GrowthOwnerScopeConfig
   workflowOwnerAnchored?: WorkflowOwnerAnchoredConfig
   pluginSourceProposals?: PluginSourceProposalsConfig
+  /** One-time opt-in to durable reviews driven by actual trusted foreground results. */
+  usageLearning?: { enabled?: boolean; databasePath?: string; maxPending?: number; lookbackMs?: number }
 }
 
 export interface NormalizedWorkflowOwnerAnchoredConfig {
@@ -98,7 +100,7 @@ export interface NormalizedPluginSourceProposalsConfig {
   readonly planTtlMs: number
 }
 
-export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'provider' | 'model' | 'reasoningEffort' | 'apiKeyEnv' | 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored' | 'pluginSourceProposals'>> {
+export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGrowthDriverConfig, 'provider' | 'model' | 'reasoningEffort' | 'apiKeyEnv' | 'budgetId' | 'budgetAmount' | 'scope' | 'workflowOwnerAnchored' | 'pluginSourceProposals' | 'usageLearning'>> {
   readonly provider: string | null
   readonly model: string | null
   readonly reasoningEffort: string | null
@@ -108,6 +110,7 @@ export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGro
   readonly scope: GrowthOwnerScopeConfig | null
   readonly workflowOwnerAnchored: NormalizedWorkflowOwnerAnchoredConfig
   readonly pluginSourceProposals: NormalizedPluginSourceProposalsConfig
+  readonly usageLearning: Readonly<{ enabled: boolean; databasePath: string | null; maxPending: number; lookbackMs: number }>
 }
 
 const fields = new Set([
@@ -129,6 +132,7 @@ const fields = new Set([
   'scope',
   'workflowOwnerAnchored',
   'pluginSourceProposals',
+  'usageLearning',
 ])
 
 const ref = Schema.string().pattern(/^[A-Z_][A-Z0-9_]*$/u)
@@ -195,6 +199,10 @@ const schema = Schema.object({
   scope: scopeSchema,
   workflowOwnerAnchored: workflowOwnerAnchoredSchema,
   pluginSourceProposals: pluginSourceProposalsSchema,
+  usageLearning: Schema.object({ enabled: Schema.boolean().default(false), databasePath: boundedText(4096),
+    maxPending: Schema.natural().min(1).max(100).default(16),
+    lookbackMs: Schema.natural().min(60_000).max(604_800_000).default(86_400_000),
+  }).default(undefined as never),
 }) as Schema<AssistantGrowthDriverConfig>
 
 export const Config = new Proxy(schema, {
@@ -240,6 +248,9 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
       offline: config.pluginSourceProposals?.offline ?? true,
       planTtlMs: config.pluginSourceProposals?.planTtlMs ?? 86_400_000,
     }),
+    usageLearning: Object.freeze({ enabled: config.usageLearning?.enabled ?? false,
+      databasePath: config.usageLearning?.databasePath ?? null, maxPending: config.usageLearning?.maxPending ?? 16,
+      lookbackMs: config.usageLearning?.lookbackMs ?? 86_400_000 }),
   })
   if (normalized.enabled && !normalized.scope) throw new Error('assistant-growth-driver: enabled requires an explicit owner scope')
   if ((normalized.provider === null) !== (normalized.model === null)) {
@@ -280,6 +291,13 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
   }
   if ((normalized.budgetId === null) !== (normalized.budgetAmount === null)) {
     throw new Error('assistant-growth-driver: budgetId and budgetAmount must be configured together')
+  }
+  if (normalized.usageLearning.enabled) {
+    const path = normalized.usageLearning.databasePath
+    if (!normalized.enabled || !normalized.scope || !normalized.budgetId || normalized.intervalMs !== 0
+      || path === null || !isAbsolute(path) || resolve(path) !== path) {
+      throw new Error('assistant-growth-driver: usageLearning requires enabled owner scope, budget, absolute databasePath and intervalMs=0')
+    }
   }
   return normalized
 }

@@ -21,6 +21,8 @@ import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
+import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
+import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
 import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
 import plugin, { apply, AssistantGrowthDriverService, name, normalizeConfig, version } from '../src/index.ts'
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
@@ -57,6 +59,7 @@ interface Harness {
   scope: GoalScope
   receipts: ReturnType<typeof vi.fn>
   modelSelection: ReturnType<typeof vi.fn>
+  learningSource: ReturnType<typeof vi.fn>
   goalsApi: { inspectOwnerGoals: ReturnType<typeof vi.fn>; inspectOwnerVerifiedWorkflowSource: ReturnType<typeof vi.fn> }
   approval: { request: ReturnType<typeof vi.fn> }
   /** Scripted Delivery owner-anchored commit seam (engineering layer; no real Goals/DB behind it). */
@@ -272,9 +275,11 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
       ?? { outcome: 'trace-recorded' as const, revision: 1, template: {}, replayed: false }
   })
   const modelSelection = vi.fn(() => ({ provider: 'super-relay', model: 'auto_model/alwaysday1' }))
+  const learningSource = vi.fn()
   ctx.provide('assistantDelivery' as never, {
     validateOwnerRoute: receipts,
     inspectOwnerModelSelection: modelSelection,
+    inspectOwnerForegroundLearningTask: learningSource,
     commitOwnerAnchoredWorkflowTrace: ownerAnchoredCommit,
   } as never)
 
@@ -296,6 +301,10 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
       databasePath: join(root, 'policy.sqlite'),
       budgets: [{ id: 'growth-budget', metric: 'automation-runs', limit: opts.budgetLimit ?? 20, periodMs: 60_000, scope: 'subject' }],
       rules: [
+        { id: 'usage-reconcile', effect: 'allow', subject: { kind: 'background', id: 'assistant-growth-usage', workspace: root, principal: PRINCIPAL },
+          actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+        { id: 'usage-execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: root, principal: PRINCIPAL },
+          actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
         {
           id: 'growth-draft', effect: 'allow',
           subject: { kind: 'agent', id: PRESET, workspace: root, principal: PRINCIPAL },
@@ -336,7 +345,7 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
   const skills = opts.registerSkills === false
     ? undefined
     : (ctx.get('assistantSkills' as never) as unknown as { [CORDIS_ORIGINAL]: AssistantSkillsService })[CORDIS_ORIGINAL]
-  return { ctx, root, skillsPath: join(root, 'skills.sqlite'), scope, receipts, modelSelection, goalsApi, approval, ownerAnchoredCommit, skills }
+  return { ctx, root, skillsPath: join(root, 'skills.sqlite'), scope, receipts, modelSelection, learningSource, goalsApi, approval, ownerAnchoredCommit, skills }
 }
 
 afterEach(async () => {
@@ -383,6 +392,38 @@ async function runWake(service: AssistantGrowthDriverService): Promise<void> {
 }
 
 describe('dsh-enhanced-assistant-growth-driver', () => {
+  it('automatically reviews actual task feedback through native scheduling and the source model', async () => {
+    const adapter = new ScriptedAdapter([])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    h.modelSelection.mockImplementation(() => { throw new Error('current conversation was switched; do not read it') })
+    await h.ctx.plugin(AssistantEvaluationService, { databasePath: join(h.root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+    await h.ctx.plugin(AssistantAutomationsService, { databasePath: join(h.root, 'automations.sqlite'), runsPath: join(h.root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
+    const evaluation = h.ctx.assistantEvaluation
+    const producer = new EvaluationStore({ path: join(h.root, 'evaluation.sqlite') })
+    const task = producer.append({ scope: { workspace: h.root, preset: PRESET }, situation: 'foreground:real-task',
+      executionStatus: 'succeeded', objectiveStatus: 'not-achieved', deliveryStatus: 'delivered', trust: 'trusted',
+      source: { kind: 'evaluator', id: 'assistant-verifier' }, evaluator: { id: 'assistant-verifier', version: '1' },
+      evidence: [{ kind: 'foreground-turn', ref: 'real-task' }, { kind: 'acceptance-contract', ref: 'contract' }, { kind: 'verification-receipt', ref: 'receipt' }],
+      metrics: {}, occurredAt: Date.now(), idempotencyKey: 'real-task-result' })
+    producer.close()
+    h.learningSource.mockImplementation(() => ({ protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: buildReceipt(h.root, 1),
+      canonical: evaluation.getTrustedTaskLearningProjection({ scope: evaluation.canonicalHostScope({ workspace: h.root, preset: PRESET }), outcomeId: task.id }),
+      judgement: 'independent-verifier', source: { sessionId: 'real-session', inboxId: 'real-task', objective: 'The actual user report has a missing total.',
+        truncated: false, quiescent: true, modelSelectionState: 'frozen', modelSelection: { provider: 'conversation-provider', model: 'original-task-model' } } }))
+    const prompts: string[] = []
+    h.ctx.on('llm/stream', async function* (options, next) { prompts.push(JSON.stringify(options.messages)); yield* next() })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { budgetId: 'growth-budget', budgetAmount: 1,
+      usageLearning: { enabled: true, databasePath: join(h.root, 'usage.sqlite') } }))
+    await vi.waitFor(() => expect(service.usageHealth()).toMatchObject({ connected: true, counts: { queued: 1 } }))
+    await new Promise(resolve => setTimeout(resolve, 1100))
+    for (let i = 0; i < 3; i += 1) { await h.ctx.assistantAutomations.tick(); await h.ctx.assistantAutomations.whenIdle() }
+    expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
+    expect(adapter.requests).toEqual([{ provider: 'conversation-provider', model: 'original-task-model' }])
+    expect(h.modelSelection).not.toHaveBeenCalled()
+    expect(prompts.join('\n')).toContain('The actual user report has a missing total.')
+    expect(prompts.join('\n')).toContain('untrusted task data')
+    expect(prompts.join('\n')).not.toContain(RECORD_ID)
+  })
   it('inherits the owner conversation model, freezes it for the wake, and rereads it next wake', async () => {
     const adapter = new ScriptedAdapter([{ name: 'growth_list_owner_goals', args: {} }])
     const h = await mount({ adapter, provider: 'conversation-provider' })
