@@ -26,6 +26,8 @@ import { OwnerRepairAgentRuntime, type OwnerRepairAgentInput } from './repair-ag
 import { enqueueRepairFeedback, type RepairFeedbackMilestone } from './repair-feedback.js'
 import type { SkillRepairContinuation, SkillRepairNextIterationInput, SkillRepairAuthorizationInput } from './store.js'
 import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRun, type SkillRunStep, type StoredSkillDefinition, type SkillCapture, type SkillDeployment, type SkillDeploymentInput, type SkillWatchObservationResult } from './store.js'
+import { awaitBenchmarkSignal, benchmarkArmDefinition, sameBenchmarkArm, type BenchmarkArmSelection, type BenchmarkArmSnapshot, type BenchmarkArmCapability, type BenchmarkArmMount, type LiveBenchmarkArm } from './delegated-arm.js'
+import type { SkillDelegatedArmBinding } from './store.js'
 
 export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[]; externalHoldouts?: ExternalHoldoutProfile[]; repairProfiles?: RepairContinuationProfile[] }
 /** Narrow Host-only capability for a finite continuation of a prior owner authorization. */
@@ -235,6 +237,16 @@ function trialProofSteps(steps: readonly { toolName: string; arguments: unknown 
 /** Fixed tool compositions run in the original native Goal; no new AgentLoop or scheduler. */
 export class AssistantSkillsService extends Service {
   static Config = Config
+  static readonly #benchmarkCapabilities = new WeakMap<BenchmarkArmCapability, { recipient: object; scope: GoalScope; binding: SkillDelegatedArmBinding; snapshot: BenchmarkArmSnapshot; controller: AbortController; signal: AbortSignal; assertCurrent(): void; refresh(signal: AbortSignal): Promise<void>; consumed: boolean }>()
+  static readonly #benchmarkRecipients = new WeakMap<object, AssistantSkillsService>()
+  readonly #benchmarkIdentity = Object.freeze({})
+  /** A Host identity only; it carries no permission and survives fresh Cordis trace proxies. */
+  benchmarkRecipientIdentity = (): object => this.#benchmarkIdentity
+  readonly #issuedBenchmarkArms = new Set<AbortController>()
+  readonly #issuedBenchmarkCells = new Set<string>()
+  readonly #mountedBenchmarkArms = new Map<string, LiveBenchmarkArm>()
+  readonly #benchmarkRuns = new Set<Promise<unknown>>()
+  #benchmarkGeneration = 0
   readonly #store: SkillStore
   readonly #allowed: readonly string[]
   readonly #duration: number
@@ -272,7 +284,18 @@ export class AssistantSkillsService extends Service {
     this.#externalHoldouts = validateExternalHoldoutProfiles(config.externalHoldouts ?? [])
     this.#repairProfiles = validateRepairProfiles(config.repairProfiles ?? [], this.#externalHoldouts)
     this.#store = new SkillStore(config.databasePath ?? join(homedir(), '.dsh', 'assistant-skills.sqlite'))
-    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); await Promise.all([...this.#repairStops].map(stop => stop())); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
+    AssistantSkillsService.#benchmarkRecipients.set(this.#benchmarkIdentity, this)
+    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); this.#mountedBenchmarkArms.clear(); await Promise.allSettled(this.#benchmarkRuns); await Promise.all([...this.#repairStops].map(stop => stop())); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
+    ctx.inject(['assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
+      this.#benchmarkGeneration++
+      runtime.effect(() => () => {
+        this.#benchmarkGeneration++
+        for (const controller of this.#issuedBenchmarkArms) controller.abort()
+        this.#issuedBenchmarkArms.clear()
+        for (const arm of this.#mountedBenchmarkArms.values()) arm.revoke()
+        this.#mountedBenchmarkArms.clear()
+      }, 'assistant-skills.benchmark-service-generation')
+    })
     if (this.#repairProfiles.length > 0) this.#installRepairRuntime(ctx)
     ctx.inject(['tools', 'agents', 'assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
       runtime.tools.register(defineTool({ name: 'skill_save', description: 'Save the exact successful tool trace of this owner session’s independently achieved Goal as a private versioned skill. Requires the current human request. Historical acceptance is provenance, never permission or acceptance for a future run.',
@@ -500,7 +523,10 @@ export class AssistantSkillsService extends Service {
   }
   inspect(agent: Agent | undefined, runId?: string) {
     const scope = this.#scope(agent, 'inspect')
-    return runId ? this.#store.getRun(scope, runId) : this.#store.list(scope)
+    if (runId) return this.#store.getRun(scope, runId)
+    const mounted = this.#mountedBenchmarkArms.get(acceptanceDigest(scope))
+    if (mounted) { mounted.assertCurrent(); return [{ ...structuredClone(mounted.skill), delegation: structuredClone(mounted.binding), delegationDigest: mounted.bindingDigest }] }
+    return this.#store.list(scope)
   }
   retire(agent: Agent | undefined, name: string, expectedVersion: number) {
     const scope = this.#scope(agent, 'retire')
@@ -956,6 +982,106 @@ export class AssistantSkillsService extends Service {
   inspectOwnerSkillCandidates(scope: GoalScope) {
     if (!this.#active) throw new Error('assistant-skills: inactive')
     return this.#store.listCandidates(scope).map(candidate => this.#preview(scope, candidate))
+  }
+  #benchmarkSource(selection: BenchmarkArmSelection): BenchmarkArmSnapshot {
+    if (!this.#active) throw new Error('assistant-skills: benchmark source inactive')
+    this.#watchRoute(selection.scope, selection.ownerRouteId)
+    const policy = this.ctx.get('assistantPolicy', false)
+    if (policy?.evaluate({ ...this.#watchPolicy(selection.scope, 'watch'), action: 'compare' }).effect !== 'allow') throw new Error('assistant-skills: benchmark comparison policy denied')
+    const candidate = selection.candidateId === undefined ? undefined : this.#pending(selection.scope, selection.candidateId)
+    const selected = candidate?.definition ?? this.#store.get(selection.scope, selection.skillName)
+    const version = candidate ? candidate.parentVersion + 1 : (selected as StoredSkillDefinition | undefined)?.version
+    if (!selected || selected.name !== selection.skillName || version !== selection.version
+      || acceptanceDigest(selected.source.scope) !== acceptanceDigest(selection.scope)) throw new Error('assistant-skills: exact benchmark source required')
+    const definition = benchmarkArmDefinition(selected)
+    const expiresAt = Math.min(definition.source.acceptance.validUntil, candidate?.expiresAt ?? Number.MAX_SAFE_INTEGER)
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) throw new Error('assistant-skills: benchmark source expired')
+    return { definition, definitionDigest: acceptanceDigest(definition), sourceDigest: acceptanceDigest(definition.source), version, expiresAt }
+  }
+  /** Re-read original Goals provenance before freezing an arm. This grants no execution authority. */
+  inspectOwnerBenchmarkArm = async (selection: BenchmarkArmSelection, signal?: AbortSignal): Promise<BenchmarkArmSnapshot> => {
+    selection = structuredClone(selection)
+    const combined = AbortSignal.any([this.#lifecycle.signal, AbortSignal.timeout(10000), ...(signal ? [signal] : [])])
+    combined.throwIfAborted()
+    const before = this.#benchmarkSource(selection), goals = this.#goals(), generation = this.#benchmarkGeneration
+    const route = this.#watchRoute(selection.scope, selection.ownerRouteId)
+    const source = await awaitBenchmarkSignal(goals.inspectOwnerVerifiedWorkflowSource({ ownerRouteId: selection.ownerRouteId,
+      principalId: selection.scope.principalId, workspace: selection.scope.workspace, preset: selection.scope.preset,
+      sessionId: before.definition.source.goal.sessionId, goalId: before.definition.source.goal.id }, combined), combined)
+    combined.throwIfAborted()
+    this.#watchRoute(selection.scope, selection.ownerRouteId, route)
+    if (this.#benchmarkGeneration !== generation || !sameBenchmarkArm(before, this.#benchmarkSource(selection))
+      || acceptanceDigest(source) !== before.sourceDigest) throw new Error('assistant-skills: benchmark provenance changed')
+    return structuredClone(before)
+  }
+  /** Host-only, single-use delegation to one exact live recipient service and frozen cell. */
+  mintBenchmarkArm = async (input: { selection: BenchmarkArmSelection; recipient: AssistantSkillsService; recipientScope: GoalScope; recipientOwnerRouteId: string; binding: SkillDelegatedArmBinding }, signal?: AbortSignal): Promise<BenchmarkArmCapability> => {
+    const recipient = AssistantSkillsService.#benchmarkRecipients.get(input.recipient.benchmarkRecipientIdentity())
+    if (!recipient) throw new Error('assistant-skills: unrecognized benchmark recipient')
+    const selection = structuredClone(input.selection), scope = structuredClone(input.recipientScope), binding = structuredClone(input.binding)
+    const recipientOwnerRouteId = input.recipientOwnerRouteId
+    const snapshot = await this.inspectOwnerBenchmarkArm(selection, signal)
+    const route = this.#watchRoute(selection.scope, selection.ownerRouteId)
+    const recipientRoute = recipient.#watchRoute(scope, recipientOwnerRouteId)
+    if (recipient.#benchmarkIdentity === this.#benchmarkIdentity || !recipient.#active || binding.protocol !== 'assistant-skills/delegated-arm/v1'
+      || binding.definitionDigest !== snapshot.definitionDigest || binding.sourceDigest !== snapshot.sourceDigest
+      || binding.recipientScopeDigest !== acceptanceDigest(scope) || binding.skillName !== snapshot.definition.name || binding.version !== snapshot.version
+      || !Number.isSafeInteger(binding.expiresAt) || binding.expiresAt <= Date.now() || binding.expiresAt > snapshot.expiresAt
+      || binding.expiresAt - Date.now() > 300000) throw new Error('assistant-skills: invalid benchmark delegation')
+    if (!/^[a-f0-9]{64}$/u.test(binding.planDigest) || !binding.cellId || !binding.variantId) throw new Error('assistant-skills: invalid benchmark cell')
+    const cellKey = acceptanceDigest([binding.planDigest, binding.cellId])
+    if (this.#issuedBenchmarkCells.has(cellKey)) throw new Error('assistant-skills: benchmark cell already delegated')
+    const authorization = { idempotencyKey: `skill-benchmark-${acceptanceDigest(binding)}` }
+    if (this.ctx.get('assistantPolicy', false)?.authorize({ ...this.#watchPolicy(selection.scope, 'watch'), action: 'compare' }, authorization).effect !== 'allow'
+      || recipient.ctx.get('assistantPolicy', false)?.authorize({ ...recipient.#watchPolicy(scope, 'watch'), action: 'compare' }, authorization).effect !== 'allow') throw new Error('assistant-skills: benchmark comparison authorization denied')
+    const controller = new AbortController()
+    const combined = AbortSignal.any([controller.signal, this.#lifecycle.signal, recipient.#lifecycle.signal, ...(signal ? [signal] : [])])
+    const assertCurrent = () => {
+      combined.throwIfAborted()
+      if (!recipient.#active || Date.now() >= binding.expiresAt || !sameBenchmarkArm(snapshot, this.#benchmarkSource(selection))) throw new Error('assistant-skills: benchmark delegation unavailable')
+      this.#watchRoute(selection.scope, selection.ownerRouteId, route)
+      recipient.#watchRoute(scope, recipientOwnerRouteId, recipientRoute)
+      if (recipient.ctx.get('assistantPolicy', false)?.evaluate({ ...recipient.#watchPolicy(scope, 'watch'), action: 'compare' }).effect !== 'allow') throw new Error('assistant-skills: recipient comparison policy denied')
+    }
+    assertCurrent()
+    const capability: BenchmarkArmCapability = Object.freeze({ protocol: 'assistant-skills/benchmark-capability/v1' })
+    AssistantSkillsService.#benchmarkCapabilities.set(capability, { recipient: recipient.#benchmarkIdentity, scope, binding, snapshot, controller, signal: combined, assertCurrent,
+      refresh: async runSignal => {
+        assertCurrent()
+        const current = await this.inspectOwnerBenchmarkArm(selection, AbortSignal.any([combined, runSignal]))
+        assertCurrent()
+        if (!sameBenchmarkArm(snapshot, current)) throw new Error('assistant-skills: benchmark source changed')
+      }, consumed: false })
+    this.#issuedBenchmarkCells.add(cellKey)
+    this.#issuedBenchmarkArms.add(controller)
+    this.ctx.effect(() => {
+      const timer = setTimeout(() => controller.abort(), Math.max(1, binding.expiresAt - Date.now())); timer.unref?.()
+      const stop = () => { clearTimeout(timer); this.#issuedBenchmarkArms.delete(controller) }
+      combined.addEventListener('abort', stop, { once: true })
+      return () => { combined.removeEventListener('abort', stop); stop(); controller.abort() }
+    }, 'assistant-skills.benchmark-grant')
+    combined.addEventListener('abort', () => this.#issuedBenchmarkArms.delete(controller), { once: true })
+    return capability
+  }
+  /** No definition is imported into the active/candidate tables; a restart cannot restore the authority. */
+  mountBenchmarkArm = async (capability: BenchmarkArmCapability, expected: SkillDelegatedArmBinding): Promise<BenchmarkArmMount> => {
+    const grant = AssistantSkillsService.#benchmarkCapabilities.get(capability)
+    if (!grant || grant.consumed || grant.recipient !== this.#benchmarkIdentity || acceptanceDigest(expected) !== acceptanceDigest(grant.binding)) throw new Error('assistant-skills: unrecognized benchmark capability')
+    grant.consumed = true
+    await grant.refresh(this.#lifecycle.signal)
+    grant.assertCurrent()
+    const scopeKey = acceptanceDigest(grant.scope)
+    if (this.#mountedBenchmarkArms.has(scopeKey)) throw new Error('assistant-skills: benchmark recipient already mounted')
+    this.#store.reserveDelegatedArm(grant.scope, grant.binding)
+    const bindingDigest = acceptanceDigest(grant.binding), now = Date.now()
+    const skill: StoredSkillDefinition = { ...structuredClone(grant.snapshot.definition), version: grant.snapshot.version, parentVersion: null, retired: false, createdAt: now, updatedAt: now }
+    const arm: LiveBenchmarkArm = { binding: grant.binding, bindingDigest, skill, scope: grant.scope, signal: grant.signal, revoke: () => grant.controller.abort(), assertCurrent: grant.assertCurrent, refresh: grant.refresh }
+    this.#mountedBenchmarkArms.set(scopeKey, arm)
+    const dispose = this.ctx.effect(() => {
+      const timer = setTimeout(() => grant.controller.abort(), Math.max(1, grant.binding.expiresAt - Date.now())); timer.unref?.()
+      return () => { clearTimeout(timer); grant.controller.abort(); if (this.#mountedBenchmarkArms.get(scopeKey) === arm) this.#mountedBenchmarkArms.delete(scopeKey) }
+    }, 'assistant-skills.benchmark-arm')
+    return { binding: structuredClone(grant.binding), bindingDigest, skill: { name: skill.name, version: skill.version, inputs: structuredClone(skill.inputs) }, dispose }
   }
   #pending(scope: GoalScope, id: string): SkillCandidate {
     const candidate = this.#store.getCandidate(scope, id)
@@ -1571,13 +1697,29 @@ export class AssistantSkillsService extends Service {
   }
   async run(exec: ToolRunContext, goalId: string, name: string, version: number, inputs: Record<string, unknown>, invocationId: string) {
     const scope = this.#scope(exec.agent, 'run')
+    const delegated = this.#mountedBenchmarkArms.get(acceptanceDigest(scope))
+    if (delegated) {
+      delegated.assertCurrent()
+      if (delegated.skill.name !== name || delegated.skill.version !== version) throw new Error('assistant-skills: exact delegated arm required')
+      const task = this.#run(exec, goalId, delegated.skill, inputs, invocationId, undefined, delegated)
+      this.#benchmarkRuns.add(task)
+      try { return await task } finally { this.#benchmarkRuns.delete(task) }
+    }
     const skill = this.#store.get(scope, name)
     if (!skill || skill.retired || skill.version !== version) throw new Error('assistant-skills: active skill version required')
     return this.#run(exec, goalId, skill, inputs, invocationId)
   }
-  async #run(exec: ToolRunContext, goalId: string, skill: StoredSkillDefinition, inputs: Record<string, unknown>, invocationId: string, candidateId?: string) {
+  async #run(exec: ToolRunContext, goalId: string, skill: StoredSkillDefinition, inputs: Record<string, unknown>, invocationId: string, candidateId?: string, delegated?: LiveBenchmarkArm) {
     const action = candidateId ? 'trial' : 'run'
     const scope = this.#scope(exec.agent, action), { name, version } = skill
+    const assertDelegated = () => {
+      if (!delegated) return
+      delegated.assertCurrent()
+      if (this.#mountedBenchmarkArms.get(acceptanceDigest(scope)) !== delegated
+        || acceptanceDigest(benchmarkArmDefinition(skill)) !== delegated.binding.definitionDigest) throw new Error('assistant-skills: delegated arm changed')
+    }
+    assertDelegated()
+    if (delegated) { await delegated.refresh(exec.signal); assertDelegated() }
     const definition = instantiate(skill, inputs)
     const steps = definition.steps
     // These declarations are part of the immutable saved definition, rather
@@ -1628,7 +1770,9 @@ export class AssistantSkillsService extends Service {
         throw new Error('assistant-skills: deployment authority ended')
       }
     }
-    const claim = this.#store.claim(scope, { invocationId, goalId, sessionId: current.sessionId, skillName: name, version, inputs, goalExecutionRunId: current.goalExecutionRunId, goalDefinitionDigest: current.definition.digest, ...(typeof goalContext.nativeGoalId === 'string' ? { nativeGoalId: goalContext.nativeGoalId } : {}), ...(candidateId ? { candidateId } : {}) })
+    assertDelegated()
+    const claimInput = { invocationId, goalId, sessionId: current.sessionId, skillName: name, version, inputs, goalExecutionRunId: current.goalExecutionRunId, goalDefinitionDigest: current.definition.digest, ...(typeof goalContext.nativeGoalId === 'string' ? { nativeGoalId: goalContext.nativeGoalId } : {}), ...(candidateId ? { candidateId } : {}) }
+    const claim = delegated ? this.#store.claimDelegated(scope, claimInput, delegated.bindingDigest) : this.#store.claim(scope, claimInput)
     if (!claim.claimed) {
       if (claim.run.state !== 'succeeded') throw new Error(`assistant-skills: invocation ${claim.run.id} is ${claim.run.state}; inspect skill_status, do not replay`)
       return { ...claim.run, replayed: false, acceptance: 'requires-fresh-goal-verification' }
@@ -1646,7 +1790,8 @@ export class AssistantSkillsService extends Service {
     if (deploymentRevision) this.#deployedExecutions.add(deploymentRevision)
     const timeout = new AbortController()
     const timer = setTimeout(() => timeout.abort(), this.#duration); timer.unref?.()
-    const signal = AbortSignal.any([exec.signal, timeout.signal, this.#lifecycle.signal, ...(deploymentRevision ? [deploymentRevision.signal] : [])])
+    const signal = AbortSignal.any([exec.signal, timeout.signal, this.#lifecycle.signal, ...(delegated ? [delegated.signal] : []), ...(deploymentRevision ? [deploymentRevision.signal] : [])])
+    const settle = <T>(work: Promise<T>): Promise<T> => delegated ? awaitBenchmarkSignal(work, signal) : work
     const completed: SkillRunStep[] = []
     let state: 'succeeded' | 'failed' | 'unknown' = 'unknown'
     let dispatched = false
@@ -1655,10 +1800,12 @@ export class AssistantSkillsService extends Service {
     const compensation = compensationDirective(definition.compensation)
     const revalidate = () => {
       signal.throwIfAborted()
+      assertDelegated()
       if (acceptanceDigest(this.#scope(exec.agent, action)) !== acceptanceDigest(scope)
         || acceptanceDigest(this.#goals().inspectWorkflowRunContext(exec.agent, goalId)) !== identity) throw new Error('assistant-skills: current authority changed')
       if (this.#store.getRun(scope, claim.run.id)?.state !== 'running') throw new Error('assistant-skills: invocation no longer owns dispatch')
-      if (candidateId) this.#pending(scope, candidateId)
+      if (delegated) assertDelegated()
+      else if (candidateId) this.#pending(scope, candidateId)
       else {
         const live = this.#store.get(scope, name)
         if (!live || live.retired || live.version !== version) throw new Error('assistant-skills: skill retired or superseded')
@@ -1670,10 +1817,11 @@ export class AssistantSkillsService extends Service {
       stepsLoop: for (const [index, step] of steps.entries()) {
         for (const observation of observations) {
           if (observation.beforeStepId !== step.id) continue
+          if (delegated) await delegated.refresh(signal)
           revalidate()
           if (!this.#allowed.includes('read')) throw new Error('assistant-skills: current tool allowlist denied required file observation')
           dispatched = true
-          const observed = await exec.agent!.ctx.get('tools')!.execute({
+          const observed = await settle(exec.agent!.ctx.get('tools')!.execute({
             callId: ToolCallId(`${exec.callId}:skill-observation:${index + 1}`),
             rootCallId: exec.rootCallId,
             parent: exec.token,
@@ -1681,7 +1829,8 @@ export class AssistantSkillsService extends Service {
             name: 'read',
             arguments: { file_path: observation.filePath, limit: 1 },
             signal,
-          })
+          }))
+          if (delegated) await delegated.refresh(signal)
           revalidate()
           for (const context of observed.additionalContexts ?? []) exec.deferContext(context)
           const code = observed.isError ? observed.error.info?.code ?? 'tool-rejected' : undefined
@@ -1696,9 +1845,11 @@ export class AssistantSkillsService extends Service {
           this.#store.checkpoint(scope, claim.run.id, completed)
           if (interrupted) { state = 'unknown'; break stepsLoop }
           if (observed.isError && !absent) { state = 'failed'; break stepsLoop }
+          if (delegated) await delegated.refresh(signal)
           revalidate()
           dispatched = false
         }
+        if (delegated) await delegated.refresh(signal)
         revalidate()
         // Dependency DAG gate: every declared predecessor must have completed
         // successfully. Topological storage means a missing predecessor can only
@@ -1708,7 +1859,8 @@ export class AssistantSkillsService extends Service {
         if (compensation.stopRemainingSteps && step.dependsOn.some(dependency => !succeededById.has(dependency))) { state = 'failed'; break stepsLoop }
         if (!this.#allowed.includes(step.toolName)) throw new Error('assistant-skills: current tool allowlist denied')
         dispatched = true
-        const result = await exec.agent!.ctx.get('tools')!.execute({ callId: ToolCallId(`${exec.callId}:skill:${index + 1}`), rootCallId: exec.rootCallId, parent: exec.token, agent: exec.agent!, name: step.toolName, arguments: step.arguments, signal })
+        const result = await settle(exec.agent!.ctx.get('tools')!.execute({ callId: ToolCallId(`${exec.callId}:skill:${index + 1}`), rootCallId: exec.rootCallId, parent: exec.token, agent: exec.agent!, name: step.toolName, arguments: step.arguments, signal }))
+        if (delegated) await delegated.refresh(signal)
         revalidate()
         for (const context of result.additionalContexts ?? []) exec.deferContext(context)
         const interrupted = signal.aborted || result.isError && ['ABORTED', 'ABORTED_BEFORE_DISPATCH'].includes(result.error.info?.code ?? '')
@@ -1716,6 +1868,7 @@ export class AssistantSkillsService extends Service {
         this.#store.checkpoint(scope, claim.run.id, completed)
         if (result.isError || interrupted) { state = interrupted ? 'unknown' : 'failed'; break }
         if (result.concludesTurn) exec.concludeTurn()
+        if (delegated) await delegated.refresh(signal)
         revalidate()
         dispatched = false
         if (index === steps.length - 1) state = 'succeeded'

@@ -16,3 +16,6 @@ export type { RepairExecutionAuthority, RepairExecutionContext, StageFailureCand
 
 export { validateRepairProfiles } from './repair-profile.js'
 export { validateExternalHoldoutProfiles } from './external-holdout.js'
+
+export type { BenchmarkArmSelection, BenchmarkArmSnapshot, BenchmarkArmCapability, BenchmarkArmMount } from './delegated-arm.js'
+export type { SkillDelegatedArmBinding } from './store.js'
