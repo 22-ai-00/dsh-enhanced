@@ -989,7 +989,7 @@ async function hostRequest(argv: readonly string[]): Promise<void> {
 }
 
 async function probePluginPlanResult(input: { store: ControlPlaneStore; trust: PluginControlTrustConfig;
-  planId: string; expectedRevision: number; expectedFence: number; signal?: AbortSignal }): Promise<{ plan: PluginActivationPlan; result: Awaited<ReturnType<ControlPlaneStore['applyHostAttestation']>> }> {
+  planId: string; expectedRevision: number; expectedFence: number; signal?: AbortSignal; deferCommit?: boolean }): Promise<{ plan: PluginActivationPlan; result: Awaited<ReturnType<ControlPlaneStore['applyHostAttestation']>> }> {
   const { store, trust, planId, expectedRevision, expectedFence, signal } = input
   if (trust.hostAttestor === undefined) throw new ControlPlaneCliError('HOST_ATTESTOR_NOT_CONFIGURED', 'deployment has no owner-configured Host attestor; activation remains awaiting its current phase')
   let lock: ProfileLock | undefined
@@ -1010,7 +1010,7 @@ async function probePluginPlanResult(input: { store: ControlPlaneStore; trust: P
     const result = await checked(signal, () => store.applyHostAttestation({ planId: plan.id, expectedRevision, expectedFence, receipt,
       idempotencyKey: `host-attestation:${operation.operationId}`, resolveAuthority }))
     let output = result.result
-    if (output.status === 'rollback-pending' || output.status === 'commit-pending') {
+    if (output.status === 'rollback-pending' || (output.status === 'commit-pending' && !input.deferCommit)) {
       // Once physical recovery/commit is durable, complete it under the
       // profile lock instead of leaving a claimed plan on a late abort.
       output = await store.claimActivation({ planId: output.id, expectedRevision: output.revision, leaseMs,
@@ -1025,7 +1025,7 @@ async function probePluginPlanResult(input: { store: ControlPlaneStore; trust: P
 }
 
 export async function probePluginPlan(input: { store: ControlPlaneStore; trust: PluginControlTrustConfig;
-  planId: string; expectedRevision: number; expectedFence: number; signal?: AbortSignal }): Promise<PluginActivationPlan> {
+  planId: string; expectedRevision: number; expectedFence: number; signal?: AbortSignal; deferCommit?: boolean }): Promise<PluginActivationPlan> {
   return (await probePluginPlanResult(input)).plan
 }
 

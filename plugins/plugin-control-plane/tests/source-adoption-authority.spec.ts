@@ -61,3 +61,17 @@ test('freezes the grant and rejects protected candidates', async () => {
   await expect(authorizeSourceAdoption({ ...value.config, grant: { ...value.config.grant, receiptTtlMs: 29_000 } }, value.request)).rejects.toThrow('refused')
   expect(() => validateSourceAdoptionAuthorityConfig({ ...value.config, grant: { ...value.config.grant, policies: [{ ...value.config.grant.policies[0]!, candidateId: 'plugin-control-plane', packageName: '@dsh-enhanced/plugin-control-plane' }] } })).toThrow('refused')
 })
+
+
+test('requires the owner grant to explicitly cover signed handoff terms', async () => {
+  const value = await fixture()
+  const handoff = { schemaVersion: 1 as const, coordinatorId: 'external-host', maximumWindowMs: 60_000, commit: 'target-host' as const }
+  value.plan.dossier.handoff = handoff
+  await expect(authorizeSourceAdoption(value.config, value.request)).rejects.toThrow('refused')
+  const config = { ...value.config, grant: { ...value.config.grant, handoff: { ...handoff, coordinatorId: 'wrong-host' } } }
+  await expect(authorizeSourceAdoption(config, value.request)).rejects.toThrow('refused')
+  config.grant.handoff = handoff
+  const receipt = await authorizeSourceAdoption(config, value.request)
+  expect(receipt.planDigest).toBe(value.plan.digest)
+  expect(receipt.expiresAt).toBeLessThanOrEqual(config.grant.expiresAt)
+})

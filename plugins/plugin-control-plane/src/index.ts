@@ -37,3 +37,6 @@ export function apply(ctx: Context, config: Config): void {
 }
 
 export default PluginControlPlaneService
+
+export type { AdoptionHandoffTerms, AdoptionHandoffRecord } from './adoption-handoff.js'
+export type { AdoptionCoordinatorConfig } from './adoption-coordinator.js'

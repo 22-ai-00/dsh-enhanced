@@ -34,6 +34,7 @@ async function fixture(status: PluginActivationPlan['status'] = 'pending-approva
     getSourcePlan: vi.fn(() => source), sourceReleaseCandidate: vi.fn(() => candidate), findSourceAdoption: vi.fn<() => PluginActivationPlan | undefined>(() => undefined),
     createPlan: vi.fn(() => ({ result: plan })), getPlan: vi.fn(() => plan), getOwnerTaskFailureReference: vi.fn(() => ({ owner: 'owner' })),
     approve: vi.fn(async () => { plan = { ...plan, status: 'approved', revision: 2 } as PluginActivationPlan; return { result: plan } }),
+    prepareAdoptionHandoff: vi.fn(), assertAdoptionHandoff: vi.fn(), revokeAdoptionHandoff: vi.fn(),
     requestActivationRollback: vi.fn(input => { plan = { ...plan, status: 'rollback-pending', revision: plan.revision + 1, activation: { ...plan.activation!, fence: input.fence } }; return plan }),
   }
   const config: SourceAdoptionConfig = { profile: 'default', planTtlMs: 60_000, timeoutMs: 10_000, authority: { executable: { path: '/authority', sha256: hex('d') }, configPath: '/authority.json', timeoutMs: 1_000 } }
@@ -93,4 +94,43 @@ test('validates bounded, exact runner config synchronously', () => {
   expect(() => validateSourceAdoptionConfig(config)).not.toThrow()
   expect(() => validateSourceAdoptionConfig({ ...config, profile: '../bad' })).toThrow('invalid source adoption config')
   expect(() => validateSourceAdoptionConfig({ ...config, timeoutMs: 999 })).toThrow('invalid source adoption config')
+})
+
+const handoff = { schemaVersion: 1 as const, coordinatorId: 'external-host', maximumWindowMs: 60_000, commit: 'target-host' as const }
+
+test('target signs and hands off an approved repair without restarting itself', async () => {
+  const value = await fixture()
+  value.config.handoff = handoff; value.state().dossier.handoff = handoff
+  const output = await adoptSourceRelease({ store: value.store as never, sourcePlanId: value.source.id, trust: value.trust,
+    config: value.config, assertCurrent: async () => {}, withSourceFence: callback => callback() })
+  expect(output.status).toBe('approved')
+  expect(value.store.createPlan).toHaveBeenCalledWith(expect.objectContaining({ handoff }))
+  expect(value.store.prepareAdoptionHandoff).toHaveBeenCalledWith({ planId: output.id, expectedRevision: output.revision })
+  expect(activatePluginPlan).not.toHaveBeenCalled(); expect(probePluginPlan).not.toHaveBeenCalled()
+})
+
+test('target alone confirms commit after current feedback and live handoff checks', async () => {
+  const value = await fixture('commit-pending')
+  value.config.handoff = handoff; value.state().dossier.handoff = handoff
+  value.store.findSourceAdoption.mockReturnValue(value.state())
+  const current = vi.fn(async () => {})
+  vi.mocked(activatePluginPlan).mockResolvedValue({ ...value.state(), status: 'activated' })
+  const output = await adoptSourceRelease({ store: value.store as never, sourcePlanId: value.source.id, trust: value.trust,
+    config: value.config, assertCurrent: current, withSourceFence: callback => callback() })
+  expect(output.status).toBe('activated'); expect(current).toHaveBeenCalled()
+  expect(value.store.assertAdoptionHandoff).toHaveBeenCalledWith(output.id)
+  expect(activatePluginPlan).toHaveBeenCalledTimes(1); expect(probePluginPlan).not.toHaveBeenCalled()
+})
+
+test.each([false, true])('handoff withdrawal revokes, target unload preserves delegation (unload=%s)', async unload => {
+  const value = await fixture('awaiting-reload'), controller = new AbortController()
+  value.config.handoff = handoff; value.state().dossier.handoff = handoff
+  value.store.findSourceAdoption.mockReturnValue(value.state())
+  await expect(adoptSourceRelease({ store: value.store as never, sourcePlanId: value.source.id, trust: value.trust,
+    config: value.config, signal: controller.signal, assertCurrent: async () => {
+      if (unload) controller.abort()
+      throw new Error('source unavailable')
+    }, withSourceFence: callback => callback() })).rejects.toThrow('source unavailable')
+  expect(value.store.revokeAdoptionHandoff).toHaveBeenCalledTimes(unload ? 0 : 1)
+  expect(activatePluginPlan).not.toHaveBeenCalled(); expect(value.store.requestActivationRollback).not.toHaveBeenCalled()
 })

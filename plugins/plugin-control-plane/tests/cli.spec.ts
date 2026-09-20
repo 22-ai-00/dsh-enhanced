@@ -54,8 +54,7 @@ set -euo pipefail
 if [[ -n "\${DSH_TEST_EXECUTOR_MARKER:-}" ]]; then printf '%s\\n' 'trusted' >> "$DSH_TEST_EXECUTOR_MARKER"; fi
 if [[ -n "\${DSH_TEST_EXECUTOR_LOG:-}" ]]; then printf '%s\\n' "$*" >> "$DSH_TEST_EXECUTOR_LOG"; fi
 if [[ "\${1:-}" == '--version' && -n "\${DSH_TEST_SWAP_SOURCE:-}" && -f "\${DSH_TEST_SWAP_REPLACEMENT:-}" ]]; then
-  ( sleep 0.05; mv -f "$DSH_TEST_SWAP_REPLACEMENT" "$DSH_TEST_SWAP_SOURCE" ) &
-  sleep 0.1
+  mv -f "$DSH_TEST_SWAP_REPLACEMENT" "$DSH_TEST_SWAP_SOURCE"
 fi
 if [[ "\${1:-}" == '--version' ]]; then printf '%s\\n' '0.1.0-rc.8'; exit 0; fi
 if [[ "\${DSH_TEST_FAIL:-0}" == '1' ]]; then printf '%s\\n' 'TOP-SECRET-STDERR' >&2; exit 27; fi

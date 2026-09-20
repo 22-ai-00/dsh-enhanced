@@ -16,7 +16,7 @@
 - 下一版 npm 的发布门槛是：安装部署后，在既有授权内由真实使用持续驱动修复、验证、采用与观察/回滚，并通过完整发布检查。用户已同意达到该门槛后重新发布；当前中间能力尚不满足条件。
 - 日常使用中的工具/插件自迭代尚未贯通。普通 Lark 已有低风险偏好自动学习；Growth `usageLearning` 已可根据可信前台任务结果自动调度持久复盘；内置 Delivery 普通对话的已认证 owner 反馈也可触发，无需预设任务验收 profile；启用源码轨时，可信失败会自动形成 owner 私有修复缺口并进入源码候选工具，可经有限源码审批；精确制品的有限采用已接到同一持久作业，后续普通任务版本归因已接入可选 Host 配置；有限可信反馈批次、观察签发与自动回退已接通，可安装配置与真实部署端到端仍待验收。Skills 有限修复链仍需对精确来源 Goal 手动 `skill_repair_arm`；既有授权下的独立验证、采用及持续观察仍待接通。
 - 成长与修复的模型默认继承来源，可配置固定覆盖。Delivery schema 23 为普通 owner 前台任务单独保存执行回执，在 DSH 最终 `request/header` 保存来源实际 provider/model/effort，包括 adapter 默认值；用户随后切换模型不改变历史任务。旧任务无快照或同任务多模型时不猜测。自动 Growth 作业保存该快照，queued 可恢复，已派发但中断的任务保持 unknown、不重放；Skills 沿用其修复授权中的冻结选择。
-- Evaluation 的可信 canonical feed 包含纠正/撤回；Delivery 核对精确 owner 身份与原始任务，支持 `/new` 后读取旧任务并拒绝身份换代继承。Growth 在 writer fence 内落游标/意图，复用 Automations 扫描、调度和预算；每次模型/工具调用重查来源，排除后台结果递归触发。Control Plane schema 22 保留精确 owner/canonical 来源引用和 source release→activation 绑定，自动源码轨只读取本次缺口，检查与最终计划提交重验来源；`/new` 改变完整 owner receipt 后停止旧工作。普通对话须回复实际消息提交 typed owner 反馈，Evaluation 不可用时不确认记录，unknown/未停止执行不能被反馈改判。旧普通任务不回填；此新增入口覆盖内置外部渠道运行时，尚不覆盖原生 Web 或自定义运行时。模型结束或工具退出本身不构成学习依据。
+- Evaluation 的可信 canonical feed 包含纠正/撤回；Delivery 核对精确 owner 身份与原始任务，支持 `/new` 后读取旧任务并拒绝身份换代继承。Growth 在 writer fence 内落游标/意图，复用 Automations 扫描、调度和预算；每次模型/工具调用重查来源，排除后台结果递归触发。Control Plane schema 23 保留精确 owner/canonical 来源引用和 source release→activation 绑定，自动源码轨只读取本次缺口，检查与最终计划提交重验来源；`/new` 改变完整 owner receipt 后停止旧工作。普通对话须回复实际消息提交 typed owner 反馈，Evaluation 不可用时不确认记录，unknown/未停止执行不能被反馈改判。旧普通任务不回填；此新增入口覆盖内置外部渠道运行时，尚不覆盖原生 Web 或自定义运行时。模型结束或工具退出本身不构成学习依据。
 - 基本 RSI 已在限定任务族跑通真实修复、独立比较、后续任务 canary、两轮晋升与安全检查点恢复。它不证明任意任务都能自我改进，也不允许重放未结算的模型或外部调用。
 - Day1 已经通过原生 Agent/Growth Driver 提交源码修复候选，独立 Host 作业完成离线仓库检查并形成待审批计划；其中 personal-memory 修复经开发复核整合。待审批提案不等于自主发布或生产启用。
 - Control Plane 已有 npm 发布/独立读回/catalog adapter，以及 systemd reload、readiness、物理 rollback 的签名与持久操作组件。Host 派发在外部调用前落持久 claim，执行期间释放控制面写锁；结果未知时不重复调用，精确签名回执可对账，未结算前阻止同计划回退与恢复文件清理。认证有限回放端点支持晚到 Ed25519 授权：readiness 落账后，将真实 schema-2 请求交给同一 DSH CLI `0.1.5-rc.2` Host 执行，保持 PID/InvocationID、候选 Fiber 与部署文件不变。完成态重启失效，SIGKILL 中断后保留 unknown；同 scope 换 operation 或重新签发 grant 不能恢复派发权限。其输出不证明全局 `externalEffects = 0`，不能代替独立签名。
@@ -28,6 +28,8 @@
 - 普通 owner 修复获批后，可用独立的有限本地发布授权自动进入既有 `awaiting-pr`：Host 重查源码，外部签名器固定版本、registry/catalog、配额和有效期，最终提交再次检查当前反馈。持久作业重启可接续审批/授权及未完成发布，不重建源码候选或重复签发；可显式启用 Host 自动推进八个既有本地 release 阶段；可另配 Verifier 有限源码审查：从精确 bare Git PR 读取补丁，用全新无工具原生 Agent 生成 decision，再接续既有签名阶段。默认模型继承来源任务，可固定 override；未知调用不重派，终态可恢复同一 decision。schema 18 发布派发前持久 claim，精确签名回执可对账。精确制品启用已接续，有限 taskObservations 已接通，但可安装配置与真实部署端到端仍待验收。
 - Control Plane 使用后的签名退化/撤回已接入原有物理回退：成功启用保留上一版，核对当前版和备份核心文件，恢复后须由 Host 签名确认旧版就绪或停服；支持 rename 中断与回执丢失恢复，拒绝覆盖较新的部署。schema 17 保留部署顺序与安装摘要，旧记录不补造恢复能力。普通前台任务版本归因已接入；有限 taskObservations 已接通，安装配置与真实部署端到端仍待验收。
 - 后续普通 owner 任务已接入可选部署归因：Control Plane schema 20 在任务开始/完成时复用同一 Cordis observer，对照已签名 readiness 保留观测，固定当前源码采用的 package/version/integrity 与 Fiber 代次。重载、旧任务、owner 换代或执行未知不计有效观察；Delivery schema/source digest 不变。该记录不证明工具调用或因果退化；schema 21 的有限当前反馈批次、签名观察与物理回退已接通，可安装日常使用配置与真实部署端到端仍待验收。
+
+- 跨 Host 源码采用支持有限签名交接：`dossier.handoff` 由既有审批签名覆盖，schema 23 保存不可续期的目标授权。外部协调器复用原生 Automations 与部署引擎，仅推进至 `commit-pending`；目标恢复后重验当前反馈并最终启用。撤回/过期保留物理回退，Host 卸载保留交接，unknown 派发不重派。目标离线时仅能保证有限授权窗口，回退完成仍依赖运行中的协调器与签名服务；可安装部署和独立行为签名仍未验收。
 
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
 
@@ -62,7 +64,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. 补齐可安装的普通使用部署：supervised 安装目前未接 Growth Driver 源码轨；外部部署协调器需要目标 Host 的认证 owner/反馈校验，不能只共享 SQLite。明确一次授权、预算、停止和恢复入口，默认继承来源任务模型。
+1. 补齐可安装的普通使用部署：supervised 安装目前未接 Growth Driver 源码轨及双 Host 配置。有限签名交接已接原生 Automations，外部协调器推进至待提交，目标 Host 恢复后重验当前 owner/反馈再确认；继续补安装、一次授权、预算、停止和恢复入口，默认继承来源任务模型。
 2. 补齐采用前的独立行为观测与签名。现有 systemd attestor 只覆盖 reload/readiness/rollback；原生阻断回放不能证明全局无副作用，也不能替代 shadow/canary/soak/health 验收。
 3. 在实际部署中验证普通反馈驱动候选、独立验证、有限采用和后续真实任务观察/回滚，然后完成发布检查并发布 npm。保留上表未完成边界；Skills 路径仍需去除逐 Goal 手动 arm，WP18 仍需真实仓库授权提交与精确 CI/readback。固定场景和测试夹具不算生产闭环。
 
@@ -71,8 +73,8 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 本段全仓检查各环节已补齐：manifest、零 lint 警告、类型检查、构建、6,390 项测试（50 项跳过），以及全部 32 个插件和 3 个共享包的 dry-run pack。首次 `pnpm check` 遇到旧的回执丢失重试预期；续跑又发现 Growth 扫描测试依赖墙钟分钟。仅调整这两条测试，定向重跑通过，再续跑未执行的包、构建和打包；不把首次命令的退出码记为成功。Control Plane 合计 703 项通过。
-- 独立复核通过 Host 派发与签名对账：12 项新检查覆盖并发、执行期间其他任务写入、重启 unknown、来源撤回、签名替换、异步验签竞态与迁移；连同既有状态和回执链检查共 86 项通过。CLI 验证丢失回执后拒绝重派、按同一签名恢复。测试使用受控 attestor/来源端口，不构成真实部署闭环；尚未发布 npm。
+- 本段执行 `pnpm check`，首次在 Control Plane 遇到两条测试时序失败：路径替换 fixture 的后台进程未完成，以及 systemd fixture 的 5 秒观测超时。将前者改为同步替换，两条定向复查通过；续跑未执行的 9 个包。各环节补齐后合计 6,406 项测试通过、50 项跳过，Control Plane 719 项通过；manifest、最终零 lint 警告、类型检查、构建及 32 个插件和 3 个共享包的 dry-run pack 通过。首次命令的退出码仍为失败。
+- 跨 Host 交接独立复核通过，5 个相关文件共 54 项检查通过；另有 16 项交接/派发定向检查覆盖写锁期间撤销及原 unknown 回执边界。协调器不能创建、审批或最终启用目标计划；目标确认须同时持有当前反馈屏障和有效交接。测试使用受控 Host/签名端口，尚未验证真实双 Host 部署，尚未发布 npm。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 
 

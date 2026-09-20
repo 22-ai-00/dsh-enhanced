@@ -196,7 +196,7 @@ describe('durable source-job runtime', () => {
     } finally { await f.runtime.close(); f.store.close() }
   })
 
-  it.each([{ changed: false, adoption: false }, { changed: true, adoption: false }, { changed: false, adoption: true }, { changed: true, adoption: true }])('continues native prepared work without rebuilding on restart (%j)', async ({ changed, adoption }) => {
+  it.each([{ changed: false, adoption: false, handoff: false }, { changed: true, adoption: false, handoff: false }, { changed: false, adoption: true, handoff: false }, { changed: true, adoption: true, handoff: false }, { changed: true, adoption: true, handoff: true }])('continues native prepared work without rebuilding on restart (%j)', async ({ changed, adoption, handoff }) => {
     const f = await fixture({ typed: true, approvals: true, releases: true, execution: true, adoption })
     if (adoption) f.advanceReleased.mockImplementationOnce(async job => {
       // Release signatures are tested by source-release-runner; isolate the native job continuation boundary here.
@@ -228,13 +228,14 @@ describe('durable source-job runtime', () => {
         ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
       expect(outcome.outcome).toBe('succeeded'); expect(f.advanceReleased).toHaveBeenCalledTimes(1)
       await f.runtime.close(); f.setSourceCurrent(!changed)
+      if (handoff) vi.spyOn(f.store, 'findSourceAdoption').mockReturnValue({ status: 'approved', dossier: { handoff: { schemaVersion: 1, coordinatorId: 'external-host', maximumWindowMs: 60_000, commit: 'target-host' } } } as never)
       restarted = f.createRuntime(); restarted.start()
       await f.tickContinuation(); await restarted.close()
       expect(f.advanceReleased).toHaveBeenCalledTimes(adoption || changed ? 1 : 2)
       if (adoption) {
-        // A source change only retains post-release recovery after a durable
-        // exposed adoption record exists; this fixture has not created one.
-        expect(f.adoptReleased).toHaveBeenCalledTimes(changed ? 1 : 2)
+        // A handed-off approval retains recovery after withdrawal; without
+        // a handoff or exposed adoption, the continuation stops.
+        expect(f.adoptReleased).toHaveBeenCalledTimes(changed && !handoff ? 1 : 2)
         expect(f.adoptionForward).toHaveBeenCalledTimes(changed ? 1 : 2)
       }
       expect(f.prepare).toHaveBeenCalledTimes(1); expect(f.approvePrepared).toHaveBeenCalledTimes(1); expect(f.releasePrepared).toHaveBeenCalledTimes(1)
