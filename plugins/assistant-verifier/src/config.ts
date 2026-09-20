@@ -4,6 +4,7 @@ import type { AcceptanceTaskIdentity, TaskAcceptanceContract } from '@dsh-enhanc
 import type { AcceptanceTask } from './host.js'
 import { createVerifierAuthorities } from './drivers.js'
 import type { VerifierAuthority, VerifierAuthorityInput } from './drivers.js'
+import type { SourceReviewConfig } from './source-review.js'
 
 /** A Host-owned exact task specification; editing it cannot rewrite accepted work. */
 export interface AcceptanceProfile extends Omit<AcceptanceTask, 'task'> {
@@ -21,6 +22,7 @@ export interface Config {
   profiles?: readonly AcceptanceProfile[]
   tickIntervalMs?: number
   requireAcceptance?: boolean
+  sourceReviews?: SourceReviewConfig
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -29,6 +31,7 @@ export const Config: Schema<Config> = Schema.object({
   profiles: Schema.array(Schema.any()).default([]),
   tickIntervalMs: Schema.number().step(1).min(0).max(60_000).default(5_000),
   requireAcceptance: Schema.boolean().default(false),
+  sourceReviews: Schema.any(),
 }) as Schema<Config>
 
 export interface CompiledAcceptanceProfile {

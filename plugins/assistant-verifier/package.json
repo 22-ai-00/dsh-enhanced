@@ -54,7 +54,13 @@
     "@dsh-enhanced/assistant-delivery": ">=0.1.24 <0.2.0",
     "@dsh-enhanced/assistant-evaluation": ">=0.1.24 <0.2.0",
     "@dsh-enhanced/assistant-isolation": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-actions": ">=0.1.0 <0.2.0"
+    "@dsh-enhanced/assistant-actions": ">=0.1.0 <0.2.0",
+    "@deepseek-ai/dsh-agent": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-session": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.2-rc.1 <0.2.0",
+    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -74,6 +80,24 @@
     },
     "@dsh-enhanced/assistant-actions": {
       "optional": true
+    },
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-policy": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -84,7 +108,17 @@
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/assistant-evaluation": "workspace:*",
-    "@dsh-enhanced/assistant-isolation": "workspace:*"
+    "@dsh-enhanced/assistant-isolation": "workspace:*",
+    "@deepseek-ai/dsh-agent": "catalog:",
+    "@deepseek-ai/dsh-llm": "catalog:",
+    "@deepseek-ai/dsh-session": "catalog:",
+    "@deepseek-ai/dsh-tools": "catalog:",
+    "@deepseek-ai/dsh-system-prompt": "catalog:",
+    "@deepseek-ai/dsh-agent-loop": "catalog:",
+    "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
+    "@deepseek-ai/dsh-session-projection": "catalog:",
+    "@deepseek-ai/dsh-agent-default-model": "catalog:",
+    "@dsh-enhanced/assistant-policy": "workspace:*"
   },
   "dependencies": {
     "@dsh-enhanced/task-acceptance-contract": "workspace:*",

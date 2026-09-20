@@ -26,6 +26,38 @@ test('rejects a decision for a different checked head before any review dispatch
   expect(release.invokeSourceReleaseAdapter).toHaveBeenCalledTimes(1)
 })
 
+test('requests independent review only when enabled, then validates its decision through the normal signed phases', async () => {
+  const f = await fixture()
+  const review = vi.fn(async (request, plan) => {
+    expect(request.phase).toBe('review')
+    expect(request.plan.id).toBe(plan.id)
+    expect(release.invokeSourceReleaseAdapter).toHaveBeenCalledTimes(1)
+    await f.decide()
+  })
+  expect((await advanceSourceRelease({ ...f.options, review })).status).toBe('awaiting-review')
+  expect(review).not.toHaveBeenCalled()
+  const config = { ...f.options.config, independentReview: true }
+  validateSourceReleaseExecutionConfig(config)
+  expect((await advanceSourceRelease({ ...f.options, config, review })).status).toBe('release-complete')
+  expect(review).toHaveBeenCalledTimes(1)
+  expect(vi.mocked(release.invokeSourceReleaseAdapter).mock.calls.map(call => call[1].phase)).toEqual(phases)
+})
+
+test('a rejected or unknown review cannot advance without a matching decision', async () => {
+  const f = await fixture(), review = vi.fn(async () => {})
+  expect((await advanceSourceRelease({ ...f.options, config: { ...f.options.config, independentReview: true }, review })).status).toBe('awaiting-review')
+  expect(review).toHaveBeenCalledTimes(1)
+  expect(release.invokeSourceReleaseAdapter).toHaveBeenCalledTimes(1)
+})
+
+test('cancellation after independent review prevents signed review dispatch', async () => {
+  const f = await fixture()
+  await expect(advanceSourceRelease({ ...f.options, config: { ...f.options.config, independentReview: true },
+    review: async () => { await f.decide(); f.controller.abort() } })).rejects.toThrow()
+  expect(release.invokeSourceReleaseAdapter).toHaveBeenCalledTimes(1)
+  expect(f.store.getSourcePlan(f.plan.id).status).toBe('awaiting-review')
+})
+
 test('does not replay an adapter after a lost response, including a new Store connection', async () => {
   const f = await fixture()
   vi.mocked(release.invokeSourceReleaseAdapter).mockRejectedValueOnce(new Error('lost response'))

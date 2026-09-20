@@ -32,7 +32,7 @@ vi.mock('../src/source-release-runner.ts', async original => ({ ...await origina
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.resetAllMocks() })
 
-async function fixture(approvals = false, managedVersion = false, releases = false, execution = false) {
+async function fixture(approvals = false, managedVersion = false, releases = false, execution = false, review = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-task-source-service-'))), ctx = new Context()
   cleanup.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   const owner = { receiptVersion: 2 as const, authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner',
@@ -44,7 +44,8 @@ async function fixture(approvals = false, managedVersion = false, releases = fal
         evaluator: { id: 'assistant-verifier', version: '1' }, evidence: [], occurredAt: Date.now() },
       projection: { subjectKind: 'foreground-turn', subjectRef: 'task', version: 1, digest: 'b'.repeat(64), disposition: 'upsert' } },
     judgement: 'independent-verifier', source: { sessionId: 'session', inboxId: 'task', objective: 'private task',
-      quiescent: true, truncated: false, modelSelectionState: 'missing' } }
+      quiescent: true, truncated: false, modelSelectionState: review ? 'frozen' : 'missing',
+      ...(review ? { modelSelection: { provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } } : {}) } }
   const fence = vi.fn((_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }))
   ctx.provide('assistantDelivery' as never, { inspectOwnerForegroundLearningTask: () => structuredClone(source) })
   ctx.provide('assistantEvaluation' as never, { canonicalHostScope: (input: unknown) => input, withTrustedCanonicalTaskWriterFence: fence })
@@ -66,7 +67,7 @@ async function fixture(approvals = false, managedVersion = false, releases = fal
   const service = new PluginControlPlaneService(ctx, { statePath, catalogPath, trustPath,
     ...(approvals ? { sourceApprovals: { executable: { path: join(root, "authority.js"), sha256: "f".repeat(64) }, configPath: join(root, "authority.json"), timeoutMs: 1000 } } : {}),
     ...(releases ? { sourceReleases: { executable: { path: join(root, 'release-authority.js'), sha256: 'a'.repeat(64) }, configPath: join(root, 'release-authority.json'), timeoutMs: 1000 } } : {}),
-    ...(execution ? { sourceReleaseExecution: { reviewDecisionRoot: root, timeoutMs: 30_000 } } : {}),
+    ...(execution ? { sourceReleaseExecution: { reviewDecisionRoot: root, timeoutMs: 30_000, ...(review ? { independentReview: true } : {}) } } : {}),
     sourceBuild: { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
       ...(managedVersion ? { versioning: 'patch' as const } : {}),
       memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } })
@@ -148,8 +149,8 @@ test('a final commit fence conflict removes the worktree and leaves no plan', as
   expect(f.remove).toHaveBeenCalledOnce()
 })
 
-async function signedApprovalFixture(releases = false, execution = false) {
-  const f = await fixture(true, releases, releases, execution), plan = await f.service.prepareModifySourcePlan(f.request)
+async function signedApprovalFixture(releases = false, execution = false, review = false) {
+  const f = await fixture(true, releases, releases, execution, review), plan = await f.service.prepareModifySourcePlan(f.request)
   const keys = generateKeyPairSync('ed25519')
   const bound = await trust.loadTrustConfig('ignored')
   vi.mocked(trust.loadTrustConfig).mockResolvedValue({ ...bound, approvalKeys: [{ authority: 'authority', keyId: 'key',
@@ -209,8 +210,8 @@ test('durable approval rejects a changed frozen job trust before invoking the he
 })
 
 
-async function signedReleaseFixture(execution = false) {
-  const f = await signedApprovalFixture(true, execution)
+async function signedReleaseFixture(execution = false, review = false) {
+  const f = await signedApprovalFixture(true, execution, review)
   await f.service.requestOwnerSourceApproval({ planId: f.plan.id })
   const keys = generateKeyPairSync('ed25519'), bound = await trust.loadTrustConfig('ignored')
   const registry = { id: 'local-registry', locator: pathToFileURL(join(f.root, 'registry')).href, caPins: [], tokenEnvironment: null }
@@ -329,4 +330,30 @@ test('Host unload aborts and drains a single release continuation', async () => 
   const disposal = f.ctx.fiber.dispose().then(() => { disposed = true })
   await new Promise(resolve => setImmediate(resolve)); expect(disposed).toBe(false)
   finish(); await rejected; await disposal
+})
+
+
+test('independent review waits before PR until its exact root and inherited model are available', async () => {
+  const f = await signedReleaseFixture(true, true)
+  const started = await f.service.requestOwnerSourceRelease({ planId: f.plan.id })
+  expect(await f.service.advanceOwnerSourceRelease({ planId: f.plan.id })).toEqual(started)
+  expect(releaseRunner.advanceSourceRelease).not.toHaveBeenCalled()
+  const canReviewSourceRepair = vi.fn(() => false), reviewSourceRepair = vi.fn()
+  f.ctx.provide('assistantVerifier' as never, { canReviewSourceRepair, reviewSourceRepair })
+  expect(await f.service.advanceOwnerSourceRelease({ planId: f.plan.id })).toEqual(started)
+  expect(canReviewSourceRepair).toHaveBeenCalledWith({ decisionRoot: f.root, owner: f.owner, name: 'health-helper', modelSelection: { provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } })
+  expect(releaseRunner.advanceSourceRelease).not.toHaveBeenCalled()
+  canReviewSourceRepair.mockReturnValue(true)
+  vi.mocked(releaseRunner.advanceSourceRelease).mockImplementation(async options => {
+    const request = { phase: 'review' as const, operationId: 'review-operation', plan: { id: started.id, digest: started.digest, revision: started.revision },
+      release: started.release!, authorization: f.authorization,
+      input: { prId: 'pr', baseCommit: started.baseCommit, headCommit: 'f'.repeat(40), prEvidenceDigest: 'e'.repeat(64) } }
+    await options.review!(request as unknown as Parameters<NonNullable<typeof options.review>>[0], started)
+    return started
+  })
+  expect(await f.service.advanceOwnerSourceRelease({ planId: f.plan.id })).toEqual(started)
+  expect(reviewSourceRepair).toHaveBeenCalledTimes(1)
+  expect(reviewSourceRepair.mock.calls[0]![0]).toMatchObject({ request: { protocol: 'dsh-source-review/v1', planId: started.id,
+    source: { owner: f.owner, objective: 'private task', modelSelection: f.source.source.modelSelection },
+    checkedTreeDigest: f.authorization.checkedTreeDigest, checkedPatchDigest: f.authorization.checkedPatchDigest } })
 })

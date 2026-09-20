@@ -90,6 +90,16 @@ test('blocks wrong callers and owner generation changes, including a new session
   expect(() => f.gateway.withCurrent(gap.id, caller, () => {})).toThrow('changed')
 })
 
+test('Host snapshot inherits the verified task model and rejects later owner feedback changes', async () => {
+  const f = await fixture(), gap = f.gateway.record(f.source())
+  const snapshot = f.gateway.snapshot(gap.id, f.owner)
+  expect(snapshot.source.modelSelection).toEqual({ provider: 'supplier', model: 'task-model' })
+  expect(snapshot.source.objective).toBe('private original task')
+  expect(() => f.gateway.snapshot(gap.id, { ...f.owner, principalId: 'other-owner' })).toThrow('caller')
+  f.append('corrected', 'inbox-1', 'achieved')
+  expect(() => f.gateway.snapshot(gap.id, f.owner)).toThrow('trusted foreground failure')
+})
+
 test('refuses stale evidence inside the canonical writer fence without writing a gap', async () => {
   const f = await fixture(), expected = f.source()
   const original = f.evaluation.withTrustedCanonicalTaskWriterFence.bind(f.evaluation)

@@ -12,10 +12,13 @@ export interface SourceReleaseExecutionConfig {
   /** Independently produced decisions consumed by the configured local review adapter. */
   reviewDecisionRoot: string
   timeoutMs: number
+  /** Ask the independently configured Host Verifier to produce a missing decision. */
+  independentReview?: boolean
 }
 export function validateSourceReleaseExecutionConfig(value: SourceReleaseExecutionConfig): void {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || Object.keys(value).sort().join('\0') !== ['reviewDecisionRoot', 'timeoutMs'].join('\0')
+    || Object.keys(value).some(key => !['reviewDecisionRoot', 'timeoutMs', 'independentReview'].includes(key))
+    || (value.independentReview !== undefined && typeof value.independentReview !== 'boolean')
     || typeof value.reviewDecisionRoot !== 'string' || !isAbsolute(value.reviewDecisionRoot)
     || resolve(value.reviewDecisionRoot) !== value.reviewDecisionRoot
     || !Number.isSafeInteger(value.timeoutMs) || value.timeoutMs < 1000 || value.timeoutMs > 1_800_000) {
@@ -64,6 +67,7 @@ export function sourceReleaseAuthorities(trust: PluginControlTrustConfig) {
 export async function advanceSourceRelease(options: {
   store: ControlPlaneStore; planId: string; trust: PluginControlTrustConfig; config: SourceReleaseExecutionConfig
   signal: AbortSignal; assertCurrent: () => Promise<void>; withSourceFence: <T>(callback: () => T) => T
+  review?: (request: Extract<SourceReleaseRequest, { phase: 'review' }>, plan: PluginSourcePlan) => Promise<void>
 }): Promise<PluginSourcePlan> {
   const { store, trust, signal, withSourceFence } = options
   if (trust.schemaVersion !== 4 || !trust.releaseRegistry?.locator.startsWith('file:')) throw new Error('source release execution requires local schema-v4 trust')
@@ -99,7 +103,14 @@ export async function advanceSourceRelease(options: {
     }
     // A completed signed receipt can be applied even if the decision file was
     // subsequently removed. Store still rechecks its exact request and source.
-    if (!operation.receipt && !hasIndependentReview(operation.request, options.config.reviewDecisionRoot)) return plan
+    if (!operation.receipt && !hasIndependentReview(operation.request, options.config.reviewDecisionRoot)) {
+      if (options.config.independentReview && options.review && operation.request.phase === 'review') {
+        await options.assertCurrent(); signal.throwIfAborted()
+        await options.review(operation.request, plan)
+        await options.assertCurrent(); signal.throwIfAborted()
+      }
+      if (!hasIndependentReview(operation.request, options.config.reviewDecisionRoot)) return plan
+    }
     await options.assertCurrent()
     const receipt = await store.runSourceReleaseOperation({ operationId: operation.operationId, expectedRevision: plan.revision,
       expectedFence: plan.release.fence, resolveAuthority: authority, resolveAuthorizationAuthority: authorize, withSourceFence,
