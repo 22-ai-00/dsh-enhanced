@@ -1263,7 +1263,7 @@ describe.sequential('trusted staged CLI', () => {
     expect((database.prepare('SELECT count(*) AS count FROM host_attestations').get() as { count: number }).count).toBe(7)
     const reloadRequest = JSON.parse((database.prepare("SELECT request_json FROM host_attestation_operations WHERE plan_id = ? AND phase = 'reload'")
       .get(plan.id) as { request_json: string }).request_json) as Record<string, unknown>
-    expect(reloadRequest).toMatchObject({ schemaVersion: 1, kind: 'dsh-host-attestation-request', installationId,
+    expect(reloadRequest).toMatchObject({ schemaVersion: 2, kind: 'dsh-host-attestation-request', predecessor: null, installationId,
       ledger: value.trust.ledger, plan: { id: plan.id, digest: plan.digest },
       activation: { id: plan.activation!.id, fence: 1 }, profile: { name: 'web', path: value.profile },
       issuer: { mode: 'configured-executable', id: 'fixture-host-attestor', path: value.attestor,
@@ -1372,11 +1372,13 @@ describe.sequential('trusted staged CLI', () => {
     expect(plan.status).toBe('awaiting-canary')
     const trust = await loadTrustConfig(value.trustPath); const beforeCrash = new ControlPlaneStore({ path: value.state })
     const operation = prepareConfiguredHostAttestation(beforeCrash, plan, trust); beforeCrash.close()
+    const request = operation.request
+    if (request.schemaVersion !== 2) throw new Error('new Host operation must use schema v2')
     await withEnvironment({ HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory, HOST_ATTESTOR_MODE: 'passed', HOST_ATTESTOR_FAIL_PHASE: '' },
-      () => invokeConfiguredHostAttestor(trust, operation.request))
+      () => invokeConfiguredHostAttestor(trust, request))
     await expect(readFile(join(value.attestorDirectory, 'canary-exposures'), 'utf8')).resolves.toBe('1')
     await expect(withEnvironment({ HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory, HOST_ATTESTOR_MODE: 'passed', HOST_ATTESTOR_FAIL_PHASE: '' },
-      () => invokeConfiguredHostAttestor(trust, { ...operation.request, profile: { ...operation.request.profile, name: 'changed' } }))).rejects.toThrow('non-zero')
+      () => invokeConfiguredHostAttestor(trust, { ...request, profile: { ...request.profile, name: 'changed' } }))).rejects.toThrow('non-zero')
     await configuredProbe(value, plan)
     await expect(readFile(join(value.attestorDirectory, 'canary-exposures'), 'utf8')).resolves.toBe('1')
     const recovered = new ControlPlaneStore({ path: value.state }); expect(recovered.getPlan(plan.id).status).toBe('awaiting-soak'); recovered.close()

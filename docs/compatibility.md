@@ -189,25 +189,33 @@ teardown and actual DSH process observation. See [contract](runtime-observer.md)
 
 ### External systemd readiness signer
 
-The shipped systemd attestor version is `dsh-systemd-host-attestor-4`. Schema-1
-reload config remains supported; schema-2 selects readiness with an exact
-observer config, pinned node-only protocol helper and deployment files. The
-existing Host request/receipt and Control Plane state schemas do not change.
-Its private journal transactionally adds raw reload request/config columns;
-legacy rows without retained context cannot authorize readiness. Pending old
-executable/version requests require their original pinned binary for
-reconciliation. Upgrade checks include real observer queries, signed reload
-binding, global generation supersession, drift refusal and unchanged replay.
-Version 3 signs stable authenticated inactive entries as failed readiness;
-identity/authentication failures remain unsigned. Existing schemas and the
-Control Plane failure transition are retained. Upgrade checks also cover
-negative receipt replay and refusal to replace a cached failure with success.
+The shipped systemd attestor version is `dsh-systemd-host-attestor-5`. Owner
+config schema 1 selects reload, schema 2 readiness, and schema 3 physical
+rollback. It now requires Host request schema 2 with an immutable predecessor
+receipt binding. Readiness independently matches that binding against the
+signer's retained signed reload. Signed receipt schema 2 and Control Plane
+database schema 15 remain unchanged.
+
+Normal phase requests bind the previous passed/applied receipt in the same
+activation/fence, including its full signed digest and Host generation. The
+Control Plane rechecks this chain before dispatch and apply; only reload and
+rollback can advance generation. Old applied receipts remain historical
+evidence, while unbound schema-1 operations cannot be silently rewritten or
+resumed as schema 2. Reconcile in-flight work with the original pinned executable
+and compatible Control Plane before upgrading. Never delete a journal or
+replace an operation ID to regain dispatch permission.
+
+Upgrade checks include predecessor substitution, post-reservation generation
+supersession, restart, failed-receipt identity checks, actual observer queries,
+signed reload/readiness, and physical recovery. Stable authenticated inactive
+entries produce failed readiness; identity/authentication failures remain
+unsigned, and a cached failure cannot become success.
 
 ### Physical Host rollback (Control Plane schema 15)
 
 Schema 15 adds immutable original core-file pins, a sticky physical recovery
 requirement and a durable file-restoration marker. `rollback` extends the
-existing schema-1 Host request/schema-2 signed receipt; schema-3 systemd
+existing schema-2 Host request/schema-2 signed receipt; schema-3 systemd
 configuration explicitly authorizes either baseline restore plus authenticated
 readiness, or profile absence plus stable stop. Older attestors reject this
 phase. Historical terminal records remain historical; migration does not

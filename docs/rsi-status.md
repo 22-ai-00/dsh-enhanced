@@ -14,6 +14,7 @@
 - 基本 RSI 已在限定任务族跑通真实修复、独立比较、后续任务 canary、两轮晋升与安全检查点恢复。它不证明任意任务都能自我改进，也不允许重放未结算的模型或外部调用。
 - Day1 已经通过原生 Agent/Growth Driver 提交源码修复候选，独立 Host 作业完成离线仓库检查并形成待审批计划；其中 personal-memory 修复经开发复核整合。待审批提案不等于自主发布或生产启用。
 - Control Plane 已有 npm 发布/独立读回/catalog adapter，以及 systemd reload、readiness、物理 rollback 的签名与持久操作组件。认证有限回放端点已在真实 DSH CLI `0.1.5-rc.2` 临时 Host 验证：完成态重启失效，SIGKILL 中断后保留 unknown 且不重复派发。其输出不证明全局 `externalEffects = 0`，不能代替独立签名。
+- Host request schema 2 固定同一 activation/fence 下前一阶段的完整签名回执摘要与 generation，并在 dispatch、apply 时复核；普通阶段不能换代。systemd attestor v5 已通过真实 reload/readiness 与物理 restore 探针。旧 schema-1 已应用历史可作为前驱，未完成操作必须先用原兼容版本对账；此改动仍不提供独立副作用观测。
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
 
 ## 工作包验收
@@ -55,7 +56,8 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。代码基线 `cd7bbce` 的 `pnpm check` 退出 0：6,070 项通过、44 项跳过、35 个包的 dry-run pack（32 个插件、3 个共享库）。回放端点/账本/运行时定向 28 项通过；这些是工程验证，不是生产自治完成证明。
-- 同一代码提交的 [GitHub CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35487013866) 已于 2026-09-20 完成：Linux、macOS 仓库检查与 Windows ACP smoke 均通过。该结论只绑定 `cd7bbce`，后续提交须核对各自 CI。
+- 每段代码完成相关测试、独立复核与根 `pnpm check` 后提交、推送 `dev`。当前 Host request schema 2 / attestor v5 改动的本地 `pnpm check` 退出 0：6,088 项通过、44 项跳过、35 个包的 dry-run pack（32 个插件、3 个共享库），其中 Control Plane 为 494 项通过。定向测试覆盖旧凭证保留、前驱替换、普通阶段换代与异步验签竞争；这些是工程验证，不是生产自治完成证明。
+- 真实 DSH CLI `0.1.5-rc.2` 的 `systemd-readiness-real-dsh.mjs` 默认探针与 `DSH_READINESS_ROLLBACK=restore` 探针均退出 0；运行摘要与当前实现哈希一致。签名正确但代次替换的 synthetic negative receipt 被拒绝且未推进状态；它不构成外部副作用观测。命令与边界见 [Host 签名器](systemd-host-attestor.md)。
+- 文档提交 `2d4b228` 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35488175203) 中，Linux 与 Windows 通过，macOS 的 `Verify repository` 失败：`assistant-policy/tests/ledger.spec.ts` 的 schema-v0 并发迁移测试在释放测试锁的 `COMMIT` 处报 `database is locked`。此平台问题尚待修复和远端复验；每次提交须核对自身 CI，本地通过不等于全平台通过。
 
 原始运行 JSON、日志和临时身份留本地或 CI artifacts，仓库只保留命令、结论和限制。确需供可重复探针使用的固定输入留在 `scripts/e2e/fixtures/`，不从本次网络结果反推预期值。

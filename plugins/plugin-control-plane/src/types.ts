@@ -45,7 +45,7 @@ export type HostAttestationRequirements =
   | { kind: 'rollback'; previousHostGeneration: number; action: 'restore' | 'stop'; baselineFiles: readonly { path: string; sha256: string | null }[]; minimumChecks: number }
 
 export interface HostAttestationRequest {
-  schemaVersion: 1
+  schemaVersion: 2
   kind: 'dsh-host-attestation-request'
   operationId: string
   requestedAt: number
@@ -61,7 +61,23 @@ export interface HostAttestationRequest {
       interpreter: { path: string; sha256: string } | null; authority: string; keyId: string }
   phase: HostAttestationPhase
   requirements: HostAttestationRequirements
+  /** Immutable, durable receipt binding for the Host generation this phase observes. */
+  predecessor: null | {
+    operationId: string
+    receiptId: string
+    phase: HostAttestationPhase
+    /** SHA-256 of the complete signed receipt persisted by the prior operation. */
+    receiptDigest: string
+    hostGeneration: number
+  }
 }
+
+/** Schema-v1 records are retained for read-only provenance and reconciliation. */
+export interface LegacyHostAttestationRequest extends Omit<HostAttestationRequest, 'schemaVersion' | 'predecessor'> {
+  schemaVersion: 1
+}
+
+export type StoredHostAttestationRequest = HostAttestationRequest | LegacyHostAttestationRequest
 
 export type HostAttestationEvidence =
   | { kind: 'reload'; reloaded: boolean; previousHostGeneration: number; currentHostGeneration: number; probeDigest: string }
@@ -632,7 +648,8 @@ export interface HostAttestationOperation {
   operationId: string
   bindingDigest: string
   requestDigest: string
-  request: HostAttestationRequest
+  /** v1 is readable historical provenance only; dispatch and apply require v2. */
+  request: StoredHostAttestationRequest
   status: 'pending' | 'completed' | 'applied'
   receipt?: HostAttestationReceipt
   createdAt: number

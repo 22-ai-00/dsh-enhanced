@@ -202,6 +202,14 @@ advance `awaiting-effect-blocked-replay` or replace a Host attestation. Owner
 request/case configuration is a trust input; the caller cannot prove its own
 authorization merely by supplying `requestDigest`.
 
+New Control Plane Host requests use schema 2 and bind the exact preceding
+applied signed receipt. An effect-blocked replay request therefore carries the
+readiness receipt digest and Host generation; ordinary phases cannot advance
+generation. The ledger rechecks this chain before dispatch and apply. This
+prevents substituting a later generation or another phase's evidence, but it
+does not prove process/invocation identity or observe external effects. Those
+remain responsibilities of the independent attestor and its deployment.
+
 The boundary covers native tool bodies and Agent reply admission for these
 calls. It does not cover arbitrary Node code, pre/post hooks, other Delivery
 Host APIs, filesystem/network access, subprocesses, or a malicious same-UID

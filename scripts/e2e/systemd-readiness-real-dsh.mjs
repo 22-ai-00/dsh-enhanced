@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { queryRuntimeObserver, runtimeConfigDigest } from '../../plugins/plugin-control-plane/lib/runtime-observer.js'
-import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest } from '../../plugins/plugin-control-plane/lib/attestation.js'
+import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest, hostAttestationEvidenceDigest, hostAttestationSigningPayload } from '../../plugins/plugin-control-plane/lib/attestation.js'
 import { Ed25519ApprovalAuthority, approvalSigningPayload } from '../../plugins/plugin-control-plane/lib/approval.js'
 import { ControlPlaneStore, controlPlaneDigest } from '../../plugins/plugin-control-plane/lib/store.js'
 import { parseCatalog } from '../../plugins/plugin-control-plane/lib/catalog.js'
@@ -135,11 +135,12 @@ try {
     await writeFile(patchPath, JSON.stringify(patch(true)), { mode: 0o600 })
   }
   plan = store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence, from: 'staging', to: 'awaiting-reload' })
-  const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-4', ...executable,
+  const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-5', ...executable,
     interpreter, authority: 'fixture-owner', keyId: 'fixture-key' }
   const prepare = requirements => store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision,
     expectedFence: plan.activation.fence, issuer, requirements, receiptTtlMs: 120000 }).request
   const reloadRequest = prepare({ kind: 'reload', previousHostGeneration: 0 })
+  if (reloadRequest.schemaVersion !== 2 || reloadRequest.predecessor !== null) throw new Error('reload request is not an unchained schema-2 generation transition')
   const properties = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory', 'User', 'Group', 'Type', 'KillMode']
   const unitProperties = Object.fromEntries((await supervisor(['show', unit, ...properties.map(key => `--property=${key}`)]))
     .trimEnd().split('\n').map(line => { const index = line.indexOf('='); return [line.slice(0, index), line.slice(index + 1)] }))
@@ -181,6 +182,11 @@ try {
   const successor = await observe(!initialCandidateDisabled)
   if (successor.observation.invocationId === active.observation.invocationId) throw new Error('reload did not replace Host')
   const readinessRequest = prepare({ kind: 'readiness', minimumChecks: 3 })
+  const predecessor = { operationId: reloadReceipt.operationId, receiptId: reloadReceipt.receiptId,
+    phase: 'reload', receiptDigest: controlPlaneDigest(reloadReceipt), hostGeneration: reloadReceipt.hostGeneration }
+  if (readinessRequest.schemaVersion !== 2 || controlPlaneDigest(readinessRequest.predecessor) !== controlPlaneDigest(predecessor)) {
+    throw new Error('readiness did not bind the exact applied reload receipt')
+  }
   const { previousHostGeneration: _previous, ...authorization } = reloadConfig.authorization
   const readinessConfig = { ...reloadConfig, schemaVersion: 2,
     authorization: { ...authorization, hostGeneration: reloadReceipt.hostGeneration, requestDigest: hostAttestationRequestDigest(readinessRequest) },
@@ -197,6 +203,31 @@ try {
   if (JSON.stringify(readinessReplay) !== JSON.stringify(readinessReceipt)) throw new Error('readiness replay differs')
   const afterReadiness = await identity()
   if (JSON.stringify(afterReadiness) !== JSON.stringify(successor.supervisor)) throw new Error('readiness restarted the Host')
+  let generationSubstitution
+  if (plan.status === 'awaiting-effect-blocked-replay') {
+    const request = prepare({ kind: 'effect-blocked-replay', minimumDeliveryAttempts: 1,
+      minimumToolExecutionAttempts: 1, maximumExternalEffects: 0 })
+    if (request.predecessor?.receiptDigest !== controlPlaneDigest(readinessReceipt)) throw new Error('replay does not bind actual readiness')
+    // Deliberately fabricated negative input, not an external-effect observation.
+    // A valid owner signature must not authorize switching the observed Host generation.
+    const invalidEvidence = { kind: 'effect-blocked-replay', deliveryAttempts: 1, deliveryBlocked: 1,
+      toolExecutionAttempts: 1, toolExecutionBlocked: 1, externalEffects: 0, replayDigest: 'f'.repeat(64) }
+    const observedAt = Date.now()
+    const unsigned = { schemaVersion: 2, receiptId: 'invalid-generation-fixture', authority: issuer.authority, keyId: issuer.keyId,
+      installationId: plan.installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation.id,
+      fence: plan.activation.fence, operationId: request.operationId, requestDigest: hostAttestationRequestDigest(request),
+      phase: request.phase, outcome: 'passed', hostGeneration: readinessReceipt.hostGeneration + 1, evidence: invalidEvidence,
+      evidenceDigest: hostAttestationEvidenceDigest(invalidEvidence), observedAt, expiresAt: observedAt + 30000 }
+    const receipt = { ...unsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), keys.privateKey).toString('base64') }
+    let refused = false
+    try {
+      await store.runHostAttestationOperation({ operationId: request.operationId, expectedRevision: plan.revision,
+        expectedFence: plan.activation.fence, execute: async () => receipt, resolveAuthority: () => authority })
+    } catch (error) { if (!/changed generation from its predecessor/u.test(String(error))) throw error; refused = true }
+    if (!refused || store.getHostAttestationOperation(request.operationId).status !== 'pending'
+      || controlPlaneDigest(store.getPlan(plan.id)) !== controlPlaneDigest(plan)) throw new Error('generation substitution advanced activation')
+    generationSubstitution = { syntheticNegativeReceipt: true, refused, request, receipt, activationUnchanged: true }
+  }
   const db = new DatabaseSync(join(stateRoot, 'reload.sqlite'), { readOnly: true })
   let signedObservation
   try { signedObservation = JSON.parse(db.prepare('SELECT observation FROM readiness').get().observation) } finally { db.close() }
@@ -223,6 +254,9 @@ try {
     const filesRestoredPlan = plan
     const args = ['probe', '--plan-id', plan.id, '--expected-revision', String(plan.revision), '--expected-fence', String(plan.activation.fence)]
     const request = await cli([...args, '--prepare-only'])
+    if (request.schemaVersion !== 2 || request.activation.fence <= readinessRequest.activation.fence || request.predecessor !== null) {
+      throw new Error('physical recovery did not preserve its new fence and empty same-fence predecessor')
+    }
     if (request.requirements.action !== rollbackAction || controlPlaneDigest(request.requirements.baselineFiles) !== controlPlaneDigest(baselineFiles)) throw new Error('rollback request does not bind original baseline')
     const ownerConfig = { ...reloadConfig, schemaVersion: 3, profileFiles: baselineFiles,
       authorization: { ...reloadConfig.authorization, activation: request.activation,
@@ -275,7 +309,7 @@ try {
       controlAttestation: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/attestation.js', import.meta.url))),
       fixtureScript: sha(await readFile(fileURLToPath(import.meta.url))),
       controlEntry: sha(await readFile(fileURLToPath(controlUrl))), candidateEntry: sha(await readFile(fileURLToPath(candidateUrl))) },
-    active, replay, successor, afterReadiness, replacement, reloadReceipt, readinessReceipt, signedObservation,
+    active, replay, successor, afterReadiness, replacement, reloadReceipt, readinessReceipt, signedObservation, generationSubstitution,
     receiptPublicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }), plan: initialPlan,
     controlPlane: { transitions, finalPlan: plan, persistedAfterReopen: true },
     requests: { reload: reloadRequest, readiness: readinessRequest },
