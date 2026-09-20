@@ -70,8 +70,14 @@ async function fixture() {
   await ctx.loader.await()
   const runtime = new EffectBlockedReplayRuntime(ctx, config)
   const outbox = () => (ctx.assistantDelivery as unknown as { deliveryStore: { listOutbox(input: unknown): unknown[] } }).deliveryStore.listOutbox({})
-  return { ctx, runtime, target, other, outbox, toolBodies: () => toolBodies }
+  return { ctx, config, runtime, target, other, outbox, toolBodies: () => toolBodies }
 }
+
+test('rejects Agent scopes and inherited Agent scopes as replay runtime owners', async () => {
+  const f = await fixture()
+  expect(() => new EffectBlockedReplayRuntime(f.target.agent.ctx, f.config)).toThrow('unscoped Host Fiber')
+  expect(() => new EffectBlockedReplayRuntime(f.target.agent.ctx.extend(), f.config)).toThrow('unscoped Host Fiber')
+})
 
 function replayInput(handle: { agent: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['ctx']['agents']['create']>>['agent']; dispose(): Promise<void> }, operationId: string, signal = new AbortController().signal, cases = [
   { id: 'tool-1', kind: 'tool' as const, name: 'replay_effect_probe', arguments: {} },

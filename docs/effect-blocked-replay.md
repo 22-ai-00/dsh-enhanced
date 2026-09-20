@@ -105,9 +105,11 @@ replayEndpoint: {
 ```
 
 The owner fixes one operation and case set, a maximum 24-hour authority window,
-and a 100–60,000 ms execution deadline. The native Agent uses the configured
-preset and model selection; the endpoint submits no model prompt and does not
-override Policy. Existing startup hooks and tool registrations still apply.
+and a 100–60,000 ms execution deadline. Creation records the configured preset
+in session metadata and supplies the provider/model options. It does not mount
+that preset: required tools must already be registered by Host startup hooks.
+The endpoint submits no model prompt and does not override Policy.
+Existing startup hooks and tool registrations still apply.
 Agent creation and arbitrary hooks are outside the two replay effect boundaries.
 
 Socket/key and journal paths must be outside the candidate profile in canonical,
@@ -116,6 +118,12 @@ private directories. The key is 32 random bytes in an owner-only file. When
 Callers of the exported install helpers must preserve this separation too.
 Unix modes and HMAC do not isolate a malicious same-UID process; that requires
 separate deployment identities and protected owner state.
+
+Host/Agent identity uses the native `dsh-scope` peer, shared with the Host's
+AgentLoop. It must resolve to the same module instance: its scope tag is a
+module-local Symbol. Mixing a workspace dependency copy with another Host's
+runtime is unsupported. A runtime owner must be unscoped, and an admitted
+Agent's context must carry that exact Agent as its native scope key.
 
 `queryReplayEndpoint({ socketPath, keyPath, action, operationId, requestDigest,
 timeoutMs, signal })` supports `execute` and read-only `query`, authenticated by
@@ -142,14 +150,42 @@ authority refuses both actions. Failed or cancelled runs stay unknown. Removing
 the journal or assigning a new operation to bypass uncertainty is not recovery;
 an owner must reconcile the prior operation externally.
 
+A hard-killed process cannot remove its socket. Before restarting, the owning
+supervisor must prove the old process group has stopped and remove only that
+Host's stale socket inode. The endpoint deliberately does not unlink an
+existing socket or reset the journal on startup.
+
+### Actual DSH Host probe
+
+After building the workspace, run the opt-in Linux/systemd user fixture:
+
+```sh
+DSH_REPLAY_FIXTURE=1 DSH_REPLAY_DSH=/absolute/path/to/dsh \
+  node scripts/e2e/replay-endpoint-real-dsh.mjs --output /tmp/replay-host.json
+```
+
+It creates disposable profiles and four actual DSH processes. The Control
+Plane copy resolves native peers from that CLI's dependency closure. A fixture
+startup hook registers the probe tool; no preset mounting or model prompt is
+required. The owner independently binds process IDs and systemd invocation
+IDs, checks authentication rejection, completed-result caching, `stale` after
+restart, and SIGKILL during pre-execute followed by persistent `unknown`.
+Each operation creates exactly one Agent and executes zero probe tool bodies;
+the same journal survives restart. Dead socket cleanup is explicit owner
+recovery after supervisor quiescence. Temporary profiles and units are removed.
+
+This probe passed with DSH CLI `0.1.5-rc.2` on 2026-09-20. It uses local built
+packages and a controlled probe, so it does not establish npm artifact identity,
+model quality, independent global effect observation or production activation.
+
 ## Verification
 
 Verified on Linux with Node 24.7.0 on 2026-09-20:
 
 - `pnpm check` exited 0: manifest validation, zero-warning lint, typechecking,
-  6,069 tests passed (44 skipped), clean build and 35 package dry-run packs (32 plugins and 3 shared libraries).
-- The native replay suite passed all 11 cases; the Delivery reply fence suite
-  passed all 5 cases. Full package suites passed 475 and 777 tests respectively.
+  6,070 tests passed (44 skipped), clean build and 35 package dry-run packs (32 plugins and 3 shared libraries).
+- The native replay suite passed all 12 cases; the Delivery reply fence suite
+  passed all 5 cases. Full package suites passed 476 and 777 tests respectively.
 - Endpoint and journal suites passed 11 and 5 cases, including authenticated
   native execution, concurrent admission, timeout/unload, persistent unknown,
   stale cached results and durable request/case binding checks.

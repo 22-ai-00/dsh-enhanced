@@ -284,4 +284,6 @@ Host 可显式使用 `EffectBlockedReplayRuntime`，复用当前 Loader、ToolRu
 
 可选 `replayEndpoint` 将 owner 固定请求和用例接入独立 HMAC Unix socket；客户端只可执行或查询该操作。SQLite 在创建原生 Agent 前持久准入，未知结果不重跑，缓存结果重验当前 Loader/Fiber；实例重建后返回 stale。配置、状态目录、socket 与 32 字节密钥都由 owner 管理，观测通道与执行通道使用不同密钥。
 
+回放依赖与 Host AgentLoop 同一模块实例的 `@deepseek-ai/dsh-scope` peer；使用原生 scope 验证 Host/Agent 身份，不能混用工作区和实际 Host 的副本。`agent.preset` 仅写入会话元数据，工具需由 Host 钩子注册。真实 DSH CLI `0.1.5-rc.2` 已验证完成态重启 stale 和 SIGKILL 后 unknown、不重复派发；硬退出留下的 socket 由 supervisor 确认旧进程已停止后清理，journal 保留。
+
 这是未签名的观察组件，不能单独推进启用状态。外部签名器、未知操作的外部对账和独立副作用读回仍需后续接线。权限包括 owner 配置路径/密钥读取、私有 journal 写入、Unix socket、当前 Loader 状态、原生 Agent 创建/回收、工具管线与 Delivery 方法；原生钩子仍有 Host 权限，组件不提供 OS/网络隔离。完整生命周期、边界及示例见[组件契约](../../docs/effect-blocked-replay.md)。
