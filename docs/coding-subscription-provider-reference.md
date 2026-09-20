@@ -108,7 +108,7 @@ XAI_API_KEY
 - direct 请求把已经过 Host 证明的 DSH session id 做域分离哈希，只在 wire 上发送稳定的伪名 `session-id` / `thread-id`；原始 session id 不进入请求或日志。`x-client-request-id` 与 `thread-id` 对齐。originator/version/user-agent 是本插件的 reconstruction dialect 标识，不冒充官方二进制逐字节一致的 OS/终端标识。
 - 请求 body 的 `prompt_cache_key` 由伪名 session scope、Harmony 中和后的 instructions 与 canonical/sorted tool schemas 做内容寻址派生；同一会话的普通 turn 和 tool-result continuation 保持稳定，system 或工具 surface 改变时自动轮换。它只是 cache/routing hint，不替代完整 transcript，也不发送 `prompt_cache_retention`。
 - Responses 返回 401 时先重新读取磁盘，复用其他进程可能已刷新的 session；token 未变化时才向固定 OAuth endpoint 刷新一次，并只重试原请求一次。
-- 同一进程内相同认证身份共享一次刷新。写回使用元数据 CAS、同目录 `0600` 临时文件、`fsync` 与原子 rename；无法约束不遵循相同 CAS 的外部写者，因此跨进程冲突只能 best-effort 避免覆盖。
+- 同一进程内相同认证身份共享一次刷新。写回使用元数据比较、同目录 `0600` 临时文件、`fsync` 与原子 rename；官方客户端不共享写锁，仍可能在最后一次比较后并发写入，因此跨进程冲突只能 best-effort 避免覆盖，不是原子的 compare-and-swap。
 - POSIX 所有权和权限语义是 fail-closed 门禁，因此 direct 当前不支持 Windows。
 
 `direct-responses` 使用 ChatGPT/Codex 当前的非公开协议；endpoint、认证文件、header、模型 id 与事件格式都可能改变。CLI fallback 不依赖该私有 wire。

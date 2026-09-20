@@ -47,7 +47,7 @@ This is supplier interchangeability with reproducibility. It does **not** make m
 
 ### 1. Finish the production plugin lifecycle before expanding self-modification
 
-First finish reproducible isolated checks and durable Host execution for the existing pending source-plan flow. Then implement one explicitly authorized Control Plane production adapter (WP16). The adapter should accept an immutable package/version/digest plan, build and sign outside the candidate's authority, publish to a named registry, verify the fetched artifact, activate a finite canary, observe independent quality evidence, and close the exact version on regression or retraction.
+The pending source-plan flow now has durable Host execution and isolated checks; npm and systemd adapters are implemented. Complete their independently observed, authorized end-to-end lifecycle (WP16); remaining gates are tracked in [current status](rsi-status.md). The adapter should accept an immutable package/version/digest plan, build and sign outside the candidate's authority, publish to a named registry, verify the fetched artifact, activate a finite canary, observe independent quality evidence, and close the exact version on regression or retraction.
 
 Acceptance: a controlled external environment demonstrates `prepare → owner approval → immutable build/sign → publish → fetched-artifact verification → finite enablement → independent watch → close/rollback`; a candidate cannot read or alter the signing root or holdout; unknown post-submit state is reconciled rather than retried as a new action.
 

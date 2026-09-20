@@ -5,6 +5,13 @@ existing `plugin-control-plane` release flow.  It is not a release procedure
 and no registry write was sent. Sources were checked on 2026-09-19 at this
 repository commit `55079d2c5f7b42a1b378982fc288dc18a1f4c9ab`.
 
+Implementation status: the publish adapter, independent registry readback,
+release verifier, and catalog admission are now implemented. Use the current
+[adapter guide](npm-publish-adapter.md), [readback protocol](npm-registry-readback.md),
+[release verifier](npm-release-verifier.md), and [catalog admission](npm-catalog-admission.md).
+The recommendation below records the original design; it is not an outstanding
+implementation checklist or evidence of a real registry publication.
+
 ## Observed facts
 
 ### Publish wire operation
@@ -154,23 +161,9 @@ integrity differs. The publisher's `immutable: true` uses the configured npm
 version-identity contract; the ACK does not prove persisted bytes. Independent
 readback is still required before catalog admission.
 
-## Commands executed
+## Verification boundary
 
-All commands were read-only and exited 0 unless stated otherwise:
-
-* `git rev-parse HEAD && git status --short` (0; commit above; no status output
-  at inspection time).
-* `firecrawl search "site:github.com/npm/cli libnpmpublish publish.js" --json`
-  (0; Firecrawl readiness was `not_ready` because its Playwright check failed,
-  but search returned the npm source entry).
-* `git ls-remote https://github.com/npm/cli.git refs/heads/latest refs/heads/release/v11 refs/tags/v11.10.1`
-  (0; latest `6400533ab3d830716964bcf0def42b6c47f3fd70`, v11.10.1
-  `c029cb2e5e8b6b61d1a7fd8c454da51a52cd650c`).
-* `curl -fsSL` for the fixed npm CLI source/docs and published
-  `npm-registry-fetch@19.1.0` source (0).
-* `node -e 'require("npm-package-arg")'` (2; module is not installed in this
-  workspace).  The exact algorithm was instead checked in npm's published
-  `npm-package-arg@13.0.0` source above.
-
-These commands establish the protocol sources. Implementation checks and
-their limits are recorded separately in the [publication guide](npm-publish-adapter.md).
+The research used fixed npm CLI source/docs and published dependency source.
+Protocol source review does not establish real registry publication; current
+implementation checks and limits are recorded in the [adapter guide](npm-publish-adapter.md).
+The original command transcript remains in Git history.
