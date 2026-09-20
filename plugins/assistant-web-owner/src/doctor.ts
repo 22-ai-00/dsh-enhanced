@@ -89,7 +89,7 @@ export function inspectAutonomyOwner(profile: AutonomyDoctorProfile): { status: 
     // Deliberately pinned rather than imported: the autonomy snapshot is a
     // self-contained read-only gate, so every Delivery schema bump must be
     // reviewed here before the doctor will match that version.
-    if ((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 21) return { status: 'unavailable' }
+    if ((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== 22) return { status: 'unavailable' }
     const row = database.prepare('SELECT principal_json, role, status, version, linked_to_id FROM delivery_principals WHERE id = ?').get(profile.grant.principalRecordId)
     if (!row || row.role !== 'owner' || row.status !== 'active' || row.version !== profile.grant.principalVersion || row.linked_to_id !== null
       || typeof row.principal_json !== 'string' || !isDeepStrictEqual(JSON.parse(row.principal_json), profile.principal)) return { status: 'mismatch' }

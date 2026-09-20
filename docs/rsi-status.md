@@ -68,7 +68,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
 - 真实失败来源链已通过独立代码与证据复核。定向检查：Growth 整包 83 项通过；Control Plane store/来源 fence/Host 准备与迁移相关 106 项、durable source job 与原生调度 15 项通过。覆盖 exact owner gap、全局列表隔离、反馈变化、最终提交冲突、重启和 unknown 不重放；两包类型、构建、lint、manifest 与 dry-run pack 通过。测试使用本地脚本模型与隔离构建夹具，不作为真实供应商效果或自动采用证据。
-- 上轮全仓 `pnpm check` 在 Evaluation 的 4 个旧版本迁移测试处停止：降级 fixture 误留 v12 专用反馈索引外键，已修正并独立复核；Evaluation 整包 344 项通过、10 项跳过。当前完整门禁正在重跑，尚未确认通过。
+- 最近全仓 `pnpm check` 通过 manifest、lint、类型和构建，在 Web Owner 的 2 个安装诊断测试处停止：只读 doctor 遗漏了 Delivery schema 22，已同步；Web Owner 整包 76 项通过。此前 Evaluation 迁移 fixture 的外键问题已修复，整包 344 项通过、10 项跳过。完整门禁尚未通过，剩余测试与全包 dry-run pack 待下一次完整检查确认。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 - 未结算 generation 测试修复 `e33a6ae` 已通过 Linux、macOS 与 Windows 的 [CI](https://github.com/22-ai-00/dsh-enhanced/actions/runs/35494781155)。测试用真实派发后丢失确认建立持久未结算状态，检查新 operation 不再重启。该跨平台结论不覆盖之后的新改动。
 
