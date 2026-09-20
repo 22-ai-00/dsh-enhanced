@@ -3,7 +3,7 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 15
+export const controlPlaneSchemaVersion = 16
 
 export function controlPlaneOperationReceiptDigest(idempotencyKey: string, operation: string, inputDigest: string,
   resultJson: string, createdAt: number): string {
@@ -64,6 +64,12 @@ function createCurrent(database: DatabaseSync): void {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     ) STRICT;
+
+    CREATE TABLE owner_task_failure_gaps (
+      gap_id TEXT PRIMARY KEY REFERENCES capability_gaps(id) ON DELETE RESTRICT,
+      reference_json TEXT NOT NULL CHECK(json_valid(reference_json) AND json_type(reference_json) = 'object'),
+      reference_digest TEXT NOT NULL CHECK(length(reference_digest) = 64)
+    ) STRICT, WITHOUT ROWID;
 
 
     CREATE TABLE activation_plans (
@@ -348,7 +354,7 @@ function createCurrent(database: DatabaseSync): void {
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX activation_watch_evidence_plan ON activation_watch_evidence(plan_id, created_at);
 
-    PRAGMA user_version = 15;
+    PRAGMA user_version = 16;
   `)
 }
 
@@ -977,6 +983,19 @@ function migrateV14ToV15(database: DatabaseSync): void {
   `)
 }
 
+function migrateV15ToV16(database: DatabaseSync): void {
+  database.exec(`
+    BEGIN IMMEDIATE;
+    CREATE TABLE IF NOT EXISTS owner_task_failure_gaps (
+      gap_id TEXT PRIMARY KEY REFERENCES capability_gaps(id) ON DELETE RESTRICT,
+      reference_json TEXT NOT NULL CHECK(json_valid(reference_json) AND json_type(reference_json) = 'object'),
+      reference_digest TEXT NOT NULL CHECK(length(reference_digest) = 64)
+    ) STRICT, WITHOUT ROWID;
+    PRAGMA user_version = 16;
+    COMMIT;
+  `)
+}
+
 
 export function openControlPlaneDatabase(path: string): DatabaseSync {
   prepare(path)
@@ -1001,6 +1020,7 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       if (version <= 12) migrateV12ToV13(database)
       if (version <= 13) migrateV13ToV14(database)
       if (version <= 14) migrateV14ToV15(database)
+      if (version <= 15) migrateV15ToV16(database)
     }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database

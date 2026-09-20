@@ -242,7 +242,7 @@ sourceJobs:
 
 成功准备返回 `pending-approval`，不会自动发布。owner 按已有签名审批流程处理后，用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest，才能进入人工 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 15 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 16 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 owner 可以用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。publish 超时等不确定结果必须先进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。
 
@@ -263,9 +263,17 @@ catalog-admission 可显式配置 `registry.protocol: "npm"`，接收独立 npm 
 
 adapter 的 stdout 只有一个签名 JSON receipt，stderr 不打印 request 或 secret；它还会用 config 中固定的 release-authorization 公钥重新验签。每个 phase 在 owner-private state directory 永久绑定 operationId + requestDigest：完全相同请求重放同一 receipt，同 id 不同 payload 拒绝。`registry-verify` 副本还实现 `reconcile`，同时核对 immutable tarball 和 publication record，并用自己的独立 key 签发 `exists-match` / `absent` / `unknown` / `digest-conflict` evidence。该参考实现不访问网络，也不等同于 GitHub/npm adapter；需要远端 PR/registry 的部署应提供遵循相同 request/receipt 与幂等协议的 owner adapter。
 
+### 真实任务失败来源
+
+Host-only `recordOwnerTaskFailureGap(source)` 将经 Delivery 再验证的 foreground `not-achieved` 结果，在 Evaluation canonical writer fence 中原子写入 gap 和私有来源引用。schema 16 从 v15 保留原有计划并增加 sidecar；引用只保存完整 owner receipt、outcome/canonical 修订和 source digest，gap 使用固定说明且 ROI 为未知占位 0。模型自报、调用方文案、未结束或截断来源均不能登记，接口不注册为 CLI/模型工具。
+
+这些 gap 不出现在全局 `gaps()` 中。Growth 自动复盘仅看本次来源的 exact gap；同步准备必须提供当前 owner，durable source job 绑定相同 owner。每个检查边界与最终计划提交重新验证来源，最终写入同时持有 Evaluation writer fence 和同步 Store admission；普通 CLI 不能凭 gap id 绕过来源检查。`/new` 的 binding/generation 改变、纠正、撤回或依赖服务不可用会拒绝旧任务，已派发而中断的 job 保留 unknown。历史引用保留以供审计，不自动重放。
+
+该 Host API 使用同批 `assistant-delivery` 与可选 `assistant-evaluation >=0.1.33` 的精确接口；不要求手工 gap 部署安装 Evaluation。它只授权来源绑定的候选准备，pending plan 的后续授权采用、发布与观测仍走独立控制链。
+
 ## 权限
 
-- 插件 Host service：读取 catalog/trust，写 owner-private SQLite/WAL；不使用网络、浏览器或子进程。
+- 插件 Host service：读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceBuild`/`sourceJobs` 时创建隔离 worktree 并调用 owner 配置的离线容器构建。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。
 - owner CLI `activate`：读取/复制/rename/恢复 DSH profile，并执行固定 DSH executable。
 - owner CLI `probe`：执行固定 Host attestor，只有严格 allowlist 环境；不读取 attestation 私钥，不使用 shell或网络客户端。
 - owner CLI `scaffold`：仅在审批绑定的 linked worktree 中运行固定边界内的 `git` / `pnpm`。

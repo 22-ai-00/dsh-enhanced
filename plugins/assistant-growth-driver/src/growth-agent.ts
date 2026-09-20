@@ -291,7 +291,7 @@ function registerGrowthTools(
     })
     disposers.push(agentCtx.tools.register(defineTool({
       name: 'plugin_source_gaps',
-      description: 'List open pre-existing control-plane capability gaps available for a pending existing-plugin source proposal.',
+      description: 'List open capability gaps for this review. An automatic task review sees only its exact trusted failure gap.',
       parameters: {},
       output: toolOutput,
       execute: async () => {
@@ -402,7 +402,7 @@ function registerGrowthTools(
           const plan = await sourcePlane.prepareModifySourcePlan({
             gapId: args.gap_id, name: args.plugin_name, files, expectedBaseCommit: snapshot.baseCommit,
             repository: sourceCfg.repository!, ttlMs: sourceCfg.planTtlMs,
-            timeoutMs: sourceCfg.isolatedBuildTimeoutMs, offline: sourceCfg.offline, idempotencyKey,
+            timeoutMs: sourceCfg.isolatedBuildTimeoutMs, offline: sourceCfg.offline, owner, idempotencyKey,
             signal: combined, assertCurrent: () => { combined.throwIfAborted(); authority.assertCurrent() },
           })
           combined.throwIfAborted(); authority.assertCurrent()

@@ -1,6 +1,9 @@
 import { lstat, realpath } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import { OwnerTaskFailureGaps } from './owner-task-gaps.js'
 import { Context, Service } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import { discover, loadCatalogWithMetadata, type CatalogEntry } from './catalog.js'
@@ -68,6 +71,7 @@ export class PluginControlPlaneService extends Service {
   static Config = schema
   private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'runtimeObserver' | 'replayEndpoint'>
   private readonly store: ControlPlaneStore
+  private readonly taskGaps: OwnerTaskFailureGaps
   private readonly abort = new AbortController()
   private readonly sourceBuilds = new Set<Promise<unknown>>()
   private readonly sourceInspections = new Set<Promise<unknown>>()
@@ -95,6 +99,14 @@ export class PluginControlPlaneService extends Service {
     }
     if (![this.config.catalogPath, this.config.statePath, this.config.trustPath].every(isAbsolute)) throw new Error('plugin-control-plane: catalogPath, statePath and trustPath must be absolute')
     this.store = new ControlPlaneStore({ path: join(this.config.statePath, 'control.sqlite') })
+    this.taskGaps = new OwnerTaskFailureGaps(this.store, () => {
+      this.abort.signal.throwIfAborted()
+      const delivery = ctx.get('assistantDelivery' as never, false) as AssistantDeliveryService | undefined
+      const evaluation = ctx.get('assistantEvaluation' as never, false) as AssistantEvaluationService | undefined
+      if (typeof delivery?.inspectOwnerForegroundLearningTask !== 'function'
+        || typeof evaluation?.withTrustedCanonicalTaskWriterFence !== 'function') throw new Error('plugin-control-plane: owner task source services unavailable')
+      return { delivery, evaluation }
+    })
     ctx.effect(() => async () => {
       this.abort.abort()
       await Promise.allSettled([...this.sourceRuntimes].map(runtime => runtime.close()))
@@ -120,7 +132,8 @@ export class PluginControlPlaneService extends Service {
               inspectSystemOwned: request => current('automations').inspectSystemOwned(request),
             },
             delivery: { validateOwnerRoute: request => current('delivery').validateOwnerRoute(request) },
-          }, trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent),
+          }, withGapSourceFence: (gapId, owner, callback) => this.taskGaps.withCurrent(gapId, owner, callback),
+          trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent),
         })
         runtime.start()
         this.sourceRuntimes.add(runtime)
@@ -147,6 +160,12 @@ export class PluginControlPlaneService extends Service {
     await this.boundTrust()
     const loaded = await loadCatalogWithMetadata(this.config.catalogPath)
     return discover(loaded.catalog, capability)
+  }
+
+  /** Host only: reread the exact source; no caller text or ratings are admitted. */
+  recordOwnerTaskFailureGap = (source: OwnerForegroundLearningTask): StoredCapabilityGap => {
+    this.abort.signal.throwIfAborted()
+    return this.taskGaps.record(source)
   }
 
   recordGap(input: CapabilityGapInput): StoredCapabilityGap { return this.store.recordGap(input) }
@@ -242,6 +261,7 @@ export class PluginControlPlaneService extends Service {
     timeoutMs?: number
     offline?: boolean
     expectedBaseCommit?: string
+    owner?: SourceJobCaller
     signal?: AbortSignal
     assertCurrent?: () => void | Promise<void>
   }): Promise<PluginSourcePlan> {
@@ -255,7 +275,11 @@ export class PluginControlPlaneService extends Service {
 
   private async prepareModifySourcePlanOwned(input: Parameters<PluginControlPlaneService['prepareModifySourcePlan']>[0], sourceJob?: SourceJobRecord): Promise<PluginSourcePlan> {
     const signal = input.signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, input.signal])
-    const assertCurrent = async (): Promise<void> => { signal.throwIfAborted(); await input.assertCurrent?.(); signal.throwIfAborted() }
+    const gapOwner = sourceJob?.intent.owner ?? input.owner
+    const assertCurrent = async (): Promise<void> => {
+      signal.throwIfAborted(); await input.assertCurrent?.(); signal.throwIfAborted()
+      this.taskGaps.withCurrent(input.gapId, gapOwner, () => {})
+    }
     await assertCurrent()
     const trust = await this.boundTrust()
     const name = input.name.normalize('NFC').trim()
@@ -301,11 +325,11 @@ export class PluginControlPlaneService extends Service {
       await assertCurrent()
       // The worktree survives success: the owner recomputes its digests on this
       // exact directory during `source verify-prepared`.
-      return this.store.createSourcePlan({ gapId: input.gapId, repository, worktree: isolated.worktree, baseCommit,
+      return this.taskGaps.withCurrent(input.gapId, gapOwner, () => this.store.createSourcePlan({ gapId: input.gapId, repository, worktree: isolated.worktree, baseCommit,
         name, generatorDigest: MODIFY_GENERATOR_DIGEST, scope: [`plugins/${name}`], mode: 'modify', ttlMs,
         idempotencyKey: input.idempotencyKey,
         ...(sourceJob === undefined ? {} : { sourceJob: { jobId: sourceJob.id, jobRevision: sourceJob.revision, occurrenceId: sourceJob.occurrenceId! } }),
-        prepared: { treeDigest: checked.treeDigest, patchDigest: checked.patchDigest, checkedAt: checked.checkedAt, evidence: checked.evidence } }).result
+        prepared: { treeDigest: checked.treeDigest, patchDigest: checked.patchDigest, checkedAt: checked.checkedAt, evidence: checked.evidence } }).result)
     } catch (error) {
       await isolated.remove()
       throw error

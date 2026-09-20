@@ -3,7 +3,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantGoalsService, OwnerGoalExecutionSnapshotInput } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
@@ -86,7 +86,7 @@ export class AssistantGrowthDriverService extends Service {
   #flight: Promise<void> | undefined
   #active = true
   readonly #abort = new AbortController()
-  #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal; available: () => boolean } | undefined
+  #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal; available: () => boolean; recordTaskFailure: (source: OwnerForegroundLearningTask) => GrowthSourceGap } | undefined
   #health: GrowthWakeHealth = { lastWakeAt: null, outcome: 'never-run', reason: null, run: null }
   #usage: UsageLearningRuntime | undefined
 
@@ -126,6 +126,7 @@ export class AssistantGrowthDriverService extends Service {
         const abort = new AbortController()
         type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSource' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
           gaps(limit: number): readonly GrowthSourceGap[]
+          recordOwnerTaskFailureGap?: (source: OwnerForegroundLearningTask) => GrowthSourceGap
           canPrepareSource?: () => boolean
           canEnqueueSource?: () => boolean
         }
@@ -144,6 +145,11 @@ export class AssistantGrowthDriverService extends Service {
         if (!seamsPresent || typeof provider.inspectSource !== 'function') return
         const binding = {
           signal: abort.signal,
+          recordTaskFailure: (source: OwnerForegroundLearningTask) => {
+            const live = current()
+            if (typeof live.recordOwnerTaskFailureGap !== 'function') throw new Error('control plane owner task gap API unavailable')
+            return live.recordOwnerTaskFailureGap(source)
+          },
           available: () => {
             try {
               const live = current()
@@ -325,8 +331,29 @@ export class AssistantGrowthDriverService extends Service {
       agentSubmitted = true
       const bound = this.#sourceBinding
       const source = bound !== undefined && bound.available() ? bound : undefined
+      let sourcePort = source?.port
+      if (source && input.usage) {
+        const usage = input.usage
+        const ownGaps = (): readonly GrowthSourceGap[] => {
+          usage.assertCurrent()
+          return usage.source.canonical.objective?.status === 'not-achieved'
+            ? [source.recordTaskFailure(usage.source)] : []
+        }
+        // Persist the exact failure before submitting the model; neither a
+        // model assertion nor an operator's global gap is a prerequisite.
+        ownGaps()
+        const assertGap = (gapId: string): void => {
+          if (!ownGaps().some(gap => gap.id === gapId && gap.status === 'open' && gap.candidateId === undefined)) {
+            throw new Error('source gap is not the current task failure')
+          }
+        }
+        sourcePort = { ...source.port, listOpenGaps: ownGaps,
+          prepareModifySourcePlan: request => { assertGap(request.gapId); return source.port.prepareModifySourcePlan(request) },
+          enqueueSourceJob: request => { assertGap(request.gapId); return source.port.enqueueSourceJob(request) },
+        }
+      }
       const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, model, goals, skills,
-        ...(source === undefined ? {} : { sourcePlane: source.port }),
+        ...(sourcePort === undefined ? {} : { sourcePlane: sourcePort }),
         ...(input.usage === undefined ? {} : { feedback: input.usage.source }),
         signal: AbortSignal.any([this.#abort.signal, ...(source === undefined ? [] : [source.signal]),
           ...(input.usage === undefined ? [] : [input.usage.signal])]),
