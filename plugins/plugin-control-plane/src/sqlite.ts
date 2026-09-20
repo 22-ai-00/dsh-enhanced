@@ -3,7 +3,14 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 21
+export const controlPlaneSchemaVersion = 22
+
+const hostAttestationDispatchesSchema = `CREATE TABLE IF NOT EXISTS host_attestation_dispatches (
+  operation_id TEXT PRIMARY KEY REFERENCES host_attestation_operations(operation_id) ON DELETE RESTRICT,
+  status TEXT NOT NULL CHECK(status IN ('claimed','completed')),
+  claimed_at INTEGER NOT NULL, completed_at INTEGER,
+  CHECK((status = 'claimed' AND completed_at IS NULL) OR (status = 'completed' AND completed_at IS NOT NULL AND completed_at >= claimed_at))
+) STRICT, WITHOUT ROWID;`
 
 const taskObservationsSchema = `CREATE TABLE IF NOT EXISTS task_observation_batches (
   id TEXT PRIMARY KEY, lane TEXT NOT NULL, plan_id TEXT NOT NULL REFERENCES activation_plans(id) ON DELETE RESTRICT,
@@ -302,6 +309,13 @@ function createCurrent(database: DatabaseSync): void {
       completed_at INTEGER,
       CHECK((status = 'claimed' AND completed_at IS NULL) OR
         (status = 'completed' AND completed_at IS NOT NULL AND completed_at >= claimed_at))
+    ) STRICT, WITHOUT ROWID;
+
+    CREATE TABLE host_attestation_dispatches (
+      operation_id TEXT PRIMARY KEY REFERENCES host_attestation_operations(operation_id) ON DELETE RESTRICT,
+      status TEXT NOT NULL CHECK(status IN ('claimed', 'completed')),
+      claimed_at INTEGER NOT NULL, completed_at INTEGER,
+      CHECK((status = 'claimed' AND completed_at IS NULL) OR (status = 'completed' AND completed_at IS NOT NULL AND completed_at >= claimed_at))
     ) STRICT, WITHOUT ROWID;
 
     CREATE TABLE operation_receipts (
@@ -1146,6 +1160,13 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 21) {
       database.exec(`BEGIN IMMEDIATE; ${taskObservationsSchema} PRAGMA user_version = 21; COMMIT;`)
     } else database.exec(taskObservationsSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 22) {
+      database.exec(`BEGIN IMMEDIATE; ${hostAttestationDispatchesSchema}
+        INSERT OR IGNORE INTO host_attestation_dispatches (operation_id,status,claimed_at,completed_at)
+          SELECT operation_id, CASE WHEN status = 'pending' THEN 'claimed' ELSE 'completed' END, created_at,
+            CASE WHEN status = 'pending' THEN NULL ELSE completed_at END FROM host_attestation_operations;
+        PRAGMA user_version = 22; COMMIT;`)
+    } else database.exec(hostAttestationDispatchesSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

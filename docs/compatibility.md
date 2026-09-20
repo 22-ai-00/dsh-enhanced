@@ -271,6 +271,12 @@ Owner-task release preparation, dispatch, receipt reconciliation and application
 
 Verifier 可选源码审查复用已固定 DSH `agents.create`、`installModelSelection`、Session、ToolRuntime 与 SystemPrompt：新旧 `setup(ctx, agent?)` 均支持，不挂 preset，模型请求检查 provider/model/effort、完整 system prompt 和空工具面；依赖缺失时仅此能力等待。工程验证使用原生 AgentLoop 与本地脚本 adapter，不代表真实供应商质量或生产采用验收。
 
+### Durable Host attestation dispatch (Control Plane schema 22)
+
+Schema 22 records a durable dispatch claim before invoking a Host attestor and releases the Control Plane writer lock during external execution. Unrelated task writes and target migrations no longer wait for the whole attestor call. The same operation cannot dispatch twice, including after a timeout or restart. An unresolved claim blocks rollback of that activation until its exact signed receipt is reconciled; expiry alone cannot prove the external action stopped.
+
+`attest` now records an exact verified receipt without invoking an attestor. Receipt retention does not advance the plan: it can settle an unknown dispatch after source withdrawal, while forward application still requires current Host source admission. The original request, predecessor, generation, revision and fence remain binding. Migration conservatively claims historical pending operations, because older versions cannot prove they were never dispatched; completed/applied receipts remain intact. Stop old writers before upgrading and update every Host sharing the ledger: schema-21 binaries reject schema 22. Keep the original journals, and reconcile pending work instead of deleting operation identities. Request and signed receipt schemas are unchanged.
+
 
 ### Owner source adoption (Control Plane schema 19)
 

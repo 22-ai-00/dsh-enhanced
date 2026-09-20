@@ -123,6 +123,9 @@ test('backpressure leaves unconsumed heads discoverable after the first job fini
 
 test('the native periodic scan discovers later cross-process feedback without a local notification', async () => {
   vi.useFakeTimers({ toFake: ['Date'] })
+  // Keep the review tick away from the next cron minute, which can otherwise
+  // occupy the native runner's single admission slot depending on wall time.
+  vi.setSystemTime(new Date('2026-09-20T00:00:10Z'))
   const f = await fixture(); const runtime = f.create()
   expect(runtime.health().counts).toEqual({})
   f.append('later')

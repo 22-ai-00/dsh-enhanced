@@ -144,7 +144,7 @@ Host attestor 与 release adapter 的每次命令共用受控进程组：超时�
 
 随包的 `bin/dsh-systemd-host-attestor.js`（v5）提供 Linux/systemd 的 **reload、readiness 与物理 rollback** 适配：先用 `probe --prepare-only` 取得确切持久请求，再由主人私有配置授权其摘要；重启前记录操作，重复调用仅重放或观测对账。它核验 fresh InvocationID/MainPID 与稳定窗口，按 installation 共享 Host 代次，reload 推进至 `awaiting-readiness`；readiness 再绑定最新已签重启、实际 Loader/Fiber 与服务实例，多次稳定观测后签名，重复请求不重启 Host。稳定、认证通过且身份匹配的 inactive 候选签为 failed readiness；认证错误或状态漂移不签发回执。rollback 在 CLI 恢复原 profile 文件后证明原 Host 就绪，或原本不存在的 profile 已停服；缺少物理恢复凭证时继续保持 pending。部署配置、权限和未覆盖阶段见 [systemd Host attestor](../../docs/systemd-host-attestor.md)。
 
-phase operation 在子进程启动前持久化。子进程执行期间持有 SQLite 跨进程 writer mutex；成功 receipt 在释放 mutex 前持久化。因此并发 worker 不会创建第二个 canary exposure。若进程在 receipt 提交前崩溃，恢复 worker 使用相同 operation id 重试，依赖上述外部幂等契约取回同一结果。
+phase operation 和派发 claim 在子进程启动前持久化。外部执行期间不持有控制面 SQLite 写锁，其他任务可继续写入；同一 operation 的并发或重启调用由持久 claim 拒绝。退出、验签失败或回执丢失后保留 unknown，不自动再次调用通用 attestor。取得原请求的精确签名回执后，用下述 `attest` 对账；未结算的派发也会阻止同计划换代回退，避免旧外部动作与恢复并行。
 
 ## Phase proof，而不是命令标签
 
@@ -181,6 +181,8 @@ dsh-plugin-control attest \
 ```
 
 人工路径使用相同 operation、evidence validator、Ed25519 verifier 和 CAS，不是弱化旁路。旧的 schema-v1 `evidenceDigest`-only Host receipt 会被拒绝，因为它不能证明 phase 语义。
+
+`attest` 也接受 configured attestor 已生成但未入账的精确回执，不再次执行外部程序。保存已验签事实本身不推进计划；owner 来源已撤回时仍可保存以解除 unknown、进入恢复，前向应用仍须通过当前 Host 来源校验。通用 CLI 不能替代 owner-task 的 live source fence。
 
 ## 使用后的退化与物理回退
 
@@ -408,7 +410,7 @@ schema 20 的 `foreground_deployments` 在真实 owner 前台任务开始和完�
 
 Host 可用 `inspectOwnerForegroundDeployment()` 按与 Delivery 学习来源查询相同的参数读取归因；它重验当前可信任务，保持原学习来源摘要不变。记录证明该任务处于这一部署实例下，不证明调用过某个工具或该版本导致了结果，也不会把正常结束计作质量成功。读取结果作为质量依据仍需消费当前 canonical 反馈与撤回，并在最终写入时使用 writer fence。可选 `taskObservations` 已接通有限批次的当前反馈、签名观察与物理回退；可安装日常使用配置及端到端部署验收仍待完成，此能力不代表 npm 发布验收通过。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 21 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 22 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 非 owner-task 来源的计划可用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。adapter 返回签名 publish 歧义回执后进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。派发后没有签名回执则保持 unknown，不自动重跑；普通 owner-task 来源的全部阶段必须通过 Host 当前来源校验。
 

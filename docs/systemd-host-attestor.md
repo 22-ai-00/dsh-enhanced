@@ -105,6 +105,16 @@ supervisor fixture uses `/usr/bin/systemctl` directly.
 
 ## Dispatch, observation and recovery
 
+Control Plane schema 22 commits a dispatch claim before invoking this executable,
+then releases its own database writer lock. A second `probe` never invokes a
+claimed operation whose receipt is missing. Retrieve the original request's
+signed receipt from the owner-controlled attestor and submit it with
+`dsh-plugin-control attest --plan-id PLAN --expected-revision REVISION
+--expected-fence FENCE --receipt /private/receipt.json`. This command verifies
+and records the receipt without restarting the service. Do not delete either
+journal or create a new operation to bypass an unknown result. The attestor's
+own recovery behavior below is distinct from automatic Control Plane dispatch.
+
 Before dispatch the attestor validates config/request/pins, reads exact unit
 identity and requires a stable active/running prior instance. It rejects a
 target cgroup containing itself. It then commits the operation, request/config
