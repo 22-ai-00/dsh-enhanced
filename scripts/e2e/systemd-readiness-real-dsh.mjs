@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Explicitly opt-in, temporary Host/profile only. No model calls or production writes.
 import { execFile, spawn } from 'node:child_process'
-import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto'
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto'
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { queryRuntimeObserver, runtimeConfigDigest } from '../../plugins/plugin-control-plane/lib/runtime-observer.js'
 import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest } from '../../plugins/plugin-control-plane/lib/attestation.js'
+import { Ed25519ApprovalAuthority, approvalSigningPayload } from '../../plugins/plugin-control-plane/lib/approval.js'
+import { ControlPlaneStore, controlPlaneDigest } from '../../plugins/plugin-control-plane/lib/store.js'
+import { parseCatalog } from '../../plugins/plugin-control-plane/lib/catalog.js'
 import { DatabaseSync } from 'node:sqlite'
 
 if (process.env.DSH_READINESS_FIXTURE !== '1' || !process.env.DSH_READINESS_DSH || process.platform !== 'linux') {
@@ -16,6 +19,7 @@ if (process.env.DSH_READINESS_FIXTURE !== '1' || !process.env.DSH_READINESS_DSH 
 }
 const output = process.argv[process.argv.indexOf('--output') + 1]
 if (!process.argv.includes('--output') || !output) throw new Error('--output is required')
+const initialCandidateDisabled = process.env.DSH_READINESS_EXPECT_INACTIVE === '1'
 const run = promisify(execFile)
 const sha = bytes => createHash('sha256').update(bytes).digest('hex')
 const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-ready-')))
@@ -29,6 +33,7 @@ const candidateUrl = new URL('../../plugins/assistant-policy/lib/index.js', impo
 const supervisor = async args => (await run('/usr/bin/systemctl', ['--user', ...args], { timeout: 15000, maxBuffer: 65536 })).stdout
 let dispatched = false
 let evidence
+let store
 try {
   await mkdir(owner, { mode: 0o700 }); await mkdir(join(home, 'profiles'), { recursive: true })
   const env = { PATH: '/usr/bin:/bin', HOME: root, DSH_HOME: home, DSH_TELEMETRY_DISABLED: '1' }
@@ -45,7 +50,7 @@ try {
     { id: 'observed-candidate', name: candidateUrl.href, config: candidateConfig, disabled },
   ] }]
   const patchPath = join(profile, 'cordis.patch.yml')
-  await writeFile(patchPath, JSON.stringify(patch(false)), { mode: 0o600 })
+  await writeFile(patchPath, JSON.stringify(patch(initialCandidateDisabled)), { mode: 0o600 })
   // Mark possible dispatch before crossing the supervisor boundary, so finally
   // also attempts stop if systemd-run's acknowledgement is lost.
   dispatched = true
@@ -69,8 +74,8 @@ try {
     const logs = (await run('/usr/bin/journalctl', ['--user', '-u', unit, '--no-pager', '--quiet', '--output=cat', '--lines=25'], { timeout: 5000, maxBuffer: 65536 })).stdout
     throw new Error(`runtime fixture failed: ${String(last)}\n${logs}`)
   }
-  const active = await observe(true)
-  const replay = await observe(true)
+  const active = await observe(!initialCandidateDisabled)
+  const replay = await observe(!initialCandidateDisabled)
   if (JSON.stringify(active.observation.entries) !== JSON.stringify(replay.observation.entries)
     || active.observation.observerId !== replay.observation.observerId
     || active.observation.challenge === replay.observation.challenge) throw new Error('stable fresh-challenge sampling failed')
@@ -82,13 +87,35 @@ try {
   const keys = generateKeyPairSync('ed25519'); const privateKeyPath = join(owner, 'receipt.pem')
   await writeFile(privateKeyPath, keys.privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
   const stateRoot = join(owner, 'attestor-state'); await mkdir(stateRoot, { mode: 0o700 })
-  const ledgerPath = join(owner, 'external-ledger.sqlite'); await writeFile(ledgerPath, '', { mode: 0o600 })
+  const ledgerPath = join(owner, 'external-ledger.sqlite')
+  store = new ControlPlaneStore({ path: ledgerPath })
   const now = Date.now()
-  const reloadRequest = { schemaVersion: 1, kind: 'dsh-host-attestation-request', operationId: `reload-${randomUUID()}`,
-    requestedAt: now, receiptTtlMs: 120000, installationId: randomUUID(), ledger: { id: 'fixture-ledger', path: ledgerPath },
-    plan: { id: 'fixture-plan', digest: 'a'.repeat(64) }, activation: { id: 'fixture-activation', fence: 1 }, profile: { name, path: profile },
-    issuer: { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-2', ...executable,
-      interpreter, authority: 'fixture-owner', keyId: 'fixture-key' }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } }
+  // Catalog integrity and staging are fixture inputs. The existing store owns
+  // the actual immutable plan, owner approval, durable requests and phase CAS.
+  const candidateVersion = JSON.parse(await readFile(new URL('../../plugins/assistant-policy/package.json', import.meta.url), 'utf8')).version
+  const catalog = parseCatalog({ schemaVersion: 1, entries: [{ id: 'assistant-policy', package: '@dsh-enhanced/assistant-policy',
+    version: candidateVersion, integrity: `sha512-${Buffer.alloc(64).toString('base64')}`, dshBaseline: dshVersion,
+    capabilities: ['policy'], authorities: ['filesystem: disposable policy fixture'] }] })
+  const gap = store.recordGap({ idempotencyKey: 'fixture-gap', capability: 'policy', context: 'disposable readiness verification',
+    expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+  let plan = store.createPlan({ gapId: gap.id, idempotencyKey: 'fixture-plan', candidate: catalog.entries[0],
+    catalog: { digest: controlPlaneDigest(catalog), provenance: 'owner-provided-integrity-pinned' }, matchedCapabilities: ['policy'],
+    profile: name, target: { dshHome: home, profile: name, profilePath: profile }, installationId: randomUUID(),
+    ledger: { id: randomUUID(), path: ledgerPath }, executor: { id: 'dsh', version: dshVersion, ...await pinned(dsh) }, ttlMs: 300000 }).result
+  const approvalKeys = generateKeyPairSync('ed25519')
+  const approvalAuthority = new Ed25519ApprovalAuthority(approvalKeys.publicKey.export({ type: 'spki', format: 'pem' }), 'fixture-approval', 'approval-key')
+  const approval = { schemaVersion: 1, approvalId: 'fixture-approval', authority: 'fixture-approval', keyId: 'approval-key',
+    planId: plan.id, planDigest: plan.digest, decision: 'approved', principal: 'fixture-owner', decidedAt: Date.now(), expiresAt: now + 120000 }
+  plan = (await store.approve({ planId: plan.id, expectedRevision: plan.revision, idempotencyKey: 'fixture-approval',
+    receipt: { ...approval, signature: sign(null, Buffer.from(approvalSigningPayload(approval)), approvalKeys.privateKey).toString('base64') },
+    resolveAuthority: () => approvalAuthority })).result
+  plan = await store.claimActivation({ planId: plan.id, expectedRevision: plan.revision, leaseMs: 30000, resolveApprovalAuthority: () => approvalAuthority })
+  plan = store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence, from: 'staging', to: 'awaiting-reload' })
+  const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-3', ...executable,
+    interpreter, authority: 'fixture-owner', keyId: 'fixture-key' }
+  const prepare = requirements => store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision,
+    expectedFence: plan.activation.fence, issuer, requirements, receiptTtlMs: 120000 }).request
+  const reloadRequest = prepare({ kind: 'reload', previousHostGeneration: 0 })
   const properties = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory', 'User', 'Group', 'Type', 'KillMode']
   const unitProperties = Object.fromEntries((await supervisor(['show', unit, ...properties.map(key => `--property=${key}`)]))
     .trimEnd().split('\n').map(line => { const index = line.indexOf('='); return [line.slice(0, index), line.slice(index + 1)] }))
@@ -114,19 +141,34 @@ try {
     })
   }
   const authority = new Ed25519HostAttestationAuthority(keys.publicKey.export({ type: 'spki', format: 'pem' }), reloadConfig.authority, reloadConfig.keyId)
-  const plan = { id: reloadRequest.plan.id, digest: reloadRequest.plan.digest, installationId: reloadRequest.installationId,
-    activation: reloadRequest.activation, createdAt: now - 1000 }
-  const reloadReceipt = await invoke(reloadRequest, reloadConfig); await authority.verify(reloadReceipt, plan, reloadRequest)
-  const successor = await observe(true)
+  const initialPlan = plan
+  const transitions = []
+  const apply = async (request, ownerConfig) => {
+    const receipt = await store.runHostAttestationOperation({ operationId: request.operationId, expectedRevision: plan.revision,
+      expectedFence: plan.activation.fence, execute: durableRequest => invoke(durableRequest, ownerConfig), resolveAuthority: () => authority })
+    await authority.verify(receipt, plan, request)
+    const before = { status: plan.status, revision: plan.revision }
+    plan = (await store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision,
+      expectedFence: plan.activation.fence, receipt, resolveAuthority: () => authority, idempotencyKey: `apply:${request.operationId}` })).result
+    transitions.push({ phase: request.phase, outcome: receipt.outcome, before, after: { status: plan.status, revision: plan.revision } })
+    return receipt
+  }
+  const reloadReceipt = await apply(reloadRequest, reloadConfig)
+  const successor = await observe(!initialCandidateDisabled)
   if (successor.observation.invocationId === active.observation.invocationId) throw new Error('reload did not replace Host')
-  const readinessRequest = { ...reloadRequest, operationId: `readiness-${randomUUID()}`, requestedAt: Date.now(), phase: 'readiness', requirements: { kind: 'readiness', minimumChecks: 3 } }
+  const readinessRequest = prepare({ kind: 'readiness', minimumChecks: 3 })
   const { previousHostGeneration: _previous, ...authorization } = reloadConfig.authorization
   const readinessConfig = { ...reloadConfig, schemaVersion: 2,
     authorization: { ...authorization, hostGeneration: reloadReceipt.hostGeneration, requestDigest: hostAttestationRequestDigest(readinessRequest) },
     readiness: { reloadOperationId: reloadRequest.operationId, observer: config,
       client: await pinned(fileURLToPath(new URL('../../plugins/plugin-control-plane/lib/runtime-observer-protocol.js', import.meta.url))),
       deploymentFiles: await Promise.all([fileURLToPath(candidateUrl), fileURLToPath(new URL('../../plugins/assistant-policy/package.json', import.meta.url))].map(pinned)) } }
-  const readinessReceipt = await invoke(readinessRequest, readinessConfig); await authority.verify(readinessReceipt, plan, readinessRequest)
+  const readinessReceipt = await apply(readinessRequest, readinessConfig)
+  const expectedOutcome = initialCandidateDisabled ? 'failed' : 'passed'
+  const expectedStatus = initialCandidateDisabled ? 'rollback-pending' : 'awaiting-effect-blocked-replay'
+  if (readinessReceipt.outcome !== expectedOutcome || plan.status !== expectedStatus) throw new Error('readiness outcome did not drive the expected phase CAS')
+  store.close(); store = new ControlPlaneStore({ path: ledgerPath })
+  if (controlPlaneDigest(store.getPlan(plan.id)) !== controlPlaneDigest(plan)) throw new Error('readiness phase CAS did not survive ledger reopen')
   const readinessReplay = await invoke(readinessRequest, readinessConfig)
   if (JSON.stringify(readinessReplay) !== JSON.stringify(readinessReceipt)) throw new Error('readiness replay differs')
   const afterReadiness = await identity()
@@ -137,26 +179,29 @@ try {
   await supervisor(['stop', unit])
   try { await lstat(config.socketPath); throw new Error('Host stop retained the observer socket') }
   catch (error) { if (error.code !== 'ENOENT') throw error }
-  await writeFile(patchPath, JSON.stringify(patch(true)), { mode: 0o600 })
+  await writeFile(patchPath, JSON.stringify(patch(!initialCandidateDisabled)), { mode: 0o600 })
   await launch()
-  const disabled = await observe(false)
-  if (active.observation.observerId === disabled.observation.observerId
-    || active.observation.invocationId === disabled.observation.invocationId) throw new Error('Host instance did not change')
+  const replacement = await observe(initialCandidateDisabled)
+  if (active.observation.observerId === replacement.observation.observerId
+    || active.observation.invocationId === replacement.observation.invocationId) throw new Error('Host instance did not change')
   const rejected = await invoke(readinessRequest, readinessConfig, true)
   if (!rejected.rejected) throw new Error('stale readiness receipt replay was accepted')
   evidence = { schemaVersion: 1, kind: 'systemd-readiness-real-dsh-fixture', observedAt: new Date().toISOString(), dshVersion,
     dshCliSha256: sha(await readFile(dsh)), candidatePackage: '@dsh-enhanced/assistant-policy',
-    candidateVersion: JSON.parse(await readFile(new URL('../../plugins/assistant-policy/package.json', import.meta.url), 'utf8')).version,
+    candidateVersion, initialCandidateDisabled,
     runtimeDigests: { observer: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/runtime-observer.js', import.meta.url))),
       attestor: executable.sha256, observerClient: readinessConfig.readiness.client.sha256, processHelper: processHelper.sha256,
       controlEntry: sha(await readFile(fileURLToPath(controlUrl))), candidateEntry: sha(await readFile(fileURLToPath(candidateUrl))) },
-    active, replay, successor, afterReadiness, disabled, reloadReceipt, readinessReceipt, signedObservation,
-    receiptPublicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }), plan,
+    active, replay, successor, afterReadiness, replacement, reloadReceipt, readinessReceipt, signedObservation,
+    receiptPublicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }), plan: initialPlan,
+    controlPlane: { transitions, finalPlan: plan, persistedAfterReopen: true },
     requests: { reload: reloadRequest, readiness: readinessRequest },
     byteIdenticalReadinessReplay: true, staleReplayRejected: true, socketRemovedOnHostStop: true,
     limits: ['Actual DSH process with local built Control Plane and Policy package entries, referenced by file URL in a disposable profile; no npm install/publication or candidate artifact byte attestation.',
-      'Signed reload/readiness receipts independently verified against fixture requests; no Control Plane CAS transition, behavioral quality proof, model call, npm artifact install or production activation.'] }
+      'Existing Control Plane store performs signed approval and reload/readiness request/receipt CAS; catalog integrity, owner approval and profile staging are controlled fixture inputs, not actual npm artifact installation or CLI activation.',
+      'Negative readiness stops at rollback-pending; no profile restoration, physical Host rollback, behavioral quality proof, model call or production activation.'] }
 } finally {
+  store?.close()
   if (dispatched) { await supervisor(['stop', unit]); await supervisor(['reset-failed', unit]).catch(() => {}) }
   await rm(root, { recursive: true, force: true })
 }

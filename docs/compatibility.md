@@ -189,7 +189,7 @@ teardown and actual DSH process observation. See [contract](runtime-observer.md)
 
 ### External systemd readiness signer
 
-The shipped systemd attestor version is `dsh-systemd-host-attestor-2`. Schema-1
+The shipped systemd attestor version is `dsh-systemd-host-attestor-3`. Schema-1
 reload config remains supported; schema-2 selects readiness with an exact
 observer config, pinned node-only protocol helper and deployment files. The
 existing Host request/receipt and Control Plane state schemas do not change.
@@ -198,3 +198,7 @@ legacy rows without retained context cannot authorize readiness. Pending old
 executable/version requests require their original pinned binary for
 reconciliation. Upgrade checks include real observer queries, signed reload
 binding, global generation supersession, drift refusal and unchanged replay.
+Version 3 signs stable authenticated inactive entries as failed readiness;
+identity/authentication failures remain unsigned. Existing schemas and the
+Control Plane failure transition are retained. Upgrade checks also cover
+negative receipt replay and refusal to replace a cached failure with success.

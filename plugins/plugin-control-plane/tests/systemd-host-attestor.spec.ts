@@ -89,7 +89,7 @@ if(args[1]==='show') {
   const request: HostAttestationRequest = { schemaVersion: 1, kind: 'dsh-host-attestation-request', operationId: 'host-operation-fixture',
     requestedAt: now, receiptTtlMs: 30000, installationId: config.authorization.installationId,
     ledger: config.authorization.ledger, plan: config.authorization.plan, activation: config.authorization.activation,
-    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-2',
+    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-3',
       ...executable, interpreter, authority: config.authority, keyId: config.keyId }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } }
   config.authorization.requestDigest = hostAttestationRequestDigest(request); await save()
   const start = (value: unknown = request) => {
@@ -110,7 +110,7 @@ if(args[1]==='show') {
   return { root, config, configPath, request, save, start, restarts, verify, verifyRequest }
 }
 
-async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 'stable' | 'epoch-drift' | 'wrong-context' | 'replayed-challenge' = 'stable') {
+async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 'stable' | 'epoch-drift' | 'wrong-context' | 'replayed-challenge' | 'wrong-mac' | 'inactive' | 'inactive-then-active' | 'bad-identity' | 'disconnected' = 'stable') {
   const reload = await f.start().result; expect(reload.code, reload.stderr).toBe(0)
   const config = f.config as unknown as { schemaVersion: 2; profileFiles: Array<{ path: string; sha256: string }>; readiness: {
     client: { path: string; sha256: string }; observer: unknown; deploymentFiles: Array<{ path: string; sha256: string }>; reloadOperationId: string
@@ -137,18 +137,20 @@ async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 's
         const incoming = JSON.parse(source)
         const requestMac = createHmac('sha256', key).update(`dsh-runtime-request/v1\n${JSON.stringify(incoming.challenge)}`).digest('hex')
         if (incoming.schemaVersion !== 1 || incoming.mac !== requestMac) throw new Error('invalid request HMAC')
+        if (behavior === 'disconnected') { socket.end(); return }
         samples++
         const challenge = behavior === 'replayed-challenge' ? 'f'.repeat(64) : incoming.challenge
         const epoch = behavior === 'epoch-drift' ? samples : 1
         const invocationId = behavior === 'wrong-context' ? '3'.repeat(32) : '2'.repeat(32)
-        const instance = { uid: 101, epoch }
+        const inactive = behavior === 'inactive' || (behavior === 'inactive-then-active' && samples === 1)
+        const instance = inactive ? null : { uid: 101, epoch }
         const target = observer.targets[0]!
         const observation = { schemaVersion: 1, kind: 'dsh-runtime-observation', observerId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
           observerConfigDigest: runtimeConfigDigest(observer), challenge, processId: process.pid, invocationId,
-          profilePath: observer.profilePath, observedAt: Date.now(), entries: [{ entryId: 'candidate', module: target.module,
-            configDigest: target.configDigest, active: true, instance, dependencies: [{ name: 'loader', instance }],
+          profilePath: observer.profilePath, observedAt: Date.now(), entries: [{ entryId: 'candidate', module: behavior === 'bad-identity' ? './wrong.js' : target.module,
+            configDigest: target.configDigest, active: !inactive, instance, dependencies: [{ name: 'loader', instance }],
             services: [{ name: 'candidateService', instance }] }] }
-        const mac = createHmac('sha256', key).update(`dsh-runtime-response/v1\n${JSON.stringify(observation)}`).digest('hex')
+        const mac = behavior === 'wrong-mac' ? '0'.repeat(64) : createHmac('sha256', key).update(`dsh-runtime-response/v1\n${JSON.stringify(observation)}`).digest('hex')
         socket.end(`${JSON.stringify({ observation, mac })}\n`)
       } catch { socket.destroy() }
     })
@@ -203,12 +205,48 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     } finally { if (prior === undefined) delete process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG; else process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = prior }
   }, 30_000)
 
-  test.each(['epoch-drift', 'wrong-context', 'replayed-challenge'] as const)('rejects %s observer output without another restart', async mode => {
+  test.each(['epoch-drift', 'wrong-context', 'replayed-challenge', 'wrong-mac'] as const)('rejects %s observer output without another restart', async mode => {
     const f = await fixture(); const ready = await readinessFixture(f, mode)
     const result = await ready.start().result
     expect(result.code).toBe(1); expect(result.stdout).toBe('')
     expect(await f.restarts()).toBe(1)
   })
+
+  test('signs a stable inactive candidate as a failed readiness receipt and replays it without restart', async () => {
+    const f = await fixture(); const ready = await readinessFixture(f, 'inactive')
+    const first = await ready.start().result
+    expect(first.code, first.stderr).toBe(0)
+    const receipt = JSON.parse(first.stdout); await f.verifyRequest(receipt, ready.request)
+    expect(receipt).toMatchObject({ phase: 'readiness', outcome: 'failed', hostGeneration: 1,
+      evidence: { kind: 'readiness', checks: expect.any(Number), failures: expect.any(Number) } })
+    expect(receipt.evidence.checks).toBeGreaterThanOrEqual(2)
+    expect(receipt.evidence.failures).toBe(receipt.evidence.checks)
+    const replay = await ready.start().result
+    expect(replay.code, replay.stderr).toBe(0); expect(replay.stdout).toBe(first.stdout)
+    expect(await f.restarts()).toBe(1)
+  }, 30_000)
+
+  test.each(['inactive-then-active', 'bad-identity'] as const)('does not sign %s as a failed readiness result', async mode => {
+    const f = await fixture(); const ready = await readinessFixture(f, mode)
+    const result = await ready.start().result
+    expect(result.code).toBe(1); expect(result.stdout).toBe(''); expect(await f.restarts()).toBe(1)
+  })
+
+  test('does not sign a disconnected observer as a failed readiness result', async () => {
+    const f = await fixture(); const ready = await readinessFixture(f, 'disconnected')
+    const result = await ready.start().result
+    expect(result.code).toBe(1); expect(result.stdout).toBe(''); expect(await f.restarts()).toBe(1)
+    const db = new DatabaseSync(join(f.config.stateRoot, 'reload.sqlite'))
+    try { expect(db.prepare('SELECT receipt FROM readiness WHERE operation_id = ?').get(ready.request.operationId)).toEqual({ receipt: null }) } finally { db.close() }
+  })
+
+  test('does not turn a retained failed readiness operation into passed when the candidate later activates', async () => {
+    const f = await fixture(); const ready = await readinessFixture(f, 'inactive')
+    const first = await ready.start().result; expect(first.code, first.stderr).toBe(0)
+    ready.setBehavior('stable')
+    const later = await ready.start().result
+    expect(later.code).toBe(1); expect(later.stdout).toBe(''); expect(await f.restarts()).toBe(1)
+  }, 30_000)
 
   test.each(['missing', 'legacy', 'superseded'] as const)('refuses readiness when the retained reload is %s', async state => {
     const f = await fixture(); const ready = await readinessFixture(f)
