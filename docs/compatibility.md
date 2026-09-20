@@ -276,7 +276,9 @@ Verifier 可选源码审查复用已固定 DSH `agents.create`、`installModelSe
 
 Schema 19 adds `source_adoptions`, binding one completed owner source release to one activation plan, its exact candidate and original task reference. Existing activation and signed receipt formats remain unchanged. Older binaries reject this newer ledger; retain the current binary for pending deployment recovery.
 
-Optional `sourceAdoptions` extends the same native source job into finite activation approval and the shared CLI deployment engine. Forward activation requires the current Host owner-source fence; rollback remains possible after source withdrawal. Installer work uses a dedicated connection and the existing SQLite/profile mutex protocol. Subsequent foreground attribution is described below; signed post-deployment quality observations remain unfinished integration work.
+Optional `sourceAdoptions` extends the same native source job into finite activation approval and the shared CLI deployment engine. Forward activation requires the current Host owner-source fence; rollback remains possible after source withdrawal. Installer work uses a dedicated connection and the existing SQLite/profile mutex protocol. Subsequent foreground attribution and signed task observations are described below; installer configuration and production end-to-end verification remain incomplete.
+
+Prepared source continuations now use a separate native Automations cron instead of startup execution. This changes no ledger schema or peer API, but the configured `sourceJobs` run budget also covers continuation occurrences. Exact Policy rules must allow automation `source-job-prepared-continuations` under system owner `plugin-control-plane-source`. Startup never bypasses Policy/budget admission; unresolved external release claims retain their existing no-replay semantics.
 
 
 ### Foreground deployment attribution (Control Plane schema 20)

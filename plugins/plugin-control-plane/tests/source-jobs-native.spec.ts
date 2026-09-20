@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
 import type { SourceJobRecord } from '../src/source-job-types.ts'
@@ -18,7 +18,7 @@ const hex = (value: string) => createHash('sha256').update(value).digest('hex')
 const OWNER = { ownerRouteId: 'route-1', principalId: 'owner-1', principalRecordId: 'record-1', principalVersion: 1, workspace: '/workspace', preset: 'primary' }
 const build = { dockerPath: '/usr/bin/docker', image: `example@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000, memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 } as const
 
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 function trust(root: string): PluginControlTrustConfig {
   return { schemaVersion: 4, installationId: '00000000-0000-4000-8000-000000000001', dshHome: root, ledger: { id: 'ledger', path: join(root, 'ledger.json') },
@@ -32,29 +32,76 @@ function evidence(): SourcePreparedEvidence {
     commands: [{ command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 1, logDigest: 'e'.repeat(64) }], pack: { name: 'health-helper', version: '1.0.0', sizeBytes: 1, sha256: 'd'.repeat(64) }, preparedAt: Date.now() }
 }
 
-async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean } = {}) {
+async function fixture(options: { budget?: 'ok' | 'missing' | 'exhausted'; policyExecute?: boolean; continuations?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-native-source-jobs-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true }); await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export {}\n')
   execFileSync('/usr/bin/git', ['init', root]); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.email', 'test@example.invalid']); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.name', 'Test']); execFileSync('/usr/bin/git', ['-C', root, 'add', '.']); execFileSync('/usr/bin/git', ['-C', root, 'commit', '-m', 'fixture'])
   const head = execFileSync('/usr/bin/git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
   const ctx = new Context()
   const budgetId = options.budget === 'missing' ? 'missing-budget' : 'source-budget'
-  new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), budgets: options.budget === 'missing' ? [] : [{ id: budgetId, metric: 'automation-runs', limit: options.budget === 'exhausted' ? 0 : 2, periodMs: 60_000, scope: 'global' }], rules: [
+  const policy = new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), budgets: options.budget === 'missing' ? [] : [{ id: budgetId, metric: 'automation-runs', limit: options.budget === 'exhausted' ? 0 : 2, periodMs: options.continuations ? 86_400_000 : 60_000, scope: 'global' }], rules: [
     { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: OWNER.workspace, principal: OWNER.principalId }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
     ...(options.policyExecute === false ? [] : [{ id: 'execute', effect: 'allow' as const, subject: { kind: 'background' as const, id: '*', workspace: OWNER.workspace, principal: OWNER.principalId }, actions: ['execute'], resource: { kind: 'automation' as const, id: '*' }, context: { initiators: ['background' as const] } }]),
   ] })
   const automations = new AssistantAutomationsService(ctx, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
-  const store = new ControlPlaneStore({ path: join(root, 'control.sqlite') }); const gap = store.recordGap({ idempotencyKey: `gap:${options.budget ?? 'ok'}`, capability: 'health', context: 'native', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
-  const config = { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: root, ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId, budgetAmount: 1 }
-  const prepare = async (job: SourceJobRecord) => store.createSourcePlan({ gapId: job.intent.gapId, repository: job.intent.repository, worktree: job.intent.worktree, baseCommit: job.intent.baseCommit, name: job.intent.name, generatorDigest: MODIFY_GENERATOR_DIGEST, scope: [`plugins/${job.intent.name}`], mode: 'modify', ttlMs: job.intent.ttlMs, idempotencyKey: `source-job-plan:${job.id}`, sourceJob: { jobId: job.id, jobRevision: job.revision, occurrenceId: job.occurrenceId! }, prepared: { treeDigest: 'b'.repeat(64), patchDigest: 'c'.repeat(64), checkedAt: Date.now(), evidence: evidence() } }).result
-  const createRuntime = () => new SourceJobRuntime({ config, build, statePath: root, store, ports: { automations, delivery: { validateOwnerRoute: () => ({ receiptVersion: 2, authorityId: OWNER.ownerRouteId, authorityHash: hex('route'), principalId: OWNER.principalId, principalRecordId: OWNER.principalRecordId, principalVersion: 1, workspace: OWNER.workspace, agentPreset: OWNER.preset, bindingVersion: 1, generation: 1 }) } }, trust: async () => trust(root), prepare })
+  const owner = { receiptVersion: 2 as const, authorityId: OWNER.ownerRouteId, authorityHash: hex('route'), principalId: OWNER.principalId, principalRecordId: OWNER.principalRecordId, principalVersion: 1, workspace: OWNER.workspace, agentPreset: OWNER.preset, bindingVersion: 1, generation: 1 }
+  const store = new ControlPlaneStore({ path: join(root, 'control.sqlite') })
+  const gap = options.continuations ? store.recordOwnerTaskFailureGap({ schemaVersion: 1, owner,
+    outcomeId: 'native-owner-feedback', sourceDigest: hex('native-source'),
+    projection: { subjectKind: 'foreground-turn', subjectRef: 'native-inbox', version: 1, digest: hex('native-projection'), disposition: 'upsert' },
+  }) : store.recordGap({ idempotencyKey: `gap:${options.budget ?? 'ok'}`, capability: 'health', context: 'native', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+  const config = { authorityId: 'source-authority', expiresAt: Date.now() + (options.continuations ? 3_600_000 : 60_000), maxSubmissions: 2, repository: root, ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId, budgetAmount: 1 }
+  // The source fence and build/authority are fixture ports; admission, scheduling,
+  // job/plan persistence and budget accounting use real services and SQLite.
+  const withGapSourceFence = <T>(id: string, _owner: unknown, callback: () => T): T => store.withOwnerTaskFailureGapAdmission(id, callback)
+  const prepare = vi.fn(async (job: SourceJobRecord) => {
+    const create = () => store.createSourcePlan({ gapId: job.intent.gapId, repository: job.intent.repository, worktree: job.intent.worktree, baseCommit: job.intent.baseCommit, name: job.intent.name, generatorDigest: MODIFY_GENERATOR_DIGEST, scope: [`plugins/${job.intent.name}`], mode: 'modify', ttlMs: job.intent.ttlMs, idempotencyKey: `source-job-plan:${job.id}`, sourceJob: { jobId: job.id, jobRevision: job.revision, occurrenceId: job.occurrenceId! }, prepared: { treeDigest: 'b'.repeat(64), patchDigest: 'c'.repeat(64), checkedAt: Date.now(), evidence: evidence() } }).result
+    return options.continuations ? withGapSourceFence(job.intent.gapId, job.intent.owner, create) : create()
+  })
+  const approvePrepared = vi.fn(async () => { throw new Error('authority temporarily unavailable') })
+  const createRuntime = () => new SourceJobRuntime({ config, build, statePath: root, store, ports: { automations, delivery: { validateOwnerRoute: () => owner } }, trust: async () => trust(root), prepare,
+    ...(options.continuations ? { approvePrepared, withGapSourceFence } : {}),
+  })
   const runtime = createRuntime()
   runtime.start()
   const enqueue = (key: string) => runtime.enqueue({ gapId: gap.id, name: 'health-helper', repository: root, files: [{ path: 'src/index.ts', content: 'export const changed = true\n' }], idempotencyKey: key, expectedBaseCommit: head, ttlMs: 900_000, owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined })
-  return { ctx, automations, store, gap, runtime, createRuntime, enqueue }
+  return { ctx, automations, policy, store, gap, runtime, createRuntime, enqueue, prepare, approvePrepared }
 }
 
 describe('native Automations + Policy source jobs', () => {
+  it('charges native continuation occurrences and cannot bypass an exhausted budget on restart', async () => {
+    let now = Date.UTC(2026, 8, 20, 12, 0, 5)
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    const f = await fixture({ continuations: true })
+    const reserve = vi.spyOn(f.policy, 'reserve')
+    let restarted: SourceJobRuntime | undefined
+    try {
+      const job = await f.enqueue('native:continuation-budget')
+      now += 1_100
+      await f.automations.tick(); await f.automations.whenIdle()
+      expect(f.store.getSourceJob(job.id)?.status).toBe('prepared')
+      expect(f.approvePrepared).toHaveBeenCalledTimes(1)
+      now += 60_000
+      await f.automations.tick(); await f.automations.whenIdle()
+      expect(f.approvePrepared).toHaveBeenCalledTimes(2)
+      now += 60_000
+      await f.automations.tick(); await f.automations.whenIdle()
+      expect(f.approvePrepared).toHaveBeenCalledTimes(2)
+      const health = f.automations.inspectSystemOwned({ owner: 'plugin-control-plane-source', automationId: 'source-job-prepared-continuations' })
+      expect(health.latestTerminalRuns.production).toMatchObject({
+        diagnostic: { budgetSettlementState: 'not-reserved' } })
+      expect(reserve.mock.results.at(-1)).toMatchObject({ type: 'throw', value: expect.objectContaining({ code: 'budget-exhausted' }) })
+      await f.runtime.close()
+      restarted = f.createRuntime(); restarted.start()
+      expect(f.approvePrepared).toHaveBeenCalledTimes(2)
+      now += 60_000
+      await f.automations.tick(); await f.automations.whenIdle()
+      expect(f.approvePrepared).toHaveBeenCalledTimes(2)
+      expect(f.prepare).toHaveBeenCalledOnce()
+      expect(f.store.getSourceJob(job.id)?.status).toBe('prepared')
+    } finally { await restarted?.close(); await f.runtime.close(); f.store.close(); await f.ctx.fiber.dispose() }
+  })
+
   it('runs the native Host scheduler to a checked modify plan without an Agent service', async () => {
     const f = await fixture()
     try { const queued = await f.enqueue('native:success'); await new Promise(resolve => setTimeout(resolve, 1_100)); await f.automations.tick(); await f.automations.whenIdle(); expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'prepared' }) }

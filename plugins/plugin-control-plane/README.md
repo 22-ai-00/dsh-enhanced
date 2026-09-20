@@ -244,11 +244,15 @@ sourceJobs:
   budgetAmount: 1
 ```
 
-还需安装兼容的 `assistant-delivery` 和 `assistant-automations` Host peers；后者显式开启现有 scheduler，Policy 允许该 scope 下的 `plugin-control-plane-source` reconcile 及对应后台任务 execute，并配置 `source-check-runs` 的 `automation-runs` 预算。此预算计执行次数，不代表模型 token/费用预算。缺少 peer 或授权时不执行。`sourceBuild` 决定镜像和检查上限，模型不能改写队列权限、owner、路径或构建限制。
+还需安装兼容的 `assistant-delivery` 和 `assistant-automations` Host peers；后者显式开启现有 scheduler，Policy 允许该 scope 下的 `plugin-control-plane-source` reconcile 及对应后台任务 execute，并配置 `source-check-runs` 的 `automation-runs` 预算。此预算计源码检查和后续恢复轮次，不代表模型 token/费用预算；希望所有作业共享额度时用 Policy 的 `global` 或 `workspace` scope，`subject` 按 automation 分开计费。缺少 peer 或授权时不执行。`sourceBuild` 决定镜像和检查上限，模型不能改写队列权限、owner、路径或构建限制。
 
 任务先冻结完整 Delivery v2 回执、trust 摘要、gap revision/digest、read base、文件内容及构建配置，再以 **paused → 绑定规范化 definition hash → active** 注册到 Automations 的一次性 Host executor。源码只存控制面私有 SQLite；Automation definition 和模型状态投影不包含文件内容。相同 authority 的期限、配置和累计提交上限不可重置；同 key 不同内容拒绝。全账本同时最多一个 `queued/running/unknown` 任务。
 
 模型回合结束不会取消已接受的 Host 任务。Host 自己受授权绝对期限、构建时限、Automations lease、取消和 Cordis provider 生命周期约束。成功时，job `prepared`、gap claim 和已有 `pending-approval` plan 在同一 SQLite 事务提交。原模型授权仍最多 300 秒；不新增模型循环或调度器。
+
+配置审批、发布或采用后，临时失败的 `prepared` 作业由原生每分钟 cron 接续，无须重启 Host。独立 Host executor `plugin-control-plane-source-continuations-v1` 使用同一 system owner，持久 automation ID 为 `source-job-prepared-continuations`；如 Policy 采用精确 ID 规则，须覆盖它。每轮最多处理一个当前可推进作业，仍走生产 Policy/预算准入、原 owner/反馈/trust 校验和既有外部操作 claim。重启只注册恢复任务，不在启动时直接调用授权器；unknown 外部动作不重新派发。无可推进作业时暂停，新的已检查候选可重新激活。卸载暂停当前代次、取消并等待已有调用；旧代次不能暂停新实例。
+
+每次恢复轮次消耗 `sourceJobs.budgetAmount`。Policy 预算按配置的时间窗口计算，窗口耗尽会拒绝执行；它不是终身重试次数上限。前向推进还受原授权与计划期限约束；已暴露版本的恢复义务可在旧来源失效后继续，但仍需预算和原部署权限。调用结果不明会留在原生执行记录中，不能算成功。独立模型审查仍使用原有冻结模型及预算；此接续不建立新的模型循环。
 
 重启重接尚未 claim 的任务；已 claim 的任务转为 `unknown`，保留资源槽且不自动重跑。状态回读、入队和启动时核对 Automations 的精确生产终态，将预算/Policy 等在 executor 前发生的终结写回 `failed`。Host-only `reconcileSourceJob({id, owner})` 可对 `unknown` 进行资源核对：按容器标签、镜像、ID 删除并证明不存在，验证 worktree 的 Git 注册、base 和仓库归属后删除。归属不明、daemon 不可达或残留路径未注册时保留 `unknown`，需要 operator 检查；同一 route/principal record/version/workspace/preset 的新会话绑定仍可查看和清理旧任务；执行继续要求原完整回执精确匹配。该方法不暴露给模型，也不重跑候选。每个 statePath 使用单一控制面 Host 实例。
 
@@ -395,6 +399,8 @@ sourceAdoptions:
 原生源码作业在 `release-complete` 后自动接续：绑定原 owner 任务、精确 release 制品与 profile，申请有限采用回执，再调用与 CLI 相同的安装、Host 签名检查和物理回退实现。schema 19 的 `source_adoptions` 保证一条源码计划只对应一条激活计划；普通任务失败无需给插件添加虚假的通用修复 capability。Host 入口 `adoptOwnerSourceRelease({ sourcePlanId, signal?, expectedTrustDigest? })` 可继续已有记录，不暴露为模型工具。恢复不重建已发布制品、不重新审批已批准的激活。
 
 使用 systemd 重启目标 Host 时，控制面应运行在目标 Host 之外，避免目标重启中断自己的部署作业。采用使用独立 SQLite 连接，并复用现有 profile 锁和跨进程文件操作互斥；同一 Service 一次执行一个采用任务。任务来源在异步操作前后重验，取消或失败后保留恢复义务。物理恢复不依赖已撤回的来源授权；已暴露 profile 仍须取得原 Host 的独立 rollback 回执才结算。trust 绑定变化、无法确认资源释放或签名服务不可用时保留待恢复状态。Cordis 卸载取消并等待采用工作，随后关闭其连接。
+
+当前安装器尚未提供这个双 Host 部署：源码作业仍依赖所在 Host 的实时 Delivery/Evaluation 校验，单纯共享 SQLite 不能传递目标 Host 的当前 owner 与反馈写入屏障。跨 Host 的认证接线和安装配置仍须实现。现有 systemd attestor 只签发 reload/readiness/rollback；其余行为验收阶段也需要真实独立观测，不能用进程就绪代替。因此仅填写上述配置尚不能完成生产自动采用。
 
 这提供自动采用的执行链。目标 Host 可另配 `foregroundDeployments: { attestorJournalPath: /srv/dsh-owner/supervisor/reload.sqlite }`，同时启用 `runtimeObserver`，并挂载 Delivery。路径须指向 systemd attestor 实际的私有 SQLite journal；配置只授予读取已签名 readiness 记录的权限，不包含签名密钥。目标 Host 与外部部署协调器需使用同一精确控制面账本和 trust 绑定；当前实现要求同 UID 的私有文件读取，不能据此声称独立 UID 隔离。
 

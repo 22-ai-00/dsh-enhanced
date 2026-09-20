@@ -245,7 +245,8 @@ export class PluginControlPlaneService extends Service {
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never,
       ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : []),
       ...(this.config.sourceReleaseExecution?.independentReview ? ['assistantVerifier', 'agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'] as never[] : [])], jobsCtx => {
-      jobsCtx.effect(() => {
+      jobsCtx.effect(async () => {
+        this.abort.signal.throwIfAborted()
         const current = <K extends keyof SourceJobPorts>(key: K): SourceJobPorts[K] => jobsCtx.get((key === 'automations' ? 'assistantAutomations' : 'assistantDelivery') as never) as unknown as SourceJobPorts[K]
         for (const method of ['registerHostExecutor', 'reconcileSystem', 'inspectSystemOwnedActivation', 'inspectSystemOwned'] as const) {
           if (typeof current('automations')[method] !== 'function') throw new Error(`plugin-control-plane: durable source jobs require assistantAutomations.${method}`)
@@ -281,13 +282,20 @@ export class PluginControlPlaneService extends Service {
             } } : {}),
           trust: () => this.boundTrust(), prepare: (job, signal, assertCurrent) => this.prepareSourceJob(job, signal, assertCurrent),
         })
-        runtime.start()
         this.sourceRuntimes.add(runtime)
-        this.sourceRuntime = runtime
-        return async () => {
+        const close = async (): Promise<void> => {
           if (this.sourceRuntime === runtime) this.sourceRuntime = undefined
-          await runtime.close()
-          this.sourceRuntimes.delete(runtime)
+          try { await runtime.close() }
+          finally { this.sourceRuntimes.delete(runtime) }
+        }
+        try {
+          runtime.start()
+          this.abort.signal.throwIfAborted()
+          this.sourceRuntime = runtime
+          return close
+        } catch (error) {
+          await close()
+          throw error
         }
       }, 'plugin-control-plane.source-jobs')
     })

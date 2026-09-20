@@ -37,18 +37,18 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
       projection: { subjectKind: 'foreground-turn', subjectRef: 'inbox-source-job', version: 1, digest: hex('projection-source-job'), disposition: 'upsert' },
       sourceDigest: hex('source-job-reference') })
     : store.recordGap({ idempotencyKey: 'gap:source-job', capability: 'health', context: 'runtime', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
-  let executor: HostAutomationExecutor | undefined
-  let activation: { definitionHash: string; activationNonce: string; ownerRouteId: string } | undefined
+  const executors = new Map<string, HostAutomationExecutor>()
+  const activations = new Map<string, { definitionHash: string; activationNonce: string; ownerRouteId: string }>()
   const reconciles: SystemAutomationReconcileInput[] = []
   const automations = {
-    registerHostExecutor: vi.fn((value: HostAutomationExecutor) => { executor = value; return () => { executor = undefined } }),
+    registerHostExecutor: vi.fn((value: HostAutomationExecutor) => { executors.set(value.descriptor.executorId, value); return () => { executors.delete(value.descriptor.executorId) } }),
     reconcileSystem: vi.fn((request: SystemAutomationReconcileInput) => {
       reconciles.push(request)
       if (request.definition.execution === undefined) throw new Error('fixture requires Host execution')
-      if (request.desiredStatus === 'paused') activation = { definitionHash: hex(JSON.stringify(request.definition)), activationNonce: request.definition.execution.activationNonce, ownerRouteId: request.definition.execution.ownerRouteId }
+      activations.set(request.automationId, { definitionHash: hex(JSON.stringify(request.definition)), activationNonce: request.definition.execution.activationNonce, ownerRouteId: request.definition.execution.ownerRouteId })
       return {}
     }),
-    inspectSystemOwnedActivation: vi.fn(() => activation),
+    inspectSystemOwnedActivation: vi.fn((input: { automationId: string }) => activations.get(input.automationId)),
     inspectSystemOwned: vi.fn(() => ({ latestTerminalRuns: {} })),
   }
   const trust = { dshHome: '/dsh', executor: { environmentAllowlist: [] } }
@@ -56,7 +56,7 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
   // This fixture models the service gateway only: production obtains this
   // proof from Evaluation's canonical writer fence, never from this boolean.
   const gapSourceFence = <T>(gapId: string, owner: ReturnType<typeof receipt>, callback: () => T): T => {
-      if (gapId !== gap.id || controlPlaneDigest(owner) !== controlPlaneDigest(receipt()) || !sourceCurrent) {
+      if (!store.getOwnerTaskFailureReference(gapId) || controlPlaneDigest(owner) !== controlPlaneDigest(receipt()) || !sourceCurrent) {
         throw new Error('typed source is no longer current')
       }
       return store.withOwnerTaskFailureGapAdmission(gapId, callback)
@@ -95,12 +95,107 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
     ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}), ...(options.releases ? { releasePrepared } : {}), ...(options.execution ? { advanceReleased, releaseTimeoutMs: 60_000 } : {}), ...(options.adoption ? { adoptReleased, adoptionTimeoutMs: 60_000 } : {}) })
   const runtime = createRuntime()
   runtime.start()
-  const enqueue = (signal = new AbortController().signal, key = 'job:one') => runtime.enqueue({ gapId: gap.id, name: 'health-helper', repository: root, files: [{ path: 'src/index.ts', content: 'export const changed = true\n' }], idempotencyKey: key, expectedBaseCommit: head, ttlMs: 900_000, owner: OWNER, signal, assertCurrent: () => undefined })
+  const enqueue = (signal = new AbortController().signal, key = 'job:one', gapId = gap.id) => runtime.enqueue({ gapId, name: 'health-helper', repository: root, files: [{ path: 'src/index.ts', content: 'export const changed = true\n' }], idempotencyKey: key, expectedBaseCommit: head, ttlMs: 900_000, owner: OWNER, signal, assertCurrent: () => undefined })
   return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, approvePrepared, releasePrepared, advanceReleased, adoptReleased, adoptionForward, withGapSourceFence,
-    setSourceCurrent: (value: boolean) => { sourceCurrent = value }, get executor() { return executor }, activation: (_id: string) => activation!, enqueue, head }
+    setSourceCurrent: (value: boolean) => { sourceCurrent = value }, get executor() { return executors.get('plugin-control-plane-source-check') },
+    get continuation() { return executors.get('plugin-control-plane-source-continuations-v1') }, activation: (id: string) => activations.get(id)!,
+    tickContinuation: async (occurrenceId = 'prepared-continuation') => {
+      const continuation = executors.get('plugin-control-plane-source-continuations-v1')!, active = activations.get('source-job-prepared-continuations')!
+      return continuation.execute({ occurrenceId, automationId: 'source-job-prepared-continuations', definitionHash: active.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: continuation.descriptor.catalogDigest, signal: new AbortController().signal })
+    }, enqueue, head }
 }
 
 describe('durable source-job runtime', () => {
+  it('deduplicates concurrent continuation calls and drains an aborted late result on close', async () => {
+    const f = await fixture({ typed: true, approvals: true })
+    let release!: () => void
+    try {
+      f.approvePrepared.mockRejectedValueOnce(new Error('temporary outage'))
+      const job = await f.enqueue(), active = f.activation(job.id)
+      await f.executor!.execute({ occurrenceId: 'prepare-drain', automationId: job.id, definitionHash: active.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      let started!: () => void, executionSignal: AbortSignal | undefined
+      const entered = new Promise<void>(resolve => { started = resolve })
+      const gate = new Promise<void>(resolve => { release = resolve })
+      f.approvePrepared.mockImplementationOnce(async (_job, signal) => { executionSignal = signal; started(); await gate })
+      const pending = f.tickContinuation('continuation-drain')
+      await entered
+      await f.tickContinuation('continuation-overlap')
+      expect(f.approvePrepared).toHaveBeenCalledTimes(2)
+      let closed = false
+      const closing = f.runtime.close().then(() => { closed = true })
+      await new Promise(resolve => setImmediate(resolve))
+      expect(executionSignal?.aborted).toBe(true)
+      expect(closed).toBe(false)
+      expect(f.reconciles.at(-1)?.desiredStatus).toBe('paused')
+      release()
+      expect(await pending).toMatchObject({ outcome: 'unknown', failureCode: 'source-continuation-unsettled' })
+      await closing
+      expect(f.prepare).toHaveBeenCalledOnce()
+      expect(f.store.getSourceJob(job.id)?.status).toBe('prepared')
+    } finally { release?.(); await f.runtime.close(); f.store.close() }
+  })
+
+  it('recovers a temporary approval outage, pauses, and reactivates for another real prepared job', async () => {
+    const f = await fixture({ typed: true, approvals: true })
+    try {
+      f.approvePrepared.mockImplementation(async job => {
+        const plan = f.store.getSourcePlan(job.planId!), keys = generateKeyPairSync('ed25519')
+        const unsigned = { schemaVersion: 1 as const, approvalId: `approve-${plan.id}`, authority: 'owner', keyId: 'key',
+          planId: plan.id, planDigest: plan.digest, decision: 'approved' as const, principal: OWNER.principalId,
+          decidedAt: Date.now(), expiresAt: plan.expiresAt }
+        await f.store.approveSource({ planId: plan.id, expectedRevision: plan.revision,
+          receipt: { ...unsigned, signature: sign(null, Buffer.from(approvalSigningPayload(unsigned)), keys.privateKey).toString('base64') },
+          resolveAuthority: () => new Ed25519ApprovalAuthority(keys.publicKey.export({ type: 'spki', format: 'pem' }), 'owner', 'key'),
+          idempotencyKey: unsigned.approvalId, withSourceFence: callback => f.withGapSourceFence!(job.intent.gapId, job.intent.owner, callback) })
+      })
+      const execute = async (id: string) => {
+        const active = f.activation(id)
+        await f.executor!.execute({ occurrenceId: `execute-${id}`, automationId: id, definitionHash: active.definitionHash,
+          executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+          ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      }
+      f.approvePrepared.mockRejectedValueOnce(new Error('first temporary outage'))
+      const first = await f.enqueue()
+      await execute(first.id)
+      expect(f.reconciles.at(-1)?.desiredStatus).toBe('active')
+      await f.tickContinuation('first-recovery')
+      expect(f.store.getSourcePlan(f.store.getSourceJob(first.id)!.planId!).status).toBe('approved')
+      expect(f.reconciles.at(-1)?.desiredStatus).toBe('paused')
+      const secondGap = f.store.recordOwnerTaskFailureGap({ schemaVersion: 1, owner: receipt(), outcomeId: 'second-outcome',
+        projection: { subjectKind: 'foreground-turn', subjectRef: 'second-inbox', version: 1, digest: hex('second-projection'), disposition: 'upsert' }, sourceDigest: hex('second-source') })
+      f.approvePrepared.mockRejectedValueOnce(new Error('second temporary outage'))
+      const second = await f.enqueue(undefined, 'job:second', secondGap.id)
+      await execute(second.id)
+      expect(f.reconciles.at(-1)?.desiredStatus).toBe('active')
+      await f.tickContinuation('second-recovery')
+      expect(f.store.getSourcePlan(f.store.getSourceJob(second.id)!.planId!).status).toBe('approved')
+      const transitions = f.reconciles.filter(item => item.automationId === 'source-job-prepared-continuations')
+      expect(transitions.map(item => item.desiredStatus)).toEqual(['paused', 'active', 'paused', 'active', 'paused'])
+      expect(new Set(transitions.map(item => item.idempotencyKey)).size).toBe(transitions.length)
+      expect(f.prepare).toHaveBeenCalledTimes(2)
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  it('pauses expired prepared work without rebuilding or calling its authority', async () => {
+    const f = await fixture({ typed: true, approvals: true })
+    try {
+      f.approvePrepared.mockRejectedValueOnce(new Error('temporary outage'))
+      const job = await f.enqueue(), active = f.activation(job.id)
+      await f.executor!.execute({ occurrenceId: 'prepare-expiry', automationId: job.id, definitionHash: active.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      vi.spyOn(Date, 'now').mockReturnValue(f.store.getSourceJob(job.id)!.expiresAt + 1)
+      await f.tickContinuation('after-expiry')
+      expect(f.approvePrepared).toHaveBeenCalledOnce()
+      expect(f.prepare).toHaveBeenCalledOnce()
+      expect(f.reconciles.at(-1)?.desiredStatus).toBe('paused')
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
   it.each([{ changed: false, adoption: false }, { changed: true, adoption: false }, { changed: false, adoption: true }, { changed: true, adoption: true }])('continues native prepared work without rebuilding on restart (%j)', async ({ changed, adoption }) => {
     const f = await fixture({ typed: true, approvals: true, releases: true, execution: true, adoption })
     if (adoption) f.advanceReleased.mockImplementationOnce(async job => {
@@ -134,10 +229,12 @@ describe('durable source-job runtime', () => {
       expect(outcome.outcome).toBe('succeeded'); expect(f.advanceReleased).toHaveBeenCalledTimes(1)
       await f.runtime.close(); f.setSourceCurrent(!changed)
       restarted = f.createRuntime(); restarted.start()
-      await new Promise(resolve => setImmediate(resolve)); await restarted.close()
+      await f.tickContinuation(); await restarted.close()
       expect(f.advanceReleased).toHaveBeenCalledTimes(adoption || changed ? 1 : 2)
       if (adoption) {
-        expect(f.adoptReleased).toHaveBeenCalledTimes(2)
+        // A source change only retains post-release recovery after a durable
+        // exposed adoption record exists; this fixture has not created one.
+        expect(f.adoptReleased).toHaveBeenCalledTimes(changed ? 1 : 2)
         expect(f.adoptionForward).toHaveBeenCalledTimes(changed ? 1 : 2)
       }
       expect(f.prepare).toHaveBeenCalledTimes(1); expect(f.approvePrepared).toHaveBeenCalledTimes(1); expect(f.releasePrepared).toHaveBeenCalledTimes(1)
@@ -179,7 +276,7 @@ describe('durable source-job runtime', () => {
       await f.runtime.close()
       f.setSourceCurrent(!changed)
       restarted = f.createRuntime(); restarted.start()
-      await new Promise(resolve => setImmediate(resolve))
+      await f.tickContinuation()
       await restarted.close()
       expect(f.prepare).toHaveBeenCalledTimes(1)
       expect(f.approvePrepared).toHaveBeenCalledTimes(changed ? 1 : 2)
@@ -211,7 +308,7 @@ describe('durable source-job runtime', () => {
       if (boundary === 'source-change') f.setSourceCurrent(false)
       if (boundary === 'trust-change') Object.assign(f.trust, { installationId: 'changed' })
       restarted = f.createRuntime(); restarted.start()
-      await new Promise(resolve => setImmediate(resolve)); await restarted.close()
+      await f.tickContinuation(); await restarted.close()
       expect(f.prepare).toHaveBeenCalledTimes(1)
       expect(f.approvePrepared).toHaveBeenCalledTimes(1)
       expect(f.releasePrepared).toHaveBeenCalledTimes(boundary.endsWith('change') ? 1 : 2)
@@ -349,6 +446,39 @@ describe('durable source-job runtime', () => {
       expect(f.prepare).not.toHaveBeenCalled()
       expect(f.runtime.inspect({ id: result.id, owner: OWNER })).toEqual(result)
       expect(() => f.runtime.inspect({ id: result.id, owner: { ...OWNER, principalRecordId: 'other' } })).toThrow(/scope mismatch/)
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  it('cleans up the source executor when continuation registration fails', async () => {
+    const f = await fixture({ typed: true, approvals: true })
+    try {
+      await f.runtime.close()
+      let unregistered = 0
+      f.automations.registerHostExecutor
+        .mockImplementationOnce((_value: HostAutomationExecutor) => () => { unregistered++ })
+        .mockImplementationOnce(() => { throw new Error('continuation executor conflict') })
+      const failed = f.createRuntime()
+      expect(() => failed.start()).toThrow(/continuation executor conflict/)
+      expect(unregistered).toBe(1)
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
+  it('rejects a forged continuation occurrence before its authority hook', async () => {
+    const f = await fixture({ typed: true, approvals: true })
+    try {
+      f.approvePrepared.mockRejectedValueOnce(new Error('temporary approval outage'))
+      const queued = await f.enqueue(), active = f.activation(queued.id)
+      await f.executor!.execute({ occurrenceId: 'prepare-forged-continuation', automationId: queued.id, definitionHash: active.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(f.store.getSourceJob(queued.id)?.status).toBe('prepared')
+      f.approvePrepared.mockClear()
+      const continuation = f.continuation!, continuationActive = f.activation('source-job-prepared-continuations')
+      const result = await continuation.execute({ occurrenceId: 'forged-continuation', automationId: 'source-job-prepared-continuations', definitionHash: continuationActive.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: 'forged', catalogDigest: continuation.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(result.outcome).toBe('failed')
+      expect(f.approvePrepared).not.toHaveBeenCalled()
     } finally { await f.runtime.close(); f.store.close() }
   })
 
