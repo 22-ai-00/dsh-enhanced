@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
-export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-4'
+export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-5'
 const DIGEST = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const UNIT_PROPERTIES = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory', 'User', 'Group', 'Type', 'KillMode']
@@ -153,10 +153,19 @@ function loadConfig(environment, request) {
   object(config.systemctl, ['path', 'sha256', 'interpreter'], 'systemctl')
   pin({ path: config.systemctl.path, sha256: config.systemctl.sha256 }, 'systemctl', true)
   if (config.systemctl.interpreter !== null) pin(config.systemctl.interpreter, 'systemctl interpreter', true)
-  object(request, ['schemaVersion', 'kind', 'operationId', 'requestedAt', 'receiptTtlMs', 'installationId', 'ledger', 'plan', 'activation', 'profile', 'issuer', 'phase', 'requirements'], 'request')
-  if (request.schemaVersion !== 1 || request.kind !== 'dsh-host-attestation-request'
+  object(request, ['schemaVersion', 'kind', 'operationId', 'requestedAt', 'receiptTtlMs', 'installationId', 'ledger', 'plan', 'activation', 'profile', 'issuer', 'phase', 'requirements', 'predecessor'], 'request')
+  if (request.schemaVersion !== 2 || request.kind !== 'dsh-host-attestation-request'
     || request.phase !== (config.schemaVersion === 1 ? 'reload' : config.schemaVersion === 2 ? 'readiness' : 'rollback')) fail('phase does not match configured authority')
+  if (request.predecessor !== null) {
+    const prior = object(request.predecessor, ['operationId', 'receiptId', 'phase', 'receiptDigest', 'hostGeneration'], 'predecessor')
+    text(prior.operationId, 'predecessor operation', ID); text(prior.receiptId, 'predecessor receipt', ID)
+    text(prior.receiptDigest, 'predecessor receipt digest', DIGEST)
+    integer(prior.hostGeneration, 'predecessor generation', 1)
+    if (!['reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health'].includes(prior.phase)
+      || prior.operationId === request.operationId) fail('predecessor phase or operation is invalid')
+  }
   if (config.schemaVersion === 1) {
+    if (request.predecessor !== null) fail('reload cannot have a predecessor')
     object(request.requirements, ['kind', 'previousHostGeneration'], 'requirements')
     if (request.requirements.kind !== 'reload' || request.requirements.previousHostGeneration !== auth.previousHostGeneration) fail('generation is not authorized')
   } else if (config.schemaVersion === 3) {
@@ -164,6 +173,7 @@ function loadConfig(environment, request) {
     if (requirements.kind !== 'rollback' || !['restore', 'stop'].includes(requirements.action)
       || requirements.previousHostGeneration !== auth.previousHostGeneration
       || canonical(requirements.baselineFiles) !== canonical(config.profileFiles)) fail('rollback baseline or action is not authorized')
+    if (request.predecessor !== null && request.predecessor.hostGeneration > requirements.previousHostGeneration) fail('rollback predecessor generation is ahead of recovery')
     integer(requirements.minimumChecks, 'minimum checks', 1, 256)
     if (stopping) { if (config.readiness !== null) fail('stop cannot request runtime readiness') }
     else {
@@ -175,6 +185,9 @@ function loadConfig(environment, request) {
     if (request.requirements.kind !== 'readiness') fail('readiness requirements required')
     integer(request.requirements.minimumChecks, 'minimum checks', 1, 256)
     const ready = object(config.readiness, ['client', 'observer', 'deploymentFiles', 'reloadOperationId'], 'readiness')
+    if (request.predecessor === null || request.predecessor.phase !== 'reload'
+      || request.predecessor.operationId !== ready.reloadOperationId
+      || request.predecessor.hostGeneration !== auth.hostGeneration) fail('readiness predecessor does not bind the authorized reload')
     text(ready.reloadOperationId, 'reload operation', ID); pin(ready.client, 'observer client')
     if (!Array.isArray(ready.deploymentFiles) || !ready.deploymentFiles.length || ready.deploymentFiles.length > 128) fail('deployment pins required')
     for (const spec of ready.deploymentFiles) pin(spec, 'deployment file')
@@ -339,6 +352,8 @@ function boundReload(db, request, config, privateKey) {
     || receipt.evidence.previousHostGeneration !== priorRequest.requirements.previousHostGeneration
     || receipt.evidence.probeDigest !== digest(observation) || observation.requestDigest !== row.request_digest
     || observation.configDigest !== row.config_digest || !active(observation.successor)) fail('reload evidence binding is invalid')
+  if (canonical(request.predecessor) !== canonical({ operationId: receipt.operationId, receiptId: receipt.receiptId,
+    phase: receipt.phase, receiptDigest: digest(receipt), hostGeneration: receipt.hostGeneration })) fail('readiness predecessor differs from the signed reload')
   return { operationId: row.operation_id, generation: row.generation, receiptDigest: digest(receipt), successor: observation.successor }
 }
 

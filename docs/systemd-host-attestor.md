@@ -2,7 +2,7 @@
 
 `plugin-control-plane/bin/dsh-systemd-host-attestor.js` is shipped in the
 Control Plane bundle. It implements the existing configured Host executable
-contract, version `dsh-systemd-host-attestor-4`, for **reload, readiness and physical rollback** on Linux.
+contract, version `dsh-systemd-host-attestor-5`, for **reload, readiness and physical rollback** on Linux.
 It uses the existing signed receipt, request, fence and activation state
 machine. It creates no Cordis plugin, AgentLoop, model tool or scheduler.
 
@@ -13,6 +13,15 @@ uses authenticated live Loader/Fiber observations bound to that signed reload,
 and can advance the existing state machine to `awaiting-effect-blocked-replay`.
 Other phases are rejected before acquiring supervisor authority. Neither a
 running service nor an active candidate establishes behavioral quality.
+
+The executable accepts **schema-2 Host requests**. Each request includes a
+`predecessor` binding with the prior applied operation ID, receipt ID, phase,
+full signed receipt digest and Host generation. Reload has no predecessor.
+Readiness must name the exact reload retained in this signer's private journal;
+changing the receipt ID or digest is rejected even if the owner has authorized
+the altered request. Rollback may have no predecessor when no phase was applied
+under its recovery fence. Config schemas 1–3 and signed receipt schema 2 retain
+their existing meanings; they are separate from the request schema.
 
 ## Preparing an exact authorized request
 
@@ -284,11 +293,9 @@ require signed failed readiness plus durable `rollback-pending`; otherwise the
 active candidate must reach `awaiting-effect-blocked-replay`. Catalog integrity,
 approval authority and profile staging are explicit fixture inputs. This does
 not execute npm installation, CLI profile restoration or physical Host rollback.
-The active-candidate run
-and inactive-candidate run
-retain signed receipts, probe preimages and the actual phase transitions.
-Full-check, independent-review and prior-failure records are in the
-v3 engineering evidence.
+The fixture retains signed receipts, probe preimages and actual phase
+transitions locally. Current engineering verification is summarized in
+[RSI status](rsi-status.md); historical verification is available in Git history.
 
 ## Physical rollback
 
@@ -369,8 +376,10 @@ node scripts/e2e/systemd-readiness-real-dsh.mjs --output /tmp/restore.json
 Initial package/catalog installation remains a fixture input. This is not
 production publication or proof of behavioral improvement.
 
-Recorded real DSH evidence: restore,
-stop, and
-engineering checks.
-Each arm retains the signed recovery request/receipt and observation preimage,
-CLI-restored pending plan, final persisted plan, and exact runtime hashes.
+Each arm retains local signed recovery requests/receipts and observation
+preimages, the CLI-restored pending plan, final persisted plan, and exact runtime
+hashes. Current schema-2 request verification covers real reload/readiness and
+restore on DSH CLI `0.1.5-rc.2`. The active-candidate probe also rejects a
+correctly signed synthetic replay receipt with a substituted Host generation;
+that negative fixture does not observe external effects. See [RSI status](rsi-status.md)
+for current verification and remaining acceptance work.

@@ -13,6 +13,9 @@ const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const DIGEST = /^[a-f0-9]{64}$/u
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
 const phases = new Set(['reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health', 'rollback'])
+const predecessorPhase: Readonly<Partial<Record<HostAttestationRequest['phase'], HostAttestationRequest['phase']>>> = Object.freeze({
+  readiness: 'reload', 'effect-blocked-replay': 'readiness', shadow: 'effect-blocked-replay', canary: 'shadow', soak: 'canary', health: 'soak',
+})
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
@@ -109,6 +112,30 @@ function parseEvidence(value: unknown): HostAttestationEvidence {
   throw new ControlPlaneStoreError('invalid-input', 'host attestation evidence kind is invalid')
 }
 
+function assertRequestPredecessor(request: HostAttestationRequest): void {
+  if (request.schemaVersion !== 2 || !phases.has(request.phase)) {
+    throw new ControlPlaneStoreError('invalid-input', 'Host attestation request must use schema version 2')
+  }
+  if (request.predecessor === null) {
+    if (request.phase !== 'reload' && request.phase !== 'rollback') {
+      throw new ControlPlaneStoreError('conflict', 'normal Host attestation request lacks its predecessor')
+    }
+    return
+  }
+  const predecessor = record(request.predecessor, 'Host attestation predecessor')
+  exact(predecessor, ['operationId', 'receiptId', 'phase', 'receiptDigest', 'hostGeneration'], 'Host attestation predecessor')
+  const operationId = text(predecessor.operationId, 'predecessor operationId')
+  text(predecessor.receiptId, 'predecessor receiptId')
+  if (typeof predecessor.phase !== 'string' || !phases.has(predecessor.phase) || predecessor.phase === request.phase || operationId === request.operationId) {
+    throw new ControlPlaneStoreError('invalid-input', 'Host attestation predecessor phase or operation is invalid')
+  }
+  text(predecessor.receiptDigest, 'predecessor receiptDigest', DIGEST)
+  integer(predecessor.hostGeneration, 'predecessor hostGeneration', 1)
+  if (request.phase !== 'rollback' && predecessor.phase !== predecessorPhase[request.phase]) {
+    throw new ControlPlaneStoreError('conflict', 'Host attestation predecessor phase is not the immediately preceding phase')
+  }
+}
+
 function canonicalReceipt(receipt: HostAttestationReceipt): string {
   return canonical({
     schemaVersion: receipt.schemaVersion, receiptId: receipt.receiptId, authority: receipt.authority,
@@ -190,6 +217,7 @@ export class Ed25519HostAttestationAuthority implements HostAttestationAuthority
   ) {}
 
   async verify(receiptInput: HostAttestationReceipt, plan: PluginActivationPlan, request: HostAttestationRequest): Promise<VerifiedHostAttestation> {
+    assertRequestPredecessor(request)
     const receipt = parseHostAttestationReceipt(receiptInput)
     const configuredIssuerMismatch = request.issuer.mode === 'configured-executable'
       && (receipt.authority !== request.issuer.authority || receipt.keyId !== request.issuer.keyId)
@@ -209,6 +237,10 @@ export class Ed25519HostAttestationAuthority implements HostAttestationAuthority
     const signature = Buffer.from(receipt.signature, 'base64')
     if (!verify(null, Buffer.from(canonicalReceipt(receipt)), createPublicKey(this.publicKey), signature)) {
       throw new ControlPlaneStoreError('invalid-input', 'host attestation signature is invalid')
+    }
+    if (request.phase !== 'reload' && request.phase !== 'rollback'
+      && receipt.hostGeneration !== request.predecessor!.hostGeneration) {
+      throw new ControlPlaneStoreError('conflict', 'non-transition Host attestation receipt changed generation from its predecessor')
     }
     assertPassedEvidence(receipt, request)
     const { signature: _signature, ...fields } = receipt

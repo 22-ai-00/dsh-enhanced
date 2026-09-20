@@ -36,9 +36,9 @@ function gap(store: ControlPlaneStore, suffix: string, value = 100) {
     expectedValue: value, frequency: 10, estimatedCost: 50, risk: 0.2 })
 }
 
-function activationInput(root: string, gapId: string, idempotencyKey: string): CreateActivationPlanInput {
+function activationInput(root: string, gapId: string, idempotencyKey: string, profile = 'web'): CreateActivationPlanInput {
   return { candidate, catalog: { digest: controlPlaneDigest(exampleIntegrityPinnedCatalog), provenance: 'owner-provided-integrity-pinned' },
-    matchedCapabilities: candidate.capabilities, profile: 'web', target: { dshHome: root, profile: 'web', profilePath: join(root, 'profiles', 'web') },
+    matchedCapabilities: candidate.capabilities, profile, target: { dshHome: root, profile, profilePath: join(root, 'profiles', profile) },
     installationId, ledger: { id: '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f01', path: join(root, 'control.sqlite') },
     executor: { id: 'dsh', version: '0.1.0-rc.8', path: join(root, 'bin', 'dsh'), sha256: 'd'.repeat(64) },
     ttlMs: 60_000, gapId, idempotencyKey }
@@ -54,8 +54,8 @@ function approval(plan: PluginActivationPlan, now: number) {
   return { receipt, authority }
 }
 
-async function approved(target: Awaited<ReturnType<typeof fixture>>, suffix: string): Promise<PluginActivationPlan> {
-  const plan = target.store.createPlan(activationInput(target.root, gap(target.store, suffix).id, `plan:${suffix}`)).result
+async function approved(target: Awaited<ReturnType<typeof fixture>>, suffix: string, profile = 'web'): Promise<PluginActivationPlan> {
+  const plan = target.store.createPlan(activationInput(target.root, gap(target.store, suffix).id, `plan:${suffix}`, profile)).result
   const signed = approval(plan, target.now() + 1)
   return (await target.store.approve({ planId: plan.id, expectedRevision: plan.revision, receipt: signed.receipt,
     resolveAuthority: () => signed.authority, idempotencyKey: `approval:${suffix}` })).result
@@ -100,18 +100,23 @@ const attestationPhases: ReadonlyArray<{ phase: HostAttestationRequirements['kin
 // Drives an approved plan through claim + all seven signed Host attestation gates
 // to `activated`, mirroring the real CLI activate/attest sequence without
 // touching the filesystem or the pinned external dsh executable.
-async function promoted(target: Awaited<ReturnType<typeof fixture>>, suffix: string, host = hostTrustKey(target.now)) {
-  let plan = await approved(target, suffix)
+async function promoted(target: Awaited<ReturnType<typeof fixture>>, suffix: string, host = hostTrustKey(target.now), profile = 'web') {
+  let plan = await approved(target, suffix, profile)
   plan = await target.store.claimActivation(activationClaim(plan))
   plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, from: 'staging', to: 'awaiting-reload' })
-  let generation = 0
+  let generation = target.store.latestHostGeneration(installationId)
+  let predecessor: { operationId: string; receipt: HostAttestationReceipt } | undefined
   for (const [index, spec] of attestationPhases.entries()) {
     const requirements: HostAttestationRequirements = spec.phase === 'reload'
       ? { kind: 'reload', previousHostGeneration: target.store.latestHostGeneration(installationId) }
       : spec.requirements
     const operation = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision,
       expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' }, requirements, receiptTtlMs: 10_000 })
-    generation += 1
+    if (operation.request.schemaVersion !== 2) throw new Error('new Host operation must use schema v2')
+    if (spec.phase === 'reload') generation += 1
+    if (predecessor === undefined) expect(operation.request.predecessor).toBeNull()
+    else expect(operation.request.predecessor).toEqual({ operationId: predecessor.operationId, receiptId: predecessor.receipt.receiptId,
+      phase: predecessor.receipt.phase, receiptDigest: controlPlaneDigest(predecessor.receipt), hostGeneration: generation })
     let evidence = spec.evidence
     if (spec.phase === 'reload') {
       evidence = { kind: 'reload', reloaded: true, previousHostGeneration: (requirements as { previousHostGeneration: number }).previousHostGeneration,
@@ -133,6 +138,7 @@ async function promoted(target: Awaited<ReturnType<typeof fixture>>, suffix: str
     const applied = await target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision,
       expectedFence: plan.activation!.fence, receipt, resolveAuthority: () => host.authority,
       idempotencyKey: `host:${suffix}:${index}` })
+    predecessor = { operationId: operation.operationId, receipt }
     plan = applied.result
   }
   expect(plan.status).toBe('commit-pending')
@@ -142,6 +148,112 @@ async function promoted(target: Awaited<ReturnType<typeof fixture>>, suffix: str
   expect(plan.status).toBe('activated')
   return { plan, host, generation }
 }
+
+async function awaitingReadiness(target: Awaited<ReturnType<typeof fixture>>, suffix: string) {
+  const host = hostTrustKey(target.now); let plan = await approved(target, suffix)
+  plan = await target.store.claimActivation(activationClaim(plan))
+  plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, from: 'staging', to: 'awaiting-reload' })
+  const operation = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+    issuer: { mode: 'owner-manual' }, requirements: { kind: 'reload', previousHostGeneration: target.store.latestHostGeneration(installationId) }, receiptTtlMs: 10_000 })
+  const previousHostGeneration = (operation.request.requirements as { previousHostGeneration: number }).previousHostGeneration
+  const evidence = { kind: 'reload' as const, reloaded: true, previousHostGeneration, currentHostGeneration: previousHostGeneration + 1, probeDigest: 'd'.repeat(64) }
+  const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: `readiness-reload-${suffix}`, authority: 'host-runtime', keyId: 'host-key-1', installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: operation.operationId, requestDigest: operation.requestDigest, phase: 'reload', outcome: 'passed', hostGeneration: evidence.currentHostGeneration, evidence, evidenceDigest: hostAttestationEvidenceDigest(evidence), observedAt: target.now(), expiresAt: target.now() + 10_000 }
+  const receipt = { ...unsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), host.privateKey).toString('base64') }
+  await target.store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })
+  plan = (await target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt, resolveAuthority: () => host.authority, idempotencyKey: `readiness-reload:${suffix}` })).result
+  return { plan, host }
+}
+
+test('rejects a correctly signed normal-phase receipt that changes Host generation', async () => {
+  const target = await fixture(); const host = hostTrustKey(target.now)
+  let plan = await approved(target, 'generation-drift'); plan = await target.store.claimActivation(activationClaim(plan))
+  plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, from: 'staging', to: 'awaiting-reload' })
+  const reload = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' }, requirements: { kind: 'reload', previousHostGeneration: 0 }, receiptTtlMs: 10_000 })
+  if (reload.request.schemaVersion !== 2) throw new Error('new request must be v2')
+  const reloadEvidence = { kind: 'reload' as const, reloaded: true, previousHostGeneration: 0, currentHostGeneration: 1, probeDigest: 'a'.repeat(64) }
+  const reloadUnsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'drift-reload', authority: 'host-runtime', keyId: 'host-key-1', installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: reload.operationId, requestDigest: reload.requestDigest, phase: 'reload', outcome: 'passed', hostGeneration: 1, evidence: reloadEvidence, evidenceDigest: hostAttestationEvidenceDigest(reloadEvidence), observedAt: target.now(), expiresAt: target.now() + 10_000 }
+  const reloadReceipt = { ...reloadUnsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(reloadUnsigned)), host.privateKey).toString('base64') }
+  await target.store.runHostAttestationOperation({ operationId: reload.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => reloadReceipt, resolveAuthority: () => host.authority })
+  plan = (await target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt: reloadReceipt, resolveAuthority: () => host.authority, idempotencyKey: 'drift-reload' })).result
+  const readiness = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' }, requirements: { kind: 'readiness', minimumChecks: 1 }, receiptTtlMs: 10_000 })
+  if (readiness.request.schemaVersion !== 2) throw new Error('new request must be v2')
+  const evidence = { kind: 'readiness' as const, checks: 1, failures: 0, probeDigest: 'b'.repeat(64) }
+  const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'drift-readiness', authority: 'host-runtime', keyId: 'host-key-1', installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: readiness.operationId, requestDigest: readiness.requestDigest, phase: 'readiness', outcome: 'passed', hostGeneration: 2, evidence, evidenceDigest: hostAttestationEvidenceDigest(evidence), observedAt: target.now(), expiresAt: target.now() + 10_000 }
+  const receipt = { ...unsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), host.privateKey).toString('base64') }
+  await expect(target.store.runHostAttestationOperation({ operationId: readiness.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })).rejects.toThrow('changed generation')
+  const failedUnsigned = { ...unsigned, receiptId: 'drift-readiness-failed', outcome: 'failed' as const }
+  const failedReceipt = { ...failedUnsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(failedUnsigned)), host.privateKey).toString('base64') }
+  await expect(target.store.runHostAttestationOperation({ operationId: readiness.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => failedReceipt, resolveAuthority: () => host.authority })).rejects.toThrow('changed generation')
+  expect(target.store.getHostAttestationOperation(readiness.operationId).status).toBe('pending')
+})
+
+test('rejects a reserved Host operation before dispatch when another plan advances generation', async () => {
+  const target = await fixture(); let plan = await approved(target, 'dispatch-race')
+  plan = await target.store.claimActivation(activationClaim(plan))
+  plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, from: 'staging', to: 'awaiting-reload' })
+  const operation = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+    issuer: { mode: 'owner-manual' }, requirements: { kind: 'reload', previousHostGeneration: 0 }, receiptTtlMs: 10_000 })
+  await promoted(target, 'dispatch-race-other', hostTrustKey(target.now), 'other')
+  let executed = false
+  await expect(target.store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision,
+    expectedFence: plan.activation!.fence, execute: async () => { executed = true; throw new Error('must not dispatch') },
+    resolveAuthority: () => { throw new Error('must not resolve authority') } })).rejects.toThrow('generation advanced')
+  expect(executed).toBe(false)
+  expect(target.store.getHostAttestationOperation(operation.operationId).status).toBe('pending')
+})
+
+test('rejects completed receipt at apply when generation advances during authority verification', async () => {
+  const target = await fixture(); const host = hostTrustKey(target.now); let plan = await approved(target, 'apply-race')
+  plan = await target.store.claimActivation(activationClaim(plan))
+  plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, from: 'staging', to: 'awaiting-reload' })
+  const operation = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+    issuer: { mode: 'owner-manual' }, requirements: { kind: 'reload', previousHostGeneration: 0 }, receiptTtlMs: 10_000 })
+  const evidence = { kind: 'reload' as const, reloaded: true, previousHostGeneration: 0, currentHostGeneration: 1, probeDigest: 'c'.repeat(64) }
+  const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'apply-race-reload', authority: 'host-runtime', keyId: 'host-key-1', installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: operation.operationId, requestDigest: operation.requestDigest, phase: 'reload', outcome: 'passed', hostGeneration: 1, evidence, evidenceDigest: hostAttestationEvidenceDigest(evidence), observedAt: target.now(), expiresAt: target.now() + 10_000 }
+  const receipt = { ...unsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), host.privateKey).toString('base64') }
+  await target.store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })
+  let advanced = false
+  await expect(target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt,
+    resolveAuthority: () => ({ verify: async (candidateReceipt, candidatePlan, candidateRequest) => {
+      await promoted(target, 'apply-race-other', hostTrustKey(target.now), 'other'); advanced = true
+      return host.authority.verify(candidateReceipt, candidatePlan, candidateRequest)
+    } }), idempotencyKey: 'apply-race' })).rejects.toThrow('generation advanced')
+  expect(advanced).toBe(true)
+  expect(target.store.getPlan(plan.id)).toMatchObject({ status: 'awaiting-reload', revision: plan.revision })
+  expect(target.store.getHostAttestationOperation(operation.operationId).status).toBe('completed')
+})
+
+test('rejects a reserved readiness dispatch when another profile supersedes its generation', async () => {
+  const target = await fixture(); const { plan } = await awaitingReadiness(target, 'readiness-dispatch-race')
+  const operation = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+    issuer: { mode: 'owner-manual' }, requirements: { kind: 'readiness', minimumChecks: 1 }, receiptTtlMs: 10_000 })
+  await promoted(target, 'readiness-dispatch-race-other', hostTrustKey(target.now), 'other')
+  let executed = false
+  await expect(target.store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+    execute: async () => { executed = true; throw new Error('must not dispatch') }, resolveAuthority: () => { throw new Error('must not resolve authority') } })).rejects.toThrow('generation changed')
+  expect(executed).toBe(false)
+  expect(target.store.getHostAttestationOperation(operation.operationId).status).toBe('pending')
+})
+
+test('rejects completed readiness apply when async authority verification observes generation supersession', async () => {
+  const target = await fixture(); const { plan, host } = await awaitingReadiness(target, 'readiness-apply-race')
+  const operation = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+    issuer: { mode: 'owner-manual' }, requirements: { kind: 'readiness', minimumChecks: 1 }, receiptTtlMs: 10_000 })
+  const evidence = { kind: 'readiness' as const, checks: 1, failures: 0, probeDigest: 'e'.repeat(64) }
+  const generation = operation.request.schemaVersion === 2 ? operation.request.predecessor!.hostGeneration : 1
+  const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'readiness-apply-race', authority: 'host-runtime', keyId: 'host-key-1', installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: operation.operationId, requestDigest: operation.requestDigest, phase: 'readiness', outcome: 'passed', hostGeneration: generation, evidence, evidenceDigest: hostAttestationEvidenceDigest(evidence), observedAt: target.now(), expiresAt: target.now() + 10_000 }
+  const receipt = { ...unsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), host.privateKey).toString('base64') }
+  await target.store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })
+  let advanced = false
+  await expect(target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, receipt,
+    resolveAuthority: () => ({ verify: async (candidateReceipt, candidatePlan, candidateRequest) => {
+      await promoted(target, 'readiness-apply-race-other', hostTrustKey(target.now), 'other'); advanced = true
+      return host.authority.verify(candidateReceipt, candidatePlan, candidateRequest)
+    } }), idempotencyKey: 'readiness-apply-race' })).rejects.toThrow('generation changed')
+  expect(advanced).toBe(true)
+  expect(target.store.getPlan(plan.id)).toMatchObject({ status: 'awaiting-readiness', revision: plan.revision })
+  expect(target.store.getHostAttestationOperation(operation.operationId).status).toBe('completed')
+})
 
 function watchObservation(
   host: ReturnType<typeof hostTrustKey>,
@@ -1005,10 +1117,24 @@ catch { process.stdout.write('busy') } finally { db.close() }`
       operation_id TEXT NOT NULL UNIQUE, binding_digest TEXT NOT NULL, request_digest TEXT NOT NULL, request_json TEXT NOT NULL, status TEXT NOT NULL,
       receipt_digest TEXT, receipt_json TEXT, created_at INTEGER NOT NULL, completed_at INTEGER, applied_at INTEGER, PRIMARY KEY(plan_id, phase)) STRICT, WITHOUT ROWID;
       INSERT INTO host_attestation_operations SELECT * FROM host_attestation_operations_new; DROP TABLE host_attestation_operations_new; PRAGMA user_version = 14; PRAGMA foreign_keys = ON`)
+    const operationRow = raw.prepare('SELECT request_json FROM host_attestation_operations WHERE operation_id = ?').get(prepared.operationId) as { request_json: string }
+    const legacyRequest = JSON.parse(operationRow.request_json) as Record<string, unknown>
+    legacyRequest.schemaVersion = 1; delete legacyRequest.predecessor
+    const { operationId: _operationId, requestedAt: _requestedAt, ...legacyBinding } = legacyRequest
+    raw.prepare('UPDATE host_attestation_operations SET request_json = ?, request_digest = ?, binding_digest = ? WHERE operation_id = ?').run(
+      JSON.stringify(legacyRequest), controlPlaneDigest(legacyRequest), controlPlaneDigest(legacyBinding), prepared.operationId)
     raw.close()
     const reopened = new ControlPlaneStore({ path: target.path, now: target.now }); target.store = reopened
     expect(reopened.getPlan(awaiting.id).activation).toMatchObject({ hostRecoveryRequired: true })
     expect(reopened.getPlan(awaiting.id).activation?.targetBaselineFiles).toBeUndefined()
+    // Legacy pending operations remain inspectable, but their unbound request
+    // is never dispatched after the schema-v2 upgrade.
+    expect(reopened.getHostAttestationOperation(prepared.operationId)).toMatchObject({ status: 'pending', request: { schemaVersion: 1 } })
+    let invoked = false
+    await expect(reopened.runHostAttestationOperation({ operationId: prepared.operationId, expectedRevision: awaiting.revision,
+      expectedFence: awaiting.activation!.fence, execute: async () => { invoked = true; throw new Error('must not dispatch legacy request') },
+      resolveAuthority: () => { throw new Error('must not resolve legacy authority') } })).rejects.toThrow('requires reconciliation')
+    expect(invoked).toBe(false)
     const migrated = new DatabaseSync(target.path)
     expect((migrated.prepare("SELECT sql FROM sqlite_master WHERE name = 'host_attestations'").get() as { sql: string }).sql).toContain("'rollback'")
     expect(migrated.prepare('SELECT operation_id, status FROM host_attestation_operations WHERE operation_id = ?').get(prepared.operationId))
@@ -1045,6 +1171,10 @@ catch { process.stdout.write('busy') } finally { db.close() }`
       requirements: { kind: 'rollback', previousHostGeneration: 1, action: 'restore', baselineFiles: [...baselineFiles.slice(0, 2), { ...baselineFiles[2]!, sha256: 'c'.repeat(64) }], minimumChecks: 1 }, receiptTtlMs: 10_000 })).toThrow('baseline')
     const recovery = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision, expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' },
       requirements: { kind: 'rollback', previousHostGeneration: 1, action: 'restore', baselineFiles, minimumChecks: 1 }, receiptTtlMs: 10_000 })
+    if (recovery.request.schemaVersion !== 2) throw new Error('new Host operation must use schema v2')
+    // The failed reload belongs to the prior activation fence. A recovery
+    // claim must never carry it into the new Host attestation chain.
+    expect(recovery.request.predecessor).toBeNull()
     const evidence = { kind: 'rollback' as const, action: 'restore' as const, previousHostGeneration: 1, currentHostGeneration: 2, checks: 1, failures: 0, profileRestored: true, probeDigest: 'b'.repeat(64) }
     const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'rollback-restored', authority: 'host-runtime', keyId: 'host-key-1', installationId,
       planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence, operationId: recovery.operationId, requestDigest: recovery.requestDigest,

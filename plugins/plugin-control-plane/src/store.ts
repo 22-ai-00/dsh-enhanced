@@ -45,6 +45,7 @@ import type {
   SourceReleaseSuccessEvidence,
   SourcePlanStatus,
   SourcePreparedEvidence,
+  StoredHostAttestationRequest,
   StoredCapabilityGap,
   VerifiedApprovalReceipt,
   VerifiedSourceReleaseAuthorization,
@@ -738,17 +739,41 @@ const expectedAttestation: Readonly<Record<string, { phase: HostAttestationPhase
   'rollback-pending': { phase: 'rollback', next: 'rolled-back' },
 })
 
+const predecessorPhase: Readonly<Partial<Record<HostAttestationPhase, HostAttestationPhase>>> = Object.freeze({
+  readiness: 'reload',
+  'effect-blocked-replay': 'readiness',
+  shadow: 'effect-blocked-replay',
+  canary: 'shadow',
+  soak: 'canary',
+  health: 'soak',
+})
+
 export function expectedHostAttestation(status: PlanStatus): { phase: HostAttestationPhase; next: PlanStatus } | undefined {
   return expectedAttestation[status]
 }
 
-function requestBinding(request: HostAttestationRequest): Omit<HostAttestationRequest, 'operationId' | 'requestedAt'> {
+function requestBinding(request: StoredHostAttestationRequest): Record<string, unknown> {
   const { operationId: _operationId, requestedAt: _requestedAt, ...binding } = request
   return binding
 }
 
+const hostPhases = new Set<HostAttestationPhase>(['reload', 'readiness', 'effect-blocked-replay', 'shadow', 'canary', 'soak', 'health', 'rollback'])
+
+function isBoundHostRequest(request: StoredHostAttestationRequest): request is HostAttestationRequest {
+  if (request.schemaVersion !== 2 || !hostPhases.has(request.phase)) return false
+  const predecessor = request.predecessor
+  if (predecessor === null) return request.phase === 'reload' || request.phase === 'rollback'
+  return typeof predecessor === 'object' && predecessor !== null
+    && typeof predecessor.operationId === 'string' && KEY.test(predecessor.operationId)
+    && typeof predecessor.receiptId === 'string' && KEY.test(predecessor.receiptId)
+    && typeof predecessor.phase === 'string' && hostPhases.has(predecessor.phase)
+    && typeof predecessor.receiptDigest === 'string' && DIGEST.test(predecessor.receiptDigest)
+    && Number.isSafeInteger(predecessor.hostGeneration) && predecessor.hostGeneration >= 1
+    && predecessor.operationId !== request.operationId && predecessor.phase !== request.phase
+}
+
 function hostOperationFromRow(row: HostAttestationOperationRow): HostAttestationOperation {
-  const request = JSON.parse(row.request_json) as HostAttestationRequest
+  const request = JSON.parse(row.request_json) as StoredHostAttestationRequest
   if (request.operationId !== row.operation_id || request.plan.id !== row.plan_id || request.phase !== row.phase
     || controlPlaneDigest(request) !== row.request_digest || controlPlaneDigest(requestBinding(request)) !== row.binding_digest
     || (row.status === 'pending') !== (row.receipt_json === null)) {
@@ -1549,16 +1574,23 @@ export class ControlPlaneStore {
           throw new ControlPlaneStoreError('conflict', 'rollback operation does not bind the durable recovery baseline')
         }
       }
+      const predecessor = this.#appliedHostPredecessor(plan, expected.phase)
+      if (expected.phase !== 'rollback' && expected.phase !== 'reload' && predecessor === null) {
+        throw new ControlPlaneStoreError('conflict', 'normal Host attestation phase has no applied predecessor')
+      }
       const operationId = `host-operation-${randomUUID()}`
-      const request: HostAttestationRequest = { schemaVersion: 1, kind: 'dsh-host-attestation-request', operationId,
+      const request: HostAttestationRequest = { schemaVersion: 2, kind: 'dsh-host-attestation-request', operationId,
         requestedAt: now, receiptTtlMs: input.receiptTtlMs, installationId: plan.installationId, ledger: plan.ledger, plan: { id: plan.id, digest: plan.digest },
         activation: { id: plan.activation.id, fence: plan.activation.fence }, profile: { name: plan.profile, path: plan.target.profilePath },
-        issuer: input.issuer, phase: expected.phase, requirements: input.requirements }
+        issuer: input.issuer, phase: expected.phase, requirements: input.requirements, predecessor }
       const bindingDigest = controlPlaneDigest(requestBinding(request))
       const priorRow = this.#database.prepare('SELECT * FROM host_attestation_operations WHERE plan_id = ? AND phase = ?')
         .get(plan.id, expected.phase) as unknown as HostAttestationOperationRow | undefined
       if (priorRow !== undefined) {
         const prior = hostOperationFromRow(priorRow)
+        if (!isBoundHostRequest(prior.request)) {
+          throw new ControlPlaneStoreError('invalid-state', 'legacy Host attestation operation requires reconciliation before upgrade')
+        }
         if (prior.bindingDigest !== bindingDigest) throw new ControlPlaneStoreError('conflict', 'durable Host operation payload changed for the same phase')
         this.#database.exec('COMMIT')
         return prior
@@ -1587,6 +1619,74 @@ export class ControlPlaneStore {
     return row.generation ?? 0
   }
 
+  #appliedHostPredecessor(plan: PluginActivationPlan, phase: HostAttestationPhase): HostAttestationRequest['predecessor'] {
+    if (phase === 'reload') return null
+    const priorPhase = phase === 'rollback' ? undefined : predecessorPhase[phase]
+    const row = this.#database.prepare(`SELECT operation.* FROM host_attestation_operations AS operation
+      JOIN host_attestations AS attestation ON attestation.plan_id = operation.plan_id
+        AND attestation.phase = operation.phase AND attestation.receipt_digest = operation.receipt_digest
+      WHERE operation.plan_id = ? AND operation.status = 'applied'
+        ${priorPhase === undefined ? '' : 'AND operation.phase = ?'}
+      ORDER BY operation.applied_at DESC,
+        CASE operation.phase WHEN 'reload' THEN 1 WHEN 'readiness' THEN 2 WHEN 'effect-blocked-replay' THEN 3
+          WHEN 'shadow' THEN 4 WHEN 'canary' THEN 5 WHEN 'soak' THEN 6 WHEN 'health' THEN 7 WHEN 'rollback' THEN 8 END DESC`).all(
+      ...(priorPhase === undefined ? [plan.id] : [plan.id, priorPhase])) as unknown as HostAttestationOperationRow[]
+    for (const candidate of row) {
+      const operation = hostOperationFromRow(candidate); const receipt = operation.receipt
+      if (receipt === undefined || candidate.receipt_digest === null) throw new ControlPlaneStoreError('invalid-state', 'applied Host predecessor lacks its receipt')
+      if (operation.request.activation.id !== plan.activation?.id || operation.request.activation.fence !== plan.activation.fence
+        || receipt.activationId !== plan.activation.id || receipt.fence !== plan.activation.fence) continue
+      return { operationId: operation.operationId, receiptId: receipt.receiptId, phase: operation.phase,
+        receiptDigest: candidate.receipt_digest, hostGeneration: receipt.hostGeneration }
+    }
+    return null
+  }
+
+  #assertHostAttestationChain(operation: HostAttestationOperation, plan: PluginActivationPlan): HostAttestationRequest {
+    const request = operation.request
+    if (!isBoundHostRequest(request)) throw new ControlPlaneStoreError('invalid-state', 'legacy Host attestation request requires reconciliation before dispatch or apply')
+    if (request.phase !== operation.phase || request.activation.id !== plan.activation?.id || request.activation.fence !== plan.activation.fence) {
+      throw new ControlPlaneStoreError('conflict', 'Host attestation request lost its activation binding')
+    }
+    const latest = this.latestHostGeneration(plan.installationId)
+    if (operation.phase === 'reload') {
+      if (request.predecessor !== null || request.requirements.kind !== 'reload'
+        || request.requirements.previousHostGeneration !== latest) {
+        throw new ControlPlaneStoreError('conflict', 'reload Host generation advanced after request reservation')
+      }
+      return request
+    }
+    const rollbackRequirements = request.requirements.kind === 'rollback' ? request.requirements : undefined
+    if (operation.phase === 'rollback' && rollbackRequirements === undefined) {
+      throw new ControlPlaneStoreError('conflict', 'rollback Host request requirements changed')
+    }
+    if (operation.phase === 'rollback' && rollbackRequirements !== undefined && rollbackRequirements.previousHostGeneration !== latest) {
+      throw new ControlPlaneStoreError('conflict', 'rollback Host generation advanced after request reservation')
+    }
+    const predecessor = request.predecessor
+    const actual = this.#appliedHostPredecessor(plan, operation.phase)
+    if (predecessor === null) {
+      if (operation.phase !== 'rollback' || actual !== null) {
+        throw new ControlPlaneStoreError('conflict', 'Host attestation predecessor is missing or was added after reservation')
+      }
+      return request
+    }
+    if (actual === null || actual.operationId !== predecessor.operationId || actual.receiptId !== predecessor.receiptId
+      || actual.phase !== predecessor.phase || actual.receiptDigest !== predecessor.receiptDigest
+      || actual.hostGeneration !== predecessor.hostGeneration) {
+      throw new ControlPlaneStoreError('conflict', 'Host attestation predecessor does not match the applied receipt ledger')
+    }
+    if (operation.phase !== 'rollback') {
+      if (predecessor.phase !== predecessorPhase[operation.phase] || latest !== predecessor.hostGeneration) {
+        throw new ControlPlaneStoreError('conflict', 'Host generation changed after predecessor binding')
+      }
+      const row = this.#database.prepare('SELECT receipt_json FROM host_attestation_operations WHERE operation_id = ?').get(predecessor.operationId) as { receipt_json: string } | undefined
+      const receipt = row === undefined ? undefined : JSON.parse(row.receipt_json) as HostAttestationReceipt
+      if (receipt?.outcome !== 'passed') throw new ControlPlaneStoreError('conflict', 'normal Host phase predecessor was not passed')
+    }
+    return request
+  }
+
   /**
    * Keep the SQLite writer mutex for the complete external attestor call. The
    * operation id was committed before this method, so process death retries the
@@ -1603,9 +1703,14 @@ export class ControlPlaneStore {
         || expected?.phase !== operation.phase || operation.requestDigest !== controlPlaneDigest(operation.request)) {
         throw new ControlPlaneStoreError('conflict', 'Host attestation operation lost its plan revision/fence/phase')
       }
+      const request = this.#assertHostAttestationChain(operation, plan)
       if (operation.receipt !== undefined) { this.#database.exec('COMMIT'); return operation.receipt }
-      const receipt = await input.execute(operation.request)
-      await input.resolveAuthority(receipt).verify(receipt, plan, operation.request)
+      const receipt = await input.execute(request)
+      await input.resolveAuthority(receipt).verify(receipt, plan, request)
+      if (operation.phase !== 'reload' && operation.phase !== 'rollback'
+        && receipt.hostGeneration !== request.predecessor!.hostGeneration) {
+        throw new ControlPlaneStoreError('conflict', 'non-transition Host receipt changed generation from its predecessor')
+      }
       if (operation.phase === 'rollback' && receipt.outcome !== 'passed') {
         throw new ControlPlaneStoreError('conflict', 'failed physical rollback receipt cannot consume the durable recovery operation')
       }
@@ -1669,10 +1774,22 @@ export class ControlPlaneStore {
       || operation.receipt === undefined || controlPlaneDigest(operation.receipt) !== controlPlaneDigest(input.receipt)) {
       throw new ControlPlaneStoreError('conflict', 'Host attestation was not completed by the durable phase operation')
     }
-    const verified = await input.resolveAuthority(input.receipt).verify(input.receipt, plan, operation.request)
+    const request = this.#assertHostAttestationChain(operation, plan)
+    const verified = await input.resolveAuthority(input.receipt).verify(input.receipt, plan, request)
+    if (operation.phase !== 'reload' && operation.phase !== 'rollback'
+      && verified.hostGeneration !== request.predecessor!.hostGeneration) {
+      throw new ControlPlaneStoreError('conflict', 'non-transition Host receipt changed generation from its predecessor')
+    }
     const now = this.#now(); const nextStatus: PlanStatus = verified.outcome === 'passed' ? expected.next : 'rollback-pending'
     this.#database.exec('BEGIN IMMEDIATE')
     try {
+      const lockedOperation = this.getHostAttestationOperation(input.receipt.operationId)
+      const lockedPlan = this.getPlan(input.planId)
+      if (lockedOperation.status !== 'completed' || lockedPlan.revision !== input.expectedRevision
+        || lockedPlan.activation?.fence !== input.expectedFence || lockedPlan.status !== plan.status) {
+        throw new ControlPlaneStoreError('conflict', 'Host attestation changed before apply')
+      }
+      this.#assertHostAttestationChain(lockedOperation, lockedPlan)
       const previousGeneration = this.#database.prepare(`SELECT max(attestation.host_generation) AS generation
         FROM host_attestations AS attestation JOIN activation_plans AS activation ON activation.id = attestation.plan_id
         WHERE activation.installation_id = ?`).get(plan.installationId) as { generation: number | null }

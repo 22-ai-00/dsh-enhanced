@@ -107,11 +107,12 @@ describe.skipIf(process.platform !== 'linux')('adapter process ownership', () =>
     const identity = { id: 'tree-attestor', version: 'tree-adapter-1', path: f.path, sha256: sha(await readFile(f.path)),
       interpreter: { path: node, sha256: sha(await readFile(node)) }, authority: 'host-fixture', keyId: 'fixture-key' }
     const trust = { hostAttestor: { ...identity, timeoutMs: 1_000, environmentAllowlist: [] } } as unknown as PluginControlTrustConfig
-    const request: HostAttestationRequest = { schemaVersion: 1, kind: 'dsh-host-attestation-request', operationId: 'op-1',
+    const request: HostAttestationRequest = { schemaVersion: 2, kind: 'dsh-host-attestation-request', operationId: 'op-1',
       requestedAt: Date.now(), receiptTtlMs: 30_000, installationId: '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00',
       ledger: { id: 'ledger', path: join(f.root, 'ledger') }, plan: { id: 'plan', digest: 'a'.repeat(64) },
       activation: { id: 'activation', fence: 1 }, profile: { name: 'fixture', path: f.root },
-      issuer: { mode: 'configured-executable', ...identity }, phase: 'readiness', requirements: { kind: 'readiness', minimumChecks: 1 } }
+      issuer: { mode: 'configured-executable', ...identity }, phase: 'readiness', requirements: { kind: 'readiness', minimumChecks: 1 },
+      predecessor: { operationId: 'reload-operation', receiptId: 'reload-receipt', phase: 'reload', receiptDigest: 'b'.repeat(64), hostGeneration: 1 } }
     await expect(invokeConfiguredHostAttestor(trust, request)).rejects.toMatchObject({ name: 'HostAttestorError', code: 'TIMEOUT' })
     await f.stopped()
   })

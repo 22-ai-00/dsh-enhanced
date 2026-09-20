@@ -138,9 +138,11 @@ phase 不能从命令行指定，而是从 durable plan 状态推导。Control P
 
 request 固定：installation id、ledger id/path、plan id/digest、activation id/fence、profile name/path、attestor identity/path/digest/key、phase、phase requirements、receipt TTL，以及一个 durable operation id。外部 attestor 必须永久把 operation id 当幂等键：相同 id + 相同 request 重放同一 receipt；相同 id + 不同 request 必须拒绝。
 
+新 Host request 使用 schema 2，并固定 `predecessor: { operationId, receiptId, phase, receiptDigest, hostGeneration }`（reload 为 `null`）。每个正常后续阶段必须承接同一 activation/fence 中已应用、通过的前一阶段凭证；摘要覆盖完整签名 receipt。账本在调用外部程序前和应用结果时重新核对这条关联及 installation 最新代次。readiness、回放、shadow、canary、soak、health 不允许自行提高或降低 Host generation；换代只能通过 reload/rollback 的显式合同。失败凭证也不能绕过这些检查。该关联不替代独立运行时身份和副作用观测。
+
 Host attestor 与 release adapter 的每次命令共用受控进程组：超时、输出超限及主进程正常/异常退出都会清理同组后代，核对主进程退出，并有界排空 stdout。清理无法证实时返回失败，不以遗留管道的 `close` 无限等待。该机制依赖 runner 存活，不能包含主动 `setsid()` 脱组进程，也不撤回远端已接受的操作；具体期限、恢复边界与回归证据见 [adapter 生命周期](../../docs/control-plane-adapter-lifetime.md)。
 
-随包的 `bin/dsh-systemd-host-attestor.js` 提供 Linux/systemd 的 **reload 与 readiness** 适配：先用 `probe --prepare-only` 取得确切持久请求，再由主人私有配置授权其摘要；重启前记录操作，重复调用仅重放或观测对账。它核验 fresh InvocationID/MainPID 与稳定窗口，按 installation 共享 Host 代次，reload 推进至 `awaiting-readiness`；readiness 再绑定最新已签重启、实际 Loader/Fiber 与服务实例，多次稳定观测后签名，重复请求不重启 Host。v3 将稳定、认证通过且身份匹配的 inactive 候选签为 failed readiness，使既有控制面进入回退流程；认证错误或状态漂移仍不签发回执。当前回退恢复 profile 文件，尚不证明运行中 Host 已切回原版本。部署配置、权限和未覆盖阶段见 [systemd Host attestor](../../docs/systemd-host-attestor.md)。
+随包的 `bin/dsh-systemd-host-attestor.js`（v5）提供 Linux/systemd 的 **reload、readiness 与物理 rollback** 适配：先用 `probe --prepare-only` 取得确切持久请求，再由主人私有配置授权其摘要；重启前记录操作，重复调用仅重放或观测对账。它核验 fresh InvocationID/MainPID 与稳定窗口，按 installation 共享 Host 代次，reload 推进至 `awaiting-readiness`；readiness 再绑定最新已签重启、实际 Loader/Fiber 与服务实例，多次稳定观测后签名，重复请求不重启 Host。稳定、认证通过且身份匹配的 inactive 候选签为 failed readiness；认证错误或状态漂移不签发回执。rollback 在 CLI 恢复原 profile 文件后证明原 Host 就绪，或原本不存在的 profile 已停服；缺少物理恢复凭证时继续保持 pending。部署配置、权限和未覆盖阶段见 [systemd Host attestor](../../docs/systemd-host-attestor.md)。
 
 phase operation 在子进程启动前持久化。子进程执行期间持有 SQLite 跨进程 writer mutex；成功 receipt 在释放 mutex 前持久化。因此并发 worker 不会创建第二个 canary exposure。若进程在 receipt 提交前崩溃，恢复 worker 使用相同 operation id 重试，依赖上述外部幂等契约取回同一结果。
 
@@ -276,7 +278,7 @@ adapter 的 stdout 只有一个签名 JSON receipt，stderr 不打印 request �
 
 兼容性见仓库 [compatibility baseline](../../docs/compatibility.md)。Node.js 要求 `^22.19.0 || >=24.0.0`（使用 `node:sqlite`）。
 
-物理 Host 回退使用随包 systemd attestor v4 的 schema-3 配置，复用 `probe --prepare-only` / `probe`。回退前固定原始三份 core 文件摘要；文件恢复后固定 fence，重试同一个持久化操作只重新观察，不再次 restart/stop。原 profile 不存在时只允许 stop。详情与环境约束见[操作文档](../../docs/systemd-host-attestor.md#physical-rollback)。
+物理 Host 回退使用随包 systemd attestor v5 的 schema-3 配置与 schema-2 请求，复用 `probe --prepare-only` / `probe`。回退前固定原始三份 core 文件摘要；文件恢复后固定 fence，重试同一个持久化操作只重新观察，不再次 restart/stop。原 profile 不存在时只允许 stop。详情与环境约束见[操作文档](../../docs/systemd-host-attestor.md#physical-rollback)。
 
 ## 原生阻断回放组件
 

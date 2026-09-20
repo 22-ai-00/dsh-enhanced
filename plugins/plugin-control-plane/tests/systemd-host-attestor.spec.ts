@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterAll, afterEach, describe, expect, test } from 'vitest'
 import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest } from '../src/attestation.ts'
 import { invokeConfiguredHostAttestor } from '../src/host-attestor.ts'
+import { controlPlaneDigest } from '../src/store.ts'
 import { runtimeConfigDigest } from '../src/runtime-observer-protocol.ts'
 import type { PluginControlTrustConfig } from '../src/trust.ts'
 import type { HostAttestationReceipt, HostAttestationRequest, PluginActivationPlan } from '../src/types.ts'
@@ -97,10 +98,10 @@ if(args[1]==='show') {
       previousHostGeneration: 0, requestDigest: '', notBefore: now - 1000, expiresAt: now + 120000 }, timeoutMs: 5000, stableWindowMs: 75, pollIntervalMs: 25 }
   const configPath = join(owner, 'config.json')
   const save = async () => writeFile(configPath, JSON.stringify(config), { mode: 0o600 }); await save()
-  const request: HostAttestationRequest = { schemaVersion: 1, kind: 'dsh-host-attestation-request', operationId: 'host-operation-fixture',
+  const request: HostAttestationRequest = { schemaVersion: 2, predecessor: null, kind: 'dsh-host-attestation-request', operationId: 'host-operation-fixture',
     requestedAt: now, receiptTtlMs: 30000, installationId: config.authorization.installationId,
     ledger: config.authorization.ledger, plan: config.authorization.plan, activation: config.authorization.activation,
-    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-4',
+    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-5',
       ...executable, interpreter, authority: config.authority, keyId: config.keyId }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } }
   config.authorization.requestDigest = hostAttestationRequestDigest(request); await save()
   const start = (value: unknown = request) => {
@@ -136,7 +137,11 @@ async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 's
   config.authorization.hostGeneration = 1
   config.readiness = { client: { path: await realpath(clientPath), sha256: sha(await readFile(clientPath)) }, observer,
     deploymentFiles: config.profileFiles, reloadOperationId: f.request.operationId }
-  const request: HostAttestationRequest = { ...f.request, operationId: 'host-readiness-fixture', phase: 'readiness', requirements: { kind: 'readiness', minimumChecks: 2 } }
+  const reloadReceipt = JSON.parse(reload.stdout) as HostAttestationReceipt
+  const request: HostAttestationRequest = { ...f.request, operationId: 'host-readiness-fixture', phase: 'readiness',
+    predecessor: { operationId: reloadReceipt.operationId, receiptId: reloadReceipt.receiptId, phase: 'reload',
+      receiptDigest: controlPlaneDigest(reloadReceipt), hostGeneration: reloadReceipt.hostGeneration },
+    requirements: { kind: 'readiness', minimumChecks: 2 } }
   config.authorization.requestDigest = hostAttestationRequestDigest(request)
   await f.save()
   const key = await readFile(keyPath); let samples = 0; let behavior = mode
@@ -340,6 +345,29 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
       expect(throughRunner).toEqual(JSON.parse(replay.stdout))
       expect(await f.restarts()).toBe(1)
     } finally { if (prior === undefined) delete process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG; else process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = prior }
+  }, 30_000)
+
+  test('rejects a reauthorized foreign predecessor before observing or signing readiness', async () => {
+    const f = await fixture(); const ready = await readinessFixture(f)
+    const predecessor = ready.request.predecessor!
+    const invalid = [
+      { ...ready.request, predecessor: { ...predecessor, receiptId: 'other-receipt' } },
+      { ...ready.request, predecessor: { ...predecessor, receiptDigest: 'f'.repeat(64) } },
+      { ...ready.request, predecessor: { ...predecessor, operationId: 'other-operation' } },
+      { ...ready.request, predecessor: { ...predecessor, hostGeneration: predecessor.hostGeneration + 1 } },
+      { ...ready.request, predecessor: null },
+      { ...ready.request, schemaVersion: 1 },
+    ]
+    for (const request of invalid) {
+      f.config.authorization.requestDigest = hostAttestationRequestDigest(request as HostAttestationRequest); await f.save()
+      const result = await f.start(request).result
+      expect(result.code, result.stderr).toBe(1); expect(result.stdout).toBe('')
+      expect(ready.samples()).toBe(0); expect(await f.restarts()).toBe(1)
+    }
+    f.config.authorization.requestDigest = hostAttestationRequestDigest(ready.request); await f.save()
+    const result = await ready.start().result
+    expect(result.code, result.stderr).toBe(0)
+    await f.verifyRequest(JSON.parse(result.stdout), ready.request)
   }, 30_000)
 
   test.each(['epoch-drift', 'wrong-context', 'replayed-challenge', 'wrong-mac'] as const)('rejects %s observer output without another restart', async mode => {
