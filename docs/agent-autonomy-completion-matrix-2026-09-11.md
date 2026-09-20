@@ -88,6 +88,8 @@
 
 ## 总结
 
+2026-09-20 原生阻断回放组件：Control Plane 的 Host-only runner 消费专用原生 AgentHandle，有限 case 经实际 ToolRuntime guard 与 Delivery 回复准入阻断；记录逐次输入/结果摘要，核对 Loader/Fiber 与服务代次，并在原生 Agent 回收后才返回。原生集成验证取消、卸载、代次漂移、额外调用、跨 Host/realm 和无效 disposer 均拒绝。该组件输出未签名进程内观察，不推进 `awaiting-effect-blocked-replay`；外部有限端点、持久操作及独立签名仍待接线，WP16、WP18 状态不变。见[契约与验证摘要](effect-blocked-replay.md)。
+
 2026-09-20 readiness 失败接线：systemd attestor v3 对稳定、认证通过且身份匹配的 inactive Fiber 签发 failed receipt；认证/身份错误、状态漂移及通道故障仍不签。真实 DSH 正负两臂通过现有 ControlPlaneStore 的 durable request、验签和 CAS，分别到达 `awaiting-effect-blocked-replay` 与 `rollback-pending`，重开账本保持结果。catalog、owner approval 与 staging 为明确夹具，未做 npm 安装、CLI 文件恢复或实际 Host 回滚；WP16、WP18 状态不变。完整验证与限制见[本批证据](evidence/systemd-readiness-negative-engineering-2026-09-20.json)。
 
 2026-09-20 物理 Host 回退接线：schema 15 在 profile 对 Host 可见前持久化回退要求和原始 core 文件摘要。CLI 恢复文件后保持 `rollback-pending`；systemd attestor v4 通过实际旧 Host 就绪或原本不存在 profile 的停服证据推进 `rolled-back`，重试复用同一操作且不重复 restart/stop。临时真实 DSH 两臂覆盖 CLI 文件恢复、签名验收和账本重开；catalog 与初始安装仍为夹具，未完成完整生产发布或后续任务复用，WP16、WP18 状态不变。见[本批工程证据](evidence/systemd-rollback-engineering-2026-09-20.json)。

@@ -277,3 +277,9 @@ adapter 的 stdout 只有一个签名 JSON receipt，stderr 不打印 request �
 兼容性见仓库 [compatibility baseline](../../docs/compatibility.md)。Node.js 要求 `^22.19.0 || >=24.0.0`（使用 `node:sqlite`）。
 
 物理 Host 回退使用随包 systemd attestor v4 的 schema-3 配置，复用 `probe --prepare-only` / `probe`。回退前固定原始三份 core 文件摘要；文件恢复后固定 fence，重试同一个持久化操作只重新观察，不再次 restart/stop。原 profile 不存在时只允许 stop。详情与环境约束见[操作文档](../../docs/systemd-host-attestor.md#physical-rollback)。
+
+## 原生阻断回放组件
+
+Host 可显式使用 `EffectBlockedReplayRuntime`，复用当前 Loader、ToolRuntime 和 Delivery，消费专用原生 AgentHandle。固定有限 case 经原生单向 guard 阻止工具 body，或经真实 Delivery reply 准入阻止 Outbox 写入；逐次记录调用摘要，持续核对候选和服务 Fiber 代次，回收 Agent 后才返回。它不调用模型，不自动启用，也不增加模型工具。
+
+这是未签名的进程内观察组件，不能单独推进启用状态。调用者负责可信 case/请求配置，外部签名器、持久操作恢复和独立副作用读回仍需后续接线。权限限于读取 owner observer 配置所需路径/密钥、当前 Loader 状态、原生工具管线与 Delivery 方法；原生钩子本身仍有 Host 权限，组件不提供 OS/网络隔离。完整生命周期、边界及示例见[组件契约](../../docs/effect-blocked-replay.md)。

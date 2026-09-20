@@ -214,3 +214,17 @@ phase. Historical terminal records remain historical; migration does not
 synthesize missing baseline pins for in-flight plans. See
 [physical rollback](systemd-host-attestor.md#physical-rollback) for restart
 reconciliation, cgroup and observer deployment requirements.
+
+### Native effect-blocked replay component
+
+Control Plane's opt-in `EffectBlockedReplayRuntime` requires the same-build
+Delivery `blockAgentRepliesForReplay()` API. It feature-detects that method;
+earlier binaries, including earlier `0.1.33` development builds, cannot supply
+it. It consumes the pinned DSH ToolRuntime monotonic `guard()` contract and
+native `AgentHandle.dispose()`, with the Agent association read from the own
+`agent.ctx.agent` property rather than Cordis `ctx.get('agent')`.
+No dependency baseline, database or Host attestation schema changes.
+Provider replacement, Loader/Fiber epoch drift, earlier native denial,
+cancellation, extra calls and teardown failure must remain refusal cases.
+See [component contract](effect-blocked-replay.md); observations alone do not
+authorize activation or establish absence of arbitrary external effects.
