@@ -658,14 +658,127 @@ function advance(store: ControlPlaneStore, plan: PluginActivationPlan, to: PlanS
 
 async function finishRollback(store: ControlPlaneStore, plan: PluginActivationPlan, lock: ProfileLock): Promise<PluginActivationPlan> {
   const activationPaths = paths(plan)
-  await restoreTarget(store, plan, activationPaths.backupPath)
+  const observed = plan.activation?.failureCode?.startsWith('post-activation-') === true
+  if (observed) {
+    await restoreObservedTarget(store, plan)
+  } else await restoreTarget(store, plan, activationPaths.backupPath)
   await fencedMutation(store, plan, () => verifyRollbackBaseline(plan))
-  await fencedMutation(store, plan, () => rm(activationPaths.stagePath, { recursive: true, force: true }))
+  if (!observed) await fencedMutation(store, plan, () => rm(activationPaths.stagePath, { recursive: true, force: true }))
   const terminal = plan.activation?.hostRecoveryRequired
     ? store.markRollbackProfileRestored({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence })
     : advance(store, plan, 'rolled-back')
+  if (observed) await cleanupRestoredStage(store, terminal)
   await releaseProfileLock(store, lock)
   return terminal
+}
+
+async function profileFilesAt(plan: PluginActivationPlan, path: string): Promise<readonly { path: string; sha256: string | null }[]> {
+  await assertDirectory(path)
+  const files = await captureRollbackBaseline({ ...plan, target: { ...plan.target, profilePath: path },
+    activation: { ...plan.activation!, targetOriginallyExisted: true } })
+  return files.map((file, index) => ({ path: join(plan.target.profilePath, rollbackCoreFiles[index]!), sha256: file.sha256 }))
+}
+
+/** A closed quality watch may restore only the exact deployment it observed. */
+async function restoreObservedTarget(store: ControlPlaneStore, plan: PluginActivationPlan): Promise<void> {
+  const { backupPath, stagePath } = paths(plan)
+  await fencedMutation(store, plan, async () => {
+    const installed = store.getActivationInstalledBaseline(plan.id)
+    const baseline = plan.activation?.targetBaselineFiles
+    if (installed === undefined || baseline === undefined) {
+      throw new ControlPlaneCliError('FILESYSTEM_STATE', 'post-activation rollback checkpoints are unavailable')
+    }
+    const matches = async (path: string, expected: typeof installed): Promise<void> => {
+      if (JSON.stringify(await profileFilesAt(plan, path)) !== JSON.stringify(expected)) {
+        throw new ControlPlaneCliError('FILESYSTEM_STATE', 'post-activation profile files changed; rollback requires reconciliation')
+      }
+    }
+    const backupExists = await directoryExists(backupPath)
+    const targetExists = await directoryExists(plan.target.profilePath)
+    const staged = await directoryExists(stagePath)
+    // The old target is moved aside before its replacement. A crash between
+    // either rename can resume without deleting an unverified profile.
+    if (plan.activation!.targetOriginallyExisted) {
+      if (!backupExists) {
+        if (!targetExists || !staged) throw new ControlPlaneCliError('FILESYSTEM_STATE', 'retained rollback backup is missing')
+        await matches(plan.target.profilePath, baseline)
+        if (staged) await matches(stagePath, installed)
+        await syncDirectory(join(plan.target.dshHome, 'profiles'))
+        return
+      }
+      await matches(backupPath, baseline)
+    } else if (backupExists) throw new ControlPlaneCliError('FILESYSTEM_STATE', 'unexpected rollback backup for an absent baseline')
+    if (staged) await matches(stagePath, installed)
+    if (targetExists) {
+      await matches(plan.target.profilePath, installed)
+      if (staged) throw new ControlPlaneCliError('FILESYSTEM_STATE', 'both rollback target and staged candidate exist')
+      await rename(plan.target.profilePath, stagePath)
+    } else if (!staged) {
+      throw new ControlPlaneCliError('FILESYSTEM_STATE', 'observed deployment and recovery stage are both missing')
+    }
+    if (plan.activation!.targetOriginallyExisted) await rename(backupPath, plan.target.profilePath)
+    await syncDirectory(join(plan.target.dshHome, 'profiles'))
+  })
+}
+
+async function cleanupRestoredStage(store: ControlPlaneStore, plan: PluginActivationPlan): Promise<void> {
+  await store.withExclusiveWrite(async () => {
+    const current = store.getPlan(plan.id)
+    if (!current.activation?.rollbackProfileRestored || current.activation.fence !== plan.activation?.fence) {
+      throw new ControlPlaneCliError('FILESYSTEM_STATE', 'rollback restoration marker changed before stage cleanup')
+    }
+    const { stagePath } = paths(current)
+    if (!await directoryExists(stagePath)) return
+    const installed = store.getActivationInstalledBaseline(current.id)
+    if (installed === undefined || JSON.stringify(await profileFilesAt(current, stagePath)) !== JSON.stringify(installed)) {
+      throw new ControlPlaneCliError('FILESYSTEM_STATE', 'restored rollback stage changed; cleanup requires reconciliation')
+    }
+    await rm(stagePath, { recursive: true, force: true })
+  })
+}
+
+async function cleanupRetiredBackups(store: ControlPlaneStore, plan: PluginActivationPlan): Promise<void> {
+  await store.withExclusiveWrite(async () => {
+    for (const retired of store.listRetiredActivationBackups(plan.id)) {
+      const { backupPath } = paths(retired)
+      if (await directoryExists(backupPath)) await rm(backupPath, { recursive: true, force: true })
+    }
+  })
+}
+
+async function finishCommit(store: ControlPlaneStore, plan: PluginActivationPlan): Promise<PluginActivationPlan> {
+  const baselineFiles = await fencedMutation(store, plan, () => profileFilesAt(plan, plan.target.profilePath))
+  store.recordActivationInstalledBaseline({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, baselineFiles })
+  await fencedMutation(store, plan, () => rm(paths(plan).stagePath, { recursive: true, force: true }))
+  const committed = advance(store, plan, 'activated')
+  await cleanupRetiredBackups(store, committed)
+  return committed
+}
+
+async function rollbackClosedWatch(store: ControlPlaneStore, trust: PluginControlTrustConfig, planId: string): Promise<PluginActivationPlan> {
+  let plan = store.getPlan(planId)
+  assertPlanTrust(plan, trust)
+  plan = store.beginPostActivationRollback({ planId, expectedRevision: plan.revision })
+  if (plan.activation?.rollbackProfileRestored) await cleanupRestoredStage(store, plan)
+  if (plan.status === 'rolled-back') return plan
+  if (!plan.activation?.rollbackProfileRestored) {
+    plan = await store.claimActivation({ planId, expectedRevision: plan.revision, leaseMs,
+      resolveApprovalAuthority: receipt => activationApprovalAuthority(trust, receipt) })
+    let lock: ProfileLock | undefined = await acquireProfileLock(store, plan)
+    try { plan = await finishRollback(store, plan, lock); lock = undefined }
+    finally { if (lock !== undefined) await releaseProfileLock(store, lock) }
+  }
+  if (trust.hostAttestor === undefined) return plan
+  const operation = prepareConfiguredHostAttestation(store, plan, trust)
+  const resolveAuthority = (receipt: HostAttestationReceipt): Ed25519HostAttestationAuthority => {
+    const key = resolveTrustKey(trust, 'host-attestation', receipt.authority, receipt.keyId)
+    return new Ed25519HostAttestationAuthority(key.publicKeyPem, key.authority, key.keyId)
+  }
+  const receipt = await store.runHostAttestationOperation({ operationId: operation.operationId,
+    expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+    execute: request => invokeConfiguredHostAttestor(trust, request), resolveAuthority })
+  return (await store.applyHostAttestation({ planId, expectedRevision: plan.revision, expectedFence: plan.activation!.fence,
+    receipt, idempotencyKey: `host-attestation:${operation.operationId}`, resolveAuthority })).result
 }
 
 async function approve(argv: readonly string[]): Promise<void> {
@@ -697,7 +810,7 @@ async function activate(argv: readonly string[]): Promise<void> {
   let lock: ProfileLock | undefined
   try {
     let plan = store.getPlan(option(argv, '--plan-id')); assertPlanTrust(plan, trust)
-    if (plan.status === 'activated') { process.stdout.write(`${JSON.stringify(plan)}\n`); return }
+    if (plan.status === 'activated') { await cleanupRetiredBackups(store, plan); process.stdout.write(`${JSON.stringify(plan)}\n`); return }
     if (plan.status === 'rollback-pending' && plan.activation?.rollbackProfileRestored) {
       if (plan.revision !== integerOption(argv, '--expected-revision')) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'activation targets a stale revision')
       process.stdout.write(`${JSON.stringify(plan)}\n`); return
@@ -708,9 +821,7 @@ async function activate(argv: readonly string[]): Promise<void> {
     const activationPaths = paths(plan)
     if (plan.status === 'rollback-pending') { process.stdout.write(`${JSON.stringify(await finishRollback(store, plan, lock))}\n`); lock = undefined; return }
     if (plan.status === 'commit-pending') {
-      await fencedMutation(store, plan, () => rm(activationPaths.backupPath, { recursive: true, force: true }))
-      await fencedMutation(store, plan, () => rm(activationPaths.stagePath, { recursive: true, force: true }))
-      process.stdout.write(`${JSON.stringify(advance(store, plan, 'activated'))}\n`); return
+      process.stdout.write(`${JSON.stringify(await finishCommit(store, plan))}\n`); return
     }
     if (plan.status !== 'staging') throw new ControlPlaneCliError('HOST_ATTESTATION_REQUIRED', 'activation is awaiting a signed Host attestation')
     await assertDirectory(trust.dshHome); await assertDirectory(join(trust.dshHome, 'profiles')); await assertDirectory(plan.target.profilePath, true)
@@ -790,10 +901,7 @@ async function attest(argv: readonly string[]): Promise<void> {
         resolveApprovalAuthority: receipt => activationApprovalAuthority(trust, receipt) }); lock = await acquireProfileLock(store, plan)
       if (plan.status === 'rollback-pending') { plan = await finishRollback(store, plan, lock); lock = undefined }
       else {
-        const activationPaths = paths(plan)
-        await fencedMutation(store, plan, () => rm(activationPaths.backupPath, { recursive: true, force: true }))
-        await fencedMutation(store, plan, () => rm(activationPaths.stagePath, { recursive: true, force: true }))
-        plan = advance(store, plan, 'activated')
+        plan = await finishCommit(store, plan)
       }
     }
     process.stdout.write(`${JSON.stringify({ ...result, result: plan })}\n`)
@@ -840,10 +948,7 @@ async function probe(argv: readonly string[]): Promise<void> {
         resolveApprovalAuthority: receipt => activationApprovalAuthority(trust, receipt) }); lock = await acquireProfileLock(store, output)
       if (output.status === 'rollback-pending') { output = await finishRollback(store, output, lock); lock = undefined }
       else {
-        const activationPaths = paths(output)
-        await fencedMutation(store, output, () => rm(activationPaths.backupPath, { recursive: true, force: true }))
-        await fencedMutation(store, output, () => rm(activationPaths.stagePath, { recursive: true, force: true }))
-        output = advance(store, output, 'activated')
+        output = await finishCommit(store, output)
       }
     }
     process.stdout.write(`${JSON.stringify({ ...result, result: output })}\n`)
@@ -864,7 +969,8 @@ async function watchObserve(argv: readonly string[]): Promise<void> {
         return new Ed25519PostActivationObservationAuthority(key.publicKeyPem, key.authority, key.keyId)
       },
       idempotencyKey: `post-activation-observation:${receipt.observationId}` })
-    process.stdout.write(`${JSON.stringify(result)}\n`)
+    const activation = receipt.disposition === 'regressed' ? await rollbackClosedWatch(store, trust, receipt.planId) : undefined
+    process.stdout.write(`${JSON.stringify({ ...result, ...(activation === undefined ? {} : { activation }) })}\n`)
   } finally { store.close() }
 }
 
@@ -882,7 +988,8 @@ async function watchRetract(argv: readonly string[]): Promise<void> {
         return new Ed25519ActivationRetractionAuthority(key.publicKeyPem, key.authority, key.keyId)
       },
       idempotencyKey: `activation-retraction:${receipt.retractionId}` })
-    process.stdout.write(`${JSON.stringify(result)}\n`)
+    const activation = await rollbackClosedWatch(store, trust, receipt.planId)
+    process.stdout.write(`${JSON.stringify({ ...result, activation })}\n`)
   } finally { store.close() }
 }
 

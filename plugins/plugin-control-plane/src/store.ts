@@ -309,6 +309,11 @@ interface WatchEvidenceRow {
   host_generation: number; failures: number; checks: number; created_at: number
 }
 
+interface ActivationDeploymentCheckpointRow {
+  plan_id: string; baseline_json: string; exposure_order: number; successful_order: number | null
+  recorded_at: number; succeeded_at: number | null
+}
+
 function gapFromRow(row: GapRow): StoredCapabilityGap {
   if (!DIGEST.test(row.input_digest) || !Number.isSafeInteger(row.revision) || row.revision < 1) throw new ControlPlaneStoreError('invalid-state', 'stored capability gap is corrupt')
   return {
@@ -400,6 +405,16 @@ function digestField(value: unknown, label: string): string {
   return value
 }
 
+function activationCoreFiles(value: unknown, targetPath: string, label: string): readonly { path: string; sha256: string | null }[] {
+  const expectedPaths = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(name => `${targetPath}/${name}`)
+  if (!Array.isArray(value) || value.length !== 3 || value.some((item, index) => typeof item !== 'object' || item === null || Array.isArray(item)
+    || Object.keys(item as object).sort().join('\0') !== 'path\0sha256' || (item as { path?: unknown }).path !== expectedPaths[index]
+    || ((item as { sha256?: unknown }).sha256 !== null && !DIGEST.test((item as { sha256: string }).sha256)))) {
+    throw new ControlPlaneStoreError('invalid-state', `${label} is corrupt`)
+  }
+  return value as readonly { path: string; sha256: string | null }[]
+}
+
 function activationFromRow(row: ActivationRow): PluginActivationPlan {
   const candidate = parseCatalog({ schemaVersion: 1, entries: [JSON.parse(row.candidate_json) as unknown] }).entries[0]
   const gapSnapshot = JSON.parse(row.gap_snapshot_json) as PluginActivationPlan['gapSnapshot']
@@ -426,14 +441,10 @@ function activationFromRow(row: ActivationRow): PluginActivationPlan {
   if (row.activation_target_baseline_json !== null) {
     let value: unknown
     try { value = JSON.parse(row.activation_target_baseline_json) as unknown } catch { throw new ControlPlaneStoreError('invalid-state', 'stored activation baseline is corrupt') }
-    const expectedPaths = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(name => `${row.target_path}/${name}`)
-    if (!Array.isArray(value) || ![0, 3].includes(value.length) || value.some((item, index) => typeof item !== 'object' || item === null || Array.isArray(item)
-      || Object.keys(item as object).sort().join('\0') !== 'path\0sha256' || typeof (item as { path?: unknown }).path !== 'string'
-      || !isAbsolute((item as { path: string }).path) || (value.length === 3 && (item as { path: string }).path !== expectedPaths[index])
-      || ((item as { sha256?: unknown }).sha256 !== null && !DIGEST.test((item as { sha256: string }).sha256)))) {
+    if (!Array.isArray(value) || ![0, 3].includes(value.length)) {
       throw new ControlPlaneStoreError('invalid-state', 'stored activation baseline is corrupt')
     }
-    baselineFiles = value as readonly { path: string; sha256: string | null }[]
+    baselineFiles = value.length === 0 ? [] : activationCoreFiles(value, row.target_path, 'stored activation baseline')
   }
   const requiresApproval = row.status !== 'pending-approval'
   const requiresActivation = !['pending-approval', 'approved'].includes(row.status)
@@ -1663,6 +1674,129 @@ export class ControlPlaneStore {
     } catch (error) { this.#database.exec('ROLLBACK'); throw error }
   }
 
+  /**
+   * Freeze the exact candidate profile after all normal Host gates passed but
+   * before terminal promotion. This is a mutable deployment checkpoint, not a
+   * field in the signed immutable plan: it is the compare-and-restore fence for
+   * a later quality-triggered rollback.
+   */
+  recordActivationInstalledBaseline(input: { planId: string; expectedRevision: number; fence: number;
+    baselineFiles: readonly { path: string; sha256: string | null }[] }): PluginActivationPlan {
+    const now = this.#now()
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
+      if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
+      const plan = activationFromRow(row)
+      if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.fence || plan.status !== 'commit-pending'
+        || Number(row.activation_lease_until ?? 0) < now) {
+        throw new ControlPlaneStoreError('conflict', 'activation lost its claim before recording the installed baseline')
+      }
+      let files: readonly { path: string; sha256: string | null }[]
+      try { files = activationCoreFiles(input.baselineFiles, plan.target.profilePath, 'activation installed baseline') }
+      catch (error) {
+        if (error instanceof ControlPlaneStoreError) throw new ControlPlaneStoreError('invalid-input', 'activation installed baseline is invalid')
+        throw error
+      }
+      const baseline = JSON.stringify(files)
+      const existing = this.#database.prepare('SELECT * FROM activation_deployment_checkpoints WHERE plan_id = ?')
+        .get(plan.id) as ActivationDeploymentCheckpointRow | undefined
+      if (existing !== undefined) {
+        if (existing.baseline_json !== baseline) throw new ControlPlaneStoreError('conflict', 'activation installed baseline is immutable')
+      } else {
+        const sequence = this.#database.prepare('SELECT next_exposure_order FROM activation_deployment_sequence WHERE singleton = 1')
+          .get() as { next_exposure_order: number } | undefined
+        if (sequence === undefined || !Number.isSafeInteger(sequence.next_exposure_order) || sequence.next_exposure_order < 1) {
+          throw new ControlPlaneStoreError('invalid-state', 'activation deployment sequence is corrupt')
+        }
+        const advanced = this.#database.prepare(`UPDATE activation_deployment_sequence SET next_exposure_order = next_exposure_order + 1
+          WHERE singleton = 1 AND next_exposure_order = ?`).run(sequence.next_exposure_order)
+        if (Number(advanced.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'activation deployment sequence changed')
+        this.#database.prepare(`INSERT INTO activation_deployment_checkpoints (plan_id, baseline_json, exposure_order,
+          successful_order, recorded_at, succeeded_at) VALUES (?, ?, ?, NULL, ?, NULL)`).run(plan.id, baseline, sequence.next_exposure_order, now)
+      }
+      const output = this.getPlan(plan.id)
+      this.#database.exec('COMMIT')
+      return output
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  getActivationInstalledBaseline(planId: string): readonly { path: string; sha256: string | null }[] | undefined {
+    const plan = this.getPlan(planId)
+    const row = this.#database.prepare('SELECT * FROM activation_deployment_checkpoints WHERE plan_id = ?').get(plan.id) as ActivationDeploymentCheckpointRow | undefined
+    if (row === undefined) return undefined
+    let value: unknown
+    try { value = JSON.parse(row.baseline_json) as unknown } catch { throw new ControlPlaneStoreError('invalid-state', 'stored installed activation baseline is corrupt') }
+    return activationCoreFiles(value, plan.target.profilePath, 'stored installed activation baseline')
+  }
+
+  /** Move a signed closed deployment watch into the existing physical rollback lifecycle. */
+  beginPostActivationRollback(input: { planId: string; expectedRevision: number }): PluginActivationPlan {
+    const now = this.#now()
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
+      if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
+      const plan = activationFromRow(row)
+      if (plan.revision !== input.expectedRevision) throw new ControlPlaneStoreError('conflict', 'activation plan revision conflict')
+      // A restart or retry must retain the original rollback identity and never
+      // manufacture another rollback from a now-closed watch.
+      if ((plan.status === 'rollback-pending' || plan.status === 'rolled-back') && this.#hasPostActivationRollbackProvenance(plan)) {
+        this.#database.exec('COMMIT')
+        return plan
+      }
+      if (plan.status !== 'activated' || plan.activation === undefined) {
+        throw new ControlPlaneStoreError('invalid-state', 'only an activated deployment can enter post-activation rollback')
+      }
+      const watch = this.getActivationWatch(plan.id)
+      if ((watch.state !== 'closed-regressed' && watch.state !== 'closed-retracted')
+        || watch.activationId !== plan.activation.id || watch.fence !== plan.activation.fence || watch.close === undefined) {
+        throw new ControlPlaneStoreError('invalid-state', 'post-activation rollback requires an exact signed closed watch')
+      }
+      if (!plan.activation.hostRecoveryRequired || plan.activation.targetBaselineFiles === undefined) {
+        throw new ControlPlaneStoreError('invalid-state', 'post-activation rollback lacks its original recovery baseline')
+      }
+      const checkpoint = this.#database.prepare('SELECT * FROM activation_deployment_checkpoints WHERE plan_id = ?').get(plan.id) as ActivationDeploymentCheckpointRow | undefined
+      if (checkpoint === undefined || checkpoint.successful_order !== checkpoint.exposure_order) {
+        throw new ControlPlaneStoreError('invalid-state', 'post-activation rollback lacks a successful installed baseline checkpoint')
+      }
+      this.getActivationInstalledBaseline(plan.id)
+      const active = this.#database.prepare(`SELECT id FROM activation_plans WHERE target_path = ? AND id <> ? AND status IN (
+        'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
+        'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending') LIMIT 1`)
+        .get(plan.target.profilePath, plan.id)
+      if (active !== undefined) throw new ControlPlaneStoreError('conflict', 'a newer activation currently owns the target profile')
+      const superseded = this.#database.prepare(`SELECT checkpoint.plan_id FROM activation_deployment_checkpoints AS checkpoint
+        JOIN activation_plans AS candidate ON candidate.id = checkpoint.plan_id
+        WHERE candidate.target_path = ? AND checkpoint.successful_order IS NOT NULL
+          AND checkpoint.exposure_order > ? LIMIT 1`).get(plan.target.profilePath, checkpoint.exposure_order)
+      if (superseded !== undefined) throw new ControlPlaneStoreError('conflict', 'a newer successful deployment permanently superseded this rollback target')
+      const failureCode = watch.state === 'closed-regressed' ? 'post-activation-regressed' : 'post-activation-retracted'
+      const updated = this.#database.prepare(`UPDATE activation_plans SET status = 'rollback-pending', revision = revision + 1,
+        activation_lease_until = NULL, rollback_profile_restored = 0, failure_code = ?, updated_at = ?
+        WHERE id = ? AND status = 'activated' AND revision = ? AND activation_id = ? AND activation_fence = ?`).run(
+        failureCode, now, plan.id, plan.revision, plan.activation.id, plan.activation.fence)
+      if (Number(updated.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'post-activation rollback lost its activation CAS')
+      const output = this.getPlan(plan.id)
+      this.#database.exec('COMMIT')
+      return output
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  /** Backups safe to delete only after `currentPlanId` is terminally promoted. */
+  listRetiredActivationBackups(currentPlanId: string): readonly PluginActivationPlan[] {
+    const current = this.getPlan(currentPlanId)
+    if (current.status !== 'activated') throw new ControlPlaneStoreError('invalid-state', 'only a successful deployment may retire older backups')
+    const checkpoint = this.#database.prepare('SELECT * FROM activation_deployment_checkpoints WHERE plan_id = ?').get(current.id) as ActivationDeploymentCheckpointRow | undefined
+    if (checkpoint === undefined || checkpoint.successful_order !== checkpoint.exposure_order) return []
+    const rows = this.#database.prepare(`SELECT activation.* FROM activation_deployment_checkpoints AS older
+      JOIN activation_plans AS activation ON activation.id = older.plan_id
+      WHERE activation.target_path = ? AND activation.id <> ? AND activation.status = 'activated'
+        AND older.successful_order IS NOT NULL AND older.exposure_order < ?
+      ORDER BY older.exposure_order`).all(current.target.profilePath, current.id, checkpoint.exposure_order) as unknown as ActivationRow[]
+    return rows.map(activationFromRow)
+  }
+
   /** Freeze recovery obligation before the profile can become Host-visible. */
   markActivationHostExposure(input: { planId: string; expectedRevision: number; fence: number }): PluginActivationPlan {
     const now = this.#now()
@@ -1748,10 +1882,8 @@ export class ControlPlaneStore {
         throw new ControlPlaneStoreError('invalid-input', 'Host attestation receipt TTL is invalid')
       }
       if (expected.phase === 'reload') {
-        const previous = this.#database.prepare(`SELECT max(attestation.host_generation) AS generation
-          FROM host_attestations AS attestation JOIN activation_plans AS activation ON activation.id = attestation.plan_id
-          WHERE activation.installation_id = ?`).get(plan.installationId) as { generation: number | null }
-        if (input.requirements.kind !== 'reload' || input.requirements.previousHostGeneration !== (previous.generation ?? 0)) {
+        const previous = this.latestHostGeneration(plan.installationId)
+        if (input.requirements.kind !== 'reload' || input.requirements.previousHostGeneration !== previous) {
           throw new ControlPlaneStoreError('conflict', 'reload operation does not bind the durable prior Host generation')
         }
       }
@@ -1806,9 +1938,15 @@ export class ControlPlaneStore {
 
   latestHostGeneration(installationId: string): number {
     if (!UUID.test(installationId)) throw new ControlPlaneStoreError('invalid-input', 'installation id is invalid')
-    const row = this.#database.prepare(`SELECT max(attestation.host_generation) AS generation
-      FROM host_attestations AS attestation JOIN activation_plans AS activation ON activation.id = attestation.plan_id
-      WHERE activation.installation_id = ?`).get(installationId) as { generation: number | null }
+    const row = this.#database.prepare(`SELECT max(generation) AS generation FROM (
+      SELECT max(attestation.host_generation) AS generation
+        FROM host_attestations AS attestation JOIN activation_plans AS activation ON activation.id = attestation.plan_id
+        WHERE activation.installation_id = ?
+      UNION ALL
+      SELECT max(watch.last_host_generation) AS generation
+        FROM activation_watch AS watch JOIN activation_plans AS activation ON activation.id = watch.plan_id
+        WHERE activation.installation_id = ?
+    )`).get(installationId, installationId) as { generation: number | null }
     return row.generation ?? 0
   }
 
@@ -1827,12 +1965,33 @@ export class ControlPlaneStore {
     for (const candidate of row) {
       const operation = hostOperationFromRow(candidate); const receipt = operation.receipt
       if (receipt === undefined || candidate.receipt_digest === null) throw new ControlPlaneStoreError('invalid-state', 'applied Host predecessor lacks its receipt')
-      if (operation.request.activation.id !== plan.activation?.id || operation.request.activation.fence !== plan.activation.fence
-        || receipt.activationId !== plan.activation.id || receipt.fence !== plan.activation.fence) continue
+      const postActivationRollback = phase === 'rollback' && this.#isPostActivationRollback(plan)
+      if (operation.request.activation.id !== plan.activation?.id || receipt.activationId !== plan.activation.id
+        || (!postActivationRollback && (operation.request.activation.fence !== plan.activation.fence || receipt.fence !== plan.activation.fence))
+        || (postActivationRollback && (operation.request.activation.fence >= plan.activation.fence || receipt.fence >= plan.activation.fence))) continue
       return { operationId: operation.operationId, receiptId: receipt.receiptId, phase: operation.phase,
         receiptDigest: candidate.receipt_digest, hostGeneration: receipt.hostGeneration }
     }
     return null
+  }
+
+  #isPostActivationRollback(plan: PluginActivationPlan): boolean {
+    if (plan.status !== 'rollback-pending' || plan.activation === undefined || plan.activation.failureCode === undefined
+      || !['post-activation-regressed', 'post-activation-retracted'].includes(plan.activation.failureCode)) return false
+    const checkpoint = this.#database.prepare('SELECT successful_order, exposure_order FROM activation_deployment_checkpoints WHERE plan_id = ?')
+      .get(plan.id) as { successful_order: number | null; exposure_order: number } | undefined
+    return checkpoint !== undefined && checkpoint.successful_order === checkpoint.exposure_order
+  }
+
+  #hasPostActivationRollbackProvenance(plan: PluginActivationPlan): boolean {
+    if (plan.activation === undefined || !['post-activation-regressed', 'post-activation-retracted'].includes(plan.activation.failureCode ?? '')) return false
+    const checkpoint = this.#database.prepare('SELECT successful_order, exposure_order FROM activation_deployment_checkpoints WHERE plan_id = ?')
+      .get(plan.id) as { successful_order: number | null; exposure_order: number } | undefined
+    if (checkpoint === undefined || checkpoint.successful_order !== checkpoint.exposure_order) return false
+    const watch = this.#database.prepare('SELECT activation_id, fence, state, close_signature_digest FROM activation_watch WHERE plan_id = ?').get(plan.id) as
+      { activation_id: string; fence: number; state: ActivationWatch['state']; close_signature_digest: string | null } | undefined
+    return watch !== undefined && (watch.state === 'closed-regressed' || watch.state === 'closed-retracted')
+      && watch.close_signature_digest !== null && watch.activation_id === plan.activation.id && watch.fence <= plan.activation.fence
   }
 
   #assertHostAttestationChain(operation: HostAttestationOperation, plan: PluginActivationPlan): HostAttestationRequest {
@@ -1983,15 +2142,14 @@ export class ControlPlaneStore {
         throw new ControlPlaneStoreError('conflict', 'Host attestation changed before apply')
       }
       this.#assertHostAttestationChain(lockedOperation, lockedPlan)
-      const previousGeneration = this.#database.prepare(`SELECT max(attestation.host_generation) AS generation
-        FROM host_attestations AS attestation JOIN activation_plans AS activation ON activation.id = attestation.plan_id
-        WHERE activation.installation_id = ?`).get(plan.installationId) as { generation: number | null }
-      if (previousGeneration.generation !== null && verified.hostGeneration < previousGeneration.generation) throw new ControlPlaneStoreError('conflict', 'host generation regressed')
+      const previousGeneration = this.latestHostGeneration(plan.installationId)
+      if (verified.hostGeneration < previousGeneration) throw new ControlPlaneStoreError('conflict', 'host generation regressed')
       this.#database.prepare(`INSERT INTO host_attestations (plan_id, phase, receipt_id, receipt_digest, receipt_json, host_generation, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(plan.id, verified.phase, verified.receiptId, controlPlaneDigest(input.receipt), JSON.stringify(verified), verified.hostGeneration, now)
       const result = this.#database.prepare(`UPDATE activation_plans SET status = ?, revision = revision + 1,
         activation_lease_until = NULL,
-        failure_code = CASE WHEN ? = 'rollback-pending' THEN 'host-attestation-failed' ELSE failure_code END, updated_at = ?
+        failure_code = CASE WHEN ? = 'rollback-pending' AND (failure_code IS NULL OR failure_code NOT IN ('post-activation-regressed', 'post-activation-retracted'))
+          THEN 'host-attestation-failed' ELSE failure_code END, updated_at = ?
         WHERE id = ? AND status = ? AND revision = ? AND activation_fence = ?`).run(nextStatus, nextStatus, now, plan.id, plan.status, plan.revision, input.expectedFence)
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'host attestation lost its plan CAS')
       const applied = this.#database.prepare(`UPDATE host_attestation_operations SET status = 'applied', applied_at = ?
@@ -2006,11 +2164,11 @@ export class ControlPlaneStore {
 
   // -------------------------------------------------------------------------
   // Post-activation quality watch (deployment cohort monitoring). This is an
-  // independent lifecycle from the activation state machine: Host-signed
-  // observations append evidence and a `regressed` probe closes the exact
-  // pinned version, while an owner-signed retraction closes the watch and
-  // re-opens the capability gap for re-activation. Healthy evidence is recorded
-  // but can never close a watch.
+  // evidence lifecycle before a rollback worker claims physical recovery:
+  // Host-signed observations append evidence and a `regressed` probe closes the
+  // exact pinned version, while an owner-signed retraction closes the watch.
+  // `beginPostActivationRollback()` later turns that signed closure into the
+  // existing fenced recovery lifecycle. Healthy evidence never closes a watch.
   // -------------------------------------------------------------------------
 
   getActivationWatch(planId: string): ActivationWatch {
@@ -2052,7 +2210,7 @@ export class ControlPlaneStore {
     try {
       const current = this.#database.prepare('SELECT * FROM activation_watch WHERE plan_id = ?').get(plan.id) as unknown as WatchRow
       if (current.state !== 'watching') throw new ControlPlaneStoreError('conflict', 'post-activation watch closed while evidence was verified')
-      if (verified.hostGeneration <= current.last_host_generation) throw new ControlPlaneStoreError('conflict', 'host generation must advance')
+      if (verified.hostGeneration < current.last_host_generation) throw new ControlPlaneStoreError('conflict', 'host generation regressed')
       this.#insertWatchEvidence(verified.observationId, plan.id, verified.disposition, controlPlaneDigest(input.receipt),
         verified.signatureDigest, verified, verified.hostGeneration, verified.evidence.failures, verified.evidence.checks, now)
       if (verified.disposition === 'regressed') {
@@ -2103,12 +2261,9 @@ export class ControlPlaneStore {
         WHERE plan_id = ? AND state IN ('watching', 'closed-regressed') AND revision = ?`).run(now, now,
         verified.retractionId, verified.signatureDigest, plan.id, current.revision)
       if (Number(closed.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'activation retraction lost its watch CAS')
-      // Owner withdrawal re-opens the capability gap so the exact failed version
-      // can only come back via a fresh catalog admission of a repaired package.
-      this.#database.prepare('DELETE FROM gap_plan_claims WHERE gap_id = ? AND plan_id = ?').run(plan.gapId, plan.id)
-      const reopened = this.#database.prepare(`UPDATE capability_gaps SET status = 'open', candidate_id = NULL,
-        revision = revision + 1, updated_at = ? WHERE id = ?`).run(now, plan.gapId)
-      if (Number(reopened.changes) !== 1) throw new ControlPlaneStoreError('invalid-state', 'activation retraction could not reopen its capability gap')
+      // Owner withdrawal may race a fresh plan created after an earlier
+      // retraction. Only reopen when this historic plan remains the sole claim.
+      this.#reopenGapAfterActivation(plan, now)
       const output = this.getActivationWatch(plan.id)
       const operationReceipt = { idempotencyKey: key, operation: 'activation-retraction' as const, inputDigest, result: output, createdAt: now }
       this.#insertReceipt(operationReceipt); this.#database.exec('COMMIT'); return operationReceipt
@@ -2144,15 +2299,19 @@ export class ControlPlaneStore {
     const activationId = plan.activation?.id
     if (activationId === undefined) throw new ControlPlaneStoreError('invalid-state', 'terminal activation has no identity')
     const inputDigest = controlPlaneDigest({ planId: plan.id, planDigest: plan.digest, activationId, fence, status: plan.status, failureCode: plan.activation?.failureCode })
-    this.#insertReceipt({ idempotencyKey: `activation:${activationId}`, operation: 'activate-plan', inputDigest, result: plan, createdAt: now })
+    const checkpoint = this.#database.prepare('SELECT successful_order, exposure_order FROM activation_deployment_checkpoints WHERE plan_id = ?')
+      .get(plan.id) as { successful_order: number | null; exposure_order: number } | undefined
+    const postActivationRollback = plan.status === 'rolled-back' && checkpoint !== undefined && checkpoint.successful_order === checkpoint.exposure_order
+    this.#insertReceipt({ idempotencyKey: postActivationRollback ? `post-activation-rollback:${activationId}:${fence}` : `activation:${activationId}`,
+      operation: postActivationRollback ? 'post-activation-rollback' : 'activate-plan', inputDigest, result: plan, createdAt: now })
     if (plan.status === 'rolled-back') {
-      this.#database.prepare('DELETE FROM gap_plan_claims WHERE gap_id = ? AND plan_id = ?').run(plan.gapId, plan.id)
-      this.#database.prepare(`UPDATE capability_gaps SET status = 'open', candidate_id = NULL, revision = revision + 1, updated_at = ? WHERE id = ?`).run(now, plan.gapId)
+      this.#reopenGapAfterActivation(plan, now)
     } else if (plan.status === 'activated') {
-      // Promotion opens an independent post-activation watch pinned to the exact
-      // immutable package@version+integrity. `activated` has no exit and its
-      // backup/stage are physically removed, so quality-driven closure lives here
-      // rather than in the activation state machine.
+      if (checkpoint !== undefined) {
+        const marked = this.#database.prepare(`UPDATE activation_deployment_checkpoints SET successful_order = exposure_order,
+          succeeded_at = ? WHERE plan_id = ? AND successful_order IS NULL`).run(now, plan.id)
+        if (Number(marked.changes) !== 1) throw new ControlPlaneStoreError('invalid-state', 'activation installed baseline success marker is corrupt')
+      }
       const result = this.#database.prepare(`INSERT INTO activation_watch (plan_id, package_name, package_version,
         package_integrity, activation_id, fence, state, revision, last_host_generation, healthy_observations,
         started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'watching', 1, 0, 0, ?, ?)
@@ -2160,6 +2319,15 @@ export class ControlPlaneStore {
         plan.candidate.integrity, activationId, fence, now, now)
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('invalid-state', 'activated plan has no post-activation watch')
     }
+  }
+
+  #reopenGapAfterActivation(plan: PluginActivationPlan, now: number): void {
+    this.#database.prepare('DELETE FROM gap_plan_claims WHERE gap_id = ? AND plan_id = ?').run(plan.gapId, plan.id)
+    // A later owner may already have claimed the gap while a historic closed
+    // watch was being reconciled. Preserve that newer owner and its candidate.
+    this.#database.prepare(`UPDATE capability_gaps SET status = 'open', candidate_id = NULL, revision = revision + 1, updated_at = ?
+      WHERE id = ? AND NOT EXISTS (SELECT 1 FROM gap_plan_claims WHERE gap_id = ?)`)
+      .run(now, plan.gapId, plan.gapId)
   }
 
   beginSourceChecks(input: { planId: string; expectedRevision: number }): PluginSourcePlan {

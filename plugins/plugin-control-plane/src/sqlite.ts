@@ -3,7 +3,7 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 16
+export const controlPlaneSchemaVersion = 17
 
 export function controlPlaneOperationReceiptDigest(idempotencyKey: string, operation: string, inputDigest: string,
   resultJson: string, createdAt: number): string {
@@ -354,7 +354,27 @@ function createCurrent(database: DatabaseSync): void {
     ) STRICT, WITHOUT ROWID;
     CREATE INDEX activation_watch_evidence_plan ON activation_watch_evidence(plan_id, created_at);
 
-    PRAGMA user_version = 16;
+    -- Core-file pins captured immediately before terminal promotion.  They are
+    -- deliberately outside the immutable activation dossier: they describe the
+    -- Host-visible deployment and give a post-promotion rollback an ABA-safe
+    -- ordering without rewriting the approved plan.
+    CREATE TABLE activation_deployment_checkpoints (
+      plan_id TEXT PRIMARY KEY REFERENCES activation_plans(id) ON DELETE RESTRICT,
+      baseline_json TEXT NOT NULL CHECK(json_valid(baseline_json) AND json_type(baseline_json) = 'array'),
+      exposure_order INTEGER NOT NULL UNIQUE CHECK(exposure_order >= 1),
+      successful_order INTEGER UNIQUE CHECK(successful_order IS NULL OR successful_order = exposure_order),
+      recorded_at INTEGER NOT NULL,
+      succeeded_at INTEGER
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX activation_deployment_checkpoints_success ON activation_deployment_checkpoints(successful_order)
+      WHERE successful_order IS NOT NULL;
+    CREATE TABLE activation_deployment_sequence (
+      singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+      next_exposure_order INTEGER NOT NULL CHECK(next_exposure_order >= 1)
+    ) STRICT, WITHOUT ROWID;
+    INSERT INTO activation_deployment_sequence (singleton, next_exposure_order) VALUES (1, 1);
+
+    PRAGMA user_version = 17;
   `)
 }
 
@@ -996,6 +1016,32 @@ function migrateV15ToV16(database: DatabaseSync): void {
   `)
 }
 
+function migrateV16ToV17(database: DatabaseSync): void {
+  database.exec(`
+    BEGIN IMMEDIATE;
+    CREATE TABLE IF NOT EXISTS activation_deployment_checkpoints (
+      plan_id TEXT PRIMARY KEY REFERENCES activation_plans(id) ON DELETE RESTRICT,
+      baseline_json TEXT NOT NULL CHECK(json_valid(baseline_json) AND json_type(baseline_json) = 'array'),
+      exposure_order INTEGER NOT NULL UNIQUE CHECK(exposure_order >= 1),
+      successful_order INTEGER UNIQUE CHECK(successful_order IS NULL OR successful_order = exposure_order),
+      recorded_at INTEGER NOT NULL,
+      succeeded_at INTEGER
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS activation_deployment_checkpoints_success ON activation_deployment_checkpoints(successful_order)
+      WHERE successful_order IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS activation_deployment_sequence (
+      singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+      next_exposure_order INTEGER NOT NULL CHECK(next_exposure_order >= 1)
+    ) STRICT, WITHOUT ROWID;
+    INSERT OR IGNORE INTO activation_deployment_sequence (singleton, next_exposure_order) VALUES (1, 1);
+    -- Historical promotions did not retain a verified installed core-file pin.
+    -- Do not invent one from mutable profile contents: they remain observable,
+    -- but cannot be physically rolled back by this new path.
+    PRAGMA user_version = 17;
+    COMMIT;
+  `)
+}
+
 
 export function openControlPlaneDatabase(path: string): DatabaseSync {
   prepare(path)
@@ -1021,6 +1067,7 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       if (version <= 13) migrateV13ToV14(database)
       if (version <= 14) migrateV14ToV15(database)
       if (version <= 15) migrateV15ToV16(database)
+      if (version <= 16) migrateV16ToV17(database)
     }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database

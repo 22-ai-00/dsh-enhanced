@@ -103,6 +103,9 @@ const attestationPhases: ReadonlyArray<{ phase: HostAttestationRequirements['kin
 async function promoted(target: Awaited<ReturnType<typeof fixture>>, suffix: string, host = hostTrustKey(target.now), profile = 'web') {
   let plan = await approved(target, suffix, profile)
   plan = await target.store.claimActivation(activationClaim(plan))
+  const baselineFiles = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(name => ({ path: join(plan.target.profilePath, name), sha256: null }))
+  plan = target.store.recordActivationTargetBaseline({ planId: plan.id, expectedRevision: plan.revision,
+    fence: plan.activation!.fence, existed: true, baselineFiles })
   plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence, from: 'staging', to: 'awaiting-reload' })
   let generation = target.store.latestHostGeneration(installationId)
   let predecessor: { operationId: string; receipt: HostAttestationReceipt } | undefined
@@ -143,6 +146,9 @@ async function promoted(target: Awaited<ReturnType<typeof fixture>>, suffix: str
   }
   expect(plan.status).toBe('commit-pending')
   plan = await target.store.claimActivation({ ...activationClaim(plan) })
+  const installedFiles = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(name => ({ path: join(plan.target.profilePath, name), sha256: 'f'.repeat(64) }))
+  plan = target.store.recordActivationInstalledBaseline({ planId: plan.id, expectedRevision: plan.revision,
+    fence: plan.activation!.fence, baselineFiles: installedFiles })
   plan = target.store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence,
     from: 'commit-pending', to: 'activated' })
   expect(plan.status).toBe('activated')
@@ -1406,8 +1412,8 @@ catch { process.stdout.write('busy') } finally { db.close() }`
       expect(evidence).toHaveLength(1)
       expect(evidence[0]).toMatchObject({ observationId: 'obs-regress-1', disposition: 'regressed',
         hostGeneration: 8, failures: 1, checks: 4 })
-      // Closure is a control-plane terminal state, not a physical uninstall: the
-      // activation plan itself stays in its no-exit `activated` state.
+      // Recording evidence only closes the watch. The CLI subsequently invokes
+      // beginPostActivationRollback() to claim the physical recovery path.
       expect(target.store.getPlan(plan.id).status).toBe('activated')
       expect(target.store.health()).toMatchObject({ watchingActivations: 0, closedRegressed: 1, closedRetracted: 0 })
       target.setNow(target.now() + 1_000)
@@ -1415,6 +1421,67 @@ catch { process.stdout.write('busy') } finally { db.close() }`
         hostGeneration: 9, observedAt: target.now() })
       await expect(target.store.recordPostActivationObservation({ idempotencyKey: 'watch:after-close',
         receipt: healthy, resolveAuthority: () => host.observationAuthority })).rejects.toThrow(/already closed/u)
+    })
+
+    test('a signed regression enters the fenced physical rollback path without replacing the original promotion receipt', async () => {
+      const target = await fixture(); const { plan: activated, host } = await promoted(target, 'watch-physical-rollback')
+      const original = new DatabaseSync(target.path)
+      expect(original.prepare("SELECT operation FROM operation_receipts WHERE idempotency_key = ?").get(`activation:${activated.activation!.id}`))
+        .toEqual({ operation: 'activate-plan' })
+      original.close()
+      target.setNow(target.now() + 1_000)
+      await target.store.recordPostActivationObservation({ idempotencyKey: 'watch:physical-regression',
+        receipt: watchObservation(host, activated, { observationId: 'physical-regression', disposition: 'regressed', hostGeneration: 8, observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      let plan = target.store.beginPostActivationRollback({ planId: activated.id, expectedRevision: activated.revision })
+      expect(plan).toMatchObject({ status: 'rollback-pending', activation: { id: activated.activation!.id, failureCode: 'post-activation-regressed' } })
+      target.store.close(); target.store = new ControlPlaneStore({ path: target.path, now: target.now })
+      plan = target.store.beginPostActivationRollback({ planId: plan.id, expectedRevision: plan.revision })
+      plan = await target.store.claimActivation(activationClaim(plan))
+      plan = target.store.markRollbackProfileRestored({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence })
+      const baselineFiles = plan.activation!.targetBaselineFiles!
+      const operation = target.store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision,
+        expectedFence: plan.activation!.fence, issuer: { mode: 'owner-manual' }, requirements: { kind: 'rollback', previousHostGeneration: 8,
+          action: 'restore', baselineFiles, minimumChecks: 1 }, receiptTtlMs: 10_000 })
+      if (operation.request.schemaVersion !== 2) throw new Error('new rollback request must be v2')
+      expect(operation.request.predecessor?.phase).toBe('health')
+      const evidence = { kind: 'rollback' as const, action: 'restore' as const, previousHostGeneration: 8, currentHostGeneration: 9,
+        checks: 1, failures: 0, profileRestored: true, probeDigest: 'c'.repeat(64) }
+      const unsigned: Omit<HostAttestationReceipt, 'signature'> = { schemaVersion: 2, receiptId: 'post-watch-rollback', authority: 'host-runtime', keyId: 'host-key-1',
+        installationId, planId: plan.id, planDigest: plan.digest, activationId: plan.activation!.id, fence: plan.activation!.fence,
+        operationId: operation.operationId, requestDigest: operation.requestDigest, phase: 'rollback', outcome: 'passed', hostGeneration: 9,
+        evidence, evidenceDigest: hostAttestationEvidenceDigest(evidence), observedAt: target.now(), expiresAt: target.now() + 10_000 }
+      const receipt: HostAttestationReceipt = { ...unsigned, signature: sign(null, Buffer.from(hostAttestationSigningPayload(unsigned)), host.privateKey).toString('base64') }
+      await target.store.runHostAttestationOperation({ operationId: operation.operationId, expectedRevision: plan.revision,
+        expectedFence: plan.activation!.fence, execute: async () => receipt, resolveAuthority: () => host.authority })
+      const rolledBack = await target.store.applyHostAttestation({ planId: plan.id, expectedRevision: plan.revision,
+        expectedFence: plan.activation!.fence, receipt, resolveAuthority: () => host.authority, idempotencyKey: 'watch:physical-rollback' })
+      expect(rolledBack.result.status).toBe('rolled-back')
+      const database = new DatabaseSync(target.path)
+      expect(database.prepare("SELECT operation FROM operation_receipts WHERE idempotency_key = ?").get(`activation:${activated.activation!.id}`))
+        .toEqual({ operation: 'activate-plan' })
+      expect(database.prepare("SELECT operation FROM operation_receipts WHERE idempotency_key = ?").get(`post-activation-rollback:${activated.activation!.id}:${plan.activation!.fence}`))
+        .toEqual({ operation: 'post-activation-rollback' })
+      database.close()
+    })
+
+    test('healthy evidence cannot begin rollback and a live successor owns the profile after a later signed regression', async () => {
+      const target = await fixture(); const { plan, host } = await promoted(target, 'watch-successor-guard')
+      target.setNow(target.now() + 1_000)
+      await target.store.recordPostActivationObservation({ idempotencyKey: 'watch-successor:healthy',
+        receipt: watchObservation(host, plan, { observationId: 'successor-healthy', hostGeneration: 8, observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      expect(() => target.store.beginPostActivationRollback({ planId: plan.id, expectedRevision: plan.revision }))
+        .toThrow(/exact signed closed watch/u)
+      target.setNow(target.now() + 1_000)
+      await target.store.recordPostActivationObservation({ idempotencyKey: 'watch-successor:regressed',
+        receipt: watchObservation(host, plan, { observationId: 'successor-regressed', disposition: 'regressed',
+          hostGeneration: target.store.latestHostGeneration(installationId), observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      const successor = await approved(target, 'watch-successor-live', 'web')
+      await target.store.claimActivation(activationClaim(successor))
+      expect(() => target.store.beginPostActivationRollback({ planId: plan.id, expectedRevision: plan.revision }))
+        .toThrow(/newer activation currently owns/u)
     })
 
     test('an owner retraction closes the watching deployment, reopens the gap, and deletes its plan claim', async () => {
@@ -1513,9 +1580,9 @@ catch { process.stdout.write('busy') } finally { db.close() }`
         resolveAuthority: () => host.observationAuthority })
       target.setNow(target.now() + 1_000)
       const staleGeneration = watchObservation(host, plan, { observationId: 'obs-stale-generation',
-        hostGeneration: 8, observedAt: target.now() })
+        hostGeneration: 7, observedAt: target.now() })
       await expect(target.store.recordPostActivationObservation({ idempotencyKey: 'watch:stale-generation',
-        receipt: staleGeneration, resolveAuthority: () => host.observationAuthority })).rejects.toThrow(/host generation must advance/u)
+        receipt: staleGeneration, resolveAuthority: () => host.observationAuthority })).rejects.toThrow(/host generation regressed/u)
       const fresh = watchObservation(host, plan, { observationId: 'obs-stale-revision',
         hostGeneration: 9, observedAt: target.now() })
       await expect(target.store.recordPostActivationObservation({ idempotencyKey: 'watch:stale-revision',
@@ -1568,6 +1635,28 @@ catch { process.stdout.write('busy') } finally { db.close() }`
         receipt: watchObservation(host, plan, { observationId: 'obs-post-migration', hostGeneration: 8, observedAt: target.now() }),
         resolveAuthority: () => host.observationAuthority })
       expect(receipt.result).toMatchObject({ state: 'watching', revision: 2, healthyObservations: 1 })
+    })
+
+    test('migration v16 creates empty post-activation rollback checkpoints without inventing historical pins', async () => {
+      const target = await fixture(); const { plan, host } = await promoted(target, 'checkpoint-v16')
+      target.store.close()
+      const legacy = new DatabaseSync(target.path)
+      legacy.exec('DROP TABLE activation_deployment_checkpoints; DROP TABLE activation_deployment_sequence; PRAGMA user_version = 16;')
+      legacy.close(); await chmod(target.path, 0o600)
+      const migrated = openControlPlaneDatabase(target.path)
+      expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(controlPlaneSchemaVersion)
+      expect(migrated.prepare('SELECT count(*) AS count FROM activation_deployment_checkpoints').get()).toEqual({ count: 0 })
+      expect(migrated.prepare('SELECT next_exposure_order FROM activation_deployment_sequence WHERE singleton = 1').get())
+        .toEqual({ next_exposure_order: 1 })
+      migrated.close()
+      const reopened = new ControlPlaneStore({ path: target.path, now: target.now }); target.store = reopened
+      expect(reopened.getActivationInstalledBaseline(plan.id)).toBeUndefined()
+      target.setNow(target.now() + 1_000)
+      await reopened.recordPostActivationObservation({ idempotencyKey: 'checkpoint-v16:regression',
+        receipt: watchObservation(host, plan, { observationId: 'checkpoint-v16:regression', disposition: 'regressed', hostGeneration: 8, observedAt: target.now() }),
+        resolveAuthority: () => host.observationAuthority })
+      await expect(() => reopened.beginPostActivationRollback({ planId: plan.id, expectedRevision: plan.revision }))
+        .toThrow(/successful installed baseline checkpoint/u)
     })
   })
 })

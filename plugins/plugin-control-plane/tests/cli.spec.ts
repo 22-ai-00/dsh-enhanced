@@ -1272,24 +1272,30 @@ describe.sequential('trusted staged CLI', () => {
     database.close()
   }, 15_000)
 
-  test('watch-observe accepts signed healthy and regressed Host evidence and closes the exact pinned watch', async () => {
+  test('watch-observe restores the retained profile and attests Host recovery after signed regression', async () => {
     const value = await fixture(); const plan = await activatedByProbe(value, 'watch-observe')
     const healthyPath = join(value.control, 'watch-healthy.json')
-    await writeFile(healthyPath, JSON.stringify(watchObservationReceipt(plan, value.privateKey, { observationId: 'obs-healthy-1', hostGeneration: 8 })), { mode: 0o600 })
+    await writeFile(healthyPath, JSON.stringify(watchObservationReceipt(plan, value.privateKey, { observationId: 'obs-healthy-1', hostGeneration: 1 })), { mode: 0o600 })
     await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', healthyPath]))
     let store = new ControlPlaneStore({ path: value.state })
-    expect(store.getActivationWatch(plan.id)).toMatchObject({ state: 'watching', revision: 2, healthyObservations: 1, lastHostGeneration: 8 })
+    expect(store.getActivationWatch(plan.id)).toMatchObject({ state: 'watching', revision: 2, healthyObservations: 1, lastHostGeneration: 1 })
     store.close()
     const regressedPath = join(value.control, 'watch-regressed.json')
     await writeFile(regressedPath, JSON.stringify(watchObservationReceipt(plan, value.privateKey,
-      { observationId: 'obs-regress-1', disposition: 'regressed', hostGeneration: 9 })), { mode: 0o600 })
-    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', regressedPath]))
+      { observationId: 'obs-regress-1', disposition: 'regressed', hostGeneration: 1 })), { mode: 0o600 })
+    await withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory }, () => runPluginControl(['watch-observe', '--receipt', regressedPath]))
     store = new ControlPlaneStore({ path: value.state })
     const watch = store.getActivationWatch(plan.id)
     expect(watch.state).toBe('closed-regressed')
     expect(watch.close).toMatchObject({ disposition: 'regressed', evidenceId: 'obs-regress-1' })
-    expect(store.getPlan(plan.id).status).toBe('activated')
+    expect(store.getPlan(plan.id)).toMatchObject({ status: 'rolled-back', activation: { rollbackProfileRestored: true } })
+    expect(store.latestHostGeneration(installationId)).toBeGreaterThan(1)
+    expect(store.getGap(plan.gapId).status).toBe('open')
     store.close()
+    await expect(readFile(join(value.profile, 'pnpm-lock.yaml'))).rejects.toThrow(/ENOENT/u)
+    await expect(readFile(join(value.profile, 'marker'), 'utf8')).resolves.toBe('original')
+    // Replaying the same signed trigger must neither restore twice nor dispatch a new Host operation.
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', regressedPath]))
     await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-show', '--plan-id', plan.id]))
   }, 15_000)
 
@@ -1297,14 +1303,124 @@ describe.sequential('trusted staged CLI', () => {
     const value = await fixture(); const plan = await activatedByProbe(value, 'watch-retract')
     const retractionPath = join(value.control, 'watch-retract.json')
     await writeFile(retractionPath, JSON.stringify(watchRetractionReceipt(plan, value.privateKey, 'retract-1')), { mode: 0o600 })
-    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-retract', '--receipt', retractionPath]))
+    await withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory }, () => runPluginControl(['watch-retract', '--receipt', retractionPath]))
     const store = new ControlPlaneStore({ path: value.state })
     expect(store.getActivationWatch(plan.id).state).toBe('closed-retracted')
+    expect(store.getPlan(plan.id).status).toBe('rolled-back')
     const gap = store.getGap(plan.gapId)
     expect(gap.status).toBe('open')
     expect('candidateId' in gap).toBe(false)
     store.close()
   }, 15_000)
+
+  test.each(['target', 'backup'] as const)('post-activation rollback preserves both profiles when the %s core files drift', async location => {
+    const value = await fixture(); const plan = await activatedByProbe(value, `watch-drift-${location}`)
+    const suffix = plan.activation!.id.replace(/[^A-Za-z0-9-]/gu, '').slice(-36)
+    const backup = join(value.dshHome, 'profiles', `.web.plugin-backup-${suffix}`)
+    const targetLock = await readFile(join(value.profile, 'pnpm-lock.yaml'), 'utf8')
+    await writeFile(join(location === 'target' ? value.profile : backup, 'package.json'), '{"manual":true}\n')
+    const receiptPath = join(value.control, 'regression.json')
+    await writeFile(receiptPath, JSON.stringify(watchObservationReceipt(plan, value.privateKey,
+      { observationId: `drift-${location}`, hostGeneration: 8, disposition: 'regressed' })), { mode: 0o600 })
+    await expect(withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', receiptPath])))
+      .rejects.toThrow(/changed.*reconciliation/u)
+    await expect(readFile(join(value.profile, 'pnpm-lock.yaml'), 'utf8')).resolves.toBe(targetLock)
+    await expect(readFile(join(backup, 'marker'), 'utf8')).resolves.toBe('original')
+    const store = new ControlPlaneStore({ path: value.state })
+    expect(store.getPlan(plan.id).status).toBe('rollback-pending')
+    expect(store.getPlan(plan.id).activation?.rollbackProfileRestored).toBeUndefined()
+    store.close()
+  }, 15_000)
+
+  test('restores files but stays pending without a configured Host attestor, then resumes the same trigger', async () => {
+    const value = await fixture(); const plan = await activatedByProbe(value, 'watch-manual-recovery')
+    const trust = { ...value.trust, hostAttestor: null }
+    await writeFile(value.trustPath, JSON.stringify(trust), { mode: 0o600 })
+    const receiptPath = join(value.control, 'regression.json')
+    await writeFile(receiptPath, JSON.stringify(watchObservationReceipt(plan, value.privateKey,
+      { observationId: 'manual-recovery', hostGeneration: 8, disposition: 'regressed' })), { mode: 0o600 })
+    await withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', receiptPath]))
+    let store = new ControlPlaneStore({ path: value.state })
+    expect(store.getPlan(plan.id)).toMatchObject({ status: 'rollback-pending', activation: { rollbackProfileRestored: true } })
+    store.close()
+    await expect(readFile(join(value.profile, 'pnpm-lock.yaml'))).rejects.toThrow(/ENOENT/u)
+    await writeFile(value.trustPath, JSON.stringify(value.trust), { mode: 0o600 })
+    await withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory },
+      () => runPluginControl(['watch-observe', '--receipt', receiptPath]))
+    store = new ControlPlaneStore({ path: value.state })
+    expect(store.getPlan(plan.id).status).toBe('rolled-back'); store.close()
+  }, 15_000)
+
+  test('post-activation rollback reconciles a lost Host reply using the same durable operation', async () => {
+    const value = await fixture(); const plan = await activatedByProbe(value, 'watch-lost-reply')
+    const receiptPath = join(value.control, 'regression.json')
+    await writeFile(receiptPath, JSON.stringify(watchObservationReceipt(plan, value.privateKey,
+      { observationId: 'lost-reply', hostGeneration: 8, disposition: 'regressed' })), { mode: 0o600 })
+    await expect(withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory,
+      HOST_ATTESTOR_MODE: 'lost-reply' }, () => runPluginControl(['watch-observe', '--receipt', receiptPath]))).rejects.toThrow()
+    const db = new DatabaseSync(value.state)
+    const operation = db.prepare("SELECT operation_id, request_json, status FROM host_attestation_operations WHERE plan_id = ? AND phase = 'rollback'").get(plan.id)!
+    expect(operation.status).toBe('pending')
+    const generation = await readFile(join(value.attestorDirectory, 'host-generation'), 'utf8')
+    await withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory },
+      () => runPluginControl(['watch-observe', '--receipt', receiptPath]))
+    expect(db.prepare("SELECT operation_id, request_json, status FROM host_attestation_operations WHERE plan_id = ? AND phase = 'rollback'").get(plan.id))
+      .toMatchObject({ ...operation, status: 'applied' })
+    db.close()
+    await expect(readFile(join(value.attestorDirectory, 'host-generation'), 'utf8')).resolves.toBe(generation)
+    const store = new ControlPlaneStore({ path: value.state }); expect(store.getPlan(plan.id).status).toBe('rolled-back'); store.close()
+  }, 15_000)
+
+  test.each(['absent', 'candidate-moved', 'baseline-restored'] as const)('post-activation rollback resumes the %s filesystem checkpoint', async checkpoint => {
+    const value = await fixture(); if (checkpoint === 'absent') await rm(value.profile, { recursive: true })
+    const plan = await activatedByProbe(value, 'watch-absent-recovery')
+    const receipt = watchObservationReceipt(plan, value.privateKey,
+      { observationId: 'absent-recovery', hostGeneration: 8, disposition: 'regressed' })
+    const receiptPath = join(value.control, 'regression.json'); await writeFile(receiptPath, JSON.stringify(receipt), { mode: 0o600 })
+    const { Ed25519PostActivationObservationAuthority } = await import('../src/post-activation.ts')
+    const store = new ControlPlaneStore({ path: value.state })
+    await store.recordPostActivationObservation({ receipt, idempotencyKey: `post-activation-observation:${receipt.observationId}`,
+      resolveAuthority: () => new Ed25519PostActivationObservationAuthority(value.trust.hostAttestationKeys[0]!.publicKeyPem, 'host-runtime', 'host-key-1') })
+    store.beginPostActivationRollback({ planId: plan.id, expectedRevision: plan.revision }); store.close()
+    const suffix = plan.activation!.id.replace(/[^A-Za-z0-9-]/gu, '').slice(-36)
+    await rename(value.profile, join(value.dshHome, 'profiles', `stage-${suffix}`))
+    if (checkpoint === 'baseline-restored') await rename(join(value.dshHome, 'profiles', `.web.plugin-backup-${suffix}`), value.profile)
+    await withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory },
+      () => runPluginControl(['watch-observe', '--receipt', receiptPath]))
+    if (checkpoint === 'absent') await expect(stat(value.profile)).rejects.toThrow(/ENOENT/u)
+    else {
+      await expect(readFile(join(value.profile, 'marker'), 'utf8')).resolves.toBe('original')
+      await expect(readFile(join(value.profile, 'pnpm-lock.yaml'))).rejects.toThrow(/ENOENT/u)
+    }
+    const latest = new ControlPlaneStore({ path: value.state })
+    expect(latest.getPlan(plan.id).status).toBe('rolled-back'); latest.close()
+  }, 15_000)
+
+  test('a successful successor retires the old backup and old signed feedback cannot overwrite it', async () => {
+    const value = await fixture(); const old = await activatedByProbe(value, 'watch-old')
+    const current = await activatedByProbe(value, 'watch-successor')
+    const backup = (plan: PluginActivationPlan) => join(value.dshHome, 'profiles',
+      `.web.plugin-backup-${plan.activation!.id.replace(/[^A-Za-z0-9-]/gu, '').slice(-36)}`)
+    await expect(stat(backup(old))).rejects.toThrow(/ENOENT/u)
+    await expect(stat(backup(current))).resolves.toBeDefined()
+    const installedLock = await readFile(join(value.profile, 'pnpm-lock.yaml'), 'utf8')
+    const receiptPath = join(value.control, 'old-regression.json')
+    await writeFile(receiptPath, JSON.stringify(watchObservationReceipt(old, value.privateKey,
+      { observationId: 'old-regression', hostGeneration: 8, disposition: 'regressed' })), { mode: 0o600 })
+    await expect(withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', receiptPath])))
+      .rejects.toThrow(/superseded|newer|current|retired/u)
+    await expect(readFile(join(value.profile, 'pnpm-lock.yaml'), 'utf8')).resolves.toBe(installedLock)
+    const store = new ControlPlaneStore({ path: value.state }); expect(store.getPlan(current.id).status).toBe('activated'); store.close()
+    // Even when a successor restores this version, the historical deployment
+    // must not regain permission to restore its now-retired predecessor (ABA).
+    const retractPath = join(value.control, 'successor-retract.json')
+    await writeFile(retractPath, JSON.stringify(watchRetractionReceipt(current, value.privateKey, 'successor-retract')), { mode: 0o600 })
+    await withEnvironment({ DSH_HOME: value.dshHome, HOST_ATTESTOR_FIXTURE_DIR: value.attestorDirectory },
+      () => runPluginControl(['watch-retract', '--receipt', retractPath]))
+    await expect(withEnvironment({ DSH_HOME: value.dshHome }, () => runPluginControl(['watch-observe', '--receipt', receiptPath])))
+      .rejects.toThrow(/superseded|newer|current|retired/u)
+    await expect(readFile(join(value.profile, 'pnpm-lock.yaml'), 'utf8')).resolves.toBe(installedLock)
+  }, 20_000)
 
   test('watch-observe rejects a signed receipt pinned to a different exact version', async () => {
     const value = await fixture(); const plan = await activatedByProbe(value, 'watch-wrong-exact')
