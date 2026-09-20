@@ -1092,6 +1092,17 @@ export class EvaluationStore {
     return this.getTaskLearningProjection(scopeInput, task.projection.primaryOutcomeId)
   }
 
+  /** Host-only exact current foreground projection, including retractions. */
+  getForegroundLearningProjection(scopeInput: EvaluationScope, inboxIdInput: string): TrustedTaskLearningProjectionReceipt | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const inboxId = boundedText(inboxIdInput, 'inboxId', 1_000)
+    const row = this.#database.prepare(`SELECT task.* FROM evaluation_task_projection_view task
+      WHERE task.scope_key = ? AND task.task_subject_kind = 'foreground-turn' AND task.task_subject_ref = ?`)
+      .get(scopeKey, inboxId) as unknown as ProjectedOutcomeRow | undefined
+    if (row === undefined) return undefined
+    return this.getTaskLearningProjection(scopeInput, projected(row).projection.primaryOutcomeId)
+  }
+
   /** Exact whole-goal lookup by the verifier assessment identity. */
   getGoalOutcomeLearningProjection(
     scopeInput: EvaluationScope,

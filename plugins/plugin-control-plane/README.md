@@ -400,9 +400,9 @@ sourceAdoptions:
 
 schema 20 的 `foreground_deployments` 在真实 owner 前台任务开始和完成时保存身份及运行实例。采样复用认证 observer 的同一实例，核对已应用 readiness 的签名、保留观测摘要、PID/InvocationID、profile、Fiber/依赖/服务代次，并关联精确 package/version/integrity。只接受当前最近一次成功部署、已完成 owner 源码采用、且属于同一 owner/workspace/preset 的新任务；未结算部署、重载、实例变化或非静止完成均不产生有效观察。注销/重启中断的记录保持 pending，历史任务不回填。trust 文件改变后需重载配置；观察失败不会中断正常对话。
 
-Host 可用 `inspectOwnerForegroundDeployment()` 按与 Delivery 学习来源查询相同的参数读取归因；它重验当前可信任务，保持原学习来源摘要不变。记录证明该任务处于这一部署实例下，不证明调用过某个工具或该版本导致了结果，也不会把正常结束计作质量成功。读取结果作为质量依据仍需消费当前 canonical 反馈与撤回，并在最终写入时使用 writer fence。自动签发观察证据、持续回退和可安装日常使用配置仍待接通；此能力不代表完整自迭代或 npm 发布验收通过。
+Host 可用 `inspectOwnerForegroundDeployment()` 按与 Delivery 学习来源查询相同的参数读取归因；它重验当前可信任务，保持原学习来源摘要不变。记录证明该任务处于这一部署实例下，不证明调用过某个工具或该版本导致了结果，也不会把正常结束计作质量成功。读取结果作为质量依据仍需消费当前 canonical 反馈与撤回，并在最终写入时使用 writer fence。可选 `taskObservations` 已接通有限批次的当前反馈、签名观察与物理回退；可安装日常使用配置及端到端部署验收仍待完成，此能力不代表 npm 发布验收通过。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 20 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 21 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 非 owner-task 来源的计划可用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。adapter 返回签名 publish 歧义回执后进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。派发后没有签名回执则保持 unknown，不自动重跑；普通 owner-task 来源的全部阶段必须通过 Host 当前来源校验。
 
@@ -459,3 +459,37 @@ Host 可显式使用 `EffectBlockedReplayRuntime`，复用当前 Loader、ToolRu
 回放依赖与 Host AgentLoop 同一模块实例的 `@deepseek-ai/dsh-scope` peer；使用原生 scope 验证 Host/Agent 身份，不能混用工作区和实际 Host 的副本。`agent.preset` 仅写入会话元数据，工具需由 Host 钩子注册。真实 DSH CLI `0.1.5-rc.2` 已验证完成态重启 stale 和 SIGKILL 后 unknown、不重复派发；硬退出留下的 socket 由 supervisor 确认旧进程已停止后清理，journal 保留。
 
 这是未签名的观察组件，不能单独推进启用状态。外部签名器、未知操作的外部对账和独立副作用读回仍需后续接线。权限包括 owner 配置路径/密钥读取、私有 journal 写入、Unix socket、当前 Loader 状态、原生 Agent 创建/回收、工具管线与 Delivery 方法；原生钩子仍有 Host 权限，组件不提供 OS/网络隔离。完整生命周期、边界及示例见[组件契约](../../docs/effect-blocked-replay.md)。
+
+
+### 真实使用中的部署观察
+
+目标 Host 可启用下面的可选项，依赖同一 profile 的 `foregroundDeployments`、Delivery、Evaluation 和 Automations。调度由原生 Automations 的每分钟 cron 执行；配置期间扫描至多最近 1,000 条有效部署任务，不调用模型，不产生新的 AgentLoop。该窗口之外的任务不参与观察。
+
+```yaml
+taskObservations:
+  policy:
+    id: owner-plugin-watch-1
+    expiresAt: 1790000000000 # 替换为有限授权截止时间（毫秒）
+    maximumObservations: 20
+    minimumChecks: 2
+    maximumChecks: 8
+    lookbackMs: 86400000
+  scope:
+    ownerRouteId: owner-route
+    principalId: owner
+    workspace: /srv/dsh-owner/workspace
+    preset: primary
+  profilePath: /srv/dsh-owner/profiles/web
+  timeoutMs: 60000
+  authority:
+    executable: { path: /srv/dsh-owner/bin/dsh-task-observation-authority.js, sha256: '<固定文件摘要>' }
+    interpreter: { path: /usr/bin/node, sha256: '<固定解释器摘要>' }
+    configPath: /srv/dsh-owner/private/task-observation.json
+    timeoutMs: 10000
+```
+
+`dsh-task-observation-authority --config <private-file>` 从 stdin 接收 `{ protocol: "dsh-task-observation/v1", observationId, observationDigest }`，只读控制面账本中的批次。独立私有配置字段为 `schemaVersion: 1`、`authority`、`keyId`、`keyPath`、`statePath`、`controlDatabasePath` 与 `grant`；grant 包含与 Host 完全相同的 `policy`、稳定 `owner`（authorityId/authorityHash/principalId/principalRecordId/principalVersion/workspace/agentPreset）、`installationId`、`ledger: { id, path }`、`profilePath`、允许的 `packages` 数组和 `receiptTtlMs`（1,000–300,000）。Ed25519 公钥进入 trust 的 `hostAttestationKeys`。配置、密钥、数据库路径须为 owner 私有本地文件；固定执行器通过受限环境和描述符执行，无网络或模型凭据。其签名授权不授予候选插件修改控制面或验收器的权限。
+
+每个批次包含同一实际部署下、不同真实任务的当前 `achieved/not-achieved` owner 反馈或独立 verifier 结果；unknown、撤回、截断或非静止任务不计票。批次内任一失败触发 `regressed`，否则为 `healthy`。这是 owner 明确选择的部署任务组策略，不能证明某个工具被调用或该版本造成结果。相同任务的相同 canonical revision 只落账一次；后续纠正可形成新观察。批次身份、grant/key 指纹、签名次数和回执持久化，重启重试复用原回执，不延长期限。政策最多 1,000 次观察、每批 1–32 个任务、回看 1 秒至 30 天。
+
+Host 在冻结批次、签名前后与最终落账时重读来源；最终 Evaluation writer fence 包裹控制面 SQLite 事务，同步写入 watch 和 applied 状态。签名器验证有限策略及已记录部署事实，可信任务质量来自 Host 当前 canonical 读取；它不是另一次独立模型评分，也不构成同 UID 文件隔离。签名期间纠正、撤回或部署变化阻止旧观察落账。已落账的回滚决定保留审计，后续反馈变更不取消恢复义务；cron 复用现有物理恢复/Host attestor 回执链，失败保留待恢复状态。进程重启可继续，主动卸载会暂停对应 cron、取消并等待在途执行，再关闭连接。owner/trust 被撤销、目标 Host 自身重启或资源无法释放时仍需外部控制面/CLI 完成恢复，不能承诺目标 Host 单独完成自重启恢复。
