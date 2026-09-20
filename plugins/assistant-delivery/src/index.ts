@@ -15,6 +15,8 @@ export type {
 } from './goal-wake-types.js'
 export * from './types.js'
 export * from './operator.js'
+export { ReplyReplayBlockedError, replyReplayInputDigest, replyReplayBlockContract } from './reply-replay.js'
+export type { ReplyReplayBlockConfig, ReplyReplayBlockHandle, ReplyReplayBlockSnapshot, ReplyReplayBlockedAttempt } from './reply-replay.js'
 export * from './learning-command.js'
 export { externalPrincipalId, ownerRouteAuthorityHash } from './canonical.js'
 export { deliverySchemaVersion } from './sqlite.js'

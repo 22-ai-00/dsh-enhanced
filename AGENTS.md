@@ -58,3 +58,5 @@ Deliver in capability-sized commits. Once an independently usable capability pas
 Run `pnpm check` from the repository root. Completion requires manifest validation, zero lint warnings, successful typechecking and tests, a clean build, and a successful dry-run pack for every plugin. Inspect the dry-run file list whenever package boundaries or `files` change.
 
 Keep changes scoped to the requested plugin or shared contract. Generated output (`lib/`, coverage, tarballs, caches) stays untracked.
+
+Keep raw runtime evidence, JSON dumps, and logs local (for example, ignored `docs/evidence/`) or in CI artifacts; commit only concise verification commands, results, and limitations.

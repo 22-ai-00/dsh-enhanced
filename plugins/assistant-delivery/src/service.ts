@@ -74,6 +74,12 @@ import {
 import { isExactDeliveryCommand, parseDeliveryCommand } from './session-commands.js'
 import { deliveryT1PreferenceKeys, deliveryT1PreferenceValues } from './learning-command.js'
 import {
+  assertReplyReplayAllowed,
+  blockAgentRepliesForReplay as createReplyReplayBlock,
+  type ReplyReplayBlockConfig,
+  type ReplyReplayBlockHandle,
+} from './reply-replay.js'
+import {
   feedbackSignalInput,
   parseFeedbackCommand,
   classifyNaturalPreferenceDirective,
@@ -4509,6 +4515,12 @@ export class AssistantDeliveryService extends Service {
     return this.deliveryStore.enqueue(prepared.intent)
   }
 
+  /** Host-only replay boundary. The returned tombstone fences this exact Agent object permanently. */
+  blockAgentRepliesForReplay(agent: Agent, config: ReplyReplayBlockConfig): ReplyReplayBlockHandle {
+    this.assertActive()
+    return createReplyReplayBlock(agent, config)
+  }
+
   private async replyCompletedPreferenceTurn(
     agent: Agent,
     expectedBinding: Readonly<ConversationBinding>,
@@ -4553,6 +4565,7 @@ export class AssistantDeliveryService extends Service {
     permissionPicker?: PermissionPickerIntent
     replyToEventId?: string
   }): Readonly<{ binding: ConversationBinding; intent: OutboundIntent }> {
+    assertReplyReplayAllowed(agent, input)
     this.assertActive()
     const binding = agent === undefined ? undefined : this.deliveryStore.getBindingBySession(String(agent.session.id))
     if (agent === undefined || binding === undefined || binding.status !== 'active'

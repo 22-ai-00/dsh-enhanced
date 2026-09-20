@@ -36,6 +36,7 @@ sessions/
 *.local
 
 # Logs and diagnostics
+/docs/evidence/
 *.log
 logs/
 npm-debug.log*

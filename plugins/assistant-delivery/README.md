@@ -401,6 +401,10 @@ pnpm --dir plugins/assistant-delivery pack --dry-run
 
 Host 编排可从 `@dsh-enhanced/assistant-delivery/types` 读取无服务初始化的公开类型；该入口不激活 Delivery，也不授予消息发送权限。根构建先生成此类型入口，避免 Evaluation benchmark 与 Delivery 服务声明形成构建环。
 
+## Host 回放的回复阻断
+
+`blockAgentRepliesForReplay(agent, { operationId, maximumAttempts, expiresAt })` 为专用 Agent 建立永久拒绝回复的标记。真实 `reply()` 与完成偏好回合的回复在绑定、Policy、Outbox 前记录有界输入摘要并拒绝；其他 Agent 不受影响。关闭句柄、到期、限额和 Agent Fiber 卸载均不会恢复权限。它不授予发送权限、不新增模型工具，也不阻断其他 Host 发送 API；快照是进程内观察，不是外部签名或全局无副作用证明。见[回放组件契约](../../docs/effect-blocked-replay.md)。
+
 ## 持久主人提醒
 
 `enqueueOwnerNotification` 为可信 Host 插件提供限定主人路由、原会话、身份版本和有效期的提醒入队接口。普通 `enqueueBackground` 不能写入保留的 `dsh.native-notice*` 元数据。投递前重查当前主人、绑定版本与代次、路由、期限及背景 `send` Policy；过期、撤权或换代的队列不会发送。
