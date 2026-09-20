@@ -276,4 +276,11 @@ Verifier 可选源码审查复用已固定 DSH `agents.create`、`installModelSe
 
 Schema 19 adds `source_adoptions`, binding one completed owner source release to one activation plan, its exact candidate and original task reference. Existing activation and signed receipt formats remain unchanged. Older binaries reject this newer ledger; retain the current binary for pending deployment recovery.
 
-Optional `sourceAdoptions` extends the same native source job into finite activation approval and the shared CLI deployment engine. Forward activation requires the current Host owner-source fence; rollback remains possible after source withdrawal. Installer work uses a dedicated connection and the existing SQLite/profile mutex protocol. Ordinary task version attribution and signed post-deployment observations remain separate unfinished integration work.
+Optional `sourceAdoptions` extends the same native source job into finite activation approval and the shared CLI deployment engine. Forward activation requires the current Host owner-source fence; rollback remains possible after source withdrawal. Installer work uses a dedicated connection and the existing SQLite/profile mutex protocol. Subsequent foreground attribution is described below; signed post-deployment quality observations remain unfinished integration work.
+
+
+### Foreground deployment attribution (Control Plane schema 20)
+
+Schema 20 adds `foreground_deployments` for new authenticated owner tasks, preserving exact applied readiness, loaded runtime identity and completion facts. Migration preserves existing source-adoption bindings and never backfills tasks. Delivery remains schema 23; its optional synchronous Host observer leaves the existing v1 learning-source digest unchanged. Both packages must include the new observer API when this option is enabled.
+
+The target Host shares the runtime observer sampler with the attested socket and reads the configured systemd journal. Its trust file is pinned for the owning Fiber. HMR, provider replacement, pending deployment or incomplete teardown prevents a stable witness. This covers the built-in external-channel foreground runtime only. It neither grades task quality nor signs post-activation health observations.

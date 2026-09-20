@@ -403,6 +403,8 @@ Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果�
 
 当前 Web 只支持单已认证控制面的文本交互；图片、完整 queue/steer、跨渠道 owner 别名和子 Agent 历史仍未验收。原生 Web 安装及浏览器验证范围见 [RSI 当前状态](../../docs/rsi-status.md)，配置、Policy 与权限见 [Web owner 包说明](../assistant-web-owner/README.md)。
 
+可选 Host 接口 `registerForegroundTaskObserver()` 只接受当前 Control Plane 拥有的注册，在认证 Inbox 的执行绑定后同步通知开始，资源释放并保存真实执行回执后通知结束。它不改变 schema 23 或学习来源摘要，不注册模型工具；注销、owner/服务换代及重启后不补发历史事件，观察错误不影响正常聊天。部署版本与 readiness 核对由 [Control Plane](../plugin-control-plane) 持有；这些事件本身不证明任务质量或具体工具调用。
+
 Host 编排可从 `@dsh-enhanced/assistant-delivery/types` 读取无服务初始化的公开类型；该入口不激活 Delivery，也不授予消息发送权限。根构建先生成此类型入口，避免 Evaluation benchmark 与 Delivery 服务声明形成构建环。
 
 ## Host 回放的回复阻断

@@ -307,7 +307,7 @@ sourceApprovals:
 
 在 Control Plane trust 的 `approvalKeys` 登记对应 Ed25519 公钥；该 key 不用于 release authorization、发布或 Host attestation。owner 字段取实际 Delivery 回执，不由模型生成。grant id 的配置与 key 指纹不可变，额度和已签回执落入独立 SQLite；重启及同一请求重试不重置额度、不延长签名期限。
 
-签名器只读当前 schema 19 控制面库，重新验证完整来源摘要、owner、期限、仓库及 worktree 归属、检查证据和当前 tree/patch。默认只允许白名单非保护插件 `src/` 下的普通 `.ts/.js/.mts/.mjs` 源文件修改；`grant.versioning: "patch"` 仅额外允许上述 Host 管理的 manifest 版本变化。测试目录、其他 manifest 字段、脚本、lockfile 和保护插件不在授权范围。工程检查证据不构成业务目标达成证明。
+签名器只读当前 schema 20 控制面库，重新验证完整来源摘要、owner、期限、仓库及 worktree 归属、检查证据和当前 tree/patch。默认只允许白名单非保护插件 `src/` 下的普通 `.ts/.js/.mts/.mjs` 源文件修改；`grant.versioning: "patch"` 仅额外允许上述 Host 管理的 manifest 版本变化。测试目录、其他 manifest 字段、脚本、lockfile 和保护插件不在授权范围。工程检查证据不构成业务目标达成证明。
 
 持久作业在 `prepared` 落账后调用审批，Host 在验签后以 Delivery/Evaluation 当前来源 writer fence 提交 `approved`。纠正、撤回、身份/会话换代、取消或 trust 变化均阻止提交。审批失败保留 pending 计划和已完成构建；重启恢复最多 1000 个 pending 的 owner 作业，仍核对原 sourceJobs 授权和 owner，只重试审批。单次 helper 至多 10 秒；卸载会等待子进程清理并丢弃迟到结果。Host 可调用 `requestOwnerSourceApproval({planId, signal?})` 显式重试；该方法不暴露为模型工具。inline 准备仍只返回 pending。
 
@@ -396,9 +396,13 @@ sourceAdoptions:
 
 使用 systemd 重启目标 Host 时，控制面应运行在目标 Host 之外，避免目标重启中断自己的部署作业。采用使用独立 SQLite 连接，并复用现有 profile 锁和跨进程文件操作互斥；同一 Service 一次执行一个采用任务。任务来源在异步操作前后重验，取消或失败后保留恢复义务。物理恢复不依赖已撤回的来源授权；已暴露 profile 仍须取得原 Host 的独立 rollback 回执才结算。trust 绑定变化、无法确认资源释放或签名服务不可用时保留待恢复状态。Cordis 卸载取消并等待采用工作，随后关闭其连接。
 
-这提供自动采用的执行链。后续普通用户任务归因到精确部署版本、自动签发观察证据及持续回退尚需接线；未据此宣称部署后的完整自迭代或 npm 发布验收通过。
+这提供自动采用的执行链。目标 Host 可另配 `foregroundDeployments: { attestorJournalPath: /srv/dsh-owner/supervisor/reload.sqlite }`，同时启用 `runtimeObserver`，并挂载 Delivery。路径须指向 systemd attestor 实际的私有 SQLite journal；配置只授予读取已签名 readiness 记录的权限，不包含签名密钥。目标 Host 与外部部署协调器需使用同一精确控制面账本和 trust 绑定；当前实现要求同 UID 的私有文件读取，不能据此声称独立 UID 隔离。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 19 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+schema 20 的 `foreground_deployments` 在真实 owner 前台任务开始和完成时保存身份及运行实例。采样复用认证 observer 的同一实例，核对已应用 readiness 的签名、保留观测摘要、PID/InvocationID、profile、Fiber/依赖/服务代次，并关联精确 package/version/integrity。只接受当前最近一次成功部署、已完成 owner 源码采用、且属于同一 owner/workspace/preset 的新任务；未结算部署、重载、实例变化或非静止完成均不产生有效观察。注销/重启中断的记录保持 pending，历史任务不回填。trust 文件改变后需重载配置；观察失败不会中断正常对话。
+
+Host 可用 `inspectOwnerForegroundDeployment()` 按与 Delivery 学习来源查询相同的参数读取归因；它重验当前可信任务，保持原学习来源摘要不变。记录证明该任务处于这一部署实例下，不证明调用过某个工具或该版本导致了结果，也不会把正常结束计作质量成功。读取结果作为质量依据仍需消费当前 canonical 反馈与撤回，并在最终写入时使用 writer fence。自动签发观察证据、持续回退和可安装日常使用配置仍待接通；此能力不代表完整自迭代或 npm 发布验收通过。
+
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 20 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 非 owner-task 来源的计划可用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。adapter 返回签名 publish 歧义回执后进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。派发后没有签名回执则保持 unknown，不自动重跑；普通 owner-task 来源的全部阶段必须通过 Host 当前来源校验。
 

@@ -1,7 +1,7 @@
 import { lstat, realpath } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
-import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
+import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
 import { OwnerTaskFailureGaps } from './owner-task-gaps.js'
@@ -37,6 +37,8 @@ import type { SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './s
 import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer.js'
 import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig } from './replay-endpoint.js'
 import { readPrivateRuntimeObserverKey } from './runtime-observer-protocol.js'
+import { createForegroundDeploymentObserver, foregroundTrustSnapshot, validateForegroundDeploymentConfig, type ForegroundDeploymentConfig } from './foreground-deployment-runtime.js'
+import type { ForegroundDeploymentRecord } from './foreground-deployment.js'
 
 export interface Config {
   catalogPath: string
@@ -57,6 +59,8 @@ export interface Config {
   sourceAdoptions?: SourceAdoptionConfig
   /** Explicit owner-only observation channel; no signing or activation authority. */
   runtimeObserver?: RuntimeObserverConfig
+  /** Capture real owner foreground tasks against signed, currently loaded deployments. */
+  foregroundDeployments?: ForegroundDeploymentConfig
   /** Owner-pinned finite native replay; separate from the read-only observer. */
   replayEndpoint?: ReplayEndpointConfig
 }
@@ -70,6 +74,7 @@ const schema = Schema.object({
   sourceReleaseExecution: Schema.any(),
   sourceAdoptions: Schema.any(),
   runtimeObserver: Schema.any(),
+  foregroundDeployments: Schema.any(),
   replayEndpoint: Schema.any(),
 }) as Schema<Config>
 
@@ -91,7 +96,7 @@ async function canonicalTarget(dshHome: string, profile: string): Promise<Plugin
 
 export class PluginControlPlaneService extends Service {
   static Config = schema
-  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'replayEndpoint'>
+  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'foregroundDeployments' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'runtimeObserver' | 'foregroundDeployments' | 'replayEndpoint'>
   private readonly store: ControlPlaneStore
   private readonly taskGaps: OwnerTaskFailureGaps
   private readonly abort = new AbortController()
@@ -101,6 +106,7 @@ export class PluginControlPlaneService extends Service {
   private readonly sourceReleaseFlights = new Set<Promise<unknown>>()
   private readonly sourceReleaseAdvances = new Map<string, Promise<PluginSourcePlan>>()
   private readonly sourceAdoptionFlights = new Map<string, Promise<PluginActivationPlan>>()
+  private readonly foregroundObservers = new Set<ForegroundTaskObservationRegistration>()
   private sourceRuntime: SourceJobRuntime | undefined
   private readonly sourceRuntimes = new Set<SourceJobRuntime>()
 
@@ -108,6 +114,10 @@ export class PluginControlPlaneService extends Service {
     super(ctx, 'pluginControlPlane')
     this.config = structuredClone(schema(input)) as typeof this.config
     if (this.config.runtimeObserver !== undefined) validateRuntimeObserverConfig(this.config.runtimeObserver)
+    if (this.config.foregroundDeployments !== undefined) {
+      validateForegroundDeploymentConfig(this.config.foregroundDeployments)
+      if (!this.config.runtimeObserver) throw new Error('plugin-control-plane: foregroundDeployments requires runtimeObserver')
+    }
     if (this.config.replayEndpoint !== undefined) {
       validateReplayEndpointConfig(this.config.replayEndpoint)
       if (this.config.runtimeObserver !== undefined) {
@@ -153,7 +163,30 @@ export class PluginControlPlaneService extends Service {
       this.store.close()
     }, 'plugin-control-plane.store')
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
-    if (this.config.runtimeObserver !== undefined) installRuntimeObserver(ctx, this.config.runtimeObserver)
+    if (this.config.runtimeObserver !== undefined) installRuntimeObserver(ctx, this.config.runtimeObserver,
+      this.config.foregroundDeployments ? (observerCtx, sample) => {
+        const fiber = observerCtx.inject(['assistantDelivery' as never], deliveryCtx => {
+          deliveryCtx.effect(async () => {
+            const snapshot = foregroundTrustSnapshot(this.config.trustPath)
+            const trust = await this.boundTrust()
+            let live = true
+            const assertCurrent = () => {
+              this.abort.signal.throwIfAborted()
+              if (!live || foregroundTrustSnapshot(this.config.trustPath) !== snapshot) throw new Error('foreground deployment trust changed')
+            }
+            assertCurrent()
+            const registration = createForegroundDeploymentObserver({ config: this.config.foregroundDeployments!,
+              profilePath: this.config.runtimeObserver!.profilePath, store: this.store, trust, sample, assertCurrent, owner: this })
+            this.foregroundObservers.add(registration)
+            try {
+              const delivery = deliveryCtx.get('assistantDelivery' as never) as unknown as AssistantDeliveryService
+              const remove = delivery.registerForegroundTaskObserver(registration)
+              return () => { live = false; this.foregroundObservers.delete(registration); remove() }
+            } catch (error) { live = false; this.foregroundObservers.delete(registration); throw error }
+          }, 'plugin-control-plane.foreground-deployments')
+        })
+        return () => fiber.dispose()
+      } : undefined)
     if (this.config.replayEndpoint !== undefined) installReplayEndpoint(ctx, this.config.replayEndpoint)
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never,
       ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : []),
@@ -204,6 +237,25 @@ export class PluginControlPlaneService extends Service {
         }
       }, 'plugin-control-plane.source-jobs')
     })
+  }
+
+  ownsForegroundTaskObservationRegistration = (registration: ForegroundTaskObservationRegistration): boolean =>
+    !this.abort.signal.aborted && this.foregroundObservers.has(registration)
+
+  /** Host-only readback. The current trusted task is reread; no caller rating is accepted. */
+  inspectOwnerForegroundDeployment = (input: Parameters<AssistantDeliveryService['inspectOwnerForegroundLearningTask']>[0]): ForegroundDeploymentRecord | undefined => {
+    this.abort.signal.throwIfAborted()
+    const delivery = this.ctx.get('assistantDelivery' as never, false) as AssistantDeliveryService | undefined
+    if (!delivery) throw new Error('foreground deployment Delivery unavailable')
+    const source = delivery.inspectOwnerForegroundLearningTask(input)
+    if (!source) return undefined
+    const record = this.store.getForegroundDeployment(source.source.inboxId)
+    if (!record || record.state !== 'observed' || !source.source.quiescent
+      || record.task.sessionId !== source.source.sessionId
+      || record.task.owner.principalRecordId !== source.owner.principalRecordId
+      || record.task.owner.principalVersion !== source.owner.principalVersion
+      || record.task.scope.workspace !== source.owner.workspace || record.task.scope.preset !== source.owner.agentPreset) return undefined
+    return record
   }
 
   private async boundTrust(): Promise<Awaited<ReturnType<typeof loadTrustConfig>>> {
