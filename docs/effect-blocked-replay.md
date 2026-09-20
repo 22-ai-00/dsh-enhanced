@@ -180,15 +180,12 @@ model quality, independent global effect observation or production activation.
 
 ## Verification
 
-Verified on Linux with Node 24.7.0 on 2026-09-20:
+Current repository-wide check results are maintained in [RSI status](rsi-status.md).
+The component suites cover:
 
-- `pnpm check` exited 0: manifest validation, zero-warning lint, typechecking,
-  6,070 tests passed (44 skipped), clean build and 35 package dry-run packs (32 plugins and 3 shared libraries).
-- The native replay suite passed all 12 cases; the Delivery reply fence suite
-  passed all 5 cases. Full package suites passed 476 and 777 tests respectively.
-- Endpoint and journal suites passed 11 and 5 cases, including authenticated
-  native execution, concurrent admission, timeout/unload, persistent unknown,
-  stale cached results and durable request/case binding checks.
+- Native replay and Delivery reply fencing through the actual Host services.
+- Endpoint and journal authentication, concurrent admission, timeout/unload,
+  persistent unknown, stale cached results and durable request/case bindings.
 - Pack lists include the runtime, endpoint/protocol and journal modules and declarations alongside the
   required package files. Raw run data and logs stay local or in CI artifacts.
 
