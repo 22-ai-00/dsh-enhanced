@@ -10,6 +10,8 @@ export type {
   DeliveryInboundRuntime,
   OwnerForegroundLearningTask,
 } from './service.js'
+export type { ForegroundExecution } from './acceptance.js'
+export type { ForegroundTaskIdentity, ForegroundTaskObservationRegistration } from './foreground-observation.js'
 export type {
   DeliveryGoalWakeInput, DeliveryGoalWakeResult, OwnerGoalOutcomeFeedbackLocator,
   OwnerGoalOutcomeFeedbackProof, OwnerGoalOutcomeFeedbackTarget,

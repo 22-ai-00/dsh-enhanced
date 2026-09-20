@@ -88,7 +88,8 @@ export function createRuntimeSampler(ctx: Context, config: RuntimeObserverConfig
 }
 
 /** One bounded request/response per connection; resources belong to this Fiber. */
-export function installRuntimeObserver(ctx: Context, input: RuntimeObserverConfig): void {
+export function installRuntimeObserver(ctx: Context, input: RuntimeObserverConfig,
+  attach?: (ctx: Context, sample: (challenge: string) => RuntimeObservation) => (() => void | Promise<void>)): void {
   validateRuntimeObserverConfig(input)
   const config = structuredClone(input)
   ctx.inject(['loader'], observerCtx => {
@@ -97,6 +98,7 @@ export function installRuntimeObserver(ctx: Context, input: RuntimeObserverConfi
       const sample = createRuntimeSampler(observerCtx, config)
       const sockets = new Set<Socket>()
       let closing = false
+      let detach: (() => void | Promise<void>) | undefined
       let identity: Awaited<ReturnType<typeof lstat>> | undefined
       const server = createServer({ allowHalfOpen: true }, socket => {
         if (closing || sockets.size >= 8) { socket.destroy(); return }
@@ -131,6 +133,7 @@ export function installRuntimeObserver(ctx: Context, input: RuntimeObserverConfi
         closing = true
         for (const socket of sockets) socket.destroy()
         try {
+          const [detached] = await Promise.allSettled([Promise.resolve().then(() => detach?.())])
           if (server.listening) await new Promise<void>((resolveClose, reject) => server.close(error => error ? reject(error) : resolveClose()))
           if (identity) {
             try {
@@ -138,6 +141,7 @@ export function installRuntimeObserver(ctx: Context, input: RuntimeObserverConfi
               if (current.ino === identity.ino && current.dev === identity.dev && current.isSocket()) await unlink(config.socketPath)
             } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
           }
+          if (detached.status === 'rejected') throw detached.reason
         } finally { key.fill(0) }
       })()
       try {
@@ -148,6 +152,12 @@ export function installRuntimeObserver(ctx: Context, input: RuntimeObserverConfi
         })
         identity = await lstat(config.socketPath)
         await chmod(config.socketPath, 0o600)
+        // In-process consumers must share this sampler's observer ID and Fiber
+        // epochs with the authenticated supervisor channel.
+        detach = attach?.(observerCtx, challenge => {
+          if (closing) runtimeObserverFail()
+          return sample(challenge)
+        })
         server.on('error', () => { void close().catch(() => observerCtx.logger.error('runtime observer teardown failed')) })
         return close
       } catch (error) { await close(); throw error }

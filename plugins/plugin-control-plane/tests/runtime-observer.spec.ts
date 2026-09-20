@@ -8,7 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { PluginControlPlaneService } from '../src/service.js'
-import { queryRuntimeObserver, runtimeConfigDigest, validateRuntimeObserverConfig, type RuntimeObserverConfig } from '../src/runtime-observer.js'
+import { installRuntimeObserver, queryRuntimeObserver, runtimeConfigDigest, validateRuntimeObserverConfig, type RuntimeObservation, type RuntimeObserverConfig } from '../src/runtime-observer.js'
 
 const createdServers = vi.hoisted(() => [] as Server[])
 vi.mock('node:net', async importOriginal => {
@@ -58,6 +58,28 @@ async function fixture(load = true, services = ['candidateService']) {
 }
 
 describe.skipIf(process.platform !== 'linux')('owner runtime observer on the pinned Loader', () => {
+  test('foreground consumers share socket identity and epochs, and lose sampling on teardown', async () => {
+    const f = await fixture(); await f.dependency(); await f.addCandidate()
+    const config = { ...f.config, socketPath: join(f.owner, 'foreground.sock') }
+    let sample: ((challenge: string) => RuntimeObservation) | undefined
+    const detached = vi.fn()
+    const fiber = f.ctx.plugin({ name: 'foreground-observer-fixture', apply(ctx: Context) {
+      installRuntimeObserver(ctx, config, (_ctx, sampler) => { sample = sampler; return detached })
+    } })
+    await fiber
+    await eventually(async () => { expect(await queryRuntimeObserver(config)).toMatchObject({ processId: process.pid }) })
+    const socket = await queryRuntimeObserver(config), local = sample!(socket.challenge)
+    expect(local.observerId).toBe(socket.observerId); expect(local.entries).toEqual(socket.entries)
+    await f.ctx.loader.update('candidate', { config: { option: 2 } })
+    const next = await queryRuntimeObserver(config)
+    expect(sample!(next.challenge).entries).toEqual(next.entries)
+    expect(next.entries[0]?.instance?.epoch).not.toBe(socket.entries[0]?.instance?.epoch)
+    await fiber.dispose()
+    expect(detached).toHaveBeenCalledTimes(1)
+    expect(() => sample!('a'.repeat(64))).toThrow()
+    await expect(lstat(config.socketPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('distinguishes missing and injection-pending entries from actual active services', async () => {
     const f = await fixture()
     expect((await f.query()).entries[0]).toMatchObject({ active: false, instance: null, module: null })

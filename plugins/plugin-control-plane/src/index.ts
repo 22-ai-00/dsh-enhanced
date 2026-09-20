@@ -16,6 +16,8 @@ export type { SourceAdoptionAuthorityConfig } from './source-adoption-authority.
 export * from './attestation.js'
 export * from './host-attestor.js'
 export * from './runtime-observer.js'
+export type { ForegroundDeploymentConfig } from './foreground-deployment-runtime.js'
+export type { ForegroundDeploymentRecord } from './foreground-deployment.js'
 export * from './effect-blocked-replay.js'
 export * from './replay-endpoint.js'
 export * from './lockfile.js'

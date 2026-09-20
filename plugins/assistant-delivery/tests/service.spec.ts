@@ -1,4 +1,4 @@
-import { Context } from '@deepseek-ai/cordis'
+import { Context, Service } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, {
   ToolCallId,
@@ -30,6 +30,7 @@ import type {
   ConversationBinding,
   ConversationRef,
   DeliveryAdapter,
+  ForegroundTaskObservationRegistration,
   InboundEnvelope,
   ModelSelectionSettlementInput,
 } from '../src/index.ts'
@@ -297,6 +298,100 @@ async function boundApprovalHarness(options: MountHarnessOptions & {
 }
 
 describe('assistant delivery Cordis service', () => {
+  test('observes only authenticated foreground execution receipts and isolates observer changes', async () => {
+    const { ctx, service } = await harness()
+    let current = true
+    let registration: ForegroundTaskObservationRegistration
+    let readRawControl: () => ForegroundObserverControlPlane
+    class ForegroundObserverControlPlane extends Service {
+      readonly registrations = new Set<ForegroundTaskObservationRegistration>()
+      constructor(context: Context) { super(context, 'pluginControlPlane'); readRawControl = () => this }
+      ownsForegroundTaskObservationRegistration = (value: ForegroundTaskObservationRegistration): boolean =>
+        current && this.registrations.has(value)
+    }
+    await ctx.plugin(ForegroundObserverControlPlane)
+    const control = readRawControl!()
+    expect(ctx.get('pluginControlPlane' as never)).not.toBe(control)
+    const begun: unknown[] = []
+    const completed: unknown[] = []
+    expect(() => service.registerForegroundTaskObserver({
+      protocol: 'plugin-control-plane/foreground-observer/v1', generation: 'spoof',
+      owner: { ownsForegroundTaskObservationRegistration: () => true }, begin: () => undefined, completed: () => {},
+    })).toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    registration = {
+      protocol: 'plugin-control-plane/foreground-observer/v1', generation: 'control-generation', owner: control,
+      begin: task => { begun.push(task); return { handle: task.inboxId } },
+      completed: (handle, task, execution) => { completed.push({ handle, task, execution }) },
+    }
+    control.registrations.add(registration)
+    const unregister = service.registerForegroundTaskObserver(registration)
+    const store = runtimeStoreFromService(service)
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'foreground-observation-session', policyRef: 'owner-dm' })
+    const internals = service as unknown as {
+      beginForegroundTaskExecution(binding: ConversationBinding, envelope: InboundEnvelope): string | undefined
+      completeForegroundTaskExecution(inboxId: string, input: { status: 'succeeded'; quiescent: boolean }): void
+    }
+    const claim = (eventId: string) => {
+      const received = store.acceptInbound({ ...envelope, eventId }).record
+      store.queueInbox(received.id, binding.id)
+      const claim = store.claimInbox({ ownerId: `foreground-observer-${eventId}`, leaseMs: 10_000, limit: 1, maxAttempts: 3 })[0]
+      expect(claim?.record.id).toBe(received.id)
+      return { received, input: { ...envelope, eventId }, claim: claim! }
+    }
+    const first = claim('evt-foreground-observer-1')
+    expect(internals.beginForegroundTaskExecution(binding, first.input)).toBe(first.received.id)
+    expect(begun).toEqual([expect.objectContaining({ inboxId: first.received.id, sessionId: binding.sessionId,
+      scope: { workspace: '/work/alpha', preset: 'primary' }, binding: { id: binding.id, version: binding.version, generation: binding.generation } })])
+    internals.completeForegroundTaskExecution(first.received.id, { status: 'succeeded', quiescent: true })
+    expect(completed).toEqual([expect.objectContaining({ handle: { handle: first.received.id },
+      task: expect.objectContaining({ inboxId: first.received.id }),
+      execution: expect.objectContaining({ status: 'succeeded', quiescent: true, executionRef: first.received.id }) })])
+    store.finishInbox({ inboxId: first.received.id, ownerId: first.claim.record.claimedBy!, fencingToken: first.claim.fencingToken, outcome: 'processed' })
+
+    const second = claim('evt-foreground-observer-2')
+    internals.beginForegroundTaskExecution(binding, second.input)
+    unregister()
+    internals.completeForegroundTaskExecution(second.received.id, { status: 'succeeded', quiescent: true })
+    expect(completed).toHaveLength(1)
+    store.finishInbox({ inboxId: second.received.id, ownerId: second.claim.record.claimedBy!, fencingToken: second.claim.fencingToken, outcome: 'processed' })
+
+    control.registrations.delete(registration)
+    registration = { ...registration, generation: 'promise-observer', begin: () => Promise.reject(new Error('async observer')),
+      completed: () => { throw new Error('must not complete a promise handle') } }
+    control.registrations.add(registration)
+    const unregisterPromise = service.registerForegroundTaskObserver(registration)
+    const third = claim('evt-foreground-observer-3')
+    expect(internals.beginForegroundTaskExecution(binding, third.input)).toBe(third.received.id)
+    internals.completeForegroundTaskExecution(third.received.id, { status: 'succeeded', quiescent: true })
+    expect(store.inspectForegroundExecutionForOwner({ inboxId: third.received.id,
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      owner: { principalRecordId: store.getPrincipal(principal)!.id, principalVersion: store.getPrincipal(principal)!.version },
+      bindingId: binding.id, bindingVersion: binding.version, bindingGeneration: binding.generation }))
+      .toEqual(expect.objectContaining({ status: 'succeeded', executionRef: third.received.id }))
+    await Promise.resolve()
+    unregisterPromise()
+    store.finishInbox({ inboxId: third.received.id, ownerId: third.claim.record.claimedBy!, fencingToken: third.claim.fencingToken, outcome: 'processed' })
+
+    control.registrations.delete(registration)
+    registration = { ...registration, generation: 'throwing-observer', begin: () => ({ captured: true }),
+      completed: () => { throw new Error('observer completion') } }
+    control.registrations.add(registration)
+    const unregisterThrowing = service.registerForegroundTaskObserver(registration)
+    const fourth = claim('evt-foreground-observer-4')
+    internals.beginForegroundTaskExecution(binding, fourth.input)
+    expect(() => internals.completeForegroundTaskExecution(fourth.received.id, { status: 'succeeded', quiescent: true })).not.toThrow()
+    expect(store.inspectForegroundExecutionForOwner({ inboxId: fourth.received.id,
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      owner: { principalRecordId: store.getPrincipal(principal)!.id, principalVersion: store.getPrincipal(principal)!.version },
+      bindingId: binding.id, bindingVersion: binding.version, bindingGeneration: binding.generation }))
+      .toEqual(expect.objectContaining({ status: 'succeeded', executionRef: fourth.received.id }))
+    unregisterThrowing()
+    current = false
+  })
+
   test.each([
     { label: 'selected', result: { status: 'selected' as const, selection: {
       provider: 'alternate', model: 'precise', reasoningEffort: 'high',

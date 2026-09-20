@@ -3,7 +3,14 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 19
+export const controlPlaneSchemaVersion = 20
+
+const foregroundDeploymentsSchema = `CREATE TABLE IF NOT EXISTS foreground_deployments (
+  inbox_id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL REFERENCES activation_plans(id) ON DELETE RESTRICT,
+  record_json TEXT NOT NULL CHECK(json_valid(record_json) AND json_type(record_json) = 'object'),
+  record_digest TEXT NOT NULL CHECK(length(record_digest) = 64)
+) STRICT, WITHOUT ROWID;`
 
 const sourceAdoptionsSchema = `CREATE TABLE IF NOT EXISTS source_adoptions (
   source_plan_id TEXT PRIMARY KEY REFERENCES source_plans(id) ON DELETE RESTRICT,
@@ -1121,6 +1128,9 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 19) {
       database.exec(`BEGIN IMMEDIATE; ${sourceAdoptionsSchema} PRAGMA user_version = 19; COMMIT;`)
     } else database.exec(sourceAdoptionsSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 20) {
+      database.exec(`BEGIN IMMEDIATE; ${foregroundDeploymentsSchema} PRAGMA user_version = 20; COMMIT;`)
+    } else database.exec(foregroundDeploymentsSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

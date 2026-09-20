@@ -61,7 +61,9 @@ import {
   type OwnerGoalOutcomeFeedbackLocator,
   type OwnerGoalOutcomeFeedbackProof,
 } from './goal-wake-types.js'
-import type { AcceptanceContract, AcceptanceHandle, TaskAcceptanceRegistration } from './acceptance.js'
+import type { AcceptanceContract, AcceptanceHandle, ForegroundExecution, TaskAcceptanceRegistration } from './acceptance.js'
+import { isSynchronousForegroundObservationHandle, validForegroundObservationRegistration,
+  type ForegroundTaskIdentity, type ForegroundTaskObservationRegistration } from './foreground-observation.js'
 import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
 import {
@@ -1005,6 +1007,7 @@ export class AssistantDeliveryService extends Service {
   private readonly preferenceProducerGeneration = `assistant-delivery-preference:${randomUUID()}`
   private readonly acceptanceProducerGeneration = `assistant-delivery-acceptance:${randomUUID()}`
   private acceptanceSink: Readonly<{ token: symbol; registration: TaskAcceptanceRegistration }> | undefined
+  private foregroundObserver: Readonly<{ token: symbol; generation: string; registration: ForegroundTaskObservationRegistration; handles: Map<string, { task: ForegroundTaskIdentity; handle: unknown }> }> | undefined
   /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
   private acceptanceRequired = false
   private readonly preferenceTurns = new WeakMap<Agent, Readonly<DeliveryPreferenceTurnAttestation>>()
@@ -1131,7 +1134,7 @@ export class AssistantDeliveryService extends Service {
         recordForegroundTaskModelSelection: (handle, input) => this.deliveryStore.recordForegroundTaskModelSelection({ contractId: handle.contractId, ...input }),
         beginForegroundTaskExecution: (binding, envelope) => this.beginForegroundTaskExecution(binding, envelope),
         recordForegroundExecutionModelSelection: (inboxId, input) => this.deliveryStore.recordForegroundExecutionModelSelection({ inboxId, ...input }),
-        completeForegroundTaskExecution: (inboxId, input) => this.deliveryStore.finishForegroundTaskExecution({ inboxId, ...input, completedAt: Date.now() }),
+        completeForegroundTaskExecution: (inboxId, input) => this.completeForegroundTaskExecution(inboxId, input),
         modelPickerTtlMs: config.modelPickerTtlMs,
         permissionPickerTtlMs: config.permissionPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
@@ -1219,6 +1222,7 @@ export class AssistantDeliveryService extends Service {
       trustedDeliveryPreferenceProducers.delete(this)
       this.preferenceFeedbackSink = undefined
       this.acceptanceSink = undefined
+      this.foregroundObserver = undefined
       this.evaluationSink = undefined
       this.workflowTraceSink = undefined
       this.automationPresentationBinding?.dispose()
@@ -1989,9 +1993,69 @@ export class AssistantDeliveryService extends Service {
       || JSON.stringify(inbox.envelope) !== JSON.stringify(envelope)) {
       throw new AssistantDeliveryError('missing-binding', 'foreground execution lacks an authenticated owner inbox')
     }
+    const dispatchedAt = Date.now()
     this.deliveryStore.bindForegroundTaskExecution({ inboxId: inbox.id,
-      scope: { workspace: binding.workspace, preset: binding.agentPreset }, owner, binding, dispatchedAt: Date.now() })
+      scope: { workspace: binding.workspace, preset: binding.agentPreset }, owner, binding, dispatchedAt })
+    this.observeForegroundBegin(Object.freeze({ protocol: 'assistant-delivery/foreground-task/v1' as const, inboxId: inbox.id,
+      sessionId: binding.sessionId, scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+      owner: Object.freeze({ principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion }),
+      binding: Object.freeze({ id: binding.id, version: binding.version, generation: binding.generation }), dispatchedAt }))
     return inbox.id
+  }
+
+  registerForegroundTaskObserver(registration: ForegroundTaskObservationRegistration): () => void {
+    this.assertActive()
+    const control = this.context.get('pluginControlPlane' as never, false) as unknown as { ownsForegroundTaskObservationRegistration?(value: ForegroundTaskObservationRegistration): boolean } | undefined
+    if (!validForegroundObservationRegistration(registration) || control === undefined
+      || control.ownsForegroundTaskObservationRegistration?.(registration) !== true) {
+      throw new AssistantDeliveryError('runtime-conflict', 'foreground observation registration is invalid')
+    }
+    if (this.foregroundObserver !== undefined) throw new AssistantDeliveryError('runtime-conflict', 'foreground observer is already registered')
+    const token = Symbol('assistant-delivery.foreground-observer')
+    const sink = Object.freeze({ token, generation: registration.generation, registration,
+      handles: new Map<string, { task: ForegroundTaskIdentity; handle: unknown }>() })
+    this.foregroundObserver = sink
+    let live = true
+    return () => { if (live) { live = false; if (this.foregroundObserver?.token === token) this.foregroundObserver = undefined } }
+  }
+
+  private observerCurrent(sink: NonNullable<AssistantDeliveryService['foregroundObserver']>): boolean {
+    const control = this.context.get('pluginControlPlane' as never, false) as unknown as { ownsForegroundTaskObservationRegistration?(value: ForegroundTaskObservationRegistration): boolean } | undefined
+    return this.active && this.foregroundObserver?.token === sink.token
+      && control?.ownsForegroundTaskObservationRegistration?.(sink.registration) === true
+      && sink.generation === sink.registration.generation
+  }
+
+  private observeForegroundBegin(task: ForegroundTaskIdentity): void {
+    const sink = this.foregroundObserver
+    if (sink === undefined || !this.observerCurrent(sink) || sink.handles.size >= Math.max(16, this.config.maxConcurrency * 4)) return
+    try {
+      const handle = sink.registration.begin(task)
+      if (!isSynchronousForegroundObservationHandle(handle)) {
+        void Promise.resolve(handle).catch(error => this.context.logger.warn(`assistant-delivery: foreground observer begin must be synchronous: ${String(error)}`))
+        return
+      }
+      if (!this.observerCurrent(sink)) return
+      sink.handles.set(task.inboxId, { task, handle })
+    } catch (error) { this.context.logger.warn(`assistant-delivery: foreground observer begin failed: ${String(error)}`) }
+  }
+
+  private completeForegroundTaskExecution(inboxId: string, input: { status: ForegroundExecution['status']; quiescent: boolean }): void {
+    this.deliveryStore.finishForegroundTaskExecution({ inboxId, ...input, completedAt: Date.now() })
+    const sink = this.foregroundObserver; const observed = sink?.handles.get(inboxId)
+    if (sink === undefined || observed === undefined) return
+    sink.handles.delete(inboxId)
+    if (!this.observerCurrent(sink)) return
+    const actual = this.deliveryStore.inspectForegroundExecutionForOwner({ inboxId, scope: observed.task.scope, owner: observed.task.owner,
+      bindingId: observed.task.binding.id, bindingVersion: observed.task.binding.version, bindingGeneration: observed.task.binding.generation })
+    if (actual === null) return
+    try {
+      const result: unknown = sink.registration.completed(observed.handle, observed.task, actual)
+      if (!isSynchronousForegroundObservationHandle(result)) {
+        void Promise.resolve(result).catch(error => this.context.logger.warn(`assistant-delivery: foreground observer completion must be synchronous: ${String(error)}`))
+      }
+    }
+    catch (error) { this.context.logger.warn(`assistant-delivery: foreground observer completion failed: ${String(error)}`) }
   }
 
   private prepareForegroundTaskAcceptance(

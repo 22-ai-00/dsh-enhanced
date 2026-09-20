@@ -10,6 +10,7 @@ import { validateSourceBuildConfig } from './source-build.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
 import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
+import { assertForegroundDeployment, assertForegroundTask, type ForegroundDeploymentRecord } from './foreground-deployment.js'
 import type {
   ActivationRetractionAuthority,
   ActivationRetractionReceipt,
@@ -1160,6 +1161,7 @@ export class ControlPlaneStore {
   readonly #database: DatabaseSync
   readonly #now: () => number
   #ownerTaskFailureGapAdmission: string | undefined
+  #foregroundDeploymentAdmission: string | undefined
   readonly #withOwnerActivationFence: ControlPlaneStoreOptions['withOwnerActivationFence']
 
   constructor(options: ControlPlaneStoreOptions) { this.#database = openControlPlaneDatabase(options.path); this.#now = options.now ?? Date.now; this.#withOwnerActivationFence = options.withOwnerActivationFence }
@@ -2039,6 +2041,85 @@ export class ControlPlaneStore {
     const row = this.#database.prepare('SELECT * FROM host_attestation_operations WHERE operation_id = ?').get(operationId) as unknown as HostAttestationOperationRow | undefined
     if (row === undefined) throw new ControlPlaneStoreError('not-found', 'Host attestation operation not found')
     return hostOperationFromRow(row)
+  }
+
+  /** Same synchronous transaction owns current-profile selection and capture. */
+  withForegroundDeployment<T>(task: ForegroundDeploymentRecord['task'], profilePath: string,
+    callback: (plan: PluginActivationPlan, operation: HostAttestationOperation) => T): T {
+    assertForegroundTask(task)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const active = this.#database.prepare(`SELECT id FROM activation_plans WHERE target_path = ? AND status IN (
+        'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
+        'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending') LIMIT 1`).get(profilePath)
+      if (active) throw new ControlPlaneStoreError('conflict', 'profile has an unsettled activation')
+      const latest = this.#database.prepare(`SELECT checkpoint.plan_id, checkpoint.exposure_order, checkpoint.successful_order
+        FROM activation_deployment_checkpoints checkpoint JOIN activation_plans plan ON plan.id = checkpoint.plan_id
+        WHERE plan.target_path = ? ORDER BY checkpoint.exposure_order DESC LIMIT 1`).get(profilePath) as
+        { plan_id: string; exposure_order: number; successful_order: number | null } | undefined
+      if (!latest || latest.exposure_order !== latest.successful_order) throw new ControlPlaneStoreError('invalid-state', 'profile has no current successful deployment')
+      const plan = this.getPlan(latest.plan_id), watch = this.getActivationWatch(plan.id)
+      if (plan.status !== 'activated' || !plan.activation || watch.state !== 'watching'
+        || watch.activationId !== plan.activation.id || watch.fence !== plan.activation.fence || watch.startedAt > task.dispatchedAt) {
+        throw new ControlPlaneStoreError('invalid-state', 'task did not begin under a watched deployment')
+      }
+      const source = readOwnerSourceAdoptionPlan(this.#database, plan.id).source
+      const owner = source.owner
+      if (owner.principalRecordId !== task.owner.principalRecordId || owner.principalVersion !== task.owner.principalVersion
+        || owner.workspace !== task.scope.workspace || owner.agentPreset !== task.scope.preset) {
+        throw new ControlPlaneStoreError('conflict', 'foreground task owner differs from adopted source owner')
+      }
+      const row = this.#database.prepare(`SELECT operation.* FROM host_attestation_operations operation
+        JOIN host_attestations attestation ON attestation.plan_id = operation.plan_id AND attestation.phase = operation.phase
+          AND attestation.receipt_digest = operation.receipt_digest
+        WHERE operation.plan_id = ? AND operation.phase = 'readiness' AND operation.status = 'applied'`).get(plan.id) as
+        HostAttestationOperationRow | undefined
+      if (!row) throw new ControlPlaneStoreError('invalid-state', 'deployment has no applied readiness receipt')
+      this.#foregroundDeploymentAdmission = plan.id
+      const result = callback(plan, hostOperationFromRow(row))
+      if (result && (typeof result === 'object' || typeof result === 'function') && 'then' in result) throw new ControlPlaneStoreError('invalid-input', 'foreground capture must be synchronous')
+      this.#database.exec('COMMIT')
+      return result
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    finally { this.#foregroundDeploymentAdmission = undefined }
+  }
+
+  beginForegroundDeployment(record: ForegroundDeploymentRecord): void {
+    assertForegroundDeployment(record)
+    if (this.#foregroundDeploymentAdmission !== record.readiness.planId) throw new ControlPlaneStoreError('conflict', 'foreground deployment lacks current admission')
+    if (record.state !== 'pending') throw new ControlPlaneStoreError('invalid-input', 'foreground deployment must begin pending')
+    const encoded = JSON.stringify(record)
+    if (Buffer.byteLength(encoded) > 262_144) throw new ControlPlaneStoreError('invalid-input', 'foreground deployment exceeds storage bound')
+    this.#database.prepare(`INSERT INTO foreground_deployments (inbox_id, plan_id, record_json, record_digest)
+      VALUES (?, ?, ?, ?)`).run(record.task.inboxId, record.readiness.planId, encoded, controlPlaneDigest(record))
+  }
+
+  getForegroundDeployment(inboxId: string): ForegroundDeploymentRecord | undefined {
+    const row = this.#database.prepare('SELECT record_json, record_digest, plan_id FROM foreground_deployments WHERE inbox_id = ?').get(inboxId) as
+      { record_json: string; record_digest: string; plan_id: string } | undefined
+    if (!row) return undefined
+    if (Buffer.byteLength(row.record_json) > 262_144) throw new ControlPlaneStoreError('invalid-state', 'stored foreground deployment exceeds storage bound')
+    const record = JSON.parse(row.record_json) as ForegroundDeploymentRecord
+    if (controlPlaneDigest(record) !== row.record_digest || record.task.inboxId !== inboxId || record.readiness.planId !== row.plan_id) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored foreground deployment changed')
+    }
+    assertForegroundDeployment(record)
+    return record
+  }
+
+  finishForegroundDeployment(record: ForegroundDeploymentRecord): void {
+    assertForegroundDeployment(record)
+    if (record.state === 'observed' && this.#foregroundDeploymentAdmission !== record.readiness.planId) throw new ControlPlaneStoreError('conflict', 'foreground deployment lacks current admission')
+    const prior = this.getForegroundDeployment(record.task.inboxId)
+    if (!prior || prior.state !== 'pending' || record.state === 'pending'
+      || controlPlaneDigest(prior.task) !== controlPlaneDigest(record.task)
+      || controlPlaneDigest(prior.readiness) !== controlPlaneDigest(record.readiness)
+      || controlPlaneDigest(prior.begin) !== controlPlaneDigest(record.begin)) throw new ControlPlaneStoreError('conflict', 'foreground deployment completion changed')
+    const encoded = JSON.stringify(record)
+    if (Buffer.byteLength(encoded) > 262_144) throw new ControlPlaneStoreError('invalid-input', 'foreground deployment exceeds storage bound')
+    const result = this.#database.prepare(`UPDATE foreground_deployments SET record_json = ?, record_digest = ?
+      WHERE inbox_id = ? AND record_digest = ?`).run(encoded, controlPlaneDigest(record), record.task.inboxId, controlPlaneDigest(prior))
+    if (result.changes !== 1) throw new ControlPlaneStoreError('conflict', 'foreground deployment completion lost its fence')
   }
 
   latestHostGeneration(installationId: string): number {
