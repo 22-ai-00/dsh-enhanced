@@ -18,7 +18,7 @@ import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthor
   parseSourceReleaseAuthorization, parseSourceReleaseReceipt } from './release.js'
 import { ControlPlaneStore, controlPlaneDigest, expectedSourceRelease } from './store.js'
 import { ControlPlaneCliError } from './errors.js'
-import { changedSourcePaths, checkedSourceSnapshot, gcPreparedModifyWorktrees, runLocalCommand, sourcePathAllowed } from './source-workspace.js'
+import { changedSourcePaths, checkedSourceSnapshot, gcPreparedModifyWorktrees, runLocalCommand, sourcePathAllowed, verifyPreparedSourceWorktree } from './source-workspace.js'
 import { inheritedEnvironment, loadTrustConfig, openTrustedExecutable, resolveTrustKey, verifyOpenTrustedExecutable,
   type OpenTrustedExecutable, type PluginControlTrustConfig } from './trust.js'
 import type { ActivationRetractionAuthority, ActivationRetractionReceipt, ApprovalReceipt, HostAttestationReceipt,
@@ -1082,32 +1082,7 @@ async function sourceVerifyPrepared(argv: readonly string[]): Promise<void> {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'exact approved modify source plan revision is required')
     }
     if (plan.sourceCheck === undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'approved modify plan is missing its bound checked digests')
-    if (plan.scope.length !== 1 || plan.scope[0] !== `plugins/${plan.name}`) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'modify plan scope must be exactly its own plugin tree')
-    }
-    if (await realpath(plan.repository) !== plan.repository || await realpath(plan.worktree) !== plan.worktree) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source paths drifted from their canonical bindings')
-    }
-    const environment = inheritedEnvironment(trust)
-    // The prepared patch lives in the worktree as deliberately uncommitted
-    // changes, so a clean-tree assertion would reject every valid plan. The
-    // owner-side proof is instead: nobody committed over the base commit, every
-    // changed/untracked path stays inside the plugin scope, and the tree/patch
-    // digests recomputed on this exact directory equal the bound checked
-    // digests byte for byte.
-    if ((await runLocalCommand('git', ['rev-parse', 'HEAD'], plan.worktree, environment, { capture: true })).trim() !== plan.baseCommit) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared worktree HEAD drifted from the bound base commit')
-    }
-    const changes = await changedSourcePaths(plan.worktree, plan.baseCommit, environment)
-    const outsideScope = changes.find(path => !sourcePathAllowed(path, plan.name, plan.mode))
-    if (outsideScope !== undefined) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', `prepared modification holds files outside its approved scope: ${JSON.stringify(outsideScope)}`)
-    }
-    const checked = await checkedSourceSnapshot(plan.worktree, plan.baseCommit, plan.scope, environment)
-    if (checked.checkedTreeDigest !== plan.sourceCheck.treeDigest
-      || checked.checkedPatchDigest !== plan.sourceCheck.patchDigest) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'recomputed prepared digests do not match the bound checked digests')
-    }
+    const checked = await verifyPreparedSourceWorktree(plan, inheritedEnvironment(trust))
     const receipt = store.verifyPreparedSourcePlan({ planId: plan.id, expectedRevision: plan.revision,
       recheckedTreeDigest: checked.checkedTreeDigest, recheckedPatchDigest: checked.checkedPatchDigest })
     process.stdout.write(`${JSON.stringify(receipt)}\n`)

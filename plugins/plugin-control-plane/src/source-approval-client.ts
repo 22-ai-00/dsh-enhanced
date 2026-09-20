@@ -80,13 +80,17 @@ export function validateSourceApprovalClientConfig(value: unknown): asserts valu
   }
 }
 
-function assertRequest(value: unknown): asserts value is SourceApprovalRequest {
+export interface SourceAuthorityRequest extends Omit<SourceApprovalRequest, 'protocol'> {
+  protocol: 'dsh-source-approval/v1' | 'dsh-source-release-authorization/v1'
+}
+
+function assertRequest(value: unknown): asserts value is SourceAuthorityRequest {
   if (typeof value !== 'object' || value === null || Array.isArray(value)
     || Object.keys(value).sort().join(',') !== ['planDigest', 'planId', 'protocol', 'sourceReferenceDigest'].join(',')) {
     throw new SourceApprovalClientError('FAILED', 'source approval request is invalid')
   }
   const item = value as Record<string, unknown>
-  if (item.protocol !== 'dsh-source-approval/v1' || typeof item.planId !== 'string' || typeof item.planDigest !== 'string'
+  if (!['dsh-source-approval/v1', 'dsh-source-release-authorization/v1'].includes(String(item.protocol)) || typeof item.planId !== 'string' || typeof item.planDigest !== 'string'
     || typeof item.sourceReferenceDigest !== 'string' || !ID.test(item.planId)
     || !DIGEST.test(item.planDigest) || !DIGEST.test(item.sourceReferenceDigest)) {
     throw new SourceApprovalClientError('FAILED', 'source approval request is invalid')
@@ -122,8 +126,9 @@ async function execute(executable: OpenTrustedExecutable, interpreter: OpenTrust
   }
 }
 
-export async function requestSourceApproval(config: SourceApprovalClientConfig, request: SourceApprovalRequest,
-  signal?: AbortSignal): Promise<ApprovalReceipt> {
+// Shared descriptor-pinned transport; protocol-specific wrappers validate the receipt.
+export async function requestSourceAuthorityReceipt<T>(config: SourceApprovalClientConfig, request: SourceAuthorityRequest,
+  parseReceipt: (value: unknown) => T, signal?: AbortSignal): Promise<T> {
   validateSourceApprovalClientConfig(config)
   assertRequest(request)
   assertNotAborted(signal)
@@ -144,6 +149,21 @@ export async function requestSourceApproval(config: SourceApprovalClientConfig, 
     try { parsed = JSON.parse(output) as unknown } catch {
       throw new SourceApprovalClientError('FAILED', 'source approval authority did not return one JSON receipt')
     }
+    return parseReceipt(parsed)
+  } catch (error) {
+    if (error instanceof SourceApprovalClientError) throw error
+    throw new SourceApprovalClientError('EXECUTABLE_CHANGED', 'source approval executable descriptor identity could not be retained')
+  } finally {
+    try { await interpreter?.handle.close() }
+    finally { await executable?.handle.close() }
+  }
+}
+
+
+export async function requestSourceApproval(config: SourceApprovalClientConfig, request: SourceApprovalRequest,
+  signal?: AbortSignal): Promise<ApprovalReceipt> {
+  if (request?.protocol !== 'dsh-source-approval/v1') throw new SourceApprovalClientError('FAILED', 'source approval request protocol is invalid')
+  return requestSourceAuthorityReceipt(config, request, parsed => {
     let receipt: ApprovalReceipt
     try { receipt = parseApprovalReceipt(parsed) } catch {
       throw new SourceApprovalClientError('FAILED', 'source approval authority returned an invalid approval receipt')
@@ -152,11 +172,5 @@ export async function requestSourceApproval(config: SourceApprovalClientConfig, 
       throw new SourceApprovalClientError('FAILED', 'source approval receipt is not an approval for this exact plan and digest')
     }
     return receipt
-  } catch (error) {
-    if (error instanceof SourceApprovalClientError) throw error
-    throw new SourceApprovalClientError('EXECUTABLE_CHANGED', 'source approval executable descriptor identity could not be retained')
-  } finally {
-    try { await interpreter?.handle.close() }
-    finally { await executable?.handle.close() }
-  }
+  }, signal)
 }

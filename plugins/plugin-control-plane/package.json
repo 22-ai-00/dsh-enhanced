@@ -8,7 +8,8 @@
   "types": "./lib/index.d.ts",
   "bin": {
     "dsh-plugin-control": "./bin/dsh-plugin-control.js",
-    "dsh-source-approval-authority": "./bin/dsh-source-approval-authority.js"
+    "dsh-source-approval-authority": "./bin/dsh-source-approval-authority.js",
+    "dsh-source-release-authority": "./bin/dsh-source-release-authority.js"
   },
   "exports": {
     ".": {

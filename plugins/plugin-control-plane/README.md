@@ -254,7 +254,7 @@ sourceJobs:
 
 默认只准备待审批提案；配置下述有限审批后，真实 owner 失败来源的持久作业可继续审批。工程层 native scheduler/Policy/SQLite 集成测试不等于真实模型执行整仓修复或生产发布验收。
 
-成功准备返回 `pending-approval`，不会自动发布。普通 gap 可用已有签名审批流程；owner 任务来源必须通过 Host 当前来源 fence 审批，离线 CLI 签名本身不能代替该校验。审批后，用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest，才能进入人工 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
+成功准备返回 `pending-approval`，不会自动发布。普通 gap 可用已有签名审批流程；owner 任务来源必须通过 Host 当前来源 fence 审批，离线 CLI 签名本身不能代替该校验。审批后，普通 gap 用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest；owner 来源由下述 Host 发布接续入口完成复核，才能进入 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
 
 ### 普通任务修复的有限审批
 
@@ -311,7 +311,49 @@ sourceApprovals:
 
 持久作业在 `prepared` 落账后调用审批，Host 在验签后以 Delivery/Evaluation 当前来源 writer fence 提交 `approved`。纠正、撤回、身份/会话换代、取消或 trust 变化均阻止提交。审批失败保留 pending 计划和已完成构建；重启恢复最多 1000 个 pending 的 owner 作业，仍核对原 sourceJobs 授权和 owner，只重试审批。单次 helper 至多 10 秒；卸载会等待子进程清理并丢弃迟到结果。Host 可调用 `requestOwnerSourceApproval({planId, signal?})` 显式重试；该方法不暴露为模型工具。inline 准备仍只返回 pending。
 
-此客户端要求 Linux `/proc`；wrapper 和 Node 均须是 canonical 路径、可执行且只有一个硬链接的 owner/root 文件，不能由其他用户写入。按文件描述符固定两者字节；完整已安装库仍须由 owner 控制，wrapper hash 不覆盖导入库。子进程是执行和清理边界，同 UID 运行不构成私钥隔离；若模型可任意执行 Host 代码，应将签名器置于独立身份边界，通过 owner 固定的代理执行文件调用。签名器不执行候选源码。审批完成只进入 `approved`；后续精确 artifact 验证、采用和观察/回滚仍走各自授权链路。
+此客户端要求 Linux `/proc`；wrapper 和 Node 均须是 canonical 路径、可执行且只有一个硬链接的 owner/root 文件，不能由其他用户写入。按文件描述符固定两者字节；完整已安装库仍须由 owner 控制，wrapper hash 不覆盖导入库。子进程是执行和清理边界，同 UID 运行不构成私钥隔离；若模型可任意执行 Host 代码，应将签名器置于独立身份边界，通过 owner 固定的代理执行文件调用。签名器不执行候选源码。仅启用 `sourceApprovals` 时停在 `approved`；可配置下面的有限发布授权接续，精确制品的验证、采用和观察/回滚仍走各自授权链路。
+
+### 获批源码的有限本地发布授权
+
+同时启用 `sourceApprovals`、`sourceBuild.versioning: patch` 和可选 `sourceReleases` 后，持久源码作业会在获批后自动复核同一 worktree，再请求独立发布授权，进入既有 `awaiting-pr` 状态。继续使用原生 Automations executor 和 `prepared` 作业恢复；不会重复构建。Host 方法 `requestOwnerSourceRelease({ planId, signal?, expectedTrustDigest? })` 也可显式接续已批准的 owner 来源计划，未注册为模型工具。普通 owner 来源的 `verify-prepared` 和 `release-start` 必须通过 Host 当前反馈校验，离线 CLI 不能代替该校验。
+
+```yaml
+sourceReleases:
+  executable:
+    path: /opt/dsh/control-plane/bin/dsh-source-release-authority.js
+    sha256: <installed-wrapper-sha256>
+  interpreter:
+    path: /opt/dsh/node
+    sha256: <installed-node-sha256>
+  configPath: /private/owner/source-release.json
+  timeoutMs: 10000
+```
+
+`source-release.json` 沿用上方源码审批配置的 `schemaVersion`、authority/key、私有状态库、控制面库和 owner/repository/worktree/文件预算结构，但须使用独立发布授权私钥和状态库：将 `grant.maxApprovals` 替换为 `grant.maxReleases`，设置 `grant.versioning: "patch"`，并给每个白名单插件配置一条 `grant.policies`。在 trust 的 `releaseAuthorizationKeys` 注册公钥；该 key 与 source approval、adapter receipt keys 分开。策略示例：
+
+```json
+{
+  "targetBranch": "rsi/repairs",
+  "candidateId": "personal-memory",
+  "packageName": "@dsh-enhanced/personal-memory",
+  "packagePath": "plugins/personal-memory",
+  "dshBaseline": "0.1.5-rc.2",
+  "capabilities": ["memory"],
+  "authorities": ["filesystem"],
+  "requires": [],
+  "registryId": "local-repairs",
+  "registryLocator": "file:///private/owner/registry",
+  "catalogId": "owner-catalog",
+  "catalogPath": "/private/owner/catalog.json",
+  "minimumReproducibleBuilds": 2
+}
+```
+
+能力、权限和依赖应填写目标部署的精确授权值，数组按既有 release policy 规则排序。registry 目录和 catalog 文件必须已存在且归 owner 私有控制；此授权器仅支持现有本地 file registry。包版本从已检查的 Host 补丁版本推导，制品路径固定为 registry 的 `packages/<编码包名>/<版本>/package.tgz`；调用者不能指定版本、路径或扩大策略。
+
+签名器独立重读当前控制面库、owner 来源、源码范围、构建证据、Git 摘要及版本。grant/config/key 指纹和累计签发数持久保存；重试和进程重启只返回同一回执，不重扣额度、不延长有效期。Host 在最终提交及重放时再检查当前反馈，纠正、撤回、身份变化、取消、trust 漂移均阻止接续。重启可从 `pending-approval`、`approved` 或 `ready-for-human-review` 接续；已进入 release 的计划不重新签发。单次 Host 接续最多 30 秒，卸载等待受控进程清理并丢弃迟到结果。
+
+此步骤只自动开始既有 release 状态机。独立 review、各阶段推进、activation 与普通任务版本观察仍待接线，不会上传公共 npm 或直接启用候选。
 
 单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 17 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 

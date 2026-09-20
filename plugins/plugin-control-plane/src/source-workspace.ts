@@ -161,11 +161,11 @@ export async function runLocalCommand(command: 'git' | 'pnpm', args: readonly st
   return options.capture === true ? result.stdout : ''
 }
 
-export async function changedSourcePaths(worktree: string, baseCommit: string, environment: NodeJS.ProcessEnv): Promise<readonly string[]> {
+export async function changedSourcePaths(worktree: string, baseCommit: string, environment: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<readonly string[]> {
   const tracked = await runLocalCommand('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', 'diff', '--no-renames',
-    '--name-only', '-z', baseCommit, '--'], worktree, environment, { capture: true, maximumOutput: MAX_COMMAND_OUTPUT_BYTES })
+    '--name-only', '-z', baseCommit, '--'], worktree, environment, { capture: true, maximumOutput: MAX_COMMAND_OUTPUT_BYTES, ...(signal ? { signal } : {}) })
   const untracked = await runLocalCommand('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', 'ls-files', '--others',
-    '--exclude-standard', '-z'], worktree, environment, { capture: true, maximumOutput: MAX_COMMAND_OUTPUT_BYTES })
+    '--exclude-standard', '-z'], worktree, environment, { capture: true, maximumOutput: MAX_COMMAND_OUTPUT_BYTES, ...(signal ? { signal } : {}) })
   return [...new Set(`${tracked}${untracked}`.split('\0').filter(Boolean))].sort()
 }
 
@@ -176,25 +176,48 @@ export function sourcePathAllowed(path: string, name: string, mode: 'create' | '
 }
 
 export async function checkedSourceSnapshot(worktree: string, baseCommit: string, scopeInput: readonly string[],
-  environment: NodeJS.ProcessEnv, preparedTree?: string): Promise<{ checkedTreeDigest: string; checkedPatchDigest: string }> {
+  environment: NodeJS.ProcessEnv, preparedTree?: string, signal?: AbortSignal): Promise<{ checkedTreeDigest: string; checkedPatchDigest: string }> {
   const temporary = await mkdtemp(join(tmpdir(), 'dsh-plugin-control-index-'))
   try {
     const scope = [...new Set(scopeInput.map(value => value.normalize('NFC').trim()))].sort()
     if (scope.length === 0 || scope.some(value => value === '')) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'checked source scope is invalid')
     const snapshotEnvironment = { ...environment, GIT_INDEX_FILE: join(temporary, 'index') }
-    await runLocalCommand('git', ['read-tree', preparedTree ?? baseCommit], worktree, snapshotEnvironment)
-    if (preparedTree === undefined) await runLocalCommand('git', ['--literal-pathspecs', 'add', '--all', '--', ...scope], worktree, snapshotEnvironment)
+    await runLocalCommand('git', ['read-tree', preparedTree ?? baseCommit], worktree, snapshotEnvironment, signal ? { signal } : {})
+    if (preparedTree === undefined) await runLocalCommand('git', ['--literal-pathspecs', 'add', '--all', '--', ...scope], worktree, snapshotEnvironment, signal ? { signal } : {})
     const tree = await runLocalCommand('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', 'ls-files', '--stage', '-z',
-      '--', ...scope], worktree, snapshotEnvironment, { capture: true, maximumOutput: MAX_COMMAND_OUTPUT_BYTES })
+      '--', ...scope], worktree, snapshotEnvironment, { capture: true, maximumOutput: MAX_COMMAND_OUTPUT_BYTES, ...(signal ? { signal } : {}) })
     const patch = await runLocalCommand('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', 'diff', '--cached', '--binary',
       '--full-index', '--no-color', baseCommit, '--', ...scope], worktree, snapshotEnvironment,
-      { capture: true, maximumOutput: MAX_COMMAND_OUTPUT_BYTES })
+      { capture: true, maximumOutput: MAX_COMMAND_OUTPUT_BYTES, ...(signal ? { signal } : {}) })
     const binding = `${baseCommit}\0${JSON.stringify(scope)}\0`
     return {
       checkedTreeDigest: createHash('sha256').update('dsh-source-tree-v2\0').update(binding).update(tree).digest('hex'),
       checkedPatchDigest: createHash('sha256').update('dsh-source-patch-v2\0').update(binding).update(patch).digest('hex'),
     }
   } finally { await rm(temporary, { recursive: true, force: true }) }
+}
+
+/** Recheck the immutable prepared tree without rebuilding or executing candidate code. */
+export async function verifyPreparedSourceWorktree(plan: PluginSourcePlan, environment: NodeJS.ProcessEnv,
+  signal?: AbortSignal): Promise<{ checkedTreeDigest: string; checkedPatchDigest: string }> {
+  signal?.throwIfAborted()
+  if (plan.mode !== 'modify' || !plan.sourceCheck || plan.scope.length !== 1 || plan.scope[0] !== `plugins/${plan.name}`
+    || await realpath(plan.repository) !== plan.repository || await realpath(plan.worktree) !== plan.worktree) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source paths or scope changed')
+  }
+  if ((await runLocalCommand('git', ['rev-parse', 'HEAD'], plan.worktree, environment, { capture: true, ...(signal ? { signal } : {}) })).trim() !== plan.baseCommit) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared worktree HEAD changed')
+  }
+  const changes = await changedSourcePaths(plan.worktree, plan.baseCommit, environment, signal)
+  if (changes.some(path => !sourcePathAllowed(path, plan.name, plan.mode))) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared modification is outside its approved scope')
+  }
+  const checked = await checkedSourceSnapshot(plan.worktree, plan.baseCommit, plan.scope, environment, undefined, signal)
+  signal?.throwIfAborted()
+  if (checked.checkedTreeDigest !== plan.sourceCheck.treeDigest || checked.checkedPatchDigest !== plan.sourceCheck.patchDigest) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source digests changed')
+  }
+  return checked
 }
 
 async function assertOwnerDirectory(path: string): Promise<void> {

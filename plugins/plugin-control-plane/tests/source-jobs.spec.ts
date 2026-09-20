@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { HostAutomationExecutor, SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
 import type { SourceJobRecord } from '../src/source-job-types.ts'
@@ -22,7 +23,7 @@ const evidence = () => ({ schemaVersion: 1 as const, kind: 'dsh-source-prepared-
 
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean } = {}) {
+async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: boolean; versioning?: boolean; releases?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-source-jobs-runtime-'))); roots.push(root)
   await mkdir(join(root, 'plugins', 'health-helper', 'src'), { recursive: true })
   await writeFile(join(root, 'plugins', 'health-helper', 'src', 'index.ts'), 'export const committed = true\n')
@@ -73,13 +74,23 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
   const config = { authorityId: 'source-authority', expiresAt: Date.now() + 60_000, maxSubmissions: 2, repository: root,
     ownerRouteId: OWNER.ownerRouteId, principalId: OWNER.principalId, workspace: OWNER.workspace, preset: OWNER.preset, budgetId: 'source-runs', budgetAmount: 1 }
   const delivery = { validateOwnerRoute: vi.fn(receipt) }
-  const approvePrepared = vi.fn(async (_job: SourceJobRecord, _signal: AbortSignal) => {})
+  const approvePrepared = vi.fn(async (job: SourceJobRecord, _signal: AbortSignal) => {
+    if (!options.releases) return
+    const plan = store.getSourcePlan(job.planId!), keys = generateKeyPairSync('ed25519')
+    const unsigned = { schemaVersion: 1 as const, approvalId: 'runtime-approval', authority: 'source-authority', keyId: 'source-key',
+      planId: plan.id, planDigest: plan.digest, decision: 'approved' as const, principal: OWNER.principalId, decidedAt: Date.now(), expiresAt: plan.expiresAt }
+    const signed = { ...unsigned, signature: sign(null, Buffer.from(approvalSigningPayload(unsigned)), keys.privateKey).toString('base64') }
+    await store.approveSource({ planId: plan.id, expectedRevision: plan.revision, receipt: signed,
+      resolveAuthority: () => new Ed25519ApprovalAuthority(keys.publicKey.export({ type: 'spki', format: 'pem' }), unsigned.authority, unsigned.keyId),
+      idempotencyKey: `runtime-approval:${plan.id}`, withSourceFence: callback => gapSourceFence(job.intent.gapId, job.intent.owner, callback) })
+  })
+  const releasePrepared = vi.fn(async (_job: SourceJobRecord, _signal: AbortSignal) => {})
   const createRuntime = () => new SourceJobRuntime({ config, build: { ...build, ...(options.versioning ? { versioning: 'patch' as const } : {}) }, statePath: root, store, ports: { automations: automations as never, delivery },
-    ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}) })
+    ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}), ...(options.releases ? { releasePrepared } : {}) })
   const runtime = createRuntime()
   runtime.start()
   const enqueue = (signal = new AbortController().signal, key = 'job:one') => runtime.enqueue({ gapId: gap.id, name: 'health-helper', repository: root, files: [{ path: 'src/index.ts', content: 'export const changed = true\n' }], idempotencyKey: key, expectedBaseCommit: head, ttlMs: 900_000, owner: OWNER, signal, assertCurrent: () => undefined })
-  return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, approvePrepared, withGapSourceFence,
+  return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, approvePrepared, releasePrepared, withGapSourceFence,
     setSourceCurrent: (value: boolean) => { sourceCurrent = value }, get executor() { return executor }, activation: (_id: string) => activation!, enqueue, head }
 }
 
@@ -123,6 +134,38 @@ describe('durable source-job runtime', () => {
       await restarted.close()
       expect(f.prepare).toHaveBeenCalledTimes(1)
       expect(f.approvePrepared).toHaveBeenCalledTimes(changed ? 1 : 2)
+    } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
+  })
+
+  it.each(['approved', 'ready', 'source-change', 'trust-change'] as const)('resumes finite release authorization from %s without rebuilding or reapproving', async boundary => {
+    const f = await fixture({ typed: true, approvals: true, releases: true })
+    let restarted: SourceJobRuntime | undefined
+    try {
+      f.releasePrepared.mockImplementationOnce(async job => {
+        if (boundary === 'ready') {
+          const plan = f.store.getSourcePlan(job.planId!)
+          f.store.verifyPreparedSourcePlan({ planId: plan.id, expectedRevision: plan.revision,
+            recheckedTreeDigest: plan.sourceCheck!.treeDigest, recheckedPatchDigest: plan.sourceCheck!.patchDigest,
+            withSourceFence: callback => f.withGapSourceFence!(job.intent.gapId, job.intent.owner, callback) })
+        }
+        throw new Error('release helper response unavailable')
+      })
+      const queued = await f.enqueue(), active = f.activation(queued.id)
+      const outcome = await f.executor!.execute({ occurrenceId: 'prepared-release', automationId: queued.id, definitionHash: active.definitionHash,
+        executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset }, principal: OWNER.principalId,
+        ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce, catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(outcome.outcome).toBe('unknown')
+      const job = f.store.getSourceJob(queued.id)!
+      expect(f.store.getSourcePlan(job.planId!).status).toBe(boundary === 'ready' ? 'ready-for-human-review' : 'approved')
+      expect(f.releasePrepared).toHaveBeenCalledTimes(1)
+      await f.runtime.close()
+      if (boundary === 'source-change') f.setSourceCurrent(false)
+      if (boundary === 'trust-change') Object.assign(f.trust, { installationId: 'changed' })
+      restarted = f.createRuntime(); restarted.start()
+      await new Promise(resolve => setImmediate(resolve)); await restarted.close()
+      expect(f.prepare).toHaveBeenCalledTimes(1)
+      expect(f.approvePrepared).toHaveBeenCalledTimes(1)
+      expect(f.releasePrepared).toHaveBeenCalledTimes(boundary.endsWith('change') ? 1 : 2)
     } finally { await restarted?.close(); await f.runtime.close(); f.store.close() }
   })
 
