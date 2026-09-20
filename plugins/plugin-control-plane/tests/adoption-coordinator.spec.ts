@@ -68,8 +68,12 @@ test('does not replay an expired handoff while the Store retains an unknown Host
 })
 
 test('validates strict coordinator configuration', () => {
-  expect(() => validateAdoptionCoordinatorConfig({ coordinatorId: 'coordinator', scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' }, timeoutMs: 1_000 })).not.toThrow()
-  expect(() => validateAdoptionCoordinatorConfig({ coordinatorId: 'coordinator', scope: { workspace: 'workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' }, timeoutMs: 1_000 })).toThrow('invalid adoption coordinator')
+  const valid = { coordinatorId: 'coordinator', scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' }, timeoutMs: 1_000, budgetId: 'adoption-runs', budgetAmount: 1 }
+  expect(() => validateAdoptionCoordinatorConfig(valid)).not.toThrow()
+  expect(() => validateAdoptionCoordinatorConfig({ ...valid, scope: { ...valid.scope, workspace: 'workspace' } })).toThrow('invalid adoption coordinator')
+  expect(() => validateAdoptionCoordinatorConfig({ ...valid, budgetAmount: 0 })).toThrow('invalid adoption coordinator')
+  const { budgetId: _budgetId, ...missingBudget } = valid
+  expect(() => validateAdoptionCoordinatorConfig(missingBudget)).toThrow('invalid adoption coordinator')
 })
 
 test('native executor rejects forged dispatches and close pauses only its generation after draining', async () => {
@@ -82,10 +86,11 @@ test('native executor rejects forged dispatches and close pauses only its genera
     reconcileSystem: vi.fn((input: any) => { registration = { definitionHash: 'definition', activationNonce: input.definition.execution.activationNonce }; return {} }),
     inspectSystemOwnedActivation: vi.fn(() => registration),
   }
-  const runtime = new AdoptionCoordinatorRuntime({ config: { coordinatorId: 'coordinator', scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' }, timeoutMs: 1_000 },
+  const runtime = new AdoptionCoordinatorRuntime({ config: { coordinatorId: 'coordinator', scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' }, timeoutMs: 1_000, budgetId: 'adoption-runs', budgetAmount: 7 },
     store: f.store as never, trust: {} as never, automations: automations as never, assertCurrent() {} })
   runtime.start()
   const definition = (automations.reconcileSystem.mock.calls[0]![0] as any).definition
+  expect(definition).toMatchObject({ budgetId: 'adoption-runs', budgetAmount: 7 })
   const forged = await executor!.execute({ automationId: 'bad', executionMode: 'production', activationNonce: definition.execution.activationNonce, definitionHash: 'definition', catalogDigest: executor!.descriptor.catalogDigest,
     ownerRouteId: 'route', principal: 'owner', targetScope: { workspace: '/workspace', preset: 'primary' }, signal: new AbortController().signal } as HostAutomationExecutorInput)
   expect(forged.outcome).toBe('failed')

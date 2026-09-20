@@ -31,6 +31,8 @@
 
 - 跨 Host 源码采用支持有限签名交接：`dossier.handoff` 由既有审批签名覆盖，schema 23 保存不可续期的目标授权。外部协调器复用原生 Automations 与部署引擎，仅推进至 `commit-pending`；目标恢复后重验当前反馈并最终启用。撤回/过期保留物理回退，Host 卸载保留交接，unknown 派发不重派。目标离线时仅能保证有限授权窗口，回退完成仍依赖运行中的协调器与签名服务；可安装部署和独立行为签名仍未验收。
 
+- 原生调度预算已补齐：Growth 使用反馈扫描必填 `usageLearning.scanBudgetId/scanBudgetAmount`，采用协调器和任务观察必填 `budgetId/budgetAmount`。三者通过 Automations 的原有 Policy 预留执行，空队列扫描也消耗额度；模型复盘继续使用顶层预算，部署通过扫描的 `subject` scope 与复盘的 `workspace/global` scope 分开额度（仅换 budget id 不会分池）。此前无预算定义会被默认 Host runner 拒绝，升级须补齐配置。耗尽协调器或观察预算也会暂停自动恢复，不提供无预算旁路。
+
 - 完整 RSI 目标尚未完成。组件测试、历史局部真实运行和 fixture 不能合并推导为 WP16/WP18 的生产端到端验收。
 
 真实同预算收益仍未验收；历史 Day1 unknown 保持原判、不重放，未知用量不计零。固定模型探针不再作为开发主线，后续优先完成日常使用中的验证、采用和观察能力。
@@ -73,8 +75,8 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 本段执行 `pnpm check`，首次在 Control Plane 遇到两条测试时序失败：路径替换 fixture 的后台进程未完成，以及 systemd fixture 的 5 秒观测超时。将前者改为同步替换，两条定向复查通过；续跑未执行的 9 个包。各环节补齐后合计 6,406 项测试通过、50 项跳过，Control Plane 719 项通过；manifest、最终零 lint 警告、类型检查、构建及 32 个插件和 3 个共享包的 dry-run pack 通过。首次命令的退出码仍为失败。
-- 跨 Host 交接独立复核通过，5 个相关文件共 54 项检查通过；另有 16 项交接/派发定向检查覆盖写锁期间撤销及原 unknown 回执边界。协调器不能创建、审批或最终启用目标计划；目标确认须同时持有当前反馈屏障和有效交接。测试使用受控 Host/签名端口，尚未验证真实双 Host 部署，尚未发布 npm。
+- 本段执行 `pnpm check`，首次在 Control Plane 的一条既有 systemd 物理恢复测试遇到观测时限超时，其余 720 项通过；该项单独复查通过，未更改时限或生产逻辑。续跑未执行的 9 个包后，合计 6,416 项测试通过、50 项跳过；manifest、最终零 lint 警告、类型检查、构建及 32 个插件和 3 个共享包的 dry-run pack 通过。首次全检命令的退出码仍为失败。
+- 原生维护预算修复独立复核通过：Control Plane 三个相关 spec 共 16 项、Growth 使用复盘 spec 共 19 项。真实 Automations + Policy 路径证明三个 cron 成功结算预算、耗尽后不进入执行器；扫描与模型复盘按 scope 分开额度，未开启无预算旁路。部署配置现在须补齐必填字段；这些组件测试不证明真实双 Host 安装或生产使用闭环，尚未发布 npm。
 - Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 
 

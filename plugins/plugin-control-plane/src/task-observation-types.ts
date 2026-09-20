@@ -20,6 +20,8 @@ export interface TaskObservationConfig {
   scope: { ownerRouteId: string; principalId: string; workspace: string; preset: string }
   profilePath: string
   timeoutMs: number
+  budgetId: string
+  budgetAmount: number
   authority: SourceApprovalClientConfig
 }
 

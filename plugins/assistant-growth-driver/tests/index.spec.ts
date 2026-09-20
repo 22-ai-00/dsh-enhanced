@@ -413,7 +413,7 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     const prompts: string[] = []
     h.ctx.on('llm/stream', async function* (options, next) { prompts.push(JSON.stringify(options.messages)); yield* next() })
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, { budgetId: 'growth-budget', budgetAmount: 1,
-      usageLearning: { enabled: true, databasePath: join(h.root, 'usage.sqlite') } }))
+      usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(h.root, 'usage.sqlite') } }))
     await vi.waitFor(() => expect(service.usageHealth()).toMatchObject({ connected: true, counts: { queued: 1 } }))
     await new Promise(resolve => setTimeout(resolve, 1100))
     for (let i = 0; i < 3; i += 1) { await h.ctx.assistantAutomations.tick(); await h.ctx.assistantAutomations.whenIdle() }
@@ -930,7 +930,7 @@ describe('opt-in plugin source proposals', () => {
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
       budgetId: 'growth-budget', budgetAmount: 1,
       pluginSourceProposals: options(h.root),
-      usageLearning: { enabled: true, databasePath: join(h.root, 'usage.sqlite') },
+      usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(h.root, 'usage.sqlite') },
     }))
     await vi.waitFor(() => expect(service.usageHealth()).toMatchObject({ connected: true, counts: { queued: 1 } }))
     await new Promise(resolve => setTimeout(resolve, 1_100))

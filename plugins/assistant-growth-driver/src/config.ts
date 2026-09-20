@@ -81,7 +81,11 @@ export interface AssistantGrowthDriverConfig {
   workflowOwnerAnchored?: WorkflowOwnerAnchoredConfig
   pluginSourceProposals?: PluginSourceProposalsConfig
   /** One-time opt-in to durable reviews driven by actual trusted foreground results. */
-  usageLearning?: { enabled?: boolean; databasePath?: string; maxPending?: number; lookbackMs?: number }
+  usageLearning?: {
+    enabled?: boolean; databasePath?: string; maxPending?: number; lookbackMs?: number
+    /** Native discovery scans need their own explicit automation-runs allocation. */
+    scanBudgetId?: string; scanBudgetAmount?: number
+  }
 }
 
 export interface NormalizedWorkflowOwnerAnchoredConfig {
@@ -110,7 +114,8 @@ export interface NormalizedGrowthDriverConfig extends Required<Omit<AssistantGro
   readonly scope: GrowthOwnerScopeConfig | null
   readonly workflowOwnerAnchored: NormalizedWorkflowOwnerAnchoredConfig
   readonly pluginSourceProposals: NormalizedPluginSourceProposalsConfig
-  readonly usageLearning: Readonly<{ enabled: boolean; databasePath: string | null; maxPending: number; lookbackMs: number }>
+  readonly usageLearning: Readonly<{ enabled: boolean; databasePath: string | null; maxPending: number; lookbackMs: number;
+    scanBudgetId: string | null; scanBudgetAmount: number | null }>
 }
 
 const fields = new Set([
@@ -200,6 +205,8 @@ const schema = Schema.object({
   workflowOwnerAnchored: workflowOwnerAnchoredSchema,
   pluginSourceProposals: pluginSourceProposalsSchema,
   usageLearning: Schema.object({ enabled: Schema.boolean().default(false), databasePath: boundedText(4096),
+    scanBudgetId: boundedText(128),
+    scanBudgetAmount: Schema.natural().min(1).max(10_000_000),
     maxPending: Schema.natural().min(1).max(100).default(16),
     lookbackMs: Schema.natural().min(60_000).max(604_800_000).default(86_400_000),
   }).default(undefined as never),
@@ -249,6 +256,8 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
       planTtlMs: config.pluginSourceProposals?.planTtlMs ?? 86_400_000,
     }),
     usageLearning: Object.freeze({ enabled: config.usageLearning?.enabled ?? false,
+      scanBudgetId: config.usageLearning?.scanBudgetId ?? null,
+      scanBudgetAmount: config.usageLearning?.scanBudgetAmount ?? null,
       databasePath: config.usageLearning?.databasePath ?? null, maxPending: config.usageLearning?.maxPending ?? 16,
       lookbackMs: config.usageLearning?.lookbackMs ?? 86_400_000 }),
   })
@@ -297,6 +306,12 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     if (!normalized.enabled || !normalized.scope || !normalized.budgetId || normalized.intervalMs !== 0
       || path === null || !isAbsolute(path) || resolve(path) !== path) {
       throw new Error('assistant-growth-driver: usageLearning requires enabled owner scope, budget, absolute databasePath and intervalMs=0')
+    }
+    const scanBudget = normalized.usageLearning.scanBudgetId
+    if (scanBudget === null || scanBudget.trim() !== scanBudget || scanBudget.length === 0
+      || scanBudget.normalize('NFC') !== scanBudget || /[\p{Cc}]/u.test(scanBudget)
+      || normalized.usageLearning.scanBudgetAmount === null) {
+      throw new Error('assistant-growth-driver: usageLearning requires scanBudgetId and scanBudgetAmount for native discovery')
     }
   }
   return normalized
