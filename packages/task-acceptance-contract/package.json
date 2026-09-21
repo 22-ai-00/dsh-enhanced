@@ -11,6 +11,14 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./holdout-authority": {
+      "types": "./lib/holdout-authority.d.ts",
+      "default": "./lib/holdout-authority.js"
+    },
+    "./prospective-holdout": {
+      "types": "./lib/prospective-holdout.d.ts",
+      "default": "./lib/prospective-holdout.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
