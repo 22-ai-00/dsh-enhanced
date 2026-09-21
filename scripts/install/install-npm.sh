@@ -136,6 +136,118 @@ validate_temporary_parent() {
   fi
 }
 
+# Reject TMPDIR paths that traverse a symlink an unprivileged user could have
+# created. The logical path is lexically normalized (collapsing duplicate
+# slashes and "." / "..") so a trailing slash can never make [[ -L ]] deref-
+# erence a link. We then emulate pathname resolution one symlink hop at a
+# time with readlink instead of a single `cd -P`: the latter would hide a
+# non-root symlink nested inside a root symlink's target. Every symlink hop
+# must be owned by uid 0 and ultimately resolve to a directory (macOS
+# /var -> /private/var, where the per-user TMPDIR under /var/folders lives,
+# and /tmp -> /private/tmp are such trusted aliases). The ownership/mode
+# validation further below still runs against the fully resolved canonical
+# path only.
+validate_root_owned_directory_aliases() {
+  local logical_path="$1"
+  local raw component candidate link_target link_dir
+  local -a segments=()
+  local -a hop_tokens=()
+  local -a rebuilt=()
+  local idx=0 tail_idx=0
+  local physical_path=''
+  local symlink_hops=0
+
+  case "$logical_path" in
+    /*) ;;
+    *)
+      printf 'dsh-enhanced installer: TMPDIR 必须是绝对路径。\n' >&2
+      return 1
+      ;;
+  esac
+
+  local -a raw_tokens=()
+  IFS='/' read -r -a raw_tokens <<< "$logical_path"
+  for raw in "${raw_tokens[@]+"${raw_tokens[@]}"}"; do
+    [[ -n "$raw" ]] && segments+=("$raw")
+  done
+
+  while [[ $idx -lt ${#segments[@]} ]]; do
+    component="${segments[$idx]}"
+    case "$component" in
+      .)
+        idx=$((idx + 1))
+        continue ;;
+      ..)
+        case "$physical_path" in
+          '') ;;
+          /*/*) physical_path="${physical_path%/*}" ;;
+          *) physical_path='' ;;
+        esac
+        idx=$((idx + 1))
+        continue ;;
+    esac
+    if [[ -n "$physical_path" ]]; then
+      candidate="$physical_path/$component"
+    else
+      candidate="/$component"
+    fi
+
+    if [[ -L "$candidate" ]]; then
+      if installer_stat "$candidate"; then
+        parse_installer_stat "$INSTALLER_STAT_RESULT" || return 1
+      else
+        printf 'dsh-enhanced installer: 无法检查 TMPDIR 符号链接：%s。\n' "$candidate" >&2
+        return 1
+      fi
+      if [[ "$INSTALLER_STAT_UID" != '0' ]]; then
+        printf 'dsh-enhanced installer: TMPDIR 经过非 root 拥有的符号链接，不受信任：%s。\n' "$candidate" >&2
+        return 1
+      fi
+      symlink_hops=$((symlink_hops + 1))
+      if [[ "$symlink_hops" -gt 40 ]]; then
+        printf 'dsh-enhanced installer: TMPDIR 符号链接层数过多或存在循环：%s。\n' "$logical_path" >&2
+        return 1
+      fi
+      link_target="$(readlink "$candidate")" || {
+        printf 'dsh-enhanced installer: TMPDIR 符号链接无法解析：%s。\n' "$candidate" >&2
+        return 1
+      }
+      link_dir="$(cd -P "$candidate" 2>/dev/null && pwd -P)" || {
+        printf 'dsh-enhanced installer: TMPDIR 符号链接无法解析：%s。\n' "$candidate" >&2
+        return 1
+      }
+      if [[ ! -d "$link_dir" ]]; then
+        printf 'dsh-enhanced installer: TMPDIR 符号链接未指向目录：%s。\n' "$candidate" >&2
+        return 1
+      fi
+      hop_tokens=()
+      rebuilt=()
+      IFS='/' read -r -a hop_tokens <<< "$link_target"
+      for raw in "${hop_tokens[@]+"${hop_tokens[@]}"}"; do
+        [[ -n "$raw" ]] && rebuilt+=("$raw")
+      done
+      # Splice the link target in place of the link component, keeping the
+      # unprocessed suffix. An absolute target restarts at the filesystem
+      # root; a relative target keeps accumulating beneath the link's parent
+      # directory (physical_path currently excludes the link component).
+      for ((tail_idx = idx + 1; tail_idx < ${#segments[@]}; tail_idx++)); do
+        rebuilt+=("${segments[$tail_idx]}")
+      done
+      # Keep the unquoted ${arr[@]+"${arr[@]}"} guard rather than a plain
+      # ("${rebuilt[@]}"): on bash < 4.4 under `set -u` an empty array copy
+      # otherwise trips an unbound-variable error. Each quoted element is
+      # still protected, so no word splitting or globbing occurs.
+      segments=(${rebuilt[@]+"${rebuilt[@]}"})
+      [[ "$link_target" == /* ]] && physical_path=''
+      idx=0
+    else
+      physical_path="$candidate"
+      idx=$((idx + 1))
+    fi
+  done
+  return 0
+}
+
 select_temporary_parent() {
   local requested_parent="${TMPDIR:-/tmp}"
   local canonical_parent
@@ -148,12 +260,6 @@ select_temporary_parent() {
   while [[ "$requested_parent" != '/' && "$requested_parent" == */ ]]; do
     requested_parent="${requested_parent%/}"
   done
-  # macOS exposes /tmp as the conventional symlink to /private/tmp. Resolve
-  # that one system alias, then validate only the canonical directory below.
-  if [[ -L "$requested_parent" && "$requested_parent" != '/tmp' ]]; then
-    printf 'dsh-enhanced installer: TMPDIR 不能是符号链接：%s。\n' "$requested_parent" >&2
-    return 1
-  fi
   canonical_parent="$(cd -P "$requested_parent" 2>/dev/null && pwd -P)" || {
     printf 'dsh-enhanced installer: TMPDIR 不存在或不可访问：%s。\n' "$requested_parent" >&2
     return 1
@@ -162,14 +268,7 @@ select_temporary_parent() {
     printf 'dsh-enhanced installer: 无法解析系统临时目录 /tmp。\n' >&2
     return 1
   }
-  if [[ "$canonical_parent" != "$requested_parent" && "$requested_parent" != '/tmp' ]]; then
-    printf 'dsh-enhanced installer: TMPDIR 必须是 canonical 路径：%s。\n' "$requested_parent" >&2
-    return 1
-  fi
-  if [[ -L "$canonical_parent" ]]; then
-    printf 'dsh-enhanced installer: canonical TMPDIR 不能是符号链接：%s。\n' "$canonical_parent" >&2
-    return 1
-  fi
+  validate_root_owned_directory_aliases "$requested_parent" || return 1
   TEMPORARY_PARENT="$canonical_parent"
   validate_temporary_parent "$TEMPORARY_PARENT" '' "$system_temp_path" || return $?
   TEMPORARY_PARENT_IDENTITY="$INSTALLER_LAST_IDENTITY"
