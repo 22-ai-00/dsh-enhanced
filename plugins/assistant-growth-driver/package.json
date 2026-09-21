@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-growth-driver",
-  "version": "0.1.34",
+  "version": "0.1.35",
   "description": "Bounded growth agent with durable reviews driven by owner-verified task feedback and frozen source models.",
   "license": "MIT",
   "type": "module",
