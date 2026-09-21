@@ -7422,6 +7422,10 @@ if [[ "$*" == 'install --global @deepseek-ai/dsh@0.1.5-rc.1' ]]; then
   cp "$FAKE_BIN/dsh-new" "$FAKE_BIN/dsh"
   chmod 755 "$FAKE_BIN/dsh"
 fi
+if [[ "\${1:-}" == 'install' && "$*" == *rsi-cli* ]]; then
+  printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-rsi"
+  chmod 755 "$FAKE_BIN/dsh-rsi"
+fi
 `)
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; exit 0; fi
@@ -7530,6 +7534,10 @@ exit 0
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.2-rc.1\\n'; exit 0; fi
 if [[ "\${1:-}" == 'prefix' ]]; then printf '%s\\n' "$FAKE_PREFIX"; fi
+if [[ "\${1:-}" == 'install' && "$*" == *rsi-cli* ]]; then
+  printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-rsi"
+  chmod 755 "$FAKE_BIN/dsh-rsi"
+fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
@@ -7578,6 +7586,7 @@ fi
         PATH: `${fakeBin}:/usr/bin:/bin`,
         DSH_HOME: dshHome,
         INSTALL_LOG: logPath,
+        FAKE_BIN: fakeBin,
         FAKE_PREFIX: root,
         DSH_ENHANCED_SERVICE_STABILITY_SECONDS: '0',
         // The fake bin stubs systemd tooling, so pin the detected platform
@@ -7848,6 +7857,10 @@ exit 0
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 if [[ "\${1:-}" == 'view' ]]; then printf '"0.1.33"\\n'; fi
+if [[ "\${1:-}" == 'install' && "$*" == *rsi-cli* ]]; then
+  printf '#!/bin/bash\nif [[ "\${1:-}" == version ]]; then printf "0.1.35\\n"; fi\nexit 0\n' > "$FAKE_BIN/dsh-rsi"
+  chmod 755 "$FAKE_BIN/dsh-rsi"
+fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
@@ -7871,6 +7884,7 @@ if [[ "$REGISTER_MODE" != 'invisible' ]]; then touch "$REGISTERED"; fi
       '--scenario', 'lark', '--profile', profile, '--yes', '--model', 'skip', '--model-route', 'skip', ...extra,
     ], dshHome, 'Darwin', {
       PATH: `${fakeBin}:/usr/bin:/bin`,
+      FAKE_BIN: fakeBin,
       FIXTURE_REAL_NODE: process.execPath,
       FIXTURE_PROFILE: profile,
       INSTALL_LOG: logPath,
