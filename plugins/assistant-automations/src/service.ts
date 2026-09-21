@@ -14,10 +14,7 @@ import type {
   TrustedAutomationEvaluationProducer,
   TrustedAutomationEvaluationClaims,
   TrustedAutomationEvaluationRegistration,
-} from '@dsh-enhanced/assistant-evaluation'
-import {
-  canonicalEvaluationHostScope,
-  type AssistantEvaluationService,
+  AssistantEvaluationService,
 } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantPolicyService, PolicyDecision } from '@dsh-enhanced/assistant-policy'
 import {
@@ -1300,7 +1297,7 @@ export class AssistantAutomationsService extends Service implements
   private currentCanaryProof(artifact: Readonly<GrowthArtifactRecord>) {
     if (artifact.canaryRunId === undefined || this.evaluation === undefined
       || typeof this.evaluation.getTrustedAutomationRunLearningProjection !== 'function') return undefined
-    const scope = canonicalEvaluationHostScope({ workspace: artifact.workspace, preset: artifact.preset })
+    const scope = this.evaluation.createHostScope({ workspace: artifact.workspace, preset: artifact.preset })
     const proof = this.evaluation.getTrustedAutomationRunLearningProjection({ scope, runId: artifact.canaryRunId })
     if (proof === undefined || proof.scope.workspace !== scope.workspace || proof.scope.preset !== scope.preset
       || proof.situation !== `automation:${artifact.automationId}`
@@ -1409,7 +1406,7 @@ export class AssistantAutomationsService extends Service implements
     }
     const proof = this.requireCurrentCanaryProof(artifact)
     const fenced = this.evaluation!.withTrustedCanonicalLearningWriterFence({
-      scope: canonicalEvaluationHostScope({ workspace: artifact.workspace, preset: artifact.preset }),
+      scope: this.evaluation!.createHostScope({ workspace: artifact.workspace, preset: artifact.preset }),
       scopeWatermark: proof.scopeWatermark,
       evidence: [{ ...proof.projection, disposition: 'upsert' }],
     }, () => {

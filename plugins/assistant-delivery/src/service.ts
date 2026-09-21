@@ -16,13 +16,18 @@ import {
   type AssistantPolicyService,
   type PolicyDecision,
 } from '@dsh-enhanced/assistant-policy'
-import {
-  TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
-  type AssistantEvaluationService,
-  type TrustedTaskLearningProjectionReceipt,
-  type TrustedDeliveryEvaluationClaims,
-  type TrustedDeliveryEvaluationRegistration,
+import type {
+  AssistantEvaluationService,
+  TrustedTaskLearningProjectionReceipt,
+  TrustedDeliveryEvaluationClaims,
+  TrustedDeliveryEvaluationRegistration,
 } from '@dsh-enhanced/assistant-evaluation'
+
+// Cross-package wire literal, kept locally so this bundle can load without the
+// optional assistant-evaluation peer installed (a value import would defeat
+// peerDependenciesMeta.optional at module link time).  Must stay identical to
+// TRUSTED_EVALUATION_PRODUCER_PROTOCOL in assistant-evaluation.
+const TRUSTED_EVALUATION_PRODUCER_PROTOCOL = 'assistant-evaluation/trusted-producer/v1' as const
 
 import {
   ASSISTANT_GROWTH_CONTRACT_VERSION,
