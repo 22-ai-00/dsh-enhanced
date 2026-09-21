@@ -1,0 +1,56 @@
+{
+  "name": "@dsh-enhanced/rsi-cli",
+  "version": "0.1.35",
+  "description": "Global dsh-rsi command: status, doctor, and full purge for DSH enhanced plugin installations.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "bin": {
+    "dsh-rsi": "./bin/dsh-rsi.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "directory": "packages/rsi-cli"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "purge",
+    "uninstall",
+    "diagnostics",
+    "cli"
+  ],
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

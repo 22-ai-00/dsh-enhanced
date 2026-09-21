@@ -435,6 +435,18 @@ importers:
         specifier: 'catalog:'
         version: 4.1.8(@types/node@22.20.0)(vite@8.2.1(@types/node@22.20.0)(esbuild@0.27.7)(yaml@2.9.0))
 
+  packages/rsi-cli:
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.8(@types/node@22.20.0)(vite@8.2.1(@types/node@22.20.0)(esbuild@0.27.7)(yaml@2.9.0))
+
   packages/task-acceptance-contract:
     devDependencies:
       '@types/node':

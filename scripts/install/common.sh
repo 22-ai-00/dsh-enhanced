@@ -434,6 +434,43 @@ dsh_enhanced_ensure_pnpm() {
   fi
 }
 
+# 安装插件集合的同时提供全局 dsh-rsi 控制/诊断/卸载命令（@dsh-enhanced/rsi-cli）。
+# npm 形态安装与 cohort 完全一致的精确版本；local 形态从当前 checkout 的 packages/rsi-cli 安装。
+# 纯库包无 install 脚本、无原生依赖，全局安装安全；install/upgrade 均调用，保证老安装补齐该命令。
+dsh_enhanced_ensure_rsi_cli() {
+  local source_mode="$1"
+  local repo_root="$2"
+  local plugin_version="$3"
+  local dry_run="$4"
+  printf '\ndsh-rsi 控制命令：\n'
+  if [[ "$source_mode" == 'local' ]]; then
+    if [[ "$dry_run" == '1' ]]; then
+      dsh_enhanced_print_command npm install --global "$repo_root/packages/rsi-cli"
+      return 0
+    fi
+    npm install --global "$repo_root/packages/rsi-cli" || {
+      dsh_enhanced_fail 1 'dsh-rsi 安装失败（local 形态）；可手工执行 npm install --global '"$repo_root/packages/rsi-cli"。
+      return $?
+    }
+  else
+    if [[ "$dry_run" == '1' ]]; then
+      dsh_enhanced_print_command npm install --global "@dsh-enhanced/rsi-cli@$plugin_version"
+      return 0
+    fi
+    npm install --global "@dsh-enhanced/rsi-cli@$plugin_version" || {
+      dsh_enhanced_fail 1 "dsh-rsi 安装失败（npm 形态 @$plugin_version）；可手工执行 npm install --global @dsh-enhanced/rsi-cli@$plugin_version。"
+      return $?
+    }
+  fi
+  hash -r
+  dsh_enhanced_refresh_global_path || true
+  if ! command -v dsh-rsi >/dev/null 2>&1; then
+    dsh_enhanced_fail 1 'dsh-rsi 已安装但不在 PATH；请把 npm global bin 目录加入 PATH。'
+    return $?
+  fi
+  printf 'dsh-rsi 已就绪：%s\n' "$(dsh-rsi version 2>/dev/null || printf 'unknown')"
+}
+
 dsh_enhanced_require_existing_runtime() {
   local ack_unverified_host="$1"
   local require_pnpm="${2:-1}"
@@ -3222,6 +3259,8 @@ NODE
       dsh_enhanced_doctor_isolation "$profile" "$dsh_home" || return $?
     fi
   fi
+
+  dsh_enhanced_ensure_rsi_cli "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
 
   printf '\n安装流程完成。\n'
   printf '检查配置：dsh --profile %s --dump-config\n' "$profile"

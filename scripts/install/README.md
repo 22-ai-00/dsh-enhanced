@@ -56,6 +56,29 @@ uninstall 不访问 npm registry 或 pnpm store。`web` / `autonomy` 仍使用�
 
 Linux Lark/supervised service-aware upgrade/uninstall 另外要求固定系统解释器 `/usr/bin/python3`，用于 `renameat2(RENAME_NOREPLACE)` 的无覆盖文件屏障；`DSH_HOME` 与用户 systemd 配置目录必须位于同一文件系统。
 
+## 彻底卸载（purge）
+
+`--operation uninstall` 是**保留数据的归档**（旧 profile 移入 `$DSH_HOME/uninstalled-profiles/`，凭据 / Session / Goal 等状态保留）。需要**彻底删除**整个安装（崩溃救机、报废环境、干净重装）时，使用随插件集合一起安装的全局 `dsh-rsi` 命令：
+
+```sh
+dsh-rsi doctor          # 只读诊断：host 版本、服务、凭据条目数、已知崩溃模式
+dsh-rsi purge --dry-run # 查看完整删除计划
+dsh-rsi purge --yes     # 先在 ~ 生成 0600 的 tar.gz 备份，再删除 DSH home 与全部受管痕迹
+```
+
+purge 覆盖 npm cohort 实体副本与本地 checkout 符号链接两种形态：删除整个 `$DSH_HOME`（或 `--profile <name>` 单个 profile）、home 外生命周期事务/失败诊断/锁、launchd / systemd --user 受管服务，并按各 profile 的 setup journal 权威反查清理 Keychain / Secret Service 中 service 前缀为 `dsh/` 的凭据。选项：`--no-backup`、`--keep-keychain`、`--remove-host`（同时卸载全局 `@deepseek-ai/dsh`，默认保留；仅限全量）。本地 checkout 源码只删符号链接、**绝不删除 checkout**，报告会列出 checkout 路径。发现仍在运行的 profile host 会拒绝执行（不代为 kill）；systemd unit 文件内容不匹配受管标记时 fail-closed 只报告保留。完整命令参考见 `packages/rsi-cli/README.md`。
+
+机器上没有 `dsh-rsi` 时（host 已损坏 / 全局命令被删），可直接执行单文件救机脚本；它优先委托 `dsh-rsi`，找不到时使用等价的内联精简实现，参数与 `dsh-rsi purge` 一致：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh \
+  | bash -s -- --yes
+# 或 checkout 内：
+./scripts/install/purge.sh --dry-run
+```
+
+`purge.sh` 是 **mutable-main 运维脚本**：始终取 main 分支最新版本，不做 release pin / SHA-256 校验，也不纳入 `install-npm.sh` 的引导资产清单（引导器不会下载执行它）。它与固定 tag、三资产摘要校验的供应链引导路径刻意分离；需要可复现引导校验时仍应使用 `install-npm.sh`。
+
 交互运行不传参数会选择场景；自动化可显式指定：
 
 ```sh
