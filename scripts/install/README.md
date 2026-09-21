@@ -79,6 +79,29 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 
 `purge.sh` 是 **mutable-main 运维脚本**：始终取 main 分支最新版本，不做 release pin / SHA-256 校验，也不纳入 `install-npm.sh` 的引导资产清单（引导器不会下载执行它）。它与固定 tag、三资产摘要校验的供应链引导路径刻意分离；需要可复现引导校验时仍应使用 `install-npm.sh`。
 
+## 通过 `dsh-rsi` 安装与重装
+
+全局 `dsh-rsi` 也可以直接发起安装（修复损坏安装、救机重装），它是**薄委托**：自身不复制任何安装逻辑，只锁定版本并把参数原样交给对应安装器，stdio 与终端直连。
+
+```sh
+# npm 形态（默认）：下载与本 dsh-rsi 同版本（vX.Y.Z）的 install-npm.sh 到临时目录执行；
+# 引导脚本内部仍按内嵌 SHA-256 自校验 common.sh 等资产
+dsh-rsi install --scenario core --yes
+
+# local 形态：执行 checkout 内 install-local.sh
+dsh-rsi install --local ~/work/github/dsh-enhanced --scenario web
+
+# 安装器支持的全部参数（--scenario/--workspace/--model-route/--lark …）原样透传
+dsh-rsi install --help
+
+# 干净重装：先按 purge 安全门控备份+彻底删除，再立即重新安装
+dsh-rsi reinstall --yes
+dsh-rsi reinstall --profile web --yes
+dsh-rsi reinstall --local ~/work/github/dsh-enhanced --yes
+```
+
+`--dsh-home` 由 dsh-rsi 经 `DSH_HOME` 环境变量传给安装器（安装器不识别该 flag）；`reinstall` 的 purge 阶段支持 `--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`，未加 `--yes` 仍需输入 `purge` 确认。安装器退出码原样透传。
+
 交互运行不传参数会选择场景；自动化可显式指定：
 
 ```sh
