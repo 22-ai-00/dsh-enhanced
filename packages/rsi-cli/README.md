@@ -1,6 +1,6 @@
 # @dsh-enhanced/rsi-cli — 全局 `dsh-rsi` 命令
 
-DSH enhanced 插件集合的控制 / 诊断 / 彻底卸载工具。安装插件集合（npm cohort 或本地 checkout 形态）后，安装器会同时把本包装成全局 `dsh-rsi` 命令；也可单独安装：
+DSH enhanced 插件集合的安装 / 控制 / 诊断 / 彻底卸载工具。安装插件集合（npm cohort 或本地 checkout 形态）后，安装器会同时把本包装成全局 `dsh-rsi` 命令；也可单独安装：
 
 ```bash
 npm install --global @dsh-enhanced/rsi-cli
@@ -18,16 +18,43 @@ dsh-rsi [全局选项] <命令>
 | --- | --- |
 | `status`（默认） | 列出 DSH home、各 profile 与安装形态（npm 实体副本 / local 符号链接）、全局 host 版本、launchd / systemd 受管服务状态、外部凭据条目数、生命周期事务/锁残留。**只读**。 |
 | `doctor` | 在 `status` 基础上扫描各 profile 的 `*-host.error.log`，识别已知崩溃模式（如旧版 event-support oracle 拒绝注册）并给出升级/重建建议。**只读**。 |
+| `install` | 安装/修复插件集合：npm 形态下载与本 dsh-rsi 同版本的官方安装器执行，`--local <dir>` 执行 checkout 内安装器；其余参数原样透传。 |
+| `reinstall` | 先 `purge`（默认先备份、同样的安全门控）再立即 `install`，用于干净重装。 |
 | `purge` | 彻底卸载：进程静止检查 → 停服注销 → tar.gz 备份 → 删除 profile / DSH home / 生命周期残留 → 清理外部凭据。 |
 | `version` | 打印版本。 |
 
 全局选项：
 
-- `--dsh-home <path>`：指定 DSH home（默认取 `$DSH_HOME`，否则 `~/.dsh`）
-- `--profile <name>`：仅操作单个 profile（`purge` 默认全量）
-- `--dry-run`：只打印将执行的动作，不做任何修改
-- `--yes`：`purge` 时跳过交互确认（脚本 / 管道场景）
-- `-h, --help`：完整帮助
+- `--dsh-home <path>`：指定 DSH home（默认取 `$DSH_HOME`，否则 `~/.dsh`；install 经 `DSH_HOME` 环境变量传给安装器）
+- `--profile <name>`：仅操作单个 profile（`purge` 默认全量；install/reinstall 同时透传给安装器）
+- `--dry-run`：只打印将执行的动作，不做任何修改（install/reinstall 透传给安装器）
+- `--yes`：`purge` / `reinstall` 时跳过交互确认（install/reinstall 透传给安装器）
+- `-h, --help`：无命令位置时显示 dsh-rsi 帮助；`dsh-rsi install --help` 透传展示**安装器**完整参数清单
+
+## install / reinstall（薄委托）
+
+`dsh-rsi install` 不复制任何安装逻辑，只做统一入口与版本锁定：
+
+- **npm 形态（默认）**：下载 `https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v<本包版本>/scripts/install/install-npm.sh` 到临时目录执行。引导脚本内部会按内嵌 SHA-256 自校验 `common.sh` 等资产，rsi-cli 不重复 hash 逻辑。即「用哪个版本的 dsh-rsi，就装哪个版本的插件集合」。
+- **local 形态**：`--local <checkout 目录>`，直接执行该目录下 `scripts/install/install-local.sh`（本地开发 / 无网救机）。
+- 安装器 stdio 与终端直连（交互提示照常），退出码原样透传。
+
+```bash
+# npm 形态安装 core 场景（其余安装器参数任意透传）
+dsh-rsi install --scenario core --yes
+
+# local checkout 形态
+dsh-rsi install --local ~/work/github/dsh-enhanced --scenario web
+
+# 查看安装器支持的全部参数
+dsh-rsi install --help
+
+# 干净重装：先备份+purge，再按相同形态重新安装
+dsh-rsi reinstall --yes
+dsh-rsi reinstall --profile web --yes
+```
+
+`reinstall` 支持的 rsi 侧选项与 `purge` 一致（`--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`）；purge 阶段未加 `--yes` 时仍需输入 `purge` 确认。重装阶段默认走 npm 形态；local 重装加 `--local <dir>`。
 
 ## status / doctor
 
@@ -107,8 +134,9 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 成功（含 dry-run、目标不存在的幂等场景） |
-| 1 | purge 执行失败（活动进程、服务/凭据错误等） |
+| 1 | purge 执行失败（活动进程、服务/凭据错误等）；install 下载/委托失败 |
 | 2 | 参数错误 |
+| 其它非 0 | `install` / `reinstall` 安装器的退出码原样透传 |
 
 ## License
 

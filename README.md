@@ -44,16 +44,18 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/restart.sh
 ```
 
-安装器会同时提供全局 `dsh-rsi` 控制命令（npm 与本地 checkout 两种形态均包含），用于只读诊断与彻底卸载：
+安装器会同时提供全局 `dsh-rsi` 控制命令（npm 与本地 checkout 两种形态均包含），用于安装、只读诊断与彻底卸载：
 
 ```sh
-dsh-rsi status            # 各 profile、安装形态、host 版本、服务与凭据状态
-dsh-rsi doctor            # 识别 host 错误日志中的已知崩溃模式并给出升级建议
-dsh-rsi purge --dry-run   # 查看彻底删除计划
-dsh-rsi purge --yes       # 先备份 ~/.dsh（0600 tar.gz）再彻底删除；默认保留全局 host
+dsh-rsi install --scenario core --yes  # 安装/修复：薄委托到与本 dsh-rsi 同版本的官方安装器
+dsh-rsi status                         # 各 profile、安装形态、host 版本、服务与凭据状态
+dsh-rsi doctor                         # 识别 host 错误日志中的已知崩溃模式并给出升级建议
+dsh-rsi reinstall --yes                # 先备份 purge 再干净重装（也可加 --local <checkout>）
+dsh-rsi purge --dry-run                # 查看彻底删除计划
+dsh-rsi purge --yes                    # 先备份 ~/.dsh（0600 tar.gz）再彻底删除；默认保留全局 host
 ```
 
-`purge` 与安装器的 `--operation uninstall`（归档保留数据）不同：它删除 DSH home、生命周期残留、受管服务与外部凭据，但绝不删除本地 checkout 源码；详见 [`packages/rsi-cli/README.md`](packages/rsi-cli/README.md)。崩溃机器上没有 `dsh-rsi` 时可用单文件脚本 `curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh | bash -s -- --yes`。
+`install` 默认按 npm 形态下载与本 dsh-rsi 同版本（`vX.Y.Z`）的 `install-npm.sh` 执行（脚本内部自校验资产 SHA-256），加 `--local <checkout>` 执行该目录的 `install-local.sh`，其余安装器参数原样透传（`dsh-rsi install --help` 查看完整清单）。`purge` 与安装器的 `--operation uninstall`（归档保留数据）不同：它删除 DSH home、生命周期残留、受管服务与外部凭据，但绝不删除本地 checkout 源码；详见 [`packages/rsi-cli/README.md`](packages/rsi-cli/README.md)。崩溃机器上没有 `dsh-rsi` 时可用单文件脚本 `curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh | bash -s -- --yes`。
 
 需要试用有限离线执行时，可显式使用 `--scenario autonomy --isolation-image sha256:<本机固定镜像ID>`。安装器会实际探测 Docker 并为本机 Web owner 配置有次数、期限和累计时长的隔离授权；参数与前置条件见[安装文档](scripts/install/README.md)。这是基本 RSI 首版的实验入口；有限修复使用下述 repair admission，外部动作需要单独配置范围明确的授权和凭据，完整自治规划继续推进。
 
