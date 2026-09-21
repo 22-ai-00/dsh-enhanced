@@ -66,7 +66,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. 补齐可安装的普通使用部署：supervised 安装目前未接 Growth Driver 源码轨及双 Host 配置。有限签名交接已接原生 Automations，外部协调器推进至待提交，目标 Host 恢复后重验当前 owner/反馈再确认；继续补安装、一次授权、预算、停止和恢复入口，默认继承来源任务模型。
+1. 完成普通使用部署验收：新增 [`dsh-rsi-setup`](../plugins/lark-channel/docs/rsi-setup.md) 为已安装的目标与独立协调器编译有限配置、原生预算和 Policy，核对 owner/trust/四类签名授权，提供成对写入、恢复及可选常驻启动。supervised 安装仍需按指南补装 Growth Driver 与协调器；该入口不代替授权器和独立行为观测的部署。下一步在真实安装上贯通整条链，默认继承来源任务模型。
 2. 补齐采用前的独立行为观测与签名。现有 systemd attestor 只覆盖 reload/readiness/rollback；原生阻断回放不能证明全局无副作用，也不能替代 shadow/canary/soak/health 验收。
 3. 在实际部署中验证普通反馈驱动候选、独立验证、有限采用和后续真实任务观察/回滚，然后完成发布检查并发布 npm。保留上表未完成边界；Skills 路径仍需去除逐 Goal 手动 arm，WP18 仍需真实仓库授权提交与精确 CI/readback。固定场景和测试夹具不算生产闭环。
 

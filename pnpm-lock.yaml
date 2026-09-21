@@ -1817,6 +1817,9 @@ importers:
       '@dsh-enhanced/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
+      '@dsh-enhanced/assistant-growth-driver':
+        specifier: workspace:*
+        version: link:../assistant-growth-driver
       '@dsh-enhanced/assistant-growth-experiments':
         specifier: workspace:*
         version: link:../assistant-growth-experiments
@@ -1826,15 +1829,24 @@ importers:
       '@dsh-enhanced/assistant-heartbeat':
         specifier: workspace:*
         version: link:../assistant-heartbeat
+      '@dsh-enhanced/assistant-policy':
+        specifier: workspace:*
+        version: link:../assistant-policy
       '@dsh-enhanced/assistant-recovery':
         specifier: workspace:*
         version: link:../assistant-recovery
+      '@dsh-enhanced/assistant-verifier':
+        specifier: workspace:*
+        version: link:../assistant-verifier
       '@dsh-enhanced/credentials-keychain':
         specifier: workspace:*
         version: link:../credentials-keychain
       '@dsh-enhanced/personal-assistant':
         specifier: workspace:*
         version: link:../personal-assistant
+      '@dsh-enhanced/plugin-control-plane':
+        specifier: workspace:*
+        version: link:../plugin-control-plane
       '@dsh-enhanced/preference-learning':
         specifier: workspace:*
         version: link:../preference-learning

@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## 日常使用双 Host 配置入口
+
+`dsh-rsi-setup` 随 `lark-channel` 发布，使用同一构建的 Growth Driver、Control Plane、Verifier、Policy 与 Delivery API。新增的 `normalizeControlPlaneConfig` 和 `validateSourceReviewConfig` 是只读配置预检入口；此次不修改数据库 schema 或 DSH/Cordis 基线。两个 Host 和授权器须成套安装当前构建。CLI 要求 Linux/systemd user services，默认仅校验；显式应用具有私有恢复 journal，详见[部署指南](../plugins/lark-channel/docs/rsi-setup.md)。此前 supervised 安装仍需按该指南补装 Growth Driver 与独立协调器。
+
+## Host 基线
+
 `0.1.32` 安装器的支持范围为 `>=0.1.2-rc.1 <0.2.0`：以主版本与次版本作为兼容边界，同一 `0.1.x` 内的补丁版和后续 RC 不再被精确版本检查拦截。默认新安装版为 `0.1.5-rc.1`；已有兼容 CLI 直接复用。`pinnedHostVersion` 是发布安装器默认版本的可复现记录，不是唯一允许的运行时版本。跨次版本需单独适配验证。
 
 编译和工作区测试继续使用最低支持版 `0.1.2-rc.1`，避免无意依赖新接口后破坏旧版；新版 Host 使用独立安装的真实模块闭包验证。Policy 同时支持旧 `PersistenceCoordinator.assertEventsSupported` 和新版 JSONL 的公开 `assertVersion` / `validateStoredEvents`。新版 reader 从实际 Loader 挂载的 backend 模块解析，先证明未知必需事件被拒绝，再证明注册表身份；不把审批事件标成 ignorable。现代 Session format 3 与旧 format 0 各自使用匹配的 registry 和探针。Cordis service 的 `ctx` 会随调用者变化，因此仅从其 own data descriptor 读取定义处的 Loader 元数据；运行时调用与资源仍属于当前注入 Context。

@@ -24,6 +24,7 @@ describe('dsh-enhanced-lark-channel entrypoint', () => {
     expect(manifest.bin).toEqual({
       'dsh-lark-setup': './bin/dsh-lark-setup.js',
       'dsh-supervised-growth-setup': './bin/dsh-supervised-growth-setup.js',
+      'dsh-rsi-setup': './bin/dsh-rsi-setup.js',
     })
     expect(manifest.files).toContain('bin')
     for (const path of Object.values(manifest.bin)) {
