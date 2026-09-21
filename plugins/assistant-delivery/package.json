@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-delivery",
-  "version": "0.1.36",
+  "version": "0.1.37",
   "description": "A durable, policy-gated inbound/outbound message core for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
