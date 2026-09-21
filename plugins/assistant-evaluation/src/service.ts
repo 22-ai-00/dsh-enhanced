@@ -667,6 +667,17 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       hostIdentifier(input.principalRecordId, 'principalRecordId', 4_096), input.principalVersion)
   }
 
+  /**
+   * Factory for canonical host scope tokens.  Optional consumers (bundles that
+   * declare this package as an optional peer) must not import the module-level
+   * constructor, since that makes the peer non-optional at module link time;
+   * they obtain branded scopes through the registered service instead.
+   */
+  createHostScope(input: EvaluationScope): EvaluationHostScope {
+    this.assertActive()
+    return canonicalEvaluationHostScope(input)
+  }
+
   /** Host-only exact canonical run proof; conflicted tasks have no ready proof. */
   getTrustedAutomationRunLearningProjection(input: {
     scope: EvaluationHostScope
