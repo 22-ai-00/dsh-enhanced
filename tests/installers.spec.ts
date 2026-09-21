@@ -526,6 +526,17 @@ async function remoteBootstrapFixture(
     '#!/bin/bash',
     'set -euo pipefail',
     'target="${@: -1}"',
+    'if [[ -n "${REMOTE_BOOTSTRAP_ROOT_STAT_PATHS:-}" ]]; then',
+    '  IFS=":" read -r -a __root_paths <<< "$REMOTE_BOOTSTRAP_ROOT_STAT_PATHS"',
+    '  for __p in "${__root_paths[@]}"; do',
+    '    if [[ "$target" == "$__p" && ( "${1:-}" == -c || "${1:-}" == -f ) ]]; then',
+    '      raw="$(/usr/bin/stat "$@")"',
+    '      IFS=":" read -r device inode _ mode links type <<< "$raw"',
+    "      printf '%s:%s:0:%s:%s:%s\\n' \"$device\" \"$inode\" \"$mode\" \"$links\" \"$type\"",
+    '      exit 0',
+    '    fi',
+    '  done',
+    'fi',
     'if [[ -n "${REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH:-}" && "$target" == "$REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH" && ( "${1:-}" == -c || "${1:-}" == -f ) ]]; then',
     '  raw="$(/usr/bin/stat "$@")"',
     '  IFS=: read -r device inode _ mode links type <<< "$raw"',
@@ -548,6 +559,7 @@ function runRemoteNpmBootstrap(
   options: {
     lifecycleDigests?: boolean
     foreignStatPath?: string
+    rootStatPaths?: readonly string[]
     tamper?: keyof RemoteBootstrapFixture['assets']
     temporaryDirectory?: string
   } = {},
@@ -571,6 +583,7 @@ function runRemoteNpmBootstrap(
       } : {}),
       REMOTE_BOOTSTRAP_ASSETS: fixture.assetDirectory,
       REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH: options.foreignStatPath ?? '',
+      REMOTE_BOOTSTRAP_ROOT_STAT_PATHS: options.rootStatPaths?.join(':') ?? '',
       REMOTE_BOOTSTRAP_FOREIGN_UID: String((process.getuid?.() ?? 0) + 1),
       REMOTE_BOOTSTRAP_LOG: fixture.logPath,
       REMOTE_BOOTSTRAP_TAMPER: options.tamper ?? '',
@@ -6333,6 +6346,176 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
     expect(await readFile(fixture.logPath, 'utf8')).toContain('source:common\n')
     expect(await readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).toBe('mutated\n')
     expect(await readdir(fixture.temporaryDirectory)).toEqual([])
+  })
+
+  test('remote npm bootstrap accepts the macOS default TMPDIR beneath a root-owned /var alias', async () => {
+    const fixture = await remoteBootstrapFixture()
+    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+    const root = dirname(fixture.dshHome)
+    const privateVar = join(root, 'private', 'var')
+    const macTmp = join(privateVar, 'folders', 'd5', 'T')
+    await mkdir(macTmp, { mode: 0o700, recursive: true })
+    await symlink('private/var', join(root, 'var'))
+
+    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
+      rootStatPaths: [join(root, 'var')],
+      temporaryDirectory: join(root, 'var', 'folders', 'd5', 'T'),
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(fixture.logPath, 'utf8')).toContain('source:common\n')
+    expect(await readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).toBe('mutated\n')
+    expect(await readdir(macTmp)).toEqual([])
+  })
+
+  test('remote npm bootstrap rejects TMPDIR through a non-root-owned directory symlink', async () => {
+    const fixture = await remoteBootstrapFixture()
+    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+    const root = dirname(fixture.dshHome)
+    const privateVar = join(root, 'private', 'var')
+    const userTmp = join(privateVar, 'folders', 'd5', 'T')
+    await mkdir(userTmp, { mode: 0o700, recursive: true })
+    await symlink('private/var', join(root, 'var'))
+
+    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
+      foreignStatPath: join(root, 'var'),
+      temporaryDirectory: join(root, 'var', 'folders', 'd5', 'T'),
+    })
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('非 root 拥有的符号链接')
+    await expect(stat(fixture.logPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(join(fixture.dshHome, 'bootstrap-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readdir(userTmp)).toEqual([])
+  })
+
+  test('remote npm bootstrap rejects a non-root symlink nested inside a root-owned alias target', async () => {
+    const fixture = await remoteBootstrapFixture()
+    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+    const root = dirname(fixture.dshHome)
+    const realTmp = join(root, 'real', 'T')
+    const innerLink = join(root, 'layer', 'inner')
+    await mkdir(realTmp, { mode: 0o700, recursive: true })
+    await mkdir(dirname(innerLink), { mode: 0o755, recursive: true })
+    await symlink(realTmp, innerLink)
+    await symlink(join(root, 'layer'), join(root, 'alias'))
+
+    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
+      rootStatPaths: [join(root, 'alias')],
+      foreignStatPath: innerLink,
+      temporaryDirectory: join(root, 'alias', 'inner'),
+    })
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('非 root 拥有的符号链接')
+    expect(result.stderr).toContain(innerLink)
+    await expect(stat(fixture.logPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(join(fixture.dshHome, 'bootstrap-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('remote npm bootstrap rejects a non-root symlink reached via a root link target containing ".."', async () => {
+    // Root-owned link target `zz/evil/../real` still traverses the non-root
+    // `evil` component when re-resolved; the lexical ".." must not erase it.
+    const fixture = await remoteBootstrapFixture()
+    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+    const root = dirname(fixture.dshHome)
+    const evilLink = join(root, 'zz', 'evil')
+    await mkdir(join(root, 'zz', 'real'), { mode: 0o700, recursive: true })
+    await symlink('real', evilLink)
+    await symlink('zz/evil/../real', join(root, 'passthrough'))
+
+    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
+      rootStatPaths: [join(root, 'passthrough')],
+      foreignStatPath: evilLink,
+      temporaryDirectory: join(root, 'passthrough'),
+    })
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('非 root 拥有的符号链接')
+    expect(result.stderr).toContain(evilLink)
+    await expect(stat(fixture.logPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(join(fixture.dshHome, 'bootstrap-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('remote npm bootstrap rejects a non-root symlink after descending through a root link to the root directory',
+    async () => {
+      const fixture = await remoteBootstrapFixture()
+      const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+      const root = dirname(fixture.dshHome)
+      const evilLink = join(root, 'under', 'evil')
+      await mkdir(join(root, 'under', 'realdir'), { mode: 0o700, recursive: true })
+      await symlink('realdir', evilLink)
+      // Absolute target restarts resolution at the filesystem root.
+      await symlink(root, join(root, 'slash'))
+
+      const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
+        rootStatPaths: [join(root, 'slash')],
+        foreignStatPath: evilLink,
+        temporaryDirectory: join(root, 'slash', 'under', 'evil'),
+      })
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('非 root 拥有的符号链接')
+      expect(result.stderr).toContain(evilLink)
+      await expect(stat(fixture.logPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(join(fixture.dshHome, 'bootstrap-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+    },
+  )
+
+  test.each([
+    ['self-referencing', (root: string) => {
+      const link = join(root, 'loopA')
+      return { links: [link], make: async () => symlink('loopA', link), tmpdir: link }
+    }],
+    ['mutually-referencing', (root: string) => {
+      const linkA = join(root, 'loopA')
+      const linkB = join(root, 'loopB')
+      return {
+        links: [linkA, linkB],
+        make: async () => { await symlink('loopB', linkA); await symlink('loopA', linkB) },
+        tmpdir: linkA,
+      }
+    }],
+  ] as const)(
+    'remote npm bootstrap rejects a root-owned %s symlink cycle without looping',
+    async (_label, build) => {
+      const fixture = await remoteBootstrapFixture()
+      const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+      const root = dirname(fixture.dshHome)
+      const spec = build(root)
+      await spec.make()
+
+      const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
+        rootStatPaths: spec.links,
+        temporaryDirectory: spec.tmpdir,
+      })
+
+      expect(result.status).not.toBe(0)
+      // A cycle is fail-closed either at the upfront canonical `cd -P`
+      // ("不存在或不可访问") or, for a chain that resolves far enough, at the
+      // hop-count / readlink guard inside the alias validator. Either way it
+      // must return promptly without downloading or sourcing anything.
+      expect(result.stderr).toMatch(/TMPDIR (不存在或不可访问|符号链接)/)
+      await expect(stat(fixture.logPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(join(fixture.dshHome, 'bootstrap-ran'))).rejects.toMatchObject({ code: 'ENOENT' })
+    },
+  )
+
+  test('remote npm bootstrap accepts a TMPDIR containing spaces and glob metacharacters', async () => {
+    const fixture = await remoteBootstrapFixture()
+    const zeroPinnedInstallerSource = withPinnedLifecycleHashes(pinnedInstallerSource, zeroSha256, zeroSha256)
+    const root = dirname(fixture.dshHome)
+    const specialTmp = join(root, 'tmp two', 'star*dir', 'T')
+    await mkdir(specialTmp, { mode: 0o700, recursive: true })
+
+    const result = runRemoteNpmBootstrap(zeroPinnedInstallerSource, fixture, ['--dry-run'], {
+      temporaryDirectory: specialTmp,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(fixture.logPath, 'utf8')).toContain('source:common\n')
+    expect(await readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).toBe('mutated\n')
+    expect(await readdir(specialTmp)).toEqual([])
   })
 
   test.each(['upgrade', 'uninstall'] as const)(
