@@ -20,6 +20,7 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 - [安装、凭据与常驻服务](docs/setup.md)
 - [会话命令、卡片、可靠性与排障](docs/operations.md)
 - [分级自治成长激活器](docs/supervised-growth.md)
+- [日常使用自迭代的双 Host 配置](docs/rsi-setup.md)
 - [进度展示、安全与权限边界](docs/progress-security.md)
 
 ## 兼容性

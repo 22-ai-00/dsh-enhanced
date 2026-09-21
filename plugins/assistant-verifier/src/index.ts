@@ -9,6 +9,7 @@ export type { AcceptanceObjectivesSelection, AcceptanceProfileInspection, Accept
 export * from './drivers.js'
 export * from './host.js'
 export * from './config.js'
+export { validateSourceReviewConfig } from './source-review.js'
 export type { SourceReviewConfig, SourceReviewInput, SourceReviewRequest, SourceReviewResult, SourceReviewModelSelection, SourceReviewSelection } from './source-review.js'
 
 export function apply(ctx: Context, config: Config): void {

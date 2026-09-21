@@ -73,6 +73,8 @@ export interface Config {
   /** Owner-pinned finite native replay; separate from the read-only observer. */
   replayEndpoint?: ReplayEndpointConfig
 }
+export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>>
+  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
@@ -105,9 +107,66 @@ async function canonicalTarget(dshHome: string, profile: string): Promise<Plugin
   return Object.freeze({ dshHome, profile, profilePath })
 }
 
+/**
+ * Read-only deployment preflight for profile installers. It validates and clones
+ * control-plane configuration without opening a ledger, mounting a service,
+ * starting effects, or creating runtime resources. Existing path/key validators
+ * may read deployment files.
+ */
+export function normalizeControlPlaneConfig(input: Config): NormalizedControlPlaneConfig {
+  const config = structuredClone(schema(input)) as NormalizedControlPlaneConfig
+  if (config.runtimeObserver !== undefined) validateRuntimeObserverConfig(config.runtimeObserver)
+  if (config.foregroundDeployments !== undefined) {
+    validateForegroundDeploymentConfig(config.foregroundDeployments)
+    if (!config.runtimeObserver) throw new Error('plugin-control-plane: foregroundDeployments requires runtimeObserver')
+  }
+  if (config.taskObservations !== undefined) {
+    validateTaskObservationConfig(config.taskObservations)
+    if (!config.foregroundDeployments || config.taskObservations.profilePath !== config.runtimeObserver?.profilePath) {
+      throw new Error('plugin-control-plane: taskObservations requires foregroundDeployments on the same profile')
+    }
+  }
+  if (config.replayEndpoint !== undefined) {
+    validateReplayEndpointConfig(config.replayEndpoint)
+    if (config.runtimeObserver !== undefined) {
+      const observer = config.runtimeObserver, replay = config.replayEndpoint.runtime
+      if (observer.socketPath === replay.socketPath || observer.keyPath === replay.keyPath) throw new Error('plugin-control-plane: replay requires a separate socket and key')
+      const observerKey = readPrivateRuntimeObserverKey(observer.keyPath), replayKey = readPrivateRuntimeObserverKey(replay.keyPath)
+      try { if (observerKey.equals(replayKey)) throw new Error('plugin-control-plane: replay requires distinct key material') }
+      finally { observerKey.fill(0); replayKey.fill(0) }
+    }
+  }
+  if (config.sourceApprovals !== undefined) validateSourceApprovalClientConfig(config.sourceApprovals)
+  if (config.sourceBuild !== undefined) validateSourceBuildConfig(config.sourceBuild)
+  if (config.sourceReleases !== undefined) {
+    validateSourceReleaseClientConfig(config.sourceReleases)
+    if (!config.sourceApprovals || config.sourceBuild?.versioning !== 'patch') throw new Error('plugin-control-plane: sourceReleases requires sourceApprovals and Host patch versioning')
+  }
+  if (config.sourceReleaseExecution !== undefined) {
+    validateSourceReleaseExecutionConfig(config.sourceReleaseExecution)
+    if (!config.sourceReleases) throw new Error('plugin-control-plane: sourceReleaseExecution requires sourceReleases')
+  }
+  if (config.adoptionCoordinator !== undefined) {
+    validateAdoptionCoordinatorConfig(config.adoptionCoordinator)
+    if (config.sourceJobs || config.sourceAdoptions || config.runtimeObserver || config.replayEndpoint) {
+      throw new Error('plugin-control-plane: adoptionCoordinator requires a separate Host from target source jobs and observation')
+    }
+  }
+  if (config.sourceAdoptions !== undefined) {
+    validateSourceAdoptionConfig(config.sourceAdoptions)
+    if (!config.sourceReleaseExecution) throw new Error('plugin-control-plane: sourceAdoptions requires sourceReleaseExecution')
+  }
+  if (config.sourceJobs !== undefined) {
+    validateSourceJobsConfig(config.sourceJobs, config.sourceBuild)
+    if (realpathSync(config.sourceJobs.repository) !== config.sourceJobs.repository) throw new Error('plugin-control-plane: sourceJobs.repository must be canonical')
+  }
+  if (![config.catalogPath, config.statePath, config.trustPath].every(isAbsolute)) throw new Error('plugin-control-plane: catalogPath, statePath and trustPath must be absolute')
+  return config
+}
+
 export class PluginControlPlaneService extends Service {
   static Config = schema
-  private readonly config: Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>> & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>
+  private readonly config: NormalizedControlPlaneConfig
   private readonly store: ControlPlaneStore
   private readonly taskGaps: OwnerTaskFailureGaps
   private readonly abort = new AbortController()
@@ -123,53 +182,7 @@ export class PluginControlPlaneService extends Service {
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'pluginControlPlane')
-    this.config = structuredClone(schema(input)) as typeof this.config
-    if (this.config.runtimeObserver !== undefined) validateRuntimeObserverConfig(this.config.runtimeObserver)
-    if (this.config.foregroundDeployments !== undefined) {
-      validateForegroundDeploymentConfig(this.config.foregroundDeployments)
-      if (!this.config.runtimeObserver) throw new Error('plugin-control-plane: foregroundDeployments requires runtimeObserver')
-    }
-    if (this.config.taskObservations !== undefined) {
-      validateTaskObservationConfig(this.config.taskObservations)
-      if (!this.config.foregroundDeployments || this.config.taskObservations.profilePath !== this.config.runtimeObserver?.profilePath) {
-        throw new Error('plugin-control-plane: taskObservations requires foregroundDeployments on the same profile')
-      }
-    }
-    if (this.config.replayEndpoint !== undefined) {
-      validateReplayEndpointConfig(this.config.replayEndpoint)
-      if (this.config.runtimeObserver !== undefined) {
-        const observer = this.config.runtimeObserver, replay = this.config.replayEndpoint.runtime
-        if (observer.socketPath === replay.socketPath || observer.keyPath === replay.keyPath) throw new Error('plugin-control-plane: replay requires a separate socket and key')
-        const observerKey = readPrivateRuntimeObserverKey(observer.keyPath), replayKey = readPrivateRuntimeObserverKey(replay.keyPath)
-        try { if (observerKey.equals(replayKey)) throw new Error('plugin-control-plane: replay requires distinct key material') }
-        finally { observerKey.fill(0); replayKey.fill(0) }
-      }
-    }
-    if (this.config.sourceApprovals !== undefined) validateSourceApprovalClientConfig(this.config.sourceApprovals)
-    if (this.config.sourceBuild !== undefined) validateSourceBuildConfig(this.config.sourceBuild)
-    if (this.config.sourceReleases !== undefined) {
-      validateSourceReleaseClientConfig(this.config.sourceReleases)
-      if (!this.config.sourceApprovals || this.config.sourceBuild?.versioning !== 'patch') throw new Error('plugin-control-plane: sourceReleases requires sourceApprovals and Host patch versioning')
-    }
-    if (this.config.sourceReleaseExecution !== undefined) {
-      validateSourceReleaseExecutionConfig(this.config.sourceReleaseExecution)
-      if (!this.config.sourceReleases) throw new Error('plugin-control-plane: sourceReleaseExecution requires sourceReleases')
-    }
-    if (this.config.adoptionCoordinator !== undefined) {
-      validateAdoptionCoordinatorConfig(this.config.adoptionCoordinator)
-      if (this.config.sourceJobs || this.config.sourceAdoptions || this.config.runtimeObserver || this.config.replayEndpoint) {
-        throw new Error('plugin-control-plane: adoptionCoordinator requires a separate Host from target source jobs and observation')
-      }
-    }
-    if (this.config.sourceAdoptions !== undefined) {
-      validateSourceAdoptionConfig(this.config.sourceAdoptions)
-      if (!this.config.sourceReleaseExecution) throw new Error('plugin-control-plane: sourceAdoptions requires sourceReleaseExecution')
-    }
-    if (this.config.sourceJobs !== undefined) {
-      validateSourceJobsConfig(this.config.sourceJobs, this.config.sourceBuild)
-      if (realpathSync(this.config.sourceJobs.repository) !== this.config.sourceJobs.repository) throw new Error('plugin-control-plane: sourceJobs.repository must be canonical')
-    }
-    if (![this.config.catalogPath, this.config.statePath, this.config.trustPath].every(isAbsolute)) throw new Error('plugin-control-plane: catalogPath, statePath and trustPath must be absolute')
+    this.config = normalizeControlPlaneConfig(input)
     this.store = new ControlPlaneStore({ path: join(this.config.statePath, 'control.sqlite') })
     this.taskGaps = new OwnerTaskFailureGaps(this.store, () => {
       this.abort.signal.throwIfAborted()
