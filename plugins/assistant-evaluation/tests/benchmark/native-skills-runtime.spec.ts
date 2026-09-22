@@ -20,7 +20,13 @@ async function options(cellId: string): Promise<Omit<NativeSkillGoalOptions, 'fa
   await mkdir(workspace, { mode: 0o700 }); await mkdir(stateRoot, { mode: 0o700 })
   return { cellId, workspace, stateRoot, task, model, persona: 'Solve the requested task through the native Goal and allowed tools.',
     budget: { durationMs: 100000, inputTokens: 1000, outputTokens: 2048, toolCalls: 12, costUsdMicros: null }, execution: { modelCalls: 16, maxOutputTokensPerCall: 128, maxGoalRounds: 2 },
-    image: process.env.DSH_ISOLATION_TEST_IMAGE ?? `sha256:${'0'.repeat(64)}`, dockerPath: '/usr/bin/docker', stepMaxDurationMs: 25000, signal: new AbortController().signal }
+    image: process.env.DSH_ISOLATION_TEST_IMAGE ?? `sha256:${'0'.repeat(64)}`,
+    // Without a real image these cases exercise admission/cancellation paths
+    // and never spawn the runner, but createVerifierAuthorities still resolves
+    // the executable at construction time. macOS runners ship no Docker, so
+    // point at the running Node binary (a guaranteed canonical executable),
+    // mirroring strategy-executor.spec.ts; only the image-gated runs use docker.
+    dockerPath: process.env.DSH_ISOLATION_TEST_IMAGE ? '/usr/bin/docker' : process.execPath, stepMaxDurationMs: 25000, signal: new AbortController().signal }
 }
 interface RoundTiming {
   maxDurationMs: number
