@@ -20,6 +20,7 @@ dsh-rsi [全局选项] <命令>
 | `doctor` | 在 `status` 基础上扫描各 profile 的 `*-host.error.log`，识别已知崩溃模式（如旧版 event-support oracle 拒绝注册）并给出升级/重建建议。**只读**。 |
 | `start` / `stop` / `restart` | 切换已注册受管常驻服务的运行状态。**只改运行状态**，不新建/改写/删除 launchd plist 或 systemd unit；未注册时报错并给出注册指引。 |
 | `logs` | 查看各 profile 的受管 `*-host.log` / `*-host.error.log` 尾部（默认末 200 行）。**只读**。 |
+| `update` | 升级全局 dsh-rsi 自身；加 `--all` 再把插件集合交给安装器 `--operation upgrade` **原地升级**（保留 patch、凭据、Session、Goal）。 |
 | `install` | 安装/修复插件集合：npm 形态下载与本 dsh-rsi 同版本的官方安装器执行，`--local <dir>` 执行 checkout 内安装器；其余参数原样透传。 |
 | `reinstall` | 先 `purge`（默认先备份、同样的安全门控）再立即 `install`，用于干净重装。 |
 | `purge` | 彻底卸载：进程静止检查 → 停服注销 → tar.gz 备份 → 删除 profile / DSH home / 生命周期残留 → 清理外部凭据。 |
@@ -57,6 +58,45 @@ dsh-rsi reinstall --profile web --yes
 ```
 
 `reinstall` 支持的 rsi 侧选项与 `purge` 一致（`--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`）；只有既未加 `--yes` 也未加 `--dry-run` 时才需输入 `purge` 确认——`reinstall --dry-run` 全程无交互、无修改：先打印 purge 计划，再以 `--dry-run` 透传演练安装器（`--dry-run` 同时作用于 purge 与安装两个阶段）。重装阶段默认走 npm 形态；local 重装加 `--local <dir>`。
+
+## update（升级自身 / 升级整套）
+
+```bash
+# 只升级全局 dsh-rsi 自身（默认 latest）
+dsh-rsi update
+
+# 先看会装哪个版本
+dsh-rsi update --dry-run
+
+# 指定精确版本或 dist-tag
+dsh-rsi update --version 0.1.38
+dsh-rsi update --version next
+
+# 自身 + 整套插件集合原地升级（后者由官方安装器执行）
+dsh-rsi update --all --confirm-dsh-home-stopped --yes
+```
+
+`update` 选项：
+
+- `--all`：自身升级成功后，再把插件集合交给安装器 `--operation upgrade`。安装器自身的前置条件（如 `--confirm-dsh-home-stopped`）与参数原样透传，未满足时由安装器报错。
+- `--version <v|tag>`：dsh-rsi 自身的目标版本或 dist-tag（默认 `latest`）。只接受精确版本 `x.y.z`（可带预发布后缀）或纯字母 dist-tag；范围表达式如 `>=0.1.0` 会被拒绝。
+- `--dry-run`：解析出目标版本并打印将执行的命令，不做任何安装。
+- 其余参数在 `--all` 下原样透传给安装器（如 `--scenario core`、`--yes`）；`--local <dir>` 走 local 形态。
+
+### 三条语义边界
+
+- **自身先行，失败即止**。`--all` 下先升级 dsh-rsi 自身，失败就**不**继续升级 cohort —— 避免用旧版 rsi 的判断去驱动一轮新的 cohort 升级。
+- **新版本下一次生效**。当前进程已把旧版代码载入内存，`npm install --global` 替换包不会改变它。因此本命令执行完即返回，输出里会明确提示这一点；它**不会**在同一次调用里改用新版代码继续做别的事。
+- **已是目标版本则跳过**。先用 `npm view` 把 selector 解析为精确版本，与自身版本相同时不执行安装、直接报告；registry 解析失败则按 selector 正常安装，不会误判为"已最新"。
+
+### 与 install / reinstall 的区别
+
+| | `update --all` | `install` | `reinstall` |
+| --- | --- | --- | --- |
+| 语义 | 原地升级已装的 cohort | 安装 / 修复 | **先 purge 再装** |
+| 保留 patch、凭据、Session、Goal | 是 | 是 | **否**（purge 阶段删除） |
+| 新增场景能力 | 否（只升当前已装的顶层依赖） | 是 | 是 |
+| 升级 dsh-rsi 自身 | 是（本命令的主职责） | 顺带（安装器尾部按 cohort 版本装） | 同 install |
 
 ## 日常运维：start / stop / restart / logs
 
@@ -181,7 +221,7 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 成功。含 dry-run 与多数幂等场景：外部凭据条目本不存在、服务未注册、`rm --force` 删除已不存在的路径等 |
-| 1 | start/stop/restart：服务未注册、归属不明被拒、或底层 `systemctl`/`launchctl` 失败（多 profile 下任一失败即 1）；logs：DSH home 下没有任何 profile；purge 执行失败（活动进程、服务/凭据错误、备份失败等）；install 下载/委托失败。两个非幂等边界：① 默认备份下全量 purge 不存在的 DSH home，`tar` 因源目录不存在以退出码 2 失败、rsi 退出 1（`--no-backup` 同场景为 0）；② `purge --profile <不存在的名字>`（含 dry-run）直接报「profile 不存在」退出 1。单文件 `purge.sh` 的内联实现对不存在的 home 统一退出 0，在此边界上与 dsh-rsi 不一致 |
+| 1 | update：selector 非法、`npm install --global` 失败（`--all` 下自身升级失败则不再委托安装器）；start/stop/restart：服务未注册、归属不明被拒、或底层 `systemctl`/`launchctl` 失败（多 profile 下任一失败即 1）；logs：DSH home 下没有任何 profile；purge 执行失败（活动进程、服务/凭据错误、备份失败等）；install 下载/委托失败。两个非幂等边界：① 默认备份下全量 purge 不存在的 DSH home，`tar` 因源目录不存在以退出码 2 失败、rsi 退出 1（`--no-backup` 同场景为 0）；② `purge --profile <不存在的名字>`（含 dry-run）直接报「profile 不存在」退出 1。单文件 `purge.sh` 的内联实现对不存在的 home 统一退出 0，在此边界上与 dsh-rsi 不一致 |
 | 2 | 参数错误 |
 | 其它非 0 | `install` / `reinstall` 安装器的退出码原样透传 |
 

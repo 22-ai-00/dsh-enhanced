@@ -1,0 +1,179 @@
+import { describe, expect, test, vi } from 'vitest'
+import { PurgeError } from '../src/purge.ts'
+import type { CommandResult, CommandRunner } from '../src/run.ts'
+import { formatSelfUpdateReport, RSI_CLI_PACKAGE, runSelfUpdate } from '../src/update.ts'
+import { main, type MainDeps } from '../src/index.ts'
+import { version as VERSION } from '../src/version.ts'
+
+/** 记录调用的假 runner；按需为 npm 子命令定制返回。 */
+function npmRunner(options: {
+  prefix?: string
+  viewVersion?: string | null
+  installStatus?: number
+  installStderr?: string
+} = {}): { runner: CommandRunner; calls: string[] } {
+  const calls: string[] = []
+  const runner: CommandRunner = (command, args) => {
+    calls.push([command, ...args].join(' '))
+    const empty: CommandResult = { status: 0, stdout: '', stderr: '' }
+    if (command !== 'npm') return empty
+    if (args[0] === 'prefix') {
+      return { status: 0, stdout: `${options.prefix ?? '/usr/local'}\n`, stderr: '' }
+    }
+    if (args[0] === 'view') {
+      if (options.viewVersion === null) return { status: 1, stdout: '', stderr: 'E404' }
+      return { status: 0, stdout: `${options.viewVersion ?? '9.9.9'}\n`, stderr: '' }
+    }
+    if (args[0] === 'install') {
+      const status = options.installStatus ?? 0
+      return { status, stdout: '', stderr: options.installStderr ?? '' }
+    }
+    return empty
+  }
+  return { runner, calls }
+}
+
+describe('runSelfUpdate', () => {
+  test('默认 selector 为 latest，执行全局安装并报告前缀与目标版本', async () => {
+    const { runner, calls } = npmRunner({ prefix: '/opt/npm', viewVersion: '9.9.9' })
+    const report = await runSelfUpdate({ runner })
+    expect(report.fromVersion).toBe(VERSION)
+    expect(report.selector).toBe('latest')
+    expect(report.globalPrefix).toBe('/opt/npm')
+    expect(report.resolvedVersion).toBe('9.9.9')
+    expect(report.alreadyCurrent).toBe(false)
+    expect(calls).toContain(`npm install --global ${RSI_CLI_PACKAGE}@latest`)
+  })
+
+  test('已是目标版本时跳过安装，不执行 npm install', async () => {
+    const { runner, calls } = npmRunner({ viewVersion: VERSION })
+    const report = await runSelfUpdate({ runner })
+    expect(report.alreadyCurrent).toBe(true)
+    expect(calls.some(call => call.includes('install'))).toBe(false)
+    expect(formatSelfUpdateReport(report, false)).toMatch(/无需升级/)
+  })
+
+  test('dry-run 只列动作，不执行安装，且措辞为「将升级」', async () => {
+    const { runner, calls } = npmRunner({ viewVersion: '9.9.9' })
+    const report = await runSelfUpdate({ runner, dryRun: true })
+    expect(calls.some(call => call.includes('install'))).toBe(false)
+    expect(report.actions).toEqual([`npm install --global ${RSI_CLI_PACKAGE}@latest`])
+    const rendered = formatSelfUpdateReport(report, true)
+    expect(rendered).toMatch(/dry-run/)
+    expect(rendered).toMatch(/将升级/)
+    expect(rendered).not.toMatch(/已升级/)
+  })
+
+  test('registry 无法解析版本时仍按 selector 安装，不误判为已最新', async () => {
+    const { runner, calls } = npmRunner({ viewVersion: null })
+    const report = await runSelfUpdate({ runner })
+    expect(report.resolvedVersion).toBeUndefined()
+    expect(report.alreadyCurrent).toBe(false)
+    expect(calls).toContain(`npm install --global ${RSI_CLI_PACKAGE}@latest`)
+  })
+
+  test('接受精确版本与 dist-tag，拒绝非法 selector', async () => {
+    const { runner } = npmRunner({ viewVersion: '0.1.38' })
+    await expect(runSelfUpdate({ runner, selector: '0.1.38', dryRun: true })).resolves.toMatchObject({
+      selector: '0.1.38',
+    })
+    await expect(runSelfUpdate({ runner, selector: 'next', dryRun: true })).resolves.toMatchObject({
+      selector: 'next',
+    })
+    for (const bad of ['>=0.1.0', '0.1', 'a b', '../evil', '1.2.3 && rm -rf /']) {
+      await expect(runSelfUpdate({ runner, selector: bad })).rejects.toThrow(PurgeError)
+    }
+  })
+
+  test('npm install 失败时抛出含手工补救命令的错误', async () => {
+    const { runner } = npmRunner({ viewVersion: '9.9.9', installStatus: 1, installStderr: 'EACCES' })
+    await expect(runSelfUpdate({ runner })).rejects.toThrow(/EACCES/)
+    await expect(runSelfUpdate({ runner })).rejects.toThrow(/npm install --global/)
+  })
+
+  test('真正执行时明确提示新版本下次生效（当前进程仍是旧代码）', async () => {
+    const { runner } = npmRunner({ viewVersion: '9.9.9' })
+    const report = await runSelfUpdate({ runner })
+    expect(formatSelfUpdateReport(report, false)).toMatch(/下一次执行 dsh-rsi 时生效/)
+  })
+})
+
+describe('main：update 命令派发', () => {
+  type InstallFn = NonNullable<MainDeps['install']>
+  type SelfUpdateFn = NonNullable<MainDeps['selfUpdate']>
+
+  /** 注入假 selfUpdate，使派发测试完全不接触 npm registry。 */
+  function makeSelfUpdate() {
+    return vi.fn<SelfUpdateFn>(async () => ({
+      fromVersion: VERSION,
+      selector: 'latest',
+      alreadyCurrent: false,
+      actions: [],
+    }))
+  }
+
+  function makeInstall(code = 0) {
+    return vi.fn<InstallFn>(async () => code)
+  }
+
+  test('不带 --all 时只升级自身，绝不调用安装器', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const install = makeInstall()
+    const selfUpdate = makeSelfUpdate()
+    try {
+      const code = await main(['update'], { HOME: '/h' }, { install, selfUpdate })
+      expect(code).toBe(0)
+      expect(selfUpdate).toHaveBeenCalledTimes(1)
+      expect(install).not.toHaveBeenCalled()
+    } finally { write.mockRestore() }
+  })
+
+  test('--all 在自身升级后把 --operation upgrade 交给安装器', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const install = makeInstall()
+    const selfUpdate = makeSelfUpdate()
+    try {
+      const code = await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate })
+      expect(code).toBe(0)
+      // 顺序是刻意的：先升级自身，再交给安装器升级 cohort。
+      expect(selfUpdate).toHaveBeenCalledTimes(1)
+      expect(install).toHaveBeenCalledTimes(1)
+      const passed = install.mock.calls[0]![0] as { passthrough: readonly string[] }
+      expect(passed.passthrough).toContain('--operation')
+      expect(passed.passthrough).toContain('upgrade')
+    } finally { write.mockRestore() }
+  })
+
+  test('--version 透传给自身升级，且不泄漏给安装器', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const install = makeInstall()
+    const selfUpdate = makeSelfUpdate()
+    try {
+      await main(['update', '--all', '--version', '0.1.38'], { HOME: '/h' }, { install, selfUpdate })
+      expect(selfUpdate.mock.calls[0]![0]).toMatchObject({ selector: '0.1.38' })
+      const passed = install.mock.calls[0]![0] as { passthrough: readonly string[] }
+      expect(passed.passthrough).not.toContain('--version')
+      expect(passed.passthrough).not.toContain('0.1.38')
+    } finally { write.mockRestore() }
+  })
+
+  test('自身升级失败时不继续升级插件集合', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const install = makeInstall()
+    const selfUpdate = vi.fn<SelfUpdateFn>(async () => { throw new PurgeError('npm 失败') })
+    try {
+      expect(await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate })).toBe(1)
+      expect(install).not.toHaveBeenCalled()
+    } finally { write.mockRestore(); error.mockRestore() }
+  })
+
+  test('--all 时安装器退出码原样透传', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const install = makeInstall(7)
+    const selfUpdate = makeSelfUpdate()
+    try {
+      expect(await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate })).toBe(7)
+    } finally { write.mockRestore() }
+  })
+})

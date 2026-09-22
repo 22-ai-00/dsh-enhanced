@@ -4,6 +4,7 @@ import { runPurge, PurgeError, type PurgeReport } from './purge.ts'
 import { collectStatus, formatStatus, formatFindings, runDoctor } from './diagnose.ts'
 import { resolveDshHome } from './paths.ts'
 import { runInstall } from './install.ts'
+import { formatSelfUpdateReport, runSelfUpdate } from './update.ts'
 import {
   collectLogs,
   controlManagedService,
@@ -18,6 +19,7 @@ import { version as VERSION } from './version.ts'
 export { runPurge, PurgeError } from './purge.ts'
 export { runInstall } from './install.ts'
 export { collectStatus, runDoctor, formatStatus, formatFindings } from './diagnose.ts'
+export { formatSelfUpdateReport, runSelfUpdate, RSI_CLI_PACKAGE } from './update.ts'
 export {
   collectLogs,
   controlManagedService,
@@ -43,6 +45,7 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   stop        停止受管常驻服务（保留服务定义与 profile 数据，可再次 start）
   restart     重启受管常驻服务（配置/插件变更后生效的常用方式）
   logs        查看各 profile 的受管 stdout/stderr 日志尾部
+  update      升级全局 dsh-rsi 自身；加 --all 再升级整套插件集合（原地升级，保留数据）
   install     安装/修复插件集合（薄委托到官方安装器，参数原样透传）
   reinstall   purge（默认先备份）后立即重新安装
   purge       彻底卸载：停服 → 备份 → 删除 profile/DSH home → 清理外部凭据
@@ -60,6 +63,15 @@ install / reinstall：
   --local <dir>       local 形态：直接执行 <dir>/scripts/install/install-local.sh（checkout 安装）
   其它参数            原样透传给安装器，例如 --scenario core、--workspace、--model-route、--yes 等；
                       install --help 会展示安装器完整参数清单（也见 scripts/install/README.md）
+
+update：
+  不带参数            只升级全局 dsh-rsi 自身（npm install --global @dsh-enhanced/rsi-cli@latest）
+  --all               自身升级成功后，再把插件集合交给官方安装器 --operation upgrade 原地升级
+                      （保留 patch、凭据、Session、Goal 等状态；不同于 reinstall 的先 purge 再装）
+  --version <v|tag>   指定 dsh-rsi 目标版本或 dist-tag（默认 latest）
+  --local <dir>       --all 时走 local 形态，用该 checkout 的安装器升级
+  其它参数            --all 时原样透传给安装器（如 --scenario core、--yes）
+  注意                新版本在下一次执行 dsh-rsi 时生效：当前进程已载入旧版代码。
 
 start / stop / restart：
   不带 --profile 时作用于 DSH home 下的全部 profile；配合 --dry-run 可先看将执行的命令。
@@ -84,6 +96,10 @@ purge 选项：
   dsh-rsi start --dry-run
   dsh-rsi logs --profile web --lines 100
   dsh-rsi logs --errors-only
+  dsh-rsi update
+  dsh-rsi update --dry-run
+  dsh-rsi update --version 0.1.38
+  dsh-rsi update --all --yes
   dsh-rsi install --scenario core --yes
   dsh-rsi install --local ~/work/github/dsh-enhanced --scenario web
   dsh-rsi reinstall --yes
@@ -107,16 +123,22 @@ interface ParsedArgs {
   lines: number
   /** logs：只显示 *-host.error.log。 */
   errorsOnly: boolean
+  /** update：同时升级插件集合（薄委托安装器 --operation upgrade）。 */
+  all: boolean
+  /** update：dsh-rsi 自身的目标版本或 dist-tag。 */
+  targetVersion?: string
   /** install/reinstall：原样透传给安装器的参数。 */
   passthrough: string[]
 }
 
 const KNOWN_COMMANDS = new Set([
-  'status', 'doctor', 'start', 'stop', 'restart', 'logs', 'install', 'reinstall', 'purge', 'version',
+  'status', 'doctor', 'start', 'stop', 'restart', 'logs', 'update',
+  'install', 'reinstall', 'purge', 'version',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
-const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines'])
+const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines', '--version'])
 const LOGS_FLAGS = new Set(['--errors-only'])
+const UPDATE_FLAGS = new Set(['--all'])
 /** logs --lines 上限，避免一次把超大日志全量打到终端。 */
 const MAX_LOG_LINES = 10_000
 const DEFAULT_LOG_LINES = 200
@@ -128,6 +150,7 @@ const INSTALL_VALUE_OPTIONS = new Set(['--dsh-home', '--local'])
 function assignValueOption(result: ParsedArgs, token: string, value: string): void {
   if (token === '--dsh-home') { result.dshHome = value; return }
   if (token === '--profile') { result.profile = value; return }
+  if (token === '--version') { result.targetVersion = value; return }
   // --lines
   if (!/^[0-9]+$/u.test(value)) throw new PurgeError(`--lines 需要一个正整数，收到：${value}`)
   const parsed = Number(value)
@@ -149,6 +172,7 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     help: false,
     lines: DEFAULT_LOG_LINES,
     errorsOnly: false,
+    all: false,
     passthrough: [],
   }
   let commandSeen = false
@@ -171,6 +195,10 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
         result.errorsOnly = true
         continue
       }
+      if (UPDATE_FLAGS.has(token)) {
+        result.all = true
+        continue
+      }
       if (PURGE_FLAGS.has(token)) {
         if (token === '--no-backup') result.backup = false
         else if (token === '--keep-keychain') result.keepKeychain = true
@@ -185,8 +213,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       throw new PurgeError(`无法识别的参数：${token}（用 -h 查看用法）`)
     }
 
-    // 命令之后：install/reinstall 走「消费少数 rsi 选项 + 其余透传」。
-    if (result.command === 'install' || result.command === 'reinstall') {
+    // 命令之后：install/reinstall/update --all 走「消费少数 rsi 选项 + 其余透传」。
+    if (result.command === 'install' || result.command === 'reinstall' || result.command === 'update') {
       i = consumeInstallToken(result, argv, i)
       continue
     }
@@ -205,6 +233,10 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     }
     if (LOGS_FLAGS.has(token)) {
       result.errorsOnly = true
+      continue
+    }
+    if (UPDATE_FLAGS.has(token)) {
+      result.all = true
       continue
     }
     if (PURGE_FLAGS.has(token)) {
@@ -227,6 +259,20 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
 function consumeInstallToken(result: ParsedArgs, argv: readonly string[], index: number): number {
   const token = argv[index]!
   const isReinstall = result.command === 'reinstall'
+  const isUpdate = result.command === 'update'
+
+  // update 自身的选项由 rsi 消费，不透传给安装器。
+  if (isUpdate) {
+    if (token === '--all') { result.all = true; return index }
+    if (token === '--version') {
+      const value = argv[index + 1]
+      if (value === undefined || value.startsWith('--')) throw new PurgeError(`${token} 需要一个值`)
+      result.targetVersion = value
+      return index + 1
+    }
+    if (token === '--help' || token === '-h') { result.help = true; return index }
+    if (token === '--dry-run') { result.dryRun = true; result.passthrough.push(token); return index }
+  }
 
   if (INSTALL_VALUE_OPTIONS.has(token)) {
     const value = argv[index + 1]
@@ -349,10 +395,11 @@ function buildInstallOptions(args: ParsedArgs): Parameters<typeof runInstall>[0]
   }
 }
 
-/** main 的依赖面，仅供测试注入（默认执行真实 purge/install）。 */
+/** main 的依赖面，仅供测试注入（默认执行真实 purge/install/self-update）。 */
 export interface MainDeps {
   purge?: typeof runPurge
   install?: typeof runInstall
+  selfUpdate?: typeof runSelfUpdate
 }
 
 export async function main(
@@ -362,6 +409,7 @@ export async function main(
 ): Promise<number> {
   const purge = deps.purge ?? runPurge
   const install = deps.install ?? runInstall
+  const selfUpdate = deps.selfUpdate ?? runSelfUpdate
   let args: ParsedArgs
   try {
     args = parseArgs(argv, env)
@@ -417,6 +465,20 @@ export async function main(
         const collected = await collectLogs(args.dshHome, profiles, args.lines, args.errorsOnly)
         process.stdout.write(`${formatLogs(collected, args.lines)}\n`)
         return 0
+      }
+      case 'update': {
+        // 先升级自身：--all 下若自身升级失败就不继续动插件集合，避免用旧版 rsi
+        // 的判断去驱动新一轮 cohort 升级。
+        const report = await selfUpdate({
+          ...(args.targetVersion === undefined ? {} : { selector: args.targetVersion }),
+          dryRun: args.dryRun,
+        })
+        process.stdout.write(`${formatSelfUpdateReport(report, args.dryRun)}\n`)
+        if (!args.all) return 0
+        process.stdout.write('\n插件集合升级（薄委托安装器 --operation upgrade）：\n')
+        const passthrough = [...args.passthrough]
+        if (!passthrough.includes('--operation')) passthrough.push('--operation', 'upgrade')
+        return await install({ ...buildInstallOptions(args), passthrough })
       }
       case 'install': {
         return await install(buildInstallOptions(args))
