@@ -23,6 +23,16 @@ export const RUNTIME_OBSERVER_MAX_BYTES = 65_536
 export const RUNTIME_OBSERVER_TIMEOUT = 2_000
 
 export function runtimeObserverFail(): never { throw new Error('runtime observer: invalid configuration, authentication or runtime observation') }
+
+/**
+ * Runtime-only platform gate. The observer binds an owner-private AF_UNIX socket
+ * and reads Loader/Fiber state through /proc-backed ownership checks, which are
+ * only available on Linux. Callers that merely validate or clone configuration
+ * must not use this.
+ */
+export function assertRuntimeObserverPlatform(): void {
+  if (process.platform !== 'linux') runtimeObserverFail()
+}
 export function assertRuntimeObserverExact(value: unknown, fields: string[]): asserts value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)
     || Object.keys(value).sort().join('\0') !== [...fields].sort().join('\0')) runtimeObserverFail()
@@ -89,9 +99,15 @@ export function readPrivateRuntimeObserverKey(path: string): Buffer {
   } finally { closeSync(fd) }
 }
 
+/**
+ * Pure configuration validation: shape, canonical paths, private key material and
+ * bounded targets. It is reached by the read-only deployment preflight
+ * (`normalizeControlPlaneConfig`), so it must not depend on the running platform.
+ * The Linux requirement belongs to the runtime shells that bind the AF_UNIX
+ * observer socket; see `assertRuntimeObserverPlatform`.
+ */
 export function validateRuntimeObserverConfig(value: unknown): asserts value is RuntimeObserverConfig {
   assertRuntimeObserverExact(value, ['socketPath', 'keyPath', 'profilePath', 'targets'])
-  if (process.platform !== 'linux') runtimeObserverFail()
   for (const key of ['socketPath', 'keyPath', 'profilePath'] as const) {
     if (typeof value[key] !== 'string' || !isAbsolute(value[key]) || resolve(value[key]) !== value[key]
       || ['\0', '\r', '\n'].some(char => (value[key] as string).includes(char))) runtimeObserverFail()

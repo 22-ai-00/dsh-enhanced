@@ -7,6 +7,7 @@ import {
   RUNTIME_OBSERVER_MAX_BYTES,
   RUNTIME_OBSERVER_TIMEOUT,
   assertRuntimeObservation,
+  assertRuntimeObserverPlatform,
   assertRuntimeObserverExact,
   assertRuntimeObserverText,
   equalRuntimeObserverMac,
@@ -20,6 +21,7 @@ import {
   type RuntimeObserverInstance,
 } from './runtime-observer-protocol.js'
 export {
+  assertRuntimeObserverPlatform,
   queryRuntimeObserver,
   runtimeConfigDigest,
   validateRuntimeObserverConfig,
@@ -90,6 +92,9 @@ export function createRuntimeSampler(ctx: Context, config: RuntimeObserverConfig
 /** One bounded request/response per connection; resources belong to this Fiber. */
 export function installRuntimeObserver(ctx: Context, input: RuntimeObserverConfig,
   attach?: (ctx: Context, sample: (challenge: string) => RuntimeObservation) => (() => void | Promise<void>)): void {
+  // Binding the observer socket is Linux-only; configuration validation itself is
+  // platform-independent so deployment preflight stays portable.
+  assertRuntimeObserverPlatform()
   validateRuntimeObserverConfig(input)
   const config = structuredClone(input)
   ctx.inject(['loader'], observerCtx => {

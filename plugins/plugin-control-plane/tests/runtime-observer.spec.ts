@@ -8,7 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { PluginControlPlaneService } from '../src/service.js'
-import { installRuntimeObserver, queryRuntimeObserver, runtimeConfigDigest, validateRuntimeObserverConfig, type RuntimeObservation, type RuntimeObserverConfig } from '../src/runtime-observer.js'
+import { assertRuntimeObserverPlatform, installRuntimeObserver, queryRuntimeObserver, runtimeConfigDigest, validateRuntimeObserverConfig, type RuntimeObservation, type RuntimeObserverConfig } from '../src/runtime-observer.js'
 
 const createdServers = vi.hoisted(() => [] as Server[])
 vi.mock('node:net', async importOriginal => {
@@ -240,4 +240,34 @@ test('configuration digest is canonical and rejects getters, cycles and oversize
   const cyclic: unknown[] = []; cyclic.push(cyclic)
   expect(() => runtimeConfigDigest(cyclic)).toThrow()
   expect(() => runtimeConfigDigest('x'.repeat(70_000))).toThrow()
+})
+
+
+// 平台门控只属于绑定 AF_UNIX socket 的运行时外壳：只读部署预检
+// （normalizeControlPlaneConfig → validateRuntimeObserverConfig）必须与平台无关，
+// 否则 macOS/Windows runner 上的纯配置编译会确定性失败（本地 Linux 不可复现）。
+test('the platform gate lives in the runtime shell, not in configuration validation', async () => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'observer-gate-'))
+  try {
+    const profilePath = join(root, 'profile'); const privateRoot = join(root, 'private')
+    await mkdir(profilePath, { recursive: true }); await mkdir(privateRoot, { recursive: true }); await chmod(privateRoot, 0o700)
+    const keyPath = join(privateRoot, 'observer.key')
+    await writeFile(keyPath, Buffer.alloc(32, 7), { mode: 0o600 }); await chmod(keyPath, 0o600)
+    const config: RuntimeObserverConfig = { socketPath: join(privateRoot, 'observer.sock'), keyPath, profilePath,
+      targets: [{ entryId: 'control', module: '@dsh-enhanced/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] }
+
+    const platform = vi.spyOn(process, 'platform', 'get')
+    try {
+      // 校验纯配置：在任何平台都通过，且不创建任何运行时资源。
+      platform.mockReturnValue('darwin')
+      expect(() => validateRuntimeObserverConfig(config)).not.toThrow()
+      await expect(lstat(config.socketPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      // 运行时门控：非 Linux 仍被拒绝，真实行为不变。
+      expect(() => assertRuntimeObserverPlatform()).toThrow('runtime observer')
+      platform.mockReturnValue('win32')
+      expect(() => assertRuntimeObserverPlatform()).toThrow('runtime observer')
+      platform.mockReturnValue('linux')
+      expect(() => assertRuntimeObserverPlatform()).not.toThrow()
+    } finally { platform.mockRestore() }
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
