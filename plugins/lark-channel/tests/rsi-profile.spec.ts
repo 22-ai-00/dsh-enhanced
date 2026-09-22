@@ -3,7 +3,7 @@ import { ownerRouteAuthorityHash } from '@dsh-enhanced/assistant-delivery'
 import { Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { Context } from '@deepseek-ai/cordis'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
@@ -72,7 +72,9 @@ describe('RSI profile compiler', () => {
   })
 
   test('compiles a complete two Host deployment deterministically and retains tagged effective values', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'rsi-profile-'))
+    // macOS 上 os.tmpdir() 经 /var → /private/var 符号链接；privateRoot 有
+    // canonical 校验，夹具须先 realpath。
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'rsi-profile-'))
     try {
       const home = join(root, 'home'), profilePath = join(home, 'profiles', 'target'), privateRoot = join(root, 'private')
       await mkdir(profilePath, { recursive: true }); await mkdir(privateRoot, { recursive: true }); await chmod(privateRoot, 0o700)

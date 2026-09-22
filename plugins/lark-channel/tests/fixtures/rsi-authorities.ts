@@ -19,7 +19,9 @@ export interface RsiAuthorityFixture {
 
 /** A real, owner-private schema-v4 trust root and all four finite authority files. */
 export async function createRsiAuthorityFixture(): Promise<RsiAuthorityFixture> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-authorities-'))
+  // macOS 上 os.tmpdir() 经 /var → /private/var 符号链接；safeFile 的 canonical
+  // 检查会拒绝非规范化路径，夹具先 realpath 到真实路径。
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-rsi-authorities-'))
   await chmod(root, 0o700)
   const privateDirectory = async (name: string): Promise<string> => {
     const path = join(root, name)

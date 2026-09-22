@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -10,7 +10,8 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'review-ledger-')); roots.push(root)
+  // macOS 上 os.tmpdir() 经 /var → /private/var；决策根有 canonical 校验。
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'review-ledger-'))); roots.push(root)
   const path = join(root, 'review.sqlite')
   const open = () => { const store = new SourceReviewStore(path); stores.push(store); return store }
   const input = { operationId: 'operation', requestDigest: 'a'.repeat(64), authorityId: 'grant', authorityDigest: 'b'.repeat(64), maxReviews: 1,

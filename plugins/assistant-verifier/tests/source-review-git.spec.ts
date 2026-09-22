@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -28,7 +28,8 @@ async function snapshot(bare: string, baseCommit: string, scope: readonly string
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'source-review-git-')); roots.push(root)
+  // macOS 上 os.tmpdir() 经 /var → /private/var；review 根有 canonical 校验。
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'source-review-git-'))); roots.push(root)
   const work = join(root, 'work'), bare = join(root, 'source.git')
   run(root, 'init', '-q', work); run(work, 'config', 'user.email', 'test@example.invalid'); run(work, 'config', 'user.name', 'Tests')
   await writeFile(join(work, 'README.md'), 'base\n'); await writeFile(join(work, 'plugins-marker'), '')
