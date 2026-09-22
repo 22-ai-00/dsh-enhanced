@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { chmod, mkdtemp } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -13,7 +13,7 @@ function digest(value: unknown): string { return createHash('sha256').update(can
 
 /** Creates a private retained systemd readiness row for integration tests. Caller removes root. */
 export async function createReadinessFixture(inputPlan?: PluginActivationPlan) {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-readiness-')); await chmod(root, 0o700)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-readiness-')); await chmod(root, 0o700)
   const journalPath = join(root, 'reload.sqlite'), now = Date.now(), profilePath = inputPlan?.target.profilePath ?? '/tmp/dsh-profile'
   const plan = inputPlan ?? { id: 'plan-1', digest: 'e'.repeat(64), installationId: '123e4567-e89b-42d3-a456-426614174001', createdAt: now - 2_000, ledger: { id: '123e4567-e89b-42d3-a456-426614174002', path: '/tmp/ledger' }, target: { profilePath }, profile: 'default', activation: { id: 'activation-1', fence: 3 }, candidate: { package: '@scope/plugin', version: '1.2.3', integrity: 'sha512-test' } } as PluginActivationPlan
   const runtime: RuntimeObservation = { schemaVersion: 1, kind: 'dsh-runtime-observation', observerId: '123e4567-e89b-42d3-a456-426614174000', observerConfigDigest: 'a'.repeat(64), challenge: 'b'.repeat(64), processId: 42, invocationId: 'c'.repeat(32), profilePath, observedAt: now, entries: [{ entryId: 'plugin', module: plan.candidate.package, configDigest: 'd'.repeat(64), active: true, instance: { uid: 7, epoch: 2 }, dependencies: [{ name: 'loader', instance: { uid: 8, epoch: 1 } }], services: [{ name: 'example', instance: { uid: 9, epoch: 4 } }] }] }

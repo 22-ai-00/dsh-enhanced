@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { promisify } from 'node:util'
 import { generateKeyPairSync } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -45,7 +45,7 @@ function evidence(now: number): SourcePreparedEvidence {
 }
 
 async function fixture(beforePlan?: { path: string; content: string }, managedVersion = false, packagedVersion?: string) {
-  const root = await mkdtemp(join(tmpdir(), 'source-approval-authority-')); roots.push(root)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'source-approval-authority-')); roots.push(root)
   const repository = join(root, 'repository'); await mkdir(join(repository, 'plugins', 'health-helper', 'src'), { recursive: true, mode: 0o700 })
   await git(repository, 'init', '-q'); await git(repository, 'config', 'user.email', 'tests@example.invalid'); await git(repository, 'config', 'user.name', 'Tests')
   await writeFile(join(repository, 'plugins', 'health-helper', 'src', 'tool.ts'), 'export const value = 1\n', { encoding: 'utf8', mode: 0o600 })

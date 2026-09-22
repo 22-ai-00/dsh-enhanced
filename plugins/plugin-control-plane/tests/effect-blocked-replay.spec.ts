@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -28,7 +28,7 @@ afterEach(async () => {
 })
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'effect-blocked-replay-'))
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'effect-blocked-replay-'))
   const ctx = new Context(); fixtures.push({ ctx, root })
   const owner = join(root, 'owner'), profile = join(root, 'profile')
   await mkdir(owner, { recursive: true, mode: 0o700 }); await chmod(owner, 0o700)

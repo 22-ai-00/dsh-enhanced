@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -16,7 +16,7 @@ const ledgerId = '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f01'
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
 async function fixture(waitForAbort = false) {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-activation-engine-')); roots.push(root)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-activation-engine-')); roots.push(root)
   const dshHome = join(root, 'dsh'); const profile = join(dshHome, 'profiles', 'web'); const state = join(root, 'control.sqlite')
   await mkdir(profile, { recursive: true, mode: 0o700 }); await writeFile(join(profile, 'marker'), 'original')
   const pidFile = join(root, 'executor-child.pid'); const traceFile = join(root, 'executor.trace'); const executor = join(root, 'executor')

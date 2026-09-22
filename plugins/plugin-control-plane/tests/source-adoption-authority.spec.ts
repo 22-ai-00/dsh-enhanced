@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto'
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -27,7 +27,7 @@ function owner(): OwnerTaskFailureReference {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'source-adoption-authority-')); roots.push(root); const now = Date.now()
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'source-adoption-authority-')); roots.push(root); const now = Date.now()
   const key = generateKeyPairSync('ed25519'); const keyPath = join(root, 'key.pem'); await writeFile(keyPath, key.privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 }); await chmod(keyPath, 0o600)
   const controlPath = join(root, 'control.sqlite'); const db = new DatabaseSync(controlPath); db.close(); await chmod(controlPath, 0o600)
   const candidate: CatalogEntry = { id: 'health-helper', package: '@dsh-enhanced/health-helper', version: '1.2.3', integrity: 'sha512-YQ==', dshBaseline: '0.1.0', registry: { id: 'registry', locator: 'https://registry.example/', reference: 'https://registry.example/health-helper-1.2.3.tgz' }, capabilities: ['health'], authorities: ['network'], requires: [] }

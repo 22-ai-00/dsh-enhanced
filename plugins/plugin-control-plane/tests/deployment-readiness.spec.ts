@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { chmod, mkdtemp, readdir, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, readdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -22,7 +22,7 @@ function canonical(value: unknown): string {
 function digest(value: unknown): string { return createHash('sha256').update(canonical(value)).digest('hex') }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-readiness-')); roots.push(root); await chmod(root, 0o700)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-readiness-')); roots.push(root); await chmod(root, 0o700)
   const journalPath = join(root, 'reload.sqlite'), now = Date.now()
   const runtime: RuntimeObservation = {
     schemaVersion: 1, kind: 'dsh-runtime-observation', observerId: '123e4567-e89b-42d3-a456-426614174000',

@@ -1,4 +1,4 @@
-import { chmodSync, linkSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, mkdtempSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -12,7 +12,7 @@ const test = nativeTest.skipIf(process.platform !== 'linux')
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'replay-journal-')); roots.push(root)
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'replay-journal-')); roots.push(root)
   chmodSync(root, 0o700)
   return { root, path: join(root, 'replay.sqlite') }
 }

@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto'
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { createConnection, createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -33,7 +33,7 @@ async function eventually(assertion: () => Promise<void>): Promise<void> {
   throw last
 }
 async function fixture(load = true, services = ['candidateService']) {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-ro-'))
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-ro-'))
   const ctx = new Context(); fixtures.push({ ctx, root })
   const profile = join(root, 'profiles', 'fixture'); const owner = join(root, 'owner')
   await mkdir(profile, { recursive: true }); await mkdir(owner, { mode: 0o700 })

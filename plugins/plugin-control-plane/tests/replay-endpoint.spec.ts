@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomBytes, sign } from 'node:crypto'
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -31,7 +31,7 @@ afterEach(async () => {
 })
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'replay-endpoint-'))
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'replay-endpoint-'))
   const ctx = new Context(); fixtures.push({ ctx, root })
   const owner = join(root, 'owner'), profile = join(root, 'profile')
   await mkdir(owner, { mode: 0o700 }); await chmod(owner, 0o700); await mkdir(profile)

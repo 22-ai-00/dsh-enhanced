@@ -33,7 +33,7 @@ let cachedInterpreterRoot: string | undefined
 async function fixtureInterpreter(): Promise<{ path: string; sha256: string }> {
   if (cachedInterpreter !== undefined) return cachedInterpreter
   const sourcePath = await realpath(process.execPath)
-  const root = await mkdtemp(join(tmpdir(), 'plugin-control-node-')); await chmod(root, 0o700)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'plugin-control-node-')); await chmod(root, 0o700)
   const path = join(root, 'node')
   await copyFile(sourcePath, path); await chmod(path, 0o700)
   cachedInterpreterRoot = root
@@ -44,7 +44,7 @@ async function fixtureInterpreter(): Promise<{ path: string; sha256: string }> {
 async function executable(path: string, content: string): Promise<void> { await writeFile(path, content, 'utf8'); await chmod(path, 0o700) }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'plugin-control-cli-')); roots.push(root)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'plugin-control-cli-')); roots.push(root)
   const dshHome = join(root, 'dsh'); const profile = join(dshHome, 'profiles', 'web'); const control = join(dshHome, 'plugin-control')
   await mkdir(profile, { recursive: true, mode: 0o700 }); await mkdir(join(control, 'plans'), { recursive: true, mode: 0o700 }); await chmod(control, 0o700)
   await writeFile(join(profile, 'marker'), 'original', 'utf8')
@@ -125,7 +125,7 @@ exit 0
 }
 
 async function sourceRepositoryFixture(extraGeneratorWrite = false): Promise<{ repository: string; worktree: string }> {
-  const root = await mkdtemp(join(tmpdir(), 'plugin-control-source-repository-')); roots.push(root)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'plugin-control-source-repository-')); roots.push(root)
   const repository = join(root, 'repository'); const worktree = join(root, 'worktree')
   await mkdir(join(repository, 'scripts'), { recursive: true }); await mkdir(join(repository, 'plugins'), { recursive: true })
   await cp(join(repositoryRoot, 'scripts', 'create-plugin.mjs'), join(repository, 'scripts', 'create-plugin.mjs'))
@@ -255,7 +255,7 @@ async function approvedLocal(value: Awaited<ReturnType<typeof fixture>>, suffix:
 // Generates one self-signed certificate for 127.0.0.1 with openssl and returns
 // the PEM key/certificate pair used by the loopback HTTPS registry fixture.
 async function loopbackCertificate(): Promise<{ key: string; cert: string }> {
-  const directory = await mkdtemp(join(tmpdir(), 'plugin-control-tls-')); roots.push(directory)
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'plugin-control-tls-')); roots.push(directory)
   const keyPath = join(directory, 'key.pem'); const certPath = join(directory, 'cert.pem')
   execFileSync('/usr/bin/openssl', ['req', '-x509', '-newkey', 'ed25519', '-nodes', '-keyout', keyPath, '-out', certPath,
     '-days', '2', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'])
@@ -564,7 +564,7 @@ describe.sequential('trusted staged CLI', () => {
   }, 30_000)
 
   test('computes an exact checked source snapshot without changing the real Git index', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'plugin-control-checked-tree-')); roots.push(root)
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'plugin-control-checked-tree-')); roots.push(root)
     execFileSync('/usr/bin/git', ['init', root]); execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.name', 'Test'])
     execFileSync('/usr/bin/git', ['-C', root, 'config', 'user.email', 'test@example.invalid'])
     await mkdir(join(root, 'plugins', 'example'), { recursive: true }); await writeFile(join(root, 'README.md'), 'base\n')

@@ -40,7 +40,7 @@ let cachedInterpreterRoot: string | undefined
 async function fixtureInterpreter(): Promise<{ path: string; sha256: string }> {
   if (cachedInterpreter !== undefined) return cachedInterpreter
   const sourcePath = await realpath(process.execPath)
-  const root = await mkdtemp(join(tmpdir(), 'plugin-control-node-')); await chmod(root, 0o700)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'plugin-control-node-')); await chmod(root, 0o700)
   const path = join(root, 'node')
   await copyFile(sourcePath, path); await chmod(path, 0o700)
   cachedInterpreterRoot = root
@@ -57,7 +57,7 @@ async function executable(path: string, content: string): Promise<void> {
 // narrowed to the keys the engineering-layer pnpm shell and frozen-build checks
 // need (NPM_CONFIG_FOO deliberately proves exogenous npm_config_* stripping).
 async function trustFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'plugin-control-workspace-')); roots.push(root)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'plugin-control-workspace-')); roots.push(root)
   const dshHome = join(root, 'dsh')
   const profile = join(dshHome, 'profiles', 'web')
   const control = join(dshHome, 'plugin-control')

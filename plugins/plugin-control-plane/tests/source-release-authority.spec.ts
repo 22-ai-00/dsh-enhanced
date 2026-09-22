@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync } from 'node:crypto'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -23,7 +23,7 @@ afterEach(async () => { for (const store of stores.splice(0)) store.close(); for
 function owner(): OwnerTaskFailureReference { return { schemaVersion: 1, owner: { receiptVersion: 2, authorityId: 'owner', authorityHash: hex('a'), principalId: 'principal', principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', agentPreset: 'default', bindingVersion: 1, generation: 1 }, outcomeId: 'outcome', projection: { subjectKind: 'foreground-turn', subjectRef: 'turn', version: 1, digest: hex('b'), disposition: 'upsert' }, sourceDigest: hex('c') } }
 
 async function fixture(ready = true) {
-  const root = await mkdtemp(join(tmpdir(), 'source-release-authority-')); roots.push(root); const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', 'health-helper'); const worktreeRoot = join(root, 'worktrees'); const worktree = join(worktreeRoot, 'prepared')
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'source-release-authority-')); roots.push(root); const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', 'health-helper'); const worktreeRoot = join(root, 'worktrees'); const worktree = join(worktreeRoot, 'prepared')
   await mkdir(join(plugin, 'src'), { recursive: true, mode: 0o700 }); const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, env, encoding: 'utf8' }).trim()
   await writeFile(join(plugin, 'package.json'), JSON.stringify({ name: '@dsh-enhanced/health-helper', version: '0.1.0', dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { build: 'tsc' } }, null, 2) + '\n', { mode: 0o600 }); await writeFile(join(plugin, 'src/version.ts'), "export const version = '0.1.0'\n", { mode: 0o600 }); await writeFile(join(plugin, 'src/tool.ts'), 'export const value = 1\n', { mode: 0o600 })
   git('init', '-q'); git('config', 'user.email', 'tests@example.invalid'); git('config', 'user.name', 'Tests'); git('add', '.'); git('commit', '-qm', 'base'); const baseCommit = git('rev-parse', 'HEAD'); await mkdir(worktreeRoot, { mode: 0o700 }); git('worktree', 'add', '--detach', worktree, baseCommit); await chmod(worktree, 0o700)
