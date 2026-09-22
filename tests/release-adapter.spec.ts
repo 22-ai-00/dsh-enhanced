@@ -311,7 +311,10 @@ async function checkedSnapshot(worktree: string, baseCommit: string, scope: read
 async function createFixture(): Promise<ReleaseFixture> {
   const pnpmVersion = await workspacePnpmVersion()
   const pnpmSourceRoot = await resolveNativePnpmRoot(pnpmVersion)
-  const root = await mkdtemp(join(tmpdir(), 'dsh-release-adapter-'))
+  // Resolve tmpdir() first: on macOS os.tmpdir() lies under /var, which is a
+  // symlink to /private/var, and the release adapter pins trusted executables
+  // to canonical absolute paths (trust.ts rejects a non-canonical path).
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-release-adapter-'))
   roots.push(root)
   await chmod(root, 0o700)
   const nodePath = join(root, 'node')
