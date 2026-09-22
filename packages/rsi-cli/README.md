@@ -35,8 +35,8 @@ dsh-rsi [全局选项] <命令>
 
 `dsh-rsi install` 不复制任何安装逻辑，只做统一入口与版本锁定：
 
-- **npm 形态（默认）**：下载 `https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v<本包版本>/scripts/install/install-npm.sh` 到临时目录执行。引导脚本内部会按内嵌 SHA-256 自校验 `common.sh` 等资产，rsi-cli 不重复 hash 逻辑。即「用哪个版本的 dsh-rsi，就装哪个版本的插件集合」。
-- **local 形态**：`--local <checkout 目录>`，直接执行该目录下 `scripts/install/install-local.sh`（本地开发 / 无网救机）。
+- **npm 形态（默认）**：下载 `https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v<本包版本>/scripts/install/install-npm.sh` 到临时目录执行。引导脚本内部会按内嵌 SHA-256 自校验 `common.sh` 等资产，rsi-cli 不重复 hash 逻辑。**锁定的只是引导脚本与同 tag 的安装器资产，不是插件 cohort 版本**：安装器默认把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套 `@dsh-enhanced/*` bundle；要锁定插件版本需透传 `--plugin-version <x.y.z|dist-tag>` 或预设 `DSH_ENHANCED_VERSION`。安装器尾部还会执行 `npm install --global @dsh-enhanced/rsi-cli@<cohort 版本>`，可能因此把全局 dsh-rsi 升降级到该 cohort 版本。
+- **local 形态**：`--local <checkout 目录>`，直接执行该目录下 `scripts/install/install-local.sh`，并从该 checkout 全局安装 rsi-cli（本地开发 / 无网救机）。
 - 安装器 stdio 与终端直连（交互提示照常），退出码原样透传。
 
 ```bash
@@ -54,7 +54,7 @@ dsh-rsi reinstall --yes
 dsh-rsi reinstall --profile web --yes
 ```
 
-`reinstall` 支持的 rsi 侧选项与 `purge` 一致（`--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`）；purge 阶段未加 `--yes` 时仍需输入 `purge` 确认。重装阶段默认走 npm 形态；local 重装加 `--local <dir>`。
+`reinstall` 支持的 rsi 侧选项与 `purge` 一致（`--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`）；只有既未加 `--yes` 也未加 `--dry-run` 时才需输入 `purge` 确认——`reinstall --dry-run` 全程无交互、无修改：先打印 purge 计划，再以 `--dry-run` 透传演练安装器（`--dry-run` 同时作用于 purge 与安装两个阶段）。重装阶段默认走 npm 形态；local 重装加 `--local <dir>`。
 
 ## status / doctor
 
@@ -111,7 +111,7 @@ purge 选项：
 
 - **进程静止检查**：发现仍在运行的 profile host 会拒绝执行（列出 PID 与完整命令行），不代为 kill；请先停用服务或手工退出后重试。
 - **systemd unit 归属 fail-closed**：仅当 unit 文件内容同时包含受管标记（`DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`）才删除；归属不明的同名文件只报告、保留。
-- **凭据先于文件清理**：外部凭据删除失败会立即中止（文件尚未删除，journal 仍可用于复查），避免出现「文件没了但凭据残留且无法反查」。
+- **locator 先扫描、文件先删除、凭据后清理**：删文件前先扫描各 profile 的 setup journal / cleanup 记录（journal 位于 DSH home 内，必须在删除前扫出凭据 locator）；随后**先删除文件**，再按预扫描的 locator 逐条删除外部凭据。单条凭据删除失败不会回滚已删文件，而是以「文件已删除，但以下凭据条目清理失败，请手工删除：…」报错并以退出码 1 结束。默认的 tar.gz 备份内含完整 journal，可解包后据此复查、手工补删；`--no-backup` 下文件与 journal 均不可恢复，只剩错误消息中列出的 service/account 可供定位。
 - 单 profile 与 `--remove-host` 互斥；仅支持 macOS / Linux。
 
 ### 与安装器 `--operation uninstall` 的区别
@@ -133,8 +133,8 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 
 | 退出码 | 含义 |
 | --- | --- |
-| 0 | 成功（含 dry-run、目标不存在的幂等场景） |
-| 1 | purge 执行失败（活动进程、服务/凭据错误等）；install 下载/委托失败 |
+| 0 | 成功。含 dry-run 与多数幂等场景：外部凭据条目本不存在、服务未注册、`rm --force` 删除已不存在的路径等 |
+| 1 | purge 执行失败（活动进程、服务/凭据错误、备份失败等）；install 下载/委托失败。两个非幂等边界：① 默认备份下全量 purge 不存在的 DSH home，`tar` 因源目录不存在以退出码 2 失败、rsi 退出 1（`--no-backup` 同场景为 0）；② `purge --profile <不存在的名字>`（含 dry-run）直接报「profile 不存在」退出 1。单文件 `purge.sh` 的内联实现对不存在的 home 统一退出 0，在此边界上与 dsh-rsi 不一致 |
 | 2 | 参数错误 |
 | 其它非 0 | `install` / `reinstall` 安装器的退出码原样透传 |
 

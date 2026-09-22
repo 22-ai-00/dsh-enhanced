@@ -14,9 +14,9 @@ pnpm approve-builds koffi
 
 macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；若 `ai.deepseek.dsh.profile.<profile>` 未注册，会自动调用当前 profile 的服务注册入口并再次确认，再执行健康检查，无需手动运行 `launchctl bootstrap`。修复复用服务注册入口，不启动新的飞书 onboarding；已有中断的 setup 事务仍由原入口恢复。`--no-service`、`--lark skip` 以及不管理常驻服务的场景保持跳过；独立 `doctor.sh` 仍只检查。注册失败会保留具体错误并停止安装。
 
-当前真实验收范围：`v0.1.31` 已完成 Linux `autonomy` 的远程全新安装；本批候选 v4 完成真实 `.30 → .31` 升级、隔离 Host 启动及事务提交；补齐预检约束后的最终冻结候选 v6 完成 `.31 → .31` 重复升级，尚未用最终源码重跑跨版本升级。两次运行均确认 14 个受管包同版本，选定配置和状态文件、暂停目标及其检查点保持不变。这份升级修复纳入 `0.1.32`；旧 `v0.1.31` 远程 helper 不具备同样能力。升级证据和验证限制见完整升级记录。
+历史验收记录（截至 2026-09-12）：`v0.1.31` 完成过 Linux `autonomy` 的远程全新安装，以及真实 `.30 → .31` 升级、隔离 Host 启动与事务提交；最终冻结候选完成 `.31 → .31` 重复升级，两次均确认 14 个受管包同版本，选定配置、状态文件、暂停目标及其检查点保持不变。该批升级修复随 `0.1.32` 发布；旧 `v0.1.31` 远程 helper 不具备同样能力。当前验收范围与剩余缺口见 [RSI 当前状态](../../docs/rsi-status.md)。
 
-`0.1.32` 安装器先确保 Node.js、pnpm 和兼容的 DSH。兼容范围为 `>=0.1.2-rc.1 <0.2.0`，包含后续 `0.1.x` 的 RC；默认新安装版为 `0.1.5-rc.1`。已有兼容 CLI 直接复用，不做全局升级或降级。跨到 `0.2.x` 或无法识别的版本会在修改 profile 前拒绝。`v0.1.31` 的旧远程引导器固定旧 Host；使用本版本引导器可采用上述兼容范围。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
+安装器先确保 Node.js、pnpm 和兼容的 DSH。兼容范围为 `>=0.1.2-rc.1 <0.2.0`，包含后续 `0.1.x` 的 RC；默认新安装版为 `0.1.5-rc.1`。已有兼容 CLI 直接复用，不做全局升级或降级。跨到 `0.2.x` 或无法识别的版本会在修改 profile 前拒绝。`v0.1.31` 的旧远程引导器固定旧 Host；使用本版本引导器可采用上述兼容范围。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
 
 ```sh
 ./scripts/install/install-local.sh --yes
@@ -66,7 +66,7 @@ dsh-rsi purge --dry-run # 查看完整删除计划
 dsh-rsi purge --yes     # 先在 ~ 生成 0600 的 tar.gz 备份，再删除 DSH home 与全部受管痕迹
 ```
 
-purge 覆盖 npm cohort 实体副本与本地 checkout 符号链接两种形态：删除整个 `$DSH_HOME`（或 `--profile <name>` 单个 profile）、home 外生命周期事务/失败诊断/锁、launchd / systemd --user 受管服务，并按各 profile 的 setup journal 权威反查清理 Keychain / Secret Service 中 service 前缀为 `dsh/` 的凭据。选项：`--no-backup`、`--keep-keychain`、`--remove-host`（同时卸载全局 `@deepseek-ai/dsh`，默认保留；仅限全量）。本地 checkout 源码只删符号链接、**绝不删除 checkout**，报告会列出 checkout 路径。发现仍在运行的 profile host 会拒绝执行（不代为 kill）；systemd unit 文件内容不匹配受管标记时 fail-closed 只报告保留。完整命令参考见 `packages/rsi-cli/README.md`。
+purge 覆盖 npm cohort 实体副本与本地 checkout 符号链接两种形态。**全量**（默认）删除整个 `$DSH_HOME`（profiles、logs、uninstalled-profiles、home 内锁文件）以及 home 外生命周期事务目录、失败诊断目录、home 锁与 `/tmp` rendezvous 锁；**单 profile**（`--profile <name>`）只删除 `profiles/<name>`、该 profile 的两份 host 日志与 `.failed-<name>-*` 失败诊断目录，共享的生命周期事务目录与两把锁因可能涉及其它 profile 而刻意保留——注意单 profile 的 tar.gz 备份仍覆盖**整个** `$DSH_HOME`。两种范围都会停用并注销 launchd / systemd --user 受管服务，并按各 profile 的 setup journal 权威反查清理 Keychain / Secret Service 中 service 前缀为 `dsh/` 的凭据。选项：`--no-backup`、`--keep-keychain`、`--remove-host`（同时卸载全局 `@deepseek-ai/dsh`，默认保留；仅限全量）。本地 checkout 源码只删符号链接、**绝不删除 checkout**，报告会列出 checkout 路径。发现仍在运行的 profile host 会拒绝执行（不代为 kill）；systemd unit 文件内容不匹配受管标记时 fail-closed 只报告保留。完整命令参考见 `packages/rsi-cli/README.md`。
 
 机器上没有 `dsh-rsi` 时（host 已损坏 / 全局命令被删），可直接执行单文件救机脚本；它优先委托 `dsh-rsi`，找不到时使用等价的内联精简实现，参数与 `dsh-rsi purge` 一致：
 
@@ -125,7 +125,7 @@ dsh-rsi reinstall --local ~/work/github/dsh-enhanced --yes
 管理内建服务时，安装器会在 OAuth 前检查 systemd user manager 和 lingering。当前用户有权时会自动启用 lingering；需要管理员权限时，交互向导会先展示唯一的固定提权命令，并询问是否现在通过 `sudo` 执行，密码由 `sudo` 直接读取，不进入安装器、参数或日志。拒绝、失败或非交互运行都会在云端授权前停止并给出同一条可复制命令。Linux 安装完成后还会观察 user unit 的 `ActiveState`、`ExecMainStatus` 和 `NRestarts` 一个短窗口；发现快速崩溃/重启循环会打印最近 journal 并停止该 unit，避免 systemd 无限重启掩盖原始错误。容器、未启用 systemd 的 WSL 或其他没有 systemd user manager/logind 的系统应使用 `--no-service`，并由 Docker、s6、runit 等外部 supervisor 保持 `dsh --profile <name> --no-open` 常驻；此时安装器不会宣称或验证内建服务的注销后存活能力。
 Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 root-owned `01777` `/tmp`；setup 会在任何 profile、凭据、数据库或 service mutation 前持有与 upgrade/uninstall 相同的 canonical `DSH_HOME` rendezvous lock，避免 onboarding/reconfigure 与 service-aware lifecycle 并发。
 
-普通 `lark` 场景已经安装 Preference Learning：经 owner onboarding 的完成对话只产生无正文的有界行为证据，并可在固定 T1 目录、阈值和回滚门内自动应用偏好；它不要求 Health、Heartbeat 或 Recovery，也不会新增通用 Agent 工具授权。`--disable-agent-tools` 只移除向导托管的规则，不覆盖用户自定义规则或显式的全局 Policy 默认值。
+普通 `lark` 场景已经安装 Preference Learning：经 owner onboarding 的完成对话只产生无正文的有界行为证据，并可在固定 T1 目录、阈值和回滚门内自动应用偏好；它不要求 Health、Heartbeat 或 Recovery，也不会新增通用 Agent 工具授权。用户面参数 `--agent-tools disable` 只移除向导托管的规则，不覆盖用户自定义规则或显式的全局 Policy 默认值（安装器内部再映射为 `dsh-lark-setup` 的 `--disable-agent-tools`，不能直接把后者传给安装脚本）。
 
 `supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Recovery 与 Health；v2 激活器用同一 nonce 执行 preview→active 的固定 Host runbook。Recovery bootstrap 本身不依赖模型；独立 `supervised-growth-analyst` 每天最多运行一次，只能读取一个 Host 选出的 adoption candidate 并生成 owner 审批 proposal，不能投递普通模型正文。成长 overlay 会把 Heartbeat 连同 Delivery、Evaluation、Preference Learning、Evolution、Growth Experiments、Recovery、Lark Channel 和四个核心 service 标记为 Health required，并为审批后的 workflow replay/shadow/单次 canary 配置独立的低额度预算与 exact owner route。升级时旧 `supervised-growth` model heartbeat 会被安全暂停；TraeX 仍只在显式 `--with traex` 时安装。
 
@@ -228,7 +228,12 @@ DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-mo
 ./scripts/install/doctor.sh --profile web
 ./scripts/install/doctor.sh --profile web --require-service
 ./scripts/install/doctor.sh --profile web --require-isolation
+
+# 安装前预检：只检查 Web 端口占用，不组合 profile、不启动 Host
+./scripts/install/doctor.sh --preflight --port 3080
 ```
+
+`doctor.sh` 参数：`--preflight` 切换为安装前预检（只查 Web 端口，默认 postflight 会组合 profile 并对未启用 Lark 的 profile 做一次前台激活）；`--port <1..65535>` 指定预检端口（默认取 `DSH_ENHANCED_WEB_PORT`，再缺省 `3080`）；`--require-service` 验证受管常驻服务与 Linux 注销后存活；`--require-isolation` 检查有限隔离授权、配对 owner 与临时 Docker 探测（不另起 Host、不续授权）。`--require-isolation` 不得与 `--preflight` 或 `--require-service` 同用，违反时以退出码 2 拒绝。
 
 `--require-service` 在 Linux 同时验证 systemd user unit、稳定性窗口和 lingering；若检测到循环崩溃会停止该 unit 并输出 journal，若未启用 lingering，注销会停止 user service，按 doctor 提示运行 `sudo loginctl enable-linger "$(id -u)"`。未带 `--require-service` 的 doctor 会避免对已启用 Lark 的 profile 启动第二个 Host；macOS LaunchAgent 与 Windows 当前用户计划任务只能在用户登录会话中运行；Windows 的任务会在失败后重启，但不宣称注销后继续运行。
 
