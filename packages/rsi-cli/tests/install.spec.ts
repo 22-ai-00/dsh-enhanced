@@ -19,6 +19,7 @@ const fakeReport = {
 
 type InstallFn = NonNullable<MainDeps['install']>
 type PurgeFn = NonNullable<MainDeps['purge']>
+type SelfUpdateFn = NonNullable<MainDeps['selfUpdate']>
 
 function makeDeps(installCalls: unknown[], purgeCalls: unknown[] = []): Required<MainDeps> {
   return {
@@ -30,6 +31,11 @@ function makeDeps(installCalls: unknown[], purgeCalls: unknown[] = []): Required
       purgeCalls.push(options)
       return fakeReport
     }) as PurgeFn,
+    // 这些测试不走 update 路径；注入假实现只为满足 Required<MainDeps>，
+    // 同时确保任何意外调用都不会打到真实 npm registry。
+    selfUpdate: (async () => ({
+      fromVersion: '0.0.0', selector: 'latest', alreadyCurrent: true, actions: [],
+    })) as SelfUpdateFn,
   }
 }
 

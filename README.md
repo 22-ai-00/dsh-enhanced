@@ -44,7 +44,7 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/restart.sh
 ```
 
-安装器会同时提供全局 `dsh-rsi` 控制命令（npm 与本地 checkout 两种形态均包含），用于安装、日常运维（启停/重启/看日志）、只读诊断与彻底卸载：
+安装器会同时提供全局 `dsh-rsi` 控制命令（npm 与本地 checkout 两种形态均包含），用于安装、升级、日常运维（启停/重启/看日志）、只读诊断与彻底卸载：
 
 ```sh
 dsh-rsi install --scenario core --yes  # 安装/修复：薄委托到与本 dsh-rsi 同版本的官方安装器
@@ -53,13 +53,15 @@ dsh-rsi doctor                         # 识别 host 错误日志中的已知崩
 dsh-rsi restart --profile web          # 重启受管常驻服务；只改运行状态，不动服务定义
 dsh-rsi stop                           # 停止全部 profile 的常驻服务（可再 start）
 dsh-rsi logs --profile web --lines 100 # 查看受管 stdout/stderr 日志尾部
+dsh-rsi update                         # 只升级 dsh-rsi 自身（--version 可指定版本/dist-tag）
+dsh-rsi update --all                   # 自身 + 整套插件原地升级（薄委托安装器 --operation upgrade）
 dsh-rsi reinstall --yes                # 先备份 purge 再干净重装（也可加 --local <checkout>）
 dsh-rsi purge --dry-run                # 查看彻底删除计划
 dsh-rsi purge --yes                    # 先备份 ~/.dsh（0600 tar.gz）再彻底删除；默认保留全局 host
 dsh-rsi version                        # 打印 dsh-rsi 自身版本
 ```
 
-`install` 默认按 npm 形态下载与本 dsh-rsi 同版本（`vX.Y.Z`）的 `install-npm.sh` 执行（脚本内部自校验资产 SHA-256），加 `--local <checkout>` 执行该目录的 `install-local.sh`，其余安装器参数原样透传（`dsh-rsi install --help` 查看完整清单）。`start` / `stop` / `restart` 只切换已注册受管服务的运行状态：不新建、不改写、不删除 launchd plist 或 systemd unit，服务未注册时报错并给出注册指引而非隐式注册。`purge` 与安装器的 `--operation uninstall`（归档保留数据）不同：它删除 DSH home、生命周期残留、受管服务与外部凭据，但绝不删除本地 checkout 源码；详见 [`packages/rsi-cli/README.md`](packages/rsi-cli/README.md)。崩溃机器上没有 `dsh-rsi` 时可用单文件脚本 `curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh | bash -s -- --yes`。
+`install` 默认按 npm 形态下载与本 dsh-rsi 同版本（`vX.Y.Z`）的 `install-npm.sh` 执行（脚本内部自校验资产 SHA-256），加 `--local <checkout>` 执行该目录的 `install-local.sh`，其余安装器参数原样透传（`dsh-rsi install --help` 查看完整清单）。`update` 不带参数只升级 dsh-rsi 自身；加 `--all` 再把插件集合交给安装器 `--operation upgrade` 原地升级（保留 patch、凭据、Session、Goal，与 `reinstall` 的先 purge 再装不同）。新版本在下一次执行 dsh-rsi 时生效。`start` / `stop` / `restart` 只切换已注册受管服务的运行状态：不新建、不改写、不删除 launchd plist 或 systemd unit，服务未注册时报错并给出注册指引而非隐式注册。`purge` 与安装器的 `--operation uninstall`（归档保留数据）不同：它删除 DSH home、生命周期残留、受管服务与外部凭据，但绝不删除本地 checkout 源码；详见 [`packages/rsi-cli/README.md`](packages/rsi-cli/README.md)。崩溃机器上没有 `dsh-rsi` 时可用单文件脚本 `curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh | bash -s -- --yes`。
 
 需要试用有限离线执行时，可显式使用 `--scenario autonomy --isolation-image sha256:<本机固定镜像ID>`。安装器会实际探测 Docker 并为本机 Web owner 配置有次数、期限和累计时长的隔离授权；参数与前置条件见[安装文档](scripts/install/README.md)。这是基本 RSI 首版的实验入口；有限修复使用下述 repair admission，外部动作需要单独配置范围明确的授权和凭据，完整自治规划继续推进。
 
