@@ -69,7 +69,7 @@ preview 使用 fresh UUID 和新 package catalog，在 no-network bubblewrap 中
 
 supervised uninstall 只停用目标 profile 的本地受管能力：事务停止并收容经证明归属该 canonical home 的 unit，归档目标 profile 的完整目录树，再用 installer-clean 的同名 Web profile 替换 live target。clean target 不再要求 Lark、Health 或 supervised active attestation，只通过 fresh InvocationID、对应 journal ready marker 和稳定窗口组成的通用 readiness；原 active unit 恢复，原 inactive unit 保持停止。uninstall 不访问 npm registry 或 pnpm store，也不撤销凭据、owner binding、Session、Goal、数据库或其它共享/外置状态。完整 profile-tree 归档不等于整个 home 的逐字节证明，后续重装或共享同一状态库的其它 profile 仍可能解释这些保留状态。
 
-WP17 的原始安装范围已经验收，详见 [RSI 当前状态](rsi-status.md)。上述 supervised 生命周期的工程测试不等于所有真实部署组合已验收；真实 systemd/Lark、跨库 live-WAL、更多 crash window 和平台覆盖继续作为强化项。远程 bootstrap 使用已发布标签与摘要固定的生命周期 helper，当前默认发布版为 `0.1.32`；旧 `v0.1.24` 缺少 helper，会在执行前拒绝。该 supervised 路径仍不支持 `--no-service`、外部 supervisor、macOS 或 Windows。
+WP17 的原始安装范围已经验收，详见 [RSI 当前状态](rsi-status.md)。上述 supervised 生命周期的工程测试不等于所有真实部署组合已验收；真实 systemd/Lark、跨库 live-WAL、更多 crash window 和平台覆盖继续作为强化项。远程 bootstrap 使用已发布标签与摘要固定的生命周期 helper，固定标签以 `scripts/install/install-npm.sh` 中的 `DSH_ENHANCED_PINNED_RELEASE_REF` 为准；旧 `v0.1.24` 缺少 helper，会在执行前拒绝。该 supervised 路径仍不支持 `--no-service`、外部 supervisor、macOS 或 Windows。
 
 DSH 尚处于预发布阶段，插件机制可能发生破坏性变化。`pnpm-workspace.yaml` 的 catalog 和各插件 `peerDependencies` 是实际依赖范围的源；本页记录人工验证过的 DSH 基线。
 
@@ -104,7 +104,7 @@ construction 自身的 owner effect 把卸载记入不可复位的组合取消�
 
 `assistant-web-owner` 的生产边界以 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1` 与 Cordis `4.0.2` 实际实现验证：保留原 Controller 的 Remote 原型元数据，在构造入口提供独立 fiber 的受限 Agent facade；`SessionSkillCatalog` 必须在其构造时加 owner gate，`api-session/*` 也必须在全局 ApiRemotes 转发前过滤。不能用简单 Proxy 包装原 registry（Cordis trace 可能还原原始服务），也不能在已运行 Controller 上仅覆盖 prompt。bundle patch 通过禁用原行再插入新行替换，`name` 本身不是可改写字段。
 
-Delivery 集成测试显式使用同版本 `dsh-api-gateway` 与 `dsh-api-remotes`，覆盖真实 Gateway 调用和两个 `$events` 消费者；浏览器和 HTTP/WS 由独立命令验证。`assistant-web-owner` 已包含在当前 `0.1.32` 发布基线中，安装、离线 owner 配置与验证入口见[插件说明](../plugins/assistant-web-owner/README.md)；发布记录见[发布账本](../release-manifest.json)。
+Delivery 集成测试显式使用同版本 `dsh-api-gateway` 与 `dsh-api-remotes`，覆盖真实 Gateway 调用和两个 `$events` 消费者；浏览器和 HTTP/WS 由独立命令验证。`assistant-web-owner` 已包含在当前发布基线中，安装、离线 owner 配置与验证入口见[插件说明](../plugins/assistant-web-owner/README.md)；当前版本见[发布账本](../release-manifest.json)。
 
 Web client 与工作区接线：本包构建期复用 `dsh-api-session-controller@0.1.2-rc.1` 的完整 browser factory，仅替换注册模块 ID，并携带原 MIT 文本；原 Host row 禁用后不会自动提供 client graph row，必须由本包声明 `dsh.client` 和 `./client`。构建校验上游版本、模块格式、依赖元数据，升级后须重新核验 UI 的模块引用。`dsh-workspace` 作为可选 Host peer，使用同版本 `resolveByPath/create/get` 与 canonical `Workspace.path`；不直接改写原生存储。每次创建重查配置中的 workspaceId/path，并交给原生 Controller 完成关联。配置路径与 realpath 不同会报错，不能悄悄改变 Delivery/Policy scope 键。
 
