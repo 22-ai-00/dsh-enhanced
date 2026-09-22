@@ -1,5 +1,5 @@
 import { createHash, createPrivateKey, sign } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -30,7 +30,7 @@ const plan = (): BenchmarkPlan => ({ schemaVersion: 1, id: 'holdout-executor', d
   { id: 'candidate', role: 'candidate', versions, features: { memory: true, planning: false, review: false, growth: false } },
 ], budget: { durationMs: 2_000, inputTokens: 100, outputTokens: 100, costUsdMicros: null, toolCalls: 0 }, repeats: 2, seed: 7 })
 
-function root(): string { const path = mkdtempSync(join(tmpdir(), 'holdout-executor-')); roots.push(path); return path }
+function root(): string { const path = realpathSync(mkdtempSync(join(tmpdir(), 'holdout-executor-'))); roots.push(path); return path }
 function providerConfig(mode = 'authority'): HoldoutProviderConfig { return {
   executable: process.execPath, args: [fixture], environment: { HOLDOUT_FIXTURE_MODE: mode, LANG: 'C', LC_ALL: 'C' },
   maxLineBytes: 512 * 1024, maxStderrBytes: 1024, readyTimeoutMs: 500, requestTimeoutMs: 500, closeTimeoutMs: 50, killTimeoutMs: 100,

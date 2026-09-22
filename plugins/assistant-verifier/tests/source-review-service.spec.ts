@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -18,7 +18,8 @@ const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.clearAllMocks() })
 
 test('keeps acceptance active while review peers arrive and disposes each reviewer generation', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'review-service-')), ctx = new Context()
+  // macOS 上 os.tmpdir() 经 /var → /private/var；决策根有 canonical 校验。
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'review-service-'))), ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   const sourceReviews: SourceReviewConfig = { authorityId: 'review', expiresAt: Date.now() + 60_000, maxReviews: 1,
     repository: root, git: { path: '/usr/bin/git', sha256: 'a'.repeat(64) }, decisionRoot: root, plugins: ['sample'],

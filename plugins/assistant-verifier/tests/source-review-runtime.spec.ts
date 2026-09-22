@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, symlink } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, realpath, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -12,7 +12,8 @@ vi.mock('../src/source-review-git.ts', () => ({ assertSourceReviewHead: vi.fn(),
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); vi.resetAllMocks() })
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'source-review-runtime-')), ctx = new Context()
+  // macOS 上 os.tmpdir() 经 /var → /private/var；决策根有 canonical 校验。
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'source-review-runtime-'))), ctx = new Context()
   const owner = { authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'main' }
   const config: SourceReviewConfig = { authorityId: 'grant', expiresAt: Date.now() + 60_000, maxReviews: 1,
     repository: root, git: { path: '/usr/bin/git', sha256: 'b'.repeat(64) }, decisionRoot: root, plugins: ['sample'], owner,

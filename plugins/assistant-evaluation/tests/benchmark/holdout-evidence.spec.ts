@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
@@ -35,7 +35,7 @@ function verifier(counter?: { manifest: number; verdict: number; finish: number 
   verifyVerdict: input => { if (counter) counter.verdict++; return parseSignedHoldoutVerdict(input.envelope, input.manifest, input.planDigest, input.cell, input.outputDigest, publicKey) },
   verifyFinish: input => { if (counter) counter.finish++; return parseSignedHoldoutFinish(input.envelope, input.manifest, input.planDigest, input.cells, input.verdictEnvelopeDigests, publicKey) },
 } }
-function stateRoot(): string { const parent = mkdtempSync(join(tmpdir(), 'holdout-evidence-')); roots.push(parent); return join(parent, 'state') }
+function stateRoot(): string { const parent = realpathSync(mkdtempSync(join(tmpdir(), 'holdout-evidence-'))); roots.push(parent); return join(parent, 'state') }
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe.runIf(process.platform === 'linux')('HoldoutEvidenceStore', () => {
@@ -96,7 +96,8 @@ describe.runIf(process.platform === 'linux')('HoldoutEvidenceStore', () => {
   })
 
   it('rejects unsafe ancestors and detects replacement of its pinned root', () => {
-    const parent = mkdtempSync(join(tmpdir(), 'holdout-evidence-unsafe-')); roots.push(parent); chmodSync(parent, 0o777); const child = join(parent, 'state')
+    // 夹具根仍须 canonical（macOS /var → /private/var）；这里刻意制造的是 mode 0o777 的不安全祖先。
+    const parent = realpathSync(mkdtempSync(join(tmpdir(), 'holdout-evidence-unsafe-'))); roots.push(parent); chmodSync(parent, 0o777); const child = join(parent, 'state')
     expect(() => new HoldoutEvidenceStore({ root: child, verifier: verifier() })).toThrow(/unsafe-root/); chmodSync(parent, 0o700)
     const root = join(parent, 'trusted'); mkdirSync(root, { mode: 0o700 }); const store = new HoldoutEvidenceStore({ root, verifier: verifier(), create: false }), parked = join(parent, 'parked'), replacement = join(parent, 'replacement')
     mkdirSync(replacement, { mode: 0o700 }); renameSync(root, parked); renameSync(replacement, root)

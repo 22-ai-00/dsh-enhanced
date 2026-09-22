@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,7 +9,9 @@ import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, runRsiSe
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 async function fixture() {
-  const home = await mkdtemp(join(tmpdir(), 'dsh-rsi-setup-')); roots.push(home)
+  // macOS 上 os.tmpdir() 经 /var → /private/var 符号链接，须先规范化到 canonical 路径，
+  // 否则 safeDirectory 的 realpath 检查会拒绝测试夹具本身（生产 DSH home 无此问题）。
+  const home = await mkdtemp(join(await realpath(tmpdir()), 'dsh-rsi-setup-')); roots.push(home)
   const pair = ['target', 'coordinator']
   for (const name of pair) {
     await mkdir(join(home, 'profiles', name), { recursive: true, mode: 0o700 })

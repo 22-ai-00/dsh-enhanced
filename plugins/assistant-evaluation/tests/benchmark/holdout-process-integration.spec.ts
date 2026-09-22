@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { chmod, mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, realpath, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,7 +32,7 @@ function sha(value: string | Uint8Array): string {
 }
 
 async function privateRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'holdout-process-'))
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'holdout-process-')))
   roots.push(root)
   await chmod(root, 0o700)
   return root
