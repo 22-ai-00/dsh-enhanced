@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-enhanced/assistant-delivery'
-import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, type RsiSetupPorts } from '../src/rsi-setup.js'
+import { assertRsiEffectivePatch, configureRsiSetup, parseRsiSetupArgs, runRsiSetup, type RsiSetupPorts } from '../src/rsi-setup.js'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -160,5 +160,19 @@ describe('RSI dual profile setup transaction', () => {
     expect(() => parseRsiSetupArgs([...base, '--apply'])).toThrow('confirm-hosts-stopped')
     expect(() => parseRsiSetupArgs([...base, '--rollback', '--apply'])).toThrow('cannot be combined')
     expect(() => parseRsiSetupArgs([...base, '--apply', '--apply'])).toThrow('duplicate')
+  })
+  test('platform gate lives only in the CLI shell, not in the injectable transaction', async () => {
+    const f = await fixture()
+    // 事务本体在任意平台都可测（ports 已隔离 systemctl/服务安装）。
+    await expect(configureRsiSetup(f.args(), f.ports)).resolves.toMatchObject({ mode: 'checked' })
+    // CLI 外壳在非 Linux 上拒绝，且发生在读任何 profile 文件之前。
+    const platform = vi.spyOn(process, 'platform', 'get')
+    platform.mockReturnValue('darwin')
+    try {
+      await expect(runRsiSetup(['--manifest', f.manifestPath, '--dsh-home', f.home]))
+        .rejects.toThrow('requires Linux systemd user services')
+    } finally {
+      platform.mockRestore()
+    }
   })
 })
