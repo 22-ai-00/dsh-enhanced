@@ -214,7 +214,6 @@ export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding
 }
 
 export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts = defaultPorts): Promise<{ mode: string; profiles: readonly string[] }> {
-  if (process.platform !== 'linux') fail('dual Host setup currently requires Linux systemd user services')
   if (args.rollback && (args.apply || args.start) || args.start && !args.apply) fail('incompatible setup operations')
   const home = args.dshHome
   await safeDirectory(home)
@@ -288,5 +287,8 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
     process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\n')
     return
   }
+  // 平台门控只属于 CLI 外壳：事务逻辑经注入的 ports 隔离 systemctl/服务安装，
+  // 单测须能在任意平台跑；真实 systemd 用户服务只在 Linux 可用。
+  if (process.platform !== 'linux') fail('dual Host setup currently requires Linux systemd user services')
   process.stdout.write(`${JSON.stringify(await configureRsiSetup(args))}\n`)
 }
