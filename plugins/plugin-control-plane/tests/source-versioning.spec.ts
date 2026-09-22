@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { link, mkdir, mkdtemp, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { link, mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
@@ -9,7 +9,7 @@ const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 
 async function fixture(version = '1.2.3', name = 'helper') {
-  const root = await mkdtemp(join(tmpdir(), 'source-versioning-')); roots.push(root)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'source-versioning-')); roots.push(root)
   const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', name); const source = join(plugin, 'src')
   await mkdir(source, { recursive: true })
   const manifest = { name: `@dsh-enhanced/${name}`, version, dsh: { bundle: { patch: './cordis.patch.yml' } }, scripts: { check: 'pnpm check' }, dependencies: { leftpad: '1.0.0' }, metadata: { alpha: 1, beta: 2 } }

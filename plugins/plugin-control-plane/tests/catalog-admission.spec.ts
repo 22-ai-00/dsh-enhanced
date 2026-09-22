@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { lstatSync } from 'node:fs'
-import { chmod, link, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -42,7 +42,7 @@ function candidate(overrides: Partial<CatalogEntry> = {}): CatalogEntry {
 }
 
 async function fixture(entries: CatalogEntry[] = []): Promise<{ root: string; path: string; catalog: CapabilityCatalog }> {
-  const root = await mkdtemp(join(tmpdir(), 'plugin-catalog-admission-')); roots.add(root)
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'plugin-catalog-admission-')); roots.add(root)
   await chmod(root, 0o700)
   const path = join(root, 'catalog.json')
   const catalog = parseCatalog({ schemaVersion: 1, entries })

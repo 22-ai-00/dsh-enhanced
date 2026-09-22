@@ -1,5 +1,5 @@
 import { closeSync, fstatSync, lstatSync, realpathSync } from 'node:fs'
-import { chmod, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -32,7 +32,7 @@ describe.runIf(rootOwnsSystemDirs)('catalog commit interpreter portability', () 
   })
 
   test('rejects an interpreter reached through a user-controlled directory', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'catalog-python-')); roots.add(root)
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'catalog-python-')); roots.add(root)
     await chmod(root, 0o700)
     const target = join(root, 'python3.99')
     const launcher = join(root, 'python3')
