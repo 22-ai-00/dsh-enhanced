@@ -34,6 +34,32 @@ describe('parseArgs', () => {
     expect(parseArgs(['--dry-run', 'purge'], { HOME: '/h' }).dryRun).toBe(true)
   })
 
+  test('运维命令解析：start/stop/restart/logs', () => {
+    expect(parseArgs(['start'], { HOME: '/h' }).command).toBe('start')
+    expect(parseArgs(['stop', '--profile', 'web'], { HOME: '/h' })).toMatchObject({
+      command: 'stop', profile: 'web',
+    })
+    expect(parseArgs(['restart', '--dry-run'], { HOME: '/h' })).toMatchObject({
+      command: 'restart', dryRun: true,
+    })
+  })
+
+  test('logs 默认 200 行，可用 --lines 与 --errors-only 覆盖', () => {
+    expect(parseArgs(['logs'], { HOME: '/h' })).toMatchObject({
+      command: 'logs', lines: 200, errorsOnly: false,
+    })
+    expect(parseArgs(['logs', '--lines', '50', '--errors-only'], { HOME: '/h' })).toMatchObject({
+      command: 'logs', lines: 50, errorsOnly: true,
+    })
+  })
+
+  test('--lines 非法值必须报错，而不是静默回落默认值', () => {
+    expect(() => parseArgs(['logs', '--lines', 'abc'], { HOME: '/h' })).toThrow(/正整数/)
+    expect(() => parseArgs(['logs', '--lines', '0'], { HOME: '/h' })).toThrow(/1\.\.10000/)
+    expect(() => parseArgs(['logs', '--lines', '10001'], { HOME: '/h' })).toThrow(/1\.\.10000/)
+    expect(() => parseArgs(['logs', '--lines'], { HOME: '/h' })).toThrow(/需要一个值/)
+  })
+
   test('未知参数报错', () => {
     expect(() => parseArgs(['--bogus'], { HOME: '/h' })).toThrow(/无法识别/)
   })

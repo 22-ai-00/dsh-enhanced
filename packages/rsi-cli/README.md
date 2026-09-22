@@ -18,6 +18,8 @@ dsh-rsi [全局选项] <命令>
 | --- | --- |
 | `status`（默认） | 列出 DSH home、各 profile 与安装形态（npm 实体副本 / local 符号链接）、全局 host 版本、launchd / systemd 受管服务状态、外部凭据条目数、生命周期事务/锁残留。**只读**。 |
 | `doctor` | 在 `status` 基础上扫描各 profile 的 `*-host.error.log`，识别已知崩溃模式（如旧版 event-support oracle 拒绝注册）并给出升级/重建建议。**只读**。 |
+| `start` / `stop` / `restart` | 切换已注册受管常驻服务的运行状态。**只改运行状态**，不新建/改写/删除 launchd plist 或 systemd unit；未注册时报错并给出注册指引。 |
+| `logs` | 查看各 profile 的受管 `*-host.log` / `*-host.error.log` 尾部（默认末 200 行）。**只读**。 |
 | `install` | 安装/修复插件集合：npm 形态下载与本 dsh-rsi 同版本的官方安装器执行，`--local <dir>` 执行 checkout 内安装器；其余参数原样透传。 |
 | `reinstall` | 先 `purge`（默认先备份、同样的安全门控）再立即 `install`，用于干净重装。 |
 | `purge` | 彻底卸载：进程静止检查 → 停服注销 → tar.gz 备份 → 删除 profile / DSH home / 生命周期残留 → 清理外部凭据。 |
@@ -55,6 +57,51 @@ dsh-rsi reinstall --profile web --yes
 ```
 
 `reinstall` 支持的 rsi 侧选项与 `purge` 一致（`--no-backup` / `--keep-keychain` / `--remove-host` / `--profile`）；只有既未加 `--yes` 也未加 `--dry-run` 时才需输入 `purge` 确认——`reinstall --dry-run` 全程无交互、无修改：先打印 purge 计划，再以 `--dry-run` 透传演练安装器（`--dry-run` 同时作用于 purge 与安装两个阶段）。重装阶段默认走 npm 形态；local 重装加 `--local <dir>`。
+
+## 日常运维：start / stop / restart / logs
+
+```bash
+# 改完配置或升级插件后让 profile 生效
+dsh-rsi restart --profile web
+
+# 停掉全部 profile 的常驻服务（服务定义与数据都保留，可再 start）
+dsh-rsi stop
+
+# 先看会执行什么，再真正动手
+dsh-rsi restart --dry-run
+
+# 看日志尾部
+dsh-rsi logs --profile web --lines 100
+dsh-rsi logs --errors-only
+```
+
+不带 `--profile` 时作用于 DSH home 下的**全部** profile。
+
+`logs` 选项：
+
+- `--lines <n>`：每个日志文件显示的尾部行数（默认 200，范围 1..10000；非法值报错退出 2，不静默回落）
+- `--errors-only`：只显示 `*-host.error.log`
+
+### 与 purge 的职责分界
+
+这三个运维命令和 `purge` 的停服步骤刻意分开：
+
+| | start / stop / restart | purge |
+| --- | --- | --- |
+| 改变运行状态 | 是 | 是 |
+| 删除 plist / unit 定义 | **否** | 是 |
+| 删除 profile 数据 | **否** | 是 |
+| 服务未注册时 | 报错并给出注册指引 | 视作已停止，继续删数据 |
+
+`stop` 之后服务定义仍在，所以可以再 `start` 起来；`purge` 的停服会连定义一起注销。
+
+### 安全门控
+
+- **不隐式注册服务**：服务定义文件不存在时**不会**顺手装一个（那会绕过安装器的归属、路径与凭据校验），而是提示先执行 `dsh-rsi install` 或 `dsh-rsi-setup`，并以退出码 1 结束。
+- **归属 fail-closed**：同名文件存在但内容不属受管（人工改写或被第三方占用）时拒绝操作、原样保留文件，并说明需人工确认归属。判定依据与 purge 一致 —— Linux 要求 unit 同时含 `DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`；macOS 要求 plist 的 `Label` 为 `ai.deepseek.dsh.profile.<p>` 且 `ProgramArguments` 含 `--profile <p>` 与 `--no-open`。
+- **dry-run 措辞与实际执行严格区分**：`--dry-run` 下不执行任何命令，结论行为「将启动/将停止/将重启」；只有真正执行过才输出「已…」。
+- **多 profile 部分失败即非零**：任一 profile 出错，命令整体以退出码 1 结束，便于脚本判定；其余 profile 的处理结果照常打印。
+- 仅支持 macOS（launchd）与 Linux（systemd --user），其它平台明确报错而非静默成功。
 
 ## status / doctor
 
@@ -134,7 +181,7 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 | 退出码 | 含义 |
 | --- | --- |
 | 0 | 成功。含 dry-run 与多数幂等场景：外部凭据条目本不存在、服务未注册、`rm --force` 删除已不存在的路径等 |
-| 1 | purge 执行失败（活动进程、服务/凭据错误、备份失败等）；install 下载/委托失败。两个非幂等边界：① 默认备份下全量 purge 不存在的 DSH home，`tar` 因源目录不存在以退出码 2 失败、rsi 退出 1（`--no-backup` 同场景为 0）；② `purge --profile <不存在的名字>`（含 dry-run）直接报「profile 不存在」退出 1。单文件 `purge.sh` 的内联实现对不存在的 home 统一退出 0，在此边界上与 dsh-rsi 不一致 |
+| 1 | start/stop/restart：服务未注册、归属不明被拒、或底层 `systemctl`/`launchctl` 失败（多 profile 下任一失败即 1）；logs：DSH home 下没有任何 profile；purge 执行失败（活动进程、服务/凭据错误、备份失败等）；install 下载/委托失败。两个非幂等边界：① 默认备份下全量 purge 不存在的 DSH home，`tar` 因源目录不存在以退出码 2 失败、rsi 退出 1（`--no-backup` 同场景为 0）；② `purge --profile <不存在的名字>`（含 dry-run）直接报「profile 不存在」退出 1。单文件 `purge.sh` 的内联实现对不存在的 home 统一退出 0，在此边界上与 dsh-rsi 不一致 |
 | 2 | 参数错误 |
 | 其它非 0 | `install` / `reinstall` 安装器的退出码原样透传 |
 

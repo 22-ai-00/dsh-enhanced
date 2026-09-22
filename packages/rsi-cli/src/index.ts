@@ -4,11 +4,29 @@ import { runPurge, PurgeError, type PurgeReport } from './purge.ts'
 import { collectStatus, formatStatus, formatFindings, runDoctor } from './diagnose.ts'
 import { resolveDshHome } from './paths.ts'
 import { runInstall } from './install.ts'
+import {
+  collectLogs,
+  controlManagedService,
+  formatLogs,
+  formatServiceOutcomes,
+  resolveTargetProfiles,
+  type ServiceAction,
+  type ServiceActionOutcome,
+} from './services.ts'
 import { version as VERSION } from './version.ts'
 
 export { runPurge, PurgeError } from './purge.ts'
 export { runInstall } from './install.ts'
 export { collectStatus, runDoctor, formatStatus, formatFindings } from './diagnose.ts'
+export {
+  collectLogs,
+  controlManagedService,
+  formatLogs,
+  formatServiceOutcomes,
+  inspectManagedService,
+  resolveTargetProfiles,
+  tailLogFile,
+} from './services.ts'
 export { resolveDshHome } from './paths.ts'
 export { version } from './version.ts'
 
@@ -21,6 +39,10 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   status      列出 DSH home、各 profile 与安装形态（npm/local）、host 版本、
               受管服务状态、外部凭据条目数、生命周期残留（只读）
   doctor      status 之外，扫描各 profile 的 host 错误日志，识别已知崩溃模式并给出建议（只读）
+  start       启动已注册的受管常驻服务（不改动服务定义，未注册时报错并给出指引）
+  stop        停止受管常驻服务（保留服务定义与 profile 数据，可再次 start）
+  restart     重启受管常驻服务（配置/插件变更后生效的常用方式）
+  logs        查看各 profile 的受管 stdout/stderr 日志尾部
   install     安装/修复插件集合（薄委托到官方安装器，参数原样透传）
   reinstall   purge（默认先备份）后立即重新安装
   purge       彻底卸载：停服 → 备份 → 删除 profile/DSH home → 清理外部凭据
@@ -39,6 +61,16 @@ install / reinstall：
   其它参数            原样透传给安装器，例如 --scenario core、--workspace、--model-route、--yes 等；
                       install --help 会展示安装器完整参数清单（也见 scripts/install/README.md）
 
+start / stop / restart：
+  不带 --profile 时作用于 DSH home 下的全部 profile；配合 --dry-run 可先看将执行的命令。
+  只切换运行状态：不新建、不改写、不删除 launchd plist 或 systemd unit。
+  服务尚未注册时不会隐式注册（那会绕过安装器的归属与路径校验），而是提示先执行
+  dsh-rsi install 或 dsh-rsi-setup。停止/注销服务并删除定义请用 purge。
+
+logs 选项：
+  --lines <n>         每个日志文件显示的尾部行数（默认 200，上限 10000）
+  --errors-only       只显示 *-host.error.log
+
 purge 选项：
   --no-backup         删除前不生成 ~/dsh-purge-backup-<UTC时间戳>.tar.gz 备份
   --keep-keychain     保留 macOS Keychain / Linux Secret Service 中的受管凭据
@@ -47,6 +79,11 @@ purge 选项：
 示例：
   dsh-rsi status
   dsh-rsi doctor
+  dsh-rsi restart --profile web
+  dsh-rsi stop
+  dsh-rsi start --dry-run
+  dsh-rsi logs --profile web --lines 100
+  dsh-rsi logs --errors-only
   dsh-rsi install --scenario core --yes
   dsh-rsi install --local ~/work/github/dsh-enhanced --scenario web
   dsh-rsi reinstall --yes
@@ -66,16 +103,39 @@ interface ParsedArgs {
   removeHost: boolean
   help: boolean
   local?: string
+  /** logs：每个文件显示的尾部行数。 */
+  lines: number
+  /** logs：只显示 *-host.error.log。 */
+  errorsOnly: boolean
   /** install/reinstall：原样透传给安装器的参数。 */
   passthrough: string[]
 }
 
-const KNOWN_COMMANDS = new Set(['status', 'doctor', 'install', 'reinstall', 'purge', 'version'])
+const KNOWN_COMMANDS = new Set([
+  'status', 'doctor', 'start', 'stop', 'restart', 'logs', 'install', 'reinstall', 'purge', 'version',
+])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
-const VALUE_OPTIONS = new Set(['--dsh-home', '--profile'])
+const VALUE_OPTIONS = new Set(['--dsh-home', '--profile', '--lines'])
+const LOGS_FLAGS = new Set(['--errors-only'])
+/** logs --lines 上限，避免一次把超大日志全量打到终端。 */
+const MAX_LOG_LINES = 10_000
+const DEFAULT_LOG_LINES = 200
 const PURGE_FLAGS = new Set(['--no-backup', '--keep-keychain', '--remove-host'])
 /** install/reinstall 中由 rsi 自身消费、不透传给安装器的带值选项。 */
 const INSTALL_VALUE_OPTIONS = new Set(['--dsh-home', '--local'])
+
+/** 写入一个带值选项；--lines 需要范围校验，错误值必须报错而不是静默取默认。 */
+function assignValueOption(result: ParsedArgs, token: string, value: string): void {
+  if (token === '--dsh-home') { result.dshHome = value; return }
+  if (token === '--profile') { result.profile = value; return }
+  // --lines
+  if (!/^[0-9]+$/u.test(value)) throw new PurgeError(`--lines 需要一个正整数，收到：${value}`)
+  const parsed = Number(value)
+  if (parsed < 1 || parsed > MAX_LOG_LINES) {
+    throw new PurgeError(`--lines 需在 1..${MAX_LOG_LINES} 之间，收到：${value}`)
+  }
+  result.lines = parsed
+}
 
 export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): ParsedArgs {
   const result: ParsedArgs = {
@@ -87,6 +147,8 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     keepKeychain: false,
     removeHost: false,
     help: false,
+    lines: DEFAULT_LOG_LINES,
+    errorsOnly: false,
     passthrough: [],
   }
   let commandSeen = false
@@ -96,14 +158,17 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
       if (VALUE_OPTIONS.has(token)) {
         const value = argv[++i]
         if (value === undefined || value.startsWith('--')) throw new PurgeError(`${token} 需要一个值`)
-        if (token === '--dsh-home') result.dshHome = value
-        else result.profile = value
+        assignValueOption(result, token, value)
         continue
       }
       if (GLOBAL_FLAGS.has(token)) {
         if (token === '--dry-run') result.dryRun = true
         else if (token === '--yes') result.yes = true
         else result.help = true
+        continue
+      }
+      if (LOGS_FLAGS.has(token)) {
+        result.errorsOnly = true
         continue
       }
       if (PURGE_FLAGS.has(token)) {
@@ -129,14 +194,17 @@ export function parseArgs(argv: readonly string[], env: NodeJS.ProcessEnv = proc
     if (VALUE_OPTIONS.has(token)) {
       const value = argv[++i]
       if (value === undefined || value.startsWith('--')) throw new PurgeError(`${token} 需要一个值`)
-      if (token === '--dsh-home') result.dshHome = value
-      else result.profile = value
+      assignValueOption(result, token, value)
       continue
     }
     if (GLOBAL_FLAGS.has(token)) {
       if (token === '--dry-run') result.dryRun = true
       else if (token === '--yes') result.yes = true
       else result.help = true
+      continue
+    }
+    if (LOGS_FLAGS.has(token)) {
+      result.errorsOnly = true
       continue
     }
     if (PURGE_FLAGS.has(token)) {
@@ -319,6 +387,35 @@ export async function main(
         const snapshot = await collectStatus(args.dshHome, homedir(), process.platform)
         const findings = await runDoctor(args.dshHome)
         process.stdout.write(`${formatStatus(snapshot)}\n\n${formatFindings(findings)}\n`)
+        return 0
+      }
+      case 'start':
+      case 'stop':
+      case 'restart': {
+        const action = args.command as ServiceAction
+        const profiles = await resolveTargetProfiles(args.dshHome, args.profile)
+        if (profiles.length === 0) {
+          process.stderr.write(`${action}：${args.dshHome} 下没有任何 profile（先执行 dsh-rsi install）\n`)
+          return 1
+        }
+        const outcomes: ServiceActionOutcome[] = []
+        for (const profile of profiles) {
+          outcomes.push(await controlManagedService(
+            process.platform, homedir(), profile, action, undefined, args.dryRun,
+          ))
+        }
+        process.stdout.write(`${formatServiceOutcomes(outcomes, action, args.dryRun)}\n`)
+        // 任一 profile 失败即非零退出，便于脚本判定。
+        return outcomes.some(outcome => outcome.errors.length > 0) ? 1 : 0
+      }
+      case 'logs': {
+        const profiles = await resolveTargetProfiles(args.dshHome, args.profile)
+        if (profiles.length === 0) {
+          process.stderr.write(`logs：${args.dshHome} 下没有任何 profile\n`)
+          return 1
+        }
+        const collected = await collectLogs(args.dshHome, profiles, args.lines, args.errorsOnly)
+        process.stdout.write(`${formatLogs(collected, args.lines)}\n`)
         return 0
       }
       case 'install': {
