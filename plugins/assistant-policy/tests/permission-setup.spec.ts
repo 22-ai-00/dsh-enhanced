@@ -28,6 +28,11 @@ describe('permission setup', () => {
     expect(await readFile(join(home, 'settings.yaml'), 'utf8')).toContain('extra: retain')
   })
 
+  test('defaults new profiles to the auto preset', () => {
+    const args = parsePermissionSetupArgs(['--dsh-home', '/tmp/dsh'])
+    expect(args.preset).toBe('auto')
+  })
+
   test('fails closed for unsafe paths and invalid preset names', () => {
     expect(() => parsePermissionSetupArgs(['--dsh-home', 'relative', '--preset', 'auto'])).toThrow('absolute path')
     expect(() => parsePermissionSetupArgs(['--dsh-home', '/tmp/dsh', '--preset', 'full'])).toThrow('preset must be')

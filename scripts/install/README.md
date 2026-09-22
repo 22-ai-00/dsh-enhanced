@@ -162,7 +162,7 @@ v1 任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次�
 
 核心 profile 中的 `plugin_discover` 可立即按能力检索内置、完整性固定的首方候选目录；它不会下载或启用任何包。Agent 只能生成待审批 plan，owner 仍需用 `dsh-plugin-control approve` 与 `activate` 在 staging profile 中显式启用。写入 `~/.dsh/plugin-control/catalog.json` 的 owner catalog 会取代内置目录。
 
-默认 Permission 是 `workspace-write + ask`；完整访问需要明确确认：
+默认 Permission 是 `auto`（与 `workspace-write + ask` 同一沙箱，仅低/中风险可逆动作由隔离 reviewer 自动批准，高风险仍交人工）；每步都问可显式传 `--permission workspace-write`，完整访问需要明确确认：
 
 ```sh
 ./scripts/install/install-local.sh --permission danger-full-access --confirm-dangerous-full-access

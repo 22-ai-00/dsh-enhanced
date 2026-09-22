@@ -22,7 +22,7 @@ function argumentValue(argv: readonly string[], index: number, option: string): 
 export function parsePermissionSetupArgs(argv: readonly string[]): PermissionSetupArgs {
   const result: PermissionSetupArgs = {
     dshHome: process.env.DSH_HOME ?? join(process.env.HOME ?? '', '.dsh'),
-    preset: 'workspace-write',
+    preset: 'auto',
     help: false,
   }
   for (let index = 0; index < argv.length; index += 1) {

@@ -90,7 +90,7 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 
 引导器 `install-npm.sh` 虽从 `main` 拉取，但实际安装逻辑及按操作需要的生命周期 helper 从同一个固定 `vX.Y.Z` 发布标签拉取并全部通过内嵌 SHA-256 校验后才执行，不从 mutable `main` 执行代码。完整场景选项、凭据存储和平台差异见[安装脚本文档](scripts/install)；飞书授权、模型选择、进度展示与常驻服务见 [`lark-channel` 文档](plugins/lark-channel)。
 
-个人助理默认采用 `workspace-write + ask`；可显式传 `--permission auto`，让确定性低风险动作和隔离 reviewer 认可的局部可逆动作自动继续，而网络、凭据、破坏性操作、提权和复杂 shell 仍交人工。需要最低打扰时可传 `--permission danger-full-access --confirm-dangerous-full-access`，此时 reviewer 为 `none`，工具风险分类被整体跳过（网络、凭据读取、破坏性命令和提权都不再询问），只应在完全信任当前 workspace 时使用。注意两套名称不同：安装器 `--permission` 取 `preserve|workspace-write|auto|danger-full-access`，而运行时在飞书里用 `/permission ask|auto|full confirm` 切换（`full` 需二次确认）。工具可达性和执行权限是两层控制；即使选择 `danger-full-access`，显式 Policy deny、紧急停止、身份校验和预算硬门仍然生效。完整边界以各插件 README 为准。
+个人助理默认采用 `auto`：它与 `workspace-write` 使用完全相同的工作区沙箱与人工审批策略，区别只是低/中风险的可逆动作由隔离 reviewer 自动批准，不再逐次弹确认；网络、凭据、破坏性操作、提权和后台任务等确定性高风险动作仍绕过 reviewer 直达人工，复杂 shell 语法与包安装（如 `npm install`、`npx`、管道/重定向）会先交隔离 reviewer 按实际内容研判。需要每步都问可显式传 `--permission workspace-write`。需要最低打扰时可传 `--permission danger-full-access --confirm-dangerous-full-access`，此时 reviewer 为 `none`，工具风险分类被整体跳过（网络、凭据读取、破坏性命令和提权都不再询问），只应在完全信任当前 workspace 时使用。注意两套名称不同：安装器 `--permission` 取 `preserve|workspace-write|auto|danger-full-access`，而运行时在飞书里用 `/permission ask|auto|full confirm` 切换（`full` 需二次确认）。工具可达性和执行权限是两层控制；即使选择 `danger-full-access`，显式 Policy deny、紧急停止、身份校验和预算硬门仍然生效。完整边界以各插件 README 为准。
 
 ## 能力概览
 

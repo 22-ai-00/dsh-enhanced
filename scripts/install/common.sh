@@ -1972,7 +1972,7 @@ dsh_enhanced_apply_permission_choice() {
   local dry_run="$5"
 
   if [[ "$preset" == 'preserve' ]]; then
-    printf '权限默认值：保留现有 Settings；新 profile 使用 bundle 的 workspace-write 安全默认值。\n'
+    printf '权限默认值：保留现有 Settings；新 profile 使用 bundle 的 auto 安全默认值（工作区沙箱不变，低/中风险由隔离 reviewer 自动批准，高风险仍交人工）。\n'
     return 0
   fi
   if [[ "$preset" == 'danger-full-access' && "$confirmed" != '1' ]]; then

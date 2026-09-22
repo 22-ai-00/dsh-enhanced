@@ -14,11 +14,15 @@
         sandbox: danger-full-access
         approval: never
         name: 完全访问权限
-    # A fresh profile must be useful without silently granting the Host
-    # unrestricted filesystem/network access.  The owner can explicitly pick
+    # Default to `auto`: it keeps the exact same workspace-write sandbox and
+    # human approval policy as `workspace-write`; the only difference is that
+    # low/medium-risk actions are pre-approved by the isolated model reviewer
+    # instead of prompting. Deterministically sensitive actions (secrets,
+    # network, privilege escalation, destruction, background tasks) bypass the
+    # reviewer and still reach a human. The owner can explicitly pick
     # `danger-full-access` in DSH's native selector (or via the installer
     # confirmation) after understanding the consequence.
-    defaultPreset: workspace-write
+    defaultPreset: auto
 
 - insert:
     - id: dsh-enhanced-personal-assistant

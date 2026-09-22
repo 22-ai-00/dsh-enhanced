@@ -139,7 +139,7 @@ async function fixture(
     sandboxMode?: 'workspace-write' | 'danger-full-access' | 'missing'
     settleExactCall?: boolean
     exactArguments?: Record<string, unknown>
-    exactToolName?: 'bash' | 'run_code'
+    exactToolName?: 'bash' | 'run_code' | 'skill_run' | 'skill_status'
     policy?: Pick<Config, 'toolDefaultEffect' | 'rules' | 'budgets'>
     toolMode?: 'ptc' | 'native'
     userIntent?: string
@@ -314,12 +314,18 @@ function assessment(overrides: Record<string, unknown> = {}): string {
 }
 
 describe('isolated automatic approval reviewer', () => {
-  test('allows once only for low risk with medium-or-higher authorization', async () => {
+  test('allows once for low or medium risk with medium-or-higher authorization', async () => {
+    for (const reply of [
+      assessment(),
+      assessment({ riskLevel: 'medium', rationale: 'Reversible install of a declared dependency.' }),
+    ]) {
+      const current = await fixture([reply])
+      await expect(current.request(), reply).resolves.toBe('allowed-once')
+      expect(current.fallbackCalls).toBe(0)
+      expect(current.adapter.requests).toHaveLength(1)
+    }
     const current = await fixture([assessment()])
-
-    await expect(current.request()).resolves.toBe('allowed-once')
-    expect(current.fallbackCalls).toBe(0)
-    expect(current.adapter.requests).toHaveLength(1)
+    await current.request()
     expect(current.adapter.requests[0]).toMatchObject({
       provider: 'main',
       model: 'main-model',
@@ -348,9 +354,11 @@ describe('isolated automatic approval reviewer', () => {
     }
   })
 
-  test('hands high risk and weak authorization to the next human answerer', async () => {
+  test('hands high/critical risk and weak authorization to the next human answerer', async () => {
     for (const reply of [
       assessment({ riskLevel: 'high', authorization: 'high' }),
+      assessment({ riskLevel: 'critical', authorization: 'high' }),
+      assessment({ riskLevel: 'medium', authorization: 'low' }),
       assessment({ authorization: 'low' }),
       assessment({ outcome: 'escalate' }),
     ]) {
@@ -478,9 +486,6 @@ describe('isolated automatic approval reviewer', () => {
       'rm -rf build',
       'API_TOKEN=secret node script.js',
       'node server.js &',
-      'npx eslint .',
-      'npm exec eslint .',
-      'pnpm dlx create-vite app',
       'git submodule update --init --recursive',
     ]) {
       const current = await fixture([assessment()], {
@@ -516,6 +521,128 @@ describe('isolated automatic approval reviewer', () => {
       expect(current.fallbackEscalations, command).toEqual([true])
       expect(executions, command).toBe(0)
     }
+  })
+
+  test('sends package fetching and non-sensitive complex syntax to the model reviewer', async () => {
+    for (const command of [
+      'npx eslint .',
+      'npm exec eslint .',
+      'pnpm dlx create-vite app',
+      'npm install',
+      'pwd | cat',
+    ]) {
+      const current = await fixture([assessment({
+        riskLevel: 'medium',
+        rationale: 'Reversible declared dependency install or shell composition.',
+      })], {
+        exactArguments: { command },
+        policy: { toolDefaultEffect: 'allow', rules: [] },
+      })
+      let executions = 0
+      current.ctx.tools.register(defineTool({
+        name: 'bash',
+        description: 'reviewable risk fixture',
+        parameters: {},
+        output: {
+          schema: { type: 'string' },
+          render: (_arguments, value) => [{ type: 'text', text: value }],
+        },
+        async execute() {
+          executions += 1
+          return 'executed'
+        },
+      }))
+
+      const result = await current.ctx.tools.execute({
+        callId: current.callId,
+        name: 'bash',
+        arguments: { command },
+        signal: new AbortController().signal,
+        agent: current.agent,
+      })
+
+      expect(result.isError, command).toBe(false)
+      expect(current.adapter.requests, command).toHaveLength(1)
+      expect(current.fallbackCalls, command).toBe(0)
+      expect(executions, command).toBe(1)
+    }
+  })
+
+  test('approves skill invocations deterministically in auto mode without spending a reviewer round', async () => {
+    for (const toolName of ['skill_run', 'skill_status'] as const) {
+      const arguments_ = toolName === 'skill_run'
+        ? { name: 'review-pr', invocation_id: 'run-1' }
+        : { invocation_id: 'run-1' }
+      const current = await fixture([assessment({ riskLevel: 'medium' })], {
+        exactArguments: arguments_,
+        exactToolName: toolName,
+        policy: { toolDefaultEffect: 'allow', rules: [] },
+      })
+      let executions = 0
+      current.ctx.tools.register(defineTool({
+        name: toolName,
+        description: 'skill invocation fixture',
+        parameters: {},
+        output: {
+          schema: { type: 'string' },
+          render: (_args, value) => [{ type: 'text', text: value }],
+        },
+        async execute() {
+          executions += 1
+          return 'executed'
+        },
+      }))
+
+      const result = await current.ctx.tools.execute({
+        callId: current.callId,
+        name: toolName,
+        arguments: arguments_,
+        signal: new AbortController().signal,
+        agent: current.agent,
+      })
+
+      expect(result.isError, toolName).toBe(false)
+      expect(current.adapter.requests, toolName).toHaveLength(0)
+      expect(current.fallbackCalls, toolName).toBe(0)
+      expect(executions, toolName).toBe(1)
+    }
+  })
+
+  test('still prompts for skill invocations in user mode', async () => {
+    const arguments_ = { name: 'review-pr', invocation_id: 'run-1' }
+    const current = await fixture([assessment()], {
+      exactArguments: arguments_,
+      exactToolName: 'skill_run',
+      reviewer: 'user',
+      policy: { toolDefaultEffect: 'allow', rules: [] },
+    })
+    let executions = 0
+    current.ctx.tools.register(defineTool({
+      name: 'skill_run',
+      description: 'skill invocation fixture',
+      parameters: {},
+      output: {
+        schema: { type: 'string' },
+        render: (_args, value) => [{ type: 'text', text: value }],
+      },
+      async execute() {
+        executions += 1
+        return 'executed'
+      },
+    }))
+
+    const result = await current.ctx.tools.execute({
+      callId: current.callId,
+      name: 'skill_run',
+      arguments: arguments_,
+      signal: new AbortController().signal,
+      agent: current.agent,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(current.adapter.requests).toHaveLength(0)
+    expect(current.fallbackCalls).toBe(1)
+    expect(executions).toBe(0)
   })
 
   test('routes run_code to human approval in auto mode without invoking the model reviewer', async () => {
