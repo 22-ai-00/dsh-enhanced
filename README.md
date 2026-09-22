@@ -10,7 +10,7 @@
 
 ## 快速开始
 
-要求 Node.js 22.19+（或 24+）、pnpm 11.7.0 和兼容的 DSH `0.1.x`（最低 `0.1.2-rc.1`）。`0.1.32` 安装器默认安装 `0.1.5-rc.1`，已有兼容版本直接复用；`0.2.x` 需重新评估兼容性。安装插件：
+要求 Node.js 22.19+（或 24+）、pnpm 11.7.0 和兼容的 DSH `0.1.x`（最低 `0.1.2-rc.1`）。当前安装器默认新装 `0.1.5-rc.1`，已有兼容版本直接复用；`0.2.x` 需重新评估兼容性。安装插件：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/<plugin-name>
@@ -53,6 +53,7 @@ dsh-rsi doctor                         # 识别 host 错误日志中的已知崩
 dsh-rsi reinstall --yes                # 先备份 purge 再干净重装（也可加 --local <checkout>）
 dsh-rsi purge --dry-run                # 查看彻底删除计划
 dsh-rsi purge --yes                    # 先备份 ~/.dsh（0600 tar.gz）再彻底删除；默认保留全局 host
+dsh-rsi version                        # 打印 dsh-rsi 自身版本
 ```
 
 `install` 默认按 npm 形态下载与本 dsh-rsi 同版本（`vX.Y.Z`）的 `install-npm.sh` 执行（脚本内部自校验资产 SHA-256），加 `--local <checkout>` 执行该目录的 `install-local.sh`，其余安装器参数原样透传（`dsh-rsi install --help` 查看完整清单）。`purge` 与安装器的 `--operation uninstall`（归档保留数据）不同：它删除 DSH home、生命周期残留、受管服务与外部凭据，但绝不删除本地 checkout 源码；详见 [`packages/rsi-cli/README.md`](packages/rsi-cli/README.md)。崩溃机器上没有 `dsh-rsi` 时可用单文件脚本 `curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/purge.sh | bash -s -- --yes`。
@@ -75,7 +76,7 @@ dsh-rsi purge --yes                    # 先备份 ~/.dsh（0600 tar.gz）再彻
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
 ```
 
-不便先 clone 仓库时，可一键远程安装。远程引导器会从固定发布 tag 下载并校验 `common.sh`；请求 `--operation upgrade|uninstall` 时，还会从同一个 tag 下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`，三个资产全部通过各自内嵌的 SHA-256 后才允许任何安装代码执行。旧 `v0.1.24` 的 lifecycle helper 摘要为全零，因此它不支持远程 upgrade/uninstall；新发布由 `release:prepare` 为三个实际资产生成独立摘要。本版本远程引导器固定到 `v0.1.32`，支持上述 DSH `0.1.x` 兼容范围。插件安装会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，避免跨包 `latest` 混装：
+不便先 clone 仓库时，可一键远程安装。远程引导器会从固定发布 tag 下载并校验 `common.sh`；请求 `--operation upgrade|uninstall` 时，还会从同一个 tag 下载 `lifecycle-config.mjs` 和 `lifecycle-profile.mjs`，三个资产全部通过各自内嵌的 SHA-256 后才允许任何安装代码执行。旧 `v0.1.24` 的 lifecycle helper 摘要为全零，因此它不支持远程 upgrade/uninstall；新发布由 `release:prepare` 为三个实际资产生成独立摘要。当前远程引导器固定到本次发布的 `vX.Y.Z` 标签，支持上述 DSH `0.1.x` 兼容范围。插件安装会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，避免跨包 `latest` 混装：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
