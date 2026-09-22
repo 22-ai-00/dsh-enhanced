@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { generateKeyPairSync, type KeyObject } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -33,7 +33,10 @@ function pem(key: KeyObject): string | Buffer {
 }
 
 async function privateRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'abp-e2e-'))
+  // Resolve tmpdir() first: macOS reaches its tmpdir through /var ->
+  // /private/var, and the broker ledger rejects a non-canonical ancestor
+  // chain (broker-ledger.ts safeAncestorChain, code 'unsafe-file').
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'abp-e2e-'))
   roots.push(root)
   await chmod(root, 0o700)
   return root
