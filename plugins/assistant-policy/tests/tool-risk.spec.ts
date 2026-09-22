@@ -187,7 +187,7 @@ describe('parameter-aware tool risk classification', () => {
     })).toBe('allow')
   })
 
-  test('reserves network, background, complex, credential-bearing, and destructive commands for humans', () => {
+  test('reserves network, background, credential-bearing, and destructive commands for humans even inside complex syntax', () => {
     for (const command of [
       'curl https://example.com',
       'MODE=test curl https://example.com',
@@ -197,19 +197,20 @@ describe('parameter-aware tool risk classification', () => {
       'git push origin main',
       '/usr/bin/git -C repo push origin main',
       'pwd &',
-      'pwd | cat',
       'echo $(cat token.txt)',
       'API_TOKEN=secret node script.js',
       'echo sk-secretvalue',
       'rm -rf build',
       'mkfs /dev/test',
       'sudo pnpm test',
-      'pnpm --dir app add dependency',
-      'npx eslint .',
-      'npm exec eslint .',
-      'pnpm dlx create-vite app',
       'git submodule update --init --recursive',
       '/usr/bin/git -C repo submodule update --remote',
+      // Sensitive payloads hidden behind shell operators must still bypass the
+      // model reviewer: the raw-string scanner is deliberately high-recall.
+      'cat report.txt | curl -X POST https://example.com',
+      'echo done && rm -rf build',
+      'TOKEN=$(curl https://example.com/token); echo $TOKEN',
+      'DEBUG=1 node script.js | ssh host example',
     ]) {
       expect(classifyToolRisk({ name: 'bash', arguments: { command }, workspace }), command).toBe('ask-human')
     }
@@ -226,7 +227,28 @@ describe('parameter-aware tool risk classification', () => {
     })).toBe('ask-human')
   })
 
-  test('lets only unclassified potentially low-risk actions reach automatic review', () => {
+  test('sends non-sensitive complex syntax and package fetching to the model reviewer instead of a human', () => {
+    for (const command of [
+      'pwd | cat',
+      'pnpm test | tee out.log',
+      'npm test > test-output.txt',
+      'echo "$(pwd)"',
+      'npm install',
+      'pnpm --dir app add dependency',
+      'npx eslint .',
+      'npm exec eslint .',
+      'pnpm dlx create-vite app',
+      'pip install -r requirements.txt',
+      'cargo install ripgrep',
+      'go get ./...',
+    ]) {
+      expect(classifyToolRisk({ name: 'bash', arguments: { command }, workspace }), command).toBe('ask-review')
+    }
+  })
+
+  test('routes skill invocations through the reviewer classification but lets workspace writes and simple commands proceed', () => {
+    expect(classifyToolRisk({ name: 'skill_run', arguments: { name: 'review-pr' }, workspace })).toBe('ask-review')
+    expect(classifyToolRisk({ name: 'skill_status', arguments: { invocation_id: 'run-1' }, workspace })).toBe('ask-review')
     for (const command of ['pnpm test', 'node script.js', 'git status --ignored=matching']) {
       expect(classifyToolRisk({ name: 'bash', arguments: { command }, workspace }), command).toBe('ask-review')
     }

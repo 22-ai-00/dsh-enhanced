@@ -329,6 +329,16 @@ export class AssistantPolicyService extends Service {
         const preauthorization = this.preauthorizedToolDecision(execution)
         if (preauthorization?.kind === 'allow') return next()
         if (preauthorization?.kind === 'deny') return preauthorization
+        // Skill invocations only load instruction bundles; they perform no OS
+        // or network operation of their own, and the nested tool calls still
+        // pass through this same gate. In the auto preset they are approved
+        // deterministically instead of spending a reviewer round-trip; the
+        // skills fiber's live delegation predicate above still owns benchmark
+        // arms, and its denialReason-marked bounds returned deny before this
+        // point. The ask (user) preset intentionally keeps prompting for
+        // every step, so it is not widened here.
+        if ((execution.name === 'skill_run' || execution.name === 'skill_status')
+          && getApprovalReviewer(agent.session) === 'auto-review') return next()
         const risk = classifyToolRisk({
           name: execution.name,
           arguments: execution.arguments,

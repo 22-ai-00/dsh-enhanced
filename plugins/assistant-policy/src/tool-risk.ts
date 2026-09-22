@@ -97,14 +97,13 @@ const NETWORK_COMMANDS = new Set([
 const GIT_NETWORK_SUBCOMMANDS = new Set(['clone', 'fetch', 'ls-remote', 'pull', 'push'])
 const PRIVILEGE_COMMANDS = new Set(['doas', 'pkexec', 'su', 'sudo'])
 const BACKGROUND_COMMANDS = new Set(['disown', 'nohup', 'setsid'])
-const SHELL_WRAPPER_COMMANDS = new Set(['command', 'eval', 'exec', 'ionice', 'nice', 'time', 'timeout', 'xargs'])
+// These wrappers can substitute or inject a different command than the visible
+// argv, so they stay hard-sensitive. Benign timing/scheduling wrappers
+// (`time`, `timeout`, `nice`, `ionice`) are not listed: they are reviewable.
+const SHELL_WRAPPER_COMMANDS = new Set(['command', 'eval', 'exec', 'xargs'])
 const SHELL_INTERPRETERS = new Set(['bash', 'dash', 'fish', 'sh', 'zsh'])
 const CREDENTIAL_COMMANDS = new Set(['env', 'keychain', 'op', 'pass', 'printenv', 'security'])
 const DESTRUCTIVE_COMMANDS = new Set(['dd', 'rm', 'shred'])
-const PACKAGE_MANAGER_COMMANDS = new Set(['bun', 'npm', 'pnpm', 'yarn'])
-const PACKAGE_NETWORK_SUBCOMMANDS = new Set(['add', 'install', 'update', 'upgrade'])
-const PACKAGE_EXEC_COMMANDS = new Set(['bunx', 'npx'])
-const PYTHON_PACKAGE_COMMANDS = new Set(['pip', 'pip3'])
 const CREDENTIAL_MARKER = /(?:^|[^a-z0-9])(?:api[-_]?key|authorization|cookie|credential|password|private[-_]?key|secret|token)(?:[^a-z0-9]|$)/iu
 const CREDENTIAL_PATH = /(?:^|[/\\])(?:\.aws[/\\](?:config|credentials)|\.codex[/\\]auth\.json|\.docker[/\\]config\.json|\.env(?:\.[^/\\\s]+)?|\.gnupg|\.kube[/\\]config|\.netrc|\.npmrc|\.ssh|auth\.json|credentials\.json|id_(?:ed25519|rsa))(?:$|[\s/\\])/iu
 const EMBEDDED_SECRET = /(?:bearer\s+[a-z0-9._~-]+|(?:^|[^a-z0-9])(?:ghp|github_pat|sk|xox[baprs])[-_][a-z0-9_-]+)/iu
@@ -258,9 +257,7 @@ function commandName(argv: readonly string[]): string {
 
 function isDeterministicallySensitive(argv: readonly string[], raw: string): boolean {
   const command = commandName(argv)
-  if (CREDENTIAL_MARKER.test(raw) || CREDENTIAL_PATH.test(raw) || EMBEDDED_SECRET.test(raw)
-    || URI_USER_INFO.test(raw) || PEM_PRIVATE_KEY.test(raw)
-    || JWT_TOKEN.test(raw) || AWS_ACCESS_KEY.test(raw)) return true
+  if (rawCommandBearsSecret(raw)) return true
   if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(argv[0] ?? '')) return true
   if (NETWORK_COMMANDS.has(command) || PRIVILEGE_COMMANDS.has(command)
     || BACKGROUND_COMMANDS.has(command) || CREDENTIAL_COMMANDS.has(command)
@@ -277,27 +274,59 @@ function isDeterministicallySensitive(argv: readonly string[], raw: string): boo
     const submodule = argv.indexOf('submodule', 1)
     if (submodule >= 0 && argv.slice(submodule + 1).includes('update')) return true
   }
-  const argumentsAfterCommand = argv.slice(1)
-  if (PACKAGE_MANAGER_COMMANDS.has(command)
-    && argumentsAfterCommand.some(token => PACKAGE_NETWORK_SUBCOMMANDS.has(token))) return true
-  if (PACKAGE_EXEC_COMMANDS.has(command)) return true
-  if (command === 'npm' && argumentsAfterCommand.some(token => token === 'exec' || token === 'x')) return true
-  if ((command === 'pnpm' || command === 'yarn') && argumentsAfterCommand.includes('dlx')) return true
-  if (PYTHON_PACKAGE_COMMANDS.has(command) && argumentsAfterCommand.includes('install')) return true
-  if ((command === 'python' || command === 'python3')
-    && argumentsAfterCommand.some((token, index) => token === '-m'
-      && PYTHON_PACKAGE_COMMANDS.has(argumentsAfterCommand[index + 1] ?? '')
-      && argumentsAfterCommand.slice(index + 2).includes('install'))) return true
-  if (command === 'uv' && argumentsAfterCommand[0] === 'pip'
-    && argumentsAfterCommand.includes('install')) return true
-  if ((command === 'cargo' || command === 'gem' || command === 'brew')
-    && argumentsAfterCommand.includes('install')) return true
-  if (command === 'go' && argumentsAfterCommand[0] === 'get') return true
-  if (command === 'composer'
-    && argumentsAfterCommand.some(token => token === 'install' || token === 'require' || token === 'update')) return true
+  // Container image transfer/authentication reaches registries with the host's
+  // credentials. Package fetching (npm/pnpm/pip/cargo/...) is reviewable instead.
   if (command === 'docker'
-    && argumentsAfterCommand.some(token => token === 'pull' || token === 'push' || token === 'login')) return true
+    && argv.slice(1).some(token => token === 'pull' || token === 'push' || token === 'login')) return true
   return command === 'gh' || command === 'glab'
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+}
+
+function rawMentionsCommand(raw: string, names: ReadonlySet<string>): boolean {
+  const alternatives = [...names].map(escapeRegExp).join('|')
+  return new RegExp(`(?:^|[^A-Za-z0-9._-])(?:${alternatives})(?=$|[^A-Za-z0-9._-])`, 'u').test(raw)
+}
+
+function rawCommandBearsSecret(raw: string): boolean {
+  return CREDENTIAL_MARKER.test(raw) || CREDENTIAL_PATH.test(raw) || EMBEDDED_SECRET.test(raw)
+    || URI_USER_INFO.test(raw) || PEM_PRIVATE_KEY.test(raw)
+    || JWT_TOKEN.test(raw) || AWS_ACCESS_KEY.test(raw)
+}
+
+/**
+ * Deliberately high-recall scan for command strings the narrow argv grammar
+ * cannot tokenise (pipes, quotes, redirection, expansion). A false positive
+ * only costs a human prompt; a false negative would let a hidden sensitive
+ * command reach the model reviewer, so matching stays conservative.
+ */
+function rawCommandIsSensitive(raw: string): boolean {
+  if (rawCommandBearsSecret(raw)) return true
+  // Leading environment assignments (e.g. `API_TOKEN=... node script.js`).
+  if (/(?:^|[;&|\n])\s*[A-Za-z_][A-Za-z0-9_]*=/u.test(raw)) return true
+  if (rawMentionsCommand(raw, NETWORK_COMMANDS) || rawMentionsCommand(raw, PRIVILEGE_COMMANDS)
+    || rawMentionsCommand(raw, BACKGROUND_COMMANDS) || rawMentionsCommand(raw, CREDENTIAL_COMMANDS)
+    || rawMentionsCommand(raw, DESTRUCTIVE_COMMANDS) || rawMentionsCommand(raw, MKFS_COMMANDS)
+    || rawMentionsCommand(raw, SHELL_WRAPPER_COMMANDS)) return true
+  // Shell wrappers with -c substitute the command that actually runs.
+  if (/(?:^|[^A-Za-z0-9._-])(?:bash|dash|fish|sh|zsh)(?:\s+\S+)*\s+-c(?=$|\s)/u.test(raw)) return true
+  if (/(?:^|[^A-Za-z0-9._-])(?:busybox|toybox)\s+/u.test(raw)
+    && rawMentionsCommand(raw, new Set([...NETWORK_COMMANDS, ...DESTRUCTIVE_COMMANDS, ...MKFS_COMMANDS]))) {
+    return true
+  }
+  // Background operator: a bare `&`. Excludes `&&`, `&>`, and `>&digit`
+  // redirection rather than treating sequencing/redirection as backgrounding.
+  if (/(?<![&\d>])&(?!&|>|\s*\d\b)/u.test(raw)) return true
+  if (/(?:^|[^A-Za-z0-9._-])git(?=$|[^A-Za-z0-9._-])/u.test(raw)) {
+    if (/(?:^|[^A-Za-z0-9._-])(?:clone|fetch|ls-remote|pull|push)(?=$|[^A-Za-z0-9._-])/u.test(raw)) return true
+    if (/\bgit\b[^;&|\n]*\bclean\b/u.test(raw)
+      || (/\bgit\b[^;&|\n]*\breset\b/u.test(raw) && /\breset\b[^;&|\n]*\b--hard\b/u.test(raw))
+      || (/\bgit\b[^;&|\n]*\bsubmodule\b/u.test(raw) && /\bsubmodule\b[^;&|\n]*\bupdate\b/u.test(raw))) return true
+  }
+  if (/\bdocker\b[^;&|\n]*\b(?:pull|push|login)\b/u.test(raw)) return true
+  return rawMentionsCommand(raw, new Set(['gh', 'glab']))
 }
 
 function classifyBash(
@@ -319,10 +348,14 @@ function classifyBash(
   if (typeof workdir !== 'string' || !isWorkspaceReadTarget(workdir, workspace)) return 'ask-human'
   const command = argumentsRecord.command
   const argv = simpleArgv(command)
-  // Anything that needs real shell parsing is deliberately ineligible for
-  // automatic review: operators, expansion, quoting, redirection and globbing
-  // may materially change the command that actually runs.
-  if (argv === undefined) return 'ask-human'
+  if (argv === undefined) {
+    // Real shell syntax (pipes, quoting, redirection, expansion) can change the
+    // command that actually runs, so it is never deterministically allowable.
+    // A conservative raw-string scan still keeps hard-sensitive payloads
+    // (secrets, network, privilege, destruction, backgrounding) with humans;
+    // everything else is delegated to the model reviewer in the auto preset.
+    return rawCommandIsSensitive(command) ? 'ask-human' : 'ask-review'
+  }
   if (isDeterministicallySensitive(argv, command)) return 'ask-human'
   const lsRisk = classifyLs(argv, resolve(workspace, workdir), workspace)
   if (lsRisk !== undefined) return lsRisk

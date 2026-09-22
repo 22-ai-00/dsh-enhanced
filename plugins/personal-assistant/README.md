@@ -20,7 +20,7 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 ## 默认安全状态
 
-- 原生 Permission selector 固定显示 `workspace-write`（请求批准）、`auto`（帮我批准）和 `danger-full-access`（完全访问）三项；前两项共享 `workspace-write + ask` 执行 bundle，但保留不同选择意图。没有用户层设置的新安装默认 `workspace-write`。已有 `settings.yaml` 的 `permission.defaultPreset` 仍由 DSH Settings 用户层优先，不会被 bundle 强制覆盖。
+- 原生 Permission selector 固定显示 `workspace-write`（请求批准）、`auto`（帮我批准）和 `danger-full-access`（完全访问）三项；前两项共享 `workspace-write + ask` 执行 bundle（同一沙箱、同一人工审批策略），区别只是 `auto` 档把低/中风险的可逆动作交隔离 reviewer 自动批准，高风险仍直达人工。没有用户层设置的新安装默认 `auto`。已有 `settings.yaml` 的 `permission.defaultPreset` 仍由 DSH Settings 用户层优先，不会被 bundle 强制覆盖。
 - policy 默认写入一条 `dsh-enhanced-foreground-capability-*`：本机 Web/direct 的 foreground Agent 可访问 profile 已挂载的全部技能、工具与插件动作，后续动态挂载也无需逐项补 allow；它不会安装尚未安装的插件，也不授权 background 或飞书 external 身份。显式 deny、紧急停止、身份/预算检查仍优先。`budgets` 默认留空。
 - automations scheduler 默认关闭；创建并审批 automation 后仍需由部署者显式启用 scheduler。
 - Memory、Wiki、Policy、Automations 使用各自的 DSH home 私有路径和独立真源。
