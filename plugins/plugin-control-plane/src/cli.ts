@@ -312,6 +312,25 @@ async function verifyPinnedDescriptor(value: OpenTrustedExecutable): Promise<voi
   }
 }
 
+// `#!/usr/bin/env bash` must resolve through the same trusted-path rules on every
+// Host. Linux keeps bash in /usr/bin, while macOS ships only /bin/bash, so probe
+// the fixed candidate list instead of assuming one absolute location. Only
+// canonical, non-symlinked candidates are accepted; openCurrentTrustedExecutable
+// still enforces ownership, size and digest pinning on whichever one is used.
+const envBashCandidates = ['/usr/bin/bash', '/bin/bash'] as const
+
+async function resolveEnvBash(): Promise<string> {
+  for (const candidate of envBashCandidates) {
+    let canonical: string
+    try { canonical = await realpath(candidate) } catch { continue }
+    // A candidate that resolves elsewhere (for example the macOS
+    // /usr/bin -> /bin layout) is still acceptable, because the resolved path is
+    // what gets pinned and verified next.
+    return canonical
+  }
+  throw new ControlPlaneCliError('ACTIVATION_BINDING', 'registered executor env interpreter bash is unavailable')
+}
+
 async function executorInterpreter(executable: OpenTrustedExecutable): Promise<{
   executable: OpenTrustedExecutable; arguments: readonly string[]
 } | undefined> {
@@ -327,7 +346,7 @@ async function executorInterpreter(executable: OpenTrustedExecutable): Promise<{
   }
   if (path === '/usr/bin/env') {
     if (argument === 'node') path = process.execPath
-    else if (argument === 'bash') path = '/usr/bin/bash'
+    else if (argument === 'bash') path = await resolveEnvBash()
     else throw new ControlPlaneCliError('ACTIVATION_BINDING', 'registered executor env interpreter is unsupported')
     argument = undefined
   } else {

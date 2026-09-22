@@ -9,13 +9,16 @@ import { assertReplayEndpointRequest, assertReplayEndpointResponse, REPLAY_MAX_B
   REPLAY_RESPONSE_DOMAIN, replayEndpointFail, isReplaySignedAuthority, validateReplayEndpointConfig,
   type ReplayEndpointConfig, type ReplayEndpointRequest, type ReplayEndpointResponse } from './replay-endpoint-protocol.js'
 import { assertRuntimeObserverExact, equalRuntimeObserverMac, readPrivateRuntimeObserverKey,
-  runtimeConfigDigest, runtimeObserverMac } from './runtime-observer-protocol.js'
+  runtimeConfigDigest, runtimeObserverMac, assertRuntimeObserverPlatform } from './runtime-observer-protocol.js'
 
 export { queryReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig, type ReplayFixedAuthority, type ReplayEndpointResponse } from './replay-endpoint-protocol.js'
 export * from './replay-grant.js'
 
 /** Opt-in mutation endpoint: a single immutable owner operation, never a model tool. */
 export function installReplayEndpoint(ctx: Context, input: ReplayEndpointConfig): void {
+  // The replay endpoint binds its own owner-private AF_UNIX socket, so it carries
+  // the same runtime-only Linux requirement as the observer it reuses.
+  assertRuntimeObserverPlatform()
   validateReplayEndpointConfig(input)
   const config = structuredClone(input)
   const bindingDigest = runtimeConfigDigest(config)

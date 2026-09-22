@@ -57,13 +57,26 @@ printf '{"name":"@fixture/engine","version":"1.0.0"}' > "$dir/node_modules/@fixt
 }
 
 describe('shared activation engine', () => {
-  test('stages through the real fixture executor without stdout or closing the caller store', async () => {
+  // 完整 staging 依赖 /proc/self/fd 描述符钉定（assertDescriptorFileSystem），
+  // 与下方取消用例同为 Linux-only；非 Linux 上改由下面的拒绝契约覆盖。
+  test.runIf(process.platform === 'linux')('stages through the real fixture executor without stdout or closing the caller store', async () => {
     const f = await fixture(); const stdout = vi.spyOn(process.stdout, 'write')
     try {
       const result = await activatePluginPlan({ store: f.store, trust: f.trust, planId: f.plan.id, expectedRevision: f.plan.revision })
       expect(result.status).toBe('awaiting-reload'); expect(stdout).not.toHaveBeenCalled()
       expect(f.store.getPlan(f.plan.id).status).toBe('awaiting-reload')
     } finally { stdout.mockRestore(); f.store.close() }
+  })
+
+  // 平台无关：非 Linux 上激活必须以明确的描述符钉定原因被拒，而不是在任意
+  // 一步失败（例如把 `#!/usr/bin/env bash` 当成 Linux 布局而报 ENOENT）。
+  test('refuses to activate off Linux with an explicit descriptor-pinning reason', async () => {
+    const f = await fixture(); const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const platform = vi.spyOn(process, 'platform', 'get'); platform.mockReturnValue('darwin')
+    try {
+      await expect(activatePluginPlan({ store: f.store, trust: f.trust, planId: f.plan.id, expectedRevision: f.plan.revision }))
+        .rejects.toThrow('requires Linux descriptor pinning')
+    } finally { platform.mockRestore(); stdout.mockRestore(); f.store.close() }
   })
 
   test.runIf(process.platform === 'linux')('cancels a running fixture executor only after its process group is drained', async () => {
