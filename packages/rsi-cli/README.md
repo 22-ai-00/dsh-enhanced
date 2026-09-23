@@ -72,22 +72,22 @@ dsh-rsi update --dry-run
 dsh-rsi update --version 0.1.38
 dsh-rsi update --version next
 
-# 自身 + 整套插件集合原地升级（后者由官方安装器执行）
-dsh-rsi update --all --confirm-dsh-home-stopped --yes
+# 自身 + 整套插件集合原地升级；自动检查 Host 是否已停止并识别现有场景
+dsh-rsi update --all --yes
 ```
 
 `update` 选项：
 
-- `--all`：自身升级成功后，再把插件集合交给安装器 `--operation upgrade`。安装器自身的前置条件（如 `--confirm-dsh-home-stopped`）与参数原样透传，未满足时由安装器报错。
+- `--all`：自身升级成功后，自动确认目标 profile 没有运行中 Host，再把插件集合交给同一目标版本的安装器原地升级。用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
 - `--version <v|tag>`：dsh-rsi 自身的目标版本或 dist-tag（默认 `latest`）。只接受精确版本 `x.y.z`（可带预发布后缀）或纯字母 dist-tag；范围表达式如 `>=0.1.0` 会被拒绝。
 - `--dry-run`：解析出目标版本并打印将执行的命令，不做任何安装。
-- 其余参数在 `--all` 下原样透传给安装器（如 `--scenario core`、`--yes`）；`--local <dir>` 走 local 形态。
+- 其余参数在 `--all` 下原样透传给安装器；`--local <dir>` 走 local 形态。显式 `--scenario` 仍可作为一致性断言，但不再是必填项。
 
 ### 三条语义边界
 
 - **自身先行，失败即止**。`--all` 下先升级 dsh-rsi 自身，失败就**不**继续升级 cohort —— 避免用旧版 rsi 的判断去驱动一轮新的 cohort 升级。
-- **新版本下一次生效**。当前进程已把旧版代码载入内存，`npm install --global` 替换包不会改变它。因此本命令执行完即返回，输出里会明确提示这一点；它**不会**在同一次调用里改用新版代码继续做别的事。
-- **已是目标版本则跳过**。先用 `npm view` 把 selector 解析为精确版本，与自身版本相同时不执行安装、直接报告；registry 解析失败则按 selector 正常安装，不会误判为"已最新"。
+- **同版本闭环**。自身升级固定写回当前 `dsh-rsi` 实际所属的 npm prefix，不受当前目录 `.npmrc` 或沙箱 prefix 影响；`--all` 使用 registry 解析出的精确版本 tag 下载安装器，无法确定精确版本时停止，绝不回退到旧进程版本。
+- **已是目标版本则跳过自身安装，但继续 `--all`**。先用 `npm view` 把 selector 解析为精确版本，与自身版本相同时不重复安装 CLI；`--all` 仍继续升级 profile。registry 无法解析 dist-tag 时可单独升级 CLI，但整体升级会 fail-closed，避免 CLI 与安装器 tag 错配。
 
 ### 与 install / reinstall 的区别
 

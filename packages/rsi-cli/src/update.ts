@@ -1,3 +1,5 @@
+import { dirname, resolve, sep } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { PurgeError } from './purge.ts'
 import { defaultRunner, type CommandRunner } from './run.ts'
 import { version as VERSION } from './version.ts'
@@ -6,6 +8,14 @@ import { version as VERSION } from './version.ts'
 export const RSI_CLI_PACKAGE = '@dsh-enhanced/rsi-cli'
 /** 精确版本或 dist-tag：只接受 x.y.z、带预发布后缀的 x.y.z-tag.n，或纯字母 dist-tag。 */
 const SELECTOR_PATTERN = /^(?:\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?|[A-Za-z][A-Za-z0-9-]{0,63})$/u
+const runtimePackageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+
+/** 从真实 npm 全局包路径反推 prefix；源码 checkout/测试环境回退 npm prefix -g。 */
+export function prefixFromPackageRoot(packageRoot: string): string | undefined {
+  const normalized = resolve(packageRoot)
+  const suffix = `${sep}lib${sep}node_modules${sep}@dsh-enhanced${sep}rsi-cli`
+  return normalized.endsWith(suffix) ? normalized.slice(0, -suffix.length) : undefined
+}
 
 export interface SelfUpdateReport {
   /** 升级前当前进程所属的 dsh-rsi 版本。 */
@@ -16,6 +26,8 @@ export interface SelfUpdateReport {
   globalPrefix?: string
   /** registry 上 selector 解析出的精确版本；无法解析时为 undefined。 */
   resolvedVersion?: string
+  /** 实际安装成功的精确版本；供 update --all 选择同版本安装器 tag。 */
+  installedVersion?: string
   /** 已是目标版本、未执行安装。 */
   alreadyCurrent: boolean
   /** 计划执行/已执行的命令描述。 */
@@ -37,6 +49,8 @@ export async function runSelfUpdate(options: {
   selector?: string
   dryRun?: boolean
   runner?: CommandRunner
+  /** 测试注入；生产默认使用当前已加载 npm 包根目录。 */
+  packageRoot?: string
 }): Promise<SelfUpdateReport> {
   const runner = options.runner ?? defaultRunner
   const selector = options.selector ?? 'latest'
@@ -50,9 +64,14 @@ export async function runSelfUpdate(options: {
     actions: [],
   }
 
-  const prefix = runner('npm', ['prefix', '-g'])
-  const prefixValue = prefix.stdout.trim()
-  if (prefixValue.length > 0) report.globalPrefix = prefixValue
+  const ownedPrefix = prefixFromPackageRoot(options.packageRoot ?? runtimePackageRoot)
+  if (ownedPrefix !== undefined) {
+    report.globalPrefix = ownedPrefix
+  } else {
+    const prefix = runner('npm', ['prefix', '-g'])
+    const prefixValue = prefix.stdout.trim()
+    if (prefixValue.length > 0) report.globalPrefix = prefixValue
+  }
 
   // 先把 selector 解析成精确版本，这样「已是最新」可以直接跳过安装，
   // 而且用户能在 dry-run 下看到将要装的确切版本而不只是一个 tag。
@@ -71,14 +90,18 @@ export async function runSelfUpdate(options: {
 
   if (report.resolvedVersion !== undefined && report.resolvedVersion === VERSION) {
     report.alreadyCurrent = true
+    report.installedVersion = report.resolvedVersion
     return report
   }
 
   const target = `${RSI_CLI_PACKAGE}@${selector}`
-  report.actions.push(`npm install --global ${target}`)
+  const prefixArgs = report.globalPrefix === undefined ? [] : ['--prefix', report.globalPrefix]
+  report.actions.push(
+    `npm install --global${report.globalPrefix === undefined ? '' : ` --prefix ${report.globalPrefix}`} ${target}`,
+  )
   if (options.dryRun === true) return report
 
-  const install = runner('npm', ['install', '--global', target, '--location=global'])
+  const install = runner('npm', ['install', '--global', ...prefixArgs, target, '--location=global'])
   if (install.status !== 0) {
     const detail = install.stderr.trim() || install.stdout.trim() || `npm 退出码 ${install.status}`
     throw new PurgeError(
@@ -86,6 +109,7 @@ export async function runSelfUpdate(options: {
       + `可手工执行：npm install --global ${target}`,
     )
   }
+  if (report.resolvedVersion !== undefined) report.installedVersion = report.resolvedVersion
   return report
 }
 

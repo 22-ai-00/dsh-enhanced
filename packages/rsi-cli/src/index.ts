@@ -4,6 +4,7 @@ import { runPurge, PurgeError, type PurgeReport } from './purge.ts'
 import { collectStatus, formatStatus, formatFindings, runDoctor } from './diagnose.ts'
 import { resolveDshHome } from './paths.ts'
 import { runInstall } from './install.ts'
+import { findRunningProfiles } from './run.ts'
 import { formatSelfUpdateReport, runSelfUpdate } from './update.ts'
 import {
   collectLogs,
@@ -70,8 +71,8 @@ update：
                       （保留 patch、凭据、Session、Goal 等状态；不同于 reinstall 的先 purge 再装）
   --version <v|tag>   指定 dsh-rsi 目标版本或 dist-tag（默认 latest）
   --local <dir>       --all 时走 local 形态，用该 checkout 的安装器升级
-  其它参数            --all 时原样透传给安装器（如 --scenario core、--yes）
-  注意                新版本在下一次执行 dsh-rsi 时生效：当前进程已载入旧版代码。
+  其它参数            --all 时原样透传给安装器；通常无需再写 --scenario 或内部确认参数
+  安全                自动检查目标 profile 是否仍在运行；运行中则停止升级并给出处理指引。
 
 start / stop / restart：
   不带 --profile 时作用于 DSH home 下的全部 profile；配合 --dry-run 可先看将执行的命令。
@@ -123,7 +124,7 @@ interface ParsedArgs {
   lines: number
   /** logs：只显示 *-host.error.log。 */
   errorsOnly: boolean
-  /** update：同时升级插件集合（薄委托安装器 --operation upgrade）。 */
+  /** update：同时升级插件集合（自动检查静止状态并继承现有场景）。 */
   all: boolean
   /** update：dsh-rsi 自身的目标版本或 dist-tag。 */
   targetVersion?: string
@@ -400,6 +401,7 @@ export interface MainDeps {
   purge?: typeof runPurge
   install?: typeof runInstall
   selfUpdate?: typeof runSelfUpdate
+  findRunning?: typeof findRunningProfiles
 }
 
 export async function main(
@@ -410,6 +412,7 @@ export async function main(
   const purge = deps.purge ?? runPurge
   const install = deps.install ?? runInstall
   const selfUpdate = deps.selfUpdate ?? runSelfUpdate
+  const findRunning = deps.findRunning ?? findRunningProfiles
   let args: ParsedArgs
   try {
     args = parseArgs(argv, env)
@@ -475,10 +478,39 @@ export async function main(
         })
         process.stdout.write(`${formatSelfUpdateReport(report, args.dryRun)}\n`)
         if (!args.all) return 0
-        process.stdout.write('\n插件集合升级（薄委托安装器 --operation upgrade）：\n')
+        const profiles = args.profile === undefined
+          ? await resolveTargetProfiles(args.dshHome)
+          : [args.profile]
+        const running = findRunning(profiles)
+        if (running.error !== undefined) {
+          throw new PurgeError(`无法确认 DSH_HOME 已静止：${running.error}`)
+        }
+        if (running.active.length > 0) {
+          const details = running.active.map(item => `PID ${item.pid}`).join('、')
+          throw new PurgeError(
+            `检测到目标 profile 仍在运行（${details}）。请先执行 dsh-rsi stop；`
+            + '若不是受管服务，请停止对应手工 dsh 进程后重试。',
+          )
+        }
+        process.stdout.write('\n插件集合升级：已确认目标 profile 无运行中 Host，正在继承现有部署场景并原地升级。\n')
         const passthrough = [...args.passthrough]
         if (!passthrough.includes('--operation')) passthrough.push('--operation', 'upgrade')
-        return await install({ ...buildInstallOptions(args), passthrough })
+        if (!passthrough.includes('--confirm-dsh-home-stopped')) {
+          passthrough.push('--confirm-dsh-home-stopped')
+        }
+        const releaseVersion = report.installedVersion
+          ?? report.resolvedVersion
+          ?? (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(report.selector) ? report.selector : undefined)
+        if (releaseVersion === undefined) {
+          throw new PurgeError(
+            '无法把 dsh-rsi 目标 selector 解析为精确发布版本；为避免 CLI 与安装器版本错配，未开始插件升级。',
+          )
+        }
+        return await install({
+          ...buildInstallOptions(args),
+          releaseRef: `v${releaseVersion}`,
+          passthrough,
+        })
       }
       case 'install': {
         return await install(buildInstallOptions(args))
