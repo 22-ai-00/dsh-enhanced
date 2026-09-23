@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-verifier",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "description": "Independent, bounded task acceptance verification with durable contracts and receipts.",
   "license": "MIT",
   "type": "module",
