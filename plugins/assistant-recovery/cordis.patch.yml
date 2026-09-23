@@ -6,6 +6,7 @@
         - assistantDelivery
         - assistantEvaluation
         - assistantEvolution
+        - assistantGoals
         - assistantPreferenceLearning
         - assistantHealth
       config:

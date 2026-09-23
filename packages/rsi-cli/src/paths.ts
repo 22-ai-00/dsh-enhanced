@@ -45,8 +45,16 @@ export async function listProfiles(dshHome: string): Promise<string[]> {
   }
   const profiles: string[] = []
   for (const entry of entries) {
-    const metadata = await lstat(join(directory, entry))
-    if (metadata.isDirectory()) profiles.push(entry)
+    if (entry.startsWith('.')) continue
+    const profilePath = join(directory, entry)
+    const metadata = await lstat(profilePath)
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) continue
+    // profiles/node_modules is DSH's shared Host peer fallback, not a profile.
+    // A real DSH profile is anchored by its package.json; requiring the marker
+    // also avoids treating arbitrary/cache directories as service targets.
+    let manifest
+    try { manifest = await lstat(join(profilePath, 'package.json')) } catch { continue }
+    if (manifest.isFile() && !manifest.isSymbolicLink()) profiles.push(entry)
   }
   return profiles.sort()
 }

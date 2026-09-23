@@ -56,7 +56,7 @@ export async function runSelfUpdate(options: {
 
   // 先把 selector 解析成精确版本，这样「已是最新」可以直接跳过安装，
   // 而且用户能在 dry-run 下看到将要装的确切版本而不只是一个 tag。
-  const view = runner('npm', ['view', `${RSI_CLI_PACKAGE}@${selector}`, 'version'])
+  const view = runner('npm', ['view', `${RSI_CLI_PACKAGE}@${selector}`, 'version', '--location=global'])
   if (view.status === 0) {
     // npm view 对 dist-tag 返回单行版本；对范围可能返回多行，取最后一行（最高版本）。
     const lines = view.stdout.trim().split('\n').map(line => line.trim()).filter(line => line.length > 0)
@@ -78,7 +78,7 @@ export async function runSelfUpdate(options: {
   report.actions.push(`npm install --global ${target}`)
   if (options.dryRun === true) return report
 
-  const install = runner('npm', ['install', '--global', target])
+  const install = runner('npm', ['install', '--global', target, '--location=global'])
   if (install.status !== 0) {
     const detail = install.stderr.trim() || install.stdout.trim() || `npm 退出码 ${install.status}`
     throw new PurgeError(

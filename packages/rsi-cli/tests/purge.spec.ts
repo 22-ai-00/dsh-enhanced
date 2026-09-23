@@ -27,6 +27,9 @@ async function makeFixture(): Promise<Fixture> {
   const dshHome = join(home, '.dsh')
   const checkout = join(root, 'checkout')
   await mkdir(join(dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'assistant-policy'), { recursive: true })
+  await writeFile(join(dshHome, 'profiles', 'web', 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true, dependencies: {}, dsh: { profile: { bundles: [] } },
+  }))
   await mkdir(join(dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'lark-channel'), { recursive: true })
   await mkdir(join(dshHome, 'logs'), { recursive: true })
   await mkdir(join(checkout, 'plugins', 'personal-assistant'), { recursive: true })
@@ -85,6 +88,34 @@ describe('paths 枚举', () => {
       ])
       expect(plugins.find(p => p.name === '@dsh-enhanced/personal-assistant')?.linkTarget)
         .toBe(join(fixture.checkout, 'plugins', 'personal-assistant'))
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('忽略 profiles/node_modules、缓存目录和不含 manifest 的普通目录', async () => {
+    const fixture = await makeFixture()
+    try {
+      await mkdir(join(fixture.dshHome, 'profiles', 'node_modules'), { recursive: true })
+      await mkdir(join(fixture.dshHome, 'profiles', '.cache'), { recursive: true })
+      await mkdir(join(fixture.dshHome, 'profiles', 'staging-without-manifest'), { recursive: true })
+      expect(await listProfiles(fixture.dshHome)).toEqual(['web'])
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
+
+  test('拒绝把符号链接目录或符号链接 package.json 当作 profile', async () => {
+    const fixture = await makeFixture()
+    try {
+      const external = join(fixture.root, 'external-profile')
+      await mkdir(external)
+      await writeFile(join(external, 'package.json'), '{}')
+      await symlink(external, join(fixture.dshHome, 'profiles', 'linked-profile'))
+      const fake = join(fixture.dshHome, 'profiles', 'fake')
+      await mkdir(fake)
+      await symlink(join(external, 'package.json'), join(fake, 'package.json'))
+      expect(await listProfiles(fixture.dshHome)).toEqual(['web'])
     } finally {
       await rm(fixture.root, { recursive: true, force: true })
     }

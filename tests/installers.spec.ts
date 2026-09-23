@@ -6722,10 +6722,10 @@ esac
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('resolved=1.4.0')
     expect(await readFile(logPath, 'utf8')).toBe([
-      'view @dsh-enhanced/personal-assistant@latest version --json',
-      'view @dsh-enhanced/personal-assistant@1.4.0 version --json',
-      'view @dsh-enhanced/plugin-control-plane@1.4.0 version --json',
-      'view @dsh-enhanced/traex-acp-provider@1.4.0 version --json',
+      'view @dsh-enhanced/personal-assistant@latest version --json --location=global',
+      'view @dsh-enhanced/personal-assistant@1.4.0 version --json --location=global',
+      'view @dsh-enhanced/plugin-control-plane@1.4.0 version --json --location=global',
+      'view @dsh-enhanced/traex-acp-provider@1.4.0 version --json --location=global',
       '',
     ].join('\n'))
   })
@@ -6836,7 +6836,7 @@ esac
 
     expect(explicit.status, explicit.stderr).toBe(0)
     expect(explicit.stdout).toContain('resolved=1.4.0')
-    expect(await readFile(logPath, 'utf8')).toContain('view @dsh-enhanced/personal-assistant@1.4.0 version --json')
+    expect(await readFile(logPath, 'utf8')).toContain('view @dsh-enhanced/personal-assistant@1.4.0 version --json --location=global')
     expect(dryRun.status, dryRun.stderr).toBe(0)
     expect(dryRun.stdout).toContain('resolved=<npm-anchor:latest>')
     expect(dryRun.stdout).toContain('不会访问 npm registry')
@@ -6880,7 +6880,7 @@ printf '%s\\n' '{not-json'
     expect(unsafe.status).toBe(2)
     expect(unsafe.stderr).toContain('不支持 range')
     await expect(readFile(markerPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(await readFile(logPath, 'utf8')).toBe('view @dsh-enhanced/personal-assistant@latest version --json\n')
+    expect(await readFile(logPath, 'utf8')).toBe('view @dsh-enhanced/personal-assistant@latest version --json --location=global\n')
   })
 
   test('npm supervised dry-run describes one unresolved anchor cohort for every required bundle', async () => {
@@ -6902,8 +6902,9 @@ printf '%s\\n' '{not-json'
     for (const required of [
       'personal-assistant', 'assistant-delivery', 'assistant-evaluation',
       'assistant-evolution', 'assistant-growth-experiments', 'preference-learning', 'assistant-heartbeat',
-      'assistant-health', 'assistant-recovery', 'lark-channel',
+      'assistant-health', 'assistant-goals', 'assistant-recovery', 'lark-channel',
     ]) expect(slugs.has(required), `missing ${required}`).toBe(true)
+    expect(result.stdout).toContain('env npm_config_loglevel=error dsh plugin --profile web add')
     expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000')
   })
 

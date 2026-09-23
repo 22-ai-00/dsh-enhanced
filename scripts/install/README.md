@@ -127,7 +127,7 @@ Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 r
 
 普通 `lark` 场景已经安装 Preference Learning：经 owner onboarding 的完成对话只产生无正文的有界行为证据，并可在固定 T1 目录、阈值和回滚门内自动应用偏好；它不要求 Health、Heartbeat 或 Recovery，也不会新增通用 Agent 工具授权。用户面参数 `--agent-tools disable` 只移除向导托管的规则，不覆盖用户自定义规则或显式的全局 Policy 默认值（安装器内部再映射为 `dsh-lark-setup` 的 `--disable-agent-tools`，不能直接把后者传给安装脚本）。
 
-`supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Recovery 与 Health；v2 激活器用同一 nonce 执行 preview→active 的固定 Host runbook。Recovery bootstrap 本身不依赖模型；独立 `supervised-growth-analyst` 每天最多运行一次，只能读取一个 Host 选出的 adoption candidate 并生成 owner 审批 proposal，不能投递普通模型正文。成长 overlay 会把 Heartbeat 连同 Delivery、Evaluation、Preference Learning、Evolution、Growth Experiments、Recovery、Lark Channel 和四个核心 service 标记为 Health required，并为审批后的 workflow replay/shadow/单次 canary 配置独立的低额度预算与 exact owner route。升级时旧 `supervised-growth` model heartbeat 会被安全暂停；TraeX 仍只在显式 `--with traex` 时安装。
+`supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Goals、Recovery 与 Health；Goals 必须与 Recovery 同场景安装，因为 Recovery 的运行时 Cordis 注入要求 `assistantGoals`（npm optional peer 标记不能把运行时注入变成可选）。v2 激活器用同一 nonce 执行 preview→active 的固定 Host runbook。Recovery bootstrap 本身不依赖模型；独立 `supervised-growth-analyst` 每天最多运行一次，只能读取一个 Host 选出的 adoption candidate 并生成 owner 审批 proposal，不能投递普通模型正文。成长 overlay 会把 Heartbeat 连同 Delivery、Evaluation、Preference Learning、Evolution、Growth Experiments、Recovery、Lark Channel 和四个核心 service 标记为 Health required，并为审批后的 workflow replay/shadow/单次 canary 配置独立的低额度预算与 exact owner route。升级时旧 `supervised-growth` model heartbeat 会被安全暂停；TraeX 仍只在显式 `--with traex` 时安装。
 
 `--with coding|traex|health|heartbeat|events|bridge` 可为其他场景追加能力。`--scenario full` 只用于迁移旧的全量默认集合；新安装不应使用它。`--mode supervised-growth` 保持兼容，等价于 supervised 场景。
 
@@ -243,7 +243,7 @@ DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-mo
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
 ```
 
-安装器默认先把 `@dsh-enhanced/personal-assistant@latest` 解析为一次安装的精确版本，再用该精确版本预检并安装每个选中的 `@dsh-enhanced/*` bundle；因此仍会获得最新的完整发布，不会因各包独立解析 `latest` 而混装。预检发现任一 bundle 尚未发布该版本时，会在修改 profile 前失败。显式传入 `--plugin-version` 或 `DSH_ENHANCED_VERSION` 可使用精确 SemVer 或 npm dist-tag；tag 同样先由 anchor 解析为精确版本。版本 range 会被拒绝，因为它不能表达一个可验证的单一 cohort。`--dry-run` 不访问 npm registry，会显示待执行的 anchor 解析与预检；要确认实际发布状态请去掉 `--dry-run`。`supervised` 场景要求完整的 bundle 集合，安装后才运行 preview→active 激活器。
+安装器默认先把 `@dsh-enhanced/personal-assistant@latest` 解析为一次安装的精确版本，再用该精确版本预检并安装每个选中的 `@dsh-enhanced/*` bundle；registry 查询固定使用 npm 的 global location，避免当前 checkout 中 pnpm 专用 `.npmrc` 键被 npm 误报为 unknown project config。profile add 仅把 pnpm 日志级别降到 error：安装器自己的 cohort/阶段输出保留，Host 已提供的 optional peer 与已明确忽略的 build-script 重复提示不再刷屏，真实 package-manager 错误仍原样显示并以非零退出。因此仍会获得最新的完整发布，不会因各包独立解析 `latest` 而混装。预检发现任一 bundle 尚未发布该版本时，会在修改 profile 前失败。显式传入 `--plugin-version` 或 `DSH_ENHANCED_VERSION` 可使用精确 SemVer 或 npm dist-tag；tag 同样先由 anchor 解析为精确版本。版本 range 会被拒绝，因为它不能表达一个可验证的单一 cohort。`--dry-run` 不访问 npm registry，会显示待执行的 anchor 解析与预检；要确认实际发布状态请去掉 `--dry-run`。`supervised` 场景要求完整的 bundle 集合，安装后才运行 preview→active 激活器。
 
 本地源码改动后仅重建并重启已有常驻服务：
 

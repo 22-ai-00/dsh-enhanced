@@ -115,7 +115,7 @@ dsh-rsi logs --profile web --lines 100
 dsh-rsi logs --errors-only
 ```
 
-不带 `--profile` 时作用于 DSH home 下的**全部** profile。
+不带 `--profile` 时作用于 DSH home 下的**全部真实 profile**。枚举以 `profiles/<name>/package.json` 为 profile 身份锚点；共享的 `profiles/node_modules`、缓存目录、无 manifest 的暂存目录和符号链接不会被当成 profile，也不会生成 `ai.deepseek.dsh.profile.node_modules` 之类的错误服务目标。
 
 `logs` 选项：
 
@@ -137,7 +137,7 @@ dsh-rsi logs --errors-only
 
 ### 安全门控
 
-- **不隐式注册服务**：服务定义文件不存在时**不会**顺手装一个（那会绕过安装器的归属、路径与凭据校验），而是提示先执行 `dsh-rsi install` 或 `dsh-rsi-setup`，并以退出码 1 结束。
+- **不隐式注册服务**：服务定义文件不存在时**不会**顺手装一个（那会绕过安装器的归属、路径与凭据校验）。`core` / `web` 场景默认没有常驻服务，这是正常状态；命令会提供可直接复制的 `dsh-rsi install --profile <p> --scenario lark` / `--scenario supervised`，并以退出码 1 结束。`dsh-rsi-setup` 是插件包内的专用工具，不保证作为全局命令存在，因此不再把它作为用户修复入口。
 - **归属 fail-closed**：同名文件存在但内容不属受管（人工改写或被第三方占用）时拒绝操作、原样保留文件，并说明需人工确认归属。判定依据与 purge 一致 —— Linux 要求 unit 同时含 `DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`；macOS 要求 plist 的 `Label` 为 `ai.deepseek.dsh.profile.<p>` 且 `ProgramArguments` 含 `--profile <p>` 与 `--no-open`。
 - **dry-run 措辞与实际执行严格区分**：`--dry-run` 下不执行任何命令，结论行为「将启动/将停止/将重启」；只有真正执行过才输出「已…」。
 - **多 profile 部分失败即非零**：任一 profile 出错，命令整体以退出码 1 结束，便于脚本判定；其余 profile 的处理结果照常打印。
