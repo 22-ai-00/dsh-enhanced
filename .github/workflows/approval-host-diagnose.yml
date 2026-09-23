@@ -1,0 +1,51 @@
+name: Approval Host import diagnosis
+on:
+  push:
+    branches: [fix/approval-interaction]
+    paths: [.github/workflows/approval-host-diagnose.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Install the exact upstream Host
+        run: npm install --global --no-audit --no-fund --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.1.5-rc.2
+      - name: Inspect module resolution and real imports
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DSH_CLI_ROOT="$(npm root -g)/@deepseek-ai/dsh"
+          node --input-type=module <<'JS' | tee "$RUNNER_TEMP/approval-host-imports.txt"
+          import { readdirSync, readFileSync } from 'node:fs'
+          import { join } from 'node:path'
+          import { spawnSync } from 'node:child_process'
+          const paths = []
+          function walk(path) {
+            for (const entry of readdirSync(path, { withFileTypes: true })) {
+              if (!entry.isDirectory()) continue
+              const file = join(path, entry.name)
+              if (entry.name === 'dsh-sandbox-local' || entry.name === 'dsh-subprocess-local') paths.push(file)
+              if (entry.name === 'node_modules' || path.endsWith('node_modules') || entry.name.startsWith('@') || entry.name.startsWith('dsh-')) walk(file)
+            }
+          }
+          walk(process.env.DSH_CLI_ROOT)
+          console.log(JSON.stringify({ platform: process.platform, node: process.version, paths }, null, 2))
+          for (const path of paths) {
+            console.log('MANIFEST', readFileSync(join(path, 'package.json'), 'utf8'))
+            const code = `try { const m = await import(${JSON.stringify(join(path, 'lib/index.js'))}); console.log('IMPORTED', Object.keys(m)) } catch(e) { console.error(e.stack); if(e.cause) console.error(e.cause); process.exitCode = 1 }`
+            const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 15000 })
+            console.log('IMPORT', path, 'EXIT', result.status, result.stdout, result.stderr)
+          }
+          JS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: approval-host-imports
+          path: ${{ runner.temp }}/approval-host-imports.txt
+          retention-days: 1
