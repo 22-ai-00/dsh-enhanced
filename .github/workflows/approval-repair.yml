@@ -1,17 +1,18 @@
-name: Approval browser verification
-
+name: Approval browser compatibility
 on:
   push:
     branches: [fix/approval-interaction]
     paths: [.github/workflows/approval-repair.yml]
-
 permissions:
   contents: read
-
 jobs:
   browser:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [0.1.2-rc.1, 0.1.5-rc.1, 0.1.5-rc.2]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -37,15 +38,39 @@ jobs:
           /usr/bin/bwrap --unshare-all --die-with-parent --new-session --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev /usr/bin/true
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - name: Install exact Host and Chromium
+      - name: Install selected supported Host and Chromium
+        env:
+          HOST_VERSION: ${{ matrix.host }}
         run: |
-          npm install --global --no-audit --no-fund --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.1.5-rc.2
+          npm install --global --no-audit --no-fund --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty "@deepseek-ai/dsh@$HOST_VERSION"
           pnpm exec playwright install --with-deps chromium
+      - name: Add test-only startup error exporter
+        shell: bash
+        run: |
+          mkdir -p .cache
+          cat > .cache/approval-startup-logger.mjs <<'JS'
+          import { inspect } from 'node:util'
+          export const name = 'approval-startup-logger'
+          export function apply(ctx) {
+            const log = message => console.error('[startup]', inspect(message, { depth: 4, colors: false }))
+            for (const message of ctx.logger.buffer) log(message)
+            ctx.logger.exporter({ export: log })
+          }
+          JS
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/e2e/web-owner.spec.mjs')
+          text = path.read_text()
+          anchor = "    const patch = parseDocument(await readFile(patchPath, 'utf8'))\n"
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, anchor + "    patch.add({ insert: [{ id: 'approval-startup-logger', name: resolve(root, '.cache/approval-startup-logger.mjs') }] })\n")
+          path.write_text(text)
+          PY
       - name: Exercise native Web approval and resume
         run: pnpm test:web-owner
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: approval-web-regression
+          name: approval-web-${{ matrix.host }}
           path: .cache/web-owner-e2e
           retention-days: 3
