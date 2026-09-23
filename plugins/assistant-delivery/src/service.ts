@@ -448,6 +448,8 @@ export interface Config {
   modelPickerTtlMs?: number
   permissionPickerTtlMs?: number
   toolApprovalTtlMs?: number
+  /** Bound durability preparation separately from the time given to the human. */
+  toolApprovalPreparationTimeoutMs?: number
   /** Host-owned stable routes. They are never exposed as Agent tools or prompt input. */
   ownerRoutes?: readonly OwnerRouteAuthority[]
 }
@@ -623,6 +625,7 @@ const configSchema = Schema.object({
   modelPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   permissionPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   toolApprovalTtlMs: Schema.number().step(1).min(1_000).max(300_000).default(300_000),
+  toolApprovalPreparationTimeoutMs: Schema.number().step(1).min(100).max(30_000).default(10_000),
   ownerRoutes: Schema.array(Schema.object({
     id: Schema.string().min(1).required(),
     conversation: Schema.object({
@@ -1190,8 +1193,16 @@ export class AssistantDeliveryService extends Service {
       void this.drainModelSelectionSettlements()
       return unregister
     })
-    ctx.inject(['approval'], approvalCtx => approvalCtx.on('approval/request', (request, next) =>
-      this.requestToolApproval(approvalCtx, request, next)))
+    // Register behind Policy's risk reviewer, but before the generic Web remote.
+    // A plain approval/request listener can be starved by an earlier remote
+    // waterfall (notably a Web-enabled Host with a headless Lark conversation).
+    ctx.inject(['approval', 'assistantPolicy'], approvalCtx => approvalCtx.effect(() => {
+      if (typeof approvalCtx.assistantPolicy.registerHumanApprovalAnswerer !== 'function') {
+        throw new Error('assistant-delivery: upgrade assistant-policy with Delivery; human approval routing is unavailable')
+      }
+      return approvalCtx.assistantPolicy.registerHumanApprovalAnswerer((request, next) =>
+        this.requestToolApproval(approvalCtx, request, next))
+    }, 'assistant-delivery.tool-approval-route'))
     ctx.inject(['tools'], toolsCtx => registerDeliveryTools(toolsCtx, this))
     // rc.1 exposes questions as an Agent-scoped waterfall. Delivery is one
     // answerer in that chain, so Web and other frontends may call `next()` and
@@ -3925,6 +3936,22 @@ export class AssistantDeliveryService extends Service {
       actionHash, arguments: call.arguments, callId }
   }
 
+  /** A source-thread notice, never raw command arguments or a new approval grant. */
+  private notifyToolApproval(request: Readonly<ApprovalRequest>, binding: Readonly<ConversationBinding>, operationId: string, phase: string, text: string): void {
+    try {
+      const turn = this.currentPreferenceTurn(request.agent)
+      if (turn === undefined || turn.bindingId !== binding.id || turn.bindingVersion !== binding.version) return
+      this.replyCommand(binding, {
+        idempotencyKey: `${operationId}:notice:${phase}`,
+        replyToEventId: turn.sourceEventId,
+        text,
+      })
+    } catch {
+      // Normal reply authorization and the durable Outbox own presentation.
+      // A notice failure must neither authorize the action nor delay its card.
+    }
+  }
+
   private async requestToolApproval(
     ctx: Context,
     request: Readonly<ApprovalRequest>,
@@ -3954,11 +3981,15 @@ export class AssistantDeliveryService extends Service {
       initialRoute.binding.conversation.channel,
       initialRoute.binding.conversation.account,
     )
-    // Delivery owns channel approvals only when that channel can present and
-    // settle an actionable prompt. Native Web sessions intentionally have a
-    // notice-only adapter, so defer them to the next Host answerer instead of
-    // consuming the waterfall with `unavailable` and stranding the UI.
-    if (adapter?.capabilities.toolApprovals !== true || adapter.requestToolApproval === undefined) return next()
+    const operationId = `tool-approval:${randomUUID()}`
+    // Only a native Web owner may defer to the Web dialog. A headless Lark
+    // request must not disappear into an unrelated remote browser waterfall.
+    if (adapter?.capabilities.toolApprovals !== true || adapter.requestToolApproval === undefined) {
+      if (initialRoute.binding.conversation.channel === 'web') return next()
+      this.notifyToolApproval(request, initialRoute.binding, operationId, 'unavailable',
+        '本次操作需要您授权，但当前渠道无法显示审批卡片。请检查机器人审批配置和连接后重试；本次不会执行该操作。')
+      return 'unavailable'
+    }
 
     // The TTL controller is installed BEFORE every pre-card wait, not just
     // before the adapter call. resolveToolApprovalAuthority is synchronous, but
@@ -3968,7 +3999,6 @@ export class AssistantDeliveryService extends Service {
     // headless-Lark observation). Everything from here on is bounded by the
     // same fail-closed deadline; abort races resolve 'cancelled' only when the
     // owning request itself was aborted, otherwise 'unavailable'.
-    const operationId = `tool-approval:${randomUUID()}`
     const expiresAt = Date.now() + this.config.toolApprovalTtlMs
     const controller = new AbortController()
     let requestCancelled = false
@@ -3990,6 +4020,10 @@ export class AssistantDeliveryService extends Service {
       controller.abort(new Error('assistant-delivery tool approval timed out'))
     }, this.config.toolApprovalTtlMs)
     timeout.unref?.()
+    const preparationTimeout = setTimeout(() => {
+      controller.abort(new Error('assistant-delivery tool approval preparation timed out'))
+    }, Math.min(this.config.toolApprovalTtlMs, this.config.toolApprovalPreparationTimeoutMs))
+    preparationTimeout.unref?.()
     this.toolApprovalControllers.add(controller)
 
     let outcome: ApprovalOutcome
@@ -4014,6 +4048,7 @@ export class AssistantDeliveryService extends Service {
             return 'unavailable'
           }
           if (signalAborted(request.signal)) return 'cancelled'
+          if (controller.signal.aborted) return 'unavailable'
           let persisted: ToolApprovalAuthority | undefined
           try {
             persisted = this.resolveToolApprovalAuthority(ctx, request)
@@ -4025,7 +4060,12 @@ export class AssistantDeliveryService extends Service {
         })(),
         deadlineAbort,
       ])
-      if (typeof preCard === 'string') return preCard
+      clearTimeout(preparationTimeout)
+      if (typeof preCard === 'string') {
+        if (preCard === 'unavailable') this.notifyToolApproval(request, initialRoute.binding, operationId, 'unavailable',
+          '本次操作需要您授权，但审批卡片未能就绪。请先与机器人建立已配对的私聊，并检查连接后重试；本次不会执行该操作。')
+        return preCard
+      }
       const granted: ToolApprovalAuthority = preCard
       authority = granted
 
@@ -4043,12 +4083,17 @@ export class AssistantDeliveryService extends Service {
         ...(request.reason === undefined ? {} : { reason: request.reason }),
         arguments: granted.arguments,
       })
+      this.notifyToolApproval(request, granted.binding, operationId, 'pending',
+        granted.binding.conversation.kind === 'group'
+          ? '本次操作需要您确认，请到与机器人的私聊中处理授权卡片，选择“允许一次”或“拒绝”。超时不会自动放行；可用 /stop 取消任务。'
+          : '本次操作需要您确认，请在授权卡片中选择“允许一次”或“拒绝”。超时不会自动放行；可用 /stop 取消任务。')
       const answer = Promise.resolve()
         .then(() => granted.adapter.requestToolApproval!(adapterRequest, controller.signal))
         .then<ApprovalOutcome, ApprovalOutcome>(value => value, () => 'unavailable')
       outcome = await Promise.race([answer, deadlineAbort])
     } finally {
       clearTimeout(timeout)
+      clearTimeout(preparationTimeout)
       request.signal?.removeEventListener('abort', onRequestAbort)
       this.toolApprovalControllers.delete(controller)
     }

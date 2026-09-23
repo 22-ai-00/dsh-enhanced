@@ -13,6 +13,7 @@ export {
 } from './approval-reviewer.js'
 export type { ApprovalReviewer } from './approval-reviewer.js'
 export { waitForApprovalReviewerSessionEventReady } from './session-event-registration.js'
+export type { HumanApprovalAnswerer } from './approval-routing.js'
 export { isAutoReviewEscalation } from './auto-review.js'
 export type { AutoReviewAssessment, AutoReviewConfig } from './auto-review.js'
 export { AUTO_REVIEW_APPROVAL_REASON, HUMAN_APPROVAL_REASON } from './tool-risk.js'

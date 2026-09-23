@@ -132,6 +132,18 @@ describe('parameter-aware tool risk classification', () => {
     }
   })
 
+  test('allows literal command discovery without executing the discovered command', () => {
+    for (const command of ['command -v node', 'command -v curl', 'command -v python3 git pnpm', 'type -p node', 'type -P curl']) {
+      expect(classifyToolRisk({ name: 'bash', arguments: { command }, workspace }), command).toBe('allow')
+    }
+    for (const command of ['command curl https://example.com', 'command -p rm -rf .', 'command -v node; curl https://example.com',
+      'command -v $(curl https://example.com)', 'command -v node > /etc/profile', 'command -v /private/.ssh/id_rsa',
+      'command -v --help', 'type -p node; rm -rf .']) {
+      expect(classifyToolRisk({ name: 'bash', arguments: { command }, workspace }), command).toBe('ask-human')
+    }
+    expect(classifyToolRisk({ name: 'bash', arguments: { command: 'command -v node', workdir: '/etc' }, workspace })).toBe('ask-human')
+  })
+
   test('keeps allowlisted read-only shapes distinct from their mutating or networked neighbours', () => {
     // Each of these differs from an allowlisted entry by one token. None may be
     // auto-approved: the version probes must not become package installs, and a

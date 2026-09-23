@@ -356,6 +356,14 @@ function classifyBash(
     // everything else is delegated to the model reviewer in the auto preset.
     return rawCommandIsSensitive(command) ? 'ask-human' : 'ask-review'
   }
+  // These Bash builtins only resolve literal executable names; they do not
+  // execute the command being discovered. Check the complete argv, never a
+  // wrapper prefix: `command curl ...` must remain a human-approved action.
+  if (((argv[0] === 'command' && argv[1] === '-v')
+    || (argv[0] === 'type' && (argv[1] === '-p' || argv[1] === '-P')))
+    && argv.length >= 3 && argv.length <= 10
+    && argv.slice(2).every(name => /^[A-Za-z][A-Za-z0-9_.+-]{0,63}$/u.test(name))
+    && !rawCommandBearsSecret(command)) return 'allow'
   if (isDeterministicallySensitive(argv, command)) return 'ask-human'
   const lsRisk = classifyLs(argv, resolve(workspace, workdir), workspace)
   if (lsRisk !== undefined) return lsRisk
