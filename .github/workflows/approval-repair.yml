@@ -36,20 +36,21 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           /usr/bin/bwrap --unshare-all --die-with-parent --new-session --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev /usr/bin/true
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
-      - name: Install selected supported Host with a deduplicated private dependency closure
+      - name: Install a private supported Host
         env:
           HOST_VERSION: ${{ matrix.host }}
         shell: bash
         run: |
           set -euo pipefail
-          npm install --prefix "$RUNNER_TEMP/approval-host" --prefer-dedupe --no-audit --no-fund --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty "@deepseek-ai/dsh@$HOST_VERSION"
-          npm dedupe --prefix "$RUNNER_TEMP/approval-host" --ignore-scripts --no-audit --no-fund
+          mkdir -p "$RUNNER_TEMP/approval-host" .cache/web-owner-e2e
+          printf '%s\n' '{"private":true,"allowScripts":{"@deepseek-ai/dsh-subprocess-local":true,"koffi":true,"node-pty":true}}' > "$RUNNER_TEMP/approval-host/package.json"
+          npm install --prefix "$RUNNER_TEMP/approval-host" --prefer-dedupe --no-audit --no-fund "@deepseek-ai/dsh@$HOST_VERSION" 2>&1 | tee .cache/web-owner-e2e/host-install.log
+          npm dedupe --prefix "$RUNNER_TEMP/approval-host" --ignore-scripts --no-audit --no-fund 2>&1 | tee -a .cache/web-owner-e2e/host-install.log
           echo "$RUNNER_TEMP/approval-host/node_modules/.bin" >> "$GITHUB_PATH"
-          pnpm exec playwright install --with-deps chromium
-          mkdir -p .cache/web-owner-e2e
           find "$RUNNER_TEMP/approval-host/node_modules" -type d \( -name dsh-api-session-controller -o -name dsh-win32-process -o -name dsh-hmr \) > .cache/web-owner-e2e/host-package-paths.txt
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm exec playwright install --with-deps chromium
       - name: Activate native HMR before startup and export startup errors
         shell: bash
         run: |
