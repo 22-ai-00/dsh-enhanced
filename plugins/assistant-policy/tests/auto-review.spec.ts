@@ -523,7 +523,7 @@ describe('isolated automatic approval reviewer', () => {
     }
   })
 
-  test('sends package fetching and non-sensitive complex syntax to the model reviewer', async () => {
+  test('executes package fetching and non-sensitive complex syntax directly in auto mode', async () => {
     for (const command of [
       'npx eslint .',
       'npm exec eslint .',
@@ -562,7 +562,7 @@ describe('isolated automatic approval reviewer', () => {
       })
 
       expect(result.isError, command).toBe(false)
-      expect(current.adapter.requests, command).toHaveLength(1)
+      expect(current.adapter.requests, command).toHaveLength(0)
       expect(current.fallbackCalls, command).toBe(0)
       expect(executions, command).toBe(1)
     }
@@ -996,7 +996,7 @@ describe('isolated automatic approval reviewer', () => {
       agent: current.agent,
     })
 
-    expect(current.adapter.requests).toHaveLength(1)
+    expect(current.adapter.requests).toHaveLength(0)
     expect(current.fallbackCalls).toBe(0)
     expect(result.isError).toBe(true)
     expect(result.content).toEqual([

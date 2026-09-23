@@ -325,7 +325,8 @@ export class AssistantPolicyService extends Service {
         // permission change can win after that promise resolves but before
         // this continuation runs, so authorization must always fold the live
         // three-dimensional state again at the final synchronous boundary.
-        if (getApprovalReviewer(agent.session) === 'none') return next()
+        const reviewer = getApprovalReviewer(agent.session)
+        if (reviewer === 'none') return next()
         const preauthorization = this.preauthorizedToolDecision(execution)
         if (preauthorization?.kind === 'allow') return next()
         if (preauthorization?.kind === 'deny') return preauthorization
@@ -344,7 +345,7 @@ export class AssistantPolicyService extends Service {
           arguments: execution.arguments,
           workspace,
         })
-        if (risk === 'allow') return next()
+        if (risk === 'allow' || (risk === 'ask-review' && reviewer === 'auto-review' && execution.name === 'bash')) return next()
         const permission = approvalPermissionStateOf(agent.session.snapshotEvents())
         const configuredApproval = toolsCtx.get('approval')?.config.policy
         const approval = permission.approvalPolicyEvent

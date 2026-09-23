@@ -633,6 +633,52 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     await ctx.fiber.restart()
   })
 
+  test('runs read-only web and user-question bridge tools in auto mode without creating approval events', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-policy-default-auto-tools-'))
+    temporaryRoots.push(root)
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(ToolRuntime)
+    await ctx.plugin(ApprovalService, { policy: 'ask' })
+    const executions: string[] = []
+    for (const name of ['web_fetch', 'ask_user_question']) {
+      ctx.tools.register(defineTool({
+        name,
+        description: `${name} default auto fixture`,
+        parameters: {},
+        output: { schema: { type: 'string' }, render: (_arguments, value) => [{ type: 'text', text: value }] },
+        async execute() { executions.push(name); return name },
+      }))
+    }
+    await ctx.plugin(AssistantPolicyService, {
+      databasePath: join(root, 'policy.sqlite'),
+      toolDefaultEffect: 'allow',
+      rules: [],
+    })
+    const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
+    owner.session.append('permission/preset', { preset: 'auto' })
+    appendSandboxMode(owner, 'workspace-write')
+    owner.session.append('approval/policy', { policy: 'ask' })
+    setApprovalReviewer(owner.session, 'auto-review')
+    owner.session.append('turn/start', { turn: 1 })
+
+    for (const [name, arguments_] of [
+      ['web_fetch', { url: 'https://example.com/article' }],
+      ['ask_user_question', { questions: [{ id: 'choice', question: '继续吗？' }] }],
+    ] as const) {
+      const result = await ctx.tools.execute({
+        callId: ToolCallId(`default-auto-${name}`), name, arguments: arguments_,
+        signal: new AbortController().signal, agent: owner,
+      })
+      expect(result.isError, name).toBe(false)
+    }
+
+    expect(executions).toEqual(['web_fetch', 'ask_user_question'])
+    expect(owner.session.snapshotEvents().filter(event => event.type === 'approval/asked')).toHaveLength(0)
+    expect(owner.session.snapshotEvents().filter(event => event.type === 'approval/decided')).toHaveLength(0)
+    await ctx.fiber.restart()
+  })
+
   test('registers the risk gate before the monotonic guard', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-policy-risk-gate-'))
     temporaryRoots.push(root)
