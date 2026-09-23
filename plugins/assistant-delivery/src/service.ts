@@ -812,6 +812,7 @@ function signalAborted(signal: AbortSignal | undefined): boolean {
 interface ToolApprovalAuthority {
   adapter: DeliveryAdapter
   binding: ConversationBinding
+  presentationBinding: ConversationBinding
   policyEmergencyVersion: number
   reviewRoute: 'auto-escalation' | 'user'
   routeKind: 'delegated' | 'direct'
@@ -910,6 +911,10 @@ function sameToolApprovalAuthority(
     && right.binding.id === left.binding.id
     && right.binding.version === left.binding.version
     && right.binding.generation === left.binding.generation
+    && right.presentationBinding.id === left.presentationBinding.id
+    && right.presentationBinding.version === left.presentationBinding.version
+    && right.presentationBinding.generation === left.presentationBinding.generation
+    && JSON.stringify(right.presentationBinding.conversation) === JSON.stringify(left.presentationBinding.conversation)
     && right.policyEmergencyVersion === left.policyEmergencyVersion
     && right.reviewRoute === left.reviewRoute
     && right.routeKind === left.routeKind
@@ -3828,7 +3833,6 @@ export class AssistantDeliveryService extends Service {
       || (route.kind === 'direct' && binding.sessionId !== sessionId)
       || agent.session.header.cwd !== binding.workspace
       || agent.session.header.agentPreset !== binding.agentPreset
-      || binding.conversation.kind !== 'dm'
       || reviewRoute === undefined) {
       return undefined
     }
@@ -3865,7 +3869,24 @@ export class AssistantDeliveryService extends Service {
     if (asked.length !== 1) return undefined
     const ask = asked[0]!
     const requestHeader = events.findLast(event => event.type === 'request/header')
-    const adapter = this.registry.get(binding.conversation.channel, binding.conversation.account)
+    const presentationCandidates = binding.conversation.kind === 'dm'
+      ? [binding]
+      : this.deliveryStore.listActiveBindings().filter(candidate =>
+          candidate.conversation.kind === 'dm'
+          && candidate.conversation.thread === undefined
+          && candidate.conversation.channel === binding.conversation.channel
+          && candidate.conversation.account === binding.conversation.account
+          && candidate.conversation.tenant === binding.conversation.tenant
+          && candidate.workspace === binding.workspace
+          && candidate.agentPreset === binding.agentPreset
+          && candidate.policyRef === binding.policyRef
+          && JSON.stringify(candidate.principal) === JSON.stringify(binding.principal))
+    if (presentationCandidates.length !== 1) return undefined
+    const presentationBinding = presentationCandidates[0]!
+    const adapter = this.registry.get(
+      presentationBinding.conversation.channel,
+      presentationBinding.conversation.account,
+    )
     if (adapter?.capabilities.toolApprovals !== true || adapter.requestToolApproval === undefined) return undefined
     const header = agent.session.header
     const actionHash = createHash('sha256').update(JSON.stringify([
@@ -3882,6 +3903,11 @@ export class AssistantDeliveryService extends Service {
         header.parentSession ?? null, header.isSeeded, agent.session.inheritedEventCount, header.origin ?? null,
         header.delegationDepth ?? null, header.agentPreset ?? null],
       ['route-kind', route.kind],
+      ['presentation-binding', presentationBinding.id, presentationBinding.version,
+        presentationBinding.generation, presentationBinding.sessionId,
+        [presentationBinding.conversation.channel, presentationBinding.conversation.account,
+          presentationBinding.conversation.tenant, presentationBinding.conversation.kind,
+          presentationBinding.conversation.chat, presentationBinding.conversation.thread ?? null]],
       ['review-route', reviewRoute],
       ['turn', openTurn.seq, openTurn.data.turn],
       ['call', ...call.hashIdentity],
@@ -3893,7 +3919,7 @@ export class AssistantDeliveryService extends Service {
       ['policy-emergency-stop', emergencyStop.version, emergencyStop.enabled],
       ['permission-events', currentPermissionEvents(agent)],
     ])).digest('hex')
-    return { adapter, binding, reviewRoute, routeKind: route.kind,
+    return { adapter, binding, presentationBinding, reviewRoute, routeKind: route.kind,
       ...(route.token === undefined ? {} : { routeToken: route.token }),
       policyEmergencyVersion: emergencyStop.version,
       actionHash, arguments: call.arguments, callId }
@@ -3924,6 +3950,15 @@ export class AssistantDeliveryService extends Service {
         : undefined
     if (reviewRoute === undefined) return reviewer === 'auto-review' ? next() : 'unavailable'
     if (initialRoute.state !== 'bound') return 'unavailable'
+    const adapter = this.registry.get(
+      initialRoute.binding.conversation.channel,
+      initialRoute.binding.conversation.account,
+    )
+    // Delivery owns channel approvals only when that channel can present and
+    // settle an actionable prompt. Native Web sessions intentionally have a
+    // notice-only adapter, so defer them to the next Host answerer instead of
+    // consuming the waterfall with `unavailable` and stranding the UI.
+    if (adapter?.capabilities.toolApprovals !== true || adapter.requestToolApproval === undefined) return next()
 
     // The TTL controller is installed BEFORE every pre-card wait, not just
     // before the adapter call. resolveToolApprovalAuthority is synchronous, but
@@ -3998,8 +4033,8 @@ export class AssistantDeliveryService extends Service {
         operationId,
         bindingId: granted.binding.id,
         target: Object.freeze({
-          conversation: Object.freeze({ ...granted.binding.conversation }),
-          principal: Object.freeze({ ...granted.binding.principal }),
+          conversation: Object.freeze({ ...granted.presentationBinding.conversation }),
+          principal: Object.freeze({ ...granted.presentationBinding.principal }),
         }),
         expiresAt,
         actionHash: granted.actionHash,

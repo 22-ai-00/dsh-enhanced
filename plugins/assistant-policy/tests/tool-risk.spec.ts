@@ -227,7 +227,7 @@ describe('parameter-aware tool risk classification', () => {
     })).toBe('ask-human')
   })
 
-  test('sends non-sensitive complex syntax and package fetching to the model reviewer instead of a human', () => {
+  test('classifies non-sensitive complex syntax and package fetching as reviewable rather than human-only', () => {
     for (const command of [
       'pwd | cat',
       'pnpm test | tee out.log',
@@ -266,11 +266,16 @@ describe('parameter-aware tool risk classification', () => {
     }
   })
 
-  test('reserves built-in network tools for humans without consulting the model reviewer', () => {
-    for (const name of ['web_search', 'web_fetch']) {
-      expect(classifyToolRisk({ name, arguments: { query: 'current release' }, workspace }), name)
-        .toBe('ask-human')
-    }
+  test('allows built-in read-only network retrieval without a permission prompt', () => {
+    expect(classifyToolRisk({ name: 'web_search', arguments: { query: 'current release' }, workspace }))
+      .toBe('allow')
+    expect(classifyToolRisk({ name: 'web_fetch', arguments: { url: 'https://example.com/article' }, workspace }))
+      .toBe('allow')
+  })
+
+  test('allows the dedicated user-question bridge so required clarification can reach the user', () => {
+    expect(classifyToolRisk({ name: 'ask_user_question', arguments: { questions: [] }, workspace }))
+      .toBe('allow')
   })
 
   test('asks for unknown non-built-in tools', () => {

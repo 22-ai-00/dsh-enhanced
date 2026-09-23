@@ -1985,11 +1985,11 @@ describe('assistant delivery Cordis service', () => {
     expect(next).toHaveBeenCalledOnce()
     expect(flush).not.toHaveBeenCalled()
 
-    // `ask + none` is conservatively folded back to the human user reviewer.
+    // `ask + none` is conservatively folded back to the native human reviewer.
     bound.agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
     await expect(bound.ctx.approval.request({ agent: bound.agent, toolName: 'write_file',
-      callId: ToolCallId('call-delivery-1') })).resolves.toBe('unavailable')
-    expect(next).toHaveBeenCalledOnce()
+      callId: ToolCallId('call-delivery-1') })).resolves.toBe('rejected')
+    expect(next).toHaveBeenCalledTimes(2)
     expect(flush).not.toHaveBeenCalled()
 
     bound.agent.session.append('approval/policy', { policy: 'never' })
@@ -2004,6 +2004,79 @@ describe('assistant delivery Cordis service', () => {
       callId: ToolCallId('call-delivery-1') }, noneNext)).resolves.toBe('unavailable')
     expect(noneNext).not.toHaveBeenCalled()
     await bound.ctx.fiber.restart()
+  })
+
+  test('delegates a bound approval to the native answerer when its channel has no actionable adapter', async () => {
+    const fixture = await boundApprovalHarness({ sessionId: 'approval-native-fallback' })
+    const next = vi.fn(async () => 'allowed-once' as const)
+    fixture.ctx.on('approval/request', next)
+
+    await expect(fixture.ctx.approval.request({
+      agent: fixture.agent,
+      toolName: 'write_file',
+      callId: ToolCallId('call-delivery-1'),
+      reason: HUMAN_APPROVAL_REASON,
+    })).resolves.toBe('allowed-once')
+    expect(next).toHaveBeenCalledOnce()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('routes a group-triggered approval to the same owner unique DM without exposing arguments in the group', async () => {
+    const group = { ...conversation, kind: 'group' as const, chat: 'oc_group', thread: 'omt_owner_lane' }
+    const fixture = await boundApprovalHarness({ sessionId: 'approval-group-source', route: group })
+    const store = runtimeStoreFromService(fixture.service)
+    const dmBinding = store.createBinding({
+      conversation,
+      principal,
+      workspace: fixture.binding.workspace,
+      agentPreset: fixture.binding.agentPreset,
+      sessionId: 'approval-owner-dm',
+      policyRef: fixture.binding.policyRef,
+    })
+    const requestToolApproval = vi.fn(async () => 'allowed-once' as const)
+    await fixture.service.registerAdapter({
+      channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'], toolApprovals: true },
+      start: async () => {}, requestToolApproval,
+      send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
+    })
+
+    await expect(fixture.ctx.approval.request({
+      agent: fixture.agent,
+      toolName: 'write_file',
+      callId: ToolCallId('call-delivery-1'),
+      reason: HUMAN_APPROVAL_REASON,
+    })).resolves.toBe('allowed-once')
+    expect(requestToolApproval).toHaveBeenCalledWith(expect.objectContaining({
+      bindingId: fixture.binding.id,
+      target: { conversation, principal },
+      arguments: fixture.rawArguments,
+    }), expect.any(AbortSignal))
+    expect(dmBinding.id).not.toBe(fixture.binding.id)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('does not guess among multiple owner DMs for a group-triggered approval', async () => {
+    const group = { ...conversation, kind: 'group' as const, chat: 'oc_group_ambiguous', thread: 'omt_owner_lane' }
+    const fixture = await boundApprovalHarness({ sessionId: 'approval-group-ambiguous', route: group })
+    const store = runtimeStoreFromService(fixture.service)
+    store.createBinding({ conversation, principal, workspace: fixture.binding.workspace,
+      agentPreset: fixture.binding.agentPreset, sessionId: 'approval-owner-dm-1', policyRef: fixture.binding.policyRef })
+    store.createBinding({ conversation: { ...conversation, chat: 'oc_owner_2' }, principal,
+      workspace: fixture.binding.workspace, agentPreset: fixture.binding.agentPreset,
+      sessionId: 'approval-owner-dm-2', policyRef: fixture.binding.policyRef })
+    const requestToolApproval = vi.fn(async () => 'allowed-once' as const)
+    await fixture.service.registerAdapter({
+      channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'], toolApprovals: true },
+      start: async () => {}, requestToolApproval,
+      send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
+    })
+
+    await expect(fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
+      callId: ToolCallId('call-delivery-1'), reason: HUMAN_APPROVAL_REASON })).resolves.toBe('unavailable')
+    expect(requestToolApproval).not.toHaveBeenCalled()
+    await fixture.ctx.fiber.restart()
   })
 
   test('composes ask, auto-review escalation, and full approval modes without routing by listener order', async () => {

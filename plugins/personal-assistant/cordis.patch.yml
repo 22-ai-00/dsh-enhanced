@@ -16,10 +16,11 @@
         name: 完全访问权限
     # Default to `auto`: it keeps the exact same workspace-write sandbox and
     # human approval policy as `workspace-write`; the only difference is that
-    # low/medium-risk actions are pre-approved by the isolated model reviewer
-    # instead of prompting. Deterministically sensitive actions (secrets,
-    # network, privilege escalation, destruction, background tasks) bypass the
-    # reviewer and still reach a human. The owner can explicitly pick
+    # ordinary workspace work, read-only web retrieval and explicit user
+    # questions continue without prompting. Unknown plugin tools still use the
+    # isolated reviewer. Deterministically sensitive actions (secrets,
+    # arbitrary network commands, privilege escalation, destruction,
+    # background tasks) bypass the reviewer and still reach a human. The owner can explicitly pick
     # `danger-full-access` in DSH's native selector (or via the installer
     # confirmation) after understanding the consequence.
     defaultPreset: auto

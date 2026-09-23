@@ -18,7 +18,7 @@ export interface ToolRiskInput {
 }
 
 const WRITE_TOOLS = new Set(['write', 'edit'])
-const NETWORK_TOOLS = new Set(['web_fetch', 'web_search'])
+const READ_ONLY_NETWORK_TOOLS = new Set(['web_fetch', 'web_search'])
 const NATIVE_ESCALATION_TOOLS = new Set(['bash', 'pwsh', 'write', 'edit'])
 const NATIVE_ESCALATION_TARGETS = new Set(['workspace-write', 'danger-full-access'])
 const BASH_ARGUMENT_KEYS = new Set([
@@ -373,7 +373,7 @@ export function classifyToolRisk(input: Readonly<ToolRiskInput>): ToolRiskClassi
     return NATIVE_ESCALATION_TOOLS.has(input.name) ? 'defer-native-approval' : 'ask-human'
   }
   if (escalation === 'invalid') return 'ask-human'
-  if (NETWORK_TOOLS.has(input.name)) return 'ask-human'
+  if (READ_ONLY_NETWORK_TOOLS.has(input.name) || input.name === 'ask_user_question') return 'allow'
   // `run_code` executes arbitrary worker code and is not an OS sandbox. Its
   // source cannot be reduced to the narrow argv grammar below, so auto review
   // must never grant it without a human decision.
