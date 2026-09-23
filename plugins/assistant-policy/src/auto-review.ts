@@ -14,6 +14,7 @@ import {
   hasCoherentAutoReview,
 } from './approval-reviewer.js'
 import { AUTO_REVIEW_APPROVAL_REASON, HUMAN_APPROVAL_REASON } from './tool-risk.js'
+import type { HumanApprovalAnswerer } from './approval-routing.js'
 
 export interface AutoReviewConfig {
   enabled?: boolean
@@ -490,37 +491,62 @@ function fallbackAfterReview(
     : 'unavailable'
 }
 
-/** Register an isolated answerer only when both host services are present. */
-export function registerAutoReviewAnswerer(ctx: Context, input: AutoReviewConfig | undefined): void {
+/** Keep human routing live even when the optional model provider is unavailable. */
+export function registerAutoReviewAnswerer(
+  ctx: Context,
+  input: AutoReviewConfig | undefined,
+  answerHuman: HumanApprovalAnswerer = (_request, next) => next(),
+): void {
   const config = resolveConfig(input)
-  ctx.inject(['llm', 'approval'], (runtimeCtx) => {
+  ctx.inject(['approval'], (runtimeCtx) => {
+    type Provider = { review(request: ApprovalRequest, snapshot: AutoReviewSnapshot): Promise<ReviewVerdict>; signal: AbortSignal }
+    let provider: Provider | undefined
+    runtimeCtx.inject(['llm'], modelCtx => {
+      const lifetime = new AbortController()
+      const current: Provider = {
+        review: (request, snapshot) => reviewOnce(modelCtx.llm, request, config, snapshot),
+        signal: lifetime.signal,
+      }
+      modelCtx.effect(() => {
+        provider = current
+        return () => {
+          if (provider === current) provider = undefined
+          lifetime.abort()
+        }
+      }, 'assistant-policy.approval-review-provider')
+    })
     runtimeCtx.on('approval/request', async (request, next): Promise<ApprovalOutcome> => {
-      if (approvalReviewerOf(request.agent.session.snapshotEvents()) !== 'auto-review') return next()
-      if (request.reason === HUMAN_APPROVAL_REASON) return escalateToHuman(request, next)
-      if (isExactNativeSandboxApproval(request)) return escalateToHuman(request, next)
+      const human = () => answerHuman(request, next)
+      if (approvalReviewerOf(request.agent.session.snapshotEvents()) !== 'auto-review') return human()
+      if (request.reason === HUMAN_APPROVAL_REASON) return escalateToHuman(request, human)
+      if (isExactNativeSandboxApproval(request)) return escalateToHuman(request, human)
       if (request.reason !== AUTO_REVIEW_APPROVAL_REASON) return next()
-      if (!config.enabled) return escalateToHuman(request, next)
+      const current = provider
+      if (!config.enabled || current === undefined) return escalateToHuman(request, human)
       const snapshot = autoReviewSnapshot(request)
-      if (snapshot === undefined) return fallbackAfterReview(request, next)
+      if (snapshot === undefined) return fallbackAfterReview(request, human)
       let outcome: ReviewVerdict
+      const reviewSignal = request.signal === undefined
+        ? current.signal : AbortSignal.any([request.signal, current.signal])
       try {
         outcome = await boundedReview(
-          reviewOnce(runtimeCtx.llm, request, config, snapshot),
+          current.review({ ...request, signal: reviewSignal }, snapshot),
           config.timeoutMs + HARD_TIMEOUT_GRACE_MS,
-          request.signal,
+          reviewSignal,
         )
       } catch {
-        return fallbackAfterReview(request, next)
+        return fallbackAfterReview(request, human)
       }
+      if (provider !== current || current.signal.aborted) return fallbackAfterReview(request, human)
       if (outcome === 'allow') {
         if (!isCurrentAutoReviewSnapshot(request, snapshot)
           || !hasCoherentAutoReview(request.agent.session.snapshotEvents())) {
-          return fallbackAfterReview(request, next)
+          return fallbackAfterReview(request, human)
         }
         return 'allowed-once'
       }
       if (outcome === 'cancelled') return 'cancelled'
-      return fallbackAfterReview(request, next)
+      return fallbackAfterReview(request, human)
     }, { prepend: true })
   })
 }

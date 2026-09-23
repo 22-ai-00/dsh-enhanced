@@ -4,6 +4,10 @@
 
 `dsh-rsi-setup` 随 `lark-channel` 发布，使用同一构建的 Growth Driver、Control Plane、Verifier、Policy 与 Delivery API。新增的 `normalizeControlPlaneConfig` 和 `validateSourceReviewConfig` 是只读配置预检入口；此次不修改数据库 schema 或 DSH/Cordis 基线。两个 Host 和授权器须成套安装当前构建。CLI 要求 Linux/systemd user services，默认仅校验；显式应用具有私有恢复 journal，详见[部署指南](../plugins/lark-channel/docs/rsi-setup.md)。此前 supervised 安装仍需按该指南补装 Growth Driver 与独立协调器。
 
+## 即时审批渠道路由
+
+Delivery 的新审批桥要求提供 `registerHumanApprovalAnswerer` 的同批 Policy（首次随 `0.1.43` 交付）；安装时须成套升级，不能把新的 Delivery 与旧 Policy 混用。注册同时依赖原生 Approval 和 Policy，通过生命周期 effect 释放，不依赖 LLM 启动次序。此变更不修改 DSH/Cordis 版本或数据库 schema，Web 仍使用原生 Remote 对话框。升级回归须包括 Web listener 先注册、auto reviewer 缺少 provider、飞书群聊转同一 owner 私聊、超时/取消/卸载、跨 owner 拒绝，以及真实 Web 允许一次后继续执行。
+
 ## Host 基线
 
 `0.1.32` 安装器的支持范围为 `>=0.1.2-rc.1 <0.2.0`：以主版本与次版本作为兼容边界，同一 `0.1.x` 内的补丁版和后续 RC 不再被精确版本检查拦截。默认新安装版为 `0.1.5-rc.1`；已有兼容 CLI 直接复用。`pinnedHostVersion` 是发布安装器默认版本的可复现记录，不是唯一允许的运行时版本。跨次版本需单独适配验证。
