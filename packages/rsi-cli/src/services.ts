@@ -212,7 +212,7 @@ export async function inspectManagedService(
  * 对一个已注册的受管服务执行 start / stop / restart。
  *
  * 前置条件是服务定义文件已存在且确属受管：这个命令只切换运行状态，不承担安装
- * 职责，未注册时返回可操作的指引（install / dsh-rsi-setup）而不是隐式注册一个
+ * 职责，未注册时返回可复制的 dsh-rsi install 指引而不是隐式注册一个
  * 服务——隐式注册会绕过安装器的归属、路径与凭据校验。
  *
  * macOS 用 `launchctl kickstart -k`（重启）/ `kickstart`（启动）/ `bootout`（停止）；
@@ -239,7 +239,11 @@ export async function controlManagedService(
   if (!presence.managed) {
     outcome.errors.push(presence.foreign
       ? `${profile}：${presence.definitionPath} 存在但不是 dsh-enhanced 受管服务，已拒绝操作（请人工确认该文件归属）`
-      : `${profile}：未注册受管常驻服务（${presence.definitionPath} 不存在）；先执行 dsh-rsi install 或 dsh-rsi-setup 注册服务`)
+      : `${profile}：尚未安装常驻服务（${presence.definitionPath} 不存在）。core/web 场景默认只提供按需启动的 Web/direct 能力，这是正常状态；如需 start/restart，请安装常驻场景：\n`
+        + `  dsh-rsi install --profile ${profile} --scenario lark\n`
+        + `或安装分级自治成长：\n`
+        + `  dsh-rsi install --profile ${profile} --scenario supervised\n`
+        + '安装完成前无需反复执行 start/restart。')
     return outcome
   }
 

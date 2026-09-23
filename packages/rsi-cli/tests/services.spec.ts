@@ -106,8 +106,11 @@ describe('controlManagedService', () => {
     const { runner, calls } = recordingRunner()
     const outcome = await controlManagedService('linux', home, 'web', 'restart', runner, false)
     expect(outcome.errors).toHaveLength(1)
-    expect(outcome.errors[0]).toMatch(/未注册受管常驻服务/)
-    expect(outcome.errors[0]).toMatch(/dsh-rsi install|dsh-rsi-setup/)
+    expect(outcome.errors[0]).toMatch(/尚未安装常驻服务/)
+    expect(outcome.errors[0]).toContain('dsh-rsi install --profile web --scenario lark')
+    expect(outcome.errors[0]).toContain('dsh-rsi install --profile web --scenario supervised')
+    expect(outcome.errors[0]).toMatch(/core\/web 场景.*正常状态/)
+    expect(outcome.errors[0]).not.toContain('dsh-rsi-setup')
     // 关键：绝不隐式注册服务，也不该调用 systemctl。
     expect(calls).toEqual([])
   })
@@ -258,6 +261,12 @@ describe('resolveTargetProfiles', () => {
       const dshHome = join(root, '.dsh')
       await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
       await mkdir(join(dshHome, 'profiles', 'personal-web'), { recursive: true })
+      await writeFile(join(dshHome, 'profiles', 'web', 'package.json'), JSON.stringify({
+        name: 'dsh-profile-web', private: true,
+      }))
+      await writeFile(join(dshHome, 'profiles', 'personal-web', 'package.json'), JSON.stringify({
+        name: 'dsh-profile-personal-web', private: true,
+      }))
       expect(await resolveTargetProfiles(dshHome, 'web')).toEqual(['web'])
       expect(await resolveTargetProfiles(dshHome)).toEqual(['personal-web', 'web'])
       // profiles/ 不存在时返回空数组，由 CLI 决定提示与退出码。

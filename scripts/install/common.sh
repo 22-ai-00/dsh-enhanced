@@ -39,6 +39,11 @@ DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
   'assistant-growth-experiments'
   'assistant-heartbeat'
   'assistant-health'
+  # Recovery's mounted class declares assistantGoals as a required Cordis
+  # injection.  peerDependenciesMeta.optional only affects package installation;
+  # it cannot make a Cordis injection optional.  Keep the runtime provider in
+  # the supervised top-level cohort so fresh profiles activate completely.
+  'assistant-goals'
   'assistant-recovery'
 )
 
@@ -932,7 +937,7 @@ dsh_enhanced_resolve_npm_cohort() {
   fi
 
   package_spec="$anchor@$selector"
-  if ! raw="$(npm view "$package_spec" version --json)"; then
+  if ! raw="$(npm view "$package_spec" version --json --location=global)"; then
     dsh_enhanced_fail 1 "无法从 npm 解析 $package_spec 的版本。"
     return $?
   fi
@@ -945,7 +950,7 @@ dsh_enhanced_resolve_npm_cohort() {
   printf 'npm cohort：%s@%s 解析为精确版本 %s。\n' "$anchor" "$selector" "$resolved"
   for slug in "$@"; do
     package_spec="@dsh-enhanced/$slug@$resolved"
-    if ! raw="$(npm view "$package_spec" version --json)"; then
+    if ! raw="$(npm view "$package_spec" version --json --location=global)"; then
       dsh_enhanced_fail 1 "npm 未发布所需 cohort bundle：$package_spec。尚未修改 profile。"
       return $?
     fi
@@ -3106,7 +3111,18 @@ NODE
   printf '\n将安装以下顶层 bundle：\n'
   printf '  - %s\n' "${targets[@]}"
   printf '\n安装到 DSH profile：\n'
-  dsh_enhanced_run "$dry_run" dsh plugin --profile "$profile" add "${targets[@]}" || return $?
+  # The selected plugin bundles intentionally declare Host-provided services as
+  # peers.  DSH supplies those services outside the profile package tree, so
+  # pnpm's repeated missing-peer/build-script advisory blocks are not actionable
+  # here.  Use pnpm's own log-level input rather than filtering text: warnings
+  # and progress are quiet, while real package-manager errors stay visible and
+  # retain their non-zero status.  The installer already prints the exact cohort
+  # and every lifecycle stage above/below this call.
+  if [[ "$dry_run" == '1' ]]; then
+    dsh_enhanced_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}"
+  else
+    npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}" || return $?
+  fi
   if [[ "$scenario" != 'core' ]]; then
     if [[ "$dry_run" == '1' ]]; then
       printf 'DSH setup peer 闭包：dry-run 不写入 %s/profiles/node_modules。\n' "$dsh_home"

@@ -172,11 +172,32 @@ describe('optional peer 静态导入守卫（按安装器场景闭包）', () =>
     expect(scenarios.autonomy).toContain('assistant-skills')
     expect(scenarios.lark).toContain('lark-channel')
     expect(scenarios.supervised).toContain('assistant-evolution')
+    expect(scenarios.supervised).toContain('assistant-goals')
+    expect(scenarios.supervised).toContain('assistant-recovery')
   })
 
   const closures = new Map<string, Set<string>>(
     Object.entries(scenarios).map(([name, slugs]) => [name, scenarioClosure(slugs, packages)]),
   )
+
+  test('supervised runtime providers cover Recovery required enhanced peers', () => {
+    const supervised = closures.get('supervised')!
+    const recovery = packages.get('@dsh-enhanced/assistant-recovery')!
+    // Recovery's mounted class declares these as required Cordis injections.
+    // peerDependenciesMeta.optional cannot make the runtime injection optional.
+    for (const provider of [
+      '@dsh-enhanced/assistant-automations',
+      '@dsh-enhanced/assistant-delivery',
+      '@dsh-enhanced/assistant-evaluation',
+      '@dsh-enhanced/assistant-evolution',
+      '@dsh-enhanced/assistant-goals',
+      '@dsh-enhanced/assistant-health',
+      '@dsh-enhanced/preference-learning',
+    ]) {
+      expect(supervised.has(provider), `supervised 缺少 Recovery provider ${provider}`).toBe(true)
+      expect(recovery.optionalPeers.has(provider), `Recovery manifest 缺少 peer ${provider}`).toBe(true)
+    }
+  })
 
   // 包名 -> 至少一个「装它但不装该 peer」的场景名列表（仅真·可选 peer）。
   const genuinelyOptional = new Map<string, Map<string, string[]>>()

@@ -42,7 +42,8 @@ describe('runSelfUpdate', () => {
     expect(report.globalPrefix).toBe('/opt/npm')
     expect(report.resolvedVersion).toBe('9.9.9')
     expect(report.alreadyCurrent).toBe(false)
-    expect(calls).toContain(`npm install --global ${RSI_CLI_PACKAGE}@latest`)
+    expect(calls).toContain(`npm view ${RSI_CLI_PACKAGE}@latest version --location=global`)
+    expect(calls).toContain(`npm install --global ${RSI_CLI_PACKAGE}@latest --location=global`)
   })
 
   test('已是目标版本时跳过安装，不执行 npm install', async () => {
@@ -69,7 +70,7 @@ describe('runSelfUpdate', () => {
     const report = await runSelfUpdate({ runner })
     expect(report.resolvedVersion).toBeUndefined()
     expect(report.alreadyCurrent).toBe(false)
-    expect(calls).toContain(`npm install --global ${RSI_CLI_PACKAGE}@latest`)
+    expect(calls).toContain(`npm install --global ${RSI_CLI_PACKAGE}@latest --location=global`)
   })
 
   test('接受精确版本与 dist-tag，拒绝非法 selector', async () => {
