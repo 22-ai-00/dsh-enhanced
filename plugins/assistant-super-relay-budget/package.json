@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-super-relay-budget",
-  "version": "0.1.40",
+  "version": "0.1.41",
   "description": "A Super Relay OpenAI Responses route with conservative goal-budget token metering.",
   "license": "MIT",
   "type": "module",
