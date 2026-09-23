@@ -1,0 +1,46 @@
+name: Approval repair workspace
+
+on:
+  push:
+    branches: [fix/approval-interaction]
+    paths: [.github/workflows/approval-repair.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: 11.7.0
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Export source and pinned offline test dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .repair-runtime/bin
+          cp "$(command -v node)" .repair-runtime/bin/node
+          pnpm_entry="$(readlink -f "$(command -v pnpm)")"
+          cp -a "$(dirname "$(dirname "$pnpm_entry")")" .repair-runtime/pnpm
+          git ls-files -z | tar --null -T - -cf "$RUNNER_TEMP/approval-repair.tar"
+          find . -type d -name node_modules -prune -print0 | tar --null -T - -rf "$RUNNER_TEMP/approval-repair.tar"
+          tar -rf "$RUNNER_TEMP/approval-repair.tar" .repair-runtime
+          gzip -1 "$RUNNER_TEMP/approval-repair.tar"
+          du -h "$RUNNER_TEMP/approval-repair.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: approval-repair-workspace
+          path: ${{ runner.temp }}/approval-repair.tar.gz
+          retention-days: 1
+          compression-level: 0
