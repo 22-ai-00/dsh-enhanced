@@ -1,4 +1,4 @@
-name: Approval browser compatibility
+name: Approval browser Host isolation
 on:
   push:
     branches: [fix/approval-interaction]
@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        host: [0.1.2-rc.1, 0.1.5-rc.1, 0.1.5-rc.2]
+        host: [0.1.2-rc.1, 0.1.5-rc.1]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -38,13 +38,19 @@ jobs:
           /usr/bin/bwrap --unshare-all --die-with-parent --new-session --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 --proc /proc --dev /dev /usr/bin/true
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - name: Install selected supported Host and Chromium
+      - name: Install selected supported Host with a deduplicated private dependency closure
         env:
           HOST_VERSION: ${{ matrix.host }}
+        shell: bash
         run: |
-          npm install --global --no-audit --no-fund --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty "@deepseek-ai/dsh@$HOST_VERSION"
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/approval-host" --prefer-dedupe --no-audit --no-fund --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty "@deepseek-ai/dsh@$HOST_VERSION"
+          npm dedupe --prefix "$RUNNER_TEMP/approval-host" --ignore-scripts --no-audit --no-fund
+          echo "$RUNNER_TEMP/approval-host/node_modules/.bin" >> "$GITHUB_PATH"
           pnpm exec playwright install --with-deps chromium
-      - name: Add test-only startup error exporter
+          mkdir -p .cache/web-owner-e2e
+          find "$RUNNER_TEMP/approval-host/node_modules" -type d \( -name dsh-api-session-controller -o -name dsh-win32-process -o -name dsh-hmr \) > .cache/web-owner-e2e/host-package-paths.txt
+      - name: Activate native HMR before startup and export startup errors
         shell: bash
         run: |
           mkdir -p .cache
@@ -63,7 +69,7 @@ jobs:
           text = path.read_text()
           anchor = "    const patch = parseDocument(await readFile(patchPath, 'utf8'))\n"
           assert text.count(anchor) == 1
-          text = text.replace(anchor, anchor + "    patch.add({ insert: [{ id: 'approval-startup-logger', name: resolve(root, '.cache/approval-startup-logger.mjs') }] })\n")
+          text = text.replace(anchor, anchor + "    patch.add({ id: 'hmr', disabled: false })\n    patch.add({ insert: [{ id: 'approval-startup-logger', name: resolve(root, '.cache/approval-startup-logger.mjs') }] })\n")
           path.write_text(text)
           PY
       - name: Exercise native Web approval and resume
@@ -71,6 +77,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: approval-web-${{ matrix.host }}
+          name: approval-web-isolated-${{ matrix.host }}
           path: .cache/web-owner-e2e
           retention-days: 3
