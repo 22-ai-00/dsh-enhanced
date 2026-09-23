@@ -1,4 +1,4 @@
-name: Approval repair workspace
+name: Approval repair verification
 
 on:
   push:
@@ -9,12 +9,93 @@ permissions:
   contents: read
 
 jobs:
-  workspace:
+  prepare:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      source: ${{ steps.prepare.outputs.source }}
+      release: ${{ steps.prepare.outputs.release }}
     steps:
       - uses: actions/checkout@v6
         with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: 11.7.0
+          run_install: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Decode and verify exact tested patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse origin/dev)" = aca468007b7b58340acad4cdf8424191b0f4ffbb
+          test "$(git rev-parse origin/main)" = aca468007b7b58340acad4cdf8424191b0f4ffbb
+          python3 - <<'PY'
+          import base64, gzip, hashlib
+          from pathlib import Path
+          encoded = Path('.github/approval-fix.patch.gz.b64').read_text().strip()
+          # Restore the separately pinned prefix after text transport truncation.
+          anchor = 'EM7pmg+9rFuHowBGKKMhva9i/b8V84vJ6tLZ+'
+          prefix = 'H4sIAAAAAAAC/+19aXNTV5rwd37FSXW/YwmkK8nynhDaIelKqkOTgqSnaihefC1d2WpkSXOvZMO4XWVICMbY2EnYMRATtiYBk4Sw2Cz/Je17JX/qvzDPcs5dtNgyS/d8SM9UsKWzPufZN6ezmYyIRoeyJaHH0oWUFUsVRop6KTuYzWVLh7WRtBhs/PmWbD5tHBId8Xh3XG/XtHS8J6GnDJGIx7s6OrZEo9FmK27Ztm1b01X/8AcR7YrExbbuSIf4wx+2bPvd74Q9+7Nz7qF9b9E58cR5/O3akW+qj5Yqp3/csm3LtveNXHbUMA+LysUvnLP35aDFG9WbR5wfjzpz86vPL4kB0xjKWiXD/LA8ouf7i0WzMKrn+vPWmGEa5gDOtednYKL4pJDLpg7/8+nU2s2zzg+LaxfnxEBcS2gdyQGxunx9deX8P5+e+OfTS/a9E9XvjsGp1hZXnKl5+8Y5e/Z4ZfnWP5/OrD6erX7+zJmehuPAwsI94erjU865W3IL4Tx6VDl9+x+TR52fb9tfzuD+5x6uPr9c/eWsfepq5fRVoc4p7K9n3IPNrE1erL44Dt/bXz2zv7rtLFwVRiZjpEpi7fi0c/o5n4AXEh9/vEvY80v29G24jL08h9vdvW7PnXcuPcBRL+45p5+I9/d+GNtZMNNZS1ROTDkLPzhTZ50z953Ze/byN8JKDRsjOiz7n8agWF2ZXX32Ag4uz7jHGCmUDGEvPakuXXYWv4QNGBD2pSv2s68BOvbMMefkDwIn5/AN8oYp7GNTfOt/TB7Ry6WCMI3RrAGPISpPl+37Xwm8eDZtmPD92ndXVp/crDy/Xj0yXX32A8Bp9fGkKIzhOpVbR+BTGFR9iG8Rs+fOOg+nYvbs4+qzZ/jxo9typHPy68rKZYTNyg17brqycNW+d4UOZR87Ur33GNZECM2fqqzcqqzcdU7cqi7C6Y4CiqXrSMS0slGrpJfKlo8+Ah9K4kh0dfS092Y0Ld6V6jS60g2IIzjNRxnBL5AsEh1IF4lOIouocO5+Zy/cZqT0U8ja+RV78Qo8rX199p9PL0p0g6H8ZDxIjOlADhk9B9j15TF4D/veDODx2nen1i78HYd8+xiAZX85C3jMIK8uPQKCWps8Yj+ftB/9VL13vbp0hKkRsfLIC/vYLGCVc+7v/LSI+ghfiSHO9LXqL/f5MXkpoCJET0BDew6o+Tai/wqSDiPQ6vKy/egGPEFleQlQfXXlevX57erSl0jk1644CycqZ2YEnL8whmgF43hte3axcuK4ffxL+/rxtZXzcEwAOiDK16uPp9cuzMNRGZWcyzec5fnVpxed0w/tqfv2qRVGJvv6F5X5L51TU87lz5GlzM1Xri8jKHzAq6x841y+urp8cnXlIV757P3qi0v28k04B'
+          assert encoded.count(anchor) == 1
+          patch = gzip.decompress(base64.b64decode(prefix + anchor + encoded.split(anchor)[1], validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '8a47c3bfde0ff8da53e1cf17fdd52b012c78bd5c7b3a96e8b1a69a51043d0cbc'
+          Path('/tmp/approval-fix.patch').write_bytes(patch)
+          PY
+          git apply --check --index --unidiff-zero /tmp/approval-fix.patch
+          git apply --index --unidiff-zero /tmp/approval-fix.patch
+          git rm .github/workflows/approval-repair.yml .github/approval-fix.patch.gz.b64
+          test "$(git write-tree)" = b1c6378208fbc8e8ec86101a4fd3ee7a2cbacecc
+      - name: Prepare clean source and version commits
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          source="$(printf '%s\n' 'fix: route actionable approvals to owner channels before Web remotes' | git commit-tree b1c6378208fbc8e8ec86101a4fd3ee7a2cbacecc -p aca468007b7b58340acad4cdf8424191b0f4ffbb)"
+          git reset --hard "$source"
+          node scripts/release-version.mjs prepare 0.1.43
+          node --input-type=module - <<'JS'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          const path = 'plugins/assistant-delivery/package.json'
+          const manifest = JSON.parse(readFileSync(path, 'utf8'))
+          manifest.peerDependencies['@dsh-enhanced/assistant-policy'] = '>=0.1.43 <0.2.0'
+          writeFileSync(path, JSON.stringify(manifest, null, 2) + '\n')
+          JS
+          pnpm install --lockfile-only --ignore-scripts
+          node scripts/release-version.mjs verify-tag v0.1.43
+          git add -u
+          git commit -m 'chore(release): prepare v0.1.43'
+          echo "source=$source" >> "$GITHUB_OUTPUT"
+          echo "release=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          printf 'Source: %s\nRelease: %s\nTree: %s\n' "$source" "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+      - name: Publish isolated candidate branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(gh api repos/${GITHUB_REPOSITORY}/git/ref/heads/dev --jq .object.sha)" = aca468007b7b58340acad4cdf8424191b0f4ffbb
+          test "$(gh api repos/${GITHUB_REPOSITORY}/git/ref/heads/main --jq .object.sha)" = aca468007b7b58340acad4cdf8424191b0f4ffbb
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" push "https://github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/fix/approval-ready
+
+  browser:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.release }}
           persist-credentials: false
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
         with:
@@ -25,22 +106,16 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Export source and pinned offline test dependencies
-        shell: bash
+      - run: pnpm build
+      - name: Install exact Host and Chromium
         run: |
-          set -euo pipefail
-          mkdir -p .repair-runtime/bin
-          cp "$(command -v node)" .repair-runtime/bin/node
-          pnpm_entry="$(readlink -f "$(command -v pnpm)")"
-          cp -a "$(dirname "$(dirname "$pnpm_entry")")" .repair-runtime/pnpm
-          git ls-files -z | tar --null -T - -cf "$RUNNER_TEMP/approval-repair.tar"
-          find . -type d -name node_modules -prune -print0 | tar --null -T - -rf "$RUNNER_TEMP/approval-repair.tar"
-          tar -rf "$RUNNER_TEMP/approval-repair.tar" .repair-runtime
-          gzip -1 "$RUNNER_TEMP/approval-repair.tar"
-          du -h "$RUNNER_TEMP/approval-repair.tar.gz"
+          npm install --global --no-audit --no-fund @deepseek-ai/dsh@0.1.5-rc.2
+          pnpm exec playwright install --with-deps chromium
+      - name: Exercise native Web approval and resume
+        run: pnpm test:web-owner
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: approval-repair-workspace
-          path: ${{ runner.temp }}/approval-repair.tar.gz
-          retention-days: 1
-          compression-level: 0
+          name: approval-web-regression
+          path: .cache/web-owner-e2e
+          retention-days: 3
