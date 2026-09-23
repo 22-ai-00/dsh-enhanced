@@ -2360,6 +2360,56 @@ dsh_enhanced_profile_lifecycle() {
   dsh_enhanced_run_lifecycle_executor "$operation" "$profile" "$dsh_home" "$expected_scenario" "$@"
 }
 
+# macOS 没有 Linux bwrap/systemd 强事务。该分支只在调用方已确认整个
+# DSH_HOME 静止时运行；升级前完整备份 profile，失败时恢复原目录。
+dsh_enhanced_macos_stopped_upgrade() {
+  local profile="$1"
+  local dsh_home="$2"
+  local dry_run="$3"
+  shift 3
+  local profile_directory="$dsh_home/profiles/$profile"
+  if [[ "$dry_run" == '1' ]]; then
+    printf '\nmacOS 已停止 Home 升级：\n'
+    printf '  - 将备份完整 profile，精确更新现有受管 bundle，并执行组合与临时 Host 激活验证。\n'
+    printf '  - 失败将恢复原 profile；不执行飞书 onboarding，不创建或启动 LaunchAgent。\n'
+    dsh_enhanced_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "$@"
+    dsh_enhanced_print_command dsh --profile "$profile" --dump-config
+    dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
+    return 0
+  fi
+  local backup_directory=''
+  backup_directory="$(mktemp -d "$dsh_home/profiles/.${profile}.upgrade-backup.XXXXXX")" || {
+    dsh_enhanced_fail 1 'macOS 升级无法创建 profile 备份目录。'
+    return $?
+  }
+  chmod 700 "$backup_directory" || { rm -rf -- "$backup_directory"; return 1; }
+  if ! cp -pR "$profile_directory/." "$backup_directory/"; then
+    rm -rf -- "$backup_directory"
+    dsh_enhanced_fail 1 'macOS 升级无法完整备份当前 profile；尚未修改安装。'
+    return $?
+  fi
+  local failure=''
+  npm_config_loglevel=error dsh plugin --profile "$profile" add "$@" || failure='package update failed'
+  if [[ -z "$failure" ]] && ! dsh --profile "$profile" --dump-config >/dev/null; then
+    failure='profile composition failed'
+  fi
+  if [[ -z "$failure" ]] && ! dsh_enhanced_verify_profile_activation "$profile" "$dsh_home" 0; then
+    failure='profile activation failed'
+  fi
+  if [[ -z "$failure" ]]; then
+    rm -rf -- "$backup_directory"
+    printf 'macOS profile 原地升级通过：package、组合配置与临时 Host 激活均已验证。\n'
+    return 0
+  fi
+  local failed_directory="${profile_directory}.failed-upgrade.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  if ! mv "$profile_directory" "$failed_directory" || ! mv "$backup_directory" "$profile_directory"; then
+    dsh_enhanced_fail 1 "macOS 升级失败（$failure），且自动恢复未完成；原备份保留在 $backup_directory。"
+    return $?
+  fi
+  dsh_enhanced_fail 1 "macOS 升级失败（$failure）；原 profile 已恢复，失败现场保留在 $failed_directory。"
+}
+
+
 dsh_enhanced_install() {
   local source_mode="$1"
   local repo_root="$2"
@@ -2670,20 +2720,10 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；Lark/supervised service lifecycle 会自行停止受管 systemd units，该确认表示其它外部/手工进程均已停止。"
       return $?
     fi
-    if [[ "$scenario_explicit" != '1' ]]; then
-      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前需要显式 --scenario。'
-      return $?
-    fi
-    if [[ "$scenario" != 'web' && "$scenario" != 'autonomy' && "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
-      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前只支持显式 --scenario web、autonomy、lark 或 supervised。'
-      return $?
-    fi
-    if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$manage_service" != '1' ]]; then
-      dsh_enhanced_fail 2 'Lark/supervised upgrade/uninstall 必须由 systemd user service-aware 生命周期执行；不能使用 --no-service。'
-      return $?
-    fi
-    if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" != 'Linux' ]]; then
-      dsh_enhanced_fail 2 'Lark/supervised service-aware upgrade/uninstall 当前仅支持 Linux systemd --user。'
+    if [[ "$scenario_explicit" == '1'
+      && "$scenario" != 'web' && "$scenario" != 'autonomy'
+      && "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
+      dsh_enhanced_fail 2 '--operation upgrade/uninstall 的 --scenario 只支持 web、autonomy、lark 或 supervised。'
       return $?
     fi
     if [[ "$dry_run" == '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
@@ -2711,7 +2751,7 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 'profile 生命周期事务不会修改全局 DSH；请先单独完成 Host 升级，再执行本操作。'
       return $?
     fi
-    if [[ "$dry_run" != '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
+    if [[ "$dry_run" != '1' && "$scenario_explicit" == '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
       if [[ "$scenario" == 'lark' || "$scenario" == 'supervised' ]]; then
         dsh_enhanced_run_lifecycle_executor service-recover "$profile" "$dsh_home" "$scenario" || return $?
       else
@@ -2725,13 +2765,37 @@ dsh_enhanced_install() {
       "$profile" "$dsh_home" "$lifecycle_directory")"; then
       return 1
     fi
+    if [[ "$scenario_explicit" != '1' ]]; then
+      scenario="$effective_lifecycle_scenario"
+      printf '生命周期场景：已从 effective/composed profile 自动识别为 %s。\n' "$scenario"
+    fi
     if [[ "$effective_lifecycle_scenario" == 'unsupported' && "$operation" != 'uninstall' ]]; then
       dsh_enhanced_fail 1 '实际 effective/composed profile 无法安全归类为 web、autonomy 或已启用 Lark；拒绝 lifecycle 操作。'
+      return $?
+    fi
+    if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$manage_service" != '1' ]]; then
+      dsh_enhanced_fail 2 'Lark/supervised upgrade/uninstall 必须管理受管常驻服务；不能使用 --no-service。'
+      return $?
+    fi
+    local lifecycle_platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+    if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' )
+      && "$lifecycle_platform" != 'Linux'
+      && !( "$operation" == 'upgrade' && ( "$lifecycle_platform" == 'Darwin' || "$lifecycle_platform" == 'darwin' ) ) ]]; then
+      dsh_enhanced_fail 2 'Lark/supervised 生命周期支持 Linux systemd --user；macOS 仅支持已停止 Home 的 upgrade。'
       return $?
     fi
     if [[ "$effective_lifecycle_scenario" != "$scenario"
       && !( "$operation" == 'uninstall' && "$effective_lifecycle_scenario" == 'unsupported' ) ]]; then
       dsh_enhanced_fail 2 "声明的 --scenario $scenario 与实际 effective/composed profile 场景 $effective_lifecycle_scenario 不一致；拒绝 lifecycle 操作。"
+      return $?
+    fi
+    if [[ "$dry_run" != '1' && "$scenario_explicit" != '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
+      if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$lifecycle_platform" == 'Linux' ]]; then
+        dsh_enhanced_run_lifecycle_executor service-recover "$profile" "$dsh_home" "$scenario" || return $?
+      else
+        dsh_enhanced_run_lifecycle_executor recover "$profile" "$dsh_home" "$scenario" || return $?
+      fi
+      dsh_enhanced_fail 1 '已恢复或隔离上次生命周期事务；本次未开始新的 package、registry、store 或 service mutation。请检查恢复结果后重试。'
       return $?
     fi
     model_mode='skip'
@@ -2747,12 +2811,15 @@ dsh_enhanced_install() {
     if [[ "$source_mode" == 'npm' && "$operation" == 'upgrade' && "$dry_run" != '1' ]]; then
       dsh_enhanced_require_node || return $?
       dsh_enhanced_require_existing_runtime "$ack_unverified_host" || return $?
-      if [[ "$scenario" == 'lark' || "$scenario" == 'supervised' ]]; then
+      if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$lifecycle_platform" == 'Linux' ]]; then
         dsh_enhanced_run_lifecycle_executor npm-service-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version"
-      else
-        dsh_enhanced_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version"
+        return $?
       fi
-      return $?
+      if [[ "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
+        dsh_enhanced_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version"
+        return $?
+      fi
+      printf 'macOS 已停止 Home 升级：将保留现有 Lark/supervised 配置，不重跑 onboarding 或注册服务。\n'
     fi
   fi
 
@@ -2999,6 +3066,11 @@ NODE
       dsh_enhanced_fail 1 '当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。'
       return $?
     fi
+    if dsh_enhanced_profile_mentions_bundle "$dsh_home/profiles/$profile/package.json" '@dsh-enhanced/assistant-recovery' \
+      && ! dsh_enhanced_profile_mentions_bundle "$dsh_home/profiles/$profile/package.json" '@dsh-enhanced/assistant-goals'; then
+      printf '兼容性修复：检测到旧 profile 含 assistant-recovery 但缺少 assistant-goals；本次将补齐其必需 provider。\n'
+      dsh_enhanced_append_slug 'assistant-goals'
+    fi
   else
     for slug in "${DSH_ENHANCED_CORE_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
     case "$scenario" in
@@ -3081,7 +3153,7 @@ NODE
   done
 
   if [[ "$operation" == 'upgrade' ]]; then
-    if [[ "$scenario" == 'lark' || "$scenario" == 'supervised' ]]; then
+    if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$lifecycle_platform" == 'Linux' ]]; then
       if [[ "$dry_run" == '1' ]]; then
         if [[ "$scenario" == 'supervised' ]]; then
           printf '\nsupervised service-aware upgrade (Linux systemd --user):\n'
@@ -3102,9 +3174,13 @@ NODE
       else
         dsh_enhanced_run_lifecycle_executor service-upgrade "$profile" "$dsh_home" "$scenario" "${targets[@]}"
       fi
-    else
-      dsh_enhanced_profile_lifecycle upgrade "$profile" "$dsh_home" "$dry_run" "$scenario" "${targets[@]}"
+      return $?
     fi
+    if [[ "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
+      dsh_enhanced_profile_lifecycle upgrade "$profile" "$dsh_home" "$dry_run" "$scenario" "${targets[@]}"
+      return $?
+    fi
+    dsh_enhanced_macos_stopped_upgrade "$profile" "$dsh_home" "$dry_run" "${targets[@]}"
     return $?
   fi
 
@@ -3145,7 +3221,7 @@ NODE
     dsh --profile "$profile" --dump-config >/dev/null
     printf 'profile 配置校验通过。\n'
   fi
-  if [[ "$existing_lark_configured" == '1' ]]; then
+  if [[ "$existing_lark_configured" == '1' && "$operation" == 'install' ]]; then
     printf 'profile 运行时自检：检测到已有启用的 Lark channel；跳过临时 Host，避免与可能运行的既有服务并发访问状态。\n'
   else
     dsh_enhanced_verify_profile_activation "$profile" "$dsh_home" "$dry_run" || return $?
@@ -3186,7 +3262,7 @@ NODE
     fi
     dsh_enhanced_apply_lark "$lark_mode" "$profile" "$dsh_home" "$lark_configured" "$manage_service" "$dry_run" "$agent_tools_mode" || return $?
   fi
-  if [[ "$deployment_mode" == 'supervised-growth' ]]; then
+  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
     dsh_enhanced_apply_supervised_growth "$profile" "$dsh_home" "$ack_existing_automations" "$dry_run" || return $?
   fi
 
@@ -3276,7 +3352,9 @@ NODE
     fi
   fi
 
-  dsh_enhanced_ensure_rsi_cli "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
+  if [[ "$operation" == 'install' ]]; then
+    dsh_enhanced_ensure_rsi_cli "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
+  fi
 
   printf '\n安装流程完成。\n'
   printf '检查配置：dsh --profile %s --dump-config\n' "$profile"

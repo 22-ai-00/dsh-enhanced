@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import { PurgeError } from '../src/purge.ts'
 import type { CommandResult, CommandRunner } from '../src/run.ts'
-import { formatSelfUpdateReport, RSI_CLI_PACKAGE, runSelfUpdate } from '../src/update.ts'
+import { formatSelfUpdateReport, prefixFromPackageRoot, RSI_CLI_PACKAGE, runSelfUpdate } from '../src/update.ts'
 import { main, type MainDeps } from '../src/index.ts'
 import { version as VERSION } from '../src/version.ts'
 
@@ -34,6 +34,25 @@ function npmRunner(options: {
 }
 
 describe('runSelfUpdate', () => {
+  test('从当前全局包路径反推真实 npm prefix', () => {
+    expect(prefixFromPackageRoot('/Users/test/.npm-global/lib/node_modules/@dsh-enhanced/rsi-cli'))
+      .toBe('/Users/test/.npm-global')
+    expect(prefixFromPackageRoot('/checkout/packages/rsi-cli')).toBeUndefined()
+  })
+
+  test('固定写回当前包所属 prefix，不受当前 npm 配置漂移影响', async () => {
+    const { runner, calls } = npmRunner({ prefix: '/wrong-prefix', viewVersion: '9.9.9' })
+    const report = await runSelfUpdate({
+      runner,
+      packageRoot: '/Users/test/.npm-global/lib/node_modules/@dsh-enhanced/rsi-cli',
+    })
+    expect(report.globalPrefix).toBe('/Users/test/.npm-global')
+    expect(calls).not.toContain('npm prefix -g')
+    expect(calls).toContain(
+      `npm install --global --prefix /Users/test/.npm-global ${RSI_CLI_PACKAGE}@latest --location=global`,
+    )
+    expect(report.installedVersion).toBe('9.9.9')
+  })
   test('默认 selector 为 latest，执行全局安装并报告前缀与目标版本', async () => {
     const { runner, calls } = npmRunner({ prefix: '/opt/npm', viewVersion: '9.9.9' })
     const report = await runSelfUpdate({ runner })
@@ -41,9 +60,9 @@ describe('runSelfUpdate', () => {
     expect(report.selector).toBe('latest')
     expect(report.globalPrefix).toBe('/opt/npm')
     expect(report.resolvedVersion).toBe('9.9.9')
-    expect(report.alreadyCurrent).toBe(false)
-    expect(calls).toContain(`npm view ${RSI_CLI_PACKAGE}@latest version --location=global`)
-    expect(calls).toContain(`npm install --global ${RSI_CLI_PACKAGE}@latest --location=global`)
+    expect(calls).toContain(
+      `npm install --global --prefix /opt/npm ${RSI_CLI_PACKAGE}@latest --location=global`,
+    )
   })
 
   test('已是目标版本时跳过安装，不执行 npm install', async () => {
@@ -58,7 +77,9 @@ describe('runSelfUpdate', () => {
     const { runner, calls } = npmRunner({ viewVersion: '9.9.9' })
     const report = await runSelfUpdate({ runner, dryRun: true })
     expect(calls.some(call => call.includes('install'))).toBe(false)
-    expect(report.actions).toEqual([`npm install --global ${RSI_CLI_PACKAGE}@latest`])
+    expect(report.actions).toEqual([
+      `npm install --global --prefix /usr/local ${RSI_CLI_PACKAGE}@latest`,
+    ])
     const rendered = formatSelfUpdateReport(report, true)
     expect(rendered).toMatch(/dry-run/)
     expect(rendered).toMatch(/将升级/)
@@ -70,7 +91,9 @@ describe('runSelfUpdate', () => {
     const report = await runSelfUpdate({ runner })
     expect(report.resolvedVersion).toBeUndefined()
     expect(report.alreadyCurrent).toBe(false)
-    expect(calls).toContain(`npm install --global ${RSI_CLI_PACKAGE}@latest --location=global`)
+    expect(calls).toContain(
+      `npm install --global --prefix /usr/local ${RSI_CLI_PACKAGE}@latest --location=global`,
+    )
   })
 
   test('接受精确版本与 dist-tag，拒绝非法 selector', async () => {
@@ -108,6 +131,8 @@ describe('main：update 命令派发', () => {
     return vi.fn<SelfUpdateFn>(async () => ({
       fromVersion: VERSION,
       selector: 'latest',
+      resolvedVersion: VERSION,
+      installedVersion: VERSION,
       alreadyCurrent: false,
       actions: [],
     }))
@@ -117,12 +142,14 @@ describe('main：update 命令派发', () => {
     return vi.fn<InstallFn>(async () => code)
   }
 
+  const noRunning = () => ({ active: [] })
+
   test('不带 --all 时只升级自身，绝不调用安装器', async () => {
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     const install = makeInstall()
     const selfUpdate = makeSelfUpdate()
     try {
-      const code = await main(['update'], { HOME: '/h' }, { install, selfUpdate })
+      const code = await main(['update'], { HOME: '/h' }, { install, selfUpdate, findRunning: noRunning })
       expect(code).toBe(0)
       expect(selfUpdate).toHaveBeenCalledTimes(1)
       expect(install).not.toHaveBeenCalled()
@@ -134,7 +161,7 @@ describe('main：update 命令派发', () => {
     const install = makeInstall()
     const selfUpdate = makeSelfUpdate()
     try {
-      const code = await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate })
+      const code = await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate, findRunning: noRunning })
       expect(code).toBe(0)
       // 顺序是刻意的：先升级自身，再交给安装器升级 cohort。
       expect(selfUpdate).toHaveBeenCalledTimes(1)
@@ -145,12 +172,57 @@ describe('main：update 命令派发', () => {
     } finally { write.mockRestore() }
   })
 
+  test('--all 在自身升级后自动确认静止、使用目标版本安装器且不要求场景参数', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const install = makeInstall()
+    const selfUpdate = vi.fn<SelfUpdateFn>(async () => ({
+      fromVersion: VERSION,
+      selector: 'latest',
+      resolvedVersion: '9.9.9',
+      installedVersion: '9.9.9',
+      alreadyCurrent: false,
+      actions: [],
+    }))
+    const findRunning = vi.fn(() => ({ active: [] }))
+    try {
+      const code = await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate, findRunning })
+      expect(code).toBe(0)
+      expect(findRunning).toHaveBeenCalledTimes(1)
+      expect(install).toHaveBeenCalledTimes(1)
+      const passed = install.mock.calls[0]![0] as {
+        releaseRef: string
+        passthrough: readonly string[]
+      }
+      expect(passed.releaseRef).toBe('v9.9.9')
+      expect(passed.passthrough).toContain('--operation')
+      expect(passed.passthrough).toContain('upgrade')
+      expect(passed.passthrough).toContain('--confirm-dsh-home-stopped')
+      expect(passed.passthrough).not.toContain('--scenario')
+    } finally { write.mockRestore() }
+  })
+
+  test('--all 检测到运行中 Host 时停止，不调用安装器', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const install = makeInstall()
+    const selfUpdate = makeSelfUpdate()
+    const findRunning = vi.fn(() => ({
+      active: [{ pid: 123, commandLine: 'dsh --profile web' }],
+    }))
+    try {
+      expect(await main(['update', '--all'], { HOME: '/h' }, {
+        install, selfUpdate, findRunning,
+      })).toBe(1)
+      expect(install).not.toHaveBeenCalled()
+      expect(error).toHaveBeenCalledWith(expect.stringMatching(/PID 123/))
+    } finally { write.mockRestore(); error.mockRestore() }
+  })
   test('--version 透传给自身升级，且不泄漏给安装器', async () => {
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     const install = makeInstall()
     const selfUpdate = makeSelfUpdate()
     try {
-      await main(['update', '--all', '--version', '0.1.38'], { HOME: '/h' }, { install, selfUpdate })
+      await main(['update', '--all', '--version', '0.1.38'], { HOME: '/h' }, { install, selfUpdate, findRunning: noRunning })
       expect(selfUpdate.mock.calls[0]![0]).toMatchObject({ selector: '0.1.38' })
       const passed = install.mock.calls[0]![0] as { passthrough: readonly string[] }
       expect(passed.passthrough).not.toContain('--version')
@@ -164,7 +236,7 @@ describe('main：update 命令派发', () => {
     const install = makeInstall()
     const selfUpdate = vi.fn<SelfUpdateFn>(async () => { throw new PurgeError('npm 失败') })
     try {
-      expect(await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate })).toBe(1)
+      expect(await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate, findRunning: noRunning })).toBe(1)
       expect(install).not.toHaveBeenCalled()
     } finally { write.mockRestore(); error.mockRestore() }
   })
@@ -174,7 +246,7 @@ describe('main：update 命令派发', () => {
     const install = makeInstall(7)
     const selfUpdate = makeSelfUpdate()
     try {
-      expect(await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate })).toBe(7)
+      expect(await main(['update', '--all'], { HOME: '/h' }, { install, selfUpdate, findRunning: noRunning })).toBe(7)
     } finally { write.mockRestore() }
   })
 })
