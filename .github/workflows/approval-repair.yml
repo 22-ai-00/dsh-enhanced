@@ -2,7 +2,7 @@ name: Verify and stage native Web client repair
 on:
   push:
     branches: [fix/approval-interaction]
-    paths: [.github/workflows/approval-repair.yml, .github/patches/web-native-client.py]
+    paths: [.github/workflows/approval-repair.yml, .github/patches/web-native-client.py, .github/patches/web-native-client-inject.py]
 permissions:
   contents: read
 jobs:
@@ -27,7 +27,9 @@ jobs:
           path: candidate
           persist-credentials: false
       - name: Apply only the reviewed repair to the exact candidate
-        run: python3 ../repair-source/.github/patches/web-native-client.py
+        run: |
+          python3 ../repair-source/.github/patches/web-native-client.py
+          python3 ../repair-source/.github/patches/web-native-client-inject.py
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
         with:
           version: 11.7.0
@@ -119,6 +121,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = 1bc2bf92d0b0ec80dfd969696fcad3acd23d8dee
           python3 ../repair-source/.github/patches/web-native-client.py
+          python3 ../repair-source/.github/patches/web-native-client-inject.py
           git add plugins/assistant-web-owner/src/native-client.ts plugins/assistant-web-owner/src/index.ts plugins/assistant-web-owner/src/client.ts plugins/assistant-web-owner/scripts/build-client.mjs plugins/assistant-web-owner/package.json plugins/assistant-web-owner/tests/index.spec.ts plugins/assistant-web-owner/tests/native-client.spec.ts plugins/assistant-web-owner/README.md scripts/e2e/web-owner.spec.mjs docs/architecture.md pnpm-lock.yaml
           git diff --cached --check
           git config user.name 'github-actions[bot]'
