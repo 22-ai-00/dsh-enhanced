@@ -1,4 +1,4 @@
-name: Approval Host import diagnosis
+name: Approval Host protocol diagnosis
 on:
   push:
     branches: [fix/approval-interaction]
@@ -14,38 +14,53 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      - name: Install the exact upstream Host
-        run: npm install --global --no-audit --no-fund --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.1.5-rc.2
-      - name: Inspect module resolution and real imports
+      - name: Inspect a private supported Host without executing install scripts
         shell: bash
         run: |
           set -euo pipefail
-          export DSH_CLI_ROOT="$(npm root -g)/@deepseek-ai/dsh"
-          node --input-type=module <<'JS' | tee "$RUNNER_TEMP/approval-host-imports.txt"
-          import { readdirSync, readFileSync } from 'node:fs'
-          import { join } from 'node:path'
-          import { spawnSync } from 'node:child_process'
-          const paths = []
-          function walk(path) {
+          mkdir -p "$RUNNER_TEMP/protocol-host" "$RUNNER_TEMP/approval-protocol"
+          npm install --prefix "$RUNNER_TEMP/protocol-host" --ignore-scripts --prefer-dedupe --no-audit --no-fund @deepseek-ai/dsh@0.1.5-rc.1
+          export HOST_ROOT="$RUNNER_TEMP/protocol-host/node_modules"
+          export OUTPUT_ROOT="$RUNNER_TEMP/approval-protocol"
+          node --input-type=module <<'JS'
+          import { readdirSync, readFileSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs'
+          import { join, relative, dirname } from 'node:path'
+          const root = process.env.HOST_ROOT, out = process.env.OUTPUT_ROOT
+          const selected = new Set(['dsh-api-session-controller', 'dsh-session-projection', 'dsh-client-ui-conversation', 'dsh-client-ui-session', 'dsh-agent-loop', 'dsh-llm'])
+          const versions = []
+          let bytes = 0
+          function inspect(path) {
             for (const entry of readdirSync(path, { withFileTypes: true })) {
-              if (!entry.isDirectory()) continue
               const file = join(path, entry.name)
-              if (entry.name === 'dsh-sandbox-local' || entry.name === 'dsh-subprocess-local') paths.push(file)
-              if (entry.name === 'node_modules' || path.endsWith('node_modules') || entry.name.startsWith('@') || entry.name.startsWith('dsh-')) walk(file)
+              if (!entry.isDirectory()) continue
+              if (path.endsWith('/@deepseek-ai') && entry.name.startsWith('dsh')) {
+                const pkg = JSON.parse(readFileSync(join(file, 'package.json'), 'utf8'))
+                versions.push({ path: relative(root, file), name: pkg.name, version: pkg.version, dependencies: pkg.dependencies })
+                if (selected.has(entry.name)) collect(file)
+              }
+              if (entry.name === 'node_modules' || path.endsWith('/node_modules') || entry.name.startsWith('@')) inspect(file)
             }
           }
-          walk(process.env.DSH_CLI_ROOT)
-          console.log(JSON.stringify({ platform: process.platform, node: process.version, paths }, null, 2))
-          for (const path of paths) {
-            console.log('MANIFEST', readFileSync(join(path, 'package.json'), 'utf8'))
-            const code = `try { const m = await import(${JSON.stringify(join(path, 'lib/index.js'))}); console.log('IMPORTED', Object.keys(m)) } catch(e) { console.error(e.stack); if(e.cause) console.error(e.cause); process.exitCode = 1 }`
-            const result = spawnSync(process.execPath, ['--input-type=module', '-e', code], { encoding: 'utf8', timeout: 15000 })
-            console.log('IMPORT', path, 'EXIT', result.status, result.stdout, result.stderr)
+          function collect(path) {
+            for (const entry of readdirSync(path, { withFileTypes: true })) {
+              const file = join(path, entry.name)
+              if (entry.name === 'node_modules') continue
+              if (entry.isDirectory()) { collect(file); continue }
+              if (!entry.isFile() || !/\.(?:json|[cm]?js|ts)$/.test(entry.name)) continue
+              const content = readFileSync(file)
+              if ((bytes += content.length) > 20 * 1024 * 1024) throw new Error('diagnostic source bound exceeded')
+              const target = join(out, relative(root, file))
+              mkdirSync(dirname(target), { recursive: true })
+              copyFileSync(file, target)
+            }
           }
+          inspect(root)
+          writeFileSync(join(out, 'versions.json'), JSON.stringify(versions, null, 2))
+          console.log(JSON.stringify({ packages: versions.length, sourceBytes: bytes }))
           JS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: approval-host-imports
-          path: ${{ runner.temp }}/approval-host-imports.txt
+          name: approval-host-protocol
+          path: ${{ runner.temp }}/approval-protocol
           retention-days: 1
