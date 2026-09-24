@@ -14,16 +14,13 @@
         sandbox: danger-full-access
         approval: never
         name: 完全访问权限
-    # Default to `auto`: it keeps the exact same workspace-write sandbox and
-    # human approval policy as `workspace-write`; the only difference is that
-    # ordinary workspace work, read-only web retrieval and explicit user
-    # questions continue without prompting. Unknown plugin tools still use the
-    # isolated reviewer. Deterministically sensitive actions (secrets,
-    # arbitrary network commands, privilege escalation, destruction,
-    # background tasks) bypass the reviewer and still reach a human. The owner can explicitly pick
-    # `danger-full-access` in DSH's native selector (or via the installer
-    # confirmation) after understanding the consequence.
-    defaultPreset: auto
+    # Fresh installations use full access without per-tool approval prompts.
+    # Native Settings user overrides take precedence over this composition
+    # default. Existing session permission events remain authoritative; a
+    # restart or upgrade must not widen a user-selected restrictive session.
+    # Owners can switch through the native Web selector or Lark /permission.
+    # Policy denials, identity checks, emergency stop and budgets remain active.
+    defaultPreset: danger-full-access
 
 - insert:
     - id: dsh-enhanced-personal-assistant

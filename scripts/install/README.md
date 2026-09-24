@@ -162,11 +162,13 @@ v1 任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次�
 
 核心 profile 中的 `plugin_discover` 可立即按能力检索内置、完整性固定的首方候选目录；它不会下载或启用任何包。Agent 只能生成待审批 plan，owner 仍需用 `dsh-plugin-control approve` 与 `activate` 在 staging profile 中显式启用。写入 `~/.dsh/plugin-control/catalog.json` 的 owner catalog 会取代内置目录。
 
-默认 Permission 是 `auto`（与 `workspace-write + ask` 同一沙箱，仅低/中风险可逆动作由隔离 reviewer 自动批准，高风险仍交人工）；每步都问可显式传 `--permission workspace-write`，完整访问需要明确确认：
+新安装在没有用户权限设置时默认 **Full access**（`danger-full-access + never`），不逐次请求批准，可访问任意文件和网络；只应在信任的环境中使用。安装器仍默认 `--permission preserve`：已有用户设置原样保留，已记录的会话档位也不会被升级覆盖。需要更严格的后续会话默认，用 `--permission workspace-write`（人工批准）或 `--permission auto`（自动审核）。显式把既有默认改为完全访问时，使用：
 
 ```sh
 ./scripts/install/install-local.sh --permission danger-full-access --confirm-dangerous-full-access
 ```
+
+当前会话不必为了切换档位而重启：Web 使用原生 Permission selector；飞书发送 `/permission` 打开卡片，或发送 `/permission ask`、`/permission auto`、`/permission full confirm`。这些入口修改当前会话；安装器的 `--permission` 修改后续新会话默认。Full access 不绕过显式 Policy 拒绝、紧急停止、身份、预算以及操作系统权限。
 
 默认不更改安装器托管的 Agent capability 规则。飞书场景中才可显式用 `--agent-tools allow` 或 `--agent-tools disable`；`core` 场景保持 `preserve`。
 

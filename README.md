@@ -95,7 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/
 
 引导器 `install-npm.sh` 虽从 `main` 拉取，但实际安装逻辑及按操作需要的生命周期 helper 从同一个固定 `vX.Y.Z` 发布标签拉取并全部通过内嵌 SHA-256 校验后才执行，不从 mutable `main` 执行代码。完整场景选项、凭据存储和平台差异见[安装脚本文档](scripts/install)；飞书授权、模型选择、进度展示与常驻服务见 [`lark-channel` 文档](plugins/lark-channel)。
 
-个人助理默认采用 `auto`：它与 `workspace-write` 使用完全相同的工作区沙箱与人工审批策略，区别只是低/中风险的可逆动作由隔离 reviewer 自动批准，不再逐次弹确认；网络、凭据、破坏性操作、提权和后台任务等确定性高风险动作仍绕过 reviewer 直达人工，复杂 shell 语法与包安装（如 `npm install`、`npx`、管道/重定向）会先交隔离 reviewer 按实际内容研判。需要每步都问可显式传 `--permission workspace-write`。需要最低打扰时可传 `--permission danger-full-access --confirm-dangerous-full-access`，此时 reviewer 为 `none`，工具风险分类被整体跳过（网络、凭据读取、破坏性命令和提权都不再询问），只应在完全信任当前 workspace 时使用。注意两套名称不同：安装器 `--permission` 取 `preserve|workspace-write|auto|danger-full-access`，而运行时在飞书里用 `/permission ask|auto|full confirm` 切换（`full` 需二次确认）。工具可达性和执行权限是两层控制；即使选择 `danger-full-access`，显式 Policy deny、紧急停止、身份校验和预算硬门仍然生效。完整边界以各插件 README 为准。
+个人助理在没有用户权限设置的新安装中默认采用 **Full access**（`danger-full-access + never`，reviewer 为 `none`）：工具可访问任意文件与网络，不逐次请求批准。这也包括网络访问、凭据读取和破坏性命令，请仅在信任的运行环境使用。已有 `settings.yaml` 用户设置和已记录的会话档位优先，升级或重启不会把用户选过的 `ask` / `auto` 擅自改成完全访问。需要更严格的安装默认可显式传 `--permission workspace-write` 或 `--permission auto`；显式覆盖既有默认为完全访问仍使用 `--permission danger-full-access --confirm-dangerous-full-access`。Web 使用原生 Permission selector 切换当前会话；飞书发送 `/permission` 打开权限卡片，或使用 `/permission ask`、`/permission auto`、`/permission full confirm`。无需寻找其他产品的 approval/sandbox 设置或重启会话来完成运行时切换。工具可达性和执行权限是两层控制；Full access 不会绕过显式 Policy deny、紧急停止、身份校验、预算硬门或操作系统自身的权限。完整边界以各插件 README 为准。
 
 ## 能力概览
 
