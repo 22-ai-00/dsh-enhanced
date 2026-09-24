@@ -28,9 +28,13 @@ describe('permission setup', () => {
     expect(await readFile(join(home, 'settings.yaml'), 'utf8')).toContain('extra: retain')
   })
 
-  test('defaults new profiles to the auto preset', () => {
+  test('defaults the explicitly invoked setup helper to full access', () => {
     const args = parsePermissionSetupArgs(['--dsh-home', '/tmp/dsh'])
-    expect(args.preset).toBe('auto')
+    expect(args.preset).toBe('danger-full-access')
+  })
+
+  test.each(['workspace-write', 'auto', 'danger-full-access'])('honors an explicit %s override', preset => {
+    expect(parsePermissionSetupArgs(['--dsh-home', '/tmp/dsh', '--preset', preset]).preset).toBe(preset)
   })
 
   test('fails closed for unsafe paths and invalid preset names', () => {
