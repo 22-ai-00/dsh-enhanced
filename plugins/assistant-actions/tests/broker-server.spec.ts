@@ -92,8 +92,8 @@ function actionOptions(socketPath: string) {
   return { ...connectionOptions(socketPath), clientPrivateKey: clientKeys.privateKey, clientKeyId: 'client-fixture', source: { kind: 'assistant-actions-host' as const, instanceId: 'host-fixture', generation: 2 } }
 }
 
-async function connect(path: string): Promise<Socket> {
-  return await new Promise<Socket>((resolve, reject) => { const socket = createConnection({ path }); socket.once('connect', () => resolve(socket)); socket.once('error', reject) })
+async function connect(path: string, allowHalfOpen = false): Promise<Socket> {
+  return await new Promise<Socket>((resolve, reject) => { const socket = createConnection({ path, allowHalfOpen }); socket.once('connect', () => resolve(socket)); socket.once('error', reject) })
 }
 
 async function nextFrame(socket: Socket): Promise<unknown> {
@@ -280,19 +280,43 @@ describe('GitHubBrokerServer', () => {
     await expect(lstat(path)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  it('bounds shutdown after a valid response when the client keeps its write half open', async () => {
-    const server = await start()
-    const socket = await connect(server.actionSocketPath)
-    const hello = verifyBrokerServerHello(await nextFrame(socket), serverKeys.publicKey)
-    const request = createBrokerClientRequest(intent(), hello, { kind: 'assistant-actions-host', instanceId: 'host-fixture', generation: 2 }, 'client-fixture', clientKeys.privateKey)
-    socket.write(encodeBrokerFrame(request, 8 * 1024 * 1024))
-    await nextFrame(socket)
-    const startedAt = Date.now()
-    await server.stop('lifecycle', 100)
-    expect(Date.now() - startedAt).toBeLessThan(500)
-    expect(socket.destroyed).toBe(true)
-    await expect(lstat(server.actionSocketPath)).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(lstat(server.adminSocketPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  it('closes a real half-open response connection without waiting for the shutdown deadline', async () => {
+    // Drive deadlines independently of real socket/fs progress. A loaded CI
+    // runner is not a 100ms stopwatch. The next test still verifies an actual
+    // bounded failure for barriers that ignore cancellation.
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+    let socket: Socket | undefined
+    try {
+      const server = await start()
+      socket = await connect(server.actionSocketPath, true)
+      const hello = verifyBrokerServerHello(await nextFrame(socket), serverKeys.publicKey)
+      const request = createBrokerClientRequest(intent(), hello, { kind: 'assistant-actions-host', instanceId: 'host-fixture', generation: 2 }, 'client-fixture', clientKeys.privateKey)
+      const response = nextFrame(socket)
+      const ended = new Promise<void>(resolve => socket!.once('end', resolve))
+      socket.write(encodeBrokerFrame(request, 8 * 1024 * 1024))
+      await response
+      await ended
+      expect(socket.allowHalfOpen).toBe(true)
+      expect(socket.writableEnded).toBe(false)
+      expect(socket.destroyed).toBe(false)
+      const startedAt = Date.now()
+      // Do not advance the test clock: this can only resolve through the real
+      // close/drain barriers, never a deadline callback masquerading as success.
+      await server.stop('lifecycle', 100)
+      expect(Date.now() - startedAt).toBe(0)
+      expect(server.accepting).toBe(false)
+      expect(server.activeRequests).toBe(0)
+      await expect(lstat(server.actionSocketPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(lstat(server.adminSocketPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      // An allowHalfOpen client intentionally retains its own writable half;
+      // the server must have closed without requiring that client to cooperate.
+      const closed = new Promise<void>(resolve => socket!.once('close', () => resolve()))
+      socket.destroy()
+      await closed
+    } finally {
+      socket?.destroy()
+      try { await vi.runOnlyPendingTimersAsync() } finally { vi.useRealTimers() }
+    }
   })
 
   it('bounds shutdown when every core barrier ignores cancellation', async () => {
