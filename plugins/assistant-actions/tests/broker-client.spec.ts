@@ -4,7 +4,7 @@ import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promis
 import { createServer, type Server, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BrokerClientError, requestGitHubBroker, requestGitHubBrokerAdmin, type GitHubBrokerClientOptions, type GitHubBrokerConnectionOptions } from '../src/broker-client.ts'
 import {
   BrokerFrameDecoder, GITHUB_BROKER_REQUEST_MAX_BYTES, createBrokerAdminResponse, createBrokerServerHello, createBrokerServerResponse, encodeBrokerFrame, verifyBrokerAdminRequest, verifyBrokerClientRequest,
@@ -170,10 +170,29 @@ describe('requestGitHubBroker', () => {
       const greeting = hello(); socket.write(encodeBrokerFrame(greeting, 2 * 1024 * 1024))
       readOne(socket, value => { verifyBrokerClientRequest(value, greeting, clientKeys.publicKey); dispatched?.() })
     })
+    const timeoutController = new AbortController()
+    // Do not make real socket inspection/handshake race a 40 ms wall clock.
+    // Keep UDS I/O native; advance the same timeout only after a signed
+    // request is actually received, proving the dispatch boundary first.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {
-      await expect(requestGitHubBroker(options(afterWrite.path, { timeoutMs: 40 }), intent())).rejects.toSatisfy((error: unknown) => { expectClientError(error, 'timeout', 'post-dispatch-unknown'); return true })
-      await gotRequest
-    } finally { await close(afterWrite.server) }
+      let settled = false
+      const result = requestGitHubBroker(options(afterWrite.path, { timeoutMs: 40 }), intent(), timeoutController.signal).then(
+        value => { settled = true; return value },
+        error => { settled = true; return error as unknown },
+      )
+      // Surface early protocol/connection failures instead of hanging at
+      // the receive barrier when the fixture or client is broken.
+      await Promise.race([gotRequest, result.then(value => { throw value })])
+      await vi.advanceTimersByTimeAsync(39)
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expectClientError(await result, 'timeout', 'post-dispatch-unknown')
+    } finally {
+      timeoutController.abort(new Error('timeout fixture cleanup'))
+      vi.useRealTimers()
+      await close(afterWrite.server)
+    }
 
     let abortReceived: (() => void) | undefined
     const requestReceived = new Promise<void>(resolvePromise => { abortReceived = resolvePromise })
