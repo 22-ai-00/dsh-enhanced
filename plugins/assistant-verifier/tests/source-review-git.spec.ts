@@ -1,12 +1,18 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { assertSourceReviewHead, inspectSourceReviewGit, type SourceReviewGitConfig, type SourceReviewGitRequest } from '../src/source-review-git.ts'
 
-const git = '/usr/bin/git'
+// On macOS /usr/bin/git is a developer-tool shim. Resolve it once so the
+// reader's minimal environment does not repeat toolchain discovery per command.
+// Pin the canonical executable itself, not the shim that selects another binary.
+const git = process.platform === 'darwin'
+  ? realpathSync(execFileSync('/usr/bin/xcrun', ['--find', 'git'], { encoding: 'utf8' }).trim())
+  : '/usr/bin/git'
 const roots: string[] = []
 const run = (cwd: string, ...args: string[]): Buffer => execFileSync(git, args, { cwd, encoding: 'buffer' })
 const text = (cwd: string, ...args: string[]) => run(cwd, ...args).toString('utf8').trim()
