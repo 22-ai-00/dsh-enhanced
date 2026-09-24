@@ -14,7 +14,7 @@ jobs:
         with:
           ref: 1bc2bf92d0b0ec80dfd969696fcad3acd23d8dee
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef358964e2896645e5dc5ba9c38
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
         with:
           node-version: 24
           package-manager-cache: false
