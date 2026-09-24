@@ -73,6 +73,7 @@ interface MountHarnessOptions {
   reviewer?: DeliveryReviewerAdapter
   reviewerMountOrder?: 'before-policy' | 'after-delivery'
   toolApprovalTtlMs?: number
+  toolApprovalPreparationTimeoutMs?: number
   leaseMs?: number
 }
 
@@ -200,7 +201,8 @@ async function mountHarness(root: string, allow = true, options: MountHarnessOpt
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
     schedulerEnabled: false,
     ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
-    ...(options.toolApprovalTtlMs === undefined ? {} : { toolApprovalTtlMs: options.toolApprovalTtlMs }) })
+    ...(options.toolApprovalTtlMs === undefined ? {} : { toolApprovalTtlMs: options.toolApprovalTtlMs }),
+    ...(options.toolApprovalPreparationTimeoutMs === undefined ? {} : { toolApprovalPreparationTimeoutMs: options.toolApprovalPreparationTimeoutMs }) })
   if (options.reviewer !== undefined && options.reviewerMountOrder === 'after-delivery') {
     await ctx.plugin(LlmRuntime)
     ctx.llm.registerAdapter(['delivery-reviewer'], options.reviewer)
@@ -1773,6 +1775,26 @@ describe('assistant delivery Cordis service', () => {
     }
   })
 
+  test('bounds preparation separately so a stuck flush cannot consume the whole human decision window', async () => {
+    vi.useFakeTimers()
+    const fixture = await boundApprovalHarness({ sessionId: 'approval-short-preparation',
+      toolApprovalTtlMs: 300_000, toolApprovalPreparationTimeoutMs: 100,
+      flush: () => new Promise<void>(() => {}),
+    })
+    const requestToolApproval = vi.fn(async () => 'allowed-once' as const)
+    await fixture.service.registerAdapter({ channel: 'lark', account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'], toolApprovals: true },
+      start: async () => {}, requestToolApproval,
+      send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
+    })
+    const pending = fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
+      callId: ToolCallId('call-delivery-1'), reason: HUMAN_APPROVAL_REASON })
+    await vi.advanceTimersByTimeAsync(150)
+    await expect(pending).resolves.toBe('unavailable')
+    expect(requestToolApproval).not.toHaveBeenCalled()
+    await fixture.ctx.fiber.restart()
+  })
+
   test('fails closed at the TTL when the owner adapter never answers', async () => {
     vi.useFakeTimers()
     try {
@@ -1988,8 +2010,8 @@ describe('assistant delivery Cordis service', () => {
     // `ask + none` is conservatively folded back to the native human reviewer.
     bound.agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
     await expect(bound.ctx.approval.request({ agent: bound.agent, toolName: 'write_file',
-      callId: ToolCallId('call-delivery-1') })).resolves.toBe('rejected')
-    expect(next).toHaveBeenCalledTimes(2)
+      callId: ToolCallId('call-delivery-1') })).resolves.toBe('unavailable')
+    expect(next).toHaveBeenCalledOnce()
     expect(flush).not.toHaveBeenCalled()
 
     bound.agent.session.append('approval/policy', { policy: 'never' })
@@ -2006,7 +2028,7 @@ describe('assistant delivery Cordis service', () => {
     await bound.ctx.fiber.restart()
   })
 
-  test('delegates a bound approval to the native answerer when its channel has no actionable adapter', async () => {
+  test('does not redirect a headless Lark approval into the native Web listener', async () => {
     const fixture = await boundApprovalHarness({ sessionId: 'approval-native-fallback' })
     const next = vi.fn(async () => 'allowed-once' as const)
     fixture.ctx.on('approval/request', next)
@@ -2016,8 +2038,8 @@ describe('assistant delivery Cordis service', () => {
       toolName: 'write_file',
       callId: ToolCallId('call-delivery-1'),
       reason: HUMAN_APPROVAL_REASON,
-    })).resolves.toBe('allowed-once')
-    expect(next).toHaveBeenCalledOnce()
+    })).resolves.toBe('unavailable')
+    expect(next).not.toHaveBeenCalled()
     await fixture.ctx.fiber.restart()
   })
 
@@ -2025,6 +2047,11 @@ describe('assistant delivery Cordis service', () => {
     const group = { ...conversation, kind: 'group' as const, chat: 'oc_group', thread: 'omt_owner_lane' }
     const fixture = await boundApprovalHarness({ sessionId: 'approval-group-source', route: group })
     const store = runtimeStoreFromService(fixture.service)
+    const [claim] = store.claimInbox({ ownerId: 'approval-test', leaseMs: 60_000, limit: 1, maxAttempts: 3 })
+    expect(claim).toBeDefined()
+    fixture.ctx.emit('agent/inbox/claimed', { agent: fixture.agent, turn: 1,
+      message: createUserMessage({ content: [{ type: 'text', text: 'perform the requested task' }],
+        source: { kind: 'delivery', channel: 'lark', account: 'bot-1', eventId: claim!.record.envelope.eventId, trust: 'untrusted' } }) })
     const dmBinding = store.createBinding({
       conversation,
       principal,
@@ -2053,6 +2080,11 @@ describe('assistant delivery Cordis service', () => {
       arguments: fixture.rawArguments,
     }), expect.any(AbortSignal))
     expect(dmBinding.id).not.toBe(fixture.binding.id)
+    const notices = store.listOutbox({ bindingId: fixture.binding.id })
+    expect(notices).toHaveLength(1)
+    expect(notices[0]?.intent.text).toContain('私聊')
+    expect(notices[0]?.intent.text).not.toContain(fixture.rawArguments)
+    expect(notices[0]?.intent.replyToEventId).toBe(claim!.record.envelope.eventId)
     await fixture.ctx.fiber.restart()
   })
 

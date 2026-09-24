@@ -6,6 +6,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import Schema from '@deepseek-ai/schemastery'
 import type { ToolDefinition, ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
 import { registerAutoReviewAnswerer, type AutoReviewConfig } from './auto-review.js'
+import { HumanApprovalRouter, type HumanApprovalAnswerer } from './approval-routing.js'
 import {
   approvalPermissionFingerprint,
   approvalPermissionStateOf,
@@ -256,7 +257,14 @@ export class AssistantPolicyService extends Service {
   private readonly reviewerEventRegistration: ReturnType<typeof registerApprovalReviewerSessionEvent>
   private readonly policyContext: Context
   private readonly preauthorizedTools = new Set<PreauthorizedTool>()
+  private readonly humanApprovalRouter = new HumanApprovalRouter()
   private active = true
+
+  /** Host channel composition only; the channel retains all owner/call checks. */
+  registerHumanApprovalAnswerer(answerer: HumanApprovalAnswerer): () => void {
+    if (!this.active) throw new Error('assistant-policy: unavailable approval router')
+    return this.humanApprovalRouter.register(answerer)
+  }
 
   constructor(ctx: Context, input: Config, options: AssistantPolicyServiceOptions = {}) {
     super(ctx, 'assistantPolicy')
@@ -277,7 +285,8 @@ export class AssistantPolicyService extends Service {
       path: config.databasePath,
       ...(options.now === undefined ? {} : { now: options.now }),
     })
-    registerAutoReviewAnswerer(ctx, this.configuration.autoReview ?? undefined)
+    registerAutoReviewAnswerer(ctx, this.configuration.autoReview ?? undefined,
+      (request, next) => this.humanApprovalRouter.dispatch(request, next))
 
     // PermissionPresetService predates AssistantPolicy's third permission
     // dimension. Repair exact legacy native-full sessions at creation/resume,

@@ -610,6 +610,14 @@ export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryP
     // A tool name here is policy-controlled, but bound it like every other field.
     return { kind: 'step', text: `正在确认工具「${boundedProgressText(event.data.toolName)}」的调用权限…` }
   }
+  if (event.type === 'approval/decided') {
+    switch (event.data.outcome) {
+      case 'allowed-once': return { kind: 'step', text: '已获批准，继续执行…' }
+      case 'rejected': return { kind: 'step', text: '您已拒绝本次操作，该操作不会执行。' }
+      case 'cancelled': return { kind: 'step', text: '本次审批已取消，该操作不会执行。' }
+      case 'unavailable': return { kind: 'step', text: '审批通道不可用或等待已超时，该操作不会执行。请检查审批卡片或 Web 连接后重新发起。' }
+    }
+  }
   if (event.type === 'tool/call') {
     if (event.data.name === 'ask_user_question') {
       return { kind: 'step', text: '等待您的回答…' }

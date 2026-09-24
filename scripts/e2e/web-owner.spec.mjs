@@ -77,7 +77,11 @@ test('fresh Web owner authenticates, streams a business goal, and resumes its se
     expect((await promptResponse.json()).result.ok).toBe(true)
     expect(promptResponse.request().postDataJSON().payload.args.request.sessionId).toBe(sessionId)
     await page.getByRole('button', { name: 'Allow once', exact: true }).click()
-    await expect(page.getByText('Browser owner reply 2', { exact: true })).toBeVisible()
+    // Independent permission review can consume a fixture model call.
+    // Bind the actual visible owner reply, not a global model-call ordinal.
+    const firstReply = page.getByText(/^Browser owner reply [1-6]$/).first()
+    await expect(firstReply).toBeVisible()
+    const initialReply = await firstReply.innerText()
 
     const deliveryPath = join(home, 'assistant-delivery/state.sqlite')
     const goalsPath = join(home, 'assistant-goals/web.sqlite')
@@ -116,7 +120,7 @@ test('fresh Web owner authenticates, streams a business goal, and resumes its se
     await expect(workspaceRow).toBeVisible()
     if (await workspaceRow.getAttribute('aria-expanded') === 'false') await workspaceRow.click()
     await resumedPage.getByRole('treeitem', { name: /Create a goal: Browser owner/ }).click()
-    await expect(resumedPage.getByText('Browser owner reply 2', { exact: true })).toBeVisible()
+    await expect(resumedPage.getByText(initialReply, { exact: true })).toBeVisible()
     await expect.poll(() => query(deliveryPath, 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state).toBe('released')
     const callsBeforePrompt = (await readFile(modelLog, 'utf8')).trim().split('\n').length
     const resumedComposer = resumedPage.getByLabel(/Describe what you want to build|Message or run a task/)
@@ -143,11 +147,14 @@ test('fresh Web owner authenticates, streams a business goal, and resumes its se
     expect(calls.filter(call => call.type === 'goal-tool')).toEqual([{ call: 1, type: 'goal-tool', hasGoalTool: true }])
     expect(calls.length).toBeLessThanOrEqual(6)
     expect(calls.length).toBe(callsBeforePrompt + 1)
+    expect(calls.some(call => call.type === 'reply' && `Browser owner reply ${call.call}` === initialReply)).toBe(true)
+    // A rendered reply must not hide a crashed native conversation/approval UI.
+    expect(transport.filter(item => item.kind === 'page-error' || item.kind === 'error' && /PendingSubmissionBubble|slot .*crashed|reading .map/i.test(item.message))).toEqual([])
     await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({
       authentication: { launchRedirect: true, unauthenticatedStatus: 401, untrustedOriginStatus: 403 },
       sessionId, bindingId: bindings[0].id, goalId: goals[0].id, objective,
       streams: [...streams.values()], processedPrompts: 2, finalLease: 'released', hostRestart: true, freshBrowserContext: true,
-      goalScope: scope, approvedTool: 'goal_create',
+      goalScope: scope, approvedTool: 'goal_create', initialReply,
       model: 'deterministic browser-e2e/goal-proof; not a real-model autonomy benchmark',
       calls, callsBeforeRestart, roundsBeforeRestart, roundsAfterRestart,
     }, null, 2), { mode: 0o600 })

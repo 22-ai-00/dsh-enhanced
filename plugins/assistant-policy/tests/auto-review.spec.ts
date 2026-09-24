@@ -134,6 +134,7 @@ async function fixture(
     intentSource?: 'delivery' | 'plugin' | 'tool' | 'unknown' | 'user'
     includeImageIntent?: boolean
     lateLlm?: boolean
+    missingLlm?: boolean
     approvalPolicy?: 'ask' | 'never' | 'missing'
     reviewer?: 'user' | 'auto-review'
     sandboxMode?: 'workspace-write' | 'danger-full-access' | 'missing'
@@ -150,11 +151,11 @@ async function fixture(
   const ctx = new Context()
   contexts.add(ctx)
   await ctx.plugin(SystemPrompt)
-  if (options.lateLlm !== true) await ctx.plugin(LlmRuntime)
+  if (options.lateLlm !== true && options.missingLlm !== true) await ctx.plugin(LlmRuntime)
   await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(ToolRuntime, { mode: options.toolMode ?? 'native' })
   const adapter = new ReviewerAdapter(scripts)
-  if (options.lateLlm !== true) ctx.llm.registerAdapter(['main', 'fixed-reviewer'], adapter)
+  if (options.lateLlm !== true && options.missingLlm !== true) ctx.llm.registerAdapter(['main', 'fixed-reviewer'], adapter)
   await ctx.plugin(AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
     rules: [],
@@ -314,6 +315,13 @@ function assessment(overrides: Record<string, unknown> = {}): string {
 }
 
 describe('isolated automatic approval reviewer', () => {
+  test('hands off to the human frontend even while the optional model provider is absent', async () => {
+    const current = await fixture([], { missingLlm: true, fallback: 'allowed-once' })
+    await expect(current.request()).resolves.toBe('allowed-once')
+    expect(current.fallbackEscalations).toEqual([true])
+    expect(current.adapter.requests).toHaveLength(0)
+  })
+
   test('allows once for low or medium risk with medium-or-higher authorization', async () => {
     for (const reply of [
       assessment(),

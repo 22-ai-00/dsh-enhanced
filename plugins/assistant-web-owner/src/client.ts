@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { jsx } from 'react/jsx-runtime'
 import { TYPERT_REMOTE } from './typert.js'
 
+/** The Session client itself is supplied by the installed Host, not this bundle. */
+export const inject = ['remote', 'slots']
+
 type Notice = Readonly<{ id: string, text: string, createdAt: number }>
 type RemoteResult = Readonly<{ ok: true, value: readonly Notice[] }> | Readonly<{ ok: false }>
 type NoticeRemote = Readonly<{ list(sessionId: string): Promise<RemoteResult> }>
