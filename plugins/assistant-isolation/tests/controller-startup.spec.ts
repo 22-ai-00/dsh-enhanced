@@ -66,6 +66,11 @@ test('scope guard blocks raw Host tools while controller startup is pending and 
 
 test('default mount and dependent injection stay pending until a release or expiry during startup', async () => {
   const claimAfterPending = async (mode: 'release' | 'expiry') => {
+    // Keep the lease clock stationary until pending-service assertions finish.
+    // Real filesystem/SQLite and Cordis scheduling remain active: a busy CI
+    // worker must not expire the 40ms lease before construction is observed.
+    let now = Date.now()
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
     const previous = await fixture(mode === 'release' ? 30_000 : 40)
     const context = new Context()
     const mounted = context.plugin(IsolationPlugin, { stateRoot: previous.root })
@@ -80,13 +85,14 @@ test('default mount and dependent injection stay pending until a release or expi
       expect(startupError).toBeUndefined()
       expect(activations).toBe(0)
       if (mode === 'release') previous.ledger.releaseController(previous.authority)
+      else now += 41 // Exercise the real ledger expiry path, not releaseController.
       await mounted
       await dependent
       expect(activations).toBe(1)
       expect(controller(previous.root)).toMatchObject({ fence: previous.authority.fence + 1 })
       expect(previous.ledger.renewController(previous.authority, 500)).toBe(false)
       expect(() => previous.ledger.syncGrants([], previous.authority)).toThrow(/controller/i)
-    } finally { await context.fiber.dispose(); previous.ledger.close() }
+    } finally { try { await context.fiber.dispose(); previous.ledger.close() } finally { clock.mockRestore() } }
   }
 
   await claimAfterPending('release')
