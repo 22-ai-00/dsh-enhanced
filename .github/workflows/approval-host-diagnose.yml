@@ -10,7 +10,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 1bc2bf92d0b0ec80dfd969696fcad3acd23d8dee
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef358964e2896645e5dc5ba9c38
         with:
           node-version: 24
           package-manager-cache: false
@@ -19,15 +23,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/protocol-host" "$RUNNER_TEMP/approval-protocol"
+          git archive --format=tar.gz HEAD plugins/assistant-delivery plugins/assistant-web-owner scripts/e2e docs/architecture.md docs/compatibility.md package.json pnpm-lock.yaml > "$RUNNER_TEMP/approval-protocol/repository-source.tar.gz"
           npm install --prefix "$RUNNER_TEMP/protocol-host" --ignore-scripts --prefer-dedupe --no-audit --no-fund @deepseek-ai/dsh@0.1.5-rc.1
           export HOST_ROOT="$RUNNER_TEMP/protocol-host/node_modules"
           export OUTPUT_ROOT="$RUNNER_TEMP/approval-protocol"
           node --input-type=module <<'JS'
-          import { readdirSync, readFileSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs'
+          import { existsSync, readdirSync, readFileSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs'
           import { join, relative, dirname } from 'node:path'
           const root = process.env.HOST_ROOT, out = process.env.OUTPUT_ROOT
           const selected = new Set(['dsh-api-session-controller', 'dsh-session-projection', 'dsh-client-ui-conversation', 'dsh-client-ui-session', 'dsh-agent-loop', 'dsh-llm'])
-          const versions = []
+          const versions = [], copied = new Set()
           let bytes = 0
           function inspect(path) {
             for (const entry of readdirSync(path, { withFileTypes: true })) {
@@ -36,9 +41,10 @@ jobs:
               if (path.endsWith('/@deepseek-ai') && entry.name.startsWith('dsh')) {
                 const pkg = JSON.parse(readFileSync(join(file, 'package.json'), 'utf8'))
                 versions.push({ path: relative(root, file), name: pkg.name, version: pkg.version, dependencies: pkg.dependencies })
-                if (selected.has(entry.name)) collect(file)
+                if (selected.has(entry.name)) { collect(file); copied.add(entry.name) }
               }
               if (entry.name === 'node_modules' || path.endsWith('/node_modules') || entry.name.startsWith('@')) inspect(file)
+              else if (existsSync(join(file, 'node_modules'))) inspect(join(file, 'node_modules'))
             }
           }
           function collect(path) {
@@ -56,7 +62,8 @@ jobs:
           }
           inspect(root)
           writeFileSync(join(out, 'versions.json'), JSON.stringify(versions, null, 2))
-          console.log(JSON.stringify({ packages: versions.length, sourceBytes: bytes }))
+          console.log(JSON.stringify({ packages: versions.length, copied: [...copied], sourceBytes: bytes }))
+          if (!copied.has('dsh-api-session-controller') || !copied.has('dsh-client-ui-conversation')) throw new Error('required protocol sources absent')
           JS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
