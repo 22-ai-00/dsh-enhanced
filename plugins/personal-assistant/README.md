@@ -20,7 +20,7 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 ## 默认安全状态
 
-- 原生 Permission selector 固定显示 `workspace-write`（请求批准）、`auto`（帮我批准）和 `danger-full-access`（完全访问）三项；前两项共享 `workspace-write + ask` 执行 bundle（同一沙箱、同一人工审批策略），区别只是 `auto` 档把低/中风险的可逆动作交隔离 reviewer 自动批准，高风险仍直达人工。没有用户层设置的新安装默认 `auto`。已有 `settings.yaml` 的 `permission.defaultPreset` 仍由 DSH Settings 用户层优先，不会被 bundle 强制覆盖。
+- 原生 Permission selector 固定显示 `workspace-write`（请求批准）、`auto`（帮我批准）和 `danger-full-access`（完全访问）三项；前两项共享 `workspace-write + ask` 执行 bundle（同一沙箱、同一人工审批策略），区别只是 `auto` 档把低/中风险的可逆动作交隔离 reviewer 自动批准，高风险仍直达人工。没有用户层设置的新安装默认 `danger-full-access`（Full access）：可访问任意文件与网络，不逐次请求批准。已有 `settings.yaml` 的 `permission.defaultPreset` 仍由 DSH Settings 用户层优先，不会被 bundle 强制覆盖。
 - policy 默认写入一条 `dsh-enhanced-foreground-capability-*`：本机 Web/direct 的 foreground Agent 可访问 profile 已挂载的全部技能、工具与插件动作，后续动态挂载也无需逐项补 allow；它不会安装尚未安装的插件，也不授权 background 或飞书 external 身份。显式 deny、紧急停止、身份/预算检查仍优先。`budgets` 默认留空。
 - automations scheduler 默认关闭；创建并审批 automation 后仍需由部署者显式启用 scheduler。
 - Memory、Wiki、Policy、Automations 使用各自的 DSH home 私有路径和独立真源。
@@ -50,7 +50,7 @@ API Key 绝不作为参数传入：加 `--store-key` 时，值只从 `DSH_ENHANC
 
 ## 权限与数据
 
-meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API、凭据、浏览器或安装脚本权限；四个子包的实际权限和数据边界分别见其 README。新 session 从 `workspace-write + ask` 开始；若确实需要 `danger-full-access + never`，必须在原生 selector 中明确选择，或使用安装器的 `--permission danger-full-access --confirm-dangerous-full-access`。完全访问会允许 Host sandbox 访问任意文件与网络且不逐次询问；已有兼容的用户设置始终优先。
+meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API、凭据、浏览器或安装脚本权限；四个子包的实际权限和数据边界分别见其 README。没有用户覆盖的新 session 从 `danger-full-access + never` 开始，reviewer 为 `none`。完全访问允许 Host sandbox 访问任意文件与网络且不逐次询问；请仅在信任的运行环境使用。已有兼容的用户设置和已记录的会话权限不会被升级或重启覆盖。用户可在原生 Web Permission selector 切换当前会话；飞书发送 `/permission` 打开交互卡片，或使用 `/permission ask`、`/permission auto`、`/permission full confirm`。安装时用 `--permission workspace-write` 或 `--permission auto` 设置更严格的后续会话默认值；显式覆盖既有默认为完全访问仍使用 `--permission danger-full-access --confirm-dangerous-full-access`。权限档位不绕过 Policy 显式拒绝、紧急停止、身份校验和预算硬门。
 
 ## 兼容性
 

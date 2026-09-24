@@ -1977,7 +1977,7 @@ dsh_enhanced_apply_permission_choice() {
   local dry_run="$5"
 
   if [[ "$preset" == 'preserve' ]]; then
-    printf '权限默认值：保留现有 Settings；新 profile 使用 bundle 的 auto 安全默认值（工作区沙箱不变，低/中风险由隔离 reviewer 自动批准，高风险仍交人工）。\n'
+    printf '权限默认值：保留现有 Settings 和已有会话选择；没有用户设置的新会话默认 danger-full-access（Full access，可访问任意文件和网络，不逐次请求批准）。可用 --permission auto 或 --permission workspace-write 选择更严格的默认值。\n'
     return 0
   fi
   if [[ "$preset" == 'danger-full-access' && "$confirmed" != '1' ]]; then
