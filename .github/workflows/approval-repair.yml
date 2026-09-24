@@ -2,7 +2,7 @@ name: Verify and stage native Web client repair
 on:
   push:
     branches: [fix/approval-interaction]
-    paths: [.github/workflows/approval-repair.yml, .github/patches/web-native-client.py, .github/patches/web-native-client-inject.py]
+    paths: [.github/workflows/approval-repair.yml, .github/patches/web-native-client.py, .github/patches/web-native-client-verify.py]
 permissions:
   contents: read
 jobs:
@@ -29,7 +29,7 @@ jobs:
       - name: Apply only the reviewed repair to the exact candidate
         run: |
           python3 ../repair-source/.github/patches/web-native-client.py
-          python3 ../repair-source/.github/patches/web-native-client-inject.py
+          python3 ../repair-source/.github/patches/web-native-client-verify.py
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
         with:
           version: 11.7.0
@@ -55,10 +55,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/approval-host" .cache/web-owner-e2e
-          printf '%s\n' '{"private":true,"allowScripts":{"@deepseek-ai/dsh-subprocess-local":true,"koffi":true,"node-pty":true}}' > "$RUNNER_TEMP/approval-host/package.json"
-          npm install --prefix "$RUNNER_TEMP/approval-host" --prefer-dedupe --no-audit --no-fund "@deepseek-ai/dsh@$HOST_VERSION" 2>&1 | tee .cache/web-owner-e2e/host-install.log
-          npm dedupe --prefix "$RUNNER_TEMP/approval-host" --ignore-scripts --no-audit --no-fund 2>&1 | tee -a .cache/web-owner-e2e/host-install.log
+          mkdir -p "$RUNNER_TEMP/approval-host" .cache/host-evidence
+          node --input-type=module <<'JS'
+          import { writeFileSync } from 'node:fs'
+          const pkg = { private: true, allowScripts: { '@deepseek-ai/dsh-subprocess-local': true, koffi: true, 'node-pty': true } }
+          // A fresh legacy CLI otherwise selects a newer ^ bootstrap whose
+          // registerConfig ABI does not match its bundled HMR. Keep the legacy
+          // bootstrap in this private fixture; never patch the user's Host.
+          if (process.env.HOST_VERSION === '0.1.2-rc.1') pkg.overrides = { '@deepseek-ai/dsh-app-boot': '0.1.2-rc.1' }
+          writeFileSync(`${process.env.RUNNER_TEMP}/approval-host/package.json`, JSON.stringify(pkg))
+          JS
+          npm install --prefix "$RUNNER_TEMP/approval-host" --save-exact --prefer-dedupe --no-audit --no-fund "@deepseek-ai/dsh@$HOST_VERSION" 2>&1 | tee .cache/host-evidence/install.log
+          if [[ "$HOST_VERSION" != 0.1.2-rc.1 ]]; then
+            npm dedupe --prefix "$RUNNER_TEMP/approval-host" --ignore-scripts --no-audit --no-fund 2>&1 | tee -a .cache/host-evidence/install.log
+          fi
+          npm ls --prefix "$RUNNER_TEMP/approval-host" --all --json > .cache/host-evidence/packages.json || echo 'npm ls reported dependency metadata issues; retained in packages.json'
           echo "$RUNNER_TEMP/approval-host/node_modules/.bin" >> "$GITHUB_PATH"
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
@@ -97,7 +108,9 @@ jobs:
         if: always()
         with:
           name: native-web-client-${{ matrix.host }}
-          path: candidate/.cache/web-owner-e2e
+          path: |
+            candidate/.cache/web-owner-e2e
+            candidate/.cache/host-evidence
           retention-days: 3
   stage:
     needs: browser
@@ -121,7 +134,7 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = 1bc2bf92d0b0ec80dfd969696fcad3acd23d8dee
           python3 ../repair-source/.github/patches/web-native-client.py
-          python3 ../repair-source/.github/patches/web-native-client-inject.py
+          python3 ../repair-source/.github/patches/web-native-client-verify.py
           git add plugins/assistant-web-owner/src/native-client.ts plugins/assistant-web-owner/src/index.ts plugins/assistant-web-owner/src/client.ts plugins/assistant-web-owner/scripts/build-client.mjs plugins/assistant-web-owner/package.json plugins/assistant-web-owner/tests/index.spec.ts plugins/assistant-web-owner/tests/native-client.spec.ts plugins/assistant-web-owner/README.md scripts/e2e/web-owner.spec.mjs docs/architecture.md pnpm-lock.yaml
           git diff --cached --check
           git config user.name 'github-actions[bot]'
