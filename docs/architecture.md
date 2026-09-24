@@ -47,6 +47,8 @@ plugins/<name>/
 
 双端模板尚未固化，因为它依赖具体 UI slot 和 Host contract。创建这类插件时应先在当前 DSH 源码中确认 client module manifest、目标 slot/service 及构建产物，再把可复用形态提炼成新模板，而不是扩张基础 Host 模板。
 
+Web owner 适配通过内存 `EntryTree` 将宿主实际 Session Controller 包的 client 元数据，与 owner-scoped 的 Host 包装绑定。唯一原生入口的 import 仅返回该包装，不启动未过滤 Controller；浏览器通过既有 ClientModuleRegistry 加载同一 Host 的原生 Session client。本包构建产物只含提醒 UI，不复制旧版 Session 协议。子树由 Cordis effect 释放，无 profile 写回或 node_modules 修改；跨版本浏览器测试覆盖审批后续答、历史恢复与页面异常。
+
 ## 分发
 
 本地开发可以把 `plugins/<name>` 目录链接进 profile。正式分发以独立 npm 包或预构建 tarball 为准。Git package 安装以仓库根为包边界，不适合作为多插件子目录的默认分发方式。

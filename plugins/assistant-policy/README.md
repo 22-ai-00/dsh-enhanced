@@ -62,6 +62,8 @@ canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要
 
 参数级风险门不是宽泛的字符串前缀判断，也不声称实现了完整 shell parser：
 
+- 命令辨识支持完整的 `command -v <name...>`、`type -p <name...>` 和 `type -P <name...>`，每次 1–8 个字面命令名；这只查询可执行名称，不运行被查询的命令。选项、路径、插值、命令替换、复合 shell、敏感字段和越界 workdir 不适用；`command curl ...` 等执行包装器不会因此获得权限；
+
 - `read` / `read_image` 只有一个可证明位于 workspace 内且不带 credential-sensitive 标记的本地路径时可继续；`glob` / `grep` 只接受已知参数形态，并对 search root、glob/include 做同样的词法范围检查。workspace 外、`.env`、`.ssh`、`.codex/auth.json` 等敏感目标、URL、缺失路径或未知参数一律交人工；
 - `pwd`、受限 `ls`、`git status --short|--porcelain`、`git rev-parse --show-toplevel|--abbrev-ref HEAD`、`git diff --no-ext-diff` 的 `--stat|--stat --cached|--name-only`、`git log --oneline -n 10|20`，以及 `node/npm/pnpm/python3/cargo/rustc/tsc/git --version`、`node -v`、`go version`、`uname -s|-m` 等少量精确 argv 形态可继续。允许的条件是只读、不触网、不读 credential 路径且不接受可逃出 workspace 的操作数：带操作数的命令（如 `ls`）由独立分类器做范围检查，`git log --oneline -n 50`、`uname -a`、`go get`、`npm install`、`cargo install` 等相邻形态不在名单内。其 `workdir` 与 `ls` 路径操作数仍必须位于非 credential 的 workspace 范围内，未知或畸形 bash 参数失败关闭；
 - 简单但未分类的前台 Bash（例如 `pnpm test`）先归为 `ask-review`；显式 `ask` 档仍提示人工，默认 `auto` 档则直接继续。未知插件工具保持 `ask-review` 并在 auto 中交隔离 reviewer，不因本次放宽自动执行。`run_code` 例外：当前 worker runtime 是 bash-equivalent 的便利执行环境，不是 OS 安全边界，因此在 ask/auto 档始终进入 `ask-human`；
@@ -78,6 +80,10 @@ workspace 路径判断是保守的词法检查，不替代宿主对 symlink、�
 Reviewer 只接收当前 open turn 中唯一、尚未结算的 exact `callId` 参数，以及最近的真实 user-role 文本意图；只信任核心 `user` 与可选 Delivery 的 `delivery` source，`plugin` / `tool` 或未知扩展来源不能充当授权。可信消息只要还含图片等非文本 block 就整体转人工，不会丢掉上下文后让 reviewer 猜测。调用 LLM 前会快照 `permission/preset`、sandbox、approval、reviewer 四类最新事件的 seq/identity、open `turn/start` seq、exact call/settlement event seq、可信 intent event seq 与精确内容；LLM await 返回后以及签发 grant 的同步边界会再次校验 signal 与完整快照。权限或事实漂移（包括先改走再改回的 ABA）绝不会得到 `allowed-once`：仍为一致 auto 档时降级人工，否则返回失败关闭结果。参数和意图都有硬字节上限；发生截断、secret 脱敏、参数 prompt injection、找不到 exact call、重复或已结算 call、route 缺失、超时、provider 错误或非严格 JSON 时，都会交给人工，绝不静默允许。只有严格返回 `outcome=allow`、`riskLevel=low` 且 `authorization` 至少为 `medium` 才可能签发一次性 `allowed-once`；rationale 不进入主模型会话。
 
 发送 reviewer 前的本地 secret-like 检查是失败关闭的：除 password/passphrase/passwd/secret/token 等敏感字段名与常见 token 前缀外，也拦截对应自然语言赋值、URI userinfo、PEM private key、JWT，以及 `AKIA` / `ASIA` AWS access key。任何命中都会保持 reviewer 请求数为零并转人工；这是避免跨 provider 外发的最后本地边界，不应把 reviewer provider 当成秘密扫描器。
+
+人工渠道通过 Host-only `registerHumanApprovalAnswerer(answerer)` 注册，并在自己的 Cordis effect 中释放。Policy 的原生 `approval/request` 前置监听器先做风险/自动审核，再把**同一个请求对象**交给这些渠道；只有未被精确 owner 渠道认领的请求才到原生 Web Remote。这样不依赖 Web/Delivery 插件启动先后，也不会让 headless 飞书请求被无浏览器的 Remote 提前拿走。路由没有自己的审批账本或执行权限；每个渠道仍须验证当前 owner、调用、参数、权限和期限。卸载、取消及晚到允许不能形成新 grant。
+
+路由只依赖原生 Approval 服务；LLM 是独立的、生命周期绑定的可选 provider。缺少、卸载或替换 LLM 时，符合 auto 档的待审请求立即转人工，不等待 provider 恢复，也不接受卸载后的旧模型判定。Web 保留原生批准/拒绝控件；Delivery 必须和提供此接口的 Policy 成套升级。
 
 包根的 `isAutoReviewEscalation(request)` 是 auto reviewer 与人工 answerer 的对象级交接信号：它只在同一个 `ApprovalRequest` 被明确升级并执行下游 `next()` 的期间为真，并在 `finally` 中清除。Reviewer listener 使用 waterfall 的 `prepend` 注册，即使 LLM service 晚于人工 listener 到达也先完成自动判定。人工渠道在 auto 档只应认领这个信号标记的请求；其他插件的自定义 approval reason 不会被本插件标记或抢占。
 

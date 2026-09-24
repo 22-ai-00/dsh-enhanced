@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-web-owner",
-  "version": "0.1.42",
+  "version": "0.1.43",
   "description": "A DeepSeek Harness plugin for Assistant Web Owner.",
   "license": "MIT",
   "type": "module",
@@ -60,6 +60,7 @@
       ],
       "inject": [
         "@deepseek-ai/dsh-api-gateway",
+        "@deepseek-ai/dsh-api-session-controller",
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-conversation"
       ]
@@ -87,7 +88,8 @@
     "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-deepseek-budget": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-actions": ">=0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-skills": ">=0.1.0 <0.2.0"
+    "@dsh-enhanced/assistant-skills": ">=0.1.0 <0.2.0",
+    "@deepseek-ai/cordis-plugin-loader": ">=1.0.3 <2.0.0"
   },
   "peerDependenciesMeta": {
     "@dsh-enhanced/event-triggers": {
@@ -146,6 +148,9 @@
     },
     "@dsh-enhanced/assistant-skills": {
       "optional": true
+    },
+    "@deepseek-ai/cordis-plugin-loader": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -173,7 +178,8 @@
     "@dsh-enhanced/assistant-verifier": "workspace:*",
     "@dsh-enhanced/assistant-deepseek-budget": "workspace:*",
     "@dsh-enhanced/assistant-actions": "workspace:*",
-    "@dsh-enhanced/assistant-skills": "workspace:*"
+    "@dsh-enhanced/assistant-skills": "workspace:*",
+    "@deepseek-ai/cordis-plugin-loader": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

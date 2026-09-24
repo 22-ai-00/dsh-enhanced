@@ -81,7 +81,7 @@ function registerAgent(ctx: Context, sessionId: string, input: {
   return agent
 }
 
-async function fixture(adapterOutcome: DeliveryToolApprovalOutcome) {
+async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: { nativeFirst?: boolean; auto?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-tool-runtime-'))
   roots.push(root)
   const ctx = new Context()
@@ -91,6 +91,8 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome) {
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(ToolRuntime)
+  const nativeAnswerer = vi.fn(async () => 'unavailable' as const)
+  if (options.nativeFirst) ctx.on('approval/request', nativeAnswerer)
   await ctx.plugin(AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
     rules: [
@@ -151,6 +153,11 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome) {
     toolName: 'delivery_mutation_probe',
     argumentsJson,
   })
+  if (options.auto) {
+    agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
+    const append = agent.session.append as unknown as (type: string, data: unknown) => unknown
+    append.call(agent.session, 'sandbox/mode', { mode: 'workspace-write' })
+  }
   let executions = 0
   const receivedArguments: unknown[] = []
   ctx.tools.register(defineTool({
@@ -194,10 +201,23 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome) {
     receivedArguments,
     requests,
     requestToolApproval,
+    nativeAnswerer,
   }
 }
 
 describe('owner-DM approval through the real tool runtime', () => {
+  test.each([false, true])('does not let an earlier Web answerer swallow Lark approvals (auto=%s)', async auto => {
+    const current = await fixture('allowed-once', { nativeFirst: true, auto })
+    const result = await current.ctx.tools.execute({
+      callId: current.callId, name: 'delivery_mutation_probe', arguments: current.arguments_,
+      signal: new AbortController().signal, agent: current.agent,
+    })
+    expect(result).toMatchObject({ isError: false, value: 'probe-executed' })
+    expect(current.executions).toBe(1)
+    expect(current.requestToolApproval).toHaveBeenCalledOnce()
+    expect(current.nativeAnswerer).not.toHaveBeenCalled()
+  })
+
   test('an allowed-once owner decision dispatches the exact tool exactly once', async () => {
     const current = await fixture('allowed-once')
 

@@ -1,4 +1,4 @@
-import { fork, type ChildProcess } from 'node:child_process'
+import { fork } from 'node:child_process'
 import {
   closeSync,
   constants,
@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import ts from 'typescript'
 import { afterEach, describe, expect, test } from 'vitest'
 import { openPreferenceDatabase, preferenceSchemaVersion } from '../src/sqlite.ts'
+import { observeRaceWorker, type WorkerMessage } from './fixtures/sqlite-race-worker.ts'
 
 const roots: string[] = []
 
@@ -46,77 +47,28 @@ function sqliteModule(root: string): string {
   return pathToFileURL(join(output, 'sqlite.js')).href
 }
 
-interface WorkerMessage {
-  type: 'ready' | 'result'
-  result?: {
-    schemaVersion: number
-    schemaTables: number
-    journalMode: string
-    secureDelete: number
-  }
-  error?: { name: string; code?: string; message: string }
-}
-
-interface RaceWorker {
-  child: ChildProcess
-  ready: Promise<void>
-  result: Promise<WorkerMessage>
-}
-
 const workerPath = fileURLToPath(new URL('./fixtures/sqlite-open-worker.mjs', import.meta.url))
 
-function startWorker(moduleUrl: string, databasePath: string): RaceWorker {
-  const child = fork(workerPath, [moduleUrl, databasePath], {
-    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-  })
-  let stderr = ''
-  child.stderr?.on('data', chunk => { stderr += String(chunk) })
-
-  let ready = false
-  let settled = false
-  let resolveReady!: () => void
-  let rejectReady!: (error: Error) => void
-  let resolveResult!: (message: WorkerMessage) => void
-  let rejectResult!: (error: Error) => void
-  const readyPromise = new Promise<void>((resolve, reject) => {
-    resolveReady = resolve
-    rejectReady = reject
-  })
-  const resultPromise = new Promise<WorkerMessage>((resolve, reject) => {
-    resolveResult = resolve
-    rejectResult = reject
-  })
-  const fail = (error: Error): void => {
-    if (!ready) rejectReady(error)
-    if (!settled) rejectResult(error)
-  }
-
-  child.on('message', value => {
-    const message = value as WorkerMessage
-    if (message.type === 'ready') {
-      ready = true
-      resolveReady()
-      return
-    }
-    if (message.type === 'result') {
-      settled = true
-      resolveResult(message)
-    }
-  })
-  child.once('error', error => { fail(error) })
-  child.once('exit', code => {
-    if (!settled) {
-      fail(new Error(`SQLite race worker exited ${code ?? 'by signal'}${stderr === '' ? '' : `: ${stderr}`}`))
-    }
-  })
-  return { child, ready: readyPromise, result: resultPromise }
-}
-
 async function concurrentlyOpen(moduleUrl: string, databasePath: string, count = 16) {
-  const workers = Array.from({ length: count }, () => startWorker(moduleUrl, databasePath))
-  await Promise.all(workers.map(worker => worker.ready))
-  for (const worker of workers) worker.child.send?.('open')
-  return Promise.all(workers.map(worker => worker.result))
+  const workers = Array.from({ length: count }, () => observeRaceWorker(fork(workerPath, [moduleUrl, databasePath], {
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+  })))
+  const results = Promise.all(workers.map(worker => worker.result))
+  void results.catch(() => {})
+  try {
+    await Promise.all(workers.map(worker => worker.ready))
+    await Promise.all(workers.map(worker => new Promise<void>((resolve, reject) => {
+      worker.child.send('open', error => error === null ? resolve() : reject(error))
+    })))
+    return await results
+  } finally {
+    // A failed worker must not leave its peers opening a database while the
+    // test's afterEach removes it. Successful results already await close.
+    for (const worker of workers) {
+      if (worker.child.exitCode === null && worker.child.signalCode === null) worker.child.kill('SIGKILL')
+    }
+    await Promise.all(workers.map(worker => worker.closed))
+  }
 }
 
 function assertSuccessfulMigration(results: WorkerMessage[]): void {

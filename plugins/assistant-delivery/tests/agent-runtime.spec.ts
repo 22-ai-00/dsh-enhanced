@@ -3552,10 +3552,14 @@ describe('real rc.1 delivery Agent runtime', () => {
       const native = await nativeGoalPlugins()
       await fixture.ctx.plugin(native.GoalService as never, {} as never)
       await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+      // Production Loader supplies the matching native Session browser entry.
+      // This fixture has no preset root, so its generic harness omits Loader.
+      await fixture.ctx.plugin(Loader)
       const fiber = fixture.ctx.plugin(NativeWebOwnerPlugin, { principal: { account: 'browser', tenant: 'local', user: 'owner' }, workspace: root, preset: 'primary' })
       await fiber; webFiber = fiber
+      // Parent activation does not imply all injected child fibers are active.
+      await vi.waitFor(() => expect(fixture.ctx.get('sessionController')).toBeDefined())
       const controller = fixture.ctx.get('sessionController')!
-      expect(controller).toBeDefined()
       expect(resolveByPath).toHaveBeenCalledWith(root)
       expect(createWorkspace).toHaveBeenCalledWith(root)
       await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: 'unknown-workspace' } } })).rejects.toThrow('configured workspaceId')
@@ -5140,6 +5144,18 @@ describe('real rc.1 delivery Agent runtime', () => {
       status: 'dead_letter',
     })
     await restarted.ctx.fiber.restart()
+  })
+
+  test('settles permission progress without falsely attributing unavailable approval to the owner', () => {
+    for (const [outcome, text] of [
+      ['allowed-once', '已获批准，继续执行…'],
+      ['rejected', '您已拒绝本次操作，该操作不会执行。'],
+      ['cancelled', '本次审批已取消，该操作不会执行。'],
+      ['unavailable', '审批通道不可用或等待已超时，该操作不会执行。请检查审批卡片或 Web 连接后重新发起。'],
+    ]) {
+      expect(deliveryProgressFromSessionEvent({ type: 'approval/decided', data: { id: 'approval-1', outcome } } as SessionEvent))
+        .toEqual({ kind: 'step', text })
+    }
   })
 
   test('turns session events into useful bounded progress while redacting reasoning and credentials', () => {
