@@ -59,10 +59,16 @@ jobs:
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
           const pkg = { private: true, allowScripts: { '@deepseek-ai/dsh-subprocess-local': true, koffi: true, 'node-pty': true } }
-          // A fresh legacy CLI otherwise selects a newer ^ bootstrap whose
-          // registerConfig ABI does not match its bundled HMR. Keep the legacy
-          // bootstrap in this private fixture; never patch the user's Host.
-          if (process.env.HOST_VERSION === '0.1.2-rc.1') pkg.overrides = { '@deepseek-ai/dsh-app-boot': '0.1.2-rc.1' }
+          // Keep the legacy fixture on its public Cordis/Loader/HMR ABI.
+          // Fresh ^ resolution otherwise selects HMR 1.0.19 without the
+          // registerConfig method expected by this CLI's bootstrap.
+          // These are private test dependencies, never changes to a user Host.
+          if (process.env.HOST_VERSION === '0.1.2-rc.1') pkg.overrides = {
+            '@deepseek-ai/dsh-app-boot': '0.1.2-rc.1',
+            '@deepseek-ai/cordis': '4.0.2',
+            '@deepseek-ai/cordis-plugin-loader': '1.0.3',
+            '@deepseek-ai/cordis-plugin-hmr': '1.0.17',
+          }
           writeFileSync(`${process.env.RUNNER_TEMP}/approval-host/package.json`, JSON.stringify(pkg))
           JS
           npm install --prefix "$RUNNER_TEMP/approval-host" --save-exact --prefer-dedupe --no-audit --no-fund "@deepseek-ai/dsh@$HOST_VERSION" 2>&1 | tee .cache/host-evidence/install.log
