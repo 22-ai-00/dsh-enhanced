@@ -22,7 +22,7 @@ function argumentValue(argv: readonly string[], index: number, option: string): 
 export function parsePermissionSetupArgs(argv: readonly string[]): PermissionSetupArgs {
   const result: PermissionSetupArgs = {
     dshHome: process.env.DSH_HOME ?? join(process.env.HOME ?? '', '.dsh'),
-    preset: 'auto',
+    preset: 'danger-full-access',
     help: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
@@ -44,8 +44,10 @@ export function parsePermissionSetupArgs(argv: readonly string[]): PermissionSet
 
 export function permissionSetupUsage(): string {
   return [
-    'Usage: dsh-permission-setup [--dsh-home <absolute-path>] --preset <workspace-write|auto|danger-full-access>',
+    'Usage: dsh-permission-setup [--dsh-home <absolute-path>] [--preset <workspace-write|auto|danger-full-access>]',
     '',
+    'Default preset: danger-full-access (full file/network access, no approval prompts).',
+    'An explicit --preset workspace-write or --preset auto selects a more restrictive default.',
     'Writes only permission.defaultPreset in DSH settings.yaml using an atomic replacement.',
   ].join('\n')
 }
