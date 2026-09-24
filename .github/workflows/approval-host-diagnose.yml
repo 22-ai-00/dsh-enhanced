@@ -1,4 +1,4 @@
-name: Approval Host client module contracts
+name: Approval native client entry contract
 on:
   push:
     branches: [fix/approval-interaction]
@@ -14,19 +14,33 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
-      - name: Read published native client contracts without executing package code
+      - name: Verify the public Cordis no-op entry contract
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/client-contracts"
-          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/client-contracts" \
-            @deepseek-ai/dsh-client-modules@0.1.5-rc.3 \
-            @deepseek-ai/dsh-client-modules@0.1.2-rc.1 \
-            @deepseek-ai/dsh-cordis-client-runner@0.1.5-rc.3 \
-            @deepseek-ai/dsh-host-webserver@0.1.5-rc.3 \
-            @deepseek-ai/dsh-api-session-controller@0.1.2-rc.1
+          mkdir -p "$RUNNER_TEMP/client-contracts" "$RUNNER_TEMP/cordis-contract"
+          npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/client-contracts" @deepseek-ai/cordis@4.0.2 @deepseek-ai/cordis-plugin-loader@1.0.3
+          npm install --prefix "$RUNNER_TEMP/cordis-contract" --ignore-scripts --no-audit --no-fund @deepseek-ai/cordis@4.0.2 @deepseek-ai/cordis-plugin-loader@1.0.3
+          export TEST_ROOT="$RUNNER_TEMP/cordis-contract"
+          node --input-type=module <<'JS'
+          import { createRequire } from 'node:module'
+          import { writeFileSync } from 'node:fs'
+          import { pathToFileURL } from 'node:url'
+          const require = createRequire(`${process.env.TEST_ROOT}/package.json`)
+          const { Context } = await import(pathToFileURL(require.resolve('@deepseek-ai/cordis')).href)
+          const file = `${process.env.TEST_ROOT}/empty.mjs`
+          writeFileSync(file, 'export {}\n')
+          const empty = await import(pathToFileURL(file).href)
+          const ctx = new Context()
+          try {
+            const fiber = ctx.plugin(empty)
+            await fiber
+            console.log(JSON.stringify({ exports: Object.keys(empty), state: fiber.state, error: String(fiber.error ?? '') }))
+          } finally { await ctx.fiber.dispose() }
+          JS
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: approval-client-contracts
+          name: approval-cordis-contracts
           path: ${{ runner.temp }}/client-contracts
           retention-days: 1
