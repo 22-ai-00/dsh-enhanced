@@ -1,23 +1,33 @@
-name: Approval browser Host isolation
+name: Verify and stage native Web client repair
 on:
   push:
     branches: [fix/approval-interaction]
-    paths: [.github/workflows/approval-repair.yml]
+    paths: [.github/workflows/approval-repair.yml, .github/patches/web-native-client.py]
 permissions:
   contents: read
 jobs:
   browser:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
         host: [0.1.2-rc.1, 0.1.5-rc.1]
+    defaults:
+      run:
+        working-directory: candidate
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 1bc2bf92d0b0ec80dfd969696fcad3acd23d8dee
+          path: repair-source
           persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 1bc2bf92d0b0ec80dfd969696fcad3acd23d8dee
+          path: candidate
+          persist-credentials: false
+      - name: Apply only the reviewed repair to the exact candidate
+        run: python3 ../repair-source/.github/patches/web-native-client.py
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
         with:
           version: 11.7.0
@@ -26,6 +36,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+          cache-dependency-path: candidate/pnpm-lock.yaml
       - name: Verify native Linux sandbox prerequisites
         shell: bash
         run: |
@@ -47,11 +58,16 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/approval-host" --prefer-dedupe --no-audit --no-fund "@deepseek-ai/dsh@$HOST_VERSION" 2>&1 | tee .cache/web-owner-e2e/host-install.log
           npm dedupe --prefix "$RUNNER_TEMP/approval-host" --ignore-scripts --no-audit --no-fund 2>&1 | tee -a .cache/web-owner-e2e/host-install.log
           echo "$RUNNER_TEMP/approval-host/node_modules/.bin" >> "$GITHUB_PATH"
-          find "$RUNNER_TEMP/approval-host/node_modules" -type d \( -name dsh-api-session-controller -o -name dsh-win32-process -o -name dsh-hmr \) > .cache/web-owner-e2e/host-package-paths.txt
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
+      - name: Check workspace contract, lint and owner types/tests
+        run: |
+          pnpm validate
+          pnpm lint
+          pnpm --filter @dsh-enhanced/assistant-web-owner typecheck
+          pnpm --filter @dsh-enhanced/assistant-web-owner test --testTimeout=15000
       - run: pnpm exec playwright install --with-deps chromium
-      - name: Activate native HMR before startup and export startup errors
+      - name: Attach startup diagnostics to the private browser fixture
         shell: bash
         run: |
           mkdir -p .cache
@@ -73,11 +89,40 @@ jobs:
           text = text.replace(anchor, anchor + "    patch.add({ id: 'hmr', disabled: false })\n    patch.add({ insert: [{ id: 'approval-startup-logger', name: resolve(root, '.cache/approval-startup-logger.mjs') }] })\n")
           path.write_text(text)
           PY
-      - name: Exercise native Web approval and resume
+      - name: Exercise native Web approval, reply and restart recovery
         run: pnpm test:web-owner
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: approval-web-isolated-${{ matrix.host }}
-          path: .cache/web-owner-e2e
+          name: native-web-client-${{ matrix.host }}
+          path: candidate/.cache/web-owner-e2e
           retention-days: 3
+  stage:
+    needs: browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: repair-source
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: fix/web-native-client
+          path: candidate
+      - name: Commit only verified source to the repair branch, never main or dev
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 1bc2bf92d0b0ec80dfd969696fcad3acd23d8dee
+          python3 ../repair-source/.github/patches/web-native-client.py
+          git add plugins/assistant-web-owner/src/native-client.ts plugins/assistant-web-owner/src/index.ts plugins/assistant-web-owner/src/client.ts plugins/assistant-web-owner/scripts/build-client.mjs plugins/assistant-web-owner/package.json plugins/assistant-web-owner/tests/index.spec.ts plugins/assistant-web-owner/tests/native-client.spec.ts plugins/assistant-web-owner/README.md scripts/e2e/web-owner.spec.mjs docs/architecture.md pnpm-lock.yaml
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: reuse installed native Web Session client with owner-scoped Host adapter'
+          git push origin HEAD:refs/heads/fix/web-native-client
+          echo "Verified repair commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
