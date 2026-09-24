@@ -85,14 +85,13 @@ describe('dsh-enhanced-assistant-web-owner', () => {
     }
   })
 
-  it('builds an owner-scoped copy of the upstream Web client', () => {
+  it('builds only the owner notice UI and depends on the native Host Session client', () => {
     const output = mkdtempSync(join(tmpdir(), 'assistant-web-owner-client-'))
     try {
       execFileSync(process.execPath, ['scripts/build-client.mjs'], {
         cwd: new URL('..', import.meta.url), stdio: 'pipe', env: { ...process.env, DSH_WEB_OWNER_CLIENT_OUT: output },
       })
       const client = readFileSync(join(output, 'client.js'), 'utf8')
-      const licenses = readFileSync(join(output, 'THIRD_PARTY_LICENSES'), 'utf8')
       const require = createRequire(import.meta.url)
       const upstream = readFileSync(require.resolve('@deepseek-ai/dsh-api-session-controller/client'), 'utf8')
       const capture = (source: string) => {
@@ -111,14 +110,14 @@ describe('dsh-enhanced-assistant-web-owner', () => {
       expect(upstreamRegistration.id).toBe('@deepseek-ai/dsh-api-session-controller')
       expect(ownerRegistration.factory.toString()).toContain('deliveryNotices/list')
       expect(ownerRegistration.factory.toString()).toContain('conversation.input.dock')
-      expect(ownerRegistration.factory.toString()).toContain('sessionControllerApply')
-      expect(licenses).toContain('Copyright (c) 2026 DeepSeek')
-      expect(licenses).toContain('Permission is hereby granted')
+      expect(ownerRegistration.factory.toString()).not.toContain('sessionControllerApply')
+      expect(ownerRegistration.factory.toString()).not.toContain('class ClientSessions')
+      expect(ownerRegistration.factory.toString()).not.toContain('pendingSubmissions')
       expect(packageJson.exports['./client']).toBeTruthy()
       expect(packageJson.dsh.client).toEqual({
         platform: 'web',
         external: ['@deepseek-ai/dsh-api-gateway/client'],
-        inject: ['@deepseek-ai/dsh-api-gateway', '@deepseek-ai/dsh-client-ui-renderer', '@deepseek-ai/dsh-client-ui-conversation'],
+        inject: ['@deepseek-ai/dsh-api-gateway', '@deepseek-ai/dsh-api-session-controller', '@deepseek-ai/dsh-client-ui-renderer', '@deepseek-ai/dsh-client-ui-conversation'],
       })
     } finally {
       rmSync(output, { recursive: true, force: true })
@@ -161,25 +160,17 @@ describe('dsh-enhanced-assistant-web-owner', () => {
     }
   })
 
-  it('composes the final client without recursively replacing the upstream apply', async () => {
+  it('mounts and disposes notices without replacing the native Session client', async () => {
     const output = mkdtempSync(join(tmpdir(), 'assistant-web-owner-client-runtime-'))
     try {
       execFileSync(process.execPath, ['scripts/build-client.mjs'], {
         cwd: new URL('..', import.meta.url), stdio: 'pipe', env: { ...process.env, DSH_WEB_OWNER_CLIENT_OUT: output },
       })
       const built = readFileSync(join(output, 'client.js'), 'utf8')
-      const wrapper = built.indexOf('const ownerNoticeModule')
-      const base = built.lastIndexOf('function apply(ctx)', wrapper)
-      expect(base).toBeGreaterThan(0)
-      // Keep the actual final composed wrapper, while replacing only the very
-      // large upstream implementation with a deterministic stand-in. This
-      // executes the ModuleLoader factory and proves the wrapper calls the
-      // captured upstream apply before mounting/registering the notice client.
-      const executable = `${built.slice(0, base)}function apply(ctx) { ctx.order.push('base'); return async () => { ctx.order.push('base-dispose') }; }\n${built.slice(wrapper)}`
       let registration: { factory: (require: (id: string) => unknown) => Record<string, unknown> } | undefined
       const Empty = class {}
       const fallback = new Proxy({}, { get: () => Empty })
-      runInNewContext(executable, { window: { __ModuleLoader__: { load: (value: typeof registration) => { registration = value } } } })
+      runInNewContext(built, { window: { __ModuleLoader__: { load: (value: typeof registration) => { registration = value } } } })
       if (registration === undefined) throw new Error('client did not register a ModuleLoader factory')
       const exports = registration.factory((id) => {
         if (id === 'react') return { useEffect: () => undefined, useRef: (value: unknown) => ({ current: value }), useState: (value: unknown) => [value, () => undefined] }
@@ -210,12 +201,12 @@ describe('dsh-enhanced-assistant-web-owner', () => {
         },
       }
       const dispose = await (exports.apply as (value: typeof ctx) => Promise<() => Promise<void>>)(ctx)
-      expect(order).toEqual(['base', 'mount', 'inject:remote.deliveryNotices,slots', 'slot-inject', 'register'])
+      expect(order).toEqual(['mount', 'inject:remote.deliveryNotices,slots', 'slot-inject', 'register'])
       expect(JSON.stringify(descriptor)).toContain('deliveryNotices/list')
       expect(JSON.stringify(slot)).toContain('delivery-notices')
       expect((exports.inject as readonly string[])).toContain('slots')
       await dispose()
-      expect(order).toEqual(['base', 'mount', 'inject:remote.deliveryNotices,slots', 'slot-inject', 'register', 'injection-dispose', 'slot-dispose', 'unmount', 'base-dispose'])
+      expect(order).toEqual(['mount', 'inject:remote.deliveryNotices,slots', 'slot-inject', 'register', 'injection-dispose', 'slot-dispose', 'unmount'])
     } finally {
       rmSync(output, { recursive: true, force: true })
     }

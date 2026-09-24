@@ -11,10 +11,11 @@ import { pathToFileURL } from 'node:url'
 import { version } from './version.js'
 import { TYPERT } from './typert.js'
 import { DeliveryNoticesService } from './notices.js'
+import { createOwnerSessionTree, resolveHostWebModules } from './native-client.js'
 
 export const name = 'dsh-enhanced-assistant-web-owner'
 export { version }
-export const inject = [...BundledSessionController.inject, 'assistantDelivery', 'typert']
+export const inject = [...BundledSessionController.inject, 'assistantDelivery', 'typert', 'loader']
 
 export interface DeliveryNotice {
   readonly id: string
@@ -145,13 +146,19 @@ async function wrapController(ctx: Context, config: Config, access: NativeWebOwn
   // facade keeps its existing isolated-agent ownership and RPC boundary.
   // Its exact inject list must own the nested Context: later Hosts require
   // fileUploads while the supported 0.1.2 Host does not provide that service.
-  const Controller = await resolveHostSessionController()
+  const { controllerPath, EntryTree } = await resolveHostWebModules()
+  const Controller = (await import(pathToFileURL(controllerPath).href) as { SessionController: SessionControllerConstructor }).SessionController
+  if (typeof Controller !== 'function' || !Array.isArray(Controller.inject)) fail('Host SessionController is unavailable')
   // `scoped` is backed by the currently-loading owner fiber.  Its `agents`
   // provider becomes visible only after this apply callback settles, so do
   // not await the child here: that would make its exact Controller.inject
   // list wait on its own parent.  Cordis owns and activates this child after
   // the provider is live, and reloads it with the active Host inject list.
-  scoped.inject(Controller.inject, controllerCtx => {
+  scoped.inject([...Controller.inject, 'loader'], async active => {
+    const tree = createOwnerSessionTree(active, EntryTree, controllerPath, {
+      name: 'assistant-web-owner-native-controller',
+      inject: Controller.inject,
+      apply(controllerCtx: Context) {
     const controller = new Controller(controllerCtx, {})
     // Keep the unwrapped methods before installing own properties.  The Typert
     // gateway resolves a Remote operation with Reflect.get(), so the own
@@ -212,6 +219,11 @@ async function wrapController(ctx: Context, config: Config, access: NativeWebOwn
     replace('control', async function* (signal: AbortSignal) { for await (const frame of call('control', [signal]) as AsyncIterable<SessionControlFrame>) { const filtered = ownedControl(frame, access); if (filtered !== undefined) yield filtered } })
     replace('openWorkspacePath', async () => fail('opening arbitrary host paths is disabled for the Web owner'))
     replace('canOpenWorkspacePath', () => false)
+      },
+    })
+    // Register cleanup before starting any child, including a partial failure.
+    active.effect(() => () => tree.root.stop(), 'assistant-web-owner.native-client-entry')
+    await tree.root.update([{ id: 'native-session-controller', name: controllerPath }])
   })
 }
 

@@ -45,7 +45,7 @@ Policy 至少需要显式允许该 `web/account/tenant/user` 的 `ingest`，以�
 - 忙时拒绝新的输入，当前不支持输入图片、fork、子 Agent 历史地址或任意宿主路径打开。排队/steer 的完整交互、附件的一次性准入与长期跨日运行仍待完成。
 - 中断的 native Inbox 不转成普通 Delivery 消息重放，包括尚未调用原生 prompt 的崩溃窗口。已有 Session/Goal/业务记录保留。
 
-Web client 在构建时复用 DSH `0.1.2-rc.1` Session Controller 的浏览器 bundle，只将 ModuleLoader 注册 id 改为本包 id；不会重新实现 session RPC 或 UI 状态。构建脚本会验证上游版本、完整 `dsh.client` 元数据、MIT 许可证、单一注册 id 和无自引用 require，格式变化时失败。生成产物携带上游完整 MIT 文本于 `lib/THIRD_PARTY_LICENSES`，并保留 client 文件的版权 notice；该方案依赖当前 DSH UI bundles 不通过 ModuleLoader require 原 Controller client id。其他 UI manifest 的旧 inject 边在该版本只影响 graph 到达顺序，Cordis client service injection 仍等待本 clone 提供 `sessions`。
+Web Session Controller 的 Host 与 browser 两半都从当前 DSH 安装解析。本包通过只含一个精确源码入口的内存 Loader 子树，将原生包的 client 元数据与已有 owner-scoped Host 包装绑定：浏览器加载该 Host 自带的 Session client，而非构建时复制的旧版本。子树不启动未过滤的上游 Host Controller，不写 profile 或 node_modules，随 owner Fiber 卸载；无法解析当前 Host 的公开 Loader/Controller 契约时拒绝启动，不回退到旧客户端。本包自己的 browser 产物只实现主动提醒，不再复制 Session RPC、提交队列或 UI 状态。
 
 当 Delivery 接受了同一 owner Session 的主动提醒时，输入框上方会显示只读“主动提醒”区域。该区域通过严格 Typert `deliveryNotices.list(sessionId)` 读取，并在每次读取结束后约两秒发起下一次读取；切换会话、断开连接、撤权或读取失败会清空旧内容。提醒保持独立于聊天记录，不会伪装成用户或模型消息，也不会触发模型、创建 Session 或改变提醒状态。Host 每次读取重新校验固定 Web owner 能力、owner lineage 和期限；提醒只会在 Delivery 已通过实时背景 `send` Policy 后被接受，不属于该主人的 Session 请求会被拒绝。
 
