@@ -1,0 +1,81 @@
+name: Verify Web owner Loader fixture
+on:
+  push:
+    branches: [fix/approval-interaction]
+    paths: [.github/workflows/approval-fixture-verify.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: e4605aff68be488cfd5dc546ff15329ad834dea2
+          persist-credentials: false
+      - name: Mount the required native Loader and await the Controller lifecycle
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('plugins/assistant-delivery/tests/agent-runtime.spec.ts')
+          text = p.read_text()
+          before = "      const fiber = fixture.ctx.plugin(NativeWebOwnerPlugin, { principal: { account: 'browser', tenant: 'local', user: 'owner' }, workspace: root, preset: 'primary' })\n      await fiber; webFiber = fiber\n      const controller = fixture.ctx.get('sessionController')!\n      expect(controller).toBeDefined()"
+          after = "      // Production Loader supplies the matching native Session browser entry.\n      // This fixture has no preset root, so its generic harness omits Loader.\n      await fixture.ctx.plugin(Loader)\n      const fiber = fixture.ctx.plugin(NativeWebOwnerPlugin, { principal: { account: 'browser', tenant: 'local', user: 'owner' }, workspace: root, preset: 'primary' })\n      await fiber; webFiber = fiber\n      // Parent activation does not imply all injected child fibers are active.\n      await vi.waitFor(() => expect(fixture.ctx.get('sessionController')).toBeDefined())\n      const controller = fixture.ctx.get('sessionController')!"
+          assert text.count(before) == 1
+          p.write_text(text.replace(before, after))
+          PY
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: 11.7.0
+          run_install: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Validate real native owner integration and package types
+        shell: bash
+        run: |
+          pnpm --filter @dsh-enhanced/assistant-delivery typecheck
+          pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t 'production Web owner admits a real native human turn' --testTimeout=15000
+          pnpm --filter @dsh-enhanced/assistant-web-owner test --testTimeout=15000
+          pnpm lint
+          git diff --check
+  stage:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: fix/web-owner-loader-fixture
+      - name: Commit the verified fixture fix to its isolated branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = e4605aff68be488cfd5dc546ff15329ad834dea2
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('plugins/assistant-delivery/tests/agent-runtime.spec.ts')
+          text = p.read_text()
+          before = "      const fiber = fixture.ctx.plugin(NativeWebOwnerPlugin, { principal: { account: 'browser', tenant: 'local', user: 'owner' }, workspace: root, preset: 'primary' })\n      await fiber; webFiber = fiber\n      const controller = fixture.ctx.get('sessionController')!\n      expect(controller).toBeDefined()"
+          after = "      // Production Loader supplies the matching native Session browser entry.\n      // This fixture has no preset root, so its generic harness omits Loader.\n      await fixture.ctx.plugin(Loader)\n      const fiber = fixture.ctx.plugin(NativeWebOwnerPlugin, { principal: { account: 'browser', tenant: 'local', user: 'owner' }, workspace: root, preset: 'primary' })\n      await fiber; webFiber = fiber\n      // Parent activation does not imply all injected child fibers are active.\n      await vi.waitFor(() => expect(fixture.ctx.get('sessionController')).toBeDefined())\n      const controller = fixture.ctx.get('sessionController')!"
+          assert text.count(before) == 1
+          p.write_text(text.replace(before, after))
+          PY
+          git diff --check
+          git add plugins/assistant-delivery/tests/agent-runtime.spec.ts
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'test: mount native Loader and await Web owner controller in Delivery integration'
+          git push origin HEAD:refs/heads/fix/web-owner-loader-fixture
+          echo "Verified fixture commit: $(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
