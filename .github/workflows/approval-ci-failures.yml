@@ -1,0 +1,58 @@
+name: Read approval CI failures
+on:
+  push:
+    branches: [fix/approval-interaction]
+    paths: [.github/workflows/approval-ci-failures.yml]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Summarize only failed-test diagnostics from the exact combined CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-failures"
+          python3 - <<'PY'
+          import json, os, re, urllib.request
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'ci-failures'
+          api = 'https://api.github.com/repos/22-ai-00/dsh-enhanced'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'}
+          def get(path):
+              req = urllib.request.Request(api + path, headers=headers)
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  data = r.read(32 * 1024 * 1024 + 1)
+              if len(data) > 32 * 1024 * 1024: raise RuntimeError('bounded log exceeded')
+              return data
+          run = json.loads(get('/actions/runs/35940829649'))
+          assert run['head_sha'] == 'e4605aff68be488cfd5dc546ff15329ad834dea2'
+          jobs = json.loads(get('/actions/runs/35940829649/jobs?per_page=10'))['jobs']
+          summary = []
+          pattern = re.compile(r'FAIL\s|Failed Tests|failed\)|AssertionError|Error: Test timed out|Test Files.*failed|ERR_PNPM_RECURSIVE|Tests.*failed|packages.*failed', re.I)
+          for job in jobs:
+              summary.append({k: job.get(k) for k in ('id','name','status','conclusion')})
+              if job['status'] != 'completed' or job['conclusion'] != 'failure': continue
+              text = get('/actions/jobs/' + str(job['id']) + '/logs').decode('utf-8', errors='replace')
+              lines = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text).splitlines()
+              hits = [i for i, line in enumerate(lines) if pattern.search(line)]
+              keep = set()
+              for i in hits:
+                  keep.update(range(max(0, i-3), min(len(lines), i+26)))
+              selected = [f'{i+1}: {lines[i]}' for i in sorted(keep)]
+              output = '\n'.join(selected)
+              if len(output) > 48000: output = output[:24000] + '\n[diagnostic middle omitted]\n' + output[-24000:]
+              (root / (job['name'] + '.txt')).write_text(output)
+              print(json.dumps({'job': job['name'], 'lines': len(lines), 'failureMatches': len(hits), 'savedBytes': len(output)}))
+          (root / 'jobs.json').write_text(json.dumps(summary, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: combined-ci-failures
+          path: ${{ runner.temp }}/ci-failures
+          retention-days: 2
