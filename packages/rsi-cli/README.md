@@ -72,7 +72,7 @@ dsh-rsi update --dry-run
 dsh-rsi update --version 0.1.38
 dsh-rsi update --version next
 
-# 自身 + 整套插件集合原地升级；自动检查 Host 是否已停止并识别现有场景
+# 自身 + 整套插件集合原地升级；受管 Linux 服务由事务停服/恢复，额外 Host 会被拒绝
 dsh-rsi update --all --yes
 ```
 
@@ -196,7 +196,7 @@ purge 选项：
 
 ### 安全门控
 
-- **进程静止检查**：发现仍在运行的 profile host 会拒绝执行（列出 PID 与完整命令行），不代为 kill；请先停用服务或手工退出后重试。
+- **进程静止检查**：Linux 已注册受管服务的精确 systemd MainPID 会交给 installer 的 service-aware 事务停服、屏蔽、升级和恢复；其它同 profile 的手工/测试 Host 仍会拒绝执行并列出 PID，不会被自动 kill。macOS 及无受管服务场景仍要求调用前保持整个目标 Home 静止。
 - **systemd unit 归属 fail-closed**：仅当 unit 文件内容同时包含受管标记（`DeepSeek Harness profile`、对应 `--profile <p>`、`--no-open`）才删除；归属不明的同名文件只报告、保留。
 - **locator 先扫描、文件先删除、凭据后清理**：删文件前先扫描各 profile 的 setup journal / cleanup 记录（journal 位于 DSH home 内，必须在删除前扫出凭据 locator）；随后**先删除文件**，再按预扫描的 locator 逐条删除外部凭据。单条凭据删除失败不会回滚已删文件，而是以「文件已删除，但以下凭据条目清理失败，请手工删除：…」报错并以退出码 1 结束。默认的 tar.gz 备份内含完整 journal，可解包后据此复查、手工补删；`--no-backup` 下文件与 journal 均不可恢复，只剩错误消息中列出的 service/account 可供定位。
 - 单 profile 与 `--remove-host` 互斥；仅支持 macOS / Linux。

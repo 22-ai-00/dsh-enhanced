@@ -37,6 +37,7 @@ function makeDeps(installCalls: unknown[], purgeCalls: unknown[] = []): Required
       fromVersion: '0.0.0', selector: 'latest', alreadyCurrent: true, actions: [],
     })) as SelfUpdateFn,
     findRunning: () => ({ active: [] }),
+    managedServicePids: async () => ({ pids: [], errors: [] }),
   }
 }
 

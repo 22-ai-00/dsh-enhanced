@@ -35,6 +35,10 @@ const SYSTEMD_SHOW_PROPERTIES = [
   'Id', 'LoadState', 'FragmentPath', 'DropInPaths', 'ActiveState', 'SubState', 'MainPID',
   'ControlPID', 'InvocationID', 'NRestarts', 'UnitFileState', 'WorkingDirectory', 'Environment', 'ExecStart',
 ]
+const SYSTEMD_RUNTIME_PROPERTIES = [
+  'Id', 'LoadState', 'ActiveState', 'SubState', 'MainPID', 'ControlPID',
+  'InvocationID', 'NRestarts', 'UnitFileState', 'WorkingDirectory', 'Environment',
+]
 const KEYRING_DROP_IN = '[Unit]\nRequires=gnome-keyring-daemon.service\nAfter=gnome-keyring-daemon.service\n'
 const SERVICE_PHASES = new Set(['initializing', 'stopping', 'stopped', 'swapped', 'starting', 'service-accepted', 'service-failed'])
 const LIFECYCLE_SCENARIOS = new Set(['web', 'autonomy', 'lark', 'supervised'])
@@ -1706,7 +1710,10 @@ const state = unit => parseProperties(command([
 const inactive = (unit, values) => values !== undefined && values.Id === unit
   && values.ActiveState === 'inactive' && values.SubState === 'dead'
   && values.MainPID === '0' && values.ControlPID === '0'
-const stop = targets => targets.length === 0 || successful(command(['--user', 'stop', ...targets]))
+const stop = targets => targets.length === 0 || (
+  successful(command(['--user', 'stop', ...targets]))
+  && successful(command(['--user', 'reset-failed', ...targets]))
+)
 const blockStarts = targets => targets.length === 0 || (
   successful(command(['--user', 'disable', ...targets]))
   && successful(command(['--user', 'mask', '--runtime', ...targets]))
@@ -2134,9 +2141,9 @@ async function inspectServiceUnit(systemctlExecutable, unit, dshExecutable) {
 }
 
 async function readRawServiceState(systemctlExecutable, unit) {
-  const shown = parseSystemdShow((await runServiceCommand(systemctlExecutable, [
-    '--user', 'show', unit, '--no-pager', ...SYSTEMD_SHOW_PROPERTIES.map(property => `--property=${property}`),
-  ])).stdout, unit)
+  const shown = parseSystemdShowProperties((await runServiceCommand(systemctlExecutable, [
+    '--user', 'show', unit, '--no-pager', ...SYSTEMD_RUNTIME_PROPERTIES.map(property => `--property=${property}`),
+  ])).stdout, unit, SYSTEMD_RUNTIME_PROPERTIES)
   if (shown.Id !== unit) fail(`systemd raw state unit 身份不匹配：${unit}`)
   for (const property of ['MainPID', 'ControlPID', 'NRestarts']) {
     if (!/^(?:0|[1-9]\d*)$/u.test(shown[property])) fail(`systemd unit 数字状态无效：${unit}:${property}`)
@@ -2560,13 +2567,22 @@ async function assertMaskedAndQuiescent({
   assertLockParentStable(homePath)
 }
 
+async function stopAndResetServiceUnits(systemctlExecutable, units) {
+  if (units.length === 0) return
+  await runServiceCommand(systemctlExecutable, ['--user', 'stop', ...units])
+  // DSH exits with 130 after its intentional SIGINT shutdown. systemd may
+  // retain failed/failed even after every PID is gone; clear only that manager
+  // bookkeeping before requiring the stable inactive/dead state.
+  await runServiceCommand(systemctlExecutable, ['--user', 'reset-failed', ...units])
+}
+
 async function stopServicesAndWait(
   systemctlExecutable, services, masks, homePath, dshExecutable, unitUniverse, foreignOwnership, timeoutMilliseconds,
 ) {
   const names = services.map(service => service.unit)
   await installBoundMasks(systemctlExecutable, masks)
   if (names.length > 0) {
-    try { await runServiceCommand(systemctlExecutable, ['--user', 'stop', ...names]) }
+    try { await stopAndResetServiceUnits(systemctlExecutable, names) }
     catch (error) {
       fail(`systemd service stop 失败：${error instanceof Error ? error.message : String(error)}`)
     }
@@ -2607,7 +2623,7 @@ async function stopRelatedServices(
       }, manifest.state)
       await installBoundMasks(systemctlExecutable, [mask])
       await releaseGuardianRuntimeMasks(systemctlExecutable, [mask])
-      await runServiceCommand(systemctlExecutable, ['--user', 'stop', intent.unit])
+      await stopAndResetServiceUnits(systemctlExecutable, [intent.unit])
       return manifest
     }, false, homePath)
   }
@@ -2625,10 +2641,10 @@ async function stopRelatedServices(
   const currentUniverse = await listedServiceUnits(systemctlExecutable)
   const additionalUnits = [...containedUnits].filter(unit => currentUniverse.includes(unit))
   if (services.length > 0) {
-    await runServiceCommand(systemctlExecutable, ['--user', 'stop', ...services.map(service => service.unit)])
+    await stopAndResetServiceUnits(systemctlExecutable, services.map(service => service.unit))
   }
   if (additionalUnits.length > 0) {
-    await runServiceCommand(systemctlExecutable, ['--user', 'stop', ...additionalUnits])
+    await stopAndResetServiceUnits(systemctlExecutable, additionalUnits)
   }
   for (const unit of currentUniverse) {
     if (combined.has(unit) || containedUnits.has(unit)) continue
@@ -3413,6 +3429,55 @@ async function processAncestorIds() {
   return identifiers
 }
 
+/**
+ * 严格证明一个同 UID 进程是 root sshd 直接派生的认证会话。
+ * sshd 在认证成功后会把子会话进程设为 non-dumpable，导致即使同 UID 也读不到
+ * environ/cwd/root/fd/maps（EACCES/EPERM）。只有当子进程 comm=sshd、父进程 Uid=0 且父 comm=sshd
+ * 同时成立时，才认定这是内核安全策略导致的不可读，而非未知进程隐藏 DSH_HOME 引用。
+ * 任意一步读取失败或条件不满足都返回 false（fail-closed）；本函数不抛异常、不调用 fail()。
+ */
+async function isStrictlyRootSshdAuthSession(pid, childStatus) {
+  let comm
+  try { comm = (await readFile(`/proc/${pid}/comm`, 'utf8')).trim() }
+  catch { return false }
+  if (comm !== 'sshd') return false
+  const parent = Number(/^PPid:\s+(\d+)/mu.exec(childStatus)?.[1])
+  if (!Number.isSafeInteger(parent) || parent <= 0) return false
+  let parentStatus
+  try { parentStatus = await readFile(`/proc/${parent}/status`, 'utf8') }
+  catch { return false }
+  if (/^Uid:\s+(\d+)/mu.exec(parentStatus)?.[1] !== '0') return false
+  let parentComm
+  try { parentComm = (await readFile(`/proc/${parent}/comm`, 'utf8')).trim() }
+  catch { return false }
+  return parentComm === 'sshd'
+}
+
+/**
+ * 严格证明一个同 UID 进程是 systemd --user 的 PAM 会话辅助进程 (sd-pam)。
+ * pam_systemd 在建立用户登录会话时 fork 出该进程并设为 non-dumpable，导致同 UID
+ * 也读不到 environ/cwd/root/fd/maps（EACCES/EPERM）。只有当 comm 精确为 (sd-pam)、
+ * 父进程 comm=systemd 且父进程 Uid 与当前用户一致时，才认定这是 systemd 用户会话
+ * 管理进程，而非未知进程隐藏 DSH_HOME 引用。任意一步读取失败或条件不满足都返回
+ * false（fail-closed）；本函数不抛异常、不调用 fail()。
+ */
+async function isStrictlySystemdUserPamHelper(pid, childStatus) {
+  let comm
+  try { comm = (await readFile(`/proc/${pid}/comm`, 'utf8')).trim() }
+  catch { return false }
+  if (comm !== '(sd-pam)') return false
+  const parent = Number(/^PPid:\s+(\d+)/mu.exec(childStatus)?.[1])
+  if (!Number.isSafeInteger(parent) || parent <= 0) return false
+  let parentStatus
+  try { parentStatus = await readFile(`/proc/${parent}/status`, 'utf8') }
+  catch { return false }
+  if (/^Uid:\s+(\d+)/mu.exec(parentStatus)?.[1] !== String(currentUid())) return false
+  let parentComm
+  try { parentComm = (await readFile(`/proc/${parent}/comm`, 'utf8')).trim() }
+  catch { return false }
+  return parentComm === 'systemd'
+}
+
 async function assertNoUnmanagedHomeProcesses(homePath, equivalentHomePaths = []) {
   const roots = [homePath, ...equivalentHomePaths]
   const weakReferenceExempt = await processAncestorIds()
@@ -3426,6 +3491,17 @@ async function assertNoUnmanagedHomeProcesses(homePath, equivalentHomePaths = []
     const uid = /^Uid:\s+(\d+)/mu.exec(status)?.[1]
     if (uid !== String(currentUid())) continue
     if (/^State:\s+Z\b/mu.test(status)) continue
+    // 仅在 environ/cwd/root/fd/maps 遇到 EACCES/EPERM 时惰性证明该进程是否为已知的会话
+    // 基础设施 non-dumpable 进程（root sshd 认证会话或 systemd --user 的 (sd-pam)）；
+    // 证明结果按进程缓存。其余同 UID 不可读进程仍 fail-closed。
+    let provenSessionInfra
+    const proveSessionInfra = async () => {
+      if (provenSessionInfra === undefined) {
+        provenSessionInfra = await isStrictlyRootSshdAuthSession(Number(entry.name), status)
+          || await isStrictlySystemdUserPamHelper(Number(entry.name), status)
+      }
+      return provenSessionInfra
+    }
     let referenced = false
     if (!weakReferenceExempt.has(Number(entry.name))) {
       try {
@@ -3449,7 +3525,14 @@ async function assertNoUnmanagedHomeProcesses(homePath, equivalentHomePaths = []
           }
         }
       } catch (error) {
-        if (error?.code !== 'ENOENT') fail(`无法确认当前用户进程 ${entry.name} 的环境。`)
+        if (error?.code === 'ENOENT') {
+          // 进程已退出，保持现有行为
+        } else if ((error?.code === 'EACCES' || error?.code === 'EPERM') && await proveSessionInfra()) {
+          // 已证明是 root sshd 直接派生的认证会话：sshd 认证后把子进程设为 non-dumpable，
+          // 同 UID 也读不到 environ 是内核安全策略，不构成 DSH_HOME 被引用的证据。
+        } else {
+          fail(`无法确认当前用户进程 ${entry.name} 的环境。`)
+        }
       }
     }
     for (const name of ['cwd', 'root']) {
@@ -3457,7 +3540,13 @@ async function assertNoUnmanagedHomeProcesses(homePath, equivalentHomePaths = []
         const canonical = await realpath(join(processPath, name))
         referenced ||= roots.some(root => inside(root, canonical))
       }
-      catch (error) { if (error?.code !== 'ENOENT') fail(`无法确认当前用户进程 ${entry.name} 的 ${name}。`) }
+      catch (error) {
+        if (error?.code === 'ENOENT') continue
+        // non-dumpable sshd 认证会话的 cwd/root 同 environ/fd/maps 一样被内核拒绝；
+        // 仅在严格证明后才跳过不可读证据，可读的 cwd/root 引用仍会在上面被检测。
+        if ((error?.code === 'EACCES' || error?.code === 'EPERM') && await proveSessionInfra()) continue
+        fail(`无法确认当前用户进程 ${entry.name} 的 ${name}。`)
+      }
     }
     for (const directory of ['fd']) {
       try {
@@ -3467,9 +3556,17 @@ async function assertNoUnmanagedHomeProcesses(homePath, equivalentHomePaths = []
             const canonical = await realpath(join(processPath, directory, handle.name))
             referenced ||= roots.some(root => inside(root, canonical))
           }
-          catch (error) { if (error?.code !== 'ENOENT') fail(`无法确认当前用户进程 ${entry.name} 的 ${directory} 引用。`) }
+          catch (error) {
+            if (error?.code === 'ENOENT') continue
+            if ((error?.code === 'EACCES' || error?.code === 'EPERM') && await proveSessionInfra()) continue
+            fail(`无法确认当前用户进程 ${entry.name} 的 ${directory} 引用。`)
+          }
         }
-      } catch (error) { if (error?.code !== 'ENOENT') fail(`无法枚举当前用户进程 ${entry.name} 的 ${directory}。`) }
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue
+        if ((error?.code === 'EACCES' || error?.code === 'EPERM') && await proveSessionInfra()) continue
+        fail(`无法枚举当前用户进程 ${entry.name} 的 ${directory}。`)
+      }
     }
     try {
       const maps = await readFile(join(processPath, 'maps'), 'utf8')
@@ -3480,7 +3577,13 @@ async function assertNoUnmanagedHomeProcesses(homePath, equivalentHomePaths = []
         referenced ||= roots.some(root => inside(root, canonical))
       }
     } catch (error) {
-      if (error?.code !== 'ENOENT') fail(`无法确认当前用户进程 ${entry.name} 的内存映射。`)
+      if (error?.code === 'ENOENT') {
+        // 进程已退出，保持现有行为
+      } else if ((error?.code === 'EACCES' || error?.code === 'EPERM') && await proveSessionInfra()) {
+        // non-dumpable sshd 认证会话：maps 不可读不构成 DSH_HOME 被引用的证据。
+      } else {
+        fail(`无法确认当前用户进程 ${entry.name} 的内存映射。`)
+      }
     }
     if (referenced) fail(`检测到 systemd inventory 之外的当前用户进程仍引用 DSH_HOME；拒绝继续：PID ${entry.name}`)
   }

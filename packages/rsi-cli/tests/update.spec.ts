@@ -201,6 +201,45 @@ describe('main：update 命令派发', () => {
     } finally { write.mockRestore() }
   })
 
+  test('--all 允许精确受管 MainPID 并交给 service-aware installer 接管', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const install = makeInstall()
+    const selfUpdate = makeSelfUpdate()
+    const findRunning = vi.fn(() => ({
+      active: [{ pid: 123, commandLine: 'dsh --profile web' }],
+    }))
+    const managedServicePids = vi.fn(async () => ({ pids: [123], errors: [] }))
+    try {
+      expect(await main(['update', '--all', '--profile', 'web'], { HOME: '/h' }, {
+        install, selfUpdate, findRunning, managedServicePids,
+      })).toBe(0)
+      expect(install).toHaveBeenCalledOnce()
+      expect(write).toHaveBeenCalledWith(expect.stringMatching(/生命周期事务将安全停服/))
+    } finally { write.mockRestore() }
+  })
+
+  test('--all 即使存在受管 MainPID，也拒绝额外的手工 Host', async () => {
+    const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+    const install = makeInstall()
+    const selfUpdate = makeSelfUpdate()
+    const findRunning = vi.fn(() => ({
+      active: [
+        { pid: 123, commandLine: 'dsh --profile web' },
+        { pid: 456, commandLine: 'dsh --profile web --port 0' },
+      ],
+    }))
+    const managedServicePids = vi.fn(async () => ({ pids: [123], errors: [] }))
+    try {
+      expect(await main(['update', '--all', '--profile', 'web'], { HOME: '/h' }, {
+        install, selfUpdate, findRunning, managedServicePids,
+      })).toBe(1)
+      expect(install).not.toHaveBeenCalled()
+      expect(error).toHaveBeenCalledWith(expect.stringMatching(/PID 456/))
+      expect(error).not.toHaveBeenCalledWith(expect.stringMatching(/PID 123/))
+    } finally { write.mockRestore(); error.mockRestore() }
+  })
+
   test('--all 检测到运行中 Host 时停止，不调用安装器', async () => {
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
     const error = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
