@@ -673,12 +673,15 @@ interface LifecycleRunOptions {
   systemdLarkFlapAfterAccept?: boolean
   systemdLarkFlapAtReadinessBaseline?: boolean
   systemdMaskedMetadataEmpty?: boolean
+  systemdMaskedStaticMetadataOmitted?: boolean
   systemdKillLifecycleDuringStartProfile?: string
   systemdLarkProfiles?: readonly string[]
   systemdOwnershipChangesProfile?: string
   systemdOwnershipChangesAfterStartProfile?: string
   systemdPidStuckProfile?: string
   systemdProcPids?: readonly number[]
+  sshdProofPids?: readonly number[]
+  sdPamProofPids?: readonly number[]
   systemdQuiescenceDriftProfile?: string
   systemdReadinessFailsProfile?: string
   systemdRawBlankNumericProfile?: string
@@ -687,6 +690,7 @@ interface LifecycleRunOptions {
   systemdRestartLoopProfile?: string
   systemdStartFailsProfile?: string
   systemdStopFailsProfile?: string
+  systemdStopLeavesFailedProfile?: string
   systemdSupervisedProfile?: string
   systemdUnsupportedProfile?: string
   supervisedMockFailure?: 'active' | 'host-exit' | 'post-swap' | 'preview'
@@ -711,6 +715,8 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   const trustCheck = "  const entry = await lstat(canonical)\n"
   const systemTrustFunction = "async function trustedSystemExecutable(path, name) {\n"
   const procLoop = "  const proc = await opendir('/proc')\n  for await (const entry of proc) {"
+  const sshdProofAnchor = "async function isStrictlyRootSshdAuthSession(pid, childStatus) {\n"
+  const sdPamProofAnchor = "async function isStrictlySystemdUserPamHelper(pid, childStatus) {\n"
   const guardianReady = "  try {\n    const result = await operation()"
   const guardianCompletion = '  const completion = new Promise((resolveCompletion, rejectCompletion) => {\n'
   const originalRenamed = "    manifest = await writeManifest(physicalTransactionRoot, manifest, 'original-renamed')\n"
@@ -728,6 +734,8 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   expect(lifecycleSource).toContain(trustCheck)
   expect(lifecycleSource).toContain(systemTrustFunction)
   expect(lifecycleSource).toContain(procLoop)
+  expect(lifecycleSource).toContain(sshdProofAnchor)
+  expect(lifecycleSource).toContain(sdPamProofAnchor)
   expect(lifecycleSource).toContain(guardianReady)
   expect(lifecycleSource).toContain(guardianCompletion)
   expect(lifecycleSource).toContain(originalRenamed)
@@ -825,6 +833,14 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     "  const procNames = (process.env.DSH_ENHANCED_TEST_PROC_PIDS ?? '').split(',').filter(Boolean)\n"
       + "  if (process.env.DSH_ENHANCED_TEST_INCLUDE_ANCESTORS === '1') procNames.push(...await processAncestorIds())\n"
       + "  const proc = [...new Set(procNames.map(String))].map(name => ({ name }))\n  for (const entry of proc) {",
+  ).replace(
+    sshdProofAnchor,
+    sshdProofAnchor
+      + "  if ((process.env.DSH_ENHANCED_TEST_SSHD_PROOF_PIDS ?? '').split(',').filter(Boolean).map(Number).includes(pid)) return true\n",
+  ).replace(
+    sdPamProofAnchor,
+    sdPamProofAnchor
+      + "  if ((process.env.DSH_ENHANCED_TEST_SDPAM_PROOF_PIDS ?? '').split(',').filter(Boolean).map(Number).includes(pid)) return true\n",
   ).replace(
     guardianCompletion,
     "  if (process.env.DSH_ENHANCED_TEST_GUARDIAN_PID_FILE) await writeFile(process.env.DSH_ENHANCED_TEST_GUARDIAN_PID_FILE, String(guardian.pid))\n"
@@ -1384,6 +1400,8 @@ if (args[1] === 'show') {
     .map(value => value.slice('--property='.length)))
   process.stdout.write(properties
     .filter(([name]) => requested.size === 0 || requested.has(name))
+    .filter(([name]) => !(controlMasked && state.controls.maskedStaticMetadataOmitted
+      && ['FragmentPath', 'DropInPaths', 'ExecStart'].includes(name)))
     .map(([name, value]) => name + '=' + value).join('\\n') + '\\n')
   process.exit(0)
 }
@@ -1446,8 +1464,9 @@ if (args[1] === 'stop') {
       unit: name, maskPresent: unit.maskPresentWhenStopped, unitFileState: unit.unitFileState,
     }]
     if (state.controls.stopFailsProfile === unit.profile) { persist(); process.exit(5) }
-    unit.activeState = 'inactive'
-    unit.subState = 'dead'
+    const leavesFailed = state.controls.stopLeavesFailedProfile === unit.profile
+    unit.activeState = leavesFailed ? 'failed' : 'inactive'
+    unit.subState = leavesFailed ? 'failed' : 'dead'
     if (state.controls.pidStuckProfile !== unit.profile) unit.mainPid = 0
   }
   persist()
@@ -1460,6 +1479,18 @@ if (args[1] === 'stop') {
     }
   }
   if (state.controls.journal === 'missing') unlinkSync(journalExecutable)
+  process.exit(0)
+}
+if (args[1] === 'reset-failed') {
+  for (const name of args.slice(2)) {
+    const unit = state.units[name]
+    if (!unit) continue
+    if (unit.activeState === 'failed' && unit.mainPid === 0 && unit.controlPid === 0) {
+      unit.activeState = 'inactive'
+      unit.subState = 'dead'
+    }
+  }
+  persist()
   process.exit(0)
 }
 if (args[1] === 'start' || args[1] === 'restart') {
@@ -1694,6 +1725,8 @@ function lifecycleEnvironment(dshHome: string, fakeBin: string, options: Lifecyc
     LIFECYCLE_SYSTEMD_LARK_PROFILES: options.systemdLarkProfiles?.join(',') ?? '',
     LIFECYCLE_SYSTEMD_PID_STUCK_PROFILE: options.systemdPidStuckProfile ?? '',
     DSH_ENHANCED_TEST_PROC_PIDS: options.systemdProcPids?.join(',') ?? '',
+    DSH_ENHANCED_TEST_SSHD_PROOF_PIDS: options.sshdProofPids?.join(',') ?? '',
+    DSH_ENHANCED_TEST_SDPAM_PROOF_PIDS: options.sdPamProofPids?.join(',') ?? '',
     DSH_ENHANCED_TEST_INCLUDE_ANCESTORS: options.processAncestorReference === undefined ? '' : '1',
     LIFECYCLE_SYSTEMD_QUIESCENCE_DRIFT_PROFILE: options.systemdQuiescenceDriftProfile ?? '',
     LIFECYCLE_SYSTEMD_READINESS_FAILS_PROFILE: options.systemdReadinessFailsProfile ?? '',
@@ -1942,6 +1975,7 @@ interface LifecycleSystemdState {
     restartLoopProfile?: string
     startFailsProfile?: string
     stopFailsProfile?: string
+    stopLeavesFailedProfile?: string
   }
   firstCommandBackupExists?: boolean
   firstCommandHomeExists?: boolean
@@ -1996,6 +2030,7 @@ function setLifecycleSystemdControls(path: string, options: LifecycleRunOptions)
     larkFlapAfterAccept: options.systemdLarkFlapAfterAccept ?? false,
     larkFlapAtReadinessBaseline: options.systemdLarkFlapAtReadinessBaseline ?? false,
     maskedMetadataEmpty: options.systemdMaskedMetadataEmpty ?? false,
+    maskedStaticMetadataOmitted: options.systemdMaskedStaticMetadataOmitted ?? false,
     killLifecycleDuringStartProfile: options.systemdKillLifecycleDuringStartProfile,
     ownershipChangesProfile: options.systemdOwnershipChangesProfile,
     ownershipChangesAfterStartProfile: options.systemdOwnershipChangesAfterStartProfile,
@@ -2008,6 +2043,7 @@ function setLifecycleSystemdControls(path: string, options: LifecycleRunOptions)
     restartLoopProfile: options.systemdRestartLoopProfile,
     startFailsProfile: options.systemdStartFailsProfile,
     stopFailsProfile: options.systemdStopFailsProfile,
+    stopLeavesFailedProfile: options.systemdStopLeavesFailedProfile,
   }
   writeFileSync(path, `${JSON.stringify(state)}\n`, { mode: 0o600 })
 }
@@ -5128,6 +5164,39 @@ describe('one-click installers', () => {
     }
   }, 15_000)
 
+  test('service-aware upgrade resets an intentional SIGINT failed state before continuing', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { systemdStopLeavesFailedProfile: 'web' },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    const stopIndex = commands.findIndex(command => command[1] === 'stop')
+    const resetIndex = commands.findIndex((command, index) => index > stopIndex
+      && command[1] === 'reset-failed' && command.includes('dsh-profile-web.service'))
+    const startIndex = commands.findIndex(command => command[1] === 'start')
+    expect(resetIndex).toBeGreaterThan(stopIndex)
+    expect(resetIndex).toBeLessThan(startIndex)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
+      .toMatchObject({ activeState: 'active', subState: 'running' })
+  }, 15_000)
+
+  test('service-aware upgrade reads only runtime properties while its bound mask hides static metadata', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { systemdMaskedMetadataEmpty: true, systemdMaskedStaticMetadataOmitted: true },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
+      .toMatchObject({ activeState: 'active', subState: 'running' })
+  }, 15_000)
+
   test('service-aware upgrade treats a canonical home alias as the same service home', async () => {
     const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
     const aliasHome = join(f.root, 'home-alias')
@@ -5388,6 +5457,25 @@ describe('one-click installers', () => {
       state = await readLifecycleSystemdState(f.systemdState)
     }
     expect(state.units['dsh-profile-web.service']).toMatchObject({
+      activeState: 'inactive', subState: 'dead', mainPid: 0, controlPid: 0,
+    })
+  }, 15_000)
+
+  test('guardian resets failed bookkeeping after stopping a SIGINT-terminated Host', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { guardianDisconnectAfterStart: true, systemdStopLeavesFailedProfile: 'web' },
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/service crash guardian failed with exit 1/u)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    const lastStartIndex = commands.findLastIndex(command => command[1] === 'start')
+    expect(commands.some((command, index) => index > lastStartIndex
+      && command[1] === 'reset-failed' && command.includes('dsh-profile-web.service'))).toBe(true)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']).toMatchObject({
       activeState: 'inactive', subState: 'dead', mainPid: 0, controlPid: 0,
     })
   }, 15_000)
@@ -5655,6 +5743,8 @@ describe('one-click installers', () => {
     const source = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
 
     expect(source).not.toContain('DSH_ENHANCED_TEST_SERVICE_TOOLS')
+    expect(source).not.toContain('DSH_ENHANCED_TEST_SSHD_PROOF_PIDS')
+    expect(source).not.toContain('DSH_ENHANCED_TEST_SDPAM_PROOF_PIDS')
     expect(source).not.toContain('LIFECYCLE_SYSTEMD_STATE')
     expect(source).toMatch(/entry\.uid !== 0/u)
     expect(source).toMatch(/\['\/usr\/bin', '\/bin'\]\.includes\(dirname\(canonical\)\)/u)
@@ -5715,6 +5805,148 @@ describe('one-click installers', () => {
       expect(result.status).not.toBe(0)
       expect(result.stderr).toMatch(/无法.*进程|cannot.*process|proc/iu)
       expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    } finally {
+      opaque.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('a proven root sshd auth session with unreadable environ/fd/maps does not block the service upgrade', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const opaque = spawn('/usr/bin/python3', ['-c', [
+      'import ctypes, time',
+      'libc = ctypes.CDLL(None)',
+      'libc.prctl(4, 0, 0, 0, 0)',
+      'libc.prctl(15, b"sshd", 0, 0, 0)',
+      "print('ready', flush=True)",
+      'time.sleep(30)',
+    ].join(';')], { cwd: f.root, stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((resolveReady, rejectReady) => {
+      opaque.once('error', rejectReady)
+      opaque.stdout.once('data', () => resolveReady())
+    })
+    try {
+      const result = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { systemdProcPids: [opaque.pid!], sshdProofPids: [opaque.pid!] },
+      )
+
+      expect(result.status, result.stderr).toBe(0)
+      expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
+        .toMatchObject({ activeState: 'active', subState: 'running' })
+    } finally {
+      opaque.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('a sshd-comm process whose parent is not a root sshd still fails closed on unreadable environ', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const opaque = spawn('/usr/bin/python3', ['-c', [
+      'import ctypes, time',
+      'libc = ctypes.CDLL(None)',
+      'libc.prctl(4, 0, 0, 0, 0)',
+      'libc.prctl(15, b"sshd", 0, 0, 0)',
+      "print('ready', flush=True)",
+      'time.sleep(30)',
+    ].join(';')], { cwd: f.root, stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((resolveReady, rejectReady) => {
+      opaque.once('error', rejectReady)
+      opaque.stdout.once('data', () => resolveReady())
+    })
+    try {
+      const result = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { systemdProcPids: [opaque.pid!] },
+      )
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/无法确认当前用户进程.*环境/u)
+    } finally {
+      opaque.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('an ordinary non-dumpable same-UID process without a proven root sshd parent fails closed on unreadable environ', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    // comm 保持 python3（普通进程），仅设 non-dumpable 触发 environ/fd/maps EACCES；
+    // 不加入 sshdProofPids，真实证明函数会读到 comm!=sshd 而返回 false → fail-closed。
+    const opaque = spawn('/usr/bin/python3', ['-c', [
+      'import ctypes, time',
+      'libc = ctypes.CDLL(None)',
+      'libc.prctl(4, 0, 0, 0, 0)',
+      "print('ready', flush=True)",
+      'time.sleep(30)',
+    ].join(';')], { cwd: f.root, stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((resolveReady, rejectReady) => {
+      opaque.once('error', rejectReady)
+      opaque.stdout.once('data', () => resolveReady())
+    })
+    try {
+      const result = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { systemdProcPids: [opaque.pid!] },
+      )
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/无法确认当前用户进程.*环境/u)
+    } finally {
+      opaque.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('a proven systemd (sd-pam) session helper with unreadable environ/fd/maps does not block the service upgrade', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    // non-dumpable 触发 environ/fd/maps EACCES；comm 伪装成 (sd-pam) 会话辅助进程，
+    // 经测试证明函数判定为已知 systemd 会话基础设施后放行。
+    const opaque = spawn('/usr/bin/python3', ['-c', [
+      'import ctypes, time',
+      'libc = ctypes.CDLL(None)',
+      'libc.prctl(4, 0, 0, 0, 0)',
+      "libc.prctl(15, b'(sd-pam)', 0, 0, 0)",
+      "print('ready', flush=True)",
+      'time.sleep(30)',
+    ].join(';')], { cwd: f.root, stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((resolveReady, rejectReady) => {
+      opaque.once('error', rejectReady)
+      opaque.stdout.once('data', () => resolveReady())
+    })
+    try {
+      const result = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { systemdProcPids: [opaque.pid!], sdPamProofPids: [opaque.pid!] },
+      )
+
+      expect(result.status, result.stderr).toBe(0)
+      expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
+        .toMatchObject({ activeState: 'active', subState: 'running' })
+    } finally {
+      opaque.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test('a proven root sshd auth session with a readable cwd inside DSH_HOME still blocks the upgrade', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    // cwd 必须保持可读（不设 non-dumpable）：这样 proof 豁免后仍能读到 cwd 并检测到 DSH_HOME 引用。
+    const opaque = spawn('/usr/bin/python3', ['-c', [
+      'import ctypes, time',
+      'libc = ctypes.CDLL(None)',
+      'libc.prctl(15, b"sshd", 0, 0, 0)',
+      "print('ready', flush=True)",
+      'time.sleep(30)',
+    ].join(';')], { cwd: f.dshHome, stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((resolveReady, rejectReady) => {
+      opaque.once('error', rejectReady)
+      opaque.stdout.once('data', () => resolveReady())
+    })
+    try {
+      const result = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { systemdProcPids: [opaque.pid!], sshdProofPids: [opaque.pid!] },
+      )
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/拒绝继续/u)
+      expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
+        .toMatchObject({ activeState: 'active', starts: 1 })
     } finally {
       opaque.kill('SIGKILL')
     }
