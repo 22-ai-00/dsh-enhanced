@@ -167,6 +167,39 @@ function actionResult(profile: string, action: ServiceAction, dryRun: boolean, s
 }
 
 /** 受管服务的注册与运行状态，以及未注册时的成因判定。 */
+export interface ManagedServiceProcessIds {
+  pids: number[]
+  errors: string[]
+}
+
+/**
+ * Return only the exact MainPID owned by an installer-managed Linux user unit.
+ * Other processes with the same --profile remain external and must block lifecycle work.
+ */
+export async function managedServiceProcessIds(
+  platform: NodeJS.Platform,
+  home: string,
+  profiles: readonly string[],
+  runner: CommandRunner = defaultRunner,
+): Promise<ManagedServiceProcessIds> {
+  const pids: number[] = []
+  const errors: string[] = []
+  if (platform !== 'linux') return { pids, errors }
+  for (const profile of profiles) {
+    const presence = await inspectManagedService(platform, home, profile)
+    if (!presence.managed) continue
+    const unit = systemdUnitName(profile)
+    const result = runner('systemctl', ['--user', 'show', unit, '--property', 'MainPID', '--value'])
+    if (result.status !== 0) {
+      errors.push(`${profile}：无法读取受管服务 MainPID：${result.stderr.trim() || `systemctl 退出码 ${result.status}`}`)
+      continue
+    }
+    const pid = Number(result.stdout.trim())
+    if (Number.isSafeInteger(pid) && pid > 0) pids.push(pid)
+  }
+  return { pids: [...new Set(pids)], errors }
+}
+
 export interface ManagedServicePresence {
   /** 服务定义文件存在且内容确属受管。 */
   managed: boolean

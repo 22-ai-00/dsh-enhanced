@@ -11,6 +11,7 @@ import {
   controlManagedService,
   formatLogs,
   formatServiceOutcomes,
+  managedServiceProcessIds,
   resolveTargetProfiles,
   type ServiceAction,
   type ServiceActionOutcome,
@@ -27,6 +28,7 @@ export {
   formatLogs,
   formatServiceOutcomes,
   inspectManagedService,
+  managedServiceProcessIds,
   resolveTargetProfiles,
   tailLogFile,
 } from './services.ts'
@@ -72,7 +74,7 @@ update：
   --version <v|tag>   指定 dsh-rsi 目标版本或 dist-tag（默认 latest）
   --local <dir>       --all 时走 local 形态，用该 checkout 的安装器升级
   其它参数            --all 时原样透传给安装器；通常无需再写 --scenario 或内部确认参数
-  安全                自动检查目标 profile 是否仍在运行；运行中则停止升级并给出处理指引。
+  安全                已注册的 Linux 受管服务由升级事务自行停服/恢复；额外手工或测试 Host 会阻止升级。
 
 start / stop / restart：
   不带 --profile 时作用于 DSH home 下的全部 profile；配合 --dry-run 可先看将执行的命令。
@@ -402,6 +404,7 @@ export interface MainDeps {
   install?: typeof runInstall
   selfUpdate?: typeof runSelfUpdate
   findRunning?: typeof findRunningProfiles
+  managedServicePids?: typeof managedServiceProcessIds
 }
 
 export async function main(
@@ -413,6 +416,7 @@ export async function main(
   const install = deps.install ?? runInstall
   const selfUpdate = deps.selfUpdate ?? runSelfUpdate
   const findRunning = deps.findRunning ?? findRunningProfiles
+  const managedPids = deps.managedServicePids ?? managedServiceProcessIds
   let args: ParsedArgs
   try {
     args = parseArgs(argv, env)
@@ -485,14 +489,22 @@ export async function main(
         if (running.error !== undefined) {
           throw new PurgeError(`无法确认 DSH_HOME 已静止：${running.error}`)
         }
-        if (running.active.length > 0) {
-          const details = running.active.map(item => `PID ${item.pid}`).join('、')
+        const managed = await managedPids(process.platform, homedir(), profiles)
+        if (managed.errors.length > 0) {
+          throw new PurgeError(`无法确认受管服务进程：${managed.errors.join('；')}`)
+        }
+        const managedSet = new Set(managed.pids)
+        const external = running.active.filter(item => !managedSet.has(item.pid))
+        if (external.length > 0) {
+          const details = external.map(item => `PID ${item.pid}`).join('、')
           throw new PurgeError(
-            `检测到目标 profile 仍在运行（${details}）。请先执行 dsh-rsi stop；`
-            + '若不是受管服务，请停止对应手工 dsh 进程后重试。',
+            `检测到目标 profile 存在非受管 Host（${details}）。请停止对应手工/测试 dsh 进程后重试；`
+            + '已注册的受管服务无需手动停止，将由生命周期事务接管。',
           )
         }
-        process.stdout.write('\n插件集合升级：已确认目标 profile 无运行中 Host，正在继承现有部署场景并原地升级。\n')
+        process.stdout.write(managed.pids.length > 0
+          ? '\n插件集合升级：已确认除受管服务外没有其它 Host；生命周期事务将安全停服、升级并恢复。\n'
+          : '\n插件集合升级：已确认目标 profile 无运行中 Host，正在继承现有部署场景并原地升级。\n')
         const passthrough = [...args.passthrough]
         if (!passthrough.includes('--operation')) passthrough.push('--operation', 'upgrade')
         if (!passthrough.includes('--confirm-dsh-home-stopped')) {

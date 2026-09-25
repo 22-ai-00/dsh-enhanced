@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-09-23。此页是当前进展与剩余验收的唯一入口；历史流水保留在 Git 历史，配置以各插件 README 为准。
+更新：2026-09-25。此页是当前进展与剩余验收的唯一入口；历史流水保留在 Git 历史，配置以各插件 README 为准。
 
 ## 项目方向
 
@@ -14,7 +14,7 @@
 
 - 即时审批阻塞修复已进入发布验证：Policy 的 `auto` 对非凭据本地只读与单个命名 Skill 加载直接继续，显式 `ask` 仍询问；凭据扫描、任意代码、提权、破坏性和后台操作保持人工。Lark 工具审批改为 CardKit 2.0 callback 按钮，不再先发送假定卡片存在的普通文字；卡片 `format_error` 时降级为同一 owner 私聊的精确文字允许/拒绝，其他发送失败明确提示本次不执行。群聊来源只把 exact arguments 投递到唯一 owner DM。Policy/Delivery/Lark 125 个定向测试、受影响包类型检查与零警告 oxlint 已通过；完整仓库、发布和真实飞书验收仍待完成。
 - `dsh-rsi` 已提供安装、升级、状态/doctor、服务 start/stop/restart、日志查看与彻底卸载。上一轮修复了 DSH `profiles/node_modules` 被误识别为 profile、未注册服务指向不可用全局 `dsh-rsi-setup`、npm/pnpm 重复提示刷屏，以及 supervised 新装漏选 Goals 导致 Recovery 等待 `assistantGoals` 的运行时失败。降噪只使用 npm global location 与 pnpm error log level；真实 package-manager 错误仍保留并非零退出。
-- 本轮正在发布 `dsh-rsi update --all` 部署闭环修复：自升级固定写回当前 CLI 的真实 npm prefix；profile 升级使用同一精确版本 tag；自动检查运行中 Host、补传静止确认并从 effective/composed profile 识别场景。macOS 已停止 Home 的 Lark/supervised profile 会先完整备份再升级，组合或真实激活失败时恢复原 profile；旧 Recovery profile 缺失 `assistant-goals` 时自动补齐。用户本机已手工从 0.1.39 升至 0.1.41，12 个原顶层 bundle 与新增 Goals 均为 0.1.41，临时 Host 实际激活通过。
+- `dsh-rsi update --all` 部署闭环修复已完成：自升级固定写回当前 CLI 的真实 npm prefix；profile 升级使用同一精确版本 tag；Linux 已注册受管服务的精确 systemd MainPID 由 service-aware lifecycle 接管（`update --all` 只阻止非受管 Host，受管服务 MainPID 交给 lifecycle 事务），只有额外手工/测试 Host 才阻止升级；受管服务 stop 后对失败单元执行 `reset-failed`，masked unit 的 raw 状态改用不含 `ExecStart` 的 `SYSTEMD_RUNTIME_PROPERTIES` 读取。真实 Linux 部署验收（2026-09-25）通过公开路径完成：旧 profile 经 `dsh-rsi purge --profile web --yes` 正式清除后，`dsh-rsi install --scenario lark --lark skip --local` 干净重装，`dsh-profile-web.service` active/running/MainPID>0，web 端点响应，profile 下全部 @dsh-enhanced/* 包统一为 0.1.46，active 事务目录已清理（仅保留 lifecycle 重命名的 failed evidence 目录）。升级前的同 UID 进程扫描对 non-dumpable 会话基础设施严格证明后放行：root sshd 认证会话（comm=`sshd`、父进程 uid=0 且父 comm=`sshd`）与 systemd --user 的 `(sd-pam)` PAM 辅助进程（comm=`(sd-pam)`、父 comm=`systemd` 且父 Uid 为当前用户）的 environ/cwd/root/fd/maps 返回 EACCES/EPERM 时不再误拦；证明按进程惰性缓存，普通不可读同 UID 进程仍 fail-closed，已证明会话若可读 cmdline/cwd/fd/maps 真实引用 DSH_HOME 仍阻止升级。CLI 补传静止确认并从 effective/composed profile 识别场景。macOS 已停止 Home 的 Lark/supervised profile 会先完整备份再升级，组合或真实激活失败时恢复原 profile；旧 Recovery profile 缺失 `assistant-goals` 时自动补齐。
 - `0.1.41` 已完成基础权限与交互修复；当前未发布改动进一步把 `auto` 扩展到非凭据本地只读和 Skill 加载，并修复 Lark 即时审批卡片/文字兜底。Web approval 继续原生 UI；Lark 群聊高影响调用只在可唯一证明同一 owner DM 时转投私聊审批，避免群内泄露参数并在批准后恢复原任务。
 - 当前 npm 发布基线以发布账本的 `current` 为准；后续 dev 开发及 `pending` 不等于已发布。安装器和 Host 兼容范围见[兼容性说明](compatibility.md)与[发布账本](../release-manifest.json)。
 - 下一版 npm 的发布门槛是：安装部署后，在既有授权内由真实使用持续驱动修复、验证、采用与观察/回滚，并通过完整发布检查。用户已同意达到该门槛后重新发布；当前中间能力尚不满足条件。
