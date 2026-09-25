@@ -354,7 +354,9 @@ export class AssistantPolicyService extends Service {
           arguments: execution.arguments,
           workspace,
         })
-        if (risk === 'allow' || (risk === 'ask-review' && reviewer === 'auto-review' && execution.name === 'bash')) return next()
+        if (risk === 'allow'
+          || (risk === 'allow-auto' && reviewer === 'auto-review')
+          || (risk === 'ask-review' && reviewer === 'auto-review' && execution.name === 'bash')) return next()
         const permission = approvalPermissionStateOf(agent.session.snapshotEvents())
         const configuredApproval = toolsCtx.get('approval')?.config.policy
         const approval = permission.approvalPolicyEvent
@@ -370,7 +372,9 @@ export class AssistantPolicyService extends Service {
         if (risk === 'defer-native-approval') return next()
         return {
           kind: 'ask',
-          reason: risk === 'ask-review' ? AUTO_REVIEW_APPROVAL_REASON : HUMAN_APPROVAL_REASON,
+          reason: risk === 'ask-review' || risk === 'allow-auto'
+            ? AUTO_REVIEW_APPROVAL_REASON
+            : HUMAN_APPROVAL_REASON,
         }
       })
       toolsCtx.tools.guard(createPolicyToolGuard(this))

@@ -641,7 +641,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(ApprovalService, { policy: 'ask' })
     const executions: string[] = []
-    for (const name of ['web_fetch', 'ask_user_question']) {
+    for (const name of ['web_fetch', 'ask_user_question', 'read', 'glob', 'skill']) {
       ctx.tools.register(defineTool({
         name,
         description: `${name} default auto fixture`,
@@ -665,6 +665,9 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
     for (const [name, arguments_] of [
       ['web_fetch', { url: 'https://example.com/article' }],
       ['ask_user_question', { questions: [{ id: 'choice', question: '继续吗？' }] }],
+      ['read', { file_path: '/opt/dsh/package.json' }],
+      ['glob', { path: '/opt/dsh', pattern: '**/*.json' }],
+      ['skill', { name: 'firecrawl-scrape' }],
     ] as const) {
       const result = await ctx.tools.execute({
         callId: ToolCallId(`default-auto-${name}`), name, arguments: arguments_,
@@ -673,7 +676,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
       expect(result.isError, name).toBe(false)
     }
 
-    expect(executions).toEqual(['web_fetch', 'ask_user_question'])
+    expect(executions).toEqual(['web_fetch', 'ask_user_question', 'read', 'glob', 'skill'])
     expect(owner.session.snapshotEvents().filter(event => event.type === 'approval/asked')).toHaveLength(0)
     expect(owner.session.snapshotEvents().filter(event => event.type === 'approval/decided')).toHaveLength(0)
     await ctx.fiber.restart()

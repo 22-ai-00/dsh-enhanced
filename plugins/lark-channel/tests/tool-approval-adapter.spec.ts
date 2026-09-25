@@ -43,6 +43,10 @@ class FakeTransport implements LarkTransport {
   async emitCardAction(action: LarkCardAction): Promise<unknown> {
     return await this.handlers?.cardAction(action)
   }
+
+  async emitMessage(message: import('../src/types.ts').LarkMessage): Promise<void> {
+    await this.handlers?.message(message)
+  }
 }
 
 function request(overrides: Partial<DeliveryToolApprovalRequest> = {}): DeliveryToolApprovalRequest {
@@ -114,6 +118,18 @@ describe('Lark open-turn tool approval adapter', () => {
     const sent = sentToolCard(f.transport)
     const card = JSON.parse(renderLarkMessage(sent).content) as Record<string, unknown>
     expect(card).toMatchObject({ config: { enable_forward_interaction: false } })
+    const elements = (card.body as { elements: unknown[] }).elements
+    expect(elements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        tag: 'button', name: 'tool_approval_allow_once', width: 'fill',
+        behaviors: [expect.objectContaining({ type: 'callback', value: sent.toolApproval.allowValue })],
+      }),
+      expect.objectContaining({
+        tag: 'button', name: 'tool_approval_reject', width: 'fill',
+        behaviors: [expect.objectContaining({ type: 'callback', value: sent.toolApproval.rejectValue })],
+      }),
+    ]))
+    expect(elements).not.toEqual(expect.arrayContaining([expect.objectContaining({ tag: 'action' })]))
     const serialized = JSON.stringify(card)
     expect(serialized).toContain('不可信审阅文本')
     expect(serialized).toContain('exec_command')
@@ -150,6 +166,47 @@ describe('Lark open-turn tool approval adapter', () => {
       value: sent.toolApproval.rejectValue,
     })
     expect(f.adapter.health()).toMatchObject({ lastErrorCode: 'format_error' })
+    await f.dispose?.()
+  })
+
+  test('accepts an exact owner text fallback only when one DM approval is pending', async () => {
+    const f = await fixture({ approvalSecret: secret })
+    const pending = f.adapter.requestToolApproval(request({ operationId: 'text-fallback' }),
+      new AbortController().signal)
+    await vi.waitFor(() => expect(f.transport.send).toHaveBeenCalledOnce())
+    await f.transport.emitMessage({
+      messageId: 'om_owner_text', chatId: 'oc_dm', chatType: 'p2p', senderId: 'ou_owner',
+      content: '允许一次', rawContentType: 'text', resources: [], mentionAll: false, mentionedBot: false,
+      createTime: 1_001,
+    })
+    await expect(pending).resolves.toBe('allowed-once')
+    await vi.waitFor(() => expect(f.transport.addReaction).toHaveBeenCalledWith('om_owner_text', 'DONE'))
+    await f.dispose?.()
+  })
+
+  test('does not guess when an owner text decision matches multiple pending approvals', async () => {
+    const f = await fixture({ approvalSecret: secret })
+    const firstController = new AbortController()
+    const secondController = new AbortController()
+    let firstSettled = false
+    let secondSettled = false
+    const first = f.adapter.requestToolApproval(request({ operationId: 'text-ambiguous-1' }), firstController.signal)
+    const second = f.adapter.requestToolApproval(request({ operationId: 'text-ambiguous-2', actionHash: 'b'.repeat(64) }), secondController.signal)
+    void first.then(() => { firstSettled = true })
+    void second.then(() => { secondSettled = true })
+    await vi.waitFor(() => expect(f.transport.send).toHaveBeenCalledTimes(2))
+    await f.transport.emitMessage({
+      messageId: 'om_owner_ambiguous', chatId: 'oc_dm', chatType: 'p2p', senderId: 'ou_owner',
+      content: '允许一次', rawContentType: 'text', resources: [], mentionAll: false, mentionedBot: false,
+      createTime: 1_001,
+    })
+    await Promise.resolve()
+    expect(firstSettled).toBe(false)
+    expect(secondSettled).toBe(false)
+    firstController.abort()
+    secondController.abort()
+    await expect(first).resolves.toBe('cancelled')
+    await expect(second).resolves.toBe('cancelled')
     await f.dispose?.()
   })
 
@@ -324,6 +381,26 @@ describe('Lark open-turn tool approval adapter', () => {
     await expect(f.adapter.requestToolApproval(request(), new AbortController().signal))
       .resolves.toBe('unavailable')
     expect(f.transport.send).not.toHaveBeenCalled()
+    await f.dispose?.()
+  })
+
+  test('falls back to an exact owner text decision when Lark rejects the card format', async () => {
+    const f = await fixture({ approvalSecret: secret })
+    f.transport.send
+      .mockRejectedValueOnce(new LarkTransportError('format_error', 'provider details must not leak'))
+      .mockResolvedValueOnce({ messageId: 'om_tool_text_fallback' })
+    const pending = f.adapter.requestToolApproval(request({ operationId: 'format-fallback' }),
+      new AbortController().signal)
+    await vi.waitFor(() => expect(f.transport.send).toHaveBeenCalledTimes(2))
+    expect(f.transport.send.mock.calls[1]?.[1]).toEqual(expect.objectContaining({
+      text: expect.stringContaining('请直接回复“允许一次”或“拒绝”'),
+    }))
+    await f.transport.emitMessage({
+      messageId: 'om_owner_reject', chatId: 'oc_dm', chatType: 'p2p', senderId: 'ou_owner',
+      content: '拒绝', rawContentType: 'text', resources: [], mentionAll: false, mentionedBot: false,
+      createTime: 1_001,
+    })
+    await expect(pending).resolves.toBe('rejected')
     await f.dispose?.()
   })
 

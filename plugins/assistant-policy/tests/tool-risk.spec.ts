@@ -27,21 +27,26 @@ describe('parameter-aware tool risk classification', () => {
       .toBe('ask-human')
   })
 
-  test('reserves external, credential-sensitive, and unproven read targets for humans', () => {
+  test('lets auto mode inspect ordinary local paths but reserves credentials and malformed reads for humans', () => {
     for (const [name, arguments_] of [
       ['read', { file_path: '/private/input' }],
+      ['read_image', { file_path: '../outside.png' }],
+      ['glob', { path: '/opt/dsh', pattern: '**/*.json' }],
+      ['grep', { pattern: 'TODO', path: '/opt/dsh' }],
+    ] as const) {
+      expect(classifyToolRisk({ name, arguments: arguments_, workspace }), `${name} ${JSON.stringify(arguments_)}`)
+        .toBe('allow-auto')
+    }
+    for (const [name, arguments_] of [
       ['read', { file_path: '.codex/auth.json' }],
       ['read', { path: '.env.production' }],
       ['read', {}],
       ['read', { file_path: 'README.md', root: '/etc' }],
       ['read', { file_path: 'README.md', path: true }],
-      ['read_image', { file_path: '../outside.png' }],
       ['read_image', { url: 'https://example.com/image.png' }],
-      ['glob', { pattern: '/etc/**' }],
       ['glob', { pattern: '**/.ssh/**' }],
       ['glob', { pattern: 'src/**', cwd: '/etc' }],
       ['grep', { pattern: 'token', path: '/etc' }],
-      ['grep', { pattern: 'TODO', include: '../outside/**' }],
       ['grep', { pattern: 'TODO', unknown_root: '/etc' }],
     ] as const) {
       expect(classifyToolRisk({ name, arguments: arguments_, workspace }), `${name} ${JSON.stringify(arguments_)}`)
@@ -258,7 +263,10 @@ describe('parameter-aware tool risk classification', () => {
     }
   })
 
-  test('routes skill invocations through the reviewer classification but lets workspace writes and simple commands proceed', () => {
+  test('lets auto mode load one named skill while runtime skill invocations retain their dedicated guard', () => {
+    expect(classifyToolRisk({ name: 'skill', arguments: { name: 'firecrawl-scrape' }, workspace })).toBe('allow-auto')
+    expect(classifyToolRisk({ name: 'skill', arguments: { name: '../escape' }, workspace })).toBe('ask-human')
+    expect(classifyToolRisk({ name: 'skill', arguments: { name: 'review-pr', extra: true }, workspace })).toBe('ask-human')
     expect(classifyToolRisk({ name: 'skill_run', arguments: { name: 'review-pr' }, workspace })).toBe('ask-review')
     expect(classifyToolRisk({ name: 'skill_status', arguments: { invocation_id: 'run-1' }, workspace })).toBe('ask-review')
     for (const command of ['pnpm test', 'node script.js', 'git status --ignored=matching']) {
