@@ -912,7 +912,7 @@ function validDigest(value) {
 
 function validCompactOperatorProof(proof) {
   const expected = {
-    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': 20,
+    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': 23,
     'assistant-recovery/operator-snapshot/v1': 5,
     'assistant-automations-operator-snapshot/v1': 15,
   }
