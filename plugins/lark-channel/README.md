@@ -148,7 +148,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 ## 权限与数据边界
 
 - `--allow-agent-tools` 是高权限显式开关：为本地 `foreground` 与精确 owner Delivery 主体建立 capability/工具可达性；不授权 `background`，也不绕过显式 deny、紧急停止、身份、预算及插件业务硬门。
-- `ask` 和 `auto` 中需要人工确认的工具调用只向 active owner 私聊发送一次性审批卡；`full` 关闭逐次审批并放开 sandbox，应保持 owner 与应用可用范围最小。
+- `ask` 和 `auto` 中真正需要人工确认的工具调用只向 active owner 私聊发送一次性 CardKit 2.0 审批卡；卡片包含“允许一次 / 拒绝”按钮。若租户拒绝该卡片格式，只对 `format_error` 降级成同一私聊的明确文字审批；恰好一个匹配请求时，owner 回复“允许”“允许一次”或“拒绝”可恢复原调用。多请求并存不猜测，网络/连接失败也不自动放行。`full` 关闭逐次审批并放开 sandbox，应保持 owner 与应用可用范围最小。
 - `ask_user_question` 的卡片是另一条即时交互路径：本包有向原飞书会话发送/原位更新 CardKit 2.0 卡片、并接收 `card.action.trigger` callback 的网络权限。选项仅以签名 callback capability 提交；自由文本只接受 exact owner 对原卡的明确回复。它不把卡片点击或匹配回复写成普通 Inbox/新 turn，且问题内容会在原会话显示，群聊并不保密。
 - 行为学习审批卡会把签名覆盖的 scope、情境、guidance、版本、证据和回滚原因逐字段以纯文本展示；提案内容不会作为 Markdown 或卡片组件解释。点击后卡片只确认 Policy 决策已写入持久账本，明确不把“批准”误报成“变更已生效”。
 - 网络仅访问所选飞书/Lark OpenAPI、token 与 WebSocket endpoint；图片读取使用固定消息资源端点，不接受消息或模型提供的 URL，并关闭重定向。

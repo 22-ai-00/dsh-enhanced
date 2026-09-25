@@ -597,6 +597,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         )
         if (normalized.outcome !== 'accept') return
         if (await this.tryAnswerUserQuestion(normalized.envelope, message.messageId)) return
+        if (this.tryAnswerToolApproval(normalized.envelope, message.messageId)) return
         if (unmentionedQuestionReply) return
         const accepted = await context.accept(normalized.envelope)
         if (this.statusReactions && !accepted.duplicate && accepted.status === 'queued') {
@@ -759,19 +760,12 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     const sendOptions: LarkSendOptions = {
       requestKey: `tool-approval:${input.operationId}:${input.actionHash}`,
     }
-    let sending: Promise<Awaited<ReturnType<LarkTransport['send']>>>
     try {
-      sending = Promise.resolve(this.transport.send(input.target.conversation.chat, card, sendOptions))
-    } catch (error) {
-      this.recordPresentationFailure(error)
-      this.settleToolApproval(pending, 'unavailable')
-      return outcome
-    }
-    void sending.then(result => {
-      if (this.pendingToolApprovals.get(input.operationId) !== pending) return
+      const result = await this.transport.send(input.target.conversation.chat, card, sendOptions)
+      if (this.pendingToolApprovals.get(input.operationId) !== pending) return await outcome
       if (!larkProviderMessageIdentifier.test(result.messageId)) {
         this.settleToolApproval(pending, 'unavailable')
-        return
+        return await outcome
       }
       pending.providerMessageId = result.messageId
       const earlyAction = pending.earlyAction
@@ -779,11 +773,26 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       if (earlyAction?.messageId === result.messageId) {
         this.settleToolApproval(pending, earlyAction.decision)
       }
-    }, error => {
+    } catch (error) {
       this.recordPresentationFailure(error)
+      if (error instanceof LarkTransportError && error.code === 'format_error'
+        && this.pendingToolApprovals.get(input.operationId) === pending) {
+        try {
+          const fallback = await this.transport.send(input.target.conversation.chat, { text:
+            `工具调用需要确认\n工具：${input.toolName}\n理由：${input.reason ?? '（未提供）'}\n参数：${input.arguments}\n\n`            + '请直接回复“允许一次”或“拒绝”。仅当本私聊中恰好有一个待审批操作时，文字回复才会生效。' }, {
+            requestKey: `${sendOptions.requestKey}:text-fallback`,
+          })
+          if (larkProviderMessageIdentifier.test(fallback.messageId)) {
+            pending.providerMessageId = fallback.messageId
+            return await outcome
+          }
+        } catch (fallbackError) {
+          this.recordPresentationFailure(fallbackError)
+        }
+      }
       this.settleToolApproval(pending, 'unavailable')
-    })
-    return outcome
+    }
+    return await outcome
   }
 
   async requestUserQuestion(
@@ -1379,6 +1388,36 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     }
     if (this.statusReactions) void this.addReaction(providerMessageId, 'DONE')
     return true
+  }
+
+  private tryAnswerToolApproval(envelope: InboundEnvelope, providerMessageId: string): boolean {
+    if (envelope.kind !== 'text' || envelope.attachments !== undefined || envelope.conversation.kind !== 'dm') return false
+    const decision = new Map<string, DeliveryToolApprovalOutcome>([
+      ['允许', 'allowed-once'],
+      ['允许一次', 'allowed-once'],
+      ['拒绝', 'rejected'],
+    ]).get(envelope.text.trim())
+    if (decision === undefined) return false
+    const candidates = [...this.pendingToolApprovals.values()].filter(candidate =>
+      candidate.providerMessageId !== undefined
+      && candidate.payload.channel === envelope.conversation.channel
+      && candidate.payload.account === envelope.conversation.account
+      && candidate.payload.tenant === envelope.conversation.tenant
+      && candidate.payload.chatId === envelope.conversation.chat
+      && candidate.payload.ownerUser === envelope.principal.user
+      && samePrincipal(envelope.principal, {
+        channel: candidate.payload.channel,
+        account: candidate.payload.account,
+        tenant: candidate.payload.tenant,
+        user: candidate.payload.ownerUser,
+      }))
+    if (candidates.length === 1) {
+      this.settleToolApproval(candidates[0]!, decision)
+      if (this.statusReactions) void this.addReaction(providerMessageId, 'DONE')
+    }
+    // Consume an approval-shaped owner message whenever at least one matching request is open.
+    // With multiple requests the text is ambiguous, so only the exact card buttons may settle them.
+    return candidates.length > 0
   }
 
   private armToolApprovalTombstone(operationId: string, tombstone: ToolApprovalTombstone): void {

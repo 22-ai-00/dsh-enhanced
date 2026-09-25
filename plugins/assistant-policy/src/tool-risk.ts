@@ -2,6 +2,7 @@ import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 
 export type ToolRiskClassification =
   | 'allow'
+  | 'allow-auto'
   | 'ask-review'
   | 'ask-human'
   | 'defer-native-approval'
@@ -19,6 +20,7 @@ export interface ToolRiskInput {
 
 const WRITE_TOOLS = new Set(['write', 'edit'])
 const READ_ONLY_NETWORK_TOOLS = new Set(['web_fetch', 'web_search'])
+const AUTO_ONLY_COORDINATION_TOOLS = new Set(['skill'])
 const NATIVE_ESCALATION_TOOLS = new Set(['bash', 'pwsh', 'write', 'edit'])
 const NATIVE_ESCALATION_TARGETS = new Set(['workspace-write', 'danger-full-access'])
 const BASH_ARGUMENT_KEYS = new Set([
@@ -156,6 +158,11 @@ function isWorkspaceReadTarget(target: string, workspace: string): boolean {
   return isWorkspacePath(target, workspace) && !isCredentialSensitivePath(target, workspace)
 }
 
+function classifyLocalReadTarget(target: string, workspace: string): ToolRiskClassification {
+  if (target.trim() === '' || target.includes('\0') || isCredentialSensitivePath(target, workspace)) return 'ask-human'
+  return isWorkspacePath(target, workspace) ? 'allow' : 'allow-auto'
+}
+
 function hasOnlyKeys(
   value: Readonly<Record<string, unknown>>,
   allowed: ReadonlySet<string>,
@@ -188,24 +195,35 @@ function classifyReadTool(
   }
   if (name === 'read' || name === 'read_image') {
     const target = onePathArgument(argumentsRecord)
-    if (target === undefined || !isWorkspaceReadTarget(target, workspace)) return 'ask-human'
+    if (target === undefined) return 'ask-human'
+    const targetRisk = classifyLocalReadTarget(target, workspace)
+    if (targetRisk === 'ask-human') return targetRisk
     if (name === 'read' && !validReadBounds(argumentsRecord)) return 'ask-human'
     if (name === 'read_image' && Object.hasOwn(argumentsRecord, 'detail')
       && !['auto', 'high', 'low', 'original'].includes(String(argumentsRecord.detail))) return 'ask-human'
-    return 'allow'
+    return targetRisk
   }
   if (typeof argumentsRecord.pattern !== 'string' || argumentsRecord.pattern.trim() === '') return 'ask-human'
   const root = argumentsRecord.path ?? workspace
-  if (typeof root !== 'string' || !isWorkspaceReadTarget(root, workspace)) return 'ask-human'
+  if (typeof root !== 'string') return 'ask-human'
   const resolvedRoot = resolve(workspace, root)
+  const rootRisk = classifyLocalReadTarget(resolvedRoot, workspace)
+  if (rootRisk === 'ask-human') return rootRisk
+  if (rootRisk === 'allow-auto' && name === 'grep' && CREDENTIAL_MARKER.test(argumentsRecord.pattern)) {
+    return 'ask-human'
+  }
   if (name === 'glob') {
-    return isWorkspaceReadTarget(resolve(resolvedRoot, argumentsRecord.pattern), workspace) ? 'allow' : 'ask-human'
+    const patternRisk = classifyLocalReadTarget(resolve(resolvedRoot, argumentsRecord.pattern), workspace)
+    return patternRisk === 'ask-human' ? patternRisk
+      : rootRisk === 'allow-auto' || patternRisk === 'allow-auto' ? 'allow-auto' : 'allow'
   }
   if (Object.hasOwn(argumentsRecord, 'include')) {
-    if (typeof argumentsRecord.include !== 'string' || argumentsRecord.include.trim() === ''
-      || !isWorkspaceReadTarget(resolve(resolvedRoot, argumentsRecord.include), workspace)) return 'ask-human'
+    if (typeof argumentsRecord.include !== 'string' || argumentsRecord.include.trim() === '') return 'ask-human'
+    const includeRisk = classifyLocalReadTarget(resolve(resolvedRoot, argumentsRecord.include), workspace)
+    if (includeRisk === 'ask-human') return includeRisk
+    if (includeRisk === 'allow-auto') return 'allow-auto'
   }
-  return 'allow'
+  return rootRisk
 }
 
 function hasWorkspaceContainedTarget(
@@ -382,6 +400,14 @@ export function classifyToolRisk(input: Readonly<ToolRiskInput>): ToolRiskClassi
   }
   if (escalation === 'invalid') return 'ask-human'
   if (READ_ONLY_NETWORK_TOOLS.has(input.name) || input.name === 'ask_user_question') return 'allow'
+  if (AUTO_ONLY_COORDINATION_TOOLS.has(input.name)) {
+    return argumentsRecord !== undefined
+      && hasOnlyKeys(argumentsRecord, new Set(['name']))
+      && typeof argumentsRecord.name === 'string'
+      && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(argumentsRecord.name)
+      ? 'allow-auto'
+      : 'ask-human'
+  }
   // `run_code` executes arbitrary worker code and is not an OS sandbox. Its
   // source cannot be reduced to the narrow argv grammar below, so auto review
   // must never grant it without a human decision.

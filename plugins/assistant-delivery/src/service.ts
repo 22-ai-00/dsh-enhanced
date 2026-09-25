@@ -4083,10 +4083,8 @@ export class AssistantDeliveryService extends Service {
         ...(request.reason === undefined ? {} : { reason: request.reason }),
         arguments: granted.arguments,
       })
-      this.notifyToolApproval(request, granted.binding, operationId, 'pending',
-        granted.binding.conversation.kind === 'group'
-          ? '本次操作需要您确认，请到与机器人的私聊中处理授权卡片，选择“允许一次”或“拒绝”。超时不会自动放行；可用 /stop 取消任务。'
-          : '本次操作需要您确认，请在授权卡片中选择“允许一次”或“拒绝”。超时不会自动放行；可用 /stop 取消任务。')
+      // The actionable card is the primary notice. Do not enqueue text that claims a card
+      // exists before the provider has accepted it; an adapter failure is reported below.
       const answer = Promise.resolve()
         .then(() => granted.adapter.requestToolApproval!(adapterRequest, controller.signal))
         .then<ApprovalOutcome, ApprovalOutcome>(value => value, () => 'unavailable')
@@ -4098,6 +4096,10 @@ export class AssistantDeliveryService extends Service {
       this.toolApprovalControllers.delete(controller)
     }
     if (signalAborted(request.signal)) return 'cancelled'
+    if (outcome === 'unavailable') {
+      this.notifyToolApproval(request, initialRoute.binding, operationId, 'unavailable',
+        '本次操作需要您授权，但授权卡片未能送达、已超时或连接已中断；本次不会执行该操作。请检查飞书连接后重试。')
+    }
     if (controller.signal.aborted || !this.active || Date.now() >= expiresAt) return 'unavailable'
     let current: ToolApprovalAuthority | undefined
     try {

@@ -12,10 +12,10 @@
 
 ## 当前交付边界
 
-- 正在交付即时审批阻塞修复：Policy 在原生审批 waterfall 内先完成风险审核，再把同一请求送往已认证渠道，避免更早注册的 Web Remote 抢走飞书请求；LLM 不可用时仍能升级人工。纯命令辨识新增有界 allowlist。飞书卡片准备默认 10 秒上限，群聊来源会收到去私聊处理授权的提示，原生审批结束事件更新进度。Policy/Delivery/Lark/Web-owner 定向测试均已通过；完整仓库、安装后浏览器与发布结果以本次 CI 为准，未操作用户实际运行的飞书实例，也不据此宣称完整 RSI 闭环。
+- 即时审批阻塞修复已进入发布验证：Policy 的 `auto` 对非凭据本地只读与单个命名 Skill 加载直接继续，显式 `ask` 仍询问；凭据扫描、任意代码、提权、破坏性和后台操作保持人工。Lark 工具审批改为 CardKit 2.0 callback 按钮，不再先发送假定卡片存在的普通文字；卡片 `format_error` 时降级为同一 owner 私聊的精确文字允许/拒绝，其他发送失败明确提示本次不执行。群聊来源只把 exact arguments 投递到唯一 owner DM。Policy/Delivery/Lark 125 个定向测试、受影响包类型检查与零警告 oxlint 已通过；完整仓库、发布和真实飞书验收仍待完成。
 - `dsh-rsi` 已提供安装、升级、状态/doctor、服务 start/stop/restart、日志查看与彻底卸载。上一轮修复了 DSH `profiles/node_modules` 被误识别为 profile、未注册服务指向不可用全局 `dsh-rsi-setup`、npm/pnpm 重复提示刷屏，以及 supervised 新装漏选 Goals 导致 Recovery 等待 `assistantGoals` 的运行时失败。降噪只使用 npm global location 与 pnpm error log level；真实 package-manager 错误仍保留并非零退出。
 - 本轮正在发布 `dsh-rsi update --all` 部署闭环修复：自升级固定写回当前 CLI 的真实 npm prefix；profile 升级使用同一精确版本 tag；自动检查运行中 Host、补传静止确认并从 effective/composed profile 识别场景。macOS 已停止 Home 的 Lark/supervised profile 会先完整备份再升级，组合或真实激活失败时恢复原 profile；旧 Recovery profile 缺失 `assistant-goals` 时自动补齐。用户本机已手工从 0.1.39 升至 0.1.41，12 个原顶层 bundle 与新增 Goals 均为 0.1.41，临时 Host 实际激活通过。
-- 权限与交互修复已随 `0.1.41` 发布并完成本机 profile 激活验证：fresh profile 的默认 `auto` 对只读 Web、用户提问、workspace 内文件操作和普通前台 Bash 直接继续；凭据、任意代码、提权、破坏性、后台与原生命令升级仍需人工。Web approval 继续原生 UI；Lark 群聊高影响调用只在可唯一证明同一 owner DM 时转投私聊卡片，避免群内泄露参数并可在批准后恢复原任务。
+- `0.1.41` 已完成基础权限与交互修复；当前未发布改动进一步把 `auto` 扩展到非凭据本地只读和 Skill 加载，并修复 Lark 即时审批卡片/文字兜底。Web approval 继续原生 UI；Lark 群聊高影响调用只在可唯一证明同一 owner DM 时转投私聊审批，避免群内泄露参数并在批准后恢复原任务。
 - 当前 npm 发布基线以发布账本的 `current` 为准；后续 dev 开发及 `pending` 不等于已发布。安装器和 Host 兼容范围见[兼容性说明](compatibility.md)与[发布账本](../release-manifest.json)。
 - 下一版 npm 的发布门槛是：安装部署后，在既有授权内由真实使用持续驱动修复、验证、采用与观察/回滚，并通过完整发布检查。用户已同意达到该门槛后重新发布；当前中间能力尚不满足条件。
 - 日常使用中的工具/插件自迭代尚未贯通。普通 Lark 已有低风险偏好自动学习；Growth `usageLearning` 已可根据可信前台任务结果自动调度持久复盘；内置 Delivery 普通对话的已认证 owner 反馈也可触发，无需预设任务验收 profile；启用源码轨时，可信失败会自动形成 owner 私有修复缺口并进入源码候选工具，可经有限源码审批；精确制品的有限采用已接到同一持久作业，后续普通任务版本归因已接入可选 Host 配置；有限可信反馈批次、观察签发与自动回退已接通，可安装配置与真实部署端到端仍待验收。Skills 有限修复链仍需对精确来源 Goal 手动 `skill_repair_arm`；既有授权下的独立验证、采用及持续观察仍待接通。

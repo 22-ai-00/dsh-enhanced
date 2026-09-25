@@ -2081,10 +2081,7 @@ describe('assistant delivery Cordis service', () => {
     }), expect.any(AbortSignal))
     expect(dmBinding.id).not.toBe(fixture.binding.id)
     const notices = store.listOutbox({ bindingId: fixture.binding.id })
-    expect(notices).toHaveLength(1)
-    expect(notices[0]?.intent.text).toContain('私聊')
-    expect(notices[0]?.intent.text).not.toContain(fixture.rawArguments)
-    expect(notices[0]?.intent.replyToEventId).toBe(claim!.record.envelope.eventId)
+    expect(notices).toHaveLength(0)
     await fixture.ctx.fiber.restart()
   })
 
