@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/dsh-rsi-cli",
-  "version": "0.1.47",
+  "version": "0.1.48",
   "description": "Global dsh-rsi command: status, doctor, web-url, and full purge for DSH enhanced plugin installations.",
   "license": "MIT",
   "type": "module",
