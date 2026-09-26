@@ -9,7 +9,7 @@
 **方式一：npm 全局安装 `dsh-rsi`（零运行时依赖，仅用 Node 内置模块），再安装个人助理**
 
 ```sh
-npm install --global @dsh-enhanced/rsi-cli
+npm install --global @dsh-enhanced/dsh-rsi-cli
 dsh-rsi install --scenario core --yes
 ```
 
@@ -35,15 +35,16 @@ pnpm build
 ./scripts/install/install-local.sh
 ```
 
-安装后最常用的三条 `dsh-rsi` 命令（完整命令、升级与卸载见 [`packages/rsi-cli/README.md`](packages/rsi-cli/README.md)）：
+安装后最常用的三条 `dsh-rsi` 命令（完整命令、升级与卸载见 [`packages/dsh-rsi-cli/README.md`](packages/dsh-rsi-cli/README.md)）：
 
 ```sh
 dsh-rsi status                         # 只读：各 profile、host 版本、受管服务与凭据状态
+dsh-rsi web-url --profile web          # 受管服务当前带 token 的 Web 授权 URL（不关闭认证）
 dsh-rsi logs --profile web --lines 100 # 查看受管服务日志尾部
 dsh-rsi restart --profile web          # 改配置后重启（只动运行状态，不动服务定义）
 ```
 
-升级（`update` / `update --all`）、干净重装（`reinstall`）、彻底卸载（`purge`）、崩溃救机脚本与全部安装器参数分别见 [`packages/rsi-cli/README.md`](packages/rsi-cli/README.md) 和[安装脚本文档](scripts/install/README.md)。
+升级（`update` / `update --all`）、干净重装（`reinstall`）、彻底卸载（`purge`）、崩溃救机脚本与全部安装器参数分别见 [`packages/dsh-rsi-cli/README.md`](packages/dsh-rsi-cli/README.md) 和[安装脚本文档](scripts/install/README.md)。
 
 三档部署场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 含全部 `core` 能力并加飞书常驻与偏好学习，`supervised` 再追加评测、演化与恢复。安装过程会引导配置默认模型（DeepSeek 官方或自定义 OpenAI 兼容网关），API Key 只从环境读取。实验性离线执行入口 `autonomy` 需显式指定本机固定隔离镜像，详见[安装文档](scripts/install/README.md)。
 
@@ -82,7 +83,7 @@ pnpm check
 ## 文档与目录
 
 - [文档索引](docs/README.md)
-- [`dsh-rsi` 完整命令参考](packages/rsi-cli/README.md)
+- [`dsh-rsi` 完整命令参考](packages/dsh-rsi-cli/README.md)
 - [安装器完整选项与故障排查](scripts/install/README.md)
 - [插件目录](plugins/README.md) ・ [仓库架构](docs/architecture.md) ・ [兼容性基线](docs/compatibility.md) ・ [RSI 当前状态](docs/rsi-status.md)
 
