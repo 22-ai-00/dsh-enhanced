@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { ownerRouteAuthorityHash } from '@dsh-enhanced/assistant-delivery'
 import { Config as PolicyConfig } from '@dsh-enhanced/assistant-policy'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
 import { Context } from '@deepseek-ai/cordis'
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -54,7 +55,7 @@ const manifest = (): RsiSetupManifest => ({ schemaVersion: 1, targetProfile: 'ta
   controlPlane: { catalogPath: '/tmp/catalog.json', statePath: '/tmp/state', trustPath: '/tmp/trust.json',
     sourceJobs: { authorityId: 'authority', expiresAt: Date.now() + 60_000, maxSubmissions: 1, repository: '/tmp/repository', ownerRouteId: 'owner-route', principalId: 'lark/account/tenant/owner', workspace: '/tmp/rsi-workspace', preset: 'primary', budgetId: 'source', budgetAmount: 1 } },
   growthDriver: { enabled: true, intervalMs: 0, budgetId: 'review', budgetAmount: 1, scope: { workspace: '/tmp/rsi-workspace', preset: 'primary', principalId: 'lark/account/tenant/owner', ownerRouteId: 'owner-route' }, usageLearning: { enabled: true, databasePath: '/tmp/growth.sqlite', scanBudgetId: 'discovery', scanBudgetAmount: 1 }, pluginSourceProposals: { enabled: true, preparationMode: 'durable', repository: '/tmp/repository', offline: true } },
-  sourceReviews: { authorityId: 'review', expiresAt: Date.now() + 60_000, maxReviews: 1, repository: '/tmp/repository', git: { path: '/tmp/git', sha256: 'a'.repeat(64) }, decisionRoot: '/not-a-private-existing-directory', plugins: ['lark-channel'], owner: { authorityId: 'authority', authorityHash: ownerRouteAuthorityHash({ id: 'owner-route', conversation: owner.conversation, principal: owner.principal, workspace: owner.workspace, agentPreset: owner.agentPreset, policyRef: owner.policyRef, minimumGeneration: 1 }), principalId: 'lark/account/tenant/owner', principalRecordId: 'principal-record', principalVersion: 1, workspace: '/tmp/rsi-workspace', agentPreset: 'primary' }, reviewerPrincipal: 'reviewer', policy: 'independent', maxChangedFiles: 1, maxInputBytes: 4096, maxOutputTokens: 1, timeoutMs: 1000 },
+  sourceReviews: { authorityId: 'review', expiresAt: Date.now() + 60_000, maxReviews: 1, repository: '/tmp/repository', git: { path: '/tmp/git', sha256: 'a'.repeat(64) }, decisionRoot: '/not-a-private-existing-directory', plugins: ['lark-channel'], owner: { authorityId: 'owner-route', authorityHash: ownerRouteAuthorityHash({ id: 'owner-route', conversation: owner.conversation, principal: owner.principal, workspace: owner.workspace, agentPreset: owner.agentPreset, policyRef: owner.policyRef, minimumGeneration: 1 }), principalId: 'lark/account/tenant/owner', principalRecordId: 'principal-record', principalVersion: 1, workspace: '/tmp/rsi-workspace', agentPreset: 'primary' }, reviewerPrincipal: 'reviewer', policy: 'independent', maxChangedFiles: 1, maxInputBytes: 4096, maxOutputTokens: 1, timeoutMs: 1000 },
   coordinator: { budgetId: 'coordinator', budgetAmount: 1, timeoutMs: 1000 }, limits: { periodMs: 60_000, reviews: 1, discovery: 1, source: 1, observations: 1, coordinator: 1 },
 })
 const coordinatorBase = `
@@ -113,6 +114,25 @@ describe('RSI profile compiler', () => {
       expect(first.targetPatch).toContain('!!js dshHomePath')
       const target = parse(first.targetPatch) as Array<{ id: string; config: any }>
       expect(target.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config.sourceBuild.versioning).toBe('patch')
+      expect(target.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config.sourceJobs.authorityId).toBe('authority')
+      const reviewConfig = target.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config.sourceReviews
+      expect(reviewConfig.authorityId).toBe('review')
+      expect(reviewConfig.owner.authorityId).toBe('owner-route')
+      const reviewCtx = new Context()
+      try {
+        const verifier = new AssistantVerifierService(reviewCtx, {
+          databasePath: join(root, 'review-verifier.sqlite'), tickIntervalMs: 0, sourceReviews: reviewConfig,
+        })
+        const peers = reviewCtx.plugin({ name: 'rsi-review-peers', apply(peer: Context) {
+          for (const name of ['agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy']) peer.provide(name as never, {} as never)
+        } })
+        await peers
+        const receipt = { ...reviewConfig.owner, receiptVersion: 2 as const, bindingVersion: adjustedOwner.version, generation: adjustedOwner.generation }
+        const selection = { decisionRoot: decision, owner: receipt, name: 'lark-channel', modelSelection: { provider: 'supplier', model: 'task-model' } }
+        expect(verifier.canReviewSourceRepair(selection)).toBe(true)
+        expect(verifier.canReviewSourceRepair({ ...selection, owner: { ...receipt, authorityId: 'authority' } })).toBe(false)
+        expect(verifier.canReviewSourceRepair({ ...selection, owner: { ...receipt, principalVersion: receipt.principalVersion + 1 } })).toBe(false)
+      } finally { await reviewCtx.fiber.dispose() }
       expect(first.coordinatorPatch).toContain(join(home, 'rsi-coordinators', 'coordinator', 'runs'))
       // The generated rules are accepted by the real Policy schema, rather
       // than merely looking structurally plausible in YAML.
@@ -131,6 +151,8 @@ describe('RSI profile compiler', () => {
       await expect(compileRsiProfiles({ ...input, owner: { ...adjustedOwner, generation: 0 } })).rejects.toThrow('minimumGeneration')
       const wrongScope = structuredClone(value); wrongScope.controlPlane.sourceJobs!.principalId = 'another-owner'
       await expect(compileRsiProfiles({ ...input, manifest: wrongScope })).rejects.toThrow('sourceJobs')
+      const wrongReviewOwner = structuredClone(value); wrongReviewOwner.sourceReviews.owner = { ...wrongReviewOwner.sourceReviews.owner, authorityId: wrongReviewOwner.controlPlane.sourceJobs!.authorityId }
+      await expect(compileRsiProfiles({ ...input, manifest: wrongReviewOwner })).rejects.toThrow('sourceReviews.owner')
       await expect(compileRsiProfiles({ ...input, coordinatorEffective: `${coordinatorEffective}- id: dsh-enhanced-web-owner\n  name: "@dsh-enhanced/web-owner"\n  config: {}\n` })).rejects.toThrow('forbidden row')
       await expect(compileRsiProfiles({ ...input, coordinatorEffective: coordinatorEffective.replace('@deepseek-ai/tool-web', '@evil/tool-web') })).rejects.toThrow('forbidden row')
       await expect(compileRsiProfiles({ ...input, coordinatorEffective: `${coordinatorEffective}- id: custom-ingress\n  name: "@owner/custom-ingress"\n  config: {}\n` })).rejects.toThrow('forbidden row')
