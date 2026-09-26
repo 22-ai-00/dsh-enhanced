@@ -49,7 +49,7 @@ export interface RunInstallOptions {
 }
 
 /**
- * 薄委托：rsi-cli 不复制任何安装逻辑。
+ * 薄委托：dsh-rsi 不复制任何安装逻辑。
  * npm 形态只负责把与自身版本同 tag 的 install-npm.sh 拉到临时目录执行，
  * common.sh 的 SHA-256 自校验由脚本自身完成；local 形态直接执行 checkout 内脚本。
  * 安装器 stdio 与当前终端直连，交互提示/输出不经缓冲。

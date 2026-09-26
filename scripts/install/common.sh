@@ -439,8 +439,8 @@ dsh_enhanced_ensure_pnpm() {
   fi
 }
 
-# 安装插件集合的同时提供全局 dsh-rsi 控制/诊断/卸载命令（@dsh-enhanced/rsi-cli）。
-# npm 形态安装与 cohort 完全一致的精确版本；local 形态从当前 checkout 的 packages/rsi-cli 安装。
+# 安装插件集合的同时提供全局 dsh-rsi 控制/诊断/卸载命令（@dsh-enhanced/dsh-rsi-cli）。
+# npm 形态安装与 cohort 完全一致的精确版本；local 形态从当前 checkout 的 packages/dsh-rsi-cli 安装。
 # 纯库包无 install 脚本、无原生依赖，全局安装安全；install/upgrade 均调用，保证老安装补齐该命令。
 dsh_enhanced_ensure_rsi_cli() {
   local source_mode="$1"
@@ -448,22 +448,27 @@ dsh_enhanced_ensure_rsi_cli() {
   local plugin_version="$3"
   local dry_run="$4"
   printf '\ndsh-rsi 控制命令：\n'
+  # 旧包名 @dsh-enhanced/rsi-cli 与新包提供同名 bin dsh-rsi；先尽力卸载旧包，
+  # 避免新包安装时 bin 已被旧包占用导致 npm EEXIST（迁移：先清旧再装新）。
+  if [[ "$dry_run" != '1' ]]; then
+    npm uninstall --global @dsh-enhanced/rsi-cli >/dev/null 2>&1 || true
+  fi
   if [[ "$source_mode" == 'local' ]]; then
     if [[ "$dry_run" == '1' ]]; then
-      dsh_enhanced_print_command npm install --global "$repo_root/packages/rsi-cli"
+      dsh_enhanced_print_command npm install --global "$repo_root/packages/dsh-rsi-cli"
       return 0
     fi
-    npm install --global "$repo_root/packages/rsi-cli" || {
-      dsh_enhanced_fail 1 'dsh-rsi 安装失败（local 形态）；可手工执行 npm install --global '"$repo_root/packages/rsi-cli"。
+    npm install --global "$repo_root/packages/dsh-rsi-cli" || {
+      dsh_enhanced_fail 1 'dsh-rsi 安装失败（local 形态）；可手工执行 npm install --global '"$repo_root/packages/dsh-rsi-cli"。
       return $?
     }
   else
     if [[ "$dry_run" == '1' ]]; then
-      dsh_enhanced_print_command npm install --global "@dsh-enhanced/rsi-cli@$plugin_version"
+      dsh_enhanced_print_command npm install --global "@dsh-enhanced/dsh-rsi-cli@$plugin_version"
       return 0
     fi
-    npm install --global "@dsh-enhanced/rsi-cli@$plugin_version" || {
-      dsh_enhanced_fail 1 "dsh-rsi 安装失败（npm 形态 @$plugin_version）；可手工执行 npm install --global @dsh-enhanced/rsi-cli@$plugin_version。"
+    npm install --global "@dsh-enhanced/dsh-rsi-cli@$plugin_version" || {
+      dsh_enhanced_fail 1 "dsh-rsi 安装失败（npm 形态 @$plugin_version）；可手工执行 npm install --global @dsh-enhanced/dsh-rsi-cli@$plugin_version。"
       return $?
     }
   fi
@@ -1658,6 +1663,14 @@ dsh_enhanced_restore_trap() {
   fi
 }
 
+# 从日志/输出文件中提取最新一次 `dsh web: http://...` 完整 URL（含 token）。
+# 取最后一个匹配行：token 随每次重启变化。无匹配时返回空（不报错）。
+dsh_enhanced_latest_web_url() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  grep -Eo 'dsh web: https?://[^ ]+' "$file" 2>/dev/null | tail -n 1 | sed -E 's/^dsh web: //' || true
+}
+
 dsh_enhanced_verify_profile_activation() {
   local profile="$1"
   local dsh_home="$2"
@@ -1728,6 +1741,11 @@ dsh_enhanced_verify_profile_activation() {
     dsh_enhanced_restore_trap "$saved_exit_trap" EXIT
     dsh_enhanced_restore_trap "$saved_int_trap" INT
     dsh_enhanced_restore_trap "$saved_term_trap" TERM
+    local probe_url=""
+    probe_url="$(dsh_enhanced_latest_web_url "$stdout_path" || true)"
+    if [[ -n "$probe_url" ]]; then
+      printf 'profile 运行时自检：DSH 已打印带 token 的 Web URL（临时端口，仅用于验证激活，不是持久访问地址）。\n'
+    fi
     if [[ "$lark_temporarily_disabled" == '1' ]]; then
       printf 'profile 运行时自检通过：除临时禁用的 Lark channel 外，全部启用插件已激活。\n'
     else
@@ -3130,6 +3148,24 @@ NODE
     dsh_enhanced_append_slug 'assistant-evaluation'
   fi
 
+  # TraeX ACP provider 的 cordis.patch.yml 把 cwd 固定为 dshHomePath('assistant-workspace')。
+  # 该目录若不存在，ACP 子进程在首次模型调用时才会因 spawn cwd 不存在而失败；安装时即以 0700 预建。
+  # 插件 apply 阶段只 resolve 路径、不 stat（已核查 adapter 构造与 index.apply），故建目录即可，无需改插件源码。
+  local slug
+  for slug in "${selected_slugs[@]}"; do
+    if [[ "$slug" == 'traex-acp-provider' ]]; then
+      if [[ "$dry_run" == '1' ]]; then
+        dsh_enhanced_print_command install -d -m 700 "$dsh_home/assistant-workspace"
+      else
+        install -d -m 700 "$dsh_home/assistant-workspace" || {
+          dsh_enhanced_fail 1 "无法创建 TraeX 工作目录 $dsh_home/assistant-workspace。"
+          return $?
+        }
+      fi
+      break
+    fi
+  done
+
   local resolved_plugin_version="$plugin_version"
   if [[ "$source_mode" == 'npm' ]]; then
     # Do this before `dsh plugin add`: a partially published release must fail
@@ -3360,13 +3396,39 @@ NODE
   printf '检查配置：dsh --profile %s --dump-config\n' "$profile"
   if [[ "$scenario" == 'core' || "$scenario" == 'web' ]]; then
     printf '立即使用：dsh --profile %s\n' "$profile"
+    printf '  该命令会打印一行带 token 的完整 URL（形如 http://127.0.0.1:PORT/?token=...）；\n'
+    printf '  Web 开启了认证，请使用输出中的完整 URL 访问，不要只打开裸地址。\n'
   elif [[ "$scenario" == 'autonomy' ]]; then
     printf '自治安装已完成离线有限执行配置；凭据、外部目标验证与完整自治仍需单独配置。\n'
   fi
+
+  # TraeX：包已装载但默认未启用（config.enabled 默认 false）。给出明确可执行的启用与验证指引。
+  local slug
+  for slug in "${selected_slugs[@]}"; do
+    if [[ "$slug" == 'traex-acp-provider' ]]; then
+      printf '\nTraeX（traex-agent）配置指引：\n'
+      printf '  - 插件包已装载，但默认未启用为模型路由。启用并设为默认：\n'
+      printf '      dsh-model-setup --provider traex-agent --enable-in-profile %s\n' "$profile"
+      printf '    或在重装/升级时传 --model-provider traex-agent。\n'
+      printf '  - 前置条件：本机已安装 traex/trae-cli 并已登录（同一 OS 用户）：\n'
+      printf '      traex login status\n'
+      printf '    未登录时先运行 `traex login`。\n'
+      printf '  - ACP 会话工作目录：%s/assistant-workspace（已以 0700 创建）。\n' "$dsh_home"
+      printf '  - 启用后用 `dsh --profile %s --dump-config` 确认 @dsh-enhanced/traex-acp-provider 已注册。\n' "$profile"
+      break
+    fi
+  done
+
   if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
     case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in
       Linux) printf '查看日志：journalctl --user -u dsh-profile-%s.service -f\n' "$profile" ;;
       *) printf '查看日志：tail -f %s/logs/%s-host.error.log\n' "$dsh_home" "$profile" ;;
     esac
+    # 受管服务已在后台运行；用刚装好的 dsh-rsi 解析当前带 token 的 Web URL（不关闭认证）。
+    if [[ "$dry_run" != '1' ]] && command -v dsh-rsi >/dev/null 2>&1; then
+      printf '\n当前 Web 授权 URL（受管服务；token 随重启变化）：\n'
+      dsh-rsi web-url --profile "$profile" --dsh-home "$dsh_home" || true
+      printf '若服务刚启动尚未打印 URL，稍后重跑：dsh-rsi web-url --profile %s\n' "$profile"
+    fi
   fi
 }
