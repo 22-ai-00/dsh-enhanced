@@ -12,6 +12,7 @@ import { Ed25519ActivationRetractionAuthority, Ed25519PostActivationObservationA
 import { discover, loadCatalogWithMetadata, previewCatalogAdmission, type CatalogPackage } from './catalog.js'
 import { fetchRegistryArtifact, RegistryFetchError } from './registry-fetch.js'
 import { verifyApprovedPackagesInLockfile } from './lockfile.js'
+import { captureHostInputFiles, materializeHostInputFiles } from './host-inputs.js'
 import { Ed25519SourcePublishReconciliationAuthority, Ed25519SourceReleaseAuthority, Ed25519SourceReleaseAuthorizationAuthority,
   invokeSourcePublishReconciliationAdapter, invokeSourceReleaseAdapter, parseSourcePublishReconciliationReceipt,
   parseSourceReleaseAuthorization, parseSourceReleaseReceipt } from './release.js'
@@ -939,6 +940,22 @@ export async function activatePluginPlan(input: { store: ControlPlaneStore; trus
         if (activationArtifacts !== undefined) await closeActivationArtifactSnapshots(activationArtifacts.snapshots)
         if (pinnedInterpreter !== undefined) await pinnedInterpreter.executable.handle.close()
         await pinnedExecutor?.handle.close()
+      }
+      if (plan.dossier.hostDeploymentInputs) {
+        const inputs = plan.dossier.hostDeploymentInputs
+        const captured = await checked(signal, () => fencedMutation(store, plan, async () => {
+          await materializeHostInputFiles(activationPaths.stagePath, inputs)
+          if (plan.activation!.targetOriginallyExisted) await materializeHostInputFiles(plan.target.profilePath, inputs)
+          return {
+          profileFiles: (await captureHostInputFiles(activationPaths.stagePath, plan.target.profilePath, rollbackCoreFiles))
+            .map(({ path, sha256 }) => ({ path, sha256 })),
+          deploymentFiles: await captureHostInputFiles(activationPaths.stagePath, plan.target.profilePath, inputs),
+          baselineDeploymentFiles: plan.activation!.targetOriginallyExisted
+            ? await captureHostInputFiles(plan.target.profilePath, plan.target.profilePath, inputs) : [],
+          }
+        }))
+        plan = store.recordActivationHostInputWitness({ planId: plan.id, expectedRevision: plan.revision,
+          fence: plan.activation!.fence, ...captured })
       }
       plan = store.markActivationHostExposure({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation!.fence })
       throwIfAborted(signal)

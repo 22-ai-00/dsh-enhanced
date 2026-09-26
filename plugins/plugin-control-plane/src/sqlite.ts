@@ -3,7 +3,13 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 24
+export const controlPlaneSchemaVersion = 25
+
+const hostInputWitnessSchema = `CREATE TABLE IF NOT EXISTS activation_host_input_witnesses (
+  plan_id TEXT PRIMARY KEY REFERENCES activation_plans(id) ON DELETE RESTRICT,
+  witness_json TEXT NOT NULL CHECK(json_valid(witness_json) AND json_type(witness_json)='object'),
+  witness_digest TEXT NOT NULL CHECK(length(witness_digest)=64)
+) STRICT, WITHOUT ROWID;`
 
 const liveQualificationSchema = `
 CREATE TABLE IF NOT EXISTS live_qualification_windows (
@@ -1221,6 +1227,9 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     } else database.exec(adoptionHandoffsSchema)
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 24) migrateV23ToV24(database)
     else database.exec(liveQualificationSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 25) {
+      database.exec(`BEGIN IMMEDIATE; ${hostInputWitnessSchema} PRAGMA user_version = 25; COMMIT;`)
+    } else database.exec(hostInputWitnessSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

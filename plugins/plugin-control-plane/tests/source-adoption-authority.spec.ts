@@ -75,3 +75,13 @@ test('requires the owner grant to explicitly cover signed handoff terms', async 
   expect(receipt.planDigest).toBe(value.plan.digest)
   expect(receipt.expiresAt).toBeLessThanOrEqual(config.grant.expiresAt)
 })
+
+test('requires exact owner authorization for the signed deployment input list', async () => {
+  const value = await fixture()
+  value.plan.dossier.hostDeploymentInputs = ['node_modules/@dsh-enhanced/health-helper/lib/index.js']
+  await expect(authorizeSourceAdoption(value.config, value.request)).rejects.toThrow('refused')
+  value.config.grant.hostDeploymentInputs = ['different.js']
+  await expect(authorizeSourceAdoption(value.config, value.request)).rejects.toThrow('refused')
+  value.config.grant.hostDeploymentInputs = value.plan.dossier.hostDeploymentInputs
+  await expect(authorizeSourceAdoption(value.config, value.request)).resolves.toMatchObject({ planDigest: value.plan.digest })
+})

@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
-export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-5'
+export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-6'
 const DIGEST = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const UNIT_PROPERTIES = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory', 'User', 'Group', 'Type', 'KillMode']
@@ -104,8 +104,7 @@ function validateReadiness(ready, profilePath, withReload) {
   if (new Set(ready.deploymentFiles.map(spec => spec.path)).size !== ready.deploymentFiles.length) fail('duplicate deployment pin')
   if (ready.observer?.profilePath !== profilePath) fail('observer profile differs')
 }
-function loadConfig(environment, request) {
-  const config = parseJson(readSafe(environment.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG, 65536, true), 'config')
+function loadConfig(environment, request, config) {
   object(config, ['schemaVersion', 'authority', 'keyId', 'privateKeyPath', 'stateRoot', 'executable', 'interpreter', 'processHelper',
     'systemctl', 'scope', 'unit', 'unitProperties', 'profileFiles', 'authorization', 'timeoutMs', 'stableWindowMs', 'pollIntervalMs',
     ...([2, 3].includes(config.schemaVersion) ? ['readiness'] : [])], 'config')
@@ -206,6 +205,68 @@ function loadConfig(environment, request) {
     || request.issuer.authority !== config.authority || request.issuer.keyId !== config.keyId) fail('issuer differs from owner configuration')
   assertCurrent(config, request)
   return { config, privateKey }
+}
+
+const TEMPLATE_FIELDS = ['authority', 'keyId', 'privateKeyPath', 'stateRoot', 'executable', 'interpreter', 'processHelper',
+  'systemctl', 'scope', 'unit', 'unitProperties', 'timeoutMs', 'stableWindowMs', 'pollIntervalMs', 'readiness', 'recoveryReadiness']
+
+async function processRunner(spec) {
+  const bytes = readSafe(spec.path, 1048576)
+  if (hash(bytes) !== spec.sha256) fail('process helper changed')
+  const { executeControlledProcess } = await import(`data:text/javascript;base64,${bytes.toString('base64')}`)
+  if (typeof executeControlledProcess !== 'function') fail('process helper contract is unavailable')
+  return executeControlledProcess
+}
+
+/** A pinned independent resolver authorizes each durable operation from its standing grant. */
+async function resolveStandingConfig(wrapper, request) {
+  object(wrapper, ['schemaVersion', 'template', 'resolver'], 'standing config')
+  const template = object(wrapper.template, TEMPLATE_FIELDS, 'standing template')
+  pin(template.executable, 'attestor executable', true); pin(template.interpreter, 'attestor interpreter', true)
+  pin(template.processHelper, 'process helper')
+  if (runningHash(process.argv[1]) !== template.executable.sha256 || runningHash(process.execPath) !== template.interpreter.sha256) fail('running attestor identity differs')
+  const resolver = object(wrapper.resolver, ['executable', 'interpreter', 'configPath', 'configSha256', 'timeoutMs'], 'authorization resolver')
+  pin(resolver.executable, 'resolver executable', true)
+  if (resolver.interpreter !== null) pin(resolver.interpreter, 'resolver interpreter', true)
+  integer(resolver.timeoutMs, 'resolver timeout', 1000, 60000)
+  text(resolver.configSha256, 'resolver config digest', DIGEST)
+  const configBytes = readSafe(resolver.configPath, 65536, true)
+  if (hash(configBytes) !== resolver.configSha256) fail('resolver config changed')
+  const authorityConfig = parseJson(configBytes, 'resolver config')
+  if (canonical(authorityConfig.template) !== canonical(template)) fail('resolver template differs from standing config')
+  const execute = await processRunner(template.processHelper)
+  const specs = [resolver.executable, ...(resolver.interpreter ? [resolver.interpreter] : [])], descriptors = []
+  try {
+    for (const spec of specs) {
+      const fd = openSync(spec.path, F.O_RDONLY | F.O_NOFOLLOW); descriptors.push(fd)
+      const bytes = descriptorBytes(fd, 268435456)
+      if (hash(bytes) !== spec.sha256) fail('resolver inode changed')
+      if ((resolver.interpreter === null || spec === resolver.interpreter)
+        && !bytes.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) fail('script resolver requires a pinned interpreter with native ELF identity')
+    }
+    const result = await execute({ command: descriptors.length === 2 ? '/proc/self/fd/4' : '/proc/self/fd/3',
+      args: [...(descriptors.length === 2 ? ['/proc/self/fd/3'] : []), '--config', resolver.configPath],
+      env: { LANG: 'C', LC_ALL: 'C' }, stdio: ['pipe', 'pipe', 'ignore', ...descriptors],
+      stdin: `${JSON.stringify(request)}\n`, maximumOutput: 65536, timeoutMs: resolver.timeoutMs })
+    for (let index = 0; index < descriptors.length; index++) if (hash(descriptorBytes(descriptors[index], 268435456)) !== specs[index].sha256) fail('resolver mutated')
+    if (hash(readSafe(resolver.configPath, 65536, true)) !== resolver.configSha256) fail('resolver config changed during authorization')
+    const derived = parseJson(Buffer.from(result), 'resolved config')
+    for (const field of TEMPLATE_FIELDS.filter(field => field !== 'readiness' && field !== 'recoveryReadiness')) {
+      if (canonical(derived[field]) !== canonical(template[field])) fail('resolved static authority differs')
+    }
+    const expectedSchema = request.phase === 'reload' ? 1 : request.phase === 'readiness' ? 2 : 3
+    if (derived.schemaVersion !== expectedSchema || derived.authorization?.requestDigest !== digest(request)) fail('resolver did not authorize the exact phase and request')
+    if (expectedSchema !== 1) {
+      if (request.phase === 'rollback' && request.requirements?.action === 'stop') {
+        if (derived.readiness !== null) fail('resolved stop readiness differs')
+      } else {
+        const expected = request.phase === 'rollback' ? template.recoveryReadiness : template.readiness
+        if (canonical(derived.readiness?.client) !== canonical(expected?.client)
+          || canonical(derived.readiness?.observer) !== canonical(expected?.observer)) fail('resolved observer authority differs')
+      }
+    }
+    return derived
+  } finally { for (const fd of descriptors.reverse()) closeSync(fd) }
 }
 function assertCurrent(config, request) {
   const now = Date.now(); const auth = config.authorization
@@ -619,10 +680,7 @@ async function attestRollback(request, config, privateKey, db, execute, deadline
   })
 }
 async function attest(request, config, privateKey) {
-  const helperBytes = readSafe(config.processHelper.path, 1048576)
-  if (hash(helperBytes) !== config.processHelper.sha256) fail('process helper changed')
-  const { executeControlledProcess: execute } = await import(`data:text/javascript;base64,${helperBytes.toString('base64')}`)
-  if (typeof execute !== 'function') fail('process helper contract is unavailable')
+  const execute = await processRunner(config.processHelper)
   const deadline = performance.now() + config.timeoutMs
   const db = journal(config)
   try {
@@ -694,7 +752,9 @@ export async function runSystemdHostAttestor(argv = process.argv.slice(2), envir
   for await (const chunk of process.stdin) { bytes += chunk.length; if (bytes > 65536) fail('request exceeds byte limit'); chunks.push(chunk) }
   const request = parseJson(Buffer.concat(chunks), 'request')
   if (!['reload', 'readiness', 'rollback'].includes(request?.phase)) fail('only reload, readiness and rollback requests are supported')
-  const { config, privateKey } = loadConfig(environment, request)
+  let input = parseJson(readSafe(environment.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG, 65536, true), 'config')
+  if (input.schemaVersion === 4) input = await resolveStandingConfig(input, request)
+  const { config, privateKey } = loadConfig(environment, request, input)
   return attest(request, config, privateKey)
 }
 if (process.argv[1] && (/^\/proc\/self\/fd\/\d+$/u.test(process.argv[1]) || realpathSync(process.argv[1]) === fileURLToPath(import.meta.url))) {

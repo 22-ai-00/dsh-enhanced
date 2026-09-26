@@ -51,3 +51,5 @@ export { validateLiveQualificationAuthorityConfig } from './live-qualification-a
 export type { LiveQualificationAuthorityConfig } from './live-qualification-authority.js'
 export type { LiveQualificationConfig } from './live-qualification-runtime.js'
 export type { LiveQualificationTerms, LiveQualificationBatch, LiveQualificationReceipt } from './live-qualification.js'
+export { validateSystemdHostAuthorityConfig } from './systemd-host-authority.js'
+export type { SystemdHostAuthorityConfig } from './systemd-host-authority.js'

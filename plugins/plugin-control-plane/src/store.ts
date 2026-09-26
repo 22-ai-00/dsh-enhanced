@@ -1,7 +1,7 @@
 import { validateLiveQualificationTerms, assertLiveQualificationBatch, parseLiveQualificationReceipt, verifyLiveQualificationReceipt, type LiveQualificationTerms, type LiveQualificationBatch, type LiveQualificationReceipt, type LiveQualificationRecord } from './live-qualification.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
-import { basename, isAbsolute } from 'node:path'
+import { basename, isAbsolute, posix, resolve, win32 } from 'node:path'
 import { discover, parseCatalog, type CatalogEntry, type LoadedCapabilityCatalog } from './catalog.js'
 import { parseApprovalReceipt } from './approval.js'
 import { parseSourcePublishReconciliationReceipt, parseSourcePublishReconciliationRequest, parseSourceReleaseAuthorization,
@@ -29,6 +29,7 @@ import type {
   HostAttestationReceipt,
   HostAttestationRequest,
   HostAttestationRequirements,
+  HostInputWitness,
   OperationReceipt,
   PlanStatus,
   PluginActivationPlan,
@@ -73,6 +74,24 @@ const ACTIVATION_PLAN_KEYS = ['schemaVersion', 'kind', 'id', 'gapId', 'gapSnapsh
 const ACTIVATION_STATUSES = new Set<PlanStatus>(['pending-approval', 'approved', 'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks',
   'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending',
   'rollback-pending', 'activated', 'rolled-back'])
+
+export function validateHostDeploymentInputs(value: unknown): asserts value is readonly string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 128) {
+    throw new ControlPlaneStoreError('invalid-input', 'Host deployment inputs require 1..128 relative paths')
+  }
+  const seen = new Set<string>()
+  for (const input of value) {
+    if (typeof input !== 'string' || input.length === 0 || Buffer.byteLength(input) > 4096
+      || input !== input.normalize('NFC') || input !== input.trim() || input.includes('\\')
+      || [...input].some(character => { const point = character.codePointAt(0)!; return point < 32 || point === 127 })
+      || posix.isAbsolute(input) || win32.parse(input).root !== ''
+      || input.split('/').some(part => part === '' || part === '.' || part === '..')
+      || posix.normalize(input) !== input || seen.has(input)) {
+      throw new ControlPlaneStoreError('invalid-input', 'Host deployment input is not a unique normalized relative path')
+    }
+    seen.add(input)
+  }
+}
 
 export class ControlPlaneStoreError extends Error {
   constructor(readonly code: 'conflict' | 'expired' | 'invalid-input' | 'invalid-state' | 'not-found', message: string) {
@@ -180,7 +199,8 @@ function activationSnapshotFromStored(value: unknown): PluginActivationPlan {
   exactKeys(gapSnapshot, ['revision', 'inputDigest', 'roi', 'capability'], 'stored activation gap snapshot')
   const dossier = objectRecord(item['dossier'], 'stored activation dossier')
   exactKeys(dossier, ['catalogDigest', 'catalogProvenance', 'matchedCapabilities', 'authorities', 'packages',
-    ...(Object.hasOwn(dossier, 'handoff') ? ['handoff'] : []), ...(Object.hasOwn(dossier, 'liveQualification') ? ['liveQualification'] : [])], 'stored activation dossier')
+    ...(Object.hasOwn(dossier, 'handoff') ? ['handoff'] : []), ...(Object.hasOwn(dossier, 'liveQualification') ? ['liveQualification'] : []),
+    ...(Object.hasOwn(dossier, 'hostDeploymentInputs') ? ['hostDeploymentInputs'] : [])], 'stored activation dossier')
   const ledger = objectRecord(item['ledger'], 'stored activation ledger'); exactKeys(ledger, ['id', 'path'], 'stored activation ledger')
   const target = objectRecord(item['target'], 'stored activation target'); exactKeys(target, ['dshHome', 'profile', 'profilePath'], 'stored activation target')
   const executor = objectRecord(item['executor'], 'stored activation executor'); exactKeys(executor, ['id', 'version', 'path', 'sha256'], 'stored activation executor')
@@ -207,6 +227,10 @@ function activationSnapshotFromStored(value: unknown): PluginActivationPlan {
     throw new ControlPlaneStoreError('invalid-state', 'stored activation plan snapshot is corrupt')
   }
   if (dossier['liveQualification'] !== undefined) validateLiveQualificationTerms(dossier['liveQualification'])
+  if (dossier['hostDeploymentInputs'] !== undefined) {
+    try { validateHostDeploymentInputs(dossier['hostDeploymentInputs']) }
+    catch { throw new ControlPlaneStoreError('invalid-state', 'stored Host deployment inputs are corrupt') }
+  }
   if (dossier['handoff'] !== undefined) {
     try { validateAdoptionHandoffTerms(dossier['handoff']) }
     catch { throw new ControlPlaneStoreError('invalid-state', 'stored activation handoff terms are corrupt') }
@@ -434,6 +458,57 @@ function activationCoreFiles(value: unknown, targetPath: string, label: string):
   return value as readonly { path: string; sha256: string | null }[]
 }
 
+function hostInputPins(value: unknown, inputs: readonly string[], targetPath: string, label: string):
+  readonly { input: string; path: string; sha256: string }[] {
+  if (!Array.isArray(value) || value.length !== inputs.length) throw new ControlPlaneStoreError('invalid-state', `${label} does not cover signed inputs`)
+  const paths = new Set<string>()
+  for (let index = 0; index < value.length; index++) {
+    const item = value[index] as Record<string, unknown>
+    if (!item || typeof item !== 'object' || Array.isArray(item)
+      || Object.keys(item).sort().join('\0') !== 'input\0path\0sha256' || item.input !== inputs[index]
+      || typeof item.path !== 'string' || !isAbsolute(item.path) || resolve(item.path) !== item.path
+      || !item.path.startsWith(`${targetPath}/`) || paths.has(item.path)
+      || typeof item.sha256 !== 'string' || !DIGEST.test(item.sha256)) {
+      throw new ControlPlaneStoreError('invalid-state', `${label} contains an unbound or unsafe file pin`)
+    }
+    paths.add(item.path)
+  }
+  return value as readonly { input: string; path: string; sha256: string }[]
+}
+
+function hostInputWitnessFromRow(database: DatabaseSync, plan: PluginActivationPlan): HostInputWitness | undefined {
+  const row = database.prepare('SELECT witness_json,witness_digest FROM activation_host_input_witnesses WHERE plan_id=?')
+    .get(plan.id) as { witness_json: string; witness_digest: string } | undefined
+  if (!row) return undefined
+  if (Buffer.byteLength(row.witness_json) > 262_144) throw new ControlPlaneStoreError('invalid-state', 'Host input witness exceeds storage bound')
+  let witness: HostInputWitness
+  try { witness = JSON.parse(row.witness_json) as HostInputWitness }
+  catch { throw new ControlPlaneStoreError('invalid-state', 'Host input witness JSON is corrupt') }
+  if (!witness || typeof witness !== 'object' || Array.isArray(witness)
+    || Object.keys(witness).sort().join('\0') !== ['schemaVersion','kind','planId','planDigest','activationId','fence','createdAt',
+      'inputs','profileFiles','deploymentFiles','baselineDeploymentFiles','digest'].sort().join('\0')
+    || witness.schemaVersion !== 1 || witness.kind !== 'dsh-host-input-witness'
+    || !plan.dossier.hostDeploymentInputs || witness.planId !== plan.id || witness.planDigest !== plan.digest
+    || !plan.activation || witness.activationId !== plan.activation.id || !Number.isSafeInteger(witness.fence) || witness.fence < 1
+    || (witness.fence !== plan.activation.fence && !(['rollback-pending', 'rolled-back'].includes(plan.status) && witness.fence < plan.activation.fence))
+    || !Number.isSafeInteger(witness.createdAt) || witness.createdAt < plan.createdAt
+    || controlPlaneDigest(witness) !== row.witness_digest) throw new ControlPlaneStoreError('invalid-state', 'Host input witness identity changed')
+  const { digest, ...unsigned } = witness
+  if (digest !== controlPlaneDigest(unsigned) || !Array.isArray(witness.inputs)
+    || controlPlaneDigest(witness.inputs) !== controlPlaneDigest(plan.dossier.hostDeploymentInputs)) {
+    throw new ControlPlaneStoreError('invalid-state', 'Host input witness digest or signed input set changed')
+  }
+  const core = activationCoreFiles(witness.profileFiles, plan.target.profilePath, 'Host input witness core files')
+  if (core.some(file => file.sha256 === null)) throw new ControlPlaneStoreError('invalid-state', 'Host input witness has an absent core file')
+  hostInputPins(witness.deploymentFiles, witness.inputs, plan.target.profilePath, 'Host input witness deployment files')
+  if (plan.activation.targetOriginallyExisted) {
+    hostInputPins(witness.baselineDeploymentFiles, witness.inputs, plan.target.profilePath, 'Host input witness baseline files')
+  } else if (!Array.isArray(witness.baselineDeploymentFiles) || witness.baselineDeploymentFiles.length !== 0) {
+    throw new ControlPlaneStoreError('invalid-state', 'absent original target has Host input baseline files')
+  }
+  return witness
+}
+
 function activationFromRow(row: ActivationRow): PluginActivationPlan {
   const candidate = parseCatalog({ schemaVersion: 1, entries: [JSON.parse(row.candidate_json) as unknown] }).entries[0]
   const gapSnapshot = JSON.parse(row.gap_snapshot_json) as PluginActivationPlan['gapSnapshot']
@@ -441,6 +516,10 @@ function activationFromRow(row: ActivationRow): PluginActivationPlan {
   if (candidate === undefined || !DIGEST.test(row.plan_digest) || !UUID.test(row.installation_id)
     || !DIGEST.test(gapSnapshot.inputDigest) || !DIGEST.test(dossier.catalogDigest)) throw new ControlPlaneStoreError('invalid-state', 'stored activation plan is corrupt')
   if (dossier.liveQualification !== undefined) validateLiveQualificationTerms(dossier.liveQualification)
+  if (dossier.hostDeploymentInputs !== undefined) {
+    try { validateHostDeploymentInputs(dossier.hostDeploymentInputs) }
+    catch { throw new ControlPlaneStoreError('invalid-state', 'stored Host deployment inputs are corrupt') }
+  }
   if (dossier.handoff !== undefined) {
     try { validateAdoptionHandoffTerms(dossier.handoff) }
     catch { throw new ControlPlaneStoreError('invalid-state', 'stored activation handoff terms are corrupt') }
@@ -741,6 +820,7 @@ export interface CreateActivationPlanInput {
   sourcePlanId?: string
   handoff?: AdoptionHandoffTerms
   liveQualification?: LiveQualificationTerms
+  hostDeploymentInputs?: readonly string[]
 }
 
 export interface CreateSourcePlanInput {
@@ -1177,6 +1257,163 @@ export function readOwnerSourceAdoptionPlan(database: DatabaseSync, activationPl
   return { plan, sourcePlan, source, released }
 }
 
+/** Read-only, exact durable authority context for an independently signed Host operation. */
+export interface OwnerHostAttestationContext extends ReturnType<typeof readOwnerSourceAdoptionPlan> {
+  handoff: AdoptionHandoffRecord
+  approvalReceipt: ApprovalReceipt
+  operation: HostAttestationOperation & { request: HostAttestationRequest }
+  dispatch: { status: 'claimed'; claimedAt: number }
+  witness: HostInputWitness
+}
+
+export function readOwnerHostAttestationContext(database: DatabaseSync, operationId: string): OwnerHostAttestationContext {
+  if (database.prepare('PRAGMA user_version').get()?.user_version !== controlPlaneSchemaVersion
+    || typeof operationId !== 'string' || !KEY.test(operationId)) {
+    throw new ControlPlaneStoreError('invalid-state', 'Host authority database or operation identity is invalid')
+  }
+  const operationRow = database.prepare('SELECT * FROM host_attestation_operations WHERE operation_id=?')
+    .get(operationId) as HostAttestationOperationRow | undefined
+  if (!operationRow) throw new ControlPlaneStoreError('not-found', 'Host authority operation is absent')
+  const parsed = hostOperationFromRow(operationRow)
+  if (!isBoundHostRequest(parsed.request) || parsed.status !== 'pending' || parsed.receipt !== undefined
+    || operationRow.completed_at !== null || operationRow.applied_at !== null) {
+    throw new ControlPlaneStoreError('invalid-state', 'Host authority requires an uncompleted schema-2 operation')
+  }
+  const operation = parsed as HostAttestationOperation & { request: HostAttestationRequest }
+  const { plan, sourcePlan, source, released } = readOwnerSourceAdoptionPlan(database, operation.planId)
+  const request = operation.request, activation = plan.activation, expected = expectedAttestation[plan.status]
+  if (!activation || expected?.phase !== operation.phase || request.phase !== operation.phase
+    || request.operationId !== operation.operationId || request.plan.id !== plan.id || request.plan.digest !== plan.digest
+    || request.installationId !== plan.installationId || controlPlaneDigest(request.ledger) !== controlPlaneDigest(plan.ledger)
+    || request.profile.name !== plan.profile || request.profile.path !== plan.target.profilePath
+    || request.activation.id !== activation.id || request.activation.fence !== activation.fence
+    || request.requestedAt !== operation.createdAt || request.receiptTtlMs < 1_000 || request.receiptTtlMs > 300_000) {
+    throw new ControlPlaneStoreError('conflict', 'Host authority operation lost its current plan binding')
+  }
+  const dispatchRow = database.prepare('SELECT * FROM host_attestation_dispatches WHERE operation_id=?')
+    .get(operationId) as HostAttestationDispatchRow | undefined
+  if (!dispatchRow || dispatchRow.status !== 'claimed' || dispatchRow.completed_at !== null
+    || !Number.isSafeInteger(dispatchRow.claimed_at) || dispatchRow.claimed_at < operation.createdAt) {
+    throw new ControlPlaneStoreError('conflict', 'Host authority operation was not durably claimed')
+  }
+  const handoffRow = database.prepare('SELECT * FROM adoption_handoffs WHERE plan_id=?').get(plan.id) as
+    {plan_id:string;plan_digest:string;coordinator_id:string;created_at:number;expires_at:number;revoked_at:number|null}|undefined
+  const terms = plan.dossier.handoff
+  if (!handoffRow || !terms || handoffRow.plan_digest !== plan.digest || handoffRow.coordinator_id !== terms.coordinatorId
+    || !Number.isSafeInteger(handoffRow.created_at) || handoffRow.created_at < plan.createdAt
+    || handoffRow.expires_at !== Math.min(handoffRow.created_at + terms.maximumWindowMs, plan.expiresAt, plan.approval?.expiresAt ?? 0)) {
+    throw new ControlPlaneStoreError('invalid-state', 'Host authority handoff is not bound to the owner plan')
+  }
+  validateAdoptionHandoffTerms(terms)
+  const handoff: AdoptionHandoffRecord = { planId: plan.id, planDigest: plan.digest, coordinatorId: terms.coordinatorId,
+    createdAt: handoffRow.created_at, expiresAt: handoffRow.expires_at,
+    ...(handoffRow.revoked_at === null ? {} : { revokedAt: handoffRow.revoked_at }) }
+  const planRow = database.prepare('SELECT approval_receipt_json FROM activation_plans WHERE id=?').get(plan.id) as
+    { approval_receipt_json: string | null }
+  let approvalReceipt: ApprovalReceipt
+  try { approvalReceipt = parseApprovalReceipt(JSON.parse(planRow.approval_receipt_json ?? 'null')) }
+  catch { throw new ControlPlaneStoreError('invalid-state', 'Host authority approval receipt is corrupt') }
+  if (!plan.approval || controlPlaneDigest(projectedApproval(approvalReceipt)) !== controlPlaneDigest(plan.approval)) {
+    throw new ControlPlaneStoreError('invalid-state', 'Host authority approval projection changed')
+  }
+  const rollback = operation.phase === 'rollback'
+  const now = Date.now()
+  if (!rollback && (now >= plan.expiresAt || now >= plan.approval.expiresAt || now >= handoff.expiresAt
+    || handoff.revokedAt !== undefined)) throw new ControlPlaneStoreError('expired', 'Host authority forward authorization expired')
+  const witness = hostInputWitnessFromRow(database, plan)
+  if (!witness || witness.activationId !== activation.id || (!rollback && witness.fence !== activation.fence)) {
+    throw new ControlPlaneStoreError('conflict', 'Host authority lacks exact deployment witness')
+  }
+  if (rollback) {
+    if (!activation.hostRecoveryRequired || !activation.rollbackProfileRestored || activation.targetBaselineFiles === undefined
+      || request.requirements.kind !== 'rollback'
+      || controlPlaneDigest(request.requirements.baselineFiles) !== controlPlaneDigest(activation.targetBaselineFiles)
+      || request.requirements.action !== (activation.targetOriginallyExisted ? 'restore' : 'stop')) {
+      throw new ControlPlaneStoreError('conflict', 'Host rollback lacks a durable physical recovery obligation')
+    }
+    const checkpoint = database.prepare('SELECT exposure_order,successful_order FROM activation_deployment_checkpoints WHERE plan_id=?')
+      .get(plan.id) as {exposure_order:number;successful_order:number|null}|undefined
+    const postActivated = ['post-activation-regressed', 'post-activation-retracted', 'live-qualification-invalidated']
+      .includes(activation.failureCode ?? '')
+    if (postActivated && (!checkpoint || checkpoint.exposure_order !== checkpoint.successful_order)) {
+      throw new ControlPlaneStoreError('conflict', 'post-activation rollback lacks a successful deployment checkpoint')
+    }
+    if (postActivated) {
+      const readinessRow = database.prepare(`SELECT o.* FROM host_attestation_operations o
+        JOIN host_attestations a ON a.plan_id=o.plan_id AND a.phase=o.phase AND a.receipt_digest=o.receipt_digest
+        WHERE o.plan_id=? AND o.phase='readiness' AND o.status='applied'`).get(plan.id) as HostAttestationOperationRow | undefined
+      const readiness = readinessRow && hostOperationFromRow(readinessRow)
+      if (!readiness?.receipt || readiness.receipt.outcome !== 'passed'
+        || readiness.request.activation.id !== activation.id || readiness.request.activation.fence !== witness.fence
+        || readiness.receipt.activationId !== activation.id || readiness.receipt.fence !== witness.fence) {
+        throw new ControlPlaneStoreError('conflict', 'post-activation rollback lacks original applied readiness')
+      }
+    }
+    const active = database.prepare(`SELECT 1 FROM activation_plans WHERE target_path=? AND id<>? AND status IN
+      ('staging','awaiting-reload','awaiting-readiness','awaiting-live-tasks','awaiting-effect-blocked-replay','awaiting-shadow',
+       'awaiting-canary','awaiting-soak','awaiting-health','commit-pending','rollback-pending') LIMIT 1`)
+      .get(plan.target.profilePath, plan.id)
+    const superseded = checkpoint && database.prepare(`SELECT 1 FROM activation_deployment_checkpoints AS c
+      JOIN activation_plans AS p ON p.id=c.plan_id WHERE p.target_path=? AND c.successful_order IS NOT NULL
+      AND c.exposure_order>? LIMIT 1`).get(plan.target.profilePath, checkpoint.exposure_order)
+    if (active || superseded) throw new ControlPlaneStoreError('conflict', 'Host rollback target has a newer owner')
+  }
+  const latestRow = database.prepare(`SELECT max(generation) AS generation FROM (
+    SELECT max(a.host_generation) AS generation FROM host_attestations a JOIN activation_plans p ON p.id=a.plan_id WHERE p.installation_id=?
+    UNION ALL SELECT max(w.last_host_generation) AS generation FROM activation_watch w JOIN activation_plans p ON p.id=w.plan_id WHERE p.installation_id=?)`)
+    .get(plan.installationId, plan.installationId) as {generation:number|null}
+  const latest = latestRow.generation ?? 0
+  if ((operation.phase === 'reload' && (request.predecessor !== null || request.requirements.kind !== 'reload'
+      || request.requirements.previousHostGeneration !== latest))
+    || (rollback && (request.requirements.kind !== 'rollback' || request.requirements.previousHostGeneration !== latest))) {
+    throw new ControlPlaneStoreError('conflict', 'Host authority generation changed after operation reservation')
+  }
+  if (operation.phase !== 'reload') {
+    const predecessor = request.predecessor
+    const priorPhase = rollback ? undefined : predecessorPhase[operation.phase]
+    const priorRows = database.prepare(`SELECT o.* FROM host_attestation_operations AS o
+      JOIN host_attestations AS a ON a.plan_id=o.plan_id AND a.phase=o.phase AND a.receipt_digest=o.receipt_digest
+      WHERE o.plan_id=? AND o.status='applied' ${priorPhase === undefined ? '' : 'AND o.phase=?'}
+      ORDER BY o.applied_at DESC,
+        CASE o.phase WHEN 'reload' THEN 1 WHEN 'readiness' THEN 2 WHEN 'effect-blocked-replay' THEN 3
+          WHEN 'shadow' THEN 4 WHEN 'canary' THEN 5 WHEN 'soak' THEN 6 WHEN 'health' THEN 7 WHEN 'rollback' THEN 8 END DESC`)
+      .all(...(priorPhase === undefined ? [plan.id] : [plan.id, priorPhase])) as unknown as HostAttestationOperationRow[]
+    let actual: HostAttestationRequest['predecessor'] = null
+    for (const priorRow of priorRows) {
+      const prior = hostOperationFromRow(priorRow), receipt = prior.receipt
+      if (!receipt || priorRow.receipt_digest === null || prior.request.activation.id !== activation.id
+        || receipt.activationId !== activation.id
+        || (!rollback && (prior.request.activation.fence !== activation.fence || receipt.fence !== activation.fence))
+        || (rollback && (prior.request.activation.fence >= activation.fence || receipt.fence >= activation.fence))) continue
+      actual = { operationId: prior.operationId, receiptId: receipt.receiptId, phase: prior.phase,
+        receiptDigest: priorRow.receipt_digest, hostGeneration: receipt.hostGeneration }
+      break
+    }
+    if (controlPlaneDigest(actual) !== controlPlaneDigest(predecessor)) {
+      throw new ControlPlaneStoreError('conflict', 'Host authority predecessor is no longer current')
+    }
+    if (predecessor !== null) {
+      const prior = database.prepare(`SELECT o.*, a.host_generation AS applied_generation FROM host_attestation_operations o
+        JOIN host_attestations a ON a.plan_id=o.plan_id AND a.phase=o.phase AND a.receipt_digest=o.receipt_digest
+        WHERE o.operation_id=? AND o.plan_id=? AND o.status='applied'`).get(predecessor.operationId, plan.id) as
+        (HostAttestationOperationRow & { applied_generation:number }) | undefined
+      if (!prior) throw new ControlPlaneStoreError('conflict', 'Host authority predecessor is not applied')
+      const predecessorOperation = hostOperationFromRow(prior)
+      if (!predecessorOperation.receipt || predecessorOperation.receipt.receiptId !== predecessor.receiptId
+        || predecessorOperation.phase !== predecessor.phase || prior.receipt_digest !== predecessor.receiptDigest
+        || prior.applied_generation !== predecessor.hostGeneration
+        || predecessorOperation.request.activation.id !== activation.id
+        || (!rollback && (predecessor.phase !== predecessorPhase[operation.phase] || predecessor.hostGeneration !== latest
+          || predecessorOperation.receipt.outcome !== 'passed'))
+        || (rollback && predecessorOperation.request.activation.fence >= activation.fence && witness.fence < activation.fence)) {
+        throw new ControlPlaneStoreError('conflict', 'Host authority predecessor binding changed')
+      }
+    } else if (!rollback) throw new ControlPlaneStoreError('conflict', 'Host authority normal phase lacks predecessor')
+  }
+  return { plan, sourcePlan, source, released, handoff, approvalReceipt, operation,
+    dispatch: { status: 'claimed', claimedAt: dispatchRow.claimed_at }, witness }
+}
+
 function liveQualificationRecord(db: DatabaseSync, id: string): LiveQualificationRecord | undefined {
   const row = db.prepare('SELECT * FROM live_qualification_batches WHERE id=?').get(id) as
     { id: string; plan_id: string; batch_json: string; batch_digest: string; state: LiveQualificationRecord['state']; receipt_json: string | null; receipt_digest: string | null } | undefined
@@ -1469,13 +1706,15 @@ export class ControlPlaneStore {
     const requestBinding = { operation: 'create-activation-plan', gapId: input.gapId, candidate, catalog: input.catalog,
       matchedCapabilities, profile, target: input.target, installationId: input.installationId,
       ledger: input.ledger, executor: input.executor, ttlMs: input.ttlMs,
-      ...(input.sourcePlanId === undefined ? {} : { sourcePlanId: input.sourcePlanId }), ...(input.handoff === undefined ? {} : { handoff: input.handoff }), ...(input.liveQualification === undefined ? {} : { liveQualification: input.liveQualification }) }
+      ...(input.sourcePlanId === undefined ? {} : { sourcePlanId: input.sourcePlanId }), ...(input.handoff === undefined ? {} : { handoff: input.handoff }), ...(input.liveQualification === undefined ? {} : { liveQualification: input.liveQualification }),
+      ...(input.hostDeploymentInputs === undefined ? {} : { hostDeploymentInputs: input.hostDeploymentInputs }) }
     this.#assertOwnerTaskFailureGapAdmission(input.gapId)
     const source = input.sourcePlanId === undefined ? undefined : readOwnerPreparedSourcePlan(this.#database, input.sourcePlanId)
     if (input.liveQualification !== undefined) {
       validateLiveQualificationTerms(input.liveQualification)
       if (!source || !input.handoff) throw new ControlPlaneStoreError('invalid-input', 'bounded-live adoption requires an exact owner release and external coordinator')
     }
+    if (input.hostDeploymentInputs !== undefined) validateHostDeploymentInputs(input.hostDeploymentInputs)
     if (input.handoff !== undefined) { validateAdoptionHandoffTerms(input.handoff); if (!source) throw new ControlPlaneStoreError('invalid-input', 'adoption handoff requires an exact owner release') }
     if (source && (source.plan.status !== 'release-complete' || source.plan.gapId !== input.gapId
       || controlPlaneDigest(readReleaseCandidate(this.#database, source.plan)) !== controlPlaneDigest(candidate))) {
@@ -1500,7 +1739,8 @@ export class ControlPlaneStore {
     const dossier = Object.freeze({ catalogDigest: input.catalog.digest, catalogProvenance: input.catalog.provenance,
       matchedCapabilities: Object.freeze(matchedCapabilities), authorities: Object.freeze([...candidate.authorities]), packages,
       ...(input.handoff === undefined ? {} : { handoff: Object.freeze({ ...input.handoff }) }),
-      ...(input.liveQualification === undefined ? {} : { liveQualification: Object.freeze({ ...input.liveQualification }) }) })
+      ...(input.liveQualification === undefined ? {} : { liveQualification: Object.freeze({ ...input.liveQualification }) }),
+      ...(input.hostDeploymentInputs === undefined ? {} : { hostDeploymentInputs: Object.freeze([...input.hostDeploymentInputs]) }) })
     const now = this.#now(); const id = `plugin-${randomUUID()}`; const expiresAt = now + input.ttlMs
     const immutable = { schemaVersion: 4 as const, kind: 'activation' as const, id, gapId: gap.id, gapSnapshot,
       profile, candidate, dossier, installationId: input.installationId, ledger: input.ledger,
@@ -2149,9 +2389,66 @@ export class ControlPlaneStore {
     return rows.map(activationFromRow)
   }
 
+  /** Freeze exact physical pins before a signed deployment becomes Host-visible. */
+  recordActivationHostInputWitness(input: { planId: string; expectedRevision: number; fence: number;
+    profileFiles: readonly { path: string; sha256: string }[];
+    deploymentFiles: readonly { input: string; path: string; sha256: string }[];
+    baselineDeploymentFiles: readonly { input: string; path: string; sha256: string }[] }): PluginActivationPlan {
+    return this.#withActivationWrite(input.planId, () => {
+      const plan = this.getPlan(input.planId)
+      const row = this.#database.prepare('SELECT activation_lease_until FROM activation_plans WHERE id=?').get(plan.id) as
+        { activation_lease_until: number | null }
+      const inputs = plan.dossier.hostDeploymentInputs
+      if (!inputs) throw new ControlPlaneStoreError('invalid-state', 'plan has no signed Host deployment inputs')
+      if (plan.status !== 'staging' || plan.revision !== input.expectedRevision || plan.activation?.fence !== input.fence
+        || (row.activation_lease_until ?? 0) < this.#now() || plan.activation.hostRecoveryRequired
+        || plan.activation.targetOriginallyExisted === undefined || plan.activation.targetBaselineFiles === undefined) {
+        throw new ControlPlaneStoreError('conflict', 'Host input witness lost its staging claim or target baseline')
+      }
+      let profileFiles: readonly { path: string; sha256: string }[]
+      let deploymentFiles: readonly { input: string; path: string; sha256: string }[]
+      let baselineDeploymentFiles: readonly { input: string; path: string; sha256: string }[]
+      try {
+        profileFiles = activationCoreFiles(input.profileFiles, plan.target.profilePath, 'Host input witness core files') as readonly { path: string; sha256: string }[]
+        if (profileFiles.some(file => file.sha256 === null)) throw new Error('missing core file')
+        deploymentFiles = hostInputPins(input.deploymentFiles, inputs, plan.target.profilePath, 'Host input witness deployment files')
+        baselineDeploymentFiles = plan.activation.targetOriginallyExisted
+          ? hostInputPins(input.baselineDeploymentFiles, inputs, plan.target.profilePath, 'Host input witness baseline files')
+          : input.baselineDeploymentFiles.length === 0 ? [] : (() => { throw new Error('unexpected baseline files') })()
+      } catch { throw new ControlPlaneStoreError('invalid-input', 'Host input witness pins do not match the signed profile deployment') }
+      const existing = hostInputWitnessFromRow(this.#database, plan)
+      if (existing) {
+        if (controlPlaneDigest(existing.profileFiles) !== controlPlaneDigest(profileFiles)
+          || controlPlaneDigest(existing.deploymentFiles) !== controlPlaneDigest(deploymentFiles)
+          || controlPlaneDigest(existing.baselineDeploymentFiles) !== controlPlaneDigest(baselineDeploymentFiles)) {
+          throw new ControlPlaneStoreError('conflict', 'Host input witness is immutable')
+        }
+        return plan
+      }
+      const unsigned = { schemaVersion: 1 as const, kind: 'dsh-host-input-witness' as const, planId: plan.id,
+        planDigest: plan.digest, activationId: plan.activation.id, fence: input.fence, createdAt: this.#now(),
+        inputs, profileFiles, deploymentFiles, baselineDeploymentFiles }
+      const witness: HostInputWitness = { ...unsigned, digest: controlPlaneDigest(unsigned) }
+      this.#database.prepare('INSERT INTO activation_host_input_witnesses (plan_id,witness_json,witness_digest) VALUES (?,?,?)')
+        .run(plan.id, JSON.stringify(witness), controlPlaneDigest(witness))
+      return plan
+    })
+  }
+
+  getActivationHostInputWitness(planId: string): HostInputWitness | undefined {
+    return hostInputWitnessFromRow(this.#database, this.getPlan(planId))
+  }
+
   /** Freeze recovery obligation before the profile can become Host-visible. */
   markActivationHostExposure(input: { planId: string; expectedRevision: number; fence: number }): PluginActivationPlan {
     return this.#withActivationWrite(input.planId, () => {
+      const before = this.getPlan(input.planId)
+      if (before.dossier.hostDeploymentInputs) {
+        const witness = hostInputWitnessFromRow(this.#database, before)
+        if (!witness || witness.fence !== input.fence || before.revision !== input.expectedRevision) {
+          throw new ControlPlaneStoreError('conflict', 'Host exposure requires an exact staged input witness')
+        }
+      }
       const now = this.#now()
       const result = this.#database.prepare(`UPDATE activation_plans SET host_recovery_required = 1, updated_at = ?
         WHERE id = ? AND revision = ? AND activation_fence = ? AND status = 'staging'

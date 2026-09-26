@@ -81,3 +81,5 @@ systemctl --user stop dsh-profile-web.service dsh-profile-rsi-coordinator.servic
 ## 使用普通任务资格合同
 
 可按[有限试用采用指南](../../../docs/bounded-live-adoption.md)配置 `sourceAdoptions.liveQualification` 与 `controlPlane.liveQualification`，并设置 `limits.qualification` 和独立预算 ID。配置器核对第五份独立签名授权及公钥，生成资格扫描的原生 Policy/Automations 规则。该模式以限时真实 owner 任务替代严格 replay/shadow 等验收合同，不声称这些严格阶段已通过；已有未配置此模式的 manifest 保持原行为。实际部署端到端验收仍见当前状态。
+
+Host 可通过 [systemd schema4](../../../docs/systemd-host-attestor.md#automatic-authorization-within-an-installation-grant) 自动解析已批准操作的逐次授权。配置器核对 `sourceAdoptions.hostDeploymentInputs` 与采用授权的同名列表；Host 授权配置与原始/候选 observer 仍须预先准备，配置器不会生成它们。

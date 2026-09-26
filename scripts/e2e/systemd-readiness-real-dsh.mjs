@@ -173,7 +173,7 @@ try {
     await writeFile(patchPath, JSON.stringify(patch(false)), { mode: 0o600 })
   }
   plan = store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence, from: 'staging', to: 'awaiting-reload' })
-  const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-5', ...executable,
+  const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-6', ...executable,
     interpreter, authority: 'fixture-owner', keyId: 'fixture-key' }
   const prepare = requirements => store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision,
     expectedFence: plan.activation.fence, issuer, requirements, receiptTtlMs: 120000 }).request

@@ -138,6 +138,8 @@ export interface PluginActivationPlan {
     packages: readonly CatalogPackage[]
     handoff?: AdoptionHandoffTerms
     liveQualification?: LiveQualificationTerms
+    /** Exact profile-relative deployment inputs authorized by the owner. */
+    hostDeploymentInputs?: readonly string[]
   }
   installationId: string
   ledger: { id: string; path: string }
@@ -159,6 +161,22 @@ export interface PluginActivationPlan {
     failureCode?: string
     updatedAt: number
   }
+}
+
+/** Immutable pre-exposure pins for one exact authorized Host deployment. */
+export interface HostInputWitness {
+  schemaVersion: 1
+  kind: 'dsh-host-input-witness'
+  planId: string
+  planDigest: string
+  activationId: string
+  fence: number
+  createdAt: number
+  inputs: readonly string[]
+  profileFiles: readonly { path: string; sha256: string }[]
+  deploymentFiles: readonly { input: string; path: string; sha256: string }[]
+  baselineDeploymentFiles: readonly { input: string; path: string; sha256: string }[]
+  digest: string
 }
 
 export type SourceReleasePhase = 'pr' | 'review' | 'merge' | 'build' | 'sign' | 'publish' | 'registry-verify' | 'catalog-admission'

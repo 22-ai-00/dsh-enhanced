@@ -2,7 +2,7 @@
 
 `plugin-control-plane/bin/dsh-systemd-host-attestor.js` is shipped in the
 Control Plane bundle. It implements the existing configured Host executable
-contract, version `dsh-systemd-host-attestor-5`, for **reload, readiness and physical rollback** on Linux.
+contract, version `dsh-systemd-host-attestor-6`, for **reload, readiness and physical rollback** on Linux.
 It uses the existing signed receipt, request, fence and activation state
 machine. It creates no Cordis plugin, AgentLoop, model tool or scheduler.
 
@@ -23,7 +23,88 @@ the altered request. Rollback may have no predecessor when no phase was applied
 under its recovery fence. Config schemas 1–3 and signed receipt schema 2 retain
 their existing meanings; they are separate from the request schema.
 
-## Preparing an exact authorized request
+## Automatic authorization within an installation grant
+
+For unattended source adoption, use configuration schema 4 with the shipped
+`dsh-systemd-host-authority` resolver. It derives each exact operation's inner
+schema-1/2/3 config from the existing Control Plane ledger and a private finite
+installation grant. It does not ask the user to edit a request digest for each
+update. Existing explicit configs below remain supported.
+
+```text
+schemaVersion: 4
+template:
+  authority, keyId, privateKeyPath, stateRoot
+  executable, interpreter, processHelper, systemctl
+  scope, unit, unitProperties, timeoutMs, stableWindowMs, pollIntervalMs
+  readiness: { client: { path, sha256 }, observer: RuntimeObserverConfig }
+  recoveryReadiness: { client: { path, sha256 }, observer: RuntimeObserverConfig }
+resolver:
+  executable: { path, sha256 }
+  interpreter: null | { path, sha256 }
+  configPath, configSha256
+  timeoutMs: 1000..60000
+```
+
+The resolver's private JSON config has `schemaVersion: 1`, `statePath` (its
+durable SQLite journal), `controlDatabasePath`, `trustPath`, `template` (exactly
+equal to the wrapper template), and `grant`. The grant fixes `id`, `notBefore`,
+`expiresAt`, `maximumReloads` (1–1000), source `owner`, target `profile`, allowed
+`packages`, `coordinatorId`, `hostDeploymentInputs`, and `liveQualification`.
+The source-adoption config, adoption approval grant and Host grant must agree
+on both the deployment inputs and finite trial terms. This initial resolver
+supports owner-bound source adoption with the bounded-live contract.
+`readiness` identifies the intended candidate runtime; `recoveryReadiness`
+independently identifies the original runtime after restore. Configure both
+explicitly when entry IDs or config digests differ between versions.
+
+`hostDeploymentInputs` is a nonempty list of unique relative files in the
+profile. Include the candidate's entry/config files required by the runtime
+observer. The signed activation dossier fixes these logical paths. Before
+exposing the staged profile, activation records hashes of the three core
+profile files, declared candidate inputs and the original deployment inputs.
+Internal pnpm symlinks are resolved and remapped to the final profile path.
+Activation detaches declared pnpm hardlinks into byte-identical private files
+before recording their hashes; external links, aliases and group/other-writable
+files are rejected. Every declared input must exist in both candidate and
+original profile when restoring an existing deployment. New paths absent from
+the original profile require a different recovery-input contract and are not
+covered by this initial witness format.
+This is an input witness, not a complete inventory or proof of quality.
+
+The resolver requires a durable claimed operation, its exact signed approval,
+source/release binding, current handoff and deployment witness. It reserves
+each reload against the grant's persistent quota before returning any config.
+While the operation and its authority remain current, reusing the same
+operation returns the same config without renewing the grant. Expiry or
+revocation also blocks replay of a forward config already reserved in the
+journal. An unknown dispatch then needs reconciliation from retained signed
+receipts; this resolver does not add unattended unknown-outcome recovery or
+permission to retry a restart.
+Rollback uses the recorded original files and a proven recovery obligation;
+an expired forward grant does not authorize another deployment. Never delete
+the journal to reset quotas or bypass an unknown outcome. A staging retry with
+a different fence cannot reuse an old immutable witness.
+Keep the original grant, resolver config, trust and keys available until its
+exposed deployments settle: rotating those inputs under an existing grant ID
+is rejected, including during recovery.
+
+The wrapper pins the resolver and config bytes, passes only the exact request,
+and rejects changes to static supervisor/key/observer authority. The
+resolver interpreter may be null only for a native ELF executable; scripts
+must name a pinned native ELF interpreter, including the shipped JavaScript wrapper. The
+outer Host timeout must also cover resolver execution and cleanup. Provision all
+private resources outside the candidate profile. Schema 25 and version 6 must
+be deployed together with the new resolver. Complete pending version-5
+operations using their original pinned binary before changing trust; their
+issuer identity cannot be rewritten. Full installer resource provisioning is
+still separate work; this entry point alone does not configure two Hosts,
+source/build resources or signing keys.
+If package-manager files have multiple hardlinks, provision the signer and
+resolver as a private single-link package tree, including their `bin/` and
+`lib/` modules. Copying only the resolver wrapper loses its relative imports.
+
+## Preparing an explicit exact authorized request
 
 1. Register the executable, its **single-link native Node interpreter**, hashes,
    version, receipt authority/key and finite timeout in the existing
