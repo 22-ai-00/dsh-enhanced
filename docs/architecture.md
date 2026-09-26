@@ -124,3 +124,5 @@ Broker 在自己的 WAL/FULL journal 中先保存请求，再跨越 `dispatched`
 ## 私有技能配对比较
 
 Skills 的比较器复用 Evaluation 的 BenchmarkStore/runBenchmark/report，按固定输入与预算调度两个技能版本。每个 cell 新建仅含原生文件工具的 Context 与私有临时 workspace；它不创建 AgentLoop，也不继承调用方任意 Host 工具。生成的 artifact 交给独立 IsolatedVerifierRunner，在有限离线容器中执行，Host 对照配置答案判定。Native FS 库随 Skills 包交付，Evaluation/Isolation 是可选 peer，导入不激活其 bundle。比较报告没有发布或晋升权限；调用方 Host 本身的高权限尚不构成密封留出边界，必须与未来自动推广授权分开验证。
+
+Control Plane 的可选 [bounded-live 合同](bounded-live-adoption.md)在原部署状态机中增加普通任务资格阶段：有限 owner 授权固定整个 profile 的试用窗口，独立签名绑定现有 Delivery/Evaluation 证据，最终采用用一个 canonical writer fence 同时复核原失败与资格票。后台工作仍归原生 Automations 和 Cordis effect，失败/失效继续复用物理回退；严格 Host 阶段不会被伪造的成功凭证跳过。

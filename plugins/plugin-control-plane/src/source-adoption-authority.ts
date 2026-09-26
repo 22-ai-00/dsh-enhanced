@@ -1,3 +1,4 @@
+import { validateLiveQualificationTerms, type LiveQualificationTerms } from './live-qualification.js'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffTerms } from './adoption-handoff.js'
 /** Finite owner signer for the durable source-release to activation binding. */
 import { createHash, createPrivateKey, sign } from 'node:crypto'
@@ -45,6 +46,7 @@ export interface SourceAdoptionAuthorityConfig {
     catalogPath: string
     receiptTtlMs: number
     handoff?: AdoptionHandoffTerms
+    liveQualification?: LiveQualificationTerms
     policies: readonly AdoptionPolicy[]
   }
 }
@@ -92,8 +94,9 @@ export function validateSourceAdoptionAuthorityConfig(value: unknown): asserts v
   if (item.schemaVersion !== 1) fail(); text(item.authority); text(item.keyId)
   const keyPath = path(item.keyPath); const statePath = configuredPath(item.statePath); const control = path(item.controlDatabasePath)
   if (new Set([keyPath, statePath, control]).size !== 3) fail()
-  const grant = object(item.grant); keys(grant, ['id', 'expiresAt', 'maxAdoptions', 'owner', 'installationId', 'ledger', 'target', 'executor', 'catalogPath', 'receiptTtlMs', 'policies', ...(Object.hasOwn(grant, 'handoff') ? ['handoff'] : [])])
+  const grant = object(item.grant); keys(grant, ['id', 'expiresAt', 'maxAdoptions', 'owner', 'installationId', 'ledger', 'target', 'executor', 'catalogPath', 'receiptTtlMs', 'policies', ...(Object.hasOwn(grant, 'handoff') ? ['handoff'] : []), ...(Object.hasOwn(grant, 'liveQualification') ? ['liveQualification'] : [])])
   if (Object.hasOwn(grant, 'handoff')) validateAdoptionHandoffTerms(grant.handoff)
+  if (Object.hasOwn(grant, 'liveQualification')) { validateLiveQualificationTerms(grant.liveQualification); if (!grant.handoff) fail() }
   text(grant.id); integer(grant.expiresAt, 1); integer(grant.maxAdoptions, 1, 10_000); text(grant.installationId)
   const owner = object(grant.owner); keys(owner, ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset'])
   text(owner.authorityId); text(owner.authorityHash, DIGEST, 64); text(owner.principalId, /^[\s\S]+$/u, 512); text(owner.principalRecordId, /^[\s\S]+$/u, 512); integer(owner.principalVersion, 1); configuredPath(owner.workspace); text(owner.agentPreset)
@@ -147,7 +150,7 @@ export async function authorizeSourceAdoption(configInput: SourceAdoptionAuthori
       const { plan, sourcePlan, source, released } = bound
       if (plan.digest !== requested.planDigest || controlPlaneDigest(source) !== requested.sourceReferenceDigest || plan.status !== 'pending-approval' || sourcePlan.status !== 'release-complete' || !sameOwner(source.owner, config.grant.owner)) fail()
       if (plan.installationId !== config.grant.installationId || !same(plan.ledger, config.grant.ledger) || !same(plan.target, config.grant.target) || !same(plan.executor, config.grant.executor)) fail()
-      if (!same(plan.dossier.handoff ?? null, config.grant.handoff ?? null)) fail()
+      if (!same(plan.dossier.handoff ?? null, config.grant.handoff ?? null) || !same(plan.dossier.liveQualification ?? null, config.grant.liveQualification ?? null)) fail()
       if (!same(plan.candidate, released) || plan.dossier.catalogProvenance !== 'owner-provided-integrity-pinned') fail()
       const selected = config.grant.policies.map(policy).find(value => value.candidateId === released.id); if (!selected || !exactPolicy(released, selected)) fail()
       sourceAuthorityCanonicalSafePath(config.grant.catalogPath, 'file'); const catalog = await loadCatalogWithMetadata(config.grant.catalogPath)

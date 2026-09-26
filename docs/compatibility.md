@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## 有限试用采用（Control Plane schema 24）
+
+Control Plane v24 增加 `awaiting-live-tasks`、不可续期窗口、专用资格记录与负向失效义务。迁移重建 activation 状态约束，保留既有计划摘要、签名、外键及 unknown 派发；旧记录不补造试用授权。两个 Host 与独立签名器须成套升级，旧 schema23 reader 拒绝 v24。新 `dossier.liveQualification` 是批准摘要的一部分，缺省严格合同不变。
+
+新资格运行时复用当前 Cordis 注入/effect 和原生 Automations，不改 DSH/Cordis 基线。最终采用在同一 Evaluation writer fence 内检查原失败来源及资格反馈，资格 signer 使用独立协议；Delivery/Lark/Automations 加入源码修复保护名单。双 Host 配置器可校验资格授权并生成有限预算规则；详见[有限试用采用](bounded-live-adoption.md)。
+
 ## 飞书业务 CLI 安装
 
 Lark setup 的业务接入使用官方 `lark-cli` 1.x、最低已核实版本 `1.0.85`；同时检查所需 CLI 子命令，实际启用前校验认证 JSON 与服务端 owner 身份。`1.0.85` 和 `1.0.96` 的认证/技能协议已对照官方源码，`1.0.96` 的全域 scope 集合还会读取官方远端目录。缺失时解析 npm latest 并下载精确稳定版本，复用兼容的本地或受管 CLI。生成的入口使用 DSH `0.1.5-rc.3` 原生 `skill-filesystem` 的 `$DSH_HOME/skills` 与原生 shell/skill 工具，不新增 Cordis 服务或修改 Host ABI；参见[安装指南](../plugins/lark-channel/docs/setup.md#自动业务工具接入)。

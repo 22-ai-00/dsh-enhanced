@@ -43,7 +43,7 @@ export function validateAdoptionCoordinatorConfig(value: unknown): asserts value
 }
 
 function terminal(plan: PluginActivationPlan): boolean { return plan.status === 'activated' || plan.status === 'rolled-back' }
-function exposed(plan: PluginActivationPlan): boolean { return plan.status === 'staging' || plan.status === 'commit-pending' || AWAITING.has(plan.status) }
+function exposed(plan: PluginActivationPlan): boolean { return plan.status === 'staging' || plan.status === 'commit-pending' || plan.status === 'awaiting-live-tasks' || AWAITING.has(plan.status) }
 
 /**
  * Advance an already signed source handoff only through Host attestation.
@@ -81,12 +81,12 @@ export async function coordinateAdoptionHandoff(options: {
     }
     return restored
   }
-  const recoverExpired = async (plan: PluginActivationPlan): Promise<PluginActivationPlan> => {
+  const recoverExpired = async (plan: PluginActivationPlan, failureCode = 'adoption-handoff-expired'): Promise<PluginActivationPlan> => {
     if (plan.status === 'rollback-pending') return finishRollback(plan)
     if (!exposed(plan) || plan.activation === undefined) return plan
     await current()
     const rollback = options.store.requestActivationRollback({ planId: plan.id, expectedRevision: plan.revision,
-      fence: plan.activation.fence, failureCode: 'adoption-handoff-expired' })
+      fence: plan.activation.fence, failureCode })
     return finishRollback(rollback)
   }
 
@@ -104,6 +104,8 @@ export async function coordinateAdoptionHandoff(options: {
       throw error
     }
     await current()
+    const liveDeadline = options.store.getLiveQualificationDeadline(plan.id)
+    if (liveDeadline !== undefined && liveDeadline <= Date.now()) return recoverExpired(plan, 'live-qualification-expired')
     const before = { status: plan.status, revision: plan.revision, fence: plan.activation?.fence }
     if (plan.status === 'approved' || plan.status === 'staging') {
       options.store.assertAdoptionHandoff(plan.id)

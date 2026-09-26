@@ -12,13 +12,13 @@ export interface RsiAuthorityFixture {
   root: string
   manifest: RsiSetupManifest
   binding: { owner: { id: string; version: number } }
-  readAuthority(name: 'approvals' | 'releases' | 'adoptions' | 'observations'): Promise<Record<string, any>>
-  writeAuthority(name: 'approvals' | 'releases' | 'adoptions' | 'observations', value: Record<string, any>): Promise<void>
+  readAuthority(name: 'approvals' | 'releases' | 'adoptions' | 'observations' | 'qualifications'): Promise<Record<string, any>>
+  writeAuthority(name: 'approvals' | 'releases' | 'adoptions' | 'observations' | 'qualifications', value: Record<string, any>): Promise<void>
   dispose(): Promise<void>
 }
 
 /** A real, owner-private schema-v4 trust root and all four finite authority files. */
-export async function createRsiAuthorityFixture(): Promise<RsiAuthorityFixture> {
+export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthorityFixture> {
   // macOS 上 os.tmpdir() 经 /var → /private/var 符号链接；safeFile 的 canonical
   // 检查会拒绝非规范化路径，夹具先 realpath 到真实路径。
   const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-rsi-authorities-'))
@@ -65,6 +65,7 @@ export async function createRsiAuthorityFixture(): Promise<RsiAuthorityFixture> 
   const release = await authorityKey('release-authority', 'release-authority', 'release-key')
   const adoption = await authorityKey('adoption-authority', 'adoption-authority', 'adoption-key')
   const observation = await authorityKey('observation-authority', 'observation-authority', 'observation-key')
+  const qualification = await authorityKey('qualification-authority', 'qualification-authority', 'qualification-key')
   const host = await authorityKey('host-attestation', 'host-attestation', 'host-key')
   const adapterKeys = await Promise.all(phases.map(phase => authorityKey(`adapter-${phase}`, `adapter-${phase}`, `${phase}-key`)))
   const adapters = Object.fromEntries(await Promise.all(phases.map(async (phase, index) => {
@@ -101,7 +102,14 @@ export async function createRsiAuthorityFixture(): Promise<RsiAuthorityFixture> 
     statePath: join(root, 'observation-state.sqlite'), controlDatabasePath: controlPath,
     grant: { policy, owner, installationId: adoptions.grant.installationId, ledger: adoptions.grant.ledger, profilePath,
       packages: ['@dsh-enhanced/health-helper'], receiptTtlMs: 30_000 } }
-  for (const [name, value] of Object.entries({ approvals, releases, adoptions, observations })) await writePrivate(authorityPath(name), `${JSON.stringify(value)}\n`)
+  const terms = { protocol: 'dsh-bounded-live/v1', maximumWindowMs: 60_000, minimumTasks: 1, authority: qualification.authority, keyId: qualification.keyId }
+  const handoff = { schemaVersion: 1, coordinatorId: 'coordinator', maximumWindowMs: 60_000, commit: 'target-host' }
+  if (live) Object.assign(adoptions.grant, { liveQualification: terms, handoff })
+  const qualifications = { schemaVersion: 1, authority: qualification.authority, keyId: qualification.keyId, keyPath: qualification.keyPath,
+    statePath: join(root, 'qualification-state.sqlite'), controlDatabasePath: controlPath,
+    grant: { id: 'qualification-grant', expiresAt, maxQualifications: 2, owner, installationId: adoptions.grant.installationId,
+      ledger: adoptions.grant.ledger, profilePath, packages: ['@dsh-enhanced/health-helper'], terms, receiptTtlMs: 30_000 } }
+  for (const [name, value] of Object.entries({ approvals, releases, adoptions, observations, qualifications })) await writePrivate(authorityPath(name), `${JSON.stringify(value)}\n`)
   const trustPath = join(root, 'trust.json')
   await writePrivate(trustPath, `${JSON.stringify({ schemaVersion: 4, installationId: adoptions.grant.installationId, dshHome: home,
     ledger: adoptions.grant.ledger, executor, hostPolicy: { readinessMinimumChecks: 1, effectBlockedMinimumDeliveryAttempts: 1,
@@ -111,15 +119,16 @@ export async function createRsiAuthorityFixture(): Promise<RsiAuthorityFixture> 
       interpreter: { path: shell, sha256: shellDigest }, environmentAllowlist: [], authority: host.authority, keyId: host.keyId, timeoutMs: 1_000 },
     catalog: { id: 'fixture-catalog', path: catalogPath }, releaseRegistry: { id: 'fixture-registry', locator: 'https://registry.example/', protocol: 'dsh' },
     releaseReceiptTtlMs: 1_000, releaseAdapters: adapters, approvalKeys: [approval, adoption].map(({ authority, keyId, publicKeyPem }) => ({ authority, keyId, publicKeyPem })),
-    hostAttestationKeys: [host, observation].map(({ authority, keyId, publicKeyPem }) => ({ authority, keyId, publicKeyPem })),
+    hostAttestationKeys: [host, observation, qualification].map(({ authority, keyId, publicKeyPem }) => ({ authority, keyId, publicKeyPem })),
     releaseKeys: adapterKeys.map(({ authority, keyId, publicKeyPem }) => ({ authority, keyId, publicKeyPem })),
     releaseAuthorizationKeys: [release].map(({ authority, keyId, publicKeyPem }) => ({ authority, keyId, publicKeyPem })) })}\n`)
   const manifest = { schemaVersion: 1, targetProfile: 'target', coordinatorProfile: 'coordinator', controlPlane: { catalogPath, statePath, trustPath,
     sourceJobs: { repository }, sourceApprovals: { configPath: authorityPath('approvals') }, sourceReleases: { configPath: authorityPath('releases') },
-    sourceAdoptions: { authority: { configPath: authorityPath('adoptions') } }, runtimeObserver: { profilePath },
+    sourceAdoptions: { authority: { configPath: authorityPath('adoptions') }, ...(live ? { liveQualification: terms, handoff } : {}) },
+    ...(live ? { liveQualification: { authority: { configPath: authorityPath('qualifications') }, profilePath } } : {}), runtimeObserver: { profilePath },
     taskObservations: { authority: { configPath: authorityPath('observations') }, policy, profilePath } },
   sourceReviews: { owner, plugins: ['health-helper'], expiresAt } } as unknown as RsiSetupManifest
-  const names = new Set(['approvals', 'releases', 'adoptions', 'observations'])
+  const names = new Set(['approvals', 'releases', 'adoptions', 'observations', 'qualifications'])
   return { root, manifest, binding: { owner: { id: owner.principalRecordId, version: owner.principalVersion } },
     async readAuthority(name) { return JSON.parse(await readFile(authorityPath(name), 'utf8')) },
     async writeAuthority(name, value) { if (!names.has(name)) throw new Error('unknown authority'); await writePrivate(authorityPath(name), `${JSON.stringify(value)}\n`) },

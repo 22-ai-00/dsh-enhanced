@@ -2,10 +2,12 @@ import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type Ado
 import { lstat, realpath } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { randomBytes } from 'node:crypto'
 import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { TaskObservationRuntime, validateTaskObservationConfig } from './task-observation-runtime.js'
+import { LiveQualificationRuntime, validateLiveQualificationConfig, type LiveQualificationConfig } from './live-qualification-runtime.js'
 import type { TaskObservationConfig } from './task-observation-types.js'
 import { rollbackPluginWatch } from './cli.js'
 import type { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
@@ -43,6 +45,7 @@ import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObse
 import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig } from './replay-endpoint.js'
 import { readPrivateRuntimeObserverKey } from './runtime-observer-protocol.js'
 import { createForegroundDeploymentObserver, foregroundTrustSnapshot, validateForegroundDeploymentConfig, type ForegroundDeploymentConfig } from './foreground-deployment-runtime.js'
+import { captureRetainedDeploymentReadiness } from './deployment-readiness.js'
 import type { ForegroundDeploymentRecord } from './foreground-deployment.js'
 
 export interface Config {
@@ -70,11 +73,13 @@ export interface Config {
   foregroundDeployments?: ForegroundDeploymentConfig
   /** Finite trusted task feedback observations scheduled by native Automations. */
   taskObservations?: TaskObservationConfig
+  /** Finite pre-adoption real-task qualification under the installed owner authority. */
+  liveQualification?: LiveQualificationConfig
   /** Owner-pinned finite native replay; separate from the read-only observer. */
   replayEndpoint?: ReplayEndpointConfig
 }
-export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>>
-  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'replayEndpoint'>
+export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
+  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
@@ -88,6 +93,7 @@ const schema = Schema.object({
   runtimeObserver: Schema.any(),
   foregroundDeployments: Schema.any(),
   taskObservations: Schema.any(),
+  liveQualification: Schema.any(),
   replayEndpoint: Schema.any(),
 }) as Schema<Config>
 
@@ -126,6 +132,17 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
       throw new Error('plugin-control-plane: taskObservations requires foregroundDeployments on the same profile')
     }
   }
+  if (config.liveQualification !== undefined) {
+    validateLiveQualificationConfig(config.liveQualification)
+    if (!config.foregroundDeployments || config.liveQualification.profilePath !== config.runtimeObserver?.profilePath) {
+      throw new Error('plugin-control-plane: liveQualification requires foregroundDeployments on the same profile')
+    }
+    if (!config.sourceAdoptions?.liveQualification || !config.sourceReleaseExecution?.independentReview
+      || !config.taskObservations || config.taskObservations.profilePath !== config.liveQualification.profilePath
+      || config.sourceAdoptions.profile !== basename(config.liveQualification.profilePath)) {
+      throw new Error('plugin-control-plane: liveQualification requires independently reviewed sourceAdoptions')
+    }
+  }
   if (config.replayEndpoint !== undefined) {
     validateReplayEndpointConfig(config.replayEndpoint)
     if (config.runtimeObserver !== undefined) {
@@ -155,6 +172,9 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
   if (config.sourceAdoptions !== undefined) {
     validateSourceAdoptionConfig(config.sourceAdoptions)
     if (!config.sourceReleaseExecution) throw new Error('plugin-control-plane: sourceAdoptions requires sourceReleaseExecution')
+    if (config.sourceAdoptions.liveQualification && !config.liveQualification) {
+      throw new Error('plugin-control-plane: bounded-live sourceAdoptions requires liveQualification runtime')
+    }
   }
   if (config.sourceJobs !== undefined) {
     validateSourceJobsConfig(config.sourceJobs, config.sourceBuild)
@@ -177,6 +197,8 @@ export class PluginControlPlaneService extends Service {
   private readonly sourceReleaseAdvances = new Map<string, Promise<PluginSourcePlan>>()
   private readonly sourceAdoptionFlights = new Map<string, Promise<PluginActivationPlan>>()
   private readonly foregroundObservers = new Set<ForegroundTaskObservationRegistration>()
+  private liveRuntime: LiveQualificationRuntime | undefined
+  private assertLiveRuntime: ((planId: string) => void) | undefined
   private sourceRuntime: SourceJobRuntime | undefined
   private readonly sourceRuntimes = new Set<SourceJobRuntime>()
 
@@ -211,14 +233,35 @@ export class PluginControlPlaneService extends Service {
               if (!live || foregroundTrustSnapshot(this.config.trustPath) !== snapshot) throw new Error('foreground deployment trust changed')
             }
             assertCurrent()
+            const assertLiveRuntime = (planId: string): void => {
+              assertCurrent()
+              const plan = this.store.getPlan(planId)
+              const operation = this.store.getLiveQualificationReadiness(planId)
+              if (!operation.receipt) throw new Error('live qualification has no retained signed readiness')
+              const binding = captureRetainedDeploymentReadiness({ plan, operation, receipt: operation.receipt, trust,
+                journalPath: this.config.foregroundDeployments!.attestorJournalPath,
+                runtime: sample(randomBytes(32).toString('hex')) })
+              const window = this.store.getLiveQualificationWindow(planId)
+              if (binding.receiptDigest !== window.readinessDigest || binding.hostGeneration !== window.hostGeneration) {
+                throw new Error('live qualification runtime differs from retained readiness')
+              }
+              assertCurrent()
+            }
             const registration = createForegroundDeploymentObserver({ config: this.config.foregroundDeployments!,
               profilePath: this.config.runtimeObserver!.profilePath, store: this.store, trust, sample, assertCurrent, owner: this })
             this.foregroundObservers.add(registration)
             try {
               const delivery = deliveryCtx.get('assistantDelivery' as never) as unknown as AssistantDeliveryService
               const remove = delivery.registerForegroundTaskObserver(registration)
-              return () => { live = false; this.foregroundObservers.delete(registration); remove() }
-            } catch (error) { live = false; this.foregroundObservers.delete(registration); throw error }
+              if (this.config.liveQualification) {
+                this.assertLiveRuntime = assertLiveRuntime
+                this.liveRuntime?.scan()
+              }
+              return () => { live = false; if (this.assertLiveRuntime === assertLiveRuntime) this.assertLiveRuntime = undefined;
+                this.liveRuntime?.scan()
+                this.foregroundObservers.delete(registration); remove() }
+            } catch (error) { live = false; if (this.assertLiveRuntime === assertLiveRuntime) this.assertLiveRuntime = undefined;
+              this.foregroundObservers.delete(registration); throw error }
           }, 'plugin-control-plane.foreground-deployments')
         })
         return () => fiber.dispose()
@@ -292,6 +335,61 @@ export class PluginControlPlaneService extends Service {
           throw error
         }
       }, 'plugin-control-plane.task-observations')
+    })
+    if (this.config.liveQualification !== undefined) ctx.inject(['assistantAutomations', 'assistantDelivery', 'assistantEvaluation'] as never[], observerCtx => {
+      observerCtx.effect(async () => {
+        const snapshot = foregroundTrustSnapshot(this.config.trustPath), trust = await this.boundTrust()
+        this.abort.signal.throwIfAborted()
+        const store = new ControlPlaneStore({ path: trust.ledger.path })
+        const evaluation = () => observerCtx.get('assistantEvaluation' as never) as unknown as AssistantEvaluationService
+        const delivery = () => observerCtx.get('assistantDelivery' as never) as unknown as AssistantDeliveryService
+        const automations = () => observerCtx.get('assistantAutomations' as never) as unknown as AssistantAutomationsService
+        let runtime: LiveQualificationRuntime | undefined
+        try {
+          runtime = new LiveQualificationRuntime({ config: this.config.liveQualification!, store, trust,
+            assertCurrent: () => {
+              this.abort.signal.throwIfAborted()
+              if (foregroundTrustSnapshot(this.config.trustPath) !== snapshot) throw new Error('live qualification trust changed')
+            },
+            assertRuntime: planId => {
+              if (!this.assertLiveRuntime) throw new Error('live qualification Host observer unavailable')
+              this.assertLiveRuntime(planId)
+            },
+            runtimeAvailable: () => this.assertLiveRuntime !== undefined,
+            qualificationSource: planId => {
+              const plan = this.store.getPlan(planId)
+              const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
+              if (!reference) throw new Error('live qualification original owner failure unavailable')
+              return this.taskGaps.inspectCurrent(plan.gapId, reference.owner)
+            },
+            evaluation: {
+              canonicalHostScope: input => evaluation().canonicalHostScope(input),
+              getTrustedForegroundLearningProjection: input => evaluation().getTrustedForegroundLearningProjection(input),
+              withTrustedCanonicalTaskWriterFence: (input, callback) => evaluation().withTrustedCanonicalTaskWriterFence(input, callback),
+              onTrustedTaskChange: callback => evaluation().onTrustedTaskChange(callback),
+            },
+            delivery: {
+              validateOwnerRoute: input => delivery().validateOwnerRoute(input),
+              inspectOwnerForegroundLearningTask: input => delivery().inspectOwnerForegroundLearningTask(input),
+            },
+            automations: {
+              registerHostExecutor: input => automations().registerHostExecutor(input),
+              reconcileSystem: input => automations().reconcileSystem(input),
+              inspectSystemOwnedActivation: input => automations().inspectSystemOwnedActivation(input),
+            },
+          })
+          runtime.start()
+          this.liveRuntime = runtime
+          return async () => {
+            if (this.liveRuntime === runtime) this.liveRuntime = undefined
+            await runtime!.close()
+          }
+        } catch (error) {
+          if (runtime) await runtime.close()
+          else store.close()
+          throw error
+        }
+      }, 'plugin-control-plane.live-qualification')
     })
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never,
       ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : []),
@@ -548,6 +646,10 @@ export class PluginControlPlaneService extends Service {
         withOwnerActivationFence: (gapId, callback) => {
           if (gapId !== plan.gapId) throw new Error('source adoption escaped its owner task')
           return current(callback)
+        },
+        withLiveQualificationFence: (planId, callback) => {
+          if (!this.liveRuntime) throw new Error('live qualification runtime unavailable')
+          return this.liveRuntime.withQualificationFence(planId, callback)
         } })
       const withSourceFence = <T>(callback: () => T): T => current(() => store.withOwnerTaskFailureGapAdmission(plan.gapId, callback))
       try {

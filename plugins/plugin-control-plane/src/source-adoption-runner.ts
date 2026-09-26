@@ -1,3 +1,4 @@
+import { validateLiveQualificationTerms, type LiveQualificationTerms } from './live-qualification.js'
 /** Host-owned continuation from a completed source release into normal activation. */
 import { validateAdoptionHandoffTerms, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import { lstat, realpath } from 'node:fs/promises'
@@ -19,12 +20,13 @@ export interface SourceAdoptionConfig {
   timeoutMs: number
   authority: SourceApprovalClientConfig
   handoff?: AdoptionHandoffTerms
+  liveQualification?: LiveQualificationTerms
 }
 
 export function validateSourceAdoptionConfig(value: unknown): asserts value is SourceAdoptionConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('plugin-control-plane: invalid source adoption config')
   const item = value as Record<string, unknown>
-  if (Object.keys(item).sort().join('\0') !== ['authority', ...(Object.hasOwn(item, 'handoff') ? ['handoff'] : []), 'planTtlMs', 'profile', 'timeoutMs'].join('\0')
+  if (Object.keys(item).sort().join('\0') !== ['authority', ...(Object.hasOwn(item, 'handoff') ? ['handoff'] : []), ...(Object.hasOwn(item, 'liveQualification') ? ['liveQualification'] : []), 'planTtlMs', 'profile', 'timeoutMs'].join('\0')
     || typeof item.profile !== 'string' || item.profile.normalize('NFC').trim() !== item.profile || !PROFILE.test(item.profile)
     || !Number.isSafeInteger(item.planTtlMs) || Number(item.planTtlMs) < 60_000 || Number(item.planTtlMs) > 86_400_000
     || !Number.isSafeInteger(item.timeoutMs) || Number(item.timeoutMs) < 1_000 || Number(item.timeoutMs) > 3_600_000) {
@@ -32,6 +34,10 @@ export function validateSourceAdoptionConfig(value: unknown): asserts value is S
   }
   validateSourceApprovalClientConfig(item.authority)
   if (Object.hasOwn(item, 'handoff')) validateAdoptionHandoffTerms(item.handoff)
+  if (Object.hasOwn(item, 'liveQualification')) {
+    validateLiveQualificationTerms(item.liveQualification)
+    if (!item.handoff) throw new Error('bounded-live adoption requires an external coordinator')
+  }
 }
 
 function same(left: unknown, right: unknown): boolean { return controlPlaneDigest(left) === controlPlaneDigest(right) }
@@ -77,7 +83,7 @@ async function recoverAwaiting(store: ControlPlaneStore, trust: PluginControlTru
   const recoverySignal = AbortSignal.timeout(timeoutMs)
   let rollback = plan
   if (plan.status !== 'rollback-pending') {
-    if ((!AWAITING.has(plan.status) && plan.status !== 'staging' && plan.status !== 'commit-pending') || plan.activation === undefined) return
+    if ((!AWAITING.has(plan.status) && plan.status !== 'awaiting-live-tasks' && plan.status !== 'staging' && plan.status !== 'commit-pending') || plan.activation === undefined) return
     // The Store rejects a live lease. Expired staging/commit work can instead
     // be converted to the same durable rollback path as an awaiting failure.
     rollback = store.requestActivationRollback({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence, failureCode: 'source-adoption-interrupted' })
@@ -131,10 +137,11 @@ export async function adoptSourceRelease(options: {
       plan = options.withSourceFence(() => options.store.createPlan({ candidate: admitted, catalog: { digest: catalog.digest, provenance: catalog.provenance }, matchedCapabilities: admitted.capabilities,
         profile: options.config.profile, target, installationId: options.trust.installationId, ledger: options.trust.ledger,
         executor: { id: options.trust.executor.id, version: options.trust.executor.version, path: options.trust.executor.path, sha256: options.trust.executor.sha256 },
-        ttlMs: options.config.planTtlMs, gapId: source.gapId, sourcePlanId: source.id, ...(options.config.handoff ? { handoff: options.config.handoff } : {}), idempotencyKey: `source-adoption:${source.id}` }).result)
+        ttlMs: options.config.planTtlMs, gapId: source.gapId, sourcePlanId: source.id, ...(options.config.handoff ? { handoff: options.config.handoff } : {}), ...(options.config.liveQualification ? { liveQualification: options.config.liveQualification } : {}), idempotencyKey: `source-adoption:${source.id}` }).result)
     }
     assertPlanBinding(plan, source.id, options.trust, target, catalog, admitted); created = plan; trustBound = true
     if (!same(plan.dossier.handoff ?? null, options.config.handoff ?? null)) throw new Error('plugin-control-plane: adoption handoff configuration changed')
+    if (!same(plan.dossier.liveQualification ?? null, options.config.liveQualification ?? null)) throw new Error('plugin-control-plane: live qualification contract changed')
     let requestedApproval = false
     for (let step = 0; step < 32; step++) {
       await options.assertCurrent(); signal.throwIfAborted()

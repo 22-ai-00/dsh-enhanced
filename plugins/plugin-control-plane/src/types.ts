@@ -1,4 +1,5 @@
 import type { CatalogEntry, CatalogPackage } from './catalog.js'
+import type { LiveQualificationTerms } from './live-qualification.js'
 import type { AdoptionHandoffTerms } from './adoption-handoff.js'
 
 export type PlanStatus =
@@ -7,6 +8,7 @@ export type PlanStatus =
   | 'staging'
   | 'awaiting-reload'
   | 'awaiting-readiness'
+  | 'awaiting-live-tasks'
   | 'awaiting-effect-blocked-replay'
   | 'awaiting-shadow'
   | 'awaiting-canary'
@@ -135,6 +137,7 @@ export interface PluginActivationPlan {
     authorities: readonly string[]
     packages: readonly CatalogPackage[]
     handoff?: AdoptionHandoffTerms
+    liveQualification?: LiveQualificationTerms
   }
   installationId: string
   ledger: { id: string; path: string }

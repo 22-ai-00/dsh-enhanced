@@ -186,6 +186,7 @@ export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding
     || adoptions.grant.target.profile !== manifest.targetProfile || adoptions.grant.target.profilePath !== config.runtimeObserver?.profilePath
     || adoptions.grant.target.profilePath !== join(trust.dshHome, 'profiles', manifest.targetProfile)
     || !isDeepStrictEqual(adoptions.grant.executor, { id, version, path, sha256 })
+    || !isDeepStrictEqual(adoptions.grant.liveQualification, config.sourceAdoptions!.liveQualification)
     || adoptions.grant.catalogPath !== config.catalogPath || !isDeepStrictEqual(adoptions.grant.handoff, config.sourceAdoptions!.handoff)
     || approvals.grant.repository !== config.sourceJobs!.repository || releases.grant.repository !== config.sourceJobs!.repository
     || approvals.grant.worktreeRoot !== join(config.statePath, 'source-worktrees') || releases.grant.worktreeRoot !== approvals.grant.worktreeRoot
@@ -208,6 +209,19 @@ export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding
     const configured = createPublicKey(await readOwnedFile(authority.keyPath)).export({ type: 'spki', format: 'der' })
     const registered = createPublicKey(trusted.publicKeyPem).export({ type: 'spki', format: 'der' })
     if (!configured.equals(registered)) fail('authority key does not match registered trust')
+  }
+  if (config.liveQualification) {
+    const qualification: unknown = JSON.parse(await readOwnedFile(config.liveQualification.authority.configPath))
+    cp.validateLiveQualificationAuthorityConfig(qualification)
+    if (qualification.controlDatabasePath !== ledgerPath || !isDeepStrictEqual(qualification.grant.owner, expectedOwner)
+      || !isDeepStrictEqual(qualification.grant.terms, config.sourceAdoptions!.liveQualification)
+      || qualification.grant.installationId !== trust.installationId || !isDeepStrictEqual(qualification.grant.ledger, trust.ledger)
+      || qualification.grant.profilePath !== config.liveQualification.profilePath
+      || !isDeepStrictEqual([...qualification.grant.packages].sort(), selected.map(plugin => `@dsh-enhanced/${plugin}`))
+      || qualification.grant.expiresAt <= Date.now()) fail('live qualification authority terms mismatch')
+    const trusted = cp.resolveTrustKey(trust, 'host-attestation', qualification.authority, qualification.keyId)
+    const configured = createPublicKey(await readOwnedFile(qualification.keyPath)).export({ type: 'spki', format: 'der' })
+    if (!configured.equals(createPublicKey(trusted.publicKeyPem).export({ type: 'spki', format: 'der' }))) fail('live qualification authority key mismatch')
   }
   if ([approvals.grant.expiresAt, releases.grant.expiresAt, adoptions.grant.expiresAt, observations.grant.policy.expiresAt,
     manifest.sourceReviews.expiresAt].some(value => value <= Date.now())) fail('finite authority has expired')

@@ -46,3 +46,8 @@ export default PluginControlPlaneService
 
 export type { AdoptionHandoffTerms, AdoptionHandoffRecord } from './adoption-handoff.js'
 export type { AdoptionCoordinatorConfig } from './adoption-coordinator.js'
+
+export { validateLiveQualificationAuthorityConfig } from './live-qualification-authority.js'
+export type { LiveQualificationAuthorityConfig } from './live-qualification-authority.js'
+export type { LiveQualificationConfig } from './live-qualification-runtime.js'
+export type { LiveQualificationTerms, LiveQualificationBatch, LiveQualificationReceipt } from './live-qualification.js'

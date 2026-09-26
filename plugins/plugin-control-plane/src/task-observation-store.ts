@@ -82,7 +82,7 @@ export function readTaskObservationContext(db: DatabaseSync, id: string): {
     if (batch.owner[key] !== adopted.source.owner[key]) fail('task observation source owner changed')
   }
   const unsettled = db.prepare(`SELECT 1 FROM activation_plans WHERE target_path=? AND status IN (
-    'staging','awaiting-reload','awaiting-readiness','awaiting-effect-blocked-replay','awaiting-shadow',
+    'staging','awaiting-reload','awaiting-readiness','awaiting-live-tasks','awaiting-effect-blocked-replay','awaiting-shadow',
     'awaiting-canary','awaiting-soak','awaiting-health','commit-pending','rollback-pending') LIMIT 1`).get(plan.target.profilePath)
   const latest = db.prepare(`SELECT checkpoint.plan_id,checkpoint.exposure_order,checkpoint.successful_order
     FROM activation_deployment_checkpoints checkpoint JOIN activation_plans candidate ON candidate.id=checkpoint.plan_id

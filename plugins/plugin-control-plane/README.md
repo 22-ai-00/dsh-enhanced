@@ -431,15 +431,15 @@ adoptionCoordinator:
 
 协调器沿现有安装和签名检查路径推进，到 `commit-pending` 停止。目标恢复后由其原生源码 continuation 重验当前 owner、反馈和信任，再完成启用；已撤销或过期交接只能进入既有回退。目标卸载不会撤销已交出的任务；未知 Host 派发仍须精确签名对账，不能自动重派。目标离线期间无法即时获知反馈纠正，允许暴露的最长授权窗口由上述期限限制；回退完成时间仍取决于协调器可用性和签名服务。
 
-当前安装器尚未提供这个双 Host 配置。现有 systemd attestor 只签发 reload/readiness/rollback；其余行为验收阶段仍需要真实独立观测，不能用进程就绪代替。组件接线不等于生产自动采用闭环，npm 发布仍须等待实际部署验收。
+`dsh-rsi-setup` 已提供双 Host 合同编译与校验，实际部署验收尚未完成。现有 systemd attestor 只签发 reload/readiness/rollback；缺省严格合同的其余行为验收阶段仍需要真实独立观测，不能用进程就绪代替。可显式配置下述有限试用合同，由普通任务证据独立签发资格。组件接线不等于生产自动采用闭环，npm 发布仍须等待实际部署验收。
 
 这提供自动采用的执行链。目标 Host 可另配 `foregroundDeployments: { attestorJournalPath: /srv/dsh-owner/supervisor/reload.sqlite }`，同时启用 `runtimeObserver`，并挂载 Delivery。路径须指向 systemd attestor 实际的私有 SQLite journal；配置只授予读取已签名 readiness 记录的权限，不包含签名密钥。目标 Host 与外部部署协调器需使用同一精确控制面账本和 trust 绑定；当前实现要求同 UID 的私有文件读取，不能据此声称独立 UID 隔离。
 
 schema 20 的 `foreground_deployments` 在真实 owner 前台任务开始和完成时保存身份及运行实例。采样复用认证 observer 的同一实例，核对已应用 readiness 的签名、保留观测摘要、PID/InvocationID、profile、Fiber/依赖/服务代次，并关联精确 package/version/integrity。只接受当前最近一次成功部署、已完成 owner 源码采用、且属于同一 owner/workspace/preset 的新任务；未结算部署、重载、实例变化或非静止完成均不产生有效观察。注销/重启中断的记录保持 pending，历史任务不回填。trust 文件改变后需重载配置；观察失败不会中断正常对话。
 
-Host 可用 `inspectOwnerForegroundDeployment()` 按与 Delivery 学习来源查询相同的参数读取归因；它重验当前可信任务，保持原学习来源摘要不变。记录证明该任务处于这一部署实例下，不证明调用过某个工具或该版本导致了结果，也不会把正常结束计作质量成功。读取结果作为质量依据仍需消费当前 canonical 反馈与撤回，并在最终写入时使用 writer fence。可选 `taskObservations` 已接通有限批次的当前反馈、签名观察与物理回退；可安装日常使用配置及端到端部署验收仍待完成，此能力不代表 npm 发布验收通过。
+Host 可用 `inspectOwnerForegroundDeployment()` 按与 Delivery 学习来源查询相同的参数读取归因；它重验当前可信任务，保持原学习来源摘要不变。记录证明该任务处于这一部署实例下，不证明调用过某个工具或该版本导致了结果，也不会把正常结束计作质量成功。读取结果作为质量依据仍需消费当前 canonical 反馈与撤回，并在最终写入时使用 writer fence。可选 `taskObservations` 已接通有限批次的当前反馈、签名观察与物理回退；日常使用配置已可编译，端到端部署验收仍待完成，此能力不代表 npm 发布验收通过。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 23 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 24 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 非 owner-task 来源的计划可用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。adapter 返回签名 publish 歧义回执后进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。派发后没有签名回执则保持 unknown，不自动重跑；普通 owner-task 来源的全部阶段必须通过 Host 当前来源校验。
 
@@ -532,3 +532,7 @@ taskObservations:
 每个批次包含同一实际部署下、不同真实任务的当前 `achieved/not-achieved` owner 反馈或独立 verifier 结果；unknown、撤回、截断或非静止任务不计票。批次内任一失败触发 `regressed`，否则为 `healthy`。这是 owner 明确选择的部署任务组策略，不能证明某个工具被调用或该版本造成结果。相同任务的相同 canonical revision 只落账一次；后续纠正可形成新观察。批次身份、grant/key 指纹、签名次数和回执持久化，重启重试复用原回执，不延长期限。政策最多 1,000 次观察、每批 1–32 个任务、回看 1 秒至 30 天。
 
 Host 在冻结批次、签名前后与最终落账时重读来源；最终 Evaluation writer fence 包裹控制面 SQLite 事务，同步写入 watch 和 applied 状态。签名器验证有限策略及已记录部署事实，可信任务质量来自 Host 当前 canonical 读取；它不是另一次独立模型评分，也不构成同 UID 文件隔离。签名期间纠正、撤回或部署变化阻止旧观察落账。已落账的回滚决定保留审计，后续反馈变更不取消恢复义务；cron 复用现有物理恢复/Host attestor 回执链，失败保留待恢复状态。进程重启可继续，主动卸载会暂停对应 cron、取消并等待在途执行，再关闭连接。owner/trust 被撤销、目标 Host 自身重启或资源无法释放时仍需外部控制面/CLI 完成恢复，不能承诺目标 Host 单独完成自重启恢复。
+
+### 有限真实任务试用采用
+
+可显式配置 `sourceAdoptions.liveQualification` 与 `liveQualification`，经独立源码审查和真实 reload/readiness 后，用当前 owner 的普通任务反馈决定采用或回退。合同、独立签名、原生预算、期限、最终 canonical 复核及运行边界见[有限试用采用](../../docs/bounded-live-adoption.md)。缺省严格验收顺序不变；新模式不签发 shadow/零副作用凭证，不限制整个 profile 的曝光次数。
