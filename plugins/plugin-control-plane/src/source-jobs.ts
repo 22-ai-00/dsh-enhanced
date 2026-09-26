@@ -6,6 +6,7 @@ import { controlPlaneDigest, expectedSourceRelease, type ControlPlaneStore } fro
 import { awaitSourceSignal, inspectSourceContext } from './source-context.js'
 import { assertPluginModificationAllowed, removeSourceJobWorktree, validateScopedPluginFiles, type ScopedPluginFile } from './source-workspace.js'
 import { assertManagedVersionPaths } from './source-versioning.js'
+import { resolveSourceBaseline, validateSourceBaselineConfig } from './source-baseline.js'
 import { removeSourceJobContainer, type SourceBuildConfig } from './source-build.js'
 import { inheritedEnvironment, type loadTrustConfig } from './trust.js'
 import type { PluginSourcePlan } from './types.js'
@@ -32,7 +33,7 @@ export interface SourceJobPorts {
 type Trust = Awaited<ReturnType<typeof loadTrustConfig>>
 
 export function validateSourceJobsConfig(value: SourceJobsConfig, build?: SourceBuildConfig): void {
-  const allowed = new Set(['authorityId', 'expiresAt', 'maxSubmissions', 'repository', 'ownerRouteId', 'principalId', 'workspace', 'preset', 'budgetId', 'budgetAmount'])
+  const allowed = new Set(['authorityId', 'expiresAt', 'maxSubmissions', 'repository', 'baseline', 'ownerRouteId', 'principalId', 'workspace', 'preset', 'budgetId', 'budgetAmount'])
   if (value === null || typeof value !== 'object' || Array.isArray(value) || build === undefined
     || Object.keys(value).some(key => !allowed.has(key))
     || ![value.authorityId, value.ownerRouteId, value.principalId, value.repository, value.workspace, value.preset].every(text => typeof text === 'string' && text !== '' && text.normalize('NFC').trim() === text && text.length <= 4096 && !/[\p{Cc}]/u.test(text))
@@ -44,6 +45,7 @@ export function validateSourceJobsConfig(value: SourceJobsConfig, build?: Source
     || !Number.isSafeInteger(value.budgetAmount) || value.budgetAmount < 1) {
     throw new Error('plugin-control-plane: invalid sourceJobs authority configuration')
   }
+  if (value.baseline !== undefined) validateSourceBaselineConfig(value.baseline)
 }
 
 function projection(job: SourceJobRecord): SourceJobProjection {
@@ -254,10 +256,16 @@ export class SourceJobRuntime {
     }
     const gap = this.options.store.getGap(input.gapId)
     if (gap.status !== 'open' || gap.candidateId !== undefined) throw new Error('source job gap is not open')
-    const source = await inspectSourceContext({ repository: config.repository, name: input.name, paths: [], baseCommit: input.expectedBaseCommit, environment: inheritedEnvironment(trust), signal, assertCurrent })
+    const environment = inheritedEnvironment(trust)
+    const baselineCommit = config.baseline === undefined ? undefined : await resolveSourceBaseline({ repository: config.repository,
+      config: config.baseline, environment, signal, assertCurrent, trust,
+      readHistory: () => this.options.store.getSourceBaselineHistory(config.repository) })
+    const source = await inspectSourceContext({ repository: config.repository, name: input.name, paths: [], baseCommit: input.expectedBaseCommit,
+      ...(baselineCommit === undefined ? {} : { baselineCommit }), environment, signal, assertCurrent })
     const intent: SourceJobIntent = {
       authority: { id: config.authorityId, digest: this.authorityDigest, expiresAt: config.expiresAt, maxSubmissions: config.maxSubmissions },
       owner, ownerDigest: controlPlaneDigest(owner), trustDigest: controlPlaneDigest(trust), repository: config.repository, name: input.name,
+      ...(config.baseline === undefined ? {} : { baseline: structuredClone(config.baseline) }),
       gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap), baseCommit: source.baseCommit,
       files: structuredClone(input.files), ttlMs: input.ttlMs, build: structuredClone(this.options.build),
       worktree: join(this.options.statePath, 'source-worktrees', `worktree-job-${token}`), containerName: `dsh-source-job-${token}`,

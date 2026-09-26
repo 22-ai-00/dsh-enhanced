@@ -26,6 +26,7 @@ import {
 import { PluginControlPlaneService } from '../src/service.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST } from '../src/store.ts'
 import type { SourceBuildConfig } from '../src/source-build.ts'
+import type { SourceJobsConfig } from '../src/source-job-types.ts'
 import type { ApprovalReceipt, PluginSourcePlan } from '../src/types.ts'
 
 const installationId = '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00'
@@ -233,13 +234,14 @@ class ToolsStub extends Service {
   register(): void { /* the control-plane tool registrar only calls ctx.tools.register */ }
 }
 
-function makeService(value: TrustFixture, sourceBuild: Partial<SourceBuildConfig> = {}): PluginControlPlaneService {
+function makeService(value: TrustFixture, sourceBuild: Partial<SourceBuildConfig> = {}, sourceJobs?: SourceJobsConfig): PluginControlPlaneService {
   const ctx = new Context(); contexts.push(ctx)
   new ToolsStub(ctx)
   return new PluginControlPlaneService(ctx, {
     catalogPath: join(value.control, 'catalog.json'),
     statePath: value.statePath,
     trustPath: value.trustPath,
+    ...(sourceJobs === undefined ? {} : { sourceJobs }),
     sourceBuild: { dockerPath: join(value.root, 'bin', 'docker'), image: 'fixture/source-build@sha256:' + 'a'.repeat(64),
       timeoutMs: 180_000, memoryMiB: 256, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 65_536, ...sourceBuild },
   })
@@ -758,6 +760,38 @@ exit 0
     expect(plan.baseCommit).toBe(fresh.baseCommit)
     expect(plan.status).toBe('pending-approval')
     expect(execFileSync('/usr/bin/git', ['-C', plan.worktree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(fresh.baseCommit)
+  })
+
+  it('inspects and prepares the managed baseline while preserving a dirty older checkout', async () => {
+    const value = await trustFixture()
+    await installFakePnpm(value.root)
+    const source = await modifyRepositoryFixture(value.root)
+    const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-C', source.repository, ...args], { encoding: 'utf8' }).trim()
+    await writeFile(join(source.repository, 'plugins/health-helper/src/index.ts'), 'export const installed = true\n')
+    git('add', '.'); git('commit', '-m', 'installed baseline')
+    const installed = git('rev-parse', 'HEAD'), remote = join(value.root, 'source-release.git')
+    execFileSync('/usr/bin/git', ['clone', '--bare', source.repository, remote], { stdio: 'pipe' })
+    await chmod(remote, 0o700)
+    execFileSync('/usr/bin/git', ['-C', remote, 'update-ref', 'refs/heads/main', installed])
+    git('checkout', '--detach', source.head)
+    const dirtyPath = join(source.repository, 'plugins/health-helper/src/index.ts')
+    await writeFile(dirtyPath, '// user work in progress\n')
+    const service = makeService(value, {}, { authorityId: 'managed-source-test', expiresAt: Date.now() + 600_000,
+      maxSubmissions: 3, repository: source.repository, ownerRouteId: 'owner-route', principalId: 'owner',
+      workspace: value.root, preset: 'primary', budgetId: 'source-runs', budgetAmount: 1,
+      baseline: { ref: 'refs/dsh-source/main', remote, targetBranch: 'main', initialCommit: installed } })
+    const inspection = await service.inspectSource({ repository: source.repository, name: 'health-helper', paths: ['src/index.ts'] })
+    expect(inspection.baseCommit).toBe(installed)
+    const gap = await recordGap(service, 'managed-inspected')
+    const input = { gapId: gap.id, name: 'health-helper', repository: source.repository,
+      files: [{ path: 'src/index.ts', content: 'export const repaired = true\n' }], idempotencyKey: 'source:managed-inspected' }
+    await expect(service.prepareModifySourcePlan({ ...input, expectedBaseCommit: source.head })).rejects.toThrow('stale')
+    const plan = await service.prepareModifySourcePlan({ ...input, expectedBaseCommit: inspection.baseCommit })
+    expect(plan.baseCommit).toBe(installed)
+    expect(execFileSync('/usr/bin/git', ['-C', plan.worktree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(installed)
+    expect(git('rev-parse', 'HEAD')).toBe(source.head)
+    expect(git('rev-parse', 'refs/dsh-source/main')).toBe(installed)
+    expect(await readFile(dirtyPath, 'utf8')).toBe('// user work in progress\n')
   })
 
   it('starts the inspection deadline before awaiting a stalled authority fence', async () => {

@@ -1,6 +1,6 @@
 import * as childProcess from 'node:child_process'
 import { execFileSync } from 'node:child_process'
-import { chmod, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -53,6 +53,22 @@ describe('source context', () => {
     await expect(inspect(value.root, ['src/binary.ts'], value.head)).rejects.toThrow('UTF-8')
     await expect(inspect(value.root, ['src/link.ts'], value.head)).rejects.toThrow('unavailable')
     await expect(inspect(value.root, ['../package.json'], value.head)).rejects.toThrow('escapes')
+  })
+
+  it('reads the resolved managed baseline while preserving the checkout and rejects a stale inspected base', async () => {
+    const value = await fixture(), file = join(value.root, 'plugins/health-helper/src/index.ts')
+    await writeFile(file, 'export const secondVersion = true\n')
+    execFileSync('/usr/bin/git', ['-C', value.root, 'add', '.'])
+    execFileSync('/usr/bin/git', ['-C', value.root, 'commit', '-m', 'next released version'])
+    const released = execFileSync('/usr/bin/git', ['-C', value.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+    execFileSync('/usr/bin/git', ['-C', value.root, 'checkout', '--detach', value.head])
+    await writeFile(file, 'private uncommitted edit\n')
+    const input = { repository: value.root, name: 'health-helper', paths: ['src/index.ts'], environment: process.env,
+      baselineCommit: released, baseCommit: released, signal: new AbortController().signal, assertCurrent: async () => {} }
+    expect((await inspectSourceContext(input)).contents).toEqual([{ path: 'src/index.ts', content: 'export const secondVersion = true\n' }])
+    expect(await readFile(file, 'utf8')).toBe('private uncommitted edit\n')
+    expect(execFileSync('/usr/bin/git', ['-C', value.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(value.head)
+    await expect(inspectSourceContext({ ...input, baseCommit: value.head })).rejects.toThrow('stale')
   })
 
   it('omits submodules and generated/hidden files while reading executable UTF-8 text', async () => {

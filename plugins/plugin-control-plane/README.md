@@ -250,6 +250,24 @@ sourceJobs:
 
 任务先冻结完整 Delivery v2 回执、trust 摘要、gap revision/digest、read base、文件内容及构建配置，再以 **paused → 绑定规范化 definition hash → active** 注册到 Automations 的一次性 Host executor。源码只存控制面私有 SQLite；Automation definition 和模型状态投影不包含文件内容。相同 authority 的期限、配置和累计提交上限不可重置；同 key 不同内容拒绝。全账本同时最多一个 `queued/running/unknown` 任务。
 
+本地发布需要持续生成下一版本时，可在 `sourceJobs` 下配置受管源码基线：
+
+```yaml
+  baseline:
+    ref: refs/dsh-source/repairs
+    remote: /absolute/canonical/private/releases.git
+    targetBranch: repairs
+    initialCommit: 0123456789abcdef0123456789abcdef01234567
+```
+
+`initialCommit` 是 owner 明确批准的初始提交，`remote` 是本地发布适配器使用的私有 bare 仓库，分支初值须与该提交一致。`ref` 限于 `refs/dsh-source/<简单小写名称>`；`targetBranch` 也使用简单小写名称。读取、入队和准备会从账本核对完整 `release-complete` 发布链，重验当前 installation/ledger 下已应用的合并签名，并核对 bare 分支精确落在链末端，再导入对应 Git 对象并以 CAS 推进专用 ref。用户 checkout 的 HEAD、索引与工作文件保持不变；下一次候选的版本递增和构建均从新基线开始。历史签发公钥须保留在 trust 中。
+
+专用 ref 不能被主工作区或关联 worktree 的 HEAD 直接或间接引用，也不能是符号引用。同步会反复核对这些条件并以 `--no-deref` 更新。该检查不与同 UID 外部 Git 进程构成原子事务；安装管理的仓库不应同时由外部进程重指 HEAD 或改写引用。
+
+每次最多核对同仓库 1000 条已启动发布记录和 128 个 worktree；超过上限会停止同步，不会截断历史后猜测基线。
+
+同仓库的持久修复按发布终态串行衔接。未结束或结果未知的发布、已合并后失败的发布、分叉或被外部推进的分支会暂缓新修复，需要先核对既有操作结果；不会自动跟随任意远端 HEAD。任务仍冻结入队时的基线，执行前发现变化会拒绝旧候选。发布启动时的基线链检查绑定到持久作业；手工直接计划仍由本地适配器核对精确 base，不能绕过正在进行的受管作业。专用 ref 可在重启后根据相同账本幂等恢复；同步本身最多 30 秒，仍受调用方取消和 owner fence 约束。此设置不增加提交额度或延长授权，修改配置须换 `authorityId`。未配置时保留原有 HEAD 行为；安装器尚未自动创建该仓库与配置。
+
 模型回合结束不会取消已接受的 Host 任务。Host 自己受授权绝对期限、构建时限、Automations lease、取消和 Cordis provider 生命周期约束。成功时，job `prepared`、gap claim 和已有 `pending-approval` plan 在同一 SQLite 事务提交。原模型授权仍最多 300 秒；不新增模型循环或调度器。
 
 配置审批、发布或采用后，临时失败的 `prepared` 作业由原生每分钟 cron 接续，无须重启 Host。独立 Host executor `plugin-control-plane-source-continuations-v1` 使用同一 system owner，持久 automation ID 为 `source-job-prepared-continuations`；如 Policy 采用精确 ID 规则，须覆盖它。每轮最多处理一个当前可推进作业，仍走生产 Policy/预算准入、原 owner/反馈/trust 校验和既有外部操作 claim。重启只注册恢复任务，不在启动时直接调用授权器；unknown 外部动作不重新派发。无可推进作业时暂停，新的已检查候选可重新激活。卸载暂停当前代次、取消并等待已有调用；旧代次不能暂停新实例。
@@ -470,7 +488,7 @@ Host-only `recordOwnerTaskFailureGap(source)` 将经 Delivery 再验证的 foreg
 
 ## 权限
 
-- 插件 Host service：启用 `sourceApprovals` 时执行固定的 owner helper（可读其配置、私钥和私有审批账本），Host 只消费签名回执；读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceBuild`/`sourceJobs` 时创建隔离 worktree 并调用 owner 配置的离线容器构建。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。
+- 插件 Host service：启用 `sourceApprovals` 时执行固定的 owner helper（可读其配置、私钥和私有审批账本），Host 只消费签名回执；读取 catalog/trust，写 owner-private SQLite/WAL；启用源码读取或准备时执行受限 Git，启用 `sourceJobs.baseline` 时还会从指定本地 bare 仓库导入对象并写入专用 `refs/dsh-source/` 引用；启用 `sourceBuild`/`sourceJobs` 时创建隔离 worktree 并调用 owner 配置的离线容器构建。模型不能选择可执行文件、网络或凭据；Host 不使用浏览器。
 - owner CLI `activate`：读取/复制/rename/恢复 DSH profile，并执行固定 DSH executable。
 - owner CLI `probe`：执行固定 Host attestor，只有严格 allowlist 环境；不读取 attestation 私钥，不使用 shell或网络客户端。
 - owner CLI `scaffold`：仅在审批绑定的 linked worktree 中运行固定边界内的 `git` / `pnpm`。

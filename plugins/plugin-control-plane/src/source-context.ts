@@ -42,6 +42,8 @@ function parseTree(value: string, root: string): Map<string, { mode: string; typ
 
 export async function inspectSourceContext(input: {
   repository: string; name: string; paths: readonly string[]; baseCommit?: string; environment: NodeJS.ProcessEnv
+  /** Resolved from owner-configured, signed release history by the Host. */
+  baselineCommit?: string
   signal: AbortSignal; assertCurrent: () => Promise<void>
 }): Promise<SourceInspection> {
   const signal = AbortSignal.any([input.signal, AbortSignal.timeout(15_000)])
@@ -56,7 +58,9 @@ export async function inspectSourceContext(input: {
   if (repository !== resolve(input.repository)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository path must be canonical')
   const top = (await runLocalCommand('git', ['rev-parse', '--show-toplevel'], repository, input.environment, { capture: true, timeoutMs: 15_000, signal })).trim()
   if (top !== repository) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository must be the canonical Git top-level')
-  const head = (await runLocalCommand('git', ['rev-parse', 'HEAD'], repository, input.environment, { capture: true, timeoutMs: 15_000, signal })).trim()
+  if (input.baselineCommit !== undefined && !/^[a-f0-9]{40}$/u.test(input.baselineCommit)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'managed source baseline is invalid')
+  const head = (await runLocalCommand('git', ['rev-parse', '--verify', `${input.baselineCommit ?? 'HEAD'}^{commit}`], repository, input.environment, { capture: true, timeoutMs: 15_000, signal })).trim()
+  if (input.baselineCommit !== undefined && head !== input.baselineCommit) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'managed source baseline changed')
   if (!/^[a-f0-9]{40}$/u.test(head) || (input.baseCommit !== undefined && input.baseCommit !== head)) {
     throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source context base commit is stale or invalid')
   }
