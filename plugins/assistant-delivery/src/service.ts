@@ -92,6 +92,7 @@ import {
 import {
   feedbackSignalInput,
   parseFeedbackCommand,
+  parseNaturalObjectiveFeedback,
   classifyNaturalPreferenceDirective,
   observedResponseLanguage,
   type FeedbackSignalSelection,
@@ -420,6 +421,7 @@ export interface OwnerForegroundLearningTask {
   readonly canonical: TrustedTaskLearningProjectionReceipt
   readonly judgement: 'independent-verifier' | 'owner-feedback' | 'unresolved'
   readonly ownerRevision?: Readonly<{ version: number; action: 'initial' | 'correct' | 'withdraw' }>
+  readonly feedback?: Readonly<{ inboxId: string; text: string; truncated: boolean }>
   readonly source: Readonly<{ sessionId: string; inboxId: string; objective: string; truncated: boolean; quiescent: boolean; modelSelectionState: 'missing' | 'frozen' | 'inconsistent'; modelSelection?: Readonly<{ provider: string; model: string; reasoningEffort?: string }> }>
 }
 
@@ -1028,6 +1030,7 @@ export class AssistantDeliveryService extends Service {
   private modelSelectionFlight: Promise<void> | undefined
   private presentationFlight: Promise<void> | undefined
   private workflowTraceFlight: Promise<void> | undefined
+  private naturalObjectiveFlight: Promise<void> | undefined
   private preferenceProjectionFlight: Promise<void> | undefined
   private inboundAdmissionRecoveryFlight: Promise<void> | undefined
   private inboundAdmissionRecoveryAfterSequence = 0
@@ -1165,6 +1168,8 @@ export class AssistantDeliveryService extends Service {
           this.replyCompletedPreferenceTurn(agent, binding, envelope, reply),
         dispatchObjectiveFeedback: (binding, envelope, objectiveStatus) =>
           this.dispatchObjectiveFeedback(binding, envelope, objectiveStatus),
+        dispatchNaturalObjectiveFeedback: (binding, envelope) =>
+          this.dispatchNaturalObjectiveFeedback(binding, envelope),
         dispatchWorkflowCommand: (binding, envelope, command) =>
           this.dispatchWorkflowCommand(binding, envelope, command),
         dispatchLearningCommand: (binding, envelope, action, preferenceKey) =>
@@ -2455,6 +2460,7 @@ export class AssistantDeliveryService extends Service {
     }
     const token = Symbol('assistant-delivery.trusted-evaluation')
     this.evaluationSink = Object.freeze({ token, registration })
+    void this.drainNaturalObjectiveIntents()
     let active = true
     return () => {
       if (!active) return
@@ -2971,6 +2977,7 @@ export class AssistantDeliveryService extends Service {
   private isOwnerFeedbackController(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
+    allowProcessedNatural = false,
   ): boolean {
     if (!this.isInboundAuthorized(binding, envelope)) return false
     const principal = this.deliveryStore.getPrincipal(binding.principal)
@@ -2980,7 +2987,8 @@ export class AssistantDeliveryService extends Service {
       envelope.eventId,
     )
     if (principal?.status !== 'active' || principal.role !== 'owner'
-      || inbox?.status !== 'claimed'
+      || (inbox?.status !== 'claimed' && !(allowProcessedNatural && (inbox?.status === 'processed' || inbox?.status === 'dead_letter')
+        && inbox.envelope.kind === 'text' && this.deliveryStore.getNaturalObjectiveIntent(inbox.id)?.envelopeHash === inbox.envelopeHash))
       || inbox.bindingId !== binding.id
       || JSON.stringify(inbox.envelope) !== JSON.stringify(envelope)) {
       return false
@@ -3419,6 +3427,84 @@ export class AssistantDeliveryService extends Service {
    * Evolution re-proves the immutable production run; the later Inbox is a
    * separate evidence reference, never copied as prose.
    */
+  private async dispatchNaturalObjectiveFeedback(
+    binding: Readonly<ConversationBinding>, envelope: Readonly<InboundEnvelope>,
+  ): Promise<void> {
+    const selection = envelope.kind === 'text' && (envelope.attachments?.length ?? 0) === 0
+      ? parseNaturalObjectiveFeedback(envelope.text) : undefined
+    if (selection === undefined || !this.isOwnerFeedbackController(binding, envelope)) return
+    const replyTarget = envelope.metadata?.replyToProviderMessageId
+    if (typeof replyTarget !== 'string') return
+    const inbox = this.deliveryStore.getInboxByProviderEvent(envelope.channel, envelope.account, envelope.eventId)
+    const target = this.deliveryStore.getOutboxByProviderMessage(envelope.channel, envelope.account, replyTarget)
+    const sourceEventId = target?.intent.replyToEventId
+    const source = sourceEventId === undefined ? undefined
+      : this.deliveryStore.getInboxByProviderEvent(envelope.channel, envelope.account, sourceEventId)
+    const lineage = this.ownerLineageForBinding(binding)
+    if (inbox === undefined || target === undefined || source === undefined || lineage === undefined) return
+    if (!this.deliveryStore.isVerifiedForegroundObjectiveTarget(binding, source.id, target.id)) return
+    const scope = { workspace: binding.workspace, preset: binding.agentPreset }
+    const execution = this.deliveryStore.inspectForegroundExecutionForOwner({ inboxId: source.id,
+      scope, owner: lineage, bindingId: binding.id, bindingVersion: binding.version,
+      bindingGeneration: binding.generation })
+      ?? this.deliveryStore.inspectForegroundAcceptedExecutionForOwner({ inboxId: source.id,
+        scope, owner: lineage, bindingId: binding.id })
+    if (execution?.status !== 'succeeded' || !execution.quiescent) return
+    try {
+      this.deliveryStore.prepareNaturalObjectiveIntent({ binding, feedbackInboxId: inbox.id,
+        sourceInboxId: source.id, sourceOutboxId: target.id, selection })
+    } catch (error) {
+      if (error instanceof DeliveryStoreError) return
+      throw error
+    }
+    void this.drainNaturalObjectiveIntents().catch(() => { /* durable intent remains pending */ })
+  }
+
+  private drainNaturalObjectiveIntents(): Promise<void> {
+    if (this.naturalObjectiveFlight !== undefined) return this.naturalObjectiveFlight
+    const flight = this.runNaturalObjectiveIntents()
+      .finally(() => { if (this.naturalObjectiveFlight === flight) this.naturalObjectiveFlight = undefined })
+    this.naturalObjectiveFlight = flight
+    return flight
+  }
+
+  private async runNaturalObjectiveIntents(): Promise<void> {
+    let afterAdmissionSequence = 0
+    while (true) {
+      const page = this.deliveryStore.listPendingNaturalObjectiveIntents(100, afterAdmissionSequence)
+      if (page.length === 0) return
+      for (const intent of page) {
+      afterAdmissionSequence = intent.admissionSequence
+      if (!this.active || this.evaluationSink === undefined) return
+      if (this.evaluationSink.registration.ownerRevisionProtocol !== 'owner-objective-revision/v2'
+        || typeof this.evaluationSink.registration.inspect !== 'function') return
+      const inbox = this.deliveryStore.getInbox(intent.inboxId)
+      const binding = this.deliveryStore.getBinding(intent.bindingId)
+      if (inbox === undefined || binding === undefined) continue
+      let frozen = intent
+      if (frozen.status === 'awaiting-evaluation') {
+        const inspected = await this.dispatchObjectiveFeedback(binding, inbox.envelope, { kind: 'objective-status' })
+        if (inspected === 'invalid-target' || inspected === 'conflict') {
+          this.deliveryStore.settleNaturalObjectiveIntent(intent.inboxId, 'conflict')
+          continue
+        }
+        if (inspected === 'unavailable' || inspected === 'unknown') continue
+        const current = typeof inspected === 'object' ? inspected : undefined
+        frozen = this.deliveryStore.freezeNaturalObjectiveIntent(intent.inboxId, current) ?? intent
+        if (frozen.status === 'awaiting-evaluation') continue
+      }
+      if (frozen.status !== 'frozen' || frozen.command === undefined) continue
+      const result = await this.dispatchObjectiveFeedback(binding, inbox.envelope, frozen.command)
+      if (typeof result === 'object') {
+        this.deliveryStore.settleNaturalObjectiveIntent(intent.inboxId, 'projected', result)
+      } else if (result === 'conflict' || result === 'invalid-target') {
+        this.deliveryStore.settleNaturalObjectiveIntent(intent.inboxId, 'conflict')
+      } else if (result === 'unavailable' || result === 'unknown') continue
+      }
+      if (page.length < 100) return
+    }
+  }
+
   private async dispatchObjectiveFeedback(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
@@ -3428,10 +3514,12 @@ export class AssistantDeliveryService extends Service {
     const objectiveStatus = parsed.kind === 'objective-status' ? 'achieved' : parsed.objectiveStatus
     const replyTarget = envelope.metadata?.replyToProviderMessageId
     if (typeof replyTarget !== 'string') return 'invalid-target'
-    if (!this.isOwnerFeedbackController(binding, envelope)) return 'invalid-target'
     const inbox = this.deliveryStore.getInboxByProviderEvent(envelope.channel, envelope.account, envelope.eventId)
+    const naturalIntent = inbox === undefined ? undefined : this.deliveryStore.getNaturalObjectiveIntent(inbox.id)
+    if (!this.isOwnerFeedbackController(binding, envelope, naturalIntent !== undefined)) return 'invalid-target'
     const target = this.deliveryStore.getOutboxByProviderMessage(envelope.channel, envelope.account, replyTarget)
-    if (inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+    if ((inbox?.status !== 'claimed' && !(naturalIntent !== undefined
+      && (inbox?.status === 'processed' || inbox?.status === 'dead_letter'))) || inbox.bindingId !== binding.id
       || target === undefined || target.providerMessageId !== replyTarget
       || target.intent.bindingId !== binding.id
       || JSON.stringify(target.intent.target.conversation) !== JSON.stringify(binding.conversation)
@@ -3439,8 +3527,20 @@ export class AssistantDeliveryService extends Service {
       return 'invalid-target'
     }
     const hostCommand = parseDeliveryCommand(inbox.envelope)
-    if (hostCommand?.name !== 'feedback' || (inbox.envelope.attachments?.length ?? 0) !== 0
-      || JSON.stringify(parseFeedbackCommand(hostCommand.rawInput)) !== JSON.stringify(parsed)) return 'invalid-target'
+    const typedMatches = hostCommand?.name === 'feedback'
+      && JSON.stringify(parseFeedbackCommand(hostCommand.rawInput)) === JSON.stringify(parsed)
+    const naturalMatches = naturalIntent !== undefined && inbox.envelope.kind === 'text'
+      && naturalIntent.envelopeHash === inbox.envelopeHash
+      && naturalIntent.sourceOutboxId === target.id
+      && parseNaturalObjectiveFeedback(inbox.envelope.text) === naturalIntent.selection
+      && (parsed.kind === 'objective-status' || (naturalIntent.status === 'frozen'
+        && JSON.stringify(naturalIntent.command) === JSON.stringify(parsed)))
+    if ((inbox.envelope.attachments?.length ?? 0) !== 0 || (!typedMatches && !naturalMatches)) return 'invalid-target'
+    if (naturalIntent === undefined && parsed.kind !== 'objective-status'
+      && this.deliveryStore.hasEarlierPendingNaturalObjectiveIntent(target.id, inbox.admissionCursor.sequence)) {
+      await this.drainNaturalObjectiveIntents()
+      if (this.deliveryStore.hasEarlierPendingNaturalObjectiveIntent(target.id, inbox.admissionCursor.sequence)) return 'unknown'
+    }
     const metadata = target.intent.metadata
     let goalOutcomeTarget: ReturnType<DeliveryStore['getGoalOutcomeTarget']>
     try { goalOutcomeTarget = this.deliveryStore.getGoalOutcomeTarget(target.id) } catch { return 'invalid-target' }
@@ -3462,6 +3562,7 @@ export class AssistantDeliveryService extends Service {
         sourceEventId,
       )
       if (sourceInbox === undefined) return 'invalid-target'
+      if (!this.deliveryStore.isVerifiedForegroundObjectiveTarget(binding, sourceInbox.id, target.id)) return 'invalid-target'
       const lineage = this.ownerLineageForBinding(binding)
       const accepted = lineage === undefined ? null : this.deliveryStore.inspectForegroundAcceptedExecutionForOwner({
         inboxId: sourceInbox.id,
@@ -3479,7 +3580,7 @@ export class AssistantDeliveryService extends Service {
       if ([foreground, accepted].some(execution => execution !== null
         && (execution.status !== 'succeeded' || !execution.quiescent))) return 'invalid-target'
       const canonicalForeground = foreground !== null || accepted !== null
-      const projectForegroundOwner = async (inspectOnly: boolean) => {
+      const projectForegroundOwner = (inspectOnly: boolean) => {
         const sink = this.evaluationSink
         if (sink === undefined || lineage === undefined) return undefined
         if ((parsed.kind !== 'objective' || inspectOnly) && (!['owner-objective-revision/v1', 'owner-objective-revision/v2']
@@ -3505,10 +3606,10 @@ export class AssistantDeliveryService extends Service {
         const capabilityReceipt = sink.registration.issueCapability(claims)
         if (this.evaluationSink?.token !== sink.token) return undefined
         if (inspectOnly) return sink.registration.inspect?.(capabilityReceipt)
-        const receipt = await Promise.resolve(sink.registration.append({
+        const receipt = sink.registration.append({
           capabilityReceipt, runId: sourceInbox.id, outboxId: target.id, chatId: binding.conversation.chat,
           principalId: externalPrincipalId(binding.principal), bindingId: binding.id, idempotencyKey: claims.idempotencyKey,
-        }))
+        })
         return typeof receipt === 'object' && receipt !== null
           && typeof (receipt as Partial<{ ownerFeedbackState: unknown }>).ownerFeedbackState === 'object'
           ? (receipt as { ownerFeedbackState: import('@dsh-enhanced/assistant-evaluation').OwnerObjectiveState }).ownerFeedbackState
@@ -3516,15 +3617,19 @@ export class AssistantDeliveryService extends Service {
       }
       if (parsed.kind === 'objective-status') {
         if (!canonicalForeground) return this.deliveryStore.verifiedWorkflowObjectiveState(target.id, lineage) ?? 'recorded'
-        try { return await projectForegroundOwner(true) ?? 'unavailable' } catch { return 'unknown' }
+        try {
+          const inspected = projectForegroundOwner(true)
+          return inspected ?? (naturalIntent !== undefined && this.evaluationSink !== undefined ? 'recorded' : 'unavailable')
+        } catch { return 'unknown' }
       }
+      if (naturalIntent !== undefined && !canonicalForeground) return 'invalid-target'
       if (canonicalForeground && this.evaluationSink === undefined) return 'unavailable'
       try {
         // Evaluation commits first for recorded foreground tasks. If the sink
         // is unavailable, never acknowledge a Delivery-only success; a replay
         // can safely repeat the opaque command and then repair local workflow
         // evidence after the canonical owner revision is durable.
-        const canonical = canonicalForeground ? await projectForegroundOwner(false) : undefined
+        const canonical = canonicalForeground ? projectForegroundOwner(false) : undefined
         if (canonicalForeground && canonical === undefined) return 'unavailable'
         const result = this.deliveryStore.commitVerifiedWorkflowTraceFeedback({
           binding,
@@ -3534,7 +3639,7 @@ export class AssistantDeliveryService extends Service {
           objectiveStatus,
           ...(parsed.kind === 'objective-revision' ? { command: parsed } : {}),
         })
-        await this.drainWorkflowTraces()
+        void this.drainWorkflowTraces().catch(() => { /* durable trace projection retries on tick */ })
         return canonical ?? result.ownerFeedbackState ?? 'recorded'
       } catch (error) {
         if (error instanceof DeliveryStoreError) {
@@ -3547,7 +3652,7 @@ export class AssistantDeliveryService extends Service {
         }
         if (typeof error === 'object' && error !== null && 'code' in error
           && ['idempotency-conflict', 'version-conflict'].includes(String((error as { code?: unknown }).code))) return 'conflict'
-        return 'invalid-target'
+        return 'unknown'
       }
     }
     const automationId = metadata?.['dsh.learning.automationId']
@@ -4623,6 +4728,7 @@ export class AssistantDeliveryService extends Service {
       || canonical.execution.status !== accepted?.status)) return undefined
     let judgement: OwnerForegroundLearningTask['judgement'] = 'unresolved'
     let ownerRevision: OwnerForegroundLearningTask['ownerRevision']
+    let feedback: OwnerForegroundLearningTask['feedback']
     const objective = canonical.objective
     if (objective?.source.kind === 'user-feedback') {
       if (objective.source.id !== 'assistant-delivery/typed-owner-feedback') return undefined
@@ -4640,6 +4746,9 @@ export class AssistantDeliveryService extends Service {
         || !['accepted', 'delivered', 'read'].includes(outbox.status)) return undefined
       judgement = 'owner-feedback'
       ownerRevision = Object.freeze({ version: revision.version, action: revision.action })
+      if (revision.operationId !== undefined) feedback = this.deliveryStore.findNaturalObjectiveFeedbackByOperation(
+        outbox.id, revision.operationId,
+        { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion })
     } else if (objective !== undefined) {
       if (!verifierComponent(objective)) return undefined
       judgement = 'independent-verifier'
@@ -4654,6 +4763,7 @@ export class AssistantDeliveryService extends Service {
     const objectiveText = inbox.envelope.text
     return Object.freeze({ protocol: 'assistant-delivery/owner-foreground-learning/v1', owner, canonical, judgement,
       ...(ownerRevision === undefined ? {} : { ownerRevision }),
+      ...(feedback === undefined ? {} : { feedback }),
       source: Object.freeze({ sessionId: binding.sessionId, inboxId: inbox.id,
         objective: objectiveText.slice(0, 4096), truncated: objectiveText.length > 4096, quiescent: execution.quiescent,
         modelSelectionState: execution.modelSelectionState, ...(execution.modelSelection === undefined ? {} : { modelSelection: execution.modelSelection }) }) })
@@ -4988,6 +5098,7 @@ export class AssistantDeliveryService extends Service {
     await this.outbound.tick()
     await this.drainDeliveryPresentations()
     await this.drainPreferenceProjections()
+    await this.drainNaturalObjectiveIntents()
     await this.drainWorkflowTraces()
   }
 
@@ -4999,6 +5110,7 @@ export class AssistantDeliveryService extends Service {
       this.modelSelectionFlight,
       this.presentationFlight,
       this.preferenceProjectionFlight,
+      this.naturalObjectiveFlight,
       this.workflowTraceFlight,
       this.inboundAdmissionRecoveryFlight,
     ])
@@ -5255,6 +5367,7 @@ export class AssistantDeliveryService extends Service {
       this.modelSelectionFlight,
       this.presentationFlight,
       this.preferenceProjectionFlight,
+      this.naturalObjectiveFlight,
       this.workflowTraceFlight,
     ])
   }

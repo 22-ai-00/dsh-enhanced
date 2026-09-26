@@ -912,15 +912,18 @@ function validDigest(value) {
 
 function validCompactOperatorProof(proof) {
   const expected = {
-    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': 23,
-    'assistant-recovery/operator-snapshot/v1': 5,
-    'assistant-automations-operator-snapshot/v1': 15,
+    // v24 adds the natural-feedback journal; the read-only owner snapshot
+    // contract is unchanged. Retain v23 proofs for in-progress upgrades.
+    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24],
+    'assistant-recovery/operator-snapshot/v1': [5],
+    'assistant-automations-operator-snapshot/v1': [15],
   }
   const additional = proof?.protocol === 'assistant-delivery/active-lark-owner-bindings-snapshot/v1'
     ? ['storageDigest'] : proof?.protocol === 'assistant-automations-operator-snapshot/v1' ? ['inventoryDigest', 'storageDigest']
       : proof?.protocol === 'assistant-recovery/operator-snapshot/v1' ? ['bootstrap'] : []
   return exactKeys(proof, ['protocol', 'schemaVersion', 'database', 'snapshotDigest'], additional)
-    && expected[proof.protocol] === proof.schemaVersion
+    && Object.hasOwn(expected, proof.protocol)
+    && expected[proof.protocol]?.includes(proof.schemaVersion) === true
     && validDigest(proof.snapshotDigest)
     && proof.database !== null && typeof proof.database === 'object'
     && typeof proof.database.device === 'string' && typeof proof.database.inode === 'string'

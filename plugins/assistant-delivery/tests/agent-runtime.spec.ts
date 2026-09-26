@@ -6576,6 +6576,153 @@ describe('real native Delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('natural owner replies revise one canonical foreground result and each continue through Agent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-natural-objective-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+    await fixture.service.acceptInbound({ ...message('natural-source', 'prepare daily workspace status summary'), occurredAt: 1_000 })
+    await drive(fixture.service)
+    const source = runtimeStore(fixture.service).getInboxByProviderEvent('lark', 'bot-1', 'natural-source')!
+    const target = replyProviderMessageId(fixture.service, 'natural-source')
+    const before = fixture.llm.requests.length
+    for (const [index, text, status] of [
+      [0, '还是不行，保存报错', 'not-achieved'],
+      [1, '问题解决了', 'achieved'],
+      [2, '撤回刚才的任务反馈', 'unknown'],
+    ] as const) {
+      await fixture.service.acceptInbound({ ...message(`natural-feedback-${index}`, text), occurredAt: 2_000 + index,
+        metadata: { replyToProviderMessageId: target } })
+      await drive(fixture.service)
+      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } }))
+        .toEqual([expect.objectContaining({ objectiveStatus: status,
+          projection: expect.objectContaining({ subjectRef: source.id }) })])
+      expect(fixture.llm.requests.length).toBe(before + index + 1)
+      const inbox = runtimeStore(fixture.service).getInboxByProviderEvent('lark', 'bot-1', `natural-feedback-${index}`)!
+      expect((runtimeStore(fixture.service) as unknown as DeliveryStore).getNaturalObjectiveIntent(inbox.id))
+        .toMatchObject({ status: 'projected' })
+    }
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('natural feedback without Evaluation stays pending while ordinary Agent still replies', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-natural-no-evaluation-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound({ ...message('no-eval-source', 'prepare daily workspace status summary'), occurredAt: 1_000 })
+    await drive(fixture.service)
+    const target = replyProviderMessageId(fixture.service, 'no-eval-source')
+    const before = fixture.llm.requests.length
+    await fixture.service.acceptInbound({ ...message('no-eval-no-target', '问题解决了'), occurredAt: 2_000 })
+    await drive(fixture.service)
+    const noTarget = runtimeStore(fixture.service).getInboxByProviderEvent('lark', 'bot-1', 'no-eval-no-target')!
+    expect((runtimeStore(fixture.service) as unknown as DeliveryStore).getNaturalObjectiveIntent(noTarget.id)).toBeUndefined()
+    await fixture.service.acceptInbound({ ...message('no-eval-feedback', '还是不行，保存报错'), occurredAt: 2_001,
+      metadata: { replyToProviderMessageId: target } })
+    await drive(fixture.service)
+    const feedback = runtimeStore(fixture.service).getInboxByProviderEvent('lark', 'bot-1', 'no-eval-feedback')!
+    expect((runtimeStore(fixture.service) as unknown as DeliveryStore).getNaturalObjectiveIntent(feedback.id))
+      .toMatchObject({ status: 'awaiting-evaluation', selection: 'not-achieved' })
+    expect(fixture.llm.requests.length).toBe(before + 2)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('natural Evaluation append survives a temporary Delivery projection failure without replaying Agent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-natural-ledger-gap-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+    await fixture.service.acceptInbound({ ...message('gap-source', 'prepare daily workspace status summary'), occurredAt: 1_000 })
+    await drive(fixture.service)
+    const target = replyProviderMessageId(fixture.service, 'gap-source')
+    const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+    const original = store.commitVerifiedWorkflowTraceFeedback.bind(store)
+    const failure = vi.spyOn(store, 'commitVerifiedWorkflowTraceFeedback').mockImplementation(() => { throw new Error('temporary SQLite write failure') })
+    const before = fixture.llm.requests.length
+    await fixture.service.acceptInbound({ ...message('gap-feedback', '还是不行，保存报错'), occurredAt: 2_000,
+      metadata: { replyToProviderMessageId: target } })
+    await drive(fixture.service)
+    const inbox = store.getInboxByProviderEvent('lark', 'bot-1', 'gap-feedback')!
+    expect(fixture.llm.requests.length).toBe(before + 1)
+    expect(store.getNaturalObjectiveIntent(inbox.id)).toMatchObject({ status: 'frozen' })
+    expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } }))
+      .toEqual([expect.objectContaining({ objectiveStatus: 'not-achieved' })])
+    failure.mockImplementation(original)
+    await drive(fixture.service)
+    expect(store.getNaturalObjectiveIntent(inbox.id)).toMatchObject({ status: 'projected' })
+    expect(store.verifiedWorkflowObjectiveState(store.getNaturalObjectiveIntent(inbox.id)!.sourceOutboxId))
+      .toEqual({ version: 1, objectiveStatus: 'not-achieved' })
+    expect(fixture.llm.requests.length).toBe(before + 1)
+    failure.mockRestore()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('natural intent preparation failure does not stop the ordinary Agent reply', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-natural-prepare-failure-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound({ ...message('prepare-failure-source', 'prepare daily workspace status summary'), occurredAt: 1_000 })
+    await drive(fixture.service)
+    const target = replyProviderMessageId(fixture.service, 'prepare-failure-source')
+    const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+    const failure = vi.spyOn(store, 'prepareNaturalObjectiveIntent').mockImplementationOnce(() => {
+      throw new Error('simulated intent database failure')
+    })
+    const before = fixture.llm.requests.length
+    await fixture.service.acceptInbound({ ...message('prepare-failure-feedback', '问题解决了'), occurredAt: 2_000,
+      metadata: { replyToProviderMessageId: target } })
+    await drive(fixture.service)
+    const inbox = store.getInboxByProviderEvent('lark', 'bot-1', 'prepare-failure-feedback')!
+    expect(store.getNaturalObjectiveIntent(inbox.id)).toBeUndefined()
+    expect(fixture.llm.requests.length).toBe(before + 1)
+    expect(store.getInbox(inbox.id)?.status).toBe('processed')
+    failure.mockRestore()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('completed source with a file attachment cannot become canonical natural feedback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-natural-source-attachment-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+    await fixture.service.acceptInbound({ ...message('attachment-source', 'prepare daily workspace status summary'),
+      occurredAt: 1_000, attachments: [{ resourceType: 'file', providerRef: 'file-source-1', fileName: 'error.txt' }] })
+    await drive(fixture.service)
+    const store = runtimeStore(fixture.service) as unknown as DeliveryStore
+    const source = store.getInboxByProviderEvent('lark', 'bot-1', 'attachment-source')!
+    expect(source.status).toBe('processed')
+    const binding = store.getBinding(source.bindingId!)!
+    const owner = store.getPrincipal(principal)!
+    expect(store.inspectForegroundExecutionForOwner({ inboxId: source.id,
+      scope: { workspace: root, preset: 'primary' },
+      owner: { principalRecordId: owner.id, principalVersion: owner.version }, bindingId: binding.id,
+      bindingVersion: binding.version, bindingGeneration: binding.generation }))
+      .toMatchObject({ status: 'succeeded', quiescent: true })
+    const target = replyProviderMessageId(fixture.service, 'attachment-source')
+    expect(store.getOutboxByProviderMessage('lark', 'bot-1', target))
+      .toMatchObject({ status: expect.stringMatching(/^(accepted|delivered|read)$/u) })
+    const before = fixture.llm.requests.length
+    await fixture.service.acceptInbound({ ...message('attachment-natural-feedback', '问题解决了'),
+      occurredAt: 2_000, metadata: { replyToProviderMessageId: target } })
+    await drive(fixture.service)
+    const feedback = store.getInboxByProviderEvent('lark', 'bot-1', 'attachment-natural-feedback')!
+    expect(store.getNaturalObjectiveIntent(feedback.id)).toBeUndefined()
+    expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } }))
+      .toEqual([])
+    expect(fixture.llm.requests.length).toBe(before + 1)
+    await fixture.ctx.fiber.restart()
+  })
+
   test('/feedback too-long emits both T0 response feedback and typed T1 verbosity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-length-'))
     roots.push(root)

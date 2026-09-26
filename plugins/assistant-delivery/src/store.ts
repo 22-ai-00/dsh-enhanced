@@ -53,7 +53,7 @@ import {
   permissionDispatchRecoveryFromFailureCode,
   workflowDispatchRecoveryCode,
 } from './session-commands.js'
-import { parseFeedbackCommand } from './feedback-command.js'
+import { parseFeedbackCommand, parseNaturalObjectiveFeedback, type ObjectiveCommand, type ObjectiveFeedbackStatus } from './feedback-command.js'
 import {
   validateOwnerGoalOutcomeFeedbackLocator,
   validateOwnerGoalOutcomeFeedbackProof,
@@ -2054,6 +2054,25 @@ function leaseTargetJson(target: SessionLeaseTarget): string {
   }
   return JSON.stringify({ kind: 'construction', sessionId: target.sessionId, conversation: canonicalConversation(target.conversation), principal: canonicalPrincipal(target.principal), workspace: target.workspace, agentPreset: target.agentPreset, generation: target.generation, ...(target.previous === undefined ? {} : { previous: { id: target.previous.id, conversation: canonicalConversation(target.previous.conversation), principal: canonicalPrincipal(target.previous.principal), workspace: target.previous.workspace, agentPreset: target.previous.agentPreset, sessionId: target.previous.sessionId, generation: target.previous.generation, version: target.previous.version, status: 'active' } }) })
 }
+
+export type NaturalObjectiveIntent = Readonly<{
+  inboxId: string
+  envelopeHash: string
+  sourceInboxId: string
+  sourceOutboxId: string
+  bindingId: string
+  bindingVersion: number
+  bindingGeneration: number
+  principalRecordId: string
+  principalVersion: number
+  admissionEpoch: string
+  admissionSequence: number
+  occurredAt: number
+  selection: ObjectiveFeedbackStatus | 'withdraw'
+  status: 'awaiting-evaluation' | 'frozen' | 'projected' | 'conflict'
+  command?: Extract<ObjectiveCommand, { kind: 'objective' | 'objective-revision' }>
+  canonical?: Readonly<{ version: number; objectiveStatus: ObjectiveFeedbackStatus | 'unknown' }>
+}>
 
 export class DeliveryStore {
   private readonly database: DatabaseSync
@@ -6467,16 +6486,232 @@ export class DeliveryStore {
     })
   }
 
-  /**
-   * Atomically record an authenticated owner objective judgement about one
-   * ordinary completed Agent turn and, only when a closed deterministic
-   * deidentification catalog recognizes the source, emit its verified trace.
-   *
-   * The caller may not supply a prompt, task reference, template, or proof:
-   * all of them are rebuilt below from the exact durable Inbox/Outbox fence.
-   * A normal durable reply alone is intentionally insufficient; the owner
-   * must have replied `/feedback achieved` to that exact provider message.
-   */
+  getNaturalObjectiveIntent(inboxId: string): NaturalObjectiveIntent | undefined {
+    this.assertOpen()
+    const row = this.database.prepare('SELECT * FROM delivery_natural_objective_intents WHERE inbox_id = ?')
+      .get(inboxId) as Record<string, unknown> | undefined
+    if (row === undefined) return undefined
+    return Object.freeze({
+      inboxId: String(row['inbox_id']), envelopeHash: String(row['envelope_hash']),
+      sourceInboxId: String(row['source_inbox_id']), sourceOutboxId: String(row['source_outbox_id']),
+      bindingId: String(row['binding_id']), bindingVersion: Number(row['binding_version']),
+      bindingGeneration: Number(row['binding_generation']), principalRecordId: String(row['principal_record_id']),
+      principalVersion: Number(row['principal_version']), admissionSequence: Number(row['admission_sequence']),
+      admissionEpoch: String(row['admission_epoch']),
+      occurredAt: Number(row['occurred_at']), selection: row['selection'] as NaturalObjectiveIntent['selection'],
+      status: row['intent_status'] as NaturalObjectiveIntent['status'],
+      ...(row['command_json'] === null ? {} : { command: JSON.parse(String(row['command_json'])) as NonNullable<NaturalObjectiveIntent['command']> }),
+      ...(row['canonical_json'] === null ? {} : { canonical: JSON.parse(String(row['canonical_json'])) as NonNullable<NaturalObjectiveIntent['canonical']> }),
+    })
+  }
+
+  listPendingNaturalObjectiveIntents(limit = 100, afterAdmissionSequence = 0): readonly NaturalObjectiveIntent[] {
+    this.assertOpen()
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new DeliveryStoreError('conflict', 'invalid natural feedback limit')
+    if (!Number.isSafeInteger(afterAdmissionSequence) || afterAdmissionSequence < 0) throw new DeliveryStoreError('conflict', 'invalid natural feedback cursor')
+    const ids = this.database.prepare(`SELECT inbox_id FROM delivery_natural_objective_intents
+      WHERE intent_status IN ('awaiting-evaluation', 'frozen') AND admission_sequence > ?
+      ORDER BY admission_sequence LIMIT ?`)
+      .all(afterAdmissionSequence, limit) as { inbox_id: string }[]
+    return ids.map(row => this.getNaturalObjectiveIntent(row.inbox_id)!)
+  }
+
+  hasEarlierPendingNaturalObjectiveIntent(sourceOutboxId: string, admissionSequence: number): boolean {
+    this.assertOpen()
+    return this.database.prepare(`SELECT 1 FROM delivery_natural_objective_intents
+      WHERE source_outbox_id = ? AND admission_sequence < ?
+        AND intent_status IN ('awaiting-evaluation', 'frozen') LIMIT 1`)
+      .get(sourceOutboxId, admissionSequence) !== undefined
+  }
+
+  /** Same source proof required by the local workflow commit, before Evaluation append. */
+  isVerifiedForegroundObjectiveTarget(binding: Readonly<ConversationBinding>, sourceInboxId: string,
+    sourceOutboxId: string): boolean {
+    this.assertOpen()
+    const source = this.getInbox(sourceInboxId)
+    const outbox = this.getOutbox(sourceOutboxId)
+    return source?.status === 'processed' && source.bindingId === binding.id
+      && source.envelope.kind === 'text' && (source.envelope.attachments?.length ?? 0) === 0
+      && outbox !== undefined && outbox.intent.bindingId === binding.id
+      && outbox.intent.idempotencyKey === `inbound:${source.id}:reply`
+      && outbox.intent.replyToEventId === source.eventId
+      && ['accepted', 'delivered', 'read'].includes(outbox.status)
+      && outbox.providerMessageId !== undefined
+      && (outbox.intent.format === 'markdown' || outbox.intent.format === 'plain')
+      && outbox.intent.metadata === undefined && outbox.intent.modelPicker === undefined
+      && outbox.intent.permissionPicker === undefined && outbox.intent.approval === undefined
+      && this.getGoalOutcomeTarget(outbox.id) === undefined
+      && JSON.stringify(source.envelope.conversation) === JSON.stringify(binding.conversation)
+      && JSON.stringify(source.envelope.principal) === JSON.stringify(binding.principal)
+      && JSON.stringify(outbox.intent.target.conversation) === JSON.stringify(binding.conversation)
+      && JSON.stringify(outbox.intent.target.principal) === JSON.stringify(binding.principal)
+  }
+
+  /** Freeze the immutable owner wording and exact completed result before any Evaluation I/O. */
+  prepareNaturalObjectiveIntent(input: Readonly<{
+    binding: Readonly<ConversationBinding>; feedbackInboxId: string; sourceInboxId: string;
+    sourceOutboxId: string; selection: ObjectiveFeedbackStatus | 'withdraw'
+  }>): NaturalObjectiveIntent {
+    this.assertOpen()
+    return this.transaction(() => {
+      const binding = this.getBinding(input.binding.id)
+      const owner = binding === undefined ? undefined : this.getPrincipal(binding.principal)
+      const inbox = this.getInbox(input.feedbackInboxId)
+      const source = this.getInbox(input.sourceInboxId)
+      const outbox = this.getOutbox(input.sourceOutboxId)
+      const existing = this.getNaturalObjectiveIntent(input.feedbackInboxId)
+      if (binding?.status !== 'active' || binding.version !== input.binding.version
+        || binding.generation !== input.binding.generation || binding.sessionId !== input.binding.sessionId
+        || binding.conversation.kind !== 'dm' || owner?.status !== 'active' || owner.role !== 'owner'
+        || inbox?.status !== 'claimed' || inbox.bindingId !== binding.id || inbox.envelope.kind !== 'text'
+        || (inbox.envelope.attachments?.length ?? 0) !== 0
+        || parseNaturalObjectiveFeedback(inbox.envelope.text) !== input.selection
+        || !this.isVerifiedForegroundObjectiveTarget(binding, input.sourceInboxId, input.sourceOutboxId)
+        || source === undefined || outbox === undefined
+        || inbox.envelope.metadata?.replyToProviderMessageId !== outbox.providerMessageId
+        || JSON.stringify(inbox.envelope.conversation) !== JSON.stringify(binding.conversation)
+        || JSON.stringify(inbox.envelope.principal) !== JSON.stringify(binding.principal)) {
+        throw new DeliveryStoreError('conflict', 'natural feedback does not target one completed owner turn')
+      }
+      if (existing !== undefined) {
+        if (existing.envelopeHash !== inbox.envelopeHash || existing.sourceInboxId !== source.id
+          || existing.sourceOutboxId !== outbox.id || existing.selection !== input.selection
+          || existing.principalRecordId !== owner.id || existing.principalVersion !== owner.version
+          || existing.bindingVersion !== binding.version || existing.bindingGeneration !== binding.generation
+          || existing.admissionEpoch !== inbox.admissionCursor.epoch
+          || existing.admissionSequence !== inbox.admissionCursor.sequence) {
+          throw new DeliveryStoreError('idempotency-conflict', 'natural feedback identity changed')
+        }
+        return existing
+      }
+      const now = this.now()
+      this.database.prepare(`INSERT INTO delivery_natural_objective_intents(
+        inbox_id, envelope_hash, source_inbox_id, source_outbox_id, binding_id, binding_version,
+        binding_generation, principal_record_id, principal_version, admission_epoch, admission_sequence,
+        occurred_at, parser_version, intent_status, selection, command_json, canonical_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'awaiting-evaluation', ?, NULL, NULL, ?, ?)`).run(
+        inbox.id, inbox.envelopeHash, source.id, outbox.id, binding.id, binding.version,
+        binding.generation, owner.id, owner.version, inbox.admissionCursor.epoch,
+        inbox.admissionCursor.sequence, inbox.envelope.occurredAt, input.selection, now, now,
+      )
+      return this.getNaturalObjectiveIntent(inbox.id)!
+    })
+  }
+
+  /** A CAS command is fixed once; retries may never inspect a newer version and rebase it. */
+  freezeNaturalObjectiveIntent(inboxId: string, current: Readonly<{
+    version: number; objectiveStatus: ObjectiveFeedbackStatus | 'unknown'
+  }> | undefined): NaturalObjectiveIntent | undefined {
+    this.assertOpen()
+    return this.transaction(() => {
+      const intent = this.getNaturalObjectiveIntent(inboxId)
+      if (intent === undefined) return undefined
+      if (intent.status !== 'awaiting-evaluation') return intent
+      const earlier = this.database.prepare(`SELECT 1 FROM delivery_natural_objective_intents
+        WHERE source_outbox_id = ? AND admission_sequence < ?
+          AND intent_status IN ('awaiting-evaluation', 'frozen') LIMIT 1`)
+        .get(intent.sourceOutboxId, intent.admissionSequence)
+      if (earlier !== undefined) return undefined
+      const later = this.database.prepare(`SELECT 1 FROM delivery_natural_objective_intents
+        WHERE source_outbox_id = ? AND admission_sequence > ?
+          AND intent_status = 'projected' LIMIT 1`)
+        .get(intent.sourceOutboxId, intent.admissionSequence)
+      if (later !== undefined) {
+        this.database.prepare(`UPDATE delivery_natural_objective_intents SET intent_status = 'conflict', updated_at = ? WHERE inbox_id = ?`)
+          .run(this.now(), inboxId)
+        return this.getNaturalObjectiveIntent(inboxId)
+      }
+      const latest = this.database.prepare(`SELECT inbox.envelope_json, admission.admission_sequence
+        FROM delivery_owner_objective_commands AS command
+        JOIN inbox_messages AS inbox ON inbox.id = command.inbox_id
+        JOIN delivery_inbox_admissions AS admission ON admission.inbox_id = inbox.id
+        WHERE command.source_outbox_id = ? AND json_extract(command.result_json, '$.error') IS NULL
+        ORDER BY command.version DESC, admission.admission_sequence DESC LIMIT 1`)
+        .get(intent.sourceOutboxId) as { envelope_json: string; admission_sequence: number } | undefined
+      if (latest !== undefined) {
+        const previous = JSON.parse(latest.envelope_json) as InboundEnvelope
+        if (latest.admission_sequence >= intent.admissionSequence
+          || previous.occurredAt >= intent.occurredAt) {
+          this.database.prepare(`UPDATE delivery_natural_objective_intents SET intent_status = 'conflict', updated_at = ? WHERE inbox_id = ?`)
+            .run(this.now(), inboxId)
+          return this.getNaturalObjectiveIntent(inboxId)
+        }
+      }
+      const projected = this.database.prepare(`SELECT MAX(occurred_at) AS occurred_at
+        FROM delivery_natural_objective_intents WHERE source_outbox_id = ?
+          AND admission_sequence < ? AND intent_status = 'projected'`)
+        .get(intent.sourceOutboxId, intent.admissionSequence) as { occurred_at: number | null }
+      if (projected.occurred_at !== null && projected.occurred_at >= intent.occurredAt) {
+        this.database.prepare(`UPDATE delivery_natural_objective_intents SET intent_status = 'conflict', updated_at = ? WHERE inbox_id = ?`)
+          .run(this.now(), inboxId)
+        return this.getNaturalObjectiveIntent(inboxId)
+      }
+      const local = this.verifiedWorkflowObjectiveState(intent.sourceOutboxId,
+        { principalRecordId: intent.principalRecordId, principalVersion: intent.principalVersion })
+      if (local !== undefined && (current === undefined || local.version !== current.version
+        || local.objectiveStatus !== current.objectiveStatus)) return undefined
+      if (current !== undefined && local === undefined) return undefined
+      if (intent.selection === 'withdraw' && (current === undefined || current.objectiveStatus === 'unknown')) {
+        this.database.prepare(`UPDATE delivery_natural_objective_intents SET intent_status = 'conflict', updated_at = ? WHERE inbox_id = ?`)
+          .run(this.now(), inboxId)
+        return this.getNaturalObjectiveIntent(inboxId)
+      }
+      if (current !== undefined && current.objectiveStatus === intent.selection) {
+        this.database.prepare(`UPDATE delivery_natural_objective_intents SET intent_status = 'projected', updated_at = ? WHERE inbox_id = ?`)
+          .run(this.now(), inboxId)
+        return this.getNaturalObjectiveIntent(inboxId)
+      }
+      const command: NaturalObjectiveIntent['command'] = current === undefined
+        ? { kind: 'objective', objectiveStatus: intent.selection as ObjectiveFeedbackStatus }
+        : { kind: 'objective-revision', action: intent.selection === 'withdraw' ? 'withdraw' : 'correct',
+          expectedVersion: current.version, previousStatus: current.objectiveStatus,
+          objectiveStatus: intent.selection === 'withdraw' ? 'unknown' : intent.selection }
+      this.database.prepare(`UPDATE delivery_natural_objective_intents
+        SET intent_status = 'frozen', command_json = ?, updated_at = ? WHERE inbox_id = ?`)
+        .run(JSON.stringify(command), this.now(), inboxId)
+      return this.getNaturalObjectiveIntent(inboxId)
+    })
+  }
+
+  settleNaturalObjectiveIntent(inboxId: string, status: 'projected' | 'conflict', canonical?: NaturalObjectiveIntent['canonical']): void {
+    this.assertOpen()
+    this.transaction(() => {
+      const intent = this.getNaturalObjectiveIntent(inboxId)
+      if (intent?.status !== 'frozen' && intent?.status !== status
+        && !(intent?.status === 'awaiting-evaluation' && status === 'conflict')) {
+        throw new DeliveryStoreError('conflict', 'natural intent was not frozen')
+      }
+      if (intent.status === 'projected' && status !== 'projected') throw new DeliveryStoreError('conflict', 'projected natural feedback cannot regress')
+      this.database.prepare(`UPDATE delivery_natural_objective_intents
+        SET intent_status = ?, canonical_json = COALESCE(canonical_json, ?), updated_at = ? WHERE inbox_id = ?`)
+        .run(status, canonical === undefined ? null : JSON.stringify(canonical), this.now(), inboxId)
+    })
+  }
+
+  findNaturalObjectiveFeedbackByOperation(sourceOutboxId: string, operationId: string,
+    lineage: Readonly<{ principalRecordId: string; principalVersion: number }>): Readonly<{ inboxId: string; text: string; truncated: boolean }> | undefined {
+    this.assertOpen()
+    const row = this.database.prepare(`SELECT intent.inbox_id, intent.envelope_hash, intent.principal_record_id,
+        intent.principal_version, inbox.envelope_json, inbox.envelope_hash AS current_hash
+      FROM delivery_natural_objective_intents AS intent JOIN inbox_messages AS inbox ON inbox.id = intent.inbox_id
+      WHERE intent.source_outbox_id = ? AND intent.principal_record_id = ? AND intent.principal_version = ?
+        AND intent.command_json IS NOT NULL
+        AND intent.intent_status IN ('frozen', 'projected')`).all(sourceOutboxId,
+          lineage.principalRecordId, lineage.principalVersion) as Array<{
+          inbox_id: string; envelope_hash: string; principal_record_id: string; principal_version: number;
+          envelope_json: string; current_hash: string
+        }>
+    for (const candidate of row) {
+      if (candidate.envelope_hash !== candidate.current_hash) continue
+      const derived = `owner-feedback:${createHash('sha256').update(JSON.stringify([candidate.inbox_id, candidate.envelope_hash])).digest('hex')}`
+      if (derived !== operationId) continue
+      const envelope = JSON.parse(candidate.envelope_json) as InboundEnvelope
+      if (envelope.kind !== 'text' || parseNaturalObjectiveFeedback(envelope.text) === undefined) continue
+      return Object.freeze({ inboxId: candidate.inbox_id, text: envelope.text.slice(0, 4096), truncated: envelope.text.length > 4096 })
+    }
+    return undefined
+  }
+
   verifiedWorkflowObjectiveState(sourceOutboxId: string, lineage?: Readonly<{ principalRecordId: string; principalVersion: number }>): { version: number; objectiveStatus: 'achieved' | 'partial' | 'not-achieved' | 'unknown' } | undefined {
     const row = this.database.prepare(`SELECT version, objective_status, principal_record_id, principal_version FROM delivery_owner_objective_commands
       WHERE source_outbox_id = ? AND json_extract(result_json, '$.error') IS NULL ORDER BY version DESC LIMIT 1`).get(sourceOutboxId) as {
@@ -6494,6 +6729,7 @@ export class DeliveryStore {
     return initial === undefined ? undefined : { version: 1, objectiveStatus: initial.objective_status }
   }
 
+  /** Commit exact owner feedback (typed command or frozen natural intent) and closed-set workflow evidence. */
   commitVerifiedWorkflowTraceFeedback(input: Readonly<{
     binding: Readonly<ConversationBinding>
     feedbackInboxId: string
@@ -6528,13 +6764,28 @@ export class DeliveryStore {
       const feedbackInbox = this.getInbox(feedbackInboxId)
       const sourceInbox = this.getInbox(sourceInboxId)
       const sourceOutbox = this.getOutbox(sourceOutboxId)
+      const naturalIntent = this.getNaturalObjectiveIntent(feedbackInboxId)
       const feedbackCommand = feedbackInbox === undefined || feedbackInbox.envelope.kind !== 'command'
         ? undefined
         : parseDeliveryCommand(feedbackInbox.envelope)
-      const feedback = feedbackCommand?.name !== 'feedback'
+      const typedFeedback = feedbackCommand?.name !== 'feedback'
         ? undefined
         : parseFeedbackCommand(feedbackCommand.rawInput)
-      if (feedbackInbox?.status !== 'claimed' || feedbackInbox.bindingId !== binding.id
+      const feedback = naturalIntent?.command ?? typedFeedback
+      const naturalMatches = naturalIntent === undefined || (feedbackInbox !== undefined
+        && feedbackInbox.envelope.kind === 'text'
+        && naturalIntent.status !== 'awaiting-evaluation' && naturalIntent.status !== 'conflict'
+        && naturalIntent.envelopeHash === feedbackInbox.envelopeHash
+        && naturalIntent.sourceInboxId === sourceInboxId && naturalIntent.sourceOutboxId === sourceOutboxId
+        && naturalIntent.bindingId === binding.id
+        && naturalIntent.bindingVersion === binding.version && naturalIntent.bindingGeneration === binding.generation
+        && naturalIntent.principalRecordId === owner.id && naturalIntent.principalVersion === owner.version
+        && naturalIntent.admissionEpoch === feedbackInbox.admissionCursor.epoch
+        && naturalIntent.admissionSequence === feedbackInbox.admissionCursor.sequence
+        && parseNaturalObjectiveFeedback(feedbackInbox.envelope.text) === naturalIntent.selection)
+      if ((feedbackInbox?.status !== 'claimed' && !(naturalIntent !== undefined
+        && (feedbackInbox?.status === 'processed' || feedbackInbox?.status === 'dead_letter')))
+        || feedbackInbox?.bindingId !== binding.id || !naturalMatches
         || (feedbackInbox.envelope.attachments?.length ?? 0) !== 0
         || (feedback?.kind !== 'objective' && feedback?.kind !== 'objective-revision')
         || feedback.objectiveStatus !== input.objectiveStatus

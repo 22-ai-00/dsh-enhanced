@@ -227,7 +227,11 @@ Goals 的单次计划恢复使用单独的 Host capability。`goalWakeSettlement
 
 结果已经取得 provider message id 后，exact owner 可以直接回复该消息，沿用 `/feedback status`、`/feedback correct <version> <previous-status> <new-status>` 与 `/feedback withdraw <version> <previous-status>`。首次 `status` 已显示从 Verifier baseline 采纳的 revision 1；单词形式的初始判断只有与该 baseline 状态相同才幂等成功，任何不同判断都必须使用 `status` 返回的 version/status 做显式 `correct`，不能用裸命令覆盖。历史 Verifier receipt 此时允许超过原 freshness window，因为 owner 正在标注一份不可变的历史结果；但 Delivery、Goals 和 Evaluation 仍会重验同一个 sidecar、owner lineage、route/binding、Goal definition、assessment、run、profile、contract 与 receipt identity。原消息、当前 Goals provider 或任一身份不匹配时拒绝，不会仅凭过期 metadata 产生修订。Web `native-session` 返回值没有外部 Outbox/provider reply identity，因此当前不支持这条 whole-goal reply-feedback 路径。
 
-`/feedback` 的完整固定语法如下；不接受附件或额外自由文本：
+普通前台任务也支持自然反馈：同一 owner 直接回复原任务结果，说“问题解决了”“还是不行，保存报错”或“撤回刚才的任务反馈”，Host 会记录明确判断，原文仍交给 Agent 正常续答。已有判断会自动按当前版本更正，无需先查询版本。只有明确、可确定解析的表述才记录；感谢、疑问、假设、引用、附件和没有精确回复目标的文字仍按普通聊天处理。该入口不覆盖 Automation、whole-goal 或原生 Web 结果；这些结果继续使用原有入口。
+
+自然反馈使用 Delivery schema 24 的持久日志，绑定原始 Inbox、目标 Outbox、owner、入站顺序和一次冻结的修订参数。Evaluation 暂不可用时，普通聊天继续，日志等待后续补记；恢复只重试反馈记录，不重新运行用户的 Agent 请求。若旁路反馈日志本身未能持久化，Host 记诊断并继续普通聊天，不声称该条反馈已保存；普通派发仍须通过自身授权与持久化检查。版本冲突不自动改用新版本重试；明显早于当前反馈或无法确定顺序的相反判断不会覆盖当前结果。自然纠正原因可随精确 canonical 修订交给 Growth，最多 4096 字，作为不可信任务材料，不授予任何新权限。
+
+`/feedback` 的完整固定语法如下；不接受附件或额外自由文本，命令本身不进入模型：
 
 ```text
 /feedback helpful|not-helpful|too-long|too-short|wrong-format|wrong-action|unwanted-reminder
@@ -397,7 +401,7 @@ pnpm --dir plugins/assistant-delivery pack --dry-run
 
 旧 foreground receipt 未保存 principal version：仅当前仍为同一 record 的初始 v1 身份可修订；身份已更新时保守拒绝继承旧判断修订权。新记录完整保存 record+version。
 
-Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果绑定到精确 owner。它核对当前 route、原始 Inbox/binding、Host 执行回执和 principal record/version，再区分独立 Verifier 与 owner 的纠正/撤回；只有核对成功才返回来源 Session、最多 4096 字符的原任务正文及 canonical receipt。来源带 `modelSelectionState`：`frozen` 才返回实际原生 `request/header` 已物化的 provider/model/可选 reasoning effort；`missing` 表示历史执行未采到调用快照，`inconsistent` 表示同一前台执行出现不同实际路由。后两者不猜测当前会话或部署默认模型。schema v23 为内置 Delivery 运行时的普通 owner 对话增加独立执行回执：无需预设验收 profile，回复具体消息的 `/feedback not-achieved`、更正或撤回也能进入 canonical 前台结果。记录只证明任务归属、实际模型和执行已停止，不能证明目标达成；没有验收契约时只接受已认证的 typed owner 反馈。这类新任务的目标结果反馈要求 Evaluation 可用，先提交 canonical 修订再更新本地 workflow；服务缺失时明确返回不可用，不确认仅有本地记录的成功。偏好反馈和没有执行回执的历史 workflow 路径保持原行为。旧 acceptance 回执继续兼容，旧普通任务不回填，终态执行不能事后补写路由。此入口覆盖内置外部渠道运行时；原生 Web 和自定义运行时不能据此推断已接通。`/new` 前的同 owner 任务可被识别，主体身份变更不能继承旧任务权限。该接口仅供发现前台学习来源，尚不自动调度修复，也不授予执行或采用权限；消费者写入前仍须使用 Evaluation 的 canonical writer fence。
+Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果绑定到精确 owner。它核对当前 route、原始 Inbox/binding、Host 执行回执和 principal record/version，再区分独立 Verifier 与 owner 的纠正/撤回；只有核对成功才返回来源 Session、最多 4096 字符的原任务正文及 canonical receipt；当前 owner revision 的操作身份能与自然反馈日志核对时，另返回最多 4096 字符的 `feedback.text`、来源 Inbox 与截断标志。来源带 `modelSelectionState`：`frozen` 才返回实际原生 `request/header` 已物化的 provider/model/可选 reasoning effort；`missing` 表示历史执行未采到调用快照，`inconsistent` 表示同一前台执行出现不同实际路由。后两者不猜测当前会话或部署默认模型。schema v23 为内置 Delivery 运行时的普通 owner 对话增加独立执行回执：无需预设验收 profile，回复具体消息的 `/feedback not-achieved`、更正或撤回也能进入 canonical 前台结果；schema v24 另支持上述明确自然回复。记录只证明任务归属、实际模型和执行已停止，不能证明目标达成；没有验收契约时只接受已认证 owner 的明确反馈，不能取模型自评。这类新任务的目标结果反馈要求 Evaluation 可用，先提交 canonical 修订再更新本地 workflow；服务缺失时明确返回不可用，不确认仅有本地记录的成功。偏好反馈和没有执行回执的历史 workflow 路径保持原行为。旧 acceptance 回执继续兼容，旧普通任务不回填，终态执行不能事后补写路由。此入口覆盖内置外部渠道运行时；原生 Web 和自定义运行时不能据此推断已接通。`/new` 前的同 owner 任务可被识别，主体身份变更不能继承旧任务权限。该接口仅供发现前台学习来源，尚不自动调度修复，也不授予执行或采用权限；消费者写入前仍须使用 Evaluation 的 canonical writer fence。
 
 
 ## 原生 Web owner 接入

@@ -1225,7 +1225,7 @@ export class EvaluationStore {
     } catch (error) { this.#database.exec('ROLLBACK'); throw error }
   }
 
-  inspectTaskOwnerRevision(scopeInput: EvaluationScope, outcomeIdInput: string, principalRecordIdInput: string, principalVersionInput: number): Readonly<{ outcomeId: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objectiveStatus: string }> | undefined {
+  inspectTaskOwnerRevision(scopeInput: EvaluationScope, outcomeIdInput: string, principalRecordIdInput: string, principalVersionInput: number): Readonly<{ outcomeId: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objectiveStatus: string; operationId?: string }> | undefined {
     const { scopeKey } = canonicalEvaluationScope(scopeInput)
     const outcomeId = boundedText(outcomeIdInput, 'outcomeId', 200)
     const principalRecordId = boundedText(principalRecordIdInput, 'principalRecordId', 4_096)
@@ -1233,7 +1233,8 @@ export class EvaluationStore {
     const receipt = this.getTaskLearningProjection(scopeInput, outcomeId)
     if (!receipt || receipt.projection.evidenceOutcomeId === undefined) return undefined
     const row = this.#database.prepare(`
-      SELECT revision.outcome_id, revision.version, revision.action, outcome.objective_status
+      SELECT revision.outcome_id, revision.version, revision.action, outcome.objective_status,
+        json_extract(revision.command_json, '$.operationId') AS operation_id
       FROM evaluation_owner_revisions revision
       JOIN evaluation_outcomes outcome ON outcome.id = revision.outcome_id
       JOIN evaluation_task_projections projection ON projection.subject_key = revision.subject_key
@@ -1245,8 +1246,9 @@ export class EvaluationStore {
             AND newer.version > revision.version
         )
       ORDER BY revision.version DESC LIMIT 1
-    `).get(receipt.projection.evidenceOutcomeId, JSON.stringify([principalRecordId, principalVersionInput]), scopeKey) as { outcome_id: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objective_status: string } | undefined
-    return row === undefined ? undefined : Object.freeze({ outcomeId: row.outcome_id, version: row.version, action: row.action, objectiveStatus: row.objective_status })
+    `).get(receipt.projection.evidenceOutcomeId, JSON.stringify([principalRecordId, principalVersionInput]), scopeKey) as { outcome_id: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objective_status: string; operation_id: unknown } | undefined
+    return row === undefined ? undefined : Object.freeze({ outcomeId: row.outcome_id, version: row.version, action: row.action, objectiveStatus: row.objective_status,
+      ...(typeof row.operation_id === 'string' ? { operationId: row.operation_id } : {}) })
   }
 
   /**

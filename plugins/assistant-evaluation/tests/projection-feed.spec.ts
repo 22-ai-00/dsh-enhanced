@@ -51,13 +51,17 @@ test('owner revision lookup follows the current exact lineage and withdraws it',
   const lineage = { principalRecordId: 'owner-record', principalVersion: 1 }
   const initial = store.append(owner('owner-initial', 'achieved'), { ...lineage, action: 'initial', operationId: 'owner-1' })
   const before = store.listTaskLearningProjectionFeed(scope, undefined, 10)
-  expect(store.inspectTaskOwnerRevision(scope, terminal.id, 'owner-record', 1)).toMatchObject({ outcomeId: initial.id, version: 1, action: 'initial' })
+  expect(store.inspectTaskOwnerRevision(scope, terminal.id, 'owner-record', 1)).toMatchObject({ outcomeId: initial.id, version: 1, action: 'initial', operationId: 'owner-1' })
   expect(store.inspectTaskOwnerRevision(scope, terminal.id, 'other', 1)).toBeUndefined()
   expect(store.inspectTaskOwnerRevision(scope, terminal.id, 'owner-record', 2)).toBeUndefined()
+  store.append(owner('owner-repeat', 'achieved'), { ...lineage, action: 'initial', operationId: 'owner-repeat-operation' })
+  // Same-value acknowledgements cannot replace the original evidence text
+  // that Delivery resolves through the canonical operation identity.
+  expect(store.inspectTaskOwnerRevision(scope, terminal.id, 'owner-record', 1)).toMatchObject({ outcomeId: initial.id, version: 1, operationId: 'owner-1' })
   const withdrawal = store.append(owner('owner-withdraw', 'unknown'), { ...lineage, action: 'withdraw', operationId: 'owner-2', expectedVersion: 1, previousStatus: 'achieved' })
   const update = store.listTaskLearningProjectionFeed(scope, before.nextCursor, 10)
   expect(update.items).toHaveLength(1); expect(update.items[0]!.receipt.projection.disposition).toBe('retract')
-  expect(store.inspectTaskOwnerRevision(scope, terminal.id, 'owner-record', 1)).toMatchObject({ outcomeId: withdrawal.id, version: 2, action: 'withdraw', objectiveStatus: 'unknown' })
+  expect(store.inspectTaskOwnerRevision(scope, terminal.id, 'owner-record', 1)).toMatchObject({ outcomeId: withdrawal.id, version: 2, action: 'withdraw', objectiveStatus: 'unknown', operationId: 'owner-2' })
   store.close()
 })
 

@@ -26,6 +26,8 @@ import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import { AssistantEvolutionService } from '@dsh-enhanced/assistant-evolution'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { PreferenceLearningService } from '@dsh-enhanced/preference-learning'
+import { normalizeConfig as normalizeGrowthConfig } from '../plugins/assistant-growth-driver/src/config.ts'
+import { UsageLearningRuntime } from '../plugins/assistant-growth-driver/src/usage-runtime.ts'
 import {
   CodingSubscriptionAdapter,
   Config as CodingSubscriptionConfig,
@@ -365,6 +367,7 @@ async function openGrowthRuntime(input: {
   evolutionPath: string
   saved: Map<string, SavedSession>
   llm: GrowthAdapter
+  ownerRouteId?: string
 }): Promise<{ ctx: Context; transport: FakeLarkTransport }> {
   const ctx = new Context()
   contexts.add(ctx)
@@ -374,8 +377,20 @@ async function openGrowthRuntime(input: {
     proposalMaintenanceIntervalMs: 0,
     budgets: [{
       id: 'growth-budget', metric: 'automation-runs', limit: 10, periodMs: 60_000, scope: 'subject',
-    }],
-    rules: policyRules(input.workspace),
+    }, ...(input.ownerRouteId === undefined ? [] : [{
+      id: 'growth-scan-budget', metric: 'automation-runs' as const, limit: 10, periodMs: 60_000, scope: 'subject' as const,
+    }])],
+    rules: [...policyRules(input.workspace), ...(input.ownerRouteId === undefined ? [] : [{
+      id: 'growth-usage-reconcile', effect: 'allow' as const,
+      subject: { kind: 'background' as const, id: 'assistant-growth-usage', workspace: input.workspace, principal: OWNER },
+      actions: ['reconcile'], resource: { kind: 'automation' as const, id: '*' },
+      context: { initiators: ['background' as const] },
+    }, {
+      id: 'growth-usage-execute', effect: 'allow' as const,
+      subject: { kind: 'background' as const, id: '*', workspace: input.workspace, principal: OWNER },
+      actions: ['execute'], resource: { kind: 'automation' as const, id: '*' },
+      context: { initiators: ['background' as const] },
+    }])],
   })
   await ctx.plugin(AssistantDeliveryService, {
     databasePath: join(input.root, 'delivery.sqlite'),
@@ -385,6 +400,12 @@ async function openGrowthRuntime(input: {
     defaultAgentPreset: PRESET,
     agentProvider: 'growth-model',
     agentModel: 'default',
+    ...(input.ownerRouteId === undefined ? {} : { ownerRoutes: [{
+      id: input.ownerRouteId,
+      conversation: { channel: 'lark', account: ACCOUNT, tenant: TENANT, kind: 'dm' as const, chat: 'oc_owner' },
+      principal: { channel: 'lark', account: ACCOUNT, tenant: TENANT, user: OWNER_USER },
+      workspace: input.workspace, agentPreset: PRESET, policyRef: 'owner-dm', minimumGeneration: 1,
+    }] }),
   })
   await ctx.plugin(AssistantEvaluationService, {
     databasePath: join(input.root, 'evaluation.sqlite'),
@@ -1634,6 +1655,164 @@ describe('personal-assistant growth composition', () => {
     `).get()
     finalEvaluation.close()
     expect(finalCount).toEqual({ count: 1 })
+  })
+
+  test('ordinary owner corrections keep the Agent replying while Growth durably invalidates stale reviews', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-natural-growth-e2e-'))
+    roots.push(root)
+    const workspace = join(root, 'workspace')
+    const routeId = 'ordinary-learning-owner'
+    const usagePath = join(root, 'usage.sqlite')
+    const llm = new GrowthAdapter()
+    const { ctx, transport } = await openGrowthRuntime({
+      root, workspace, policyPath: join(root, 'policy.sqlite'), automationPath: join(root, 'automations.sqlite'),
+      evolutionPath: join(root, 'evolution.sqlite'), saved: new Map<string, SavedSession>(), llm,
+      ownerRouteId: routeId,
+    })
+    await pairOwner(ctx)
+    const startedAt = Date.now() - 10_000
+    const original = { ...larkMessage('om-natural-source', 'Please save the report.'), createTime: startedAt }
+    await transport.message(original)
+    for (let pass = 0; pass < 3; pass += 1) await runInboundPass(ctx)
+    expect(llm.requests).toHaveLength(1)
+    const originalReply = transport.sent.find(message => 'markdown' in message.input)
+    expect(originalReply).toBeDefined()
+    const deliveryDb = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+    const sourceInbox = deliveryDb.prepare('SELECT id FROM inbox_messages WHERE event_id = ?')
+      .get(original.messageId) as { id: string } | undefined
+    deliveryDb.close()
+    expect(sourceInbox).toBeDefined()
+    const scope = ctx.assistantEvaluation.canonicalHostScope({ workspace, preset: PRESET })
+    const growthConfig = normalizeGrowthConfig({
+      enabled: true, scope: { workspace, preset: PRESET, principalId: OWNER, ownerRouteId: routeId },
+      budgetId: 'growth-budget', budgetAmount: 1,
+      usageLearning: { enabled: true, databasePath: usagePath, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1 },
+    })
+    const review = vi.fn(async () => 'reviewed' as const)
+    const usage = new UsageLearningRuntime(growthConfig, {
+      evaluation: ctx.assistantEvaluation, delivery: ctx.assistantDelivery,
+      automations: ctx.assistantAutomations, review,
+    })
+    const jobs = () => {
+      const db = new DatabaseSync(usagePath, { readOnly: true })
+      try {
+        return db.prepare('SELECT id, state, reason, subject, intent_json FROM usage_jobs ORDER BY rowid')
+          .all() as Array<{ id: string; state: string; reason: string | null; subject: string; intent_json: string }>
+      } finally { db.close() }
+    }
+    const canonical = () => ctx.assistantEvaluation.getTrustedForegroundLearningProjection({ scope, inboxId: sourceInbox!.id })
+    const sendCorrection = async (event: LarkMessage) => {
+      const requestCount = llm.requests.length
+      const replyCount = transport.sent.length
+      await transport.message(event)
+      for (let pass = 0; pass < 3; pass += 1) await runInboundPass(ctx)
+      await ctx.assistantEvaluation.whenProjectionIdle()
+      expect(llm.requests).toHaveLength(requestCount + 1)
+      expect(transport.sent.slice(replyCount).some(message => 'markdown' in message.input)).toBe(true)
+    }
+    try {
+      usage.start()
+      expect(usage.health()).toMatchObject({ connected: true, counts: {} })
+      const failure = { ...larkMessage('om-natural-failed', '还是不行，保存报错', originalReply!.messageId),
+        createTime: startedAt + 2_000 }
+      await sendCorrection(failure)
+      await vi.waitFor(() => expect(usage.health().counts).toEqual({ queued: 1 }))
+      expect(canonical()).toMatchObject({
+        objective: { status: 'not-achieved' },
+        projection: { subjectKind: 'foreground-turn', subjectRef: sourceInbox!.id, disposition: 'upsert' },
+      })
+      const firstSource = ctx.assistantDelivery.inspectOwnerForegroundLearningTask({
+        authorityId: routeId, principalId: OWNER, workspace, agentPreset: PRESET,
+        outcomeId: canonical()!.triggerOutcomeId,
+      })
+      const feedbackDb = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      const failureInbox = feedbackDb.prepare('SELECT id FROM inbox_messages WHERE event_id = ?')
+        .get(failure.messageId) as { id: string } | undefined
+      feedbackDb.close()
+      expect(failureInbox).toBeDefined()
+      expect(firstSource).toMatchObject({
+        judgement: 'owner-feedback', ownerRevision: { version: 1, action: 'initial' },
+        feedback: { inboxId: failureInbox!.id, text: failure.content, truncated: false },
+        source: { inboxId: sourceInbox!.id, objective: original.content, quiescent: true,
+          modelSelectionState: 'frozen', modelSelection: { provider: 'growth-model', model: 'default' } },
+      })
+      const firstJobs = jobs()
+      expect(firstJobs).toHaveLength(1)
+      expect(firstJobs[0]).toMatchObject({ state: 'queued', subject: `foreground-turn:${sourceInbox!.id}` })
+      expect(JSON.parse(firstJobs[0]!.intent_json)).toMatchObject({
+        model: { provider: 'growth-model', model: 'default' },
+        source: { feedback: { inboxId: failureInbox!.id, text: failure.content, truncated: false },
+          source: { inboxId: sourceInbox!.id, objective: original.content } },
+      })
+      expect(ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-growth-usage' })
+        .some(row => row.automationId === firstJobs[0]!.id)).toBe(true)
+
+      // A provider retry must not replay the ordinary Agent turn or duplicate
+      // the authoritative revision and its durable Growth job.
+      const requestCount = llm.requests.length
+      const replyCount = transport.sent.length
+      await transport.message(failure)
+      for (let pass = 0; pass < 2; pass += 1) await runInboundPass(ctx)
+      expect(llm.requests).toHaveLength(requestCount)
+      expect(transport.sent).toHaveLength(replyCount)
+      expect(jobs()).toEqual(firstJobs)
+
+      // A distinct, same-valued owner message still gets an Agent response,
+      // but the canonical v1 operation must retain its original feedback Inbox.
+      await sendCorrection({ ...larkMessage('om-natural-same-status', failure.content, originalReply!.messageId),
+        createTime: startedAt + 3_000 })
+      expect(canonical()).toMatchObject({ objective: { status: 'not-achieved' } })
+      expect(ctx.assistantDelivery.inspectOwnerForegroundLearningTask({
+        authorityId: routeId, principalId: OWNER, workspace, agentPreset: PRESET,
+        outcomeId: canonical()!.triggerOutcomeId,
+      })).toMatchObject({ ownerRevision: { version: 1, action: 'initial' },
+        feedback: { inboxId: failureInbox!.id, text: failure.content } })
+      expect(jobs()).toEqual(firstJobs)
+
+      await sendCorrection({ ...larkMessage('om-natural-correct', '问题解决了', originalReply!.messageId),
+        createTime: startedAt + 4_000 })
+      await vi.waitFor(() => expect(usage.health().counts).toEqual({ failed: 1, queued: 1 }))
+      expect(canonical()).toMatchObject({ objective: { status: 'achieved' }, projection: { disposition: 'upsert' } })
+      expect(ctx.assistantDelivery.inspectOwnerForegroundLearningTask({
+        authorityId: routeId, principalId: OWNER, workspace, agentPreset: PRESET,
+        outcomeId: canonical()!.triggerOutcomeId,
+      })).toMatchObject({ ownerRevision: { version: 2, action: 'correct' } })
+      const correctedJobs = jobs()
+      expect(correctedJobs).toHaveLength(2)
+      expect(correctedJobs.find(job => job.id === firstJobs[0]!.id)).toMatchObject({
+        state: 'failed', reason: 'queued-source-or-schedule-unavailable', intent_json: firstJobs[0]!.intent_json,
+      })
+      const correctedJob = correctedJobs.find(job => job.state === 'queued')
+      expect(correctedJob).toBeDefined()
+      expect(JSON.parse(correctedJob!.intent_json)).toMatchObject({
+        source: { canonical: { projection: canonical()!.projection },
+          feedback: { text: '问题解决了', truncated: false } },
+      })
+      expect(JSON.parse(firstJobs[0]!.intent_json).source.canonical.projection)
+        .not.toEqual(canonical()!.projection)
+
+      await sendCorrection({ ...larkMessage('om-natural-withdraw', '撤回刚才的任务反馈', originalReply!.messageId),
+        createTime: startedAt + 6_000 })
+      await vi.waitFor(() => expect(usage.health().counts).toEqual({ failed: 2 }))
+      expect(canonical()).toMatchObject({ objective: { status: 'unknown' }, projection: { disposition: 'retract' } })
+      expect(ctx.assistantDelivery.inspectOwnerForegroundLearningTask({
+        authorityId: routeId, principalId: OWNER, workspace, agentPreset: PRESET,
+        outcomeId: canonical()!.triggerOutcomeId,
+      })).toMatchObject({ ownerRevision: { version: 3, action: 'withdraw' } })
+      expect(jobs()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: firstJobs[0]!.id, state: 'failed',
+          reason: 'queued-source-or-schedule-unavailable', intent_json: firstJobs[0]!.intent_json }),
+        expect.objectContaining({ id: correctedJob!.id, state: 'failed',
+          reason: 'queued-source-or-schedule-unavailable', intent_json: correctedJob!.intent_json }),
+      ]))
+      expect(jobs().filter(job => job.state === 'queued')).toHaveLength(0)
+      await new Promise(resolve => setTimeout(resolve, 1_100))
+      for (let pass = 0; pass < 3; pass += 1) {
+        await ctx.assistantAutomations.tick()
+        await ctx.assistantAutomations.whenIdle()
+      }
+      expect(review).not.toHaveBeenCalled()
+    } finally { await usage.close() }
   })
 
   test('runs a tool-bearing Delivery turn on Codex CLI without route capability metadata', async () => {

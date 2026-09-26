@@ -21,6 +21,19 @@ export type ObjectiveRevisionCommand = Readonly<{
 export type ObjectiveCommand = Extract<ParsedFeedbackCommand, { kind: 'objective' | 'objective-revision' | 'objective-status' }>
 export type ObjectiveCommandResult = 'conflict' | 'invalid-target' | 'recorded' | 'unavailable' | 'unknown'
   | Readonly<{ version: number; objectiveStatus: ObjectiveFeedbackStatus | 'unknown' }>
+
+/** Only whole, direct owner assertions are objective evidence. The reason remains untrusted text. */
+export function parseNaturalObjectiveFeedback(text: string): ObjectiveFeedbackStatus | 'withdraw' | undefined {
+  const value = text.trim()
+  const unquoted = value.replace(/“[^”]*”|"[^"]*"|'[^']*'|`[^`]*`/gsu, '')
+  if (/^(?:撤回刚才的任务反馈|撤回我刚才的任务反馈)[。.!！]?$/u.test(value)) return 'withdraw'
+  if (/^(?:问题解决了|已经解决了|现在解决了)[。.!！]?$/u.test(value)) return 'achieved'
+  if (/^(?:还是不行|还没解决|问题还没解决)(?:[，,。\n]\s*[\s\S]+)?[。.!！]?$/u.test(value)
+    && !/[?？]\s*$/u.test(value)
+    && !/[，,。\n]\s*(?:如果|假如|假设|可能|也许|是否|不确定|大概|其实(?:已经|现在)?解决了)/u.test(value)
+    && !/(?:解决了|成功了|完成了|可以了)/u.test(unquoted)) return 'not-achieved'
+  return undefined
+}
 export function objectiveStateMessage(state: Readonly<{ version: number; objectiveStatus: string }>): string {
   return `当前任务反馈：${state.objectiveStatus}，版本 ${state.version}。\n继续回复原任务结果：\n/feedback correct ${state.version} ${state.objectiveStatus} not-achieved\n/feedback withdraw ${state.version} ${state.objectiveStatus}\n/feedback status`
 }

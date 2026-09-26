@@ -660,7 +660,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     outcomeId: string
     principalRecordId: string
     principalVersion: number
-  }): Readonly<{ outcomeId: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objectiveStatus: string }> | undefined {
+  }): Readonly<{ outcomeId: string; version: number; action: 'initial' | 'correct' | 'withdraw'; objectiveStatus: string; operationId?: string }> | undefined {
     this.assertActive()
     const scope = exactEvaluationHostScope(input.scope)
     return this.store.inspectTaskOwnerRevision(scope, hostOutcomeId(input.outcomeId),

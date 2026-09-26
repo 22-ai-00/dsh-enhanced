@@ -175,6 +175,10 @@ interface DshDeliveryRuntimeOptions {
     envelope: Readonly<InboundEnvelope>,
     objectiveStatus: ObjectiveCommand | import('./feedback-command.js').ObjectiveFeedbackStatus,
   ): Promise<ObjectiveCommandResult>
+  dispatchNaturalObjectiveFeedback(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): Promise<void>
   dispatchWorkflowCommand(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
@@ -3831,6 +3835,13 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     }
     if (markDispatching === undefined) {
       return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+    }
+    // Persist owner feedback before model/session preparation, which may be
+    // unavailable independently. The ordinary Inbox still proceeds to Agent.
+    try {
+      await this.options.dispatchNaturalObjectiveFeedback(binding, envelope)
+    } catch {
+      this.ctx.logger.warn('assistant-delivery: natural objective intent could not be prepared; continuing ordinary Agent turn')
     }
     const agents = this.ctx.get('agents')
     const sessions = this.ctx.get('sessions')
