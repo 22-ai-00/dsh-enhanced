@@ -444,20 +444,43 @@ describe('side-effect-free active Lark owner snapshot', () => {
     expect(inspectActiveLarkOwnerBindingsLocally(larkQuery(inactiveOwner.path)).bindings).toEqual([])
   })
 
-  test('fails closed for missing, corrupt, non-current-schema, symlinked, hardlinked, and non-private storage', async () => {
+  test('reads a pre-upgrade schema 23 owner snapshot without migrating its database', async () => {
+    const fixture = await larkSeeded()
+    fixture.store.close()
+    const database = new DatabaseSync(fixture.path)
+    database.exec('DROP TABLE delivery_natural_objective_intents; PRAGMA user_version=23;')
+    database.close()
+    const before = await fingerprint(fixture.path)
+    const snapshot = inspectActiveLarkOwnerBindingsLocally(larkQuery(fixture.path))
+    expect(snapshot.schemaVersion).toBe(23)
+    expect(snapshot.bindings).toHaveLength(1)
+    expect(snapshot.bindings[0]!.id).toBe(fixture.binding.id)
+    expect(await fingerprint(fixture.path)).toEqual(before)
+    const unchanged = new DatabaseSync(fixture.path, { readOnly: true })
+    try {
+      expect(unchanged.prepare('PRAGMA user_version').get()).toEqual({ user_version: 23 })
+      expect(unchanged.prepare("SELECT name FROM sqlite_schema WHERE name='delivery_natural_objective_intents'").get()).toBeUndefined()
+    } finally { unchanged.close() }
+  })
+
+  test('fails closed for missing, corrupt, unsupported-schema, symlinked, hardlinked, and non-private storage', async () => {
     const parent = await realpath(await mkdtemp(join(tmpdir(), 'delivery-lark-operator-invalid-'))); roots.push(parent)
     expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally(larkQuery(join(parent, 'missing.sqlite'))), 'database-missing')
     expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally({ ...larkQuery('/relative'), databasePath: 'relative.sqlite' }), 'invalid-path')
     const corrupt = join(parent, 'corrupt.sqlite'); await writeFile(corrupt, 'not sqlite', { mode: 0o600 })
     expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally(larkQuery(corrupt)), 'database-corrupt')
 
-    for (const version of [deliverySchemaVersion - 1, deliverySchemaVersion + 1]) {
+    for (const version of [22, deliverySchemaVersion + 1]) {
       const path = join(parent, `schema-${version}.sqlite`); const schema = new DatabaseSync(path)
       schema.exec(`PRAGMA user_version=${version}`); schema.close(); await chmod(path, 0o600)
       const before = await fingerprint(path)
       expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally(larkQuery(path)), 'schema-unsupported')
       expect(await fingerprint(path)).toEqual(before)
     }
+    const emptyLegacy = join(parent, 'empty-schema-23.sqlite')
+    const emptyDatabase = new DatabaseSync(emptyLegacy)
+    emptyDatabase.exec('PRAGMA user_version=23'); emptyDatabase.close(); await chmod(emptyLegacy, 0o600)
+    expectLarkCode(() => inspectActiveLarkOwnerBindingsLocally(larkQuery(emptyLegacy)), 'database-corrupt')
 
     const fixture = await larkSeeded(); fixture.store.close()
     const linked = join(fixture.root, 'linked.sqlite'); await symlink(fixture.path, linked)

@@ -760,6 +760,7 @@ interface LifecycleRunOptions {
   supervisedMockFailure?: 'active' | 'host-exit' | 'post-swap' | 'preview'
   supervisedProofDrift?: boolean
   supervisedUnmanagedAutomationDrift?: boolean
+  deliverySnapshotSchema?: 23 | 24
 }
 
 async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
@@ -871,7 +872,7 @@ async function testSupervisedOperator(action, nonce, direct, context) {
   return { effectiveConfigDigest: digest, semanticDigest: digest,
     databasePaths: { delivery: 'delivery.sqlite', automations: 'automations.sqlite', recovery: 'recovery.sqlite' },
     ownerBindingDigest: ownerDigest,
-    delivery: { protocol: 'assistant-delivery/active-lark-owner-bindings-snapshot/v1', schemaVersion: 23, database,
+    delivery: { protocol: 'assistant-delivery/active-lark-owner-bindings-snapshot/v1', schemaVersion: ${options.deliverySnapshotSchema ?? 24}, database,
       snapshotDigest: digest, storageDigest: digest, bindings: [{ id: 'binding-1' }] },
     recovery, automations: { protocol: 'assistant-automations-operator-snapshot/v1', schemaVersion: 15, database,
       snapshotDigest: digest, inventoryDigest: digest, storageDigest: digest, inFlightCount: raw ? 1 : 0,
@@ -3565,8 +3566,8 @@ describe('one-click installers', () => {
     await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
-  test('supervised service upgrade completes preview, swap, active acceptance, and cleanup', async () => {
-    const f = await lifecycleFixture({ effectiveScenario: 'supervised', systemd: { units: [{ profile: 'web', active: true }] } })
+  test.each([23, 24] as const)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
+    const f = await lifecycleFixture({ effectiveScenario: 'supervised', deliverySnapshotSchema, systemd: { units: [{ profile: 'web', active: true }] } })
     const result = runServiceLifecycle(
       ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' },
     )

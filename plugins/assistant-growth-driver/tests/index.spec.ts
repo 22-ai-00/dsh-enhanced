@@ -391,7 +391,7 @@ async function runWake(service: AssistantGrowthDriverService): Promise<void> {
 }
 
 describe('dsh-enhanced-assistant-growth-driver', () => {
-  it('automatically reviews actual task feedback through native scheduling and the source model', async () => {
+  it.each([false, true])('automatically reviews task feedback through native scheduling and the source model; owner prose=%s', async ownerProse => {
     const adapter = new ScriptedAdapter([])
     const h = await mount({ adapter, provider: 'conversation-provider' })
     h.modelSelection.mockImplementation(() => { throw new Error('current conversation was switched; do not read it') })
@@ -401,13 +401,18 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     const producer = new EvaluationStore({ path: join(h.root, 'evaluation.sqlite') })
     const task = producer.append({ scope: { workspace: h.root, preset: PRESET }, situation: 'foreground:real-task',
       executionStatus: 'succeeded', objectiveStatus: 'not-achieved', deliveryStatus: 'delivered', trust: 'trusted',
-      source: { kind: 'evaluator', id: 'assistant-verifier' }, evaluator: { id: 'assistant-verifier', version: '1' },
-      evidence: [{ kind: 'foreground-turn', ref: 'real-task' }, { kind: 'acceptance-contract', ref: 'contract' }, { kind: 'verification-receipt', ref: 'receipt' }],
-      metrics: {}, occurredAt: Date.now(), idempotencyKey: 'real-task-result' })
+      source: ownerProse ? { kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' } : { kind: 'evaluator', id: 'assistant-verifier' },
+      evaluator: ownerProse ? { id: 'assistant-delivery-owner-feedback', version: '2' } : { id: 'assistant-verifier', version: '1' },
+      evidence: ownerProse ? [{ kind: 'foreground-turn', ref: 'real-task' }, { kind: 'delivery-outbox', ref: 'original-reply' }]
+        : [{ kind: 'foreground-turn', ref: 'real-task' }, { kind: 'acceptance-contract', ref: 'contract' }, { kind: 'verification-receipt', ref: 'receipt' }],
+      metrics: {}, occurredAt: Date.now(), idempotencyKey: 'real-task-result' },
+    ownerProse ? { principalRecordId: RECORD_ID, principalVersion: 1, operationId: 'feedback-operation', action: 'initial' } : undefined)
     producer.close()
     h.learningSource.mockImplementation(() => ({ protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: buildReceipt(h.root, 1),
       canonical: evaluation.getTrustedTaskLearningProjection({ scope: evaluation.canonicalHostScope({ workspace: h.root, preset: PRESET }), outcomeId: task.id }),
-      judgement: 'independent-verifier', source: { sessionId: 'real-session', inboxId: 'real-task', objective: 'The actual user report has a missing total.',
+      judgement: ownerProse ? 'owner-feedback' : 'independent-verifier',
+      ...(ownerProse ? { feedback: { inboxId: 'private-feedback-inbox', text: '还是不行，保存时报错。', truncated: false } } : {}),
+      source: { sessionId: 'real-session', inboxId: 'real-task', objective: 'The actual user report has a missing total.',
         truncated: false, quiescent: true, modelSelectionState: 'frozen', modelSelection: { provider: 'conversation-provider', model: 'original-task-model' } } }))
     const prompts: string[] = []
     h.ctx.on('llm/stream', async function* (options, next) { prompts.push(JSON.stringify(options.messages)); yield* next() })
@@ -421,6 +426,8 @@ describe('dsh-enhanced-assistant-growth-driver', () => {
     expect(h.modelSelection).not.toHaveBeenCalled()
     expect(prompts.join('\n')).toContain('The actual user report has a missing total.')
     expect(prompts.join('\n')).toContain('untrusted task data')
+    if (ownerProse) expect(prompts.join('\n')).toContain('还是不行，保存时报错。')
+    expect(prompts.join('\n')).not.toContain('private-feedback-inbox')
     expect(prompts.join('\n')).not.toContain(RECORD_ID)
   })
   it('inherits the owner conversation model, freezes it for the wake, and rereads it next wake', async () => {

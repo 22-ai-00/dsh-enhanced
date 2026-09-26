@@ -71,6 +71,8 @@ Web owner 适配通过内存 `EntryTree` 将宿主实际 Session Controller 包�
 
 Delivery 内置运行时通过同一 schema 19 Session lease 表序列化 active binding 的恢复与绑定前 construction，Session ID 是最终排他键。新会话的持久身份在 binding 写入前就固定，released orphan 不允许换主体接管。生命周期由原生 AgentLoop 驱动；lease 不负责调度，过期的 dispatched/unknown 也不授予恢复权限。Goals wake 已接入同一 gate，与前台共享排他，再按既有 Automations 的持久任务意图派发。
 
+Delivery schema 24 增加自然任务反馈日志：同一 owner 对原普通前台结果的明确回复，在保持正常 Agent 续答的同时生成初评、更正或撤回。Host 从持久原文与回复目标建立身份，冻结 canonical 版本前置条件；恢复只补记反馈，不能重派模型请求。Evaluation 的当前 owner revision 提供操作身份，Delivery 据此附上对应的有界纠正原文，Growth 将其视为不可信任务材料。
+
 Growth 的可选 `usageLearning` 使用 Evaluation canonical feed 与 Delivery owner 来源校验，把真实前台结果转成持久复盘意图；Delivery schema 23 的普通任务执行回执独立于验收契约，内置外部渠道运行时捕获实际模型并在资源释放后结束记录，已认证 owner 对具体回复的反馈即可进入 canonical 结果；它只保存消费游标和作业快照，不复制结果账本。Evaluation writer fence 内同步提交游标与意图，原生 Automations 拥有每分钟恢复扫描、一次性作业、执行准入和预算。模型在来源任务实际请求时固定并持久保存，后台恢复不重新读取用户当前模型选择。queued 可恢复，派发后的 unknown 不自动重放；纠正、撤回及 owner 换代在模型/工具边界阻止旧来源继续使用。启用源码轨时，可信失败在 Control Plane schema 16 自动形成带 owner/canonical 来源的私有 gap，自动复盘仅看到本次 gap；源码检查和计划提交持续重验来源，最终写入处于 Evaluation writer fence 内。有限源码审批、发布/独立审查和精确制品采用已接续同一原生作业。Control Plane schema 20 另在目标 Host 通过 Delivery 前台生命周期记录部署归因：共享认证 observer 的 Cordis 采样器，对照已应用 readiness 的签名观测，保存任务开始/完成时的精确运行实例；不改变 Delivery 学习来源摘要。schema 21 的可选 taskObservations 由原生 Automations 按当前 owner 反馈/独立验证结果形成有限任务批次，外部签名器只读持久批次并执行次数/期限/部署授权；最终 Evaluation writer fence 包裹 watch 与批次落账，回滚复用既有物理恢复链。任务组关联不证明工具调用或结果因果；目标 Host 自重启仍需外部协调器继续恢复。
 
 

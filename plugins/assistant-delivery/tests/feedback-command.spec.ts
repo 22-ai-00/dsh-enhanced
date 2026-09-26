@@ -5,10 +5,23 @@ import {
   isOneShotPreferenceRequest,
   parseNaturalPreferenceCorrection,
   parseFeedbackCommand,
+  parseNaturalObjectiveFeedback,
 } from '../src/feedback-command.ts'
 import type { ConversationBinding, InboundEnvelope } from '../src/types.ts'
 
 describe('Delivery feedback command grammar', () => {
+  test('accepts bounded direct natural objective assertions but abstains on questions, hypotheticals and contradictions', () => {
+    expect(parseNaturalObjectiveFeedback('问题解决了。')).toBe('achieved')
+    expect(parseNaturalObjectiveFeedback('还是不行，保存报错')).toBe('not-achieved')
+    expect(parseNaturalObjectiveFeedback(`还是不行，报错：${'x'.repeat(5000)}`)).toBe('not-achieved')
+    expect(parseNaturalObjectiveFeedback('还是不行，日志写着“保存成功了”，但文件仍报错')).toBe('not-achieved')
+    expect(parseNaturalObjectiveFeedback('撤回刚才的任务反馈')).toBe('withdraw')
+    for (const text of ['问题解决了吗？', '他说“问题解决了”', '如果还是不行，怎么办？',
+      '还是不行，但现在解决了', '还是不行，虽然现在已经解决了',
+      '还是不行，后来保存成功了', '还是不行，如果失败再说', '撤回刚才的任务反馈吗？']) {
+      expect(parseNaturalObjectiveFeedback(text)).toBeUndefined()
+    }
+  })
   test.each([
     [' helpful ', [{ preferenceKey: 'feedback.response', candidateValue: 'helpful' }]],
     ['too-long', [

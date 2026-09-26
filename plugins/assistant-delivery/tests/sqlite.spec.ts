@@ -117,6 +117,7 @@ describe('delivery SQLite boundary', () => {
       'delivery_inbox_admission_clock', 'delivery_inbox_admissions',
       'delivery_task_acceptance_executions', 'delivery_foreground_executions', 'delivery_session_leases',
       'delivery_goal_outcome_targets',
+      'delivery_natural_objective_intents',
     ]))
     const modelColumns = (database.prepare('PRAGMA table_info(conversation_model_selections)').all() as { name: string }[])
       .map(row => row.name)
@@ -140,6 +141,25 @@ describe('delivery SQLite boundary', () => {
     database.close()
     expect((await stat(join(root, 'nested'))).mode & 0o777).toBe(0o700)
     expect((await stat(path)).mode & 0o777).toBe(0o600)
+  })
+
+  test('migrates v23 to an empty natural owner intent journal without inferring old text', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v23-natural-journal-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const previous = openDeliveryDatabase(path)
+    previous.exec('DROP TABLE delivery_natural_objective_intents; PRAGMA user_version = 23;')
+    previous.close()
+    const migrated = openDeliveryDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 24 })
+    expect(migrated.prepare('SELECT COUNT(*) AS count FROM delivery_natural_objective_intents').get())
+      .toEqual({ count: 0 })
+    expect((migrated.prepare('PRAGMA table_info(delivery_natural_objective_intents)').all() as Array<{ name: string }>)
+      .map(row => row.name)).toEqual(expect.arrayContaining([
+        'inbox_id', 'envelope_hash', 'source_outbox_id', 'principal_version',
+        'admission_epoch', 'admission_sequence', 'intent_status', 'command_json',
+      ]))
+    migrated.close()
   })
 
   test('migrates schema v19 with a strict goal outcome target sidecar', async () => {

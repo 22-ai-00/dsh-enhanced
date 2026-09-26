@@ -171,7 +171,7 @@ usageLearning:
 
 `scanBudgetId/scanBudgetAmount` 是启用时的必填配置；对应 Policy budget 的 metric 为 `automation-runs`，扫描建议用 `subject` scope（每个 owner scope 的 scan automation id 稳定）。每分钟扫描即使队列为空也需要预算；例如每天最多 1,440 次扫描可配置 `limit: 1440, periodMs: 86400000, scope: subject`。模型复盘继续使用顶层 `workspace/global` 聚合预算。Policy 账本按 scope、metric 和周期计量，仅换 budget id 不会分开额度；扫描用 `subject`、复盘用 `workspace/global` 可以避免扫描占用模型额度。扫描预算耗尽暂停跨进程发现，同进程通知仍可登记候选，但 review 仍须通过自己的预算；不要开启 `allowUnbudgetedExecution` 绕过配置。升级已启用配置须补齐扫描预算，旧排队作业因配置摘要变化停止，不自动重放。
 
-同进程 Evaluation 变化即时扫描，原生每分钟 scan 负责重启及其他进程写入的恢复；scan 自身不调用模型。只处理精确 owner、已结束且 quiescent、未截断的前台可信结果（独立 Verifier 或已认证 owner 反馈），内置 Delivery 普通对话可在回复具体消息的 `/feedback not-achieved` 后触发，无需预先配置任务验收 profile；单纯模型结束不会生成可信结果。排除 Automation/后台成长自己的结果，避免递归触发。缺模型快照或多请求模型不一致且没有固定覆盖时不发起作业。相同 canonical 修订只接纳一次；纠正/撤回使旧排队作业失效，运行中的作业在模型/工具边界重查来源。原始记录和评价仍由 Evaluation 持有。
+同进程 Evaluation 变化即时扫描，原生每分钟 scan 负责重启及其他进程写入的恢复；scan 自身不调用模型。只处理精确 owner、已结束且 quiescent、未截断的前台可信结果（独立 Verifier 或已认证 owner 反馈）。内置 Delivery 普通对话可在回复原结果“还是不行，保存报错”等明确自然反馈后触发，也保留 `/feedback not-achieved`，无需预先配置任务验收 profile；原文继续进入普通 Agent 对话。Delivery 用当前 canonical 修订的操作身份核对自然反馈原文，复盘最多收到 4096 字的纠正原因及截断标志，作为不可信任务材料；历史记录没有该证据时不猜测原因。单纯模型结束不会生成可信结果。排除 Automation/后台成长自己的结果，避免递归触发。缺模型快照或多请求模型不一致且没有固定覆盖时不发起作业。相同 canonical 修订只接纳一次；纠正/撤回使旧排队作业失效，运行中的作业在模型/工具边界重查来源。原始记录和评价仍由 Evaluation 持有。
 
 `usageHealth()` 返回连接、扫描错误与各状态数量，不返回任务正文。queued 可在重启后恢复；running 中断转 unknown，不自动重跑。配置、owner 身份/route 或来源变化会阻止旧作业继续。停用 `usageLearning` 会卸载执行器并中止本代工作；持久作业不会被清除。它目前自动驱动有界复盘和候选生成，尚不创建任意修复 Goal；完成复盘不代表候选已采用或带来收益。
 

@@ -207,7 +207,7 @@ export interface ActiveLarkOwnerBinding extends Readonly<ConversationBinding> {
 
 export interface ActiveLarkOwnerBindingsSnapshot {
   readonly protocol: typeof activeLarkOwnerBindingsSnapshotProtocol
-  readonly schemaVersion: typeof deliverySchemaVersion
+  readonly schemaVersion: 23 | typeof deliverySchemaVersion
   readonly scope: Readonly<Omit<ActiveLarkOwnerBindingsQuery, 'databasePath'>>
   readonly database: DeliveryOperatorFileIdentity
   readonly sidecars: Readonly<{
@@ -785,7 +785,12 @@ export function inspectActiveLarkOwnerBindingsLocally(input: ActiveLarkOwnerBind
     const queryOnly = database.prepare('PRAGMA query_only').get() as { query_only?: unknown }
     if (queryOnly.query_only !== 1) operatorFail('database-corrupt', 'read-only guard was not enabled')
     const version = (database.prepare('PRAGMA user_version').get() as { user_version?: unknown }).user_version
-    if (version !== deliverySchemaVersion) operatorFail('schema-unsupported', `expected schema ${deliverySchemaVersion}`)
+    // A staged upgrade reads owner identity before starting the new Host.
+    // v24 only adds the natural-feedback journal, so this read-only snapshot
+    // can inspect v23's identical owner tables without migrating the source.
+    if (version !== 23 && version !== deliverySchemaVersion) {
+      operatorFail('schema-unsupported', `expected schema 23 or ${deliverySchemaVersion}`)
+    }
     const quick = database.prepare('PRAGMA quick_check').all() as unknown as Array<{ quick_check?: unknown }>
     if (quick.length !== 1 || quick[0]?.quick_check !== 'ok') operatorFail('database-corrupt', 'SQLite quick_check failed')
     if (database.prepare('PRAGMA foreign_key_check').all().length !== 0) operatorFail('database-corrupt', 'foreign-key integrity check failed')
@@ -826,7 +831,7 @@ export function inspectActiveLarkOwnerBindingsLocally(input: ActiveLarkOwnerBind
       protocol: 'assistant-delivery/operator-storage/v1', database: source.digest, wal: wal?.digest ?? null,
     }))
     const unsigned: Omit<ActiveLarkOwnerBindingsSnapshot, 'snapshotDigest'> = operatorFreeze({
-      protocol: activeLarkOwnerBindingsSnapshotProtocol, schemaVersion: deliverySchemaVersion, scope,
+      protocol: activeLarkOwnerBindingsSnapshotProtocol, schemaVersion: version, scope,
       database: databaseIdentity, sidecars, storageDigest, bindings,
     })
     result = operatorFreeze({ ...unsigned, snapshotDigest: operatorSha256(operatorCanonicalJson(unsigned)) })

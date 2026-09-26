@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -289,6 +290,110 @@ test('foreground corrections and withdrawal advance one trace, preserve other ta
   const latest = fixture.store.listPendingWorkflowTraceRevisions(100, 1000)
   expect(latest.at(-1)?.revision).toMatchObject({ subjectRef: initial.revision.subjectRef, disposition: 'upsert', version: 4 })
   expect(fixture.store.getWorkflowAutomationTemplate(initial.template)?.status).toBe('active')
+  fixture.store.close()
+})
+
+test('natural intent freezes target and CAS, survives restart, and rejects older provider feedback after a repeated assertion', async () => {
+  const fixture = await createFixture()
+  const path = join(roots.at(-1)!, 'delivery.sqlite')
+  const source = recordCompletedAgentReply({ ...fixture, eventId: 'natural-source',
+    text: 'prepare daily workspace status summary', providerMessageId: 'natural-result' })
+  const natural = (eventId: string, text: string, occurredAt: number) => {
+    const inbox = fixture.store.acceptInbound({ channel: fixture.principal.channel, account: fixture.principal.account,
+      eventId, occurredAt, principal: fixture.principal, conversation: fixture.conversation,
+      kind: 'text', text, metadata: { replyToProviderMessageId: 'natural-result' } }).record
+    claimInbox(fixture.store, inbox.id, fixture.binding.id)
+    return inbox.id
+  }
+  const first = natural('natural-first', '问题解决了', 2_000)
+  const prepared = fixture.store.prepareNaturalObjectiveIntent({ binding: fixture.binding, feedbackInboxId: first,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, selection: 'achieved' })
+  expect(prepared).toMatchObject({ status: 'awaiting-evaluation' })
+  expect(prepared.command).toBeUndefined()
+  expect(fixture.store.freezeNaturalObjectiveIntent(first, undefined)).toMatchObject({ status: 'frozen',
+    command: { kind: 'objective', objectiveStatus: 'achieved' } })
+  fixture.store.close()
+  const store = new DeliveryStore({ path, now: () => 1_000 })
+  fixture.store = store
+  expect(store.getNaturalObjectiveIntent(first)).toMatchObject({ status: 'frozen', sourceOutboxId: source.outboxId })
+  expect(store.commitVerifiedWorkflowTraceFeedback({ binding: fixture.binding, feedbackInboxId: first,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, objectiveStatus: 'achieved' }))
+    .toMatchObject({ ownerFeedbackState: { version: 1, objectiveStatus: 'achieved' } })
+  store.settleNaturalObjectiveIntent(first, 'projected', { version: 1, objectiveStatus: 'achieved' })
+  finishSourceInbox(store, first)
+
+  const repeated = natural('natural-repeated', '问题解决了', 4_000)
+  store.prepareNaturalObjectiveIntent({ binding: fixture.binding, feedbackInboxId: repeated,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, selection: 'achieved' })
+  expect(store.freezeNaturalObjectiveIntent(repeated, { version: 1, objectiveStatus: 'achieved' }))
+    .toMatchObject({ status: 'projected' })
+  finishSourceInbox(store, repeated)
+
+  const delayed = natural('natural-delayed', '还是不行，保存报错', 3_000)
+  store.prepareNaturalObjectiveIntent({ binding: fixture.binding, feedbackInboxId: delayed,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, selection: 'not-achieved' })
+  expect(store.freezeNaturalObjectiveIntent(delayed, { version: 1, objectiveStatus: 'achieved' }))
+    .toMatchObject({ status: 'conflict' })
+  expect(store.verifiedWorkflowObjectiveState(source.outboxId)).toEqual({ version: 1, objectiveStatus: 'achieved' })
+  store.close()
+})
+
+test('natural owner feedback cannot claim a forged result target or a linked principal', async () => {
+  const fixture = await createFixture()
+  const source = recordCompletedAgentReply({ ...fixture, eventId: 'natural-authority-source',
+    text: 'prepare daily workspace status summary', providerMessageId: 'natural-authority-result' })
+  const forged = fixture.store.acceptInbound({ channel: fixture.principal.channel, account: fixture.principal.account,
+    eventId: 'forged-natural-target', occurredAt: 2_000, principal: fixture.principal,
+    conversation: fixture.conversation, kind: 'text', text: '问题解决了',
+    metadata: { replyToProviderMessageId: 'unrelated-provider-message' } }).record
+  claimInbox(fixture.store, forged.id, fixture.binding.id)
+  expect(() => fixture.store.prepareNaturalObjectiveIntent({ binding: fixture.binding, feedbackInboxId: forged.id,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, selection: 'achieved' }))
+    .toThrow(/completed owner turn/)
+  finishSourceInbox(fixture.store, forged.id)
+
+  const linked = { ...fixture.principal, user: 'linked@example.com' }
+  const pairing = fixture.store.issuePairing(linked, { ttlMs: 10_000, maxAttempts: 1 })
+  fixture.store.confirmPairing({ challengeId: pairing.challenge.id, principal: linked, code: pairing.code })
+  const linkedConversation = { ...fixture.conversation, chat: 'oc_linked' }
+  const linkedBinding = fixture.store.createBinding({ conversation: linkedConversation, principal: linked,
+    workspace: '/work/owner', agentPreset: 'primary', sessionId: 'linked-session', policyRef: 'owner-dm' })
+  const linkedInbox = fixture.store.acceptInbound({ channel: linked.channel, account: linked.account,
+    eventId: 'linked-natural-feedback', occurredAt: 2_001, principal: linked,
+    conversation: linkedConversation, kind: 'text', text: '问题解决了',
+    metadata: { replyToProviderMessageId: 'natural-authority-result' } }).record
+  claimInbox(fixture.store, linkedInbox.id, linkedBinding.id)
+  expect(() => fixture.store.prepareNaturalObjectiveIntent({ binding: linkedBinding, feedbackInboxId: linkedInbox.id,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, selection: 'achieved' }))
+    .toThrow(/completed owner turn/)
+  expect(fixture.store.getNaturalObjectiveIntent(forged.id)).toBeUndefined()
+  expect(fixture.store.getNaturalObjectiveIntent(linkedInbox.id)).toBeUndefined()
+  fixture.store.close()
+})
+
+test('foreground target proof rejects persisted control-format and picker or approval payloads', async () => {
+  const fixture = await createFixture()
+  const source = recordCompletedAgentReply({ ...fixture, eventId: 'control-source',
+    text: 'prepare daily workspace status summary', providerMessageId: 'control-result' })
+  const path = join(roots.at(-1)!, 'delivery.sqlite')
+  const database = new DatabaseSync(path)
+  const original = fixture.store.getOutbox(source.outboxId)!.intent
+  expect(fixture.store.isVerifiedForegroundObjectiveTarget(fixture.binding, source.inboxId, source.outboxId)).toBe(true)
+  for (const [name, changes] of [
+    ['model-picker format', { format: 'model-picker' }],
+    ['permission-picker format', { format: 'permission-picker' }],
+    ['approval format', { format: 'approval' }],
+    ['model picker payload', { modelPicker: { operationId: 'control-model' } }],
+    ['permission picker payload', { permissionPicker: { operationId: 'control-permission' } }],
+    ['approval payload', { approval: { operationId: 'control-approval' } }],
+  ] as const) {
+    const intent = JSON.stringify({ ...original, ...changes })
+    database.prepare('UPDATE outbox_messages SET intent_json = ?, intent_hash = ? WHERE id = ?')
+      .run(intent, createHash('sha256').update(intent).digest('hex'), source.outboxId)
+    expect(fixture.store.isVerifiedForegroundObjectiveTarget(fixture.binding, source.inboxId, source.outboxId), name)
+      .toBe(false)
+  }
+  database.close()
   fixture.store.close()
 })
 

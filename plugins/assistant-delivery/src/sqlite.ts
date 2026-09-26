@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 23
+export const deliverySchemaVersion = 24
 
 const goalOutcomeTargetSchema = `
   CREATE TABLE IF NOT EXISTS delivery_goal_outcome_targets (
@@ -136,6 +136,35 @@ const ownerObjectiveRevisionSchema = `
     result_json TEXT NOT NULL
   ) STRICT;
   CREATE INDEX delivery_owner_objective_current ON delivery_owner_objective_commands(source_outbox_id, version);
+`
+
+/** Frozen owner wording/target and CAS state, independent of Agent dispatch replay. */
+const naturalObjectiveIntentSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_natural_objective_intents (
+    inbox_id TEXT PRIMARY KEY REFERENCES inbox_messages(id),
+    envelope_hash TEXT NOT NULL,
+    source_inbox_id TEXT NOT NULL REFERENCES inbox_messages(id),
+    source_outbox_id TEXT NOT NULL REFERENCES outbox_messages(id),
+    binding_id TEXT NOT NULL REFERENCES conversation_bindings(id),
+    binding_version INTEGER NOT NULL CHECK(binding_version >= 1),
+    binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+    principal_record_id TEXT NOT NULL REFERENCES delivery_principals(id),
+    principal_version INTEGER NOT NULL CHECK(principal_version >= 1),
+    admission_epoch TEXT NOT NULL,
+    admission_sequence INTEGER NOT NULL CHECK(admission_sequence >= 1),
+    occurred_at INTEGER NOT NULL CHECK(occurred_at >= 0),
+    parser_version INTEGER NOT NULL CHECK(parser_version = 1),
+    intent_status TEXT NOT NULL CHECK(intent_status IN ('awaiting-evaluation', 'frozen', 'projected', 'conflict')),
+    selection TEXT NOT NULL CHECK(selection IN ('achieved', 'not-achieved', 'withdraw')),
+    command_json TEXT CHECK(command_json IS NULL OR json_valid(command_json)),
+    canonical_json TEXT CHECK(canonical_json IS NULL OR json_valid(canonical_json)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS delivery_natural_objective_target_order
+    ON delivery_natural_objective_intents(source_outbox_id, admission_sequence);
+  CREATE INDEX IF NOT EXISTS delivery_natural_objective_pending
+    ON delivery_natural_objective_intents(intent_status, admission_sequence);
 `
 
 
@@ -1141,6 +1170,10 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec(`${foregroundExecutionSchema} PRAGMA user_version = 23;`)
     version = 23
   }
+  if (version === 23) {
+    database.exec(`${naturalObjectiveIntentSchema} PRAGMA user_version = 24;`)
+    version = 24
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1351,13 +1384,14 @@ function migrateObserved(database: DatabaseSync): void {
     ${inboxAdmissionSchema}
 
     ${ownerObjectiveRevisionSchema}
+    ${naturalObjectiveIntentSchema}
     ${taskAcceptanceExecutionSchema}
     ${foregroundExecutionSchema}
     ${sessionLeaseSchema}
     ${goalOutcomeTargetSchema}
 
     ${workflowOwnerAnchoredSchema}
-    PRAGMA user_version = 23;
+    PRAGMA user_version = 24;
   `)
 }
 
