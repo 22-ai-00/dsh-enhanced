@@ -66,7 +66,7 @@ dsh-rsi purge --dry-run # 查看完整删除计划
 dsh-rsi purge --yes     # 先在 ~ 生成 0600 的 tar.gz 备份，再删除 DSH home 与全部受管痕迹
 ```
 
-purge 覆盖 npm cohort 实体副本与本地 checkout 符号链接两种形态。**全量**（默认）删除整个 `$DSH_HOME`（profiles、logs、uninstalled-profiles、home 内锁文件）以及 home 外生命周期事务目录、失败诊断目录、home 锁与 `/tmp` rendezvous 锁；**单 profile**（`--profile <name>`）只删除 `profiles/<name>`、该 profile 的两份 host 日志与 `.failed-<name>-*` 失败诊断目录，共享的生命周期事务目录与两把锁因可能涉及其它 profile 而刻意保留——注意单 profile 的 tar.gz 备份仍覆盖**整个** `$DSH_HOME`。两种范围都会停用并注销 launchd / systemd --user 受管服务，并按各 profile 的 setup journal 权威反查清理 Keychain / Secret Service 中 service 前缀为 `dsh/` 的凭据。选项：`--no-backup`、`--keep-keychain`、`--remove-host`（同时卸载全局 `@deepseek-ai/dsh`，默认保留；仅限全量）。本地 checkout 源码只删符号链接、**绝不删除 checkout**，报告会列出 checkout 路径。发现仍在运行的 profile host 会拒绝执行（不代为 kill）；systemd unit 文件内容不匹配受管标记时 fail-closed 只报告保留。完整命令参考见 `packages/rsi-cli/README.md`。
+purge 覆盖 npm cohort 实体副本与本地 checkout 符号链接两种形态。**全量**（默认）删除整个 `$DSH_HOME`（profiles、logs、uninstalled-profiles、home 内锁文件）以及 home 外生命周期事务目录、失败诊断目录、home 锁与 `/tmp` rendezvous 锁；**单 profile**（`--profile <name>`）只删除 `profiles/<name>`、该 profile 的两份 host 日志与 `.failed-<name>-*` 失败诊断目录，共享的生命周期事务目录与两把锁因可能涉及其它 profile 而刻意保留——注意单 profile 的 tar.gz 备份仍覆盖**整个** `$DSH_HOME`。两种范围都会停用并注销 launchd / systemd --user 受管服务，并按各 profile 的 setup journal 权威反查清理 Keychain / Secret Service 中 service 前缀为 `dsh/` 的凭据。选项：`--no-backup`、`--keep-keychain`、`--remove-host`（同时卸载全局 `@deepseek-ai/dsh`，默认保留；仅限全量）。本地 checkout 源码只删符号链接、**绝不删除 checkout**，报告会列出 checkout 路径。发现仍在运行的 profile host 会拒绝执行（不代为 kill）；systemd unit 文件内容不匹配受管标记时 fail-closed 只报告保留。完整命令参考见 `packages/dsh-rsi-cli/README.md`。
 
 机器上没有 `dsh-rsi` 时（host 已损坏 / 全局命令被删），可直接执行单文件救机脚本；它优先委托 `dsh-rsi`，找不到时使用等价的内联精简实现，参数与 `dsh-rsi purge` 一致：
 
