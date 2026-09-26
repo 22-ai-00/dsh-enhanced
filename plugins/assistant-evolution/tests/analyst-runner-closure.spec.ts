@@ -1,9 +1,10 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
-import { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import {
@@ -13,7 +14,6 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type UserMessage } from '@deepseek-ai/dsh-session'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import {
   acceptanceDigest,
   goalDefinitionSituation,
@@ -261,7 +261,7 @@ function foregroundSession(workspace: string, id: string): { agent: Agent; injec
     id: sessionId,
     options: {},
     session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
     cancel() {},
@@ -293,9 +293,9 @@ async function fixture(dryRunAdapter = false): Promise<Target & {
   // Real loop dependencies: LlmRuntime, SessionStore (sessions), SystemPrompt,
   // ToolRuntime, AgentRegistry. The Evolution plugin registers its tools on
   // this same runtime, so the runner-created Agent dispatches the real tools.
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' } })
   // AgentLoop flush projects through this registry, as in runner.spec.
-  await ctx.plugin(SessionProjectionRegistry)
+
 
   ctx.provide('agentPresets' as never, {
     resolve: async (id?: string) => ({ id: id ?? PRESET }),

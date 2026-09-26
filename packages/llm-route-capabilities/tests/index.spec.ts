@@ -3,6 +3,7 @@ import LlmRuntime, {
   ToolCallId,
   createAssistantMessage,
   createMessage,
+  createSystemMessage,
   createToolResultMessage,
   createUserMessage,
   freezeMessage,
@@ -79,7 +80,6 @@ function attestorFixture(
       maxTokens: 2048,
       ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
     },
-    system: 'system prompt',
     tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }],
   }
   let events: readonly unknown[] = []
@@ -121,7 +121,6 @@ function envelope(
     model: 'default',
     maxTokens: 2048,
     messages,
-    system: 'system prompt',
     tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }],
     sessionId: SESSION_ID,
     signal: new AbortController().signal,
@@ -158,7 +157,6 @@ function compactionEnvelope(
     model: 'default',
     maxTokens: 8192,
     messages: [...prefix, compactionInstruction()],
-    system: 'system prompt',
     tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object' } }],
     sessionId: SESSION_ID,
     purpose: 'compaction',
@@ -252,14 +250,16 @@ describe('LLM route capability registry', () => {
 
 describe('Agent Loop request attestor', () => {
   test('accepts an exact frozen ordinary request for the exact running Agent and Session', () => {
+    const system = createSystemMessage('system prompt', 'agent-loop')
     const message = createMessage({
       role: 'user',
       source: { kind: 'user' },
       content: [{ type: 'text', text: 'hello' }],
     })
-    const fixture = attestorFixture([message])
+    const fixture = attestorFixture([system, message])
 
-    expect(fixture.attestor.claim(envelope([message]), fixture.session)).toBe(true)
+    expect(fixture.attestor.claim(envelope([system, message]), fixture.session)).toBe(true)
+    expect(fixture.attestor.claim(envelope([system, message], { system: 'system prompt' }), fixture.session)).toBe(false)
   })
 
   test('accepts only the forAdapter replayState-removal clone of derived history', () => {
@@ -347,7 +347,8 @@ describe('Agent Loop request attestor', () => {
     expect(fixture.attestor.claim(envelope([projected[0]!, changedProjection]), fixture.session)).toBe(false)
   })
 
-  test('accepts and seals only the exact DSH 0.1.2 same-route compaction envelope', () => {
+  test('accepts and seals only the exact DSH 0.1.5 same-route compaction envelope', () => {
+    const system = createSystemMessage('system prompt', 'agent-loop')
     const first = createMessage({
       role: 'user',
       source: { kind: 'user' },
@@ -357,10 +358,10 @@ describe('Agent Loop request attestor', () => {
       source: { provider: 'traex-agent', model: 'default' },
       content: [{ type: 'text', text: 'recent answer' }],
     })
-    const fixture = attestorFixture([first, tail], { reasoningEffort: 'high' })
+    const fixture = attestorFixture([system, first, tail], { reasoningEffort: 'high' })
     fixture.setEvents(activeCompactionEvents())
     const signal = new AbortController().signal
-    const request = compactionEnvelope([first], { reasoningEffort: 'high' as never, signal })
+    const request = compactionEnvelope([system, first], { signal })
 
     expect(Object.isFrozen(request)).toBe(false)
     expect(fixture.attestor.claimCompaction?.(request, fixture.session)).toBe(true)
@@ -449,7 +450,7 @@ describe('Agent Loop request attestor', () => {
     expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], { system: 'changed' }), fixture.session)).toBe(false)
     expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], { tools: [] }), fixture.session)).toBe(false)
     expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], {
-      reasoningEffort: 'low' as never,
+      reasoningEffort: 'high' as never,
     }), fixture.session)).toBe(false)
     expect(fixture.attestor.claimCompaction?.(compactionEnvelope([first], {
       temperature: 0,

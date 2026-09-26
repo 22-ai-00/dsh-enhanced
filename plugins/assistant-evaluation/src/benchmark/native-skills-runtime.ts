@@ -210,7 +210,7 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
       const agent = ctx.agents.currentInitiator(); benchmarkAssert(agent !== undefined, 'native skill request has no Agent')
       const names = (options.tools ?? []).map(tool => tool.name).sort()
       benchmarkAssert(names.every(name => tools.includes(name)) && (captured ? names.includes('skill_run') && names.includes('skill_status') : !names.some(name => name.startsWith('skill'))), `native skill tool surface drift: ${names.join(',')}`)
-      capabilities.push({ sessionId: String(agent.session.id), toolNames: names, toolsDigest: acceptanceDigest(options.tools ?? []), systemDigest: acceptanceDigest(options.system ?? '') })
+      capabilities.push({ sessionId: String(agent.session.id), toolNames: names, toolsDigest: acceptanceDigest(options.tools ?? []), systemDigest: acceptanceDigest(options.messages.findLast(message => message.role === 'system')?.content.filter(block => block.type === 'text').map(block => block.text).join('') ?? '') })
       yield* next()
     })
     ctx.on('tools/result', (execution, value) => {
@@ -280,7 +280,7 @@ export async function createNativeSkillGoalRuntime(input: NativeSkillGoalOptions
           agentOptions: { provider: frozen.model.provider, model: frozen.model.model, maxTokens: frozen.execution.maxOutputTokensPerCall },
           setup(agentCtx: Agent['ctx'], preparedAgent?: Agent) {
             assertCurrent()
-            const agent = preparedAgent ?? agentCtx.agent
+            const agent = preparedAgent
             benchmarkAssert(agent !== undefined, 'capture Agent unavailable')
             agentCtx.effect(() => raw(ctx.assistantPolicy).bindInitiator(agent, 'background', scope.principalId))
             agentCtx.tools.restrict({ allow: [] })

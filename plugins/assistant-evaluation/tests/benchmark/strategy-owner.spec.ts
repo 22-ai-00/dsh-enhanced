@@ -58,7 +58,7 @@ describe('production benchmark owner bootstrap', () => {
     const persisted = db.prepare('SELECT status, failure_code FROM inbox_messages').all(); db.close()
     expect(persisted).toEqual([{ status: 'processed', failure_code: null }])
     expect(adapter.requests).toHaveLength(1)
-    expect(adapter.requests[0]).toMatchObject({ provider: 'benchmark-fixture', model: 'fixed', maxTokens: 8, system: 'Common public persona.' })
+    expect(adapter.requests[0]).toMatchObject({ provider: 'benchmark-fixture', model: 'fixed', maxTokens: 8, messages: expect.arrayContaining([expect.objectContaining({ role: 'system', content: [{ type: 'text', text: 'Common public persona.' }] })]) })
     expect(adapter.requests[0]!.tools ?? []).toEqual([])
     expect(JSON.stringify(adapter.requests[0]!.messages)).toContain('Solve the public benchmark task.')
     meter.assertComplete()

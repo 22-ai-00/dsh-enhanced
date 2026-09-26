@@ -33,9 +33,11 @@ if [[ "\${1:-}" == 'install' ]]; then exit 0; fi
 if [[ "\${1:-}" == 'build' ]]; then exit 0; fi
 exec env PATH="$REAL_PATH" pnpm "$@"
 `)
+    await writeExecutable(join(fakeBin, 'npm'), '#!/bin/bash\nexit 0\n')
+    await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
 set -euo pipefail
-if [[ "\${1:-}" == '--version' ]]; then printf '0.1.2-rc.1\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.5-rc.3\\n'; exit 0; fi
 if [[ "$*" == *'--no-open --port 0'* ]]; then
   printf 'dsh web: http://127.0.0.1:43210\\n'
   exit 0
@@ -84,7 +86,7 @@ PROFILE
 
     const installerArguments = [
       localInstaller,
-      '--dsh-version', '0.1.2-rc.1',
+      '--dsh-version', '0.1.5-rc.3',
       '--lark', 'skip',
       '--no-service',
     ]
@@ -129,7 +131,7 @@ PROFILE
     await mkdir(dirname(dshPath), { recursive: true })
     await mkdir(fakeBin, { recursive: true })
     await writeFile(join(fakeHost, 'package.json'), JSON.stringify({
-      name: '@deepseek-ai/dsh', version: '0.1.2-rc.1', type: 'module',
+      name: '@deepseek-ai/dsh', version: '0.1.5-rc.3', type: 'module',
     }), 'utf8')
     await writeFile(join(fakeHost, 'node_modules', '@deepseek-ai', 'dsh-app-boot', 'package.json'), JSON.stringify({
       name: '@deepseek-ai/dsh-app-boot', type: 'module', exports: './index.js',
@@ -142,9 +144,11 @@ if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; exit 0; fi
 if [[ "\${1:-}" == 'install' || "\${1:-}" == 'build' ]]; then exit 0; fi
 exec env PATH="$REAL_PATH" pnpm "$@"
 `)
+    await writeExecutable(join(fakeBin, 'npm'), '#!/bin/bash\nexit 0\n')
+    await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
     await writeExecutable(dshPath, `#!/bin/bash
 set -euo pipefail
-if [[ "\${1:-}" == '--version' ]]; then printf '0.1.2-rc.1\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.5-rc.3\\n'; exit 0; fi
 profile='web'
 for ((index = 1; index <= $#; index += 1)); do
   if [[ "\${!index}" == '--profile' ]]; then next=$((index + 1)); profile="\${!next}"; fi
@@ -188,7 +192,7 @@ exit 2
       DSH_ENHANCED_WEB_PORT: '43192',
       REAL_PATH: process.env.PATH ?? '',
     }
-    const arguments_ = [localInstaller, '--dsh-version', '0.1.2-rc.1', '--scenario', 'web', '--lark', 'skip', '--no-service']
+    const arguments_ = [localInstaller, '--dsh-version', '0.1.5-rc.3', '--scenario', 'web', '--lark', 'skip', '--no-service']
     const first = spawnSync('/bin/bash', arguments_, { cwd: repoRoot, encoding: 'utf8', env: environment })
     expect(first.status, first.stderr).toBe(0)
 

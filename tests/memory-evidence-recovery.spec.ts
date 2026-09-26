@@ -1,11 +1,10 @@
 import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createUserMessage, LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
@@ -51,9 +50,10 @@ class ScriptAdapter extends LlmAdapter {
 async function host(root: string, adapter: ScriptAdapter, options: { ownerVersion?: number; revoked?: boolean; denySource?: boolean; denyFile?: boolean; denyPipeline?: boolean; unregistered?: boolean; budgeted?: 'execute' | 'read'; pruneThresholdChars?: number; pruneHeadChars?: number; pruneTailChars?: number; imageStore?: boolean; imageTool?: boolean } = {}) {
   const ctx = new Context()
   try {
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: 'Use current verified evidence.', includeRuntimeContext: true } })
-  await ctx.plugin(SessionProjectionRegistry)
-  await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'none', packChunks: false, writeBatchMaxDelayMs: 1 })
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: 'Use current verified evidence.', includeRuntimeContext: true } })
+  await ctx.plugin(Loader, { baseUrl: import.meta.url })
+  await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none', packChunks: false, writeBatchMaxDelayMs: 1 } })
+  await ctx.loader.await()
   await ctx.plugin(TokenMeter)
   await ctx.plugin(ToolResultPruner, { thresholdChars: options.pruneThresholdChars ?? 8_192, headChars: options.pruneHeadChars ?? 4_096, tailChars: options.pruneTailChars ?? 1_024 })
   ctx.provide('assistantDelivery', {
@@ -137,9 +137,8 @@ test.each(['current-owner', 'changed-owner', 'revoked-owner', 'denied-tool', 'ch
       expect(JSON.stringify(handle.agent.session.deriveMessages())).not.toContain('NEEDLE=journal-v2')
       expect(handle.agent.session.eventAt(pruned.pruned[0]!.originalSeq)?.type).toBe('tool/result')
       expect(await first.ctx.sessions.flush(handle.agent.session)).toBe(true)
-      const raw = await first.ctx.sessionPersistence.readRaw(id)
-      expect(raw?.content).toContain('NEEDLE=journal-v2')
       sourcePath = first.ctx.sessionPersistence.locate(handle.agent.session.header)!.path
+      expect(await readFile(sourcePath, 'utf8')).toContain('NEEDLE=journal-v2')
     } finally { await handle?.dispose(); await first.ctx.fiber.dispose() }
 
     if (mode === 'changed-original') {
@@ -267,8 +266,8 @@ test('read_image evidence survives prune, reopen, and replays through the vision
     expect(pruned.pruned).toHaveLength(1)
     expect(JSON.stringify(handle.agent.session.deriveMessages())).not.toContain(IMAGE_ENVELOPE_NEEDLE)
     expect(await first.ctx.sessions.flush(handle.agent.session)).toBe(true)
-    const raw = await first.ctx.sessionPersistence.readRaw(id)
-    expect(raw?.content).toContain(IMAGE_ENVELOPE_NEEDLE)
+    const sourcePath = first.ctx.sessionPersistence.locate(handle.agent.session.header)!.path
+    expect(await readFile(sourcePath, 'utf8')).toContain(IMAGE_ENVELOPE_NEEDLE)
   } finally { await handle?.dispose(); await first.ctx.fiber.dispose() }
 
   const recovery = new ScriptAdapter((request, index) => {

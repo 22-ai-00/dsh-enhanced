@@ -298,6 +298,7 @@ export class AssistantPolicyService extends Service {
       }
       permissionCtx.on('session/created', adopt)
       for (const session of permissionCtx.sessions.list()) adopt(session)
+      this.publishAutoPreset(permissionCtx)
     })
 
     ctx.effect(() => () => {
@@ -379,6 +380,50 @@ export class AssistantPolicyService extends Service {
       })
       toolsCtx.tools.guard(createPolicyToolGuard(this))
     })
+  }
+
+  /**
+   * Publish the fixed live Auto permission preset when the host supports it.
+   *
+   * In 0.1.7-rc.2 "auto" is a reserved preset name: it cannot appear in the
+   * static table (the service construction throws), and is instead exposed only
+   * while an integration registers the host's fixed bundle through
+   * `permissionPresets.registerAuto(admit)`. The host owns the bundle
+   * (danger-full-access sandbox + "ask" approval on 0.1.7-rc.2) and invokes the
+   * synchronous `admit` gate immediately before selecting or restoring Auto;
+   * per-call risk gating is unrelated and stays in tools/pre-execute. This
+   * adapter therefore only proves the integration is still alive, and hands the
+   * disposer returned by registerAuto() to OUR injected fiber so Auto is
+   * withdrawn the moment this plugin (or the permissionPresets generation) goes
+   * away. The current 0.1.5-rc.3 host lacks this API and exposes its
+   * configured static Auto without dynamic registration.
+   */
+  private publishAutoPreset(permissionCtx: Context): void {
+    type RegisterAuto = (admit: () => void) => () => Promise<void>
+    permissionCtx.effect(() => {
+      const service = permissionCtx.permissionPresets as unknown as { registerAuto?: unknown }
+      const registerAuto = typeof service.registerAuto === 'function'
+        ? service.registerAuto as RegisterAuto
+        : undefined
+      if (registerAuto === undefined) return () => {}
+      let integrationActive = true
+      const admit = (): void => {
+        if (!this.active || !integrationActive) {
+          throw new Error('assistant-policy: cannot select preset "auto" while its reviewer integration is inactive')
+        }
+      }
+      // Preserve the contextual service proxy as `this`: registerAuto owns its
+      // internal Cordis effect through the calling integration's fiber.
+      const dispose = registerAuto.call(service as never, admit)
+      if (typeof dispose !== 'function') {
+        integrationActive = false
+        throw new Error('assistant-policy: permissionPresets.registerAuto returned no disposer')
+      }
+      return async () => {
+        integrationActive = false
+        await dispose()
+      }
+    }, 'assistant-policy.auto-preset')
   }
 
   /**

@@ -157,7 +157,7 @@ export class EffectBlockedReplayRuntime {
     const agent = input.handle.agent
     if (!agent || typeof input.handle.dispose !== 'function' || agent.status !== 'idle'
       || scopeOf(agent.ctx) !== agent || this.states.has(agent)) fail('fresh idle native Agent handle required')
-    if (agent.inbox.hasPending || agent.session.snapshotEvents().some(event =>
+    if ((agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) || agent.session.snapshotEvents().some(event =>
       ['turn/start', 'user/message', 'assistant/message', 'tool/result'].includes(event.type))) fail('replay requires an unused Agent session')
     this.assertProviders()
     if (this.ctx.agents.get(agent.id) !== agent) fail('Agent is not registered in this Host')
@@ -182,7 +182,7 @@ export class EffectBlockedReplayRuntime {
     let result: EffectBlockedReplayResult | undefined
     const assertCurrent = () => {
       state.abort.signal.throwIfAborted()
-      if (this.closed || state.violation || Date.now() >= input.expiresAt || agent.status !== 'idle' || agent.inbox.hasPending) fail('replay was interrupted or changed')
+      if (this.closed || state.violation || Date.now() >= input.expiresAt || agent.status !== 'idle' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0)) fail('replay was interrupted or changed')
       this.assertProviders()
     }
     try {

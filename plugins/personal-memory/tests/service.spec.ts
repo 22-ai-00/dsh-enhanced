@@ -1,5 +1,6 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
-import { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import SystemPrompt, { renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -32,7 +33,7 @@ function stubAgent(options: { cwd?: string; preset?: string } = {}) {
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options.preset === undefined ? {} : { agentPreset: options.preset }),
   })
-  const inbox = new Inbox(session, { inserted() {}, discarded() {}, claimed() {} })
+  const inbox = createInboxStub()
   const injections: UserMessage[] = []
   const agent: Agent = {
     id,

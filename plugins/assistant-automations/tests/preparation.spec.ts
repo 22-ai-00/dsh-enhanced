@@ -3,7 +3,6 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -41,8 +40,8 @@ async function fixture(options: { requestedTool?: string; budgetLimit?: number; 
   const ctx = new Context(); const adapter = new DraftAdapter(options.requestedTool)
   let presetMounts = 0
   const binding = { id: 'binding-1', version: 1, generation: 1, sessionId: 'owner-session' }
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
-  await ctx.plugin(SessionProjectionRegistry)
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' } })
+
   ctx.provide('agentPresets' as never, { resolve: async (id?: string) => ({ id: id ?? 'primary' }), mount: async (agentCtx: Agent['ctx']) => {
     presetMounts += 1
     if (options.presetTool !== undefined) {

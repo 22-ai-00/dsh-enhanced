@@ -94,7 +94,7 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
             ownerId: this.#ownerId, fencingToken: entry.input.fencingToken, leaseMs: port.leaseMs })) {
             throw new SessionLeaseUnavailable('denied')
           }
-          if (entry.input?.admitting !== true && entry.handle.agent.status === 'idle' && !entry.handle.agent.inbox.hasPending
+          if (entry.input?.admitting !== true && entry.handle.agent.status === 'idle' && !(entry.handle.agent.inbox.nextTurn.length > 0 || entry.handle.agent.inbox.nextStep.length > 0)
             && !this.#awaitingNativeGoal(entry.handle.agent)) void this.#close(id, entry)
         } catch { entry.lease.cancel(); void this.#close(id, entry) }
       }
@@ -185,7 +185,7 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
   #setup(original: CreateAgentOptions['setup']): NonNullable<CreateAgentOptions['setup']> {
     return async (ctx, preparedAgent?: Agent) => {
       this.#assertOwner()
-      const agent = preparedAgent ?? ctx.agent
+      const agent = preparedAgent
       if (agent === undefined || agent.session.header.cwd !== this.#config.workspace
         || agent.session.header.agentPreset !== this.#config.preset) throw new SessionLeaseUnavailable('denied')
       ctx.effect(() => this.policy.bindInitiator(agent, 'external', externalPrincipalId(this.#config.principal)))
@@ -209,7 +209,7 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
     const binding = this.#binding(input.sessionId)
     const entry = this.#entries.get(input.sessionId)
     if (entry === undefined || entry.closing !== undefined || entry.input !== undefined
-      || entry.handle.agent.status !== 'idle' || entry.handle.agent.inbox.hasPending) throw new SessionLeaseUnavailable('busy')
+      || entry.handle.agent.status !== 'idle' || (entry.handle.agent.inbox.nextTurn.length > 0 || entry.handle.agent.inbox.nextStep.length > 0)) throw new SessionLeaseUnavailable('busy')
     const envelope: InboundEnvelope = { channel: 'web', account: this.#config.principal.account,
       eventId: input.requestId, occurredAt: Date.now(), principal: binding.principal,
       conversation: binding.conversation, kind: 'text', text: input.text,

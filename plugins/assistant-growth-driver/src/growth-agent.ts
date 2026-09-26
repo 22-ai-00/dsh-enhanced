@@ -525,7 +525,7 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
       agentOptions: { ...model, maxTokens: config.maxOutputTokens },
       signal: combined,
       setup: async (agentCtx: Agent['ctx'], preparedAgent?: Agent) => {
-        const agent = preparedAgent ?? agentCtx.agent
+        const agent = preparedAgent
         if (agent === undefined) throw new Error('assistant-growth-driver: unpublished growth Agent is unavailable')
         if (agent.session.header.cwd !== authority.scope.workspace || agent.session.header.agentPreset !== authority.scope.preset) {
           throw new Error('assistant-growth-driver: growth Agent identity does not match the frozen owner scope')

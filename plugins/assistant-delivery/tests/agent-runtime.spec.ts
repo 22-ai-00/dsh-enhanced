@@ -30,14 +30,12 @@ import {
 import {
   KNOWN_SESSION_EVENT_TYPES,
   SessionLogOffset,
-  SessionPreparation,
   SessionSeq,
   type Session,
   type SessionEvent,
   type SessionHeader,
   type SessionId,
 } from '@deepseek-ai/dsh-session'
-import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
@@ -143,42 +141,36 @@ interface DurableStoredSession {
   revision: string
 }
 
-interface SessionStorageMetadata {
-  meta: SessionHeader
-  inheritedEventCount: SessionLogOffset
+interface PersistedHandle {
+  readonly id: SessionId
+  readonly header: SessionHeader
+  readonly inheritedEventCount: SessionLogOffset
+  readonly access: 'read' | 'write'
+  read(offset?: number, length?: number, options?: { signal?: AbortSignal }): Promise<{
+    eventState: 'detached' | 'shared-frozen'
+    events: readonly SessionEvent[]
+  }>
+  append(events: readonly SessionEvent[], options?: { signal?: AbortSignal }): Promise<void>
+  flush(options?: { signal?: AbortSignal }): Promise<void>
+  close(): Promise<void>
+  [Symbol.asyncDispose](): PromiseLike<void>
 }
 
-interface PersistenceBackend {
-  readonly name: string
-  appendBatch(storage: SessionStorageMetadata, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void>
-  commitRepair(storage: SessionStorageMetadata, tornMarker: undefined, closers: readonly SessionEvent[]): Promise<void>
-  list(): Promise<SessionHeader[]>
-  loadStored(id: SessionId): Promise<DurableStoredSession | undefined>
-  readStoredRevision(id: SessionId): Promise<string | undefined>
+interface HandlePersistence {
+  create(header: SessionHeader, options?: { signal?: AbortSignal; inheritedEventCount?: SessionLogOffset }): Promise<PersistedHandle>
+  open(id: SessionId, access: 'read' | 'write', options?: { signal?: AbortSignal }): Promise<PersistedHandle>
+  flush(): Promise<void>
+  stat(id: SessionId, options?: { signal?: AbortSignal }): Promise<{ header: SessionHeader; revision: string } | undefined>
+  list(options?: { signal?: AbortSignal }): Promise<readonly { header: SessionHeader; revision: string }[]>
 }
 
-interface PersistenceCoordinator {
-  assertEventsSupported(meta: SessionHeader, events: readonly SessionEvent[]): void
-  borrowSession(id: SessionId, signal?: AbortSignal): Promise<unknown>
-  inspect(id: SessionId, signal?: AbortSignal): Promise<unknown>
-  prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>
-}
-
-type PersistenceCoordinatorConstructor = new (
-  ctx: Context,
-  backend: PersistenceBackend,
-  options: { preparedSessionCacheSize: number; writeBatchMaxDelayMs: number },
-) => PersistenceCoordinator
-
-async function persistenceCoordinatorConstructor(): Promise<PersistenceCoordinatorConstructor> {
+async function jsonlPersistenceConstructor(): Promise<string> {
+  const name = '@deepseek-ai/dsh-session-persistence-jsonl'
+  // Resolve from the exact AgentLoop installation before asking Loader to
+  // mount the backend through its real entry metadata.
   const loopPackage = require.resolve('@deepseek-ai/dsh-agent-loop/package.json')
-  const entrypoint = require.resolve('@deepseek-ai/dsh-session-persistence', {
-    paths: [dirname(loopPackage)],
-  })
-  const module = await import(pathToFileURL(entrypoint).href) as {
-    PersistenceCoordinator: PersistenceCoordinatorConstructor
-  }
-  return module.PersistenceCoordinator
+  require.resolve(name, { paths: [dirname(loopPackage)] })
+  return name
 }
 
 async function nativeGoalPlugins(): Promise<Readonly<{
@@ -210,58 +202,45 @@ function nativeGoals(ctx: Context): Readonly<{
   return (ctx as unknown as { goals: ReturnType<typeof nativeGoals> }).goals
 }
 
-function persistenceBackend(stored: Map<string, DurableStoredSession>): PersistenceBackend {
-  let revision = 0
-  const snapshot = (value: DurableStoredSession): DurableStoredSession => structuredClone(value)
-  return {
-    name: 'assistant-delivery-session-adoption-test',
-    async appendBatch(storage, events, isMaterialized) {
-      const current = stored.get(String(storage.meta.id))
-      revision += 1
-      if (!isMaterialized || current === undefined) {
-        stored.set(String(storage.meta.id), snapshot({ ...storage, events: [...events], revision: `test:${revision}` }))
-        return
-      }
-      current.events.push(...structuredClone(events))
-      current.revision = `test:${revision}`
-    },
-    async commitRepair(storage, _tornMarker, closers) {
-      const current = stored.get(String(storage.meta.id))
-      if (current === undefined) throw new Error(`missing stored session ${storage.meta.id}`)
-      revision += 1
-      current.events.push(...structuredClone(closers))
-      current.revision = `test:${revision}`
-    },
-    async list() {
-      return [...stored.values()].map(value => structuredClone(value.meta))
-    },
-    async loadStored(id) {
-      const current = stored.get(String(id))
-      return current === undefined ? undefined : snapshot(current)
-    },
-    async readStoredRevision(id) {
-      return stored.get(String(id))?.revision
-    },
-  }
-}
-
 function realPersistence(
-  PersistenceCoordinator: PersistenceCoordinatorConstructor,
+  pluginName: string,
+  root: string,
   stored: Map<string, DurableStoredSession>,
-): (ctx: Context) => unknown {
-  return ctx => {
-    const backend = persistenceBackend(stored)
-    const coordinator = new PersistenceCoordinator(ctx, backend, {
-      preparedSessionCacheSize: 1,
-      writeBatchMaxDelayMs: 1,
-    })
-    return {
-      coordinator,
-      list: () => backend.list(),
-      borrowSession: (id: SessionId, signal?: AbortSignal) => coordinator.borrowSession(id, signal),
-      inspect: (id: SessionId, signal?: AbortSignal) => coordinator.inspect(id, signal),
-      prepare: (id: SessionId, signal?: AbortSignal) => coordinator.prepare(id, signal),
+): (ctx: Context) => Promise<void> {
+  return async ctx => {
+    await ctx.loader.create({ name: pluginName, config: { root: join(root, 'session-logs'), compression: 'none' } })
+    await ctx.loader.await()
+    const persistence = ctx.get('sessionPersistence') as unknown as HandlePersistence
+    const create = persistence.create.bind(persistence)
+    const open = persistence.open.bind(persistence)
+    let revision = 0
+    const observe = (handle: PersistedHandle): PersistedHandle => {
+      if (handle.access !== 'write') return handle
+      const append = handle.append.bind(handle)
+      const flush = handle.flush.bind(handle)
+      const close = handle.close.bind(handle)
+      const snapshot = async (source: PersistedHandle = handle) => {
+        const read = await source.read()
+        stored.set(String(source.id), {
+          meta: structuredClone(source.header),
+          inheritedEventCount: source.inheritedEventCount,
+          events: structuredClone([...read.events]),
+          revision: `test:${++revision}`,
+        })
+      }
+      handle.append = async (events, options) => { await append(events, options); await snapshot() }
+      handle.flush = async options => { await flush(options); await snapshot() }
+      handle.close = async () => {
+        await close()
+        // JSONL drains routed live events during close, bypassing append().
+        // Mirror that final durable state through a fresh read handle.
+        const reader = await open(handle.id, 'read')
+        try { await snapshot(reader) } finally { await reader.close() }
+      }
+      return handle
     }
+    persistence.create = async (header, options) => observe(await create(header, options))
+    persistence.open = async (id, access, options) => observe(await open(id, access, options))
   }
 }
 
@@ -498,14 +477,19 @@ async function runtimeHarness(
     readInboundImage: NonNullable<DeliveryAdapter['readInboundImage']>
   },
   permissions?: PermissionHarnessOptions,
-  sessionPersistence?: (ctx: Context) => unknown,
+  sessionPersistence?: (ctx: Context) => Promise<unknown> | unknown,
 ) {
   const ctx = new Context()
   ctx.baseUrl = pathToFileURL(`${root}/`).href
   const presetExecute = vi.fn(async () => ({ mounted: true }))
-  if (presetRoot !== undefined) await ctx.plugin(Loader)
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' }, tools: { mode: 'native' } })
-  await ctx.plugin(SessionProjection)
+  await ctx.plugin(Loader, { baseUrl: import.meta.url })
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  // Direct SessionController fixtures exercise text prompt admission only.
+  ctx.provide('fileUploads' as never, {
+    registerAgentResolver: () => () => {},
+    resolve: () => { throw new Error('unexpected file receipt in text-only delivery fixture') },
+    bindPrompt: () => ({ commit() {}, [Symbol.dispose]() {} }),
+  } as never)
   if (presetRoot === undefined && provideAgentPresets) {
     const presetResolve = vi.fn(async (id?: string) => ({ id: id ?? agentPreset }))
     const presetMount = vi.fn(async (agentCtx: Agent['ctx'], id?: string) => {
@@ -537,6 +521,7 @@ async function runtimeHarness(
     })
   }
   ctx.on('session/flush', session => {
+    if (sessionPersistence === undefined && fallbackWriters.has(String(session.id))) return
     saved.set(String(session.id), structuredClone({
       header: session.header,
       events: session.snapshotEvents(),
@@ -552,18 +537,98 @@ async function runtimeHarness(
         }
       },
     },
-    list: async () => [...saved.values()].map(value => structuredClone(value.header)),
-    prepare: async (id: SessionId) => {
-      const value = saved.get(String(id))
-      if (value === undefined) throw new Error(`session "${id}" not found`)
-      const restored = structuredClone(value)
-      return SessionPreparation.create(ctx.sessions.prepare(id, {
-        seedSource: 'persistence', seed: [...restored.events], meta: restored.header,
-        inheritedEventCount: restored.inheritedEventCount,
-      }))
+    create: async (header: SessionHeader, options?: { signal?: AbortSignal; inheritedEventCount?: SessionLogOffset }) => {
+      options?.signal?.throwIfAborted()
+      if (saved.has(String(header.id))) throw new Error(`session "${header.id}" already exists`)
+      saved.set(String(header.id), {
+        header: structuredClone(header), events: [],
+        inheritedEventCount: options?.inheritedEventCount ?? SessionLogOffset(0),
+      })
+      return makeFallbackHandle(header.id, 'write', true)
     },
+    open: async (id: SessionId, access: 'read' | 'write', options?: { signal?: AbortSignal }) => {
+      options?.signal?.throwIfAborted()
+      if (!saved.has(String(id))) throw Object.assign(new Error(`session "${id}" not found`), {
+        name: 'SessionPersistenceNotFoundError',
+      })
+      if (access === 'write' && fallbackWriters.has(String(id))) throw new Error(`session "${id}" already owned`)
+      return makeFallbackHandle(id, access, false)
+    },
+    flush: async () => { await Promise.all([...fallbackWriters.values()].map(handle => handle.flush())) },
+    stat: async (id: SessionId) => {
+      const value = saved.get(String(id))
+      return value === undefined ? undefined : {
+        header: structuredClone(value.header),
+        revision: createHash('sha256').update(JSON.stringify(value)).digest('hex'),
+      }
+    },
+    list: async () => [...saved.values()].map(value => ({
+      header: structuredClone(value.header),
+      revision: createHash('sha256').update(JSON.stringify(value)).digest('hex'),
+    })),
   }
-  ctx.provide('sessionPersistence' as never, (sessionPersistence?.(ctx) ?? fallbackPersistence) as never)
+  const fallbackWriters = new Map<string, PersistedHandle>()
+  function makeFallbackHandle(id: SessionId, access: 'read' | 'write', created: boolean): PersistedHandle {
+    const key = String(id)
+    const initial = saved.get(key)!
+    let closed = false
+    let materialized = false
+    const pending: SessionEvent[] = []
+    const requireOpen = () => {
+      if (closed) throw new Error(`session "${id}" handle is closed`)
+      return saved.get(key)!
+    }
+    const handle: PersistedHandle = {
+      id, access,
+      header: structuredClone(initial.header),
+      inheritedEventCount: initial.inheritedEventCount,
+      async read(offset = 0, length?: number, options?: { signal?: AbortSignal }) {
+        options?.signal?.throwIfAborted()
+        const events = [...requireOpen().events, ...pending]
+        return { eventState: 'detached', events: structuredClone(events.slice(offset, length === undefined ? undefined : offset + length)) }
+      },
+      async append(events, options) {
+        options?.signal?.throwIfAborted()
+        if (access !== 'write') throw new Error('read-only session handle')
+        const value = requireOpen()
+        if (events.length > 0 && events[0]!.seq !== value.events.length + pending.length) throw new Error('non-contiguous session append')
+        pending.push(...structuredClone(events))
+      },
+      async flush(options) {
+        options?.signal?.throwIfAborted()
+        if (access !== 'write') throw new Error('read-only session handle')
+        const value = requireOpen()
+        saved.set(key, { ...value, events: [...value.events, ...pending.splice(0)] })
+        materialized = true
+      },
+      async close() {
+        if (closed) return
+        // This in-memory fault fixture preserves only explicit flush barriers;
+        // the tests that stub a failed barrier model a process lost before
+        // the backend's ordinary close drain could commit its pending tail.
+        pending.length = 0
+        closed = true
+        if (access === 'write') fallbackWriters.delete(key)
+        if (created && !materialized && saved.get(key)?.events.length === 0) saved.delete(key)
+      },
+      async [Symbol.asyncDispose]() { await this.close() },
+    }
+    if (access === 'write') fallbackWriters.set(key, handle)
+    return handle
+  }
+  if (sessionPersistence === undefined) {
+    ctx.provide('sessionPersistence' as never, fallbackPersistence as never)
+    ctx.on('session/event', (session, event) => {
+      const writer = fallbackWriters.get(String(session.id))
+      if (writer !== undefined) void writer.append([event])
+    })
+    ctx.on('session/flush', session => fallbackWriters.get(String(session.id))?.flush())
+    ctx.on('session/disposed', session => { void fallbackWriters.get(String(session.id))?.close() })
+  }
+  else {
+    const provided = await sessionPersistence(ctx)
+    if (ctx.get('sessionPersistence') === undefined) ctx.provide('sessionPersistence' as never, provided as never)
+  }
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
     ...(permissions?.policyRules ?? []),
     { id: 'local-pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' }, actions: ['pair.issue'],
@@ -1063,7 +1128,7 @@ async function permissionRuntimeHarness(
 async function persistentRuntimeHarness(
   root: string,
   stored: Map<string, DurableStoredSession>,
-  PersistenceCoordinator: PersistenceCoordinatorConstructor,
+  JsonlPersistence: string,
 ) {
   return await runtimeHarness(
     root,
@@ -1077,7 +1142,7 @@ async function persistentRuntimeHarness(
     'probe',
     undefined,
     { seedDefaultPreset: 'unlocked-dynamic-id' },
-    realPersistence(PersistenceCoordinator, stored),
+    realPersistence(JsonlPersistence, root, stored),
   )
 }
 
@@ -1153,7 +1218,14 @@ function attachmentFixture() {
   return { attachments, saveImages, saved }
 }
 
-describe('real rc.1 delivery Agent runtime', () => {
+function textPromptAttachments() {
+  return {
+    ...attachmentFixture().attachments,
+    admitPromptContent: async (content: unknown) => content,
+  } as never
+}
+
+describe('real native Delivery Agent runtime', () => {
   test('native Web notice adapter accepts a typed owner notice, exposes it to its original session, and rejects mixed learning metadata', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-notice-')); roots.push(root)
     const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
@@ -3399,8 +3471,8 @@ describe('real rc.1 delivery Agent runtime', () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-lease-'))
     roots.push(root)
     const stored = new Map<string, DurableStoredSession>()
-    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
-    const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const JsonlPersistence = await jsonlPersistenceConstructor()
+    const first = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     const pairing = first.service.issuePairing('test', principal)
     first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     await first.service.acceptInbound(message('evt-web-lease-owner-turn', 'Delivery owns this session'))
@@ -3410,12 +3482,13 @@ describe('real rc.1 delivery Agent runtime', () => {
     expect(stored.has(binding.sessionId)).toBe(true)
     await first.ctx.fiber.restart()
 
-    const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const reopened = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     await reopened.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
     // SessionQueryEngine is declared abstract because search backends extend it, while its
     // production base implements the live/cold observeSession path exercised here.
     await reopened.ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)
     await reopened.ctx.plugin(TypertRegistry)
+    reopened.ctx.provide('attachments', textPromptAttachments())
     const controller = new SessionController(reopened.ctx, {})
     const abort = new AbortController()
     const follower = controller.follow(
@@ -3496,7 +3569,7 @@ describe('real rc.1 delivery Agent runtime', () => {
 
   test('production Web owner admits a real native human turn, creates a business Goal and releases its idle Session', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'assistant-delivery-native-owner-'))); roots.push(root)
-    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const JsonlPersistence = await jsonlPersistenceConstructor()
     const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
     const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'web/browser/local/owner' }
     const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
@@ -3506,17 +3579,17 @@ describe('real rc.1 delivery Agent runtime', () => {
         { id: 'web-goal', effect: 'allow', subject, actions: ['create', 'observe', 'inspect', 'snapshot'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
         { id: 'web-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
       ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
-    }, realPersistence(PersistenceCoordinator, new Map()))
+    }, realPersistence(JsonlPersistence, root, new Map()))
     const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
     operator.handoffOwner(webPrincipal)
-    fixture.ctx.sessionProjections.register(agentPresetProjectionDefinition)
+    fixture.ctx.sessionProjections.register(agentPresetProjectionDefinition as never)
     let webFiber: { dispose(): Promise<void> } | undefined
     const eventAbort = new AbortController()
     const eventStreams: Promise<void>[] = []
     const forwarded: Array<Array<{ event?: string; args?: unknown[] }>> = [[], []]
     let ownerHistory: AsyncIterator<unknown> | undefined
     try {
-      fixture.ctx.provide('attachments', attachmentFixture().attachments)
+      fixture.ctx.provide('attachments', textPromptAttachments())
       const ownedWorkspace = {
         id: 'web-owner-workspace', path: root, attachSession: vi.fn(async () => {}),
       }
@@ -3553,8 +3626,6 @@ describe('real rc.1 delivery Agent runtime', () => {
       await fixture.ctx.plugin(native.GoalService as never, {} as never)
       await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
       // Production Loader supplies the matching native Session browser entry.
-      // This fixture has no preset root, so its generic harness omits Loader.
-      await fixture.ctx.plugin(Loader)
       const fiber = fixture.ctx.plugin(NativeWebOwnerPlugin, { principal: { account: 'browser', tenant: 'local', user: 'owner' }, workspace: root, preset: 'primary' })
       await fiber; webFiber = fiber
       // Parent activation does not imply all injected child fibers are active.
@@ -3634,7 +3705,7 @@ describe('real rc.1 delivery Agent runtime', () => {
 
   test('keeps a Web-owned Agent leased while the real native Goal driver waits for its durable checkpoint', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goal-flush-')); roots.push(root)
-    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const JsonlPersistence = await jsonlPersistenceConstructor()
     const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
     const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'web/browser/local/owner' }
     const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
@@ -3644,7 +3715,7 @@ describe('real rc.1 delivery Agent runtime', () => {
         { id: 'web-goal', effect: 'allow', subject, actions: ['create', 'observe', 'inspect', 'snapshot'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
         { id: 'web-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
       ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, leaseMs: 1_000,
-    }, realPersistence(PersistenceCoordinator, new Map()))
+    }, realPersistence(JsonlPersistence, root, new Map()))
     const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
     const native = await nativeGoalPlugins()
     await fixture.ctx.plugin(native.GoalService as never, {} as never)
@@ -3740,7 +3811,7 @@ describe('real rc.1 delivery Agent runtime', () => {
 
   test.each([{ withdraw: false, conflict: false }, { withdraw: true, conflict: false }, { withdraw: false, conflict: true }])('native Goal rounds refresh task memory after a checkpoint change (%j)', async ({ withdraw, conflict }) => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-native-goal-memory-')); roots.push(root)
-    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const JsonlPersistence = await jsonlPersistenceConstructor()
     const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
     const principalId = 'web/browser/local/owner'
     const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: principalId }
@@ -3752,7 +3823,7 @@ describe('real rc.1 delivery Agent runtime', () => {
         { id: 'web-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
         { id: 'web-memory', effect: 'allow', subject, actions: ['snapshot'], resource: { kind: 'memory', id: 'visible' }, context: { initiators: ['external'] } },
       ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
-    }, realPersistence(PersistenceCoordinator, new Map()))
+    }, realPersistence(JsonlPersistence, root, new Map()))
     const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
     const owner = operator.getPrincipal(webPrincipal)!
     const native = await nativeGoalPlugins()
@@ -3872,8 +3943,8 @@ describe('real rc.1 delivery Agent runtime', () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-owned-resume-'))
     roots.push(root)
     const stored = new Map<string, DurableStoredSession>()
-    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
-    const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const JsonlPersistence = await jsonlPersistenceConstructor()
+    const first = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     const pairing = first.service.issuePairing('test', principal)
     first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     await first.service.acceptInbound(message('evt-web-owned-seed', 'Persist this Delivery-owned session.'))
@@ -3881,7 +3952,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     const binding = runtimeStore(first.service).getActiveBinding(conversation)!
     await first.ctx.fiber.restart()
 
-    const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const reopened = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     let lease: ReturnType<TestSessionLeases['open']> | undefined
     let controller: SessionController | undefined
     let controllerCtx: Context | undefined
@@ -3890,7 +3961,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     let follower: AsyncIterator<unknown> | undefined
     let promotion: Promise<IteratorResult<unknown>> | undefined
     try {
-      reopened.ctx.provide('attachments', attachmentFixture().attachments)
+      reopened.ctx.provide('attachments', textPromptAttachments())
       await reopened.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
       await reopened.ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)
       await reopened.ctx.plugin(TypertRegistry)
@@ -3982,8 +4053,8 @@ describe('real rc.1 delivery Agent runtime', () => {
       const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-owned-rollback-'))
       roots.push(root)
       const stored = new Map<string, DurableStoredSession>()
-      const PersistenceCoordinator = await persistenceCoordinatorConstructor()
-      const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+      const JsonlPersistence = await jsonlPersistenceConstructor()
+      const first = await persistentRuntimeHarness(root, stored, JsonlPersistence)
       const pairing = first.service.issuePairing('test', principal)
       first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
       await first.service.acceptInbound(message('evt-web-owned-rollback-seed', 'Persist rollback fixture.'))
@@ -3991,7 +4062,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       const binding = runtimeStore(first.service).getActiveBinding(conversation)!
       await first.ctx.fiber.restart()
 
-      const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+      const reopened = await persistentRuntimeHarness(root, stored, JsonlPersistence)
       let owner: Context | undefined
       const ownerFiber = reopened.ctx.plugin(ownerCtx => {
         owner = ownerCtx.isolate('agents')
@@ -4029,8 +4100,8 @@ describe('real rc.1 delivery Agent runtime', () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-owned-resume-abort-race-'))
     roots.push(root)
     const stored = new Map<string, DurableStoredSession>()
-    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
-    const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const JsonlPersistence = await jsonlPersistenceConstructor()
+    const first = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     const pairing = first.service.issuePairing('test', principal)
     first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     await first.service.acceptInbound(message('evt-web-owned-abort-race-seed', 'Persist abort race fixture.'))
@@ -4038,32 +4109,31 @@ describe('real rc.1 delivery Agent runtime', () => {
     const binding = runtimeStore(first.service).getActiveBinding(conversation)!
     await first.ctx.fiber.restart()
 
-    const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const reopened = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     let owner: Context | undefined
     const ownerFiber = reopened.ctx.plugin(ownerCtx => {
       owner = ownerCtx.isolate('agents')
     })
     await ownerFiber
     if (owner === undefined) throw new Error('abort-race owner fixture did not start')
-    const persistence = reopened.ctx.get('sessionPersistence') as {
-      prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>
-    }
-    const originalPrepare = persistence.prepare.bind(persistence)
-    const preparationReady = Promise.withResolvers<void>()
-    const preparationBarrier = Promise.withResolvers<void>()
-    let latePreparation: SessionPreparation | undefined
-    let preparationDisposed = false
-    const prepare = vi.spyOn(persistence, 'prepare').mockImplementation(async (id, signal) => {
-      const preparation = await originalPrepare(id, signal)
-      latePreparation = preparation
-      const dispose = preparation[Symbol.dispose].bind(preparation)
-      vi.spyOn(preparation, Symbol.dispose).mockImplementation(() => {
-        preparationDisposed = true
-        return dispose()
+    const persistence = reopened.ctx.get('sessionPersistence') as unknown as HandlePersistence
+    const originalOpen = persistence.open.bind(persistence)
+    const openReady = Promise.withResolvers<void>()
+    const openBarrier = Promise.withResolvers<void>()
+    let lateHandle: PersistedHandle | undefined
+    let handleClosed = false
+    const open = vi.spyOn(persistence, 'open').mockImplementation(async (id, access, options) => {
+      const handle = await originalOpen(id, access, options)
+      if (access !== 'write' || id !== binding.sessionId) return handle
+      lateHandle = handle
+      const close = handle.close.bind(handle)
+      vi.spyOn(handle, 'close').mockImplementation(async () => {
+        handleClosed = true
+        await close()
       })
-      preparationReady.resolve()
-      await preparationBarrier.promise
-      return preparation
+      openReady.resolve()
+      await openBarrier.promise
+      return handle
     })
     const outer = new AbortController()
     const lease = runtimeSessionLeases(reopened.service).open({ kind: 'bound', binding }, outer.signal)
@@ -4076,12 +4146,12 @@ describe('real rc.1 delivery Agent runtime', () => {
         resumeSessionId: binding.sessionId as SessionId,
       })
       void resume.catch(() => {})
-      await preparationReady.promise
+      await openReady.promise
       const factoryFiber = [...reopened.ctx.registry.get(AgentLoop)!.fibers][0]!
       unloading = cancellation === 'owner' ? ownerFiber.dispose() : factoryFiber.dispose()
       await expect(resume).rejects.toThrow()
       lease.close()
-      expect(preparationDisposed).toBe(false)
+      expect(handleClosed).toBe(false)
 
       const database = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
       try {
@@ -4094,20 +4164,20 @@ describe('real rc.1 delivery Agent runtime', () => {
           .toMatchObject({ kind: 'unknown' })
       } finally { secondHost.close() }
 
-      preparationBarrier.resolve()
+      openBarrier.resolve()
       await unloading
-      await vi.waitFor(() => expect(preparationDisposed).toBe(true))
-      expect(latePreparation).toBeDefined()
+      await vi.waitFor(() => expect(handleClosed).toBe(true))
+      expect(lateHandle).toBeDefined()
       const retained = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
       try {
         expect(retained.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?')
           .get(binding.sessionId)).toMatchObject({ state: 'unknown' })
       } finally { retained.close() }
     } finally {
-      preparationBarrier.resolve()
+      openBarrier.resolve()
       outer.abort()
       lease.close()
-      prepare.mockRestore()
+      open.mockRestore()
       if (unloading !== undefined) await unloading
       await ownerFiber.dispose()
       await reopened.ctx.fiber.restart()
@@ -4139,6 +4209,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       const live = fixture.ctx.agents.get(binding.sessionId as SessionId)
       expect(live).toBeDefined()
       await fixture.ctx.plugin(TypertRegistry)
+      fixture.ctx.provide('attachments', textPromptAttachments())
       const controller = new SessionController(fixture.ctx, {})
       await expect(controller.prompt({
         sessionId: binding.sessionId as SessionId,
@@ -4171,6 +4242,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     try {
       await fixture.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
       await fixture.ctx.plugin(TypertRegistry)
+      fixture.ctx.provide('attachments', textPromptAttachments())
       const controller = new SessionController(fixture.ctx, {})
       const created = await controller.create({ cwd: root })
       await expect(controller.prompt({
@@ -4232,8 +4304,8 @@ describe('real rc.1 delivery Agent runtime', () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-adopt-generation-1-'))
     roots.push(root)
     const stored = new Map<string, DurableStoredSession>()
-    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
-    const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const JsonlPersistence = await jsonlPersistenceConstructor()
+    const first = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     const pairing = first.service.issuePairing('test', principal)
     first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
 
@@ -4249,7 +4321,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       .toMatchObject({ status: 'received' })
     await first.ctx.fiber.restart()
 
-    const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const reopened = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     const following = await reopened.service.acceptInbound(message(
       'evt-after-orphan-generation-1',
       'must reuse the durable session',
@@ -4269,8 +4341,8 @@ describe('real rc.1 delivery Agent runtime', () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-adopt-new-generation-'))
     roots.push(root)
     const stored = new Map<string, DurableStoredSession>()
-    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
-    const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const JsonlPersistence = await jsonlPersistenceConstructor()
+    const first = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     const pairing = first.service.issuePairing('test', principal)
     first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     await first.service.acceptInbound(message('evt-before-orphan-new', 'generation one'))
@@ -4289,7 +4361,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       .toMatchObject({ status: 'received' })
     await first.ctx.fiber.restart()
 
-    const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const reopened = await persistentRuntimeHarness(root, stored, JsonlPersistence)
     const following = await reopened.service.acceptInbound(message(
       'evt-after-orphan-new',
       'must enter the adopted generation',
@@ -10911,16 +10983,12 @@ describe('real rc.1 delivery Agent runtime', () => {
       presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, allowPresetProbeExecution: true, goalContinuationTimeoutMs: 5_000,
     })
     const native = await nativeGoalPlugins(); await fixture.ctx.plugin(native.GoalService as never, {} as never); await fixture.ctx.plugin(native.goalTools as never, {} as never); await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
-    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, stepMaxDurationMs: change === 'timeout' ? 200 : 5_000 } as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, stepMaxDurationMs: change === 'timeout' ? 1_000 : 5_000 } as never)
     const pairing = fixture.service.issuePairing('test', principal); fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     const owner = runtimeStore(fixture.service).getPrincipal(principal)!; const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }; const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
     await writeFile(join(root, 'report.md'), 'Confirmed result'); await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: [{ id: 'definition', version: 2, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }] }] })
     let goalAgent: Agent | undefined
     let goalSignal: AbortSignal | undefined
-    fixture.ctx.on('agent/request', async ({ agent, signal }, next) => {
-      if ((nativeGoals(fixture.ctx).get(agent)?.roundsStarted ?? 0) > 0) goalSignal = signal
-      return await next()
-    })
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { goalAgent = agent; const created = await fixture.ctx.tools.execute({ callId: ToolCallId('definition-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } }); if (created.isError) throw new Error('definition setup rejected') }; return await next() })
     fixture.presetExecute.mockImplementationOnce(async () => {
       const goal = nativeGoals(fixture.ctx).get(goalAgent!)
@@ -10942,7 +11010,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       else fixture.ctx.goals.edit(goalAgent!, { id: goal.id as never, revision: goal.revision }, change === 'objective' ? { objective: 'Changed after dispatch' } : { maxGoalRounds: 2 })
       return { mounted: true }
     })
-    const original = fixture.llm.stream.bind(fixture.llm); vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) { if (fixture.llm.requests.length === 1) { const callId = ToolCallId('definition-probe'); fixture.llm.requests.push(options); yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: callId, name: 'preset_probe', argumentsDelta: '{}' }; yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'preset_probe', arguments: '{}' } }; yield { type: 'finish', reason: { kind: 'tool-calls' } }; return }; yield* original(options) })
+    const original = fixture.llm.stream.bind(fixture.llm); vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) { if (fixture.llm.requests.length === 1) { goalSignal = options.signal; const callId = ToolCallId('definition-probe'); fixture.llm.requests.push(options); yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: callId, name: 'preset_probe', argumentsDelta: '{}' }; yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'preset_probe', arguments: '{}' } }; yield { type: 'finish', reason: { kind: 'tool-calls' } }; return }; yield* original(options) })
     await fixture.service.acceptInbound(message('evt-goal-step-definition-change', objective)); await drive(fixture.service); await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
     expect(fixture.llm.requests).toHaveLength(2)
     expect(fixture.presetExecute).toHaveBeenCalledTimes(1)
@@ -11084,7 +11152,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     await writeFile(join(presetRoot, 'primary', 'agent.cordis.yml'), '- id: tools\n  name: cordis:assistant-delivery-test-tools\n')
     const ownerId = 'lark/bot-1/tenant-a/ou_owner'
     const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }
-    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const JsonlPersistence = await jsonlPersistenceConstructor()
     const stored = new Map<string, DurableStoredSession>()
     const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, presetRoot, 'primary', true, 'probe', undefined, {
       policyRules: [
@@ -11096,7 +11164,7 @@ describe('real rc.1 delivery Agent runtime', () => {
         { id: 'native-strategy-tool', effect: 'allow' as const, subject,
           actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_strategy' }, context: { initiators: ['external' as const] } },
       ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, goalContinuationTimeoutMs: 5_000,
-    }, realPersistence(PersistenceCoordinator, stored))
+    }, realPersistence(JsonlPersistence, root, stored))
     const native = await nativeGoalPlugins()
     await fixture.ctx.plugin(native.GoalService as never, {} as never)
     await fixture.ctx.plugin(native.goalTools as never, {} as never)
@@ -11126,8 +11194,20 @@ describe('real rc.1 delivery Agent runtime', () => {
       }
       return await next()
     })
+    let childMeterArrivals = 0
+    let releaseChildMeters: (() => void) | undefined
+    const childMeterGate = new Promise<void>(resolve => { releaseChildMeters = resolve })
     fixture.ctx.assistantGoals.registerBudgetMeter({ id: 'native-strategy-meter', provider: 'mock', model: 'delivery-model',
-      inputTokenUpperBound: () => 10, inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
+      inputTokenUpperBound: async () => {
+        if ((mode === 'quota' || mode === 'revoke') && fixture.ctx.agents.currentInitiator()?.session.header.origin === 'subagent') {
+          // Admit both concurrent children before either reserves or can
+          // revoke the owner. The quota test can then pin the atomic reserve
+          // loser, and revocation must cancel both already-bound children.
+          if (++childMeterArrivals === 2) releaseChildMeters!()
+          await childMeterGate
+        }
+        return 10
+      }, inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
     const scopedEffect = vi.fn(async () => ({}))
     const scopedResults: ToolExecutionResult[] = []
     const childAgents: Agent[] = []

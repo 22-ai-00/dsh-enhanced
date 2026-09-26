@@ -73,7 +73,9 @@ describe('native AgentLoop benchmark plan', () => {
     const result = await executor.execute(request)
     expect(result.verdict).toBe('achieved'); expect(result.quiescent).toBe(true); expect(disposed).toBe(true)
     expect(calls).toHaveLength(1)
-    expect(calls[0]).toMatchObject({ provider: input.model.provider, model: input.model.model, temperature: input.model.temperature, maxTokens: input.model.maxOutputTokens, system: input.variants.find(item => item.id === cell.variantId)!.persona })
+    expect(calls[0]).toMatchObject({ provider: input.model.provider, model: input.model.model, temperature: input.model.temperature, maxTokens: input.model.maxOutputTokens })
+    expect(calls[0]!.system).toBeUndefined()
+    expect(calls[0]!.messages[0]).toMatchObject({ role: 'system', content: [{ type: 'text', text: input.variants.find(item => item.id === cell.variantId)!.persona }] })
     expect(calls[0]!.tools ?? []).toEqual([])
     expect(calls[0]!.messages.at(-1)?.content).toContainEqual(expect.objectContaining({ type: 'text', text: expect.stringContaining('原始用户任务') }))
 
@@ -88,7 +90,7 @@ describe('native AgentLoop benchmark plan', () => {
   it('runs paired cells through the durable runner', async () => {
     const input = config(); const plan = nativeBenchmarkPlan(input); const task = developmentCorpus[0]!
     class PairedAdapter extends LlmAdapter { override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-      const text = JSON.stringify({ answer: options.system === input.variants[1]!.persona ? task.acceptance.answer : 'wrong', citations: task.acceptance.citations })
+      const text = JSON.stringify({ answer: options.messages.find(message => message.role === 'system')?.content.filter(block => block.type === 'text').map(block => block.text).join('') === input.variants[1]!.persona ? task.acceptance.answer : 'wrong', citations: task.acceptance.citations })
       yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text }; yield { type: 'block-end', index: 0, block: { type: 'text', text } }
       yield { type: 'usage', usage: { inputTokens: 4, outputTokens: 5 } }; yield { type: 'finish', reason: { kind: 'stop' } }
     } }

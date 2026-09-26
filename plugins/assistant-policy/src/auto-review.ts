@@ -236,11 +236,11 @@ function exactToolCall(events: readonly SessionEvent[], callId: string, toolName
       }
       matches.push({ toolName: event.data.name, arguments: args })
     }
-    if (event.type === 'tool/code-dispatch-start' && String(event.data.subCallId) === callId) {
+    if (event.type === 'tool/ptc-dispatch-start' && String(event.data.subCallId) === callId) {
       matches.push({ toolName: event.data.name, arguments: event.data.arguments })
     }
     if (event.type === 'tool/result' && String(event.data.message.source.callId) === callId) settled = true
-    if (event.type === 'tool/code-dispatch' && String(event.data.subCallId) === callId) settled = true
+    if (event.type === 'tool/ptc-dispatch' && String(event.data.subCallId) === callId) settled = true
   }
   const exact = matches.length === 1 ? matches[0] : undefined
   return exact?.toolName === toolName && !settled ? exact : undefined
@@ -312,16 +312,16 @@ function reviewFactFingerprint(
       identities.push(['tool/call', index, event.seq])
       continue
     }
-    if (event.type === 'tool/code-dispatch-start' && String(event.data.subCallId) === callId) {
-      identities.push(['tool/code-dispatch-start', index, event.seq])
+    if (event.type === 'tool/ptc-dispatch-start' && String(event.data.subCallId) === callId) {
+      identities.push(['tool/ptc-dispatch-start', index, event.seq])
       continue
     }
     if (event.type === 'tool/result' && String(event.data.message.source.callId) === callId) {
       identities.push(['tool/result', index, event.seq])
       continue
     }
-    if (event.type === 'tool/code-dispatch' && String(event.data.subCallId) === callId) {
-      identities.push(['tool/code-dispatch', index, event.seq])
+    if (event.type === 'tool/ptc-dispatch' && String(event.data.subCallId) === callId) {
+      identities.push(['tool/ptc-dispatch', index, event.seq])
     }
   }
   return JSON.stringify(identities)
@@ -486,7 +486,7 @@ function fallbackAfterReview(
   next: () => Promise<ApprovalOutcome>,
 ): Promise<ApprovalOutcome> | ApprovalOutcome {
   if (request.signal?.aborted === true) return 'cancelled'
-  return hasCoherentAutoReview(request.agent.session.snapshotEvents())
+  return hasCoherentAutoReview(request.agent.session.snapshotEvents(), request.agent.session.header.version)
     ? escalateToHuman(request, next)
     : 'unavailable'
 }
@@ -540,7 +540,7 @@ export function registerAutoReviewAnswerer(
       if (provider !== current || current.signal.aborted) return fallbackAfterReview(request, human)
       if (outcome === 'allow') {
         if (!isCurrentAutoReviewSnapshot(request, snapshot)
-          || !hasCoherentAutoReview(request.agent.session.snapshotEvents())) {
+          || !hasCoherentAutoReview(request.agent.session.snapshotEvents(), request.agent.session.header.version)) {
           return fallbackAfterReview(request, human)
         }
         return 'allowed-once'

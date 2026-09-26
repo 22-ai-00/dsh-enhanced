@@ -3,20 +3,17 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import {
   LlmAdapter,
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import {
-  KNOWN_SESSION_EVENT_TYPES,
-  SessionPreparation,
   type SessionEvent,
   type SessionHeader,
-  type SessionId,
   type SessionLogOffset,
 } from '@deepseek-ai/dsh-session'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
@@ -60,6 +57,7 @@ const LARK_SECRET = 'personal-assistant-e2e-signing-secret'
 const roots: string[] = []
 const contexts = new Set<Context>()
 let larkMessageSequence = 0
+const persistenceRoots = new WeakMap<Map<string, SavedSession>, string>()
 
 interface SavedSession {
   header: SessionHeader
@@ -155,10 +153,9 @@ function larkMessage(messageId: string, content: string, replyToMessageId?: stri
 
 async function installAgentRuntime(ctx: Context, saved: Map<string, SavedSession>): Promise<void> {
   await mountAgentLoopTestDependencies(ctx, {
-    systemPrompt: { persona: '' },
+    systemPrompt: { personaPrefix: '' },
     tools: { mode: 'native' },
   })
-  await ctx.plugin(SessionProjectionRegistry)
   ctx.on('agent/session-start', ({ agent }) => {
     agent.session.append('approval/policy', { policy: 'never' })
     agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
@@ -176,28 +173,17 @@ async function installAgentRuntime(ctx: Context, saved: Map<string, SavedSession
       inheritedEventCount: session.inheritedEventCount,
     }))
   })
-  ctx.provide('sessionPersistence' as never, {
-    coordinator: {
-      assertEventsSupported(_meta: SessionHeader, events: readonly SessionEvent[]) {
-        for (const event of events) {
-          if (KNOWN_SESSION_EVENT_TYPES.has(event.type) || event.ignorable === true) continue
-          throw new Error(`unknown required session event type: ${event.type}`)
-        }
-      },
-    },
-    list: async () => [...saved.values()].map(value => structuredClone(value.header)),
-    prepare: async (id: SessionId) => {
-      const stored = saved.get(String(id))
-      if (stored === undefined) throw new Error(`session not found: ${id}`)
-      const restored = structuredClone(stored)
-      return SessionPreparation.create(ctx.sessions.prepare(id, {
-        seedSource: 'persistence',
-        seed: [...restored.events],
-        meta: restored.header,
-        inheritedEventCount: restored.inheritedEventCount,
-      }))
-    },
-  } as never)
+  let persistenceRoot = persistenceRoots.get(saved)
+  if (persistenceRoot === undefined) {
+    persistenceRoot = await mkdtemp(join(tmpdir(), 'personal-assistant-sessions-'))
+    roots.push(persistenceRoot)
+    persistenceRoots.set(saved, persistenceRoot)
+  }
+  await ctx.plugin(Loader, { baseUrl: import.meta.url })
+  await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: {
+    root: persistenceRoot, compression: 'none',
+  } })
+  await ctx.loader.await()
 }
 
 async function installLark(ctx: Context, transport: FakeLarkTransport): Promise<void> {

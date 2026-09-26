@@ -1,6 +1,6 @@
 # dsh-enhanced：RSI 智能助手插件集合
 
-基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 **RSI 智能助手插件集合**：围绕 RSI（Recursive Self-Improvement，递归自我改进）提供任务执行、独立验收、反馈学习、技能复用与有限连续改进，让助手在明确授权和预算内完成任务，并把成功经验用于后续任务。`plugins/*` 中每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。当前为实验性能力，DSH 兼容范围 `>=0.1.2-rc.1 <0.2.0`。当前进展见 [RSI 当前状态](docs/rsi-status.md)。
+基于 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 **RSI 智能助手插件集合**：围绕 RSI（Recursive Self-Improvement，递归自我改进）提供任务执行、独立验收、反馈学习、技能复用与有限连续改进，让助手在明确授权和预算内完成任务，并把成功经验用于后续任务。`plugins/*` 中每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。当前为实验性能力；仓库新安装默认跟随 DSH 官方 `latest`，当前验证基线为 `0.1.5-rc.3`，下一版计划支持 `>=0.1.5-rc.3 <0.1.6`。已发布 `v0.1.48` 安装器仍固定其发布时的 Host 版本与兼容范围。当前进展见 [RSI 当前状态](docs/rsi-status.md)。
 
 ## 安装
 

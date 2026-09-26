@@ -8,7 +8,6 @@ import {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { registerLlmRouteCapability, type ToolCallMode } from '@dsh-enhanced/llm-route-capabilities'
@@ -129,8 +128,8 @@ async function harness(options: {
   if (options.approvalRoute !== undefined) {
     ctx.provide('assistantDelivery' as never, { bindAgentApprovalRoute, prepareAgentApproval } as never)
   }
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
-  await ctx.plugin(SessionProjectionRegistry)
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' } })
+
   const presetResolve = vi.fn(async (id?: string) => ({ id: id ?? 'primary' }))
   const presetMount = vi.fn(async (agentCtx: Agent['ctx'], id?: string) => {
     if (options.presetTool !== undefined) {
@@ -208,12 +207,12 @@ describe('fresh rc.1 automation Agent runner', () => {
     const create = fixture.ctx.agents.create.bind(fixture.ctx.agents)
     vi.spyOn(fixture.ctx.agents, 'create').mockImplementation(async options => create({
       ...options,
-      setup: async agentCtx => {
+      setup: async (agentCtx, preparedAgent) => {
         const setup = options.setup as unknown as (ctx: Agent['ctx'], prepared?: Agent) => Promise<unknown>
         const newerAbiContext = new Proxy(agentCtx, {
           get(target, key, receiver) { return key === 'agent' ? undefined : Reflect.get(target, key, receiver) },
         })
-        await setup(newerAbiContext, agentCtx.agent)
+        await setup(newerAbiContext, preparedAgent)
       },
     }))
 

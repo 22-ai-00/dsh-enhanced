@@ -153,7 +153,7 @@ export class OwnerRepairAgentRuntime {
       const options = {
         agentOptions: { provider: input.provider, model: input.model, ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(input.reasoningEffort) }), maxTokens: input.maxOutputTokens }, signal: combined,
         setup: async (agentCtx: Agent['ctx'], preparedAgent?: Agent) => {
-          const agent = preparedAgent ?? agentCtx.agent
+          const agent = preparedAgent
           if (agent === undefined) throw new Error('assistant-skills: unpublished repair Agent is unavailable')
           input.assertCurrent(); combined.throwIfAborted()
           this.#assertLease(key)
@@ -231,6 +231,27 @@ export class OwnerRepairAgentRuntime {
     const assertLease = () => this.#assertLease(key)
     const beginModel = () => this.#effect(key, 'model')
     const toolsAwaitingLog = new Map<string, () => void>()
+    const pauseIfRevoked = (): boolean => {
+      try { input.assertCurrent(); combined.throwIfAborted(); assertLease(); return false } catch {
+        // The native driver disarms an errored turn without changing its durable
+        // phase. Revoke the active goal while its exact Agent is still live so
+        // a denied pre-step/request cannot strand an active, disarmed repair.
+        const goals = agentCtx.get('goals')
+        const current = goals?.get(agent)
+        if (current?.phase === 'active') goals!.pause(agent, { id: current.id, revision: current.revision })
+        return true
+      }
+    }
+    agentCtx.on('agent/pre-step', async ({ agent: stepped }, next) => {
+      if (stepped === agent && pauseIfRevoked()) return { kind: 'reject' as const }
+      try { return await next() } catch (error) {
+        if (stepped === agent && pauseIfRevoked()) return { kind: 'reject' as const }
+        throw error
+      }
+    })
+    agentCtx.on('session/event', (session, event) => {
+      if (session === agent.session && event.type === 'turn/end') pauseIfRevoked()
+    })
     agentCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
       const assembly = await next()
       if (context.agent !== agent) return assembly

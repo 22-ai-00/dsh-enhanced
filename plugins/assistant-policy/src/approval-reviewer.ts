@@ -87,11 +87,22 @@ export function hasCoherentFullAccess(events: readonly SessionEvent[]): boolean 
     && state.sandboxModeEvent && state.sandboxMode === 'danger-full-access'
 }
 
-export function hasCoherentAutoReview(events: readonly SessionEvent[]): boolean {
+export function hasCoherentAutoReview(events: readonly SessionEvent[], sessionFormat = 3): boolean {
   const state = approvalPermissionStateOf(events)
+  // Format 4 identifies the verified fixed-Auto ABI. In format 3 a stale
+  // "auto" selector plus changed full-access knobs is custom, not Auto.
+  // Both supported Auto bundles keep approval on "ask" (a reviewer denial
+  // still routes to the human):
+  //   - DSH 0.1.5-rc.3 configured preset: workspace-write + ask
+  //   - DSH 0.1.7-rc.2 fixed AUTO_PRESET_SPEC: danger-full-access + ask
+  // danger-full-access + "never" is the separate full-access/no-reviewer bundle
+  // and is matched first by hasCoherentFullAccess().
   return state.approvalPolicyEvent && state.approvalPolicy === 'ask'
     && reviewerIntentOf(events) === 'auto-review'
-    && state.sandboxModeEvent && state.sandboxMode === 'workspace-write'
+    && state.sandboxModeEvent
+    && (((sessionFormat === 0 || sessionFormat === 3) && state.sandboxMode === 'workspace-write')
+      || (sessionFormat === 4 && state.sandboxMode === 'danger-full-access'
+        && lastPermissionEvent(events, 'permission/preset').data?.preset === 'auto'))
 }
 
 /**
@@ -130,13 +141,13 @@ export function foldApprovalReviewer(events: readonly SessionEvent[]): ApprovalR
  * Resolve a reviewer conservatively against the standard approval policy.
  * Inconsistent intermediate event order never widens authority.
  */
-export function approvalReviewerOf(events: readonly SessionEvent[]): ApprovalReviewer {
+export function approvalReviewerOf(events: readonly SessionEvent[], sessionFormat = 3): ApprovalReviewer {
   if (hasCoherentFullAccess(events)) return 'none'
-  return hasCoherentAutoReview(events) ? 'auto-review' : 'user'
+  return hasCoherentAutoReview(events, sessionFormat) ? 'auto-review' : 'user'
 }
 
-export function getApprovalReviewer(session: Pick<Session, 'snapshotEvents'>): ApprovalReviewer {
-  return approvalReviewerOf(session.snapshotEvents())
+export function getApprovalReviewer(session: Pick<Session, 'snapshotEvents' | 'header'>): ApprovalReviewer {
+  return approvalReviewerOf(session.snapshotEvents(), session.header.version)
 }
 
 /** Append a validated reviewer transition only when it changes the durable selection. */

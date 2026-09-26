@@ -1,3 +1,4 @@
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
@@ -6,15 +7,6 @@ import {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import {
-  KNOWN_SESSION_EVENT_TYPES,
-  SessionPreparation,
-  type SessionEvent,
-  type SessionHeader,
-  type SessionId,
-  type SessionLogOffset,
-} from '@deepseek-ai/dsh-session'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantDeliveryService, type DeliveryAdapter, type OutboundIntent } from '@dsh-enhanced/assistant-delivery'
 import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
@@ -61,46 +53,6 @@ const modelStep = Object.freeze({
   catalogId: 'assistant.agent-turn',
   argumentSchemaDigest: workflowArgumentShapeDigest({ prompt: secretPrompt }),
 })
-
-interface PersistedSession {
-  events: readonly SessionEvent[]
-  header: SessionHeader
-  inheritedEventCount: SessionLogOffset
-}
-
-/** Minimal durable session backend required by Delivery's public Agent resume path. */
-function mountSessionPersistence(ctx: Context): void {
-  const saved = new Map<string, PersistedSession>()
-  ctx.on('session/flush', session => {
-    saved.set(String(session.id), structuredClone({
-      header: session.header,
-      events: session.snapshotEvents(),
-      inheritedEventCount: session.inheritedEventCount,
-    }))
-  })
-  ctx.provide('sessionPersistence' as never, {
-    coordinator: {
-      assertEventsSupported(_header: SessionHeader, events: readonly SessionEvent[]) {
-        for (const event of events) {
-          if (KNOWN_SESSION_EVENT_TYPES.has(event.type) || event.ignorable === true) continue
-          throw new Error(`unsupported durable session event: ${event.type}`)
-        }
-      },
-    },
-    list: async () => [...saved.values()].map(value => structuredClone(value.header)),
-    prepare: async (id: SessionId) => {
-      const value = saved.get(String(id))
-      if (value === undefined) throw new Error(`missing durable session ${String(id)}`)
-      const restored = structuredClone(value)
-      return SessionPreparation.create(ctx.sessions.prepare(id, {
-        seedSource: 'persistence',
-        seed: [...restored.events],
-        meta: restored.header,
-        inheritedEventCount: restored.inheritedEventCount,
-      }))
-    },
-  } as never)
-}
 
 class GrowthTextAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
@@ -308,11 +260,11 @@ describe('real supervised workflow-growth stack', () => {
     const ctx = new Context()
     contexts.push(ctx)
 
-    await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
-    await ctx.plugin(SessionProjectionRegistry)
+    await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' } })
+
     // Delivery's public runtime refuses to bind or later resume an Agent
     // session unless it crosses the durable session-persistence boundary.
-    mountSessionPersistence(ctx)
+    await ctx.plugin(Loader, { baseUrl: import.meta.url }); await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none' } }); await ctx.loader.await()
     ctx.provide('agentPresets' as never, {
       resolve: async (id?: string) => ({ id: id ?? preset }),
       mount: async (_agent: unknown, id?: string) => ({ id: id ?? preset }),

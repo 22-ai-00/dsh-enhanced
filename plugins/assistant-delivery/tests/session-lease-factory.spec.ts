@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from 'vitest'
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentHandle, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { DeliverySessionLeases, SessionLeaseUnavailable } from '../src/session-lease-runtime.ts'
@@ -42,15 +42,15 @@ function fixture(resume: (options: ResumeAgentOptions) => Promise<AgentHandle>, 
 }
 
 describe('Shared Session factory lifecycle', () => {
-  test.each([false, true])('binds and forwards the unpublished Agent across old/new setup ABI (explicit=%s)', async explicit => {
+  test('binds and forwards the unpublished Agent supplied by the native setup ABI', async () => {
     const agent = { session: { id: SessionId('session') }, cancel: vi.fn() } as unknown as Agent
     const agentCtx = Object.defineProperty({}, 'agent', {
-      get() { if (explicit) throw new Error('agent is not injected'); return agent },
+      get() { throw new Error('agent is not injected') },
     }) as Context
     const commit = vi.fn()
     const setup = vi.fn((_ctx: Context, _agent?: Agent) => ({ commit }))
     const f = fixture(async options => {
-      const result = await (options.setup as CompatibleAgentSetup)?.(agentCtx, explicit ? agent : undefined)
+      const result = await (options.setup as CompatibleAgentSetup)?.(agentCtx, agent)
       result?.commit()
       return { agent, dispose: async () => {} }
     })
@@ -62,6 +62,22 @@ describe('Shared Session factory lifecycle', () => {
       expect(setup.mock.calls[0]?.[1]).toBe(agent)
       expect(commit).toHaveBeenCalledOnce()
       await handle.dispose()
+    } finally { f.lease.close() }
+  })
+
+  test('rejects setup without the unpublished Agent instead of reading a Context fallback', async () => {
+    const fallback = vi.fn(() => { throw new Error('must not read Context Agent') })
+    const agentCtx = Object.defineProperty({}, 'agent', { get: fallback }) as Context
+    const setup = vi.fn()
+    const f = fixture(async options => {
+      await (options.setup as CompatibleAgentSetup)?.(agentCtx)
+      throw new Error('missing Agent must not reach publication')
+    })
+    try {
+      await expect(f.leases.resume(f.owner, { resumeSessionId: SessionId('session'), setup }))
+        .rejects.toThrow(SessionLeaseUnavailable)
+      expect(fallback).not.toHaveBeenCalled()
+      expect(setup).not.toHaveBeenCalled()
     } finally { f.lease.close() }
   })
 
@@ -121,7 +137,7 @@ describe('Shared Session factory lifecycle', () => {
     const agent = { session: { id: SessionId('session') }, cancel: vi.fn() } as unknown as Agent
     const dispose = vi.fn(() => drained.promise)
     const f = fixture(async options => {
-      const setup = await options.setup?.({ agent } as Context)
+      const setup = await options.setup?.(new Context(), agent)
       setup?.commit()
       return { agent, dispose }
     })
@@ -147,7 +163,7 @@ describe('Shared Session factory lifecycle', () => {
     const agent = { session: { id: SessionId('session') }, cancel: vi.fn() } as unknown as Agent
     const published = vi.fn()
     const f = fixture(async options => {
-      const setup = await options.setup?.({ agent } as Context)
+      const setup = await options.setup?.(new Context(), agent)
       setup?.commit()
       published()
       return { agent, dispose: async () => {} }

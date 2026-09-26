@@ -14,7 +14,12 @@ import { createRequire } from 'node:module'
 const APPROVAL_REVIEWER_EVENT_TYPE = 'assistant-policy/approval-reviewer'
 const READER_PROBE_EVENT_PREFIX = 'assistant-policy/__reader-probe/'
 const LEGACY_SESSION_FORMAT_VERSION = 0
-const SUPPORTED_SESSION_FORMATS = new Set([LEGACY_SESSION_FORMAT_VERSION, 3])
+// v3 is the 0.1.5-rc.3 format; v4 is the 0.1.7-rc.2 format. Every one of
+// these builds exposes the same mutable KNOWN_SESSION_EVENT_TYPES Set that
+// persistence consults on both append and cold read (with the unknown-type
+// refusal running before per-type structural adoption), so the reader-identity
+// probe below proves a single live reader unchanged across all three formats.
+const SUPPORTED_SESSION_FORMATS = new Set([LEGACY_SESSION_FORMAT_VERSION, 3, 4])
 const SESSION_REGISTRATIONS_GLOBAL_KEY = '__dshEnhancedApprovalReviewerSessionRegistrationsV1__'
 
 interface MutableEventTypeRegistry extends ReadonlySet<string> {

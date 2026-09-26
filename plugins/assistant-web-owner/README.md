@@ -4,7 +4,7 @@
 
 ## 安装与配置
 
-兼容 DSH `>=0.1.2-rc.1 <0.2.0`。这是可独立安装的可选实验性 bundle。本地源码安装可使用现有安装器的显式 Web 场景；默认 `core` 不会自动启用它：
+兼容 DSH `>=0.1.5-rc.3 <0.1.6`。这是可独立安装的可选实验性 bundle。本地源码安装可使用现有安装器的显式 Web 场景；默认 `core` 不会自动启用它：
 
 ```sh
 ./scripts/install/install-local.sh --scenario web --workspace /absolute/workspace --yes --no-service

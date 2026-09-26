@@ -64,7 +64,7 @@ describe('native Memory development comparison', () => {
     expect(roots[0]).not.toBe(roots[1])
     const baseline = prompts.get('baseline')!; const candidate = prompts.get('candidate')!
     for (const options of [baseline, candidate]) {
-      expect(options.system).toBe(input.variants[0]!.persona)
+      expect(options.messages.find(message => message.role === 'system')?.content.filter(block => block.type === 'text').map(block => block.text).join('')).toBe(input.variants[0]!.persona)
       expect(options.tools ?? []).toEqual([])
       expect(text(options)).toContain(memoryDevelopmentPrompt(caseId, suite === 'memory-v2' ? '2' : '1'))
     }

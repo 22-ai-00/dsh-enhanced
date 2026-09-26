@@ -103,6 +103,15 @@
     "@deepseek-ai/dsh-fs": "catalog:",
     "@deepseek-ai/dsh-fs-local": "catalog:",
     "@deepseek-ai/dsh-tool-fs": "catalog:",
-    "@deepseek-ai/dsh-subagent": "catalog:"
+    "@deepseek-ai/dsh-subagent": "catalog:",
+    "@deepseek-ai/dsh-client-connection": "catalog:",
+    "@deepseek-ai/dsh-file-reference": "catalog:",
+    "@deepseek-ai/dsh-native-command": "catalog:",
+    "@deepseek-ai/dsh-util-time": "catalog:",
+    "@deepseek-ai/dsh-util-workspace-path": "catalog:",
+    "@deepseek-ai/dsh-llm-retry": "catalog:",
+    "@deepseek-ai/dsh-storage": "catalog:",
+    "@deepseek-ai/dsh-storage-domain": "catalog:",
+    "@deepseek-ai/cordis-plugin-loader": "catalog:"
   }
 }

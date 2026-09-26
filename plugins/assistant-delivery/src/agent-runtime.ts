@@ -11,6 +11,7 @@ import {
 } from '@deepseek-ai/dsh-agent'
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-goal'
+import type {} from '@deepseek-ai/dsh-session-persistence'
 import {
   contentHasImage,
   createUserMessage,
@@ -1658,7 +1659,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // has retired.  `whenIdle()` is deliberately avoided here because it
       // can follow a later wakeup forever; the current Agent state and inbox
       // are the bounded observation needed before declaring quiescence.
-      if (agent.status !== 'idle' || agent.inbox.hasPending) return
+      if (agent.status !== 'idle' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0)) return
       const current = disposition()
       if (current === 'settled') finishNaturally()
       // Missing identity/readback and replacement are intentionally unknown:
@@ -2027,7 +2028,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       liftRestriction = agent.ctx.tools.restrict({ allow: [] })
       liftGuard = agent.ctx.tools.guard(() => AUTOMATIC_COMPLETION_TOOL_DENIAL)
       signal.throwIfAborted()
-      if (agent.status !== 'idle' || agent.inbox.hasPending) {
+      if (agent.status !== 'idle' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0)) {
         throw new AutomaticCompletionUnavailableError(
           'assistant-delivery: automatic completion lost the idle scheduling boundary',
         )
@@ -2071,7 +2072,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     agentPresets: Pick<AgentPresets, 'mount'> | undefined,
     initiator: 'background' | 'external' = 'external',
   ): Promise<void> {
-    const agent = preparedAgent ?? agentCtx.agent
+    const agent = preparedAgent
     if (agent === undefined) throw new Error('assistant-delivery: unpublished Agent identity is missing')
     if (agent.session.header.cwd !== workspace || agent.session.header.agentPreset !== presetId) {
       throw new DurableAgentIdentityError(
@@ -2639,12 +2640,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         model: selected.model,
         maxTokens: this.options.maxOutputTokens,
       }
-      const persistence = this.ctx.get('sessionPersistence') as undefined | {
-        list(signal?: AbortSignal): Promise<readonly { id: SessionId }[]>
-      }
+      const persistence = this.ctx.get('sessionPersistence')
       const persisted = persistence === undefined
         ? false
-        : (await persistence.list(lease.signal)).some(header => String(header.id) === String(id))
+        : (await persistence.list({ signal: lease.signal })).some(snapshot => String(snapshot.header.id) === String(id))
       if (persisted) {
         handle = await this.resumeAgent({
           resumeSessionId: id,
@@ -2734,7 +2733,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         setup: async (agentCtx, preparedAgent?: Agent) => {
           // Restored inbox entries may wake immediately on Session publication.
           // Install the background-only gate before that publication boundary.
-          const agent = preparedAgent ?? agentCtx.agent
+          const agent = preparedAgent
           if (agent === undefined) throw new Error('assistant-delivery: wake Agent missing')
           releaseFences = this.installScheduledGoalFences(agent, input)
           await this.setupAgent(
@@ -2742,7 +2741,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           )
           const llm = this.ctx.get('llm')
           if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
-          requireAdapterToolCallProtocol(llm, selected.provider, selected.model, presetId, agentCtx.tools.schemas(preparedAgent ?? agentCtx.agent).length)
+          requireAdapterToolCallProtocol(llm, selected.provider, selected.model, presetId, agentCtx.tools.schemas(preparedAgent).length)
         },
       })
       const agent = handle.agent
@@ -2756,7 +2755,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         || current.activation !== 'disarmed' || current.roundsStarted >= current.maxGoalRounds) {
         return denied()
       }
-      if (agent.status !== 'idle' || agent.inbox.hasPending) {
+      if (agent.status !== 'idle' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0)) {
         return denied()
       }
       this.assertScheduledGoal(input, agent, 'before-resume')
@@ -2981,7 +2980,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             input.assertCurrent(agent, 'running')
             return
           }
-          if (agent.status !== 'idle' || agent.inbox.hasPending) return
+          if (agent.status !== 'idle' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0)) return
           input.assertCurrent(agent, 'terminal')
           // Native idle/round-limit can precede the asynchronous step and
           // whole-goal verifier. Keep the Agent and its lease alive until that
@@ -2991,7 +2990,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             if (settled) return
             signal.throwIfAborted()
             this.assertScheduledGoal(input, agent, 'terminal')
-            if (agent.status !== 'idle' || agent.inbox.hasPending) throw new Error('assistant-delivery: goal changed during terminal settlement')
+            if (agent.status !== 'idle' || (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0)) throw new Error('assistant-delivery: goal changed during terminal settlement')
             finish(true)
           }).catch(() => {
             if (settled) return
@@ -3901,7 +3900,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             selected.provider,
             selected.model,
             presetId,
-            agentCtx.tools.schemas(preparedAgent ?? agentCtx.agent).length,
+            agentCtx.tools.schemas(preparedAgent).length,
           )
         } })
       const agent = handle.agent

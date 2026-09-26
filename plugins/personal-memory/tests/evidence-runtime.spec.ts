@@ -41,7 +41,7 @@ describe('tool evidence runtime', () => {
     const result = appendCallAndResult(target)
     const replacement = target.append('tool/result', { ...result.data,
       message: { ...result.data.message, content: [{ ...result.data.message.content[0], content: [{ type: 'text', text: 'summary only' }] }] },
-    }, { surfaceOp: { op: 'replace', start: result.seq, end: result.seq }, sourceEventSeqs: [result.seq] })
+    }, { surfaceOp: { op: 'replace', startSeq: result.seq, endSeq: result.seq }, sourceEventSeqs: [result.seq] })
     expect(originalToolEvidence(target, result.seq)?.text).toContain('result')
     expect(originalToolEvidence(target, replacement.seq)).toBeUndefined()
   })

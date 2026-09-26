@@ -8,12 +8,11 @@ import { createRequire } from 'node:module'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantDeliveryService, type DeliveryAdapter, type InboundEnvelope, type OutboundIntent } from '@dsh-enhanced/assistant-delivery'
 import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
@@ -80,21 +79,26 @@ async function assistantGoalsPlugin() {
   }
 }
 
+async function installJsonlPersistence(ctx: Context, root: string) {
+  await ctx.plugin(Loader, { baseUrl: import.meta.url })
+  await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none', packChunks: false, writeBatchMaxDelayMs: 1 } })
+  await ctx.loader.await()
+}
+
 async function open(root: string, options: { provision?: boolean; model?: EventGoalModel; allowSourceWait?: boolean } = {}) {
   const workspace = join(root, 'workspace')
   const watched = join(workspace, 'source.txt')
   await mkdir(workspace, { recursive: true })
   if (options.provision !== false) await writeFile(watched, 'before')
   const ctx = new Context(); contexts.add(ctx)
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' }, tools: { mode: 'native' } })
-  await ctx.plugin(SessionProjectionRegistry)
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
   ctx.on('session/created', session => {
     session.append('approval/policy', { policy: 'never' })
     session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
     const append = session.append as unknown as (type: string, data: unknown) => unknown
     append.call(session, 'sandbox/mode', { mode: 'danger-full-access' })
   })
-  await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'none', packChunks: false, writeBatchMaxDelayMs: 1 })
+  await installJsonlPersistence(ctx, root)
   ctx.provide('agentPresets' as never, { resolve: async () => ({ id: 'primary' }), mount: async () => ({ id: 'primary' }) } as never)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), budgets: [{ id: 'event-wake-runs', metric: 'automation-runs', limit: 5, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }], rules: [
     { id: 'pair', effect: 'allow', subject: { kind: 'external', id: 'local:event-goal' }, actions: ['pair.issue'], resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },

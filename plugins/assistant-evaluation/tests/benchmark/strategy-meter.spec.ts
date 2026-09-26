@@ -38,7 +38,7 @@ async function* complete(input = 3, output = 2): AsyncIterable<StreamChunk> {
 
 describe('strategy benchmark outer meter', () => {
   test('observes actual LlmRuntime streams and ToolRuntime dispatch in one Context', async () => {
-    const ctx = new RealContext(); contexts.push(ctx); await ctx.plugin(LlmRuntime); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false, persona: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' })
+    const ctx = new RealContext(); contexts.push(ctx); await ctx.plugin(LlmRuntime); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' })
     class Adapter extends LlmAdapter { override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
       expect(options.signal?.aborted).toBe(false)
       yield { type: 'usage', usage: { inputTokens: 2, outputTokens: 1, totalTokens: 3 } }
