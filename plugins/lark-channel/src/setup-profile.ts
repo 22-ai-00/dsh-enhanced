@@ -24,7 +24,7 @@ export interface LarkProfileSetupInput {
   keychainAccount: string
   credentialProvider?: 'linux-protected-file' | 'linux-secret-service' | 'macos-keychain' | 'windows-dpapi'
   credentialPath?: string
-  agentTools?: 'disable' | 'enable' | 'preserve'
+  agentTools?: 'disable' | 'enable' | 'preserve' | 'auto'
 }
 
 export interface LarkAgentPolicyRefreshInput {
@@ -1135,8 +1135,8 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
     .includes(credentialProvider)) {
     throw new Error('lark-channel setup: invalid credentialProvider')
   }
-  const agentToolsMode = input.agentTools ?? 'preserve'
-  if (!['disable', 'enable', 'preserve'].includes(agentToolsMode)) {
+  let agentToolsMode = input.agentTools ?? 'auto'
+  if (!['disable', 'enable', 'preserve', 'auto'].includes(agentToolsMode)) {
     throw new Error('lark-channel setup: invalid agentTools mode')
   }
   const credentialHandle = `lark-app-secret-${account}`
@@ -1149,8 +1149,11 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   assertManagedProfileRowIntegrity(rows)
   const existingLarkRow = findRow(rows, 'dsh-enhanced-lark-channel')
   let previousAccount: string | undefined
+  let existingAppConfigured = false
   if (existingLarkRow !== undefined) {
     const existingChannel = asMap(existingLarkRow.get('config', true) as Node, 'lark-channel config')
+    const existingAppId = existingChannel.get('appId')
+    existingAppConfigured = existingAppId !== undefined && existingAppId !== ''
     const existingAccount = existingChannel.get('account')
     if (existingAccount !== undefined) {
       if (typeof existingAccount !== 'string') {
@@ -1172,6 +1175,24 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   assertManagedForegroundRuleIntegrity(rules)
   assertManagedFixedRuleIntegrity(rules, account)
   const sourceOwnerPrincipal = configuredOwnerPrincipal(rules, grantSourceAccount)
+  if (agentToolsMode === 'auto') {
+    // A new owner gets the install-time capability default. Existing bindings,
+    // explicit restrictions and remnants of retired bindings retain the old
+    // preserve path; re-running onboarding must not re-enable revoked tools.
+    const hasOwnerHistory = rules.items.some(item => {
+      if (!isMap(item)) return false
+      const id = item.get('id')
+      return typeof id === 'string' && id.startsWith('lark-owner-')
+    })
+    const hasForegroundRestriction = rules.items.some(item => {
+      if (!isMap(item)) return false
+      const id = item.get('id')
+      return typeof id === 'string' && isManagedForegroundRuleId(id)
+        && !isUnrestrictedForegroundAllow(item)
+    })
+    agentToolsMode = existingAppConfigured || hasOwnerHistory || hasForegroundRestriction
+      ? 'preserve' : 'enable'
+  }
   const preserveOwnerPrincipal = sourceOwnerPrincipal
     ?? (previousAccount === undefined ? principalId : undefined)
   if (agentToolsMode === 'preserve'

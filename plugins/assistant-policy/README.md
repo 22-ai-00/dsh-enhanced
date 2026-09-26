@@ -137,6 +137,8 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 - 网络：插件不直接打开 socket；启用隔离自动 reviewer 时会调用宿主 `dsh-llm`，所选 provider route 可能使用网络。provider 的认证与传输仍由宿主拥有，本插件不直接读取其凭据。
 - 子进程：无。
 - 凭据：运行时的 Policy service 不读取或保存凭据值。审计按敏感 key/value、shell `command`、授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。自动 reviewer 输入只要需要任何 secret 脱敏就失去自动放行资格并转人工。包另附带两个安装期 CLI（`dsh-permission-setup`、`dsh-model-setup`），仅供安装器/部署者手动调用，不在 Cordis 运行时加载：`dsh-permission-setup` 只原子改写 `settings.yaml` 的 `permission.defaultPreset`；`dsh-model-setup` 原子写入 `agent-default-model`（自定义网关另写 `llm-pi-ai.providers.<route>`），并在显式 `--store-key` 时把仅从环境变量读取的 API Key 原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥绝不作为命令行参数、缺失时 fail-closed。`dsh-model-setup` 还支持 agent route（如 `traex-agent`）：这类 route 不涉及 API Key，`--enable-in-profile <profile>` 只在该 profile 的 `cordis.patch.yml` 原子改写对应 provider 行的 `enabled`（保留其它行/注释/`!!js`），非 YAML 序列的 patch 会 fail-closed 而非被覆盖。
+
+自动发现本机 agent 时可调用 `dsh-model-setup --provider traex-agent --enable-in-profile web --enable-only [--agent-command /absolute/path/to/traex]`：仅启用目标 profile 的 route，完全不读取或写入 `settings.yaml`。若希望在没有显式选择时把它设为该 profile 的默认模型，改用 `--default-if-absent`；CLI 用 YAML AST 检查 `settings.yaml`、home patch 和目标 profile patch，已有 `agent-default-model` 就保留，三处都没有才在目标 profile patch 添加默认模型行。DSH 的 settings 用户层优先于插件配置，因此已有全局 settings 默认值不会被 profile 行覆盖。两个模式互斥且仅适用于带 `--enable-in-profile` 的 agent route；启用 route 时在目标行同时写 `disabled: false` 和 `config.enabled: true`，保留 profile 的已有配置；没有 profile 配置时继承 home patch 最后生效的整段配置，并保留 `!!js` 表达式。`--agent-command` 必须是绝对路径，只填缺失的 `config.command`，保留已有 `command` 和 `cwd`。不带新模式的显式 model setup 保持原有全局默认模型写入行为。
 - 浏览器：无。
 - 安装脚本：无 npm 生命周期脚本；上述 CLI 仅在被显式调用时运行。
 

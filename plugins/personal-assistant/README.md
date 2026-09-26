@@ -50,6 +50,8 @@ API Key 绝不作为参数传入：加 `--store-key` 时，值只从 `DSH_ENHANC
 
 `traex-agent` 是 **agent route**：不需要 API Key（也拒绝 `--store-key` 与网关传输字段），由本机已登录的 TraeX 通过 [`@dsh-enhanced/traex-acp-provider`](../traex-acp-provider/README.md) 提供。它把全局 `agent-default-model` 指向 `traex-agent`，并用 `--enable-in-profile <profile>` 在该 profile 的 `cordis.patch.yml` 里把 provider 行置为 `enabled: true`（保留其它行/注释/`!!js`，仅在缺失时补默认 `cwd`）。注意 `agent-default-model` 是全局唯一段、被所有 profile 共享，而该 route 的适配器只在启用了本 bundle 的 profile 里注册；因此只有已启用的 profile（如 `web`）能解析 `traex-agent`，`headless` 等未装该 bundle 的 profile 会 `NO_ADAPTER`。安装器的模型配置引导即调用此工具，详见[安装脚本文档](../../scripts/install/README.md#配置默认模型)。
 
+自动安装使用 `--default-if-absent --enable-in-profile <profile>`：保留 settings、home patch 和 profile patch 中已有的显式模型选择，只在没有选择时写入当前 profile 默认模型；`--enable-only` 只启用 route。检测到的命令通过 `--agent-command` 补入缺失字段，已有 command/cwd 保留。手动不带这两个新选项的调用仍写入全局 settings。
+
 ## 权限与数据
 
 meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API、凭据、浏览器或安装脚本权限；四个子包的实际权限和数据边界分别见其 README。没有用户覆盖的新 session 从 `danger-full-access + never` 开始，reviewer 为 `none`。完全访问允许 Host sandbox 访问任意文件与网络且不逐次询问；请仅在信任的运行环境使用。已有兼容的用户设置和已记录的会话权限不会被升级或重启覆盖。用户可在原生 Web Permission selector 切换当前会话；飞书发送 `/permission` 打开交互卡片，或使用 `/permission ask`、`/permission auto`、`/permission full confirm`。安装时用 `--permission workspace-write` 或 `--permission auto` 设置更严格的后续会话默认值；显式覆盖既有默认为完全访问仍使用 `--permission danger-full-access --confirm-dangerous-full-access`。权限档位不绕过 Policy 显式拒绝、紧急停止、身份校验和预算硬门。

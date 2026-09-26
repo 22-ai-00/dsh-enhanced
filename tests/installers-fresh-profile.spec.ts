@@ -1,6 +1,7 @@
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
@@ -9,6 +10,8 @@ import { afterEach, describe, expect, test } from 'vitest'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const localInstaller = join(repoRoot, 'scripts', 'install', 'install-local.sh')
 const temporaryRoots: string[] = []
+const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory => directory !== ''
+  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli'))).join(':')
 
 async function writeExecutable(path: string, content: string): Promise<void> {
   await writeFile(path, content, 'utf8')
@@ -91,10 +94,10 @@ PROFILE
       '--no-service',
     ]
     const testEnvironment = {
-      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      PATH: `${fakeBin}:${pathWithoutTraex}`,
       DSH_HOME: dshHome,
       DSH_ENHANCED_WEB_PORT: '43191',
-      REAL_PATH: process.env.PATH ?? '',
+      REAL_PATH: pathWithoutTraex,
     }
     const result = spawnSync('/bin/bash', installerArguments, {
       cwd: repoRoot,
@@ -187,10 +190,10 @@ exit 2
 `)
 
     const environment = {
-      PATH: `${join(fakeHost, 'bin')}:${fakeBin}:${process.env.PATH ?? ''}`,
+      PATH: `${join(fakeHost, 'bin')}:${fakeBin}:${pathWithoutTraex}`,
       DSH_HOME: dshHome,
       DSH_ENHANCED_WEB_PORT: '43192',
-      REAL_PATH: process.env.PATH ?? '',
+      REAL_PATH: pathWithoutTraex,
     }
     const arguments_ = [localInstaller, '--dsh-version', '0.1.5-rc.3', '--scenario', 'web', '--lark', 'skip', '--no-service']
     const first = spawnSync('/bin/bash', arguments_, { cwd: repoRoot, encoding: 'utf8', env: environment })

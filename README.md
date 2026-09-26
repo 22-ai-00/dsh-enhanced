@@ -46,11 +46,13 @@ dsh-rsi restart --profile web          # 改配置后重启（只动运行状态
 
 升级（`update` / `update --all`）、干净重装（`reinstall`）、彻底卸载（`purge`）、崩溃救机脚本与全部安装器参数分别见 [`packages/dsh-rsi-cli/README.md`](packages/dsh-rsi-cli/README.md) 和[安装脚本文档](scripts/install/README.md)。
 
-三档部署场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 含全部 `core` 能力并加飞书常驻与偏好学习，`supervised` 再追加评测、演化与恢复。安装过程会引导配置默认模型（DeepSeek 官方或自定义 OpenAI 兼容网关），API Key 只从环境读取。实验性离线执行入口 `autonomy` 需显式指定本机固定隔离镜像，详见[安装文档](scripts/install/README.md)。
+三档部署场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 含全部 `core` 能力并加飞书常驻与偏好学习，`supervised` 再追加评测、演化与恢复。安装时检测到本机 `traex` 或 `trae-cli` 会自动安装并启用 TraeX 插件，复用本机登录；已登录且没有显式默认模型时，为当前 profile 配置 TraeX 默认模型。已有模型选择保持不变。其它模型可在安装引导中配置，API Key 只从环境读取。实验性离线执行入口 `autonomy` 需显式指定本机固定隔离镜像，详见[安装文档](scripts/install/README.md)。
 
 ### 默认权限：Full access
 
 新安装在用户未设置权限时默认 **Full access**（`danger-full-access + never`，reviewer 为 `none`）：工具可访问任意文件与网络、不逐次请求批准，包括凭据读取和破坏性命令，请仅在信任的运行环境使用。需要收紧可在安装时传 `--permission workspace-write`（人工批准）或 `--permission auto`（自动审核）。Full access 不会绕过显式 Policy deny、紧急停止、身份校验、预算硬门或操作系统自身权限；已有 `settings.yaml` 设置和已记录的会话档位优先，升级或重启不会改写用户已选的档位。
+
+首次绑定飞书 owner 也默认开放已安装的 Agent 工具能力；重复安装保留现有授权和显式限制。飞书平台权限仍由应用和用户授权决定，当前消息通道不等于完整飞书业务工具集。
 
 ## 能力概览
 

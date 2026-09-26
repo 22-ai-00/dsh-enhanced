@@ -50,6 +50,31 @@ const fixture = `
 `
 
 describe('Lark Web-profile onboarding patch', () => {
+
+  test.each(['preserve', 'disable'] as const)('retains explicit %s through ordinary reconfiguration', agentTools => {
+    const common = {
+      dshHome: '/Users/test/.dsh', appId: 'cli_0123456789abcdef', account: 'primary',
+      tenant: 'personal', domain: 'feishu' as const, ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary', keychainAccount: 'primary',
+    }
+    const restricted = lark.configureLarkProfilePatch({ ...common, profilePatch: fixture, agentTools })
+    expect(restricted).not.toContain('lark-owner-tool-')
+    expect(restricted).not.toContain('lark-owner-capability-')
+    expect(lark.configureLarkProfilePatch({ ...common, profilePatch: restricted })).toBe(restricted)
+  })
+
+  test('recognizes an unconfigured channel bundle as a new owner installation', () => {
+    const base = lark.refreshLarkAgentPolicyPatch({ profilePatch: fixture, dshHome: '/Users/test/.dsh', agentTools: 'enable' })
+    const profilePatch = base + '\n- id: dsh-enhanced-lark-channel\n  config: { enabled: false, account: primary, appId: "" }\n'
+    const configured = lark.configureLarkProfilePatch({
+      profilePatch, dshHome: '/Users/test/.dsh', appId: 'cli_0123456789abcdef', account: 'primary',
+      tenant: 'personal', domain: 'feishu', ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary', keychainAccount: 'primary',
+    })
+    expect(configured).toContain('lark-owner-capability-*-primary')
+    expect(configured).toContain('lark-owner-tool-*-primary')
+  })
+
   test('refreshes the foreground capability grant without requiring a configured Lark channel', () => {
     const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
     const enabled = refresh({
@@ -165,7 +190,7 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(disabledChannelRefresh).not.toContain('lark-owner-preference-snapshot-')
   })
 
-  test('always grants only the two bounded preference-learning capabilities to the authenticated owner', () => {
+  test('keeps the two bounded preference-learning capabilities when broad tools are explicitly preserved', () => {
     const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
     const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
     const input = {
@@ -179,7 +204,7 @@ describe('Lark Web-profile onboarding patch', () => {
       keychainService: 'dsh/lark/web/secondary',
       keychainAccount: 'secondary',
     }
-    const configured = configure(input)
+    const configured = configure({ ...input, agentTools: 'preserve' })
     const rows = parse(configured, {
       customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
     })
@@ -1105,7 +1130,7 @@ describe('Lark Web-profile onboarding patch', () => {
       keychainService: 'dsh/lark/web/primary',
       keychainAccount: 'primary',
     }
-    const configured = configure(common)
+    const configured = configure({ ...common, agentTools: 'preserve' })
     const legacy = configured.replace('      budgets: []', `
         - id: lark-owner-tool-bash-primary
           effect: allow
@@ -1520,6 +1545,7 @@ describe('Lark Web-profile onboarding patch', () => {
     const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
     const configured = configure({
       profilePatch: fixture,
+      agentTools: 'preserve',
       dshHome: '/Users/test/.dsh',
       appId: 'cli_0123456789abcdef',
       account: 'primary',
@@ -1706,7 +1732,7 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(() => migrate('disable')).toThrow(/lark-owner-reply-primary.*malformed/iu)
   })
 
-  test('preserves existing policy while adding exact owner, credential, and enabled-channel config', () => {
+  test('defaults a new owner to full mounted tool capabilities while preserving user policy', () => {
     const configure = (lark as Record<string, unknown>).configureLarkProfilePatch
     expect(configure).toBeTypeOf('function')
 
@@ -1720,7 +1746,6 @@ describe('Lark Web-profile onboarding patch', () => {
       ownerUserId: 'ou_owner',
       keychainService: 'dsh/lark/web/primary',
       keychainAccount: 'primary',
-      agentTools: 'enable',
     })
 
     expect(output).toContain('keep-user-rule')
@@ -1939,7 +1964,7 @@ describe('Lark Web-profile onboarding patch', () => {
       keychainService: 'dsh/lark/web/primary',
       keychainAccount: 'primary',
     }
-    const untouched = configure(input)
+    const untouched = configure({ ...input, agentTools: 'preserve' })
     expect(untouched).not.toContain('lark-owner-tool-')
 
     const enabled = configure({ ...input, agentTools: 'enable' })

@@ -127,7 +127,7 @@ Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 r
 
 普通 `lark` 场景已经安装 Preference Learning：经 owner onboarding 的完成对话只产生无正文的有界行为证据，并可在固定 T1 目录、阈值和回滚门内自动应用偏好；它不要求 Health、Heartbeat 或 Recovery，也不会新增通用 Agent 工具授权。用户面参数 `--agent-tools disable` 只移除向导托管的规则，不覆盖用户自定义规则或显式的全局 Policy 默认值（安装器内部再映射为 `dsh-lark-setup` 的 `--disable-agent-tools`，不能直接把后者传给安装脚本）。
 
-`supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Goals、Recovery 与 Health；Goals 必须与 Recovery 同场景安装，因为 Recovery 的运行时 Cordis 注入要求 `assistantGoals`（npm optional peer 标记不能把运行时注入变成可选）。v2 激活器用同一 nonce 执行 preview→active 的固定 Host runbook。Recovery bootstrap 本身不依赖模型；独立 `supervised-growth-analyst` 每天最多运行一次，只能读取一个 Host 选出的 adoption candidate 并生成 owner 审批 proposal，不能投递普通模型正文。成长 overlay 会把 Heartbeat 连同 Delivery、Evaluation、Preference Learning、Evolution、Growth Experiments、Recovery、Lark Channel 和四个核心 service 标记为 Health required，并为审批后的 workflow replay/shadow/单次 canary 配置独立的低额度预算与 exact owner route。升级时旧 `supervised-growth` model heartbeat 会被安全暂停；TraeX 仍只在显式 `--with traex` 时安装。
+`supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Goals、Recovery 与 Health；Goals 必须与 Recovery 同场景安装，因为 Recovery 的运行时 Cordis 注入要求 `assistantGoals`（npm optional peer 标记不能把运行时注入变成可选）。v2 激活器用同一 nonce 执行 preview→active 的固定 Host runbook。Recovery bootstrap 本身不依赖模型；独立 `supervised-growth-analyst` 每天最多运行一次，只能读取一个 Host 选出的 adoption candidate 并生成 owner 审批 proposal，不能投递普通模型正文。成长 overlay 会把 Heartbeat 连同 Delivery、Evaluation、Preference Learning、Evolution、Growth Experiments、Recovery、Lark Channel 和四个核心 service 标记为 Health required，并为审批后的 workflow replay/shadow/单次 canary 配置独立的低额度预算与 exact owner route。升级时旧 `supervised-growth` model heartbeat 会被安全暂停；新安装发现本机 TraeX 可执行文件时，会把 provider 纳入同一安装集并启用当前 profile 的 route，升级不会自动追加。
 
 `--with coding|traex|health|heartbeat|events|bridge` 可为其他场景追加能力。`--scenario full` 只用于迁移旧的全量默认集合；新安装不应使用它。`--mode supervised-growth` 保持兼容，等价于 supervised 场景。
 
@@ -170,11 +170,11 @@ v1 任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次�
 
 当前会话不必为了切换档位而重启：Web 使用原生 Permission selector；飞书发送 `/permission` 打开卡片，或发送 `/permission ask`、`/permission auto`、`/permission full confirm`。这些入口修改当前会话；安装器的 `--permission` 修改后续新会话默认。Full access 不绕过显式 Policy 拒绝、紧急停止、身份、预算以及操作系统权限。
 
-默认不更改安装器托管的 Agent capability 规则。飞书场景中才可显式用 `--agent-tools allow` 或 `--agent-tools disable`；`core` 场景保持 `preserve`。
+新安装飞书场景的 `--agent-tools` 默认为 `auto`：新 owner 使用向导的 Agent 工具默认规则，已有 owner 保留原规则。显式 `allow`、`preserve`、`disable` 仍可选；非飞书场景及升级默认保留现有规则，`core` 场景固定为 `preserve`。
 
 ## 配置默认模型
 
-DSH 需要一个能解析的默认模型才能真正对话。所有场景在飞书/常驻服务处理之后、模型 route 验证之前都会进入一次模型配置引导：交互运行会检测当前 profile 是否已能解析 `agent-default-model` 的 provider/model，已配置则默认保留，未配置则默认现在配置；`--yes` 和非交互运行只保留 profile 已组合的默认（至少是内置的 `deepseek-official`），绝不擅自写入新 route。
+DSH 需要一个能解析的默认模型才能真正对话。新安装时若 PATH 上有真正可执行的 `traex` 或 `trae-cli`，安装器会在写入前把 TraeX provider 加入同一 cohort 预检、安装并启用当前 profile 的 route，不弹模型菜单。它只在最终有效命令已登录、且 settings/home/profile 都没有显式默认模型时，为当前 profile 选择 `traex-agent` 默认模型；已有命令、工作目录与明确默认模型均保留。未登录时 route 仍启用，但不声称可对话，只提示运行最终命令的 `login`；`--model skip` 仍安装并启用 route，但不选择默认模型。未发现 TraeX 时沿用模型配置引导；`--yes` 和非交互运行不主动写入新 route。升级不自动追加 TraeX 或改模型 route。
 
 引导支持三种目标，都由 `dsh-model-setup` 写入 `settings.yaml` 的 `agent-default-model`（自定义网关另写 `llm-pi-ai.providers.<route>`）：
 
@@ -192,11 +192,13 @@ DSH 需要一个能解析的默认模型才能真正对话。所有场景在飞�
 ./scripts/install/install-local.sh --model-provider traex-agent
 ```
 
-`--model-api` 仅用于自定义网关，缺省 `openai-completions`（`/v1/chat/completions`），也可选 `openai-responses` 或 `anthropic-messages`；`deepseek-official` 由内置 `dsh-llm-deepseek` 服务，禁止携带这些传输字段。`--model configure` 在交互终端会额外弹出选择向导；`--model skip` 完全跳过。
+`--model-api` 仅用于自定义网关，缺省 `openai-completions`（`/v1/chat/completions`），也可选 `openai-responses` 或 `anthropic-messages`；`deepseek-official` 由内置 `dsh-llm-deepseek` 服务，禁止携带这些传输字段。`--model configure` 在交互终端会额外弹出选择向导；`--model skip` 跳过默认模型选择，但不阻止自动启用本机 TraeX route。
 
 ### 本机 TraeX 作为默认模型
 
-若本机 PATH 上存在 `traex` 或 `trae-cli`，交互向导会多出一个「本机 TraeX」选项，也可用 `--model-provider traex-agent` 直接指定。这是一个 **agent route**（由本机已登录的 TraeX 通过 ACP 提供），因此：
+若显式选择 `--model configure`，且本机 PATH 上存在 `traex` 或 `trae-cli`，交互向导会多出一个「本机 TraeX」选项；也可用 `--model-provider traex-agent` 直接指定。这是一个 **agent route**（由本机已登录的 TraeX 通过 ACP 提供），因此：
+
+以下显式 `--model-provider traex-agent` 路径仍写入全局默认；上面的自动发现路径只可能写当前 profile 的默认行，不改全局 settings。
 
 - 不需要 API Key，也不接受 `--model-base-url/--model-api/--model-display-name`。
 - 安装器会自动把 `@dsh-enhanced/traex-acp-provider` 加入安装集，把全局 `settings.yaml` 的 `agent-default-model` 指向 `traex-agent`，并在**该 profile 的 patch 层**把 provider 行置为 `enabled: true`（保留其它行、注释与 `!!js` 表达式；已有 `cwd` 覆盖不被改写）。

@@ -45,20 +45,19 @@ dsh plugin --profile web add @dsh-enhanced/lark-channel
 dsh --profile web --dump-config
 ```
 
-推荐使用跨平台向导完成飞书应用授权、凭据保存、owner 绑定、最小 Policy 和用户级常驻服务：
+推荐使用跨平台向导完成飞书应用授权、凭据保存、owner 绑定、owner 工具策略 和用户级常驻服务：
 
 ```sh
 ~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup \
   --profile web \
-  --create-app \
-  --allow-agent-tools
+  --create-app
 ```
 
 源码工作区也可运行：
 
 ```sh
 pnpm --filter @dsh-enhanced/lark-channel build
-pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app --allow-agent-tools
+pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 ```
 
 向导不会把 App Secret 放进 argv、profile 或日志。macOS 使用 Keychain，Linux 优先 Secret Service、无桌面环境降级为严格权限的 protected-file，Windows 使用 best-effort DPAPI。完整流程、已有应用接入和平台排障见[安装文档](docs/setup.md)。
@@ -147,7 +146,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 
 ## 权限与数据边界
 
-- `--allow-agent-tools` 是高权限显式开关：为本地 `foreground` 与精确 owner Delivery 主体建立 capability/工具可达性；不授权 `background`，也不绕过显式 deny、紧急停止、身份、预算及插件业务硬门。
+- 首次绑定 owner 默认为本地 `foreground` 与精确 owner Delivery 主体建立已安装 capability/工具可达性，配合默认 Full access 无需逐工具确认。重复配置保留现有规则；可显式 `--allow-agent-tools` 开启、`--disable-agent-tools` 关闭向导规则，或 `--preserve-agent-tools` 连首次配置也保留现状；不授权 `background`，也不绕过显式 deny、紧急停止、身份、预算及插件业务硬门。
 - `ask` 和 `auto` 中真正需要人工确认的工具调用只向 active owner 私聊发送一次性 CardKit 2.0 审批卡；卡片包含“允许一次 / 拒绝”按钮。若租户拒绝该卡片格式，只对 `format_error` 降级成同一私聊的明确文字审批；恰好一个匹配请求时，owner 回复“允许”“允许一次”或“拒绝”可恢复原调用。多请求并存不猜测，网络/连接失败也不自动放行。`full` 关闭逐次审批并放开 sandbox，应保持 owner 与应用可用范围最小。
 - `ask_user_question` 的卡片是另一条即时交互路径：本包有向原飞书会话发送/原位更新 CardKit 2.0 卡片、并接收 `card.action.trigger` callback 的网络权限。选项仅以签名 callback capability 提交；自由文本只接受 exact owner 对原卡的明确回复。它不把卡片点击或匹配回复写成普通 Inbox/新 turn，且问题内容会在原会话显示，群聊并不保密。
 - 行为学习审批卡会把签名覆盖的 scope、情境、guidance、版本、证据和回滚原因逐字段以纯文本展示；提案内容不会作为 Markdown 或卡片组件解释。点击后卡片只确认 Policy 决策已写入持久账本，明确不把“批准”误报成“变更已生效”。

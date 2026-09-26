@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { parse, stringify } from 'yaml'
 import * as lark from '../src/index.ts'
 
 const lifecycleProfilePath = fileURLToPath(new URL('../../../scripts/install/lifecycle-profile.mjs', import.meta.url))
@@ -639,6 +640,42 @@ setInterval(() => {}, 1000)`,
     expect(await readFile(patchPath, 'utf8')).toBe(updatedPatch)
     expect(JSON.parse(await readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')))
       .toMatchObject({ phase: 'validated', databasePath })
+  })
+
+  test('grants owner tools through first-time setup with an empty raw profile and no permission flags', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-fresh-auto-tools-'))
+    const dshHome = join(root, 'dsh-home')
+    const patchPath = join(dshHome, 'profiles/web/cordis.patch.yml')
+    await mkdir(dirname(patchPath), { recursive: true })
+    await writeFile(patchPath, '# new profile\n[]\n', 'utf8')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const base = lark.refreshLarkAgentPolicyPatch({
+      profilePatch: baseAssistantProfile(dshHome, databasePath), dshHome, agentTools: 'enable',
+    })
+    const bundledChannel = parse(await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8'))[0].insert
+    const effectiveBase = asEffectiveProfile(base) + '\n' + stringify(bundledChannel)
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    let paired = false
+    await executeLarkSetupProfileTransaction({
+      args: lark.parseLarkSetupArgs(['--no-service']), dshHome, patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      operations: {
+        readEffectiveProfile() {
+          const patch = readFileSync(patchPath, 'utf8')
+          return patch === '# new profile\n[]\n' ? effectiveBase : asEffectiveProfile(patch)
+        },
+        storeCredential() {}, readCredential() { return 'test-secret' },
+        discoverOwner() { return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_owner' } },
+        validateProfile() {}, pairPrincipal() { paired = true }, removeCredential() {},
+      },
+    })
+    const installed = await readFile(patchPath, 'utf8')
+    expect(paired).toBe(true)
+    expect(installed).toContain('lark-owner-capability-*-primary')
+    expect(installed).toContain('lark-owner-tool-*-primary')
+    expect(installed).toContain('principal: lark/primary/personal/ou_owner')
+    expect(installed).not.toContain('cli_0000000000000000')
   })
 
   test('rolls back before pairing when the effective Delivery database changes during validation', async () => {
@@ -2857,7 +2894,7 @@ setInterval(() => {}, 1000)`,
     const parse = parseArgs as (argv: string[]) => unknown
 
     expect(parse(['--profile', 'web', '--domain', 'feishu'])).toMatchObject({ profile: 'web', domain: 'feishu' })
-    expect(parse([])).toMatchObject({ agentTools: 'preserve', linuxCredentialProvider: 'auto' })
+    expect(parse([])).toMatchObject({ agentTools: 'auto', linuxCredentialProvider: 'auto' })
     expect(parse(['--linux-credential-provider', 'secret-service']))
       .toMatchObject({ linuxCredentialProvider: 'secret-service' })
     expect(parse(['--linux-credential-provider', 'protected-file']))
@@ -2866,6 +2903,10 @@ setInterval(() => {}, 1000)`,
       .toThrow(/linux-credential-provider.*auto.*protected-file.*secret-service/iu)
     expect(parse(['--allow-agent-tools'])).toMatchObject({ agentTools: 'enable' })
     expect(parse(['--disable-agent-tools'])).toMatchObject({ agentTools: 'disable' })
+    expect(parse(['--preserve-agent-tools'])).toMatchObject({ agentTools: 'preserve' })
+    expect(() => parse(['--preserve-agent-tools', '--allow-agent-tools'])).toThrow(/mutually exclusive/i)
+    expect(() => parse(['--disable-agent-tools', '--preserve-agent-tools'])).toThrow(/mutually exclusive/i)
+    expect(() => parse(['--refresh-agent-policy', '--preserve-agent-tools'])).toThrow(/requires/iu)
     expect(() => parse(['--allow-agent-tools', '--disable-agent-tools'])).toThrow(/mutually exclusive/i)
     expect(parse(['--profile', 'web', '--refresh-agent-policy', '--allow-agent-tools'])).toMatchObject({
       profile: 'web',

@@ -18,7 +18,7 @@ traex login status
 
 `--version` 只是人工兼容记录；运行时的机器门禁是精确 `login status` 加 ACP `initialize` 返回的 protocol / agent identity / auth method，不依赖对版本文本的宽松解析。
 
-如命令名是 `trae-cli`，可在插件配置中覆盖 `command`。首次登录应在 DSH 外单独完成，例如本机版本提供的 `traex login --sso` 或 `traex login --sso-device`；插件不会启动交互式登录或打开浏览器。
+一键安装器自动检测 `traex` / `trae-cli` 并补入实际可执行路径；手动安装时可在插件配置中覆盖 `command`。首次登录应在 DSH 外单独完成，例如本机版本提供的 `traex login --sso` 或 `traex login --sso-device`；插件不会启动交互式登录或打开浏览器。
 
 公开的 ByteDance `trae-agent` Python 项目与这里检测到的 TraeX / TRAE CLI 不是同一个运行时。只有 `acp serve` 可用且握手返回 `agentInfo.name = "traex-acp"` 的实现会被本插件接受。
 
@@ -29,7 +29,7 @@ dsh plugin --profile web add @dsh-enhanced/traex-acp-provider
 dsh --profile web --dump-config
 ```
 
-该实验性 route 默认关闭。确认本机版本、登录和 ACP 入口后设置 `enabled: true`，再在 DSH 的 provider/model 选择处选择 `traex-agent`。首次打开模型选择器时，`listModels` 会自动执行一次不提交 prompt 的只读 ACP discovery，展示当前账号完整模型目录；并发查询共享同一次发现，短 TTL 内直接复用，过期后刷新。`default` 沿用 TraeX 当前模型。具体模型和 effort 都通过 ACP session config option 选择，不会拼进 shell 命令。
+直接添加 bundle 时该实验性 route 默认关闭；一键安装器发现本地命令后自动启用。手动安装确认本机版本、登录和 ACP 入口后设置 `enabled: true`，再在 DSH 的 provider/model 选择处选择 `traex-agent`。首次打开模型选择器时，`listModels` 会自动执行一次不提交 prompt 的只读 ACP discovery，展示当前账号完整模型目录；并发查询共享同一次发现，短 TTL 内直接复用，过期后刷新。`default` 沿用 TraeX 当前模型。具体模型和 effort 都通过 ACP session config option 选择，不会拼进 shell 命令。
 
 ### 设为部署默认模型
 
@@ -39,9 +39,9 @@ dsh --profile web --dump-config
 dsh-model-setup --provider traex-agent --enable-in-profile web
 ```
 
-一键安装器同样支持：本机存在 `traex`/`trae-cli` 时交互向导会出现「本机 TraeX」选项，或直接 `./scripts/install/install-local.sh --model-provider traex-agent`——它会自动把本 bundle 加入安装集、把全局 `agent-default-model` 指向 `traex-agent`、在该 profile 启用 route，并探测 `traex login status`（未登录仅提示，不中断）。
+一键安装器检测到本机 `traex` / `trae-cli` 就会自动安装并启用本 bundle，无需手动选插件。已登录且没有显式模型选择时，自动设置当前 profile 的默认模型；已有 settings/home/profile 选择以及 command/cwd 保留。没有登录时插件仍启用，但不会自动切换默认模型或宣称可对话；完成一次 TraeX 登录即可继续。`--model skip` 保留默认模型，仍自动启用插件。
 
-关键区别：`agent-default-model` 是**全局唯一**的 settings 段，被所有 profile 共享；而本 route 的**适配器按 profile 注册**，只在启用了本 bundle 的 profile 里存在。因此把默认设为 `traex-agent` 后，只有已启用本 route 的 profile（默认 `web`）能解析它，`headless` 等未安装本 bundle 的 profile 会报 `NO_ADAPTER`。安装器的 `--model-route verify` 因此对 agent route 采用结构化验证（校验目标 profile 已注册适配器 + `traex login status`），不发模型请求、不消耗额度。`enabled` 仍是本 bundle 的最终开关。
+关键区别：手动 `dsh-model-setup` 不带条件选项时写入的 `agent-default-model` settings 段被所有 profile 共享；自动安装使用的 `--default-if-absent` 只写目标 profile 的组合默认值；而本 route 的**适配器按 profile 注册**，只在启用了本 bundle 的 profile 里存在。因此把默认设为 `traex-agent` 后，只有已启用本 route 的 profile（默认 `web`）能解析它，`headless` 等未安装本 bundle 的 profile 会报 `NO_ADAPTER`。安装器的 `--model-route verify` 因此对 agent route 采用结构化验证（校验目标 profile 已注册适配器 + `traex login status`），不发模型请求、不消耗额度。`enabled` 仍是本 bundle 的最终开关。
 
 ## 快速开始（5 步）
 
