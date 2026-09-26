@@ -1,7 +1,7 @@
 {
-  "name": "@dsh-enhanced/rsi-cli",
+  "name": "@dsh-enhanced/dsh-rsi-cli",
   "version": "0.1.47",
-  "description": "Global dsh-rsi command: status, doctor, and full purge for DSH enhanced plugin installations.",
+  "description": "Global dsh-rsi command: status, doctor, web-url, and full purge for DSH enhanced plugin installations.",
   "license": "MIT",
   "type": "module",
   "main": "./lib/index.js",
@@ -38,7 +38,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
-    "directory": "packages/rsi-cli"
+    "directory": "packages/dsh-rsi-cli"
   },
   "keywords": [
     "deepseek",

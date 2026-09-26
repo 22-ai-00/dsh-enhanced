@@ -1,9 +1,9 @@
-# @dsh-enhanced/rsi-cli — 全局 `dsh-rsi` 命令
+# @dsh-enhanced/dsh-rsi-cli — 全局 `dsh-rsi` 命令
 
 DSH enhanced 插件集合的安装 / 控制 / 诊断 / 彻底卸载工具。安装插件集合（npm cohort 或本地 checkout 形态）后，安装器会同时把本包装成全局 `dsh-rsi` 命令；也可单独安装：
 
 ```bash
-npm install --global @dsh-enhanced/rsi-cli
+npm install --global @dsh-enhanced/dsh-rsi-cli
 ```
 
 零运行时依赖（仅用 Node.js 内置模块），要求 Node.js `^22.19.0 || >=24.0.0`，支持 macOS 与 Linux。
@@ -20,6 +20,7 @@ dsh-rsi [全局选项] <命令>
 | `doctor` | 在 `status` 基础上扫描各 profile 的 `*-host.error.log`，识别已知崩溃模式（如旧版 event-support oracle 拒绝注册）并给出升级/重建建议。**只读**。 |
 | `start` / `stop` / `restart` | 切换已注册受管常驻服务的运行状态。**只改运行状态**，不新建/改写/删除 launchd plist 或 systemd unit；未注册时报错并给出注册指引。 |
 | `logs` | 查看各 profile 的受管 `*-host.log` / `*-host.error.log` 尾部（默认末 200 行）。**只读**。 |
+| `web-url` | 从运行中受管服务的 journal（Linux）或 `*-host.log`（macOS）解析最近一次 `dsh web:` 行，输出带 token 的完整 Web 授权 URL。**只读**，不关闭或绕过 Web 认证；服务未运行时提示先 `dsh-rsi start`。 |
 | `update` | 升级全局 dsh-rsi 自身；加 `--all` 再把插件集合交给安装器 `--operation upgrade` **原地升级**（保留 patch、凭据、Session、Goal）。 |
 | `install` | 安装/修复插件集合：npm 形态下载与本 dsh-rsi 同版本的官方安装器执行，`--local <dir>` 执行 checkout 内安装器；其余参数原样透传。 |
 | `reinstall` | 先 `purge`（默认先备份、同样的安全门控）再立即 `install`，用于干净重装。 |
@@ -38,8 +39,8 @@ dsh-rsi [全局选项] <命令>
 
 `dsh-rsi install` 不复制任何安装逻辑，只做统一入口与引导器版本固定：
 
-- **npm 形态（默认）**：下载 `https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v<本包版本>/scripts/install/install-npm.sh` 到临时目录执行。引导脚本内部会按内嵌 SHA-256 自校验 `common.sh` 等资产，rsi-cli 不重复 hash 逻辑。**锁定的只是引导脚本与同 tag 的安装器资产，不是插件 cohort 版本**：安装器默认把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套 `@dsh-enhanced/*` bundle；要锁定插件版本需透传 `--plugin-version <x.y.z|dist-tag>` 或预设 `DSH_ENHANCED_VERSION`。安装器尾部还会执行 `npm install --global @dsh-enhanced/rsi-cli@<cohort 版本>`，可能因此把全局 dsh-rsi 升降级到该 cohort 版本。
-- **local 形态**：`--local <checkout 目录>`，直接执行该目录下 `scripts/install/install-local.sh`，并从该 checkout 全局安装 rsi-cli（本地开发 / 无网救机）。
+- **npm 形态（默认）**：下载 `https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/v<本包版本>/scripts/install/install-npm.sh` 到临时目录执行。引导脚本内部会按内嵌 SHA-256 自校验 `common.sh` 等资产，dsh-rsi 不重复 hash 逻辑。**锁定的只是引导脚本与同 tag 的安装器资产，不是插件 cohort 版本**：安装器默认把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套 `@dsh-enhanced/*` bundle；要锁定插件版本需透传 `--plugin-version <x.y.z|dist-tag>` 或预设 `DSH_ENHANCED_VERSION`。安装器尾部还会执行 `npm install --global @dsh-enhanced/dsh-rsi-cli@<cohort 版本>`，可能因此把全局 dsh-rsi 升降级到该 cohort 版本。
+- **local 形态**：`--local <checkout 目录>`，直接执行该目录下 `scripts/install/install-local.sh`，并从该 checkout 的 packages/dsh-rsi-cli 全局安装（本地开发 / 无网救机）。
 - 安装器 stdio 与终端直连（交互提示照常），退出码原样透传。
 
 ```bash

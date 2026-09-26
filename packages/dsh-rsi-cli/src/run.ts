@@ -33,7 +33,8 @@ function escapeRegex(value: string): string {
  * 先用 `pgrep -f <pattern>`（只取 PID），pattern 为 `--profile <profile>`；
  * 命令行再用 `ps -p <pid> -o command=` 读取（procps/BSD 均支持），
  * 因为部分环境 pgrep -l 会打印线程 comm（如 MainThread）而非完整命令行。
- * dsh-rsi purge 自身命令行也可能带该参数，因此把命令行中含 dsh-rsi/rsi-cli 的匹配剔除。
+ * dsh-rsi purge 自身命令行也可能带该参数，因此把命令行中含 dsh-rsi / dsh-rsi-cli
+ * （旧包名 @dsh-enhanced/rsi-cli 的全局路径同样包含 rsi-cli）的匹配剔除。
  * pgrep 无匹配时退出码 1（属正常）；其它非零按执行失败上抛，由调用方 fail-closed。
  */
 export function findRunningProfiles(

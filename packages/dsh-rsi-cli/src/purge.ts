@@ -14,6 +14,7 @@ import {
 import { deleteCredentialLocator, scanCredentialLocators } from './secrets.ts'
 import { findRunningProfiles, defaultRunner, type CommandRunner } from './run.ts'
 import { stopManagedService } from './services.ts'
+import { scanRunningProfiles, terminatePids } from './process-guard.ts'
 
 export class PurgeError extends Error {}
 
@@ -31,6 +32,8 @@ export interface PurgeOptions {
   /** UTC 时间戳生成器（测试可注入）。 */
   stamp?: () => string
   runner?: CommandRunner
+  /** --yes：自动终止已证明归属本 DSH home 的残留进程；否则仅报告并要求显式确认。 */
+  assumeYes?: boolean
 }
 
 export interface PurgeReport {
@@ -47,6 +50,10 @@ export interface PurgeReport {
   hostRemoved: boolean
   hostPrefix?: string
   dryRun: boolean
+  /** 停服后残留进程的处理结果（proven 终止 / foreign 拒绝）。 */
+  terminatedPids: number[]
+  failedPids: number[]
+  foreignProcesses: string[]
 }
 
 function utcStamp(): string {
@@ -90,15 +97,9 @@ export async function runPurge(options: PurgeOptions): Promise<PurgeReport> {
   }
   const targetProfiles = scope === 'full' ? allProfiles : [options.profile!]
 
-  // 1. 进程静止检查
-  const { active, error } = findRunningProfiles(targetProfiles, runner)
-  if (error !== undefined) throw new PurgeError(`无法检查运行中的 profile 进程：${error}`)
-  if (active.length > 0) {
-    const listing = active.map(process_ => `  PID ${process_.pid}: ${process_.commandLine}`).join('\n')
-    throw new PurgeError(`以下 profile host 仍在运行，请先停用服务后再 purge（不代你结束进程）：\n${listing}`)
-  }
-
-  // 2. 停服注销（失败即中止，此时尚未做任何破坏性修改）
+  // 1. 先停用并注销受管常驻服务（fail-closed：停服失败则不进入删除阶段）。
+  //    受管 host 是「本应自动停掉」的进程，旧逻辑把它和临时进程一起当成阻塞，
+  //    导致用户明明可以自动停服却被卡在入口。
   const skippedServiceFiles: string[] = []
   const serviceErrors: string[] = []
   for (const profile of targetProfiles) {
@@ -107,6 +108,48 @@ export async function runPurge(options: PurgeOptions): Promise<PurgeReport> {
     for (const message of outcome.errors) serviceErrors.push(`[${profile}] ${message}`)
   }
   if (serviceErrors.length > 0) throw new PurgeError(`受管服务停用失败，已中止（未删除任何数据）：\n${serviceErrors.join('\n')}`)
+
+  // 2. 停服后复检残留进程。受管 host 此时应已消失；剩下的要么是可证明归属本 home
+  //    的临时 dsh/plugin 命令（proven，可终止），要么是无法证明归属的进程（foreign，
+  //    fail-closed，绝不自动杀）。
+  const guard = await scanRunningProfiles(options.dshHome, targetProfiles, runner)
+  if (guard.error !== undefined) {
+    throw new PurgeError(`无法检查运行中的 profile 进程：${guard.error}`)
+  }
+  const foreign = guard.processes.filter(p => p.owner === 'foreign')
+  const proven = guard.processes.filter(p => p.owner === 'proven')
+  const foreignListing = foreign.map(p => `  PID ${p.pid}: ${p.commandLine}\n    ${p.evidence.join('\n    ')}`).join('\n')
+  if (foreign.length > 0) {
+    throw new PurgeError(`发现无法证明归属本 DSH home 的进程，为避免误杀已中止（请手工确认后再 purge）：\n${foreignListing}`)
+  }
+
+  const terminatedPids: number[] = []
+  const failedPids: number[] = []
+  if (proven.length > 0) {
+    const listing = proven.map(p => `  PID ${p.pid}: ${p.commandLine}\n    ${p.evidence.join('\n    ')}`).join('\n')
+    if (options.dryRun) {
+      // dry-run 只列出，不终止。
+    } else if (options.assumeYes) {
+      const outcome = await terminatePids(proven.map(p => p.pid), runner)
+      if (outcome.failed.length > 0) {
+        throw new PurgeError(`以下残留进程未能安全终止（身份已变化或 KILL 后仍在），已中止：${outcome.failed.join(', ')}\n${listing}`)
+      }
+      terminatedPids.push(...proven.map(p => p.pid))
+    } else {
+      throw new PurgeError(
+        `发现以下指向本 DSH home 的残留进程（可能是正在执行的 dsh plugin 操作）。` +
+        `purge 将删除它们正在使用的目录，请先确认其已结束，或加 --yes 自动终止：\n${listing}`,
+      )
+    }
+  }
+
+  // 兼容旧的整体静止检查：在进程守卫之外再做一次 pgrep 汇总（无 proven/foreign 区分时用）。
+  const { active, error } = findRunningProfiles(targetProfiles, runner)
+  if (error !== undefined) throw new PurgeError(`无法检查运行中的 profile 进程：${error}`)
+  if (active.length > 0 && proven.length === 0 && foreign.length === 0) {
+    const listing = active.map(process_ => `  PID ${process_.pid}: ${process_.commandLine}`).join('\n')
+    throw new PurgeError(`以下 profile host 仍在运行，请先停用服务后再 purge（不代你结束进程）：\n${listing}`)
+  }
 
   const report: PurgeReport = {
     scope,
@@ -120,6 +163,9 @@ export async function runPurge(options: PurgeOptions): Promise<PurgeReport> {
     keptCheckouts: [],
     hostRemoved: false,
     dryRun: options.dryRun,
+    terminatedPids,
+    failedPids,
+    foreignProcesses: foreign.map(p => p.commandLine),
   }
 
   // 3. 备份（单 profile 也备份整个 home：其中包含该 profile 全部数据与凭据落盘）

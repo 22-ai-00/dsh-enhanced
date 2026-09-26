@@ -10,7 +10,7 @@
     "packages": {
       "@dsh-enhanced/assistant-growth-contract": "0.1.47",
       "@dsh-enhanced/llm-route-capabilities": "0.1.47",
-      "@dsh-enhanced/rsi-cli": "0.1.47",
+      "@dsh-enhanced/dsh-rsi-cli": "0.1.47",
       "@dsh-enhanced/task-acceptance-contract": "0.1.47",
       "@dsh-enhanced/acp": "0.1.47",
       "@dsh-enhanced/assistant-actions": "0.1.47",
@@ -1206,7 +1206,7 @@
       "packages": {
         "@dsh-enhanced/assistant-growth-contract": "0.1.47",
         "@dsh-enhanced/llm-route-capabilities": "0.1.47",
-        "@dsh-enhanced/rsi-cli": "0.1.47",
+        "@dsh-enhanced/dsh-rsi-cli": "0.1.47",
         "@dsh-enhanced/task-acceptance-contract": "0.1.47",
         "@dsh-enhanced/acp": "0.1.47",
         "@dsh-enhanced/assistant-actions": "0.1.47",

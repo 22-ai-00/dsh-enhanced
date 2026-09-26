@@ -6,6 +6,7 @@ import { resolveDshHome } from './paths.ts'
 import { runInstall } from './install.ts'
 import { findRunningProfiles } from './run.ts'
 import { formatSelfUpdateReport, runSelfUpdate } from './update.ts'
+import { formatWebUrlResult, resolveManagedWebUrl } from './weburl.ts'
 import {
   collectLogs,
   controlManagedService,
@@ -32,6 +33,7 @@ export {
   resolveTargetProfiles,
   tailLogFile,
 } from './services.ts'
+export { extractWebUrlFromText, formatWebUrlResult, resolveManagedWebUrl } from './weburl.ts'
 export { resolveDshHome } from './paths.ts'
 export { version } from './version.ts'
 
@@ -48,6 +50,7 @@ const HELP = `dsh-rsi — DSH enhanced 插件集合的安装 / 控制 / 诊断 /
   stop        停止受管常驻服务（保留服务定义与 profile 数据，可再次 start）
   restart     重启受管常驻服务（配置/插件变更后生效的常用方式）
   logs        查看各 profile 的受管 stdout/stderr 日志尾部
+  web-url     解析受管服务当前有效的带 token Web 授权 URL（从 journal / host 日志取最新 dsh web 行）
   update      升级全局 dsh-rsi 自身；加 --all 再升级整套插件集合（原地升级，保留数据）
   install     安装/修复插件集合（薄委托到官方安装器，参数原样透传）
   reinstall   purge（默认先备份）后立即重新安装
@@ -68,7 +71,8 @@ install / reinstall：
                       install --help 会展示安装器完整参数清单（也见 scripts/install/README.md）
 
 update：
-  不带参数            只升级全局 dsh-rsi 自身（npm install --global @dsh-enhanced/rsi-cli@latest）
+  不带参数            只升级全局 dsh-rsi 自身（npm install --global @dsh-enhanced/dsh-rsi-cli@latest）；
+                      若当前仍由旧包 @dsh-enhanced/rsi-cli 安装，会在新包可用后自动卸载旧包。
   --all               自身升级成功后，再把插件集合交给官方安装器 --operation upgrade 原地升级
                       （保留 patch、凭据、Session、Goal 等状态；不同于 reinstall 的先 purge 再装）
   --version <v|tag>   指定 dsh-rsi 目标版本或 dist-tag（默认 latest）
@@ -135,7 +139,7 @@ interface ParsedArgs {
 }
 
 const KNOWN_COMMANDS = new Set([
-  'status', 'doctor', 'start', 'stop', 'restart', 'logs', 'update',
+  'status', 'doctor', 'start', 'stop', 'restart', 'logs', 'web-url', 'update',
   'install', 'reinstall', 'purge', 'version',
 ])
 const GLOBAL_FLAGS = new Set(['--dry-run', '--yes', '--help', '-h'])
@@ -353,6 +357,9 @@ function formatPurgeReport(args: ParsedArgs, report: PurgeReport): string {
   }
   for (const profile of report.serviceProfiles) lines.push(`服务：已停用并注销 ${profile} 的受管常驻服务`)
   for (const path of report.skippedServiceFiles) lines.push(`服务文件保留：${path}`)
+  if (report.terminatedPids.length > 0) {
+    lines.push(`残留进程：已终止 ${report.terminatedPids.length} 个（PID ${report.terminatedPids.join(", ")}）`)
+  }
   lines.push(`删除路径（${report.removedPaths.length}）：`)
   for (const path of report.removedPaths) lines.push(`  - ${path}`)
   if (report.removedCredentials.length > 0) {
@@ -473,6 +480,20 @@ export async function main(
         process.stdout.write(`${formatLogs(collected, args.lines)}\n`)
         return 0
       }
+      case 'web-url': {
+        const profiles = await resolveTargetProfiles(args.dshHome, args.profile)
+        if (profiles.length === 0) {
+          process.stderr.write(`web-url：${args.dshHome} 下没有任何 profile\n`)
+          return 1
+        }
+        const entries = []
+        for (const profile of profiles) {
+          entries.push(await resolveManagedWebUrl(process.platform, homedir(), args.dshHome, profile))
+        }
+        process.stdout.write(`${formatWebUrlResult(entries)}\n`)
+        // 任一 profile 解析出错时退出 1，但仍尽量打印成功的 URL。
+        return entries.some(entry => entry.errors.length > 0) ? 1 : 0
+      }
       case 'update': {
         // 先升级自身：--all 下若自身升级失败就不继续动插件集合，避免用旧版 rsi
         // 的判断去驱动新一轮 cohort 升级。
@@ -543,6 +564,7 @@ export async function main(
           keepKeychain: args.keepKeychain,
           removeHost: args.removeHost,
           dryRun: args.dryRun,
+          assumeYes: args.yes,
         })
         process.stdout.write(`${formatPurgeReport(args, report)}\n\n`)
         return await install(buildInstallOptions(args))
@@ -563,6 +585,7 @@ export async function main(
           keepKeychain: args.keepKeychain,
           removeHost: args.removeHost,
           dryRun: args.dryRun,
+          assumeYes: args.yes,
         })
         process.stdout.write(`${formatPurgeReport(args, report)}\n`)
         return 0

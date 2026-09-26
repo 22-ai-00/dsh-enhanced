@@ -15,6 +15,9 @@ const fakeReport = {
   keptCheckouts: [],
   hostRemoved: false,
   dryRun: false,
+  terminatedPids: [],
+  failedPids: [],
+  foreignProcesses: [],
 }
 
 type InstallFn = NonNullable<MainDeps['install']>
@@ -34,7 +37,7 @@ function makeDeps(installCalls: unknown[], purgeCalls: unknown[] = []): Required
     // 这些测试不走 update 路径；注入假实现只为满足 Required<MainDeps>，
     // 同时确保任何意外调用都不会打到真实 npm registry。
     selfUpdate: (async () => ({
-      fromVersion: '0.0.0', selector: 'latest', alreadyCurrent: true, actions: [],
+      fromVersion: '0.0.0', selector: 'latest', alreadyCurrent: true, migratedFrom: false, actions: [],
     })) as SelfUpdateFn,
     findRunning: () => ({ active: [] }),
     managedServicePids: async () => ({ pids: [], errors: [] }),
