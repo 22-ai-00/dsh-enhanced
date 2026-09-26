@@ -18,7 +18,7 @@ const plan = (status: PluginActivationPlan['status']): PluginActivationPlan => (
 function storeFixture(status: PluginActivationPlan['status'] = 'awaiting-health', handoff = { planId: 'plan', planDigest: 'b'.repeat(64), coordinatorId: 'coordinator', createdAt: 1, expiresAt: Date.now() + 60_000 }) {
   let current = plan(status)
   return { store: {
-    getPlan: vi.fn(() => current), getAdoptionHandoff: vi.fn(() => handoff),
+    getPlan: vi.fn(() => current), getAdoptionHandoff: vi.fn(() => handoff), getLiveQualificationDeadline: vi.fn<() => number | undefined>(() => undefined),
     assertAdoptionHandoff: vi.fn(() => { if (handoff.expiresAt <= Date.now() || 'revokedAt' in handoff) throw new Error('inactive') }),
     requestActivationRollback: vi.fn(() => current = { ...current, status: 'rollback-pending', revision: current.revision + 1,
       activation: { ...current.activation!, rollbackProfileRestored: true } }),
@@ -49,6 +49,24 @@ test('expired exposed handoff enters the shared rollback path; an unexposed appr
   const approved = storeFixture('approved', expired)
   await coordinateAdoptionHandoff({ store: approved.store as never, trust: {} as never, planId: 'plan' })
   expect(approved.store.requestActivationRollback).not.toHaveBeenCalled()
+  expect(activatePluginPlan).not.toHaveBeenCalled()
+})
+
+test('live qualification deadline rolls back exposure before the handoff expires', async () => {
+  const f = storeFixture('awaiting-live-tasks')
+  f.store.getLiveQualificationDeadline.mockReturnValue(Date.now() - 1)
+  vi.mocked(probePluginPlan).mockImplementation(async () => ({ ...f.state(), status: 'rolled-back' }))
+  await coordinateAdoptionHandoff({ store: f.store as never, trust: {} as never, planId: 'plan' })
+  expect(f.store.requestActivationRollback).toHaveBeenCalledWith(expect.objectContaining({ failureCode: 'live-qualification-expired' }))
+  expect(probePluginPlan).toHaveBeenCalledWith(expect.objectContaining({ deferCommit: true }))
+})
+
+test('waiting for live tasks does not request a strict behavioral attestation', async () => {
+  const f = storeFixture('awaiting-live-tasks')
+  f.store.getLiveQualificationDeadline.mockReturnValue(Date.now() + 60_000)
+  const output = await coordinateAdoptionHandoff({ store: f.store as never, trust: {} as never, planId: 'plan' })
+  expect(output.status).toBe('awaiting-live-tasks')
+  expect(probePluginPlan).not.toHaveBeenCalled()
   expect(activatePluginPlan).not.toHaveBeenCalled()
 })
 

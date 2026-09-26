@@ -699,7 +699,7 @@ function advance(store: ControlPlaneStore, plan: PluginActivationPlan, to: PlanS
 
 async function finishRollback(store: ControlPlaneStore, plan: PluginActivationPlan, lock: ProfileLock): Promise<PluginActivationPlan> {
   const activationPaths = paths(plan)
-  const observed = plan.activation?.failureCode?.startsWith('post-activation-') === true
+  const observed = (plan.activation?.failureCode?.startsWith('post-activation-') || (plan.activation?.failureCode === 'live-qualification-invalidated' && store.getActivationInstalledBaseline(plan.id) !== undefined)) === true
   if (observed) {
     await restoreObservedTarget(store, plan)
   } else await restoreTarget(store, plan, activationPaths.backupPath)

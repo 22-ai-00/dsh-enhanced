@@ -3,7 +3,51 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 23
+export const controlPlaneSchemaVersion = 24
+
+const liveQualificationSchema = `
+CREATE TABLE IF NOT EXISTS live_qualification_windows (
+  plan_id TEXT PRIMARY KEY REFERENCES activation_plans(id) ON DELETE RESTRICT,
+  activation_id TEXT NOT NULL, fence INTEGER NOT NULL CHECK(fence >= 1),
+  started_at INTEGER NOT NULL, deadline_at INTEGER NOT NULL CHECK(deadline_at > started_at)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS live_qualification_batches (
+  id TEXT PRIMARY KEY, lane TEXT NOT NULL, plan_id TEXT NOT NULL REFERENCES activation_plans(id) ON DELETE RESTRICT,
+  batch_json TEXT NOT NULL CHECK(json_valid(batch_json)), batch_digest TEXT NOT NULL CHECK(length(batch_digest)=64),
+  state TEXT NOT NULL CHECK(state IN ('pending','signed','applied','stale')),
+  receipt_json TEXT CHECK(receipt_json IS NULL OR json_valid(receipt_json)),
+  receipt_digest TEXT CHECK(receipt_digest IS NULL OR length(receipt_digest)=64), created_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+CREATE UNIQUE INDEX IF NOT EXISTS live_qualification_one_current ON live_qualification_batches(plan_id) WHERE state IN ('pending','signed','applied');
+CREATE TABLE IF NOT EXISTS live_qualification_invalidations (
+  plan_id TEXT PRIMARY KEY REFERENCES activation_plans(id) ON DELETE RESTRICT,
+  batch_id TEXT NOT NULL REFERENCES live_qualification_batches(id) ON DELETE RESTRICT,
+  batch_digest TEXT NOT NULL, receipt_digest TEXT NOT NULL, activation_id TEXT NOT NULL, fence INTEGER NOT NULL,
+  reason TEXT NOT NULL, invalidated_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;`
+
+/** Rebuild the status constraint without rewriting signed plan JSON or foreign-key targets. */
+function migrateV23ToV24(database: DatabaseSync): void {
+  const table = database.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='activation_plans'").get() as { sql: string }
+  const indexes = database.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name='activation_plans' AND sql IS NOT NULL").all() as Array<{ sql: string }>
+  const columns = (database.prepare('PRAGMA table_info(activation_plans)').all() as Array<{ name: string }>).map(row => {
+    if (!/^[a-z_]+$/u.test(row.name)) throw new Error('invalid activation column')
+    return `"${row.name}"`
+  }).join(',')
+  const schema = table.sql.replace(/^CREATE TABLE\s+"?activation_plans"?/u, 'CREATE TABLE activation_plans_v24')
+    .replaceAll("'awaiting-health'", "'awaiting-health','awaiting-live-tasks'")
+  if (!schema.startsWith('CREATE TABLE activation_plans_v24') || !schema.includes("'awaiting-live-tasks'")) throw new Error('unknown activation schema')
+  database.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE')
+  try {
+    database.exec(`${schema}; INSERT INTO activation_plans_v24 (${columns}) SELECT ${columns} FROM activation_plans;
+      DROP TABLE activation_plans; ALTER TABLE activation_plans_v24 RENAME TO activation_plans;`)
+    for (const index of indexes) database.exec(index.sql.replaceAll("'awaiting-health'", "'awaiting-health','awaiting-live-tasks'"))
+    database.exec(liveQualificationSchema)
+    if (database.prepare('PRAGMA foreign_key_check').all().length) throw new Error('activation migration changed a foreign key')
+    database.exec('PRAGMA user_version = 24; COMMIT')
+  } catch (error) { database.exec('ROLLBACK'); throw error }
+  finally { database.exec('PRAGMA foreign_keys = ON') }
+}
 
 const adoptionHandoffsSchema = `CREATE TABLE IF NOT EXISTS adoption_handoffs (
  plan_id TEXT PRIMARY KEY REFERENCES activation_plans(id) ON DELETE RESTRICT, plan_digest TEXT NOT NULL CHECK(length(plan_digest)=64), coordinator_id TEXT NOT NULL,
@@ -1175,6 +1219,8 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 23) {
       database.exec(`BEGIN IMMEDIATE; ${adoptionHandoffsSchema} PRAGMA user_version = 23; COMMIT;`)
     } else database.exec(adoptionHandoffsSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 24) migrateV23ToV24(database)
+    else database.exec(liveQualificationSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

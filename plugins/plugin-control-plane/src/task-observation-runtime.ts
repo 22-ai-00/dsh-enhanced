@@ -9,6 +9,7 @@ import { validateSourceApprovalClientConfig } from './source-approval-client.js'
 import { requestTaskObservation } from './task-observation-client.js'
 import { Ed25519PostActivationObservationAuthority } from './post-activation.js'
 import { resolveTrustKey, type PluginControlTrustConfig } from './trust.js'
+import { trustedForegroundSource, trustedForegroundVote, withTrustedForegroundVoteFence, taskObservationOwner } from './task-observation-evidence.js'
 import type { ForegroundDeploymentRecord } from './foreground-deployment.js'
 import type { TaskObservationBatch, TaskObservationConfig, TaskObservationOwner, TaskObservationVote } from './task-observation-types.js'
 import type { PostActivationObservationReceipt } from './types.js'
@@ -21,10 +22,7 @@ type Evaluation = Pick<AssistantEvaluationService, 'canonicalHostScope' | 'getTr
 type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOwnerForegroundLearningTask'>
 type Automations = Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation'>
 
-export function taskObservationOwner(owner: TaskObservationOwner): TaskObservationOwner {
-  const { authorityId, authorityHash, principalId, principalRecordId, principalVersion, workspace, agentPreset } = owner
-  return { authorityId, authorityHash, principalId, principalRecordId, principalVersion, workspace, agentPreset }
-}
+export { taskObservationOwner } from './task-observation-evidence.js'
 
 export function validateTaskObservationConfig(config: TaskObservationConfig): void {
   const exact = (value: object, keys: string): boolean => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -130,30 +128,10 @@ export class TaskObservationRuntime {
   }
   private source(inboxId: string): OwnerForegroundLearningTask | undefined {
     const owner = this.owner()
-    const scope = this.options.evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
-    const canonical = this.options.evaluation.getTrustedForegroundLearningProjection({ scope, inboxId })
-    if (!canonical) return undefined
-    const source = this.options.delivery.inspectOwnerForegroundLearningTask({ authorityId: owner.authorityId,
-      principalId: owner.principalId, workspace: owner.workspace, agentPreset: owner.agentPreset, outcomeId: canonical.triggerOutcomeId })
-    if (!source || !same(taskObservationOwner(source.owner), owner) || !same(source.canonical.projection, canonical.projection)
-      || source.source.inboxId !== inboxId) return undefined
-    return source
+    return trustedForegroundSource({ owner, inboxId, evaluation: this.options.evaluation, delivery: this.options.delivery })
   }
   private vote(deployment: ForegroundDeploymentRecord, source: OwnerForegroundLearningTask | undefined): TaskObservationVote | undefined {
-    const now = Date.now(), status = source?.canonical.objective?.status
-    if (!source || !['owner-feedback', 'independent-verifier'].includes(source.judgement)
-      || (status !== 'achieved' && status !== 'not-achieved') || source.ownerRevision?.action === 'withdraw'
-      || source.canonical.projection.subjectKind !== 'foreground-turn' || source.canonical.projection.disposition !== 'upsert'
-      || source.canonical.projection.subjectRef !== deployment.task.inboxId || !source.source.quiescent || source.source.truncated
-      || source.source.sessionId !== deployment.task.sessionId || deployment.state !== 'observed' || !deployment.execution
-      || source.owner.principalRecordId !== deployment.task.owner.principalRecordId
-      || source.owner.principalVersion !== deployment.task.owner.principalVersion
-      || source.owner.workspace !== deployment.task.scope.workspace || source.owner.agentPreset !== deployment.task.scope.preset
-      || deployment.execution.completedAt > now || now - deployment.execution.completedAt > this.options.config.policy.lookbackMs
-      || (source.canonical.objective?.occurredAt ?? now + 1) > now) return undefined
-    return { inboxId: deployment.task.inboxId, outcomeId: source.canonical.triggerOutcomeId, projection: { ...source.canonical.projection },
-      sourceDigest: controlPlaneDigest({ protocol: source.protocol, source: source.source, judgement: source.judgement, ownerRevision: source.ownerRevision }),
-      deploymentDigest: controlPlaneDigest(deployment), status, completedAt: deployment.execution.completedAt }
+    return trustedForegroundVote({ deployment, source, now: Date.now(), lookbackMs: this.options.config.policy.lookbackMs })
   }
   private read(batch: TaskObservationBatch): OwnerForegroundLearningTask[] {
     this.current()
@@ -166,16 +144,10 @@ export class TaskObservationRuntime {
     })
   }
   private fence<T>(batch: TaskObservationBatch, callback: () => T): T {
-    const sources = this.read(batch)
+    this.read(batch)
     if (this.options.store.getTaskObservation(batch.id)) this.options.store.assertCurrentTaskObservation(batch.id)
-    const scope = this.options.evaluation.canonicalHostScope({ workspace: batch.owner.workspace, preset: batch.owner.agentPreset })
-    const result = this.options.evaluation.withTrustedCanonicalTaskWriterFence({ scope,
-      scopeWatermark: Math.max(...sources.map(source => source.canonical.scopeWatermark)), evidence: batch.votes.map(vote => vote.projection) }, () => {
-      this.read(batch)
-      return callback()
-    })
-    if (!result.matched) throw new Error('task observation canonical writer fence changed')
-    return result.value
+    return withTrustedForegroundVoteFence({ evaluation: this.options.evaluation, owner: batch.owner, votes: batch.votes,
+      read: () => this.read(batch), callback })
   }
 
   /** Bounded synchronous nudge; the persisted native cron owns asynchronous work. */

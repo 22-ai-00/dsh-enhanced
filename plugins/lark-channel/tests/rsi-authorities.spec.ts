@@ -4,12 +4,26 @@ import { createRsiAuthorityFixture, type RsiAuthorityFixture } from './fixtures/
 
 const fixtures: RsiAuthorityFixture[] = []
 afterEach(async () => { await Promise.all(fixtures.splice(0).map(fixture => fixture.dispose())) })
-async function fixture(): Promise<RsiAuthorityFixture> { const value = await createRsiAuthorityFixture(); fixtures.push(value); return value }
+async function fixture(live = false): Promise<RsiAuthorityFixture> { const value = await createRsiAuthorityFixture(live); fixtures.push(value); return value }
 
 describe('RSI finite authority deployment binding', () => {
   test('accepts four owner-private finite authority files pinned to schema-v4 trust', async () => {
     const value = await fixture()
     await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
+  })
+
+  test('accepts separately trusted finite live qualification and rejects changed window, key, and grant expiry', async () => {
+    const value = await fixture(true)
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
+    const original = await value.readAuthority('qualifications')
+    for (const changed of [
+      { ...original, grant: { ...original.grant, terms: { ...original.grant.terms, maximumWindowMs: 120_000 } } },
+      { ...original, keyPath: (await value.readAuthority('observations')).keyPath },
+      { ...original, grant: { ...original.grant, expiresAt: Date.now() - 1 } },
+    ]) {
+      await value.writeAuthority('qualifications', changed)
+      await expect(validateRsiAuthorities(value.manifest, value.binding as any)).rejects.toThrow('live qualification authority')
+    }
   })
 
   test.each([

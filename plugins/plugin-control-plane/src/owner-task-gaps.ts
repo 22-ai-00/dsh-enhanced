@@ -65,6 +65,13 @@ export class OwnerTaskFailureGaps {
     return this.withCurrent(gapId, owner, () => structuredClone(this.read(reference, this.ports())))
   }
 
+  /** Read-only part of a combined Host acceptance fence; caller owns the Evaluation writer lock. */
+  inspectCurrent(gapId: string, owner: SourceJobOwnerReceipt): OwnerForegroundLearningTask {
+    const reference = this.store.getOwnerTaskFailureReference(gapId)
+    if (!reference || controlPlaneDigest(reference.owner) !== controlPlaneDigest(owner)) throw new Error('task repair source owner changed')
+    return this.read(reference, this.ports())
+  }
+
   withCurrent<T>(gapId: string, owner: SourceJobCaller | SourceJobOwnerReceipt | undefined, callback: () => T): T {
     const reference = this.store.getOwnerTaskFailureReference(gapId)
     if (!reference) return callback()

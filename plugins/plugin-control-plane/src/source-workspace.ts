@@ -32,6 +32,9 @@ const COMMAND_TAIL_BYTES = 4_096
  * pending plan。命中即拒绝，不进入 worktree 流程。
  */
 export const PROTECTED_PLUGIN_DENYLIST: ReadonlySet<string> = new Set([
+  'assistant-delivery', // authenticated task and feedback evidence
+  'lark-channel', // authenticated external-channel ingress
+  'assistant-automations', // qualification observation and rollback scheduling
   'assistant-policy', // 策略规则、授权寿命、急停根
   'credentials-keychain', // 凭据根
   'assistant-evaluation', // 评测答案根

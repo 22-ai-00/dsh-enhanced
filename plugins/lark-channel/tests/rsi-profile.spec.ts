@@ -71,7 +71,7 @@ describe('RSI profile compiler', () => {
       coordinatorEffective: '- id: dsh-enhanced-assistant-policy\n  name: "@dsh-enhanced/assistant-policy"\n  config: { budgets: [], rules: [] }\n- id: dsh-enhanced-assistant-automations\n  name: "@dsh-enhanced/assistant-automations"\n  config: { schedulerEnabled: false, allowUnbudgetedExecution: false }\n- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config: {}\n', coordinatorBase, owner })).rejects.toThrow('ENOENT')
   })
 
-  test('compiles a complete two Host deployment deterministically and retains tagged effective values', async () => {
+  test.each([false, true])('compiles a complete two Host deployment with bounded-live=%s deterministically', async (boundedLive) => {
     // macOS 上 os.tmpdir() 经 /var → /private/var 符号链接；privateRoot 有
     // canonical 校验，夹具须先 realpath。
     const root = await mkdtemp(join(await realpath(tmpdir()), 'rsi-profile-'))
@@ -89,6 +89,11 @@ describe('RSI profile compiler', () => {
         runtimeObserver: { socketPath: join(privateRoot, 'observer.sock'), keyPath: key, profilePath, targets: [{ entryId: 'control', module: '@dsh-enhanced/plugin-control-plane', configDigest: 'c'.repeat(64), services: [] }] }, foregroundDeployments: { attestorJournalPath: join(root, 'attestor.json') },
         taskObservations: { policy: { id: 'observation', expiresAt: Date.now() + 60_000, maximumObservations: 1, minimumChecks: 1, maximumChecks: 1, lookbackMs: 1000 }, scope, profilePath, timeoutMs: 1000, budgetId: 'observations', budgetAmount: 1, authority: adapter },
       }
+      if (boundedLive) {
+        value.controlPlane.sourceAdoptions!.liveQualification = { protocol: 'dsh-bounded-live/v1', maximumWindowMs: 60_000, minimumTasks: 2, authority: 'qualification', keyId: 'key' }
+        value.controlPlane.liveQualification = { scope, profilePath, timeoutMs: 1000, budgetId: 'qualification', budgetAmount: 1, authority: adapter }
+        value.limits.qualification = 3
+      }
       value.sourceReviews = { ...value.sourceReviews, repository: join(root, 'review-remote'), git: { path: join(root, 'git'), sha256: 'a'.repeat(64) }, decisionRoot: decision }
       value.growthDriver = { ...value.growthDriver, pluginSourceProposals: { ...value.growthDriver.pluginSourceProposals!, repository: root } }
       const targetEffective = rows('').replace('/tmp/rsi-workspace', join(root, 'workspace')).replaceAll('/tmp/rsi-workspace', join(root, 'workspace'))
@@ -97,6 +102,7 @@ describe('RSI profile compiler', () => {
       ;(value.growthDriver.scope as any).workspace = adjustedOwner.workspace
       ;(value.sourceReviews.owner as any).workspace = adjustedOwner.workspace
       ;(value.controlPlane.taskObservations as any).scope.workspace = adjustedOwner.workspace
+      if (value.controlPlane.liveQualification) value.controlPlane.liveQualification.scope.workspace = adjustedOwner.workspace
       const hash = ownerRouteAuthorityHash({ id: 'owner-route', conversation: adjustedOwner.conversation, principal: adjustedOwner.principal, workspace: adjustedOwner.workspace, agentPreset: 'primary', policyRef: 'owner-policy', minimumGeneration: 1 })
       ;(value.sourceReviews.owner as any).authorityHash = hash
       const coordinatorEffective = '- id: dsh-enhanced-assistant-policy\n  name: "@dsh-enhanced/assistant-policy"\n  config: { databasePath: !!js dshHomePath(\'old.sqlite\'), budgets: [], rules: [] }\n- id: dsh-enhanced-assistant-automations\n  name: "@dsh-enhanced/assistant-automations"\n  config: { databasePath: !!js dshHomePath(\'old-auto.sqlite\'), runsPath: !!js dshHomePath(\'old-runs\'), schedulerEnabled: false, allowUnbudgetedExecution: false }\n- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config: {}\n- id: tool-web\n  name: "@deepseek-ai/tool-web"\n  config: {}\n'
@@ -114,6 +120,13 @@ describe('RSI profile compiler', () => {
       const policyConfig = { ...target.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.assistantPolicy, databasePath: join(root, 'policy.sqlite') }
       const policy = new AssistantPolicyService(new Context(), policyConfig)
       expect(policy.evaluate({ subject: { kind: 'background', id: 'source-job-123', workspace: adjustedOwner.workspace, principal: 'lark/account/tenant/owner' }, action: 'execute', resource: { kind: 'automation', id: 'source-job-123' }, context: { initiator: 'background' } }).effect).toBe('allow')
+
+      if (boundedLive) {
+        expect(policy.evaluate({ subject: { kind: 'background', id: 'live-qualification-scan-abc', workspace: adjustedOwner.workspace, principal: 'lark/account/tenant/owner' }, action: 'execute', resource: { kind: 'automation', id: 'live-qualification-scan-abc' }, context: { initiator: 'background' } }).effect).toBe('allow')
+        expect(policyConfig.budgets).toContainEqual({ id: 'qualification', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'subject' })
+        const noLimit = structuredClone(value); delete noLimit.limits.qualification
+        await expect(compileRsiProfiles({ ...input, manifest: noLimit })).rejects.toThrow('distinct finite budget')
+      }
 
       await expect(compileRsiProfiles({ ...input, owner: { ...adjustedOwner, generation: 0 } })).rejects.toThrow('minimumGeneration')
       const wrongScope = structuredClone(value); wrongScope.controlPlane.sourceJobs!.principalId = 'another-owner'

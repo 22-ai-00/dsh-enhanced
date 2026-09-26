@@ -1,3 +1,4 @@
+import { validateLiveQualificationTerms, assertLiveQualificationBatch, parseLiveQualificationReceipt, verifyLiveQualificationReceipt, type LiveQualificationTerms, type LiveQualificationBatch, type LiveQualificationReceipt, type LiveQualificationRecord } from './live-qualification.js'
 import { createHash, randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { basename, isAbsolute } from 'node:path'
@@ -69,7 +70,7 @@ const SOURCE_PLAN_KEYS = ['schemaVersion', 'kind', 'id', 'gapId', 'gapSnapshot',
   'expiresAt', 'digest', 'repository', 'worktree', 'baseCommit', 'name', 'generatorDigest', 'scope'] as const
 const ACTIVATION_PLAN_KEYS = ['schemaVersion', 'kind', 'id', 'gapId', 'gapSnapshot', 'status', 'revision', 'createdAt',
   'expiresAt', 'profile', 'candidate', 'dossier', 'installationId', 'ledger', 'target', 'executor', 'digest'] as const
-const ACTIVATION_STATUSES = new Set<PlanStatus>(['pending-approval', 'approved', 'staging', 'awaiting-reload', 'awaiting-readiness',
+const ACTIVATION_STATUSES = new Set<PlanStatus>(['pending-approval', 'approved', 'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks',
   'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending',
   'rollback-pending', 'activated', 'rolled-back'])
 
@@ -179,7 +180,7 @@ function activationSnapshotFromStored(value: unknown): PluginActivationPlan {
   exactKeys(gapSnapshot, ['revision', 'inputDigest', 'roi', 'capability'], 'stored activation gap snapshot')
   const dossier = objectRecord(item['dossier'], 'stored activation dossier')
   exactKeys(dossier, ['catalogDigest', 'catalogProvenance', 'matchedCapabilities', 'authorities', 'packages',
-    ...(Object.hasOwn(dossier, 'handoff') ? ['handoff'] : [])], 'stored activation dossier')
+    ...(Object.hasOwn(dossier, 'handoff') ? ['handoff'] : []), ...(Object.hasOwn(dossier, 'liveQualification') ? ['liveQualification'] : [])], 'stored activation dossier')
   const ledger = objectRecord(item['ledger'], 'stored activation ledger'); exactKeys(ledger, ['id', 'path'], 'stored activation ledger')
   const target = objectRecord(item['target'], 'stored activation target'); exactKeys(target, ['dshHome', 'profile', 'profilePath'], 'stored activation target')
   const executor = objectRecord(item['executor'], 'stored activation executor'); exactKeys(executor, ['id', 'version', 'path', 'sha256'], 'stored activation executor')
@@ -205,6 +206,7 @@ function activationSnapshotFromStored(value: unknown): PluginActivationPlan {
     || typeof executor['sha256'] !== 'string' || !DIGEST.test(executor['sha256'])) {
     throw new ControlPlaneStoreError('invalid-state', 'stored activation plan snapshot is corrupt')
   }
+  if (dossier['liveQualification'] !== undefined) validateLiveQualificationTerms(dossier['liveQualification'])
   if (dossier['handoff'] !== undefined) {
     try { validateAdoptionHandoffTerms(dossier['handoff']) }
     catch { throw new ControlPlaneStoreError('invalid-state', 'stored activation handoff terms are corrupt') }
@@ -438,6 +440,7 @@ function activationFromRow(row: ActivationRow): PluginActivationPlan {
   const dossier = JSON.parse(row.dossier_json) as PluginActivationPlan['dossier']
   if (candidate === undefined || !DIGEST.test(row.plan_digest) || !UUID.test(row.installation_id)
     || !DIGEST.test(gapSnapshot.inputDigest) || !DIGEST.test(dossier.catalogDigest)) throw new ControlPlaneStoreError('invalid-state', 'stored activation plan is corrupt')
+  if (dossier.liveQualification !== undefined) validateLiveQualificationTerms(dossier.liveQualification)
   if (dossier.handoff !== undefined) {
     try { validateAdoptionHandoffTerms(dossier.handoff) }
     catch { throw new ControlPlaneStoreError('invalid-state', 'stored activation handoff terms are corrupt') }
@@ -719,6 +722,7 @@ export interface ControlPlaneStoreOptions {
   /** Host-owned synchronous source fence for an activation worker connection. */
   withOwnerActivationFence?: <T>(gapId: string, callback: () => T) => T
   adoptionCoordinatorId?: string
+  withLiveQualificationFence?: <T>(planId: string, callback: () => T) => T
 }
 
 export interface CreateActivationPlanInput {
@@ -736,6 +740,7 @@ export interface CreateActivationPlanInput {
   /** Exact completed owner repair; persisted atomically with its activation plan. */
   sourcePlanId?: string
   handoff?: AdoptionHandoffTerms
+  liveQualification?: LiveQualificationTerms
 }
 
 export interface CreateSourcePlanInput {
@@ -1172,11 +1177,109 @@ export function readOwnerSourceAdoptionPlan(database: DatabaseSync, activationPl
   return { plan, sourcePlan, source, released }
 }
 
+function liveQualificationRecord(db: DatabaseSync, id: string): LiveQualificationRecord | undefined {
+  const row = db.prepare('SELECT * FROM live_qualification_batches WHERE id=?').get(id) as
+    { id: string; plan_id: string; batch_json: string; batch_digest: string; state: LiveQualificationRecord['state']; receipt_json: string | null; receipt_digest: string | null } | undefined
+  if (!row) return undefined
+  if (Buffer.byteLength(row.batch_json) > 262_144) throw new ControlPlaneStoreError('invalid-state', 'live qualification batch too large')
+  const batch = JSON.parse(row.batch_json) as LiveQualificationBatch
+  assertLiveQualificationBatch(batch)
+  const receipt = row.receipt_json === null ? undefined : parseLiveQualificationReceipt(JSON.parse(row.receipt_json))
+  if (row.id !== batch.id || row.plan_id !== batch.planId || row.batch_digest !== controlPlaneDigest(batch)
+    || (receipt && (row.receipt_digest !== controlPlaneDigest(receipt) || receipt.batchId !== batch.id || receipt.batchDigest !== batch.digest))
+    || (row.state === 'applied' && !receipt)) throw new ControlPlaneStoreError('invalid-state', 'live qualification journal changed')
+  return { batch, state: row.state, ...(receipt ? { receipt } : {}) }
+}
+
+function liveQualificationReadiness(db: DatabaseSync, plan: PluginActivationPlan): HostAttestationOperation {
+  const row = db.prepare(`SELECT operation.* FROM host_attestation_operations operation
+    JOIN host_attestations attestation ON attestation.plan_id=operation.plan_id AND attestation.phase=operation.phase
+      AND attestation.receipt_digest=operation.receipt_digest
+    WHERE operation.plan_id=? AND operation.phase='readiness' AND operation.status='applied'`).get(plan.id) as HostAttestationOperationRow | undefined
+  if (!row) throw new ControlPlaneStoreError('invalid-state', 'live qualification lacks applied readiness')
+  const operation = hostOperationFromRow(row), receipt = operation.receipt
+  const generation = db.prepare('SELECT MAX(host_generation) AS generation FROM host_attestations WHERE plan_id IN (SELECT id FROM activation_plans WHERE installation_id=?)').get(plan.installationId) as { generation: number | null }
+  if (!receipt || receipt.outcome !== 'passed' || operation.request.schemaVersion !== 2
+    || receipt.planDigest !== plan.digest || receipt.activationId !== plan.activation?.id || receipt.fence !== plan.activation?.fence
+    || receipt.hostGeneration !== generation.generation || operation.request.activation.fence !== receipt.fence) {
+    throw new ControlPlaneStoreError('conflict', 'live qualification readiness generation changed')
+  }
+  return operation
+}
+
+function liveQualificationWindow(db: DatabaseSync, plan: PluginActivationPlan) {
+  const row = db.prepare('SELECT * FROM live_qualification_windows WHERE plan_id=?').get(plan.id) as
+    { activation_id: string; fence: number; started_at: number; deadline_at: number } | undefined
+  const terms = plan.dossier.liveQualification
+  if (!terms || !row || row.activation_id !== plan.activation?.id || row.fence !== plan.activation?.fence
+    || row.deadline_at <= row.started_at || row.deadline_at > row.started_at + terms.maximumWindowMs
+    || row.deadline_at > plan.expiresAt || row.deadline_at > (plan.approval?.expiresAt ?? 0)) {
+    throw new ControlPlaneStoreError('invalid-state', 'live qualification window changed')
+  }
+  const readiness = liveQualificationReadiness(db, plan)
+  return { startedAt: row.started_at, deadlineAt: row.deadline_at,
+    readinessDigest: controlPlaneDigest(readiness.receipt), hostGeneration: readiness.receipt!.hostGeneration }
+}
+
+/** Independent signers use this read-only seam, never a migrating Store. */
+export function readLiveQualificationContext(db: DatabaseSync, id: string) {
+  if (Number(db.prepare('PRAGMA user_version').get()?.user_version) !== controlPlaneSchemaVersion) throw new ControlPlaneStoreError('invalid-state', 'live qualification schema differs')
+  const record = liveQualificationRecord(db, id)
+  if (!record) throw new ControlPlaneStoreError('not-found', 'live qualification batch absent')
+  const { batch } = record
+  const { plan, source } = readOwnerSourceAdoptionPlan(db, batch.planId)
+  const window = liveQualificationWindow(db, plan)
+  if (!['awaiting-live-tasks', 'commit-pending', 'activated'].includes(plan.status)
+    || !plan.dossier.liveQualification || batch.planDigest !== plan.digest || batch.installationId !== plan.installationId
+    || batch.profilePath !== plan.target.profilePath || batch.activationId !== plan.activation?.id || batch.fence !== plan.activation?.fence
+    || controlPlaneDigest(batch.terms) !== controlPlaneDigest(plan.dossier.liveQualification)
+    || ['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset'].some(key =>
+      batch.owner[key as keyof typeof batch.owner] !== source.owner[key as keyof typeof source.owner])
+    || batch.startedAt !== window.startedAt || batch.deadlineAt !== window.deadlineAt
+    || batch.readinessDigest !== window.readinessDigest || batch.hostGeneration !== window.hostGeneration
+    || db.prepare('SELECT 1 FROM live_qualification_invalidations WHERE plan_id=?').get(plan.id)) {
+    throw new ControlPlaneStoreError('conflict', 'live qualification deployment or owner changed')
+  }
+  const competing = db.prepare(`SELECT 1 FROM activation_plans WHERE target_path=? AND id<>? AND status IN
+    ('staging','awaiting-reload','awaiting-readiness','awaiting-live-tasks','awaiting-effect-blocked-replay','awaiting-shadow',
+     'awaiting-canary','awaiting-soak','awaiting-health','commit-pending','rollback-pending')`).get(plan.target.profilePath, plan.id)
+  if (competing) throw new ControlPlaneStoreError('conflict', 'live qualification target superseded')
+  if (plan.status === 'activated') {
+    const latest = db.prepare(`SELECT checkpoint.plan_id FROM activation_deployment_checkpoints checkpoint
+      JOIN activation_plans candidate ON candidate.id=checkpoint.plan_id WHERE candidate.target_path=? ORDER BY checkpoint.exposure_order DESC LIMIT 1`).get(plan.target.profilePath)
+    if (latest?.plan_id !== plan.id) throw new ControlPlaneStoreError('conflict', 'live qualification deployment superseded')
+  }
+  const deployments = batch.votes.map(vote => {
+    const row = db.prepare('SELECT record_json,record_digest,plan_id FROM foreground_deployments WHERE inbox_id=?').get(vote.inboxId) as
+      { record_json: string; record_digest: string; plan_id: string } | undefined
+    if (!row || row.plan_id !== plan.id || Buffer.byteLength(row.record_json) > 262_144) throw new ControlPlaneStoreError('invalid-state', 'live task witness absent')
+    const deployment = JSON.parse(row.record_json) as ForegroundDeploymentRecord
+    assertForegroundDeployment(deployment)
+    if (controlPlaneDigest(deployment) !== row.record_digest || row.record_digest !== vote.deploymentDigest
+      || deployment.state !== 'observed' || !deployment.execution || !deployment.execution.quiescent
+      || deployment.execution.status !== 'succeeded' || deployment.execution.modelSelectionState !== 'frozen' || !deployment.execution.modelSelection
+      || deployment.task.inboxId !== vote.inboxId || deployment.execution.completedAt !== vote.completedAt
+      || deployment.task.dispatchedAt < window.startedAt || deployment.task.dispatchedAt >= window.deadlineAt
+      || vote.completedAt >= window.deadlineAt || deployment.task.owner.principalRecordId !== batch.owner.principalRecordId
+      || deployment.task.owner.principalVersion !== batch.owner.principalVersion || deployment.task.scope.workspace !== batch.owner.workspace
+      || deployment.task.scope.preset !== batch.owner.agentPreset || deployment.readiness.planDigest !== plan.digest
+      || deployment.readiness.planId !== plan.id || deployment.readiness.fence !== batch.fence
+      || deployment.readiness.hostGeneration !== batch.hostGeneration || deployment.readiness.receiptDigest !== batch.readinessDigest
+      || controlPlaneDigest(deployment.readiness.exact) !== controlPlaneDigest({ package: plan.candidate.package, version: plan.candidate.version, integrity: plan.candidate.integrity })) {
+      throw new ControlPlaneStoreError('conflict', 'live task witness differs')
+    }
+    return deployment
+  })
+  return { record, plan, source, deployments }
+}
+
 export class ControlPlaneStore {
   readonly #database: DatabaseSync
   readonly #now: () => number
   #ownerTaskFailureGapAdmission: string | undefined
   #foregroundDeploymentAdmission: string | undefined
+  #liveQualificationAdmission: string | undefined
+  readonly #withLiveQualificationFence: ControlPlaneStoreOptions['withLiveQualificationFence']
   readonly #withOwnerActivationFence: ControlPlaneStoreOptions['withOwnerActivationFence']
   readonly #adoptionCoordinatorId: string | undefined
 
@@ -1186,6 +1289,7 @@ export class ControlPlaneStore {
     }
     if (options.adoptionCoordinatorId && options.withOwnerActivationFence) throw new ControlPlaneStoreError('invalid-input', 'adoption coordinator cannot hold owner fence')
     this.#database = openControlPlaneDatabase(options.path); this.#now = options.now ?? Date.now
+    this.#withLiveQualificationFence = options.withLiveQualificationFence
     this.#withOwnerActivationFence = options.withOwnerActivationFence; this.#adoptionCoordinatorId = options.adoptionCoordinatorId
   }
   close(): void { this.#database.close() }
@@ -1312,7 +1416,7 @@ export class ControlPlaneStore {
         this.#assertAdoptionHandoffBinding(planId, this.#adoptionCoordinatorId)
         return callback()
       }
-      if (!['approved', 'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay',
+      if (!['approved', 'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay',
         'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health'].includes(plan.status)) {
         throw new ControlPlaneStoreError('invalid-state', 'adoption coordinator cannot advance this activation state')
       }
@@ -1323,6 +1427,10 @@ export class ControlPlaneStore {
     const commit = (): T => {
       const current = this.getPlan(planId)
       if (current.status === 'commit-pending' && current.dossier.handoff !== undefined) this.#assertAdoptionHandoff(planId)
+      if (current.status === 'commit-pending' && current.dossier.liveQualification) {
+        this.#assertLiveQualificationCommit(planId)
+        return callback()
+      }
       return callback()
     }
     if (this.#ownerTaskFailureGapAdmission === plan.gapId) return commit()
@@ -1361,9 +1469,13 @@ export class ControlPlaneStore {
     const requestBinding = { operation: 'create-activation-plan', gapId: input.gapId, candidate, catalog: input.catalog,
       matchedCapabilities, profile, target: input.target, installationId: input.installationId,
       ledger: input.ledger, executor: input.executor, ttlMs: input.ttlMs,
-      ...(input.sourcePlanId === undefined ? {} : { sourcePlanId: input.sourcePlanId }), ...(input.handoff === undefined ? {} : { handoff: input.handoff }) }
+      ...(input.sourcePlanId === undefined ? {} : { sourcePlanId: input.sourcePlanId }), ...(input.handoff === undefined ? {} : { handoff: input.handoff }), ...(input.liveQualification === undefined ? {} : { liveQualification: input.liveQualification }) }
     this.#assertOwnerTaskFailureGapAdmission(input.gapId)
     const source = input.sourcePlanId === undefined ? undefined : readOwnerPreparedSourcePlan(this.#database, input.sourcePlanId)
+    if (input.liveQualification !== undefined) {
+      validateLiveQualificationTerms(input.liveQualification)
+      if (!source || !input.handoff) throw new ControlPlaneStoreError('invalid-input', 'bounded-live adoption requires an exact owner release and external coordinator')
+    }
     if (input.handoff !== undefined) { validateAdoptionHandoffTerms(input.handoff); if (!source) throw new ControlPlaneStoreError('invalid-input', 'adoption handoff requires an exact owner release') }
     if (source && (source.plan.status !== 'release-complete' || source.plan.gapId !== input.gapId
       || controlPlaneDigest(readReleaseCandidate(this.#database, source.plan)) !== controlPlaneDigest(candidate))) {
@@ -1387,7 +1499,8 @@ export class ControlPlaneStore {
     const gapSnapshot = Object.freeze({ revision: gap.revision, inputDigest: gap.inputDigest, roi: gap.roi, capability: gap.capability })
     const dossier = Object.freeze({ catalogDigest: input.catalog.digest, catalogProvenance: input.catalog.provenance,
       matchedCapabilities: Object.freeze(matchedCapabilities), authorities: Object.freeze([...candidate.authorities]), packages,
-      ...(input.handoff === undefined ? {} : { handoff: Object.freeze({ ...input.handoff }) }) })
+      ...(input.handoff === undefined ? {} : { handoff: Object.freeze({ ...input.handoff }) }),
+      ...(input.liveQualification === undefined ? {} : { liveQualification: Object.freeze({ ...input.liveQualification }) }) })
     const now = this.#now(); const id = `plugin-${randomUUID()}`; const expiresAt = now + input.ttlMs
     const immutable = { schemaVersion: 4 as const, kind: 'activation' as const, id, gapId: gap.id, gapSnapshot,
       profile, candidate, dossier, installationId: input.installationId, ledger: input.ledger,
@@ -1580,7 +1693,7 @@ export class ControlPlaneStore {
       WHERE j.status = 'prepared' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))
         OR (? = 1 AND p.status IN ('awaiting-pr', 'awaiting-review', 'awaiting-merge', 'awaiting-build', 'awaiting-sign', 'awaiting-publish',
           'awaiting-registry-verify', 'awaiting-catalog-admission'))
-        OR (? = 1 AND p.status = 'release-complete' AND (ap.id IS NULL OR ap.status NOT IN ('activated', 'rolled-back', 'rejected')))) AND (p.expires_at > ? OR ap.status IN ('staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'))
+        OR (? = 1 AND p.status = 'release-complete' AND (ap.id IS NULL OR ap.status NOT IN ('activated', 'rolled-back', 'rejected')))) AND (p.expires_at > ? OR ap.status IN ('staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'))
       ORDER BY j.created_at, j.id LIMIT 1000`).all(includeRelease ? 1 : 0, includeExecution ? 1 : 0, includeAdoption ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
   }
 
@@ -1851,7 +1964,7 @@ export class ControlPlaneStore {
       if (plan.status === 'approved') {
         if (now > plan.expiresAt) throw new ControlPlaneStoreError('expired', 'activation plan expired before its first claim')
         const targetOwner = this.#database.prepare(`SELECT id FROM activation_plans WHERE target_path = ? AND id <> ? AND status IN (
-          'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
+          'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
           'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending') LIMIT 1`).get(plan.target.profilePath, plan.id)
         if (targetOwner !== undefined) throw new ControlPlaneStoreError('conflict', 'target profile already has an active activation')
       } else if (plan.status === 'rollback-pending' && plan.activation?.rollbackProfileRestored) {
@@ -1859,8 +1972,8 @@ export class ControlPlaneStore {
       } else if (!(recoverable && Number(row.activation_lease_until ?? 0) < now)) throw new ControlPlaneStoreError('invalid-state', 'activation plan cannot be claimed')
       const activationId = row.activation_id ?? `activation-${randomUUID()}`; const status = plan.status === 'approved' ? 'staging' : plan.status
       const result = this.#database.prepare(`UPDATE activation_plans SET status = ?, revision = revision + 1, activation_id = ?,
-        activation_fence = activation_fence + 1, activation_lease_until = ?, updated_at = ? WHERE id = ? AND revision = ?`).run(
-        status, activationId, now + input.leaseMs, now, plan.id, input.expectedRevision)
+        activation_fence = activation_fence + ?, activation_lease_until = ?, updated_at = ? WHERE id = ? AND revision = ?`).run(
+        status, activationId, plan.status === 'commit-pending' && plan.dossier.liveQualification ? 0 : 1, now + input.leaseMs, now, plan.id, input.expectedRevision)
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'activation plan changed while being claimed')
       const claimed = this.getPlan(plan.id); this.#database.exec('COMMIT'); return claimed
       })
@@ -2001,7 +2114,7 @@ export class ControlPlaneStore {
       }
       this.getActivationInstalledBaseline(plan.id)
       const active = this.#database.prepare(`SELECT id FROM activation_plans WHERE target_path = ? AND id <> ? AND status IN (
-        'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
+        'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
         'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending') LIMIT 1`)
         .get(plan.target.profilePath, plan.id)
       if (active !== undefined) throw new ControlPlaneStoreError('conflict', 'a newer activation currently owns the target profile')
@@ -2045,7 +2158,17 @@ export class ControlPlaneStore {
           AND activation_target_baseline_json IS NOT NULL AND activation_target_existed IS NOT NULL
           AND activation_lease_until >= ?`).run(now, input.planId, input.expectedRevision, input.fence, now)
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'Host exposure lost its claim or original baseline')
-      return this.getPlan(input.planId)
+      const plan = this.getPlan(input.planId)
+      if (plan.dossier.liveQualification) {
+        const handoff = this.getAdoptionHandoff(plan.id)
+        const deadline = Math.min(now + plan.dossier.liveQualification.maximumWindowMs,plan.expiresAt,plan.approval!.expiresAt,handoff?.expiresAt ?? 0)
+        if (deadline <= now) throw new ControlPlaneStoreError('expired', 'live qualification authorization expired before exposure')
+        this.#database.prepare(`INSERT INTO live_qualification_windows (plan_id,activation_id,fence,started_at,deadline_at)
+          VALUES (?,?,?,?,?) ON CONFLICT(plan_id) DO NOTHING`).run(plan.id,plan.activation!.id,plan.activation!.fence,now,deadline)
+        const prior = this.#database.prepare('SELECT activation_id,fence FROM live_qualification_windows WHERE plan_id=?').get(plan.id)
+        if (prior?.activation_id !== plan.activation!.id || prior.fence !== plan.activation!.fence) throw new ControlPlaneStoreError('conflict', 'live qualification exposure cannot be replayed')
+      }
+      return plan
     })
   }
 
@@ -2250,6 +2373,135 @@ export class ControlPlaneStore {
     return input.requireCurrentSource ? this.#withActivationSource(plan.id, commit) : commit()
   }
 
+  listLiveQualificationDeployments(planId: string, limit = 1001): readonly ForegroundDeploymentRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1001) throw new ControlPlaneStoreError('invalid-input', 'invalid live task limit')
+    const window = this.getLiveQualificationWindow(planId)
+    const committed = this.#database.prepare('SELECT started_at FROM activation_watch WHERE plan_id=?').get(planId)
+    const cutoff = Math.min(window.deadlineAt, committed ? Number(committed.started_at) : window.deadlineAt)
+    return (this.#database.prepare(`SELECT inbox_id FROM foreground_deployments WHERE plan_id=?
+      AND json_extract(record_json,'$.task.dispatchedAt')>=? AND json_extract(record_json,'$.task.dispatchedAt')<?
+      ORDER BY inbox_id LIMIT ?`).all(planId,window.startedAt,cutoff,limit) as { inbox_id: string }[])
+      .map(row => this.getForegroundDeployment(row.inbox_id)!)
+  }
+  listLiveQualificationPlans(profilePath: string, limit = 100): readonly PluginActivationPlan[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new ControlPlaneStoreError('invalid-input', 'invalid qualification limit')
+    return (this.#database.prepare(`SELECT plan.* FROM activation_plans plan WHERE plan.target_path=? AND plan.status IN
+      ('awaiting-live-tasks','commit-pending','activated') AND json_type(plan.dossier_json,'$.liveQualification')='object'
+      AND (plan.status<>'activated' OR (plan.id=(SELECT checkpoint.plan_id FROM activation_deployment_checkpoints checkpoint
+        JOIN activation_plans newer ON newer.id=checkpoint.plan_id WHERE newer.target_path=plan.target_path ORDER BY checkpoint.exposure_order DESC LIMIT 1)
+        AND NOT EXISTS (SELECT 1 FROM activation_plans active WHERE active.target_path=plan.target_path AND active.id<>plan.id
+          AND active.status IN ('staging','awaiting-reload','awaiting-readiness','awaiting-live-tasks','awaiting-effect-blocked-replay',
+            'awaiting-shadow','awaiting-canary','awaiting-soak','awaiting-health','commit-pending','rollback-pending'))))
+      ORDER BY plan.created_at DESC,plan.id LIMIT ?`).all(profilePath, limit) as unknown as ActivationRow[]).map(activationFromRow)
+  }
+  getLiveQualificationDeadline(planId: string): number | undefined {
+    const plan = this.getPlan(planId)
+    if (!plan.dossier.liveQualification) return undefined
+    const window = this.#database.prepare('SELECT deadline_at FROM live_qualification_windows WHERE plan_id=?').get(planId)
+    return window ? Number(window.deadline_at) : undefined
+  }
+  getLiveQualificationWindow(planId: string) { return liveQualificationWindow(this.#database, this.getPlan(planId)) }
+  getLiveQualificationReadiness(planId: string) { return liveQualificationReadiness(this.#database, this.getPlan(planId)) }
+  getLiveQualification(id: string) { return liveQualificationRecord(this.#database, id) }
+  listLiveQualifications(planId: string, limit = 100): readonly LiveQualificationRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new ControlPlaneStoreError('invalid-input', 'invalid qualification record limit')
+    return (this.#database.prepare('SELECT id FROM live_qualification_batches WHERE plan_id=? ORDER BY created_at DESC,id LIMIT ?').all(planId, limit) as { id: string }[]).map(row => this.getLiveQualification(row.id)!)
+  }
+  assertCurrentLiveQualification(id: string): void {
+    const { record, plan } = readLiveQualificationContext(this.#database, id)
+    if (record.state === 'stale' || (plan.status !== 'activated' && (this.#now() >= record.batch.deadlineAt || this.#now() >= record.batch.expiresAt))) {
+      throw new ControlPlaneStoreError('expired', 'live qualification expired or became stale')
+    }
+  }
+  putLiveQualification(batch: LiveQualificationBatch): void {
+    assertLiveQualificationBatch(batch)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const plan = this.getPlan(batch.planId)
+      if (plan.status !== 'awaiting-live-tasks' || this.#now() >= batch.deadlineAt || this.#now() >= batch.expiresAt) throw new ControlPlaneStoreError('expired', 'live qualification admission ended')
+      const prior = this.getLiveQualification(batch.id)
+      if (prior) {
+        if (controlPlaneDigest(prior.batch) !== controlPlaneDigest(batch) || prior.state === 'stale') throw new ControlPlaneStoreError('conflict', 'live qualification identity reused')
+      } else this.#database.prepare(`INSERT INTO live_qualification_batches
+        (id,lane,plan_id,batch_json,batch_digest,state,created_at) VALUES (?,?,?,?,?,'pending',?)`).run(batch.id,batch.lane,batch.planId,JSON.stringify(batch),controlPlaneDigest(batch),this.#now())
+      readLiveQualificationContext(this.#database, batch.id)
+      this.#database.exec('COMMIT')
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+  staleLiveQualification(id: string): void {
+    this.#database.prepare("UPDATE live_qualification_batches SET state='stale' WHERE id=? AND state IN ('pending','signed')").run(id)
+  }
+  async applyLiveQualification(input: { receipt: LiveQualificationReceipt; publicKeyPem: string; withSourceFence: <T>(callback: () => T) => T }): Promise<PluginActivationPlan> {
+    const record = this.getLiveQualification(input.receipt.batchId)
+    if (!record) throw new ControlPlaneStoreError('not-found', 'live qualification batch absent')
+    const receipt = verifyLiveQualificationReceipt(input.receipt, record.batch, input.publicKeyPem, this.#now())
+    return input.withSourceFence(() => {
+      this.#database.exec('BEGIN IMMEDIATE')
+      try {
+        const current = this.getLiveQualification(record.batch.id)!
+        if (current.state === 'applied') {
+          if (controlPlaneDigest(current.receipt) !== controlPlaneDigest(receipt)) throw new ControlPlaneStoreError('conflict', 'qualification receipt changed')
+          this.#database.exec('COMMIT'); return this.getPlan(record.batch.planId)
+        }
+        this.assertCurrentLiveQualification(record.batch.id)
+        const plan = this.getPlan(record.batch.planId)
+        if (plan.status !== 'awaiting-live-tasks' || this.#adoptionCoordinatorId !== undefined) throw new ControlPlaneStoreError('invalid-state', 'only target feedback runtime may qualify this deployment')
+        const updated = this.#database.prepare(`UPDATE activation_plans SET status=?,revision=revision+1,updated_at=?,failure_code=?,activation_lease_until=NULL
+          WHERE id=? AND revision=? AND activation_fence=? AND status='awaiting-live-tasks'`).run(
+          receipt.disposition === 'qualified' ? 'commit-pending' : 'rollback-pending',this.#now(),
+          receipt.disposition === 'qualified' ? null : 'live-qualification-failed',plan.id,plan.revision,record.batch.fence)
+        if (Number(updated.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'qualification lost plan CAS')
+        this.#database.prepare("UPDATE live_qualification_batches SET state='applied',receipt_json=?,receipt_digest=? WHERE id=? AND state IN ('pending','signed')")
+          .run(JSON.stringify(receipt),controlPlaneDigest(receipt),record.batch.id)
+        this.#database.exec('COMMIT'); return this.getPlan(plan.id)
+      } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+    })
+  }
+
+  /** Negative-only Host seam. The signed terms permit conservative removal of unconfirmable qualification. */
+  invalidateLiveQualification(input: { planId: string; batchId: string; reason: string }): PluginActivationPlan {
+    const reason = bounded(input.reason, 'qualification invalidation reason', 160)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const plan = this.getPlan(input.planId), record = this.getLiveQualification(input.batchId)
+      if (!record || record.batch.planId !== plan.id || record.state !== 'applied' || record.receipt?.disposition !== 'qualified'
+        || record.batch.planDigest !== plan.digest || record.batch.activationId !== plan.activation?.id || !plan.dossier.liveQualification) {
+        throw new ControlPlaneStoreError('conflict', 'qualification invalidation lacks exact accepted evidence')
+      }
+      if (plan.status === 'rollback-pending' || plan.status === 'rolled-back') { this.#database.exec('COMMIT'); return plan }
+      if (!['commit-pending', 'activated'].includes(plan.status) || record.batch.fence !== plan.activation!.fence) throw new ControlPlaneStoreError('conflict', 'qualification invalidation no longer targets current deployment')
+      this.assertNoClaimedHostAttestation(plan.id)
+      if (plan.status === 'activated') {
+        const latest = this.#database.prepare(`SELECT checkpoint.plan_id,checkpoint.successful_order,checkpoint.exposure_order FROM activation_deployment_checkpoints checkpoint
+          JOIN activation_plans candidate ON candidate.id=checkpoint.plan_id WHERE candidate.target_path=? ORDER BY checkpoint.exposure_order DESC LIMIT 1`).get(plan.target.profilePath) as
+          { plan_id: string; successful_order: number | null; exposure_order: number } | undefined
+        if (!latest || latest.plan_id !== plan.id || latest.successful_order !== latest.exposure_order || !plan.activation?.hostRecoveryRequired
+          || !this.getActivationInstalledBaseline(plan.id)) throw new ControlPlaneStoreError('conflict', 'qualification invalidation cannot restore a superseded deployment')
+      }
+      const competing = this.#database.prepare(`SELECT 1 FROM activation_plans WHERE target_path=? AND id<>? AND status IN
+        ('staging','awaiting-reload','awaiting-readiness','awaiting-live-tasks','awaiting-effect-blocked-replay','awaiting-shadow','awaiting-canary','awaiting-soak','awaiting-health','commit-pending','rollback-pending')`).get(plan.target.profilePath,plan.id)
+      if (competing) throw new ControlPlaneStoreError('conflict', 'another deployment owns the profile')
+      const now = this.#now()
+      this.#database.prepare(`INSERT INTO live_qualification_invalidations
+        (plan_id,batch_id,batch_digest,receipt_digest,activation_id,fence,reason,invalidated_at) VALUES (?,?,?,?,?,?,?,?)`).run(
+        plan.id,record.batch.id,record.batch.digest,controlPlaneDigest(record.receipt),record.batch.activationId,record.batch.fence,reason,now)
+      // A live commit worker is fenced by revision immediately; its final source guard must fail.
+      this.#database.prepare(`UPDATE activation_plans SET status='rollback-pending',revision=revision+1,
+        activation_lease_until=NULL,rollback_profile_restored=0,failure_code='live-qualification-invalidated',updated_at=?
+        WHERE id=? AND revision=? AND activation_fence=?`).run(now,plan.id,plan.revision,plan.activation!.fence)
+      this.#database.exec('COMMIT'); return this.getPlan(plan.id)
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  #assertLiveQualificationCommit(planId: string): void {
+    const plan = this.getPlan(planId)
+    if (!plan.dossier.liveQualification) return
+    if (!this.#withLiveQualificationFence) throw new ControlPlaneStoreError('invalid-state', 'target canonical qualification fence unavailable')
+    const record = this.listLiveQualifications(planId).find(item => item.state === 'applied' && item.receipt?.disposition === 'qualified')
+    if (!record || this.#now() >= record.batch.deadlineAt || this.#now() >= record.receipt!.expiresAt) throw new ControlPlaneStoreError('expired', 'accepted live qualification is absent or expired')
+    this.assertCurrentLiveQualification(record.batch.id)
+  }
+
   /** Same synchronous transaction owns current-profile selection and capture. */
   withForegroundDeployment<T>(task: ForegroundDeploymentRecord['task'], profilePath: string,
     callback: (plan: PluginActivationPlan, operation: HostAttestationOperation) => T): T {
@@ -2257,18 +2509,28 @@ export class ControlPlaneStore {
     this.#database.exec('BEGIN IMMEDIATE')
     try {
       const active = this.#database.prepare(`SELECT id FROM activation_plans WHERE target_path = ? AND status IN (
-        'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
+        'staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
         'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending') LIMIT 1`).get(profilePath)
-      if (active) throw new ControlPlaneStoreError('conflict', 'profile has an unsettled activation')
-      const latest = this.#database.prepare(`SELECT checkpoint.plan_id, checkpoint.exposure_order, checkpoint.successful_order
-        FROM activation_deployment_checkpoints checkpoint JOIN activation_plans plan ON plan.id = checkpoint.plan_id
-        WHERE plan.target_path = ? ORDER BY checkpoint.exposure_order DESC LIMIT 1`).get(profilePath) as
-        { plan_id: string; exposure_order: number; successful_order: number | null } | undefined
-      if (!latest || latest.exposure_order !== latest.successful_order) throw new ControlPlaneStoreError('invalid-state', 'profile has no current successful deployment')
-      const plan = this.getPlan(latest.plan_id), watch = this.getActivationWatch(plan.id)
-      if (plan.status !== 'activated' || !plan.activation || watch.state !== 'watching'
-        || watch.activationId !== plan.activation.id || watch.fence !== plan.activation.fence || watch.startedAt > task.dispatchedAt) {
-        throw new ControlPlaneStoreError('invalid-state', 'task did not begin under a watched deployment')
+      let plan: PluginActivationPlan
+      if (active) {
+        plan = this.getPlan(String(active.id))
+        if (!plan.dossier.liveQualification || !['awaiting-live-tasks','commit-pending'].includes(plan.status)) throw new ControlPlaneStoreError('conflict', 'profile has an unsettled activation')
+        const window = this.getLiveQualificationWindow(plan.id)
+        if (task.dispatchedAt < window.startedAt || task.dispatchedAt >= window.deadlineAt || this.#now() >= window.deadlineAt) {
+          throw new ControlPlaneStoreError('expired', 'task is outside the live qualification window')
+        }
+      } else {
+        const latest = this.#database.prepare(`SELECT checkpoint.plan_id, checkpoint.exposure_order, checkpoint.successful_order
+          FROM activation_deployment_checkpoints checkpoint JOIN activation_plans plan ON plan.id = checkpoint.plan_id
+          WHERE plan.target_path = ? ORDER BY checkpoint.exposure_order DESC LIMIT 1`).get(profilePath) as
+          { plan_id: string; exposure_order: number; successful_order: number | null } | undefined
+        if (!latest || latest.exposure_order !== latest.successful_order) throw new ControlPlaneStoreError('invalid-state', 'profile has no current successful deployment')
+        plan = this.getPlan(latest.plan_id)
+        const watch = this.getActivationWatch(plan.id)
+        if (plan.status !== 'activated' || !plan.activation || watch.state !== 'watching'
+          || watch.activationId !== plan.activation.id || watch.fence !== plan.activation.fence || watch.startedAt > task.dispatchedAt) {
+          throw new ControlPlaneStoreError('invalid-state', 'task did not begin under a watched deployment')
+        }
       }
       const source = readOwnerSourceAdoptionPlan(this.#database, plan.id).source
       const owner = source.owner
@@ -2432,17 +2694,25 @@ export class ControlPlaneStore {
 
   #isPostActivationRollback(plan: PluginActivationPlan): boolean {
     if (plan.status !== 'rollback-pending' || plan.activation === undefined || plan.activation.failureCode === undefined
-      || !['post-activation-regressed', 'post-activation-retracted'].includes(plan.activation.failureCode)) return false
+      || !['post-activation-regressed', 'post-activation-retracted', 'live-qualification-invalidated'].includes(plan.activation.failureCode)) return false
     const checkpoint = this.#database.prepare('SELECT successful_order, exposure_order FROM activation_deployment_checkpoints WHERE plan_id = ?')
       .get(plan.id) as { successful_order: number | null; exposure_order: number } | undefined
     return checkpoint !== undefined && checkpoint.successful_order === checkpoint.exposure_order
   }
 
   #hasPostActivationRollbackProvenance(plan: PluginActivationPlan): boolean {
-    if (plan.activation === undefined || !['post-activation-regressed', 'post-activation-retracted'].includes(plan.activation.failureCode ?? '')) return false
+    if (plan.activation === undefined || !['post-activation-regressed', 'post-activation-retracted', 'live-qualification-invalidated'].includes(plan.activation.failureCode ?? '')) return false
     const checkpoint = this.#database.prepare('SELECT successful_order, exposure_order FROM activation_deployment_checkpoints WHERE plan_id = ?')
       .get(plan.id) as { successful_order: number | null; exposure_order: number } | undefined
     if (checkpoint === undefined || checkpoint.successful_order !== checkpoint.exposure_order) return false
+    if (plan.activation.failureCode === 'live-qualification-invalidated') {
+      const invalidation = this.#database.prepare('SELECT * FROM live_qualification_invalidations WHERE plan_id=?').get(plan.id) as
+        { batch_id: string; batch_digest: string; receipt_digest: string; activation_id: string; fence: number } | undefined
+      const accepted = invalidation && this.getLiveQualification(invalidation.batch_id)
+      return !!invalidation && accepted?.state === 'applied' && accepted.receipt?.disposition === 'qualified'
+        && invalidation.batch_digest === accepted.batch.digest && invalidation.receipt_digest === controlPlaneDigest(accepted.receipt)
+        && invalidation.activation_id === plan.activation.id && invalidation.fence === accepted.batch.fence && invalidation.fence <= plan.activation.fence
+    }
     const watch = this.#database.prepare('SELECT activation_id, fence, state, close_signature_digest FROM activation_watch WHERE plan_id = ?').get(plan.id) as
       { activation_id: string; fence: number; state: ActivationWatch['state']; close_signature_digest: string | null } | undefined
     return watch !== undefined && (watch.state === 'closed-regressed' || watch.state === 'closed-retracted')
@@ -2537,7 +2807,7 @@ export class ControlPlaneStore {
         AND NOT EXISTS (SELECT 1 FROM host_attestation_operations operation JOIN host_attestation_dispatches dispatch
           ON dispatch.operation_id = operation.operation_id WHERE operation.plan_id = activation_plans.id
             AND dispatch.status = 'claimed')
-        AND (status IN ('awaiting-reload', 'awaiting-readiness', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
+        AND (status IN ('awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow',
           'awaiting-canary', 'awaiting-soak', 'awaiting-health')
           OR (status IN ('staging', 'commit-pending') AND COALESCE(activation_lease_until, 0) < ?))`).run(code, this.#now(), input.planId, input.expectedRevision, input.fence, this.#now())
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'activation recovery request lost its waiting-phase fence')
@@ -2546,6 +2816,14 @@ export class ControlPlaneStore {
   }
 
   advanceActivation(input: { planId: string; expectedRevision: number; fence: number; from: PlanStatus; to: PlanStatus; failureCode?: string }): PluginActivationPlan {
+    if (input.to === 'activated' && this.getPlan(input.planId).dossier.liveQualification && this.#liveQualificationAdmission !== input.planId) {
+      this.#assertLiveQualificationCommit(input.planId)
+      return this.#withLiveQualificationFence!(input.planId, () => {
+        this.#liveQualificationAdmission = input.planId
+        try { return this.withOwnerTaskFailureGapAdmission(this.getPlan(input.planId).gapId, () => this.advanceActivation(input)) }
+        finally { this.#liveQualificationAdmission = undefined }
+      })
+    }
     return this.#withActivationSource(input.planId, () => {
       const allowed: Record<string, readonly PlanStatus[]> = { staging: ['awaiting-reload', 'rollback-pending'],
         'rollback-pending': ['rolled-back'], 'commit-pending': ['activated', 'rollback-pending'] }
@@ -2591,7 +2869,7 @@ export class ControlPlaneStore {
     if (replay !== undefined) {
       const transition = Object.values(expectedAttestation).find(item => item.phase === input.receipt.phase)
       const expectedStatus: PlanStatus = input.receipt.outcome === 'passed' && transition !== undefined
-        ? transition.next : 'rollback-pending'
+        ? (input.receipt.phase === 'readiness' && replay.result.dossier.liveQualification ? 'awaiting-live-tasks' : transition.next) : 'rollback-pending'
       const expectedFailure = input.receipt.outcome === 'passed' ? undefined : 'host-attestation-failed'
       if (replay.result.status !== expectedStatus || replay.result.revision !== input.expectedRevision + 1
         || replay.result.activation?.id !== input.receipt.activationId || replay.result.activation.fence !== input.expectedFence
@@ -2614,7 +2892,7 @@ export class ControlPlaneStore {
       && verified.hostGeneration !== request.predecessor!.hostGeneration) {
       throw new ControlPlaneStoreError('conflict', 'non-transition Host receipt changed generation from its predecessor')
     }
-    const now = this.#now(); const nextStatus: PlanStatus = verified.outcome === 'passed' ? expected.next : 'rollback-pending'
+    const now = this.#now(); const nextStatus: PlanStatus = verified.outcome === 'passed' ? (verified.phase === 'readiness' && plan.dossier.liveQualification ? 'awaiting-live-tasks' : expected.next) : 'rollback-pending'
     return this.#withActivationSource(input.planId, () => {
     this.#database.exec('BEGIN IMMEDIATE')
     try {
@@ -2831,6 +3109,7 @@ export class ControlPlaneStore {
         ON CONFLICT(plan_id) DO NOTHING`).run(plan.id, plan.candidate.package, plan.candidate.version,
         plan.candidate.integrity, activationId, fence, now, now)
       if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('invalid-state', 'activated plan has no post-activation watch')
+      if (plan.dossier.liveQualification) this.#database.prepare('UPDATE activation_watch SET last_host_generation=? WHERE plan_id=?').run(this.getLiveQualificationWindow(plan.id).hostGeneration,plan.id)
     }
   }
 
@@ -3581,7 +3860,7 @@ export class ControlPlaneStore {
     const row = this.#database.prepare(`SELECT
       (SELECT count(*) FROM capability_gaps WHERE status = 'open') AS gaps,
       (SELECT count(*) FROM activation_plans WHERE status = 'approved') + (SELECT count(*) FROM source_plans WHERE status = 'approved') AS ready_plans,
-      (SELECT count(*) FROM activation_plans WHERE status IN ('staging', 'awaiting-reload', 'awaiting-readiness',
+      (SELECT count(*) FROM activation_plans WHERE status IN ('staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks',
         'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending')) AS active_activations,
       (SELECT count(*) FROM activation_plans WHERE status = 'rolled-back') +
         (SELECT count(*) FROM source_plans WHERE status IN ('local-checks-failed', 'release-failed')) AS failed,
@@ -3662,7 +3941,7 @@ export class ControlPlaneStore {
       catalog: { digest: snapshot.dossier.catalogDigest, provenance: snapshot.dossier.catalogProvenance },
       matchedCapabilities: snapshot.dossier.matchedCapabilities, profile: snapshot.profile, target: snapshot.target,
       installationId: snapshot.installationId, ledger: snapshot.ledger, executor: snapshot.executor,
-      ttlMs: snapshot.expiresAt - snapshot.createdAt, ...(adoption ? { sourcePlanId: adoption.source_plan_id } : {}), ...(snapshot.dossier.handoff === undefined ? {} : { handoff: snapshot.dossier.handoff }) }
+      ttlMs: snapshot.expiresAt - snapshot.createdAt, ...(adoption ? { sourcePlanId: adoption.source_plan_id } : {}), ...(snapshot.dossier.handoff === undefined ? {} : { handoff: snapshot.dossier.handoff }), ...(snapshot.dossier.liveQualification === undefined ? {} : { liveQualification: snapshot.dossier.liveQualification }) }
     if (snapshot.digest !== authoritative.digest || snapshot.gapId !== authoritative.gapId || snapshot.revision !== 1
       || snapshot.status !== 'pending-approval' || snapshot.createdAt !== receipt.createdAt
       || snapshot.approval !== undefined || snapshot.activation !== undefined || controlPlaneDigest(replayBinding) !== inputDigest) {

@@ -77,3 +77,7 @@ systemctl --user stop dsh-profile-web.service dsh-profile-rsi-coordinator.servic
 暂停自迭代可停止协调器及目标的相关 Automations，或撤销有限授权；重启不重置额度，也不重放 unknown 外部动作。授权续期需要新的合法授权标识与配置。配置 journal 只恢复 profile；已发布或已采用能力的回退仍由 Control Plane 的签名恢复链负责。
 
 此 CLI 读取 owner 数据库与私有配置；默认检查也会使用本地 lifecycle 锁和临时 WAL 快照，但不改变 profile 或业务状态。显式应用写两个 profile patch 和 journal；校验会执行本地 `dsh --dump-config`、`systemctl show`，显式启动会安装/启用/restart 用户级服务。它不向其他人发送消息。原始授权、私钥、数据库、journal 与运行日志留本地，不提交 GitHub。
+
+## 使用普通任务资格合同
+
+可按[有限试用采用指南](../../../docs/bounded-live-adoption.md)配置 `sourceAdoptions.liveQualification` 与 `controlPlane.liveQualification`，并设置 `limits.qualification` 和独立预算 ID。配置器核对第五份独立签名授权及公钥，生成资格扫描的原生 Policy/Automations 规则。该模式以限时真实 owner 任务替代严格 replay/shadow 等验收合同，不声称这些严格阶段已通过；已有未配置此模式的 manifest 保持原行为。实际部署端到端验收仍见当前状态。

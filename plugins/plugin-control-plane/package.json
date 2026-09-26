@@ -11,7 +11,8 @@
     "dsh-source-approval-authority": "./bin/dsh-source-approval-authority.js",
     "dsh-source-release-authority": "./bin/dsh-source-release-authority.js",
     "dsh-source-adoption-authority": "./bin/dsh-source-adoption-authority.js",
-    "dsh-task-observation-authority": "./bin/dsh-task-observation-authority.js"
+    "dsh-task-observation-authority": "./bin/dsh-task-observation-authority.js",
+    "dsh-live-qualification-authority": "./bin/dsh-live-qualification-authority.js"
   },
   "exports": {
     ".": {

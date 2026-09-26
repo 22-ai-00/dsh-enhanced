@@ -15,7 +15,7 @@ export interface RsiSetupManifest {
   growthDriver: AssistantGrowthDriverConfig
   sourceReviews: SourceReviewConfig
   coordinator: { budgetId: string; budgetAmount: number; timeoutMs: number }
-  limits: { periodMs: number; reviews: number; discovery: number; source: number; observations: number; coordinator: number }
+  limits: { periodMs: number; reviews: number; discovery: number; source: number; observations: number; coordinator: number; qualification?: number }
 }
 
 type Rows = { document: Document; rows: YAMLSeq }
@@ -151,6 +151,7 @@ function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupM
   assertBudget(document, policy, budgetIds.discovery, manifest.limits.discovery, manifest.limits.periodMs, 'subject')
   assertBudget(document, policy, budgetIds.source, manifest.limits.source, manifest.limits.periodMs, 'subject')
   assertBudget(document, policy, budgetIds.observations, manifest.limits.observations, manifest.limits.periodMs, 'subject')
+  if (manifest.controlPlane.liveQualification) assertBudget(document, policy, manifest.controlPlane.liveQualification.budgetId, manifest.limits.qualification!, manifest.limits.periodMs, 'subject')
   const rules = seq(policy.get('rules', true) as Node | undefined, 'assistantPolicy.rules'); removePrefixed(rules)
   const background = (id: string, subject: string, action: 'reconcile' | 'execute', automationId: string) => ({ id: `${rsiPrefix}${id}`, effect: 'allow', subject: { kind: 'background', id: subject, workspace: scope.workspace, principal: scope.principal }, actions: [action], resource: { kind: 'automation', id: automationId }, context: { initiators: ['background'] } })
   for (const [name, subject, automation] of [['usage', 'assistant-growth-usage', 'usage-*'], ['source', 'plugin-control-plane-source', 'source-job-*'], ['observation', 'plugin-control-plane-task-observations', 'task-observation-scan-*']] as const) {
@@ -158,6 +159,10 @@ function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupM
     // Automations execute under their generated automation id; reconciliation
     // runs under its stable owner id.
     upsertById(document, rules, background(`${name}-execute`, automation, 'execute', automation))
+  }
+  if (manifest.controlPlane.liveQualification) {
+    upsertById(document, rules, background('qualification-reconcile', 'plugin-control-plane-live-qualification', 'reconcile', 'live-qualification-scan-*'))
+    upsertById(document, rules, background('qualification-execute', 'live-qualification-scan-*', 'execute', 'live-qualification-scan-*'))
   }
   const agent = { kind: 'agent', id: scope.preset, workspace: scope.workspace, principal: scope.principal }
   for (const tool of ['growth_*', 'plugin_source_*'] as const) upsertById(document, rules, { id: `${rsiPrefix}${tool}`, effect: 'allow', subject: agent, actions: ['execute'], resource: { kind: 'tool', id: tool }, context: { initiators: ['background'] } })
@@ -196,6 +201,11 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
 
   const budgetIds = { reviews: growth.budgetId, discovery: growth.usageLearning.scanBudgetId, source: jobs.budgetId, observations: cp.taskObservations.budgetId }
   if (Object.values(budgetIds).some((value): value is null => value === null) || new Set(Object.values(budgetIds)).size !== 4 || new Set([...Object.values(budgetIds), input.manifest.coordinator.budgetId]).size !== 5) fail('five RSI automation budget ids must be present and distinct')
+  if (cp.liveQualification) {
+    same(cp.liveQualification.scope, cp.taskObservations.scope, 'live qualification')
+    if (!Number.isSafeInteger(input.manifest.limits.qualification) || input.manifest.limits.qualification! < 1
+      || [...Object.values(budgetIds), input.manifest.coordinator.budgetId].includes(cp.liveQualification.budgetId)) fail('live qualification requires a distinct finite budget')
+  }
   const personal = cloneEffectiveConfig(target, effective, 'dsh-enhanced-personal-assistant')
   targetPolicy(target.document, personal, input.manifest, owner, budgetIds as { reviews: string; discovery: string; source: string; observations: string })
   const verifier = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-verifier')
