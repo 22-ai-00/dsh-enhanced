@@ -187,6 +187,7 @@ export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding
     || adoptions.grant.target.profilePath !== join(trust.dshHome, 'profiles', manifest.targetProfile)
     || !isDeepStrictEqual(adoptions.grant.executor, { id, version, path, sha256 })
     || !isDeepStrictEqual(adoptions.grant.liveQualification, config.sourceAdoptions!.liveQualification)
+    || !isDeepStrictEqual(adoptions.grant.hostDeploymentInputs, config.sourceAdoptions!.hostDeploymentInputs)
     || adoptions.grant.catalogPath !== config.catalogPath || !isDeepStrictEqual(adoptions.grant.handoff, config.sourceAdoptions!.handoff)
     || approvals.grant.repository !== config.sourceJobs!.repository || releases.grant.repository !== config.sourceJobs!.repository
     || approvals.grant.worktreeRoot !== join(config.statePath, 'source-worktrees') || releases.grant.worktreeRoot !== approvals.grant.worktreeRoot

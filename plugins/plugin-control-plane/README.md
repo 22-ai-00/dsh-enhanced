@@ -142,7 +142,7 @@ request 固定：installation id、ledger id/path、plan id/digest、activation 
 
 Host attestor 与 release adapter 的每次命令共用受控进程组：超时、输出超限及主进程正常/异常退出都会清理同组后代，核对主进程退出，并有界排空 stdout。清理无法证实时返回失败，不以遗留管道的 `close` 无限等待。该机制依赖 runner 存活，不能包含主动 `setsid()` 脱组进程，也不撤回远端已接受的操作；具体期限、恢复边界与回归证据见 [adapter 生命周期](../../docs/control-plane-adapter-lifetime.md)。
 
-随包的 `bin/dsh-systemd-host-attestor.js`（v5）提供 Linux/systemd 的 **reload、readiness 与物理 rollback** 适配：先用 `probe --prepare-only` 取得确切持久请求，再由主人私有配置授权其摘要；重启前记录操作，重复调用仅重放或观测对账。它核验 fresh InvocationID/MainPID 与稳定窗口，按 installation 共享 Host 代次，reload 推进至 `awaiting-readiness`；readiness 再绑定最新已签重启、实际 Loader/Fiber 与服务实例，多次稳定观测后签名，重复请求不重启 Host。稳定、认证通过且身份匹配的 inactive 候选签为 failed readiness；认证错误或状态漂移不签发回执。rollback 在 CLI 恢复原 profile 文件后证明原 Host 就绪，或原本不存在的 profile 已停服；缺少物理恢复凭证时继续保持 pending。部署配置、权限和未覆盖阶段见 [systemd Host attestor](../../docs/systemd-host-attestor.md)。
+随包的 `bin/dsh-systemd-host-attestor.js`（v6）提供 Linux/systemd 的 **reload、readiness 与物理 rollback** 适配：可用 schema4 与随包 `dsh-systemd-host-authority` 按安装期有限授权自动生成精确请求配置，或用 `probe --prepare-only` 取得请求后显式配置其摘要；重启前记录操作，重复调用仅重放或观测对账。它核验 fresh InvocationID/MainPID 与稳定窗口，按 installation 共享 Host 代次，reload 推进至 `awaiting-readiness`；readiness 再绑定最新已签重启、实际 Loader/Fiber 与服务实例，多次稳定观测后签名，重复请求不重启 Host。稳定、认证通过且身份匹配的 inactive 候选签为 failed readiness；认证错误或状态漂移不签发回执。rollback 在 CLI 恢复原 profile 文件后证明原 Host 就绪，或原本不存在的 profile 已停服；缺少物理恢复凭证时继续保持 pending。部署配置、权限和未覆盖阶段见 [systemd Host attestor](../../docs/systemd-host-attestor.md)。
 
 phase operation 和派发 claim 在子进程启动前持久化。外部执行期间不持有控制面 SQLite 写锁，其他任务可继续写入；同一 operation 的并发或重启调用由持久 claim 拒绝。退出、验签失败或回执丢失后保留 unknown，不自动再次调用通用 attestor。取得原请求的精确签名回执后，用下述 `attest` 对账；未结算的派发也会阻止同计划换代回退，避免旧外部动作与恢复并行。
 
@@ -439,7 +439,7 @@ schema 20 的 `foreground_deployments` 在真实 owner 前台任务开始和完�
 
 Host 可用 `inspectOwnerForegroundDeployment()` 按与 Delivery 学习来源查询相同的参数读取归因；它重验当前可信任务，保持原学习来源摘要不变。记录证明该任务处于这一部署实例下，不证明调用过某个工具或该版本导致了结果，也不会把正常结束计作质量成功。读取结果作为质量依据仍需消费当前 canonical 反馈与撤回，并在最终写入时使用 writer fence。可选 `taskObservations` 已接通有限批次的当前反馈、签名观察与物理回退；日常使用配置已可编译，端到端部署验收仍待完成，此能力不代表 npm 发布验收通过。
 
-单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 24 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
+单个 Service 最多准备一条提案。Cordis 卸载先取消并等待所有准备步骤和容器/worktree 清理，再关闭 SQLite。数据库 schema 25 保留旧 create 摘要和 release 外键；modify 的审批摘要另外绑定 mode、检查结果及构建证据。构建证据证明配置镜像中的检查过程，不证明候选业务质量或独立隐藏评测通过；正式 release 仍需要原有审批、独立 review、构建和签名。
 
 非 owner-task 来源的计划可用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。adapter 返回签名 publish 歧义回执后进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。派发后没有签名回执则保持 unknown，不自动重跑；普通 owner-task 来源的全部阶段必须通过 Host 当前来源校验。
 
@@ -483,7 +483,7 @@ Host-only `recordOwnerTaskFailureGap(source)` 将经 Delivery 再验证的 foreg
 
 兼容性见仓库 [compatibility baseline](../../docs/compatibility.md)。Node.js 要求 `^22.19.0 || >=24.0.0`（使用 `node:sqlite`）。
 
-物理 Host 回退使用随包 systemd attestor v5 的 schema-3 配置与 schema-2 请求，复用 `probe --prepare-only` / `probe`。回退前固定原始三份 core 文件摘要；文件恢复后固定 fence，重试同一个持久化操作只重新观察，不再次 restart/stop。原 profile 不存在时只允许 stop。详情与环境约束见[操作文档](../../docs/systemd-host-attestor.md#physical-rollback)。
+物理 Host 回退使用随包 systemd attestor v6 的 schema-3 配置与 schema-2 请求，复用 `probe --prepare-only` / `probe`。回退前固定原始三份 core 文件摘要；文件恢复后固定 fence，重试同一个持久化操作只重新观察，不再次 restart/stop。原 profile 不存在时只允许 stop。详情与环境约束见[操作文档](../../docs/systemd-host-attestor.md#physical-rollback)。
 
 ## 原生阻断回放组件
 

@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { approvalSigningPayload, parseApprovalReceipt } from './approval.js'
 import { loadCatalogWithMetadata, parseCatalog, type CatalogEntry, type CatalogPackage } from './catalog.js'
 import { sourceAuthorityCanonicalSafePath, sourceAuthorityReadSafeFile } from './source-approval-authority.js'
-import { controlPlaneDigest, readOwnerSourceAdoptionPlan } from './store.js'
+import { controlPlaneDigest, readOwnerSourceAdoptionPlan, validateHostDeploymentInputs } from './store.js'
 import { PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
 import type { ApprovalReceipt } from './types.js'
@@ -47,6 +47,7 @@ export interface SourceAdoptionAuthorityConfig {
     receiptTtlMs: number
     handoff?: AdoptionHandoffTerms
     liveQualification?: LiveQualificationTerms
+    hostDeploymentInputs?: readonly string[]
     policies: readonly AdoptionPolicy[]
   }
 }
@@ -94,7 +95,8 @@ export function validateSourceAdoptionAuthorityConfig(value: unknown): asserts v
   if (item.schemaVersion !== 1) fail(); text(item.authority); text(item.keyId)
   const keyPath = path(item.keyPath); const statePath = configuredPath(item.statePath); const control = path(item.controlDatabasePath)
   if (new Set([keyPath, statePath, control]).size !== 3) fail()
-  const grant = object(item.grant); keys(grant, ['id', 'expiresAt', 'maxAdoptions', 'owner', 'installationId', 'ledger', 'target', 'executor', 'catalogPath', 'receiptTtlMs', 'policies', ...(Object.hasOwn(grant, 'handoff') ? ['handoff'] : []), ...(Object.hasOwn(grant, 'liveQualification') ? ['liveQualification'] : [])])
+  const grant = object(item.grant); keys(grant, ['id', 'expiresAt', 'maxAdoptions', 'owner', 'installationId', 'ledger', 'target', 'executor', 'catalogPath', 'receiptTtlMs', 'policies', ...(Object.hasOwn(grant, 'handoff') ? ['handoff'] : []), ...(Object.hasOwn(grant, 'liveQualification') ? ['liveQualification'] : []), ...(Object.hasOwn(grant, 'hostDeploymentInputs') ? ['hostDeploymentInputs'] : [])])
+  if (Object.hasOwn(grant, 'hostDeploymentInputs')) validateHostDeploymentInputs(grant.hostDeploymentInputs)
   if (Object.hasOwn(grant, 'handoff')) validateAdoptionHandoffTerms(grant.handoff)
   if (Object.hasOwn(grant, 'liveQualification')) { validateLiveQualificationTerms(grant.liveQualification); if (!grant.handoff) fail() }
   text(grant.id); integer(grant.expiresAt, 1); integer(grant.maxAdoptions, 1, 10_000); text(grant.installationId)
@@ -150,6 +152,7 @@ export async function authorizeSourceAdoption(configInput: SourceAdoptionAuthori
       const { plan, sourcePlan, source, released } = bound
       if (plan.digest !== requested.planDigest || controlPlaneDigest(source) !== requested.sourceReferenceDigest || plan.status !== 'pending-approval' || sourcePlan.status !== 'release-complete' || !sameOwner(source.owner, config.grant.owner)) fail()
       if (plan.installationId !== config.grant.installationId || !same(plan.ledger, config.grant.ledger) || !same(plan.target, config.grant.target) || !same(plan.executor, config.grant.executor)) fail()
+      if (!same(plan.dossier.hostDeploymentInputs ?? null, config.grant.hostDeploymentInputs ?? null)) fail()
       if (!same(plan.dossier.handoff ?? null, config.grant.handoff ?? null) || !same(plan.dossier.liveQualification ?? null, config.grant.liveQualification ?? null)) fail()
       if (!same(plan.candidate, released) || plan.dossier.catalogProvenance !== 'owner-provided-integrity-pinned') fail()
       const selected = config.grant.policies.map(policy).find(value => value.candidateId === released.id); if (!selected || !exactPolicy(released, selected)) fail()

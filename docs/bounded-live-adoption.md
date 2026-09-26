@@ -37,7 +37,7 @@ Control Plane 提供显式授权的 `dsh-bounded-live/v1` 采用合同。它复�
 - `owner`、`installationId`、`ledger`、`profilePath`、`packages`：与原源码采用授权完全一致。
 - `terms`：上述完整合同，签名身份还须登记在 trust 的 `host-attestation` 公钥集合。
 
-`dsh-rsi-setup` 校验合同、owner、包白名单、账本和公钥后才应用配置。它不生成签名授权，也不部署额外的系统身份隔离。reload/readiness/rollback 继续需要正确配置的 systemd 签名器。
+`dsh-rsi-setup` 校验合同、owner、包白名单、账本和公钥后才应用配置。它不生成签名授权，也不部署额外的系统身份隔离。reload/readiness/rollback 需要正确配置的 systemd 签名器。可使用 [schema4 自动 Host 授权](systemd-host-attestor.md#automatic-authorization-within-an-installation-grant)，同时在采用配置、采用授权和 Host 授权中设置相同 `hostDeploymentInputs`；每次更新无需手工填写 request digest。首次资源与密钥准备尚未集成到安装器。
 
 ## 决策与恢复
 

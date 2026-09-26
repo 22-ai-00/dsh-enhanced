@@ -205,10 +205,10 @@ function activationEnvironment(value: Awaited<ReturnType<typeof fixture>>, plan:
   return { DSH_HOME: value.dshHome, DSH_TEST_LOCK: lockfile(plan), DSH_TEST_PACKAGES: installedPackages(plan), DSH_TEST_FAIL: fail }
 }
 
-async function approved(value: Awaited<ReturnType<typeof fixture>>, suffix: string): Promise<PluginActivationPlan> {
+async function approved(value: Awaited<ReturnType<typeof fixture>>, suffix: string, hostDeploymentInputs?: readonly string[]): Promise<PluginActivationPlan> {
   const store = new ControlPlaneStore({ path: value.state })
   const gap = store.recordGap({ idempotencyKey: `gap:${suffix}`, capability: 'health', context: `gap ${suffix}`, expectedValue: 10, frequency: 2, estimatedCost: 2, risk: 0 })
-  const plan = store.createPlan(input(value, gap.id, `plan:${suffix}`)).result
+  const plan = store.createPlan({ ...input(value, gap.id, `plan:${suffix}`), ...(hostDeploymentInputs ? { hostDeploymentInputs } : {}) }).result
   const now = Date.now()
   const unsigned: Omit<ApprovalReceipt, 'signature'> = { schemaVersion: 1, approvalId: `approval-${suffix}`,
     authority: 'owner-policy', keyId: 'owner-key-1', planId: plan.id, planDigest: plan.digest, decision: 'approved',
@@ -765,6 +765,26 @@ describe.sequential('trusted staged CLI', () => {
     expect(staged.status).toBe('awaiting-reload')
     expect(staged.status).not.toBe('activated')
     await expect(readFile(join(value.profile, 'marker'), 'utf8')).resolves.toBe('original')
+  })
+
+  test('records signed deployment inputs before staged profile exposure', async () => {
+    const value = await fixture()
+    for (const name of ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml']) await writeFile(join(value.profile, name), '{}\n', { mode: 0o600 })
+    const plan = await approved(value, 'host-inputs', ['marker'])
+    await withEnvironment(activationEnvironment(value, plan),
+      () => runPluginControl(['activate', '--plan-id', plan.id, '--expected-revision', String(plan.revision)]))
+    const store = new ControlPlaneStore({ path: value.state })
+    try {
+      const staged = store.getPlan(plan.id), witness = store.getActivationHostInputWitness(plan.id)!
+      expect(staged.status).toBe('awaiting-reload')
+      expect(witness).toMatchObject({ planDigest: plan.digest, activationId: staged.activation!.id,
+        fence: staged.activation!.fence, inputs: ['marker'] })
+      expect(witness.profileFiles).toHaveLength(3)
+      expect(witness.deploymentFiles).toEqual([{ input: 'marker', path: join(value.profile, 'marker'),
+        sha256: createHash('sha256').update('original').digest('hex') }])
+      expect(witness.baselineDeploymentFiles).toEqual(witness.deploymentFiles)
+      for (const file of witness.profileFiles) expect(createHash('sha256').update(await readFile(file.path)).digest('hex')).toBe(file.sha256)
+    } finally { store.close() }
   })
 
   test('executes the verified descriptor when the registered executor pathname is swapped after inspection', async () => {

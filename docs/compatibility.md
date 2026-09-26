@@ -1,5 +1,9 @@
 # 兼容性基线
 
+## 自动 Host 授权（Control Plane schema 25）
+
+v25 新增不可变部署文件记录，不改写既有计划摘要和签名。可选 `hostDeploymentInputs` 进入新计划批准摘要；未配置时沿用原契约。外部 Host 授权器只读当前 source/release、claimed operation、批准与部署记录，按安装期有限授权生成精确请求配置。systemd attestor v6 的配置 schema4 包装层支持此自动授权；原配置 schema1–3 保持不变。两个 Host、授权器和信任配置需成套升级，待处理旧版本操作保留原签名器；详见[systemd Host 签名器](systemd-host-attestor.md#automatic-authorization-within-an-installation-grant)。不改变 DSH/Cordis 基线。
+
 ## 有限试用采用（Control Plane schema 24）
 
 Control Plane v24 增加 `awaiting-live-tasks`、不可续期窗口、专用资格记录与负向失效义务。迁移重建 activation 状态约束，保留既有计划摘要、签名、外键及 unknown 派发；旧记录不补造试用授权。两个 Host 与独立签名器须成套升级，旧 schema23 reader 拒绝 v24。新 `dossier.liveQualification` 是批准摘要的一部分，缺省严格合同不变。
@@ -223,7 +227,7 @@ teardown and actual DSH process observation. See [contract](runtime-observer.md)
 
 ### External systemd readiness signer
 
-The shipped systemd attestor version is `dsh-systemd-host-attestor-5`. Owner
+The shipped systemd attestor version is `dsh-systemd-host-attestor-6`. Owner
 config schema 1 selects reload, schema 2 readiness, and schema 3 physical
 rollback. It now requires Host request schema 2 with an immutable predecessor
 receipt binding. Readiness independently matches that binding against the

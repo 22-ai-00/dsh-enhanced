@@ -101,7 +101,7 @@ if(args[1]==='show') {
   const request: HostAttestationRequest = { schemaVersion: 2, predecessor: null, kind: 'dsh-host-attestation-request', operationId: 'host-operation-fixture',
     requestedAt: now, receiptTtlMs: 30000, installationId: config.authorization.installationId,
     ledger: config.authorization.ledger, plan: config.authorization.plan, activation: config.authorization.activation,
-    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-5',
+    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-6',
       ...executable, interpreter, authority: config.authority, keyId: config.keyId }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } }
   config.authorization.requestDigest = hostAttestationRequestDigest(request); await save()
   const start = (value: unknown = request) => {
@@ -120,6 +120,32 @@ if(args[1]==='show') {
       activation: { id: 'activation', fence: 1 }, createdAt: now - 1000 } as PluginActivationPlan, value)
   const verify = async (receipt: HostAttestationReceipt) => verifyRequest(receipt, request)
   return { root, config, configPath, request, save, start, restarts, verify, verifyRequest }
+}
+
+async function standingFixture(mode = 'success', existing?: Awaited<ReturnType<typeof fixture>>) {
+  const f = existing ?? await fixture()
+  const { schemaVersion: _schema, authorization: _authorization, profileFiles: _files, ...staticFields } = f.config
+  const ready = (f.config as unknown as { readiness?: { client: unknown; observer: unknown } }).readiness
+  const observed = ready ? { client: ready.client, observer: ready.observer } : { client: f.config.processHelper, observer: {} }
+  const template = { ...staticFields, readiness: observed, recoveryReadiness: observed }
+  const resolverPath = join(f.root, 'owner', 'resolver.mjs')
+  const resolverConfigPath = join(f.root, 'owner', 'resolver.json')
+  await writeFile(resolverPath, `import {readFileSync} from 'node:fs';
+const config=JSON.parse(readFileSync(process.argv[3],'utf8'));
+let input='';for await(const chunk of process.stdin) input+=chunk;
+JSON.parse(input);
+if(config.mode==='timeout') await new Promise(()=>{});
+if(config.mode==='unit') config.derived.unit='other.service';
+if(config.mode==='request') config.derived.authorization.requestDigest='0'.repeat(64);
+process.stdout.write(JSON.stringify(config.derived));`, { mode: 0o700 })
+  await writeFile(resolverConfigPath, JSON.stringify({ template, derived: f.config, mode }), { mode: 0o600 })
+  const wrapper = { schemaVersion: 4, template, resolver: {
+    executable: { path: resolverPath, sha256: sha(await readFile(resolverPath)) }, interpreter: f.config.interpreter,
+    configPath: resolverConfigPath, configSha256: sha(await readFile(resolverConfigPath)), timeoutMs: 5000,
+  } }
+  const save = () => writeFile(f.configPath, JSON.stringify(wrapper), { mode: 0o600 })
+  await save()
+  return { ...f, wrapper, resolverConfigPath, saveWrapper: save }
 }
 
 async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 'stable' | 'epoch-drift' | 'wrong-context' | 'replayed-challenge' | 'wrong-mac' | 'inactive' | 'inactive-then-active' | 'bad-identity' | 'disconnected' | 'rollback' = 'stable') {
@@ -464,6 +490,63 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     expect(await f.restarts()).toBe(1)
   })
 
+  test('resolves standing authority through pinned descriptors and replays without another restart', async () => {
+    const f = await standingFixture()
+    const first = await f.start().result
+    expect(first.code, first.stderr).toBe(0)
+    await f.verify(JSON.parse(first.stdout))
+    const second = await f.start().result
+    expect(second.code, second.stderr).toBe(0)
+    expect(second.stdout).toBe(first.stdout)
+    expect(await f.restarts()).toBe(1)
+  })
+  test('checks standing readiness with the forward observer', async () => {
+    const f = await fixture(), ready = await readinessFixture(f)
+    await standingFixture('success', f)
+    const result = await f.start(ready.request).result
+    expect(result.code, result.stderr).toBe(0)
+    await f.verifyRequest(JSON.parse(result.stdout), ready.request)
+    expect(await f.restarts()).toBe(1)
+  }, 30_000)
+  test.each(['restore', 'stop'] as const)('uses standing recovery authority for %s', async action => {
+    const f = await rollbackFixture(action)
+    const standing = await standingFixture('success', f)
+    // Forward observer can differ: restore must use the original runtime.
+    standing.wrapper.template.readiness = { client: f.config.processHelper, observer: {} }
+    const resolverConfig = JSON.parse(await readFile(standing.resolverConfigPath, 'utf8'))
+    resolverConfig.template = standing.wrapper.template
+    await writeFile(standing.resolverConfigPath, JSON.stringify(resolverConfig))
+    standing.wrapper.resolver.configSha256 = sha(await readFile(standing.resolverConfigPath))
+    await standing.saveWrapper()
+    const result = await f.startRollback().result
+    expect(result.code, result.stderr).toBe(0)
+    await f.verifyRequest(JSON.parse(result.stdout), f.request)
+    expect(await f.restarts()).toBe(action === 'restore' ? 2 : 0)
+  }, 30_000)
+  test.each(['unit', 'request'])('rejects resolver changes to %s before supervisor I/O', async mode => {
+    const f = await standingFixture(mode)
+    expect((await f.start().result).code).toBe(1)
+    expect(await f.restarts()).toBe(0)
+    expect(await readFile(join(f.root, 'calls'), 'utf8').catch(() => '')).toBe('')
+  })
+  test('rejects changed resolver config and mismatched static template', async () => {
+    const f = await standingFixture()
+    const original = await readFile(f.resolverConfigPath)
+    await writeFile(f.resolverConfigPath, Buffer.concat([original, Buffer.from(' ')]))
+    expect((await f.start().result).code).toBe(1)
+    await writeFile(f.resolverConfigPath, original)
+    f.wrapper.template.unit = 'other.service'; await f.saveWrapper()
+    expect((await f.start().result).code).toBe(1)
+    expect(await f.restarts()).toBe(0)
+  })
+  test.each(['missing', 'script'] as const)('requires a native pinned interpreter for a script resolver: %s', async mode => {
+    const f = await standingFixture()
+    Reflect.set(f.wrapper.resolver, 'interpreter', mode === 'missing' ? null : f.wrapper.resolver.executable); await f.saveWrapper()
+    const result = await f.start().result
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain('script resolver requires a pinned interpreter')
+    expect(await f.restarts()).toBe(0)
+  })
   test('signs exact reload evidence and replays a byte-identical receipt without restarting', async () => {
     const f = await fixture(); const first = await f.start().result
     expect(first.code, first.stderr).toBe(0)
