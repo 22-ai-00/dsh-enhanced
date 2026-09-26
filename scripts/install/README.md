@@ -122,6 +122,8 @@ dsh-rsi reinstall --local ~/work/github/dsh-enhanced --yes
 
 飞书向导支持纯 SSH/无桌面 Linux：默认先探测 Secret Service，不可用时会在 OAuth 前自动验证并改用当前用户 `0700` 目录下的版本化 `0600` protected-file，不要求安装 GNOME Keyring。该文件没有额外静态加密，同 UID、root 与可读备份仍能读取；需要强制系统钥匙环时可在安装后直接运行 `dsh-lark-setup --linux-credential-provider secret-service`。
 
+配置飞书时还会自动安装或复用官方 `lark-cli`，使用同一应用完成 owner 的业务域授权，并生成原生 DSH 业务技能；后续有效授权可复用。已有 channel 选择 keep/skip 时不重新发起授权，需要新增业务接入时运行 `--lark configure`。仅配置消息通道可直接调用 `dsh-lark-setup --no-business-tools`；范围、凭据存储和失败恢复见[飞书安装指南](../../plugins/lark-channel/docs/setup.md#自动业务工具接入)。
+
 管理内建服务时，安装器会在 OAuth 前检查 systemd user manager 和 lingering。当前用户有权时会自动启用 lingering；需要管理员权限时，交互向导会先展示唯一的固定提权命令，并询问是否现在通过 `sudo` 执行，密码由 `sudo` 直接读取，不进入安装器、参数或日志。拒绝、失败或非交互运行都会在云端授权前停止并给出同一条可复制命令。Linux 安装完成后还会观察 user unit 的 `ActiveState`、`ExecMainStatus` 和 `NRestarts` 一个短窗口；发现快速崩溃/重启循环会打印最近 journal 并停止该 unit，避免 systemd 无限重启掩盖原始错误。容器、未启用 systemd 的 WSL 或其他没有 systemd user manager/logind 的系统应使用 `--no-service`，并由 Docker、s6、runit 等外部 supervisor 保持 `dsh --profile <name> --no-open` 常驻；此时安装器不会宣称或验证内建服务的注销后存活能力。
 Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 root-owned `01777` `/tmp`；setup 会在任何 profile、凭据、数据库或 service mutation 前持有与 upgrade/uninstall 相同的 canonical `DSH_HOME` rendezvous lock，避免 onboarding/reconfigure 与 service-aware lifecycle 并发。
 
@@ -174,7 +176,7 @@ v1 任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次�
 
 ## 配置默认模型
 
-DSH 需要一个能解析的默认模型才能真正对话。新安装时若 PATH 上有真正可执行的 `traex` 或 `trae-cli`，安装器会在写入前把 TraeX provider 加入同一 cohort 预检、安装并启用当前 profile 的 route，不弹模型菜单。它只在最终有效命令已登录、且 settings/home/profile 都没有显式默认模型时，为当前 profile 选择 `traex-agent` 默认模型；已有命令、工作目录与明确默认模型均保留。未登录时 route 仍启用，但不声称可对话，只提示运行最终命令的 `login`；`--model skip` 仍安装并启用 route，但不选择默认模型。未发现 TraeX 时沿用模型配置引导；`--yes` 和非交互运行不主动写入新 route。升级不自动追加 TraeX 或改模型 route。
+DSH 需要一个能解析的默认模型才能真正对话。新安装时若 PATH 上有真正可执行的 `traex` 或 `trae-cli`，安装器会在写入前把 TraeX provider 加入同一 cohort 预检、安装并启用当前 profile 的 route，不弹模型菜单。它只在最终有效命令已登录、且 settings/home/profile 都没有显式默认模型时，为当前 profile 选择 `traex-agent` 默认模型；已有命令、工作目录与明确默认模型均保留。未登录时 route 仍启用，但不声称可对话，只提示运行最终命令的 `login`；`--model skip` 仍安装并启用 route，但不选择默认模型。未发现 TraeX 时沿用模型配置引导；仅在未检测到 TraeX 且未显式指定 provider 时，`--yes` 和非交互运行不主动写入新 route。升级不自动追加 TraeX 或改模型 route。
 
 引导支持三种目标，都由 `dsh-model-setup` 写入 `settings.yaml` 的 `agent-default-model`（自定义网关另写 `llm-pi-ai.providers.<route>`）：
 

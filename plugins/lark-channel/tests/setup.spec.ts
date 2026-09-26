@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -9,6 +9,7 @@ import { PassThrough } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse, stringify } from 'yaml'
 import * as lark from '../src/index.ts'
+import { installLarkBusinessSkill } from '../src/business-skill.ts'
 
 const lifecycleProfilePath = fileURLToPath(new URL('../../../scripts/install/lifecycle-profile.mjs', import.meta.url))
 
@@ -677,6 +678,93 @@ setInterval(() => {}, 1000)`,
     expect(installed).toContain('principal: lark/primary/personal/ou_owner')
     expect(installed).not.toContain('cli_0000000000000000')
   })
+
+  test.each(['default', 'channel-only', 'business-failure', 'account-rotation', 'profile-failure'] as const)(
+    'full setup entry commits the owner before business tools: %s', async mode => {
+      const root = await mkdtemp(join(tmpdir(), 'lark-business-entry-'))
+      const dshHome = join(root, 'dsh-home')
+      const patchPath = join(dshHome, 'profiles/web/cordis.patch.yml')
+      await mkdir(dirname(patchPath), { recursive: true })
+      const original = '# new profile\n[]\n'
+      await writeFile(patchPath, original)
+      const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+      const base = lark.refreshLarkAgentPolicyPatch({
+        profilePatch: baseAssistantProfile(dshHome, databasePath), dshHome, agentTools: 'enable',
+      })
+      const channel = parse(await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8'))[0].insert
+      const previousAccount = mode === 'account-rotation' ? 'old-account' : 'primary'
+      channel[0].config.account = previousAccount
+      const effectiveBase = asEffectiveProfile(base) + '\n' + stringify(channel)
+      const events: string[] = []
+      const oldSkill = await installLarkBusinessSkill({
+        dshHome, profile: 'web', account: previousAccount, appId: 'cli_0123456789abcdef',
+        ownerUserId: 'ou_previous_owner', cliCommand: '/test/lark-cli', cliProfile: 'dsh-owner',
+        cliConfigDir: join(dshHome, 'old-config'), cliDataDir: join(dshHome, 'old-data'),
+      })
+      const previousHome = process.env.DSH_HOME
+      process.env.DSH_HOME = dshHome
+      const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+      try {
+        const operation = lark.runLarkSetup([
+          '--create-app', '--no-service', ...(mode === 'channel-only' ? ['--no-business-tools'] : []),
+        ], {
+          preflightCredentialProvider() { return 'linux-protected-file' },
+          async ensureBusinessCli() { events.push('cli-preflight'); return { command: '/test/lark-cli', version: '1.0.96' } },
+          async registerApplication(args) {
+            events.push('app'); expect(args.businessTools).toBe(mode !== 'channel-only')
+            return { client_id: 'cli_0123456789abcdef', client_secret: 'fixture-secret' }
+          },
+          readEffectiveProfile() {
+            const patch = readFileSync(patchPath, 'utf8')
+            return patch === original ? effectiveBase : asEffectiveProfile(patch)
+          },
+          validateProfile() {
+            events.push('validate')
+            if (mode === 'profile-failure') throw new Error('fixture profile validation failed')
+          },
+          ownerSetupOperations: {
+            storeCredential() { events.push('credential') }, readCredential() { return 'fixture-secret' },
+            async pairPrincipal() {
+              await expect(readFile(oldSkill.path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+              events.push('paired')
+            }, removeCredential() {},
+          },
+          discoverOwner(input) {
+            expect(input.appSecret).toBe('fixture-secret')
+            events.push('owner')
+            return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_owner' }
+          },
+          async setupBusinessTools(input) {
+            events.push('business')
+            expect(input).toMatchObject({ profile: 'web', account: 'primary', ownerUserId: 'ou_owner',
+              appId: 'cli_0123456789abcdef', appSecret: 'fixture-secret', cli: { command: '/test/lark-cli', version: '1.0.96' } })
+            expect(await readFile(patchPath, 'utf8')).toContain('principal: lark/primary/personal/ou_owner')
+            await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+            if (mode === 'business-failure') throw new Error('fixture business authorization incomplete')
+            return { skillPath: join(dshHome, 'skills/fixture/SKILL.md'), reusedAuthorization: false }
+          },
+        })
+        if (mode === 'business-failure') await expect(operation).rejects.toThrow('business authorization incomplete')
+        else if (mode === 'profile-failure') await expect(operation).rejects.toThrow('profile validation failed')
+        else await operation
+        await expect(readFile(oldSkill.path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+        if (mode === 'profile-failure') {
+          expect(events).toEqual(['cli-preflight', 'app', 'credential', 'owner', 'validate'])
+          expect(await readFile(patchPath, 'utf8')).toBe(original)
+          return
+        }
+        expect(events).toEqual(mode === 'channel-only'
+          ? ['app', 'credential', 'owner', 'validate', 'paired']
+          : ['cli-preflight', 'app', 'credential', 'owner', 'validate', 'paired', 'business'])
+        expect(await readFile(patchPath, 'utf8')).toContain('principal: lark/primary/personal/ou_owner')
+      } finally {
+        output.mockRestore()
+        if (previousHome === undefined) delete process.env.DSH_HOME
+        else process.env.DSH_HOME = previousHome
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+  )
 
   test('rolls back before pairing when the effective Delivery database changes during validation', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lark-validation-database-drift-'))
@@ -2945,7 +3033,7 @@ setInterval(() => {}, 1000)`,
     expect(() => parse(['--app-secret', 'do-not-accept'])).toThrow(/secret.*not accepted/i)
   })
 
-  test('offers existing or new applications with a minimal official template', () => {
+  test('offers existing or new applications with the official business template by default', () => {
     const registrationOptions = (lark as Record<string, unknown>).createLarkRegistrationOptions
     expect(registrationOptions).toBeTypeOf('function')
 
@@ -2965,7 +3053,7 @@ setInterval(() => {}, 1000)`,
         name: 'DSH Personal Assistant',
       },
       addons: {
-        preset: false,
+        preset: true,
         scopes: { tenant: [
           'application:bot.basic_info:read',
           'im:message.group_at_msg:readonly',
@@ -2989,6 +3077,15 @@ setInterval(() => {}, 1000)`,
     })
     expect(update).toMatchObject({ appId: 'cli_0123456789abcdef' })
     expect(update).not.toHaveProperty('createOnly')
+    const channelOnly = lark.createLarkRegistrationOptions({
+      domain: 'feishu', appName: 'DSH Personal Assistant', businessTools: false,
+      signal: new AbortController().signal, onQRCodeReady() {}, onStatusChange() {},
+    })
+    expect(channelOnly.addons?.preset).toBe(false)
+    expect(lark.parseLarkSetupArgs([]).businessTools).toBe(true)
+    expect(lark.parseLarkSetupArgs(['--no-business-tools']).businessTools).toBe(false)
+    expect(() => lark.parseLarkSetupArgs(['--install-service', '--no-business-tools']))
+      .toThrow(/install-service.*no-business-tools/u)
   })
 
   test('keeps an automatically received secret out of Keychain process arguments', () => {

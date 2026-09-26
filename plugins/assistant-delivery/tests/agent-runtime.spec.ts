@@ -11209,7 +11209,7 @@ describe('real native Delivery Agent runtime', () => {
         return 10
       }, inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
     const scopedEffect = vi.fn(async () => ({}))
-    const scopedResults: ToolExecutionResult[] = []
+    const scopedResults: Array<{ sessionId: string; result: ToolExecutionResult }> = []
     const childAgents: Agent[] = []
     fixture.ctx.on('agent/created', ({ agent }) => {
       if (agent.session.header.origin !== 'subagent') return
@@ -11222,15 +11222,21 @@ describe('real native Delivery Agent runtime', () => {
         output: { schema: { type: 'object', additionalProperties: false, properties: {} }, render: () => [] },
         execute: scopedEffect,
       }))
-      agent.ctx.on('tools/result', (execution, result) => { if (execution.name === 'strategy_scoped_probe') scopedResults.push(result) })
+      agent.ctx.on('tools/result', (execution, result) => {
+        if (execution.name === 'strategy_scoped_probe') scopedResults.push({ sessionId: String(agent.session.id), result })
+      })
     })
     let attackSent = false
+    let attackSessionId: string | undefined
     let adapterAborted = false
     let revokedAt = 0
     let faultInjected = false
+    let faultSessionId: string | undefined
     if (mode === 'stream-setup-error') fixture.ctx.on('llm/stream', (_options, next) => {
-      if (!faultInjected && fixture.ctx.agents.currentInitiator()?.session.header.origin === 'subagent') {
+      const initiator = fixture.ctx.agents.currentInitiator()
+      if (!faultInjected && initiator?.session.header.origin === 'subagent') {
         faultInjected = true
+        faultSessionId = String(initiator.session.id)
         throw new Error('downstream stream construction fixture failed')
       }
       return next()
@@ -11265,6 +11271,7 @@ describe('real native Delivery Agent runtime', () => {
         expect(options.tools ?? []).toEqual([])
         if (!faultInjected && (mode === 'stream-error' || mode === 'usage-invalid')) {
           faultInjected = true
+          faultSessionId = String(initiator.session.id)
           if (mode === 'stream-error') throw new Error('strategy adapter fixture stream failed')
           omitUsage = true
         }
@@ -11280,6 +11287,7 @@ describe('real native Delivery Agent runtime', () => {
         }
         if (mode === 'scoped-tool' && !attackSent) {
           attackSent = true
+          attackSessionId = String(initiator.session.id)
           const callId = ToolCallId('strategy-scoped-attack')
           yield { type: 'block-start', index: 0, blockType: 'tool-call' }
           yield { type: 'tool-call-delta', index: 0, id: callId, name: 'strategy_scoped_probe', argumentsDelta: '{}' }
@@ -11323,8 +11331,9 @@ describe('real native Delivery Agent runtime', () => {
     expect(scopedEffect).not.toHaveBeenCalled()
     if (mode === 'scoped-tool') {
       expect(scopedResults).toHaveLength(1)
-      expect(scopedResults[0]).toMatchObject({ isError: true })
-      expect(JSON.stringify(scopedResults[0])).toContain('strategy children cannot use tools')
+      expect(scopedResults[0]?.sessionId).toBe(attackSessionId)
+      expect(scopedResults[0]?.result).toMatchObject({ isError: true })
+      expect(JSON.stringify(scopedResults[0]?.result)).toContain('strategy children cannot use tools')
     }
     if (mode === 'revoke') {
       expect(adapterAborted).toBe(true)
@@ -11343,14 +11352,23 @@ describe('real native Delivery Agent runtime', () => {
         // 都通过流式前的 modelCalls 快照预检。串行实现时负者在该快照处被拒
         // （'request-limit'）；并发下该快照存在竞态，真正权威的拒绝点是预算
         // 存储的原子预留事务（'reserve'）。这两道闸都严格发生在 adapter 派发
-        // 之前，因此安全契约不变：第二个 child 被拒且从未发出请求
+        // 之前，因此安全契约不变：恰好一个 child 被拒且从未发出请求
         // （dispatched:false，且没有多出任何 adapter 调用）。这里钉死具体的
         // 原子阶段，而不是放宽为“派发前任一阶段”，并强制保留 dispatched:false。
-        expect(bound[1]?.diagnostics?.failure).toEqual({ stage: 'reserve', dispatched: false })
+        expect(new Set(bound.map(child => child.sessionId))).toEqual(new Set(childAgents.map(agent => String(agent.session.id))))
+        expect(bound.map(child => child.diagnostics?.failure).filter(failure => failure !== undefined))
+          .toEqual([{ stage: 'reserve', dispatched: false }])
       }
-      if (mode === 'stream-error' || mode === 'usage-invalid') expect(bound[0]?.diagnostics?.failure).toEqual({ stage: mode === 'stream-error' ? 'stream' : 'usage', dispatched: true })
-      if (mode === 'request-hook-error') expect(bound[0]?.diagnostics).not.toHaveProperty('failure')
-      if (mode === 'stream-setup-error') expect(bound[0]?.diagnostics?.failure).toEqual({ stage: 'stream', dispatched: false })
+      if (mode === 'stream-error' || mode === 'usage-invalid' || mode === 'stream-setup-error') {
+        expect(faultSessionId).toBeDefined()
+        expect(bound.find(child => child.sessionId === faultSessionId)?.diagnostics?.failure).toEqual({
+          stage: mode === 'usage-invalid' ? 'usage' : 'stream', dispatched: mode !== 'stream-setup-error',
+        })
+        expect(bound.filter(child => child.sessionId !== faultSessionId).every(child => child.diagnostics?.failure === undefined)).toBe(true)
+      }
+      if (mode === 'request-hook-error') {
+        expect(bound.find(child => child.sessionId === String(childAgents[0]?.session.id))?.diagnostics).not.toHaveProperty('failure')
+      }
       if (mode === 'revoke') {
         // 并发下两个 persona 都已绑定。owner 吊销必须同时冻结两者：恰好一个在
         // 等待首个 chunk 的流中被中止（dispatched:true，对应 adapterAborted 与
@@ -11367,7 +11385,13 @@ describe('real native Delivery Agent runtime', () => {
         // 因此两个 child 都不得被记成预算 failure。
         expect(bound.every(child => child.diagnostics?.failure === undefined)).toBe(true)
       }
-      if (mode === 'scoped-tool') expect(bound.map(child => child.diagnostics?.toolRejections)).toEqual([1, 0])
+      if (mode === 'scoped-tool') {
+        expect(attackSessionId).toBeDefined()
+        expect(new Set(bound.map(child => child.sessionId))).toEqual(new Set(childAgents.map(agent => String(agent.session.id))))
+        expect(bound.find(child => child.sessionId === attackSessionId)?.diagnostics).toMatchObject({ toolRejections: 1, output: 'accepted' })
+        expect(bound.filter(child => child.sessionId !== attackSessionId).map(child => child.diagnostics))
+          .toEqual([{ toolRejections: 0, output: 'accepted' }])
+      }
       if (mode === 'normal') expect(bound.map(child => child.diagnostics)).toEqual([
         { toolRejections: 0, output: 'accepted' }, { toolRejections: 0, output: 'accepted' },
       ])

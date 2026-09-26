@@ -1,5 +1,9 @@
 # 兼容性基线
 
+## 飞书业务 CLI 安装
+
+Lark setup 的业务接入使用官方 `lark-cli` 1.x、最低已核实版本 `1.0.85`；同时检查所需 CLI 子命令，实际启用前校验认证 JSON 与服务端 owner 身份。`1.0.85` 和 `1.0.96` 的认证/技能协议已对照官方源码，`1.0.96` 的全域 scope 集合还会读取官方远端目录。缺失时解析 npm latest 并下载精确稳定版本，复用兼容的本地或受管 CLI。生成的入口使用 DSH `0.1.5-rc.3` 原生 `skill-filesystem` 的 `$DSH_HOME/skills` 与原生 shell/skill 工具，不新增 Cordis 服务或修改 Host ABI；参见[安装指南](../plugins/lark-channel/docs/setup.md#自动业务工具接入)。
+
 ## 日常使用双 Host 配置入口
 
 `dsh-rsi-setup` 随 `lark-channel` 发布，使用同一构建的 Growth Driver、Control Plane、Verifier、Policy 与 Delivery API。新增的 `normalizeControlPlaneConfig` 和 `validateSourceReviewConfig` 是只读配置预检入口；此次不修改数据库 schema 或 DSH/Cordis 基线。两个 Host 和授权器须成套安装当前构建。CLI 要求 Linux/systemd user services，默认仅校验；显式应用具有私有恢复 journal，详见[部署指南](../plugins/lark-channel/docs/rsi-setup.md)。此前 supervised 安装仍需按该指南补装 Growth Driver 与独立协调器。

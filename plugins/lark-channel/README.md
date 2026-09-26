@@ -62,6 +62,10 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 向导不会把 App Secret 放进 argv、profile 或日志。macOS 使用 Keychain，Linux 优先 Secret Service、无桌面环境降级为严格权限的 protected-file，Windows 使用 best-effort DPAPI。完整流程、已有应用接入和平台排障见[安装文档](docs/setup.md)。
 
+向导默认还安装或复用官方 `lark-cli`，使用同一应用为绑定的 owner 申请 `--domain all` 用户授权，并生成原生 DSH 业务技能。Agent 按需读取 CLI 内嵌的最新技能说明，通过原生工具操作文档、表格、日历、任务、邮件等；已授权任务无需反复批准。重复安装验证并复用有效用户授权。只需消息通道时，可用 `--no-business-tools` 跳过该步骤。
+
+业务 CLI 使用 DSH 专用配置目录、显式 profile 和净化后的环境；Linux 另用专用数据目录保存 CLI 加密凭据，macOS/Windows 的系统钥匙环仍可能按应用/用户共享凭据。自动安装只下载并校验官方 npm 包与匹配的 GitHub release（失败时尝试官方安装器镜像，使用相同校验值），不运行 npm lifecycle 或全局安装脚本。此安装步骤需要网络和子进程权限，生成的技能位于 `$DSH_HOME/skills`；具体平台权限仍以飞书实际批准结果为准。
+
 ## 最小配置
 
 不使用向导时，可在 profile patch 中配置：
@@ -150,7 +154,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 - `ask` 和 `auto` 中真正需要人工确认的工具调用只向 active owner 私聊发送一次性 CardKit 2.0 审批卡；卡片包含“允许一次 / 拒绝”按钮。若租户拒绝该卡片格式，只对 `format_error` 降级成同一私聊的明确文字审批；恰好一个匹配请求时，owner 回复“允许”“允许一次”或“拒绝”可恢复原调用。多请求并存不猜测，网络/连接失败也不自动放行。`full` 关闭逐次审批并放开 sandbox，应保持 owner 与应用可用范围最小。
 - `ask_user_question` 的卡片是另一条即时交互路径：本包有向原飞书会话发送/原位更新 CardKit 2.0 卡片、并接收 `card.action.trigger` callback 的网络权限。选项仅以签名 callback capability 提交；自由文本只接受 exact owner 对原卡的明确回复。它不把卡片点击或匹配回复写成普通 Inbox/新 turn，且问题内容会在原会话显示，群聊并不保密。
 - 行为学习审批卡会把签名覆盖的 scope、情境、guidance、版本、证据和回滚原因逐字段以纯文本展示；提案内容不会作为 Markdown 或卡片组件解释。点击后卡片只确认 Policy 决策已写入持久账本，明确不把“批准”误报成“变更已生效”。
-- 网络仅访问所选飞书/Lark OpenAPI、token 与 WebSocket endpoint；图片读取使用固定消息资源端点，不接受消息或模型提供的 URL，并关闭重定向。
+- 消息通道运行时网络仅访问所选飞书/Lark OpenAPI、token 与 WebSocket endpoint；图片读取使用固定消息资源端点，不接受消息或模型提供的 URL，并关闭重定向。
 - `requestTimeoutMs`（默认 30 秒）为常规 OpenAPI 请求设置硬 deadline，`imageDownloadTimeoutMs` 独立限制图片下载。SDK 会把可下传的 AbortSignal 交给底层 HTTP；若调用已经被服务端接收后超时，最终消息保留 Delivery 的 `unknown_after_send` 语义，绝不自动重发或假称未发送。
 - App Secret 不写 Delivery 数据库、工具参数、health、route、日志或异常；Linux protected-file 没有额外静态加密，同 UID、root 和可读备份仍能取得内容。
 - Delivery SQLite 保存标准化文本、路由 id 和最多 10 个受限附件描述符；不保存 raw 事件、token 或下载 URL。图片字节只交给 AttachmentStore。
