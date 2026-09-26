@@ -1,9 +1,10 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
-import { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type UserMessage } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -136,7 +137,7 @@ function foregroundSession(workspace: string, id: string): { agent: Agent; injec
     id: sessionId,
     options: {},
     session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
     cancel() {},
@@ -182,7 +183,7 @@ function analystAgent(
     id,
     options: {},
     session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
     cancel() {},

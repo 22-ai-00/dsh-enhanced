@@ -955,7 +955,7 @@ function exactToolApprovalCall(
           callId, event.data.name, event.data.arguments],
       })
     }
-    if (event.type === 'tool/code-dispatch-start' && String(event.data.subCallId) === callId) {
+    if (event.type === 'tool/ptc-dispatch-start' && String(event.data.subCallId) === callId) {
       const rootCallId = String(event.data.rootCallId)
       const parentCallId = String(event.data.parentCallId)
       const argumentsJson = serializeCodeDispatchArguments(event.data.arguments)
@@ -966,13 +966,13 @@ function exactToolApprovalCall(
         seq: event.seq,
         name: event.data.name,
         arguments: argumentsJson,
-        hashIdentity: ['tool/code-dispatch-start', event.seq, rootCallId, parentCallId,
+        hashIdentity: ['tool/ptc-dispatch-start', event.seq, rootCallId, parentCallId,
           callId, event.data.name, argumentsJson],
       })
     }
     if (event.type === 'tool/result'
       && String(event.data.message.source.callId) === callId) settled = true
-    if (event.type === 'tool/code-dispatch'
+    if (event.type === 'tool/ptc-dispatch'
       && String(event.data.subCallId) === callId) settled = true
   }
   const exact = matches.length === 1 ? matches[0] : undefined

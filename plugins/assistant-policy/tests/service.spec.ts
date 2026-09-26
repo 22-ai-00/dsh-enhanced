@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
+import SessionStore from '@deepseek-ai/dsh-session'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantPolicyService } from '../src/service.ts'
 import type { PolicyRequest } from '../src/types.ts'
@@ -28,6 +29,49 @@ const request: PolicyRequest = {
 }
 
 describe('assistant policy Cordis service', () => {
+  test('registers Auto for an injected permission generation and revokes its admission on replacement', async () => {
+    const ctx = new Context()
+    new SessionStore(ctx)
+    const policy = ctx.plugin(AssistantPolicyService, { databasePath: await databasePath(), rules: [] })
+    await policy
+    const registrations: Array<{ admit: () => void; published: boolean }> = []
+    const mountPermission = async () => {
+      const provider = ctx.plugin((providerCtx: Context) => {
+        providerCtx.provide('permissionPresets' as never, {
+          registerAuto(admit: () => void) {
+            const registration = { admit, published: false }
+            registrations.push(registration)
+            return providerCtx.effect(() => {
+              registration.published = true
+              return () => { registration.published = false }
+            }, 'test.permission-auto')
+          },
+        } as never)
+      })
+      await provider
+      return provider
+    }
+
+    const first = await mountPermission()
+    expect(registrations).toHaveLength(1)
+    expect(registrations[0]!.published).toBe(true)
+    expect(registrations[0]!.admit).not.toThrow()
+
+    await first.dispose()
+    expect(registrations[0]!.published).toBe(false)
+    expect(registrations[0]!.admit).toThrow(/integration is inactive/u)
+
+    const second = await mountPermission()
+    expect(registrations).toHaveLength(2)
+    expect(registrations[1]!.published).toBe(true)
+    expect(registrations[1]!.admit).not.toThrow()
+    await policy.dispose()
+    expect(registrations[1]!.published).toBe(false)
+    expect(registrations[1]!.admit).toThrow(/integration is inactive/u)
+    await second.dispose()
+    await ctx.fiber.restart()
+  })
+
   test('registers the typed service and snapshots its rule config', async () => {
     const ctx = new Context()
     const rules = [{

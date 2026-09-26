@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -29,7 +30,7 @@ function createAgent(ctx: Context): Agent {
     id,
     options: { provider: 'test', model: 'test' },
     session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    inbox: createInboxStub(),
     ctx: undefined as unknown as Context,
     status: 'idle' as const,
     cancel() {},

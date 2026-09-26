@@ -1,9 +1,8 @@
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { createInboxStub, mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { ToolCallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -27,7 +26,7 @@ function foreground(): Agent {
   })
   return {
     id, options: {}, session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    inbox: createInboxStub(session),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {},
   }
@@ -67,8 +66,7 @@ describe('four-core personal assistant composition', () => {
     const root = await mkdtemp(join(tmpdir(), 'personal-assistant-core-'))
     roots.push(root)
     const ctx = new Context()
-    await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
-    await ctx.plugin(SessionProjectionRegistry)
+    await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' } })
     ctx.on('agent/session-start', ({ agent }) => {
       agent.session.append('approval/policy', { policy: 'never' })
       agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })

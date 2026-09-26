@@ -43,7 +43,7 @@ export async function runNativeSourceReview(ctx: Context, input: {
       meta: { cwd: request.source.owner.workspace, agentPreset: request.source.owner.agentPreset },
       agentOptions: { ...nativeModel, maxTokens: config.maxOutputTokens }, signal,
       setup: async (agentCtx, preparedAgent?: Agent) => {
-        const agent = preparedAgent ?? agentCtx.agent
+        const agent = preparedAgent
         if (!agent || agent.session.header.cwd !== request.source.owner.workspace
           || agent.session.header.agentPreset !== request.source.owner.agentPreset) throw new Error('source review Agent identity changed')
         assertCurrent(); signal.throwIfAborted()
@@ -67,9 +67,10 @@ export async function runNativeSourceReview(ctx: Context, input: {
           if (calls !== 0 || options.provider !== model.provider || options.model !== model.model
             || options.reasoningEffort !== model.reasoningEffort || options.maxTokens !== config.maxOutputTokens
             || (options.tools?.length ?? 0) !== 0 || agentCtx.tools.schemas(agent).length !== 0
-            || options.system !== prompt || options.messages.length !== 1 || options.messages[0]?.role !== 'user'
-            || acceptanceDigest(options.messages[0].content) !== acceptanceDigest([{ type: 'text', text: data }])
-            || Buffer.byteLength(JSON.stringify(options.messages)) + Buffer.byteLength(prompt) > config.maxInputBytes) {
+            || options.system !== undefined || options.messages.length !== 2 || options.messages[0]?.role !== 'system'
+            || acceptanceDigest(options.messages[0].content) !== acceptanceDigest([{ type: 'text', text: prompt }])
+            || options.messages[1]?.role !== 'user' || acceptanceDigest(options.messages[1].content) !== acceptanceDigest([{ type: 'text', text: data }])
+            || Buffer.byteLength(JSON.stringify(options.messages)) > config.maxInputBytes) {
             violated = true; agent.cancel({ kind: 'hook', reason: 'source-review-contract-changed' })
             throw new Error('source review model contract changed')
           }

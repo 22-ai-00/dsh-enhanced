@@ -13,7 +13,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { AgentRegistry } from '@deepseek-ai/dsh-agent'
 import { LlmAdapter, LlmRuntime } from '@deepseek-ai/dsh-llm'
-import { JsonlSessionPersistence } from '@deepseek-ai/dsh-session-persistence-jsonl'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import { SessionStore } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -177,15 +177,11 @@ export async function createBenchmarkStrategyOwnerRuntime(
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
     new SessionProjectionRegistry(ctx)
-    await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
+    await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
     ctx.systemPrompt.section({ name: 'benchmark-strategy-persona', order: 0, text: persona, complete: true })
     await ctx.plugin(ToolRuntime, { mode: 'native' })
     await ctx.plugin(AgentRegistry)
-    await ctx.plugin(JsonlSessionPersistence, { root: join(runtimeRoot, 'sessions'), compression: 'none', writeBatchMaxDelayMs: 1 })
-    // Delivery first persists an unstarted Session, then disposes and resumes
-    // it for the inbound turn. JSONL flush alone leaves an empty log lazy;
-    // explicitly materialize its real header without fabricating an event.
-    ctx.on('session/flush', session => ctx.sessionPersistence.ensureMaterialized(session))
+    await ctx.plugin(Loader, { baseUrl: import.meta.url }); await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(runtimeRoot, 'sessions'), compression: 'none' } }); await ctx.loader.await()
     await ctx.plugin(AssistantPolicyService, { databasePath: join(runtimeRoot, 'policy.sqlite'), toolDefaultEffect: 'deny', rules: [
       { id: 'benchmark-pair-issue', effect: 'allow', subject: { kind: 'external', id: `local:${bootstrapId}` }, actions: ['pair.issue'], resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
       { id: 'benchmark-owner-ingest', effect: 'allow', subject: { kind: 'external', id: principalId }, actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },

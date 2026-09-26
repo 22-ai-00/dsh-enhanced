@@ -8,7 +8,8 @@
 `dsh-llm` 包副本及 adapter 请求克隆验证 Agent Loop 来源。它使用 Host 的
 `AgentRegistry` initiator，要求 Agent 仍为 `running`、registry 与 `sessions`
 返回同一个 Agent/Session 对象，并从该 Session 的 request header 与 derived
-messages 重建完整普通对话请求。只允许 DSH 0.1.2 `forAdapter()` 为跨 route
+messages 重建完整普通对话请求，系统提示词由消息历史中的 `system` 消息承载，
+request header 不含独立 `system` 字段。只允许 DSH 0.1.5 `forAdapter()` 为跨 route
 历史删除 `replayState` 时产生的冻结副本，以及 text-only route 对完整消息序列
 执行 `projectImagesForTextModel()` 后产生的确定性副本；局部图片投影、任意嵌套
 调用、过期 Session 与其他变形均失败关闭。该证明不替代 provider 自己的静态

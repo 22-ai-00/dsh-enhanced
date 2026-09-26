@@ -382,7 +382,7 @@ export class DshAutomationRunner implements AutomationRunner {
         signal: input.signal,
         setup: async (agentCtx, preparedAgent?: Agent) => {
           phase = 'agent-setup'
-          const agent = preparedAgent ?? agentCtx.agent
+          const agent = preparedAgent
           if (agent === undefined) {
             throw new Error('assistant-automations: unpublished Agent identity is missing during setup')
           }

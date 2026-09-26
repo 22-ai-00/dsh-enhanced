@@ -25,7 +25,7 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 
 ## 兼容性
 
-- DeepSeek Harness：`>=0.1.2-rc.1 <0.2.0` 基线语义（通过 `assistant-delivery`）。
+- DeepSeek Harness：`>=0.1.5-rc.3 <0.1.6` 基线语义（通过 `assistant-delivery`）。
 - `@dsh-enhanced/assistant-delivery`：`>0.1.7 <0.2.0`；本包的 supervised setup 使用当前发布切片的私有 capability。
 - `@deepseek-ai/dsh-user-questions`：由 DSH `0.1.2-rc.1` 定义 Agent-scoped `user-questions/request` answerer waterfall。Web Host 通过 Remote Events 提供 scoped answerer；飞书通道要承接 `ask_user_question` 时也必须直接注册同一 scope 的 answerer。
 - `@dsh-enhanced/credentials-keychain`：handle 模式为 `>=0.1.0 <0.2.0`；env fallback 不要求其激活。

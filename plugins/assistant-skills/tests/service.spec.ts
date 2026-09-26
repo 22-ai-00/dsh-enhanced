@@ -1,5 +1,6 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -29,7 +30,7 @@ function runRows(root: string): number { const database = new DatabaseSync(join(
 function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id): Agent {
   const sid = SessionId(sessionId), session = Session.create(sid, [], { version: SESSION_FORMAT_VERSION, id: sid, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
   const value: Agent = { id: SessionId(id), options: { provider: 'fixture', model: 'fixture' }, session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }), ctx: undefined as unknown as Context,
+    inbox: createInboxStub(), ctx: undefined as unknown as Context,
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(value as unknown as { ctx: Context }).ctx = createScope(ctx, value).ctx
   session.append('turn/start', { turn: 1 })

@@ -114,14 +114,14 @@ export class GoalStrategyRuntime {
       // only removes presentation, never grants budget or owner authority.
       runtime.on('system-prompt/assemble', async (_assembly, { agent }, next) => {
         const assembly = await next()
-        const marker = assembly.sections.find(section => section.name === 'deployment:persona')?.text
+        const marker = assembly.sections.find(section => section.name === 'deployment:persona-prefix')?.text
         if (typeof marker !== 'string' || !marker.startsWith(`${STRATEGY_PROVIDER}:`)) return assembly
         const permit = this.#permits.get(marker.slice(STRATEGY_PROVIDER.length + 1))
         if (!agent || !permit || agent.session.header.origin !== 'subagent'
           || String(agent.session.header.parentSession) !== String(permit.parent.session.id)) throw new Error('assistant-goals: strategy prompt is not admitted')
         this.#assertPermit(permit)
         return { ...assembly, tools: [], sections: assembly.sections.filter(section => !section.name.startsWith('tools:')).map(section =>
-          section.name === 'deployment:persona' ? { ...section, text: 'Analyze the supplied material only. Return unverified advice; do not invoke tools or take actions.' } : section) }
+          section.name === 'deployment:persona-prefix' ? { ...section, text: 'Analyze the supplied material only. Return unverified advice; do not invoke tools or take actions.' } : section) }
       })
       // The descriptor exists before the first request. This also keeps scoped
       // tools out of the assembled prompt, while the guard denies any late call.

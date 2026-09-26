@@ -1,5 +1,6 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -27,7 +28,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 function ownerAgent(ctx: Context, workspace: string): Agent {
   const id = SessionId('external-owner-session')
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
-  const agent: Agent = { id, options: { provider: 'test', model: 'test' }, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
+  const agent: Agent = { id, options: { provider: 'test', model: 'test' }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(agent as unknown as { ctx: Context }).ctx = createScope(ctx, agent).ctx
   session.append('turn/start', { turn: 1 }); session.append('approval/policy', { policy: 'ask' })
   return agent

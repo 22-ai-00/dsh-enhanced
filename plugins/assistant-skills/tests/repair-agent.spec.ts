@@ -106,10 +106,7 @@ test('production repair runtime confines native file tools before their delegate
   }
 })
 
-test.each([
-  ['native', 'legacy'],
-  ['repair', 'current'],
-] as const)('a %s abort at normal provider return keeps its effect pending after %s Agent setup', async (source, abi) => {
+test.each(['native', 'repair'] as const)('a %s abort at normal provider return keeps its effect pending after prepared Agent setup', async source => {
   const store = new SkillStore(':memory:')
   const record = store.createRepairContinuation(scope, { invocationId: `abort-${source}`, ownerRouteId: 'route', source: { goalId: 'source', sessionId: 'source-session', nativeGoalId: 'source-native', definitionDigest: 'a'.repeat(64) },
     profileId: 'profile', profileDigest: 'b'.repeat(64), skillName: 'repair-skill', parentVersion: 1, parentDigest: 'c'.repeat(64), maxIterations: 1, expiresAt: Date.now() + 60_000 }, {})
@@ -120,14 +117,11 @@ test.each([
     const agent = { session: { id: sessionId }, cancel: vi.fn() }
     const runtime = { effect: (acquire: () => unknown) => acquire(), tools: { schemas: () => [], guard: () => {} },
       on: (name: string, listener: typeof stream) => { if (name === 'llm/stream') stream = listener; return () => {} } }
-    const agentCtx = abi === 'legacy'
-      ? { ...runtime, agent }
-      : new Proxy(runtime, { get(target, key, receiver) {
-        if (key === 'agent') throw new Error('current Agent setup must use its prepared Agent')
-        return Reflect.get(target, key, receiver)
-      } })
-    if (abi === 'legacy') await setup(agentCtx)
-    else await setup(agentCtx, agent)
+    const agentCtx = new Proxy(runtime, { get(target, key, receiver) {
+      if (key === 'agent') throw new Error('Agent setup must use its prepared Agent')
+      return Reflect.get(target, key, receiver)
+    } })
+    await setup(agentCtx, agent)
     return { agent, dispose: async () => {} }
   }
   const ctx = { effect() {}, get: (name: string) => ({ agents: { create }, assistantGoals: { startOwnerAuthorizedRepair: async () => ({ id: 'goal' }) },

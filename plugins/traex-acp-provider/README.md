@@ -164,7 +164,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 ## 兼容性与调研
 
 - Node.js `^22.19.0 || >=24.0.0`
-- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.1.2-rc.1 <0.2.0`
+- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.1.5-rc.3 <0.1.6`
 - Cordis `^4.0.1`
 - Agent Client Protocol SDK `0.25.1`，protocol version `1`
 

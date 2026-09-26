@@ -22,7 +22,7 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'goal-owner-snapshot-')); const ctx = new Context(); let live = true; let version = 1; let routeReads = 0; let changeDuringRead = false
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
-  await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
+  await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
   await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const owner = { principalId: 'owner', principalRecordId: 'record-owner', principalVersion: version, workspace: root, preset: 'primary' }
   ctx.provide('assistantDelivery' as never, {

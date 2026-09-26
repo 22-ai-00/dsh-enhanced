@@ -1,5 +1,6 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantHealthService } from '@dsh-enhanced/assistant-health'
@@ -21,7 +22,7 @@ function foreground(): Agent {
   const id = SessionId('p1-foreground')
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1,
     cwd: '/work/alpha', agentPreset: 'primary', isSeeded: false })
-  return { id, options: {}, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+  return { id, options: {}, session, inbox: createInboxStub(session),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
 }

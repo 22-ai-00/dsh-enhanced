@@ -1,5 +1,6 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -65,7 +66,7 @@ function liveAgent(ctx: Context, sessionId: string): Agent {
     id,
     options: {},
     session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
     cancel() {},

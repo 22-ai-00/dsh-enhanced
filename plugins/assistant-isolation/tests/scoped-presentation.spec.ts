@@ -30,7 +30,7 @@ async function fixture() {
   const stateRoot = join(root, 'state'), workspace = join(root, 'workspace'), ordinaryWorkspace = join(root, 'ordinary')
   await Promise.all([mkdir(stateRoot, { recursive: true, mode: 0o700 }), mkdir(workspace), mkdir(ordinaryWorkspace)])
   const ctx = new Context(); await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
-  await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
   for (const name of ['glob', 'bash', 'read', 'goal_create', 'goal_context', 'goal_checkpoint', 'goal_control']) ctx.tools.register(nativeTool(name))
   ctx.systemPrompt.section({ name: 'tools:glob', order: 1000, text: 'glob instructions' })
   ctx.systemPrompt.section({ name: 'tools:goal_create', order: 1001, text: 'goal create instructions' })

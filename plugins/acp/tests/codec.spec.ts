@@ -16,6 +16,7 @@ describe('DSH session event to ACP updates', () => {
     const mapper = createSessionEventMapper({ includeRawEvents: true })
     mapper.map(event('request/context', { provider: 'alpha', model: 'reasoner', contextWindow: 128_000 }))
     const updates = mapper.map(event('assistant/message', {
+      stream: [],
       turn: 1,
       step: 1,
       message: createAssistantMessage({

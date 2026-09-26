@@ -1,7 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import {
   AssistantPolicyService,
@@ -143,10 +142,9 @@ describe('Codex direct private Responses Agent Loop', () => {
 
     try {
       await mountAgentLoopTestDependencies(ctx, {
-        systemPrompt: { persona: '' },
+        systemPrompt: { personaPrefix: '' },
         tools: { mode: 'native' },
       })
-      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(ApprovalService, { policy: 'ask' })
       await ctx.plugin(AssistantPolicyService, {
         databasePath: join(root, 'policy.sqlite'),

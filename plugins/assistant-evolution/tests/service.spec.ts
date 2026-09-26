@@ -1,6 +1,7 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
-import { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { agentEvents, type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type UserMessage } from '@deepseek-ai/dsh-session'
 import { goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import {
@@ -51,7 +52,7 @@ function stubAgent(options: {
     agentPreset: options.preset ?? 'primary',
     isSeeded: false,
   })
-  const inbox = new Inbox(session, { inserted() {}, discarded() {}, claimed() {} })
+  const inbox = createInboxStub()
   const injections: UserMessage[] = []
   const agent: Agent = {
     id,

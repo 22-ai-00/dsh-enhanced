@@ -7,7 +7,6 @@ import { Context } from '@deepseek-ai/cordis'
 import { Loader } from '@deepseek-ai/cordis-plugin-loader'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -48,8 +47,8 @@ async function fixture() {
       cases: [{ id: 'tool', kind: 'tool', name: 'endpoint_probe', arguments: {} }, { id: 'reply', kind: 'delivery', text: 'blocked reply' }] },
     agent: { cwd: root, preset: 'primary', provider: 'fixture', model: 'fixture' },
   }
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' }, tools: { mode: 'native' } })
-  new SessionProjectionRegistry(ctx)
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow' })
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'), schedulerEnabled: false })

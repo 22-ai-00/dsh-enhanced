@@ -2,6 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, {
   createMessage,
+  createSystemMessage,
   isAgentLoopRequest,
   LlmAdapter,
   markAgentLoopRequest,
@@ -322,6 +323,7 @@ describe('TraeX ACP LLM adapter', () => {
         },
         content: [{ type: 'text', text: 'old answer' }],
       })
+      const system = createSystemMessage('Be concise.', 'agent-loop')
       const user = createMessage({
         role: 'user',
         source: { kind: 'user' },
@@ -332,9 +334,8 @@ describe('TraeX ACP LLM adapter', () => {
         header: { cwd: workspace },
         requestHeader: () => ({
           config: { provider: 'traex-agent', model: 'default' },
-          system: 'Be concise.',
         }),
-        deriveMessages: () => [historical, user],
+        deriveMessages: () => [system, historical, user],
       } as unknown as Agent['session']
       const agent = {
         id: TEST_SESSION_ID,
@@ -372,8 +373,7 @@ describe('TraeX ACP LLM adapter', () => {
       const original = isolatedLlm.markAgentLoopRequest(deepFreeze({
         provider: 'traex-agent',
         model: 'default',
-        system: 'Be concise.',
-        messages: [historical, user],
+        messages: [system, historical, user],
         sessionId: TEST_SESSION_ID,
         signal: new AbortController().signal,
       }))
@@ -396,7 +396,7 @@ describe('TraeX ACP LLM adapter', () => {
       expect(Object.isFrozen(cloned)).toBe(true)
       expect(isAgentLoopRequest(cloned)).toBe(false)
       expect(isolatedLlm.isAgentLoopRequest(cloned)).toBe(false)
-      expect(cloned.messages[0]!.source).toEqual({
+      expect(cloned.messages[1]!.source).toEqual({
         kind: 'model',
         provider: 'historical-route',
         model: 'old-model',

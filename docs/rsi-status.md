@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-09-25。此页是当前进展与剩余验收的唯一入口；历史流水保留在 Git 历史，配置以各插件 README 为准。
+更新：2026-09-26。此页是当前进展与剩余验收的唯一入口；历史流水保留在 Git 历史，配置以各插件 README 为准。
 
 ## 项目方向
 
@@ -12,10 +12,13 @@
 
 ## 当前交付边界
 
-- 即时审批阻塞修复已进入发布验证：Policy 的 `auto` 对非凭据本地只读与单个命名 Skill 加载直接继续，显式 `ask` 仍询问；凭据扫描、任意代码、提权、破坏性和后台操作保持人工。Lark 工具审批改为 CardKit 2.0 callback 按钮，不再先发送假定卡片存在的普通文字；卡片 `format_error` 时降级为同一 owner 私聊的精确文字允许/拒绝，其他发送失败明确提示本次不执行。群聊来源只把 exact arguments 投递到唯一 owner DM。Policy/Delivery/Lark 125 个定向测试、受影响包类型检查与零警告 oxlint 已通过；完整仓库、发布和真实飞书验收仍待完成。
+- 用户新增安装默认要求：面向已绑定 owner 默认全访问，日常对话不逐次询问工具权限，飞书能力尽量在安装时一次授权；保留停止、回滚和去重。现有 bundle 已默认 Full access，但 Lark capability Policy、应用 scopes 与成长授权仍需统一梳理并完成默认自主模式，不能把 Host 的 full-access 等同于已取得全部飞书平台权限。
+- 按用户确认跟随官方 npm `latest`，当前验证基线为 DSH `0.1.5-rc.3`；registry 尚无正式 `0.1.7`，`0.1.7-rc.2` 属于 next。测试依赖保持精确版本以复现结果，新装默认 selector 将跟随 latest 并验证兼容范围，已有兼容 Host 保持复用。`update --all` 尚不更新 DSH Host，后续须补齐受管 Host 更新事务。原生 Agent setup、Inbox、PTC 审计事件、系统提示和会话句柄 API 已迁移，完整 `pnpm check` 退出 0。真实 latest CLI 的三进程会话写入、未知事件拒绝和冷读恢复，以及 systemd reload/readiness/物理 restore 探针已通过；这些兼容性结果不代表生产自迭代闭环或 npm 发布门槛已完成。
+- 本轮只读代码核查确认普通反馈→持久复盘→源码候选→发布/采用协调已有接线，`dsh-rsi-setup` 已实现。采用仍会停在独立行为阶段：随包 systemd attestor 仅覆盖 reload/readiness/rollback，runtime observer 仅证明运行实例，阻断回放仅证明指定工具/回复被拒绝，不能据此签发全局 `externalEffects=0`。须补齐同一目标 Host 代次的独立行为证据，不能以候选自报或隔离副本测试替代生产采用验收。
+
+- 即时审批沿用已发布能力：Policy 的 `auto` 对非凭据本地只读与单个命名 Skill 加载直接继续，显式 `ask` 仍询问；Lark 使用 CardKit callback，`format_error` 时降级为同一 owner 私聊的精确文字允许/拒绝。本轮另修复 Auto 来源判定：当前 format 3 中残留 `auto` 选择不能授权后来切换的 full-access 自动审核；独立复核与 Policy 定向测试通过。
 - `dsh-rsi` 已提供安装、升级、状态/doctor、服务 start/stop/restart、日志查看与彻底卸载。上一轮修复了 DSH `profiles/node_modules` 被误识别为 profile、未注册服务指向不可用全局 `dsh-rsi-setup`、npm/pnpm 重复提示刷屏，以及 supervised 新装漏选 Goals 导致 Recovery 等待 `assistantGoals` 的运行时失败。降噪只使用 npm global location 与 pnpm error log level；真实 package-manager 错误仍保留并非零退出。
 - `dsh-rsi update --all` 部署闭环修复已完成：自升级固定写回当前 CLI 的真实 npm prefix；profile 升级使用同一精确版本 tag；Linux 已注册受管服务的精确 systemd MainPID 由 service-aware lifecycle 接管（`update --all` 只阻止非受管 Host，受管服务 MainPID 交给 lifecycle 事务），只有额外手工/测试 Host 才阻止升级；受管服务 stop 后对失败单元执行 `reset-failed`，masked unit 的 raw 状态改用不含 `ExecStart` 的 `SYSTEMD_RUNTIME_PROPERTIES` 读取。真实 Linux 部署验收（2026-09-25）通过公开路径完成：旧 profile 经 `dsh-rsi purge --profile web --yes` 正式清除后，`dsh-rsi install --scenario lark --lark skip --local` 干净重装，`dsh-profile-web.service` active/running/MainPID>0，web 端点响应，profile 下全部 @dsh-enhanced/* 包统一为 0.1.46，active 事务目录已清理（仅保留 lifecycle 重命名的 failed evidence 目录）。升级前的同 UID 进程扫描对 non-dumpable 会话基础设施严格证明后放行：root sshd 认证会话（comm=`sshd`、父进程 uid=0 且父 comm=`sshd`）与 systemd --user 的 `(sd-pam)` PAM 辅助进程（comm=`(sd-pam)`、父 comm=`systemd` 且父 Uid 为当前用户）的 environ/cwd/root/fd/maps 返回 EACCES/EPERM 时不再误拦；证明按进程惰性缓存，普通不可读同 UID 进程仍 fail-closed，已证明会话若可读 cmdline/cwd/fd/maps 真实引用 DSH_HOME 仍阻止升级。CLI 补传静止确认并从 effective/composed profile 识别场景。macOS 已停止 Home 的 Lark/supervised profile 会先完整备份再升级，组合或真实激活失败时恢复原 profile；旧 Recovery profile 缺失 `assistant-goals` 时自动补齐。
-- `0.1.41` 已完成基础权限与交互修复；当前未发布改动进一步把 `auto` 扩展到非凭据本地只读和 Skill 加载，并修复 Lark 即时审批卡片/文字兜底。Web approval 继续原生 UI；Lark 群聊高影响调用只在可唯一证明同一 owner DM 时转投私聊审批，避免群内泄露参数并在批准后恢复原任务。
 - 当前 npm 发布基线以发布账本的 `current` 为准；后续 dev 开发及 `pending` 不等于已发布。安装器和 Host 兼容范围见[兼容性说明](compatibility.md)与[发布账本](../release-manifest.json)。
 - 下一版 npm 的发布门槛是：安装部署后，在既有授权内由真实使用持续驱动修复、验证、采用与观察/回滚，并通过完整发布检查。用户已同意达到该门槛后重新发布；当前中间能力尚不满足条件。
 - 日常使用中的工具/插件自迭代尚未贯通。普通 Lark 已有低风险偏好自动学习；Growth `usageLearning` 已可根据可信前台任务结果自动调度持久复盘；内置 Delivery 普通对话的已认证 owner 反馈也可触发，无需预设任务验收 profile；启用源码轨时，可信失败会自动形成 owner 私有修复缺口并进入源码候选工具，可经有限源码审批；精确制品的有限采用已接到同一持久作业，后续普通任务版本归因已接入可选 Host 配置；有限可信反馈批次、观察签发与自动回退已接通，可安装配置与真实部署端到端仍待验收。Skills 有限修复链仍需对精确来源 Goal 手动 `skill_repair_arm`；既有授权下的独立验证、采用及持续观察仍待接通。
@@ -70,18 +73,20 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. 完成普通使用部署验收：新增 [`dsh-rsi-setup`](../plugins/lark-channel/docs/rsi-setup.md) 为已安装的目标与独立协调器编译有限配置、原生预算和 Policy，核对 owner/trust/四类签名授权，提供成对写入、恢复及可选常驻启动。supervised 安装仍需按指南补装 Growth Driver 与协调器；该入口不代替授权器和独立行为观测的部署。下一步在真实安装上贯通整条链，默认继承来源任务模型。
-2. 补齐采用前的独立行为观测与签名。现有 systemd attestor 只覆盖 reload/readiness/rollback；原生阻断回放不能证明全局无副作用，也不能替代 shadow/canary/soak/health 验收。
-3. 在实际部署中验证普通反馈驱动候选、独立验证、有限采用和后续真实任务观察/回滚，然后完成发布检查并发布 npm。保留上表未完成边界；Skills 路径仍需去除逐 Goal 手动 arm，WP18 仍需真实仓库授权提交与精确 CI/readback。固定场景和测试夹具不算生产闭环。
+1. 简化新用户安装：检测到本机 `traex` / `trae-cli` 时自动安装并启用 TraeX 插件，复用本机登录与配置，避免手动选插件或填写接口；在没有显式模型配置时提供可用默认模型，不覆盖用户明确选择。按用户新增要求交付默认自主权限：安装后 owner 日常对话无需逐次工具审批，统一原生 Full access 与 Lark owner capability 默认规则，安装时配置现有飞书能力的应用 scopes。当前 channel 并非完整飞书 OpenAPI 工具集；须补齐实际能力及平台授权，不能仅把 Policy 全局设 allow 后宣称全权限可用。停止、回滚、去重及独立验收继续保留。
+2. 补齐已有 Host 跟随官方 latest 更新：扩展现有 service-aware 事务，以精确版本私有 Host 验证离线副本并切换受管服务；不能在活动 Host 下覆盖全局 npm。覆盖同一 home 的 sibling profile 兼容性及失败恢复。
+3. 完成普通使用部署验收：使用已有 [`dsh-rsi-setup`](../plugins/lark-channel/docs/rsi-setup.md) 为目标与独立协调器编译有限配置、原生预算和 Policy，核对 owner/trust/签名授权。该入口不代替授权器和独立行为观测部署；默认继承来源任务模型。
+4. 补齐采用前的独立行为观测与签名。现有 systemd attestor 只覆盖 reload/readiness/rollback；原生阻断回放不能证明全局无副作用，也不能替代 shadow/canary/soak/health 验收。
+5. 在实际部署中验证普通反馈驱动候选、独立验证、有限采用和后续真实任务观察/回滚，然后完成发布检查并发布 npm。保留上表未完成边界；Skills 路径仍需去除逐 Goal 手动 arm，WP18 仍需真实仓库授权提交与精确 CI/readback。固定场景和测试夹具不算生产闭环。
 
 ## 开发入口与验证
 
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 本段执行 `pnpm check`，首次在 Control Plane 的一条既有 systemd 物理恢复测试遇到观测时限超时，其余 720 项通过；该项单独复查通过，未更改时限或生产逻辑。续跑未执行的 9 个包后，合计 6,416 项测试通过、50 项跳过；manifest、最终零 lint 警告、类型检查、构建及 32 个插件和 3 个共享包的 dry-run pack 通过。首次全检命令的退出码仍为失败。
+- 本轮验证：`NODE_OPTIONS=--max-old-space-size=8192 pnpm check` 退出 0，覆盖清单校验、零警告 lint、类型检查、构建和打包。根目录 654 项、36 个包 5,996 项测试通过，50 项跳过；其中 Delivery 799 项通过。32 个插件与 4 个共享包 dry-run pack 均成功，检查清单包含必需文件且未包含测试或运行日志。完整检查不替代真实生产授权、普通反馈采用和独立行为验收，尚未发布 npm。
 - 原生维护预算修复独立复核通过：Control Plane 三个相关 spec 共 16 项、Growth 使用复盘 spec 共 19 项。真实 Automations + Policy 路径证明三个 cron 成功结算预算、耗尽后不进入执行器；扫描与模型复盘按 scope 分开额度，未开启无预算旁路。部署配置现在须补齐必填字段；这些组件测试不证明真实双 Host 安装或生产使用闭环，尚未发布 npm。
-- Control Plane 基线 `5cfc3c8` 的真实 DSH CLI `0.1.5-rc.2` 探针 `systemd-readiness-real-dsh.mjs`（默认及 `DSH_READINESS_ROLLBACK=restore`）和 `replay-endpoint-real-dsh.mjs` 均退出 0。覆盖同 Host 的 readiness→grant→回放、重启/SIGKILL 后拒绝重新派发以及物理恢复；命令与证据边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
+- 当前工作区真实 DSH CLI `0.1.5-rc.3` 探针：`DSH_READINESS_FIXTURE=1 DSH_READINESS_DSH=/absolute/path/to/dsh node scripts/e2e/systemd-readiness-real-dsh.mjs --output <local-evidence.json>`，默认及 `DSH_READINESS_ROLLBACK=restore` 均退出 0。覆盖临时 profile 的 dump-config、真实 Host reload/readiness 与物理恢复；未执行 npm 制品安装、生产采用或独立行为质量验收。会话兼容三进程冷读探针也已通过。历史 rc2 回放端点验收不自动视为本轮新版验证，边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 
 
 原始运行 JSON、日志和临时身份留本地或 CI artifacts，仓库只保留命令、结论和限制。确需供可重复探针使用的固定输入留在 `scripts/e2e/fixtures/`，不从本次网络结果反推预期值。

@@ -20,11 +20,13 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 ## 默认安全状态
 
+当前交付基线是官方 `latest` 的 DSH `0.1.5-rc.3`。此 patch 为该版本保留静态 `auto` 项；`0.1.7-rc.2` 把此名称设为保留项，整套 meta-bundle 尚未适配该候选版本。
+
 - 原生 Permission selector 固定显示 `workspace-write`（请求批准）、`auto`（帮我批准）和 `danger-full-access`（完全访问）三项；前两项共享 `workspace-write + ask` 执行 bundle（同一沙箱、同一人工审批策略），区别只是 `auto` 档把低/中风险的可逆动作交隔离 reviewer 自动批准，高风险仍直达人工。没有用户层设置的新安装默认 `danger-full-access`（Full access）：可访问任意文件与网络，不逐次请求批准。已有 `settings.yaml` 的 `permission.defaultPreset` 仍由 DSH Settings 用户层优先，不会被 bundle 强制覆盖。
 - policy 默认写入一条 `dsh-enhanced-foreground-capability-*`：本机 Web/direct 的 foreground Agent 可访问 profile 已挂载的全部技能、工具与插件动作，后续动态挂载也无需逐项补 allow；它不会安装尚未安装的插件，也不授权 background 或飞书 external 身份。显式 deny、紧急停止、身份/预算检查仍优先。`budgets` 默认留空。
 - automations scheduler 默认关闭；创建并审批 automation 后仍需由部署者显式启用 scheduler。
 - Memory、Wiki、Policy、Automations 使用各自的 DSH home 私有路径和独立真源。
-- meta 入口先等待 Policy 完成激活，再依次挂载 Memory、Wiki 与 Automations；真实 `0.1.2-rc.1` 启动不依赖同步构造或 YAML 行序碰巧成功。
+- meta 入口先等待 Policy 完成激活，再依次挂载 Memory、Wiki 与 Automations；启动不依赖同步构造或 YAML 行序碰巧成功。
 
 需要收紧时可添加显式 deny，或使用安装器的 `--agent-tools disable` 移除托管的 foreground grant；先在测试 profile 使用 `--dump-config` 检查最终 patch。
 

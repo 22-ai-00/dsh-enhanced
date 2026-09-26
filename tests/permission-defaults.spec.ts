@@ -2,7 +2,6 @@ import { Context } from '@deepseek-ai/cordis'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import PermissionPresets from '@deepseek-ai/dsh-permission-presets'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
-import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import SettingsProvider from '@deepseek-ai/dsh-settings'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { getApprovalReviewer } from '@dsh-enhanced/assistant-policy'
@@ -25,8 +24,7 @@ class MemorySettings extends SettingsProvider {
 async function fixture(document: Record<string, unknown> = {}) {
   const ctx = new Context()
   contexts.push(ctx)
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' }, tools: { mode: 'native' } })
-  await ctx.plugin(SessionProjection)
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
   // No OS command runs in this contract test; initialization reads this mode.
   ctx.provide('shell', { sandboxMode: 'workspace-write' } as never)
   await ctx.plugin(ApprovalService, { policy: 'ask' })

@@ -418,7 +418,7 @@ describe('assistant-policy session event registration', () => {
     }
   })
 
-  test('registers a late-provided distinct reader before persisting and cold-resuming reviewer history', async () => {
+  test.skipIf(Number(SESSION_FORMAT_VERSION) !== 0)('registers a late-provided distinct reader before persisting and cold-resuming reviewer history on the legacy coordinator', async () => {
     const stored = new Map<string, StoredSession>()
     const PersistenceCoordinator = await coordinatorConstructor()
     const first = await context(true)
@@ -586,7 +586,7 @@ describe('assistant-policy session event registration', () => {
   })
 
   test('fails closed when the active host registry uses an unsupported format', async () => {
-    const host = await distinctHostSessionModule(SESSION_FORMAT_VERSION + 1)
+    const host = await distinctHostSessionModule(5)
     const originalArgv = [...process.argv]
     process.argv[1] = host.entrypoint
     const ctx = new Context()
@@ -596,9 +596,36 @@ describe('assistant-policy session event registration', () => {
     } as never)
     try {
       expect(() => registerApprovalReviewerSessionEvent(ctx)).toThrow(
-        /cannot prove.*unsupported session format v1/i,
+        /cannot prove.*unsupported session format v5/i,
       )
       expect(host.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(false)
+    } finally {
+      process.argv.splice(0, process.argv.length, ...originalArgv)
+    }
+  })
+
+  test('proves the live reader and mounts the required event against a format v4 host', async () => {
+    // DSH 0.1.7 bumped the session log to format v4 but kept the same mutable
+    // KNOWN_SESSION_EVENT_TYPES Set consulted on cold read. The version gate
+    // must admit v4 and the reader-identity probe must still prove exactly one
+    // live reader before the required reviewer event is installed.
+    const host = await distinctHostSessionModule(4)
+    const originalArgv = [...process.argv]
+    process.argv[1] = host.entrypoint
+    const ctx = new Context()
+    contexts.add(ctx)
+    ctx.provide('sessionPersistence' as never, {
+      coordinator: readerCoordinator(host.module),
+    } as never)
+    try {
+      expect(host.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(false)
+      const registration = registerApprovalReviewerSessionEvent(ctx)
+      await registration.assertReady()
+      expect(registration.isReady()).toBe(true)
+      expect(host.module.KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(true)
+      expect(
+        [...host.module.KNOWN_SESSION_EVENT_TYPES].some(type => type.includes('__reader-probe/')),
+      ).toBe(false)
     } finally {
       process.argv.splice(0, process.argv.length, ...originalArgv)
     }
@@ -625,7 +652,7 @@ describe('assistant-policy session event registration', () => {
     }
   })
 
-  test('mounts the exact required event type and restores its non-ignorable history after a cold restart', async () => {
+  test.skipIf(Number(SESSION_FORMAT_VERSION) !== 0)('mounts the exact required event type and restores its non-ignorable history after a cold restart on the legacy coordinator', async () => {
     expect(SESSION_FORMAT_VERSION).toBe(0)
     // The shim is process-lifetime metadata. This worker starts clean, while a
     // prior mount in the same process would also be a valid starting state.

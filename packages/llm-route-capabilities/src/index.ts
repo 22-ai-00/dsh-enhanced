@@ -59,9 +59,7 @@ const MAX_COMPACTION_TOKENS = 8_192
 const compactionRequestKeys = new Set([
   'provider',
   'model',
-  'reasoningEffort',
   'messages',
-  'system',
   'tools',
   'maxTokens',
   'sessionId',
@@ -81,7 +79,7 @@ const instructionMessageKeys = new Set(['id', 'role', 'content', 'source'])
 const compactionStartKeys = new Set(['compactionId', 'sourceCommandId', 'turn'])
 const automaticCompactionStartKeys = new Set(['compactionId', 'turn'])
 
-/** Exact final user instruction emitted by @deepseek-ai/dsh-compaction-basic 0.1.2-rc.1. */
+/** Exact final user instruction emitted by @deepseek-ai/dsh-compaction-basic 0.1.5-rc.3. */
 const COMPACTION_INSTRUCTION = [
   'You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.',
   '',
@@ -278,8 +276,8 @@ function deeplyFrozen(value: unknown): boolean {
 
 /**
  * Seal one graph already proven by plainCompactionRequestGraph(). Keep this
- * local: `deepFreeze` was an unstable implementation export and is absent
- * from DSH 0.1.2 even though the public request types remain compatible.
+ * local: `deepFreeze` is an unstable implementation helper outside the
+ * public DSH LLM request contract.
  */
 function freezePlainGraph(value: object, signal: AbortSignal): void {
   const pending: object[] = [value]
@@ -489,7 +487,6 @@ function exactLoopEnvelope(
   const expected: Record<string, unknown> = {
     ...header.config,
     messages: request.messages,
-    ...(header.system === undefined ? {} : { system: header.system }),
     ...(header.tools === undefined ? {} : { tools: header.tools }),
     sessionId: session.id,
     signal: request.signal,
@@ -515,12 +512,7 @@ function exactCompactionEnvelope(
 
   const header = session.requestHeader()
   if (header === undefined || request.provider !== header.config.provider || request.model !== header.config.model
-    || own(request, 'system') !== own(header, 'system') || !sameData(request.system, header.system)
     || own(request, 'tools') !== own(header, 'tools') || !sameData(request.tools, header.tools)) return false
-
-  if (own(request, 'reasoningEffort')) {
-    if (!own(header.config, 'reasoningEffort') || request.reasoningEffort !== header.config.reasoningEffort) return false
-  }
 
   const expectedMessages = session.deriveMessages()
   const prefixLength = request.messages.length - 1

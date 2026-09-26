@@ -1,5 +1,6 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context, Service } from '@deepseek-ai/cordis'
-import AgentRegistry, { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, {
   ToolCallId,
   type ToolCallId as ToolCallIdType,
@@ -46,7 +47,7 @@ function foreground(sessionId: string): Agent {
   const id = SessionId(sessionId)
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1,
     cwd: '/work/alpha', isSeeded: false, agentPreset: 'primary' })
-  return { id, options: {}, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+  return { id, options: {}, session, inbox: createInboxStub(),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
 }
@@ -56,7 +57,7 @@ function foregroundWithHeader(sessionId: string, cwd: string, agentPreset: strin
   const session = Session.create(id, [], {
     version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd, isSeeded: false, agentPreset,
   })
-  return { id, options: {}, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+  return { id, options: {}, session, inbox: createInboxStub(),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
 }
@@ -224,7 +225,7 @@ function registerApprovalAgent(ctx: Context, sessionId: string, input: {
   const id = SessionId(sessionId)
   const session = ctx.sessions.create(id, { meta: { cwd: '/work/alpha', agentPreset: 'primary' } })
   const agent: Agent = { id, options: {}, session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    inbox: createInboxStub(),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ctx.agents.register(agent)
@@ -1918,7 +1919,7 @@ describe('assistant delivery Cordis service', () => {
     const fixture = await boundApprovalHarness({ sessionId: 'approval-code-dispatch' })
     const subCallId = ToolCallId('call-delivery-1:code:0')
     const argumentsValue = { path: '/work/alpha/code-mode.txt', mode: 'write' }
-    fixture.agent.session.append('tool/code-dispatch-start', {
+    fixture.agent.session.append('tool/ptc-dispatch-start', {
       rootCallId: ToolCallId('call-delivery-1'),
       parentCallId: ToolCallId('call-delivery-1'),
       subCallId,
@@ -1959,8 +1960,8 @@ describe('assistant delivery Cordis service', () => {
       name: 'write_file',
       arguments: { path: '/work/alpha/code-mode.txt', mode: 'write' },
     }
-    fixture.agent.session.append('tool/code-dispatch-start', dispatch)
-    fixture.agent.session.append('tool/code-dispatch', {
+    fixture.agent.session.append('tool/ptc-dispatch-start', dispatch)
+    fixture.agent.session.append('tool/ptc-dispatch', {
       ...dispatch,
       isError: false,
       content: [{ type: 'text', text: 'already settled' }],

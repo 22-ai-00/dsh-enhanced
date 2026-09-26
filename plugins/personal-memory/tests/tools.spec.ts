@@ -1,5 +1,6 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -31,7 +32,7 @@ function agent(): Agent {
   session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
   const append = session.append as unknown as (type: string, data: unknown) => unknown
   append.call(session, 'sandbox/mode', { mode: 'danger-full-access' })
-  const inbox = new Inbox(session, { inserted() {}, discarded() {}, claimed() {} })
+  const inbox = createInboxStub()
   return {
     id,
     options: {},

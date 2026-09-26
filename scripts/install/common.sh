@@ -5,12 +5,12 @@
 
 DSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.5-rc.1'
 # The bootstrap pin identifies the pinned installer cohort. Runtime Hosts use
-# the verified compatibility range below, and new installs select its latest
-# independently checked release.
-DSH_ENHANCED_DEFAULT_DSH_VERSION='0.1.5-rc.1'
+# the verified compatibility range below. Fresh installs resolve the registry's
+# latest tag to an exact, compatible Host before mutating the global toolchain.
+DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
 if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
-  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'
+  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.5-rc.3 <0.1.6'
 fi
 DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
   'personal-assistant'
@@ -359,17 +359,43 @@ dsh_enhanced_require_pinned_host_version() {
     dsh_enhanced_fail 2 "安装引导器的 Host pin 与安装逻辑不一致；尚未修改运行时或 profile。"
     return $?
   fi
-  if ! dsh_enhanced_is_host_version "$version" || ! dsh_enhanced_version_in_range "$version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+  # `latest` is a selector, never an install target. The actual version is
+  # checked again after registry resolution in ensure_dsh.
+  [[ "$version" == 'latest' ]] && return 0
+  if ! dsh_enhanced_is_host_version "$version" || ! dsh_enhanced_is_supported_host_channel "$version" \
+    || ! dsh_enhanced_version_in_range "$version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
     dsh_enhanced_fail 2 "此安装器支持 DSH ${DSH_ENHANCED_VERIFIED_HOST_RANGE}；收到 ${version:-unknown}。请使用兼容的独立 CLI；不会修改现有全局 DSH。"
     return $?
   fi
+}
+
+dsh_enhanced_is_supported_host_channel() {
+  local without_build="${1%%+*}"
+  [[ "$without_build" != *-* || "${without_build#*-}" == 'rc' || "${without_build#*-}" == rc.* ]]
+}
+
+dsh_enhanced_resolve_latest_host_version() {
+  local version=''
+  if ! version="$(npm view @deepseek-ai/dsh dist-tags.latest 2>/dev/null)"; then
+    dsh_enhanced_fail 1 '无法从 npm registry 解析 DSH latest；尚未修改全局 DSH。'
+    return $?
+  fi
+  if [[ "$version" == *$'\n'* || "$version" == *$'\r'* ]] \
+    || ! dsh_enhanced_is_host_version "$version" \
+    || ! dsh_enhanced_is_supported_host_channel "$version" \
+    || ! dsh_enhanced_version_in_range "$version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+    dsh_enhanced_fail 2 "npm registry 的 DSH latest 不是此安装器支持的精确版本（支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}，仅 stable/rc）；尚未修改全局 DSH。"
+    return $?
+  fi
+  printf '%s\n' "$version"
 }
 
 dsh_enhanced_reject_incompatible_existing_dsh() {
   local current_version=''
   if command -v dsh >/dev/null 2>&1; then
     current_version="$(dsh --version 2>/dev/null || true)"
-    if ! dsh_enhanced_is_host_version "$current_version" || ! dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+    if ! dsh_enhanced_is_host_version "$current_version" || ! dsh_enhanced_is_supported_host_channel "$current_version" \
+      || ! dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
       dsh_enhanced_fail 2 "检测到 DSH ${current_version:-unknown}，但此安装器支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
       return $?
     fi
@@ -382,17 +408,23 @@ dsh_enhanced_ensure_dsh() {
   local ack_unverified_host="$3"
   local target_version="$requested_version"
   local current_version=''
-  printf 'DSH 目标：@deepseek-ai/dsh@%s\n' "$requested_version"
-  dsh_enhanced_require_pinned_host_version "$target_version" || return $?
+  dsh_enhanced_require_pinned_host_version "$requested_version" || return $?
   if [[ "$dry_run" == '1' ]]; then
-    dsh_enhanced_print_command npm install --global "@deepseek-ai/dsh@$target_version"
+    if [[ "$requested_version" == 'latest' ]]; then
+      printf 'DSH 目标：npm latest（dry-run 未联网解析；执行时先校验精确版本和兼容范围）\n'
+      printf '将仅在未安装兼容 DSH 时解析 latest 并安装精确版本。\n'
+    else
+      printf 'DSH 目标：@deepseek-ai/dsh@%s\n' "$requested_version"
+      dsh_enhanced_print_command npm install --global "@deepseek-ai/dsh@$target_version"
+    fi
     return 0
   fi
   if command -v dsh >/dev/null 2>&1; then
     current_version="$(dsh --version 2>/dev/null || true)"
   fi
   if [[ -n "$current_version" ]]; then
-    if dsh_enhanced_is_host_version "$current_version" && dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+    if dsh_enhanced_is_host_version "$current_version" && dsh_enhanced_is_supported_host_channel "$current_version" \
+      && dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
       printf 'DSH 已安装且版本兼容：%s\n' "$current_version"
     else
       dsh_enhanced_fail 2 "检测到 DSH ${current_version}，但此安装器支持 ${DSH_ENHANCED_VERIFIED_HOST_RANGE}。请使用兼容的独立 CLI；不会修改或降级现有全局 DSH，也不会用它继续安装。"
@@ -400,6 +432,11 @@ dsh_enhanced_ensure_dsh() {
     fi
     return 0
   fi
+  if [[ "$requested_version" == 'latest' ]]; then
+    target_version="$(dsh_enhanced_resolve_latest_host_version)" || return $?
+    dsh_enhanced_require_pinned_host_version "$target_version" || return $?
+  fi
+  printf 'DSH 目标：@deepseek-ai/dsh@%s\n' "$target_version"
   printf '未检测到 DSH，正在安装。\n'
   npm install --global "@deepseek-ai/dsh@$target_version"
   hash -r

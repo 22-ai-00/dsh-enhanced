@@ -6,7 +6,7 @@ import { LlmRuntime, LlmAdapter, ToolCallId, createUserMessage, type StreamChunk
 import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
 import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -34,9 +34,11 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
-  await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'),
-    ...(productionPersistence ? {} : { compression: 'none' as const, packChunks: false, writeBatchMaxDelayMs: 1 }) })
-  await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
+  await ctx.plugin(Loader, { baseUrl: import.meta.url })
+  await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'),
+    ...(productionPersistence ? {} : { compression: 'none' }) } })
+  await ctx.loader.await()
+  await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
   await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const owners = new Map<Agent, string>(); const handles = new Map<Agent, { dispose(): Promise<void> }>(); const human = new Set<Agent>(); let allowed = true; let routeAvailable = true; let routeBinding: { id: string; version: number; generation: number; sessionId: string; workspace: string; agentPreset: string } | undefined; const deniedActions = new Set<string>()
   const attestation = (agent: Agent) => {
@@ -1104,8 +1106,9 @@ describe('owner-scoped native goal context', () => {
     await vi.waitFor(() => expect(requests).toBe(5), { timeout: 2_000 })
     await agent.whenIdle(); await f.service.whenIdle()
     const complete = f.service.inspect(agent, record.id)
-    const durable = await f.ctx.sessionPersistence.readRaw(agent.session.id)
-    expect(durable?.content).toContain('read-source')
+    const durable = await f.ctx.sessionPersistence.open(agent.session.id, 'read')
+    try { expect(JSON.stringify((await durable.read()).events)).toContain('read-source') }
+    finally { await durable.close() }
     expect(requests).toBe(5)
     expect(complete.native).toMatchObject({ phase: 'complete', roundsStarted: 2, revision: record.native.revision + 2 })
     expect(f.service.inspectGoalOutcome(agent, record.id)).toMatchObject({ status: 'achieved', nativeCompletion: 'complete' })
@@ -1393,7 +1396,7 @@ describe('goal strategy compare concurrency', () => {
   // rewritten to this fixed sentence (see GoalStrategyRuntime), which lets the
   // shared fixture adapter tell a child stream apart from a parent turn.
   const childMarker = 'Analyze the supplied material only.'
-  const isStrategyChild = (options: GenerateOptions): boolean => options.system?.includes(childMarker) ?? false
+  const isStrategyChild = (options: GenerateOptions): boolean => options.messages.some(message => message.role === 'system' && JSON.stringify(message.content).includes(childMarker))
   const isSkepticalPersona = (options: GenerateOptions): boolean => JSON.stringify(options.messages).includes('independent skeptical analysis')
   const compareResult = (agent: Agent) => {
     const blocks = agent.session.snapshotEvents()

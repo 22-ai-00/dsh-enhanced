@@ -77,7 +77,9 @@
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "catalog:",
+    "@deepseek-ai/cordis-plugin-loader": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

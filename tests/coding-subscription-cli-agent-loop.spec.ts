@@ -1,7 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
@@ -176,10 +175,9 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
 
     try {
       await mountAgentLoopTestDependencies(ctx, {
-        systemPrompt: { persona: '' },
+        systemPrompt: { personaPrefix: '' },
         tools: { mode: 'native' },
       })
-      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(SkillRegistry)
       ctx.skills.register({
         name: TEST_SKILL_NAME,
@@ -452,10 +450,9 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
 
     try {
       await mountAgentLoopTestDependencies(ctx, {
-        systemPrompt: { persona: '' },
+        systemPrompt: { personaPrefix: '' },
         tools: { mode: 'native' },
       })
-      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(ApprovalService, { policy: 'ask' })
       await ctx.plugin(AssistantPolicyService, {
         databasePath: join(root, 'policy.sqlite'),
@@ -606,10 +603,9 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
 
     try {
       await mountAgentLoopTestDependencies(ctx, {
-        systemPrompt: { persona: '' },
+        systemPrompt: { personaPrefix: '' },
         tools: { mode: 'native' },
       })
-      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(SkillRegistry)
       ctx.skills.register({
         name: TEST_SKILL_NAME,
@@ -746,10 +742,9 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
 
     try {
       await mountAgentLoopTestDependencies(ctx, {
-        systemPrompt: { persona: '' },
+        systemPrompt: { personaPrefix: '' },
         tools: { mode: 'native' },
       })
-      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(ApprovalService, { policy: 'ask' })
       await ctx.plugin(AssistantPolicyService, {
         databasePath: join(root, 'policy.sqlite'),
@@ -900,7 +895,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
     }
   })
 
-  test('uses the real 0.1.2 compaction pipeline to prune, summarize, checkpoint, and resume a CLI tool loop', async () => {
+  test('uses the real native compaction pipeline to prune, summarize, checkpoint, and resume a CLI tool loop', async () => {
     const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cli-compaction-'))
     roots.push(root)
     const ctx = new Context()
@@ -908,10 +903,9 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
 
     try {
       await mountAgentLoopTestDependencies(ctx, {
-        systemPrompt: { persona: '' },
+        systemPrompt: { personaPrefix: '' },
         tools: { mode: 'native' },
       })
-      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(TokenMeter)
       await ctx.plugin(ToolResultPruner, {
         thresholdChars: 8_192,

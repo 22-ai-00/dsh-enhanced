@@ -223,7 +223,7 @@ export class DeliverySessionLeases {
     try {
       finishConstruction = lease.enter()
       native = await factory(async (agentCtx, preparedAgent?: Agent) => {
-        const agent = preparedAgent ?? agentCtx.agent
+        const agent = preparedAgent
         if (agent === undefined || String(agent.session.id) !== sessionId) throw new SessionLeaseUnavailable('denied')
         lease.attach(agent)
         this.#agents.set(agent, lease)

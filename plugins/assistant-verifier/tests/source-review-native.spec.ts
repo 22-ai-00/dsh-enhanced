@@ -4,7 +4,6 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { LlmAdapter, ReasoningEffortId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -30,12 +29,12 @@ class Adapter extends LlmAdapter {
 async function fixture(mode?: Adapter['mode']) {
   const root = await mkdtemp(join(tmpdir(), 'source-review-native-')), ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: 'GLOBAL PERSONA MUST NOT LEAK' } })
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: 'GLOBAL PERSONA MUST NOT LEAK' } })
   ctx.tools.register({ name: 'global_write', description: 'A global tool that review must never inherit.',
     parameters: { type: 'object', properties: {} },
     output: { schema: { type: 'string' }, render: () => [{ type: 'text', text: 'forbidden' }] },
     execute: async () => { throw new Error('review executed a global tool') } })
-  await ctx.plugin(SessionProjectionRegistry)
+
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [] })
   const adapter = new Adapter(mode)
   ctx.llm.registerAdapter(['supplier'], adapter)
@@ -62,7 +61,7 @@ test('runs one native turn with the exact inherited model, isolated prompt and z
   expect(f.adapter.requests).toHaveLength(1)
   expect(f.adapter.requests[0]).toMatchObject({ provider: 'supplier', model: 'task-model', reasoningEffort: 'high', maxTokens: 512 })
   expect(f.adapter.requests[0]!.tools ?? []).toEqual([])
-  expect(f.adapter.requests[0]!.system).not.toContain('GLOBAL PERSONA')
+  expect(JSON.stringify(f.adapter.requests[0]!.messages.filter(message => message.role === 'system'))).not.toContain('GLOBAL PERSONA')
   expect(f.assertCurrent.mock.calls.length).toBeGreaterThan(3)
 })
 

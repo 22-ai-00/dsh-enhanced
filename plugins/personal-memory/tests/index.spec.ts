@@ -32,7 +32,7 @@ describe('dsh-enhanced-personal-memory entrypoint', () => {
     expect(bundle).toContain('maxImportRecords: 100')
     expect(bundle).toContain('- assistantPolicy')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
-    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.1.2-rc.1 <0.2.0')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.1.5-rc.3 <0.1.6')
     expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
     expect(manifest.dependencies['@dsh-enhanced/assistant-growth-contract']).toBe('workspace:*')
     expect(manifest.peerDependencies).not.toHaveProperty('@dsh-enhanced/preference-learning')

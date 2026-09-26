@@ -149,7 +149,23 @@ describe('durable approval reviewer', () => {
     expect(getApprovalReviewer(auto)).toBe('user')
     auto.append('approval/policy', { policy: 'ask' })
     appendSandboxMode(auto, 'danger-full-access')
+    // Current format 3 defines Auto as workspace-write + ask. Changing only
+    // sandbox mode invalidates a stale selector and must require human review.
     expect(getApprovalReviewer(auto)).toBe('user')
+    // The fixed full-access Auto bundle belongs only to the verified v4 ABI.
+    expect(approvalReviewerOf(auto.snapshotEvents(), 4)).toBe('auto-review')
+    expect(approvalReviewerOf(auto.snapshotEvents(), 5)).toBe('user')
+    // approval "never" with only an Auto intent is the host's delegated-child
+    // case, not a local full-access reviewer: fail closed to the human.
+    auto.append('approval/policy', { policy: 'never' })
+    expect(getApprovalReviewer(auto)).toBe('user')
+
+    const legacyAuto = session()
+    appendPermissionPreset(legacyAuto, 'auto')
+    legacyAuto.append('approval/policy', { policy: 'ask' })
+    appendSandboxMode(legacyAuto, 'workspace-write')
+    expect(getApprovalReviewer(legacyAuto)).toBe('auto-review')
+    expect(approvalReviewerOf(legacyAuto.snapshotEvents(), 4)).toBe('user')
 
     const full = session()
     appendPermissionPreset(full, 'danger-full-access')

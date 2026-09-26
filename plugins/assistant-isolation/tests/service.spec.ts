@@ -82,7 +82,7 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
     let handle: { agent: Agent, dispose(): Promise<void> } | undefined
     try {
       await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
-      await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
+      await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
       await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
       ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record-owner', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }) } as never)
       new AssistantPolicyService(ctx, {
@@ -141,7 +141,7 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
     let agentHandle: { agent: Agent, dispose(): Promise<void> } | undefined
     try {
       await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
-      await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
+      await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, personaPrefix: '' })
       await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
       const owners = new Map<Agent, string>()
       ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: (agent: Agent) => {

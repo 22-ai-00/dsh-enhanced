@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import {
   KNOWN_SESSION_EVENT_TYPES,
@@ -54,11 +55,7 @@ function agent(options: { cwd?: string; preset?: string } = {}): Agent {
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options.preset === undefined ? {} : { agentPreset: options.preset }),
   })
-  const inbox = new Inbox(session, {
-    inserted() {},
-    discarded() {},
-    claimed() {},
-  })
+  const inbox = createInboxStub()
   const ctx = new Context()
   return {
     id,

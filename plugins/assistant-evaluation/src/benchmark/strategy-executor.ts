@@ -110,7 +110,7 @@ export function createStrategyBenchmarkExecutor(input: StrategyBenchmarkExecutor
               attempt.captures.push({ sessionId, kind: 'child', observation: null })
             } else {
               const host = StrategyCapabilityRuntimeHost.fromMountedContext(ctx as unknown as Parameters<typeof StrategyCapabilityRuntimeHost.fromMountedContext>[0])
-              host.captureParentRequest({ system: options.system ?? '', tools: (options.tools ?? []).map(tool => ({ ...tool, output: null })) })
+              host.captureParentRequest({ system: options.messages.findLast(message => message.role === 'system')?.content.filter(block => block.type === 'text').map(block => block.text).join('') ?? '', tools: (options.tools ?? []).map(tool => ({ ...tool, output: null })) })
               const policyRequest = { subject: { kind: 'agent', id: 'benchmark', workspace }, action: 'execute', context: { initiator: 'external' } }
               host.capturePolicyRequests({ common: { ...policyRequest, resource: { kind: 'tool', id: 'goal_create' } },
                 strategy: { ...policyRequest, resource: { kind: 'tool', id: 'goal_strategy' } } })

@@ -177,7 +177,7 @@ export function createNativeBenchmarkExecutor(raw: NativeBenchmarkConfig, factor
     let calls = 0; let reserved = false; let reservedInput = 0; let observedUsage: TokenUsage | undefined; let unexpectedTool = false
     try {
       const memoryTask = isMemorySuite(input) ? memoryDevelopmentTask(request.cell.caseId, input.suite === 'memory-v2' ? '2' : '1') : undefined
-      await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: memoryTask !== undefined, persona: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
+      await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx); await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: memoryTask !== undefined, personaPrefix: '' }); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
       binding = await factory(Object.freeze({ ...input.model }), Object.freeze({ ctx, workspace }))
       const countInput = input.model.inputLimitMode === 'estimate' ? binding?.inputTokenEstimate : binding?.inputTokenUpperBound
       if (!binding || !(binding.adapter instanceof LlmAdapter) || typeof countInput !== 'function' || typeof binding.dispose !== 'function') throw new Error('invalid native adapter binding')
@@ -186,7 +186,7 @@ export function createNativeBenchmarkExecutor(raw: NativeBenchmarkConfig, factor
       if (memoryTask === undefined) ctx.systemPrompt.suppressRuntimeContext()
       const memory = memoryTask === undefined ? undefined : await installBenchmarkMemory(ctx, workspace, memoryTask.snapshotLimit, request.variant.features.memory)
       ctx.on('llm/stream', async function* (options, next) {
-        if (!isAgentLoopRequest(options) || calls++ !== 0 || options.provider !== input.model.provider || options.model !== input.model.model || options.temperature !== (input.model.temperature ?? undefined) || options.maxTokens !== (input.model.outputLimitMode === 'observed' ? undefined : input.model.maxOutputTokens) || options.system !== persona || (options.tools?.length ?? 0) !== 0) throw new Error('native request contract violation')
+        if (!isAgentLoopRequest(options) || calls++ !== 0 || options.provider !== input.model.provider || options.model !== input.model.model || options.temperature !== (input.model.temperature ?? undefined) || options.maxTokens !== (input.model.outputLimitMode === 'observed' ? undefined : input.model.maxOutputTokens) || options.system !== undefined || options.messages[0]?.role !== 'system' || !same(options.messages[0].content, persona ? [{ type: 'text', text: persona }] : []) || (options.tools?.length ?? 0) !== 0) throw new Error('native request contract violation')
         const upper = await countInput.call(binding, options)
         if (!Number.isSafeInteger(upper) || upper < 0 || upper > request.budget.inputTokens) throw new Error('input budget preflight failed')
         const reserve = tokenUsageReserveCost(upper, input.model.maxOutputTokens, input.model)

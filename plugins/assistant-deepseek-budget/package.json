@@ -53,8 +53,8 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-credentials": ">=0.1.2-rc.1 <0.2.0",
-    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-credentials": ">=0.1.5-rc.3 <0.1.6",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.3 <0.1.6",
     "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {

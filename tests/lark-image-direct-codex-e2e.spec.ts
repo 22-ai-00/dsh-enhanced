@@ -1,14 +1,11 @@
 import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LocalAttachmentStore } from '@deepseek-ai/dsh-attachment-local'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import {
-  KNOWN_SESSION_EVENT_TYPES,
-  SessionPreparation,
   type SessionEvent,
   type SessionHeader,
-  type SessionId,
   type SessionLogOffset,
 } from '@deepseek-ai/dsh-session'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -114,10 +111,9 @@ describe('Lark image to Direct Codex', () => {
 
     try {
       await mountAgentLoopTestDependencies(ctx, {
-        systemPrompt: { persona: '' },
+        systemPrompt: { personaPrefix: '' },
         tools: { mode: 'native' },
       })
-      await ctx.plugin(SessionProjectionRegistry)
       const saved = new Map<string, {
         header: SessionHeader
         events: readonly SessionEvent[]
@@ -130,26 +126,11 @@ describe('Lark image to Direct Codex', () => {
           inheritedEventCount: session.inheritedEventCount,
         }))
       })
-      ctx.provide('sessionPersistence' as never, {
-        coordinator: {
-          assertEventsSupported(_meta: SessionHeader, events: readonly SessionEvent[]) {
-            for (const event of events) {
-              if (KNOWN_SESSION_EVENT_TYPES.has(event.type) || event.ignorable === true) continue
-              throw new Error(`unknown required session event type: ${event.type}`)
-            }
-          },
-        },
-        list: async () => [...saved.values()].map(value => structuredClone(value.header)),
-        prepare: async (id: SessionId) => {
-          const value = saved.get(String(id))
-          if (value === undefined) throw new Error(`session not found: ${id}`)
-          const restored = structuredClone(value)
-          return SessionPreparation.create(ctx.sessions.prepare(id, {
-            seedSource: 'persistence', seed: [...restored.events], meta: restored.header,
-            inheritedEventCount: restored.inheritedEventCount,
-          }))
-        },
-      } as never)
+      await ctx.plugin(Loader, { baseUrl: import.meta.url })
+      await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: {
+        root: join(root, 'sessions'), compression: 'none',
+      } })
+      await ctx.loader.await()
       await ctx.plugin(AssistantPolicyService, {
         databasePath: join(root, 'policy.sqlite'),
         rules: [

@@ -40,7 +40,7 @@ async function actualFixture(setupExit: number | 'missing') {
   await mkdir(join(hostModules, 'dsh'), { recursive: true })
   await mkdir(join(hostModules, 'dsh-app-boot'), { recursive: true })
   await writeFile(join(hostModules, 'dsh', 'package.json'), JSON.stringify({
-    name: '@deepseek-ai/dsh', version: '0.1.2-rc.1',
+    name: '@deepseek-ai/dsh', version: '0.1.5-rc.3',
   }))
   await writeFile(join(hostModules, 'dsh-app-boot', 'package.json'), JSON.stringify({
     name: '@deepseek-ai/dsh-app-boot', type: 'module', exports: './index.js',
@@ -60,9 +60,11 @@ async function actualFixture(setupExit: number | 'missing') {
 if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; fi
 exit 0
 `)
+  await writeExecutable(join(fakeBin, 'npm'), '#!/bin/bash\nexit 0\n')
+  await writeExecutable(join(fakeBin, 'dsh-rsi'), '#!/bin/bash\nif [[ "${1:-}" == version ]]; then printf "0.1.48\\n"; fi\n')
   await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
 set -euo pipefail
-if [[ "\${1:-}" == '--version' ]]; then printf '0.1.2-rc.1\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.5-rc.3\\n'; exit 0; fi
 if [[ " $* " == *' plugin '* ]]; then
   mkdir -p "$DSH_HOME/profiles/web/node_modules/.bin"
   printf 'plugin-add\\n' >> "$INSTALL_LOG"
@@ -86,7 +88,7 @@ exit ${setupExit}
 `)
   }
   const result = spawnSync('/bin/bash', [installer,
-    '--scenario', 'web', '--workspace', join(root, 'workspace'), '--dsh-version', '0.1.2-rc.1',
+    '--scenario', 'web', '--workspace', join(root, 'workspace'), '--dsh-version', '0.1.5-rc.3',
     '--no-service', '--model', 'skip', '--model-route', 'skip',
   ], {
     cwd: repoRoot,

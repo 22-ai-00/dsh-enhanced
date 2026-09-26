@@ -1,8 +1,9 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import * as FsPolicy from '@deepseek-ai/dsh-fs-observation-policy'
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { createScope } from '@deepseek-ai/dsh-scope'
@@ -59,7 +60,7 @@ const wrongTopologyImplementation = "process.stdin.resume(); process.stdin.on('e
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 function agent(ctx: Context, workspace: string): Agent {
   const id = SessionId('external-owner'), session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
-  const value: Agent = { id, options: { provider: 'fixture', model: 'fixture' }, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
+  const value: Agent = { id, options: { provider: 'fixture', model: 'fixture' }, session, inbox: createInboxStub(), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(value as unknown as { ctx: Context }).ctx = createScope(ctx, value).ctx; session.append('turn/start', { turn: 1 }); return value
 }
 

@@ -1,8 +1,9 @@
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { AssistantPolicyService, type ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
 import {
@@ -148,7 +149,7 @@ function agent(sessionId = `memory-promotion-integration-${Math.random()}`): Age
   })
   return {
     id, options: {}, session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    inbox: createInboxStub(),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {},
   }

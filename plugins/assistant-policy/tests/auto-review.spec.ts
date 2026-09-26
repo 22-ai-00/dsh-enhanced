@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createInboxStub } from '@deepseek-ai/dsh-agent-loop-testkit'
 import LlmRuntime, {
   LlmAdapter,
   createToolResultMessage,
@@ -100,7 +101,7 @@ function createAgent(): Agent {
     id,
     options: { provider: 'main', model: 'main-model' },
     session,
-    inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    inbox: createInboxStub(),
     ctx: new Context(),
     status: 'idle',
     cancel() {},
@@ -348,7 +349,7 @@ describe('isolated automatic approval reviewer', () => {
     expect(JSON.stringify(current.agent.session.snapshotEvents())).not.toContain('Narrow read-only repository inspection.')
   })
 
-  test('requires an explicit ask plus workspace-write permission state for automatic review', async () => {
+  test('requires an explicit ask and recognized sandbox state for automatic review', async () => {
     for (const options of [
       { approvalPolicy: 'missing' as const },
       { sandboxMode: 'missing' as const },
@@ -360,6 +361,38 @@ describe('isolated automatic approval reviewer', () => {
       expect(current.adapter.requests).toHaveLength(0)
       expect(current.fallbackEscalations).toEqual([false])
     }
+  })
+
+  test('does not review a stale Auto selector after rc.3 sandbox knobs change', async () => {
+    const current = await fixture([assessment()], { sandboxMode: 'danger-full-access' })
+    appendPermissionPreset(current.agent, 'auto')
+    await expect(current.request()).resolves.toBe('rejected')
+    expect(current.adapter.requests).toHaveLength(0)
+  })
+
+  test('binds a nested PTC dispatch to its exact start and refuses it after settlement', async () => {
+    const current = await fixture([assessment()], { includeExactCall: false })
+    current.agent.session.append('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('parent-ptc-call'),
+      parentCallId: ToolCallId('parent-ptc-call'),
+      subCallId: current.callId,
+      name: 'bash',
+      arguments: { command: 'git status --short' },
+    })
+    await expect(current.request()).resolves.toBe('allowed-once')
+    expect(current.adapter.requests).toHaveLength(1)
+
+    current.agent.session.append('tool/ptc-dispatch', {
+      rootCallId: ToolCallId('parent-ptc-call'),
+      parentCallId: ToolCallId('parent-ptc-call'),
+      subCallId: current.callId,
+      name: 'bash',
+      arguments: { command: 'git status --short' },
+      isError: false,
+      content: [{ type: 'text', text: 'settled' }],
+    })
+    await expect(current.request()).resolves.toBe('rejected')
+    expect(current.adapter.requests).toHaveLength(1)
   })
 
   test('hands high/critical risk and weak authorization to the next human answerer', async () => {

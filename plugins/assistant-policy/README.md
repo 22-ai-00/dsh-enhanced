@@ -44,21 +44,23 @@ dsh --profile web --dump-config
     budgets: []
 ```
 
-匹配支持完整字符串中的 `*` 通配符。任意匹配的 deny 都优先于 allow；同 effect 先选更具体的规则，再按声明顺序决定。工具身份来自 DSH 0.1.2-rc.1 的 `Agent.session.header.agentPreset` 与绝对 `cwd`，缺少 agent、preset 或 workspace 时直接拒绝，调用方参数不能伪造这些字段。
+匹配支持完整字符串中的 `*` 通配符。任意匹配的 deny 都优先于 allow；同 effect 先选更具体的规则，再按声明顺序决定。工具身份来自 DSH 的 `Agent.session.header.agentPreset` 与绝对 `cwd`，缺少 agent、preset 或 workspace 时直接拒绝，调用方参数不能伪造这些字段。
 
 ## 三档即时审批
+
+当前交付基线是官方 `latest` 的 DSH `0.1.5-rc.3`。Policy 已验证 `0.1.7-rc.2` 的动态 Auto 注册与 format v4 冷读适配，但 meta-bundle 的静态 Auto 配置不能用于该版本；整套插件尚未宣称支持 `0.1.7-rc.2`。
 
 生产三档由标准 `permission/preset`、`sandbox/mode` 与 `approval/policy` 共同决定：官方 id `workspace-write` / `auto` / `danger-full-access` 分别映射 reviewer `user` / `auto-review` / `none`，而且日志中更晚的官方选择会覆盖更早的旧 reviewer 事件。`assistant-policy/approval-reviewer` 仍保留为旧 session、单 workspace preset 或第三方动态 id 的兼容事实；无论意图来自哪一种事件，执行状态仍逐项核验：
 
 - **请求批准**：`sandbox/mode: workspace-write` + `approval/policy: ask` + reviewer `user`。低风险精确 allowlist 直接继续，其余动作交给人工。
-- **帮我批准**：`sandbox/mode: workspace-write` + `approval/policy: ask` + reviewer `auto-review`，也是 fresh profile 的默认档。内置只读网络工具、workspace 内文件读写、非凭据本地文件只读、单个命名 Skill 的加载、普通前台 Bash（含测试、构建、非敏感管道/重定向和依赖安装）以及专用 `ask_user_question` 直接继续，不再消耗 reviewer 或打断用户；未知插件工具仍进入隔离 reviewer。凭据、后台进程、破坏性命令、提权、workspace 外写入、任意 `run_code` / PowerShell，以及显式原生 sandbox escalation 仍交人工。
+- **帮我批准**：当前 `0.1.5-rc.3` profile 使用 `sandbox/mode: workspace-write` + `approval/policy: ask` + reviewer `auto-review`；`0.1.7-rc.2` 的保留 Auto bundle 则使用 `danger-full-access + ask`，由 Policy 的实时注册控制；只有 format v4 且有效 preset 为 `auto` 才识别该组合。format v3 中残留的 `auto` 选择不能授权 full-access 自动审核，未知会话格式也不会启用自动审核。内置只读网络工具、workspace 内文件读写、非凭据本地文件只读、单个命名 Skill 的加载、普通前台 Bash（含测试、构建、非敏感管道/重定向和依赖安装）以及专用 `ask_user_question` 直接继续，不再消耗 reviewer 或打断用户；未知插件工具仍进入隔离 reviewer。凭据、后台进程、破坏性命令、提权、workspace 外写入、任意 `run_code` / PowerShell，以及显式原生 sandbox escalation 仍交人工。
 - **完全访问权限**：只有显式且同时生效的 `sandbox/mode: danger-full-access` + `approval/policy: never` + reviewer `none` 才会绕过参数级即时风险门。单独的 `never`、缺少 sandbox 事件、事件畸形或三者暂时不一致都会失败关闭，绝不会把 headless 的“不询问”误解成 full；此时敏感工具直接返回稳定的 `[approval-disabled]` 诊断，并明确说明没有向用户展示审批，不再制造 `the user rejected tool` 的错误归因。`tools.guard()` 的显式 deny、紧急停止、身份和预算检查仍然单调生效；若希望未匹配工具也可执行，需要显式配置 `toolDefaultEffect: allow`。
 
 包根导出 `approvalReviewerOf(events)`、`getApprovalReviewer(session)` 和兼容 setter `setApprovalReviewer(session, reviewer)`；setter 只接受 `user | auto-review | none`。auto 与 full 都要求 preset 意图、显式 approval 和显式 sandbox 完整一致；缺项、畸形事件或切换中的中间状态只会折回 `user`。因此 Web 的 full→auto、ask→auto，以及 Delivery auto→Web ask 都由最新官方 preset 直接串行折叠，不再依赖另写 custom reviewer。
 
 canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要迁移写入。仅对旧版/第三方的非 canonical full preset，插件仍在 live session 扫描、`session/created` 和工具执行屏障做严格兼容迁移；它要求显式 full bundle、sandbox 与 approval 完全一致且没有 reviewer，失败则收窄并拒绝本次工具。
 
-`assistant-policy/approval-reviewer` 是 required session event。DSH 0.1.2-rc.1 尚无公开事件注册 API，而且独立安装/软链接插件时，插件和 DSH Host 可能各自加载一份 `@deepseek-ai/dsh-session`。本包会同步校验 format v0，并在插件本地目录与从真实 Host 入口解析出的目录不同的情况下同时做精确、进程生命周期内单调注册；npm/pnpm bin 会先解析软链接，不依赖固定安装路径。注册不能在插件卸载或 HMR 时删除，否则 persistence 的关机 drain 和已有 session 冷恢复可能再次把事件判为 unknown。若无法从真实入口解析 Host copy，或已解析到的 copy 在格式、导出形态、同步加载能力上不兼容，插件都会 fail fast，拒绝仅修改本地目录并要求同步更新兼容层。
+`assistant-policy/approval-reviewer` 是 required session event。当前 DSH 尚无公开事件注册 API，而且独立安装/软链接插件时，插件和 DSH Host 可能各自加载一份 `@deepseek-ai/dsh-session`。本包会同步校验当前 `0.1.5-rc.3` 的 format v3（也识别 `0.1.7-rc.2` 的 v4），并在插件本地目录与真实 Host reader 使用的目录不同时做精确、进程生命周期内单调注册；npm/pnpm bin 会先解析软链接，不依赖固定安装路径。注册不能在插件卸载或 HMR 时删除，否则 persistence 的关机 drain 和已有 session 冷恢复可能再次把事件判为 unknown。若无法从真实入口解析 Host copy，或已解析到的 copy 在格式、导出形态、同步加载能力上不兼容，插件都会 fail fast，拒绝仅修改本地目录并要求同步更新兼容层。
 
 参数级风险门不是宽泛的字符串前缀判断，也不声称实现了完整 shell parser：
 
@@ -69,9 +71,9 @@ canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要
 - 简单但未分类的前台 Bash（例如 `pnpm test`）先归为 `ask-review`；显式 `ask` 档仍提示人工，默认 `auto` 档则直接继续。未知插件工具保持 `ask-review` 并在 auto 中交隔离 reviewer，不因本次放宽自动执行。`run_code` 例外：当前 worker runtime 是 bash-equivalent 的便利执行环境，不是 OS 安全边界，因此在 ask/auto 档始终进入 `ask-human`；
 - 内置只读 `web_search` / `web_fetch` 与专用 `ask_user_question` 确定性放行。普通 Bash 中的 `curl`、`ssh`、`git push` 等网络命令，以及 credential 痕迹、外部路径中的 credential 关键词搜索、后台执行、破坏性操作、提权、workspace 外写入仍进入 `ask-human`。普通外部本地只读与 Skill 加载只在默认 `auto` 直放，显式 `ask` 仍会询问。复杂 shell 会先做高召回敏感扫描；未命中时仅在默认 auto 直接继续，在显式 ask 仍展示授权。`npx`、`npm exec`、`pnpm/yarn dlx` 及依赖安装属于默认 auto 的普通操作；`git submodule update` 仍按潜在远端执行归入 `ask-human`；
 - `pwsh` 在具备独立严格解析器前一律进入 `ask-human`；
-- `bash` / `pwsh` / `write` / `edit` 已携带 DSH 0.1.2-rc.1 合法的 `sandbox_permissions: workspace-write | danger-full-access` 和非空 `justification` 时交还工具自身的原生审批，避免弹两次；Codex 风格的 `require_escalated` 或其他畸形升级参数仍交人工。
+- `bash` / `pwsh` / `write` / `edit` 已携带合法的 `sandbox_permissions: workspace-write | danger-full-access` 和非空 `justification` 时交还工具自身的原生审批，避免弹两次；Codex 风格的 `require_escalated` 或其他畸形升级参数仍交人工。
 
-workspace 路径判断是保守的词法检查，不替代宿主对 symlink、文件权限和进程的最终约束。尤其 DSH 0.1.2-rc.1 的 `workspace-write` sandbox 不能被当作网络或子进程隔离；这里的风险门只负责授权路由，不是 OS 安全边界。
+workspace 路径判断是保守的词法检查，不替代宿主对 symlink、文件权限和进程的最终约束。`workspace-write` sandbox 不能被当作网络或子进程隔离；这里的风险门只负责授权路由，不是 OS 安全边界。
 
 ### 隔离自动 reviewer
 
@@ -142,7 +144,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 
 ## 兼容性
 
-已针对 DeepSeek Harness `0.1.2-rc.1` 验证。详见仓库[兼容性基线](../../docs/compatibility.md)。
+已针对 DeepSeek Harness `0.1.5-rc.3` 验证。详见仓库[兼容性基线](../../docs/compatibility.md)。
 
 ### Finite action broker preauthorization
 

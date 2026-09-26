@@ -17,7 +17,6 @@ import { Context } from '@deepseek-ai/cordis'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
@@ -246,8 +245,8 @@ async function mount(opts: MountOptions = {}): Promise<Harness> {
   contexts.push(ctx)
   roots.push(root)
 
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
-  await ctx.plugin(SessionProjectionRegistry)
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' } })
+
 
   // Fake approval seam: the tools/pre-execute waterfall resolves unknown
   // growth_* names as `ask`, and ToolRuntime routes that through this channel.

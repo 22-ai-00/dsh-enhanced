@@ -79,7 +79,7 @@ dsh-rsi update --all --yes
 
 `update` 选项：
 
-- `--all`：自身升级成功后，自动确认目标 profile 没有运行中 Host，再把插件集合交给同一目标版本的安装器原地升级。用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
+- `--all`：自身升级成功后，把插件集合交给同一目标版本的安装器原地升级；Linux 受管服务由事务停服并恢复，额外或手工启动的 Host 必须先停止。该选项目前不升级 DSH Host。用户无需传 `--confirm-dsh-home-stopped` 或重复声明 `--scenario`；安装器从 effective/composed profile 自动识别场景。
 - `--version <v|tag>`：dsh-rsi 自身的目标版本或 dist-tag（默认 `latest`）。只接受精确版本 `x.y.z`（可带预发布后缀）或纯字母 dist-tag；范围表达式如 `>=0.1.0` 会被拒绝。
 - `--dry-run`：解析出目标版本并打印将执行的命令，不做任何安装。
 - 其余参数在 `--all` 下原样透传给安装器；`--local <dir>` 走 local 形态。显式 `--scenario` 仍可作为一致性断言，但不再是必填项。

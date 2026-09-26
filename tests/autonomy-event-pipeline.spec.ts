@@ -4,11 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
-import { KNOWN_SESSION_EVENT_TYPES, SessionPreparation, type SessionEvent, type SessionHeader, type SessionId, type SessionLogOffset } from '@deepseek-ai/dsh-session'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantDeliveryService, type DeliveryAdapter, type InboundEnvelope, type OutboundIntent } from '@dsh-enhanced/assistant-delivery'
 import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
@@ -22,8 +21,6 @@ const contexts = new Set<Context>()
 const principal = { channel: 'lark', account: 'event-bot', tenant: 'event-tenant', user: 'event-owner' }
 const principalId = 'lark/event-bot/event-tenant/event-owner'
 const workspacePreset = 'primary'
-
-interface SavedSession { header: SessionHeader; events: readonly SessionEvent[]; inheritedEventCount: SessionLogOffset }
 
 class EventModel extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
@@ -44,12 +41,12 @@ function inbound(eventId: string): InboundEnvelope {
     kind: 'text', text: 'bind the owner route' }
 }
 
-async function installAgentRuntime(ctx: Context, saved: Map<string, SavedSession>) {
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' }, tools: { mode: 'native' } })
-  await ctx.plugin(SessionProjectionRegistry)
+async function installAgentRuntime(ctx: Context, root: string) {
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+  await ctx.plugin(Loader, { baseUrl: import.meta.url })
+  await ctx.loader.create({ name: '@deepseek-ai/dsh-session-persistence-jsonl', config: { root: join(root, 'sessions'), compression: 'none', packChunks: false, writeBatchMaxDelayMs: 1 } })
+  await ctx.loader.await()
   ctx.provide('agentPresets' as never, { resolve: async (id?: string) => ({ id: id ?? workspacePreset }), mount: async (_ctx: unknown, id?: string) => ({ id: id ?? workspacePreset }) } as never)
-  ctx.on('session/flush', session => saved.set(String(session.id), structuredClone({ header: session.header, events: session.snapshotEvents(), inheritedEventCount: session.inheritedEventCount })))
-  ctx.provide('sessionPersistence' as never, { coordinator: { assertEventsSupported(_header: SessionHeader, events: readonly SessionEvent[]) { for (const event of events) if (!KNOWN_SESSION_EVENT_TYPES.has(event.type) && event.ignorable !== true) throw new Error(`unknown session event ${event.type}`) } }, list: async () => [...saved.values()].map(value => structuredClone(value.header)), prepare: async (id: SessionId) => { const savedSession = saved.get(String(id)); if (savedSession === undefined) throw new Error('missing saved session'); const value = structuredClone(savedSession); return SessionPreparation.create(ctx.sessions.prepare(id, { seedSource: 'persistence', seed: [...value.events], meta: value.header, inheritedEventCount: value.inheritedEventCount })) } } as never)
 }
 
 async function openPipeline(root: string, report: string) {
@@ -59,10 +56,9 @@ async function openPipeline(root: string, report: string) {
   await writeFile(watched, 'initial')
   await writeFile(join(workspace, 'report.md'), report)
   const ctx = new Context(); contexts.add(ctx)
-  const saved = new Map<string, SavedSession>()
   const model = new EventModel()
   const sends: OutboundIntent[] = []
-  await installAgentRuntime(ctx, saved)
+  await installAgentRuntime(ctx, root)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), budgets: [{ id: 'event-runs', metric: 'automation-runs', limit: 10, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }], rules: [
     { id: 'pair', effect: 'allow', subject: { kind: 'external', id: 'local:event' }, actions: ['pair.issue'], resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
     { id: 'owner', effect: 'allow', subject: { kind: 'external', id: principalId }, actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
