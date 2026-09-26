@@ -11,6 +11,8 @@ import { compileRsiProfiles, type RsiSetupManifest } from './rsi-profile.js'
 import { withDshHomeLifecycleLock } from './setup.js'
 import { supervisedGrowthBindingQuery, supervisedGrowthDatabasePaths } from './supervised-growth-profile.js'
 import { installDshResidentService } from './resident.js'
+import { prepareRsiSourceWorkspace } from './rsi-source.js'
+import { version } from './version.js'
 
 const MAX_BYTES = 2_097_152
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -40,6 +42,7 @@ export function assertRsiEffectivePatch(patch: string, effective: string): void 
 
 export interface RsiSetupArgs {
   manifestPath: string; dshHome: string; apply: boolean; rollback: boolean; start: boolean; confirmStopped: boolean; help: boolean
+  prepareSource?: boolean; profile?: string; sourceRepository?: string
 }
 export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
   const result: RsiSetupArgs = { manifestPath: '', dshHome: process.env.DSH_HOME || join(homedir(), '.dsh'),
@@ -54,13 +57,24 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     else if (key === '--rollback') result.rollback = true
     else if (key === '--start') result.start = true
     else if (key === '--confirm-hosts-stopped') result.confirmStopped = true
-    else if (key === '--manifest' || key === '--dsh-home') {
+    else if (key === '--prepare-source') result.prepareSource = true
+    else if (key === '--manifest' || key === '--dsh-home' || key === '--profile' || key === '--source-repository') {
       const value = argv[++i]
       if (!value || value.startsWith('--')) fail(`${key} needs a value`)
-      if (key === '--manifest') result.manifestPath = resolve(value!); else result.dshHome = value!
+      if (key === '--manifest') result.manifestPath = resolve(value!)
+      else if (key === '--profile') result.profile = value
+      else if (key === '--source-repository') result.sourceRepository = value
+      else result.dshHome = value!
     } else fail(`unknown option ${key}`)
   }
   if (result.help) return result
+  if (result.prepareSource) {
+    if (result.manifestPath || result.apply || result.rollback || result.start || result.confirmStopped) fail('--prepare-source cannot be combined with profile configuration operations')
+    if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('--prepare-source requires --profile and absolute DSH_HOME')
+    if (result.sourceRepository && !isAbsolute(result.sourceRepository)) fail('--source-repository must be absolute')
+    return result
+  }
+  if (result.profile || result.sourceRepository) fail('--profile and --source-repository require --prepare-source')
   if (!result.manifestPath || !isAbsolute(result.dshHome)) fail('--manifest and absolute DSH_HOME are required')
   if (result.rollback && (result.apply || result.start)) fail('--rollback cannot be combined with --apply or --start')
   if (result.start && !result.apply) fail('--start requires --apply')
@@ -229,6 +243,7 @@ export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding
 }
 
 export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts = defaultPorts): Promise<{ mode: string; profiles: readonly string[] }> {
+  if (args.prepareSource || args.profile || args.sourceRepository) fail('source preparation is a separate setup operation')
   if (args.rollback && (args.apply || args.start) || args.start && !args.apply) fail('incompatible setup operations')
   const home = args.dshHome
   await safeDirectory(home)
@@ -299,7 +314,20 @@ export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts
 export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
-    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\n')
+    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version.\n')
+    return
+  }
+  if (args.prepareSource) {
+    await safeDirectory(args.dshHome)
+    const controller = new AbortController()
+    const cancel = () => controller.abort(new Error('source preparation interrupted'))
+    process.once('SIGINT', cancel); process.once('SIGTERM', cancel)
+    try {
+      const prepared = await withDshHomeLifecycleLock(args.dshHome, () => prepareRsiSourceWorkspace({
+        dshHome: args.dshHome, profile: args.profile!, version, sourceRepository: args.sourceRepository, signal: controller.signal,
+      }))
+      process.stdout.write(`${JSON.stringify(prepared)}\n`)
+    } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel) }
     return
   }
   // 平台门控只属于 CLI 外壳：事务逻辑经注入的 ports 隔离 systemctl/服务安装，
