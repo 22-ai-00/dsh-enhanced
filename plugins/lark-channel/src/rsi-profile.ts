@@ -185,7 +185,9 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   if (jobs.ownerRouteId !== owner.route.id || jobs.principalId !== owner.principal || jobs.workspace !== owner.workspace || jobs.preset !== owner.preset) fail('sourceJobs does not match effective owner route')
   const growth = normalizeConfig(input.manifest.growthDriver)
   if (!growth.enabled || growth.intervalMs !== 0 || !growth.usageLearning.enabled || !growth.pluginSourceProposals.enabled || growth.pluginSourceProposals.preparationMode !== 'durable' || growth.pluginSourceProposals.repository !== jobs.repository || !growth.scope || !isDeepStrictEqual(growth.scope, { workspace: owner.workspace, preset: owner.preset, principalId: owner.principal, ownerRouteId: owner.route.id })) fail('growthDriver must be owner-scoped durable ordinary-use configuration')
-  const expectedOwner = { authorityId: jobs.authorityId, authorityHash: owner.route.authorityHash, principalId: owner.principal, principalRecordId: input.owner.owner.id, principalVersion: input.owner.owner.version, workspace: owner.workspace, agentPreset: owner.preset }
+  // The review source is the Delivery owner receipt. Its authorityId is the
+  // owner route, while sourceJobs.authorityId names a separate finite job grant.
+  const expectedOwner = { authorityId: owner.route.id, authorityHash: owner.route.authorityHash, principalId: owner.principal, principalRecordId: input.owner.owner.id, principalVersion: input.owner.owner.version, workspace: owner.workspace, agentPreset: owner.preset }
   if (!isDeepStrictEqual(input.manifest.sourceReviews.owner, expectedOwner)) fail('sourceReviews.owner does not match current owner')
   validateSourceReviewConfig(input.manifest.sourceReviews)
 
