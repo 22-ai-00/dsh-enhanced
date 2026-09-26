@@ -25,6 +25,10 @@ const localInstaller = join(installDirectory, 'install-local.sh')
 const npmInstaller = join(installDirectory, 'install-npm.sh')
 const restartScript = join(installDirectory, 'restart.sh')
 const installerLibrary = join(installDirectory, 'common.sh')
+// Installer fixtures should not inherit a developer machine's optional TraeX.
+// Tests for auto-discovery place their own executable ahead of this PATH.
+const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory => directory !== ''
+  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli'))).join(':')
 const temporaryRoots: string[] = []
 const pinnedInstallerSource = readFileSync(npmInstaller, 'utf8')
 const pinnedReleaseRef = pinnedInstallerSource.match(/^DSH_ENHANCED_PINNED_RELEASE_REF='([^']+)'$/mu)?.[1]
@@ -396,12 +400,72 @@ function runInstaller(
     cwd: repoRoot,
     encoding: 'utf8',
     env: {
-      PATH: process.env.PATH ?? '',
+      PATH: pathWithoutTraex,
       DSH_HOME: dshHome,
       ...(platform === undefined ? {} : { DSH_ENHANCED_PLATFORM_OVERRIDE: platform }),
       ...extraEnvironment,
     },
   })
+}
+
+async function autoTraexSetupFixture(commandName: 'traex' | 'trae-cli', loggedIn: boolean,
+  policyLayout: 'top-level' | 'nested' = 'top-level') {
+  const dshHome = await temporaryDshHome()
+  const fakeBin = join(dshHome, 'fake-bin')
+  const profileBin = join(dshHome, 'profiles', 'web', 'node_modules', '.bin')
+  await mkdir(fakeBin, { recursive: true })
+  await mkdir(profileBin, { recursive: true })
+  const profileModules = join(dshHome, 'profiles', 'web', 'node_modules')
+  await mkdir(join(profileModules, '@dsh-enhanced'), { recursive: true })
+  if (policyLayout === 'nested') {
+    const personalDir = join(profileModules, '@dsh-enhanced', 'personal-assistant')
+    await mkdir(join(personalDir, 'node_modules', '@dsh-enhanced'), { recursive: true })
+    await writeFile(join(personalDir, 'package.json'), JSON.stringify({
+      name: '@dsh-enhanced/personal-assistant',
+      dependencies: { '@dsh-enhanced/assistant-policy': '0.1.48' },
+    }))
+    await symlink(join(repoRoot, 'plugins', 'assistant-policy'),
+      join(personalDir, 'node_modules', '@dsh-enhanced', 'assistant-policy'), 'dir')
+  } else {
+    await symlink(join(repoRoot, 'plugins', 'assistant-policy'),
+      join(profileModules, '@dsh-enhanced', 'assistant-policy'), 'dir')
+  }
+  await writeExecutable(join(fakeBin, commandName), `#!/bin/bash
+if [[ "$*" == 'login status' ]]; then
+  printf '%s\\n' '${loggedIn ? 'Logged in using Trae' : 'Not logged in'}'
+  exit 0
+fi
+exit 7
+`)
+  await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+if [[ "$*" == *'--dump-config'* ]]; then
+  "$NODE_BIN" - "$DSH_HOME/profiles/web/cordis.patch.yml" <<'NODE'
+const { readFileSync } = require('node:fs')
+const { createRequire } = require('node:module')
+const yaml = createRequire(process.env.MODEL_SETUP_SOURCE)('yaml')
+const doc = yaml.parseDocument(readFileSync(process.argv[2], 'utf8'))
+for (const row of doc.contents.items) {
+  if (yaml.isMap(row) && row.get('id') === 'dsh-enhanced-traex-acp-provider') {
+    row.set('name', '@dsh-enhanced/traex-acp-provider')
+    if (process.env.DSH_FAKE_COMPOSED_DISABLED === '1') row.set('disabled', true)
+  }
+}
+process.stdout.write(doc.toString())
+NODE
+  exit 0
+fi
+exit 7
+`)
+  await writeExecutable(join(profileBin, 'dsh-model-setup'), `#!/bin/bash
+exec "$NODE_BIN" --experimental-strip-types --input-type=module -e 'import(process.env.MODEL_SETUP_SOURCE).then(m => m.runModelSetup(process.argv.slice(1))).catch(error => { process.stderr.write(String(error) + "\\n"); process.exitCode = 1 })' -- "$@"
+`)
+  const environment = {
+    PATH: `${fakeBin}:${dirname(process.execPath)}:/usr/bin:/bin`,
+    DSH_HOME: dshHome,
+    NODE_BIN: process.execPath,
+    MODEL_SETUP_SOURCE: join(repoRoot, 'plugins', 'assistant-policy', 'src', 'model-setup.ts'),
+  }
+  return { dshHome, fakeBin, commandPath: join(fakeBin, commandName), environment }
 }
 
 function runRestart(args: readonly string[], dshHome: string, platform?: string) {
@@ -7346,7 +7410,7 @@ cp "$REMOTE_COMMON" "$4"
     expect(result.stdout).not.toContain('overlay：未应用')
   })
 
-  test('supervised-growth installs TraeX only when explicitly requested', async () => {
+  test('supervised-growth can install TraeX when explicitly requested without a local executable', async () => {
     const dshHome = await temporaryDshHome()
     const result = runInstaller(localInstaller, [
       '--dry-run', '--mode', 'supervised-growth', '--lark', 'configure', '--with', 'traex',
@@ -8108,8 +8172,8 @@ printf '%s\\n' 'simulated DSH activation failure'
     const originalSettings = 'agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-flash\n'
     await writeFile(join(dshHome, 'settings.yaml'), originalSettings, 'utf8')
     await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
-if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
-exit 0
+if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; exit 0; fi
+exec "$NODE_BIN" "$@"
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.5-rc.3\\n'; fi
@@ -8164,6 +8228,7 @@ fi
         PATH: `${fakeBin}:/usr/bin:/bin`,
         DSH_HOME: dshHome,
         COMMAND_LOG: commandLog,
+        NODE_BIN: process.execPath,
       },
     })
 
@@ -8262,6 +8327,23 @@ fi
     const installService = `${larkSetup} --profile web --install-service`
     expect(result.stdout).toContain(installService)
     expect(result.stdout).not.toContain('--refresh-agent-policy')
+  })
+
+  test('Lark auto passes no Agent tools override, while explicit preserve never refreshes policy', async () => {
+    const dshHome = await temporaryDshHome()
+    const automatic = runInstaller(localInstaller, [
+      '--dry-run', '--scenario', 'lark', '--lark', 'configure', '--no-service',
+    ], dshHome)
+    expect(automatic.status, automatic.stderr).toBe(0)
+    expect(automatic.stdout).toContain('Agent 工具授权：auto')
+    expect(automatic.stdout).toContain('dsh-lark-setup --profile web --no-service')
+    expect(automatic.stdout).not.toContain('--preserve-agent-tools')
+    await configureExistingLark(dshHome)
+    const preserved = runInstaller(localInstaller, [
+      '--dry-run', '--scenario', 'lark', '--lark', 'keep', '--agent-tools', 'preserve',
+    ], dshHome)
+    expect(preserved.status, preserved.stderr).toBe(0)
+    expect(preserved.stdout).not.toContain('--refresh-agent-policy')
   })
 
   test.each([localInstaller, npmInstaller].flatMap(installer => [
@@ -8883,6 +8965,190 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
 
       await rm(fakeBin, { recursive: true, force: true })
     })()
+  })
+
+  test('auto-discovers trae-cli as an executable path and enables its profile route and default', async () => {
+    const f = await autoTraexSetupFixture('trae-cli', true)
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; detected="$(dsh_enhanced_detect_traex_command)"; dsh_enhanced_apply_auto_traex web "$2" "$detected" 1 0',
+      'installer-test', installerLibrary, f.dshHome,
+    ], { encoding: 'utf8', env: f.environment })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain(`TraeX 自动接入：${f.commandPath}`)
+    const patch = await readFile(join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
+    expect(patch).toContain('id: dsh-enhanced-traex-acp-provider')
+    expect(patch).toContain('enabled: true')
+    expect(patch).toContain(`command: ${f.commandPath}`)
+    expect(patch).toContain('id: agent-default-model')
+    expect(patch).toContain('provider: traex-agent')
+    expect(existsSync(join(f.dshHome, 'settings.yaml'))).toBe(false)
+  })
+
+  test('auto TraeX postflight resolves Policy YAML through isolated personal-assistant dependencies', async () => {
+    const f = await autoTraexSetupFixture('trae-cli', true, 'nested')
+    const profileModules = join(f.dshHome, 'profiles', 'web', 'node_modules')
+    expect(existsSync(join(profileModules, '@dsh-enhanced', 'assistant-policy'))).toBe(false)
+    expect(existsSync(join(profileModules, 'yaml'))).toBe(false)
+    const positive = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      'installer-test', installerLibrary, f.dshHome, f.commandPath,
+    ], { encoding: 'utf8', env: f.environment })
+    expect(positive.status, positive.stderr).toBe(0)
+    const patch = await readFile(join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
+    expect(patch).toContain('enabled: true')
+    expect(patch).toContain(`command: ${f.commandPath}`)
+
+    const composedPath = join(f.dshHome, 'disabled-composed.yml')
+    await writeFile(composedPath, `- id: dsh-enhanced-traex-acp-provider
+  name: '@dsh-enhanced/traex-acp-provider'
+  disabled: true
+  config:
+    enabled: true
+    command: ${f.commandPath}
+`)
+    const negative = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_probe_auto_traex_route web "$2" "$3"',
+      'installer-test', installerLibrary, f.dshHome, composedPath,
+    ], { encoding: 'utf8', env: f.environment })
+    expect(negative.status).not.toBe(0)
+    expect(negative.stderr).toContain('composed TraeX route is not active')
+  })
+
+  test('auto-enabling TraeX preserves an explicit default and operator command/cwd across repeat installs', async () => {
+    const f = await autoTraexSetupFixture('traex', true)
+    const patchPath = join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml')
+    const settingsPath = join(f.dshHome, 'settings.yaml')
+    const originalSettings = 'agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-flash\n'
+    await writeFile(settingsPath, originalSettings)
+    await writeFile(patchPath, "- id: dsh-enhanced-traex-acp-provider\n  config:\n    enabled: false\n    command: /custom/traex\n    cwd: !!js dshHomePath('custom-workspace')\n")
+    const invoke = () => spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      'installer-test', installerLibrary, f.dshHome, f.commandPath,
+    ], { encoding: 'utf8', env: f.environment })
+    const first = invoke()
+    expect(first.status, first.stderr).toBe(0)
+    const afterFirst = await readFile(patchPath, 'utf8')
+    const second = invoke()
+    expect(second.status, second.stderr).toBe(0)
+    expect(await readFile(patchPath, 'utf8')).toBe(afterFirst)
+    expect(afterFirst).toContain('enabled: true')
+    expect(afterFirst).toContain('command: /custom/traex')
+    expect(afterFirst).toContain("cwd: !!js dshHomePath('custom-workspace')")
+    expect(afterFirst).not.toContain('id: agent-default-model')
+    expect(await readFile(settingsPath, 'utf8')).toBe(originalSettings)
+  })
+
+  test('auto-enabling TraeX does not use a discovered login for an existing custom command', async () => {
+    const f = await autoTraexSetupFixture('traex', true)
+    const patchPath = join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml')
+    await writeFile(patchPath, '- id: dsh-enhanced-traex-acp-provider\n  config:\n    command: /custom/traex\n')
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      'installer-test', installerLibrary, f.dshHome, f.commandPath,
+    ], { encoding: 'utf8', env: f.environment })
+    expect(result.status, result.stderr).toBe(0)
+    const patch = await readFile(patchPath, 'utf8')
+    expect(patch).toContain('enabled: true')
+    expect(patch).toContain('command: /custom/traex')
+    expect(patch).not.toContain('id: agent-default-model')
+    expect(result.stdout).toContain('请运行：/custom/traex login')
+    expect(result.stdout).not.toContain('本机已登录')
+  })
+
+  test('auto TraeX postflight rejects a disabled row and leaves concurrent settings changes intact', async () => {
+    const f = await autoTraexSetupFixture('traex', true)
+    const patchPath = join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml')
+    const settingsPath = join(f.dshHome, 'settings.yaml')
+    const originalPatch = '- id: existing-owner-row\n  config: { enabled: true }\n'
+    await writeFile(patchPath, originalPatch)
+    await writeExecutable(join(f.fakeBin, 'dsh'), `#!/bin/bash
+if [[ "$*" == *'--dump-config'* ]]; then
+  printf 'agent-default-model:\\n  provider: concurrent-owner\\n' > "$DSH_HOME/settings.yaml"
+  printf '%s\\n' '- id: dsh-enhanced-traex-acp-provider' '  config: { enabled: false, command: /fake/traex }' > "$DSH_HOME/profiles/web/cordis.patch.yml"
+  printf '%s\\n' '- id: dsh-enhanced-traex-acp-provider' "  name: '@dsh-enhanced/traex-acp-provider'" '  config: { enabled: false, command: /fake/traex }'
+  exit 0
+fi
+exit 7
+`)
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      'installer-test', installerLibrary, f.dshHome, f.commandPath,
+    ], { encoding: 'utf8', env: f.environment })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('profile/composed route 未确认启用')
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    expect(await readFile(settingsPath, 'utf8')).toBe('agent-default-model:\n  provider: concurrent-owner\n')
+  })
+
+  test('auto TraeX rejects a disabled effective composed row even when profile config is enabled', async () => {
+    const f = await autoTraexSetupFixture('traex', true)
+    const patchPath = join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml')
+    const originalPatch = '- id: existing-owner-row\n  config: { enabled: true }\n'
+    await writeFile(patchPath, originalPatch)
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      'installer-test', installerLibrary, f.dshHome, f.commandPath,
+    ], { encoding: 'utf8', env: { ...f.environment, DSH_FAKE_COMPOSED_DISABLED: '1' } })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('composed TraeX route is not active')
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+  })
+
+  test.each([
+    { label: 'misleading substring', response: "printf '%s\\n' 'Not Logged in using Trae'", ready: false },
+    { label: 'stdout prefix noise', response: "printf '%s\\n' 'notice' 'Logged in using Trae'", ready: false },
+    { label: 'stderr noise', response: "printf '%s\\n' 'Logged in using Trae'; printf '%s\\n' 'notice' >&2", ready: false },
+    { label: 'exact stderr', response: "printf '%s\\n' 'Logged in using Trae' >&2", ready: true },
+  ])('auto TraeX accepts only runtime-exact login status: $label', async ({ response, ready }) => {
+    const f = await autoTraexSetupFixture('traex', false)
+    await writeExecutable(f.commandPath, `#!/bin/bash
+if [[ "$*" == 'login status' ]]; then
+  ${response}
+  exit 0
+fi
+exit 7
+`)
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" 1 0',
+      'installer-test', installerLibrary, f.dshHome, f.commandPath,
+    ], { encoding: 'utf8', env: f.environment })
+    expect(result.status, result.stderr).toBe(0)
+    const patch = await readFile(join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
+    expect(patch.includes('id: agent-default-model')).toBe(ready)
+    expect(result.stdout.includes('本机已登录')).toBe(ready)
+  })
+
+  test.each([{ loggedIn: false, defaultCandidate: '1' }, { loggedIn: true, defaultCandidate: '0' }])(
+    'auto-enables TraeX without changing defaults when loggedIn=$loggedIn candidate=$defaultCandidate',
+    async ({ loggedIn, defaultCandidate }) => {
+      const f = await autoTraexSetupFixture('traex', loggedIn)
+      const result = spawnSync('/bin/bash', [
+        '-c', 'source "$1"; dsh_enhanced_apply_auto_traex web "$2" "$3" "$4" 0',
+        'installer-test', installerLibrary, f.dshHome, f.commandPath, defaultCandidate,
+      ], { encoding: 'utf8', env: f.environment })
+      expect(result.status, result.stderr).toBe(0)
+      const patch = await readFile(join(f.dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8')
+      expect(patch).toContain('enabled: true')
+      expect(patch).not.toContain('id: agent-default-model')
+      expect(existsSync(join(f.dshHome, 'settings.yaml'))).toBe(false)
+      if (!loggedIn) {
+        expect(result.stdout).toContain(`请运行：${f.commandPath} login`)
+        expect(result.stdout).not.toContain('本机已登录')
+      }
+    },
+  )
+
+  test('auto-discovered TraeX joins the dry-run cohort before profile writes; explicit model skip only skips default', async () => {
+    const f = await autoTraexSetupFixture('trae-cli', true)
+    const result = runInstaller(npmInstaller, [
+      '--dry-run', '--scenario', 'core', '--model', 'skip', '--plugin-version', '0.1.48',
+    ], f.dshHome, undefined, { PATH: f.environment.PATH })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('@dsh-enhanced/traex-acp-provider@0.1.48')
+    expect(result.stdout.indexOf('npm cohort（dry-run）')).toBeLessThan(result.stdout.indexOf('dsh plugin --profile'))
+    expect(result.stdout).toContain(`--agent-command ${f.commandPath} --enable-only`)
+    expect(result.stdout).not.toContain('--default-if-absent')
+    expect(result.stdout).not.toContain('请选择')
   })
 
   test('explicit configure mode reruns onboarding and can avoid installing a service', async () => {

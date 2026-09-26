@@ -41,7 +41,7 @@ export interface LarkSetupArgs {
   refreshAgentPolicy: boolean
   manageService: boolean
   linuxCredentialProvider: 'auto' | 'protected-file' | 'secret-service'
-  agentTools: 'disable' | 'enable' | 'preserve'
+  agentTools: 'disable' | 'enable' | 'preserve' | 'auto'
   help: boolean
 }
 
@@ -69,7 +69,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     refreshAgentPolicy: false,
     manageService: true,
     linuxCredentialProvider: 'auto',
-    agentTools: 'preserve',
+    agentTools: 'auto',
     help: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
@@ -95,11 +95,11 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     else if (option === '--linux-credential-provider') {
       result.linuxCredentialProvider = argumentValue(argv, index++, option) as LarkSetupArgs['linuxCredentialProvider']
     }
-    else if (option === '--allow-agent-tools' || option === '--disable-agent-tools') {
-      if (result.agentTools !== 'preserve') {
-        throw new Error('lark-channel setup: --allow-agent-tools and --disable-agent-tools are mutually exclusive')
+    else if (option === '--allow-agent-tools' || option === '--disable-agent-tools' || option === '--preserve-agent-tools') {
+      if (result.agentTools !== 'auto') {
+        throw new Error('lark-channel setup: --allow-agent-tools, --disable-agent-tools and --preserve-agent-tools are mutually exclusive')
       }
-      result.agentTools = option === '--allow-agent-tools' ? 'enable' : 'disable'
+      result.agentTools = option === '--allow-agent-tools' ? 'enable' : option === '--disable-agent-tools' ? 'disable' : 'preserve'
     }
     else if (option === '--app-name') result.appName = argumentValue(argv, index++, option)
     else if (option === '--timeout-ms') result.timeoutMs = Number(argumentValue(argv, index++, option))
@@ -119,7 +119,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     if (incompatible !== undefined) {
       throw new Error(`lark-channel setup: --refresh-agent-policy cannot be combined with ${incompatible}`)
     }
-    if (result.agentTools === 'preserve') {
+    if (result.agentTools !== 'enable' && result.agentTools !== 'disable') {
       throw new Error('lark-channel setup: --refresh-agent-policy requires --allow-agent-tools or --disable-agent-tools')
     }
   }
@@ -135,7 +135,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
   if (result.installServiceOnly && argv.includes('--linux-credential-provider')) {
     throw new Error('lark-channel setup: --install-service cannot be combined with --linux-credential-provider')
   }
-  if (result.installServiceOnly && result.agentTools !== 'preserve') {
+  if (result.installServiceOnly && result.agentTools !== 'auto') {
     throw new Error('lark-channel setup: --install-service cannot be combined with agent-tools options')
   }
   const appNameHasControlCharacter = [...result.appName]
@@ -364,6 +364,8 @@ Options:
                           auto, protected-file, or secret-service (default: auto)
   --allow-agent-tools     Allow mounted foreground/external Agent capabilities
   --disable-agent-tools   Remove setup-managed Agent capability rules
+  --preserve-agent-tools  Preserve existing rules, including on first setup
+                          Default: allow for a new owner, preserve on reconfiguration
   --timeout-ms <ms>      Owner DM wait, 30000..900000 (default: 300000)
   -h, --help             Show this help
 

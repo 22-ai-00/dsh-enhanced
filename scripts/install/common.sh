@@ -86,7 +86,7 @@ Options:
   --ack-existing-automations
                             Acknowledge active jobs may run when its scheduler is enabled
   --lark <mode>             auto, keep, configure, or skip (default: auto)
-  --agent-tools <mode>      allow, preserve, or disable (default: preserve)
+  --agent-tools <mode>      auto, allow, preserve, or disable (default: auto)
   --permission <preset>     preserve, workspace-write, auto, or danger-full-access (default: preserve)
   --confirm-dangerous-full-access
                             Required together with --permission danger-full-access
@@ -889,18 +889,36 @@ dsh_enhanced_prompt_model_route() {
   esac
 }
 
-# Detect a locally installed TraeX / TRAE CLI executable so the model prompt can
-# offer it as a zero-key default-model route.  Prints the resolved command name
-# on stdout and returns 0 when found; returns 1 otherwise.
+# Detect an actual executable, not a shell function or alias: the provider later
+# starts this path with shell:false from a potentially different service PATH.
 dsh_enhanced_detect_traex_command() {
-  local candidate
+  local candidate found directory
   for candidate in traex trae-cli; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      printf '%s' "$candidate"
+    found="$(type -P "$candidate" 2>/dev/null || true)"
+    if [[ -n "$found" && -f "$found" && -x "$found" ]]; then
+      directory="$(cd "$(dirname "$found")" && pwd -P)" || return 1
+      printf '%s/%s' "$directory" "$(basename "$found")"
       return 0
     fi
   done
   return 1
+}
+
+dsh_enhanced_traex_login_ready() {
+  local command="$1"
+  node - "$command" <<'NODE'
+const { spawnSync } = require('node:child_process')
+const result = spawnSync(process.argv[2], ['login', 'status'], {
+  encoding: 'utf8', shell: false, timeout: 10000, maxBuffer: 32 * 1024,
+})
+const stdout = typeof result.stdout === 'string' ? result.stdout.trim() : ''
+const stderr = typeof result.stderr === 'string' ? result.stderr.trim() : ''
+if (result.error || result.status !== 0 || result.signal !== null
+  || !((stdout === 'Logged in using Trae' && stderr === '')
+    || (stderr === 'Logged in using Trae' && stdout === ''))) {
+  process.exitCode = 1
+}
+NODE
 }
 
 # The agent route (TraeX) is served by a local coding agent, not an API key.
@@ -1044,6 +1062,7 @@ dsh_enhanced_ensure_agent_bundle() {
 dsh_enhanced_snapshot_agent_route_configuration() {
   local profile="$1"
   local dsh_home="$2"
+  local scope="${3:-global-and-profile}"
   local snapshot_directory
   if ! snapshot_directory="$(mktemp -d "${TMPDIR:-/tmp}/dsh-enhanced-agent-route.XXXXXX")"; then
     return 1
@@ -1055,7 +1074,9 @@ dsh_enhanced_snapshot_agent_route_configuration() {
 
   local settings_path="$dsh_home/settings.yaml"
   local profile_patch="$dsh_home/profiles/$profile/cordis.patch.yml"
-  if [[ -e "$settings_path" ]]; then
+  if [[ "$scope" == 'profile-only' ]]; then
+    : > "$snapshot_directory/profile-only"
+  elif [[ -e "$settings_path" ]]; then
     cp -p -- "$settings_path" "$snapshot_directory/settings.yaml" || {
       rm -rf -- "$snapshot_directory"
       return 1
@@ -1079,10 +1100,12 @@ dsh_enhanced_restore_agent_route_configuration() {
   [[ -n "$snapshot_directory" && -d "$snapshot_directory" ]] || return 0
   local settings_path="$dsh_home/settings.yaml"
   local profile_patch="$dsh_home/profiles/$profile/cordis.patch.yml"
-  if [[ -f "$snapshot_directory/settings.present" ]]; then
-    cp -p -- "$snapshot_directory/settings.yaml" "$settings_path" || return 1
-  else
-    rm -f -- "$settings_path"
+  if [[ ! -f "$snapshot_directory/profile-only" ]]; then
+    if [[ -f "$snapshot_directory/settings.present" ]]; then
+      cp -p -- "$snapshot_directory/settings.yaml" "$settings_path" || return 1
+    else
+      rm -f -- "$settings_path"
+    fi
   fi
   if [[ -f "$snapshot_directory/profile-patch.present" ]]; then
     cp -p -- "$snapshot_directory/cordis.patch.yml" "$profile_patch" || return 1
@@ -1318,7 +1341,10 @@ dsh_enhanced_verify_model_route() {
   # local agent reports a login.  This also avoids spending any model quota.
   local effective_provider="$configured_provider"
   if [[ -z "$effective_provider" ]]; then
-    effective_provider="$(dsh_enhanced_effective_default_provider "$dsh_home")"
+    if ! effective_provider="$(dsh_enhanced_effective_default_provider "$dsh_home" "$profile")"; then
+      dsh_enhanced_fail 1 "模型 route 验证失败：无法解析 profile $profile 的有效默认模型。"
+      return $?
+    fi
   fi
   if dsh_enhanced_is_agent_route "$effective_provider"; then
     dsh_enhanced_verify_agent_route "$effective_provider" "$profile" "$dry_run" "$agent_login_verified"
@@ -1353,24 +1379,40 @@ dsh_enhanced_verify_model_route() {
 # so the verifier never misreads the default and picks the wrong route.
 dsh_enhanced_effective_default_provider() {
   local dsh_home="$1"
+  local profile="${2:-}"
   local settings_path="$dsh_home/settings.yaml"
-  [[ -f "$settings_path" ]] || return 0
-  local provider
-  provider="$(awk '
+  local provider=''
+  if [[ -f "$settings_path" ]]; then
+    provider="$(awk '
     BEGIN { in_s = 0 }
     /^agent-default-model:[[:space:]]*$/ { in_s = 1; next }
     in_s && /^[^[:space:]]/ { in_s = 0 }
     in_s && /^[[:space:]]+provider:[[:space:]]+/ {
       line = $0; sub(/^[[:space:]]+provider:[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line); print line; exit
     }
-  ' "$settings_path")"
-  if [[ -z "$provider" ]]; then
+    ' "$settings_path")"
+  fi
+  if [[ -z "$provider" && -f "$settings_path" ]]; then
     # Flow-style fallback: match `agent-default-model: { ... provider: X ... }`
     # anywhere in the document. Kept deliberately narrow (a single unquoted
     # token) so it never guesses on complex documents.
     provider="$(grep -oE 'agent-default-model:[[:space:]]*\{[^{}]*provider:[[:space:]]*[^,}[:space:]]+' "$settings_path" \
       | grep -oE 'provider:[[:space:]]*[^,}[:space:]]+' | head -n1 \
       | sed -E 's/^provider:[[:space:]]*//')"
+  fi
+  # A profile-local default may be selected by --default-if-absent while
+  # settings.yaml intentionally remains untouched. Verify its effective route
+  # rather than assuming the headless/global provider.
+  if [[ -z "$provider" && -n "$profile" ]]; then
+    local composed=''
+    composed="$(dsh --profile "$profile" --dump-config 2>/dev/null)" || return 1
+    provider="$(printf '%s\n' "$composed" | awk '
+      BEGIN { in_default = 0 }
+      /^[[:space:]]*- id:/ { in_default = ($0 ~ /agent-default-model[[:space:]]*$/) }
+      in_default && /^[[:space:]]+provider:[[:space:]]+/ {
+        line = $0; sub(/^[[:space:]]+provider:[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line); print line; exit
+      }
+    ')"
   fi
   printf '%s' "$provider"
 }
@@ -1393,9 +1435,7 @@ dsh_enhanced_verify_agent_login() {
     dsh_enhanced_fail 1 '模型 route 验证失败：未在 PATH 找到 traex/trae-cli。'
     return $?
   fi
-  local login_status
-  if ! login_status="$("$traex_command" login status 2>&1)" || [[ "$login_status" != *'Logged in using Trae'* ]]; then
-    printf '%s\n' "$login_status" >&2
+  if ! dsh_enhanced_traex_login_ready "$traex_command"; then
     dsh_enhanced_fail 1 "模型 route 验证失败：$traex_command 未确认登录；请在同一 OS 用户下运行 \`$traex_command login\` 后重试。"
     return $?
   fi
@@ -1489,6 +1529,169 @@ dsh_enhanced_apply_verified_agent_model() (
   committed='1'
   dsh_enhanced_discard_agent_route_configuration_snapshot "$snapshot" || true
   trap - EXIT INT TERM
+)
+
+# Auto-discovered TraeX is an optional route in this profile. Its setup must
+# never rewrite an existing global default or another profile's default.
+dsh_enhanced_probe_auto_traex_route() {
+  local profile="$1"
+  local dsh_home="$2"
+  local composed_path="${3:-}"
+  node - "$dsh_home/profiles/$profile" "$composed_path" <<'NODE'
+const { existsSync, readFileSync, realpathSync } = require('node:fs')
+const { createRequire } = require('node:module')
+const { join } = require('node:path')
+const profileDir = process.argv[2]
+const composedPath = process.argv[3]
+try {
+  // pnpm may expose Policy only below personal-assistant. Resolve from the
+  // installed parent package, then use Policy's own YAML dependency; never
+  // rely on a hoisted top-level yaml link in the profile.
+  const nodeModules = join(profileDir, 'node_modules')
+  const topLevelPolicy = join(nodeModules, '@dsh-enhanced', 'assistant-policy', 'package.json')
+  let policyManifest = topLevelPolicy
+  if (!existsSync(topLevelPolicy)) {
+    const personalManifest = realpathSync(join(nodeModules, '@dsh-enhanced', 'personal-assistant', 'package.json'))
+    const personalRequire = createRequire(personalManifest)
+    policyManifest = personalRequire.resolve('@dsh-enhanced/assistant-policy/package.json')
+  }
+  const packageRequire = createRequire(realpathSync(policyManifest))
+  const { parseDocument, isMap, isSeq } = packageRequire('yaml')
+  function rowsFrom(path) {
+    const document = parseDocument(readFileSync(path, 'utf8'))
+    if (document.errors.length || !document.contents) throw new Error(`invalid YAML: ${path}`)
+    const rows = []
+    function visit(node) {
+      if (isSeq(node)) for (const item of node.items) visit(item)
+      else if (isMap(node)) {
+        if (node.has('id')) rows.push(node)
+        for (const pair of node.items) visit(pair.value)
+      }
+    }
+    visit(document.contents)
+    return rows
+  }
+  function routeFrom(path) {
+    const route = rowsFrom(path).filter(row => row.get('id') === 'dsh-enhanced-traex-acp-provider').at(-1)
+    if (!route) throw new Error(`TraeX route row missing: ${path}`)
+    return route
+  }
+  const route = routeFrom(join(profileDir, 'cordis.patch.yml'))
+  const config = route?.get('config', true)
+  const command = isMap(config) ? config.get('command') : undefined
+  if (route.get('disabled') !== undefined && route.get('disabled') !== false) {
+    throw new Error('TraeX profile route row is disabled')
+  }
+  if (!isMap(config) || config.get('enabled') !== true || typeof command !== 'string' || !command.trim()) {
+    throw new Error('TraeX route is not enabled with a nonempty command')
+  }
+  if (composedPath) {
+    const effective = routeFrom(composedPath)
+    const effectiveConfig = effective.get('config', true)
+    if (effective.get('name') !== '@dsh-enhanced/traex-acp-provider'
+      || (effective.get('disabled') !== undefined && effective.get('disabled') !== false)
+      || !isMap(effectiveConfig) || effectiveConfig.get('enabled') !== true
+      || typeof effectiveConfig.get('command') !== 'string' || !effectiveConfig.get('command').trim()) {
+      throw new Error('composed TraeX route is not active with a nonempty command')
+    }
+    if (effectiveConfig.get('command') !== command) {
+      throw new Error('composed TraeX command differs from the target profile')
+    }
+  }
+  process.stdout.write(command)
+} catch (error) {
+  process.stderr.write(`dsh-enhanced installer: TraeX route postflight: ${error.message}\n`)
+  process.exitCode = 1
+}
+NODE
+}
+
+dsh_enhanced_apply_auto_traex() (
+  local profile="$1"
+  local dsh_home="$2"
+  local traex_command="$3"
+  local default_candidate="$4"
+  local dry_run="$5"
+  local setup_display="$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup"
+  local setup_launcher=()
+  local logged_in='0'
+
+  if [[ "$dry_run" != '1' ]]; then
+    local launcher_token
+    while IFS= read -r launcher_token; do setup_launcher+=("$launcher_token"); done \
+      < <(dsh_enhanced_resolve_model_setup "$profile" "$dsh_home")
+    if [[ -z "${setup_launcher[0]+set}" ]]; then
+      dsh_enhanced_fail 1 "TraeX 自动启用缺少安装后的 dsh-model-setup：$dsh_home/profiles/$profile"
+      return $?
+    fi
+    setup_display="${setup_launcher[*]}"
+  fi
+
+  printf '\nTraeX 自动接入：%s\n' "$traex_command"
+  if [[ "$dry_run" == '1' ]]; then
+    printf 'TraeX：dry-run 不检查最终命令或登录；执行时仅在最终命令已登录且无显式默认模型时设置此 profile 的默认模型。\n'
+    printf 'TraeX：未登录或显式 --model skip 时仅启用 route：\n'
+    dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --provider traex-agent \
+      --enable-in-profile "$profile" --agent-command "$traex_command" --enable-only
+    if [[ "$default_candidate" == '1' ]]; then
+      printf 'TraeX：已登录时由 model-setup 原子确认无显式默认模型：\n'
+      dsh_enhanced_print_command "$setup_display" --dsh-home "$dsh_home" --provider traex-agent \
+        --enable-in-profile "$profile" --agent-command "$traex_command" --default-if-absent
+    fi
+    return 0
+  fi
+
+  local snapshot=''
+  snapshot="$(dsh_enhanced_snapshot_agent_route_configuration "$profile" "$dsh_home" profile-only)" || {
+    dsh_enhanced_fail 1 'TraeX 自动启用无法创建配置回滚点；尚未修改模型配置。'
+    return $?
+  }
+  local committed='0'
+  trap '
+    status=$?
+    if [[ "$committed" != "1" && -n "$snapshot" ]]; then
+      dsh_enhanced_restore_agent_route_configuration "$snapshot" "$profile" "$dsh_home" \
+        || printf "dsh-enhanced installer: TraeX 自动接入回滚失败；请检查 profile patch。\n" >&2
+    fi
+    exit "$status"
+  ' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  "${setup_launcher[@]}" --dsh-home "$dsh_home" --provider traex-agent \
+    --enable-in-profile "$profile" --agent-command "$traex_command" --enable-only || return $?
+  local composed_path="$snapshot/composed.yml"
+  if ! dsh --profile "$profile" --dump-config > "$composed_path"; then
+    dsh_enhanced_fail 1 'TraeX 自动启用后 profile 无法组合。'
+    return $?
+  fi
+  local effective_command=''
+  effective_command="$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home" "$composed_path")" || {
+    dsh_enhanced_fail 1 'TraeX 自动启用后 profile/composed route 未确认启用或缺少有效 command；已恢复原配置。'
+    return $?
+  }
+  # The operator may have selected a different command in a home/profile
+  # patch. Never infer its login from the executable discovered on PATH.
+  if [[ "$effective_command" == "$traex_command" ]] && dsh_enhanced_traex_login_ready "$effective_command"; then
+    logged_in='1'
+  fi
+  if [[ "$default_candidate" == '1' && "$logged_in" == '1' ]]; then
+    "${setup_launcher[@]}" --dsh-home "$dsh_home" --provider traex-agent \
+      --enable-in-profile "$profile" --agent-command "$traex_command" --default-if-absent || return $?
+    dsh --profile "$profile" --dump-config > "$composed_path" || return $?
+    effective_command="$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home" "$composed_path")" || return $?
+    if [[ "$effective_command" != "$traex_command" ]]; then
+      dsh_enhanced_fail 1 'TraeX 自动设置默认模型期间 route command 已变化；已恢复原配置。'
+      return $?
+    fi
+  fi
+  committed='1'
+  dsh_enhanced_discard_agent_route_configuration_snapshot "$snapshot" || true
+  if [[ "$logged_in" == '1' ]]; then
+    printf 'TraeX：本机已登录；已启用 profile route。\n'
+  else
+    printf 'TraeX：已安装并启用 route，但最终命令尚未确认登录，默认模型保持原样；请运行：%s login\n' "$effective_command"
+  fi
 )
 
 
@@ -2055,11 +2258,12 @@ dsh_enhanced_apply_lark() {
   local configured="$4"
   local manage_service="$5"
   local dry_run="$6"
-  local agent_tools="${7:-preserve}"
+  local agent_tools="${7:-auto}"
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-lark-setup"
   local agent_tools_flag=()
   case "$agent_tools" in
     allow) agent_tools_flag=(--allow-agent-tools) ;;
+    preserve) agent_tools_flag=(--preserve-agent-tools) ;;
     disable) agent_tools_flag=(--disable-agent-tools) ;;
   esac
 
@@ -2076,7 +2280,7 @@ dsh_enhanced_apply_lark() {
       fi
       # Refresh only the policy layer from the existing channel binding before
       # any restart; this path never reopens app/credential/owner onboarding.
-      if [[ "$agent_tools" != 'preserve' ]]; then
+      if [[ "$agent_tools" == 'allow' || "$agent_tools" == 'disable' ]]; then
         dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --refresh-agent-policy \
           "${agent_tools_flag[@]}" || return $?
       fi
@@ -2106,7 +2310,7 @@ dsh_enhanced_apply_lark() {
       ;;
     skip)
       printf '\n飞书处理：本次跳过；现有配置不会被修改。\n'
-      if [[ "$agent_tools" != 'preserve' ]]; then
+      if [[ "$agent_tools" == 'allow' || "$agent_tools" == 'disable' ]]; then
         if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
           dsh_enhanced_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
           return $?
@@ -2478,11 +2682,13 @@ dsh_enhanced_install() {
   local deployment_mode='standard'
   local deployment_mode_explicit='0'
   local lark_mode='auto'
-  local agent_tools_mode='preserve'
+  local agent_tools_mode='auto'
   local permission_preset='preserve'
   local confirm_dangerous_full_access='0'
   local model_route_mode='auto'
   local model_mode='auto'
+  local auto_traex_command=''
+  local auto_traex_default_candidate='0'
   local model_provider=''
   local model_name=''
   local model_base_url=''
@@ -2685,10 +2891,13 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 '--mode 只能是 standard 或 supervised-growth。'
     return $?
   esac
-  case "$agent_tools_mode" in allow|preserve|disable) ;; *)
-    dsh_enhanced_fail 2 '--agent-tools 只能是 allow、preserve 或 disable。'
+  case "$agent_tools_mode" in auto|allow|preserve|disable) ;; *)
+    dsh_enhanced_fail 2 '--agent-tools 只能是 auto、allow、preserve 或 disable。'
     return $?
   esac
+  if [[ "$operation" != 'install' && "$agent_tools_mode" == 'auto' ]]; then
+    agent_tools_mode='preserve'
+  fi
   case "$permission_preset" in preserve|workspace-write|auto|danger-full-access) ;; *)
     dsh_enhanced_fail 2 '--permission 只能是 preserve、workspace-write、auto 或 danger-full-access。'
     return $?
@@ -2925,6 +3134,9 @@ dsh_enhanced_install() {
     fi
     deployment_mode='supervised-growth'
   fi
+  if [[ "$agent_tools_mode" == 'auto' && "$scenario" != 'lark' && "$scenario" != 'supervised' && "$scenario" != 'full' ]]; then
+    agent_tools_mode='preserve'
+  fi
   if [[ "$scenario" == 'autonomy' && "$operation" == 'install' ]]; then
     if [[ ! "$isolation_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then dsh_enhanced_fail 2 '--scenario autonomy 需要 --isolation-image sha256:<64位小写hex>。'; return $?; fi
     local value_limit value maximum label
@@ -3056,6 +3268,16 @@ dsh_enhanced_install() {
   # particular, choosing TraeX must add its provider to the same preflight as
   # every other bundle; otherwise a partially published provider could fail
   # only after the core profile had already changed.
+  if [[ "$operation" == 'install' ]]; then
+    auto_traex_command="$(dsh_enhanced_detect_traex_command || true)"
+    if [[ -n "$auto_traex_command" && "$model_mode" == 'auto' && -z "$model_provider" ]]; then
+      # Auto-discovery is independent of the model menu. An authenticated
+      # TraeX may become this profile's default only when no explicit default
+      # exists; model-setup performs that final YAML check atomically.
+      auto_traex_default_candidate='1'
+      model_mode='skip'
+    fi
+  fi
   if [[ -n "$model_provider" ]]; then
     model_mode='configure'
   fi
@@ -3086,6 +3308,12 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 '模型配置输入无效。'
       return $?
     }
+  fi
+  if [[ "$model_mode" == 'configure' && "$model_provider" == 'traex-agent' && "$model_route_mode" != 'skip' ]]; then
+    # An explicit global default must not be written after Lark has already
+    # restarted with an unauthenticated local agent. Check before service work.
+    dsh_enhanced_verify_agent_login "$model_provider" "$dry_run" || return $?
+    agent_login_verified='1'
   fi
 
   local selected_slugs=()
@@ -3170,6 +3398,9 @@ NODE
   # bundle so the route can be enabled and resolve in the same run.  Interactive
   # selection happens after install and is handled on the spot in apply_model.
   if [[ "$operation" == 'install' ]] && dsh_enhanced_is_agent_route "$model_provider"; then
+    dsh_enhanced_append_slug 'traex-acp-provider'
+  fi
+  if [[ "$operation" == 'install' && -n "$auto_traex_command" ]]; then
     dsh_enhanced_append_slug 'traex-acp-provider'
   fi
 
@@ -3339,6 +3570,14 @@ NODE
     dsh_enhanced_apply_supervised_growth "$profile" "$dsh_home" "$ack_existing_automations" "$dry_run" || return $?
   fi
 
+  if [[ "$operation" == 'install' && -n "$auto_traex_command" && "$model_provider" != 'traex-agent' ]]; then
+    dsh_enhanced_apply_auto_traex "$profile" "$dsh_home" "$auto_traex_command" \
+      "$auto_traex_default_candidate" "$dry_run" || return $?
+    if [[ "$model_mode" != 'configure' && "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
+      dsh_enhanced_restart_resident_service "$profile" "$dry_run" || return $?
+    fi
+  fi
+
   if [[ "$model_mode" == 'configure' ]]; then
     # A TraeX provider selected above is already in the preflighted cohort;
     # keep this idempotent check for a pre-existing installed profile.
@@ -3354,7 +3593,9 @@ NODE
       fi
       if [[ "$model_route_mode" == 'verify' ]]; then
         # Check the external prerequisite before writing a global default.
-        dsh_enhanced_verify_agent_login "$model_provider" "$dry_run" || return $?
+        if [[ "$agent_login_verified" != '1' ]]; then
+          dsh_enhanced_verify_agent_login "$model_provider" "$dry_run" || return $?
+        fi
         agent_login_verified='1'
       fi
     fi
@@ -3381,7 +3622,10 @@ NODE
   fi
 
   if [[ "$model_route_mode" == 'auto' ]]; then
-    if [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
+    if [[ -n "$auto_traex_command" && "$model_provider" != 'traex-agent' ]]; then
+      # The automatic route was verified without a model request above.
+      model_route_mode='skip'
+    elif [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
       model_route_mode='skip'
     else
       model_route_mode="$(dsh_enhanced_choose_model_route_mode)" || {
@@ -3439,19 +3683,22 @@ NODE
     printf '自治安装已完成离线有限执行配置；凭据、外部目标验证与完整自治仍需单独配置。\n'
   fi
 
-  # TraeX：包已装载但默认未启用（config.enabled 默认 false）。给出明确可执行的启用与验证指引。
+  # Automatic discovery already enabled this profile's route. A manually added
+  # bundle without a local executable remains disabled until configured.
   local slug
   for slug in "${selected_slugs[@]}"; do
     if [[ "$slug" == 'traex-acp-provider' ]]; then
-      printf '\nTraeX（traex-agent）配置指引：\n'
-      printf '  - 插件包已装载，但默认未启用为模型路由。启用并设为默认：\n'
-      printf '      dsh-model-setup --provider traex-agent --enable-in-profile %s\n' "$profile"
-      printf '    或在重装/升级时传 --model-provider traex-agent。\n'
-      printf '  - 前置条件：本机已安装 traex/trae-cli 并已登录（同一 OS 用户）：\n'
-      printf '      traex login status\n'
-      printf '    未登录时先运行 `traex login`。\n'
-      printf '  - ACP 会话工作目录：%s/assistant-workspace（已以 0700 创建）。\n' "$dsh_home"
-      printf '  - 启用后用 `dsh --profile %s --dump-config` 确认 @dsh-enhanced/traex-acp-provider 已注册。\n' "$profile"
+      if [[ -n "$auto_traex_command" ]]; then
+        if [[ "$dry_run" == '1' ]]; then
+          printf '\nTraeX route 将自动接入 profile %s（命令：%s）。\n' "$profile" "$auto_traex_command"
+        else
+          printf '\nTraeX route 已接入 profile %s（有效命令：%s）。\n' "$profile" \
+            "$(dsh_enhanced_probe_auto_traex_route "$profile" "$dsh_home")"
+        fi
+      else
+        printf '\nTraeX bundle 已安装；未检测到本机可执行文件，route 尚未自动启用。\n'
+        printf '  安装并登录 TraeX 后运行：dsh-model-setup --provider traex-agent --enable-in-profile %s\n' "$profile"
+      fi
       break
     fi
   done

@@ -15,13 +15,12 @@ dsh --profile web --dump-config
 
 ## 推荐：setup wizard
 
-安装完成后，让向导配置 Keychain、owner 身份、最小 Policy、Web profile 和用户级常驻服务：
+安装完成后，让向导配置 Keychain、owner 身份、owner 工具策略、Web profile 和用户级常驻服务：
 
 ```sh
 ~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup \
   --profile web \
-  --create-app \
-  --allow-agent-tools
+  --create-app
 ```
 
 源码工作区可运行：
@@ -29,7 +28,7 @@ dsh --profile web --dump-config
 ```sh
 cd /path/to/dsh-enhanced
 pnpm --filter @dsh-enhanced/lark-channel build
-pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app --allow-agent-tools
+pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 ```
 
 向导依次完成：
@@ -40,7 +39,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app 
 4. 使用真实凭据建立一次临时长连接；
 5. 显示一次性 `DSH-CONNECT-...` 短语，并等待你私聊机器人原样发送；
 6. 从单聊取得应用作用域内准确的 `open_id`，只把该身份配置为 owner；
-7. 更新 `web/cordis.patch.yml`，启用 channel 并添加精确 ingress/reply/credential 规则；传入 `--allow-agent-tools` 时，还会创建本地 foreground 与精确 Delivery 主体的 capability/工具规则；随后运行 `dsh --profile web --dump-config` 自检；
+7. 更新 `web/cordis.patch.yml`，启用 channel 并添加精确 ingress/reply/credential 规则；首次绑定 owner 默认创建本地 foreground 与精确 Delivery 主体的 capability/工具规则；随后运行 `dsh --profile web --dump-config` 自检；
 8. 安装并启动该 profile 的用户级常驻服务：macOS 使用 launchd，Linux 使用 systemd，Windows 使用 best-effort Task Scheduler；命令均为 `dsh --profile web --no-open`。
 
 飞书授权只建立应用凭据和 owner 绑定。插件仍运行在 DSH Host 内；安装到 `web` profile 时，向导默认让该 profile 在后台常驻，不需要保持浏览器打开，也不需要另行运行 `dsh web`。
@@ -80,13 +79,14 @@ Calendar 不在默认范围内。只有需要精确日历变更触发器时，�
 
 单独使用 `--app-id` 时，向导通过当前系统的安全输入读取 App Secret，适合已经自行配置控制台的应用。省略 `--create-app` 和 `--app-id` 时，向导会询问 App ID；直接回车进入一键选择/创建。
 
-重复执行会更新同一 account 的受管配置，不会重复添加规则或 handle。Agent 能力策略是显式三态：
+重复执行会更新同一 account 的受管配置，不会重复添加规则或 handle。首次绑定 owner 默认开放已安装的 Agent 工具能力；已有应用或 owner 配置保留现状，不会因重装重新开启已关闭的工具：
 
-- 不传参数：保留现状；
+- 不传参数：首次配置默认开放，已有配置保留现状；
+- `--preserve-agent-tools`：始终保留现有规则，首次配置也不新增通用工具授权；
 - `--allow-agent-tools`：写入本地 foreground 与精确 Delivery 主体的通用 capability 可达性规则，并保留外部主体工具级 allow/deny；
 - `--disable-agent-tools`：删除向导为该 account 管理的这些规则。
 
-普通重跑不会意外授权或撤权。profile 校验失败时会在进程内恢复原内容，不保留备份文件。
+本地工具授权不等于取得全部飞书平台权限；当前 channel 的业务接口仍限于其已实现能力，应用和用户授权以飞书平台结果为准。普通重跑不会意外授权或撤权。profile 校验失败时会在进程内恢复原内容，不保留备份文件。
 
 ## 只刷新 Agent Policy
 

@@ -1,6 +1,7 @@
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { afterEach, describe, expect, test } from 'vitest'
@@ -8,6 +9,8 @@ import { afterEach, describe, expect, test } from 'vitest'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const installer = join(repoRoot, 'scripts', 'install', 'install-local.sh')
 const roots: string[] = []
+const pathWithoutTraex = (process.env.PATH ?? '').split(':').filter(directory => directory !== ''
+  && !existsSync(join(directory, 'traex')) && !existsSync(join(directory, 'trae-cli'))).join(':')
 
 async function temporaryHome(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-enhanced-web-installer-'))
@@ -19,7 +22,7 @@ function run(args: readonly string[], dshHome: string) {
   return spawnSync('/bin/bash', [installer, ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
-    env: { PATH: process.env.PATH ?? '', DSH_HOME: dshHome },
+    env: { PATH: pathWithoutTraex, DSH_HOME: dshHome },
   })
 }
 
@@ -94,7 +97,7 @@ exit ${setupExit}
     cwd: repoRoot,
     encoding: 'utf8',
     env: {
-      PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+      PATH: `${fakeBin}:${pathWithoutTraex}`,
       DSH_HOME: dshHome,
       INSTALL_LOG: log,
     },
