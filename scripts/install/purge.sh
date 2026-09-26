@@ -71,8 +71,7 @@ purge_locate_rsi() {
   purge_prefix="$(npm prefix -g 2>/dev/null || true)"
   for purge_cand in \
     "$(command -v dsh-rsi 2>/dev/null || true)" \
-    "${purge_prefix:+$purge_prefix/bin/dsh-rsi}" \
-    /opt/home/jiataorui/.local/node24/bin/dsh-rsi; do
+    "${purge_prefix:+$purge_prefix/bin/dsh-rsi}"; do
     [[ -n "$purge_cand" && -e "$purge_cand" ]] && { printf '%s\n' "$purge_cand"; return 0; }
   done
   # .js 入口（包名路径）：需用 node 执行。
