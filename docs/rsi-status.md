@@ -12,7 +12,8 @@
 
 ## 当前交付边界
 
-- 新用户安装简化已实现：检测本机 `traex` / `trae-cli` 后自动安装并启用，保留显式模型、命令和工作目录；精确登录检查通过且没有显式选择时，只为目标 profile 设置默认模型。未登录或 `--model skip` 仍启用插件；失败仅恢复目标 profile。支持 pnpm 嵌套依赖布局。Lark 首次 owner 默认开放已安装工具能力，已有应用/owner 保留权限，显式关闭不因重装恢复。整仓检查通过，真实 DSH dump-config 已验证启用状态和配置保留；未执行真实 TraeX ACP 请求、飞书平台授权或生产 npm 安装。Host 已默认 Full access；应用 scopes、完整飞书业务工具和成长授权仍待补齐，不能等同于已取得全部飞书平台权限。
+- 新用户安装简化已实现：检测本机 `traex` / `trae-cli` 后自动安装并启用，保留显式模型、命令和工作目录；精确登录检查通过且没有显式选择时，只为目标 profile 设置默认模型。未登录或 `--model skip` 仍启用插件；失败仅恢复目标 profile。支持 pnpm 嵌套依赖布局。Lark 首次 owner 默认开放已安装工具能力，已有应用/owner 保留权限，显式关闭不因重装恢复。整仓检查通过，真实 DSH dump-config 已验证启用状态和配置保留；未执行真实 TraeX ACP 请求、飞书平台授权或生产 npm 安装。Host 已默认 Full access；这不等同于已取得全部飞书平台权限或完成成长授权。
+- 飞书向导默认接入官方业务 CLI：应用采用智能体权限模板，复用契约兼容 CLI 或校验下载官方 latest，安装时为绑定 owner 申请 `--domain all` 用户授权；由 DSH 原生技能按需读取 CLI 内嵌能力说明。身份同时核对本地验证状态与服务端 user_info，重复安装复用有效授权；更换 owner/app/account 或显式关闭时先撤旧技能。真实 Linux CLI 1.0.96 下载、离线复用与原生技能加载已验证；平台授权和真实业务操作尚未执行，不能宣称租户全部权限已开通。macOS/Windows 尚未实机验证，系统钥匙环与同一 DSH_HOME 的用户技能目录不构成独立凭据隔离。
 - 按用户确认跟随官方 npm `latest`，当前验证基线为 DSH `0.1.5-rc.3`；registry 尚无正式 `0.1.7`，`0.1.7-rc.2` 属于 next。测试依赖保持精确版本以复现结果，新装默认 selector 将跟随 latest 并验证兼容范围，已有兼容 Host 保持复用。`update --all` 尚不更新 DSH Host，后续须补齐受管 Host 更新事务。原生 Agent setup、Inbox、PTC 审计事件、系统提示和会话句柄 API 已迁移，完整 `pnpm check` 退出 0。真实 latest CLI 的三进程会话写入、未知事件拒绝和冷读恢复，以及 systemd reload/readiness/物理 restore 探针已通过；这些兼容性结果不代表生产自迭代闭环或 npm 发布门槛已完成。
 - 本轮只读代码核查确认普通反馈→持久复盘→源码候选→发布/采用协调已有接线，`dsh-rsi-setup` 已实现。采用仍会停在独立行为阶段：随包 systemd attestor 仅覆盖 reload/readiness/rollback，runtime observer 仅证明运行实例，阻断回放仅证明指定工具/回复被拒绝，不能据此签发全局 `externalEffects=0`。须补齐同一目标 Host 代次的独立行为证据，不能以候选自报或隔离副本测试替代生产采用验收。
 
@@ -73,7 +74,7 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 下一步
 
-1. 补齐安装时的飞书业务工具与平台授权：本机 TraeX 自动接入、原生 Full access 和首次 Lark owner 工具默认规则已完成；下一步配置实际业务能力及对应应用/用户 scopes，让 owner 日常对话无需重复工具审批。当前 channel 并非完整飞书 OpenAPI 工具集，不能仅把 Policy 设 allow 后宣称全权限可用。停止、回滚、去重及独立验收继续保留。
+1. 验证实际飞书部署：本机 TraeX 自动接入、原生 Full access、首次 Lark owner 默认规则和业务 CLI 安装/用户授权入口已实现；在实际安装中完成平台授权并验证普通业务任务。应用和用户 scopes 由平台批准，不能从本地规则或 fixture 推导全权限可用。停止、回滚、去重及独立验收继续保留。
 2. 补齐已有 Host 跟随官方 latest 更新：扩展现有 service-aware 事务，以精确版本私有 Host 验证离线副本并切换受管服务；不能在活动 Host 下覆盖全局 npm。覆盖同一 home 的 sibling profile 兼容性及失败恢复。
 3. 完成普通使用部署验收：使用已有 [`dsh-rsi-setup`](../plugins/lark-channel/docs/rsi-setup.md) 为目标与独立协调器编译有限配置、原生预算和 Policy，核对 owner/trust/签名授权。该入口不代替授权器和独立行为观测部署；默认继承来源任务模型。
 4. 补齐采用前的独立行为观测与签名。现有 systemd attestor 只覆盖 reload/readiness/rollback；原生阻断回放不能证明全局无副作用，也不能替代 shadow/canary/soak/health 验收。
@@ -81,10 +82,12 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 ## 开发入口与验证
 
+- 当前安装改动的验证：`NODE_OPTIONS=--max-old-space-size=8192 pnpm check` 退出 0，覆盖清单校验、零警告 lint、类型检查、测试、构建与打包。根目录 668 项、36 个包 6,055 项测试通过，50 项跳过；其中 Lark 515 项、Delivery 799 项通过。36 个包 dry-run pack 均成功，32 个插件包含 patch，所有包包含 README/LICENSE，新增业务模块在包内，未混入测试和日志。验证期间修正了既有 Delivery 比较测试的并发顺序假设，现按真实子会话绑定诊断，保留原拒绝、预算和副作用断言，独立复核通过。
+- 真实 Linux 官方 CLI 1.0.96 下载及断网复用成功；原生 DSH `0.1.5-rc.3` 技能发现、读取，以及撤下文件后同一运行实例的目录失效已验证。TraeX 临时 profile 的真实 dump-config 已验证 Loader/provider 启用、既有 command/cwd/settings 保留及条件默认模型只作用于目标 profile。未执行真实 TraeX ACP prompt、飞书 OAuth、业务 API 写入或 npm 发布；这些检查不替代生产普通反馈采用与独立行为验收。
+
 - [插件目录](../plugins/README.md)、[仓库架构](architecture.md)、[持续成长设计](continuous-personal-assistant-growth.md)。
 - [源码提案与持久检查](live-durable-source-proposal.md)、[真实仓库 E2E](live-repository-e2e.md)。
 - [systemd Host 签名器](systemd-host-attestor.md)、[运行时观测](runtime-observer.md)、[原生阻断回放及有限端点](effect-blocked-replay.md)。
-- 本轮安装简化的验证：`NODE_OPTIONS=--max-old-space-size=8192 pnpm check` 退出 0，覆盖清单校验、零警告 lint、类型检查、构建和打包。根目录 668 项、36 个包 6,013 项测试通过，50 项跳过；其中 Policy 250 项、TraeX 161 项、Lark 473 项通过。32 个插件与 4 个共享包 dry-run pack 均成功，检查清单包含必需文件且未包含测试或运行日志。真实 DSH `0.1.5-rc.3` 临时 profile 的 dump-config 验证了 Loader 行与 provider 同时启用、保留已有 command/cwd/settings，以及条件默认模型仅作用于目标 profile；未提交 ACP prompt。完整检查不替代真实生产授权、普通反馈采用和独立行为验收，尚未发布 npm。
 - 原生维护预算修复独立复核通过：Control Plane 三个相关 spec 共 16 项、Growth 使用复盘 spec 共 19 项。真实 Automations + Policy 路径证明三个 cron 成功结算预算、耗尽后不进入执行器；扫描与模型复盘按 scope 分开额度，未开启无预算旁路。部署配置现在须补齐必填字段；这些组件测试不证明真实双 Host 安装或生产使用闭环，尚未发布 npm。
 - 当前工作区真实 DSH CLI `0.1.5-rc.3` 探针：`DSH_READINESS_FIXTURE=1 DSH_READINESS_DSH=/absolute/path/to/dsh node scripts/e2e/systemd-readiness-real-dsh.mjs --output <local-evidence.json>`，默认及 `DSH_READINESS_ROLLBACK=restore` 均退出 0。覆盖临时 profile 的 dump-config、真实 Host reload/readiness 与物理恢复；未执行 npm 制品安装、生产采用或独立行为质量验收。会话兼容三进程冷读探针也已通过。历史 rc2 回放端点验收不自动视为本轮新版验证，边界见 [Host 签名器](systemd-host-attestor.md)和[阻断回放](effect-blocked-replay.md)。
 

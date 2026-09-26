@@ -17,6 +17,9 @@ import { createOfficialLarkTransport } from './sdk.js'
 import { installDshResidentService } from './resident.js'
 import { prepareDshSystemdUserService } from './systemd.js'
 import { configureLarkProfilePatch, refreshLarkAgentPolicyPatch } from './setup-profile.js'
+import { ensureLarkBusinessCli } from './business-cli-install.js'
+import { setupLarkBusinessTools } from './setup-business.js'
+import { reconcileLarkBusinessSkill } from './business-skill.js'
 import {
   assertRawManagedProfileIntegrity,
   materializeManagedProfileOverride,
@@ -35,6 +38,7 @@ export interface LarkSetupArgs {
   appId?: string
   createApp: boolean
   calendarReadonly: boolean
+  businessTools: boolean
   appName: string
   timeoutMs: number
   installServiceOnly: boolean
@@ -63,6 +67,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     tenant: 'personal',
     createApp: false,
     calendarReadonly: false,
+    businessTools: true,
     appName: 'DSH Personal Assistant',
     timeoutMs: 300_000,
     installServiceOnly: false,
@@ -89,6 +94,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     else if (option === '--app-id') result.appId = argumentValue(argv, index++, option)
     else if (option === '--create-app') result.createApp = true
     else if (option === '--calendar-readonly') result.calendarReadonly = true
+    else if (option === '--no-business-tools') result.businessTools = false
     else if (option === '--install-service') result.installServiceOnly = true
     else if (option === '--refresh-agent-policy') result.refreshAgentPolicy = true
     else if (option === '--no-service') result.manageService = false
@@ -114,7 +120,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
   if (!result.help && result.refreshAgentPolicy) {
     const incompatible = [
       '--domain', '--tenant', '--app-id', '--create-app', '--install-service',
-      '--no-service', '--linux-credential-provider', '--app-name', '--timeout-ms',
+      '--no-service', '--linux-credential-provider', '--app-name', '--timeout-ms', '--no-business-tools',
     ].find(option => argv.includes(option))
     if (incompatible !== undefined) {
       throw new Error(`lark-channel setup: --refresh-agent-policy cannot be combined with ${incompatible}`)
@@ -131,6 +137,9 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
   }
   if (result.installServiceOnly && (result.createApp || result.appId !== undefined)) {
     throw new Error('lark-channel setup: --install-service cannot be combined with application setup options')
+  }
+  if (result.installServiceOnly && !result.businessTools) {
+    throw new Error('lark-channel setup: --install-service cannot be combined with --no-business-tools')
   }
   if (result.installServiceOnly && argv.includes('--linux-credential-provider')) {
     throw new Error('lark-channel setup: --install-service cannot be combined with --linux-credential-provider')
@@ -158,6 +167,7 @@ export interface LarkRegistrationOptionsInput {
   appName: string
   appId?: string
   calendarReadonly?: boolean
+  businessTools?: boolean
   signal: AbortSignal
   onQRCodeReady: RegisterAppOptions['onQRCodeReady']
   onStatusChange: NonNullable<RegisterAppOptions['onStatusChange']>
@@ -175,7 +185,7 @@ export function createLarkRegistrationOptions(input: LarkRegistrationOptionsInpu
       desc: '由 DeepSeek Harness 驱动的个人助理',
     },
     addons: {
-      preset: false,
+      preset: input.businessTools !== false,
       scopes: { tenant: [
         'application:bot.basic_info:read',
         'im:message.group_at_msg:readonly',
@@ -360,6 +370,7 @@ Options:
   --install-service       Only install/restart the profile's resident service
   --refresh-agent-policy  Only refresh policy from the existing channel binding
   --no-service            Configure Lark without installing a resident service
+  --no-business-tools     Only configure the message channel; skip business CLI and user authorization
   --linux-credential-provider <mode>
                           auto, protected-file, or secret-service (default: auto)
   --allow-agent-tools     Allow mounted foreground/external Agent capabilities
@@ -1321,6 +1332,7 @@ async function registerLarkApplication(args: LarkSetupArgs): Promise<RegisterApp
       appName: args.appName,
       ...(args.appId === undefined ? {} : { appId: args.appId }),
       ...(args.calendarReadonly ? { calendarReadonly: true } : {}),
+      businessTools: args.businessTools,
       signal: abortController.signal,
       onQRCodeReady(info) {
         process.stdout.write(`\n请在飞书中打开以下链接，选择已有应用或创建新应用（${info.expireIn} 秒内有效）：\n${info.url}\n\n`)
@@ -3238,6 +3250,12 @@ export async function executeLarkSetupProfileTransaction(
 }
 
 export interface LarkSetupRuntime {
+  ensureBusinessCli?: typeof ensureLarkBusinessCli
+  setupBusinessTools?: typeof setupLarkBusinessTools
+  registerApplication?: typeof registerLarkApplication
+  discoverOwner?: LarkSetupProfileTransactionOperations['discoverOwner']
+  ownerSetupOperations?: Pick<LarkSetupProfileTransactionOperations,
+    'storeCredential' | 'readCredential' | 'pairPrincipal' | 'removeCredential'>
   profileLockOptions?: ProfileSetupLockOptions
   validateProfile?: NonNullable<ValidatedLarkOwnerSetupOperations['validateProfile']>
   readEffectiveProfile?: (profile: string) => string | Promise<string>
@@ -3437,6 +3455,9 @@ export async function runLarkSetup(
       })
     }, runtime.profileLockOptions)
   }, runtime.profileLockOptions)
+  const businessCli = args.businessTools
+    ? await (runtime.ensureBusinessCli ?? ensureLarkBusinessCli)({ dshHome })
+    : undefined
   let appId = args.appId
   let createApp = args.createApp
   if (appId === undefined && !createApp) {
@@ -3453,9 +3474,9 @@ export async function runLarkSetup(
   let generatedSecret: string | undefined
   if (createApp) {
     process.stdout.write(args.appId === undefined
-      ? '\n将通过飞书官方设备授权选择已有应用或创建新应用，并增量申请最小权限。App Secret 不会显示或写入 profile。\n'
-      : `\n将通过飞书官方设备授权更新已有应用 ${args.appId}，并增量申请最小权限。App Secret 不会显示或写入 profile。\n`)
-    const registration = await registerLarkApplication(args)
+      ? '\n将通过飞书官方设备授权选择已有应用或创建新应用，并增量申请应用权限。App Secret 不会显示或写入 profile。\n'
+      : `\n将通过飞书官方设备授权更新已有应用 ${args.appId}，并增量申请应用权限。App Secret 不会显示或写入 profile。\n`)
+    const registration = await (runtime.registerApplication ?? registerLarkApplication)(args)
     appId = registration.client_id
     resolvedDomain = registration.user_info?.tenant_brand ?? resolvedDomain
     generatedSecret = registration.client_secret
@@ -3470,6 +3491,7 @@ export async function runLarkSetup(
   if (appId === undefined) throw new Error('lark-channel setup: Feishu did not return an App ID')
   const configuredAppId = appId
   let installedService: Awaited<ReturnType<typeof installDshResidentService>> | undefined
+  let businessBinding: { appSecret: string; owner: ExternalPrincipalKey } | undefined
   await executeLarkSetupProfileTransaction({
     args,
     dshHome,
@@ -3509,23 +3531,36 @@ export async function runLarkSetup(
         )
       },
       readEffectiveProfile,
+      validateProfile: validate,
+      ...runtime.ownerSetupOperations,
       async discoverOwner(ownerInput) {
-        const phrase = `DSH-CONNECT-${randomBytes(4).toString('hex').toUpperCase()}`
-        const transport = createOfficialLarkTransport({
-          appId: ownerInput.appId,
-          appSecret: ownerInput.appSecret,
-          domain: ownerInput.domain,
-          handshakeTimeoutMs: 15_000,
-          requestTimeoutMs: 30_000,
-          imageDownloadTimeoutMs: 30_000,
+        let owner: ExternalPrincipalKey
+        if (runtime.discoverOwner !== undefined) owner = await runtime.discoverOwner(ownerInput)
+        else {
+          const phrase = `DSH-CONNECT-${randomBytes(4).toString('hex').toUpperCase()}`
+          const transport = createOfficialLarkTransport({
+            appId: ownerInput.appId,
+            appSecret: ownerInput.appSecret,
+            domain: ownerInput.domain,
+            handshakeTimeoutMs: 15_000,
+            requestTimeoutMs: 30_000,
+            imageDownloadTimeoutMs: 30_000,
+          })
+          owner = await discoverOwner(transport, phrase, ownerInput.account, ownerInput.tenant, ownerInput.timeoutMs)
+        }
+        if (args.businessTools) businessBinding = { appSecret: ownerInput.appSecret, owner }
+        const previousDocument = parseDocument(await readEffectiveProfile(args.profile), { uniqueKeys: true })
+        const previousRow = isSeq(previousDocument.contents)
+          ? previousDocument.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-lark-channel')
+          : undefined
+        const previousConfig = isMap(previousRow) ? previousRow.get('config', true) : undefined
+        const previousAccount = isMap(previousConfig) ? previousConfig.get('account') : undefined
+        await reconcileLarkBusinessSkill({
+          dshHome, profile: args.profile, account: args.account, appId: ownerInput.appId,
+          ownerUserId: owner.user, enabled: args.businessTools,
+          ...(typeof previousAccount === 'string' ? { previousAccount } : {}),
         })
-        return discoverOwner(
-          transport,
-          phrase,
-          ownerInput.account,
-          ownerInput.tenant,
-          ownerInput.timeoutMs,
-        )
+        return owner
       },
       ...(args.manageService ? {
         async afterCommit() {
@@ -3534,6 +3569,24 @@ export async function runLarkSetup(
       } : {}),
     },
   })
+  if (businessCli !== undefined) {
+    const binding = businessBinding
+    if (binding === undefined) throw new Error('lark-channel setup: business tools require the completed owner binding')
+    process.stdout.write('\n消息通道已配置；正在接入飞书业务工具并检查 owner 用户授权。\n')
+    const business = await (runtime.setupBusinessTools ?? setupLarkBusinessTools)({
+      dshHome, profile: args.profile, account: args.account, appId: configuredAppId,
+      appSecret: binding.appSecret, domain: resolvedDomain, ownerUserId: binding.owner.user,
+      cli: businessCli, timeoutMs: args.timeoutMs,
+      async onAuthorization(url) {
+        process.stdout.write(`\n请用刚才绑定的飞书账号完成业务权限授权：\n${url}\n\n`)
+        try {
+          process.stdout.write(`${await QRCode.toString(url, { type: 'terminal', small: true })}\n`)
+        } catch { process.stdout.write('终端二维码生成失败，请打开上面的链接。\n') }
+      },
+    })
+    businessBinding = undefined
+    process.stdout.write(`飞书业务工具已接入${business.reusedAuthorization ? '，复用已有 owner 授权' : ''}。技能：${business.skillPath}\n`)
+  }
   if (args.manageService) {
     const service = installedService
     if (service === undefined) throw new Error('lark-channel setup: resident service installation did not complete')

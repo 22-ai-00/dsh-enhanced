@@ -40,15 +40,16 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 5. 显示一次性 `DSH-CONNECT-...` 短语，并等待你私聊机器人原样发送；
 6. 从单聊取得应用作用域内准确的 `open_id`，只把该身份配置为 owner；
 7. 更新 `web/cordis.patch.yml`，启用 channel 并添加精确 ingress/reply/credential 规则；首次绑定 owner 默认创建本地 foreground 与精确 Delivery 主体的 capability/工具规则；随后运行 `dsh --profile web --dump-config` 自检；
-8. 安装并启动该 profile 的用户级常驻服务：macOS 使用 launchd，Linux 使用 systemd，Windows 使用 best-effort Task Scheduler；命令均为 `dsh --profile web --no-open`。
+8. 安装并启动该 profile 的用户级常驻服务：macOS 使用 launchd，Linux 使用 systemd，Windows 使用 best-effort Task Scheduler；命令均为 `dsh --profile web --no-open`；
+9. 将同一应用以 stdin 凭据接入官方 `lark-cli` 的 DSH 专用配置，申请其全部业务域用户授权，核对服务端返回的用户身份与刚绑定的 owner 一致，再生成可动态读取 CLI 技能的原生 DSH 技能。
 
-飞书授权只建立应用凭据和 owner 绑定。插件仍运行在 DSH Host 内；安装到 `web` profile 时，向导默认让该 profile 在后台常驻，不需要保持浏览器打开，也不需要另行运行 `dsh web`。
+应用授权与用户业务授权在安装流程中完成。插件仍运行在 DSH Host 内；安装到 `web` profile 时，向导默认让该 profile 在后台常驻，不需要保持浏览器打开，也不需要另行运行 `dsh web`。
 
 ### 官方一键授权的范围
 
 一键模式使用 OAuth 2.0 Device Authorization Grant。只传 `--create-app` 时，确认页同时提供“选择已有应用”和“创建新应用”；同时传 `--app-id` 时，只更新该已有应用。两种方式都会先显示权限、事件与回调增量，确认后才生效。
 
-向导不传 `createOnly`，并使用 `addons.preset: false`，不会采用官方默认智能体模板中与本 channel 无关的文档、Wiki、群管理和批量消息权限。确认页只申请：
+向导不传 `createOnly`，默认使用官方智能体应用权限模板（`addons.preset: true`），并增量补齐下列消息通道权限。传 `--no-business-tools` 则保留仅消息通道的 `preset: false`：
 
 - `application:bot.basic_info:read`：连接时取得机器人身份；
 - `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`：接收私聊和群内 @ 消息；
@@ -58,7 +59,17 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 - `im.message.receive_v1`：消息事件；
 - `card.action.trigger`：审批卡片、模型级联选择和最终确认按钮。
 
-Calendar 不在默认范围内。只有需要精确日历变更触发器时，才用 `--create-app --calendar-readonly` 更新应用，确认新增的 `calendar:calendar:readonly` 并发布版本；随后在 Lark Channel profile 配置的 `allowedCalendarIds` 填入已授权的 exact Calendar ID。此范围只允许读取，且不会让机器人自动枚举用户日历或让任意 Host 调用 Calendar API。
+消息通道自身的精确日历触发器仍需 `--create-app --calendar-readonly` 和 `allowedCalendarIds`；这与业务 CLI 在用户实际授权下提供的日历功能是两条独立路径。应用模板和 `auth login --domain all` 都不代表租户已经批准平台上的所有权限；后者申请 CLI 当前已知的业务域用户 scopes，平台限制和 CLI 的批量授权排除项仍然适用。
+
+### 自动业务工具接入
+
+安装器优先复用满足契约的本机 CLI，缺失时下载官方 npm `latest` 对应的精确稳定版本到 `$DSH_HOME/.dsh-enhanced/tools/lark-cli`。优先下载 GitHub release，失败时尝试官方安装器使用的镜像；两条路径都验证 npm SHA512 与包内记录的 release SHA256，不执行 npm 安装脚本或修改全局 npm。已验证的受管 CLI 可在后续安装中复用。
+
+每个 DSH profile/account 的配置与授权记录保存在 `$DSH_HOME/lark-business`；App Secret 仅通过 stdin 交给 CLI。每次 CLI 调用都固定绝对命令、named profile、配置目录，并清除会抢占身份的外部 Agent/CLI 环境变量。Linux 凭据数据也存入专用目录；macOS/Windows 使用 CLI 的原生系统钥匙环，同一应用/用户的条目可能与其它 CLI 实例共享，不能视为独立凭据隔离。
+
+首次用户授权会展示链接与二维码。授权完成后同时检查 CLI 授权结果、已验证状态，以及只读 `user_info` 的服务端 `open_id`；只接受绑定的 owner。已有有效授权在重装时更新应用凭据并重新核对身份，无需再次扫码。认证未完成或范围证据丢失时不启用新的业务技能，已经提交的消息通道配置会保留。同一 owner/app 的授权更新失败保留原有技能；更换 owner、app 或 account，以及显式关闭业务工具时，会在通道 owner 交接前撤下旧受管技能入口。撤下入口不代表撤销平台 token，原凭据配置仍保留。若后续通道配置事务失败并回滚，旧技能不会自动重新发布；按原绑定重跑向导并核对身份后可恢复入口。
+
+生成的 `$DSH_HOME/skills/lark-business-*/SKILL.md` 由 DSH 原生文件系统技能提供者发现，按需读取当前 CLI 的 `skills list/read` 与 `schema`，无需复制一份易过期的 API 指南。技能明确记录适用的 profile/account/app/owner，不携带凭据，也不新增 Agent 循环。DSH 的用户技能目录对同一 DSH_HOME 的 profile 可见；这属于同一操作系统用户的 Full access 信任范围，不提供跨 profile 的凭据隔离。官方业务能力与权限机制参考 [larksuite/cli](https://github.com/larksuite/cli)。
 
 事件与回调由官方流程预置为 WebSocket 长连接，不需要公网 callback URL。实现依据见飞书的[一键创建智能体应用](https://open.larkoffice.com/document/mcp_open_tools/integrating-agents-with-feishu/overview)和 Node SDK 的 [`registerApp` 文档](https://github.com/larksuite/node-sdk/blob/main/README.zh.md#%E4%B8%80%E9%94%AE%E5%88%9B%E5%BB%BA%E5%BA%94%E7%94%A8)。
 
@@ -254,7 +265,7 @@ OAuth 前的 canary 不读取、写入或显示 App Secret。出现钥匙环解�
 
 ## 手工配置飞书应用
 
-这一流程只适用于手工输入 `--app-id` 的路径；官方一键路径会预置机器人、最小权限、消息事件和卡片回调。选择已有应用时只增量添加配置，不删除现有权限。
+这一流程只适用于手工输入 `--app-id` 的路径；官方一键路径会预置机器人、所选应用权限模板、消息事件和卡片回调。选择已有应用时只增量添加配置，不删除现有权限。
 
 1. 在[飞书开放平台](https://open.feishu.cn/app)创建“企业自建应用”，复制 `App ID` 与 `App Secret`；
 2. 在“添加应用能力”中开启“机器人”；
