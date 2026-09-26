@@ -1,5 +1,6 @@
 import type { SourceBuildConfig } from './source-build.js'
 import type { ScopedPluginFile } from './source-workspace.js'
+import type { SourceBaselineConfig } from './source-baseline.js'
 
 /** Owner-configured authority for background checks, separate from an Agent wake. */
 export interface SourceJobsConfig {
@@ -7,6 +8,8 @@ export interface SourceJobsConfig {
   expiresAt: number
   maxSubmissions: number
   repository: string
+  /** Owner-managed source history; the working checkout remains untouched. */
+  baseline?: SourceBaselineConfig
   ownerRouteId: string
   principalId: string
   workspace: string
@@ -43,6 +46,7 @@ export interface SourceJobIntent {
   ownerDigest: string
   trustDigest: string
   repository: string
+  baseline?: SourceBaselineConfig
   name: string
   gapId: string
   gapRevision: number

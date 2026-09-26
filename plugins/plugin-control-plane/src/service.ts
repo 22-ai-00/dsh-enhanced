@@ -36,6 +36,7 @@ import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { awaitSourceSignal, inspectSourceContext, type SourceInspection } from './source-context.js'
+import { resolveSourceBaseline } from './source-baseline.js'
 import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.js'
 import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
 import { registerPluginControlTools } from './tools.js'
@@ -718,7 +719,14 @@ export class PluginControlPlaneService extends Service {
     const assertCurrent = async (): Promise<void> => { signal.throwIfAborted(); await awaitSourceSignal(signal, () => input.assertCurrent?.()); signal.throwIfAborted() }
     await assertCurrent()
     const trust = await awaitSourceSignal(signal, () => this.boundTrust())
-    return inspectSourceContext({ ...input, environment: inheritedEnvironment(trust), signal, assertCurrent })
+    const environment = inheritedEnvironment(trust)
+    const baseline = this.config.sourceJobs?.repository === input.repository ? this.config.sourceJobs.baseline : undefined
+    const baselineCommit = baseline === undefined ? undefined : await resolveSourceBaseline({ repository: input.repository,
+      config: baseline, environment, signal, assertCurrent, trust,
+      readHistory: () => this.store.getSourceBaselineHistory(input.repository) })
+    return inspectSourceContext({ repository: input.repository, name: input.name, paths: input.paths,
+      ...(input.baseCommit === undefined ? {} : { baseCommit: input.baseCommit }),
+      ...(baselineCommit === undefined ? {} : { baselineCommit }), environment, signal, assertCurrent })
   }
 
   async plan(candidateId: string, profile: string, idempotencyKey: string, gapId: string): Promise<PluginActivationPlan> {
@@ -805,7 +813,11 @@ export class PluginControlPlaneService extends Service {
     }
     const offline = input.offline ?? true
     const environment = inheritedEnvironment(trust)
-    const baseCommit = (await runLocalCommand('git', ['rev-parse', 'HEAD'], repository, environment, { capture: true })).trim()
+    const baseline = this.config.sourceJobs?.repository === repository ? this.config.sourceJobs.baseline : undefined
+    const baseCommit = baseline === undefined
+      ? (await runLocalCommand('git', ['rev-parse', 'HEAD'], repository, environment, { capture: true })).trim()
+      : await resolveSourceBaseline({ repository, config: baseline, environment, signal, assertCurrent, trust,
+        readHistory: () => this.store.getSourceBaselineHistory(repository) })
     await assertCurrent()
     if (!/^[a-f0-9]{40}$/u.test(baseCommit)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository HEAD is not a 40-hex commit id')
     if (input.expectedBaseCommit !== undefined && input.expectedBaseCommit !== baseCommit) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source base commit is stale')

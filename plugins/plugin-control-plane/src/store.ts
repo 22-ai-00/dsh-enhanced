@@ -8,6 +8,7 @@ import { parseSourcePublishReconciliationReceipt, parseSourcePublishReconciliati
   parseSourceReleaseReceipt, parseSourceReleaseRequest, parseVerifiedSourceReleaseAuthorization } from './release.js'
 import { controlPlaneOperationReceiptDigest, controlPlaneSchemaVersion, openControlPlaneDatabase } from './sqlite.js'
 import { validateSourceBuildConfig } from './source-build.js'
+import { validateSourceBaselineConfig } from './source-baseline.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
@@ -1039,7 +1040,7 @@ function releaseArtifact(evidence: SourceReleaseSuccessEvidence): SourceReleaseA
 function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   const intent = objectRecord(value, 'source job intent')
   exactKeys(intent, ['authority', 'owner', 'ownerDigest', 'trustDigest', 'repository', 'name', 'gapId', 'gapRevision', 'gapDigest',
-    'baseCommit', 'files', 'ttlMs', 'build', 'worktree', 'containerName'], 'source job intent')
+    'baseCommit', 'files', 'ttlMs', 'build', 'worktree', 'containerName', ...(Object.hasOwn(intent, 'baseline') ? ['baseline'] : [])], 'source job intent')
   const authority = objectRecord(intent['authority'], 'source job authority')
   exactKeys(authority, ['id', 'digest', 'expiresAt', 'maxSubmissions'], 'source job authority')
   const owner = objectRecord(intent['owner'], 'source job owner')
@@ -1083,6 +1084,10 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   catch { throw new ControlPlaneStoreError('invalid-input', 'source job files are invalid') }
   try { validateSourceBuildConfig(intent['build'] as SourceJobIntent['build']) }
   catch { throw new ControlPlaneStoreError('invalid-input', 'source job build configuration is invalid') }
+  if (Object.hasOwn(intent, 'baseline')) {
+    try { validateSourceBaselineConfig(intent['baseline']) }
+    catch { throw new ControlPlaneStoreError('invalid-input', 'source job baseline configuration is invalid') }
+  }
   return Object.freeze({ authority: Object.freeze({ id: authority['id'], digest: authority['digest'], expiresAt: Number(authority['expiresAt']), maxSubmissions: Number(authority['maxSubmissions']) }),
     owner: Object.freeze({ receiptVersion: 2, authorityId: owner['authorityId'] as string, authorityHash: owner['authorityHash'] as string,
       principalId: owner['principalId'] as string, principalRecordId: owner['principalRecordId'] as string, principalVersion: Number(owner['principalVersion']),
@@ -1090,7 +1095,8 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
     ownerDigest: intent['ownerDigest'] as string, trustDigest: intent['trustDigest'] as string, repository: intent['repository'] as string,
     name: intent['name'] as string, gapId: intent['gapId'] as string, gapRevision: Number(intent['gapRevision']), gapDigest: intent['gapDigest'] as string,
     baseCommit: intent['baseCommit'] as string, files: Object.freeze(files), ttlMs: Number(intent['ttlMs']), build: intent['build'] as SourceJobIntent['build'],
-    worktree: intent['worktree'] as string, containerName: intent['containerName'] as string })
+    worktree: intent['worktree'] as string, containerName: intent['containerName'] as string,
+    ...(Object.hasOwn(intent, 'baseline') ? { baseline: Object.freeze(intent['baseline']) as NonNullable<SourceJobIntent['baseline']> } : {}) })
 }
 
 function exactInputRecord(value: unknown, label: string): Record<string, unknown> {
@@ -1883,6 +1889,20 @@ export class ControlPlaneStore {
         }
         this.#database.exec('COMMIT'); return record
       }
+      if (intent.baseline !== undefined) {
+        const rows = this.#database.prepare(`SELECT * FROM source_jobs WHERE json_extract(intent_json, '$.repository') = ?
+          AND json_type(intent_json, '$.baseline') IS NOT NULL AND status IN ('queued', 'running', 'unknown', 'prepared')
+          LIMIT 1001`).all(intent.repository) as unknown as SourceJobRow[]
+        if (rows.length > 1000) throw new ControlPlaneStoreError('invalid-state', 'managed source job cohort exceeds bound')
+        for (const row of rows) {
+          const competing = sourceJobFromRow(row)
+          if (competing.status !== 'prepared') throw new ControlPlaneStoreError('conflict', 'managed source job is already active for repository')
+          const prepared = competing.planId === undefined ? undefined : this.getSourcePlan(competing.planId)
+          if (prepared === undefined || !['release-complete', 'release-failed', 'expired', 'local-checks-failed'].includes(prepared.status)) {
+            throw new ControlPlaneStoreError('conflict', 'managed source job is awaiting a terminal source release')
+          }
+        }
+      }
       const authority = this.#database.prepare('SELECT * FROM source_job_authorities WHERE authority_id = ?').get(intent.authority.id) as {
         authority_digest: string; expires_at: number; max_submissions: number; submissions: number
       } | undefined
@@ -2069,6 +2089,54 @@ export class ControlPlaneStore {
     const row = this.#database.prepare('SELECT * FROM source_plans WHERE id = ?').get(id) as unknown as SourceRow | undefined
     if (row === undefined) throw new ControlPlaneStoreError('not-found', 'source plan not found')
     return sourceFromRow(row)
+  }
+
+  /** Durable, structurally bound applied merge history; receipt signatures are checked by the baseline resolver. */
+  getSourceBaselineHistory(repository: string): readonly { plan: PluginSourcePlan; operation: SourceReleaseOperation }[] {
+    if (!isAbsolute(repository) || resolve(repository) !== repository) throw new ControlPlaneStoreError('invalid-input', 'source repository path is invalid')
+    // A SAVEPOINT provides one SQLite read snapshot, and also works inside the
+    // start-release BEGIN IMMEDIATE writer without nesting another BEGIN.
+    this.#database.exec('SAVEPOINT source_baseline_history')
+    try {
+      const rows = this.#database.prepare(`SELECT * FROM source_plans WHERE repository = ? AND release_id IS NOT NULL
+        ORDER BY created_at, id LIMIT 1001`).all(repository) as unknown as SourceRow[]
+      if (rows.length > 1000) throw new ControlPlaneStoreError('invalid-state', 'source release history exceeds bound')
+      const history: { plan: PluginSourcePlan; operation: SourceReleaseOperation }[] = []
+      for (const row of rows) {
+        const plan = sourceFromRow(row)
+        if (plan.release === undefined) throw new ControlPlaneStoreError('invalid-state', 'started source release lacks release identity')
+        if (plan.status !== 'release-complete' && plan.status !== 'release-failed') {
+          throw new ControlPlaneStoreError('conflict', 'source repository has an unfinished release')
+        }
+        const merges = this.#database.prepare(`SELECT * FROM source_release_operations WHERE plan_id = ? AND phase = 'merge'
+          AND status = 'applied' LIMIT 2`).all(plan.id) as unknown as SourceReleaseOperationRow[]
+        if (plan.status === 'release-failed') {
+          if (merges.length !== 0) throw new ControlPlaneStoreError('conflict', 'failed source release has unresolved applied remote merge')
+          continue
+        }
+        if (merges.length !== 1) throw new ControlPlaneStoreError('invalid-state', 'completed source release lacks one applied merge')
+        const operation = sourceReleaseOperationFromRow(merges[0]!)
+        const receipt = operation.receipt
+        if (operation.status !== 'applied' || operation.phase !== 'merge' || operation.request.phase !== 'merge' || operation.planId !== plan.id
+          || operation.request.plan.digest !== plan.digest || operation.request.plan.revision > plan.revision
+          || operation.request.release.id !== plan.release.id || operation.request.release.fence !== plan.release.fence
+          || receipt?.outcome !== 'passed' || receipt.evidence.kind !== 'merge'
+          || receipt.planDigest !== plan.digest || receipt.evidence.targetBranch !== plan.releaseAuthorization?.releasePolicy.targetBranch
+          || receipt.evidence.reviewedHeadCommit !== operation.request.input.headCommit
+          || receipt.evidence.reviewEvidenceDigest !== operation.request.input.reviewEvidenceDigest
+          || receipt.evidence.reviewId !== operation.request.input.reviewId
+          || receipt.evidence.prId !== operation.request.input.prId) {
+          throw new ControlPlaneStoreError('invalid-state', 'completed source release merge is not bound to current release')
+        }
+        history.push({ plan, operation })
+      }
+      this.#database.exec('RELEASE source_baseline_history')
+      return history
+    } catch (error) {
+      this.#database.exec('ROLLBACK TO source_baseline_history')
+      this.#database.exec('RELEASE source_baseline_history')
+      throw error
+    }
   }
 
   /**
@@ -3543,6 +3611,56 @@ export class ControlPlaneStore {
     return withCurrentSource(plan.gapId, () => {
       this.#database.exec('BEGIN IMMEDIATE')
       try {
+        const linkedRows = this.#database.prepare('SELECT * FROM source_jobs WHERE plan_id = ? LIMIT 2')
+          .all(plan.id) as unknown as SourceJobRow[]
+        if (linkedRows.length > 1) throw new ControlPlaneStoreError('invalid-state', 'source plan has multiple source jobs')
+        const linked = linkedRows[0] === undefined ? undefined : sourceJobFromRow(linkedRows[0])
+        const managedRows = this.#database.prepare(`SELECT * FROM source_jobs WHERE json_extract(intent_json, '$.repository') = ?
+          AND json_type(intent_json, '$.baseline') IS NOT NULL AND status IN ('queued', 'running', 'unknown', 'prepared')
+          LIMIT 1001`).all(plan.repository) as unknown as SourceJobRow[]
+        if (managedRows.length > 1000) throw new ControlPlaneStoreError('invalid-state', 'managed source job cohort exceeds bound')
+        for (const row of managedRows) {
+          const managed = sourceJobFromRow(row)
+          if (managed.planId === plan.id) continue
+          if (managed.status !== 'prepared' || managed.planId === undefined
+            || !['release-complete', 'release-failed', 'expired', 'local-checks-failed'].includes(this.getSourcePlan(managed.planId).status)) {
+            throw new ControlPlaneStoreError('conflict', 'managed source job owns this repository release')
+          }
+        }
+        if (linked?.intent.baseline !== undefined) {
+          if (linked.status !== 'prepared' || linked.intent.repository !== plan.repository
+            || linked.intent.baseCommit !== plan.baseCommit) {
+            throw new ControlPlaneStoreError('invalid-state', 'managed source release is not bound to its prepared job')
+          }
+          const active = this.#database.prepare(`SELECT id FROM source_plans WHERE repository = ? AND id <> ?
+            AND release_id IS NOT NULL AND status NOT IN ('release-complete', 'release-failed') LIMIT 1`)
+            .get(plan.repository, plan.id) as { id: string } | undefined
+          if (active !== undefined) throw new ControlPlaneStoreError('conflict', 'source repository has another active release')
+          const history = this.getSourceBaselineHistory(plan.repository)
+          const byBase = new Map<string, string>()
+          const merged = new Set<string>()
+          for (const previous of history) {
+            const evidence = previous.operation.receipt?.evidence
+            if (previous.plan.releaseAuthorization?.releasePolicy.targetBranch !== linked.intent.baseline.targetBranch
+              || evidence?.kind !== 'merge' || evidence.targetBranch !== linked.intent.baseline.targetBranch) {
+              throw new ControlPlaneStoreError('conflict', 'source repository release history does not follow managed baseline')
+            }
+            if (byBase.has(previous.plan.baseCommit) || merged.has(evidence.mergeCommit) || previous.plan.baseCommit === evidence.mergeCommit) {
+              throw new ControlPlaneStoreError('conflict', 'source repository release history forks or repeats a merge')
+            }
+            byBase.set(previous.plan.baseCommit, evidence.mergeCommit)
+            merged.add(evidence.mergeCommit)
+          }
+          let expectedCommit = linked.intent.baseline.initialCommit
+          const visited = new Set<string>([expectedCommit])
+          while (byBase.has(expectedCommit)) {
+            expectedCommit = byBase.get(expectedCommit)!
+            if (visited.has(expectedCommit)) throw new ControlPlaneStoreError('conflict', 'source repository release history has a cycle')
+            visited.add(expectedCommit)
+          }
+          if (visited.size !== history.length + 1) throw new ControlPlaneStoreError('conflict', 'source repository release history is disconnected')
+          if (plan.baseCommit !== expectedCommit) throw new ControlPlaneStoreError('conflict', 'managed source release base commit is stale')
+        }
         const releaseId = `release-${randomUUID()}`
         const result = this.#database.prepare(`UPDATE source_plans SET status = 'awaiting-pr', revision = revision + 1,
           release_authorization_json = ?, release_authorization_digest = ?, release_id = ?, release_fence = release_fence + 1,

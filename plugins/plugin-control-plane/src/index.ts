@@ -36,6 +36,8 @@ export * from './store.js'
 export * from './types.js'
 export * from './trust.js'
 export type * from './source-job-types.js'
+export { validateSourceBaselineConfig } from './source-baseline.js'
+export type { SourceBaselineConfig } from './source-baseline.js'
 export type { EnqueueSourceJobInput, SourceJobCaller } from './source-jobs.js'
 
 export function apply(ctx: Context, config: Config): void {
