@@ -39,6 +39,9 @@ DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
   'assistant-growth-experiments'
   'assistant-heartbeat'
   'assistant-health'
+  'assistant-skills'
+  'assistant-verifier'
+  'assistant-growth-driver'
   # Recovery's mounted class declares assistantGoals as a required Cordis
   # injection.  peerDependenciesMeta.optional only affects package installation;
   # it cannot make a Cordis injection optional.  Keep the runtime provider in
@@ -2346,6 +2349,30 @@ dsh_enhanced_apply_supervised_growth() {
   dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
 }
 
+dsh_enhanced_prepare_rsi_source() {
+  local profile="$1"
+  local dsh_home="$2"
+  local source_mode="$3"
+  local repo_root="$4"
+  local dry_run="$5"
+  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup"
+  local args=(--prepare-source --profile "$profile" --dsh-home "$dsh_home")
+  if [[ "$source_mode" == 'local' ]]; then
+    args+=(--source-repository "$repo_root")
+  fi
+
+  printf '\nsupervised-growth：准备自迭代源码工作区。\n'
+  if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
+    dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
+    return $?
+  fi
+  dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}" || {
+    local status=$?
+    dsh_enhanced_fail "$status" '自迭代源码准备失败，安装已停止。'
+    return $?
+  }
+}
+
 # Setup CLIs run as ordinary Node processes before a profile is mounted.  Ask
 # the verified Host's public boot API to materialize its shared peer closure
 # under this DSH_HOME, without composing or activating a profile.
@@ -3509,6 +3536,9 @@ NODE
     else
       dsh_enhanced_heal_host_module_fallback "$dsh_home" "$(dsh --version 2>/dev/null || true)" || return $?
     fi
+  fi
+  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
+    dsh_enhanced_prepare_rsi_source "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" || return $?
   fi
   if [[ "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then
     printf '\nWeb owner 初始化：\n'

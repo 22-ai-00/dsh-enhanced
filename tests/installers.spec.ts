@@ -66,6 +66,9 @@ const supervisedManagedDependencies = [
   'assistant-growth-experiments',
   'assistant-heartbeat',
   'assistant-health',
+  'assistant-skills',
+  'assistant-verifier',
+  'assistant-growth-driver',
   'assistant-recovery',
 ] as const
 
@@ -8026,7 +8029,7 @@ fi
     expect(log).not.toContain('systemctl --user show-environment')
   })
 
-  test('supervised-growth invokes the installed activator only after the installed Lark setup completes', async () => {
+  test('supervised-growth prepares source before Lark setup and invokes the installed activator afterwards', async () => {
     const root = await temporaryDshHome()
     const dshHome = join(root, 'dsh-home')
     const fakeBin = join(root, 'bin')
@@ -8081,7 +8084,11 @@ EOF
 printf 'supervised-setup %s\\n' "$*" >> "$INSTALL_LOG"
 printf 'supervised growth activated\\n'
 EOF
-  chmod 755 "$bin/dsh-lark-setup" "$bin/dsh-supervised-growth-setup"
+  cat > "$bin/dsh-rsi-setup" <<'EOF'
+#!/bin/bash
+printf 'rsi-source-setup %s\\n' "$*" >> "$INSTALL_LOG"
+EOF
+  chmod 755 "$bin/dsh-lark-setup" "$bin/dsh-rsi-setup" "$bin/dsh-supervised-growth-setup"
 fi
 `)
 
@@ -8110,9 +8117,12 @@ fi
     expect(log).toContain('loginctl show-user')
     expect(log).not.toContain('--no-open --port 0')
     const larkSetup = log.indexOf('lark-setup --profile web --install-service')
+    const sourceSetup = log.indexOf(`rsi-source-setup --prepare-source --profile web --dsh-home ${dshHome} --source-repository ${repoRoot}`)
     const activator = log.indexOf('supervised-setup --profile web --timeout-ms 300000')
     const serviceDoctor = log.indexOf('systemctl --user is-active --quiet dsh-profile-web.service')
     expect(larkSetup).toBeGreaterThanOrEqual(0)
+    expect(sourceSetup).toBeGreaterThanOrEqual(0)
+    expect(larkSetup).toBeGreaterThan(sourceSetup)
     expect(activator).toBeGreaterThan(larkSetup)
     expect(serviceDoctor).toBeGreaterThan(activator)
   })
