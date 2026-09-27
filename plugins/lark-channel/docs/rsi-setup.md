@@ -129,6 +129,8 @@ systemctl --user stop dsh-profile-web.service dsh-profile-rsi-coordinator.servic
 
 回滚前仍须停止两个 Host。恢复不要求前向授权仍未过期；若任一 patch、服务绑定或 unit 被外部改过，会保留 journal 并在恢复任何文件前拒绝覆盖。服务启动失败时保留已应用配置，先排查/停止服务再决定恢复，避免改写活跃 Host。受管升级会同时校验绑定、unit 与有效环境，并在复制、切换和恢复时检查绑定内容未漂移。
 
+成功采用后的同版本 Host 重启会自动申请新的运行实例证明，使用现有协调器的每分钟调度，无需用户逐次配置。签署和应用前的会话仍可执行，但这些任务不计入部署效果归因；新证明通过后恢复后续任务观察。旧签名、原授权期限和 reload 累计次数保持不变。见 [运行实例证明](../../../docs/systemd-host-attestor.md#runtime-continuity-after-restart)。
+
 暂停自迭代可停止协调器及目标的相关 Automations，或撤销有限授权；重启不重置额度，也不重放 unknown 外部动作。授权续期需要新的合法授权标识与配置。配置 journal 恢复 profile 及上述服务配置；已发布或已采用能力的回退仍由 Control Plane 的签名恢复链负责。
 
 此 CLI 读取 owner 数据库与私有配置；默认检查也会使用本地 lifecycle 锁和临时 WAL 快照，但不改变 profile 或业务状态。显式应用写两个 profile patch、受管服务绑定/unit 和 journal；校验会执行本地 `dsh --dump-config`、`systemctl show`，服务定义变更会执行 `daemon-reload`，显式启动会安装/启用/restart 用户级服务。它不向其他人发送消息。原始授权、私钥、数据库、journal 与运行日志留本地，不提交 GitHub。

@@ -8,6 +8,10 @@ interface AppReady {
 
 /** Observe the native launcher's post-audit signal without gating the Control Plane on its presence. */
 export function installHostReadiness(ctx: Context, write: (text: string) => void = text => { process.stderr.write(text) }): void {
+  onHostReady(ctx, () => write(marker))
+}
+
+export function onHostReady(ctx: Context, callback: () => void): void {
   ctx.inject(['appReady' as never], readyCtx => {
     readyCtx.effect(() => {
       const appReady = readyCtx.get('appReady' as never) as unknown as AppReady
@@ -16,7 +20,7 @@ export function installHostReadiness(ctx: Context, write: (text: string) => void
       const remove = appReady.onReady(() => {
         if (!active || reported) return
         reported = true
-        write(marker)
+        callback()
       })
       return () => { active = false; remove() }
     }, 'plugin-control-plane.host-readiness')

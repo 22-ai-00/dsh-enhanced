@@ -2,7 +2,7 @@
 
 `plugin-control-plane/bin/dsh-systemd-host-attestor.js` is shipped in the
 Control Plane bundle. It implements the existing configured Host executable
-contract, version `dsh-systemd-host-attestor-6`, for **reload, readiness and physical rollback** on Linux.
+contract, version `dsh-systemd-host-attestor-7`, for **reload, readiness, physical rollback and runtime continuity** on Linux.
 It uses the existing signed receipt, request, fence and activation state
 machine. It creates no Cordis plugin, AgentLoop, model tool or scheduler.
 
@@ -11,7 +11,7 @@ service, observes a fresh stable invocation and signs a schema-2 reload
 receipt. Control Plane can then advance to `awaiting-readiness`. Readiness
 uses authenticated live Loader/Fiber observations bound to that signed reload,
 and can advance the existing state machine to `awaiting-effect-blocked-replay`.
-Other phases are rejected before acquiring supervisor authority. Neither a
+Other activation phases are rejected before acquiring supervisor authority. Neither a
 running service nor an active candidate establishes behavioral quality.
 
 The executable accepts **schema-2 Host requests**. Each request includes a
@@ -23,11 +23,45 @@ the altered request. Rollback may have no predecessor when no phase was applied
 under its recovery fence. Config schemas 1–3 and signed receipt schema 2 retain
 their existing meanings; they are separate from the request schema.
 
+## Runtime continuity after restart
+
+A successful deployment remains under observation after its activation finishes.
+Its original readiness signature binds one process and one set of Cordis instances;
+restarting that process cannot make the old signature describe the replacement.
+The target Host therefore queues a separate `dsh-runtime-epoch-request` after native
+startup, or when a foreground task detects a changed runtime. Queueing holds the
+current owner task source fence. The existing coordinator Automation invokes the
+attestor outside the target service cgroup; it does not create another scheduler.
+
+The standing resolver checks the latest successful deployment, its open watch,
+original owner, approval, readiness and deployment files, and the current grant.
+It derives an exact schema-5 observation configuration. Historical activation and
+handoff expiry do not erase an adopted deployment; the standing grant's original
+start, expiry and revocation boundaries still apply. Runtime epoch operations have
+a separate count capped by the same grant's `maximumReloads` value and do not reset
+or consume its accumulated reload count. No new user configuration is required.
+
+This path issues **no restart command**. It checks systemd identity before and after
+authenticated runtime samples, requires active target instances and unchanged pinned
+files, and signs the complete runtime identity. It retains observations in
+`runtime-epochs.sqlite`, beside the unchanged `reload.sqlite`. Sequence numbers may
+skip expired requests, but an older signer cannot commit after a newer sequence.
+Retries of these read-only observations remain tied to the original request.
+
+Control Plane schema 26 keeps the requests and accepted proofs separately from
+activation plans and their original receipts. Only the latest successful epoch can
+admit a foreground task; its signature must predate task dispatch and both task
+endpoints must match the same runtime. Tasks during the coordinator's recovery
+interval are not retrospectively attributed. A failed, stale or withdrawn proof
+cannot establish continuity. This covers an unchanged deployment after a process
+restart or instance replacement; migrating Host versions and their frozen authority
+configuration is a separate update transaction.
+
 ## Automatic authorization within an installation grant
 
 For unattended source adoption, use configuration schema 4 with the shipped
 `dsh-systemd-host-authority` resolver. It derives each exact operation's inner
-schema-1/2/3 config from the existing Control Plane ledger and a private finite
+schema-1/2/3 config (or schema 5 for runtime continuity) from the existing Control Plane ledger and a private finite
 installation grant. It does not ask the user to edit a request digest for each
 update. Existing explicit configs below remain supported.
 
@@ -94,12 +128,12 @@ and rejects changes to static supervisor/key/observer authority. The
 resolver interpreter may be null only for a native ELF executable; scripts
 must name a pinned native ELF interpreter, including the shipped JavaScript wrapper. The
 outer Host timeout must also cover resolver execution and cleanup. Provision all
-private resources outside the candidate profile. Schema 25 and version 6 must
-be deployed together with the new resolver. Complete pending version-5
+private resources outside the candidate profile. Runtime continuity requires
+Control Plane schema 26 and attestor version 7 together. Complete pending older
 operations using their original pinned binary before changing trust; their
-issuer identity cannot be rewritten. Full installer resource provisioning is
-still separate work; this entry point alone does not configure two Hosts,
-source/build resources or signing keys.
+issuer identity cannot be rewritten. The [supervised installer](../plugins/lark-channel/docs/rsi-setup.md)
+prepares both Hosts, source/build resources and signing keys; invoking this
+resolver alone does not perform that installation.
 If package-manager files have multiple hardlinks, provision the signer and
 resolver as a private single-link package tree, including their `bin/` and
 `lib/` modules. Copying only the resolver wrapper loses its relative imports.
@@ -386,6 +420,21 @@ observation is unsigned and does not attest global absence of external effects.
 The fixture retains signed receipts, probe preimages and actual phase
 transitions locally. Current engineering verification is summarized in
 [RSI status](rsi-status.md); historical verification is available in Git history.
+
+For runtime continuity, run the same fixture with:
+
+```sh
+DSH_READINESS_FIXTURE=1 \
+DSH_READINESS_DSH=/absolute/path/to/dsh \
+DSH_READINESS_RUNTIME_EPOCH=1 \
+node scripts/e2e/systemd-readiness-real-dsh.mjs --output /tmp/runtime-epoch-evidence.json
+```
+
+This mode seeds a successful deployment checkpoint after genuine reload/readiness,
+restarts the temporary Host, rejects the old readiness, and captures the new
+schema-5 proof. It checks unchanged historical journal rows, no additional restart,
+and stopped unit/process cleanup. It does not exercise a real owner grant,
+coordinator dispatch, model call or ordinary-user feedback adoption.
 
 ## Physical rollback
 

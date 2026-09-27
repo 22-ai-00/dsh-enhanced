@@ -7,11 +7,13 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
 import * as release from '../src/release.ts'
 
-const mock = vi.hoisted(() => ({ context: undefined as unknown, trust: undefined as unknown }))
+const mock = vi.hoisted(() => ({ context: undefined as unknown, epochContext: undefined as unknown, trust: undefined as unknown }))
 vi.mock('../src/store.ts', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/store.ts')>()
   return { ...actual, readOwnerHostAttestationContext: (...args: Parameters<typeof actual.readOwnerHostAttestationContext>) =>
-    mock.context === null ? actual.readOwnerHostAttestationContext(...args) : mock.context }
+    mock.context === null ? actual.readOwnerHostAttestationContext(...args) : mock.context,
+  readOwnerRuntimeEpochContext: (...args: Parameters<typeof actual.readOwnerRuntimeEpochContext>) =>
+    mock.epochContext === null ? actual.readOwnerRuntimeEpochContext(...args) : mock.epochContext }
 })
 vi.mock('../src/trust.ts', async importOriginal => ({
   ...await importOriginal<typeof import('../src/trust.ts')>(),
@@ -22,6 +24,7 @@ vi.mock('../src/release.ts', async importOriginal => ({
 }))
 
 import { Ed25519ApprovalAuthority, approvalSigningPayload } from '../src/approval.ts'
+import type { RuntimeEpochRequest } from '../src/runtime-epoch.ts'
 import { resolveSystemdHostAuthority, validateSystemdHostAuthorityConfig, type SystemdHostAuthorityConfig } from '../src/systemd-host-authority.ts'
 import { controlPlaneDigest } from '../src/store.ts'
 import { defaultHostAttestationPolicy } from '../src/trust.ts'
@@ -31,7 +34,7 @@ import { cleanupReleaseFixtures } from './helpers/source-release-runner.ts'
 
 const roots: string[] = []
 const hex = (character: string) => character.repeat(64)
-afterEach(async () => { mock.context = undefined; mock.trust = undefined; await cleanupReleaseFixtures(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
+afterEach(async () => { vi.useRealTimers(); mock.context = undefined; mock.epochContext = undefined; mock.trust = undefined; await cleanupReleaseFixtures(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 
 async function fixture() {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'systemd-host-authority-'))); roots.push(root)
@@ -80,7 +83,7 @@ async function fixture() {
   const request: HostAttestationRequest = { schemaVersion: 2, kind: 'dsh-host-attestation-request', operationId: 'operation-reload',
     requestedAt: now, receiptTtlMs: 30_000, installationId: plan.installationId, ledger: plan.ledger,
     plan: { id: plan.id, digest: plan.digest }, activation: { id: 'activation', fence: 1 }, profile: { name: 'test', path: profilePath },
-    issuer: { mode: 'configured-executable', id: 'systemd-host', version: 'dsh-systemd-host-attestor-6', ...executable,
+    issuer: { mode: 'configured-executable', id: 'systemd-host', version: 'dsh-systemd-host-attestor-7', ...executable,
       interpreter, authority: template.authority, keyId: template.keyId }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 }, predecessor: null }
   const witnessCore = { schemaVersion: 1, kind: 'dsh-host-input-witness', planId: plan.id, planDigest: plan.digest,
     activationId: 'activation', fence: 1, createdAt: now - 400, inputs: [input], profileFiles,
@@ -92,7 +95,7 @@ async function fixture() {
     dispatch: { status: 'claimed', claimedAt: now + 10 }, witness }
   mock.context = context
   mock.trust = { installationId: plan.installationId, ledger: plan.ledger, dshHome: home,
-    hostAttestor: { id: 'systemd-host', version: 'dsh-systemd-host-attestor-6', ...executable, interpreter,
+    hostAttestor: { id: 'systemd-host', version: 'dsh-systemd-host-attestor-7', ...executable, interpreter,
       authority: template.authority, keyId: template.keyId },
     approvalKeys: [{ authority: approvalReceipt.authority, keyId: approvalReceipt.keyId,
       publicKeyPem: approvalKey.publicKey.export({ format: 'pem', type: 'spki' }) }] }
@@ -138,6 +141,82 @@ test('derives one exact reload config from claimed owner context and replays the
   const db = new DatabaseSync(f.config.statePath, { readOnly: true })
   try { expect(db.prepare('SELECT COUNT(*) AS n FROM systemd_host_operations').get()).toEqual({ n: 1 }) }
   finally { db.close() }
+})
+
+function runtimeEpochFixture(f: Awaited<ReturnType<typeof fixture>>, requestedAt: number, operationId = 'epoch-one', sequence = 1) {
+  const readinessReceipt = { planId: f.context.plan.id, planDigest: f.context.plan.digest,
+    activationId: f.context.plan.activation!.id, fence: f.context.plan.activation!.fence,
+    hostGeneration: 1, outcome: 'passed' }
+  const readiness = { phase: 'readiness', status: 'applied', operationId: 'original-readiness',
+    createdAt: f.now + 20, receipt: readinessReceipt }
+  const request: RuntimeEpochRequest = { schemaVersion: 1, kind: 'dsh-runtime-epoch-request', operationId,
+    requestedAt, receiptTtlMs: 30_000, installationId: f.request.installationId, ledger: f.request.ledger,
+    plan: f.request.plan, activation: f.request.activation, profile: f.request.profile,
+    issuer: f.request.issuer as RuntimeEpochRequest['issuer'],
+    predecessor: { operationId: readiness.operationId, receiptDigest: controlPlaneDigest(readinessReceipt), hostGeneration: 1 },
+    sequence, runtimeIdentityDigest: hex('8') }
+  f.context.plan.status = 'activated'
+  const context = { plan: f.context.plan, sourcePlan: f.context.sourcePlan, source: f.context.source,
+    released: f.context.released, handoff: f.context.handoff, approvalReceipt: f.context.approvalReceipt,
+    witness: f.context.witness, readiness, request, status: 'claimed', createdAt: requestedAt }
+  mock.epochContext = context
+  return { request, context }
+}
+
+test('authorizes a fresh runtime proof for an activated deployment after historical expiry, with an independent finite quota', async () => {
+  const f = await fixture()
+  const config = { ...f.config, grant: { ...f.config.grant, expiresAt: f.now + 120_000 } }
+  await resolveSystemdHostAuthority(config, f.request)
+  const requestedAt = f.now + 61_000
+  const { request, context } = runtimeEpochFixture(f, requestedAt)
+  vi.useFakeTimers(); vi.setSystemTime(requestedAt)
+  const first = await resolveSystemdHostAuthority(config, request)
+  expect(first).toMatchObject({ schemaVersion: 5, profileFiles: f.profileFiles,
+    authorization: { hostGeneration: 1, requestDigest: controlPlaneDigest(request), expiresAt: requestedAt + 30_000 },
+    readiness: { deploymentFiles: f.context.witness.deploymentFiles.map(item => ({ path: item.path, sha256: item.sha256 })) } })
+  expect((first.readiness as Record<string, unknown>).reloadOperationId).toBeUndefined()
+  expect(await resolveSystemdHostAuthority(config, request)).toEqual(first)
+  const second = { ...request, operationId: 'epoch-two', sequence: 2 }
+  context.request = second; context.createdAt = requestedAt
+  await expect(resolveSystemdHostAuthority(config, second)).rejects.toThrow('refused')
+  const db = new DatabaseSync(config.statePath, { readOnly: true })
+  try {
+    expect(db.prepare('SELECT phase,COUNT(*) AS n FROM systemd_host_operations GROUP BY phase ORDER BY phase').all())
+      .toEqual([{ phase: 'reload', n: 1 }, { phase: 'runtime-epoch', n: 1 }])
+  } finally { db.close() }
+})
+
+test('runtime epoch denies expired standing authority and drift in owner, source, issuer, trust, or witness', async () => {
+  const f = await fixture()
+  const requestedAt = f.now + 61_000
+  const { request, context } = runtimeEpochFixture(f, requestedAt)
+  const config = { ...f.config, grant: { ...f.config.grant, expiresAt: f.now + 120_000 } }
+  vi.useFakeTimers(); vi.setSystemTime(requestedAt)
+  await expect(resolveSystemdHostAuthority(f.config, request)).rejects.toThrow('refused')
+  context.source.owner.principalId = 'other-owner'
+  await expect(resolveSystemdHostAuthority(config, request)).rejects.toThrow('refused')
+  context.source.owner.principalId = 'principal'
+  context.released.package = '@dsh-enhanced/other-package'
+  await expect(resolveSystemdHostAuthority(config, request)).rejects.toThrow('refused')
+  context.released.package = f.context.plan.candidate.package
+  await expect(resolveSystemdHostAuthority({ ...config, grant: { ...config.grant, coordinatorId: 'other-coordinator' } }, request))
+    .rejects.toThrow('refused')
+  await expect(resolveSystemdHostAuthority({ ...config, grant: { ...config.grant,
+    liveQualification: { ...config.grant.liveQualification, authority: 'other-live-authority' } } }, request)).rejects.toThrow('refused')
+  await expect(resolveSystemdHostAuthority({ ...config, grant: { ...config.grant,
+    hostDeploymentInputs: ['node_modules/@dsh-enhanced/other-package/lib/index.js'] } }, request)).rejects.toThrow('refused')
+  context.request = { ...request, issuer: { ...request.issuer, sha256: hex('9') } }
+  await expect(resolveSystemdHostAuthority(config, context.request)).rejects.toThrow('refused')
+  context.request = request
+  const originalTrust = mock.trust as { hostAttestor: { sha256: string } }
+  originalTrust.hostAttestor.sha256 = hex('9')
+  await expect(resolveSystemdHostAuthority(config, request)).rejects.toThrow('refused')
+  originalTrust.hostAttestor.sha256 = request.issuer.sha256
+  context.witness.inputs = ['node_modules/@dsh-enhanced/other-package/lib/index.js']
+  await expect(resolveSystemdHostAuthority(config, request)).rejects.toThrow('refused')
+  context.witness.inputs = [...config.grant.hostDeploymentInputs]
+  Object.assign(context.handoff, { revokedAt: requestedAt - 1 })
+  await expect(resolveSystemdHostAuthority(config, request)).rejects.toThrow('refused')
 })
 
 test('rejects forged requests, owner drift, and a changed grant without consuming a new reload', async () => {
@@ -245,7 +324,7 @@ test('packaged CLI resolves the exact claimed Store request through its relative
   const executable = { path: attestorPath, sha256: await sha(attestorPath) }
   const interpreter = { path: nodePath, sha256: await sha(nodePath) }
   const issuer: HostAttestationRequest['issuer'] = { mode: 'configured-executable', id: 'systemd-host',
-    version: 'dsh-systemd-host-attestor-6', ...executable, interpreter,
+    version: 'dsh-systemd-host-attestor-7', ...executable, interpreter,
     authority: base.config.template.authority, keyId: base.config.template.keyId }
   const real = await hostAuthorizationPlan({ liveQualification: base.config.grant.liveQualification, issuer })
   const claimed = await real.exposeAndClaimReload()

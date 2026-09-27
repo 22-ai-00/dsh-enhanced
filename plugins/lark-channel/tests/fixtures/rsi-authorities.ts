@@ -163,7 +163,7 @@ export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthor
         configPath: resolverConfigPath, configSha256: digest(await readFile(resolverConfigPath)), timeoutMs: 2000 } }
       await writePrivate(wrapperPath, `${JSON.stringify(wrapper)}\n`)
       const trust = JSON.parse(await readFile(trustPath, 'utf8'))
-      trust.hostAttestor = { id: 'fixture-host-attestor', version: 'dsh-systemd-host-attestor-6', path: attestorPath,
+      trust.hostAttestor = { id: 'fixture-host-attestor', version: 'dsh-systemd-host-attestor-7', path: attestorPath,
         sha256: template.executable.sha256, interpreter: nodePin, environmentAllowlist: ['DSH_SYSTEMD_HOST_ATTESTOR_CONFIG'],
         authority: host.authority, keyId: host.keyId, timeoutMs: 20_000 }
       await writePrivate(trustPath, `${JSON.stringify(trust)}\n`)

@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
-export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-6'
+export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-7'
 const DIGEST = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const UNIT_PROPERTIES = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory', 'User', 'Group', 'Type', 'KillMode']
@@ -254,7 +254,8 @@ async function resolveStandingConfig(wrapper, request) {
     for (const field of TEMPLATE_FIELDS.filter(field => field !== 'readiness' && field !== 'recoveryReadiness')) {
       if (canonical(derived[field]) !== canonical(template[field])) fail('resolved static authority differs')
     }
-    const expectedSchema = request.phase === 'reload' ? 1 : request.phase === 'readiness' ? 2 : 3
+    const expectedSchema = request.kind === 'dsh-runtime-epoch-request' ? 5
+      : request.phase === 'reload' ? 1 : request.phase === 'readiness' ? 2 : 3
     if (derived.schemaVersion !== expectedSchema || derived.authorization?.requestDigest !== digest(request)) fail('resolver did not authorize the exact phase and request')
     if (expectedSchema !== 1) {
       if (request.phase === 'rollback' && request.requirements?.action === 'stop') {
@@ -267,6 +268,70 @@ async function resolveStandingConfig(wrapper, request) {
     }
     return derived
   } finally { for (const fd of descriptors.reverse()) closeSync(fd) }
+}
+function loadEpochConfig(environment, request, config) {
+  object(config, ['schemaVersion', 'authority', 'keyId', 'privateKeyPath', 'stateRoot', 'executable', 'interpreter', 'processHelper',
+    'systemctl', 'scope', 'unit', 'unitProperties', 'profileFiles', 'authorization', 'timeoutMs', 'stableWindowMs', 'pollIntervalMs',
+    'readiness'], 'epoch config')
+  if (config.schemaVersion !== 5) fail('runtime epoch requires config schema 5')
+  text(config.authority, 'authority', ID); text(config.keyId, 'keyId', ID)
+  integer(config.timeoutMs, 'timeout', 1000, 60000); integer(config.stableWindowMs, 'stable window', 50, 10000)
+  integer(config.pollIntervalMs, 'poll interval', 25, 1000)
+  if (config.stableWindowMs + config.pollIntervalMs >= config.timeoutMs || !['user', 'system'].includes(config.scope)) fail('epoch observation bounds are invalid')
+  const auth = object(config.authorization, ['installationId', 'ledger', 'profile', 'plan', 'activation', 'hostGeneration', 'requestDigest', 'notBefore', 'expiresAt'], 'epoch authorization')
+  text(auth.requestDigest, 'request digest', DIGEST)
+  if (digest(request) !== auth.requestDigest) fail('exact epoch request is not authorized')
+  object(auth.ledger, ['id', 'path'], 'ledger'); object(auth.profile, ['name', 'path'], 'profile')
+  object(auth.plan, ['id', 'digest'], 'plan'); object(auth.activation, ['id', 'fence'], 'activation')
+  text(auth.installationId, 'installation', /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u)
+  for (const value of [auth.ledger.id, auth.plan.id, auth.activation.id]) text(value, 'identity', ID)
+  text(auth.plan.digest, 'plan digest', DIGEST); text(auth.profile.name, 'profile name', /^[a-z0-9][a-z0-9-]{0,63}$/u)
+  canonicalPath(auth.profile.path, 'profile'); canonicalPath(auth.ledger.path, 'ledger')
+  if (basename(auth.profile.path) !== auth.profile.name || basename(dirname(auth.profile.path)) !== 'profiles') fail('profile path and name differ')
+  integer(auth.activation.fence, 'fence', 1); integer(auth.hostGeneration, 'host generation', 1)
+  integer(auth.notBefore, 'authorization start'); integer(auth.expiresAt, 'authorization expiry', auth.notBefore + 1)
+  if (config.unit !== `dsh-profile-${auth.profile.name}.service`) fail('unit does not bind the profile')
+  object(config.unitProperties, UNIT_PROPERTIES, 'unit properties')
+  for (const property of UNIT_PROPERTIES) text(config.unitProperties[property], property)
+  if (!['simple', 'exec', 'notify'].includes(config.unitProperties.Type) || config.unitProperties.KillMode !== 'control-group') fail('unsupported unit lifecycle')
+  if (!Array.isArray(config.profileFiles) || config.profileFiles.length < 3 || config.profileFiles.length > 32) fail('profile pins are invalid')
+  const paths = config.profileFiles.map(spec => {
+    pin(spec, 'profile file')
+    if (!within(auth.profile.path, spec.path)) fail('profile pin is outside profile')
+    return spec.path
+  })
+  if (new Set(paths).size !== paths.length || !['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].every(name => paths.includes(join(auth.profile.path, name)))) fail('profile manifest, lockfile and patch pins are required')
+  privateDirectory(config.stateRoot)
+  for (const path of [environment.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG, config.privateKeyPath, config.stateRoot]) {
+    if (within(auth.profile.path, path)) fail('attestor authority must be outside the candidate profile')
+  }
+  const privateKey = createPrivateKey(readSafe(config.privateKeyPath, 16384, true))
+  if (privateKey.asymmetricKeyType !== 'ed25519') fail('signing key must be Ed25519')
+  pin(config.executable, 'attestor executable', true); pin(config.interpreter, 'attestor interpreter', true); pin(config.processHelper, 'process helper')
+  if (runningHash(process.argv[1]) !== config.executable.sha256 || runningHash(process.execPath) !== config.interpreter.sha256) fail('running attestor identity differs')
+  object(config.systemctl, ['path', 'sha256', 'interpreter'], 'systemctl')
+  pin({ path: config.systemctl.path, sha256: config.systemctl.sha256 }, 'systemctl', true)
+  if (config.systemctl.interpreter !== null) pin(config.systemctl.interpreter, 'systemctl interpreter', true)
+  object(request, ['schemaVersion', 'kind', 'operationId', 'requestedAt', 'receiptTtlMs', 'installationId', 'ledger', 'plan',
+    'activation', 'profile', 'issuer', 'predecessor', 'sequence', 'runtimeIdentityDigest'], 'epoch request')
+  if (request.schemaVersion !== 1 || request.kind !== 'dsh-runtime-epoch-request') fail('epoch request version or kind is invalid')
+  text(request.operationId, 'operation', ID); if (request.operationId.length > 152) fail('operation is too long for receipt identity')
+  integer(request.requestedAt, 'requestedAt'); integer(request.receiptTtlMs, 'receipt TTL', 1, 3600000)
+  integer(request.sequence, 'epoch sequence', 1); text(request.runtimeIdentityDigest, 'runtime identity digest', DIGEST)
+  const prior = object(request.predecessor, ['operationId', 'receiptDigest', 'hostGeneration'], 'epoch predecessor')
+  text(prior.operationId, 'predecessor operation', ID); text(prior.receiptDigest, 'predecessor digest', DIGEST)
+  integer(prior.hostGeneration, 'predecessor generation', 1)
+  if (prior.operationId === request.operationId || prior.hostGeneration !== auth.hostGeneration) fail('epoch predecessor is invalid')
+  for (const field of ['installationId', 'ledger', 'profile', 'plan', 'activation']) if (canonical(request[field]) !== canonical(auth[field])) fail(`${field} is not authorized`)
+  object(request.issuer, ['mode', 'id', 'version', 'path', 'sha256', 'interpreter', 'authority', 'keyId'], 'issuer')
+  text(request.issuer.id, 'issuer ID', ID)
+  if (request.issuer.mode !== 'configured-executable' || request.issuer.version !== SYSTEMD_HOST_ATTESTOR_VERSION
+    || request.issuer.path !== config.executable.path || request.issuer.sha256 !== config.executable.sha256
+    || canonical(request.issuer.interpreter) !== canonical(config.interpreter)
+    || request.issuer.authority !== config.authority || request.issuer.keyId !== config.keyId) fail('issuer differs from owner configuration')
+  validateReadiness(config.readiness, auth.profile.path, false)
+  assertCurrent(config, request)
+  return { config, privateKey }
 }
 function assertCurrent(config, request) {
   const now = Date.now(); const auth = config.authorization
@@ -679,6 +744,195 @@ async function attestRollback(request, config, privateKey, db, execute, deadline
     return cachedReceipt(db.prepare('SELECT * FROM reloads WHERE operation_id = ?').get(request.operationId), request, config, privateKey)
   })
 }
+function retainedSignedReceipt(row, privateKey, label) {
+  if (!row?.receipt || !row.observation) fail(`${label} is unresolved`)
+  const receipt = parseJson(Buffer.from(row.receipt), `${label} receipt`)
+  const observation = parseJson(Buffer.from(row.observation), `${label} observation`)
+  const { signature, ...unsigned } = receipt
+  if (receipt.operationId !== row.operation_id || receipt.requestDigest !== row.request_digest
+    || receipt.evidenceDigest !== digest(receipt.evidence) || receipt.evidence.probeDigest !== digest(observation)
+    || typeof signature !== 'string' || !verify(null, Buffer.from(canonical(unsigned)), createPublicKey(privateKey), Buffer.from(signature, 'base64'))) {
+    fail(`${label} signed evidence is invalid`)
+  }
+  // A prior passed readiness is durable history even after its short live TTL.
+  return { receipt, observation }
+}
+function boundEpochPredecessor(db, request, config, privateKey) {
+  const scopeId = digest({ installation: request.installationId })
+  const reload = db.prepare('SELECT * FROM reloads WHERE scope_id = ? ORDER BY generation DESC LIMIT 1').get(scopeId)
+  if (!reload || reload.generation !== config.authorization.hostGeneration || !reload.request || !reload.config) fail('latest Host generation is unresolved or superseded')
+  const priorRequest = parseJson(Buffer.from(reload.request), 'historical reload request')
+  const priorConfig = parseJson(Buffer.from(reload.config), 'historical reload config')
+  if (reload.request_digest !== digest(priorRequest) || reload.config_digest !== digest(priorConfig)) fail('historical reload context changed')
+  for (const field of ['installationId', 'ledger', 'profile', 'plan', 'activation']) {
+    if (canonical(priorRequest[field]) !== canonical(request[field])) fail('historical reload context differs')
+  }
+  for (const field of ['authority', 'keyId', 'privateKeyPath', 'stateRoot', 'scope', 'unit', 'unitProperties', 'profileFiles', 'systemctl']) {
+    if (canonical(priorConfig[field]) !== canonical(config[field])) fail('historical deployment differs')
+  }
+  const signedReload = retainedSignedReceipt(reload, privateKey, 'historical reload')
+  if (priorRequest.phase !== 'reload' || signedReload.receipt.phase !== 'reload' || signedReload.receipt.outcome !== 'passed'
+    || signedReload.receipt.hostGeneration !== reload.generation || signedReload.receipt.authority !== config.authority
+    || signedReload.receipt.keyId !== config.keyId || signedReload.receipt.evidence.reloaded !== true
+    || signedReload.receipt.evidence.currentHostGeneration !== reload.generation
+    || signedReload.observation.requestDigest !== reload.request_digest || signedReload.observation.configDigest !== reload.config_digest) fail('historical reload is invalid')
+  const readiness = db.prepare('SELECT * FROM readiness WHERE reload_id = ?').get(reload.operation_id)
+  const signedReady = retainedSignedReceipt(readiness, privateKey, 'historical readiness')
+  const ready = signedReady.receipt
+  if (readiness.reload_id !== reload.operation_id || ready.phase !== 'readiness' || ready.outcome !== 'passed'
+    || ready.hostGeneration !== reload.generation || ready.installationId !== request.installationId
+    || ready.planId !== request.plan.id || ready.planDigest !== request.plan.digest
+    || ready.activationId !== request.activation.id || ready.fence !== request.activation.fence
+    || ready.authority !== config.authority || ready.keyId !== config.keyId || ready.evidence.kind !== 'readiness'
+    || ready.evidence.checks < 2 || ready.evidence.failures !== 0
+    || signedReady.observation.reload?.operationId !== reload.operation_id
+    || signedReady.observation.reload?.receiptDigest !== digest(signedReload.receipt)
+    || signedReady.observation.reload?.generation !== reload.generation
+    || request.predecessor.operationId !== ready.operationId || request.predecessor.receiptDigest !== digest(ready)
+    || request.predecessor.hostGeneration !== ready.hostGeneration) fail('runtime epoch predecessor is not the applied signed readiness')
+  return { reloadOperationId: reload.operation_id, readinessOperationId: ready.operationId,
+    readinessReceiptDigest: digest(ready), hostGeneration: reload.generation }
+}
+function epochJournal(config) {
+  const path = join(config.stateRoot, 'runtime-epochs.sqlite')
+  for (const suffix of ['', '-wal', '-shm', '-journal']) if (existsSync(path + suffix)) readSafe(path + suffix, 67108864, true)
+  const oldMask = process.umask(0o077); let db
+  try { db = new DatabaseSync(path) } finally { process.umask(oldMask) }
+  try {
+    db.exec(`PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+      CREATE TABLE IF NOT EXISTS runtime_epochs (
+        operation_id TEXT PRIMARY KEY, request_digest TEXT NOT NULL, config_digest TEXT NOT NULL,
+        scope_id TEXT NOT NULL, host_generation INTEGER NOT NULL, sequence INTEGER NOT NULL,
+        runtime_identity_digest TEXT NOT NULL, predecessor_digest TEXT NOT NULL,
+        observation TEXT, receipt TEXT,
+        UNIQUE(scope_id, host_generation, sequence));`)
+    syncDirectory(config.stateRoot)
+    return db
+  } catch { db.close(); fail('private runtime epoch journal could not be opened') }
+}
+function epochCachedReceipt(row, request, config, privateKey) {
+  if (row.request_digest !== digest(request) || row.config_digest !== digest(config)
+    || row.runtime_identity_digest !== request.runtimeIdentityDigest
+    || row.predecessor_digest !== request.predecessor.receiptDigest) fail('runtime epoch operation identity changed')
+  if (row.receipt === null) return undefined
+  if (row.observation === null) fail('runtime epoch receipt lacks observation')
+  const receipt = parseJson(Buffer.from(row.receipt), 'runtime epoch receipt')
+  const observation = parseJson(Buffer.from(row.observation), 'runtime epoch observation')
+  const { signature, ...unsigned } = receipt
+  if (receipt.requestDigest !== row.request_digest || receipt.runtimeIdentityDigest !== request.runtimeIdentityDigest
+    || receipt.sequence !== request.sequence || receipt.hostGeneration !== request.predecessor.hostGeneration
+    || receipt.evidence?.probeDigest !== digest(observation)
+    || typeof signature !== 'string' || !verify(null, Buffer.from(canonical(unsigned)), createPublicKey(privateKey), Buffer.from(signature, 'base64'))) fail('cached runtime epoch receipt is invalid')
+  if (Date.now() > receipt.expiresAt) fail('cached runtime epoch receipt expired; owner reconciliation required')
+  return { receipt, observation }
+}
+async function attestEpoch(request, config, privateKey) {
+  const execute = await processRunner(config.processHelper)
+  const deadline = performance.now() + config.timeoutMs
+  const oldPath = join(config.stateRoot, 'reload.sqlite')
+  readSafe(oldPath, 67108864, true)
+  const historical = new DatabaseSync(oldPath, { readOnly: true })
+  const epochs = epochJournal(config)
+  try {
+    const binding = boundEpochPredecessor(historical, request, config, privateKey)
+    const scopeId = digest({ installation: request.installationId })
+    const row = transaction(epochs, () => {
+      const existing = epochs.prepare('SELECT * FROM runtime_epochs WHERE operation_id = ?').get(request.operationId)
+      const latest = epochs.prepare('SELECT * FROM runtime_epochs WHERE scope_id = ? AND host_generation = ? ORDER BY sequence DESC LIMIT 1').get(scopeId, binding.hostGeneration)
+      if (existing) {
+        if (latest?.sequence !== existing.sequence) fail('runtime epoch operation was superseded')
+        epochCachedReceipt(existing, request, config, privateKey)
+        return existing
+      }
+      if (request.sequence <= (latest?.sequence ?? 0)) fail('runtime epoch sequence is stale')
+      epochs.prepare(`INSERT INTO runtime_epochs(operation_id, request_digest, config_digest, scope_id, host_generation,
+        sequence, runtime_identity_digest, predecessor_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(request.operationId, digest(request), digest(config), scopeId, binding.hostGeneration,
+          request.sequence, request.runtimeIdentityDigest, request.predecessor.receiptDigest)
+      return epochs.prepare('SELECT * FROM runtime_epochs WHERE operation_id = ?').get(request.operationId)
+    })
+    const cached = epochCachedReceipt(row, request, config, privateKey)
+    const retained = cached?.observation
+    const ready = config.readiness
+    const bytes = readSafe(ready.client.path, 1048576)
+    if (hash(bytes) !== ready.client.sha256) fail('observer client changed')
+    const client = await import(`data:text/javascript;base64,${bytes.toString('base64')}`)
+    client.validateRuntimeObserverConfig(ready.observer)
+    const observerDigest = client.runtimeConfigDigest(ready.observer)
+    const channelDigest = hash(readSafe(ready.observer.keyPath, 32, true))
+    let stable; let supervisor; let started; let failures = 0
+    const samples = [], challenges = new Set()
+    for (;;) {
+      assertCurrent(config, request); remaining(deadline)
+      if (canonical(boundEpochPredecessor(historical, request, config, privateKey)) !== canonical(binding)) fail('Host generation changed during runtime epoch')
+      const before = await observe(config, execute, deadline)
+      if (!active(before)) fail('target service is not active for runtime epoch')
+      if (supervisor === undefined) supervisor = before
+      else if (canonical(supervisor) !== canonical(before)) fail('supervisor changed during runtime epoch')
+      if (hash(readSafe(ready.observer.keyPath, 32, true)) !== channelDigest) fail('observer key changed')
+      const queriedAt = Date.now()
+      const sample = await client.queryRuntimeObserver({ ...ready.observer, signal: AbortSignal.timeout(remaining(deadline)) })
+      if (sample.profilePath !== request.profile.path || sample.observerConfigDigest !== observerDigest
+        || sample.processId !== before.MainPID || sample.invocationId !== before.InvocationID
+        || sample.observedAt < queriedAt || sample.observedAt > Date.now() || challenges.has(sample.challenge)
+        || sample.entries.length !== ready.observer.targets.length) fail('observer identity or freshness differs')
+      challenges.add(sample.challenge)
+      let sampleFailed = false
+      for (const target of ready.observer.targets) {
+        const entry = sample.entries.find(item => item.entryId === target.entryId)
+        if (!entry || entry.module !== target.module || entry.configDigest !== target.configDigest
+          || canonical(entry.services.map(service => service.name).sort()) !== canonical([...target.services].sort())) fail('candidate identity differs')
+        if (entry.active === true) {
+          if (!entry.instance || [...entry.dependencies, ...entry.services].some(service => !service.instance)) fail('active candidate is not ready')
+        } else if (entry.active === false) sampleFailed = true
+        else fail('candidate active state is invalid')
+      }
+      const { challenge: _challenge, observedAt: _observedAt, ...identity } = sample
+      if (digest(identity) !== request.runtimeIdentityDigest) fail('runtime identity differs from requested epoch')
+      if (stable === undefined) { stable = identity; started = performance.now() }
+      else if (canonical(stable) !== canonical(identity)) fail('runtime instance changed during epoch')
+      if (retained && (canonical(identity) !== canonical(retained.runtime)
+        || canonical(before) !== canonical(retained.supervisor) || channelDigest !== retained.channelDigest)) fail('cached runtime epoch identity changed')
+      if (sampleFailed) failures++
+      samples.push({ challenge: sample.challenge, observedAt: sample.observedAt, digest: digest(sample) })
+      const after = await observe(config, execute, deadline)
+      if (canonical(after) !== canonical(before)) fail('supervisor changed during runtime query')
+      if (samples.length >= 2 && performance.now() - started >= config.stableWindowMs) break
+      if (samples.length >= 256) fail('runtime epoch sample limit exceeded')
+      await new Promise(resolveDelay => setTimeout(resolveDelay, Math.min(config.pollIntervalMs, remaining(deadline))))
+    }
+    assertCurrent(config, request); assertProfile(config); remaining(deadline)
+    if (hash(readSafe(ready.observer.keyPath, 32, true)) !== channelDigest) fail('observer key changed')
+    const observation = { schemaVersion: 1, requestDigest: digest(request), configDigest: digest(config), binding,
+      channelDigest, supervisor, runtime: stable, samples, stableWindowMs: config.stableWindowMs, observedAt: Date.now() }
+    const evidence = { checks: samples.length, failures, probeDigest: digest(observation) }
+    const unsigned = { schemaVersion: 1, kind: 'dsh-runtime-epoch-receipt', receiptId: `receipt:${request.operationId}`,
+      operationId: request.operationId, requestDigest: digest(request), installationId: request.installationId,
+      planId: request.plan.id, planDigest: request.plan.digest, activationId: request.activation.id, fence: request.activation.fence,
+      hostGeneration: binding.hostGeneration, sequence: request.sequence, runtimeIdentityDigest: request.runtimeIdentityDigest,
+      authority: config.authority, keyId: config.keyId, outcome: failures === 0 ? 'passed' : 'failed',
+      observedAt: observation.observedAt, expiresAt: Math.min(observation.observedAt + request.receiptTtlMs, config.authorization.expiresAt), evidence }
+    if (unsigned.expiresAt <= unsigned.observedAt) fail('authorization expired before signing')
+    return transaction(epochs, () => {
+      assertCurrent(config, request); remaining(deadline)
+      if (canonical(boundEpochPredecessor(historical, request, config, privateKey)) !== canonical(binding)) fail('Host generation changed before epoch signing')
+      const current = epochs.prepare('SELECT * FROM runtime_epochs WHERE operation_id = ?').get(request.operationId)
+      const latest = epochs.prepare('SELECT operation_id FROM runtime_epochs WHERE scope_id = ? AND host_generation = ? ORDER BY sequence DESC LIMIT 1')
+        .get(scopeId, binding.hostGeneration)
+      if (latest?.operation_id !== request.operationId) fail('runtime epoch operation was superseded before signing')
+      const replay = epochCachedReceipt(current, request, config, privateKey)
+      if (replay) {
+        if (canonical(replay.observation.runtime) !== canonical(stable)
+          || canonical(replay.observation.supervisor) !== canonical(supervisor)) fail('concurrent epoch identity differs')
+        return replay.receipt
+      }
+      const receipt = { ...unsigned, signature: sign(null, Buffer.from(canonical(unsigned)), privateKey).toString('base64') }
+      epochs.prepare('UPDATE runtime_epochs SET observation = ?, receipt = ? WHERE operation_id = ? AND receipt IS NULL')
+        .run(canonical(observation), canonical(receipt), request.operationId)
+      return epochCachedReceipt(epochs.prepare('SELECT * FROM runtime_epochs WHERE operation_id = ?').get(request.operationId), request, config, privateKey).receipt
+    })
+  } finally { epochs.close(); historical.close() }
+}
 async function attest(request, config, privateKey) {
   const execute = await processRunner(config.processHelper)
   const deadline = performance.now() + config.timeoutMs
@@ -751,9 +1005,14 @@ export async function runSystemdHostAttestor(argv = process.argv.slice(2), envir
   let bytes = 0; const chunks = []
   for await (const chunk of process.stdin) { bytes += chunk.length; if (bytes > 65536) fail('request exceeds byte limit'); chunks.push(chunk) }
   const request = parseJson(Buffer.concat(chunks), 'request')
-  if (!['reload', 'readiness', 'rollback'].includes(request?.phase)) fail('only reload, readiness and rollback requests are supported')
+  const epoch = request?.kind === 'dsh-runtime-epoch-request'
+  if (!epoch && !['reload', 'readiness', 'rollback'].includes(request?.phase)) fail('only reload, readiness, rollback and runtime epoch requests are supported')
   let input = parseJson(readSafe(environment.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG, 65536, true), 'config')
   if (input.schemaVersion === 4) input = await resolveStandingConfig(input, request)
+  if (epoch) {
+    const { config, privateKey } = loadEpochConfig(environment, request, input)
+    return attestEpoch(request, config, privateKey)
+  }
   const { config, privateKey } = loadConfig(environment, request, input)
   return attest(request, config, privateKey)
 }

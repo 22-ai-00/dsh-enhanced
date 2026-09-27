@@ -146,7 +146,7 @@ async function verifyRuntime(runtime: RsiAuthorityRuntime, signal: AbortSignal):
   const script = `await Promise.all(${JSON.stringify(urls)}.map(url => import(url)))`
   await io.command(runtime.node.path, ['--input-type=module', '--eval', script], env, signal, 10_000, 4096)
   for (const [key, spec] of [['hostAttestor', runtime.executables.hostAttestor], ...Object.entries(runtime.releaseAdapters)] as [string, Pin][]) {
-    const expected = key === 'hostAttestor' ? 'dsh-systemd-host-attestor-6' : 'dsh-local-release-adapter-1'
+    const expected = key === 'hostAttestor' ? 'dsh-systemd-host-attestor-7' : 'dsh-local-release-adapter-1'
     const output = await io.command(runtime.node.path, [spec.path, '--version'], env, signal, 10_000, 4096)
     if (output !== expected) fail(`CLI version check failed: ${key}`)
   }

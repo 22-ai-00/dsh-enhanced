@@ -2,8 +2,10 @@ import type { HostAutomationExecutor, HostAutomationExecutorInput } from '@dsh-e
 import { afterEach, expect, test, vi } from 'vitest'
 
 vi.mock('../src/cli.ts', () => ({ activatePluginPlan: vi.fn(), probePluginPlan: vi.fn() }))
+vi.mock('../src/host-attestor.ts', () => ({ invokeConfiguredRuntimeEpochAttestor: vi.fn() }))
 
 import { activatePluginPlan, probePluginPlan } from '../src/cli.ts'
+import { invokeConfiguredRuntimeEpochAttestor } from '../src/host-attestor.ts'
 import { AdoptionCoordinatorRuntime, coordinateAdoptionHandoff, validateAdoptionCoordinatorConfig } from '../src/adoption-coordinator.ts'
 import type { PluginActivationPlan } from '../src/types.ts'
 
@@ -22,7 +24,8 @@ function storeFixture(status: PluginActivationPlan['status'] = 'awaiting-health'
     assertAdoptionHandoff: vi.fn(() => { if (handoff.expiresAt <= Date.now() || 'revokedAt' in handoff) throw new Error('inactive') }),
     requestActivationRollback: vi.fn(() => current = { ...current, status: 'rollback-pending', revision: current.revision + 1,
       activation: { ...current.activation!, rollbackProfileRestored: true } }),
-    listAdoptionHandoffs: vi.fn(() => [handoff]), close: vi.fn(),
+    listAdoptionHandoffs: vi.fn(() => [handoff]), pendingRuntimeEpochs: vi.fn(() => [] as any[]),
+    claimRuntimeEpoch: vi.fn(), applyRuntimeEpoch: vi.fn(), close: vi.fn(),
   }, state: () => current, set: (value: PluginActivationPlan) => { current = value } }
 }
 
@@ -144,4 +147,31 @@ test('barrier-owned close skips Automations after its exact generation was pause
   expect(automations.reconcileSystem).toHaveBeenCalledTimes(1)
   expect(unregister).toHaveBeenCalledTimes(1)
   expect(f.store.close).toHaveBeenCalledTimes(1)
+})
+
+test('native coordinator independently attests a queued runtime epoch under its existing dispatch budget', async () => {
+  const f = storeFixture('activated'), request = { operationId: 'epoch-1' }, receipt = { operationId: 'epoch-1', signature: 'signed' }
+  f.store.pendingRuntimeEpochs.mockReturnValue([{ request }]); f.store.claimRuntimeEpoch.mockReturnValue({ request })
+  vi.mocked(invokeConfiguredRuntimeEpochAttestor).mockResolvedValue(receipt as never)
+  let executor: HostAutomationExecutor | undefined
+  let registration: { definitionHash: string; activationNonce: string } | undefined
+  const automations = {
+    registerHostExecutor: vi.fn((value: HostAutomationExecutor) => { executor = value; return () => {} }),
+    reconcileSystem: vi.fn((input: any) => { registration = { definitionHash: 'definition', activationNonce: input.definition.execution.activationNonce }; return {} }),
+    inspectSystemOwnedActivation: vi.fn(() => registration),
+  }
+  const trust = {} as never
+  const runtime = new AdoptionCoordinatorRuntime({ config: { coordinatorId: 'coordinator', scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' },
+    timeoutMs: 1_000, budgetId: 'adoption-runs', budgetAmount: 7 }, store: f.store as never, trust, automations: automations as never, assertCurrent() {} })
+  runtime.start()
+  const installed = automations.reconcileSystem.mock.calls[0]![0] as any
+  const result = await executor!.execute({ automationId: installed.automationId, executionMode: 'production', activationNonce: registration!.activationNonce,
+    definitionHash: 'definition', catalogDigest: executor!.descriptor.catalogDigest, ownerRouteId: 'route', principal: 'owner',
+    targetScope: { workspace: '/workspace', preset: 'primary' }, signal: new AbortController().signal } as HostAutomationExecutorInput)
+  expect(result.outcome).toBe('succeeded')
+  expect(f.store.claimRuntimeEpoch).toHaveBeenCalledWith('epoch-1', 'coordinator')
+  expect(invokeConfiguredRuntimeEpochAttestor).toHaveBeenCalledWith(trust, request, expect.any(AbortSignal))
+  expect(f.store.applyRuntimeEpoch).toHaveBeenCalledWith(receipt, trust)
+  expect(activatePluginPlan).not.toHaveBeenCalled(); expect(probePluginPlan).not.toHaveBeenCalled()
+  await runtime.close()
 })

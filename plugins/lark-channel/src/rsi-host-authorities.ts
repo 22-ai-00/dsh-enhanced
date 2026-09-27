@@ -63,7 +63,7 @@ export async function validateRsiHostAuthorities(input: {
   exactFields(wrapper.resolver, ['executable', 'interpreter', 'configPath', 'configSha256', 'timeoutMs'])
   exactFields(wrapper.resolver.executable, ['path', 'sha256'])
   if (wrapper.resolver.interpreter !== null) exactFields(wrapper.resolver.interpreter, ['path', 'sha256'])
-  if (attestor.version !== 'dsh-systemd-host-attestor-6' || attestor.interpreter === null) fail('trust does not select the schema-4 wrapper')
+  if (attestor.version !== 'dsh-systemd-host-attestor-7' || attestor.interpreter === null) fail('trust does not select the schema-4 wrapper')
   const resolver = wrapper.resolver
   if (!Number.isSafeInteger(resolver.timeoutMs) || resolver.timeoutMs < 1000 || resolver.timeoutMs > 60_000
     || resolver.timeoutMs + wrapper.template.timeoutMs >= attestor.timeoutMs) fail('timeouts cannot cover resolver and Host operation')

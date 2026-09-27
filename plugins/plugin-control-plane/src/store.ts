@@ -16,6 +16,10 @@ import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
 import { assertForegroundDeployment, assertForegroundTask, type ForegroundDeploymentRecord } from './foreground-deployment.js'
 import { assertTaskObservationBatch, getTaskObservationRecord, readTaskObservationContext } from './task-observation-store.js'
 import type { TaskObservationBatch, TaskObservationRecord } from './task-observation-types.js'
+import { parseRuntimeEpochRequest, parseRuntimeEpochReceipt, verifyRuntimeEpochReceipt, type RuntimeEpochRequest, type RuntimeEpochReceipt } from './runtime-epoch.js'
+import { runtimeIdentityDigest } from './foreground-deployment.js'
+import type { RuntimeObservation } from './runtime-observer-protocol.js'
+import type { PluginControlTrustConfig } from './trust.js'
 import type {
   ActivationRetractionAuthority,
   ActivationRetractionReceipt,
@@ -1261,6 +1265,89 @@ export function readOwnerSourceAdoptionPlan(database: DatabaseSync, activationPl
   if (controlPlaneDigest(JSON.parse(link.binding_json)) !== link.binding_digest || controlPlaneDigest(expected) !== link.binding_digest
     || controlPlaneDigest(plan.candidate) !== controlPlaneDigest(released)) throw new ControlPlaneStoreError('invalid-state', 'source adoption binding changed')
   return { plan, sourcePlan, source, released }
+}
+
+export interface RuntimeEpochRecord {
+  request: RuntimeEpochRequest
+  status: 'pending' | 'claimed' | 'applied' | 'stale'
+  receipt?: RuntimeEpochReceipt
+}
+type RuntimeEpochRow = { operation_id: string; plan_id: string; sequence: number; runtime_digest: string;
+  request_json: string; request_digest: string; status: RuntimeEpochRecord['status']; receipt_json: string | null; created_at: number }
+function runtimeEpochFromRow(row: RuntimeEpochRow): RuntimeEpochRecord {
+  const request = parseRuntimeEpochRequest(JSON.parse(row.request_json))
+  if (request.operationId !== row.operation_id || request.plan.id !== row.plan_id || request.sequence !== row.sequence
+    || request.runtimeIdentityDigest !== row.runtime_digest || controlPlaneDigest(request) !== row.request_digest
+    || request.requestedAt !== row.created_at || (row.status === 'applied') !== (row.receipt_json !== null)) {
+    throw new ControlPlaneStoreError('invalid-state', 'runtime epoch journal binding changed')
+  }
+  return { request, status: row.status, ...(row.receipt_json === null ? {} : { receipt: parseRuntimeEpochReceipt(JSON.parse(row.receipt_json)) }) }
+}
+
+/** Historical adoption remains immutable; only a currently watched deployment can acquire another runtime proof. */
+export function readCurrentRuntimeEpochDeployment(database: DatabaseSync, profilePath: string) {
+  const unsettled = database.prepare(`SELECT 1 FROM activation_plans WHERE target_path=? AND status IN (
+    'staging','awaiting-reload','awaiting-readiness','awaiting-live-tasks','awaiting-effect-blocked-replay','awaiting-shadow',
+    'awaiting-canary','awaiting-soak','awaiting-health','commit-pending','rollback-pending') LIMIT 1`).get(profilePath)
+  const latest = database.prepare(`SELECT checkpoint.plan_id,checkpoint.exposure_order,checkpoint.successful_order
+    FROM activation_deployment_checkpoints checkpoint JOIN activation_plans plan ON plan.id=checkpoint.plan_id
+    WHERE plan.target_path=? ORDER BY checkpoint.exposure_order DESC LIMIT 1`).get(profilePath) as
+    { plan_id: string; exposure_order: number; successful_order: number | null } | undefined
+  if (unsettled || !latest || latest.exposure_order !== latest.successful_order) {
+    throw new ControlPlaneStoreError('invalid-state', 'runtime epoch requires the current successful deployment')
+  }
+  const adopted = readOwnerSourceAdoptionPlan(database, latest.plan_id), { plan } = adopted
+  const watch = database.prepare('SELECT state,activation_id,fence,last_host_generation FROM activation_watch WHERE plan_id=?').get(plan.id) as
+    { state: string; activation_id: string; fence: number; last_host_generation: number } | undefined
+  if (plan.status !== 'activated' || !plan.activation || watch?.state !== 'watching'
+    || watch.activation_id !== plan.activation.id || watch.fence !== plan.activation.fence) {
+    throw new ControlPlaneStoreError('invalid-state', 'runtime epoch deployment is no longer watched')
+  }
+  const terms = plan.dossier.handoff
+  const handoffRow = database.prepare('SELECT * FROM adoption_handoffs WHERE plan_id=?').get(plan.id) as
+    { plan_digest: string; coordinator_id: string; created_at: number; expires_at: number; revoked_at: number | null } | undefined
+  if (!terms || !handoffRow || handoffRow.revoked_at !== null || handoffRow.plan_digest !== plan.digest
+    || handoffRow.coordinator_id !== terms.coordinatorId) throw new ControlPlaneStoreError('conflict', 'runtime epoch handoff was revoked or changed')
+  const handoff: AdoptionHandoffRecord = { planId: plan.id, planDigest: plan.digest, coordinatorId: handoffRow.coordinator_id,
+    createdAt: handoffRow.created_at, expiresAt: handoffRow.expires_at }
+  const approvalRow = database.prepare('SELECT approval_receipt_json FROM activation_plans WHERE id=?').get(plan.id) as { approval_receipt_json: string }
+  const approvalReceipt = parseApprovalReceipt(JSON.parse(approvalRow.approval_receipt_json))
+  if (!plan.approval || controlPlaneDigest(projectedApproval(approvalReceipt)) !== controlPlaneDigest(plan.approval)) {
+    throw new ControlPlaneStoreError('invalid-state', 'runtime epoch historical approval changed')
+  }
+  const witness = hostInputWitnessFromRow(database, plan)
+  if (!witness || witness.activationId !== plan.activation.id || witness.fence !== plan.activation.fence) {
+    throw new ControlPlaneStoreError('invalid-state', 'runtime epoch deployment witness changed')
+  }
+  const readinessRow = database.prepare(`SELECT operation.* FROM host_attestation_operations operation
+    JOIN host_attestations attestation ON attestation.plan_id=operation.plan_id AND attestation.phase=operation.phase
+      AND attestation.receipt_digest=operation.receipt_digest
+    WHERE operation.plan_id=? AND operation.phase='readiness' AND operation.status='applied'`).get(plan.id) as HostAttestationOperationRow | undefined
+  if (!readinessRow) throw new ControlPlaneStoreError('invalid-state', 'runtime epoch lacks original applied readiness')
+  const readiness = hostOperationFromRow(readinessRow)
+  if (!readiness.receipt || readiness.receipt.outcome !== 'passed' || readiness.receipt.activationId !== plan.activation.id
+    || readiness.receipt.fence !== plan.activation.fence || readiness.receipt.hostGeneration !== watch.last_host_generation) {
+    throw new ControlPlaneStoreError('conflict', 'runtime epoch original readiness changed')
+  }
+  return { ...adopted, handoff, approvalReceipt, witness, readiness }
+}
+
+/** Read-only authority seam; current request admission never extends the historical activation authorization. */
+export function readOwnerRuntimeEpochContext(database: DatabaseSync, operationId: string) {
+  const row = database.prepare('SELECT * FROM deployment_runtime_epochs WHERE operation_id=?').get(operationId) as RuntimeEpochRow | undefined
+  if (!row) throw new ControlPlaneStoreError('not-found', 'runtime epoch operation absent')
+  const record = runtimeEpochFromRow(row), request = record.request
+  if (record.status !== 'claimed') throw new ControlPlaneStoreError('conflict', 'runtime epoch operation is not claimed')
+  const context = readCurrentRuntimeEpochDeployment(database, request.profile.path), { plan, readiness } = context
+  const latest = database.prepare('SELECT max(sequence) AS sequence FROM deployment_runtime_epochs WHERE plan_id=?').get(plan.id)
+  if (latest?.sequence !== request.sequence || request.plan.id !== plan.id || request.plan.digest !== plan.digest
+    || request.installationId !== plan.installationId || controlPlaneDigest(request.ledger) !== controlPlaneDigest(plan.ledger)
+    || request.profile.name !== plan.profile || request.activation.id !== plan.activation!.id || request.activation.fence !== plan.activation!.fence
+    || controlPlaneDigest(request.predecessor) !== controlPlaneDigest({ operationId: readiness.operationId,
+      receiptDigest: controlPlaneDigest(readiness.receipt), hostGeneration: readiness.receipt!.hostGeneration })) {
+    throw new ControlPlaneStoreError('conflict', 'runtime epoch request lost current deployment admission')
+  }
+  return { ...context, request, status: 'claimed' as const, createdAt: row.created_at }
 }
 
 /** Read-only, exact durable authority context for an independently signed Host operation. */
@@ -2600,6 +2687,99 @@ export class ControlPlaneStore {
     const plan = this.getPlan(input.planId)
     if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.fence || !input.statuses.includes(plan.status)) throw new ControlPlaneStoreError('conflict', 'activation no longer owns the exact revision/fence/status')
     return plan
+  }
+
+  currentRuntimeEpochDeployment(profilePath: string): ReturnType<typeof readCurrentRuntimeEpochDeployment> {
+    return readCurrentRuntimeEpochDeployment(this.#database, profilePath)
+  }
+
+  prepareRuntimeEpoch(input: { runtime: RuntimeObservation; issuer: RuntimeEpochRequest['issuer']; receiptTtlMs: number }): RuntimeEpochRecord {
+    const runtimeDigest = runtimeIdentityDigest(input.runtime)
+    if (input.runtime.observedAt > this.#now() || input.runtime.observedAt < this.#now() - 30_000
+      || input.runtime.entries.some(entry => !entry.active)) throw new ControlPlaneStoreError('invalid-input', 'runtime epoch needs a fresh active runtime')
+    const current = readCurrentRuntimeEpochDeployment(this.#database, input.runtime.profilePath)
+    return this.#withActivationWrite(current.plan.id, () => {
+      const context = readCurrentRuntimeEpochDeployment(this.#database, input.runtime.profilePath), { plan, readiness } = context
+      const previous = this.#database.prepare(`SELECT * FROM deployment_runtime_epochs WHERE plan_id=? ORDER BY sequence DESC LIMIT 1`)
+        .get(plan.id) as RuntimeEpochRow | undefined
+      if (previous) {
+        const record = runtimeEpochFromRow(previous)
+        if (record.request.runtimeIdentityDigest === runtimeDigest && controlPlaneDigest(record.request.issuer) === controlPlaneDigest(input.issuer)
+          && record.status !== 'stale'
+          && (record.status === 'applied' || this.#now() < record.request.requestedAt + record.request.receiptTtlMs)) {
+          return record
+        }
+        // An expired read-only observation may be replaced, never relabelled or replayed as a new proof.
+        this.#database.prepare("UPDATE deployment_runtime_epochs SET status='stale' WHERE plan_id=? AND status IN ('pending','claimed')").run(plan.id)
+      }
+      const sequence = Number(this.#database.prepare('SELECT max(sequence) AS sequence FROM deployment_runtime_epochs WHERE plan_id=?').get(plan.id)?.sequence ?? 0) + 1
+      const request = parseRuntimeEpochRequest({ schemaVersion: 1, kind: 'dsh-runtime-epoch-request', operationId: `runtime-epoch-${randomUUID()}`,
+        requestedAt: this.#now(), receiptTtlMs: input.receiptTtlMs, installationId: plan.installationId, ledger: plan.ledger,
+        plan: { id: plan.id, digest: plan.digest }, activation: { id: plan.activation!.id, fence: plan.activation!.fence },
+        profile: { name: plan.profile, path: plan.target.profilePath }, issuer: input.issuer, predecessor: {
+          operationId: readiness.operationId, receiptDigest: controlPlaneDigest(readiness.receipt), hostGeneration: readiness.receipt!.hostGeneration },
+        sequence, runtimeIdentityDigest: runtimeDigest })
+      this.#database.prepare(`INSERT INTO deployment_runtime_epochs VALUES (?,?,?,?,?,?,'pending',NULL,?)`).run(
+        request.operationId, plan.id, sequence, runtimeDigest, JSON.stringify(request), controlPlaneDigest(request), request.requestedAt)
+      return { request, status: 'pending' }
+    })
+  }
+
+  getRuntimeEpoch(operationId: string): RuntimeEpochRecord {
+    const row = this.#database.prepare('SELECT * FROM deployment_runtime_epochs WHERE operation_id=?').get(operationId) as RuntimeEpochRow | undefined
+    if (!row) throw new ControlPlaneStoreError('not-found', 'runtime epoch absent')
+    return runtimeEpochFromRow(row)
+  }
+
+  latestAppliedRuntimeEpoch(planId: string): RuntimeEpochRecord | undefined {
+    const row = this.#database.prepare(`SELECT * FROM deployment_runtime_epochs WHERE plan_id=? ORDER BY sequence DESC LIMIT 1`)
+      .get(planId) as RuntimeEpochRow | undefined
+    if (row && row.status !== 'applied') throw new ControlPlaneStoreError('conflict', 'current runtime epoch is not independently verified')
+    return row && runtimeEpochFromRow(row)
+  }
+
+  pendingRuntimeEpochs(coordinatorId: string): readonly RuntimeEpochRecord[] {
+    return (this.#database.prepare(`SELECT epoch.* FROM deployment_runtime_epochs epoch
+      JOIN adoption_handoffs handoff ON handoff.plan_id=epoch.plan_id
+      JOIN activation_plans plan ON plan.id=epoch.plan_id
+      WHERE handoff.coordinator_id=? AND handoff.revoked_at IS NULL AND plan.status='activated'
+        AND epoch.status IN ('pending','claimed') AND epoch.created_at + json_extract(epoch.request_json,'$.receiptTtlMs') > ?
+        AND epoch.sequence=(SELECT max(other.sequence) FROM deployment_runtime_epochs other WHERE other.plan_id=epoch.plan_id)
+      ORDER BY epoch.created_at,epoch.operation_id LIMIT 100`).all(coordinatorId, this.#now()) as RuntimeEpochRow[]).map(runtimeEpochFromRow)
+  }
+
+  claimRuntimeEpoch(operationId: string, coordinatorId: string): RuntimeEpochRecord {
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const record = this.getRuntimeEpoch(operationId)
+      if (!['pending','claimed'].includes(record.status) || this.#now() >= record.request.requestedAt + record.request.receiptTtlMs) {
+        throw new ControlPlaneStoreError('expired', 'runtime epoch request is not live')
+      }
+      this.#database.prepare("UPDATE deployment_runtime_epochs SET status='claimed' WHERE operation_id=?").run(operationId)
+      const context = readOwnerRuntimeEpochContext(this.#database, operationId)
+      if (context.handoff.coordinatorId !== coordinatorId || (this.#adoptionCoordinatorId !== undefined && this.#adoptionCoordinatorId !== coordinatorId)) {
+        throw new ControlPlaneStoreError('conflict', 'runtime epoch coordinator changed')
+      }
+      this.#database.exec('COMMIT'); return { ...record, status: 'claimed' }
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  applyRuntimeEpoch(receiptInput: RuntimeEpochReceipt, trust: PluginControlTrustConfig): RuntimeEpochRecord {
+    const receipt = parseRuntimeEpochReceipt(receiptInput)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const context = readOwnerRuntimeEpochContext(this.#database, receipt.operationId)
+      if (this.#now() >= context.request.requestedAt + context.request.receiptTtlMs) throw new ControlPlaneStoreError('expired', 'runtime epoch request expired before application')
+      verifyRuntimeEpochReceipt(receipt, context.request, trust, this.#now())
+      if (receipt.outcome !== 'passed' || receipt.evidence.failures !== 0) throw new ControlPlaneStoreError('conflict', 'failed runtime epoch cannot be applied')
+      if (context.request.ledger.id !== trust.ledger.id || context.request.ledger.path !== trust.ledger.path) {
+        throw new ControlPlaneStoreError('conflict', 'runtime epoch trust ledger changed')
+      }
+      this.#database.prepare("UPDATE deployment_runtime_epochs SET status='applied',receipt_json=? WHERE operation_id=? AND status='claimed'")
+        .run(JSON.stringify(receipt), receipt.operationId)
+      const result = this.getRuntimeEpoch(receipt.operationId)
+      this.#database.exec('COMMIT'); return result
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
   }
 
   prepareHostAttestationOperation(input: { planId: string; expectedRevision: number; expectedFence: number;

@@ -2,13 +2,29 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import type { ForegroundTaskObservationRegistration } from '@dsh-enhanced/assistant-delivery'
-import { captureRetainedDeploymentReadiness } from './deployment-readiness.js'
+import { captureRetainedDeploymentReadiness, captureRuntimeEpochReadiness } from './deployment-readiness.js'
 import { type ForegroundDeploymentRecord } from './foreground-deployment.js'
 import { controlPlaneDigest, type ControlPlaneStore } from './store.js'
 import type { PluginControlTrustConfig } from './trust.js'
 import type { RuntimeObservation } from './runtime-observer-protocol.js'
+import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
 
 export interface ForegroundDeploymentConfig { attestorJournalPath: string }
+
+export function queueRuntimeEpoch(store: ControlPlaneStore, trust: PluginControlTrustConfig, runtime: RuntimeObservation,
+  withSourceFence?: (gapId: string, owner: OwnerTaskFailureReference['owner'], callback: () => void) => void): void {
+  const attestor = trust.hostAttestor
+  if (!attestor) return
+  const prepare = () => { store.prepareRuntimeEpoch({ runtime,
+    issuer: { mode: 'configured-executable', id: attestor.id, version: attestor.version, path: attestor.path,
+      sha256: attestor.sha256, interpreter: attestor.interpreter, authority: attestor.authority, keyId: attestor.keyId },
+    // Covers the next native one-minute coordinator dispatch without extending the standing grant.
+    receiptTtlMs: 300_000 }) }
+  if (withSourceFence) {
+    const { plan, source } = store.currentRuntimeEpochDeployment(runtime.profilePath)
+    withSourceFence(plan.gapId, source.owner, prepare)
+  } else prepare()
+}
 
 export function validateForegroundDeploymentConfig(value: ForegroundDeploymentConfig): void {
   if (!value || Object.keys(value).join(',') !== 'attestorJournalPath' || typeof value.attestorJournalPath !== 'string'
@@ -36,6 +52,7 @@ export function createForegroundDeploymentObserver(input: {
   sample(challenge: string): RuntimeObservation
   assertCurrent(): void
   owner: ForegroundTaskObservationRegistration['owner']
+  requestRuntimeEpoch?(runtime: RuntimeObservation): void
 }): ForegroundTaskObservationRegistration {
   const capture = (task: ForegroundDeploymentRecord['task']) => {
     input.assertCurrent()
@@ -47,15 +64,29 @@ export function createForegroundDeploymentObserver(input: {
     protocol: 'plugin-control-plane/foreground-observer/v1' as const,
     generation: randomUUID(), owner: input.owner,
     begin(task) {
-      return input.store.withForegroundDeployment(task, input.profilePath, (plan, operation) => {
+      let runtime: RuntimeObservation | undefined
+      try { return input.store.withForegroundDeployment(task, input.profilePath, (plan, operation) => {
         const begin = capture(task)
+        runtime = begin
         if (!operation.receipt) throw new Error('foreground deployment lacks signed readiness')
-        const readiness = captureRetainedDeploymentReadiness({ plan, operation, receipt: operation.receipt, trust: input.trust,
-          journalPath: input.config.attestorJournalPath, runtime: begin })
+        const epoch = plan.status === 'activated' ? input.store.latestAppliedRuntimeEpoch(plan.id) : undefined
+        const readiness = epoch ? captureRuntimeEpochReadiness({ plan, operation, epoch, trust: input.trust,
+          journalPath: input.config.attestorJournalPath, runtime: begin, dispatchedAt: task.dispatchedAt })
+          : captureRetainedDeploymentReadiness({ plan, operation, receipt: operation.receipt, trust: input.trust,
+            journalPath: input.config.attestorJournalPath, runtime: begin })
         input.assertCurrent()
         input.store.beginForegroundDeployment({ schemaVersion: 1, task: structuredClone(task), readiness, begin, state: 'pending' })
         return task.inboxId
-      })
+      }) } catch (error) {
+        // Queue only a current runtime hint. The independent coordinator must sign it before any later task is attributed.
+        if (runtime) {
+          try { input.assertCurrent();
+            if (input.requestRuntimeEpoch) input.requestRuntimeEpoch(runtime)
+            else queueRuntimeEpoch(input.store, input.trust, runtime)
+          } catch { /* No successful watched deployment or source authorization. */ }
+        }
+        throw error
+      }
     },
     completed(handle, task, execution) {
       input.assertCurrent()
@@ -66,8 +97,11 @@ export function createForegroundDeploymentObserver(input: {
         input.store.withForegroundDeployment(task, input.profilePath, (plan, operation) => {
           const end = capture(task)
           if (!operation.receipt || !execution.quiescent || execution.status !== 'succeeded') throw new Error('foreground deployment completion unknown')
-          const readiness = captureRetainedDeploymentReadiness({ plan, operation, receipt: operation.receipt, trust: input.trust,
-            journalPath: input.config.attestorJournalPath, runtime: end })
+          const epoch = plan.status === 'activated' ? input.store.latestAppliedRuntimeEpoch(plan.id) : undefined
+          const readiness = epoch ? captureRuntimeEpochReadiness({ plan, operation, epoch, trust: input.trust,
+            journalPath: input.config.attestorJournalPath, runtime: end, dispatchedAt: task.dispatchedAt })
+            : captureRetainedDeploymentReadiness({ plan, operation, receipt: operation.receipt, trust: input.trust,
+              journalPath: input.config.attestorJournalPath, runtime: end })
           if (controlPlaneDigest(readiness) !== controlPlaneDigest(prior.readiness)) throw new Error('foreground deployment changed during execution')
           input.assertCurrent()
           input.store.finishForegroundDeployment({ ...prior, state: 'observed', end, execution: structuredClone(execution) })

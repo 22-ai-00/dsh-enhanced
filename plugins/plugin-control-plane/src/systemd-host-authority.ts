@@ -5,7 +5,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { Ed25519ApprovalAuthority } from './approval.js'
 import { validateLiveQualificationTerms, type LiveQualificationTerms } from './live-qualification.js'
 import { sourceAuthorityCanonicalSafePath, sourceAuthorityReadSafeFile } from './source-approval-authority.js'
-import { controlPlaneDigest, readOwnerHostAttestationContext, validateHostDeploymentInputs } from './store.js'
+import { parseRuntimeEpochRequest, type RuntimeEpochRequest } from './runtime-epoch.js'
+import { controlPlaneDigest, readOwnerHostAttestationContext, readOwnerRuntimeEpochContext, validateHostDeploymentInputs } from './store.js'
 import { PROTECTED_PLUGIN_DENYLIST } from './source-workspace.js'
 import { loadTrustConfig, resolveTrustKey } from './trust.js'
 import type { SourceJobOwnerReceipt } from './source-job-types.js'
@@ -141,6 +142,13 @@ function contextFor(controlPath: string, operationId: string): ReturnType<typeof
   finally { db.close() }
 }
 
+function runtimeEpochContextFor(controlPath: string, operationId: string): ReturnType<typeof readOwnerRuntimeEpochContext> {
+  const db = new DatabaseSync(sourceAuthorityCanonicalSafePath(controlPath, 'file'), { readOnly: true })
+  try { db.exec('PRAGMA query_only=ON; BEGIN;'); const context = readOwnerRuntimeEpochContext(db, operationId); db.exec('COMMIT'); return context }
+  catch (error) { try { db.exec('ROLLBACK') } catch {} throw error }
+  finally { db.close() }
+}
+
 function sameOwner(actual: SourceJobOwnerReceipt, expected: Owner): boolean {
   return actual.authorityId === expected.authorityId && actual.authorityHash === expected.authorityHash
     && actual.principalId === expected.principalId && actual.principalRecordId === expected.principalRecordId
@@ -230,6 +238,66 @@ async function derive(config: SystemdHostAuthorityConfig, request: HostAttestati
     contextDigest: controlPlaneDigest(context), trustDigest: controlPlaneDigest(trust) }
 }
 
+/** Standing authority observes a fresh Host instance of an already successful deployment. */
+async function deriveRuntimeEpoch(config: SystemdHostAuthorityConfig, request: RuntimeEpochRequest, now: number): Promise<{
+  result: ExactConfig; witnessDigest: string; contextDigest: string; trustDigest: string
+}> {
+  const trust = await loadTrustConfig(config.trustPath)
+  const context = runtimeEpochContextFor(config.controlDatabasePath, request.operationId)
+  const { plan, source, released, handoff, approvalReceipt, witness, readiness } = context
+  const receipt = readiness.receipt
+  if (!same(context.request, request) || context.status !== 'claimed' || context.createdAt !== request.requestedAt
+    || plan.id !== request.plan.id || plan.digest !== request.plan.digest
+    || plan.activation?.id !== request.activation.id || plan.activation.fence !== request.activation.fence
+    || plan.installationId !== request.installationId || !same(plan.ledger, request.ledger)
+    || plan.profile !== request.profile.name || plan.target.profilePath !== request.profile.path
+    || config.grant.profile.name !== plan.profile || config.grant.profile.path !== plan.target.profilePath
+    || !sameOwner(source.owner, config.grant.owner) || !same(released, plan.candidate)
+    || !config.grant.packages.includes(released.package) || PROTECTED_PLUGIN_DENYLIST.has(released.id)
+    || plan.dossier.catalogProvenance !== 'owner-provided-integrity-pinned'
+    || !same(plan.dossier.hostDeploymentInputs, config.grant.hostDeploymentInputs)
+    || !same(plan.dossier.liveQualification, config.grant.liveQualification)
+    || !plan.dossier.handoff || plan.dossier.handoff.coordinatorId !== config.grant.coordinatorId
+    || handoff.coordinatorId !== config.grant.coordinatorId || handoff.planId !== plan.id || handoff.planDigest !== plan.digest
+    || handoff.revokedAt !== undefined
+    || !witness || witness.activationId !== request.activation.id || witness.fence !== request.activation.fence
+    || witness.planDigest !== plan.digest || !same(witness.inputs, config.grant.hostDeploymentInputs)
+    || readiness.status !== 'applied' || readiness.phase !== 'readiness' || !receipt || receipt.outcome !== 'passed'
+    || !Number.isSafeInteger(readiness.createdAt) || readiness.createdAt < plan.createdAt
+    || readiness.operationId !== request.predecessor.operationId
+    || controlPlaneDigest(receipt) !== request.predecessor.receiptDigest
+    || receipt.hostGeneration !== request.predecessor.hostGeneration
+    || receipt.planId !== plan.id || receipt.planDigest !== plan.digest
+    || receipt.activationId !== request.activation.id || receipt.fence !== request.activation.fence
+    || trust.installationId !== request.installationId || !same(trust.ledger, request.ledger)
+    || trust.dshHome !== plan.target.dshHome || trust.ledger.path !== config.controlDatabasePath
+    || trust.hostAttestor === undefined
+    || !same({ mode: 'configured-executable', id: trust.hostAttestor.id, version: trust.hostAttestor.version,
+      path: trust.hostAttestor.path, sha256: trust.hostAttestor.sha256, interpreter: trust.hostAttestor.interpreter,
+      authority: trust.hostAttestor.authority, keyId: trust.hostAttestor.keyId }, request.issuer)
+    || !same({ authority: config.template.authority, keyId: config.template.keyId,
+      executable: config.template.executable, interpreter: config.template.interpreter },
+    { authority: trust.hostAttestor.authority, keyId: trust.hostAttestor.keyId,
+      executable: { path: trust.hostAttestor.path, sha256: trust.hostAttestor.sha256 }, interpreter: trust.hostAttestor.interpreter })) fail()
+
+  const key = resolveTrustKey(trust, 'approval', approvalReceipt.authority, approvalReceipt.keyId)
+  const verified = await new Ed25519ApprovalAuthority(key.publicKeyPem, key.authority, key.keyId,
+    () => readiness.createdAt).verify(approvalReceipt, plan)
+  if (!same(verified, plan.approval)) fail()
+  const expiresAt = Math.min(config.grant.expiresAt, request.requestedAt + request.receiptTtlMs)
+  if (now < config.grant.notBefore || now >= expiresAt || request.requestedAt < config.grant.notBefore
+    || request.requestedAt > now || expiresAt <= request.requestedAt) fail()
+
+  const { readiness: _readiness, recoveryReadiness: _recoveryReadiness, ...base } = config.template
+  const result = { schemaVersion: 5, ...base, profileFiles: witness.profileFiles,
+    authorization: { installationId: request.installationId, ledger: request.ledger, profile: request.profile,
+      plan: request.plan, activation: request.activation, hostGeneration: request.predecessor.hostGeneration,
+      requestDigest: controlPlaneDigest(request), notBefore: config.grant.notBefore, expiresAt },
+    readiness: { ...config.template.readiness,
+      deploymentFiles: witness.deploymentFiles.map(item => ({ path: item.path, sha256: item.sha256 })) } }
+  return { result, witnessDigest: witness.digest, contextDigest: controlPlaneDigest(context), trustDigest: controlPlaneDigest(trust) }
+}
+
 function journal(pathname: string): DatabaseSync {
   sourceAuthorityCanonicalSafePath(dirname(pathname), 'directory')
   sourceAuthorityCanonicalSafePath(pathname, 'file', true)
@@ -244,17 +312,24 @@ function journal(pathname: string): DatabaseSync {
   return db
 }
 
-export async function resolveSystemdHostAuthority(configInput: SystemdHostAuthorityConfig, request: HostAttestationRequest): Promise<ExactConfig> {
+export async function resolveSystemdHostAuthority(configInput: SystemdHostAuthorityConfig,
+  requestInput: HostAttestationRequest | RuntimeEpochRequest): Promise<ExactConfig> {
   try {
     validateSystemdHostAuthorityConfig(configInput)
     const config = configInput
-    if (!request || typeof request !== 'object' || request.kind !== 'dsh-host-attestation-request') fail()
-    const first = await derive(config, request, Date.now())
+    if (!requestInput || typeof requestInput !== 'object') fail()
+    const runtimeEpoch = requestInput.kind === 'dsh-runtime-epoch-request'
+    if (!runtimeEpoch && requestInput.kind !== 'dsh-host-attestation-request') fail()
+    const request = runtimeEpoch ? parseRuntimeEpochRequest(requestInput) : requestInput
+    const deriveRequest = () => runtimeEpoch
+      ? deriveRuntimeEpoch(config, request as RuntimeEpochRequest, Date.now())
+      : derive(config, request as HostAttestationRequest, Date.now())
+    const first = await deriveRequest()
     const db = journal(config.statePath)
     try {
       db.exec('BEGIN IMMEDIATE')
       try {
-        const second = await derive(config, request, Date.now())
+        const second = await deriveRequest()
         if (!same(first, second)) fail()
         const configDigest = controlPlaneDigest(config)
         const grantDigest = controlPlaneDigest(config.grant)
@@ -265,26 +340,27 @@ export async function resolveSystemdHostAuthority(configInput: SystemdHostAuthor
         const previous = db.prepare('SELECT * FROM systemd_host_operations WHERE operation_id=?').get(request.operationId) as
           { grant_id: string; phase: string; request_digest: string; config_digest: string; witness_digest: string;
             context_digest: string; config_json: string } | undefined
+        const phase = runtimeEpoch ? 'runtime-epoch' : (request as HostAttestationRequest).phase
         const requestDigest = controlPlaneDigest(request), outputDigest = controlPlaneDigest(second.result)
         if (previous !== undefined) {
-          if (previous.grant_id !== config.grant.id || previous.phase !== request.phase || previous.request_digest !== requestDigest
+          if (previous.grant_id !== config.grant.id || previous.phase !== phase || previous.request_digest !== requestDigest
             || previous.config_digest !== outputDigest || previous.witness_digest !== second.witnessDigest
             || previous.context_digest !== second.contextDigest || controlPlaneDigest(JSON.parse(previous.config_json)) !== outputDigest) fail()
           db.exec('COMMIT'); return JSON.parse(previous.config_json) as ExactConfig
         }
-        if (request.phase === 'reload' && (db.prepare("SELECT COUNT(*) AS n FROM systemd_host_operations WHERE grant_id=? AND phase='reload'")
-          .get(config.grant.id) as { n: number }).n >= config.grant.maximumReloads) fail()
+        if ((phase === 'reload' || phase === 'runtime-epoch') && (db.prepare('SELECT COUNT(*) AS n FROM systemd_host_operations WHERE grant_id=? AND phase=?')
+          .get(config.grant.id, phase) as { n: number }).n >= config.grant.maximumReloads) fail()
         const json = JSON.stringify(second.result)
         if (Buffer.byteLength(json) + 1 > 65_536) fail()
         db.prepare('INSERT INTO systemd_host_operations VALUES (?,?,?,?,?,?,?,?)').run(request.operationId, config.grant.id,
-          request.phase, requestDigest, outputDigest, second.witnessDigest, second.contextDigest, json)
+          phase, requestDigest, outputDigest, second.witnessDigest, second.contextDigest, json)
         db.exec('COMMIT'); return second.result
       } catch (error) { try { db.exec('ROLLBACK') } catch {} throw error }
     } finally { db.close() }
   } catch { throw new SystemdHostAuthorityError() }
 }
 
-/** One bounded request in, one exact schema-1/2/3 configuration out. */
+/** One bounded request in, one exact schema-1/2/3/5 configuration out. */
 export async function runSystemdHostAuthority(argv = process.argv.slice(2)): Promise<void> {
   try {
     if (argv.length !== 2 || argv[0] !== '--config') fail()
@@ -296,7 +372,7 @@ export async function runSystemdHostAuthority(argv = process.argv.slice(2)): Pro
       if ((size += bytes.length) > MAX_REQUEST_BYTES) fail()
       chunks.push(bytes)
     }
-    const request = JSON.parse(Buffer.concat(chunks).toString('utf8')) as HostAttestationRequest
+    const request = JSON.parse(Buffer.concat(chunks).toString('utf8')) as HostAttestationRequest | RuntimeEpochRequest
     process.stdout.write(`${JSON.stringify(await resolveSystemdHostAuthority(config, request))}\n`)
   } catch { throw new SystemdHostAuthorityError() }
 }

@@ -3,7 +3,18 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 25
+export const controlPlaneSchemaVersion = 26
+
+const runtimeEpochSchema = `CREATE TABLE IF NOT EXISTS deployment_runtime_epochs (
+  operation_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES activation_plans(id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK(sequence > 0), runtime_digest TEXT NOT NULL CHECK(length(runtime_digest)=64),
+  request_json TEXT NOT NULL CHECK(json_valid(request_json)), request_digest TEXT NOT NULL CHECK(length(request_digest)=64),
+  status TEXT NOT NULL CHECK(status IN ('pending','claimed','applied','stale')),
+  receipt_json TEXT CHECK(receipt_json IS NULL OR json_valid(receipt_json)), created_at INTEGER NOT NULL,
+  UNIQUE(plan_id, sequence)
+) STRICT, WITHOUT ROWID;
+CREATE UNIQUE INDEX IF NOT EXISTS deployment_runtime_epochs_identity ON deployment_runtime_epochs(plan_id,runtime_digest)
+  WHERE status IN ('pending','claimed');`
 
 const hostInputWitnessSchema = `CREATE TABLE IF NOT EXISTS activation_host_input_witnesses (
   plan_id TEXT PRIMARY KEY REFERENCES activation_plans(id) ON DELETE RESTRICT,
@@ -1230,6 +1241,9 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 25) {
       database.exec(`BEGIN IMMEDIATE; ${hostInputWitnessSchema} PRAGMA user_version = 25; COMMIT;`)
     } else database.exec(hostInputWitnessSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 26) {
+      database.exec(`BEGIN IMMEDIATE; ${runtimeEpochSchema} PRAGMA user_version = 26; COMMIT;`)
+    } else database.exec(runtimeEpochSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {
