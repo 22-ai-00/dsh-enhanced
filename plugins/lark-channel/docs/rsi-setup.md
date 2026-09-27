@@ -4,7 +4,7 @@
 
 双 Host 配置入口要求 Linux、可用的 systemd user session、两个已安装的 profile，以及已配置的有限授权器和 release/Host adapters。独立的源码准备入口不启动 Host。它负责核对授权与配置、成对写入和启动服务；完整生产部署还需要独立行为观测与实际使用验收。源码发布轨使用授权的本地 registry，仓库公共 npm 发版仍走仓库发布流程。
 
-## 1. 准备源码与两个 profile
+## 1. 准备源码、构建环境与两个 profile
 
 新安装的 `supervised` 场景会自动准备私有源码仓库，并安装下述目标依赖。源码放在 `$DSH_HOME/rsi-sources/<profile>/`：`checkout` 为独立工作树，`release.git` 为本地 bare 发布仓库，`bootstrap.json` 保存来源与初始提交。npm 安装读取本工具版本对应的官方 `v<version>` tag；本地安装只复制 checkout 已提交的 HEAD，保留原工作区的未提交修改。
 
@@ -18,7 +18,18 @@
 
 输出 JSON 的 `repository` 与 `baseline` 可直接用于 `sourceJobs`；Growth 与相关授权须引用同一仓库。初始发布分支为 `repairs`，受管基准为 `refs/dsh-source/repairs`。重复执行会复用并核对已保存的来源和版本，保留已推进的发布分支及基准；它不会把日常修复回退到安装版本。不同版本或来源不能覆盖已有目录，须先完成部署迁移。准备过程需要 Git，官方来源还需要访问 GitHub；失败或中断不会被当成完成。
 
-此步只准备源码与发布仓库。签名配置、registry、构建执行环境、协调器与 manifest 仍按后续步骤配置；源码存在不代表双 Host 自动采用已启用。
+新安装还会尝试准备离线构建镜像。当前完整仓库检查沿用已验证的 Linux x64、Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；不满足这些前置条件时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。实际镜像构建失败或已有资源不一致会停止安装。
+
+支持的环境可单独运行严格构建准备：
+
+```sh
+~/.dsh/profiles/web/node_modules/.bin/dsh-rsi-setup \
+  --prepare-build --profile web --dsh-home "$HOME/.dsh"
+```
+
+输出中的 `sourceBuild` 可用于 Control Plane manifest。配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`。重新执行会核对来源、构建输入与本地镜像；不会静默换镜像或重新构建丢失的已登记镜像。Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，只把 lock、workspace 配置及包清单放入构建上下文；不复制源码、主机包缓存或凭据。首次镜像准备需要网络，随后候选构建离线运行。
+
+自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。源码、镜像及配置已准备不代表双 Host 自动采用已启用；签名配置、registry、协调器与完整 manifest 仍按后续步骤配置。
 
 目标先完成 [Lark 配对](setup.md)与 [supervised 安装](supervised-growth.md)，已有唯一 active owner DM 和有效 owner route。旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier 与 Control Plane。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 

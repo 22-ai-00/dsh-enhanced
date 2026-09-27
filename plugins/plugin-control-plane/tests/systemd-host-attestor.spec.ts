@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { lstatSync, readFileSync, realpathSync, statfsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createHash, createHmac, generateKeyPairSync, randomBytes } from 'node:crypto'
 import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
@@ -18,6 +18,24 @@ const roots: string[] = []
 const children = new Set<ReturnType<typeof spawn>>()
 const servers = new Set<Server>()
 const sha = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
+function hasVisibleRecoveryCgroup(): boolean {
+  if (process.platform !== 'linux') return false
+  try {
+    const mount = '/sys/fs/cgroup'
+    const unified = statfsSync(mount).type === 0x63677270
+    const root = unified ? mount : join(mount, 'systemd')
+    const kind = unified ? 0x63677270 : 0x27e0eb
+    if (statfsSync(root).type !== kind) return false
+    const own = readFileSync('/proc/self/cgroup', 'utf8').trim().split('\n')
+      .map(line => line.match(/^\d+:([^:]*):(.*)$/u))
+      .find(match => match && (unified ? match[1] === '' : match[1]!.split(',').includes('name=systemd')))?.[2]
+    if (!own || own === '/' || !own.startsWith('/') || own.includes('..')) return false
+    const members = readFileSync(join(root, own, unified ? 'cgroup.procs' : 'tasks'), 'utf8').trim().split('\n')
+    const parent = join(root, dirname(own))
+    return members.includes(String(process.pid)) && realpathSync(parent) === parent
+      && lstatSync(parent).isDirectory() && statfsSync(parent).type === kind
+  } catch { return false }
+}
 let interpreterRoot: string | undefined
 let interpreterPin: { path: string; sha256: string } | undefined
 async function privateInterpreter() {
@@ -236,7 +254,11 @@ async function rollbackFixture(action: 'restore' | 'stop' = 'stop', mode = 'succ
 }
 
 describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', () => {
-  test.each(['restore', 'stop'] as const)('attests physical %s and reconciles byte-identical replay without another action', async action => {
+  // Positive physical recovery requires the same visible kernel hierarchy
+  // that the attestor verifies. An isolated build with a masked /sys cannot
+  // prove that evidence; the rejection tests below still run there.
+  const recoveryTest = test.skipIf(!hasVisibleRecoveryCgroup())
+  recoveryTest.each(['restore', 'stop'] as const)('attests physical %s and reconciles byte-identical replay without another action', async action => {
     const f = await rollbackFixture(action)
     const first = await f.startRollback().result; expect(first.code, first.stderr).toBe(0)
     const receipt = JSON.parse(first.stdout); await f.verifyRequest(receipt, f.request)
@@ -246,7 +268,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     expect(await f.restarts()).toBe(action === 'restore' ? 2 : 0); expect(await f.stops()).toBe(action === 'stop' ? 1 : 0)
   }, 30_000)
 
-  test.each(['restore', 'stop'] as const)('reconciles lost %s acknowledgement without redispatch', async action => {
+  recoveryTest.each(['restore', 'stop'] as const)('reconciles lost %s acknowledgement without redispatch', async action => {
     const f = await rollbackFixture(action, 'lost-ack')
     const first = await f.startRollback().result; expect(first.code).toBe(1); expect(first.stdout).toBe('')
     const later = await f.startRollback().result; expect(later.code, later.stderr).toBe(0)
@@ -259,7 +281,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     const result = await f.startRollback().result; expect(result.code).toBe(1); expect(await f.stops()).toBe(0)
   })
 
-  test('does not sign stop while the prior Host process remains alive', async () => {
+  recoveryTest('does not sign stop while the prior Host process remains alive', async () => {
     const f = await rollbackFixture()
     const observed = JSON.parse(await readFile(join(f.root, 'observation.json'), 'utf8')); observed.MainPID = String(process.pid)
     await writeFile(join(f.root, 'observation.json'), JSON.stringify(observed))
@@ -267,7 +289,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     expect(result.stderr).toContain('prior Host process still exists'); expect(await f.stops()).toBe(1)
   })
 
-  test('rejects stale cached stop after a successor starts and after a newer generation is reserved', async () => {
+  recoveryTest('rejects stale cached stop after a successor starts and after a newer generation is reserved', async () => {
     const f = await rollbackFixture(); const result = await f.startRollback().result; expect(result.code, result.stderr).toBe(0)
     const path = join(f.root, 'observation.json'); const observed = JSON.parse(await readFile(path, 'utf8'))
     await writeFile(path, JSON.stringify({ ...observed, ActiveState: 'active', SubState: 'running', MainPID: String(process.pid), InvocationID: '3'.repeat(32) }))
@@ -280,7 +302,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     expect(await f.stops()).toBe(1)
   }, 30_000)
 
-  test('rejects restored profile drift and inactive runtime without signing recovery', async () => {
+  recoveryTest('rejects restored profile drift and inactive runtime without signing recovery', async () => {
     const f = await rollbackFixture('restore'); f.ready!.setBehavior('inactive')
     const result = await f.startRollback().result; expect(result.code).toBe(1); expect(result.stdout).toBe('')
     expect(await f.restarts()).toBe(2)
@@ -288,7 +310,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     const drift = await f.startRollback().result; expect(drift.code).toBe(1); expect(await f.restarts()).toBe(2)
   }, 30_000)
 
-  test('proves stop of a transient unit that disappears after dispatch', async () => {
+  recoveryTest('proves stop of a transient unit that disappears after dispatch', async () => {
     const f = await rollbackFixture('stop', 'unloaded')
     const first = await f.startRollback().result; expect(first.code, first.stderr).toBe(0)
     const replay = await f.startRollback().result; expect(replay.code, replay.stderr).toBe(0); expect(replay.stdout).toBe(first.stdout)
@@ -301,7 +323,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     expect(await f.stops()).toBe(0)
   })
 
-  test('verifies explicit baseline-file absence throughout restored runtime observation', async () => {
+  recoveryTest('verifies explicit baseline-file absence throughout restored runtime observation', async () => {
     const f = await rollbackFixture('restore')
     const missing = f.config.profileFiles[1]!
     const ready = f.config as unknown as { readiness: { deploymentFiles: Array<{ path: string; sha256: string }> } }
@@ -315,7 +337,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     expect(await f.restarts()).toBe(2)
   }, 30_000)
 
-  test('cached restore rejects changed authenticated runtime without redispatch', async () => {
+  recoveryTest('cached restore rejects changed authenticated runtime without redispatch', async () => {
     const f = await rollbackFixture('restore'); const first = await f.startRollback().result; expect(first.code, first.stderr).toBe(0)
     f.ready!.setBehavior('epoch-drift')
     const replay = await f.startRollback().result; expect(replay.code).toBe(1); expect(replay.stdout).toBe('')
@@ -508,7 +530,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     await f.verifyRequest(JSON.parse(result.stdout), ready.request)
     expect(await f.restarts()).toBe(1)
   }, 30_000)
-  test.each(['restore', 'stop'] as const)('uses standing recovery authority for %s', async action => {
+  recoveryTest.each(['restore', 'stop'] as const)('uses standing recovery authority for %s', async action => {
     const f = await rollbackFixture(action)
     const standing = await standingFixture('success', f)
     // Forward observer can differ: restore must use the original runtime.

@@ -232,7 +232,7 @@ async function armWait(fixture: Awaited<ReturnType<typeof open>>, eventId: strin
 
 async function runProcessPhase(root: string, name: 'seed' | 'resume'): Promise<void> {
   const vitest = join(process.cwd(), 'node_modules/vitest/vitest.mjs')
-  await execFile(process.execPath, [vitest, 'run', 'tests/autonomy-event-goal.spec.ts', '-t', `process phase ${name}`], {
+  await execFile(process.execPath, [vitest, 'run', '--dir', 'tests', 'tests/autonomy-event-goal.spec.ts', '-t', `process phase ${name}`], {
     cwd: process.cwd(), timeout: 30_000,
     env: { ...process.env, DSH_EVENT_GOAL_PHASE: name, DSH_EVENT_GOAL_ROOT: root },
   })
