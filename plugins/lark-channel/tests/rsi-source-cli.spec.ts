@@ -32,6 +32,12 @@ describe('RSI source preparation CLI', () => {
     expect(() => parseRsiSetupArgs([...base, '--optional-build'])).toThrow('require --prepare-build')
     expect(() => parseRsiSetupArgs([...build, '--docker-path', 'relative'])).toThrow('must be absolute')
     expect(() => parseRsiSetupArgs([...build, '--apply'])).toThrow('cannot be combined')
+    const authorities = ['--prepare-authorities', '--profile', 'web', '--dsh-home', '/tmp/home']
+    expect(parseRsiSetupArgs(authorities)).toMatchObject({ prepareAuthorities: true, profile: 'web', manifestPath: '' })
+    for (const flags of [['--apply'], ['--prepare-source'], ['--prepare-build'], ['--source-repository', '/tmp/source']]) {
+      expect(() => parseRsiSetupArgs([...authorities, ...flags])).toThrow()
+    }
+    await expect(configureRsiSetup(parseRsiSetupArgs(authorities))).rejects.toThrow('separate setup operation')
   })
 
   test('prepares and replays a real local checkout at the installed version without a manifest or profile writes', async () => {
@@ -80,9 +86,28 @@ describe('RSI source preparation CLI', () => {
     const result = JSON.parse(String(output.mock.calls.at(-1)![0]))
     expect(result).toMatchObject({ version, buildUnavailable: expect.stringContaining('daemon unavailable'), repository: join(home, 'rsi-sources', 'web', 'checkout') })
     expect(result.sourceBuild).toBeUndefined()
+    if (process.platform === 'linux') {
+      expect(result.authorityResources.identities.host.publicKeyPem).toContain('PUBLIC KEY')
+      expect(result.authorityRuntime.executables.hostAttestor.path).toContain('rsi-authority-runtimes')
+    } else expect(result.authorityResourcesUnavailable).toContain('requires Linux')
     expect(build.mock.calls.at(-1)![0]).toMatchObject({ profile: 'web', dshHome: home, source: { version } })
     build.mockRejectedValue(new Error('image build failed'))
     await expect(runRsiSetup([...args, '--optional-build'])).rejects.toThrow('image build failed')
     await expect(readFile(join(home, 'profiles', 'web', 'cordis.patch.yml'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test.skipIf(process.platform !== 'linux')('prepares authority tools and stable identities without Git, Docker, a manifest or profile changes', async () => {
+    const home = await mkdtemp(join(await realpath(tmpdir()), 'rsi-authority-cli-')); roots.push(home)
+    const output = vi.spyOn(process.stdout, 'write').mockImplementation(() => true)
+    const args = ['--prepare-authorities', '--profile', 'web', '--dsh-home', home]
+    await runRsiSetup(args)
+    const first = JSON.parse(String(output.mock.calls.at(-1)![0]))
+    expect(first.authorityRuntime.packageVersion).toBe(version)
+    expect(Object.keys(first.authorityRuntime.releaseAdapters)).toHaveLength(8)
+    expect(Object.keys(first.authorityResources.identities)).toHaveLength(14)
+    await runRsiSetup(args)
+    expect(JSON.parse(String(output.mock.calls.at(-1)![0]))).toEqual(first)
+    await expect(readFile(join(home, 'profiles', 'web', 'cordis.patch.yml'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(home, 'rsi-sources', 'web', 'bootstrap.json'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

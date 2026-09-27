@@ -18,6 +18,17 @@
 
 输出 JSON 的 `repository` 与 `baseline` 可直接用于 `sourceJobs`；Growth 与相关授权须引用同一仓库。初始发布分支为 `repairs`，受管基准为 `refs/dsh-source/repairs`。重复执行会复用并核对已保存的来源和版本，保留已推进的发布分支及基准；它不会把日常修复回退到安装版本。不同版本或来源不能覆盖已有目录，须先完成部署迁移。准备过程需要 Git，官方来源还需要访问 GitHub；失败或中断不会被当成完成。
 
+Linux 上的新安装还会自动准备授权工具与本地发布资源，无需手工复制程序、生成密钥或创建 registry。`--prepare-build` 在构建准备前执行此步骤，因此 Docker 不可用时也能保留它们。已有安装可独立运行，不需要 Git、Docker、源码 checkout 或 owner manifest：
+
+```sh
+~/.dsh/profiles/web/node_modules/.bin/dsh-rsi-setup \
+  --prepare-authorities --profile web --dsh-home "$HOME/.dsh"
+```
+
+输出的 `authorityRuntime` 包含 `$DSH_HOME/rsi-authority-runtimes/<profile>` 内独立 Node、官方 Control Plane CLI、运行模块及摘要。八个发布阶段各有独立程序文件，脚本固定使用私有 Node；不依赖 profile 后续替换的程序。只复制当前同版本安装包的文件，执行版本和模块加载检查，不执行 npm 安装脚本。再次准备会核验源包与已部署字节，版本或内容漂移会停止，不能用重装静默改换已固定的运行时。
+
+`authorityResources` 包含 `$DSH_HOME/rsi-authorities/<profile>` 内 14 个独立 Ed25519 身份的公钥与私钥路径、安装/账本标识、私有 `file:` registry、catalog、配置及状态目录。私钥正文不出现在输出中。重复执行复用相同身份并保留已发布内容、catalog 条目及授权状态；缺失、损坏或权限漂移不会触发密钥重建或存储清空。失败只清理本次创建的目录；崩溃留下不完整目录时拒绝覆盖，需要先检查残留。该步骤仅准备资源，不签发 owner 授权、不启动服务；完整 grants、协调器和 manifest 仍需后续接线。
+
 新安装还会尝试准备离线构建镜像。当前完整仓库检查沿用已验证的 Linux x64、Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；不满足这些前置条件时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。实际镜像构建失败或已有资源不一致会停止安装。
 
 支持的环境可单独运行严格构建准备：
@@ -29,7 +40,7 @@
 
 输出中的 `sourceBuild` 可用于 Control Plane manifest。安装器还自动从同一不可变镜像导出原生 Node、pnpm、离线 store 和供应链策略缓存，输出 `releaseBuild` 可直接用于本地发布 adapter 的 `build` 配置；无需手填工具链路径和摘要。资源保存在 `$DSH_HOME/rsi-release-builds/<profile>`，回执固定所有文件内容与模式。导出只创建未启动的容器，复制固定路径后删除容器，不执行其中的源码。发布仍使用本机 `/usr/bin/bwrap` 和 `/usr/bin/tar`；`--optional-build` 在缺少这些前置条件时报告 `releaseBuildUnavailable`，保留已准备的源码验证镜像。实际复制、工具链版本校验或已有回执漂移失败仍会停止安装。配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`。重新执行会核对来源、构建输入与本地镜像；不会静默换镜像或重新构建丢失的已登记镜像。Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，只把 lock、workspace 配置及包清单放入构建上下文；不复制源码、主机包缓存或凭据。首次镜像准备需要网络，随后候选构建离线运行。
 
-自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。源码、镜像、发布工具链及配置已准备不代表双 Host 自动采用已启用；签名配置、registry、协调器与完整 manifest 仍按后续步骤配置。
+自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。源码、镜像、发布工具链与授权资源已准备不代表双 Host 自动采用已启用；owner-bound 授权、协调器与完整 manifest 仍按后续步骤配置。
 
 目标先完成 [Lark 配对](setup.md)与 [supervised 安装](supervised-growth.md)，已有唯一 active owner DM 和有效 owner route。旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier 与 Control Plane。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 
