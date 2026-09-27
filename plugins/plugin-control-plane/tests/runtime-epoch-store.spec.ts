@@ -145,7 +145,7 @@ test('schema-25 upgrade adds the epoch journal while retaining signed historical
   try {
     const check = new DatabaseSync(f.plan.ledger.path, { readOnly: true })
     try {
-      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 27 })
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 28 })
       expect(check.prepare('SELECT COUNT(*) AS n FROM deployment_runtime_epochs').get()).toEqual({ n: 0 })
     } finally { check.close() }
     expect(historicalRows(f.plan.ledger.path, f.plan.id)).toEqual(before)

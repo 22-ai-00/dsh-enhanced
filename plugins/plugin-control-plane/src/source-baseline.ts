@@ -4,6 +4,8 @@ import { Ed25519SourceReleaseAuthority } from './release.js'
 import { runLocalCommand } from './source-workspace.js'
 import { controlPlaneDigest } from './store.js'
 import { resolveTrustKey, type PluginControlTrustConfig } from './trust.js'
+import { sourceBaselineChain, verifySourceMaintenanceRecords,
+  type SourceMaintenanceRecord } from './source-maintenance.js'
 import type { PluginSourcePlan, SourceReleaseOperation } from './types.js'
 
 const COMMIT = /^[a-f0-9]{40}$/u
@@ -130,14 +132,11 @@ async function canonicalBareRemote(remote: string, environment: NodeJS.ProcessEn
   }
 }
 
-interface Edge { base: string; merged: string }
-
 async function trustedChain(input: { repository: string; config: SourceBaselineConfig; trust: PluginControlTrustConfig;
-  history: readonly { plan: PluginSourcePlan; operation: SourceReleaseOperation }[]; signal: AbortSignal }): Promise<readonly string[]> {
-  const { repository, config, trust, history } = input
+  history: readonly { plan: PluginSourcePlan; operation: SourceReleaseOperation }[];
+  maintenance: readonly SourceMaintenanceRecord[]; signal: AbortSignal }): Promise<readonly string[]> {
+  const { repository, config, trust, history, maintenance } = input
   if (history.length > 1024) throw new Error('source baseline release history exceeds bound')
-  const edges: Edge[] = []
-  const bases = new Set<string>(), merged = new Set<string>()
   for (const { plan, operation } of history) {
     input.signal.throwIfAborted()
     const request = operation.request, receipt = operation.receipt
@@ -158,25 +157,28 @@ async function trustedChain(input: { repository: string; config: SourceBaselineC
     const key = resolveTrustKey(trust, 'release', receipt.authority, receipt.keyId)
     const verifier = new Ed25519SourceReleaseAuthority(key.publicKeyPem, key.authority, key.keyId, () => receipt.observedAt)
     await verifier.verify(receipt, { ...plan, revision: request.plan.revision }, request)
-    const base = plan.baseCommit, next = receipt.evidence.mergeCommit
-    if (base === next || bases.has(base) || merged.has(next)) throw new Error('source baseline history forks or repeats a merge')
-    bases.add(base); merged.add(next); edges.push({ base, merged: next })
   }
-  const byBase = new Map(edges.map(edge => [edge.base, edge.merged]))
-  const chain = [config.initialCommit], visited = new Set<string>(chain)
-  while (byBase.has(chain.at(-1)!)) {
-    const next = byBase.get(chain.at(-1)!)!
-    if (visited.has(next)) throw new Error('source baseline history has a cycle')
-    chain.push(next); visited.add(next)
+  if (maintenance.length) {
+    const first = maintenance[0]!
+    const key = resolveTrustKey(trust, 'host-attestation', first.authority, first.keyId)
+    verifySourceMaintenanceRecords(maintenance, { installationId: trust.installationId, ledger: trust.ledger,
+      repository, baseline: config, hostIdentity: key })
   }
-  if (chain.length !== history.length + 1) throw new Error('source baseline history is disconnected')
-  return chain
+  return sourceBaselineChain(config, history, maintenance)
+}
+
+/** Historical receipts are verified at their signed observation time. */
+export async function verifySourceBaselineHistory(input: { repository: string; config: SourceBaselineConfig;
+  trust: PluginControlTrustConfig; history: readonly { plan: PluginSourcePlan; operation: SourceReleaseOperation }[];
+  maintenance: readonly SourceMaintenanceRecord[]; signal: AbortSignal }): Promise<readonly string[]> {
+  return trustedChain(input)
 }
 
 /** Advance only an owner-pinned private Git ref; never touch HEAD, index, or worktree. */
 export async function resolveSourceBaseline(input: { repository: string; config: SourceBaselineConfig;
   environment: NodeJS.ProcessEnv; signal: AbortSignal; assertCurrent: () => void | Promise<void>;
   readHistory: () => readonly { plan: PluginSourcePlan; operation: SourceReleaseOperation }[];
+  readMaintenance?: () => readonly SourceMaintenanceRecord[];
   trust: PluginControlTrustConfig }): Promise<string> {
   validateSourceBaselineConfig(input.config)
   const { repository, config } = input, signal = AbortSignal.any([input.signal, AbortSignal.timeout(30_000)])
@@ -195,14 +197,16 @@ export async function resolveSourceBaseline(input: { repository: string; config:
   await current()
   await canonicalRepository(repository, environment, signal)
   await canonicalBareRemote(config.remote, environment, signal)
-  const history = input.readHistory(), historyDigest = controlPlaneDigest(history)
+  const history = input.readHistory(), maintenance = input.readMaintenance?.() ?? []
+  const historyDigest = controlPlaneDigest({ history, maintenance })
   const trustDigest = controlPlaneDigest(input.trust)
-  const chain = await trustedChain({ repository, config, trust: input.trust, history, signal })
+  const chain = await trustedChain({ repository, config, trust: input.trust, history, maintenance, signal })
   const final = chain.at(-1)!
   const remoteRef = `refs/heads/${config.targetBranch}`
   const verifyState = async (): Promise<void> => {
     await current()
-    if (controlPlaneDigest(input.readHistory()) !== historyDigest || controlPlaneDigest(input.trust) !== trustDigest) {
+    if (controlPlaneDigest({ history: input.readHistory(), maintenance: input.readMaintenance?.() ?? [] }) !== historyDigest
+      || controlPlaneDigest(input.trust) !== trustDigest) {
       throw new Error('source baseline authority changed during synchronization')
     }
     await canonicalRepository(repository, environment, signal)

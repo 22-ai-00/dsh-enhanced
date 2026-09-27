@@ -105,6 +105,8 @@ dsh-rsi-setup --prepare-local-update --profile web --dsh-home "$HOME/.dsh"
 
 更新构建先用已固定摘要的 manifest-only Docker 构建器准备依赖镜像，再导出独立 Node/pnpm/store/cache。候选的 build/pack 脚本在现有 release adapter 的离线 bubblewrap 环境内运行，只挂载构建副本、输出及只读工具链/依赖，不提供原 Home、原 Git 仓库、凭据或环境变量。此步骤需要与首次构建准备相同的 Linux x64、Docker 和 bubblewrap 支持；没有宿主机直接构建的回退路径。输出 `mode: prepared` 只表示源码和制品已准备，尚未迁移签名源码历史、构建/授权配置或切换服务；当前普通 upgrade 仍拒绝冻结本地安装，包括尚未创建协调器收据的安装。后续激活须由停机事务重新核对当前状态，不能把准备收据当作激活授权。
 
+安装事务可通过只读候选检查重新验证源提交、原安装、tarball、固定构建器和导出的工具链；它不会执行 Docker 或候选脚本，也不会补建丢失的资源。这里的构建资源检查证明本地记录和文件仍匹配，不证明 Docker 镜像当前可运行。源码维护 helper 在独立 Home 副本中导入新提交、更新受管 refs，并保留最初 bootstrap、Git 对象及 `baseline.initialCommit`；既有 Host 密钥签名的 `maintenance.json` 使后续源码读取和候选准备解析到新版本。Control Plane schema 28 将该维护记录与旧 release 收据一起校验，拒绝未结源码任务、断链、旧 tip 或不匹配的 Host 身份。它是完整升级事务的内部接口，尚未开放为直接替换运行中 Agent 的命令；协议边界见[兼容性说明](../../../docs/compatibility.md#本地源码维护历史control-plane-schema-28)。
+
 自动入口只收集已启用且可修复的 `@dsh-enhanced/*` 条目，核对同批包名、版本、patch、入口及声明的 Host 文件；Delivery、Lark 的原始 Loader 配置与生成后的 Growth Driver、Verifier 配置都进入目标 observer。停机后临时加载最终计划的 systemd unit，以真实 `systemctl show` 捕获授权所需属性，再恢复原 unit；捕获期间不启动服务。随后成对应用 patch、环境绑定和 unit，先启动协调器再启动目标。就绪判断要求两个 PID、InvocationID 与重启计数连续 12 秒稳定，目标 observer 与实际进程和配置摘要一致，并读到本次启动后持久登记的、绑定当前 owner scope 的协调器原生 Automation。它证明这次部署的有限启动状态，不证明普通任务已产生候选、通过独立验收或完成采用/回滚。
 
 崩溃留下的 `prepared` journal 会先在两个 Host 停机后回滚；若回滚确认成功，先恢复原来运行的服务，再继续新预检。应用前失败仅在原 patch、journal、unit 均可核对时恢复原服务；未知状态保持停机供对账。已应用后的启动或就绪失败保留 applied journal 和配置，供停止服务、排查后重试或显式回滚。自动重试沿用原有限授权起点、期限和额度。

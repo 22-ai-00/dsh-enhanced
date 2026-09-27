@@ -192,6 +192,38 @@ async function existing(path: string, expected: Omit<Receipt, 'sourceCommit' | '
   return result
 }
 
+/** Read the registered source without creating or repairing any workspace. */
+export async function readRsiSourceWorkspace(input: { dshHome: string; profile: string; version?: string;
+  sourceRepository?: string | undefined; signal?: AbortSignal }): Promise<RsiSourceWorkspace> {
+  canonicalPath(input.dshHome, 'DSH_HOME')
+  if (!PROFILE.test(input.profile) || input.version !== undefined && !VERSION.test(input.version)) fail('invalid profile or exact version')
+  await safeHome(input.dshHome)
+  const final = join(input.dshHome, 'rsi-sources', input.profile)
+  await privateDirectory(join(input.dshHome, 'rsi-sources'))
+  await privateDirectory(final)
+  const receipt = JSON.parse((await readStable(join(final, 'bootstrap.json'), 16_384, true)).toString('utf8')) as Receipt
+  if (!VERSION.test(receipt.version) || !receipt.origin || !['local-head', 'official-tag'].includes(receipt.origin.kind)) fail('source bootstrap identity is invalid')
+  if (input.sourceRepository !== undefined) canonicalPath(input.sourceRepository, 'source repository')
+  const origin: RsiSourceWorkspace['origin'] = input.sourceRepository === undefined ? receipt.origin
+    : { kind: 'local-head', locator: input.sourceRepository, ref: 'HEAD' }
+  if (origin.kind === 'local-head') canonicalPath(origin.locator, 'source repository')
+  else if (origin.locator !== OFFICIAL || origin.ref !== `refs/tags/v${receipt.version}`) fail('official source identity differs')
+  const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(180_000)])
+  const expected = { schemaVersion: 1 as const, version: receipt.version, origin,
+    repository: join(final, 'checkout'), dshHome: input.dshHome, profile: input.profile,
+    baseline: { ref: 'refs/dsh-source/repairs' as const, remote: join(final, 'release.git'), targetBranch: 'repairs' as const } }
+  let maintained = false
+  try { await lstat(join(final, 'maintenance.json')); maintained = true }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  const result = maintained
+    ? (await (await import('./rsi-source-maintenance.js')).readRsiSourceMaintenance({
+      logicalHome: input.dshHome, physicalHome: input.dshHome, profile: input.profile, signal })).workspace
+    : await existing(final, expected, signal)
+  if (JSON.stringify(result.origin) !== JSON.stringify(origin)
+    || input.version !== undefined && result.version !== input.version) fail('effective source identity differs')
+  return result
+}
+
 /** Caller must hold the DSH_HOME lifecycle lock across this operation and setup. */
 export async function prepareRsiSourceWorkspace(input: { dshHome: string; profile: string; version: string;
   sourceRepository?: string | undefined; signal?: AbortSignal }): Promise<RsiSourceWorkspace> {
@@ -217,7 +249,7 @@ export async function prepareRsiSourceWorkspace(input: { dshHome: string; profil
   const expected = { schemaVersion: 1 as const, version: input.version, origin, repository,
     dshHome: input.dshHome, profile: input.profile,
     baseline: { ref: 'refs/dsh-source/repairs' as const, remote, targetBranch: 'repairs' as const } }
-  try { await lstat(final); return existing(final, expected, signal) }
+  try { await lstat(final); return readRsiSourceWorkspace({ ...input, signal }) }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   const stage = await mkdtemp(join(parent, `.${input.profile}-stage-`))
   await chmod(stage, 0o700)

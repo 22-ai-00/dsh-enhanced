@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto'
 import { lstat, mkdir, readdir, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { rsiBuildResources as io } from './rsi-build.js'
+import { rsiBuildResources as io, readRsiBuildEnvironment } from './rsi-build.js'
+import { readRsiReleaseBuildEnvironment } from './rsi-release-build.js'
 import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages,
   type RsiLocalCohort, type RsiLocalCohortPorts } from './rsi-local-cohort.js'
-import { prepareRsiSourceWorkspace } from './rsi-source.js'
+import { prepareRsiSourceWorkspace, readRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiSourceUpdate, readRsiSourceUpdate, type RsiSourceUpdateCandidate } from './rsi-source-update.js'
 import { withDshHomeLifecycleLock } from './setup.js'
 import { prepareRsiLocalUpdateBuild } from './rsi-local-update-build.js'
@@ -26,6 +27,57 @@ export interface RsiLocalUpdatePreparation {
   cohort: RsiLocalCohort
   build: Awaited<ReturnType<typeof prepareRsiLocalUpdateBuild>>['evidence'] | null
   receiptDigest: string
+}
+
+/** Caller owns the original Home lifecycle lock. Reading a completed candidate
+ * never creates missing resources and does not run candidate build scripts. */
+export async function readRsiLocalUpdateLocked(input: { dshHome: string; profile: string; root: string;
+  signal?: AbortSignal }): Promise<RsiLocalUpdatePreparation> {
+  if (process.platform !== 'linux' || !profileName.test(input.profile)
+    || !isAbsolute(input.dshHome) || resolve(input.dshHome) !== input.dshHome
+    || !isAbsolute(input.root) || resolve(input.root) !== input.root
+    || await realpath(input.dshHome) !== input.dshHome || await realpath(input.root) !== input.root) fail('invalid preparation identity')
+  await io.directory(input.dshHome, false)
+  const parent = join(dirname(input.dshHome), `.dsh-rsi-local-updates-${hash(input.dshHome).slice(0, 16)}`)
+  if (dirname(input.root) !== parent) fail('preparation is outside its bound parent')
+  await io.directory(parent); await io.directory(input.root)
+  const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(180_000)])
+  signal.throwIfAborted()
+  const raw = await io.readStable(join(input.root, 'receipt.json'), 20_971_520, true)
+  const saved = JSON.parse(raw.toString('utf8')) as RsiLocalUpdatePreparation
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)
+    || !isDeepStrictEqual(Object.keys(saved).sort(), ['schemaVersion', 'mode', 'dshHome', 'profile', 'root',
+      'candidateHome', 'originalCohortDigest', 'source', 'cohort', 'build', 'receiptDigest'].sort())) fail('prepared update receipt is invalid')
+  const { receiptDigest, ...body } = saved
+  if (receiptDigest !== hash(JSON.stringify(body)) || saved.schemaVersion !== 1 || saved.mode !== 'prepared'
+    || saved.dshHome !== input.dshHome || saved.profile !== input.profile || saved.root !== input.root
+    || saved.candidateHome !== join(input.root, 'home') || !saved.build) fail('prepared update receipt binding differs')
+  if (!isDeepStrictEqual((await readdir(input.root)).sort(), ['home', 'receipt.json', 'source'])) fail('unexpected preparation contents')
+  const original = await readRsiLocalCohort(input)
+  if (saved.originalCohortDigest !== original.receiptDigest) fail('prepared update no longer matches installed cohort')
+  const sourceInput = { dshHome: input.dshHome, profile: input.profile, sourceRepository: original.sourceRepository,
+    candidateRoot: join(input.root, 'source'), signal }
+  const source = await readRsiSourceUpdate(sourceInput)
+  const identity = hash(JSON.stringify({ preparation: 'isolated-build-v1', home: input.dshHome, profile: input.profile,
+    original: original.receiptDigest, upstreamCommit: source.upstreamCommit, repairCommit: source.repairCommit }))
+  if (join(parent, identity) !== input.root || !isDeepStrictEqual(saved.source, source)) fail('prepared source differs')
+  const workspace = await readRsiSourceWorkspace({ dshHome: saved.candidateHome, profile: input.profile,
+    sourceRepository: source.repository, signal })
+  if (workspace.sourceCommit !== source.sourceCommit || workspace.version !== source.version) fail('candidate workspace differs from prepared source')
+  const cohort = await readRsiLocalCohort({ dshHome: saved.candidateHome, profile: input.profile, source: workspace })
+  const sourceBuild = await readRsiBuildEnvironment({ dshHome: saved.candidateHome, profile: input.profile, source: workspace, signal })
+  const releaseBuild = await readRsiReleaseBuildEnvironment({ dshHome: saved.candidateHome, profile: input.profile, build: sourceBuild, signal })
+  if (!isDeepStrictEqual(saved.cohort, cohort) || !isDeepStrictEqual(saved.build, { sourceBuild, releaseBuild })) fail('prepared build or cohort differs')
+  await verifyRsiLocalInstalledPackages({ cohort: original, profilePath: join(input.dshHome, 'profiles', input.profile) })
+  if (!isDeepStrictEqual(await readRsiSourceUpdate(sourceInput), source)
+    || !isDeepStrictEqual(await readRsiLocalCohort(input), original)
+    || !(await io.readStable(join(input.root, 'receipt.json'), 20_971_520, true)).equals(raw)) fail('preparation or original changed during verification')
+  signal.throwIfAborted()
+  return saved
+}
+
+export async function readRsiLocalUpdate(input: Parameters<typeof readRsiLocalUpdateLocked>[0]): Promise<RsiLocalUpdatePreparation> {
+  return withDshHomeLifecycleLock(input.dshHome, () => readRsiLocalUpdateLocked(input))
 }
 
 async function privateDirectory(path: string): Promise<void> {

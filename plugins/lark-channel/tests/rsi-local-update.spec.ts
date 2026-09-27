@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import { dirname, join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
 import { prepareRsiLocalCohort, verifyRsiLocalInstalledPackages } from '../src/rsi-local-cohort.js'
-import { prepareRsiLocalUpdate } from '../src/rsi-local-update.js'
+import { prepareRsiLocalUpdate, readRsiLocalUpdate } from '../src/rsi-local-update.js'
 import { parseRsiSetupArgs } from '../src/rsi-setup.js'
 import { localCohortFixture, installFixture } from './fixtures/rsi-local-cohort.js'
 
@@ -107,6 +107,20 @@ test('default preparation refuses missing isolated build inputs without running 
   // This minimal fixture has no digest-pinned Docker builder inputs.
   await expect(prepareRsiLocalUpdate(f.args)).rejects.toThrow()
   await expect(readFile(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+  await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
+}, 60_000)
+
+test('reading an update never recreates an absent candidate or accepts a preparation without isolated build evidence', async () => {
+  const f = await fixture(); await f.next()
+  const result = await prepareRsiLocalUpdate(f.args, f.ports)
+  const args = { dshHome: f.home, profile: f.profile, root: result.root }
+  await expect(readRsiLocalUpdate(args)).rejects.toThrow('receipt binding differs')
+  await rm(join(result.root, 'receipt.json'))
+  await expect(readRsiLocalUpdate(args)).rejects.toThrow()
+  await expect(readFile(join(result.root, 'receipt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  await rm(result.root, { recursive: true })
+  await expect(readRsiLocalUpdate(args)).rejects.toThrow()
+  await expect(readdir(result.root)).rejects.toMatchObject({ code: 'ENOENT' })
   await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
 }, 60_000)
 

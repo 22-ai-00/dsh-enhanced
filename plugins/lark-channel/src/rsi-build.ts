@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import type { Config as ControlPlaneConfig } from '@dsh-enhanced/plugin-control-plane'
-import type { RsiSourceWorkspace } from './rsi-source.js'
+import { readRsiSourceWorkspace, type RsiSourceWorkspace } from './rsi-source.js'
 
 type SourceBuild = NonNullable<ControlPlaneConfig['sourceBuild']>
 const COMMIT = /^[a-f0-9]{40}$/u
@@ -181,9 +182,17 @@ async function sourceInputs(source: RsiSourceWorkspace, expectedRepository: stri
   files: Map<string, Buffer>; hashes: Record<string, string>; contextFiles: string[]; lockSha256: string
 }> {
   if (source.schemaVersion !== 1 || !COMMIT.test(source.sourceCommit) || source.repository !== expectedRepository
-    || source.baseline.initialCommit !== source.sourceCommit
+    || !COMMIT.test(source.baseline.initialCommit)
     || source.baseline.ref !== 'refs/dsh-source/repairs' || source.baseline.targetBranch !== 'repairs'
     || source.baseline.remote !== join(dirname(expectedRepository), 'release.git')) fail('source workspace binding is invalid')
+  if (source.baseline.initialCommit !== source.sourceCommit) {
+    // A newer checkout must be derived from retained, Host-signed maintenance
+    // history. A caller-supplied commit alone cannot replace the original root.
+    const current = await readRsiSourceWorkspace({ dshHome: dirname(dirname(dirname(expectedRepository))),
+      profile: basename(dirname(expectedRepository)),
+      ...(source.origin.kind === 'local-head' ? { sourceRepository: source.origin.locator } : {}) })
+    if (!isDeepStrictEqual(current, source)) fail('source workspace differs from signed maintenance history')
+  }
   await directory(source.repository)
   const files = new Map<string, Buffer>()
   const contextFiles = ['scripts/isolation/source-builder.Dockerfile', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml']
@@ -242,7 +251,7 @@ async function imageExists(dockerPath: string, image: string, scratch: string, s
 
 async function replay(final: string, expected: { dshHome: string; profile: string; repository: string;
   sourceCommit: string; dockerPath: string; dockerSha256: string; inputHashes: Record<string, string>;
-  contextFiles: string[]; lockSha256: string }, scratch: string, signal: AbortSignal): Promise<RsiBuildEnvironment> {
+  contextFiles: string[]; lockSha256: string }, scratch: string | undefined, signal: AbortSignal): Promise<RsiBuildEnvironment> {
   await directory(final)
   if (JSON.stringify((await readdir(final)).sort()) !== JSON.stringify(['bootstrap.json', 'seccomp.json'])) fail('build workspace incomplete or unexpected')
   const value = JSON.parse((await readStable(join(final, 'bootstrap.json'), 65_536, true)).toString('utf8')) as Receipt
@@ -257,8 +266,28 @@ async function replay(final: string, expected: { dshHome: string; profile: strin
     || value.lockSha256 !== expected.lockSha256
     || JSON.stringify(value.sourceBuild) !== JSON.stringify(buildConfig(expected.dockerPath, value.sourceBuild.image, join(final, 'seccomp.json')))) fail('build receipt differs from frozen source or Docker client')
   if (digest(await readStable(join(final, 'seccomp.json'), 65_536, true)) !== SECCOMP_SHA) fail('private repository seccomp changed')
-  await imageExists(expected.dockerPath, value.sourceBuild.image, scratch, signal)
+  if (scratch !== undefined) await imageExists(expected.dockerPath, value.sourceBuild.image, scratch, signal)
+  signal.throwIfAborted()
   return { schemaVersion: 1, sourceCommit: value.sourceCommit, sourceBuild: value.sourceBuild }
+}
+
+/** Read recorded build inputs without creating resources or running Docker.
+ * Image availability is checked separately by preparation/execution. */
+export async function readRsiBuildEnvironment(input: { dshHome: string; profile: string;
+  source: RsiSourceWorkspace; signal?: AbortSignal }): Promise<RsiBuildEnvironment> {
+  if (!exactPath(input.dshHome) || !PROFILE.test(input.profile)) fail('invalid DSH_HOME or profile')
+  await directory(input.dshHome, false)
+  const repository = join(input.dshHome, 'rsi-sources', input.profile, 'checkout')
+  const source = await sourceInputs(input.source, repository)
+  const parent = join(input.dshHome, 'rsi-builds'), final = join(parent, input.profile)
+  await directory(parent); await directory(final)
+  const saved = JSON.parse((await readStable(join(final, 'bootstrap.json'), 65_536, true)).toString('utf8')) as Receipt
+  if (typeof saved.sourceBuild?.dockerPath !== 'string') fail('recorded Docker path is absent')
+  const docker = await dockerExecutable(saved.sourceBuild.dockerPath)
+  const signal = input.signal ?? new AbortController().signal
+  return replay(final, { dshHome: input.dshHome, profile: input.profile, repository,
+    sourceCommit: input.source.sourceCommit, dockerPath: docker.path, dockerSha256: docker.sha256,
+    inputHashes: source.hashes, contextFiles: source.contextFiles, lockSha256: source.lockSha256 }, undefined, signal)
 }
 
 /** Caller holds the DSH_HOME lifecycle lock; no profile or service is changed here. */
