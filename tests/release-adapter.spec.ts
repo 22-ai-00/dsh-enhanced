@@ -23,7 +23,7 @@ import {
   sourcePublishReconciliationRequestDigest,
   sourcePublishReconciliationSigningPayload,
 } from '../plugins/plugin-control-plane/src/release.ts'
-import { defaultHostAttestationPolicy, type PluginControlTrustConfig } from '../plugins/plugin-control-plane/src/trust.ts'
+import { defaultHostAttestationPolicy, loadTrustConfig } from '../plugins/plugin-control-plane/src/trust.ts'
 import type {
   SourceReleaseAdapterIdentity,
   SourceReleaseArtifact,
@@ -691,12 +691,22 @@ function runReconciliationAdapter(target: ReleaseFixture, request: SourcePublish
 async function invokePinnedAdapter(target: ReleaseFixture, request: SourceReleaseRequest): Promise<SourceReleaseReceipt> {
   const role = target.roles[request.phase]; const previous = process.env[role.environmentName]
   process.env[role.environmentName] = role.configPath
-  const trust: PluginControlTrustConfig = { schemaVersion: 4, installationId, dshHome: target.root, ledger: request.ledger,
+  const independentKey = (authority: string) => ({ authority, keyId: authority,
+    publicKeyPem: generateKeyPairSync('ed25519').publicKey.export({ format: 'pem', type: 'spki' }).toString() })
+  const trustPath = join(target.root, 'invocation-trust.json')
+  await writeJson(trustPath, { schemaVersion: 4, installationId, dshHome: target.root, ledger: request.ledger,
     executor: { id: 'unused', version: '1.0.0', path: target.nodePath,
       sha256: digestBytes(await readFile(target.nodePath)), environmentAllowlist: [] },
-    hostPolicy: defaultHostAttestationPolicy, catalog: request.catalog, releaseRegistry: request.registry, releaseReceiptTtlMs: 60_000,
-    releaseAdapters: { [request.phase]: { ...role.identity, environmentAllowlist: [role.environmentName], timeoutMs: 45_000 } },
-    approvalKeys: [], hostAttestationKeys: [], releaseKeys: [], releaseAuthorizationKeys: [] }
+    hostPolicy: defaultHostAttestationPolicy, hostAttestor: null,
+    catalog: { id: request.catalog.id, path: request.catalog.path }, releaseRegistry: request.registry, releaseReceiptTtlMs: 60_000,
+    releaseAdapters: Object.fromEntries(Object.entries(target.roles).map(([phase, value]) => [phase,
+      { ...value.identity, environmentAllowlist: [value.environmentName], timeoutMs: 45_000 }])),
+    approvalKeys: [independentKey('source-owner')], hostAttestationKeys: [independentKey('host-owner')],
+    releaseKeys: Object.values(target.roles).map(value => ({ authority: value.identity.authority, keyId: value.identity.keyId, publicKeyPem: value.publicKeyPem })),
+    releaseAuthorizationKeys: [{ authority: target.authorization.authority, keyId: target.authorization.keyId,
+      publicKeyPem: await readFile(join(role.directory, 'authorization-public.pem'), 'utf8') }] })
+  // Exercise the real installation boundary before invoking the real adapter.
+  const trust = await loadTrustConfig(trustPath)
   try { return await invokeSourceReleaseAdapter(trust, request) } finally {
     if (previous === undefined) delete process.env[role.environmentName]; else process.env[role.environmentName] = previous
   }

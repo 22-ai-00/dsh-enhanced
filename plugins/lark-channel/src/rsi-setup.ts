@@ -15,6 +15,7 @@ import { prepareRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiBuildEnvironment, RsiBuildUnavailableError } from './rsi-build.js'
 import { prepareRsiReleaseBuildEnvironment, RsiReleaseBuildUnavailableError } from './rsi-release-build.js'
 import { version } from './version.js'
+import { validateRsiHostAuthorities } from './rsi-host-authorities.js'
 
 const MAX_BYTES = 2_097_152
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -249,6 +250,10 @@ export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding
   }
   if ([approvals.grant.expiresAt, releases.grant.expiresAt, adoptions.grant.expiresAt, observations.grant.policy.expiresAt,
     manifest.sourceReviews.expiresAt].some(value => value <= Date.now())) fail('finite authority has expired')
+  await validateRsiHostAuthorities({ trust, adoption: adoptions, owner: expectedOwner, ledgerPath, trustPath: config.trustPath,
+    targetProfile: manifest.targetProfile,
+    liveQualification: config.sourceAdoptions!.liveQualification, hostDeploymentInputs: config.sourceAdoptions!.hostDeploymentInputs,
+    handoff: config.sourceAdoptions!.handoff, readPrivate: path => readOwnedFile(path) })
 }
 
 export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts = defaultPorts): Promise<{ mode: string; profiles: readonly string[] }> {
