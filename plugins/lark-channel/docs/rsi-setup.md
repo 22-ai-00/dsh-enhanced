@@ -2,7 +2,7 @@
 
 `dsh-rsi-setup` 将已配置的 Lark owner 目标 profile 和独立采用协调器接入原生 Automations。目标 Host 从真实任务反馈形成源码修复，协调器在目标重启期间继续有限交接；目标恢复后重验当前 owner 和反馈，再完成采用。后续任务进入观察与回滚流程。
 
-双 Host 配置入口要求 Linux、可用的 systemd user session、两个已安装的 profile，以及已配置的有限授权器和 release/Host adapters。独立的源码准备入口不启动 Host。它负责核对授权与配置、成对写入和启动服务；完整生产部署还需要独立行为观测与实际使用验收。源码发布轨使用授权的本地 registry，仓库公共 npm 发版仍走仓库发布流程。
+Linux `supervised` 新安装在最终模型、TraeX、Lark 配置和 doctor 完成后自动运行 `dsh-rsi-setup --install-owner`。它使用当前 active owner，准备独立协调器、有限授权与发布/Host 配置，成对应用并启动两个 systemd user Host。需要可用的 systemd user session、完整离线构建资源和同批已安装插件；缺少构建前置条件会返回 `not-ready` 和退出码 3，安装流程不打印完成。完整生产部署仍需实际使用验收。源码发布轨使用授权的本地 registry，仓库公共 npm 发版仍走仓库发布流程。
 
 ## 1. 准备源码、构建环境与两个 profile
 
@@ -27,7 +27,7 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
 
 输出的 `authorityRuntime` 包含 `$DSH_HOME/rsi-authority-runtimes/<profile>` 内独立 Node、官方 Control Plane CLI、运行模块及摘要。八个发布阶段各有独立程序文件，脚本固定使用私有 Node；不依赖 profile 后续替换的程序。只复制当前同版本安装包的文件，执行版本和模块加载检查，不执行 npm 安装脚本。再次准备会核验源包与已部署字节，版本或内容漂移会停止，不能用重装静默改换已固定的运行时。
 
-`authorityResources` 包含 `$DSH_HOME/rsi-authorities/<profile>` 内 14 个独立 Ed25519 身份的公钥与私钥路径、安装/账本标识、私有 `file:` registry、catalog、配置及状态目录。私钥正文不出现在输出中。重复执行复用相同身份并保留已发布内容、catalog 条目及授权状态；缺失、损坏或权限漂移不会触发密钥重建或存储清空。失败只清理本次创建的目录；崩溃留下不完整目录时拒绝覆盖，需要先检查残留。该步骤仅准备资源，不签发 owner 授权、不启动服务；完整 grants、协调器和 manifest 仍需后续接线。
+`authorityResources` 包含 `$DSH_HOME/rsi-authorities/<profile>` 内 14 个独立 Ed25519 身份的公钥与私钥路径、安装/账本标识、私有 `file:` registry、catalog、配置及状态目录。私钥正文不出现在输出中。重复执行复用相同身份并保留已发布内容、catalog 条目及授权状态；缺失、损坏或权限漂移不会触发密钥重建或存储清空。失败只清理本次创建的目录；崩溃留下不完整目录时拒绝覆盖，需要先检查残留。独立的 `--prepare-authorities` 只准备资源；自动 `--install-owner` 后续才生成 owner 配置并启动服务。
 
 新安装还会尝试准备离线构建镜像。当前完整仓库检查沿用已验证的 Linux x64、Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；不满足这些前置条件时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。实际镜像构建失败或已有资源不一致会停止安装。
 
@@ -40,9 +40,9 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
 
 输出中的 `sourceBuild` 可用于 Control Plane manifest。安装器还自动从同一不可变镜像导出原生 Node、pnpm、离线 store 和供应链策略缓存，输出 `releaseBuild` 可直接用于本地发布 adapter 的 `build` 配置；无需手填工具链路径和摘要。资源保存在 `$DSH_HOME/rsi-release-builds/<profile>`，回执固定所有文件内容与模式。导出只创建未启动的容器，复制固定路径后删除容器，不执行其中的源码。发布仍使用本机 `/usr/bin/bwrap` 和 `/usr/bin/tar`；`--optional-build` 在缺少这些前置条件时报告 `releaseBuildUnavailable`，保留已准备的源码验证镜像。实际复制、工具链版本校验或已有回执漂移失败仍会停止安装。配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`。重新执行会核对来源、构建输入与本地镜像；不会静默换镜像或重新构建丢失的已登记镜像。Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，只把 lock、workspace 配置及包清单放入构建上下文；不复制源码、主机包缓存或凭据。首次镜像准备需要网络，随后候选构建离线运行。
 
-自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。源码、镜像、发布工具链与授权资源已准备不代表双 Host 自动采用已启用；owner-bound 授权、协调器与完整 manifest 仍按后续步骤配置。
+自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
 
-目标先完成 [Lark 配对](setup.md)与 [supervised 安装](supervised-growth.md)，已有唯一 active owner DM 和有效 owner route。旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier 与 Control Plane。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
+目标先完成 [Lark 配对](setup.md)与 [supervised 安装](supervised-growth.md)，已有唯一 active owner DM 和有效 owner route。新安装自动补齐目标依赖；旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier 与 Control Plane。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 
 ```sh
 dsh plugin --profile web add \
@@ -58,15 +58,15 @@ dsh plugin --profile rsi-coordinator add \
   @dsh-enhanced/plugin-control-plane
 ```
 
-协调器使用新的自定义 profile，默认从 DSH base 创建。勿从 `web` 模板复制：协调器不需要 Web 服务或第二个 Lark 入口。目标和协调器的 Policy/Automations 状态分开；协调器 Control Plane 的主库独立，专用采用连接按目标 trust 中的精确路径读取共享交接账本。
+自动安装从 DSH base 创建确定性命名的独立协调器 profile，并安装同版本 Policy、Automations、Control Plane；中断后的部分安装仅凭本次私有登记及停机状态修复。手动配置也须使用新的自定义 profile，勿从 `web` 模板复制：协调器不需要 Web 服务或第二个 Lark 入口。目标和协调器的 Policy/Automations 状态分开；协调器 Control Plane 的主库独立，专用采用连接按目标 trust 中的精确路径读取共享交接账本。
 
 ## 2. 准备一次性有限授权 manifest
 
 manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不含 symlink。它引用已存在的私有授权器配置、key、trust、catalog 和控制账本。配置器读取并验证这些文件，不生成授权或签名回执。
 
-安装器接线所需的内部生成接口已提供：`lib/rsi-bootstrap-manifest.js` 的 `createRsiBootstrapManifest` 从有效目标配置、真实 active owner DM、已准备资源及明确的插件/Host 文件范围生成完整 manifest；`lib/rsi-authority-config.js` 的 `compileRsiAuthorityConfigs` 生成 schema4 trust、五份有限授权、八个发布 adapter、公钥文件和 Host resolver/wrapper。调用者必须提供实际 DSH/Git/systemctl 与构建资源的 pins、最终 unit 属性，以及实际安装条目的 observer 摘要；生成器不会从测试常量或模型自评推导这些证据。默认模型继承原任务，已有显式 Growth 模型覆盖会保留。observer 不能观察 Control Plane 自身或本次会重写的配置条目，避免摘要自引用；含运行时 YAML 表达式的目标需要先解析实际 Loader 配置。
+自动入口调用 `lib/rsi-bootstrap-manifest.js` 的 `createRsiBootstrapManifest`，从有效目标配置、真实 active owner DM、已准备资源及声明的插件/Host 文件范围生成完整 manifest；`lib/rsi-authority-config.js` 的 `compileRsiAuthorityConfigs` 生成 schema4 trust、五份有限授权、八个发布 adapter、公钥文件和 Host resolver/wrapper。安装器核对实际 DSH/Git/systemctl 与构建资源的 pins、最终 unit 属性，以及 Loader 条目的 observer 摘要；这些声明文件并非完整的传递性 JS 模块证明。默认模型继承原任务，已有显式 Growth 模型覆盖会保留。observer 不观察 Control Plane 自身，避免摘要自引用；Growth Driver 与 Verifier 按最终生成的配置摘要观察，Delivery 与 Lark 按原始 Loader 配置摘要观察。安装器把 `!!js` 标量按 Loader 原始值处理，不执行该表达式。
 
-`lib/rsi-bootstrap.js` 的 `prepareRsiOwnerConfiguration` 在调用者持有 home lifecycle lock 时，重新核对已准备的程序和身份，创建真实 Control Plane 账本和 observer 密钥，将配置写到私有目录，并执行完整 profile、授权和八阶段 adapter 配置预检，返回 `manifestPath`。重复调用同一冻结输入会核对配置、密钥和 owner，保留已使用的账本与状态，不刷新期限或配额；首次准备发现未登记的配置/账本则拒绝覆盖。失败只清理本次创建且未被修改的文件，崩溃残留需先核对。这些接口不签发任务回执，不修改 profile 或 systemd unit，也不启动 Host；安装器中取得 owner、捕获完整部署输入、创建协调器并自动调用生成/应用步骤的接线仍待完成，普通安装尚未自动启用完整自迭代闭环。
+`--install-owner` 在 home lifecycle lock 下调用 `prepareRsiOwnerConfiguration`，重新核对已准备的程序和身份，创建真实 Control Plane 账本和 observer 密钥，将配置写到私有目录，并执行 profile、授权和八阶段 adapter 配置预检。重复调用核对配置、密钥和 owner，保留已用账本与状态；重试复用原安装授权的起点及到期时间，不自动续期或增额。首次准备发现未登记的配置/账本则拒绝覆盖。`--local` 固定源码 checkout 的已提交 HEAD，但当前本地目录链接不满足安装器的 profile 内包实体约束，会报告 `not-ready`；逐字节源码版本证明仍需后续处理。安装接线已实现，真实普通任务闭环尚未验收。
 
 | 字段 | 要求 |
 | --- | --- |
@@ -89,6 +89,14 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
 
 扫描、源码作业、观察与协调器使用 `subject` scope 的 `automation-runs` budget；模型复盘使用 `global` scope 汇总。Policy 按 scope、metric、period 计量，改 budget ID 不会隔离同一计数池。源码额度按每个原生 automation identity 计量，总作业数另由有限 `sourceJobs.maxSubmissions` 限制。空扫描也消耗配置额度；额度应覆盖所需扫描频率。已有同周期全局规则的额度必须兼容。配置器不会打开 `allowUnbudgetedExecution`。
 
+## 自动安装与就绪判断
+
+正常新装无需手填 manifest。`supervised` 安装完成模型、TraeX、Lark 与 doctor 后，调用当前 profile 内的 `dsh-rsi-setup --install-owner --profile <name> --dsh-home <absolute>`；本地源码安装再传 `--source-repository`。仅 Linux systemd user services 支持此入口。构建前置条件缺失，或本地目录链接使必需包实体位于 profile 外时，返回 `{"mode":"not-ready",...}` 和退出码 3；后者在停服、创建协调器和签发授权前停止，需后续打包内化。其他预检或部署失败也使安装命令非零退出，不显示“安装流程完成”。前序已安装的普通 Agent 与资源保留供修复后重试。
+
+自动入口只收集已启用且可修复的 `@dsh-enhanced/*` 条目，核对同批包名、版本、patch、入口及声明的 Host 文件；Delivery、Lark 的原始 Loader 配置与生成后的 Growth Driver、Verifier 配置都进入目标 observer。停机后临时加载最终计划的 systemd unit，以真实 `systemctl show` 捕获授权所需属性，再恢复原 unit；捕获期间不启动服务。随后成对应用 patch、环境绑定和 unit，先启动协调器再启动目标。就绪判断要求两个 PID、InvocationID 与重启计数连续 12 秒稳定，目标 observer 与实际进程和配置摘要一致，并读到本次启动后持久登记的、绑定当前 owner scope 的协调器原生 Automation。它证明这次部署的有限启动状态，不证明普通任务已产生候选、通过独立验收或完成采用/回滚。
+
+崩溃留下的 `prepared` journal 会先在两个 Host 停机后回滚；若回滚确认成功，先恢复原来运行的服务，再继续新预检。应用前失败仅在原 patch、journal、unit 均可核对时恢复原服务；未知状态保持停机供对账。已应用后的启动或就绪失败保留 applied journal 和配置，供停止服务、排查后重试或显式回滚。自动重试沿用原有限授权起点、期限和额度。
+
 ## 3. 校验、应用、启动
 
 ```sh
@@ -96,7 +104,7 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
   --manifest /private/owner/rsi.json
 ```
 
-默认只读组合 profile、核对当前 owner 与有限授权，不修改 profile 或启动服务。`DSH_HOME` 可由环境变量或 `--dsh-home /absolute/path` 指定。
+此手动 manifest 命令默认只读组合 profile、核对当前 owner 与有限授权，不修改 profile 或启动服务。`DSH_HOME` 可由环境变量或 `--dsh-home /absolute/path` 指定。
 
 应用前停止两个 Host（包括手工启动的进程），并确认没有其他 writer。命令同时检查对应 systemd unit 处于 stopped 状态；系统服务状态不能证明手工进程已停止。
 

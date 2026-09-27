@@ -2,7 +2,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { externalPrincipalId, ownerRouteAuthorityHash, type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
 import { PROTECTED_PLUGIN_DENYLIST, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
-import { isMap, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
+import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { Pin, RsiAuthorityRuntime } from './rsi-authority-runtime.js'
@@ -60,13 +60,38 @@ function plain(value: YAMLMap, label: string): Record<string, unknown> {
   if (!result || typeof result !== 'object' || Array.isArray(result)) fail(`${label} must be an object`)
   return result as Record<string, unknown>
 }
-function noTags(node: Node, label: string): void {
-  if ('tag' in node && typeof node.tag === 'string') fail(`${label} has evaluated YAML tags; supply an independently observed Loader config digest`)
-  if (isMap(node)) for (const pair of node.items) {
-    if (pair.key) noTags(pair.key as Node, label)
-    if (pair.value) noTags(pair.value as Node, label)
+/** Include's entryListSchema keeps !!js as an inert raw `{__jsExpr}` value in
+ * Loader Entry.options. Runtime observation hashes that raw value before the
+ * Fiber interpolates it. Never evaluate the expression while preparing setup. */
+export function rawLoaderConfig(node: Node | string | number | boolean | null | undefined, label: string): unknown {
+  if (node === undefined || node === null) return null
+  if (typeof node === 'string' || typeof node === 'number' || typeof node === 'boolean') return node
+  if (isAlias(node)) fail(`${label} contains a YAML alias`)
+  if (isScalar(node)) {
+    if (node.tag === 'tag:yaml.org,2002:js') {
+      if (typeof node.value !== 'string') fail(`${label} has an invalid !!js scalar`)
+      return { __jsExpr: node.value }
+    }
+    if (node.tag) fail(`${label} has an unsupported YAML tag`)
+    return node.value
   }
-  else if (isSeq(node)) for (const child of node.items) if (child) noTags(child as Node, label)
+  if (isSeq(node)) {
+    if (node.tag) fail(`${label} has an unsupported YAML tag`)
+    return node.items.map(item => rawLoaderConfig(item as Node | undefined, label))
+  }
+  if (isMap(node)) {
+    if (node.tag) fail(`${label} has an unsupported YAML tag`)
+    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+    for (const pair of node.items) {
+      const key = typeof pair.key === 'string' ? pair.key
+        : isScalar(pair.key) && !pair.key.tag && typeof pair.key.value === 'string' ? pair.key.value : undefined
+      if (key === undefined) fail(`${label} has an invalid YAML key`)
+      if (Object.hasOwn(result, key)) fail(`${label} has a duplicate YAML key`)
+      result[key] = rawLoaderConfig(pair.value as Node | undefined, label)
+    }
+    return result
+  }
+  fail(`${label} contains an unsupported YAML node`)
 }
 
 /** This only creates a candidate deployment contract. It performs no I/O and issues no authority. */
@@ -195,17 +220,16 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     }
   } else if (effectiveGrowth.reasoningEffort !== undefined) fail('growth reasoning effort has no fixed model')
 
-  if (!Array.isArray(input.observerTargets) || input.observerTargets.length < 1 || input.observerTargets.length > 32
+  if (!Array.isArray(input.observerTargets) || input.observerTargets.length < 1 || input.observerTargets.length > 30
     || new Set(input.observerTargets.map(target => target.entryId)).size !== input.observerTargets.length) fail('observer targets are invalid')
   for (const target of input.observerTargets) {
     const effective = rows.get(target.entryId)
     if (!effective || effective.get('disabled') === true || mutableRows.has(target.entryId)
       || target.module !== effective.get('name')) fail(`observer target ${target.entryId} is not a stable effective Loader entry`)
     const node = effective.get('config', true) as Node | undefined
-    if (node) noTags(node, target.entryId)
     // Loader observes an omitted configuration as null. Default-only bundles
     // need no artificial YAML config mapping to be observed or bootstrapped.
-    if (runtimeConfigDigest(node?.toJSON() ?? null) !== target.configDigest) fail(`observer target ${target.entryId} config digest differs from effective Loader entry`)
+    if (runtimeConfigDigest(rawLoaderConfig(node, target.entryId)) !== target.configDigest) fail(`observer target ${target.entryId} config digest differs from effective Loader entry`)
   }
 
   const config = input.resources.configRoot, state = input.resources.stateRoot
@@ -261,5 +285,18 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     limits: { periodMs: day, reviews: reviewLimit, discovery: 1440, source: 7, observations: 1440,
       coordinator: 1440, qualification: 1440 },
   }
+  // These two rows are rewritten deterministically by compileRsiProfiles.
+  // Observe their final raw Loader options, not the pre-install dump. Neither
+  // embeds runtimeObserver, so there is no configuration-digest cycle.
+  const verifier = rows.get('dsh-enhanced-assistant-verifier')
+  if (!verifier || verifier.get('disabled') === true) fail('effective verifier is missing')
+  const verifierRaw = rawLoaderConfig(rowConfig(verifier, 'verifier'), 'verifier')
+  if (!verifierRaw || typeof verifierRaw !== 'object' || Array.isArray(verifierRaw)) fail('invalid verifier config')
+  manifest.controlPlane.runtimeObserver!.targets.push(
+    { entryId: 'dsh-enhanced-assistant-growth-driver', module: '@dsh-enhanced/assistant-growth-driver',
+      configDigest: runtimeConfigDigest(manifest.growthDriver), services: ['assistantGrowthDriver'] },
+    { entryId: 'dsh-enhanced-assistant-verifier', module: '@dsh-enhanced/assistant-verifier',
+      configDigest: runtimeConfigDigest({ ...verifierRaw, sourceReviews: manifest.sourceReviews }), services: ['assistantVerifier'] },
+  )
   return manifest
 }

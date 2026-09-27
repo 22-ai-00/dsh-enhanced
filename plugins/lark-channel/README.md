@@ -23,7 +23,7 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 - [日常使用自迭代的双 Host 配置](docs/rsi-setup.md)
 - [进度展示、安全与权限边界](docs/progress-security.md)
 
-双 Host 部署还提供内部 owner manifest/授权生成与私有资源准备接口，复用当前配对身份并预检发布与 Host 配置；安装器自动取得全部部署输入和启动协调器的接线仍待完成，见上述配置指南。
+Linux `supervised` 新安装在模型、TraeX、飞书配置与 doctor 后自动取得当前 owner、生成有限授权与 manifest，并部署目标和独立协调器两个 systemd Host。未就绪会以非零状态停止安装完成提示；重试不续期授权。当前尚未完成真实普通任务驱动的修复、采用和观察验收，见上述配置指南。
 
 ## 兼容性
 

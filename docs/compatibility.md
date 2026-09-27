@@ -16,9 +16,9 @@ Lark setup 的业务接入使用官方 `lark-cli` 1.x、最低已核实版本 `1
 
 ## 日常使用双 Host 配置入口
 
-`dsh-rsi-setup` 随 `lark-channel` 发布，使用同一构建的 Growth Driver、Control Plane、Verifier、Policy 与 Delivery API。新增的 `normalizeControlPlaneConfig` 和 `validateSourceReviewConfig` 是只读配置预检入口；此次不修改数据库 schema 或 DSH/Cordis 基线。两个 Host 和授权器须成套安装当前构建。CLI 要求 Linux/systemd user services，默认仅校验；显式应用具有私有恢复 journal，详见[部署指南](../plugins/lark-channel/docs/rsi-setup.md)。supervised 新安装已自动补齐 Growth Driver；独立协调器及完整双 Host 应用仍需按该指南配置。
+`dsh-rsi-setup` 随 `lark-channel` 发布，使用同一构建的 Growth Driver、Control Plane、Verifier、Policy 与 Delivery API。`normalizeControlPlaneConfig` 和 `validateSourceReviewConfig` 是只读配置预检入口；此次不修改数据库 schema 或 DSH/Cordis 基线。两个 Host 和授权器须成套安装当前构建。CLI 要求 Linux/systemd user services；手动 manifest 入口默认仅校验，显式应用具有私有恢复 journal。Linux `supervised` 新安装通过 `--install-owner` 自动补齐独立协调器、生成当前 owner 的有限配置并成对部署；构建资源未就绪或本地目录链接使包实体位于 profile 外时返回退出码 3。安装器核对已安装包的同批版本、声明入口和 patch，按原始 Loader 配置生成 observer 摘要，最终 systemd 属性取自停机状态下的实际 `systemctl show`。这没有升级 DSH/Cordis ABI，也不构成完整传递性模块字节证明；详见[部署指南](../plugins/lark-channel/docs/rsi-setup.md)。
 
-owner 配置生成器依赖同批本地发布 adapter 的 `inspectLocalReleaseAdapterConfiguration` 只读入口，用真实阶段配置解析器核对私有身份、Git、构建和 registry/catalog 资源，不执行发布阶段。准备器复制并固定这批程序后才生成授权；不能混用缺少此入口的旧副本。没有修改 DSH/Cordis ABI 或账本 schema，安装器的完整 owner/协调器自动接线仍未交付。
+owner 配置生成器依赖同批本地发布 adapter 的 `inspectLocalReleaseAdapterConfiguration` 只读入口，用真实阶段配置解析器核对私有身份、Git、构建和 registry/catalog 资源，不执行发布阶段。准备器复制并固定这批程序后才生成授权；不能混用缺少此入口的旧副本。自动安装接线使用这些固定资源并保留有限授权的原期限和额度；旧 `web` profile 若运行越界的 DSH `0.1.7-rc.2`，其 peer 不兼容导致增强包被跳过，只能作为负向证据，不能证明正向部署。没有修改 DSH/Cordis ABI 或账本 schema，真实普通任务闭环与受管 Host 跟随 latest 更新仍待验收。
 
 ## 即时审批渠道路由
 
