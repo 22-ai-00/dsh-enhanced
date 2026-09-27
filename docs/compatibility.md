@@ -16,7 +16,9 @@ Lark setup 的业务接入使用官方 `lark-cli` 1.x、最低已核实版本 `1
 
 ## 日常使用双 Host 配置入口
 
-`dsh-rsi-setup` 随 `lark-channel` 发布，使用同一构建的 Growth Driver、Control Plane、Verifier、Policy 与 Delivery API。新增的 `normalizeControlPlaneConfig` 和 `validateSourceReviewConfig` 是只读配置预检入口；此次不修改数据库 schema 或 DSH/Cordis 基线。两个 Host 和授权器须成套安装当前构建。CLI 要求 Linux/systemd user services，默认仅校验；显式应用具有私有恢复 journal，详见[部署指南](../plugins/lark-channel/docs/rsi-setup.md)。此前 supervised 安装仍需按该指南补装 Growth Driver 与独立协调器。
+`dsh-rsi-setup` 随 `lark-channel` 发布，使用同一构建的 Growth Driver、Control Plane、Verifier、Policy 与 Delivery API。新增的 `normalizeControlPlaneConfig` 和 `validateSourceReviewConfig` 是只读配置预检入口；此次不修改数据库 schema 或 DSH/Cordis 基线。两个 Host 和授权器须成套安装当前构建。CLI 要求 Linux/systemd user services，默认仅校验；显式应用具有私有恢复 journal，详见[部署指南](../plugins/lark-channel/docs/rsi-setup.md)。supervised 新安装已自动补齐 Growth Driver；独立协调器及完整双 Host 应用仍需按该指南配置。
+
+owner 配置生成器依赖同批本地发布 adapter 的 `inspectLocalReleaseAdapterConfiguration` 只读入口，用真实阶段配置解析器核对私有身份、Git、构建和 registry/catalog 资源，不执行发布阶段。准备器复制并固定这批程序后才生成授权；不能混用缺少此入口的旧副本。没有修改 DSH/Cordis ABI 或账本 schema，安装器的完整 owner/协调器自动接线仍未交付。
 
 ## 即时审批渠道路由
 

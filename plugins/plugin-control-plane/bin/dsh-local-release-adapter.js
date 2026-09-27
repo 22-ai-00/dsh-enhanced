@@ -1510,6 +1510,39 @@ function persistReviewReceipt(receipt, config) {
   } else immutableJson(path, receipt, 0o600)
 }
 
+/** Read-only installation preflight. No request, receipt, lock, subprocess or
+ * release phase is created; return public identity only, never loaded keys. */
+export function inspectLocalReleaseAdapterConfiguration(environment, phase) {
+  if (!PHASES.has(phase)) fail('adapter inspection phase is invalid')
+  const config = loadConfig(environment, phase)
+  if (config.phase !== phase) fail('adapter config differs from inspection phase')
+  const publicKey = createPublicKey(config.privateKey)
+  if (config.authorizationAuthority.publicKey.equals(publicKey)
+    || (config.authorizationAuthority.authority === config.authority && config.authorizationAuthority.keyId === config.keyId)) {
+    fail('release authorization and adapter identities must be independent')
+  }
+  if (['pr', 'review', 'merge', 'build'].includes(phase)) {
+    const git = gitConfig(config.git)
+    if (phase === 'review' && (!git.reviewStore || !git.reviewDecisionRoot)) fail('review requires independent decision and receipt stores')
+    if (phase === 'merge' && (!git.reviewStore || !git.reviewAuthority || git.reviewAuthority.publicKey.equals(publicKey))) {
+      fail('merge requires an independent review identity and receipt store')
+    }
+  }
+  if (phase === 'build') buildConfig(config.build)
+  if (['publish', 'registry-verify', 'catalog-admission'].includes(phase)) {
+    const registry = registryConfig(config.registry)
+    if (!registry.signer) fail('registry requires an artifact signer')
+    if (phase === 'registry-verify' && !registry.downloadRoot) fail('registry verification requires a separate download root')
+    if (registry.signer.publicKey.equals(publicKey)) fail('registry phase and artifact signer must be independent')
+  }
+  if (phase === 'catalog-admission') {
+    const catalog = catalogConfig(config.catalog)
+    const helper = openPinnedFile(catalog.helper, 'catalog helper', 1_048_576, false)
+    try { privateFile(catalog.path, 'catalog file') } finally { closePinnedFile(helper) }
+  }
+  return { id: config.id, phase, executablePath: config.executablePath, authority: config.authority, keyId: config.keyId }
+}
+
 export async function runLocalReleaseAdapter(argv = process.argv.slice(2), environment = process.env, hooks = {}) {
   if (argv.length === 1 && argv[0] === '--version') { process.stdout.write(`${LOCAL_RELEASE_ADAPTER_VERSION}\n`); return }
   if (argv.length === 1 && argv[0] === '--capabilities') {

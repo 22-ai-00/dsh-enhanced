@@ -64,6 +64,10 @@ dsh plugin --profile rsi-coordinator add \
 
 manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不含 symlink。它引用已存在的私有授权器配置、key、trust、catalog 和控制账本。配置器读取并验证这些文件，不生成授权或签名回执。
 
+安装器接线所需的内部生成接口已提供：`lib/rsi-bootstrap-manifest.js` 的 `createRsiBootstrapManifest` 从有效目标配置、真实 active owner DM、已准备资源及明确的插件/Host 文件范围生成完整 manifest；`lib/rsi-authority-config.js` 的 `compileRsiAuthorityConfigs` 生成 schema4 trust、五份有限授权、八个发布 adapter、公钥文件和 Host resolver/wrapper。调用者必须提供实际 DSH/Git/systemctl 与构建资源的 pins、最终 unit 属性，以及实际安装条目的 observer 摘要；生成器不会从测试常量或模型自评推导这些证据。默认模型继承原任务，已有显式 Growth 模型覆盖会保留。observer 不能观察 Control Plane 自身或本次会重写的配置条目，避免摘要自引用；含运行时 YAML 表达式的目标需要先解析实际 Loader 配置。
+
+`lib/rsi-bootstrap.js` 的 `prepareRsiOwnerConfiguration` 在调用者持有 home lifecycle lock 时，重新核对已准备的程序和身份，创建真实 Control Plane 账本和 observer 密钥，将配置写到私有目录，并执行完整 profile、授权和八阶段 adapter 配置预检，返回 `manifestPath`。重复调用同一冻结输入会核对配置、密钥和 owner，保留已使用的账本与状态，不刷新期限或配额；首次准备发现未登记的配置/账本则拒绝覆盖。失败只清理本次创建且未被修改的文件，崩溃残留需先核对。这些接口不签发任务回执，不修改 profile 或 systemd unit，也不启动 Host；安装器中取得 owner、捕获完整部署输入、创建协调器并自动调用生成/应用步骤的接线仍待完成，普通安装尚未自动启用完整自迭代闭环。
+
 | 字段 | 要求 |
 | --- | --- |
 | `schemaVersion` | `1` |
