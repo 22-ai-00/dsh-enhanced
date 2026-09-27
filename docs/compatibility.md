@@ -26,7 +26,7 @@ Delivery 的新审批桥要求提供 `registerHumanApprovalAnswerer` 的同批 P
 
 ## Host 基线
 
-当前开发与测试基线为官方 npm `latest` 的 **DSH `0.1.5-rc.3`**（2026-09-26 核对 registry）。没有发布不带预发布后缀的 `0.1.7`；`next` 为 `0.1.7-rc.2`，`alpha` 为 `0.1.7-alpha.2`，不能把这些称为正式版。按用户选择跟随官方 latest 通道，不选择 Alpha/Beta。新安装在运行时解析 latest 到精确版本并检查兼容范围；已装兼容 Host 保持复用。`dsh-rsi update --all` 目前更新 CLI 与插件集合，Host 更新事务尚待实现，不能宣称它已自动更新 DSH。工作区 catalog、Host peers 和下一版发布基线使用 `0.1.5-rc.3`；已经发布的 installer cohort 与发布账本历史保留原值，下一次 release prepare 才更新其远端制品固定信息。
+当前开发与测试基线为官方 npm `latest` 的 **DSH `0.1.5-rc.3`**（2026-09-27 核对 registry）。没有发布不带预发布后缀的 `0.1.7`；`next` 为 `0.1.7-rc.2`，`alpha` 为 `0.1.7-alpha.2`，不能把这些称为正式版。按用户选择跟随官方 latest 通道，不选择 Alpha/Beta。`dsh-rsi install` 对全新空 Home 在运行时解析 latest 到精确版本并检查兼容范围，安装至独立私有目录并把版本及文件收据绑定到 Home；重试及插件升级复用绑定，不替换全局 Host。直接 shell 安装及已有未绑定 Home 仍复用当前兼容 Host。`dsh-rsi update --all` 目前更新 CLI 与插件集合，Host 更新事务尚待实现，不能宣称它已自动更新 DSH。工作区 catalog、Host peers 和下一版发布基线使用 `0.1.5-rc.3`；已经发布的 installer cohort 与发布账本历史保留原值，下一次 release prepare 才更新其远端制品固定信息。
 
 新版 Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.agent`。Inbox 使用公开 `nextTurn` / `nextStep`，程序内嵌套工具事件为 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。Session format 为 3，持久化使用 `create/open` 返回的会话句柄，恢复和清理须保持独占写入及未知结果不重派。系统提示进入原生消息历史，`EpochHeader` 不再携带 `system`；请求来源验证按新原生结构精确比较。
 

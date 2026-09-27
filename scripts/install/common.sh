@@ -166,11 +166,24 @@ dsh_enhanced_run() {
 
 dsh_enhanced_refresh_global_path() {
   local prefix
+  local selected_host_bin=''
+  if [[ -n "${DSH_ENHANCED_HOST_BIN:-}" ]] \
+    && [[ "$(command -v dsh 2>/dev/null || true)" == "$DSH_ENHANCED_HOST_BIN/dsh" ]]; then
+    selected_host_bin="$DSH_ENHANCED_HOST_BIN"
+  fi
   prefix="$(npm prefix --global 2>/dev/null)" || return 1
   if [[ -d "$prefix/bin" ]]; then
     case ":$PATH:" in
       *":$prefix/bin:"*) ;;
       *) PATH="$prefix/bin:$PATH"; export PATH ;;
+    esac
+  fi
+  # A Home-bound private Host must remain authoritative after installing pnpm
+  # or other global helpers. dsh-rsi verifies this directory before delegation.
+  if [[ -n "$selected_host_bin" ]]; then
+    case "$PATH" in
+      "$selected_host_bin":*) ;;
+      *) PATH="$selected_host_bin:$PATH"; export PATH ;;
     esac
   fi
 }
