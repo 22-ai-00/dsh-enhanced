@@ -10,7 +10,7 @@ const VERSION = /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$
 const COMMIT = /^[a-f0-9]{40}$/u
 const ZERO = '0'.repeat(40)
 const MAX_OUTPUT = 65_536
-const GIT_FLAGS = ['-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never',
+const GIT_FLAGS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'protocol.allow=never',
   '-c', 'protocol.https.allow=always', '-c', 'protocol.file.allow=always',
   '-c', 'credential.helper=', '-c', 'gc.auto=0'] as const
 
@@ -78,7 +78,7 @@ async function staticFiles(repository: string, remote: string): Promise<Receipt[
 }
 
 function gitEnvironment(): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', HOME: '/nonexistent',
+  const environment: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', HOME: '/nonexistent',
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null',
     GIT_CONFIG_COUNT: '0', GIT_ALLOW_PROTOCOL: 'https:file', GIT_NO_REPLACE_OBJECTS: '1',
     GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/false', GCM_INTERACTIVE: 'never',
@@ -99,7 +99,7 @@ async function git(cwd: string, args: readonly string[], signal: AbortSignal): P
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(60_000)])
   return new Promise<string>((resolvePromise, reject) => {
     let child: ReturnType<typeof spawn>
-    try { child = spawn('git', [...GIT_FLAGS, ...args], { cwd, env: gitEnvironment(),
+    try { child = spawn('/usr/bin/git', [...GIT_FLAGS, ...args], { cwd, env: gitEnvironment(),
       stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32', windowsHide: true }) }
     catch { reject(new Error('rsi source: Git invocation failed')); return }
     const chunks: Buffer[] = []

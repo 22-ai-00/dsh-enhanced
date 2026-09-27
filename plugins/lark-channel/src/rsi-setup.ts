@@ -55,6 +55,7 @@ export interface RsiSetupArgs {
   prepareAuthorities?: boolean
   installOwner?: boolean
   installLocalCohort?: boolean; bundles?: string[]
+  prepareLocalUpdate?: boolean
 }
 export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
   const result: RsiSetupArgs = { manifestPath: '', dshHome: process.env.DSH_HOME || join(homedir(), '.dsh'),
@@ -74,6 +75,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     else if (key === '--prepare-authorities') result.prepareAuthorities = true
     else if (key === '--install-owner') result.installOwner = true
     else if (key === '--install-local-cohort') result.installLocalCohort = true
+    else if (key === '--prepare-local-update') result.prepareLocalUpdate = true
     else if (key === '--bundle') {
       const value = argv[++i]
       if (!value || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(value)) fail('--bundle requires a plugin slug')
@@ -91,6 +93,14 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     } else fail(`unknown option ${key}`)
   }
   if (result.help) return result
+  if (result.prepareLocalUpdate) {
+    if (result.installLocalCohort || result.installOwner || result.prepareSource || result.prepareBuild
+      || result.prepareAuthorities || result.manifestPath || result.apply || result.rollback || result.start
+      || result.confirmStopped || result.optionalBuild || result.dockerPath || result.bundles) fail('local update preparation cannot be combined with other operations')
+    if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('local update preparation requires --profile and absolute DSH_HOME')
+    if (result.sourceRepository && !isAbsolute(result.sourceRepository)) fail('--source-repository must be absolute')
+    return result
+  }
   if (result.bundles && !result.installLocalCohort) fail('--bundle requires --install-local-cohort')
   if (result.installLocalCohort) {
     if (result.installOwner || result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.manifestPath
@@ -355,7 +365,7 @@ export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts
 
 /** Internal installer entry: caller already owns the DSH_HOME lifecycle lock. */
 export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetupPorts = rsiSetupPorts): Promise<{ mode: string; profiles: readonly string[] }> {
-  if (args.installLocalCohort || args.bundles || args.installOwner || args.prepareSource || args.prepareBuild || args.prepareAuthorities || args.optionalBuild || args.dockerPath || args.profile || args.sourceRepository) fail('resource preparation is a separate setup operation')
+  if (args.prepareLocalUpdate || args.installLocalCohort || args.bundles || args.installOwner || args.prepareSource || args.prepareBuild || args.prepareAuthorities || args.optionalBuild || args.dockerPath || args.profile || args.sourceRepository) fail('resource preparation is a separate setup operation')
   if (args.rollback && (args.apply || args.start) || args.start && !args.apply) fail('incompatible setup operations')
   const home = args.dshHome
   await safeDirectory(home)
@@ -449,6 +459,22 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
     process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\nPrepare local update source and tarballs outside the active Home; does not install or activate them.\n')
+    return
+  }
+  if (args.prepareLocalUpdate) {
+    const controller = new AbortController()
+    const cancel = () => controller.abort(new Error('local update preparation interrupted'))
+    process.on('SIGINT', cancel); process.on('SIGTERM', cancel)
+    try {
+      const { prepareRsiLocalUpdate } = await import('./rsi-local-update.js')
+      const { readRsiLocalCohort } = await import('./rsi-local-cohort.js')
+      const sourceRepository = args.sourceRepository ?? (await readRsiLocalCohort({ dshHome: args.dshHome, profile: args.profile! })).sourceRepository
+      const prepared = await prepareRsiLocalUpdate({ dshHome: args.dshHome, profile: args.profile!, sourceRepository, signal: controller.signal })
+      process.stdout.write(`${JSON.stringify({ mode: prepared.mode, root: prepared.root, profile: prepared.profile,
+        sourceCommit: prepared.source.sourceCommit, version: prepared.cohort.version,
+        packages: prepared.cohort.packages.length, receiptDigest: prepared.receiptDigest })}\n`)
+    } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel) }
     return
   }
   if (args.installLocalCohort) {

@@ -25,6 +25,7 @@ import {
   existsSync,
   fsyncSync,
   lstatSync,
+  mkdtempSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -33,6 +34,7 @@ import {
   readdirSync,
   readSync,
   renameSync,
+  rmdirSync,
   rmSync,
   fstatSync,
   statSync,
@@ -550,6 +552,78 @@ function sandboxCommand(build, args, context, hooks = {}) {
     { beforeSpawn: hooks.beforeSandboxSpawn, afterSpawn: hooks.afterSandboxSpawn, afterFinally: hooks.afterSandboxFinally })
   for (const item of mounts) verifyPinnedDirectory(item)
 }
+
+/** Build one frozen local cohort with the release adapter's pinned, offline
+ * sandbox. The caller supplies private staging directories, never a live Home.
+ * All candidate code sees is a copy without Git metadata or installed modules. */
+export function buildLocalUpdateCohort(value) {
+  const input = object(value, 'local update cohort')
+  exactKeys(input, ['build', 'workspace', 'output', 'packagePaths'], 'local update cohort')
+  const build = buildConfig(input.build)
+  const workspace = canonicalPath(input.workspace, 'local update workspace')
+  const output = canonicalPath(input.output, 'local update output')
+  if (workspace === output || dirname(workspace) !== dirname(output)) fail('local update workspace and output must be private siblings')
+  privateDirectory(dirname(workspace), 'local update staging parent')
+  privateDirectory(workspace, 'local update workspace')
+  privateDirectory(output, 'local update output')
+  if (readdirSync(output).length !== 0) fail('local update output must be empty')
+  const outputIdentity = statSync(output, { bigint: true })
+  if (!Array.isArray(input.packagePaths) || input.packagePaths.length < 1 || input.packagePaths.length > 128) {
+    fail('local update package paths exceed their bound')
+  }
+  const paths = input.packagePaths.map(path => text(path, 'local update package path', /^(?:plugins|packages)\/[a-z0-9][a-z0-9-]{0,63}$/u))
+  const slugs = paths.map(path => basename(path))
+  if (new Set(paths).size !== paths.length || new Set(slugs).size !== slugs.length) fail('local update package paths are ambiguous')
+  verifyBuildPins(build)
+  const runRoot = mkdtempSync(join(dirname(workspace), '.local-cohort-build-'))
+  try {
+    chmodSync(runRoot, 0o700)
+    const isolatedWorkspace = join(runRoot, 'workspace')
+    copyBuildWorkspace(workspace, isolatedWorkspace)
+    const sourceInputs = snapshotBuildInputs(isolatedWorkspace)
+    for (const path of paths) {
+      const packageRoot = join(isolatedWorkspace, path)
+      if (!existsSync(packageRoot) || !lstatSync(packageRoot).isDirectory()
+        || realpathSync(packageRoot) !== resolve(packageRoot)) fail(`local update package is unavailable: ${path}`)
+    }
+    const packed = join(runRoot, 'packed'); mkdirSync(packed, { mode: 0o700 })
+    for (const slug of slugs) mkdirSync(join(packed, slug), { mode: 0o700 })
+    const sandbox = openSandboxContext(build, isolatedWorkspace, packed, runRoot)
+    try {
+      sandboxCommand(build, ['install', '--offline', '--frozen-lockfile', '--frozen-store', '--ignore-scripts',
+        '--package-import-method=copy', '--store-dir=/store'], sandbox)
+      sandboxCommand(build, ['--workspace-root', '--if-present', 'run', 'build'], sandbox)
+      for (const [index, path] of paths.entries()) {
+        const packageRoot = join(isolatedWorkspace, path)
+        if (!lstatSync(packageRoot).isDirectory() || realpathSync(packageRoot) !== resolve(packageRoot)) {
+          fail(`local update package changed before pack: ${path}`)
+        }
+        sandboxCommand(build, ['--dir', `/workspace/${path}`, 'pack', '--pack-destination', `/output/${slugs[index]}`], sandbox)
+      }
+    } finally { closeSandboxContext(sandbox) }
+    verifyBuildInputs(isolatedWorkspace, sourceInputs)
+    verifyBuildPins(build)
+    if (readdirSync(packed).sort().join('\0') !== [...slugs].sort().join('\0')) fail('local update pack output has unexpected directories')
+    let totalBytes = 0
+    for (const slug of slugs) {
+      const directory = join(packed, slug)
+      privateDirectory(directory, `local update ${slug} output`)
+      const names = readdirSync(directory)
+      if (names.length !== 1 || !names[0].endsWith('.tgz')) fail(`local update pack output is ambiguous: ${slug}`)
+      const tarball = safeRegularFile(join(directory, names[0]), `local update ${slug} tarball`)
+      totalBytes += lstatSync(tarball).size
+      if (totalBytes > 2_147_483_648) fail('local update cohort output exceeds its bound')
+    }
+    // Output is a private, empty preparation directory; make the complete
+    // validated set visible in one rename, or leave it absent on failure.
+    const currentOutput = lstatSync(output, { bigint: true })
+    if (!currentOutput.isDirectory() || currentOutput.dev !== outputIdentity.dev
+      || currentOutput.ino !== outputIdentity.ino || readdirSync(output).length !== 0) fail('local update output changed during build')
+    rmdirSync(output)
+    renameSync(packed, output)
+    fsyncDirectory(dirname(output))
+  } finally { rmSync(runRoot, { recursive: true, force: true }) }
+}
 function git(gitValue, args, cwd, environment = {}, hooks = {}) {
   return command(gitValue.executable, [...SAFE_GIT_CONFIG, ...args], cwd,
     { GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', ...environment }, undefined, [],
@@ -999,6 +1073,42 @@ function copyBuildWorkspace(source, destination) {
     if (metadata.isDirectory()) for (const name of readdirSync(path)) inspect(join(path, name))
   }
   inspect(destination)
+}
+function snapshotBuildInputs(root) {
+  const directories = [], files = []
+  let entries = 0, bytes = 0
+  const visit = (path, relativePath = '') => {
+    const metadata = lstatSync(path)
+    if (++entries > 100_000) fail('local update source has too many entries')
+    if (metadata.isDirectory() && !metadata.isSymbolicLink()) {
+      directories.push({ path: relativePath, mode: metadata.mode & 0o777 })
+      for (const name of readdirSync(path).sort()) visit(join(path, name), relativePath ? `${relativePath}/${name}` : name)
+    } else if (metadata.isFile() && !metadata.isSymbolicLink()) {
+      bytes += metadata.size
+      if (metadata.size > MAX_ARTIFACT_BYTES || bytes > 4_294_967_296) fail('local update source exceeds its size bound')
+      files.push({ path: relativePath, mode: metadata.mode & 0o777, size: metadata.size,
+        sha256: sha256Bytes(readFileSync(path)) })
+    } else fail('local update source contains an unsupported entry')
+  }
+  visit(root)
+  return { directories, files }
+}
+function verifyBuildInputs(root, before) {
+  for (const item of before.directories) {
+    const path = item.path ? join(root, item.path) : root
+    const metadata = lstatSync(path)
+    if (!metadata.isDirectory() || metadata.isSymbolicLink() || (metadata.mode & 0o777) !== item.mode) {
+      fail(`local update source directory changed during build: ${item.path}`)
+    }
+  }
+  for (const item of before.files) {
+    const metadata = lstatSync(join(root, item.path))
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size !== item.size
+      || (metadata.mode & 0o777) !== item.mode
+      || sha256Bytes(readFileSync(join(root, item.path))) !== item.sha256) {
+      fail(`local update source file changed during build: ${item.path}`)
+    }
+  }
 }
 function fileInventory(root) {
   const result = []

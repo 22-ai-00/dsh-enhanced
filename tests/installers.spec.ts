@@ -3138,6 +3138,26 @@ describe('one-click installers', () => {
     expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toContain(`"${target}"`)
   })
 
+  test('npm upgrade without a coordinator refuses a frozen local cohort before registry access', async () => {
+    const f = await lifecycleFixture()
+    const cohortRoot = join(f.dshHome, 'rsi-local-cohorts', 'web')
+    await mkdir(join(cohortRoot, 'artifacts'), { recursive: true })
+    await writeFile(join(cohortRoot, 'receipt.json'), '{"frozen":true}\n')
+    await writeFile(join(cohortRoot, 'artifacts', 'bundle.tgz'), 'frozen artifact')
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--plugin-version', '1.4.0',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin, { npmVersion: '1.4.0' }))
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('源码/制品收据迁移')
+    expect(await readFile(f.operationLog, 'utf8')).not.toMatch(/npm-view|pnpm-prepare|dsh-add/u)
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    expect(await readFile(join(cohortRoot, 'receipt.json'), 'utf8')).toBe('{"frozen":true}\n')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
   test('npm upgrade uses an isolated metadata preparation directory and a fd-bound frozen offline store', async () => {
     const f = await lifecycleFixture({
       requirePnpmStore: true, requirePnpmFrozenStore: true, requirePnpmStoreFd: true, requirePnpmProfileCwd: true,
@@ -3813,6 +3833,28 @@ describe('one-click installers', () => {
     expect(await readFile(f.operationLog, 'utf8')).not.toContain('pair-add')
     expect(JSON.parse(await readFile(f.receiptPath, 'utf8')).version).toBe('0.1.0')
     expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${f.coordinator}.service`].invocationId).toBe(`original-${f.coordinator}`)
+  }, 15_000)
+
+  test.each(['local', 'npm'] as const)('supervised %s upgrade without a coordinator refuses a frozen local cohort before mutation', async source => {
+    const f = await lifecycleFixture({ readiness: 'host', effectiveScenario: 'supervised',
+      systemd: { units: [{ profile: 'web', active: true }] } })
+    const cohortRoot = join(f.dshHome, 'rsi-local-cohorts', 'web')
+    await mkdir(join(cohortRoot, 'artifacts'), { recursive: true })
+    await writeFile(join(cohortRoot, 'receipt.json'), '{"frozen":true}\n')
+    await writeFile(join(cohortRoot, 'artifacts', 'bundle.tgz'), 'frozen artifact')
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const result = source === 'local'
+      ? runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+      : runInstaller(npmInstaller, ['--operation', 'upgrade', '--scenario', 'supervised',
+        '--confirm-dsh-home-stopped', '--plugin-version', '1.4.0'], f.dshHome, undefined,
+      lifecycleEnvironment(f.dshHome, f.fakeBin, { npmVersion: '1.4.0', expectedScenario: 'supervised' }))
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('源码/制品收据迁移')
+    expect(await readFile(f.operationLog, 'utf8')).not.toMatch(/npm-view|pnpm-prepare|dsh-add/u)
+    expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    expect(await readFile(join(cohortRoot, 'receipt.json'), 'utf8')).toBe('{"frozen":true}\n')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
   test.each(['receipt', 'cohort-directory'])('RSI pair npm upgrade rejects frozen local %s before registry access or stopping services', async kind => {
