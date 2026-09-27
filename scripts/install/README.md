@@ -16,7 +16,7 @@ macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；
 
 历史验收记录（截至 2026-09-12）：`v0.1.31` 完成过 Linux `autonomy` 的远程全新安装，以及真实 `.30 → .31` 升级、隔离 Host 启动与事务提交；最终冻结候选完成 `.31 → .31` 重复升级，两次均确认 14 个受管包同版本，选定配置、状态文件、暂停目标及其检查点保持不变。该批升级修复随 `0.1.32` 发布；旧 `v0.1.31` 远程 helper 不具备同样能力。当前验收范围与剩余缺口见 [RSI 当前状态](../../docs/rsi-status.md)。
 
-安装器先确保 Node.js、pnpm 和兼容的 DSH。当前 checkout 的兼容范围为 `>=0.1.5-rc.3 <0.1.6`；新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认属于该范围后安装解析出的精确版本，不追踪 `next` 或 beta。已有兼容 CLI 直接复用，不做全局升级或降级。越界、无法识别或解析失败会在安装 Host 前拒绝；新维护线需先完成适配。`--dry-run` 离线展示解析计划，显式 `--dsh-version` 可指定范围内精确版本。已发布的远程引导器仍加载其发布标签中的 helper；本 checkout 的改动须发布后才进入远程安装。已有 Host 自动更新尚未实现，`dsh-rsi update --all` 当前更新 CLI 与插件集合。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
+安装器先确保 Node.js、pnpm 和兼容的 DSH。当前 checkout 的兼容范围为 `>=0.1.5-rc.3 <0.1.6`；新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认属于该范围后安装解析出的精确版本，不追踪 `next` 或 beta。已有兼容 CLI 直接复用，不做全局升级或降级。越界、无法识别或解析失败会在安装 Host 前拒绝；新维护线需先完成适配。`--dry-run` 离线展示解析计划，显式 `--dsh-version` 可指定范围内精确版本。已发布的远程引导器仍加载其发布标签中的 helper；本 checkout 的改动须发布后才进入远程安装。已有 Host 自动更新尚未实现，`dsh-rsi update --all` 当前更新 CLI 与插件集合。 `dsh-rsi install` 对全新空 Home 已加入私有 Host 选择：解析并安装官方 latest 到独立目录，Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，补装 pnpm 不会改变它的优先级。此行为不修改全局 DSH；直接执行本节 shell 脚本仍沿用上述选择方式。缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#install--reinstall薄委托)。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
 
 ```sh
 ./scripts/install/install-local.sh --yes

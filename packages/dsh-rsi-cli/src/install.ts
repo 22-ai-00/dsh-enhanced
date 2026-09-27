@@ -3,6 +3,8 @@ import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PurgeError } from './purge.ts'
+import { prepareInstallHostEnvironment } from './install-host.ts'
+import { resolveDshHome } from './paths.ts'
 
 const INSTALL_BASE_URL = 'https://raw.githubusercontent.com/22-ai-00/dsh-enhanced'
 
@@ -11,6 +13,9 @@ const INSTALL_BASE_URL = 'https://raw.githubusercontent.com/22-ai-00/dsh-enhance
  * 测试注入假实现，做到不联网、不真实执行安装器。
  */
 export interface InstallExecutor {
+  /** Custom executors may supply their own Host; the production executor always
+   * prepares or verifies the Home-bound runtime before invoking the installer. */
+  prepareHost?: typeof prepareInstallHostEnvironment
   download: (url: string) => Promise<string>
   runInherited: (
     command: string,
@@ -20,6 +25,7 @@ export interface InstallExecutor {
 }
 
 export const defaultExecutor: InstallExecutor = {
+  prepareHost: prepareInstallHostEnvironment,
   async download(url: string): Promise<string> {
     const response = await fetch(url, { redirect: 'follow' })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -49,7 +55,7 @@ export interface RunInstallOptions {
 }
 
 /**
- * 薄委托：dsh-rsi 不复制任何安装逻辑。
+ * 新 Home 先选择私有 Host，再委托现有安装器。
  * npm 形态只负责把与自身版本同 tag 的 install-npm.sh 拉到临时目录执行，
  * common.sh 的 SHA-256 自校验由脚本自身完成；local 形态直接执行 checkout 内脚本。
  * 安装器 stdio 与当前终端直连，交互提示/输出不经缓冲。
@@ -57,8 +63,27 @@ export interface RunInstallOptions {
  */
 export async function runInstall(options: RunInstallOptions): Promise<number> {
   const executor = options.executor ?? defaultExecutor
-  const env: NodeJS.ProcessEnv = { ...process.env }
+  let env: NodeJS.ProcessEnv = { ...process.env }
   if (options.dshHome !== undefined) env.DSH_HOME = options.dshHome
+
+  // Validate the invocation before preparing a runtime or touching the Home.
+  if (options.mode === 'local' && !options.localRepositoryRoot) throw new PurgeError('local 安装形态需要 --local <checkout 目录>')
+  if (options.mode === 'npm' && !/^v\d+\.\d+\.\d+$/u.test(options.releaseRef)) throw new PurgeError(`非法的 release ref：${options.releaseRef}（应为 vX.Y.Z）`)
+  const value = (name: string): string | undefined => {
+    const index = options.passthrough.indexOf(name)
+    if (index < 0) return undefined
+    const result = options.passthrough[index+1]
+    if (!result || result.startsWith('-') || options.passthrough.lastIndexOf(name) !== index) {
+      throw new PurgeError(`${name} 必须提供一个且仅一个值。`)
+    }
+    return result
+  }
+  const operation = value('--operation') ?? 'install'
+  const selector = value('--dsh-version') ?? 'latest'
+  if (executor.prepareHost
+    && !options.passthrough.some(arg => ['--help','-h','--dry-run'].includes(arg))) {
+    env = await executor.prepareHost({dshHome:resolveDshHome(env),selector,environment:env,prepareFresh:operation === 'install'})
+  }
 
   if (options.mode === 'local') {
     const root = options.localRepositoryRoot
@@ -69,9 +94,6 @@ export async function runInstall(options: RunInstallOptions): Promise<number> {
     return await executor.runInherited('bash', [script, ...options.passthrough], { env })
   }
 
-  if (!/^v\d+\.\d+\.\d+$/u.test(options.releaseRef)) {
-    throw new PurgeError(`非法的 release ref：${options.releaseRef}（应为 vX.Y.Z）`)
-  }
   const url = `${INSTALL_BASE_URL}/${options.releaseRef}/scripts/install/install-npm.sh`
   let scriptBody: string
   try {
