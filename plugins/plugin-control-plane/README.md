@@ -449,6 +449,8 @@ adoptionCoordinator:
 
 协调器必须运行在另一进程和独立 systemd unit；它不能同时配置目标的 `sourceJobs`、`sourceAdoptions`、`runtimeObserver` 或 `replayEndpoint`。只需连接所在 Host 的 Automations，复用原生每分钟调度、owner/Policy 和预算，每轮至多推进一个交接；空队列仍消耗一次配置的调度预算。`budgetId/budgetAmount` 必填，对应 Policy budget 使用 `automation-runs` metric 与有限周期额度，建议 `subject` scope，以稳定的协调器 automation id 聚合。Policy 账本按 scope、metric 和周期计量，仅换 budget id 不会分池；同一 Host 的其他任务应明确选择共用或分开额度。旧配置升级时须补齐，不能打开 `allowUnbudgetedExecution` 代替。`coordinatorId` 是绑定标识，不提供 OS 隔离或替代 ledger 文件权限。停用调度或耗尽原生预算也会暂停自动恢复，恢复前需先核对未知外部操作。
 
+协调器把关闭动作登记到同批 Automations 的 Host 停用屏障：正常卸载、provider 替换及 Host 退出时，在 Automations 存储关闭前暂停本代原生登记，再释放执行器与控制面连接。该屏障要求成套更新 Automations 与 Control Plane；不改变强制终止后的 unknown 执行对账语义。
+
 协调器沿现有安装和签名检查路径推进，到 `commit-pending` 停止。目标恢复后由其原生源码 continuation 重验当前 owner、反馈和信任，再完成启用；已撤销或过期交接只能进入既有回退。目标卸载不会撤销已交出的任务；未知 Host 派发仍须精确签名对账，不能自动重派。目标离线期间无法即时获知反馈纠正，允许暴露的最长授权窗口由上述期限限制；回退完成时间仍取决于协调器可用性和签名服务。
 
 `dsh-rsi-setup` 已提供双 Host 合同编译与校验，实际部署验收尚未完成。现有 systemd attestor 只签发 reload/readiness/rollback；缺省严格合同的其余行为验收阶段仍需要真实独立观测，不能用进程就绪代替。可显式配置下述有限试用合同，由普通任务证据独立签发资格。组件接线不等于生产自动采用闭环，npm 发布仍须等待实际部署验收。

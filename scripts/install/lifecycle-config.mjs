@@ -1,7 +1,10 @@
 import { createRequire } from 'node:module'
-import { lstat, readFile, realpath } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { constants } from 'node:fs'
+import { lstat, open, readFile, realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 
 const repositoryRequire = createRequire(import.meta.url)
 const storageFields = new Set(['databasePath', 'statePath', 'stateRoot', 'vaultRoot', 'spoolPath', 'runsPath', 'catalogPath', 'trustPath', 'scratchPath'])
@@ -416,6 +419,183 @@ function containsAlias(yaml, node) {
   if (yaml.isMap(node)) return node.items.some(pair => containsAlias(yaml, pair.key) || containsAlias(yaml, pair.value))
   if (yaml.isSeq(node)) return node.items.some(item => containsAlias(yaml, item))
   return false
+}
+
+const rsiProfilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
+const rsiCoordinatorBundles = new Map([
+  ['dsh-enhanced-assistant-policy', '@dsh-enhanced/assistant-policy'],
+  ['dsh-enhanced-assistant-automations', '@dsh-enhanced/assistant-automations'],
+  ['dsh-enhanced-plugin-control-plane', '@dsh-enhanced/plugin-control-plane'],
+])
+
+function rsiPairError(message) {
+  throw new Error(`lifecycle RSI coordinator rejects ${message}`)
+}
+
+function rsiProfile(value, field) {
+  if (typeof value !== 'string' || !rsiProfilePattern.test(value)) rsiPairError(`invalid ${field}`)
+  return value
+}
+
+function rsiRecord(value, field) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) rsiPairError(`${field} must be a mapping`)
+  return value
+}
+
+function rsiFinite(value, field) {
+  if (!Number.isSafeInteger(value) || value < 1) rsiPairError(`${field} must be a finite positive integer`)
+}
+
+/** The installer writes this private, per-target receipt before creating its coordinator. */
+export async function readRsiCoordinatorReceipt({ homePath, profile }) {
+  rsiProfile(profile, 'target profile')
+  if (typeof homePath !== 'string' || !isAbsolute(homePath) || resolve(homePath) !== homePath) rsiPairError('invalid DSH_HOME')
+  const relativePath = `.rsi-coordinator-${createHash('sha256').update(profile).digest('hex').slice(0, 16)}.json`
+  const path = join(homePath, relativePath)
+  let descriptor
+  try { descriptor = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW) }
+  catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    rsiPairError(`unsafe receipt ${relativePath}`)
+  }
+  let source
+  try {
+    const before = await descriptor.stat()
+    if (!before.isFile() || before.nlink !== 1 || before.size < 1 || before.size > 65_536 || before.mode & 0o077
+      || typeof process.getuid === 'function' && before.uid !== process.getuid()) rsiPairError('unsafe receipt file')
+    const bytes = await descriptor.readFile()
+    const after = await descriptor.stat(), named = await lstat(path)
+    if (bytes.length !== before.size || !after.isFile() || after.nlink !== 1 || named.nlink !== 1 || named.isSymbolicLink()
+      || after.mode & 0o077 || typeof process.getuid === 'function' && after.uid !== process.getuid()
+      || before.dev !== after.dev || before.ino !== after.ino || before.dev !== named.dev || before.ino !== named.ino
+      || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+      rsiPairError('receipt changed during read')
+    }
+    try { source = new TextDecoder('utf-8', { fatal: true }).decode(bytes) }
+    catch { rsiPairError('receipt is not UTF-8') }
+  } finally { await descriptor.close() }
+  let receipt
+  try { receipt = JSON.parse(source) } catch { rsiPairError('malformed receipt JSON') }
+  rsiRecord(receipt, 'receipt')
+  if (!isDeepStrictEqual(Object.keys(receipt).sort(), ['coordinatorProfile', 'schemaVersion', 'sourceRepository', 'targetProfile', 'version'])) {
+    rsiPairError('receipt fields differ from installer schema')
+  }
+  if (receipt.schemaVersion !== 1 || receipt.targetProfile !== profile) rsiPairError('receipt schema or target profile mismatch')
+  const coordinatorProfile = rsiProfile(receipt.coordinatorProfile, 'coordinator profile')
+  if (coordinatorProfile === profile) rsiPairError('coordinator profile equals target')
+  const prerelease = typeof receipt.version === 'string' ? receipt.version.split('+', 1)[0].split('-', 2)[1] : undefined
+  if (typeof receipt.version !== 'string' || !exactSemver.test(receipt.version)
+    || prerelease !== undefined && prereleaseIdentifiers(prerelease) === undefined) {
+    rsiPairError('receipt version must be exact SemVer')
+  }
+  if (receipt.sourceRepository !== null && (typeof receipt.sourceRepository !== 'string'
+    || !isAbsolute(receipt.sourceRepository) || resolve(receipt.sourceRepository) !== receipt.sourceRepository
+    || await canonicalPath(receipt.sourceRepository) !== receipt.sourceRepository)) rsiPairError('sourceRepository must be canonical absolute or null')
+  return { relativePath, source, coordinatorProfile, version: receipt.version, sourceRepository: receipt.sourceRepository }
+}
+
+function rsiYamlRows(yaml, source, field, base = false) {
+  if (typeof source !== 'string') rsiPairError(`${field} must be YAML text`)
+  const document = yaml.parseDocument(source, {
+    customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: value => value }], uniqueKeys: true,
+  })
+  if (document.errors.length || document.warnings.length || !yaml.isSeq(document.contents) || containsAlias(yaml, document.contents)) {
+    rsiPairError(`${field} is not structurally valid YAML`)
+  }
+  const rows = new Map()
+  const insert = operation => {
+    if (!yaml.isMap(operation) || operation.items.length !== 1 || !operation.has('insert')) rsiPairError(`${field} has unsupported base operation`)
+    const inserted = operation.get('insert', true)
+    if (!yaml.isSeq(inserted)) rsiPairError(`${field} insert must be a sequence`)
+    return inserted.items
+  }
+  for (const item of document.contents.items.flatMap(operation => base ? insert(operation) : [operation])) {
+    if (!yaml.isMap(item)) rsiPairError(`${field} contains a non-mapping row`)
+    const id = item.get('id'), name = item.get('name'), disabled = item.get('disabled'), disabledNode = item.get('disabled', true)
+    if (typeof id !== 'string' || !id || typeof name !== 'string' || !name || rows.has(id)) rsiPairError(`${field} contains invalid or duplicate rows`)
+    const expressionDisabled = yaml.isScalar(disabledNode) && disabledNode.tag === 'tag:yaml.org,2002:js' && typeof disabled === 'string'
+    if (disabled !== undefined && typeof disabled !== 'boolean' && !expressionDisabled) rsiPairError(`${field}.${id} has invalid disabled status`)
+    rows.set(id, { name, disabled, config: item.toJSON().config, configNode: item.get('config', true) })
+  }
+  if (rows.size === 0) rsiPairError(`${field} has no rows`)
+  return rows
+}
+
+function rsiNoNestedPlugins(value, field) {
+  if (value === null || typeof value !== 'object') return
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === 'plugins' && (Array.isArray(nested) ? nested.length > 0 : nested !== undefined && nested !== null)) rsiPairError(`${field} has nested plugins`)
+    rsiNoNestedPlugins(nested, `${field}.${key}`)
+  }
+}
+
+/** Read-only cross-profile check before the caller changes either Host. */
+export async function validateRsiCoordinatorPair(targetSource, coordinatorSource, { dshHome, targetProfile, coordinatorProfile, coordinatorBaseSource, dshExecutable }) {
+  rsiProfile(targetProfile, 'target profile')
+  rsiProfile(coordinatorProfile, 'coordinator profile')
+  if (targetProfile === coordinatorProfile) rsiPairError('target and coordinator profiles must differ')
+  if (typeof dshHome !== 'string' || !isAbsolute(dshHome) || resolve(dshHome) !== dshHome) rsiPairError('invalid DSH_HOME')
+  const yaml = await yamlModule(dshExecutable)
+  const base = rsiYamlRows(yaml, coordinatorBaseSource, 'coordinator base', true)
+  const target = rsiYamlRows(yaml, targetSource, 'target profile')
+  const coordinator = rsiYamlRows(yaml, coordinatorSource, 'coordinator profile')
+  for (const [id, { name, disabled, config }] of coordinator) {
+    const expected = rsiCoordinatorBundles.get(id) ?? base.get(id)?.name
+    if (name !== expected || /lark/iu.test(id) || /lark/iu.test(name)) rsiPairError(`coordinator contains forbidden row ${id}`)
+    if (rsiCoordinatorBundles.has(id) && disabled !== undefined && disabled !== false) rsiPairError(`coordinator enhanced row ${id} is disabled`)
+    rsiNoNestedPlugins(config, `coordinator.${id}`)
+    if (rsiCoordinatorBundles.has(id) && config?.enabled === false) rsiPairError(`coordinator.${id} is disabled`)
+    if (id === 'agent-loop' && (!Array.isArray(rsiRecord(config, 'agent-loop config').agents) || config.agents.length)) {
+      rsiPairError('coordinator agent-loop.agents must be empty')
+    }
+  }
+  for (const id of rsiCoordinatorBundles.keys()) {
+    if (!coordinator.has(id)) rsiPairError(`coordinator lacks required row ${id}`)
+  }
+  const targetControlPlane = target.get('dsh-enhanced-plugin-control-plane')
+  if (targetControlPlane?.name !== '@dsh-enhanced/plugin-control-plane'
+    || targetControlPlane.disabled !== undefined && targetControlPlane.disabled !== false) {
+    rsiPairError('target control plane is missing, renamed or disabled')
+  }
+  const targetCp = rsiRecord(target.get('dsh-enhanced-plugin-control-plane')?.config, 'target control plane')
+  const coordinatorCp = rsiRecord(coordinator.get('dsh-enhanced-plugin-control-plane')?.config, 'coordinator control plane')
+  const adoptions = rsiRecord(targetCp.sourceAdoptions, 'target sourceAdoptions')
+  const jobs = rsiRecord(targetCp.sourceJobs, 'target sourceJobs')
+  const adoption = rsiRecord(coordinatorCp.adoptionCoordinator, 'coordinator adoptionCoordinator')
+  const scope = rsiRecord(adoption.scope, 'coordinator adoption scope')
+  if (targetCp.adoptionCoordinator !== undefined && targetCp.adoptionCoordinator !== null) rsiPairError('target control plane enables adoptionCoordinator')
+  if (adoptions.profile !== targetProfile || typeof adoptions.handoff?.coordinatorId !== 'string' || !adoptions.handoff.coordinatorId
+    || adoptions.handoff.coordinatorId !== adoption.coordinatorId) rsiPairError('target handoff and coordinator adoption disagree')
+  rsiFinite(jobs.budgetAmount, 'target sourceJobs.budgetAmount')
+  if (!isDeepStrictEqual(scope, { ownerRouteId: jobs.ownerRouteId, principalId: jobs.principalId, workspace: jobs.workspace, preset: jobs.preset })
+    || Object.values(scope).some(value => typeof value !== 'string' || !value)) rsiPairError('coordinator owner scope differs from target source jobs')
+  if (typeof targetCp.catalogPath !== 'string' || typeof targetCp.trustPath !== 'string'
+    || coordinatorCp.catalogPath !== targetCp.catalogPath || coordinatorCp.trustPath !== targetCp.trustPath) rsiPairError('coordinator catalog or trust path differs from target')
+  const root = join(dshHome, 'rsi-coordinators', coordinatorProfile)
+  if (coordinatorCp.statePath !== root) rsiPairError('coordinator statePath differs from dedicated root')
+  const policy = rsiRecord(coordinator.get('dsh-enhanced-assistant-policy')?.config, 'coordinator Policy config')
+  const automations = rsiRecord(coordinator.get('dsh-enhanced-assistant-automations')?.config, 'coordinator Automations config')
+  if (policy.databasePath !== join(root, 'policy.sqlite') || automations.databasePath !== join(root, 'automations.sqlite')
+    || automations.runsPath !== join(root, 'runs')) rsiPairError('coordinator storage differs from dedicated root')
+  if (automations.schedulerEnabled !== true || automations.allowUnbudgetedExecution === true) rsiPairError('coordinator scheduler or budget admission is unsafe')
+  for (const field of ['sourceJobs', 'sourceBuild', 'sourceApprovals', 'sourceReleases', 'sourceReleaseExecution', 'sourceAdoptions',
+    'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'liveQualification', 'replayEndpoint']) {
+    if (coordinatorCp[field] !== undefined && coordinatorCp[field] !== null) rsiPairError(`coordinator control plane enables ${field}`)
+  }
+  rsiFinite(adoption.timeoutMs, 'coordinator timeoutMs')
+  rsiFinite(adoption.budgetAmount, 'coordinator budgetAmount')
+  if (typeof adoption.budgetId !== 'string' || !adoption.budgetId) rsiPairError('coordinator budgetId is invalid')
+  const matchingBudgets = Array.isArray(policy.budgets) ? policy.budgets.filter(entry => entry?.id === adoption.budgetId) : []
+  if (matchingBudgets.length !== 1 || matchingBudgets[0].metric !== 'automation-runs' || matchingBudgets[0].scope !== 'subject'
+    || !Number.isSafeInteger(matchingBudgets[0].limit) || matchingBudgets[0].limit < adoption.budgetAmount
+    || !Number.isSafeInteger(matchingBudgets[0].periodMs) || matchingBudgets[0].periodMs < 1_000) {
+    rsiPairError('coordinator Policy lacks a unique finite automation budget')
+  }
+  const preview = yaml.parseDocument('- id: dsh-enhanced-assistant-automations\n')
+  const previewConfig = coordinator.get('dsh-enhanced-assistant-automations').configNode.clone()
+  previewConfig.set('schedulerEnabled', false)
+  preview.contents.items[0].set('config', previewConfig)
+  return { scope, coordinatorId: adoption.coordinatorId, previewPatch: preview.toString({ lineWidth: 0 }) }
 }
 
 function parseYamlDocument(yaml, source, field) {
