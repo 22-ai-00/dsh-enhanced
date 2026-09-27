@@ -78,8 +78,9 @@ function profile(value: string, label: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(value)) fail(`invalid ${label}`)
   return value
 }
-function cloneEffectiveConfig(out: Rows, effective: Rows, id: string): YAMLMap {
-  const source = config(required(effective.rows, id, 'effective profile'), id)
+function cloneEffectiveConfig(out: Rows, effective: Rows, id: string, allowMissing = false): YAMLMap {
+  const entry = required(effective.rows, id, 'effective profile')
+  const source = allowMissing && !entry.has('config') ? map(out.document.createNode({}), `${id} config`) : config(entry, id)
   let destination = row(out.rows, id)
   if (!destination) { destination = map(out.document.createNode({ id }), `${id} override`); out.rows.add(destination) }
   if (destination.get('disabled') === true) fail(`profile row ${id} is disabled`)
@@ -216,7 +217,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   const verifier = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-verifier')
   // Keep all existing verifier settings, replacing only the finite review grant.
   replaceNode(target.document, verifier, 'sourceReviews', input.manifest.sourceReviews)
-  cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-growth-driver')
+  cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-growth-driver', true)
   replaceNode(target.document, required(target.rows, 'dsh-enhanced-assistant-growth-driver'), 'config', input.manifest.growthDriver)
   cloneEffectiveConfig(target, effective, 'dsh-enhanced-plugin-control-plane')
   replaceNode(target.document, required(target.rows, 'dsh-enhanced-plugin-control-plane'), 'config', cp)

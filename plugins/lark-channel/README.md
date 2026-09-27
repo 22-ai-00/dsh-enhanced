@@ -23,6 +23,8 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 - [日常使用自迭代的双 Host 配置](docs/rsi-setup.md)
 - [进度展示、安全与权限边界](docs/progress-security.md)
 
+双 Host 部署还提供内部 owner manifest/授权生成与私有资源准备接口，复用当前配对身份并预检发布与 Host 配置；安装器自动取得全部部署输入和启动协调器的接线仍待完成，见上述配置指南。
+
 ## 兼容性
 
 - DeepSeek Harness：`>=0.1.5-rc.3 <0.1.6` 基线语义（通过 `assistant-delivery`）。
