@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## 本地源码维护历史（Control Plane schema 28）
+
+schema 28 为冻结本地更新增加独立的源码维护记录，保留 schema 27 的计划、发布收据、部署记录和授权用量。维护记录由既有 Host 身份签名，绑定安装、账本、原始源码基准、更新前后提交与制品摘要，并与原有已签名 release merge 共同形成唯一的源码链。后续源码任务与发布准入都沿这条链解析基准，不能用重置 `initialCommit` 或清空旧记录恢复运行。
+
+源码迁移 helper 只修改事务中的 Home 副本，保留原始 bootstrap 和 Git 对象，通过签名 sidecar 解析当前 checkout/version。普通读取与更新候选校验不会重建缺失的资源。旧模块不能读取新维护历史；源码 helper、Control Plane 与后续安装事务必须使用支持同一协议的构建。此协议不单独完成构建资源、owner 配置、profile 包或服务激活迁移，当前普通升级仍保留对冻结本地安装的拒绝，直至完整事务接线。
+
 ## 受管 Host 迁移证明（Control Plane schema 27）
 
 v27 增加独立维护记录，原计划、批准、readiness、部署 checkpoint 和 watch 不改写。停服迁移使用原 Host 签名身份将新 executor、unit、profile 与回滚备份关联到原成功部署；读取时验证完整链，物理回退使用迁移后的文件基线。attestor v8 的 schema6 配置验证该关联并为新进程补证，不额外重启、不续期授权、不重置额度。

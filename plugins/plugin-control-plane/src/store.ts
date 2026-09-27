@@ -1,5 +1,8 @@
 import { validateLiveQualificationTerms, assertLiveQualificationBatch, parseLiveQualificationReceipt, verifyLiveQualificationReceipt, type LiveQualificationTerms, type LiveQualificationBatch, type LiveQualificationReceipt, type LiveQualificationRecord } from './live-qualification.js'
 import { createHash, randomUUID } from 'node:crypto'
+import { createPublicKey, verify } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import type { DatabaseSync } from 'node:sqlite'
 import { basename, isAbsolute, posix, resolve, win32 } from 'node:path'
 import { discover, parseCatalog, type CatalogEntry, type LoadedCapabilityCatalog } from './catalog.js'
@@ -8,7 +11,7 @@ import { parseSourcePublishReconciliationReceipt, parseSourcePublishReconciliati
   parseSourceReleaseReceipt, parseSourceReleaseRequest, parseVerifiedSourceReleaseAuthorization } from './release.js'
 import { controlPlaneOperationReceiptDigest, controlPlaneSchemaVersion, openControlPlaneDatabase } from './sqlite.js'
 import { validateSourceBuildConfig } from './source-build.js'
-import { validateSourceBaselineConfig } from './source-baseline.js'
+import { validateSourceBaselineConfig, verifySourceBaselineHistory } from './source-baseline.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
@@ -18,7 +21,11 @@ import { assertTaskObservationBatch, getTaskObservationRecord, readTaskObservati
 import type { TaskObservationBatch, TaskObservationRecord } from './task-observation-types.js'
 import { parseRuntimeEpochRequest, parseRuntimeEpochReceipt, verifyRuntimeEpochReceipt, type RuntimeEpochRequest, type RuntimeEpochReceipt } from './runtime-epoch.js'
 import { runtimeIdentityDigest } from './foreground-deployment.js'
-import { readHostMaintenanceRecords, verifyHostMaintenanceChain, hostMaintenanceDigest, type HostMaintenanceRecord } from './host-maintenance.js'
+import { readHostMaintenanceRecords, verifyHostMaintenanceChain, hostMaintenanceCanonical, hostMaintenanceDigest, type HostMaintenanceRecord } from './host-maintenance.js'
+import { parseSourceMaintenanceRecord, sourceMaintenanceDigest, sourceBaselineChain,
+  verifySourceMaintenanceRecords, type SourceMaintenanceRecord } from './source-maintenance.js'
+import { resolveTrustKey } from './trust.js'
+import type { SourceBaselineConfig } from './source-baseline.js'
 import type { RuntimeObservation } from './runtime-observer-protocol.js'
 import type { PluginControlTrustConfig } from './trust.js'
 import type {
@@ -103,6 +110,52 @@ export class ControlPlaneStoreError extends Error {
   constructor(readonly code: 'conflict' | 'expired' | 'invalid-input' | 'invalid-state' | 'not-found', message: string) {
     super(message)
     this.name = 'ControlPlaneStoreError'
+  }
+}
+
+function sourceMaintenanceGit(cwd: string, args: readonly string[]): string {
+  const result = spawnSync('git', ['-c','core.hooksPath=/dev/null','-c','protocol.allow=never',
+    '-c','gc.auto=0',...args], { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 16384,
+    env: { LANG: 'C', LC_ALL: 'C', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_COUNT: '0', GIT_ALLOW_PROTOCOL: 'file',
+      GIT_NO_REPLACE_OBJECTS: '1', GIT_TERMINAL_PROMPT: '0', GIT_NO_LAZY_FETCH: '1' } })
+  if (result.error || result.status !== 0 || result.signal || typeof result.stdout !== 'string') {
+    throw new ControlPlaneStoreError('conflict', 'source maintenance Git evidence failed')
+  }
+  return result.stdout.trimEnd()
+}
+
+function sourceMaintenanceDirectRef(cwd: string, ref: string): string {
+  const fields = sourceMaintenanceGit(cwd, ['for-each-ref','--format=%(refname)%00%(objectname)%00%(symref)',ref]).split('\0')
+  if (fields.length !== 3 || fields[0] !== ref || !COMMIT.test(fields[1] ?? '') || fields[2] !== '') {
+    throw new ControlPlaneStoreError('conflict', 'source maintenance Git ref is missing or symbolic')
+  }
+  return fields[1]!
+}
+
+function assertSourceMaintenanceGit(record: SourceMaintenanceRecord, physicalHome: string, logicalHome: string,
+  requireCurrentRefs = true): void {
+  if (realpathSync(physicalHome) !== physicalHome) throw new ControlPlaneStoreError('invalid-input', 'source maintenance physical Home is not canonical')
+  const project = (path: string): string => {
+    if (!path.startsWith(`${logicalHome}/`)) throw new ControlPlaneStoreError('invalid-input', 'source maintenance Git path is outside Home')
+    return `${physicalHome}${path.slice(logicalHome.length)}`
+  }
+  const repository = project(record.repository), remote = project(record.baseline.remote)
+  if (realpathSync(repository) !== repository || realpathSync(remote) !== remote
+    || sourceMaintenanceGit(repository, ['rev-parse','--show-toplevel']) !== repository
+    || sourceMaintenanceGit(remote, ['rev-parse','--is-bare-repository']) !== 'true') {
+    throw new ControlPlaneStoreError('conflict', 'source maintenance Git repository changed')
+  }
+  const branch = requireCurrentRefs ? sourceMaintenanceDirectRef(remote, `refs/heads/${record.baseline.targetBranch}`) : undefined
+  const managed = requireCurrentRefs ? sourceMaintenanceDirectRef(repository, record.baseline.ref) : undefined
+  if (requireCurrentRefs && (branch !== record.candidateTip || managed !== record.candidateTip)
+    || sourceMaintenanceGit(repository, ['rev-parse',`${record.candidateTip}^{tree}`]) !== record.sourceTree) {
+    throw new ControlPlaneStoreError('conflict', 'source maintenance candidate Git tip or tree changed')
+  }
+  for (const [earlier, later] of [[record.previousTip,record.candidateTip], [record.upstreamCommit,record.candidateTip],
+    [record.before.sourceCommit,record.previousTip], [record.after.sourceCommit,record.candidateTip],
+    [record.before.sourceCommit,record.after.sourceCommit]]) {
+    sourceMaintenanceGit(repository, ['merge-base','--is-ancestor',earlier!,later!])
   }
 }
 
@@ -2305,6 +2358,142 @@ export class ControlPlaneStore {
     }
   }
 
+  getSourceMaintenanceRecords(repository: string): readonly SourceMaintenanceRecord[] {
+    if (!isAbsolute(repository) || resolve(repository) !== repository) throw new ControlPlaneStoreError('invalid-input', 'source repository path is invalid')
+    const rows = this.#database.prepare('SELECT sequence,host_plan_id,record_json,record_digest FROM source_maintenance WHERE repository=? ORDER BY sequence LIMIT 257')
+      .all(repository) as Array<{ sequence: number; host_plan_id: string | null; record_json: string; record_digest: string }>
+    if (rows.length > 256) throw new ControlPlaneStoreError('invalid-state', 'source maintenance history exceeds bound')
+    return rows.map((row, index) => {
+      const record = parseSourceMaintenanceRecord(JSON.parse(row.record_json))
+      if (record.repository !== repository || record.sequence !== index + 1 || record.sequence !== row.sequence
+        || record.host?.planId !== (row.host_plan_id ?? undefined)
+        || sourceMaintenanceDigest(record) !== row.record_digest) {
+        throw new ControlPlaneStoreError('invalid-state', 'source maintenance stored record changed')
+      }
+      return record
+    })
+  }
+
+  /** Offline owner transaction only. No service/model-facing signing path exists. */
+  async appendSourceMaintenance(recordInput: SourceMaintenanceRecord, input: { trust: PluginControlTrustConfig;
+    baseline: SourceBaselineConfig; physicalHome?: string }): Promise<void> {
+    const record = parseSourceMaintenanceRecord(recordInput), { trust, baseline } = input
+    validateSourceBaselineConfig(baseline)
+    const key = resolveTrustKey(trust, 'host-attestation', record.authority, record.keyId)
+    if (record.installationId !== trust.installationId || controlPlaneDigest(record.ledger) !== controlPlaneDigest(trust.ledger)
+      || record.repository !== recordInput.repository || controlPlaneDigest(record.baseline) !== controlPlaneDigest(baseline)
+      || record.publicKeyPem !== key.publicKeyPem || record.issuedAt > this.#now()) {
+      throw new ControlPlaneStoreError('invalid-input', 'source maintenance owner binding changed')
+    }
+    const verifiedHistory = this.getSourceBaselineHistory(record.repository)
+    const verifiedMaintenance = this.getSourceMaintenanceRecords(record.repository)
+    const authorityDigest = controlPlaneDigest({ trust, baseline })
+    await verifySourceBaselineHistory({ repository: record.repository, config: baseline, trust,
+      history: verifiedHistory, maintenance: verifiedMaintenance, signal: new AbortController().signal })
+    const verifiedSnapshot = controlPlaneDigest({ history: verifiedHistory, maintenance: verifiedMaintenance })
+    this.#database.exec('SAVEPOINT append_source_maintenance')
+    try {
+      this.#database.exec('UPDATE source_maintenance SET sequence=sequence WHERE 0')
+      const records = this.getSourceMaintenanceRecords(record.repository)
+      const history = this.getSourceBaselineHistory(record.repository)
+      if (controlPlaneDigest({ trust, baseline }) !== authorityDigest) {
+        throw new ControlPlaneStoreError('conflict', 'source maintenance trust or baseline changed before append')
+      }
+      if (controlPlaneDigest({ history, maintenance: records }) !== verifiedSnapshot) {
+        throw new ControlPlaneStoreError('conflict', 'source maintenance signed history changed before append')
+      }
+      const priorTransaction = records.find(item => item.transactionId === record.transactionId)
+      if (priorTransaction) {
+        if (sourceMaintenanceDigest(priorTransaction) !== sourceMaintenanceDigest(record)) {
+          throw new ControlPlaneStoreError('conflict', 'source maintenance transaction changed')
+        }
+        this.#database.exec('RELEASE append_source_maintenance')
+        return
+      }
+      verifySourceMaintenanceRecords([...records, record], { installationId: trust.installationId,
+        ledger: trust.ledger, repository: record.repository, baseline, hostIdentity: key })
+      const unsettledJob = this.#database.prepare(`SELECT id FROM source_jobs WHERE json_extract(intent_json,'$.repository')=?
+        AND status IN ('queued','running','unknown') LIMIT 1`).get(record.repository)
+      const unsettledPlan = this.#database.prepare(`SELECT id FROM source_plans WHERE repository=?
+        AND status NOT IN ('expired','local-checks-failed','release-failed','release-complete') LIMIT 1`).get(record.repository)
+      if (unsettledJob || unsettledPlan) throw new ControlPlaneStoreError('conflict', 'source maintenance has unsettled source work')
+      const watching = this.#database.prepare(`SELECT plan.id FROM activation_plans plan JOIN activation_watch watch ON watch.plan_id=plan.id
+        WHERE plan.dsh_home=? AND watch.state='watching' LIMIT 2`).all(trust.dshHome) as Array<{ id: string }>
+      const active = this.#database.prepare(`SELECT id FROM activation_plans WHERE dsh_home=?
+        AND status NOT IN ('rolled-back','activated') LIMIT 1`).get(trust.dshHome)
+      const activated = this.#database.prepare(`SELECT id FROM activation_plans WHERE dsh_home=? AND status='activated' LIMIT 1`)
+        .get(trust.dshHome)
+      if (watching.length > 1 || active || activated && watching.length === 0) {
+        throw new ControlPlaneStoreError('conflict', 'source maintenance activation is unsettled')
+      }
+      if (watching.length) {
+        const context = readCurrentRuntimeEpochDeployment(this.#database, this.getPlan(watching[0]!.id).target.profilePath)
+        const { plan, readiness } = context, receipt = readiness.receipt
+        if (!record.host || record.host.planId !== plan.id || record.host.planDigest !== plan.digest
+          || record.host.readinessOperationId !== readiness.operationId || !receipt
+          || record.host.readinessReceiptDigest !== hostMaintenanceDigest(receipt)
+          || receipt.authority !== record.authority || receipt.keyId !== record.keyId) {
+          throw new ControlPlaneStoreError('conflict', 'source maintenance watched Host anchor changed')
+        }
+        const { signature, ...unsigned } = receipt
+        if (!verify(null, Buffer.from(hostMaintenanceCanonical(unsigned)), createPublicKey(key.publicKeyPem), Buffer.from(signature, 'base64'))) {
+          throw new ControlPlaneStoreError('conflict', 'source maintenance original Host receipt signature changed')
+        }
+      } else if (record.host !== null) throw new ControlPlaneStoreError('conflict', 'source maintenance has no watched Host anchor')
+      const current = sourceBaselineChain(baseline, history, records).at(-1)!
+      if (record.previousTip !== current) throw new ControlPlaneStoreError('conflict', 'source maintenance previous tip is stale')
+      sourceBaselineChain(baseline, history, [...records, record])
+      assertSourceMaintenanceGit(record, input.physicalHome ?? trust.dshHome, trust.dshHome)
+      this.#database.prepare('INSERT INTO source_maintenance VALUES (?,?,?,?,?,?)').run(record.repository,record.sequence,
+        record.transactionId,record.host?.planId ?? null,JSON.stringify(record),sourceMaintenanceDigest(record))
+      this.#database.exec('RELEASE append_source_maintenance')
+    } catch (error) {
+      this.#database.exec('ROLLBACK TO append_source_maintenance; RELEASE append_source_maintenance')
+      throw error
+    }
+  }
+
+  /** Seed a previously owner-signed pre-adoption sidecar into a new ledger. */
+  async importSourceMaintenanceRecords(recordInputs: readonly SourceMaintenanceRecord[], input: { trust: PluginControlTrustConfig;
+    baseline: SourceBaselineConfig; physicalHome?: string }): Promise<void> {
+    if (recordInputs.length === 0 || recordInputs.length > 256) throw new ControlPlaneStoreError('invalid-input', 'source maintenance import is empty or unbounded')
+    const { trust, baseline } = input
+    validateSourceBaselineConfig(baseline)
+    const records = recordInputs.map(parseSourceMaintenanceRecord), first = records[0]!
+    const key = resolveTrustKey(trust, 'host-attestation', first.authority, first.keyId)
+    verifySourceMaintenanceRecords(records, { installationId: trust.installationId, ledger: trust.ledger,
+      repository: first.repository, baseline, hostIdentity: key })
+    if (records.some(record => record.host !== null)) throw new ControlPlaneStoreError('invalid-input', 'pre-adoption source history carries a deployment anchor')
+    sourceBaselineChain(baseline, [], records)
+    const authorityDigest = controlPlaneDigest({ trust, baseline, records })
+    this.#database.exec('SAVEPOINT import_source_maintenance')
+    try {
+      this.#database.exec('UPDATE source_maintenance SET sequence=sequence WHERE 0')
+      if (controlPlaneDigest({ trust, baseline, records }) !== authorityDigest) throw new ControlPlaneStoreError('conflict', 'source import authority changed')
+      const present = this.getSourceMaintenanceRecords(first.repository)
+      if (present.length > records.length || present.some((record,index) => sourceMaintenanceDigest(record) !== sourceMaintenanceDigest(records[index]))) {
+        throw new ControlPlaneStoreError('conflict', 'source import differs from existing ledger history')
+      }
+      if (this.getSourceBaselineHistory(first.repository).length) throw new ControlPlaneStoreError('conflict', 'source import cannot cross a published release')
+      const anyJob = this.#database.prepare(`SELECT id FROM source_jobs WHERE json_extract(intent_json,'$.repository')=? LIMIT 1`)
+        .get(first.repository)
+      const anyPlan = this.#database.prepare('SELECT id FROM source_plans WHERE repository=? LIMIT 1').get(first.repository)
+      const anyActivation = this.#database.prepare('SELECT id FROM activation_plans WHERE dsh_home=? LIMIT 1').get(trust.dshHome)
+      if (anyJob || anyPlan || anyActivation) throw new ControlPlaneStoreError('conflict', 'source import requires an empty owner ledger')
+      for (let index = 0; index < records.length; index++) {
+        assertSourceMaintenanceGit(records[index]!, input.physicalHome ?? trust.dshHome, trust.dshHome, index === records.length - 1)
+      }
+      for (const record of records.slice(present.length)) {
+        this.#database.prepare('INSERT INTO source_maintenance VALUES (?,?,?,?,?,?)').run(record.repository,record.sequence,
+          record.transactionId,null,JSON.stringify(record),sourceMaintenanceDigest(record))
+      }
+      this.#database.exec('RELEASE import_source_maintenance')
+    } catch (error) {
+      this.#database.exec('ROLLBACK TO import_source_maintenance; RELEASE import_source_maintenance')
+      throw error
+    }
+  }
+
   /**
    * Enumerate 'modify' plans for isolated-worktree garbage collection. Only
    * modify plans own control-plane-created worktrees under the state root;
@@ -3834,7 +4023,8 @@ export class ControlPlaneStore {
 
   async startSourceRelease(input: { planId: string; expectedRevision: number; authorization: SourceReleaseAuthorization;
     resolveAuthority: (authorization: SourceReleaseAuthorization) => SourceReleaseAuthorizationAuthority;
-    idempotencyKey: string; withSourceFence?: <T>(callback: () => T) => T }): Promise<OperationReceipt<PluginSourcePlan>> {
+    idempotencyKey: string; withSourceFence?: <T>(callback: () => T) => T;
+    trust?: PluginControlTrustConfig }): Promise<OperationReceipt<PluginSourcePlan>> {
     const withCurrentSource = <T>(gapId: string, callback: () => T): T => {
       const commit = () => { this.#assertOwnerTaskFailureGapAdmission(gapId); return callback() }
       return input.withSourceFence ? input.withSourceFence(commit) : commit()
@@ -3868,6 +4058,18 @@ export class ControlPlaneStore {
     const verified = await input.resolveAuthority(input.authorization).verify(input.authorization, plan)
     const now = this.#now()
     if (now > plan.expiresAt || now > verified.expiresAt) throw new ControlPlaneStoreError('expired', 'source release authorization is no longer applicable')
+    const prelinked = this.#database.prepare('SELECT * FROM source_jobs WHERE plan_id=? LIMIT 2')
+      .all(plan.id) as unknown as SourceJobRow[]
+    const prebaseline = prelinked.length === 1 ? sourceJobFromRow(prelinked[0]!).intent.baseline : undefined
+    const premaintenance = prebaseline ? this.getSourceMaintenanceRecords(plan.repository) : []
+    let lineageDigest: string | undefined
+    if (prebaseline && premaintenance.length) {
+      if (!input.trust) throw new ControlPlaneStoreError('invalid-input', 'managed source maintenance requires current trust')
+      const prehistory = this.getSourceBaselineHistory(plan.repository)
+      await verifySourceBaselineHistory({ repository: plan.repository, config: prebaseline, trust: input.trust,
+        history: prehistory, maintenance: premaintenance, signal: new AbortController().signal })
+      lineageDigest = controlPlaneDigest({ history: prehistory, maintenance: premaintenance, trust: input.trust, baseline: prebaseline })
+    }
     return withCurrentSource(plan.gapId, () => {
       this.#database.exec('BEGIN IMMEDIATE')
       try {
@@ -3897,28 +4099,15 @@ export class ControlPlaneStore {
             .get(plan.repository, plan.id) as { id: string } | undefined
           if (active !== undefined) throw new ControlPlaneStoreError('conflict', 'source repository has another active release')
           const history = this.getSourceBaselineHistory(plan.repository)
-          const byBase = new Map<string, string>()
-          const merged = new Set<string>()
-          for (const previous of history) {
-            const evidence = previous.operation.receipt?.evidence
-            if (previous.plan.releaseAuthorization?.releasePolicy.targetBranch !== linked.intent.baseline.targetBranch
-              || evidence?.kind !== 'merge' || evidence.targetBranch !== linked.intent.baseline.targetBranch) {
-              throw new ControlPlaneStoreError('conflict', 'source repository release history does not follow managed baseline')
-            }
-            if (byBase.has(previous.plan.baseCommit) || merged.has(evidence.mergeCommit) || previous.plan.baseCommit === evidence.mergeCommit) {
-              throw new ControlPlaneStoreError('conflict', 'source repository release history forks or repeats a merge')
-            }
-            byBase.set(previous.plan.baseCommit, evidence.mergeCommit)
-            merged.add(evidence.mergeCommit)
+          const maintenance = this.getSourceMaintenanceRecords(plan.repository)
+          if (lineageDigest !== undefined && controlPlaneDigest({ history, maintenance, trust: input.trust,
+            baseline: linked.intent.baseline }) !== lineageDigest) {
+            throw new ControlPlaneStoreError('conflict', 'managed source signed lineage changed before release')
           }
-          let expectedCommit = linked.intent.baseline.initialCommit
-          const visited = new Set<string>([expectedCommit])
-          while (byBase.has(expectedCommit)) {
-            expectedCommit = byBase.get(expectedCommit)!
-            if (visited.has(expectedCommit)) throw new ControlPlaneStoreError('conflict', 'source repository release history has a cycle')
-            visited.add(expectedCommit)
+          if (maintenance.length && lineageDigest === undefined) {
+            throw new ControlPlaneStoreError('conflict', 'managed source maintenance was not preverified')
           }
-          if (visited.size !== history.length + 1) throw new ControlPlaneStoreError('conflict', 'source repository release history is disconnected')
+          const expectedCommit = sourceBaselineChain(linked.intent.baseline, history, maintenance).at(-1)!
           if (plan.baseCommit !== expectedCommit) throw new ControlPlaneStoreError('conflict', 'managed source release base commit is stale')
         }
         const releaseId = `release-${randomUUID()}`

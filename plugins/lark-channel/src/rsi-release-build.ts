@@ -33,6 +33,28 @@ async function inspect(root: string): Promise<RsiReleaseBuildConfig> {
     storeRoot: join(root, 'store'), cacheRoot: join(root, 'cache') })
 }
 
+/** Verify existing exported inputs only; never creates a container or repairs a
+ * missing export. The caller separately verifies the source image evidence. */
+export async function readRsiReleaseBuildEnvironment(input: {
+  dshHome: string; profile: string; build: RsiBuildEnvironment; signal?: AbortSignal
+}): Promise<RsiReleaseBuildEnvironment> {
+  if (!isAbsolute(input.dshHome) || resolve(input.dshHome) !== input.dshHome
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(input.profile)) fail('invalid resource binding')
+  input.signal?.throwIfAborted()
+  await io.directory(input.dshHome, false)
+  const parent = join(input.dshHome, 'rsi-release-builds'), final = join(parent, input.profile)
+  await io.directory(parent); await io.directory(final)
+  if (!isDeepStrictEqual((await readdir(final)).sort(), ['bootstrap.json', 'cache', 'store', 'toolchain'])) fail('existing release environment is incomplete')
+  const receipt = JSON.parse((await io.readStable(join(final, 'bootstrap.json'), 65_536, true)).toString('utf8')) as Receipt
+  const { receiptDigest, ...content } = receipt
+  if (receipt.schemaVersion !== 1 || receipt.dshHome !== input.dshHome || receipt.profile !== input.profile
+    || receipt.sourceCommit !== input.build.sourceCommit || receipt.image !== input.build.sourceBuild.image
+    || digest(JSON.stringify(content)) !== receiptDigest
+    || !isDeepStrictEqual(receipt.releaseBuild, await inspect(final))) fail('release environment differs from its receipt')
+  input.signal?.throwIfAborted()
+  return { schemaVersion: 1, sourceCommit: receipt.sourceCommit, image: receipt.image, releaseBuild: receipt.releaseBuild }
+}
+
 // Docker cp preserves image mode bits. Make exported resources private, reject
 // links/devices, and separate any hard links before the adapter pins the trees.
 async function harden(root: string, signal: AbortSignal): Promise<void> {
@@ -83,16 +105,7 @@ export async function prepareRsiReleaseBuildEnvironment(input: {
   const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(600_000)])
   try {
     await lstat(final)
-    await io.directory(final)
-    if (!isDeepStrictEqual((await readdir(final)).sort(), ['bootstrap.json', 'cache', 'store', 'toolchain'])) fail('existing release environment is incomplete')
-    const receipt = JSON.parse((await io.readStable(join(final, 'bootstrap.json'), 65_536, true)).toString('utf8')) as Receipt
-    const { receiptDigest, ...content } = receipt
-    if (receipt.schemaVersion !== 1 || receipt.dshHome !== input.dshHome || receipt.profile !== input.profile
-      || receipt.sourceCommit !== input.build.sourceCommit || receipt.image !== image
-      || digest(JSON.stringify(content)) !== receiptDigest
-      || !isDeepStrictEqual(receipt.releaseBuild, await inspect(final))) fail('release environment differs from its receipt')
-    signal.throwIfAborted()
-    return { schemaVersion: 1, sourceCommit: receipt.sourceCommit, image, releaseBuild: receipt.releaseBuild }
+    return await readRsiReleaseBuildEnvironment({ ...input, signal })
   } catch (error) {
     // Only absence of the root permits creation. A missing child is drift.
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error

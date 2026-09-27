@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { prepareRsiReleaseBuildEnvironment } from '../src/rsi-release-build.js'
+import { prepareRsiReleaseBuildEnvironment, readRsiReleaseBuildEnvironment } from '../src/rsi-release-build.js'
 import type { RsiBuildEnvironment } from '../src/rsi-build.js'
 
 const roots: string[] = []
@@ -58,6 +58,19 @@ async function readCalls(path: string): Promise<string[][]> {
 }
 const supported = process.platform === 'linux' && process.arch === 'x64' && existsSync('/usr/bin/bwrap') && existsSync('/usr/bin/tar')
 describe.skipIf(!supported)('private release build preparation', () => {
+  test('read-only inspection never exports or repairs missing resources', async () => {
+    const f = await fixture()
+    await expect(readRsiReleaseBuildEnvironment(f.args)).rejects.toThrow()
+    await expect(lstat(join(f.home, 'rsi-release-builds'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const prepared = await prepareRsiReleaseBuildEnvironment(f.args)
+    const before = await readFile(f.calls)
+    expect(await readRsiReleaseBuildEnvironment(f.args)).toEqual(prepared)
+    await rm(join(f.final, 'store'), { recursive: true })
+    await expect(readRsiReleaseBuildEnvironment(f.args)).rejects.toThrow('incomplete')
+    expect(await readFile(f.calls)).toEqual(before)
+    await expect(lstat(join(f.final, 'store'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('exports fixed image assets without starting a container, pins them through the real adapter, and replays', async () => {
     const f = await fixture()
     const result = await prepareRsiReleaseBuildEnvironment(f.args)

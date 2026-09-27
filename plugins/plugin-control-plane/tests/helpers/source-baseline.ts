@@ -9,7 +9,9 @@ export async function sourceBaselineRelease(input: { repository: string; baseCom
   if ((await advanceSourceRelease(first.options)).status !== 'release-complete') throw new Error('source baseline fixture did not complete release')
   return {
     ...first,
-    completeNext: async (next: { baseCommit: string; mergeCommit: string; repository?: string; managed?: boolean }) => {
+    completeNext: async (next: { baseCommit: string; mergeCommit: string; repository?: string; managed?: boolean;
+      baseline?: import('../../src/source-baseline.ts').SourceBaselineConfig;
+      trustOverride?: import('../../src/trust.ts').PluginControlTrustConfig }) => {
       const second = await first.next(next)
       if ((await advanceSourceRelease(second.options)).status !== 'awaiting-review') throw new Error('second baseline fixture did not request review')
       await second.decide()

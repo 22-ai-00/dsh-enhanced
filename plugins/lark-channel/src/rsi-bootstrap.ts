@@ -13,6 +13,7 @@ import { validateRsiAuthorities } from './rsi-setup.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
 import { prepareRsiAuthorityRuntime } from './rsi-authority-runtime.js'
 import { readRsiHostUpdateOverlayChain } from './rsi-host-update.js'
+import { readRsiSourceMaintenance } from './rsi-source-maintenance.js'
 import { rsiBuildResources as io } from './rsi-build.js'
 
 type Profiles = Pick<Parameters<typeof compileRsiProfiles>[0], 'targetPatch' | 'targetEffective'
@@ -90,6 +91,18 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
     || [manifestPath, receiptPath, overlayPath].includes(observer.keyPath)) fail('observer key must have a separate private configuration path')
   const ledgerPath = join(manifest.controlPlane.statePath, 'control.sqlite')
   if (!within(ledgerPath, resources.stateRoot) || !within(observer.socketPath, resources.stateRoot)) fail('runtime state must stay in the installation state root')
+  const readSourceMaintenance = async () => {
+    const path = join(home, 'rsi-sources', manifest.targetProfile, 'maintenance.json')
+    if (!await exists(path)) return []
+    const maintained = await readRsiSourceMaintenance({ logicalHome: home, physicalHome: home,
+      profile: manifest.targetProfile, signal })
+    if (maintained.workspace.repository !== manifest.controlPlane.sourceJobs?.repository
+      || !isDeepStrictEqual(maintained.workspace.baseline, manifest.controlPlane.sourceJobs.baseline)) {
+      fail('source maintenance differs from owner configuration')
+    }
+    return maintained.records
+  }
+  const sourceMaintenance = await readSourceMaintenance()
   const directories = [...new Set([...compiled.directories, dirname(ledgerPath), dirname(observer.keyPath),
     ...Object.keys(files).map(dirname)])].sort((left, right) => left.length - right.length || left.localeCompare(right))
   const roots = [resources.configRoot, resources.stateRoot, resources.registry.root]
@@ -105,6 +118,10 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
     try {
       const row = database.prepare('PRAGMA user_version').get() as { user_version: number }
       if (row.user_version !== controlPlaneSchemaVersion) fail('control ledger schema differs from the installed runtime')
+      const stored = database.prepare('SELECT record_json FROM source_maintenance WHERE repository=? ORDER BY sequence')
+        .all(manifest.controlPlane.sourceJobs!.repository).map(row => JSON.parse(String(row.record_json)) as unknown)
+      if (!isDeepStrictEqual(stored, sourceMaintenance)
+        || !isDeepStrictEqual(await readSourceMaintenance(), sourceMaintenance)) fail('source maintenance ledger differs from retained history')
     } finally { database.close() }
     const patches = await compileRsiProfiles({ manifest, dshHome: home, ...context.profiles, owner: context.binding })
     await validateRsiAuthorities(manifest, context.binding, manifest.serviceEnvironment?.target)
@@ -179,8 +196,13 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
     await write(observer.keyPath, randomBytes(32))
     // Create the real schema. No empty-file stand-in is accepted as a ledger.
     const store = new ControlPlaneStore({ path: ledgerPath })
-    store.close()
-    await remember(ledgerPath)
+    try {
+      if (sourceMaintenance.length) {
+        const baseline = manifest.controlPlane.sourceJobs?.baseline
+        if (!baseline) fail('retained source maintenance requires the original baseline')
+        await store.importSourceMaintenanceRecords(sourceMaintenance, { trust: compiled.trust, baseline })
+      }
+    } finally { store.close(); await remember(ledgerPath) }
     for (const [path, bytes] of Object.entries(files)) await write(path, bytes)
     const planDigest = hash(json({ files: expectedFiles, patches: await verify() }))
     const receipt: Receipt = { schemaVersion: 1, planDigest, files: expectedFiles,

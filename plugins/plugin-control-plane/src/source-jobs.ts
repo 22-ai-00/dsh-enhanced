@@ -259,7 +259,8 @@ export class SourceJobRuntime {
     const environment = inheritedEnvironment(trust)
     const baselineCommit = config.baseline === undefined ? undefined : await resolveSourceBaseline({ repository: config.repository,
       config: config.baseline, environment, signal, assertCurrent, trust,
-      readHistory: () => this.options.store.getSourceBaselineHistory(config.repository) })
+      readHistory: () => this.options.store.getSourceBaselineHistory(config.repository),
+      readMaintenance: () => this.options.store.getSourceMaintenanceRecords(config.repository) })
     const source = await inspectSourceContext({ repository: config.repository, name: input.name, paths: [], baseCommit: input.expectedBaseCommit,
       ...(baselineCommit === undefined ? {} : { baselineCommit }), environment, signal, assertCurrent })
     const intent: SourceJobIntent = {

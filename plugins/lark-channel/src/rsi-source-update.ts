@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, readdir, realpath, rename, rm, stat } from 'node
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { readRsiLocalCohort } from './rsi-local-cohort.js'
-import { prepareRsiSourceWorkspace } from './rsi-source.js'
+import { readRsiSourceWorkspace } from './rsi-source.js'
 
 const PROFILE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
@@ -116,10 +116,9 @@ async function original(input: RsiSourceUpdateInput, signal: AbortSignal) {
   const bootstrapPath = join(input.dshHome, 'rsi-sources', input.profile, 'bootstrap.json')
   const bootstrap = await privateFile(bootstrapPath, 65_536)
   const saved = parseJson(bootstrap, 'original source receipt')
-  const originalVersion = typeof saved.version === 'string' && EXACT_VERSION.test(saved.version)
-    ? saved.version : fail('original source version is invalid')
-  const source = await prepareRsiSourceWorkspace({ dshHome: input.dshHome, profile: input.profile,
-    sourceRepository: input.sourceRepository, version: originalVersion, signal })
+  if (typeof saved.version !== 'string' || !EXACT_VERSION.test(saved.version)) fail('original source version is invalid')
+  const source = await readRsiSourceWorkspace({ dshHome: input.dshHome, profile: input.profile,
+    sourceRepository: input.sourceRepository, signal })
   if (source.origin.kind !== 'local-head' || source.origin.locator !== input.sourceRepository) fail('original source is not the selected local repository')
   const cohort = await readRsiLocalCohort({ dshHome: input.dshHome, profile: input.profile, source })
   await noAlternates(source.repository)

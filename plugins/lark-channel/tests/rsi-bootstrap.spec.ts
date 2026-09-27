@@ -1,12 +1,64 @@
-import { lstat, readFile, readdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { lstat, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, test } from 'vitest'
-import { ControlPlaneStore } from '@dsh-enhanced/plugin-control-plane'
+import { ControlPlaneStore, signSourceMaintenanceRecord } from '@dsh-enhanced/plugin-control-plane'
 import { prepareRsiOwnerConfiguration } from '../src/rsi-bootstrap.js'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
 
 describe.skipIf(process.platform !== 'linux')('owner configuration preparation', () => {
+  test('first owner imports retained pre-owner source maintenance and retry detects a missing ledger edge', async () => {
+    const f = await rsiBootstrapFixture()
+    try {
+      const source = f.input.source, { resources, manifest } = f.input
+      const home = dirname(dirname(resources.root)), profile = manifest.targetProfile
+      const sourceRoot = dirname(source.repository)
+      const bootstrap = await readFile(join(sourceRoot, 'bootstrap.json'))
+      const sha = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex')
+      const git = (repository: string, ...args: string[]) => execFileSync('/usr/bin/git', ['-C', repository,
+        '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args], {
+        encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: '/nonexistent', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+      }).trim()
+      await writeFile(join(source.repository, 'maintenance.txt'), 'pre-owner source update\n')
+      git(source.repository, 'add', 'maintenance.txt'); git(source.repository, 'commit', '-m', 'pre-owner update')
+      const tip = git(source.repository, 'rev-parse', 'HEAD')
+      git(source.repository, 'update-ref', source.baseline.ref, tip, source.sourceCommit)
+      git(source.baseline.remote, 'fetch', '--no-write-fetch-head', source.repository, `${tip}:refs/heads/repairs`)
+      // This fixture supplies the signed source/cohort metadata. Package
+      // materialization is covered separately by the local-cohort tests.
+      const cohortRoot = join(home, 'rsi-local-cohorts', profile)
+      await mkdir(cohortRoot, { recursive: true, mode: 0o700 })
+      const body = { schemaVersion: 1, root: cohortRoot, sourceCommit: tip, version: source.version }
+      const cohort = { ...body, receiptDigest: sha(JSON.stringify(body)) }
+      await writeFile(join(cohortRoot, 'receipt.json'), JSON.stringify(cohort), { mode: 0o600 })
+      const host = resources.identities.host
+      const record = signSourceMaintenanceRecord({ schemaVersion: 1, kind: 'dsh-source-maintenance',
+        transactionId: 'first-owner-source-update', installationId: resources.installationId,
+        ledger: { id: resources.ledgerId, path: join(manifest.controlPlane.statePath, 'control.sqlite') },
+        repository: source.repository, baseline: source.baseline, sequence: 1, previousDigest: null,
+        previousTip: source.sourceCommit, candidateTip: tip, upstreamCommit: tip,
+        sourceTree: git(source.repository, 'rev-parse', 'HEAD^{tree}'), preparationReceiptDigest: 'a'.repeat(64),
+        originalBootstrapDigest: sha(bootstrap), before: { sourceCommit: source.sourceCommit, version: source.version, cohortDigest: 'b'.repeat(64) },
+        after: { sourceCommit: tip, version: source.version, cohortDigest: cohort.receiptDigest }, host: null,
+        issuedAt: f.input.now, authority: host.authority, keyId: host.keyId }, await readFile(host.keyPath, 'utf8'))
+      await writeFile(join(sourceRoot, 'maintenance.json'), JSON.stringify([record]), { mode: 0o600 })
+      f.input.source = { ...source, sourceCommit: tip }
+      const result = await prepareRsiOwnerConfiguration(f.input, f)
+      const store = new ControlPlaneStore({ path: record.ledger.path })
+      try { expect(store.getSourceMaintenanceRecords(source.repository)).toEqual([record]) } finally { store.close() }
+      expect(await prepareRsiOwnerConfiguration(f.input, f)).toEqual(result)
+      const { DatabaseSync } = await import('node:sqlite')
+      const database = new DatabaseSync(record.ledger.path)
+      try { database.prepare('DELETE FROM source_maintenance WHERE repository=?').run(source.repository) } finally { database.close() }
+      await expect(prepareRsiOwnerConfiguration(f.input, f)).rejects.toThrow('source maintenance ledger differs')
+      const unchanged = new ControlPlaneStore({ path: record.ledger.path })
+      try { expect(unchanged.getSourceMaintenanceRecords(source.repository)).toEqual([]) } finally { unchanged.close() }
+      expect(await readFile(join(sourceRoot, 'bootstrap.json'))).toEqual(bootstrap)
+    } finally { await f.cleanup() }
+  }, 120_000)
+
   test('creates validated complete configuration and preserves real ledger, key and authority state on retry', async () => {
     const f = await rsiBootstrapFixture()
     try {

@@ -581,7 +581,7 @@ export class PluginControlPlaneService extends Service {
       const key = resolveTrustKey(trust, 'release-authorization', authorization.authority, authorization.keyId)
       return (await this.store.startSourceRelease({ planId: plan.id, expectedRevision: plan.revision, authorization,
         resolveAuthority: () => new Ed25519SourceReleaseAuthorizationAuthority(key.publicKeyPem, key.authority, key.keyId),
-        idempotencyKey: `source-release-authorization:${authorization.authorizationId}`, withSourceFence })).result
+        idempotencyKey: `source-release-authorization:${authorization.authorizationId}`, withSourceFence, trust })).result
     })()
     this.sourceReleaseFlights.add(operation)
     try { return await operation } finally { this.sourceReleaseFlights.delete(operation) }
@@ -741,7 +741,8 @@ export class PluginControlPlaneService extends Service {
     const baseline = this.config.sourceJobs?.repository === input.repository ? this.config.sourceJobs.baseline : undefined
     const baselineCommit = baseline === undefined ? undefined : await resolveSourceBaseline({ repository: input.repository,
       config: baseline, environment, signal, assertCurrent, trust,
-      readHistory: () => this.store.getSourceBaselineHistory(input.repository) })
+      readHistory: () => this.store.getSourceBaselineHistory(input.repository),
+      readMaintenance: () => this.store.getSourceMaintenanceRecords(input.repository) })
     return inspectSourceContext({ repository: input.repository, name: input.name, paths: input.paths,
       ...(input.baseCommit === undefined ? {} : { baseCommit: input.baseCommit }),
       ...(baselineCommit === undefined ? {} : { baselineCommit }), environment, signal, assertCurrent })
@@ -835,7 +836,8 @@ export class PluginControlPlaneService extends Service {
     const baseCommit = baseline === undefined
       ? (await runLocalCommand('git', ['rev-parse', 'HEAD'], repository, environment, { capture: true })).trim()
       : await resolveSourceBaseline({ repository, config: baseline, environment, signal, assertCurrent, trust,
-        readHistory: () => this.store.getSourceBaselineHistory(repository) })
+        readHistory: () => this.store.getSourceBaselineHistory(repository),
+        readMaintenance: () => this.store.getSourceMaintenanceRecords(repository) })
     await assertCurrent()
     if (!/^[a-f0-9]{40}$/u.test(baseCommit)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository HEAD is not a 40-hex commit id')
     if (input.expectedBaseCommit !== undefined && input.expectedBaseCommit !== baseCommit) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source base commit is stale')

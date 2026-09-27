@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
-import { prepareRsiBuildEnvironment, RsiBuildUnavailableError } from '../src/rsi-build.js'
+import { prepareRsiBuildEnvironment, readRsiBuildEnvironment, RsiBuildUnavailableError } from '../src/rsi-build.js'
 import type { RsiSourceWorkspace } from '../src/rsi-source.js'
 
 const roots: string[] = []
@@ -73,6 +73,19 @@ async function calls(path: string): Promise<{ args: string[]; safe: boolean }[]>
 }
 
 describe('private RSI repository builder', () => {
+  test('reads pinned inputs without Docker calls and refuses missing or changed resources', async () => {
+    const f = await fixture()
+    await expect(readRsiBuildEnvironment(f.args)).rejects.toThrow()
+    await expect(lstat(join(f.home, 'rsi-builds'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const prepared = await prepareRsiBuildEnvironment(f.args)
+    const before = await readFile(f.calls)
+    expect(await readRsiBuildEnvironment(f.args)).toEqual(prepared)
+    expect(await readFile(f.calls)).toEqual(before)
+    await writeFile(join(f.home, 'rsi-builds', 'owner', 'seccomp.json'), 'changed')
+    await expect(readRsiBuildEnvironment(f.args)).rejects.toThrow('seccomp changed')
+    expect(await readFile(f.calls)).toEqual(before)
+  })
+
   test('runs the pinned trusted builder with an empty Docker config and reuses its immutable image', async () => {
     const f = await fixture()
     const first = await prepareRsiBuildEnvironment(f.args)

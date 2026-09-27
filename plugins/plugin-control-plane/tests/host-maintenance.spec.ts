@@ -137,7 +137,7 @@ test('schema 26 migration adds an empty maintenance journal and retains original
     f.db.exec('DROP TABLE deployment_host_maintenance; PRAGMA user_version=26')
     const reopened = new ControlPlaneStore({ path: f.plan.ledger.path })
     try {
-      expect(f.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 27 })
+      expect(f.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 28 })
       expect(readHostMaintenanceContext(f.db, f.plan.id).records).toEqual([])
       expect(history(f.db)).toEqual(before)
     } finally { reopened.close() }

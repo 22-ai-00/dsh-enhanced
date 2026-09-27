@@ -10,6 +10,8 @@ import * as release from '../../src/release.ts'
 import type { advanceSourceRelease } from '../../src/source-release-runner.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../../src/store.ts'
 import { defaultHostAttestationPolicy } from '../../src/trust.ts'
+import type { PluginControlTrustConfig } from '../../src/trust.ts'
+import type { SourceBaselineConfig } from '../../src/source-baseline.ts'
 import type { SourceReleaseAuthorization, SourceReleaseRequest, SourceReleaseReceipt, SourceReleaseSuccessEvidence } from '../../src/types.ts'
 
 // Real SQLite and Ed25519 phase verification; only external adapter execution is scripted.
@@ -143,7 +145,8 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
       ...operation.request.input, decision: 'approved', reviewerPrincipal: 'independent-reviewer', ...overrides }), { mode: 0o600 })
     // request input contains exactly prId/head/base/prEvidenceDigest.
   }
-  const next = async (nextInput: { repository?: string; baseCommit: string; mergeCommit: string; managed?: boolean }) => {
+  const next = async (nextInput: { repository?: string; baseCommit: string; mergeCommit: string; managed?: boolean;
+    baseline?: SourceBaselineConfig; trustOverride?: PluginControlTrustConfig }) => {
     if (!ownerBound) throw new Error('second release requires the owner-bound fixture')
     const secondGap = store.recordOwnerTaskFailureGap({ schemaVersion: 1, owner, outcomeId: `outcome-${plan.id}`,
       projection: { subjectKind: 'foreground-turn', subjectRef: `task-${plan.id}`, version: 1, digest: hash(`projection-${plan.id}`), disposition: 'upsert' },
@@ -163,7 +166,7 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
         files: [{ path: 'src/index.ts', content: 'export const second = true\n' }], ttlMs: 600_000,
         build: { dockerPath: '/usr/bin/docker', image: `example@sha256:${'b'.repeat(64)}`, timeoutMs: 60_000, memoryMiB: 128,
           cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 }, worktree: secondWorktree,
-        containerName: `dsh-${secondJobId}`, baseline: { ref: 'refs/dsh-source/health-helper', remote: join(root, 'remote.git'),
+        containerName: `dsh-${secondJobId}`, baseline: nextInput.baseline ?? { ref: 'refs/dsh-source/health-helper', remote: join(root, 'remote.git'),
           targetBranch: policy.targetBranch, initialCommit: plan.baseCommit } }
       const queued = secondFence(() => store.enqueueSourceJob({ id: secondJobId, automationId: secondJobId,
         idempotencyKey: `job-second:${secondGap.id}`, intent }))
@@ -197,10 +200,11 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
     second = (await store.startSourceRelease({ planId: second.id, expectedRevision: second.revision,
       authorization: { ...secondAuthorization, signature: sign(null, Buffer.from(release.sourceReleaseAuthorizationSigningPayload(secondAuthorization)), keys.releaseOwner!.privateKey).toString('base64') },
       idempotencyKey: `start-second:${second.id}`, withSourceFence: secondFence,
+      ...(nextInput.trustOverride ? { trust: nextInput.trustOverride } : {}),
       resolveAuthority: () => new release.Ed25519SourceReleaseAuthorizationAuthority(keys.releaseOwner!.publicKey.export({ format: 'pem', type: 'spki' }), 'release-owner', 'release-owner') })).result
     mergeCommits.set(second.id, nextInput.mergeCommit)
     const secondController = new AbortController()
-    const secondOptions: Parameters<typeof advanceSourceRelease>[0] = { store, planId: second.id, trust,
+    const secondOptions: Parameters<typeof advanceSourceRelease>[0] = { store, planId: second.id, trust: nextInput.trustOverride ?? trust,
       config: { reviewDecisionRoot, timeoutMs: 30_000 }, signal: secondController.signal,
       assertCurrent: async () => { secondController.signal.throwIfAborted(); secondFence(() => {}) },
       withSourceFence: <T>(callback: () => T): T => { secondController.signal.throwIfAborted(); return secondFence(callback) } }
