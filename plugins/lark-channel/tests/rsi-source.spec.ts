@@ -1,12 +1,21 @@
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { prepareRsiSourceWorkspace } from '../src/rsi-source.js'
 
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
+
 const roots: string[] = []
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+afterEach(async () => {
+  vi.unstubAllEnvs()
+  vi.clearAllMocks()
+  await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
+})
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args],
@@ -110,47 +119,48 @@ describe('private RSI source workspace', () => {
   })
 
   test('cancels a running Git subprocess before returning and leaves no published workspace', async () => {
-    const f = await fixture(), bin = join(f.root, 'bin')
-    await mkdir(bin)
-    await writeFile(join(bin, 'git'), '#!/bin/sh\nsleep 30 &\nwait\n', { mode: 0o700 })
-    const originalPath = process.env.PATH
+    const f = await fixture()
+    const nativeSpawn = (await vi.importActual<typeof import('node:child_process')>('node:child_process')).spawn
     const controller = new AbortController()
-    try {
-      process.env.PATH = `${bin}:${originalPath ?? ''}`
-      const pending = prepareRsiSourceWorkspace({ ...f.args, signal: controller.signal })
-      setTimeout(() => controller.abort(), 100)
-      await expect(pending).rejects.toThrow('Git command failed')
-      await expect(lstat(join(f.home, 'rsi-sources', 'owner'))).rejects.toMatchObject({ code: 'ENOENT' })
-    } finally { process.env.PATH = originalPath }
+    vi.mocked(spawn).mockImplementationOnce((_file, _args, options) => nativeSpawn('/bin/sh', ['-c', 'sleep 30 & wait'], options))
+    const pending = prepareRsiSourceWorkspace({ ...f.args, signal: controller.signal })
+    setTimeout(() => controller.abort(), 100)
+    await expect(pending).rejects.toThrow('Git command failed')
+    expect(vi.mocked(spawn).mock.calls[0]?.[0]).toBe('/usr/bin/git')
+    await expect(lstat(join(f.home, 'rsi-sources', 'owner'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('passes only standard proxy and CA routing while excluding caller Git config and askpass', async () => {
-    const f = await fixture(), bin = join(f.root, 'bin'), marker = join(f.root, 'environment-result')
-    await mkdir(bin)
+    const f = await fixture(), marker = join(f.root, 'environment-result')
+    const nativeSpawn = (await vi.importActual<typeof import('node:child_process')>('node:child_process')).spawn
     const allowed = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy',
       'NO_PROXY', 'no_proxy', 'GIT_SSL_CAINFO', 'GIT_SSL_CAPATH', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'CURL_CA_BUNDLE'] as const
     const values = Object.fromEntries(allowed.map((key, index) => [key, `test-route-${index}`]))
     const script = `#!${process.execPath}\nconst fs=require('node:fs')\nconst expected=${JSON.stringify(values)}\n` +
       `const allowed=Object.entries(expected).every(([key,value])=>process.env[key]===value)\n` +
       `const isolated=process.env.GIT_CONFIG_COUNT==='0'&&process.env.GIT_CONFIG_GLOBAL==='/dev/null'` +
-      `&&process.env.GIT_ASKPASS==='/bin/false'&&process.env.GIT_CONFIG_KEY_0===undefined` +
+      `&&process.env.GIT_ASKPASS==='/bin/false'&&process.env.PATH==='/usr/bin:/bin'&&process.env.GIT_CONFIG_KEY_0===undefined` +
       `&&process.env.GIT_CONFIG_VALUE_0===undefined&&process.env.GIT_SSL_NO_VERIFY===undefined\n` +
       `fs.writeFileSync(${JSON.stringify(marker)},allowed&&isolated?'pass':'fail')\nprocess.exit(13)\n`
-    await writeFile(join(bin, 'git'), script, { mode: 0o700 })
-    const keys = [...allowed, 'PATH', 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0', 'GIT_ASKPASS', 'GIT_SSL_NO_VERIFY']
-    const before = Object.fromEntries(keys.map(key => [key, process.env[key]]))
-    try {
-      Object.assign(process.env, values, { PATH: `${bin}:${process.env.PATH ?? ''}`, GIT_CONFIG_COUNT: '1',
-        GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/tmp/untrusted-hooks',
-        GIT_ASKPASS: '/tmp/untrusted-askpass', GIT_SSL_NO_VERIFY: 'true' })
-      await expect(prepareRsiSourceWorkspace(f.args)).rejects.toThrow('Git command failed')
-      expect(await readFile(marker, 'utf8')).toBe('pass')
-    } finally {
-      for (const key of keys) {
-        const value = before[key]
-        if (value === undefined) delete process.env[key]
-        else process.env[key] = value
-      }
-    }
+    for (const [key, value] of Object.entries(values)) vi.stubEnv(key, value)
+    vi.stubEnv('GIT_CONFIG_COUNT', '1')
+    vi.stubEnv('GIT_CONFIG_KEY_0', 'core.hooksPath')
+    vi.stubEnv('GIT_CONFIG_VALUE_0', '/tmp/untrusted-hooks')
+    vi.stubEnv('GIT_ASKPASS', '/tmp/untrusted-askpass')
+    vi.stubEnv('GIT_SSL_NO_VERIFY', 'true')
+    vi.mocked(spawn).mockImplementationOnce((_file, _args, options) => nativeSpawn(process.execPath, ['-e', script], options))
+    await expect(prepareRsiSourceWorkspace(f.args)).rejects.toThrow('Git command failed')
+    expect(vi.mocked(spawn).mock.calls[0]?.[0]).toBe('/usr/bin/git')
+    expect(await readFile(marker, 'utf8')).toBe('pass')
+  })
+
+  test('ignores a caller PATH executable during a real source checkout', async () => {
+    const f = await fixture(), bin = join(f.root, 'bin'), marker = join(f.root, 'path-git-ran')
+    await mkdir(bin)
+    await writeFile(join(bin, 'git'), `#!/bin/sh\necho ran > ${marker}\nexit 13\n`, { mode: 0o700 })
+    vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`)
+    const value = await prepareRsiSourceWorkspace(f.args)
+    expect(value.sourceCommit).toBe(f.head)
+    await expect(lstat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

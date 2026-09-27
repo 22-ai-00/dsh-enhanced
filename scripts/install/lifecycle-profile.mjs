@@ -3946,9 +3946,8 @@ function rsiCoordinatorSnapshot(pair) {
 }
 
 async function assertRsiPairUpgradeSource(homePath, profile, pair) {
-  if (pair === undefined) return
-  if (pair.receipt.sourceRepository !== null
-    || await existingIdentity(join(homePath, 'rsi-local-cohorts', profile)) !== undefined) {
+  if (await existingIdentity(join(homePath, 'rsi-local-cohorts', profile)) !== undefined
+    || pair !== undefined && pair.receipt.sourceRepository !== null) {
     fail('RSI 本地冻结 cohort 需要连同源码/制品收据迁移；尚未停服或修改安装，不能只升级两个 profile 的包。')
   }
 }
@@ -5051,6 +5050,7 @@ async function performNpmUpgrade({
   if (recovery !== undefined) {
     fail('已恢复或隔离上次生命周期事务；本次未访问 npm registry。请确认 DSH_HOME 仍已停止后重试 upgrade。')
   }
+  await assertRsiPairUpgradeSource(homePath, profile, undefined)
   const current = await readProfile(physicalHomePath, profile)
   const expectedManaged = managedNames(current.manifest)
   if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。')

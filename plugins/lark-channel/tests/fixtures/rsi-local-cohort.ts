@@ -54,7 +54,7 @@ export async function localCohortFixture() {
       const pkg = JSON.parse(await readFile(join(workspace, path, 'package.json'), 'utf8')) as Record<string, unknown>
       for (const field of ['dependencies', 'optionalDependencies']) {
         const map = pkg[field] as Record<string, string> | undefined
-        if (map) for (const name of Object.keys(map)) map[name] = version
+        if (map) for (const name of Object.keys(map)) map[name] = String(pkg.version)
       }
       await writeFile(join(packedRoot, 'package.json'), JSON.stringify(pkg, null, 2) + '\n')
       await mkdir(join(packedRoot, 'lib'))

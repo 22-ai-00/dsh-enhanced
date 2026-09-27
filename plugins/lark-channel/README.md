@@ -158,6 +158,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 - 行为学习审批卡会把签名覆盖的 scope、情境、guidance、版本、证据和回滚原因逐字段以纯文本展示；提案内容不会作为 Markdown 或卡片组件解释。点击后卡片只确认 Policy 决策已写入持久账本，明确不把“批准”误报成“变更已生效”。
 - 消息通道运行时网络仅访问所选飞书/Lark OpenAPI、token 与 WebSocket endpoint；图片读取使用固定消息资源端点，不接受消息或模型提供的 URL，并关闭重定向。
 - 安装阶段的 `dsh-rsi-setup --prepare-source` 执行 Git，在 `$DSH_HOME/rsi-sources/<profile>` 写入私有源码与 bare 发布仓库；npm 来源访问固定官方 GitHub 仓库的精确版本 tag，本地来源只复制已提交内容。支持常用代理与 CA 环境变量，不执行安装脚本；此命令不使用飞书凭据或浏览器，详见 [RSI 配置](docs/rsi-setup.md)。
+- `dsh-rsi-setup --prepare-local-update` 在 Home 外准备本地上游与现有修复分支合并后的源码和 tarball，使用固定的镜像准备器及离线 bubblewrap 构建，保留原包、源码 refs 与授权。它可联网准备依赖镜像，但候选 build/pack 不带网络、凭据或原 Home；不会停服或激活更新，后续完整迁移仍需实现，详见 [RSI 配置](docs/rsi-setup.md)。
 - Linux 安装的 `--prepare-build` 还自动准备私有授权运行时和本地发布资源，也可单独执行 `--prepare-authorities`：从同版本已安装 Control Plane 复制官方程序及模块、固定独立 Node，运行副本做版本/模块检查，并生成 14 个独立 Ed25519 身份和本地 registry/catalog。目录和密钥仅当前用户可读写；重复执行核验固定内容并保留发布/状态进展。此步骤需要文件写入与子进程权限，不需要网络、浏览器或飞书凭据，不执行 npm lifecycle，不签发 owner grant 或启动 Host。
 - `dsh-rsi-setup --prepare-build` 还会执行摘要固定的构建脚本和 Dockerfile，用空 Docker 配置准备联网下载依赖的镜像，保存不可变 image ID 与私有构建回执。随后候选检查使用离线完整仓库 sandbox；安装期间不会读取主机 Docker registry 凭据或启动候选 Host。当前 runtime 支持与资源上限见 [RSI 配置](docs/rsi-setup.md)。
 - `requestTimeoutMs`（默认 30 秒）为常规 OpenAPI 请求设置硬 deadline，`imageDownloadTimeoutMs` 独立限制图片下载。SDK 会把可下传的 AbortSignal 交给底层 HTTP；若调用已经被服务端接收后超时，最终消息保留 Delivery 的 `unknown_after_send` 语义，绝不自动重发或假称未发送。
