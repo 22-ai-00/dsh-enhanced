@@ -43,6 +43,7 @@ import {
 } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { gunzipSync, gzipSync } from 'node:zlib'
 
 export const LOCAL_RELEASE_ADAPTER_VERSION = 'dsh-local-release-adapter-1'
 const PHASES = new Set(['pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission'])
@@ -411,7 +412,8 @@ function catalogConfig(value, npm = false) {
 }
 function buildConfig(value) {
   const item = object(value, 'build config')
-  exactKeys(item, ['sandboxExecutable', 'tarExecutable', 'nodeExecutable', 'pnpmExecutable', 'pnpmRoot', 'storeRoot'], 'build config')
+  const expected = ['sandboxExecutable', 'tarExecutable', 'nodeExecutable', 'pnpmExecutable', 'pnpmRoot', 'storeRoot']
+  exactKeys(item, item.cacheRoot === undefined ? expected : [...expected, 'cacheRoot'], 'build config')
   const sandboxExecutable = inspectExecutable(item.sandboxExecutable, 'build sandbox')
   const tarExecutable = inspectExecutable(item.tarExecutable, 'tar')
   if (sandboxExecutable.path !== '/usr/bin/bwrap') fail('local build adapter requires the pinned Linux bubblewrap sandbox')
@@ -419,6 +421,7 @@ function buildConfig(value) {
   const pnpmExecutable = inspectExecutable(item.pnpmExecutable, 'pnpm executable')
   const pnpmRoot = pinnedDirectory(item.pnpmRoot, 'pnpm root')
   const storeRoot = pinnedDirectory(item.storeRoot, 'pnpm store')
+  const cacheRoot = item.cacheRoot === undefined ? undefined : pinnedDirectory(item.cacheRoot, 'pnpm cache')
   if (nodeExecutable.path !== join(pnpmRoot.path, 'node')) fail('Node executable must be the pinned pnpm root node entrypoint')
   if (pnpmExecutable.path !== join(pnpmRoot.path, 'pnpm')) fail('pnpm executable must be the pinned pnpm root entrypoint')
   let pnpmManifest
@@ -428,12 +431,38 @@ function buildConfig(value) {
   const storeVersion = Number.parseInt(pnpmVersion.split('.')[0], 10)
   const projectsPath = join(storeRoot.path, `v${storeVersion}`, 'projects')
   if (!existsSync(projectsPath) || !lstatSync(projectsPath).isDirectory()) fail('pnpm store project registry is unavailable')
-  return { sandboxExecutable, tarExecutable, nodeExecutable, pnpmExecutable, pnpmRoot, storeRoot, storeVersion }
+  return { sandboxExecutable, tarExecutable, nodeExecutable, pnpmExecutable, pnpmRoot, storeRoot, cacheRoot, storeVersion }
 }
 function verifyBuildPins(build) {
-  for (const [item, label] of [[build.pnpmRoot, 'pnpm root'], [build.storeRoot, 'pnpm store']]) {
+  const pinned = [[build.pnpmRoot, 'pnpm root'], [build.storeRoot, 'pnpm store']]
+  if (build.cacheRoot !== undefined) pinned.push([build.cacheRoot, 'pnpm cache'])
+  for (const [item, label] of pinned) {
     if (directoryInventory(item.path, label).sha256 !== item.sha256) fail(`${label} changed after configuration validation`)
   }
+}
+
+export function inspectLocalReleaseBuildEnvironment(value) {
+  const input = object(value, 'local release build environment')
+  exactKeys(input, input.cacheRoot === undefined ? ['pnpmRoot', 'storeRoot'] : ['pnpmRoot', 'storeRoot', 'cacheRoot'],
+    'local release build environment')
+  const executable = (path, label) => {
+    const pin = { path, sha256: sha256Bytes(stableBytes(path, label)) }
+    return inspectExecutable(pin, label)
+  }
+  const pnpmRoot = directoryInventory(input.pnpmRoot, 'pnpm root')
+  const storeRoot = directoryInventory(input.storeRoot, 'pnpm store')
+  const cacheRoot = input.cacheRoot === undefined ? undefined : directoryInventory(input.cacheRoot, 'pnpm cache')
+  const pins = {
+    sandboxExecutable: executable('/usr/bin/bwrap', 'build sandbox'),
+    tarExecutable: executable('/usr/bin/tar', 'tar'),
+    nodeExecutable: executable(join(pnpmRoot.path, 'node'), 'build Node executable'),
+    pnpmExecutable: executable(join(pnpmRoot.path, 'pnpm'), 'pnpm executable'),
+    pnpmRoot: { path: pnpmRoot.path, sha256: pnpmRoot.sha256 },
+    storeRoot: { path: storeRoot.path, sha256: storeRoot.sha256 },
+    ...(cacheRoot === undefined ? {} : { cacheRoot: { path: cacheRoot.path, sha256: cacheRoot.sha256 } }),
+  }
+  buildConfig(pins)
+  return pins
 }
 
 function command(executable, args, cwd, extraEnvironment = {}, input, inherited = [], hooks = {}) {
@@ -488,14 +517,17 @@ function openSandboxContext(build, workspace, output, runRoot) {
   const storeProjects = join(runRoot, 'store-projects')
   if (!existsSync(storeProjects)) mkdirSync(storeProjects, { mode: 0o700 })
   const toolchainSnapshot = join(runRoot, 'toolchain-snapshot'); const storeSnapshot = join(runRoot, 'store-snapshot')
+  const cacheSnapshot = build.cacheRoot === undefined ? undefined : join(runRoot, 'cache-snapshot')
   if (!existsSync(toolchainSnapshot)) copyPinnedTree(build.pnpmRoot, toolchainSnapshot, 'pnpm root')
   if (!existsSync(storeSnapshot)) copyPinnedTree(build.storeRoot, storeSnapshot, 'pnpm store')
+  if (cacheSnapshot !== undefined && !existsSync(cacheSnapshot)) copyPinnedTree(build.cacheRoot, cacheSnapshot, 'pnpm cache')
   const pnpmRoot = openPinnedDirectory({ path: toolchainSnapshot, sha256: build.pnpmRoot.sha256 }, 'pnpm snapshot')
   const storeRoot = openPinnedDirectory({ path: storeSnapshot, sha256: build.storeRoot.sha256 }, 'pnpm store snapshot')
   const workspaceRoot = openPinnedDirectory({ path: workspace }, 'build workspace')
   const outputRoot = openPinnedDirectory({ path: output }, 'build output')
   const storeProjectsRoot = openPinnedDirectory({ path: storeProjects }, 'pnpm project registry')
   const mounts = [pnpmRoot, storeRoot, workspaceRoot, outputRoot, storeProjectsRoot]
+  if (cacheSnapshot !== undefined) mounts.push(openPinnedDirectory({ path: cacheSnapshot, sha256: build.cacheRoot.sha256 }, 'pnpm cache snapshot'))
   return { mounts, runRoot }
 }
 function closeSandboxContext(context) { for (const item of context.mounts) closePinnedDirectory(item) }
@@ -505,11 +537,15 @@ function sandboxCommand(build, args, context, hooks = {}) {
   const mountFd = index => String(3 + index)
   const sandboxArgs = ['--unshare-all', '--die-with-parent', '--new-session', '--clearenv',
     '--ro-bind', '/usr', '/usr', '--ro-bind', '/lib', '/lib', '--ro-bind', '/lib64', '/lib64',
+    '--symlink', 'usr/bin', '/bin',
     '--ro-bind-fd', mountFd(0), '/toolchain', '--ro-bind-fd', mountFd(1), '/store',
+    ...(build.cacheRoot === undefined ? [] : ['--ro-bind-fd', mountFd(5), '/cache']),
     '--bind-fd', mountFd(4), `/store/v${build.storeVersion}/projects`, '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--dir', '/home',
     '--bind-fd', mountFd(2), '/workspace', '--bind-fd', mountFd(3), '/output',
     '--chdir', '/workspace', '--setenv', 'HOME', '/home', '--setenv', 'TMPDIR', '/tmp', '--setenv', 'SOURCE_DATE_EPOCH', '0',
-    '--setenv', 'PATH', '/toolchain:/usr/bin:/bin', '/toolchain/pnpm', ...args]
+    '--setenv', 'PATH', '/toolchain:/usr/bin:/bin',
+    ...(build.cacheRoot === undefined ? [] : ['--setenv', 'pnpm_config_cache_dir', '/cache']),
+    '/toolchain/pnpm', ...args]
   command(build.sandboxExecutable, sandboxArgs, runRoot, {}, undefined, mounts.map(item => item.descriptor),
     { beforeSpawn: hooks.beforeSandboxSpawn, afterSpawn: hooks.afterSandboxSpawn, afterFinally: hooks.afterSandboxFinally })
   for (const item of mounts) verifyPinnedDirectory(item)
@@ -976,6 +1012,92 @@ function fileInventory(root) {
   }
   visit(root); return result
 }
+const TAR_BLOCK_BYTES = 512
+const DEPENDENCY_MAPS = ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']
+function tarOctal(header, start, length, label) {
+  const field = header.subarray(start, start + length)
+  if (field.some(byte => byte !== 0 && byte !== 32 && (byte < 48 || byte > 55))) {
+    fail(`${label} uses unsupported binary or non-octal tar encoding`)
+  }
+  const octal = field.toString('ascii').replaceAll('\0', ' ').trim()
+  if (!/^[0-7]+$/u.test(octal)) fail(`${label} is not an octal tar field`)
+  const value = Number.parseInt(octal, 8)
+  if (!Number.isSafeInteger(value)) fail(`${label} exceeds the safe tar size`)
+  return value
+}
+function tarString(header, start, length) {
+  const field = header.subarray(start, start + length)
+  const terminator = field.indexOf(0)
+  if (terminator !== -1 && field.subarray(terminator).some(byte => byte !== 0)) fail('tar pathname field has nonzero padding')
+  return field.subarray(0, terminator === -1 ? field.length : terminator).toString('utf8')
+}
+
+export function normalizePackedDependencyOrder(packed) {
+  if (!Buffer.isBuffer(packed) || packed.length < 1 || packed.length > MAX_ARTIFACT_BYTES) fail('packed archive size is invalid')
+  let archive
+  try { archive = gunzipSync(packed, { maxOutputLength: MAX_ARTIFACT_BYTES }) }
+  catch { fail('packed archive is invalid or exceeds the extraction limit') }
+  if (archive.length < TAR_BLOCK_BYTES * 3 || archive.length % TAR_BLOCK_BYTES !== 0) fail('packed tar block layout is invalid')
+  let manifestOffset; let manifestSize; let offset = 0; let terminated = false
+  while (offset < archive.length) {
+    const header = archive.subarray(offset, offset + TAR_BLOCK_BYTES)
+    if (header.every(byte => byte === 0)) {
+      if (archive.length - offset < TAR_BLOCK_BYTES * 2 || archive.subarray(offset).some(byte => byte !== 0)) {
+        fail('packed tar terminator is invalid')
+      }
+      terminated = true; break
+    }
+    const expectedChecksum = tarOctal(header, 148, 8, 'tar header checksum')
+    let checksum = 0
+    for (let index = 0; index < TAR_BLOCK_BYTES; index += 1) checksum += index >= 148 && index < 156 ? 32 : header[index]
+    if (checksum !== expectedChecksum) fail('packed tar header checksum is invalid')
+    const size = tarOctal(header, 124, 12, 'tar entry size')
+    const type = header[156]
+    if (type !== 0 && type !== 48 && type !== 53) fail('packed tar uses an unsupported entry representation')
+    if (type === 53 && size !== 0) fail('packed tar directory has a payload')
+    const name = tarString(header, 0, 100); const prefix = tarString(header, 345, 155)
+    const entryPath = prefix === '' ? name : `${prefix}/${name}`
+    const logicalPath = type === 53 && entryPath.endsWith('/') ? entryPath.slice(0, -1) : entryPath
+    if ((logicalPath !== 'package' && !logicalPath.startsWith('package/'))
+      || logicalPath.includes('//') || logicalPath.split('/').some(part => part === '' || part === '.' || part === '..')) {
+      fail('packed tar entry path is not canonical')
+    }
+    const dataOffset = offset + TAR_BLOCK_BYTES
+    const nextOffset = dataOffset + Math.ceil(size / TAR_BLOCK_BYTES) * TAR_BLOCK_BYTES
+    if (nextOffset > archive.length) fail('packed tar entry is truncated')
+    if (entryPath === 'package/package.json') {
+      if (manifestOffset !== undefined || prefix !== '' || (type !== 0 && type !== 48)) {
+        fail('packed manifest has a duplicate or unsupported representation')
+      }
+      manifestOffset = dataOffset; manifestSize = size
+    }
+    offset = nextOffset
+  }
+  if (!terminated || manifestOffset === undefined || manifestSize === undefined) fail('packed tar has no regular package manifest')
+  const sourceBytes = archive.subarray(manifestOffset, manifestOffset + manifestSize)
+  const source = sourceBytes.toString('utf8')
+  if (!Buffer.from(source, 'utf8').equals(sourceBytes)) fail('packed manifest is not valid UTF-8')
+  let manifest
+  try { manifest = JSON.parse(source) } catch { fail('packed manifest is not valid JSON') }
+  if (typeof manifest !== 'object' || manifest === null || Array.isArray(manifest)) fail('packed manifest must be an object')
+  const lineEnding = source.endsWith('\n') ? '\n' : ''
+  if (`${JSON.stringify(manifest, null, 2)}${lineEnding}` !== source) fail('packed manifest is not in the supported canonical JSON format')
+  const normalized = { ...manifest }
+  for (const name of DEPENDENCY_MAPS) {
+    if (!Object.hasOwn(manifest, name)) continue
+    const entries = manifest[name]
+    if (typeof entries !== 'object' || entries === null || Array.isArray(entries)
+      || Object.values(entries).some(value => typeof value !== 'string')) fail(`packed manifest ${name} is invalid`)
+    normalized[name] = Object.fromEntries(Object.entries(entries).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
+  }
+  const normalizedBytes = Buffer.from(`${JSON.stringify(normalized, null, 2)}${lineEnding}`)
+  if (normalizedBytes.length !== manifestSize) fail('packed manifest normalization changed its tar entry size')
+  const normalizedArchive = Buffer.from(archive)
+  normalizedBytes.copy(normalizedArchive, manifestOffset)
+  const result = gzipSync(normalizedArchive, { mtime: 0 })
+  if (result.length > MAX_ARTIFACT_BYTES) fail('normalized packed archive exceeds the artifact limit')
+  return result
+}
 function prepareBuildSource(request, context, gitValue, hooks) {
   const bundle = join(context.directory, 'source.bundle'); rmSync(bundle, { force: true })
   const temporaryRef = `refs/dsh-release/build/${sha256Bytes(request.operationId).slice(0, 32)}`
@@ -1012,15 +1134,18 @@ function runIsolatedBuild(request, context, runNumber, gitValue, build, packageP
   try {
     sandboxCommand(build, ['install', '--offline', '--frozen-lockfile', '--frozen-store', '--ignore-scripts',
       '--package-import-method=copy', '--store-dir=/store'], sandbox, hooks)
+    sandboxCommand(build, ['--workspace-root', '--if-present', 'run', 'build'], sandbox, hooks)
     sandboxCommand(build, ['--dir', `/workspace/${packagePath}`, 'run', 'build'], sandbox, hooks)
     sandboxCommand(build, ['--dir', `/workspace/${packagePath}`, 'pack', '--pack-destination', '/output'], sandbox, hooks)
   } finally { closeSandboxContext(sandbox) }
   const packed = readdirSync(output).filter(name => name.endsWith('.tgz'))
   if (packed.length !== 1 || readdirSync(output).length !== 1) fail('pnpm pack must produce exactly one tarball')
   const tarball = safeRegularFile(join(output, packed[0]), `isolated build ${runNumber} tarball`)
-  const bytes = readBounded(tarball, `isolated build ${runNumber} tarball`)
-  const unpacked = unpackPackage(build, tarball, join(runRoot, 'packed'), runRoot, hooks)
-  return { runRoot, checkout, workspace, packageRoot: unpacked.packageRoot, inventory: unpacked.inventory, tarball, bytes, sha256: sha256Bytes(bytes) }
+  const bytes = normalizePackedDependencyOrder(readBounded(tarball, `isolated build ${runNumber} tarball`))
+  const normalizedTarball = join(runRoot, 'normalized-package.tgz'); writeSynced(normalizedTarball, bytes, 0o600)
+  const unpacked = unpackPackage(build, normalizedTarball, join(runRoot, 'packed'), runRoot, hooks)
+  return { runRoot, checkout, workspace, packageRoot: unpacked.packageRoot, inventory: unpacked.inventory,
+    tarball: normalizedTarball, bytes, sha256: sha256Bytes(bytes) }
 }
 function temporaryBuildRef(request) { return `refs/dsh-release/build/${sha256Bytes(request.operationId).slice(0, 32)}` }
 function buildPhase(request, config, context, hooks) {
@@ -1069,7 +1194,8 @@ function buildPhase(request, config, context, hooks) {
   const sbomPath = join(outputs, 'sbom.cdx.json'); immutableCopy(sbomPath, Buffer.from(`${canonicalReleaseValue(sbom)}\n`), 0o600)
   const provenance = { _type: 'https://in-toto.io/Statement/v1', subject: [{ name: packageName, digest: { sha256: tarballSha256 } }],
     predicateType: 'https://slsa.dev/provenance/v1', predicate: { buildDefinition: { buildType: 'https://dsh-enhanced.dev/build/local-isolated/v1',
-      externalParameters: { packagePath, packageVersion }, resolvedDependencies: [{ uri: pathToFileURL(gitValue.remote).href, digest: { gitCommit: mergeCommit } }] },
+      externalParameters: { packagePath, packageVersion, manifestNormalization: 'sort-direct-dependency-maps-v1' },
+      resolvedDependencies: [{ uri: pathToFileURL(gitValue.remote).href, digest: { gitCommit: mergeCommit } }] },
     runDetails: { builder: { id: `dsh-local-release-adapter:${config.authority}:${config.keyId}` }, metadata: { invocationId: request.operationId },
       byproducts: [{ name: 'sbom', digest: { sha256: sha256Bytes(readFileSync(sbomPath)) } }] } } }
   const provenancePath = join(outputs, 'provenance.intoto.jsonl'); immutableCopy(provenancePath, Buffer.from(`${canonicalReleaseValue(provenance)}\n`), 0o600)

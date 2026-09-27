@@ -5,6 +5,7 @@ import { access, chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, 
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { gunzipSync, gzipSync } from 'node:zlib'
 import { afterEach, describe as baseDescribe, expect, test } from 'vitest'
 import { previewCatalogAdmission } from '../plugins/plugin-control-plane/src/catalog.ts'
 import { controlPlaneDigest } from '../plugins/plugin-control-plane/src/store.ts'
@@ -362,21 +363,37 @@ async function createFixture(): Promise<ReleaseFixture> {
   await writeJson(join(rolesRoot, 'package.json'), { type: 'module' })
   git(['init', '--initial-branch=main'], source)
   await mkdir(join(source, 'plugins', 'fixture-capability', 'src'), { recursive: true, mode: 0o700 })
+  await mkdir(join(source, 'packages', 'fixture-shared', 'src'), { recursive: true, mode: 0o700 })
   await writeFile(join(source, 'plugins', 'README.md'), '# Plugins\n', { mode: 0o644 })
   await writeJson(join(source, 'plugins', 'fixture-capability', 'package.json'), {
     name: '@fixture/capability', version: '1.0.0', description: 'Release adapter fixture DSH plugin.', license: 'MIT', type: 'module',
     main: './lib/index.js', exports: { '.': './lib/index.js', './cordis.patch.yml': './cordis.patch.yml', './package.json': './package.json' },
     files: ['lib', 'cordis.patch.yml', 'README.md', 'LICENSE'], scripts: { build: 'node ./build.mjs', prepack: 'pnpm run build' },
+    devDependencies: { '@fixture/shared': 'workspace:*' },
     dsh: { bundle: { patch: './cordis.patch.yml' } },
   }, 0o644)
+  await writeJson(join(source, 'packages', 'fixture-shared', 'package.json'), {
+    name: '@fixture/shared', version: '1.0.0', type: 'module', exports: './lib/index.js', scripts: { build: './build.sh' },
+  }, 0o644)
+  await writeFile(join(source, 'packages', 'fixture-shared', 'src', 'index.js'), "export const sharedValue = 'peer-ready'\n", { mode: 0o644 })
+  await writeFile(join(source, 'packages', 'fixture-shared', 'build.sh'), '#!/bin/sh\nexec node ./build.mjs\n', { mode: 0o755 })
+  await writeFile(join(source, 'packages', 'fixture-shared', 'build.mjs'), `import { copyFileSync, mkdirSync } from 'node:fs'
+mkdirSync('lib', { recursive: true }); copyFileSync('src/index.js', 'lib/index.js')
+`, { mode: 0o644 })
   await writeFile(join(source, 'plugins', 'fixture-capability', 'src', 'index.js'), "export const value = 'base'\n", { mode: 0o644 })
-  await writeFile(join(source, 'plugins', 'fixture-capability', 'build.mjs'), `import { copyFileSync, mkdirSync, readFileSync, readlinkSync } from 'node:fs'
+  await writeFile(join(source, 'plugins', 'fixture-capability', 'build.mjs'), `import { appendFileSync, copyFileSync, mkdirSync, readFileSync, readlinkSync } from 'node:fs'
+import { sharedValue } from '@fixture/shared'
 if (process.cwd() !== '/workspace/plugins/fixture-capability' || process.env.HOME !== '/home'
   || process.env.TMPDIR !== '/tmp' || process.env.SOURCE_DATE_EPOCH !== '0') process.exit(9)
 if (process.execPath !== '/toolchain/node') process.exit(11)
+if (sharedValue !== 'peer-ready') process.exit(12)
 const hostNamespace = readFileSync('.host-netns', 'utf8').trim()
 if (readlinkSync('/proc/self/ns/net') === hostNamespace) process.exit(10)
 mkdirSync('lib', { recursive: true }); copyFileSync('src/index.js', 'lib/index.js')
+if (process.env.pnpm_config_cache_dir !== undefined) {
+  if (process.env.pnpm_config_cache_dir !== '/cache' || readFileSync('/cache/probe.txt', 'utf8') !== 'fixture-cache\\n') process.exit(13)
+  appendFileSync('lib/index.js', "export const cacheValue = 'fixture-cache'\\n")
+}
 `, { mode: 0o644 })
   await writeFile(join(source, 'plugins', 'fixture-capability', '.host-netns'),
     execFileSync('/usr/bin/readlink', ['/proc/self/ns/net'], { encoding: 'utf8' }), { mode: 0o644 })
@@ -386,8 +403,8 @@ mkdirSync('lib', { recursive: true }); copyFileSync('src/index.js', 'lib/index.j
   await writeFile(join(source, 'plugins', 'fixture-capability', 'LICENSE'), 'MIT License fixture\n', { mode: 0o644 })
   await writeJson(join(source, 'package.json'), { name: 'fixture-workspace', private: true, packageManager: `pnpm@${pnpmVersion}`,
     scripts: { build: 'pnpm --recursive --if-present run build' } }, 0o644)
-  await writeFile(join(source, 'pnpm-workspace.yaml'), "packages:\n  - plugins/*\n", { mode: 0o644 })
-  await writeFile(join(source, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\nimporters:\n  .: {}\n  plugins/fixture-capability: {}\n", { mode: 0o644 })
+  await writeFile(join(source, 'pnpm-workspace.yaml'), "packages:\n  - plugins/*\n  - packages/*\n", { mode: 0o644 })
+  await writeFile(join(source, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\nimporters:\n  .: {}\n  plugins/fixture-capability:\n    devDependencies:\n      '@fixture/shared':\n        specifier: workspace:*\n        version: link:../../packages/fixture-shared\n  packages/fixture-shared: {}\n", { mode: 0o644 })
   git(['add', '.'], source)
   git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'base'], source)
   const baseCommit = git(['rev-parse', 'HEAD'], source)
@@ -721,8 +738,98 @@ const rootOwnsSystemDirs = process.platform === 'linux'
 const describe = rootOwnsSystemDirs ? baseDescribe : baseDescribe.skip
 
 describe('owner-controlled local release adapter', () => {
-  test('runs a real independent git/build/sign/immutable-registry/catalog release with permanent replay', async () => {
+  test('normalizes only packed dependency-map order and rejects unsafe tar layouts', async () => {
+    const adapter = await import(pathToFileURL(adapterSource).href) as {
+      normalizePackedDependencyOrder: (archive: Buffer) => Buffer
+    }
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-release-normalize-'))
+    roots.push(root)
+    const packageRoot = join(root, 'package')
+    await mkdir(packageRoot, { mode: 0o700 })
+    const archivePath = join(root, 'package.tgz')
+    const manifestPath = join(packageRoot, 'package.json')
+    const extraPath = join(packageRoot, 'README.md')
+    await writeFile(extraPath, 'unchanged package file\n', { mode: 0o600 })
+    const manifest = (reverseDependencies: boolean, reverseExports = false, dependencyValue = '1.0.0') => ({
+      name: '@fixture/normalize', version: '1.0.0',
+      dependencies: reverseDependencies ? { '@fixture/b': dependencyValue, '@fixture/a': '1.0.0' }
+        : { '@fixture/a': '1.0.0', '@fixture/b': dependencyValue },
+      devDependencies: reverseDependencies ? { '@fixture/d': '1.0.0', '@fixture/c': '1.0.0' }
+        : { '@fixture/c': '1.0.0', '@fixture/d': '1.0.0' },
+      peerDependencies: reverseDependencies ? { '@fixture/f': '1.0.0', '@fixture/e': '1.0.0' }
+        : { '@fixture/e': '1.0.0', '@fixture/f': '1.0.0' },
+      optionalDependencies: reverseDependencies ? { '@fixture/h': '1.0.0', '@fixture/g': '1.0.0' }
+        : { '@fixture/g': '1.0.0', '@fixture/h': '1.0.0' },
+      exports: { '.': reverseExports ? { require: './lib/index.cjs', import: './lib/index.js' }
+        : { import: './lib/index.js', require: './lib/index.cjs' } },
+    })
+    const pack = async (value: ReturnType<typeof manifest>): Promise<Buffer> => {
+      await writeFile(manifestPath, JSON.stringify(value, null, 2), { mode: 0o600 })
+      execFileSync(tarPath, ['--sort=name', '--mtime=@0', '--owner=0', '--group=0', '--numeric-owner',
+        '-czf', archivePath, '-C', root, 'package'])
+      return readFile(archivePath)
+    }
+    const first = adapter.normalizePackedDependencyOrder(await pack(manifest(false)))
+    const orderOnly = adapter.normalizePackedDependencyOrder(await pack(manifest(true)))
+    expect(first.equals(orderOnly)).toBe(true)
+    expect(adapter.normalizePackedDependencyOrder(await pack(manifest(true, true))).equals(first)).toBe(false)
+    expect(adapter.normalizePackedDependencyOrder(await pack(manifest(true, false, '2.0.0'))).equals(first)).toBe(false)
+    await writeFile(extraPath, 'changed package file\n', { mode: 0o600 })
+    expect(adapter.normalizePackedDependencyOrder(await pack(manifest(false))).equals(first)).toBe(false)
+    const valid = await pack(manifest(false))
+    expect(() => adapter.normalizePackedDependencyOrder(valid.subarray(0, valid.length - 8))).toThrow('packed archive is invalid')
+    const brokenHeader = gunzipSync(valid); brokenHeader[0] ^= 1
+    expect(() => adapter.normalizePackedDependencyOrder(gzipSync(brokenHeader))).toThrow('tar header checksum is invalid')
+    const binarySize = gunzipSync(valid); binarySize[124] = 0x80
+    binarySize.fill(32, 148, 156)
+    let headerSum = 0
+    for (let index = 0; index < 512; index += 1) headerSum += binarySize[index]
+    binarySize.write(`${headerSum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii')
+    expect(() => adapter.normalizePackedDependencyOrder(gzipSync(binarySize))).toThrow('unsupported binary or non-octal tar encoding')
+    const binaryChecksum = gunzipSync(valid); binaryChecksum[148] = 0x80
+    expect(() => adapter.normalizePackedDependencyOrder(gzipSync(binaryChecksum))).toThrow('unsupported binary or non-octal tar encoding')
+    const aliasedManifest = gunzipSync(valid)
+    const manifestHeader = aliasedManifest.indexOf(Buffer.from('package/package.json\0'))
+    expect(manifestHeader).toBeGreaterThan(0)
+    const headerStart = Math.floor(manifestHeader / 512) * 512
+    aliasedManifest.fill(0, headerStart, headerStart + 100)
+    aliasedManifest.write('package//package.json', headerStart, 'ascii')
+    aliasedManifest.fill(32, headerStart + 148, headerStart + 156)
+    let aliasSum = 0
+    for (let index = headerStart; index < headerStart + 512; index += 1) aliasSum += aliasedManifest[index]
+    aliasedManifest.write(`${aliasSum.toString(8).padStart(6, '0')}\0 `, headerStart + 148, 8, 'ascii')
+    expect(() => adapter.normalizePackedDependencyOrder(gzipSync(aliasedManifest))).toThrow('tar entry path is not canonical')
+    const duplicatePath = join(root, 'duplicate.tar')
+    execFileSync(tarPath, ['-cf', duplicatePath, '-C', root, 'package'])
+    execFileSync(tarPath, ['-rf', duplicatePath, '-C', root, 'package/package.json'])
+    const duplicateBytes = await readFile(duplicatePath)
+    expect(() => adapter.normalizePackedDependencyOrder(gzipSync(duplicateBytes))).toThrow('duplicate or unsupported representation')
+  })
+
+  test.each([false, true])('runs a real independent git/build/sign/immutable-registry/catalog release with permanent replay (pinned cache: %s)', async withCache => {
     const target = await createFixture()
+    const releaseAdapter = await import(pathToFileURL(adapterSource).href) as {
+      inspectLocalReleaseBuildEnvironment: (value: { pnpmRoot: string; storeRoot: string; cacheRoot?: string }) => Record<string, unknown>
+    }
+    const buildConfigPath = target.roles.build.configPath
+    const buildConfig = JSON.parse(await readFile(buildConfigPath, 'utf8')) as {
+      build: { pnpmRoot: { path: string; sha256: string }; storeRoot: { path: string; sha256: string }; cacheRoot?: { path: string; sha256: string } }
+    }
+    const environment = { pnpmRoot: buildConfig.build.pnpmRoot.path, storeRoot: buildConfig.build.storeRoot.path }
+    expect(releaseAdapter.inspectLocalReleaseBuildEnvironment(environment)).toEqual(buildConfig.build)
+    if (withCache) {
+      const cacheRoot = join(target.root, 'pnpm-cache')
+      await mkdir(cacheRoot, { mode: 0o700 })
+      await writeFile(join(cacheRoot, 'probe.txt'), 'fixture-cache\n', { mode: 0o600 })
+      const pinned = releaseAdapter.inspectLocalReleaseBuildEnvironment({ ...environment, cacheRoot })
+      buildConfig.build.cacheRoot = pinned.cacheRoot as { path: string; sha256: string }
+      expect(pinned).toEqual(buildConfig.build)
+      await writeJson(buildConfigPath, buildConfig)
+      expect(() => releaseAdapter.inspectLocalReleaseBuildEnvironment({ ...environment, cacheRoot: join(target.root, 'missing-cache') }))
+        .toThrow('ENOENT')
+      expect(() => releaseAdapter.inspectLocalReleaseBuildEnvironment({ ...environment, cacheRoot, unexpected: true } as never))
+        .toThrow('unknown or missing fields')
+    }
     const distinctPaths = new Set(Object.values(target.roles).map(role => role.identity.path))
     const distinctKeys = new Set(Object.values(target.roles).map(role => role.identity.authority + ':' + role.identity.keyId))
     const distinctPublicKeys = new Set(Object.values(target.roles).map(role => role.publicKeyPem))
@@ -836,13 +943,27 @@ describe('owner-controlled local release adapter', () => {
     expect(archiveEntries.some(path => path.startsWith('package/src/') || path.startsWith('package/tests/')
       || path.includes('tsconfig') || path.includes('build.mjs') || path.includes('pnpm-lock'))).toBe(false)
     for (const index of [1, 2]) {
+      const built = await readFile(join(target.roles.build.directory, 'state', 'operations', digestBytes(buildRequest.operationId),
+        `build-${index}`, 'workspace', 'plugins', 'fixture-capability', 'lib', 'index.js'), 'utf8')
+      expect(built).toContain("value = 'released'")
+      expect(built.includes("cacheValue = 'fixture-cache'")).toBe(withCache)
       expect(await readFile(join(target.roles.build.directory, 'state', 'operations', digestBytes(buildRequest.operationId),
-        `build-${index}`, 'workspace', 'plugins', 'fixture-capability', 'lib', 'index.js'), 'utf8')).toContain("value = 'released'")
+        `build-${index}`, 'workspace', 'packages', 'fixture-shared', 'lib', 'index.js'), 'utf8')).toContain("sharedValue = 'peer-ready'")
+    }
+    if (withCache) {
+      await writeFile(join(target.root, 'pnpm-cache', 'probe.txt'), 'tampered-cache\n', { mode: 0o600 })
+      await expect(runAdapter(target, { ...buildRequest, operationId: 'release-operation-build-cache-drift', requestedAt: Date.now() - 10 }))
+        .rejects.toThrow('pnpm cache digest does not match the owner pin')
+      buildConfig.build.cacheRoot = { ...buildConfig.build.cacheRoot!, sha256: 'bad' }
+      await writeJson(buildConfigPath, buildConfig)
+      await expect(runAdapter(target, { ...buildRequest, operationId: 'release-operation-build-cache-malformed', requestedAt: Date.now() - 10 }))
+        .rejects.toThrow('pnpm cache.sha256 is invalid')
     }
     await expect(access(join(target.source, 'plugins', 'fixture-capability', 'lib'))).rejects.toMatchObject({ code: 'ENOENT' })
     expect(JSON.parse(await readFile(build.sbomPath, 'utf8'))).toMatchObject({ bomFormat: 'CycloneDX' })
     expect(JSON.parse(await readFile(build.provenancePath, 'utf8'))).toMatchObject({
       predicateType: 'https://slsa.dev/provenance/v1',
+      predicate: { buildDefinition: { externalParameters: { manifestNormalization: 'sort-direct-dependency-maps-v1' } } },
     })
     const artifact: SourceReleaseArtifact = {
       candidateId: build.candidateId,

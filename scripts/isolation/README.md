@@ -39,8 +39,11 @@ runs every candidate check offline with a read-only root.
 
 The image also contains native `@pnpm/exe@11.7.0` and its system libraries for
 the existing release-adapter integration tests. `DSH_TEST_PNPM_ROOT` points to
-that image-local toolchain; it does not select a Host executable or bypass a
-test. Image preparation downloads this exact npm version with install scripts
+that image-local toolchain for tests. The supervised installer also exports the
+fixed native toolchain, Node, store, and metadata cache from the immutable image
+into a private, digest-pinned release environment. Its local release adapter
+uses that exported environment through Bubblewrap; it does not invoke the
+source-runner launcher or bypass a test. Image preparation downloads this exact npm version with install scripts
 disabled; the returned image digest pins the resulting bytes.
 
 ## Nested sandbox profile
