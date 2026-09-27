@@ -112,7 +112,17 @@ describe('installer Host preparation wiring', () => {
     const ports = executor()
     await runInstall({...options,passthrough:['--dsh-version','0.1.5-rc.3'],executor:ports})
     expect(ports.prepareHost).toHaveBeenCalledWith(expect.objectContaining({dshHome:'/new/home',selector:'0.1.5-rc.3'}))
-    expect(ports.runInherited).toHaveBeenCalledWith('bash',expect.any(Array),{env:{PATH:'/private/bin',DSH_HOME:'/canonical/home'}})
+    expect(ports.runInherited).toHaveBeenCalledWith('bash',[
+      '/repo/scripts/install/install-local.sh','--dsh-version','0.1.5-rc.3','--scenario','supervised',
+    ],{env:{PATH:'/private/bin',DSH_HOME:'/canonical/home'}})
+  })
+  test('explicit legacy mode preserves Host preparation and suppresses the default scenario', async () => {
+    const ports = executor()
+    await runInstall({...options,passthrough:['--mode','standard'],executor:ports})
+    expect(ports.prepareHost).toHaveBeenCalledWith(expect.objectContaining({prepareFresh:true,selector:'latest'}))
+    expect(ports.runInherited).toHaveBeenCalledWith('bash',[
+      '/repo/scripts/install/install-local.sh','--mode','standard',
+    ],{env:{PATH:'/private/bin',DSH_HOME:'/canonical/home'}})
   })
   test.each([['--dry-run'],['--help'],['-h']])('does not prepare for %j', async (...passthrough) => {
     const ports = executor()

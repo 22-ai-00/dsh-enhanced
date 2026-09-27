@@ -493,6 +493,7 @@ async function temporaryDshHome(): Promise<string> {
 async function configureExistingLark(dshHome: string, profile = 'web'): Promise<void> {
   const profileDirectory = join(dshHome, 'profiles', profile)
   await mkdir(profileDirectory, { recursive: true })
+  await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({ dependencies: {} }))
   await writeFile(join(profileDirectory, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel
   config:
     enabled: true

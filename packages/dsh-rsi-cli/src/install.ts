@@ -47,7 +47,7 @@ export interface RunInstallOptions {
   localRepositoryRoot?: string
   /** npm 形态拉取引导脚本的 release ref；rsi-cli 默认传与自身版本一致的 vX.Y.Z。 */
   releaseRef: string
-  /** 原样透传给安装器的参数。 */
+  /** 用户传入的安装器参数；默认 install 在委派副本末尾补 supervised 场景。 */
   passthrough: readonly string[]
   /** 安装器不识别 --dsh-home，统一经 DSH_HOME 环境变量传入。 */
   dshHome?: string
@@ -80,6 +80,22 @@ export async function runInstall(options: RunInstallOptions): Promise<number> {
   }
   const operation = value('--operation') ?? 'install'
   const selector = value('--dsh-version') ?? 'latest'
+  const help = options.passthrough.includes('--help') || options.passthrough.includes('-h')
+  const explicitlySet = (name: string): boolean => {
+    let present = false
+    for (let index = 0; index < options.passthrough.length; index++) {
+      if (options.passthrough[index] !== name) continue
+      const selected = options.passthrough[index + 1]
+      if (!selected || selected.startsWith('-')) throw new PurgeError(`${name} 必须提供一个值。`)
+      present = true
+    }
+    return present
+  }
+  const scenarioExplicit = !help && explicitlySet('--scenario')
+  const modeExplicit = !help && explicitlySet('--mode')
+  const passthrough = operation === 'install' && !help && !scenarioExplicit && !modeExplicit
+    ? [...options.passthrough, '--scenario', 'supervised']
+    : options.passthrough
   if (executor.prepareHost
     && !options.passthrough.some(arg => ['--help','-h','--dry-run'].includes(arg))) {
     env = await executor.prepareHost({dshHome:resolveDshHome(env),selector,environment:env,prepareFresh:operation === 'install'})
@@ -91,7 +107,7 @@ export async function runInstall(options: RunInstallOptions): Promise<number> {
       throw new PurgeError('local 安装形态需要 --local <checkout 目录>')
     }
     const script = join(root, 'scripts', 'install', 'install-local.sh')
-    return await executor.runInherited('bash', [script, ...options.passthrough], { env })
+    return await executor.runInherited('bash', [script, ...passthrough], { env })
   }
 
   const url = `${INSTALL_BASE_URL}/${options.releaseRef}/scripts/install/install-npm.sh`
@@ -109,7 +125,7 @@ export async function runInstall(options: RunInstallOptions): Promise<number> {
   try {
     await writeFile(scriptPath, scriptBody, { mode: 0o700 })
     await chmod(scriptPath, 0o700)
-    return await executor.runInherited('bash', [scriptPath, ...options.passthrough], { env })
+    return await executor.runInherited('bash', [scriptPath, ...passthrough], { env })
   } finally {
     await rm(staging, { recursive: true, force: true })
   }

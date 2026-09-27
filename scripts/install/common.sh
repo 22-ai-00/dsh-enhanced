@@ -1872,8 +1872,9 @@ dsh_enhanced_prepare_linux_resident_service() {
   printf 'systemd：user manager 与 logout persistence 已就绪。\n'
 }
 
-# Start a short-lived real Web host on an OS-assigned loopback port and wait for
-# its post-Loader ready line.  Unlike --dump-config (which only composes YAML)
+# Start a short-lived Host and wait for its post-Loader readiness signal.
+# Web uses an OS-assigned loopback port; custom profiles use appReady.
+# Unlike --dump-config (which only composes YAML)
 # and --help (which exits during CLI parsing), this makes DSH audit that every
 # enabled Cordis entry actually activated.  A configured Lark row is disabled
 # in a process-only overlay so the probe neither opens another WebSocket nor
@@ -1934,7 +1935,7 @@ dsh_enhanced_verify_profile_activation() {
   local profile_patch="$dsh_home/profiles/$profile/cordis.patch.yml"
   local home_patch="$dsh_home/cordis.patch.yml"
   if [[ "$dry_run" == '1' ]]; then
-    printf 'profile 运行时自检：将以临时 loopback Web Host 实际加载全部插件，并等待就绪信号。\n'
+    printf 'profile 运行时自检：将实际加载全部插件，并等待 Host 就绪信号（Web 使用临时 loopback 端口）。\n'
     dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
     return 0
   fi
@@ -1961,7 +1962,38 @@ dsh_enhanced_verify_profile_activation() {
     lark_temporarily_disabled='1'
   fi
 
-  printf 'profile 运行时自检：正在实际加载全部插件（临时端口）。\n'
+  local ready_marker='dsh web: http://127.0.0.1:'
+  if [[ "$profile" != 'web' ]]; then
+    # The native launcher commits appReady only after the Loader activation
+    # audit. A process-only observer works without adding a Web surface.
+    ready_marker="dsh-enhanced activation ready: ${probe_directory##*/}"
+    if ! node --input-type=module - "$probe_directory" "$ready_marker" <<'NODE'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+const [directory, marker] = process.argv.slice(2)
+const observer = join(directory, 'ready.mjs')
+writeFileSync(observer, `export default {
+  name: 'dsh-enhanced-installer-readiness',
+  inject: ['appReady'],
+  apply(ctx) {
+    ctx.effect(() => ctx.get('appReady').onReady(() => {
+      process.stdout.write(${JSON.stringify(marker + '\n')});
+    }));
+  },
+};\n`, { mode: 0o600 })
+writeFileSync(join(directory, 'readiness.yml'), JSON.stringify([
+  { insert: [{ id: 'dsh-enhanced-installer-readiness', name: observer }] },
+]), { mode: 0o600 })
+NODE
+    then
+      rm -rf -- "$probe_directory"
+      dsh_enhanced_fail 1 '无法创建 profile 运行时就绪探针。'
+      return $?
+    fi
+    overlay_args+=(--patch "$probe_directory/readiness.yml")
+  fi
+
+  printf 'profile 运行时自检：正在实际加载全部插件（Web 使用临时端口）。\n'
   local probe_pid=''
   local saved_exit_trap saved_int_trap saved_term_trap
   saved_exit_trap="$(trap -p EXIT || true)"
@@ -1976,7 +2008,7 @@ dsh_enhanced_verify_profile_activation() {
   local ready='0'
   local elapsed
   for ((elapsed = 0; elapsed < 30; elapsed += 1)); do
-    if grep -Fq 'dsh web: http://127.0.0.1:' "$stdout_path" 2>/dev/null; then
+    if grep -Fq "$ready_marker" "$stdout_path" 2>/dev/null; then
       ready='1'
       break
     fi
@@ -1987,18 +2019,18 @@ dsh_enhanced_verify_profile_activation() {
   # A short-lived process can write the ready line between the final grep and
   # the liveness check above.  Treat that completed output as a successful
   # activation probe too; the probe only needs to prove that DSH composed and
-  # activated the profile far enough to start its Web Host.
-  if grep -Fq 'dsh web: http://127.0.0.1:' "$stdout_path" 2>/dev/null; then
+  # activated the profile and committed the native readiness signal.
+  if grep -Fq "$ready_marker" "$stdout_path" 2>/dev/null; then
     ready='1'
   fi
 
   if [[ "$ready" == '1' ]]; then
+    local probe_url=""
+    probe_url="$(dsh_enhanced_latest_web_url "$stdout_path" || true)"
     dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"
     dsh_enhanced_restore_trap "$saved_exit_trap" EXIT
     dsh_enhanced_restore_trap "$saved_int_trap" INT
     dsh_enhanced_restore_trap "$saved_term_trap" TERM
-    local probe_url=""
-    probe_url="$(dsh_enhanced_latest_web_url "$stdout_path" || true)"
     if [[ -n "$probe_url" ]]; then
       printf 'profile 运行时自检：DSH 已打印带 token 的 Web URL（临时端口，仅用于验证激活，不是持久访问地址）。\n'
     fi
@@ -2010,9 +2042,9 @@ dsh_enhanced_verify_profile_activation() {
     return 0
   fi
 
-  local failure='启动进程在 Web Host 就绪前退出。'
+  local failure='启动进程在 Host 就绪前退出。'
   if kill -0 "$probe_pid" >/dev/null 2>&1; then
-    failure='30 秒内没有等到 Web Host 就绪。'
+    failure='30 秒内没有等到 Host 就绪。'
   fi
   dsh_enhanced_stop_activation_probe "$probe_pid"
   dsh_enhanced_restore_trap "$saved_exit_trap" EXIT
@@ -3151,7 +3183,9 @@ dsh_enhanced_install() {
     fi
   fi
 
-  if [[ ! -d "$dsh_home/profiles/$profile" ]]; then
+  # Only the native web template starts a Web listener. New custom profiles
+  # contain dsh-base, so another profile's port must not block Lark onboarding.
+  if [[ "$profile" == 'web' && ! -f "$dsh_home/profiles/$profile/package.json" ]]; then
     printf '\n安装前诊断：\n'
     if [[ "$dry_run" == '1' ]]; then
       printf 'doctor：将检查 Web 端口 127.0.0.1:%s 是否可用。\n' "$web_port"
