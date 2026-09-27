@@ -23,7 +23,7 @@ test('native coordinator and observation crons finalize one budgeted run and do 
     { id: 'execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: '/workspace', principal: 'owner' }, actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
   ] })
   const automations = new AssistantAutomationsService(ctx, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
-  const coordinatorStore = { listAdoptionHandoffs: vi.fn(() => []), close: vi.fn() }
+  const coordinatorStore = { pendingRuntimeEpochs: vi.fn(() => []), listAdoptionHandoffs: vi.fn(() => []), close: vi.fn() }
   const observationStore = { listTaskObservations: vi.fn(() => []), listObservedForegroundDeployments: vi.fn(() => []), close: vi.fn() }
   const owner = { receiptVersion: 2 as const, authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', agentPreset: 'primary', bindingVersion: 1, generation: 1 }
   const coordinator = new AdoptionCoordinatorRuntime({ config: { coordinatorId: 'coordinator', scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' }, timeoutMs: 1_000, budgetId: 'adoption-runs', budgetAmount: 1 }, store: coordinatorStore as never, trust: {} as never, automations, assertCurrent() {} })
@@ -41,11 +41,13 @@ test('native coordinator and observation crons finalize one budgeted run and do 
   }
   try {
     now += 60_000; await drain()
+    expect(coordinatorStore.pendingRuntimeEpochs).toHaveBeenCalledTimes(1)
     expect(coordinatorStore.listAdoptionHandoffs).toHaveBeenCalledTimes(1)
     expect(observationStore.listTaskObservations).toHaveBeenCalledTimes(2)
     for (const lane of lanes) expect(automations.inspectSystemOwned(lane).latestTerminalRuns.production)
       .toMatchObject({ status: 'succeeded', diagnostic: { budgetSettlementState: 'finalized' } })
     now += 60_000; await drain()
+    expect(coordinatorStore.pendingRuntimeEpochs).toHaveBeenCalledTimes(1)
     expect(coordinatorStore.listAdoptionHandoffs).toHaveBeenCalledTimes(1)
     expect(observationStore.listTaskObservations).toHaveBeenCalledTimes(2)
     const failures = reserve.mock.results.filter(result => result.type === 'throw').map(result => result.value)

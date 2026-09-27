@@ -1,11 +1,13 @@
 import { createHash, createPublicKey, verify } from 'node:crypto'
 import { constants, lstatSync, openSync, closeSync, fstatSync, readSync, realpathSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { hostAttestationEvidenceDigest, hostAttestationRequestDigest, hostAttestationSigningPayload, parseHostAttestationReceipt } from './attestation.js'
 import { resolveTrustKey, type PluginControlTrustConfig } from './trust.js'
 import type { HostAttestationOperation, HostAttestationReceipt, HostAttestationRequest, PluginActivationPlan } from './types.js'
 import { assertRuntimeObservation, runtimeConfigDigest, type RuntimeObservation } from './runtime-observer-protocol.js'
+import { parseRuntimeEpochReceipt, verifyRuntimeEpochReceipt } from './runtime-epoch.js'
+import type { RuntimeEpochRecord } from './store.js'
 
 const MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 const MAX_JSON_BYTES = 1024 * 1024
@@ -56,6 +58,7 @@ function stableRuntime(value: RuntimeObservation): Record<string, unknown> {
 }
 
 export interface DeploymentReadinessBinding {
+  readonly runtimeEpoch?: Readonly<{ operationId: string; sequence: number; receiptDigest: string }>
   readonly planId: string
   readonly activationId: string
   readonly fence: number
@@ -68,6 +71,50 @@ export interface DeploymentReadinessBinding {
   readonly installationId: string
   readonly profilePath: string
   readonly exact: Readonly<{ package: string; version: string; integrity: string }>
+}
+
+/** A fresh independent proof may continue a successful deployment across process generations. */
+export function captureRuntimeEpochReadiness(input: {
+  plan: PluginActivationPlan; operation: HostAttestationOperation; epoch: RuntimeEpochRecord
+  trust: PluginControlTrustConfig; journalPath: string; runtime: RuntimeObservation; dispatchedAt: number
+}): DeploymentReadinessBinding {
+  const { plan, operation, epoch, trust, runtime } = input
+  const request = epoch.request, receipt = epoch.receipt
+  if (epoch.status !== 'applied' || !receipt || receipt.outcome !== 'passed' || receipt.evidence.failures !== 0
+    || plan.status !== 'activated' || !plan.activation || !operation.receipt
+    || request.plan.id !== plan.id || request.plan.digest !== plan.digest || request.activation.id !== plan.activation.id
+    || request.activation.fence !== plan.activation.fence || request.installationId !== plan.installationId
+    || request.profile.path !== plan.target.profilePath || canonical(request.ledger) !== canonical(plan.ledger)
+    || canonical(request.ledger) !== canonical(trust.ledger) || request.predecessor.operationId !== operation.operationId
+    || request.predecessor.receiptDigest !== digest(operation.receipt)
+    || request.predecessor.hostGeneration !== operation.receipt.hostGeneration
+    || receipt.observedAt > input.dispatchedAt) throw new DeploymentReadinessError('runtime epoch is outside the admitted deployment or task')
+  verifyRuntimeEpochReceipt(receipt, request, trust, receipt.observedAt)
+  assertRuntimeObservation(runtime)
+  const stable = stableRuntime(runtime)
+  if (runtime.observedAt < receipt.observedAt || runtime.profilePath !== plan.target.profilePath || runtime.entries.some(entry => !entry.active)
+    || digest(stable) !== request.runtimeIdentityDigest) throw new DeploymentReadinessError('runtime differs from admitted epoch')
+  const epochJournalPath = join(dirname(input.journalPath), 'runtime-epochs.sqlite')
+  safeFile(epochJournalPath)
+  let database: DatabaseSync | undefined
+  try {
+    database = new DatabaseSync(epochJournalPath, { readOnly: true }); database.exec('PRAGMA query_only=ON')
+    const row = database.prepare('SELECT request_digest,observation,receipt FROM runtime_epochs WHERE operation_id=?').get(request.operationId) as
+      { request_digest: string; observation: string; receipt: string } | undefined
+    if (!row || row.request_digest !== receipt.requestDigest
+      || canonical(parseRuntimeEpochReceipt(parseBounded(row.receipt, 'epoch receipt'))) !== canonical(receipt)) {
+      throw new DeploymentReadinessError('retained runtime epoch receipt differs')
+    }
+    const observation = parseBounded(row.observation, 'epoch observation')
+    if (digest(observation) !== receipt.evidence.probeDigest || observation.requestDigest !== receipt.requestDigest
+      || canonical(observation.runtime) !== canonical(stable)) throw new DeploymentReadinessError('retained runtime epoch observation differs')
+    return Object.freeze({ planId: plan.id, activationId: plan.activation.id, fence: plan.activation.fence,
+      hostGeneration: receipt.hostGeneration, operationId: receipt.operationId, receiptDigest: digest(receipt),
+      readinessDigest: receipt.evidence.probeDigest, runtimeDigest: request.runtimeIdentityDigest,
+      planDigest: plan.digest, installationId: plan.installationId, profilePath: plan.target.profilePath,
+      runtimeEpoch: Object.freeze({ operationId: receipt.operationId, sequence: receipt.sequence, receiptDigest: digest(receipt) }),
+      exact: Object.freeze({ package: plan.candidate.package, version: plan.candidate.version, integrity: plan.candidate.integrity }) })
+  } finally { database?.close() }
 }
 
 /**

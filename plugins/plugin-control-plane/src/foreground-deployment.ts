@@ -35,6 +35,11 @@ export function assertForegroundDeployment(record: ForegroundDeploymentRecord): 
   if (record.schemaVersion !== 1 || !['pending', 'observed', 'unknown'].includes(record.state)) throw new Error('invalid foreground deployment')
   assertForegroundTask(record.task)
   assertRuntimeObservation(record.begin)
+  const epoch = record.readiness.runtimeEpoch
+  if (epoch && (!Number.isSafeInteger(epoch.sequence) || epoch.sequence < 1
+    || epoch.operationId !== record.readiness.operationId || epoch.receiptDigest !== record.readiness.receiptDigest)) {
+    throw new Error('foreground runtime epoch binding differs')
+  }
   if (record.begin.observedAt < record.task.dispatchedAt || record.begin.profilePath !== record.readiness.profilePath
     || runtimeIdentityDigest(record.begin) !== record.readiness.runtimeDigest) throw new Error('foreground deployment binding differs')
   if (record.end) assertRuntimeObservation(record.end)

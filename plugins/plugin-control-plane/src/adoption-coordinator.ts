@@ -5,6 +5,7 @@ import { activatePluginPlan, probePluginPlan } from './cli.js'
 import { controlPlaneDigest, type ControlPlaneStore } from './store.js'
 import type { PluginControlTrustConfig } from './trust.js'
 import type { PluginActivationPlan } from './types.js'
+import { invokeConfiguredRuntimeEpochAttestor } from './host-attestor.js'
 
 const OWNER = 'plugin-control-plane-adoption-coordinator'
 const EXECUTOR = 'plugin-control-plane-adoption-coordinator-v1'
@@ -224,8 +225,16 @@ export class AdoptionCoordinatorRuntime {
       }
       const signal = AbortSignal.any([this.abort.signal, input.signal, AbortSignal.timeout(this.options.config.timeoutMs)])
       this.current(signal)
+      const epochs = this.options.store.pendingRuntimeEpochs(this.options.config.coordinatorId)
       const handoffs = this.handoffs()
-      if (handoffs.length) {
+      // Runtime continuity uses the same native Automation budget and lifetime as adoption.
+      if (epochs.length && (this.cursor++ % 2 === 0 || !handoffs.length)) {
+        const epoch = this.options.store.claimRuntimeEpoch(epochs[0]!.request.operationId, this.options.config.coordinatorId)
+        began = true
+        const receipt = await invokeConfiguredRuntimeEpochAttestor(this.options.trust, epoch.request, signal)
+        this.current(signal)
+        this.options.store.applyRuntimeEpoch(receipt, this.options.trust)
+      } else if (handoffs.length) {
         const handoff = handoffs[this.cursor++ % handoffs.length]!
         began = true
         await coordinateAdoptionHandoff({ store: this.options.store, trust: this.options.trust, planId: handoff.planId, signal,

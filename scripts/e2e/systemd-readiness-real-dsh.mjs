@@ -16,6 +16,8 @@ import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest, hostAtte
 import { Ed25519ApprovalAuthority, approvalSigningPayload } from '../../plugins/plugin-control-plane/lib/approval.js'
 import { ControlPlaneStore, controlPlaneDigest } from '../../plugins/plugin-control-plane/lib/store.js'
 import { parseCatalog } from '../../plugins/plugin-control-plane/lib/catalog.js'
+import { captureRetainedDeploymentReadiness, captureRuntimeEpochReadiness } from '../../plugins/plugin-control-plane/lib/deployment-readiness.js'
+import { runtimeEpochIdentityDigest, runtimeEpochRequestDigest, verifyRuntimeEpochReceipt } from '../../plugins/plugin-control-plane/lib/runtime-epoch.js'
 import { DatabaseSync } from 'node:sqlite'
 
 if (process.env.DSH_READINESS_FIXTURE !== '1' || !process.env.DSH_READINESS_DSH || process.platform !== 'linux') {
@@ -25,6 +27,10 @@ const output = process.argv[process.argv.indexOf('--output') + 1]
 if (!process.argv.includes('--output') || !output) throw new Error('--output is required')
 const rollbackAction = process.env.DSH_READINESS_ROLLBACK
 if (rollbackAction !== undefined && !['restore', 'stop'].includes(rollbackAction)) throw new Error('DSH_READINESS_ROLLBACK must be restore or stop')
+const runtimeEpochMode = process.env.DSH_READINESS_RUNTIME_EPOCH === '1'
+if (runtimeEpochMode && (rollbackAction !== undefined || process.env.DSH_READINESS_EXPECT_INACTIVE === '1')) {
+  throw new Error('runtime epoch fixture requires an initially active candidate without rollback')
+}
 const initialCandidateDisabled = rollbackAction !== undefined || process.env.DSH_READINESS_EXPECT_INACTIVE === '1'
 const initialRuntimeActive = rollbackAction === 'restore' || !initialCandidateDisabled
 const run = promisify(execFile)
@@ -38,6 +44,7 @@ const node = await realpath(process.execPath)
 let controlUrl
 let controlBuild
 let peerPackages
+const seenPids = new Set()
 const candidateUrl = new URL('../../plugins/assistant-policy/lib/index.js', import.meta.url)
 const supervisor = async args => (await run('/usr/bin/systemctl', ['--user', ...args], { timeout: 15000, maxBuffer: 65536 })).stdout
 async function cleanupUnit() {
@@ -46,6 +53,16 @@ async function cleanupUnit() {
     try { await supervisor(['stop', unit]) } catch (error) {
       const state = await supervisor(['show', unit, '--property=LoadState', '--property=ActiveState', '--property=MainPID'])
       if (!state.includes('LoadState=not-found') || !state.includes('ActiveState=inactive') || !state.includes('MainPID=0')) throw error
+    }
+    const state = await supervisor(['show', unit, '--property=LoadState', '--property=ActiveState', '--property=MainPID'])
+    if (!state.includes('ActiveState=inactive') || !state.includes('MainPID=0')) throw new Error(`temporary unit did not stop: ${state}`)
+    for (const pid of seenPids) {
+      const deadline = Date.now() + 5000
+      for (;;) {
+        try { process.kill(pid, 0) } catch (error) { if (error.code === 'ESRCH') break; throw error }
+        if (Date.now() >= deadline) throw new Error(`temporary Host PID ${pid} survived unit stop`)
+        await new Promise(resolve => setTimeout(resolve, 50))
+      }
     }
     await supervisor(['reset-failed', unit]).catch(() => {})
 }
@@ -95,6 +112,7 @@ try {
         if (current.entries[0]?.active !== expectedActive) throw new Error('candidate lifecycle state differs')
         const state = await identity()
         if (state.ActiveState !== 'active' || current.processId !== Number(state.MainPID) || current.invocationId !== state.InvocationID) throw new Error('supervisor binding differs')
+        seenPids.add(current.processId)
         return { supervisor: state, observation: current }
       } catch (error) { last = error; await new Promise(resolve => setTimeout(resolve, 100)) }
     }
@@ -151,7 +169,7 @@ try {
   }
   const grantKeys = generateKeyPairSync('ed25519')
   const replayAuditPath = join(owner, 'replay-audit.jsonl')
-  if (!initialCandidateDisabled) {
+  if (!initialCandidateDisabled && !runtimeEpochMode) {
     const probePath = join(profile, 'replay-probe.mjs')
     await copyFile(new URL('./fixtures/replay-host-probe.mjs', import.meta.url), probePath)
     replayProbeRow = { id: 'replay-probe', name: pathToFileURL(probePath).href,
@@ -173,7 +191,7 @@ try {
     await writeFile(patchPath, JSON.stringify(patch(false)), { mode: 0o600 })
   }
   plan = store.advanceActivation({ planId: plan.id, expectedRevision: plan.revision, fence: plan.activation.fence, from: 'staging', to: 'awaiting-reload' })
-  const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-6', ...executable,
+  const issuer = { mode: 'configured-executable', id: 'systemd-fixture', version: 'dsh-systemd-host-attestor-7', ...executable,
     interpreter, authority: 'fixture-owner', keyId: 'fixture-key' }
   const prepare = requirements => store.prepareHostAttestationOperation({ planId: plan.id, expectedRevision: plan.revision,
     expectedFence: plan.activation.fence, issuer, requirements, receiptTtlMs: 120000 }).request
@@ -243,7 +261,7 @@ try {
   if (JSON.stringify(afterReadiness) !== JSON.stringify(successor.supervisor)) throw new Error('readiness restarted the Host')
   let lateReplay
   let generationSubstitution
-  if (plan.status === 'awaiting-effect-blocked-replay') {
+  if (plan.status === 'awaiting-effect-blocked-replay' && !runtimeEpochMode) {
     const request = prepare({ kind: 'effect-blocked-replay', minimumDeliveryAttempts: 1,
       minimumToolExecutionAttempts: 1, maximumExternalEffects: 0 })
     if (request.predecessor?.receiptDigest !== controlPlaneDigest(readinessReceipt)) throw new Error('replay does not bind actual readiness')
@@ -302,9 +320,79 @@ try {
   const db = new DatabaseSync(join(stateRoot, 'reload.sqlite'), { readOnly: true })
   let signedObservation
   try { signedObservation = JSON.parse(db.prepare('SELECT observation FROM readiness').get().observation) } finally { db.close() }
+  const historicalJournal = () => {
+    const history = new DatabaseSync(join(stateRoot, 'reload.sqlite'), { readOnly: true })
+    try { history.exec('PRAGMA query_only=ON'); return controlPlaneDigest({ reloads: history.prepare('SELECT * FROM reloads ORDER BY operation_id').all(),
+      readiness: history.prepare('SELECT * FROM readiness ORDER BY operation_id').all() }) }
+    finally { history.close() }
+  }
   let recoveryEvidence
   let replacement
-  if (rollbackAction) {
+  let runtimeEpochEvidence
+  if (runtimeEpochMode) {
+    // This native probe explicitly seeds the already successful checkpoint; the
+    // owner release, adoption coordinator, and promotion gates have separate tests.
+    const seeded = new DatabaseSync(ledgerPath)
+    try {
+      const recordedAt = Date.now()
+      seeded.exec('BEGIN IMMEDIATE')
+      seeded.prepare("UPDATE activation_plans SET status='activated',activation_lease_until=NULL WHERE id=?").run(plan.id)
+      seeded.prepare(`INSERT INTO activation_watch (plan_id,package_name,package_version,package_integrity,activation_id,fence,state,
+        revision,last_host_generation,healthy_observations,started_at,updated_at)
+        VALUES (?,?,?,?,?,?,'watching',1,?,0,?,?)`).run(plan.id, plan.candidate.package, plan.candidate.version,
+        plan.candidate.integrity, plan.activation.id, plan.activation.fence, readinessReceipt.hostGeneration, recordedAt, recordedAt)
+      seeded.prepare('INSERT INTO activation_deployment_checkpoints VALUES (?,?,1,1,?,?)').run(plan.id, '[]', recordedAt, recordedAt)
+      seeded.exec('COMMIT')
+    } catch (error) { seeded.exec('ROLLBACK'); throw error }
+    finally { seeded.close() }
+    plan = store.getPlan(plan.id)
+    const readinessOperation = store.getHostAttestationOperation(readinessRequest.operationId)
+    const journalPath = join(stateRoot, 'reload.sqlite')
+    const trust = { installationId: plan.installationId, ledger: plan.ledger,
+      hostAttestationKeys: [{ authority: issuer.authority, keyId: issuer.keyId,
+        publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }) }] }
+    const originalSample = await observe(true)
+    const originalBinding = captureRetainedDeploymentReadiness({ plan, operation: readinessOperation,
+      receipt: readinessReceipt, trust, journalPath, runtime: originalSample.observation })
+    const historicalDigest = historicalJournal()
+    await supervisor(['restart', unit, '--no-ask-password', '--job-mode=fail'])
+    replacement = await observe(true)
+    if (replacement.supervisor.MainPID === successor.supervisor.MainPID
+      || replacement.supervisor.InvocationID === successor.supervisor.InvocationID
+      || replacement.observation.observerId === successor.observation.observerId) throw new Error('temporary Host restart retained the old instance')
+    assert.throws(() => captureRetainedDeploymentReadiness({ plan, operation: readinessOperation,
+      receipt: readinessReceipt, trust, journalPath, runtime: replacement.observation }), /current runtime differs from retained stable readiness runtime/u)
+    const rejected = await invoke(readinessRequest, readinessConfig, true)
+    if (!rejected.rejected) throw new Error('old readiness was accepted after temporary Host restart')
+    const requestedAt = Date.now()
+    const epochRequest = { schemaVersion: 1, kind: 'dsh-runtime-epoch-request', operationId: `runtime-epoch-${randomUUID()}`,
+      requestedAt, receiptTtlMs: 60000, installationId: plan.installationId, ledger: plan.ledger,
+      profile: { name, path: profile }, plan: { id: plan.id, digest: plan.digest },
+      activation: { id: plan.activation.id, fence: plan.activation.fence }, issuer,
+      predecessor: { operationId: readinessReceipt.operationId, receiptDigest: controlPlaneDigest(readinessReceipt),
+        hostGeneration: readinessReceipt.hostGeneration }, sequence: 1,
+      runtimeIdentityDigest: runtimeEpochIdentityDigest(replacement.observation) }
+    const { reloadOperationId: _reloadOperationId, ...epochReadiness } = readinessConfig.readiness
+    const epochConfig = { ...reloadConfig, schemaVersion: 5,
+      authorization: { installationId: epochRequest.installationId, ledger: epochRequest.ledger, profile: epochRequest.profile,
+        plan: epochRequest.plan, activation: epochRequest.activation, hostGeneration: epochRequest.predecessor.hostGeneration,
+        requestDigest: runtimeEpochRequestDigest(epochRequest), notBefore: requestedAt - 1000,
+        expiresAt: requestedAt + epochRequest.receiptTtlMs }, readiness: epochReadiness }
+    const beforeEpoch = await identity()
+    const epochReceipt = await invoke(epochRequest, epochConfig)
+    verifyRuntimeEpochReceipt(epochReceipt, epochRequest, trust)
+    if (epochReceipt.outcome !== 'passed' || epochReceipt.evidence.failures !== 0) throw new Error('runtime epoch did not pass')
+    const dispatchedAt = Date.now()
+    const observed = await observe(true)
+    const binding = captureRuntimeEpochReadiness({ plan, operation: readinessOperation,
+      epoch: { request: epochRequest, status: 'applied', receipt: epochReceipt }, trust, journalPath,
+      runtime: observed.observation, dispatchedAt })
+    if (JSON.stringify(await identity()) !== JSON.stringify(beforeEpoch)) throw new Error('runtime epoch restarted the Host')
+    if (historicalJournal() !== historicalDigest) throw new Error('runtime epoch rewrote historical reload/readiness rows')
+    runtimeEpochEvidence = { request: epochRequest, receipt: epochReceipt, originalBinding, binding,
+      beforeEpoch, afterEpoch: observed, historicalJournalUnchanged: true, noAdditionalRestart: true,
+      oldReadinessRejected: true }
+  } else if (rollbackAction) {
     const controlDir = join(home, 'plugin-control'); await mkdir(controlDir, { mode: 0o700 })
     const { mode: _mode, ...hostAttestor } = issuer
     const trust = { schemaVersion: 2, installationId: plan.installationId, dshHome: home, ledger: plan.ledger,
@@ -370,9 +458,10 @@ try {
   const rejected = await invoke(readinessRequest, readinessConfig, true)
   if (!rejected.rejected) throw new Error('stale readiness receipt replay was accepted')
   }
-  evidence = { schemaVersion: 1, kind: rollbackAction ? 'systemd-rollback-real-dsh-fixture' : 'systemd-readiness-real-dsh-fixture', observedAt: new Date().toISOString(), dshVersion,
+  evidence = { schemaVersion: 1, kind: runtimeEpochMode ? 'systemd-runtime-epoch-real-dsh-fixture'
+    : rollbackAction ? 'systemd-rollback-real-dsh-fixture' : 'systemd-readiness-real-dsh-fixture', observedAt: new Date().toISOString(), dshVersion,
     dshCliSha256: sha(await readFile(dsh)), candidatePackage: '@dsh-enhanced/assistant-policy',
-    candidateVersion, initialCandidateDisabled, rollbackAction, recoveryEvidence, controlBuild, peerPackages, lateReplay,
+    candidateVersion, initialCandidateDisabled, rollbackAction, recoveryEvidence, runtimeEpochEvidence, controlBuild, peerPackages, lateReplay,
     runtimeDigests: { observer: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/runtime-observer.js', import.meta.url))),
       attestor: sha(await readFile(attestorSource)), deployedAttestor: executable.sha256, observerClient: readinessConfig.readiness.client.sha256, processHelper: processHelper.sha256,
       controlCli: sha(await readFile(new URL('../../plugins/plugin-control-plane/lib/cli.js', import.meta.url))),
@@ -387,13 +476,15 @@ try {
     byteIdenticalReadinessReplay: true, staleReplayRejected: rollbackAction ? undefined : true, socketRemovedOnHostStop: rollbackAction ? undefined : true,
     limits: ['Actual DSH process with local built Control Plane and Policy package entries, referenced by file URL in a disposable profile; no npm install/publication or candidate artifact byte attestation.',
       'Existing Control Plane store performs signed approval and reload/readiness request/receipt CAS; catalog integrity, owner approval and profile staging are controlled fixture inputs, not actual npm artifact installation or CLI activation.',
-      rollbackAction ? 'CLI restores/removes fixture profile, then descriptor-pinned supervisor attestor proves physical recovery. Initial catalog/artifact installation is fixture input; no production activation, npm publication, model call or behavioral quality proof.'
-        : 'Negative readiness stops at rollback-pending; no profile restoration, physical Host rollback, behavioral quality proof, model call or production activation.'] }
+      runtimeEpochMode ? 'Native epoch mode seeds an activated checkpoint after the genuine reload/readiness CAS. It proves independent observation of a temporary restarted Host, not an owner source grant, adoption coordinator, model call, or production feedback.'
+        : rollbackAction ? 'CLI restores/removes fixture profile, then descriptor-pinned supervisor attestor proves physical recovery. Initial catalog/artifact installation is fixture input; no production activation, npm publication, model call or behavioral quality proof.'
+          : 'Negative readiness stops at rollback-pending; no profile restoration, physical Host rollback, behavioral quality proof, model call or production activation.'] }
 } finally {
   store?.close()
   if (dispatched) await cleanupUnit()
   await rm(root, { recursive: true, force: true })
 }
 evidence.fixtureRemoved = true
+evidence.temporaryUnitStoppedAndPidsGone = true
 await writeFile(output, JSON.stringify(evidence, null, 2) + '\n')
 process.stdout.write(JSON.stringify(evidence) + '\n')

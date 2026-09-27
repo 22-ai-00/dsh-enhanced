@@ -63,7 +63,7 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
       const trust = JSON.parse(await readFile(trustPath, 'utf8')) as Record<string, any>
       const interpreter = result.node
       trust.hostAttestor = { ...trust.hostAttestor, ...result.executables.hostAttestor,
-        version: 'dsh-systemd-host-attestor-6', interpreter }
+        version: 'dsh-systemd-host-attestor-7', interpreter }
       for (const phase of Object.keys(result.releaseAdapters) as (keyof typeof result.releaseAdapters)[]) {
         trust.releaseAdapters[phase] = { ...trust.releaseAdapters[phase], ...result.releaseAdapters[phase],
           version: 'dsh-local-release-adapter-1', interpreter }
@@ -81,7 +81,7 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     const isolated = { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', HOME: f.final }
     const attestor = spawnSync(result.node.path, [result.executables.hostAttestor.path, '--version'], { env: isolated, encoding: 'utf8', timeout: 10_000 })
     expect(attestor.status).toBe(0)
-    expect(attestor.stdout.trim()).toBe('dsh-systemd-host-attestor-6')
+    expect(attestor.stdout.trim()).toBe('dsh-systemd-host-attestor-7')
     const adapter = spawnSync(result.node.path, [result.releaseAdapters.pr.path, '--version'], { env: isolated, encoding: 'utf8', timeout: 10_000 })
     expect(adapter.status).toBe(0)
     expect(adapter.stdout.trim()).toBe('dsh-local-release-adapter-1')

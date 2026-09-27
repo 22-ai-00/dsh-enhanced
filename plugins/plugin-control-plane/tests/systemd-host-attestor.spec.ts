@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, realpathSync, statfsSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, realpathSync, statfsSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { createHash, createHmac, generateKeyPairSync, randomBytes } from 'node:crypto'
 import { chmod, copyFile, mkdtemp, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
@@ -10,7 +10,8 @@ import { afterAll, afterEach, describe, expect, test } from 'vitest'
 import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest } from '../src/attestation.ts'
 import { invokeConfiguredHostAttestor } from '../src/host-attestor.ts'
 import { controlPlaneDigest } from '../src/store.ts'
-import { runtimeConfigDigest } from '../src/runtime-observer-protocol.ts'
+import { queryRuntimeObserver, runtimeConfigDigest } from '../src/runtime-observer-protocol.ts'
+import { runtimeEpochIdentityDigest, runtimeEpochRequestDigest, verifyRuntimeEpochReceipt, type RuntimeEpochRequest } from '../src/runtime-epoch.ts'
 import type { PluginControlTrustConfig } from '../src/trust.ts'
 import type { HostAttestationReceipt, HostAttestationRequest, PluginActivationPlan } from '../src/types.ts'
 
@@ -119,7 +120,7 @@ if(args[1]==='show') {
   const request: HostAttestationRequest = { schemaVersion: 2, predecessor: null, kind: 'dsh-host-attestation-request', operationId: 'host-operation-fixture',
     requestedAt: now, receiptTtlMs: 30000, installationId: config.authorization.installationId,
     ledger: config.authorization.ledger, plan: config.authorization.plan, activation: config.authorization.activation,
-    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-6',
+    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-7',
       ...executable, interpreter, authority: config.authority, keyId: config.keyId }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } }
   config.authorization.requestDigest = hostAttestationRequestDigest(request); await save()
   const start = (value: unknown = request) => {
@@ -137,7 +138,8 @@ if(args[1]==='show') {
     .verify(receipt, { id: 'plan', digest: 'a'.repeat(64), installationId: value.installationId,
       activation: { id: 'activation', fence: 1 }, createdAt: now - 1000 } as PluginActivationPlan, value)
   const verify = async (receipt: HostAttestationReceipt) => verifyRequest(receipt, request)
-  return { root, config, configPath, request, save, start, restarts, verify, verifyRequest }
+  return { root, config, configPath, request, save, start, restarts, verify, verifyRequest,
+    publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString() }
 }
 
 async function standingFixture(mode = 'success', existing?: Awaited<ReturnType<typeof fixture>>) {
@@ -166,7 +168,7 @@ process.stdout.write(JSON.stringify(config.derived));`, { mode: 0o700 })
   return { ...f, wrapper, resolverConfigPath, saveWrapper: save }
 }
 
-async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 'stable' | 'epoch-drift' | 'wrong-context' | 'replayed-challenge' | 'wrong-mac' | 'inactive' | 'inactive-then-active' | 'bad-identity' | 'disconnected' | 'rollback' = 'stable') {
+async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 'stable' | 'changed-epoch' | 'epoch-drift' | 'wrong-context' | 'replayed-challenge' | 'wrong-mac' | 'inactive' | 'inactive-then-active' | 'bad-identity' | 'disconnected' | 'rollback' = 'stable') {
   const reload = await f.start().result; expect(reload.code, reload.stderr).toBe(0)
   const config = f.config as unknown as { schemaVersion: 2; profileFiles: Array<{ path: string; sha256: string }>; readiness: {
     client: { path: string; sha256: string }; observer: unknown; deploymentFiles: Array<{ path: string; sha256: string }>; reloadOperationId: string
@@ -200,7 +202,7 @@ async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 's
         if (behavior === 'disconnected') { socket.end(); return }
         samples++
         const challenge = behavior === 'replayed-challenge' ? 'f'.repeat(64) : incoming.challenge
-        const epoch = behavior === 'epoch-drift' ? samples : 1
+        const epoch = behavior === 'epoch-drift' ? samples : behavior === 'changed-epoch' ? 2 : 1
         const invocationId = behavior === 'rollback' ? JSON.parse(readFileSync(join(f.root, 'observation.json'), 'utf8')).InvocationID
           : behavior === 'wrong-context' ? '3'.repeat(32) : '2'.repeat(32)
         const inactive = behavior === 'inactive' || (behavior === 'inactive-then-active' && samples === 1)
@@ -221,6 +223,32 @@ async function readinessFixture(f: Awaited<ReturnType<typeof fixture>>, mode: 's
   await chmod(socketPath, 0o600)
   return { request, observer, start: () => f.start(request), samples: () => samples,
     setBehavior: (value: typeof mode) => { behavior = value } }
+}
+
+async function epochFixture() {
+  const f = await fixture()
+  const ready = await readinessFixture(f)
+  const readiness = await ready.start().result
+  expect(readiness.code, readiness.stderr).toBe(0)
+  const predecessor = JSON.parse(readiness.stdout) as HostAttestationReceipt
+  const sample = await queryRuntimeObserver(ready.observer)
+  const request: RuntimeEpochRequest = {
+    schemaVersion: 1, kind: 'dsh-runtime-epoch-request', operationId: 'runtime-epoch-fixture',
+    requestedAt: Date.now(), receiptTtlMs: 30_000, installationId: ready.request.installationId,
+    ledger: ready.request.ledger, plan: ready.request.plan, activation: ready.request.activation,
+    profile: ready.request.profile, issuer: ready.request.issuer as RuntimeEpochRequest['issuer'],
+    predecessor: { operationId: predecessor.operationId, receiptDigest: controlPlaneDigest(predecessor),
+      hostGeneration: predecessor.hostGeneration }, sequence: 1,
+    runtimeIdentityDigest: runtimeEpochIdentityDigest({ ...sample }),
+  }
+  const config = f.config as unknown as { schemaVersion: number; authorization: { requestDigest: string };
+    readiness: { reloadOperationId?: string } }
+  config.schemaVersion = 5
+  delete config.readiness.reloadOperationId
+  config.authorization.requestDigest = runtimeEpochRequestDigest(request)
+  await f.save()
+  return { f, ready, request, start: () => f.start(request),
+    saveRequest: async () => { config.authorization.requestDigest = runtimeEpochRequestDigest(request); await f.save() } }
 }
 
 async function rollbackFixture(action: 'restore' | 'stop' = 'stop', mode = 'success') {
@@ -258,6 +286,139 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
   // that the attestor verifies. An isolated build with a masked /sys cannot
   // prove that evidence; the rejection tests below still run there.
   const recoveryTest = test.skipIf(!hasVisibleRecoveryCgroup())
+  // Reload, readiness, initial epoch and replay each launch the pinned attestor;
+  // each has its own 5-second command deadline, plus resolver and test setup.
+  test('attests a stable runtime epoch through schema 5 without another restart or changing reload history', async () => {
+    const { f, request, start } = await epochFixture()
+    const historical = new DatabaseSync(join(f.config.stateRoot, 'reload.sqlite'), { readOnly: true })
+    const before = historical.prepare('SELECT operation_id, request_digest, observation, receipt FROM reloads').all()
+    const beforeReady = historical.prepare('SELECT operation_id, request_digest, observation, receipt FROM readiness').all()
+    historical.close()
+    await standingFixture('success', f)
+    const first = await start().result
+    expect(first.code, first.stderr).toBe(0)
+    const receipt = verifyRuntimeEpochReceipt(JSON.parse(first.stdout), request,
+      { installationId: request.installationId, hostAttestationKeys: [{ authority: f.config.authority,
+        keyId: f.config.keyId, publicKeyPem: f.publicKeyPem }] })
+    expect(receipt.outcome).toBe('passed')
+    expect(receipt.hostGeneration).toBe(1)
+    expect(await f.restarts()).toBe(1)
+    const retry = await start().result
+    expect(retry.code, retry.stderr).toBe(0)
+    expect(retry.stdout).toBe(first.stdout)
+    expect(await f.restarts()).toBe(1)
+    const old = new DatabaseSync(join(f.config.stateRoot, 'reload.sqlite'), { readOnly: true })
+    try {
+      expect(old.prepare('SELECT operation_id, request_digest, observation, receipt FROM reloads').all()).toEqual(before)
+      expect(old.prepare('SELECT operation_id, request_digest, observation, receipt FROM readiness').all()).toEqual(beforeReady)
+    } finally { old.close() }
+    const db = new DatabaseSync(join(f.config.stateRoot, 'runtime-epochs.sqlite'), { readOnly: true })
+    try {
+      const row = db.prepare('SELECT request_digest, observation, receipt FROM runtime_epochs').get()!
+      expect(row.request_digest).toBe(runtimeEpochRequestDigest(request))
+      expect(JSON.parse(String(row.observation)).runtime).toBeDefined()
+      expect(JSON.parse(String(row.observation)).samples.length).toBeGreaterThanOrEqual(2)
+      expect(JSON.parse(String(row.receipt))).toEqual(receipt)
+    } finally { db.close() }
+  }, 45_000)
+  test('rejects a different request, predecessor and runtime identity without restarting', async () => {
+    const { f, ready, request, start, saveRequest } = await epochFixture()
+    const different = await f.start({ ...request, sequence: 2 }).result
+    expect(different.code).toBe(1)
+    expect(different.stderr).toContain('exact epoch request is not authorized')
+    const originalDigest = request.predecessor.receiptDigest
+    request.predecessor.receiptDigest = '0'.repeat(64)
+    await saveRequest()
+    const predecessor = await start().result
+    expect(predecessor.code).toBe(1)
+    expect(predecessor.stderr).toContain('runtime epoch predecessor is not the applied signed readiness')
+    request.predecessor.receiptDigest = originalDigest
+    await saveRequest()
+    ready.setBehavior('epoch-drift')
+    const drift = await start().result
+    expect(drift.code).toBe(1)
+    expect(drift.stderr).toContain('runtime identity differs from requested epoch')
+    expect(await f.restarts()).toBe(1)
+  }, 20_000)
+  test('rejects an expired cached runtime epoch while retaining its signed history', async () => {
+    const { f, request, start, saveRequest } = await epochFixture()
+    request.receiptTtlMs = 1_000
+    await saveRequest()
+    const first = await start().result
+    expect(first.code, first.stderr).toBe(0)
+    const receipt = JSON.parse(first.stdout)
+    verifyRuntimeEpochReceipt(receipt, request, { installationId: request.installationId,
+      hostAttestationKeys: [{ authority: f.config.authority, keyId: f.config.keyId, publicKeyPem: f.publicKeyPem }] }, receipt.observedAt)
+    await new Promise(resolveWait => setTimeout(resolveWait, 1_100))
+    const expired = await start().result
+    expect(expired.code).toBe(1)
+    expect(expired.stderr).toContain('cached runtime epoch receipt expired')
+    expect(await f.restarts()).toBe(1)
+  }, 20_000)
+  test('permits skipped sequence and A to B to A epochs but rejects a superseded receipt', async () => {
+    const { f, ready, request, start, saveRequest } = await epochFixture()
+    const original = request.runtimeIdentityDigest
+    request.sequence = 3
+    request.operationId = 'runtime-epoch-three'
+    request.requestedAt = Date.now()
+    ready.setBehavior('changed-epoch')
+    request.runtimeIdentityDigest = runtimeEpochIdentityDigest({ ...await queryRuntimeObserver(ready.observer) })
+    const third = structuredClone(request)
+    await saveRequest()
+    const changed = await start().result
+    expect(changed.code, changed.stderr).toBe(0)
+    expect(JSON.parse(changed.stdout).sequence).toBe(3)
+    request.sequence = 4
+    request.operationId = 'runtime-epoch-four'
+    request.requestedAt = Date.now()
+    request.runtimeIdentityDigest = original
+    ready.setBehavior('stable')
+    await saveRequest()
+    const restored = await start().result
+    expect(restored.code, restored.stderr).toBe(0)
+    expect(JSON.parse(restored.stdout).sequence).toBe(4)
+    const config = f.config as unknown as { authorization: { requestDigest: string } }
+    config.authorization.requestDigest = runtimeEpochRequestDigest(third)
+    await f.save()
+    const stale = await f.start(third).result
+    expect(stale.code).toBe(1)
+    expect(stale.stderr).toContain('runtime epoch operation was superseded')
+    expect(await f.restarts()).toBe(1)
+  }, 30_000)
+  test('a late epoch signer cannot commit after a newer sequence is reserved', async () => {
+    const { f, start } = await epochFixture()
+    f.config.stableWindowMs = 1_500
+    f.config.timeoutMs = 10_000
+    await f.save()
+    const old = start()
+    const journalPath = join(f.config.stateRoot, 'runtime-epochs.sqlite')
+    let reserved = false
+    const deadline = Date.now() + 5_000
+    while (!reserved && Date.now() < deadline) {
+      if (!existsSync(journalPath)) { await new Promise(resolveWait => setTimeout(resolveWait, 20)); continue }
+      try {
+        const db = new DatabaseSync(journalPath)
+        try {
+          const row = db.prepare('SELECT * FROM runtime_epochs WHERE sequence = 1').get()
+          if (row) {
+            db.prepare(`INSERT INTO runtime_epochs(operation_id, request_digest, config_digest, scope_id,
+              host_generation, sequence, runtime_identity_digest, predecessor_digest) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+              'newer-reserved-epoch', String(row.request_digest), String(row.config_digest), String(row.scope_id),
+              Number(row.host_generation), 3, String(row.runtime_identity_digest), String(row.predecessor_digest))
+            reserved = true
+          }
+        } finally { db.close() }
+      } catch { /* the private journal may not exist until the attestor reserves */ }
+      if (!reserved) await new Promise(resolveWait => setTimeout(resolveWait, 20))
+    }
+    expect(reserved).toBe(true)
+    const result = await old.result
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain('runtime epoch operation was superseded before signing')
+    expect(await f.restarts()).toBe(1)
+    const db = new DatabaseSync(journalPath, { readOnly: true })
+    try { expect(db.prepare('SELECT receipt FROM runtime_epochs WHERE sequence = 1').get()!.receipt).toBeNull() } finally { db.close() }
+  }, 20_000)
   recoveryTest.each(['restore', 'stop'] as const)('attests physical %s and reconciles byte-identical replay without another action', async action => {
     const f = await rollbackFixture(action)
     const first = await f.startRollback().result; expect(first.code, first.stderr).toBe(0)
@@ -423,7 +584,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     const result = await ready.start().result
     expect(result.code).toBe(1); expect(result.stdout).toBe('')
     expect(await f.restarts()).toBe(1)
-  })
+  }, 15_000)
 
   test('signs a stable inactive candidate as a failed readiness receipt and replays it without restart', async () => {
     const f = await fixture(); const ready = await readinessFixture(f, 'inactive')
@@ -443,7 +604,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     const f = await fixture(); const ready = await readinessFixture(f, mode)
     const result = await ready.start().result
     expect(result.code).toBe(1); expect(result.stdout).toBe(''); expect(await f.restarts()).toBe(1)
-  })
+  }, 15_000)
 
   test('does not sign a disconnected observer as a failed readiness result', async () => {
     const f = await fixture(); const ready = await readinessFixture(f, 'disconnected')
@@ -480,14 +641,14 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     ready.setBehavior('epoch-drift')
     const second = await ready.start().result
     expect(second.code).toBe(1); expect(second.stdout).toBe(''); expect(await f.restarts()).toBe(1)
-  })
+  }, 15_000)
 
   test('concurrent first readiness calls return byte-identical receipts without another reload', async () => {
     const f = await fixture(); const ready = await readinessFixture(f)
     const results = await Promise.all([ready.start().result, ready.start().result])
     expect(results.every(result => result.code === 0), JSON.stringify(results)).toBe(true)
     expect(results[0]!.stdout).toBe(results[1]!.stdout); expect(await f.restarts()).toBe(1)
-  })
+  }, 15_000)
 
   test('rejects a changed observer client pin, deployment pin, legacy request and expired authorization before readiness', async () => {
     const f = await fixture(); const ready = await readinessFixture(f)
@@ -510,7 +671,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     config.authorization.requestDigest = hostAttestationRequestDigest(ready.request); config.authorization.expiresAt = Date.now() - 1; await f.save()
     expect((await ready.start().result).code).toBe(1)
     expect(await f.restarts()).toBe(1)
-  })
+  }, 20_000)
 
   test('resolves standing authority through pinned descriptors and replays without another restart', async () => {
     const f = await standingFixture()
@@ -521,7 +682,7 @@ describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', (
     expect(second.code, second.stderr).toBe(0)
     expect(second.stdout).toBe(first.stdout)
     expect(await f.restarts()).toBe(1)
-  })
+  }, 15_000)
   test('checks standing readiness with the forward observer', async () => {
     const f = await fixture(), ready = await readinessFixture(f)
     await standingFixture('success', f)

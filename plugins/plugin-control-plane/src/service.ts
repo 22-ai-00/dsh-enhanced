@@ -45,9 +45,9 @@ import type { SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './s
 import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer.js'
 import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig } from './replay-endpoint.js'
 import { readPrivateRuntimeObserverKey } from './runtime-observer-protocol.js'
-import { createForegroundDeploymentObserver, foregroundTrustSnapshot, validateForegroundDeploymentConfig, type ForegroundDeploymentConfig } from './foreground-deployment-runtime.js'
+import { createForegroundDeploymentObserver, foregroundTrustSnapshot, queueRuntimeEpoch, validateForegroundDeploymentConfig, type ForegroundDeploymentConfig } from './foreground-deployment-runtime.js'
 import { captureRetainedDeploymentReadiness } from './deployment-readiness.js'
-import { installHostReadiness } from './host-readiness.js'
+import { installHostReadiness, onHostReady } from './host-readiness.js'
 import type { ForegroundDeploymentRecord } from './foreground-deployment.js'
 
 export interface Config {
@@ -250,8 +250,16 @@ export class PluginControlPlaneService extends Service {
               }
               assertCurrent()
             }
+            const requestRuntimeEpoch = (runtime: ReturnType<typeof sample>) => {
+              assertCurrent()
+              queueRuntimeEpoch(this.store, trust, runtime, (gapId, owner, callback) => this.taskGaps.withCurrent(gapId, owner, callback))
+            }
             const registration = createForegroundDeploymentObserver({ config: this.config.foregroundDeployments!,
-              profilePath: this.config.runtimeObserver!.profilePath, store: this.store, trust, sample, assertCurrent, owner: this })
+              profilePath: this.config.runtimeObserver!.profilePath, store: this.store, trust, sample, assertCurrent, owner: this, requestRuntimeEpoch })
+            onHostReady(deliveryCtx, () => {
+              try { requestRuntimeEpoch(sample(randomBytes(32).toString('hex'))) }
+              catch { /* Initial deployment and inactive/retracted sources have no continuity work. */ }
+            })
             this.foregroundObservers.add(registration)
             try {
               const delivery = deliveryCtx.get('assistantDelivery' as never) as unknown as AssistantDeliveryService

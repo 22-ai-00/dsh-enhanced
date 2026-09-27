@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## 重启后的持续观察（Control Plane schema 26）
+
+v26 新增独立 runtime epoch 表，保留既有计划摘要、签名和部署观察历史。目标 Host 在原生启动或任务发现运行身份变化时申请补证；既有协调器通过原生 Automation 调用 systemd attestor v7，schema4 授权包装层生成只观察的 schema5 配置。两个 Host、授权器及签名器需使用同批版本；未完成的旧操作保留原固定程序，不能改写 issuer。
+
+新证明只恢复原成功部署在新进程下的后续任务归因，不补填证明到达前的任务，也不迁移 Host 版本或冻结的授权配置。采用历史仍保留，授权沿用原期限与额度；DSH/Cordis 基线不变。原生 DSH/systemd 重启探针和具体边界见[持续观察](systemd-host-attestor.md#runtime-continuity-after-restart)。
+
 ## 自动 Host 授权（Control Plane schema 25）
 
 v25 新增不可变部署文件记录，不改写既有计划摘要和签名。可选 `hostDeploymentInputs` 进入新计划批准摘要；未配置时沿用原契约。外部 Host 授权器只读当前 source/release、claimed operation、批准与部署记录，按安装期有限授权生成精确请求配置。systemd attestor v6 的配置 schema4 包装层支持此自动授权；原配置 schema1–3 保持不变。两个 Host、授权器和信任配置需成套升级，待处理旧版本操作保留原签名器；详见[systemd Host 签名器](systemd-host-attestor.md#automatic-authorization-within-an-installation-grant)。不改变 DSH/Cordis 基线。
