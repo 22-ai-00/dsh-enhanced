@@ -246,6 +246,12 @@ describe('RSI dual profile setup transaction', () => {
     expect(await readFile(f.patch(), 'utf8')).toContain('original')
     await expect(stat(f.journal)).rejects.toMatchObject({ code: 'ENOENT' })
   })
+  test('automatic owner installation selects its own operation without manual manifest or stop confirmation', () => {
+    expect(parseRsiSetupArgs(['--install-owner','--profile','web','--dsh-home','/tmp/home','--source-repository','/tmp/source']))
+      .toMatchObject({installOwner:true,profile:'web',sourceRepository:'/tmp/source',apply:false})
+    expect(() => parseRsiSetupArgs(['--install-owner','--profile','web','--dsh-home','/tmp/home','--apply']))
+      .toThrow('cannot be combined')
+  })
   test('argument parser refuses implicit mutation and incompatible operations', () => {
     const base = ['--manifest', '/tmp/private.json', '--dsh-home', '/tmp/home']
     expect(() => parseRsiSetupArgs([...base, '--start'])).toThrow('requires --apply')

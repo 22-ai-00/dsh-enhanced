@@ -53,6 +53,7 @@ export interface RsiSetupArgs {
   prepareSource?: boolean; profile?: string; sourceRepository?: string
   prepareBuild?: boolean; optionalBuild?: boolean; dockerPath?: string
   prepareAuthorities?: boolean
+  installOwner?: boolean
 }
 export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
   const result: RsiSetupArgs = { manifestPath: '', dshHome: process.env.DSH_HOME || join(homedir(), '.dsh'),
@@ -70,6 +71,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     else if (key === '--prepare-source') result.prepareSource = true
     else if (key === '--prepare-build') result.prepareBuild = true
     else if (key === '--prepare-authorities') result.prepareAuthorities = true
+    else if (key === '--install-owner') result.installOwner = true
     else if (key === '--optional-build') result.optionalBuild = true
     else if (key === '--manifest' || key === '--dsh-home' || key === '--profile' || key === '--source-repository' || key === '--docker-path') {
       const value = argv[++i]
@@ -83,6 +85,13 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
   }
   if (result.help) return result
   if ((result.optionalBuild || result.dockerPath) && !result.prepareBuild) fail('--optional-build and --docker-path require --prepare-build')
+  if (result.installOwner) {
+    if (result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.manifestPath || result.apply
+      || result.rollback || result.start || result.confirmStopped || result.optionalBuild || result.dockerPath) fail('owner installation cannot be combined with other operations')
+    if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)) fail('owner installation requires --profile and absolute DSH_HOME')
+    if (result.sourceRepository && !isAbsolute(result.sourceRepository)) fail('--source-repository must be absolute')
+    return result
+  }
   if (result.prepareSource || result.prepareBuild || result.prepareAuthorities) {
     if ([result.prepareSource, result.prepareBuild, result.prepareAuthorities].filter(Boolean).length > 1) fail('resource preparation modes cannot be combined')
     if (result.manifestPath || result.apply || result.rollback || result.start || result.confirmStopped) fail('resource preparation cannot be combined with profile configuration operations')
@@ -205,7 +214,7 @@ export interface RsiSetupPorts {
   start(profile: string, home: string): Promise<void>
 }
 
-const defaultPorts: RsiSetupPorts = {
+export const rsiSetupPorts: RsiSetupPorts = {
   async base(profile, home) {
     // Resolve the installed package symlink, then pin a bounded non-writable file.
     const path = await realpath(join(home, 'profiles', profile, 'node_modules', '@deepseek-ai', 'dsh-base', 'cordis.patch.yml'))
@@ -324,15 +333,20 @@ export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding
     handoff: config.sourceAdoptions!.handoff, ...(environment === undefined ? {} : { environment }), readPrivate: path => readOwnedFile(path) })
 }
 
-export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts = defaultPorts): Promise<{ mode: string; profiles: readonly string[] }> {
-  if (args.prepareSource || args.prepareBuild || args.prepareAuthorities || args.optionalBuild || args.dockerPath || args.profile || args.sourceRepository) fail('resource preparation is a separate setup operation')
+export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts = rsiSetupPorts): Promise<{ mode: string; profiles: readonly string[] }> {
+  return withDshHomeLifecycleLock(args.dshHome, () => configureRsiSetupLocked(args, ports))
+}
+
+/** Internal installer entry: caller already owns the DSH_HOME lifecycle lock. */
+export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetupPorts = rsiSetupPorts): Promise<{ mode: string; profiles: readonly string[] }> {
+  if (args.installOwner || args.prepareSource || args.prepareBuild || args.prepareAuthorities || args.optionalBuild || args.dockerPath || args.profile || args.sourceRepository) fail('resource preparation is a separate setup operation')
   if (args.rollback && (args.apply || args.start) || args.start && !args.apply) fail('incompatible setup operations')
   const home = args.dshHome
   await safeDirectory(home)
   const manifestBytes = await readOwnedFile(args.manifestPath)
   const manifest = JSON.parse(manifestBytes) as RsiSetupManifest
   const pair = profiles(manifest)
-  return withDshHomeLifecycleLock(home, async () => {
+  return (async () => {
     for (const profile of pair) await safeDirectory(join(home, 'profiles', profile))
     const journalPath = join(home, '.rsi-setup-journal.json')
     const previous = await readJournal(journalPath, pair)
@@ -412,13 +426,33 @@ export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts
     // A failed start retains the applied journal; it never rewrites a live Host.
     if (args.start) { await ports.start(pair[1], home); await ports.start(pair[0], home) }
     return { mode: args.start ? 'services-started' : 'configured', profiles: pair }
-  })
+  })()
 }
 
 export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
-    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    return
+  }
+  if (args.installOwner) {
+    if (process.platform !== 'linux') {
+      process.stdout.write(`${JSON.stringify({ mode: 'not-ready', reason: 'automatic dual Host installation requires Linux systemd user services' })}\n`)
+      process.exitCode = 3
+      return
+    }
+    const controller = new AbortController()
+    const cancel = () => controller.abort(new Error('owner installation interrupted'))
+    process.once('SIGINT', cancel); process.once('SIGTERM', cancel)
+    try {
+      const { installRsiOwnerDeployment } = await import('./rsi-install.js')
+      const result = await installRsiOwnerDeployment({ dshHome: args.dshHome, profile: args.profile!,
+        sourceRepository: args.sourceRepository, signal: controller.signal })
+      process.stdout.write(`${JSON.stringify(result)}\n`)
+      process.stderr.write(result.mode === 'ready' ? '自迭代双 Host 已启动并通过就绪检查。\n'
+        : `普通 supervised 安装已保留；自迭代双 Host 未就绪：${result.reason}。\n`)
+      if (result.mode === 'not-ready') process.exitCode = 3
+    } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel) }
     return
   }
   if (args.prepareSource || args.prepareBuild || args.prepareAuthorities) {

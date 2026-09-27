@@ -2373,6 +2373,19 @@ dsh_enhanced_prepare_rsi_source() {
   }
 }
 
+dsh_enhanced_install_rsi_owner() {
+  local profile="$1" dsh_home="$2" source_mode="$3" repo_root="$4" dry_run="$5"
+  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup"
+  local args=(--install-owner --profile "$profile" --dsh-home "$dsh_home")
+  if [[ "$source_mode" == 'local' ]]; then args+=(--source-repository "$repo_root"); fi
+  printf '\nsupervised-growth：自动配置当前 owner 的自迭代双 Host。\n'
+  if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
+    dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
+    return $?
+  fi
+  dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
+}
+
 # Setup CLIs run as ordinary Node processes before a profile is mounted.  Ask
 # the verified Host's public boot API to materialize its shared peer closure
 # under this DSH_HOME, without composing or activating a profile.
@@ -3701,6 +3714,10 @@ NODE
 
   if [[ "$operation" == 'install' ]]; then
     dsh_enhanced_ensure_rsi_cli "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
+  fi
+
+  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
+    dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" || return $?
   fi
 
   printf '\n安装流程完成。\n'

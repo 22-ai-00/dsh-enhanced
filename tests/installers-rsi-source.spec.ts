@@ -62,6 +62,17 @@ describe('supervised RSI source and build preparation', () => {
     expect(missing.stderr).toContain('找不到安装后的 dsh-rsi-setup')
   })
 
+  it('propagates the owner installer not-ready status instead of reporting success', async () => {
+    const {home,log} = await fixture()
+    const result = spawnSync('/bin/bash',['-c','source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"','bash',
+      common,'web',home,'local',repoRoot,'0'],{cwd:repoRoot,encoding:'utf8',env:{...process.env,RSI_ARGS_LOG:log,RSI_EXIT_CODE:'3'}})
+    expect(result.status).toBe(3)
+    expect((await readFile(log,'utf8')).trimEnd().split('\n')).toEqual([
+      '--install-owner','--profile','web','--dsh-home',home,'--source-repository',repoRoot,
+    ])
+    expect(result.stdout).not.toContain('安装流程完成')
+  })
+
   it('prints the new supervised cohort and preparation between install and final setup without writing source', async () => {
     const { home } = await fixture()
     const result = spawnSync('/bin/bash', [localInstaller, '--dry-run', '--scenario', 'supervised',
@@ -81,10 +92,15 @@ describe('supervised RSI source and build preparation', () => {
     expect(result.stdout).toContain(`--source-repository ${repoRoot}`)
     expect(await readdir(home)).toEqual(['profiles'])
 
+    const ownerInstall = result.stdout.indexOf('dsh-rsi-setup --install-owner')
+    expect(ownerInstall).toBeGreaterThan(finalSetup)
+    expect(ownerInstall).toBeGreaterThan(result.stdout.indexOf('doctor：将验证'))
+
     const standard = spawnSync('/bin/bash', [localInstaller, '--dry-run', '--scenario', 'lark', '--lark', 'configure'], {
       cwd: repoRoot, encoding: 'utf8', env: { ...process.env, DSH_HOME: home, PATH: pathWithoutTraex },
     })
     expect(standard.status, standard.stderr).toBe(0)
     expect(standard.stdout).not.toContain('dsh-rsi-setup --prepare-build')
+    expect(standard.stdout).not.toContain('dsh-rsi-setup --install-owner')
   })
 })

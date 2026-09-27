@@ -2,13 +2,13 @@ import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
-import { parse, stringify } from 'yaml'
+import { isMap, isSeq, parse, parseDocument, stringify, type Node } from 'yaml'
 import { normalizeControlPlaneConfig, runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
 import { normalizeConfig } from '@dsh-enhanced/assistant-growth-driver'
 import { validateSourceReviewConfig } from '@dsh-enhanced/assistant-verifier'
 
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.ts'
-import { createRsiBootstrapManifest, type RsiBootstrapManifestInput } from '../src/rsi-bootstrap-manifest.ts'
+import { createRsiBootstrapManifest, rawLoaderConfig, type RsiBootstrapManifestInput } from '../src/rsi-bootstrap-manifest.ts'
 import { compileRsiProfiles } from '../src/rsi-profile.ts'
 import type { RsiAuthorityRuntime } from '../src/rsi-authority-runtime.ts'
 
@@ -111,6 +111,15 @@ describe('ordinary-use RSI manifest factory', () => {
       const compiled = await compileRsiProfiles({ manifest, dshHome: input.dshHome, targetPatch: '[]\n',
         targetEffective: input.targetEffective, coordinatorPatch: '[]\n',
         coordinatorEffective: stringify(coordinatorEffective), coordinatorBase, owner: input.owner })
+      const patch = parseDocument(compiled.targetPatch)
+      expect(isSeq(patch.contents)).toBe(true)
+      if (!isSeq(patch.contents)) throw new Error('invalid patch')
+      for (const id of ['dsh-enhanced-assistant-growth-driver','dsh-enhanced-assistant-verifier']) {
+        const row = patch.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === id)
+        if (!isMap(row)) throw new Error('missing derived row')
+        expect(manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === id)!.configDigest)
+          .toBe(runtimeConfigDigest(rawLoaderConfig(row.get('config',true) as Node,id)))
+      }
       expect(compiled.targetPatch).toContain('sourceAdoptions')
       expect(compiled.coordinatorPatch).toContain('adoptionCoordinator')
     } finally { await rm(root, { recursive: true, force: true }) }
@@ -127,7 +136,9 @@ describe('ordinary-use RSI manifest factory', () => {
       expect(() => createRsiBootstrapManifest({ ...input, hostDeploymentInputs: input.hostDeploymentInputs.slice(0, 3) })).toThrow('does not cover installed package')
       expect(() => createRsiBootstrapManifest({ ...input, plugins: ['plugin-control-plane'] })).toThrow('protected')
       expect(() => createRsiBootstrapManifest({ ...input, plugins: ['assistant-health'] })).toThrow('scope differs from all installed')
-      expect(() => createRsiBootstrapManifest({ ...input, targetEffective: input.targetEffective.replace('enabled: true', 'enabled: !!js true') })).toThrow('evaluated YAML tags')
+      const tagged = input.targetEffective.replace('enabled: true', 'enabled: !!js true')
+      expect(() => createRsiBootstrapManifest({ ...input, targetEffective: tagged })).toThrow('config digest differs')
+      expect(() => createRsiBootstrapManifest({ ...input, targetEffective: input.targetEffective.replace('enabled: true', 'enabled: !unknown true') })).toThrow('unsupported YAML tag')
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 
@@ -162,6 +173,16 @@ describe('ordinary-use RSI manifest factory', () => {
       expect(compiled.targetPatch).toContain('pluginSourceProposals:')
       expect(compiled.targetPatch).toContain('preparationMode: durable')
       expect(manifest.controlPlane.runtimeObserver!.targets[0]!.configDigest).toBe(runtimeConfigDigest(null))
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('validates raw Include !!js expressions without evaluating them', async () => {
+    const { root, input } = await fixture()
+    try {
+      const targetEffective = input.targetEffective.replace('enabled: true', "enabled: !!js dshHomePath('never-execute')")
+      const manifest = createRsiBootstrapManifest({ ...input, targetEffective,
+        observerTargets: [{ ...input.observerTargets[0]!, configDigest: runtimeConfigDigest({ enabled: { __jsExpr: "dshHomePath('never-execute')" } }) }] })
+      expect(manifest.controlPlane.runtimeObserver?.targets[0]?.configDigest).toBe(runtimeConfigDigest({ enabled: { __jsExpr: "dshHomePath('never-execute')" } }))
     } finally { await rm(root, { recursive: true, force: true }) }
   })
 })
