@@ -1747,6 +1747,116 @@ process.exit(result.status ?? 99)
   }
 }
 
+async function rsiPairLifecycleFixture() {
+  const coordinator = 'rsi-web-test'
+  const f = await lifecycleFixture({ readiness: 'host', effectiveScenario: 'supervised',
+    managedDependencies: ['personal-assistant', 'plugin-control-plane'],
+    systemd: { units: [{ profile: 'web', active: true }, { profile: coordinator, active: true }] } })
+  const coordinatorPath = join(f.dshHome, 'profiles', coordinator)
+  const slugs = ['assistant-automations', 'assistant-policy', 'plugin-control-plane']
+  const scope = { ownerRouteId: 'owner-route', principalId: 'owner', workspace: 'workspace', preset: 'default' }
+  const storage = join(f.dshHome, 'rsi-coordinators', coordinator)
+  const shared = { catalogPath: join(f.dshHome, 'catalog.json'), trustPath: join(f.dshHome, 'trust.json') }
+  const targetRows = parse(await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')) as object[]
+  targetRows.push({ id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {
+    ...shared, sourceJobs: { ...scope, budgetAmount: 1 }, sourceAdoptions: { profile: 'web', handoff: { coordinatorId: 'pair-coordinator' } },
+  } })
+  await writeFile(join(f.dshHome, '.lifecycle-dump-config'), stringify(targetRows))
+  const base = [{ id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop', config: { agents: [] } }]
+  const rows = [...base,
+    { id: 'dsh-enhanced-assistant-policy', name: '@dsh-enhanced/assistant-policy', config: {
+      databasePath: join(storage, 'policy.sqlite'), budgets: [{ id: 'coord', metric: 'automation-runs', scope: 'subject', limit: 3, periodMs: 60_000 }],
+    } },
+    { id: 'dsh-enhanced-assistant-automations', name: '@dsh-enhanced/assistant-automations', config: {
+      databasePath: join(storage, 'automations.sqlite'), runsPath: join(storage, 'runs'), schedulerEnabled: true,
+    } },
+    { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {
+      ...shared, statePath: storage, adoptionCoordinator: { coordinatorId: 'pair-coordinator', scope, timeoutMs: 10_000, budgetId: 'coord', budgetAmount: 1 },
+    } },
+  ]
+  await writeFile(join(coordinatorPath, '.lifecycle-dump-config'), stringify(rows))
+  await writeFile(join(coordinatorPath, 'cordis.patch.yml'), stringify(rows))
+  await writeFile(join(coordinatorPath, 'package.json'), JSON.stringify({ name: 'coordinator', private: true,
+    dependencies: Object.fromEntries(slugs.map(slug => [`@dsh-enhanced/${slug}`, '0.1.0'])),
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', ...slugs.map(slug => `@dsh-enhanced/${slug}`)] } },
+  }))
+  await writeFile(join(coordinatorPath, 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
+  await writeFile(join(coordinatorPath, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+  const basePath = join(coordinatorPath, 'node_modules', '@deepseek-ai', 'dsh-base')
+  await mkdir(basePath, { recursive: true })
+  await writeFile(join(basePath, 'cordis.patch.yml'), stringify([{ insert: base }]))
+  for (const [profile, slug] of [['web', 'personal-assistant'], ['web', 'plugin-control-plane'], ...slugs.map(slug => [coordinator, slug])]) {
+    const root = join(f.dshHome, 'profiles', profile!, 'node_modules', '@dsh-enhanced', slug!)
+    await mkdir(root, { recursive: true })
+    await writeFile(join(root, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${slug}`, version: '0.1.0', type: 'module', exports: './index.js' }))
+    const source = slug === 'plugin-control-plane'
+      ? "export const controlPlaneDigest = () => 'a'.repeat(64)\n"
+      : `export const listActiveAutomationsLocally = () => [{ id: 'adoption-coordinator-' + 'a'.repeat(40), owner: 'plugin-control-plane-adoption-coordinator', updatedAt: Date.now(), definition: { execution: { kind: 'host', executorId: 'plugin-control-plane-adoption-coordinator-v1', ownerRouteId: 'owner-route' }, principal: 'owner', workspace: 'workspace', agentPreset: 'default' } }]\n`
+    await writeFile(join(root, 'index.js'), source)
+  }
+  const receiptPath = join(f.dshHome, `.rsi-coordinator-${createHash('sha256').update('web').digest('hex').slice(0, 16)}.json`)
+  await writeFile(receiptPath, JSON.stringify({ schemaVersion: 1, targetProfile: 'web', coordinatorProfile: coordinator, version: '0.1.0', sourceRepository: null }), { mode: 0o600 })
+  const cohortPath = join(f.root, 'cohort')
+  for (const slug of ['personal-assistant', ...slugs]) {
+    await mkdir(join(cohortPath, slug), { recursive: true })
+    await writeFile(join(cohortPath, slug, 'package.json'), JSON.stringify({ name: `@dsh-enhanced/${slug}`, version: '0.1.1' }))
+  }
+  const updater = join(f.fakeBin, 'pair-update.mjs')
+  await writeFile(updater, `import { readFileSync,writeFileSync,existsSync,mkdirSync,appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+const args=process.argv.slice(2), profile=args[args.indexOf('--profile')+1], root=join(process.env.DSH_HOME,'profiles',profile);
+if(profile === ${JSON.stringify(coordinator)} && existsSync(join(process.env.DSH_HOME,'.fail-coordinator-install'))) process.exit(42);
+const manifest=JSON.parse(readFileSync(join(root,'package.json')));
+for(const path of args.slice(args.indexOf('add')+1)) {
+ const value=JSON.parse(readFileSync(join(path,'package.json'))); manifest.dependencies[value.name]=value.version;
+ const dest=join(root,'node_modules',value.name); mkdirSync(dest,{recursive:true});
+ let previous={};try{previous=JSON.parse(readFileSync(join(dest,'package.json')))}catch{}
+ writeFileSync(join(dest,'package.json'),JSON.stringify({...previous,...value}));
+}
+writeFileSync(join(root,'package.json'),JSON.stringify(manifest));
+appendFileSync(process.env.LIFECYCLE_OPERATION_LOG,'pair-add '+profile+'\\n');
+`)
+  const dshPath = join(f.fakeBin, 'dsh')
+  let dsh = await readFile(dshPath, 'utf8')
+  const add = 'if [[ " $* " == *\' plugin \'* && " $* " == *\' add \'* ]]; then\n'
+  expect(dsh).toContain(add)
+  dsh = dsh.replace(add, add + `${JSON.stringify(process.execPath)} ${JSON.stringify(updater)} "$@"\n`)
+  const dump = '  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"'
+  expect(dsh).toContain(dump)
+  dsh = dsh.replace(dump, '  if [[ -f "$DSH_HOME/profiles/$requested_profile/.lifecycle-dump-config" ]]; then cat "$DSH_HOME/profiles/$requested_profile/.lifecycle-dump-config"; exit 0; fi\n' + dump)
+  await writeFile(dshPath, dsh)
+  const pnpmPath = join(f.fakeBin, 'pnpm')
+  const pnpm = await readFile(pnpmPath, 'utf8')
+  const installEntry = '  printf \'pnpm-offline-install'
+  expect(pnpm).toContain(installEntry)
+  const materializer = join(f.fakeBin, 'pair-materialize.mjs')
+  await writeFile(materializer, `import { readFileSync,writeFileSync,mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+const root=process.argv[2], manifest=JSON.parse(readFileSync(join(root,'package.json')));
+for(const [name,version] of Object.entries(manifest.dependencies)) {
+ if(!name.startsWith('@dsh-enhanced/')) continue;
+ const dest=join(root,'node_modules',name); mkdirSync(dest,{recursive:true});
+ let previous={};try{previous=JSON.parse(readFileSync(join(dest,'package.json')))}catch{}
+ writeFileSync(join(dest,'package.json'),JSON.stringify({...previous,name,version}));
+}
+`)
+  await writeFile(pnpmPath, pnpm.replace(installEntry,
+    `  ${JSON.stringify(process.execPath)} ${JSON.stringify(materializer)} "$directory"\n` + installEntry))
+  const journalPath = join(f.fakeBin, 'journalctl')
+  const journal = await readFile(journalPath, 'utf8')
+  await writeFile(journalPath, journal.replace("invocation?.startsWith('fresh-')",
+    `(invocation?.startsWith('fresh-') || invocation === 'original-${coordinator}')`))
+  // This fixture's bwrap substitute maps argv paths to the staged directory.
+  // Map literals during path validation too, matching the real mount namespace.
+  const validatorPath = join(f.fixtureInstallDirectory, 'lifecycle-config.mjs')
+  const validationEntry = 'export async function validateLifecycleConfig(source, { dshHome, dshExecutable } = {}) {\n'
+  const validator = await readFile(validatorPath, 'utf8')
+  expect(validator).toContain(validationEntry)
+  await writeFile(validatorPath, validator.replace(validationEntry,
+    validationEntry + `  source = source.replaceAll(${JSON.stringify(f.dshHome)}, dshHome)\n`))
+  return { ...f, coordinator, coordinatorPath, receiptPath, targets: ['personal-assistant', 'plugin-control-plane'].map(slug => join(cohortPath, slug)) }
+}
+
 function lifecycleEnvironment(dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
   return {
     PATH: `${fakeBin}:${process.env.PATH ?? ''}`, DSH_HOME: dshHome, NODE_ENV: 'test',
@@ -3590,6 +3700,192 @@ describe('one-click installers', () => {
     expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
     await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
+
+  test('RSI pair upgrades target and coordinator in one Home transaction', async () => {
+    const f = await rsiPairLifecycleFixture()
+    const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(JSON.parse(await readFile(f.receiptPath, 'utf8')).version).toBe('0.1.1')
+    for (const profile of ['web', f.coordinator]) {
+      const cp = JSON.parse(await readFile(join(f.dshHome, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json'), 'utf8'))
+      expect(cp.version).toBe('0.1.1')
+      expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('active')
+    }
+    expect(await readFile(f.operationLog, 'utf8')).toContain(`pair-add ${f.coordinator}`)
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 30_000)
+
+  test('RSI pair coordinator package failure preserves the original pair and receipt', async () => {
+    const f = await rsiPairLifecycleFixture()
+    const receipt = await readFile(f.receiptPath, 'utf8')
+    await writeFile(join(f.dshHome, '.fail-coordinator-install'), 'fail')
+    const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('42')
+    expect(await readFile(f.receiptPath, 'utf8')).toBe(receipt)
+    for (const profile of ['web', f.coordinator]) {
+      const cp = JSON.parse(await readFile(join(f.dshHome, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json'), 'utf8'))
+      expect(cp.version).toBe('0.1.0')
+      expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('active')
+    }
+  }, 30_000)
+
+  test('RSI pair npm upgrade verifies and installs both profiles at the resolved version', async () => {
+    const f = await rsiPairLifecycleFixture()
+    const result = runInstaller(npmInstaller, ['--operation', 'upgrade', '--scenario', 'supervised',
+      '--confirm-dsh-home-stopped', '--plugin-version', '0.1.1'], f.dshHome, undefined,
+    lifecycleEnvironment(f.dshHome, f.fakeBin, { npmVersion: '0.1.1', expectedScenario: 'supervised' }))
+    expect(result.status, result.stderr).toBe(0)
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations.match(/^pnpm-prepare\tabsent/gmu)).toHaveLength(2)
+    expect(operations.match(/^pnpm-fetch\tabsent/gmu)).toHaveLength(2)
+    expect(operations.match(/^pnpm-offline-install\tpresent/gmu)).toHaveLength(2)
+    expect(JSON.parse(await readFile(f.receiptPath, 'utf8')).version).toBe('0.1.1')
+    const installed = JSON.parse(await readFile(join(f.coordinatorPath, 'package.json'), 'utf8'))
+    expect(Object.values(installed.dependencies)).toEqual(['0.1.1', '0.1.1', '0.1.1'])
+  }, 30_000)
+
+  test('RSI pair rejects a coordinator already running a different cohort before stopping services', async () => {
+    const f = await rsiPairLifecycleFixture()
+    const path = join(f.coordinatorPath, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json')
+    const manifest = JSON.parse(await readFile(path, 'utf8')); manifest.version = '0.1.2'
+    await writeFile(path, JSON.stringify(manifest))
+    const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('安装版本与登记不一致')
+    expect(await readFile(f.operationLog, 'utf8')).not.toContain('pair-add')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test.each(['installed', 'candidate'])('RSI pair refuses mixed %s target versions before stopping either service', async kind => {
+    const f = await rsiPairLifecycleFixture()
+    const path = kind === 'installed'
+      ? join(f.dshHome, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'personal-assistant', 'package.json')
+      : join(f.targets[0]!, 'package.json')
+    const manifest = JSON.parse(await readFile(path, 'utf8')); manifest.version = '0.1.2'
+    await writeFile(path, JSON.stringify(manifest))
+    const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/安装版本与登记不一致|目标全部受管包必须使用同一 cohort/u)
+    expect(await readFile(f.operationLog, 'utf8')).not.toContain('pair-add')
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test('RSI pair keeps an old no-Web coordinator running when rollback readiness cannot be proved', async () => {
+    const f = await rsiPairLifecycleFixture()
+    const journalPath = join(f.fakeBin, 'journalctl')
+    const journal = await readFile(journalPath, 'utf8')
+    await writeFile(journalPath, journal.replace(` || invocation === 'original-${f.coordinator}'`, ''))
+    const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('尚未停服')
+    expect(await readFile(f.operationLog, 'utf8')).not.toContain('pair-add')
+    for (const profile of ['web', f.coordinator]) {
+      const service = (await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`]
+      expect(service.activeState).toBe('active')
+      expect(service.invocationId).toBe(`original-${profile}`)
+    }
+  }, 15_000)
+
+  test('RSI pair refuses an incomplete frozen local-cohort migration before any package mutation', async () => {
+    const f = await rsiPairLifecycleFixture()
+    const receipt = JSON.parse(await readFile(f.receiptPath, 'utf8'))
+    receipt.sourceRepository = f.root
+    await writeFile(f.receiptPath, JSON.stringify(receipt))
+    const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('源码/制品收据迁移')
+    expect(await readFile(f.operationLog, 'utf8')).not.toContain('pair-add')
+    expect(JSON.parse(await readFile(f.receiptPath, 'utf8')).version).toBe('0.1.0')
+    expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${f.coordinator}.service`].invocationId).toBe(`original-${f.coordinator}`)
+  }, 15_000)
+
+  test.each(['receipt', 'cohort-directory'])('RSI pair npm upgrade rejects frozen local %s before registry access or stopping services', async kind => {
+    const f = await rsiPairLifecycleFixture()
+    if (kind === 'receipt') {
+      const receipt = JSON.parse(await readFile(f.receiptPath, 'utf8'))
+      receipt.sourceRepository = f.root
+      await writeFile(f.receiptPath, JSON.stringify(receipt))
+    } else {
+      await mkdir(join(f.dshHome, 'rsi-local-cohorts', 'web'), { recursive: true })
+    }
+    const result = runInstaller(npmInstaller, ['--operation', 'upgrade', '--scenario', 'supervised',
+      '--confirm-dsh-home-stopped', '--plugin-version', '0.1.1'], f.dshHome, undefined,
+    lifecycleEnvironment(f.dshHome, f.fakeBin, { npmVersion: '0.1.1', expectedScenario: 'supervised' }))
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('源码/制品收据迁移')
+    const operations = await readFile(f.operationLog, 'utf8')
+    expect(operations).not.toMatch(/npm-view|pnpm-prepare|pair-add/u)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
+    expect(JSON.parse(await readFile(f.receiptPath, 'utf8')).version).toBe('0.1.0')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test('RSI pair retains both snapshots after stale activation and reconciles without reinstalling', async () => {
+    const f = await rsiPairLifecycleFixture()
+    const modulePath = join(f.coordinatorPath, 'node_modules', '@dsh-enhanced', 'assistant-automations', 'index.js')
+    const source = await readFile(modulePath, 'utf8')
+    const readyPath = join(f.root, 'coordinator-ready')
+    await writeFile(modulePath, "import { readFileSync, existsSync } from 'node:fs'\n" + source.replace('updatedAt: Date.now()',
+      `updatedAt: JSON.parse(readFileSync(new URL('./package.json', import.meta.url))).version === '0.1.1' && !existsSync(${JSON.stringify(readyPath)}) ? 0 : Date.now()`))
+    const result = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('fresh InvocationID Host ready marker')
+    expect(await readFile(f.operationLog, 'utf8')).toContain(`pair-add ${f.coordinator}`)
+    expect(JSON.parse(await readFile(f.receiptPath, 'utf8')).version).toBe('0.1.1')
+    const backup = join(`${f.dshHome}.dsh-enhanced-transaction`, 'original-home')
+    for (const profile of ['web', f.coordinator]) {
+      const cp = JSON.parse(await readFile(join(backup, 'profiles', profile, 'node_modules', '@dsh-enhanced', 'plugin-control-plane', 'package.json'), 'utf8'))
+      expect(cp.version).toBe('0.1.0')
+      expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('inactive')
+    }
+    const count = (await readFile(f.operationLog, 'utf8')).match(/^pair-add/gmu)?.length
+    await writeFile(readyPath, 'ready')
+    const recovered = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect((await readFile(f.operationLog, 'utf8')).match(/^pair-add/gmu)?.length).toBe(count)
+    expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${f.coordinator}.service`].activeState).toBe('active')
+    await expect(stat(backup)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 30_000)
+
+  test('RSI pair recovers an interrupted Home swap without reinstalling either cohort', async () => {
+    const f = await rsiPairLifecycleFixture()
+    const crashed = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', killLifecycleAfterOriginalRename: true })
+    expect(crashed.status).not.toBe(0)
+    expect(await readFile(f.operationLog, 'utf8')).toContain(`pair-add ${f.coordinator}`)
+    const before = (await readFile(f.operationLog, 'utf8')).match(/^pair-add/gmu)?.length
+    const recovered = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect((await readFile(f.operationLog, 'utf8')).match(/^pair-add/gmu)?.length).toBe(before)
+    for (const profile of ['web', f.coordinator]) {
+      expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('active')
+    }
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 30_000)
+
+  test('RSI pair recovery refuses effective coordinator drift and retains the old Home', async () => {
+    const f = await rsiPairLifecycleFixture()
+    const failed = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin,
+      { expectedScenario: 'supervised', systemdStartFailsProfile: f.coordinator })
+    expect(failed.status).not.toBe(0)
+    const backup = join(`${f.dshHome}.dsh-enhanced-transaction`, 'original-home')
+    expect(existsSync(backup), failed.stderr).toBe(true)
+    const configPath = join(f.coordinatorPath, '.lifecycle-dump-config')
+    const rows = parse(await readFile(configPath, 'utf8'))
+    rows.find((row: { id: string }) => row.id === 'dsh-enhanced-plugin-control-plane').config.adoptionCoordinator.timeoutMs += 1
+    await writeFile(configPath, stringify(rows))
+    const recovered = runServiceLifecycle(['web', f.dshHome, '0', ...f.targets], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' })
+    expect(recovered.status).not.toBe(0)
+    expect(recovered.stderr).toContain('有效配置在事务中发生变化')
+    expect(existsSync(backup)).toBe(true)
+    for (const profile of ['web', f.coordinator]) {
+      expect((await readLifecycleSystemdState(f.systemdState)).units[`dsh-profile-${profile}.service`].activeState).toBe('inactive')
+    }
+  }, 30_000)
 
   test.each(['lark', 'supervised'] as const)('native generic Host readiness completes %s service upgrade without a Web URL', async expectedScenario => {
     const f = await lifecycleFixture({ readiness: 'host', effectiveScenario: expectedScenario,

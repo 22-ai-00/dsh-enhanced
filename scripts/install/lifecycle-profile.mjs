@@ -6,7 +6,7 @@ import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata } from './lifecycle-config.mjs'
+import { assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const VALIDATOR_PATH = join(dirname(SCRIPT_PATH), 'lifecycle-config.mjs')
@@ -37,6 +37,7 @@ const MANAGED_EXACT_SPEC = new RegExp(`^(@dsh-enhanced/[a-z0-9-]+)@(${SEMVER_SOU
 const EXACT_SEMVER = new RegExp(`^${SEMVER_SOURCE}$`, 'u')
 const NARROW_DIST_TAG = /^[A-Za-z][A-Za-z0-9._-]*$/u
 const NPM_COHORT_ANCHOR = '@dsh-enhanced/personal-assistant'
+const RSI_COORDINATOR_PACKAGES = ['@dsh-enhanced/assistant-automations', '@dsh-enhanced/assistant-policy', '@dsh-enhanced/plugin-control-plane']
 const ANCESTOR_CHAIN_ENV = 'DSH_ENHANCED_LIFECYCLE_ANCESTORS'
 const LOCK_PARENT_FD_PATH = '/proc/self/fd/3'
 const ALLOWED_WEB_BUNDLES = new Set(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
@@ -318,6 +319,7 @@ function bindingFor(manifest) {
     archivedProfile: manifest.archivedProfile,
     cleanup: manifest.cleanup,
     supervisedLifecycle: manifest.supervisedLifecycle,
+    rsiCoordinator: manifest.rsiCoordinator,
   }
 }
 
@@ -746,7 +748,7 @@ const MANIFEST_TOP_LEVEL_KEYS = [
   'services', 'servicePhase', 'serviceFailure', 'serviceAcceptance', 'unitUniverse',
   'foreignOwnership', 'cleanProfileDigest', 'cleanProfiles', 'serviceMasks',
   'containmentMasks', 'containmentMaskIntents', 'serviceStartBarriers',
-  'containmentStartBarriers', 'archivedProfile', 'cleanup', 'supervisedLifecycle',
+  'containmentStartBarriers', 'archivedProfile', 'cleanup', 'supervisedLifecycle', 'rsiCoordinator',
   // 以下三个键不进 bindingDigest：updatedAt/failure 是事务时间线与收容诊断，
   // bindingDigest 是自反校验字段本身。未知顶层键必须拒绝，否则可绕过篡改信封。
   'updatedAt', 'failure', 'bindingDigest',
@@ -852,6 +854,14 @@ async function loadManifest(physicalTransactionRoot, expected) {
             && !Array.isArray(service.environmentBinding.environment)
             && Object.entries(service.environmentBinding.environment).every(([name, value]) =>
               SERVICE_CONFIG_ENVIRONMENT.has(name) && typeof value === 'string' && isAbsolute(value))))
+      && (service.coordinatorRuntime === undefined || service.coordinatorRuntime !== null
+        && exactKeys(service.coordinatorRuntime, ['targetProfile', 'scope', 'coordinatorId'])
+        && service.coordinatorRuntime.targetProfile === manifest.profile
+        && service.profile === manifest.rsiCoordinator?.original?.profile
+        && typeof service.coordinatorRuntime.coordinatorId === 'string' && service.coordinatorRuntime.coordinatorId.length > 0
+        && service.coordinatorRuntime.scope !== null && typeof service.coordinatorRuntime.scope === 'object'
+        && exactKeys(service.coordinatorRuntime.scope, ['workspace', 'preset', 'principalId', 'ownerRouteId'])
+        && Object.values(service.coordinatorRuntime.scope).every(value => typeof value === 'string' && value.length > 0))
       && Array.isArray(service.dropIns))
   )
   const validExpectedScenario = manifest?.expectedScenario === undefined
@@ -877,6 +887,21 @@ async function loadManifest(physicalTransactionRoot, expected) {
       && typeof entry.profile === 'string' && PROFILE_NAME.test(entry.profile)
       && /^[0-9a-f]{64}$/u.test(entry.digest)
       && manifest.services?.some(service => service?.profile === entry.profile))
+  const validPairSnapshot = value => value !== null && typeof value === 'object'
+    && exactKeys(value, ['profile', 'receipt', 'profileDigest', 'configDigest', 'version', 'patchDigest', 'baseDigest'])
+    && typeof value.profile === 'string' && PROFILE_NAME.test(value.profile) && value.profile !== manifest.profile
+    && typeof value.receipt === 'string' && value.receipt.length <= 4096
+    && typeof value.version === 'string' && EXACT_SEMVER.test(value.version)
+    && ['profileDigest', 'configDigest', 'patchDigest', 'baseDigest'].every(key => validDigest(value[key]))
+  const validRsiCoordinator = manifest?.rsiCoordinator === undefined
+    || manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION && manifest.operation === 'upgrade'
+      && exactKeys(manifest.rsiCoordinator, manifest.rsiCoordinator.candidate === undefined ? ['original'] : ['original', 'candidate'])
+      && validPairSnapshot(manifest.rsiCoordinator.original)
+      && manifest.services?.some(service => service.profile === manifest.rsiCoordinator.original.profile && service.wasActive)
+      && (manifest.rsiCoordinator.candidate === undefined
+        ? ['preparing', 'prepared', 'failed', 'service-failed'].includes(manifest.state)
+        : validPairSnapshot(manifest.rsiCoordinator.candidate)
+          && manifest.rsiCoordinator.original.profile === manifest.rsiCoordinator.candidate.profile)
   const validCleanup = manifest?.cleanup === undefined
     || validServiceCleanup(manifest.cleanup, manifest)
   const validSupervised = validV3OperationShape(manifest)
@@ -899,6 +924,7 @@ async function loadManifest(physicalTransactionRoot, expected) {
     || !validStagedScenario
     || !validCleanProfileDigest
     || !validCleanProfiles
+    || !validRsiCoordinator
     || !validCleanup
     || !validSupervised
     || !validVersionFields
@@ -2903,6 +2929,7 @@ async function startAndAcceptServices({
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts,
   acceptAfterReady, durableAccept, requireLarkReady = false,
 }) {
+  const startedAt = Date.now()
   const activeBefore = services.filter(service => service.wasActive)
   const activeMasks = activeBefore.map(service => {
     const mask = serviceMasks.find(candidate => candidate.unit === service.unit)
@@ -2941,6 +2968,8 @@ async function startAndAcceptServices({
         const readinessLarkCounts = new Map()
         for (const candidate of candidates) {
           if (!await journalHasReadyMarker(journalctlExecutable, candidate.current)) { logsReady = false; break }
+          try { await assertRsiCoordinatorActivation(homePath, candidate.current, startedAt) }
+          catch { logsReady = false; break }
           if (requireLarkReady && candidate.current.profile === targetProfile) {
             const states = await larkJournalStates(journalctlExecutable, candidate.current)
             if (!LARK_ACCEPTED_STATES.has(latestLarkState(states))) { logsReady = false; break }
@@ -2977,6 +3006,7 @@ async function startAndAcceptServices({
       for (const service of stable) assertExpectedServiceEnvironment(service, service)
       const stableByUnit = new Map(stable.map(service => [service.unit, service]))
       for (const acceptedService of accepted) {
+        await assertRsiCoordinatorActivation(homePath, acceptedService, startedAt)
         const service = stableByUnit.get(acceptedService.unit)
         if (service === undefined || service.activeState !== 'active' || service.subState !== 'running' || service.mainPid <= 0
           || service.controlPid !== 0
@@ -3112,6 +3142,7 @@ async function acceptedServicesStillBound({
     if (proof === undefined || service.activeState !== 'active' || service.subState !== 'running'
       || service.mainPid !== proof.mainPid || service.invocationId !== proof.invocationId
       || service.nRestarts !== proof.nRestarts) readyForCleanup = false
+    await assertRsiCoordinatorActivation(homePath, original, 0)
     if (requireLarkReady && original.profile === targetProfile
       && !LARK_ACCEPTED_STATES.has(await latestLarkJournalState(journalctlExecutable, service))) {
       readyForCleanup = false
@@ -3121,6 +3152,13 @@ async function acceptedServicesStillBound({
 }
 
 async function removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome }) {
+  if (manifest.rsiCoordinator !== undefined) {
+    await assertServiceFilesUnchanged(manifest.services)
+    const service = manifest.services.find(service => service.profile === manifest.profile)
+    await assertRsiCoordinatorSnapshot({ homePath: manifest.homePath, profile: manifest.profile,
+      dshExecutable: await realpath(service.dshPath), snapshot: manifest.rsiCoordinator.candidate })
+  }
+  await assertRsiCoordinatorFiles(manifest.homePath, manifest.profile, manifest.rsiCoordinator?.candidate)
   const liveDescriptor = openSync(manifest.homePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
   try {
     if (!sameIdentity(fstatSync(liveDescriptor), manifest.stagedIdentity)) {
@@ -3297,6 +3335,14 @@ async function recoverServiceTransaction({
   manifest, homePath, physicalHomePath, profile, transactionRoot, physicalTransactionRoot, backupHome,
   homeStat, backupStat, homeIsOriginal, homeIsStaged, backupIsOriginal, serviceContext, dshExecutable,
 }) {
+  if (manifest.rsiCoordinator !== undefined) {
+    if (homeIsOriginal) await assertRsiCoordinatorFiles(physicalHomePath, profile, manifest.rsiCoordinator.original)
+    if (backupIsOriginal) await assertRsiCoordinatorFiles(backupHome, profile, manifest.rsiCoordinator.original)
+    if (homeIsStaged) {
+      if (manifest.rsiCoordinator.candidate === undefined) fail('RSI swapped Home 缺少 candidate 绑定。')
+      await assertRsiCoordinatorFiles(physicalHomePath, profile, manifest.rsiCoordinator.candidate)
+    }
+  }
   const services = manifest.services
   const serviceMasks = manifest.serviceMasks
   const serviceStartBarriers = manifest.serviceStartBarriers
@@ -3395,6 +3441,7 @@ async function recoverServiceTransaction({
       manifest = await persistSourceRestoreAttempt({ manifest, physicalTransactionRoot, homePath, profile, dshExecutable })
       sourceAcceptance = sourceRestoreAcceptance({ manifest, homePath, profile, dshExecutable, timeouts })
     }
+    await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.original })
     await restoreOriginalActiveSet({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
@@ -3421,6 +3468,7 @@ async function recoverServiceTransaction({
       manifest = await persistSourceRestoreAttempt({ manifest, physicalTransactionRoot, homePath, profile, dshExecutable })
       sourceAcceptance = sourceRestoreAcceptance({ manifest, homePath, profile, dshExecutable, timeouts })
     }
+    await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.original })
     await restoreOriginalActiveSet({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
@@ -3468,6 +3516,7 @@ async function recoverServiceTransaction({
     let accepted
     try {
       let postSwapProof
+      await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.candidate })
       accepted = await startAndAcceptServices({
         ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
         unitUniverse, foreignOwnership, cleanProfiles, timeouts,
@@ -3736,8 +3785,141 @@ async function assertNoUnmanagedHomeProcesses(homePath, equivalentHomePaths = []
   }
 }
 
-async function assertServiceProfileScenario({ dshExecutable, profile, homePath, targetProfile, expectedScenario }) {
+async function captureRsiCoordinator({ homePath, profile, dshExecutable, sandbox }) {
+  const physicalHome = sandbox?.stageHome ?? homePath
+  const canonicalHome = await realpath(physicalHome)
+  const receipt = await readRsiCoordinatorReceipt({ homePath: physicalHome, profile })
+  if (receipt === undefined) return undefined
+  const coordinator = await readProfile(physicalHome, receipt.coordinatorProfile)
+  const target = await readProfile(physicalHome, profile)
+  if (JSON.stringify(managedNames(coordinator.manifest)) !== JSON.stringify(RSI_COORDINATOR_PACKAGES)
+    || thirdPartyBundles(coordinator.manifest).length > 0) fail('RSI coordinator 必须保留安装器的三个同批 bundle。')
+  const versions = []
+  for (const [owner, name] of [
+    ...managedNames(target.manifest).map(name => [profile, name]),
+    ...RSI_COORDINATOR_PACKAGES.map(name => [receipt.coordinatorProfile, name]),
+  ]) {
+    const path = join(physicalHome, 'profiles', owner, 'node_modules', name, 'package.json')
+    const canonical = await realpath(path)
+    if (!inside(canonicalHome, canonical)) fail('RSI pair 的安装包必须位于同一 DSH_HOME。')
+    const value = JSON.parse(await readFile(canonical, 'utf8'))
+    if (value.name !== name || value.version !== receipt.version) fail('RSI target/coordinator 安装版本与登记不一致。')
+    versions.push(value.version)
+  }
+  const dump = async name => sandbox
+    ? (await sandboxRun(sandbox, [dshExecutable, '--profile', name, '--dump-config'], { capture: true })).stdout
+    : (await readLifecycleConfig({ homePath, profile: name, dshExecutable })).source
+  const [targetSource, coordinatorSource] = await Promise.all([dump(profile), dump(receipt.coordinatorProfile)])
+  const basePath = await realpath(join(coordinator.profilePath, 'node_modules', '@deepseek-ai', 'dsh-base', 'cordis.patch.yml'))
+  if (!inside(canonicalHome, basePath)) fail('RSI coordinator base 必须位于同一 DSH_HOME。')
+  const contract = await validateRsiCoordinatorPair(targetSource, coordinatorSource, {
+    dshHome: homePath, targetProfile: profile, coordinatorProfile: receipt.coordinatorProfile,
+    coordinatorBaseSource: await readFile(basePath, 'utf8'), dshExecutable,
+  })
+  return { profile: receipt.coordinatorProfile, receipt, profileDigest: sha256(coordinator.source),
+    configDigest: sha256(coordinatorSource), version: versions[0], contract,
+    patchDigest: sha256(await readFile(join(coordinator.profilePath, 'cordis.patch.yml'))), baseDigest: sha256(await readFile(basePath)) }
+}
+
+function rsiCoordinatorSnapshot(pair) {
+  return { profile: pair.profile, receipt: pair.receipt.source, profileDigest: pair.profileDigest,
+    configDigest: pair.configDigest, version: pair.version, patchDigest: pair.patchDigest, baseDigest: pair.baseDigest }
+}
+
+async function assertRsiPairUpgradeSource(homePath, profile, pair) {
+  if (pair === undefined) return
+  if (pair.receipt.sourceRepository !== null
+    || await existingIdentity(join(homePath, 'rsi-local-cohorts', profile)) !== undefined) {
+    fail('RSI 本地冻结 cohort 需要连同源码/制品收据迁移；尚未停服或修改安装，不能只升级两个 profile 的包。')
+  }
+}
+
+async function assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot, sandbox }) {
+  if (snapshot === undefined) return
+  const current = await captureRsiCoordinator({ homePath, profile, dshExecutable, sandbox })
+  if (current === undefined || JSON.stringify(rsiCoordinatorSnapshot(current)) !== JSON.stringify(snapshot)) {
+    fail('RSI coordinator 的登记、版本或有效配置在事务中发生变化。')
+  }
+}
+
+async function assertRsiCoordinatorFiles(homePath, profile, snapshot) {
+  if (snapshot === undefined) return
+  const canonicalHome = await realpath(homePath)
+  const receipt = await readRsiCoordinatorReceipt({ homePath, profile })
+  const root = join(homePath, 'profiles', snapshot.profile)
+  if (receipt?.source !== snapshot.receipt || receipt.coordinatorProfile !== snapshot.profile
+    || receipt.version !== snapshot.version
+    || sha256(await readFile(join(root, 'package.json'))) !== snapshot.profileDigest
+    || sha256(await readFile(join(root, 'cordis.patch.yml'))) !== snapshot.patchDigest
+    || sha256(await readFile(join(root, 'node_modules', '@deepseek-ai', 'dsh-base', 'cordis.patch.yml'))) !== snapshot.baseDigest) {
+    fail('RSI coordinator 的持久文件与事务快照不一致。')
+  }
+  const target = await readProfile(homePath, profile)
+  for (const [owner, name] of [...managedNames(target.manifest).map(name => [profile, name]),
+    ...RSI_COORDINATOR_PACKAGES.map(name => [snapshot.profile, name])]) {
+    const path = await realpath(join(homePath, 'profiles', owner, 'node_modules', name, 'package.json'))
+    if (!inside(canonicalHome, path)) fail('RSI coordinator 安装包逃逸事务 Home。')
+    const value = JSON.parse(await readFile(path, 'utf8'))
+    if (value.name !== name || value.version !== snapshot.version) fail('RSI coordinator 包版本未保持同批。')
+  }
+}
+
+async function assertRsiCoordinatorActivation(homePath, service, startedAt) {
+  if (service.coordinatorRuntime === undefined) return
+  const program = String.raw`
+import { createRequire } from 'node:module'
+import { join } from 'node:path'
+const [home, profile, contractSource, since] = process.argv.slice(1)
+const require = createRequire(join(home, 'profiles', profile, 'package.json'))
+const { listActiveAutomationsLocally } = await import(require.resolve('@dsh-enhanced/assistant-automations'))
+const { controlPlaneDigest } = await import(require.resolve('@dsh-enhanced/plugin-control-plane'))
+const { scope, coordinatorId } = JSON.parse(contractSource)
+const id = 'adoption-coordinator-' + controlPlaneDigest({ coordinatorId, scope }).slice(0,40)
+const registration = listActiveAutomationsLocally(join(home,'rsi-coordinators',profile,'automations.sqlite')).find(item => item.id === id)
+if (!registration || registration.owner !== 'plugin-control-plane-adoption-coordinator'
+  || registration.updatedAt < Number(since) || registration.definition.execution?.kind !== 'host'
+  || registration.definition.execution.executorId !== 'plugin-control-plane-adoption-coordinator-v1'
+  || registration.definition.execution.ownerRouteId !== scope.ownerRouteId
+  || registration.definition.principal !== scope.principalId || registration.definition.workspace !== scope.workspace
+  || registration.definition.agentPreset !== scope.preset) throw new Error('RSI coordinator has no fresh owner-bound native activation')
+`
+  await run(process.execPath, ['--input-type=module', '--eval', program,
+    homePath, service.profile, JSON.stringify(service.coordinatorRuntime), String(startedAt)], { capture: true, timeoutMs: 5000 })
+}
+
+async function rsiCoordinatorUpgradeTargets(targets) {
+  const packages = new Map()
+  for (const target of targets) {
+    if (isAbsolute(target)) {
+      const manifest = JSON.parse(await readFile(join(target, 'package.json'), 'utf8'))
+      packages.set(manifest.name, { target, version: manifest.version })
+    } else {
+      const match = MANAGED_EXACT_SPEC.exec(target)
+      if (match) packages.set(match[1], { target, version: match[2] })
+    }
+  }
+  const anchor = packages.get('@dsh-enhanced/plugin-control-plane')
+  if (!anchor || !EXACT_SEMVER.test(anchor.version)) fail('RSI 升级必须包含精确的 Control Plane cohort。')
+  if ([...packages.values()].some(entry => entry.version !== anchor.version)) fail('RSI 目标全部受管包必须使用同一 cohort。')
+  const result = []
+  for (const name of RSI_COORDINATOR_PACKAGES) {
+    let entry = packages.get(name)
+    if (entry === undefined && isAbsolute(anchor.target)) {
+      const target = join(dirname(anchor.target), name.split('/')[1])
+      const manifest = JSON.parse(await readFile(join(target, 'package.json'), 'utf8'))
+      if (manifest.name !== name) fail('RSI 本地 coordinator 包名不匹配。')
+      entry = { target, version: manifest.version }
+    }
+    entry ??= { target: `${name}@${anchor.version}`, version: anchor.version }
+    if (entry.version !== anchor.version) fail('RSI coordinator 升级必须使用同一 cohort。')
+    result.push(entry.target)
+  }
+  return { targets: result, version: anchor.version }
+}
+
+async function assertServiceProfileScenario({ dshExecutable, profile, homePath, targetProfile, expectedScenario, rsiCoordinator }) {
   const { scenario } = await readLifecycleConfig({ dshExecutable, profile, homePath })
+  if (rsiCoordinator?.profile === profile && expectedScenario === 'supervised' && scenario === 'supervised') return undefined
   if (profile === targetProfile && expectedScenario === 'supervised') {
     if (scenario !== 'supervised') fail(`目标 systemd profile 必须保持 supervised：${profile}:${scenario}`)
     return undefined
@@ -4279,7 +4461,7 @@ async function activateInSandbox(context) {
   const invocation = sandboxArgs({
     ...context,
     validatorPath: SANDBOX_VALIDATOR_PATH,
-    command: [context.dshExecutable, '--profile', context.profile, '--host', '127.0.0.1', '--no-open', '--port', '0'],
+    command: [context.dshExecutable, '--profile', context.profile, ...(context.runtimePatch ? ['--patch', context.runtimePatch] : []), '--host', '127.0.0.1', '--no-open', '--port', '0'],
     workspaceFds: resources.workspaces.map((workspace, index) => ({ path: workspace.path, fd: 5 + index })),
   })
   try { await new Promise((resolveActivation, rejectActivation) => {
@@ -4770,6 +4952,8 @@ async function performNpmServiceUpgrade({
   await assertLockedLifecycleScenario({ dshExecutable, profile, homePath, expectedScenario, serviceAware: true })
   if (recovery !== undefined) fail('已恢复上次生命周期事务；本次未访问 npm registry，请重试 upgrade。')
   if (expectedScenario === 'supervised') await assertSupervisedLifecycleCapability(homePath, profile)
+  const pair = expectedScenario === 'supervised' ? await captureRsiCoordinator({ homePath, profile, dshExecutable }) : undefined
+  await assertRsiPairUpgradeSource(homePath, profile, pair)
   const current = await readProfile(physicalHomePath, profile)
   const expectedManaged = managedNames(current.manifest)
   if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。')
@@ -4777,17 +4961,33 @@ async function performNpmServiceUpgrade({
   if (thirdParty.length > 0) fail(`检测到无法证明状态路径的第三方顶层 bundle，拒绝 upgrade：${thirdParty.join(', ')}`)
   const npmPath = await realpath(npmExecutable).catch(() => fail('npm executable must exist'))
   const pnpmPath = await realpath(pnpmExecutable).catch(() => fail('pnpm executable must exist'))
-  const targets = await resolveNpmUpgradeCohort({ npmExecutable: npmPath, selector, expectedNames: expectedManaged })
+  const cohort = await resolveNpmUpgradeCohort({ npmExecutable: npmPath, selector,
+    expectedNames: [...new Set([...expectedManaged, ...(pair ? RSI_COORDINATOR_PACKAGES : [])])].sort() })
+  const targets = cohort.filter(target => expectedManaged.includes(MANAGED_EXACT_SPEC.exec(target)[1]))
   const profileCwd = await realpath(current.profilePath).catch(() => fail(`npm cohort 无法解析 profile：${profile}`))
   if (!sameIdentity(await stat(profileCwd), identity(current.profileStat))) fail(`npm cohort profile 身份在 store 解析前发生变化：${profile}`)
   await precheckNpmMetadata(current, dshExecutable)
   const pnpmStore = await resolvedPnpmStorePath(pnpmPath, homePath, profileCwd)
   const npmPreparation = await prepareNpmUpgrade({ current, profile, homePath, pnpmPath, dshExecutable, targets, pnpmStore })
-  try { await performLifecycle({
-    operation: 'upgrade', profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
-    skipRecovery: true, transactionPrechecked: true, pnpmStore, npmPreparation,
-    serviceContext: { systemctlExecutable, journalctlExecutable },
-  }) } finally { await npmPreparation.dispose() }
+  let coordinatorNpmPreparation
+  try {
+    if (pair !== undefined) {
+      const coordinator = await readProfile(physicalHomePath, pair.profile)
+      await precheckNpmMetadata(coordinator, dshExecutable)
+      const coordinatorStore = await resolvedPnpmStorePath(pnpmPath, homePath, await realpath(coordinator.profilePath))
+      if (coordinatorStore.storePath !== pnpmStore.storePath) fail('RSI pair 必须使用同一已验证 pnpm store。')
+      coordinatorNpmPreparation = await prepareNpmUpgrade({ current: coordinator, profile: pair.profile, pnpmPath,
+        dshExecutable, targets: cohort.filter(target => RSI_COORDINATOR_PACKAGES.includes(MANAGED_EXACT_SPEC.exec(target)[1])), pnpmStore })
+    }
+    await performLifecycle({
+      operation: 'upgrade', profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
+      skipRecovery: true, transactionPrechecked: true, pnpmStore, npmPreparation, coordinatorNpmPreparation,
+      serviceContext: { systemctlExecutable, journalctlExecutable },
+    })
+  } finally {
+    await coordinatorNpmPreparation?.dispose()
+    await npmPreparation.dispose()
+  }
 }
 
 async function copyHome(homePath, stageHome) {
@@ -4864,9 +5064,47 @@ async function initializeCleanWebProfile(stageHome, profile) {
   for (const [name, source] of cleanWebProfileSources(profile)) await writeFile(join(profilePath, name), source)
 }
 
+async function installUpgradeIntoStage({ sandbox, current, stagedProfile, targets, npmPreparation, pnpmStore, packageSymlinkWhitelist }) {
+  const { stageHome, homePath, profile, dshExecutable } = sandbox
+  if (npmPreparation !== undefined) {
+    await assertNpmMetadata(current.profilePath, npmPreparation.original, true)
+    await assertNpmMetadata(stagedProfile.profilePath, npmPreparation.original)
+    await writeNpmMetadata(stagedProfile.profilePath, npmPreparation.metadata)
+    const npmOptions = {
+      extraEnvironment: {
+        HOME: '/run/dsh-enhanced-pnpm-cache/home', XDG_CONFIG_HOME: '/run/dsh-enhanced-pnpm-cache/config',
+        pnpm_config_userconfig: '/run/dsh-enhanced-pnpm-cache/home/.npmrc',
+        ...(process.env.CI === undefined ? {} : { CI: process.env.CI }),
+        pnpm_config_offline: 'true', pnpm_config_frozen_store: 'true', pnpm_config_package_import_method: 'copy',
+        pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false',
+        pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_cache_dir: '/run/dsh-enhanced-pnpm-cache',
+      }, pnpmStore, npmPreparation,
+    }
+    const configResult = await sandboxRun(sandbox, [npmPreparation.pnpmPath, '--dir', join(homePath, 'profiles', profile), 'config', 'list', '--json'], { ...npmOptions, capture: true })
+    assertSameNpmConfig(parseNpmEffectiveConfig(configResult.stdout), npmPreparation.finalConfig)
+    const restorePeers = await detachNpmPeerLinks(stageHome, homePath, profile, packageSymlinkWhitelist)
+    try {
+      await sandboxRun(sandbox, [npmPreparation.pnpmPath, '--dir', join(homePath, 'profiles', profile), 'install', '--offline', '--frozen-lockfile'], npmOptions)
+    } finally { await restorePeers() }
+    await assertNpmMetadata(stagedProfile.profilePath, npmPreparation.prepared)
+    await assertNpmPreparationCache(npmPreparation)
+  } else {
+    await sandboxRun(sandbox, [dshExecutable, 'plugin', '--profile', profile, 'add', ...targets], {
+      extraEnvironment: {
+        pnpm_config_offline: 'true', pnpm_config_package_import_method: 'copy', pnpm_config_ignore_scripts: 'true',
+        pnpm_config_ignore_pnpmfile: 'true',
+        ...(pnpmStore === undefined ? {} : {
+          pnpm_config_store_dir: pnpmStore.storePath,
+          pnpm_config_frozen_store: 'true',
+        }) },
+      pnpmStore,
+    })
+  }
+}
+
 async function performLifecycle({
   operation, profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
-  skipRecovery = false, transactionPrechecked = false, serviceContext, pnpmStore, npmPreparation,
+  skipRecovery = false, transactionPrechecked = false, serviceContext, pnpmStore, npmPreparation, coordinatorNpmPreparation,
 }) {
   if (!['upgrade', 'uninstall'].includes(operation) || !PROFILE_NAME.test(profile) || !isAbsolute(homePath) || resolve(homePath) !== homePath) fail('invalid lifecycle invocation', 2)
   assertExpectedScenario(expectedScenario, serviceContext !== undefined, operation)
@@ -4892,6 +5130,13 @@ async function performLifecycle({
   await assertNoMounts(physicalHomePath)
   const packageSymlinkWhitelist = await assertSnapshotTreeSafe(physicalHomePath, homePath, true)
 
+  const rsiCoordinator = expectedScenario === 'supervised'
+    ? await captureRsiCoordinator({ homePath, profile, dshExecutable }) : undefined
+  await assertRsiPairUpgradeSource(homePath, profile, rsiCoordinator)
+  if (rsiCoordinator !== undefined && (operation !== 'upgrade' || serviceContext === undefined)) {
+    fail('RSI 双 Host 目前只支持成对 service upgrade；不得单独卸载目标。')
+  }
+  const coordinatorUpgrade = rsiCoordinator === undefined ? undefined : await rsiCoordinatorUpgradeTargets(targets)
   const current = await readProfile(physicalHomePath, profile)
   if (npmPreparation !== undefined) {
     await assertNpmMetadata(current.profilePath, npmPreparation.original, true)
@@ -4936,9 +5181,21 @@ async function performLifecycle({
     unitUniverse = inventory.unitUniverse
     foreignOwnership = inventory.foreignOwnership
     cleanProfiles = []
+    if (rsiCoordinator !== undefined) {
+      const service = services.find(service => service.profile === rsiCoordinator.profile)
+      if (service) service.coordinatorRuntime = { targetProfile: profile,
+        scope: rsiCoordinator.contract.scope, coordinatorId: rsiCoordinator.contract.coordinatorId }
+    }
+    if (rsiCoordinator !== undefined && services.find(service => service.profile === rsiCoordinator.profile)?.wasActive !== true) {
+      fail('RSI upgrade 要求已登记的 coordinator service 在事务开始前处于 active。')
+    }
+    if (rsiCoordinator !== undefined && !await journalHasReadyMarker(serviceContext.journalctlExecutable,
+      services.find(service => service.profile === rsiCoordinator.profile))) {
+      fail('原 RSI coordinator 缺少本次 InvocationID 的 Host ready 证据；尚未停服，不能保证失败恢复。')
+    }
     for (const service of services) {
       const cleanDigest = await assertServiceProfileScenario({
-        dshExecutable, profile: service.profile, homePath, targetProfile: profile, expectedScenario,
+        dshExecutable, profile: service.profile, homePath, targetProfile: profile, expectedScenario, rsiCoordinator,
       })
       if (cleanDigest !== undefined) cleanProfiles.push({ profile: service.profile, digest: cleanDigest })
       if (!['enabled', 'disabled'].includes(service.unitFileState)) {
@@ -4973,6 +5230,7 @@ async function performLifecycle({
     originalIdentity: identity(originalStat), originalProfileDigest: sha256(current.source),
     stagedIdentity: undefined, stagedProfileDigest: undefined, createdAt: new Date().toISOString(),
     expectedScenario, stagedScenario: operation === 'uninstall' ? 'unsupported' : expectedScenario,
+    ...(rsiCoordinator === undefined ? {} : { rsiCoordinator: { original: rsiCoordinatorSnapshot(rsiCoordinator) } }),
     ...(expectedScenario === 'supervised' ? {
       supervisedLifecycle: operation === 'uninstall' ? {
         protocol: SUPERVISED_UNINSTALL_PROTOCOL, phase: 'source-pending',
@@ -5065,6 +5323,7 @@ async function performLifecycle({
             }, { recoveryProof: { bootstrap: { generation: raw.recoveryProof.bootstrap.generation } } }, 'active', timeouts.ready)
           }
         }
+        await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.original })
         await restoreOriginalActiveSet({
           ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
           containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
@@ -5114,39 +5373,27 @@ async function performLifecycle({
       assertCopiedSupervisedSnapshot(manifest.supervisedLifecycle.source, copiedSource)
     }
     let archivedProfile
-    if (operation === 'upgrade' && npmPreparation !== undefined) {
-      await assertNpmMetadata(current.profilePath, npmPreparation.original, true)
-      await assertNpmMetadata(stagedProfile.profilePath, npmPreparation.original)
-      await writeNpmMetadata(stagedProfile.profilePath, npmPreparation.metadata)
-      const npmOptions = {
-        extraEnvironment: {
-          HOME: '/run/dsh-enhanced-pnpm-cache/home', XDG_CONFIG_HOME: '/run/dsh-enhanced-pnpm-cache/config',
-          pnpm_config_userconfig: '/run/dsh-enhanced-pnpm-cache/home/.npmrc',
-          ...(process.env.CI === undefined ? {} : { CI: process.env.CI }),
-          pnpm_config_offline: 'true', pnpm_config_frozen_store: 'true', pnpm_config_package_import_method: 'copy',
-          pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true', pnpm_config_trust_lockfile: 'false',
-          pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_cache_dir: '/run/dsh-enhanced-pnpm-cache',
-        }, pnpmStore, npmPreparation,
+    if (operation === 'upgrade') {
+      await installUpgradeIntoStage({ sandbox, current, stagedProfile, targets, npmPreparation, pnpmStore, packageSymlinkWhitelist })
+      if (rsiCoordinator !== undefined) {
+        const coordinatorContext = { ...sandbox, profile: rsiCoordinator.profile, expectedScenario: 'supervised' }
+        const oldCoordinator = await readProfile(physicalHomePath, rsiCoordinator.profile)
+        const stagedCoordinator = await readProfile(stageHome, rsiCoordinator.profile)
+        await validateComposedConfig(coordinatorContext, 'coordinator-before')
+        await installUpgradeIntoStage({ sandbox: coordinatorContext, current: oldCoordinator, stagedProfile: stagedCoordinator,
+          targets: coordinatorUpgrade.targets, npmPreparation: coordinatorNpmPreparation, pnpmStore, packageSymlinkWhitelist })
+        const nextReceipt = JSON.parse(rsiCoordinator.receipt.source)
+        nextReceipt.version = coordinatorUpgrade.version
+        await writeFileAtomic(join(stageHome, rsiCoordinator.receipt.relativePath), JSON.stringify(nextReceipt))
+        await validateComposedConfig(coordinatorContext, 'coordinator-after')
+        const candidate = await captureRsiCoordinator({ homePath, profile, dshExecutable, sandbox })
+        const overlayPath = join(stageHome, `.rsi-coordinator-preview-${manifest.id}.yml`)
+        await writeFile(overlayPath, candidate.contract.previewPatch, { mode: 0o600, flag: 'wx' })
+        try { await activateInSandbox({ ...coordinatorContext, runtimePatch: join(homePath, basename(overlayPath)) }) }
+        finally { await rm(overlayPath, { force: true }) }
+        manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+          rsiCoordinator: { ...manifest.rsiCoordinator, candidate: rsiCoordinatorSnapshot(candidate) } }, 'prepared')
       }
-      const configResult = await sandboxRun(sandbox, [npmPreparation.pnpmPath, '--dir', join(homePath, 'profiles', profile), 'config', 'list', '--json'], { ...npmOptions, capture: true })
-      assertSameNpmConfig(parseNpmEffectiveConfig(configResult.stdout), npmPreparation.finalConfig)
-      const restorePeers = await detachNpmPeerLinks(stageHome, homePath, profile, packageSymlinkWhitelist)
-      try {
-        await sandboxRun(sandbox, [npmPreparation.pnpmPath, '--dir', join(homePath, 'profiles', profile), 'install', '--offline', '--frozen-lockfile'], npmOptions)
-      } finally { await restorePeers() }
-      await assertNpmMetadata(stagedProfile.profilePath, npmPreparation.prepared)
-      await assertNpmPreparationCache(npmPreparation)
-    } else if (operation === 'upgrade') {
-      await sandboxRun(sandbox, [dshExecutable, 'plugin', '--profile', profile, 'add', ...targets], {
-        extraEnvironment: {
-          pnpm_config_offline: 'true', pnpm_config_package_import_method: 'copy', pnpm_config_ignore_scripts: 'true',
-          pnpm_config_ignore_pnpmfile: 'true',
-          ...(pnpmStore === undefined ? {} : {
-            pnpm_config_store_dir: pnpmStore.storePath,
-            pnpm_config_frozen_store: 'true',
-          }) },
-        pnpmStore,
-      })
     } else {
       const archiveRoot = join(stageHome, 'uninstalled-profiles')
       await mkdir(archiveRoot, { recursive: true, mode: 0o700 })
@@ -5255,6 +5502,15 @@ async function performLifecycle({
     }, 'validated')
     if (expectedScenario === 'supervised' && operation === 'uninstall') await assertArchivedProfile(stageHome, manifest)
 
+    await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.original })
+    await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.candidate, sandbox })
+    if (coordinatorNpmPreparation !== undefined) {
+      const oldCoordinator = await readProfile(physicalHomePath, rsiCoordinator.profile)
+      const newCoordinator = await readProfile(stageHome, rsiCoordinator.profile)
+      await assertNpmMetadata(oldCoordinator.profilePath, coordinatorNpmPreparation.original, true)
+      await assertNpmMetadata(newCoordinator.profilePath, coordinatorNpmPreparation.prepared)
+      await assertNpmConfiguration(coordinatorNpmPreparation, oldCoordinator.profilePath)
+    }
     assertLockParentStable(homePath)
     assertExpectedDirectoryMetadata(await lstat(physicalHomePath), originalStat, homePath)
     await assertProfileTreeIdentity(current)
@@ -5335,6 +5591,7 @@ async function performLifecycle({
       }
       try {
         let postSwapProof
+        await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.candidate })
         const accepted = await startAndAcceptServices({
           ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
           unitUniverse, foreignOwnership, cleanProfiles, timeouts,
@@ -5526,6 +5783,7 @@ async function performLifecycle({
             }, { recoveryProof: { bootstrap: { generation: raw.recoveryProof.bootstrap.generation } } }, 'active', timeouts.ready)
           }
         }
+        await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.original })
         await restoreOriginalActiveSet({
           ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
           containmentMasks: (persisted ?? manifest).containmentMasks,

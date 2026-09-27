@@ -290,7 +290,15 @@ export class PluginControlPlaneService extends Service {
             },
           })
           runtime.start()
-          return () => runtime!.close()
+          const owner = 'plugin-control-plane-adoption-coordinator'
+          const automationId = `adoption-coordinator-${controlPlaneDigest({
+            coordinatorId: this.config.adoptionCoordinator!.coordinatorId,
+            scope: this.config.adoptionCoordinator!.scope,
+          }).slice(0, 40)}`
+          const activationNonce = automations().inspectSystemOwnedActivation({ owner, automationId })?.activationNonce
+          if (activationNonce === undefined) throw new Error('plugin-control-plane: adoption coordinator registration is missing')
+          const stop = automations().registerHostShutdown(coordinatorCtx, { owner, automationId, activationNonce }, () => runtime!.close({ skipPause: true }))
+          return stop
         } catch (error) {
           if (runtime) await runtime.close()
           else store.close()

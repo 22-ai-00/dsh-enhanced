@@ -391,6 +391,7 @@ export class AssistantAutomationsService extends Service implements
   private readonly preparationRunner: AutomationPreparationRunner
   private readonly coordinator: AutomationCoordinator
   private readonly hostExecutors = new HostAutomationExecutorRegistry()
+  private readonly hostShutdowns = new Set<() => Promise<void>>()
   private readonly config: Required<Config>
   private readonly evaluationProducerGeneration = `assistant-automations:${randomUUID()}`
   private readonly presentationProducerGeneration = `assistant-automations-presentation:${randomUUID()}`
@@ -409,6 +410,7 @@ export class AssistantAutomationsService extends Service implements
   private workflowTemplateResolver: WorkflowTemplateResolver | undefined
   private evaluation: AssistantEvaluationService | undefined
   private active = true
+  private stopping = false
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'assistantAutomations')
@@ -519,15 +521,22 @@ export class AssistantAutomationsService extends Service implements
     }
     ctx.inject(['tools'], toolsCtx => registerAutomationTools(toolsCtx, this))
     ctx.effect(() => async () => {
-      this.active = false
-      this.evaluationSink = undefined
-      this.acceptanceSink = undefined
-      this.presentationSink?.dispose()
-      this.coordinator.setEvaluationRecorder(undefined)
-      await this.coordinator.stop()
-      this.proposalStore.close()
-      this.growthStore.close()
-      this.store.close()
+      this.stopping = true
+      try {
+        const stopped = await Promise.allSettled([...this.hostShutdowns].map(stop => stop()))
+        for (const result of stopped) if (result.status === 'rejected') ctx.logger.error(result.reason)
+      } finally {
+        this.active = false
+        this.evaluationSink = undefined
+        this.acceptanceSink = undefined
+        this.presentationSink?.dispose()
+        this.coordinator.setEvaluationRecorder(undefined)
+        try { await this.coordinator.stop() } finally {
+          this.proposalStore.close()
+          this.growthStore.close()
+          this.store.close()
+        }
+      }
     }, 'assistant-automations.runtime')
   }
 
@@ -1875,6 +1884,55 @@ export class AssistantAutomationsService extends Service implements
     return this.hostExecutors.register(executor)
   }
 
+  /** Authorize an exact Host generation now; pause it before provider storage closes. */
+  registerHostShutdown(owner: Context, registration: { owner: string; automationId: string; activationNonce: string },
+    shutdown: () => void | Promise<void>): () => Promise<void> {
+    this.assertActive()
+    const current = this.store.get(registration.automationId)
+    if (current?.owner !== registration.owner || current.status !== 'active'
+      || current.definition.execution?.kind !== 'host'
+      || current.definition.execution.activationNonce !== registration.activationNonce) {
+      throw new AssistantAutomationsError('not-found', 'exact active Host generation is required for shutdown registration')
+    }
+    const decision = this.policy.authorize({
+      subject: { kind: 'background', id: registration.owner,
+        workspace: current.definition.workspace, principal: current.definition.principal },
+      action: 'reconcile', resource: { kind: 'automation', id: registration.automationId },
+      context: { initiator: 'background' },
+    }, { idempotencyKey: `automation-host-shutdown:${registration.owner}:${registration.automationId}:${registration.activationNonce}` })
+    if (decision.effect !== 'allow') throw policyError(decision)
+    let task: Promise<void> | undefined
+    const stop = (): Promise<void> => task ??= (async () => {
+      let failure: unknown
+      // Policy may already be unloading as a sibling. The generation-fenced,
+      // pre-authorized pause is owned by this provider while its store is open.
+      const latest = this.store.get(registration.automationId)
+      if (latest?.owner === registration.owner && latest.definition.execution?.kind === 'host'
+        && latest.definition.execution.activationNonce === registration.activationNonce && latest.status === 'active') {
+        try {
+          this.store.pauseSystemOwned({ owner: registration.owner, automationId: registration.automationId,
+            operationId: `host-shutdown:${registration.automationId}:${registration.activationNonce}`,
+            definitionHash: this.store.getDefinitionHash(registration.automationId)!, expectedVersion: latest.version })
+        } catch (error) { failure = error }
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([
+          Promise.resolve().then(shutdown),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('assistant-automations: Host shutdown exceeded 3 seconds')), 3_000)
+          }),
+        ])
+      } catch (error) { failure = failure === undefined ? error : new AggregateError([failure, error], 'Host shutdown and pause failed') }
+      finally { if (timer !== undefined) clearTimeout(timer) }
+      if (failure !== undefined) throw failure
+    })().finally(() => this.hostShutdowns.delete(stop))
+    this.hostShutdowns.add(stop)
+    try { owner.effect(() => () => stop(), 'assistant-automations.host-shutdown') }
+    catch (error) { this.hostShutdowns.delete(stop); throw error }
+    return stop
+  }
+
   /**
    * Host/operator seam for one exact circuit repair. This is deliberately not
    * registered as a model tool. The current immutable definition hash must
@@ -2061,7 +2119,7 @@ export class AssistantAutomationsService extends Service implements
   }
 
   private assertActive(): void {
-    if (!this.active) throw new AssistantAutomationsError('disposed', 'assistant-automations service is disposed')
+    if (!this.active || this.stopping) throw new AssistantAutomationsError('disposed', 'assistant-automations service is disposed')
   }
 }
 

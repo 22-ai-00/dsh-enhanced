@@ -123,3 +123,25 @@ test('native executor rejects forged dispatches and close pauses only its genera
   expect(unregister).toHaveBeenCalledTimes(1); expect(f.store.close).toHaveBeenCalledTimes(1)
   expect(automations.reconcileSystem).toHaveBeenLastCalledWith(expect.objectContaining({ desiredStatus: 'paused' }))
 })
+
+test('barrier-owned close skips Automations after its exact generation was paused', async () => {
+  const f = storeFixture()
+  const unregister = vi.fn()
+  const automations = {
+    registerHostExecutor: vi.fn(() => unregister),
+    reconcileSystem: vi.fn(() => ({})),
+    inspectSystemOwnedActivation: vi.fn(),
+  }
+  const runtime = new AdoptionCoordinatorRuntime({ config: { coordinatorId: 'coordinator',
+    scope: { workspace: '/workspace', preset: 'primary', principalId: 'owner', ownerRouteId: 'route' },
+    timeoutMs: 1_000, budgetId: 'adoption-runs', budgetAmount: 7 },
+  store: f.store as never, trust: {} as never, automations: automations as never, assertCurrent() {} })
+  runtime.start()
+  expect(automations.reconcileSystem).toHaveBeenCalledTimes(1)
+  const closing = runtime.close({ skipPause: true })
+  await Promise.all([closing, runtime.close()])
+  expect(automations.inspectSystemOwnedActivation).not.toHaveBeenCalled()
+  expect(automations.reconcileSystem).toHaveBeenCalledTimes(1)
+  expect(unregister).toHaveBeenCalledTimes(1)
+  expect(f.store.close).toHaveBeenCalledTimes(1)
+})

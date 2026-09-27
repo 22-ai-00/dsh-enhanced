@@ -167,13 +167,15 @@ export class AdoptionCoordinatorRuntime {
     }
   }
 
-  close(): Promise<void> {
+  close(options: { skipPause?: boolean } = {}): Promise<void> {
     return this.closing ??= (async () => {
       this.active = false
       try {
-        const registration = this.options.automations.inspectSystemOwnedActivation({ owner: OWNER, automationId: this.automationId })
-        if (registration?.activationNonce === this.activationNonce) this.options.automations.reconcileSystem({ owner: OWNER,
-          automationId: this.automationId, idempotencyKey: `${this.automationId}:${this.generation}:pause`, desiredStatus: 'paused', definition: this.definition() })
+        if (!options.skipPause) {
+          const registration = this.options.automations.inspectSystemOwnedActivation({ owner: OWNER, automationId: this.automationId })
+          if (registration?.activationNonce === this.activationNonce) this.options.automations.reconcileSystem({ owner: OWNER,
+            automationId: this.automationId, idempotencyKey: `${this.automationId}:${this.generation}:pause`, desiredStatus: 'paused', definition: this.definition() })
+        }
       } finally {
         this.abort.abort()
         try { this.unregister?.() } finally {
