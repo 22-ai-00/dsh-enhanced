@@ -54,6 +54,7 @@ export interface RsiSetupArgs {
   prepareBuild?: boolean; optionalBuild?: boolean; dockerPath?: string
   prepareAuthorities?: boolean
   installOwner?: boolean
+  installLocalCohort?: boolean; bundles?: string[]
 }
 export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
   const result: RsiSetupArgs = { manifestPath: '', dshHome: process.env.DSH_HOME || join(homedir(), '.dsh'),
@@ -61,7 +62,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
   const seen = new Set<string>()
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i]!
-    if (seen.has(key)) fail(`duplicate option ${key}`)
+    if (key !== '--bundle' && seen.has(key)) fail(`duplicate option ${key}`)
     seen.add(key)
     if (key === '--help' || key === '-h') result.help = true
     else if (key === '--apply') result.apply = true
@@ -72,6 +73,12 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     else if (key === '--prepare-build') result.prepareBuild = true
     else if (key === '--prepare-authorities') result.prepareAuthorities = true
     else if (key === '--install-owner') result.installOwner = true
+    else if (key === '--install-local-cohort') result.installLocalCohort = true
+    else if (key === '--bundle') {
+      const value = argv[++i]
+      if (!value || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(value)) fail('--bundle requires a plugin slug')
+      ;(result.bundles ??= []).push(value)
+    }
     else if (key === '--optional-build') result.optionalBuild = true
     else if (key === '--manifest' || key === '--dsh-home' || key === '--profile' || key === '--source-repository' || key === '--docker-path') {
       const value = argv[++i]
@@ -84,6 +91,15 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     } else fail(`unknown option ${key}`)
   }
   if (result.help) return result
+  if (result.bundles && !result.installLocalCohort) fail('--bundle requires --install-local-cohort')
+  if (result.installLocalCohort) {
+    if (result.installOwner || result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.manifestPath
+      || result.apply || result.rollback || result.start || result.confirmStopped || result.optionalBuild || result.dockerPath) fail('local cohort installation cannot be combined with other operations')
+    if (!isAbsolute(result.dshHome) || !result.profile || !profilePattern.test(result.profile)
+      || !result.sourceRepository || !isAbsolute(result.sourceRepository) || !result.bundles?.length
+      || new Set(result.bundles).size !== result.bundles.length) fail('local cohort installation requires a profile, absolute source repository and unique bundles')
+    return result
+  }
   if ((result.optionalBuild || result.dockerPath) && !result.prepareBuild) fail('--optional-build and --docker-path require --prepare-build')
   if (result.installOwner) {
     if (result.prepareSource || result.prepareBuild || result.prepareAuthorities || result.manifestPath || result.apply
@@ -339,7 +355,7 @@ export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts
 
 /** Internal installer entry: caller already owns the DSH_HOME lifecycle lock. */
 export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetupPorts = rsiSetupPorts): Promise<{ mode: string; profiles: readonly string[] }> {
-  if (args.installOwner || args.prepareSource || args.prepareBuild || args.prepareAuthorities || args.optionalBuild || args.dockerPath || args.profile || args.sourceRepository) fail('resource preparation is a separate setup operation')
+  if (args.installLocalCohort || args.bundles || args.installOwner || args.prepareSource || args.prepareBuild || args.prepareAuthorities || args.optionalBuild || args.dockerPath || args.profile || args.sourceRepository) fail('resource preparation is a separate setup operation')
   if (args.rollback && (args.apply || args.start) || args.start && !args.apply) fail('incompatible setup operations')
   const home = args.dshHome
   await safeDirectory(home)
@@ -432,7 +448,18 @@ export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetu
 export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
-    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    return
+  }
+  if (args.installLocalCohort) {
+    const controller = new AbortController()
+    const cancel = () => controller.abort(new Error('local cohort installation interrupted'))
+    process.once('SIGINT',cancel); process.once('SIGTERM',cancel)
+    try {
+      const {installRsiLocalTarget} = await import('./rsi-local-install.js')
+      process.stdout.write(`${JSON.stringify(await installRsiLocalTarget({dshHome:args.dshHome,profile:args.profile!,
+        sourceRepository:args.sourceRepository!,bundles:args.bundles!,signal:controller.signal}))}\n`)
+    } finally { process.off('SIGINT',cancel); process.off('SIGTERM',cancel) }
     return
   }
   if (args.installOwner) {

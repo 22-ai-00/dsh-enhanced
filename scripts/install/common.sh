@@ -2386,6 +2386,17 @@ dsh_enhanced_install_rsi_owner() {
   dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
 }
 
+dsh_enhanced_install_local_cohort() {
+  local profile="$1" dsh_home="$2" repo_root="$3" dry_run="$4"
+  shift 4
+  local setup_bin="$repo_root/plugins/lark-channel/bin/dsh-rsi-setup.js"
+  local args=(--install-local-cohort --profile "$profile" --dsh-home "$dsh_home" --source-repository "$repo_root")
+  local slug
+  for slug in "$@"; do args+=(--bundle "$slug"); done
+  printf '\n本地 supervised：从冻结提交构建独立包，并安装到 profile 内。\n'
+  dsh_enhanced_run "$dry_run" node "$setup_bin" "${args[@]}"
+}
+
 # Setup CLIs run as ordinary Node processes before a profile is mounted.  Ask
 # the verified Host's public boot API to materialize its shared peer closure
 # under this DSH_HOME, without composing or activating a profile.
@@ -3248,6 +3259,10 @@ dsh_enhanced_install() {
   if [[ "$dry_run" != '1' ]]; then
     dsh_enhanced_require_node || return $?
   fi
+  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' && "$dry_run" != '1' ]]; then
+    dsh_home="$(dsh_enhanced_canonical_lifecycle_home "$dsh_home")" || return $?
+    export DSH_HOME="$dsh_home"
+  fi
   if [[ "$operation" == 'install' ]]; then
     dsh_enhanced_ensure_dsh "$dsh_version" "$dry_run" "$ack_unverified_host" || return $?
   elif [[ "$dry_run" == '1' ]]; then
@@ -3538,7 +3553,9 @@ NODE
   # and progress are quiet, while real package-manager errors stay visible and
   # retain their non-zero status.  The installer already prints the exact cohort
   # and every lifecycle stage above/below this call.
-  if [[ "$dry_run" == '1' ]]; then
+  if [[ "$source_mode" == 'local' && "$deployment_mode" == 'supervised-growth' ]]; then
+    dsh_enhanced_install_local_cohort "$profile" "$dsh_home" "$repo_root" "$dry_run" "${selected_slugs[@]}" || return $?
+  elif [[ "$dry_run" == '1' ]]; then
     dsh_enhanced_print_command env npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}"
   else
     npm_config_loglevel=error dsh plugin --profile "$profile" add "${targets[@]}" || return $?

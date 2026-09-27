@@ -83,10 +83,12 @@ describe('supervised RSI source and build preparation', () => {
     for (const slug of ['assistant-skills', 'assistant-verifier', 'assistant-growth-driver']) {
       expect(result.stdout).toContain(join(repoRoot, 'plugins', slug))
     }
-    const install = result.stdout.indexOf('dsh plugin --profile web add')
+    const install = result.stdout.indexOf('dsh-rsi-setup.js --install-local-cohort')
     const source = result.stdout.indexOf('dsh-rsi-setup --prepare-build --optional-build')
     const finalSetup = result.stdout.indexOf('dsh-supervised-growth-setup --profile web')
     expect(install).toBeGreaterThanOrEqual(0)
+    expect(result.stdout).toContain('--bundle assistant-growth-driver')
+    expect(result.stdout).not.toContain('dsh plugin --profile web add')
     expect(source).toBeGreaterThan(install)
     expect(finalSetup).toBeGreaterThan(source)
     expect(result.stdout).toContain(`--source-repository ${repoRoot}`)
