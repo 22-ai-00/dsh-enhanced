@@ -660,6 +660,7 @@ function runRemoteNpmBootstrap(
 }
 
 interface LifecycleFixtureOptions {
+  readiness?: 'web' | 'host' | 'invalid-host'
   activationFails?: boolean
   effectiveScenario?: 'autonomy' | 'lark' | 'supervised' | 'web'
   managedDependencies?: readonly string[]
@@ -1040,6 +1041,9 @@ async function testSupervisedOperator(action, nonce, direct, context) {
     name: `@dsh-enhanced/${managedDependencies[0] ?? 'personal-assistant'}`,
     version: '0.1.0',
   }))
+  const readinessLine = options.readiness === 'host' ? 'dsh-enhanced host ready: v1'
+    : options.readiness === 'invalid-host' ? 'dsh-enhanced host ready: v10'
+      : 'dsh web: http://127.0.0.1:43210'
   const activation = `"${process.execPath}" --input-type=module - "$DSH_HOME/assistant-goals/web.sqlite" <<'NODE'
 import { DatabaseSync } from 'node:sqlite'
 const database = new DatabaseSync(process.argv[2])
@@ -1049,7 +1053,7 @@ NODE
 if [[ -n "$LIFECYCLE_CONFIG_AFTER_ACTIVATION" ]]; then
   printf '%s\n' "$LIFECYCLE_CONFIG_AFTER_ACTIVATION" > "$DSH_HOME/.lifecycle-dump-config"
 fi
-${options.activationFails ? "printf 'activation failed\\n' >&2; exit 23" : "printf 'dsh web: http://127.0.0.1:43210\\n'; exit 0"}`
+${options.activationFails ? "printf 'activation failed\\n' >&2; exit 23" : `printf '${readinessLine}\\n'${options.readiness && options.readiness !== 'web' ? ' >&2' : ''}; exit 0`}`
   await writeExecutable(join(fakeBin, 'dsh'), String.raw`#!/bin/bash
 set -euo pipefail
 { printf 'CALL'; printf '\t%s' "$@"; printf '\n'; } >> "$LIFECYCLE_DSH_LOG"
@@ -1652,7 +1656,7 @@ if (state.controls.journal === 'fail') process.exit(7)
 const invocation = args.find(value => value.startsWith('_SYSTEMD_INVOCATION_ID='))?.slice('_SYSTEMD_INVOCATION_ID='.length)
 const lines = []
 if (state.controls.journal !== 'stale' && invocation?.startsWith('fresh-')) {
-  lines.push('dsh web: http://127.0.0.1:43210', 'lark-channel: connected')
+  lines.push(${JSON.stringify(readinessLine)}, 'lark-channel: connected')
   if (state.controls.larkDisconnectAfterConnect) lines.push('lark-channel: disconnected')
   // F5：swap 完成（原 home 出现 upgraded 标记）之后，在稳定性窗口的第 2 个
   // 样本上制造 connected→disconnected→connected。末点状态复原，两点采样
@@ -3586,6 +3590,32 @@ describe('one-click installers', () => {
     expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
     await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
   })
+
+  test.each(['lark', 'supervised'] as const)('native generic Host readiness completes %s service upgrade without a Web URL', async expectedScenario => {
+    const f = await lifecycleFixture({ readiness: 'host', effectiveScenario: expectedScenario,
+      systemd: { units: [{ profile: 'web', active: true }] } })
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { expectedScenario })
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].activeState).toBe('active')
+  }, 15_000)
+
+  test('native generic Host readiness from an old invocation cannot accept a restarted service', async () => {
+    const f = await lifecycleFixture({ readiness: 'host', systemd: { units: [{ profile: 'web', active: true }] } })
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdJournal: 'stale' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/fresh InvocationID Host ready marker/u)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].activeState).toBe('inactive')
+  }, 15_000)
+
+  test('a different generic Host readiness protocol cannot pass activation', async () => {
+    const f = await lifecycleFixture({ readiness: 'invalid-host', systemd: { units: [{ profile: 'web', active: true }] } })
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/隔离 Host 激活失败/u)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
 
   test.each([23, 24] as const)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
     const f = await lifecycleFixture({ effectiveScenario: 'supervised', deliverySnapshotSchema, systemd: { units: [{ profile: 'web', active: true }] } })

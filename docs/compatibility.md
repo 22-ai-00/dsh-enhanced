@@ -28,6 +28,8 @@ Delivery 的新审批桥要求提供 `registerHumanApprovalAnswerer` 的同批 P
 
 安装前自定义 profile 激活探针使用 `0.1.5-rc.3` 原生 launcher 提供的 `appReady.onReady`：只有 Loader 完成启用项审计后才提交就绪信号。临时观察插件通过 `inject` 和 effect 注册/释放监听，以进程专属 patch 挂载，探针结束删除；不修改持久 profile，也不要求自定义 profile 带 Web 服务。原生 `web` 模板仍使用同一提交之后的 Web URL 信号。
 
+新 Control Plane 在原生 `appReady` 提交后向 stderr 输出版本化的 `dsh-enhanced host ready: v1`，不污染 headless/ACP 的 stdout。安装器及单目标 service lifecycle 的隔离激活、预览和 systemd 验收均识别此信号，保留旧 Web URL 信号；systemd 仍要求新 InvocationID，generic 信号必须是完整、精确的协议行。仅含旧 cohort 的无 Web Host 可能没有该通知；RSI 双 Host 的协调器 sibling 接纳和跨版本 Host 切换仍未接通，不能据此声称整个双 Host 可通过 `update --all` 升级。该启动证据也不替代独立任务验证或持久采用证明。
+
 当前开发与测试基线为官方 npm `latest` 的 **DSH `0.1.5-rc.3`**（2026-09-27 核对 registry）。没有发布不带预发布后缀的 `0.1.7`；`next` 为 `0.1.7-rc.2`，`alpha` 为 `0.1.7-alpha.2`，不能把这些称为正式版。按用户选择跟随官方 latest 通道，不选择 Alpha/Beta。`dsh-rsi install` 对全新空 Home 在运行时解析 latest 到精确版本并检查兼容范围，安装至独立私有目录并把版本及文件收据绑定到 Home；重试及插件升级复用绑定，不替换全局 Host。直接 shell 安装及已有未绑定 Home 仍复用当前兼容 Host。`dsh-rsi update --all` 目前更新 CLI 与插件集合，Host 更新事务尚待实现，不能宣称它已自动更新 DSH。工作区 catalog、Host peers 和下一版发布基线使用 `0.1.5-rc.3`；已经发布的 installer cohort 与发布账本历史保留原值，下一次 release prepare 才更新其远端制品固定信息。
 
 新版 Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.agent`。Inbox 使用公开 `nextTurn` / `nextStep`，程序内嵌套工具事件为 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。Session format 为 3，持久化使用 `create/open` 返回的会话句柄，恢复和清理须保持独占写入及未知结果不重派。系统提示进入原生消息历史，`EpochHeader` 不再携带 `system`；请求来源验证按新原生结构精确比较。

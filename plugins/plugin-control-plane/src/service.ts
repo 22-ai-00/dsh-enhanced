@@ -47,6 +47,7 @@ import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpoin
 import { readPrivateRuntimeObserverKey } from './runtime-observer-protocol.js'
 import { createForegroundDeploymentObserver, foregroundTrustSnapshot, validateForegroundDeploymentConfig, type ForegroundDeploymentConfig } from './foreground-deployment-runtime.js'
 import { captureRetainedDeploymentReadiness } from './deployment-readiness.js'
+import { installHostReadiness } from './host-readiness.js'
 import type { ForegroundDeploymentRecord } from './foreground-deployment.js'
 
 export interface Config {
@@ -221,6 +222,7 @@ export class PluginControlPlaneService extends Service {
       await Promise.allSettled([...this.sourceBuilds, ...this.sourceInspections, ...this.sourceApprovalFlights, ...this.sourceReleaseFlights, ...this.sourceAdoptionFlights.values()])
       this.store.close()
     }, 'plugin-control-plane.store')
+    installHostReadiness(ctx)
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
     if (this.config.runtimeObserver !== undefined) installRuntimeObserver(ctx, this.config.runtimeObserver,
       this.config.foregroundDeployments ? (observerCtx, sample) => {

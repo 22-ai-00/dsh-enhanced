@@ -15,7 +15,18 @@ const MANIFEST_VERSION = 1
 const SERVICE_MANIFEST_VERSION = 2
 const SUPERVISED_SERVICE_MANIFEST_VERSION = 3
 const TRANSACTION_SUFFIX = '.dsh-enhanced-transaction'
-const READY_MARKER = 'dsh web: http://127.0.0.1:'
+const WEB_READY_MARKER = 'dsh web: http://127.0.0.1:'
+const HOST_READY_MARKER = 'dsh-enhanced host ready: v1'
+
+// appReady commits after the native Loader activation audit. New enhanced
+// cohorts report it without requiring a Web surface; retain native Web output
+// for existing Web cohorts and clean post-uninstall profiles.
+function hasHostReadyMarker(stdout, stderr = '') {
+  // Operational readiness is written to stderr to leave stdio protocols intact.
+  // Require a completed generic line: a chunk ending in v1 might continue v10.
+  return stdout.includes(WEB_READY_MARKER) || [stdout, stderr].some(output =>
+    output.split('\n').slice(0, -1).some(line => line.trim() === HOST_READY_MARKER))
+}
 const LARK_STATE_PREFIX = 'lark-channel: '
 const LARK_ACCEPTED_STATES = new Set(['connected', 'connected-with-gap'])
 const PROFILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -2863,7 +2874,7 @@ async function journalHasReadyMarker(journalctlExecutable, service) {
   const result = await runServiceCommand(journalctlExecutable, [
     '--user', '--unit', service.unit, `_SYSTEMD_INVOCATION_ID=${service.invocationId}`, '--output=cat', '--no-pager',
   ])
-  return result.stdout.split('\n').some(line => line.includes(READY_MARKER))
+  return hasHostReadyMarker(result.stdout)
 }
 
 async function larkJournalStates(journalctlExecutable, service) {
@@ -4148,7 +4159,7 @@ async function startSandboxHost(context) {
     await resources.validator.close(); await resources.stage.close()
   }
   const readyDeadline = Date.now() + 30_000
-  while (!stdout.includes(READY_MARKER)) {
+  while (!hasHostReadyMarker(stdout, stderr)) {
     if (closed) { await close(); fail(`supervised 隔离 Host 激活失败（exit ${closeCode ?? 1}）${stderr === '' ? '' : `：${stderr.trim()}`}`) }
     if (Date.now() >= readyDeadline) { await close(); fail('supervised 隔离 Host 在 30 秒内未就绪。') }
     await delay(25)
@@ -4299,12 +4310,15 @@ async function activateInSandbox(context) {
     }
     child.stdout.on('data', chunk => {
       if (stdout.length < 1024 * 1024) stdout += String(chunk)
-      if (stdout.includes(READY_MARKER)) stopAfterReady()
+      if (hasHostReadyMarker(stdout, stderr)) stopAfterReady()
     })
-    child.stderr.on('data', chunk => { if (stderr.length < 1024 * 1024) stderr += String(chunk) })
+    child.stderr.on('data', chunk => {
+      if (stderr.length < 1024 * 1024) stderr += String(chunk)
+      if (hasHostReadyMarker(stdout, stderr)) stopAfterReady()
+    })
     child.once('error', error => finish(error))
     child.once('close', code => {
-      if (ready || stdout.includes(READY_MARKER)) finish()
+      if (ready || hasHostReadyMarker(stdout, stderr)) finish()
       else if (timedOut) finish(new LifecycleError('隔离 Host 激活在 30 秒内未就绪。'))
       else finish(new LifecycleError(`隔离 Host 激活失败（exit ${code ?? 1}）${stderr === '' ? '' : `：${stderr.trim()}`}`))
     })
