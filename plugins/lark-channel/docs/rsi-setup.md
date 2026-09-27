@@ -27,9 +27,9 @@
   --prepare-build --profile web --dsh-home "$HOME/.dsh"
 ```
 
-输出中的 `sourceBuild` 可用于 Control Plane manifest。配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`。重新执行会核对来源、构建输入与本地镜像；不会静默换镜像或重新构建丢失的已登记镜像。Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，只把 lock、workspace 配置及包清单放入构建上下文；不复制源码、主机包缓存或凭据。首次镜像准备需要网络，随后候选构建离线运行。
+输出中的 `sourceBuild` 可用于 Control Plane manifest。安装器还自动从同一不可变镜像导出原生 Node、pnpm、离线 store 和供应链策略缓存，输出 `releaseBuild` 可直接用于本地发布 adapter 的 `build` 配置；无需手填工具链路径和摘要。资源保存在 `$DSH_HOME/rsi-release-builds/<profile>`，回执固定所有文件内容与模式。导出只创建未启动的容器，复制固定路径后删除容器，不执行其中的源码。发布仍使用本机 `/usr/bin/bwrap` 和 `/usr/bin/tar`；`--optional-build` 在缺少这些前置条件时报告 `releaseBuildUnavailable`，保留已准备的源码验证镜像。实际复制、工具链版本校验或已有回执漂移失败仍会停止安装。配置使用不可变镜像 ID，并将私有回执与 seccomp 保存到 `$DSH_HOME/rsi-builds/<profile>`。重新执行会核对来源、构建输入与本地镜像；不会静默换镜像或重新构建丢失的已登记镜像。Docker 构建脚本、Dockerfile 与 seccomp 必须匹配安装包内登记的摘要，只把 lock、workspace 配置及包清单放入构建上下文；不复制源码、主机包缓存或凭据。首次镜像准备需要网络，随后候选构建离线运行。
 
-自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。源码、镜像及配置已准备不代表双 Host 自动采用已启用；签名配置、registry、协调器与完整 manifest 仍按后续步骤配置。
+自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。源码、镜像、发布工具链及配置已准备不代表双 Host 自动采用已启用；签名配置、registry、协调器与完整 manifest 仍按后续步骤配置。
 
 目标先完成 [Lark 配对](setup.md)与 [supervised 安装](supervised-growth.md)，已有唯一 active owner DM 和有效 owner route。旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier 与 Control Plane。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 

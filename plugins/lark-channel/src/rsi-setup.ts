@@ -13,6 +13,7 @@ import { supervisedGrowthBindingQuery, supervisedGrowthDatabasePaths } from './s
 import { installDshResidentService } from './resident.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiBuildEnvironment, RsiBuildUnavailableError } from './rsi-build.js'
+import { prepareRsiReleaseBuildEnvironment, RsiReleaseBuildUnavailableError } from './rsi-release-build.js'
 import { version } from './version.js'
 
 const MAX_BYTES = 2_097_152
@@ -322,7 +323,7 @@ export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts
 export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
-    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also creates an offline image; --optional-build reports unavailable prerequisites without enabling source builds.\n')
+    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which prerequisites are unavailable.\n')
     return
   }
   if (args.prepareSource || args.prepareBuild) {
@@ -339,7 +340,16 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
         try {
           const build = await prepareRsiBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!, source,
             dockerPath: args.dockerPath, signal: controller.signal })
-          return { ...source, sourceBuild: build.sourceBuild }
+          try {
+            const release = await prepareRsiReleaseBuildEnvironment({ dshHome: args.dshHome, profile: args.profile!,
+              build, signal: controller.signal })
+            return { ...source, sourceBuild: build.sourceBuild, releaseBuild: release.releaseBuild }
+          } catch (error) {
+            controller.signal.throwIfAborted()
+            if (!args.optionalBuild || !(error instanceof RsiReleaseBuildUnavailableError)) throw error
+            process.stderr.write(`自迭代发布构建环境未就绪：${error.message}。已保留源码与验证镜像。\n`)
+            return { ...source, sourceBuild: build.sourceBuild, releaseBuildUnavailable: error.message }
+          }
         } catch (error) {
           controller.signal.throwIfAborted()
           if (!args.optionalBuild || !(error instanceof RsiBuildUnavailableError)) throw error

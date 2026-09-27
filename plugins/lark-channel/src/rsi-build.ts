@@ -139,6 +139,9 @@ function isolatedEnvironment(home: string): NodeJS.ProcessEnv {
     DOCKER_BUILDKIT: '1' }
 }
 
+// Shared by the release-toolchain preparer; these helpers never change a profile.
+export const rsiBuildResources = { directory, readStable, writeExclusive, syncDirectory, command, isolatedEnvironment }
+
 async function dockerExecutable(requested?: string): Promise<{ path: string; sha256: string }> {
   let path = requested
   if (path === undefined) {
