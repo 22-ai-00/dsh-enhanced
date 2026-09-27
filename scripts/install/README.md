@@ -16,7 +16,7 @@ macOS 的本地和 npm 安装入口会在安装末尾检查受管 LaunchAgent；
 
 历史验收记录（截至 2026-09-12）：`v0.1.31` 完成过 Linux `autonomy` 的远程全新安装，以及真实 `.30 → .31` 升级、隔离 Host 启动与事务提交；最终冻结候选完成 `.31 → .31` 重复升级，两次均确认 14 个受管包同版本，选定配置、状态文件、暂停目标及其检查点保持不变。该批升级修复随 `0.1.32` 发布；旧 `v0.1.31` 远程 helper 不具备同样能力。当前验收范围与剩余缺口见 [RSI 当前状态](../../docs/rsi-status.md)。
 
-安装器先确保 Node.js、pnpm 和兼容的 DSH。当前 checkout 的兼容范围为 `>=0.1.5-rc.3 <0.1.6`；新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认属于该范围后安装解析出的精确版本，不追踪 `next` 或 beta。已有兼容 CLI 直接复用，不做全局升级或降级。越界、无法识别或解析失败会在安装 Host 前拒绝；新维护线需先完成适配。`--dry-run` 离线展示解析计划，显式 `--dsh-version` 可指定范围内精确版本。已发布的远程引导器仍加载其发布标签中的 helper；本 checkout 的改动须发布后才进入远程安装。已有 Host 自动更新尚未实现，`dsh-rsi update --all` 当前更新 CLI 与插件集合。 `dsh-rsi install` 对全新空 Home 已加入私有 Host 选择：解析并安装官方 latest 到独立目录，Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，补装 pnpm 不会改变它的优先级。此行为不修改全局 DSH；直接执行本节 shell 脚本仍沿用上述选择方式。缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#install--reinstall薄委托)。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
+安装器先确保 Node.js、pnpm 和兼容的 DSH。当前 checkout 的兼容范围为 `>=0.1.5-rc.3 <0.1.6`；新安装先解析官方 `@deepseek-ai/dsh` 的 `latest`，确认属于该范围后安装解析出的精确版本，不追踪 `next` 或 beta。已有兼容 CLI 直接复用，不做全局升级或降级。越界、无法识别或解析失败会在安装 Host 前拒绝；新维护线需先完成适配。`--dry-run` 离线展示解析计划，显式 `--dsh-version` 可指定范围内精确版本。已发布的远程引导器仍加载其发布标签中的 helper；本 checkout 的改动须发布后才进入远程安装。已有 Host 自动更新尚未实现，`dsh-rsi update --all` 当前更新 CLI 与插件集合。 `dsh-rsi install` 对全新空 Home 已加入私有 Host 选择：解析并安装官方 latest 到独立目录，Home 内持久绑定精确版本；重试、插件升级及生成的服务复用该入口，补装 pnpm 不会改变它的优先级。此行为不修改全局 DSH；直接执行本节 shell 脚本仍沿用上述选择方式。缓存与重装说明见 [CLI 指南](../../packages/dsh-rsi-cli/README.md#install--reinstall薄委托)。之后，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。`dsh-rsi install/reinstall` 未指定 `--scenario` 或 `--mode` 时默认进入 `supervised`，不再要求用户先选择成长场景。直接调用 shell 安装脚本的首次非交互运行和 `--yes` 仍选择 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
 
 ```sh
 ./scripts/install/install-local.sh --yes
@@ -118,7 +118,9 @@ dsh-rsi reinstall --local ~/work/github/dsh-enhanced --yes
 ./scripts/install/install-local.sh --scenario supervised --lark configure
 ```
 
-安装器不会把 `dsh --dump-config` 当作“可用”的证明：对于尚未配置 Lark 的 profile，它会在安装 bundle 后、飞书 OAuth 前，在 OS 分配的 loopback 端口短暂启动一次 Web Host，等待 Loader 的就绪信号。已启用 Lark 的旧 profile 则不会启动第二个 Host 去并发访问同一份状态；若由安装器管理服务，最终会以真正的常驻进程和稳定性窗口验收。Lark 是否已启用按 DSH 的 home→profile 覆盖层计算，profile 的 `disabled`、`enabled` 或 App ID 覆盖会优先于 home 层，避免把已禁用的 bot 误判为可保留。临时 probe 中的 Lark Channel 会被 process-only overlay 禁用，不会建立第二条 WebSocket，也不会改写 profile。任何 Cordis service 依赖未满足都会明确失败。对于历史 profile 中已存在 `assistant-evolution` 而缺少其 `assistant-evaluation` provider 的情况，安装器会只补齐 Evaluation bundle；不会删除或默默启用其它旧插件。
+原生 `web` 模板的新 profile 会预检 Web 端口；原生自定义 profile 只加载 `dsh-base`，不会因为另一个 profile 占用 3080 而被阻止安装。`DSH_ENHANCED_WEB_PORT` 只指定诊断端口，不会改写 DSH 的实际监听配置。
+
+安装器不会把 `dsh --dump-config` 当作“可用”的证明：对于尚未配置 Lark 的 profile，它会在安装 bundle 后、飞书 OAuth 前，短暂启动一次 Host，等待原生 Loader 完成审计后的就绪信号；Web 使用 OS 分配的 loopback 端口，自定义 profile 通过临时 `appReady` 监听接收信号。已启用 Lark 的旧 profile 则不会启动第二个 Host 去并发访问同一份状态；若由安装器管理服务，最终会以真正的常驻进程和稳定性窗口验收。Lark 是否已启用按 DSH 的 home→profile 覆盖层计算，profile 的 `disabled`、`enabled` 或 App ID 覆盖会优先于 home 层，避免把已禁用的 bot 误判为可保留。临时 probe 中的 Lark Channel 会被 process-only overlay 禁用，不会建立第二条 WebSocket，也不会改写 profile。任何 Cordis service 依赖未满足都会明确失败。对于历史 profile 中已存在 `assistant-evolution` 而缺少其 `assistant-evaluation` provider 的情况，安装器会只补齐 Evaluation bundle；不会删除或默默启用其它旧插件。
 
 飞书向导支持纯 SSH/无桌面 Linux：默认先探测 Secret Service，不可用时会在 OAuth 前自动验证并改用当前用户 `0700` 目录下的版本化 `0600` protected-file，不要求安装 GNOME Keyring。该文件没有额外静态加密，同 UID、root 与可读备份仍能读取；需要强制系统钥匙环时可在安装后直接运行 `dsh-lark-setup --linux-credential-provider secret-service`。
 
@@ -232,7 +234,7 @@ DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-mo
 
 验证方式取决于当前全局默认的 provider 类型：普通 API-key/网关 route 通过 `headless` profile 发送一次固定的最小请求；agent route（`traex-agent`）不发模型请求，改为校验目标 profile 已注册 `traex-acp-provider` 适配器并检查 `traex login status`。
 
-每次新 profile 都会预检 Web 端口（默认 `127.0.0.1:3080`，可用 `DSH_ENHANCED_WEB_PORT` 覆盖），并在飞书配置前验证 profile 能真实激活，而非只验证 YAML 可组合；已管理的 Lark profile 则以实际常驻服务验收。独立诊断：
+新建原生 `web` 模板时会预检 Web 端口（默认 `127.0.0.1:3080`，可用 `DSH_ENHANCED_WEB_PORT` 覆盖）。自定义 profile 不要求 Web 端口；安装器在飞书配置前通过原生 Host 就绪信号验证插件真实激活，而非只验证 YAML 可组合；已管理的 Lark profile 则以实际常驻服务验收。独立诊断：
 
 ```sh
 ./scripts/install/doctor.sh --profile web

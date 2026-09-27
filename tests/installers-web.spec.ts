@@ -40,6 +40,7 @@ async function actualFixture(setupExit: number | 'missing') {
   const hostModules = join(fakeBin, 'node_modules', '@deepseek-ai')
   await mkdir(fakeBin, { recursive: true })
   await mkdir(profileBin, { recursive: true })
+  await writeFile(join(dshHome, 'profiles', 'web', 'package.json'), JSON.stringify({ dependencies: {} }))
   await mkdir(join(hostModules, 'dsh'), { recursive: true })
   await mkdir(join(hostModules, 'dsh-app-boot'), { recursive: true })
   await writeFile(join(hostModules, 'dsh', 'package.json'), JSON.stringify({

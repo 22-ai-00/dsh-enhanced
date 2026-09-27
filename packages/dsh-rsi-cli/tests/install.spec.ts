@@ -45,6 +45,65 @@ function makeDeps(installCalls: unknown[], purgeCalls: unknown[] = []): Required
 }
 
 describe('runInstall（薄委托）', () => {
+  test.each(['npm', 'local'] as const)('%s 默认 install 委派 supervised，且不修改原参数', async mode => {
+    const passthrough = Object.freeze(['--yes', '--dry-run'])
+    const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+    const download = vi.fn(async () => '#!/usr/bin/env bash\n')
+    await runInstall({
+      mode,
+      ...(mode === 'local' ? { localRepositoryRoot: '/repo' } : {}),
+      releaseRef: 'v0.1.48', passthrough,
+      executor: { download, runInherited },
+    })
+    expect(runInherited.mock.calls[0]![1].slice(1)).toEqual(['--yes', '--dry-run', '--scenario', 'supervised'])
+    expect(passthrough).toEqual(['--yes', '--dry-run'])
+    expect(download).toHaveBeenCalledTimes(mode === 'npm' ? 1 : 0)
+  })
+
+  test('explicit --operation install still selects the supervised default', async () => {
+    const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+    await runInstall({
+      mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+      passthrough: ['--operation', 'install', '--dry-run'],
+      executor: { download: vi.fn(), runInherited },
+    })
+    expect(runInherited.mock.calls[0]![1].slice(1)).toEqual([
+      '--operation', 'install', '--dry-run', '--scenario', 'supervised',
+    ])
+  })
+
+  test.each([
+    { label: 'explicit scenario', args: ['--scenario', 'core', '--yes'] },
+    { label: 'explicit legacy standard mode', args: ['--mode', 'standard', '--yes'] },
+    { label: 'explicit supervised mode', args: ['--mode', 'supervised-growth', '--yes'] },
+    { label: 'explicit auto scenario', args: ['--scenario', 'auto', '--dry-run'] },
+    { label: 'repeated explicit scenario', args: ['--scenario', 'core', '--scenario', 'web'] },
+    { label: 'repeated explicit mode', args: ['--mode', 'standard', '--mode', 'supervised-growth'] },
+    { label: 'upgrade', args: ['--operation', 'upgrade', '--dry-run'] },
+    { label: 'uninstall', args: ['--operation', 'uninstall', '--dry-run'] },
+    { label: 'recover', args: ['--operation', 'recover', '--dry-run'] },
+    { label: 'help', args: ['--help'] },
+  ])('$label remains delegated without an injected scenario', async ({ args }) => {
+    const runInherited = vi.fn(async (_command: string, _args: readonly string[]) => 0)
+    await runInstall({
+      mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48', passthrough: args,
+      executor: { download: vi.fn(), runInherited },
+    })
+    expect(runInherited.mock.calls[0]![1].slice(1)).toEqual(args)
+  })
+
+  test.each([['--scenario'], ['--mode'], ['--scenario', '--yes'], ['--mode', '--yes']])
+  ('missing selector values fail before Host preparation or installer invocation: %j', async (...passthrough) => {
+    const prepareHost = vi.fn(async () => ({}))
+    const runInherited = vi.fn(async () => 0)
+    await expect(runInstall({
+      mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48', passthrough,
+      executor: { prepareHost, download: vi.fn(), runInherited },
+    })).rejects.toThrow('必须提供')
+    expect(prepareHost).not.toHaveBeenCalled()
+    expect(runInherited).not.toHaveBeenCalled()
+  })
+
   test('npm 形态：按 release ref 拼 URL 下载，bash 执行并透传参数与 DSH_HOME', async () => {
     const downloads: string[] = []
     const runs: Array<{ command: string; args: readonly string[]; env: NodeJS.ProcessEnv }> = []
@@ -203,6 +262,23 @@ describe('parseArgs：install/reinstall 透传', () => {
 })
 
 describe('main：install / reinstall 分发', () => {
+  test.each([
+    { command: ['install', '--dry-run'], expected: ['--dry-run', '--scenario', 'supervised'] },
+    { command: ['reinstall', '--yes', '--dry-run'], expected: ['--yes', '--dry-run', '--scenario', 'supervised'] },
+  ])('public $command entry delegates the supervised default', async ({ command, expected }) => {
+    const delegated: string[][] = []
+    const install: InstallFn = async options => runInstall({
+      ...options,
+      executor: {
+        download: async () => '#!/usr/bin/env bash\n',
+        runInherited: async (_command, args) => { delegated.push(args.slice(1)); return 0 },
+      },
+    })
+    const code = await main(command, { HOME: '/h' }, { ...makeDeps([]), install })
+    expect(code).toBe(0)
+    expect(delegated).toEqual([expected])
+  })
+
   test('install：npm 形态，releaseRef 锁自身版本，参数完整透传', async () => {
     const installCalls: unknown[] = []
     const code = await main(

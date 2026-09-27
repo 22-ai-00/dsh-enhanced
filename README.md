@@ -6,11 +6,11 @@
 
 支持 macOS / Linux，需要 Node.js `^22.19 || >=24`。
 
-**方式一：npm 全局安装 `dsh-rsi`（零运行时依赖，仅用 Node 内置模块），再安装个人助理**
+**方式一：npm 全局安装 `dsh-rsi`（零运行时依赖，仅用 Node 内置模块），再安装自迭代助理**
 
 ```sh
 npm install --global @dsh-enhanced/dsh-rsi-cli
-dsh-rsi install --scenario core --yes
+dsh-rsi install --scenario supervised --yes
 ```
 
 **方式二：curl 一键安装（默认 `core` 场景，无需先 clone 仓库）**
@@ -45,6 +45,8 @@ dsh-rsi restart --profile web          # 改配置后重启（只动运行状态
 ```
 
 升级（`update` / `update --all`）、干净重装（`reinstall`）、彻底卸载（`purge`）、崩溃救机脚本与全部安装器参数分别见 [`packages/dsh-rsi-cli/README.md`](packages/dsh-rsi-cli/README.md) 和[安装脚本文档](scripts/install/README.md)。
+
+开发版 `dsh-rsi install/reinstall` 未显式选择场景时默认安装 `supervised`；首次飞书身份授权仍由平台完成，构建资源或 owner 未就绪时不会报告安装成功。显式 `--scenario core` 可选择本机核心。
 
 三档部署场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 含全部 `core` 能力并加飞书常驻与偏好学习，`supervised` 再追加评测、演化与恢复。安装时检测到本机 `traex` 或 `trae-cli` 会自动安装并启用 TraeX 插件，复用本机登录；已登录且没有显式默认模型时，为当前 profile 配置 TraeX 默认模型。已有模型选择保持不变。其它模型可在安装引导中配置，API Key 只从环境读取。实验性离线执行入口 `autonomy` 需显式指定本机固定隔离镜像，详见[安装文档](scripts/install/README.md)。
 
