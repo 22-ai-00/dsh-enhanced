@@ -673,6 +673,7 @@ interface LifecycleFixtureOptions {
 
 interface LifecycleSystemdUnitOptions {
   active: boolean
+  serviceEnvironment?: Record<string, string>
   enabled?: boolean
   dshHome?: string
   dropIn?: 'keyring' | 'unknown' | 'unsafe-keyring'
@@ -1266,6 +1267,7 @@ exit 92
       mainPid: number
       nRestarts: number
       pathEnvironment: string
+      serviceEnvironment: Record<string, string>
       profile: string
       reportedDshHome: string
       serviceHome: string
@@ -1288,6 +1290,7 @@ exit 92
         : configured.workingDirectory ?? serviceProfileDirectory
       await mkdir(serviceProfileDirectory, { recursive: true, mode: 0o700 })
       const paths = systemdServicePaths({ home: systemdHome, dshHome: serviceHome, profile: configured.profile })
+      const serviceEnvironment = configured.serviceEnvironment ?? {}
       const source = configured.fragment === 'foreign'
         ? `[Service]\nEnvironment=DSH_HOME=${serviceHome}\nExecStart=/usr/bin/false\n`
         : createSystemdUserUnit({
@@ -1298,7 +1301,15 @@ exit 92
           nodePath: process.execPath,
           dshPath: join(fakeBin, 'dsh'),
           path: `${dirname(process.execPath)}:${fakeBin}:/usr/bin:/bin`,
+          environment: serviceEnvironment,
         })
+      if (Object.keys(serviceEnvironment).length > 0) {
+        const bindingDirectory = join(serviceHome, 'rsi-service-environments')
+        await mkdir(bindingDirectory, { recursive: true, mode: 0o700 })
+        await writeFile(join(bindingDirectory, `${configured.profile}.json`), `${JSON.stringify({
+          schemaVersion: 1, dshHome: serviceHome, profile: configured.profile, environment: serviceEnvironment,
+        })}\n`, { mode: 0o600 })
+      }
       await writeFile(paths.unitPath, source, { mode: 0o600 })
       if (!configured.runtimeMasked && configured.enabled !== false) {
         await symlink(paths.unitPath, join(wantsDirectory, paths.unitName))
@@ -1325,6 +1336,7 @@ exit 92
         mainPid: configured.active ? 20_000 + Object.keys(units).length : 0,
         nRestarts: 0,
         pathEnvironment: `${dirname(process.execPath)}:${fakeBin}:/usr/bin:/bin`,
+        serviceEnvironment,
         profile: configured.profile,
         reportedDshHome,
         serviceHome,
@@ -1458,9 +1470,13 @@ if (args[1] === 'show') {
     ['NRestarts', unit.nRestarts],
     ['UnitFileState', controlMasked ? 'masked' : unit.unitFileState],
     ['WorkingDirectory', controlMasked && state.controls.maskedMetadataEmpty ? '' : unit.workingDirectory],
-    ['Environment', controlMasked && state.controls.maskedMetadataEmpty ? '' : 'DSH_HOME=' + unit.reportedDshHome + ' PATH=' + unit.pathEnvironment
-      + ' DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + process.getuid() + '/bus'
-      + ' XDG_RUNTIME_DIR=/run/user/' + process.getuid()],
+    ['Environment', controlMasked && state.controls.maskedMetadataEmpty ? '' : [
+      'DSH_HOME=' + unit.reportedDshHome, 'PATH=' + unit.pathEnvironment,
+      'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + process.getuid() + '/bus',
+      'XDG_RUNTIME_DIR=/run/user/' + process.getuid(),
+      ...Object.entries(unit.serviceEnvironment ?? {}).sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, value]) => name + '=' + value),
+    ].map((value, index) => index < 4 ? value : JSON.stringify(value)).join(' ')],
     ['ExecStart', '{ path=' + process.execPath + ' ; argv[]=' + process.execPath + ' '
       + '--disable-warning=ExperimentalWarning ' + dshExecutable + ' --profile ' + unit.profile + ' --no-open ; ignore_errors=no ; }'],
   ]
@@ -2063,6 +2079,7 @@ interface LifecycleSystemdState {
     maskPresentWhenStopped?: boolean
     nRestarts: number
     pathEnvironment: string
+    serviceEnvironment: Record<string, string>
     profile: string
     reportedDshHome: string
     serviceHome: string
@@ -6149,6 +6166,121 @@ describe('one-click installers', () => {
       expect.objectContaining({ profile: 'dormant', activeState: 'inactive', mainPid: 0 }),
     ]))
   }, 15_000)
+
+  test('service-aware upgrade preserves sorted resident RSI environment with quoted paths', async () => {
+    const environment = {
+      DSH_SYSTEMD_HOST_ATTESTOR_CONFIG: '/tmp/dsh rsi/attestor%"\\config.json',
+      DSH_RELEASE_PR_CONFIG: '/tmp/dsh rsi/pr config.json',
+    }
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true, serviceEnvironment: environment },
+    ] } })
+    const bindingPath = join(f.dshHome, 'rsi-service-environments', 'web.json')
+    const original = await readFile(bindingPath, 'utf8')
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(bindingPath, 'utf8')).toBe(original)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].serviceEnvironment)
+      .toEqual(environment)
+  }, 15_000)
+
+  test('service-aware upgrade failure keeps original and staged RSI environment bindings', async () => {
+    const environment = { DSH_RELEASE_BUILD_CONFIG: '/tmp/dsh rsi/build%config.json' }
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true, serviceEnvironment: environment },
+    ] } })
+    const original = await readFile(join(f.dshHome, 'rsi-service-environments', 'web.json'), 'utf8')
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdJournal: 'stale' },
+    )
+    expect(result.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    expect(await readFile(join(f.dshHome, 'rsi-service-environments', 'web.json'), 'utf8')).toBe(original)
+    expect(await readFile(join(transaction, 'original-home', 'rsi-service-environments', 'web.json'), 'utf8'))
+      .toBe(original)
+  }, 15_000)
+
+  test('service-aware upgrade restores the original RSI binding after package failure', async () => {
+    const environment = { DSH_RELEASE_MERGE_CONFIG: '/tmp/dsh rsi/merge config.json' }
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true, serviceEnvironment: environment },
+    ] } })
+    const bindingPath = join(f.dshHome, 'rsi-service-environments', 'web.json')
+    const original = await readFile(bindingPath, 'utf8')
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { packageFails: true },
+    )
+    expect(result.status).not.toBe(0)
+    expect(await readFile(bindingPath, 'utf8')).toBe(original)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].activeState)
+      .toBe('active')
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test('service-aware upgrade rejects RSI binding changes inside staged home', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true, serviceEnvironment: { DSH_RELEASE_PR_CONFIG: '/tmp/pr.json' } },
+    ] } })
+    const bindingPath = join(f.dshHome, 'rsi-service-environments', 'web.json')
+    const original = await readFile(bindingPath, 'utf8')
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { packageWriteRelative: 'rsi-service-environments/web.json' },
+    )
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/Environment|绑定/u)
+    expect(await readFile(bindingPath, 'utf8')).toBe(original)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test.each(['binding file', 'effective environment'] as const)(
+    'service-aware upgrade rejects %s drift before package work', async drift => {
+      const environment = { DSH_RELEASE_SIGN_CONFIG: '/tmp/dsh rsi/sign config.json' }
+      const f = await lifecycleFixture({ systemd: { units: [
+        { profile: 'web', active: true, serviceEnvironment: environment },
+      ] } })
+      if (drift === 'binding file') {
+        await writeFile(join(f.dshHome, 'rsi-service-environments', 'web.json'), `${JSON.stringify({
+          schemaVersion: 1, dshHome: f.dshHome, profile: 'web', environment: {
+            DSH_RELEASE_SIGN_CONFIG: '/tmp/dsh rsi/other config.json',
+          },
+        })}\n`)
+      } else {
+        const state = await readLifecycleSystemdState(f.systemdState)
+        state.units['dsh-profile-web.service'].serviceEnvironment.DSH_RELEASE_SIGN_CONFIG = '/tmp/other config.json'
+        await writeFile(f.systemdState, `${JSON.stringify(state)}\n`)
+      }
+      const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/Environment|绑定/u)
+      await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }, 15_000,
+  )
+
+  test.each(['unknown name', 'unsorted names'] as const)(
+    'service-aware upgrade rejects unit RSI Environment with %s', async mutation => {
+      const f = await lifecycleFixture({ systemd: { units: [
+        { profile: 'web', active: true, serviceEnvironment: {
+          DSH_RELEASE_BUILD_CONFIG: '/tmp/build.json', DSH_RELEASE_PR_CONFIG: '/tmp/pr.json',
+        } },
+      ] } })
+      const unitPath = join(f.systemdHome, '.config', 'systemd', 'user', 'dsh-profile-web.service')
+      let source = await readFile(unitPath, 'utf8')
+      if (mutation === 'unknown name') {
+        source = source.replace('DSH_RELEASE_BUILD_CONFIG=', 'DSH_RELEASE_OTHER_CONFIG=')
+      } else {
+        source = source.replace(
+          'Environment="DSH_RELEASE_BUILD_CONFIG=/tmp/build.json"\nEnvironment="DSH_RELEASE_PR_CONFIG=/tmp/pr.json"',
+          'Environment="DSH_RELEASE_PR_CONFIG=/tmp/pr.json"\nEnvironment="DSH_RELEASE_BUILD_CONFIG=/tmp/build.json"',
+        )
+      }
+      await writeFile(unitPath, source)
+      const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/Environment/u)
+      await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }, 15_000,
+  )
 
   test('service-failed recovery reaccepts the swapped home without repeating package preparation', async () => {
     const f = await lifecycleFixture({ systemd: { units: [

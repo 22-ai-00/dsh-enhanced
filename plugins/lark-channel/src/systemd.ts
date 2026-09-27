@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { isRsiServiceEnvironmentName, readRsiServiceEnvironment, type RsiServiceEnvironment } from './rsi-service-environment.js'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 
@@ -25,6 +26,7 @@ export interface SystemdUnitInput extends SystemdServicePaths {
   nodePath: string
   dshPath: string
   path: string
+  environment?: RsiServiceEnvironment
 }
 
 export interface InstalledSystemdService extends SystemdServicePaths {
@@ -115,6 +117,12 @@ export function createSystemdUserUnit(input: SystemdUnitInput): string {
     dshPath: input.dshPath,
   })) requireAbsolute(value, label)
   if (!profilePattern.test(input.profile)) throw new Error('lark-channel setup: invalid profile')
+  const environmentLines = Object.entries(input.environment ?? {}).sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => {
+      if (!isRsiServiceEnvironmentName(name)) throw new Error(`lark-channel setup: unsupported environment name: ${name}`)
+      requireAbsolute(value, name)
+      return `Environment=${unitLiteralQuote(`${name}=${value}`)}\n`
+    }).join('')
   return `[Unit]
 Description=DeepSeek Harness profile ${input.profile}
 After=network-online.target
@@ -128,7 +136,7 @@ Environment=${unitLiteralQuote(`DSH_HOME=${input.dshHome}`)}
 Environment=${unitLiteralQuote(`PATH=${input.path}`)}
 Environment=${unitQuote('DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus')}
 Environment=${unitQuote('XDG_RUNTIME_DIR=%t')}
-ExecStart=${unitLiteralQuote(input.nodePath)} --disable-warning=ExperimentalWarning ${unitLiteralQuote(input.dshPath)} --profile ${input.profile} --no-open
+${environmentLines}ExecStart=${unitLiteralQuote(input.nodePath)} --disable-warning=ExperimentalWarning ${unitLiteralQuote(input.dshPath)} --profile ${input.profile} --no-open
 # A deliberate systemctl user stop remains stopped, while every process
 # exit (including a clean but unintended Host exit) is restarted.  Disabling
 # systemd's start-rate limiter keeps a long-lived personal assistant from
@@ -299,10 +307,10 @@ export async function prepareDshSystemdUserService(
   return { enabledLinger }
 }
 
-export async function installDshSystemdService(
+export async function renderDshSystemdService(
   input: { dshHome: string; profile: string },
-  options: SystemdInstallOptions = {},
-): Promise<InstalledSystemdService> {
+  options: SystemdInstallOptions & { environment?: RsiServiceEnvironment } = {},
+): Promise<SystemdServicePaths & { source: string }> {
   if ((options.platform ?? process.platform) !== 'linux') {
     throw new Error('lark-channel setup: systemd installer requires Linux')
   }
@@ -315,9 +323,24 @@ export async function installDshSystemdService(
   await access(profileDirectory, constants.R_OK)
   const nodePath = options.nodePath ?? findExecutable('node', options.path)
   const dshPath = options.dshPath ?? findExecutable('dsh', options.path)
+  const path = servicePath(nodePath, dshPath, options.path ?? process.env.PATH)
+  const environment = options.environment ?? await readRsiServiceEnvironment(input.dshHome, input.profile)
+  return {
+    ...paths,
+    source: createSystemdUserUnit({
+      ...paths, dshHome: input.dshHome, profile: input.profile, profileDirectory, nodePath, dshPath, path,
+      ...(environment === undefined ? {} : { environment }),
+    }),
+  }
+}
+
+export async function installDshSystemdService(
+  input: { dshHome: string; profile: string },
+  options: SystemdInstallOptions = {},
+): Promise<InstalledSystemdService> {
+  const { source, ...paths } = await renderDshSystemdService(input, options)
   const loginctlPath = options.loginctlPath ?? findExecutable('loginctl', options.path)
   const systemctlPath = options.systemctlPath ?? findExecutable('systemctl', options.path)
-  const path = servicePath(nodePath, dshPath, options.path ?? process.env.PATH)
   const run = options.run ?? defaultRun
   await prepareDshSystemdUserService(input, {
     ...(options.home === undefined ? {} : { home: options.home }),
@@ -329,9 +352,7 @@ export async function installDshSystemdService(
     run,
   })
   await mkdir(dirname(paths.unitPath), { recursive: true, mode: 0o700 })
-  await atomicWrite(paths.unitPath, createSystemdUserUnit({
-    ...paths, dshHome: input.dshHome, profile: input.profile, profileDirectory, nodePath, dshPath, path,
-  }))
+  await atomicWrite(paths.unitPath, source)
   const commands: Array<readonly string[]> = [
     ['--user', 'daemon-reload'],
     ['--user', 'enable', paths.unitName],

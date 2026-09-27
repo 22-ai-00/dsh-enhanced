@@ -192,7 +192,7 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 
 ### Linux
 
-向导创建私有的 `~/.config/systemd/user/dsh-profile-web.service`，只配置 DSH 所需路径及 Secret Service 可能需要的用户 D-Bus/XDG 定位。OAuth 前会检查 systemd user manager，并尝试为当前用户启用 linger，以便 SSH 注销后继续运行。若系统需要管理员授权，向导会在修改飞书应用前停止，并显示唯一需要执行的命令：
+向导创建私有的 `~/.config/systemd/user/dsh-profile-web.service`，配置 DSH 所需路径及 Secret Service 可能需要的用户 D-Bus/XDG 定位。若已通过 [RSI 配置器](rsi-setup.md)登记发布/Host 配置路径，安装或重装服务会自动加载这些持久绑定；不会复制任意 shell 环境或 Secret。OAuth 前会检查 systemd user manager，并尝试为当前用户启用 linger，以便 SSH 注销后继续运行。若系统需要管理员授权，向导会在修改飞书应用前停止，并显示唯一需要执行的命令：
 
 ```sh
 sudo loginctl enable-linger "$(id -u)"
