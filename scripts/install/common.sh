@@ -2356,19 +2356,19 @@ dsh_enhanced_prepare_rsi_source() {
   local repo_root="$4"
   local dry_run="$5"
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup"
-  local args=(--prepare-source --profile "$profile" --dsh-home "$dsh_home")
+  local args=(--prepare-build --optional-build --profile "$profile" --dsh-home "$dsh_home")
   if [[ "$source_mode" == 'local' ]]; then
     args+=(--source-repository "$repo_root")
   fi
 
-  printf '\nsupervised-growth：准备自迭代源码工作区。\n'
+  printf '\nsupervised-growth：准备自迭代源码和构建环境。\n'
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
     dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
     return $?
   fi
   dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}" || {
     local status=$?
-    dsh_enhanced_fail "$status" '自迭代源码准备失败，安装已停止。'
+    dsh_enhanced_fail "$status" '自迭代源码和构建环境准备失败，安装已停止。'
     return $?
   }
 }

@@ -134,6 +134,7 @@ test('rejects foreign databases and untrusted filesystem identities', () => {
   linkSync(join(f.root, 'target'), f.path)
   expect(() => new ReplayJournal(f.path)).toThrow(); rmSync(f.path)
   writeFileSync(f.path, '', { mode: 0o644 })
+  chmodSync(f.path, 0o644) // Preserve the unsafe fixture even under a private umask.
   expect(() => new ReplayJournal(f.path)).toThrow()
 })
 

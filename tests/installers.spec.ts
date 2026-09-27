@@ -8117,7 +8117,7 @@ fi
     expect(log).toContain('loginctl show-user')
     expect(log).not.toContain('--no-open --port 0')
     const larkSetup = log.indexOf('lark-setup --profile web --install-service')
-    const sourceSetup = log.indexOf(`rsi-source-setup --prepare-source --profile web --dsh-home ${dshHome} --source-repository ${repoRoot}`)
+    const sourceSetup = log.indexOf(`rsi-source-setup --prepare-build --optional-build --profile web --dsh-home ${dshHome} --source-repository ${repoRoot}`)
     const activator = log.indexOf('supervised-setup --profile web --timeout-ms 300000')
     const serviceDoctor = log.indexOf('systemctl --user is-active --quiet dsh-profile-web.service')
     expect(larkSetup).toBeGreaterThanOrEqual(0)
@@ -8655,6 +8655,9 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
 
   test('prints the bounded headless model route check only when requested', async () => {
     const dshHome = await temporaryDshHome()
+    // Pin a non-agent default for this dry-run; the builder image has no global dsh.
+    await writeFile(join(dshHome, 'settings.yaml'),
+      'agent-default-model:\n  provider: deepseek-official\n  model: deepseek-chat\n', 'utf8')
 
     const result = runInstaller(localInstaller, [
       '--dry-run', '--lark', 'skip', '--model-route', 'verify',

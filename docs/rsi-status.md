@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-09-26。此页是当前进展与剩余验收的唯一入口；历史流水保留在 Git 历史，配置以各插件 README 为准。
+更新：2026-09-27。此页是当前进展与剩余验收的唯一入口；历史流水保留在 Git 历史，配置以各插件 README 为准。
 
 ## 项目方向
 
@@ -13,12 +13,12 @@
 ## 当前交付边界
 
 - 新用户安装简化已实现：检测本机 `traex` / `trae-cli` 后自动安装并启用，保留显式模型、命令和工作目录；精确登录检查通过且没有显式选择时，只为目标 profile 设置默认模型。未登录或 `--model skip` 仍启用插件；失败仅恢复目标 profile。支持 pnpm 嵌套依赖布局。Lark 首次 owner 默认开放已安装工具能力，已有应用/owner 保留权限，显式关闭不因重装恢复。整仓检查通过，真实 DSH dump-config 已验证启用状态和配置保留；未执行真实 TraeX ACP 请求、飞书平台授权或生产 npm 安装。Host 已默认 Full access；这不等同于已取得全部飞书平台权限或完成成长授权。
-- supervised 新安装自动补齐 Skills、Verifier 与 Growth Driver，并在飞书配置前准备私有源码工作区和本地 bare 发布仓库。npm 固定取本次 CLI 版本的官方 tag，本地安装只取已提交 HEAD；重复执行保留已推进的修复基准，原开发工作区不变。该步骤移除手动建仓库配置，不生成签名授权、registry、构建环境或协调器 manifest，完整普通使用闭环仍待完成。配置与独立命令见 [RSI 安装指南](../plugins/lark-channel/docs/rsi-setup.md)。
+- supervised 新安装自动补齐 Skills、Verifier 与 Growth Driver，并在飞书配置前准备私有源码工作区和本地 bare 发布仓库。npm 固定取本次 CLI 版本的官方 tag，本地安装只取已提交 HEAD；重复执行保留已推进的修复基准，原开发工作区不变。该步骤移除手动建仓库配置。满足当前 Linux x64/Docker 29.4.1 条件时，安装器还会自动构建离线镜像并保存不可变 image ID 与 `sourceBuild` 配置，重装核对后复用；前置条件缺失会明确报告构建未就绪，实际构建失败会停止。签名授权、registry 与协调器 manifest 仍待自动生成，完整普通使用闭环尚未完成。配置与独立命令见 [RSI 安装指南](../plugins/lark-channel/docs/rsi-setup.md)。
 - 飞书向导默认接入官方业务 CLI：应用采用智能体权限模板，复用契约兼容 CLI 或校验下载官方 latest，安装时为绑定 owner 申请 `--domain all` 用户授权；由 DSH 原生技能按需读取 CLI 内嵌能力说明。身份同时核对本地验证状态与服务端 user_info，重复安装复用有效授权；更换 owner/app/account 或显式关闭时先撤旧技能。真实 Linux CLI 1.0.96 下载、离线复用与原生技能加载已验证；平台授权和真实业务操作尚未执行，不能宣称租户全部权限已开通。macOS/Windows 尚未实机验证，系统钥匙环与同一 DSH_HOME 的用户技能目录不构成独立凭据隔离。
 - 按用户确认跟随官方 npm `latest`，当前验证基线为 DSH `0.1.5-rc.3`；registry 尚无正式 `0.1.7`，`0.1.7-rc.2` 属于 next。测试依赖保持精确版本以复现结果，新装默认 selector 将跟随 latest 并验证兼容范围，已有兼容 Host 保持复用。`update --all` 尚不更新 DSH Host，后续须补齐受管 Host 更新事务。原生 Agent setup、Inbox、PTC 审计事件、系统提示和会话句柄 API 已迁移，完整 `pnpm check` 退出 0。真实 latest CLI 的三进程会话写入、未知事件拒绝和冷读恢复，以及 systemd reload/readiness/物理 restore 探针已通过；这些兼容性结果不代表生产自迭代闭环或 npm 发布门槛已完成。
 - 普通反馈→持久复盘→源码候选→发布/采用协调已有接线，`dsh-rsi-setup` 已实现。已提供可选[有限试用采用合同](bounded-live-adoption.md)：独立源码审核及 reload/readiness 后，使用精确部署下的普通任务反馈签发资格，最终提交同时重验原失败来源与资格反馈；负向或失效证据进入原有物理回退。窗口约束决定与回退请求，不保证物理恢复时限；整个 profile 会暴露候选，同 UID 不是 OS 隔离。双 Host 配置器校验第五个签发器与第六份预算，完整工程检查与独立源码复核通过，真实部署闭环尚未验收。缺省严格合同保持原独立行为阶段；现有 systemd attestor 不能签发全局 `externalEffects=0`，新合同也不作此声明。
 
-- 已接入自动 Host 授权：schema25 在暴露部署前保存批准输入及原始文件记录，systemd v6 的 schema4 包装层调用独立有限授权器，从 claimed 操作自动生成 reload/readiness/rollback 配置，避免每次更新人工填写摘要。候选与原始 Host 分别固定 observer；静态配置继续兼容。首次安装已准备源码仓库，仍须补齐独立协调器、离线构建与签名资源的自动配置，以及受管 Host 更新。
+- 已接入自动 Host 授权：schema25 在暴露部署前保存批准输入及原始文件记录，systemd v6 的 schema4 包装层调用独立有限授权器，从 claimed 操作自动生成 reload/readiness/rollback 配置，避免每次更新人工填写摘要。候选与原始 Host 分别固定 observer；静态配置继续兼容。首次安装已准备源码仓库，并可在支持的 Docker 环境自动准备离线构建镜像；仍须补齐独立协调器与签名资源的自动配置，以及受管 Host 更新。
 - 本地发布后的连续源码基线已接入可选 [`sourceJobs.baseline`](../plugins/plugin-control-plane/README.md#持久源码检查任务可选)：完整发布的已应用签名合并链决定下一次读取、入队和构建的基准，专用 Git ref 可从账本恢复，旧候选和并行发布被拒绝。主工作区和关联 worktree 的 HEAD、索引与文件保持原状；外部同 UID 并发改写 Git 不构成原子隔离。真实 Git、SQLite 和签名的两轮发布后重开账本、下一作业入队已通过工程测试；发布执行器与调度器仍为替身。安装器已准备仓库与初始提交 pin，仍须自动生成授权配置并将 baseline 写入完整 manifest；未知合并结果仍需对账，不代表已实现无人配置的生产持续迭代。
 - 双 Host 配置器修复了 owner 路由与源码作业授权 ID 的混用：审核与签名授权中的 owner 使用真实 Delivery route，源码作业的独立额度标识保持不变。生成配置接入真实 Verifier 的有效 owner、错误作业 ID 和 owner 版本变更准入检查已通过，独立复核通过；不是实际模型审核或生产采用验收。
 - 即时审批沿用已发布能力：Policy 的 `auto` 对非凭据本地只读与单个命名 Skill 加载直接继续，显式 `ask` 仍询问；Lark 使用 CardKit callback，`format_error` 时降级为同一 owner 私聊的精确文字允许/拒绝。Auto 来源判定也已修复：当前 format 3 中残留 `auto` 选择不能授权后来切换的 full-access 自动审核；独立复核与 Policy 定向测试通过。
@@ -81,13 +81,15 @@ WP14 的独立性证据限定于 after-freeze 任务生成与绑定，不证明�
 
 1. 验证实际飞书部署：本机 TraeX 自动接入、原生 Full access、首次 Lark owner 默认规则和业务 CLI 安装/用户授权入口已实现；在实际安装中完成平台授权并验证普通业务任务。应用和用户 scopes 由平台批准，不能从本地规则或 fixture 推导全权限可用。停止、回滚、去重及独立验收继续保留。
 2. 补齐已有 Host 跟随官方 latest 更新：扩展现有 service-aware 事务，以精确版本私有 Host 验证离线副本并切换受管服务；不能在活动 Host 下覆盖全局 npm。覆盖同一 home 的 sibling profile 兼容性及失败恢复。
-3. 补齐普通使用的安装环境：源码 checkout、本地 bare 发布仓库与必要目标插件已由安装器准备；继续自动准备独立协调器、离线构建、本地 registry、签名资源及自动 Host 授权，复用 [`dsh-rsi-setup`](../plugins/lark-channel/docs/rsi-setup.md) 成对配置。补齐配置器对 schema4 wrapper/resolver 的预检，并将已准备的仓库和 `sourceJobs.baseline` 接入生成的 manifest；默认继承来源任务模型。
+3. 补齐普通使用的安装环境：源码 checkout、本地 bare 发布仓库、必要目标插件及支持环境下的离线镜像已由安装器准备；继续自动准备独立协调器、本地 registry、签名资源及自动 Host 授权，复用 [`dsh-rsi-setup`](../plugins/lark-channel/docs/rsi-setup.md) 成对配置。补齐配置器对 schema4 wrapper/resolver 的预检，确保发布 attestor 的固定 Node shebang 与实际受管解释器路径一致，并将已准备的仓库、`sourceJobs.baseline` 与 `sourceBuild` 接入生成的 manifest；默认继承来源任务模型。
 4. 完成可选有限试用合同的部署验收：独立签发器、普通任务资格、最终提交纠正竞争、重启后观察与物理回退。缺省严格合同仍需补齐独立行为观测；有限试用不代表 shadow/canary/soak/health 或全局无副作用验收。
 5. 在实际部署中验证普通反馈驱动候选、独立验证、有限采用和后续真实任务观察/回滚，然后完成发布检查并发布 npm。保留上表未完成边界；Skills 路径仍需去除逐 Goal 手动 arm，WP18 仍需真实仓库授权提交与精确 CI/readback。固定场景和测试夹具不算生产闭环。
 
 ## 开发入口与验证
 
-- 本轮完整验证：`NODE_OPTIONS=--max-old-space-size=8192 pnpm check` 退出 0，覆盖清单校验、零警告 lint、类型检查、测试、构建与打包。根目录 675 项、36 个包 6,147 项测试通过，50 项跳过；其中 Control Plane 792 项、Delivery 810 项、Growth Driver 92 项、Lark 528 项、TraeX provider 161 项通过。36 个包 dry-run pack 均成功，32 个插件包含 patch，所有包包含 README/LICENSE；新增源码准备模块及声明进入 Lark 包，未混入测试和日志。代理与静态 Git 校验顺序的最终改动另通过 Lark 类型检查、零警告 lint 和 30 项定向测试。
+- 最近完整验证（自动构建环境与安装器兼容修复）：`NODE_OPTIONS=--max-old-space-size=8192 pnpm check` 退出 0，覆盖清单校验、零警告 lint、类型检查、测试、构建与打包。根目录 675 项、36 个包 6,155 项测试通过，50 项跳过；其中 Control Plane 792 项、Delivery 810 项、Growth Driver 92 项、Lark 536 项、TraeX provider 161 项通过。36 个包 dry-run pack 均成功，32 个插件包含 patch，所有包包含 README/LICENSE；新增 `rsi-build` 模块与声明进入 Lark 包，未混入测试、覆盖率或日志。
+- 自动构建环境通过真实编译 CLI 的镜像准备与回执复用，生成的 `sourceBuild` 通过 Control Plane 校验。使用同一不可变镜像和生成配置，对冻结的当前工作区运行生产 `runDockerPreparedChecks`：离线安装、整仓 `pnpm check`、Control Plane 制品打包与最终源码摘要复查均成功，退出 0，耗时约 24 分 53 秒，保持单 worker 与 30 分钟上限，容器已清理。容器内根目录 673 项通过/2 项条件跳过，36 个包 6,143 项通过/62 项条件跳过；其中 12 项物理恢复用例要求可见的 supervisor cgroup，容器隐藏 `/sys` 时按真实环境条件跳过，宿主全检则全部执行通过。不可见层级的拒绝检查仍在容器运行。该验证使用本地提交及当前工作区，不包含真实模型候选、官方源码公网下载、registry 发布或生产采用。
+- 离线与私有目录验证暴露的测试环境依赖已修复：子进程 Vitest 限定根测试目录，避免重复发现忽略目录内的源码副本；模型验证夹具显式设置默认模型；不安全权限夹具显式设置 mode，避免被私有 umask 收窄；授权 CLI 夹具使用私有解释器及匹配 shebang。受测授权 CLI 仍来自实际包，生产 attestor 与 Docker 边界未放宽；容器不能替代宿主物理恢复验证，生产 attestor 的解释器部署配置仍属于下一步。
 - 自动源码准备已通过真实本地 Git、命令入口与安装器回归：仅复制提交内容、保留原工作区、重复执行保留后续发布进度、错误版本及损坏资源拒绝、子进程取消清理、常用代理/CA 透传及配置注入排除。编译后的 CLI 对实际仓库的准备与重复执行也通过；固定官方 GitHub tag 下载在本环境 60 秒超时，未验收公网下载，不据此宣称完整 npm/生产安装成功。独立只读源码复核通过；所有原始日志留在忽略的 `docs/evidence/`。
 - 连续源码基线新增 20 项工程回归：真实 Git 的两次签名合并、零历史初始 pin、专用 ref 恢复、脏工作区保留、主/关联 worktree 的符号 HEAD 拒绝，以及篡改/分叉/未完成/失败后已合并的历史拒绝。真实 SQLite 和签名完成两轮发布后重开账本，受管作业冻结第二次基线并拒绝旧基线；服务读取和隔离准备也使用同一新基线。发布执行器、构建与调度部分仍用替身，不能据此宣称真实生产连续发布或采用完成；外部同 UID Git 改动不具原子隔离。
 - 自动 Host 授权新增 29 项工程回归：v24→25 保留计划/批准签名、不可变部署记录、claimed 操作、过期撤权后的恢复、有限配额与精确重放、打包 CLI 子进程，以及 schema4 包装层的 reload/readiness/restore/stop 和解释器拒绝。真实 Store/resolver 与使用替身 resolver 的 attestor 测试分别验证各自边界，尚未合并执行完整生产链。真实离线 packed ACP 安装使用 pnpm hardlink，声明输入解离后链接数 2→1、SHA256 不变且捕获成功；该探针不证明完整 DSH 激活。旧明确授权配置的回归与全部 Control Plane 测试通过。失效授权下未知操作仍需精确回执对账，不宣称自动恢复。

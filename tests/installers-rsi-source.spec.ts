@@ -35,15 +35,15 @@ function invokeHelper(home: string, mode: 'local' | 'npm', repository: string, d
   })
 }
 
-describe('supervised RSI source preparation', () => {
+describe('supervised RSI source and build preparation', () => {
   it('forwards the canonical local source and uses the installed profile CLI', async () => {
     const { home, log } = await fixture()
     const result = invokeHelper(home, 'local', repoRoot, false, log)
     expect(result.status, result.stderr).toBe(0)
     expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([
-      '--prepare-source', '--profile', 'web', '--dsh-home', home, '--source-repository', repoRoot,
+      '--prepare-build', '--optional-build', '--profile', 'web', '--dsh-home', home, '--source-repository', repoRoot,
     ])
-    expect(result.stdout).toContain('准备自迭代源码工作区')
+    expect(result.stdout).toContain('准备自迭代源码和构建环境')
   })
 
   it('omits a local repository for npm and propagates preparation failures', async () => {
@@ -51,11 +51,11 @@ describe('supervised RSI source preparation', () => {
     const result = invokeHelper(home, 'npm', repoRoot, false, log)
     expect(result.status, result.stderr).toBe(0)
     expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([
-      '--prepare-source', '--profile', 'web', '--dsh-home', home,
+      '--prepare-build', '--optional-build', '--profile', 'web', '--dsh-home', home,
     ])
     const failed = invokeHelper(home, 'npm', repoRoot, false, log, 17)
     expect(failed.status).toBe(17)
-    expect(failed.stderr).toContain('自迭代源码准备失败，安装已停止')
+    expect(failed.stderr).toContain('自迭代源码和构建环境准备失败，安装已停止')
     await rm(join(home, 'profiles', 'web', 'node_modules', '.bin', 'dsh-rsi-setup'))
     const missing = invokeHelper(home, 'npm', repoRoot, false, log)
     expect(missing.status).toBe(1)
@@ -73,7 +73,7 @@ describe('supervised RSI source preparation', () => {
       expect(result.stdout).toContain(join(repoRoot, 'plugins', slug))
     }
     const install = result.stdout.indexOf('dsh plugin --profile web add')
-    const source = result.stdout.indexOf('dsh-rsi-setup --prepare-source')
+    const source = result.stdout.indexOf('dsh-rsi-setup --prepare-build --optional-build')
     const finalSetup = result.stdout.indexOf('dsh-supervised-growth-setup --profile web')
     expect(install).toBeGreaterThanOrEqual(0)
     expect(source).toBeGreaterThan(install)
@@ -85,6 +85,6 @@ describe('supervised RSI source preparation', () => {
       cwd: repoRoot, encoding: 'utf8', env: { ...process.env, DSH_HOME: home, PATH: pathWithoutTraex },
     })
     expect(standard.status, standard.stderr).toBe(0)
-    expect(standard.stdout).not.toContain('dsh-rsi-setup --prepare-source')
+    expect(standard.stdout).not.toContain('dsh-rsi-setup --prepare-build')
   })
 })

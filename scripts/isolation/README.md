@@ -1,5 +1,11 @@
 # Source builder image
 
+New supervised installations prepare this image automatically when the supported
+Linux x64 Docker runtime is available. The installer pins the builder inputs,
+records the immutable image ID in a private receipt, and verifies that receipt
+before reusing the image. See the [RSI setup guide](../../plugins/lark-channel/docs/rsi-setup.md)
+for the installed command, runtime requirements, and generated `sourceBuild` configuration.
+
 Build the owner-controlled, manifest-only source-check image with:
 
 ```sh
@@ -65,8 +71,9 @@ clears both masked and read-only system-path lists. The empty `/sys` does
 **not** restore `/proc` masks. Arbitrary repository tests run in this outer
 container and can see its unmasked `/proc`; the inner release sandbox does
 not protect all outer test code. This profile is not equivalent to Docker's
-default restrictions. The owner must explicitly select it for the pinned
-check environment. Standard builds and repository builds without this opt-in
+default restrictions. Supervised installation selects it for the supported
+pinned environment; standalone configuration must select it explicitly.
+Standard builds and repository builds without this opt-in
 retain the default system-path policy.
 
 The runner retains UID 65534, zero capabilities, no-new-privileges, network
@@ -101,7 +108,11 @@ including uncommitted, non-ignored files. It runs the unchanged root
 Both tmpfs mounts permit execution of build tools and test fixtures; the root
 remains read-only, with no capabilities or network. The evidence records actual Docker arguments and the immutable archived Git
 tree label. Normal conditional integration skips remain in force (for example,
-there is no Docker socket or nested-container authority). This does not create
+there is no Docker socket or nested-container authority). Physical recovery
+tests also require a visible supervisor cgroup hierarchy; the masked `/sys`
+does not provide it. Those cases run on a capable host, while rejection of an
+invisible hierarchy remains covered inside this container. Container success
+does not replace the host's physical recovery checks. This does not create
 a source plan, invoke a model, publish packages, or activate a deployment.
 
 Image construction needs Docker-daemon access and network access to the public
