@@ -2661,14 +2661,18 @@ dsh_enhanced_run_lifecycle_executor() {
     return $?
   fi
   local lock_path="${dsh_home}.dsh-enhanced-lifecycle.lock"
-  if [[ "$operation" == 'recover' || "$operation" == 'service-recover' ]]; then
+  if [[ "$operation" == 'host-recover' ]]; then
+    # A v4 rename gap may leave neither the Home nor its former dsh on PATH.
+    dsh_executable='/usr/bin/node'
+    bwrap_executable='/nonexistent/bwrap-not-required-for-recovery'
+  elif [[ "$operation" == 'recover' || "$operation" == 'service-recover' ]]; then
     dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_enhanced_fail 1 'lifecycle recovery 需要现有 dsh executable 复检绑定配置。'; return $?; }
     bwrap_executable='/nonexistent/bwrap-not-required-for-recovery'
   else
     dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_enhanced_fail 1 '找不到现有 dsh executable。'; return $?; }
     bwrap_executable="$(command -v bwrap 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 bubblewrap（bwrap）。'; return $?; }
   fi
-  if [[ "$operation" == 'service-upgrade' || "$operation" == 'npm-service-upgrade' || "$operation" == 'service-uninstall' || "$operation" == 'service-recover' ]]; then
+  if [[ "$operation" == 'service-upgrade' || "$operation" == 'npm-service-upgrade' || "$operation" == 'service-uninstall' || "$operation" == 'service-recover' || "$operation" == 'host-update' || "$operation" == 'host-recover' ]]; then
     systemctl_executable="$(command -v systemctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark/supervised service lifecycle 需要 systemctl。'; return $?; }
     journalctl_executable="$(command -v journalctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark/supervised service lifecycle 需要 journalctl 验证 fresh InvocationID readiness。'; return $?; }
     set -- "$systemctl_executable" "$journalctl_executable" "$@"
@@ -2694,6 +2698,22 @@ dsh_enhanced_run_lifecycle_executor() {
     return $?
   fi
   return "$status"
+}
+
+dsh_enhanced_finish_host_update() {
+  local profile="$1"
+  local dsh_home="$2"
+  local plan_path="${DSH_ENHANCED_HOST_UPDATE_PLAN:-}"
+  [[ -n "$plan_path" ]] || return 0
+  if [[ "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" != 'Linux' ]]; then
+    dsh_enhanced_fail 1 '受管 Host 更新需要 Linux systemd --user。'
+    return $?
+  fi
+  dsh_enhanced_run_lifecycle_executor host-update "$profile" "$dsh_home" "$plan_path" || return $?
+  if [[ -n "${DSH_ENHANCED_HOST_UPDATE_BIN:-}" ]]; then
+    PATH="${DSH_ENHANCED_HOST_UPDATE_BIN}:$PATH"
+    export PATH DSH_ENHANCED_HOST_BIN="$DSH_ENHANCED_HOST_UPDATE_BIN"
+  fi
 }
 
 dsh_enhanced_profile_lifecycle() {
@@ -3080,6 +3100,28 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 1 '无法解析 lifecycle DSH_HOME 的 canonical 路径。'
       return $?
     }
+    if [[ "${DSH_ENHANCED_HOST_RECOVERY_ONLY:-}" == '1' ]]; then
+      if [[ "$operation" != 'upgrade' || "$dry_run" == '1' ]]; then
+        dsh_enhanced_fail 2 'Host recovery 仅用于非 dry-run upgrade。'
+        return $?
+      fi
+      for lifecycle_asset in host-lifecycle.mjs host-profile-update.mjs host-rsi-update.mjs; do
+        if [[ ! -f "$lifecycle_directory/$lifecycle_asset" || -L "$lifecycle_directory/$lifecycle_asset" ]]; then
+          dsh_enhanced_fail 1 "缺少可信的 Host 资产：$lifecycle_directory/$lifecycle_asset"
+          return $?
+        fi
+      done
+      dsh_enhanced_run_lifecycle_executor host-recover "${DSH_ENHANCED_HOST_RECOVERY_PROFILE:-$profile}" "$dsh_home"
+      return $?
+    fi
+    if [[ -n "${DSH_ENHANCED_HOST_UPDATE_PLAN:-}" ]]; then
+      for lifecycle_asset in host-lifecycle.mjs host-profile-update.mjs host-rsi-update.mjs; do
+        if [[ ! -f "$lifecycle_directory/$lifecycle_asset" || -L "$lifecycle_directory/$lifecycle_asset" ]]; then
+          dsh_enhanced_fail 1 "缺少可信的 Host 资产：$lifecycle_directory/$lifecycle_asset"
+          return $?
+        fi
+      done
+    fi
     if [[ "$confirm_dsh_home_stopped" != '1' ]]; then
       dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；Lark/supervised service lifecycle 会自行停止受管 systemd units，该确认表示其它外部/手工进程均已停止。"
       return $?
@@ -3111,7 +3153,7 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 'profile 生命周期事务不会扩展能力；升级期间不能使用 --with。'
       return $?
     fi
-    if [[ "$dsh_version_explicit" == '1' ]]; then
+    if [[ "$dsh_version_explicit" == '1' && "${DSH_ENHANCED_HOST_SELECTOR_VALIDATED:-}" != '1' ]]; then
       dsh_enhanced_fail 2 'profile 生命周期事务不会修改全局 DSH；请先单独完成 Host 升级，再执行本操作。'
       return $?
     fi
@@ -3176,11 +3218,13 @@ dsh_enhanced_install() {
       dsh_enhanced_require_node || return $?
       dsh_enhanced_require_existing_runtime "$ack_unverified_host" || return $?
       if [[ ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) && "$lifecycle_platform" == 'Linux' ]]; then
-        dsh_enhanced_run_lifecycle_executor npm-service-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version"
+        dsh_enhanced_run_lifecycle_executor npm-service-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version" || return $?
+        dsh_enhanced_finish_host_update "$profile" "$dsh_home"
         return $?
       fi
       if [[ "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
-        dsh_enhanced_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version"
+        dsh_enhanced_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version" || return $?
+        dsh_enhanced_finish_host_update "$profile" "$dsh_home"
         return $?
       fi
       printf 'macOS 已停止 Home 升级：将保留现有 Lark/supervised 配置，不重跑 onboarding 或注册服务。\n'
@@ -3582,15 +3626,18 @@ NODE
         printf '  - On readiness failure, keep services stopped and preserve both homes plus the bound manifest without automatic rollback.\n'
         dsh_enhanced_print_command dsh plugin --profile "$profile" add "${targets[@]}"
       else
-        dsh_enhanced_run_lifecycle_executor service-upgrade "$profile" "$dsh_home" "$scenario" "${targets[@]}"
+        dsh_enhanced_run_lifecycle_executor service-upgrade "$profile" "$dsh_home" "$scenario" "${targets[@]}" || return $?
+        dsh_enhanced_finish_host_update "$profile" "$dsh_home"
       fi
       return $?
     fi
     if [[ "$scenario" != 'lark' && "$scenario" != 'supervised' ]]; then
-      dsh_enhanced_profile_lifecycle upgrade "$profile" "$dsh_home" "$dry_run" "$scenario" "${targets[@]}"
+      dsh_enhanced_profile_lifecycle upgrade "$profile" "$dsh_home" "$dry_run" "$scenario" "${targets[@]}" || return $?
+      if [[ "$dry_run" != '1' ]]; then dsh_enhanced_finish_host_update "$profile" "$dsh_home"; fi
       return $?
     fi
-    dsh_enhanced_macos_stopped_upgrade "$profile" "$dsh_home" "$dry_run" "${targets[@]}"
+    dsh_enhanced_macos_stopped_upgrade "$profile" "$dsh_home" "$dry_run" "${targets[@]}" || return $?
+    if [[ "$dry_run" != '1' ]]; then dsh_enhanced_finish_host_update "$profile" "$dsh_home"; fi
     return $?
   fi
 

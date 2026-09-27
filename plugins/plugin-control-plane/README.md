@@ -144,11 +144,11 @@ request 固定：installation id、ledger id/path、plan id/digest、activation 
 
 Host attestor 与 release adapter 的每次命令共用受控进程组：超时、输出超限及主进程正常/异常退出都会清理同组后代，核对主进程退出，并有界排空 stdout。清理无法证实时返回失败，不以遗留管道的 `close` 无限等待。该机制依赖 runner 存活，不能包含主动 `setsid()` 脱组进程，也不撤回远端已接受的操作；具体期限、恢复边界与回归证据见 [adapter 生命周期](../../docs/control-plane-adapter-lifetime.md)。
 
-随包的 `bin/dsh-systemd-host-attestor.js`（v7）提供 Linux/systemd 的 **reload、readiness 与物理 rollback** 适配：可用 schema4 与随包 `dsh-systemd-host-authority` 按安装期有限授权自动生成精确请求配置，或用 `probe --prepare-only` 取得请求后显式配置其摘要；重启前记录操作，重复调用仅重放或观测对账。它核验 fresh InvocationID/MainPID 与稳定窗口，按 installation 共享 Host 代次，reload 推进至 `awaiting-readiness`；readiness 再绑定最新已签重启、实际 Loader/Fiber 与服务实例，多次稳定观测后签名，重复请求不重启 Host。稳定、认证通过且身份匹配的 inactive 候选签为 failed readiness；认证错误或状态漂移不签发回执。rollback 在 CLI 恢复原 profile 文件后证明原 Host 就绪，或原本不存在的 profile 已停服；缺少物理恢复凭证时继续保持 pending。部署配置、权限和未覆盖阶段见 [systemd Host attestor](../../docs/systemd-host-attestor.md)。
+随包的 `bin/dsh-systemd-host-attestor.js`（v8）提供 Linux/systemd 的 **reload、readiness 与物理 rollback** 适配：可用 schema4 与随包 `dsh-systemd-host-authority` 按安装期有限授权自动生成精确请求配置，或用 `probe --prepare-only` 取得请求后显式配置其摘要；重启前记录操作，重复调用仅重放或观测对账。它核验 fresh InvocationID/MainPID 与稳定窗口，按 installation 共享 Host 代次，reload 推进至 `awaiting-readiness`；readiness 再绑定最新已签重启、实际 Loader/Fiber 与服务实例，多次稳定观测后签名，重复请求不重启 Host。稳定、认证通过且身份匹配的 inactive 候选签为 failed readiness；认证错误或状态漂移不签发回执。rollback 在 CLI 恢复原 profile 文件后证明原 Host 就绪，或原本不存在的 profile 已停服；缺少物理恢复凭证时继续保持 pending。部署配置、权限和未覆盖阶段见 [systemd Host attestor](../../docs/systemd-host-attestor.md)。
 
 phase operation 和派发 claim 在子进程启动前持久化。外部执行期间不持有控制面 SQLite 写锁，其他任务可继续写入；同一 operation 的并发或重启调用由持久 claim 拒绝。退出、验签失败或回执丢失后保留 unknown，不自动再次调用通用 attestor。取得原请求的精确签名回执后，用下述 `attest` 对账；未结算的派发也会阻止同计划换代回退，避免旧外部动作与恢复并行。
 
-成功部署重启后，目标 Host 在当前 owner 来源保护下登记独立 runtime epoch 请求，由既有协调器 Automation 获取新的签名实例证明。它不重启服务，不改旧 plan、watch 或原始 readiness；新证明到达前的任务不回填。schema 26 为此新增独立记录，详细授权、计数与恢复边界见 [重启后的持续观察](../../docs/systemd-host-attestor.md#runtime-continuity-after-restart)。
+成功部署重启后，目标 Host 在当前 owner 来源保护下登记独立 runtime epoch 请求，由既有协调器 Automation 获取新的签名实例证明。它不重启服务，不改旧 plan、watch 或原始 readiness；新证明到达前的任务不回填。schema 26 为此新增独立记录；schema 27 另保存原 Host 身份签名的维护链，供受管更新后投影当前部署和回滚基线，原计划及验收历史保持不变。维护协议见 [Host 迁移](../../docs/systemd-host-attestor.md#continuity-through-managed-host-maintenance)，详细授权、计数与恢复边界见 [重启后的持续观察](../../docs/systemd-host-attestor.md#runtime-continuity-after-restart)。
 
 ## Phase proof，而不是命令标签
 

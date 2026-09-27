@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
-export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-7'
+export const SYSTEMD_HOST_ATTESTOR_VERSION = 'dsh-systemd-host-attestor-8'
 const DIGEST = /^[a-f0-9]{64}$/u
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u
 const UNIT_PROPERTIES = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory', 'User', 'Group', 'Type', 'KillMode']
@@ -247,14 +247,14 @@ async function resolveStandingConfig(wrapper, request) {
     const result = await execute({ command: descriptors.length === 2 ? '/proc/self/fd/4' : '/proc/self/fd/3',
       args: [...(descriptors.length === 2 ? ['/proc/self/fd/3'] : []), '--config', resolver.configPath],
       env: { LANG: 'C', LC_ALL: 'C' }, stdio: ['pipe', 'pipe', 'ignore', ...descriptors],
-      stdin: `${JSON.stringify(request)}\n`, maximumOutput: 65536, timeoutMs: resolver.timeoutMs })
+      stdin: `${JSON.stringify(request)}\n`, maximumOutput: 524288, timeoutMs: resolver.timeoutMs })
     for (let index = 0; index < descriptors.length; index++) if (hash(descriptorBytes(descriptors[index], 268435456)) !== specs[index].sha256) fail('resolver mutated')
     if (hash(readSafe(resolver.configPath, 65536, true)) !== resolver.configSha256) fail('resolver config changed during authorization')
     const derived = parseJson(Buffer.from(result), 'resolved config')
     for (const field of TEMPLATE_FIELDS.filter(field => field !== 'readiness' && field !== 'recoveryReadiness')) {
       if (canonical(derived[field]) !== canonical(template[field])) fail('resolved static authority differs')
     }
-    const expectedSchema = request.kind === 'dsh-runtime-epoch-request' ? 5
+    const expectedSchema = request.kind === 'dsh-runtime-epoch-request' ? (derived.maintenance === undefined ? 5 : 6)
       : request.phase === 'reload' ? 1 : request.phase === 'readiness' ? 2 : 3
     if (derived.schemaVersion !== expectedSchema || derived.authorization?.requestDigest !== digest(request)) fail('resolver did not authorize the exact phase and request')
     if (expectedSchema !== 1) {
@@ -272,8 +272,10 @@ async function resolveStandingConfig(wrapper, request) {
 function loadEpochConfig(environment, request, config) {
   object(config, ['schemaVersion', 'authority', 'keyId', 'privateKeyPath', 'stateRoot', 'executable', 'interpreter', 'processHelper',
     'systemctl', 'scope', 'unit', 'unitProperties', 'profileFiles', 'authorization', 'timeoutMs', 'stableWindowMs', 'pollIntervalMs',
-    'readiness'], 'epoch config')
-  if (config.schemaVersion !== 5) fail('runtime epoch requires config schema 5')
+    'readiness', ...(config.schemaVersion === 6 ? ['maintenance'] : [])], 'epoch config')
+  if (![5, 6].includes(config.schemaVersion)) fail('runtime epoch requires config schema 5 or 6')
+  if (config.schemaVersion === 6 && (!Array.isArray(config.maintenance) || !config.maintenance.length
+    || config.maintenance.length > 256 || Buffer.byteLength(JSON.stringify(config.maintenance)) > 450000)) fail('maintenance chain exceeds bounds')
   text(config.authority, 'authority', ID); text(config.keyId, 'keyId', ID)
   integer(config.timeoutMs, 'timeout', 1000, 60000); integer(config.stableWindowMs, 'stable window', 50, 10000)
   integer(config.pollIntervalMs, 'poll interval', 25, 1000)
@@ -768,6 +770,7 @@ function boundEpochPredecessor(db, request, config, privateKey) {
     if (canonical(priorRequest[field]) !== canonical(request[field])) fail('historical reload context differs')
   }
   for (const field of ['authority', 'keyId', 'privateKeyPath', 'stateRoot', 'scope', 'unit', 'unitProperties', 'profileFiles', 'systemctl']) {
+    if (config.schemaVersion === 6 && ['unitProperties', 'profileFiles'].includes(field)) continue
     if (canonical(priorConfig[field]) !== canonical(config[field])) fail('historical deployment differs')
   }
   const signedReload = retainedSignedReceipt(reload, privateKey, 'historical reload')
@@ -790,8 +793,36 @@ function boundEpochPredecessor(db, request, config, privateKey) {
     || signedReady.observation.reload?.generation !== reload.generation
     || request.predecessor.operationId !== ready.operationId || request.predecessor.receiptDigest !== digest(ready)
     || request.predecessor.hostGeneration !== ready.hostGeneration) fail('runtime epoch predecessor is not the applied signed readiness')
+  if (config.schemaVersion === 6) verifyEpochMaintenance(config, request, priorConfig, ready, privateKey)
   return { reloadOperationId: reload.operation_id, readinessOperationId: ready.operationId,
     readinessReceiptDigest: digest(ready), hostGeneration: reload.generation }
+}
+function verifyEpochMaintenance(config, request, original, ready, privateKey) {
+  const key = createPublicKey(privateKey), publicKeyPem = key.export({ type: 'spki', format: 'pem' }).toString()
+  let prior
+  for (const record of config.maintenance) {
+    object(record, ['schemaVersion', 'kind', 'transactionId', 'installationId', 'ledger', 'profile', 'plan', 'activation',
+      'predecessor', 'sequence', 'previousDigest', 'before', 'after', 'issuedAt', 'authority', 'keyId', 'publicKeyPem', 'signature'], 'maintenance record')
+    const { signature, ...unsigned } = record
+    if (record.schemaVersion !== 1 || record.kind !== 'dsh-host-maintenance'
+      || record.publicKeyPem !== publicKeyPem || record.authority !== config.authority || record.keyId !== config.keyId
+      || typeof signature !== 'string' || !verify(null, Buffer.from(canonical(unsigned)), key, Buffer.from(signature, 'base64'))
+      || record.sequence !== (prior?.sequence ?? 0) + 1 || record.previousDigest !== (prior ? digest(prior) : null)
+      || !Number.isSafeInteger(record.issuedAt) || record.issuedAt < (prior?.issuedAt ?? ready.observedAt)
+      || record.issuedAt > Date.now() || canonical(record.predecessor) !== canonical(request.predecessor)) fail('maintenance signature or chain differs')
+    for (const field of ['installationId', 'ledger', 'profile', 'plan', 'activation']) {
+      if (canonical(record[field]) !== canonical(request[field])) fail('maintenance deployment identity differs')
+    }
+    for (const snapshot of [record.before, record.after]) object(snapshot,
+      ['executor', 'profileFiles', 'baselineFiles', 'deploymentFiles', 'baselineDeploymentFiles', 'unitProperties'], 'maintenance snapshot')
+    if (prior ? canonical(record.before) !== canonical(prior.after)
+      : canonical(record.before.profileFiles) !== canonical(original.profileFiles)
+        || canonical(record.before.unitProperties) !== canonical(original.unitProperties)) fail('maintenance predecessor deployment differs')
+    prior = record
+  }
+  if (!prior || canonical(prior.after.profileFiles) !== canonical(config.profileFiles)
+    || canonical(prior.after.unitProperties) !== canonical(config.unitProperties)
+    || canonical(prior.after.deploymentFiles.map(({ path, sha256 }) => ({ path, sha256 }))) !== canonical(config.readiness.deploymentFiles)) fail('maintenance current deployment differs')
 }
 function epochJournal(config) {
   const path = join(config.stateRoot, 'runtime-epochs.sqlite')

@@ -17,10 +17,14 @@ const cleanup: Array<() => Promise<void>> = []
 export async function cleanupReleaseFixtures() { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.resetAllMocks() }
 export const phases = ['pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission'] as const
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
-export async function fixture(ownerBound = false, input: { repository?: string; baseCommit?: string; mergeCommit?: string } = {}) {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'source-release-runner-'))); await chmod(root, 0o700)
-  const db = join(root, 'control.sqlite'), store = new ControlPlaneStore({ path: db })
-  cleanup.push(async () => { store.close(); await rm(root, { recursive: true, force: true }) })
+export async function fixture(ownerBound = false, input: { repository?: string; baseCommit?: string; mergeCommit?: string;
+  root?: string; databasePath?: string; installationId?: string; ledgerId?: string } = {}) {
+  const root = await realpath(input.root ?? await mkdtemp(join(tmpdir(), 'source-release-runner-'))); await chmod(root, 0o700)
+  const db = input.databasePath ?? join(root, 'control.sqlite')
+  let store = new ControlPlaneStore({ path: db })
+  let closed = false
+  const close = () => { if (!closed) { store.close(); closed = true } }
+  cleanup.push(async () => { close(); await rm(root, { recursive: true, force: true }) })
   const catalog = { schemaVersion: 1 as const, entries: [] }, catalogPath = join(root, 'catalog.json')
   await writeFile(catalogPath, JSON.stringify(catalog), { mode: 0o600 })
   const reviewDecisionRoot = join(root, 'review'); await mkdir(reviewDecisionRoot, { mode: 0o700 })
@@ -62,10 +66,10 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
   }
   const trustedKey = (name: string, authority = name) => ({ authority, keyId: authority,
     publicKeyPem: keys[name]!.publicKey.export({ format: 'pem', type: 'spki' }).toString() })
-  const rawTrust = { schemaVersion: 4, installationId: '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00', dshHome: root,
+  const rawTrust = { schemaVersion: 4, installationId: input.installationId ?? '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00', dshHome: root,
     executor: { id: 'executor', version: '1', ...await executable('executor'), environmentAllowlist: [] },
     hostPolicy: defaultHostAttestationPolicy, hostAttestor: null, approvalKeys: [trustedKey('owner')], hostAttestationKeys: [trustedKey('host')],
-    ledger: { id: '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f01', path: db }, catalog: { id: 'catalog', path: catalogPath },
+    ledger: { id: input.ledgerId ?? '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f01', path: db }, catalog: { id: 'catalog', path: catalogPath },
     releaseRegistry: { id: 'local', locator: policy.registryLocator }, releaseReceiptTtlMs: 60_000,
     releaseAuthorizationKeys: [trustedKey('releaseOwner', 'release-owner')], releaseKeys: phases.map(phase => trustedKey(phase)),
     releaseAdapters: Object.fromEntries(await Promise.all(phases.map(async phase => [phase, { id: phase, version: '1', ...await executable(phase),
@@ -208,6 +212,7 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
     }
     return { root, store, plan: second, options: secondOptions, controller: secondController, decide: secondDecide, execute, trust }
   }
-  return { root, store, plan, options, controller, decide, execute, trust, next,
+  return { root, get store() { return store }, plan, options, controller, decide, execute, trust, next, close,
+    reopen: () => { if (!closed) throw new Error('fixture store is still open'); store = new ControlPlaneStore({ path: db }); options.store = store; closed = false },
     setSourceCurrent: (value: boolean) => { sourceCurrent = value } }
 }

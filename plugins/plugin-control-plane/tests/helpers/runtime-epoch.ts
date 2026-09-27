@@ -16,25 +16,29 @@ export async function cleanupRuntimeEpochFixtures() {
 }
 
 /** Real released owner source, activated checkpoint, signed original readiness, and a distinct epoch key. */
-export async function createRuntimeEpochFixture() {
+export async function createRuntimeEpochFixture(options: Parameters<typeof hostAuthorizationPlan>[0] & {
+  readinessKey?: { authority: string; keyId: string; privateKeyPem: string }
+} = {}) {
   const keys = generateKeyPairSync('ed25519')
   const issuer: RuntimeEpochRequest['issuer'] = { mode: 'configured-executable', id: 'epoch-attestor', version: '1',
     path: '/tmp/epoch-attestor', sha256: 'e'.repeat(64), interpreter: null, authority: 'epoch-authority', keyId: 'epoch-key' }
-  const original = await hostAuthorizationPlan({ issuer })
+  const original = await hostAuthorizationPlan({ issuer, ...options })
   let plan = original.coordinator.recordActivationHostInputWitness(original.witnessInput)
   // Keep the signed approval before the historical readiness request's creation time.
   await new Promise(resolve => setTimeout(resolve, 120))
-  const signed = await createReadinessFixture(plan); roots.push(signed.root)
+  const signed = await createReadinessFixture(plan, options.readinessKey,
+    options.releaseFixture ? `-${plan.id}` : ''); roots.push(signed.root)
   const db = new DatabaseSync(plan.ledger.path)
   try {
     const now = Date.now()
     db.exec('BEGIN IMMEDIATE')
-    db.prepare("UPDATE activation_plans SET status='activated',activation_lease_until=NULL WHERE id=?").run(plan.id)
+    db.prepare("UPDATE activation_plans SET status='activated',activation_lease_until=NULL,host_recovery_required=1 WHERE id=?").run(plan.id)
     db.prepare(`INSERT INTO activation_watch (plan_id,package_name,package_version,package_integrity,activation_id,fence,state,
       revision,last_host_generation,healthy_observations,started_at,updated_at)
       VALUES (?,?,?,?,?,?,'watching',1,?,0,?,?)`).run(plan.id, plan.candidate.package, plan.candidate.version,
       plan.candidate.integrity, plan.activation!.id, plan.activation!.fence, signed.receipt.hostGeneration, now, now)
-    db.prepare('INSERT INTO activation_deployment_checkpoints VALUES (?,?,1,1,?,?)').run(plan.id, '[]', now, now)
+    const order = Number(db.prepare('SELECT coalesce(max(exposure_order),0)+1 AS value FROM activation_deployment_checkpoints').get()!.value)
+    db.prepare('INSERT INTO activation_deployment_checkpoints VALUES (?,?,?,?,?,?)').run(plan.id, JSON.stringify(original.witnessInput.profileFiles), order, order, now, now)
     const operation = signed.operation
     const { operationId: _operationId, requestedAt: _requestedAt, ...binding } = operation.request
     db.prepare(`INSERT INTO host_attestation_operations (plan_id,phase,operation_id,binding_digest,request_digest,

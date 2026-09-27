@@ -508,9 +508,15 @@ describe('broker CLI safety boundary', () => {
   })
 
   it.runIf(process.platform === 'linux' && existsSync(brokerCliEntrypoint) && linuxPeerCredentialsAvailable())('runs the built broker CLI in separate serve and operator processes', async () => {
-    const actionSocketPath = await privateSocketPath(), serveConfig = await configFile(actionSocketPath, true, { minimumBrokerGeneration: 1 })
+    // This checks the packaged process boundary; the separate non-cooperative
+    // barrier test checks a short shutdown deadline and its elapsed-time bound.
+    const actionSocketPath = await privateSocketPath(), serveConfig = await configFile(actionSocketPath, true, { minimumBrokerGeneration: 1, drainTimeoutMs: 2_000 })
     const operatorConfig = await configFile(actionSocketPath, false, { minimumBrokerGeneration: 1 })
     const child = spawn(process.execPath, [brokerCliEntrypoint, 'serve', serveConfig], { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C' } })
+    let childStderr = ''
+    child.stdout?.resume()
+    child.stderr?.setEncoding('utf8')
+    child.stderr?.on('data', (chunk: string) => { childStderr = (childStderr + chunk).slice(-16_384) })
     children.push(child)
     await vi.waitFor(async () => expect((await lstat(actionSocketPath)).isSocket()).toBe(true), { timeout: 5_000 })
     const run = promisify(execFile)
@@ -518,8 +524,12 @@ describe('broker CLI safety boundary', () => {
     expect(JSON.parse(status.stdout)).toMatchObject({ status: 'succeeded', state: { admission: 'accepting', generation: 1, controlVersion: 0 } })
     const stop = await run(process.execPath, [brokerCliEntrypoint, 'stop', operatorConfig, '0', 'operator-request'], { timeout: 5_000, maxBuffer: 16_384, env: { PATH: process.env.PATH, LANG: 'C', LC_ALL: 'C' } })
     expect(JSON.parse(stop.stdout)).toMatchObject({ status: 'succeeded', state: { admission: 'stopped', controlVersion: 1 } })
-    child.kill('SIGTERM')
-    await new Promise<void>((resolve, reject) => { child.once('exit', code => code === 0 ? resolve() : reject(new Error(`broker child exited ${code}`))); child.once('error', reject) })
+    await new Promise<void>((resolve, reject) => {
+      child.once('close', (code, signal) => code === 0 ? resolve()
+        : reject(new Error(`broker child exited ${code} (signal ${signal ?? 'none'}); stderr: ${JSON.stringify(childStderr)}`)))
+      child.once('error', reject)
+      if (!child.kill('SIGTERM')) reject(new Error(`broker child had already exited ${child.exitCode}; stderr: ${JSON.stringify(childStderr)}`))
+    })
     await expect(lstat(actionSocketPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

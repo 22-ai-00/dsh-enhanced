@@ -1,20 +1,25 @@
+import { createHash } from 'node:crypto'
 import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { prepareInstallHostEnvironment, type InstallHostPorts } from '../src/install-host.ts'
+import { prepareHostUpdatePlan, prepareInstallHostEnvironment, type InstallHostPorts } from '../src/install-host.ts'
 import { runInstall } from '../src/install.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root,{recursive:true,force:true}))) })
+function runtimeAt(cacheRoot: string, version: string, receiptDigest = 'a'.repeat(64)) {
+  const root = join(cacheRoot, version)
+  return { version, root, dshPath: join(root, 'dsh.js'), binDirectory: join(root, 'bin'), integrity: 'fixture', receiptDigest }
+}
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(),'dsh-install-host-'))
   roots.push(root)
   const dshHome = join(root,'home with spaces')
   const cacheRoot = join(root,'cache')
-  const runtime = {version:'0.1.5-rc.3',root:cacheRoot,dshPath:join(cacheRoot,'dsh.js'),binDirectory:join(cacheRoot,'bin'),integrity:'fixture',receiptDigest:'a'.repeat(64)}
+  const runtime = runtimeAt(cacheRoot, '0.1.5-rc.3')
   const prepare = vi.fn(async () => runtime)
-  const read = vi.fn(async () => runtime)
+  const read = vi.fn(async (_input: Parameters<InstallHostPorts['read']>[0]) => runtime)
   const ports: InstallHostPorts = {prepare,read}
   const input = {dshHome,cacheRoot,environment:{PATH:'/original/bin',TOKEN:'preserved'}}
   return {root,input,runtime,prepare,read,ports}
@@ -100,6 +105,136 @@ describe('Home-bound private Host selection', () => {
     f.prepare.mockClear()
     expect((await prepareInstallHostEnvironment({...f.input,prepareFresh:false},f.ports)).PATH).toContain(f.runtime.binDirectory)
     expect(f.prepare).not.toHaveBeenCalled()
+  })
+})
+
+describe('read-only Home Host update planning', () => {
+  test('same verified version returns current with exact original source and no Home writes', async () => {
+    const f = await fixture()
+    await prepareInstallHostEnvironment(f.input, f.ports)
+    const path = join(f.input.dshHome, '.dsh-rsi-host.json')
+    const before = await readFile(path, 'utf8')
+    f.prepare.mockClear()
+    const plan = await prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)
+    expect(plan).toMatchObject({ schemaVersion: 1, status: 'current', canonicalHome: f.input.dshHome,
+      bindingPath: path, originalRuntime: f.runtime, candidateRuntime: f.runtime,
+      originalBindingSource: before, candidateBindingSource: before,
+      originalBindingDigest: createHash('sha256').update(before).digest('hex') })
+    expect(f.prepare).toHaveBeenCalledExactlyOnceWith({ root: f.input.cacheRoot, selector: 'latest' })
+    expect(await readFile(path, 'utf8')).toBe(before)
+    expect(await readdir(f.input.dshHome)).toEqual(['.dsh-rsi-host.json'])
+  })
+  test('a different compatible exact version only prepares candidate binding bytes', async () => {
+    const f = await fixture()
+    await prepareInstallHostEnvironment(f.input, f.ports)
+    const path = join(f.input.dshHome, '.dsh-rsi-host.json')
+    const before = await readFile(path, 'utf8')
+    const candidate = runtimeAt(f.input.cacheRoot, '0.1.5-rc.4', 'b'.repeat(64))
+    f.prepare.mockResolvedValue(candidate)
+    f.read.mockImplementation(async ({ version }) => version === candidate.version ? candidate : f.runtime)
+    const plan = await prepareHostUpdatePlan({ dshHome: f.input.dshHome, selector: '0.1.5-rc.4' }, f.ports)
+    expect(plan.status).toBe('update')
+    expect(plan.candidateRuntime).toEqual(candidate)
+    expect(JSON.parse(plan.candidateBindingSource)).toEqual({ schemaVersion: 1, cacheRoot: f.input.cacheRoot,
+      version: candidate.version, receiptDigest: candidate.receiptDigest })
+    expect(await readFile(path, 'utf8')).toBe(before)
+    expect(f.prepare).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, selector: '0.1.5-rc.4' })
+  })
+  test('same-version receipt or runtime path mismatch cannot be treated as current', async () => {
+    const f = await fixture()
+    await prepareInstallHostEnvironment(f.input, f.ports)
+    const path = join(f.input.dshHome, '.dsh-rsi-host.json')
+    const before = await readFile(path, 'utf8')
+    f.prepare.mockResolvedValueOnce({ ...f.runtime, receiptDigest: 'b'.repeat(64) })
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('独立收据验证')
+    f.prepare.mockResolvedValueOnce({ ...f.runtime, dshPath: join(f.root, 'other-dsh.js') })
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('独立收据验证')
+    expect(await readFile(path, 'utf8')).toBe(before)
+  })
+  test.each([['0.1.5-rc.4', '0.1.5-rc.3'], ['0.1.5', '0.1.5-rc.4']])(
+    'latest and exact selectors cannot downgrade %s to %s', async (originalVersion, olderVersion) => {
+      const f = await fixture()
+      const originalRuntime = runtimeAt(f.input.cacheRoot, originalVersion)
+      f.prepare.mockResolvedValueOnce(originalRuntime)
+      f.read.mockResolvedValue(originalRuntime)
+      await prepareInstallHostEnvironment(f.input, f.ports)
+      const path = join(f.input.dshHome, '.dsh-rsi-host.json')
+      const before = await readFile(path, 'utf8')
+      f.prepare.mockClear()
+      f.prepare.mockResolvedValue(runtimeAt(f.input.cacheRoot, olderVersion, 'b'.repeat(64)))
+      await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('不能降级')
+      expect(f.prepare).toHaveBeenCalledTimes(1)
+      await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome, selector: olderVersion }, f.ports)).rejects.toThrow('不能降级')
+      expect(f.prepare).toHaveBeenCalledTimes(1)
+      expect(await readFile(path, 'utf8')).toBe(before)
+    })
+  test('a different-version candidate must independently match the exact cached runtime', async () => {
+    const f = await fixture()
+    await prepareInstallHostEnvironment(f.input, f.ports)
+    const path = join(f.input.dshHome, '.dsh-rsi-host.json')
+    const before = await readFile(path, 'utf8')
+    const candidate = runtimeAt(f.input.cacheRoot, '0.1.5-rc.4', 'b'.repeat(64))
+    f.prepare.mockResolvedValue(candidate)
+    f.read.mockImplementation(async ({ version }) => version === candidate.version
+      ? { ...candidate, root: join(f.root, 'foreign-cache') } : f.runtime)
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('独立收据验证')
+    expect(f.read).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, version: candidate.version })
+    f.read.mockImplementation(async ({ version }) => version === candidate.version
+      ? { ...candidate, receiptDigest: 'c'.repeat(64) } : f.runtime)
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('独立收据验证')
+    expect(await readFile(path, 'utf8')).toBe(before)
+  })
+  test('unknown or unbound Homes never create a binding or candidate', async () => {
+    const f = await fixture()
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('不存在')
+    await expect(stat(f.input.dshHome)).rejects.toMatchObject({ code: 'ENOENT' })
+    await mkdir(f.input.dshHome)
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('没有私有 Host 绑定')
+    expect(await readdir(f.input.dshHome)).toEqual([])
+    expect(f.prepare).not.toHaveBeenCalled()
+  })
+  test('tampered receipt and public binding mode fail before candidate preparation', async () => {
+    const f = await fixture()
+    await prepareInstallHostEnvironment(f.input, f.ports)
+    const path = join(f.input.dshHome, '.dsh-rsi-host.json')
+    const before = await readFile(path, 'utf8')
+    f.prepare.mockClear()
+    f.read.mockResolvedValue({ ...f.runtime, receiptDigest: 'b'.repeat(64) })
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('制品发生变化')
+    expect(f.prepare).not.toHaveBeenCalled()
+    f.read.mockResolvedValue(f.runtime)
+    await chmod(path, 0o644)
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('不安全')
+    expect(await readFile(path, 'utf8')).toBe(before)
+  })
+  test('binding drift during preparation is rejected without publishing the candidate', async () => {
+    const f = await fixture()
+    await prepareInstallHostEnvironment(f.input, f.ports)
+    const path = join(f.input.dshHome, '.dsh-rsi-host.json')
+    const drifted = JSON.stringify({ schemaVersion: 1, cacheRoot: f.input.cacheRoot, version: f.runtime.version,
+      receiptDigest: 'c'.repeat(64) }) + '\n'
+    const candidate = runtimeAt(f.input.cacheRoot, '0.1.5-rc.4', 'b'.repeat(64))
+    f.read.mockImplementation(async ({ version }) => version === candidate.version ? candidate : f.runtime)
+    f.prepare.mockImplementation(async () => {
+      await writeFile(path, drifted, { mode: 0o600 })
+      return candidate
+    })
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('绑定发生变化')
+    expect(await readFile(path, 'utf8')).toBe(drifted)
+  })
+  test('incompatible latest and cancellation leave the binding unchanged', async () => {
+    const f = await fixture()
+    await prepareInstallHostEnvironment(f.input, f.ports)
+    const path = join(f.input.dshHome, '.dsh-rsi-host.json')
+    const before = await readFile(path, 'utf8')
+    f.prepare.mockResolvedValueOnce({ ...f.runtime, version: '0.2.0' })
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome }, f.ports)).rejects.toThrow('候选 Host 版本')
+    const controller = new AbortController()
+    f.prepare.mockImplementationOnce(async () => { controller.abort(); return f.runtime })
+    await expect(prepareHostUpdatePlan({ dshHome: f.input.dshHome, signal: controller.signal }, f.ports)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(f.read).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, version: f.runtime.version, signal: controller.signal })
+    expect(f.prepare).toHaveBeenLastCalledWith({ root: f.input.cacheRoot, selector: 'latest', signal: controller.signal })
+    expect(await readFile(path, 'utf8')).toBe(before)
   })
 })
 

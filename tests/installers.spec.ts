@@ -521,11 +521,11 @@ function withPinnedLifecycleHashes(source: string, configHash: string, profileHa
 }
 
 interface RemoteBootstrapFixture {
-  assets: Record<'common.sh' | 'lifecycle-config.mjs' | 'lifecycle-profile.mjs', string>
+  assets: Record<'common.sh' | 'lifecycle-config.mjs' | 'lifecycle-profile.mjs' | 'host-lifecycle.mjs' | 'host-profile-update.mjs' | 'host-rsi-update.mjs', string>
   assetDirectory: string
   dshHome: string
   fakeBin: string
-  hashes: Record<'common.sh' | 'lifecycle-config.mjs' | 'lifecycle-profile.mjs', string>
+  hashes: Record<keyof RemoteBootstrapFixture['assets'], string>
   logPath: string
   temporaryDirectory: string
 }
@@ -557,6 +557,9 @@ async function remoteBootstrapFixture(
     ].join('\n'),
     'lifecycle-config.mjs': '// lifecycle config fixture\n',
     'lifecycle-profile.mjs': '// lifecycle profile fixture\n',
+    'host-lifecycle.mjs': '// host lifecycle fixture\n',
+    'host-profile-update.mjs': '// host profile fixture\n',
+    'host-rsi-update.mjs': '// host rsi fixture\n',
     ...replacements,
   }
   await Promise.all(Object.entries(assets).map(([name, source]) => (
@@ -626,6 +629,7 @@ function runRemoteNpmBootstrap(
   args: readonly string[],
   options: {
     lifecycleDigests?: boolean
+    hostDigests?: boolean
     foreignStatPath?: string
     rootStatPaths?: readonly string[]
     tamper?: keyof RemoteBootstrapFixture['assets']
@@ -648,6 +652,12 @@ function runRemoteNpmBootstrap(
       ...(options.lifecycleDigests ? {
         DSH_ENHANCED_INSTALL_LIFECYCLE_CONFIG_SHA256: fixture.hashes['lifecycle-config.mjs'],
         DSH_ENHANCED_INSTALL_LIFECYCLE_PROFILE_SHA256: fixture.hashes['lifecycle-profile.mjs'],
+      } : {}),
+      ...(options.hostDigests ? {
+        DSH_ENHANCED_INSTALL_HOST_LIFECYCLE_SHA256: fixture.hashes['host-lifecycle.mjs'],
+        DSH_ENHANCED_INSTALL_HOST_PROFILE_UPDATE_SHA256: fixture.hashes['host-profile-update.mjs'],
+        DSH_ENHANCED_INSTALL_HOST_RSI_UPDATE_SHA256: fixture.hashes['host-rsi-update.mjs'],
+        DSH_ENHANCED_HOST_UPDATE_PLAN: '/private/plan.json',
       } : {}),
       REMOTE_BOOTSTRAP_ASSETS: fixture.assetDirectory,
       REMOTE_BOOTSTRAP_FOREIGN_STAT_PATH: options.foreignStatPath ?? '',
@@ -782,6 +792,9 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   await writeFile(fixtureInstallerLibrary, await readFile(installerLibrary))
   await writeFile(join(fixtureInstallDirectory, 'lifecycle-config.mjs'),
     await readFile(join(installDirectory, 'lifecycle-config.mjs')))
+  for (const helper of ['host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs']) {
+    await writeFile(join(fixtureInstallDirectory, helper), await readFile(join(installDirectory, helper)))
+  }
   const lifecycleSource = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
   const trustCheck = "  const entry = await lstat(canonical)\n"
   const systemTrustFunction = "async function trustedSystemExecutable(path, name) {\n"
@@ -7403,6 +7416,34 @@ printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" 
       expect(log).not.toContain('\nrun\t')
       await expect(readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
       expect(await readdir(fixture.temporaryDirectory)).toEqual([])
+    },
+  )
+
+  test('remote Host update bootstrap verifies all helper assets before sourcing common', async () => {
+    const fixture = await remoteBootstrapFixture()
+    const result = runRemoteNpmBootstrap(pinnedInstallerSource, fixture, [
+      '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--scenario', 'web',
+    ], { lifecycleDigests: true, hostDigests: true })
+    expect(result.status, result.stderr).toBe(0)
+    const log = await readFile(fixture.logPath, 'utf8')
+    for (const asset of ['host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs']) {
+      expect(log).toContain(`download\thttps://assets.invalid/v9.8.7/${asset}\n`)
+      expect(log).toContain(`verify\t${asset}\n`)
+    }
+    expect(log.indexOf('verify\thost-rsi-update.mjs')).toBeLessThan(log.indexOf('source:common'))
+  })
+
+  test.each(['host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs'] as const)(
+    'remote Host update bootstrap rejects tampered %s before source', async tamperedAsset => {
+      const fixture = await remoteBootstrapFixture()
+      const result = runRemoteNpmBootstrap(pinnedInstallerSource, fixture, [
+        '--operation', 'upgrade', '--confirm-dsh-home-stopped', '--scenario', 'web',
+      ], { lifecycleDigests: true, hostDigests: true, tamper: tamperedAsset })
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain(`远程 ${tamperedAsset} 完整性校验失败`)
+      expect(await readFile(fixture.logPath, 'utf8')).not.toContain('source:common')
+      await expect(readFile(join(fixture.dshHome, 'bootstrap-ran'), 'utf8'))
+        .rejects.toMatchObject({ code: 'ENOENT' })
     },
   )
 

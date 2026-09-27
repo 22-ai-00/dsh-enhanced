@@ -2,11 +2,12 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { closeSync, constants, fstatSync, lstatSync, openSync } from 'node:fs'
+import { closeSync, constants, createReadStream, fstatSync, lstatSync, openSync } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
+import { candidateHostUnitSource, classifyHostUnitBytes, parseHostUpdatePlan } from './host-lifecycle.mjs'
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url)
 const VALIDATOR_PATH = join(dirname(SCRIPT_PATH), 'lifecycle-config.mjs')
@@ -14,6 +15,7 @@ const SANDBOX_VALIDATOR_PATH = '/run/dsh-enhanced-lifecycle-config.mjs'
 const MANIFEST_VERSION = 1
 const SERVICE_MANIFEST_VERSION = 2
 const SUPERVISED_SERVICE_MANIFEST_VERSION = 3
+const HOST_UPDATE_MANIFEST_VERSION = 4
 const TRANSACTION_SUFFIX = '.dsh-enhanced-transaction'
 const WEB_READY_MARKER = 'dsh web: http://127.0.0.1:'
 const HOST_READY_MARKER = 'dsh-enhanced host ready: v1'
@@ -320,6 +322,7 @@ function bindingFor(manifest) {
     cleanup: manifest.cleanup,
     supervisedLifecycle: manifest.supervisedLifecycle,
     rsiCoordinator: manifest.rsiCoordinator,
+    hostMigration: manifest.hostMigration,
   }
 }
 
@@ -716,6 +719,36 @@ async function assertSnapshotTreeSafe(homePath, logicalHome = homePath, allowPac
   return observedPackageSymlinks
 }
 
+async function originalExternalPackageLinkDigest(originalHome, originalLinks) {
+  const physicalRoot = await realpath(originalHome)
+  const entries = [...originalLinks].filter(([, link]) => link.target === undefined
+    || !inside(physicalRoot, link.target)).map(([relative, link]) => [relative, link.linkText,
+    link.target ?? null, link.targetIdentity?.dev ?? null, link.targetIdentity?.ino ?? null])
+  return sha256(JSON.stringify(entries.sort(([left], [right]) => left.localeCompare(right))))
+}
+
+async function assertHostCandidateTreeSafe(originalHome, candidateHome, logicalHome, plan, originalExternalLinksDigest) {
+  const originalLinks = await assertSnapshotTreeSafe(originalHome, logicalHome, true)
+  if (await originalExternalPackageLinkDigest(originalHome, originalLinks) !== originalExternalLinksDigest) {
+    fail('original Host Home external package links changed after transaction planning')
+  }
+  const candidateLinks = await assertSnapshotTreeSafe(candidateHome, logicalHome, false)
+  const candidatePhysicalRoot = await realpath(candidateHome)
+  const candidateHostRoot = await realpath(plan.candidateRuntime.root)
+  const allowed = new Map(originalLinks)
+  for (const [relative, current] of candidateLinks) {
+    if (current.target !== undefined && inside(candidatePhysicalRoot, current.target)) continue
+    const prior = originalLinks.get(relative)
+    if (prior !== undefined && current.linkText === prior.linkText && sameSymlinkTarget(current, prior)) continue
+    if (current.target !== undefined && inside(candidateHostRoot, current.target)) {
+      allowed.set(relative, current)
+      continue
+    }
+    fail(`staged Host Home contains an unapproved external package link: ${relative} -> ${current.linkText}`)
+  }
+  await assertSnapshotTreeSafe(candidateHome, logicalHome, false, allowed)
+}
+
 async function assertNoMounts(root) {
   let source
   try { source = await readFile('/proc/self/mountinfo', 'utf8') }
@@ -739,6 +772,7 @@ async function writeFileAtomic(path, contents) {
 }
 
 const MANIFEST_MAX_BYTES = 64 * 1024
+const HOST_MANIFEST_MAX_BYTES = 2 * 1024 * 1024
 const PROFILE_TREE_MAX_ENTRIES = 200_000
 const PROFILE_TREE_MAX_FILE_BYTES = 64 * 1024 * 1024
 const MANIFEST_TOP_LEVEL_KEYS = [
@@ -749,6 +783,7 @@ const MANIFEST_TOP_LEVEL_KEYS = [
   'foreignOwnership', 'cleanProfileDigest', 'cleanProfiles', 'serviceMasks',
   'containmentMasks', 'containmentMaskIntents', 'serviceStartBarriers',
   'containmentStartBarriers', 'archivedProfile', 'cleanup', 'supervisedLifecycle', 'rsiCoordinator',
+  'hostMigration',
   // 以下三个键不进 bindingDigest：updatedAt/failure 是事务时间线与收容诊断，
   // bindingDigest 是自反校验字段本身。未知顶层键必须拒绝，否则可绕过篡改信封。
   'updatedAt', 'failure', 'bindingDigest',
@@ -766,8 +801,9 @@ async function writeManifest(transactionRoot, manifest, state, details = {}) {
     fail('生命周期事务 manifest 包含未知顶层字段，拒绝持久化（可能绕过 bindingDigest 信封）。')
   }
   const serialized = `${JSON.stringify(next, null, 2)}\n`
-  if (Buffer.byteLength(serialized, 'utf8') > MANIFEST_MAX_BYTES) {
-    fail(`生命周期事务 manifest 超过 ${MANIFEST_MAX_BYTES} 字节安全上限，拒绝持久化：${transactionRoot}`)
+  const maximum = next.version === HOST_UPDATE_MANIFEST_VERSION ? HOST_MANIFEST_MAX_BYTES : MANIFEST_MAX_BYTES
+  if (Buffer.byteLength(serialized, 'utf8') > maximum) {
+    fail(`生命周期事务 manifest 超过 ${maximum} 字节安全上限，拒绝持久化：${transactionRoot}`)
   }
   await writeFileAtomic(join(transactionRoot, 'manifest.json'), serialized)
   return next
@@ -784,9 +820,14 @@ async function loadManifest(physicalTransactionRoot, expected) {
     manifestDescriptor = openSync(`/proc/self/fd/${rootDescriptor}/manifest.json`, constants.O_RDONLY | constants.O_NOFOLLOW)
     const manifestStat = fstatSync(manifestDescriptor)
     if (!manifestStat.isFile() || manifestStat.uid !== currentUid()
-      || manifestStat.nlink !== 1 || (manifestStat.mode & 0o077) !== 0 || manifestStat.size > MANIFEST_MAX_BYTES) throw new Error('unsafe manifest')
+      || manifestStat.nlink !== 1 || (manifestStat.mode & 0o077) !== 0
+      || manifestStat.size > HOST_MANIFEST_MAX_BYTES) throw new Error('unsafe manifest')
     manifest = JSON.parse(await readFile(`/proc/self/fd/${manifestDescriptor}`, 'utf8'))
-    if (isServiceManifestVersion(manifest?.version) && !sameIdentity(rootStat, manifest.transactionIdentity)) {
+    if (manifest?.version !== HOST_UPDATE_MANIFEST_VERSION && manifestStat.size > MANIFEST_MAX_BYTES) {
+      throw new Error('legacy manifest size exceeded')
+    }
+    if ((isServiceManifestVersion(manifest?.version) || manifest?.version === HOST_UPDATE_MANIFEST_VERSION)
+      && !sameIdentity(rootStat, manifest.transactionIdentity)) {
       throw new Error('transaction root identity mismatch')
     }
   } catch {
@@ -794,6 +835,10 @@ async function loadManifest(physicalTransactionRoot, expected) {
   } finally {
     if (manifestDescriptor !== undefined) closeSync(manifestDescriptor)
     if (rootDescriptor !== undefined) closeSync(rootDescriptor)
+  }
+  if (manifest?.version === HOST_UPDATE_MANIFEST_VERSION) {
+    validateHostUpdateManifest(manifest, expected, physicalTransactionRoot)
+    return manifest
   }
   const initializingServiceManifest = isServiceManifestVersion(manifest?.version)
     && manifest.state === 'preparing' && manifest.servicePhase === 'initializing'
@@ -934,6 +979,61 @@ async function loadManifest(physicalTransactionRoot, expected) {
   }
   if (expected.homePath !== manifest.canonicalHome) fail(`生命周期事务 manifest 与当前 DSH_HOME 未绑定：${expected.transactionPath}`)
   return manifest
+}
+
+const HOST_UPDATE_PHASES = new Set([
+  'initializing', 'stopping', 'stopped', 'prepared', 'original-renamed', 'swapped',
+  'units-changing', 'units-changed', 'authority-prepared', 'starting', 'accepted',
+  'committed', 'cleanup-started', 'failed',
+])
+
+function validateHostUpdateManifest(manifest, expected, transactionRoot) {
+  const migration = manifest.hostMigration
+  if (!validManifestTopLevel(manifest) || manifest.version !== HOST_UPDATE_MANIFEST_VERSION
+    || manifest.operation !== 'host-update' || manifest.homePath !== expected.homePath
+    || manifest.canonicalHome !== expected.homePath || manifest.transactionPath !== expected.transactionPath
+    || manifest.profile !== expected.profile || typeof manifest.id !== 'string'
+    || !sameIdentity(lstatSync(transactionRoot), manifest.transactionIdentity)
+    || !HOST_UPDATE_PHASES.has(migration?.phase) || !Array.isArray(migration.units)
+    || !validDigest(migration.originalExternalLinksDigest)
+    || !Array.isArray(manifest.services) || !Array.isArray(manifest.unitUniverse)
+    || !Array.isArray(manifest.foreignOwnership) || !validForeignOwnershipInventory(manifest)
+    || !Array.isArray(manifest.serviceMasks) || !Array.isArray(manifest.serviceStartBarriers)
+    || !Array.isArray(manifest.containmentMasks) || !Array.isArray(manifest.containmentMaskIntents)
+    || !Array.isArray(manifest.containmentStartBarriers)
+    || manifest.serviceMasks.some((mask, index) => !validBoundMask(mask, manifest.services[index]?.unit, transactionRoot))
+    || manifest.serviceStartBarriers.some((barrier, index) => barrier?.unit !== manifest.services[index]?.unit
+      || !['enabled', 'disabled'].includes(barrier.originalUnitFileState)
+      || !validBoundEnablement(barrier, transactionRoot))
+    || manifest.services.length !== migration.units.length
+    || manifest.services.some((service, index) => service.unit !== migration.units[index]?.unit)
+    || migration.units.some(unit => !SYSTEMD_UNIT.test(unit.unit)
+      || unit.profile !== SYSTEMD_UNIT.exec(unit.unit)?.[1]
+      || typeof unit.before !== 'string' || typeof unit.after !== 'string'
+      || unit.before === unit.after || !validDigest(unit.beforeDigest) || !validDigest(unit.afterDigest)
+      || sha256(unit.before) !== unit.beforeDigest || sha256(unit.after) !== unit.afterDigest)
+    || migration.unitProperties !== undefined && (!Array.isArray(migration.unitProperties)
+      || migration.unitProperties.length !== migration.units.length
+      || migration.unitProperties.some((record, index) => record?.unit !== migration.units[index]?.unit
+        || record.properties === null || typeof record.properties !== 'object'
+        || !['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory',
+          'User', 'Group', 'Type', 'KillMode'].every(key => typeof record.properties[key] === 'string')))
+    || typeof migration.candidateEverStarted !== 'boolean'
+    || migration.candidateEverStarted && (migration.rsiProof === undefined
+      || !Array.isArray(migration.unitProperties)
+      || migration.unitProperties.length !== migration.units.length)
+    || !['preparing', 'original-renamed', 'swapped', 'committed', 'cleanup-started', 'failed'].includes(manifest.state)
+    || manifest.bindingDigest !== sha256(JSON.stringify(bindingFor(manifest)))) {
+    fail(`拒绝未绑定或无效的 Host 更新事务 manifest：${expected.transactionPath}`)
+  }
+  parseHostUpdatePlan(migration.plan, expected.homePath)
+  if (migration.plan.status !== 'update') fail('Host 更新事务不能记录 current 计划。')
+  if (manifest.serviceMasks.length !== 0 && manifest.serviceMasks.length !== manifest.services.length) {
+    fail('Host 更新事务 service mask inventory 无效。')
+  }
+  if (manifest.serviceStartBarriers.length !== 0 && manifest.serviceStartBarriers.length !== manifest.services.length) {
+    fail('Host 更新事务 start barrier inventory 无效。')
+  }
 }
 
 function validForeignOwnershipEvidence(evidence) {
@@ -1474,6 +1574,10 @@ async function recoverBoundTransaction({
   }
   let manifest
   manifest = await loadManifest(physicalTransactionRoot, { homePath, profile, transactionPath: transactionRoot })
+  if (manifest.version === HOST_UPDATE_MANIFEST_VERSION) {
+    return recoverHostUpdate({ manifest, homePath, physicalHomePath, profile, transactionRoot,
+      physicalTransactionRoot, serviceContext })
+  }
   if (serviceContext !== undefined && !isServiceManifestVersion(manifest.version)) {
     fail(`检测到旧版 stopped-home lifecycle residue；无法在受管 service 运行状态未知时安全恢复，拒绝修改 DSH_HOME：${transactionRoot}`)
   }
@@ -2365,7 +2469,7 @@ async function captureForeignOwnership(systemctlExecutable, units, homePath) {
   return foreignOwnership
 }
 
-async function captureServiceInventory(systemctlExecutable, homePath, targetProfile, dshExecutable) {
+async function captureServiceInventory(systemctlExecutable, homePath, targetProfile, dshExecutable, allowMissingTarget = false) {
   await runServiceCommand(systemctlExecutable, ['--user', 'daemon-reload'])
   const names = await listedServiceUnits(systemctlExecutable)
   const services = []
@@ -2384,7 +2488,7 @@ async function captureServiceInventory(systemctlExecutable, homePath, targetProf
   }
   const targetUnit = `dsh-profile-${targetProfile}.service`
   const target = services.find(service => service.unit === targetUnit)
-  if (target === undefined || target.serviceHome !== homePath) {
+  if (!allowMissingTarget && (target === undefined || target.serviceHome !== homePath)) {
     fail(`Lark service lifecycle 需要由 installer 管理且属于目标 DSH_HOME 的 unit：${targetUnit}`)
   }
   return {
@@ -2927,7 +3031,7 @@ async function latestLarkJournalState(journalctlExecutable, service) {
 async function startAndAcceptServices({
   systemctlExecutable, journalctlExecutable, services, serviceMasks,
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], timeouts,
-  acceptAfterReady, durableAccept, requireLarkReady = false,
+  acceptAfterReady, durableAccept, requireLarkReady = false, larkReadyProfiles = [],
 }) {
   const startedAt = Date.now()
   const activeBefore = services.filter(service => service.wasActive)
@@ -2970,7 +3074,8 @@ async function startAndAcceptServices({
           if (!await journalHasReadyMarker(journalctlExecutable, candidate.current)) { logsReady = false; break }
           try { await assertRsiCoordinatorActivation(homePath, candidate.current, startedAt) }
           catch { logsReady = false; break }
-          if (requireLarkReady && candidate.current.profile === targetProfile) {
+          if (requireLarkReady && candidate.current.profile === targetProfile
+            || larkReadyProfiles.includes(candidate.current.profile)) {
             const states = await larkJournalStates(journalctlExecutable, candidate.current)
             if (!LARK_ACCEPTED_STATES.has(latestLarkState(states))) { logsReady = false; break }
             readinessLarkCounts.set(candidate.current.unit, states.length)
@@ -3013,7 +3118,8 @@ async function startAndAcceptServices({
           || service.invocationId !== acceptedService.invocationId || service.nRestarts !== acceptedService.nRestarts) {
           fail(`systemd service 未通过稳定性验证：${acceptedService.unit}`)
         }
-        if (requireLarkReady && acceptedService.profile === targetProfile) {
+        if (requireLarkReady && acceptedService.profile === targetProfile
+          || larkReadyProfiles.includes(acceptedService.profile)) {
           const states = await larkJournalStates(journalctlExecutable, service)
           const baselineCount = larkBaseline.get(acceptedService.unit) ?? 0
           const offending = states.slice(baselineCount)
@@ -3044,6 +3150,7 @@ async function finalizeAcceptedServices({
   systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, containmentMasks, serviceStartBarriers,
   containmentStartBarriers,
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
+  larkReadyProfiles = [],
   restoreContainedEnablement = true,
 }) {
   await stageBoundMasks(systemctlExecutable, serviceMasks)
@@ -3066,22 +3173,26 @@ async function finalizeAcceptedServices({
   await assertAcceptedServicesStillBound({
     systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
     homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, acceptance, requireLarkReady,
+    larkReadyProfiles,
   })
 }
 
 async function assertAcceptedServicesStillBound({
   systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
   homePath, targetProfile, unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
+  larkReadyProfiles = [],
 }) {
   if (!await acceptedServicesStillBound({
     systemctlExecutable, journalctlExecutable, dshExecutable, services, serviceMasks, serviceStartBarriers,
     homePath, targetProfile, unitUniverse, foreignOwnership, cleanProfiles, acceptance, requireLarkReady,
+    larkReadyProfiles,
   })) fail('systemd service acceptance 在 cleanup 前失效。')
 }
 
 async function acceptedServicesStillBound({
   systemctlExecutable, journalctlExecutable, services, serviceMasks, serviceStartBarriers, homePath, targetProfile,
   unitUniverse, foreignOwnership = [], cleanProfiles = [], acceptance, requireLarkReady = false,
+  larkReadyProfiles = [],
 }) {
   await assertUnitUniverseStable(systemctlExecutable, unitUniverse, homePath, foreignOwnership)
   await assertCleanProfileInventory(homePath, cleanProfiles)
@@ -3143,7 +3254,8 @@ async function acceptedServicesStillBound({
       || service.mainPid !== proof.mainPid || service.invocationId !== proof.invocationId
       || service.nRestarts !== proof.nRestarts) readyForCleanup = false
     await assertRsiCoordinatorActivation(homePath, original, 0)
-    if (requireLarkReady && original.profile === targetProfile
+    if ((requireLarkReady && original.profile === targetProfile
+      || larkReadyProfiles.includes(original.profile))
       && !LARK_ACCEPTED_STATES.has(await latestLarkJournalState(journalctlExecutable, service))) {
       readyForCleanup = false
     }
@@ -3304,12 +3416,19 @@ async function removeCommittedTransactionBound({
     if (!entries.includes('manifest.json')) {
       fail(`service-aware transaction root 在清理前缺少 manifest：${transactionRoot}`)
     }
-    const allowedCleanupEntries = new Set(['manifest.json', 'service-mask-staging', 'service-enablement'])
+    const allowedCleanupEntries = new Set(['manifest.json', 'service-mask-staging', 'service-enablement',
+      ...(manifest.version === HOST_UPDATE_MANIFEST_VERSION ? ['host-preparation'] : [])])
     const unknownEntries = entries.filter(entry => !allowedCleanupEntries.has(entry))
     if (unknownEntries.length > 0) fail(`service-aware cleanup 包含未知事务条目：${unknownEntries.join(', ')}`)
     for (const entry of entries) {
       if (entry === 'manifest.json') continue
       await assertOwnedPrivateDirectory(join(cleanupFdPath, entry))
+      if (entry === 'host-preparation') {
+        if (manifest.hostMigration.preparation?.preparationRoot !== join(transactionRoot, entry)) {
+          fail('Host preparation cleanup is not bound to this transaction')
+        }
+        await assertNoMounts(join(cleanupFdPath, entry))
+      }
       await rm(join(cleanupFdPath, entry), { recursive: true })
     }
     await fsyncPath(cleanupFdPath, true)
@@ -4175,6 +4294,18 @@ function assertSupervisedOwnerBindingStable(source, current) {
     || source.ownerBindingDigest !== current.ownerBindingDigest
     || source.unmanagedAutomationsDigest !== current.unmanagedAutomationsDigest) {
     fail('supervised owner binding 或非受管 Automation 在 lifecycle phase 间发生变化。')
+  }
+}
+
+function assertHostRsiRuntimeSuccessor(source, current, attestation) {
+  assertSupervisedOwnerBindingStable(source, current)
+  assertPostSwapDatabaseLocations(source, current)
+  if (current.effectiveConfigDigest !== source.effectiveConfigDigest
+    || current.recoveryProof.bootstrap.generation <= source.recoveryProof.bootstrap.generation
+    || attestation?.stage !== 'active'
+    || current.activePlan?.effectiveConfigDigest !== current.effectiveConfigDigest
+    || current.activePlan?.attestationSetDigest !== current.recoveryProof.bootstrap.attestationSetDigest) {
+    fail('Host RSI runtime lacks a fresh active owner-bound Recovery successor')
   }
 }
 
@@ -5117,7 +5248,7 @@ async function performLifecycle({
     const recovery = await recoverBoundTransaction({
       homePath, physicalHomePath, profile, transactionRoot, physicalTransactionRoot, serviceContext, dshExecutable,
     })
-    if (typeof recovery === 'string' && recovery.startsWith('service-')) return
+    if (typeof recovery === 'string' && (recovery.startsWith('service-') || recovery.startsWith('host-'))) return
   }
   await assertLockedLifecycleScenario({
     dshExecutable, profile, homePath, expectedScenario, serviceAware: serviceContext !== undefined, operation,
@@ -5818,6 +5949,557 @@ async function performLifecycle({
   }
 }
 
+async function readHostPlanFile(path, homePath) {
+  if (!isAbsolute(path) || resolve(path) !== path) fail('Host update plan path must be absolute')
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const entry = fstatSync(descriptor)
+    if (!entry.isFile() || entry.uid !== currentUid() || entry.nlink !== 1
+      || (entry.mode & 0o077) !== 0 || entry.size < 1 || entry.size > 128 * 1024) {
+      fail('Host update plan file is not owner-private')
+    }
+    const source = await readFile(`/proc/self/fd/${descriptor}`, 'utf8')
+    return parseHostUpdatePlan(JSON.parse(source), homePath)
+  } finally { closeSync(descriptor) }
+}
+
+async function verifyHostPlanBinding(plan, homePath, selection = 'original') {
+  const path = join(homePath, '.dsh-rsi-host.json')
+  const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const entry = fstatSync(descriptor)
+    if (!entry.isFile() || entry.uid !== currentUid() || entry.nlink !== 1
+      || (entry.mode & 0o077) !== 0 || entry.size > 16 * 1024
+      || await readFile(`/proc/self/fd/${descriptor}`, 'utf8') !== (selection === 'original'
+        ? plan.originalBindingSource : plan.candidateBindingSource)) {
+      fail('Home-bound Host changed after update planning')
+    }
+  } finally { closeSync(descriptor) }
+  for (const runtime of [plan.originalRuntime, plan.candidateRuntime]) {
+    const root = await lstat(runtime.root)
+    if (!root.isDirectory() || root.isSymbolicLink() || root.uid !== currentUid() || (root.mode & 0o077) !== 0
+      || await realpath(runtime.root) !== runtime.root
+      || !inside(runtime.root, await realpath(runtime.dshPath))) {
+      fail('Host runtime identity changed after update planning')
+    }
+    const receiptPath = join(runtime.root, 'receipt.json')
+    const receiptEntry = await lstat(receiptPath)
+    if (!receiptEntry.isFile() || receiptEntry.isSymbolicLink() || receiptEntry.uid !== currentUid()
+      || receiptEntry.nlink !== 1 || (receiptEntry.mode & 0o077) !== 0) {
+      fail('Host runtime receipt path changed after update planning')
+    }
+    const receipt = JSON.parse(await readFile(receiptPath, 'utf8'))
+    if (receipt.version !== runtime.version || receipt.integrity !== runtime.integrity
+      || sha256(JSON.stringify(receipt)) !== runtime.receiptDigest) {
+      fail('Host runtime receipt changed after update planning')
+    }
+    const actualInventory = []
+    const walk = async (directory, prefix = '') => {
+      for (const name of (await readdir(directory)).sort()) {
+        const relativePath = prefix === '' ? name : `${prefix}/${name}`
+        if (relativePath === 'receipt.json') continue
+        if (actualInventory.length >= 150_000) fail('Host runtime inventory is too large')
+        const path = join(directory, name)
+        const entry = await lstat(path)
+        const mode = entry.mode & 0o777
+        if (entry.isDirectory()) {
+          actualInventory.push({ path: relativePath, type: 'directory', mode })
+          await walk(path, relativePath)
+        } else if (entry.isFile()) {
+          const hash = createHash('sha256')
+          for await (const chunk of createReadStream(path)) hash.update(chunk)
+          actualInventory.push({ path: relativePath, type: 'file', mode, sha256: hash.digest('hex') })
+        } else if (entry.isSymbolicLink()) {
+          const target = await readlink(path)
+          if (isAbsolute(target) || !inside(runtime.root, resolve(dirname(path), target))
+            || !inside(runtime.root, await realpath(path))) fail('Host runtime symlink escaped its root')
+          actualInventory.push({ path: relativePath, type: 'link', mode, target })
+        } else fail('Host runtime contains unsupported file type')
+      }
+    }
+    await walk(runtime.root)
+    if (JSON.stringify(actualInventory) !== JSON.stringify(receipt.entries)) {
+      fail('Host runtime file inventory changed after update planning')
+    }
+    const executablePath = await realpath(runtime.dshPath)
+    const executableEntry = receipt.entries?.find(entry => join(runtime.root, entry.path) === executablePath)
+    if (executableEntry?.type !== 'file' || !/^[0-9a-f]{64}$/u.test(executableEntry.sha256)
+      || sha256(await readFile(executablePath)) !== executableEntry.sha256) {
+      fail('Host executable changed after update planning')
+    }
+    const reportedVersion = await run(runtime.dshPath, ['--version'], { capture: true, timeoutMs: 20_000 })
+    if (reportedVersion.stdout.trim() !== runtime.version) fail('Host executable version differs from receipt')
+  }
+}
+
+async function hostUnitProperties(systemctlExecutable, unit) {
+  const names = ['FragmentPath', 'DropInPaths', 'ExecStart', 'Environment', 'WorkingDirectory',
+    'User', 'Group', 'Type', 'KillMode']
+  const values = parseSystemdShowProperties((await runServiceCommand(systemctlExecutable,
+    ['--user', 'show', unit, '--no-pager', ...names.map(name => `--property=${name}`)])).stdout, unit, names)
+  const match = /^(\{ path=[^\r\n]* ; argv\[\]=[^\r\n]* ; ignore_errors=(?:yes|no)) ; (?:start_time=[^\r\n]* )?\}$/u.exec(values.ExecStart)
+  if (match === null || values.ExecStart.split('{ path=').length !== 2) fail(`Host unit ExecStart representation invalid: ${unit}`)
+  values.ExecStart = `${match[1]} ; }`
+  return values
+}
+
+async function hostSandboxRun({ bwrapExecutable, preparationRoot, stageHome, logicalHome, command, args, cwd,
+  phase, environment = {} }) {
+  const isPreparation = phase === 'resolve' || phase === 'fetch'
+  const logical = isPreparation ? preparationRoot : logicalHome
+  const physical = isPreparation ? preparationRoot : stageHome
+  const env = {
+    PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: preparationRoot,
+    TMPDIR: '/tmp', DSH_HOME: logicalHome, XDG_CACHE_HOME: join(preparationRoot, 'cache'),
+    pnpm_config_store_dir: join(preparationRoot, 'store'),
+    pnpm_config_ignore_scripts: 'true', pnpm_config_ignore_pnpmfile: 'true',
+    pnpm_config_trust_lockfile: phase === 'materialize' ? 'true' : 'false',
+    ...(isPreparation ? {} : { pnpm_config_offline: 'true', pnpm_config_frozen_lockfile: 'true',
+      pnpm_config_package_import_method: 'copy' }),
+  }
+  for (const name of ['pnpm_config_offline', 'pnpm_config_frozen_lockfile', 'pnpm_config_package_import_method']) {
+    if (environment[name] !== undefined) env[name] = environment[name]
+  }
+  const invocation = [
+    '--die-with-parent', '--new-session', '--ro-bind', '/', '/', '--proc', '/proc', '--dev', '/dev',
+    '--tmpfs', '/tmp', '--bind', preparationRoot, preparationRoot,
+    ...(isPreparation ? [] : ['--bind', physical, logical, '--unshare-net']),
+    '--chdir', cwd, '--clearenv',
+    ...Object.entries(env).flatMap(([name, value]) => ['--setenv', name, value]),
+    '--', command, ...args,
+  ]
+  return run(bwrapExecutable, invocation, { capture: true, timeoutMs: 10 * 60_000 })
+}
+
+async function hostCandidateServices(services, units, candidateDshPath) {
+  const byUnit = new Map(units.map(unit => [unit.unit, unit]))
+  return Promise.all(services.map(async service => {
+    const transition = byUnit.get(service.unit)
+    const snapshot = await snapshotServiceFile(service.fragment.path, transition.after)
+    return { ...service, dshPath: candidateDshPath,
+      pathEnvironment: transition.pathEnvironment,
+      fragment: { path: snapshot.path, identity: snapshot.identity, parentPath: snapshot.parentPath,
+        parentIdentity: snapshot.parentIdentity, ancestorChain: snapshot.ancestorChain, sha256: snapshot.sha256 } }
+  }))
+}
+
+async function reconcileHostUnitSources(units, selected) {
+  for (const unit of units) {
+    const snapshot = await snapshotServiceFile(unit.path)
+    const state = classifyHostUnitBytes(snapshot.source, unit.before, unit.after)
+    if (state !== selected) await writeFileAtomic(unit.path, selected === 'before' ? unit.before : unit.after)
+    const after = await snapshotServiceFile(unit.path, selected === 'before' ? unit.before : unit.after)
+    if (after.path !== unit.path) fail(`Host unit path changed: ${unit.unit}`)
+  }
+}
+
+async function performHostUpdate({ homePath, physicalHomePath, transactionRoot, physicalTransactionRoot,
+  profile, planPath, bwrapExecutable, dshExecutable, serviceContext }) {
+  const previous = await recoverBoundTransaction({ homePath, physicalHomePath, profile,
+    transactionRoot, physicalTransactionRoot, serviceContext })
+  if (previous !== undefined) return
+  const plan = await readHostPlanFile(planPath, homePath)
+  await verifyHostPlanBinding(plan, homePath)
+  if (await realpath(plan.originalRuntime.dshPath) !== dshExecutable) {
+    fail('caller DSH executable does not match Home-bound Host')
+  }
+  if (plan.status === 'current') {
+    process.stdout.write(`managed Host already current: ${plan.originalRuntime.version}\n`)
+    return
+  }
+  await assertNoMounts(physicalHomePath)
+  const originalPackageLinks = await assertSnapshotTreeSafe(physicalHomePath, homePath, true)
+  const originalExternalLinksDigest = await originalExternalPackageLinkDigest(physicalHomePath, originalPackageLinks)
+  const originalProfile = await readProfile(physicalHomePath, profile)
+  const originalDshExecutable = await realpath(plan.originalRuntime.dshPath)
+  const inventory = await captureServiceInventory(serviceContext.systemctlExecutable, homePath, profile,
+    originalDshExecutable, true)
+  const { services, unitUniverse, foreignOwnership } = inventory
+  const units = []
+  for (const service of services) {
+    if (!service.dshPath.startsWith(`${plan.originalRuntime.root}/`)) {
+      fail(`unit does not use the bound Host root: ${service.unit}`)
+    }
+    const before = await snapshotServiceFile(service.fragment.path)
+    const candidate = candidateHostUnitSource(service, before.source,
+      service.dshPath, plan.candidateRuntime.dshPath, plan.originalRuntime.root)
+    if (await existingIdentity(serviceMaskPath(service.unit)) !== undefined
+      || await existingIdentity(`${serviceMaskPath(service.unit)}.d`) !== undefined) {
+      fail(`existing systemd mask conflicts with Host transaction: ${service.unit}`)
+    }
+    units.push({ unit: service.unit, profile: service.profile, path: service.fragment.path,
+      before: before.source, beforeDigest: before.sha256, after: candidate.source,
+      afterDigest: sha256(candidate.source), pathEnvironment: candidate.pathEnvironment })
+  }
+  const originalStat = await assertOwnedPrivateDirectory(physicalHomePath)
+  const homeParent = fstatSync(3)
+  if (String(homeParent.dev) !== String(originalStat.dev)) fail('Host Home and transaction must share filesystem')
+  if (services.length > 0) {
+    const unitParent = await stat(join(process.env.HOME ?? '', '.config', 'systemd', 'user'))
+    if (String(unitParent.dev) !== String(homeParent.dev)) fail('Host Home and unit directory must share filesystem')
+  }
+  assertLockParentStable(homePath)
+  await mkdir(physicalTransactionRoot, { mode: 0o700 })
+  const stageHome = join(transactionRoot, 'staged-home')
+  const backupHome = join(transactionRoot, 'original-home')
+  const preparationRoot = join(transactionRoot, 'host-preparation')
+  const transactionIdentity = identity(await lstat(physicalTransactionRoot))
+  const initial = {
+    version: HOST_UPDATE_MANIFEST_VERSION, id: randomUUID(), homePath, canonicalHome: homePath,
+    transactionPath: transactionRoot, transactionIdentity, profile, operation: 'host-update',
+    originalIdentity: identity(originalStat), originalProfileDigest: sha256(originalProfile.source),
+    stagedIdentity: undefined, stagedProfileDigest: undefined, createdAt: new Date().toISOString(),
+    services, unitUniverse, foreignOwnership, serviceMasks: [], serviceStartBarriers: [],
+    containmentMasks: [], containmentMaskIntents: [], containmentStartBarriers: [],
+    hostMigration: { plan, units, phase: 'initializing', candidateEverStarted: false,
+      originalExternalLinksDigest },
+  }
+  let manifest = await writeManifest(physicalTransactionRoot, initial, 'preparing')
+  try {
+    await mkdir(preparationRoot, { mode: 0o700 })
+    const { prepareHostProfileUpdate, materializeHostProfileUpdate } = await import('./host-profile-update.mjs')
+    const { discoverRsiHostUpdateBackups } = await import('./host-rsi-update.mjs')
+    const { approvedBackupNames } = await discoverRsiHostUpdateBackups({ homePath })
+    const runPnpm = async (args, options) => {
+      await hostSandboxRun({ bwrapExecutable, preparationRoot, stageHome, logicalHome: homePath,
+        command: options.pnpmPath, args, cwd: options.cwd, phase: options.phase,
+        environment: options.env })
+    }
+    const preparation = await prepareHostProfileUpdate({ originalHome: homePath,
+      originalDshPath: plan.originalRuntime.dshPath, candidateDshPath: plan.candidateRuntime.dshPath,
+      preparationRoot, approvedBackupNames, runPnpm })
+    manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+      hostMigration: { ...manifest.hostMigration, preparation } }, 'preparing')
+    const masks = await prepareBoundMasks(physicalTransactionRoot, services.map(service => service.unit), 'managed')
+    const barriers = await prepareServiceStartBarriers(physicalTransactionRoot, services)
+    manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+      serviceMasks: masks, serviceStartBarriers: barriers,
+      hostMigration: { ...manifest.hostMigration, phase: 'stopping' } }, 'preparing')
+    await assertUnitUniverseStable(serviceContext.systemctlExecutable, unitUniverse, homePath, foreignOwnership)
+    await installBoundMasks(serviceContext.systemctlExecutable, masks)
+    await establishServiceStartBarriers(serviceContext.systemctlExecutable, barriers)
+    await stopServicesAndWait(serviceContext.systemctlExecutable, services, masks, homePath,
+      originalDshExecutable, unitUniverse, foreignOwnership, serviceTimeouts().stop)
+    await assertNoUnmanagedHomeProcesses(homePath)
+    manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+      hostMigration: { ...manifest.hostMigration, phase: 'stopped' } }, 'preparing')
+    await copyHome(physicalHomePath, stageHome)
+    const stagedIdentity = identity(await lstat(stageHome))
+    manifest = await writeManifest(physicalTransactionRoot, { ...manifest, stagedIdentity,
+      hostMigration: { ...manifest.hostMigration, phase: 'prepared' } }, 'preparing')
+    await writeFileAtomic(join(stageHome, '.dsh-rsi-host.json'), plan.candidateBindingSource)
+    const runCandidateDsh = async (args, options) => {
+      await hostSandboxRun({ bwrapExecutable, preparationRoot, stageHome, logicalHome: homePath,
+        command: plan.candidateRuntime.dshPath, args, cwd: homePath, phase: options.phase,
+        environment: options.env })
+    }
+    const profileProof = await materializeHostProfileUpdate({ preparation, stagedHome: stageHome,
+      logicalHome: homePath, runPnpm, runCandidateDsh })
+    await assertHostCandidateTreeSafe(physicalHomePath, stageHome, homePath, plan,
+      manifest.hostMigration.originalExternalLinksDigest)
+    manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+      stagedProfileDigest: sha256((await readProfile(stageHome, profile)).source),
+      hostMigration: { ...manifest.hostMigration, profileProof } }, 'preparing')
+    await continueHostUpdate({ manifest, homePath, physicalHomePath, transactionRoot,
+      physicalTransactionRoot, stageHome, backupHome, serviceContext })
+  } catch (error) {
+    await recoverBoundTransaction({ homePath, physicalHomePath, profile,
+      transactionRoot, physicalTransactionRoot, serviceContext }).catch(recoveryError => {
+      process.stderr.write(`Host update recovery incomplete: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}\n`)
+    })
+    throw error
+  }
+}
+
+async function continueHostUpdate({ manifest: initial, homePath, physicalHomePath, transactionRoot,
+  physicalTransactionRoot, stageHome, backupHome, serviceContext }) {
+  let manifest = initial
+  const migration = manifest.hostMigration
+  const plan = migration.plan
+  const services = manifest.services
+  const masks = manifest.serviceMasks
+  const systemctlExecutable = serviceContext.systemctlExecutable
+  const candidateDshExecutable = await realpath(plan.candidateRuntime.dshPath)
+  const { validateHostProfileUpdate } = await import('./host-profile-update.mjs')
+  const { prepareRsiHostUpdate, verifyRsiHostUpdate } = await import('./host-rsi-update.mjs')
+  if (migration.profileProof === undefined || JSON.stringify(await validateHostProfileUpdate({
+    preparation: migration.preparation, stagedHome: stageHome,
+  })) !== JSON.stringify(migration.profileProof)) fail('staged Host profile proof changed')
+  await assertMaskedAndQuiescent({ systemctlExecutable, services, serviceMasks: masks, homePath,
+    unitUniverse: manifest.unitUniverse, foreignOwnership: manifest.foreignOwnership })
+  manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+    hostMigration: { ...manifest.hostMigration, phase: 'units-changing' } }, 'preparing')
+  await reconcileHostUnitSources(migration.units, 'after')
+  await runServiceCommand(systemctlExecutable, ['--user', 'daemon-reload'])
+  manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+    hostMigration: { ...manifest.hostMigration, phase: 'units-changed' } }, 'preparing')
+  let unitTransitions
+  await withCrashStopGuardian(systemctlExecutable, [], randomUUID(), async () => {
+    await stageBoundMasks(systemctlExecutable, masks)
+    try {
+      unitTransitions = await Promise.all(migration.units.map(async transition => {
+        const loaded = await inspectServiceUnit(systemctlExecutable, transition.unit, candidateDshExecutable)
+        const raw = await readRawServiceState(systemctlExecutable, transition.unit)
+        if (raw.activeState !== 'inactive' || raw.subState !== 'dead' || raw.mainPid !== 0
+          || raw.controlPid !== 0 || loaded.fragment.sha256 !== transition.afterDigest) {
+          fail(`candidate unit is not stopped and exact: ${transition.unit}`)
+        }
+        return { unit: transition.unit, profile: transition.profile,
+          oldSource: transition.before, newSource: transition.after,
+          unitProperties: await hostUnitProperties(systemctlExecutable, transition.unit) }
+      }))
+    } finally { await installBoundMasks(systemctlExecutable, masks) }
+  }, false, homePath, services.map(service => service.unit))
+  await assertNoUnmanagedHomeProcesses(homePath)
+  const rsiProof = await prepareRsiHostUpdate({ homePath, stageHome, hostPlan: plan, unitTransitions,
+    transactionId: manifest.id, systemctlExecutable })
+  await verifyRsiHostUpdate({ homePath, physicalHome: stageHome, hostPlan: plan, proof: rsiProof })
+  if (JSON.stringify(await validateHostProfileUpdate({ preparation: migration.preparation,
+    stagedHome: stageHome, authorizedPatchDigests: rsiProof.authorizedPatchDigests })) !== JSON.stringify(migration.profileProof)) {
+    fail('RSI authority preparation changed staged profile materialization')
+  }
+  await verifyHostPlanBinding(plan, homePath)
+  await assertHostCandidateTreeSafe(physicalHomePath, stageHome, homePath, plan,
+    migration.originalExternalLinksDigest)
+  await assertUnitUniverseStable(systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
+  manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+    hostMigration: { ...manifest.hostMigration, phase: 'authority-prepared', rsiProof,
+      unitProperties: unitTransitions.map(item => ({ unit: item.unit, properties: item.unitProperties })) } }, 'preparing')
+  await assertCriticalDirectory(stageHome, manifest.stagedIdentity)
+  await assertCriticalDirectory(physicalHomePath, manifest.originalIdentity)
+  await assertNoUnmanagedHomeProcesses(homePath)
+  await moveBoundDirectoryNoReplace(physicalHomePath, backupHome, manifest.originalIdentity,
+    { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
+  await fsyncPath(physicalTransactionRoot, true)
+  await fsyncPath(LOCK_PARENT_FD_PATH, true)
+  manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+    hostMigration: { ...manifest.hostMigration, phase: 'original-renamed' } }, 'original-renamed')
+  await assertNoUnmanagedHomeProcesses(homePath, [await realpath(backupHome)])
+  await moveBoundDirectoryNoReplace(stageHome, physicalHomePath, manifest.stagedIdentity,
+    { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
+  await fsyncPath(physicalTransactionRoot, true)
+  await fsyncPath(LOCK_PARENT_FD_PATH, true)
+  manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+    hostMigration: { ...manifest.hostMigration, phase: 'swapped' } }, 'swapped')
+  await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan, proof: rsiProof })
+  await assertUnitUniverseStable(systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
+  await acceptHostCandidate({ manifest, homePath, physicalHomePath, transactionRoot,
+    physicalTransactionRoot, backupHome, serviceContext })
+}
+
+async function hostRsiRuntimeAcceptance({ proof, homePath, dshExecutable, services }) {
+  const targets = []
+  for (const installation of proof.installations ?? []) {
+    const target = services.find(service => service.profile === installation.targetProfile)
+    const coordinator = services.find(service => service.profile === installation.coordinatorProfile)
+    if (target?.wasActive !== true || coordinator?.wasActive !== true
+      || targets.some(item => item.profile === installation.targetProfile)
+      || coordinator.coordinatorRuntime !== undefined) {
+      fail('Host RSI runtime acceptance requires a unique active target/coordinator pair')
+    }
+    const pair = await captureRsiCoordinator({ homePath, profile: installation.targetProfile, dshExecutable })
+    if (pair === undefined || pair.profile !== installation.coordinatorProfile) {
+      fail('Host RSI coordinator changed after authority migration')
+    }
+    coordinator.coordinatorRuntime = { targetProfile: installation.targetProfile,
+      scope: pair.contract.scope, coordinatorId: pair.contract.coordinatorId }
+    const baseline = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
+      homePath, profile: installation.targetProfile, dshExecutable,
+    }, 'snapshot'), false)
+    targets.push({ profile: installation.targetProfile, baseline, accepted: undefined })
+  }
+  return targets
+}
+
+async function awaitHostRsiRuntimeSuccessor({ homePath, dshExecutable, target, timeoutMs }) {
+  const deadline = Date.now() + timeoutMs
+  let lastError
+  for (;;) {
+    try {
+      const snapshot = await runSupervisedOperatorDirect({ homePath, profile: target.profile, dshExecutable }, 'attest-active')
+      const current = compactSupervisedSnapshot(snapshot)
+      assertHostRsiRuntimeSuccessor(target.baseline, current, snapshot.attestation)
+      return current
+    } catch (error) { lastError = error }
+    if (Date.now() >= deadline) throw lastError
+    await delay(Math.min(SUPERVISED_POLL_INTERVAL_MS, deadline - Date.now()))
+  }
+}
+
+async function acceptHostCandidate({ manifest: initial, homePath, physicalHomePath, transactionRoot,
+  physicalTransactionRoot, backupHome, serviceContext }) {
+  let manifest = initial
+  const migration = manifest.hostMigration
+  const plan = migration.plan
+  const systemctlExecutable = serviceContext.systemctlExecutable
+  const masks = manifest.serviceMasks
+  const services = await hostCandidateServices(manifest.services, migration.units, plan.candidateRuntime.dshPath)
+  const { verifyRsiHostUpdate } = await import('./host-rsi-update.mjs')
+  await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan,
+    proof: migration.rsiProof })
+  await verifyHostPlanBinding(plan, homePath, 'candidate')
+  const candidateDshExecutable = await realpath(plan.candidateRuntime.dshPath)
+  const rsiTargets = await hostRsiRuntimeAcceptance({ proof: migration.rsiProof, homePath,
+    dshExecutable: candidateDshExecutable, services })
+  if (!migration.candidateEverStarted) await assertHostCandidateTreeSafe(backupHome, physicalHomePath,
+    homePath, plan, migration.originalExternalLinksDigest)
+  await assertUnitUniverseStable(systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
+  await reconcileHostUnitSources(migration.units, 'after')
+  await assertUnitUniverseStable(systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
+  await assertNoUnmanagedHomeProcesses(homePath)
+  await installBoundMasks(systemctlExecutable, masks)
+  await ensureServiceStartBarriers(systemctlExecutable, manifest.serviceStartBarriers)
+  await withCrashStopGuardian(systemctlExecutable, [], randomUUID(), async () => {
+    await stageBoundMasks(systemctlExecutable, masks)
+    try {
+      for (const expected of migration.unitProperties ?? []) {
+        const actual = await hostUnitProperties(systemctlExecutable, expected.unit)
+        const state = await readRawServiceState(systemctlExecutable, expected.unit)
+        if (JSON.stringify(actual) !== JSON.stringify(expected.properties)
+          || state.activeState !== 'inactive' || state.subState !== 'dead'
+          || state.mainPid !== 0 || state.controlPid !== 0) {
+          fail(`candidate systemd unit changed before start: ${expected.unit}`)
+        }
+      }
+    } finally { await installBoundMasks(systemctlExecutable, masks) }
+  }, false, homePath, services.map(service => service.unit))
+  manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+    hostMigration: { ...migration, phase: 'starting', candidateEverStarted: true } }, 'swapped')
+  const targetProfile = services.find(service => service.profile === manifest.profile)?.profile
+    ?? services[0]?.profile ?? manifest.profile
+  const accepted = services.length === 0 ? [] : await startAndAcceptServices({
+    ...serviceContext, services, serviceMasks: masks, homePath, targetProfile,
+    unitUniverse: manifest.unitUniverse, foreignOwnership: manifest.foreignOwnership,
+    cleanProfiles: [], timeouts: serviceTimeouts(), requireLarkReady: false,
+    larkReadyProfiles: rsiTargets.map(target => target.profile),
+    acceptAfterReady: async () => {
+      for (const target of rsiTargets) target.accepted = await awaitHostRsiRuntimeSuccessor({
+        homePath, dshExecutable: candidateDshExecutable, target, timeoutMs: serviceTimeouts().ready,
+      })
+    },
+  })
+  manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+    serviceAcceptance: accepted.map(service => ({ unit: service.unit, invocationId: service.invocationId,
+      mainPid: service.mainPid, nRestarts: service.nRestarts })),
+    hostMigration: { ...manifest.hostMigration, phase: 'accepted' } }, 'swapped')
+  if (services.length > 0) await finalizeAcceptedServices({
+    ...serviceContext, dshExecutable: candidateDshExecutable,
+    services, serviceMasks: masks, serviceStartBarriers: manifest.serviceStartBarriers,
+    containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
+    homePath, targetProfile, unitUniverse: manifest.unitUniverse,
+    foreignOwnership: manifest.foreignOwnership, cleanProfiles: [], acceptance: manifest.serviceAcceptance,
+    requireLarkReady: false, larkReadyProfiles: rsiTargets.map(target => target.profile),
+  })
+  for (const target of rsiTargets) {
+    const current = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
+      homePath, profile: target.profile, dshExecutable: candidateDshExecutable,
+    }, 'attest-active'))
+    assertSupervisedAcceptanceStable({
+      generation: target.accepted.recoveryProof.bootstrap.generation,
+      recoveryProof: target.accepted.recoveryProof,
+      automationsProof: target.accepted.automationsProof,
+      unmanagedAutomationsDigest: target.accepted.unmanagedAutomationsDigest,
+      ownerBindingDigest: target.accepted.ownerBindingDigest,
+      databasePaths: target.accepted.databasePaths,
+    }, current)
+  }
+  for (const expected of migration.unitProperties ?? []) {
+    if (JSON.stringify(await hostUnitProperties(systemctlExecutable, expected.unit)) !== JSON.stringify(expected.properties)) {
+      fail(`candidate systemd unit properties changed after acceptance: ${expected.unit}`)
+    }
+  }
+  await verifyRsiHostUpdate({ homePath, physicalHome: physicalHomePath, hostPlan: plan,
+    proof: migration.rsiProof })
+  manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+    hostMigration: { ...manifest.hostMigration, phase: 'committed' } }, 'committed')
+  manifest = await writeManifest(physicalTransactionRoot, { ...manifest,
+    hostMigration: { ...manifest.hostMigration, phase: 'cleanup-started' } }, 'cleanup-started')
+  await removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome })
+  process.stdout.write(`managed Host updated: ${plan.originalRuntime.version} -> ${plan.candidateRuntime.version}\n`)
+}
+
+async function recoverHostUpdate({ manifest: initial, homePath, physicalHomePath, profile,
+  transactionRoot, physicalTransactionRoot, serviceContext }) {
+  if (serviceContext === undefined) fail('Host update recovery requires systemd service context')
+  let manifest = initial
+  const migration = manifest.hostMigration
+  const backupHome = join(transactionRoot, 'original-home')
+  const failedHome = join(transactionRoot, 'failed-home')
+  const current = await existingIdentity(physicalHomePath)
+  const backup = await existingIdentity(backupHome)
+  const originalLive = current !== undefined && sameIdentity(current, manifest.originalIdentity)
+  const candidateLive = current !== undefined && sameIdentity(current, manifest.stagedIdentity)
+  const originalBackup = backup !== undefined && sameIdentity(backup, manifest.originalIdentity)
+  if (!originalLive && !candidateLive && !(current === undefined && originalBackup)) {
+    fail('Host update recovery found unknown Home identities; retain transaction')
+  }
+  if (migration.phase === 'initializing' && manifest.serviceMasks.length === 0) {
+    if (!originalLive || backup !== undefined) fail('Host initializing recovery found modified Home')
+    const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
+    await fsyncPath(LOCK_PARENT_FD_PATH, true)
+    process.stderr.write(`Host update initialization was not applied; evidence: ${evidence}\n`)
+    return 'host-original-restored'
+  }
+  const systemctlExecutable = serviceContext.systemctlExecutable
+  await installBoundMasks(systemctlExecutable, manifest.serviceMasks)
+  await ensureServiceStartBarriers(systemctlExecutable, manifest.serviceStartBarriers)
+  await stopAndResetServiceUnits(systemctlExecutable, manifest.services.map(service => service.unit))
+  await assertUnitUniverseStable(systemctlExecutable, manifest.unitUniverse, homePath, manifest.foreignOwnership)
+  for (const service of manifest.services) {
+    const state = await readRawServiceState(systemctlExecutable, service.unit)
+    if (state.activeState !== 'inactive' || state.subState !== 'dead'
+      || state.mainPid !== 0 || state.controlPid !== 0) fail(`Host recovery failed to stop unit: ${service.unit}`)
+  }
+  await assertNoUnmanagedHomeProcesses(homePath,
+    originalBackup ? [await realpath(backupHome)] : [])
+  if (!migration.candidateEverStarted) {
+    await reconcileHostUnitSources(migration.units, 'before')
+    await runServiceCommand(systemctlExecutable, ['--user', 'daemon-reload'])
+    if (candidateLive) {
+      if (!originalBackup || await existingIdentity(failedHome) !== undefined) {
+        fail('Host pre-start rollback requires intact original backup and empty failed-home')
+      }
+      await moveBoundDirectoryNoReplace(physicalHomePath, failedHome, manifest.stagedIdentity,
+        { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
+      await fsyncPath(LOCK_PARENT_FD_PATH, true)
+    }
+    if (!originalLive) {
+      if (!originalBackup || await existingIdentity(physicalHomePath) !== undefined) {
+        fail('Host pre-start rollback cannot restore original Home')
+      }
+      await moveBoundDirectoryNoReplace(backupHome, physicalHomePath, manifest.originalIdentity,
+        { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
+      await fsyncPath(LOCK_PARENT_FD_PATH, true)
+    }
+    await verifyHostPlanBinding(migration.plan, homePath)
+    const restored = await Promise.all(manifest.services.map(async service => {
+      const fragment = await snapshotServiceFile(service.fragment.path,
+        migration.units.find(unit => unit.unit === service.unit).before)
+      return { ...service, fragment: { path: fragment.path, identity: fragment.identity,
+        parentPath: fragment.parentPath, parentIdentity: fragment.parentIdentity,
+        ancestorChain: fragment.ancestorChain, sha256: fragment.sha256 } }
+    }))
+    if (restored.length > 0) await restoreOriginalActiveSet({ ...serviceContext,
+      dshExecutable: await realpath(migration.plan.originalRuntime.dshPath),
+      services: restored, serviceMasks: manifest.serviceMasks,
+      serviceStartBarriers: manifest.serviceStartBarriers,
+      containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
+      homePath, targetProfile: restored.find(service => service.profile === profile)?.profile ?? restored[0].profile,
+      unitUniverse: manifest.unitUniverse, foreignOwnership: manifest.foreignOwnership,
+      cleanProfiles: [], timeouts: serviceTimeouts() })
+    const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
+    await fsyncPath(LOCK_PARENT_FD_PATH, true)
+    process.stderr.write(`Host update rolled back before candidate start; evidence: ${evidence}\n`)
+    return 'host-original-restored'
+  }
+  if (!candidateLive) fail('candidate Host has potentially run but candidate Home is unavailable; retain containment')
+  await reconcileHostUnitSources(migration.units, 'after')
+  await runServiceCommand(systemctlExecutable, ['--user', 'daemon-reload'])
+  await acceptHostCandidate({ manifest, homePath, physicalHomePath, transactionRoot,
+    physicalTransactionRoot, backupHome, serviceContext })
+  return 'host-candidate-committed'
+}
+
 async function main() {
   const argv = process.argv.slice(2)
   const lockHeld = argv.at(-1) === '--lock-held'
@@ -5828,7 +6510,7 @@ async function main() {
   }
   if (!isAbsolute(suppliedHomePath) || resolve(suppliedHomePath) !== suppliedHomePath) fail('invalid lifecycle DSH_HOME', 2)
   const homePath = await canonicalMissingAllowed(suppliedHomePath)
-  const recoveryOperation = operation === 'recover' || operation === 'service-recover'
+  const recoveryOperation = operation === 'recover' || operation === 'service-recover' || operation === 'host-recover'
   const dshExecutable = await realpath(suppliedDshExecutable).catch(() => fail('DSH executable must exist'))
   const bwrapExecutable = recoveryOperation ? suppliedBwrapExecutable
     : await trustedSystemExecutable(suppliedBwrapExecutable, 'bwrap')
@@ -5837,6 +6519,28 @@ async function main() {
     return
   }
   await assertLifecycleLocksHeld(homePath)
+  if (operation === 'host-update' || operation === 'host-recover') {
+    if (!PROFILE_NAME.test(profile) || targets.length < 2 || targets.length > 3) {
+      fail('host-update/recover requires systemctl, journalctl and optional plan.json', 2)
+    }
+    const [suppliedSystemctl, suppliedJournalctl, planPath] = targets
+    const serviceContext = {
+      systemctlExecutable: await trustedServiceExecutable(suppliedSystemctl, 'systemctl'),
+      journalctlExecutable: await trustedServiceExecutable(suppliedJournalctl, 'journalctl'),
+    }
+    const paths = lifecyclePaths(homePath)
+    const hostPaths = { homePath, physicalHomePath: paths.physicalHomePath,
+      transactionRoot: paths.transactionPath, physicalTransactionRoot: paths.physicalTransactionRoot }
+    if (operation === 'host-recover') {
+      if (planPath !== undefined) fail('host-recover does not accept plan.json', 2)
+      await recoverBoundTransaction({ ...hostPaths, profile, serviceContext })
+      return
+    }
+    if (planPath === undefined) fail('host-update requires plan.json', 2)
+    await performHostUpdate({ ...hostPaths, profile, planPath, bwrapExecutable,
+      dshExecutable, serviceContext })
+    return
+  }
   if (operation === 'recover') {
     if (targets.length > 1) fail('recover accepts at most one ignored caller scenario', 2)
     if (!PROFILE_NAME.test(profile) || !isAbsolute(homePath) || resolve(homePath) !== homePath) fail('invalid lifecycle recovery invocation', 2)
@@ -5911,7 +6615,7 @@ async function main() {
 export const lifecycleProfileTest = Object.freeze({
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest,
-  validSupervisedCapabilityProof, MANIFEST_MAX_BYTES,
+  validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
 })
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {

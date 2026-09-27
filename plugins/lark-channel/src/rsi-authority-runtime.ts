@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { chmod, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm } from 'node:fs/promises'
 import { createRequire } from 'node:module'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { rsiBuildResources as io } from './rsi-build.js'
@@ -146,9 +146,93 @@ async function verifyRuntime(runtime: RsiAuthorityRuntime, signal: AbortSignal):
   const script = `await Promise.all(${JSON.stringify(urls)}.map(url => import(url)))`
   await io.command(runtime.node.path, ['--input-type=module', '--eval', script], env, signal, 10_000, 4096)
   for (const [key, spec] of [['hostAttestor', runtime.executables.hostAttestor], ...Object.entries(runtime.releaseAdapters)] as [string, Pin][]) {
-    const expected = key === 'hostAttestor' ? 'dsh-systemd-host-attestor-7' : 'dsh-local-release-adapter-1'
+    const expected = key === 'hostAttestor' ? 'dsh-systemd-host-attestor-8' : 'dsh-local-release-adapter-1'
     const output = await io.command(runtime.node.path, [spec.path, '--version'], env, signal, 10_000, 4096)
     if (output !== expected) fail(`CLI version check failed: ${key}`)
+  }
+}
+
+/** Read a copied runtime receipt through its physical stage path, retaining
+ * the logical paths embedded in the original installation. */
+export async function readRsiAuthorityRuntimeReceipt(input: {
+  logicalHome: string; physicalHome: string; profile: string; signal?: AbortSignal
+}): Promise<{ runtime: RsiAuthorityRuntime; receiptDigest: string }> {
+  const { logicalHome, physicalHome, profile } = input
+  if (!exactPath(logicalHome) || !exactPath(physicalHome) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(profile)) fail('invalid copied runtime binding')
+  const root = join(physicalHome, 'rsi-authority-runtimes', profile)
+  const source = await io.readStable(join(root, 'receipt.json'), 65_536, true)
+  const receipt = JSON.parse(source.toString('utf8')) as Receipt
+  const { digest, ...body } = receipt
+  if (receipt.schemaVersion !== 1 || receipt.root !== join(logicalHome, 'rsi-authority-runtimes', profile)
+    || !Array.isArray(receipt.entries) || receipt.entries.length > MAX_ENTRIES
+    || !/^[a-f0-9]{64}$/u.test(digest) || hash(JSON.stringify(body)) !== digest) fail('copied runtime receipt differs')
+  const signal = input.signal ?? new AbortController().signal
+  await verifyTree(root, receipt.entries, signal)
+  const { entries: _entries, ...runtime } = body
+  return { runtime, receiptDigest: hash(source) }
+}
+
+/** Replace only the copied runtime under a stopped Home stage. The receipt and
+ * shebangs keep their logical Home paths, so the transaction can rename Home. */
+export async function replaceRsiAuthorityRuntimeInStage(input: {
+  logicalHome: string; physicalHome: string; profile: string; signal?: AbortSignal
+}, options: Options = {}): Promise<RsiAuthorityRuntime> {
+  const previous = await readRsiAuthorityRuntimeReceipt(input)
+  const signal = AbortSignal.any([input.signal ?? new AbortController().signal, AbortSignal.timeout(120_000)])
+  const parent = join(input.physicalHome, 'rsi-authority-runtimes')
+  await io.directory(parent)
+  const final = join(input.logicalHome, 'rsi-authority-runtimes', input.profile)
+  if (previous.runtime.root !== final) fail('previous runtime root changed')
+  const physical = join(parent, input.profile)
+  const packageRoot = options.packageRoot ?? dirname(createRequire(import.meta.url).resolve('@dsh-enhanced/plugin-control-plane/package.json'))
+  const nodePath = await realpath(options.nodePath ?? process.execPath)
+  if (!exactPath(packageRoot) || !exactPath(nodePath)) fail('source paths must be canonical')
+  const files = await sourceAssets(packageRoot, nodePath, signal)
+  const logicalSourcePath = (path: string): string => path === input.physicalHome ? input.logicalHome
+    : path.startsWith(`${input.physicalHome}${sep}`)
+      ? join(input.logicalHome, relative(input.physicalHome, path)) : path
+  const entries = files.map(file => {
+    const bytes = deployedBytes(file, final)
+    return { path: file.path, sha256: hash(bytes), size: bytes.length,
+      mode: file.path === 'node' || file.path.startsWith('bin/') ? 0o700 : 0o600,
+      sourcePath: logicalSourcePath(file.sourcePath), sourceSha256: file.sourceSha256,
+      sourceSize: file.bytes.length, sourceMode: file.sourceMode }
+  }).sort((a, b) => a.path.localeCompare(b.path))
+  const runtime = result(final, entries)
+  const stage = await mkdtemp(join(parent, `.${input.profile}-update-`))
+  const backup = await mkdtemp(join(parent, `.${input.profile}-previous-`))
+  await rm(backup, { recursive: true })
+  let moved = false
+  try {
+    await chmod(stage, 0o700)
+    await mkdir(join(stage, 'bin'), { mode: 0o700 }); await mkdir(join(stage, 'lib'), { mode: 0o700 })
+    for (const file of files) {
+      const entry = entries.find(item => item.path === file.path)!
+      await writeFile(join(stage, file.path), deployedBytes(file, final), entry.mode)
+    }
+    await verifySources(files, signal)
+    const body = { ...runtime, entries }
+    await writeFile(join(stage, 'receipt.json'), Buffer.from(JSON.stringify({ ...body, digest: hash(JSON.stringify(body)) })), 0o600)
+    await verifyTree(stage, entries, signal)
+    await rename(physical, backup); moved = true
+    try { await rename(stage, physical) }
+    catch (error) { await rename(backup, physical); moved = false; throw error }
+    const actual = await readRsiAuthorityRuntimeReceipt(input)
+    if (!isDeepStrictEqual(actual.runtime, runtime)) fail('replacement runtime differs')
+    await verifyRuntime({ ...runtime, root: physical, node: { ...runtime.node, path: join(physical, 'node') },
+      executables: Object.fromEntries(Object.entries(runtime.executables).map(([key, pin]) => [key, { ...pin, path: join(physical, 'bin', EXECUTABLES[key as Executable]) }])) as RsiAuthorityRuntime['executables'],
+      releaseAdapters: Object.fromEntries(Object.entries(runtime.releaseAdapters).map(([key, pin]) => [key, { ...pin, path: join(physical, 'bin', `dsh-local-release-${key}.js`) }])) as RsiAuthorityRuntime['releaseAdapters'] }, signal)
+    await rm(backup, { recursive: true })
+    return runtime
+  } catch (error) {
+    if (moved) {
+      await rm(physical, { recursive: true, force: true })
+      await rename(backup, physical)
+    }
+    throw error
+  } finally {
+    await rm(stage, { recursive: true, force: true })
+    if (!moved) await rm(backup, { recursive: true, force: true })
   }
 }
 

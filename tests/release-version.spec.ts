@@ -76,6 +76,9 @@ const installerAssets = {
   'common.sh': "#!/usr/bin/env bash\n\n# fixture common source\n\nDSH_ENHANCED_SOURCE_PINNED_HOST_VERSION='0.1.0-rc.7'\n",
   'lifecycle-config.mjs': 'export const fixtureConfig = true\n',
   'lifecycle-profile.mjs': 'export const fixtureProfile = true\n',
+  'host-lifecycle.mjs': 'export const fixtureHost = true\n',
+  'host-profile-update.mjs': 'export const fixtureHostProfile = true\n',
+  'host-rsi-update.mjs': 'export const fixtureHostRsi = true\n',
 }
 
 async function createInstaller(root: string) {
@@ -89,6 +92,9 @@ async function createInstaller(root: string) {
     `DSH_ENHANCED_PINNED_COMMON_SHA256='${'0'.repeat(64)}'`,
     `DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='${'1'.repeat(64)}'`,
     `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${'2'.repeat(64)}'`,
+    `DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256='${'3'.repeat(64)}'`,
+    `DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256='${'4'.repeat(64)}'`,
+    `DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256='${'5'.repeat(64)}'`,
     "DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'",
     "DSH_ENHANCED_PINNED_HOST_VERSION='0.1.0-rc.7'",
     '',
@@ -291,6 +297,15 @@ describe('release version workflow', () => {
     )
     expect(installer).toContain(
       `DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='${sha256(installerAssets['lifecycle-profile.mjs'])}'`,
+    )
+    expect(installer).toContain(
+      `DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256='${sha256(installerAssets['host-lifecycle.mjs'])}'`,
+    )
+    expect(installer).toContain(
+      `DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256='${sha256(installerAssets['host-profile-update.mjs'])}'`,
+    )
+    expect(installer).toContain(
+      `DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256='${sha256(installerAssets['host-rsi-update.mjs'])}'`,
     )
     expect(installer).toContain("DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'")
     expect(installer).toContain("DSH_ENHANCED_PINNED_HOST_VERSION='0.1.2-rc.1'")
@@ -545,7 +560,8 @@ describe('release version workflow', () => {
     expect(ledger.pending.version).toBe('0.1.1')
   })
 
-  test.each(['common.sh', 'lifecycle-config.mjs', 'lifecycle-profile.mjs'])(
+  test.each(['common.sh', 'lifecycle-config.mjs', 'lifecycle-profile.mjs',
+    'host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs'])(
     'verify-tag rejects tampering with pinned installer asset %s',
     async assetName => {
       const root = await createRepository('0.1.0')

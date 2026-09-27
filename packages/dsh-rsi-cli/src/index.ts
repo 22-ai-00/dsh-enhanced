@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline/promises'
 import { runPurge, PurgeError, type PurgeReport } from './purge.ts'
 import { collectStatus, formatStatus, formatFindings, runDoctor } from './diagnose.ts'
 import { resolveDshHome } from './paths.ts'
-import { runInstall } from './install.ts'
+import { hasPendingHostRecovery, runInstall } from './install.ts'
 import { findRunningProfiles } from './run.ts'
 import { formatSelfUpdateReport, runSelfUpdate } from './update.ts'
 import { formatWebUrlResult, resolveManagedWebUrl } from './weburl.ts'
@@ -73,8 +73,10 @@ install / reinstall：
 update：
   不带参数            只升级全局 dsh-rsi 自身（npm install --global @dsh-enhanced/dsh-rsi-cli@latest）；
                       若当前仍由旧包 @dsh-enhanced/rsi-cli 安装，会在新包可用后自动卸载旧包。
-  --all               自身升级成功后，再把插件集合交给官方安装器 --operation upgrade 原地升级
-                      （保留 patch、凭据、Session、Goal 等状态；不同于 reinstall 的先 purge 再装）
+  --all               自身升级成功后，先升级插件集合，再将已绑定的私有 Host 更新到最新兼容版本；
+                      保留 patch、凭据、Session、Goal 等状态
+  --dsh-version <v>   --all 时指定兼容的私有 Host 版本；默认 latest（现有未绑定 Home 保持原 Host）
+                      Host 事务覆盖同一 DSH_HOME 下全部已登记受管 unit，即使 --profile 只升级一个 cohort
   --version <v|tag>   指定 dsh-rsi 目标版本或 dist-tag（默认 latest）
   --local <dir>       --all 时走 local 形态，用该 checkout 的安装器升级
   其它参数            --all 时原样透传给安装器；通常无需再写 --scenario 或内部确认参数
@@ -503,6 +505,26 @@ export async function main(
         })
         process.stdout.write(`${formatSelfUpdateReport(report, args.dryRun)}\n`)
         if (!args.all) return 0
+        const passthrough = [...args.passthrough]
+        if (!passthrough.includes('--operation')) passthrough.push('--operation', 'upgrade')
+        if (!passthrough.includes('--confirm-dsh-home-stopped')) {
+          passthrough.push('--confirm-dsh-home-stopped')
+        }
+        const releaseVersion = report.installedVersion
+          ?? report.resolvedVersion
+          ?? (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(report.selector) ? report.selector : undefined)
+        if (releaseVersion === undefined) {
+          throw new PurgeError(
+            '无法把 dsh-rsi 目标 selector 解析为精确发布版本；为避免 CLI 与安装器版本错配，未开始插件升级。',
+          )
+        }
+        if (!args.dryRun && await hasPendingHostRecovery(args.dshHome)) {
+          const recovery = await install({
+            ...buildInstallOptions(args), releaseRef: `v${releaseVersion}`, passthrough,
+            recoveryOnly: true,
+          })
+          if (recovery !== 0) return recovery
+        }
         const profiles = args.profile === undefined
           ? await resolveTargetProfiles(args.dshHome)
           : [args.profile]
@@ -526,19 +548,6 @@ export async function main(
         process.stdout.write(managed.pids.length > 0
           ? '\n插件集合升级：已确认除受管服务外没有其它 Host；生命周期事务将安全停服、升级并恢复。\n'
           : '\n插件集合升级：已确认目标 profile 无运行中 Host，正在继承现有部署场景并原地升级。\n')
-        const passthrough = [...args.passthrough]
-        if (!passthrough.includes('--operation')) passthrough.push('--operation', 'upgrade')
-        if (!passthrough.includes('--confirm-dsh-home-stopped')) {
-          passthrough.push('--confirm-dsh-home-stopped')
-        }
-        const releaseVersion = report.installedVersion
-          ?? report.resolvedVersion
-          ?? (/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(report.selector) ? report.selector : undefined)
-        if (releaseVersion === undefined) {
-          throw new PurgeError(
-            '无法把 dsh-rsi 目标 selector 解析为精确发布版本；为避免 CLI 与安装器版本错配，未开始插件升级。',
-          )
-        }
         return await install({
           ...buildInstallOptions(args),
           releaseRef: `v${releaseVersion}`,

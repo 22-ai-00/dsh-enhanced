@@ -10,6 +10,7 @@ import { afterAll, afterEach, describe, expect, test } from 'vitest'
 import { Ed25519HostAttestationAuthority, hostAttestationRequestDigest } from '../src/attestation.ts'
 import { invokeConfiguredHostAttestor } from '../src/host-attestor.ts'
 import { controlPlaneDigest } from '../src/store.ts'
+import { signHostMaintenanceRecord } from '../src/host-maintenance.js'
 import { queryRuntimeObserver, runtimeConfigDigest } from '../src/runtime-observer-protocol.ts'
 import { runtimeEpochIdentityDigest, runtimeEpochRequestDigest, verifyRuntimeEpochReceipt, type RuntimeEpochRequest } from '../src/runtime-epoch.ts'
 import type { PluginControlTrustConfig } from '../src/trust.ts'
@@ -120,7 +121,7 @@ if(args[1]==='show') {
   const request: HostAttestationRequest = { schemaVersion: 2, predecessor: null, kind: 'dsh-host-attestation-request', operationId: 'host-operation-fixture',
     requestedAt: now, receiptTtlMs: 30000, installationId: config.authorization.installationId,
     ledger: config.authorization.ledger, plan: config.authorization.plan, activation: config.authorization.activation,
-    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-7',
+    profile: config.authorization.profile, issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-8',
       ...executable, interpreter, authority: config.authority, keyId: config.keyId }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 } }
   config.authorization.requestDigest = hostAttestationRequestDigest(request); await save()
   const start = (value: unknown = request) => {
@@ -144,7 +145,8 @@ if(args[1]==='show') {
 
 async function standingFixture(mode = 'success', existing?: Awaited<ReturnType<typeof fixture>>) {
   const f = existing ?? await fixture()
-  const { schemaVersion: _schema, authorization: _authorization, profileFiles: _files, ...staticFields } = f.config
+  const { schemaVersion: _schema, authorization: _authorization, profileFiles: _files, maintenance: _maintenance,
+    ...staticFields } = f.config as typeof f.config & { maintenance?: unknown }
   const ready = (f.config as unknown as { readiness?: { client: unknown; observer: unknown } }).readiness
   const observed = ready ? { client: ready.client, observer: ready.observer } : { client: f.config.processHelper, observer: {} }
   const template = { ...staticFields, readiness: observed, recoveryReadiness: observed }
@@ -282,6 +284,44 @@ async function rollbackFixture(action: 'restore' | 'stop' = 'stop', mode = 'succ
 }
 
 describe.skipIf(process.platform !== 'linux')('owner systemd reload attestor', () => {
+  test.each(['direct', 'standing'] as const)('schema 6 verifies a signed Host migration via %s configuration without restarting', async mode => {
+    const { f, request, start } = await epochFixture()
+    const before = { executor: { id: 'dsh', version: 'fixture-old', path: '/old/dsh', sha256: 'a'.repeat(64) },
+      profileFiles: structuredClone(f.config.profileFiles), baselineFiles: [], deploymentFiles: [], baselineDeploymentFiles: [],
+      unitProperties: structuredClone(f.config.unitProperties) }
+    const config = f.config as unknown as { schemaVersion: number; readiness: { deploymentFiles: { path: string; sha256: string }[] }; maintenance: unknown[] }
+    config.schemaVersion = 6
+    f.config.unitProperties.Environment += ' PATH=/candidate'
+    const observationPath = join(f.root, 'observation.json')
+    const observation = JSON.parse(await readFile(observationPath, 'utf8'))
+    observation.Environment = f.config.unitProperties.Environment
+    await writeFile(observationPath, JSON.stringify(observation))
+    for (const pin of f.config.profileFiles) {
+      await writeFile(pin.path, '{"host":"candidate"}\n')
+      pin.sha256 = sha(await readFile(pin.path))
+    }
+    const after = { ...structuredClone(before), executor: { ...before.executor, version: 'fixture-candidate', path: '/candidate/dsh' },
+      profileFiles: f.config.profileFiles, unitProperties: f.config.unitProperties }
+    // This fixture's observer has no additional deployment-file requirements.
+    before.deploymentFiles = config.readiness.deploymentFiles.map(pin => ({ ...pin, input: pin.path.slice(request.profile.path.length + 1) })) as []
+    after.deploymentFiles = before.deploymentFiles
+    const record = signHostMaintenanceRecord({ schemaVersion: 1, kind: 'dsh-host-maintenance', transactionId: 'offline-update',
+      installationId: request.installationId, ledger: request.ledger, profile: request.profile, plan: request.plan,
+      activation: request.activation, predecessor: request.predecessor, sequence: 1, previousDigest: null,
+      before, after, issuedAt: Date.now(), authority: f.config.authority, keyId: f.config.keyId }, await readFile(f.config.privateKeyPath, 'utf8'))
+    config.maintenance = [record]
+    await f.save()
+    if (mode === 'standing') await standingFixture('success', f)
+    const result = await start().result
+    expect(result.code, result.stderr).toBe(0)
+    expect(await f.restarts()).toBe(1)
+    config.maintenance = [{ ...record, after: { ...after, unitProperties: before.unitProperties } }]
+    await f.save()
+    if (mode === 'standing') await standingFixture('success', f)
+    const altered = await start().result
+    expect(altered.code).not.toBe(0)
+    expect(await f.restarts()).toBe(1)
+  }, 45000)
   // Positive physical recovery requires the same visible kernel hierarchy
   // that the attestor verifies. An isolated build with a masked /sys cannot
   // prove that evidence; the rejection tests below still run there.

@@ -83,7 +83,7 @@ async function fixture() {
   const request: HostAttestationRequest = { schemaVersion: 2, kind: 'dsh-host-attestation-request', operationId: 'operation-reload',
     requestedAt: now, receiptTtlMs: 30_000, installationId: plan.installationId, ledger: plan.ledger,
     plan: { id: plan.id, digest: plan.digest }, activation: { id: 'activation', fence: 1 }, profile: { name: 'test', path: profilePath },
-    issuer: { mode: 'configured-executable', id: 'systemd-host', version: 'dsh-systemd-host-attestor-7', ...executable,
+    issuer: { mode: 'configured-executable', id: 'systemd-host', version: 'dsh-systemd-host-attestor-8', ...executable,
       interpreter, authority: template.authority, keyId: template.keyId }, phase: 'reload', requirements: { kind: 'reload', previousHostGeneration: 0 }, predecessor: null }
   const witnessCore = { schemaVersion: 1, kind: 'dsh-host-input-witness', planId: plan.id, planDigest: plan.digest,
     activationId: 'activation', fence: 1, createdAt: now - 400, inputs: [input], profileFiles,
@@ -95,7 +95,7 @@ async function fixture() {
     dispatch: { status: 'claimed', claimedAt: now + 10 }, witness }
   mock.context = context
   mock.trust = { installationId: plan.installationId, ledger: plan.ledger, dshHome: home,
-    hostAttestor: { id: 'systemd-host', version: 'dsh-systemd-host-attestor-7', ...executable, interpreter,
+    hostAttestor: { id: 'systemd-host', version: 'dsh-systemd-host-attestor-8', ...executable, interpreter,
       authority: template.authority, keyId: template.keyId },
     approvalKeys: [{ authority: approvalReceipt.authority, keyId: approvalReceipt.keyId,
       publicKeyPem: approvalKey.publicKey.export({ format: 'pem', type: 'spki' }) }] }
@@ -158,7 +158,7 @@ function runtimeEpochFixture(f: Awaited<ReturnType<typeof fixture>>, requestedAt
   f.context.plan.status = 'activated'
   const context = { plan: f.context.plan, sourcePlan: f.context.sourcePlan, source: f.context.source,
     released: f.context.released, handoff: f.context.handoff, approvalReceipt: f.context.approvalReceipt,
-    witness: f.context.witness, readiness, request, status: 'claimed', createdAt: requestedAt }
+    witness: f.context.witness, readiness, request, status: 'claimed', createdAt: requestedAt, maintenance: [] }
   mock.epochContext = context
   return { request, context }
 }
@@ -324,7 +324,7 @@ test('packaged CLI resolves the exact claimed Store request through its relative
   const executable = { path: attestorPath, sha256: await sha(attestorPath) }
   const interpreter = { path: nodePath, sha256: await sha(nodePath) }
   const issuer: HostAttestationRequest['issuer'] = { mode: 'configured-executable', id: 'systemd-host',
-    version: 'dsh-systemd-host-attestor-7', ...executable, interpreter,
+    version: 'dsh-systemd-host-attestor-8', ...executable, interpreter,
     authority: base.config.template.authority, keyId: base.config.template.keyId }
   const real = await hostAuthorizationPlan({ liveQualification: base.config.grant.liveQualification, issuer })
   const claimed = await real.exposeAndClaimReload()

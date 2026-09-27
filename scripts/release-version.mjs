@@ -19,6 +19,9 @@ const installerAssetPins = [
   ['common.sh', 'DSH_ENHANCED_PINNED_COMMON_SHA256'],
   ['lifecycle-config.mjs', 'DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256'],
   ['lifecycle-profile.mjs', 'DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256'],
+  ['host-lifecycle.mjs', 'DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256'],
+  ['host-profile-update.mjs', 'DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256'],
+  ['host-rsi-update.mjs', 'DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256'],
 ]
 
 function parseArguments(argv) {

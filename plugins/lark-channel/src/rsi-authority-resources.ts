@@ -75,7 +75,7 @@ async function inspect(home: string, profile: string, signal: AbortSignal): Prom
 /** Caller holds the DSH_HOME lifecycle lock. This creates identities and local
  * storage, not grants; owner-bound authorization is configured separately. */
 export async function prepareRsiAuthorityResources(input: {
-  dshHome: string; profile: string; signal?: AbortSignal
+  dshHome: string; profile: string; signal?: AbortSignal; existingOnly?: boolean
 }): Promise<RsiAuthorityResources> {
   const { dshHome: home, profile } = input
   if (!isAbsolute(home) || resolve(home) !== home || home.includes('\0') || /[\r\n]/u.test(home)
@@ -84,6 +84,10 @@ export async function prepareRsiAuthorityResources(input: {
   signal.throwIfAborted()
   await io.directory(home, false)
   const parent = join(home, 'rsi-authorities'), paths = locations(home, profile)
+  if (input.existingOnly) {
+    await io.directory(parent)
+    return inspect(home, profile, signal)
+  }
   try { await mkdir(parent, { mode: 0o700 }) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
   await io.directory(parent)
   let existing = false

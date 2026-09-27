@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, test } from 'vitest'
 import { loadTrustConfig } from '@dsh-enhanced/plugin-control-plane'
-import { prepareRsiAuthorityRuntime } from '../src/rsi-authority-runtime.js'
+import { prepareRsiAuthorityRuntime, replaceRsiAuthorityRuntimeInStage } from '../src/rsi-authority-runtime.js'
 import { createRsiAuthorityFixture } from './fixtures/rsi-authorities.js'
 
 const roots: string[] = []
@@ -63,7 +63,7 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
       const trust = JSON.parse(await readFile(trustPath, 'utf8')) as Record<string, any>
       const interpreter = result.node
       trust.hostAttestor = { ...trust.hostAttestor, ...result.executables.hostAttestor,
-        version: 'dsh-systemd-host-attestor-7', interpreter }
+        version: 'dsh-systemd-host-attestor-8', interpreter }
       for (const phase of Object.keys(result.releaseAdapters) as (keyof typeof result.releaseAdapters)[]) {
         trust.releaseAdapters[phase] = { ...trust.releaseAdapters[phase], ...result.releaseAdapters[phase],
           version: 'dsh-local-release-adapter-1', interpreter }
@@ -81,7 +81,7 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     const isolated = { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', HOME: f.final }
     const attestor = spawnSync(result.node.path, [result.executables.hostAttestor.path, '--version'], { env: isolated, encoding: 'utf8', timeout: 10_000 })
     expect(attestor.status).toBe(0)
-    expect(attestor.stdout.trim()).toBe('dsh-systemd-host-attestor-7')
+    expect(attestor.stdout.trim()).toBe('dsh-systemd-host-attestor-8')
     const adapter = spawnSync(result.node.path, [result.releaseAdapters.pr.path, '--version'], { env: isolated, encoding: 'utf8', timeout: 10_000 })
     expect(adapter.status).toBe(0)
     expect(adapter.stdout.trim()).toBe('dsh-local-release-adapter-1')
@@ -117,6 +117,27 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     await writeFile(deployed, original, { mode: 0o600 })
     await writeFile(join(f.final, 'lib', 'unexpected.js'), '')
     await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })).rejects.toThrow()
+  }, 120_000)
+
+  test('stage replacement persists logical source paths and replays after Home swap', async () => {
+    const f = await fixture()
+    await prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })
+    const stageHome = join(f.root, 'stage-home'), previousHome = join(f.root, 'previous-home')
+    await cp(f.home, stageHome, { recursive: true })
+    const installed = join(stageHome, 'profiles', 'owner', 'node_modules', '@dsh-enhanced', 'plugin-control-plane')
+    await mkdir(dirname(installed), { recursive: true, mode: 0o700 })
+    await cp(f.packageRoot, installed, { recursive: true })
+    await replaceRsiAuthorityRuntimeInStage({ logicalHome: f.home, physicalHome: stageHome, profile: 'owner' },
+      { packageRoot: installed })
+    const source = JSON.parse(await readFile(join(stageHome, 'rsi-authority-runtimes', 'owner', 'receipt.json'), 'utf8')) as {
+      entries: Array<{ sourcePath: string }>
+    }
+    expect(source.entries.some(entry => entry.sourcePath.startsWith(stageHome))).toBe(false)
+    expect(source.entries.some(entry => entry.sourcePath.startsWith(join(f.home, 'profiles')))).toBe(true)
+    await rename(f.home, previousHome)
+    await rename(stageHome, f.home)
+    expect(await prepareRsiAuthorityRuntime(f.input, { packageRoot: join(f.home, 'profiles', 'owner',
+      'node_modules', '@dsh-enhanced', 'plugin-control-plane') })).toHaveProperty('root', f.final)
   }, 120_000)
 
   test('cancellation leaves no runtime; failed copied CLI removes only its claimed runtime', async () => {

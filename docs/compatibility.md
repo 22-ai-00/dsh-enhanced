@@ -1,5 +1,11 @@
 # 兼容性基线
 
+## 受管 Host 迁移证明（Control Plane schema 27）
+
+v27 增加独立维护记录，原计划、批准、readiness、部署 checkpoint 和 watch 不改写。停服迁移使用原 Host 签名身份将新 executor、unit、profile 与回滚备份关联到原成功部署；读取时验证完整链，物理回退使用迁移后的文件基线。attestor v8 的 schema6 配置验证该关联并为新进程补证，不额外重启、不续期授权、不重置额度。
+
+目标、协调器与复制后的独立授权程序必须成套升级；旧 reader 不支持 v27。先完成或对账原固定版本的未结操作，再执行迁移。维护证明协议的工程测试不代替完整安装事务或真实普通反馈验收；当前边界见 [RSI 状态](rsi-status.md) 与 [Host 维护协议](systemd-host-attestor.md#continuity-through-managed-host-maintenance)。
+
 ## 重启后的持续观察（Control Plane schema 26）
 
 v26 新增独立 runtime epoch 表，保留既有计划摘要、签名和部署观察历史。目标 Host 在原生启动或任务发现运行身份变化时申请补证；既有协调器通过原生 Automation 调用 systemd attestor v7，schema4 授权包装层生成只观察的 schema5 配置。两个 Host、授权器及签名器需使用同批版本；未完成的旧操作保留原固定程序，不能改写 issuer。
@@ -36,9 +42,9 @@ Delivery 的新审批桥要求提供 `registerHumanApprovalAnswerer` 的同批 P
 
 新 Control Plane 在原生 `appReady` 提交后向 stderr 输出版本化的 `dsh-enhanced host ready: v1`，不污染 headless/ACP 的 stdout。安装器与 service lifecycle 的隔离激活、预览和 systemd 验收均识别此信号，保留旧 Web URL 信号；systemd 仍要求新 InvocationID，generic 信号必须是完整、精确的协议行。仅含旧 cohort 的无 Web Host 可能没有该通知；成对升级会在停服前检查旧协调器当前 InvocationID 的就绪记录，无法证明时保留运行状态并拒绝升级。该启动证据不替代独立任务验证或持久采用证明。
 
-Linux service-aware upgrade 已接入登记过的 RSI 目标与协调器：核对私有安装收据、同批已安装版本、共享 catalog/trust、owner scope、handoff 与专用状态路径，再把目标包和协调器的 Policy、Automations、Control Plane 三包更新到同一精确版本。协调器仅在隔离预览进程关闭 scheduler；持久配置仍启用调度。真实服务接受还要求本次启动后登记的、匹配 owner 与 executor 的原生 Automation。事务绑定原始/候选收据、配置及包摘要，恢复与清理前重新核对。固定本地源码或 `rsi-local-cohorts` 制品的迁移尚未实现，会在 registry 查询和停服前拒绝；不能将此能力外推为所有本地安装可更新。跨版本 DSH Host 切换仍未实现。
+Linux service-aware upgrade 已接入登记过的 RSI 目标与协调器：核对私有安装收据、同批已安装版本、共享 catalog/trust、owner scope、handoff 与专用状态路径，再把目标包和协调器的 Policy、Automations、Control Plane 三包更新到同一精确版本。协调器仅在隔离预览进程关闭 scheduler；持久配置仍启用调度。真实服务接受还要求本次启动后登记的、匹配 owner 与 executor 的原生 Automation。事务绑定原始/候选收据、配置及包摘要，恢复与清理前重新核对。固定本地源码或 `rsi-local-cohorts` 制品的迁移尚未实现，会在 registry 查询和停服前拒绝；不能将此能力外推为所有本地安装可更新。跨版本 DSH Host 更新的独立迁移事务已通过工程验收，真实跨版本升级尚未验证；与插件升级是先后两个阶段，Host 失败不会撤销已提交的插件升级。
 
-当前开发与测试基线为官方 npm `latest` 的 **DSH `0.1.5-rc.3`**（2026-09-27 核对 registry）。没有发布不带预发布后缀的 `0.1.7`；`next` 为 `0.1.7-rc.2`，`alpha` 为 `0.1.7-alpha.2`，不能把这些称为正式版。按用户选择跟随官方 latest 通道，不选择 Alpha/Beta。`dsh-rsi install` 对全新空 Home 在运行时解析 latest 到精确版本并检查兼容范围，安装至独立私有目录并把版本及文件收据绑定到 Home；重试及插件升级复用绑定，不替换全局 Host。直接 shell 安装及已有未绑定 Home 仍复用当前兼容 Host。`dsh-rsi update --all` 目前更新 CLI 与插件集合，Host 更新事务尚待实现，不能宣称它已自动更新 DSH。工作区 catalog、Host peers 和下一版发布基线使用 `0.1.5-rc.3`；已经发布的 installer cohort 与发布账本历史保留原值，下一次 release prepare 才更新其远端制品固定信息。
+当前开发与测试基线为官方 npm `latest` 的 **DSH `0.1.5-rc.3`**（2026-09-27 核对 registry）。没有发布不带预发布后缀的 `0.1.7`；`next` 为 `0.1.7-rc.2`，`alpha` 为 `0.1.7-alpha.2`，不能把这些称为正式版。按用户选择跟随官方 latest 通道，不选择 Alpha/Beta。`dsh-rsi install` 对全新空 Home 在运行时解析 latest 到精确版本并检查兼容范围，安装至独立私有目录并把版本及文件收据绑定到 Home；重试及插件升级复用绑定，不替换全局 Host。直接 shell 安装及已有未绑定 Home 仍复用当前兼容 Host。当前开发版的 `dsh-rsi update --all` 在 CLI 与插件集合升级后，为已绑定 Linux Home 规划独立 Host 更新事务；已发布安装器尚不具备此行为，当前验证范围见 [RSI 状态](rsi-status.md)。原生依赖随候选 Host 的权威锁图迁移；已精确指向旧 Host 原生版本的依赖 override 同步更新，包括相同值的手工配置。非原生包和制品保持固定，不一致的自定义原生 override 会拒绝。工作区 catalog、Host peers 和下一版发布基线使用 `0.1.5-rc.3`；已经发布的 installer cohort 与发布账本历史保留原值，下一次 release prepare 才更新其远端制品固定信息。
 
 新版 Agent setup 的第二参数是尚未发布的确切 Agent；不再读取 `ctx.agent`。Inbox 使用公开 `nextTurn` / `nextStep`，程序内嵌套工具事件为 `tool/ptc-dispatch-start` / `tool/ptc-dispatch`。Session format 为 3，持久化使用 `create/open` 返回的会话句柄，恢复和清理须保持独占写入及未知结果不重派。系统提示进入原生消息历史，`EpochHeader` 不再携带 `system`；请求来源验证按新原生结构精确比较。
 

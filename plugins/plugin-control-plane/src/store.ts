@@ -18,6 +18,7 @@ import { assertTaskObservationBatch, getTaskObservationRecord, readTaskObservati
 import type { TaskObservationBatch, TaskObservationRecord } from './task-observation-types.js'
 import { parseRuntimeEpochRequest, parseRuntimeEpochReceipt, verifyRuntimeEpochReceipt, type RuntimeEpochRequest, type RuntimeEpochReceipt } from './runtime-epoch.js'
 import { runtimeIdentityDigest } from './foreground-deployment.js'
+import { readHostMaintenanceRecords, verifyHostMaintenanceChain, hostMaintenanceDigest, type HostMaintenanceRecord } from './host-maintenance.js'
 import type { RuntimeObservation } from './runtime-observer-protocol.js'
 import type { PluginControlTrustConfig } from './trust.js'
 import type {
@@ -481,7 +482,7 @@ function hostInputPins(value: unknown, inputs: readonly string[], targetPath: st
   return value as readonly { input: string; path: string; sha256: string }[]
 }
 
-function hostInputWitnessFromRow(database: DatabaseSync, plan: PluginActivationPlan): HostInputWitness | undefined {
+function hostInputWitnessFromRow(database: DatabaseSync, plan: PluginActivationPlan, project = true): HostInputWitness | undefined {
   const row = database.prepare('SELECT witness_json,witness_digest FROM activation_host_input_witnesses WHERE plan_id=?')
     .get(plan.id) as { witness_json: string; witness_digest: string } | undefined
   if (!row) return undefined
@@ -511,7 +512,79 @@ function hostInputWitnessFromRow(database: DatabaseSync, plan: PluginActivationP
   } else if (!Array.isArray(witness.baselineDeploymentFiles) || witness.baselineDeploymentFiles.length !== 0) {
     throw new ControlPlaneStoreError('invalid-state', 'absent original target has Host input baseline files')
   }
-  return witness
+  if (!project) return witness
+  const latest = readHostMaintenanceContext(database, plan.id).records.at(-1)
+  if (!latest) return witness
+  const { digest: _digest, ...original } = witness
+  const effective = { ...original, profileFiles: latest.after.profileFiles as HostInputWitness['profileFiles'],
+    deploymentFiles: latest.after.deploymentFiles, baselineDeploymentFiles: latest.after.baselineDeploymentFiles }
+  return { ...effective, digest: controlPlaneDigest(effective) }
+}
+
+/** Offline update seam. Reads original history before verifying its maintenance chain. */
+export function readHostMaintenanceContext(database: DatabaseSync, planId: string) {
+  const row = database.prepare('SELECT * FROM activation_plans WHERE id=?').get(planId) as unknown as ActivationRow | undefined
+  if (!row) throw new ControlPlaneStoreError('not-found', 'maintenance plan absent')
+  const plan = activationFromRow(row), records = readHostMaintenanceRecords(database, planId)
+  const witness = hostInputWitnessFromRow(database, plan, false)
+  const readinessRow = database.prepare(`SELECT operation.* FROM host_attestation_operations operation
+    JOIN host_attestations attestation ON attestation.plan_id=operation.plan_id AND attestation.phase=operation.phase
+      AND attestation.receipt_digest=operation.receipt_digest
+    WHERE operation.plan_id=? AND operation.phase='readiness' AND operation.status='applied'`).get(planId) as HostAttestationOperationRow | undefined
+  const readiness = readinessRow ? hostOperationFromRow(readinessRow).receipt : undefined
+  if (records.length) {
+    if (!witness || !readiness || readiness.outcome !== 'passed') throw new ControlPlaneStoreError('invalid-state', 'maintenance lost original readiness')
+    verifyHostMaintenanceChain(records, plan, readiness, witness)
+    const checkpoint = database.prepare('SELECT baseline_json FROM activation_deployment_checkpoints WHERE plan_id=?').get(plan.id)
+    if (!checkpoint || controlPlaneDigest(JSON.parse(String(checkpoint.baseline_json))) !== controlPlaneDigest(records[0]!.before.profileFiles)) {
+      throw new ControlPlaneStoreError('invalid-state', 'maintenance original deployment checkpoint changed')
+    }
+  }
+  return { plan, witness, readiness, records }
+}
+
+/** Caller owns the stopped Home transaction; this append never rewrites historical evidence. */
+export function appendHostMaintenance(database: DatabaseSync, record: HostMaintenanceRecord): void {
+  database.exec('SAVEPOINT append_host_maintenance')
+  try {
+    // Acquire the SQLite writer reservation before reading the current lineage.
+    // A savepoint composes with the installer's enclosing offline transaction.
+    database.exec('UPDATE deployment_host_maintenance SET sequence=sequence WHERE 0')
+    appendHostMaintenanceLocked(database, record)
+    database.exec('RELEASE append_host_maintenance')
+  } catch (error) {
+    database.exec('ROLLBACK TO append_host_maintenance; RELEASE append_host_maintenance')
+    throw error
+  }
+}
+function appendHostMaintenanceLocked(database: DatabaseSync, record: HostMaintenanceRecord): void {
+  const context = readHostMaintenanceContext(database, record.plan.id), { plan, witness, readiness, records } = context
+  const prior = records.find(item => item.transactionId === record.transactionId)
+  if (prior) {
+    if (hostMaintenanceDigest(prior) !== hostMaintenanceDigest(record)) throw new ControlPlaneStoreError('conflict', 'maintenance transaction changed')
+    return
+  }
+  const current = readCurrentRuntimeEpochDeployment(database, plan.target.profilePath)
+  if (current.plan.id !== plan.id) throw new ControlPlaneStoreError('conflict', 'maintenance deployment was superseded')
+  const watch = database.prepare('SELECT state,activation_id,fence FROM activation_watch WHERE plan_id=?').get(plan.id)
+  if (plan.status !== 'activated' || !witness || !readiness || readiness.outcome !== 'passed'
+    || watch?.state !== 'watching' || watch.activation_id !== plan.activation?.id || watch.fence !== plan.activation?.fence) {
+    throw new ControlPlaneStoreError('invalid-state', 'maintenance requires a watched successful deployment')
+  }
+  verifyHostMaintenanceChain([...records, record], plan, readiness, witness)
+  const checkpoint = database.prepare('SELECT baseline_json FROM activation_deployment_checkpoints WHERE plan_id=?').get(plan.id)
+  if (!checkpoint || controlPlaneDigest(JSON.parse(String(checkpoint.baseline_json))) !== controlPlaneDigest(witness.profileFiles)) {
+    throw new ControlPlaneStoreError('invalid-state', 'maintenance original deployment checkpoint changed')
+  }
+  database.prepare('INSERT INTO deployment_host_maintenance VALUES (?,?,?,?,?)')
+    .run(plan.id, record.sequence, record.transactionId, JSON.stringify(record), hostMaintenanceDigest(record))
+}
+
+function effectiveActivationFromRow(database: DatabaseSync, row: ActivationRow): PluginActivationPlan {
+  const plan = activationFromRow(row)
+  if (!database.prepare('SELECT 1 FROM deployment_host_maintenance WHERE plan_id=? LIMIT 1').get(plan.id)) return plan
+  const latest = readHostMaintenanceContext(database, plan.id).records.at(-1)
+  return latest && plan.activation ? { ...plan, activation: { ...plan.activation, targetBaselineFiles: latest.after.baselineFiles } } : plan
 }
 
 function activationFromRow(row: ActivationRow): PluginActivationPlan {
@@ -1259,7 +1332,7 @@ export function readOwnerSourceAdoptionPlan(database: DatabaseSync, activationPl
     { source_plan_id: string; activation_plan_id: string; binding_json: string; binding_digest: string } | undefined
   const row = database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(activationPlanId) as unknown as ActivationRow | undefined
   if (!link || !row) throw new ControlPlaneStoreError('not-found', 'owner source adoption binding absent')
-  const plan = activationFromRow(row), { plan: sourcePlan, source } = readOwnerPreparedSourcePlan(database, link.source_plan_id)
+  const plan = effectiveActivationFromRow(database, row), { plan: sourcePlan, source } = readOwnerPreparedSourcePlan(database, link.source_plan_id)
   if (sourcePlan.status !== 'release-complete' || !sourcePlan.release || plan.gapId !== sourcePlan.gapId) throw new ControlPlaneStoreError('invalid-state', 'source adoption requires a completed owner release')
   const expected = adoptionBinding(sourcePlan, source, plan), released = readReleaseCandidate(database, sourcePlan)
   if (controlPlaneDigest(JSON.parse(link.binding_json)) !== link.binding_digest || controlPlaneDigest(expected) !== link.binding_digest
@@ -1329,7 +1402,8 @@ export function readCurrentRuntimeEpochDeployment(database: DatabaseSync, profil
     || readiness.receipt.fence !== plan.activation.fence || readiness.receipt.hostGeneration !== watch.last_host_generation) {
     throw new ControlPlaneStoreError('conflict', 'runtime epoch original readiness changed')
   }
-  return { ...adopted, handoff, approvalReceipt, witness, readiness }
+  return { ...adopted, handoff, approvalReceipt, witness, readiness,
+    maintenance: readHostMaintenanceContext(database, plan.id).records }
 }
 
 /** Read-only authority seam; current request admission never extends the historical activation authorization. */
@@ -1873,7 +1947,12 @@ export class ControlPlaneStore {
   getPlan(id: string): PluginActivationPlan {
     const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(id) as unknown as ActivationRow | undefined
     if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
-    return activationFromRow(row)
+    return effectiveActivationFromRow(this.#database, row)
+  }
+
+  currentPlanExecutor(planId: string): PluginActivationPlan['executor'] {
+    const context = readHostMaintenanceContext(this.#database, planId)
+    return context.records.at(-1)?.after.executor ?? context.plan.executor
   }
 
   findSourceAdoption(sourcePlanId: string): PluginActivationPlan | undefined {
@@ -2343,7 +2422,7 @@ export class ControlPlaneStore {
     try {
       const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
       if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
-      const plan = activationFromRow(row); if (plan.revision !== input.expectedRevision) throw new ControlPlaneStoreError('conflict', 'activation plan revision conflict')
+      const plan = effectiveActivationFromRow(this.#database, row); if (plan.revision !== input.expectedRevision) throw new ControlPlaneStoreError('conflict', 'activation plan revision conflict')
       if (row.approval_receipt_json === null || plan.approval === undefined) {
         throw new ControlPlaneStoreError('invalid-state', 'activation approval signature is unavailable')
       }
@@ -2395,7 +2474,7 @@ export class ControlPlaneStore {
         this.assertOwnerActivationSource(input.planId)
         const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
         if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
-        const plan = activationFromRow(row)
+        const plan = effectiveActivationFromRow(this.#database, row)
         if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.fence || plan.status !== 'staging'
           || Number(row.activation_lease_until ?? 0) < now) throw new ControlPlaneStoreError('conflict', 'activation lost its claim before recording the target baseline')
         const expectedPaths = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml'].map(name => `${plan.target.profilePath}/${name}`)
@@ -2433,7 +2512,7 @@ export class ControlPlaneStore {
         this.assertOwnerActivationSource(input.planId)
         const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
         if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
-        const plan = activationFromRow(row)
+        const plan = effectiveActivationFromRow(this.#database, row)
         if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.fence || plan.status !== 'commit-pending'
           || Number(row.activation_lease_until ?? 0) < now) {
           throw new ControlPlaneStoreError('conflict', 'activation lost its claim before recording the installed baseline')
@@ -2474,7 +2553,8 @@ export class ControlPlaneStore {
     if (row === undefined) return undefined
     let value: unknown
     try { value = JSON.parse(row.baseline_json) as unknown } catch { throw new ControlPlaneStoreError('invalid-state', 'stored installed activation baseline is corrupt') }
-    return activationCoreFiles(value, plan.target.profilePath, 'stored installed activation baseline')
+    const original = activationCoreFiles(value, plan.target.profilePath, 'stored installed activation baseline')
+    return readHostMaintenanceContext(this.#database, plan.id).records.at(-1)?.after.profileFiles ?? original
   }
 
   /** Move a signed closed deployment watch into the existing physical rollback lifecycle. */
@@ -2484,7 +2564,7 @@ export class ControlPlaneStore {
     try {
       const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
       if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
-      const plan = activationFromRow(row)
+      const plan = effectiveActivationFromRow(this.#database, row)
       if (plan.revision !== input.expectedRevision) throw new ControlPlaneStoreError('conflict', 'activation plan revision conflict')
       // A restart or retry must retain the original rollback identity and never
       // manufacture another rollback from a now-closed watch.
@@ -2650,7 +2730,7 @@ export class ControlPlaneStore {
       const assertOwner = (requireLiveLease: boolean): ActivationRow => {
         const row = this.#database.prepare('SELECT * FROM activation_plans WHERE id = ?').get(input.planId) as unknown as ActivationRow | undefined
         if (row === undefined) throw new ControlPlaneStoreError('not-found', 'activation plan not found')
-        const plan = activationFromRow(row)
+        const plan = effectiveActivationFromRow(this.#database, row)
         if (plan.revision !== input.expectedRevision || plan.activation?.fence !== input.fence || plan.status !== input.status
           || (requireLiveLease && Number(row.activation_lease_until ?? 0) < this.#now())) throw new ControlPlaneStoreError('conflict', 'activation no longer owns the filesystem fence')
         return row
