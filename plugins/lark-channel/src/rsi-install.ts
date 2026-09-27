@@ -21,6 +21,8 @@ import type { RsiSetupManifest } from './rsi-profile.js'
 import type { RsiAuthorityConfigInput } from './rsi-authority-config.js'
 import { readRsiServiceEnvironment } from './rsi-service-environment.js'
 import { version } from './version.js'
+import { readRsiLocalCohort, verifyRsiLocalInstalledPackages } from './rsi-local-cohort.js'
+import { installRsiLocalProfile, isRsiLocalPackageRepairable } from './rsi-local-install.js'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const coordinatorBundles = ['assistant-policy', 'assistant-automations', 'plugin-control-plane'] as const
@@ -63,17 +65,24 @@ async function ensureCoordinator(input: RsiInstallInput, coordinator: string,
     if (manifest.name !== `@dsh-enhanced/${name}` || manifest.version !== version) fail('coordinator must use the same installed plugin release')
     return true
   }
-  const complete = (await Promise.all(coordinatorBundles.map(matches))).every(Boolean)
+  let complete = (await Promise.all(coordinatorBundles.map(matches))).every(Boolean)
+  const local = input.sourceRepository ? await readRsiLocalCohort({dshHome:input.dshHome,profile:input.profile}) : undefined
+  if (local && (local.sourceRepository !== input.sourceRepository || local.version !== version)) fail('local coordinator cohort differs from the source installation')
+  if (local && complete) {
+    try { await verifyRsiLocalInstalledPackages({cohort:local,profilePath:root,bundles:[...coordinatorBundles]}) }
+    catch (error) { if (!isRsiLocalPackageRepairable(error)) throw error; complete = false }
+  }
   if (!complete) {
     if (!owned) fail('unregistered coordinator profile cannot be overwritten')
     const state = await status(systemctlPin,coordinator,signal)
     if (!['inactive','failed'].includes(state.ActiveState!) || state.MainPID !== '0') fail('partial coordinator must be stopped before package repair')
-    const specs = coordinatorBundles.map(name => input.sourceRepository
-      ? join(input.sourceRepository, 'plugins', name) : `@dsh-enhanced/${name}@${version}`)
-    await io.command(executor.path, ['plugin', '--profile', coordinator, 'add', ...specs],
+    if (local) await installRsiLocalProfile({dshHome:input.dshHome,profile:coordinator,cohort:local,
+      bundles:coordinatorBundles,dsh:{path:executor.path,pin:{path:executor.path,sha256:executor.sha256}},signal})
+    else await io.command(executor.path, ['plugin', '--profile', coordinator, 'add', ...coordinatorBundles.map(name => `@dsh-enhanced/${name}@${version}`)],
       { ...process.env, DSH_HOME: input.dshHome, npm_config_loglevel: 'error' }, signal, 300_000, 2_097_152)
     if (!(await Promise.all(coordinatorBundles.map(matches))).every(Boolean)) fail('coordinator package installation is incomplete')
   }
+  if (local) await verifyRsiLocalInstalledPackages({cohort:local,profilePath:root,bundles:[...coordinatorBundles]})
   await io.directory(root, false)
 }
 async function systemctl(pin: RsiAuthorityConfigInput['systemctl'], args: string[], signal: AbortSignal): Promise<string> {

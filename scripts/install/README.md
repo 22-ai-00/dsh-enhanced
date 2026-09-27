@@ -133,7 +133,7 @@ Linux 上的 Lark 与 supervised setup 还要求 `/usr/bin/flock` 和安全的 r
 
 新安装 `supervised` 时还会自动调用 `dsh-rsi-setup --prepare-build --optional-build`，在 `$DSH_HOME/rsi-sources/<profile>` 创建私有源码工作树和本地 bare 发布仓库。npm 来源固定为本次安装版本的官方 Git tag，本地来源只取已提交 HEAD；重装保留已推进的修复基准。需要 Git，npm 来源还需要 GitHub 连接；准备失败会停止安装并显示原因，`--dry-run` 只展示命令。符合当前完整仓库检查条件（Linux x64、Docker Server `29.4.1/linux/amd64`）时，还会自动构建并保存不可变的离线镜像配置；前置条件不可用时明确记录构建未就绪并继续普通安装，实际构建失败会停止。重装复用已核对的镜像；不会把缺失的已登记镜像静默换掉。Linux 上该步骤还会自动复制私有授权工具与固定 Node，生成独立签名身份、私有本地 registry/catalog 和状态目录；缺少 Docker 时仍保留这些资源。重复执行保留身份和发布进展，拒绝固定资源漂移。
 
-在最终模型、TraeX、飞书配置和 doctor 后，Linux `supervised` 安装调用当前 profile 内的 `dsh-rsi-setup --install-owner`，自动读取当前 owner、补装独立协调器、生成有限授权并成对启动两个 systemd Host；本地安装会传入源码仓库路径。构建前置条件不足，或本地目录链接使必需包实体位于 profile 外时，此阶段返回 `not-ready` 和退出码 3，安装命令不打印“安装流程完成”，已准备的普通 Agent 与资源可用于重试。其他配置或服务就绪失败也非零退出。重试保留原授权期限和额度；`--local` 固定源码准备的已提交 HEAD；当前本地目录链接会在自动 owner 安装预检时被拒绝，停服和签发授权前报告未就绪。后续需打包内化，并证明运行字节对应冻结源码。稳定启动验收不等于真实普通任务自迭代闭环，详见[RSI 配置指南](../../plugins/lark-channel/docs/rsi-setup.md)。
+在最终模型、TraeX、飞书配置和 doctor 后，Linux `supervised` 安装调用当前 profile 内的 `dsh-rsi-setup --install-owner`，自动读取当前 owner、补装独立协调器、生成有限授权并成对启动两个 systemd Host；本地安装会传入源码仓库路径。构建前置条件不足，或旧的本地目录链接使必需包实体位于 profile 外时，此阶段返回 `not-ready` 和退出码 3，安装命令不打印“安装流程完成”，已准备的普通 Agent 与资源可用于重试。其他配置或服务就绪失败也非零退出。重试保留原授权期限和额度；`--local` 的 supervised 新安装会从冻结的已提交 HEAD 构建独立 tarball，并将选定插件及其运行依赖安装到目标 profile 内；协调器复用同一批包，安装后校验制品摘要和实际文件。重试保持原提交和包选择，未提交修改不会进入 Agent。包安装失败时保留固定制品和配置，Host 保持停机，供修复后重试。稳定启动验收不等于真实普通任务自迭代闭环，详见[RSI 配置指南](../../plugins/lark-channel/docs/rsi-setup.md)。
 
 `--with coding|traex|health|heartbeat|events|bridge` 可为其他场景追加能力。`--scenario full` 只用于迁移旧的全量默认集合；新安装不应使用它。`--mode supervised-growth` 保持兼容，等价于 supervised 场景。
 

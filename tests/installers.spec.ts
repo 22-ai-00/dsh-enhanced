@@ -8170,6 +8170,14 @@ fi
     await configureExistingLark(dshHome)
     await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
+if [[ "\${1:-}" == '--input-type=module' && "\${3:-}" == "$DSH_HOME" ]]; then
+  script="$(cat)"
+  if [[ "$script" == *'DSH_HOME symlink cycle'* ]]; then printf '%s' "$DSH_HOME"; fi
+fi
+if [[ "\${2:-}" == '--install-local-cohort' ]]; then
+  printf 'local-cohort %s\\n' "$*" >> "$INSTALL_LOG"
+  dsh plugin --profile web add fixture-local-cohort
+fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
@@ -8249,11 +8257,14 @@ fi
     expect(log).toContain('loginctl show-user')
     expect(log).not.toContain('--no-open --port 0')
     const larkSetup = log.indexOf('lark-setup --profile web --install-service')
+    const localCohort = log.indexOf('local-cohort ')
     const sourceSetup = log.indexOf(`rsi-source-setup --prepare-build --optional-build --profile web --dsh-home ${dshHome} --source-repository ${repoRoot}`)
     const activator = log.indexOf('supervised-setup --profile web --timeout-ms 300000')
     const serviceDoctor = log.indexOf('systemctl --user is-active --quiet dsh-profile-web.service')
     expect(larkSetup).toBeGreaterThanOrEqual(0)
     expect(sourceSetup).toBeGreaterThanOrEqual(0)
+    expect(localCohort).toBeGreaterThanOrEqual(0)
+    expect(sourceSetup).toBeGreaterThan(localCohort)
     expect(larkSetup).toBeGreaterThan(sourceSetup)
     expect(activator).toBeGreaterThan(larkSetup)
     expect(serviceDoctor).toBeGreaterThan(activator)

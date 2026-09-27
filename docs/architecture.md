@@ -51,7 +51,7 @@ Web owner 适配通过内存 `EntryTree` 将宿主实际 Session Controller 包�
 
 ## 分发
 
-本地开发可以把 `plugins/<name>` 目录链接进 profile。正式分发以独立 npm 包或预构建 tarball 为准。Git package 安装以仓库根为包边界，不适合作为多插件子目录的默认分发方式。
+本地开发可以把 `plugins/<name>` 目录链接进 profile。`--local --scenario supervised` 则从冻结的已提交 HEAD 构建独立 tarball，将选定插件及其运行依赖安装到 profile 内；协调器复用同一批制品。共享库作为依赖安装，不作为 bundle 启用。正式分发以独立 npm 包或预构建 tarball 为准。Git package 安装以仓库根为包边界，不适合作为多插件子目录的默认分发方式。
 
 发布由 tag 驱动的 CI 自动完成。维护者先用根目录的 `release:prepare` 统一更新仓库版本和 `release-manifest.json` 的 `pending`，验证后合入 `main`；发布标签必须严格为 `vX.Y.Z`，必须从当时的 `origin/main` HEAD 创建，而且版本必须等于 `pending`。GitHub Actions（`.github/workflows/release.yml`）检出这个精确 tag，而不是移动中的分支，并在发布前要求 tag peeled commit 仍等于当前 `origin/main` HEAD。它还会验证 current/history/pending 的账本顺序、根版本、pending 包集合与全部 `plugins/*` / `packages/*` 目录一一对应，且每个包的 manifest 和运行时版本都一致；`src/version.ts` 只允许单一稳定字面量导出。任一条件不满足都会 fail closed。
 

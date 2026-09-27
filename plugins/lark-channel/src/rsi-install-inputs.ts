@@ -11,6 +11,7 @@ import { rawLoaderConfig } from './rsi-bootstrap-manifest.js'
 import type { RsiAuthorityResources } from './rsi-authority-resources.js'
 import type { Pin } from './rsi-authority-runtime.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
+import { readRsiLocalCohort, verifyRsiLocalInstalledPackages } from './rsi-local-cohort.js'
 
 const pluginPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -166,6 +167,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
   if (document.errors.length || !isSeq(document.contents)) fail('effective dump is not an entry list')
   const rows = new Map<string, YAMLMap>()
   const plugins: string[] = []
+  const activeBundles: string[] = []
   for (const value of document.contents.items) {
     if (!isMap(value)) fail('effective entry is not a mapping')
     const row = value as YAMLMap
@@ -179,6 +181,7 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     }
     const plugin = name.slice('@dsh-enhanced/'.length)
     if (!pluginPattern.test(plugin) || id !== `dsh-enhanced-${plugin}`) fail(`installed ${id} has inconsistent package identity`)
+    activeBundles.push(plugin)
     if (!PROTECTED_PLUGIN_DENYLIST.has(plugin)) plugins.push(plugin)
   }
   if (!plugins.length || plugins.length > 32) fail('repairable installed plugin scope is empty or too large')
@@ -227,6 +230,10 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     hostDeploymentInputs.push(...declared)
   }
   validateHostDeploymentInputs(hostDeploymentInputs)
+  if (input.source.origin?.kind === 'local-head') {
+    const cohort = await readRsiLocalCohort({dshHome:input.dshHome,profile:input.targetProfile,source:input.source})
+    await verifyRsiLocalInstalledPackages({cohort,profilePath:profile,bundles:[...new Set([...cohort.bundles,...activeBundles])]})
+  }
   if (input.resources.schemaVersion !== 1 || input.resources.root !== join(input.dshHome, 'rsi-authorities', input.targetProfile)
     || input.source.schemaVersion !== 1) fail('authority resources or source cohort differs from installation')
   const environment = input.environment ?? process.env

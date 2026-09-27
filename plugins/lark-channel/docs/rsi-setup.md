@@ -66,7 +66,7 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
 
 自动入口调用 `lib/rsi-bootstrap-manifest.js` 的 `createRsiBootstrapManifest`，从有效目标配置、真实 active owner DM、已准备资源及声明的插件/Host 文件范围生成完整 manifest；`lib/rsi-authority-config.js` 的 `compileRsiAuthorityConfigs` 生成 schema4 trust、五份有限授权、八个发布 adapter、公钥文件和 Host resolver/wrapper。安装器核对实际 DSH/Git/systemctl 与构建资源的 pins、最终 unit 属性，以及 Loader 条目的 observer 摘要；这些声明文件并非完整的传递性 JS 模块证明。默认模型继承原任务，已有显式 Growth 模型覆盖会保留。observer 不观察 Control Plane 自身，避免摘要自引用；Growth Driver 与 Verifier 按最终生成的配置摘要观察，Delivery 与 Lark 按原始 Loader 配置摘要观察。安装器把 `!!js` 标量按 Loader 原始值处理，不执行该表达式。
 
-`--install-owner` 在 home lifecycle lock 下调用 `prepareRsiOwnerConfiguration`，重新核对已准备的程序和身份，创建真实 Control Plane 账本和 observer 密钥，将配置写到私有目录，并执行 profile、授权和八阶段 adapter 配置预检。重复调用核对配置、密钥和 owner，保留已用账本与状态；重试复用原安装授权的起点及到期时间，不自动续期或增额。首次准备发现未登记的配置/账本则拒绝覆盖。`--local` 固定源码 checkout 的已提交 HEAD，但当前本地目录链接不满足安装器的 profile 内包实体约束，会报告 `not-ready`；逐字节源码版本证明仍需后续处理。安装接线已实现，真实普通任务闭环尚未验收。
+`--install-owner` 在 home lifecycle lock 下调用 `prepareRsiOwnerConfiguration`，重新核对已准备的程序和身份，创建真实 Control Plane 账本和 observer 密钥，将配置写到私有目录，并执行 profile、授权和八阶段 adapter 配置预检。重复调用核对配置、密钥和 owner，保留已用账本与状态；重试复用原安装授权的起点及到期时间，不自动续期或增额。首次准备发现未登记的配置/账本则拒绝覆盖。`--local` 的 supervised 新安装固定源码 checkout 的已提交 HEAD，构建并保存独立 tarball；目标与协调器安装后都核对运行依赖闭包的文件清单和摘要。未提交修改不进入这批制品。安装接线已实现，真实普通任务闭环尚未验收。
 
 | 字段 | 要求 |
 | --- | --- |
@@ -91,7 +91,9 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
 
 ## 自动安装与就绪判断
 
-正常新装无需手填 manifest。`supervised` 安装完成模型、TraeX、Lark 与 doctor 后，调用当前 profile 内的 `dsh-rsi-setup --install-owner --profile <name> --dsh-home <absolute>`；本地源码安装再传 `--source-repository`。仅 Linux systemd user services 支持此入口。构建前置条件缺失，或本地目录链接使必需包实体位于 profile 外时，返回 `{"mode":"not-ready",...}` 和退出码 3；后者在停服、创建协调器和签发授权前停止，需后续打包内化。其他预检或部署失败也使安装命令非零退出，不显示“安装流程完成”。前序已安装的普通 Agent 与资源保留供修复后重试。
+正常新装无需手填 manifest。`supervised` 安装完成模型、TraeX、Lark 与 doctor 后，调用当前 profile 内的 `dsh-rsi-setup --install-owner --profile <name> --dsh-home <absolute>`；本地源码安装再传 `--source-repository`。仅 Linux systemd user services 支持此入口。构建前置条件缺失，或旧的本地目录链接使必需包实体位于 profile 外时，返回 `{"mode":"not-ready",...}` 和退出码 3；旧链接在停服、创建协调器和签发授权前被拒绝。其他预检或部署失败也使安装命令非零退出，不显示“安装流程完成”。前序已安装的普通 Agent 与资源保留供修复后重试。
+
+本地 supervised 新安装先运行 `--install-local-cohort`：在私有临时 checkout 中按冻结 lockfile 构建，将选定插件、协调器及其内部运行依赖打包到 `$DSH_HOME/rsi-local-cohorts/<profile>/`。bootstrap 构建复用本机 pnpm 缓存；这不是候选代码的隔离构建。冻结源码的 `allowBuilds` 布尔清单随 receipt 保存并在安装前合并，保留已有配置；同一依赖存在相反决定时停止，不自动扩大安装脚本权限。安装通过原生 DSH `plugin list/add` 完成，本地 supervised profile 使用 pnpm `nodeLinker: isolated`，防止 hoisted 布局把同版本 registry peer 混入本地运行依赖。依赖覆盖仅作用于精确父包的运行依赖，避免把可选 Host peer 变为自动安装依赖。仅选定根包成为直接 bundle；每条内部依赖和实际安装文件均须匹配制品。重试复用 receipt 并核对原始提交、包选择与摘要，不自动改为新的 HEAD。构建发生在停服前；若后续包安装或文件核验失败，保留固定制品与覆盖配置，Host 保持停机，修复后以相同输入重试。若 pnpm 普通安装保留了缺失或已知文件内容不符的包，安装器会重验冻结制品和配置，再强制重装一次并核验结果。协调器的完整包名/版本不会掩盖文件缺失。额外文件、配置冲突及未知状态不会触发此自动修复；重验仍失败时保持停机，不自动删除用户的 profile。
 
 自动入口只收集已启用且可修复的 `@dsh-enhanced/*` 条目，核对同批包名、版本、patch、入口及声明的 Host 文件；Delivery、Lark 的原始 Loader 配置与生成后的 Growth Driver、Verifier 配置都进入目标 observer。停机后临时加载最终计划的 systemd unit，以真实 `systemctl show` 捕获授权所需属性，再恢复原 unit；捕获期间不启动服务。随后成对应用 patch、环境绑定和 unit，先启动协调器再启动目标。就绪判断要求两个 PID、InvocationID 与重启计数连续 12 秒稳定，目标 observer 与实际进程和配置摘要一致，并读到本次启动后持久登记的、绑定当前 owner scope 的协调器原生 Automation。它证明这次部署的有限启动状态，不证明普通任务已产生候选、通过独立验收或完成采用/回滚。
 
