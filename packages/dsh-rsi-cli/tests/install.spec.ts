@@ -1,5 +1,8 @@
 import { describe, expect, test, vi } from 'vitest'
-import { runInstall } from '../src/install.ts'
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { hasPendingHostRecovery, runInstall } from '../src/install.ts'
 import { PurgeError } from '../src/purge.ts'
 import { main, parseArgs, type MainDeps } from '../src/index.ts'
 
@@ -207,6 +210,108 @@ describe('runInstall（薄委托）', () => {
       },
     })
     expect(code).toBe(3)
+  })
+
+  test('upgrade prepares a private Host plan, delegates cohort first, and removes the plan afterward', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-host-plan-test-'))
+    try {
+      const home = join(root, 'home')
+      await mkdir(home)
+      await writeFile(join(home, '.dsh-rsi-host.json'), '{}', { mode: 0o600 })
+      const plan = { schemaVersion: 1 as const, status: 'update' as const, canonicalHome: home,
+        bindingPath: join(home, '.dsh-rsi-host.json'), originalBindingSource: '{}', originalBindingDigest: 'a'.repeat(64),
+        originalRuntime: { version: '0.1.5-rc.3', root: '/hosts/old', dshPath: '/hosts/old/dsh',
+          binDirectory: '/hosts/old', integrity: 'sha512-old', receiptDigest: 'a'.repeat(64) },
+        candidateRuntime: { version: '0.1.5-rc.4', root: '/hosts/new', dshPath: '/hosts/new/dsh',
+          binDirectory: '/hosts/new', integrity: 'sha512-new', receiptDigest: 'b'.repeat(64) },
+        candidateBindingSource: '{}',
+      }
+      let planPath = ''
+      const runInherited = vi.fn(async (_command: string, _args: readonly string[], options: { env: NodeJS.ProcessEnv }) => {
+        planPath = options.env.DSH_ENHANCED_HOST_UPDATE_PLAN!
+        expect(options.env.DSH_ENHANCED_HOST_BIN).toBe('/hosts/old')
+        expect(options.env.DSH_ENHANCED_HOST_UPDATE_BIN).toBe('/hosts/new')
+        expect(JSON.parse(await readFile(planPath, 'utf8'))).toEqual(plan)
+        return 0
+      })
+      const prepareHostUpdate = vi.fn(async () => plan)
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade'], dshHome: home,
+        executor: { download: vi.fn(), runInherited, prepareHost: async ({ environment }) =>
+          ({ ...environment, DSH_HOME: home, DSH_ENHANCED_HOST_BIN: '/hosts/old' }),
+        prepareHostUpdate },
+      })).toBe(0)
+      expect(prepareHostUpdate).toHaveBeenCalledWith({ dshHome: home, selector: 'latest' })
+      await expect(readFile(planPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(runInherited).toHaveBeenCalledTimes(1)
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('upgrade preserves an unbound Home and dry-run never prepares a Host', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-unbound-test-'))
+    try {
+      const home = join(root, 'home')
+      await mkdir(home)
+      const prepareHostUpdate = vi.fn()
+      const executor = { download: vi.fn(), runInherited: vi.fn(async () => 0),
+        prepareHost: async ({ environment }: { environment?: NodeJS.ProcessEnv }) => ({ ...environment, DSH_HOME: home }),
+        prepareHostUpdate }
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade'], dshHome: home, executor })).toBe(0)
+      expect(prepareHostUpdate).not.toHaveBeenCalled()
+      await expect(runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade', '--dsh-version', '0.1.5-rc.4'], dshHome: home, executor }))
+        .rejects.toThrow('没有私有 Host 绑定')
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade', '--dry-run'], dshHome: home, executor })).toBe(0)
+      expect(prepareHostUpdate).not.toHaveBeenCalled()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('v4 rename gap invokes recovery before Host preparation and returns for preflight', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-rsi-host-recovery-test-'))
+    try {
+      const home = join(root, 'home')
+      const transaction = `${home}.dsh-enhanced-transaction`
+      await mkdir(transaction, { mode: 0o700 })
+      await writeFile(join(transaction, 'manifest.json'), '{"version":4,"profile":"owner"}\n', { mode: 0o600 })
+      const alias = join(root, 'alias')
+      await symlink(home, alias)
+      expect(await hasPendingHostRecovery(alias)).toBe(true)
+      const prepareHost = vi.fn()
+      const runInherited = vi.fn(async (_command: string, _args: readonly string[], options: { env: NodeJS.ProcessEnv }) => {
+        expect(options.env.DSH_HOME).toBe(home)
+        expect(options.env.DSH_ENHANCED_HOST_RECOVERY_ONLY).toBe('1')
+        expect(options.env.DSH_ENHANCED_HOST_RECOVERY_PROFILE).toBe('owner')
+        return 0
+      })
+      const result = await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade'], dshHome: alias, recoveryOnly: true,
+        executor: { download: vi.fn(), runInherited, prepareHost },
+      })
+      expect(result).toBe(0)
+      expect(runInherited).toHaveBeenCalledTimes(1)
+      expect(prepareHost).not.toHaveBeenCalled()
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
+
+  test('normal install and dry-run ignore ambient Host transaction markers', async () => {
+    const markers = ['DSH_ENHANCED_HOST_UPDATE_PLAN', 'DSH_ENHANCED_HOST_UPDATE_BIN',
+      'DSH_ENHANCED_HOST_SELECTOR_VALIDATED', 'DSH_ENHANCED_HOST_RECOVERY_ONLY',
+      'DSH_ENHANCED_HOST_RECOVERY_PROFILE']
+    try {
+      for (const marker of markers) vi.stubEnv(marker, 'ambient-value')
+      const runInherited = vi.fn(async (_command: string, _args: readonly string[], options: { env: NodeJS.ProcessEnv }) => {
+        for (const marker of markers) expect(options.env[marker]).toBeUndefined()
+        return 0
+      })
+      const executor = { download: vi.fn(), runInherited }
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: [], executor })).toBe(0)
+      expect(await runInstall({ mode: 'local', localRepositoryRoot: '/repo', releaseRef: 'v0.1.48',
+        passthrough: ['--operation', 'upgrade', '--dry-run'], executor })).toBe(0)
+      expect(runInherited).toHaveBeenCalledTimes(2)
+    } finally { vi.unstubAllEnvs() }
   })
 })
 

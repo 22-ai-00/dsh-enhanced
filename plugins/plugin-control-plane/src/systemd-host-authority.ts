@@ -289,7 +289,8 @@ async function deriveRuntimeEpoch(config: SystemdHostAuthorityConfig, request: R
     || request.requestedAt > now || expiresAt <= request.requestedAt) fail()
 
   const { readiness: _readiness, recoveryReadiness: _recoveryReadiness, ...base } = config.template
-  const result = { schemaVersion: 5, ...base, profileFiles: witness.profileFiles,
+  const result = { schemaVersion: context.maintenance.length ? 6 : 5, ...base, profileFiles: witness.profileFiles,
+    ...(context.maintenance.length ? { maintenance: context.maintenance } : {}),
     authorization: { installationId: request.installationId, ledger: request.ledger, profile: request.profile,
       plan: request.plan, activation: request.activation, hostGeneration: request.predecessor.hostGeneration,
       requestDigest: controlPlaneDigest(request), notBefore: config.grant.notBefore, expiresAt },
@@ -351,7 +352,7 @@ export async function resolveSystemdHostAuthority(configInput: SystemdHostAuthor
         if ((phase === 'reload' || phase === 'runtime-epoch') && (db.prepare('SELECT COUNT(*) AS n FROM systemd_host_operations WHERE grant_id=? AND phase=?')
           .get(config.grant.id, phase) as { n: number }).n >= config.grant.maximumReloads) fail()
         const json = JSON.stringify(second.result)
-        if (Buffer.byteLength(json) + 1 > 65_536) fail()
+        if (Buffer.byteLength(json) + 1 > 524_288) fail()
         db.prepare('INSERT INTO systemd_host_operations VALUES (?,?,?,?,?,?,?,?)').run(request.operationId, config.grant.id,
           phase, requestDigest, outputDigest, second.witnessDigest, second.contextDigest, json)
         db.exec('COMMIT'); return second.result

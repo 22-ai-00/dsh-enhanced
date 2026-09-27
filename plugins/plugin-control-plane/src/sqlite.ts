@@ -3,7 +3,15 @@ import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 26
+export const controlPlaneSchemaVersion = 27
+
+const hostMaintenanceSchema = `CREATE TABLE IF NOT EXISTS deployment_host_maintenance (
+  plan_id TEXT NOT NULL REFERENCES activation_plans(id) ON DELETE RESTRICT,
+  sequence INTEGER NOT NULL CHECK(sequence > 0), transaction_id TEXT NOT NULL,
+  record_json TEXT NOT NULL CHECK(json_valid(record_json)),
+  record_digest TEXT NOT NULL CHECK(length(record_digest)=64),
+  PRIMARY KEY(plan_id,sequence), UNIQUE(plan_id,transaction_id)
+) STRICT, WITHOUT ROWID;`
 
 const runtimeEpochSchema = `CREATE TABLE IF NOT EXISTS deployment_runtime_epochs (
   operation_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES activation_plans(id) ON DELETE RESTRICT,
@@ -1244,6 +1252,9 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 26) {
       database.exec(`BEGIN IMMEDIATE; ${runtimeEpochSchema} PRAGMA user_version = 26; COMMIT;`)
     } else database.exec(runtimeEpochSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 27) {
+      database.exec(`BEGIN IMMEDIATE; ${hostMaintenanceSchema} PRAGMA user_version = 27; COMMIT;`)
+    } else database.exec(hostMaintenanceSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

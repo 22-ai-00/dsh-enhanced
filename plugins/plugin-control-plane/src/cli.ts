@@ -239,10 +239,11 @@ async function releaseProfileLock(store: ControlPlaneStore, lock: ProfileLock): 
   } finally { await lock.handle.close() }
 }
 
-function assertPlanTrust(plan: PluginActivationPlan, trust: PluginControlTrustConfig): void {
+function assertPlanTrust(plan: PluginActivationPlan, trust: PluginControlTrustConfig, store: ControlPlaneStore): void {
+  const executor = store.currentPlanExecutor(plan.id)
   if (plan.installationId !== trust.installationId || plan.target.dshHome !== trust.dshHome
-    || plan.executor.id !== trust.executor.id || plan.executor.version !== trust.executor.version
-    || plan.executor.path !== trust.executor.path || plan.executor.sha256 !== trust.executor.sha256
+    || executor.id !== trust.executor.id || executor.version !== trust.executor.version
+    || executor.path !== trust.executor.path || executor.sha256 !== trust.executor.sha256
     || plan.ledger.id !== trust.ledger.id || plan.ledger.path !== trust.ledger.path
     || plan.target.profilePath !== join(trust.dshHome, 'profiles', plan.profile)) {
     throw new ControlPlaneCliError('ACTIVATION_BINDING', 'plan does not match the registered installation, ledger, target, and executor')
@@ -809,7 +810,7 @@ export async function rollbackPluginWatch(input: { store: ControlPlaneStore; tru
   const { store, trust, planId, signal } = input
   throwIfAborted(signal)
   let plan = store.getPlan(planId)
-  assertPlanTrust(plan, trust)
+  assertPlanTrust(plan, trust, store)
   plan = store.beginPostActivationRollback({ planId, expectedRevision: plan.revision })
   if (plan.activation?.rollbackProfileRestored) await cleanupRestoredStage(store, plan)
   if (plan.status === 'rolled-back') return plan
@@ -877,7 +878,7 @@ export async function activatePluginPlan(input: { store: ControlPlaneStore; trus
   let lock: ProfileLock | undefined
   try {
     throwIfAborted(signal)
-    let plan = store.getPlan(planId); assertPlanTrust(plan, trust)
+    let plan = store.getPlan(planId); assertPlanTrust(plan, trust, store)
     if (plan.status === 'activated') { await checked(signal, () => cleanupRetiredBackups(store, plan)); return plan }
     if (plan.status === 'rollback-pending' && plan.activation?.rollbackProfileRestored) {
       if (plan.revision !== expectedRevision) throw new ControlPlaneCliError('ACTIVATION_BINDING', 'activation targets a stale revision')
@@ -988,7 +989,7 @@ async function attest(argv: readonly string[]): Promise<void> {
   try {
     const receipt = parseHostAttestationReceipt(JSON.parse(await loadPrivateApprovalInput(resolve(option(argv, '--receipt')), 32_768)) as unknown)
     const planId = option(argv, '--plan-id'); const expectedRevision = integerOption(argv, '--expected-revision')
-    const expectedFence = integerOption(argv, '--expected-fence'); const initial = store.getPlan(planId); assertPlanTrust(initial, trust)
+    const expectedFence = integerOption(argv, '--expected-fence'); const initial = store.getPlan(planId); assertPlanTrust(initial, trust, store)
     if (receipt.planId !== planId || receipt.planDigest !== initial.digest) {
       throw new ControlPlaneCliError('ACTIVATION_BINDING', 'Host receipt does not target the requested activation plan')
     }
@@ -1000,7 +1001,7 @@ async function attest(argv: readonly string[]): Promise<void> {
       receipt, resolveAuthority })
     const result = await store.applyHostAttestation({ planId, expectedRevision, expectedFence, receipt,
       idempotencyKey: `host-attestation:${receipt.operationId}`, resolveAuthority })
-    let plan = store.getPlan(result.result.id); assertPlanTrust(plan, trust)
+    let plan = store.getPlan(result.result.id); assertPlanTrust(plan, trust, store)
     if (plan.status === 'rollback-pending' || plan.status === 'commit-pending') {
       plan = await store.claimActivation({ planId: plan.id, expectedRevision: plan.revision, leaseMs,
         resolveApprovalAuthority: receipt => activationClaimAuthority(trust, plan, receipt) }); lock = await acquireProfileLock(store, plan)
@@ -1016,7 +1017,7 @@ async function attest(argv: readonly string[]): Promise<void> {
 async function hostRequest(argv: readonly string[]): Promise<void> {
   const trust = await commandTrust(argv); const store = new ControlPlaneStore({ path: trust.ledger.path })
   try {
-    const plan = store.getPlan(option(argv, '--plan-id')); assertPlanTrust(plan, trust)
+    const plan = store.getPlan(option(argv, '--plan-id')); assertPlanTrust(plan, trust, store)
     if (plan.revision !== integerOption(argv, '--expected-revision') || plan.activation?.fence !== integerOption(argv, '--expected-fence')) {
       throw new ControlPlaneCliError('ACTIVATION_BINDING', 'manual Host request targets a stale revision/fence')
     }
@@ -1031,7 +1032,7 @@ async function probePluginPlanResult(input: { store: ControlPlaneStore; trust: P
   let lock: ProfileLock | undefined
   try {
     throwIfAborted(signal)
-    const plan = store.getPlan(planId); assertPlanTrust(plan, trust)
+    const plan = store.getPlan(planId); assertPlanTrust(plan, trust, store)
     if (plan.revision !== expectedRevision || plan.activation?.fence !== expectedFence) {
       throw new ControlPlaneCliError('ACTIVATION_BINDING', 'configured Host probe targets a stale revision/fence')
     }
@@ -1072,7 +1073,7 @@ async function probe(argv: readonly string[]): Promise<void> {
   try {
     const planId = option(argv, '--plan-id'); const expectedRevision = integerOption(argv, '--expected-revision'); const expectedFence = integerOption(argv, '--expected-fence')
     if (argv.includes('--prepare-only')) {
-      const plan = store.getPlan(planId); assertPlanTrust(plan, trust)
+      const plan = store.getPlan(planId); assertPlanTrust(plan, trust, store)
       if (plan.revision !== expectedRevision || plan.activation?.fence !== expectedFence) {
         throw new ControlPlaneCliError('ACTIVATION_BINDING', 'configured Host probe targets a stale revision/fence')
       }
@@ -1089,7 +1090,7 @@ async function watchObserve(argv: readonly string[]): Promise<void> {
   const store = new ControlPlaneStore({ path: trust.ledger.path })
   try {
     const receipt = parsePostActivationObservation(JSON.parse(await loadPrivateApprovalInput(resolve(option(argv, '--receipt')), 32_768)) as unknown)
-    assertPlanTrust(store.getPlan(receipt.planId), trust)
+    assertPlanTrust(store.getPlan(receipt.planId), trust, store)
     const result = await store.recordPostActivationObservation({
       receipt,
       ...(argv.includes('--expected-revision') ? { expectedRevision: integerOption(argv, '--expected-revision') } : {}),
@@ -1108,7 +1109,7 @@ async function watchRetract(argv: readonly string[]): Promise<void> {
   const store = new ControlPlaneStore({ path: trust.ledger.path })
   try {
     const receipt = parseActivationRetraction(JSON.parse(await loadPrivateApprovalInput(resolve(option(argv, '--receipt')), 32_768)) as unknown)
-    assertPlanTrust(store.getPlan(receipt.planId), trust)
+    assertPlanTrust(store.getPlan(receipt.planId), trust, store)
     const result = await store.retractActivation({
       receipt,
       ...(argv.includes('--expected-revision') ? { expectedRevision: integerOption(argv, '--expected-revision') } : {}),
@@ -1128,7 +1129,7 @@ async function watchShow(argv: readonly string[]): Promise<void> {
   try {
     const planId = optionalOption(argv, '--plan-id')
     if (planId !== undefined) {
-      assertPlanTrust(store.getPlan(planId), trust)
+      assertPlanTrust(store.getPlan(planId), trust, store)
       process.stdout.write(`${JSON.stringify({ watch: store.getActivationWatch(planId),
         evidence: store.listActivationWatchEvidence(planId) })}\n`)
     } else {

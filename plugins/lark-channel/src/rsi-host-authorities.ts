@@ -33,7 +33,7 @@ async function privateDirectory(path: string): Promise<void> {
   if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) fail('directory is not owner-private')
 }
 
-/** Read-only preflight for the schema-4 standing Host grant. The CP validator owns its schema. */
+/** Read-only preflight for the standing Host grant. The CP validator owns its schema. */
 export async function validateRsiHostAuthorities(input: {
   trust: PluginControlTrustConfig
   adoption: SourceAdoptionAuthorityConfig
@@ -63,7 +63,7 @@ export async function validateRsiHostAuthorities(input: {
   exactFields(wrapper.resolver, ['executable', 'interpreter', 'configPath', 'configSha256', 'timeoutMs'])
   exactFields(wrapper.resolver.executable, ['path', 'sha256'])
   if (wrapper.resolver.interpreter !== null) exactFields(wrapper.resolver.interpreter, ['path', 'sha256'])
-  if (attestor.version !== 'dsh-systemd-host-attestor-7' || attestor.interpreter === null) fail('trust does not select the schema-4 wrapper')
+  if (attestor.version !== 'dsh-systemd-host-attestor-8' || attestor.interpreter === null) fail('trust does not select the standing wrapper')
   const resolver = wrapper.resolver
   if (!Number.isSafeInteger(resolver.timeoutMs) || resolver.timeoutMs < 1000 || resolver.timeoutMs > 60_000
     || resolver.timeoutMs + wrapper.template.timeoutMs >= attestor.timeoutMs) fail('timeouts cannot cover resolver and Host operation')

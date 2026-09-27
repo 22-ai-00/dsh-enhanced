@@ -13,7 +13,7 @@ const request: RuntimeEpochRequest = {
   receiptTtlMs: 30_000, installationId, ledger: { id: 'ledger', path: '/private/ledger.sqlite' },
   plan: { id: 'plan', digest }, activation: { id: 'activation', fence: 2 },
   profile: { name: 'owner', path: '/private/profiles/owner' },
-  issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-7',
+  issuer: { mode: 'configured-executable', id: 'systemd-reload', version: 'dsh-systemd-host-attestor-8',
     path: '/private/attestor', sha256: digest, interpreter: { path: '/usr/bin/node', sha256: digest },
     authority: 'systemd-owner', keyId: 'key-1' },
   predecessor: { operationId: 'readiness-1', receiptDigest: digest, hostGeneration: 3 },

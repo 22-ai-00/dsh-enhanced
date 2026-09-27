@@ -9,6 +9,9 @@ DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.48'
 DSH_ENHANCED_PINNED_COMMON_SHA256='1ba2f7c934fc38b7ec7adec02ec84426c4827f1aed5f05d92b28c69013ccfe7d'
 DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256='e5af0ac77c275c3577aef7353e024504b51880c7d4a092ba041a67e609d01465'
 DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256='a7ded9400e51f7e972a1fe23a86f5ab43a4cb712f3bf2c0ce0beb7a1abe5e411'
+DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256='0000000000000000000000000000000000000000000000000000000000000000'
+DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256='0000000000000000000000000000000000000000000000000000000000000000'
+DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256='0000000000000000000000000000000000000000000000000000000000000000'
 DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'
 DSH_ENHANCED_PINNED_HOST_VERSION='0.1.5-rc.1'
 
@@ -34,6 +37,9 @@ TEMPORARY_DIRECTORY_IDENTITY=''
 COMMON_DOWNLOAD_IDENTITY=''
 LIFECYCLE_CONFIG_DOWNLOAD_IDENTITY=''
 LIFECYCLE_PROFILE_DOWNLOAD_IDENTITY=''
+HOST_LIFECYCLE_DOWNLOAD_IDENTITY=''
+HOST_PROFILE_UPDATE_DOWNLOAD_IDENTITY=''
+HOST_RSI_UPDATE_DOWNLOAD_IDENTITY=''
 
 installer_stat() {
   local target_path="$1"
@@ -357,6 +363,9 @@ set_installer_asset_identity() {
     common.sh) COMMON_DOWNLOAD_IDENTITY="$asset_identity" ;;
     lifecycle-config.mjs) LIFECYCLE_CONFIG_DOWNLOAD_IDENTITY="$asset_identity" ;;
     lifecycle-profile.mjs) LIFECYCLE_PROFILE_DOWNLOAD_IDENTITY="$asset_identity" ;;
+    host-lifecycle.mjs) HOST_LIFECYCLE_DOWNLOAD_IDENTITY="$asset_identity" ;;
+    host-profile-update.mjs) HOST_PROFILE_UPDATE_DOWNLOAD_IDENTITY="$asset_identity" ;;
+    host-rsi-update.mjs) HOST_RSI_UPDATE_DOWNLOAD_IDENTITY="$asset_identity" ;;
     *) return 1 ;;
   esac
 }
@@ -367,6 +376,9 @@ get_installer_asset_identity() {
     common.sh) INSTALLER_ASSET_IDENTITY="$COMMON_DOWNLOAD_IDENTITY" ;;
     lifecycle-config.mjs) INSTALLER_ASSET_IDENTITY="$LIFECYCLE_CONFIG_DOWNLOAD_IDENTITY" ;;
     lifecycle-profile.mjs) INSTALLER_ASSET_IDENTITY="$LIFECYCLE_PROFILE_DOWNLOAD_IDENTITY" ;;
+    host-lifecycle.mjs) INSTALLER_ASSET_IDENTITY="$HOST_LIFECYCLE_DOWNLOAD_IDENTITY" ;;
+    host-profile-update.mjs) INSTALLER_ASSET_IDENTITY="$HOST_PROFILE_UPDATE_DOWNLOAD_IDENTITY" ;;
+    host-rsi-update.mjs) INSTALLER_ASSET_IDENTITY="$HOST_RSI_UPDATE_DOWNLOAD_IDENTITY" ;;
     *) return 1 ;;
   esac
 }
@@ -381,9 +393,11 @@ cleanup_installer_library() {
     rm -f "$TEMPORARY_DIRECTORY/common.sh.download"
     rm -f "$TEMPORARY_DIRECTORY/lifecycle-config.mjs.download"
     rm -f "$TEMPORARY_DIRECTORY/lifecycle-profile.mjs.download"
+    rm -f "$TEMPORARY_DIRECTORY/host-lifecycle.mjs.download" "$TEMPORARY_DIRECTORY/host-profile-update.mjs.download" "$TEMPORARY_DIRECTORY/host-rsi-update.mjs.download"
     rm -f "$TEMPORARY_DIRECTORY/common.sh"
     rm -f "$TEMPORARY_DIRECTORY/lifecycle-config.mjs"
     rm -f "$TEMPORARY_DIRECTORY/lifecycle-profile.mjs"
+    rm -f "$TEMPORARY_DIRECTORY/host-lifecycle.mjs" "$TEMPORARY_DIRECTORY/host-profile-update.mjs" "$TEMPORARY_DIRECTORY/host-rsi-update.mjs"
     rmdir "$TEMPORARY_DIRECTORY" 2>/dev/null || true
   fi
 }
@@ -466,9 +480,13 @@ for INSTALL_ARGUMENT in "$@"; do
   fi
 done
 INSTALL_NEEDS_LIFECYCLE_HELPERS='0'
+INSTALL_NEEDS_HOST_HELPERS='0'
 case "$INSTALL_OPERATION" in
   upgrade|uninstall) INSTALL_NEEDS_LIFECYCLE_HELPERS='1' ;;
 esac
+if [[ -n "${DSH_ENHANCED_HOST_UPDATE_PLAN:-}" || "${DSH_ENHANCED_HOST_RECOVERY_ONLY:-}" == '1' ]]; then
+  INSTALL_NEEDS_HOST_HELPERS='1'
+fi
 
 if [[ -n "$SCRIPT_DIRECTORY" && -r "$SCRIPT_DIRECTORY/common.sh" ]]; then
   # shellcheck source=./common.sh
@@ -486,6 +504,9 @@ else
   INSTALL_COMMON_SHA256="${DSH_ENHANCED_INSTALL_COMMON_SHA256:-$DSH_ENHANCED_PINNED_COMMON_SHA256}"
   INSTALL_LIFECYCLE_CONFIG_SHA256="${DSH_ENHANCED_INSTALL_LIFECYCLE_CONFIG_SHA256:-$DSH_ENHANCED_PINNED_LIFECYCLE_CONFIG_SHA256}"
   INSTALL_LIFECYCLE_PROFILE_SHA256="${DSH_ENHANCED_INSTALL_LIFECYCLE_PROFILE_SHA256:-$DSH_ENHANCED_PINNED_LIFECYCLE_PROFILE_SHA256}"
+  INSTALL_HOST_LIFECYCLE_SHA256="${DSH_ENHANCED_INSTALL_HOST_LIFECYCLE_SHA256:-$DSH_ENHANCED_PINNED_HOST_LIFECYCLE_SHA256}"
+  INSTALL_HOST_PROFILE_UPDATE_SHA256="${DSH_ENHANCED_INSTALL_HOST_PROFILE_UPDATE_SHA256:-$DSH_ENHANCED_PINNED_HOST_PROFILE_UPDATE_SHA256}"
+  INSTALL_HOST_RSI_UPDATE_SHA256="${DSH_ENHANCED_INSTALL_HOST_RSI_UPDATE_SHA256:-$DSH_ENHANCED_PINNED_HOST_RSI_UPDATE_SHA256}"
   if [[ ! "$INSTALL_RELEASE_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     printf 'dsh-enhanced installer: 远程安装 ref 必须是固定的 vX.Y.Z 发布标签。\n' >&2
     exit 2
@@ -509,6 +530,14 @@ else
       exit 1
     fi
   fi
+  if [[ "$INSTALL_NEEDS_HOST_HELPERS" == '1' ]]; then
+    for host_digest in "$INSTALL_HOST_LIFECYCLE_SHA256" "$INSTALL_HOST_PROFILE_UPDATE_SHA256" "$INSTALL_HOST_RSI_UPDATE_SHA256"; do
+      if [[ ! "$host_digest" =~ ^[0-9a-f]{64}$ || "$host_digest" == '0000000000000000000000000000000000000000000000000000000000000000' ]]; then
+        printf 'dsh-enhanced installer: 固定发布未包含已校验的 Host helper；拒绝受管 Host 更新/恢复。\n' >&2
+        exit 1
+      fi
+    done
+  fi
   INSTALL_BASE_URL="${DSH_ENHANCED_INSTALL_BASE_URL:-https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/$INSTALL_RELEASE_REF/scripts/install}"
   download_installer_asset common.sh
   verify_installer_asset common.sh "$INSTALL_COMMON_SHA256"
@@ -518,11 +547,24 @@ else
     verify_installer_asset lifecycle-config.mjs "$INSTALL_LIFECYCLE_CONFIG_SHA256"
     verify_installer_asset lifecycle-profile.mjs "$INSTALL_LIFECYCLE_PROFILE_SHA256"
   fi
+  if [[ "$INSTALL_NEEDS_HOST_HELPERS" == '1' ]]; then
+    download_installer_asset host-lifecycle.mjs
+    download_installer_asset host-profile-update.mjs
+    download_installer_asset host-rsi-update.mjs
+    verify_installer_asset host-lifecycle.mjs "$INSTALL_HOST_LIFECYCLE_SHA256"
+    verify_installer_asset host-profile-update.mjs "$INSTALL_HOST_PROFILE_UPDATE_SHA256"
+    verify_installer_asset host-rsi-update.mjs "$INSTALL_HOST_RSI_UPDATE_SHA256"
+  fi
 
   seal_installer_asset common.sh
   if [[ "$INSTALL_NEEDS_LIFECYCLE_HELPERS" == '1' ]]; then
     seal_installer_asset lifecycle-config.mjs
     seal_installer_asset lifecycle-profile.mjs
+  fi
+  if [[ "$INSTALL_NEEDS_HOST_HELPERS" == '1' ]]; then
+    seal_installer_asset host-lifecycle.mjs
+    seal_installer_asset host-profile-update.mjs
+    seal_installer_asset host-rsi-update.mjs
   fi
   chmod 0500 "$TEMPORARY_DIRECTORY"
   validate_temporary_parent "$TEMPORARY_PARENT" "$TEMPORARY_PARENT_IDENTITY" "$INSTALLER_SYSTEM_TEMP_PATH"
@@ -531,6 +573,11 @@ else
   if [[ "$INSTALL_NEEDS_LIFECYCLE_HELPERS" == '1' ]]; then
     validate_installer_asset_path "$TEMPORARY_DIRECTORY/lifecycle-config.mjs" "$LIFECYCLE_CONFIG_DOWNLOAD_IDENTITY" 256
     validate_installer_asset_path "$TEMPORARY_DIRECTORY/lifecycle-profile.mjs" "$LIFECYCLE_PROFILE_DOWNLOAD_IDENTITY" 256
+  fi
+  if [[ "$INSTALL_NEEDS_HOST_HELPERS" == '1' ]]; then
+    validate_installer_asset_path "$TEMPORARY_DIRECTORY/host-lifecycle.mjs" "$HOST_LIFECYCLE_DOWNLOAD_IDENTITY" 256
+    validate_installer_asset_path "$TEMPORARY_DIRECTORY/host-profile-update.mjs" "$HOST_PROFILE_UPDATE_DOWNLOAD_IDENTITY" 256
+    validate_installer_asset_path "$TEMPORARY_DIRECTORY/host-rsi-update.mjs" "$HOST_RSI_UPDATE_DOWNLOAD_IDENTITY" 256
   fi
   DSH_ENHANCED_VERIFIED_HOST_RANGE="$DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE"
   export DSH_ENHANCED_VERIFIED_HOST_RANGE

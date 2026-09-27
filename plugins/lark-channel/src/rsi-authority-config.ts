@@ -221,7 +221,7 @@ export function compileRsiAuthorityConfigs(input: RsiAuthorityConfigInput): {
 
   const trust: PluginControlTrustConfig = { schemaVersion: 4, installationId: resources.installationId, dshHome: home, ledger,
     executor, hostPolicy: defaultHostAttestationPolicy,
-    hostAttestor: { id: `host-attestor-${resources.installationId}`, version: 'dsh-systemd-host-attestor-7',
+    hostAttestor: { id: `host-attestor-${resources.installationId}`, version: 'dsh-systemd-host-attestor-8',
       ...checkedPin(runtime.executables.hostAttestor, 'Host attestor'), interpreter: checkedPin(runtime.node, 'Host Node'),
       environmentAllowlist: ['DSH_SYSTEMD_HOST_ATTESTOR_CONFIG'], authority: role('host').authority, keyId: role('host').keyId,
       timeoutMs: 60_000 }, catalog: resources.catalog,

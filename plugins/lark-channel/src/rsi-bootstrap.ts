@@ -12,6 +12,7 @@ import { compileRsiProfiles } from './rsi-profile.js'
 import { validateRsiAuthorities } from './rsi-setup.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
 import { prepareRsiAuthorityRuntime } from './rsi-authority-runtime.js'
+import { readRsiHostUpdateOverlayChain } from './rsi-host-update.js'
 import { rsiBuildResources as io } from './rsi-build.js'
 
 type Profiles = Pick<Parameters<typeof compileRsiProfiles>[0], 'targetPatch' | 'targetEffective'
@@ -79,13 +80,14 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
   const compiled = compileRsiAuthorityConfigs(input)
   const manifestPath = join(resources.configRoot, 'manifest.json')
   const receiptPath = join(resources.configRoot, 'bootstrap.json')
+  const overlayPath = join(resources.configRoot, 'host-update-overlays.json')
   const files = { ...compiled.files }
-  if (Object.hasOwn(files, manifestPath) || Object.hasOwn(files, receiptPath)) fail('reserved configuration path')
+  if (Object.hasOwn(files, manifestPath) || Object.hasOwn(files, receiptPath) || Object.hasOwn(files, overlayPath)) fail('reserved configuration path')
   files[manifestPath] = json(manifest)
   if (Object.keys(files).length > 64 || Object.entries(files).some(([path, value]) =>
     !within(path, resources.configRoot) || typeof value !== 'string' || Buffer.byteLength(value) > 2_097_152)) fail('configuration output exceeds its bounds')
   if (!within(observer.keyPath, resources.configRoot) || Object.hasOwn(files, observer.keyPath)
-    || [manifestPath, receiptPath].includes(observer.keyPath)) fail('observer key must have a separate private configuration path')
+    || [manifestPath, receiptPath, overlayPath].includes(observer.keyPath)) fail('observer key must have a separate private configuration path')
   const ledgerPath = join(manifest.controlPlane.statePath, 'control.sqlite')
   if (!within(ledgerPath, resources.stateRoot) || !within(observer.socketPath, resources.stateRoot)) fail('runtime state must stay in the installation state root')
   const directories = [...new Set([...compiled.directories, dirname(ledgerPath), dirname(observer.keyPath),
@@ -118,16 +120,33 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
         authority: expected.authority, keyId: expected.keyId })) fail('release adapter configuration differs from trust')
     }
     signal.throwIfAborted()
-    return hash(json({ files: expectedFiles, patches }))
+    return patches
   }
   if (await exists(receiptPath)) {
-    const receipt = JSON.parse((await privateFile(receiptPath)).toString('utf8')) as Receipt
-    if (receipt.schemaVersion !== 1 || !isDeepStrictEqual(receipt.files, expectedFiles)
-      || !isDeepStrictEqual(receipt.result, result)) fail('existing owner configuration differs; retain it for reconciliation')
+    const bootstrapSource = (await privateFile(receiptPath)).toString('utf8')
+    const receipt = JSON.parse(bootstrapSource) as Receipt
+    const overlay = readRsiHostUpdateOverlayChain({ source: await exists(overlayPath)
+      ? (await privateFile(overlayPath)).toString('utf8') : undefined,
+    resources, dshHome: home, profile: manifest.targetProfile, bootstrapSource })
+    const effective = overlay.latest ?? receipt
+    if (receipt.schemaVersion !== 1 || !isDeepStrictEqual(effective.files, expectedFiles)
+      || !isDeepStrictEqual(effective.result, result)) fail('existing owner configuration differs; retain it for reconciliation')
     for (const [path, digest] of Object.entries(expectedFiles)) if (hash(await privateFile(path)) !== digest) fail('existing configuration changed')
     const key = await privateFile(observer.keyPath, 32)
     if (key.length !== 32 || hash(key) !== receipt.observerKeyDigest) fail('observer identity changed')
-    if (await verify() !== receipt.planDigest) fail('owner or compiled profiles changed')
+    const patches = await verify()
+    if (overlay.latest) {
+      const patchDigests = { [manifest.targetProfile]: hash(patches.targetPatch),
+        [manifest.coordinatorProfile]: hash(patches.coordinatorPatch) }
+      for (const [profile, digest] of Object.entries(overlay.latest.patches)) {
+        const path = join(home, 'profiles', profile, 'cordis.patch.yml')
+        if (!within(path, join(home, 'profiles')) || hash(await privateFile(path)) !== digest) fail('signed owner profile changed')
+      }
+      if (Object.entries(patchDigests).some(([profile, digest]) => overlay.latest?.patches[profile] !== digest)
+        || hash(json({ files: expectedFiles, patches: overlay.latest.patches })) !== overlay.latest.planDigest
+        || overlay.latest.runtimeReceiptDigest !== hash(await privateFile(join(home,
+          'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json'), 65_536))) fail('signed Host update differs from compiled configuration')
+    } else if (hash(json({ files: expectedFiles, patches })) !== receipt.planDigest) fail('owner or compiled profiles changed')
     return result
   }
   // First preparation must not overwrite an operator's configuration or attach
@@ -163,7 +182,7 @@ export async function prepareRsiOwnerConfiguration(input: RsiAuthorityConfigInpu
     store.close()
     await remember(ledgerPath)
     for (const [path, bytes] of Object.entries(files)) await write(path, bytes)
-    const planDigest = await verify()
+    const planDigest = hash(json({ files: expectedFiles, patches: await verify() }))
     const receipt: Receipt = { schemaVersion: 1, planDigest, files: expectedFiles,
       observerKeyDigest: hash(await privateFile(observer.keyPath, 32)), result }
     await write(receiptPath, json(receipt))

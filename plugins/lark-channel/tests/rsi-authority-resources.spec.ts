@@ -13,6 +13,13 @@ async function fixture() {
 }
 
 describe('private authority identities and local release storage', () => {
+  test('existing-only inspection never claims a missing authority root', async () => {
+    const f = await fixture()
+    await expect(prepareRsiAuthorityResources({ ...f.input, existingOnly: true })).rejects.toThrow()
+    await expect(lstat(join(f.home, 'rsi-authorities'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const first = await prepareRsiAuthorityResources(f.input)
+    expect(await prepareRsiAuthorityResources({ ...f.input, existingOnly: true })).toEqual(first)
+  })
   test('creates fourteen distinct Ed25519 identities once and preserves published catalog and authority state', async () => {
     const f = await fixture(), first = await prepareRsiAuthorityResources(f.input)
     expect(new Set(Object.values(first.identities).map(value => value.publicKeyPem)).size).toBe(14)

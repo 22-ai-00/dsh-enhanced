@@ -2,7 +2,7 @@
 
 `plugin-control-plane/bin/dsh-systemd-host-attestor.js` is shipped in the
 Control Plane bundle. It implements the existing configured Host executable
-contract, version `dsh-systemd-host-attestor-7`, for **reload, readiness, physical rollback and runtime continuity** on Linux.
+contract, version `dsh-systemd-host-attestor-8`, for **reload, readiness, physical rollback and runtime continuity** on Linux.
 It uses the existing signed receipt, request, fence and activation state
 machine. It creates no Cordis plugin, AgentLoop, model tool or scheduler.
 
@@ -57,11 +57,38 @@ cannot establish continuity. This covers an unchanged deployment after a process
 restart or instance replacement; migrating Host versions and their frozen authority
 configuration is a separate update transaction.
 
+## Continuity through managed Host maintenance
+
+Control Plane schema 27 adds an append-only `deployment_host_maintenance` journal.
+A stopped-Home update signs the transition with the installation's existing Host
+key. Each record binds the original applied readiness, plan and activation, the
+previous maintenance record, and old/new executor, unit properties, profile files
+and rollback files. A new record requires the current successful deployment and
+open watch, with no unsettled successor. Original plan, approval, readiness,
+checkpoint and watch rows are retained unchanged. The installer checks every original
+and copied ledger before changing any authority: unfinished source jobs, releases,
+activation plans, runtime proofs and observation batches must first be reconciled
+on the original Host. This preserves replay of already issued authorization receipts.
+
+Readers verify the chain against the original readiness key before projecting
+current deployment files and recovery baselines. Physical rollback checks both
+the rebased candidate and its rebased backup. The standing resolver derives
+schema 6 for a maintained deployment; the attestor checks the first record against
+its retained reload configuration and the last against the current configuration.
+It then samples the new runtime without another restart. Historical Host generation
+and authorization limits are preserved; a maintenance signature is not a new
+approval or evidence of behavioral improvement.
+
+The installer must update both Host plugin cohorts and the copied authority
+programs together. This protocol does not by itself migrate package dependencies,
+grant configurations, or service definitions. Cross-version installer verification
+and frozen local cohort updates are tracked in [RSI status](rsi-status.md).
+
 ## Automatic authorization within an installation grant
 
 For unattended source adoption, use configuration schema 4 with the shipped
 `dsh-systemd-host-authority` resolver. It derives each exact operation's inner
-schema-1/2/3 config (or schema 5 for runtime continuity) from the existing Control Plane ledger and a private finite
+schema-1/2/3 config (or schema 5/6 for runtime continuity) from the existing Control Plane ledger and a private finite
 installation grant. It does not ask the user to edit a request digest for each
 update. Existing explicit configs below remain supported.
 
@@ -129,9 +156,11 @@ resolver interpreter may be null only for a native ELF executable; scripts
 must name a pinned native ELF interpreter, including the shipped JavaScript wrapper. The
 outer Host timeout must also cover resolver execution and cleanup. Provision all
 private resources outside the candidate profile. Runtime continuity requires
-Control Plane schema 26 and attestor version 7 together. Complete pending older
+Control Plane schema 27 and attestor version 8 together. Complete pending older
 operations using their original pinned binary before changing trust; their
-issuer identity cannot be rewritten. The [supervised installer](../plugins/lark-channel/docs/rsi-setup.md)
+issuer identity cannot be rewritten. The standing wrapper remains schema 4;
+its resolver produces flat schema 5 for ordinary runtime continuity or schema 6
+when a signed Host maintenance chain is present. The [supervised installer](../plugins/lark-channel/docs/rsi-setup.md)
 prepares both Hosts, source/build resources and signing keys; invoking this
 resolver alone does not perform that installation.
 If package-manager files have multiple hardlinks, provision the signer and
@@ -435,6 +464,25 @@ restarts the temporary Host, rejects the old readiness, and captures the new
 schema-5 proof. It checks unchanged historical journal rows, no additional restart,
 and stopped unit/process cleanup. It does not exercise a real owner grant,
 coordinator dispatch, model call or ordinary-user feedback adoption.
+
+Managed Host maintenance additionally has an offline integration fixture:
+
+```sh
+pnpm exec vitest run --dir tests tests/host-rsi-update.test.ts --testTimeout=120000
+```
+
+It uses actual compiled owner configuration, copied authority programs, signing
+keys and SQLite ledgers. Two Host migrations are followed by a new source release
+and activation through the Control Plane APIs, removal of the superseded backup,
+and a third migration. Original history, bootstrap, identities and used grant
+records must survive. External release adapters and successful runtime checkpoints
+are explicit fixture inputs; this is not a live deployment or owner-task test.
+The separate `tests/host-lifecycle.test.ts` transaction fixtures also simulate
+the service supervisor and Home process census. They exercise transaction and
+crash-recovery ordering; production process-census rejection remains covered by
+the installer tests, not by these controlled recovery fixtures.
+The native runtime-continuity command above also passed with attestor v8 on
+DSH `0.1.5-rc.3`; that checks schema-5 compatibility, not a live schema-6 Host upgrade.
 
 ## Physical rollback
 
