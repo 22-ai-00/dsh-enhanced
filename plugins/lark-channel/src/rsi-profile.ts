@@ -6,11 +6,14 @@ import { normalizeControlPlaneConfig, type Config as ControlPlaneConfig } from '
 import { validateSourceReviewConfig, type SourceReviewConfig } from '@dsh-enhanced/assistant-verifier'
 import { isMap, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 
+import type { RsiServiceEnvironments } from './rsi-service-setup.js'
+
 /** Private, owner supplied input for the two-host RSI overlay. */
 export interface RsiSetupManifest {
   schemaVersion: 1
   targetProfile: string
   coordinatorProfile: string
+  serviceEnvironment?: RsiServiceEnvironments
   controlPlane: ControlPlaneConfig
   growthDriver: AssistantGrowthDriverConfig
   sourceReviews: SourceReviewConfig

@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { chmod, lstat, open, realpath, rename, unlink } from 'node:fs/promises'
+import { chmod, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { createHash, createPublicKey, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -15,6 +15,9 @@ import { prepareRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiBuildEnvironment, RsiBuildUnavailableError } from './rsi-build.js'
 import { prepareRsiReleaseBuildEnvironment, RsiReleaseBuildUnavailableError } from './rsi-release-build.js'
 import { version } from './version.js'
+import { renderDshSystemdService, systemdServicePaths } from './systemd.js'
+import { rsiServiceEnvironmentPath, type RsiServiceEnvironment } from './rsi-service-environment.js'
+import { resolveRsiServiceEnvironments } from './rsi-service-setup.js'
 import { validateRsiHostAuthorities } from './rsi-host-authorities.js'
 
 const MAX_BYTES = 2_097_152
@@ -120,7 +123,9 @@ async function atomicWrite(path: string, value: string): Promise<void> {
 }
 
 interface JournalEntry { profile: string; before: string; after: string }
-interface Journal { schemaVersion: 1; manifestDigest: string; stage: 'prepared' | 'applied'; entries: [JournalEntry, JournalEntry] }
+interface AuxiliaryEntry { profile: string; before: string | null; after: string | null }
+interface Journal { schemaVersion: 1 | 2; manifestDigest: string; stage: 'prepared' | 'applied'; entries: [JournalEntry, JournalEntry]
+  environments?: [AuxiliaryEntry, AuxiliaryEntry]; units?: [AuxiliaryEntry, AuxiliaryEntry] }
 function profiles(manifest: Pick<RsiSetupManifest, 'targetProfile' | 'coordinatorProfile'>): [string, string] {
   const values: [string, string] = [manifest.targetProfile, manifest.coordinatorProfile]
   if (!values.every(value => typeof value === 'string' && profilePattern.test(value)) || values[0] === values[1]) fail('profiles must be distinct canonical names')
@@ -131,18 +136,52 @@ async function readJournal(path: string, expected: readonly string[]): Promise<J
   let content: string
   try { content = await readOwnedFile(path) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
   const value = JSON.parse(content) as Journal
-  if (value.schemaVersion !== 1 || !['prepared', 'applied'].includes(value.stage) || !/^[a-f0-9]{64}$/u.test(value.manifestDigest)
+  if (![1, 2].includes(value.schemaVersion) || !['prepared', 'applied'].includes(value.stage) || !/^[a-f0-9]{64}$/u.test(value.manifestDigest)
     || !Array.isArray(value.entries) || value.entries.length !== 2
     || value.entries.some((entry, index) => entry.profile !== expected[index] || typeof entry.before !== 'string' || typeof entry.after !== 'string')) fail('journal does not match this profile pair')
+  if (value.schemaVersion === 2) {
+    for (const entries of [value.environments, value.units]) {
+      if (!Array.isArray(entries) || entries.length !== 2 || entries.some((entry, index) => entry.profile !== expected[index]
+        || (entry.before !== null && typeof entry.before !== 'string') || (entry.after !== null && typeof entry.after !== 'string'))) fail('invalid service environment journal')
+    }
+  } else if (value.environments || value.units) fail('legacy journal cannot contain service resources')
   return value
 }
-async function rollback(home: string, journalPath: string, journal: Journal): Promise<void> {
-  // Check both files before restoring either. Retry also accepts a half-restored pair.
+async function readOptionalFile(path: string, privateFile = true): Promise<string | null> {
+  try { return await readOwnedFile(path, privateFile) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    // realpath also reports ENOENT for dangling links; those are not absent files.
+    try { await lstat(path) }
+    catch (linkedError) { if ((linkedError as NodeJS.ErrnoException).code === 'ENOENT') return null; throw linkedError }
+    fail(`unsafe file: ${path}`)
+  }
+}
+async function writeOptionalFile(path: string, value: string | null): Promise<void> {
+  if (value !== null) { await atomicWrite(path, value); return }
+  try { await unlink(path); await syncDirectory(dirname(path)) }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+}
+function auxiliary(home: string, journal: Journal, ports: RsiSetupPorts) {
+  return [
+    ...(journal.environments ?? []).map(entry => ({ ...entry, path: rsiServiceEnvironmentPath(home, entry.profile), privateFile: true })),
+    ...(journal.units ?? []).map(entry => ({ ...entry, path: ports.serviceUnitPath(entry.profile, home), privateFile: false })),
+  ]
+}
+async function rollback(home: string, journalPath: string, journal: Journal, ports: RsiSetupPorts): Promise<void> {
+  // Check every resource before restoring any. Retry accepts a half-restored transaction.
   for (const entry of journal.entries) {
     const current = await readOwnedFile(patchPath(home, entry.profile), false)
     if (current !== entry.before && current !== entry.after) fail('profile changed outside setup; retain journal for reconciliation')
   }
+  const resources = auxiliary(home, journal, ports)
+  for (const entry of resources) {
+    const current = await readOptionalFile(entry.path, entry.privateFile)
+    if (current !== entry.before && current !== entry.after) fail('service resource changed outside setup; retain journal for reconciliation')
+  }
   for (const entry of journal.entries) await atomicWrite(patchPath(home, entry.profile), entry.before)
+  for (const entry of resources) await writeOptionalFile(entry.path, entry.before)
+  if (journal.units) ports.reloadServices()
   await unlink(journalPath); await syncDirectory(home)
 }
 
@@ -151,7 +190,12 @@ export interface RsiSetupPorts {
   base(profile: string, home: string): Promise<string>
   snapshot(effective: string, home: string): Promise<ActiveLarkOwnerBindingsSnapshot>
   compile: typeof compileRsiProfiles
-  validateAuthorities(manifest: RsiSetupManifest, owner: ActiveLarkOwnerBindingsSnapshot['bindings'][number]): Promise<void>
+  validateAuthorities(manifest: RsiSetupManifest, owner: ActiveLarkOwnerBindingsSnapshot['bindings'][number], environment?: RsiServiceEnvironment): Promise<void>
+  resolveEnvironments: typeof resolveRsiServiceEnvironments
+  serviceUnitPath(profile: string, home: string): string
+  renderServiceUnit(profile: string, home: string, environment: RsiServiceEnvironment): Promise<string>
+  reloadServices(): void
+  validateServiceUnits(manifest: RsiSetupManifest, environment: RsiServiceEnvironment): Promise<void>
   assertStopped(profile: string): void
   start(profile: string, home: string): Promise<void>
 }
@@ -175,6 +219,14 @@ const defaultPorts: RsiSetupPorts = {
   },
   compile: compileRsiProfiles,
   validateAuthorities: validateRsiAuthorities,
+  resolveEnvironments: resolveRsiServiceEnvironments,
+  serviceUnitPath: (profile, home) => systemdServicePaths({ dshHome: home, profile }).unitPath,
+  async renderServiceUnit(profile, home, environment) { return (await renderDshSystemdService({ dshHome: home, profile }, { environment })).source },
+  reloadServices() {
+    const result = spawnSync('systemctl', ['--user', 'daemon-reload'], { encoding: 'utf8', timeout: 10_000, maxBuffer: 65_536 })
+    if (result.status !== 0 || result.error) fail('cannot reload service definitions')
+  },
+  validateServiceUnits: validateRsiServiceUnitEnvironment,
   assertStopped(profile) {
     const result = spawnSync('systemctl', ['--user', 'show', `dsh-profile-${profile}.service`, '--property=ActiveState', '--value'],
       { encoding: 'utf8', timeout: 10_000, maxBuffer: 65_536 })
@@ -183,8 +235,19 @@ const defaultPorts: RsiSetupPorts = {
   async start(profile, home) { await installDshResidentService({ dshHome: home, profile }) },
 }
 
+/** Read back the loaded unit after daemon-reload, before starting either Host. */
+export async function validateRsiServiceUnitEnvironment(manifest: Pick<RsiSetupManifest, 'targetProfile'>, environment: RsiServiceEnvironment): Promise<void> {
+  const path = environment.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG
+  if (!path) return
+  const wrapper = JSON.parse(await readOwnedFile(path)) as { schemaVersion: number; template?: { unitProperties?: { Environment?: string } } }
+  if (wrapper.schemaVersion !== 4) return
+  const result = spawnSync('systemctl', ['--user', 'show', `dsh-profile-${manifest.targetProfile}.service`, '--property=Environment', '--value'],
+    { encoding: 'utf8', timeout: 10_000, maxBuffer: 65_536 })
+  if (result.status !== 0 || result.error || result.stdout.trimEnd() !== wrapper.template?.unitProperties?.Environment) fail('effective service environment differs from the Host installation grant')
+}
+
 /** Validate imported finite grants, without calling any signing/authorization method. */
-export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding: ActiveLarkOwnerBindingsSnapshot['bindings'][number]): Promise<void> {
+export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding: ActiveLarkOwnerBindingsSnapshot['bindings'][number], environment?: RsiServiceEnvironment): Promise<void> {
   const cp: typeof import('@dsh-enhanced/plugin-control-plane') = await import('@dsh-enhanced/plugin-control-plane')
   const config = manifest.controlPlane
   if (!config.sourceJobs || !config.sourceApprovals || !config.sourceReleases || !config.sourceAdoptions || !config.taskObservations) fail('source authority chain is incomplete')
@@ -253,7 +316,7 @@ export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding
   await validateRsiHostAuthorities({ trust, adoption: adoptions, owner: expectedOwner, ledgerPath, trustPath: config.trustPath,
     targetProfile: manifest.targetProfile,
     liveQualification: config.sourceAdoptions!.liveQualification, hostDeploymentInputs: config.sourceAdoptions!.hostDeploymentInputs,
-    handoff: config.sourceAdoptions!.handoff, readPrivate: path => readOwnedFile(path) })
+    handoff: config.sourceAdoptions!.handoff, ...(environment === undefined ? {} : { environment }), readPrivate: path => readOwnedFile(path) })
 }
 
 export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts = defaultPorts): Promise<{ mode: string; profiles: readonly string[] }> {
@@ -274,7 +337,7 @@ export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts
     }
     if (args.rollback) {
       if (!previous) fail('no setup journal to roll back')
-      await rollback(home, journalPath, previous!)
+      await rollback(home, journalPath, previous!, ports)
       return { mode: 'rolled-back', profiles: pair }
     }
     if (previous?.stage === 'prepared') fail('interrupted setup; use --rollback before continuing')
@@ -287,37 +350,59 @@ export async function configureRsiSetup(args: RsiSetupArgs, ports: RsiSetupPorts
     const input = { manifest, dshHome: home, targetPatch: original[0]!, coordinatorPatch: original[1]!,
       targetEffective: effective[0]!, coordinatorEffective: effective[1]!, coordinatorBase, owner }
     const compiled = await ports.compile(input)
-    await ports.validateAuthorities(manifest, owner)
+    const originalEnvironments = await Promise.all(pair.map(profile => readOptionalFile(rsiServiceEnvironmentPath(home, profile))))
+    const environments = await ports.resolveEnvironments(manifest, home)
+    const originalUnits = environments ? await Promise.all(pair.map(profile => readOptionalFile(ports.serviceUnitPath(profile, home), false))) : undefined
+    const nextUnits = environments ? await Promise.all(pair.map((profile, index) => ports.renderServiceUnit(profile, home, index === 0 ? environments.target : environments.coordinator))) : undefined
+    await ports.validateAuthorities(manifest, owner, environments?.target)
     if (!args.apply) return { mode: 'checked', profiles: pair }
     if (await readOwnedFile(args.manifestPath) !== manifestBytes || await ports.base(pair[1], home) !== coordinatorBase
       || !isDeepStrictEqual(snapshot, await ports.snapshot(effective[0]!, home))) fail('manifest or owner snapshot changed before write')
     for (let i = 0; i < pair.length; i++) {
       ports.assertStopped(pair[i]!)
       if (await readOwnedFile(patchPath(home, pair[i]!), false) !== original[i]) fail('profile changed before write')
+      if (environments && (await readOptionalFile(rsiServiceEnvironmentPath(home, pair[i]!)) !== originalEnvironments[i]
+        || await readOptionalFile(ports.serviceUnitPath(pair[i]!, home), false) !== originalUnits![i])) fail('service resource changed before write')
     }
     const next = [compiled.targetPatch, compiled.coordinatorPatch]
     if (previous && previous.entries.some((entry, i) => entry.after !== original[i])) fail('profile changed since previous setup; reconcile its journal first')
-    const journal: Journal = { schemaVersion: 1, manifestDigest: digest(manifestBytes), stage: 'prepared',
-      entries: pair.map((profile, i) => ({ profile, before: original[i]!, after: next[i]! })) as Journal['entries'] }
+    const journal: Journal = { schemaVersion: environments ? 2 : 1, manifestDigest: digest(manifestBytes), stage: 'prepared',
+      entries: pair.map((profile, i) => ({ profile, before: original[i]!, after: next[i]! })) as Journal['entries'],
+      ...(environments ? {
+        environments: pair.map((profile, i) => ({ profile, before: originalEnvironments[i]!, after: JSON.stringify({ schemaVersion: 1,
+          dshHome: home, profile, environment: i === 0 ? environments.target : environments.coordinator }) + '\n' })) as NonNullable<Journal['environments']>,
+        units: pair.map((profile, i) => ({ profile, before: originalUnits![i]!, after: nextUnits![i]! })) as NonNullable<Journal['units']>,
+      } : {}) }
+    if (previous) for (const entry of auxiliary(home, previous, ports)) {
+      if (await readOptionalFile(entry.path, entry.privateFile) !== entry.after) fail('service resource changed since previous setup; reconcile its journal first')
+    }
     if (Buffer.byteLength(JSON.stringify(journal)) > MAX_BYTES) fail('combined profile journal exceeds setup size limit')
-    const unchanged = next.every((value, i) => value === original[i])
+    const unchanged = next.every((value, i) => value === original[i]) && auxiliary(home, journal, ports).every(entry => entry.before === entry.after)
     if (unchanged) for (let i = 0; i < pair.length; i++) assertRsiEffectivePatch(next[i]!, effective[i]!)
     if (!unchanged) {
+      for (const entry of auxiliary(home, journal, ports)) {
+        await mkdir(dirname(entry.path), { recursive: true, mode: 0o700 })
+        await safeDirectory(dirname(entry.path))
+        if (entry.privateFile && ((await lstat(dirname(entry.path))).mode & 0o077) !== 0) fail('service environment directory must be private')
+      }
       await atomicWrite(journalPath, JSON.stringify(journal))
       try {
         for (const entry of journal.entries) await atomicWrite(patchPath(home, entry.profile), entry.after)
+        for (const entry of auxiliary(home, journal, ports)) await writeOptionalFile(entry.path, entry.after)
         const final = pair.map(profile => ports.dump(profile, home))
         for (let i = 0; i < pair.length; i++) assertRsiEffectivePatch(next[i]!, final[i]!)
         const recompiled = await ports.compile({ ...input, targetPatch: next[0]!, coordinatorPatch: next[1]!,
           targetEffective: final[0]!, coordinatorEffective: final[1]! })
         if (!isDeepStrictEqual(recompiled, compiled)) fail('effective profile differs from the compiled deployment')
+        if (environments) { ports.reloadServices(); await ports.validateServiceUnits(manifest, environments.target) }
         journal.stage = 'applied'; await atomicWrite(journalPath, JSON.stringify(journal))
       } catch (error) {
-        await rollback(home, journalPath, journal)
+        await rollback(home, journalPath, journal, ports)
         if (previous) await atomicWrite(journalPath, JSON.stringify(previous))
         throw error
       }
     }
+    if (unchanged && environments) { ports.reloadServices(); await ports.validateServiceUnits(manifest, environments.target) }
     // Starting is explicit and follows successful composition of both profiles.
     // A failed start retains the applied journal; it never rewrites a live Host.
     if (args.start) { await ports.start(pair[1], home); await ports.start(pair[0], home) }

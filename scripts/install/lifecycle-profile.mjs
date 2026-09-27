@@ -30,6 +30,11 @@ const ANCESTOR_CHAIN_ENV = 'DSH_ENHANCED_LIFECYCLE_ANCESTORS'
 const LOCK_PARENT_FD_PATH = '/proc/self/fd/3'
 const ALLOWED_WEB_BUNDLES = new Set(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
 const SYSTEMD_UNIT = /^dsh-profile-([A-Za-z0-9][A-Za-z0-9._-]{0,63})\.service$/u
+const SERVICE_CONFIG_ENVIRONMENT = new Set([
+  'DSH_SYSTEMD_HOST_ATTESTOR_CONFIG',
+  ...['PR', 'REVIEW', 'MERGE', 'BUILD', 'SIGN', 'PUBLISH', 'REGISTRY_VERIFY', 'CATALOG_ADMISSION']
+    .map(name => `DSH_RELEASE_${name}_CONFIG`),
+])
 const SYSTEMD_OWNERSHIP_PROPERTIES = ['Id', 'LoadState', 'WorkingDirectory', 'Environment']
 const SYSTEMD_SHOW_PROPERTIES = [
   'Id', 'LoadState', 'FragmentPath', 'DropInPaths', 'ActiveState', 'SubState', 'MainPID',
@@ -819,9 +824,23 @@ async function loadManifest(physicalTransactionRoot, expected) {
       && typeof service.profile === 'string' && PROFILE_NAME.test(service.profile)
       && service.unit === `dsh-profile-${service.profile}.service`
       && service.serviceHome === expected.homePath
+      && (service.configuredHome === undefined || typeof service.configuredHome === 'string'
+        && isAbsolute(service.configuredHome))
       && typeof service.wasActive === 'boolean'
       && service.fragment !== null && typeof service.fragment === 'object'
       && typeof service.fragment.path === 'string' && typeof service.fragment.sha256 === 'string'
+      && (service.environmentBinding === undefined || service.environmentBinding !== null
+        && typeof service.environmentBinding === 'object'
+        && (service.environmentBinding.present === false
+          ? exactKeys(service.environmentBinding, ['present'])
+          : service.environmentBinding.present === true
+            && exactKeys(service.environmentBinding, ['present', 'sha256', 'environment'])
+            && validDigest(service.environmentBinding.sha256)
+            && service.environmentBinding.environment !== null
+            && typeof service.environmentBinding.environment === 'object'
+            && !Array.isArray(service.environmentBinding.environment)
+            && Object.entries(service.environmentBinding.environment).every(([name, value]) =>
+              SERVICE_CONFIG_ENVIRONMENT.has(name) && typeof value === 'string' && isAbsolute(value))))
       && Array.isArray(service.dropIns))
   )
   const validExpectedScenario = manifest?.expectedScenario === undefined
@@ -2024,6 +2043,7 @@ function rendererUnitPattern(profile) {
     + '\\[Service\\]\\nType=simple\\nWorkingDirectory=([^\\r\\n]+)\\n'
     + 'Environment="((?:\\\\.|[^"])*)"\\nEnvironment="((?:\\\\.|[^"])*)"\\n'
     + 'Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"\\nEnvironment="XDG_RUNTIME_DIR=%t"\\n'
+    + '((?:Environment="(?:\\\\.|[^"])*"\\n)*)'
     + 'ExecStart="((?:\\\\.|[^"])*)" --disable-warning=ExperimentalWarning "((?:\\\\.|[^"])*)" --profile '
     + escapedProfile + ' --no-open\\n'
     + '# A deliberate systemctl user stop remains stopped, while every process\\n'
@@ -2033,6 +2053,83 @@ function rendererUnitPattern(profile) {
     + 'Restart=always\\nRestartSec=5\\nTimeoutStopSec=30\\nKillSignal=SIGINT\\nUMask=0077\\n\\n'
     + '\\[Install\\]\\nWantedBy=default\\.target\\n$', 'u',
   )
+}
+
+function serviceEnvironmentAssignments(source, unit) {
+  const assignments = []
+  for (const line of source.split('\n').filter(Boolean)) {
+    const match = /^Environment="((?:\\.|[^"])*)"$/u.exec(line)
+    if (match === null) fail(`systemd unit 包含未知 Environment 格式：${unit}`)
+    const decoded = decodeUnitQuoted(match[1], 'service config')
+    const separator = decoded.indexOf('=')
+    const name = decoded.slice(0, separator)
+    const path = decoded.slice(separator + 1)
+    if (separator < 0 || !SERVICE_CONFIG_ENVIRONMENT.has(name) || !isAbsolute(path) || resolve(path) !== path
+      || path.includes('\0') || /[\r\n]/u.test(path)
+      || `Environment="${decoded.replaceAll('%', '%%').replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"` !== line) {
+      fail(`systemd unit service Environment 不受支持：${unit}`)
+    }
+    assignments.push([name, path])
+  }
+  const names = assignments.map(([name]) => name)
+  if (JSON.stringify(names) !== JSON.stringify([...new Set(names)].sort())) {
+    fail(`systemd unit service Environment 顺序或唯一性无效：${unit}`)
+  }
+  return Object.fromEntries(assignments)
+}
+
+async function snapshotServiceEnvironmentBinding(homePath, profile, bindingHome = homePath) {
+  const directory = join(homePath, 'rsi-service-environments')
+  const path = join(directory, `${profile}.json`)
+  const parent = await lstat(directory).catch(error => {
+    if (error?.code === 'ENOENT') return undefined
+    throw error
+  })
+  if (parent === undefined) {
+    if (await existingIdentity(path) !== undefined) fail(`service Environment 绑定目录缺失：${path}`)
+    return { present: false }
+  }
+  if (!parent.isDirectory() || parent.isSymbolicLink() || parent.uid !== currentUid()
+    || (parent.mode & 0o077) !== 0) {
+    fail(`service Environment 绑定目录身份或权限不安全：${directory}`)
+  }
+  let descriptor
+  try { descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW) } catch (error) {
+    if (error?.code === 'ENOENT') return { present: false }
+    throw error
+  }
+  try {
+    const entry = fstatSync(descriptor)
+    if (!entry.isFile() || entry.uid !== currentUid() || entry.nlink !== 1
+      || (entry.mode & 0o077) !== 0 || entry.size < 1 || entry.size > 65_536) {
+      fail(`service Environment 绑定文件身份或权限不安全：${path}`)
+    }
+    const source = await readFile(`/proc/self/fd/${descriptor}`, 'utf8')
+    if (!sameServiceFileIdentity(await lstat(path), identity(entry))) fail(`service Environment 绑定文件身份变化：${path}`)
+    let binding
+    try { binding = JSON.parse(source) } catch { fail(`service Environment 绑定 JSON 无效：${path}`) }
+    if (!exactKeys(binding, ['schemaVersion', 'dshHome', 'profile', 'environment'])
+      || binding.schemaVersion !== 1 || binding.dshHome !== bindingHome || binding.profile !== profile
+      || binding.environment === null || typeof binding.environment !== 'object'
+      || Array.isArray(binding.environment)
+      || Object.entries(binding.environment).some(([name, value]) => !SERVICE_CONFIG_ENVIRONMENT.has(name)
+        || typeof value !== 'string' || !isAbsolute(value) || resolve(value) !== value
+        || value.includes('\0') || /[\r\n]/u.test(value))) {
+      fail(`service Environment 绑定内容不受支持：${path}`)
+    }
+    return { present: true, sha256: sha256(source), environment: binding.environment }
+  } finally { closeSync(descriptor) }
+}
+
+async function assertServiceEnvironmentBindings(services, homePath) {
+  for (const service of services) {
+    if (service.environmentBinding === undefined) continue // recovery of older manifests
+    const current = await snapshotServiceEnvironmentBinding(homePath, service.profile, service.serviceHome)
+    if (current.present !== service.environmentBinding.present
+      || current.sha256 !== service.environmentBinding.sha256) {
+      fail(`service Environment 绑定文件在事务期间变化：${service.unit}`)
+    }
+  }
 }
 
 async function snapshotServiceFile(path, expectedSource) {
@@ -2079,8 +2176,9 @@ async function inspectServiceUnit(systemctlExecutable, unit, dshExecutable) {
   const workingDirectory = parsed[1].replaceAll('%%', '%').replace(/\/$/u, '')
   const dshEnvironment = decodeUnitQuoted(parsed[2], 'DSH_HOME')
   const pathEnvironment = decodeUnitQuoted(parsed[3], 'PATH')
-  const nodePath = decodeUnitQuoted(parsed[4], 'node path')
-  const dshPath = decodeUnitQuoted(parsed[5], 'dsh path')
+  const serviceEnvironment = serviceEnvironmentAssignments(parsed[4], unit)
+  const nodePath = decodeUnitQuoted(parsed[5], 'node path')
+  const dshPath = decodeUnitQuoted(parsed[6], 'dsh path')
   if (!dshEnvironment.startsWith('DSH_HOME=') || !pathEnvironment.startsWith('PATH=')
     || !isAbsolute(nodePath) || !isAbsolute(dshPath)) fail(`systemd unit renderer 字段无效：${unit}`)
   if (pathEnvironment.slice('PATH='.length).split(':').some(path => !isAbsolute(path))
@@ -2089,18 +2187,21 @@ async function inspectServiceUnit(systemctlExecutable, unit, dshExecutable) {
   const configuredHome = dshEnvironment.slice('DSH_HOME='.length)
   if (!isAbsolute(configuredHome)) fail(`systemd unit DSH_HOME 必须是绝对路径：${unit}`)
   const serviceHome = await canonicalMissingAllowed(configuredHome)
+  const environmentBinding = await snapshotServiceEnvironmentBinding(serviceHome, match[1])
+  if (JSON.stringify(Object.entries(serviceEnvironment).sort(([left], [right]) => left.localeCompare(right)))
+    !== JSON.stringify(Object.entries(environmentBinding.environment ?? {}).sort(([left], [right]) => left.localeCompare(right)))) {
+    fail(`systemd unit service Environment 与持久绑定文件不一致：${unit}`)
+  }
   const expectedWorkingDirectory = join(serviceHome, 'profiles', match[1])
   if (await canonicalMissingAllowed(workingDirectory) !== expectedWorkingDirectory || shown.WorkingDirectory !== workingDirectory) {
     fail(`systemd unit WorkingDirectory 与 profile 不匹配：${unit}`)
   }
-  const shownEnvironment = shown.Environment.split(' ')
-  if (shownEnvironment.length !== 4
-    || shownEnvironment.filter(value => value.startsWith('DSH_HOME=')).length !== 1
-    || shownEnvironment.filter(value => value.startsWith('PATH=')).length !== 1
-    || !shownEnvironment.includes(`DSH_HOME=${dshEnvironment.slice('DSH_HOME='.length)}`)
-    || !shownEnvironment.includes(pathEnvironment)
-    || !shownEnvironment.includes('DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + currentUid() + '/bus')
-    || !shownEnvironment.includes('XDG_RUNTIME_DIR=/run/user/' + currentUid())) {
+  const shownEnvironment = parseSystemdEnvironment(shown.Environment, unit)
+  const expectedEnvironment = [dshEnvironment, pathEnvironment,
+    'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + currentUid() + '/bus',
+    'XDG_RUNTIME_DIR=/run/user/' + currentUid(),
+    ...Object.entries(serviceEnvironment).map(([name, path]) => `${name}=${path}`)]
+  if (JSON.stringify(shownEnvironment) !== JSON.stringify(expectedEnvironment)) {
     fail(`systemd unit Environment 与 fragment 不一致：${unit}`)
   }
   const expectedExecPrefix = `{ path=${nodePath} ; argv[]=${nodePath} --disable-warning=ExperimentalWarning ${dshPath} --profile ${match[1]} --no-open ; ignore_errors=no ;`
@@ -2140,6 +2241,8 @@ async function inspectServiceUnit(systemctlExecutable, unit, dshExecutable) {
     },
     dropIns, wasActive: shown.ActiveState === 'active', activeState: shown.ActiveState, subState: shown.SubState,
     mainPid, controlPid, invocationId: shown.InvocationID, nRestarts, unitFileState: shown.UnitFileState, nodePath, dshPath, pathEnvironment,
+    configuredHome,
+    environmentBinding,
   }
 }
 
@@ -2165,8 +2268,19 @@ async function readRawServiceState(systemctlExecutable, unit) {
   }
 }
 
+function assertExpectedServiceEnvironment(raw, service) {
+  const expected = [`DSH_HOME=${service.configuredHome ?? service.serviceHome}`, service.pathEnvironment,
+    `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${currentUid()}/bus`,
+    `XDG_RUNTIME_DIR=/run/user/${currentUid()}`,
+    ...Object.entries(service.environmentBinding?.environment ?? {})
+      .sort(([left], [right]) => left.localeCompare(right)).map(([name, path]) => `${name}=${path}`)]
+  if (JSON.stringify(parseSystemdEnvironment(raw.environment, service.unit)) !== JSON.stringify(expected)) {
+    fail(`systemd service 有效 Environment 在事务期间变化：${service.unit}`)
+  }
+}
+
 async function sameHomeRawServiceOwnership(raw, homePath, strict = false) {
-  const homes = (raw.environment ?? '').split(' ').filter(value => value.startsWith('DSH_HOME='))
+  const homes = parseSystemdEnvironment(raw.environment ?? '', raw.unit).filter(value => value.startsWith('DSH_HOME='))
   const candidate = homes.length === 1 ? homes[0].slice('DSH_HOME='.length) : undefined
   if (candidate === undefined || !isAbsolute(candidate) || !isAbsolute(raw.workingDirectory ?? '')) return false
   const canonicalize = strict ? realpath : canonicalMissingAllowed
@@ -2268,12 +2382,22 @@ async function assertServiceFilesUnchanged(services) {
       }
     }
   }
+  for (const homePath of new Set(services.map(service => service.serviceHome))) {
+    if (await existingIdentity(homePath) !== undefined) {
+      await assertServiceEnvironmentBindings(services.filter(service => service.serviceHome === homePath), homePath)
+    }
+  }
 }
 
 async function readServiceStates(systemctlExecutable, services, homePath, dshExecutable) {
   const result = []
   for (const expected of services) {
     const current = await inspectServiceUnit(systemctlExecutable, expected.unit, dshExecutable)
+    if (expected.environmentBinding !== undefined
+      && (current.environmentBinding.present !== expected.environmentBinding.present
+        || current.environmentBinding.sha256 !== expected.environmentBinding.sha256)) {
+      fail(`service Environment 绑定文件在事务期间变化：${expected.unit}`)
+    }
     if (current.serviceHome === homePath) result.push(current)
   }
   return result
@@ -2788,6 +2912,7 @@ async function startAndAcceptServices({
       const current = await Promise.all(activeBefore.map(async previous => ({
         ...previous, ...await readRawServiceState(systemctlExecutable, previous.unit),
       })))
+      for (const service of current) assertExpectedServiceEnvironment(service, service)
       const byUnit = new Map(current.map(service => [service.unit, service]))
       const candidates = activeBefore.map(previous => ({ previous, current: byUnit.get(previous.unit) }))
       let inactiveReady = true
@@ -2838,6 +2963,7 @@ async function startAndAcceptServices({
       const stable = await Promise.all(activeBefore.map(async previous => ({
         ...previous, ...await readRawServiceState(systemctlExecutable, previous.unit),
       })))
+      for (const service of stable) assertExpectedServiceEnvironment(service, service)
       const stableByUnit = new Map(stable.map(service => [service.unit, service]))
       for (const acceptedService of accepted) {
         const service = stableByUnit.get(acceptedService.unit)
@@ -2935,6 +3061,7 @@ async function acceptedServicesStillBound({
       fail(`systemd service start barrier 状态不受支持：${barrier.unit}`)
     }
     const service = await readRawServiceState(systemctlExecutable, original.unit)
+    if (service.loadState === 'loaded') assertExpectedServiceEnvironment(service, original)
     if (!['loaded', 'masked'].includes(service.loadState)
       || !['enabled', 'disabled', 'masked', 'masked-runtime'].includes(service.unitFileState)) {
       fail(`systemd service raw load/unit-file state 无效：${original.unit}:${service.loadState}/${service.unitFileState}`)
@@ -3037,6 +3164,9 @@ async function removeCommittedTransactionBound({
       } else {
         if (!sameIdentity(backupIdentity, manifest.originalIdentity)) fail(`service-aware original-home 身份不匹配；拒绝清理：${backupHome}`)
         await assertProfileDigest(anchoredBackup, manifest.profile, manifest.originalProfileDigest)
+        if (isServiceManifestVersion(manifest.version)) {
+          await assertServiceEnvironmentBindings(manifest.services, anchoredBackup)
+        }
         const boundBackupIdentity = identity(backupIdentity)
         manifest = await writeManifest(cleanupFdPath, manifest, 'cleanup-started', {
           cleanup: { protocol: SERVICE_CLEANUP_PROTOCOL, phase: 'prepared', tombstoneName, identity: boundBackupIdentity },
@@ -3268,6 +3398,7 @@ async function recoverServiceTransaction({
 
   if (homeStat === undefined && backupIsOriginal) {
     await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
+    await assertServiceEnvironmentBindings(services, backupHome)
     manifest = await stopRelatedServices(serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop, physicalTransactionRoot, manifest)
     assertLockParentStable(homePath)
     await moveBoundDirectoryNoReplace(backupHome, physicalHomePath, manifest.originalIdentity,
@@ -3294,6 +3425,8 @@ async function recoverServiceTransaction({
   const cleanupWithoutBackup = homeIsStaged && backupStat === undefined && manifest.state === 'cleanup-started'
   if (homeIsStaged && (backupIsOriginal || cleanupWithoutBackup)) {
     await assertProfileDigest(physicalHomePath, profile, manifest.stagedProfileDigest)
+    await assertServiceEnvironmentBindings(services, physicalHomePath)
+    if (backupIsOriginal) await assertServiceEnvironmentBindings(services, backupHome)
     await assertCommittedCleanProfile()
     await assertCleanProfileInventory(physicalHomePath, cleanProfiles)
     if (backupIsOriginal && manifest.state !== 'cleanup-started') {
@@ -4951,6 +5084,7 @@ async function performLifecycle({
       })
     }
     await copyHome(physicalHomePath, stageHome)
+    if (serviceContext !== undefined) await assertServiceEnvironmentBindings(services, stageHome)
     const stagedStat = await stat(stageHome)
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest, stagedIdentity: identity(stagedStat) }, 'prepared')
     const stagedProfile = await readProfile(stageHome, profile)
@@ -5119,6 +5253,8 @@ async function performLifecycle({
     if (operation === 'upgrade') await assertProfileTreeIdentity(validatedProfile)
     else await readProfile(stageHome, profile)
     if (serviceContext !== undefined) {
+      await assertServiceEnvironmentBindings(services, physicalHomePath)
+      await assertServiceEnvironmentBindings(services, stageHome)
       await assertMaskedAndQuiescent({
         ...serviceContext, services, serviceMasks, homePath, dshExecutable, unitUniverse, foreignOwnership,
       })
@@ -5154,6 +5290,7 @@ async function performLifecycle({
     }
     await moveBoundDirectoryNoReplace(stageHome, physicalHomePath, manifest.stagedIdentity,
       { path: physicalTransactionRoot, identity: manifest.transactionIdentity })
+    if (serviceContext !== undefined) await assertServiceEnvironmentBindings(services, physicalHomePath)
     assertLockParentStable(homePath)
     await fsyncPath(physicalTransactionRoot, true)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)

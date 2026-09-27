@@ -44,10 +44,11 @@ export async function validateRsiHostAuthorities(input: {
   liveQualification: unknown
   hostDeploymentInputs: unknown
   handoff: { coordinatorId: string } | undefined
+  environment?: NodeJS.ProcessEnv
   readPrivate(path: string): Promise<string>
 }): Promise<void> {
   const attestor = input.trust.hostAttestor!
-  const configPath = process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG
+  const configPath = (input.environment ?? process.env).DSH_SYSTEMD_HOST_ATTESTOR_CONFIG
   const allowed = attestor.environmentAllowlist.includes('DSH_SYSTEMD_HOST_ATTESTOR_CONFIG')
   if (!allowed) return // Existing owner-provisioned explicit request configs remain valid.
   if (!configPath) fail('config path is missing')

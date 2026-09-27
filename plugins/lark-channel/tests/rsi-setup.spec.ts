@@ -1,4 +1,5 @@
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { rsiServiceEnvironmentPath } from '../src/rsi-service-environment.js'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,6 +27,8 @@ async function fixture() {
     base: vi.fn(async () => '[]\n'),
     snapshot: vi.fn(async () => snapshot),
     compile: vi.fn(async () => ({ targetPatch: '- id: target\n  config: { status: configured }\n', coordinatorPatch: '- id: coordinator\n  config: { status: configured }\n' })),
+    resolveEnvironments: vi.fn(async () => undefined), serviceUnitPath: (profile, home) => join(home, 'units', `${profile}.service`),
+    renderServiceUnit: vi.fn(async (profile, _home, environment) => JSON.stringify({ profile, environment })), reloadServices: vi.fn(), validateServiceUnits: vi.fn(async () => {}),
     validateAuthorities: vi.fn(async () => {}), assertStopped: vi.fn(), start: vi.fn(async () => {}),
   }
   const args = (flags: string[] = []) => parseRsiSetupArgs(['--manifest', manifestPath, '--dsh-home', home, ...flags])
@@ -155,6 +158,93 @@ describe('RSI dual profile setup transaction', () => {
     await chmod(f.manifestPath, 0o600)
     const link = join(f.home, 'linked.json'); await symlink(f.manifestPath, link)
     await expect(configureRsiSetup({ ...f.args(), manifestPath: link }, f.ports)).rejects.toThrow('noncanonical file')
+  })
+  async function withServiceEnvironment() {
+    const f = await fixture()
+    const config = join(f.home, 'authority config.json'); await writeFile(config, '{}', { mode: 0o600 })
+    const environments = { target: { DSH_RELEASE_PR_CONFIG: config, DSH_SYSTEMD_HOST_ATTESTOR_CONFIG: config },
+      coordinator: { DSH_SYSTEMD_HOST_ATTESTOR_CONFIG: config } }
+    f.ports.resolveEnvironments = vi.fn(async () => environments)
+    return { ...f, environments, binding: (profile = 'target') => rsiServiceEnvironmentPath(f.home, profile),
+      unit: (profile = 'target') => f.ports.serviceUnitPath(profile, f.home) }
+  }
+  test('journals both service bindings and units, preserves replay, and restores absent originals', async () => {
+    const f = await withServiceEnvironment()
+    await configureRsiSetup(f.args(), f.ports)
+    await expect(stat(f.binding())).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(f.unit())).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(f.ports.reloadServices).not.toHaveBeenCalled()
+    await configureRsiSetup(f.args(f.apply), f.ports)
+    expect(JSON.parse(await readFile(f.binding(), 'utf8')).environment).toEqual(f.environments.target)
+    expect(JSON.parse(await readFile(f.binding('coordinator'), 'utf8')).environment).toEqual(f.environments.coordinator)
+    expect((await stat(f.binding())).mode & 0o777).toBe(0o600)
+    expect(JSON.parse(await readFile(f.unit(), 'utf8')).environment).toEqual(f.environments.target)
+    const saved = await readFile(f.journal, 'utf8'); expect(JSON.parse(saved).schemaVersion).toBe(2)
+    await configureRsiSetup(f.args(f.apply), f.ports)
+    expect(await readFile(f.journal, 'utf8')).toBe(saved)
+    await configureRsiSetup(f.args(f.rollback), f.ports)
+    for (const profile of f.pair) {
+      await expect(stat(f.binding(profile))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(f.unit(profile))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    expect(f.ports.reloadServices).toHaveBeenCalledTimes(3)
+  })
+  test('failed Host grant environment readback restores all files before any service starts', async () => {
+    const f = await withServiceEnvironment()
+    await mkdir(join(f.home, 'units'), { mode: 0o700 })
+    await writeFile(f.unit(), 'original unit', { mode: 0o600 })
+    f.ports.validateServiceUnits = vi.fn(async () => { throw new Error('grant environment mismatch') })
+    await expect(configureRsiSetup(f.args([...f.apply, '--start']), f.ports)).rejects.toThrow('grant environment mismatch')
+    expect(await readFile(f.unit(), 'utf8')).toBe('original unit')
+    expect(await readFile(f.patch(), 'utf8')).toContain('original')
+    await expect(stat(f.binding())).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(f.journal)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(f.ports.start).not.toHaveBeenCalled()
+  })
+  test.each(['unit', 'binding'])('refuses %s drift without partial rollback', async resource => {
+    const f = await withServiceEnvironment()
+    await configureRsiSetup(f.args(f.apply), f.ports)
+    await writeFile(resource === 'unit' ? f.unit() : f.binding(), 'external edit', { mode: 0o600 })
+    await expect(configureRsiSetup(f.args(f.rollback), f.ports)).rejects.toThrow('service resource changed outside setup')
+    expect(await readFile(f.patch(), 'utf8')).toContain('configured')
+    expect((await stat(f.journal)).isFile()).toBe(true)
+  })
+  test('failed target start retains all new resources and rollback restores prior bindings and units', async () => {
+    const f = await withServiceEnvironment()
+    await mkdir(join(f.home, 'rsi-service-environments'), { mode: 0o700 })
+    await mkdir(join(f.home, 'units'), { mode: 0o700 })
+    for (const profile of f.pair) {
+      await writeFile(f.binding(profile), 'previous binding', { mode: 0o600 })
+      await writeFile(f.unit(profile), 'previous unit', { mode: 0o600 })
+    }
+    f.ports.start = vi.fn(async profile => { if (profile === 'target') throw new Error('start failed') })
+    await expect(configureRsiSetup(f.args([...f.apply, '--start']), f.ports)).rejects.toThrow('start failed')
+    expect(JSON.parse(await readFile(f.journal, 'utf8')).stage).toBe('applied')
+    expect(await readFile(f.unit(), 'utf8')).toContain('DSH_RELEASE_PR_CONFIG')
+    // A crash during rollback can leave one resource already restored.
+    await writeFile(f.binding(), 'previous binding', { mode: 0o600 })
+    await configureRsiSetup(f.args(f.rollback), f.ports)
+    for (const profile of f.pair) {
+      expect(await readFile(f.binding(profile), 'utf8')).toBe('previous binding')
+      expect(await readFile(f.unit(profile), 'utf8')).toBe('previous unit')
+    }
+  })
+  test('rejects service file changes during preflight before changing either profile', async () => {
+    const f = await withServiceEnvironment()
+    f.ports.validateAuthorities = vi.fn(async () => {
+      await mkdir(join(f.home, 'units'), { mode: 0o700 }); await writeFile(f.unit(), 'external writer', { mode: 0o600 })
+    })
+    await expect(configureRsiSetup(f.args(f.apply), f.ports)).rejects.toThrow('service resource changed before write')
+    expect(await readFile(f.patch(), 'utf8')).toContain('original')
+    await expect(stat(f.journal)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+  test('refuses a dangling service unit link without replacing it or changing profiles', async () => {
+    const f = await withServiceEnvironment()
+    await mkdir(join(f.home, 'units'), { mode: 0o700 })
+    await symlink(join(f.home, 'missing-unit'), f.unit())
+    await expect(configureRsiSetup(f.args(f.apply), f.ports)).rejects.toThrow('unsafe file')
+    expect(await readFile(f.patch(), 'utf8')).toContain('original')
+    await expect(stat(f.journal)).rejects.toMatchObject({ code: 'ENOENT' })
   })
   test('argument parser refuses implicit mutation and incompatible operations', () => {
     const base = ['--manifest', '/tmp/private.json', '--dsh-home', '/tmp/home']

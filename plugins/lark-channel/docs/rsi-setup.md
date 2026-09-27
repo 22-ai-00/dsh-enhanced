@@ -62,12 +62,15 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
 | `sourceReviews` | 有限独立审查授权；owner 精确匹配当前 Delivery 记录，decisionRoot 与发布轨一致 |
 | `coordinator` | `{ "budgetId": "rsi-adoption", "budgetAmount": 1, "timeoutMs": 900000 }`，按实际约束设置 |
 | `limits` | 例如 `{ "periodMs": 86400000, "reviews": 5, "discovery": 1440, "source": 1440, "observations": 1440, "coordinator": 1440 }`；均为显式有限额度 |
+| `serviceEnvironment` | 可选 `{ "target": { ... }, "coordinator": { ... } }`，显式替换两个服务的配置路径绑定；通常无需填写，见下文 |
 
 具体配置契约见 [Control Plane](../../plugin-control-plane/README.md)、[Growth Driver](../../assistant-growth-driver/README.md)、[Verifier](../../assistant-verifier/README.md)。四份签名授权必须使用相同 owner、目标 ledger 与插件白名单，并与 trust 登记的公钥一致。采用授权绑定 executor、profile、handoff；观察授权绑定包名单和观察策略。所有授权须在有效期内。
 
 所有 owner 字段中的 `authorityId` 使用有效 Delivery 路由的 ID，即 `sourceJobs.ownerRouteId`。`sourceJobs.authorityId` 是源码作业的独立期限与额度标识，不能用作 owner 路由身份。
 
 不填 Growth `provider/model` 和 Verifier `sourceReviews.model` 时继承来源任务的实际模型。需要固定修复或审查供应时显式配置；历史任务已冻结的模型不会跟随之后的会话切换。
+
+配置器自动保存 trust 所选择的标准 adapter 配置路径：`DSH_SYSTEMD_HOST_ATTESTOR_CONFIG` 和 `DSH_RELEASE_{PR,REVIEW,MERGE,BUILD,SIGN,PUBLISH,REGISTRY_VERIFY,CATALOG_ADMISSION}_CONFIG`。首次配置从当前进程读取；之后优先复用 `$DSH_HOME/rsi-service-environments/<profile>.json`，重装服务或退出 shell 后无需重新 export。目标接收所选发布与 Host 路径，协调器只接收相同的 Host 路径。若要替换已有路径，可在 `serviceEnvironment` 明确给出两个映射；字段集合须与 trust 所选标准变量一致。引用的配置必须是当前用户私有、canonical、单链接普通文件，且位于 `profiles/` 之外。这里只保存配置路径，不复制 token、私钥或任意 shell 环境变量。
 
 扫描、源码作业、观察与协调器使用 `subject` scope 的 `automation-runs` budget；模型复盘使用 `global` scope 汇总。Policy 按 scope、metric、period 计量，改 budget ID 不会隔离同一计数池。源码额度按每个原生 automation identity 计量，总作业数另由有限 `sourceJobs.maxSubmissions` 限制。空扫描也消耗配置额度；额度应覆盖所需扫描频率。已有同周期全局规则的额度必须兼容。配置器不会打开 `allowUnbudgetedExecution`。
 
@@ -88,25 +91,25 @@ systemctl --user stop dsh-profile-web.service dsh-profile-rsi-coordinator.servic
   --manifest /private/owner/rsi.json --apply --confirm-hosts-stopped --start
 ```
 
-使用同一 DSH_HOME lifecycle lock；写入前重查 manifest、owner snapshot 和两个原始 patch，保留有效配置中的其他字段与 `!!js`。成对写入后再次运行 `dsh --dump-config` 检查。`--start` 复用已有常驻服务安装器，先启动协调器，再启动目标；省略该参数只保存配置。
+使用同一 DSH_HOME lifecycle lock；写入前重查 manifest、owner snapshot、两个原始 patch 以及服务绑定和 unit，保留有效配置中的其他字段与 `!!js`。成对写入后再次运行 `dsh --dump-config` 检查。存在受管服务环境时，同一事务保存两个绑定和 systemd unit，并执行 `daemon-reload`；schema4 Host grant 中的 `template.unitProperties.Environment` 必须与目标 unit 的实际 `systemctl show` 输出一致，否则自动恢复。准备 grant 时应使用最终计划的服务环境。`--start` 复用已有常驻服务安装器，先启动协调器，再启动目标；省略该参数仍保存并加载服务定义，但不启动服务。
 
 ## 恢复与停止
 
-配置 journal 存在 `DSH_HOME/.rsi-setup-journal.json`，为私有文件，含上次变更前后的两个 patch。写入或最终组合失败时自动恢复；崩溃留下 prepared journal 时先执行回滚。重复应用相同配置不会覆盖原回滚点。只有最近一次变更可由此入口恢复。
+配置 journal 存在 `DSH_HOME/.rsi-setup-journal.json`，为私有文件，含上次变更前后的两个 patch。新 schema2 还保存两个环境绑定和 unit 的原始及新内容，原先不存在的文件回滚时删除；仍支持旧 schema1 journal。写入、最终组合或服务环境读回失败时自动恢复；崩溃留下 prepared journal 时先执行回滚。重复应用相同配置不会覆盖原回滚点。只有最近一次变更可由此入口恢复。
 
 ```sh
 ~/.dsh/profiles/web/node_modules/.bin/dsh-rsi-setup \
   --manifest /private/owner/rsi.json --rollback --confirm-hosts-stopped
 ```
 
-回滚前仍须停止两个 Host。恢复不要求前向授权仍未过期；若任一 patch 被外部改过，会保留 journal 并拒绝覆盖。服务启动失败时保留已应用配置，先排查/停止服务再决定恢复，避免改写活跃 Host。
+回滚前仍须停止两个 Host。恢复不要求前向授权仍未过期；若任一 patch、服务绑定或 unit 被外部改过，会保留 journal 并在恢复任何文件前拒绝覆盖。服务启动失败时保留已应用配置，先排查/停止服务再决定恢复，避免改写活跃 Host。受管升级会同时校验绑定、unit 与有效环境，并在复制、切换和恢复时检查绑定内容未漂移。
 
-暂停自迭代可停止协调器及目标的相关 Automations，或撤销有限授权；重启不重置额度，也不重放 unknown 外部动作。授权续期需要新的合法授权标识与配置。配置 journal 只恢复 profile；已发布或已采用能力的回退仍由 Control Plane 的签名恢复链负责。
+暂停自迭代可停止协调器及目标的相关 Automations，或撤销有限授权；重启不重置额度，也不重放 unknown 外部动作。授权续期需要新的合法授权标识与配置。配置 journal 恢复 profile 及上述服务配置；已发布或已采用能力的回退仍由 Control Plane 的签名恢复链负责。
 
-此 CLI 读取 owner 数据库与私有配置；默认检查也会使用本地 lifecycle 锁和临时 WAL 快照，但不改变 profile 或业务状态。显式应用写两个 profile patch 和 journal；校验会执行本地 `dsh --dump-config`、`systemctl show`，显式启动会安装/启用/restart 用户级服务。它不向其他人发送消息。原始授权、私钥、数据库、journal 与运行日志留本地，不提交 GitHub。
+此 CLI 读取 owner 数据库与私有配置；默认检查也会使用本地 lifecycle 锁和临时 WAL 快照，但不改变 profile 或业务状态。显式应用写两个 profile patch、受管服务绑定/unit 和 journal；校验会执行本地 `dsh --dump-config`、`systemctl show`，服务定义变更会执行 `daemon-reload`，显式启动会安装/启用/restart 用户级服务。它不向其他人发送消息。原始授权、私钥、数据库、journal 与运行日志留本地，不提交 GitHub。
 
 ## 使用普通任务资格合同
 
 可按[有限试用采用指南](../../../docs/bounded-live-adoption.md)配置 `sourceAdoptions.liveQualification` 与 `controlPlane.liveQualification`，并设置 `limits.qualification` 和独立预算 ID。配置器核对第五份独立签名授权及公钥，生成资格扫描的原生 Policy/Automations 规则。该模式以限时真实 owner 任务替代严格 replay/shadow 等验收合同，不声称这些严格阶段已通过；已有未配置此模式的 manifest 保持原行为。实际部署端到端验收仍见当前状态。
 
-Host 可通过 [systemd schema4](../../../docs/systemd-host-attestor.md#automatic-authorization-within-an-installation-grant) 自动解析已批准操作的逐次授权。配置器核对 `sourceAdoptions.hostDeploymentInputs` 与采用授权的同名列表；当 trust 选择 `DSH_SYSTEMD_HOST_ATTESTOR_CONFIG` 时，还读取当前进程该变量所指向的私有配置，预检 schema4 wrapper、resolver/config 摘要、固定解释器及 Host 签名身份，并核对 owner、ledger、目标 profile、协调器 handoff 和有限试用条款。预检仅执行已固定 attestor 的版本查询和已选官方 resolver 的语法检查，不签发逐次授权或重启服务。Host 授权配置与原始/候选 observer 仍须预先准备，配置器不会生成它们，也不负责把当前 shell 环境写入 systemd；两个 Host 服务必须持续取得各自 trust 所需的相同环境变量。预检通过不等于实际 reload/readiness 已验收。
+Host 可通过 [systemd schema4](../../../docs/systemd-host-attestor.md#automatic-authorization-within-an-installation-grant) 自动解析已批准操作的逐次授权。配置器核对 `sourceAdoptions.hostDeploymentInputs` 与采用授权的同名列表；当 trust 选择 `DSH_SYSTEMD_HOST_ATTESTOR_CONFIG` 时，还读取已解析的服务绑定所指向的私有配置，预检 schema4 wrapper、resolver/config 摘要、固定解释器及 Host 签名身份，并核对 owner、ledger、目标 profile、协调器 handoff 和有限试用条款。预检仅执行已固定 attestor 的版本查询和已选官方 resolver 的语法检查，不签发逐次授权或重启服务。Host 授权配置与原始/候选 observer 仍须预先准备，配置器不会生成它们；路径的持久传递由上述服务绑定负责。预检通过不等于实际 reload/readiness 已验收。
