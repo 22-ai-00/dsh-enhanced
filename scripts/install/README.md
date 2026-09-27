@@ -122,6 +122,8 @@ dsh-rsi reinstall --local ~/work/github/dsh-enhanced --yes
 
 安装器不会把 `dsh --dump-config` 当作“可用”的证明：对于尚未配置 Lark 的 profile，它会在安装 bundle 后、飞书 OAuth 前，短暂启动一次 Host，等待原生 Loader 完成审计后的就绪信号；Web 使用 OS 分配的 loopback 端口，自定义 profile 通过临时 `appReady` 监听接收信号。已启用 Lark 的旧 profile 则不会启动第二个 Host 去并发访问同一份状态；若由安装器管理服务，最终会以真正的常驻进程和稳定性窗口验收。Lark 是否已启用按 DSH 的 home→profile 覆盖层计算，profile 的 `disabled`、`enabled` 或 App ID 覆盖会优先于 home 层，避免把已禁用的 bot 误判为可保留。临时 probe 中的 Lark Channel 会被 process-only overlay 禁用，不会建立第二条 WebSocket，也不会改写 profile。任何 Cordis service 依赖未满足都会明确失败。对于历史 profile 中已存在 `assistant-evolution` 而缺少其 `assistant-evaluation` provider 的情况，安装器会只补齐 Evaluation bundle；不会删除或默默启用其它旧插件。
 
+新 Control Plane 会在原生 Host 完成启动审计后向 stderr 打印 `dsh-enhanced host ready: v1`。安装探针及单目标 Lark/supervised 生命周期事务可用此信号验收无 Web Host；旧 Web URL 信号继续支持。systemd 验收仍绑定新 InvocationID，并执行原有 Lark、稳定性与持久状态检查。旧无 Web cohort 未必具备通知；双 Host 安装生成的协调器尚不满足旧生命周期的 sibling 约束，整套双 Host 升级和 Host 版本切换仍待补齐。
+
 飞书向导支持纯 SSH/无桌面 Linux：默认先探测 Secret Service，不可用时会在 OAuth 前自动验证并改用当前用户 `0700` 目录下的版本化 `0600` protected-file，不要求安装 GNOME Keyring。该文件没有额外静态加密，同 UID、root 与可读备份仍能读取；需要强制系统钥匙环时可在安装后直接运行 `dsh-lark-setup --linux-credential-provider secret-service`。
 
 配置飞书时还会自动安装或复用官方 `lark-cli`，使用同一应用完成 owner 的业务域授权，并生成原生 DSH 业务技能；后续有效授权可复用。已有 channel 选择 keep/skip 时不重新发起授权，需要新增业务接入时运行 `--lark configure`。仅配置消息通道可直接调用 `dsh-lark-setup --no-business-tools`；范围、凭据存储和失败恢复见[飞书安装指南](../../plugins/lark-channel/docs/setup.md#自动业务工具接入)。

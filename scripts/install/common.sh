@@ -2008,7 +2008,9 @@ NODE
   local ready='0'
   local elapsed
   for ((elapsed = 0; elapsed < 30; elapsed += 1)); do
-    if grep -Fq "$ready_marker" "$stdout_path" 2>/dev/null; then
+    if grep -Fq "$ready_marker" "$stdout_path" 2>/dev/null \
+      || grep -Fxq 'dsh-enhanced host ready: v1' "$stdout_path" 2>/dev/null \
+      || grep -Fxq 'dsh-enhanced host ready: v1' "$stderr_path" 2>/dev/null; then
       ready='1'
       break
     fi
@@ -2020,7 +2022,9 @@ NODE
   # the liveness check above.  Treat that completed output as a successful
   # activation probe too; the probe only needs to prove that DSH composed and
   # activated the profile and committed the native readiness signal.
-  if grep -Fq "$ready_marker" "$stdout_path" 2>/dev/null; then
+  if grep -Fq "$ready_marker" "$stdout_path" 2>/dev/null \
+      || grep -Fxq 'dsh-enhanced host ready: v1' "$stdout_path" 2>/dev/null \
+      || grep -Fxq 'dsh-enhanced host ready: v1' "$stderr_path" 2>/dev/null; then
     ready='1'
   fi
 

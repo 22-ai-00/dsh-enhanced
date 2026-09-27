@@ -4,6 +4,8 @@
 
 可选 `runtimeObserver` 提供 owner-only、HMAC 认证的本地 Unix socket，读取实际 Loader/Fiber 与服务归属；socket、连接和密钥缓冲区由 Cordis 注入 Fiber 管理。该配置会读取私有认证 key 并创建本地 socket，不新增模型工具或签名权限；调用方与 Host 共享受信 owner 身份，不构成同 UID/同进程隔离。详见[配置、权限与证据](../../docs/runtime-observer.md)。
 
+运行在提供原生 `appReady` 服务的 Host 内时，插件在 launcher 完成 Loader 激活审计并发出就绪回调后，向 stderr 输出 `dsh-enhanced host ready: v1`；每个 peer 代次最多输出一次，避免污染 headless/ACP 的 stdout 协议流。监听器由 Control Plane 的 Cordis Fiber 管理；没有 `appReady` 的嵌入式 Host 仍可激活，但不会输出此标记。旧版 cohort 可能没有该通知。此标记只表示该 Host 的启动就绪，不证明用户任务或自迭代结果。
+
 ## 安装
 
 ```sh

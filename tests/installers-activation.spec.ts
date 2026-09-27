@@ -137,20 +137,21 @@ describe('custom profile activation through the installer readiness overlay', ()
     await expectProbeCleaned(f.root)
   }, 15_000)
 
-  test('the Web profile keeps its URL readiness path without a custom overlay', async () => {
+  test.each(['dsh web: http://127.0.0.1:43210/probe', 'dsh-enhanced host ready: v1'])('the Web-named profile accepts native readiness without a custom overlay: %s', async marker => {
     const f = await fixture()
     await mkdir(join(f.home, 'profiles', 'web'))
     await writeFile(join(f.home, 'profiles', 'web', 'cordis.patch.yml'), '[]\n')
     const webDsh = join(f.fakeBin, 'dsh')
     await writeFile(webDsh, `#!/bin/bash
 printf '%s\\n' "$@" > ${JSON.stringify(f.log)}
-printf 'dsh web: http://127.0.0.1:43210/probe\\n'
+printf '%s\\n' '${marker}'${marker.startsWith('dsh web:') ? '' : ' >&2'}
 `, { mode: 0o755 })
     await chmod(webDsh, 0o755)
     const result = runProbe(f, 'web', 'web')
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('profile 运行时自检通过')
-    expect(result.stdout).toContain('DSH 已打印带 token 的 Web URL')
+    if (marker.startsWith('dsh web:')) expect(result.stdout).toContain('DSH 已打印带 token 的 Web URL')
+    else expect(result.stdout).not.toContain('Web URL')
     expect(await readFile(f.log, 'utf8')).not.toContain('--patch')
     await expectProbeCleaned(f.root)
   }, 15_000)
