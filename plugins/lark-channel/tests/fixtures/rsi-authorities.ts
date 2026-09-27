@@ -14,6 +14,8 @@ export interface RsiAuthorityFixture {
   binding: { owner: { id: string; version: number } }
   readAuthority(name: 'approvals' | 'releases' | 'adoptions' | 'observations' | 'qualifications'): Promise<Record<string, any>>
   writeAuthority(name: 'approvals' | 'releases' | 'adoptions' | 'observations' | 'qualifications', value: Record<string, any>): Promise<void>
+  standingHost(): Promise<{ wrapperPath: string; resolverConfigPath: string; readWrapper(): Promise<any>; writeWrapper(value: any): Promise<void>;
+    readResolver(): Promise<any>; writeResolver(value: any): Promise<void> }>
   dispose(): Promise<void>
 }
 
@@ -104,7 +106,8 @@ export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthor
       packages: ['@dsh-enhanced/health-helper'], receiptTtlMs: 30_000 } }
   const terms = { protocol: 'dsh-bounded-live/v1', maximumWindowMs: 60_000, minimumTasks: 1, authority: qualification.authority, keyId: qualification.keyId }
   const handoff = { schemaVersion: 1, coordinatorId: 'coordinator', maximumWindowMs: 60_000, commit: 'target-host' }
-  if (live) Object.assign(adoptions.grant, { liveQualification: terms, handoff })
+  const hostDeploymentInputs = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml']
+  if (live) Object.assign(adoptions.grant, { liveQualification: terms, handoff, hostDeploymentInputs })
   const qualifications = { schemaVersion: 1, authority: qualification.authority, keyId: qualification.keyId, keyPath: qualification.keyPath,
     statePath: join(root, 'qualification-state.sqlite'), controlDatabasePath: controlPath,
     grant: { id: 'qualification-grant', expiresAt, maxQualifications: 2, owner, installationId: adoptions.grant.installationId,
@@ -124,12 +127,52 @@ export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthor
     releaseAuthorizationKeys: [release].map(({ authority, keyId, publicKeyPem }) => ({ authority, keyId, publicKeyPem })) })}\n`)
   const manifest = { schemaVersion: 1, targetProfile: 'target', coordinatorProfile: 'coordinator', controlPlane: { catalogPath, statePath, trustPath,
     sourceJobs: { repository }, sourceApprovals: { configPath: authorityPath('approvals') }, sourceReleases: { configPath: authorityPath('releases') },
-    sourceAdoptions: { authority: { configPath: authorityPath('adoptions') }, ...(live ? { liveQualification: terms, handoff } : {}) },
+    sourceAdoptions: { authority: { configPath: authorityPath('adoptions') }, ...(live ? { liveQualification: terms, handoff, hostDeploymentInputs } : {}) },
     ...(live ? { liveQualification: { authority: { configPath: authorityPath('qualifications') }, profilePath } } : {}), runtimeObserver: { profilePath },
     taskObservations: { authority: { configPath: authorityPath('observations') }, policy, profilePath } },
   sourceReviews: { owner, plugins: ['health-helper'], expiresAt } } as unknown as RsiSetupManifest
   const names = new Set(['approvals', 'releases', 'adoptions', 'observations', 'qualifications'])
   return { root, manifest, binding: { owner: { id: owner.principalRecordId, version: owner.principalVersion } },
+    async standingHost() {
+      if (!live) throw new Error('standing Host requires live qualification')
+      const node = await realpath('/usr/bin/node')
+      const nodePin = { path: node, sha256: digest(await readFile(node)) }
+      const packageRoot = join(import.meta.dirname, '../../../plugin-control-plane')
+      const attestorPath = join(packageRoot, 'bin/dsh-systemd-host-attestor.js')
+      const resolverPath = join(packageRoot, 'bin/dsh-systemd-host-authority.js')
+      const helperPath = join(packageRoot, 'lib/adapter-process.js')
+      const clientPath = join(packageRoot, 'lib/runtime-observer-protocol.js')
+      const pin = async (path: string) => ({ path, sha256: digest(await readFile(path)) })
+      const observed = { socketPath: join(root, 'observer.sock'), keyPath: join(root, 'observer.key'), profilePath,
+        targets: [{ entryId: 'candidate', module: './candidate.js', configDigest: 'a'.repeat(64), services: ['candidate'] }] }
+      const template = { authority: host.authority, keyId: host.keyId, privateKeyPath: host.keyPath, stateRoot: root,
+        executable: await pin(attestorPath), interpreter: nodePin, processHelper: await pin(helperPath),
+        systemctl: { ...await pin(await realpath('/usr/bin/true')), interpreter: null }, scope: 'user', unit: 'dsh-profile-target.service',
+        unitProperties: { FragmentPath: '/owner/unit', DropInPaths: '', ExecStart: '/owner/exec ; }', Environment: '',
+          WorkingDirectory: home, User: '', Group: '', Type: 'simple', KillMode: 'control-group' },
+        timeoutMs: 10_000, stableWindowMs: 100, pollIntervalMs: 25,
+        readiness: { client: await pin(clientPath), observer: observed }, recoveryReadiness: { client: await pin(clientPath), observer: observed } }
+      const resolverConfigPath = join(root, 'resolver.json')
+      const resolverConfig = { schemaVersion: 1, statePath: join(root, 'resolver-state.sqlite'), controlDatabasePath: controlPath,
+        trustPath, template, grant: { id: 'host-grant', notBefore: Date.now() - 1000, expiresAt,
+          maximumReloads: 2, owner, profile: { name: 'target', path: profilePath }, packages: ['@dsh-enhanced/health-helper'],
+          coordinatorId: 'coordinator', hostDeploymentInputs, liveQualification: terms } }
+      await writePrivate(resolverConfigPath, `${JSON.stringify(resolverConfig)}\n`)
+      const wrapperPath = join(root, 'wrapper.json')
+      const wrapper = { schemaVersion: 4, template, resolver: { executable: await pin(resolverPath), interpreter: nodePin,
+        configPath: resolverConfigPath, configSha256: digest(await readFile(resolverConfigPath)), timeoutMs: 2000 } }
+      await writePrivate(wrapperPath, `${JSON.stringify(wrapper)}\n`)
+      const trust = JSON.parse(await readFile(trustPath, 'utf8'))
+      trust.hostAttestor = { id: 'fixture-host-attestor', version: 'dsh-systemd-host-attestor-6', path: attestorPath,
+        sha256: template.executable.sha256, interpreter: nodePin, environmentAllowlist: ['DSH_SYSTEMD_HOST_ATTESTOR_CONFIG'],
+        authority: host.authority, keyId: host.keyId, timeoutMs: 20_000 }
+      await writePrivate(trustPath, `${JSON.stringify(trust)}\n`)
+      return { wrapperPath, resolverConfigPath,
+        readWrapper: async () => JSON.parse(await readFile(wrapperPath, 'utf8')),
+        writeWrapper: async value => writePrivate(wrapperPath, `${JSON.stringify(value)}\n`),
+        readResolver: async () => JSON.parse(await readFile(resolverConfigPath, 'utf8')),
+        writeResolver: async value => writePrivate(resolverConfigPath, `${JSON.stringify(value)}\n`) }
+    },
     async readAuthority(name) { return JSON.parse(await readFile(authorityPath(name), 'utf8')) },
     async writeAuthority(name, value) { if (!names.has(name)) throw new Error('unknown authority'); await writePrivate(authorityPath(name), `${JSON.stringify(value)}\n`) },
     async dispose() { await rm(root, { recursive: true, force: true }) } }

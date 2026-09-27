@@ -388,7 +388,7 @@ sourceReleaseExecution:
   independentReview: true # 可选；需另配 assistant-verifier.sourceReviews
 ```
 
-此配置依赖 `sourceReleases`，沿用 trust schema v4 中八个固定 `releaseAdapters` 和本地 `file:` registry。原生 Automations 作业获批后，Host 依次接续 PR、review、merge、build、sign、publish、registry verify 与 catalog admission；最多推进八个既有阶段，不创建额外定时器。`timeoutMs` 为本次接续总上限（1 秒至 30 分钟），各 adapter 保留自身时限。源码检查和 release 构建是两个原有检查阶段，恢复不会重做已完成阶段。
+此配置依赖 `sourceReleases`，沿用 trust schema v4 中八个固定 `releaseAdapters` 和本地 `file:` registry。 trust loader 接受指向已存在、canonical、owner-private 目录的精确 `file:` URL，协议只能省略或为 `dsh`，不携带 CA/token 配置；URL 别名、符号链接和其他用户可访问的目录会被拒绝。schema v3 与 `protocol: "npm"` 仍要求 HTTPS。原生 Automations 作业获批后，Host 依次接续 PR、review、merge、build、sign、publish、registry verify 与 catalog admission；最多推进八个既有阶段，不创建额外定时器。`timeoutMs` 为本次接续总上限（1 秒至 30 分钟），各 adapter 保留自身时限。源码检查和 release 构建是两个原有检查阶段，恢复不会重做已完成阶段。
 
 review decision 仍由独立审查方产生：Host 只读 canonical、无 symlink、owner 私有目录下的 `<prId>.json`，其内容须符合现有 local adapter 的 `dsh-local-review-decision` 格式并精确绑定 PR id、base/head commit 和 PR evidence digest。配置的 `reviewDecisionRoot` 须与 review adapter 读取目录一致。缺失时保持 `awaiting-review`，不派发 review；格式错误或绑定变化则拒绝。独立审查方完成后调用 Host-only `advanceOwnerSourceRelease({ planId, signal?, expectedTrustDigest? })` 即可在当前进程继续，不要求重启。该入口不是模型工具；decision 由独立 Verifier 或外部审查方生成。部署须把 decision 写权限、审查输入和审查执行环境与候选写权限分开；同 UID 的目录权限本身不证明进程隔离。
 

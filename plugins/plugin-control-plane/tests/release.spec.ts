@@ -1,7 +1,8 @@
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterAll, afterEach, describe, expect, test } from 'vitest'
 import { catalogAdmissionId, previewCatalogAdmission } from '../src/catalog.ts'
 import {
@@ -1260,6 +1261,43 @@ async function scriptAdapterFixture(root: string, role: string, interpreter: { p
 }
 
 describe('schema 4 release trust separation', () => {
+  test('loads a private local registry for ordinary schema-4 release execution', async () => {
+    const fixture = await trustFixture(), directory = join(fixture.root, 'local registry')
+    await mkdir(directory, { mode: 0o700 }); await chmod(directory, 0o700)
+    const registry = { id: 'local', locator: pathToFileURL(directory).href }
+    for (const selected of [registry, { ...registry, protocol: 'dsh' }]) {
+      await fixture.write({ ...fixture.config, releaseRegistry: selected })
+      expect((await loadTrustConfig(fixture.trustPath)).releaseRegistry).toEqual({ ...selected, caPins: [], tokenEnvironment: null })
+    }
+  })
+
+  test('rejects local registry URL aliases, remote settings, unsafe directories and legacy schema', async () => {
+    const fixture = await trustFixture(), directory = join(fixture.root, 'registry')
+    await mkdir(directory, { mode: 0o700 }); await chmod(directory, 0o700)
+    const locator = pathToFileURL(directory).href
+    const alias = join(fixture.root, 'alias'); await symlink(directory, alias)
+    const regular = join(fixture.root, 'file'); await writeFile(regular, '', { mode: 0o600 })
+    const failures = [
+      { locator: `${locator}/` }, { locator: `${locator}/../registry` }, { locator: `${locator}?x=1` }, { locator: `${locator}#fragment` },
+      { locator: locator.replace('file:///', 'file://localhost/') }, { locator: locator.replace('file:///', 'file://remote/') },
+      { locator: locator.replace('registry', '%72egistry') }, { locator: 'file:///' },
+      { locator: pathToFileURL(alias).href }, { locator: pathToFileURL(regular).href },
+      { locator: `${locator}/missing` }, { locator: `${locator}%00` }, { locator, protocol: 'npm' },
+      { locator, tokenEnvironment: 'DSH_REGISTRY_TOKEN' }, { locator, caPins: ['invalid'] },
+    ]
+    for (const registry of failures) {
+      await fixture.write({ ...fixture.config, releaseRegistry: { id: 'local', ...registry } })
+      await expect(loadTrustConfig(fixture.trustPath), JSON.stringify(registry)).rejects.toThrow()
+    }
+    await fixture.write({ ...fixture.config, releaseRegistry: { id: 'local', locator } })
+    await chmod(directory, 0o755)
+    await expect(loadTrustConfig(fixture.trustPath)).rejects.toThrow('owner-private directory')
+    await chmod(directory, 0o700)
+    const { releaseAuthorizationKeys: _keys, ...legacy } = fixture.config
+    await fixture.write({ ...legacy, schemaVersion: 3, releaseRegistry: { id: 'local', locator } })
+    await expect(loadTrustConfig(fixture.trustPath)).rejects.toThrow('bare https origin/path')
+  })
+
   test('keeps authorization keys distinct from approval and adapter-receipt keys by identity and fingerprint', async () => {
     const fixture = await trustFixture()
     const loaded = await loadTrustConfig(fixture.trustPath)

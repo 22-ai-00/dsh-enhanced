@@ -1,14 +1,27 @@
 import { afterEach, describe, expect, test } from 'vitest'
+import { createHash } from 'node:crypto'
+import { readFile, realpath } from 'node:fs/promises'
 import { validateRsiAuthorities } from '../src/rsi-setup.js'
 import { createRsiAuthorityFixture, type RsiAuthorityFixture } from './fixtures/rsi-authorities.js'
 
 const fixtures: RsiAuthorityFixture[] = []
-afterEach(async () => { await Promise.all(fixtures.splice(0).map(fixture => fixture.dispose())) })
+const previousHostConfig = process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG
+afterEach(async () => {
+  if (previousHostConfig === undefined) delete process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG
+  else process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = previousHostConfig
+  await Promise.all(fixtures.splice(0).map(fixture => fixture.dispose()))
+})
 async function fixture(live = false): Promise<RsiAuthorityFixture> { const value = await createRsiAuthorityFixture(live); fixtures.push(value); return value }
 
 describe('RSI finite authority deployment binding', () => {
   test('accepts four owner-private finite authority files pinned to schema-v4 trust', async () => {
     const value = await fixture()
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
+  })
+
+  test('ignores ambient Host config when trust does not forward it', async () => {
+    const value = await fixture()
+    process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = `${value.root}/unused.json`
     await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
   })
 
@@ -36,6 +49,77 @@ describe('RSI finite authority deployment binding', () => {
   ])('rejects %s drift', async (_label, change, message) => {
     const value = await fixture()
     await change(value)
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).rejects.toThrow(message)
+  })
+
+  test('accepts a pinned schema-4 Host wrapper and matching finite resolver grant', async () => {
+    const value = await fixture(true)
+    const host = await value.standingHost()
+    process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = host.wrapperPath
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
+  })
+
+  test('accepts two Host grant packages in reverse adoption policy order', async () => {
+    const value = await fixture(true)
+    const host = await value.standingHost()
+    for (const name of ['approvals', 'releases', 'adoptions', 'observations', 'qualifications'] as const) {
+      const authority = await value.readAuthority(name)
+      if (name === 'observations' || name === 'qualifications') authority.grant.packages.push('@dsh-enhanced/other-helper')
+      else if (name === 'adoptions') authority.grant.policies.push({ ...authority.grant.policies[0],
+        candidateId: 'other-helper', packageName: '@dsh-enhanced/other-helper' })
+      else {
+        authority.grant.plugins.push('other-helper')
+        if (name === 'releases') authority.grant.policies.push({ ...authority.grant.policies[0],
+          candidateId: 'other-helper', packageName: '@dsh-enhanced/other-helper', packagePath: 'plugins/other-helper' })
+      }
+      await value.writeAuthority(name, authority)
+    }
+    const reviewPlugins = value.manifest.sourceReviews.plugins as string[]
+    reviewPlugins.push('other-helper')
+    const config = await host.readResolver()
+    config.grant.packages = ['@dsh-enhanced/other-helper', '@dsh-enhanced/health-helper']
+    await host.writeResolver(config)
+    const wrapper = await host.readWrapper()
+    wrapper.resolver.configSha256 = createHash('sha256').update(await readFile(host.resolverConfigPath)).digest('hex')
+    await host.writeWrapper(wrapper)
+    process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = host.wrapperPath
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
+  })
+
+  test.each([
+    ['unknown wrapper schema', async (host: Awaited<ReturnType<RsiAuthorityFixture['standingHost']>>) => {
+      const wrapper = await host.readWrapper(); wrapper.schemaVersion = 5; await host.writeWrapper(wrapper)
+    }, 'unknown wrapper schema'],
+    ['wrapper fields', async (host: Awaited<ReturnType<RsiAuthorityFixture['standingHost']>>) => {
+      const wrapper = await host.readWrapper(); wrapper.unexpected = true; await host.writeWrapper(wrapper)
+    }, 'wrapper fields differ from runtime contract'],
+    ['resolver digest', async (host: Awaited<ReturnType<RsiAuthorityFixture['standingHost']>>) => {
+      const config = await host.readResolver(); config.grant.maximumReloads = 3; await host.writeResolver(config)
+    }, 'resolver config pin changed'],
+    ['wrapper executable', async (host: Awaited<ReturnType<RsiAuthorityFixture['standingHost']>>) => {
+      const wrapper = await host.readWrapper(); wrapper.template.executable.sha256 = '0'.repeat(64); await host.writeWrapper(wrapper)
+    }, 'wrapper differs from trusted attestor'],
+    ['resolver executable', async (host: Awaited<ReturnType<RsiAuthorityFixture['standingHost']>>) => {
+      const wrapper = await host.readWrapper(); wrapper.resolver.executable.sha256 = '0'.repeat(64); await host.writeWrapper(wrapper)
+    }, 'trusted executable identity or digest changed'],
+    ['resolver interpreter', async (host: Awaited<ReturnType<RsiAuthorityFixture['standingHost']>>) => {
+      const wrapper = await host.readWrapper(); const path = await realpath('/usr/bin/true')
+      wrapper.resolver.interpreter = { path, sha256: createHash('sha256').update(await readFile(path)).digest('hex') }
+      await host.writeWrapper(wrapper)
+    }, 'pinned interpreter cannot run shipped resolver'],
+    ['owner grant', async (host: Awaited<ReturnType<RsiAuthorityFixture['standingHost']>>) => {
+      const config = await host.readResolver(); config.grant.owner.principalRecordId = 'other-owner'; await host.writeResolver(config)
+      const wrapper = await host.readWrapper(); wrapper.resolver.configSha256 = createHash('sha256').update(await readFile(host.resolverConfigPath)).digest('hex'); await host.writeWrapper(wrapper)
+    }, 'grant deployment terms differ'],
+    ['deployment inputs', async (host: Awaited<ReturnType<RsiAuthorityFixture['standingHost']>>) => {
+      const config = await host.readResolver(); config.grant.hostDeploymentInputs = ['package.json']; await host.writeResolver(config)
+      const wrapper = await host.readWrapper(); wrapper.resolver.configSha256 = createHash('sha256').update(await readFile(host.resolverConfigPath)).digest('hex'); await host.writeWrapper(wrapper)
+    }, 'grant deployment terms differ'],
+  ])('rejects schema-4 %s drift', async (_label, change, message) => {
+    const value = await fixture(true)
+    const host = await value.standingHost()
+    process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG = host.wrapperPath
+    await change(host)
     await expect(validateRsiAuthorities(value.manifest, value.binding as any)).rejects.toThrow(message)
   })
 })

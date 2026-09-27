@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -9,7 +9,7 @@ import { catalogAdmissionId } from '../../src/catalog.ts'
 import * as release from '../../src/release.ts'
 import type { advanceSourceRelease } from '../../src/source-release-runner.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../../src/store.ts'
-import type { PluginControlTrustConfig } from '../../src/trust.ts'
+import { defaultHostAttestationPolicy } from '../../src/trust.ts'
 import type { SourceReleaseAuthorization, SourceReleaseRequest, SourceReleaseReceipt, SourceReleaseSuccessEvidence } from '../../src/types.ts'
 
 // Real SQLite and Ed25519 phase verification; only external adapter execution is scripted.
@@ -24,7 +24,7 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
   const catalog = { schemaVersion: 1 as const, entries: [] }, catalogPath = join(root, 'catalog.json')
   await writeFile(catalogPath, JSON.stringify(catalog), { mode: 0o600 })
   const reviewDecisionRoot = join(root, 'review'); await mkdir(reviewDecisionRoot, { mode: 0o700 })
-  const keys = Object.fromEntries(['owner', ...phases].map(phase => [phase, generateKeyPairSync('ed25519')]))
+  const keys = Object.fromEntries(['owner', 'releaseOwner', 'host', ...phases].map(phase => [phase, generateKeyPairSync('ed25519')]))
   const policy = { targetBranch: 'repairs', candidateId: 'health-helper', packageName: '@dsh-enhanced/health-helper', packageVersion: '0.1.1',
     packagePath: 'plugins/health-helper', dshBaseline: '0.1.5', capabilities: ['health'], authorities: ['filesystem'], requires: [],
     registryId: 'local', registryLocator: pathToFileURL(join(root, 'registry')).href, registryReference: pathToFileURL(join(root, 'registry', 'packages', encodeURIComponent('@dsh-enhanced/health-helper'), '0.1.1', 'package.tgz')).href,
@@ -47,18 +47,34 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
   plan = store.finishSourceChecks({ planId: plan.id, expectedRevision: plan.revision, succeeded: true, checkedTreeDigest: 'c'.repeat(64), checkedPatchDigest: 'd'.repeat(64) })
   }
   const authorizationInput: Omit<SourceReleaseAuthorization, 'signature'> = { schemaVersion: 1, kind: 'dsh-source-release-authorization', authorizationId: 'auth',
-    authority: 'owner', keyId: 'owner', planId: plan.id, planDigest: plan.digest, baseCommit: plan.baseCommit, scope: plan.scope,
+    authority: 'release-owner', keyId: 'release-owner', planId: plan.id, planDigest: plan.digest, baseCommit: plan.baseCommit, scope: plan.scope,
     checkedTreeDigest: plan.sourceCheck!.treeDigest, checkedPatchDigest: plan.sourceCheck!.patchDigest, releasePolicy: policy, authorizedAt: Date.now(), expiresAt: plan.expiresAt }
-  const authorization = { ...authorizationInput, signature: sign(null, Buffer.from(release.sourceReleaseAuthorizationSigningPayload(authorizationInput)), keys.owner!.privateKey).toString('base64') }
+  const authorization = { ...authorizationInput, signature: sign(null, Buffer.from(release.sourceReleaseAuthorizationSigningPayload(authorizationInput)), keys.releaseOwner!.privateKey).toString('base64') }
   plan = (await store.startSourceRelease({ planId: plan.id, expectedRevision: plan.revision, authorization, idempotencyKey: 'start', withSourceFence,
-    resolveAuthority: () => new release.Ed25519SourceReleaseAuthorizationAuthority(keys.owner!.publicKey.export({ format: 'pem', type: 'spki' }), 'owner', 'owner') })).result
-  const trust = { schemaVersion: 4, installationId: '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00',
+    resolveAuthority: () => new release.Ed25519SourceReleaseAuthorizationAuthority(keys.releaseOwner!.publicKey.export({ format: 'pem', type: 'spki' }), 'release-owner', 'release-owner') })).result
+  // Load the same private trust file as the Host; a typed object bypassed the
+  // loader's URL and key-separation contracts and hid a local-registry failure.
+  await mkdir(join(root, 'registry'), { mode: 0o700 })
+  const executable = async (name: string) => {
+    const path = join(root, `adapter-${name}`)
+    await copyFile(await realpath('/usr/bin/true'), path); await chmod(path, 0o700)
+    return { path, sha256: hash(await readFile(path)) }
+  }
+  const trustedKey = (name: string, authority = name) => ({ authority, keyId: authority,
+    publicKeyPem: keys[name]!.publicKey.export({ format: 'pem', type: 'spki' }).toString() })
+  const rawTrust = { schemaVersion: 4, installationId: '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f00', dshHome: root,
+    executor: { id: 'executor', version: '1', ...await executable('executor'), environmentAllowlist: [] },
+    hostPolicy: defaultHostAttestationPolicy, hostAttestor: null, approvalKeys: [trustedKey('owner')], hostAttestationKeys: [trustedKey('host')],
     ledger: { id: '018f4f6e-7b21-7cc8-9235-8b1c4e6d9f01', path: db }, catalog: { id: 'catalog', path: catalogPath },
     releaseRegistry: { id: 'local', locator: policy.registryLocator }, releaseReceiptTtlMs: 60_000,
-    releaseAuthorizationKeys: [{ authority: 'owner', keyId: 'owner', publicKeyPem: keys.owner!.publicKey.export({ format: 'pem', type: 'spki' }) }],
-    releaseKeys: phases.map(phase => ({ authority: phase, keyId: phase, publicKeyPem: keys[phase]!.publicKey.export({ format: 'pem', type: 'spki' }) })),
-    releaseAdapters: Object.fromEntries(phases.map(phase => [phase, { id: phase, version: '1', path: join(root, phase), sha256: 'e'.repeat(64),
-      interpreter: null, authority: phase, keyId: phase, timeoutMs: 1000, environmentAllowlist: [] }])) } as unknown as PluginControlTrustConfig
+    releaseAuthorizationKeys: [trustedKey('releaseOwner', 'release-owner')], releaseKeys: phases.map(phase => trustedKey(phase)),
+    releaseAdapters: Object.fromEntries(await Promise.all(phases.map(async phase => [phase, { id: phase, version: '1', ...await executable(phase),
+      interpreter: null, authority: phase, keyId: phase, timeoutMs: 1000, environmentAllowlist: [] }]))) }
+  const trustPath = join(root, 'trust.json'); await writeFile(trustPath, JSON.stringify(rawTrust), { mode: 0o600 })
+  // Some authority tests mock their own trust boundary; this release fixture must
+  // still prove that its local deployment can pass the actual loader.
+  const { loadTrustConfig } = await vi.importActual<typeof import('../../src/trust.ts')>('../../src/trust.ts')
+  const trust = await loadTrustConfig(trustPath)
   const controller = new AbortController(), assertCurrent = vi.fn(async () => { controller.signal.throwIfAborted(); withSourceFence(() => {}) })
   const options: Parameters<typeof advanceSourceRelease>[0] = { store, planId: plan.id, trust, config: { reviewDecisionRoot, timeoutMs: 30_000 }, signal: controller.signal,
     assertCurrent, withSourceFence: <T>(callback: () => T): T => { controller.signal.throwIfAborted(); return withSourceFence(callback) } }
@@ -171,13 +187,13 @@ export async function fixture(ownerBound = false, input: { repository?: string; 
     const secondPolicy = { ...policy, packageVersion: '0.1.2',
       registryReference: pathToFileURL(join(root, 'registry', 'packages', encodeURIComponent('@dsh-enhanced/health-helper'), '0.1.2', 'package.tgz')).href }
     const secondAuthorization: Omit<SourceReleaseAuthorization, 'signature'> = { schemaVersion: 1, kind: 'dsh-source-release-authorization',
-      authorizationId: `auth-${second.id}`, authority: 'owner', keyId: 'owner', planId: second.id, planDigest: second.digest,
+      authorizationId: `auth-${second.id}`, authority: 'release-owner', keyId: 'release-owner', planId: second.id, planDigest: second.digest,
       baseCommit: second.baseCommit, scope: second.scope, checkedTreeDigest: second.sourceCheck!.treeDigest,
       checkedPatchDigest: second.sourceCheck!.patchDigest, releasePolicy: secondPolicy, authorizedAt: Date.now(), expiresAt: second.expiresAt }
     second = (await store.startSourceRelease({ planId: second.id, expectedRevision: second.revision,
-      authorization: { ...secondAuthorization, signature: sign(null, Buffer.from(release.sourceReleaseAuthorizationSigningPayload(secondAuthorization)), keys.owner!.privateKey).toString('base64') },
+      authorization: { ...secondAuthorization, signature: sign(null, Buffer.from(release.sourceReleaseAuthorizationSigningPayload(secondAuthorization)), keys.releaseOwner!.privateKey).toString('base64') },
       idempotencyKey: `start-second:${second.id}`, withSourceFence: secondFence,
-      resolveAuthority: () => new release.Ed25519SourceReleaseAuthorizationAuthority(keys.owner!.publicKey.export({ format: 'pem', type: 'spki' }), 'owner', 'owner') })).result
+      resolveAuthority: () => new release.Ed25519SourceReleaseAuthorizationAuthority(keys.releaseOwner!.publicKey.export({ format: 'pem', type: 'spki' }), 'release-owner', 'release-owner') })).result
     mergeCommits.set(second.id, nextInput.mergeCommit)
     const secondController = new AbortController()
     const secondOptions: Parameters<typeof advanceSourceRelease>[0] = { store, planId: second.id, trust,
