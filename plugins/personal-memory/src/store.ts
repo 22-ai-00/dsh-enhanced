@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
+  growthObjectDigest, memoryLearningRequestDigest, validateMemoryLearningOwner,
   validatePreferenceMemoryPromotionCancellationRequest,
   withPreferenceMemoryPromotionCancellationReceiptDigest,
   withPreferenceMemoryPromotionResultDigest,
@@ -11,6 +12,14 @@ import { MemoryDatabaseError, openMemoryDatabase } from './sqlite.js'
 import { MemoryEvidenceLedger } from './evidence-ledger.js'
 import { tokenizeMemory } from './tokenize.js'
 import { memoryKnowledgeText, normalizeMemoryKnowledge } from './knowledge.js'
+import {
+  learningGrantDigest, learningRecordDigest, learningResultDigest, validateLearningGrant,
+  validateLearningRequest, validateLearningReviewReceipt,
+  type MemoryLearningAdoptionCommit, type MemoryLearningAdoptionGrant,
+  type MemoryLearningAdoptionResult, type MemoryLearningManagedSource,
+  type MemoryLearningSourceInvalidation, type MemoryLearningTarget,
+  type MemoryLearningTargetInput, type MemoryLearningValidatedRef,
+} from './learning-adoptions.js'
 import type {
   ApprovedMemoryMutation,
   MemoryAgentContext,
@@ -562,6 +571,7 @@ export class MemoryStore {
   readonly #now: () => number
   #closed = false
   #reading = false
+  #learningVisibility: ReadonlySet<string> | undefined
   readonly evidence: MemoryEvidenceLedger
 
   constructor(options: MemoryStoreOptions) {
@@ -587,6 +597,241 @@ export class MemoryStore {
     if (this.#closed) return
     this.#closed = true
     this.#database.close()
+  }
+
+  #learningNamespace(owner: MemoryLearningAdoptionGrant['owner']): MemoryOwnerNamespace {
+    return Object.freeze({ mode: 'delivery', principalDigest: memoryPrincipalDigest(owner.principalId),
+      principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion })
+  }
+
+  #learningIdentity(owner: MemoryLearningAdoptionGrant['owner']): MemoryIdentity {
+    return Object.freeze({ owner: 'agent', scope: 'workspace', workspace: owner.workspace, agentPreset: owner.agentPreset })
+  }
+
+  #learningGrantRow(authorityId: string): { grant_json: string; grant_digest: string; used_mutations: number; used_content_bytes: number } | undefined {
+    return this.#database.prepare(`SELECT grant_json, grant_digest, used_mutations, used_content_bytes
+      FROM memory_learning_adoptions WHERE authority_id = ? AND operation_id = '' AND row_kind = 'grant'`)
+      .get(authorityId) as { grant_json: string; grant_digest: string; used_mutations: number; used_content_bytes: number } | undefined
+  }
+
+  /** Register a frozen Host grant; reusing its id with different authority never resets quota. */
+  registerLearningGrant(input: MemoryLearningAdoptionGrant): Readonly<{ authorityId: string; grantDigest: string }> {
+    const grant = validateLearningGrant(input)
+    const digest = learningGrantDigest(grant)
+    return this.#transaction(() => {
+      const existing = this.#learningGrantRow(grant.authorityId)
+      if (existing === undefined) this.#database.prepare(`INSERT INTO memory_learning_adoptions(
+        authority_id, operation_id, row_kind, grant_json, grant_digest, used_mutations, used_content_bytes)
+        VALUES (?, '', 'grant', ?, ?, 0, 0)`).run(grant.authorityId, JSON.stringify(grant), digest)
+      else if (existing.grant_digest !== digest || growthObjectDigest(JSON.parse(existing.grant_json)) !== digest) {
+        throw new MemoryStoreError('idempotency-conflict', 'learning grant authority changed')
+      }
+      return Object.freeze({ authorityId: grant.authorityId, grantDigest: digest })
+    })
+  }
+
+  lookupLearningAdoption(input: Readonly<{ authorityId: string; operationId: string; requestDigest: string }>): Readonly<MemoryLearningAdoptionResult> | undefined {
+    if (typeof input.authorityId !== 'string' || typeof input.operationId !== 'string'
+      || !SHA_256.test(input.requestDigest)) throw new MemoryStoreError('invalid-entry', 'learning adoption lookup is invalid')
+    const row = this.#database.prepare(`SELECT request_digest, result_json FROM memory_learning_adoptions
+      WHERE authority_id = ? AND operation_id = ? AND row_kind = 'operation'`).get(input.authorityId, input.operationId) as
+      { request_digest: string; result_json: string } | undefined
+    if (row === undefined) return undefined
+    if (row.request_digest !== input.requestDigest) throw new MemoryStoreError('idempotency-conflict', 'learning operation was reused')
+    return Object.freeze(JSON.parse(row.result_json) as MemoryLearningAdoptionResult)
+  }
+
+  applyLearningAdoption(input: MemoryLearningAdoptionCommit): Readonly<MemoryLearningAdoptionResult> {
+    const grant = validateLearningGrant(input.grant)
+    const request = validateLearningRequest(input.request)
+    const requestDigest = memoryLearningRequestDigest(request)
+    const review = validateLearningReviewReceipt(input.reviewReceipt, request, grant)
+    if (growthObjectDigest(request.owner) !== growthObjectDigest(grant.owner)
+      || !grant.operations.includes(request.mutation.op)
+      || (request.mutation.op !== 'remove' && !grant.kinds.includes(request.mutation.entry.kind))
+      || !Number.isSafeInteger(input.sourceObservedAt) || input.sourceObservedAt < 0) {
+      throw new MemoryStoreError('invalid-entry', 'learning operation exceeds grant scope')
+    }
+    const contentBytes = request.mutation.op === 'remove' ? 0
+      : Buffer.byteLength(request.mutation.entry.content, 'utf8')
+        + (request.mutation.entry.knowledge === undefined ? 0 : Buffer.byteLength(JSON.stringify(request.mutation.entry.knowledge), 'utf8'))
+    const namespace = this.#learningNamespace(request.owner)
+    const identity = this.#learningIdentity(request.owner)
+    return this.#transaction(() => {
+      const prior = this.lookupLearningAdoption({ authorityId: grant.authorityId, operationId: request.operationId, requestDigest })
+      if (prior !== undefined) return prior
+      const current = this.#learningGrantRow(grant.authorityId)
+      if (current === undefined || current.grant_digest !== learningGrantDigest(grant)
+        || growthObjectDigest(JSON.parse(current.grant_json)) !== current.grant_digest) {
+        throw new MemoryStoreError('idempotency-conflict', 'learning grant is absent or changed')
+      }
+      const now = this.#now()
+      if (now >= grant.expiresAt) throw new MemoryStoreError('invalid-entry', 'learning grant expired')
+      if (current.used_mutations >= grant.maxMutations || current.used_content_bytes + contentBytes > grant.maxTotalContentBytes) {
+        throw new MemoryStoreError('record-limit', 'learning adoption quota exceeded')
+      }
+      if (request.mutation.op !== 'add') {
+        const target = this.inspectLearningTarget({ owner: request.owner, id: request.mutation.id,
+          expectedVersion: request.mutation.expectedVersion })
+        if (target === undefined) throw new MemoryStoreError('version-conflict', 'learning target is no longer managed')
+      }
+      const operationKey = growthObjectDigest([grant.authorityId, request.operationId])
+      const idempotencyKey = `memory-learning:${operationKey}`
+      const reservedAudit = this.#database.prepare(`SELECT 1 AS used FROM memory_audit
+        WHERE namespace_key = ? AND idempotency_key = ?`).get(memoryOwnerNamespaceKey(namespace), idempotencyKey)
+      if (reservedAudit !== undefined) throw new MemoryStoreError('idempotency-conflict', 'learning audit key was already used')
+      const entry = request.mutation.op === 'remove' ? undefined
+        : { kind: request.mutation.entry.kind, content: request.mutation.entry.content,
+            sensitivity: 'private', trust: 'agent-observed', confidence: 0.5,
+            provenance: { source: 'assistant-memory-learning', observedAt: input.sourceObservedAt,
+              uri: `delivery:foreground:${request.source.inboxId}` },
+            expiresAt: now + grant.maxRecordTtlMs,
+            ...(request.mutation.entry.knowledge === undefined ? {} : { knowledge: request.mutation.entry.knowledge }) } satisfies MemoryEntryInput
+      const mutation: ApprovedMemoryMutation = request.mutation.op === 'remove'
+        ? { op: 'remove', namespace, identity, id: request.mutation.id, expectedVersion: request.mutation.expectedVersion, idempotencyKey }
+        : request.mutation.op === 'replace'
+          ? { op: 'replace', namespace, identity, id: request.mutation.id, expectedVersion: request.mutation.expectedVersion,
+            idempotencyKey, entry: entry! }
+          : { op: 'add', namespace, identity, idempotencyKey, entry: entry! }
+      const record = this.#applyMutationInCurrentTransaction(mutation)
+      const body = { protocol: 'memory-learning-adoption/v1' as const, authorityId: grant.authorityId,
+        operationId: request.operationId, requestDigest, reviewReceiptDigest: review.receiptDigest,
+        record, recordDigest: learningRecordDigest(record), adoptedAt: now }
+      const result = Object.freeze({ ...body, receiptDigest: learningResultDigest(body) })
+      const updated = this.#database.prepare(`UPDATE memory_learning_adoptions
+        SET used_mutations = used_mutations + 1, used_content_bytes = used_content_bytes + ?
+        WHERE authority_id = ? AND operation_id = '' AND row_kind = 'grant'
+          AND grant_digest = ? AND used_mutations = ? AND used_content_bytes = ?`).run(
+        contentBytes, grant.authorityId, current.grant_digest, current.used_mutations, current.used_content_bytes)
+      if (updated.changes !== 1) throw new MemoryStoreError('version-conflict', 'learning quota changed')
+      this.#database.prepare(`INSERT INTO memory_learning_adoptions(
+        authority_id, operation_id, row_kind, request_json, request_digest, review_receipt_json,
+        source_digest, result_json, record_id, record_version, record_digest)
+        VALUES (?, ?, 'operation', ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        grant.authorityId, request.operationId, JSON.stringify(request), requestDigest,
+        JSON.stringify(review), request.source.sourceDigest, JSON.stringify(result), record.id, record.version, body.recordDigest)
+      return result
+    })
+  }
+
+  #learningOperationForRecord(record: MemoryRecord): { authority_id: string; operation_id: string;
+    request_json: string; source_digest: string; record_digest: string; invalidated_at: number | null } | undefined {
+    return this.#database.prepare(`SELECT authority_id, operation_id, request_json, source_digest,
+      record_digest, invalidated_at FROM memory_learning_adoptions
+      WHERE row_kind = 'operation' AND record_id = ? AND record_version = ? LIMIT 1`).get(record.id, record.version) as
+      { authority_id: string; operation_id: string; request_json: string; source_digest: string;
+        record_digest: string; invalidated_at: number | null } | undefined
+  }
+
+  #learningVisible(record: MemoryRecord): boolean {
+    const managed = this.#learningOperationForRecord(record)
+    if (managed === undefined) return true
+    return managed.invalidated_at === null && managed.record_digest === learningRecordDigest(record)
+      && this.#learningVisibility?.has(`${record.id}:${record.version}:${managed.record_digest}`) === true
+  }
+
+  /** This synchronous Host view admits only source-validated exact versions. */
+  withLearningVisibility<T>(validatedExactRefs: readonly MemoryLearningValidatedRef[], callback: () => T): T {
+    if (!Array.isArray(validatedExactRefs) || validatedExactRefs.length > 10_000
+      || typeof callback !== 'function' || this.#learningVisibility !== undefined) {
+      throw new MemoryStoreError('invalid-entry', 'learning visibility requires a bounded synchronous view')
+    }
+    const refs = new Set<string>()
+    for (const ref of validatedExactRefs) {
+      if (!ref || typeof ref.id !== 'string' || !Number.isSafeInteger(ref.version) || ref.version < 1
+        || !SHA_256.test(ref.recordDigest)) throw new MemoryStoreError('invalid-entry', 'learning visibility ref is invalid')
+      const key = `${ref.id}:${ref.version}:${ref.recordDigest}`
+      if (refs.has(key)) throw new MemoryStoreError('invalid-entry', 'duplicate learning visibility ref')
+      refs.add(key)
+    }
+    this.#learningVisibility = refs
+    try {
+      const result = callback()
+      if ((typeof result === 'object' || typeof result === 'function') && result !== null && 'then' in result) {
+        try { Promise.prototype.then.call(result, undefined, () => undefined) } catch { /* Not a native Promise. */ }
+        throw new MemoryStoreError('invalid-entry', 'learning visibility callback must be synchronous')
+      }
+      return result
+    } finally { this.#learningVisibility = undefined }
+  }
+
+  inspectLearningTarget(input: MemoryLearningTargetInput): MemoryLearningTarget | undefined {
+    const owner = validateMemoryLearningOwner(input.owner)
+    if (typeof input.id !== 'string' || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new MemoryStoreError('invalid-entry', 'learning target is invalid')
+    }
+    const record = this.#selectRecord(normalizeIdentity(this.#learningIdentity(owner), this.#learningNamespace(owner)), input.id)
+    if (record === undefined || record.status !== 'active' || this.#expired(record)
+      || record.version !== input.expectedVersion) return undefined
+    const actual = this.#toRecord(record)
+    const managed = this.#learningOperationForRecord(actual)
+    if (managed === undefined || managed.invalidated_at !== null || managed.record_digest !== learningRecordDigest(actual)) return undefined
+    const request = validateLearningRequest(JSON.parse(managed.request_json))
+    if (growthObjectDigest(request.owner) !== growthObjectDigest(owner) || request.mutation.op === 'remove'
+      || (actual.kind !== 'fact' && actual.kind !== 'experience')) return undefined
+    return Object.freeze({ id: actual.id, version: actual.version, managed: true,
+      kind: actual.kind, content: actual.content,
+      ...(actual.knowledge === undefined ? {} : { knowledge: actual.knowledge }) })
+  }
+
+  listManagedLearningSources(contextInput: MemoryAgentContext): readonly Readonly<MemoryLearningManagedSource>[] {
+    const context = normalizeAgentContext(contextInput)
+    if (context.namespace.mode !== 'delivery') return Object.freeze([])
+    const identity = normalizeIdentity({ owner: 'agent', scope: 'workspace', workspace: context.workspace,
+      agentPreset: context.agentPreset }, context.namespace)
+    const rows = this.#database.prepare(`SELECT adoption.authority_id, adoption.request_json,
+      adoption.record_id, adoption.record_version, adoption.record_digest, adoption.source_digest
+      FROM memory_learning_adoptions adoption JOIN memory_records record ON record.id = adoption.record_id
+      WHERE adoption.row_kind = 'operation' AND adoption.invalidated_at IS NULL
+        AND record.version = adoption.record_version AND record.status = 'active'
+        AND record.namespace_key = ? AND record.owner = 'agent' AND record.scope = 'workspace'
+        AND record.workspace = ? AND record.agent_preset = ?
+        AND (record.expires_at IS NULL OR record.expires_at > ?)
+      ORDER BY adoption.authority_id, adoption.operation_id`).all(
+      identity.namespaceKey, identity.workspace, identity.agentPreset, this.#now()) as Array<{
+      authority_id: string; request_json: string; record_id: string; record_version: number;
+      record_digest: string; source_digest: string }>
+    return Object.freeze(rows.flatMap(row => {
+      const record = this.#selectRecord(identity, row.record_id)
+      if (record === undefined || row.record_digest !== learningRecordDigest(this.#toRecord(record))) return []
+      const request = validateLearningRequest(JSON.parse(row.request_json))
+      return [Object.freeze({ authorityId: row.authority_id, request, id: row.record_id,
+        version: row.record_version, recordDigest: row.record_digest, sourceDigest: row.source_digest })]
+    }))
+  }
+
+  invalidateManagedLearningSource(input: MemoryLearningSourceInvalidation): Readonly<{ invalidated: boolean }> {
+    const owner = validateMemoryLearningOwner(input.owner)
+    if (input.reason !== 'withdrawn' && input.reason !== 'source-changed') throw new MemoryStoreError('invalid-entry', 'invalid source invalidation reason')
+    if (typeof input.id !== 'string' || !Number.isSafeInteger(input.version) || input.version < 1
+      || !SHA_256.test(input.recordDigest) || !SHA_256.test(input.sourceDigest)) {
+      throw new MemoryStoreError('invalid-entry', 'invalid source invalidation ref')
+    }
+    const namespace = this.#learningNamespace(owner)
+    const identity = this.#learningIdentity(owner)
+    return this.#transaction(() => {
+      const row = this.#selectRecord(normalizeIdentity(identity, namespace), input.id)
+      if (row === undefined || row.status !== 'active' || row.version !== input.version) return Object.freeze({ invalidated: false })
+      const actual = this.#toRecord(row)
+      const managed = this.#learningOperationForRecord(actual)
+      if (!managed || managed.invalidated_at !== null || managed.record_digest !== input.recordDigest
+        || managed.source_digest !== input.sourceDigest || learningRecordDigest(actual) !== input.recordDigest) {
+        return Object.freeze({ invalidated: false })
+      }
+      const request = validateLearningRequest(JSON.parse(managed.request_json))
+      if (growthObjectDigest(request.owner) !== growthObjectDigest(owner)) return Object.freeze({ invalidated: false })
+      const invalidationKey = `memory-learning-invalidated:${growthObjectDigest([managed.authority_id, managed.operation_id])}`
+      const reservedAudit = this.#database.prepare(`SELECT 1 AS used FROM memory_audit
+        WHERE namespace_key = ? AND idempotency_key = ?`).get(memoryOwnerNamespaceKey(namespace), invalidationKey)
+      if (reservedAudit !== undefined) throw new MemoryStoreError('idempotency-conflict', 'learning invalidation audit key was already used')
+      this.#applyMutationInCurrentTransaction({ op: 'remove', namespace, identity, id: input.id,
+        expectedVersion: input.version, idempotencyKey: invalidationKey })
+      const changed = this.#database.prepare(`UPDATE memory_learning_adoptions SET invalidated_at = ?, invalidation_reason = ?
+        WHERE authority_id = ? AND operation_id = ? AND invalidated_at IS NULL`).run(
+        this.#now(), input.reason, managed.authority_id, managed.operation_id)
+      if (changed.changes !== 1) throw new MemoryStoreError('version-conflict', 'learning invalidation changed')
+      return Object.freeze({ invalidated: true })
+    })
   }
 
   resolveProposalNotAfter(
@@ -624,7 +869,8 @@ export class MemoryStore {
     const columns = normalizeIdentity(identity, namespace)
     const row = this.#selectRecord(columns, id)
     if (row === undefined || row.status !== 'active' || this.#expired(row)) return undefined
-    return this.#toRecord(row)
+    const record = this.#toRecord(row)
+    return this.#learningVisible(record) ? record : undefined
   }
 
   list(
@@ -643,6 +889,7 @@ export class MemoryStore {
     return rows
       .filter(row => row.status === 'removed' ? options.includeRemoved === true : !this.#expired(row))
       .map(row => this.#toRecord(row))
+      .filter(record => this.#learningVisible(record))
   }
 
   read(context: MemoryAgentContext, ids: readonly string[]): MemoryRecord[] {

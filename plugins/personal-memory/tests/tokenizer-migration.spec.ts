@@ -97,7 +97,7 @@ describe('mixed-script memory tokenizer', () => {
     migrated.close()
 
     const indexed = new DatabaseSync(path)
-    expect(indexed.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 6 })
+    expect(indexed.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 7 })
     expect(indexed.prepare("SELECT value FROM schema_meta WHERE key = 'tokenizer-index-version'").get())
       .toMatchObject({ value: '1' })
     // A second rebuild would delete this distinguishable token. It must not run

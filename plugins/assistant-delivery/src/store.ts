@@ -96,6 +96,7 @@ import type {
   OwnerForegroundTaskSourceCursor,
   OwnerForegroundTaskSourcePage,
   OwnerForegroundTaskSourceContent,
+  OwnerForegroundTaskSourceRef,
   OwnerForegroundTaskSourceText,
   OutboxRecord,
   PairingChallenge,
@@ -4432,12 +4433,48 @@ export class DeliveryStore {
     return this.withForegroundSourceRead(input, authority, source => {
       if (source === undefined) throw new DeliveryStoreError('conflict', 'foreground source is unavailable or changed')
       const result = callback(source)
-      if (result !== null && (typeof result === 'object' || typeof result === 'function') && 'then' in result) {
-        if (result instanceof Promise) void result.catch(() => {})
-        throw new DeliveryStoreError('invalid-binding', 'foreground source callback must be synchronous')
-      }
+      this.assertForegroundSourceSyncResult(result)
       return result
     })
+  }
+
+  /** One owner check and one Delivery writer transaction for an ordered set of exact sources. */
+  withOwnerForegroundTaskSourcesFence<T>(input: OwnerForegroundTaskSourceScope & {
+    sources: readonly Readonly<OwnerForegroundTaskSourceRef>[]
+  }, authority: OwnerRouteAuthority,
+  callback: (sources: readonly (Readonly<OwnerForegroundTaskSourceContent> | undefined)[]) => T): T {
+    this.assertOpen()
+    if (typeof callback !== 'function') throw new DeliveryStoreError('invalid-binding', 'foreground source callback is invalid')
+    if (!Array.isArray(input.sources) || input.sources.length > 1_000) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground source batch must contain at most 1000 sources')
+    }
+    const inboxIds = new Set<string>()
+    for (const source of input.sources) {
+      if (source === null || typeof source !== 'object' || typeof source.inboxId !== 'string'
+        || source.inboxId === '' || typeof source.expectedSourceDigest !== 'string'
+        || inboxIds.has(source.inboxId)) {
+        throw new DeliveryStoreError('invalid-binding', 'foreground source batch requires unique inbox IDs and digests')
+      }
+      inboxIds.add(source.inboxId)
+    }
+    return this.transaction(() => {
+      const fence = this.foregroundSourceFence(input, authority)
+      const sources = Object.freeze(input.sources.map(source => this.foregroundSourceContent(
+        { ...input, inboxId: source.inboxId, expectedSourceDigest: source.expectedSourceDigest }, fence, 16_384, 16_384,
+      )))
+      const result = callback(sources)
+      this.assertForegroundSourceSyncResult(result)
+      return result
+    })
+  }
+
+  private assertForegroundSourceSyncResult<T>(result: T): void {
+    if (result !== null && (typeof result === 'object' || typeof result === 'function') && 'then' in result) {
+      // The native method consumes a real rejected Promise without invoking an
+      // arbitrary thenable's getter or callback. The transaction then rolls back.
+      try { Promise.prototype.then.call(result, undefined, () => undefined) } catch { /* Not a native Promise. */ }
+      throw new DeliveryStoreError('invalid-binding', 'foreground source callback must be synchronous')
+    }
   }
 
   private withForegroundSourceRead<T>(input: OwnerForegroundTaskSourceScope & {
@@ -4448,31 +4485,38 @@ export class DeliveryStore {
     const replyLimit = foregroundSourceByteLimit(input.maxReplyBytes)
     return this.transaction(() => {
       const fence = this.foregroundSourceFence(input, authority)
-      const row = this.database.prepare(`SELECT * FROM delivery_foreground_executions
-        WHERE inbox_id = ? AND status != 'pending'`).get(input.inboxId) as unknown as ForegroundSourceRow | undefined
-      const source = row === undefined ? undefined : this.foregroundSource(row, input, fence)
-      if (!source || source.sourceDigest !== input.expectedSourceDigest || source.execution.status !== 'succeeded'
-        || !source.execution.quiescent || source.execution.modelSelectionState !== 'frozen'
-        || source.execution.modelSelection === undefined) return callback(undefined)
-      const inbox = this.getInbox(source.inboxId)!
-      const binding = this.getBinding(source.binding.id)!
-      const outbox = this.getOutboxByIdempotencyKey(`inbound:${inbox.id}:reply`)
-      if (!outbox || outbox.intentHash !== digest(JSON.stringify(outbox.intent))) return callback(undefined)
-      const intent = outbox.intent
-      if (intent.bindingId !== binding.id || intent.replyToEventId !== inbox.envelope.eventId
-        || intent.idempotencyKey !== `inbound:${inbox.id}:reply`
-        || JSON.stringify(intent.target.principal) !== JSON.stringify(binding.principal)
-        || JSON.stringify(intent.target.conversation) !== JSON.stringify(binding.conversation)
-        || ![undefined, 'plain', 'markdown'].includes(intent.format)
-        || intent.approval !== undefined || intent.modelPicker !== undefined || intent.permissionPicker !== undefined
-        || Object.keys(intent.metadata ?? {}).length !== 0) return callback(undefined)
-      const inputText = foregroundSourceText(inbox.envelope.text, inputLimit)
-      const reply = Object.freeze({ ...foregroundSourceText(intent.text, replyLimit), outboxId: outbox.id, intentDigest: outbox.intentHash })
-      const contentDigest = digest(acceptanceCanonicalJson({ protocol: 'assistant-delivery/owner-foreground-source-content/v1',
-        sourceDigest: source.sourceDigest, inputDigest: inputText.fullTextDigest,
-        replyDigest: reply.fullTextDigest, outboxId: reply.outboxId, intentDigest: reply.intentDigest }))
-      return callback(Object.freeze({ source, sourceDigest: source.sourceDigest, contentDigest, input: inputText, reply }))
+      return callback(this.foregroundSourceContent(input, fence, inputLimit, replyLimit))
     })
+  }
+
+  private foregroundSourceContent(input: OwnerForegroundTaskSourceScope & {
+    inboxId: string; expectedSourceDigest: string
+  }, fence: ReturnType<DeliveryStore['foregroundSourceFence']>, inputLimit: number,
+  replyLimit: number): Readonly<OwnerForegroundTaskSourceContent> | undefined {
+    const row = this.database.prepare(`SELECT * FROM delivery_foreground_executions
+      WHERE inbox_id = ? AND status != 'pending'`).get(input.inboxId) as unknown as ForegroundSourceRow | undefined
+    const source = row === undefined ? undefined : this.foregroundSource(row, input, fence)
+    if (!source || source.sourceDigest !== input.expectedSourceDigest || source.execution.status !== 'succeeded'
+      || !source.execution.quiescent || source.execution.modelSelectionState !== 'frozen'
+      || source.execution.modelSelection === undefined) return undefined
+    const inbox = this.getInbox(source.inboxId)!
+    const binding = this.getBinding(source.binding.id)!
+    const outbox = this.getOutboxByIdempotencyKey(`inbound:${inbox.id}:reply`)
+    if (!outbox || outbox.intentHash !== digest(JSON.stringify(outbox.intent))) return undefined
+    const intent = outbox.intent
+    if (intent.bindingId !== binding.id || intent.replyToEventId !== inbox.envelope.eventId
+      || intent.idempotencyKey !== `inbound:${inbox.id}:reply`
+      || JSON.stringify(intent.target.principal) !== JSON.stringify(binding.principal)
+      || JSON.stringify(intent.target.conversation) !== JSON.stringify(binding.conversation)
+      || ![undefined, 'plain', 'markdown'].includes(intent.format)
+      || intent.approval !== undefined || intent.modelPicker !== undefined || intent.permissionPicker !== undefined
+      || Object.keys(intent.metadata ?? {}).length !== 0) return undefined
+    const inputText = foregroundSourceText(inbox.envelope.text, inputLimit)
+    const reply = Object.freeze({ ...foregroundSourceText(intent.text, replyLimit), outboxId: outbox.id, intentDigest: outbox.intentHash })
+    const contentDigest = digest(acceptanceCanonicalJson({ protocol: 'assistant-delivery/owner-foreground-source-content/v1',
+      sourceDigest: source.sourceDigest, inputDigest: inputText.fullTextDigest,
+      replyDigest: reply.fullTextDigest, outboxId: reply.outboxId, intentDigest: reply.intentDigest }))
+    return Object.freeze({ source, sourceDigest: source.sourceDigest, contentDigest, input: inputText, reply })
   }
 
   inspectForegroundExecutionForOwner(input: {

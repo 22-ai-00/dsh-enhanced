@@ -1,6 +1,6 @@
 # @dsh-enhanced/personal-memory
 
-面向个人助理的短期上下文之外长期记忆：保存简短且稳定的事实、偏好、约定和经验，按 user/agent 与 user-global/workspace 双维隔离，通过 `assistant-policy` 的持久审批提案写入。研究资料、文档和项目知识不属于这里，应交给 `personal-wiki`。
+面向个人助理的短期上下文之外长期记忆：保存简短且稳定的事实、偏好、约定和经验，按 user/agent 与 user-global/workspace 双维隔离。手动写入走 `assistant-policy` 的持久审批提案；可选有限授权支持独立审查后的事实/经验采用。研究资料、文档和项目知识不属于这里，应交给 `personal-wiki`。
 
 ## 安装
 
@@ -60,6 +60,22 @@ dsh --profile web --dump-config
 
 内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”；XML 元字符和模板花括号在预算计算前转义。原生 Host 持久保存发生变化的新快照，用它取代先前快照的有效语义；撤回、过期或权限撤销会影响下一步的当前快照，**不会删除 Session 中已经提供过的历史快照、工具结果或模型输出**。因此不能把本功能当作会话历史的数据擦除或跨 owner 会话迁移保护。没有 `systemPrompt` 的程序化集成保留旧的 `agent/session-start` 一次性冻结快照，不能承诺逐步更新。`memory_search`、`memory_search_confirmed` 与 `memory_manage` 的模型可见结果也使用有界、转义的独立 framing。缺少绝对 cwd、agent preset 或已验证 owner 时不搜索、不提案、不贡献新快照，也不会退化到共享域。
 
+## 有限授权的事实与经验采用
+
+可选 `automaticLearning` 为 Host 提供 `adoptReviewedLearning({request})`、`lookupLearningAdoption({request})` 和记忆审查所需的 `inspectLearningTarget(...)`。这些接口不注册为模型工具；`memory_manage` 仍只创建手动审批提案。此组件负责采用与召回，尚不自行提取候选、调度学习或部署新的插件；完整自动学习还需连接普通任务来源与学习生产者。
+
+授权包含独立的 `authorityId`、精确 `owner`、固定 `reviewAuthorityId` / `reviewAuthorityDigest`、`expiresAt`、`maxMutations`（1–1000）、`maxTotalContentBytes`、`maxRecordTtlMs`、允许的 `kinds`（fact/experience）和 `operations`（add/replace/remove）。owner 包含 Delivery route id/hash、principal id/record/version、绝对 workspace 与 preset。采用授权、Delivery 路由和审查授权的 ID 分别管理；同一采用授权 ID 的内容不可更改，重启、撤回或失败不能重置已用额度。授权到期停止新写入，记录仍按独立 TTL 和当前来源有效性参与读取。
+
+采用要求同批 Delivery、Evaluation 和 Verifier 服务，以及 Policy 对背景主体 `assistant-memory-learning`、精确 workspace/principal、动作 `adopt`、资源 `memory:learning:<采用授权ID>` 的 allow 规则。审查另按 Verifier 的 `review` 规则和独立预算授权。可选 peers 不会自动挂载这些服务；服务缺失或卸载时新采用拒绝，人工记忆照常按原 Policy 工作。调用方只提供共享合同中的 request，不能提交批准布尔值、替代回执、namespace、trust、provenance 或额度。
+
+Host 先向真实 Verifier 查询已持久化的独立批准，再在 Delivery → Evaluation → Memory 的锁序下重新核对来源原文摘要、owner 和 canonical 结果。事实可以来自明确的 owner 原话，无需任务成功标签；经验必须绑定已判断的原任务结果，不能以正常回复代替结果。记忆固定为当前 agent/workspace 下的 `agent-observed`、`private`，不升级为 `user-confirmed`；TTL、来源时间和原 inbox 引用由 Host 写入。记录、检索索引、审计、累计额度及完整采用回执在同一 Memory 事务中提交。
+
+重复 operation 只返回原始持久回执，不返回之后手动编辑的内容，也不再次消费额度；同 operation 的不同 request 拒绝。历史回执只证明过去提交，不证明记录仍可见。回执查询仍要求当前 owner 和 Policy；临时失去访问资格时不会重新执行该操作，恢复后可继续对账。replace/remove 只允许 ID、版本、完整记录摘要均匹配的自动版本；手动修改后的版本永久退出原自动管理链，即使恢复相同正文也不能被旧候选接管。
+
+搜索、显式 read、导出和每步动态快照在排名及 claim 分歧计算前重验自动记录，来源锁保持到读取完成。一次最多核对 1000 条受管记录，超限时隐藏自动记录。来源/结果改变或暂时读不到时只隐藏；明确的当前 owner 撤回才对仍然匹配的自动版本做 CAS 删除并清理索引。服务恢复后重新检查，不把服务故障写成永久撤回。已有经验的结果被纠正后不再召回，新的独立候选可以替换它；删除不返还历史额度。没有当前任务 query 的动态快照、以及缺少 `systemPrompt` 时的一次性永久快照，都不自动注入这些记录。
+
+这不会擦除已在 Session 历史中出现的正文，也不能证明模型已实际使用某条记忆或测得收益。真实后续任务的质量、成本、延迟与回归仍需独立观察。
+
 ## 压缩后的原始文件证据
 
 默认启用 `toolEvidence` 时，插件只索引当前可信 owner 由模型直接调用的原生成功 `read` 结果；`run_code`/PTC 子调度及其他嵌套调用暂不索引。记录绑定 owner namespace/version、workspace、preset、Session、原始事件序号、call id、原始 FS 观测的规范路径/目标身份摘要和内容摘要；摘要同时覆盖原始参数与模型可见结果。复制的 result、压缩 replacement、Memory 工具、其他自定义工具、shell 和图片均不成为新原始证据。原文只存在于原生 Session，不另存入 Memory，也不自动获得长期记忆审批。
@@ -88,13 +104,13 @@ JSONL 冷恢复只使用先前 owner 绑定的索引，不按新 owner 回填旧
 
 每次检索与快照的排名、状态和冲突伙伴使用同一 SQLite 读视图，不阻塞其他 WAL writer；并发修改会在下一次读取体现。同一可见 claim key 有不同记录值时，快照会共同呈现来源和条件；预算无法容纳所有相关记录时，只给出分歧提示与有界记录引用，不留下看似无争议的单一正文。显式搜索的 `disagreement` 包含 key、记录数及最多 4 个记录 ID，在 query/top-K 截断前计算。自动补充的分歧信息仅来自当前 owner/scope 内有效、非敏感的记录；撤回、到期和身份变更会在下次读取生效。相同 key 的不同值可能源于不同适用条件，应核对当前系统和原始证据；本功能不解析任意自然语言矛盾，也不自行决定哪个值正确。
 
-带 knowledge 的导出文档使用版本 2，导入仍须逐条批准；没有 knowledge 的导出继续使用版本 1，当前版本同时接受两种格式。旧 reader 会拒绝版本 2，避免悄悄丢掉条件后复用经验。升级到数据库 schema 6 前应停止旧 Host writer；v4→v5 新增 nullable knowledge 列，v5→v6 新增独立工具证据索引表，保留旧记录、pending 提案和既有回执指纹，不能让旧版本继续写入新库。
+带 knowledge 的导出文档使用版本 2，导入仍须逐条批准；没有 knowledge 的导出继续使用版本 1，当前版本同时接受两种格式。旧 reader 会拒绝版本 2，避免悄悄丢掉条件后复用经验。升级到数据库 schema 7 前应停止旧 Host writer；v4→v5 新增 nullable knowledge 列，v5→v6 新增工具证据索引，v6→v7 新增有限采用授权与回执表。迁移保留旧记录、pending 提案和既有回执指纹，不把人工记录改为自动管理；不能让旧版本继续写入新库。
 
 ## 数据与一致性
 
 SQLite 使用 WAL、`busy_timeout`、外键、FULL synchronous 和前向 schema 版本；目录为 `0700`，数据库为 `0600`。记录包含 stable id、内容哈希、provenance、trust、confidence、sensitivity、TTL、supersedes、可选 knowledge 和 version。replace/remove 在批准后重新读取 target version 并以 CAS 提交；审批与内存位于两个数据库，若进程恰好在 policy 批准后退出，可用原决定安全重放。并发变化会把提案标为 `conflicted`，不会覆盖新值。
 
-Schema 版本仍为 6；词法索引版本独立记录在 `schema_meta` 的 `tokenizer-index-version`。重新打开旧库时会在启动迁移事务内按当前 tokenizer 仅重建 active 记录的 `memory_tokens`（内容加 knowledge 文本），不复活 removed 记录，也不改变 identity、schema 版本或审计数据；每个索引版本只重建一次。
+Schema 版本为 7；词法索引版本独立记录在 `schema_meta` 的 `tokenizer-index-version`。重新打开旧库时会在启动迁移事务内按当前 tokenizer 仅重建 active 记录的 `memory_tokens`（内容加 knowledge 文本），不复活 removed 记录，也不改变 identity、schema 版本或审计数据；每个索引版本只重建一次。
 
 升级前必须停止所有仍会写入同一数据库的旧 Host；受管部署使用安装器已有的 stop/quiescence 屏障，手动部署须确认全部旧 writer 已退出。迁移后不得让旧 tokenizer 再写入此库；回退旧版本须按数据恢复流程使用匹配版本的数据库备份。
 
@@ -115,6 +131,7 @@ JSON 导入是一组独立、可重放的提案，不承诺跨所有记录的一
 
 | 字段 | 默认值 | 作用 |
 |---|---:|---|
+| `automaticLearning` | 未配置 | 可选有限采用授权；字段与当前来源检查见上节 |
 | `approvalMode` | `delivery-required` | 生产默认要求 authenticated Delivery route；仅可信本地/headless 集成可显式设为 `delivery-or-headless` 并传 principal |
 | `maxContentBytes` | 4096 | 单条内容最大 UTF-8 字节数 |
 | `maxRecordsPerIdentity` | 1000 | 每个完整身份域的活动记录上限 |
@@ -153,7 +170,7 @@ JSON 导入是一组独立、可重放的提案，不承诺跨所有记录的一
 - 网络：本插件不直接发网络请求；工具证据重读可调用 Host 配置的远端 FS provider。组合 Delivery 时只写 durable dispatch，由 channel 插件负责发送审批卡片。
 - 子进程、凭据、浏览器、安装脚本：无。
 - 数据敏感性：`sensitive` 只表示禁止环境快照；显式、已授权的搜索仍可能把内容发送给当前模型。真正的密码/API key 应放在后续 `credentials-keychain`，不要写入 memory。
-- 非目标：向量数据库、自动无审批写入、自动遗忘/dreaming、知识图谱、Wiki 长文、跨设备同步和多用户 ACL。
+- 非目标：向量数据库、无授权写入、自动遗忘/dreaming、知识图谱、Wiki 长文、跨设备同步和多用户 ACL。
 
 ## 兼容性
 

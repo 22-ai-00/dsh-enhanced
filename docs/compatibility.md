@@ -1,5 +1,9 @@
 # 兼容性基线
 
+## 有限事实与经验采用（Memory schema 7）
+
+Personal Memory v7 增加有限采用授权、累计额度与不可变结果回执，迁移保留人工记录、审批和工具证据。升级前停止旧 writer；旧版本不得写入新库。可选自动采用依赖同批 Delivery 批量来源 fence、Evaluation canonical scope fence 与 Verifier 记忆审查接口；未配置时仍使用原审批流程。来源 peer 不可用时隐藏自动记录，不扩大到人工记录或伪造撤回。DSH/Cordis 基线不变，自动候选生产和插件动态采用仍按当前状态中的完整闭环验收。
+
 ## 普通任务完成来源（Delivery schema 25）
 
 v25 增加完成顺序与终态保护，原 owner 身份和只读 owner snapshot 协议不变。Web Owner 诊断显式兼容 v24/v25，安装生命周期接受 v23/v24/v25 的既有 snapshot 协议；未知 schema 继续拒绝。新来源读取与记忆审查须使用同批 Delivery、Evaluation、Verifier 和共享合同，旧读取器不能自动推断兼容。迁移保留历史任务，但历史完成顺序仅为确定性补序，不代表原始提交顺序。

@@ -136,6 +136,7 @@ import type {
   OwnerForegroundTaskSourceCursor,
   OwnerForegroundTaskSourcePage,
   OwnerForegroundTaskSourceContent,
+  OwnerForegroundTaskSourceRef,
   OwnerApprovalForPreferenceInput,
   OwnerApprovalForPreferenceResult,
   OwnerRouteValidationReceipt,
@@ -4674,6 +4675,15 @@ export class AssistantDeliveryService extends Service {
     this.assertActive()
     this.validateOwnerRoute(input)
     return this.deliveryStore.withOwnerForegroundTaskSourceFence(input, this.ownerRoutes.get(input.authorityId)!, callback)
+  }
+
+  /** Hold one owner/source writer fence for a bounded, ordered batch of sources. */
+  withOwnerForegroundTaskSourcesFence<T>(input: OwnerForegroundTaskSourceScope & {
+    sources: readonly Readonly<OwnerForegroundTaskSourceRef>[]
+  }, callback: (sources: readonly (Readonly<OwnerForegroundTaskSourceContent> | undefined)[]) => T): T {
+    this.assertActive()
+    this.validateOwnerRoute(input)
+    return this.deliveryStore.withOwnerForegroundTaskSourcesFence(input, this.ownerRoutes.get(input.authorityId)!, callback)
   }
 
   /** Host-only snapshot of the model selected for this owner's external conversation. */

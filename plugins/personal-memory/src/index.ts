@@ -7,6 +7,7 @@ export const name = 'dsh-enhanced-personal-memory'
 export { PersonalMemoryService, version }
 export type { Config }
 export * from './types.js'
+export { validateMemoryLearningAdoptionGrant } from './learning-adoptions.js'
 
 export function apply(ctx: Context, config: import('./service.js').Config): void {
   new PersonalMemoryService(ctx, config)

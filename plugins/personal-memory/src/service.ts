@@ -16,6 +16,8 @@ import type {
   PolicyDecision,
 } from '@dsh-enhanced/assistant-policy'
 import { MemoryPromotionCancelledError, MemoryProposalManager } from './proposals.js'
+import { MemoryLearningService } from './learning-service.js'
+import { validateMemoryLearningAdoptionGrant } from './learning-adoptions.js'
 import {
   memoryPrincipalDigest,
   MemoryStore,
@@ -42,6 +44,7 @@ import type {
   MemorySnapshot,
   MemorySnapshotRequest,
   StoredMemoryProposal,
+  MemoryLearningAdoptionGrant,
 } from './types.js'
 import {
   withPreferenceMemoryPromotionSubmissionDigest,
@@ -51,10 +54,14 @@ import {
   type PreferenceMemoryPromotionResult,
   type PreferenceMemoryPromotionResultAck,
   type PreferenceMemoryPromotionSubmissionReceipt,
+  type MemoryLearningOwner,
+  type MemoryLearningReviewRequest,
 } from '@dsh-enhanced/assistant-growth-contract'
 
 export interface Config {
   databasePath: string
+  /** Optional immutable finite Host grant; never accepted from a model tool. */
+  automaticLearning?: MemoryLearningAdoptionGrant
   approvalMode?: 'delivery-or-headless' | 'delivery-required'
   maxContentBytes?: number
   maxRecordsPerIdentity?: number
@@ -120,6 +127,11 @@ export class PersonalMemoryError extends Error {
 
 const configSchema = Schema.object({
   databasePath: Schema.string().required(),
+  automaticLearning: Schema.transform(Schema.any(), (value, options) => {
+    if (value === undefined) return undefined
+    try { return validateMemoryLearningAdoptionGrant(value) }
+    catch (error) { throw new Schema.ValidationError(String(error), options ?? { path: ['automaticLearning'] }) }
+  }),
   approvalMode: Schema.union(['delivery-or-headless', 'delivery-required'] as const)
     .default('delivery-required'),
   maxContentBytes: Schema.number().step(1).min(1).default(4_096),
@@ -156,6 +168,7 @@ const APPROVAL_SOURCE_ID = 'dsh-enhanced-personal-memory'
 
 export class PersonalMemoryService extends Service {
   static Config = configSchema
+  static inject = ['assistantPolicy']
 
   private readonly memoryStore: MemoryStore
   private readonly evidenceBridge: SessionEvidenceBridge | undefined
@@ -164,16 +177,17 @@ export class PersonalMemoryService extends Service {
   private delivery: Pick<AssistantDeliveryService,
     'prepareAgentApproval' | 'preferencePrincipalForAgent' | 'prepareOwnerApprovalForPreference'> | undefined
   private readonly promotionBridge: PreferenceMemoryPromotionBridge
+  private readonly learning: MemoryLearningService | undefined
   private readonly headlessNamespaces = new WeakMap<Agent, MemoryOwnerNamespace>()
-  private readonly config: Required<Config>
+  private readonly config: Required<Omit<Config, 'automaticLearning'>> & Pick<Config, 'automaticLearning'>
   private readonly sessionSnapshots = new WeakMap<Agent, MemorySnapshot>()
   private active = true
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'personalMemory')
-    let config: Required<Config>
+    let config: Required<Omit<Config, 'automaticLearning'>> & Pick<Config, 'automaticLearning'>
     try {
-      config = PersonalMemoryService.Config(input) as Required<Config>
+      config = PersonalMemoryService.Config(input) as typeof config
     } catch (error) {
       throw new Error(`personal-memory: invalid configuration: ${String(error)}`, { cause: error })
     }
@@ -187,6 +201,13 @@ export class PersonalMemoryService extends Service {
       maxContentBytes: config.maxContentBytes,
       maxRecordsPerIdentity: config.maxRecordsPerIdentity,
     })
+    try {
+      this.learning = config.automaticLearning === undefined ? undefined
+        : new MemoryLearningService(ctx, this.memoryStore, config.automaticLearning)
+    } catch (error) {
+      this.memoryStore.close()
+      throw error
+    }
     this.evidenceBridge = config.toolEvidence ? new SessionEvidenceBridge(ctx, this.memoryStore.evidence, {
       maxSourceBytes: config.evidenceMaxSourceBytes,
       manifestMaxBytes: config.evidenceManifestMaxBytes,
@@ -274,11 +295,33 @@ export class PersonalMemoryService extends Service {
     )
     if (decision.effect !== 'allow') throw decisionError(decision)
     const context = this.agentContext(agent)
-    return this.memoryStore.search({
+    return this.withLearningVisibility(context, () => this.memoryStore.search({
       context,
       query: request.query,
       limit: request.limit ?? this.config.searchLimit,
-    })
+    }))
+  }
+
+  /** Host-only: candidates never provide approval flags, namespace, trust or a grant. */
+  adoptReviewedLearning(input: { request: MemoryLearningReviewRequest }) {
+    this.assertActive()
+    if (!this.learning) throw new Error('personal-memory: automatic learning is not configured')
+    return this.learning.adopt(input.request)
+  }
+
+  lookupLearningAdoption(input: { request: MemoryLearningReviewRequest }) {
+    this.assertActive()
+    if (!this.learning) throw new Error('personal-memory: automatic learning is not configured')
+    return this.learning.lookup(input.request)
+  }
+
+  inspectLearningTarget(input: { owner: MemoryLearningOwner; id: string; expectedVersion: number }) {
+    this.assertActive()
+    return this.learning?.inspectTarget(input)
+  }
+
+  private withLearningVisibility<T>(context: MemoryAgentContext, callback: () => T): T {
+    return this.learning ? this.learning.withVisible(context, callback) : callback()
   }
 
   readEvidence(exec: ToolExecution, request: EvidenceReadRequest): Promise<EvidenceReadResult> {
@@ -315,14 +358,14 @@ export class PersonalMemoryService extends Service {
       authorizationOptions,
     )
     if (decision.effect !== 'allow') throw decisionError(decision)
-    return this.memoryStore.search({
+    return this.withLearningVisibility(context, () => this.memoryStore.search({
       context,
       query: request.query,
       limit: request.limit ?? this.config.searchLimit,
       kinds: ['instruction', 'preference'],
       trusts: ['user-confirmed'],
       sensitivities: ['private'],
-    })
+    }))
   }
 
   read(agent: Agent | undefined, request: { ids: readonly string[] }): MemoryRecord[] {
@@ -333,7 +376,7 @@ export class PersonalMemoryService extends Service {
     })
     if (decision.effect !== 'allow') throw decisionError(decision)
     try {
-      return this.memoryStore.read(context, request.ids)
+      return this.withLearningVisibility(context, () => this.memoryStore.read(context, request.ids))
     } catch (error) {
       if (error instanceof Error && 'code' in error && error.code === 'not-found') {
         throw new PersonalMemoryError('not-found', error.message)
@@ -386,7 +429,7 @@ export class PersonalMemoryService extends Service {
       idempotencyKey: `memory-export:${String(agent?.id)}`,
     })
     if (decision.effect !== 'allow') throw decisionError(decision)
-    return JSON.stringify(this.memoryStore.exportDocument(context), null, 2)
+    return this.withLearningVisibility(context, () => JSON.stringify(this.memoryStore.exportDocument(context), null, 2))
   }
 
   proposeImport(agent: Agent | undefined, input: ServiceImportInput): MemoryImportBatchResult {
@@ -632,6 +675,8 @@ export class PersonalMemoryService extends Service {
       idempotencyKey: `memory-snapshot:${agent.id}`,
     })
     if (decision.effect !== 'allow') return
+    // Permanent session-start injection deliberately uses the default view,
+    // which excludes automatic records requiring a fresh source check.
     const snapshot = this.memoryStore.snapshot({
       context,
       limit: this.config.snapshotLimit,
@@ -682,12 +727,16 @@ export class PersonalMemoryService extends Service {
           task = { objective: goal.goal.objective.slice(0, 2_048), nextStep: goal.checkpoint.nextStep.slice(0, 2_048), query }
         }
       } catch { /* An absent, older, or invalid optional Goals service cannot suppress owner memory. */ }
-      return this.memoryStore.snapshot({
+      const snapshot = () => this.memoryStore.snapshot({
         context, query, ...(task === undefined ? {} : { task }),
         limit: this.config.snapshotLimit,
         maxBytes: this.config.snapshotMaxBytes,
         maxTokens: this.config.snapshotMaxTokens,
       }).text
+      // Automatic facts/experiences need a current task, including for claim
+      // partners; the no-query fallback uses only the default manual view.
+      return query.trim() || task?.objective.trim() || task?.nextStep.trim()
+        ? this.withLearningVisibility(context, snapshot) : snapshot()
     } catch {
       // Missing/revoked owner scope must clear the contribution, not retain an
       // earlier owner's data or interrupt unrelated task execution.

@@ -209,6 +209,12 @@ describe('durable owner foreground completion feed', () => {
     expect(fullBudget.input.text).not.toContain('�')
     expect(fullBudget.contentDigest).toBe(small.contentDigest)
     expect(fullBudget.reply.intentDigest).toMatch(/^[a-f0-9]{64}$/u)
+    const batch = f.store.withOwnerForegroundTaskSourcesFence({ ...f.scope,
+      sources: [{ inboxId: input.inboxId, expectedSourceDigest: input.expectedSourceDigest }] },
+    authority, items => items[0]!)
+    expect(batch).toEqual(fullBudget)
+    expect(batch.input.returnedBytes).toBeLessThanOrEqual(16_384)
+    expect(batch.reply.returnedBytes).toBeLessThanOrEqual(16_384)
     for (const limit of [0, -1, 16_385, 1.5]) {
       expect(() => f.store.readOwnerForegroundTaskSource({ ...input, maxInputBytes: limit }, authority)).toThrow(/byte limit/u)
       expect(() => f.store.readOwnerForegroundTaskSource({ ...input, maxReplyBytes: limit }, authority)).toThrow(/byte limit/u)
@@ -332,6 +338,81 @@ describe('durable owner foreground completion feed', () => {
     } finally { inspector.close() }
   })
 
+  test('batch fence checks ordered sources under one owner-bound writer transaction', async () => {
+    const f = await fixture()
+    const first = dispatch(f.store, f.binding, 'batch-first')
+    complete(f.store, first.record.id)
+    reply(f.store, f.binding, first.record.id, 'batch-first')
+    processed(f.store, first)
+    const second = dispatch(f.store, f.binding, 'batch-second')
+    complete(f.store, second.record.id)
+    reply(f.store, f.binding, second.record.id, 'batch-second')
+    processed(f.store, second)
+    const noReply = dispatch(f.store, f.binding, 'batch-no-reply')
+    complete(f.store, noReply.record.id)
+    processed(f.store, noReply)
+    const changed = dispatch(f.store, f.binding, 'batch-changed')
+    complete(f.store, changed.record.id)
+    reply(f.store, f.binding, changed.record.id, 'batch-changed')
+    const a = sourceInput(f, first.record.id)
+    const b = sourceInput(f, second.record.id)
+    const missing = sourceInput(f, noReply.record.id)
+    const other = open(f.path)
+    ;(other as unknown as { database: DatabaseSync }).database.exec('PRAGMA busy_timeout = 0')
+    const sources = [
+      { inboxId: b.inboxId, expectedSourceDigest: b.expectedSourceDigest },
+      { inboxId: a.inboxId, expectedSourceDigest: a.expectedSourceDigest },
+      { inboxId: missing.inboxId, expectedSourceDigest: missing.expectedSourceDigest },
+      { inboxId: 'no-such-inbox', expectedSourceDigest: 'f'.repeat(64) },
+      { inboxId: changed.record.id, expectedSourceDigest: 'f'.repeat(64) },
+    ]
+    const input = { ...f.scope, sources }
+    const contents = f.store.withOwnerForegroundTaskSourcesFence(input, authority, current => {
+      expect(Object.isFrozen(current)).toBe(true)
+      expect(current.map(item => item?.source.inboxId)).toEqual([b.inboxId, a.inboxId, undefined, undefined, undefined])
+      expect(current[0]!.reply.text).toBe('ordinary answer')
+      expect(() => other.revokePrincipal(f.owner.id, f.owner.version)).toThrow(/locked/u)
+      return current
+    })
+    expect(contents[1]).toEqual(f.store.readOwnerForegroundTaskSource(a, authority))
+    expect(f.store.withOwnerForegroundTaskSourcesFence({ ...f.scope, sources: [] }, authority, current => current)).toEqual([])
+    expect(() => f.store.withOwnerForegroundTaskSourcesFence({ ...f.scope,
+      expectedOwner: { ...f.scope.expectedOwner, principalVersion: f.scope.expectedOwner.principalVersion + 1 },
+      sources: [] }, authority, () => 'bad')).toThrow(/owner authority changed/u)
+    expect(() => f.store.withOwnerForegroundTaskSourcesFence({ ...f.scope, sources: [sources[0]!, sources[0]!] },
+      authority, () => 'bad')).toThrow(/unique inbox/u)
+    expect(() => f.store.withOwnerForegroundTaskSourcesFence({ ...f.scope,
+      sources: Array.from({ length: 1_001 }, (_, index) => ({ inboxId: `source-${index}`, expectedSourceDigest: 'f'.repeat(64) })) },
+    authority, () => 'bad')).toThrow(/at most 1000/u)
+    other.revokePrincipal(f.owner.id, f.owner.version)
+    expect(() => f.store.withOwnerForegroundTaskSourcesFence(input, authority, () => 'bad')).toThrow(/owner authority changed/u)
+  })
+
+  test('batch fence rejects asynchronous callbacks and releases or rolls back its transaction', async () => {
+    const f = await fixture()
+    const inbox = dispatch(f.store, f.binding, 'batch-callback')
+    complete(f.store, inbox.record.id); reply(f.store, f.binding, inbox.record.id, 'batch-callback')
+    const { inboxId, expectedSourceDigest } = sourceInput(f, inbox.record.id)
+    const input = { ...f.scope, sources: [{ inboxId, expectedSourceDigest }] }
+    const writer = (f.store as unknown as { database: DatabaseSync }).database
+    const inspector = new DatabaseSync(f.path, { readOnly: true })
+    const before = f.store.getInbox(inboxId)!.status
+    const change = () => writer.prepare("UPDATE inbox_messages SET status = 'processed' WHERE id = ?").run(inboxId)
+    try {
+      expect(() => f.store.withOwnerForegroundTaskSourcesFence(input, authority,
+        () => { change(); throw new Error('batch consumer failed') })).toThrow('batch consumer failed')
+      expect(inspector.prepare('SELECT status FROM inbox_messages WHERE id = ?').get(inboxId)).toEqual({ status: before })
+      expect(() => f.store.withOwnerForegroundTaskSourcesFence(input, authority,
+        () => { change(); return Promise.reject(new Error('late batch rejection')) })).toThrow(/synchronous/u)
+      expect(() => f.store.withOwnerForegroundTaskSourcesFence(input, authority,
+        // eslint-disable-next-line unicorn/no-thenable -- Untrusted thenables must never be invoked.
+        () => ({ then() { throw new Error('must not run') } }))).toThrow(/synchronous/u)
+      expect(inspector.prepare('SELECT status FROM inbox_messages WHERE id = ?').get(inboxId)).toEqual({ status: before })
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(f.store.withOwnerForegroundTaskSourcesFence(input, authority, items => items[0]!.source.inboxId)).toBe(inboxId)
+    } finally { inspector.close() }
+  })
+
   test('exposes the same Host-only service API and invalidates it on Fiber disposal', async () => {
     const f = await fixture()
     const inbox = dispatch(f.store, f.binding, 'service')
@@ -343,6 +424,9 @@ describe('durable owner foreground completion feed', () => {
     expect(ctx.assistantDelivery.listOwnerForegroundTaskSources(f.scope).items[0]!.sourceDigest).toBe(input.expectedSourceDigest)
     expect(ctx.assistantDelivery.readOwnerForegroundTaskSource(input)?.source.execution.modelSelection?.model).toBe('frozen-model')
     expect(ctx.assistantDelivery.withOwnerForegroundTaskSourceFence(input, content => content.reply.text)).toBe('ordinary answer')
+    expect(ctx.assistantDelivery.withOwnerForegroundTaskSourcesFence({ ...f.scope,
+      sources: [{ inboxId: input.inboxId, expectedSourceDigest: input.expectedSourceDigest }] },
+    contents => contents[0]?.reply.text)).toBe('ordinary answer')
     const service = ctx.assistantDelivery
     await ctx.fiber.restart(); contexts.delete(ctx)
     expect(() => service.listOwnerForegroundTaskSources(f.scope)).toThrow()

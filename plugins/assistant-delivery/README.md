@@ -142,6 +142,8 @@ cursor 的 protocol、数据库 epoch、稳定 owner scopeKey 和 sequence 必�
 
 `withOwnerForegroundTaskSourceFence(scopeAndReadInput, callback)` 在 Delivery `BEGIN IMMEDIATE` 中重验相同来源，并保持 writer fence 到同步 callback 返回；来源缺失或改变会抛错，callback 异常、Promise 或 thenable 会拒绝并回滚 Delivery 事务。消费者可在 callback 内按 Delivery → Evaluation → Memory 的锁序获取下游 writer fence，不能跨 `await`。这些接口不注册为模型工具、不新增正文或投影账本；原文本、执行成功与投递成功都不是业务目标达成或记忆真实性的证明。
 
+`withOwnerForegroundTaskSourcesFence({ ...scope, sources }, callback)` 对最多 1000 个不重复 `inboxId` 按输入顺序，在同一个 Delivery `BEGIN IMMEDIATE` 与当前 owner 校验下读取原 Inbox/Outbox；每项提供 `inboxId` 与 `expectedSourceDigest`。空数组仍校验 owner。来源缺失、变化或内容暂不可读时对应位置为 `undefined`，不取消其他项；输入错误和 owner/authority 变化则拒绝整批。callback 收到冻结数组，必须同步结束，异常、Promise 或 thenable 会回滚；每段正文固定最多 16 KiB，调用方不能扩限。它用于在检索/快照前同时核对多个自动学习来源，并保持 Delivery → Evaluation → Memory 锁序，避免逐条 fence 的嵌套事务。
+
 `enqueueBackgroundRoute()` 的 Policy resource 固定为精确的 `message/route:<authorityId>`，subject 同时带配置中的 workspace 与 canonical owner principal；部署规则不需要、也不应为这条控制路径授予 message 通配符。Policy 通过后，Delivery 会在同一个 `BEGIN IMMEDIATE` 事务内重新解析 active binding 并写 Outbox，封住授权期间 `/new` 的竞态。claim 时还会在同一写事务内重新验证 authority、source hash、完整 owner scope、generation floor 与当前 exact Policy；route 被删除、修改或撤权时不会调用 adapter，而是写入带 `owner-route-*` failure code 的 terminal Outbox 和 `outbox_attempts` 审计 receipt。
 
 显式 Policy deny 表示 T3 撤权并永久 dead；Policy 检查本身抛错（例如 SQLite busy、滚动部署中的短暂不可用）不等同撤权。claim 前发生时，消息保持 `retry_wait`、`attemptCount` 不增加并暴露 `owner-route-policy-check-failed`；claim 后、adapter I/O 前发生时，当前 not-sent attempt 进入带退避的 `retry_wait`。两者都不会调用 provider，Policy 恢复后可自动继续。锁顺序也保持单向：enqueue 的 Policy 写在进入 Delivery 事务前已经完成；claim 只有 Delivery→Policy 的同步检查，没有持有 Policy 写事务再进入 Delivery 的反向路径。运维可用 `pendingOutbox` 加该 failure code 定位持续锁冲突，而不丢失唯一告警。

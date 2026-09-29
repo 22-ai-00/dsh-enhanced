@@ -2066,12 +2066,18 @@ importers:
       '@dsh-enhanced/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-evaluation':
+        specifier: workspace:*
+        version: link:../assistant-evaluation
       '@dsh-enhanced/assistant-goals':
         specifier: workspace:*
         version: link:../assistant-goals
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
+      '@dsh-enhanced/assistant-verifier':
+        specifier: workspace:*
+        version: link:../assistant-verifier
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0

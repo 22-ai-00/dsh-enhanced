@@ -84,15 +84,15 @@ describe('approval-gated memory proposals', () => {
     const prior = f.memory.applyApprovedMutation({ ...oldMutation, namespace, idempotencyKey: 'legacy-approved' })
     f.memory.close()
     const old = new DatabaseSync(f.memoryPath)
-    // Reconstruct the exact pre-knowledge v4 layout; all other tables are unchanged.
-    old.exec("DROP TABLE memory_evidence_anchors; ALTER TABLE memory_records DROP COLUMN knowledge_json; UPDATE schema_meta SET value = '4' WHERE key = 'schema-version'; PRAGMA user_version = 4")
+    // Reconstruct the exact pre-knowledge v4 layout; later evidence/adoption tables did not exist.
+    old.exec("DROP TABLE memory_evidence_anchors; DROP TABLE memory_learning_adoptions; ALTER TABLE memory_records DROP COLUMN knowledge_json; UPDATE schema_meta SET value = '4' WHERE key = 'schema-version'; PRAGMA user_version = 4")
     const beforeProposal = old.prepare('SELECT * FROM memory_proposals').all()
     const beforeAudit = old.prepare('SELECT * FROM memory_audit').all()
     const beforeRecord = old.prepare('SELECT * FROM memory_records').all()
     old.close()
     const memory = new MemoryStore({ path: f.memoryPath, now: () => 100_000 })
     const inspect = new DatabaseSync(f.memoryPath)
-    expect(inspect.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
+    expect(inspect.prepare('PRAGMA user_version').get()).toEqual({ user_version: 7 })
     expect(inspect.prepare('SELECT * FROM memory_proposals').all()).toEqual(beforeProposal)
     expect(inspect.prepare('SELECT * FROM memory_audit').all()).toEqual(beforeAudit)
     expect(inspect.prepare('SELECT * FROM memory_records').all()).toEqual(beforeRecord.map(row => ({ ...row, knowledge_json: null })))

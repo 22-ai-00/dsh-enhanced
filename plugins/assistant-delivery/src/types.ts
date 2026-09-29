@@ -60,6 +60,12 @@ export interface OwnerForegroundTaskSourceContent {
   readonly reply: Readonly<OwnerForegroundTaskSourceText & { outboxId: string; intentDigest: string }>
 }
 
+/** An exact completed source to recheck under one owner-bound writer fence. */
+export interface OwnerForegroundTaskSourceRef {
+  readonly inboxId: string
+  readonly expectedSourceDigest: string
+}
+
 export interface ExternalPrincipalKey {
   channel: string
   account: string

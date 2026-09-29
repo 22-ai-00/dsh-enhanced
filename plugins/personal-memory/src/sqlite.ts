@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { memoryKnowledgeText, normalizeMemoryKnowledge } from './knowledge.js'
 import { tokenizeMemory } from './tokenize.js'
 
-export const memorySchemaVersion = 6
+export const memorySchemaVersion = 7
 export const memoryTokenizerIndexVersion = 1
 
 export class MemoryDatabaseError extends Error {
@@ -319,6 +319,7 @@ function createFresh(database: DatabaseSync): void {
   createV3Indexes(database)
   migrateV4ToV5(database)
   migrateV5ToV6(database)
+  migrateV6ToV7(database)
   database.exec(`
     INSERT INTO schema_meta(key, value) VALUES ('tokenizer-index-version', '${memoryTokenizerIndexVersion}');
   `)
@@ -345,6 +346,46 @@ function migrateV5ToV6(database: DatabaseSync): void {
   database.exec(`
     UPDATE schema_meta SET value = '6' WHERE key = 'schema-version';
     PRAGMA user_version = 6;
+  `)
+}
+
+function migrateV6ToV7(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE memory_learning_adoptions (
+      authority_id TEXT NOT NULL,
+      operation_id TEXT NOT NULL,
+      row_kind TEXT NOT NULL CHECK(row_kind IN ('grant', 'operation')),
+      grant_json TEXT,
+      grant_digest TEXT,
+      used_mutations INTEGER,
+      used_content_bytes INTEGER,
+      request_json TEXT,
+      request_digest TEXT,
+      review_receipt_json TEXT,
+      source_digest TEXT,
+      result_json TEXT,
+      record_id TEXT,
+      record_version INTEGER,
+      record_digest TEXT,
+      invalidated_at INTEGER,
+      invalidation_reason TEXT CHECK(invalidation_reason IS NULL OR invalidation_reason IN ('withdrawn', 'source-changed')),
+      PRIMARY KEY(authority_id, operation_id),
+      CHECK ((row_kind = 'grant' AND operation_id = '' AND grant_json IS NOT NULL
+        AND grant_digest IS NOT NULL AND used_mutations >= 0 AND used_content_bytes >= 0
+        AND request_json IS NULL AND result_json IS NULL AND record_id IS NULL)
+        OR (row_kind = 'operation' AND operation_id <> '' AND grant_json IS NULL
+          AND grant_digest IS NULL AND used_mutations IS NULL AND used_content_bytes IS NULL
+          AND request_json IS NOT NULL AND request_digest IS NOT NULL
+          AND review_receipt_json IS NOT NULL AND source_digest IS NOT NULL
+          AND result_json IS NOT NULL AND record_id IS NOT NULL AND record_version >= 1
+          AND record_digest IS NOT NULL)),
+      CHECK ((invalidated_at IS NULL AND invalidation_reason IS NULL)
+        OR (row_kind = 'operation' AND invalidated_at IS NOT NULL AND invalidation_reason IS NOT NULL))
+    ) STRICT;
+    CREATE INDEX memory_learning_adoptions_record
+      ON memory_learning_adoptions(record_id, record_version) WHERE row_kind = 'operation';
+    UPDATE schema_meta SET value = '7' WHERE key = 'schema-version';
+    PRAGMA user_version = 7;
   `)
 }
 
@@ -482,7 +523,7 @@ function migrate(database: DatabaseSync): void {
     }
     if (row.user_version === 0) {
       createFresh(database)
-      database.exec('PRAGMA user_version = 6')
+      database.exec('PRAGMA user_version = 7')
     } else {
       if (row.user_version === 1) migrateV1ToV2(database)
       row = database.prepare('PRAGMA user_version').get() as { user_version: number }
@@ -493,6 +534,8 @@ function migrate(database: DatabaseSync): void {
       if (row.user_version === 4) migrateV4ToV5(database)
       row = database.prepare('PRAGMA user_version').get() as { user_version: number }
       if (row.user_version === 5) migrateV5ToV6(database)
+      row = database.prepare('PRAGMA user_version').get() as { user_version: number }
+      if (row.user_version === 6) migrateV6ToV7(database)
     }
     migrateTokenizerIndex(database)
     database.exec('COMMIT')
