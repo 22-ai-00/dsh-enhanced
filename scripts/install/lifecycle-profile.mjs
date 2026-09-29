@@ -4127,7 +4127,7 @@ async function restoreOriginalActiveSet({
   return accepted
 }
 
-function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraEnvironment = {}, pnpmStoreFd, pnpmStorePath, pnpmCacheFd, workspaceFds = [] }) {
+function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraEnvironment = {}, pnpmStoreFd, pnpmStorePath, pnpmCacheFd, workspaceFds = [], localPackageFds = [] }) {
   const args = [
     '--unshare-all', '--die-with-parent', '--new-session',
     '--ro-bind', '/', '/',
@@ -4148,6 +4148,7 @@ function sandboxArgs({ bwrapExecutable, homePath, validatorPath, command, extraE
   }
   if (pnpmCacheFd !== undefined) args.push('--ro-bind-fd', String(pnpmCacheFd), '/run/dsh-enhanced-pnpm-cache')
   for (const workspace of workspaceFds) args.push('--dir', dirname(workspace.path), '--ro-bind-fd', String(workspace.fd), workspace.path)
+  for (const resource of localPackageFds) args.push('--dir', dirname(resource.path), '--bind-fd', String(resource.fd), resource.path)
   for (const [name, value] of Object.entries(extraEnvironment)) args.push('--setenv', name, value)
   args.push('--', ...command)
   return { executable: bwrapExecutable, args }
@@ -4206,15 +4207,23 @@ async function openSandboxResources(context, pnpmStore, npmPreparation, bindWork
 async function sandboxRun(context, command, options = {}) {
   const resources = await openSandboxResources(context, options.pnpmStore, options.npmPreparation)
   const readonlyRoots = []
+  const localPackageRoots = []
   try {
     for (const path of new Set(options.readonlyRoots ?? [])) {
       const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
       readonlyRoots.push({ path, handle })
       if (!sameIdentity(await handle.stat(), identity(await lstat(path)))) fail('readonly module root identity changed')
     }
+    for (const resource of options.localPackageRoots ?? []) {
+      await assertCriticalDirectory(resource.sourcePath, resource.identity)
+      const handle = await open(resource.sourcePath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      localPackageRoots.push({ ...resource, handle })
+      if (!sameIdentity(await handle.stat(), resource.identity)) fail('local package cache identity changed')
+    }
   } catch (error) {
     await resources.validator.close(); await resources.stage.close(); await resources.store?.close(); await resources.cache?.close()
     for (const root of readonlyRoots) await root.handle.close()
+    for (const root of localPackageRoots) await root.handle.close()
     throw error
   }
   const extraFd = 5 + Number(resources.store !== undefined) + Number(resources.cache !== undefined)
@@ -4223,11 +4232,12 @@ async function sandboxRun(context, command, options = {}) {
     ...(resources.store === undefined ? {} : { pnpmStoreFd: 5, pnpmStorePath: options.pnpmStore.storePath }),
     ...(resources.cache === undefined ? {} : { pnpmCacheFd: resources.store === undefined ? 5 : 6 }),
     workspaceFds: readonlyRoots.map((root, index) => ({ path: root.path, fd: extraFd + index })),
+    localPackageFds: localPackageRoots.map((root, index) => ({ path: root.path, fd: extraFd + readonlyRoots.length + index })),
   })
   try {
     return await run(invocation.executable, invocation.args, {
       capture: options.capture,
-      passFds: [resources.stage.fd, resources.validator.fd, ...(resources.store === undefined ? [] : [resources.store.fd]), ...(resources.cache === undefined ? [] : [resources.cache.fd]), ...readonlyRoots.map(root => root.handle.fd)],
+      passFds: [resources.stage.fd, resources.validator.fd, ...(resources.store === undefined ? [] : [resources.store.fd]), ...(resources.cache === undefined ? [] : [resources.cache.fd]), ...readonlyRoots.map(root => root.handle.fd), ...localPackageRoots.map(root => root.handle.fd)],
     })
   } finally {
     await resources.validator.close()
@@ -4235,6 +4245,10 @@ async function sandboxRun(context, command, options = {}) {
     await resources.store?.close()
     await resources.cache?.close()
     for (const root of readonlyRoots) await root.handle.close()
+    for (const root of localPackageRoots) {
+      await root.handle.close()
+      await assertCriticalDirectory(root.sourcePath, root.identity)
+    }
   }
 }
 
@@ -5328,7 +5342,79 @@ async function localSourceDriverDigest() {
 async function localSourceHelper() {
   return import('./local-source-maintenance.mjs')
 }
-async function localSourceSandbox(context, action, input, pnpmStore) {
+async function assertLocalSourceCacheTree(root, boundary = root) {
+  for (const name of await readdir(root)) {
+    const path = join(root, name), entry = await lstat(path)
+    if (entry.uid !== currentUid()) fail('local package cache copy contains an unsafe owner')
+    if (entry.isSymbolicLink()) {
+      if (!inside(boundary, await realpath(path))) fail('local package cache link escapes its private copy')
+      continue
+    }
+    if (isGroupOrOtherWritable(entry) || !entry.isDirectory() && (!entry.isFile() || entry.nlink !== 1)) {
+      fail('local package cache copy contains an unsafe entry')
+    }
+    if (entry.isFile() && name.endsWith('-wal') && entry.size !== 0) fail('local package cache has an unsupported active SQLite WAL')
+    if (entry.isDirectory()) await assertLocalSourceCacheTree(path, boundary)
+  }
+}
+
+async function prepareLocalSourcePackageCaches(transactionRoot, pnpmStore) {
+  if (!pnpmStore?.localSource || !sameIdentity(await lstat(pnpmStore.storePath), pnpmStore.identity)
+    || await realpath(pnpmStore.localSource.alias.path) !== pnpmStore.storePath) fail('local package store binding changed')
+  await assertCriticalDirectory(pnpmStore.localSource.cachePath, pnpmStore.localSource.cacheIdentity)
+  const transactionIdentity = identity(await lstat(transactionRoot)), canonicalTransaction = await realpath(transactionRoot)
+  await assertCriticalDirectory(canonicalTransaction, transactionIdentity)
+  const root = await mkdtemp(join(canonicalTransaction, 'local-package-caches-'))
+  const rootIdentity = identity(await lstat(root))
+  const dispose = async () => {
+    await assertCriticalDirectory(canonicalTransaction, transactionIdentity)
+    await assertCriticalDirectory(root, rootIdentity)
+    await rm(root, { recursive: true })
+  }
+  try {
+    const store = join(root, 'store'), cache = join(root, 'cache')
+    for (const [source, destination] of [[pnpmStore.storePath, store], [pnpmStore.localSource.cachePath, cache]]) {
+      await mkdir(destination, { mode: 0o700 })
+      await run('/bin/cp', ['-a', '--no-preserve=links', '--reflink=auto', '--', `${source}${sep}.`, destination], { timeoutMs: 300_000 })
+      await chmod(destination, 0o700)
+    }
+    // Project registrations and dlx executables are unrelated to offline add;
+    // their links must not become authority in this disposable cache snapshot.
+    await rm(join(store, 'projects'), { recursive: true, force: true })
+    await rm(join(cache, 'dlx'), { recursive: true, force: true })
+    // cp is not a SQLite snapshot. Replace the copied pnpm index (including
+    // active-WAL contents) with the native online backup, then discard sidecars.
+    const indexPath = join(pnpmStore.storePath, 'index.db')
+    const index = await existingIdentity(indexPath)
+    if (index !== undefined) {
+      const entry = await lstat(indexPath)
+      if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== currentUid() || isGroupOrOtherWritable(entry)) fail('local pnpm SQLite index is unsafe')
+      const { DatabaseSync, backup } = await import('node:sqlite')
+      const database = new DatabaseSync(indexPath, { readOnly: true, timeout: 5_000 })
+      const target = join(store, 'index.backup.db'), deadline = Date.now() + 60_000
+      try {
+        await backup(database, target, { rate: 1_024, progress: () => { if (Date.now() > deadline) fail('local pnpm SQLite snapshot exceeded its bound') } })
+        if (!sameNpmFileIdentity(await lstat(indexPath), identity(entry))) fail('local pnpm SQLite index identity changed during backup')
+      } finally { database.close() }
+      for (const suffix of ['', '-wal', '-shm', '-journal']) await rm(join(store, `index.db${suffix}`), { force: true })
+      await rename(target, join(store, 'index.db'))
+    }
+    await assertLocalSourceCacheTree(store)
+    await assertLocalSourceCacheTree(cache)
+    if (!sameIdentity(await lstat(pnpmStore.storePath), pnpmStore.identity)
+      || await realpath(pnpmStore.localSource.alias.path) !== pnpmStore.storePath) fail('local package store changed while copying')
+    await assertCriticalDirectory(pnpmStore.localSource.cachePath, pnpmStore.localSource.cacheIdentity)
+    return { dispose, roots: [
+      { sourcePath: store, identity: identity(await lstat(store)), path: pnpmStore.storePath },
+      ...(sandboxHiddenStorePath(pnpmStore.localSource.alias.path) && pnpmStore.localSource.alias.path !== pnpmStore.storePath
+        ? [{ sourcePath: store, identity: identity(await lstat(store)), path: pnpmStore.localSource.alias.path }] : []),
+      { sourcePath: cache, identity: identity(await lstat(cache)), path: '/run/dsh-enhanced-local-pnpm-cache' },
+    ] }
+  } catch (error) { await dispose(); throw error }
+}
+
+async function localSourceSandbox(context, action, input, pnpmStore, packageCaches) {
+  if (packageCaches !== undefined && action !== 'packages') fail('writable local package caches are only allowed for package installation')
   if (input.proof.driverDigest !== await localSourceDriverDigest()) fail('local source lifecycle driver changed')
   const helper = await localSourceHelper()
   await helper.assertLocalSourceInstaller(input.proof.installer)
@@ -5339,9 +5425,12 @@ async function localSourceSandbox(context, action, input, pnpmStore) {
     const result = await sandboxRun(context, [process.execPath,
       join(dirname(SCRIPT_PATH), 'local-source-maintenance.mjs'), action, join(context.homePath, inputName)], {
       capture: true, pnpmStore, readonlyRoots: [input.proof.installer.root, dirname(SCRIPT_PATH)],
+      ...(packageCaches === undefined ? {} : { localPackageRoots: packageCaches.roots }),
       extraEnvironment: { pnpm_config_offline: 'true', pnpm_config_ignore_scripts: 'true',
         pnpm_config_ignore_pnpmfile: 'true', pnpm_config_package_import_method: 'copy',
-        ...(pnpmStore === undefined ? {} : { pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_frozen_store: 'true' }) },
+        ...(pnpmStore === undefined ? {} : { pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_frozen_store: 'true' }),
+        ...(packageCaches === undefined ? {} : { pnpm_config_store_dir: pnpmStore.localSource.alias.path,
+          pnpm_config_cache_dir: '/run/dsh-enhanced-local-pnpm-cache', pnpm_config_frozen_store: 'false', pnpm_config_verify_store_integrity: 'true' }) },
     })
     return parseJsonOutput(result.stdout, 'pre-owner local source')
   } finally { await rm(inputPath, { force: true }) }
@@ -5703,7 +5792,12 @@ async function performLifecycle({
         const staged = await helper.prepareLocalSourceStage({ homePath, stageHome: canonicalStageHome, profile, proof: manifest.localSourceMaintenance })
         await assertApiStage()
         const dsh = { path: dshExecutable, pin: { path: dshExecutable, sha256: sha256(await readFile(dshExecutable)), interpreter: null } }
-        await localSourceSandbox(sandbox, 'packages', { proof: manifest.localSourceMaintenance, homePath, profile, originalCohort: staged.originalCohort, dsh }, pnpmStore)
+        const alias = await helper.readLocalSourcePnpmStoreAlias({ profilePath: join(canonicalStageHome, 'profiles', profile), storePath: pnpmStore.storePath, installer: manifest.localSourceMaintenance.installer })
+        if (!isDeepStrictEqual(alias, pnpmStore.localSource.alias)) fail('installed pnpm store metadata changed before package installation')
+        const packageCaches = await prepareLocalSourcePackageCaches(physicalTransactionRoot, pnpmStore)
+        try {
+          await localSourceSandbox(sandbox, 'packages', { proof: manifest.localSourceMaintenance, homePath, profile, originalCohort: staged.originalCohort, dsh }, pnpmStore, packageCaches)
+        } finally { await packageCaches.dispose() }
         await assertApiStage()
         await helper.replaceLocalSourceAuthority({ homePath, stageHome: canonicalStageHome, profile, proof: manifest.localSourceMaintenance })
         await assertApiStage()
@@ -6776,6 +6870,21 @@ async function main() {
     const current = await readProfile(homePath, profile)
     await precheckNpmMetadata(current, dshExecutable)
     const pnpmStore = await resolvedPnpmStorePath(await realpath(pnpmPath), homePath, current.profilePath)
+    const alias = await helper.readLocalSourcePnpmStoreAlias({ profilePath: current.profilePath, storePath: pnpmStore.storePath, installer })
+    const rawConfig = JSON.parse((await run(await realpath(pnpmPath), ['config', 'list', '--json'], {
+      cwd: current.profilePath, capture: true,
+      env: { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined, pnpm_config_ignore_pnpmfile: 'true', pnpm_config_ignore_scripts: 'true' },
+      timeoutMs: 30_000,
+    })).stdout)
+    const cacheSetting = rawConfig.cacheDir ?? rawConfig['cache-dir']
+      ?? join(process.env.XDG_CACHE_HOME ?? join(process.env.HOME ?? dirname(homePath), '.cache'), 'pnpm')
+    if (typeof cacheSetting !== 'string' || !isAbsolute(cacheSetting) || resolve(cacheSetting) !== cacheSetting) fail('local pnpm cache path is invalid')
+    const cachePath = await realpath(cacheSetting)
+    if (inside(homePath, cachePath) || inside(cachePath, homePath) || inside(pnpmStore.storePath, cachePath)
+      || inside(cachePath, pnpmStore.storePath)) fail('local pnpm cache must be separate from Home and store')
+    const cacheEntry = await lstat(cachePath)
+    assertExpectedDirectoryMetadata(cacheEntry, identity(cacheEntry), cachePath)
+    pnpmStore.localSource = { alias, cachePath, cacheIdentity: identity(cacheEntry) }
     await performLifecycle({ operation: 'upgrade', homePath, profile, dshExecutable, bwrapExecutable,
       expectedScenario: scenario, targets: [], serviceContext, pnpmStore, localSourceMaintenance, localSourceConfigs,
       skipRecovery: true, transactionPrechecked: true })
@@ -6879,6 +6988,7 @@ export const lifecycleProfileTest = Object.freeze({
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest,
   validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
   validLocalSourceManifest, validLocalSourceSelection, localSourcePhysicalProof, profileTreeDigest,
+  prepareLocalSourcePackageCaches, sandboxArgs,
 })
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {

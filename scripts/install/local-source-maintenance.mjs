@@ -9,6 +9,7 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
+import { buildLocalSourcePreviewOverlay, assertLocalSourcePreviewDerivation } from './local-source-preview.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const canonical = value => value === null || typeof value !== 'object' ? JSON.stringify(value)
@@ -121,6 +122,26 @@ async function load(binding) {
   const result = Object.assign({}, ...await Promise.all(modules.map(name => import(pathToFileURL(join(root, `${name}.js`)).href))))
   result.yaml = require('yaml')
   return result
+}
+
+/** pnpm compares store spellings in .modules.yaml, even for the same inode. */
+export async function readLocalSourcePnpmStoreAlias({ profilePath, storePath, installer }) {
+  const { yaml } = await load(installer)
+  const path = join(profilePath, 'node_modules', '.modules.yaml')
+  const before = await lstat(path)
+  if (!before.isFile() || before.isSymbolicLink() || before.size > 16 * 1024 * 1024
+    || before.mode & 0o022 || before.uid !== process.getuid()) fail('pnpm installed store metadata is unsafe')
+  const source = await readFile(path, 'utf8')
+  const after = await lstat(path)
+  if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size
+    || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) fail('pnpm installed store metadata changed')
+  const document = yaml.parseDocument(source, { uniqueKeys: true })
+  const alias = document.get('storeDir')
+  if (document.errors.length || document.warnings.length || !exactPath(alias)
+    || await realpath(alias) !== storePath) fail('pnpm installed store alias does not match the verified store')
+  const canonical = await lstat(storePath), selected = await lstat(await realpath(alias))
+  if (!canonical.isDirectory() || canonical.dev !== selected.dev || canonical.ino !== selected.ino) fail('pnpm installed store alias identity changed')
+  return { path: alias, metadataDigest: hash(source) }
 }
 
 /** The proof covers each effective profile, not merely the target patch. A
@@ -352,7 +373,7 @@ export async function localSourcePreviewOverlay(input) {
   const api = await load(input.proof.installer)
   const { configs } = await composeLocalSourceConfigs(input)
   assertPreOwnerEffectiveConfigs(configs, input.homePath, input.profile, api.yaml)
-  return api.buildSupervisedGrowthPreviewOverlay(configs[input.profile])
+  return buildLocalSourcePreviewOverlay(configs[input.profile], api.yaml)
 }
 export async function assertLocalSourcePreview(input) {
   const api = await load(input.proof.installer)
@@ -361,7 +382,7 @@ export async function assertLocalSourcePreview(input) {
   })
   if (dumped.status !== 0) fail('DSH rejected local source preview overlay')
   const { configs } = await composeLocalSourceConfigs(input)
-  api.assertSupervisedGrowthPreviewDerivation({ persistedConfig: configs[input.profile], previewConfig: dumped.stdout })
+  assertLocalSourcePreviewDerivation({ persistedConfig: configs[input.profile], previewConfig: dumped.stdout }, api.yaml)
   return { persistedConfigDigest: hash(configs[input.profile]), previewConfigDigest: hash(dumped.stdout) }
 }
 
