@@ -5686,10 +5686,25 @@ async function performLifecycle({
       if (localSourceMaintenance !== undefined) {
         await assertLocalSourceHome({ manifest, physicalHome: stageHome, selection: 'original', dshExecutable, bwrapExecutable })
         const helper = await localSourceHelper()
-        const staged = await helper.prepareLocalSourceStage({ homePath, stageHome, profile, proof: manifest.localSourceMaintenance })
+        // The fd path anchors the transaction, while source/resource APIs must
+        // receive a canonical physical Home. Prove both names retain its inode.
+        const canonicalStageHome = await realpath(stageHome)
+        if (canonicalStageHome !== join(transactionRoot, 'staged-home')) fail('local source stage canonical path differs from the locked transaction')
+        const assertApiStage = async () => {
+          assertLockParentStable(homePath)
+          await assertCriticalDirectory(physicalTransactionRoot, manifest.transactionIdentity)
+          await assertCriticalDirectory(stageHome, manifest.stagedIdentity)
+          await assertCriticalDirectory(canonicalStageHome, manifest.stagedIdentity)
+          if (await realpath(stageHome) !== canonicalStageHome) fail('local source stage canonical identity changed')
+        }
+        await assertApiStage()
+        const staged = await helper.prepareLocalSourceStage({ homePath, stageHome: canonicalStageHome, profile, proof: manifest.localSourceMaintenance })
+        await assertApiStage()
         const dsh = { path: dshExecutable, pin: { path: dshExecutable, sha256: sha256(await readFile(dshExecutable)), interpreter: null } }
         await localSourceSandbox(sandbox, 'packages', { proof: manifest.localSourceMaintenance, homePath, profile, originalCohort: staged.originalCohort, dsh }, pnpmStore)
-        await helper.replaceLocalSourceAuthority({ homePath, stageHome, profile, proof: manifest.localSourceMaintenance })
+        await assertApiStage()
+        await helper.replaceLocalSourceAuthority({ homePath, stageHome: canonicalStageHome, profile, proof: manifest.localSourceMaintenance })
+        await assertApiStage()
         const candidate = await localSourceSandbox(sandbox, 'verify', { proof: manifest.localSourceMaintenance, homePath, profile, dshPath: dshExecutable, selection: 'candidate' })
         if (!isDeepStrictEqual(candidate.configDigests, manifest.localSourceMaintenance.original.configDigests)) fail('local source update changed effective configuration')
         manifest = await writeManifest(physicalTransactionRoot, { ...manifest, localSourceMaintenance: { ...manifest.localSourceMaintenance, candidate } }, 'prepared')
