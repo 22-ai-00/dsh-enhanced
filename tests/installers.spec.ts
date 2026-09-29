@@ -793,7 +793,7 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   await writeFile(fixtureInstallerLibrary, await readFile(installerLibrary))
   await writeFile(join(fixtureInstallDirectory, 'lifecycle-config.mjs'),
     await readFile(join(installDirectory, 'lifecycle-config.mjs')))
-  for (const helper of ['host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs', 'local-source-maintenance.mjs']) {
+  for (const helper of ['host-lifecycle.mjs', 'host-profile-update.mjs', 'host-rsi-update.mjs', 'local-source-maintenance.mjs', 'local-source-preview.mjs']) {
     await writeFile(join(fixtureInstallDirectory, helper), await readFile(join(installDirectory, helper)))
   }
   const lifecycleSource = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
@@ -1766,6 +1766,16 @@ process.exit(result.status ?? 99)
 // are covered by lark-channel's source-maintenance and local-package suites.
 async function preOwnerLifecycleFixture() {
   const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+  const cachePath = join(f.root, 'pnpm-cache'), storeAlias = join(f.root, 'pnpm-store-alias')
+  await mkdir(cachePath, { mode: 0o700 })
+  await writeFile(join(cachePath, 'original-cache'), 'original cache', { mode: 0o600 })
+  await writeFile(join(f.root, 'pnpm-store', 'original-store'), 'original store', { mode: 0o600 })
+  await symlink(join(f.root, 'pnpm-store'), storeAlias)
+  await mkdir(join(f.profileDirectory, 'node_modules'), { recursive: true })
+  await writeFile(join(f.profileDirectory, 'node_modules', '.modules.yaml'), stringify({ storeDir: storeAlias }), { mode: 0o600 })
+  const pnpmPath = join(f.fakeBin, 'pnpm')
+  await writeFile(pnpmPath, (await readFile(pnpmPath, 'utf8')).replaceAll('"@jsr:registry":"https://npm.jsr.io/"',
+    `"@jsr:registry":"https://npm.jsr.io/","cacheDir":${JSON.stringify(cachePath)}`))
   await chmod(f.dshHome, 0o755)
   await mkdir(join(f.dshHome, 'profiles', 'node_modules'))
   const moduleRoot = join(f.root, 'reviewed-installer')
@@ -1813,6 +1823,10 @@ export async function stageRsiLocalUpdateResources(input) {
 export async function produceRsiLocalSourceMaintenance(input) { await canonicalStage(input.stagePhysicalHome); if(input.maintenanceMode !== 'pre-owner') throw new Error('wrong mode');return {host:null} }
 export async function applyRsiSourceMaintenanceInStage(input) { await canonicalStage(input.physicalHome); await writeFile(join(input.physicalHome,'rsi-sources',input.profile,'receipt.json'),'{"revision":"new"}') }
 export async function stageRsiLocalSinglePackages(input) {
+ if(process.env.pnpm_config_frozen_store !== 'false' || process.env.pnpm_config_offline !== 'true'
+  || process.env.pnpm_config_ignore_scripts !== 'true' || process.env.pnpm_config_ignore_pnpmfile !== 'true') throw new Error('unsafe private package cache configuration')
+ await writeFile(join(process.env.pnpm_config_store_dir,'package-install-marker'),'private store mutation')
+ await writeFile(join(process.env.pnpm_config_cache_dir,'package-install-marker'),'private cache mutation')
  if(process.env.LIFECYCLE_PACKAGE_FAILS === '1') throw new Error('fixture package failure')
  await writeFile(join(input.dshHome,'profiles',input.profile,'pnpm-lock.yaml'),'candidate-lock')
  await writeFile(join(input.dshHome,'profiles',input.profile,'upgraded'),'upgraded\\n')
@@ -1834,7 +1848,14 @@ export function assertSupervisedGrowthPreviewDerivation() { return {externalProv
   // does. The production helper has no environment-controlled test seam.
   const bwrapPath = join(f.fakeBin, 'bwrap')
   const bwrapSource = await readFile(bwrapPath, 'utf8')
-  await writeFile(bwrapPath, bwrapSource.replace('const result = spawnSync(command[0], command.slice(1), {', `
+  await writeFile(bwrapPath, bwrapSource.replace('const readonlyBindings = {}', 'const readonlyBindings = {}\nconst writableBindings = {}')
+    .replace("if (args[index] === '--bind-fd') { stageHome", "if (args[index] === '--bind-fd' && args[index + 1] !== '3') { writableBindings[args[index + 2]] = realpathSync('/proc/self/fd/' + args[index + 1]); index += 2; continue }\n  if (args[index] === '--bind-fd') { stageHome")
+    .replace('Object.assign(environment, controls)', `for(const [key,value] of Object.entries(environment)) {
+ const destination = Object.keys(writableBindings).find(path => value === path || (() => { try { return realpathSync(value) === path } catch { return false } })())
+ if(destination) environment[key] = writableBindings[destination]
+}
+Object.assign(environment, controls)`)
+    .replace('const result = spawnSync(command[0], command.slice(1), {', `
 if (command.includes(${JSON.stringify(join(f.fixtureInstallDirectory, 'local-source-maintenance.mjs'))})) {
  const fs = require('node:fs')
  const inputPath = command.at(-1)
@@ -1850,15 +1871,42 @@ const result = spawnSync(command[0], command.slice(1), {`))
   const nativePath = join(f.fakeBin, 'dsh')
   const activationHead = `if [[ " $* " == *' --host 127.0.0.1 --no-open --port 0 '* ]]; then`
   const nativeSource = (await readFile(nativePath, 'utf8')).replace(activationHead, activationHead + `\n  printf 'preview-claimed-job' > "$DSH_HOME/assistant-delivery/preview-queue.json"\n  printf 'preview-session-write' > "$DSH_HOME/sessions/owner-session.jsonl"`)
-  await writeFile(nativePath, nativeSource.replace('  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"',
-    `  printf '[]\\n' > "$DSH_HOME/profiles/$requested_profile/cordis.yml"\n  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"`))
+  const dumpSource = nativeSource.replace('  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"',
+    `  printf '[]\\n' > "$DSH_HOME/profiles/$requested_profile/cordis.yml"\n  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"`)
+  // Keep the shared v3 fake unchanged. This pre-owner fake composes CLI patches
+  // by row id and replaces each supplied config as a whole native patch value.
+  const composer = join(f.fakeBin, 'pre-owner-config-overlay.cjs')
+  await writeFile(composer, `
+const { readFileSync } = require('node:fs')
+const yaml = require(${JSON.stringify(require.resolve('yaml'))})
+const source = readFileSync(0, 'utf8')
+const args = process.argv.slice(2), patches = []
+for(let index = 0; index < args.length; index++) if(args[index] === '--patch') patches.push(args[++index])
+if(!patches.length) { process.stdout.write(source); process.exit(0) }
+const rows = yaml.parse(source)
+for(const path of patches) for(const patch of yaml.parse(readFileSync(path, 'utf8'))) {
+ const index = rows.findIndex(row => row.id === patch.id)
+ if(index < 0) rows.push(patch)
+ else rows[index] = { ...rows[index], ...patch }
+}
+process.stdout.write(yaml.stringify(rows))
+`)
+  const dumpHead = `if [[ " $* " == *' --dump-config '* ]]; then`
+  const dumpStart = dumpSource.indexOf(dumpHead), dumpEnd = dumpSource.indexOf(activationHead, dumpStart)
+  const dumpBody = dumpSource.slice(dumpStart + dumpHead.length, dumpEnd).replace(/\nfi\n$/u, '\n')
+  await writeFile(nativePath, dumpSource.slice(0, dumpStart) + `${dumpHead}
+  pre_owner_dump() {${dumpBody}  }
+  pre_owner_dump "$@" | "${process.execPath}" "${composer}" "$@"
+  exit 0
+fi
+` + dumpSource.slice(dumpEnd))
   // Runtime replacement uses a package locator but no fixture Control Plane code.
   const controlPackage = join(f.profileDirectory, 'node_modules/@dsh-enhanced/plugin-control-plane')
   await mkdir(controlPackage, { recursive: true })
   await writeFile(join(controlPackage, 'package.json'), '{"name":"@dsh-enhanced/plugin-control-plane","version":"0.1.0"}')
   await mkdir(join(controlPackage, 'lib'))
   await writeFile(join(controlPackage, 'lib/entry.js'), 'approved-package-bytes')
-  return { ...f, moduleRoot, preparationRoot }
+  return { ...f, moduleRoot, preparationRoot, cachePath, storeAlias }
 }
 function runPreOwnerLifecycle(f: Awaited<ReturnType<typeof preOwnerLifecycleFixture>>, operation: 'local-service-upgrade' | 'local-service-recover', options: LifecycleRunOptions = {}) {
   setLifecycleSystemdControls(join(f.root, 'systemd-state.json'), options)
@@ -9913,6 +9961,63 @@ exit 7
 
 
 describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source transaction', () => {
+  test('takes a SQLite store snapshot including committed WAL and isolates writable cache copies', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-package-cache-')))
+    temporaryRoots.push(root)
+    const storePath = join(root, 'store'), cachePath = join(root, 'cache'), transaction = join(root, 'transaction'), alias = join(root, 'store-alias')
+    for (const path of [storePath, cachePath, transaction]) await mkdir(path, { mode: 0o700 })
+    await symlink(storePath, alias)
+    await writeFile(join(storePath, 'content'), 'original', { mode: 0o600 })
+    await link(join(storePath, 'content'), join(storePath, 'content-alias'))
+    await writeFile(join(cachePath, 'cache-content'), 'cached', { mode: 0o600 })
+    await symlink('cache-content', join(cachePath, 'contained-link'))
+    await mkdir(join(storePath, 'projects'))
+    await symlink(root, join(storePath, 'projects', 'registered-project'))
+    await mkdir(join(cachePath, 'dlx'))
+    await symlink(root, join(cachePath, 'dlx', 'unrelated-executable'))
+    const db = new DatabaseSync(join(storePath, 'index.db'))
+    db.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE package_index(key TEXT); INSERT INTO package_index VALUES (\'committed in WAL\')')
+    expect((await stat(join(storePath, 'index.db-wal'))).size).toBeGreaterThan(0)
+    const directoryIdentity = async (path: string) => { const entry = await lstat(path); return { dev: String(entry.dev), ino: String(entry.ino), uid: entry.uid, mode: entry.mode } }
+    try {
+      const copy = await lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, {
+        storePath, identity: await directoryIdentity(storePath), localSource: { alias: { path: alias }, cachePath, cacheIdentity: await directoryIdentity(cachePath) },
+      })
+      try {
+        const clone = new DatabaseSync(join(copy.roots[0].sourcePath, 'index.db'))
+        try { expect(clone.prepare('SELECT key FROM package_index').all()).toEqual([{ key: 'committed in WAL' }]) } finally { clone.close() }
+        expect((await stat(join(copy.roots[0].sourcePath, 'content'))).nlink).toBe(1)
+        await writeFile(join(copy.roots[0].sourcePath, 'content'), 'new')
+        expect(existsSync(join(copy.roots[0]!.sourcePath, 'projects'))).toBe(false)
+        expect(existsSync(join(copy.roots.at(-1)!.sourcePath, 'dlx'))).toBe(false)
+        expect(await realpath(join(copy.roots.at(-1)!.sourcePath, 'contained-link'))).toBe(join(copy.roots.at(-1)!.sourcePath, 'cache-content'))
+        expect(await readlink(join(storePath, 'projects', 'registered-project'))).toBe(root)
+        expect(await readlink(join(cachePath, 'dlx', 'unrelated-executable'))).toBe(root)
+        await writeFile(join(copy.roots.at(-1)!.sourcePath, 'cache-content'), 'new')
+        expect(await readFile(join(storePath, 'content'), 'utf8')).toBe('original')
+        expect(await readFile(join(cachePath, 'cache-content'), 'utf8')).toBe('cached')
+      } finally { await copy.dispose() }
+      expect(await readdir(transaction)).toEqual([])
+      const binding = { storePath, identity: await directoryIdentity(storePath), localSource: { alias: { path: alias }, cachePath, cacheIdentity: await directoryIdentity(cachePath) } }
+      await writeFile(join(cachePath, 'other.db-wal'), 'unsupported WAL', { mode: 0o600 })
+      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, binding)).rejects.toThrow('unsupported active SQLite WAL')
+      expect(await readdir(transaction)).toEqual([])
+      await rm(join(cachePath, 'other.db-wal'))
+      await symlink(join(storePath, 'content'), join(cachePath, 'escape'))
+      await expect(lifecycleProfileTest.prepareLocalSourcePackageCaches(transaction, binding)).rejects.toThrow('link escapes its private copy')
+      expect(await readdir(transaction)).toEqual([])
+    } finally { db.close() }
+  })
+  test('rejects a different installed store before stopping the service', async () => {
+    const f = await preOwnerLifecycleFixture()
+    const foreign = join(f.root, 'foreign-store')
+    await mkdir(foreign)
+    await writeFile(join(f.profileDirectory, 'node_modules', '.modules.yaml'), stringify({ storeDir: foreign }), { mode: 0o600 })
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade')
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('installed store alias does not match')
+    expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command.includes('stop'))).toBe(false)
+  })
   test('reproduces the native resource gate for a lock-anchored physical stage alias', async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-stage-alias-')))
     temporaryRoots.push(root)
@@ -9998,6 +10103,23 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     expect(await readFile(join(f.profileDirectory,'pnpm-lock.yaml'),'utf8')).toBe('candidate-lock')
     expect(await readFile(join(f.dshHome,'sessions/owner-session.jsonl'),'utf8')).toBe('durable-session')
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
+    expect(await readFile(join(f.root, 'pnpm-store', 'original-store'), 'utf8')).toBe('original store')
+    expect(await readFile(join(f.cachePath, 'original-cache'), 'utf8')).toBe('original cache')
+    expect(existsSync(join(f.root, 'pnpm-store', 'package-install-marker'))).toBe(false)
+    expect(existsSync(join(f.cachePath, 'package-install-marker'))).toBe(false)
+    const invocations = (await readFile(f.bwrapLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as string[])
+    const packageInvocation = invocations.find(args => args.includes('packages'))!
+    expect(packageInvocation).toContain('--unshare-all')
+    expect(packageInvocation).not.toContain('--share-net')
+    const storeEnv = packageInvocation.indexOf('pnpm_config_store_dir')
+    expect(packageInvocation[storeEnv + 1]).toBe(f.storeAlias)
+    const storeMount = packageInvocation.lastIndexOf(join(f.root, 'pnpm-store'))
+    expect(packageInvocation[storeMount - 2]).toBe('--bind-fd')
+    expect(packageInvocation.filter(arg => arg === '--bind-fd')).toHaveLength(4)
+    for (const invocation of invocations.filter(args => args.some(arg => ['configs', 'verify', 'preview-overlay', 'assert-preview'].includes(arg)))) {
+      expect(invocation.filter(arg => arg === '--bind-fd')).toHaveLength(1)
+      expect(invocation).not.toContain('pnpm_config_cache_dir')
+    }
     const commands = await readLifecycleSystemdLog(f.systemdLog)
     expect(commands.some(command => command.includes('stop'))).toBe(true)
     expect(commands.some(command => command.includes('start'))).toBe(true)
@@ -10021,6 +10143,10 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     const result = runPreOwnerLifecycle(f,'local-service-upgrade',{packageFails:true})
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('fixture package failure')
+    expect(existsSync(join(f.root, 'pnpm-store', 'package-install-marker'))).toBe(false)
+    expect(existsSync(join(f.cachePath, 'package-install-marker'))).toBe(false)
+    const archived = (await readdir(f.root)).find(name => name.startsWith('home.dsh-enhanced-transaction.failed-'))!
+    expect((await readdir(join(f.root, archived))).some(name => name.startsWith('local-package-caches-'))).toBe(false)
     expect((await stat(f.dshHome)).mode & 0o777).toBe(0o755)
     expect(await readFile(join(f.dshHome,'rsi-sources/web/receipt.json'),'utf8')).toContain('old')
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
