@@ -1,14 +1,14 @@
 import { execFileSync } from 'node:child_process'
 import { createHash, generateKeyPairSync } from 'node:crypto'
-import { chmod, cp, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, readdir, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
 import { ControlPlaneStore, controlPlaneDigest, hostMaintenanceDigest, parseSourceMaintenanceRecord,
-  sourceMaintenanceDigest, verifySourceMaintenanceRecords,
-  type HostAttestationReceipt, type PluginActivationPlan } from '@dsh-enhanced/plugin-control-plane'
+  signSourceMaintenanceRecord, sourceMaintenanceDigest, verifySourceMaintenanceRecords,
+  type HostAttestationReceipt, type PluginActivationPlan, type PluginControlTrustConfig } from '@dsh-enhanced/plugin-control-plane'
 import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.js'
-import { produceRsiLocalSourceMaintenance } from '../src/rsi-local-activation.js'
+import { assertRsiPreOwnerInstallation, produceRsiLocalSourceMaintenance } from '../src/rsi-local-activation.js'
 import { prepareRsiLocalCohort, type RsiLocalCohort } from '../src/rsi-local-cohort.js'
 import { prepareRsiLocalUpdate } from '../src/rsi-local-update.js'
 import { applyRsiSourceMaintenanceInStage, readRsiSourceMaintenance } from '../src/rsi-source-maintenance.js'
@@ -71,15 +71,17 @@ async function stageCohort(f: { home: string; profile: string; sourceRepository:
   await writeFile(join(stagedRoot, 'receipt.json'), JSON.stringify(next))
   return next
 }
-async function fixture(watched = false) {
+async function fixture(watched = false, preOwner = false) {
   const f = await localCohortFixture(); roots.push(f.root)
   const original = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile,
     source: f.source, bundles: ['target'] }, f.ports)
   await installFixture(f, original, undefined, `home/profiles/${f.profile}`)
   const resources = await prepareRsiAuthorityResources({ dshHome: f.home, profile: f.profile })
   const ledger = join(resources.stateRoot, 'control-plane', 'control.sqlite')
-  await mkdir(join(resources.stateRoot, 'control-plane'), { mode: 0o700 })
-  const store = new ControlPlaneStore({ path: ledger }); store.close()
+  if (!preOwner) {
+    await mkdir(join(resources.stateRoot, 'control-plane'), { mode: 0o700 })
+    const store = new ControlPlaneStore({ path: ledger }); store.close()
+  }
   let watchedPlan: PluginActivationPlan | undefined
   let readiness: HostAttestationReceipt | undefined
   if (watched) {
@@ -105,7 +107,8 @@ async function fixture(watched = false) {
   await cp(f.home, stage, { recursive: true })
   const stageLedger = join(stage, 'rsi-authorities', f.profile, 'state', 'control-plane', 'control.sqlite')
   const nextCohort = await stageCohort(f, stage, preparation.cohort)
-  const input = { logicalHome: f.home, profile: f.profile, preparation, live, stagePhysicalHome: stage, nextCohort }
+  const input = { logicalHome: f.home, profile: f.profile, preparation, live, stagePhysicalHome: stage, nextCohort,
+    ...(preOwner ? { maintenanceMode: 'pre-owner' as const } : {}) }
   return { ...f, resources, original, preparation, live, stage, ledger, stageLedger, watchedPlan, readiness, input }
 }
 
@@ -125,12 +128,12 @@ test('produces a verifiable unanchored Host signature without writing either Hom
   expect(await snapshot(f.stage)).toEqual(originalStage)
 }, 60_000)
 
-test('extends a previously applied signed Git and ledger chain with the exact prior digest', async () => {
-  const f = await fixture(), originalHome = await snapshot(f.home)
+test.each(['owner-ledger', 'pre-owner'] as const)('extends a previously applied signed Git chain in %s mode with the exact prior digest', async mode => {
+  const f = await fixture(false, mode === 'pre-owner'), originalHome = await snapshot(f.home)
   const first = await produceRsiLocalSourceMaintenance(f.input)
   await applyRsiSourceMaintenanceInStage({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile,
     sourceRepository: f.sourceRepository, candidateRoot: f.preparation.source.root, records: [first] })
-  sql(f.stageLedger, database => database.prepare('INSERT INTO source_maintenance VALUES (?,?,?,?,?,?)')
+  if (mode === 'owner-ledger') sql(f.stageLedger, database => database.prepare('INSERT INTO source_maintenance VALUES (?,?,?,?,?,?)')
     .run(first.repository, first.sequence, first.transactionId, null, JSON.stringify(first), sourceMaintenanceDigest(first)))
   const archive = join(f.root, 'original-home')
   await rename(f.home, archive); await rename(f.stage, f.home)
@@ -248,3 +251,144 @@ test.each(['missing-readiness', 'forged-signature', 'foreign-issuer', 'unwatched
     await expect(produceRsiLocalSourceMaintenance(f.input)).rejects.toThrow()
     expect(await snapshot(f.home)).toEqual(originalHome)
   }, 60_000)
+
+
+test('explicit pre-owner maintenance signs real Host evidence without creating a ledger and imports through first-owner contract', async () => {
+  const f = await fixture(false, true)
+  for (const home of [f.home, f.stage]) await writeFile(join(home, 'profiles', f.profile, 'cordis.patch.yml'),
+    '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config:\n    sourceAdoptions: null\n- id: unrelated-default\n  name: !!js import("unrelated")\n', { mode: 0o600 })
+  const originalLive = await snapshot(f.home), originalStage = await snapshot(f.stage)
+  const proof = await assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile })
+  expect(proof).toMatchObject({ mode: 'pre-owner', anchor: f.live.anchor, records: [], sourceChainTip: f.source.sourceCommit,
+    originalBootstrapDigest: f.live.originalBootstrapDigest })
+  const first = await produceRsiLocalSourceMaintenance(f.input)
+  expect(first).toMatchObject({ host: null, sequence: 1, previousDigest: null, previousTip: f.source.sourceCommit })
+  expect(verifySourceMaintenanceRecords([first], f.live.anchor)).toEqual([first])
+  await expect(produceRsiLocalSourceMaintenance({ ...f.input, maintenanceMode: 'owner-ledger' })).rejects.toThrow('live control ledger is unavailable')
+  expect(await snapshot(f.home)).toEqual(originalLive)
+  expect(await snapshot(f.stage)).toEqual(originalStage)
+  await applyRsiSourceMaintenanceInStage({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile,
+    sourceRepository: f.sourceRepository, candidateRoot: f.preparation.source.root, records: [first] })
+  const maintained = await assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile, records: [first] })
+  expect(maintained.sourceChainTip).toBe(first.candidateTip)
+  expect((await readRsiSourceMaintenance({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile })).records).toEqual([first])
+  // This is the exact native import used by rsi-bootstrap's first owner setup.
+  // Only this disposable stage receives a ledger; the live Home remains untouched.
+  await mkdir(join(f.stageLedger, '..'), { recursive: true, mode: 0o700 })
+  const store = new ControlPlaneStore({ path: f.stageLedger })
+  const trust = { installationId: f.resources.installationId, dshHome: f.home,
+    ledger: f.live.anchor.ledger, hostAttestationKeys: [f.live.anchor.hostIdentity] } as unknown as PluginControlTrustConfig
+  try {
+    await store.importSourceMaintenanceRecords([first], { trust, baseline: f.live.anchor.baseline, physicalHome: f.stage })
+    await store.importSourceMaintenanceRecords([first], { trust, baseline: f.live.anchor.baseline, physicalHome: f.stage })
+    expect(store.getSourceMaintenanceRecords(first.repository)).toEqual([first])
+  } finally { store.close() }
+  await expect(assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile,
+    records: [first] })).rejects.toThrow('pre-owner state is not empty')
+  expect(await snapshot(f.home)).toEqual(originalLive)
+}, 60_000)
+
+const residues = ['config', 'ledger', 'state', 'registry', 'catalog', 'coordinator-profile', 'coordinator-state',
+  'coordinator-receipt', 'setup-journal', 'target-control-plane', 'target-authority-reference'] as const
+for (const side of ['live', 'stage'] as const) test.each(residues)('rejects pre-owner %s residue in ' + side, async kind => {
+  const f = await fixture(false, true), home = side === 'live' ? f.home : f.stage
+  const digest = hash(f.profile), coordinator = `rsi-${f.profile.slice(0, 43)}-${digest.slice(0, 12)}`
+  const authority = join(home, 'rsi-authorities', f.profile)
+  const path = kind === 'config' ? join(authority, 'config', 'manifest.json')
+    : kind === 'ledger' ? join(authority, 'state', 'control-plane', 'control.sqlite')
+      : kind === 'state' ? join(authority, 'state', 'used-grant.json')
+        : kind === 'registry' ? join(authority, 'registry', 'artifact.tgz')
+          : kind === 'catalog' ? join(authority, 'catalog.json')
+            : kind === 'coordinator-profile' ? join(home, 'profiles', coordinator, 'package.json')
+              : kind === 'coordinator-state' ? join(home, 'rsi-coordinators', coordinator, 'automations.sqlite')
+                : kind === 'coordinator-receipt' ? join(home, `.rsi-coordinator-${digest.slice(0, 16)}.json`)
+                  : kind === 'setup-journal' ? join(home, '.rsi-setup-journal.json')
+                    : join(home, 'profiles', f.profile, 'cordis.patch.yml')
+  await mkdir(join(path, '..'), { recursive: true, mode: 0o700 })
+  const bytes = kind === 'catalog' ? '{"schemaVersion":1,"entries":[{}]}'
+    : kind === 'target-control-plane' ? '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  disabled: true\n  config:\n    sourceAdoptions: {}\n'
+      : kind === 'target-authority-reference' ? `- id: owner-tools\n  config:\n    authorityPath: ${join(f.home, 'rsi-authorities', f.profile, 'config', 'host-authority.json')}\n` : '{}'
+  await writeFile(path, bytes, { mode: 0o600 })
+  const beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)
+  await expect(produceRsiLocalSourceMaintenance(f.input)).rejects.toThrow()
+  expect(await snapshot(f.home)).toEqual(beforeLive)
+  expect(await snapshot(f.stage)).toEqual(beforeStage)
+}, 60_000)
+
+test.each(['authority-bootstrap', 'source-bootstrap', 'identity', 'sidecar', 'anchor'] as const)(
+  'rejects pre-owner %s mismatch with read-only evidence', async kind => {
+    const f = await fixture(false, true)
+    if (kind === 'authority-bootstrap' || kind === 'source-bootstrap') {
+      const root = kind === 'authority-bootstrap' ? 'rsi-authorities' : 'rsi-sources'
+      const path = join(f.stage, root, f.profile, 'bootstrap.json')
+      const receipt = JSON.parse(await readFile(path, 'utf8')); receipt.profile = 'foreign'
+      await writeFile(path, JSON.stringify(receipt))
+    } else if (kind === 'identity') await writeFile(join(f.stage, 'rsi-authorities', f.profile, 'identities', 'approval.pem'),
+      generateKeyPairSync('ed25519').privateKey.export({ format: 'pem', type: 'pkcs8' }).toString())
+    else if (kind === 'sidecar') {
+      const record = await produceRsiLocalSourceMaintenance(f.input)
+      await writeFile(join(f.stage, 'rsi-sources', f.profile, 'maintenance.json'), JSON.stringify([record]), { mode: 0o600 })
+    }
+    const input = kind === 'anchor' ? { ...f.input, live: { ...f.live, anchor: { ...f.live.anchor, installationId: 'foreign' } } } : f.input
+    const beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)
+    await expect(produceRsiLocalSourceMaintenance(input)).rejects.toThrow()
+    expect(await snapshot(f.home)).toEqual(beforeLive); expect(await snapshot(f.stage)).toEqual(beforeStage)
+  }, 60_000)
+
+test('rejects even validly signed pre-owner sidecar records carrying an owner deployment anchor', async () => {
+  const f = await fixture(false, true), record = await produceRsiLocalSourceMaintenance(f.input)
+  const { signature: _signature, publicKeyPem: _publicKey, ...unsigned } = record
+  const anchored = signSourceMaintenanceRecord({ ...unsigned, host: { planId: 'owner-plan', planDigest: 'a'.repeat(64),
+    readinessOperationId: 'owner-readiness', readinessReceiptDigest: 'b'.repeat(64) } },
+  await readFile(f.resources.identities.host.keyPath, 'utf8'))
+  await writeFile(join(f.stage, 'rsi-sources', f.profile, 'maintenance.json'), JSON.stringify([anchored]), { mode: 0o600 })
+  await expect(assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile,
+    records: [anchored] })).rejects.toThrow('owner Host activation evidence')
+}, 60_000)
+
+
+test('pre-owner inspection does not refresh the live Git index when tracked stat metadata changes', async () => {
+  const f = await fixture(false, true), tracked = join(f.source.repository, 'package.json')
+  const changedTime = new Date(Date.now() + 10_000)
+  await utimes(tracked, changedTime, changedTime)
+  const beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)
+  const index = await readFile(join(f.source.repository, '.git', 'index'))
+  const proof = await assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile })
+  expect(proof.mode).toBe('pre-owner')
+  expect(await readFile(join(f.source.repository, '.git', 'index'))).toEqual(index)
+  expect(await snapshot(f.home)).toEqual(beforeLive); expect(await snapshot(f.stage)).toEqual(beforeStage)
+}, 60_000)
+
+
+test.each(['home-patch', 'home-root', 'profile-root', 'dynamic-row', 'dynamic-config', 'include', 'alternate-format', 'external-overlay'] as const)(
+  'rejects pre-owner %s configuration outside the target patch', async kind => {
+    const f = await fixture(false, true)
+    const path = kind === 'home-patch' ? join(f.stage, 'cordis.patch.yml')
+      : kind === 'home-root' ? join(f.stage, 'cordis.yml')
+        : kind === 'profile-root' ? join(f.stage, 'profiles', f.profile, 'cordis.yml')
+          : kind === 'alternate-format' ? join(f.stage, 'cordis.patch.yaml')
+            : join(f.stage, 'profiles', f.profile, 'cordis.patch.yml')
+    const source = kind === 'dynamic-row' ? '- !!js ({name: "@dsh-enhanced/plugin-control-plane", config: {sourceAdoptions: {}}})\n'
+      : kind === 'dynamic-config' ? '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config: !!js import("owner-config")\n'
+        : kind === 'include' ? '- id: extra-layer\n  name: "@deepseek-ai/cordis-plugin-include"\n  config:\n    url: /outside/owner.yml\n'
+          : '- id: ordinary-control-plane\n  config:\n    sourceAdoptions: {}\n'
+    if (kind !== 'external-overlay') await writeFile(path, source, { mode: 0o600 })
+    const beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)
+    await expect(assertRsiPreOwnerInstallation({ logicalHome: f.home, physicalHome: f.stage, profile: f.profile,
+      ...(kind === 'external-overlay' ? { extraPatchFiles: ['/outside/owner.yml'] } : {}) })).rejects.toThrow(/pre-owner/u)
+    expect(await snapshot(f.home)).toEqual(beforeLive); expect(await snapshot(f.stage)).toEqual(beforeStage)
+  }, 60_000)
+
+test('supports empty native root layers and ordinary defaults while never evaluating unrelated !!js module references', async () => {
+  const f = await fixture(false, true)
+  for (const home of [f.home, f.stage]) {
+    await writeFile(join(home, 'cordis.patch.yml'), '[]\n', { mode: 0o644 })
+    await writeFile(join(home, 'profiles', f.profile, 'cordis.yml'), '# launcher-owned empty root\n[]\n', { mode: 0o644 })
+    await writeFile(join(home, 'profiles', f.profile, 'cordis.patch.yml'),
+      '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config:\n    sourceJobs: null\n- id: harmless-loader-reference\n  name: !!js import("does-not-exist")\n', { mode: 0o644 })
+  }
+  const beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)
+  const record = await produceRsiLocalSourceMaintenance(f.input)
+  expect(record.host).toBeNull()
+  expect(await snapshot(f.home)).toEqual(beforeLive); expect(await snapshot(f.stage)).toEqual(beforeStage)
+}, 60_000)

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { realpath, rename, unlink } from 'node:fs/promises'
+import { lstat, realpath, rename, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { rsiBuildResources as io } from './rsi-build.js'
@@ -12,12 +12,14 @@ import { assertRsiLocalProfileRoots, rebaseRsiLocalProfileWorkspace } from './rs
 const coordinatorBundles = ['assistant-policy', 'assistant-automations', 'plugin-control-plane']
 const hash = (source: string | Buffer): string => createHash('sha256').update(source).digest('hex')
 function fail(message: string): never { throw new Error(`rsi local pair install: ${message}`) }
-export interface RsiLocalPairPackageProof {
+export interface RsiLocalSinglePackageProof {
   schemaVersion: 1
   profile: string
-  coordinatorProfile: string
   cohortDigest: string
   files: Record<string, string>
+}
+export interface RsiLocalPairPackageProof extends RsiLocalSinglePackageProof {
+  coordinatorProfile: string
 }
 export interface RsiLocalPairPackagePorts {
   install: typeof installRsiLocalProfile
@@ -41,23 +43,54 @@ async function replace(path: string, before: Buffer, after: string): Promise<voi
  * originalCohort, and has staged candidate resources. This helper neither
  * establishes that isolation nor switches services. A failed install leaves the
  * stage for outer recovery/discard; it never reports a partial pair as success. */
-export async function stageRsiLocalPairPackages(input: {
+interface RsiLocalPackageInput {
   dshHome: string; profile: string; originalCohort: RsiLocalCohort
   dsh: Pick<InstalledRsiDsh, 'path' | 'pin'>; signal: AbortSignal
-}, dependencies: RsiLocalPairPackagePorts = ports): Promise<RsiLocalPairPackageProof> {
+}
+
+export async function stageRsiLocalPairPackages(input: RsiLocalPackageInput,
+  dependencies: RsiLocalPairPackagePorts = ports): Promise<RsiLocalPairPackageProof> {
+  return { ...await stageRsiLocalPackages(input, dependencies, true), coordinatorProfile: rsiCoordinatorProfile(input.profile) }
+}
+
+/** Package-only step for an explicitly verified pre-owner installation. The
+ * outer transaction must also prove the absence of owner authority, stage signed
+ * source maintenance and own stop/copy/switch/recovery. Never splits an existing
+ * coordinator pair, even if its receipt or profile has been partly removed. */
+export async function stageRsiLocalSinglePackages(input: RsiLocalPackageInput,
+  dependencies: RsiLocalPairPackagePorts = ports): Promise<RsiLocalSinglePackageProof> {
+  return stageRsiLocalPackages(input, dependencies, false)
+}
+
+async function absent(path: string): Promise<boolean> {
+  try { await lstat(path); return false }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; throw error }
+}
+
+async function stageRsiLocalPackages(input: RsiLocalPackageInput,
+  dependencies: RsiLocalPairPackagePorts, paired: boolean): Promise<RsiLocalSinglePackageProof> {
   const { dshHome, profile, originalCohort, signal } = input
   signal.throwIfAborted()
   if (await realpath(dshHome) !== dshHome) fail('Home is not canonical')
   const coordinatorProfile = rsiCoordinatorProfile(profile)
   const candidate = await readRsiLocalCohort({ dshHome, profile })
   const receiptPath = join(dshHome, `.rsi-coordinator-${hash(profile).slice(0, 16)}.json`)
-  const receiptSource = await io.readStable(receiptPath, 65_536, true)
+  const assertSingle = async (): Promise<void> => {
+    if (!await absent(receiptPath) || !await absent(join(dshHome, 'profiles', coordinatorProfile))) {
+      fail('single-profile update cannot split an existing or incomplete coordinator pair')
+    }
+  }
+  if (!paired) await assertSingle()
+  const receiptSource = paired ? await io.readStable(receiptPath, 65_536, true) : undefined
   const receipt = { schemaVersion: 1, targetProfile: profile, coordinatorProfile,
     version: originalCohort.version, sourceRepository: originalCohort.sourceRepository }
-  if (!isDeepStrictEqual(JSON.parse(receiptSource.toString('utf8')), receipt)) fail('coordinator receipt differs')
+  if (receiptSource && !isDeepStrictEqual(JSON.parse(receiptSource.toString('utf8')), receipt)) fail('coordinator receipt differs')
   const nextReceipt = JSON.stringify({ ...receipt, version: candidate.version })
   const snapshots = []
-  for (const [name, bundles] of [[profile, originalCohort.bundles], [coordinatorProfile, coordinatorBundles]] as const) {
+  const profiles: readonly (readonly [string, readonly string[]])[] = paired
+    ? [[profile, originalCohort.bundles], [coordinatorProfile, coordinatorBundles]]
+    : [[profile, originalCohort.bundles]]
+  for (const [name, bundles] of profiles) {
     signal.throwIfAborted()
     const root = join(dshHome, 'profiles', name)
     await io.directory(root, false)
@@ -77,7 +110,8 @@ export async function stageRsiLocalPairPackages(input: {
   }
   // All old package inventories and both configurations must pass before the
   // first write or package-manager invocation.
-  if (!(await io.readStable(receiptPath, 65_536, true)).equals(receiptSource)) fail('coordinator receipt changed')
+  if (receiptSource && !(await io.readStable(receiptPath, 65_536, true)).equals(receiptSource)) fail('coordinator receipt changed')
+  if (!paired) await assertSingle()
   for (const snapshot of snapshots) for (const [name, expected] of [
     ['package.json', snapshot.manifest], ['cordis.patch.yml', snapshot.patch], ['pnpm-workspace.yaml', snapshot.workspace],
   ] as const) if (!(await io.readStable(join(snapshot.root, name), 2_097_152)).equals(expected)) fail(`profile changed before installation: ${snapshot.name}`)
@@ -105,8 +139,10 @@ export async function stageRsiLocalPairPackages(input: {
   }
   if (!isDeepStrictEqual(await readRsiLocalCohort({ dshHome, profile }), candidate)) fail('candidate cohort changed')
   signal.throwIfAborted()
-  await replace(receiptPath, receiptSource, nextReceipt)
-  await io.syncDirectory(dshHome)
-  files[receiptPath] = hash(nextReceipt)
-  return { schemaVersion: 1, profile, coordinatorProfile, cohortDigest: candidate.receiptDigest, files }
+  if (receiptSource) {
+    await replace(receiptPath, receiptSource, nextReceipt)
+    await io.syncDirectory(dshHome)
+    files[receiptPath] = hash(nextReceipt)
+  } else await assertSingle()
+  return { schemaVersion: 1, profile, cohortDigest: candidate.receiptDigest, files }
 }

@@ -37,7 +37,7 @@ const GIT_FLAGS = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false
 function gitEnvironment(): NodeJS.ProcessEnv { return { PATH: '/usr/bin:/bin', HOME: '/nonexistent', LANG: 'C', LC_ALL: 'C',
   GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_COUNT: '0',
   GIT_ALLOW_PROTOCOL: 'file', GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', GIT_LFS_SKIP_SMUDGE: '1',
-  GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/false' } }
+  GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: '/bin/false', GIT_OPTIONAL_LOCKS: '0' } }
 async function git(repository: string, args: readonly string[], signal: AbortSignal): Promise<string> {
   return io.command('/usr/bin/git', [...GIT_FLAGS, '-C', repository, ...args], gitEnvironment(), signal, 60_000, 65_536)
 }
