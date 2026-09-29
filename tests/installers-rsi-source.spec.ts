@@ -73,6 +73,18 @@ describe('supervised RSI source and build preparation', () => {
     expect(result.stdout).not.toContain('安装流程完成')
   })
 
+  it('forwards an explicit existing-automation acknowledgement only to owner setup', async () => {
+    const { home, log } = await fixture()
+    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_install_rsi_owner "$@"', 'bash',
+      common, 'web', home, 'npm', repoRoot, '0', '1'], {
+      cwd: repoRoot, encoding: 'utf8', env: { ...process.env, RSI_ARGS_LOG: log },
+    })
+    expect(result.status, result.stderr).toBe(0)
+    expect((await readFile(log, 'utf8')).trimEnd().split('\n')).toEqual([
+      '--install-owner', '--profile', 'web', '--dsh-home', home, '--ack-existing-automations',
+    ])
+  })
+
   it('prints the new supervised cohort and preparation between install and final setup without writing source', async () => {
     const { home } = await fixture()
     const result = spawnSync('/bin/bash', [localInstaller, '--dry-run', '--scenario', 'supervised',
@@ -85,17 +97,16 @@ describe('supervised RSI source and build preparation', () => {
     }
     const install = result.stdout.indexOf('dsh-rsi-setup.js --install-local-cohort')
     const source = result.stdout.indexOf('dsh-rsi-setup --prepare-build --optional-build')
-    const finalSetup = result.stdout.indexOf('dsh-supervised-growth-setup --profile web')
     expect(install).toBeGreaterThanOrEqual(0)
     expect(result.stdout).toContain('--bundle assistant-growth-driver')
     expect(result.stdout).not.toContain('dsh plugin --profile web add')
     expect(source).toBeGreaterThan(install)
-    expect(finalSetup).toBeGreaterThan(source)
+    expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
     expect(result.stdout).toContain(`--source-repository ${repoRoot}`)
     expect(await readdir(home)).toEqual(['profiles'])
 
     const ownerInstall = result.stdout.indexOf('dsh-rsi-setup --install-owner')
-    expect(ownerInstall).toBeGreaterThan(finalSetup)
+    expect(ownerInstall).toBeGreaterThan(source)
     expect(ownerInstall).toBeGreaterThan(result.stdout.indexOf('doctor：将验证'))
 
     const standard = spawnSync('/bin/bash', [localInstaller, '--dry-run', '--scenario', 'lark', '--lark', 'configure'], {

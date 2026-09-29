@@ -9,7 +9,8 @@ import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
 import type { ActiveLarkOwnerBindingsSnapshot } from '@dsh-enhanced/assistant-delivery'
 import { compileRsiProfiles, type RsiSetupManifest } from './rsi-profile.js'
 import { withDshHomeLifecycleLock } from './setup.js'
-import { supervisedGrowthBindingQuery, supervisedGrowthDatabasePaths } from './supervised-growth-profile.js'
+import { assertRsiSchedulerActivation, captureRsiAutomationInventories, rsiAutomationInventory, rsiOwnerBindingQuery,
+  rsiDatabasePaths, type RsiAutomationInventories, type RsiAutomationInventory } from './rsi-owner-profile.js'
 import { installDshResidentService } from './resident.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
 import { prepareRsiBuildEnvironment, RsiBuildUnavailableError } from './rsi-build.js'
@@ -54,6 +55,9 @@ export interface RsiSetupArgs {
   prepareBuild?: boolean; optionalBuild?: boolean; dockerPath?: string
   prepareAuthorities?: boolean
   installOwner?: boolean
+  ackExistingAutomations?: boolean
+  /** Installer's pre-stop source and destination inventories; never parsed from CLI. */
+  expectedAutomationInventories?: RsiAutomationInventories
   installLocalCohort?: boolean; bundles?: string[]
   prepareLocalUpdate?: boolean
 }
@@ -74,6 +78,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     else if (key === '--prepare-build') result.prepareBuild = true
     else if (key === '--prepare-authorities') result.prepareAuthorities = true
     else if (key === '--install-owner') result.installOwner = true
+    else if (key === '--ack-existing-automations') result.ackExistingAutomations = true
     else if (key === '--install-local-cohort') result.installLocalCohort = true
     else if (key === '--prepare-local-update') result.prepareLocalUpdate = true
     else if (key === '--bundle') {
@@ -93,6 +98,8 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     } else fail(`unknown option ${key}`)
   }
   if (result.help) return result
+  if (result.ackExistingAutomations && (!result.installOwner && !result.apply || result.rollback
+    || result.prepareLocalUpdate || result.installLocalCohort || result.prepareSource || result.prepareBuild || result.prepareAuthorities)) fail('--ack-existing-automations requires --install-owner or --apply')
   if (result.prepareLocalUpdate) {
     if (result.installLocalCohort || result.installOwner || result.prepareSource || result.prepareBuild
       || result.prepareAuthorities || result.manifestPath || result.apply || result.rollback || result.start
@@ -229,6 +236,7 @@ export interface RsiSetupPorts {
   dump(profile: string, home: string): string
   base(profile: string, home: string): Promise<string>
   snapshot(effective: string, home: string): Promise<ActiveLarkOwnerBindingsSnapshot>
+  automationInventory(effective: string, home: string): Promise<RsiAutomationInventory>
   compile: typeof compileRsiProfiles
   validateAuthorities(manifest: RsiSetupManifest, owner: ActiveLarkOwnerBindingsSnapshot['bindings'][number], environment?: RsiServiceEnvironment): Promise<void>
   resolveEnvironments: typeof resolveRsiServiceEnvironments
@@ -254,9 +262,10 @@ export const rsiSetupPorts: RsiSetupPorts = {
   },
   async snapshot(effective, home) {
     const { inspectActiveLarkOwnerBindingsLocally } = await import('@dsh-enhanced/assistant-delivery')
-    return inspectActiveLarkOwnerBindingsLocally({ databasePath: supervisedGrowthDatabasePaths(effective, home).deliveryDatabasePath,
-      ...supervisedGrowthBindingQuery(effective, home) })
+    return inspectActiveLarkOwnerBindingsLocally({ databasePath: rsiDatabasePaths(effective, home).deliveryDatabasePath,
+      ...rsiOwnerBindingQuery(effective, home) })
   },
+  async automationInventory(effective, home) { return rsiAutomationInventory(effective, home) },
   compile: compileRsiProfiles,
   validateAuthorities: validateRsiAuthorities,
   resolveEnvironments: resolveRsiServiceEnvironments,
@@ -395,6 +404,10 @@ export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetu
     const input = { manifest, dshHome: home, targetPatch: original[0]!, coordinatorPatch: original[1]!,
       targetEffective: effective[0]!, coordinatorEffective: effective[1]!, coordinatorBase, owner }
     const compiled = await ports.compile(input)
+    const inventories = await captureRsiAutomationInventories(ports.automationInventory,
+      effective[0]!, effective[1]!, home, pair[1])
+    if (args.expectedAutomationInventories && !isDeepStrictEqual(inventories, args.expectedAutomationInventories)) fail('Automation inventory changed since installer preflight')
+    assertRsiSchedulerActivation(inventories, args.ackExistingAutomations === true)
     const originalEnvironments = await Promise.all(pair.map(profile => readOptionalFile(rsiServiceEnvironmentPath(home, profile))))
     const environments = await ports.resolveEnvironments(manifest, home)
     const originalUnits = environments ? await Promise.all(pair.map(profile => readOptionalFile(ports.serviceUnitPath(profile, home), false))) : undefined
@@ -403,6 +416,8 @@ export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetu
     if (!args.apply) return { mode: 'checked', profiles: pair }
     if (await readOwnedFile(args.manifestPath) !== manifestBytes || await ports.base(pair[1], home) !== coordinatorBase
       || !isDeepStrictEqual(snapshot, await ports.snapshot(effective[0]!, home))) fail('manifest or owner snapshot changed before write')
+    if (!isDeepStrictEqual(inventories, await captureRsiAutomationInventories(ports.automationInventory,
+      effective[0]!, effective[1]!, home, pair[1]))) fail('Automation inventory changed before write')
     for (let i = 0; i < pair.length; i++) {
       ports.assertStopped(pair[i]!)
       if (await readOwnedFile(patchPath(home, pair[i]!), false) !== original[i]) fail('profile changed before write')
@@ -458,7 +473,7 @@ export async function configureRsiSetupLocked(args: RsiSetupArgs, ports: RsiSetu
 export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
-    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
+    process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
     process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\nPrepare local update source and tarballs outside the active Home; does not install or activate them.\n')
     return
   }
@@ -500,7 +515,7 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
     try {
       const { installRsiOwnerDeployment } = await import('./rsi-install.js')
       const result = await installRsiOwnerDeployment({ dshHome: args.dshHome, profile: args.profile!,
-        sourceRepository: args.sourceRepository, signal: controller.signal })
+        sourceRepository: args.sourceRepository, ackExistingAutomations: args.ackExistingAutomations, signal: controller.signal })
       process.stdout.write(`${JSON.stringify(result)}\n`)
       process.stderr.write(result.mode === 'ready' ? '自迭代双 Host 已启动并通过就绪检查。\n'
         : `普通 supervised 安装已保留；自迭代双 Host 未就绪：${result.reason}。\n`)

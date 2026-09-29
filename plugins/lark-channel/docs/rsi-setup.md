@@ -42,7 +42,7 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
 
 自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
 
-目标先完成 [Lark 配对](setup.md)与 [supervised 安装](supervised-growth.md)，已有唯一 active owner DM 和有效 owner route。新安装自动补齐目标依赖；旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier 与 Control Plane。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
+目标先完成 [Lark 配对](setup.md)与 [supervised 安装](../../../scripts/install/README.md)，已有唯一 active owner DM。无需先激活固定 Recovery runbook；缺失的 owner route 在成对配置事务内生成，既有唯一精确路由（包括 `supervised-growth-owner`）沿用原 ID 和 minimum generation。路由冲突或重复会拒绝，不覆盖其他授权。新安装自动补齐目标依赖；旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier 与 Control Plane。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 
 ```sh
 dsh plugin --profile web add \
@@ -64,7 +64,7 @@ dsh plugin --profile rsi-coordinator add \
 
 manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不含 symlink。它引用已存在的私有授权器配置、key、trust、catalog 和控制账本。配置器读取并验证这些文件，不生成授权或签名回执。
 
-自动入口调用 `lib/rsi-bootstrap-manifest.js` 的 `createRsiBootstrapManifest`，从有效目标配置、真实 active owner DM、已准备资源及声明的插件/Host 文件范围生成完整 manifest；`lib/rsi-authority-config.js` 的 `compileRsiAuthorityConfigs` 生成 schema4 trust、五份有限授权、八个发布 adapter、公钥文件和 Host resolver/wrapper。安装器核对实际 DSH/Git/systemctl 与构建资源的 pins、最终 unit 属性，以及 Loader 条目的 observer 摘要；这些声明文件并非完整的传递性 JS 模块证明。默认模型继承原任务，已有显式 Growth 模型覆盖会保留。observer 不观察 Control Plane 自身，避免摘要自引用；Growth Driver 与 Verifier 按最终生成的配置摘要观察，Delivery 与 Lark 按原始 Loader 配置摘要观察。安装器把 `!!js` 标量按 Loader 原始值处理，不执行该表达式。
+自动入口调用 `lib/rsi-bootstrap-manifest.js` 的 `createRsiBootstrapManifest`，从有效目标配置、真实 active owner DM、已准备资源及声明的插件/Host 文件范围生成完整 manifest；`lib/rsi-authority-config.js` 的 `compileRsiAuthorityConfigs` 生成 schema4 trust、五份有限授权、八个发布 adapter、公钥文件和 Host resolver/wrapper。安装器核对实际 DSH/Git/systemctl 与构建资源的 pins、最终 unit 属性，以及 Loader 条目的 observer 摘要；这些声明文件并非完整的传递性 JS 模块证明。默认模型继承原任务，已有显式 Growth 模型覆盖会保留。observer 不观察 Control Plane 自身，避免摘要自引用；Delivery、Growth Driver 与 Verifier 按最终生成的配置摘要观察，Lark 按原始 Loader 配置摘要观察；输入仍核对原始配置。安装器把 `!!js` 标量按 Loader 原始值处理，不执行该表达式。
 
 `--install-owner` 在 home lifecycle lock 下调用 `prepareRsiOwnerConfiguration`，重新核对已准备的程序和身份，创建真实 Control Plane 账本和 observer 密钥，将配置写到私有目录，并执行 profile、授权和八阶段 adapter 配置预检。重复调用核对配置、密钥和 owner，保留已用账本与状态；重试复用原安装授权的起点及到期时间，不自动续期或增额。首次准备发现未登记的配置/账本则拒绝覆盖。`--local` 的 supervised 新安装固定源码 checkout 的已提交 HEAD，构建并保存独立 tarball；目标与协调器安装后都核对运行依赖闭包的文件清单和摘要。未提交修改不进入这批制品。安装接线已实现，真实普通任务闭环尚未验收。
 
@@ -113,9 +113,11 @@ dsh-rsi-setup --prepare-local-update --profile web --dsh-home "$HOME/.dsh"
 
 尚未配置 owner 自动迭代的冻结安装另有显式内部 `maintenanceMode: 'pre-owner'`，不会因账本缺失自动启用。只读 `assertRsiPreOwnerInstallation` 核对原 Home/副本的初始授权资源、全部身份、bootstrap 与签名源码链，拒绝协调器、安装 journal、已配置 owner 或不明配置层；读取 Git 时禁用可选写锁。该模式保留初始身份与历史，以 `host:null` 签署连续维护记录，不创建控制账本。对应的 `stageRsiLocalSinglePackages` 只迁移单 profile，拒绝任何协调器残留，仍核验同版本的实际包字节。外层必须另外检查所有 profile 的有效插件图与真实启动参数，并负责停服、副本、切换和恢复；这些内部组件本身不负责服务切换。开发 checkout 已提供显式 `local-service-upgrade` / `local-service-recover`，复用 Home 锁、systemd 收容、完整 Home 副本及切换/恢复；预检的原生配置导出仅在私有副本运行，恢复前重验源码、安装模块和全部配置。激活预览使用额外可丢弃 Home 副本，其队列、数据库及会话写入不会进入正式安装。用法和未发布边界见[安装器指南](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)。
 
-自动入口只收集已启用且可修复的 `@dsh-enhanced/*` 条目，核对同批包名、版本、patch、入口及声明的 Host 文件；Delivery、Lark 的原始 Loader 配置与生成后的 Growth Driver、Verifier 配置都进入目标 observer。停机后临时加载最终计划的 systemd unit，以真实 `systemctl show` 捕获授权所需属性，再恢复原 unit；捕获期间不启动服务。随后成对应用 patch、环境绑定和 unit，先启动协调器再启动目标。就绪判断要求两个 PID、InvocationID 与重启计数连续 12 秒稳定，目标 observer 与实际进程和配置摘要一致，并读到本次启动后持久登记的、绑定当前 owner scope 的协调器原生 Automation。它证明这次部署的有限启动状态，不证明普通任务已产生候选、通过独立验收或完成采用/回滚。
+自动入口只收集已启用且可修复的 `@dsh-enhanced/*` 条目，核对同批包名、版本、patch、入口及声明的 Host 文件；最终 Delivery、Growth Driver、Verifier 配置及原始 Lark Loader 配置都进入目标 observer。停机后临时加载最终计划的 systemd unit，以真实 `systemctl show` 捕获授权所需属性，再恢复原 unit；捕获期间不启动服务。随后成对应用 patch、环境绑定和 unit，先启动协调器再启动目标。就绪判断要求两个 PID、InvocationID 与重启计数连续 12 秒稳定，目标 observer 与实际进程和配置摘要一致，并读到本次启动后持久登记的、绑定当前 owner scope 的协调器原生 Automation。它证明这次部署的有限启动状态，不证明普通任务已产生候选、通过独立验收或完成采用/回滚。
 
 崩溃留下的 `prepared` journal 会先在两个 Host 停机后回滚；若回滚确认成功，先恢复原来运行的服务，再继续新预检。应用前失败仅在原 patch、journal、unit 均可核对时恢复原服务；未知状态保持停机供对账。已应用后的启动或就绪失败保留 applied journal 和配置，供停止服务、排查后重试或显式回滚。自动重试沿用原有限授权起点、期限和额度。
+
+自动安装和手动 `--apply` 都会检查两个 Host 的原 Automation 数据库，以及最终使用的数据库（协调器改用私有库）。关闭的 scheduler 将被开启、或启用另一数据库时，若原库或目标库存在 active 或 paused 定义，必须显式传入 `--ack-existing-automations`；没有固定 Recovery/Heartbeat 豁免；paused 也需确认，因为已有 Growth shadow/canary 作业仍可能被调度。数据库未知或检查失败会停止。自动入口停机后再核对同一库存；手动入口在写入前重查，发生变化即拒绝。该标志仅适用于 `--install-owner` 或 `--apply`，不续期授权、不重置次数，也不重放 unknown 动作。
 
 ## 3. 校验、应用、启动
 

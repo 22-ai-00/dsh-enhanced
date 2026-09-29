@@ -1,12 +1,13 @@
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { externalPrincipalId, ownerRouteAuthorityHash, type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
+import { type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
 import { normalizeConfig, type AssistantGrowthDriverConfig } from '@dsh-enhanced/assistant-growth-driver'
 import { normalizeControlPlaneConfig, type Config as ControlPlaneConfig } from '@dsh-enhanced/plugin-control-plane'
 import { validateSourceReviewConfig, type SourceReviewConfig } from '@dsh-enhanced/assistant-verifier'
 import { isMap, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 
 import type { RsiServiceEnvironments } from './rsi-service-setup.js'
+import { resolveRsiOwnerRoute, rsiCoordinatorAutomationDatabasePath } from './rsi-owner-profile.js'
 
 /** Private, owner supplied input for the two-host RSI overlay. */
 export interface RsiSetupManifest {
@@ -73,7 +74,6 @@ function json(item: YAMLMap, label: string): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(`${label} must be an object`)
   return value as Record<string, any>
 }
-function text(value: unknown, label: string): string { if (typeof value !== 'string' || value.trim() !== value || !value) fail(`invalid ${label}`); return value }
 function profile(value: string, label: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(value)) fail(`invalid ${label}`)
   return value
@@ -102,33 +102,6 @@ function removePrefixed(values: YAMLSeq): void {
 function absolute(value: string, label: string): string { if (!isAbsolute(value) || resolve(value) !== value) fail(`${label} must be canonical absolute`); return value }
 function same(value: unknown, expected: unknown, label: string): void { if (!isDeepStrictEqual(value, expected)) fail(`${label} does not match owner scope`) }
 
-function ownerRoute(delivery: YAMLMap, owner: ActiveLarkOwnerBinding, routeId: string, dshHome: string): { workspace: string; preset: string; principal: string; route: Record<string, any> } {
-  const root = json(delivery, 'assistant-delivery config')
-  const configuredWorkspace = text(root.defaultWorkspace, 'assistant-delivery.defaultWorkspace')
-  const workspace = configuredWorkspace === "dshHomePath('assistant-workspace')" || configuredWorkspace === 'dshHomePath("assistant-workspace")'
-    ? join(dshHome, 'assistant-workspace') : absolute(configuredWorkspace, 'assistant-delivery.defaultWorkspace')
-  const preset = text(root.defaultAgentPreset, 'assistant-delivery.defaultAgentPreset')
-  const principal = externalPrincipalId(owner.principal)
-  if (workspace !== owner.workspace || preset !== owner.agentPreset || root.policyRef !== undefined && root.policyRef !== owner.policyRef) fail('owner binding differs from effective delivery scope')
-  const routes = root.ownerRoutes
-  if (!Array.isArray(routes)) fail('assistant-delivery.ownerRoutes is missing')
-  const candidates = routes.filter((item: any) => item && typeof item === 'object' && item.id === routeId)
-  if (candidates.length !== 1) fail('effective delivery has no unique owner route for the owner binding')
-  const route = candidates[0] as Record<string, any>
-  // The configured authority is checked field-for-field before it can bind a
-  // durable owner receipt. Its minimum generation is a lower bound, not an
-  // optional hint.
-  for (const key of ['conversation', 'principal', 'workspace', 'agentPreset', 'policyRef'] as const) {
-    const expected = key === 'conversation' ? owner.conversation : key === 'principal' ? owner.principal : owner[key]
-    same(route[key], expected, `owner route ${key}`)
-  }
-  if (!Number.isSafeInteger(route.minimumGeneration) || route.minimumGeneration < 1 || owner.generation < route.minimumGeneration) fail('owner route minimumGeneration does not match current binding')
-  if (owner.generation < 1 || owner.version < 1 || !owner.owner?.id || owner.owner.version < 1) fail('owner binding generation or owner receipt is invalid')
-  const id = text(route.id, 'owner route id')
-  const authority = { id, conversation: owner.conversation, principal: owner.principal, workspace, agentPreset: preset,
-    policyRef: owner.policyRef, minimumGeneration: route.minimumGeneration }
-  return { workspace, preset, principal, route: { id, authorityHash: ownerRouteAuthorityHash(authority) } }
-}
 
 function assertManifest(input: RsiSetupManifest): void {
   if (!input || input.schemaVersion !== 1) fail('unsupported manifest schema')
@@ -182,10 +155,12 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   const target = parse(input.targetPatch, 'target patch'), effective = parse(input.targetEffective, 'target effective config')
   const coordinator = parse(input.coordinatorPatch, 'coordinator patch'), coordinatorEffective = parse(input.coordinatorEffective, 'coordinator effective config')
   for (const id of targetBundles) required(effective.rows, id, 'target effective profile')
+  const standaloneAutomations = row(effective.rows, 'dsh-enhanced-assistant-automations')
+  if (standaloneAutomations && standaloneAutomations.get('disabled') !== true) fail('ambiguous standalone and embedded Automations providers')
   const jobs = input.manifest.controlPlane.sourceJobs
   if (!jobs || jobs.expiresAt <= Date.now()) fail('sourceJobs must be present and unexpired')
   const delivery = config(required(effective.rows, 'dsh-enhanced-assistant-delivery'), 'assistant-delivery')
-  const owner = ownerRoute(delivery, input.owner, jobs.ownerRouteId, input.dshHome)
+  const owner = resolveRsiOwnerRoute(json(delivery, 'assistant-delivery config'), input.owner, input.dshHome, jobs.ownerRouteId)
   if (jobs.ownerRouteId !== owner.route.id || jobs.principalId !== owner.principal || jobs.workspace !== owner.workspace || jobs.preset !== owner.preset) fail('sourceJobs does not match effective owner route')
   const growth = normalizeConfig(input.manifest.growthDriver)
   if (!growth.enabled || growth.intervalMs !== 0 || !growth.usageLearning.enabled || !growth.pluginSourceProposals.enabled || growth.pluginSourceProposals.preparationMode !== 'durable' || growth.pluginSourceProposals.repository !== jobs.repository || !growth.scope || !isDeepStrictEqual(growth.scope, { workspace: owner.workspace, preset: owner.preset, principalId: owner.principal, ownerRouteId: owner.route.id })) fail('growthDriver must be owner-scoped durable ordinary-use configuration')
@@ -211,6 +186,10 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     same(cp.liveQualification.scope, cp.taskObservations.scope, 'live qualification')
     if (!Number.isSafeInteger(input.manifest.limits.qualification) || input.manifest.limits.qualification! < 1
       || [...Object.values(budgetIds), input.manifest.coordinator.budgetId].includes(cp.liveQualification.budgetId)) fail('live qualification requires a distinct finite budget')
+  }
+  if (owner.created) {
+    const deliveryOverride = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-delivery')
+    seq(deliveryOverride.get('ownerRoutes', true) as Node | undefined, 'Delivery ownerRoutes').add(target.document.createNode(owner.authority))
   }
   const personal = cloneEffectiveConfig(target, effective, 'dsh-enhanced-personal-assistant')
   targetPolicy(target.document, personal, input.manifest, owner, budgetIds as { reviews: string; discovery: string; source: string; observations: string })
@@ -260,7 +239,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   upsertById(coordinator.document, rules, { id: `${rsiPrefix}coordinator-execute`, effect: 'allow', subject: coordinatorAutomationSubject, actions: ['execute'], resource: { kind: 'automation', id: 'adoption-coordinator-*' }, context: { initiators: ['background'] } })
   const automationConfig = cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-enhanced-assistant-automations')
   if (automationConfig.get('allowUnbudgetedExecution') === true) fail('coordinator allowUnbudgetedExecution must be false')
-  automationConfig.set('schedulerEnabled', true); automationConfig.set('databasePath', join(root, 'automations.sqlite')); automationConfig.set('runsPath', join(root, 'runs'))
+  automationConfig.set('schedulerEnabled', true); automationConfig.set('databasePath', rsiCoordinatorAutomationDatabasePath(input.dshHome, input.manifest.coordinatorProfile)); automationConfig.set('runsPath', join(root, 'runs'))
   cloneEffectiveConfig(coordinator, coordinatorEffective, 'dsh-enhanced-plugin-control-plane')
   replaceNode(coordinator.document, required(coordinator.rows, 'dsh-enhanced-plugin-control-plane'), 'config', coordinatorCp)
   return { targetPatch: target.document.toString({ lineWidth: 0 }), coordinatorPatch: coordinator.document.toString({ lineWidth: 0 }) }
