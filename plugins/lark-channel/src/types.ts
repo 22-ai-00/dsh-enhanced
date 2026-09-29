@@ -110,6 +110,12 @@ export interface LarkUserQuestionCard {
   answered?: readonly LarkUserQuestionAnsweredItem[]
 }
 
+/** A terminal projection of authorization, never a claim of tool execution success. */
+export interface LarkToolApprovalResultCard {
+  status: 'allowed-once' | 'rejected' | 'cancelled' | 'expired' | 'unavailable'
+  toolName: string
+}
+
 /** A terminal projection for a previously pending Lark user-question card. */
 export interface LarkUserQuestionResultCard {
   status: 'answered' | 'cancelled' | 'resolved'
@@ -183,6 +189,7 @@ export type LarkSendInput =
   | { permissionPicker: LarkPermissionPickerCard }
   | { text: string }
   | { toolApproval: LarkToolApprovalCard }
+  | { toolApprovalResult: LarkToolApprovalResultCard }
   | { userQuestion: LarkUserQuestionCard }
   | { userQuestionResult: LarkUserQuestionResultCard }
 

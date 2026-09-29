@@ -1323,3 +1323,26 @@ describe('Lark SDK boundary', () => {
     expect(oversized.destroyed).toBe(true)
   })
 })
+
+
+describe('tool approval terminal card rendering', () => {
+  test.each([
+    ['allowed-once', '已允许本次操作，任务继续中'],
+    ['rejected', '已拒绝本次操作'],
+    ['cancelled', '本次审批已取消'],
+    ['expired', '本次审批已超时'],
+    ['unavailable', '本次审批已结束'],
+  ] as const)('renders %s as honest plain text with no interactive controls', (status, title) => {
+    const rendered = renderLarkMessage({ toolApprovalResult: { status, toolName: '<script>[link](https://example.com)</script>' } })
+    const card = JSON.parse(rendered.content)
+    expect(card).toMatchObject({ schema: '2.0', config: { summary: { content: title } },
+      header: { title: { tag: 'plain_text', content: title } } })
+    expect(card.body.elements).toEqual([
+      { tag: 'div', text: { tag: 'plain_text', content: expect.any(String) } },
+      { tag: 'div', text: { tag: 'plain_text', content: '工具：<script>[link](https://example.com)</script>' } },
+    ])
+    expect(rendered.content).not.toContain('"tag":"button"')
+    expect(rendered.content).not.toContain('"behaviors"')
+    expect(rendered.content).not.toContain('执行成功')
+  })
+})

@@ -131,11 +131,14 @@ export interface LarkAdapterOptions {
 }
 
 interface PendingToolApproval {
+  readonly presentationGeneration: number
   readonly payload: Omit<LarkToolApprovalActionPayload, 'decision'>
   readonly signal: AbortSignal
   readonly abort: () => void
   readonly resolve: (outcome: DeliveryToolApprovalOutcome) => void
   earlyAction?: { messageId: string; decision: 'allowed-once' | 'rejected' }
+  resultStatus?: import('./types.js').LarkToolApprovalResultCard['status']
+  textFallback?: boolean
   providerMessageId?: string
 }
 
@@ -528,6 +531,9 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly pendingUserQuestions = new Map<string, PendingUserQuestion>()
   private readonly userQuestionAnswerEvents = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly toolApprovalTombstones = new Map<string, ToolApprovalTombstone>()
+  private readonly toolApprovalUpdates = new Set<{ controller: AbortController; done: Promise<void> }>()
+  private closing = false
+  private presentationGeneration = 0
   private readonly modelSelectionUpdates = new Map<string, PendingModelSelectionUpdate>()
   private state: LarkChannelHealth['state'] = 'disconnected'
   private gapGeneration = 0
@@ -573,6 +579,8 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   }
 
   async start(context: DeliveryAdapterContext): Promise<() => Promise<void>> {
+    this.closing = false
+    this.presentationGeneration += 1
     this.state = 'connecting'
     const unsubscribe = this.transport.subscribe({
       message: async message => {
@@ -646,6 +654,8 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       this.cancelPendingUserQuestions()
       this.clearUserQuestionAnswerEvents()
       this.cancelModelSelectionUpdates()
+      this.closing = true
+      await this.drainToolApprovalUpdates()
       await this.transport.disconnect()
     }
   }
@@ -701,7 +711,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     if (previousTombstone !== undefined) {
       if (now < previousTombstone.expiresAt) return 'unavailable'
       const expiredPending = this.pendingToolApprovals.get(input.operationId)
-      if (expiredPending !== undefined) this.settleToolApproval(expiredPending, 'unavailable')
+      if (expiredPending !== undefined) this.settleToolApproval(expiredPending, 'unavailable', 'expired')
       this.deleteToolApprovalTombstone(input.operationId, previousTombstone)
     }
     const payload: Omit<LarkToolApprovalActionPayload, 'decision'> = {
@@ -744,8 +754,15 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     let resolve!: (outcome: DeliveryToolApprovalOutcome) => void
     const outcome = new Promise<DeliveryToolApprovalOutcome>(settle => { resolve = settle })
     let pending!: PendingToolApproval
-    const abort = () => { this.settleToolApproval(pending, 'cancelled') }
-    pending = { payload, signal, abort, resolve }
+    const abort = () => {
+      let status: 'cancelled' | 'expired' = 'cancelled'
+      try {
+        const abortedAt = this.now()
+        if (Number.isSafeInteger(abortedAt) && abortedAt >= payload.expiresAt) status = 'expired'
+      } catch { /* A failed clock cannot establish expiry. */ }
+      this.settleToolApproval(pending, 'cancelled', status)
+    }
+    pending = { payload, signal, abort, resolve, presentationGeneration: this.presentationGeneration }
     const tombstone: ToolApprovalTombstone = { expiresAt: input.expiresAt }
     this.pendingToolApprovals.set(input.operationId, pending)
     this.toolApprovalTombstones.set(input.operationId, tombstone)
@@ -762,7 +779,13 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     }
     try {
       const result = await this.transport.send(input.target.conversation.chat, card, sendOptions)
-      if (this.pendingToolApprovals.get(input.operationId) !== pending) return await outcome
+      if (this.pendingToolApprovals.get(input.operationId) !== pending) {
+        if (larkProviderMessageIdentifier.test(result.messageId) && pending.resultStatus !== undefined) {
+          pending.providerMessageId = result.messageId
+          this.updateToolApprovalResult(pending, pending.resultStatus)
+        }
+        return await outcome
+      }
       if (!larkProviderMessageIdentifier.test(result.messageId)) {
         this.settleToolApproval(pending, 'unavailable')
         return await outcome
@@ -783,6 +806,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
             requestKey: `${sendOptions.requestKey}:text-fallback`,
           })
           if (larkProviderMessageIdentifier.test(fallback.messageId)) {
+            pending.textFallback = true
             pending.providerMessageId = fallback.messageId
             return await outcome
           }
@@ -1442,7 +1466,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       }
       if (remaining <= 0) {
         const pending = this.pendingToolApprovals.get(operationId)
-        if (pending !== undefined) this.settleToolApproval(pending, 'unavailable')
+        if (pending !== undefined) this.settleToolApproval(pending, 'unavailable', 'expired')
         this.deleteToolApprovalTombstone(operationId, tombstone)
         return
       }
@@ -1459,11 +1483,68 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     return true
   }
 
-  private settleToolApproval(pending: PendingToolApproval, outcome: DeliveryToolApprovalOutcome): boolean {
+  private toolApprovalResult(
+    pending: PendingToolApproval,
+    status: import('./types.js').LarkToolApprovalResultCard['status'],
+  ): Extract<import('./types.js').LarkSendInput, { toolApprovalResult: unknown }> {
+    return { toolApprovalResult: { status, toolName: pending.payload.toolName } }
+  }
+
+  private updateToolApprovalResult(
+    pending: PendingToolApproval,
+    status: import('./types.js').LarkToolApprovalResultCard['status'],
+  ): void {
+    const update = this.transport.updateRawCard
+    const messageId = pending.providerMessageId
+    if (this.closing || pending.presentationGeneration !== this.presentationGeneration
+      || pending.textFallback || messageId === undefined || update === undefined) return
+    const controller = new AbortController()
+    const card = rawCard(this.toolApprovalResult(pending, status))
+    let abort!: () => void
+    const cancelled = new Promise<void>(resolve => { abort = resolve })
+    controller.signal.addEventListener('abort', abort, { once: true })
+    const deadline = setTimeout(() => {
+      this.recordPresentationFailure(new LarkTransportError('send_timeout', 'Lark tool approval update timed out'))
+      controller.abort()
+    }, 30_000)
+    deadline.unref?.()
+    const entry = { controller, done: Promise.resolve() }
+    entry.done = Promise.race([
+      Promise.resolve().then(() => update.call(this.transport, messageId, card, controller.signal))
+        .catch(error => { if (!controller.signal.aborted) this.recordPresentationFailure(error) }),
+      cancelled,
+    ]).finally(() => {
+      clearTimeout(deadline)
+      controller.signal.removeEventListener('abort', abort)
+      this.toolApprovalUpdates.delete(entry)
+    })
+    this.toolApprovalUpdates.add(entry)
+  }
+
+  private async drainToolApprovalUpdates(): Promise<void> {
+    if (this.toolApprovalUpdates.size === 0) return
+    let deadline!: ReturnType<typeof setTimeout>
+    await Promise.race([
+      Promise.all([...this.toolApprovalUpdates].map(entry => entry.done)),
+      new Promise<void>(resolve => { deadline = setTimeout(resolve, 1_000) }),
+    ])
+    clearTimeout(deadline)
+    for (const entry of this.toolApprovalUpdates) entry.controller.abort()
+    await Promise.all([...this.toolApprovalUpdates].map(entry => entry.done))
+  }
+
+  private settleToolApproval(
+    pending: PendingToolApproval,
+    outcome: DeliveryToolApprovalOutcome,
+    status: import('./types.js').LarkToolApprovalResultCard['status'] = outcome,
+    updatePresentation = true,
+  ): boolean {
     if (this.pendingToolApprovals.get(pending.payload.operationId) !== pending) return false
     this.pendingToolApprovals.delete(pending.payload.operationId)
     pending.signal.removeEventListener('abort', pending.abort)
+    pending.resultStatus = status
     pending.resolve(outcome)
+    if (updatePresentation) this.updateToolApprovalResult(pending, status)
     return true
   }
 
@@ -1724,11 +1805,12 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     if (pending.providerMessageId !== action.messageId) {
       throw new LarkToolApprovalError('invalid', 'Lark tool approval request does not match')
     }
-    if (!this.settleToolApproval(pending, payload.decision)) {
+    if (!this.settleToolApproval(pending, payload.decision, payload.decision, false)) {
       throw new LarkToolApprovalError('invalid', 'Lark tool approval request is no longer pending')
     }
     return { toast: { type: payload.decision === 'allowed-once' ? 'success' : 'info',
-      content: payload.decision === 'allowed-once' ? '已仅允许本次工具调用' : '已拒绝工具调用' } }
+      content: payload.decision === 'allowed-once' ? '已仅允许本次工具调用' : '已拒绝工具调用' },
+      ...callbackCard(this.toolApprovalResult(pending, payload.decision)) }
   }
 
   private async handleUserQuestionAction(
