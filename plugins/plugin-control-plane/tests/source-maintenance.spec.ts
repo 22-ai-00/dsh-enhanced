@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -11,6 +11,9 @@ import { signSourceMaintenanceRecord, sourceMaintenanceDigest, sourceBaselineCha
   type SourceMaintenanceRecord } from '../src/source-maintenance.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
 import { hostMaintenanceDigest } from '../src/host-maintenance.ts'
+import { Ed25519PostActivationObservationAuthority, postActivationEvidenceDigest,
+  postActivationObservationSigningPayload } from '../src/post-activation.ts'
+import type { PostActivationObservationReceipt } from '../src/types.ts'
 import type { PluginControlTrustConfig } from '../src/trust.ts'
 import { sourceBaselineRelease } from './helpers/source-baseline.ts'
 import { cleanupRuntimeEpochFixtures, createRuntimeEpochFixture } from './helpers/runtime-epoch.ts'
@@ -229,4 +232,72 @@ test('watched owner requires its original readiness key and rejects pending or c
     await expect(store.appendSourceMaintenance(second, { trust: f.trust, baseline })).rejects.toThrow(/activation is unsettled/u)
     expect(store.getSourceMaintenanceRecords(repository)).toEqual([first])
   } finally { db.close(); f.coordinator.close() }
+}, 60_000)
+
+test('maintains a successor deployment while retaining a superseded activated plan with its closed watch and older success', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-source-successor-'))); roots.push(root)
+  const repository = join(root, 'source'), remote = join(root, 'remote.git')
+  git(root, 'init', '-q', '-b', 'main', repository)
+  git(repository, 'config', 'user.email', 'fixture@example.invalid'); git(repository, 'config', 'user.name', 'Fixture')
+  const commits: string[] = []
+  for (let index = 0; index < 4; index++) {
+    await writeFile(join(repository, 'source.txt'), `source ${index}\n`)
+    git(repository, 'add', '.'); git(repository, 'commit', '-qm', `source ${index}`)
+    commits.push(git(repository, 'rev-parse', 'HEAD'))
+  }
+  const [initial, released, successorTip, maintained] = commits as [string,string,string,string]
+  git(root, 'init', '-q', '--bare', remote); await chmod(remote, 0o700)
+  git(repository, 'push', '-q', remote, 'HEAD:refs/heads/repairs')
+  const source = await releaseFixture(true, { root, repository, baseCommit: initial, mergeCommit: released })
+  const old = await createRuntimeEpochFixture({ releaseFixture: source })
+  const keys = generateKeyPairSync('ed25519'), now = Date.now()
+  const evidence = { kind: 'post-activation-health' as const, checks: 1, failures: 1, probeDigest: sha('regression') }
+  const unsigned: Omit<PostActivationObservationReceipt, 'signature'> = {
+    schemaVersion: 1, observationId: 'superseded-regression', authority: 'host-observer', keyId: 'host-observer',
+    installationId: old.plan.installationId, planId: old.plan.id, planDigest: old.plan.digest,
+    activationId: old.plan.activation!.id, fence: old.plan.activation!.fence,
+    package: old.plan.candidate.package, version: old.plan.candidate.version, integrity: old.plan.candidate.integrity,
+    disposition: 'regressed', evidence, evidenceDigest: postActivationEvidenceDigest(evidence),
+    hostGeneration: old.signed.receipt.hostGeneration, observedAt: now, expiresAt: now + 30_000,
+  }
+  await source.store.recordPostActivationObservation({ idempotencyKey: 'superseded-regression',
+    receipt: { ...unsigned, signature: sign(null, Buffer.from(postActivationObservationSigningPayload(unsigned)), keys.privateKey).toString('base64') },
+    resolveAuthority: () => new Ed25519PostActivationObservationAuthority(
+      keys.publicKey.export({ type: 'spki', format: 'pem' }), 'host-observer', 'host-observer') })
+  expect(source.store.getPlan(old.plan.id).status).toBe('activated')
+  expect(source.store.getActivationWatch(old.plan.id).state).toBe('closed-regressed')
+  old.coordinator.close()
+  const next = await source.next({ baseCommit: released, mergeCommit: successorTip })
+  const current = await createRuntimeEpochFixture({ releaseFixture: next })
+  expect(current.plan.target.profilePath).toBe(old.plan.target.profilePath)
+  expect(source.store.listRetiredActivationBackups(current.plan.id).map(plan => plan.id)).toEqual([old.plan.id])
+  expect(() => source.store.beginPostActivationRollback({ planId: old.plan.id, expectedRevision: old.plan.revision })).toThrow(/superseded/u)
+  expect(source.store.readSourceMaintenanceActivationState(root)).toEqual({ kind: 'watched', planId: current.plan.id })
+  const baseline = { ref: 'refs/dsh-source/repairs', remote, targetBranch: 'repairs', initialCommit: initial }
+  git(repository, 'update-ref', baseline.ref, maintained)
+  const readiness = current.signed.receipt
+  const record = signSourceMaintenanceRecord({ schemaVersion: 1, kind: 'dsh-source-maintenance', transactionId: 'successor-maintenance',
+    installationId: current.trust.installationId, ledger: current.trust.ledger, repository, baseline,
+    sequence: 1, previousDigest: null, previousTip: successorTip, candidateTip: maintained, upstreamCommit: maintained,
+    sourceTree: git(repository, 'rev-parse', `${maintained}^{tree}`), preparationReceiptDigest: sha('successor-prep'),
+    originalBootstrapDigest: sha('successor-bootstrap'),
+    before: { sourceCommit: initial, version: '0.1.0', cohortDigest: sha('successor-before') },
+    after: { sourceCommit: maintained, version: '0.1.3', cohortDigest: sha('successor-after') },
+    host: { planId: current.plan.id, planDigest: current.plan.digest,
+      readinessOperationId: readiness.operationId, readinessReceiptDigest: hostMaintenanceDigest(readiness) },
+    issuedAt: Date.now(), authority: readiness.authority, keyId: readiness.keyId }, current.signed.privateKeyPem)
+  await source.store.appendSourceMaintenance(record, { trust: current.trust, baseline })
+  expect(source.store.getSourceMaintenanceRecords(repository)).toEqual([record])
+  current.coordinator.close(); source.close()
+  const readonly = new ControlPlaneStore({ path: current.plan.ledger.path, readOnly: true })
+  try {
+    expect(readonly.readSourceMaintenanceActivationState(root)).toEqual({ kind: 'watched', planId: current.plan.id })
+    expect(readonly.readSourceMaintenanceState(repository).records).toEqual([record])
+  } finally { readonly.close() }
+  const db = new DatabaseSync(current.plan.ledger.path)
+  try { db.prepare('UPDATE activation_deployment_checkpoints SET successful_order=NULL WHERE plan_id=?').run(old.plan.id) }
+  finally { db.close() }
+  const unproved = new ControlPlaneStore({ path: current.plan.ledger.path, readOnly: true })
+  try { expect(unproved.readSourceMaintenanceActivationState(root)).toEqual({ kind: 'unsettled' }) }
+  finally { unproved.close() }
 }, 60_000)

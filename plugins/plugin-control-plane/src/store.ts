@@ -9,7 +9,8 @@ import { discover, parseCatalog, type CatalogEntry, type LoadedCapabilityCatalog
 import { parseApprovalReceipt } from './approval.js'
 import { parseSourcePublishReconciliationReceipt, parseSourcePublishReconciliationRequest, parseSourceReleaseAuthorization,
   parseSourceReleaseReceipt, parseSourceReleaseRequest, parseVerifiedSourceReleaseAuthorization } from './release.js'
-import { controlPlaneOperationReceiptDigest, controlPlaneSchemaVersion, openControlPlaneDatabase } from './sqlite.js'
+import { controlPlaneOperationReceiptDigest, controlPlaneSchemaVersion, openControlPlaneDatabase,
+  openControlPlaneDatabaseReadOnly } from './sqlite.js'
 import { validateSourceBuildConfig } from './source-build.js'
 import { validateSourceBaselineConfig, verifySourceBaselineHistory } from './source-baseline.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
@@ -929,6 +930,8 @@ function sourceSnapshotFromStored(value: unknown): PluginSourcePlan {
 
 export interface ControlPlaneStoreOptions {
   path: string; now?: () => number
+  /** Read a stopped, checkpointed current-schema ledger without sidecar creation; never use beside a writer. */
+  readOnly?: boolean
   /** Host-owned synchronous source fence for an activation worker connection. */
   withOwnerActivationFence?: <T>(gapId: string, callback: () => T) => T
   adoptionCoordinatorId?: string
@@ -1745,7 +1748,8 @@ export class ControlPlaneStore {
       throw new ControlPlaneStoreError('invalid-input', 'adoption coordinator id is invalid')
     }
     if (options.adoptionCoordinatorId && options.withOwnerActivationFence) throw new ControlPlaneStoreError('invalid-input', 'adoption coordinator cannot hold owner fence')
-    this.#database = openControlPlaneDatabase(options.path); this.#now = options.now ?? Date.now
+    this.#database = options.readOnly === true ? openControlPlaneDatabaseReadOnly(options.path) : openControlPlaneDatabase(options.path)
+    this.#now = options.now ?? Date.now
     this.#withLiveQualificationFence = options.withLiveQualificationFence
     this.#withOwnerActivationFence = options.withOwnerActivationFence; this.#adoptionCoordinatorId = options.adoptionCoordinatorId
   }
@@ -2317,43 +2321,74 @@ export class ControlPlaneStore {
     // start-release BEGIN IMMEDIATE writer without nesting another BEGIN.
     this.#database.exec('SAVEPOINT source_baseline_history')
     try {
-      const rows = this.#database.prepare(`SELECT * FROM source_plans WHERE repository = ? AND release_id IS NOT NULL
-        ORDER BY created_at, id LIMIT 1001`).all(repository) as unknown as SourceRow[]
-      if (rows.length > 1000) throw new ControlPlaneStoreError('invalid-state', 'source release history exceeds bound')
-      const history: { plan: PluginSourcePlan; operation: SourceReleaseOperation }[] = []
-      for (const row of rows) {
-        const plan = sourceFromRow(row)
-        if (plan.release === undefined) throw new ControlPlaneStoreError('invalid-state', 'started source release lacks release identity')
-        if (plan.status !== 'release-complete' && plan.status !== 'release-failed') {
-          throw new ControlPlaneStoreError('conflict', 'source repository has an unfinished release')
-        }
-        const merges = this.#database.prepare(`SELECT * FROM source_release_operations WHERE plan_id = ? AND phase = 'merge'
-          AND status = 'applied' LIMIT 2`).all(plan.id) as unknown as SourceReleaseOperationRow[]
-        if (plan.status === 'release-failed') {
-          if (merges.length !== 0) throw new ControlPlaneStoreError('conflict', 'failed source release has unresolved applied remote merge')
-          continue
-        }
-        if (merges.length !== 1) throw new ControlPlaneStoreError('invalid-state', 'completed source release lacks one applied merge')
-        const operation = sourceReleaseOperationFromRow(merges[0]!)
-        const receipt = operation.receipt
-        if (operation.status !== 'applied' || operation.phase !== 'merge' || operation.request.phase !== 'merge' || operation.planId !== plan.id
-          || operation.request.plan.digest !== plan.digest || operation.request.plan.revision > plan.revision
-          || operation.request.release.id !== plan.release.id || operation.request.release.fence !== plan.release.fence
-          || receipt?.outcome !== 'passed' || receipt.evidence.kind !== 'merge'
-          || receipt.planDigest !== plan.digest || receipt.evidence.targetBranch !== plan.releaseAuthorization?.releasePolicy.targetBranch
-          || receipt.evidence.reviewedHeadCommit !== operation.request.input.headCommit
-          || receipt.evidence.reviewEvidenceDigest !== operation.request.input.reviewEvidenceDigest
-          || receipt.evidence.reviewId !== operation.request.input.reviewId
-          || receipt.evidence.prId !== operation.request.input.prId) {
-          throw new ControlPlaneStoreError('invalid-state', 'completed source release merge is not bound to current release')
-        }
-        history.push({ plan, operation })
-      }
+      const history = this.#readSourceBaselineHistory(repository)
       this.#database.exec('RELEASE source_baseline_history')
       return history
     } catch (error) {
       this.#database.exec('ROLLBACK TO source_baseline_history')
       this.#database.exec('RELEASE source_baseline_history')
+      throw error
+    }
+  }
+
+  /** Must run inside an open read transaction/SAVEPOINT so the caller sees one snapshot. */
+  #readSourceBaselineHistory(repository: string): readonly { plan: PluginSourcePlan; operation: SourceReleaseOperation }[] {
+    const rows = this.#database.prepare(`SELECT * FROM source_plans WHERE repository = ?
+      AND (release_id IS NOT NULL OR status IN ('release-complete','release-failed'))
+      ORDER BY created_at, id LIMIT 1001`).all(repository) as unknown as SourceRow[]
+    if (rows.length > 1000) throw new ControlPlaneStoreError('invalid-state', 'source release history exceeds bound')
+    const history: { plan: PluginSourcePlan; operation: SourceReleaseOperation }[] = []
+    for (const row of rows) {
+      const plan = sourceFromRow(row)
+      if (plan.release === undefined) throw new ControlPlaneStoreError('invalid-state', 'started source release lacks release identity')
+      if (plan.status !== 'release-complete' && plan.status !== 'release-failed') {
+        throw new ControlPlaneStoreError('conflict', 'source repository has an unfinished release')
+      }
+      const merges = this.#database.prepare(`SELECT * FROM source_release_operations WHERE plan_id = ? AND phase = 'merge'
+        AND status = 'applied' LIMIT 2`).all(plan.id) as unknown as SourceReleaseOperationRow[]
+      if (plan.status === 'release-failed') {
+        if (merges.length !== 0) throw new ControlPlaneStoreError('conflict', 'failed source release has unresolved applied remote merge')
+        continue
+      }
+      if (merges.length !== 1) throw new ControlPlaneStoreError('invalid-state', 'completed source release lacks one applied merge')
+      const operation = sourceReleaseOperationFromRow(merges[0]!)
+      const receipt = operation.receipt
+      if (operation.status !== 'applied' || operation.phase !== 'merge' || operation.request.phase !== 'merge' || operation.planId !== plan.id
+        || operation.request.plan.digest !== plan.digest || operation.request.plan.revision > plan.revision
+        || operation.request.release.id !== plan.release.id || operation.request.release.fence !== plan.release.fence
+        || receipt?.outcome !== 'passed' || receipt.evidence.kind !== 'merge'
+        || receipt.planDigest !== plan.digest || receipt.evidence.targetBranch !== plan.releaseAuthorization?.releasePolicy.targetBranch
+        || receipt.evidence.reviewedHeadCommit !== operation.request.input.headCommit
+        || receipt.evidence.reviewEvidenceDigest !== operation.request.input.reviewEvidenceDigest
+        || receipt.evidence.reviewId !== operation.request.input.reviewId
+        || receipt.evidence.prId !== operation.request.input.prId) {
+        throw new ControlPlaneStoreError('invalid-state', 'completed source release merge is not bound to current release')
+      }
+      history.push({ plan, operation })
+    }
+    return history
+  }
+
+  /** Release edges and maintenance edges in one SQLite snapshot, for preflight consumers that must compare both. */
+  readSourceMaintenanceState(repository: string): {
+    history: readonly { plan: PluginSourcePlan; operation: SourceReleaseOperation }[]
+    records: readonly SourceMaintenanceRecord[]
+  } {
+    if (!isAbsolute(repository) || resolve(repository) !== repository) throw new ControlPlaneStoreError('invalid-input', 'source repository path is invalid')
+    this.#database.exec('SAVEPOINT source_maintenance_state')
+    try {
+      const unsettledJob = this.#database.prepare(`SELECT id FROM source_jobs WHERE json_extract(intent_json,'$.repository')=?
+        AND status IN ('queued','running','unknown') LIMIT 1`).get(repository)
+      const unsettledPlan = this.#database.prepare(`SELECT id FROM source_plans WHERE repository=?
+        AND status NOT IN ('expired','local-checks-failed','release-failed','release-complete') LIMIT 1`).get(repository)
+      if (unsettledJob || unsettledPlan) throw new ControlPlaneStoreError('conflict', 'source maintenance has unsettled source work')
+      const history = this.#readSourceBaselineHistory(repository)
+      const records = this.getSourceMaintenanceRecords(repository)
+      this.#database.exec('RELEASE source_maintenance_state')
+      return { history, records }
+    } catch (error) {
+      this.#database.exec('ROLLBACK TO source_maintenance_state')
+      this.#database.exec('RELEASE source_maintenance_state')
       throw error
     }
   }
@@ -2417,17 +2452,12 @@ export class ControlPlaneStore {
       const unsettledPlan = this.#database.prepare(`SELECT id FROM source_plans WHERE repository=?
         AND status NOT IN ('expired','local-checks-failed','release-failed','release-complete') LIMIT 1`).get(record.repository)
       if (unsettledJob || unsettledPlan) throw new ControlPlaneStoreError('conflict', 'source maintenance has unsettled source work')
-      const watching = this.#database.prepare(`SELECT plan.id FROM activation_plans plan JOIN activation_watch watch ON watch.plan_id=plan.id
-        WHERE plan.dsh_home=? AND watch.state='watching' LIMIT 2`).all(trust.dshHome) as Array<{ id: string }>
-      const active = this.#database.prepare(`SELECT id FROM activation_plans WHERE dsh_home=?
-        AND status NOT IN ('rolled-back','activated') LIMIT 1`).get(trust.dshHome)
-      const activated = this.#database.prepare(`SELECT id FROM activation_plans WHERE dsh_home=? AND status='activated' LIMIT 1`)
-        .get(trust.dshHome)
-      if (watching.length > 1 || active || activated && watching.length === 0) {
+      const activationState = this.readSourceMaintenanceActivationState(trust.dshHome)
+      if (activationState.kind === 'unsettled') {
         throw new ControlPlaneStoreError('conflict', 'source maintenance activation is unsettled')
       }
-      if (watching.length) {
-        const context = readCurrentRuntimeEpochDeployment(this.#database, this.getPlan(watching[0]!.id).target.profilePath)
+      if (activationState.kind === 'watched') {
+        const context = readCurrentRuntimeEpochDeployment(this.#database, this.getPlan(activationState.planId).target.profilePath)
         const { plan, readiness } = context, receipt = readiness.receipt
         if (!record.host || record.host.planId !== plan.id || record.host.planDigest !== plan.digest
           || record.host.readinessOperationId !== readiness.operationId || !receipt
@@ -2960,6 +2990,75 @@ export class ControlPlaneStore {
 
   currentRuntimeEpochDeployment(profilePath: string): ReturnType<typeof readCurrentRuntimeEpochDeployment> {
     return readCurrentRuntimeEpochDeployment(this.#database, profilePath)
+  }
+
+  /**
+   * Classify activation state for a Home in one read snapshot, using the exact
+   * watch/plan queries that gate {@link appendSourceMaintenance}. Preflight
+   * producers use it to distinguish a genuinely unanchored ledger (`none`) from
+   * a watched deployment that must bind its readiness receipt (`watched`) and
+   * from any conflict that must abort rather than silently degrade (`unsettled`).
+   */
+  readSourceMaintenanceActivationState(dshHome: string): { kind: 'watched'; planId: string } | { kind: 'unsettled' } | { kind: 'none' } {
+    if (!isAbsolute(dshHome) || resolve(dshHome) !== dshHome) {
+      throw new ControlPlaneStoreError('invalid-input', 'source maintenance Home path is invalid')
+    }
+    this.#database.exec('SAVEPOINT source_maintenance_activation_state')
+    try {
+      const watching = this.#database.prepare(`SELECT plan.id FROM activation_plans plan JOIN activation_watch watch ON watch.plan_id=plan.id
+        WHERE plan.dsh_home=? AND watch.state='watching' LIMIT 2`).all(dshHome) as Array<{ id: string }>
+      const active = this.#database.prepare(`SELECT id FROM activation_plans WHERE dsh_home=?
+        AND status NOT IN ('rolled-back','activated') LIMIT 1`).get(dshHome)
+      const activated = this.#database.prepare(`SELECT plan.id,plan.target_path,watch.state,
+        checkpoint.exposure_order,checkpoint.successful_order FROM activation_plans plan
+        LEFT JOIN activation_watch watch ON watch.plan_id=plan.id
+        LEFT JOIN activation_deployment_checkpoints checkpoint ON checkpoint.plan_id=plan.id
+        WHERE plan.dsh_home=? AND plan.status='activated' LIMIT 1001`).all(dshHome) as Array<{
+        id: string; target_path: string; state: ActivationWatch['state'] | null
+        exposure_order: number | null; successful_order: number | null
+      }>
+      if (activated.length > 1000) throw new ControlPlaneStoreError('invalid-state', 'source maintenance activation history exceeds bound')
+      let result = watching.length > 1 || active || watching.length === 0 && activated.length !== 0
+        || watching.length === 1 && !activated.some(row => row.id === watching[0]!.id)
+        ? { kind: 'unsettled' as const }
+        : watching.length === 1
+          ? { kind: 'watched' as const, planId: watching[0]!.id }
+          : { kind: 'none' as const }
+      if (result.kind === 'watched') {
+        const plan = this.getPlan(result.planId), watch = this.getActivationWatch(result.planId)
+        const assertBinding = (candidate: PluginActivationPlan, boundWatch: ActivationWatch) => {
+          if (boundWatch.activationId !== candidate.activation?.id || boundWatch.fence !== candidate.activation.fence
+            || boundWatch.exact.package !== candidate.candidate.package || boundWatch.exact.version !== candidate.candidate.version
+            || boundWatch.exact.integrity !== candidate.candidate.integrity) {
+            throw new ControlPlaneStoreError('invalid-state', 'source maintenance activation watch binding is corrupt')
+          }
+        }
+        assertBinding(plan, watch)
+        const current = activated.find(row => row.id === plan.id)!
+        const latest = this.#database.prepare(`SELECT checkpoint.plan_id FROM activation_deployment_checkpoints checkpoint
+          JOIN activation_plans plan ON plan.id=checkpoint.plan_id WHERE plan.target_path=?
+          ORDER BY checkpoint.exposure_order DESC LIMIT 1`).get(plan.target.profilePath) as { plan_id: string } | undefined
+        if (current.exposure_order === null || current.successful_order !== current.exposure_order || latest?.plan_id !== plan.id) {
+          result = { kind: 'unsettled' as const }
+        } else for (const older of activated) {
+          if (older.id === plan.id) continue
+          // Closed watches retain activated status after a successor takes over.
+          // Only a proved older success on this same profile is retired history.
+          if (older.target_path !== plan.target.profilePath || !['closed-regressed', 'closed-retracted'].includes(older.state ?? '')
+            || older.exposure_order === null || older.successful_order !== older.exposure_order
+            || older.exposure_order >= current.exposure_order) {
+            result = { kind: 'unsettled' as const }
+            break
+          }
+          assertBinding(this.getPlan(older.id), this.getActivationWatch(older.id))
+        }
+      }
+      this.#database.exec('RELEASE source_maintenance_activation_state')
+      return result
+    } catch (error) {
+      this.#database.exec('ROLLBACK TO source_maintenance_activation_state; RELEASE source_maintenance_activation_state')
+      throw error
+    }
   }
 
   prepareRuntimeEpoch(input: { runtime: RuntimeObservation; issuer: RuntimeEpochRequest['issuer']; receiptTtlMs: number }): RuntimeEpochRecord {
