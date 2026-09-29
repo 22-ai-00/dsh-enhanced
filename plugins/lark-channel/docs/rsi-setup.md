@@ -93,7 +93,9 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
 
 正常新装无需手填 manifest。`supervised` 安装完成模型、TraeX、Lark 与 doctor 后，调用当前 profile 内的 `dsh-rsi-setup --install-owner --profile <name> --dsh-home <absolute>`；本地源码安装再传 `--source-repository`。仅 Linux systemd user services 支持此入口。构建前置条件缺失，或旧的本地目录链接使必需包实体位于 profile 外时，返回 `{"mode":"not-ready",...}` 和退出码 3；旧链接在停服、创建协调器和签发授权前被拒绝。其他预检或部署失败也使安装命令非零退出，不显示“安装流程完成”。前序已安装的普通 Agent 与资源保留供修复后重试。
 
-本地 supervised 新安装先运行 `--install-local-cohort`：在私有临时 checkout 中按冻结 lockfile 构建，将选定插件、协调器及其内部运行依赖打包到 `$DSH_HOME/rsi-local-cohorts/<profile>/`。bootstrap 构建复用本机 pnpm 缓存；这不是候选代码的隔离构建。冻结源码的 `allowBuilds` 布尔清单随 receipt 保存并在安装前合并，保留已有配置；同一依赖存在相反决定时停止，不自动扩大安装脚本权限。安装通过原生 DSH `plugin list/add` 完成，本地 supervised profile 使用 pnpm `nodeLinker: isolated`，防止 hoisted 布局把同版本 registry peer 混入本地运行依赖。依赖覆盖仅作用于精确父包的运行依赖，避免把可选 Host peer 变为自动安装依赖。仅选定根包成为直接 bundle；每条内部依赖和实际安装文件均须匹配制品。重试复用 receipt 并核对原始提交、包选择与摘要，不自动改为新的 HEAD。构建发生在停服前；若后续包安装或文件核验失败，保留固定制品与覆盖配置，Host 保持停机，修复后以相同输入重试。若 pnpm 普通安装保留了缺失或已知文件内容不符的包，安装器会重验冻结制品和配置，再强制重装一次并核验结果。协调器的完整包名/版本不会掩盖文件缺失。额外文件、配置冲突及未知状态不会触发此自动修复；重验仍失败时保持停机，不自动删除用户的 profile。
+本地 supervised 新安装先运行 `--install-local-cohort`：在私有临时 checkout 中按冻结 lockfile 构建，将选定插件、协调器及其内部运行依赖打包到 `$DSH_HOME/rsi-local-cohorts/<profile>/`。bootstrap 构建复用本机 pnpm 缓存；这不是候选代码的隔离构建。冻结源码的 `allowBuilds` 布尔清单随 receipt 保存并在安装前合并，保留已有配置；同一依赖存在相反决定时停止，不自动扩大安装脚本权限。安装通过原生 DSH `plugin list/add` 完成，本地 supervised profile 使用 pnpm `nodeLinker: isolated`，防止 hoisted 布局把同版本 registry peer 混入本地运行依赖。依赖覆盖限定精确父包：运行依赖固定到本批制品；内部 peer 仅在其 provider 已属于当前 profile 的运行依赖闭包时固定到同一制品，不通过 peer 扩大安装集合。目标和协调器分别计算闭包，缺席的可选 peer 不自动安装。仅选定根包成为直接 bundle；每条内部运行依赖、已提供的 peer 和实际安装文件均须匹配制品，同名内部包必须解析到同一真实目录，防止同版本 npm/file 副本产生不同模块状态。重试复用 receipt 并核对原始提交、包选择与摘要，不自动改为新的 HEAD。构建发生在停服前；若后续包安装或文件核验失败，保留固定制品与覆盖配置，Host 保持停机，修复后以相同输入重试。若 pnpm 普通安装保留了缺失、已知文件内容不符或模块目录分裂的包，安装器会重验冻结制品和配置，再强制重装一次并核验结果。协调器的完整包名/版本不会掩盖文件缺失。额外文件、配置冲突及未知状态不会触发此自动修复；重验仍失败时保持停机，不自动删除用户的 profile。
+
+既有冻结安装可重跑原 `--install-local-cohort` 命令修复同批 peer 解析；必须保持原 profile、源码路径和 bundle 选择。预检拒绝未知内部 override、改变的固定路径或制品；随后持生命周期锁停服，重新安装原 tarball 并核验，成功后恢复原服务。此修复不更新源码提交、冻结收据或业务状态；不是升级到当前开发 HEAD。
 
 开发版提供本地更新候选的准备入口：
 

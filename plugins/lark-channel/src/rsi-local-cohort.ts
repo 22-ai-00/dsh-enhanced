@@ -154,7 +154,7 @@ function tarString(header: Buffer, start: number, length: number): string {
   if (end !== -1 && bytes.subarray(end).some(byte => byte !== 0)) fail('invalid tar string padding')
   return bytes.subarray(0, end === -1 ? bytes.length : end).toString('utf8')
 }
-function archiveEntries(packed: Buffer): { path: string; sha256: string; mode: number }[] {
+function archiveEntries(packed: Buffer, onManifest?: (bytes: Buffer) => void): { path: string; sha256: string; mode: number }[] {
   let tar: Buffer
   try { tar = gunzipSync(packed, { maxOutputLength: MAX_ARCHIVE }) } catch { fail('invalid or oversized gzip tarball') }
   if (tar.length < 1536 || tar.length % 512) fail('invalid tar layout')
@@ -182,7 +182,9 @@ function archiveEntries(packed: Buffer): { path: string; sha256: string; mode: n
     if (next > tar.length) fail('truncated tar entry')
     if (type !== 53) {
       if (canonical === 'package') fail('package root is a file')
-      files.push({ path: canonical.slice('package/'.length), sha256: digest(tar.subarray(offset + 512, offset + 512 + size)), mode })
+      const bytes = tar.subarray(offset + 512, offset + 512 + size)
+      files.push({ path: canonical.slice('package/'.length), sha256: digest(bytes), mode })
+      if (canonical === 'package/package.json') onManifest?.(bytes)
       if (files.length > MAX_PACKAGE_FILES) fail('package file count exceeds bound')
     }
     offset = next
@@ -400,6 +402,75 @@ export async function prepareRsiLocalCohort(input: { dshHome: string; profile: s
   } finally { await rm(stage, { recursive: true, force: true }); await io.syncDirectory(parent) }
 }
 
+/** A profile's roots and runtime closure define the only eligible peer providers.
+ * Peers never expand that closure, including optional peers. Receipt schema 1
+ * stays immutable; the peer edges are derived from its exact manifest bytes. */
+export function rsiLocalRuntimeClosure(cohort: RsiLocalCohort, bundles: readonly string[]): RsiLocalCohortPackage[] {
+  const packages = new Map(cohort.packages.map(item => [item.name, item]))
+  if (!bundles.length || new Set(bundles).size !== bundles.length
+    || bundles.some(slug => !SLUG.test(slug) || !packages.get(`${INTERNAL}${slug}`)?.bundle)) fail('bundle is outside cohort')
+  const pending = bundles.map(slug => `${INTERNAL}${slug}`), result = new Map<string, RsiLocalCohortPackage>()
+  while (pending.length) {
+    const name = pending.shift()!
+    if (result.has(name)) continue
+    const item = packages.get(name)
+    if (!item) fail(`installed closure missing: ${name}`)
+    result.set(name, item); pending.push(...item.runtimeDependencies)
+  }
+  return [...result.values()]
+}
+
+export async function rsiLocalPeerOverrides(input: { cohort: RsiLocalCohort; bundles: readonly string[];
+  /** During a pair upgrade the original archives have already been replaced.
+   * Its installed manifests must still match the original receipt's digest. */
+  profilePath?: string }): Promise<Record<string, string>> {
+  const { cohort } = input
+  validateReceipt(cohort, dirname(dirname(cohort.root)), cohort.root.split(sep).at(-1)!)
+  const closure = rsiLocalRuntimeClosure(cohort, input.bundles)
+  const providers = new Map(closure.map(item => [item.name, item])), result: Record<string, string> = {}
+  const manifestPaths = new Map<string, string>()
+  if (input.profilePath) {
+    const root = await realpath(input.profilePath)
+    if (root !== input.profilePath) fail('profile path is a link')
+    const pending = input.bundles.map(slug => ({ name: `${INTERNAL}${slug}`, from: join(root, 'package.json') }))
+    while (pending.length) {
+      const { name, from } = pending.shift()!
+      const path = await realpath(createRequire(from).resolve(`${name}/package.json`))
+      if (!inside(root, path)) fail(`installed package escapes profile: ${name}`)
+      const previous = manifestPaths.get(name)
+      if (previous && previous !== path) fail(`installed package identity split: ${name}`)
+      if (previous) continue
+      manifestPaths.set(name, path)
+      pending.push(...providers.get(name)!.runtimeDependencies.map(dependency => ({ name: dependency, from: path })))
+    }
+  }
+  for (const parent of closure) {
+    let bytes: Buffer | undefined
+    if (input.profilePath) {
+      bytes = await stableFile(manifestPaths.get(parent.name)!, 1_048_576)
+    } else {
+      const packed = await stableFile(parent.tarball, MAX_ARCHIVE)
+      const files = archiveEntries(packed, manifest => { bytes = manifest })
+      if (digest(packed) !== parent.sha256 || !same(files, parent.files)) fail(`cohort tarball differs: ${parent.name}`)
+    }
+    if (!bytes || bytes.length > 1_048_576 || digest(bytes) !== parent.files.find(file => file.path === 'package.json')?.sha256) fail(`installed package file differs: ${parent.name}/package.json`)
+    const manifest = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>
+    if (manifest.name !== parent.name || manifest.version !== cohort.version
+      || !same(runtimeDependencies(manifest), parent.runtimeDependencies)) fail(`installed package identity differs: ${parent.name}`)
+    const peers = manifest.peerDependencies
+    if (peers === undefined) continue
+    if (!peers || typeof peers !== 'object' || Array.isArray(peers)) fail(`invalid peerDependencies: ${parent.name}`)
+    for (const [name, range] of Object.entries(peers)) {
+      if (typeof range !== 'string' || !range) fail(`invalid peerDependencies entry: ${parent.name}`)
+      if (!name.startsWith(INTERNAL)) continue
+      slugOf(name)
+      const provider = providers.get(name)
+      if (provider) result[`${parent.name}@${cohort.version}>${name}`] = `file:${provider.tarball}`
+    }
+  }
+  return result
+}
+
 /** Validate the exact installed files for selected bundles and their own runtime closure. */
 export async function verifyRsiLocalInstalledPackages(input: { cohort: RsiLocalCohort; profilePath: string; bundles?: string[] }): Promise<void> {
   const { cohort } = input
@@ -413,6 +484,8 @@ export async function verifyRsiLocalInstalledPackages(input: { cohort: RsiLocalC
   const packages = new Map(cohort.packages.map(item => [item.name, item]))
   if (!Array.isArray(selected) || selected.some(slug => !SLUG.test(slug)
     || !packages.get(`${INTERNAL}${slug}`)?.bundle)) fail('bundle is outside cohort')
+  const eligible = new Set(rsiLocalRuntimeClosure(cohort, selected).map(item => item.name))
+  const physicalPackages = new Map<string, string>()
   const pending = [...new Set(selected.map(slug => `${INTERNAL}${slug}`))]
     .map(name => ({ name, from: join(root, 'package.json') }))
   const visited = new Set<string>()
@@ -423,6 +496,9 @@ export async function verifyRsiLocalInstalledPackages(input: { cohort: RsiLocalC
     const manifestPath = createRequire(from).resolve(`${name}/package.json`)
     const packageRoot = dirname(manifestPath), physical = await realpath(packageRoot)
     if (!inside(root, physical)) fail(`installed package escapes profile: ${name}`)
+    const existingPhysical = physicalPackages.get(name)
+    if (existingPhysical && existingPhysical !== physical) fail(`installed package identity split: ${name}`)
+    physicalPackages.set(name, physical)
     const visitKey = `${name}\0${physical}`
     if (visited.has(visitKey)) continue
     visited.add(visitKey)
@@ -448,7 +524,13 @@ export async function verifyRsiLocalInstalledPackages(input: { cohort: RsiLocalC
     }
     await walk(packageRoot)
     if (!same(actualFiles.sort(), item.files.map(file => file.path))) fail(`installed package inventory differs: ${name}`)
-    for (const dependency of item.runtimeDependencies) {
+    const peers = manifest.peerDependencies
+    if (peers !== undefined && (!peers || typeof peers !== 'object' || Array.isArray(peers))) fail(`invalid peerDependencies: ${name}`)
+    const localPeers = Object.entries(peers ?? {}).filter(([peer, range]) => {
+      if (typeof range !== 'string' || !range) fail(`invalid peerDependencies entry: ${name}`)
+      return eligible.has(peer)
+    }).map(([peer]) => peer)
+    for (const dependency of new Set([...item.runtimeDependencies, ...localPeers])) {
       // Resolve relative to this package so pnpm's nested layout cannot silently
       // route a runtime edge to a global or otherwise unrelated installation.
       const localRequire = createRequire(manifestPath)

@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { rsiCoordinatorProfile } from './rsi-install.js'
 import type { InstalledRsiDsh } from './rsi-install-inputs.js'
-import { readRsiLocalCohort, verifyRsiLocalInstalledPackages, type RsiLocalCohort } from './rsi-local-cohort.js'
+import { readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohort } from './rsi-local-cohort.js'
 import { installRsiLocalProfile } from './rsi-local-install.js'
 import { assertRsiLocalProfileRoots, rebaseRsiLocalProfileWorkspace } from './rsi-local-profile-update.js'
 
@@ -69,7 +69,9 @@ export async function stageRsiLocalPairPackages(input: {
     const manifest = await read('package.json'), patch = await read('cordis.patch.yml')
     const workspace = await read('pnpm-workspace.yaml')
     assertRsiLocalProfileRoots({ source: manifest.toString('utf8'), cohort: originalCohort, bundles })
-    const nextWorkspace = rebaseRsiLocalProfileWorkspace({ source: workspace.toString('utf8'), original: originalCohort, candidate })
+    const nextWorkspace = rebaseRsiLocalProfileWorkspace({ source: workspace.toString('utf8'), original: originalCohort, candidate, bundles,
+      originalPeers: await rsiLocalPeerOverrides({ cohort: originalCohort, bundles, profilePath: root }),
+      candidatePeers: await rsiLocalPeerOverrides({ cohort: candidate, bundles }) })
     await dependencies.verify({ cohort: originalCohort, profilePath: root, bundles: [...bundles] })
     snapshots.push({ name, root, bundles, manifest, patch, workspace, nextWorkspace })
   }

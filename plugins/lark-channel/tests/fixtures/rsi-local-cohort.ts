@@ -17,7 +17,7 @@ function manifest(name: string, version: string, runtime: string[] = [], dev: st
     devDependencies: Object.fromEntries(dev.map(item => [item, 'workspace:*'])),
     peerDependencies: Object.fromEntries(peer.map(item => [item, 'workspace:*'])) }
 }
-export async function localCohortFixture() {
+export async function localCohortFixture(peerGraph = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rsi-cohort-')))
   const home = join(root, 'home'), sourceRepository = join(root, 'source'), profile = 'owner', version = '0.1.48'
   await mkdir(home, { mode: 0o700 }); await mkdir(sourceRepository)
@@ -32,8 +32,11 @@ export async function localCohortFixture() {
     const runtime = slug === 'target' ? ['@dsh-enhanced/shared-lib'] : []
     const optional = slug === 'target' ? ['@dsh-enhanced/optional-plugin'] : []
     const dev = slug === 'target' ? ['@dsh-enhanced/dev-only'] : []
-    const peer = slug === 'target' ? ['@dsh-enhanced/peer-only'] : []
-    const pkg = manifest(name, version, runtime, dev, peer, optional)
+    const peer = slug === 'target' ? ['@dsh-enhanced/peer-only', ...(peerGraph ? ['@dsh-enhanced/shared-lib', '@dsh-enhanced/assistant-policy'] : [])]
+      : peerGraph && slug === 'assistant-automations' ? ['@dsh-enhanced/assistant-policy']
+        : peerGraph && slug === 'optional-plugin' ? ['@dsh-enhanced/shared-lib'] : []
+    const pkg = { ...manifest(name, version, runtime, dev, peer, optional),
+      peerDependenciesMeta: Object.fromEntries(peer.map(name => [name, { optional: true }])) }
     if (base === 'plugins') pkg.dsh = { bundle: { patch: './cordis.patch.yml' } }
     await writeFile(join(directory, 'package.json'), JSON.stringify(pkg, null, 2) + '\n')
     await writeFile(join(directory, 'lib', 'index.js'), `export const identity = '${slug}-committed'\n`)
@@ -52,7 +55,7 @@ export async function localCohortFixture() {
       await mkdir(packedRoot, { recursive: true })
       await mkdir(join(output, slug), { recursive: true })
       const pkg = JSON.parse(await readFile(join(workspace, path, 'package.json'), 'utf8')) as Record<string, unknown>
-      for (const field of ['dependencies', 'optionalDependencies']) {
+      for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
         const map = pkg[field] as Record<string, string> | undefined
         if (map) for (const name of Object.keys(map)) map[name] = String(pkg.version)
       }

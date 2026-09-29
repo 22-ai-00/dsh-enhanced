@@ -61,7 +61,8 @@ function compareVersions(left: string, right: string): number {
  * workspace. Extra owner settings and YAML comments remain in the document;
  * the candidate cannot grant new build-script authority. No files are read or
  * written and no installation/Host action is performed. */
-export function rebaseRsiLocalProfileWorkspace(input: { source: string; original: RsiLocalCohort; candidate: RsiLocalCohort }): string {
+export function rebaseRsiLocalProfileWorkspace(input: { source: string; original: RsiLocalCohort; candidate: RsiLocalCohort; bundles?: readonly string[];
+  originalPeers?: Record<string, string>; candidatePeers?: Record<string, string> }): string {
   const { source, original, candidate } = input
   assertCohort(original); assertCohort(candidate)
   if (original.root !== candidate.root || original.sourceRepository !== candidate.sourceRepository
@@ -80,7 +81,10 @@ export function rebaseRsiLocalProfileWorkspace(input: { source: string; original
   const document = parseDocument(source, { uniqueKeys: true })
   if (document.errors.length || document.warnings.length || !isMap(document.contents)) fail('profile workspace configuration is invalid')
   if (document.get('nodeLinker') !== 'isolated') fail('profile nodeLinker drifted from frozen local installation')
-  const oldOverrides = rsiLocalDependencyOverrides(original), nextOverrides = rsiLocalDependencyOverrides(candidate)
+  const oldRuntime = rsiLocalDependencyOverrides(original)
+  const oldRequired = rsiLocalDependencyOverrides(original, input.bundles)
+  const oldOverrides = { ...oldRuntime, ...input.originalPeers }
+  const nextOverrides = { ...rsiLocalDependencyOverrides(candidate, input.bundles), ...input.candidatePeers }
   const overrides = document.get('overrides', true)
   if (overrides !== undefined && !isMap(overrides)) fail('profile overrides must be a mapping')
   if (isMap(overrides)) for (const item of overrides.items) {
@@ -88,8 +92,12 @@ export function rebaseRsiLocalProfileWorkspace(input: { source: string; original
     const selector = item.key.value
     if (selector.includes(INTERNAL) && !Object.hasOwn(oldOverrides, selector)) fail(`unknown or stale internal override: ${selector}`)
   }
-  for (const [selector, value] of Object.entries(oldOverrides)) {
+  for (const [selector, value] of Object.entries(oldRequired)) {
     if (document.getIn(['overrides', selector]) !== value) fail(`old runtime override is missing or changed: ${selector}`)
+  }
+  for (const [selector, value] of Object.entries(oldOverrides)) {
+    const present = document.getIn(['overrides', selector])
+    if (present !== undefined && present !== value) fail(`old peer or runtime override changed: ${selector}`)
   }
   const builds = document.get('allowBuilds', true)
   if (builds !== undefined && !isMap(builds)) fail('profile allowBuilds must be a mapping')
@@ -103,6 +111,7 @@ export function rebaseRsiLocalProfileWorkspace(input: { source: string; original
   // Rename retained edges in place, including version advances, so owner
   // comments survive. Comments on removed edges remain on the overrides map.
   for (const selector of Object.keys(oldOverrides)) {
+    if (document.getIn(['overrides', selector]) === undefined) continue
     const nextSelector = selector.replace(`@${original.version}>`, `@${candidate.version}>`)
     if (Object.hasOwn(nextOverrides, nextSelector) && isMap(overrides)) {
       const pair = overrides.items.find(item => isScalar(item.key) && item.key.value === selector)!

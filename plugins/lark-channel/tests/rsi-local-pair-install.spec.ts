@@ -5,7 +5,7 @@ import { join, relative } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { parseDocument } from 'yaml'
 import { rsiCoordinatorProfile } from '../src/rsi-install.js'
-import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, type RsiLocalCohort } from '../src/rsi-local-cohort.js'
+import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohort } from '../src/rsi-local-cohort.js'
 import { installRsiLocalProfile, mergeRsiLocalOverrides, rsiLocalDependencyOverrides, type RsiLocalProfilePorts } from '../src/rsi-local-install.js'
 import { stageRsiLocalPairPackages } from '../src/rsi-local-pair-install.js'
 import { prepareRsiSourceWorkspace } from '../src/rsi-source.js'
@@ -45,8 +45,8 @@ async function unpack(cohort: RsiLocalCohort, root: string, bundles: readonly st
     pending.push(...pkg.runtimeDependencies)
   }
 }
-async function fixture(sameVersion = false) {
-  const f = await localCohortFixture(); roots.push(f.root)
+async function fixture(sameVersion = false, peerGraph = false) {
+  const f = await localCohortFixture(peerGraph); roots.push(f.root)
   const original = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
   const coordinator = rsiCoordinatorProfile(f.profile), pair = [f.profile, coordinator] as const
   for (const name of pair) {
@@ -63,7 +63,7 @@ async function fixture(sameVersion = false) {
     await writeFile(join(root, 'cordis.patch.yml'), `# owner patch for ${name}\n[]\n`, { mode: 0o600 })
     await writeFile(join(root, 'pnpm-workspace.yaml'), mergeRsiLocalOverrides(
       '# owner workspace\npackages: [.]\nautoInstallPeers: false\noverrides:\n  unrelated-package: 1.2.3\n',
-      rsiLocalDependencyOverrides(original), original.allowBuilds), { mode: 0o600 })
+      { ...rsiLocalDependencyOverrides(original), ...(peerGraph ? await rsiLocalPeerOverrides({ cohort: original, bundles }) : {}) }, original.allowBuilds), { mode: 0o600 })
     await writeFile(join(root, 'pnpm-lock.yaml'), '# original lock\n', { mode: 0o600 })
   }
   const receiptPath = join(f.home, `.rsi-coordinator-${hash(f.profile).slice(0, 16)}.json`)
@@ -128,7 +128,7 @@ describe('disposable Home paired package installation', () => {
       expect(await readFile(join(root, 'cordis.patch.yml'))).toEqual(before[name]!.patch)
       const source = await readFile(join(root, 'pnpm-workspace.yaml'), 'utf8'), workspace = parseDocument(source).toJS()
       expect(source).toContain('# owner workspace')
-      expect(workspace.overrides).toEqual({ 'unrelated-package': '1.2.3', ...rsiLocalDependencyOverrides(f.candidate) })
+      expect(workspace.overrides).toEqual({ 'unrelated-package': '1.2.3', ...rsiLocalDependencyOverrides(f.candidate, name === f.profile ? f.original.bundles : coordinatorBundles) })
       expect(workspace.allowBuilds).toEqual(f.candidate.allowBuilds)
     }
     expect(JSON.parse(await readFile(f.receiptPath, 'utf8'))).toEqual({ ...f.receipt, version: f.candidate.version })
@@ -177,7 +177,7 @@ describe('disposable Home paired package installation', () => {
     await verifyRsiLocalInstalledPackages({ cohort: f.candidate, profilePath: join(f.home, 'profiles', f.profile) })
     await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: join(f.home, 'profiles', f.coordinator), bundles: coordinatorBundles })
     expect(parseDocument(await readFile(join(f.home, 'profiles', f.coordinator, 'pnpm-workspace.yaml'), 'utf8')).toJS().overrides)
-      .toEqual({ 'unrelated-package': '1.2.3', ...rsiLocalDependencyOverrides(f.candidate) })
+      .toEqual({ 'unrelated-package': '1.2.3', ...rsiLocalDependencyOverrides(f.candidate, coordinatorBundles) })
   })
 
   test.each(['manifest', 'patch', 'workspace', 'receipt'] as const)
@@ -252,4 +252,28 @@ describe('disposable Home paired package installation', () => {
     expect(await readFile(f.receiptPath)).toEqual(receipt)
     expect(await snapshot(join(f.home, 'profiles', f.coordinator))).toEqual(coordinatorBefore)
   })
+})
+
+
+test('migrates exact original peer pins and narrows the coordinator to its own closure', async () => {
+  const f = await fixture(false, true)
+  await stageRsiLocalPairPackages(f.input, f.ports)
+  for (const name of f.pair) {
+    const bundles = name === f.profile ? f.original.bundles : coordinatorBundles
+    const workspace = parseDocument(await readFile(join(f.home, 'profiles', name, 'pnpm-workspace.yaml'), 'utf8')).toJS()
+    expect(workspace.overrides).toEqual({ 'unrelated-package': '1.2.3',
+      ...rsiLocalDependencyOverrides(f.candidate, bundles), ...await rsiLocalPeerOverrides({ cohort: f.candidate, bundles }) })
+    if (name === f.coordinator) expect(JSON.stringify(workspace.overrides)).not.toContain('@dsh-enhanced/target')
+  }
+})
+
+test('rejects a changed original peer pin before either profile is written', async () => {
+  const f = await fixture(false, true), workspace = join(f.home, 'profiles', f.profile, 'pnpm-workspace.yaml')
+  const document = parseDocument(await readFile(workspace, 'utf8'))
+  document.setIn(['overrides', '@dsh-enhanced/optional-plugin@0.1.48>@dsh-enhanced/shared-lib'], 'file:/foreign/same-version.tgz')
+  await writeFile(workspace, document.toString())
+  const before = await snapshot(f.home)
+  await expect(stageRsiLocalPairPackages(f.input, f.ports)).rejects.toThrow('override changed')
+  expect(f.install).not.toHaveBeenCalled()
+  expect(await snapshot(f.home)).toEqual(before)
 })
