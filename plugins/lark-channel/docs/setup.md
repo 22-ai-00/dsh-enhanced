@@ -67,7 +67,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 每个 DSH profile/account 的配置与授权记录保存在 `$DSH_HOME/lark-business`；App Secret 仅通过 stdin 交给 CLI。每次 CLI 调用都固定绝对命令、named profile、配置目录，并清除会抢占身份的外部 Agent/CLI 环境变量。Linux 凭据数据也存入专用目录；macOS/Windows 使用 CLI 的原生系统钥匙环，同一应用/用户的条目可能与其它 CLI 实例共享，不能视为独立凭据隔离。
 
-首次用户授权会展示链接与二维码。授权完成后同时检查 CLI 授权结果、已验证状态，以及只读 `user_info` 的服务端 `open_id`；只接受绑定的 owner。已有有效授权在重装时更新应用凭据并重新核对身份，无需再次扫码。认证未完成或范围证据丢失时不启用新的业务技能，已经提交的消息通道配置会保留。同一 owner/app 的授权更新失败保留原有技能；更换 owner、app 或 account，以及显式关闭业务工具时，会在通道 owner 交接前撤下旧受管技能入口。撤下入口不代表撤销平台 token，原凭据配置仍保留。若后续通道配置事务失败并回滚，旧技能不会自动重新发布；按原绑定重跑向导并核对身份后可恢复入口。
+首次用户授权会展示链接与二维码。授权完成后同时检查 CLI 授权结果、已验证状态，以及只读 `user_info` 的服务端 `open_id`；只接受绑定的 owner。CLI 明确报告登录完成但部分 scope 未获批时，向导保存申请、已授予和缺失清单，展示缺失权限并接入实际已授权的业务工具；非零退出码本身不等于登录失败，也不能单独证明登录成功。若身份读回或技能发布中断，只有已持久化完整授权结果的 pending 记录可在重跑时复查身份并续接，不再次请求扫码。已有有效授权在重装时更新应用凭据并重新核对身份；旧记录缺少权限清单时明确标为未知，不推断全部获批。认证未完成、CLI 返回不明错误或范围证据丢失时不启用新的业务技能，已经提交的消息通道配置会保留。同一 owner/app 的授权更新失败保留原有技能；更换 owner、app 或 account，以及显式关闭业务工具时，会在通道 owner 交接前撤下旧受管技能入口。撤下入口不代表撤销平台 token，原凭据配置仍保留。若后续通道配置事务失败并回滚，旧技能不会自动重新发布；按原绑定重跑向导并核对身份后可恢复入口。
 
 生成的 `$DSH_HOME/skills/lark-business-*/SKILL.md` 由 DSH 原生文件系统技能提供者发现，按需读取当前 CLI 的 `skills list/read` 与 `schema`，无需复制一份易过期的 API 指南。技能明确记录适用的 profile/account/app/owner，不携带凭据，也不新增 Agent 循环。DSH 的用户技能目录对同一 DSH_HOME 的 profile 可见；这属于同一操作系统用户的 Full access 信任范围，不提供跨 profile 的凭据隔离。官方业务能力与权限机制参考 [larksuite/cli](https://github.com/larksuite/cli)。
 
@@ -177,6 +177,8 @@ systemctl --user restart dsh-profile-web.service
 ```
 
 若自行管理进程，在首次向导中加入 `--no-service`，然后用 supervisor 运行 `dsh --profile web --no-open`。不要同时启动前台与系统服务的两个相同 profile，否则 Web 端口和飞书长连接会竞争。
+
+同一个 Delivery 数据库也不能由不同 profile 的消息调度器同时消费。即使另一个 profile 已关闭 Lark，只要其 Delivery 调度器仍启用，就可能抢到消息并按另一套 Policy 拒绝处理。向导会检查其他已配置 profile 的有效 Delivery 路径与调度状态；不能仅凭另一个服务暂时停止判断没有冲突。请在旧 profile 的完整 Delivery 配置中关闭 `schedulerEnabled`，或为独立部署配置不同数据库；保留其余配置字段。向导不会替你关闭其他服务、清空队列或撤销旧任务。
 
 ### macOS
 
