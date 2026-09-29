@@ -6090,7 +6090,7 @@ async function performLifecycle({
           } } : {}),
         } : {}),
         })
-        if (expectedScenario !== 'supervised') {
+        if (!supervisedOwner) {
           manifest = await writeManifest(physicalTransactionRoot, {
             ...manifest, servicePhase: 'service-accepted',
             serviceAcceptance: accepted.map(service => ({
