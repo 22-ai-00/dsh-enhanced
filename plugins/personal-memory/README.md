@@ -62,7 +62,7 @@ dsh --profile web --dump-config
 
 ## 有限授权的事实与经验采用
 
-可选 `automaticLearning` 为 Host 提供 `adoptReviewedLearning({request})`、`lookupLearningAdoption({request})` 和记忆审查所需的 `inspectLearningTarget(...)`。这些接口不注册为模型工具；`memory_manage` 仍只创建手动审批提案。此组件负责采用与召回，尚不自行提取候选、调度学习或部署新的插件；完整自动学习还需连接普通任务来源与学习生产者。
+可选 `automaticLearning` 为 Host 提供 `adoptReviewedLearning({request})`、`lookupLearningAdoption({request})` 和记忆审查所需的 `inspectLearningTarget(...)`。学习生产者还可调用 `listLearningTargets({owner,limit})`（默认 20，范围 1–100），获取经当前 Delivery owner、Policy、Evaluation 和原任务来源复核的可管理事实/经验摘要；来源暂失时返回空列表，人工改写、失效或撤回的版本不会列出。`inspectLearningAdoptionAvailability({owner})` 只读返回当前授权指纹、到期时间、剩余修改次数与内容字节数及 `available`，不登记授权或消耗额度。两项查询都要求与配置授权完全一致的 owner；目标在来源复核后排序限量。这些接口不注册为模型工具；`memory_manage` 仍只创建手动审批提案。此组件负责采用与召回；普通任务自动发现、提取和调度由独立 [assistant-memory-learning](../assistant-memory-learning/README.md) bundle 提供。新插件生成与动态工程采用另按当前状态验收。
 
 授权包含独立的 `authorityId`、精确 `owner`、固定 `reviewAuthorityId` / `reviewAuthorityDigest`、`expiresAt`、`maxMutations`（1–1000）、`maxTotalContentBytes`、`maxRecordTtlMs`、允许的 `kinds`（fact/experience）和 `operations`（add/replace/remove）。owner 包含 Delivery route id/hash、principal id/record/version、绝对 workspace 与 preset。采用授权、Delivery 路由和审查授权的 ID 分别管理；同一采用授权 ID 的内容不可更改，重启、撤回或失败不能重置已用额度。授权到期停止新写入，记录仍按独立 TTL 和当前来源有效性参与读取。
 

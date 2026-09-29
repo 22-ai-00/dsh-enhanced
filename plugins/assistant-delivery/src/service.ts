@@ -133,6 +133,7 @@ import type {
   ModelSelectionTerminalResult,
   OwnerRouteAuthority,
   OwnerForegroundTaskSourceScope,
+  OwnerForegroundTaskSource,
   OwnerForegroundTaskSourceCursor,
   OwnerForegroundTaskSourcePage,
   OwnerForegroundTaskSourceContent,
@@ -4657,6 +4658,15 @@ export class AssistantDeliveryService extends Service {
     this.assertActive()
     this.validateOwnerRoute(input)
     return this.deliveryStore.listOwnerForegroundTaskSources(input, this.ownerRoutes.get(input.authorityId)!)
+  }
+
+  /** Host-only exact terminal source metadata, including before reply Outbox exists. */
+  inspectOwnerForegroundTaskSource(input: OwnerForegroundTaskSourceScope & {
+    inboxId: string
+  }): Readonly<OwnerForegroundTaskSource> | undefined {
+    this.assertActive()
+    this.validateOwnerRoute(input)
+    return this.deliveryStore.inspectOwnerForegroundTaskSource(input, this.ownerRoutes.get(input.authorityId)!)
   }
 
   /** Read one exact completed source under the current owner fence. */

@@ -16,7 +16,7 @@ import {
   learningGrantDigest, learningRecordDigest, learningResultDigest, validateLearningGrant,
   validateLearningRequest, validateLearningReviewReceipt,
   type MemoryLearningAdoptionCommit, type MemoryLearningAdoptionGrant,
-  type MemoryLearningAdoptionResult, type MemoryLearningManagedSource,
+  type MemoryLearningAdoptionAvailability, type MemoryLearningAdoptionResult, type MemoryLearningManagedSource,
   type MemoryLearningSourceInvalidation, type MemoryLearningTarget,
   type MemoryLearningTargetInput, type MemoryLearningValidatedRef,
 } from './learning-adoptions.js'
@@ -628,6 +628,23 @@ export class MemoryStore {
       }
       return Object.freeze({ authorityId: grant.authorityId, grantDigest: digest })
     })
+  }
+
+  /** Read the already registered grant without creating it or reserving budget. */
+  inspectLearningAdoptionAvailability(input: MemoryLearningAdoptionGrant): MemoryLearningAdoptionAvailability {
+    const grant = validateLearningGrant(input)
+    const grantDigest = learningGrantDigest(grant)
+    const row = this.#learningGrantRow(grant.authorityId)
+    if (row === undefined || row.grant_digest !== grantDigest
+      || growthObjectDigest(JSON.parse(row.grant_json)) !== grantDigest) {
+      throw new MemoryStoreError('idempotency-conflict', 'learning grant is absent or changed')
+    }
+    const remainingMutations = Math.max(0, grant.maxMutations - row.used_mutations)
+    const remainingContentBytes = Math.max(0, grant.maxTotalContentBytes - row.used_content_bytes)
+    return Object.freeze({ authorityId: grant.authorityId, grantDigest, expiresAt: grant.expiresAt,
+      remainingMutations, remainingContentBytes,
+      available: this.#now() < grant.expiresAt && remainingMutations > 0
+        && (remainingContentBytes > 0 || grant.operations.includes('remove')) })
   }
 
   lookupLearningAdoption(input: Readonly<{ authorityId: string; operationId: string; requestDigest: string }>): Readonly<MemoryLearningAdoptionResult> | undefined {

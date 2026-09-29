@@ -14,7 +14,8 @@ import { AcceptanceStore } from './store.js'
 import type { Execution } from './store.js'
 import { SourceReviewRuntime, validateSourceReviewConfig, type SourceReviewInput, type SourceReviewSelection } from './source-review.js'
 import { MemoryReviewRuntime, validateMemoryReviewConfig } from './memory-review.js'
-import type { MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
+import type { MemoryReviewConfig, MemoryReviewAvailability } from './memory-review.js'
+import type { MemoryLearningOwner, MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
 
 export { Config } from './config.js'
 
@@ -137,6 +138,7 @@ export class AssistantVerifierService extends Service<Config> {
   #sourceReviewer: SourceReviewRuntime | undefined
   readonly #sourceReviewers = new Set<SourceReviewRuntime>()
   #memoryReviewer: MemoryReviewRuntime | undefined
+  readonly #memoryReviewConfig: MemoryReviewConfig | undefined
   readonly #memoryReviewers = new Set<MemoryReviewRuntime>()
 
   constructor(ctx: Context, config: Config, options: { now?: () => number } = {}) {
@@ -144,6 +146,7 @@ export class AssistantVerifierService extends Service<Config> {
     const normalized = Config(config)
     const sourceReviews = normalized.sourceReviews === undefined ? undefined : validateSourceReviewConfig(normalized.sourceReviews)
     const memoryReviews = normalized.memoryReviews === undefined ? undefined : validateMemoryReviewConfig(normalized.memoryReviews)
+    this.#memoryReviewConfig = memoryReviews
     this.#compiled = compileAcceptanceProfiles(normalized)
     this.#now = options.now ?? Date.now
     this.#requireAcceptance = normalized.requireAcceptance ?? false
@@ -208,6 +211,15 @@ export class AssistantVerifierService extends Service<Config> {
   lookupMemoryLearningReview = (request: MemoryLearningReviewRequest) => {
     this.#assertActive()
     return this.#memoryReviewer?.lookup(request)
+  }
+
+  /** Host-only read of current authority and unclaimed review capacity. */
+  inspectMemoryLearningReviewAvailability = (input: { owner: MemoryLearningOwner }): MemoryReviewAvailability | undefined => {
+    this.#assertActive()
+    const config = this.#memoryReviewConfig
+    if (!config) return undefined
+    return this.#memoryReviewer?.inspectAvailability(input) ?? Object.freeze({ authorityId: config.authorityId,
+      authorityDigest: acceptanceDigest(config), expiresAt: config.expiresAt, remainingReviews: 0, available: false })
   }
 
   /** Host-only capability probe, including the exact decision directory. */

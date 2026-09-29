@@ -37,6 +37,14 @@ export interface MemoryReviewReceipt {
   receiptDigest: string
 }
 
+export interface MemoryReviewAvailability {
+  readonly authorityId: string
+  readonly authorityDigest: string
+  readonly expiresAt: number
+  readonly remainingReviews: number
+  readonly available: boolean
+}
+
 /** Structural Host-only reader prevents a reverse package dependency on Memory. */
 interface TargetReader {
   inspectLearningTarget(input: { owner: MemoryLearningOwner; id: string; expectedVersion: number }): MemoryReviewTarget | undefined
@@ -68,7 +76,9 @@ export function validateMemoryReviewConfig(input: MemoryReviewConfig): MemoryRev
     || !input.policy.isWellFormed() || Buffer.byteLength(input.policy) > 8192) throw new Error('memory review invalid policy')
   if (Object.hasOwn(input, 'model')) {
     const model = exact(input.model, ['provider', 'model'], ['reasoningEffort'])
-    id(model.provider); id(model.model)
+    id(model.provider)
+    if (typeof model.model !== 'string' || !model.model.trim() || model.model.includes('\0')
+      || !model.model.isWellFormed() || Buffer.byteLength(model.model) > 256) throw new Error('memory review invalid model')
     if (Object.hasOwn(model, 'reasoningEffort')) id(model.reasoningEffort)
   }
   return structuredClone(input)
@@ -85,6 +95,35 @@ export class MemoryReviewRuntime {
   constructor(private readonly ctx: Context, config: MemoryReviewConfig, databasePath: string) {
     this.#config = validateMemoryReviewConfig(config)
     this.#store = new SourceReviewStore(databasePath + '.memory-reviews')
+  }
+
+  inspectAvailability(input: { owner: MemoryLearningOwner }): MemoryReviewAvailability {
+    const authorityDigest = acceptanceDigest(this.#config)
+    const unavailable = (): MemoryReviewAvailability => Object.freeze({ authorityId: this.#config.authorityId,
+      authorityDigest, expiresAt: this.#config.expiresAt, remainingReviews: 0, available: false })
+    this.#controller.signal.throwIfAborted()
+    const owner = validateMemoryLearningOwner(input.owner)
+    if (acceptanceDigest(owner) !== acceptanceDigest(this.#config.owner) || Date.now() >= this.#config.expiresAt) return unavailable()
+    try {
+      const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
+      const evaluation = this.ctx.get('assistantEvaluation') as AssistantEvaluationService | undefined
+      const policy = this.ctx.get('assistantPolicy') as AssistantPolicyService | undefined
+      if (typeof delivery?.validateOwnerRoute !== 'function' || typeof evaluation?.canonicalHostScope !== 'function'
+        || typeof policy?.evaluate !== 'function') return unavailable()
+      const current = delivery.validateOwnerRoute({ authorityId: owner.authorityId, principalId: owner.principalId,
+        workspace: owner.workspace, agentPreset: owner.agentPreset })
+      if (['authorityId', 'authorityHash', 'principalId', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset']
+        .some(key => current[key as keyof typeof current] !== owner[key as keyof MemoryLearningOwner])) return unavailable()
+      evaluation.canonicalHostScope({ workspace: owner.workspace, preset: owner.agentPreset })
+      const decision = policy.evaluate({ subject: { kind: 'background', id: 'assistant-memory-learning',
+        workspace: owner.workspace, principal: owner.principalId }, action: 'review',
+      resource: { kind: 'memory', id: `learning:${this.#config.authorityId}` }, context: { initiator: 'background' } })
+      if (decision.effect !== 'allow') return unavailable()
+      const remainingReviews = this.#store.remaining({ authorityId: this.#config.authorityId,
+        authorityDigest, maxReviews: this.#config.maxReviews })
+      return Object.freeze({ authorityId: this.#config.authorityId, authorityDigest,
+        expiresAt: this.#config.expiresAt, remainingReviews, available: remainingReviews > 0 })
+    } catch { return unavailable() }
   }
 
   #policy(request: MemoryLearningReviewRequest, consume: boolean): void {

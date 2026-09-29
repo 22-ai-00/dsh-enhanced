@@ -1,5 +1,9 @@
 # 兼容性基线
 
+## 普通任务自动记忆学习
+
+`assistant-memory-learning` 新 bundle 使用独立私有 schema 1 意图/游标/提取额度库，依赖同批 Delivery 精确来源元数据查询、Verifier 审查额度探针和 Memory 当前受管目标/采用额度探针。Delivery schema 25、Memory schema 7、Verifier 的既有审查库结构不变；旧 peers 缺少能力时拒绝激活。初始 owner/grants/有限预算配置完成后复用原生 Automations 和 Agent；DSH/Cordis ABI 未升级。真实 owner 部署与后续收益仍待完整闭环验收。
+
 ## 有限事实与经验采用（Memory schema 7）
 
 Personal Memory v7 增加有限采用授权、累计额度与不可变结果回执，迁移保留人工记录、审批和工具证据。升级前停止旧 writer；旧版本不得写入新库。可选自动采用依赖同批 Delivery 批量来源 fence、Evaluation canonical scope fence 与 Verifier 记忆审查接口；未配置时仍使用原审批流程。来源 peer 不可用时隐藏自动记录，不扩大到人工记录或伪造撤回。DSH/Cordis 基线不变，自动候选生产和插件动态采用仍按当前状态中的完整闭环验收。

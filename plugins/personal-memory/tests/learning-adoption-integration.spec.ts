@@ -178,6 +178,18 @@ test('adopts a real ordinary source while producer locks cover Memory commit, th
     return result
   })
   const adopted = f.ctx.personalMemory.adoptReviewedLearning({ request })
+  const inspect = MemoryStore.prototype.inspectLearningTarget
+  const checked = vi.spyOn(MemoryStore.prototype, 'inspectLearningTarget').mockImplementation(function (this: MemoryStore, input) {
+    expect(() => f.otherDelivery.exec('BEGIN IMMEDIATE')).toThrow(/locked/u)
+    expect(() => f.otherEvaluation.exec('BEGIN IMMEDIATE')).toThrow(/locked/u)
+    return inspect.call(this, input)
+  })
+  expect(f.ctx.personalMemory.listLearningTargets({ owner: f.owner })).toEqual([{
+    id: adopted.record.id, version: adopted.record.version,
+    kind: adopted.record.kind, content: adopted.record.content,
+  }])
+  expect(checked).toHaveBeenCalled()
+  checked.mockRestore()
   expect(commit).toHaveBeenCalledTimes(1)
   expect(f.lookup).toHaveBeenCalledTimes(1)
   expect(adopted.record).toMatchObject({ kind: 'fact', trust: 'agent-observed', sensitivity: 'private',
@@ -211,6 +223,7 @@ test('adopts a real ordinary source while producer locks cover Memory commit, th
     principalRecordId: f.owner.principalRecordId, principalVersion: f.owner.principalVersion,
     action: 'withdraw', operationId: 'owner-op-2', expectedVersion: 1, previousStatus: 'achieved' })
   expect(f.ctx.personalMemory.search(f.agent, { query: 'pnpm lockfile' })).toEqual([])
+  expect(f.ctx.personalMemory.listLearningTargets({ owner: f.owner })).toEqual([])
   expect(f.ctx.personalMemory.search(f.agent, { query: 'garden' }).map(item => item.record.id)).toContain(manual.id)
   const memoryRead = new DatabaseSync(f.memoryPath, { readOnly: true })
   try {
@@ -268,6 +281,7 @@ test('a manual version of an adopted record remains visible and cannot be reclai
   expect(f.ctx.personalMemory.search(f.agent, { query: 'pnpm policy' }).map(item => item.record.id)).toContain(manual.id)
   expect(f.ctx.personalMemory.inspectLearningTarget({ owner: f.owner, id: manual.id,
     expectedVersion: manual.version })).toBeUndefined()
+  expect(f.ctx.personalMemory.listLearningTargets({ owner: f.owner })).toEqual([])
   const replaceRequest = f.request(source, 'learn-manual-2', { op: 'replace', id: manual.id,
     expectedVersion: manual.version, entry: { kind: 'fact', content: 'This pnpm project uses a revised lockfile.' } })
   expect(() => f.ctx.personalMemory.adoptReviewedLearning({ request: replaceRequest })).toThrow(/no longer managed/u)

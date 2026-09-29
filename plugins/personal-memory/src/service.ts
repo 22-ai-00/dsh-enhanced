@@ -320,6 +320,20 @@ export class PersonalMemoryService extends Service {
     return this.learning?.inspectTarget(input)
   }
 
+  /** Host-only current managed facts and experiences, suitable for replacement proposals. */
+  listLearningTargets(input: { owner: MemoryLearningOwner; limit?: number }) {
+    this.assertActive()
+    if (!this.learning) throw new Error('personal-memory: automatic learning is not configured')
+    return this.learning.listTargets(input)
+  }
+
+  /** Host-only read of the current adoption grant and its remaining budget. */
+  inspectLearningAdoptionAvailability(input: { owner: MemoryLearningOwner }) {
+    this.assertActive()
+    if (!this.learning) throw new Error('personal-memory: automatic learning is not configured')
+    return this.learning.inspectAvailability(input)
+  }
+
   private withLearningVisibility<T>(context: MemoryAgentContext, callback: () => T): T {
     return this.learning ? this.learning.withVisible(context, callback) : callback()
   }

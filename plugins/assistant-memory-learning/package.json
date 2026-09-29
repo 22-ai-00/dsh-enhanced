@@ -1,0 +1,128 @@
+{
+  "name": "@dsh-enhanced/assistant-memory-learning",
+  "version": "0.1.48",
+  "description": "Durable ordinary-task memory learning through native Automations, independent review and bounded adoption.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "directory": "plugins/assistant-memory-learning"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh-plugin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": ">=0.1.5-rc.3 <0.1.6",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.3 <0.1.6",
+    "@deepseek-ai/dsh-session": ">=0.1.5-rc.3 <0.1.6",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.3 <0.1.6",
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.5-rc.3 <0.1.6",
+    "@dsh-enhanced/assistant-automations": ">=0.1.48 <0.2.0",
+    "@dsh-enhanced/assistant-delivery": ">=0.1.48 <0.2.0",
+    "@dsh-enhanced/assistant-evaluation": ">=0.1.48 <0.2.0",
+    "@dsh-enhanced/assistant-policy": ">=0.1.48 <0.2.0",
+    "@dsh-enhanced/assistant-verifier": ">=0.1.48 <0.2.0",
+    "@dsh-enhanced/personal-memory": ">=0.1.48 <0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-automations": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-delivery": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-evaluation": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-policy": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-verifier": {
+      "optional": true
+    },
+    "@dsh-enhanced/personal-memory": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "@deepseek-ai/dsh-agent": "catalog:",
+    "@deepseek-ai/dsh-llm": "catalog:",
+    "@deepseek-ai/dsh-session": "catalog:",
+    "@deepseek-ai/dsh-tools": "catalog:",
+    "@deepseek-ai/dsh-system-prompt": "catalog:",
+    "@dsh-enhanced/assistant-automations": "workspace:*",
+    "@dsh-enhanced/assistant-delivery": "workspace:*",
+    "@dsh-enhanced/assistant-evaluation": "workspace:*",
+    "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@dsh-enhanced/assistant-verifier": "workspace:*",
+    "@dsh-enhanced/personal-memory": "workspace:*",
+    "@deepseek-ai/dsh-agent-default-model": "catalog:",
+    "@deepseek-ai/dsh-agent-loop": "catalog:",
+    "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
+    "@deepseek-ai/dsh-session-projection": "catalog:"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "catalog:",
+    "@dsh-enhanced/assistant-growth-contract": "workspace:*"
+  }
+}
