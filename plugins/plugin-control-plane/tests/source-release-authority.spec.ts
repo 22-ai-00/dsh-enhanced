@@ -67,15 +67,36 @@ localTest('signs exactly one ready owner source release and replays the immutabl
   await expect(verifier.verify(authorization, f.plan)).resolves.toMatchObject({ planId: f.plan.id })
 })
 
-localTest('refuses unready status, owner/digest drift, source drift, and invalid local release policy', async () => {
-  const unready = await fixture(false); await expect(authorizePreparedSourceRelease(unready.release, unready.request)).rejects.toThrow('refused')
-  const f = await fixture(); await expect(authorizePreparedSourceRelease(f.release, { ...f.request, sourceReferenceDigest: hex('f') })).rejects.toThrow('refused')
+localTest('refuses a source release before it is ready for review', async () => {
+  const f = await fixture(false)
+  await expect(authorizePreparedSourceRelease(f.release, f.request)).rejects.toThrow('refused')
+})
+
+localTest('refuses source reference digest drift', async () => {
+  const f = await fixture()
+  await expect(authorizePreparedSourceRelease(f.release, { ...f.request, sourceReferenceDigest: hex('f') })).rejects.toThrow('refused')
+})
+
+localTest('refuses owner principal record drift', async () => {
+  const f = await fixture()
   await expect(authorizePreparedSourceRelease({ ...f.release, grant: { ...f.release.grant, owner: { ...f.release.grant.owner, principalRecordId: 'other-record' } } }, f.request)).rejects.toThrow('refused')
+})
+
+localTest('refuses worktree source drift', async () => {
+  const f = await fixture()
   await writeFile(join(f.root, 'worktrees/prepared/plugins/health-helper/src/tool.ts'), 'export const value = 99\n', { mode: 0o600 })
   await expect(authorizePreparedSourceRelease(f.release, f.request)).rejects.toThrow('refused')
-  const policy = await fixture(); await expect(authorizePreparedSourceRelease({ ...policy.release, grant: { ...policy.release.grant,
-    policies: [{ ...policy.release.grant.policies[0]!, registryLocator: 'https://registry.example/' }] } }, policy.request)).rejects.toThrow('refused')
-  await expect(authorizePreparedSourceRelease({ ...policy.release, grant: { ...policy.release.grant, expiresAt: Date.now() - 1 } }, policy.request)).rejects.toThrow('refused')
+})
+
+localTest('refuses a network registry in a local release policy', async () => {
+  const f = await fixture()
+  await expect(authorizePreparedSourceRelease({ ...f.release, grant: { ...f.release.grant,
+    policies: [{ ...f.release.grant.policies[0]!, registryLocator: 'https://registry.example/' }] } }, f.request)).rejects.toThrow('refused')
+})
+
+localTest('refuses an expired local source release grant', async () => {
+  const f = await fixture()
+  await expect(authorizePreparedSourceRelease({ ...f.release, grant: { ...f.release.grant, expiresAt: Date.now() - 1 } }, f.request)).rejects.toThrow('refused')
 })
 
 localTest('binds a grant to immutable configuration after its first authorization', async () => {
