@@ -1,7 +1,7 @@
-import { chmod, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, cp, mkdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
-import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, type RsiLocalCohortPorts } from '../src/rsi-local-cohort.js'
+import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohortPorts } from '../src/rsi-local-cohort.js'
 import { localCohortFixture, installFixture } from './fixtures/rsi-local-cohort.js'
 
 const roots: string[] = []
@@ -80,5 +80,42 @@ describe('frozen local tarball cohort', () => {
     await expect(prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source,
       bundles: ['target'] }, ports)).rejects.toThrow('tracked build input changed')
     await expect(readRsiLocalCohort({ dshHome: f.home, profile: f.profile })).rejects.toThrow()
+  })
+})
+
+
+describe('frozen internal peers', () => {
+  test('derives peers from schema 1 tarballs within the selected runtime closure only', async () => {
+    const f = await localCohortFixture(true); roots.push(f.root)
+    const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
+    const before = await readFile(join(cohort.root, 'receipt.json'), 'utf8')
+    const provider = cohort.packages.find(item => item.name === '@dsh-enhanced/shared-lib')!
+    expect(await rsiLocalPeerOverrides({ cohort, bundles: ['target'] })).toEqual({
+      '@dsh-enhanced/target@0.1.48>@dsh-enhanced/shared-lib': `file:${provider.tarball}`,
+      '@dsh-enhanced/optional-plugin@0.1.48>@dsh-enhanced/shared-lib': `file:${provider.tarball}`,
+    })
+    const policy = cohort.packages.find(item => item.name === '@dsh-enhanced/assistant-policy')!
+    expect(await rsiLocalPeerOverrides({ cohort, bundles: ['assistant-policy', 'assistant-automations', 'plugin-control-plane'] })).toEqual({
+      '@dsh-enhanced/assistant-automations@0.1.48>@dsh-enhanced/assistant-policy': `file:${policy.tarball}`,
+    })
+    expect(await readFile(join(cohort.root, 'receipt.json'), 'utf8')).toBe(before)
+    const installed = await installFixture(f, cohort, ['target', 'shared-lib', 'optional-plugin'])
+    expect(await rsiLocalPeerOverrides({ cohort, bundles: ['target'], profilePath: installed }))
+      .toEqual(await rsiLocalPeerOverrides({ cohort, bundles: ['target'] }))
+    await verifyRsiLocalInstalledPackages({ cohort, profilePath: installed })
+  })
+
+  test.each([false, true])('rejects a duplicate peer provider even at the same version (changed bytes: %s)', async changed => {
+    const f = await localCohortFixture(true); roots.push(f.root)
+    const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source,
+      bundles: ['target'] }, f.ports)
+    // target and optional-plugin reach shared-lib through two distinct consumers.
+    const installed = await installFixture(f, cohort, ['target', 'shared-lib', 'optional-plugin'])
+    const nested = join(installed, 'node_modules', '@dsh-enhanced', 'target', 'node_modules', '@dsh-enhanced', 'shared-lib')
+    await mkdir(join(nested, '..'), { recursive: true })
+    await cp(join(installed, 'node_modules', '@dsh-enhanced', 'shared-lib'), nested, { recursive: true })
+    if (changed) await writeFile(join(nested, 'lib', 'index.js'), 'registry same-version bytes\n')
+    await expect(verifyRsiLocalInstalledPackages({ cohort, profilePath: installed }))
+      .rejects.toThrow(changed ? /file differs|identity split/u : /identity split/u)
   })
 })

@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, realpath, rename, unlink } from 'node:fs/promises'
 import { delimiter, isAbsolute, join } from 'node:path'
-import { isMap, parseDocument } from 'yaml'
+import { isMap, isScalar, parseDocument } from 'yaml'
 import { rsiBuildResources as io } from './rsi-build.js'
 import { resolveInstalledRsiDsh, type InstalledRsiDsh } from './rsi-install-inputs.js'
 import { prepareRsiSourceWorkspace } from './rsi-source.js'
-import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, type RsiLocalCohort } from './rsi-local-cohort.js'
+import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, rsiLocalRuntimeClosure, type RsiLocalCohort } from './rsi-local-cohort.js'
 import { withDshHomeLifecycleLock } from './setup.js'
 import { version } from './version.js'
 
@@ -26,14 +26,29 @@ async function systemctlPin() {
 
 /** Scope each override to an actual runtime edge. A global override would also
  * turn matching optional peers into dependencies in pnpm 11. */
-export function rsiLocalDependencyOverrides(cohort: RsiLocalCohort): Record<string, string> {
+export function rsiLocalDependencyOverrides(cohort: RsiLocalCohort, bundles?: readonly string[]): Record<string, string> {
   const result: Record<string, string> = {}
-  for (const parent of cohort.packages) for (const name of parent.runtimeDependencies) {
+  for (const parent of bundles ? rsiLocalRuntimeClosure(cohort, bundles) : cohort.packages) for (const name of parent.runtimeDependencies) {
     const child = cohort.packages.find(item => item.name === name)
     if (!child) fail('local runtime dependency is absent from the frozen cohort')
     result[`${parent.name}@${cohort.version}>${name}`] = `file:${child.tarball}`
   }
   return result
+}
+
+function assertLocalOverrideIdentity(source: string, cohort: RsiLocalCohort, peers: Record<string, string>): void {
+  const document = parseDocument(source, { uniqueKeys: true })
+  if (document.errors.length || document.warnings.length || !isMap(document.contents)) fail('profile workspace configuration is invalid')
+  const mapping = document.get('overrides', true)
+  if (mapping === undefined) return
+  if (!isMap(mapping)) fail('profile overrides must be a mapping')
+  const known = { ...rsiLocalDependencyOverrides(cohort), ...peers }
+  for (const item of mapping.items) {
+    if (!isScalar(item.key) || typeof item.key.value !== 'string') fail('profile override selector is invalid')
+    const selector = item.key.value
+    if (selector.includes('@dsh-enhanced/') && (!Object.hasOwn(known, selector)
+      || !isScalar(item.value) || item.value.value !== known[selector])) fail(`unknown or changed frozen internal override: ${selector}`)
+  }
 }
 
 export function mergeRsiLocalOverrides(source: string, overrides: Record<string,string>, allowBuilds: Record<string,boolean> = {}): string {
@@ -79,19 +94,23 @@ const localProfilePorts: RsiLocalProfilePorts = { command: io.command, verify: v
 
 /** Reject an existing owner's configuration conflict before stopping its Host.
  * Installation re-reads these bytes after stopping, before any package mutation. */
-export async function preflightRsiLocalProfile(input: Pick<RsiLocalProfileInput,'dshHome'|'profile'|'cohort'>): Promise<void> {
+export async function preflightRsiLocalProfile(input: Pick<RsiLocalProfileInput,'dshHome'|'profile'|'cohort'> & { bundles?: readonly string[] }): Promise<void> {
   if (!profilePattern.test(input.profile)) fail('invalid target profile')
   const workspace = join(input.dshHome,'profiles',input.profile,'pnpm-workspace.yaml')
   try { await lstat(workspace) }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
   if (await realpath(workspace) !== workspace) fail('profile workspace file is not physical')
-  mergeRsiLocalOverrides((await io.readStable(workspace,1_048_576)).toString('utf8'),
-    rsiLocalDependencyOverrides(input.cohort),input.cohort.allowBuilds)
+  const bundles = input.bundles ?? input.cohort.bundles
+  const source = (await io.readStable(workspace,1_048_576)).toString('utf8')
+  const peers = await rsiLocalPeerOverrides({ cohort: input.cohort, bundles })
+  assertLocalOverrideIdentity(source, input.cohort, peers)
+  mergeRsiLocalOverrides(source, { ...rsiLocalDependencyOverrides(input.cohort, bundles), ...peers }, input.cohort.allowBuilds)
 }
 
 export function isRsiLocalPackageRepairable(error: unknown): boolean {
   return error instanceof Error && ((error as NodeJS.ErrnoException).code === 'ENOENT'
-    || error.message.startsWith('rsi local cohort: installed package file differs:'))
+    || error.message.startsWith('rsi local cohort: installed package file differs:')
+    || error.message.startsWith('rsi local cohort: installed package identity split:'))
 }
 
 /** Caller owns the home lifecycle lock and has stopped any existing Host. */
@@ -119,7 +138,10 @@ export async function installRsiLocalProfile(input: RsiLocalProfileInput, ports 
   const workspace = join(profilePath,'pnpm-workspace.yaml')
   if (await realpath(workspace) !== workspace) fail('profile workspace file is not physical')
   const before = await io.readStable(workspace,1_048_576)
-  const after = mergeRsiLocalOverrides(before.toString('utf8'),rsiLocalDependencyOverrides(cohort),cohort.allowBuilds)
+  const peers = await rsiLocalPeerOverrides({ cohort, bundles: input.bundles })
+  assertLocalOverrideIdentity(before.toString('utf8'), cohort, peers)
+  const overrides = { ...rsiLocalDependencyOverrides(cohort, input.bundles), ...peers }
+  const after = mergeRsiLocalOverrides(before.toString('utf8'),overrides,cohort.allowBuilds)
   if (after !== before.toString('utf8')) {
     const temporary = join(profilePath,`.rsi-local-workspace-${randomUUID()}`)
     try {

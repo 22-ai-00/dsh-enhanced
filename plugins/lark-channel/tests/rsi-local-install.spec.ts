@@ -1,11 +1,13 @@
+import { execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 import { parseDocument } from 'yaml'
 import { installRsiLocalProfile, mergeRsiLocalOverrides, preflightRsiLocalProfile, rsiLocalDependencyOverrides, type RsiLocalProfilePorts } from '../src/rsi-local-install.js'
 import { parseRsiSetupArgs } from '../src/rsi-setup.js'
-import { prepareRsiLocalCohort, verifyRsiLocalInstalledPackages, type RsiLocalCohort } from '../src/rsi-local-cohort.js'
+import { prepareRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohort } from '../src/rsi-local-cohort.js'
 import { installFixture, localCohortFixture } from './fixtures/rsi-local-cohort.js'
 
 describe('frozen local profile dependency installation', () => {
@@ -88,3 +90,48 @@ describe('frozen local profile dependency installation', () => {
     expect(() => parseRsiSetupArgs(args.slice(0,-4))).toThrow('requires a profile')
   })
 })
+
+
+test('native pnpm peer overrides preserve one module identity and do not install absent optional providers', async () => {
+  const f = await localCohortFixture(true)
+  try {
+    const cohort = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
+    const profilePath = join(f.root, 'native-pnpm'); await mkdir(profilePath)
+    const target = cohort.packages.find(item => item.name === '@dsh-enhanced/target')!
+    await writeFile(join(profilePath, 'package.json'), JSON.stringify({ private: true,
+      dependencies: { [target.name]: `file:${target.tarball}` } }))
+    const peers = await rsiLocalPeerOverrides({ cohort, bundles: ['target'] })
+    await writeFile(join(profilePath, 'pnpm-workspace.yaml'), mergeRsiLocalOverrides('packages: [.]\nautoInstallPeers: false\n',
+      { ...rsiLocalDependencyOverrides(cohort, ['target']), ...peers }))
+    const output = execFileSync('pnpm', ['--dir', profilePath, 'install', '--ignore-scripts'], { encoding: 'utf8', timeout: 30_000,
+      env: { ...process.env, CI: 'true', pnpm_config_package_import_method: 'copy' } })
+    expect(output).toContain('Packages: +3')
+    await verifyRsiLocalInstalledPackages({ cohort, profilePath })
+    const targetPath = createRequire(join(profilePath, 'package.json')).resolve(`${target.name}/package.json`)
+    const targetRequire = createRequire(targetPath)
+    const provider = targetRequire.resolve('@dsh-enhanced/shared-lib/package.json')
+    const consumer = targetRequire.resolve('@dsh-enhanced/optional-plugin/package.json')
+    const peer = createRequire(consumer).resolve('@dsh-enhanced/shared-lib/package.json')
+    expect(await realpath(peer)).toBe(await realpath(provider))
+    for (const absent of ['assistant-policy', 'peer-only', 'assistant-automations', 'plugin-control-plane']) {
+      let resolved: string | undefined
+      try { resolved = targetRequire.resolve(`@dsh-enhanced/${absent}/package.json`) } catch { /* absent everywhere */ }
+      // NODE_PATH may expose this repository's unrelated packages to Node.
+      // They must not have been installed into the disposable profile.
+      expect(resolved?.startsWith(`${profilePath}/`) ?? false).toBe(false)
+    }
+    const before = await readFile(join(cohort.root, 'receipt.json'), 'utf8')
+    // Same-cohort retry derives the identical plan; unknown selectors fail
+    // preflight before invoking the package manager or touching owner bytes.
+    const workspace = join(profilePath, 'pnpm-workspace.yaml')
+    const known = await readFile(workspace, 'utf8')
+    await mkdir(join(f.home, 'profiles'), { recursive: true })
+    const retryProfile = join(f.home, 'profiles', 'retry'); await mkdir(retryProfile)
+    await writeFile(join(retryProfile, 'pnpm-workspace.yaml'), known)
+    await preflightRsiLocalProfile({ dshHome: f.home, profile: 'retry', cohort, bundles: ['target'] })
+    const drift = known + "  '@dsh-enhanced/target@0.1.48>@dsh-enhanced/assistant-policy': file:/unknown.tgz\n"
+    await writeFile(join(retryProfile, 'pnpm-workspace.yaml'), drift)
+    await expect(preflightRsiLocalProfile({ dshHome: f.home, profile: 'retry', cohort, bundles: ['target'] })).rejects.toThrow('frozen internal override')
+    expect(await readFile(join(cohort.root, 'receipt.json'), 'utf8')).toBe(before)
+  } finally { await rm(f.root, { recursive: true, force: true }) }
+}, 40_000)
