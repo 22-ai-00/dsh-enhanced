@@ -1456,7 +1456,7 @@ async function assertProfileDigest(home, profile, expected) {
   } finally { closeSync(descriptor) }
 }
 
-async function profileTreeDigest(profilePath, initialPrefix = '') {
+async function profileTreeDigest(profilePath, initialPrefix = '', maxFileBytes = PROFILE_TREE_MAX_FILE_BYTES) {
   const records = []
   let count = 0
   const visit = async (directory, prefix = '') => {
@@ -1475,7 +1475,7 @@ async function profileTreeDigest(profilePath, initialPrefix = '') {
       } else if (entry.isFile()) {
         assertOwnedPrivateEntry(linked, path, 'file')
         const packageEntry = relative.split('/').includes('node_modules')
-        if (!packageEntry && linked.nlink !== 1 || linked.size > PROFILE_TREE_MAX_FILE_BYTES) {
+        if (!packageEntry && linked.nlink !== 1 || linked.size > maxFileBytes) {
           fail(`profile tree 文件身份或大小不安全：${relative}`)
         }
         const descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW)
@@ -5349,7 +5349,7 @@ async function localSourceSandbox(context, action, input, pnpmStore) {
 async function localSourcePhysicalProof(home, profile) {
   const resources = {}
   for (const kind of ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']) {
-    resources[kind] = await profileTreeDigest(join(home, kind, profile))
+    resources[kind] = await profileTreeDigest(join(home, kind, profile), '', 256 * 1024 * 1024)
   }
   const metadata = {}
   for (const name of ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']) {
@@ -6861,7 +6861,7 @@ export const lifecycleProfileTest = Object.freeze({
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest,
   validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
-  validLocalSourceManifest, validLocalSourceSelection,
+  validLocalSourceManifest, validLocalSourceSelection, localSourcePhysicalProof, profileTreeDigest,
 })
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {

@@ -9901,6 +9901,34 @@ exit 7
 
 
 describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source transaction', () => {
+  test('accepts large frozen resource binaries within 256MiB while retaining the profile 64MiB limit', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'local-source-large-resource-'))
+    temporaryRoots.push(home)
+    const profile = 'assistant'
+    for (const kind of ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']) {
+      await mkdir(join(home, kind, profile), { recursive: true, mode: 0o700 })
+    }
+    const profilePath = join(home, 'profiles', profile)
+    await mkdir(join(profilePath, 'node_modules'), { recursive: true, mode: 0o700 })
+    for (const name of ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']) {
+      await writeFile(join(profilePath, name), '{}', { mode: 0o600 })
+    }
+    const resource = join(home, 'rsi-authority-runtimes', profile, 'node')
+    const handle = await open(resource, 'wx', 0o600)
+    try { await handle.truncate(64 * 1024 * 1024 + 1) } finally { await handle.close() }
+    const before = await lifecycleProfileTest.localSourcePhysicalProof(home, profile)
+    await expect(lifecycleProfileTest.profileTreeDigest(join(home, 'rsi-authority-runtimes', profile))).rejects.toThrow('大小不安全')
+    const changed = await open(resource, 'r+')
+    try { await changed.write(Buffer.from('x'), 0, 1, 0) } finally { await changed.close() }
+    expect((await lifecycleProfileTest.localSourcePhysicalProof(home, profile)).resources['rsi-authority-runtimes']).not.toBe(before.resources['rsi-authority-runtimes'])
+    const alias = join(home, 'rsi-authority-runtimes', profile, 'alias')
+    await link(resource, alias)
+    await expect(lifecycleProfileTest.localSourcePhysicalProof(home, profile)).rejects.toThrow('身份或大小不安全')
+    await rm(alias)
+    const oversized = await open(resource, 'r+')
+    try { await oversized.truncate(256 * 1024 * 1024 + 1) } finally { await oversized.close() }
+    await expect(lifecycleProfileTest.localSourcePhysicalProof(home, profile)).rejects.toThrow('大小不安全')
+  })
   test('rejects retained owner authority before stopping the service', async () => {
     const f = await preOwnerLifecycleFixture()
     await writeFile(join(f.dshHome,'owner-residue'),'retained owner',{mode:0o600})
