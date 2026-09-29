@@ -87,7 +87,7 @@ Options:
   --mode <mode>             standard or supervised-growth (default: standard)
   --with <add-on>           Add coding, traex, health, heartbeat, events, or bridge (repeatable)
   --ack-existing-automations
-                            Acknowledge active jobs may run when its scheduler is enabled
+                            Acknowledge existing active/paused jobs when enabling the RSI scheduler
   --lark <mode>             auto, keep, configure, or skip (default: auto)
   --agent-tools <mode>      auto, allow, preserve, or disable (default: auto)
   --permission <preset>     preserve, workspace-write, auto, or danger-full-access (default: preserve)
@@ -2381,23 +2381,6 @@ dsh_enhanced_apply_lark() {
   esac
 }
 
-dsh_enhanced_apply_supervised_growth() {
-  local profile="$1"
-  local dsh_home="$2"
-  local acknowledge="$3"
-  local dry_run="$4"
-  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-supervised-growth-setup"
-  local args=(--profile "$profile" --timeout-ms 300000)
-  if [[ "$acknowledge" == '1' ]]; then args+=(--ack-existing-automations); fi
-
-  printf '\nsupervised-growth：飞书 onboarding 完成后，正在运行有界且可审计的激活器。\n'
-  if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
-    dsh_enhanced_fail 1 "找不到安装后的 dsh-supervised-growth-setup：$setup_bin"
-    return $?
-  fi
-  dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
-}
-
 dsh_enhanced_prepare_rsi_source() {
   local profile="$1"
   local dsh_home="$2"
@@ -2423,10 +2406,11 @@ dsh_enhanced_prepare_rsi_source() {
 }
 
 dsh_enhanced_install_rsi_owner() {
-  local profile="$1" dsh_home="$2" source_mode="$3" repo_root="$4" dry_run="$5"
+  local profile="$1" dsh_home="$2" source_mode="$3" repo_root="$4" dry_run="$5" acknowledge="${6:-0}"
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-rsi-setup"
   local args=(--install-owner --profile "$profile" --dsh-home "$dsh_home")
   if [[ "$source_mode" == 'local' ]]; then args+=(--source-repository "$repo_root"); fi
+  if [[ "$acknowledge" == '1' ]]; then args+=(--ack-existing-automations); fi
   printf '\nsupervised-growth：自动配置当前 owner 的自迭代双 Host。\n'
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
     dsh_enhanced_fail 1 "找不到安装后的 dsh-rsi-setup：$setup_bin"
@@ -3724,9 +3708,9 @@ NODE
     fi
     dsh_enhanced_apply_lark "$lark_mode" "$profile" "$dsh_home" "$lark_configured" "$manage_service" "$dry_run" "$agent_tools_mode" || return $?
   fi
-  if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
-    dsh_enhanced_apply_supervised_growth "$profile" "$dsh_home" "$ack_existing_automations" "$dry_run" || return $?
-  fi
+  # Ordinary-use RSI configures its owner route and bounded scheduler in the
+  # final paired setup transaction. Fixed Recovery remains an explicit setup;
+  # its historical Health incidents must not gate this independent capability.
 
   if [[ "$operation" == 'install' && -n "$auto_traex_command" && "$model_provider" != 'traex-agent' ]]; then
     dsh_enhanced_apply_auto_traex "$profile" "$dsh_home" "$auto_traex_command" \
@@ -3832,7 +3816,7 @@ NODE
   fi
 
   if [[ "$operation" == 'install' && "$deployment_mode" == 'supervised-growth' ]]; then
-    dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" || return $?
+    dsh_enhanced_install_rsi_owner "$profile" "$dsh_home" "$source_mode" "$repo_root" "$dry_run" "$ack_existing_automations" || return $?
   fi
 
   printf '\n安装流程完成。\n'

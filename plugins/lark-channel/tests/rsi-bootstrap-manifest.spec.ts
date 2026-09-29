@@ -96,6 +96,34 @@ async function fixture() {
 }
 
 describe('ordinary-use RSI manifest factory', () => {
+  test('adds a missing owner route only in compiler output and observes its final tagged Delivery config', async () => {
+    const {root,input} = await fixture()
+    try {
+      const original = parse(input.targetEffective) as Array<{id:string;config:Record<string,any>}>
+      original.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config.ownerRoutes = []
+      const targetEffective = stringify(original).replace('ownerRoutes: []', "ownerRoutes: []\n    databasePath: !!js dshHomePath('delivery/state.sqlite')")
+      const source = parseDocument(targetEffective)
+      if (!isSeq(source.contents)) throw new Error('invalid fixture')
+      const delivery = source.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-assistant-delivery')
+      if (!isMap(delivery)) throw new Error('missing Delivery')
+      const originalDigest = runtimeConfigDigest(rawLoaderConfig(delivery.get('config',true) as Node,'Delivery'))
+      const observerTargets = [...input.observerTargets,{entryId:'dsh-enhanced-assistant-delivery',module:'@dsh-enhanced/assistant-delivery',configDigest:originalDigest,services:['assistantDelivery']}]
+      const manifest = createRsiBootstrapManifest({...input,targetEffective,observerTargets})
+      expect(targetEffective).toContain('ownerRoutes: []')
+      expect(() => createRsiBootstrapManifest({...input,targetEffective,observerTargets:observerTargets.map(target => target.entryId === 'dsh-enhanced-assistant-delivery' ? {...target,configDigest:'a'.repeat(64)} : target)})).toThrow('config digest differs')
+      const compiled = await compileRsiProfiles({manifest,dshHome:input.dshHome,targetPatch:'[]\n',targetEffective,
+        coordinatorPatch:'[]\n',coordinatorEffective:stringify(coordinatorEffective),coordinatorBase,owner:input.owner})
+      const final = parseDocument(compiled.targetPatch)
+      if (!isSeq(final.contents)) throw new Error('invalid final')
+      const row = final.contents.items.find(item => isMap(item) && (item.get('id') as unknown) === 'dsh-enhanced-assistant-delivery')
+      if (!isMap(row)) throw new Error('missing compiled Delivery')
+      expect(compiled.targetPatch).toContain("databasePath: !!js dshHomePath('delivery/state.sqlite')")
+      const digest = manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === 'dsh-enhanced-assistant-delivery')!.configDigest
+      expect(digest).not.toBe(originalDigest)
+      expect(digest).toBe(runtimeConfigDigest(rawLoaderConfig(row.get('config',true) as Node,'Delivery')))
+      expect((row.toJSON() as {config:{ownerRoutes:unknown[]}}).config.ownerRoutes).toHaveLength(1)
+    } finally { await rm(root,{recursive:true,force:true}) }
+  })
   test('composes a real validator-accepted owner-bound two-Host profile from prepared inputs', async () => {
     const { root, input } = await fixture()
     try {

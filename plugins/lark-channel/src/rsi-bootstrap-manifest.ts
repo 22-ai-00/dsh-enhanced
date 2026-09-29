@@ -1,6 +1,6 @@
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
-import { externalPrincipalId, ownerRouteAuthorityHash, type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
+import { type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
 import { PROTECTED_PLUGIN_DENYLIST, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 
@@ -9,6 +9,7 @@ import type { Pin, RsiAuthorityRuntime } from './rsi-authority-runtime.js'
 import type { RsiBuildEnvironment } from './rsi-build.js'
 import type { RsiSetupManifest } from './rsi-profile.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
+import { resolveRsiOwnerRoute } from './rsi-owner-profile.js'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const pluginPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
@@ -161,33 +162,10 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
   const delivery = rows.get('dsh-enhanced-assistant-delivery')
   if (!delivery || delivery.get('disabled') === true) fail('effective Delivery is unavailable')
   const deliveryConfig = plain(rowConfig(delivery, 'Delivery'), 'Delivery config')
-  const configuredWorkspace = deliveryConfig.defaultWorkspace
-  const workspace = configuredWorkspace === "dshHomePath('assistant-workspace')" || configuredWorkspace === 'dshHomePath("assistant-workspace")'
-    ? join(input.dshHome, 'assistant-workspace') : configuredWorkspace
-  canonical(workspace as string, 'Delivery workspace')
-  if (workspace !== input.owner.workspace || deliveryConfig.defaultAgentPreset !== input.owner.agentPreset
-    || deliveryConfig.policyRef !== undefined && deliveryConfig.policyRef !== input.owner.policyRef) fail('Delivery scope differs from active owner')
-  const routes = deliveryConfig.ownerRoutes
-  if (!Array.isArray(routes)) fail('Delivery owner routes are missing')
-  const matching = routes.filter(route => {
-    if (!route || typeof route !== 'object' || Array.isArray(route)) return false
-    const item = route as Record<string, unknown>
-    return isDeepStrictEqual(item.conversation, input.owner.conversation)
-      && isDeepStrictEqual(item.principal, input.owner.principal)
-      && item.workspace === input.owner.workspace && item.agentPreset === input.owner.agentPreset
-      && item.policyRef === input.owner.policyRef
-      && Number.isSafeInteger(item.minimumGeneration) && (item.minimumGeneration as number) >= 1
-      && (item.minimumGeneration as number) <= input.owner.generation
-  }) as Record<string, unknown>[]
-  if (matching.length !== 1 || typeof matching[0]!.id !== 'string' || !matching[0]!.id) fail('no unique effective route matches active owner')
-  const route = matching[0]!, routeId = route.id as string
-  if (routes.filter(item => item && typeof item === 'object' && (item as Record<string, unknown>).id === routeId).length !== 1) fail('matching owner route id is duplicated')
-  const principalId = externalPrincipalId(input.owner.principal)
+  const resolvedOwner = resolveRsiOwnerRoute(deliveryConfig, input.owner, input.dshHome)
+  const routeId = resolvedOwner.route.id, principalId = resolvedOwner.principal
   const scope = { ownerRouteId: routeId, principalId, workspace: input.owner.workspace, preset: input.owner.agentPreset }
-  const reviewOwner = { authorityId: routeId,
-    authorityHash: ownerRouteAuthorityHash({ id: routeId, conversation: input.owner.conversation, principal: input.owner.principal,
-      workspace: input.owner.workspace, agentPreset: input.owner.agentPreset, policyRef: input.owner.policyRef,
-      minimumGeneration: route.minimumGeneration as number }), principalId,
+  const reviewOwner = { authorityId: routeId, authorityHash: resolvedOwner.route.authorityHash, principalId,
     principalRecordId: input.owner.owner.id, principalVersion: input.owner.owner.version,
     workspace: input.owner.workspace, agentPreset: input.owner.agentPreset }
 
@@ -285,7 +263,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     limits: { periodMs: day, reviews: reviewLimit, discovery: 1440, source: 7, observations: 1440,
       coordinator: 1440, qualification: 1440 },
   }
-  // These two rows are rewritten deterministically by compileRsiProfiles.
+  // Delivery, Growth and Verifier final options are determined by compileRsiProfiles.
   // Observe their final raw Loader options, not the pre-install dump. Neither
   // embeds runtimeObserver, so there is no configuration-digest cycle.
   const verifier = rows.get('dsh-enhanced-assistant-verifier')
@@ -298,5 +276,14 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     { entryId: 'dsh-enhanced-assistant-verifier', module: '@dsh-enhanced/assistant-verifier',
       configDigest: runtimeConfigDigest({ ...verifierRaw, sourceReviews: manifest.sourceReviews }), services: ['assistantVerifier'] },
   )
+  const deliveryTarget = manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === 'dsh-enhanced-assistant-delivery')
+  if (deliveryTarget) {
+    // The input observer digest was validated above against the original dump.
+    // Only the journaled compiler output receives the new owner route.
+    const deliveryRaw = rawLoaderConfig(rowConfig(delivery, 'Delivery'), 'Delivery') as Record<string, unknown>
+    deliveryTarget.configDigest = runtimeConfigDigest(resolvedOwner.created
+      ? { ...deliveryRaw, ownerRoutes: [...deliveryRaw.ownerRoutes as unknown[], resolvedOwner.authority] }
+      : deliveryRaw)
+  }
   return manifest
 }

@@ -148,7 +148,7 @@ describe('RSI profile compiler', () => {
         await expect(compileRsiProfiles({ ...input, manifest: noLimit })).rejects.toThrow('distinct finite budget')
       }
 
-      await expect(compileRsiProfiles({ ...input, owner: { ...adjustedOwner, generation: 0 } })).rejects.toThrow('minimumGeneration')
+      await expect(compileRsiProfiles({ ...input, owner: { ...adjustedOwner, generation: 0 } })).rejects.toThrow('owner receipt')
       const wrongScope = structuredClone(value); wrongScope.controlPlane.sourceJobs!.principalId = 'another-owner'
       await expect(compileRsiProfiles({ ...input, manifest: wrongScope })).rejects.toThrow('sourceJobs')
       const wrongReviewOwner = structuredClone(value); wrongReviewOwner.sourceReviews.owner = { ...wrongReviewOwner.sourceReviews.owner, authorityId: wrongReviewOwner.controlPlane.sourceJobs!.authorityId }

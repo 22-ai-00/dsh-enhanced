@@ -23,12 +23,13 @@ import { readRsiServiceEnvironment } from './rsi-service-environment.js'
 import { version } from './version.js'
 import { readRsiLocalCohort, verifyRsiLocalInstalledPackages } from './rsi-local-cohort.js'
 import { installRsiLocalProfile, isRsiLocalPackageRepairable } from './rsi-local-install.js'
+import { assertRsiSchedulerActivation, captureRsiAutomationInventories } from './rsi-owner-profile.js'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const coordinatorBundles = ['assistant-policy', 'assistant-automations', 'plugin-control-plane'] as const
 const hash = (value: string): string => createHash('sha256').update(value).digest('hex')
 function fail(message: string): never { throw new Error(`rsi install: ${message}`) }
-export interface RsiInstallInput { dshHome: string; profile: string; sourceRepository?: string | undefined; signal?: AbortSignal }
+export interface RsiInstallInput { dshHome: string; profile: string; sourceRepository?: string | undefined; signal?: AbortSignal; ackExistingAutomations?: boolean | undefined }
 export type RsiInstallResult = { mode: 'not-ready'; reason: string } | { mode: 'ready'; profiles: readonly string[]; manifestPath: string }
 async function exists(path: string): Promise<boolean> {
   try { await lstat(path); return true } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; return false }
@@ -227,6 +228,9 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
       targetEffective, owner: binding, resources, runtime, source, sourceBuild: build.sourceBuild,
       git: installed.git, now, expiresAt, plugins: installed.plugins,
       observerTargets: installed.observerTargets, hostDeploymentInputs: installed.hostDeploymentInputs })
+    const inventories = await captureRsiAutomationInventories(ports.setup.automationInventory,
+      targetEffective, profiles.coordinatorEffective, input.dshHome, coordinatorProfile)
+    assertRsiSchedulerActivation(inventories, input.ackExistingAutomations === true)
     const previousJournal = await exists(setupJournal) ? (await io.readStable(setupJournal,2_097_152,true)).toString('utf8') : null
     const running = new Set<string>()
     let applied = false
@@ -236,12 +240,15 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
       if (!isDeepStrictEqual(snapshot.bindings, (await ports.setup.snapshot(targetEffective,input.dshHome)).bindings)
         || ports.setup.dump(pair[0],input.dshHome) !== targetEffective
         || ports.setup.dump(pair[1],input.dshHome) !== profiles.coordinatorEffective) fail('owner or profile changed while stopping Hosts')
+      if (!isDeepStrictEqual(inventories, await captureRsiAutomationInventories(ports.setup.automationInventory,
+        targetEffective, profiles.coordinatorEffective, input.dshHome, coordinatorProfile))) fail('Automation inventory changed while stopping Hosts')
       const unitProperties = await ports.capture({ dshHome: input.dshHome, profile: pair[0] },
         { systemctl: { ...installed.systemctl, interpreter: null }, environment: manifest.serviceEnvironment!.target, signal })
       const configuration = await ports.prepareOwner({ manifest, resources, runtime, source, releaseBuild: release.releaseBuild,
         executor: installed.executor, systemctl: installed.systemctl, unitProperties, policies: installed.policies, now }, { binding, profiles, signal })
       const args = { dshHome: input.dshHome, manifestPath: configuration.manifestPath, apply: true, rollback: false,
-        start: false, confirmStopped: true, help: false }
+        start: false, confirmStopped: true, help: false, ackExistingAutomations: input.ackExistingAutomations === true,
+        expectedAutomationInventories: inventories }
       const deploymentPorts: RsiSetupPorts = { ...ports.setup, async validateServiceUnits(value, environment) {
         await ports.setup.validateServiceUnits(value, environment)
         const current = await ports.readUnit({ dshHome: input.dshHome, profile: pair[0] },

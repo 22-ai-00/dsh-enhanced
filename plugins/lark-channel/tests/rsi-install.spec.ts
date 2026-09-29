@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse, stringify } from 'yaml'
+import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { installRsiOwnerDeployment, rsiCoordinatorProfile, rsiInstallPorts, type RsiInstallPorts } from '../src/rsi-install.js'
 import { rsiSetupPorts } from '../src/rsi-setup.js'
@@ -32,6 +33,12 @@ async function fixture() {
   const setup = { ...rsiSetupPorts,
     dump: vi.fn(dump), base: vi.fn(async () => f.profiles.coordinatorBase),
     snapshot: vi.fn(async () => ({bindings:[f.binding],storageDigest:stops.length ? 'stopped' : 'running'} as unknown as Awaited<ReturnType<typeof rsiSetupPorts.snapshot>>)),
+    automationInventory: vi.fn(async (effective: string) => {
+      const rows = parse(effective) as Array<{id:string;config:Record<string,any>}>
+      const config = rows.find(row => row.id === 'dsh-enhanced-assistant-automations')?.config
+        ?? rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.assistantAutomations
+      return {databasePath:config.databasePath ?? join(home,'automations.sqlite'),schedulerEnabled:config.schedulerEnabled === true,records:[]}
+    }),
     assertStopped: vi.fn(), start: vi.fn(async (name: string) => { starts.push(name) }),
     serviceUnitPath: (name: string) => join(home,'units',`${name}.service`),
     renderServiceUnit: vi.fn(async (name:string,_home:string,environment:Record<string,string>) => JSON.stringify({name,environment})),
@@ -44,10 +51,12 @@ async function fixture() {
     prepare: vi.fn(async () => ({ source:f.input.source, runtime:f.input.runtime,resources:f.input.resources,
       build:{schemaVersion:1 as const,sourceCommit:f.input.source.sourceCommit,sourceBuild:f.input.manifest.controlPlane.sourceBuild!},
       release:{schemaVersion:1 as const,sourceCommit:f.input.source.sourceCommit,image:'sha256:'+'a'.repeat(64),releaseBuild:f.input.releaseBuild} })),
-    collect: vi.fn(async () => ({ dsh:{root:'/fixture/dsh',path:f.input.executor.path,version:f.input.executor.version,pin:f.input.executor},
+    collect: vi.fn(async value => ({ dsh:{root:'/fixture/dsh',path:f.input.executor.path,version:f.input.executor.version,pin:f.input.executor},
       executor:f.input.executor,git:f.input.manifest.sourceReviews.git,systemctl:f.input.systemctl,
       plugins:[...f.input.manifest.sourceReviews.plugins],policies:f.input.policies,
-      observerTargets:f.input.manifest.controlPlane.runtimeObserver!.targets.filter(target => !['dsh-enhanced-assistant-growth-driver','dsh-enhanced-assistant-verifier'].includes(target.entryId)),
+      observerTargets:f.input.manifest.controlPlane.runtimeObserver!.targets.filter(target => !['dsh-enhanced-assistant-growth-driver','dsh-enhanced-assistant-verifier'].includes(target.entryId))
+        .map(target => target.entryId === 'dsh-enhanced-assistant-delivery' ? {...target,
+          configDigest:runtimeConfigDigest((parse(value.targetEffective) as Array<{id:string;config:unknown}>).find(row => row.id === target.entryId)!.config)} : target),
       hostDeploymentInputs:[...f.input.manifest.controlPlane.sourceAdoptions!.hostDeploymentInputs!] })),
     coordinator: vi.fn(async () => {}),
     stop: vi.fn(async (_input,name) => { stops.push(name); return true }),
@@ -57,16 +66,28 @@ async function fixture() {
   // The synchronous dump port reads current profile bytes just like dsh --dump-config.
   const { readFileSync } = await import('node:fs')
   setup.dump = vi.fn(name => { patches[name] = readFileSync(join(home,'profiles',name,'cordis.patch.yml'),'utf8'); return dump(name) })
-  return {f,home,profile,coordinator,ports,starts,stops,input:{dshHome:home,profile}}
+  return {f,home,profile,coordinator,ports,starts,stops,originals,input:{dshHome:home,profile}}
 }
 
 describe('automatic owner deployment', () => {
   test('applies real owner/profile/authority transaction, starts coordinator first, and preserves frozen installation on retry', async () => {
     const f = await fixture()
+    const original = parse(f.originals[f.profile]!) as Array<{id:string;config:Record<string,any>}>
+    const delivery = original.find(row => row.id === 'dsh-enhanced-assistant-delivery')!
+    delivery.config.ownerRoutes = []
+    delivery.config.preservedSetting = {exact:'keep'}
+    f.originals[f.profile] = stringify(original)
     const first = await installRsiOwnerDeployment(f.input,f.ports)
     expect(first.mode).toBe('ready')
     expect(f.starts).toEqual([f.coordinator,f.profile])
     const manifest = await readFile(join(f.f.input.resources.configRoot,'manifest.json'),'utf8')
+    const appliedRows = parse(await readFile(join(f.home,'profiles',f.profile,'cordis.patch.yml'),'utf8')) as Array<{id:string;config:Record<string,any>}>
+    const appliedDelivery = appliedRows.find(row => row.id === delivery.id)!.config
+    expect(appliedDelivery.ownerRoutes).toHaveLength(1)
+    expect(appliedDelivery.ownerRoutes[0].id).toMatch(/^rsi-owner-/u)
+    expect(appliedDelivery.preservedSetting).toEqual({exact:'keep'})
+    expect(JSON.parse(manifest).controlPlane.runtimeObserver.targets.find((target:{entryId:string}) => target.entryId === delivery.id).configDigest)
+      .toBe(runtimeConfigDigest(appliedDelivery))
     const key = await readFile(join(f.f.input.resources.configRoot,'observer.key'))
     expect(f.ports.ready).toHaveBeenCalledOnce()
     expect(vi.mocked(f.ports.ready).mock.calls[0]![3]).toBeGreaterThan(0)
@@ -161,9 +182,50 @@ process.exit(first ? 9 : 0);
   },120_000)
   test('final unit property drift rolls back profile application before any Host starts', async () => {
     const f = await fixture()
+    const original = parse(f.originals[f.profile]!) as Array<{id:string;config:Record<string,any>}>
+    original.find(row => row.id === 'dsh-enhanced-assistant-delivery')!.config.ownerRoutes = []
+    f.originals[f.profile] = stringify(original)
     f.ports.readUnit = vi.fn(async () => ({...f.f.input.unitProperties,User:'changed'}))
     await expect(installRsiOwnerDeployment(f.input,f.ports)).rejects.toThrow('final loaded systemd unit differs')
     expect(f.starts).toEqual([])
     expect(await readFile(join(f.home,'profiles',f.profile,'cordis.patch.yml'),'utf8')).toBe('[]\n')
+  },120_000)
+  test('an active destination coordinator ledger needs acknowledgement even when both source ledgers are empty', async () => {
+    const f = await fixture()
+    const inspect = f.ports.setup.automationInventory, destination = join(f.home,'rsi-coordinators',f.coordinator,'automations.sqlite')
+    const active = [{id:'existing-coordinator-row',status:'active',version:1}] as unknown as Awaited<ReturnType<typeof inspect>>['records']
+    f.ports.setup.automationInventory = vi.fn(async (effective,home) => {
+      const inventory = await inspect(effective,home)
+      return {...inventory,records:inventory.databasePath === destination ? active : []}
+    })
+    await expect(installRsiOwnerDeployment(f.input,f.ports)).rejects.toThrow('--ack-existing-automations')
+    expect(f.stops).toEqual([])
+    expect((await installRsiOwnerDeployment({...f.input,ackExistingAutomations:true},f.ports)).mode).toBe('ready')
+    expect(active).toEqual([{id:'existing-coordinator-row',status:'active',version:1}])
+  },120_000)
+  test('requires acknowledgement for existing Recovery/heartbeat rows and rejects post-stop inventory drift before grants', async () => {
+    const f = await fixture()
+    const inspect = f.ports.setup.automationInventory
+    const active = [{id:'recovery:supervised-growth',owner:'dsh-enhanced-assistant-recovery',status:'active',version:1}] as unknown as Awaited<ReturnType<typeof inspect>>['records']
+    f.ports.setup.automationInventory = vi.fn(async (effective,home) => {
+      const inventory = await inspect(effective,home)
+      return {...inventory,records:inventory.databasePath === join(f.home,'automations.sqlite') ? active : []}
+    })
+    f.ports.prepareOwner = vi.fn(f.ports.prepareOwner)
+    await expect(installRsiOwnerDeployment(f.input,f.ports)).rejects.toThrow('--ack-existing-automations')
+    expect(f.stops).toEqual([])
+    expect(f.ports.prepareOwner).not.toHaveBeenCalled()
+    const stop = f.ports.stop
+    f.ports.stop = vi.fn(async (...args: Parameters<RsiInstallPorts['stop']>) => {
+      const result = await stop(...args)
+      active[0] = {...active[0]!,version:2}
+      return result
+    })
+    await expect(installRsiOwnerDeployment({...f.input,ackExistingAutomations:true},f.ports)).rejects.toThrow('Automation inventory changed while stopping')
+    expect(f.ports.prepareOwner).not.toHaveBeenCalled()
+    expect(await readFile(join(f.home,'profiles',f.profile,'cordis.patch.yml'),'utf8')).toBe('[]\n')
+    f.ports.stop = stop
+    expect((await installRsiOwnerDeployment({...f.input,ackExistingAutomations:true},f.ports)).mode).toBe('ready')
+    expect(active[0]).toMatchObject({id:'recovery:supervised-growth',version:2})
   },120_000)
 })

@@ -2,7 +2,7 @@
 
 ## Mission
 
-Build an intelligent tool that improves through ordinary use: authenticated task feedback → durable learning → skill/tool/plugin candidate → independent verification → bounded adoption → subsequent tasks → observation/rollback. After initial setup and authorization, the owner should not need to orchestrate each improvement.
+Build an intelligent tool that improves through ordinary use: authenticated task feedback → durable learning → skill/tool/plugin candidate → independent verification → bounded adoption → subsequent tasks → observation/rollback. Evolution includes durable factual/experience memory and engineering capabilities, primarily through creating and dynamically loading Cordis plugins. After initial setup and authorization, the owner should not need to orchestrate each improvement.
 
 This pnpm monorepo contains independently publishable DSH bundles in `plugins/*`; `packages/*` contains shared libraries that never auto-enable.
 

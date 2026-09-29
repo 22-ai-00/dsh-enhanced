@@ -1,5 +1,7 @@
 # 分级自治成长激活器
 
+这是显式选择的固定 Recovery runbook。普通 `supervised` 安装直接使用[日常使用自迭代配置](rsi-setup.md)，不再自动调用本激活器；以下 preview、健康门与回滚合同继续适用于显式激活。
+
 `dsh-supervised-growth-setup --profile web` 在完成 Lark owner onboarding 后，把
 `supervised-growth/v2` 作为无模型的 `assistant-recovery` Host runbook 激活。它不把恢复步骤、
 目标 scope、owner route 或 Policy 参数交给模型选择。另有独立、受限的 adoption analyst；它不参与

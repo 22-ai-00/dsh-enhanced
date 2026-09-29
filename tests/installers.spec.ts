@@ -7975,7 +7975,8 @@ printf '%s\\n' '{not-json'
       'assistant-health', 'assistant-goals', 'assistant-recovery', 'lark-channel',
     ]) expect(slugs.has(required), `missing ${required}`).toBe(true)
     expect(result.stdout).toContain('env npm_config_loglevel=error dsh plugin --profile web add')
-    expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000')
+    expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')
+    expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
   })
 
   test('npm installer with its sibling common rejects an unsupported exact host version', async () => {
@@ -8114,7 +8115,8 @@ cp "$REMOTE_COMMON" "$4"
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-recovery'))
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'traex-acp-provider'))
     expect(result.stdout).toContain('dsh-lark-setup --profile web')
-    expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000')
+    expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')
+    expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
     expect(result.stdout).not.toContain('overlay：未应用')
   })
 
@@ -8171,7 +8173,7 @@ cp "$REMOTE_COMMON" "$4"
     })
   })
 
-  test('supervised-growth passes an explicit acknowledgement only to its activator', async () => {
+  test('supervised-growth passes an explicit acknowledgement only to owner RSI setup', async () => {
     const dshHome = await temporaryDshHome()
 
     const result = runInstaller(localInstaller, [
@@ -8179,7 +8181,9 @@ cp "$REMOTE_COMMON" "$4"
     ], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000 --ack-existing-automations')
+    expect(result.stdout).toContain('dsh-rsi-setup --install-owner --profile web')
+    expect(result.stdout).toContain('--ack-existing-automations')
+    expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
   })
 
   test('supervised-growth refuses to run without an owner onboarding path', async () => {
@@ -8733,7 +8737,7 @@ fi
     expect(log).not.toContain('systemctl --user show-environment')
   })
 
-  test('supervised-growth prepares source before Lark setup and invokes the installed activator afterwards', async () => {
+  test('supervised-growth prepares source before Lark setup and installs owner RSI after doctor without fixed Recovery', async () => {
     const root = await temporaryDshHome()
     const dshHome = join(root, 'dsh-home')
     const fakeBin = join(root, 'bin')
@@ -8794,7 +8798,7 @@ EOF
   cat > "$bin/dsh-supervised-growth-setup" <<'EOF'
 #!/bin/bash
 printf 'supervised-setup %s\\n' "$*" >> "$INSTALL_LOG"
-printf 'supervised growth activated\\n'
+exit 42
 EOF
   cat > "$bin/dsh-rsi-setup" <<'EOF'
 #!/bin/bash
@@ -8821,7 +8825,7 @@ fi
     })
 
     expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('supervised growth activated')
+    expect(result.stdout).not.toContain('supervised growth activated')
     const log = await readFile(logPath, 'utf8')
     expect(log).toContain('systemctl --user show-environment')
     expect(log).toContain('systemctl --user is-active --quiet dsh-profile-web.service')
@@ -8831,15 +8835,16 @@ fi
     const larkSetup = log.indexOf('lark-setup --profile web --install-service')
     const localCohort = log.indexOf('local-cohort ')
     const sourceSetup = log.indexOf(`rsi-source-setup --prepare-build --optional-build --profile web --dsh-home ${dshHome} --source-repository ${repoRoot}`)
-    const activator = log.indexOf('supervised-setup --profile web --timeout-ms 300000')
+    const ownerInstall = log.indexOf('rsi-source-setup --install-owner --profile web')
+    expect(log).not.toContain('supervised-setup')
     const serviceDoctor = log.indexOf('systemctl --user is-active --quiet dsh-profile-web.service')
     expect(larkSetup).toBeGreaterThanOrEqual(0)
     expect(sourceSetup).toBeGreaterThanOrEqual(0)
     expect(localCohort).toBeGreaterThanOrEqual(0)
     expect(sourceSetup).toBeGreaterThan(localCohort)
     expect(larkSetup).toBeGreaterThan(sourceSetup)
-    expect(activator).toBeGreaterThan(larkSetup)
-    expect(serviceDoctor).toBeGreaterThan(activator)
+    expect(serviceDoctor).toBeGreaterThan(larkSetup)
+    expect(ownerInstall).toBeGreaterThan(serviceDoctor)
   })
 
   test('Linux service stability verification stops a restart loop and reports its journal', async () => {

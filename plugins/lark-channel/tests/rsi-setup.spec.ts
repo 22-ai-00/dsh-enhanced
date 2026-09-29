@@ -26,6 +26,7 @@ async function fixture() {
     dump: vi.fn(profile => readFileSync(join(home, 'profiles', profile, 'cordis.patch.yml'), 'utf8')),
     base: vi.fn(async () => '[]\n'),
     snapshot: vi.fn(async () => snapshot),
+    automationInventory: vi.fn(async () => ({ databasePath: join(home, 'automations.sqlite'), schedulerEnabled: true, records: [] })),
     compile: vi.fn(async () => ({ targetPatch: '- id: target\n  config: { status: configured }\n', coordinatorPatch: '- id: coordinator\n  config: { status: configured }\n' })),
     resolveEnvironments: vi.fn(async () => undefined), serviceUnitPath: (profile, home) => join(home, 'units', `${profile}.service`),
     renderServiceUnit: vi.fn(async (profile, _home, environment) => JSON.stringify({ profile, environment })), reloadServices: vi.fn(), validateServiceUnits: vi.fn(async () => {}),
@@ -54,6 +55,20 @@ describe('RSI dual profile setup transaction', () => {
     await expect(stat(f.journal)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(f.ports.validateAuthorities).toHaveBeenCalledOnce()
     expect(f.ports.start).not.toHaveBeenCalled()
+  })
+  test('manual apply gates scheduler activation and acknowledgement still fences inventory drift', async () => {
+    const f = await fixture()
+    const active = [{id:'heartbeat:legacy',status:'active',version:1}] as unknown as Awaited<ReturnType<typeof f.ports.automationInventory>>['records']
+    f.ports.automationInventory = vi.fn(async effective => ({databasePath:join(f.home,'automations.sqlite'),
+      schedulerEnabled:effective.includes('schedulerEnabled: true'),records:active}))
+    await expect(configureRsiSetup(f.args(f.apply),f.ports)).rejects.toThrow('--ack-existing-automations')
+    await expect(stat(f.journal)).rejects.toMatchObject({code:'ENOENT'})
+    f.ports.validateAuthorities = vi.fn(async () => { active[0] = {...active[0]!,version:2} })
+    await expect(configureRsiSetup(f.args([...f.apply,'--ack-existing-automations']),f.ports)).rejects.toThrow('Automation inventory changed before write')
+    expect(await readFile(f.patch(),'utf8')).toContain('status: original')
+    f.ports.validateAuthorities = vi.fn(async () => {})
+    expect((await configureRsiSetup(f.args([...f.apply,'--ack-existing-automations']),f.ports)).mode).toBe('configured')
+    expect(active[0]).toMatchObject({id:'heartbeat:legacy',version:2})
   })
   test('applies both profiles, retains private journal across idempotent apply, and rolls back', async () => {
     const f = await fixture()
@@ -251,6 +266,7 @@ describe('RSI dual profile setup transaction', () => {
       .toMatchObject({installOwner:true,profile:'web',sourceRepository:'/tmp/source',apply:false})
     expect(() => parseRsiSetupArgs(['--install-owner','--profile','web','--dsh-home','/tmp/home','--apply']))
       .toThrow('cannot be combined')
+    expect(parseRsiSetupArgs(['--install-owner','--profile','web','--dsh-home','/tmp/home','--ack-existing-automations']).ackExistingAutomations).toBe(true)
   })
   test('argument parser refuses implicit mutation and incompatible operations', () => {
     const base = ['--manifest', '/tmp/private.json', '--dsh-home', '/tmp/home']
@@ -258,6 +274,10 @@ describe('RSI dual profile setup transaction', () => {
     expect(() => parseRsiSetupArgs([...base, '--apply'])).toThrow('confirm-hosts-stopped')
     expect(() => parseRsiSetupArgs([...base, '--rollback', '--apply'])).toThrow('cannot be combined')
     expect(() => parseRsiSetupArgs([...base, '--apply', '--apply'])).toThrow('duplicate')
+    expect(parseRsiSetupArgs([...base,'--apply','--confirm-hosts-stopped','--ack-existing-automations']).ackExistingAutomations).toBe(true)
+    expect(() => parseRsiSetupArgs([...base,'--ack-existing-automations'])).toThrow('requires --install-owner or --apply')
+    expect(() => parseRsiSetupArgs([...base,'--rollback','--confirm-hosts-stopped','--ack-existing-automations'])).toThrow('requires --install-owner or --apply')
+    expect(() => parseRsiSetupArgs(['--prepare-build','--profile','web','--ack-existing-automations'])).toThrow('requires --install-owner or --apply')
   })
   test('platform gate lives only in the CLI shell, not in the injectable transaction', async () => {
     const f = await fixture()
