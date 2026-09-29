@@ -6,6 +6,7 @@ import { closeSync, constants, createReadStream, fstatSync, lstatSync, openSync 
 import { chmod, lstat, mkdir, mkdtemp, open, opendir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { isDeepStrictEqual } from 'node:util'
 import { assertLifecycleNpmMetadataSafe, classifyLifecycleScenario, lifecycleWorkspacePaths, prepareLifecycleNpmMetadata, readRsiCoordinatorReceipt, validateRsiCoordinatorPair } from './lifecycle-config.mjs'
 import { candidateHostUnitSource, classifyHostUnitBytes, parseHostUpdatePlan } from './host-lifecycle.mjs'
 
@@ -16,6 +17,7 @@ const MANIFEST_VERSION = 1
 const SERVICE_MANIFEST_VERSION = 2
 const SUPERVISED_SERVICE_MANIFEST_VERSION = 3
 const HOST_UPDATE_MANIFEST_VERSION = 4
+const LOCAL_SOURCE_MANIFEST_VERSION = 5
 const TRANSACTION_SUFFIX = '.dsh-enhanced-transaction'
 const WEB_READY_MARKER = 'dsh web: http://127.0.0.1:'
 const HOST_READY_MARKER = 'dsh-enhanced host ready: v1'
@@ -283,7 +285,7 @@ function unmanagedAutomationDigest(records) {
 }
 
 function isServiceManifestVersion(version) {
-  return version === SERVICE_MANIFEST_VERSION || version === SUPERVISED_SERVICE_MANIFEST_VERSION
+  return version === SERVICE_MANIFEST_VERSION || version === SUPERVISED_SERVICE_MANIFEST_VERSION || version === LOCAL_SOURCE_MANIFEST_VERSION
 }
 
 function bindingFor(manifest) {
@@ -323,6 +325,7 @@ function bindingFor(manifest) {
     supervisedLifecycle: manifest.supervisedLifecycle,
     rsiCoordinator: manifest.rsiCoordinator,
     hostMigration: manifest.hostMigration,
+    localSourceMaintenance: manifest.localSourceMaintenance,
   }
 }
 
@@ -783,7 +786,7 @@ const MANIFEST_TOP_LEVEL_KEYS = [
   'foreignOwnership', 'cleanProfileDigest', 'cleanProfiles', 'serviceMasks',
   'containmentMasks', 'containmentMaskIntents', 'serviceStartBarriers',
   'containmentStartBarriers', 'archivedProfile', 'cleanup', 'supervisedLifecycle', 'rsiCoordinator',
-  'hostMigration',
+  'hostMigration', 'localSourceMaintenance',
   // 以下三个键不进 bindingDigest：updatedAt/failure 是事务时间线与收容诊断，
   // bindingDigest 是自反校验字段本身。未知顶层键必须拒绝，否则可绕过篡改信封。
   'updatedAt', 'failure', 'bindingDigest',
@@ -913,7 +916,9 @@ async function loadManifest(physicalTransactionRoot, expected) {
     ? manifest?.version === MANIFEST_VERSION
     : LIFECYCLE_SCENARIOS.has(manifest.expectedScenario)
       && (isServiceManifestVersion(manifest.version)
-        ? manifest.expectedScenario === (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION ? 'supervised' : 'lark')
+        ? (manifest.version === LOCAL_SOURCE_MANIFEST_VERSION
+          ? ['lark', 'supervised'].includes(manifest.expectedScenario)
+          : manifest.expectedScenario === (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION ? 'supervised' : 'lark'))
         : manifest.expectedScenario === 'web' || manifest.expectedScenario === 'autonomy')
   const validStagedScenario = manifest?.stagedScenario === undefined
     || (LIFECYCLE_SCENARIOS.has(manifest.stagedScenario) || manifest.stagedScenario === 'unsupported')
@@ -922,7 +927,8 @@ async function loadManifest(physicalTransactionRoot, expected) {
         : manifest.stagedScenario === manifest.expectedScenario)
       && (!isServiceManifestVersion(manifest.version) || (manifest.operation === 'uninstall'
         ? manifest.stagedScenario === 'unsupported'
-        : manifest.stagedScenario === (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION ? 'supervised' : 'lark')))
+        : manifest.stagedScenario === (manifest.version === LOCAL_SOURCE_MANIFEST_VERSION
+          ? manifest.expectedScenario : manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION ? 'supervised' : 'lark')))
   const validCleanProfileDigest = manifest?.cleanProfileDigest === undefined
     || isServiceManifestVersion(manifest.version) && manifest.operation === 'uninstall'
       && /^[0-9a-f]{64}$/u.test(manifest.cleanProfileDigest)
@@ -953,7 +959,7 @@ async function loadManifest(physicalTransactionRoot, expected) {
   const validVersionFields = manifest?.version === SUPERVISED_SERVICE_MANIFEST_VERSION
     || manifest?.supervisedLifecycle === undefined && manifest?.archivedProfile === undefined
       && manifest?.originalProfileTreeDigest === undefined
-  if (![MANIFEST_VERSION, SERVICE_MANIFEST_VERSION, SUPERVISED_SERVICE_MANIFEST_VERSION].includes(manifest?.version)
+  if (![MANIFEST_VERSION, SERVICE_MANIFEST_VERSION, SUPERVISED_SERVICE_MANIFEST_VERSION, LOCAL_SOURCE_MANIFEST_VERSION].includes(manifest?.version)
     || typeof manifest.id !== 'string'
     || manifest.homePath !== expected.homePath
     || manifest.transactionPath !== expected.transactionPath
@@ -973,6 +979,7 @@ async function loadManifest(physicalTransactionRoot, expected) {
     || !validCleanup
     || !validSupervised
     || !validVersionFields
+    || !validLocalSourceManifest(manifest)
     || !validManifestTopLevel(manifest)
     || manifest.bindingDigest !== sha256(JSON.stringify(bindingFor(manifest)))) {
     fail(`拒绝未绑定或校验失败的生命周期事务 manifest：${expected.transactionPath}`)
@@ -1449,7 +1456,7 @@ async function assertProfileDigest(home, profile, expected) {
   } finally { closeSync(descriptor) }
 }
 
-async function profileTreeDigest(profilePath) {
+async function profileTreeDigest(profilePath, initialPrefix = '') {
   const records = []
   let count = 0
   const visit = async (directory, prefix = '') => {
@@ -1489,7 +1496,7 @@ async function profileTreeDigest(profilePath) {
       } else fail(`profile tree 含不支持的特殊文件：${relative}`)
     }
   }
-  await visit(profilePath)
+  await visit(profilePath, initialPrefix)
   return sha256(canonicalJson(records))
 }
 
@@ -3264,6 +3271,11 @@ async function acceptedServicesStillBound({
 }
 
 async function removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome }) {
+  if (manifest.localSourceMaintenance !== undefined) {
+    const service = manifest.services.find(service => service.profile === manifest.profile)
+    await assertLocalSourceHome({ manifest, physicalHome: manifest.homePath, selection: 'candidate',
+      dshExecutable: await realpath(service.dshPath), bwrapExecutable: await trustedSystemExecutable(manifest.localSourceMaintenance.bwrapExecutable, 'bwrap') })
+  }
   if (manifest.rsiCoordinator !== undefined) {
     await assertServiceFilesUnchanged(manifest.services)
     const service = manifest.services.find(service => service.profile === manifest.profile)
@@ -3454,6 +3466,14 @@ async function recoverServiceTransaction({
   manifest, homePath, physicalHomePath, profile, transactionRoot, physicalTransactionRoot, backupHome,
   homeStat, backupStat, homeIsOriginal, homeIsStaged, backupIsOriginal, serviceContext, dshExecutable,
 }) {
+  if (manifest.localSourceMaintenance !== undefined) {
+    if (serviceContext.localSourceInstallerRoot !== manifest.localSourceMaintenance.installer.root
+      || serviceContext.bwrapExecutable === undefined) fail('local source recovery requires the explicitly reviewed installer root and bwrap')
+    if (!homeIsOriginal && !homeIsStaged && !(homeStat === undefined && backupIsOriginal)) fail('local source recovery Home ownership is unknown')
+    if (homeIsOriginal) await assertLocalSourceHome({ manifest, physicalHome: physicalHomePath, selection: 'original', dshExecutable, bwrapExecutable: serviceContext.bwrapExecutable })
+    if (homeIsStaged) await assertLocalSourceHome({ manifest, physicalHome: physicalHomePath, selection: 'candidate', dshExecutable, bwrapExecutable: serviceContext.bwrapExecutable })
+    if (backupIsOriginal && manifest.state !== 'cleanup-started') await assertLocalSourceHome({ manifest, physicalHome: backupHome, selection: 'original', dshExecutable, bwrapExecutable: serviceContext.bwrapExecutable })
+  }
   if (manifest.rsiCoordinator !== undefined) {
     if (homeIsOriginal) await assertRsiCoordinatorFiles(physicalHomePath, profile, manifest.rsiCoordinator.original)
     if (backupIsOriginal) await assertRsiCoordinatorFiles(backupHome, profile, manifest.rsiCoordinator.original)
@@ -3491,7 +3511,7 @@ async function recoverServiceTransaction({
     const acceptanceStillBound = await acceptedServicesStillBound({
       ...serviceContext, services, serviceMasks, serviceStartBarriers, homePath, targetProfile: profile, unitUniverse,
       foreignOwnership, cleanProfiles, acceptance: manifest.serviceAcceptance,
-      requireLarkReady: manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION && manifest.operation === 'upgrade',
+      requireLarkReady: (manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION || manifest.version === LOCAL_SOURCE_MANIFEST_VERSION) && manifest.operation === 'upgrade',
     })
     if (acceptanceStillBound && manifest.version === SUPERVISED_SERVICE_MANIFEST_VERSION && manifest.operation === 'upgrade') {
       await assertPersistedSupervisedAcceptance({
@@ -3512,6 +3532,11 @@ async function recoverServiceTransaction({
     serviceContext.systemctlExecutable, services, homePath, dshExecutable, unitUniverse, timeouts.stop,
     physicalTransactionRoot, manifest,
   )
+  if (manifest.localSourceMaintenance !== undefined) {
+    if (homeIsOriginal) await assertLocalSourceHome({ manifest, physicalHome: physicalHomePath, selection: 'original', dshExecutable, bwrapExecutable: serviceContext.bwrapExecutable })
+    if (homeIsStaged) await assertLocalSourceHome({ manifest, physicalHome: physicalHomePath, selection: 'candidate', dshExecutable, bwrapExecutable: serviceContext.bwrapExecutable })
+    if (backupIsOriginal && manifest.state !== 'cleanup-started') await assertLocalSourceHome({ manifest, physicalHome: backupHome, selection: 'original', dshExecutable, bwrapExecutable: serviceContext.bwrapExecutable })
+  }
   await assertCleanProfileInventory(
     homeIsOriginal ? physicalHomePath : backupIsOriginal ? backupHome : physicalHomePath, cleanProfiles,
   )
@@ -3565,7 +3590,7 @@ async function recoverServiceTransaction({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
       homePath, targetProfile: profile, unitUniverse, foreignOwnership, timeouts,
-      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedSource,
+      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedSource || manifest.localSourceMaintenance !== undefined,
     })
     const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -3592,7 +3617,7 @@ async function recoverServiceTransaction({
       ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
       containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
       homePath, targetProfile: profile, unitUniverse, foreignOwnership, timeouts,
-      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedSource,
+      cleanProfiles, acceptAfterReady: sourceAcceptance, requireLarkReady: supervisedSource || manifest.localSourceMaintenance !== undefined,
     })
     const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
     await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -3639,7 +3664,7 @@ async function recoverServiceTransaction({
       accepted = await startAndAcceptServices({
         ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
         unitUniverse, foreignOwnership, cleanProfiles, timeouts,
-        requireLarkReady: supervisedContext !== undefined,
+        requireLarkReady: supervisedContext !== undefined || manifest.localSourceMaintenance !== undefined,
         ...(supervisedSource ? { ...(supervisedContext === undefined ? {} : { acceptAfterReady: async () => {
           postSwapProof = await awaitSupervisedDirectSuccessor(supervisedContext, { recoveryProof: { bootstrap: {
             generation: manifest.supervisedLifecycle.startAttempt.baselineGeneration,
@@ -3706,7 +3731,7 @@ async function recoverServiceTransaction({
       ...serviceContext, dshExecutable, services, serviceMasks, containmentMasks: manifest.containmentMasks,
       containmentStartBarriers: manifest.containmentStartBarriers,
       serviceStartBarriers, homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, acceptance,
-      requireLarkReady: supervisedContext !== undefined,
+      requireLarkReady: supervisedContext !== undefined || manifest.localSourceMaintenance !== undefined,
       restoreContainedEnablement: manifest.operation !== 'uninstall',
     })
     if (supervisedContext !== undefined) {
@@ -4035,8 +4060,9 @@ async function rsiCoordinatorUpgradeTargets(targets) {
   return { targets: result, version: anchor.version }
 }
 
-async function assertServiceProfileScenario({ dshExecutable, profile, homePath, targetProfile, expectedScenario, rsiCoordinator }) {
-  const { scenario } = await readLifecycleConfig({ dshExecutable, profile, homePath })
+async function assertServiceProfileScenario({ dshExecutable, profile, homePath, targetProfile, expectedScenario, rsiCoordinator, configSource }) {
+  const scenario = configSource === undefined ? (await readLifecycleConfig({ dshExecutable, profile, homePath })).scenario
+    : await classifyLifecycleScenario(configSource, { dshExecutable })
   if (rsiCoordinator?.profile === profile && expectedScenario === 'supervised' && scenario === 'supervised') return undefined
   if (profile === targetProfile && expectedScenario === 'supervised') {
     if (scenario !== 'supervised') fail(`目标 systemd profile 必须保持 supervised：${profile}:${scenario}`)
@@ -4063,8 +4089,9 @@ async function readLifecycleConfig({ dshExecutable, profile, homePath }) {
   }
 }
 
-async function assertLockedLifecycleScenario({ dshExecutable, profile, homePath, expectedScenario, serviceAware, operation = 'upgrade' }) {
-  const { scenario } = await readLifecycleConfig({ dshExecutable, profile, homePath })
+async function assertLockedLifecycleScenario({ dshExecutable, profile, homePath, expectedScenario, serviceAware, operation = 'upgrade', configSource }) {
+  const scenario = configSource === undefined ? (await readLifecycleConfig({ dshExecutable, profile, homePath })).scenario
+    : await classifyLifecycleScenario(configSource, { dshExecutable })
   if (scenario === 'unsupported' && expectedScenario !== 'unsupported') {
     fail('实际 effective/composed profile 无法安全归类为 web、autonomy 或已启用 Lark；拒绝 lifecycle 操作。')
   }
@@ -4178,21 +4205,36 @@ async function openSandboxResources(context, pnpmStore, npmPreparation, bindWork
 
 async function sandboxRun(context, command, options = {}) {
   const resources = await openSandboxResources(context, options.pnpmStore, options.npmPreparation)
+  const readonlyRoots = []
+  try {
+    for (const path of new Set(options.readonlyRoots ?? [])) {
+      const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+      readonlyRoots.push({ path, handle })
+      if (!sameIdentity(await handle.stat(), identity(await lstat(path)))) fail('readonly module root identity changed')
+    }
+  } catch (error) {
+    await resources.validator.close(); await resources.stage.close(); await resources.store?.close(); await resources.cache?.close()
+    for (const root of readonlyRoots) await root.handle.close()
+    throw error
+  }
+  const extraFd = 5 + Number(resources.store !== undefined) + Number(resources.cache !== undefined)
   const invocation = sandboxArgs({
     ...context, validatorPath: SANDBOX_VALIDATOR_PATH, command, extraEnvironment: options.extraEnvironment,
     ...(resources.store === undefined ? {} : { pnpmStoreFd: 5, pnpmStorePath: options.pnpmStore.storePath }),
     ...(resources.cache === undefined ? {} : { pnpmCacheFd: resources.store === undefined ? 5 : 6 }),
+    workspaceFds: readonlyRoots.map((root, index) => ({ path: root.path, fd: extraFd + index })),
   })
   try {
     return await run(invocation.executable, invocation.args, {
       capture: options.capture,
-      passFds: [resources.stage.fd, resources.validator.fd, ...(resources.store === undefined ? [] : [resources.store.fd]), ...(resources.cache === undefined ? [] : [resources.cache.fd])],
+      passFds: [resources.stage.fd, resources.validator.fd, ...(resources.store === undefined ? [] : [resources.store.fd]), ...(resources.cache === undefined ? [] : [resources.cache.fd]), ...readonlyRoots.map(root => root.handle.fd)],
     })
   } finally {
     await resources.validator.close()
     await resources.stage.close()
     await resources.store?.close()
     await resources.cache?.close()
+    for (const root of readonlyRoots) await root.handle.close()
   }
 }
 
@@ -5233,11 +5275,139 @@ async function installUpgradeIntoStage({ sandbox, current, stagedProfile, target
   }
 }
 
+function validLocalSourceManifest(manifest) {
+  const proof = manifest?.localSourceMaintenance
+  if (manifest?.version !== LOCAL_SOURCE_MANIFEST_VERSION) return proof === undefined
+  return manifest.operation === 'upgrade' && manifest.rsiCoordinator === undefined
+    && proof !== null && typeof proof === 'object'
+    && exactKeys(proof, ['protocol', 'installer', 'preparationRoot', 'preparationDigest', 'original', 'candidate', 'bwrapExecutable', 'driverDigest'])
+    && proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v1'
+    && typeof proof.preparationRoot === 'string' && isAbsolute(proof.preparationRoot)
+    && resolve(proof.preparationRoot) === proof.preparationRoot && !inside(manifest.homePath, proof.preparationRoot) && !inside(proof.preparationRoot, manifest.homePath)
+    && validDigest(proof.preparationDigest) && validDigest(proof.driverDigest)
+    && typeof proof.bwrapExecutable === 'string' && isAbsolute(proof.bwrapExecutable)
+    && resolve(proof.bwrapExecutable) === proof.bwrapExecutable
+    && exactKeys(proof.installer, ['root', 'dev', 'ino', 'digest', 'entries'])
+    && typeof proof.installer.root === 'string' && isAbsolute(proof.installer.root)
+    && resolve(proof.installer.root) === proof.installer.root && !inside(manifest.homePath, proof.installer.root) && !inside(proof.installer.root, manifest.homePath)
+    && typeof proof.installer.dev === 'string' && typeof proof.installer.ino === 'string'
+    && validDigest(proof.installer.digest) && Number.isSafeInteger(proof.installer.entries) && proof.installer.entries > 0
+    && validLocalSourceSelection(proof.original)
+    && (proof.candidate === null ? ['preparing', 'prepared', 'failed', 'service-failed'].includes(manifest.state)
+      : validLocalSourceSelection(proof.candidate))
+}
+function validLocalSourceSelection(value) {
+  return value !== null && typeof value === 'object'
+    && exactKeys(value, ['mode', 'sourceDigest', 'resources', 'metadata', 'configDigests', 'rawConfiguration'])
+    && value.mode === 'pre-owner' && validDigest(value.sourceDigest)
+    && exactKeys(value.rawConfiguration, ['profiles', 'files'])
+    && Array.isArray(value.rawConfiguration.profiles) && value.rawConfiguration.profiles.length > 0
+    && value.rawConfiguration.profiles.every(profile => typeof profile === 'string' && PROFILE_NAME.test(profile) && profile !== 'node_modules')
+    && new Set(value.rawConfiguration.profiles).size === value.rawConfiguration.profiles.length
+    && exactKeys(value.rawConfiguration.files, ['cordis.yml', 'cordis.patch.yml', ...value.rawConfiguration.profiles.flatMap(profile => ['cordis.yml', 'cordis.patch.yml'].map(name => `profiles/${profile}/${name}`))])
+    && Object.values(value.rawConfiguration.files).every(digest => digest === null || validDigest(digest))
+    && isDeepStrictEqual(Object.keys(value.configDigests ?? {}).sort(), [...value.rawConfiguration.profiles].sort())
+    && exactKeys(value.resources, ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes'])
+    && Object.values(value.resources).every(validDigest)
+    && exactKeys(value.metadata, ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml', 'pnpm-lock.yaml'])
+    && Object.values(value.metadata).every(validDigest)
+    && value.configDigests !== null && typeof value.configDigests === 'object' && !Array.isArray(value.configDigests)
+    && Object.entries(value.configDigests).length > 0
+    && Object.entries(value.configDigests).every(([profile, digest]) => PROFILE_NAME.test(profile) && validDigest(digest))
+}
+async function localSourceDriverDigest() {
+  const root = dirname(SCRIPT_PATH)
+  const entries = []
+  for (const name of (await readdir(root)).sort()) {
+    const path = join(root, name), entry = await lstat(path)
+    if (!entry.isFile() || entry.isSymbolicLink() || entry.uid !== currentUid() || isGroupOrOtherWritable(entry)) fail('unsafe local source lifecycle driver')
+    entries.push([name, entry.mode & 0o777, sha256(await readFile(path))])
+  }
+  return sha256(JSON.stringify(entries))
+}
+async function localSourceHelper() {
+  return import('./local-source-maintenance.mjs')
+}
+async function localSourceSandbox(context, action, input, pnpmStore) {
+  if (input.proof.driverDigest !== await localSourceDriverDigest()) fail('local source lifecycle driver changed')
+  const helper = await localSourceHelper()
+  await helper.assertLocalSourceInstaller(input.proof.installer)
+  const inputName = `.local-source-input-${randomUUID()}.json`
+  const inputPath = join(context.stageHome, inputName)
+  await writeFile(inputPath, JSON.stringify(input), { flag: 'wx', mode: 0o600 })
+  try {
+    const result = await sandboxRun(context, [process.execPath,
+      join(dirname(SCRIPT_PATH), 'local-source-maintenance.mjs'), action, join(context.homePath, inputName)], {
+      capture: true, pnpmStore, readonlyRoots: [input.proof.installer.root, dirname(SCRIPT_PATH)],
+      extraEnvironment: { pnpm_config_offline: 'true', pnpm_config_ignore_scripts: 'true',
+        pnpm_config_ignore_pnpmfile: 'true', pnpm_config_package_import_method: 'copy',
+        ...(pnpmStore === undefined ? {} : { pnpm_config_store_dir: pnpmStore.storePath, pnpm_config_frozen_store: 'true' }) },
+    })
+    return parseJsonOutput(result.stdout, 'pre-owner local source')
+  } finally { await rm(inputPath, { force: true }) }
+}
+async function localSourcePhysicalProof(home, profile) {
+  const resources = {}
+  for (const kind of ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']) {
+    resources[kind] = await profileTreeDigest(join(home, kind, profile))
+  }
+  const metadata = {}
+  for (const name of ['package.json', 'cordis.patch.yml', 'pnpm-workspace.yaml', 'pnpm-lock.yaml']) {
+    const path = join(home, 'profiles', profile, name)
+    const entry = await lstat(path)
+    assertOwnedPrivateEntry(entry, path, 'file')
+    if (entry.nlink !== 1) fail('local source metadata is hard-linked')
+    const contents = await readFile(path)
+    if (!sameRegularFileIdentity(await lstat(path), identity(entry))) fail('local source metadata changed during read')
+    metadata[name] = sha256(contents)
+  }
+  return { resources, metadata, packages: await profileTreeDigest(join(home, 'profiles', profile, 'node_modules'), 'node_modules') }
+}
+async function composeLocalSourceSnapshot({ homePath, physicalHome = homePath, profile, proof, dshExecutable, bwrapExecutable, selection }) {
+  const helper = await localSourceHelper()
+  // Raw gates precede any native CLI: dump-config may overwrite root YAML.
+  const before = await helper.assertLocalSourceRawPreflight({ homePath, physicalHome, profile,
+    installer: proof.installer, configurationOnly: physicalHome !== homePath })
+  await assertNoMounts(physicalHome)
+  await assertSnapshotTreeSafe(physicalHome, homePath, true)
+  const originalFiles = await localSourcePhysicalProof(physicalHome, profile)
+  const scratch = await mkdtemp(join(dirname(homePath), '.dsh-local-source-preview-'))
+  const snapshotIdentity = identity(await existingIdentity(scratch))
+  const stageHome = join(scratch, 'home')
+  try {
+    await copyHome(physicalHome, stageHome)
+    if (!isDeepStrictEqual(originalFiles, await localSourcePhysicalProof(stageHome, profile))) fail('local source resource copy changed bytes')
+    const result = await localSourceSandbox({ stageHome, homePath, profile, dshExecutable, bwrapExecutable },
+      'configs', { proof, homePath, profile, dshPath: dshExecutable })
+    if (selection !== undefined) await localSourceSandbox({ stageHome, homePath, profile, dshExecutable, bwrapExecutable },
+      'verify', { proof, homePath, profile, dshPath: dshExecutable, selection, configs: result.configs })
+    if (!isDeepStrictEqual(originalFiles, await localSourcePhysicalProof(stageHome, profile))
+      || !isDeepStrictEqual(originalFiles, await localSourcePhysicalProof(physicalHome, profile))) fail('local source resources changed during snapshot verification')
+    const after = await helper.assertLocalSourceRawPreflight({ homePath, physicalHome, profile,
+      installer: proof.installer, configurationOnly: physicalHome !== homePath })
+    if (!isDeepStrictEqual(before, after) || !isDeepStrictEqual(before, result.rawConfiguration)) fail('local source raw configuration changed during snapshot composition')
+    return result.configs
+  } finally {
+    if (!sameIdentity(await lstat(scratch), snapshotIdentity)) fail('local source preview directory ownership changed')
+    await rm(scratch, { recursive: true })
+  }
+}
+async function assertLocalSourceHome({ manifest, physicalHome, selection, dshExecutable, bwrapExecutable }) {
+  if (manifest.localSourceMaintenance === undefined) return
+  const expected = manifest.localSourceMaintenance[selection]
+  if (expected === null || expected === undefined) fail('local source transaction lacks selected identity')
+  const configs = await composeLocalSourceSnapshot({ homePath: manifest.homePath, physicalHome, profile: manifest.profile,
+    proof: manifest.localSourceMaintenance, dshExecutable, bwrapExecutable, selection })
+  return configs
+}
+
 async function performLifecycle({
   operation, profile, homePath, dshExecutable, bwrapExecutable, expectedScenario, targets,
-  skipRecovery = false, transactionPrechecked = false, serviceContext, pnpmStore, npmPreparation, coordinatorNpmPreparation,
+  skipRecovery = false, transactionPrechecked = false, serviceContext, pnpmStore, npmPreparation, coordinatorNpmPreparation, localSourceMaintenance, localSourceConfigs,
 }) {
   if (!['upgrade', 'uninstall'].includes(operation) || !PROFILE_NAME.test(profile) || !isAbsolute(homePath) || resolve(homePath) !== homePath) fail('invalid lifecycle invocation', 2)
+  const supervisedOwner = expectedScenario === 'supervised' && localSourceMaintenance === undefined
+  if (localSourceMaintenance !== undefined && (operation !== 'upgrade' || serviceContext === undefined)) fail('local source maintenance requires a service upgrade')
   assertExpectedScenario(expectedScenario, serviceContext !== undefined, operation)
   const { transactionPath: transactionRoot, physicalHomePath, physicalTransactionRoot } = lifecyclePaths(homePath)
   if (skipRecovery) {
@@ -5251,7 +5421,7 @@ async function performLifecycle({
     if (typeof recovery === 'string' && (recovery.startsWith('service-') || recovery.startsWith('host-'))) return
   }
   await assertLockedLifecycleScenario({
-    dshExecutable, profile, homePath, expectedScenario, serviceAware: serviceContext !== undefined, operation,
+    dshExecutable, profile, homePath, expectedScenario, serviceAware: serviceContext !== undefined, operation, configSource: localSourceConfigs?.[profile],
   })
   const homeLstat = await lstat(physicalHomePath).catch(() => undefined)
   if (homeLstat === undefined || !homeLstat.isDirectory() || homeLstat.isSymbolicLink() || resolve(homePath) === sep) {
@@ -5261,9 +5431,14 @@ async function performLifecycle({
   await assertNoMounts(physicalHomePath)
   const packageSymlinkWhitelist = await assertSnapshotTreeSafe(physicalHomePath, homePath, true)
 
-  const rsiCoordinator = expectedScenario === 'supervised'
+  const rsiCoordinator = supervisedOwner
     ? await captureRsiCoordinator({ homePath, profile, dshExecutable }) : undefined
-  await assertRsiPairUpgradeSource(homePath, profile, rsiCoordinator)
+  if (localSourceMaintenance === undefined) await assertRsiPairUpgradeSource(homePath, profile, rsiCoordinator)
+  else {
+    if (rsiCoordinator !== undefined) fail('pre-owner update cannot split an owner/coordinator pair')
+    await assertLocalSourceHome({ manifest: { homePath, profile, localSourceMaintenance }, physicalHome: homePath,
+      selection: 'original', dshExecutable, bwrapExecutable })
+  }
   if (rsiCoordinator !== undefined && (operation !== 'upgrade' || serviceContext === undefined)) {
     fail('RSI 双 Host 目前只支持成对 service upgrade；不得单独卸载目标。')
   }
@@ -5282,20 +5457,20 @@ async function performLifecycle({
   }
   if (operation === 'upgrade') {
     if (expectedManaged.length === 0) fail('当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。')
-    await validateUpgradeTargets(targets, expectedManaged)
+    if (localSourceMaintenance === undefined) await validateUpgradeTargets(targets, expectedManaged)
   } else {
     if (expectedManaged.length === 0) {
       process.stdout.write('profile 生命周期事务：uninstall 已完成；当前 profile 没有 @dsh-enhanced/* 顶层依赖。\n')
       return
     }
   }
-  if (expectedScenario === 'supervised') {
+  if (supervisedOwner) {
     await assertSupervisedLifecycleCapability(homePath, profile)
   }
   let serviceInventory
   if (serviceContext !== undefined) {
     serviceInventory = await captureServiceInventory(serviceContext.systemctlExecutable, homePath, profile, dshExecutable)
-    if (expectedScenario === 'supervised'
+    if ((supervisedOwner || localSourceMaintenance !== undefined)
       && serviceInventory.services.find(service => service.profile === profile)?.wasActive !== true) {
       fail('supervised upgrade 要求目标 systemd user service 在事务开始前处于 active。')
     }
@@ -5326,7 +5501,7 @@ async function performLifecycle({
     }
     for (const service of services) {
       const cleanDigest = await assertServiceProfileScenario({
-        dshExecutable, profile: service.profile, homePath, targetProfile: profile, expectedScenario, rsiCoordinator,
+        dshExecutable, profile: service.profile, homePath, targetProfile: profile, expectedScenario, rsiCoordinator, configSource: localSourceConfigs?.[service.profile],
       })
       if (cleanDigest !== undefined) cleanProfiles.push({ profile: service.profile, digest: cleanDigest })
       if (!['enabled', 'disabled'].includes(service.unitFileState)) {
@@ -5355,14 +5530,16 @@ async function performLifecycle({
   const backupHome = join(physicalTransactionRoot, 'original-home')
   const transactionCreated = {
     version: serviceContext === undefined ? MANIFEST_VERSION
-      : expectedScenario === 'supervised' ? SUPERVISED_SERVICE_MANIFEST_VERSION : SERVICE_MANIFEST_VERSION,
+      : localSourceMaintenance !== undefined ? LOCAL_SOURCE_MANIFEST_VERSION
+        : supervisedOwner ? SUPERVISED_SERVICE_MANIFEST_VERSION : SERVICE_MANIFEST_VERSION,
+    ...(localSourceMaintenance === undefined ? {} : { localSourceMaintenance }),
     id: randomUUID(), homePath, canonicalHome, transactionPath: transactionRoot, profile, operation,
     transactionIdentity: identity(await lstat(physicalTransactionRoot)),
     originalIdentity: identity(originalStat), originalProfileDigest: sha256(current.source),
     stagedIdentity: undefined, stagedProfileDigest: undefined, createdAt: new Date().toISOString(),
     expectedScenario, stagedScenario: operation === 'uninstall' ? 'unsupported' : expectedScenario,
     ...(rsiCoordinator === undefined ? {} : { rsiCoordinator: { original: rsiCoordinatorSnapshot(rsiCoordinator) } }),
-    ...(expectedScenario === 'supervised' ? {
+    ...(supervisedOwner ? {
       supervisedLifecycle: operation === 'uninstall' ? {
         protocol: SUPERVISED_UNINSTALL_PROTOCOL, phase: 'source-pending',
         databasePaths: undefined, source: undefined, startAttempt: undefined,
@@ -5414,7 +5591,7 @@ async function performLifecycle({
       )
       await assertNoUnmanagedHomeProcesses(homePath)
       manifest = await writeManifest(physicalTransactionRoot, { ...manifest, servicePhase: 'stopped' }, 'preparing')
-      if (expectedScenario === 'supervised') {
+      if (supervisedOwner) {
         const stoppedSource = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
           homePath, profile, dshExecutable,
         }, 'attest-active'))
@@ -5431,7 +5608,7 @@ async function performLifecycle({
     } catch (error) {
       try {
         let restoreAccepted
-        if (expectedScenario === 'supervised' && manifest.supervisedLifecycle.source !== undefined) {
+        if (supervisedOwner && manifest.supervisedLifecycle.source !== undefined) {
           const raw = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
             homePath, profile, dshExecutable,
           }, 'snapshot'), false)
@@ -5455,11 +5632,12 @@ async function performLifecycle({
           }
         }
         await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.original })
+        await assertLocalSourceHome({ manifest, physicalHome: homePath, selection: 'original', dshExecutable, bwrapExecutable })
         await restoreOriginalActiveSet({
           ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
           containmentMasks: manifest.containmentMasks, containmentStartBarriers: manifest.containmentStartBarriers,
           homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, timeouts,
-          acceptAfterReady: restoreAccepted, requireLarkReady: expectedScenario === 'supervised',
+          acceptAfterReady: restoreAccepted, requireLarkReady: supervisedOwner || manifest.localSourceMaintenance !== undefined,
         })
         await rm(physicalTransactionRoot, { recursive: true, force: true })
       } catch (restoreError) {
@@ -5499,13 +5677,23 @@ async function performLifecycle({
       bwrapExecutable, stageHome, homePath, dshExecutable, profile, expectedScenario, transactionId: manifest.id,
     }
     await validateComposedConfig(sandbox, 'before')
-    if (expectedScenario === 'supervised') {
+    if (supervisedOwner) {
       const copiedSource = compactSupervisedSnapshot(await runSupervisedOperator(sandbox, 'attest-active'))
       assertCopiedSupervisedSnapshot(manifest.supervisedLifecycle.source, copiedSource)
     }
     let archivedProfile
     if (operation === 'upgrade') {
-      await installUpgradeIntoStage({ sandbox, current, stagedProfile, targets, npmPreparation, pnpmStore, packageSymlinkWhitelist })
+      if (localSourceMaintenance !== undefined) {
+        await assertLocalSourceHome({ manifest, physicalHome: stageHome, selection: 'original', dshExecutable, bwrapExecutable })
+        const helper = await localSourceHelper()
+        const staged = await helper.prepareLocalSourceStage({ homePath, stageHome, profile, proof: manifest.localSourceMaintenance })
+        const dsh = { path: dshExecutable, pin: { path: dshExecutable, sha256: sha256(await readFile(dshExecutable)), interpreter: null } }
+        await localSourceSandbox(sandbox, 'packages', { proof: manifest.localSourceMaintenance, homePath, profile, originalCohort: staged.originalCohort, dsh }, pnpmStore)
+        await helper.replaceLocalSourceAuthority({ homePath, stageHome, profile, proof: manifest.localSourceMaintenance })
+        const candidate = await localSourceSandbox(sandbox, 'verify', { proof: manifest.localSourceMaintenance, homePath, profile, dshPath: dshExecutable, selection: 'candidate' })
+        if (!isDeepStrictEqual(candidate.configDigests, manifest.localSourceMaintenance.original.configDigests)) fail('local source update changed effective configuration')
+        manifest = await writeManifest(physicalTransactionRoot, { ...manifest, localSourceMaintenance: { ...manifest.localSourceMaintenance, candidate } }, 'prepared')
+      } else await installUpgradeIntoStage({ sandbox, current, stagedProfile, targets, npmPreparation, pnpmStore, packageSymlinkWhitelist })
       if (rsiCoordinator !== undefined) {
         const coordinatorContext = { ...sandbox, profile: rsiCoordinator.profile, expectedScenario: 'supervised' }
         const oldCoordinator = await readProfile(physicalHomePath, rsiCoordinator.profile)
@@ -5533,7 +5721,7 @@ async function performLifecycle({
       const archivePath = join(archiveRoot, archiveName)
       const archiveSourceIdentity = identity(await lstat(sourceProfilePath))
       const archiveTreeDigest = await profileTreeDigest(sourceProfilePath)
-      if (expectedScenario === 'supervised' && archiveTreeDigest !== manifest.originalProfileTreeDigest) {
+      if (supervisedOwner && archiveTreeDigest !== manifest.originalProfileTreeDigest) {
         fail('supervised uninstall copied profile tree 与 stopped source 不一致。')
       }
       await moveBoundDirectoryNoReplace(sourceProfilePath, archivePath, archiveSourceIdentity)
@@ -5545,7 +5733,7 @@ async function performLifecycle({
     }
     const committedScenario = manifest.stagedScenario
     const packageScenario = await validateComposedConfig({ ...sandbox, expectedScenario: committedScenario }, 'after-package')
-    if (expectedScenario === 'supervised' && operation === 'upgrade') {
+    if (supervisedOwner && operation === 'upgrade') {
       const nonce = manifest.supervisedLifecycle.activationNonce
       const overlay = supervisedPreviewOverlayPaths(sandbox)
       // Clear any dotfile left by a crashed earlier attempt; prepare-preview
@@ -5615,7 +5803,26 @@ async function performLifecycle({
         },
       }, 'prepared')
     } else {
-      await activateInSandbox(sandbox)
+      if (manifest.localSourceMaintenance !== undefined) {
+        // Delivery and other base services may write immediately during init.
+        // Preview a disposable complete Home; the deployable stage never starts.
+        const previewRoot = await mkdtemp(join(dirname(homePath), '.dsh-local-source-activation-'))
+        const previewIdentity = identity(await lstat(previewRoot))
+        const previewHome = join(previewRoot, 'home')
+        try {
+          await copyHome(stageHome, previewHome)
+          const previewSandbox = { ...sandbox, stageHome: previewHome }
+          const overlayName = `.local-source-preview-${manifest.id}.yml`
+          const overlay = await localSourceSandbox(previewSandbox, 'preview-overlay', { proof: manifest.localSourceMaintenance, homePath, profile, dshPath: dshExecutable })
+          await writeFile(join(previewHome, overlayName), overlay, { flag: 'wx', mode: 0o600 })
+          await localSourceSandbox(previewSandbox, 'assert-preview', { proof: manifest.localSourceMaintenance, homePath, profile, dshPath: dshExecutable, overlayPath: join(homePath, overlayName) })
+          await activateInSandbox({ ...previewSandbox, runtimePatch: join(homePath, overlayName) })
+        } finally {
+          if (!sameIdentity(await lstat(previewRoot), previewIdentity)) fail('local source activation preview directory ownership changed')
+          await assertNoMounts(previewRoot)
+          await rm(previewRoot, { recursive: true })
+        }
+      } else await activateInSandbox(sandbox)
     }
     await validateComposedConfig({ ...sandbox, expectedScenario: packageScenario }, 'after-activation')
     await assertSnapshotTreeSafe(stageHome, homePath, false, packageSymlinkWhitelist)
@@ -5627,12 +5834,14 @@ async function performLifecycle({
       : undefined
     manifest = await writeManifest(physicalTransactionRoot, {
       ...manifest, stagedProfileDigest: sha256(validatedProfile.source), cleanProfileDigest,
-      ...(expectedScenario === 'supervised' && operation === 'uninstall' ? {
+      ...(supervisedOwner && operation === 'uninstall' ? {
         archivedProfile, supervisedLifecycle: { ...manifest.supervisedLifecycle, phase: 'clean-target-validated' },
       } : {}),
     }, 'validated')
-    if (expectedScenario === 'supervised' && operation === 'uninstall') await assertArchivedProfile(stageHome, manifest)
+    if (supervisedOwner && operation === 'uninstall') await assertArchivedProfile(stageHome, manifest)
 
+    await assertLocalSourceHome({ manifest, physicalHome: homePath, selection: 'original', dshExecutable, bwrapExecutable })
+    await assertLocalSourceHome({ manifest, physicalHome: stageHome, selection: 'candidate', dshExecutable, bwrapExecutable })
     await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.original })
     await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.candidate, sandbox })
     if (coordinatorNpmPreparation !== undefined) {
@@ -5700,9 +5909,9 @@ async function performLifecycle({
       ...manifest, ...(serviceContext === undefined ? {} : { servicePhase: 'swapped' }),
     }, 'swapped')
     await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
-    if (expectedScenario === 'supervised' && operation === 'uninstall') await assertArchivedProfile(physicalHomePath, manifest)
+    if (supervisedOwner && operation === 'uninstall') await assertArchivedProfile(physicalHomePath, manifest)
     if (serviceContext !== undefined) {
-      if (expectedScenario === 'supervised' && operation === 'upgrade') {
+      if (supervisedOwner && operation === 'upgrade') {
         const rawBeforeStart = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
           homePath, profile, dshExecutable,
         }, 'snapshot'), false)
@@ -5715,19 +5924,20 @@ async function performLifecycle({
       } else {
         manifest = await writeManifest(physicalTransactionRoot, {
           ...manifest, servicePhase: 'starting', serviceAcceptance: undefined,
-          ...(expectedScenario === 'supervised' ? {
+          ...(supervisedOwner ? {
             supervisedLifecycle: { ...manifest.supervisedLifecycle, phase: 'clean-target-pending' },
           } : {}),
         }, 'swapped')
       }
       try {
         let postSwapProof
+        await assertLocalSourceHome({ manifest, physicalHome: homePath, selection: 'candidate', dshExecutable, bwrapExecutable })
         await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.candidate })
         const accepted = await startAndAcceptServices({
           ...serviceContext, dshExecutable, services, serviceMasks, homePath, targetProfile: profile,
           unitUniverse, foreignOwnership, cleanProfiles, timeouts,
-        requireLarkReady: expectedScenario === 'supervised' && operation === 'upgrade',
-        ...(expectedScenario === 'supervised' ? {
+        requireLarkReady: (supervisedOwner || manifest.localSourceMaintenance !== undefined) && operation === 'upgrade',
+        ...(supervisedOwner ? {
           durableAccept: async acceptedStates => {
             const serviceAcceptance = acceptedStates.map(service => ({
               unit: service.unit, invocationId: service.invocationId, mainPid: service.mainPid, nRestarts: service.nRestarts,
@@ -5810,7 +6020,7 @@ async function performLifecycle({
         containmentStartBarriers: manifest.containmentStartBarriers,
         serviceStartBarriers,
         homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, acceptance: manifest.serviceAcceptance,
-        requireLarkReady: expectedScenario === 'supervised' && operation === 'upgrade',
+        requireLarkReady: (supervisedOwner || manifest.localSourceMaintenance !== undefined) && operation === 'upgrade',
         restoreContainedEnablement: operation !== 'uninstall',
       })
     }
@@ -5820,16 +6030,16 @@ async function performLifecycle({
     await assertProfileDigest(physicalHomePath, profile, manifest.stagedProfileDigest)
     if (operation === 'uninstall') {
       await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
-      if (expectedScenario === 'supervised') await assertArchivedProfile(physicalHomePath, manifest)
+      if (supervisedOwner) await assertArchivedProfile(physicalHomePath, manifest)
     }
     await assertProfileDigest(backupHome, profile, manifest.originalProfileDigest)
     if (serviceContext !== undefined) {
       await assertAcceptedServicesStillBound({
         ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers, homePath, unitUniverse,
         foreignOwnership, targetProfile: profile, cleanProfiles, acceptance: manifest.serviceAcceptance,
-        requireLarkReady: expectedScenario === 'supervised' && operation === 'upgrade',
+        requireLarkReady: (supervisedOwner || manifest.localSourceMaintenance !== undefined) && operation === 'upgrade',
       })
-      if (expectedScenario === 'supervised' && operation === 'upgrade') {
+      if (supervisedOwner && operation === 'upgrade') {
         await assertPersistedSupervisedAcceptance({
           homePath, profile, dshExecutable, acceptance: manifest.supervisedLifecycle.postSwapAcceptance,
         })
@@ -5841,7 +6051,7 @@ async function performLifecycle({
     }
     if (operation === 'uninstall') {
       await assertInstallerCleanWebProfile(physicalHomePath, profile, manifest.cleanProfileDigest)
-      if (expectedScenario === 'supervised') await assertArchivedProfile(physicalHomePath, manifest)
+      if (supervisedOwner) await assertArchivedProfile(physicalHomePath, manifest)
     }
     manifest = await writeManifest(physicalTransactionRoot, manifest, 'cleanup-started')
     committedCleanup = true
@@ -5890,7 +6100,7 @@ async function performLifecycle({
           physicalTransactionRoot, persisted ?? manifest,
         )
         let restoreAccepted
-        if (expectedScenario === 'supervised' && (persisted ?? manifest).supervisedLifecycle?.source !== undefined) {
+        if (supervisedOwner && (persisted ?? manifest).supervisedLifecycle?.source !== undefined) {
           const lifecycle = (persisted ?? manifest).supervisedLifecycle
           const raw = compactSupervisedSnapshot(await runSupervisedOperatorDirect({
             homePath, profile, dshExecutable,
@@ -5915,12 +6125,13 @@ async function performLifecycle({
           }
         }
         await assertRsiCoordinatorSnapshot({ homePath, profile, dshExecutable, snapshot: manifest.rsiCoordinator?.original })
+        await assertLocalSourceHome({ manifest, physicalHome: homePath, selection: 'original', dshExecutable, bwrapExecutable })
         await restoreOriginalActiveSet({
           ...serviceContext, dshExecutable, services, serviceMasks, serviceStartBarriers,
           containmentMasks: (persisted ?? manifest).containmentMasks,
           containmentStartBarriers: (persisted ?? manifest).containmentStartBarriers,
           homePath, targetProfile: profile, unitUniverse, foreignOwnership, cleanProfiles, timeouts,
-          acceptAfterReady: restoreAccepted, requireLarkReady: expectedScenario === 'supervised',
+          acceptAfterReady: restoreAccepted, requireLarkReady: supervisedOwner || manifest.localSourceMaintenance !== undefined,
         })
         const evidence = await moveTransactionAside(physicalTransactionRoot, transactionRoot, profile)
         await fsyncPath(LOCK_PARENT_FD_PATH, true)
@@ -6519,6 +6730,40 @@ async function main() {
     return
   }
   await assertLifecycleLocksHeld(homePath)
+  if (operation === 'local-service-upgrade' || operation === 'local-service-recover') {
+    if (!PROFILE_NAME.test(profile) || targets.length !== (operation === 'local-service-upgrade' ? 5 : 3)) {
+      fail('local-service-upgrade requires systemctl, journalctl, pnpm, preparation-root and reviewed-installer-root; local-service-recover requires systemctl, journalctl and reviewed-installer-root', 2)
+    }
+    const [suppliedSystemctl, suppliedJournalctl] = targets
+    const installerRoot = targets.at(-1)
+    const serviceContext = {
+      systemctlExecutable: await trustedServiceExecutable(suppliedSystemctl, 'systemctl'),
+      journalctlExecutable: await trustedServiceExecutable(suppliedJournalctl, 'journalctl'),
+      localSourceInstallerRoot: installerRoot, bwrapExecutable,
+    }
+    const paths = lifecyclePaths(homePath)
+    const recovery = await recoverBoundTransaction({ homePath, physicalHomePath: paths.physicalHomePath,
+      profile, transactionRoot: paths.transactionPath, physicalTransactionRoot: paths.physicalTransactionRoot,
+      dshExecutable, serviceContext })
+    if (operation === 'local-service-recover' || recovery?.startsWith('service-')) return
+    const [,, pnpmPath, preparationRoot] = targets
+    const helper = await localSourceHelper()
+    if (inside(homePath, installerRoot) || inside(installerRoot, homePath)
+      || inside(homePath, preparationRoot) || inside(preparationRoot, homePath)) fail('local source candidate and installer roots must be outside Home')
+    const installer = await helper.bindLocalSourceInstaller(installerRoot)
+    const snapshotProof = { installer, driverDigest: await localSourceDriverDigest() }
+    const localSourceConfigs = await composeLocalSourceSnapshot({ homePath, profile, proof: snapshotProof, dshExecutable, bwrapExecutable })
+    const scenario = await classifyLifecycleScenario(localSourceConfigs[profile], { dshExecutable })
+    const localSourceMaintenance = { ...await helper.preflightLocalSourceMaintenance({ homePath, profile, preparationRoot, installerRoot, installer, configs: localSourceConfigs, dshPath: dshExecutable }),
+      bwrapExecutable, driverDigest: snapshotProof.driverDigest }
+    const current = await readProfile(homePath, profile)
+    await precheckNpmMetadata(current, dshExecutable)
+    const pnpmStore = await resolvedPnpmStorePath(await realpath(pnpmPath), homePath, current.profilePath)
+    await performLifecycle({ operation: 'upgrade', homePath, profile, dshExecutable, bwrapExecutable,
+      expectedScenario: scenario, targets: [], serviceContext, pnpmStore, localSourceMaintenance, localSourceConfigs,
+      skipRecovery: true, transactionPrechecked: true })
+    return
+  }
   if (operation === 'host-update' || operation === 'host-recover') {
     if (!PROFILE_NAME.test(profile) || targets.length < 2 || targets.length > 3) {
       fail('host-update/recover requires systemctl, journalctl and optional plan.json', 2)
@@ -6616,6 +6861,7 @@ export const lifecycleProfileTest = Object.freeze({
   compactSupervisedSnapshot, validSupervisedLifecycle, validSupervisedManifestPhase, sameHomeOwnershipEvidence,
   validManifestTopLevel, validV3OperationShape, validV3ServiceAcceptance, writeManifest,
   validSupervisedCapabilityProof, assertHostRsiRuntimeSuccessor, hostSandboxRun, MANIFEST_MAX_BYTES,
+  validLocalSourceManifest, validLocalSourceSelection,
 })
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {
