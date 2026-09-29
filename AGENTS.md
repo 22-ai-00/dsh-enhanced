@@ -2,69 +2,46 @@
 
 ## Mission
 
-This repository is a pnpm monorepo of independently publishable DeepSeek Harness plugins. DSH composes a profile from bundle patch layers; each package under `plugins/*` must therefore remain a self-contained installable bundle, while `packages/*` contains ordinary shared libraries that are never auto-enabled.
+Build an intelligent tool that improves through ordinary use: authenticated task feedback → durable learning → skill/tool/plugin candidate → independent verification → bounded adoption → subsequent tasks → observation/rollback. After initial setup and authorization, the owner should not need to orchestrate each improvement.
 
-## Self-iteration principles
-
-- Build a self-iterating DSH tool/plugin agent. Models are replaceable suppliers; agent identity, history, and versioned capabilities must survive supplier changes. Freeze the approved supplier, budget, and acceptance contract per run.
-- Self-repair and growth inherit the triggering conversation/task model by default; allow an explicit fixed model override. Persist the resolved selection for durable work and never silently switch suppliers during recovery.
-- Reuse DSH's native agent loop and Cordis composition, injection, effects, and reload lifecycle. Connect task feedback → candidate skill/tool/plugin → independent verification → bounded rollout → observation/rollback; avoid duplicate loops or goal state machines.
-- Deliver self-iteration during ordinary user use: authenticated task outcomes, corrections, and repeated work must drive durable learning and authorized capability updates without developer orchestration. Ordinary owner feedback must not require a preconfigured task acceptance scenario. Fixed scenarios are regression evidence; repeated hand-run probes do not deliver this capability.
-- Publish the next npm release once an installable deployment supports that ordinary-use loop and passes release verification; intermediate APIs or pending proposals alone do not meet this release gate.
-- Keep acceptance rules and held-out tasks outside candidate write authority. Promote from fresh, independently checked outcomes; model self-ratings and successful tool exits alone do not establish success.
-- Judge improvement through subsequent real user tasks and recorded quality, cost, latency, and regressions. Deduplicate canonical task revisions and fence final decisions against corrections/withdrawals; deployment association alone is not causal evidence. Use bounded, versioned comparisons with the same supplier and budget when needed; retain failed attempts without turning repeated benchmark runs into the development objective.
-- Link actions and peer claims to agent/run identity, capability versions, and original evidence. Derive repair triggers from current owner-bound feedback; global gap records do not establish ownership. Combine pre-action policy with post-action observation; keep changes bounded and reversible, reconcile unknown outcomes before retrying, and stay within existing owner authorization.
-
-Rationale and development priorities: [research note](docs/research-dsh-plugin-self-iteration-2026-09-19.md).
+This pnpm monorepo contains independently publishable DSH bundles in `plugins/*`; `packages/*` contains shared libraries that never auto-enable.
 
 ## Start here
 
-1. Read [docs/creating-a-plugin.md](docs/creating-a-plugin.md) when adding or restructuring a plugin. The step is complete when its package, patch, tests, README, and catalog row all exist.
-2. Read [docs/architecture.md](docs/architecture.md) when changing package boundaries, adding shared code, or creating a Host/Web dual-face plugin. The step is complete when the change preserves independent package publication and DSH composition semantics.
-3. Read [docs/compatibility.md](docs/compatibility.md) when changing DSH/Cordis dependencies or consuming a new upstream API. The step is complete when the declared baseline and every affected package agree.
-4. Read the Cordis implementation at `/home/jiataorui/work/github/cordis` when changing plugin lifecycle, service injection, configuration, effects, isolation, Loader composition, or HMR behavior. Use it to understand the architecture, but verify executable behavior against this repository's lockfile and installed `@deepseek-ai/cordis`; the sibling checkout and the DSH-pinned fork can be different versions.
+Read [current status](docs/rsi-status.md) for the current boundary and next delivery. Load only the guide and plugin README relevant to the task; do not preload the documentation tree, completed work, historical probes, or research notes.
 
-## Cordis runtime contracts
+| Change | Required reference |
+| --- | --- |
+| Add/restructure a plugin | [Creating a plugin](docs/creating-a-plugin.md); finish package, patch, tests, README and catalog row together. |
+| Package boundaries, shared code, Host/Web | [Architecture](docs/architecture.md); preserve independent publication and composition. |
+| DSH/Cordis dependency or new upstream API | [Compatibility](docs/compatibility.md); keep baseline and affected packages consistent. |
+| Lifecycle, injection, config, effects, isolation, Loader or HMR | [Cordis runtime contracts](docs/cordis-runtime-contracts.md) and `/home/jiataorui/work/github/cordis`; verify executable behavior against this lockfile's installed fork and Loader/Include versions. |
+| Acceptance or release | Relevant rows of [acceptance contract](docs/rsi-acceptance.md) and [release guide](docs/releasing.md). |
 
-DSH's “everything is a plugin” model means that every composable extension enters the same Cordis lifecycle: the Loader mounts a plugin value, each mount creates a Fiber, services are published on a Context, and all runtime effects belong to a Fiber. It does not mean that Cordis isolation replaces OS, credential, owner, or Policy boundaries.
+## Self-iteration principles
 
-- Put every applicable runtime field—especially `name`, `Config`, and `inject`—on the value the Loader actually mounts; object plugins must also carry `apply`. The Loader unwraps `default` before registration, so named metadata beside a default export does not decorate that default object or class. Prefer a default `{ name, Config, inject, apply }` object when stable runtime identity matters; a default `Service` class must carry any source-level `Config` and `inject` metadata as static fields. A `provide` metadata field alone does not register a service; instantiate a Cordis `Service` or call `ctx.provide()`.
-- Declare every required Host service on the value the Loader mounts and/or its patch row. Prefer source-level `inject` for intrinsic dependencies shared by every deployment; reserve patch-level `inject` for composition-specific constraints, and keep the declarations consistent when both are present. Injection is a live activation gate, not a row-order hint: a Fiber remains pending until every dependency is active and is unloaded/reloaded when a provider generation changes.
-- Cordis has no optional-inject flag. Every key in array or object `inject` is required; object values are intercept configuration, so `{ service: false }` is not optional. For an optional peer, keep the outer plugin active and use an owned nested `ctx.inject([name], callback)` for late binding, or strict `ctx.get(name)` for a one-shot capability probe. `peerDependenciesMeta.optional` only controls package installation.
-- Export a synchronous Standard-Schema `Config` for every deployment-varying value and consume only the validated result. Reject invalid paths, providers, and authority before acquiring external resources. Treat config changes as stop/start unless a tested `internal/update` handler performs an atomic, awaitable reconciliation. Patch `config` is a whole-value replacement, so overrides must restate every key that must survive.
-- Treat the Fiber as the resource-ownership unit. Acquire timers, listeners, watchers, sockets, servers, subprocesses, workers, database handles, locks, and registrations inside the owning `ctx.effect()`, `ctx.on()`, child plugin, or `Service.init`, and return an idempotent, awaitable, bounded disposer. Never leave import-time singletons or fire-and-forget resources outside the Fiber tree.
-- Do not depend on sibling effect cleanup order: top-level Fiber effects may dispose concurrently. When resources have ordering constraints, use one async disposer that explicitly sequences close-admission, abort, drain, flush, close or process-group kill, and final ownership checks. Cordis disposal is cooperative, not preemptive; long-running work also needs an `AbortSignal`, deadline, generation fence, and late-result suppression.
-- Preserve use-site ownership for traceable services. Call services through the current injected context (`ctx.service.method()`), or explicitly pass the owner Context/effect registrar. Capturing a root/provider Context or raw service instance can attach new effects to the provider or root Fiber, so unloading the consumer will not clean them up. Do not cache Context or service proxies across reloads.
-- Treat `ctx.isolate()` as service-name realm routing only. It is not tenant, permission, filesystem, process, port, network, or credential isolation. Every high-authority method must still validate owner lineage, scope, capability, generation, budget, and cancellation; use Policy, Keychain, subprocess/container, path, and network boundaries where required.
-- Make `apply` and `Service.init` repeatable. Config updates, dependency replacement, disablement, and, when installed, HMR can all cause full unload/reload. HMR may preserve the old instance when import validation fails, but a replacement whose `apply` fails does not roll back the old instance or its external effects. Persistent initialization must therefore be idempotent and crash-recoverable; verify HMR details against the exact installed HMR version before relying on them.
-- Await lifecycle barriers when correctness depends on quiescence. Core `registry.delete()` starts Fiber disposal without awaiting it; retain the Fiber and await `fiber.await()`, or initiate and await `fiber.dispose()`, before handing an exclusive resource to a successor. Await Loader remove, update, and await operations too, then independently verify externally owned ports, locks, processes, and writers when their disposers can fail or cannot prove release.
-- Match Cordis event semantics. Use service methods for direct capabilities and typed events for interception or observation; `waterfall` handlers must deliberately delegate or terminate. Do not put asynchronous background work behind fire-and-forget `emit`; use `serial`, `parallel`, or an explicitly awaited async `waterfall`, or make the handler own complete error reporting and settlement.
-- Keep package and runtime composition aligned. A user-installable capability remains one independently publishable bundle whose stable patch row mounts the published package. Meta-bundles must mount children through `ctx.plugin()` and await the returned Fiber when current startup settlement matters; still express dependency edges with `inject`, because awaiting a pending Fiber does not make it active. They must not run beside duplicate child bundles that provide the same service realm. Host and Web are separate plugin graphs connected only through explicit versioned Remote/RPC contracts; each side owns its own injections, effects, exports, and tests.
-- Verify Cordis contracts against the pinned runtime, currently `@deepseek-ai/cordis` from [pnpm-workspace.yaml](pnpm-workspace.yaml), plus the pinned Loader/Include versions. The sibling Cordis checkout is the architectural source, but its current version is not automatically this repository's ABI. A Cordis upgrade is complete only after config validation, dependency appearance/replacement/removal, optional late binding, effect reentrancy, async teardown, isolation routing, packaged default-export loading, final `dsh --dump-config`, and relevant Host/Web integration tests pass.
+- Reuse DSH's native agent loop and Cordis lifecycle; do not add duplicate loops or goal state machines. Models are replaceable suppliers; identity, history and versioned capabilities must survive supplier changes.
+- Repair/growth inherits the triggering conversation/task model unless explicitly overridden. Freeze and persist the resolved supplier, budget and acceptance contract per run; never silently switch during recovery.
+- Ordinary authenticated outcomes, corrections and repeated work must drive learning without developer orchestration or a preconfigured task acceptance scenario. Fixed scenarios are regression evidence, not the product loop.
+- Keep acceptance rules and held-out tasks outside candidate write authority. Promote only from fresh independently checked outcomes, never model self-ratings or successful tool exits alone.
+- Judge improvement on subsequent real tasks: quality, cost, latency and regressions. Deduplicate canonical task revisions, fence decisions against corrections/withdrawals, and do not treat deployment association as causal evidence. Use bounded versioned comparisons with the same supplier/budget where needed; retain failed attempts.
+- Link actions and peer claims to agent/run identity, capability versions and original evidence. Derive repair triggers from current owner-bound feedback, not global gap records. Enforce existing owner authorization before action; observe afterward, bound changes, retain rollback and reconcile unknown outcomes before retrying.
+- Publish the next npm release once an installable deployment supports the ordinary-use loop and passes release verification. Intermediate APIs, pending proposals and repeated hand-run probes do not meet this gate.
 
 ## Repository contracts
 
-- Put user-installable bundles in `plugins/<kebab-case-name>` and reusable, non-activating code in `packages/<kebab-case-name>`.
-- Create plugins with `pnpm create:plugin <name>`; evolve the template and generator together when the common shape changes.
-- Keep the plugin directory, package name suffix, Cordis row id, source plugin name, and catalog entry unambiguous and stable.
-- Declare `dsh.bundle.patch` as `./cordis.patch.yml`. The patch must mount the package by its published package name.
-- Ship `lib/`, `cordis.patch.yml`, `README.md`, and `LICENSE` in every plugin package. Use current DSH bundles; legacy `.dsh-plugin` metadata is invalid here.
-- Treat DSH services supplied by the host as peer dependencies. Put libraries that must travel with the plugin in dependencies.
-- Express deployment-specific values through a validated `Config` schema. Use Cordis injection for required services and Cordis effects/disposers for every external resource.
-- Document filesystem, network, subprocess, credential, browser, and install-script authority in the plugin README.
-- Update [plugins/README.md](plugins/README.md) whenever a plugin is added, renamed, deprecated, or removed.
+- User-installable bundles live in `plugins/<kebab-case-name>`, non-activating libraries in `packages/<kebab-case-name>`. Use `pnpm create:plugin <name>`; evolve template and generator together.
+- Keep directory, package suffix, Cordis row id, source name and catalog identity stable and unambiguous. `dsh.bundle.patch` must be `./cordis.patch.yml` and mount the published package name; legacy `.dsh-plugin` metadata is invalid.
+- Ship `lib/`, `cordis.patch.yml`, `README.md` and `LICENSE`. Host-supplied DSH services are peers; libraries that travel with the plugin are dependencies.
+- Put runtime metadata on the value Loader mounts. Validate deployment values with synchronous Standard-Schema `Config`, declare required injections, and own every external resource through Cordis effects/disposers. Follow the detailed runtime contracts for these changes.
+- Document filesystem, network, subprocess, credential, browser and install-script authority in the plugin README. Update [plugin catalog](plugins/README.md) when adding, renaming, deprecating or removing a plugin.
 
-## Verification
+## Verification and delivery
 
-Deliver in capability-sized commits. Once an independently usable capability passes its relevant checks and independent review, commit it and push it to `dev` before starting another main capability. Parallel work should converge on that delivery; keep unfinished work out of its commit. Prepare bulk version changes only when the release is ready, in a separate release commit. A capability commit does not replace the full repository verification required before final delivery or publication.
+Deliver capability-sized commits. After relevant checks and independent review, commit and push an independently usable capability to `dev` before starting another main capability; keep unfinished work out. Bulk version changes belong in a separate release commit when ready.
 
-Keep development checks focused on changed behavior and concrete remaining risks. Do not repeatedly run fixed live-model scenarios; prioritize shipping the ordinary-use self-repair and self-iteration path.
+Run root `pnpm check` before final delivery/publication: manifest validation, zero lint warnings, typechecking, tests, clean build and every package's dry-run pack. Inspect pack file lists when boundaries or `files` change. Capability checks do not replace full verification; skipped external tests do not establish live behavior. Keep development checks focused on changed behavior and concrete risks, not repeated live-model scenarios.
 
-Run `pnpm check` from the repository root. Completion requires manifest validation, zero lint warnings, successful typechecking and tests, a clean build, and a successful dry-run pack for every plugin. Inspect the dry-run file list whenever package boundaries or `files` change.
+Scope changes to the requested capability/shared contract. Keep generated `lib/`, coverage, tarballs and caches untracked; raw JSON, logs and runtime evidence belong in ignored `docs/evidence/` or CI artifacts. Commit concise commands, results and limitations.
 
-Keep changes scoped to the requested plugin or shared contract. Generated output (`lib/`, coverage, tarballs, caches) stays untracked.
-
-Keep raw runtime evidence, JSON dumps, and logs local (for example, ignored `docs/evidence/`) or in CI artifacts; commit only concise verification commands, results, and limitations.
-
-Maintain current progress in [docs/rsi-status.md](docs/rsi-status.md); remove superseded progress snapshots instead of appending another history ledger.
-When behavior changes, update its maintained guide and incoming links; keep dated research as rationale, never as current implementation status.
+Keep [current status](docs/rsi-status.md) short: goal, capability boundaries, active blockers, next acceptance and latest verification only. Replace superseded entries; remove completed implementation/test/deployment narratives instead of creating another history ledger. Update maintained guides and incoming links when behavior changes; use Git for history and dated research only for rationale.

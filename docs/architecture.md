@@ -1,5 +1,7 @@
 # 仓库架构
 
+涉及插件生命周期、注入、配置、资源归属或重载时，须同时遵守 [Cordis runtime contracts](cordis-runtime-contracts.md)。
+
 ## 为什么采用多包仓库
 
 DSH 当前把可安装插件定义为 profile bundle：包的 `dsh.bundle.patch` 指向一个 patch 层，用户通过 `dsh plugin --profile <name> add <package>` 安装后，该层进入 profile 的有序 bundle 列表。由此，本仓库以“一个用户可启用能力对应一个 npm 包”为发布边界。

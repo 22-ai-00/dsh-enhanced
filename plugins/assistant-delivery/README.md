@@ -412,7 +412,7 @@ Host 可用 `inspectOwnerForegroundLearningTask()` 将 Evaluation 增量结果�
 
 原生 Goal 仍为 `active` 且 `armed` 时，空闲回收保留同一个 Agent 和 Session lease，允许宿主唯一 GoalRoundDriver 在会话保存完成后调度下一轮。目标终态或 disarm 后恢复普通空闲回收；owner 撤权、租约失效、scope 卸载和原有 `maxExecutionMs` 期限仍优先结束执行，不为每轮重置期限。若宿主缺少 GoalRoundDriver，armed 目标最多保持到该期限；此保留检查本身不派发任务。
 
-当前 Web 只支持单已认证控制面的文本交互；图片、完整 queue/steer、跨渠道 owner 别名和子 Agent 历史仍未验收。原生 Web 安装及浏览器验证范围见 [RSI 当前状态](../../docs/rsi-status.md)，配置、Policy 与权限见 [Web owner 包说明](../assistant-web-owner/README.md)。
+当前 Web 只支持单已认证控制面的文本交互；图片、完整 queue/steer、跨渠道 owner 别名和子 Agent 历史仍未验收。原生 Web 安装、配置、Policy 与权限见 [Web owner 包说明](../assistant-web-owner/README.md)，浏览器探针及证据边界见 [E2E 指南](../../scripts/e2e/README.md)。
 
 可选 Host 接口 `registerForegroundTaskObserver()` 只接受当前 Control Plane 拥有的注册，在认证 Inbox 的执行绑定后同步通知开始，资源释放并保存真实执行回执后通知结束。它不改变 schema 23 或学习来源摘要，不注册模型工具；注销、owner/服务换代及重启后不补发历史事件，观察错误不影响正常聊天。部署版本与 readiness 核对由 [Control Plane](../plugin-control-plane) 持有；这些事件本身不证明任务质量或具体工具调用。
 

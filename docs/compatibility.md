@@ -121,7 +121,7 @@ preview 使用 fresh UUID 和新 package catalog，在 no-network bubblewrap 中
 
 supervised uninstall 只停用目标 profile 的本地受管能力：事务停止并收容经证明归属该 canonical home 的 unit，归档目标 profile 的完整目录树，再用 installer-clean 的同名 Web profile 替换 live target。clean target 不再要求 Lark、Health 或 supervised active attestation，只通过 fresh InvocationID、对应 journal ready marker 和稳定窗口组成的通用 readiness；原 active unit 恢复，原 inactive unit 保持停止。uninstall 不访问 npm registry 或 pnpm store，也不撤销凭据、owner binding、Session、Goal、数据库或其它共享/外置状态。完整 profile-tree 归档不等于整个 home 的逐字节证明，后续重装或共享同一状态库的其它 profile 仍可能解释这些保留状态。
 
-WP17 的原始安装范围已经验收，详见 [RSI 当前状态](rsi-status.md)。上述 supervised 生命周期的工程测试不等于所有真实部署组合已验收；真实 systemd/Lark、跨库 live-WAL、更多 crash window 和平台覆盖继续作为强化项。远程 bootstrap 使用已发布标签与摘要固定的生命周期 helper，固定标签以 `scripts/install/install-npm.sh` 中的 `DSH_ENHANCED_PINNED_RELEASE_REF` 为准；旧 `v0.1.24` 缺少 helper，会在执行前拒绝。该 supervised 路径仍不支持 `--no-service`、外部 supervisor、macOS 或 Windows。
+WP17 的原始安装范围已经验收，限定条件见 [RSI 验收合同](rsi-acceptance.md)。上述 supervised 生命周期的工程测试不等于所有真实部署组合已验收；真实 systemd/Lark、跨库 live-WAL、更多 crash window 和平台覆盖继续作为强化项。远程 bootstrap 使用已发布标签与摘要固定的生命周期 helper，固定标签以 `scripts/install/install-npm.sh` 中的 `DSH_ENHANCED_PINNED_RELEASE_REF` 为准；旧 `v0.1.24` 缺少 helper，会在执行前拒绝。该 supervised 路径仍不支持 `--no-service`、外部 supervisor、macOS 或 Windows。
 
 DSH 尚处于预发布阶段，插件机制可能发生破坏性变化。`pnpm-workspace.yaml` 的 catalog 和各插件 `peerDependencies` 是实际依赖范围的源；本页记录人工验证过的 DSH 基线。
 

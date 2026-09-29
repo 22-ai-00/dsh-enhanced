@@ -82,4 +82,4 @@ pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run \
   tests/benchmark/native-skills-runtime.spec.ts tests/benchmark/native-skills.spec.ts
 ```
 
-真实 Day1 的同预算结果和剩余验收统一见 [RSI 当前状态](rsi-status.md)。任务在冻结后生成的证书只证明该次生成顺序，不证明模型训练数据独立；WP04/WP13/WP18 的任务广度和真实收益门槛仍保留。
+真实 Day1 同预算收益尚未验收；剩余门槛见 [RSI 验收合同](rsi-acceptance.md)，历史运行结果查 Git 与本地证据。任务在冻结后生成的证书只证明该次生成顺序，不证明模型训练数据独立；WP04/WP13/WP18 的任务广度和真实收益门槛仍保留。
