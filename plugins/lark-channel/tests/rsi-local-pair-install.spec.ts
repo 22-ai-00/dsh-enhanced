@@ -7,7 +7,7 @@ import { parseDocument } from 'yaml'
 import { rsiCoordinatorProfile } from '../src/rsi-install.js'
 import { prepareRsiLocalCohort, readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohort } from '../src/rsi-local-cohort.js'
 import { installRsiLocalProfile, mergeRsiLocalOverrides, rsiLocalDependencyOverrides, type RsiLocalProfilePorts } from '../src/rsi-local-install.js'
-import { stageRsiLocalPairPackages } from '../src/rsi-local-pair-install.js'
+import { stageRsiLocalPairPackages, stageRsiLocalSinglePackages } from '../src/rsi-local-pair-install.js'
 import { prepareRsiSourceWorkspace } from '../src/rsi-source.js'
 import { localCohortFixture } from './fixtures/rsi-local-cohort.js'
 
@@ -112,6 +112,32 @@ async function fixture(sameVersion = false, peerGraph = false) {
 }
 
 describe('disposable Home paired package installation', () => {
+  test.each([false, true])('updates a pre-owner single profile without inventing coordinator state (same version: %s)', async sameVersion => {
+    const f = await fixture(sameVersion, true)
+    await rm(f.receiptPath)
+    await rm(join(f.home, 'profiles', f.coordinator), { recursive: true })
+    const before = await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'))
+    const proof = await stageRsiLocalSinglePackages(f.input, f.ports)
+    expect(f.install.mock.calls.map(([input]) => input.profile)).toEqual([f.profile])
+    expect(proof).toMatchObject({ schemaVersion: 1, profile: f.profile, cohortDigest: f.candidate.receiptDigest })
+    expect(proof).not.toHaveProperty('coordinatorProfile')
+    expect(Object.keys(proof.files)).toHaveLength(4)
+    expect(await readFile(join(f.home, 'profiles', f.profile, 'cordis.patch.yml'))).toEqual(before)
+    await expect(lstat(f.receiptPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(lstat(join(f.home, 'profiles', f.coordinator))).rejects.toMatchObject({ code: 'ENOENT' })
+    await verifyRsiLocalInstalledPackages({ cohort: f.candidate, profilePath: join(f.home, 'profiles', f.profile), bundles: f.original.bundles })
+  })
+
+  test.each(['both', 'receipt', 'profile'] as const)('refuses a single update with %s coordinator residue before mutation', async residue => {
+    const f = await fixture()
+    if (residue === 'receipt') await rm(join(f.home, 'profiles', f.coordinator), { recursive: true })
+    if (residue === 'profile') await rm(f.receiptPath)
+    const before = await snapshot(join(f.home, 'profiles', f.profile))
+    await expect(stageRsiLocalSinglePackages(f.input, f.ports)).rejects.toThrow('cannot split')
+    expect(f.install).not.toHaveBeenCalled()
+    expect(await snapshot(join(f.home, 'profiles', f.profile))).toEqual(before)
+  })
+
   test.each([false, true])('installs and proves both frozen profiles (same version: %s)', async sameVersion => {
     const f = await fixture(sameVersion)
     const before = Object.fromEntries(await Promise.all(f.pair.map(async name => [name, {

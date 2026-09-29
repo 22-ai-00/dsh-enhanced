@@ -111,6 +111,8 @@ dsh-rsi-setup --prepare-local-update --profile web --dsh-home "$HOME/.dsh"
 
 内部激活准备已包含停服账本预检、维护签名生成和三类资源副本迁移。预检不会创建或迁移账本；非空 WAL/回滚日志、未结源码工作或冲突的部署观察须先在原 Host 对账。签名绑定原始与副本一致的部署及 readiness。资源迁移只重定位副本中的 tarball、构建器和发布工具链收据，并保留原安装与候选；替换或验证失败时尝试恢复副本原资源；已验证后的备份清理失败及进程崩溃由外层事务恢复或丢弃副本。成对包安装另由内部 `stageRsiLocalPairPackages` 处理：先核对两个 profile 的原制品文件、直接依赖、原生 Loader bundle 集合及固定 overrides，只替换原 cohort 拥有的精确依赖边；保留 profile 配置与注释，拒绝候选更改既有 build-script 决定或新增允许。两边安装和文件核验全部成功后才推进协调器登记，同版本源码更新也按制品字节核验。调用方须持有生命周期锁，并在隔离环境把可丢弃的已停写 Home 副本映射到原逻辑路径，准备相符的独立 pnpm store/cache；pnpm 会沿旧 `node_modules/.modules.yaml` 读取 store，且安装需要原 profile 的 lockfile 策略校验缓存和依赖包，仅复制源码构建缓存不足以离线安装。组件不自行建立这些边界，也不会放宽已有 lockfile 或脚本策略。安装中断或失败保留副本供外层恢复或丢弃，不宣称双方原子回滚。完整 owner 配置迁移、观察中的部署/回退证明、服务切换与崩溃恢复仍须接线，因此这些内部组件不能当作升级成功。
 
+尚未配置 owner 自动迭代的冻结安装另有显式内部 `maintenanceMode: 'pre-owner'`，不会因账本缺失自动启用。只读 `assertRsiPreOwnerInstallation` 核对原 Home/副本的初始授权资源、全部身份、bootstrap 与签名源码链，拒绝协调器、安装 journal、已配置 owner 或不明配置层；读取 Git 时禁用可选写锁。该模式保留初始身份与历史，以 `host:null` 签署连续维护记录，不创建控制账本。对应的 `stageRsiLocalSinglePackages` 只迁移单 profile，拒绝任何协调器残留，仍核验同版本的实际包字节。外层必须另外检查所有 profile 的有效插件图与真实启动参数，并负责停服、副本、切换和恢复；这些内部组件本身尚不构成完整升级入口。
+
 自动入口只收集已启用且可修复的 `@dsh-enhanced/*` 条目，核对同批包名、版本、patch、入口及声明的 Host 文件；Delivery、Lark 的原始 Loader 配置与生成后的 Growth Driver、Verifier 配置都进入目标 observer。停机后临时加载最终计划的 systemd unit，以真实 `systemctl show` 捕获授权所需属性，再恢复原 unit；捕获期间不启动服务。随后成对应用 patch、环境绑定和 unit，先启动协调器再启动目标。就绪判断要求两个 PID、InvocationID 与重启计数连续 12 秒稳定，目标 observer 与实际进程和配置摘要一致，并读到本次启动后持久登记的、绑定当前 owner scope 的协调器原生 Automation。它证明这次部署的有限启动状态，不证明普通任务已产生候选、通过独立验收或完成采用/回滚。
 
 崩溃留下的 `prepared` journal 会先在两个 Host 停机后回滚；若回滚确认成功，先恢复原来运行的服务，再继续新预检。应用前失败仅在原 patch、journal、unit 均可核对时恢复原服务；未知状态保持停机供对账。已应用后的启动或就绪失败保留 applied journal 和配置，供停止服务、排查后重试或显式回滚。自动重试沿用原有限授权起点、期限和额度。
