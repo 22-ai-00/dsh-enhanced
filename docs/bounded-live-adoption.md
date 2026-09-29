@@ -37,7 +37,7 @@ Control Plane 提供显式授权的 `dsh-bounded-live/v1` 采用合同。它复�
 - `owner`、`installationId`、`ledger`、`profilePath`、`packages`：与原源码采用授权完全一致。
 - `terms`：上述完整合同，签名身份还须登记在 trust 的 `host-attestation` 公钥集合。
 
-`dsh-rsi-setup` 校验合同、owner、包白名单、账本和公钥后才应用配置。它不生成任务签名回执，也不部署额外的系统身份隔离。reload/readiness/rollback 需要正确配置的 systemd 签名器。可使用 [schema4 自动 Host 授权](systemd-host-attestor.md#automatic-authorization-within-an-installation-grant)，同时在采用配置、采用授权和 Host 授权中设置相同 `hostDeploymentInputs`；每次更新无需手工填写 request digest。Linux `supervised` 安装已接入当前 owner 的资源、有限授权和独立协调器，停机捕获最终 systemd 属性后成对应用；重试不续期。当前 `--local` 的目录链接在停服前被预检拒绝并报告未就绪。当前只有工程验证和独立 systemd unit 探针，尚无完整正向生产部署或普通任务资格签发闭环的验收，见 [RSI 配置指南](../plugins/lark-channel/docs/rsi-setup.md)。
+`dsh-rsi-setup` 校验合同、owner、包白名单、账本和公钥后才应用配置。它不生成任务签名回执，也不部署额外的系统身份隔离。reload/readiness/rollback 需要正确配置的 systemd 签名器。可使用 [schema4 自动 Host 授权](systemd-host-attestor.md#automatic-authorization-within-an-installation-grant)，同时在采用配置、采用授权和 Host 授权中设置相同 `hostDeploymentInputs`；每次更新无需手工填写 request digest。Linux `supervised` 安装已接入当前 owner 的资源、有限授权和独立协调器，停机捕获最终 systemd 属性后成对应用；重试不续期。本地 `supervised` 新安装使用冻结提交的独立 tarball；旧的 `--local` 目录链接在停服前被预检拒绝并报告未就绪。当前只有工程验证和独立 systemd unit 探针，尚无完整正向生产部署或普通任务资格签发闭环的验收，见 [RSI 配置指南](../plugins/lark-channel/docs/rsi-setup.md)。
 
 ## 决策与恢复
 

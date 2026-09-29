@@ -1,6 +1,6 @@
 # 业务目标编排：执行与验收接线
 
-更新：2026-09-20。本文说明当前组合边界；配置见 [Goals README](../plugins/assistant-goals/README.md)，剩余验收统一见 [RSI 当前状态](rsi-status.md) 的 WP03–WP06、WP08 与 WP18。
+更新：2026-09-20。本文说明当前组合边界；配置见 [Goals README](../plugins/assistant-goals/README.md)，验收条件与限定结论见 [RSI 验收合同](rsi-acceptance.md) 的 WP03–WP06、WP08 与 WP18；当前优先级见 [RSI 当前状态](rsi-status.md)。
 
 ## 原生执行与独立验收
 
