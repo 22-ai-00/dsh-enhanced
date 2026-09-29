@@ -29,6 +29,9 @@ class FakeTransport implements LarkTransport {
   readonly send = vi.fn(async (_chatId: string, _input: LarkSendInput, _options?: LarkSendOptions) => ({
     messageId: 'om_tool_card',
   }))
+  readonly updateRawCard = vi.fn(async (
+    _messageId: string, _card: Readonly<Record<string, unknown>>, _signal: AbortSignal,
+  ) => {})
   readonly addReaction = vi.fn(async (_messageId: string, _emojiType: string) => 'reaction-1')
   readonly createProgress = vi.fn(async (_chatId: string, _options: { replyTo: string; hidden: boolean }) => ({
     cotId: 'cot-1', messageId: 'om_cot',
@@ -83,7 +86,7 @@ async function fixture(options: { now?: () => number; approvalSecret?: string } 
     receipt: vi.fn(async () => {}),
   }
   const dispose = await adapter.start(context)
-  return { adapter, dispose, transport }
+  return { adapter, dispose, transport, context }
 }
 
 function sentToolCard(transport: FakeTransport) {
@@ -91,6 +94,130 @@ function sentToolCard(transport: FakeTransport) {
 }
 
 describe('Lark open-turn tool approval adapter', () => {
+  test.each(['allowed-once', 'rejected'] as const)('returns a buttonless raw terminal callback for %s', async decision => {
+    const f = await fixture({ approvalSecret: secret })
+    const pending = f.adapter.requestToolApproval(request(), new AbortController().signal)
+    await vi.waitFor(() => expect(f.transport.send).toHaveBeenCalledOnce())
+    const sent = sentToolCard(f.transport)
+    const action = {
+      messageId: 'om_tool_card', chatId: 'oc_dm', operatorId: 'ou_owner', tag: 'button',
+      value: decision === 'allowed-once' ? sent.toolApproval.allowValue : sent.toolApproval.rejectValue,
+    }
+    const callback = await f.transport.emitCardAction(action) as { card: { type: string; data: unknown } }
+    expect(callback.card.type).toBe('raw')
+    expect(callback.card.data).toEqual(JSON.parse(renderLarkMessage({
+      toolApprovalResult: { status: decision, toolName: 'exec_command' },
+    }).content))
+    expect(JSON.stringify(callback.card)).not.toContain('"tag":"button"')
+    await expect(pending).resolves.toBe(decision)
+    await expect(f.transport.emitCardAction(action)).resolves.toBeUndefined()
+    expect(f.transport.updateRawCard).not.toHaveBeenCalled()
+    await f.dispose()
+  })
+
+  test.each(['cancelled', 'expired'] as const)('patches the original card for %s without granting authorization', async status => {
+    vi.useFakeTimers()
+    let now = 1_000
+    const f = await fixture({ approvalSecret: secret, now: () => now })
+    const controller = new AbortController()
+    const pending = f.adapter.requestToolApproval(request(), controller.signal)
+    await Promise.resolve()
+    if (status === 'cancelled') controller.abort()
+    else { now = 2_000; await vi.advanceTimersByTimeAsync(1_000) }
+    await expect(pending).resolves.toBe(status === 'cancelled' ? 'cancelled' : 'unavailable')
+    await Promise.resolve()
+    expect(f.transport.updateRawCard).toHaveBeenCalledWith('om_tool_card',
+      JSON.parse(renderLarkMessage({ toolApprovalResult: { status, toolName: 'exec_command' } }).content),
+      expect.any(AbortSignal))
+    await f.dispose()
+    vi.useRealTimers()
+  })
+
+  test.each([
+    [1_999, 'cancelled'], [2_000, 'expired'], [Number.NaN, 'cancelled'],
+  ] as const)('projects owner cancellation at clock %s as %s without changing the outcome contract', async (abortedAt, status) => {
+    let now = 1_000
+    const f = await fixture({ approvalSecret: secret, now: () => now })
+    const controller = new AbortController()
+    const pending = f.adapter.requestToolApproval(request(), controller.signal)
+    await Promise.resolve()
+    now = abortedAt
+    controller.abort()
+    await expect(pending).resolves.toBe('cancelled')
+    await Promise.resolve()
+    expect(f.transport.updateRawCard).toHaveBeenCalledWith('om_tool_card',
+      JSON.parse(renderLarkMessage({ toolApprovalResult: { status, toolName: 'exec_command' } }).content),
+      expect.any(AbortSignal))
+    await f.dispose()
+  })
+
+  test('aborts an uncooperative terminal PATCH after its deadline without changing authorization', async () => {
+    vi.useFakeTimers()
+    const f = await fixture({ approvalSecret: secret })
+    f.transport.updateRawCard.mockImplementationOnce(async () => await new Promise(() => {}))
+    const controller = new AbortController()
+    const pending = f.adapter.requestToolApproval(request(), controller.signal)
+    await Promise.resolve()
+    controller.abort()
+    await expect(pending).resolves.toBe('cancelled')
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(f.transport.updateRawCard.mock.calls[0]![2].aborted).toBe(true)
+    expect(f.adapter.health()).toMatchObject({ lastErrorCode: 'send_timeout' })
+    await f.dispose()
+    vi.useRealTimers()
+  })
+
+  test('patches a late acknowledged card after cancellation and preserves the terminal outcome', async () => {
+    const f = await fixture({ approvalSecret: secret })
+    let acceptSend!: (result: { messageId: string }) => void
+    f.transport.send.mockImplementationOnce(async () => await new Promise(resolve => { acceptSend = resolve }))
+    const controller = new AbortController()
+    const pending = f.adapter.requestToolApproval(request(), controller.signal)
+    controller.abort()
+    acceptSend({ messageId: 'om_late_card' })
+    await expect(pending).resolves.toBe('cancelled')
+    await vi.waitFor(() => expect(f.transport.updateRawCard).toHaveBeenCalledWith('om_late_card',
+      expect.objectContaining({ config: { enable_forward_interaction: false, summary: { content: '本次审批已取消' } } }),
+      expect.any(AbortSignal)))
+    await f.dispose()
+  })
+
+  test('does not let an old send acknowledgement schedule a card update after adapter restart', async () => {
+    const f = await fixture({ approvalSecret: secret })
+    let acceptSend!: (result: { messageId: string }) => void
+    f.transport.send.mockImplementationOnce(async () => await new Promise(resolve => { acceptSend = resolve }))
+    const pending = f.adapter.requestToolApproval(request(), new AbortController().signal)
+    await f.dispose()
+    const disposeRestarted = await f.adapter.start(f.context)
+    acceptSend({ messageId: 'om_old_generation_card' })
+    await expect(pending).resolves.toBe('unavailable')
+    expect(f.transport.updateRawCard).not.toHaveBeenCalled()
+    await disposeRestarted()
+  })
+
+  test('records presentation failure without changing rejection and bounds disposal of an uncooperative update', async () => {
+    vi.useFakeTimers()
+    const f = await fixture({ approvalSecret: secret })
+    f.transport.updateRawCard.mockImplementationOnce(async () => { throw new LarkTransportError('rate_limited', 'update rejected') })
+    const controller = new AbortController()
+    const pending = f.adapter.requestToolApproval(request(), controller.signal)
+    await Promise.resolve()
+    controller.abort()
+    await expect(pending).resolves.toBe('cancelled')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.adapter.health()).toMatchObject({ lastErrorCode: 'rate_limited' })
+    f.transport.updateRawCard.mockImplementationOnce(async () => await new Promise(() => {}))
+    const second = f.adapter.requestToolApproval(request({ operationId: 'other' }), new AbortController().signal)
+    await Promise.resolve()
+    const disposing = f.dispose()
+    await vi.advanceTimersByTimeAsync(1_000)
+    await disposing
+    await expect(second).resolves.toBe('unavailable')
+    expect(f.transport.updateRawCard.mock.calls.at(-1)![2].aborted).toBe(true)
+    expect(f.transport.disconnect).toHaveBeenCalledOnce()
+    vi.useRealTimers()
+  })
+
   test('advertises the capability only with a usable signing secret', async () => {
     const without = await fixture()
     expect(without.adapter.capabilities.toolApprovals).toBe(false)
@@ -182,6 +309,9 @@ describe('Lark open-turn tool approval adapter', () => {
     })
     await expect(pending).resolves.toBe('allowed-once')
     await vi.waitFor(() => expect(f.transport.addReaction).toHaveBeenCalledWith('om_owner_text', 'DONE'))
+    expect(f.transport.updateRawCard).toHaveBeenCalledWith('om_tool_card',
+      expect.objectContaining({ config: { enable_forward_interaction: false, summary: { content: '已允许本次操作，任务继续中' } } }),
+      expect.any(AbortSignal))
     await f.dispose?.()
   })
 
@@ -271,10 +401,35 @@ describe('Lark open-turn tool approval adapter', () => {
     ])
     try {
       expect(observed).toBe('allowed-once')
+      await vi.waitFor(() => expect(f.transport.updateRawCard).toHaveBeenCalledWith('om_tool_card',
+        expect.objectContaining({ config: { enable_forward_interaction: false, summary: { content: '已允许本次操作，任务继续中' } } }),
+        expect.any(AbortSignal)))
     } finally {
       controller.abort()
       await f.dispose?.()
     }
+  })
+
+  test('does not authorize or replace an early callback whose message does not match the send acknowledgement', async () => {
+    const f = await fixture({ approvalSecret: secret })
+    let acceptSend!: (result: { messageId: string }) => void
+    f.transport.send.mockImplementationOnce(async () => await new Promise(resolve => { acceptSend = resolve }))
+    const pending = f.adapter.requestToolApproval(request(), new AbortController().signal)
+    const sent = sentToolCard(f.transport)
+    const action = { messageId: 'om_wrong_card', chatId: 'oc_dm', operatorId: 'ou_owner', tag: 'button',
+      value: sent.toolApproval.allowValue }
+    const early = await f.transport.emitCardAction(action)
+    expect(early).not.toHaveProperty('card')
+    acceptSend({ messageId: 'om_tool_card' })
+    let settled = false
+    void pending.then(() => { settled = true })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    expect(f.transport.updateRawCard).not.toHaveBeenCalled()
+    await f.transport.emitCardAction({ ...action, messageId: 'om_tool_card' })
+    await expect(pending).resolves.toBe('allowed-once')
+    await f.dispose()
   })
 
   test('rejects mismatched or unbounded requests before sending provider-controlled review text', async () => {

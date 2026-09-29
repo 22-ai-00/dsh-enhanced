@@ -1100,11 +1100,34 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
       }),
     }
   }
+  if ('toolApprovalResult' in input) {
+    const result = input.toolApprovalResult
+    const presentation = {
+      'allowed-once': { template: 'green', title: '已允许本次操作，任务继续中',
+        detail: '本次授权已生效。工具执行结果将在任务后续消息中提供。' },
+      rejected: { template: 'red', title: '已拒绝本次操作', detail: '本次审批未授权工具执行。' },
+      cancelled: { template: 'grey', title: '本次审批已取消', detail: '本次审批未授权工具执行，已停止等待确认。' },
+      expired: { template: 'grey', title: '本次审批已超时', detail: '有效期已过，本次审批未授权工具执行。' },
+      unavailable: { template: 'grey', title: '本次审批已结束', detail: '会话或连接已结束，本次审批未授权工具执行。' },
+    }[result.status]
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: { enable_forward_interaction: false, summary: { content: presentation.title } },
+        header: { template: presentation.template, title: { tag: 'plain_text', content: presentation.title } },
+        body: { elements: [
+          { tag: 'div', text: { tag: 'plain_text', content: presentation.detail } },
+          { tag: 'div', text: { tag: 'plain_text', content: `工具：${result.toolName}` } },
+        ] },
+      }),
+    }
+  }
   if ('toolApproval' in input) return {
     msgType: 'interactive',
     content: JSON.stringify({
       schema: '2.0',
-      config: { enable_forward_interaction: false },
+      config: { enable_forward_interaction: false, summary: { content: '工具调用等待您的确认' } },
       header: { template: 'orange', title: { tag: 'plain_text', content: input.toolApproval.title } },
       body: { elements: [
         { tag: 'div', text: { tag: 'plain_text',
