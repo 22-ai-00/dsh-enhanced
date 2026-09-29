@@ -64,12 +64,16 @@ canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要
 
 参数级风险门不是宽泛的字符串前缀判断，也不声称实现了完整 shell parser：
 
+Auto 还会直接执行一种严格限定的公共 HTTP GET/HEAD `curl` 读取：第一个参数必须是 `-q` 或 `--disable`，禁用隐式 `.curlrc`；只接收一个完整 HTTP(S) 域名 URL，支持单/双引号包裹查询参数以及常用只读选项。跟随重定向必须显式限制协议，例如 `curl -q -fsSL --proto-redir '=http,https' --max-time 30 https://example.com/article`。输出只到标准输出；认证、header/cookie/proxy/config、上传、文件输出、管道、重定向和 shell 展开仍请求人工批准。IP 字面量、已知本地域名和不明选项也保持人工审批；此分类不提供 DNS 或重定向目标的网络隔离。请求批准档继续询问此类网络读取，Policy 的身份、规则和预算仍然生效。
+
+限定读取之外，动态或带引号/转义拼接的命令头（包括管道和顺序命令后的命令头）、shell 控制结构，以及命令/进程替换均保守交人工，不能落入 Auto 的普通 Bash 放行路径。`time` / `timeout` / `nice` / `ionice` / `stdbuf`、`find`、`busybox` 和 `toybox` 的参数或谓词可包含另一条待执行命令，目前整条调用请求人工批准；`find -exec` / `-execdir` 和这些选项的拼接形态不会自动执行，`xargs` / `env` / `exec` 仍保持人工审批；简单与复杂 Bash 路径都会检查可见的敏感命令。普通参数中的非敏感 `$name` / `${name}` 和单引号字面文本保留原处理；引号内 Python/JS 脚本的普通赋值不会被误判为 shell 环境变量注入，因此抓取文章后在工作目录解析 JSON 可沿用 Auto 常规执行。此拒绝扫描不实现完整 shell 语义。
+
 - 命令辨识支持完整的 `command -v <name...>`、`type -p <name...>` 和 `type -P <name...>`，每次 1–8 个字面命令名；这只查询可执行名称，不运行被查询的命令。选项、路径、插值、命令替换、复合 shell、敏感字段和越界 workdir 不适用；`command curl ...` 等执行包装器不会因此获得权限；
 
 - `read` / `read_image` 只有一个可证明位于 workspace 内且不带 credential-sensitive 标记的本地路径时可继续；`glob` / `grep` 只接受已知参数形态，并对 search root、glob/include 做同样的词法范围检查。workspace 外、`.env`、`.ssh`、`.codex/auth.json` 等敏感目标、URL、缺失路径或未知参数一律交人工；
 - `pwd`、受限 `ls`、`git status --short|--porcelain`、`git rev-parse --show-toplevel|--abbrev-ref HEAD`、`git diff --no-ext-diff` 的 `--stat|--stat --cached|--name-only`、`git log --oneline -n 10|20`，以及 `node/npm/pnpm/python3/cargo/rustc/tsc/git --version`、`node -v`、`go version`、`uname -s|-m` 等少量精确 argv 形态可继续。允许的条件是只读、不触网、不读 credential 路径且不接受可逃出 workspace 的操作数：带操作数的命令（如 `ls`）由独立分类器做范围检查，`git log --oneline -n 50`、`uname -a`、`go get`、`npm install`、`cargo install` 等相邻形态不在名单内。其 `workdir` 与 `ls` 路径操作数仍必须位于非 credential 的 workspace 范围内，未知或畸形 bash 参数失败关闭；
 - 简单但未分类的前台 Bash（例如 `pnpm test`）先归为 `ask-review`；显式 `ask` 档仍提示人工，默认 `auto` 档则直接继续。未知插件工具保持 `ask-review` 并在 auto 中交隔离 reviewer，不因本次放宽自动执行。`run_code` 例外：当前 worker runtime 是 bash-equivalent 的便利执行环境，不是 OS 安全边界，因此在 ask/auto 档始终进入 `ask-human`；
-- 内置只读 `web_search` / `web_fetch` 与专用 `ask_user_question` 确定性放行。普通 Bash 中的 `curl`、`ssh`、`git push` 等网络命令，以及 credential 痕迹、外部路径中的 credential 关键词搜索、后台执行、破坏性操作、提权、workspace 外写入仍进入 `ask-human`。普通外部本地只读与 Skill 加载只在默认 `auto` 直放，显式 `ask` 仍会询问。复杂 shell 会先做高召回敏感扫描；未命中时仅在默认 auto 直接继续，在显式 ask 仍展示授权。`npx`、`npm exec`、`pnpm/yarn dlx` 及依赖安装属于默认 auto 的普通操作；`git submodule update` 仍按潜在远端执行归入 `ask-human`；
+- 内置只读 `web_search` / `web_fetch` 与专用 `ask_user_question` 确定性放行。上述限定读取之外的 `curl`、`ssh`、`git push` 等网络命令，以及 credential 痕迹、外部路径中的 credential 关键词搜索、后台执行、破坏性操作、提权、workspace 外写入仍进入 `ask-human`。普通外部本地只读与 Skill 加载只在默认 `auto` 直放，显式 `ask` 仍会询问。复杂 shell 会先做高召回敏感扫描；未命中时仅在默认 auto 直接继续，在显式 ask 仍展示授权。`npx`、`npm exec`、`pnpm/yarn dlx` 及依赖安装属于默认 auto 的普通操作；`git submodule update` 仍按潜在远端执行归入 `ask-human`；
 - `pwsh` 在具备独立严格解析器前一律进入 `ask-human`；
 - `bash` / `pwsh` / `write` / `edit` 已携带合法的 `sandbox_permissions: workspace-write | danger-full-access` 和非空 `justification` 时交还工具自身的原生审批，避免弹两次；Codex 风格的 `require_escalated` 或其他畸形升级参数仍交人工。
 

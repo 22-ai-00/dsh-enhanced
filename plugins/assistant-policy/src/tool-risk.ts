@@ -1,4 +1,5 @@
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
+import { isIP } from 'node:net'
 
 export type ToolRiskClassification =
   | 'allow'
@@ -100,9 +101,10 @@ const GIT_NETWORK_SUBCOMMANDS = new Set(['clone', 'fetch', 'ls-remote', 'pull', 
 const PRIVILEGE_COMMANDS = new Set(['doas', 'pkexec', 'su', 'sudo'])
 const BACKGROUND_COMMANDS = new Set(['disown', 'nohup', 'setsid'])
 // These wrappers can substitute or inject a different command than the visible
-// argv, so they stay hard-sensitive. Benign timing/scheduling wrappers
-// (`time`, `timeout`, `nice`, `ionice`) are not listed: they are reviewable.
+// argv, so they stay hard-sensitive. Timing/scheduling wrappers are checked
+// separately as executable heads: their operands include another executable.
 const SHELL_WRAPPER_COMMANDS = new Set(['command', 'eval', 'exec', 'xargs'])
+const EXECUTION_WRAPPER_COMMANDS = new Set(['time', 'timeout', 'nice', 'ionice', 'stdbuf', 'find', 'busybox', 'toybox'])
 const SHELL_INTERPRETERS = new Set(['bash', 'dash', 'fish', 'sh', 'zsh'])
 const CREDENTIAL_COMMANDS = new Set(['env', 'keychain', 'op', 'pass', 'printenv', 'security'])
 const DESTRUCTIVE_COMMANDS = new Set(['dd', 'rm', 'shred'])
@@ -248,6 +250,183 @@ function simpleArgv(command: string): readonly string[] | undefined {
   return normalized.split(/[ \t]+/u)
 }
 
+/** Literal argv only: quoted URL queries are supported, shell evaluation is not. */
+function literalCurlArgv(command: string): readonly string[] | undefined {
+  if (/[$`\\]/u.test(command) || [...command].some(character => {
+    const code = character.charCodeAt(0)
+    return (code < 32 && code !== 9) || code === 127
+  })) return undefined
+  const argv: string[] = []
+  let token = ''
+  let started = false
+  let quote: "'" | '"' | undefined
+  for (const character of command) {
+    if (quote !== undefined) {
+      if (character === quote) quote = undefined
+      else token += character
+    } else if (character === "'" || character === '"') {
+      quote = character
+      started = true
+    } else if (character === ' ' || character === '\t') {
+      if (started) argv.push(token)
+      token = ''
+      started = false
+    } else {
+      if (!/[A-Za-z0-9_@%+=:,./-]/u.test(character)) return undefined
+      token += character
+      started = true
+    }
+  }
+  if (quote !== undefined) return undefined
+  if (started) argv.push(token)
+  return argv
+}
+
+function isPublicHttpUrl(value: string): boolean {
+  // Curl has its own URL globbing even inside shell quotes. Admit one literal
+  // URL, not a range or a sequence; URL credentials remain human-only too.
+  if (/[\s{}[\]]/u.test(value)) return false
+  let url: URL
+  try { url = new URL(value) } catch { return false }
+  if (!/^https?:\/\//u.test(value) || (url.protocol !== 'http:' && url.protocol !== 'https:')
+    || url.username !== '' || url.password !== '') return false
+  const hostname = url.hostname.replace(/\.$/u, '').toLowerCase()
+  if (isIP(hostname.replace(/^\[|\]$/gu, '')) !== 0
+    || !hostname.includes('.') || hostname.length > 253
+    || /(?:^|\.)(?:localhost|local|internal|onion|arpa)$/u.test(hostname)) return false
+  return hostname.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label))
+}
+
+const CURL_READ_FLAGS = new Set([
+  '--compressed', '--fail', '--fail-with-body', '--silent', '--show-error',
+  '--location', '--head', '--include', '--globoff', '--ipv4', '--ipv6',
+])
+const CURL_READ_VALUE_OPTIONS = new Set([
+  '--max-time', '--connect-timeout', '--max-redirs', '--user-agent',
+  '--request', '--proto', '--proto-redir', '--url',
+])
+
+function isReadOnlyPublicCurl(command: string): boolean {
+  if (rawCommandBearsSecret(command)) return false
+  const argv = literalCurlArgv(command)
+  // -q must be the first argument to suppress implicit ~/.curlrc options,
+  // including credentials, uploads and output files. Do not trust wrappers or
+  // another executable path merely because its basename happens to be curl.
+  if (argv?.[0] !== 'curl' || (argv[1] !== '-q' && argv[1] !== '--disable')) return false
+  let urlCount = 0
+  let followsRedirects = false
+  let restrictsRedirectProtocols = false
+  const valueIsSafe = (option: string, value: string): boolean => {
+    if (option === '--url') {
+      urlCount += 1
+      return isPublicHttpUrl(value)
+    }
+    if (option === '--user-agent') return value.length > 0 && value.length <= 512 && !value.startsWith('@')
+    if (option === '--request') return value === 'GET' || value === 'HEAD'
+    if (option === '--max-redirs') return /^(?:[0-9]|10)$/u.test(value)
+    if (option === '--proto' || option === '--proto-redir') {
+      if (!/^=(?:http|https)(?:,(?:http|https))?$/u.test(value)) return false
+      if (option === '--proto-redir') restrictsRedirectProtocols = true
+      return true
+    }
+    return /^(?:\d+(?:\.\d+)?|\.\d+)$/u.test(value)
+      && Number(value) > 0 && Number(value) <= 120
+  }
+  for (let index = 2; index < argv.length; index += 1) {
+    const token = argv[index]!
+    if (CURL_READ_FLAGS.has(token)) {
+      if (token === '--location') followsRedirects = true
+      continue
+    }
+    if (token.startsWith('--')) {
+      const separator = token.indexOf('=')
+      const option = separator < 0 ? token : token.slice(0, separator)
+      if (!CURL_READ_VALUE_OPTIONS.has(option)) return false
+      const value = separator < 0 ? argv[++index] : token.slice(separator + 1)
+      if (value === undefined || !valueIsSafe(option, value)) return false
+    } else if (token.startsWith('-')) {
+      // curl supports bundled short flags and attached option values. Parse
+      // the complete bundle, so -fsSo/path cannot inherit the safe -fsS prefix.
+      if (token === '-') return false
+      for (let offset = 1; offset < token.length; offset += 1) {
+        const flag = token[offset]!
+        if ('fsSLIig46'.includes(flag)) {
+          if (flag === 'L') followsRedirects = true
+          continue
+        }
+        const option = ({ A: '--user-agent', m: '--max-time', X: '--request' } as Record<string, string>)[flag]
+        if (option === undefined) return false
+        const value = offset + 1 < token.length ? token.slice(offset + 1) : argv[++index]
+        if (value === undefined || !valueIsSafe(option, value)) return false
+        break
+      }
+    } else {
+      urlCount += 1
+      if (!isPublicHttpUrl(token)) return false
+    }
+  }
+  return urlCount === 1 && (!followsRedirects || restrictsRedirectProtocols)
+}
+
+function hasUnverifiableShellExecution(command: string): boolean {
+  // This is a conservative rejection scan, not a shell parser or an allow
+  // decision. Unknown executable spelling must never reach Auto's ordinary
+  // Bash fallback. Scan heads after separators too; parameters may still use
+  // ordinary variables, while nested execution always requires a human.
+  let commandHead = true
+  let head = ''
+  let quote: "'" | '"' | undefined
+  const grammarHeads = new Set(['if', 'then', 'elif', 'else', 'for', 'while', 'until', 'do', 'case', 'function', 'select', 'coproc'])
+  // Wrapper/predicate grammars move the executable position. Without proving
+  // that complete nested argv, reject the wrapper itself rather than treating
+  // the hidden command name as an ordinary inert argument.
+  const unverifiedHead = (): boolean => grammarHeads.has(head) || EXECUTION_WRAPPER_COMMANDS.has(basename(head))
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index]!
+    const next = command[index + 1]
+    if (quote === "'") {
+      if (character === "'") quote = undefined
+      continue
+    }
+    if (quote === '"') {
+      if (character === '\\') index += 1
+      else if (character === '"') quote = undefined
+      else if (character === '`' || (character === '$' && next === '(')) return true
+      continue
+    }
+    if (character === '\\') {
+      if (commandHead) return true
+      index += 1
+      continue
+    }
+    if (character === "'" || character === '"') {
+      if (commandHead) return true
+      quote = character
+      continue
+    }
+    if (';|&\n'.includes(character)) {
+      if (unverifiedHead()) return true
+      commandHead = true
+      head = ''
+      continue
+    }
+    if (commandHead) {
+      if (character === ' ' || character === '\t') {
+        if (head !== '') {
+          if (unverifiedHead()) return true
+          commandHead = false
+        }
+      } else {
+        if (!/[A-Za-z0-9_./+-]/u.test(character)) return true
+        head += character
+      }
+    } else if (character === '`'
+      || (character === '$' && (next === '(' || next === "'" || next === '"'))
+      || ((character === '<' || character === '>') && next === '(')) return true
+  }
+  return quote !== undefined || unverifiedHead()
+}
+
 function argvEquals(argv: readonly string[], expected: readonly string[]): boolean {
   return argv.length === expected.length && argv.every((token, index) => token === expected[index])
 }
@@ -322,8 +501,9 @@ function rawCommandBearsSecret(raw: string): boolean {
  */
 function rawCommandIsSensitive(raw: string): boolean {
   if (rawCommandBearsSecret(raw)) return true
-  // Leading environment assignments (e.g. `API_TOKEN=... node script.js`).
-  if (/(?:^|[;&|\n])\s*[A-Za-z_][A-Za-z0-9_]*=/u.test(raw)) return true
+  // Shell assignments are rejected by the quote-aware executable-head scan.
+  // Do not mistake assignments inside a quoted Python/JS script for shell
+  // environment changes (ordinary article parsing must stay automatic).
   if (rawMentionsCommand(raw, NETWORK_COMMANDS) || rawMentionsCommand(raw, PRIVILEGE_COMMANDS)
     || rawMentionsCommand(raw, BACKGROUND_COMMANDS) || rawMentionsCommand(raw, CREDENTIAL_COMMANDS)
     || rawMentionsCommand(raw, DESTRUCTIVE_COMMANDS) || rawMentionsCommand(raw, MKFS_COMMANDS)
@@ -365,6 +545,8 @@ function classifyBash(
   const workdir = argumentsRecord.workdir ?? workspace
   if (typeof workdir !== 'string' || !isWorkspaceReadTarget(workdir, workspace)) return 'ask-human'
   const command = argumentsRecord.command
+  if (isReadOnlyPublicCurl(command)) return 'allow-auto'
+  if (hasUnverifiableShellExecution(command)) return 'ask-human'
   const argv = simpleArgv(command)
   if (argv === undefined) {
     // Real shell syntax (pipes, quoting, redirection, expansion) can change the
@@ -382,7 +564,15 @@ function classifyBash(
     && argv.length >= 3 && argv.length <= 10
     && argv.slice(2).every(name => /^[A-Za-z][A-Za-z0-9_.+-]{0,63}$/u.test(name))
     && !rawCommandBearsSecret(command)) return 'allow'
-  if (isDeterministicallySensitive(argv, command)) return 'ask-human'
+  // The simple argv path must not hide a visible nested network/destructive
+  // command merely because the first executable is an unfamiliar wrapper.
+  // Exact discovery and public GET/HEAD curl were admitted above.
+  // npm's literal `exec` subcommand retains the existing ordinary package
+  // operation policy; mask only that word, never the remaining payload.
+  const scannedCommand = argv[0] === 'npm' && argv[1] === 'exec'
+    ? command.replace(/^(\s*npm[ \t]+)exec(?=[ \t]|$)/u, '$1package-exec')
+    : command
+  if (rawCommandIsSensitive(scannedCommand) || isDeterministicallySensitive(argv, command)) return 'ask-human'
   const lsRisk = classifyLs(argv, resolve(workspace, workdir), workspace)
   if (lsRisk !== undefined) return lsRisk
   if (SAFE_EXACT_COMMANDS.some(expected => argvEquals(argv, expected))) return 'allow'
