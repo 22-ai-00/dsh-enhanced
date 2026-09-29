@@ -131,6 +131,7 @@ describe('Lark open-turn tool approval adapter', () => {
     ]))
     expect(elements).not.toEqual(expect.arrayContaining([expect.objectContaining({ tag: 'action' })]))
     const serialized = JSON.stringify(card)
+    expect(serialized).toContain('任务已暂停，以下操作尚未执行')
     expect(serialized).toContain('不可信审阅文本')
     expect(serialized).toContain('exec_command')
     expect(serialized).toContain('需要读取工作区状态')

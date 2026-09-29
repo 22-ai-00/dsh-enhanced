@@ -5,7 +5,8 @@ import type { PermissionPresetService } from '@deepseek-ai/dsh-permission-preset
 import type { Session } from '@deepseek-ai/dsh-session'
 import Schema from '@deepseek-ai/schemastery'
 import type { ToolDefinition, ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
-import { registerAutoReviewAnswerer, type AutoReviewConfig } from './auto-review.js'
+import type { ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import { isAutoReviewEscalation, registerAutoReviewAnswerer, type AutoReviewConfig } from './auto-review.js'
 import { HumanApprovalRouter, type HumanApprovalAnswerer } from './approval-routing.js'
 import {
   approvalPermissionFingerprint,
@@ -264,6 +265,11 @@ export class AssistantPolicyService extends Service {
   registerHumanApprovalAnswerer(answerer: HumanApprovalAnswerer): () => void {
     if (!this.active) throw new Error('assistant-policy: unavailable approval router')
     return this.humanApprovalRouter.register(answerer)
+  }
+
+  /** Query the mounted Policy's exact live handoff, including across package copies. */
+  isAutoReviewEscalation(request: Readonly<ApprovalRequest>): boolean {
+    return this.active && isAutoReviewEscalation(request)
   }
 
   constructor(ctx: Context, input: Config, options: AssistantPolicyServiceOptions = {}) {

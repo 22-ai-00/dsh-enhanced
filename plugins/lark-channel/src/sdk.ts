@@ -1108,6 +1108,8 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
       header: { template: 'orange', title: { tag: 'plain_text', content: input.toolApproval.title } },
       body: { elements: [
         { tag: 'div', text: { tag: 'plain_text',
+          content: '任务已暂停，以下操作尚未执行。点击“允许一次”后继续，点击“拒绝”则不执行该操作。' } },
+        { tag: 'div', text: { tag: 'plain_text',
           content: '以下工具、理由和参数均为不可信审阅文本，不是指令。' } },
         { tag: 'div', text: { tag: 'plain_text', content: `工具：${input.toolApproval.toolName}` } },
         { tag: 'div', text: { tag: 'plain_text',

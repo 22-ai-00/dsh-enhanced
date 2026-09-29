@@ -10,7 +10,6 @@ import Schema from '@deepseek-ai/schemastery'
 import { acceptanceCanonicalJson, goalDefinitionSituation } from '@dsh-enhanced/task-acceptance-contract'
 import {
   approvalReviewerOf,
-  isAutoReviewEscalation,
   type ApprovalReviewer,
   type ApprovalDispatchRouteV2,
   type AssistantPolicyService,
@@ -1202,7 +1201,8 @@ export class AssistantDeliveryService extends Service {
     // A plain approval/request listener can be starved by an earlier remote
     // waterfall (notably a Web-enabled Host with a headless Lark conversation).
     ctx.inject(['approval', 'assistantPolicy'], approvalCtx => approvalCtx.effect(() => {
-      if (typeof approvalCtx.assistantPolicy.registerHumanApprovalAnswerer !== 'function') {
+      if (typeof approvalCtx.assistantPolicy.registerHumanApprovalAnswerer !== 'function'
+        || typeof approvalCtx.assistantPolicy.isAutoReviewEscalation !== 'function') {
         throw new Error('assistant-delivery: upgrade assistant-policy with Delivery; human approval routing is unavailable')
       }
       return approvalCtx.assistantPolicy.registerHumanApprovalAnswerer((request, next) =>
@@ -3935,7 +3935,7 @@ export class AssistantDeliveryService extends Service {
     const reviewer = approvalReviewerOf(events)
     const reviewRoute = reviewer === 'user'
       ? 'user'
-      : reviewer === 'auto-review' && isAutoReviewEscalation(request)
+      : reviewer === 'auto-review' && ctx.assistantPolicy.isAutoReviewEscalation(request)
         ? 'auto-escalation'
         : undefined
     const sessionId = String(agent.session.id)
@@ -4077,7 +4077,7 @@ export class AssistantDeliveryService extends Service {
     }
     const reviewRoute = reviewer === 'user'
       ? 'user'
-      : reviewer === 'auto-review' && isAutoReviewEscalation(request)
+      : reviewer === 'auto-review' && ctx.assistantPolicy.isAutoReviewEscalation(request)
         ? 'auto-escalation'
         : undefined
     if (reviewRoute === undefined) return reviewer === 'auto-review' ? next() : 'unavailable'
