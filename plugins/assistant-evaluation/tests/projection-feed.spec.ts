@@ -133,5 +133,30 @@ test('reads the existing trusted trigger when a newer primary does not change le
     } finally { check.close() }
     expect(store.listTaskLearningProjectionFeed(scope, undefined, 10)).toEqual(before)
     expect(before.items[0]!.receipt.triggerOutcomeId).toBe(first.id)
+    expect(store.getForegroundLearningProjection(scope, 'foreground')).toEqual(before.items[0]!.receipt)
+    expect(store.getForegroundLearningProjection({ ...scope, workspace: '/work/other' }, 'foreground')).toBeUndefined()
+    expect(store.getForegroundLearningProjection(scope, 'missing')).toBeUndefined()
+
+    const owner = (id: string, status: 'achieved' | 'unknown') => outcome(id, 'foreground', {
+      source: { kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' },
+      objectiveStatus: status, deliveryStatus: 'delivered',
+      evidence: [{ kind: 'foreground-turn', ref: 'foreground' }, { kind: 'delivery-outbox', ref: 'foreground-reply' }],
+      evaluator: { id: 'assistant-delivery-owner-feedback', version: '2' },
+    })
+    const lineage = { principalRecordId: 'foreground-owner', principalVersion: 1 }
+    store.append(owner('foreground-owner-initial', 'achieved'), { ...lineage, action: 'initial', operationId: 'foreground-owner-1' })
+    const withdrawal = store.append(owner('foreground-owner-withdraw', 'unknown'), {
+      ...lineage, action: 'withdraw', operationId: 'foreground-owner-2', expectedVersion: 1, previousStatus: 'achieved',
+    })
+    const current = store.listTaskLearningProjectionFeed(scope, undefined, 10).items[0]!.receipt
+    expect(current.projection.disposition).toBe('retract')
+    expect(store.getForegroundLearningProjection(scope, 'foreground')).toEqual(current)
+    expect(store.inspectTaskOwnerRevision(scope, current.triggerOutcomeId, 'foreground-owner', 1))
+      .toMatchObject({ outcomeId: withdrawal.id, action: 'withdraw', version: 2 })
+
+    store.append(outcome('untrusted-foreground', 'untrusted', {
+      trust: 'external', evidence: [{ kind: 'foreground-turn', ref: 'untrusted' }],
+    }))
+    expect(store.getForegroundLearningProjection(scope, 'untrusted')).toBeUndefined()
   } finally { store.close() }
 })

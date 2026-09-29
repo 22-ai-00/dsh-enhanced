@@ -3,6 +3,62 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type { ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
 import type { OwnerGoalOutcomeFeedbackLocator, OwnerGoalOutcomeFeedbackProof } from './goal-wake-types.js'
+import type { ForegroundExecution } from './acceptance.js'
+
+/** Host-only owner scope; every read revalidates this exact durable lineage. */
+export interface OwnerForegroundTaskSourceScope {
+  readonly authorityId: string
+  readonly principalId: string
+  readonly workspace: string
+  readonly agentPreset: string
+  readonly expectedOwner: Readonly<{ authorityHash: string; principalRecordId: string; principalVersion: number }>
+}
+
+export interface OwnerForegroundTaskSourceCursor {
+  readonly protocol: 'assistant-delivery/owner-foreground-source-cursor/v1'
+  readonly epoch: string
+  readonly scopeKey: string
+  readonly sequence: number
+}
+
+/** Completion metadata, not evidence that the task achieved its business objective. */
+export interface OwnerForegroundTaskSource {
+  readonly protocol: 'assistant-delivery/owner-foreground-source/v1'
+  readonly inboxId: string
+  readonly sourceDigest: string
+  readonly completionSequence: number
+  readonly admissionCursor: Readonly<DeliveryAdmissionCursor>
+  readonly authorityId: string
+  readonly authorityHash: string
+  readonly principalId: string
+  readonly owner: Readonly<DeliveryOwnerLineage>
+  readonly scope: Readonly<{ workspace: string; preset: string }>
+  readonly binding: Readonly<{ id: string; version: number; generation: number; sessionId: string }>
+  readonly execution: Readonly<ForegroundExecution>
+}
+
+export interface OwnerForegroundTaskSourcePage {
+  readonly items: readonly Readonly<OwnerForegroundTaskSource>[]
+  readonly nextCursor: Readonly<OwnerForegroundTaskSourceCursor>
+  readonly watermark: number
+  readonly hasMore: boolean
+}
+
+export interface OwnerForegroundTaskSourceText {
+  readonly text: string
+  readonly fullTextDigest: string
+  readonly returnedBytes: number
+  readonly fullBytes: number
+  readonly truncated: boolean
+}
+
+export interface OwnerForegroundTaskSourceContent {
+  readonly source: Readonly<OwnerForegroundTaskSource>
+  readonly sourceDigest: string
+  readonly contentDigest: string
+  readonly input: Readonly<OwnerForegroundTaskSourceText>
+  readonly reply: Readonly<OwnerForegroundTaskSourceText & { outboxId: string; intentDigest: string }>
+}
 
 export interface ExternalPrincipalKey {
   channel: string

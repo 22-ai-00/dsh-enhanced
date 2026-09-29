@@ -25,5 +25,11 @@ Preference/Memory promotion 协议只允许 `memory.retention=long-term` 和固�
 共享 contract 同时持有 producer 的进程内可撤销 brand，使 Memory 无需加载可选的 Preference 插件即可验真；
 它只定义 registration 与 content-free wire，不提供自由文本、Memory 写权限或无审批降级。
 
+普通事实/经验候选使用独立的 `MemoryLearningReviewRequest`：Host 固定 owner lineage、
+原任务及正文摘要、提取会话，模型仅提供有限 `mutation/evidenceQuote`。经验必须关联明确的
+canonical 任务结果，替换/删除必须指定记录版本；模型不能设置 namespace、trust、TTL 或权限。
+严格 DTO 校验和摘要仅保证传递内容一致，Verifier 仍须独立回读原文与当前结果，Memory 仍须
+验证审查回执、有限授权与来源后才能采用。本库不自动提取、审批或写入记忆。
+
 本包只使用 Node `crypto` 计算 canonical SHA-256，不访问网络、文件系统、子进程、凭据或
 浏览器，也没有 install script。

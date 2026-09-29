@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 24
+export const deliverySchemaVersion = 25
 
 const goalOutcomeTargetSchema = `
   CREATE TABLE IF NOT EXISTS delivery_goal_outcome_targets (
@@ -113,6 +113,7 @@ const foregroundExecutionSchema = `
     model_provider TEXT,
     model_id TEXT,
     model_reasoning_effort TEXT,
+    completion_sequence INTEGER CHECK(completion_sequence BETWEEN 1 AND 9007199254740991),
     CHECK((status = 'pending' AND completed_at IS NULL AND execution_ref IS NULL)
       OR (status != 'pending' AND completed_at IS NOT NULL AND completed_at >= dispatched_at AND execution_ref IS NOT NULL AND execution_ref = inbox_id)),
     CHECK(quiescent = 0 OR status = 'succeeded'),
@@ -122,6 +123,75 @@ const foregroundExecutionSchema = `
   ) STRICT;
   CREATE INDEX IF NOT EXISTS delivery_foreground_execution_owner
     ON delivery_foreground_executions(principal_record_id, principal_version, workspace, preset, binding_id);
+`
+
+/** Database-owned order, independent of admission order and wall-clock time. */
+const foregroundCompletionSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_foreground_completion_clock (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    current_sequence INTEGER NOT NULL CHECK(current_sequence BETWEEN 0 AND 9007199254740991)
+  ) STRICT;
+  INSERT OR IGNORE INTO delivery_foreground_completion_clock VALUES (1, 0);
+  UPDATE delivery_foreground_completion_clock SET current_sequence = MAX(current_sequence,
+    (SELECT COALESCE(MAX(completion_sequence), 0) FROM delivery_foreground_executions));
+  WITH numbered AS MATERIALIZED (
+    SELECT inbox_id, ROW_NUMBER() OVER (ORDER BY completed_at, dispatched_at, inbox_id) AS ordinal
+    FROM delivery_foreground_executions WHERE status != 'pending' AND completion_sequence IS NULL
+  )
+  UPDATE delivery_foreground_executions SET completion_sequence =
+    (SELECT current_sequence FROM delivery_foreground_completion_clock WHERE singleton = 1)
+    + (SELECT ordinal FROM numbered WHERE numbered.inbox_id = delivery_foreground_executions.inbox_id)
+  WHERE status != 'pending' AND completion_sequence IS NULL;
+  UPDATE delivery_foreground_completion_clock SET current_sequence = MAX(current_sequence,
+    (SELECT COALESCE(MAX(completion_sequence), 0) FROM delivery_foreground_executions));
+  CREATE UNIQUE INDEX IF NOT EXISTS delivery_foreground_completion_order
+    ON delivery_foreground_executions(completion_sequence) WHERE completion_sequence IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS delivery_foreground_owner_completion_order
+    ON delivery_foreground_executions(principal_record_id, principal_version, workspace, preset, completion_sequence)
+    WHERE status != 'pending';
+
+  CREATE TRIGGER IF NOT EXISTS delivery_foreground_identity_immutable
+  BEFORE UPDATE ON delivery_foreground_executions
+  WHEN NEW.inbox_id IS NOT OLD.inbox_id OR NEW.workspace IS NOT OLD.workspace
+    OR NEW.preset IS NOT OLD.preset OR NEW.principal_record_id IS NOT OLD.principal_record_id
+    OR NEW.principal_version IS NOT OLD.principal_version OR NEW.binding_id IS NOT OLD.binding_id
+    OR NEW.binding_version IS NOT OLD.binding_version OR NEW.binding_generation IS NOT OLD.binding_generation
+    OR NEW.dispatched_at IS NOT OLD.dispatched_at
+  BEGIN SELECT RAISE(ABORT, 'foreground execution identity is immutable'); END;
+
+  CREATE TRIGGER IF NOT EXISTS delivery_foreground_terminal_immutable
+  BEFORE UPDATE ON delivery_foreground_executions
+  WHEN (OLD.status != 'pending' AND (
+    NEW.status IS NOT OLD.status OR NEW.quiescent IS NOT OLD.quiescent
+    OR NEW.completed_at IS NOT OLD.completed_at OR NEW.execution_ref IS NOT OLD.execution_ref
+    OR NEW.model_selection_state IS NOT OLD.model_selection_state OR NEW.model_provider IS NOT OLD.model_provider
+    OR NEW.model_id IS NOT OLD.model_id OR NEW.model_reasoning_effort IS NOT OLD.model_reasoning_effort))
+    OR (OLD.completion_sequence IS NOT NULL AND NEW.completion_sequence IS NOT OLD.completion_sequence)
+    OR (OLD.completion_sequence IS NULL AND NEW.completion_sequence IS NOT NULL AND
+      (OLD.status = 'pending' OR NEW.completion_sequence IS NOT
+        (SELECT current_sequence FROM delivery_foreground_completion_clock WHERE singleton = 1)))
+  BEGIN SELECT RAISE(ABORT, 'foreground execution completion is immutable'); END;
+  CREATE TRIGGER IF NOT EXISTS delivery_foreground_terminal_delete_immutable
+  BEFORE DELETE ON delivery_foreground_executions WHEN OLD.status != 'pending'
+  BEGIN SELECT RAISE(ABORT, 'foreground execution completion is immutable'); END;
+
+  CREATE TRIGGER IF NOT EXISTS delivery_foreground_completion_after_update
+  AFTER UPDATE OF status ON delivery_foreground_executions
+  WHEN OLD.status = 'pending' AND NEW.status != 'pending'
+  BEGIN
+    UPDATE delivery_foreground_completion_clock SET current_sequence = current_sequence + 1 WHERE singleton = 1;
+    UPDATE delivery_foreground_executions SET completion_sequence =
+      (SELECT current_sequence FROM delivery_foreground_completion_clock WHERE singleton = 1)
+      WHERE inbox_id = NEW.inbox_id;
+  END;
+  CREATE TRIGGER IF NOT EXISTS delivery_foreground_completion_after_insert
+  AFTER INSERT ON delivery_foreground_executions WHEN NEW.status != 'pending'
+  BEGIN
+    UPDATE delivery_foreground_completion_clock SET current_sequence = current_sequence + 1 WHERE singleton = 1;
+    UPDATE delivery_foreground_executions SET completion_sequence =
+      (SELECT current_sequence FROM delivery_foreground_completion_clock WHERE singleton = 1)
+      WHERE inbox_id = NEW.inbox_id;
+  END;
 `
 
 const ownerObjectiveRevisionSchema = `
@@ -1174,6 +1244,14 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec(`${naturalObjectiveIntentSchema} PRAGMA user_version = 24;`)
     version = 24
   }
+  if (version === 24) {
+    const columns = database.prepare('PRAGMA table_info(delivery_foreground_executions)').all() as Array<{ name: string }>
+    if (!columns.some(column => column.name === 'completion_sequence')) {
+      database.exec('ALTER TABLE delivery_foreground_executions ADD COLUMN completion_sequence INTEGER CHECK(completion_sequence BETWEEN 1 AND 9007199254740991);')
+    }
+    database.exec(`${foregroundCompletionSchema} PRAGMA user_version = 25;`)
+    version = 25
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1387,11 +1465,12 @@ function migrateObserved(database: DatabaseSync): void {
     ${naturalObjectiveIntentSchema}
     ${taskAcceptanceExecutionSchema}
     ${foregroundExecutionSchema}
+    ${foregroundCompletionSchema}
     ${sessionLeaseSchema}
     ${goalOutcomeTargetSchema}
 
     ${workflowOwnerAnchoredSchema}
-    PRAGMA user_version = 24;
+    PRAGMA user_version = 25;
   `)
 }
 

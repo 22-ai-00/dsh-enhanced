@@ -45,6 +45,27 @@ test('two connections atomically share grant quota and cannot repeat a live clai
   expect(() => second.claim({ ...f.input, operationId: 'other' })).toThrow('quota')
 })
 
+test('receipt inspection does not admit a model call and rejects substituted authority, source or supplier', async () => {
+  const f = await fixture(), store = f.open()
+  expect(store.inspect(f.input)).toBeUndefined()
+  expect(store.claim(f.input).state).toBe('claimed')
+  expect(store.inspect(f.input)).toEqual({ state: 'unknown' })
+  store.finish(f.input.operationId, f.input.requestDigest, result)
+  store.close()
+  const restarted = f.open()
+  expect(restarted.inspect(f.input)).toEqual({ state: 'approved', result: {
+    reason: result.reason, outputDigest: result.outputDigest,
+  } })
+  for (const override of [{ authorityDigest: 'd'.repeat(64) }, { authorityId: 'other' }, { maxReviews: 2 },
+    { requestDigest: 'e'.repeat(64) }, { model: { provider: 'other', model: 'task-model' } }]) {
+    expect(() => restarted.inspect({ ...f.input, ...override })).toThrow('differs')
+  }
+  expect(restarted.inspect({ ...f.input, operationId: 'absent' })).toBeUndefined()
+  expect(() => restarted.claim({ ...f.input, operationId: 'absent' })).toThrow('quota')
+  restarted.close()
+  expect(() => restarted.inspect(f.input)).toThrow('closed')
+})
+
 test('refuses symlink databases, parents, sidecars and nonprivate directories before opening SQLite', async () => {
   const f = await fixture(), target = join(f.root, 'target'); await writeFile(target, '', { mode: 0o600 })
   await symlink(target, f.path); expect(() => f.open()).toThrow('private'); await rm(f.path)

@@ -3350,14 +3350,19 @@ describe('real native Delivery Agent runtime', () => {
       fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
       await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
       const task = await fixture.service.acceptInbound(message('evt-ordinary-foreground-unknown', 'Complete this ordinary task.'))
-      await drive(fixture.service)
       // Model the durable post-dispatch outcome of a failed reply-boundary
       // teardown. Owner feedback must not upgrade it into a usable task result.
-      const database = new DatabaseSync(join(root, 'delivery.sqlite'))
+      // Terminal receipts are immutable: inject at the pending completion
+      // boundary, and keep the real Store transition and database triggers.
+      const store = (fixture.service as unknown as { deliveryStore: DeliveryStore }).deliveryStore
+      const finish = store.finishForegroundTaskExecution.bind(store)
+      const completion = vi.spyOn(store, 'finishForegroundTaskExecution').mockImplementation(input =>
+        finish(input.inboxId === task.inboxId ? { ...input, status: 'unknown', quiescent: false } : input))
       try {
-        expect(database.prepare(`UPDATE delivery_foreground_executions
-          SET status = 'unknown', quiescent = 0 WHERE inbox_id = ?`).run(task.inboxId).changes).toBe(1)
-      } finally { database.close() }
+        await drive(fixture.service)
+        expect(completion).toHaveBeenCalledTimes(1)
+        expect(completion).toHaveBeenCalledWith(expect.objectContaining({ inboxId: task.inboxId }))
+      } finally { completion.mockRestore() }
 
       const replyToProviderMessageId = replyProviderMessageId(fixture.service, 'evt-ordinary-foreground-unknown')
       await fixture.service.acceptInbound({ ...message('evt-ordinary-foreground-unknown-feedback', '/feedback not-achieved', 'command'),

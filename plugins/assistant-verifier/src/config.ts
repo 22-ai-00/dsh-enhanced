@@ -5,6 +5,7 @@ import type { AcceptanceTask } from './host.js'
 import { createVerifierAuthorities } from './drivers.js'
 import type { VerifierAuthority, VerifierAuthorityInput } from './drivers.js'
 import type { SourceReviewConfig } from './source-review.js'
+import type { MemoryReviewConfig } from './memory-review.js'
 
 /** A Host-owned exact task specification; editing it cannot rewrite accepted work. */
 export interface AcceptanceProfile extends Omit<AcceptanceTask, 'task'> {
@@ -23,6 +24,7 @@ export interface Config {
   tickIntervalMs?: number
   requireAcceptance?: boolean
   sourceReviews?: SourceReviewConfig
+  memoryReviews?: MemoryReviewConfig
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -32,6 +34,7 @@ export const Config: Schema<Config> = Schema.object({
   tickIntervalMs: Schema.number().step(1).min(0).max(60_000).default(5_000),
   requireAcceptance: Schema.boolean().default(false),
   sourceReviews: Schema.any(),
+  memoryReviews: Schema.any(),
 }) as Schema<Config>
 
 export interface CompiledAcceptanceProfile {

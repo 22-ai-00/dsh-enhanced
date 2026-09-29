@@ -118,6 +118,7 @@ describe('delivery SQLite boundary', () => {
       'delivery_task_acceptance_executions', 'delivery_foreground_executions', 'delivery_session_leases',
       'delivery_goal_outcome_targets',
       'delivery_natural_objective_intents',
+      'delivery_foreground_completion_clock',
     ]))
     const modelColumns = (database.prepare('PRAGMA table_info(conversation_model_selections)').all() as { name: string }[])
       .map(row => row.name)
@@ -151,7 +152,7 @@ describe('delivery SQLite boundary', () => {
     previous.exec('DROP TABLE delivery_natural_objective_intents; PRAGMA user_version = 23;')
     previous.close()
     const migrated = openDeliveryDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 24 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
     expect(migrated.prepare('SELECT COUNT(*) AS count FROM delivery_natural_objective_intents').get())
       .toEqual({ count: 0 })
     expect((migrated.prepare('PRAGMA table_info(delivery_natural_objective_intents)').all() as Array<{ name: string }>)

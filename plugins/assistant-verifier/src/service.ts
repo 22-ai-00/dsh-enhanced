@@ -13,6 +13,8 @@ import type { AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcce
 import { AcceptanceStore } from './store.js'
 import type { Execution } from './store.js'
 import { SourceReviewRuntime, validateSourceReviewConfig, type SourceReviewInput, type SourceReviewSelection } from './source-review.js'
+import { MemoryReviewRuntime, validateMemoryReviewConfig } from './memory-review.js'
+import type { MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
 
 export { Config } from './config.js'
 
@@ -134,11 +136,14 @@ export class AssistantVerifierService extends Service<Config> {
   #active = true
   #sourceReviewer: SourceReviewRuntime | undefined
   readonly #sourceReviewers = new Set<SourceReviewRuntime>()
+  #memoryReviewer: MemoryReviewRuntime | undefined
+  readonly #memoryReviewers = new Set<MemoryReviewRuntime>()
 
   constructor(ctx: Context, config: Config, options: { now?: () => number } = {}) {
     super(ctx, 'assistantVerifier')
     const normalized = Config(config)
     const sourceReviews = normalized.sourceReviews === undefined ? undefined : validateSourceReviewConfig(normalized.sourceReviews)
+    const memoryReviews = normalized.memoryReviews === undefined ? undefined : validateMemoryReviewConfig(normalized.memoryReviews)
     this.#compiled = compileAcceptanceProfiles(normalized)
     this.#now = options.now ?? Date.now
     this.#requireAcceptance = normalized.requireAcceptance ?? false
@@ -162,9 +167,11 @@ export class AssistantVerifierService extends Service<Config> {
       if (timer !== undefined) clearInterval(timer)
       for (const binding of this.#bindings.values()) binding.dispose()
       this.#evaluation = undefined
+      // Abort both review lanes before awaiting unrelated acceptance teardown.
+      const reviews = [...this.#sourceReviewers, ...this.#memoryReviewers].map(reviewer => reviewer.close())
       await this.#running?.catch(() => {})
       await Promise.allSettled([...this.#isolatedRunners.values()].map(async runner => (await runner).close()))
-      await Promise.allSettled([...this.#sourceReviewers].map(reviewer => reviewer.close()))
+      await Promise.allSettled(reviews)
       this.#store.close()
     }, 'assistant-verifier.database')
     if (sourceReviews) ctx.inject(['agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'], injected => {
@@ -178,6 +185,29 @@ export class AssistantVerifierService extends Service<Config> {
         }
       }, 'assistant-verifier.source-review')
     })
+    if (memoryReviews) ctx.inject(['agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy', 'assistantDelivery', 'assistantEvaluation'], injected => {
+      injected.effect(() => {
+        if (!this.#active) return () => {}
+        const reviewer = new MemoryReviewRuntime(injected, memoryReviews, normalized.databasePath)
+        this.#memoryReviewer = reviewer; this.#memoryReviewers.add(reviewer)
+        return async () => {
+          if (this.#memoryReviewer === reviewer) this.#memoryReviewer = undefined
+          await reviewer.close(); this.#memoryReviewers.delete(reviewer)
+        }
+      }, 'assistant-verifier.memory-review')
+    })
+  }
+
+  /** Host-only review. Source text and verdicts cannot be supplied by the caller. */
+  reviewMemoryLearning = (request: MemoryLearningReviewRequest, signal?: AbortSignal) => {
+    this.#assertActive()
+    if (!this.#memoryReviewer) throw new Error('assistant-verifier: memory review services unavailable')
+    return this.#memoryReviewer.run(request, signal)
+  }
+
+  lookupMemoryLearningReview = (request: MemoryLearningReviewRequest) => {
+    this.#assertActive()
+    return this.#memoryReviewer?.lookup(request)
   }
 
   /** Host-only capability probe, including the exact decision directory. */

@@ -1075,9 +1075,9 @@ function validDigest(value) {
 
 function validCompactOperatorProof(proof) {
   const expected = {
-    // v24 adds the natural-feedback journal; the read-only owner snapshot
-    // contract is unchanged. Retain v23 proofs for in-progress upgrades.
-    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24],
+    // v24 adds natural feedback and v25 adds foreground completion ordering;
+    // the owner snapshot contract is unchanged. Retain known upgrade sources.
+    'assistant-delivery/active-lark-owner-bindings-snapshot/v1': [23, 24, 25],
     'assistant-recovery/operator-snapshot/v1': [5],
     'assistant-automations-operator-snapshot/v1': [15],
   }

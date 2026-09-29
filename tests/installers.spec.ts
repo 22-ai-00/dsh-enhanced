@@ -777,7 +777,7 @@ interface LifecycleRunOptions {
   supervisedMockFailure?: 'active' | 'host-exit' | 'post-swap' | 'preview'
   supervisedProofDrift?: boolean
   supervisedUnmanagedAutomationDrift?: boolean
-  deliverySnapshotSchema?: 23 | 24
+  deliverySnapshotSchema?: 23 | 24 | 25
 }
 
 async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
@@ -4130,7 +4130,7 @@ describe('one-click installers', () => {
     await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
   }, 15_000)
 
-  test.each([23, 24] as const)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
+  test.each([23, 24, 25] as const)('supervised service upgrade completes preview, swap, active acceptance, and cleanup with Delivery schema %s', async deliverySnapshotSchema => {
     const f = await lifecycleFixture({ effectiveScenario: 'supervised', deliverySnapshotSchema, systemd: { units: [{ profile: 'web', active: true }] } })
     const result = runServiceLifecycle(
       ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { expectedScenario: 'supervised' },

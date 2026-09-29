@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DeliveryStore } from '../src/store.ts'
+import { deliverySchemaVersion } from '../src/sqlite.ts'
 import type { ConversationRef, ExternalPrincipalKey } from '../src/types.ts'
 
 const roots: string[] = []
@@ -196,7 +197,7 @@ describe('conversation bindings', () => {
     const columns = (inspected.prepare('PRAGMA table_info(delivery_task_acceptance_executions)').all() as Array<{ name: string }>)
       .map(row => row.name)
     expect(columns).toEqual(expect.arrayContaining(['model_selection_state', 'model_provider', 'model_id', 'model_reasoning_effort']))
-    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 24 })
+    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
     expect(inspected.prepare("SELECT name FROM sqlite_schema WHERE name = 'delivery_natural_objective_intents'").get())
       .toEqual({ name: 'delivery_natural_objective_intents' })
     expect(inspected.prepare('SELECT COUNT(*) AS count FROM delivery_natural_objective_intents').get())

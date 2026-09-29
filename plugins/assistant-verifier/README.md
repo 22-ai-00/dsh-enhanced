@@ -119,3 +119,30 @@ Host 独立读取精确 PR ref、单一 base parent、改动范围和已检查 t
 持久账本位于 `databasePath + '.source-reviews'`，目录须私有且 canonical。调用前落 claim；崩溃、取消或不明确结果不会自动重调模型。相同授权下的已完成批准可在再次核对来源与 PR 后恢复同一 decision 文件；改变政策、模型、目录或额度须使用新的授权标识。拒绝不会写批准文件。已 claim 的未知调用需要管理员核查本地 Session/账本，Host 返回的 `sessionId` 可定位该请求的原生会话；当前没有自动重审或模型自我批准入口。
 
 新增权限为：读取固定 Git executable/仓库、执行受限 Git 读命令、经 Host 模型供应商发送任务目标与补丁、写私有 SQLite/Session/decision。模型不能读取凭据、执行命令或写文件。该进程内工具边界不构成 OS 隔离；候选构建与 decision 写权限必须由部署隔离。原始任务、补丁、审查输出和账本留本地，不提交到 GitHub。
+
+## 普通任务记忆候选审查
+
+可选 `memoryReviews` 提供 Host-only `reviewMemoryLearning(request, signal?)` 与
+`lookupMemoryLearningReview(request)`。调用者只传共享库的候选和来源定位，不传入批准结论。
+Verifier 独立读取 Delivery 原任务、普通回复与当前 owner；经验还须绑定当前 canonical
+结果，允许保留失败经验。事实引用只能来自 owner 原文，任务未获目标结果不妨碍审查事实，
+明确的 owner 撤回则会阻止审查。替换/删除还需 PersonalMemory 的 exact managed target reader；
+缺少该服务或目标版本不符即拒绝，不把手动记录交给模型自动接管。
+
+`memoryReviews` 必填字段为 `authorityId`、`owner`（同上七个 owner 字段）、`expiresAt`、
+`maxReviews`、`policy`、`maxInputBytes`、`maxOutputTokens`、`timeoutMs`。`model` 可选，
+默认继承原任务冻结的供应商、模型和推理强度。最多 10000 次审查、128 KiB 输入、8192 输出
+tokens、每次 5 分钟；配置更改不能给原授权续期或补额度。Policy 还必须允许精确 background
+subject `assistant-memory-learning`（绑定 workspace/principal），action `review`、memory resource
+`learning:<authorityId>`；可通过该规则的持久预算进一步限制调用。未配置时没有默认审查权限。
+
+原生审查使用新会话、固定规则和零工具，每次至多一次模型调用。它只判断候选是否受来源支持，
+不证明事实在现实中为真或后续任务得到改善，也不直接写入 Memory。完整原文被截断时拒绝审查。
+`.memory-reviews` 私有 SQLite 使用独立授权和持久 claim；重复调用/重启只回读既有结果，unknown
+不重派。来源、owner、canonical 状态与目标版本在结束后重验，批准落盘使用
+Delivery → Evaluation → review ledger 同步 writer fence；卸载会先取消并等待在途审查。
+
+此入口本身不负责自动发现、候选提取、Memory 有限采用或下一任务召回；这些仍需学习插件和
+Memory 接线。批准回执不能替代采用时的当前来源与权限检查。新增数据权限仅为读取这些
+owner 来源/受管理目标，经既有 Host 模型供应商发送有界文本，并写私有审查账本和原生会话；
+无新增浏览器、子进程、凭据读取或安装脚本权限。

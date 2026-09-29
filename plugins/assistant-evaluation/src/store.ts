@@ -1096,11 +1096,20 @@ export class EvaluationStore {
   getForegroundLearningProjection(scopeInput: EvaluationScope, inboxIdInput: string): TrustedTaskLearningProjectionReceipt | undefined {
     const { scopeKey } = canonicalEvaluationScope(scopeInput)
     const inboxId = boundedText(inboxIdInput, 'inboxId', 1_000)
-    const row = this.#database.prepare(`SELECT task.* FROM evaluation_task_projection_view task
-      WHERE task.scope_key = ? AND task.task_subject_kind = 'foreground-turn' AND task.task_subject_ref = ?`)
-      .get(scopeKey, inboxId) as unknown as ProjectedOutcomeRow | undefined
+    // A display-only primary update may have no projection outbox of its own.
+    // Resolve a real trusted trigger for the exact subject, as the durable feed
+    // does, then let the shared reader return the subject's current revision.
+    const row = this.#database.prepare(`SELECT outbox.evaluation_id
+      FROM evaluation_task_projection_view task
+      JOIN evaluation_outcomes audit ON audit.task_subject_key = task.task_subject_key
+        AND audit.scope_key = task.scope_key
+      JOIN evaluation_projection_outbox outbox ON outbox.evaluation_id = audit.id
+      WHERE task.scope_key = ? AND task.task_subject_kind = 'foreground-turn'
+        AND task.task_subject_ref = ? AND audit.trust = 'trusted'
+      ORDER BY audit.recorded_at DESC, audit.id DESC LIMIT 1`)
+      .get(scopeKey, inboxId) as { evaluation_id: string } | undefined
     if (row === undefined) return undefined
-    return this.getTaskLearningProjection(scopeInput, projected(row).projection.primaryOutcomeId)
+    return this.getTaskLearningProjection(scopeInput, row.evaluation_id)
   }
 
   /** Exact whole-goal lookup by the verifier assessment identity. */
@@ -1287,6 +1296,19 @@ export class EvaluationStore {
     )
   }
 
+  /** Scope-only writer exclusion; zero means no canonical revision exists yet. */
+  withCanonicalScopeWriterFence<T>(scopeInput: EvaluationScope,
+    fenceInput: Readonly<{ scopeWatermark: number }>, callback: () => T): EvaluationLearningWriterFenceResult<T> {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    if (typeof fenceInput !== 'object' || fenceInput === null || Array.isArray(fenceInput)
+      || !Number.isSafeInteger(fenceInput.scopeWatermark) || fenceInput.scopeWatermark < 0
+      || typeof callback !== 'function') {
+      throw new EvaluationStoreError('invalid-input', 'canonical scope writer fence is invalid')
+    }
+    return this.#withLearningWriterFence(scopeKey,
+      { scopeWatermark: fenceInput.scopeWatermark, evidence: [] }, callback, { requireProjectionDelivery: false })
+  }
+
   #withLearningWriterFence<T>(
     scopeKey: string,
     fence: Readonly<{
@@ -1301,7 +1323,7 @@ export class EvaluationStore {
       const watermark = this.#database.prepare(`
         SELECT watermark FROM evaluation_scope_watermarks WHERE scope_key = ?
       `).get(scopeKey) as { watermark: number } | undefined
-      if (watermark?.watermark !== fence.scopeWatermark) {
+      if ((watermark?.watermark ?? 0) !== fence.scopeWatermark) {
         this.#database.exec('COMMIT')
         return Object.freeze({ matched: false as const, reason: 'watermark-changed' as const })
       }
@@ -1336,8 +1358,11 @@ export class EvaluationStore {
         }
       }
       const value = callback()
-      if (typeof value === 'object' && value !== null && 'then' in value
-        && typeof (value as { then?: unknown }).then === 'function') {
+      if ((typeof value === 'object' || typeof value === 'function') && value !== null && 'then' in value) {
+        // Never evaluate an untrusted then getter. The native method only
+        // consumes real Promise rejections; other thenables fail its brand
+        // check without running their implementation.
+        try { Promise.prototype.then.call(value, undefined, () => undefined) } catch { /* Not a native Promise. */ }
         throw new EvaluationStoreError(
           'invalid-input',
           'learning writer fence callback must be synchronous',
