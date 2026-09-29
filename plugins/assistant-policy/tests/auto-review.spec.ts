@@ -14,7 +14,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import ApprovalService, { type ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+import ApprovalService, { type ApprovalOutcome, type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -316,6 +316,20 @@ function assessment(overrides: Record<string, unknown> = {}): string {
 }
 
 describe('isolated automatic approval reviewer', () => {
+  test('the live Policy service recognizes only the exact request during its human handoff', async () => {
+    const current = await fixture([], { missingLlm: true })
+    let handedOff: Readonly<ApprovalRequest> | undefined
+    current.ctx.effect(() => current.ctx.assistantPolicy.registerHumanApprovalAnswerer((request, next) => {
+      handedOff = request
+      expect(current.ctx.assistantPolicy.isAutoReviewEscalation(request)).toBe(true)
+      expect(current.ctx.assistantPolicy.isAutoReviewEscalation({ ...request })).toBe(false)
+      return next()
+    }), 'test.exact-live-escalation-query')
+    await expect(current.request()).resolves.toBe('rejected')
+    expect(handedOff).toBeDefined()
+    expect(current.ctx.assistantPolicy.isAutoReviewEscalation(handedOff!)).toBe(false)
+  })
+
   test('hands off to the human frontend even while the optional model provider is absent', async () => {
     const current = await fixture([], { missingLlm: true, fallback: 'allowed-once' })
     await expect(current.request()).resolves.toBe('allowed-once')

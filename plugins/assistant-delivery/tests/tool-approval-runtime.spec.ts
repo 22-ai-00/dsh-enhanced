@@ -5,8 +5,8 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import ApprovalService from '@deepseek-ai/dsh-user-approval'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import ApprovalService, { type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
+import { AssistantPolicyService, isAutoReviewEscalation as peerRecognizesEscalation } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -82,7 +82,9 @@ function registerAgent(ctx: Context, sessionId: string, input: {
   return agent
 }
 
-async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: { nativeFirst?: boolean; auto?: boolean } = {}) {
+async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: {
+  nativeFirst?: boolean; auto?: boolean; separatePolicy?: boolean; holdApproval?: boolean
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-tool-runtime-'))
   roots.push(root)
   const ctx = new Context()
@@ -94,7 +96,17 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: { n
   await ctx.plugin(ToolRuntime)
   const nativeAnswerer = vi.fn(async () => 'unavailable' as const)
   if (options.nativeFirst) ctx.on('approval/request', nativeAnswerer)
-  await ctx.plugin(AssistantPolicyService, {
+  // Variable imports keep this runtime duplication fixture out of Delivery's
+  // compilation graph (Policy is an independently published peer package).
+  const policySourcePath = new URL('../../assistant-policy/src/service.ts', import.meta.url).href
+  const reviewerSourcePath = new URL('../../assistant-policy/src/auto-review.ts', import.meta.url).href
+  const separatePolicy = options.separatePolicy ? await import(policySourcePath) as {
+    AssistantPolicyService: typeof AssistantPolicyService
+  } : undefined
+  const separateReviewer = options.separatePolicy ? await import(reviewerSourcePath) as {
+    isAutoReviewEscalation: typeof peerRecognizesEscalation
+  } : undefined
+  await ctx.plugin(separatePolicy?.AssistantPolicyService ?? AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
     rules: [
       {
@@ -123,6 +135,13 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: { n
       },
     ],
   })
+  const approvalRequests: Readonly<ApprovalRequest>[] = []
+  if (options.separatePolicy) {
+    ctx.effect(() => ctx.assistantPolicy.registerHumanApprovalAnswerer((request, next) => {
+      approvalRequests.push(request)
+      return next()
+    }), 'test.observe-mounted-policy-handoff')
+  }
   ctx.on('tools/pre-execute', (execution, next) => execution.name === 'delivery_mutation_probe'
     ? Promise.resolve({ kind: 'ask', reason: 'Owner approval required for the exact integration probe.' })
     : next())
@@ -179,8 +198,10 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: { n
     },
   }))
   const requests: DeliveryToolApprovalRequest[] = []
+  let decideApproval: ((outcome: DeliveryToolApprovalOutcome) => void) | undefined
   const requestToolApproval = vi.fn(async (request: Readonly<DeliveryToolApprovalRequest>) => {
     requests.push(request)
+    if (options.holdApproval) return new Promise<DeliveryToolApprovalOutcome>(resolve => { decideApproval = resolve })
     return adapterOutcome
   })
   await ctx.assistantDelivery.registerAdapter({
@@ -201,12 +222,54 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome, options: { n
     get executions() { return executions },
     receivedArguments,
     requests,
+    approvalRequests,
+    decideApproval: (outcome: DeliveryToolApprovalOutcome) => {
+      if (!decideApproval) throw new Error('approval card has not been requested')
+      decideApproval(outcome)
+    },
     requestToolApproval,
     nativeAnswerer,
+    mountedRecognizesEscalation: separateReviewer?.isAutoReviewEscalation ?? peerRecognizesEscalation,
   }
 }
 
 describe('owner-DM approval through the real tool runtime', () => {
+  test.each(['allowed-once', 'rejected'] as const)('routes a separately loaded Policy handoff to its owner card and settles %s without executing while pending', async outcome => {
+    // The mounted TS graph and the peer's published JS graph are genuinely
+    // separate modules. A static peer WeakSet cannot see the mounted marker.
+    const current = await fixture(outcome, { nativeFirst: true, auto: true, separatePolicy: true, holdApproval: true })
+    expect(current.mountedRecognizesEscalation).not.toBe(peerRecognizesEscalation)
+    const execution = current.ctx.tools.execute({
+      callId: current.callId, name: 'delivery_mutation_probe', arguments: current.arguments_,
+      signal: new AbortController().signal, agent: current.agent,
+    })
+    await vi.waitFor(() => expect(current.requestToolApproval).toHaveBeenCalledOnce())
+    const request = current.approvalRequests[0]!
+    expect(current.mountedRecognizesEscalation(request)).toBe(true)
+    expect(peerRecognizesEscalation(request)).toBe(false)
+    expect(current.ctx.assistantPolicy.isAutoReviewEscalation(request)).toBe(true)
+    expect(current.ctx.assistantPolicy.isAutoReviewEscalation({ ...request })).toBe(false)
+    expect(current.executions).toBe(0)
+    expect(current.receivedArguments).toEqual([])
+    expect(current.nativeAnswerer).not.toHaveBeenCalled()
+
+    const unmarkedCall = ToolCallId('runtime-unmarked-call')
+    current.agent.session.append('tool/call', { turn: 1, step: 1, callId: unmarkedCall,
+      name: 'delivery_mutation_probe', arguments: current.argumentsJson })
+    await expect(current.ctx.approval.request({ agent: current.agent, toolName: 'delivery_mutation_probe',
+      callId: unmarkedCall, reason: 'unowned custom approval request' })).resolves.toBe('unavailable')
+    expect(current.requestToolApproval).toHaveBeenCalledOnce()
+    expect(current.executions).toBe(0)
+
+    current.decideApproval(outcome)
+    const result = await execution
+    expect(result.isError).toBe(outcome === 'rejected')
+    expect(current.executions).toBe(outcome === 'allowed-once' ? 1 : 0)
+    expect(current.receivedArguments).toEqual(outcome === 'allowed-once' ? [current.arguments_] : [])
+    expect(current.ctx.assistantPolicy.isAutoReviewEscalation(request)).toBe(false)
+    expect(current.mountedRecognizesEscalation(request)).toBe(false)
+  })
+
   test.each([false, true])('does not let an earlier Web answerer swallow Lark approvals (auto=%s)', async auto => {
     const current = await fixture('allowed-once', { nativeFirst: true, auto })
     const result = await current.ctx.tools.execute({
