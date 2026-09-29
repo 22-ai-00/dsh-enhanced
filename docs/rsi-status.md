@@ -42,5 +42,5 @@
 ## 验证与维护
 
 - 本轮文档复核 PASS：完整 18 项验收和 Cordis 契约保留，默认 AGENTS + 本页体量减少约 83%；本地链接与锚点检查通过。仅整理文档，没有重新运行历史 live-model 探针、部署、续期授权或发布 npm。
-- 本轮 `VITEST_MAX_WORKERS=4 NODE_OPTIONS=--max-old-space-size=8192 pnpm check` 退出 1：清单、零警告 lint、类型检查及根 815 项测试通过；[凭据快照并发测试](../plugins/coding-subscription-provider/tests/codex-direct-auth.spec.ts)在包并行运行中两次失败，单文件 43 项复跑通过，尚未修复。另行补检其余 35 包测试、`pnpm build` 和 36 包 `pnpm pack:check` 均退出 0；不能宣称整仓全检通过，条件跳过的外部用例不算实测。
+- [凭据快照并发测试](../plugins/coding-subscription-provider/tests/codex-direct-auth.spec.ts)已改为确定性真实磁盘变更：逐次读取后等待 `utimes` 完成，保留三次重试拒绝、不发送请求和句柄关闭检查。provider 全部 384 项、类型与零警告 lint 通过，独立静态复核通过；上轮整仓失败不能改记成功，本轮 `pnpm check` 仍待完成。
 - 本页只保留当前结论、阻塞与下一项验收。完成项合并进能力表并删除过程叙述；细节维护在对应指南，原始日志留忽略的 `docs/evidence/` 或 CI artifacts，历史查 Git。
