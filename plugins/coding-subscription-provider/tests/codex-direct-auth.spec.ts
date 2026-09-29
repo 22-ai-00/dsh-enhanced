@@ -1,9 +1,11 @@
 import {
+  type FileHandle,
   chmod,
   link,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readdir,
   readFile,
   realpath,
@@ -291,25 +293,52 @@ describe('Codex direct credential store', () => {
   })
 
   it('rejects a snapshot that keeps changing while it is read', async () => {
-    const authFile = await authFixture({ padding: 'x'.repeat(800_000) })
+    const authFile = await authFixture()
     const fetcher = vi.fn(async () => new Response('never'))
     const store = new CodexCredentialStore({ authFile, fetch: fetcher })
-    let stopped = false
-    let tick = 0
-    const mutator = (async () => {
-      while (!stopped) {
-        const timestamp = new Date(1_700_000_000_000 + tick * 1_000)
-        tick += 1
+    const baseline = 1_700_000_000_000
+    await utimes(authFile, new Date(baseline), new Date(baseline))
+    const probe = await open(authFile, 'r')
+    const prototype = Object.getPrototypeOf(probe) as FileHandle
+    const originalStat = prototype.stat
+    const authStat = await probe.stat({ bigint: true }).finally(() => probe.close())
+    const snapshots = new Map<FileHandle, bigint[]>()
+    const statSpy = vi.spyOn(prototype, 'stat').mockImplementation(async function (
+      this: FileHandle,
+      options?: Parameters<FileHandle['stat']>[0],
+    ) {
+      // Interleave a real disk mutation after the bytes are read, before the
+      // reader's second stat. Await it so each retry sees a changed fingerprint.
+      if (snapshots.has(this)) {
+        const timestamp = new Date(baseline + snapshots.size * 1_000)
         await utimes(authFile, timestamp, timestamp)
       }
-    })()
+      const result = await originalStat.call(this, options)
+      if ('mtimeNs' in result && result.dev === authStat.dev && result.ino === authStat.ino) {
+        const observed = snapshots.get(this) ?? []
+        observed.push(result.mtimeNs)
+        snapshots.set(this, observed)
+      }
+      return result
+    })
 
-    const failure = await captureFailure(store.requestResponses('{}', new AbortController().signal))
-      .finally(() => { stopped = true })
-    await mutator
+    try {
+      const failure = await captureFailure(store.requestResponses('{}', new AbortController().signal))
 
-    expect(failure).toMatchObject({ cause: 'subscription-auth' })
-    expect(fetcher).not.toHaveBeenCalled()
+      expect(failure).toMatchObject({
+        cause: 'subscription-auth',
+        message: 'Codex authentication file changed while it was read',
+      })
+      expect(snapshots.size).toBe(3)
+      for (const [handle, timestamps] of snapshots) {
+        expect(timestamps).toHaveLength(2)
+        expect(timestamps[1]).toBeGreaterThan(timestamps[0]!)
+        expect(handle.fd).toBe(-1)
+      }
+      expect(fetcher).not.toHaveBeenCalled()
+    } finally {
+      statSpy.mockRestore()
+    }
   })
 
   it('rejects credential fields that cannot safely become HTTP headers before fetch', async () => {
