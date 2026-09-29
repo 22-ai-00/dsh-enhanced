@@ -36,10 +36,21 @@ interface FakeResponses {
   pollCode?: number
   startStderr?: string
   pollStderr?: string
+  pollPayload?: unknown
   statusAppId?: string
   statusOpenId?: string
+  statusScope?: unknown
+  statusState?: string
+  refreshedScope?: string
   serverOpenId?: string
   rejectRevision?: string
+}
+
+function completedLogin(input: LarkBusinessSetupInput, partial = false): Record<string, unknown> {
+  return { event: 'authorization_complete', user_open_id: input.ownerUserId, user_name: 'Owner',
+    scope: 'contact:user.base:readonly', requested: partial ? ['contact:user.base:readonly', 'docx:document'] : ['contact:user.base:readonly'],
+    newly_granted: ['contact:user.base:readonly'], already_granted: [], granted: ['contact:user.base:readonly'],
+    missing: partial ? ['docx:document'] : [], ...(partial ? { warning: { type: 'missing_scope', message: 'Missing scope', hint: 'Authorize scope' } } : {}) }
 }
 
 function fakeCli(input: LarkBusinessSetupInput) {
@@ -62,19 +73,21 @@ function fakeCli(input: LarkBusinessSetupInput) {
     }
     if (args[0] === 'auth' && args[1] === 'login' && args.includes('--device-code')) {
       events.push('login-poll')
-      return { code: responses.pollCode ?? 0, stdout: responses.pollCode
-        ? JSON.stringify({ ok: false, missing_domains: ['docs'] }) : '{}',
+      return { code: responses.pollCode ?? 0, stdout: JSON.stringify(responses.pollPayload ?? (responses.pollCode
+        ? { ok: false, missing_domains: ['docs'] } : completedLogin(input))),
         ...(responses.pollStderr === undefined ? {} : { stderr: responses.pollStderr }) }
     }
     if (args[0] === 'auth' && args[1] === 'status') {
       events.push('status')
       const badOld = revision === responses.rejectRevision
+      const refreshed = events.includes('server-userinfo') && responses.refreshedScope !== undefined
       return { code: 0, stdout: JSON.stringify({
         appId: badOld ? 'cli_ffffffffffffffff' : (responses.statusAppId ?? input.appId),
         identity: 'user', verified: true,
         identities: { user: {
           openId: responses.statusOpenId ?? input.ownerUserId,
-          available: true, verified: true, status: 'ready',
+          available: true, verified: true, status: refreshed ? 'ready' : (responses.statusState ?? 'ready'),
+          scope: refreshed ? responses.refreshedScope : (Object.hasOwn(responses, 'statusScope') ? responses.statusScope : 'contact:user.base:readonly'),
         } },
       }) }
     }
@@ -130,12 +143,12 @@ describe('Lark business tools owner authorization', () => {
     }
     expect(result.reusedAuthorization).toBe(false)
     expect(callbacks).toEqual([authorizationUrl])
-    expect(cli.events).toEqual(['config', 'login-start', 'authorization-callback', 'login-poll', 'status', 'server-userinfo'])
+    expect(cli.events).toEqual(['config', 'login-start', 'authorization-callback', 'login-poll', 'status', 'server-userinfo', 'status'])
     expect(cli.requests.find(request => request.args.includes('--no-wait'))?.args)
       .toEqual(['--profile', 'dsh-owner', 'auth', 'login', '--domain', 'all', '--no-wait', '--json'])
     expect(cli.requests.find(request => request.args.includes('--device-code'))?.args)
       .toEqual(['--profile', 'dsh-owner', 'auth', 'login', '--device-code', deviceCode, '--json'])
-    expect(cli.requests.at(-1)?.args).toEqual([
+    expect(cli.requests.find(request => request.args.includes('/open-apis/authen/v1/user_info'))?.args).toEqual([
       '--profile', 'dsh-owner', 'api', 'GET', '/open-apis/authen/v1/user_info', '--as', 'user',
     ])
     expect(cli.requests.find(request => request.args.includes('--device-code'))?.timeoutMs).toBe(input.timeoutMs)
@@ -181,8 +194,8 @@ describe('Lark business tools owner authorization', () => {
     cli.events.length = 0
     input.appSecret = 'new-sdk-secret-never-in-argv-or-env'
     const second = await setupLarkBusinessTools(input, { run: cli.run })
-    expect(second).toEqual({ skillPath: first.skillPath, reusedAuthorization: true })
-    expect(cli.events).toEqual(['config', 'status', 'server-userinfo'])
+    expect(second).toEqual({ ...first, reusedAuthorization: true })
+    expect(cli.events).toEqual(['config', 'status', 'server-userinfo', 'status'])
     expect(cli.requests[0]?.input).toBe(`${input.appSecret}\n`)
     expect(cli.requests.slice(1).every(request => request.input === undefined)).toBe(true)
     for (const request of cli.requests) {
@@ -192,6 +205,221 @@ describe('Lark business tools owner authorization', () => {
     expect(callbacks).toEqual([authorizationUrl])
     expect(await readFile(first.skillPath, 'utf8')).toBe(beforeSkill)
     expect(await readFile(await activePath(input), 'utf8')).toBe(beforeActive)
+  })
+
+  test('accepts only the CLI missing-scope completion with independent owner proof and records actual grants', async () => {
+    const { input } = await setupInput()
+    const cli = fakeCli(input)
+    cli.responses.pollCode = 3
+    cli.responses.pollPayload = completedLogin(input, true)
+    const result = await setupLarkBusinessTools(input, { run: cli.run })
+    expect(result).toMatchObject({ permissionCompletion: 'partial', reusedAuthorization: false,
+      requestedScopes: ['contact:user.base:readonly', 'docx:document'],
+      grantedScopes: ['contact:user.base:readonly'], missingScopes: ['docx:document'] })
+    const bindingPath = await activePath(input)
+    const binding = JSON.parse(await readFile(bindingPath, 'utf8')) as Record<string, unknown>
+    expect(binding).toMatchObject({ requestedDomains: 'all', authorization: {
+      permissionCompletion: 'partial', requestedScopes: result.requestedScopes,
+      grantedScopes: result.grantedScopes, missingScopes: result.missingScopes,
+    } })
+    expect(cli.events.slice(-3)).toEqual(['status', 'server-userinfo', 'status'])
+    await absent(join(dirname(bindingPath), 'pending.json'))
+    cli.events.length = 0
+    const reused = await setupLarkBusinessTools(input, { run: cli.run })
+    expect(reused).toEqual({ ...result, reusedAuthorization: true })
+    expect(cli.events).toEqual(['config', 'status', 'server-userinfo', 'status'])
+  })
+
+  test.each([
+    ['network exit with completion body', 4, {}],
+    ['zero exit with missing-scope warning', 0, {}],
+    ['wrong warning', 3, { warning: { type: 'token_expired' } }],
+    ['wrong event', 3, { event: 'authorization_pending' }],
+    ['wrong reported owner', 3, { user_open_id: 'ou_other' }],
+    ['inconsistent missing scopes', 3, { missing: ['contact:user.base:readonly'] }],
+    ['duplicate requested scopes', 3, { requested: ['docx:document', 'docx:document'] }],
+    ['invalid granted scopes', 3, { granted: ['bad\nscope'] }],
+    ['inconsistent scope string', 3, { scope: 'docx:document' }],
+    ['inconsistent grant classifications', 3, { already_granted: ['contact:user.base:readonly'] }],
+    ['empty requested evidence', 3, { requested: [] }],
+  ] as const)('rejects %s without publishing', async (_label, code, patch) => {
+    const { input } = await setupInput()
+    const cli = fakeCli(input)
+    cli.responses.pollCode = code
+    cli.responses.pollPayload = { ...completedLogin(input, true), ...patch }
+    await expect(setupLarkBusinessTools(input, { run: cli.run })).rejects.toThrow('incomplete')
+    await absent(await activePath(input))
+    await absent(join(input.dshHome, 'skills'))
+    expect(cli.events).not.toContain('server-userinfo')
+  })
+
+  test.each(['statusOpenId', 'serverOpenId'] as const)('partial completion requires exact %s owner proof', async field => {
+    const { input } = await setupInput()
+    const cli = fakeCli(input)
+    cli.responses.pollCode = 3
+    cli.responses.pollPayload = completedLogin(input, true)
+    cli.responses[field] = 'ou_other'
+    await expect(setupLarkBusinessTools(input, { run: cli.run })).rejects.toThrow('bound owner')
+    await absent(await activePath(input))
+    await absent(join(input.dshHome, 'skills'))
+  })
+
+  test.each([false, true])('recovers an evidence-bearing %s partial completion after failed skill publication without another authorization', async partial => {
+    const { input, callbacks } = await setupInput()
+    const cli = fakeCli(input)
+    cli.responses.pollCode = partial ? 3 : 0
+    cli.responses.pollPayload = completedLogin(input, partial)
+    await expect(setupLarkBusinessTools(input, { run: cli.run,
+      installSkill: async () => { throw new Error('publication interrupted') },
+    })).rejects.toThrow('publication interrupted')
+    const bindingPath = await activePath(input)
+    await absent(bindingPath)
+    const pendingPath = join(dirname(bindingPath), 'pending.json')
+    const pending = JSON.parse(await readFile(pendingPath, 'utf8')) as { revision: string }
+    input.appSecret = 'rotated-secret'
+    cli.events.length = 0
+    cli.requests.length = 0
+    const result = await setupLarkBusinessTools(input, { run: cli.run })
+    expect(result.reusedAuthorization).toBe(true)
+    expect(result.permissionCompletion).toBe(partial ? 'partial' : 'complete')
+    expect(callbacks).toEqual([authorizationUrl])
+    expect(cli.events).toEqual(['config', 'status', 'server-userinfo', 'status'])
+    expect(cli.requests[0]?.input).toBe(`${input.appSecret}\n`)
+    expect(JSON.parse(await readFile(bindingPath, 'utf8'))).toMatchObject({ revision: pending.revision })
+    await absent(pendingPath)
+  })
+
+  test('pending completion with a different server owner cannot publish on rerun', async () => {
+    const { input, callbacks } = await setupInput()
+    const cli = fakeCli(input)
+    cli.responses.serverOpenId = 'ou_other'
+    await expect(setupLarkBusinessTools(input, { run: cli.run })).rejects.toThrow('bound owner')
+    cli.events.length = 0
+    await expect(setupLarkBusinessTools(input, { run: cli.run })).rejects.toThrow('bound owner')
+    expect(cli.events).toEqual(['config', 'status', 'server-userinfo'])
+    expect(callbacks).toEqual([authorizationUrl])
+    await absent(await activePath(input))
+    await absent(join(input.dshHome, 'skills'))
+  })
+
+  test.each([
+    ['application', { appId: 'cli_ffffffffffffffff' }],
+    ['owner', { ownerUserId: 'ou_other' }],
+    ['CLI version', { cliVersion: '1.0.1' }],
+    ['domain', { domain: 'lark' }],
+    ['revision traversal', { revision: '../outside' }],
+  ] as const)('does not recover a pending completion with mismatched %s', async (_label, patch) => {
+    const { input, callbacks } = await setupInput()
+    const cli = fakeCli(input)
+    await expect(setupLarkBusinessTools(input, { run: cli.run,
+      installSkill: async () => { throw new Error('publication interrupted') },
+    })).rejects.toThrow('publication interrupted')
+    const bindingPath = await activePath(input)
+    const pendingPath = join(dirname(bindingPath), 'pending.json')
+    const pending = JSON.parse(await readFile(pendingPath, 'utf8')) as Record<string, unknown>
+    await writeFile(pendingPath, JSON.stringify({ ...pending, ...patch }))
+    cli.events.length = 0
+    cli.responses.pollCode = 1
+    await expect(setupLarkBusinessTools(input, { run: cli.run })).rejects.toThrow('incomplete')
+    expect(callbacks).toEqual([authorizationUrl, authorizationUrl])
+    expect(cli.events).not.toContain('server-userinfo')
+    await absent(bindingPath)
+  })
+
+  test.each(['invalid evidence', 'symlink manifest', 'symlink directory'] as const)('rejects pending %s before owner readback or new authorization', async kind => {
+    const { input, callbacks } = await setupInput()
+    const cli = fakeCli(input)
+    await expect(setupLarkBusinessTools(input, { run: cli.run,
+      installSkill: async () => { throw new Error('publication interrupted') },
+    })).rejects.toThrow('publication interrupted')
+    const bindingPath = await activePath(input)
+    const pendingPath = join(dirname(bindingPath), 'pending.json')
+    const content = await readFile(pendingPath, 'utf8')
+    const pending = JSON.parse(content) as { revision: string; authorization: Record<string, unknown> }
+    if (kind === 'invalid evidence') {
+      pending.authorization.missingScopes = ['docx:document']
+      await writeFile(pendingPath, JSON.stringify(pending))
+    } else if (kind === 'symlink manifest') {
+      const outside = join(dirname(input.dshHome), 'outside.json')
+      await writeFile(outside, content)
+      await rm(pendingPath)
+      await symlink(outside, pendingPath)
+    } else {
+      const configDir = join(dirname(bindingPath), pending.revision, 'config')
+      const outside = join(dirname(input.dshHome), 'outside-config')
+      await mkdir(outside)
+      await rm(configDir, { recursive: true })
+      await symlink(outside, configDir)
+    }
+    cli.events.length = 0
+    await expect(setupLarkBusinessTools(input, { run: cli.run })).rejects.toThrow()
+    expect(cli.events).toEqual([])
+    expect(callbacks).toEqual([authorizationUrl])
+    await absent(bindingPath)
+  })
+
+  test('scope-cache failure cannot be bypassed by recovering a saved token on rerun', async () => {
+    const { input, callbacks } = await setupInput()
+    const cli = fakeCli(input)
+    cli.responses.pollStderr = 'warning: failed to load cached requested scopes'
+    await expect(setupLarkBusinessTools(input, { run: cli.run })).rejects.toThrow('scope evidence')
+    const bindingPath = await activePath(input)
+    const pending = JSON.parse(await readFile(join(dirname(bindingPath), 'pending.json'), 'utf8')) as Record<string, unknown>
+    expect(pending.authorization).toBeUndefined()
+    delete cli.responses.pollStderr
+    cli.responses.pollCode = 1
+    cli.events.length = 0
+    await expect(setupLarkBusinessTools(input, { run: cli.run })).rejects.toThrow('incomplete')
+    expect(callbacks).toEqual([authorizationUrl, authorizationUrl])
+    expect(cli.events).not.toContain('server-userinfo')
+    await absent(bindingPath)
+  })
+
+  test('legacy active receipts reuse verified identity without claiming complete grants', async () => {
+    const { input } = await setupInput()
+    const cli = fakeCli(input)
+    await setupLarkBusinessTools(input, { run: cli.run })
+    const bindingPath = await activePath(input)
+    const binding = JSON.parse(await readFile(bindingPath, 'utf8')) as Record<string, unknown>
+    delete binding.authorization
+    await writeFile(bindingPath, JSON.stringify(binding))
+    cli.events.length = 0
+    const result = await setupLarkBusinessTools(input, { run: cli.run })
+    expect(result).toMatchObject({ permissionCompletion: 'unknown', requestedScopes: [], grantedScopes: [], missingScopes: [], reusedAuthorization: true })
+    expect(cli.events).toEqual(['config', 'status', 'server-userinfo', 'status'])
+    expect(JSON.parse(await readFile(bindingPath, 'utf8'))).toEqual(binding)
+  })
+
+  test.each([undefined, 7, 'invalid\u0000scope'])('missing or invalid current scope %s cannot reuse a complete grant claim', async statusScope => {
+    const { input } = await setupInput()
+    const cli = fakeCli(input)
+    await setupLarkBusinessTools(input, { run: cli.run })
+    cli.responses.statusScope = statusScope
+    const result = await setupLarkBusinessTools(input, { run: cli.run })
+    expect(result).toMatchObject({ permissionCompletion: 'unknown', requestedScopes: [], grantedScopes: [], missingScopes: [], reusedAuthorization: true })
+  })
+
+  test('recomputes current partial grants when a formerly complete token lost requested scopes', async () => {
+    const { input } = await setupInput()
+    const cli = fakeCli(input)
+    await setupLarkBusinessTools(input, { run: cli.run })
+    const bindingPath = await activePath(input)
+    const snapshot = await readFile(bindingPath, 'utf8')
+    cli.responses.statusScope = 'offline_access'
+    const result = await setupLarkBusinessTools(input, { run: cli.run })
+    expect(result).toMatchObject({ permissionCompletion: 'partial', requestedScopes: ['contact:user.base:readonly'],
+      grantedScopes: ['offline_access'], missingScopes: ['contact:user.base:readonly'] })
+    expect(await readFile(bindingPath, 'utf8')).toBe(snapshot)
+  })
+
+  test('recomputes scope evidence after owner readback refreshed the token', async () => {
+    const { input } = await setupInput()
+    const cli = fakeCli(input)
+    cli.responses.statusState = 'needs_refresh'
+    cli.responses.refreshedScope = 'offline_access'
+    const result = await setupLarkBusinessTools(input, { run: cli.run })
+    expect(result).toMatchObject({ permissionCompletion: 'partial', grantedScopes: ['offline_access'], missingScopes: ['contact:user.base:readonly'] })
+    expect(cli.events.slice(-3)).toEqual(['status', 'server-userinfo', 'status'])
   })
 
   test.each([

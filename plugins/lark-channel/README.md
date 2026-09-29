@@ -64,7 +64,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 向导不会把 App Secret 放进 argv、profile 或日志。macOS 使用 Keychain，Linux 优先 Secret Service、无桌面环境降级为严格权限的 protected-file，Windows 使用 best-effort DPAPI。完整流程、已有应用接入和平台排障见[安装文档](docs/setup.md)。
 
-向导默认还安装或复用官方 `lark-cli`，使用同一应用为绑定的 owner 申请 `--domain all` 用户授权，并生成原生 DSH 业务技能。Agent 按需读取 CLI 内嵌的最新技能说明，通过原生工具操作文档、表格、日历、任务、邮件等；已授权任务无需反复批准。重复安装验证并复用有效用户授权。只需消息通道时，可用 `--no-business-tools` 跳过该步骤。
+向导默认还安装或复用官方 `lark-cli`，使用同一应用为绑定的 owner 申请 `--domain all` 用户授权，并生成原生 DSH 业务技能。Agent 按需读取 CLI 内嵌的最新技能说明，通过原生工具操作文档、表格、日历、任务、邮件等；已授权任务无需反复批准。重复安装验证并复用有效用户授权；明确的部分授权也可接入已获批能力，同时显示未获批权限。有完整授权结果的中断收尾可恢复，不把普通错误当作授权成功。只需消息通道时，可用 `--no-business-tools` 跳过该步骤。
 
 业务 CLI 使用 DSH 专用配置目录、显式 profile 和净化后的环境；Linux 另用专用数据目录保存 CLI 加密凭据，macOS/Windows 的系统钥匙环仍可能按应用/用户共享凭据。自动安装只下载并校验官方 npm 包与匹配的 GitHub release（失败时尝试官方安装器镜像，使用相同校验值），不运行 npm lifecycle 或全局安装脚本。此安装步骤需要网络和子进程权限，生成的技能位于 `$DSH_HOME/skills`；具体平台权限仍以飞书实际批准结果为准。
 

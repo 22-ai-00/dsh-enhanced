@@ -2158,6 +2158,40 @@ function effectiveProfileHasEnabledLarkChannel(effectiveProfile: string, profile
   return config.get('enabled') !== false
 }
 
+function effectiveDeliveryConsumerDatabasePaths(
+  effectiveProfile: string,
+  dshHome: string,
+  profile: string,
+): string[] {
+  const document = parseDocument(effectiveProfile, { uniqueKeys: true })
+  if (document.errors.length > 0 || !isSeq(document.contents)) {
+    throw new Error(`lark-channel setup: cannot verify effective Delivery consumers in profile ${profile}`)
+  }
+  const paths: string[] = []
+  for (const row of document.contents.items) {
+    if (!isMap(row)) continue
+    const id = row.get('id') as unknown
+    const name = row.get('name') as unknown
+    if (id !== 'dsh-enhanced-assistant-delivery' && name !== '@dsh-enhanced/assistant-delivery') continue
+    if (!setupRowIsEnabled(row)) continue
+    if (name !== '@dsh-enhanced/assistant-delivery') {
+      throw new Error(`lark-channel setup: profile ${profile} has an invalid effective Delivery package row`)
+    }
+    const config = row.get('config', true) as Node | undefined
+    if (!isMap(config)) throw new Error(`lark-channel setup: profile ${profile} has an invalid Delivery config`)
+    const schedulerEnabled = config.get('schedulerEnabled')
+    if (schedulerEnabled !== undefined && typeof schedulerEnabled !== 'boolean') {
+      throw new Error(`lark-channel setup: profile ${profile} has a non-boolean Delivery schedulerEnabled value`)
+    }
+    // Delivery defaults to starting its scheduler independently of the Lark
+    // adapter. A stopped service may restart later; configuration alone only
+    // proves that it cannot consume when the scheduler is explicitly disabled.
+    if (schedulerEnabled === false) continue
+    paths.push(dshEffectiveDataPath(config.get('databasePath'), dshHome, 'assistant-delivery databasePath'))
+  }
+  return paths
+}
+
 interface EffectiveLarkOwnerBinding {
   account: string
   tenant: string
@@ -2527,7 +2561,7 @@ function assertEffectiveLarkOwnerBinding(input: {
   }
 }
 
-async function assertNoOtherLarkProfileSharesDelivery(input: {
+async function assertNoOtherProfileSharesDelivery(input: {
   dshHome: string
   profile: string
   databasePath: string
@@ -2546,7 +2580,7 @@ async function assertNoOtherLarkProfileSharesDelivery(input: {
       || (!entry.isDirectory() && !entry.isSymbolicLink())
       || !setupKeyPattern.test(entry.name)) continue
     const patchPath = platformJoin(input.dshHome, 'profiles', entry.name, 'cordis.patch.yml')
-    // A profile can inherit Lark entirely from a lower bundle while its raw
+    // A profile can inherit Delivery or Lark from a lower bundle while its raw
     // override contains no channel row. Activation and database identity must
     // therefore come from effective config whenever that profile composes.
     try {
@@ -2559,20 +2593,26 @@ async function assertNoOtherLarkProfileSharesDelivery(input: {
     try {
       effective = await input.readEffectiveProfile(entry.name)
     } catch (error) {
-      // Raw absence cannot prove absence: Lark may be inherited from a lower
+      // Raw absence cannot prove absence: consumers may be inherited from a lower
       // bundle and a resident using the last valid composition may still run.
       // Without a durable ownership registry, an unverifiable real profile is
       // therefore a fail-closed handoff boundary.
-      throw new Error(`lark-channel setup: cannot verify effective Lark ownership in profile ${entry.name}`, {
+      throw new Error(`lark-channel setup: cannot verify effective Lark ownership in profile ${entry.name} or its Delivery consumers`, {
         cause: error,
       })
     }
-    if (!effectiveProfileHasEnabledLarkChannel(effective, entry.name)) continue
-    const otherDatabasePath = deliveryDatabasePathFromEffectiveProfile(effective, input.dshHome)
-    if (normalizeSetupResourcePath(otherDatabasePath) === databasePath) {
+    if (effectiveProfileHasEnabledLarkChannel(effective, entry.name)
+      && normalizeSetupResourcePath(deliveryDatabasePathFromEffectiveProfile(effective, input.dshHome)) === databasePath) {
       throw new Error(
         `lark-channel setup: profile ${entry.name} already owns Lark for the same assistant-delivery database; `
         + 'refusing to revoke its owner from another profile',
+      )
+    }
+    if (effectiveDeliveryConsumerDatabasePaths(effective, input.dshHome, entry.name)
+      .some(path => normalizeSetupResourcePath(path) === databasePath)) {
+      throw new Error(
+        `lark-channel setup: profile ${entry.name} has an enabled assistant-delivery scheduler for the same database; `
+        + 'disable its scheduler or configure a separate database before continuing',
       )
     }
   }
@@ -2763,7 +2803,7 @@ async function recoverLarkSetupJournalUnlocked(input: RecoverLarkSetupJournalInp
       stagedCredential: journal.stagedCredential!,
       context: 'journal',
     })
-    await assertNoOtherLarkProfileSharesDelivery({
+    await assertNoOtherProfileSharesDelivery({
       dshHome: input.dshHome,
       profile: input.profile,
       databasePath,
@@ -3046,7 +3086,7 @@ export async function executeLarkSetupProfileTransaction(
       effectiveProfile,
     })
     await withDeliveryOwnerSetupLock(databasePath, async () => {
-      await assertNoOtherLarkProfileSharesDelivery({
+      await assertNoOtherProfileSharesDelivery({
         dshHome: input.dshHome,
         profile: input.args.profile,
         databasePath,
@@ -3301,7 +3341,7 @@ export async function runLarkSetup(
       const effectiveProfile = await readEffectiveProfile(args.profile)
       const databasePath = deliveryDatabasePathFromEffectiveProfile(effectiveProfile, dshHome)
       await withDeliveryOwnerSetupLock(databasePath, async () => {
-        await assertNoOtherLarkProfileSharesDelivery({
+        await assertNoOtherProfileSharesDelivery({
           dshHome,
           profile: args.profile,
           databasePath,
@@ -3386,7 +3426,7 @@ export async function runLarkSetup(
       })
       const databasePath = deliveryDatabasePathFromEffectiveProfile(await readEffectiveProfile(args.profile), dshHome)
       return withDeliveryOwnerSetupLock(databasePath, async () => {
-        await assertNoOtherLarkProfileSharesDelivery({
+        await assertNoOtherProfileSharesDelivery({
           dshHome,
           profile: args.profile,
           databasePath,
@@ -3447,7 +3487,7 @@ export async function runLarkSetup(
     })
     const databasePath = deliveryDatabasePathFromEffectiveProfile(await readEffectiveProfile(args.profile), dshHome)
     await withDeliveryOwnerSetupLock(databasePath, async () => {
-      await assertNoOtherLarkProfileSharesDelivery({
+      await assertNoOtherProfileSharesDelivery({
         dshHome,
         profile: args.profile,
         databasePath,
@@ -3586,6 +3626,12 @@ export async function runLarkSetup(
     })
     businessBinding = undefined
     process.stdout.write(`飞书业务工具已接入${business.reusedAuthorization ? '，复用已有 owner 授权' : ''}。技能：${business.skillPath}\n`)
+    if (business.permissionCompletion === 'partial') {
+      process.stdout.write(`用户登录已完成；本次申请仍有 ${business.missingScopes.length} 项权限未获批，业务工具仅使用实际已授予的权限。\n`
+        + `未获批权限：${business.missingScopes.join(', ')}\n`)
+    } else if (business.permissionCompletion === 'unknown') {
+      process.stdout.write('已验证 owner 登录；当前授权证据不足以确认完整权限清单，具体操作仍以平台当前授权为准。\n')
+    }
   }
   if (args.manageService) {
     const service = installedService

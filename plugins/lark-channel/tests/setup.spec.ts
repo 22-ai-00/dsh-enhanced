@@ -741,7 +741,8 @@ setInterval(() => {}, 1000)`,
             expect(await readFile(patchPath, 'utf8')).toContain('principal: lark/primary/personal/ou_owner')
             await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
             if (mode === 'business-failure') throw new Error('fixture business authorization incomplete')
-            return { skillPath: join(dshHome, 'skills/fixture/SKILL.md'), reusedAuthorization: false }
+            return { skillPath: join(dshHome, 'skills/fixture/SKILL.md'), reusedAuthorization: false,
+              permissionCompletion: 'complete', requestedScopes: ['docs:read'], grantedScopes: ['docs:read'], missingScopes: [] }
           },
         })
         if (mode === 'business-failure') await expect(operation).rejects.toThrow('business authorization incomplete')
@@ -2482,6 +2483,137 @@ setInterval(() => {}, 1000)`,
     expect(await readFile(fooPatchPath, 'utf8')).toBe(base)
   })
 
+  test.each(['enabled', 'default', 'alias', 'custom-row', 'invalid-scheduler'] as const)(
+    'refuses a disabled Lark adapter with an unsafe Delivery consumer (%s) before staging credentials',
+    async mode => {
+      const root = await mkdtemp(join(tmpdir(), 'lark-cross-profile-consumer-'))
+      const dshHome = join(root, 'dsh-home')
+      const databasePath = join(dshHome, 'assistant-delivery/shared.sqlite')
+      const aliasPath = join(dshHome, 'delivery-alias.sqlite')
+      await mkdir(dirname(databasePath), { recursive: true })
+      await writeFile(databasePath, '', 'utf8')
+      await symlink(databasePath, aliasPath)
+      for (const profile of ['web', 'foo']) {
+        await mkdir(join(dshHome, 'profiles', profile), { recursive: true })
+        await writeFile(join(dshHome, 'profiles', profile, 'cordis.patch.yml'), '[]\n', 'utf8')
+      }
+      const patchPath = join(dshHome, 'profiles', 'foo', 'cordis.patch.yml')
+      const base = baseAssistantProfile(dshHome, databasePath)
+      await writeFile(patchPath, base, 'utf8')
+      let other = effectiveLarkDeliveryProfile(mode === 'alias' ? aliasPath : databasePath)
+        .replace('enabled: true', 'enabled: false')
+      if (mode !== 'default') {
+        other = other.replace('    databasePath:', `    schedulerEnabled: ${mode === 'invalid-scheduler' ? 'unknown' : 'true'}\n    databasePath:`)
+      }
+      if (mode === 'custom-row') other = other.replace('id: dsh-enhanced-assistant-delivery', 'id: custom-delivery')
+      const staged = vi.fn()
+      const paired = vi.fn()
+      const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+      await expect(executeLarkSetupProfileTransaction({
+        args: lark.parseLarkSetupArgs(['--profile', 'foo', '--app-id', 'cli_0123456789abcdef', '--no-service']),
+        dshHome,
+        patchPath,
+        application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+        credentialProvider: 'macos-keychain',
+        operations: {
+          readEffectiveProfile(profile) { return profile === 'web' ? other : asEffectiveProfile(base) },
+          storeCredential: staged,
+          readCredential() { return 'secret' },
+          discoverOwner() { return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_foo' } },
+          validateProfile() {},
+          pairPrincipal: paired,
+          removeCredential() {},
+        },
+      })).rejects.toThrow(mode === 'invalid-scheduler'
+        ? /non-boolean Delivery schedulerEnabled/iu
+        : /profile web.*enabled assistant-delivery scheduler.*same database/iu)
+      expect(staged).not.toHaveBeenCalled()
+      expect(paired).not.toHaveBeenCalled()
+      expect(await readFile(patchPath, 'utf8')).toBe(base)
+      await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+        .rejects.toMatchObject({ code: 'ENOENT' })
+    },
+  )
+
+  test.each(['scheduler-disabled', 'row-disabled', 'not-mounted', 'separate-database'] as const)(
+    'permits a disabled Lark profile that cannot consume the setup database (%s)',
+    async mode => {
+      const root = await mkdtemp(join(tmpdir(), 'lark-cross-profile-nonconsumer-'))
+      const dshHome = join(root, 'dsh-home')
+      const databasePath = join(dshHome, 'assistant-delivery/shared.sqlite')
+      for (const profile of ['web', 'foo']) await mkdir(join(dshHome, 'profiles', profile), { recursive: true })
+      await writeFile(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), '[]\n', 'utf8')
+      const patchPath = join(dshHome, 'profiles', 'foo', 'cordis.patch.yml')
+      await writeFile(patchPath, baseAssistantProfile(dshHome, databasePath), 'utf8')
+      let other = effectiveLarkDeliveryProfile(mode === 'separate-database' ? join(dshHome, 'other.sqlite') : databasePath)
+        .replace('enabled: true', 'enabled: false')
+      if (mode === 'scheduler-disabled') other = other.replace('    databasePath:', '    schedulerEnabled: false\n    databasePath:')
+      if (mode === 'row-disabled') other = other.replace('  name:', '  disabled: true\n  name:')
+      if (mode === 'not-mounted') other = '[]\n'
+      const paired = vi.fn()
+      const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+      await executeLarkSetupProfileTransaction({
+        args: lark.parseLarkSetupArgs(['--profile', 'foo', '--app-id', 'cli_0123456789abcdef', '--no-service']),
+        dshHome,
+        patchPath,
+        application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+        credentialProvider: 'macos-keychain',
+        operations: {
+          readEffectiveProfile(profile) {
+            return profile === 'web' ? other : asEffectiveProfile(readFileSync(patchPath, 'utf8'))
+          },
+          storeCredential() {},
+          readCredential() { return 'secret' },
+          discoverOwner() { return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_foo' } },
+          validateProfile() {},
+          pairPrincipal: paired,
+          removeCredential() {},
+        },
+      })
+      expect(paired).toHaveBeenCalledOnce()
+      expect(paired).toHaveBeenCalledWith({ databasePath, principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_foo' } })
+    },
+  )
+
+  test.each(['--install-service', '--refresh-agent-policy'] as const)(
+    '%s refuses another Delivery scheduler before service startup or policy mutation',
+    async operation => {
+      const root = await mkdtemp(join(tmpdir(), 'lark-cross-profile-service-consumer-'))
+      const dshHome = join(root, 'dsh-home')
+      const databasePath = join(dshHome, 'assistant-delivery/shared.sqlite')
+      for (const profile of ['web', 'foo']) await mkdir(join(dshHome, 'profiles', profile), { recursive: true })
+      const patchPath = join(dshHome, 'profiles', 'foo', 'cordis.patch.yml')
+      const original = configuredLarkProfile({ dshHome, databasePath, profile: 'foo' })
+      await writeFile(patchPath, original, 'utf8')
+      await writeFile(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), '[]\n', 'utf8')
+      const installed = vi.fn()
+      const validated = vi.fn()
+      const previousHome = process.env.DSH_HOME
+      process.env.DSH_HOME = dshHome
+      try {
+        await expect(lark.runLarkSetup([
+          '--profile', 'foo', operation,
+          ...(operation === '--refresh-agent-policy' ? ['--disable-agent-tools'] : []),
+        ], {
+          prepareResidentService: async () => ({ enabledLinger: false }),
+          installResidentService: installed,
+          validateProfile: validated,
+          readEffectiveProfile(profile) {
+            return profile === 'web'
+              ? effectiveLarkDeliveryProfile(databasePath).replace('enabled: true', 'enabled: false')
+              : asEffectiveProfile(original)
+          },
+        })).rejects.toThrow(/profile web.*enabled assistant-delivery scheduler.*same database/iu)
+      } finally {
+        if (previousHome === undefined) delete process.env.DSH_HOME
+        else process.env.DSH_HOME = previousHome
+      }
+      expect(installed).not.toHaveBeenCalled()
+      expect(validated).not.toHaveBeenCalled()
+      expect(await readFile(patchPath, 'utf8')).toBe(original)
+    },
+  )
+
   test('serializes different profiles through canonical aliases of their shared Delivery database', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lark-cross-profile-concurrent-'))
     const dshHome = join(root, 'dsh-home')
@@ -2519,7 +2651,7 @@ setInterval(() => {}, 1000)`,
         const databasePath = profile === 'web' ? realDatabasePath : aliasDatabasePath
         return profilePatch.includes('dsh-enhanced-lark-channel')
           ? asEffectiveProfile(profilePatch)
-          : effectiveDeliveryProfile(databasePath)
+          : effectiveDeliveryProfile(databasePath).replace('    databasePath:', '    schedulerEnabled: false\n    databasePath:')
       },
       storeCredential() { events.push(`${name}:staged`) },
       readCredential() { return `${name}-secret` },
