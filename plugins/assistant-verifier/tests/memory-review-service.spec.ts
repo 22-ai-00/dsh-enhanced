@@ -10,9 +10,10 @@ import { MemoryReviewRuntime, type MemoryReviewConfig } from '../src/memory-revi
 vi.mock('../src/memory-review.ts', async original => {
   const actual = await original<typeof import('../src/memory-review.ts')>()
   return { ...actual, MemoryReviewRuntime: vi.fn(function (this: {
-    run: () => Promise<unknown>; lookup: () => undefined; close: () => Promise<void>
+    run: () => Promise<unknown>; lookup: () => undefined; inspectAvailability: () => unknown; close: () => Promise<void>
   }) {
     this.run = vi.fn(async () => ({ status: 'approved' })); this.lookup = vi.fn(() => undefined)
+    this.inspectAvailability = vi.fn(() => ({ authorityId: 'review', authorityDigest: 'a'.repeat(64), expiresAt: 1, remainingReviews: 1, available: true }))
     this.close = vi.fn(async () => {})
   }) }
 })
@@ -30,6 +31,7 @@ test('waits for authenticated source services and drains each reviewer when its 
   // Runtime/source validation has separate tests; this checks the service seam.
   const request = {} as MemoryLearningReviewRequest
   expect(service.lookupMemoryLearningReview(request)).toBeUndefined()
+  expect(service.inspectMemoryLearningReviewAvailability({ owner: memoryReviews.owner })).toMatchObject({ remainingReviews: 0, available: false })
   expect(() => service.reviewMemoryLearning(request)).toThrow('unavailable')
   const native = ctx.plugin({ name: 'test-memory-review-native-peers', apply(peer: Context) {
     for (const name of ['agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy']) peer.provide(name as never, {} as never)
@@ -42,10 +44,12 @@ test('waits for authenticated source services and drains each reviewer when its 
   await sources; await new Promise(resolve => setImmediate(resolve))
   expect(MemoryReviewRuntime).toHaveBeenCalledTimes(1)
   expect(await service.reviewMemoryLearning(request)).toEqual({ status: 'approved' })
+  expect(service.inspectMemoryLearningReviewAvailability({ owner: memoryReviews.owner })).toMatchObject({ remainingReviews: 1, available: true })
   const runtime = vi.mocked(MemoryReviewRuntime).mock.instances[0]!
   await sources.dispose(); await new Promise(resolve => setImmediate(resolve))
   expect(runtime.close).toHaveBeenCalledTimes(1)
   expect(service.lookupMemoryLearningReview(request)).toBeUndefined()
+  expect(service.inspectMemoryLearningReviewAvailability({ owner: memoryReviews.owner })).toMatchObject({ remainingReviews: 0, available: false })
   expect(() => service.reviewMemoryLearning(request)).toThrow('unavailable')
   expect(service.trustedVerificationProducerGeneration()).toEqual(expect.any(String))
 })

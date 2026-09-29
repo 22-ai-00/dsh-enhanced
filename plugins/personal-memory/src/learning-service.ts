@@ -5,12 +5,13 @@ import type { AssistantVerifierService } from '@dsh-enhanced/assistant-verifier'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import {
   growthObjectDigest, memoryLearningRequestDigest, validateMemoryLearningReviewRequest,
+  validateMemoryLearningOwner,
   type MemoryLearningOwner, type MemoryLearningReviewRequest,
 } from '@dsh-enhanced/assistant-growth-contract'
 import { memoryPrincipalDigest, type MemoryStore } from './store.js'
 import type {
   MemoryAgentContext, MemoryLearningAdoptionGrant, MemoryLearningAdoptionResult,
-  MemoryLearningManagedSource,
+  MemoryLearningManagedSource, MemoryLearningTargetSummary, MemoryLearningAdoptionAvailability,
 } from './types.js'
 import { validateMemoryLearningAdoptionGrant } from './learning-adoptions.js'
 
@@ -43,13 +44,14 @@ export class MemoryLearningService {
     return { delivery, evaluation }
   }
 
-  #policy(request: MemoryLearningReviewRequest, consume = false): void {
+  #policy(request?: MemoryLearningReviewRequest, consume = false): void {
     const policy = this.ctx.get('assistantPolicy') as AssistantPolicyService | undefined
     if (!policy) throw new Error('memory learning policy unavailable')
+    const owner = request?.owner ?? this.#grant.owner
     const input = { subject: { kind: 'background' as const, id: 'assistant-memory-learning',
-      workspace: request.owner.workspace, principal: request.owner.principalId }, action: 'adopt',
+      workspace: owner.workspace, principal: owner.principalId }, action: 'adopt',
     resource: { kind: 'memory' as const, id: `learning:${this.#grant.authorityId}` }, context: { initiator: 'background' as const } }
-    const decision = consume ? policy.authorize(input, { idempotencyKey: `memory-adopt:${this.#grant.authorityId}:${memoryLearningRequestDigest(request)}` })
+    const decision = consume && request ? policy.authorize(input, { idempotencyKey: `memory-adopt:${this.#grant.authorityId}:${memoryLearningRequestDigest(request)}` })
       : policy.evaluate(input)
     if (decision.effect !== 'allow') throw new Error('memory learning adoption policy denied')
   }
@@ -58,6 +60,12 @@ export class MemoryLearningService {
     const request = validateMemoryLearningReviewRequest(input)
     if (growthObjectDigest(request.owner) !== growthObjectDigest(this.#grant.owner)) throw new Error('memory learning owner changed')
     return request
+  }
+
+  #owner(input: MemoryLearningOwner): MemoryLearningOwner {
+    const owner = validateMemoryLearningOwner(input)
+    if (growthObjectDigest(owner) !== growthObjectDigest(this.#grant.owner)) throw new Error('memory learning owner changed')
+    return owner
   }
 
   #evaluationFence<T>(evaluation: AssistantEvaluationService, callback: () => T): T {
@@ -134,6 +142,55 @@ export class MemoryLearningService {
   inspectTarget(input: { owner: MemoryLearningOwner; id: string; expectedVersion: number }) {
     if (growthObjectDigest(input.owner) !== growthObjectDigest(this.#grant.owner)) return undefined
     return this.store.inspectLearningTarget(input)
+  }
+
+  /** Host-only bounded candidates, after current owner, Policy and source checks. */
+  listTargets(input: { owner: MemoryLearningOwner; limit?: number }): readonly MemoryLearningTargetSummary[] {
+    const owner = this.#owner(input.owner)
+    const limit = input.limit ?? 20
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error('memory learning target limit is invalid')
+    const services = this.#services()
+    this.#policy()
+    const context: MemoryAgentContext = { workspace: owner.workspace, agentPreset: owner.agentPreset,
+      namespace: { mode: 'delivery', principalDigest: memoryPrincipalDigest(owner.principalId),
+        principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion } }
+    const managed = this.store.listManagedLearningSources(context)
+      .filter(item => growthObjectDigest(item.request.owner) === growthObjectDigest(owner))
+    if (managed.length > 1000) return Object.freeze([])
+    const sources = [...new Map(managed.map(item => [item.request.source.inboxId,
+      { inboxId: item.request.source.inboxId, expectedSourceDigest: item.request.source.sourceDigest }])).values()]
+    try {
+      return services.delivery.withOwnerForegroundTaskSourcesFence({ ...this.#scope(), sources }, contents =>
+        this.#evaluationFence(services.evaluation, () => {
+          this.#policy()
+          if (!this.store.inspectLearningAdoptionAvailability(this.#grant).available) return Object.freeze([])
+          const byInbox = new Map(sources.map((source, index) => [source.inboxId, contents[index]]))
+          const targets = managed.flatMap(item => {
+            if (this.#sourceState(item.request, byInbox.get(item.request.source.inboxId), services) !== 'current') return []
+            const target = this.store.inspectLearningTarget({ owner, id: item.id, expectedVersion: item.version })
+            return target === undefined ? [] : [{ id: target.id, version: target.version,
+              kind: target.kind, content: target.content,
+              ...(target.knowledge === undefined ? {} : { knowledge: target.knowledge }) }]
+          })
+          targets.sort((a, b) => a.id.localeCompare(b.id) || a.version - b.version)
+          return Object.freeze(targets.slice(0, limit))
+        }))
+    } catch {
+      // A temporarily missing source or provider cannot make an automatic
+      // record available to a new producer.
+      return Object.freeze([])
+    }
+  }
+
+  /** Host-only budget view; no grant registration or Policy quota consumption. */
+  inspectAvailability(input: { owner: MemoryLearningOwner }): MemoryLearningAdoptionAvailability {
+    this.#owner(input.owner)
+    const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
+    if (!delivery || typeof delivery.withOwnerForegroundTaskSourcesFence !== 'function') throw new Error('memory learning owner service unavailable')
+    return delivery.withOwnerForegroundTaskSourcesFence({ ...this.#scope(), sources: [] }, () => {
+      this.#policy()
+      return this.store.inspectLearningAdoptionAvailability(this.#grant)
+    })
   }
 
   #matchesContext(context: MemoryAgentContext): boolean {

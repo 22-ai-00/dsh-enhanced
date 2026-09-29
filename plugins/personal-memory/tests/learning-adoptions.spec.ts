@@ -46,6 +46,40 @@ function manual(content: string): MemoryEntryInput {
     provenance: { source: 'owner', observedAt: 100_000 } }
 }
 
+test('availability reads persisted quota and expiry without registering, consuming or repairing a grant', () => {
+  const database = path(); let now = 100_000
+  const store = new MemoryStore({ path: database, now: () => now })
+  const authorization = grant({ maxMutations: 1 })
+  expect(() => store.inspectLearningAdoptionAvailability(authorization)).toThrow(/absent or changed/u)
+  store.registerLearningGrant(authorization)
+  const before = store.inspectLearningAdoptionAvailability(authorization)
+  expect(before).toEqual({ authorityId: authorization.authorityId, grantDigest: growthObjectDigest(authorization),
+    expiresAt: authorization.expiresAt, remainingMutations: 1, remainingContentBytes: 100, available: true })
+  expect(store.inspectLearningAdoptionAvailability(authorization)).toEqual(before)
+  now = 200_000
+  expect(store.inspectLearningAdoptionAvailability(authorization)).toMatchObject({ remainingMutations: 1, available: false })
+  now = 100_000
+  commit(store, request('quota-one'), authorization)
+  expect(store.inspectLearningAdoptionAvailability(authorization)).toMatchObject({ remainingMutations: 0,
+    remainingContentBytes: 100 - Buffer.byteLength('Atlas uses a migration journal'), available: false })
+  expect(() => store.inspectLearningAdoptionAvailability(grant({ maxMutations: 2 }))).toThrow(/absent or changed/u)
+  store.close()
+  const reopened = new MemoryStore({ path: database, now: () => now })
+  expect(reopened.inspectLearningAdoptionAvailability(authorization).remainingMutations).toBe(0)
+  reopened.close()
+  now = 200_000
+  const expired = new MemoryStore({ path: database, now: () => now })
+  expect(expired.inspectLearningAdoptionAvailability(authorization).available).toBe(false)
+  expired.close()
+  const changed = new DatabaseSync(database)
+  changed.prepare(`UPDATE memory_learning_adoptions SET grant_digest = ?
+    WHERE authority_id = ? AND row_kind = 'grant'`).run('0'.repeat(64), authorization.authorityId)
+  changed.close()
+  const corrupted = new MemoryStore({ path: database, now: () => now })
+  expect(() => corrupted.inspectLearningAdoptionAvailability(authorization)).toThrow(/absent or changed/u)
+  corrupted.close()
+})
+
 test('freezes grant authority and exact adoption result across lost ACK, restart and manual replacement', () => {
   const database = path(); let now = 100_000
   const first = new MemoryStore({ path: database, now: () => now })

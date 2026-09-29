@@ -80,6 +80,18 @@ export type MemoryLearningTarget = Readonly<{
   knowledge?: MemoryRecord['knowledge']
 }>
 
+export type MemoryLearningTargetSummary = Readonly<Omit<MemoryLearningTarget, 'managed'>>
+
+/** Current, read-only view of a frozen Host grant and its remaining budget. */
+export type MemoryLearningAdoptionAvailability = Readonly<{
+  authorityId: string
+  grantDigest: string
+  expiresAt: number
+  remainingMutations: number
+  remainingContentBytes: number
+  available: boolean
+}>
+
 export interface MemoryLearningSourceInvalidation {
   owner: MemoryLearningOwner
   id: string

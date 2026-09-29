@@ -90,6 +90,26 @@ function sourceInput(f: Awaited<ReturnType<typeof fixture>>, inboxId: string) {
 }
 
 describe('durable owner foreground completion feed', () => {
+  test('inspects one terminal inbox before reply exists without exposing content or guessing an objective', async () => {
+    const f = await fixture()
+    const admitted = dispatch(f.store, f.binding, 'metadata-only', { metadata: { secret: 'internal' } })
+    const input = { ...f.scope, inboxId: admitted.record.id }
+    expect(f.store.inspectOwnerForegroundTaskSource(input, authority)).toBeUndefined()
+    complete(f.store, admitted.record.id)
+    const metadata = f.store.inspectOwnerForegroundTaskSource(input, authority)!
+    expect(metadata).toEqual(f.store.listOwnerForegroundTaskSources(f.scope, authority).items[0])
+    expect(metadata).toMatchObject({ inboxId: admitted.record.id,
+      execution: { status: 'succeeded', quiescent: true, modelSelectionState: 'frozen',
+        modelSelection: { provider: 'frozen-provider', model: 'frozen-model', reasoningEffort: 'high' } } })
+    expect(f.store.readOwnerForegroundTaskSource({ ...input, expectedSourceDigest: metadata.sourceDigest }, authority)).toBeUndefined()
+    expect(JSON.stringify(metadata)).not.toContain('secret')
+    expect(JSON.stringify(metadata)).not.toContain('ordinary owner task')
+    expect(metadata).not.toHaveProperty('objective')
+    expect(f.store.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: 'missing' }, authority)).toBeUndefined()
+    expect(() => f.store.inspectOwnerForegroundTaskSource({ ...input, expectedOwner: {
+      ...f.scope.expectedOwner, principalVersion: f.scope.expectedOwner.principalVersion + 1 } }, authority)).toThrow(/owner authority changed/u)
+  })
+
   test('does not miss reverse completions across pagination, two writers, equal timestamps, and a backwards clock', async () => {
     const f = await fixture()
     const second = open(f.path)
@@ -147,14 +167,17 @@ describe('durable owner foreground completion feed', () => {
     const page = f.store.listOwnerForegroundTaskSources(f.scope, authority)
     const input = sourceInput(f, inbox.record.id)
     const original = f.store.readOwnerForegroundTaskSource(input, authority)!
+    const originalMetadata = f.store.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: inbox.record.id }, authority)!
     processed(f.store, inbox)
     const rotated = f.store.rotateBinding({ bindingId: f.binding.id, expectedVersion: f.binding.version, sessionId: 'after-new' })
     expect(f.store.readOwnerForegroundTaskSource(input, authority)).toEqual(original)
+    expect(f.store.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: inbox.record.id }, authority)).toEqual(originalMetadata)
     const newer = dispatch(f.store, rotated, 'after-new')
     complete(f.store, newer.record.id)
     expect(f.store.listOwnerForegroundTaskSources({ ...f.scope, after: page.nextCursor }, authority).items.map(item => item.inboxId)).toEqual([newer.record.id])
     f.store.revokePrincipal(f.owner.id, f.owner.version)
     expect(() => f.store.readOwnerForegroundTaskSource(input, authority)).toThrow(/owner authority changed/u)
+    expect(() => f.store.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: inbox.record.id }, authority)).toThrow(/owner authority changed/u)
     const repaired = pair(f.store)
     bind(f.store, 'after-owner-aba')
     expect(repaired.owner.id).toBe(f.owner.id)
@@ -162,6 +185,7 @@ describe('durable owner foreground completion feed', () => {
     expect(() => f.store.listOwnerForegroundTaskSources({ ...repaired.scope, after: page.nextCursor }, authority)).toThrow(/cursor/u)
     expect(f.store.listOwnerForegroundTaskSources(repaired.scope, authority).items).toEqual([])
     expect(f.store.readOwnerForegroundTaskSource({ ...input, ...repaired.scope }, authority)).toBeUndefined()
+    expect(f.store.inspectOwnerForegroundTaskSource({ ...repaired.scope, inboxId: inbox.record.id }, authority)).toBeUndefined()
   })
 
   test('rejects cursor protocol/epoch/scope/sequence forgery and authority or generation-floor changes', async () => {
@@ -190,6 +214,8 @@ describe('durable owner foreground completion feed', () => {
       complete(f.store, inbox.record.id, 2, name === 'unknown' ? 'unknown' : 'succeeded')
       reply(f.store, f.binding, inbox.record.id, name)
       expect(f.store.readOwnerForegroundTaskSource(sourceInput(f, inbox.record.id), authority)).toBeUndefined()
+      expect(f.store.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: inbox.record.id }, authority)?.execution.modelSelectionState)
+        .toBe(name === 'unknown' ? 'frozen' : name)
       processed(f.store, inbox)
     }
     expect(f.store.listOwnerForegroundTaskSources(f.scope, authority).items.map(item => item.execution.status)).toEqual(['unknown', 'succeeded', 'succeeded'])
@@ -422,6 +448,8 @@ describe('durable owner foreground completion feed', () => {
     await ctx.plugin(AssistantPolicyService, { databasePath: join(f.root, 'policy.sqlite'), rules: [] })
     await ctx.plugin(AssistantDeliveryService, { databasePath: f.path, spoolPath: join(f.root, 'spool'), schedulerEnabled: false, ownerRoutes: [authority] })
     expect(ctx.assistantDelivery.listOwnerForegroundTaskSources(f.scope).items[0]!.sourceDigest).toBe(input.expectedSourceDigest)
+    expect(ctx.assistantDelivery.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: inbox.record.id })?.sourceDigest)
+      .toBe(input.expectedSourceDigest)
     expect(ctx.assistantDelivery.readOwnerForegroundTaskSource(input)?.source.execution.modelSelection?.model).toBe('frozen-model')
     expect(ctx.assistantDelivery.withOwnerForegroundTaskSourceFence(input, content => content.reply.text)).toBe('ordinary answer')
     expect(ctx.assistantDelivery.withOwnerForegroundTaskSourcesFence({ ...f.scope,
@@ -430,5 +458,6 @@ describe('durable owner foreground completion feed', () => {
     const service = ctx.assistantDelivery
     await ctx.fiber.restart(); contexts.delete(ctx)
     expect(() => service.listOwnerForegroundTaskSources(f.scope)).toThrow()
+    expect(() => service.inspectOwnerForegroundTaskSource({ ...f.scope, inboxId: inbox.record.id })).toThrow()
   })
 })

@@ -4418,6 +4418,21 @@ export class DeliveryStore {
     })
   }
 
+  /** Host-only exact inbox metadata under the same owner writer fence as the feed. */
+  inspectOwnerForegroundTaskSource(input: OwnerForegroundTaskSourceScope & { inboxId: string },
+    authority: OwnerRouteAuthority): Readonly<OwnerForegroundTaskSource> | undefined {
+    this.assertOpen()
+    if (typeof input.inboxId !== 'string' || input.inboxId === '') {
+      throw new DeliveryStoreError('invalid-binding', 'foreground source inbox ID is invalid')
+    }
+    return this.transaction(() => {
+      const fence = this.foregroundSourceFence(input, authority)
+      const row = this.database.prepare(`SELECT * FROM delivery_foreground_executions
+        WHERE inbox_id = ? AND status != 'pending'`).get(input.inboxId) as unknown as ForegroundSourceRow | undefined
+      return row === undefined ? undefined : this.foregroundSource(row, input, fence)
+    })
+  }
+
   /** Content comes from the canonical Inbox/Outbox, with no alternate text ledger. */
   readOwnerForegroundTaskSource(input: OwnerForegroundTaskSourceScope & {
     inboxId: string; expectedSourceDigest: string; maxInputBytes?: number; maxReplyBytes?: number

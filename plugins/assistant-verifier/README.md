@@ -124,6 +124,11 @@ Host 独立读取精确 PR ref、单一 base parent、改动范围和已检查 t
 
 可选 `memoryReviews` 提供 Host-only `reviewMemoryLearning(request, signal?)` 与
 `lookupMemoryLearningReview(request)`。调用者只传共享库的候选和来源定位，不传入批准结论。
+Host-only `inspectMemoryLearningReviewAvailability({ owner })` 返回当前配置授权的
+`authorityId`、`authorityDigest`、`expiresAt`、`remainingReviews`、`available`。
+它核对完整 owner 与当前 Delivery route、Policy 及私有账本；首次 claim 前显示配置上限，
+到期、服务缺失、授权变化、账本损坏或额度耗尽时不可用。查询只读，不建立 claim、
+消耗额度或调用模型；历史 unknown 仍须按原 operation ID 精确查询，不能通过该探针重派。
 Verifier 独立读取 Delivery 原任务、普通回复与当前 owner；经验还须绑定当前 canonical
 结果，允许保留失败经验。事实引用只能来自 owner 原文，任务未获目标结果不妨碍审查事实，
 明确的 owner 撤回则会阻止审查。替换/删除还需 PersonalMemory 的 exact managed target reader；
@@ -142,7 +147,7 @@ subject `assistant-memory-learning`（绑定 workspace/principal），action `re
 不重派。来源、owner、canonical 状态与目标版本在结束后重验，批准落盘使用
 Delivery → Evaluation → review ledger 同步 writer fence；卸载会先取消并等待在途审查。
 
-此入口本身不负责自动发现、候选提取、Memory 有限采用或下一任务召回；这些仍需学习插件和
-Memory 接线。批准回执不能替代采用时的当前来源与权限检查。新增数据权限仅为读取这些
+普通任务的自动发现、提取与调度见独立 [assistant-memory-learning](../assistant-memory-learning/README.md)；
+有限采用与下一任务召回由 [Memory](../personal-memory/README.md) 负责。批准回执不能替代采用时的当前来源与权限检查。新增数据权限仅为读取这些
 owner 来源/受管理目标，经既有 Host 模型供应商发送有界文本，并写私有审查账本和原生会话；
 无新增浏览器、子进程、凭据读取或安装脚本权限。

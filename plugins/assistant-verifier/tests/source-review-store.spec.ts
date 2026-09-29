@@ -20,6 +20,15 @@ async function fixture() {
 }
 const result = { status: 'approved' as const, reason: 'The scoped fix preserves resource ownership.', outputDigest: 'c'.repeat(64) }
 
+test('preserves a source supplier model name verbatim rather than narrowing it to operation-id syntax', async () => {
+  const f = await fixture(), store = f.open()
+  const input = { ...f.input, model: { provider: 'supplier', model: 'vendor/model@revision+variant' } }
+  expect(store.claim(input).state).toBe('claimed')
+  expect(store.inspect(input)).toEqual({ state: 'unknown' })
+  expect(() => store.inspect({ ...input, model: { ...input.model, model: 'vendor/model@next' } })).toThrow('differs')
+  expect(() => store.claim({ ...input, model: { ...input.model, model: 'a'.repeat(257) } })).toThrow('model')
+})
+
 test('persists unknown claims and immutable natural-language terminal replay', async () => {
   const f = await fixture(), first = f.open()
   expect(first.claim(f.input)).toEqual({ state: 'claimed' }); first.close(); first.close()

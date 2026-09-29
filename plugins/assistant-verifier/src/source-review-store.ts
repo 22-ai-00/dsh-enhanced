@@ -22,7 +22,9 @@ function reason(value: unknown): void {
 function claimModel(input: ClaimInput): string {
   id(input.operationId); digest(input.requestDigest); id(input.authorityId); digest(input.authorityDigest)
   if (!Number.isSafeInteger(input.maxReviews) || input.maxReviews < 1 || input.maxReviews > 10_000) fail('invalid-input', 'invalid review quota')
-  id(input.model.provider); id(input.model.model)
+  id(input.model.provider)
+  if (typeof input.model.model !== 'string' || !input.model.model.trim() || input.model.model.includes('\0')
+    || !input.model.model.isWellFormed() || Buffer.byteLength(input.model.model) > 256) fail('invalid-input', 'invalid review model')
   if (input.model.reasoningEffort !== undefined) id(input.model.reasoningEffort)
   return acceptanceCanonicalJson({ provider: input.model.provider, model: input.model.model,
     ...(input.model.reasoningEffort === undefined ? {} : { reasoningEffort: input.model.reasoningEffort }) })
@@ -60,6 +62,24 @@ export class SourceReviewStore {
     } catch (error) { this.#db.close(); throw error }
   }
   close(): void { if (!this.#closed) { this.#closed = true; this.#db.close() } }
+  /** Read the immutable grant without creating a row or admitting an operation. */
+  remaining(input: Pick<ClaimInput, 'authorityId' | 'authorityDigest' | 'maxReviews'>): number {
+    id(input.authorityId); digest(input.authorityDigest)
+    if (!Number.isSafeInteger(input.maxReviews) || input.maxReviews < 1 || input.maxReviews > 10_000) fail('invalid-input', 'invalid review quota')
+    if (this.#closed) fail('conflict', 'review database is closed')
+    const grant = this.#db.prepare('SELECT * FROM grants WHERE authority=?').get(input.authorityId) as unknown as GrantRow | undefined
+    const claims = (this.#db.prepare('SELECT count(*) AS count FROM reviews WHERE authority=?')
+      .get(input.authorityId) as { count: number }).count
+    if (!grant) {
+      if (claims !== 0) fail('corrupt', 'review claims have no grant')
+      return input.maxReviews
+    }
+    if (!Number.isSafeInteger(grant.max) || grant.max < 1 || grant.max > 10_000
+      || !Number.isSafeInteger(grant.used) || grant.used < 0 || grant.used > grant.max
+      || grant.used !== claims) fail('corrupt', 'invalid stored review quota')
+    if (grant.digest !== input.authorityDigest || grant.max !== input.maxReviews) fail('conflict', 'authority grant differs')
+    return grant.max - grant.used
+  }
   available(input: Pick<ClaimInput, 'authorityId' | 'authorityDigest' | 'maxReviews'> & { operationId?: string }): boolean {
     if (this.#closed) return false
     const grant = this.#db.prepare('SELECT * FROM grants WHERE authority=?').get(input.authorityId) as unknown as GrantRow | undefined

@@ -20,7 +20,7 @@
 | 能力 | 当前实现与证据边界 | 按需入口 |
 | --- | --- | --- |
 | 日常助手 | 飞书 owner 绑定、普通对话、持久投递、工具审批和固定 T1 偏好学习已有实现；已有本机真实基本对话记录。偏好适配不代表工具/插件自迭代完成。 | [Delivery](../plugins/assistant-delivery/README.md)、[偏好学习](../plugins/preference-learning/README.md) |
-| 持久记忆 | 已有提案、版本、检索和撤销；普通任务来源、独立审查与有限事实/经验采用已接通，检索重验来源，撤回可清理自动版本，手动版本受保护。普通任务自动提取/调度候选的学习生产者仍缺，尚未验收真实后续任务收益。 | [Memory](../plugins/personal-memory/README.md#有限授权的事实与经验采用)、[记忆审查](../plugins/assistant-verifier/README.md#普通任务记忆候选审查) |
+| 持久记忆 | 普通任务事实与后到客观结果经验的自动学习 bundle 已接入原生调度、候选提取、独立审查及有限采用；纠正/撤回重验检索，手动版本受保护，unknown 对账不重放。初始 owner 安装组合仍缺；工程集成的模型/审查语义用 fixture，尚未验收真实后续任务收益。 | [自动学习](../plugins/assistant-memory-learning/README.md)、[Memory](../plugins/personal-memory/README.md#有限授权的事实与经验采用) |
 | 反馈进入成长 | 内置外部渠道支持回复精确结果消息的明确自然反馈（有限语句模式）、纠正/撤回、canonical 去重与来源模型冻结；Growth 通过原生 Automations 持久复盘，生成 owner 绑定的修复依据。工程集成包含模型/传输替身；新增自然反馈入口不覆盖原生 Web、自定义运行时或所有后台任务。 | [Growth Driver](../plugins/assistant-growth-driver/README.md)、[Evaluation](../plugins/assistant-evaluation/README.md) |
 | 候选与独立验证 | 普通反馈可生成现有插件的源码修改，隔离检查、有限批准、独立审查与本地发布阶段已接线；自动创建新插件尚未接通；Skills 有版本化比较及限定任务族的真实留出/canary 证据。通用收益与同预算改善未验收，Skills 仍有逐 Goal 手动 arm 的缺口。 | [源码提案](live-durable-source-proposal.md)、[技能复用](native-skill-reuse.md) |
 | 采用、观察与恢复 | Control Plane 已有跨 Host 交接、reload/readiness、有限试用资格、普通任务归因、重启补证及物理回退组件；内置采用仍重启整个 Host，Cordis 行级动态采用尚未接通。工程测试和分段真实探针不能合并为生产全链证明；严格合同的独立行为/副作用观测仍缺。 | [有限试用合同](bounded-live-adoption.md)、[Control Plane](../plugins/plugin-control-plane/README.md) |
@@ -35,7 +35,7 @@
 ## 下一步：按顺序完成一个可用闭环
 
 1. **打通实际 owner 自迭代安装。** 处理当前失败/告警的真实原因与安装耦合，保留历史和恢复门；验收目标与协调器启动、有限授权/预算、原生调度、重复安装与失败恢复。已有 owner 成对冻结升级按实际部署需要补齐，不让一般升级扩展取代主线。
-2. **补齐两条进化通道。** 普通任务自动沉淀有来源的事实/经验记忆，纠正与撤回能传播到检索；工程通道能在有限授权内生成新插件，经独立验证后通过 Cordis 动态加载采用、观察并回滚。复用现有原生运行循环与签名状态机，不能以手动记忆工具、脚手架或整 Host 重启代替。
+2. **接入两条进化通道。** 将自动记忆学习的准确 owner、独立审查与采用 grant/预算组合进初始安装，验收真实来源和后续召回；工程通道能在有限授权内生成新插件，经独立验证后通过 Cordis 动态加载采用、观察并回滚。复用现有原生运行循环与签名状态机，不能以手动记忆工具、脚手架或整 Host 重启代替。
 3. **从普通反馈完成真实改进并观察后续任务。** 同一可追溯链路覆盖真实失败/纠正 → 持久复盘 → 候选 → 独立验证 → 授权采用 → 新任务复用；验证纠正/撤回、重启、退化与回退，unknown 外部动作先对账、不重放。有限试用须显式使用其合同，不冒充严格 shadow/canary/soak/health 验收；部署关联不等于因果收益。记录质量、成本、延迟与回归，必要时同供应同预算比较。
 4. **通过发布门后交付 npm。** 可安装部署完成上述普通使用闭环、独立复核和整仓 `pnpm check` 后，按[发版指南](releasing.md)发布。组件测试、手工探针或待审批提案不能替代该门槛。
 
@@ -43,6 +43,6 @@
 
 ## 验证与维护
 
-- 本轮采用组件的存储、服务、真实 Delivery/Evaluation/Memory 集成测试已通过，覆盖锁、额度、幂等重放、检索与撤回；实际 Verifier 账本回执已对接。审查结论仍用测试 fixture，不证明真实模型语义、自动候选生产或后续收益。
-- 本轮有限记忆采用经独立只读复核，`VITEST_MAX_WORKERS=4 pnpm check` 完整通过：manifest、零警告 lint、类型、根及全部包测试、干净构建与全部包 dry-run pack。原始日志放忽略的 `docs/evidence/rsi-memory-learning/`；外部测试跳过不作为 live 证据，未改生产部署或发布 npm。
+- 本轮自动生产者的存储、原生 Agent 守卫、原生调度和真实 Delivery/Evaluation/Memory 集成测试已通过；覆盖晚到来源/结果、额度、锁、纠正撤回、unknown 不重放与后续 prompt/检索。提取模型和独立审查结论仍用 fixture，不证明真实供应商效果或后续收益。
+- 本轮自动生产者经独立只读复核，`VITEST_MAX_WORKERS=4 pnpm check` 完整通过：manifest、零警告 lint、类型、根及全部包测试、干净构建与全部包 dry-run pack。原始日志放忽略的 `docs/evidence/rsi-memory-learning/`；外部测试跳过不作为 live 证据，未改生产部署或发布 npm。
 - 本页只保留当前结论、阻塞与下一项验收。完成项合并进能力表并删除过程叙述；细节维护在对应指南，原始日志留忽略的 `docs/evidence/` 或 CI artifacts，历史查 Git。

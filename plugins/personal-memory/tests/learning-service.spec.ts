@@ -18,17 +18,18 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 
 // Real Cordis, Policy, Memory and native prompt assembly; source/reviewer ports
 // are explicit doubles. The companion integration suite uses real producers.
-async function fixture(options: { prompt?: boolean; allowAdoption?: boolean; task?: boolean } = {}) {
+async function fixture(options: { prompt?: boolean; allowAdoption?: boolean; task?: boolean; maxMutations?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'memory-learning-service-')), ctx = new Context()
   const owner = { authorityId: 'owner-route', authorityHash: 'a'.repeat(64), principalId: 'lark/app/tenant/owner',
     principalRecordId: 'owner-row', principalVersion: 1, workspace: root, agentPreset: 'assistant' }
   const grant: MemoryLearningAdoptionGrant = { authorityId: 'adoption-grant', owner, reviewAuthorityId: 'review-grant',
-    reviewAuthorityDigest: 'e'.repeat(64), expiresAt: Date.now() + 60_000, maxMutations: 10,
+    reviewAuthorityDigest: 'e'.repeat(64), expiresAt: Date.now() + 60_000, maxMutations: options.maxMutations ?? 10,
     maxTotalContentBytes: 4096, maxRecordTtlMs: 60_000, kinds: ['fact', 'experience'], operations: ['add', 'replace', 'remove'] }
   const request: MemoryLearningReviewRequest = { protocol: 'memory-learning-review/v1', operationId: 'op-1',
     extractionSessionId: 'extract-1', owner, source: { inboxId: 'inbox-1', sourceDigest: 'b'.repeat(64), contentDigest: 'c'.repeat(64) },
     mutation: { op: 'add', entry: { kind: 'fact', content: 'Owner says Atlas uses pnpm.' } }, evidenceQuote: 'Atlas uses pnpm.' }
-  const state = { withdrawn: false, unavailable: false, ownerCurrent: true, review: 'approved' as MemoryLearningReviewReceipt['status'] }
+  const state = { withdrawn: false, unavailable: false, ownerCurrent: true, scopeCurrent: true,
+    review: 'approved' as MemoryLearningReviewReceipt['status'] }
   const content = { sourceDigest: request.source.sourceDigest, contentDigest: request.source.contentDigest,
     source: { execution: { modelSelection: { provider: 'supplier', model: 'source-model' }, completedAt: Date.now() } },
     input: { text: 'Atlas uses pnpm.', truncated: false }, reply: { text: 'Understood.', truncated: false } }
@@ -49,7 +50,7 @@ async function fixture(options: { prompt?: boolean; allowAdoption?: boolean; tas
     getTrustedForegroundLearningProjection: () => state.withdrawn ? { triggerOutcomeId: 'outcome-1' } : undefined,
     inspectTrustedTaskOwnerRevision: () => state.withdrawn ? { action: 'withdraw' } : undefined,
     withTrustedCanonicalScopeWriterFence: (_input: unknown, callback: () => unknown) => {
-      expect(locked).toBe(true); return { matched: true, value: callback() }
+      expect(locked).toBe(true); return state.scopeCurrent ? { matched: true, value: callback() } : { matched: false }
     } }
   const reviewer = { lookupMemoryLearningReview: vi.fn((input: MemoryLearningReviewRequest) => {
     expect(locked).toBe(false)
@@ -81,8 +82,53 @@ async function fixture(options: { prompt?: boolean; allowAdoption?: boolean; tas
     inject: message => { injections.push(message) } }
   const render = async () => renderContextSnapshot(await ctx.systemPrompt.assemble({ agent }))
   cleanups.push(async () => { await ctx.fiber.restart(); await rm(root, { recursive: true, force: true }) })
-  return { ctx, owner, grant, request, state, service, agent, reviewer, render, injections }
+  return { ctx, owner, grant, request, state, content, service, agent, reviewer, render, injections }
 }
+
+test('Host target listing rechecks exact owner, source, canonical scope and Policy before returning content', async () => {
+  const f = await fixture()
+  const adopted = f.service.adoptReviewedLearning({ request: f.request })
+  const summary = { id: adopted.record.id, version: adopted.record.version,
+    kind: adopted.record.kind, content: adopted.record.content }
+  expect(f.service.listLearningTargets({ owner: f.owner })).toEqual([summary])
+  expect(f.service.listLearningTargets({ owner: f.owner, limit: 1 })).toEqual([summary])
+  for (const limit of [0, 101, 1.5]) expect(() => f.service.listLearningTargets({ owner: f.owner, limit })).toThrow('limit')
+  expect(() => f.service.listLearningTargets({ owner: { ...f.owner, principalVersion: 2 } })).toThrow('owner changed')
+  f.state.unavailable = true
+  expect(f.service.listLearningTargets({ owner: f.owner })).toEqual([])
+  f.state.unavailable = false
+  f.state.scopeCurrent = false
+  expect(f.service.listLearningTargets({ owner: f.owner })).toEqual([])
+  f.state.scopeCurrent = true
+  f.content.sourceDigest = 'f'.repeat(64)
+  expect(f.service.listLearningTargets({ owner: f.owner })).toEqual([])
+  f.content.sourceDigest = f.request.source.sourceDigest
+  f.state.withdrawn = true
+  expect(f.service.listLearningTargets({ owner: f.owner })).toEqual([])
+  const denied = await fixture({ allowAdoption: false })
+  expect(() => denied.service.listLearningTargets({ owner: denied.owner })).toThrow('policy denied')
+})
+
+test('Host availability is read-only, owner bound and reflects exhausted quota', async () => {
+  const f = await fixture({ maxMutations: 1 })
+  const before = f.service.inspectLearningAdoptionAvailability({ owner: f.owner })
+  expect(before).toMatchObject({ authorityId: f.grant.authorityId, expiresAt: f.grant.expiresAt,
+    remainingMutations: 1, remainingContentBytes: f.grant.maxTotalContentBytes, available: true })
+  expect(before.grantDigest).toBe(growthObjectDigest(f.grant))
+  expect(f.service.inspectLearningAdoptionAvailability({ owner: f.owner })).toEqual(before)
+  expect(() => f.service.inspectLearningAdoptionAvailability({ owner: { ...f.owner, principalVersion: 2 } })).toThrow('owner changed')
+  f.state.ownerCurrent = false
+  expect(() => f.service.inspectLearningAdoptionAvailability({ owner: f.owner })).toThrow('source unavailable')
+  f.state.ownerCurrent = true
+  f.service.adoptReviewedLearning({ request: f.request })
+  const after = f.service.inspectLearningAdoptionAvailability({ owner: f.owner })
+  expect(after).toMatchObject({ remainingMutations: 0, available: false })
+  expect(f.service.listLearningTargets({ owner: f.owner })).toEqual([])
+  expect(after.remainingContentBytes).toBe(f.grant.maxTotalContentBytes - Buffer.byteLength(f.request.mutation.op === 'add' ? f.request.mutation.entry.content : ''))
+  expect(f.service.inspectLearningAdoptionAvailability({ owner: f.owner })).toEqual(after)
+  const denied = await fixture({ allowAdoption: false })
+  expect(() => denied.service.inspectLearningAdoptionAvailability({ owner: denied.owner })).toThrow('policy denied')
+})
 
 test('adopted facts reach fresh native prompt snapshots; temporary failure hides and withdrawal removes them', async () => {
   const f = await fixture(), adopted = f.service.adoptReviewedLearning({ request: f.request })

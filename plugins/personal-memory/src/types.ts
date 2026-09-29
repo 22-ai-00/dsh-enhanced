@@ -1,8 +1,8 @@
 import type { ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
 export type {
-  MemoryLearningAdoptionCommit, MemoryLearningAdoptionGrant, MemoryLearningAdoptionResult,
+  MemoryLearningAdoptionAvailability, MemoryLearningAdoptionCommit, MemoryLearningAdoptionGrant, MemoryLearningAdoptionResult,
   MemoryLearningManagedSource, MemoryLearningReviewReceipt, MemoryLearningSourceInvalidation,
-  MemoryLearningTarget, MemoryLearningTargetInput, MemoryLearningValidatedRef,
+  MemoryLearningTarget, MemoryLearningTargetInput, MemoryLearningTargetSummary, MemoryLearningValidatedRef,
 } from './learning-adoptions.js'
 import type {
   PreferenceMemoryPromotionCancellationReceipt,
