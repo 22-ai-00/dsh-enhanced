@@ -1622,6 +1622,9 @@ importers:
       '@dsh-enhanced/assistant-actions':
         specifier: '>=0.1.0 <0.2.0'
         version: link:../assistant-actions
+      '@dsh-enhanced/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:../../packages/assistant-growth-contract
       '@dsh-enhanced/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract

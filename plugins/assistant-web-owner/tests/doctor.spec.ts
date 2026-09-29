@@ -38,15 +38,33 @@ describe('autonomy doctor profile and persisted owner checks', () => {
     expect(existsSync(profile.stateRoot)).toBe(false)
   })
 
-  it('accepts only the current Delivery schema without migrating an older database', () => {
+  it('accepts reviewed Delivery v24 and v25 owner snapshots without changing either database', () => {
+    const { home, source, databasePath } = fixture()
+    const profile = inspectAutonomyProfile(source, 'web', home)
+    for (const version of [24, 25]) {
+      const db = new DatabaseSync(databasePath)
+      try { db.exec(`PRAGMA user_version=${version}`) } finally { db.close() }
+      const before = readFileSync(databasePath)
+      expect(inspectAutonomyOwner(profile)).toEqual({ status: 'matched' })
+      expect(inspectAutonomyOwner({ ...profile, grant: { ...profile.grant, principalRecordId: 'foreign' } }))
+        .toEqual({ status: 'mismatch' })
+      expect(readFileSync(databasePath)).toEqual(before)
+      const check = new DatabaseSync(databasePath, { readOnly: true })
+      try { expect(check.prepare('PRAGMA user_version').get()?.user_version).toBe(version) } finally { check.close() }
+    }
+  })
+
+  it('rejects unreviewed older and future Delivery schemas without migrating them', () => {
     const { home, source, databasePath } = fixture()
     const profile = inspectAutonomyProfile(source, 'web', home)
     const db = new DatabaseSync(databasePath)
     try {
       expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(deliverySchemaVersion)
-      db.exec(`PRAGMA user_version=${deliverySchemaVersion - 2}`)
-      expect(inspectAutonomyOwner(profile)).toEqual({ status: 'unavailable' })
-      expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(deliverySchemaVersion - 2)
+      for (const version of [deliverySchemaVersion - 2, deliverySchemaVersion + 1]) {
+        db.exec(`PRAGMA user_version=${version}`)
+        expect(inspectAutonomyOwner(profile)).toEqual({ status: 'unavailable' })
+        expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(version)
+      }
     } finally { db.close() }
   })
 

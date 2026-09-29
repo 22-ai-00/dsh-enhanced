@@ -19,6 +19,14 @@ function digest(value: unknown): void { if (typeof value !== 'string' || !D.test
 function reason(value: unknown): void {
   if (typeof value !== 'string' || !value.trim() || value.includes('\0') || Buffer.byteLength(value) > 4096) fail('invalid-input', 'invalid review reason')
 }
+function claimModel(input: ClaimInput): string {
+  id(input.operationId); digest(input.requestDigest); id(input.authorityId); digest(input.authorityDigest)
+  if (!Number.isSafeInteger(input.maxReviews) || input.maxReviews < 1 || input.maxReviews > 10_000) fail('invalid-input', 'invalid review quota')
+  id(input.model.provider); id(input.model.model)
+  if (input.model.reasoningEffort !== undefined) id(input.model.reasoningEffort)
+  return acceptanceCanonicalJson({ provider: input.model.provider, model: input.model.model,
+    ...(input.model.reasoningEffort === undefined ? {} : { reasoningEffort: input.model.reasoningEffort }) })
+}
 function privateFile(path: string): void {
   const stat = lstatSync(path)
   if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0
@@ -65,13 +73,25 @@ export class SourceReviewStore {
     this.#db.exec('BEGIN IMMEDIATE')
     try { const result = callback(); this.#db.exec('COMMIT'); return result } catch (error) { this.#db.exec('ROLLBACK'); throw error }
   }
+  /** Exact receipt read: never creates a claim, consumes quota, or retries a model call. */
+  inspect(input: ClaimInput): Claim | undefined {
+    const model = claimModel(input)
+    if (this.#closed) fail('conflict', 'review database is closed')
+    const row = this.#db.prepare(`SELECT reviews.*, grants.digest AS grant_digest,
+      grants.max AS grant_max, grants.used AS grant_used
+      FROM reviews LEFT JOIN grants ON grants.authority=reviews.authority WHERE operation=?`)
+      .get(input.operationId) as unknown as (ReviewRow & { grant_digest: string | null; grant_max: number | null; grant_used: number | null }) | undefined
+    if (!row) return undefined
+    if (row.request !== input.requestDigest || row.authority !== input.authorityId || row.model !== model
+      || row.grant_digest !== input.authorityDigest || row.grant_max !== input.maxReviews) fail('conflict', 'review binding differs')
+    if (!Number.isSafeInteger(row.grant_used) || row.grant_used! < 1 || row.grant_used! > row.grant_max!) fail('corrupt', 'invalid stored review quota')
+    if (row.state === 'claimed') return { state: 'unknown' }
+    if (row.state !== 'approved' && row.state !== 'rejected') fail('corrupt', 'invalid stored review state')
+    reason(row.reason); digest(row.output)
+    return { state: row.state, result: { reason: row.reason!, outputDigest: row.output! } }
+  }
   claim(input: ClaimInput): Claim {
-    id(input.operationId); digest(input.requestDigest); id(input.authorityId); digest(input.authorityDigest)
-    if (!Number.isSafeInteger(input.maxReviews) || input.maxReviews < 1 || input.maxReviews > 10_000) fail('invalid-input', 'invalid review quota')
-    id(input.model.provider); id(input.model.model)
-    if (input.model.reasoningEffort !== undefined) id(input.model.reasoningEffort)
-    const model = acceptanceCanonicalJson({ provider: input.model.provider, model: input.model.model,
-      ...(input.model.reasoningEffort === undefined ? {} : { reasoningEffort: input.model.reasoningEffort }) })
+    const model = claimModel(input)
     return this.#transaction(() => {
       const grant = this.#db.prepare('SELECT * FROM grants WHERE authority=?').get(input.authorityId) as unknown as GrantRow | undefined
       if (grant && (grant.digest !== input.authorityDigest || grant.max !== input.maxReviews)) fail('conflict', 'authority grant differs')

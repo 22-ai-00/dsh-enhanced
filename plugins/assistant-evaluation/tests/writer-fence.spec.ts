@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { EvaluationStore, EvaluationStoreError } from '../src/store.ts'
 import type {
   EvaluationLearningWriterFence,
@@ -66,6 +67,107 @@ function completeAll(target: EvaluationStore): void {
 }
 
 describe('cross-ledger learning writer fence', () => {
+  test('fences an empty exact scope against the first canonical write and rejects stale watermarks', () => {
+    const database = databasePath()
+    const target = new EvaluationStore({ path: database, now: () => 5_000 })
+    const writer = new EvaluationStore({ path: database, now: () => 5_000 })
+    const probe = new DatabaseSync(database)
+    probe.exec('PRAGMA busy_timeout = 1')
+    try {
+      expect(target.listTaskLearningProjectionFeed(scope, undefined, 1).scopeWatermark).toBe(0)
+      expect(target.withCanonicalScopeWriterFence(scope, { scopeWatermark: 0 }, () => {
+        expect(target.getForegroundLearningProjection(scope, 'absent')).toBeUndefined()
+        // A second real SQLite connection cannot acquire the writer lock,
+        // including while this scope has no canonical rows at all.
+        expect(() => probe.exec('BEGIN IMMEDIATE')).toThrow(/locked/)
+        return 'empty-scope-commit'
+      })).toEqual({ matched: true, value: 'empty-scope-commit' })
+      writer.append(outcome({ objectiveStatus: 'achieved' }))
+      const blocked = vi.fn(() => 'must-not-run')
+      expect(target.withCanonicalScopeWriterFence(scope, { scopeWatermark: 0 }, blocked))
+        .toEqual({ matched: false, reason: 'watermark-changed' })
+      expect(blocked).not.toHaveBeenCalled()
+      expect(target.withCanonicalScopeWriterFence(scope, { scopeWatermark: 1 }, () => 'current'))
+        .toEqual({ matched: true, value: 'current' })
+      expect(target.listPendingProjections(100, 10_000)).toHaveLength(1)
+      expect(target.withCanonicalScopeWriterFence({ ...scope, workspace: '/work/empty-other' }, { scopeWatermark: 0 }, () => 'other'))
+        .toEqual({ matched: true, value: 'other' })
+      for (const watermark of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+        expect(() => target.withCanonicalScopeWriterFence(scope, { scopeWatermark: watermark }, blocked)).toThrow(EvaluationStoreError)
+      }
+      for (const method of ['withLearningWriterFence', 'withCanonicalTaskWriterFence'] as const) {
+        for (const watermark of [0, 1]) {
+          expect(() => target[method](scope, { scopeWatermark: watermark, evidence: [] }, blocked)).toThrow(EvaluationStoreError)
+        }
+      }
+      expect(blocked).not.toHaveBeenCalled()
+    } finally { probe.close(); writer.close(); target.close() }
+  })
+
+  test('rolls back scope-fenced mutations on callback failure and asynchronous results', async () => {
+    const target = new EvaluationStore({ path: databasePath(), now: () => 5_000 })
+    try {
+      const stored = target.append(outcome({ objectiveStatus: 'achieved' }))
+      const scopeWatermark = target.listTaskLearningProjectionFeed(scope, undefined, 1).scopeWatermark
+      const complete = () => expect(target.completeProjection({ evaluationId: stored.id, now: 10_000 })).toBe(true)
+      expect(() => target.withCanonicalScopeWriterFence(scope, { scopeWatermark }, () => {
+        complete()
+        throw new Error('downstream failed')
+      })).toThrow('downstream failed')
+      expect(target.listPendingProjections(100, 10_000)).toHaveLength(1)
+      expect(() => target.withCanonicalScopeWriterFence(scope, { scopeWatermark }, () => {
+        complete()
+        return Promise.resolve('escaped')
+      })).toThrow(EvaluationStoreError)
+      expect(target.listPendingProjections(100, 10_000)).toHaveLength(1)
+      expect(() => target.withCanonicalScopeWriterFence(scope, { scopeWatermark }, () => {
+        complete()
+        // eslint-disable-next-line unicorn/no-thenable -- intentional hostile callback result
+        return { then() {} }
+      })).toThrow(EvaluationStoreError)
+      expect(target.listPendingProjections(100, 10_000)).toHaveLength(1)
+      const rejected = Promise.reject(new Error('callback promise rejected'))
+      expect(() => target.withCanonicalScopeWriterFence(scope, { scopeWatermark }, () => {
+        complete()
+        return rejected
+      })).toThrow(EvaluationStoreError)
+      await Promise.resolve()
+      expect(target.listPendingProjections(100, 10_000)).toHaveLength(1)
+      expect(target.withCanonicalScopeWriterFence(scope, { scopeWatermark }, () => { complete(); return 'committed' }))
+        .toEqual({ matched: true, value: 'committed' })
+      expect(target.listPendingProjections(100, 10_000)).toEqual([])
+    } finally { target.close() }
+  })
+
+  test('rejects function thenables and then getters without evaluating them through every writer fence', () => {
+    const target = new EvaluationStore({ path: databasePath(), now: () => 5_000 })
+    try {
+      const stored = target.append(outcome({ objectiveStatus: 'achieved' }))
+      const receipt = target.getTaskLearningProjection(scope, stored.id)!
+      completeAll(target)
+      const fence = { scopeWatermark: receipt.scopeWatermark, evidence: [{
+        subjectKind: receipt.projection.subjectKind, subjectRef: receipt.projection.subjectRef,
+        version: receipt.projection.version, digest: receipt.projection.digest, disposition: 'upsert' as const,
+      }] }
+      const then = vi.fn()
+      const getter = vi.fn(() => { throw new Error('then getter must never run') })
+      // eslint-disable-next-line unicorn/no-thenable -- intentional hostile function result
+      const functionThenable = Object.assign(() => 'function-value', { then })
+      // eslint-disable-next-line unicorn/no-thenable -- intentional hostile getter result
+      const getterThenable = Object.defineProperty({}, 'then', { get: getter })
+      for (const method of ['withLearningWriterFence', 'withCanonicalTaskWriterFence', 'withCanonicalScopeWriterFence'] as const) {
+        // eslint-disable-next-line unicorn/no-thenable -- even a non-callable then must be rejected without reading it
+        for (const value of [functionThenable, getterThenable, { then: 0 }]) {
+          expect(() => target[method](scope, fence, () => value)).toThrow(EvaluationStoreError)
+        }
+        expect(target[method](scope, fence, () => 'ordinary-sync-value'))
+          .toEqual({ matched: true, value: 'ordinary-sync-value' })
+      }
+      expect(then).not.toHaveBeenCalled()
+      expect(getter).not.toHaveBeenCalled()
+    } finally { target.close() }
+  })
+
   test('distinguishes pending projection, advanced watermark, and changed evidence without entering the callback', () => {
     const target = new EvaluationStore({ path: databasePath(), now: () => 5_000 })
     target.append(outcome({}))

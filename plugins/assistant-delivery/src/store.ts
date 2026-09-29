@@ -91,11 +91,41 @@ import type {
   ModelRouteRef,
   OwnerApprovalForPreferenceInput,
   OwnerRouteAuthority,
+  OwnerForegroundTaskSource,
+  OwnerForegroundTaskSourceScope,
+  OwnerForegroundTaskSourceCursor,
+  OwnerForegroundTaskSourcePage,
+  OwnerForegroundTaskSourceContent,
+  OwnerForegroundTaskSourceText,
   OutboxRecord,
   PairingChallenge,
   PermissionPickerIntent,
   StoredDeliveryPresentation,
 } from './types.js'
+
+interface ForegroundSourceRow {
+  inbox_id: string; workspace: string; preset: string; principal_record_id: string; principal_version: number
+  binding_id: string; binding_version: number; binding_generation: number; dispatched_at: number
+  status: ForegroundExecution['status']; quiescent: number; completed_at: number; execution_ref: string
+  model_selection_state: ForegroundExecution['modelSelectionState']; model_provider: string | null
+  model_id: string | null; model_reasoning_effort: string | null; completion_sequence: number
+}
+
+function foregroundSourceByteLimit(value: number | undefined): number {
+  if (value === undefined) return 16_384
+  if (!Number.isSafeInteger(value) || value < 1 || value > 16_384) {
+    throw new DeliveryStoreError('invalid-binding', 'foreground source byte limit must be between 1 and 16384')
+  }
+  return value
+}
+
+function foregroundSourceText(text: string, limit: number): Readonly<OwnerForegroundTaskSourceText> {
+  const bytes = Buffer.from(text, 'utf8')
+  let end = Math.min(bytes.length, limit)
+  while (end > 0 && end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--
+  return Object.freeze({ text: bytes.subarray(0, end).toString('utf8'), fullTextDigest: createHash('sha256').update(bytes).digest('hex'),
+    returnedBytes: end, fullBytes: bytes.length, truncated: end < bytes.length })
+}
 
 export type DeliveryStoreErrorCode =
   | 'conflict'
@@ -4286,6 +4316,162 @@ export class DeliveryStore {
         return
       }
       if (current.model_selection_state !== 'inconsistent') throw new DeliveryStoreError('conflict', 'foreground execution model selection state is invalid')
+    })
+  }
+
+  private foregroundSourceFence(input: OwnerForegroundTaskSourceScope, authorityInput: OwnerRouteAuthority) {
+    const authority = canonicalOwnerRouteAuthority(authorityInput)
+    const binding = this.getActiveBinding(authority.conversation)
+    const owner = binding === undefined ? undefined : this.getPrincipal(binding.principal)
+    const authorityHash = ownerRouteAuthorityHash(authority)
+    if (input.authorityId !== authority.id || input.principalId !== externalPrincipalId(authority.principal)
+      || input.workspace !== authority.workspace || input.agentPreset !== authority.agentPreset
+      || input.expectedOwner?.authorityHash !== authorityHash
+      || input.expectedOwner.principalRecordId !== owner?.id || input.expectedOwner.principalVersion !== owner?.version
+      || binding?.status !== 'active' || !bindingMatchesOwnerRoute(binding, authority)
+      || owner?.role !== 'owner' || owner.status !== 'active') {
+      throw new DeliveryStoreError('unauthorized-principal', 'foreground source owner authority changed')
+    }
+    // The current binding generation intentionally does not enter this key: /new
+    // retires a Session, not the stable owner's completion cursor.
+    const scopeKey = digest(acceptanceCanonicalJson({ authorityId: authority.id, authorityHash,
+      principalId: input.principalId, principalRecordId: owner.id, principalVersion: owner.version,
+      workspace: authority.workspace, preset: authority.agentPreset }))
+    return { authority, authorityHash, scopeKey }
+  }
+
+  private foregroundSource(row: ForegroundSourceRow, input: OwnerForegroundTaskSourceScope,
+    fence: ReturnType<DeliveryStore['foregroundSourceFence']>): Readonly<OwnerForegroundTaskSource> | undefined {
+    const inbox = this.getInbox(row.inbox_id)
+    const binding = this.getBinding(row.binding_id)
+    if (!inbox || !binding || inbox.bindingId !== row.binding_id
+      || row.workspace !== input.workspace || row.preset !== input.agentPreset
+      || row.principal_record_id !== input.expectedOwner.principalRecordId
+      || row.principal_version !== input.expectedOwner.principalVersion
+      || !bindingMatchesOwnerRoute(binding, fence.authority)
+      || binding.generation !== row.binding_generation
+      || !(binding.status === 'active' && binding.version === row.binding_version
+        || binding.status === 'revoked' && binding.version === row.binding_version + 1)
+      || inbox.admissionCursor.epoch !== this.databaseInstanceId
+      || row.completed_at === null || row.execution_ref !== inbox.id
+      || !Number.isSafeInteger(row.completion_sequence) || row.completion_sequence < 1) return undefined
+    try {
+      const envelope = canonicalEnvelope(inbox.envelope, this.maxTextBytes)
+      if (digest(JSON.stringify(envelope)) !== inbox.envelopeHash
+        || envelope.kind !== 'text' || parseDeliveryCommand({ ...envelope, kind: 'command' }) !== undefined
+        || JSON.stringify(envelope.principal) !== JSON.stringify(binding.principal)
+        || JSON.stringify(envelope.conversation) !== JSON.stringify(binding.conversation)) return undefined
+    } catch { return undefined }
+    const execution: Readonly<ForegroundExecution> = Object.freeze({ dispatchedAt: row.dispatched_at,
+      status: row.status, quiescent: row.quiescent === 1, completedAt: row.completed_at,
+      executionRef: row.execution_ref, modelSelectionState: row.model_selection_state,
+      ...(row.model_selection_state === 'frozen' && row.model_provider && row.model_id ? {
+        modelSelection: Object.freeze({ provider: row.model_provider, model: row.model_id,
+          ...(row.model_reasoning_effort === null ? {} : { reasoningEffort: row.model_reasoning_effort }) }),
+      } : {}) })
+    const content = { protocol: 'assistant-delivery/owner-foreground-source/v1' as const, inboxId: inbox.id,
+      completionSequence: row.completion_sequence, admissionCursor: Object.freeze({ ...inbox.admissionCursor }),
+      authorityId: fence.authority.id, authorityHash: fence.authorityHash, principalId: input.principalId,
+      owner: Object.freeze({ principalRecordId: row.principal_record_id, principalVersion: row.principal_version }),
+      scope: Object.freeze({ workspace: row.workspace, preset: row.preset }),
+      binding: Object.freeze({ id: row.binding_id, version: row.binding_version,
+        generation: row.binding_generation, sessionId: binding.sessionId }), execution }
+    return Object.freeze({ ...content, sourceDigest: digest(acceptanceCanonicalJson({ ...content, envelopeHash: inbox.envelopeHash })) })
+  }
+
+  /** Host-only durable completion feed. Mutable delivery state never hides a completion. */
+  listOwnerForegroundTaskSources(input: OwnerForegroundTaskSourceScope & {
+    after?: Readonly<OwnerForegroundTaskSourceCursor>; limit?: number
+  }, authority: OwnerRouteAuthority): Readonly<OwnerForegroundTaskSourcePage> {
+    this.assertOpen()
+    const limit = input.limit ?? 50
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground source page limit must be between 1 and 100')
+    }
+    return this.transaction(() => {
+      const fence = this.foregroundSourceFence(input, authority)
+      const watermark = (this.database.prepare('SELECT current_sequence FROM delivery_foreground_completion_clock WHERE singleton = 1')
+        .get() as { current_sequence: number }).current_sequence
+      const after = input.after
+      if (after !== undefined && (after.protocol !== 'assistant-delivery/owner-foreground-source-cursor/v1'
+        || after.epoch !== this.databaseInstanceId || after.scopeKey !== fence.scopeKey
+        || !Number.isSafeInteger(after.sequence) || after.sequence < 0 || after.sequence > watermark)) {
+        throw new DeliveryStoreError('invalid-binding', 'foreground source cursor is not bound to this owner and watermark')
+      }
+      const rows = this.database.prepare(`SELECT * FROM delivery_foreground_executions
+        WHERE principal_record_id = ? AND principal_version = ? AND workspace = ? AND preset = ?
+          AND status != 'pending' AND completion_sequence > ? AND completion_sequence <= ?
+        ORDER BY completion_sequence LIMIT ?`).all(input.expectedOwner.principalRecordId,
+          input.expectedOwner.principalVersion, input.workspace, input.agentPreset, after?.sequence ?? 0,
+          watermark, limit + 1) as unknown as ForegroundSourceRow[]
+      const hasMore = rows.length > limit
+      const scanned = rows.slice(0, limit)
+      const items = scanned.flatMap(row => {
+        const source = this.foregroundSource(row, input, fence)
+        return source === undefined ? [] : [source]
+      })
+      const nextCursor = Object.freeze({ protocol: 'assistant-delivery/owner-foreground-source-cursor/v1' as const,
+        epoch: this.databaseInstanceId, scopeKey: fence.scopeKey,
+        sequence: hasMore ? scanned[scanned.length - 1]!.completion_sequence : watermark })
+      return Object.freeze({ items: Object.freeze(items), nextCursor, watermark, hasMore })
+    })
+  }
+
+  /** Content comes from the canonical Inbox/Outbox, with no alternate text ledger. */
+  readOwnerForegroundTaskSource(input: OwnerForegroundTaskSourceScope & {
+    inboxId: string; expectedSourceDigest: string; maxInputBytes?: number; maxReplyBytes?: number
+  }, authority: OwnerRouteAuthority): Readonly<OwnerForegroundTaskSourceContent> | undefined {
+    return this.withForegroundSourceRead(input, authority, content => content)
+  }
+
+  /** Lock order: Delivery, then downstream Evaluation/Memory writer fences. */
+  withOwnerForegroundTaskSourceFence<T>(input: OwnerForegroundTaskSourceScope & {
+    inboxId: string; expectedSourceDigest: string; maxInputBytes?: number; maxReplyBytes?: number
+  }, authority: OwnerRouteAuthority, callback: (source: Readonly<OwnerForegroundTaskSourceContent>) => T): T {
+    if (typeof callback !== 'function') throw new DeliveryStoreError('invalid-binding', 'foreground source callback is invalid')
+    return this.withForegroundSourceRead(input, authority, source => {
+      if (source === undefined) throw new DeliveryStoreError('conflict', 'foreground source is unavailable or changed')
+      const result = callback(source)
+      if (result !== null && (typeof result === 'object' || typeof result === 'function') && 'then' in result) {
+        if (result instanceof Promise) void result.catch(() => {})
+        throw new DeliveryStoreError('invalid-binding', 'foreground source callback must be synchronous')
+      }
+      return result
+    })
+  }
+
+  private withForegroundSourceRead<T>(input: OwnerForegroundTaskSourceScope & {
+    inboxId: string; expectedSourceDigest: string; maxInputBytes?: number; maxReplyBytes?: number
+  }, authority: OwnerRouteAuthority, callback: (source: Readonly<OwnerForegroundTaskSourceContent> | undefined) => T): T {
+    this.assertOpen()
+    const inputLimit = foregroundSourceByteLimit(input.maxInputBytes)
+    const replyLimit = foregroundSourceByteLimit(input.maxReplyBytes)
+    return this.transaction(() => {
+      const fence = this.foregroundSourceFence(input, authority)
+      const row = this.database.prepare(`SELECT * FROM delivery_foreground_executions
+        WHERE inbox_id = ? AND status != 'pending'`).get(input.inboxId) as unknown as ForegroundSourceRow | undefined
+      const source = row === undefined ? undefined : this.foregroundSource(row, input, fence)
+      if (!source || source.sourceDigest !== input.expectedSourceDigest || source.execution.status !== 'succeeded'
+        || !source.execution.quiescent || source.execution.modelSelectionState !== 'frozen'
+        || source.execution.modelSelection === undefined) return callback(undefined)
+      const inbox = this.getInbox(source.inboxId)!
+      const binding = this.getBinding(source.binding.id)!
+      const outbox = this.getOutboxByIdempotencyKey(`inbound:${inbox.id}:reply`)
+      if (!outbox || outbox.intentHash !== digest(JSON.stringify(outbox.intent))) return callback(undefined)
+      const intent = outbox.intent
+      if (intent.bindingId !== binding.id || intent.replyToEventId !== inbox.envelope.eventId
+        || intent.idempotencyKey !== `inbound:${inbox.id}:reply`
+        || JSON.stringify(intent.target.principal) !== JSON.stringify(binding.principal)
+        || JSON.stringify(intent.target.conversation) !== JSON.stringify(binding.conversation)
+        || ![undefined, 'plain', 'markdown'].includes(intent.format)
+        || intent.approval !== undefined || intent.modelPicker !== undefined || intent.permissionPicker !== undefined
+        || Object.keys(intent.metadata ?? {}).length !== 0) return callback(undefined)
+      const inputText = foregroundSourceText(inbox.envelope.text, inputLimit)
+      const reply = Object.freeze({ ...foregroundSourceText(intent.text, replyLimit), outboxId: outbox.id, intentDigest: outbox.intentHash })
+      const contentDigest = digest(acceptanceCanonicalJson({ protocol: 'assistant-delivery/owner-foreground-source-content/v1',
+        sourceDigest: source.sourceDigest, inputDigest: inputText.fullTextDigest,
+        replyDigest: reply.fullTextDigest, outboxId: reply.outboxId, intentDigest: reply.intentDigest }))
+      return callback(Object.freeze({ source, sourceDigest: source.sourceDigest, contentDigest, input: inputText, reply }))
     })
   }
 

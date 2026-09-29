@@ -177,6 +177,10 @@ Host 可通过 `getTrustedAutomationRunLearningProjection({ scope, runId })` 精
 
 `withTrustedCanonicalTaskWriterFence({ scope, scopeWatermark, evidence }, callback)` 是对应的同步 commit fence。它逐项核对 exact subject kind/ref、revision、digest 和 `upsert | retract` disposition，并在 Evaluation writer lock 持有期间执行同步 callback；scope 内任何任务推进 watermark，或该 assessment 被纠正、撤回、替换，都会在 callback 运行前返回 `evidence-changed` / `watermark-changed`。它不等待可选 Evolution projection outbox，因此可让下游在 exact retract 下原子移除旧观察；异步 callback 会失败并回滚。原 `withTrustedCanonicalLearningWriterFence` 继续只接受可推广的 `upsert`，其契约不被放宽。
 
+`getTrustedForegroundLearningProjection({ scope, inboxId })` 按 exact foreground subject 读取当前可信 canonical projection，使用该 subject 已存在的真实 projection outbox trigger；较新的 display primary 即使没有产生学习更新，也不会遮蔽 canonical 状态。返回值仍包含当前 retract 与 scope watermark；缺失或跨 scope 返回 `undefined`。
+
+`withTrustedCanonicalScopeWriterFence({ scope, scopeWatermark }, callback)` 为 Host 来源读取提供精确 scope 的同步 writer exclusion，返回 `{ matched, value }` 或 watermark 拒绝结果。它允许尚无 canonical 行时的 watermark `0`，但空 scope 不证明业务成功，也不提供可信 outcome。callback 必须在锁内重新读取所依赖的当前 projection / owner revision，再同步提交下游事务；Promise / thenable 或 callback 异常会回滚。跨库锁序为 Delivery → Evaluation → Memory / review store，不跨 `await`。该入口不等待可选 Evolution outbox；既有 evidence fences 仍要求非空 evidence 与正 watermark。
+
 ### Owner outcome revisions
 
 Delivery's authenticated capability can explicitly correct or withdraw one exact delivered result. Schema 8 retains immutable raw outcomes, linked owner revisions, provider command receipts (including rejected CAS attempts), and a single canonical task projection. Owner lanes include principal record id and version. Only explicitly linked predecessors are superseded; independent contradictory owner evidence stays quarantined. Withdrawal is an authoritative `unknown` tombstone, so earlier terminal/evaluator success cannot reappear. The revision, digest, audit and projection outbox commit in the same SQLite transaction.

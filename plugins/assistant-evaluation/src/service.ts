@@ -831,6 +831,19 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }, callback)
   }
 
+  /** Host-only scope exclusion for source reads, including an empty canonical scope. */
+  withTrustedCanonicalScopeWriterFence<T>(input: Readonly<{
+    scope: EvaluationHostScope
+    scopeWatermark: number
+  }>, callback: () => T): EvaluationLearningWriterFenceResult<T> {
+    this.assertActive()
+    if (typeof callback !== 'function') {
+      throw new AssistantEvaluationError('invalid-input', 'writer fence callback is required')
+    }
+    return this.store.withCanonicalScopeWriterFence(exactEvaluationHostScope(input.scope),
+      { scopeWatermark: input.scopeWatermark }, callback)
+  }
+
   /** Host-only seam for a memory-assisted/model evaluator; always stored as self-reported. */
   appendSelfAssessment(input: SelfAssessmentInput): StoredSelfAssessment {
     this.assertActive()

@@ -132,6 +132,10 @@ import type {
   ModelSelectionSettlementInput,
   ModelSelectionTerminalResult,
   OwnerRouteAuthority,
+  OwnerForegroundTaskSourceScope,
+  OwnerForegroundTaskSourceCursor,
+  OwnerForegroundTaskSourcePage,
+  OwnerForegroundTaskSourceContent,
   OwnerApprovalForPreferenceInput,
   OwnerApprovalForPreferenceResult,
   OwnerRouteValidationReceipt,
@@ -4643,6 +4647,33 @@ export class AssistantDeliveryService extends Service {
       bindingVersion: resolved.snapshot.bindingVersion,
       generation: resolved.snapshot.generation,
     })
+  }
+
+  /** Host-only durable ordinary-turn metadata; never registered as a model tool. */
+  listOwnerForegroundTaskSources(input: OwnerForegroundTaskSourceScope & {
+    after?: Readonly<OwnerForegroundTaskSourceCursor>; limit?: number
+  }): Readonly<OwnerForegroundTaskSourcePage> {
+    this.assertActive()
+    this.validateOwnerRoute(input)
+    return this.deliveryStore.listOwnerForegroundTaskSources(input, this.ownerRoutes.get(input.authorityId)!)
+  }
+
+  /** Read one exact completed source under the current owner fence. */
+  readOwnerForegroundTaskSource(input: OwnerForegroundTaskSourceScope & {
+    inboxId: string; expectedSourceDigest: string; maxInputBytes?: number; maxReplyBytes?: number
+  }): Readonly<OwnerForegroundTaskSourceContent> | undefined {
+    this.assertActive()
+    this.validateOwnerRoute(input)
+    return this.deliveryStore.readOwnerForegroundTaskSource(input, this.ownerRoutes.get(input.authorityId)!)
+  }
+
+  /** Hold Delivery's owner/source writer fence across synchronous downstream adoption. */
+  withOwnerForegroundTaskSourceFence<T>(input: OwnerForegroundTaskSourceScope & {
+    inboxId: string; expectedSourceDigest: string; maxInputBytes?: number; maxReplyBytes?: number
+  }, callback: (source: Readonly<OwnerForegroundTaskSourceContent>) => T): T {
+    this.assertActive()
+    this.validateOwnerRoute(input)
+    return this.deliveryStore.withOwnerForegroundTaskSourceFence(input, this.ownerRoutes.get(input.authorityId)!, callback)
   }
 
   /** Host-only snapshot of the model selected for this owner's external conversation. */

@@ -28,6 +28,39 @@ async function harness() {
 }
 
 describe('assistant evaluation service', () => {
+  test('exposes an exact Host scope fence without treating empty scope as evidence', async () => {
+    const { automations, ctx, service } = await harness()
+    const scope = service.canonicalHostScope({ workspace: '/work/alpha', preset: 'primary' })
+    expect(service.withTrustedCanonicalScopeWriterFence({ scope, scopeWatermark: 0 }, () => {
+      expect(service.getTrustedForegroundLearningProjection({ scope, inboxId: 'absent' })).toBeUndefined()
+      return 'no-canonical-evidence'
+    })).toEqual({ matched: true, value: 'no-canonical-evidence' })
+    expect(() => service.withTrustedCanonicalScopeWriterFence({
+      scope: { ...scope }, scopeWatermark: 0,
+    }, () => 'forged')).toThrow()
+    for (const method of ['withTrustedLearningWriterFence', 'withTrustedCanonicalLearningWriterFence', 'withTrustedCanonicalTaskWriterFence'] as const) {
+      expect(() => service[method]({ scope, scopeWatermark: 0, evidence: [] }, () => 'empty-evidence')).toThrow()
+    }
+    automations.append({
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      automationId: 'scope-fence', situation: 'automation:scope-fence', runId: 'scope-fence-first',
+      executionMode: 'production', executionStatus: 'succeeded', objectiveStatus: 'achieved', deliveryStatus: 'not-required',
+      metrics: {}, occurredAt: 1_000, idempotencyKey: 'scope-fence:1', evaluatorVersion: 'terminal-v1',
+    })
+    const callback = vi.fn(() => 'stale')
+    expect(service.withTrustedCanonicalScopeWriterFence({ scope, scopeWatermark: 0 }, callback))
+      .toEqual({ matched: false, reason: 'watermark-changed' })
+    expect(callback).not.toHaveBeenCalled()
+    const { scopeWatermark } = service.listTrustedTaskLearningProjections({ scope, limit: 1 })
+    expect(scopeWatermark).toBe(1)
+    expect(service.withTrustedCanonicalScopeWriterFence({ scope, scopeWatermark }, () => 'current'))
+      .toEqual({ matched: true, value: 'current' })
+    await ctx.fiber.restart()
+    contexts.splice(contexts.indexOf(ctx), 1)
+    expect(() => service.withTrustedCanonicalScopeWriterFence({ scope, scopeWatermark }, () => 'disposed'))
+      .toThrowError(expect.objectContaining<Partial<AssistantEvaluationError>>({ code: 'disposed' }))
+  })
+
   test('exposes stable append/query/summary/health methods and closes with its Cordis scope', async () => {
     const { automations, ctx, service } = await harness()
     const stored = automations.append({

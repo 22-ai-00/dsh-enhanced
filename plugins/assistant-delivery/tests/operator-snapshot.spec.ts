@@ -444,6 +444,39 @@ describe('side-effect-free active Lark owner snapshot', () => {
     expect(inspectActiveLarkOwnerBindingsLocally(larkQuery(inactiveOwner.path)).bindings).toEqual([])
   })
 
+  test('reads a real pre-upgrade schema 24 owner snapshot without migrating its database', async () => {
+    const fixture = await larkSeeded()
+    fixture.store.close()
+    const database = new DatabaseSync(fixture.path)
+    try {
+      database.exec(`DROP TRIGGER delivery_foreground_identity_immutable;
+        DROP TRIGGER delivery_foreground_terminal_immutable;
+        DROP TRIGGER delivery_foreground_terminal_delete_immutable;
+        DROP TRIGGER delivery_foreground_completion_after_update;
+        DROP TRIGGER delivery_foreground_completion_after_insert;
+        DROP INDEX delivery_foreground_completion_order;
+        DROP INDEX delivery_foreground_owner_completion_order;
+        ALTER TABLE delivery_foreground_executions DROP COLUMN completion_sequence;
+        DROP TABLE delivery_foreground_completion_clock; PRAGMA user_version=24;`)
+    } finally { database.close() }
+    const paths = [fixture.path, `${fixture.path}-wal`, `${fixture.path}-shm`, `${fixture.path}-journal`]
+    const before = await Promise.all(paths.map(fingerprint))
+    const snapshot = inspectActiveLarkOwnerBindingsLocally(larkQuery(fixture.path))
+    expect(snapshot.schemaVersion).toBe(24)
+    expect(snapshot.bindings).toHaveLength(1)
+    expect(snapshot.bindings[0]!.id).toBe(fixture.binding.id)
+    expect(snapshot.bindings[0]!.owner).toMatchObject({ principal: fixture.principal, role: 'owner', status: 'active' })
+    expect(await Promise.all(paths.map(fingerprint))).toEqual(before)
+    const unchanged = new DatabaseSync(fixture.path, { readOnly: true })
+    try {
+      expect(unchanged.prepare('PRAGMA user_version').get()).toEqual({ user_version: 24 })
+      expect(unchanged.prepare("SELECT name FROM sqlite_schema WHERE name='delivery_foreground_completion_clock'").get()).toBeUndefined()
+      expect(unchanged.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name='delivery_foreground_executions'").all()).toEqual([])
+      expect(unchanged.prepare('PRAGMA table_info(delivery_foreground_executions)').all().map(column => column.name)).not.toContain('completion_sequence')
+      expect(unchanged.prepare("SELECT name FROM sqlite_schema WHERE name='delivery_natural_objective_intents'").get()).toBeDefined()
+    } finally { unchanged.close() }
+  })
+
   test('reads a pre-upgrade schema 23 owner snapshot without migrating its database', async () => {
     const fixture = await larkSeeded()
     fixture.store.close()

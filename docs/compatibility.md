@@ -1,5 +1,9 @@
 # 兼容性基线
 
+## 普通任务完成来源（Delivery schema 25）
+
+v25 增加完成顺序与终态保护，原 owner 身份和只读 owner snapshot 协议不变。Web Owner 诊断显式兼容 v24/v25，安装生命周期接受 v23/v24/v25 的既有 snapshot 协议；未知 schema 继续拒绝。新来源读取与记忆审查须使用同批 Delivery、Evaluation、Verifier 和共享合同，旧读取器不能自动推断兼容。迁移保留历史任务，但历史完成顺序仅为确定性补序，不代表原始提交顺序。
+
 ## 本地源码维护历史（Control Plane schema 28）
 
 schema 28 为冻结本地更新增加独立的源码维护记录，保留 schema 27 的计划、发布收据、部署记录和授权用量。维护记录由既有 Host 身份签名，绑定安装、账本、原始源码基准、更新前后提交与制品摘要，并与原有已签名 release merge 共同形成唯一的源码链。后续源码任务与发布准入都沿这条链解析基准，不能用重置 `initialCommit` 或清空旧记录恢复运行。
