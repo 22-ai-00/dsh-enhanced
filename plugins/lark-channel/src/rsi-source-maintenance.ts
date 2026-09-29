@@ -210,6 +210,7 @@ function validateInput(input: RsiSourceMaintenanceInput): void {
 /** Read a copied or live source through its physical path while all receipts retain logical Home paths. */
 async function readSourceState(input: RsiSourceMaintenanceInput, checkCohort: boolean): Promise<{
   workspace: RsiSourceWorkspace; originalBootstrapDigest: string; records: readonly SourceMaintenanceRecord[]
+  anchor: SourceMaintenanceAnchor
 }> {
   validateInput(input)
   const physicalHome = await realpath(input.physicalHome)
@@ -223,10 +224,12 @@ async function readSourceState(input: RsiSourceMaintenanceInput, checkCohort: bo
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     hasSidecar = false
   }
+  // Resolve the Host signing anchor on every read, including a live Home with no
+  // sidecar, so maintenance producers can extend the chain without re-reading it.
+  const anchor = await trustedAnchor(input.logicalHome, physicalHome, input.profile, saved)
   if (hasSidecar) {
     const parsed: unknown = JSON.parse((await privateFile(sidecar, 4_194_304)).toString('utf8'))
     if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 256) fail('source maintenance chain is invalid')
-    const anchor = await trustedAnchor(input.logicalHome, physicalHome, input.profile, saved)
     records = verifySourceMaintenanceRecords(parsed as SourceMaintenanceRecord[], anchor)
     const first = records[0]!
     if (first.originalBootstrapDigest !== hash(saved.bytes)
@@ -235,11 +238,9 @@ async function readSourceState(input: RsiSourceMaintenanceInput, checkCohort: bo
       records[index - 1]!.candidateTip, records[index]!.previousTip, signal)) {
       fail('source maintenance tip chain differs')
     }
-  } else if (physicalHome !== await realpath(input.logicalHome)) {
-    await trustedAnchor(input.logicalHome, physicalHome, input.profile, saved)
   }
   return { workspace: await repoState(saved, records, input.logicalHome, physicalHome, input.profile, signal, checkCohort),
-    originalBootstrapDigest: hash(saved.bytes), records }
+    originalBootstrapDigest: hash(saved.bytes), records, anchor }
 }
 
 export async function readRsiSourceMaintenance(input: RsiSourceMaintenanceInput): ReturnType<typeof readSourceState> {

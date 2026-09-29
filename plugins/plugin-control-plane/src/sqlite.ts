@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { pathToFileURL } from 'node:url'
 
 export const controlPlaneSchemaVersion = 28
 
@@ -127,7 +128,7 @@ export function controlPlaneOperationReceiptDigest(idempotencyKey: string, opera
 }
 
 export class ControlPlaneDatabaseError extends Error {
-  constructor(readonly code: 'invalid-path' | 'schema-too-new' | 'unsafe-file', message: string) {
+  constructor(readonly code: 'invalid-path' | 'missing' | 'schema-too-new' | 'schema-version' | 'unsafe-file' | 'unsettled-journal', message: string) {
     super(message)
     this.name = 'ControlPlaneDatabaseError'
   }
@@ -1267,6 +1268,45 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       database.exec(`BEGIN IMMEDIATE; ${sourceMaintenanceSchema} PRAGMA user_version = 28; COMMIT;`)
     } else database.exec(sourceMaintenanceSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
+    return database
+  } catch (error) {
+    database.close()
+    throw error
+  }
+}
+
+/**
+ * Open a stopped, checkpointed control-plane ledger strictly for preflight reads.
+ *
+ * Never creates the database, never migrates it, and never changes its journal
+ * mode: a missing or older ledger is evidence that the caller is looking at the
+ * wrong Home rather than a fresh installation to initialize. Immutable SQLite
+ * reads avoid even WAL/SHM creation. They must never run beside a writer: any
+ * nonempty WAL or rollback journal is rejected rather than silently ignored.
+ */
+export function openControlPlaneDatabaseReadOnly(path: string): DatabaseSync {
+  if (!isAbsolute(path)) throw new ControlPlaneDatabaseError('invalid-path', 'plugin-control-plane database path must be absolute')
+  if (!existsSync(path)) throw new ControlPlaneDatabaseError('missing', 'plugin-control-plane database does not exist')
+  assertPrivateRegularFile(path)
+  for (const sidecar of [`${path}-wal`, `${path}-shm`, `${path}-journal`]) {
+    if (!existsSync(sidecar)) continue
+    assertPrivateRegularFile(sidecar)
+    if (!sidecar.endsWith('-shm') && lstatSync(sidecar).size !== 0) {
+      throw new ControlPlaneDatabaseError('unsettled-journal', 'read-only preflight requires a stopped, checkpointed control-plane database')
+    }
+  }
+  const uri = pathToFileURL(path)
+  uri.search = 'immutable=1&mode=ro'
+  const database = new DatabaseSync(uri.href, { readOnly: true })
+  try {
+    database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;')
+    const version = Number((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+    if (version > controlPlaneSchemaVersion) {
+      throw new ControlPlaneDatabaseError('schema-too-new', 'plugin-control-plane database schema is newer than this binary')
+    }
+    if (version !== controlPlaneSchemaVersion) {
+      throw new ControlPlaneDatabaseError('schema-version', 'plugin-control-plane database is not migrated to the current schema')
+    }
     return database
   } catch (error) {
     database.close()

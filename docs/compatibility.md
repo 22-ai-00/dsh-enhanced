@@ -6,6 +6,10 @@ schema 28 为冻结本地更新增加独立的源码维护记录，保留 schema
 
 源码迁移 helper 只修改事务中的 Home 副本，保留原始 bootstrap 和 Git 对象，通过签名 sidecar 解析当前 checkout/version。普通读取与更新候选校验不会重建缺失的资源。旧模块不能读取新维护历史；源码 helper、Control Plane 与后续安装事务必须使用支持同一协议的构建。此协议不单独完成构建资源、owner 配置、profile 包或服务激活迁移，当前普通升级仍保留对冻结本地安装的拒绝，直至完整事务接线。
 
+停服预检的 `ControlPlaneStore({ readOnly: true })` 只接受已存在、已 checkpoint 的当前 schema 账本；使用 SQLite immutable 读取，既不迁移也不创建 WAL/SHM，非空 WAL 或回滚日志必须先由原 Host 对账。它不用于仍有 writer 的运行中账本。源码发布/维护历史在同一快照读取；维护签名生成器比较原 Home 与副本的源码链、激活状态和完整 watched deployment，并验证原 readiness 的 Host 签名。缺 watch、缺账本或读取失败不能退化成无部署锚点。已关闭观察的旧 `activated` 计划仅在同一 profile、具有更早成功 checkpoint 且观察绑定完整时视为历史；当前唯一观察仍须对应最新成功部署。
+
+`stageRsiLocalUpdateResources()` 在同一生命周期锁下重验候选，只替换独立停服副本中的 cohort、源码构建和发布工具链三棵资源树。收据重新绑定逻辑 Home，保留制品与工具链字节、权限、镜像和外部工具摘要，原始 upstream 路径不改为候选临时仓库。返回的 proof 可复核原始树或候选树；进程内失败尝试恢复副本原资源，崩溃仍须由外层事务恢复或丢弃副本。这些内部接口不签发新 owner 授权，也不安装 profile 包或切换服务。
+
 ## 受管 Host 迁移证明（Control Plane schema 27）
 
 v27 增加独立维护记录，原计划、批准、readiness、部署 checkpoint 和 watch 不改写。停服迁移使用原 Host 签名身份将新 executor、unit、profile 与回滚备份关联到原成功部署；读取时验证完整链，物理回退使用迁移后的文件基线。attestor v8 的 schema6 配置验证该关联并为新进程补证，不额外重启、不续期授权、不重置额度。

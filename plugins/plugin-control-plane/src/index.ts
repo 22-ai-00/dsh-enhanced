@@ -38,7 +38,7 @@ export * from './trust.js'
 export type * from './source-job-types.js'
 export { validateSourceBaselineConfig } from './source-baseline.js'
 export type { SourceBaselineConfig } from './source-baseline.js'
-export { parseSourceMaintenanceRecord, signSourceMaintenanceRecord, sourceMaintenanceDigest,
+export { parseSourceMaintenanceRecord, signSourceMaintenanceRecord, sourceBaselineChain, sourceMaintenanceDigest,
   sourceMaintenanceSourceFieldsDigest, verifySourceMaintenanceRecords } from './source-maintenance.js'
 export type { SourceMaintenanceRecord, SourceMaintenanceAnchor } from './source-maintenance.js'
 export type { EnqueueSourceJobInput, SourceJobCaller } from './source-jobs.js'
