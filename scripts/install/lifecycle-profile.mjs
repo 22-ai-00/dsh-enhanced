@@ -5666,6 +5666,8 @@ async function performLifecycle({
       })
     }
     await copyHome(physicalHomePath, stageHome)
+    // cp -a preserves the old root mode; resource migration needs a private stage.
+    if (localSourceMaintenance !== undefined) await chmod(stageHome, 0o700)
     if (serviceContext !== undefined) await assertServiceEnvironmentBindings(services, stageHome)
     const stagedStat = await stat(stageHome)
     manifest = await writeManifest(physicalTransactionRoot, { ...manifest, stagedIdentity: identity(stagedStat) }, 'prepared')

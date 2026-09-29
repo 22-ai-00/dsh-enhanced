@@ -1766,6 +1766,7 @@ process.exit(result.status ?? 99)
 // are covered by lark-channel's source-maintenance and local-package suites.
 async function preOwnerLifecycleFixture() {
   const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+  await chmod(f.dshHome, 0o755)
   await mkdir(join(f.dshHome, 'profiles', 'node_modules'))
   const moduleRoot = join(f.root, 'reviewed-installer')
   for (const directory of ['plugins/lark-channel/lib', 'packages', 'scripts/install', 'node_modules']) await mkdir(join(moduleRoot, directory), { recursive: true })
@@ -1785,7 +1786,10 @@ async function preOwnerLifecycleFixture() {
 import { readFile, writeFile, lstat, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 const kinds = ['rsi-sources','rsi-local-cohorts','rsi-builds','rsi-release-builds','rsi-authorities','rsi-authority-runtimes']
-async function canonicalStage(path) { if(await realpath(path) !== path) throw new Error('stage must be a distinct canonical stopped Home') }
+async function canonicalStage(path) {
+ if(await realpath(path) !== path) throw new Error('stage must be a distinct canonical stopped Home')
+ if((await lstat(path)).mode & 0o077) throw new Error('stage Home must be private')
+}
 export async function readRsiSourceMaintenance(input) {
  await realpath(input.logicalHome)
  const revision = JSON.parse(await readFile(join(input.physicalHome,'rsi-sources',input.profile,'receipt.json'),'utf8')).revision
@@ -9987,6 +9991,7 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     const f = await preOwnerLifecycleFixture()
     const result = runPreOwnerLifecycle(f,'local-service-upgrade')
     expect(result.status,result.stderr).toBe(0)
+    expect((await stat(f.dshHome)).mode & 0o777).toBe(0o700)
     expect(await readFile(join(f.dshHome,'rsi-sources/web/receipt.json'),'utf8')).toContain('new')
     expect(await readFile(join(f.dshHome,'rsi-authority-runtimes/web/receipt.json'),'utf8')).toContain('new')
     expect(JSON.parse(await readFile(join(f.dshHome, 'rsi-authority-runtimes/web/receipt.json'), 'utf8')).logicalSource).toBe(join(f.dshHome, 'profiles/web/node_modules/@dsh-enhanced/plugin-control-plane'))
@@ -10016,6 +10021,7 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     const result = runPreOwnerLifecycle(f,'local-service-upgrade',{packageFails:true})
     expect(result.status).not.toBe(0)
     expect(result.stderr).toContain('fixture package failure')
+    expect((await stat(f.dshHome)).mode & 0o777).toBe(0o755)
     expect(await readFile(join(f.dshHome,'rsi-sources/web/receipt.json'),'utf8')).toContain('old')
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
   },15000)
@@ -10049,6 +10055,7 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     expect(existsSync(f.dshHome)).toBe(false)
     const recovery = runPreOwnerLifecycle(f, 'local-service-recover')
     expect(recovery.status, recovery.stderr).toBe(0)
+    expect((await stat(f.dshHome)).mode & 0o777).toBe(0o755)
     expect(await readFile(join(f.dshHome, 'rsi-sources/web/receipt.json'), 'utf8')).toContain('old')
     expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']?.activeState).toBe('active')
   }, 20000)
