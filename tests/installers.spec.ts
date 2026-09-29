@@ -14,6 +14,7 @@ import { RECOVERY_CATALOG_DIGEST } from '@dsh-enhanced/assistant-recovery'
 import { createSystemdUserUnit, systemdServicePaths } from '../plugins/lark-channel/src/systemd.ts'
 import { classifyLifecycleScenario } from '../scripts/install/lifecycle-config.mjs'
 import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
+import { stageRsiLocalUpdateResources } from '../plugins/lark-channel/src/rsi-local-resources.ts'
 import {
   assertEffectiveSupervisedGrowthConfig,
   configureSupervisedGrowthProfilePatch,
@@ -1784,6 +1785,7 @@ async function preOwnerLifecycleFixture() {
 import { readFile, writeFile, lstat, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 const kinds = ['rsi-sources','rsi-local-cohorts','rsi-builds','rsi-release-builds','rsi-authorities','rsi-authority-runtimes']
+async function canonicalStage(path) { if(await realpath(path) !== path) throw new Error('stage must be a distinct canonical stopped Home') }
 export async function readRsiSourceMaintenance(input) {
  await realpath(input.logicalHome)
  const revision = JSON.parse(await readFile(join(input.physicalHome,'rsi-sources',input.profile,'receipt.json'),'utf8')).revision
@@ -1800,18 +1802,24 @@ export async function verifyRsiLocalInstalledPackages(input) {
 }
 export async function readRsiLocalUpdateLocked() { return {receiptDigest:'b'.repeat(64),source:{root:${JSON.stringify(join(preparationRoot, 'source'))}}} }
 export async function stageRsiLocalUpdateResources(input) {
+ await canonicalStage(input.stagePhysicalHome)
  for(const kind of kinds.slice(1,4)) await writeFile(join(input.stagePhysicalHome,kind,input.profile,'receipt.json'),'{"revision":"new"}')
  return {cohort:{},proof:{}}
 }
-export async function produceRsiLocalSourceMaintenance(input) { if(input.maintenanceMode !== 'pre-owner') throw new Error('wrong mode');return {host:null} }
-export async function applyRsiSourceMaintenanceInStage(input) { await writeFile(join(input.physicalHome,'rsi-sources',input.profile,'receipt.json'),'{"revision":"new"}') }
+export async function produceRsiLocalSourceMaintenance(input) { await canonicalStage(input.stagePhysicalHome); if(input.maintenanceMode !== 'pre-owner') throw new Error('wrong mode');return {host:null} }
+export async function applyRsiSourceMaintenanceInStage(input) { await canonicalStage(input.physicalHome); await writeFile(join(input.physicalHome,'rsi-sources',input.profile,'receipt.json'),'{"revision":"new"}') }
 export async function stageRsiLocalSinglePackages(input) {
  if(process.env.LIFECYCLE_PACKAGE_FAILS === '1') throw new Error('fixture package failure')
  await writeFile(join(input.dshHome,'profiles',input.profile,'pnpm-lock.yaml'),'candidate-lock')
  await writeFile(join(input.dshHome,'profiles',input.profile,'upgraded'),'upgraded\\n')
  return {schemaVersion:1,profile:input.profile,cohortDigest:'c'.repeat(64),files:{}}
 }
-export async function replaceRsiAuthorityRuntimeInStage(input) { await writeFile(join(input.physicalHome,'rsi-authority-runtimes',input.profile,'receipt.json'),'{"revision":"new"}') }
+export async function replaceRsiAuthorityRuntimeInStage(input, source) {
+ await canonicalStage(input.physicalHome)
+ if(!source.packageRoot.startsWith(input.physicalHome + '/')) throw new Error('authority source remap is outside canonical stage')
+ const logicalSource = input.logicalHome + source.packageRoot.slice(input.physicalHome.length)
+ await writeFile(join(input.physicalHome,'rsi-authority-runtimes',input.profile,'receipt.json'),JSON.stringify({revision:'new',logicalSource}))
+}
 export function buildSupervisedGrowthPreviewOverlay() { return '[]\\n' }
 export function assertSupervisedGrowthPreviewDerivation() { return {externalProviderExemptions:['larkChannel']} }
 `
@@ -9901,6 +9909,20 @@ exit 7
 
 
 describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source transaction', () => {
+  test('reproduces the native resource gate for a lock-anchored physical stage alias', async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'local-source-stage-alias-')))
+    temporaryRoots.push(root)
+    const logicalHome = join(root, 'home'), stage = join(root, 'stopped-stage')
+    await mkdir(logicalHome, { mode: 0o700 })
+    await mkdir(stage, { mode: 0o700 })
+    const parent = await open(root, 'r')
+    try {
+      const alias = `/proc/self/fd/${parent.fd}/stopped-stage`
+      expect(await realpath(alias)).toBe(stage)
+      await expect(stageRsiLocalUpdateResources({ logicalHome, stagePhysicalHome: alias, profile: 'assistant', preparationRoot: join(root, 'prepared') }))
+        .rejects.toThrow('stage must be a distinct canonical stopped Home')
+    } finally { await parent.close() }
+  })
   test('accepts large frozen resource binaries within 256MiB while retaining the profile 64MiB limit', async () => {
     const home = await mkdtemp(join(tmpdir(), 'local-source-large-resource-'))
     temporaryRoots.push(home)
@@ -9967,6 +9989,7 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     expect(result.status,result.stderr).toBe(0)
     expect(await readFile(join(f.dshHome,'rsi-sources/web/receipt.json'),'utf8')).toContain('new')
     expect(await readFile(join(f.dshHome,'rsi-authority-runtimes/web/receipt.json'),'utf8')).toContain('new')
+    expect(JSON.parse(await readFile(join(f.dshHome, 'rsi-authority-runtimes/web/receipt.json'), 'utf8')).logicalSource).toBe(join(f.dshHome, 'profiles/web/node_modules/@dsh-enhanced/plugin-control-plane'))
     expect(await readFile(join(f.profileDirectory,'pnpm-lock.yaml'),'utf8')).toBe('candidate-lock')
     expect(await readFile(join(f.dshHome,'sessions/owner-session.jsonl'),'utf8')).toBe('durable-session')
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
