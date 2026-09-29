@@ -20,7 +20,7 @@
 | 能力 | 当前实现与证据边界 | 按需入口 |
 | --- | --- | --- |
 | 日常助手 | 飞书 owner 绑定、普通对话、持久投递、工具审批和固定 T1 偏好学习已有实现；已有本机真实基本对话记录。偏好适配不代表工具/插件自迭代完成。 | [Delivery](../plugins/assistant-delivery/README.md)、[偏好学习](../plugins/preference-learning/README.md) |
-| 持久记忆 | 已有提案、版本、检索和撤销；普通任务来源新增可靠完成游标与有界原文，记忆候选可按有限授权独立审查。自动学习仍主要覆盖固定 T1 偏好；事实/经验自动采用、后续召回与纠错闭环仍缺。 | [Memory](../plugins/personal-memory/README.md)、[记忆审查](../plugins/assistant-verifier/README.md#普通任务记忆候选审查) |
+| 持久记忆 | 已有提案、版本、检索和撤销；普通任务来源、独立审查与有限事实/经验采用已接通，检索重验来源，撤回可清理自动版本，手动版本受保护。普通任务自动提取/调度候选的学习生产者仍缺，尚未验收真实后续任务收益。 | [Memory](../plugins/personal-memory/README.md#有限授权的事实与经验采用)、[记忆审查](../plugins/assistant-verifier/README.md#普通任务记忆候选审查) |
 | 反馈进入成长 | 内置外部渠道支持回复精确结果消息的明确自然反馈（有限语句模式）、纠正/撤回、canonical 去重与来源模型冻结；Growth 通过原生 Automations 持久复盘，生成 owner 绑定的修复依据。工程集成包含模型/传输替身；新增自然反馈入口不覆盖原生 Web、自定义运行时或所有后台任务。 | [Growth Driver](../plugins/assistant-growth-driver/README.md)、[Evaluation](../plugins/assistant-evaluation/README.md) |
 | 候选与独立验证 | 普通反馈可生成现有插件的源码修改，隔离检查、有限批准、独立审查与本地发布阶段已接线；自动创建新插件尚未接通；Skills 有版本化比较及限定任务族的真实留出/canary 证据。通用收益与同预算改善未验收，Skills 仍有逐 Goal 手动 arm 的缺口。 | [源码提案](live-durable-source-proposal.md)、[技能复用](native-skill-reuse.md) |
 | 采用、观察与恢复 | Control Plane 已有跨 Host 交接、reload/readiness、有限试用资格、普通任务归因、重启补证及物理回退组件；内置采用仍重启整个 Host，Cordis 行级动态采用尚未接通。工程测试和分段真实探针不能合并为生产全链证明；严格合同的独立行为/副作用观测仍缺。 | [有限试用合同](bounded-live-adoption.md)、[Control Plane](../plugins/plugin-control-plane/README.md) |
@@ -43,6 +43,6 @@
 
 ## 验证与维护
 
-- 本轮普通任务来源与记忆审查：Delivery 824 项、Evaluation 348 项（10 项跳过）、Verifier 136 项、共享合同 16 项通过；独立静态复核通过，真实 SQLite 双连接验证审查接纳/落盘持有来源锁。原生 AgentLoop 使用模型替身；不证明自动记忆采用、真实模型语义质量或后续收益。
-- 本轮 `VITEST_MAX_WORKERS=4 pnpm check` 完整通过：manifest、零警告 lint、类型、根及全部包测试、干净构建与全部包 dry-run pack。未放宽测试断言或超时；不据此声称默认并发稳定。原始日志放忽略的 `docs/evidence/rsi-memory-learning/`；外部测试跳过不作为 live 证据，未改生产部署或发布 npm。
+- 本轮采用组件的存储、服务、真实 Delivery/Evaluation/Memory 集成测试已通过，覆盖锁、额度、幂等重放、检索与撤回；实际 Verifier 账本回执已对接。审查结论仍用测试 fixture，不证明真实模型语义、自动候选生产或后续收益。
+- 本轮有限记忆采用经独立只读复核，`VITEST_MAX_WORKERS=4 pnpm check` 完整通过：manifest、零警告 lint、类型、根及全部包测试、干净构建与全部包 dry-run pack。原始日志放忽略的 `docs/evidence/rsi-memory-learning/`；外部测试跳过不作为 live 证据，未改生产部署或发布 npm。
 - 本页只保留当前结论、阻塞与下一项验收。完成项合并进能力表并删除过程叙述；细节维护在对应指南，原始日志留忽略的 `docs/evidence/` 或 CI artifacts，历史查 Git。

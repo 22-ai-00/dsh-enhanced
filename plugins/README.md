@@ -21,7 +21,7 @@
 | [assistant-verifier](assistant-verifier) | `@dsh-enhanced/assistant-verifier` | 实验性 | 事前冻结 AgentLoop 任务验收，独立核对结果并记录可信反馈修订。 |
 | [assistant-goals](assistant-goals) | `@dsh-enhanced/assistant-goals` | 实验性 | 按 owner 持久保存原生目标的上下文、下一步和阻塞；跨会话检索，完成状态等待独立验收。 |
 | [preference-learning](preference-learning) | `@dsh-enhanced/preference-learning` | 实验性 | 从有界 typed feedback 形成可衰减偏好假设；只允许 Host 固定目录中的 T1 局部偏好临时生效并自动回滚，不把推断伪装成长期 Memory。 |
-| [personal-memory](personal-memory) | `@dsh-enhanced/personal-memory` | 实验性 | 有界、分域、审批写入的个人助理长期记忆。 |
+| [personal-memory](personal-memory) | `@dsh-enhanced/personal-memory` | 实验性 | 有界、分域的长期记忆，支持手动审批及独立审查后的有限事实/经验采用。 |
 | [personal-wiki](personal-wiki) | `@dsh-enhanced/personal-wiki` | 实验性 | 以 Markdown 为真源、支持中文检索与审批写入的个人知识库。 |
 | [assistant-automations](assistant-automations) | `@dsh-enhanced/assistant-automations` | 实验性 | 单机冷启动持久调度、occurrence/task/run 账本、租约 fencing 与隔离 Agent 执行。 |
 | [personal-assistant](personal-assistant) | `@dsh-enhanced/personal-assistant` | 实验性 | 只组合 Policy、Memory、Wiki、Automations 四核心的保守默认 meta-bundle。 |

@@ -129,7 +129,7 @@ describe('memory evidence ledger', () => {
     })
     store.close()
     const v5 = new DatabaseSync(path)
-    v5.exec('DROP TABLE memory_evidence_anchors; PRAGMA user_version = 5;')
+    v5.exec('DROP TABLE memory_evidence_anchors; DROP TABLE memory_learning_adoptions; PRAGMA user_version = 5;')
     v5.prepare("UPDATE schema_meta SET value = '5' WHERE key = 'schema-version'").run()
     v5.close()
 

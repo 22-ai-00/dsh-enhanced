@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -40,10 +40,10 @@ describe('dsh-enhanced-personal-memory entrypoint', () => {
     expect(manifest.devDependencies).not.toHaveProperty('@dsh-enhanced/preference-learning')
   })
 
-  test('loads the built package root when preference-learning is unavailable', () => {
+  test('loads the built package root when optional learning peers are unavailable', () => {
     const loader = [
       'export async function resolve(specifier, context, nextResolve) {',
-      "  if (specifier === '@dsh-enhanced/preference-learning') {",
+      "  if (['@dsh-enhanced/preference-learning', '@dsh-enhanced/assistant-evaluation', '@dsh-enhanced/assistant-verifier'].includes(specifier)) {",
       "    const error = new Error('blocked optional peer')",
       "    error.code = 'ERR_MODULE_NOT_FOUND'",
       '    throw error',
@@ -82,5 +82,21 @@ describe('dsh-enhanced-personal-memory entrypoint', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  test('the default mounted service waits for Policy and closes on provider removal', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'personal-memory-policy-inject-')), ctx = new Context()
+    const databasePath = join(root, 'memory.sqlite')
+    try {
+      const memory = ctx.plugin(entrypoint.default, { databasePath, reconcileIntervalMs: 0, toolEvidence: false })
+      await memory
+      expect(ctx.get('personalMemory', false)).toBeUndefined()
+      expect(existsSync(databasePath)).toBe(false)
+      const policy = ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [] })
+      await policy; await new Promise(resolve => setImmediate(resolve))
+      expect(ctx.get('personalMemory', false)).toBeDefined()
+      await policy.dispose(); await new Promise(resolve => setImmediate(resolve))
+      expect(ctx.get('personalMemory', false)).toBeUndefined()
+    } finally { await ctx.fiber.dispose(); rmSync(root, { recursive: true, force: true }) }
   })
 })
