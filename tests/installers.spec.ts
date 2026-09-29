@@ -1764,8 +1764,13 @@ process.exit(result.status ?? 99)
 // The outer transaction is real; only trusted installer capability APIs and
 // systemd/bwrap are deterministic fixtures. Real signed-source/package contracts
 // are covered by lark-channel's source-maintenance and local-package suites.
-async function preOwnerLifecycleFixture() {
-  const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+async function preOwnerLifecycleFixture({ baseServices = false }: { baseServices?: boolean } = {}) {
+  const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] }, ...(baseServices ? { readiness: 'host' as const } : {}) })
+  if (baseServices) await writeFile(join(f.dshHome, '.lifecycle-dump-config'), stringify([
+    { id: 'dsh-enhanced-lark-channel', name: '@dsh-enhanced/lark-channel', config: { enabled: true } },
+    { id: 'dsh-enhanced-assistant-recovery', name: '@dsh-enhanced/assistant-recovery', config: { jobs: [] } },
+    { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {} },
+  ]))
   const cachePath = join(f.root, 'pnpm-cache'), storeAlias = join(f.root, 'pnpm-store-alias')
   await mkdir(cachePath, { mode: 0o700 })
   await writeFile(join(cachePath, 'original-cache'), 'original cache', { mode: 0o600 })
@@ -1872,7 +1877,7 @@ const result = spawnSync(command[0], command.slice(1), {`))
   const activationHead = `if [[ " $* " == *' --host 127.0.0.1 --no-open --port 0 '* ]]; then`
   const nativeSource = (await readFile(nativePath, 'utf8')).replace(activationHead, activationHead + `\n  printf 'preview-claimed-job' > "$DSH_HOME/assistant-delivery/preview-queue.json"\n  printf 'preview-session-write' > "$DSH_HOME/sessions/owner-session.jsonl"`)
   const dumpSource = nativeSource.replace('  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"',
-    `  printf '[]\\n' > "$DSH_HOME/profiles/$requested_profile/cordis.yml"\n  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"`)
+    `  printf '[]\\n' > "$DSH_HOME/profiles/$requested_profile/cordis.yml"\n${baseServices ? '  if [[ "$requested_profile" == \'web\' ]]; then cat "$DSH_HOME/.lifecycle-dump-config"; exit 0; fi\n' : ''}  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"`)
   // Keep the shared v3 fake unchanged. This pre-owner fake composes CLI patches
   // by row id and replaces each supplied config as a whole native patch value.
   const composer = join(f.fakeBin, 'pre-owner-config-overlay.cjs')
@@ -10124,6 +10129,23 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     expect(commands.some(command => command.includes('stop'))).toBe(true)
     expect(commands.some(command => command.includes('start'))).toBe(true)
   },15000)
+  test('accepts a pre-owner profile with baseline Recovery and Control Plane services', async () => {
+    const f = await preOwnerLifecycleFixture({ baseServices: true })
+    const config = await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')
+    expect(await classifyLifecycleScenario(config, { dshExecutable: join(f.fakeBin, 'dsh') })).toBe('supervised')
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade')
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(join(f.dshHome, 'rsi-sources/web/receipt.json'), 'utf8')).toContain('new')
+    expect(await readFile(join(f.dshHome, 'rsi-authority-runtimes/web/receipt.json'), 'utf8')).toContain('new')
+    expect(await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')).toBe(config)
+    expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
+    expect(await readFile(join(f.dshHome, 'assistant-delivery/preview-queue.json'), 'utf8')).toBe('{"attempts":0,"pending":["owner-job"]}')
+    const accepted = (await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']!
+    expect(accepted.activeState).toBe('active')
+    expect(accepted.invocationId).toMatch(/^fresh-web-/u)
+    expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
+    expect(await readFile(f.supervisedOperatorLog, 'utf8')).toBe('')
+  }, 20000)
   test('discards activation writes to Delivery, sessions and business databases before deployment', async () => {
     const f = await preOwnerLifecycleFixture()
     const result = runPreOwnerLifecycle(f, 'local-service-upgrade')
