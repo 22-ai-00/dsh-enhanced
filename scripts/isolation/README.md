@@ -67,11 +67,12 @@ node scripts/isolation/build-plugin-verifier-image.mjs \
 
 The builder checks that ID, creates and removes a temporary local tag for
 Docker BuildKit, and returns the verifier image's content ID. Its temporary
-context contains only the root/workspace manifests, lock, Dockerfile and fixed
-worker; it excludes product source, Host mounts, `.npmrc`, credentials and
+context contains only the root/workspace manifests, lock, Dockerfile, fixed
+parent/candidate workers and native observer launcher; it excludes other product source, Host mounts, `.npmrc`, credentials and
 expected behavior. It installs the exact locked Cordis 4.0.2, native tools and
 system prompt 0.1.5-rc.3 packages offline with scripts disabled, and adds
-BusyBox for the isolation supervisor. Debian BusyBox installation is a build
+BusyBox for the isolation supervisor. The build compiles the fixed launcher and
+parent protection library for Linux x64. Debian package installation is a build
 step; the returned image ID pins the completed image. No worker installation or
 package download occurs during verification.
 
@@ -81,6 +82,35 @@ schemas or invoke up to eight fixed tool calls in the isolated worker. It
 reports raw observations or unknown outcomes, not goal success, source approval,
 installation, or adoption. The Host must compare observations with an
 independent acceptance oracle and retain the existing owner/grant fences.
+
+The parent never imports the candidate. It calculates artifact/schema identity
+and environment metadata, validates bounded results from a separate pipe and
+waits for child exit. A fixed native launcher installs seccomp before the child
+loads Node; the parent protection library sets non-dumpable and the parent
+disables SIGUSR1 debugging. Node filesystem permissions are supplementary,
+not the security boundary. No additional Docker capabilities are granted.
+Wire v2 rejects old same-process worker responses; rebuild the image to use the
+new runner. Tool schemas/results remain untrusted black-box output, and process
+cleanup does not establish candidate lifecycle semantics or objective success.
+
+Run the real package/process regressions against the newly built immutable ID:
+
+```sh
+DSH_PLUGIN_OBSERVER_REAL_DOCKER=1 \
+DSH_PLUGIN_OBSERVER_TEST_IMAGE=sha256:<64-hex-verifier-image-id> \
+pnpm --filter @dsh-enhanced/assistant-verifier exec vitest run tests/plugin-behavior-process.spec.ts
+```
+
+These also check the completed image's parent preload without Node permissions
+and its child preload against raw descriptor-reuse execution. The latter uses
+`/usr/bin/cc` to compile a trusted probe and mounts only its private temporary
+directory read-only; candidate packages still run with the ordinary Isolation
+configuration.
+
+Ordinary checks also exercise raw kernel syscall rejection and same-UID parent
+descriptor protection when Linux x64 and `/usr/bin/cc` are available; the
+descriptor-reuse execution probe also requires `/usr/bin/setpriv`. The Docker
+tests are explicit opt-in and their skipped status is not live verification.
 
 ## Nested sandbox profile
 

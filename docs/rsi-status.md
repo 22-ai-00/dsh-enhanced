@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | 日常任务 | owner 绑定、持久投递、工具审批、反馈与原生调度。 | [Delivery](../plugins/assistant-delivery/README.md) |
 | 持久记忆 | 自动提取、独立审查、有限采用、纠正撤回和 unknown 对账；待真实部署及后续任务收益验收。 | [Memory Learning](../plugins/assistant-memory-learning/README.md) |
-| 工程进化 | 插件修改与新插件候选准备；创建绑定真实任务修订、成长模型/预算/会话，并保留制品用于隔离观察。创建仍止于 pending；当前采用仍重启整 Host。 | [Growth](../plugins/assistant-growth-driver/README.md)、[Control Plane](../plugins/plugin-control-plane/README.md) |
+| 工程进化 | 插件修改与新插件候选准备，绑定真实任务、成长模型/预算/会话；候选行为由独立父进程观察，输出仍须外部验收。创建仍止于 pending；当前采用仍重启整 Host。 | [Growth](../plugins/assistant-growth-driver/README.md)、[Control Plane](../plugins/plugin-control-plane/README.md)、[Verifier](../plugins/assistant-verifier/README.md) |
 | 安装恢复 | 冻结安装、owner 配置、双 Host 交接、有限试用与回退；待生产激活。 | [安装](../plugins/lark-channel/docs/rsi-setup.md)、[试用](bounded-live-adoption.md) |
 
 ## 剩余交付顺序
@@ -27,4 +27,4 @@
 
 ## 最新验证
 
-当前来源绑定与恢复改动：根 `pnpm check` 通过（7967 passed、51 skipped；37 包 dry-run pack），检查期间源码冻结一致。新增运行时依赖的 3 包实际打包核对、隔离容器冻结安装检查通过。原始证据在忽略目录 `docs/evidence/rsi-source-growth-run/`；工程 fixture 与跳过的外部测试不证明真实使用闭环。
+当前候选观察进程边界：根 `pnpm check` 通过（7972 passed、58 skipped；37 包 dry-run pack），检查期间源码冻结一致；最终镜像 7 项真实 Docker 回归与 Verifier 实际打包核对通过。原始证据在忽略目录 `docs/evidence/rsi-plugin-process-observer/`；工程 fixture 与跳过的外部测试不证明普通使用闭环。

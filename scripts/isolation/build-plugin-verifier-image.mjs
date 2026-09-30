@@ -74,6 +74,7 @@ try {
   const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
   if (manifest.packageManager !== 'pnpm@11.7.0') throw new Error('unexpected root package manager')
   for (const path of [dockerfile, join(root, 'package.json'), join(root, 'pnpm-lock.yaml'), join(root, 'pnpm-workspace.yaml')]) await copy(path)
+  await copy(join(root, 'scripts/isolation/plugin-observer-launcher.c'))
   for (const folder of ['plugins', 'packages']) {
     for (const entry of await readdir(join(root, folder), { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue
@@ -84,16 +85,23 @@ try {
     }
   }
   const raw = await readFile(source, 'utf8')
-  const begin = '/* DSH_PLUGIN_VERIFIER_WORKER_START\n'
-  const end = '\nDSH_PLUGIN_VERIFIER_WORKER_END */'
-  const first = raw.indexOf(begin)
-  const last = raw.indexOf(end, first + begin.length)
-  if (first < 0 || last < 0 || raw.indexOf(begin, first + 1) >= 0 || raw.indexOf(end, last + 1) >= 0)
-    throw new Error('fixed plugin worker markers invalid')
-  const worker = raw.slice(first + begin.length, last) + '\n'
-  if (Buffer.byteLength(worker) > 32 * 1024) throw new Error('fixed plugin worker too large')
+  function fixedAsset(name) {
+    const begin = `/* DSH_PLUGIN_VERIFIER_${name}_START\n`
+    const end = `\nDSH_PLUGIN_VERIFIER_${name}_END */`
+    const first = raw.indexOf(begin)
+    const last = raw.indexOf(end, first + begin.length)
+    if (first < 0 || last < 0 || raw.indexOf(begin, first + 1) >= 0 || raw.indexOf(end, last + 1) >= 0)
+      throw new Error(`fixed plugin ${name.toLowerCase()} markers invalid`)
+    const content = raw.slice(first + begin.length, last) + '\n'
+    if (Buffer.byteLength(content) > 32 * 1024) throw new Error(`fixed plugin ${name.toLowerCase()} too large`)
+    return content
+  }
+  const worker = fixedAsset('WORKER')
+  const candidate = fixedAsset('CANDIDATE')
   await writeFile(join(context, 'worker.mjs'), worker, { mode: 0o600 })
+  await writeFile(join(context, 'candidate.mjs'), candidate, { mode: 0o600 })
   inventory.push('worker.mjs')
+  inventory.push('candidate.mjs')
   const lockSha256 = createHash('sha256').update(await readFile(join(root, 'pnpm-lock.yaml'))).digest('hex')
   const tag = options.tag || 'dsh-plugin-verifier:' + lockSha256.slice(0, 16) + '-' + randomUUID().slice(0, 8)
   if (await command(['image', 'inspect', '--format', '{{.Id}}', options.sourceImage], true) !== options.sourceImage)
@@ -107,7 +115,11 @@ try {
   const id = await command(['image', 'inspect', '--format', '{{.Id}}', tag], true)
   if (!imagePattern.test(id)) throw new Error('Docker did not return an immutable image ID')
   process.stdout.write(JSON.stringify({ image: id, tag, sourceImage: options.sourceImage, lockSha256,
-    workerSha256: createHash('sha256').update(worker).digest('hex'), contextFiles: inventory.sort() }) + '\n')
+    workerSha256: createHash('sha256').update(worker).digest('hex'),
+    candidateSha256: createHash('sha256').update(candidate).digest('hex'),
+    launcherSourceSha256: createHash('sha256').update(await readFile(join(context, 'scripts/isolation/plugin-observer-launcher.c'))).digest('hex'),
+    dockerfileSha256: createHash('sha256').update(await readFile(join(context, 'scripts/isolation/plugin-verifier.Dockerfile'))).digest('hex'),
+    contextFiles: inventory.sort() }) + '\n')
 } finally {
   if (taggedSource) {
     try { await command(['image', 'rm', temporarySourceTag]) } catch { /* Build failure is already reported. */ }
