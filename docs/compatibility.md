@@ -22,6 +22,8 @@ schema 28 为冻结本地更新增加独立的源码维护记录，保留 schema
 
 `stageRsiLocalUpdateResources()` 在同一生命周期锁下重验候选，只替换独立停服副本中的 cohort、源码构建和发布工具链三棵资源树。收据重新绑定逻辑 Home，保留制品与工具链字节、权限、镜像和外部工具摘要，原始 upstream 路径不改为候选临时仓库。返回的 proof 可复核原始树或候选树；进程内失败尝试恢复副本原资源，崩溃仍须由外层事务恢复或丢弃副本。这些内部接口不签发新 owner 授权，也不安装 profile 包或切换服务。
 
+开发 checkout 的 pre-owner 更新新增显式 `--add-memory-learning`：准备收据 schema 2 和维护证明 v2 只允许在原 roots 上增加 `assistant-memory-learning`；schema 1/v1 保持同 roots 更新。新行必须与固定官方 disabled、无 config、完整 inject 行一致，旧有效配置用包含 YAML 动态标签的 AST 摘要核对，其他 profile 保持原字节摘要。所有候选及恢复检查保留空 owner 权限、签名源码链和原授权资源树；Control Plane 数据库及 DSH/Cordis ABI 不变。此路径不为已有 owner/coordinator 扩根、不开启学习，也不代替真实双 Host 与后续任务验收。
+
 ## 受管 Host 迁移证明（Control Plane schema 27）
 
 v27 增加独立维护记录，原计划、批准、readiness、部署 checkpoint 和 watch 不改写。停服迁移使用原 Host 签名身份将新 executor、unit、profile 与回滚备份关联到原成功部署；读取时验证完整链，物理回退使用迁移后的文件基线。attestor v8 的 schema6 配置验证该关联并为新进程补证，不额外重启、不续期授权、不重置额度。

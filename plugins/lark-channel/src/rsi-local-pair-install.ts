@@ -8,6 +8,8 @@ import type { InstalledRsiDsh } from './rsi-install-inputs.js'
 import { readRsiLocalCohort, verifyRsiLocalInstalledPackages, rsiLocalPeerOverrides, type RsiLocalCohort } from './rsi-local-cohort.js'
 import { installRsiLocalProfile } from './rsi-local-install.js'
 import { assertRsiLocalProfileRoots, rebaseRsiLocalProfileWorkspace } from './rsi-local-profile-update.js'
+import { rsiLocalUpdateBundles, rsiMemoryLearningInitialRow, type RsiLocalRootExtension } from './rsi-local-roots-extension.js'
+import { isMap, isScalar, isSeq, parseDocument } from 'yaml'
 
 const coordinatorBundles = ['assistant-policy', 'assistant-automations', 'plugin-control-plane']
 const hash = (source: string | Buffer): string => createHash('sha256').update(source).digest('hex')
@@ -46,6 +48,7 @@ async function replace(path: string, before: Buffer, after: string): Promise<voi
 interface RsiLocalPackageInput {
   dshHome: string; profile: string; originalCohort: RsiLocalCohort
   dsh: Pick<InstalledRsiDsh, 'path' | 'pin'>; signal: AbortSignal
+  rootExtension?: RsiLocalRootExtension
 }
 
 export async function stageRsiLocalPairPackages(input: RsiLocalPackageInput,
@@ -67,13 +70,54 @@ async function absent(path: string): Promise<boolean> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; throw error }
 }
 
+function assertNoLearnerPatchReference(source: string): void {
+  const document = parseDocument(source, { uniqueKeys: true,
+    customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
+  if (document.errors.length || document.warnings.length || !isSeq(document.contents)) fail('profile patch is invalid')
+  const inspect = (node: unknown): void => {
+    if (isScalar(node) && typeof node.value === 'string'
+      && (node.value.includes(rsiMemoryLearningInitialRow.id) || node.value.includes(rsiMemoryLearningInitialRow.name))) {
+      fail('profile patch already references the memory learner')
+    }
+    if (isMap(node)) for (const pair of node.items) { inspect(pair.key); inspect(pair.value) }
+    if (isSeq(node)) for (const item of node.items) inspect(item)
+  }
+  inspect(document.contents)
+}
+
+function assertExpectedLearnerManifest(before: Buffer, after: Buffer, candidate: RsiLocalCohort): void {
+  const expected = JSON.parse(before.toString('utf8')) as Record<string, unknown>
+  const actual = JSON.parse(after.toString('utf8')) as Record<string, unknown>
+  const name = rsiMemoryLearningInitialRow.name
+  const learner = candidate.packages.find(item => item.name === name && item.bundle)
+  if (!learner) fail('candidate memory learner bundle is absent')
+  const dependencies = actual.dependencies
+  const locator = dependencies && typeof dependencies === 'object' && !Array.isArray(dependencies)
+    ? (dependencies as Record<string, unknown>)[name] : undefined
+  if (typeof locator !== 'string' || !locator.startsWith('file:')) fail('memory learner manifest dependency is missing')
+  const mounted = actual.dsh && typeof actual.dsh === 'object' && !Array.isArray(actual.dsh)
+    ? (actual.dsh as Record<string, unknown>).profile : undefined
+  const bundles = mounted && typeof mounted === 'object' && !Array.isArray(mounted)
+    ? (mounted as Record<string, unknown>).bundles : undefined
+  const oldDsh = expected.dsh as Record<string, unknown>
+  const oldProfile = oldDsh.profile as Record<string, unknown>
+  if (!Array.isArray(bundles) || !Array.isArray(oldProfile.bundles)
+    || !isDeepStrictEqual(bundles, [...oldProfile.bundles, name])) fail('memory learner mounted bundle changed unexpectedly')
+  delete (dependencies as Record<string, unknown>)[name]
+  bundles.pop()
+  if (!isDeepStrictEqual(actual, expected)) fail('owner manifest changed beyond the memory learner root')
+}
+
 async function stageRsiLocalPackages(input: RsiLocalPackageInput,
   dependencies: RsiLocalPairPackagePorts, paired: boolean): Promise<RsiLocalSinglePackageProof> {
   const { dshHome, profile, originalCohort, signal } = input
   signal.throwIfAborted()
+  if (paired && input.rootExtension) fail('paired installation cannot extend bundle roots')
   if (await realpath(dshHome) !== dshHome) fail('Home is not canonical')
   const coordinatorProfile = rsiCoordinatorProfile(profile)
   const candidate = await readRsiLocalCohort({ dshHome, profile })
+  const targetBundles = rsiLocalUpdateBundles(originalCohort.bundles, input.rootExtension)
+  if (!isDeepStrictEqual(candidate.bundles, targetBundles)) fail('candidate cohort bundle roots differ')
   const receiptPath = join(dshHome, `.rsi-coordinator-${hash(profile).slice(0, 16)}.json`)
   const assertSingle = async (): Promise<void> => {
     if (!await absent(receiptPath) || !await absent(join(dshHome, 'profiles', coordinatorProfile))) {
@@ -102,11 +146,14 @@ async function stageRsiLocalPackages(input: RsiLocalPackageInput,
     const manifest = await read('package.json'), patch = await read('cordis.patch.yml')
     const workspace = await read('pnpm-workspace.yaml')
     assertRsiLocalProfileRoots({ source: manifest.toString('utf8'), cohort: originalCohort, bundles })
+    if (input.rootExtension) assertNoLearnerPatchReference(patch.toString('utf8'))
+    const nextBundles = input.rootExtension ? targetBundles : [...bundles]
     const nextWorkspace = rebaseRsiLocalProfileWorkspace({ source: workspace.toString('utf8'), original: originalCohort, candidate, bundles,
+      ...(input.rootExtension ? { rootExtension: input.rootExtension } : {}),
       originalPeers: await rsiLocalPeerOverrides({ cohort: originalCohort, bundles, profilePath: root }),
-      candidatePeers: await rsiLocalPeerOverrides({ cohort: candidate, bundles }) })
+      candidatePeers: await rsiLocalPeerOverrides({ cohort: candidate, bundles: nextBundles }) })
     await dependencies.verify({ cohort: originalCohort, profilePath: root, bundles: [...bundles] })
-    snapshots.push({ name, root, bundles, manifest, patch, workspace, nextWorkspace })
+    snapshots.push({ name, root, bundles: nextBundles, manifest, patch, workspace, nextWorkspace })
   }
   // All old package inventories and both configurations must pass before the
   // first write or package-manager invocation.
@@ -127,9 +174,9 @@ async function stageRsiLocalPackages(input: RsiLocalPackageInput,
     signal.throwIfAborted()
     await dependencies.verify({ cohort: candidate, profilePath: snapshot.root, bundles: [...snapshot.bundles] })
     const manifest = await io.readStable(join(snapshot.root, 'package.json'), 2_097_152)
-    // Tarball locators are stable logical Home paths. Adding the same roots
-    // must not change any owner manifest setting, including native bundle rows.
-    if (!isDeepStrictEqual(JSON.parse(manifest.toString('utf8')), JSON.parse(snapshot.manifest.toString('utf8')))) fail(`owner manifest changed: ${snapshot.name}`)
+    // Native plugin add may introduce only the one explicit pre-owner root.
+    if (input.rootExtension) assertExpectedLearnerManifest(snapshot.manifest, manifest, candidate)
+    else if (!isDeepStrictEqual(JSON.parse(manifest.toString('utf8')), JSON.parse(snapshot.manifest.toString('utf8')))) fail(`owner manifest changed: ${snapshot.name}`)
     assertRsiLocalProfileRoots({ source: manifest.toString('utf8'), cohort: candidate, bundles: snapshot.bundles })
     const patch = await io.readStable(join(snapshot.root, 'cordis.patch.yml'), 2_097_152)
     const workspace = await io.readStable(join(snapshot.root, 'pnpm-workspace.yaml'), 2_097_152)

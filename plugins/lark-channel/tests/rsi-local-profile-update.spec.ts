@@ -5,6 +5,7 @@ import { isMap, isScalar, parseDocument } from 'yaml'
 import type { RsiLocalCohort } from '../src/rsi-local-cohort.js'
 import { mergeRsiLocalOverrides, rsiLocalDependencyOverrides } from '../src/rsi-local-install.js'
 import { assertRsiLocalProfileRoots, rebaseRsiLocalProfileWorkspace } from '../src/rsi-local-profile-update.js'
+import { rsiLocalUpdateBundles, rsiMemoryLearningInitialRow } from '../src/rsi-local-roots-extension.js'
 
 const root = '/private/owner home/rsi-local-cohorts/owner'
 const internal = (slug: string): string => `@dsh-enhanced/${slug}`
@@ -57,6 +58,35 @@ test('same-version byte updates keep identical selectors, paths, configuration a
   const original = cohort(), candidate = structuredClone(original), source = workspace(original)
   candidate.sourceCommit = 'c'.repeat(40); candidate.packages[0]!.sha256 = 'd'.repeat(64)
   expect(rebaseRsiLocalProfileWorkspace({ source, original, candidate })).toBe(source)
+})
+
+test('only the explicit memory extension adds the exact pre-owner roots and frozen workspace edges', () => {
+  const original = cohort()
+  original.bundles = ['assistant-delivery', 'assistant-evaluation', 'assistant-verifier', 'personal-assistant', 'target']
+  for (const slug of original.bundles.filter(value => value !== 'target')) original.packages.push({
+    name: internal(slug), path: `plugins/${slug}`, bundle: true, runtimeDependencies: [],
+    tarball: join(root, 'artifacts', `${slug}.tgz`), sha256: 'b'.repeat(64), files: [],
+  })
+  original.packages.sort((left, right) => left.name.localeCompare(right.name))
+  const candidate = structuredClone(original)
+  candidate.version = '0.1.49'
+  candidate.bundles = rsiLocalUpdateBundles(original.bundles, 'memory-learning')
+  candidate.packages.push({ name: internal('assistant-memory-learning'), path: 'plugins/assistant-memory-learning', bundle: true,
+    runtimeDependencies: [internal('assistant-growth-contract')], tarball: join(root, 'artifacts', 'assistant-memory-learning.tgz'),
+    sha256: 'c'.repeat(64), files: [] })
+  candidate.packages.push({ name: internal('assistant-growth-contract'), path: 'packages/assistant-growth-contract', bundle: false,
+    runtimeDependencies: [], tarball: join(root, 'artifacts', 'assistant-growth-contract.tgz'), sha256: 'c'.repeat(64), files: [] })
+  candidate.packages.sort((left, right) => left.name.localeCompare(right.name))
+  const source = workspace(original)
+  expect(() => rebaseRsiLocalProfileWorkspace({ source, original, candidate, bundles: original.bundles })).toThrow(/identity/u)
+  const next = rebaseRsiLocalProfileWorkspace({ source, original, candidate, bundles: original.bundles,
+    rootExtension: 'memory-learning' })
+  expect(parseDocument(next).toJS().overrides).toMatchObject(rsiLocalDependencyOverrides(candidate, candidate.bundles))
+  expect(next).toContain('# owner settings')
+  expect(rsiMemoryLearningInitialRow.inject).toHaveLength(11)
+  expect(() => rsiLocalUpdateBundles(candidate.bundles, 'memory-learning')).toThrow(/already installed/u)
+  expect(() => rsiLocalUpdateBundles(['target'], 'memory-learning')).toThrow(/provider root/u)
+  expect(rsiLocalUpdateBundles(original.bundles)).toEqual(original.bundles)
 })
 
 test.each(['missing', 'conflicting', 'stale-version', 'unknown-package', 'global-internal', 'unknown-parent'] as const)(

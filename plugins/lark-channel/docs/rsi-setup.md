@@ -117,6 +117,8 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
 dsh-rsi-setup --prepare-local-update --profile web --dsh-home "$HOME/.dsh"
 ```
 
+尚未安装 RSI owner 权限的旧冻结 profile 若缺少 Memory Learning，可在已审核并构建的 checkout 中显式追加 `--add-memory-learning`。它只允许这一根包扩展，生成独立 schema 2 候选；准备前后检查真实 pre-owner 权限与签名历史。后续 checkout 维护事务核验精确新增的默认 disabled、无 config 行及全部原配置，仍不启用 scheduler 或学习。原 schema 1 更新保持原 roots；已有 owner/coordinator 不支持这条扩展。具体命令与恢复边界见[安装器指南](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)。
+
 它从既有冻结收据读取源码路径，固定上游已提交 HEAD 和当前修复分支；两条修复 ref 必须已对齐。可直接快进时复用提交，分叉时在私有新仓库合并；冲突会停止准备并保留原始分支。上游的精确包版本可以不同于已安装版本，未提交修改不进入候选。源码、tarball 及准备收据保存在 Home 同级的私有 `.dsh-rsi-local-updates-<home-hash>/` 内；相同原始制品、上游和修复提交会复用已核验的准备结果，变化则使用另一目录。准备期间上游、原始收据或已安装包变化时不返回成功。
 
 更新构建先用已固定摘要的 manifest-only Docker 构建器准备依赖镜像，再导出独立 Node/pnpm/store/cache。候选的 build/pack 脚本在现有 release adapter 的离线 bubblewrap 环境内运行，只挂载构建副本、输出及只读工具链/依赖，不提供原 Home、原 Git 仓库、凭据或环境变量。此步骤需要与首次构建准备相同的 Linux x64、Docker 和 bubblewrap 支持；没有宿主机直接构建的回退路径。输出 `mode: prepared` 只表示源码和制品已准备，尚未迁移签名源码历史、构建/授权配置或切换服务；当前普通 upgrade 仍拒绝冻结本地安装。尚无 owner/coordinator 的安装可显式使用[本地 checkout 维护事务](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)；已配置 owner 的冻结安装尚不支持完整升级。激活须由停机事务重新核对当前状态，不能把准备收据当作激活授权。

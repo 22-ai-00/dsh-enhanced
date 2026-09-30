@@ -360,7 +360,8 @@ test('pre-owner inspection does not refresh the live Git index when tracked stat
 }, 60_000)
 
 
-test.each(['home-patch', 'home-root', 'profile-root', 'dynamic-row', 'dynamic-config', 'include', 'alternate-format', 'external-overlay'] as const)(
+test.each(['home-patch', 'home-root', 'profile-root', 'dynamic-row', 'dynamic-config', 'include', 'alternate-format', 'external-overlay',
+  'memory-review', 'automatic-memory', 'active-learner', 'configured-learner'] as const)(
   'rejects pre-owner %s configuration outside the target patch', async kind => {
     const f = await fixture(false, true)
     const path = kind === 'home-patch' ? join(f.stage, 'cordis.patch.yml')
@@ -371,6 +372,10 @@ test.each(['home-patch', 'home-root', 'profile-root', 'dynamic-row', 'dynamic-co
     const source = kind === 'dynamic-row' ? '- !!js ({name: "@dsh-enhanced/plugin-control-plane", config: {sourceAdoptions: {}}})\n'
       : kind === 'dynamic-config' ? '- id: dsh-enhanced-plugin-control-plane\n  name: "@dsh-enhanced/plugin-control-plane"\n  config: !!js import("owner-config")\n'
         : kind === 'include' ? '- id: extra-layer\n  name: "@deepseek-ai/cordis-plugin-include"\n  config:\n    url: /outside/owner.yml\n'
+          : kind === 'memory-review' ? '- id: verifier\n  config:\n    memoryReviews: {}\n'
+            : kind === 'automatic-memory' ? '- id: assistant\n  config:\n    personalMemory:\n      automaticLearning: {}\n'
+              : kind === 'active-learner' ? '- id: dsh-enhanced-assistant-memory-learning\n  name: "@dsh-enhanced/assistant-memory-learning"\n'
+                : kind === 'configured-learner' ? '- id: dsh-enhanced-assistant-memory-learning\n  disabled: true\n  config: {}\n'
           : '- id: ordinary-control-plane\n  config:\n    sourceAdoptions: {}\n'
     if (kind !== 'external-overlay') await writeFile(path, source, { mode: 0o600 })
     const beforeLive = await snapshot(f.home), beforeStage = await snapshot(f.stage)

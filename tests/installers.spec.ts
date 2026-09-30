@@ -15,6 +15,7 @@ import { createSystemdUserUnit, systemdServicePaths } from '../plugins/lark-chan
 import { classifyLifecycleScenario } from '../scripts/install/lifecycle-config.mjs'
 import { lifecycleProfileTest } from '../scripts/install/lifecycle-profile.mjs'
 import { stageRsiLocalUpdateResources } from '../plugins/lark-channel/src/rsi-local-resources.ts'
+import { rsiMemoryLearningInitialRow } from '../plugins/lark-channel/src/rsi-local-roots-extension.ts'
 import {
   assertEffectiveSupervisedGrowthConfig,
   configureSupervisedGrowthProfilePatch,
@@ -1764,12 +1765,14 @@ process.exit(result.status ?? 99)
 // The outer transaction is real; only trusted installer capability APIs and
 // systemd/bwrap are deterministic fixtures. Real signed-source/package contracts
 // are covered by lark-channel's source-maintenance and local-package suites.
-async function preOwnerLifecycleFixture({ baseServices = false }: { baseServices?: boolean } = {}) {
+async function preOwnerLifecycleFixture({ baseServices = false, memoryExtension = false }: { baseServices?: boolean; memoryExtension?: boolean } = {}) {
   const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] }, ...(baseServices ? { readiness: 'host' as const } : {}) })
-  if (baseServices) await writeFile(join(f.dshHome, '.lifecycle-dump-config'), stringify([
+  if (baseServices || memoryExtension) await writeFile(join(f.dshHome, '.lifecycle-dump-config'), stringify([
     { id: 'dsh-enhanced-lark-channel', name: '@dsh-enhanced/lark-channel', config: { enabled: true } },
     { id: 'dsh-enhanced-assistant-recovery', name: '@dsh-enhanced/assistant-recovery', config: { jobs: [] } },
     { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {} },
+    ...(memoryExtension ? [{ id: 'dsh-enhanced-personal-assistant', name: '@dsh-enhanced/personal-assistant',
+      config: { assistantAutomations: { schedulerEnabled: false } } }] : []),
   ]))
   const cachePath = join(f.root, 'pnpm-cache'), storeAlias = join(f.root, 'pnpm-store-alias')
   await mkdir(cachePath, { mode: 0o700 })
@@ -1793,10 +1796,16 @@ async function preOwnerLifecycleFixture({ baseServices = false }: { baseServices
   await writeFile(join(moduleRoot, 'pnpm-lock.yaml'), 'fixture-lock', { mode: 0o600 })
   const preparationRoot = join(f.root, 'prepared-update')
   await mkdir(preparationRoot)
-  for (const kind of ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']) {
+  for (const kind of ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authority-runtimes']) {
     await mkdir(join(f.dshHome, kind, 'web'), { recursive: true, mode: 0o700 })
     await writeFile(join(f.dshHome, kind, 'web', 'receipt.json'), '{"revision":"old"}', { mode: 0o600 })
   }
+  const preOwnerAuthority = join(f.dshHome, 'rsi-authorities', 'web')
+  for (const name of ['config', 'identities', 'registry', 'state']) {
+    await mkdir(join(preOwnerAuthority, name), { recursive: true, mode: 0o700 })
+  }
+  await writeFile(join(preOwnerAuthority, 'bootstrap.json'), '{"revision":"old"}', { mode: 0o600 })
+  await writeFile(join(preOwnerAuthority, 'catalog.json'), '{"schemaVersion":1,"entries":[]}', { mode: 0o600 })
   const source = `
 import { readFile, writeFile, lstat, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -1819,7 +1828,8 @@ export async function verifyRsiLocalInstalledPackages(input) {
  const value = await readFile(join(input.profilePath,'node_modules/@dsh-enhanced/plugin-control-plane/lib/entry.js'),'utf8')
  if(value !== 'approved-package-bytes') throw new Error('installed package file differs')
 }
-export async function readRsiLocalUpdateLocked() { return {receiptDigest:'b'.repeat(64),source:{root:${JSON.stringify(join(preparationRoot, 'source'))}}} }
+export async function readRsiLocalUpdateLocked() { return {receiptDigest:'b'.repeat(64),source:{root:${JSON.stringify(join(preparationRoot, 'source'))}},
+ ...(${JSON.stringify(memoryExtension)} ? {schemaVersion:2,extension:'memory-learning'} : {})} }
 export async function stageRsiLocalUpdateResources(input) {
  await canonicalStage(input.stagePhysicalHome)
  for(const kind of kinds.slice(1,4)) await writeFile(join(input.stagePhysicalHome,kind,input.profile,'receipt.json'),'{"revision":"new"}')
@@ -1828,11 +1838,14 @@ export async function stageRsiLocalUpdateResources(input) {
 export async function produceRsiLocalSourceMaintenance(input) { await canonicalStage(input.stagePhysicalHome); if(input.maintenanceMode !== 'pre-owner') throw new Error('wrong mode');return {host:null} }
 export async function applyRsiSourceMaintenanceInStage(input) { await canonicalStage(input.physicalHome); await writeFile(join(input.physicalHome,'rsi-sources',input.profile,'receipt.json'),'{"revision":"new"}') }
 export async function stageRsiLocalSinglePackages(input) {
+ if(input.rootExtension !== ${JSON.stringify(memoryExtension ? 'memory-learning' : null)}${memoryExtension ? '' : ' && input.rootExtension !== undefined'}) throw new Error('frozen memory extension was not passed to package staging')
  if(process.env.pnpm_config_frozen_store !== 'false' || process.env.pnpm_config_offline !== 'true'
   || process.env.pnpm_config_ignore_scripts !== 'true' || process.env.pnpm_config_ignore_pnpmfile !== 'true') throw new Error('unsafe private package cache configuration')
  await writeFile(join(process.env.pnpm_config_store_dir,'package-install-marker'),'private store mutation')
  await writeFile(join(process.env.pnpm_config_cache_dir,'package-install-marker'),'private cache mutation')
  if(process.env.LIFECYCLE_PACKAGE_FAILS === '1') throw new Error('fixture package failure')
+ ${memoryExtension ? `await writeFile(join(input.dshHome,'.lifecycle-dump-config'),
+   (await readFile(join(input.dshHome,'.lifecycle-dump-config'),'utf8')) + ${JSON.stringify(stringify([rsiMemoryLearningInitialRow]))})` : ''}
  await writeFile(join(input.dshHome,'profiles',input.profile,'pnpm-lock.yaml'),'candidate-lock')
  await writeFile(join(input.dshHome,'profiles',input.profile,'upgraded'),'upgraded\\n')
  return {schemaVersion:1,profile:input.profile,cohortDigest:'c'.repeat(64),files:{}}
@@ -1846,8 +1859,10 @@ export async function replaceRsiAuthorityRuntimeInStage(input, source) {
 export function buildSupervisedGrowthPreviewOverlay() { return '[]\\n' }
 export function assertSupervisedGrowthPreviewDerivation() { return {externalProviderExemptions:['larkChannel']} }
 `
-  for (const name of ['rsi-local-update','rsi-local-resources','rsi-source-maintenance','rsi-local-activation','rsi-local-pair-install','rsi-local-cohort','rsi-authority-runtime','supervised-growth-profile']) {
-    await writeFile(join(moduleRoot, 'plugins/lark-channel/lib', `${name}.js`), name === 'rsi-local-activation' ? source : 'export {}\n', { mode: 0o600 })
+  for (const name of ['rsi-local-update','rsi-local-resources','rsi-source-maintenance','rsi-local-activation','rsi-local-pair-install','rsi-local-roots-extension','rsi-local-cohort','rsi-authority-runtime','supervised-growth-profile']) {
+    await writeFile(join(moduleRoot, 'plugins/lark-channel/lib', `${name}.js`), name === 'rsi-local-activation' ? source
+      : name === 'rsi-local-roots-extension' ? `export const rsiMemoryLearningInitialRow = ${JSON.stringify(rsiMemoryLearningInitialRow)}\n`
+        : 'export {}\n', { mode: 0o600 })
   }
   // This fake namespace remaps JSON locators just as a real bwrap Home mount
   // does. The production helper has no environment-controlled test seam.
@@ -1877,7 +1892,7 @@ const result = spawnSync(command[0], command.slice(1), {`))
   const activationHead = `if [[ " $* " == *' --host 127.0.0.1 --no-open --port 0 '* ]]; then`
   const nativeSource = (await readFile(nativePath, 'utf8')).replace(activationHead, activationHead + `\n  printf 'preview-claimed-job' > "$DSH_HOME/assistant-delivery/preview-queue.json"\n  printf 'preview-session-write' > "$DSH_HOME/sessions/owner-session.jsonl"`)
   const dumpSource = nativeSource.replace('  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"',
-    `  printf '[]\\n' > "$DSH_HOME/profiles/$requested_profile/cordis.yml"\n${baseServices ? '  if [[ "$requested_profile" == \'web\' ]]; then cat "$DSH_HOME/.lifecycle-dump-config"; exit 0; fi\n' : ''}  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"`)
+    `  printf '[]\\n' > "$DSH_HOME/profiles/$requested_profile/cordis.yml"\n${baseServices || memoryExtension ? '  if [[ "$requested_profile" == \'web\' ]]; then cat "$DSH_HOME/.lifecycle-dump-config"; exit 0; fi\n' : ''}  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE"`)
   // Keep the shared v3 fake unchanged. This pre-owner fake composes CLI patches
   // by row id and replaces each supplied config as a whole native patch value.
   const composer = join(f.fakeBin, 'pre-owner-config-overlay.cjs')
@@ -10134,6 +10149,27 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     expect(commands.some(command => command.includes('stop'))).toBe(true)
     expect(commands.some(command => command.includes('start'))).toBe(true)
   },15000)
+  test('applies the frozen learner-root extension through the stopped transaction and fresh service acceptance', async () => {
+    // Only systemd, package installation and native config composition are fixture ports.
+    const f = await preOwnerLifecycleFixture({ baseServices: true, memoryExtension: true })
+    const original = await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')
+    const result = runPreOwnerLifecycle(f, 'local-service-upgrade')
+    expect(result.status, result.stderr).toBe(0)
+    const rows = parse(await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')) as Record<string, unknown>[]
+    expect(rows.slice(0, -1)).toEqual(parse(original))
+    expect(rows.at(-1)).toEqual(rsiMemoryLearningInitialRow)
+    expect(await readFile(join(f.dshHome, 'rsi-sources/web/receipt.json'), 'utf8')).toContain('new')
+    expect(await readFile(join(f.profileDirectory, 'pnpm-lock.yaml'), 'utf8')).toBe('candidate-lock')
+    expect(await readFile(join(f.dshHome, 'sessions/owner-session.jsonl'), 'utf8')).toBe('durable-session')
+    expect(await readFile(join(f.dshHome, 'assistant-delivery/preview-queue.json'), 'utf8')).toBe('{"attempts":0,"pending":["owner-job"]}')
+    const database = new DatabaseSync(join(f.dshHome, 'assistant-goals', 'web.sqlite'))
+    try { expect(database.prepare('SELECT value FROM goals').all()).toEqual([{ value: 'durable-goal-state' }]) }
+    finally { database.close() }
+    const accepted = (await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']!
+    expect(accepted.activeState).toBe('active')
+    expect(accepted.invocationId).toMatch(/^fresh-web-/u)
+    expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
+  }, 20000)
   test('accepts a pre-owner profile with baseline Recovery and Control Plane services', async () => {
     const f = await preOwnerLifecycleFixture({ baseServices: true })
     const config = await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')
