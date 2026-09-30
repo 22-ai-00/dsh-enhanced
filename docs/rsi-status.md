@@ -1,6 +1,6 @@
 # RSI 当前状态
 
-更新：2026-09-30。默认只读本页和当前任务相关的 README；验收按需查[合同](rsi-acceptance.md)，完成项与历史探针查 Git。
+更新：2026-09-30。本页是唯一进展入口；默认只加载本页和当前任务相关的 README。完成细节查 Git，验收条件按需查[合同](rsi-acceptance.md)。
 
 ## 唯一目标
 
@@ -10,21 +10,20 @@
 
 **完整普通使用闭环尚未验收，npm 发布门未满足。**
 
-## 当前能力边界
+## 当前边界与阻塞
 
 | 能力 | 已有实现与剩余边界 | 按需入口 |
 | --- | --- | --- |
-| 日常任务 | owner 绑定、持久投递、工具审批、反馈与原生调度。 | [Delivery](../plugins/assistant-delivery/README.md) |
-| 持久记忆 | 自动提取、独立审查、有限采用、纠正撤回和 unknown 对账；待真实部署及后续任务收益验收。 | [Memory Learning](../plugins/assistant-memory-learning/README.md) |
-| 工程进化 | 插件修改与新插件候选准备，绑定真实任务、成长模型/预算/会话；候选行为由独立父进程观察，输出仍须外部验收。创建仍止于 pending；当前采用仍重启整 Host。 | [Growth](../plugins/assistant-growth-driver/README.md)、[Control Plane](../plugins/plugin-control-plane/README.md)、[Verifier](../plugins/assistant-verifier/README.md) |
-| 安装恢复 | 冻结安装、owner 配置、双 Host 交接、有限试用与回退；待生产激活。 | [安装](../plugins/lark-channel/docs/rsi-setup.md)、[试用](bounded-live-adoption.md) |
+| 任务与记忆 | 任务反馈、原生调度和记忆学习已有实现；记忆对后续真实决策的收益待验收。 | [Delivery](../plugins/assistant-delivery/README.md)、[Memory](../plugins/assistant-memory-learning/README.md) |
+| 工程进化 | 已能准备任务绑定的插件候选并隔离观察行为；新插件仍停在 pending，独立验收与有限采用未贯通，采用仍重启整 Host。 | [Growth](../plugins/assistant-growth-driver/README.md)、[Control Plane](../plugins/plugin-control-plane/README.md)、[Verifier](../plugins/assistant-verifier/README.md) |
+| 部署 | 安装、双 Host 交接与回退已有组件；普通使用闭环待部署验收。 | [安装](../plugins/lark-channel/docs/rsi-setup.md)、[试用](bounded-live-adoption.md) |
 
-## 剩余交付顺序
+## 下一次验收
 
-1. **新插件独立行为验收与有限签名采用。** 验收规则在候选写权限之外，审批绑定真实来源和精确制品；初始授权后能自动推进普通任务产生的候选。
-2. **Cordis 动态加载与使用后观察。** 完成真实 Host 的动态装卸、后续任务复用、退化回滚和源码 unknown 自动资源对账；消除 Skills 逐 Goal 手动 arm。
-3. **普通使用部署验收并发布。** 双 Host 在 owner 授权与预算下验证记忆/工程改进、后续收益、纠正撤回、重启及 unknown 恢复；通过后[发布 npm](releasing.md)。
+**打通普通任务产生的新插件候选的独立验收与有限签名采用。** 规则必须在候选写权限之外冻结，凭证绑定当前任务修订与精确制品，纠正、撤回和 unknown 不得复用旧成功。验收接线正在开发，尚未交付。
+
+随后完成 Cordis 动态装卸、后续任务复用与退化回滚，消除逐 Goal 手动 arm；最终以真实普通使用验证记忆和工程收益、重启恢复与 unknown 对账，通过[发布门](releasing.md)后再发布 npm。
 
 ## 最新验证
 
-当前候选观察进程边界：根 `pnpm check` 通过（7972 passed、58 skipped；37 包 dry-run pack），检查期间源码冻结一致；最终镜像 7 项真实 Docker 回归与 Verifier 实际打包核对通过。原始证据在忽略目录 `docs/evidence/rsi-plugin-process-observer/`；工程 fixture 与跳过的外部测试不证明普通使用闭环。
+已交付代码基线 `bd52b8e`：根 `pnpm check`、37 包打包检查及 7 项真实 Docker 回归通过。未提交的验收开发不在此结论内；局部验证和跳过的外部测试不证明普通使用闭环。
