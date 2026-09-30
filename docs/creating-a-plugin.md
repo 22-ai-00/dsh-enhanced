@@ -22,12 +22,14 @@ pnpm create:plugin my-plugin
 - DSH 宿主提供的 Cordis/service 包同时出现在 peer 与开发依赖中。
 - 插件自己运行时必须携带的库放在 dependencies 中。
 
+默认模板为原生 Tools 声明可选 Host peer 与固定 catalog 开发依赖，便于自动创建的候选在受限 `src/` 中实现工具；无工具的默认入口仍不需要 Tools 服务。工具实现与输出合同示例见生成包的 README。依赖由 Host 模板决定，自动创建候选不能修改 manifest 或 lockfile。
+
 ## 3. 实现 Cordis 插件
 
 入口通常导出 `name`、`version`、可选的 `inject` / `Config`，以及 `apply(ctx, config)`。生成的 `src/version.ts` 由仓库发版命令同步维护，不要在其他源码中重复硬编码包版本。遵循以下约束：
 
 - 用 `inject` 表达所需服务，让 Cordis 决定激活时机。
-- 可能因部署不同而变化的值进入 Schemastery `Config`，并在加载时校验。
+- 可能因部署不同而变化的值进入同步 Standard-Schema `Config`，并在加载时校验。
 - 计时器、watcher、连接、外部进程等资源必须由 Cordis effect/disposer 释放，保证热重载和关闭可靠。
 - 进入模型的内容必须沿 DSH 的持久事件/上下文 seam 注册，不能只保存在不可重放的进程内状态。
 - Patch 覆盖已有行时会替换整段 `config`，不是深合并；必须重述该行需要保留的键。

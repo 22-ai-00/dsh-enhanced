@@ -14,6 +14,8 @@ v25 增加完成顺序与终态保护，原 owner 身份和只读 owner snapshot
 
 ## 自动创建插件候选（Control Plane schema 29）
 
+当前制品留存账本为 schema 30，升级保留旧计划，但不补写旧制品或创建验收权限；停下旧 writer，并同步升级共享账本的 Host/CLI。新生成模板将原生 `@deepseek-ai/dsh-tools` 声明为可选 Host peer（`>=0.1.5-rc.3 <0.1.6`）与固定 catalog 开发依赖，不新增 DSH/Cordis ABI 或创建 grant 权限。无工具入口不加载该 peer；候选实现工具时须声明实际必需注入。模板变更由冻结的 generatorDigest 与源码基准识别，已有 pending 计划继续沿原基准核验，不换用新模板。
+
 schema 29 在原源码计划中增加 `prepared-create` 与冻结创建授权，并独立持久计量创建用量。升级保持 schema 28 的旧 `create` / `modify` 行、计划摘要、收据和引用不变，不回填创建权限。旧二进制不能打开新账本；停下旧写者，并同步升级共享账本的 Host、CLI 与签名器。只读维护入口要求当前 schema，不能用旧程序打开已升级副本。
 
 创建构建须使用保留已验证基线 lock 的新版 source builder 镜像；Host 精确复核新 importer 后，还须匹配镜像内基线锁 SHA。旧镜像缺少基线文件、基线变动或输入回执不匹配时拒绝创建，须通过现有候选构建流程准备新镜像；不自动重置旧 bootstrap 回执。普通修改保持原 pnpm 策略。安装器的 Dockerfile 白名单与镜像构建脚本须同批升级，实际构建权限和限制见[构建器说明](../scripts/isolation/README.md)。
