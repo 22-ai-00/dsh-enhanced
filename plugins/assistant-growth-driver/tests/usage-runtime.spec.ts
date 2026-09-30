@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
-import { SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
+import { SourceGrowthRunUnavailableError, type CreationAcceptanceAuthorityRef } from '@dsh-enhanced/assistant-growth-contract'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
@@ -53,9 +53,11 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
       : { provider: 'fixed', model: 'repair' } : {}),
     usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(root, 'usage.sqlite'), maxPending: options.maxPending ?? 16 } })
   const review = vi.fn<(input: UsageReviewInput) => Promise<UsageReviewResult>>(async input => { input.assertCurrent(); return 'reviewed' })
+  let currentCreationAuthority: CreationAcceptanceAuthorityRef | undefined
   const runtimes: UsageLearningRuntime[] = []
   const create = (selectedConfig = config) => {
-    const runtime = new UsageLearningRuntime(selectedConfig, { evaluation, automations, delivery, review })
+    const runtime = new UsageLearningRuntime(selectedConfig, { evaluation, automations, delivery, review,
+      inspectCreationAcceptanceAuthority: () => currentCreationAuthority })
     runtimes.push(runtime); runtime.start(); return runtime
   }
   const append = (task = 'task', status: 'achieved' | 'not-achieved' | 'unknown' = 'not-achieved') => producer.append({
@@ -72,7 +74,8 @@ async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missi
     for (let i = 0; i < 3; i += 1) { await automations.tick(); await automations.whenIdle() }
   }
   cleanup.push(async () => { for (const runtime of runtimes) await runtime.close(); producer.close(); await ctx.fiber.restart(); await rm(root, { recursive: true, force: true }) })
-  return { ctx, root, config, owner, policy, evaluation, automations, sourceModel, review, create, append, tick }
+  return { ctx, root, config, owner, policy, evaluation, automations, sourceModel, review, create, append, tick,
+    setCreationAuthority: (value: CreationAcceptanceAuthorityRef | undefined) => { currentCreationAuthority = value } }
 }
 
 function actualSourceRun(input: UsageReviewInput) {
@@ -134,6 +137,52 @@ test('binds only the claimed native occurrence, permits exact replay, rejects co
   expect(second.inspectSourceGrowthRun({ runId, intentDigest })).toEqual(before)
   await second.close()
   expect(() => second.inspectSourceGrowthRun({ runId, intentDigest })).toThrow(SourceGrowthRunUnavailableError)
+})
+
+test('recovers only the exact policy bound before generation and never retrofits a legacy run', async () => {
+  const f = await fixture()
+  const authority: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1',
+    authorityId: 'owner-policy', keyId: 'owner-key', authorityDigest: '9'.repeat(64),
+    namePrefix: 'assistant-', expiresAt: Date.now() + 60_000 }
+  f.setCreationAuthority(authority)
+  f.append(); const first = f.create()
+  let runId = ''; let intentDigest = ''
+  f.review.mockImplementationOnce(async input => {
+    runId = input.id; intentDigest = input.intentDigest
+    f.setCreationAuthority({ ...authority, authorityDigest: '8'.repeat(64) })
+    expect(() => input.bindSourceRun({ ...actualSourceRun(input), creationAcceptance: authority })).toThrow(/authority changed/)
+    f.setCreationAuthority(authority)
+    const bound = input.bindSourceRun({ ...actualSourceRun(input), creationAcceptance: authority })
+    expect(bound.creationAcceptance).toEqual(authority)
+    expect(first.inspectSourceGrowthRun({ runId, intentDigest })).toEqual(bound)
+    expect(() => input.bindSourceRun(actualSourceRun(input))).toThrow(/conflict/)
+    return 'reviewed'
+  })
+  await f.tick()
+  await first.close()
+  const recovered = f.create()
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })?.creationAcceptance).toEqual(authority)
+  f.setCreationAuthority({ ...authority, authorityDigest: '8'.repeat(64) })
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+  f.setCreationAuthority(undefined)
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+  f.setCreationAuthority(authority)
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(authority.expiresAt + 1)
+  expect(recovered.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+  vi.useRealTimers()
+  await recovered.close()
+
+  const old = await fixture(); old.append(); const legacy = old.create()
+  let oldId = ''; let oldDigest = ''
+  old.review.mockImplementationOnce(async input => {
+    oldId = input.id; oldDigest = input.intentDigest
+    input.bindSourceRun(actualSourceRun(input))
+    return 'reviewed'
+  })
+  await old.tick()
+  old.setCreationAuthority(authority)
+  expect(legacy.inspectSourceGrowthRun({ runId: oldId, intentDigest: oldDigest })).not.toHaveProperty('creationAcceptance')
 })
 
 test('fixed override records its origin even if the owner task selected the same model and invalidates on owner rotation', async () => {

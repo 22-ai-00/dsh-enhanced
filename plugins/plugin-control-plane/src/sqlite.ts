@@ -4,7 +4,20 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 31
+export const controlPlaneSchemaVersion = 32
+
+const sourceCreationVerificationSchema = `CREATE TABLE IF NOT EXISTS source_creation_verifications (
+  plan_id TEXT PRIMARY KEY REFERENCES source_plans(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL CHECK(status IN ('claimed','verified','unknown','rejected')),
+  certificate_json TEXT CHECK(certificate_json IS NULL OR (json_valid(certificate_json) AND json_type(certificate_json)='object' AND length(certificate_json)<=65536)),
+  certificate_digest TEXT CHECK(certificate_digest IS NULL OR (length(certificate_digest)=64 AND certificate_digest NOT GLOB '*[^a-f0-9]*')),
+  reason TEXT CHECK(reason IS NULL OR (length(reason)>0 AND length(reason)<=200)),
+  created_at INTEGER NOT NULL CHECK(created_at>0),
+  updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
+  CHECK((status='verified' AND certificate_json IS NOT NULL AND certificate_digest IS NOT NULL AND reason IS NULL)
+    OR (status='claimed' AND certificate_json IS NULL AND certificate_digest IS NULL AND reason IS NULL)
+    OR (status IN ('unknown','rejected') AND certificate_json IS NULL AND certificate_digest IS NULL AND reason IS NOT NULL))
+) STRICT, WITHOUT ROWID;`
 
 const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
   pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
@@ -1367,6 +1380,14 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
         ALTER TABLE source_jobs ADD COLUMN previous_definition_version INTEGER CHECK(previous_definition_version IS NULL OR previous_definition_version > 0);`}
         PRAGMA user_version = 31; COMMIT;`)
     }
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 32) {
+      const existing = database.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='source_creation_verifications'")
+        .get() as { sql: string } | undefined
+      if (existing !== undefined && existing.sql !== storedTableSchema(sourceCreationVerificationSchema)) {
+        throw new Error('unknown v31 source creation verification schema')
+      }
+      database.exec(`BEGIN IMMEDIATE; ${sourceCreationVerificationSchema} PRAGMA user_version = 32; COMMIT;`)
+    } else database.exec(sourceCreationVerificationSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

@@ -1,7 +1,7 @@
 // Real public generator, Git worktrees, Control Plane/Automations/Policy and
 // SQLite. Delivery/Evaluation and Docker are fixtures, not live acceptance.
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,11 +9,13 @@ import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
+import { pluginCreationVerificationSigningPayload, sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
+  type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, expect, it, vi } from 'vitest'
 import { PluginControlPlaneService } from '../src/service.ts'
-import { ControlPlaneStore } from '../src/store.ts'
+import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
+import { checkedSourceSnapshot } from '../src/source-workspace.ts'
 import * as build from '../src/source-build.ts'
 import * as trust from '../src/trust.ts'
 import { defaultHostAttestationPolicy } from '../src/trust.ts'
@@ -27,7 +29,7 @@ const baselineRepository = fileURLToPath(new URL('../../..', import.meta.url)).r
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.resetAllMocks() })
 
-async function fixture() {
+async function fixture(withVerification = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-created-service-')))
   const { repository } = await createSourceCreationFixture(baselineRepository, join(root, 'source'))
   const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, encoding: 'utf8' }).trim()
@@ -53,9 +55,18 @@ async function fixture() {
       projection: { subjectKind: 'foreground-turn', subjectRef: 'inbox', version: 1, digest: 'b'.repeat(64), disposition: 'upsert' } },
     judgement: 'independent-verifier', source: { sessionId: 'session', inboxId: 'inbox', objective: 'ordinary failed task',
       quiescent: true, truncated: false, modelSelectionState: 'frozen', modelSelection: { provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } } }
-  ctx.provide('assistantDelivery' as never, { validateOwnerRoute: () => structuredClone(owner), inspectOwnerForegroundLearningTask: () => structuredClone(source) })
+  let activeSource: OwnerForegroundLearningTask = source
+  ctx.provide('assistantDelivery' as never, { validateOwnerRoute: () => structuredClone(owner), inspectOwnerForegroundLearningTask: () => structuredClone(activeSource) })
   ctx.provide('assistantEvaluation' as never, { canonicalHostScope: (input: unknown) => input,
     withTrustedCanonicalTaskWriterFence: (_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }) })
+  const signing = generateKeyPairSync('ed25519')
+  const authority: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1',
+    authorityId: 'fixture-creation-review', keyId: 'fixture-key', authorityDigest: '9'.repeat(64),
+    namePrefix: 'rsi-service-', expiresAt: now + 600_000 }
+  const publicKey = signing.publicKey.export({ format: 'pem', type: 'spki' }).toString()
+  const verification = vi.fn<(_request: { planId: string }, _signal?: AbortSignal) => Promise<unknown>>()
+    .mockResolvedValue({ status: 'unknown', reason: 'fixture-verifier-unavailable' })
+  if (withVerification) ctx.provide('assistantVerifier' as never, { verifyPluginCreation: verification })
   const policy = new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'),
     budgets: [{ id: 'source-budget', metric: 'automation-runs', limit: 3, periodMs: 60_000, scope: 'global' }], rules: [
       { id: 'reconcile', effect: 'allow', subject: { kind: 'background', id: 'plugin-control-plane-source', workspace: root, principal: 'owner' }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
@@ -68,6 +79,7 @@ async function fixture() {
     executor: { id: 'executor', version: '1', path: '/bin/true', sha256: 'a'.repeat(64), environmentAllowlist: [] },
     hostPolicy: defaultHostAttestationPolicy, releaseReceiptTtlMs: 30_000, approvalKeys: [], hostAttestationKeys: [], releaseKeys: [], releaseAuthorizationKeys: [] })
   const service = new PluginControlPlaneService(ctx, { statePath, catalogPath, trustPath: join(root, 'trust.json'),
+    ...(withVerification ? { creationVerifications: { authority, publicKey } } : {}),
     sourceBuild: { dockerPath: '/usr/bin/docker', image: `fixture@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000, versioning: 'patch',
       memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 },
     sourceJobs: { authorityId: 'source-grant', expiresAt: now + 600_000, maxSubmissions: 3, repository,
@@ -78,6 +90,7 @@ async function fixture() {
   cleanup.push(async () => store.close())
   const gap = service.recordOwnerTaskFailureGap(structuredClone(source))
   const growthRun = sourceGrowthRunFixture(store.getOwnerTaskFailureReference(gap.id)!, now)
+  if (withVerification) growthRun.creationAcceptance = authority
   const inspectGrowthRun = vi.fn(() => structuredClone(growthRun))
   const unregisterGrowthRun = service.registerSourceGrowthRunProducer({ protocol: 'assistant-growth-source-run-producer/v1', inspect: inspectGrowthRun })
   cleanup.push(async () => unregisterGrowthRun())
@@ -94,10 +107,188 @@ async function fixture() {
     pack: { name: 'dsh-enhanced-rsi-service-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: packArtifact.length,
       sha256: createHash('sha256').update(packArtifact).digest('hex') }, preparedAt: now }
   const checked: build.SourceBuildResult = { treeDigest: 'e'.repeat(64), patchDigest: 'f'.repeat(64), checkedAt: now, evidence, packArtifact }
-  vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
+  if (withVerification) vi.mocked(build.runDockerPreparedChecks).mockImplementation(async input => {
+    const snapshot = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, process.env)
+    checked.treeDigest = snapshot.checkedTreeDigest
+    checked.patchDigest = snapshot.checkedPatchDigest
+    return checked
+  })
+  else vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
   return { root, repository, git, service, automations, policy, store, source, owner, request, checked, growthRun, inspectGrowthRun,
-    unregisterGrowthRun, advance: (milliseconds = 1_100) => { now += milliseconds } }
+    unregisterGrowthRun, authority, signing, verification, setSource: (next: OwnerForegroundLearningTask) => { activeSource = next },
+    advance: (milliseconds = 1_100) => { now += milliseconds } }
 }
+
+function signedCertificate(f: Awaited<ReturnType<typeof fixture>>, planId: string,
+  privateKey: KeyObject = f.signing.privateKey,
+  alter?: (body: Omit<PluginCreationVerificationCertificate, 'signature'>) => void): PluginCreationVerificationCertificate {
+  const prepared = f.service.inspectPreparedCreation(planId)
+  const plan = prepared.plan, source = prepared.reference
+  const unsigned: Omit<PluginCreationVerificationCertificate, 'signature'> = {
+    protocol: 'assistant-growth/creation-verification/v1', verificationId: 'fixture-verification', authority: f.authority,
+    plan: { id: plan.id, digest: plan.digest, name: plan.name, sourceTreeDigest: plan.sourceCheck!.treeDigest,
+      sourcePatchDigest: plan.sourceCheck!.patchDigest, artifactSha256: plan.preparedEvidence!.pack.sha256,
+      artifactBytes: plan.preparedEvidence!.pack.sizeBytes, generatorDigest: plan.generatorDigest },
+    source: { referenceDigest: controlPlaneDigest(source), ownerDigest: controlPlaneDigest(source.owner),
+      growthRunDigest: sourceGrowthRunDigest(plan.creation!.growthRun!) },
+    contractDigest: 'a'.repeat(64), schemaDigest: 'b'.repeat(64),
+    environment: { node: 'node22', cordis: 'cordis4', tools: 'tools1', systemPrompt: 'prompt1' },
+    model: plan.creation!.growthRun!.model,
+    budget: { modelCalls: 2, maxOutputTokens: 1024, maxDurationMs: 60_000, maxCases: 2 },
+    sessions: { contract: 'contract-session', sourceReview: 'review-session' },
+    observations: [{ caseId: 'case-one', jobId: 'job-one', operationDigest: 'c'.repeat(64), observationDigest: 'd'.repeat(64) },
+      { caseId: 'case-two', jobId: 'job-two', operationDigest: 'e'.repeat(64), observationDigest: 'f'.repeat(64) }],
+    reviewDigest: '1'.repeat(64), verifiedAt: Date.now(), expiresAt: Date.now() + 300_000,
+  }
+  alter?.(unsigned)
+  return { ...unsigned, signature: sign(null, Buffer.from(pluginCreationVerificationSigningPayload(unsigned)), privateKey).toString('base64url') }
+}
+
+it('automatically verifies a pinned task creation after prepare and retains exact signed evidence without replay', async () => {
+  const f = await fixture(true)
+  expect(f.service.inspectSourceCreationAcceptanceAuthority()).toEqual(f.authority)
+  f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId) }))
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(job.id)!.planId!
+  expect(f.store.getSourcePlan(planId).status).toBe('pending-approval')
+  expect(f.store.getCreationVerificationStatus(planId)).toBe('verified')
+  expect(f.service.inspectCreationVerification(planId)).toMatchObject({ status: 'verified', updatedAt: expect.any(Number) })
+  const certificate = f.service.inspectVerifiedCreation(planId)
+  expect(certificate).toMatchObject({ protocol: 'assistant-growth/creation-verification/v1', plan: { id: planId } })
+  const review = await f.service.inspectPreparedCreationReviewContext(planId, new AbortController().signal)
+  expect(review.changedPaths).toContain(`plugins/${f.request.name}/README.md`)
+  expect(review.patch).toContain('Created plugin')
+  const plan = f.store.getSourcePlan(planId), scope = [...new Set(plan.scope)].sort()
+  expect(createHash('sha256').update('dsh-source-patch-v2\0')
+    .update(`${plan.baseCommit}\0${JSON.stringify(scope)}\0`).update(review.patch).digest('hex'))
+    .toBe(plan.sourceCheck!.patchDigest)
+  expect(f.store.listPreparedSourceApprovalJobs(false, false, false, true)).toHaveLength(0)
+  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.verification).toHaveBeenCalledOnce()
+  expect(f.service.inspectVerifiedCreation(planId)).toEqual(certificate)
+  f.owner.generation += 1
+  expect(() => f.service.inspectVerifiedCreation(planId)).toThrow(/task repair source or owner changed/)
+  expect(() => f.service.inspectCreationVerification(planId)).toThrow(/task repair source or owner changed/)
+  f.owner.generation -= 1
+  f.setSource({ ...f.source, source: { ...f.source.source, objective: 'owner corrected the original task' } })
+  expect(() => f.service.inspectVerifiedCreation(planId)).toThrow(/task repair source or owner changed/)
+  f.setSource(f.source)
+  f.advance(300_000)
+  expect(f.service.inspectVerifiedCreation(planId)).toBeUndefined()
+}, 60_000)
+
+it('retains unknown verification without another native model dispatch and leaves old unpinned creates pending', async () => {
+  const f = await fixture(true)
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(job.id)!.planId!
+  expect(f.store.getCreationVerificationStatus(planId)).toBe('unknown')
+  expect(f.service.inspectCreationVerification(planId)).toMatchObject({ status: 'unknown', reason: 'independent-verifier-unknown' })
+  expect(f.store.getCreationVerification(planId)).toBeUndefined()
+  expect(f.store.listPreparedSourceApprovalJobs(false, false, false, true)).toHaveLength(0)
+  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.verification).toHaveBeenCalledOnce()
+  expect(f.store.getSourcePlan(planId).status).toBe('pending-approval')
+}, 60_000)
+
+it('keeps a dispatched claim visible and excludes it from continuation while the verifier is in flight', async () => {
+  const f = await fixture(true)
+  let finish!: (value: unknown) => void
+  f.verification.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance()
+  const tick = f.automations.tick()
+  await vi.waitFor(() => expect(f.verification).toHaveBeenCalledOnce())
+  const planId = f.store.getSourceJob(job.id)!.planId!
+  expect(f.service.inspectCreationVerification(planId)).toMatchObject({ status: 'claimed', updatedAt: expect.any(Number) })
+  expect(f.store.listPreparedSourceApprovalJobs(false, false, false, true)).toHaveLength(0)
+  finish({ status: 'unknown', reason: 'schema-observation-unknown' })
+  await tick; await f.automations.whenIdle()
+  expect(f.service.inspectCreationVerification(planId)).toMatchObject({ status: 'unknown', reason: 'schema-observation-unknown' })
+  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.verification).toHaveBeenCalledOnce()
+}, 60_000)
+
+it('stores only a bounded rejection code and does not dispatch the verifier again', async () => {
+  const f = await fixture(true)
+  f.verification.mockResolvedValue({ status: 'rejected', reason: 'case-mismatch' })
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(job.id)!.planId!
+  expect(f.service.inspectCreationVerification(planId)).toMatchObject({ status: 'rejected', reason: 'case-mismatch' })
+  expect(f.service.inspectVerifiedCreation(planId)).toBeUndefined()
+  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.verification).toHaveBeenCalledOnce()
+}, 60_000)
+
+it('does not retrofit an old run lacking the pre-author policy and rejects a changed pinned policy', async () => {
+  const f = await fixture(true)
+  f.growthRun.creationAcceptance = { ...f.authority, authorityDigest: '8'.repeat(64) }
+  await expect(f.service.enqueueSourceJob(f.request)).rejects.toThrow(/creation acceptance policy changed/)
+  delete f.growthRun.creationAcceptance
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(job.id)!.planId!
+  expect(f.store.getSourcePlan(planId).status).toBe('pending-approval')
+  expect(f.store.getCreationVerificationStatus(planId)).toBeUndefined()
+  expect(() => f.store.withOwnerTaskFailureGapAdmission(f.request.gapId,
+    () => f.store.claimCreationVerification(planId))).toThrow(/pre-author policy binding/)
+  expect(f.verification).not.toHaveBeenCalled()
+  expect(f.store.listPreparedSourceApprovalJobs(false, false, false, true)).toHaveLength(0)
+  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.verification).not.toHaveBeenCalled()
+}, 60_000)
+
+it('rejects a foreign signature and source correction before certificate use', async () => {
+  const f = await fixture(true), foreign = generateKeyPairSync('ed25519')
+  f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId, foreign.privateKey) }))
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(job.id)!.planId!
+  expect(f.store.getCreationVerificationStatus(planId)).toBe('unknown')
+  expect(f.service.inspectCreationVerification(planId)).toMatchObject({ status: 'unknown', reason: 'independent-verification-unsettled' })
+  expect(f.service.inspectVerifiedCreation(planId)).toBeUndefined()
+  expect(f.verification).toHaveBeenCalledOnce()
+}, 60_000)
+
+it.each(['plan', 'pack', 'reference', 'model', 'budget', 'schema', 'policy'] as const)(
+  'rejects a signed certificate with a mismatched %s binding', async mismatch => {
+    const f = await fixture(true)
+    f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId,
+      f.signing.privateKey, body => {
+        if (mismatch === 'plan') body.plan.digest = '2'.repeat(64)
+        if (mismatch === 'pack') body.plan.artifactSha256 = '2'.repeat(64)
+        if (mismatch === 'reference') body.source.referenceDigest = '2'.repeat(64)
+        if (mismatch === 'model') body.model = { provider: 'other-provider', model: 'other-model' }
+        if (mismatch === 'budget') body.budget.maxOutputTokens = 40_000
+        if (mismatch === 'schema') body.schemaDigest = 'not-a-digest'
+        if (mismatch === 'policy') body.authority = { ...body.authority, authorityDigest: '2'.repeat(64) }
+      }) }))
+    const job = await f.service.enqueueSourceJob(f.request)
+    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+    const planId = f.store.getSourceJob(job.id)!.planId!
+    expect(f.store.getCreationVerificationStatus(planId)).toBe('unknown')
+    expect(f.store.getCreationVerification(planId)).toBeUndefined()
+    expect(f.verification).toHaveBeenCalledOnce()
+  }, 60_000)
+
+it('refuses a changed prepared worktree after independent result and never replays the claim', async () => {
+  const f = await fixture(true)
+  f.verification.mockImplementation(async request => {
+    const certificate = signedCertificate(f, request.planId)
+    const plan = f.store.getSourcePlan(request.planId)
+    await writeFile(join(plan.worktree, 'plugins', plan.name, 'README.md'), '# changed after check\n')
+    return { status: 'verified', certificate }
+  })
+  const job = await f.service.enqueueSourceJob(f.request)
+  f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+  const planId = f.store.getSourceJob(job.id)!.planId!
+  expect(f.store.getCreationVerificationStatus(planId)).toBe('unknown')
+  expect(f.store.getCreationVerification(planId)).toBeUndefined()
+  f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+  expect(f.verification).toHaveBeenCalledOnce()
+}, 60_000)
 
 it('runs an ordinary owner failure through native scheduling into a checked new-plugin plan', async () => {
   const f = await fixture(), originalCatalog = await readFile(join(f.repository, 'plugins/README.md'), 'utf8')

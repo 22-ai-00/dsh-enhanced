@@ -16,6 +16,9 @@ import { SourceReviewRuntime, validateSourceReviewConfig, type SourceReviewInput
 import { MemoryReviewRuntime, validateMemoryReviewConfig } from './memory-review.js'
 import type { MemoryReviewConfig, MemoryReviewAvailability } from './memory-review.js'
 import type { MemoryLearningOwner, MemoryLearningReviewRequest } from '@dsh-enhanced/assistant-growth-contract'
+import type { PluginCreationVerificationRequest, PluginCreationVerificationResult } from '@dsh-enhanced/assistant-growth-contract'
+import { CreationReviewRuntime, validateCreationReviewConfig } from './creation-review.js'
+import type { CreationReviewConfig, CreationReviewAuthorityInspection } from './creation-review.js'
 
 export { Config } from './config.js'
 
@@ -140,12 +143,15 @@ export class AssistantVerifierService extends Service<Config> {
   #memoryReviewer: MemoryReviewRuntime | undefined
   readonly #memoryReviewConfig: MemoryReviewConfig | undefined
   readonly #memoryReviewers = new Set<MemoryReviewRuntime>()
+  #creationReviewer: CreationReviewRuntime | undefined
+  readonly #creationReviewers = new Set<CreationReviewRuntime>()
 
   constructor(ctx: Context, config: Config, options: { now?: () => number } = {}) {
     super(ctx, 'assistantVerifier')
     const normalized = Config(config)
     const sourceReviews = normalized.sourceReviews === undefined ? undefined : validateSourceReviewConfig(normalized.sourceReviews)
     const memoryReviews = normalized.memoryReviews === undefined ? undefined : validateMemoryReviewConfig(normalized.memoryReviews)
+    const creationReviews = normalized.creationReviews === undefined ? undefined : validateCreationReviewConfig(normalized.creationReviews)
     this.#memoryReviewConfig = memoryReviews
     this.#compiled = compileAcceptanceProfiles(normalized)
     this.#now = options.now ?? Date.now
@@ -171,7 +177,7 @@ export class AssistantVerifierService extends Service<Config> {
       for (const binding of this.#bindings.values()) binding.dispose()
       this.#evaluation = undefined
       // Abort both review lanes before awaiting unrelated acceptance teardown.
-      const reviews = [...this.#sourceReviewers, ...this.#memoryReviewers].map(reviewer => reviewer.close())
+      const reviews = [...this.#sourceReviewers, ...this.#memoryReviewers, ...this.#creationReviewers].map(reviewer => reviewer.close())
       await this.#running?.catch(() => {})
       await Promise.allSettled([...this.#isolatedRunners.values()].map(async runner => (await runner).close()))
       await Promise.allSettled(reviews)
@@ -199,6 +205,30 @@ export class AssistantVerifierService extends Service<Config> {
         }
       }, 'assistant-verifier.memory-review')
     })
+    if (creationReviews) ctx.inject(['agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy', 'pluginControlPlane' as never], injected => {
+      injected.effect(() => {
+        if (!this.#active) return () => {}
+        const reviewer = new CreationReviewRuntime(injected, creationReviews, normalized.databasePath)
+        this.#creationReviewer = reviewer; this.#creationReviewers.add(reviewer)
+        return async () => {
+          if (this.#creationReviewer === reviewer) this.#creationReviewer = undefined
+          await reviewer.close(); this.#creationReviewers.delete(reviewer)
+        }
+      }, 'assistant-verifier.creation-review')
+    })
+  }
+
+  /** Frozen public acceptance authority; unavailable until the private Host peers are active. */
+  inspectCreationAcceptanceAuthority = (input: { owner: CreationReviewConfig['owner'] }): CreationReviewAuthorityInspection | undefined => {
+    this.#assertActive()
+    return this.#creationReviewer?.inspect(input)
+  }
+
+  /** Private Host continuation only. Source, artifact and owner are re-read through Control Plane. */
+  verifyPluginCreation = (request: PluginCreationVerificationRequest, signal?: AbortSignal): Promise<PluginCreationVerificationResult> => {
+    this.#assertActive()
+    return this.#creationReviewer?.run(request, signal)
+      ?? Promise.resolve({ status: 'unknown', reason: 'verification-unavailable' })
   }
 
   /** Host-only review. Source text and verdicts cannot be supplied by the caller. */

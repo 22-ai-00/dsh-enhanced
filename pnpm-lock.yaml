@@ -1695,6 +1695,9 @@ importers:
       '@dsh-enhanced/assistant-growth-contract':
         specifier: workspace:*
         version: link:../../packages/assistant-growth-contract
+      '@dsh-enhanced/plugin-control-plane':
+        specifier: '>=0.1.0 <0.2.0'
+        version: link:../plugin-control-plane
       '@dsh-enhanced/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract

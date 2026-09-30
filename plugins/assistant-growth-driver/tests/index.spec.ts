@@ -991,6 +991,7 @@ describe('opt-in plugin source proposals', () => {
     objectiveStatus: 'achieved' | 'not-achieved'
     sourceConfig?: Record<string, unknown>
     growthConfig?: Record<string, unknown>
+    mountSourceAfterDriver?: boolean
   }): Promise<AssistantGrowthDriverService> {
     const { h, source, objectiveStatus } = input
     await h.ctx.plugin(AssistantEvaluationService, { databasePath: join(h.root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
@@ -1021,13 +1022,17 @@ describe('opt-in plugin source proposals', () => {
       },
     }
     h.learningSource.mockReturnValue(learning)
-    h.ctx.provide('pluginControlPlane' as never, source as never)
+    if (!input.mountSourceAfterDriver) h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
       budgetId: 'growth-budget', budgetAmount: 1,
       ...input.growthConfig,
       pluginSourceProposals: { ...options(h.root), ...input.sourceConfig },
       usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(h.root, 'usage.sqlite') },
     }))
+    if (input.mountSourceAfterDriver) {
+      h.ctx.provide('pluginControlPlane' as never, source as never)
+      await new Promise(resolve => setImmediate(resolve))
+    }
     await vi.waitFor(() => expect(service.usageHealth()).toMatchObject({ connected: true, counts: { queued: 1 } }))
     await new Promise(resolve => setTimeout(resolve, 1_100))
     for (let i = 0; i < 3; i += 1) {
@@ -1114,14 +1119,27 @@ describe('opt-in plugin source proposals', () => {
     ])
     const h = await mount({ adapter, provider: 'conversation-provider' })
     h.modelSelection.mockImplementation(() => { throw new Error('current session supplier changed') })
-    const source = creationService()
+    const creationAcceptance = { protocol: 'assistant-growth/creation-acceptance-authority/v1' as const,
+      authorityId: 'owner-policy', keyId: 'owner-key', authorityDigest: '9'.repeat(64),
+      namePrefix: 'assistant-', expiresAt: Date.now() + 60_000 }
+    const source = { ...creationService(),
+      inspectSourceCreationAcceptanceAuthority: vi.fn(() => creationAcceptance) }
+    adapter.onRequest = () => {
+      expect(source.inspectSourceCreationAcceptanceAuthority).toHaveBeenCalled()
+      const db = new DatabaseSync(join(h.root, 'usage.sqlite'))
+      try {
+        const row = db.prepare("SELECT source_run_json FROM usage_jobs WHERE state='running'").get() as { source_run_json: string } | undefined
+        expect(JSON.parse(row?.source_run_json ?? 'null')).toMatchObject({ creationAcceptance })
+      } finally { db.close() }
+    }
     source.gaps.mockReturnValue([{ id: 'other-owner-gap', capability: 'private', context: 'OTHER OWNER GLOBAL CONTEXT',
       status: 'open', createdAt: 1 }])
     const prompts: string[] = []
     h.ctx.on('llm/stream', async function* (options, next) { prompts.push(JSON.stringify(options.messages)); yield* next() })
     const service = await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
       sourceConfig: { preparationMode: 'durable', allowCreation: true },
-      growthConfig: { provider: 'conversation-provider', model: 'growth-review-model', reasoningEffort: 'medium' } })
+      growthConfig: { provider: 'conversation-provider', model: 'growth-review-model', reasoningEffort: 'medium' },
+      mountSourceAfterDriver: true })
 
     expect(service.health()).toMatchObject({ outcome: 'ran' })
     expect(adapter.requests.length).toBeGreaterThan(0)
@@ -1142,6 +1160,7 @@ describe('opt-in plugin source proposals', () => {
       runId: expect.stringMatching(/^usage-/),
       model: { provider: 'conversation-provider', model: 'growth-review-model', reasoningEffort: 'medium' },
       modelOrigin: 'explicit-growth-override',
+      creationAcceptance,
       budget: { budgetId: 'growth-budget', amount: 1, maxModelCalls: 8, maxToolCalls: 24,
         maxOutputTokens: 8192, maxDurationMs: 120000, maxPlansPerWake: 1 },
       native: { owner: 'assistant-growth-usage', automationId: expect.stringMatching(/^usage-/),

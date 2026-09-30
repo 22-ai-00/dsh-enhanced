@@ -64,7 +64,8 @@
     "@dsh-enhanced/assistant-delivery": ">=0.1.24 <0.2.0",
     "@dsh-enhanced/assistant-evaluation": ">=0.1.24 <0.2.0",
     "@dsh-enhanced/assistant-isolation": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
+    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/plugin-control-plane": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -101,6 +102,9 @@
       "optional": true
     },
     "@dsh-enhanced/assistant-policy": {
+      "optional": true
+    },
+    "@dsh-enhanced/plugin-control-plane": {
       "optional": true
     }
   },

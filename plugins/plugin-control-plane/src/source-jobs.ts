@@ -87,6 +87,7 @@ export class SourceJobRuntime {
     assertGrowthRun?: (growthRun: SourceGrowthRunBinding, gapId: string, owner: SourceJobOwnerReceipt, generation: boolean) => void
     trust: () => Promise<Trust>
     approvePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
+    verifyPreparedCreation?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     releasePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     advanceReleased?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     releaseTimeoutMs?: number
@@ -174,20 +175,20 @@ export class SourceJobRuntime {
   }
 
   private async continuePrepared(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
-    if (!job.planId || job.intent.mode === 'create' || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
+    if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
     if (this.continuing.has(job.id)) return
     this.continuing.add(job.id)
     try { await this.continuePreparedLocked(job, signal) } finally { this.continuing.delete(job.id) }
   }
 
   private async continuePreparedLocked(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
-    if (!job.planId || job.intent.mode === 'create' || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
+    if (!job.planId || !this.options.store.getOwnerTaskFailureReference(job.intent.gapId)) return
     const planId = job.planId
     const current = this.options.store.getSourceJob(job.id)
     if (current?.status !== 'prepared' || current.planId !== planId) throw new Error('source job continuation changed')
     job = current
     const initial = this.options.store.getSourcePlan(planId)
-    if (initial.mode !== 'modify') return
+    if (initial.mode !== 'modify' && initial.mode !== 'prepared-create') return
     // An ordinary grant or plan must not be advanced after expiry. Adoption has
     // its own durable post-release path and is deliberately retained below.
     if (initial.expiresAt <= Date.now() && initial.status !== 'release-complete') throw new Error('source job continuation expired')
@@ -195,6 +196,14 @@ export class SourceJobRuntime {
       signal.throwIfAborted(); this.assertOwner(job)
       if (controlPlaneDigest(await this.options.trust()) !== job.intent.trustDigest) throw new Error('source job continuation trust changed')
       signal.throwIfAborted(); this.assertOwner(job)
+    }
+    if (initial.mode === 'prepared-create') {
+      if (job.intent.mode !== 'create' || !this.options.verifyPreparedCreation
+        || !job.intent.creation?.growthRun?.creationAcceptance || !initial.creation?.growthRun?.creationAcceptance
+        || this.options.store.getCreationVerificationStatus(planId) !== undefined) return
+      await assertCurrent()
+      await this.options.verifyPreparedCreation(job, signal)
+      return
     }
     if (this.options.adoptReleased && this.options.store.getSourcePlan(planId).status === 'release-complete') {
       await this.options.adoptReleased(job, signal, assertCurrent)
@@ -484,12 +493,13 @@ export class SourceJobRuntime {
   }
 
   private hasContinuations(): boolean {
-    return !!(this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
+    return !!(this.options.approvePrepared || this.options.verifyPreparedCreation || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
   }
 
   private continuationJobs(): readonly SourceJobRecord[] {
     if (!this.hasContinuations()) return []
-    return this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined, this.options.adoptReleased !== undefined)
+    return this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined,
+      this.options.adoptReleased !== undefined, this.options.verifyPreparedCreation !== undefined)
       .filter(job => this.eligibleContinuation(job))
   }
 
@@ -498,6 +508,16 @@ export class SourceJobRuntime {
     if (!job.planId || job.status !== 'prepared') return false
     let plan: PluginSourcePlan
     try { plan = this.options.store.getSourcePlan(job.planId) } catch { return false }
+    if (plan.mode === 'prepared-create') {
+      if (!this.options.verifyPreparedCreation || job.intent.mode !== 'create' || plan.status !== 'pending-approval'
+        || !job.intent.creation?.growthRun?.creationAcceptance || !plan.creation?.growthRun?.creationAcceptance
+        || this.options.store.getCreationVerificationStatus(plan.id) !== undefined) return false
+      if (job.intent.authority.digest !== this.authorityDigest || job.intent.authority.id !== this.options.config.authorityId) return false
+      try { this.assertOwner(job); this.withGapSource(job.intent.gapId, job.intent.owner, () => {
+        this.assertGrowthRun(job.intent.creation?.growthRun, job.intent.mode, job.intent.gapId, job.intent.owner, false)
+      }) } catch { return false }
+      return plan.expiresAt > Date.now()
+    }
     if (plan.mode !== 'modify' || job.intent.mode === 'create') return false
     const adoption = plan.status === 'release-complete' ? this.options.store.findSourceAdoption(plan.id) : undefined
     const recovery = adoption !== undefined && ((adoption.status === 'approved' && adoption.dossier.handoff !== undefined) || ['staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'].includes(adoption.status))
@@ -514,7 +534,7 @@ export class SourceJobRuntime {
   private continuationTimeoutMs(): number {
     const release = this.options.releaseTimeoutMs ?? 40_000, adoption = this.options.adoptionTimeoutMs ?? 60_000
     const needed = (this.options.adoptReleased ? adoption : 0) + (this.options.advanceReleased ? release + 40_000 : this.options.releasePrepared ? 40_000 : 10_000)
-    return Math.max(10_000, needed)
+    return Math.max(this.options.verifyPreparedCreation ? 1_800_000 : 10_000, needed)
   }
 
   private continuationSignalTimeoutMs(job: SourceJobRecord): number {
@@ -621,7 +641,8 @@ export class SourceJobRuntime {
     if (growthController) this.growthControllers.add(growthController)
     const signal = AbortSignal.any([input.signal, this.abort.signal,
       ...(growthController ? [growthController.signal] : []),
-      AbortSignal.timeout(Math.max(1, Math.min(job.intent.build.timeoutMs + 120_000 + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0), job.expiresAt - Date.now())))])
+      AbortSignal.timeout(Math.max(1, Math.min(job.intent.build.timeoutMs + 120_000 + (this.options.verifyPreparedCreation ? 1_800_000 : 0)
+        + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0), job.expiresAt - Date.now())))])
     try {
       this.assertOwner(job)
       signal.throwIfAborted()
@@ -643,7 +664,9 @@ export class SourceJobRuntime {
       await assertCurrent()
       await this.options.prepare(owned, signal, assertCurrent)
       if (this.options.store.getSourceJob(owned.id)?.status !== 'prepared') throw new Error('source job completion was not committed')
-      if (owned.intent.mode !== 'create' && (this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased) && this.options.store.getOwnerTaskFailureReference(owned.intent.gapId)) {
+      if ((owned.intent.mode === 'create' ? this.options.verifyPreparedCreation !== undefined
+        : !!(this.options.approvePrepared || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased))
+        && this.options.store.getOwnerTaskFailureReference(owned.intent.gapId)) {
         this.reconcileContinuations()
         this.assertOwner(owned)
         await this.continuePrepared(this.options.store.getSourceJob(owned.id)!, signal)

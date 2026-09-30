@@ -91,9 +91,36 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 该镜像目前要求 Linux x64。固定原生启动器在加载候选前设置 `no_new_privs` 与 seccomp，限制文件写入、非线程进程创建、网络和跨进程操作；父进程禁用信号启动调试器并设置 [non-dumpable](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html)，避免同 UID 子进程重开其受保护的 `/proc` 内存或描述符。设置失败即拒绝运行；容器仍沿用 Isolation 的无网络、只读根文件系统、无 capability 和资源限额，不新增 Host 权限。Node 的路径权限只是额外限制，[官方权限模型](https://nodejs.org/download/release/latest-v22.x/docs/api/permissions.html)并不保证抵抗恶意代码；[seccomp](https://docs.kernel.org/userspace-api/seccomp_filter.html) 不检查路径内容，不能单独当完整沙箱。
 
-容器只收到制品与调用输入；预期结果、验收政策和签名密钥留在 Host。schema 和工具结果仍是候选的黑箱输出；`observed` 与 `quiescent` 只说明本次输出、子进程退出与外层容器回收，不能证明候选按原语义执行了工具或 Cordis disposer，也不能单独证明目标达成或发布安全。独立目标验收与真实加载后的外部观察仍需接线；当前没有新插件验收签名或自动采用。
+容器只收到制品与调用输入；预期结果、验收政策和签名密钥留在 Host。schema 和工具结果仍是候选的黑箱输出；`observed` 与 `quiescent` 只说明本次输出、子进程退出与外层容器回收，不能证明候选按原语义执行了工具或 Cordis disposer，也不能单独证明目标达成或发布安全。可选创建验收见下文；真实加载后的外部观察与自动采用仍需接通。
 
 新增权限为通过固定 Docker executable 写入私有隔离账本、暂存包和输入，在无网络、只读根文件系统且有资源上限的容器内执行候选。运行时不执行安装脚本、不挂载 Host 仓库或凭据。专用镜像准备会联网下载公开系统依赖，随后按完整锁文件离线安装且禁用依赖脚本；详见镜像指南。
+
+## 普通任务产生的新插件验收
+
+`creationReviews` 是可选 Host 配置。Control Plane 复用原生 SourceJobs 续跑调用 `verifyPluginCreation({ protocol: 'assistant-growth/creation-verification-request/v1', planId })`；此入口不注册为模型工具。相关原生服务与可选 Control Plane peer 未就绪时返回 `unknown`，provider 替换或卸载时取消并等待在途验收。
+
+配置必须包括以下字段；owner 是与 `sourceReviews.owner` 相同的七字段稳定身份，不包含每任务变化的 session/binding/generation。完整任务身份仍由 Control Plane 当前来源检查。
+
+| 字段 | 约束 |
+| --- | --- |
+| `authorityId`, `keyId`, `namePrefix`, `expiresAt` | 明确的有限验收授权，与 Control Plane 创建命名空间和期限一致。 |
+| `owner` | `authorityId`, `authorityHash`, `principalId`, `principalRecordId`, `principalVersion`, `workspace`, `agentPreset`。workspace 为已存在的 canonical 绝对路径。 |
+| `keyPath` | owner 私有、单链接、非符号链接的 Ed25519 PKCS8 文件；不会交给模型或容器。 |
+| `maxVerifications` | 1–1000；失败与未知派发也消费持久额度，不随重启返还。 |
+| `runner` | `stateRoot`, `image`, `dockerPath`, `expiresAt`, `maxRuns`, `maxTotalDurationMs`, `maxDurationMs`, `maxOutputBytes`；使用当前锁文件的专用观察镜像。最坏每次消耗 `1 + maxCases` 个独立容器调用。 |
+| `policy` | owner 固定的验收政策，最多 8192 字节。 |
+| `maxInputBytes`, `maxOutputTokens` | 输入 4096–262144 字节，每个模型回合 1–32768 输出 token。 |
+| `maxDurationMs`, `maxCases`, `receiptTtlMs` | 整次验收 1 秒至 30 分钟；2–8 个不同输入；回执 1 秒至 24 小时，受所有原授权窗口收窄。 |
+
+部署前用导出的 `compileCreationReviewConfig(config)` 取得 `{ authority, publicKey }`，只将这两个公开字段写入 Control Plane 的 `creationVerifications`。验收政策、固定规则、密钥指纹、镜像及预算纳入 authority digest。Growth 在首次作者模型请求前持久冻结这个引用；历史无引用的候选不会取得新签名资格。
+
+封存精确 tgz 后，第一轮全新、无工具的原生 Agent 从当前认证任务/纠正正文与候选参数结构生成私有用例；不读取候选代码、测试或调用结果。schema 的说明文字不进入此轮。Host 在调用前持久保存用例，分别在独立子进程执行并精确比较文本或 JSON 值。第二轮全新 Agent 检查实际已核对的源码补丁、任务语义与固定用例；两轮均使用来源 Growth run 的准确模型，不增加默认供应商或隐式恢复切换。
+
+只有实际比较通过、源码审查通过且最终当前来源 fence 有效，才签发 `assistant-growth/creation-verification/v1` Ed25519 凭证。它绑定任务修订、Growth run、精确源码/制品、私有合同摘要、观察作业、SDK 环境、模型和预算。私有 SQLite 在每次派发前持久 claim；崩溃、取消或不明执行不自动重放。含糊任务、不可支持的行为或缺失证据保持 `unknown`。
+
+生成用例与源码审查仍依赖模型语义判断；剥离 schema 说明和禁止工具不证明模型判断总是正确。此凭证仅证明这些任务派生检查通过，不是 owner 审批、通用目标成功、发布许可或采用授权。Control Plane 仍保留 `pending-approval`；之后的有限采用、Cordis 动态加载及真实后续收益必须分别验收。
+
+新增数据与权限：读取当前 Host 认证任务和检查补丁，向该任务模型供应商发送这些材料；写私有合同、观察摘要、模型 Session、有限额度与签名账本；读取私有签名密钥，并通过固定 Docker executable 执行封存候选。没有浏览器或运行时联网容器权限，没有安装脚本或公开验收写工具。
 
 ## 独立源码审查
 

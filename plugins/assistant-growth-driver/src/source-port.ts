@@ -9,7 +9,7 @@
  * @dsh-enhanced/plugin-control-plane (an optional peer): every field here is a
  * structural subset, so the driver still builds and loads without that package.
  */
-import type { SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import type { CreationAcceptanceAuthorityRef, SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 
 /**
  * Local mirror of the control-plane protected-plugin denylist
@@ -118,6 +118,8 @@ export interface GrowthSourcePlanePort {
   }): Promise<GrowthSourceSnapshot>
   /** Public naming rule only; absence means creation is not currently granted. */
   getSourceCreationNamespace?(): Readonly<{ namePrefix: string }> | undefined
+  /** Host-only current owner policy; never exposed as an Agent tool result. */
+  inspectSourceCreationAcceptanceAuthority?(): CreationAcceptanceAuthorityRef | undefined
   /** Enumerate recently recorded gaps; the caller filters to still-open ones. */
   listOpenGaps(): readonly GrowthSourceGap[]
   /**

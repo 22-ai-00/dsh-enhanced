@@ -19,6 +19,23 @@ function binding(): SourceGrowthRunBinding {
   }
 }
 
+const creationAcceptance = { protocol: 'assistant-growth/creation-acceptance-authority/v1' as const,
+  authorityId: 'owner-policy', keyId: 'owner-key', authorityDigest: '9'.repeat(64),
+  namePrefix: 'assistant-', expiresAt: 60_000 }
+
+test('an optional creation policy is part of source provenance and cannot be added after its expiry', () => {
+  const historical = binding()
+  validateSourceGrowthRunBinding(historical)
+  expect(historical).not.toHaveProperty('creationAcceptance')
+  const current = { ...historical, creationAcceptance }
+  expect(sourceGrowthRunDigest(current)).not.toBe(sourceGrowthRunDigest(historical))
+  expect(sourceGrowthRunDigest(JSON.parse(JSON.stringify(current)))).toBe(sourceGrowthRunDigest(current))
+  expect(() => validateSourceGrowthRunBinding({ ...current, createdAt: creationAcceptance.expiresAt + 1,
+    generationDeadlineAt: creationAcceptance.expiresAt + 2, expiresAt: creationAcceptance.expiresAt + 3 })).toThrow(/expiry/)
+  expect(() => validateSourceGrowthRunBinding({ ...current, creationAcceptance: { ...creationAcceptance, extra: true } })).toThrow()
+  expect(() => validateSourceGrowthRunBinding({ ...current, creationAcceptance: undefined })).toThrow()
+})
+
 test('generation provenance survives JSON persistence and every authority revision changes its digest', () => {
   const original = binding()
   const originalDigest = sourceGrowthRunDigest(original)
