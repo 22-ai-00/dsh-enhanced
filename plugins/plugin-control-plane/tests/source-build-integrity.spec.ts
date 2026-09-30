@@ -21,7 +21,7 @@ interface Fixture {
   workspace: string
   scratch: string
   archive: Buffer
-  run(mutation?: string, trust?: 'match' | 'mismatch' | 'absent'): Promise<{ code: number | null; stdout: string; stderr: string }>
+  run(mutation?: string, trust?: 'match' | 'mismatch' | 'absent', capture?: boolean): Promise<{ code: number | null; stdout: string; stderr: string }>
 }
 
 function archiveMode(archive: Buffer, entry: string): number | undefined {
@@ -210,16 +210,18 @@ esac
     .replaceAll('/tmp', '__DSH_TEST_SCRATCH__')
     .replaceAll('__DSH_TEST_WORKSPACE__', workspace).replaceAll('__DSH_TEST_SCRATCH__', scratch)
     .replaceAll('__DSH_TEST_BASELINE__', baseline)
-  const run = async (mutation = '', trust?: 'match' | 'mismatch' | 'absent'): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+  const run = async (mutation = '', trust?: 'match' | 'mismatch' | 'absent', capture = false): Promise<{ code: number | null; stdout: string; stderr: string }> => {
     if (trust === 'absent') await rm(baseline)
     // The outer source builder may itself be exercising a creation grant.
     // This private script receives creation env only from this test's trust input.
     const childEnvironment = { ...process.env }
     delete childEnvironment.DSH_SOURCE_TRUST_LOCKFILE
     delete childEnvironment.DSH_SOURCE_BASE_LOCK_SHA256
+    delete childEnvironment.DSH_SOURCE_CAPTURE_PACK
     const child = spawn('/bin/sh', ['-ceu', script], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...childEnvironment, PATH: `${bin}:${process.env.PATH ?? ''}`, PLUGIN_ROOT: 'plugins/helper',
         TEST_WORKSPACE: workspace, TEST_SCRATCH: scratch, TEST_MUTATION: mutation,
+        ...(capture ? { DSH_SOURCE_CAPTURE_PACK: 'true' } : {}),
         ...(trust === undefined ? {} : { DSH_SOURCE_TRUST_LOCKFILE: 'true',
           DSH_SOURCE_BASE_LOCK_SHA256: trust === 'mismatch' ? '0'.repeat(64)
             : createHash('sha256').update('lockfileVersion: 9\n').digest('hex') }) } })
@@ -262,6 +264,22 @@ it('checks every original archive input, permits generated lib and node_modules,
   expect(Number.parseInt(await readFile(join(f.scratch, 'pack-umask'), 'utf8'), 8)).toBe(0o077)
   expect((await lstat(join(f.workspace, 'plugins/helper/generated-check-umask-dir'))).mode & 0o777).toBe(0o755)
   expect((await lstat(join(f.workspace, 'plugins/helper/generated-check-umask-file'))).mode & 0o777).toBe(0o644)
+})
+
+it('emits a single capture frame from the exact already-verified tgz buffer', async () => {
+  const f = await fixture()
+  const result = await f.run('', undefined, true)
+  expect(result.code, result.stderr).toBe(0)
+  const lines = result.stdout.trimEnd().split('\n')
+  expect(lines).toHaveLength(2)
+  const marker = /^DSH_PREPARED_PACK\t[^\t]+\t([0-9]+)\t([a-f0-9]{64})\t[^\t]+\t[^\t]+$/u.exec(lines[0]!)
+  expect(marker).not.toBeNull()
+  expect(lines[1]).toMatch(/^DSH_PREPARED_PACK_BYTES_V1\t[A-Za-z0-9+/]+={0,2}$/u)
+  const captured = Buffer.from(lines[1]!.slice('DSH_PREPARED_PACK_BYTES_V1\t'.length), 'base64')
+  const packed = await readFile(join(f.workspace, '.dsh-pack/helper-1.0.0.tgz'))
+  expect(captured).toEqual(packed)
+  expect(captured.length).toBe(Number(marker![1]))
+  expect(createHash('sha256').update(captured).digest('hex')).toBe(marker![2])
 })
 
 it('does not inherit an outer creation grant into the default modify fixture', async () => {

@@ -13,6 +13,7 @@ export { validateSourceReviewConfig } from './source-review.js'
 export type { SourceReviewConfig, SourceReviewInput, SourceReviewRequest, SourceReviewResult, SourceReviewModelSelection, SourceReviewSelection } from './source-review.js'
 export { validateMemoryReviewConfig } from './memory-review.js'
 export type { MemoryReviewConfig, MemoryReviewReceipt, MemoryReviewAvailability } from './memory-review.js'
+export type { PluginBehaviorOperation, PluginBehaviorObservation, PluginBehaviorRunnerInput } from './plugin-behavior-runner.js'
 
 export function apply(ctx: Context, config: Config): void {
   new AssistantVerifierService(ctx, config)

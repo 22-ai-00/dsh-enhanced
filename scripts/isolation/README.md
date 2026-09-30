@@ -56,6 +56,32 @@ uses that exported environment through Bubblewrap; it does not invoke the
 source-runner launcher or bypass a test. Image preparation downloads this exact npm version with install scripts
 disabled; the returned image digest pins the resulting bytes.
 
+## Plugin behavior verifier image
+
+After building the source image, provide its **local immutable content ID**:
+
+```sh
+node scripts/isolation/build-plugin-verifier-image.mjs \
+  --source-image sha256:<64-hex-local-source-image-id>
+```
+
+The builder checks that ID, creates and removes a temporary local tag for
+Docker BuildKit, and returns the verifier image's content ID. Its temporary
+context contains only the root/workspace manifests, lock, Dockerfile and fixed
+worker; it excludes product source, Host mounts, `.npmrc`, credentials and
+expected behavior. It installs the exact locked Cordis 4.0.2, native tools and
+system prompt 0.1.5-rc.3 packages offline with scripts disabled, and adds
+BusyBox for the isolation supervisor. Debian BusyBox installation is a build
+step; the returned image ID pins the completed image. No worker installation or
+package download occurs during verification.
+
+The Host-only behavior runner accepts a checked tgz of at most 512 KiB because
+the existing isolation verifier's input limit is 1 MiB. It can discover native
+schemas or invoke up to eight fixed tool calls in the isolated worker. It
+reports raw observations or unknown outcomes, not goal success, source approval,
+installation, or adoption. The Host must compare observations with an
+independent acceptance oracle and retain the existing owner/grant fences.
+
 ## Nested sandbox profile
 
 Full repository tests invoke the existing release adapter's Bubblewrap sandbox.

@@ -236,6 +236,10 @@ sourceBuild:
 
 检查实际 tgz 的 manifest 时，控制面从不可变归档推导 pnpm 11.7.0 的出版形式：`packageManager` 和 `pnpm` 字段不入包，`scripts` 仅剔除六个发布生命周期钩子并移到顶层末尾，catalog/workspace 依赖按冻结清单解析；其余字段及对象键顺序须与预期精确一致。
 
+Host 可在调用源码检查时单独请求 `capturePack`，从同一次已核验的 tgz 读取中取回最多 32 MiB 的原始制品字节，供后续独立行为验收。容器用有版本的单帧传输；Host 严格核对帧、大小及 SHA-256，并保留原有取消、清理和源码快照栅栏。默认检查不传输制品，持久 evidence 只记录摘要，不保存制品内容；该开关不向候选或模型工具开放。
+
+普通 owner 失败触发的持久创建任务会自动捕获包，并在同一 SQLite 事务中保存字节、pending 计划和任务终态；旧计划与手工来源保持兼容，不因此获得验收资格。schema 30 的私有 BLOB 账本按 SHA-256 去重，限制 256 件、总计 128 MiB，读写均核对真实字节；额度耗尽拒绝提交，不丢弃在用制品。Host-only `inspectPreparedCreation(planId)` 在当前 owner 与 canonical writer fence 内返回绑定的计划、持久任务、真实 Delivery 来源和包；过期、纠正、换 owner、缺包或损坏均拒绝，不向模型状态工具返回正文。现有 Host/CLI 过期 worktree 维护在完成清理后回收 orphan 或仅被已过期计划引用的包；计划与摘要历史保留。这只提供独立观察的交接，创建计划仍不能审批、发布或采用。
+
 ### 持久源码检查任务（可选）
 
 Growth Driver 设置 `pluginSourceProposals.preparationMode: durable` 后，`plugin_source_prepare` 只提交任务，`plugin_source_job_status` 回读当前 owner 的状态。控制面还必须配置独立于模型回合的有限 Host 授权：

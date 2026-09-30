@@ -71,7 +71,8 @@ function downgradeSourcePlansToV28(path: string, invalidMode = false): void {
     database.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE')
     try {
       database.exec(`${old}; INSERT INTO source_plans_v28 (${columns}) SELECT ${columns} FROM source_plans;
-        DROP TABLE source_plans; ALTER TABLE source_plans_v28 RENAME TO source_plans; DROP TABLE source_creation_grants;`)
+        DROP TABLE source_plans; ALTER TABLE source_plans_v28 RENAME TO source_plans;
+        DROP TABLE source_prepared_artifact_refs; DROP TABLE source_prepared_artifacts; DROP TABLE source_creation_grants;`)
       for (const index of indexes) database.exec(index.sql)
       if (database.prepare('PRAGMA foreign_key_check').all().length) throw new Error('v28 fixture has invalid foreign keys')
       database.exec('PRAGMA user_version = 28; COMMIT')
@@ -369,7 +370,9 @@ describe('durable source job ledger', () => {
     target.store.close()
     const old = new DatabaseSync(target.path)
     try {
-      old.exec(`DROP INDEX source_jobs_created; DROP INDEX source_jobs_single_active; DROP TABLE source_jobs; DROP TABLE source_job_authorities; PRAGMA user_version = 13;`)
+      old.exec(`DROP INDEX source_jobs_created; DROP INDEX source_jobs_single_active; DROP TABLE source_jobs;
+        DROP TABLE source_job_authorities; DROP TABLE source_prepared_artifact_refs; DROP TABLE source_prepared_artifacts;
+        PRAGMA user_version = 13;`)
     } finally { old.close() }
     const migrated = openControlPlaneDatabase(target.path)
     try {
