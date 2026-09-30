@@ -159,11 +159,19 @@ async function fixture(options: { verdict?: 'approved' | 'rejected' | 'unknown';
       ...(previous === undefined ? {} : { expectedVersion: previous.version, previousStatus: previous.status }),
     })
   }
-  async function run() {
+  async function run(afterStart?: () => void) {
     runtime.start()
+    afterStart?.()
     await new Promise(resolve => setTimeout(resolve, 1150))
-    await ctx.assistantAutomations.tick()
-    await ctx.assistantAutomations.whenIdle()
+    const observations: Array<ReturnType<typeof runtime.health>['counts']> = []
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await ctx.assistantAutomations.tick()
+      await ctx.assistantAutomations.whenIdle()
+      const counts = runtime.health().counts
+      observations.push(counts)
+      if (counts.pending + counts.queued + counts.running === 0) return observations
+    }
+    throw new Error(`memory learning did not drain after three native ticks: ${JSON.stringify(observations)}`)
   }
   return { root, ctx, owner, authority, principal, binding, deliveryStore, evaluationStore,
     runtime, source, feedback, run, agent, extract, reviewCalls, reviewer, reviewLedger,
@@ -217,6 +225,22 @@ test.each(['rejected', 'unknown'] as const)('independent %s review cannot adopt 
   f.runtime.scan()
   expect(f.extract).toHaveBeenCalledOnce()
   expect(f.reviewCalls).toHaveBeenCalledOnce()
+})
+
+test('minute-boundary scan leaves the learning job queued until the next native tick', async () => {
+  const minute = Math.floor(Date.now() / 60_000) * 60_000
+  let now = minute + 59_800
+  vi.spyOn(Date, 'now').mockImplementation(() => now)
+  const f = await fixture({ verdict: 'unknown' })
+  f.source()
+  const observations = await f.run(() => { now = minute + 61_000 })
+  expect(observations.map(counts => ({ queued: counts.queued, unknown: counts.unknown })))
+    .toEqual([{ queued: 1, unknown: 0 }, { queued: 0, unknown: 1 }])
+  expect(f.extract).toHaveBeenCalledOnce()
+  expect(f.reviewCalls).toHaveBeenCalledOnce()
+  expect(f.adoptCalls).toBe(0)
+  expect(f.ctx.personalMemory.search(f.agent, { query: 'Atlas pnpm' })).toEqual([])
+  expect(f.runtime.health().counts.unknown).toBe(1)
 })
 
 test('lost adoption acknowledgement reconciles the exact durable receipt without replaying extraction or review', async () => {
