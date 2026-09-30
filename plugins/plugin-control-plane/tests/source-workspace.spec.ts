@@ -11,7 +11,7 @@ import { delimiter, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { lstatSync } from 'node:fs'
 import { Context, Service } from '@deepseek-ai/cordis'
-import type { AssistantAutomationsService, HostAutomationExecutor } from '@dsh-enhanced/assistant-automations'
+import { automationDefinitionDigest, type AssistantAutomationsService, type HostAutomationExecutor } from '@dsh-enhanced/assistant-automations'
 import { afterAll, afterEach, beforeEach, describe as baseDescribe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload } from '../src/approval.ts'
 import { runPluginControl } from '../src/cli.ts'
@@ -341,17 +341,26 @@ describe.sequential('prepared modify source workspaces (engineering-layer, not v
 
     let executor: HostAutomationExecutor | undefined
     let activation: { definitionHash: string; activationNonce: string; ownerRouteId: string } | undefined
+    let automationStatus: 'active' | 'paused' = 'paused'
+    let definitionVersion = 0
     const automations = {
       registerHostExecutor(value: HostAutomationExecutor): () => void { executor = value; return () => { executor = undefined } },
       reconcileSystem(input: Parameters<AssistantAutomationsService['reconcileSystem']>[0]): ReturnType<AssistantAutomationsService['reconcileSystem']> {
-        if (input.desiredStatus === 'paused') activation = { definitionHash: 'a'.repeat(64), activationNonce: input.definition.execution!.activationNonce, ownerRouteId: input.definition.execution!.ownerRouteId }
+        const definitionHash = automationDefinitionDigest(input.definition)
+        const desiredStatus = input.desiredStatus ?? 'active'
+        if (activation?.definitionHash !== definitionHash || automationStatus !== desiredStatus) definitionVersion += 1
+        activation = { definitionHash, activationNonce: input.definition.execution!.activationNonce, ownerRouteId: input.definition.execution!.ownerRouteId }
+        automationStatus = desiredStatus
         return {} as ReturnType<AssistantAutomationsService['reconcileSystem']>
       },
+      reconcileSystemExact(): never { throw new Error('modify lifecycle fixture must not rearm task-created plugins') },
+      pauseSystemOwned(): never { throw new Error('modify lifecycle fixture must not revoke a Growth producer') },
       inspectSystemOwnedActivation(): ReturnType<AssistantAutomationsService['inspectSystemOwnedActivation']> { return activation },
       inspectSystemOwned(): ReturnType<AssistantAutomationsService['inspectSystemOwned']> {
-        return { latestTerminalRuns: {} } as ReturnType<AssistantAutomationsService['inspectSystemOwned']>
+        return { latestTerminalRuns: {}, definitionHash: activation?.definitionHash,
+          definitionVersion, automationStatus } as ReturnType<AssistantAutomationsService['inspectSystemOwned']>
       },
-    } satisfies Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
+    } satisfies Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'reconcileSystemExact' | 'pauseSystemOwned' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
     const delivery = { validateOwnerRoute: () => ({ receiptVersion: 2 as const, authorityId: 'route-1', authorityHash: 'b'.repeat(64), principalId: 'owner-1',
       principalRecordId: 'record-1', principalVersion: 1, workspace: value.root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }) }
     const peer = ctx.plugin({ name: 'source-jobs-peers', apply(peerCtx) {

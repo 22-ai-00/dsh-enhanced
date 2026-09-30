@@ -1129,6 +1129,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.2
+      '@dsh-enhanced/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:../../packages/assistant-growth-contract
       '@dsh-enhanced/plugin-control-plane':
         specifier: '>=0.1.33 <0.2.0'
         version: link:../plugin-control-plane
@@ -2215,6 +2218,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.2
+      '@dsh-enhanced/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:../../packages/assistant-growth-contract
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'

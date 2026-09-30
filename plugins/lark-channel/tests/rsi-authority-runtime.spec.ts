@@ -28,6 +28,13 @@ async function fixture() {
     'dsh-systemd-host-authority.js', 'dsh-systemd-host-attestor.js', 'dsh-local-release-adapter.js']) {
     await cp(join(installed, 'bin', name), join(packageRoot, 'bin', name))
   }
+  const contractRoot = await realpath(join(installed, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract'))
+  const contractTarget = join(packageRoot, 'node_modules', '@dsh-enhanced', 'assistant-growth-contract')
+  await mkdir(join(contractTarget, 'lib'), { recursive: true, mode: 0o700 })
+  await cp(join(contractRoot, 'package.json'), join(contractTarget, 'package.json'))
+  for (const name of await readdir(join(contractRoot, 'lib'))) {
+    if (name.endsWith('.js')) await cp(join(contractRoot, 'lib', name), join(contractTarget, 'lib', name))
+  }
   return { root, home, packageRoot, final: join(home, 'rsi-authority-runtimes', 'owner'),
     input: { dshHome: home, profile: 'owner' } }
 }
@@ -117,6 +124,29 @@ describe.skipIf(process.platform !== 'linux')('private authority runtime', () =>
     await writeFile(deployed, original, { mode: 0o600 })
     await writeFile(join(f.final, 'lib', 'unexpected.js'), '')
     await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })).rejects.toThrow()
+  }, 120_000)
+
+  test('pins shared contract bytes and refuses dependency substitution, tampering or extra directories', async () => {
+    const f = await fixture()
+    const contract = join('node_modules', '@dsh-enhanced', 'assistant-growth-contract')
+    const sourceManifest = join(f.packageRoot, contract, 'package.json')
+    const originalManifest = await readFile(sourceManifest)
+    await writeFile(sourceManifest, JSON.stringify({ ...JSON.parse(originalManifest.toString()), version: '0.0.0' }))
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })).rejects.toThrow('shared contract identity')
+    await writeFile(sourceManifest, originalManifest)
+    await prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })
+    const deployed = join(f.final, contract, 'lib', 'source-run.js')
+    const original = await readFile(deployed)
+    await writeFile(deployed, 'tampered contract')
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })).rejects.toThrow('deployed asset changed')
+    await writeFile(deployed, original)
+    await rm(deployed)
+    await symlink(join(f.packageRoot, contract, 'lib', 'source-run.js'), deployed)
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })).rejects.toThrow('linked or unowned')
+    await rm(deployed)
+    await writeFile(deployed, original, { mode: 0o600 })
+    await mkdir(join(f.final, 'node_modules', 'unexpected'), { mode: 0o700 })
+    await expect(prepareRsiAuthorityRuntime(f.input, { packageRoot: f.packageRoot })).rejects.toThrow('unexpected runtime directory')
   }, 120_000)
 
   test('stage replacement persists logical source paths and replays after Home swap', async () => {

@@ -2,6 +2,8 @@ import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomat
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { SourceGrowthRunUnavailableError, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding,
+  type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
 import type { NormalizedGrowthDriverConfig } from './config.js'
 import { UsageStore, type UsageIntent, type UsageJob, type UsageModel } from './usage-store.js'
 
@@ -13,10 +15,15 @@ type Delivery = Pick<AssistantDeliveryService, 'validateOwnerRoute' | 'inspectOw
 type Automations = Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
 export interface UsageReviewInput {
   id: string
+  intentDigest: string
+  definitionHash: string
+  occurrenceId: string
+  expiresAt: number
   model: UsageModel
   source: OwnerForegroundLearningTask
   signal: AbortSignal
   assertCurrent(): void
+  bindSourceRun(input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt'>): SourceGrowthRunBinding
 }
 export type UsageReviewResult = 'reviewed' | 'failed' | 'unknown'
 const same = (a: unknown, b: unknown): boolean => acceptanceDigest(a) === acceptanceDigest(b)
@@ -103,8 +110,41 @@ export class UsageLearningRuntime {
       principalId: owner.principalId, workspace: owner.workspace, agentPreset: owner.agentPreset,
       outcomeId: job.intent.source.canonical.triggerOutcomeId })
     if (!source || !same(source.canonical.projection, job.intent.source.canonical.projection)
-      || !same(source.source, job.intent.source.source) || !same(source.owner, owner)) throw new Error('usage source changed')
+      || !same(source.source, job.intent.source.source) || !same(source.owner, owner)
+      || !(source.ownerRevision === undefined && job.intent.source.ownerRevision === undefined
+        || source.ownerRevision !== undefined && job.intent.source.ownerRevision !== undefined
+          && same(source.ownerRevision, job.intent.source.ownerRevision))
+      || source.judgement !== job.intent.source.judgement) throw new Error('usage source changed')
     return source
+  }
+  inspectSourceGrowthRun = (request: SourceGrowthRunRequest): SourceGrowthRunBinding | undefined => {
+    if (!this.active) throw new SourceGrowthRunUnavailableError('usage runtime is temporarily unavailable')
+    try {
+      const job = this.store.get(request.runId)
+      if (!job || job.digest !== request.intentDigest || !['running', 'reviewed'].includes(job.state)
+        || !job.intent.modelOrigin || !job.intent.budget || !job.sourceRun
+        || job.definitionHash === null || job.occurrenceId === null) return undefined
+      const source = this.source(job)
+      const binding = job.sourceRun
+      validateSourceGrowthRunBinding(binding)
+      if (binding.runId !== job.id || binding.intentDigest !== job.digest || binding.configDigest !== this.configDigest
+        || binding.native.definitionHash !== job.definitionHash || binding.native.occurrenceId !== job.occurrenceId
+        || binding.source.outcomeId !== source.canonical.triggerOutcomeId
+        || !same(binding.source.projection, source.canonical.projection)
+        || binding.ownerDigest !== sourceGrowthEvidenceDigest(source.owner)
+        || binding.source.sourceDigest !== sourceGrowthEvidenceDigest({ protocol: source.protocol, source: source.source,
+          judgement: source.judgement, ownerRevision: source.ownerRevision })
+        || !same(binding.model, job.intent.model) || binding.modelOrigin !== job.intent.modelOrigin
+        || !same(binding.budget, job.intent.budget)) return undefined
+      return structuredClone(binding)
+    } catch (error) {
+      const code = error instanceof Error ? (error as Error & { code?: string }).code : undefined
+      if (code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED'
+        || code === 'ERR_SQLITE_ERROR' && error instanceof Error && /database (?:is )?(?:busy|locked)/iu.test(error.message)) {
+        throw new SourceGrowthRunUnavailableError('usage store is temporarily busy')
+      }
+      return undefined
+    }
   }
 
   /** Synchronous nudge, bounded to 1000 heads. Native scan resumes the cursor. */
@@ -128,7 +168,8 @@ export class UsageLearningRuntime {
             ? this.ports.delivery.inspectOwnerForegroundLearningTask({ authorityId: owner.authorityId,
               principalId: owner.principalId, workspace: owner.workspace, agentPreset: owner.agentPreset,
               outcomeId: canonical.triggerOutcomeId }) : undefined
-          const model = this.config.provider !== null && this.config.model !== null
+          const fixedModel = this.config.provider !== null && this.config.model !== null
+          const model = fixedModel
             ? { provider: this.config.provider, model: this.config.model,
               ...(this.config.reasoningEffort === null ? {} : { reasoningEffort: this.config.reasoningEffort }) }
             : source?.source.modelSelection
@@ -138,6 +179,11 @@ export class UsageLearningRuntime {
             && canonical.projection.disposition === 'upsert' && source.judgement !== 'unresolved'
             && occurredAt <= now && now - occurredAt <= this.config.usageLearning.lookbackMs && model !== undefined
           const intent: UsageIntent | undefined = eligible ? { configDigest: this.configDigest, source: source!, model: model!,
+            modelOrigin: fixedModel ? 'explicit-growth-override' : 'inherited-owner-task',
+            budget: { budgetId: this.config.budgetId!, amount: this.config.budgetAmount!,
+              maxModelCalls: this.config.maxModelCalls, maxToolCalls: this.config.maxToolCalls,
+              maxOutputTokens: this.config.maxOutputTokens, maxDurationMs: this.config.maxDurationMs,
+              maxPlansPerWake: this.config.pluginSourceProposals.maxPlansPerWake },
             createdAt: now, expiresAt: now + this.config.usageLearning.lookbackMs } : undefined
           const result = this.ports.evaluation.withTrustedCanonicalTaskWriterFence({ scope, scopeWatermark: page.scopeWatermark,
             evidence: [canonical.projection] }, () => {
@@ -222,7 +268,36 @@ export class UsageLearningRuntime {
         if (stored?.state !== 'running' || stored.occurrenceId !== input.occurrenceId) throw new Error('usage dispatch no longer owned')
       }
       assertCurrent()
-      const outcome = await this.ports.review({ id: job.id, model: job.intent.model, source: job.intent.source, signal, assertCurrent })
+      const bindSourceRun: UsageReviewInput['bindSourceRun'] = actual => {
+        assertCurrent()
+        if (!job.intent.modelOrigin || !job.intent.budget || !same(actual.model, job.intent.model)) {
+          throw new Error('usage source run lacks a frozen model or budget')
+        }
+        const source = this.source(job)
+        const projection = source.canonical.projection
+        if (projection.subjectKind !== 'foreground-turn' || projection.disposition !== 'upsert') throw new Error('usage source projection is not current')
+        const binding: SourceGrowthRunBinding = {
+          protocol: 'assistant-growth/source-run/v1', runId: job.id, intentDigest: job.digest,
+          configDigest: job.intent.configDigest, ownerDigest: sourceGrowthEvidenceDigest(source.owner),
+          source: { outcomeId: source.canonical.triggerOutcomeId,
+            projection: { subjectKind: 'foreground-turn', subjectRef: projection.subjectRef, version: projection.version,
+              digest: projection.digest, disposition: 'upsert',
+              ...(projection.evidenceOutcomeId === undefined ? {} : { evidenceOutcomeId: projection.evidenceOutcomeId }) },
+            sourceDigest: sourceGrowthEvidenceDigest({ protocol: source.protocol, source: source.source,
+              judgement: source.judgement, ownerRevision: source.ownerRevision }) },
+          model: actual.model, modelOrigin: job.intent.modelOrigin, budget: job.intent.budget,
+          native: { owner: 'assistant-growth-usage', automationId: job.id,
+            definitionHash: input.definitionHash, occurrenceId: input.occurrenceId },
+          sessionId: actual.sessionId, toolContractDigest: actual.toolContractDigest,
+          executionContractDigest: actual.executionContractDigest, createdAt: actual.createdAt,
+          generationDeadlineAt: actual.generationDeadlineAt, expiresAt: job.intent.expiresAt,
+        }
+        sourceGrowthRunDigest(binding)
+        return this.store.bindSourceRun(job.id, job.digest, input.definitionHash, input.occurrenceId, binding)
+      }
+      const outcome = await this.ports.review({ id: job.id, intentDigest: job.digest,
+        definitionHash: input.definitionHash, occurrenceId: input.occurrenceId, expiresAt: job.intent.expiresAt,
+        model: job.intent.model, source: job.intent.source, signal, assertCurrent, bindSourceRun })
       assertCurrent()
       this.store.settle(job.id, outcome, outcome === 'reviewed' ? 'review-complete-not-adopted' : 'review-incomplete', input.occurrenceId)
       return result(outcome === 'reviewed' ? 'succeeded' : outcome)

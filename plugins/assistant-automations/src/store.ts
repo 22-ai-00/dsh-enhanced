@@ -1333,6 +1333,8 @@ export class AutomationStore {
     idempotencyKey: string
     desiredStatus?: 'active' | 'paused'
     definition: unknown
+    expectedDefinitionHash?: string
+    expectedVersion?: number
   }): AutomationRecord {
     const owner = text(input.owner, 'owner', 200)
     const id = text(input.automationId, 'automationId', 500)
@@ -1346,7 +1348,13 @@ export class AutomationStore {
     if (desiredStatus === 'active') {
       assertPlaceholderScheduleCannotActivate({ owner, schedule: definition.schedule })
     }
-    const inputHash = hash({ owner, automationId: id, desiredStatus, definition })
+    const exact = Object.hasOwn(input, 'expectedDefinitionHash') || Object.hasOwn(input, 'expectedVersion')
+    if (exact && (typeof input.expectedDefinitionHash !== 'string' || !/^[a-f0-9]{64}$/u.test(input.expectedDefinitionHash)
+      || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion! < 1)) {
+      throw new AutomationStoreError('invalid-definition', 'exact system reconciliation tuple is invalid')
+    }
+    const inputHash = hash({ owner, automationId: id, desiredStatus, definition,
+      ...(exact ? { expectedDefinitionHash: input.expectedDefinitionHash, expectedVersion: input.expectedVersion } : {}) })
     const definitionHash = hash(definition)
     return this.transaction(() => {
       const prior = this.database.prepare(`
@@ -1359,12 +1367,24 @@ export class AutomationStore {
             'system reconciliation key was reused with different input',
           )
         }
-        return Object.freeze(JSON.parse(prior.result_json) as AutomationRecord)
+        const replay = JSON.parse(prior.result_json) as AutomationRecord
+        if (exact && (replay.id !== id || replay.owner !== owner || replay.status !== desiredStatus
+          || (replay.version !== input.expectedVersion && replay.version !== input.expectedVersion! + 1)
+          || hash(normalizeAutomationDefinition(replay.definition, this.maxPromptBytes, this.maxAllowedTools)) !== definitionHash)) {
+          throw new AutomationStoreError('invalid-state', 'exact system reconciliation receipt is inconsistent')
+        }
+        return Object.freeze(replay)
       }
 
       const current = this.get(id)
       if (current !== undefined && current.owner !== owner) {
         throw new AutomationStoreError('invalid-state', 'automation row is not owned by this system plugin')
+      }
+      if (exact && (current === undefined || hash(current.definition) !== input.expectedDefinitionHash)) {
+        throw new AutomationStoreError('not-found', 'exact system-owned automation definition was not found')
+      }
+      if (exact && current!.version !== input.expectedVersion) {
+        throw new AutomationStoreError('version-conflict', 'system-owned automation changed before exact reconciliation')
       }
       const now = this.now()
       if (current === undefined) {

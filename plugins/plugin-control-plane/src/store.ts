@@ -15,6 +15,7 @@ import { validateSourceBuildConfig } from './source-build.js'
 import { validateSourceBaselineConfig, verifySourceBaselineHistory } from './source-baseline.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
 import { validateSourceCreationFiles, validateSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
+import { validateSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
 import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
@@ -214,13 +215,20 @@ function expectedSourceScope(name: string, mode: PluginSourcePlan['mode']): read
 
 function creationBindingFromStored(value: unknown): SourceCreationBinding {
   const binding = objectRecord(value, 'source creation binding')
-  exactKeys(binding, ['grant', 'generatorDigest'], 'source creation binding')
+  exactKeys(binding, ['grant', 'generatorDigest', ...(Object.hasOwn(binding, 'growthRun') ? ['growthRun'] : [])], 'source creation binding')
   try { validateSourceCreationGrant(binding['grant']) }
   catch { throw new ControlPlaneStoreError('invalid-input', 'source creation grant is invalid') }
   if (typeof binding['generatorDigest'] !== 'string' || !DIGEST.test(binding['generatorDigest'])) {
     throw new ControlPlaneStoreError('invalid-input', 'source creation generator digest is invalid')
   }
-  return Object.freeze({ grant: Object.freeze(structuredClone(binding['grant'])), generatorDigest: binding['generatorDigest'] })
+  let growthRun: SourceCreationBinding['growthRun']
+  if (Object.hasOwn(binding, 'growthRun')) {
+    try { validateSourceGrowthRunBinding(binding['growthRun']) }
+    catch { throw new ControlPlaneStoreError('invalid-input', 'source creation growth run is invalid') }
+    growthRun = structuredClone(binding['growthRun'])
+  }
+  return Object.freeze({ grant: Object.freeze(structuredClone(binding['grant'])), generatorDigest: binding['generatorDigest'],
+    ...(growthRun === undefined ? {} : { growthRun: Object.freeze(growthRun) }) })
 }
 
 function objectRecord(value: unknown, label: string): Record<string, unknown> {
@@ -390,6 +398,7 @@ interface SourceJobRow {
   intent_json: string; intent_digest: string; status: SourceJobStatus; revision: number
   created_at: number; expires_at: number; definition_hash: string | null; occurrence_id: string | null
   plan_id: string | null; failure_code: string | null; updated_at: number
+  dispatch_at: number | null; previous_definition_hash: string | null; previous_definition_version: number | null
 }
 
 interface HostAttestationOperationRow {
@@ -1371,6 +1380,9 @@ function sourceJobFromRow(row: SourceJobRow): SourceJobRecord {
     || !Number.isSafeInteger(row.created_at) || !Number.isSafeInteger(row.updated_at) || row.updated_at < row.created_at
     || !['queued', 'running', 'prepared', 'failed', 'unknown'].includes(row.status)
     || (row.definition_hash !== null && !DIGEST.test(row.definition_hash)) || (row.occurrence_id !== null && !KEY.test(row.occurrence_id))
+    || (row.dispatch_at !== null && (!Number.isSafeInteger(row.dispatch_at) || row.dispatch_at < row.created_at))
+    || (row.previous_definition_hash !== null && !DIGEST.test(row.previous_definition_hash))
+    || (row.previous_definition_version !== null && (!Number.isSafeInteger(row.previous_definition_version) || row.previous_definition_version < 1))
     || (row.plan_id !== null && !/^source-[a-f0-9-]{36}$/u.test(row.plan_id)) || (row.failure_code !== null && !KEY.test(row.failure_code))) {
     throw new ControlPlaneStoreError('invalid-state', 'stored source job is corrupt')
   }
@@ -1380,10 +1392,16 @@ function sourceJobFromRow(row: SourceJobRow): SourceJobRecord {
     || (row.status === 'prepared' && (row.definition_hash === null || row.occurrence_id === null || row.plan_id === null || row.failure_code !== null))
     || (row.status === 'unknown' && (row.definition_hash === null || row.occurrence_id === null || row.plan_id !== null || row.failure_code === null))
     || (row.status === 'failed' && (row.plan_id !== null || row.failure_code === null))
-    || (!active && row.status !== 'prepared' && row.plan_id !== null)) throw new ControlPlaneStoreError('invalid-state', 'stored source job state is corrupt')
+    || (!active && row.status !== 'prepared' && row.plan_id !== null)
+    || (row.previous_definition_hash === null) !== (row.previous_definition_version === null)
+    || (row.previous_definition_hash !== null && (row.status !== 'queued' || row.definition_hash !== null || row.dispatch_at === null))) throw new ControlPlaneStoreError('invalid-state', 'stored source job state is corrupt')
   return Object.freeze({ id: row.id, automationId: row.automation_id, idempotencyKey: row.idempotency_key, intent, intentDigest: row.intent_digest,
     status: row.status, revision: row.revision, createdAt: row.created_at, expiresAt: row.expires_at, updatedAt: row.updated_at,
-    ...(row.definition_hash === null ? {} : { definitionHash: row.definition_hash }), ...(row.occurrence_id === null ? {} : { occurrenceId: row.occurrence_id }),
+    ...(row.definition_hash === null ? {} : { definitionHash: row.definition_hash }),
+    ...(row.dispatch_at === null ? {} : { dispatchAt: row.dispatch_at }),
+    ...(row.previous_definition_hash === null ? {} : { previousDefinitionHash: row.previous_definition_hash }),
+    ...(row.previous_definition_version === null ? {} : { previousDefinitionVersion: row.previous_definition_version }),
+    ...(row.occurrence_id === null ? {} : { occurrenceId: row.occurrence_id }),
     ...(row.plan_id === null ? {} : { planId: row.plan_id }), ...(row.failure_code === null ? {} : { failureCode: row.failure_code }) })
 }
 
@@ -2160,11 +2178,17 @@ export class ControlPlaneStore {
     if (!KEY.test(idempotencyKey)) throw new ControlPlaneStoreError('invalid-input', 'source job idempotencyKey has invalid syntax')
     const intent = sourceJobIntentFromStored(input.intent); const intentDigest = controlPlaneDigest(intent); const now = this.#now()
     this.#assertOwnerTaskFailureGapAdmission(intent.gapId)
+    if (intent.mode === 'create' && this.getOwnerTaskFailureReference(intent.gapId) !== undefined
+      && intent.creation?.growthRun === undefined) {
+      throw new ControlPlaneStoreError('invalid-input', 'task-backed creation requires a frozen source growth run')
+    }
     if (intent.containerName !== `dsh-${input.id}` || basename(intent.worktree) !== `worktree-job-${input.id.slice('source-job-'.length)}`) {
       throw new ControlPlaneStoreError('invalid-input', 'source job resource identity is invalid')
     }
     if (now >= intent.authority.expiresAt) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
     if (intent.creation !== undefined && now >= intent.creation.grant.expiresAt) throw new ControlPlaneStoreError('expired', 'source creation grant is expired')
+    if (intent.creation?.growthRun !== undefined && (now >= intent.creation.growthRun.generationDeadlineAt
+      || now >= intent.creation.growthRun.expiresAt)) throw new ControlPlaneStoreError('expired', 'source growth generation window is expired')
     this.#database.exec('BEGIN IMMEDIATE')
     try {
       const prior = this.#database.prepare('SELECT * FROM source_jobs WHERE authority_id = ? AND idempotency_key = ?')
@@ -2260,9 +2284,27 @@ export class ControlPlaneStore {
 
   bindSourceJobDefinition(input: { id: string; revision: number; definitionHash: string }): SourceJobRecord {
     if (!Number.isSafeInteger(input.revision) || input.revision < 1 || !DIGEST.test(input.definitionHash)) throw new ControlPlaneStoreError('invalid-input', 'source job definition binding is invalid')
-    const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET definition_hash = ?, revision = revision + 1, updated_at = ?
+    const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET definition_hash = ?, previous_definition_hash = NULL,
+      previous_definition_version = NULL, revision = revision + 1, updated_at = ?
       WHERE id = ? AND revision = ? AND status = 'queued' AND definition_hash IS NULL AND expires_at > ?`).run(input.definitionHash, now, input.id, input.revision, now)
     if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source job definition binding lost its queued CAS')
+    return this.getSourceJob(input.id)!
+  }
+
+  /** Persist the only safe rearm: same queued job, with no claimed occurrence. */
+  rearmQueuedGrowthSourceJob(input: { id: string; revision: number; priorDefinitionHash: string; priorDefinitionVersion: number; dispatchAt: number }): SourceJobRecord {
+    if (!Number.isSafeInteger(input.revision) || input.revision < 1 || !DIGEST.test(input.priorDefinitionHash)
+      || !Number.isSafeInteger(input.priorDefinitionVersion) || input.priorDefinitionVersion < 1
+      || !Number.isSafeInteger(input.dispatchAt) || input.dispatchAt <= this.#now()) {
+      throw new ControlPlaneStoreError('invalid-input', 'source growth rearm request is invalid')
+    }
+    const now = this.#now()
+    const result = this.#database.prepare(`UPDATE source_jobs SET dispatch_at = ?, previous_definition_hash = definition_hash,
+      previous_definition_version = ?,
+      definition_hash = NULL, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ? AND status = 'queued'
+      AND occurrence_id IS NULL AND definition_hash = ? AND expires_at > ? AND json_type(intent_json, '$.creation.growthRun') IS NOT NULL`).run(
+      input.dispatchAt, input.priorDefinitionVersion, now, input.id, input.revision, input.priorDefinitionHash, now)
+    if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source growth rearm lost its queued CAS')
     return this.getSourceJob(input.id)!
   }
 
@@ -2281,7 +2323,8 @@ export class ControlPlaneStore {
   settleSourceJob(input: { id: string; revision: number; status: 'failed' | 'unknown'; failureCode: string }): SourceJobRecord {
     if (!Number.isSafeInteger(input.revision) || input.revision < 1 || (input.status !== 'failed' && input.status !== 'unknown') || !KEY.test(input.failureCode)) throw new ControlPlaneStoreError('invalid-input', 'source job settlement is invalid')
     const permitted = input.status === 'unknown' ? "status = 'running'" : "status IN ('queued', 'running', 'unknown')"
-    const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET status = ?, failure_code = ?, revision = revision + 1, updated_at = ?
+    const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET status = ?, failure_code = ?,
+      previous_definition_hash = NULL, previous_definition_version = NULL, revision = revision + 1, updated_at = ?
       WHERE id = ? AND revision = ? AND ${permitted}`).run(input.status, input.failureCode, now, input.id, input.revision)
     if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source job settlement lost its state CAS')
     return this.getSourceJob(input.id)!
@@ -2290,6 +2333,14 @@ export class ControlPlaneStore {
   interruptSourceJobs(): number {
     const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET status = 'unknown', failure_code = 'interrupted',
       revision = revision + 1, updated_at = ? WHERE status = 'running'`).run(now)
+    return Number(result.changes)
+  }
+
+  /** Revoke claimed task-created jobs when their Host run producer disappears. */
+  interruptGrowthSourceJobs(): number {
+    const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET status = 'unknown', failure_code = 'source-growth-provider-disposed',
+      revision = revision + 1, updated_at = ? WHERE status = 'running'
+      AND json_type(intent_json, '$.creation.growthRun') IS NOT NULL`).run(now)
     return Number(result.changes)
   }
 
@@ -2398,6 +2449,10 @@ export class ControlPlaneStore {
           throw new ControlPlaneStoreError('conflict', 'source job completion lost its immutable running binding')
         }
         if (now >= sourceJob.expiresAt || (mode === 'prepared-create' && now >= creation!.grant.expiresAt)) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
+        if (mode === 'prepared-create' && this.getOwnerTaskFailureReference(input.gapId) !== undefined
+          && (!creation?.growthRun || now >= creation.growthRun.expiresAt)) {
+          throw new ControlPlaneStoreError('expired', 'task-backed creation growth run is absent or expired')
+        }
       }
       if (preparedArtifact !== undefined) {
         const pack = preparedEvidence!.pack

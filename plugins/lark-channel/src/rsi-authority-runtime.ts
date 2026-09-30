@@ -35,6 +35,9 @@ const EXECUTABLES: Record<Executable, string> = {
   hostAttestor: 'dsh-systemd-host-attestor.js',
 }
 const MAX_ENTRIES = 512, MAX_FILE = 160_000_000, MAX_TOTAL = 256_000_000
+const CONTRACT_PACKAGE = '@dsh-enhanced/assistant-growth-contract'
+const CONTRACT_ROOT = `node_modules/${CONTRACT_PACKAGE}`
+const RUNTIME_DIRECTORIES = ['bin', 'lib', 'node_modules', 'node_modules/@dsh-enhanced', CONTRACT_ROOT, `${CONTRACT_ROOT}/lib`]
 function fail(message: string): never { throw new Error(`rsi authority runtime: ${message}`) }
 function hash(bytes: Buffer | string): string { return createHash('sha256').update(bytes).digest('hex') }
 function exactPath(path: string): boolean { return isAbsolute(path) && resolve(path) === path
@@ -74,10 +77,28 @@ async function sourceAssets(packageRoot: string, nodePath: string, signal: Abort
   for (const name of libraries) names.set(`lib/${name}`, join(packageRoot, 'lib', name))
   for (const name of Object.values(EXECUTABLES)) names.set(`bin/${name}`, join(packageRoot, 'bin', name))
   for (const phase of PHASES) names.set(`bin/dsh-local-release-${phase}.js`, join(packageRoot, 'bin', 'dsh-local-release-adapter.js'))
+  // Resolve only the Control Plane's installed dependency, never a workspace
+  // ancestor or a network install. The private runtime must survive profile replacement.
+  const contractRoot = await realpath(join(packageRoot, 'node_modules', CONTRACT_PACKAGE))
+  await io.directory(contractRoot, false)
+  await io.directory(join(contractRoot, 'lib'), false)
+  const contractPackageBytes = await asset(join(contractRoot, 'package.json'), 65_536, signal)
+  const contractManifest = JSON.parse(contractPackageBytes.toString('utf8')) as {
+    name?: string; version?: string; type?: string; dependencies?: Record<string, unknown>; optionalDependencies?: Record<string, unknown>
+  }
+  if (contractManifest.name !== CONTRACT_PACKAGE || contractManifest.version !== version || contractManifest.type !== 'module'
+    || Object.keys(contractManifest.dependencies ?? {}).length || Object.keys(contractManifest.optionalDependencies ?? {}).length) {
+    fail('installed shared contract identity or dependency boundary differs')
+  }
+  names.set(`${CONTRACT_ROOT}/package.json`, join(contractRoot, 'package.json'))
+  const contractLibraries = (await readdir(join(contractRoot, 'lib'))).filter(name => name.endsWith('.js')).sort()
+  if (!contractLibraries.includes('index.js') || names.size + contractLibraries.length > MAX_ENTRIES) fail('shared contract entry bound exceeded')
+  for (const name of contractLibraries) names.set(`${CONTRACT_ROOT}/lib/${name}`, join(contractRoot, 'lib', name))
   const files: { path: string; sourcePath: string; bytes: Buffer; sourceSha256: string; sourceMode: number }[] = []
   let total = 0
   for (const [path, sourcePath] of names) {
-    const bytes = path === 'package.json' ? packageBytes : await asset(sourcePath, MAX_FILE, signal)
+    const bytes = path === 'package.json' ? packageBytes : path === `${CONTRACT_ROOT}/package.json`
+      ? contractPackageBytes : await asset(sourcePath, MAX_FILE, signal)
     total += bytes.length
     if (total > MAX_TOTAL) fail('asset byte bound exceeded')
     const sourceMode = (await lstat(sourcePath)).mode & 0o777
@@ -121,7 +142,8 @@ async function verifyTree(root: string, entries: Entry[], signal: AbortSignal): 
       const full = join(root, path), item = await lstat(full)
       if (item.isSymbolicLink() || item.nlink !== 1 && item.isFile() || process.getuid && item.uid !== process.getuid()) fail('deployed asset is linked or unowned')
       if (item.isDirectory()) {
-        if (!['bin', 'lib'].includes(path) || (item.mode & 0o777) !== 0o700) fail('unexpected runtime directory')
+        if (!RUNTIME_DIRECTORIES.includes(path) || !entries.some(entry => entry.path.startsWith(`${path}/`))
+          || (item.mode & 0o777) !== 0o700) fail('unexpected runtime directory')
         await visit(full, path)
       } else if (item.isFile()) {
         if (path === 'receipt.json') continue
@@ -205,7 +227,7 @@ export async function replaceRsiAuthorityRuntimeInStage(input: {
   let moved = false
   try {
     await chmod(stage, 0o700)
-    await mkdir(join(stage, 'bin'), { mode: 0o700 }); await mkdir(join(stage, 'lib'), { mode: 0o700 })
+    for (const directory of RUNTIME_DIRECTORIES) await mkdir(join(stage, directory), { mode: 0o700 })
     for (const file of files) {
       const entry = entries.find(item => item.path === file.path)!
       await writeFile(join(stage, file.path), deployedBytes(file, final), entry.mode)
@@ -214,6 +236,8 @@ export async function replaceRsiAuthorityRuntimeInStage(input: {
     const body = { ...runtime, entries }
     await writeFile(join(stage, 'receipt.json'), Buffer.from(JSON.stringify({ ...body, digest: hash(JSON.stringify(body)) })), 0o600)
     await verifyTree(stage, entries, signal)
+    for (const directory of [...RUNTIME_DIRECTORIES].reverse()) await io.syncDirectory(join(stage, directory))
+    await io.syncDirectory(stage)
     await rename(physical, backup); moved = true
     try { await rename(stage, physical) }
     catch (error) { await rename(backup, physical); moved = false; throw error }
@@ -277,8 +301,7 @@ export async function prepareRsiAuthorityRuntime(input: { dshHome: string; profi
   let claimed: { dev: number; ino: number } | undefined
   try {
     await chmod(stage, 0o700)
-    await mkdir(join(stage, 'bin'), { mode: 0o700 })
-    await mkdir(join(stage, 'lib'), { mode: 0o700 })
+    for (const directory of RUNTIME_DIRECTORIES) await mkdir(join(stage, directory), { mode: 0o700 })
     for (const file of files) {
       signal.throwIfAborted()
       const entry = entries.find(item => item.path === file.path)!
@@ -287,11 +310,12 @@ export async function prepareRsiAuthorityRuntime(input: { dshHome: string; profi
     await verifySources(files, signal)
     const body = { ...runtime, entries }
     await writeFile(join(stage, 'receipt.json'), Buffer.from(JSON.stringify({ ...body, digest: hash(JSON.stringify(body)) })), 0o600)
-    await io.syncDirectory(join(stage, 'bin')); await io.syncDirectory(join(stage, 'lib')); await io.syncDirectory(stage)
+    for (const directory of [...RUNTIME_DIRECTORIES].reverse()) await io.syncDirectory(join(stage, directory))
+    await io.syncDirectory(stage)
     signal.throwIfAborted()
     await mkdir(final, { mode: 0o700 })
     const identity = await lstat(final); claimed = { dev: identity.dev, ino: identity.ino }
-    for (const name of ['bin', 'lib', 'node', 'package.json', 'receipt.json']) await rename(join(stage, name), join(final, name))
+    for (const name of ['bin', 'lib', 'node_modules', 'node', 'package.json', 'receipt.json']) await rename(join(stage, name), join(final, name))
     await verifyTree(final, entries, signal)
     await verifyRuntime(runtime, signal)
     await io.syncDirectory(parent)

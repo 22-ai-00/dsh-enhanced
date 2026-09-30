@@ -152,9 +152,11 @@ Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。`
 
 ### 新插件候选
 
-在上述 `durable` 配置中增加 `allowCreation: true`，并在 Control Plane 配置[有限创建授权](../plugin-control-plane/README.md#自动创建新插件候选)。正常使用的可信失败复盘可选择创建新能力，沿用同一原生 AgentLoop、来源模型、owner、gap 与预算。
+在上述 `durable` 配置中增加 `allowCreation: true`，并在 Control Plane 配置[有限创建授权](../plugin-control-plane/README.md#自动创建新插件候选)。正常使用的可信失败复盘可选择创建新能力，沿用同一原生 AgentLoop、冻结来源模型（或显式 Growth 固定覆盖）、owner、gap 与预算。
 
 创建工具仅公开 Host 允许的 `namePrefix` 命名规则。模型先选择此前缀下尚不存在的插件名，通过 `plugin_source_read({gap_id, plugin_name, mode: "create", paths: []})` 查看冻结基线公共模板的文件清单，再实际读取 `README.md`、`src/` 或 `tests/` 的模板内容；最后以 `plugin_source_create({gap_id, plugin_name, files: [{path, content}]})` 排队。创建与修改快照分别绑定；命名规则变化、过期或来源纠正使旧创建快照失效。
+
+可信任务复盘的创建排队另附 Host 私有 source-run 绑定：原生 Automations claim 与真实 Growth Agent setup 后，driver 持久记录任务修订、owner、模型来源、预算、实际 session、工具面摘要和生成截止时间。模型的创建参数没有这些字段；Control Plane 通过可选 provider 重新读取当前绑定，不能从模型输出推断。旧 Usage 记录没有该绑定，不能取得任务绑定创建资格；运行变为 unknown、来源纠正/撤回、配置或 owner 变化及来源过期时读取失败。可用的 reviewed 绑定可跨重启只读恢复，不重放模型工作。修改提案仍沿用原有来源和权限检查。
 
 候选只能写 README、源码与测试；manifest、patch、版本、许可证、构建配置、目录行和锁文件由 Host 生成且不能覆盖，不允许新增依赖。创建与修改共享每轮提案预算；Host 另持久计量创建额度，失败和 unknown 也消耗额度。检查通过仅产生 `prepared-create` / `pending-approval`，现有修改审批器不会批准这种计划。新插件签名采用、动态加载及真实任务收益仍待接通，不代表已形成生产自迭代闭环。
 

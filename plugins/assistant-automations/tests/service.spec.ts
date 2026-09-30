@@ -326,6 +326,24 @@ describe('assistant automations Cordis service', () => {
     await denied.ctx.fiber.restart()
   })
 
+  test('exact Host reconciliation preserves Policy authorization and rejects invalid CAS tuples', async () => {
+    const fixture = await harness()
+    const store = (fixture.service as unknown as { store: AutomationStore }).store
+    const created = fixture.service.reconcileSystem({ owner: 'assistant-heartbeat',
+      automationId: 'exact-policy', idempotencyKey: 'initial', desiredStatus: 'paused', definition: definition() })
+    const input = { owner: 'assistant-heartbeat', automationId: created.id, idempotencyKey: 'exact',
+      desiredStatus: 'active' as const, definition: definition(),
+      expectedDefinitionHash: store.getDefinitionHash(created.id)!, expectedVersion: created.version }
+    expect(fixture.service.reconcileSystemExact(input)).toMatchObject({ status: 'active', version: 2 })
+    expect(() => fixture.service.reconcileSystemExact({ ...input, expectedVersion: 0 }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-input' }))
+    await fixture.ctx.fiber.restart()
+    const denied = await harness(false)
+    expect(() => denied.service.reconcileSystemExact(input))
+      .toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    await denied.ctx.fiber.restart()
+  })
+
   test('runs one exact system-owned Host preview without an Agent or production side-channel', async () => {
     const fixture = await harness()
     const store = (fixture.service as unknown as { store: AutomationStore }).store

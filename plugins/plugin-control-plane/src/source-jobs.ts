@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, join, resolve } from 'node:path'
 import { realpath } from 'node:fs/promises'
-import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutor, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
+import { SourceGrowthRunUnavailableError, validateSourceGrowthRunBinding, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { automationDefinitionDigest, type AssistantAutomationsService, type HostAutomationDefinition, type HostAutomationExecutor, type HostAutomationExecutorInput, type HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
 import { controlPlaneDigest, expectedSourceRelease, type ControlPlaneStore } from './store.js'
 import { awaitSourceSignal, inspectSourceContext } from './source-context.js'
 import { assertPluginModificationAllowed, removeSourceJobWorktree, validateScopedPluginFiles, type ScopedPluginFile } from './source-workspace.js'
@@ -26,13 +27,18 @@ export interface SourceJobCaller {
 export interface EnqueueSourceJobInput {
   gapId: string; name: string; repository: string; files: readonly ScopedPluginFile[]; idempotencyKey: string
   mode?: 'create'
+  /** Host expectation only; authoritative bytes are reread through the registered producer. */
+  growthRun?: SourceGrowthRunBinding
   expectedBaseCommit: string; ttlMs: number; owner: SourceJobCaller; signal: AbortSignal; assertCurrent: () => void | Promise<void>
 }
 export interface SourceJobPorts {
-  automations: Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
+  automations: Pick<AssistantAutomationsService, 'registerHostExecutor' | 'reconcileSystem' | 'reconcileSystemExact'
+    | 'pauseSystemOwned' | 'inspectSystemOwnedActivation' | 'inspectSystemOwned'>
   delivery: { validateOwnerRoute(input: { authorityId: string; principalId: string; workspace: string; agentPreset: string }): SourceJobOwnerReceipt }
 }
 type Trust = Awaited<ReturnType<typeof loadTrustConfig>>
+export { SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
+class SourceGrowthNativeMismatchError extends Error {}
 
 export function validateSourceJobsConfig(value: SourceJobsConfig, build?: SourceBuildConfig): void {
   const allowed = new Set(['authorityId', 'expiresAt', 'maxSubmissions', 'repository', 'baseline', 'creation', 'ownerRouteId', 'principalId', 'workspace', 'preset', 'budgetId', 'budgetAmount'])
@@ -62,6 +68,8 @@ function projection(job: SourceJobRecord): SourceJobProjection {
 export class SourceJobRuntime {
   private readonly abort = new AbortController()
   private readonly flights = new Set<Promise<unknown>>()
+  private readonly growthFlights = new Set<Promise<unknown>>()
+  private readonly growthControllers = new Set<AbortController>()
   private readonly authorityDigest: string
   private unregister?: () => void
   private unregisterContinuation?: () => void
@@ -76,6 +84,7 @@ export class SourceJobRuntime {
   constructor(private readonly options: {
     config: SourceJobsConfig; build: SourceBuildConfig; statePath: string; store: ControlPlaneStore; ports: SourceJobPorts
     withGapSourceFence?: <T>(gapId: string, owner: SourceJobOwnerReceipt, callback: () => T) => T
+    assertGrowthRun?: (growthRun: SourceGrowthRunBinding, gapId: string, owner: SourceJobOwnerReceipt, generation: boolean) => void
     trust: () => Promise<Trust>
     approvePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     releasePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
@@ -95,7 +104,15 @@ export class SourceJobRuntime {
     const executor: HostAutomationExecutor = {
       descriptor: { executorId: EXECUTOR, contractVersion: 1, catalogDigest: CATALOG },
       accepts: spec => spec.executorId === EXECUTOR && spec.executorContractVersion === 1 && spec.catalogDigest === CATALOG && spec.runbookId === EXECUTOR && spec.runbookVersion === 1,
-      execute: input => this.track(this.execute(input)),
+      execute: input => {
+        const job = this.options.store.getSourceJobByAutomation(input.automationId)
+        const flight = this.track(this.execute(input))
+        if (job?.intent.creation?.growthRun !== undefined) {
+          this.growthFlights.add(flight)
+          void flight.then(() => this.growthFlights.delete(flight), () => this.growthFlights.delete(flight))
+        }
+        return flight
+      },
     }
     try {
       this.unregister = this.options.ports.automations.registerHostExecutor(executor)
@@ -118,14 +135,42 @@ export class SourceJobRuntime {
       try { this.unregister?.() } catch { /* original error wins */ }
       throw error
     }
+    this.reconcileQueued()
+  }
+
+  /** Nudge the existing native one-shot registrations after a Host provider appears. */
+  reconcileQueued(): void {
+    if (!this.active) return
     // Reconcile only queued intents. A previous claim is unknown and never replayed.
     for (let job of this.options.store.listSourceJobs(100)) {
       if (job.status !== 'queued') continue
-      try { job = this.refreshQueued(job); if (job.status === 'queued') { this.assertOwner(job); this.schedule(job) } } catch {
+      try { job = this.refreshQueued(job); if (job.status === 'queued') this.schedule(job) } catch (error) {
+        if (error instanceof SourceGrowthRunUnavailableError) continue
         const current = this.options.store.getSourceJob(job.id)
+        // A persisted rearm is an in-progress cross-ledger handoff. Retain it
+        // for exact native receipt replay after a crash or transient fault.
+        if (current?.previousDefinitionHash !== undefined && !(error instanceof SourceGrowthNativeMismatchError)) continue
         if (current?.status === 'queued') this.options.store.settleSourceJob({ id: current.id, revision: current.revision, status: 'failed', failureCode: 'source-job-reconcile-rejected' })
       }
     }
+  }
+
+  /** Provider removal revokes in-flight authority without replaying a claimed job. */
+  growthProviderDisposed(): Promise<void> {
+    for (const controller of this.growthControllers) controller.abort(new Error('source growth run producer disposed'))
+    this.options.store.interruptGrowthSourceJobs()
+    if (!this.active) return Promise.allSettled(this.growthFlights).then(() => undefined)
+    for (const job of this.options.store.listSourceJobs(100)) {
+      if (job.status !== 'queued' || job.intent.creation?.growthRun === undefined || job.definitionHash === undefined) continue
+      try {
+        const health = this.options.ports.automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
+        if (health.definitionHash !== job.definitionHash) continue
+        if (health.automationStatus === 'active') this.options.ports.automations.pauseSystemOwned({ owner: SOURCE_JOB_OWNER,
+          operationId: `${job.id}:growth-provider-pause:v${health.definitionVersion}`, automationId: job.automationId,
+          definitionHash: job.definitionHash, expectedVersion: health.definitionVersion })
+      } catch { /* claim guard remains authoritative */ }
+    }
+    return Promise.allSettled(this.growthFlights).then(() => undefined)
   }
 
   private async continuePrepared(job: SourceJobRecord, signal: AbortSignal): Promise<void> {
@@ -226,10 +271,25 @@ export class SourceJobRuntime {
       || job.intent.creation.grant.expiresAt <= Date.now() || controlPlaneDigest(job.intent.creation.grant) !== controlPlaneDigest(this.options.config.creation)))
       || job.intent.authority.digest !== this.authorityDigest
       || job.intent.authority.id !== this.options.config.authorityId || controlPlaneDigest(this.receipt()) !== job.intent.ownerDigest) throw new Error('source job authority changed or expired')
-    this.withGapSource(job.intent.gapId, job.intent.owner, () => {})
+    this.withGapSource(job.intent.gapId, job.intent.owner, () => this.assertGrowthRun(job.intent.creation?.growthRun,
+      job.intent.mode, job.intent.gapId, job.intent.owner, false))
+  }
+
+  private assertGrowthRun(growthRun: SourceGrowthRunBinding | undefined, mode: 'create' | undefined,
+    gapId: string, owner: SourceJobOwnerReceipt, generation: boolean): void {
+    const taskBacked = this.options.store.getOwnerTaskFailureReference(gapId) !== undefined
+    if (mode !== 'create' || !taskBacked) {
+      if (growthRun !== undefined) throw new Error('source growth run is outside a task-backed creation')
+      return
+    }
+    if (growthRun === undefined) throw new Error('task-backed creation requires a frozen source growth run')
+    validateSourceGrowthRunBinding(growthRun)
+    if (!this.options.assertGrowthRun) throw new SourceGrowthRunUnavailableError('source growth run producer unavailable')
+    this.options.assertGrowthRun(growthRun, gapId, owner, generation)
   }
 
   enqueue(input: EnqueueSourceJobInput): Promise<SourceJobProjection> {
+    if (input.mode !== 'create' && input.growthRun !== undefined) throw new Error('modify source job cannot carry a growth run')
     if (input.mode === 'create') validateSourceCreationFiles(input.files)
     else {
       if (input.mode !== undefined) throw new Error('invalid source job mode')
@@ -255,6 +315,7 @@ export class SourceJobRuntime {
     if (input.mode === 'create' && (config.creation === undefined || config.creation.expiresAt <= Date.now())) throw new Error('source creation grant unavailable or expired')
     if (input.repository !== config.repository || await realpath(input.repository) !== config.repository) throw new Error('source job repository mismatch')
     const owner = this.assertCaller(input.owner)
+    this.withGapSource(input.gapId, owner, () => this.assertGrowthRun(input.growthRun, input.mode, input.gapId, owner, true))
     const trust = await awaitSourceSignal(signal, this.options.trust)
     for (const outstanding of this.options.store.listSourceJobs(1)) this.refreshQueued(outstanding)
     const token = createHash('sha256').update(config.authorityId).update('\0').update(input.idempotencyKey).digest('hex')
@@ -263,7 +324,9 @@ export class SourceJobRuntime {
     if (prior !== undefined) {
       const frozen = prior.intent
       if (frozen.authority.digest !== this.authorityDigest || frozen.ownerDigest !== controlPlaneDigest(owner) || frozen.trustDigest !== controlPlaneDigest(trust)
-        || frozen.mode !== input.mode || (input.mode === 'create' && controlPlaneDigest(frozen.creation?.grant) !== controlPlaneDigest(config.creation))
+        || frozen.mode !== input.mode || (input.mode === 'create' && (controlPlaneDigest(frozen.creation?.grant) !== controlPlaneDigest(config.creation)
+          || (frozen.creation?.growthRun === undefined) !== (input.growthRun === undefined)
+          || (input.growthRun !== undefined && controlPlaneDigest(frozen.creation?.growthRun) !== controlPlaneDigest(input.growthRun))))
         || frozen.repository !== input.repository || frozen.name !== input.name || frozen.gapId !== input.gapId || frozen.baseCommit !== input.expectedBaseCommit
         || frozen.ttlMs !== input.ttlMs || controlPlaneDigest(frozen.files) !== controlPlaneDigest(input.files)) throw new Error('source job idempotency conflict')
       await assertCurrent()
@@ -286,14 +349,18 @@ export class SourceJobRuntime {
       authority: { id: config.authorityId, digest: this.authorityDigest, expiresAt: config.expiresAt, maxSubmissions: config.maxSubmissions },
       owner, ownerDigest: controlPlaneDigest(owner), trustDigest: controlPlaneDigest(trust), repository: config.repository, name: input.name,
       ...(config.baseline === undefined ? {} : { baseline: structuredClone(config.baseline) }),
-      ...(input.mode === 'create' ? { mode: 'create' as const, creation: { grant: structuredClone(config.creation!), generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceCreationContext>>).generatorDigest } } : {}),
+      ...(input.mode === 'create' ? { mode: 'create' as const, creation: { grant: structuredClone(config.creation!), generatorDigest: (source as Awaited<ReturnType<typeof inspectSourceCreationContext>>).generatorDigest,
+        ...(input.growthRun === undefined ? {} : { growthRun: structuredClone(input.growthRun) }) } } : {}),
       gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap), baseCommit: source.baseCommit,
       files: structuredClone(input.files), ttlMs: input.ttlMs, build: structuredClone(this.options.build),
       worktree: join(this.options.statePath, 'source-worktrees', `worktree-job-${token}`), containerName: `dsh-source-job-${token}`,
     }
     await assertCurrent()
     // Synchronous acceptance and registration: no Agent signal is persisted.
-    const job = this.withGapSource(gap.id, owner, () => this.options.store.enqueueSourceJob({ id, automationId: id, idempotencyKey: input.idempotencyKey, intent }))
+    const job = this.withGapSource(gap.id, owner, () => {
+      this.assertGrowthRun(input.growthRun, input.mode, gap.id, owner, true)
+      return this.options.store.enqueueSourceJob({ id, automationId: id, idempotencyKey: input.idempotencyKey, intent })
+    })
     if (job.status === 'queued') this.scheduleOrFail(job)
     return projection(this.options.store.getSourceJob(id)!)
   }
@@ -314,9 +381,15 @@ export class SourceJobRuntime {
   private refreshQueued(job: SourceJobRecord): SourceJobRecord {
     if (job.status !== 'queued') return job
     let code: string | undefined
-    try { this.withGapSource(job.intent.gapId, job.intent.owner, () => {}) } catch { code = 'source-job-task-source-changed' }
+    let providerUnavailable = false
+    if (job.intent.mode === 'create' && this.options.store.getOwnerTaskFailureReference(job.intent.gapId) !== undefined
+      && job.intent.creation?.growthRun === undefined) code = 'source-job-growth-run-missing'
+    else {
+      try { this.withGapSource(job.intent.gapId, job.intent.owner, () => { providerUnavailable = this.growthProducerUnavailable(job) }) }
+      catch { code = 'source-job-task-source-changed' }
+    }
     if (job.expiresAt <= Date.now()) code = 'source-job-expired'
-    else if (job.definitionHash !== undefined) {
+    else if (code === undefined && job.definitionHash !== undefined && !providerUnavailable && job.intent.creation?.growthRun === undefined) {
       const health = this.options.ports.automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
       const run = health.latestTerminalRuns.production
       if (run !== undefined && run.createdAt >= job.createdAt && run.immutableContext.state === 'verified'
@@ -328,9 +401,14 @@ export class SourceJobRuntime {
     return code === undefined ? job : this.options.store.settleSourceJob({ id: job.id, revision: job.revision, status: 'failed', failureCode: code })
   }
 
+  private growthProducerUnavailable(job: SourceJobRecord): boolean {
+    try { this.assertGrowthRun(job.intent.creation?.growthRun, job.intent.mode, job.intent.gapId, job.intent.owner, false); return false }
+    catch (error) { if (error instanceof SourceGrowthRunUnavailableError) return true; throw error }
+  }
+
   private definition(job: SourceJobRecord): HostAutomationDefinition {
     const config = this.options.config
-    return { name: `Source check: ${job.intent.name}`, schedule: { kind: 'at', at: new Date(job.createdAt + 1000).toISOString() },
+    return { name: `Source check: ${job.intent.name}`, schedule: { kind: 'at', at: new Date(job.dispatchAt ?? job.createdAt + 1000).toISOString() },
       workspace: config.workspace, agentPreset: config.preset, timeoutMs: job.intent.build.timeoutMs + 120_000 + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0),
       misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0, principal: config.principalId,
       ...(config.budgetId === undefined ? {} : { budgetId: config.budgetId, budgetAmount: config.budgetAmount! }),
@@ -342,16 +420,67 @@ export class SourceJobRuntime {
   private schedule(job: SourceJobRecord): void {
     this.assertOwner(job)
     const automations = this.options.ports.automations
+    if (job.definitionHash !== undefined && job.intent.creation?.growthRun !== undefined && job.occurrenceId === undefined) {
+      const health = automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
+      if (health.definitionHash !== job.definitionHash) throw new Error('source job native definition changed before rearm')
+      const dueAt = job.dispatchAt ?? job.createdAt + 1000
+      const terminal = health.latestTerminalRuns.production
+      if ((health.automationStatus === 'paused' && dueAt <= Date.now())
+        || (terminal !== undefined && terminal.immutableContext.state === 'verified'
+          && terminal.immutableContext.definitionHash === job.definitionHash && terminal.createdAt >= job.createdAt)) {
+        job = this.withGapSource(job.intent.gapId, job.intent.owner, () => {
+          this.assertGrowthRun(job.intent.creation!.growthRun, job.intent.mode, job.intent.gapId, job.intent.owner, false)
+          return this.options.store.rearmQueuedGrowthSourceJob({ id: job.id, revision: job.revision,
+            priorDefinitionHash: job.definitionHash!, priorDefinitionVersion: health.definitionVersion, dispatchAt: Date.now() + 1000 })
+        })
+      }
+    }
     const definition = this.definition(job)
+    const expectedHash = automationDefinitionDigest(definition)
+    if (job.previousDefinitionHash !== undefined) {
+      if (typeof automations.reconcileSystemExact !== 'function') throw new SourceGrowthRunUnavailableError('exact native source rearm unavailable')
+      const health = automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
+      const activation = automations.inspectSystemOwnedActivation({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
+      if (activation?.activationNonce !== job.intentDigest || activation.ownerRouteId !== this.options.config.ownerRouteId
+        || !((health.definitionHash === job.previousDefinitionHash && health.definitionVersion === job.previousDefinitionVersion)
+          || (health.definitionHash === expectedHash && health.definitionVersion === job.previousDefinitionVersion! + 1))) {
+        throw new SourceGrowthNativeMismatchError('source job native rearm lineage changed')
+      }
+      automations.reconcileSystemExact({ owner: SOURCE_JOB_OWNER, automationId: job.automationId,
+        idempotencyKey: `${job.id}:rearm:${job.dispatchAt}`, desiredStatus: 'active', definition,
+        expectedDefinitionHash: job.previousDefinitionHash, expectedVersion: job.previousDefinitionVersion! })
+      const activated = automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
+      if (activated.definitionHash !== expectedHash || activated.definitionVersion !== job.previousDefinitionVersion! + 1
+        || activated.automationStatus !== 'active') throw new SourceGrowthNativeMismatchError('source job exact native rearm was not active')
+      this.assertOwner(job)
+      this.options.store.bindSourceJobDefinition({ id: job.id, revision: job.revision, definitionHash: expectedHash })
+      return
+    }
     if (job.definitionHash === undefined) {
-      automations.reconcileSystem({ owner: SOURCE_JOB_OWNER, automationId: job.automationId, idempotencyKey: `${job.id}:prepare`, desiredStatus: 'paused', definition })
+      const prior = job.previousDefinitionHash
+      const existing = (() => {
+        try { return automations.inspectSystemOwnedActivation({ owner: SOURCE_JOB_OWNER, automationId: job.automationId }) }
+        catch { return undefined }
+      })()
+      if (existing !== undefined && (existing.activationNonce !== job.intentDigest || existing.ownerRouteId !== this.options.config.ownerRouteId
+        || (existing.definitionHash !== expectedHash && existing.definitionHash !== prior))) {
+        throw new Error('source job native definition differs from persisted rearm')
+      }
+      automations.reconcileSystem({ owner: SOURCE_JOB_OWNER, automationId: job.automationId,
+        idempotencyKey: `${job.id}:prepare:${job.dispatchAt ?? job.createdAt + 1000}`, desiredStatus: 'paused', definition })
       const registered = automations.inspectSystemOwnedActivation({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
-      if (registered === undefined || registered.activationNonce !== job.intentDigest || registered.ownerRouteId !== this.options.config.ownerRouteId) throw new Error('source job registration binding mismatch')
+      if (registered === undefined || registered.activationNonce !== job.intentDigest || registered.ownerRouteId !== this.options.config.ownerRouteId
+        || registered.definitionHash !== expectedHash) throw new Error('source job registration binding mismatch')
       job = this.options.store.bindSourceJobDefinition({ id: job.id, revision: job.revision, definitionHash: registered.definitionHash })
     }
     const current = automations.inspectSystemOwnedActivation({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
     if (current === undefined || current.definitionHash !== job.definitionHash || current.activationNonce !== job.intentDigest || current.ownerRouteId !== this.options.config.ownerRouteId) throw new Error('source job automation changed')
-    automations.reconcileSystem({ owner: SOURCE_JOB_OWNER, automationId: job.automationId, idempotencyKey: `${job.id}:activate`, desiredStatus: 'active', definition })
+    const health = automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
+    if (health.definitionHash !== job.definitionHash) throw new Error('source job native definition changed')
+    automations.reconcileSystem({ owner: SOURCE_JOB_OWNER, automationId: job.automationId,
+      idempotencyKey: `${job.id}:activate:v${health.definitionVersion}`, desiredStatus: 'active', definition })
+    const activated = automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
+    if (activated.definitionHash !== job.definitionHash || activated.automationStatus !== 'active') throw new Error('source job native activation did not become active')
   }
 
   private hasContinuations(): boolean {
@@ -446,8 +575,10 @@ export class SourceJobRuntime {
   }
 
   private scheduleOrFail(job: SourceJobRecord): void {
-    try { this.schedule(job) } catch {
+    try { this.schedule(job) } catch (error) {
+      if (error instanceof SourceGrowthRunUnavailableError) return
       const current = this.options.store.getSourceJob(job.id)
+      if (current?.previousDefinitionHash !== undefined && !(error instanceof SourceGrowthNativeMismatchError)) return
       if (current?.status === 'queued') this.options.store.settleSourceJob({ id: current.id, revision: current.revision, status: 'failed', failureCode: 'source-job-registration-rejected' })
     }
   }
@@ -456,8 +587,41 @@ export class SourceJobRuntime {
     let job = this.options.store.getSourceJobByAutomation(input.automationId)
     const failure = (unknown: boolean): HostAutomationExecutorResult => ({ outcome: unknown ? 'unknown' : 'failed', failureClass: unknown ? 'unknown' : 'configuration', failurePhase: 'host-execution', failureCode: 'source-job-rejected', sideEffectState: unknown ? 'unknown' : 'none', retryability: unknown ? 'unsafe' : 'after-intervention' })
     if (job === undefined || job.status !== 'queued') return failure(job?.status === 'unknown' || job?.status === 'running')
+    // A stale occurrence from before a persisted rearm can never claim this
+    // job. It has acquired no source resource, so leave the queued CAS intact.
+    if (job.intent.creation?.growthRun !== undefined && input.definitionHash !== job.definitionHash) {
+      const expectedPending = job.previousDefinitionHash === undefined ? undefined : automationDefinitionDigest(this.definition(job))
+      if (expectedPending === input.definitionHash && input.executionMode === 'production'
+        && input.activationNonce === job.intentDigest && input.catalogDigest === CATALOG
+        && input.ownerRouteId === job.intent.owner.authorityId && input.principal === job.intent.owner.principalId
+        && input.targetScope.workspace === job.intent.owner.workspace && input.targetScope.preset === job.intent.owner.agentPreset) {
+        try {
+          // The new native occurrence reached us before its cross-ledger DB
+          // acknowledgement. It has not claimed source resources. Bind the
+          // exact native receipt, then persist another one-shot before this
+          // occurrence can be considered consumed.
+          this.schedule(job)
+          const rebound = this.options.store.getSourceJob(job.id)
+          if (rebound?.status === 'queued' && rebound.definitionHash === input.definitionHash && rebound.occurrenceId === undefined) {
+            const health = this.options.ports.automations.inspectSystemOwned({ owner: SOURCE_JOB_OWNER, automationId: job.automationId })
+            if (health.definitionHash !== rebound.definitionHash) throw new Error('source job premature occurrence native binding changed')
+            const pending = this.withGapSource(rebound.intent.gapId, rebound.intent.owner, () => {
+              this.assertGrowthRun(rebound.intent.creation?.growthRun, rebound.intent.mode, rebound.intent.gapId, rebound.intent.owner, false)
+              return this.options.store.rearmQueuedGrowthSourceJob({ id: rebound.id, revision: rebound.revision,
+                priorDefinitionHash: rebound.definitionHash!, priorDefinitionVersion: health.definitionVersion, dispatchAt: Date.now() + 1000 })
+            })
+            this.schedule(pending)
+          }
+        } catch { /* persisted queued state remains fail-closed for exact recovery */ }
+      }
+      return failure(false)
+    }
     let claimed = false
-    const signal = AbortSignal.any([input.signal, this.abort.signal, AbortSignal.timeout(Math.max(1, Math.min(job.intent.build.timeoutMs + 120_000 + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0), job.expiresAt - Date.now())))])
+    const growthController = job.intent.creation?.growthRun === undefined ? undefined : new AbortController()
+    if (growthController) this.growthControllers.add(growthController)
+    const signal = AbortSignal.any([input.signal, this.abort.signal,
+      ...(growthController ? [growthController.signal] : []),
+      AbortSignal.timeout(Math.max(1, Math.min(job.intent.build.timeoutMs + 120_000 + (this.options.advanceReleased ? this.options.releaseTimeoutMs ?? 40_000 : 0) + (this.options.adoptReleased ? this.options.adoptionTimeoutMs ?? 60_000 : 0), job.expiresAt - Date.now())))])
     try {
       this.assertOwner(job)
       signal.throwIfAborted()
@@ -486,12 +650,17 @@ export class SourceJobRuntime {
         this.reconcileContinuations()
       }
       return { outcome: 'succeeded', failureClass: 'none', failurePhase: 'none', failureCode: 'none', sideEffectState: 'possible', retryability: 'unsafe' }
-    } catch {
+    } catch (error) {
       const current = this.options.store.getSourceJob(job.id)
+      if (!claimed && error instanceof SourceGrowthRunUnavailableError) return failure(false)
+      if (!claimed && current?.status === 'queued'
+        && (current.revision !== job.revision || current.definitionHash !== input.definitionHash)) return failure(false)
       if (current?.status === 'queued' || (current?.status === 'running' && current.occurrenceId === input.occurrenceId)) {
         this.options.store.settleSourceJob({ id: current.id, revision: current.revision, status: claimed ? 'unknown' : 'failed', failureCode: claimed ? 'source-job-interrupted' : 'source-job-preflight-rejected' })
       }
       return failure(claimed)
+    } finally {
+      if (growthController) this.growthControllers.delete(growthController)
     }
   }
 

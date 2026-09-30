@@ -1,7 +1,10 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
+import { SourceGrowthRunUnavailableError } from '@dsh-enhanced/assistant-growth-contract'
+import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -9,10 +12,11 @@ import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delive
 import { afterEach, expect, test, vi } from 'vitest'
 import { normalizeConfig } from '../src/config.ts'
 import { UsageLearningRuntime, type UsageReviewInput, type UsageReviewResult } from '../src/usage-runtime.ts'
+import { UsageStore } from '../src/usage-store.ts'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { vi.useRealTimers(); for (const dispose of cleanup.splice(0).reverse()) await dispose() })
-async function fixture(options: { fixed?: boolean; missing?: boolean; budget?: boolean; maxPending?: number; scanBudgetLimit?: number } = {}) {
+async function fixture(options: { fixed?: boolean; sameOverride?: boolean; missing?: boolean; budget?: boolean; maxPending?: number; scanBudgetLimit?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'growth-usage-'))
   const ctx = new Context()
   const scope = { workspace: root, preset: 'primary', principalId: 'owner', ownerRouteId: 'owner-route' }
@@ -44,12 +48,14 @@ async function fixture(options: { fixed?: boolean; missing?: boolean; budget?: b
     },
   }
   const config = normalizeConfig({ enabled: true, scope, budgetId: 'growth-budget', budgetAmount: 1,
-    ...(options.fixed ? { provider: 'fixed', model: 'repair' } : {}),
+    ...(options.fixed ? options.sameOverride
+      ? { provider: sourceModel.provider, model: sourceModel.model, reasoningEffort: sourceModel.reasoningEffort }
+      : { provider: 'fixed', model: 'repair' } : {}),
     usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(root, 'usage.sqlite'), maxPending: options.maxPending ?? 16 } })
   const review = vi.fn<(input: UsageReviewInput) => Promise<UsageReviewResult>>(async input => { input.assertCurrent(); return 'reviewed' })
   const runtimes: UsageLearningRuntime[] = []
-  const create = () => {
-    const runtime = new UsageLearningRuntime(config, { evaluation, automations, delivery, review })
+  const create = (selectedConfig = config) => {
+    const runtime = new UsageLearningRuntime(selectedConfig, { evaluation, automations, delivery, review })
     runtimes.push(runtime); runtime.start(); return runtime
   }
   const append = (task = 'task', status: 'achieved' | 'not-achieved' | 'unknown' = 'not-achieved') => producer.append({
@@ -66,7 +72,14 @@ async function fixture(options: { fixed?: boolean; missing?: boolean; budget?: b
     for (let i = 0; i < 3; i += 1) { await automations.tick(); await automations.whenIdle() }
   }
   cleanup.push(async () => { for (const runtime of runtimes) await runtime.close(); producer.close(); await ctx.fiber.restart(); await rm(root, { recursive: true, force: true }) })
-  return { ctx, config, owner, policy, evaluation, automations, sourceModel, review, create, append, tick }
+  return { ctx, root, config, owner, policy, evaluation, automations, sourceModel, review, create, append, tick }
+}
+
+function actualSourceRun(input: UsageReviewInput) {
+  const createdAt = Date.now()
+  return { model: input.model, sessionId: 'growth-real-setup-session',
+    toolContractDigest: 'a'.repeat(64), executionContractDigest: 'b'.repeat(64),
+    createdAt, generationDeadlineAt: Math.min(input.expiresAt, createdAt + 1_000) }
 }
 
 test('native Automations dispatches one durable review of real canonical feedback and never replays it', async () => {
@@ -82,10 +95,126 @@ test('native Automations dispatches one durable review of real canonical feedbac
 
 test('recovers queued work and freezes its original model across a restart', async () => {
   const f = await fixture(); f.append(); const first = f.create(); await first.close()
-  const second = f.create(); await f.tick()
+  const db = new DatabaseSync(join(f.root, 'usage.sqlite'))
+  const queued = db.prepare("SELECT id,digest FROM usage_jobs WHERE state='queued'").get() as { id: string; digest: string }
+  db.close()
+  const second = f.create()
+  expect(second.inspectSourceGrowthRun({ runId: queued.id, intentDigest: queued.digest })).toBeUndefined()
+  await f.tick()
   expect(f.review).toHaveBeenCalledTimes(1)
   expect(f.review.mock.calls[0]![0].model).toEqual({ provider: 'conversation', model: 'original', reasoningEffort: 'medium' })
   expect(second.health().counts).toEqual({ reviewed: 1 })
+})
+
+test('binds only the claimed native occurrence, permits exact replay, rejects conflicting setup, and inspects reviewed work after restart', async () => {
+  const f = await fixture(); f.append(); const first = f.create()
+  let runId = ''; let intentDigest = ''
+  f.review.mockImplementationOnce(async input => {
+    runId = input.id; intentDigest = input.intentDigest
+    const actual = actualSourceRun(input)
+    const binding = input.bindSourceRun(actual)
+    expect(binding).toMatchObject({ runId, intentDigest, model: f.sourceModel,
+      modelOrigin: 'inherited-owner-task', native: { owner: 'assistant-growth-usage',
+        automationId: runId, definitionHash: input.definitionHash, occurrenceId: input.occurrenceId },
+      budget: { budgetId: 'growth-budget', amount: 1, maxModelCalls: 8, maxToolCalls: 24,
+        maxOutputTokens: 8192, maxDurationMs: 120000, maxPlansPerWake: 1 } })
+    expect(first.inspectSourceGrowthRun({ runId, intentDigest })).toEqual(binding)
+    expect(input.bindSourceRun(actual)).toEqual(binding)
+    expect(() => input.bindSourceRun({ ...actual, sessionId: 'different-session' })).toThrow(/conflict/)
+    expect(() => input.bindSourceRun({ ...actual, model: { provider: 'switched', model: 'wrong' } })).toThrow(/frozen model/)
+    return 'reviewed'
+  })
+  await f.tick()
+  expect(first.health().counts).toEqual({ reviewed: 1 })
+  const before = first.inspectSourceGrowthRun({ runId, intentDigest })
+  expect(before).toBeDefined()
+  expect(first.inspectSourceGrowthRun({ runId, intentDigest: '0'.repeat(64) })).toBeUndefined()
+  await first.close()
+  const second = f.create()
+  expect(second.inspectSourceGrowthRun({ runId, intentDigest })).toEqual(before)
+  await second.close()
+  expect(() => second.inspectSourceGrowthRun({ runId, intentDigest })).toThrow(SourceGrowthRunUnavailableError)
+})
+
+test('fixed override records its origin even if the owner task selected the same model and invalidates on owner rotation', async () => {
+  const f = await fixture({ fixed: true, sameOverride: true }); f.append(); const runtime = f.create()
+  let runId = ''; let intentDigest = ''
+  f.review.mockImplementationOnce(async input => {
+    runId = input.id; intentDigest = input.intentDigest
+    input.bindSourceRun(actualSourceRun(input))
+    return 'reviewed'
+  })
+  await f.tick()
+  expect(runtime.inspectSourceGrowthRun({ runId, intentDigest })).toMatchObject({
+    model: f.sourceModel, modelOrigin: 'explicit-growth-override',
+  })
+  f.owner.generation += 1
+  expect(runtime.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+})
+
+test('source run inspection rejects correction, expiry, changed configuration, and unknown outcomes', async () => {
+  const f = await fixture(); f.append(); const first = f.create()
+  let runId = ''; let intentDigest = ''; let expiresAt = 0
+  f.review.mockImplementationOnce(async input => {
+    runId = input.id; intentDigest = input.intentDigest; expiresAt = input.expiresAt
+    input.bindSourceRun(actualSourceRun(input))
+    return 'reviewed'
+  })
+  await f.tick()
+  expect(first.inspectSourceGrowthRun({ runId, intentDigest })).toBeDefined()
+  await first.close()
+  const changed = normalizeConfig({ enabled: true, scope: f.config.scope!, budgetId: 'growth-budget', budgetAmount: 1,
+    maxToolCalls: 25, usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1,
+      databasePath: join(f.root, 'usage.sqlite') } })
+  const second = f.create(changed)
+  expect(second.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+  await second.close()
+  const third = f.create()
+  expect(third.inspectSourceGrowthRun({ runId, intentDigest })).toBeDefined()
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(expiresAt + 1)
+  expect(third.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+  vi.useRealTimers()
+  f.append('task', 'unknown')
+  expect(third.inspectSourceGrowthRun({ runId, intentDigest })).toBeUndefined()
+
+  const other = await fixture(); other.append(); const unknown = other.create()
+  let unknownId = ''; let unknownDigest = ''
+  other.review.mockImplementationOnce(async input => {
+    unknownId = input.id; unknownDigest = input.intentDigest
+    input.bindSourceRun(actualSourceRun(input))
+    return 'unknown'
+  })
+  await other.tick()
+  expect(unknown.health().counts).toEqual({ unknown: 1 })
+  expect(unknown.inspectSourceGrowthRun({ runId: unknownId, intentDigest: unknownDigest })).toBeUndefined()
+})
+
+test('schema 1 migration preserves legacy intent bytes and never invents a source run', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'growth-usage-legacy-'))
+  cleanup.push(async () => rm(root, { recursive: true, force: true }))
+  const path = join(root, 'usage.sqlite')
+  await writeFile(path, '', { mode: 0o600 })
+  const db = new DatabaseSync(path)
+  const legacyJson = JSON.stringify({ configDigest: 'f'.repeat(64), model: { provider: 'old', model: 'old' },
+    source: { owner: {}, canonical: { projection: {} } }, createdAt: 1, expiresAt: 2 })
+  const legacyDigest = acceptanceDigest(JSON.parse(legacyJson))
+  db.exec(`CREATE TABLE usage_jobs(id TEXT PRIMARY KEY, lane TEXT NOT NULL, subject TEXT NOT NULL,
+    intent_json TEXT NOT NULL, digest TEXT NOT NULL, state TEXT NOT NULL, definition_hash TEXT,
+    occurrence_id TEXT, reason TEXT) STRICT;
+    CREATE TABLE usage_cursors(lane TEXT PRIMARY KEY, scope_key TEXT NOT NULL, watermark INTEGER NOT NULL) STRICT;
+    PRAGMA user_version=1;`)
+  db.prepare("INSERT INTO usage_jobs(id,lane,subject,intent_json,digest,state) VALUES (?,?,?,?,?,'queued')")
+    .run('legacy', 'lane', 'subject', legacyJson, legacyDigest)
+  db.close()
+  const store = new UsageStore(path)
+  expect(store.get('legacy')).toMatchObject({ digest: legacyDigest, sourceRun: null })
+  store.close()
+  const migrated = new DatabaseSync(path)
+  expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
+  expect(migrated.prepare('SELECT intent_json,digest,source_run_json FROM usage_jobs WHERE id=?').get('legacy'))
+    .toEqual({ intent_json: legacyJson, digest: legacyDigest, source_run_json: null })
+  migrated.close()
 })
 
 test.each([false, true])('does not guess a missing source model; fixed override=%s', async fixed => {

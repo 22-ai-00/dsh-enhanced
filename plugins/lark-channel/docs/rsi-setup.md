@@ -25,7 +25,7 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
   --prepare-authorities --profile web --dsh-home "$HOME/.dsh"
 ```
 
-输出的 `authorityRuntime` 包含 `$DSH_HOME/rsi-authority-runtimes/<profile>` 内独立 Node、官方 Control Plane CLI、运行模块及摘要。八个发布阶段各有独立程序文件，脚本固定使用私有 Node；不依赖 profile 后续替换的程序。只复制当前同版本安装包的文件，执行版本和模块加载检查，不执行 npm 安装脚本。再次准备会核验源包与已部署字节，版本或内容漂移会停止，不能用重装静默改换已固定的运行时。
+输出的 `authorityRuntime` 包含 `$DSH_HOME/rsi-authority-runtimes/<profile>` 内独立 Node、官方 Control Plane CLI、运行模块及摘要。八个发布阶段各有独立程序文件，脚本固定使用私有 Node；不依赖 profile 后续替换的程序。只复制当前同版本安装包的文件及其本地已安装的非激活 Growth 共享合同库，逐文件保留摘要；私有目录不依赖 workspace 或 profile 的依赖链接。执行版本和模块加载检查，不执行 npm 安装脚本。再次准备会核验源包与已部署字节，版本或内容漂移会停止，不能用重装静默改换已固定的运行时。
 
 `authorityResources` 包含 `$DSH_HOME/rsi-authorities/<profile>` 内 14 个独立 Ed25519 身份的公钥与私钥路径、安装/账本标识、私有 `file:` registry、catalog、配置及状态目录。私钥正文不出现在输出中。重复执行复用相同身份并保留已发布内容、catalog 条目及授权状态；缺失、损坏或权限漂移不会触发密钥重建或存储清空。失败只清理本次创建的目录；崩溃留下不完整目录时拒绝覆盖，需要先检查残留。独立的 `--prepare-authorities` 只准备资源；自动 `--install-owner` 后续才生成 owner 配置并启动服务。
 

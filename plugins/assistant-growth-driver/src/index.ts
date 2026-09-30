@@ -7,6 +7,7 @@ import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh
 import type { AssistantGoalsService, OwnerGoalExecutionSnapshotInput } from '@dsh-enhanced/assistant-goals'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
+import { SourceGrowthRunUnavailableError, type SourceGrowthRunProducer } from '@dsh-enhanced/assistant-growth-contract'
 import { Config, DEFAULT_API_KEY_ENV, normalizeConfig, type AssistantGrowthDriverConfig } from './config.js'
 import { mintGrowthAuthority, type GrowthAuthority, type GrowthDeliveryPort } from './deposit.js'
 import { runGrowthAgent, type GrowthAgentRunResult } from './growth-agent.js'
@@ -86,7 +87,9 @@ export class AssistantGrowthDriverService extends Service {
   #flight: Promise<void> | undefined
   #active = true
   readonly #abort = new AbortController()
-  #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal; available: () => boolean; recordTaskFailure: (source: OwnerForegroundLearningTask) => GrowthSourceGap } | undefined
+  #sourceBinding: { port: GrowthSourcePlanePort; signal: AbortSignal; available: () => boolean;
+    taskCreationReady: () => boolean; nudge: () => void;
+    recordTaskFailure: (source: OwnerForegroundLearningTask) => GrowthSourceGap } | undefined
   #health: GrowthWakeHealth = { lastWakeAt: null, outcome: 'never-run', reason: null, run: null }
   #usage: UsageLearningRuntime | undefined
 
@@ -116,6 +119,7 @@ export class AssistantGrowthDriverService extends Service {
         }, 'assistant-growth-driver.usage-learning')
         this.#usage = usage
         usage.start()
+        this.#sourceBinding?.nudge()
       })
     }
     if (this.#config.pluginSourceProposals.enabled) {
@@ -129,6 +133,8 @@ export class AssistantGrowthDriverService extends Service {
           recordOwnerTaskFailureGap?: (source: OwnerForegroundLearningTask) => GrowthSourceGap
           canPrepareSource?: () => boolean
           canEnqueueSource?: () => boolean
+          registerSourceGrowthRunProducer?: (producer: SourceGrowthRunProducer) => () => void | Promise<void>
+          reconcileSourceGrowthRuns?: () => void
         }
         const current = (): SourceService => {
           abort.signal.throwIfAborted()
@@ -143,6 +149,15 @@ export class AssistantGrowthDriverService extends Service {
           ? typeof provider.canEnqueueSource === 'function' && typeof provider.enqueueSourceJob === 'function' && typeof provider.inspectSourceJob === 'function'
           : typeof provider.canPrepareSource === 'function' && typeof provider.prepareModifySourcePlan === 'function'
         if (!seamsPresent || typeof provider.inspectSource !== 'function') return
+        const producerAvailable = this.#config.usageLearning.enabled
+          && typeof provider.registerSourceGrowthRunProducer === 'function'
+        if (producerAvailable) sourceCtx.effect(() => provider.registerSourceGrowthRunProducer!({
+          protocol: 'assistant-growth-source-run-producer/v1',
+          inspect: request => {
+            if (this.#usage === undefined) throw new SourceGrowthRunUnavailableError('usage runtime is temporarily unavailable')
+            return this.#usage.inspectSourceGrowthRun(request)
+          },
+        }), 'assistant-growth-driver.source-run-producer')
         const binding = {
           signal: abort.signal,
           recordTaskFailure: (source: OwnerForegroundLearningTask) => {
@@ -156,6 +171,8 @@ export class AssistantGrowthDriverService extends Service {
               return durable ? live.canEnqueueSource?.() === true : live.canPrepareSource?.() === true
             } catch { return false }
           },
+          taskCreationReady: () => producerAvailable && this.#usage !== undefined,
+          nudge: () => { if (producerAvailable) current().reconcileSourceGrowthRuns?.() },
           port: {
             listOpenGaps: () => current().gaps(50),
             inspectSource: async (input: Parameters<GrowthSourcePlanePort['inspectSource']>[0]) => {
@@ -202,6 +219,7 @@ export class AssistantGrowthDriverService extends Service {
           abort.abort(new Error('assistant-growth-driver: source provider changed'))
           if (this.#sourceBinding === binding) this.#sourceBinding = undefined
         }, 'assistant-growth-driver.source-provider')
+        binding.nudge()
       })
     }
   }
@@ -362,14 +380,31 @@ export class AssistantGrowthDriverService extends Service {
             throw new Error('source gap is not the current task failure')
           }
         }
-        sourcePort = { ...source.port, listOpenGaps: ownGaps,
+        const taskPort: GrowthSourcePlanePort = { ...source.port, listOpenGaps: ownGaps,
           prepareModifySourcePlan: request => { assertGap(request.gapId); return source.port.prepareModifySourcePlan(request) },
-          enqueueSourceJob: request => { assertGap(request.gapId); return source.port.enqueueSourceJob(request) },
+          enqueueSourceJob: request => {
+            assertGap(request.gapId)
+            const growthRun = this.#usage?.inspectSourceGrowthRun({ runId: usage.id, intentDigest: usage.intentDigest })
+            if (request.mode === 'create' && (!source.taskCreationReady() || growthRun === undefined)) {
+              throw new Error('assistant-growth-driver: task-bound creation lacks a current native source run')
+            }
+            return source.port.enqueueSourceJob(request.mode === 'create' && growthRun !== undefined
+              ? { ...request, growthRun } : request)
+          },
         }
+        if (!source.taskCreationReady()) {
+          delete taskPort.inspectCreateSource
+          delete taskPort.getSourceCreationNamespace
+        }
+        sourcePort = taskPort
       }
       const run = await runGrowthAgent(this.ctx, { wakeId, authority, config, model, goals, skills,
         ...(sourcePort === undefined ? {} : { sourcePlane: sourcePort }),
-        ...(input.usage === undefined ? {} : { feedback: input.usage.source }),
+        ...(input.usage === undefined ? {} : { feedback: input.usage.source,
+          generationDeadlineAt: input.usage.expiresAt,
+          ...(config.maxToolCalls === 0 ? {} : { onSourceExecution: (actual: Parameters<UsageReviewInput['bindSourceRun']>[0]) => {
+            input.usage!.bindSourceRun(actual)
+          } }) }),
         signal: AbortSignal.any([this.#abort.signal, ...(source === undefined ? [] : [source.signal]),
           ...(input.usage === undefined ? [] : [input.usage.signal])]),
       })

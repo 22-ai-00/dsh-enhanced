@@ -5,6 +5,7 @@ import { lstat, mkdir, open, readdir, realpath, writeFile } from 'node:fs/promis
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { mkdtemp, rm } from 'node:fs/promises'
+import type { SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { ControlPlaneCliError } from './errors.js'
 import { awaitSourceSignal, type SourceInspection } from './source-context.js'
 import { changedSourcePaths, linkedWorktrees, runLocalBuffer, runLocalCommand, writeCreatedPluginFiles,
@@ -33,6 +34,8 @@ export interface SourceCreationGrant {
 export interface SourceCreationBinding {
   grant: SourceCreationGrant
   generatorDigest: string
+  /** Host-frozen ordinary-use run; absent on historical and manual creations. */
+  growthRun?: SourceGrowthRunBinding
 }
 
 function record(value: unknown): value is Record<string, unknown> {

@@ -90,6 +90,8 @@ terminal run 还会在同一 SQLite 事务中写入不可变、有限大小的**
 
 Host runbook 可调用非模型 seam `inspectSystemOwned({ owner, automationId })`。它先校验 exact system owner，只返回 current definition hash/version、按 production/preview 分栏的最新 terminal status/typed diagnostic（兼容别名 `latestTerminalRun` 只指 production）、经过 run hash + immutable claim snapshot 证明的历史 workspace/preset，以及当前 circuit/incident 的 content-free 状态；不返回 prompt、输出、artifact/session、usage 或 probe capability，也绝不拿当前 definition 猜历史 scope。
 
+Host 可通过 `reconcileSystemExact` 以当前 definition hash/version 做事务内 CAS；它沿用 `reconcileSystem` 的 Policy 授权，拒绝缺失、跨 owner 或已变更的行。同一幂等键只能重放相同输入，返回原操作收据；调用方仍须读回当前行，不能把历史收据当作当前状态。该接口不出现在模型工具面，也不延长原有预算和授权。
+
 Host definition 的 `execution` 固化 executor id/contract version、runbook id/version、catalog digest、target scope、owner route 和非 bearer `activationNonce`。normalize 会从 canonical `[workspace, preset]` 重算 `scopeDigest`，并要求 target scope 与 definition 的 workspace/preset 精确相等；Host surface 禁止 prompt/provider/model/tools、普通 `deliveryBindingId` 和输出 sink。registry 对重复 descriptor、多个 executor 同时 `accepts` 一个 spec、异常 accepts 都 fail closed；disposer 会使 registration token 失效并取消 lifecycle，非协作 callback 也由 bounded race 隔离。scheduler 在 materialize、claim、Policy budget 前三次证明 exact availability；不可用时不造 run、不耗预算，并按 exact automation/hash/stage 持久化 incident。
 
 Host 消费者可通过内部 `registerHostShutdown` 把关闭动作归属自己的 Context，并绑定 exact owner、automation id 与 activation nonce。注册时通过 Policy 授权，consumer 卸载或 Automations provider 关闭时只暂停匹配的本代登记；provider 停用开始即拒绝普通调用，对每个回调最多等待 3 秒，再关闭存储，避免 Cordis 同级 disposer 并发导致登记残留 active。重复关闭复用同一 Promise，新一代登记不会被旧回调暂停。此接口不暴露给模型，也不保证进程被强制终止时执行；未知执行仍须按原有账本对账。

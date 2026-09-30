@@ -11,6 +11,7 @@ import { gcPreparedModifyWorktrees } from '../src/source-workspace.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
 import type { CreateSourcePlanInput } from '../src/store.ts'
 import type { SourceJobIntent } from '../src/source-job-types.ts'
+import { sourceGrowthRunFixture } from './helpers/source-growth-run-fixture.ts'
 
 const roots: string[] = []
 const sha = (value: string | Buffer) => createHash('sha256').update(value).digest('hex')
@@ -33,12 +34,13 @@ async function fixture() {
   return { root, path, store, now: () => clock, setNow: (value: number) => { clock = value } }
 }
 
-function sourceIntent(gap: ReturnType<ControlPlaneStore['recordOwnerTaskFailureGap']>, suffix = 'd',
+function sourceIntent(gap: ReturnType<ControlPlaneStore['recordOwnerTaskFailureGap']>, ownerReference: OwnerTaskFailureReference, suffix = 'd',
   git?: { repository: string; worktree: string; baseCommit: string }): SourceJobIntent {
   const id = `source-job-${suffix.repeat(64)}`
-  const owner = reference().owner
+  const owner = ownerReference.owner
+  // Store-level artifact fixture: this frozen run is synthetic, not proof of a native Growth producer.
   const creation = { grant: { id: 'artifact-grant', expiresAt: NOW + 180_000, maxCreates: 10, namePrefix: 'new-' },
-    generatorDigest: sha('generator') }
+    generatorDigest: sha('generator'), growthRun: sourceGrowthRunFixture(ownerReference, NOW) }
   return { mode: 'create', creation, authority: { id: 'artifact-authority', digest: sha('authority'),
     expiresAt: NOW + 180_000, maxSubmissions: 10 }, owner, ownerDigest: controlPlaneDigest(owner), trustDigest: sha('trust'),
   repository: git?.repository ?? '/repository', name: 'new-helper', gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap),
@@ -62,8 +64,9 @@ function preparedInput(source: SourceJobIntent, jobId: string, revision: number,
 
 function queueRunning(store: ControlPlaneStore, suffix = 'd', git?: { repository: string; worktree: string; baseCommit: string },
   outcomeId = reference().outcomeId) {
-  const gap = store.recordOwnerTaskFailureGap({ ...reference(), outcomeId })
-  const source = sourceIntent(gap, suffix, git)
+  const ownerReference = { ...reference(), outcomeId }
+  const gap = store.recordOwnerTaskFailureGap(ownerReference)
+  const source = sourceIntent(gap, ownerReference, suffix, git)
   const id = `source-job-${suffix.repeat(64)}`
   return store.withOwnerTaskFailureGapAdmission(gap.id, () => {
     const queued = store.enqueueSourceJob({ id, automationId: id, idempotencyKey: `artifact:${suffix}`, intent: source })
