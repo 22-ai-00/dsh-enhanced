@@ -10,10 +10,12 @@ import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approva
 import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from '../src/store.ts'
+import { controlPlaneSchemaVersion } from '../src/sqlite.ts'
 import type { SourceJobRecord } from '../src/source-job-types.ts'
 import type { PluginSourcePlan } from '../src/types.ts'
 import * as sourceBuild from '../src/source-build.ts'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
+import { sourceGrowthRunFixture } from './helpers/source-growth-run-fixture.ts'
 
 const roots: string[] = []
 const hex = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -42,19 +44,23 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
       projection: { subjectKind: 'foreground-turn', subjectRef: 'inbox-source-job', version: 1, digest: hex('projection-source-job'), disposition: 'upsert' },
       sourceDigest: hex('source-job-reference') })
     : store.recordGap({ idempotencyKey: 'gap:source-job', capability: 'health', context: 'runtime', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+  const growthRun = options.typed && options.creation ? sourceGrowthRunFixture(store.getOwnerTaskFailureReference(gap.id)!, Date.now()) : undefined
   const executors = new Map<string, HostAutomationExecutor>()
-  const activations = new Map<string, { definitionHash: string; activationNonce: string; ownerRouteId: string }>()
+  const activations = new Map<string, { definitionHash: string; activationNonce: string; ownerRouteId: string; version: number; status: 'active' | 'paused' }>()
   const reconciles: SystemAutomationReconcileInput[] = []
   const automations = {
     registerHostExecutor: vi.fn((value: HostAutomationExecutor) => { executors.set(value.descriptor.executorId, value); return () => { executors.delete(value.descriptor.executorId) } }),
     reconcileSystem: vi.fn((request: SystemAutomationReconcileInput) => {
       reconciles.push(request)
       if (request.definition.execution === undefined) throw new Error('fixture requires Host execution')
-      activations.set(request.automationId, { definitionHash: hex(JSON.stringify(request.definition)), activationNonce: request.definition.execution.activationNonce, ownerRouteId: request.definition.execution.ownerRouteId })
+      const previous = activations.get(request.automationId)
+      activations.set(request.automationId, { definitionHash: hex(JSON.stringify(request.definition)), activationNonce: request.definition.execution.activationNonce,
+        ownerRouteId: request.definition.execution.ownerRouteId, version: (previous?.version ?? 0) + 1, status: request.desiredStatus ?? 'active' })
       return {}
     }),
     inspectSystemOwnedActivation: vi.fn((input: { automationId: string }) => activations.get(input.automationId)),
-    inspectSystemOwned: vi.fn(() => ({ latestTerminalRuns: {} })),
+    inspectSystemOwned: vi.fn((input: { automationId: string }) => ({ latestTerminalRuns: {}, definitionHash: activations.get(input.automationId)!.definitionHash,
+      definitionVersion: activations.get(input.automationId)!.version, automationStatus: activations.get(input.automationId)!.status })),
   }
   const trust = { dshHome: '/dsh', executor: { environmentAllowlist: [] } }
   let sourceCurrent = true
@@ -102,11 +108,12 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
     await assertCurrent(); adoptionForward()
   })
   const createRuntime = () => new SourceJobRuntime({ config, build: { ...build, ...(options.versioning ? { versioning: 'patch' as const } : {}) }, statePath: root, store, ports: { automations: automations as never, delivery },
+    assertGrowthRun: expected => { if (controlPlaneDigest(expected) !== controlPlaneDigest(growthRun)) throw new Error('growth run changed') },
     ...(withGapSourceFence === undefined ? {} : { withGapSourceFence }), trust: async () => trust as any, prepare, ...(options.approvals ? { approvePrepared } : {}), ...(options.releases ? { releasePrepared } : {}), ...(options.execution ? { advanceReleased, releaseTimeoutMs: 60_000 } : {}), ...(options.adoption ? { adoptReleased, adoptionTimeoutMs: 60_000 } : {}) })
   const runtime = createRuntime()
   runtime.start()
   const enqueue = (signal = new AbortController().signal, key = 'job:one', gapId = gap.id) => runtime.enqueue({ gapId, name: 'health-helper', repository: root, files: [{ path: 'src/index.ts', content: 'export const changed = true\n' }], idempotencyKey: key, expectedBaseCommit: head, ttlMs: 900_000, owner: OWNER, signal, assertCurrent: () => undefined })
-  return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, approvePrepared, releasePrepared, advanceReleased, adoptReleased, adoptionForward, withGapSourceFence,
+  return { root, store, gap, runtime, createRuntime, delivery, trust, automations, reconciles, prepare, approvePrepared, releasePrepared, advanceReleased, adoptReleased, adoptionForward, withGapSourceFence, growthRun,
     setSourceCurrent: (value: boolean) => { sourceCurrent = value }, get executor() { return executors.get('plugin-control-plane-source-check') },
     get continuation() { return executors.get('plugin-control-plane-source-continuations-v1') }, activation: (id: string) => activations.get(id)!,
     tickContinuation: async (occurrenceId = 'prepared-continuation') => {
@@ -118,11 +125,46 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
 }
 
 describe('durable source-job runtime', () => {
+  it('migrates a v30 task-created queued row byte-for-byte and refuses its missing run on restart', async () => {
+    const f = await fixture({ typed: true, creation: true })
+    const queued = await f.runtime.enqueue({ gapId: f.gap.id, name: 'agent-creation-runtime-probe', repository: f.sourceRepository,
+      files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create', growthRun: f.growthRun!,
+      idempotencyKey: 'create:legacy-row', expectedBaseCommit: f.sourceHead, ttlMs: 900_000,
+      owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined })
+    await f.runtime.close(); f.store.close()
+    const path = join(f.root, 'control.sqlite'), old = new DatabaseSync(path)
+    const current = old.prepare('SELECT intent_json FROM source_jobs WHERE id=?').get(queued.id) as { intent_json: string }
+    const intent = JSON.parse(current.intent_json) as SourceJobRecord['intent']
+    delete intent.creation!.growthRun
+    const legacyJson = JSON.stringify(intent), legacyDigest = controlPlaneDigest(intent)
+    old.prepare('UPDATE source_jobs SET intent_json=?, intent_digest=? WHERE id=?').run(legacyJson, legacyDigest, queued.id)
+    old.exec('ALTER TABLE source_jobs DROP COLUMN previous_definition_version; ALTER TABLE source_jobs DROP COLUMN previous_definition_hash; ALTER TABLE source_jobs DROP COLUMN dispatch_at; PRAGMA user_version=30;')
+    old.close()
+    const migrated = new ControlPlaneStore({ path })
+    try {
+      const raw = new DatabaseSync(path)
+      try {
+        expect(raw.prepare('PRAGMA user_version').get()).toEqual({ user_version: controlPlaneSchemaVersion })
+        expect(raw.prepare('SELECT intent_json,intent_digest FROM source_jobs WHERE id=?').get(queued.id))
+          .toEqual({ intent_json: legacyJson, intent_digest: legacyDigest })
+      } finally { raw.close() }
+      expect(migrated.getSourceJob(queued.id)?.intent.creation?.growthRun).toBeUndefined()
+      const restarted = new SourceJobRuntime({ config: f.config, build, statePath: f.root, store: migrated,
+        ports: { automations: f.automations as never, delivery: f.delivery }, trust: async () => f.trust as never,
+        withGapSourceFence: (gapId, _owner, callback) => migrated.withOwnerTaskFailureGapAdmission(gapId, callback),
+        assertGrowthRun: () => { throw new Error('legacy row must not invent a run') },
+        prepare: async () => { throw new Error('legacy row must not dispatch') } })
+      restarted.start()
+      expect(migrated.getSourceJob(queued.id)).toMatchObject({ status: 'failed', failureCode: 'source-job-growth-run-missing' })
+      await restarted.close()
+    } finally { migrated.close() }
+  })
+
   it('inspects a real Git generator for a new plugin and leaves its checked create plan pending', async () => {
     const f = await fixture({ typed: true, creation: true, approvals: true, releases: true })
     try {
       const input = { gapId: f.gap.id, name: 'agent-creation-runtime-probe', repository: f.sourceRepository,
-        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create' as const,
+        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create' as const, growthRun: f.growthRun!,
         idempotencyKey: 'create:runtime-probe', expectedBaseCommit: f.sourceHead, ttlMs: 900_000,
         owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined }
       const queued = await f.runtime.enqueue(input)
@@ -156,14 +198,14 @@ describe('durable source-job runtime', () => {
     try {
       f.setSourceCurrent(false)
       await expect(f.runtime.enqueue({ gapId: f.gap.id, name: 'agent-creation-runtime-probe', repository: f.sourceRepository,
-        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create',
+        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create', growthRun: f.growthRun!,
         idempotencyKey: 'create:corrected', expectedBaseCommit: f.sourceHead, ttlMs: 900_000,
         owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined })).rejects.toThrow(/no longer current/)
       expect(f.store.listSourceJobs()).toHaveLength(0)
       f.setSourceCurrent(true)
       vi.spyOn(Date, 'now').mockReturnValue(f.config.creation!.expiresAt)
       await expect(f.runtime.enqueue({ gapId: f.gap.id, name: 'agent-creation-runtime-probe', repository: f.sourceRepository,
-        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create',
+        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create', growthRun: f.growthRun!,
         idempotencyKey: 'create:expired', expectedBaseCommit: f.sourceHead, ttlMs: 900_000,
         owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined })).rejects.toThrow(/unavailable or expired/)
       expect(f.store.listSourceJobs()).toHaveLength(0)
@@ -173,7 +215,7 @@ describe('durable source-job runtime', () => {
     const f = await fixture({ typed: true, creation: true })
     try {
       const queued = await f.runtime.enqueue({ gapId: f.gap.id, name: 'agent-creation-runtime-probe', repository: f.sourceRepository,
-        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create',
+        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create', growthRun: f.growthRun!,
         idempotencyKey: `create:${cause}`, expectedBaseCommit: f.sourceHead, ttlMs: 900_000,
         owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined })
       if (cause === 'correction') f.setSourceCurrent(false)

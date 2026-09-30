@@ -4,13 +4,13 @@ import { execFileSync } from 'node:child_process'
 import { chmod, mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
+import { automationDefinitionDigest, type SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
 import { afterEach, expect, it, vi } from 'vitest'
 import * as release from '../src/release.ts'
 import { resolveSourceBaseline } from '../src/source-baseline.ts'
 import { inspectSourceContext } from '../src/source-context.ts'
 import { SourceJobRuntime } from '../src/source-jobs.ts'
-import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
+import { ControlPlaneStore } from '../src/store.ts'
 import type { PluginControlTrustConfig } from '../src/trust.ts'
 import { sourceBaselineRelease } from './helpers/source-baseline.ts'
 import { cleanupReleaseFixtures } from './helpers/source-release-runner.ts'
@@ -63,17 +63,24 @@ it('continues through two signed durable releases and queues from the recovered 
     const receipt = { receiptVersion: 2 as const, authorityId: owner.ownerRouteId, authorityHash: 'a'.repeat(64),
       principalId: owner.principalId, principalRecordId: owner.principalRecordId, principalVersion: 1,
       workspace: root, agentPreset: 'primary', bindingVersion: 1, generation: 1 }
-    const activations = new Map<string, { definitionHash: string; activationNonce: string; ownerRouteId: string }>()
+    const activations = new Map<string, { definitionHash: string; activationNonce: string; ownerRouteId: string;
+      definitionVersion: number; automationStatus: 'active' | 'paused' }>()
     const automations = {
       registerHostExecutor: () => () => {},
       reconcileSystem: (request: SystemAutomationReconcileInput) => {
         if (!request.definition.execution) throw new Error('Host execution expected')
-        activations.set(request.automationId, { definitionHash: controlPlaneDigest(request.definition),
-          activationNonce: request.definition.execution.activationNonce, ownerRouteId: request.definition.execution.ownerRouteId })
+        const previous = activations.get(request.automationId)
+        const definitionHash = automationDefinitionDigest(request.definition)
+        const automationStatus = request.desiredStatus ?? 'active'
+        activations.set(request.automationId, { definitionHash,
+          activationNonce: request.definition.execution.activationNonce, ownerRouteId: request.definition.execution.ownerRouteId,
+          definitionVersion: previous === undefined ? 1 : previous.definitionVersion
+            + Number(previous.definitionHash !== definitionHash || previous.automationStatus !== automationStatus),
+          automationStatus })
         return {}
       },
       inspectSystemOwnedActivation: (request: { automationId: string }) => activations.get(request.automationId),
-      inspectSystemOwned: () => ({ latestTerminalRuns: {} }),
+      inspectSystemOwned: (request: { automationId: string }) => ({ latestTerminalRuns: {}, ...activations.get(request.automationId) }),
     }
     const trust = { ...first.trust, dshHome: root, executor: { environmentAllowlist: [] } } as unknown as PluginControlTrustConfig
     runtime = new SourceJobRuntime({ config: { authorityId: 'baseline-jobs', expiresAt: Date.now() + 600_000,

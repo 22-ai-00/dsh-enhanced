@@ -51,6 +51,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
+    "@dsh-enhanced/assistant-growth-contract": "workspace:*",
     "@dsh-enhanced/task-acceptance-contract": "workspace:*"
   },
   "peerDependencies": {

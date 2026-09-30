@@ -367,6 +367,54 @@ describe('automation SQLite store', () => {
     fixture.store.close()
   })
 
+  test('exact reconciliation survives lost acknowledgement and refuses competing revisions', async () => {
+    const fixture = await store()
+    const owner = 'plugin-control-plane-source'
+    const automationId = 'creation-queued'
+    const first = fixture.store.reconcileSystemOwned({ owner, automationId,
+      idempotencyKey: 'initial', desiredStatus: 'paused', definition: definition() })
+    const input = { owner, automationId, idempotencyKey: 'rearm:1', desiredStatus: 'active' as const,
+      definition: definition({ prompt: 'frozen replacement' }),
+      expectedDefinitionHash: fixture.store.getDefinitionHash(automationId)!, expectedVersion: first.version }
+    const contender = new AutomationStore({ path: fixture.path })
+    const result = fixture.store.reconcileSystemOwned(input)
+    expect(result).toMatchObject({ version: 2, status: 'active', definition: { prompt: 'frozen replacement' } })
+    expect(() => contender.reconcileSystemOwned({ ...input, idempotencyKey: 'competing' }))
+      .toThrowError(expect.objectContaining({ code: 'not-found' }))
+    expect(() => contender.reconcileSystemOwned({ ...input, idempotencyKey: 'stale-version',
+      expectedDefinitionHash: contender.getDefinitionHash(automationId)! }))
+      .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    fixture.store.close()
+    contender.close()
+    const restarted = new AutomationStore({ path: fixture.path })
+    expect(restarted.reconcileSystemOwned(input)).toEqual(result)
+    expect(restarted.get(automationId)?.version).toBe(2)
+    expect(() => restarted.reconcileSystemOwned({ ...input, expectedVersion: 2 }))
+      .toThrowError(expect.objectContaining({ code: 'idempotency-conflict' }))
+    restarted.reconcileSystemOwned({ owner, automationId, idempotencyKey: 'later',
+      desiredStatus: 'paused', definition: result.definition })
+    // A receipt describes its completed operation, never the current native row.
+    expect(restarted.reconcileSystemOwned(input)).toEqual(result)
+    expect(restarted.get(automationId)?.version).toBe(3)
+    restarted.close()
+  })
+
+  test('exact reconciliation rejects incomplete tuples, absent rows and foreign ownership', async () => {
+    const fixture = await store()
+    const input = { owner: 'owner', automationId: 'exact-row', idempotencyKey: 'exact',
+      definition: definition(), expectedDefinitionHash: 'a'.repeat(64), expectedVersion: 1 }
+    expect(() => fixture.store.reconcileSystemOwned({ ...input, expectedVersion: Number.NaN }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-definition' }))
+    expect(() => fixture.store.reconcileSystemOwned(input))
+      .toThrowError(expect.objectContaining({ code: 'not-found' }))
+    fixture.store.reconcileSystemOwned({ owner: 'other', automationId: input.automationId,
+      idempotencyKey: 'foreign', definition: definition() })
+    expect(() => fixture.store.reconcileSystemOwned({ ...input,
+      expectedDefinitionHash: fixture.store.getDefinitionHash(input.automationId)! }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-state' }))
+    fixture.store.close()
+  })
+
   // Engineering-layer pin (not real provider evidence): the owner-anchored
   // workflow bridge materializes paused Growth-owned automations with a frozen
   // placeholder cron; these tests pin the fail-closed gate that keeps that

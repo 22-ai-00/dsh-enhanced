@@ -79,6 +79,10 @@ export interface SourceJobRecord {
   expiresAt: number
   updatedAt: number
   definitionHash?: string
+  /** Operational one-shot rearm only; never part of the immutable intent. */
+  dispatchAt?: number
+  previousDefinitionHash?: string
+  previousDefinitionVersion?: number
   occurrenceId?: string
   planId?: string
   failureCode?: string

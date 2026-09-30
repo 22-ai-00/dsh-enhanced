@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto'
 import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
+import { sourceGrowthRunDigest, validateSourceGrowthRunBinding, type SourceGrowthRunBinding, type SourceGrowthRunProducer } from '@dsh-enhanced/assistant-growth-contract'
 import { TaskObservationRuntime, validateTaskObservationConfig } from './task-observation-runtime.js'
 import { LiveQualificationRuntime, validateLiveQualificationConfig, type LiveQualificationConfig } from './live-qualification-runtime.js'
 import type { TaskObservationConfig } from './task-observation-types.js'
@@ -41,8 +42,8 @@ import { resolveSourceBaseline } from './source-baseline.js'
 import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.js'
 import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
 import { registerPluginControlTools } from './tools.js'
-import { SourceJobRuntime, validateSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
-import type { SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
+import { SourceGrowthRunUnavailableError, SourceJobRuntime, validateSourceJobsConfig, type EnqueueSourceJobInput, type SourceJobCaller, type SourceJobPorts } from './source-jobs.js'
+import type { SourceJobOwnerReceipt, SourceJobProjection, SourceJobRecord, SourceJobsConfig } from './source-job-types.js'
 import { installRuntimeObserver, validateRuntimeObserverConfig, type RuntimeObserverConfig } from './runtime-observer.js'
 import { installReplayEndpoint, validateReplayEndpointConfig, type ReplayEndpointConfig } from './replay-endpoint.js'
 import { readPrivateRuntimeObserverKey } from './runtime-observer-protocol.js'
@@ -204,6 +205,8 @@ export class PluginControlPlaneService extends Service {
   private assertLiveRuntime: ((planId: string) => void) | undefined
   private sourceRuntime: SourceJobRuntime | undefined
   private readonly sourceRuntimes = new Set<SourceJobRuntime>()
+  private growthRunProducer: SourceGrowthRunProducer | undefined
+  private growthProviderDraining = false
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'pluginControlPlane')
@@ -417,7 +420,8 @@ export class PluginControlPlaneService extends Service {
       jobsCtx.effect(async () => {
         this.abort.signal.throwIfAborted()
         const current = <K extends keyof SourceJobPorts>(key: K): SourceJobPorts[K] => jobsCtx.get((key === 'automations' ? 'assistantAutomations' : 'assistantDelivery') as never) as unknown as SourceJobPorts[K]
-        for (const method of ['registerHostExecutor', 'reconcileSystem', 'inspectSystemOwnedActivation', 'inspectSystemOwned'] as const) {
+        for (const method of ['registerHostExecutor', 'reconcileSystem', 'reconcileSystemExact', 'pauseSystemOwned',
+          'inspectSystemOwnedActivation', 'inspectSystemOwned'] as const) {
           if (typeof current('automations')[method] !== 'function') throw new Error(`plugin-control-plane: durable source jobs require assistantAutomations.${method}`)
         }
         if (typeof current('delivery').validateOwnerRoute !== 'function') throw new Error('plugin-control-plane: durable source jobs require Delivery v2 owner validation')
@@ -426,11 +430,14 @@ export class PluginControlPlaneService extends Service {
             automations: {
               registerHostExecutor: executor => current('automations').registerHostExecutor(executor),
               reconcileSystem: request => current('automations').reconcileSystem(request),
+              reconcileSystemExact: request => current('automations').reconcileSystemExact(request),
+              pauseSystemOwned: request => current('automations').pauseSystemOwned(request),
               inspectSystemOwnedActivation: request => current('automations').inspectSystemOwnedActivation(request),
               inspectSystemOwned: request => current('automations').inspectSystemOwned(request),
             },
             delivery: { validateOwnerRoute: request => current('delivery').validateOwnerRoute(request) },
           }, withGapSourceFence: (gapId, owner, callback) => this.taskGaps.withCurrent(gapId, owner, callback),
+          assertGrowthRun: (run, gapId, owner, generation) => this.assertSourceGrowthRun(run, gapId, owner, generation),
           ...(this.config.sourceApprovals ? { approvePrepared: async (job: SourceJobRecord, signal: AbortSignal) => {
             if (!job.planId) throw new Error('source job has no prepared plan')
             await this.requestOwnerSourceApproval({ planId: job.planId, signal, expectedTrustDigest: job.intent.trustDigest })
@@ -692,6 +699,54 @@ export class PluginControlPlaneService extends Service {
   canPrepareSource(): boolean { return this.config.sourceBuild !== undefined }
   canEnqueueSource(): boolean { return this.sourceRuntime?.available() === true && !this.abort.signal.aborted }
 
+  /** Host-only durable Usage reader; the caller's binding is always an expectation. */
+  registerSourceGrowthRunProducer = (producer: SourceGrowthRunProducer): (() => Promise<void>) => {
+    this.abort.signal.throwIfAborted()
+    if (producer?.protocol !== 'assistant-growth-source-run-producer/v1' || typeof producer.inspect !== 'function'
+      || this.growthRunProducer !== undefined || this.growthProviderDraining) throw new Error('plugin-control-plane: source growth run producer is invalid or already registered')
+    this.growthRunProducer = producer
+    try { this.sourceRuntime?.reconcileQueued() }
+    catch (error) { this.growthRunProducer = undefined; throw error }
+    return async () => {
+      if (this.growthRunProducer !== producer) return
+      this.growthRunProducer = undefined
+      this.growthProviderDraining = true
+      try { await this.sourceRuntime?.growthProviderDisposed() }
+      finally { this.growthProviderDraining = false }
+    }
+  }
+
+  /** Host readiness nudge after durable Usage becomes available. */
+  reconcileSourceGrowthRuns = (): void => {
+    this.abort.signal.throwIfAborted()
+    if (this.growthRunProducer !== undefined) this.sourceRuntime?.reconcileQueued()
+  }
+
+  private assertSourceGrowthRun(expected: SourceGrowthRunBinding, gapId: string, owner: SourceJobOwnerReceipt, generation: boolean): void {
+    validateSourceGrowthRunBinding(expected)
+    const producer = this.growthRunProducer
+    if (!producer) throw new SourceGrowthRunUnavailableError('source growth run producer unavailable')
+    const actual = producer.inspect({ runId: expected.runId, intentDigest: expected.intentDigest })
+    if (!actual) throw new Error('source growth run is absent or no longer current')
+    validateSourceGrowthRunBinding(actual)
+    if (sourceGrowthRunDigest(actual) !== sourceGrowthRunDigest(expected)
+      || expected.ownerDigest !== controlPlaneDigest(owner)) throw new Error('source growth run immutable binding changed')
+    const reference = this.store.getOwnerTaskFailureReference(gapId)
+    if (!reference || expected.source.outcomeId !== reference.outcomeId
+      || expected.source.sourceDigest !== reference.sourceDigest
+      || controlPlaneDigest(expected.source.projection) !== controlPlaneDigest(reference.projection)
+      || expected.ownerDigest !== controlPlaneDigest(reference.owner)) throw new Error('source growth run task reference changed')
+    const current = this.taskGaps.inspectCurrent(gapId, owner)
+    if (expected.modelOrigin === 'inherited-owner-task'
+      && (current.source.modelSelectionState !== 'frozen'
+        || controlPlaneDigest(current.source.modelSelection) !== controlPlaneDigest(expected.model))) {
+      throw new Error('source growth run inherited model changed')
+    }
+    if (Date.now() >= expected.expiresAt || (generation && Date.now() >= expected.generationDeadlineAt)) {
+      throw new Error('source growth run window expired')
+    }
+  }
+
   /** Private Host handoff. Never register this package reader as a model tool. */
   inspectPreparedCreation = (planId: string) => {
     this.abort.signal.throwIfAborted()
@@ -704,6 +759,8 @@ export class PluginControlPlaneService extends Service {
     return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
       this.abort.signal.throwIfAborted()
       const job = this.store.getPreparedSourceJob(plan.id)
+      if (!plan.creation?.growthRun || !job.intent.creation?.growthRun) throw new Error('prepared creation lacks a frozen source growth run')
+      this.assertSourceGrowthRun(plan.creation.growthRun, plan.gapId, reference.owner, false)
       return {
         protocol: 'dsh-prepared-creation/v1' as const,
         plan: structuredClone(plan), job: structuredClone(job), reference: structuredClone(reference),

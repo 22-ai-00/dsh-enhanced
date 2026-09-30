@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
-import { LlmAdapter, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, ReasoningEffortId, ToolCallId, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -22,6 +22,8 @@ import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { AssistantSkillsService } from '@dsh-enhanced/assistant-skills'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assistant-evaluation'
+import { SourceGrowthRunUnavailableError, sourceGrowthRunDigest, validateSourceGrowthRunBinding, type SourceGrowthRunProducer,
+  type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
 import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
 import plugin, { apply, AssistantGrowthDriverService, name, normalizeConfig, version } from '../src/index.ts'
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
@@ -174,15 +176,21 @@ class ScriptedAdapter extends LlmAdapter {
   requests: Array<{ provider: string; model: string; reasoningEffort?: string }> = []
   onRequest?: () => void
   surfaces: string[][] = []
+  schemas: Array<Array<{ name: string; parameters: unknown }>> = []
   toolDescriptions: Array<Record<string, string>> = []
   messageTranscripts: string[] = []
   constructor(private readonly turns: readonly ScriptedTurn[]) { super() }
   reset(): void { this.calls = 0 }
+  override async resolveModel(provider: string, model: string) {
+    return { ...await super.resolveModel(provider, model),
+      reasoning: { efforts: [{ id: ReasoningEffortId('medium'), name: 'Medium' }] } }
+  }
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push({ provider: options.provider, model: options.model,
       ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }) })
     this.onRequest?.()
     this.surfaces.push((options.tools ?? []).map(tool => tool.name).sort())
+    this.schemas.push((options.tools ?? []).map(tool => ({ name: tool.name, parameters: tool.parameters })))
     this.toolDescriptions.push(Object.fromEntries((options.tools ?? []).map(tool => [tool.name, tool.description ?? ''])))
     this.messageTranscripts.push(JSON.stringify(options.messages))
     const index = this.calls++
@@ -915,12 +923,19 @@ describe('opt-in plugin source proposals', () => {
   } })
   function creationService() {
     const base = sourceService()
+    let producer: SourceGrowthRunProducer | undefined
     base.gaps.mockReturnValue([{ id: creationGap, capability: 'new capability', context: 'owner failure',
       status: 'open', createdAt: 1 }])
     base.recordOwnerTaskFailureGap.mockReturnValue({ id: creationGap, capability: 'new capability',
       context: 'owner failure', status: 'open', createdAt: 1 })
     return {
       ...base,
+      registerSourceGrowthRunProducer: vi.fn((next: SourceGrowthRunProducer) => {
+        producer = next
+        return () => { if (producer === next) producer = undefined }
+      }),
+      reconcileSourceGrowthRuns: vi.fn(),
+      inspectRegisteredSourceRun: (request: SourceGrowthRunRequest) => producer?.inspect(request),
       canEnqueueSource: () => true,
       getSourceCreationNamespace: vi.fn((): { namePrefix: string } | undefined => ({ namePrefix: 'assistant-' })),
       inspectCreateSource: vi.fn(async (input: Parameters<NonNullable<GrowthSourcePlanePort['inspectCreateSource']>>[0]) => {
@@ -975,6 +990,7 @@ describe('opt-in plugin source proposals', () => {
     source: ReturnType<typeof sourceService> | Record<string, unknown>
     objectiveStatus: 'achieved' | 'not-achieved'
     sourceConfig?: Record<string, unknown>
+    growthConfig?: Record<string, unknown>
   }): Promise<AssistantGrowthDriverService> {
     const { h, source, objectiveStatus } = input
     await h.ctx.plugin(AssistantEvaluationService, { databasePath: join(h.root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
@@ -1008,6 +1024,7 @@ describe('opt-in plugin source proposals', () => {
     h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
       budgetId: 'growth-budget', budgetAmount: 1,
+      ...input.growthConfig,
       pluginSourceProposals: { ...options(h.root), ...input.sourceConfig },
       usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(h.root, 'usage.sqlite') },
     }))
@@ -1019,6 +1036,40 @@ describe('opt-in plugin source proposals', () => {
     }
     return service
   }
+
+  it('keeps the producer temporarily unavailable until Usage mounts, then nudges existing source runs', async () => {
+    const h = await mount({ adapter: new ScriptedAdapter([]), provider: 'conversation-provider' })
+    const source = creationService()
+    const provider = await h.ctx.plugin({ name: 'source-run-provider', apply: ctx => {
+      ctx.provide('pluginControlPlane' as never, source as never)
+    } })
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      budgetId: 'growth-budget', budgetAmount: 1,
+      pluginSourceProposals: { ...options(h.root), preparationMode: 'durable', allowCreation: true },
+      usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1,
+        databasePath: join(h.root, 'usage.sqlite') },
+    }))
+    await vi.waitFor(() => expect(source.registerSourceGrowthRunProducer).toHaveBeenCalledOnce())
+    expect(() => source.inspectRegisteredSourceRun({ runId: 'missing', intentDigest: 'a'.repeat(64) }))
+      .toThrow(SourceGrowthRunUnavailableError)
+    const before = source.reconcileSourceGrowthRuns.mock.calls.length
+    await h.ctx.plugin(AssistantEvaluationService, { databasePath: join(h.root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+    await h.ctx.plugin(AssistantAutomationsService, {
+      databasePath: join(h.root, 'automations.sqlite'), runsPath: join(h.root, 'runs'),
+      schedulerEnabled: false, reconcileIntervalMs: 0,
+    })
+    await vi.waitFor(() => expect(service.usageHealth()).toMatchObject({ connected: true }))
+    await vi.waitFor(() => expect(source.reconcileSourceGrowthRuns.mock.calls.length).toBeGreaterThan(before))
+    expect(source.inspectRegisteredSourceRun({ runId: 'missing', intentDigest: 'a'.repeat(64) })).toBeUndefined()
+    await provider.dispose()
+    expect(source.inspectRegisteredSourceRun({ runId: 'missing', intentDigest: 'a'.repeat(64) })).toBeUndefined()
+    const replacement = creationService()
+    await h.ctx.plugin({ name: 'replacement-source-run-provider', apply: ctx => {
+      ctx.provide('pluginControlPlane' as never, replacement as never)
+    } })
+    await vi.waitFor(() => expect(replacement.registerSourceGrowthRunProducer).toHaveBeenCalledOnce())
+    expect(replacement.inspectRegisteredSourceRun({ runId: 'missing', intentDigest: 'a'.repeat(64) })).toBeUndefined()
+  })
 
   it('turns a trusted failed foreground task into its exact owner gap, without exposing another owner global gap', async () => {
     const turns = [
@@ -1057,7 +1108,7 @@ describe('opt-in plugin source proposals', () => {
     expect(prompts.join('\n')).not.toContain('OTHER OWNER GLOBAL CONTEXT')
   })
 
-  it('queues new-plugin creation from ordinary failed owner usage with the original supplier and exact task gap', async () => {
+  it('queues new-plugin creation from ordinary failed owner usage with a frozen Growth override and exact task gap', async () => {
     const adapter = new ScriptedAdapter([
       { name: 'plugin_source_gaps', args: {} }, creationRead([]), creationRead(['src/index.ts', 'README.md', 'tests/index.spec.ts']), creationCall(),
     ])
@@ -1069,8 +1120,13 @@ describe('opt-in plugin source proposals', () => {
     const prompts: string[] = []
     h.ctx.on('llm/stream', async function* (options, next) { prompts.push(JSON.stringify(options.messages)); yield* next() })
     const service = await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
-      sourceConfig: { preparationMode: 'durable', allowCreation: true } })
+      sourceConfig: { preparationMode: 'durable', allowCreation: true },
+      growthConfig: { provider: 'conversation-provider', model: 'growth-review-model', reasoningEffort: 'medium' } })
 
+    expect(service.health()).toMatchObject({ outcome: 'ran' })
+    expect(adapter.requests.length).toBeGreaterThan(0)
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 0 })
+    expect(service.health().run?.outcome).toBe('succeeded')
     expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
     expect(service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 0 })
     expect(source.gaps).not.toHaveBeenCalled()
@@ -1078,8 +1134,40 @@ describe('opt-in plugin source proposals', () => {
       mode: 'create', gapId: creationGap, name: creationName, files: creationFiles,
       owner: expect.objectContaining({ principalId: PRINCIPAL, workspace: h.root }),
     }))
+    const enqueued = source.enqueueSourceJob.mock.calls[0]![0]
+    const growthRun = enqueued.growthRun
+    validateSourceGrowthRunBinding(growthRun)
+    expect(growthRun).toMatchObject({
+      protocol: 'assistant-growth/source-run/v1',
+      runId: expect.stringMatching(/^usage-/),
+      model: { provider: 'conversation-provider', model: 'growth-review-model', reasoningEffort: 'medium' },
+      modelOrigin: 'explicit-growth-override',
+      budget: { budgetId: 'growth-budget', amount: 1, maxModelCalls: 8, maxToolCalls: 24,
+        maxOutputTokens: 8192, maxDurationMs: 120000, maxPlansPerWake: 1 },
+      native: { owner: 'assistant-growth-usage', automationId: expect.stringMatching(/^usage-/),
+        definitionHash: expect.stringMatching(/^[a-f0-9]{64}$/), occurrenceId: expect.any(String) },
+      sessionId: expect.stringMatching(/^growth-/),
+      toolContractDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      executionContractDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    })
+    expect(growthRun.native.automationId).toBe(growthRun.runId)
+    expect(source.inspectRegisteredSourceRun({ runId: growthRun.runId, intentDigest: growthRun.intentDigest }))
+      .toEqual(growthRun)
+    expect(sourceGrowthRunDigest(growthRun)).toMatch(/^[a-f0-9]{64}$/)
+    expect(source.reconcileSourceGrowthRuns).toHaveBeenCalled()
+    const stored = new DatabaseSync(join(h.root, 'usage.sqlite'))
+    const persisted = stored.prepare('SELECT digest,definition_hash,occurrence_id,source_run_json FROM usage_jobs WHERE id=?')
+      .get(growthRun.runId) as { digest: string; definition_hash: string; occurrence_id: string; source_run_json: string }
+    stored.close()
+    expect(growthRun.intentDigest).toBe(persisted.digest)
+    expect(growthRun.native).toMatchObject({ definitionHash: persisted.definition_hash, occurrenceId: persisted.occurrence_id })
+    expect(JSON.parse(persisted.source_run_json)).toEqual(growthRun)
     expect(adapter.requests.every(request => request.provider === 'conversation-provider'
-      && request.model === 'original-task-model')).toBe(true)
+      && request.model === 'growth-review-model' && request.reasoningEffort === 'medium')).toBe(true)
+    const createSchema = adapter.schemas.flat().find(tool => tool.name === 'plugin_source_create')
+    const parameters = createSchema?.parameters as { properties: Record<string, unknown> } | undefined
+    expect(Object.keys(parameters?.properties ?? {}).sort())
+      .toEqual(['files', 'gap_id', 'plugin_name'])
     expect(prompts.join('\n')).toContain('owner failure')
     expect(prompts.join('\n')).not.toContain('OTHER OWNER GLOBAL CONTEXT')
   })

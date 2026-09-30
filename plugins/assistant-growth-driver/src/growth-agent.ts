@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import type { SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -148,6 +149,10 @@ export interface GrowthAgentInput {
   signal?: AbortSignal
   /** Actual task context is data, never authority or independent success proof. */
   feedback?: import('@dsh-enhanced/assistant-delivery').OwnerForegroundLearningTask
+  /** Host-only callback after the real Agent realm, model, tools and guards are pinned. */
+  onSourceExecution?: (input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt'>) => void | Promise<void>
+  /** Durable source expiry can shorten, but never extend, the Agent deadline. */
+  generationDeadlineAt?: number
 }
 
 const toolOutput = {
@@ -628,7 +633,8 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
   const sessionId = SessionId(`growth-${createHash('sha256').update(input.wakeId).digest('hex').slice(0, 40)}`)
   const now = Date.now()
   authority.assertCurrent()
-  const deadlineAt = Math.min(authority.expiresAt, now + config.maxDurationMs)
+  const deadlineAt = Math.min(authority.expiresAt, now + config.maxDurationMs,
+    input.generationDeadlineAt ?? Number.POSITIVE_INFINITY)
   const deadline = new AbortController()
   const timer = setTimeout(() => deadline.abort(new Error('assistant-growth-driver: growth wake deadline exceeded')), Math.max(0, deadlineAt - now))
   timer.unref?.()
@@ -707,6 +713,27 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
           totalToolCalls += 1
           return undefined
         })
+        if (input.onSourceExecution !== undefined) {
+          const createdAt = Date.now()
+          if (createdAt >= deadlineAt) throw new Error('assistant-growth-driver: source generation deadline expired during Agent setup')
+          authority.assertCurrent()
+          combined.throwIfAborted()
+          await input.onSourceExecution({
+            model, sessionId: String(agent.session.id), toolContractDigest: pinnedDigest,
+            executionContractDigest: acceptanceDigest({
+              protocol: 'assistant-growth/execution-contract/v1',
+              prompt: GROWTH_PROMPT + (sourcePlane === undefined ? '' : SOURCE_PROPOSALS_PROMPT)
+                + (creationAvailable ? SOURCE_CREATION_PROMPT : ''),
+              guardVersion: 1, toolContractDigest: pinnedDigest, model,
+              bounds: { maxModelCalls: config.maxModelCalls, maxToolCalls: config.maxToolCalls,
+                maxOutputTokens: config.maxOutputTokens, maxDurationMs: config.maxDurationMs,
+                maxPlansPerWake: config.pluginSourceProposals.maxPlansPerWake },
+            }),
+            createdAt, generationDeadlineAt: deadlineAt,
+          })
+          authority.assertCurrent()
+          combined.throwIfAborted()
+        }
       },
     })
 

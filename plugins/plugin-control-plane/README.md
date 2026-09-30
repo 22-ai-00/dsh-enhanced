@@ -308,6 +308,8 @@ sourceJobs:
 
 Growth Driver 同时启用 `pluginSourceProposals.allowCreation: true` 与 `preparationMode: durable`。Host 公开有效 `namePrefix`，模型只能选择该命名空间内尚不存在的插件，不能更改授权。读取和入队冻结实际 base、公共生成器及模板摘要、来源 owner、反馈修订与构建配置。候选只提交 `README.md`、`src/`（不含 `src/version.ts`）和 `tests/`；单文件 64 KiB、合计 256 KiB、最多 64 个文件，最终插件也包含模板保留文件计算此上限，受原有来源及取消 fence 约束。
 
+普通 owner 任务驱动的创建还须由 Growth Host 注册私有 run producer，冻结其持久 Usage 中的实际模型、模型来源、预算、原生 Automation occurrence、Agent session、工具/执行合同和任务来源。入队、原生 claim、构建检查点及独立验收读取均重新查询 producer，并比对当前 owner 与 Evaluation 来源；模型工具传入的字段只作为预期值。生成截止仅限制模型提交与同步入队，后续隔离构建仍使用独立的 Control Plane Policy 预算，并须处在原 Usage 来源窗口和创建授权期限内。producer 暂未就绪时未 claim 的创建保持 queued，Host 就绪时唤醒既有原生调度；注销会中止并排空已 claim 的创建，状态转为 unknown，不自动重放。旧任务创建行缺少 run binding 时仍可读取原字节和摘要，但不能继续派发或作为新验收包；旧手动创建不需要该字段。
+
 Host 在私有 worktree 使用该基线的 `scripts/create-plugin.mjs`，生成 manifest、patch、许可证、版本和构建配置，登记目录行，并只为新包追加锁文件 importer。依赖只能复用基线 catalog 的唯一既有解析，不进行网络解析、不改变已有 importers/packages/snapshots。生成器以固定 Node 执行路径、清理后的环境及有限运行时限运行；这属于可信基线的 Host 子进程，临时目录本身不构成操作系统沙箱。候选源码在原离线 Docker 构建器中检查；Host 在检查后重建生成器输出，复验保留文件、catalog 和 lock 字节。
 
 创建检查需要包含已验证基线锁文件的新构建镜像（运行 `node scripts/isolation/build-source-image.mjs`）。Host 复核实际归档的创建范围，容器核对原 Git 基线锁摘要与只读镜像 `/opt/dsh-source-baseline/pnpm-lock.yaml` 一致，才在 pnpm 11.7.0 的首次离线 frozen install 使用 `--trust-lockfile`。该选项跳过锁文件解析与供应链策略复核；已有解析已在镜像构建时通过策略验证，新 importer 不引入新解析。普通修改不使用此选项，旧镜像或不同基线均拒绝此创建检查。构建证据保留实际 Docker 参数及基线锁摘要。

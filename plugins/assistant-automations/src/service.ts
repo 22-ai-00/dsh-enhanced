@@ -1779,6 +1779,20 @@ export class AssistantAutomationsService extends Service implements
     return this.store.reconcileSystemOwned(input)
   }
 
+  /** Host-only definition CAS; cached receipts never authorize a different revision. */
+  reconcileSystemExact(input: SystemAutomationReconcileInput & {
+    expectedDefinitionHash: string
+    expectedVersion: number
+  }): AutomationRecord {
+    if (typeof input.expectedDefinitionHash !== 'string' || !/^[a-f0-9]{64}$/u.test(input.expectedDefinitionHash)
+      || !Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new AssistantAutomationsError('invalid-input', 'exact system reconciliation tuple is invalid')
+    }
+    // The ordinary Host authorization path and the store transaction receive
+    // the complete CAS tuple. No source, scope or budget is resolved again.
+    return this.reconcileSystem(input)
+  }
+
   async tick(): Promise<void> {
     this.assertActive()
     await this.coordinator.tick()

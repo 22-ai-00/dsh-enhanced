@@ -4,7 +4,7 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 30
+export const controlPlaneSchemaVersion = 31
 
 const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
   pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
@@ -1353,6 +1353,20 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       }
       database.exec(`BEGIN IMMEDIATE; ${sourcePreparedArtifactSchema} PRAGMA user_version = 30; COMMIT;`)
     } else database.exec(sourcePreparedArtifactSchema)
+    // v31 extends existing JSON with an optional Host-frozen growth run and
+    // adds operational dispatch state. Historical JSON/digests stay untouched.
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 31) {
+      const columns = (database.prepare('PRAGMA table_info(source_jobs)').all() as Array<{ name: string }>).map(row => row.name)
+      const dispatchColumns = ['dispatch_at', 'previous_definition_hash', 'previous_definition_version']
+      if (dispatchColumns.some(name => columns.includes(name)) && !dispatchColumns.every(name => columns.includes(name))) {
+        throw new Error('unknown v30 source job dispatch schema')
+      }
+      database.exec(`BEGIN IMMEDIATE;
+        ${columns.includes('dispatch_at') ? '' : `ALTER TABLE source_jobs ADD COLUMN dispatch_at INTEGER CHECK(dispatch_at IS NULL OR dispatch_at > 0);
+        ALTER TABLE source_jobs ADD COLUMN previous_definition_hash TEXT CHECK(previous_definition_hash IS NULL OR length(previous_definition_hash) = 64);
+        ALTER TABLE source_jobs ADD COLUMN previous_definition_version INTEGER CHECK(previous_definition_version IS NULL OR previous_definition_version > 0);`}
+        PRAGMA user_version = 31; COMMIT;`)
+    }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

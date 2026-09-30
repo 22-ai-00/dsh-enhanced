@@ -14,7 +14,9 @@ v25 增加完成顺序与终态保护，原 owner 身份和只读 owner snapshot
 
 ## 自动创建插件候选（Control Plane schema 29）
 
-当前制品留存账本为 schema 30，升级保留旧计划，但不补写旧制品或创建验收权限；停下旧 writer，并同步升级共享账本的 Host/CLI。新生成模板将原生 `@deepseek-ai/dsh-tools` 声明为可选 Host peer（`>=0.1.5-rc.3 <0.1.6`）与固定 catalog 开发依赖，不新增 DSH/Cordis ABI 或创建 grant 权限。无工具入口不加载该 peer；候选实现工具时须声明实际必需注入。模板变更由冻结的 generatorDigest 与源码基准识别，已有 pending 计划继续沿原基准核验，不换用新模板。
+当前账本为 schema 31：在原 intent/creation JSON 中兼容读取可选 Growth run binding，新增仅供 queued one-shot 恢复的派发列。升级不重写旧 JSON、摘要、计划或制品；旧任务创建行缺绑定不能进入新派发/验收，且不会猜测旧模型或预算。停下旧 writer，并同步升级共享账本的 Host/CLI；旧二进制由版本门拒绝新账本。普通任务创建需要同批 Growth Host 的持久 Usage producer 与 Control Plane 的精确原生 Automation 重排接口。新生成模板将原生 `@deepseek-ai/dsh-tools` 声明为可选 Host peer（`>=0.1.5-rc.3 <0.1.6`）与固定 catalog 开发依赖，不新增 DSH/Cordis ABI 或创建 grant 权限。无工具入口不加载该 peer；候选实现工具时须声明实际必需注入。模板变更由冻结的 generatorDigest 与源码基准识别，已有 pending 计划继续沿原基准核验，不换用新模板。
+
+Growth Usage schema 2 增加可空的 `source_run_json`；旧 intent 字节和摘要原样保留，不回填旧 run。旧 Growth writer 由版本门拒绝，须与 Control Plane 和原生 Automations 同批升级。
 
 schema 29 在原源码计划中增加 `prepared-create` 与冻结创建授权，并独立持久计量创建用量。升级保持 schema 28 的旧 `create` / `modify` 行、计划摘要、收据和引用不变，不回填创建权限。旧二进制不能打开新账本；停下旧写者，并同步升级共享账本的 Host、CLI 与签名器。只读维护入口要求当前 schema，不能用旧程序打开已升级副本。
 
