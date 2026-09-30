@@ -7,7 +7,8 @@ const MAX_WORKER_OUTPUT_BYTES = 64 * 1024
 const SHA256 = /^[a-f0-9]{64}$/u
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/u
 const SAFE_TOOL = /^[a-z][a-z0-9_-]{0,95}$/u
-const COMMAND = 'exec /usr/local/bin/node /opt/dsh-plugin-verifier/worker.mjs'
+const COMMAND = 'exec /usr/bin/env LD_PRELOAD=/opt/dsh-plugin-verifier/parent-protect.so /usr/local/bin/node --disable-sigusr1 /opt/dsh-plugin-verifier/worker.mjs'
+const BOUNDARY = 'process-seccomp-v1'
 
 export type PluginBehaviorOperation =
   | { readonly kind: 'discover' }
@@ -80,7 +81,7 @@ function validOperation(value: unknown): value is PluginBehaviorOperation {
 function validObservation(value: unknown, operation: PluginBehaviorOperation, sha256: string): value is PluginBehaviorObservation {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
-  if (record.schemaVersion !== 1 || record.status !== 'observed' || record.artifactSha256 !== sha256
+  if (record.schemaVersion !== 2 || record.boundary !== BOUNDARY || record.status !== 'observed' || record.artifactSha256 !== sha256
     || record.quiescent !== true || !SHA256.test(record.schemaDigest as string)
     || !record.environment || typeof record.environment !== 'object') return false
   const environment = record.environment as Record<string, unknown>
@@ -134,13 +135,15 @@ export class PluginBehaviorRunner {
       const value: unknown = JSON.parse(isolated.stdout.slice(0, -1))
       if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
         const record = value as Record<string, unknown>
-        if (record.schemaVersion === 1 && record.status === 'unknown'
+        if (record.schemaVersion === 2 && record.boundary === BOUNDARY && record.status === 'unknown'
           && typeof record.reason === 'string' && record.reason.length > 0 && record.reason.length <= 128
-          && Object.keys(record).length === 3) return unknown(record.reason, true, isolated.jobId)
+          && Object.keys(record).length === 4) return unknown(record.reason, true, isolated.jobId)
       }
       if (!validObservation(value, input.operation, artifactSha256)) return unknown('plugin-worker-observation-invalid', true, isolated.jobId)
       const observation = value as PluginBehaviorObservation
-      return { ...observation, jobId: isolated.jobId }
+      return { status: 'observed', quiescent: true, artifactSha256, jobId: isolated.jobId,
+        environment: observation.environment!, schemaDigest: observation.schemaDigest!,
+        ...(input.operation.kind === 'discover' ? { schemas: observation.schemas! } : { calls: observation.calls! }) }
     } catch { return unknown('plugin-worker-output-invalid', true, isolated.jobId) }
   }
   close(): Promise<void> { return this.#runner.close() }
@@ -150,13 +153,10 @@ export class PluginBehaviorRunner {
 // Copied verbatim into the manifest-only image by build-plugin-verifier-image.mjs.
 // This code executes inside the isolation worker, never in the Host process.
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
-import { Context } from '@deepseek-ai/cordis'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
 
 const limit = 512 * 1024
 const safeId = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$/
@@ -268,23 +268,127 @@ function validOperation(value) {
 function version(name) {
   return JSON.parse(readFileSync('/opt/dsh-plugin-verifier/node_modules/' + name + '/package.json', 'utf8')).version
 }
+const unknown = reason => ({ schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'unknown', reason })
+const decoded = bytes => new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+function validChild(value, operation) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.wireVersion !== 1) return false
+  if (value.status === 'unknown') return Object.keys(value).length === 3
+    && typeof value.reason === 'string' && value.reason.length > 0 && value.reason.length <= 128
+  if (value.status !== 'result' || !Array.isArray(value.schemas) || value.schemas.length < 1
+    || value.schemas.length > 64 || Object.keys(value).length !== (operation.kind === 'discover' ? 3 : 4)) return false
+  const names = new Set()
+  for (const schema of value.schemas) {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)
+      || !safeTool.test(schema.name) || names.has(schema.name)) return false
+    names.add(schema.name)
+  }
+  if (operation.kind === 'discover') return value.calls === undefined
+  if (!Array.isArray(value.calls) || value.calls.length !== operation.calls.length) return false
+  for (let index = 0; index < value.calls.length; index += 1) {
+    const call = value.calls[index], requested = operation.calls[index]
+    if (!call || typeof call !== 'object' || Array.isArray(call) || Object.keys(call).length !== 3
+      || call.id !== requested.id || call.toolName !== requested.toolName || !names.has(call.toolName)
+      || !Object.hasOwn(call, 'result')) return false
+  }
+  return true
+}
+function observeChild(entry, operation) {
+  return new Promise(resolvePromise => {
+    let child
+    try {
+      child = spawn('/opt/dsh-plugin-verifier/candidate-launcher', [], {
+        cwd: '/workspace/plugin/package',
+        env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C', NODE_ENV: 'production' },
+        stdio: ['pipe', 'ignore', 'ignore', 'pipe'],
+      })
+    } catch { resolvePromise({ reason: 'candidate-launch-failed' }); return }
+    let bytes = Buffer.alloc(0), overflow = false, error = false, timedOut = false
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, 8000)
+    child.stdio[3].on('data', chunk => {
+      if (overflow) return
+      if (bytes.length + chunk.length > 60 * 1024) {
+        overflow = true
+        child.kill('SIGKILL')
+      } else bytes = Buffer.concat([bytes, chunk])
+    })
+    child.once('error', () => { error = true })
+    child.stdin.on('error', () => { error = true })
+    child.once('close', (code, signal) => {
+      clearTimeout(timer)
+      if (timedOut || overflow || error || code !== 0 || signal !== null) {
+        resolvePromise({ reason: timedOut ? 'candidate-timeout' : 'candidate-process-unsettled' }); return
+      }
+      try {
+        const text = decoded(bytes)
+        if (!text.endsWith('\n') || text.indexOf('\n') !== text.length - 1) fail('candidate-result-invalid')
+        const value = JSON.parse(text.slice(0, -1))
+        resolvePromise(validChild(value, operation) ? { value } : { reason: 'candidate-result-invalid' })
+      } catch { resolvePromise({ reason: 'candidate-result-invalid' }) }
+    })
+    child.stdin.end(JSON.stringify({ operation, entry }) + '\n')
+  })
+}
 let result
-let fiber
-let ctx
-let quiescent = true
 try {
   const encoded = readFileSync('/workspace/artifact', 'utf8')
   const request = JSON.parse(readFileSync('/workspace/input', 'utf8'))
+  // Remove both staged files before any candidate process exists. The candidate
+  // gets only its operation and the extracted package through its stdin/path.
+  unlinkSync('/workspace/artifact')
+  unlinkSync('/workspace/input')
   if (!request || request.schemaVersion !== 1 || !shaPattern.test(request.sha256)
     || !Number.isSafeInteger(request.sizeBytes) || request.sizeBytes < 1 || request.sizeBytes > limit
     || !validOperation(request.operation) || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) fail('invalid-worker-input')
   const packed = Buffer.from(encoded, 'base64')
   if (packed.length !== request.sizeBytes || packed.toString('base64') !== encoded || digest(packed) !== request.sha256) fail('artifact-mismatch')
   const entry = extract(packed)
+  const child = await observeChild(entry, request.operation)
+  if (!child.value) fail(child.reason)
+  if (child.value.status === 'unknown') fail(child.value.reason)
+  const schemas = child.value.schemas
+  const schemaDigest = digest(Buffer.from(JSON.stringify(schemas)))
+  if (request.operation.kind === 'invoke' && schemaDigest !== request.operation.schemaDigest) fail('schema-digest-changed')
+  const base = { schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'observed',
+    artifactSha256: request.sha256, quiescent: true,
+    environment: { node: process.version, cordis: version('@deepseek-ai/cordis'),
+      tools: version('@deepseek-ai/dsh-tools'), systemPrompt: version('@deepseek-ai/dsh-system-prompt') }, schemaDigest }
+  result = request.operation.kind === 'discover' ? { ...base, schemas } : { ...base, calls: child.value.calls }
+} catch (error) {
+  result = unknown(error instanceof Error ? error.message.slice(0, 128) : 'worker-error')
+}
+const output = JSON.stringify(result)
+if (Buffer.byteLength(output) > 60 * 1024) process.stdout.write(JSON.stringify(unknown('worker-output-too-large')) + '\n')
+else process.stdout.write(output + '\n')
+DSH_PLUGIN_VERIFIER_WORKER_END */
+
+/* DSH_PLUGIN_VERIFIER_CANDIDATE_START
+// Executes only after the fixed launcher installs seccomp and Node permissions.
+import { createHash } from 'node:crypto'
+import { writeSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+import { Context } from '@deepseek-ai/cordis'
+import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
+
+const safeTool = /^[a-z][a-z0-9_-]{0,95}$/
+let fiber, ctx, result, disposed = true
+try {
+  const chunks = []
+  let total = 0
+  for await (const chunk of process.stdin) {
+    total += chunk.length
+    if (total > 64 * 1024) throw new Error('candidate-input-too-large')
+    chunks.push(chunk)
+  }
+  const request = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  if (!request || typeof request.entry !== 'string'
+    || !/^\/workspace\/plugin\/package\/lib\/[A-Za-z0-9._/-]+\.js$/.test(request.entry)
+    || request.entry.split('/').includes('..')
+    || !request.operation || !['discover', 'invoke'].includes(request.operation.kind)) throw new Error('candidate-input-invalid')
   ctx = new Context()
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: false, personaPrefix: '' })
   await ctx.plugin(ToolRuntime, { mode: 'native' })
-  const mod = await import(pathToFileURL(entry).href)
+  const mod = await import(pathToFileURL(request.entry).href)
   fiber = ctx.plugin(mod.default ?? mod)
   let activationTimer
   try {
@@ -292,38 +396,38 @@ try {
       activationTimer = setTimeout(() => reject(new Error('plugin-activation-timeout')), 5000)
     })])
   } finally { clearTimeout(activationTimer) }
-  if (fiber.state !== 2) fail('plugin-fiber-not-active')
-  const assembly = await ctx.systemPrompt.assemble({})
-  const schemas = assembly.tools
-  if (!Array.isArray(schemas) || schemas.length < 1 || schemas.length > 64) fail('invalid-tool-schemas')
+  if (fiber.state !== 2) throw new Error('plugin-fiber-not-active')
+  const schemas = (await ctx.systemPrompt.assemble({})).tools
+  if (!Array.isArray(schemas) || schemas.length < 1 || schemas.length > 64) throw new Error('invalid-tool-schemas')
   const names = new Set()
   for (const schema of schemas) {
-    if (!schema || !safeTool.test(schema.name) || names.has(schema.name)) fail('invalid-tool-schemas')
+    if (!schema || !safeTool.test(schema.name) || names.has(schema.name)) throw new Error('invalid-tool-schemas')
     names.add(schema.name)
   }
-  const schemaDigest = digest(Buffer.from(JSON.stringify(schemas)))
-  const base = { schemaVersion: 1, status: 'observed', artifactSha256: request.sha256,
-    quiescent: true, environment: { node: process.version, cordis: version('@deepseek-ai/cordis'),
-      tools: version('@deepseek-ai/dsh-tools'), systemPrompt: version('@deepseek-ai/dsh-system-prompt') }, schemaDigest }
-  if (request.operation.kind === 'discover') result = { ...base, schemas }
+  const schemaDigest = createHash('sha256').update(JSON.stringify(schemas)).digest('hex')
+  if (request.operation.kind === 'invoke' && request.operation.schemaDigest !== schemaDigest)
+    throw new Error('schema-digest-changed')
+  if (request.operation.kind === 'discover') result = { wireVersion: 1, status: 'result', schemas }
   else {
-    if (request.operation.schemaDigest !== schemaDigest) fail('schema-digest-changed')
     const calls = []
     for (const call of request.operation.calls) {
-      if (!names.has(call.toolName)) fail('unknown-invoked-tool')
-      const observed = await ctx.tools.execute({ callId: call.id, name: call.toolName, arguments: call.arguments, signal: new AbortController().signal })
+      if (!names.has(call.toolName)) throw new Error('unknown-invoked-tool')
+      const observed = await ctx.tools.execute({ callId: call.id, name: call.toolName,
+        arguments: call.arguments, signal: new AbortController().signal })
       calls.push({ id: call.id, toolName: call.toolName, result: observed })
     }
-    result = { ...base, calls }
+    result = { wireVersion: 1, status: 'result', schemas, calls }
   }
 } catch (error) {
-  result = { schemaVersion: 1, status: 'unknown', reason: error instanceof Error ? error.message.slice(0, 128) : 'worker-error' }
+  result = { wireVersion: 1, status: 'unknown', reason: error instanceof Error ? error.message.slice(0, 128) : 'candidate-error' }
 } finally {
-  try { if (fiber) await fiber.dispose() } catch { quiescent = false }
-  try { if (ctx) await ctx.fiber.dispose() } catch { quiescent = false }
+  try { if (fiber) await fiber.dispose() } catch { disposed = false }
+  try { if (ctx) await ctx.fiber.dispose() } catch { disposed = false }
 }
-if (!quiescent) result = { schemaVersion: 1, status: 'unknown', reason: 'plugin-disposal-unconfirmed' }
-const output = JSON.stringify(result)
-if (Buffer.byteLength(output) > 60 * 1024) process.stdout.write('{"schemaVersion":1,"status":"unknown","reason":"worker-output-too-large"}\n')
-else process.stdout.write(output + '\n')
-DSH_PLUGIN_VERIFIER_WORKER_END */
+if (!disposed) result = { wireVersion: 1, status: 'unknown', reason: 'plugin-disposal-unconfirmed' }
+try {
+  const output = JSON.stringify(result)
+  if (Buffer.byteLength(output) > 60 * 1024) throw new Error('candidate-output-too-large')
+  writeSync(3, output + '\n')
+} catch { process.exitCode = 1 }
+DSH_PLUGIN_VERIFIER_CANDIDATE_END */

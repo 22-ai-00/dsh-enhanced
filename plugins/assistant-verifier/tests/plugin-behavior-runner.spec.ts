@@ -31,7 +31,7 @@ const result = (value: unknown, status = 'succeeded', quiescent = true) => ({
   stdout: JSON.stringify(value) + '\n', stderr: '', artifacts: [],
 })
 const observed = (extra: Record<string, unknown> = {}) => ({
-  schemaVersion: 1, status: 'observed', artifactSha256, quiescent: true, schemaDigest,
+  schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'observed', artifactSha256, quiescent: true, schemaDigest,
   environment: { node: 'v22.23.2', cordis: '4.0.2', tools: '0.1.5-rc.3', systemPrompt: '0.1.5-rc.3' },
   schemas: [schema], ...extra,
 })
@@ -43,7 +43,8 @@ it('stages only canonical base64 artifact and bounded operation, with fixed comm
   const value = await runner.run({ key: 'candidate:discover', artifact, operation: { kind: 'discover' }, signal })
   expect(value).toMatchObject({ status: 'observed', quiescent: true, artifactSha256, schemaDigest, jobId: 'job-1' })
   expect(seam.configs[0]).toMatchObject({ authorityDigest: authority.authorityDigest,
-    maxRuns: authority.maxRuns, command: 'exec /usr/local/bin/node /opt/dsh-plugin-verifier/worker.mjs' })
+    maxRuns: authority.maxRuns,
+    command: 'exec /usr/bin/env LD_PRELOAD=/opt/dsh-plugin-verifier/parent-protect.so /usr/local/bin/node --disable-sigusr1 /opt/dsh-plugin-verifier/worker.mjs' })
   const [key, encoded, input] = seam.run.mock.calls[0]!
   expect(key).toBe('candidate:discover')
   expect(encoded).toBe(artifact.toString('base64'))
@@ -110,6 +111,8 @@ it('returns unknown for a package above the isolation input budget without dispa
 it.each([
   ['wrong schema digest', result(observed({ schemaDigest: '0'.repeat(64) }))],
   ['wrong artifact digest', result(observed({ artifactSha256: '0'.repeat(64) }))],
+  ['legacy same-process worker', result(observed({ schemaVersion: 1, boundary: undefined }))],
+  ['missing process boundary', result(observed({ boundary: undefined }))],
   ['stdout pollution', { ...result(observed()), stdout: 'candidate log\n' + JSON.stringify(observed()) + '\n' }],
   ['missing schema', result(observed({ schemas: [] }))],
   ['unknown process result', result(observed(), 'unknown', false)],
@@ -123,7 +126,7 @@ it.each([
 })
 
 it('preserves a bounded worker unknown reason after proven isolation cleanup', async () => {
-  seam.run.mockResolvedValue(result({ schemaVersion: 1, status: 'unknown', reason: 'plugin-fiber-not-active' }))
+  seam.run.mockResolvedValue(result({ schemaVersion: 2, boundary: 'process-seccomp-v1', status: 'unknown', reason: 'plugin-fiber-not-active' }))
   const runner = new PluginBehaviorRunner(authority)
   expect(await runner.run({ key: 'pending', artifact, operation: { kind: 'discover' }, signal }))
     .toMatchObject({ status: 'unknown', quiescent: true, reason: 'plugin-fiber-not-active' })

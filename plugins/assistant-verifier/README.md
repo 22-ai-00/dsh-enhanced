@@ -87,7 +87,11 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 `run({ key, artifact, operation, signal })` 接受真实 tgz 的 `Buffer`：`operation: { kind: 'discover' }` 返回工具 schema 与摘要；`{ kind: 'invoke', schemaDigest, calls: [{ id, toolName, arguments }] }` 仅在 schema 摘要匹配时执行调用。每包最多 512 KiB，每轮最多 8 次调用。两轮分别消耗持久预算，key 须绑定候选、操作与调用输入；派发不明的 key 不重放。
 
-容器用固定 Cordis、SystemPrompt 和原生 Tools 加载候选，不提供模拟 Agent、owner 或缺失注入。候选没有工具、注入不满足、包非法、超时、输出污染或无法确认资源结束时返回 `unknown`。容器只收到制品与调用输入；预期结果、验收政策和签名密钥留在 Host。结果 `observed` 只记录该输入下的工具输出，候选与观察 worker 同进程，不能单独证明目标达成、生命周期或发布安全；当前没有新插件验收签名或自动采用。
+新版镜像的父观察器不导入候选；候选在另一个受限进程中用固定 Cordis、SystemPrompt 和原生 Tools 加载，不提供模拟 Agent、owner 或缺失注入。父进程核对包字节、调用身份和结果大小，自行计算 schema 摘要与环境版本，等候子进程真实退出；候选 stdout/stderr 不作为父观察协议。worker 协议 v2 拒绝旧同进程镜像的 v1 结果，需要重新构建专用镜像。候选没有工具、注入不满足、包非法、超时、结果帧非法或无法确认资源结束时返回 `unknown`。
+
+该镜像目前要求 Linux x64。固定原生启动器在加载候选前设置 `no_new_privs` 与 seccomp，限制文件写入、非线程进程创建、网络和跨进程操作；父进程禁用信号启动调试器并设置 [non-dumpable](https://man7.org/linux/man-pages/man2/PR_SET_DUMPABLE.2const.html)，避免同 UID 子进程重开其受保护的 `/proc` 内存或描述符。设置失败即拒绝运行；容器仍沿用 Isolation 的无网络、只读根文件系统、无 capability 和资源限额，不新增 Host 权限。Node 的路径权限只是额外限制，[官方权限模型](https://nodejs.org/download/release/latest-v22.x/docs/api/permissions.html)并不保证抵抗恶意代码；[seccomp](https://docs.kernel.org/userspace-api/seccomp_filter.html) 不检查路径内容，不能单独当完整沙箱。
+
+容器只收到制品与调用输入；预期结果、验收政策和签名密钥留在 Host。schema 和工具结果仍是候选的黑箱输出；`observed` 与 `quiescent` 只说明本次输出、子进程退出与外层容器回收，不能证明候选按原语义执行了工具或 Cordis disposer，也不能单独证明目标达成或发布安全。独立目标验收与真实加载后的外部观察仍需接线；当前没有新插件验收签名或自动采用。
 
 新增权限为通过固定 Docker executable 写入私有隔离账本、暂存包和输入，在无网络、只读根文件系统且有资源上限的容器内执行候选。运行时不执行安装脚本、不挂载 Host 仓库或凭据。专用镜像准备会联网下载公开系统依赖，随后按完整锁文件离线安装且禁用依赖脚本；详见镜像指南。
 
