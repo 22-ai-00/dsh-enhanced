@@ -10,6 +10,8 @@ This pnpm monorepo contains independently publishable DSH bundles in `plugins/*`
 
 Read [current status](docs/rsi-status.md) for the current boundary and next delivery. Load only the guide and plugin README relevant to the task; do not preload the documentation tree, completed work, historical probes, or research notes.
 
+Keep one active delivery in context. Completed work is a capability boundary, not an active checklist; retrieve its implementation and verification from Git only when needed. Treat uncommitted implementation as unfinished until integration and review pass.
+
 | Change | Required reference |
 | --- | --- |
 | Add/restructure a plugin | [Creating a plugin](docs/creating-a-plugin.md); finish package, patch, tests, README and catalog row together. |
