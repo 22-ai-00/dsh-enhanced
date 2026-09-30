@@ -81,6 +81,16 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 
 待运行 CI、待评审、截断数据或无法认证返回 unknown；失败 CI/请求修改不能通过 `/ready`。回执有效期从读取开始计时，最多为 `freshnessMs` 且不晚于契约到期。回执仅描述这次观察，不能证明远端之后不变，也不自动配置事件订阅。测试覆盖真实 Verifier→Actions Host 调用，GitHub 传输为替身；真实远端认证与完整事件跟进仍需验证。
 
+## 新插件包的隔离行为观察
+
+从 `@dsh-enhanced/assistant-verifier/plugin-behavior-runner` 显式导入 `PluginBehaviorRunner`，它是供可信 Host 构造的观察器，未自动激活，也不注册模型工具。主 bundle 不加载可选 Isolation peer；仅使用这个子入口时才需要它。构造参数复用 `IsolatedVerifierRunnerConfig`，省略 `command`；命令由实现固定。必须使用[专用镜像](../../scripts/isolation/README.md)、私有 `stateRoot`、不可变镜像 ID、有限次数与累计时间，`maxOutputBytes` 至少 65536。Host 持有实例并在所属 Cordis effect 的 disposer 中等待 `close()`。
+
+`run({ key, artifact, operation, signal })` 接受真实 tgz 的 `Buffer`：`operation: { kind: 'discover' }` 返回工具 schema 与摘要；`{ kind: 'invoke', schemaDigest, calls: [{ id, toolName, arguments }] }` 仅在 schema 摘要匹配时执行调用。每包最多 512 KiB，每轮最多 8 次调用。两轮分别消耗持久预算，key 须绑定候选、操作与调用输入；派发不明的 key 不重放。
+
+容器用固定 Cordis、SystemPrompt 和原生 Tools 加载候选，不提供模拟 Agent、owner 或缺失注入。候选没有工具、注入不满足、包非法、超时、输出污染或无法确认资源结束时返回 `unknown`。容器只收到制品与调用输入；预期结果、验收政策和签名密钥留在 Host。结果 `observed` 只记录该输入下的工具输出，候选与观察 worker 同进程，不能单独证明目标达成、生命周期或发布安全；当前没有新插件验收签名或自动采用。
+
+新增权限为通过固定 Docker executable 写入私有隔离账本、暂存包和输入，在无网络、只读根文件系统且有资源上限的容器内执行候选。运行时不执行安装脚本、不挂载 Host 仓库或凭据。专用镜像准备会联网下载公开系统依赖，随后按完整锁文件离线安装且禁用依赖脚本；详见镜像指南。
+
 ## 独立源码审查
 
 `sourceReviews` 是可选 Host 能力，供 Control Plane 的 `sourceReleaseExecution.independentReview` 调用。复用当前 DSH `agents`、`sessions`、`tools`、`llm`、`systemPrompt` 与 `assistantPolicy`，不新增调度器。缺少这些服务时保持未就绪，依赖替换或卸载会取消并等待当前审查。Host 在 PR 前检查精确 owner、插件、模型、目录与剩余额度；已存在的 operation 可进入终态恢复核验。

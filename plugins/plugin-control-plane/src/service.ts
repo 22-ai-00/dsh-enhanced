@@ -692,6 +692,27 @@ export class PluginControlPlaneService extends Service {
   canPrepareSource(): boolean { return this.config.sourceBuild !== undefined }
   canEnqueueSource(): boolean { return this.sourceRuntime?.available() === true && !this.abort.signal.aborted }
 
+  /** Private Host handoff. Never register this package reader as a model tool. */
+  inspectPreparedCreation = (planId: string) => {
+    this.abort.signal.throwIfAborted()
+    const plan = this.store.getSourcePlan(planId)
+    const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
+    if (!reference || plan.mode !== 'prepared-create' || plan.status !== 'pending-approval'
+      || Date.now() >= plan.expiresAt || !plan.creation || Date.now() >= plan.creation.grant.expiresAt) {
+      throw new Error('prepared creation package is unavailable for independent verification')
+    }
+    return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
+      this.abort.signal.throwIfAborted()
+      const job = this.store.getPreparedSourceJob(plan.id)
+      return {
+        protocol: 'dsh-prepared-creation/v1' as const,
+        plan: structuredClone(plan), job: structuredClone(job), reference: structuredClone(reference),
+        source: this.taskGaps.inspectCurrent(plan.gapId, reference.owner),
+        artifact: this.store.readPreparedSourceArtifact(plan.id),
+      }
+    })
+  }
+
   /** Public naming rule only; never disclose grant identity or mutation authority. */
   getSourceCreationNamespace(): { namePrefix: string } | undefined {
     const config = this.config.sourceJobs
@@ -908,11 +929,16 @@ export class PluginControlPlaneService extends Service {
         await writeScopedPluginFiles({ worktree: isolated.worktree, name, files: managed.files })
         await verifyManagedPatchVersion(versionInput)
       }
+      // Only owner-bound creation jobs retain the exact package for the
+      // independent verifier. Ordinary source tools never receive these bytes.
+      const capturePack = creating && this.store.getOwnerTaskFailureReference(input.gapId) !== undefined
       const checked = await runDockerPreparedChecks({ config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
         worktree: isolated.worktree, baseCommit, name, scope: generated?.scope ?? [`plugins/${name}`], environment, signal,
         assertCurrent, preparedAt: Date.now(), ...(creation === undefined ? {} : { creation }),
+        ...(capturePack ? { capturePack: true } : {}),
         ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName } }) })
       await assertCurrent()
+      if (capturePack && checked.packArtifact === undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation artifact was not captured')
       if (creation !== undefined) {
         await verifyCreatedPluginWorkspace({ worktree: isolated.worktree, baseCommit, name,
           files: input.files, environment, signal, assertCurrent, creation })
@@ -929,6 +955,7 @@ export class PluginControlPlaneService extends Service {
         name, generatorDigest: generated?.generatorDigest ?? MODIFY_GENERATOR_DIGEST,
         scope: generated?.scope ?? [`plugins/${name}`], mode: creating ? 'prepared-create' : 'modify', ttlMs,
         ...(creation === undefined ? {} : { creation }),
+        ...(capturePack && checked.packArtifact !== undefined ? { preparedArtifact: checked.packArtifact } : {}),
         idempotencyKey: input.idempotencyKey,
         ...(sourceJob === undefined ? {} : { sourceJob: { jobId: sourceJob.id, jobRevision: sourceJob.revision, occurrenceId: sourceJob.occurrenceId! } }),
         prepared: { treeDigest: checked.treeDigest, patchDigest: checked.patchDigest, checkedAt: checked.checkedAt, evidence: checked.evidence } }).result)

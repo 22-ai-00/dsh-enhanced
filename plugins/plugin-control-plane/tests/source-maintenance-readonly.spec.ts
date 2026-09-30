@@ -5,7 +5,7 @@ import { basename, dirname, join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, expect, test, vi } from 'vitest'
 import * as release from '../src/release.ts'
-import { openControlPlaneDatabaseReadOnly } from '../src/sqlite.ts'
+import { controlPlaneSchemaVersion, openControlPlaneDatabaseReadOnly } from '../src/sqlite.ts'
 import { signSourceMaintenanceRecord, sourceMaintenanceDigest } from '../src/source-maintenance.ts'
 import { ControlPlaneStore } from '../src/store.ts'
 import { cleanupRuntimeEpochFixtures, createRuntimeEpochFixture } from './helpers/runtime-epoch.ts'
@@ -63,12 +63,12 @@ test('rejects missing paths without creating a directory or database', async () 
   expect(await readdir(root)).toEqual(before)
 })
 
-test.each([0, 27, 28, 30])('rejects schema %i without migrating, replacing rows or changing journal mode', async version => {
+test.each([0, 27, 28, 29, controlPlaneSchemaVersion + 1])('rejects schema %i without migrating, replacing rows or changing journal mode', async version => {
   const { path } = await emptyLedger()
   mutate(path, db => db.exec(`DROP TABLE source_maintenance; PRAGMA user_version=${version}`))
   const before = await ledgerBytes(path)
   expect(() => new ControlPlaneStore({ path, readOnly: true }))
-    .toThrow(expect.objectContaining({ code: version > 29 ? 'schema-too-new' : 'schema-version' }))
+    .toThrow(expect.objectContaining({ code: version > controlPlaneSchemaVersion ? 'schema-too-new' : 'schema-version' }))
   expect(await ledgerBytes(path)).toEqual(before)
 })
 

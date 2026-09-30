@@ -35,10 +35,15 @@ export interface SourceBuildResult {
   patchDigest: string
   checkedAt: number
   evidence: SourcePreparedEvidence
+  /** Host-only bytes from the same verified in-container pack read. Never persisted in source evidence. */
+  packArtifact?: Buffer
 }
 
 const imageDigest = /^(?:[a-z0-9][a-z0-9._:/-]*@)?sha256:[a-f0-9]{64}$/u
 const marker = /^DSH_PREPARED_PACK\t([^\t\n]+)\t([0-9]+)\t([a-f0-9]{64})\t([^\t\n]+)\t([^\t\n]+)$/mu
+const packFrame = 'DSH_PREPARED_PACK_BYTES_V1\t'
+const maximumPackBytes = 32 * 1024 * 1024
+const maximumPackBase64Bytes = Math.ceil(maximumPackBytes / 3) * 4
 const repositorySeccompSha256 = 'b1e4b5b709578785bd2aff4a3a344301997571ad0e8ae5747aec176571ddc342'
 
 /** Exact in-container command recorded in prepared source evidence. */
@@ -462,6 +467,7 @@ for (const [name, actual] of artifact) {
 const pnpmVersion = childProcess.execFileSync('pnpm', ['--version'], { encoding: 'utf8', timeout: 5000 }).trim()
 const digest = crypto.createHash('sha256').update(packed).digest('hex')
 console.log(['DSH_PREPARED_PACK', path.basename(packedPath), packed.length, digest, process.version, pnpmVersion].join('\t'))
+if (process.env.DSH_SOURCE_CAPTURE_PACK === 'true') process.stdout.write('DSH_PREPARED_PACK_BYTES_V1\t' + packed.toString('base64') + '\n')
 DSH_SOURCE_PACK_VERIFY
 `
 
@@ -570,7 +576,10 @@ export async function runDockerPreparedChecks(input: {
   sourceJob?: { id: string; containerName: string }
   /** Frozen owner grant and generator proof for Host-scaffolded creation only. */
   creation?: SourceCreationBinding
+  /** Host-only request to return the exact already-verified pack bytes for independent verification. */
+  capturePack?: true
 }): Promise<SourceBuildResult> {
+  if (input.capturePack !== undefined && input.capturePack !== true) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'source pack capture request is invalid')
   if (input.sourceJob !== undefined && (!/^source-job-[a-f0-9]{64}$/u.test(input.sourceJob.id)
     || input.sourceJob.containerName !== `dsh-${input.sourceJob.id}`)) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'invalid durable container identity')
   validateSourceBuildConfig(input.config); const limits = sourceBuildLimits(input.config); const dockerPath = await verifiedDockerPath(input.config.dockerPath); await input.assertCurrent()
@@ -646,6 +655,7 @@ export async function runDockerPreparedChecks(input: {
     '--memory', `${input.config.memoryMiB}m`, '--memory-swap', `${input.config.memoryMiB}m`, '--cpus', String(input.config.cpus),
     '--tmpfs', `/workspace:rw,nosuid,nodev,mode=1777,size=${input.config.workspaceMiB}m${limits.profile === 'repository' ? ',exec' : ''}`, '--tmpfs', `/tmp:rw,nosuid,nodev,mode=1777,size=${limits.temporaryMiB}m${limits.profile === 'repository' ? ',exec' : ''}`,
     '--workdir', '/workspace', '--env', `PLUGIN_ROOT=plugins/${input.name}`, '--env', 'HOME=/tmp', '--env', 'PATH=/usr/local/bin:/usr/bin:/bin',
+    ...(input.capturePack ? ['--env', 'DSH_SOURCE_CAPTURE_PACK=true'] : []),
     ...(baseLockDigest === undefined ? [] : ['--env', 'DSH_SOURCE_TRUST_LOCKFILE=true', '--env', `DSH_SOURCE_BASE_LOCK_SHA256=${baseLockDigest}`]),
     ...(limits.profile === 'repository' ? ['--env', 'CI=true', '--env', `VITEST_MAX_WORKERS=${Math.max(1, Math.min(4, Math.floor(input.config.cpus)))}`] : []),
     // Docker's masked proc submounts prevent procfs mounts in a child user
@@ -661,13 +671,14 @@ export async function runDockerPreparedChecks(input: {
   git.stdout.pipe(docker.stdin!)
   const dockerDone = new Promise<number | null>((resolvePromise, reject) => { docker.once('error', reject); docker.once('close', resolvePromise) })
   const gitDone = new Promise<void>((resolvePromise, reject) => { git.once('error', reject); git.once('close', code => code === 0 ? resolvePromise() : reject(new ControlPlaneCliError('EXECUTOR_FAILED', `source archive exited ${code}`))) })
+  const stdoutLimit = input.config.outputBytes + (input.capturePack ? packFrame.length + maximumPackBase64Bytes + 1 : 0)
   let stdout = ''; let stdoutBytes = 0; let stderr = ''; let overflow = false; let timedOut = false
   const add = (target: 'out' | 'err', chunk: Buffer): void => {
     if (target === 'err') { stderr = (stderr + chunk.toString('utf8')).slice(-4096); return }
-    const remaining = input.config.outputBytes - stdoutBytes
+    const remaining = stdoutLimit - stdoutBytes
     if (remaining > 0) stdout += chunk.subarray(0, remaining).toString('utf8')
     stdoutBytes += chunk.length
-    if (stdoutBytes > input.config.outputBytes) { overflow = true; stop() }
+    if (stdoutBytes > stdoutLimit) { overflow = true; stop() }
   }
   docker.stdout!.on('data', (chunk: Buffer) => add('out', chunk)); docker.stderr!.on('data', (chunk: Buffer) => add('err', chunk))
   const stop = (): void => { git.kill('SIGKILL'); docker.kill('SIGKILL') }
@@ -683,8 +694,25 @@ export async function runDockerPreparedChecks(input: {
     if (overflow) throw new ControlPlaneCliError('EXECUTOR_OUTPUT_LIMIT', 'isolated source build exceeded its output bound')
     if (code !== 0) throw new ControlPlaneCliError('EXECUTOR_FAILED', `isolated source build failed (${code}): ${stderr.trimEnd()}`)
     const match = marker.exec(stdout)
-    if (match !== null && stdout.trim() !== match[0]) throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build emitted unexpected evidence output')
     if (match === null) throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build did not emit its pack evidence marker')
+    let packArtifact: Buffer | undefined
+    if (input.capturePack) {
+      const prefix = `${match[0]}\n${packFrame}`
+      if (!stdout.startsWith(prefix) || !stdout.endsWith('\n')) throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build emitted an invalid pack capture frame')
+      const encoded = stdout.slice(prefix.length, -1)
+      const expectedSize = Number(match[2])
+      if (!Number.isSafeInteger(expectedSize) || expectedSize < 1 || expectedSize > maximumPackBytes
+        || encoded.length !== Math.ceil(expectedSize / 3) * 4 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded)) {
+        throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build emitted an invalid pack capture frame')
+      }
+      packArtifact = Buffer.from(encoded, 'base64')
+      if (packArtifact.length !== expectedSize || packArtifact.toString('base64') !== encoded
+        || createHash('sha256').update(packArtifact).digest('hex') !== match[3]) {
+        throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build pack capture differs from verified evidence')
+      }
+    } else if (stdout.trim() !== match[0]) {
+      throw new ControlPlaneCliError('EXECUTOR_FAILED', 'isolated source build emitted unexpected evidence output')
+    }
     const checked = await checkedSourceSnapshot(input.worktree, input.baseCommit, input.scope, input.environment)
     if (checked.checkedTreeDigest !== before.checkedTreeDigest || checked.checkedPatchDigest !== before.checkedPatchDigest) {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared source changed while its isolated build was running')
@@ -692,6 +720,7 @@ export async function runDockerPreparedChecks(input: {
     const logDigest = createHash('sha256').update(stdout).update('\0').update(stderr).digest('hex')
     const checkedAt = Date.now()
     return { treeDigest: checked.checkedTreeDigest, patchDigest: checked.checkedPatchDigest, checkedAt,
+      ...(packArtifact === undefined ? {} : { packArtifact }),
       evidence: Object.freeze({ schemaVersion: 1, kind: 'dsh-source-prepared-evidence',
         environment: Object.freeze({ npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: match[4]!, pnpmVersion: match[5]! }),
         commands: Object.freeze([{ command: 'docker', args: Object.freeze([...args]), exitCode: 0 as const, durationMs: Date.now() - started, logDigest }]),

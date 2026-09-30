@@ -79,6 +79,9 @@ const PLUGIN_NAME = /^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 const DIGEST = /^[a-f0-9]{64}$/u
 const COMMIT = /^[a-f0-9]{40}$/u
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
+const MAX_PREPARED_ARTIFACT_BYTES = 32 * 1024 * 1024
+const MAX_STORED_ARTIFACT_BYTES = 128 * 1024 * 1024
+const MAX_STORED_ARTIFACTS = 256
 const SOURCE_STATUSES = new Set<SourcePlanStatus>(['expired', 'pending-approval', 'approved', 'running-local-checks', 'ready-for-human-review',
   'local-checks-failed', 'awaiting-pr', 'awaiting-review', 'awaiting-merge', 'awaiting-build', 'awaiting-sign', 'awaiting-publish',
   'awaiting-registry-verify', 'awaiting-catalog-admission', 'release-complete', 'release-failed', 'publish-ambiguous'])
@@ -376,6 +379,10 @@ interface SourceRow {
   release_authorization_json: string | null; release_authorization_digest: string | null
   release_id: string | null; release_fence: number; release_failure_phase: SourceReleasePhase | null
   release_failure_code: string | null; updated_at: number
+}
+
+interface SourcePreparedArtifactRow {
+  pack_sha256: string; size_bytes: number; bytes: Uint8Array; created_at: number
 }
 
 interface SourceJobRow {
@@ -767,6 +774,21 @@ function preparedEvidenceFromStored(value: unknown): SourcePreparedEvidence {
     preparedAt: Number(item['preparedAt']) })
 }
 
+function preparedArtifactBytesFromRow(row: SourcePreparedArtifactRow,
+  pack: SourcePreparedEvidence['pack']): Buffer {
+  if (row.pack_sha256 !== pack.sha256 || !Number.isSafeInteger(row.size_bytes)
+    || row.size_bytes < 1 || row.size_bytes > MAX_PREPARED_ARTIFACT_BYTES
+    || row.size_bytes !== pack.sizeBytes || !(row.bytes instanceof Uint8Array)
+    || !Number.isSafeInteger(row.created_at) || row.created_at < 0) {
+    throw new ControlPlaneStoreError('invalid-state', 'stored prepared source artifact metadata is corrupt')
+  }
+  const bytes = Buffer.from(row.bytes)
+  if (bytes.length !== row.size_bytes || createHash('sha256').update(bytes).digest('hex') !== pack.sha256) {
+    throw new ControlPlaneStoreError('invalid-state', 'stored prepared source artifact bytes are corrupt')
+  }
+  return bytes
+}
+
 function sourceFromRow(row: SourceRow): PluginSourcePlan {
   if (row.mode !== 'create' && row.mode !== 'modify' && row.mode !== 'prepared-create') {
     throw new ControlPlaneStoreError('invalid-state', 'stored source plan has an unknown mode')
@@ -1000,6 +1022,8 @@ export interface CreateSourcePlanInput {
     checkedAt: number
     evidence: SourcePreparedEvidence
   }
+  /** Host-only checked package bytes. Stored only for an owner-bound prepared create. */
+  preparedArtifact?: Buffer
   /** Durable completion fence for a background source job. */
   sourceJob?: SourceJobCompletion
 }
@@ -2298,6 +2322,20 @@ export class ControlPlaneStore {
     } else if (input.prepared !== undefined) {
       throw new ControlPlaneStoreError('invalid-input', 'create source plans cannot carry prepared evidence')
     }
+    let preparedArtifact: Buffer | undefined
+    if (input.preparedArtifact !== undefined) {
+      if (mode !== 'prepared-create' || input.sourceJob === undefined || !Buffer.isBuffer(input.preparedArtifact)
+        || preparedEvidence === undefined || input.preparedArtifact.length < 1
+        || input.preparedArtifact.length > MAX_PREPARED_ARTIFACT_BYTES
+        || input.preparedArtifact.length !== preparedEvidence.pack.sizeBytes
+        || createHash('sha256').update(input.preparedArtifact).digest('hex') !== preparedEvidence.pack.sha256) {
+        throw new ControlPlaneStoreError('invalid-input', 'prepared source artifact differs from checked package evidence')
+      }
+      if (this.getOwnerTaskFailureReference(input.gapId) === undefined) {
+        throw new ControlPlaneStoreError('invalid-state', 'prepared source artifact requires an owner task failure gap')
+      }
+      preparedArtifact = Buffer.from(input.preparedArtifact)
+    }
     positiveInteger(input.ttlMs, 'ttlMs'); if (input.ttlMs < 60_000 || input.ttlMs > 86_400_000) throw new ControlPlaneStoreError('invalid-input', 'ttlMs is invalid')
     const scope = Object.freeze([...new Set(input.scope.map(value => bounded(value, 'scope', 500)))].sort())
     if (controlPlaneDigest(scope) !== controlPlaneDigest(expectedSourceScope(name, mode))) {
@@ -2314,9 +2352,22 @@ export class ControlPlaneStore {
       occurrenceId: input.sourceJob.occurrenceId }
     const inputDigest = controlPlaneDigest({ ...(mode === 'create' ? requestBinding : { ...requestBinding, mode,
       ...(creation === undefined ? {} : { creation }), prepared: input.prepared }),
-      ...(sourceJobBinding === undefined ? {} : { sourceJob: sourceJobBinding }) })
+      ...(sourceJobBinding === undefined ? {} : { sourceJob: sourceJobBinding }),
+      ...(preparedArtifact === undefined ? {} : { preparedArtifactSha256: preparedEvidence!.pack.sha256 }) })
     const prior = this.#sourcePlanReceiptByKey(key, 'create-source-plan', inputDigest)
-    if (prior !== undefined) return prior
+    if (prior !== undefined) {
+      if (preparedArtifact !== undefined) {
+        const reference = this.#database.prepare('SELECT pack_sha256 FROM source_prepared_artifact_refs WHERE plan_id = ?')
+          .get(prior.result.id) as { pack_sha256: string } | undefined
+        const row = this.#database.prepare('SELECT * FROM source_prepared_artifacts WHERE pack_sha256 = ?')
+          .get(preparedEvidence!.pack.sha256) as unknown as SourcePreparedArtifactRow | undefined
+        if (reference?.pack_sha256 !== preparedEvidence!.pack.sha256 || row === undefined
+          || !preparedArtifactBytesFromRow(row, preparedEvidence!.pack).equals(preparedArtifact)) {
+          throw new ControlPlaneStoreError('invalid-state', 'idempotent prepared source artifact is missing or changed')
+        }
+      }
+      return prior
+    }
     const gap = this.getGap(input.gapId); if (gap.status !== 'open' || gap.candidateId !== undefined) {
       throw new ControlPlaneStoreError('invalid-state', 'only an unreserved open gap can create a source plan')
     }
@@ -2348,6 +2399,25 @@ export class ControlPlaneStore {
         }
         if (now >= sourceJob.expiresAt || (mode === 'prepared-create' && now >= creation!.grant.expiresAt)) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
       }
+      if (preparedArtifact !== undefined) {
+        const pack = preparedEvidence!.pack
+        const existing = this.#database.prepare('SELECT * FROM source_prepared_artifacts WHERE pack_sha256 = ?')
+          .get(pack.sha256) as unknown as SourcePreparedArtifactRow | undefined
+        if (existing !== undefined) {
+          if (!preparedArtifactBytesFromRow(existing, pack).equals(preparedArtifact)) {
+            throw new ControlPlaneStoreError('invalid-state', 'stored prepared source artifact differs from checked bytes')
+          }
+        } else {
+          const totals = this.#database.prepare('SELECT count(*) AS count, coalesce(sum(size_bytes), 0) AS total FROM source_prepared_artifacts')
+            .get() as { count: number; total: number }
+          if (!Number.isSafeInteger(totals.count) || !Number.isSafeInteger(totals.total)
+            || totals.count >= MAX_STORED_ARTIFACTS || totals.total > MAX_STORED_ARTIFACT_BYTES - preparedArtifact.length) {
+            throw new ControlPlaneStoreError('invalid-state', 'prepared source artifact storage quota is exhausted')
+          }
+          this.#database.prepare('INSERT INTO source_prepared_artifacts (pack_sha256, size_bytes, bytes, created_at) VALUES (?, ?, ?, ?)')
+            .run(pack.sha256, preparedArtifact.length, preparedArtifact, now)
+        }
+      }
       this.#database.prepare('INSERT INTO gap_plan_claims (gap_id, plan_id, plan_kind, claimed_at) VALUES (?, ?, ?, ?)').run(gap.id, id, 'source', now)
       // 'modify' rows carry their checked digests and frozen-build evidence from
       // creation; 'create' rows leave all four columns NULL until the
@@ -2360,6 +2430,10 @@ export class ControlPlaneStore {
         input.generatorDigest, JSON.stringify(scope), mode, now, expiresAt,
         input.prepared?.treeDigest ?? null, input.prepared?.patchDigest ?? null, input.prepared?.checkedAt ?? null,
         preparedEvidence === undefined ? null : JSON.stringify(preparedEvidence), creation === undefined ? null : JSON.stringify(creation), now)
+      if (preparedArtifact !== undefined) {
+        this.#database.prepare('INSERT INTO source_prepared_artifact_refs (plan_id, pack_sha256) VALUES (?, ?)')
+          .run(id, preparedEvidence!.pack.sha256)
+      }
       const matched = this.#database.prepare(`UPDATE capability_gaps SET status = 'matched', revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?`).run(now, gap.id, gap.revision)
       if (Number(matched.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'capability gap changed while source plan was created')
       if (sourceJob !== undefined) {
@@ -2378,6 +2452,86 @@ export class ControlPlaneStore {
     const row = this.#database.prepare('SELECT * FROM source_plans WHERE id = ?').get(id) as unknown as SourceRow | undefined
     if (row === undefined) throw new ControlPlaneStoreError('not-found', 'source plan not found')
     return sourceFromRow(row)
+  }
+
+  /** Exact durable source job for a currently admitted prepared creation. */
+  getPreparedSourceJob(planId: string): SourceJobRecord {
+    const plan = this.getSourcePlan(planId)
+    if (plan.mode !== 'prepared-create' || plan.status !== 'pending-approval'
+      || plan.creation === undefined || plan.preparedEvidence === undefined
+      || this.#now() >= plan.expiresAt || this.#now() >= plan.creation.grant.expiresAt) {
+      throw new ControlPlaneStoreError('invalid-state', 'prepared creation requires a current pending plan')
+    }
+    const owner = this.getOwnerTaskFailureReference(plan.gapId)
+    if (owner === undefined) throw new ControlPlaneStoreError('invalid-state', 'prepared creation requires an owner task failure gap')
+    this.#assertOwnerTaskFailureGapAdmission(plan.gapId)
+    const row = this.#database.prepare('SELECT * FROM source_jobs WHERE plan_id = ?')
+      .get(plan.id) as unknown as SourceJobRow | undefined
+    if (row === undefined) throw new ControlPlaneStoreError('invalid-state', 'prepared creation has no source job')
+    const job = sourceJobFromRow(row)
+    const gap = this.getGap(plan.gapId)
+    if (job.status !== 'prepared' || job.planId !== plan.id || job.intent.mode !== 'create'
+      || job.intent.creation === undefined || job.intent.gapId !== plan.gapId
+      || job.intent.gapRevision !== plan.gapSnapshot.revision
+      || gap.inputDigest !== plan.gapSnapshot.inputDigest
+      || job.intent.ownerDigest !== controlPlaneDigest(owner.owner)
+      || controlPlaneDigest(job.intent.owner) !== job.intent.ownerDigest
+      || controlPlaneDigest(job.intent.creation) !== controlPlaneDigest(plan.creation)
+      || job.intent.creation.generatorDigest !== plan.generatorDigest
+      || job.intent.repository !== plan.repository || job.intent.worktree !== plan.worktree
+      || job.intent.baseCommit !== plan.baseCommit || job.intent.name !== plan.name
+      || plan.expiresAt !== plan.createdAt + job.intent.ttlMs) {
+      throw new ControlPlaneStoreError('invalid-state', 'prepared creation source job binding is corrupt')
+    }
+    return job
+  }
+
+  /** Host-only package bytes for an owner-admitted, still-pending created plugin. */
+  readPreparedSourceArtifact(planId: string): Buffer {
+    const plan = this.getSourcePlan(planId)
+    if (plan.mode !== 'prepared-create' || plan.status !== 'pending-approval'
+      || plan.preparedEvidence === undefined || this.#now() >= plan.expiresAt) {
+      throw new ControlPlaneStoreError('invalid-state', 'prepared source artifact requires a current pending creation plan')
+    }
+    this.getPreparedSourceJob(planId)
+    const pack = plan.preparedEvidence.pack
+    const reference = this.#database.prepare('SELECT pack_sha256 FROM source_prepared_artifact_refs WHERE plan_id = ?')
+      .get(plan.id) as { pack_sha256: string } | undefined
+    if (reference?.pack_sha256 !== pack.sha256) throw new ControlPlaneStoreError('invalid-state', 'prepared source artifact reference is missing or corrupt')
+    const row = this.#database.prepare('SELECT * FROM source_prepared_artifacts WHERE pack_sha256 = ?')
+      .get(pack.sha256) as unknown as SourcePreparedArtifactRow | undefined
+    if (row === undefined) throw new ControlPlaneStoreError('invalid-state', 'prepared source artifact is missing')
+    return preparedArtifactBytesFromRow(row, pack)
+  }
+
+  /** Reclaim only orphaned bytes or bytes referenced solely by expired plans. */
+  deleteExpiredPreparedSourceArtifacts(now: number): number {
+    if (!Number.isSafeInteger(now) || now < 0) throw new ControlPlaneStoreError('invalid-input', 'artifact expiry time is invalid')
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const references = this.#database.prepare('SELECT plan_id, pack_sha256 FROM source_prepared_artifact_refs')
+        .all() as Array<{ plan_id: string; pack_sha256: string }>
+      for (const reference of references) {
+        const plan = this.getSourcePlan(reference.plan_id)
+        if (plan.mode !== 'prepared-create' || plan.preparedEvidence?.pack.sha256 !== reference.pack_sha256) {
+          throw new ControlPlaneStoreError('invalid-state', 'prepared source artifact reference is corrupt')
+        }
+        if (plan.status === 'expired' && plan.expiresAt < now) {
+          this.#database.prepare('DELETE FROM source_prepared_artifact_refs WHERE plan_id = ?').run(plan.id)
+        }
+      }
+      const artifacts = this.#database.prepare(`SELECT a.pack_sha256 FROM source_prepared_artifacts a
+        WHERE NOT EXISTS (SELECT 1 FROM source_prepared_artifact_refs r WHERE r.pack_sha256 = a.pack_sha256)`)
+        .all() as Array<{ pack_sha256: string }>
+      let deleted = 0
+      for (const artifact of artifacts) {
+        const result = this.#database.prepare('DELETE FROM source_prepared_artifacts WHERE pack_sha256 = ?')
+          .run(artifact.pack_sha256)
+        deleted += Number(result.changes)
+      }
+      this.#database.exec('COMMIT')
+      return deleted
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
   }
 
   /** Durable, structurally bound applied merge history; receipt signatures are checked by the baseline resolver. */
@@ -4952,14 +5106,18 @@ export class ControlPlaneStore {
     const linked = linkedRow === undefined ? undefined : sourceJobFromRow(linkedRow)
     const sourceJob = linked === undefined ? undefined : { jobId: linked.id, jobRevision: linked.revision - 1,
       occurrenceId: linked.occurrenceId }
+    const replayInput = { ...(snapshot.mode === 'create' ? replayBinding : { ...replayBinding,
+      mode: snapshot.mode, ...(snapshot.creation === undefined ? {} : { creation: snapshot.creation }),
+      prepared: { treeDigest: snapshot.sourceCheck!.treeDigest, patchDigest: snapshot.sourceCheck!.patchDigest,
+        checkedAt: snapshot.sourceCheck!.checkedAt, evidence: snapshot.preparedEvidence } }),
+    ...(sourceJob === undefined ? {} : { sourceJob }) }
+    const replayDigest = controlPlaneDigest(replayInput)
+    const artifactReplayDigest = snapshot.mode === 'prepared-create' && snapshot.preparedEvidence !== undefined
+      ? controlPlaneDigest({ ...replayInput, preparedArtifactSha256: snapshot.preparedEvidence.pack.sha256 }) : undefined
     if (snapshot.digest !== authoritative.digest || snapshot.gapId !== authoritative.gapId
       || snapshot.revision !== 1 || snapshot.status !== 'pending-approval' || snapshot.createdAt !== receipt.createdAt
       || snapshot.approval !== undefined || snapshot.releaseAuthorization !== undefined
-      || snapshot.release !== undefined || controlPlaneDigest({ ...(snapshot.mode === 'create' ? replayBinding : { ...replayBinding,
-        mode: snapshot.mode, ...(snapshot.creation === undefined ? {} : { creation: snapshot.creation }),
-        prepared: { treeDigest: snapshot.sourceCheck!.treeDigest, patchDigest: snapshot.sourceCheck!.patchDigest,
-          checkedAt: snapshot.sourceCheck!.checkedAt, evidence: snapshot.preparedEvidence } }),
-      ...(sourceJob === undefined ? {} : { sourceJob }) }) !== inputDigest
+      || snapshot.release !== undefined || (replayDigest !== inputDigest && artifactReplayDigest !== inputDigest)
       || (snapshot.mode === 'create' && (snapshot.sourceCheck !== undefined || snapshot.preparedEvidence !== undefined))
       || (snapshot.mode === 'modify' && (snapshot.sourceCheck === undefined || snapshot.preparedEvidence === undefined
         || controlPlaneDigest(snapshot.sourceCheck) !== controlPlaneDigest(authoritative.sourceCheck)))

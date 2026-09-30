@@ -779,13 +779,20 @@ exit 0
       preparedEvidence: minimalPreparedEvidence('e'.repeat(64), now - 2),
     } as unknown as PluginSourcePlan
     const expired: string[] = []
+    const collectArtifacts = vi.fn((time: number) => {
+      expect(time).toBe(now)
+      expect(expired).toEqual([plan.id])
+      expect(() => lstatSync(durable.worktree)).toThrow()
+      return 1
+    })
     const store = { listPreparedSourcePlans: () => [plan], expirePreparedSourcePlan: ({ planId }: { planId: string }) => {
       expired.push(planId); return plan
-    } } as unknown as ControlPlaneStore
+    }, deleteExpiredPreparedSourceArtifacts: collectArtifacts } as unknown as ControlPlaneStore
     expect(preparedWorktreeIsGarbage(plan, now)).toBe(true)
     expect(await gcPreparedModifyWorktrees({ store, statePath: value.statePath, environment: process.env, now }))
       .toEqual({ removed: [durable.worktree] })
     expect(expired).toEqual([plan.id])
+    expect(collectArtifacts).toHaveBeenCalledOnce()
     await expect(lstat(durable.worktree)).rejects.toMatchObject({ code: 'ENOENT' })
     expect(await linkedWorktrees(source.repository, process.env)).not.toContain(durable.worktree)
 
@@ -794,7 +801,7 @@ exit 0
     const ghostPlan = { ...plan, id: 'unregistered', worktree: ghost } as PluginSourcePlan
     const ghostStore = { listPreparedSourcePlans: () => [ghostPlan], expirePreparedSourcePlan: () => {
       throw new Error('unregistered worktree must not expire')
-    } } as unknown as ControlPlaneStore
+    }, deleteExpiredPreparedSourceArtifacts: vi.fn(() => 0) } as unknown as ControlPlaneStore
     expect(await gcPreparedModifyWorktrees({ store: ghostStore, statePath: value.statePath, environment: process.env, now }))
       .toEqual({ removed: [] })
     expect((await lstat(ghost)).isDirectory()).toBe(true)

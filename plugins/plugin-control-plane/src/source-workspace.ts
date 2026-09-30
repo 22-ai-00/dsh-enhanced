@@ -496,5 +496,8 @@ export async function gcPreparedModifyWorktrees(input: {
     } else await pruneRegisteredWorktree({ repository: plan.repository, worktree, environment: input.environment })
     removed.push(worktree)
   }
+  // Reclaim package bytes only after durable expiration and worktree cleanup.
+  // This shared path is used by both the Host service and owner CLI.
+  input.store.deleteExpiredPreparedSourceArtifacts(input.now)
   return Object.freeze({ removed: Object.freeze(removed) })
 }

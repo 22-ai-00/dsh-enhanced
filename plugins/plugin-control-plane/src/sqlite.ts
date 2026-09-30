@@ -4,7 +4,28 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 29
+export const controlPlaneSchemaVersion = 30
+
+const sourcePreparedArtifactTableSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifacts (
+  pack_sha256 TEXT PRIMARY KEY CHECK(length(pack_sha256) = 64 AND pack_sha256 NOT GLOB '*[^a-f0-9]*'),
+  size_bytes INTEGER NOT NULL CHECK(size_bytes > 0 AND size_bytes <= 33554432),
+  bytes BLOB NOT NULL CHECK(length(bytes) = size_bytes),
+  created_at INTEGER NOT NULL CHECK(created_at >= 0)
+) STRICT, WITHOUT ROWID;`
+const sourcePreparedArtifactRefsSchema = `CREATE TABLE IF NOT EXISTS source_prepared_artifact_refs (
+  plan_id TEXT PRIMARY KEY REFERENCES source_plans(id) ON DELETE RESTRICT,
+  pack_sha256 TEXT NOT NULL REFERENCES source_prepared_artifacts(pack_sha256) ON DELETE RESTRICT
+) STRICT, WITHOUT ROWID;`
+const sourcePreparedArtifactSchema = `${sourcePreparedArtifactTableSchema}
+${sourcePreparedArtifactRefsSchema}
+CREATE INDEX IF NOT EXISTS source_prepared_artifact_refs_pack ON source_prepared_artifact_refs(pack_sha256);`
+
+// SQLite stores CREATE TABLE without IF NOT EXISTS and the trailing semicolon.
+// Preserve every column, CHECK and FK byte-for-byte when recognizing a current
+// artifact table in a synthetic downgraded ledger.
+function storedTableSchema(schema: string): string {
+  return schema.replace(/^CREATE TABLE IF NOT EXISTS /u, 'CREATE TABLE ').slice(0, -1)
+}
 
 const sourceCreationGrantSchema = `CREATE TABLE IF NOT EXISTS source_creation_grants (
   grant_id TEXT PRIMARY KEY,
@@ -1320,6 +1341,18 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     } else database.exec(sourceMaintenanceSchema)
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 29) migrateV28ToV29(database)
     else database.exec(sourceCreationGrantSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 30) {
+      const artifact = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'source_prepared_artifacts'")
+        .get() as { sql: string } | undefined
+      const reference = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'source_prepared_artifact_refs'")
+        .get() as { sql: string } | undefined
+      if ((artifact !== undefined || reference !== undefined)
+        && (artifact?.sql !== storedTableSchema(sourcePreparedArtifactTableSchema)
+          || reference?.sql !== storedTableSchema(sourcePreparedArtifactRefsSchema))) {
+        throw new Error('unknown v29 prepared artifact schema')
+      }
+      database.exec(`BEGIN IMMEDIATE; ${sourcePreparedArtifactSchema} PRAGMA user_version = 30; COMMIT;`)
+    } else database.exec(sourcePreparedArtifactSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

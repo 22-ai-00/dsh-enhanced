@@ -11,6 +11,10 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./plugin-behavior-runner": {
+      "types": "./lib/plugin-behavior-runner.d.ts",
+      "default": "./lib/plugin-behavior-runner.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },

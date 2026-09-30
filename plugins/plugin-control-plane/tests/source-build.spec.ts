@@ -27,6 +27,13 @@ const roots: string[] = []
 const worktrees: Array<{ remove: () => Promise<void> }> = []
 afterEach(async () => { indexHook.run = undefined; indices.length = 0; for (const worktree of worktrees.splice(0).reverse()) await worktree.remove(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 const marker = `printf 'DSH_PREPARED_PACK\\thelper-1.0.0-rc.1.tgz\\t13\\t${'d'.repeat(64)}\\tv24.0.0\\t11.7.0\\n'`
+const packFrame = 'DSH_PREPARED_PACK_BYTES_V1'
+function captureOutput(bytes: Buffer, options: { size?: number; sha?: string; encoded?: string; trailing?: string } = {}): string {
+  const size = options.size ?? bytes.length
+  const sha = options.sha ?? createHash('sha256').update(bytes).digest('hex')
+  const encoded = options.encoded ?? bytes.toString('base64')
+  return `printf '%s\\n' 'DSH_PREPARED_PACK\thelper-1.0.0-rc.1.tgz\t${size}\t${sha}\tv24.0.0\t11.7.0' '${packFrame}\t${encoded}'${options.trailing ?? ''}`
+}
 async function fixture(run = marker, control = 'exit 0', override: Partial<SourceBuildConfig> = {}, version = "printf '%s\\n' '29.4.1/linux/amd64'") {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'source-builder-test-'))); roots.push(root)
   const repository = join(root, 'repo'); const plugin = join(repository, 'plugins', 'helper')
@@ -121,6 +128,42 @@ it('records the immutable prerelease package version and configured image', asyn
   expect(result.evidence.commands[0]?.args).not.toContain('systempaths=unconfined')
   expect(result.evidence.commands[0]?.args.some(arg => arg.startsWith('/sys:'))).toBe(false)
   expect(result.evidence.commands[0]?.args.some(arg => arg.startsWith('VITEST_MAX_WORKERS='))).toBe(false)
+  expect(result.evidence.commands[0]?.args).not.toContain('DSH_SOURCE_CAPTURE_PACK=true')
+  expect(result.packArtifact).toBeUndefined()
+})
+
+it('returns only the exact bounded artifact whose size and digest match the verified marker', async () => {
+  const bytes = Buffer.from('verified pack bytes\0from the same container read')
+  const f = await fixture(captureOutput(bytes))
+  const result = await runDockerPreparedChecks({ ...f.input, capturePack: true })
+  expect(result.packArtifact).toEqual(bytes)
+  expect(result.evidence.pack).toMatchObject({ sizeBytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') })
+  expect(result.evidence.commands[0]?.args).toEqual(expect.arrayContaining(['--env', 'DSH_SOURCE_CAPTURE_PACK=true']))
+})
+
+it.each([
+  ['missing frame', marker],
+  ['wrong SHA', captureOutput(Buffer.from('pack'), { sha: '0'.repeat(64) })],
+  ['wrong size', captureOutput(Buffer.from('pack'), { size: 5 })],
+  ['invalid base64', captureOutput(Buffer.from('pack'), { encoded: '!!!!' })],
+  ['noncanonical base64', captureOutput(Buffer.from('f'), { encoded: 'Zh==' })],
+  ['duplicate frame', captureOutput(Buffer.from('pack'), { trailing: `\nprintf '%s\\n' '${packFrame}\tcGFjaw=='` })],
+  ['extra output', captureOutput(Buffer.from('pack'), { trailing: `\nprintf 'extra\\n'` })],
+])('rejects captured pack with %s', async (_label, output) => {
+  const f = await fixture(output)
+  await expect(runDockerPreparedChecks({ ...f.input, capturePack: true })).rejects.toThrow(/capture|evidence/u)
+})
+
+it('bounds capture stdout independently of the normal evidence budget', async () => {
+  const f = await fixture('exec /usr/bin/yes A')
+  const started = Date.now()
+  await expect(runDockerPreparedChecks({ ...f.input, capturePack: true })).rejects.toThrow(/output bound/u)
+  expect(Date.now() - started).toBeLessThan(10_000)
+})
+
+it('does not return a captured artifact when container cleanup remains unknown', async () => {
+  const f = await fixture(captureOutput(Buffer.from('pack')), 'exit 1')
+  await expect(runDockerPreparedChecks({ ...f.input, capturePack: true })).rejects.toThrow(/cleanup could not prove quiescence/u)
 })
 
 it('rejects larger limits unless the owner explicitly selects the repository profile', () => {
@@ -260,6 +303,18 @@ it('cancels a running client and checks daemon cleanup before settling', async (
     await vi.waitFor(async () => { expect((await lstat(`${f.dockerPath}.started`)).isFile()).toBe(true) }, { timeout: 5_000 })
     abort.abort(new Error('owner stopped'))
     await expect(pending).rejects.toThrow(/cancelled|archive exited/)
+  } finally { abort.abort(); await pending.catch(() => undefined) }
+})
+
+it('does not return captured bytes after owner cancellation', async () => {
+  const f = await fixture(': > "$0.started"\nexec /bin/sleep 60')
+  const abort = new AbortController()
+  const pending = runDockerPreparedChecks({ ...f.input, capturePack: true, signal: abort.signal })
+  void pending.catch(() => undefined)
+  try {
+    await vi.waitFor(async () => { expect((await lstat(`${f.dockerPath}.started`)).isFile()).toBe(true) }, { timeout: 5_000 })
+    abort.abort(new Error('owner stopped'))
+    await expect(pending).rejects.toThrow(/cancelled|archive exited/u)
   } finally { abort.abort(); await pending.catch(() => undefined) }
 })
 

@@ -1,6 +1,7 @@
 // Real public generator, Git worktrees, Control Plane/Automations/Policy and
 // SQLite. Delivery/Evaluation and Docker are fixtures, not live acceptance.
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -78,11 +79,15 @@ async function fixture() {
   const request = { repository, gapId: gap.id, name: 'rsi-service-helper', mode: 'create' as const, owner: caller,
     files: [{ path: 'README.md', content: '# Created plugin\n' }], expectedBaseCommit: git('rev-parse', 'HEAD'),
     ttlMs: 900_000, idempotencyKey: 'create-from-task', signal: new AbortController().signal, assertCurrent: () => undefined }
+  // Docker remains a fixture: these bytes exercise the Host handoff, not npm
+  // publication or real package behavior.
+  const packArtifact = Buffer.from('fixture-package-bytes')
   const evidence: SourcePreparedEvidence = { schemaVersion: 1, kind: 'dsh-source-prepared-evidence',
     environment: { npmConfigIgnoreScripts: true, frozenLockfile: true, offline: true, nodeVersion: 'fixture', pnpmVersion: 'fixture' },
     commands: [{ command: 'pnpm', args: ['check'], exitCode: 0, durationMs: 1, logDigest: 'c'.repeat(64) }],
-    pack: { name: 'dsh-enhanced-rsi-service-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: 1, sha256: 'd'.repeat(64) }, preparedAt: now }
-  const checked = { treeDigest: 'e'.repeat(64), patchDigest: 'f'.repeat(64), checkedAt: now, evidence }
+    pack: { name: 'dsh-enhanced-rsi-service-helper-0.1.0.tgz', version: '0.1.0', sizeBytes: packArtifact.length,
+      sha256: createHash('sha256').update(packArtifact).digest('hex') }, preparedAt: now }
+  const checked: build.SourceBuildResult = { treeDigest: 'e'.repeat(64), patchDigest: 'f'.repeat(64), checkedAt: now, evidence, packArtifact }
   vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
   return { root, repository, git, service, automations, policy, store, source, owner, request, checked, advance: () => { now += 1_100 } }
 }
@@ -102,21 +107,32 @@ it('runs an ordinary owner failure through native scheduling into a checked new-
   expect(plan).toMatchObject({ mode: 'prepared-create', status: 'pending-approval', creation: { grant: { id: 'owner-create' } } })
   expect(plan.scope).toEqual(['plugins/README.md', 'plugins/rsi-service-helper', 'pnpm-lock.yaml'])
   expect(plan.preparedEvidence).toEqual(f.checked.evidence)
+  const candidate = f.service.inspectPreparedCreation(plan.id)
+  expect(candidate.protocol).toBe('dsh-prepared-creation/v1')
+  expect(candidate.artifact).toEqual(f.checked.packArtifact)
+  expect(candidate.job.id).toBe(job.id)
+  expect(candidate.source.source.modelSelection).toEqual(f.source.source.modelSelection)
+  expect(candidate.reference.projection).toEqual(f.source.canonical.projection)
   expect(JSON.parse(await readFile(join(plan.worktree, 'plugins', plan.name, 'package.json'), 'utf8')).version).toBe('0.1.0')
   expect(await readFile(join(f.repository, 'plugins/README.md'), 'utf8')).toBe(originalCatalog)
   expect(reserve).toHaveBeenCalledOnce()
   expect(build.runDockerPreparedChecks).toHaveBeenCalledOnce()
+  expect(vi.mocked(build.runDockerPreparedChecks).mock.calls[0]![0].capturePack).toBe(true)
   await f.automations.tick(); await f.automations.whenIdle()
   expect(build.runDockerPreparedChecks).toHaveBeenCalledOnce()
+  f.owner.generation += 1
+  expect(() => f.service.inspectPreparedCreation(plan.id)).toThrow('task repair source or owner changed')
 }, 30_000)
 
-it.each(['manifest', 'lock', 'owner', 'artifact'] as const)('rejects late %s drift before committing a creation plan', async drift => {
+it.each(['manifest', 'lock', 'owner', 'artifact', 'missing-pack', 'pack-bytes'] as const)('rejects late %s drift before committing a creation plan', async drift => {
   const f = await fixture()
   vi.mocked(build.runDockerPreparedChecks).mockImplementationOnce(async input => {
     if (drift === 'manifest') await writeFile(join(input.worktree, 'plugins', input.name, 'package.json'), '{}\n')
     if (drift === 'lock') await writeFile(join(input.worktree, 'pnpm-lock.yaml'), 'tampered\n')
     if (drift === 'owner') f.owner.generation += 1
     if (drift === 'artifact') f.checked.evidence.pack.version = '9.9.9'
+    if (drift === 'missing-pack') delete f.checked.packArtifact
+    if (drift === 'pack-bytes') f.checked.packArtifact = Buffer.from('different-package-bytes')
     return f.checked
   })
   const job = await f.service.enqueueSourceJob(f.request)
