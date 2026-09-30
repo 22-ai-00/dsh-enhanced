@@ -15,7 +15,8 @@ import { validateSourceBuildConfig } from './source-build.js'
 import { validateSourceBaselineConfig, verifySourceBaselineHistory } from './source-baseline.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
 import { validateSourceCreationFiles, validateSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
-import { validateSourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { sourceGrowthRunDigest, validatePluginCreationVerificationCertificate, validateSourceGrowthRunBinding,
+  type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
 import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
@@ -2270,16 +2271,21 @@ export class ControlPlaneStore {
   }
 
   /** Prepared owner continuations have a bounded recovery query, independent of job history. */
-  listPreparedSourceApprovalJobs(includeRelease = false, includeExecution = false, includeAdoption = false): readonly SourceJobRecord[] {
+  listPreparedSourceApprovalJobs(includeRelease = false, includeExecution = false, includeAdoption = false, includeCreation = false): readonly SourceJobRecord[] {
     return (this.#database.prepare(`SELECT j.* FROM source_jobs j JOIN source_plans p ON p.id = j.plan_id
       JOIN owner_task_failure_gaps g ON g.gap_id = p.gap_id
       LEFT JOIN source_adoptions a ON a.source_plan_id = p.id
       LEFT JOIN activation_plans ap ON ap.id = a.activation_plan_id
-      WHERE j.status = 'prepared' AND p.mode = 'modify' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))
+      WHERE j.status = 'prepared' AND ((p.mode = 'modify' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))
         OR (? = 1 AND p.status IN ('awaiting-pr', 'awaiting-review', 'awaiting-merge', 'awaiting-build', 'awaiting-sign', 'awaiting-publish',
           'awaiting-registry-verify', 'awaiting-catalog-admission'))
-        OR (? = 1 AND p.status = 'release-complete' AND (ap.id IS NULL OR ap.status NOT IN ('activated', 'rolled-back', 'rejected')))) AND (p.expires_at > ? OR ap.status IN ('staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'))
-      ORDER BY j.created_at, j.id LIMIT 1000`).all(includeRelease ? 1 : 0, includeExecution ? 1 : 0, includeAdoption ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
+        OR (? = 1 AND p.status = 'release-complete' AND (ap.id IS NULL OR ap.status NOT IN ('activated', 'rolled-back', 'rejected')))))
+        OR (? = 1 AND p.mode = 'prepared-create' AND p.status = 'pending-approval'
+          AND json_type(j.intent_json, '$.creation.growthRun.creationAcceptance') IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM source_creation_verifications v WHERE v.plan_id = p.id)))
+        AND (p.expires_at > ? OR ap.status IN ('staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'))
+      ORDER BY j.created_at, j.id LIMIT 1000`).all(includeRelease ? 1 : 0, includeExecution ? 1 : 0, includeAdoption ? 1 : 0,
+      includeCreation ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
   }
 
   bindSourceJobDefinition(input: { id: string; revision: number; definitionHash: string }): SourceJobRecord {
@@ -2557,6 +2563,105 @@ export class ControlPlaneStore {
       .get(pack.sha256) as unknown as SourcePreparedArtifactRow | undefined
     if (row === undefined) throw new ControlPlaneStoreError('invalid-state', 'prepared source artifact is missing')
     return preparedArtifactBytesFromRow(row, pack)
+  }
+
+  /** One immutable, independently signed result per exact prepared creation. */
+  recordCreationVerification(certificate: PluginCreationVerificationCertificate): void {
+    validatePluginCreationVerificationCertificate(certificate)
+    const plan = this.getSourcePlan(certificate.plan.id)
+    const job = this.getPreparedSourceJob(plan.id)
+    const reference = this.getOwnerTaskFailureReference(plan.gapId)
+    if (!reference || !plan.sourceCheck || !plan.preparedEvidence || !plan.creation?.growthRun
+      || !job.intent.creation?.growthRun || plan.digest !== certificate.plan.digest || plan.name !== certificate.plan.name
+      || plan.sourceCheck.treeDigest !== certificate.plan.sourceTreeDigest
+      || plan.sourceCheck.patchDigest !== certificate.plan.sourcePatchDigest
+      || plan.preparedEvidence.pack.sha256 !== certificate.plan.artifactSha256
+      || plan.preparedEvidence.pack.sizeBytes !== certificate.plan.artifactBytes
+      || plan.generatorDigest !== certificate.plan.generatorDigest
+      || controlPlaneDigest(reference) !== certificate.source.referenceDigest
+      || controlPlaneDigest(reference.owner) !== certificate.source.ownerDigest
+      || sourceGrowthRunDigest(plan.creation.growthRun) !== certificate.source.growthRunDigest
+      || sourceGrowthRunDigest(job.intent.creation.growthRun) !== certificate.source.growthRunDigest
+      || controlPlaneDigest(plan.creation.growthRun.model) !== controlPlaneDigest(certificate.model)
+      || certificate.expiresAt > Math.min(plan.expiresAt, plan.creation.grant.expiresAt,
+        plan.creation.growthRun.expiresAt, certificate.authority.expiresAt)) {
+      throw new ControlPlaneStoreError('invalid-input', 'creation verification certificate does not match exact prepared source')
+    }
+    this.readPreparedSourceArtifact(plan.id)
+    const serialized = JSON.stringify(certificate), certificateDigest = controlPlaneDigest(certificate)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const previous = this.#database.prepare('SELECT status,certificate_digest FROM source_creation_verifications WHERE plan_id=?')
+        .get(plan.id) as { status: string; certificate_digest: string | null } | undefined
+      if (previous?.status === 'verified' && previous.certificate_digest === certificateDigest) { /* idempotent */ }
+      else if (previous?.status !== 'claimed') throw new ControlPlaneStoreError('conflict', 'creation verification was not claimed or already settled')
+      else this.#database.prepare(`UPDATE source_creation_verifications SET status='verified',certificate_json=?,certificate_digest=?,updated_at=?
+        WHERE plan_id=? AND status='claimed'`).run(serialized, certificateDigest, this.#now(), plan.id)
+      this.#database.exec('COMMIT')
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  getCreationVerification(planId: string): PluginCreationVerificationCertificate | undefined {
+    const row = this.#database.prepare('SELECT status,certificate_json,certificate_digest FROM source_creation_verifications WHERE plan_id=?')
+      .get(planId) as { status: string; certificate_json: string | null; certificate_digest: string | null } | undefined
+    if (!row || row.status !== 'verified') return undefined
+    let certificate: PluginCreationVerificationCertificate
+    try {
+      const parsed: unknown = JSON.parse(row.certificate_json!)
+      validatePluginCreationVerificationCertificate(parsed)
+      certificate = parsed
+    } catch { throw new ControlPlaneStoreError('invalid-state', 'stored creation verification certificate is corrupt') }
+    if (certificate.plan.id !== planId || controlPlaneDigest(certificate) !== row.certificate_digest) {
+      throw new ControlPlaneStoreError('invalid-state', 'stored creation verification certificate digest changed')
+    }
+    return certificate
+  }
+
+  getCreationVerificationStatus(planId: string): 'claimed' | 'verified' | 'unknown' | 'rejected' | undefined {
+    const row = this.#database.prepare('SELECT status FROM source_creation_verifications WHERE plan_id=?')
+      .get(planId) as { status: 'claimed' | 'verified' | 'unknown' | 'rejected' } | undefined
+    return row?.status
+  }
+
+  /** Content-free diagnostic projection; caller must hold current owner/source fence. */
+  inspectCreationVerificationRecord(planId: string): { status: 'claimed' | 'verified' | 'unknown' | 'rejected'; reason?: string;
+    updatedAt: number } | undefined {
+    const row = this.#database.prepare('SELECT status,reason,updated_at FROM source_creation_verifications WHERE plan_id=?')
+      .get(planId) as { status: 'claimed' | 'verified' | 'unknown' | 'rejected'; reason: string | null; updated_at: number } | undefined
+    if (!row) return undefined
+    if (!['claimed', 'verified', 'unknown', 'rejected'].includes(row.status)
+      || !Number.isSafeInteger(row.updated_at) || row.updated_at < 1
+      || (row.reason !== null && !/^[a-z][a-z0-9-]{0,79}$/u.test(row.reason))) {
+      throw new ControlPlaneStoreError('invalid-state', 'creation verification diagnostic record is corrupt')
+    }
+    return { status: row.status, ...(row.reason === null ? {} : { reason: row.reason }), updatedAt: row.updated_at }
+  }
+
+  claimCreationVerification(planId: string): void {
+    const job = this.getPreparedSourceJob(planId)
+    const pinned = job.intent.creation?.growthRun?.creationAcceptance
+    if (!pinned || this.#now() >= pinned.expiresAt) {
+      throw new ControlPlaneStoreError('invalid-state', 'creation verification requires a current pre-author policy binding')
+    }
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const count = this.#database.prepare('SELECT count(*) AS n FROM source_creation_verifications').get() as { n: number }
+      if (count.n >= 256) throw new ControlPlaneStoreError('conflict', 'creation verification record limit reached')
+      const now = this.#now()
+      this.#database.prepare(`INSERT INTO source_creation_verifications
+        (plan_id,status,certificate_json,certificate_digest,reason,created_at,updated_at) VALUES (?,'claimed',NULL,NULL,NULL,?,?)`)
+        .run(planId, now, now)
+      this.#database.exec('COMMIT')
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  settleCreationVerification(planId: string, status: 'unknown' | 'rejected', reason: string): void {
+    if (typeof reason !== 'string' || !/^[a-z][a-z0-9-]{0,79}$/u.test(reason)) {
+      throw new ControlPlaneStoreError('invalid-input', 'creation verification reason is invalid')
+    }
+    const result = this.#database.prepare(`UPDATE source_creation_verifications SET status=?,reason=?,updated_at=?
+      WHERE plan_id=? AND status='claimed'`).run(status, reason, this.#now(), planId)
+    if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'creation verification claim is not current')
   }
 
   /** Reclaim only orphaned bytes or bytes referenced solely by expired plans. */

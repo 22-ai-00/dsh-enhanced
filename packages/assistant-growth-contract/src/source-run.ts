@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { assertExactGrowthKeys, isGrowthRecord } from './canonical.js'
+import { validateCreationAcceptanceAuthorityRef, type CreationAcceptanceAuthorityRef } from './creation-verification.js'
 
 /** Private Host provenance, never candidate input or a semantic acceptance oracle. */
 export interface SourceGrowthRunBinding {
@@ -22,6 +23,8 @@ export interface SourceGrowthRunBinding {
   }
   model: { provider: string; model: string; reasoningEffort?: string }
   modelOrigin: 'explicit-growth-override' | 'inherited-owner-task'
+  /** Owner policy frozen before the first author model call; absent on historical runs. */
+  creationAcceptance?: CreationAcceptanceAuthorityRef
   budget: {
     budgetId: string
     amount: number
@@ -78,7 +81,8 @@ function integer(value: unknown, label: string, minimum = 1): asserts value is n
 export function validateSourceGrowthRunBinding(value: unknown): asserts value is SourceGrowthRunBinding {
   const binding = record(value, ['protocol', 'runId', 'intentDigest', 'configDigest', 'ownerDigest', 'source',
     'model', 'modelOrigin', 'budget', 'native', 'sessionId', 'toolContractDigest', 'executionContractDigest',
-    'createdAt', 'generationDeadlineAt', 'expiresAt'], 'binding')
+    'createdAt', 'generationDeadlineAt', 'expiresAt',
+    ...(isGrowthRecord(value) && Object.hasOwn(value, 'creationAcceptance') ? ['creationAcceptance'] : [])], 'binding')
   if (binding['protocol'] !== 'assistant-growth/source-run/v1') invalid('protocol')
   for (const key of ['runId', 'sessionId']) text(binding[key], key)
   for (const key of ['intentDigest', 'configDigest', 'ownerDigest', 'toolContractDigest', 'executionContractDigest']) hash(binding[key], key)
@@ -115,6 +119,10 @@ export function validateSourceGrowthRunBinding(value: unknown): asserts value is
   if (Number(binding['createdAt']) >= Number(binding['generationDeadlineAt'])
     || Number(binding['generationDeadlineAt']) > Number(binding['expiresAt'])
     || Number(binding['generationDeadlineAt']) - Number(binding['createdAt']) > Number(budget['maxDurationMs'])) invalid('deadline')
+  if (Object.hasOwn(binding, 'creationAcceptance')) {
+    validateCreationAcceptanceAuthorityRef(binding['creationAcceptance'])
+    if ((binding['creationAcceptance'] as CreationAcceptanceAuthorityRef).expiresAt < Number(binding['createdAt'])) invalid('creation acceptance expiry')
+  }
 }
 
 /** Matches the existing Control Plane evidence canonicalization, including absent optional feedback. */

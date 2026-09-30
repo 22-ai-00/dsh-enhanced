@@ -82,6 +82,31 @@ function downgradeSourcePlansToV28(path: string, invalidMode = false): void {
 }
 
 describe('durable source job ledger', () => {
+  it('upgrades a v31 ledger to a strict independent creation verification table', async () => {
+    const target = await fixture()
+    const gap = target.store.recordGap({ idempotencyKey: 'gap:v31', capability: 'health', context: 'migration',
+      expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+    target.store.close()
+    const before = new DatabaseSync(target.path)
+    try { before.exec('DROP TABLE source_creation_verifications; PRAGMA user_version = 31') }
+    finally { before.close() }
+    const reopened = new ControlPlaneStore({ path: target.path, now: target.now })
+    try {
+      expect(reopened.getGap(gap.id)).toEqual(gap)
+      expect(reopened.getCreationVerificationStatus('absent-plan')).toBeUndefined()
+      const database = new DatabaseSync(target.path)
+      try {
+        expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: controlPlaneSchemaVersion })
+        expect(database.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+        const schema = database.prepare("SELECT sql FROM sqlite_schema WHERE type='table' AND name='source_creation_verifications'").get() as { sql: string }
+        expect(schema.sql).toContain("status IN ('claimed','verified','unknown','rejected')")
+        expect(() => database.prepare(`INSERT INTO source_creation_verifications
+          (plan_id,status,certificate_json,certificate_digest,reason,created_at,updated_at)
+          VALUES (?,'verified',NULL,NULL,NULL,?,?)`).run('absent-plan', target.now(), target.now())).toThrow()
+      } finally { database.close() }
+    } finally { reopened.close() }
+  })
+
   it('migrates a v28 source row with its original digest and dependent receipts intact', async () => {
     const target = await fixture()
     const gap = target.store.recordGap({ idempotencyKey: 'gap:v28', capability: 'health', context: 'migration', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })

@@ -6,6 +6,7 @@ import { createVerifierAuthorities } from './drivers.js'
 import type { VerifierAuthority, VerifierAuthorityInput } from './drivers.js'
 import type { SourceReviewConfig } from './source-review.js'
 import type { MemoryReviewConfig } from './memory-review.js'
+import type { CreationReviewConfig } from './creation-review.js'
 
 /** A Host-owned exact task specification; editing it cannot rewrite accepted work. */
 export interface AcceptanceProfile extends Omit<AcceptanceTask, 'task'> {
@@ -25,6 +26,7 @@ export interface Config {
   requireAcceptance?: boolean
   sourceReviews?: SourceReviewConfig
   memoryReviews?: MemoryReviewConfig
+  creationReviews?: CreationReviewConfig
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -35,6 +37,7 @@ export const Config: Schema<Config> = Schema.object({
   requireAcceptance: Schema.boolean().default(false),
   sourceReviews: Schema.any(),
   memoryReviews: Schema.any(),
+  creationReviews: Schema.any(),
 }) as Schema<Config>
 
 export interface CompiledAcceptanceProfile {

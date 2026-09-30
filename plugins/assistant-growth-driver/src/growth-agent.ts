@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import type { SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { validateCreationAcceptanceAuthorityRef, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection, type Agent, type AgentHandle, type ModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -150,7 +150,7 @@ export interface GrowthAgentInput {
   /** Actual task context is data, never authority or independent success proof. */
   feedback?: import('@dsh-enhanced/assistant-delivery').OwnerForegroundLearningTask
   /** Host-only callback after the real Agent realm, model, tools and guards are pinned. */
-  onSourceExecution?: (input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt'>) => void | Promise<void>
+  onSourceExecution?: (input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt' | 'creationAcceptance'>) => void | Promise<void>
   /** Durable source expiry can shorten, but never extend, the Agent deadline. */
   generationDeadlineAt?: number
 }
@@ -718,8 +718,16 @@ export async function runGrowthAgent(ctx: Context, input: GrowthAgentInput): Pro
           if (createdAt >= deadlineAt) throw new Error('assistant-growth-driver: source generation deadline expired during Agent setup')
           authority.assertCurrent()
           combined.throwIfAborted()
+          const creationAcceptance = creationAvailable ? sourcePlane?.inspectSourceCreationAcceptanceAuthority?.() : undefined
+          if (creationAcceptance !== undefined) {
+            validateCreationAcceptanceAuthorityRef(creationAcceptance)
+            if (creationAcceptance.namePrefix !== creationNamespace || creationAcceptance.expiresAt < createdAt) {
+              throw new Error('assistant-growth-driver: creation acceptance authority does not match this Agent setup')
+            }
+          }
           await input.onSourceExecution({
             model, sessionId: String(agent.session.id), toolContractDigest: pinnedDigest,
+            ...(creationAcceptance === undefined ? {} : { creationAcceptance: structuredClone(creationAcceptance) }),
             executionContractDigest: acceptanceDigest({
               protocol: 'assistant-growth/execution-contract/v1',
               prompt: GROWTH_PROMPT + (sourcePlane === undefined ? '' : SOURCE_PROPOSALS_PROMPT)

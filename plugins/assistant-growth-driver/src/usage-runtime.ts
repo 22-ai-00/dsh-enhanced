@@ -3,7 +3,7 @@ import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluat
 import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { SourceGrowthRunUnavailableError, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding,
-  type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
+  type CreationAcceptanceAuthorityRef, type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
 import type { NormalizedGrowthDriverConfig } from './config.js'
 import { UsageStore, type UsageIntent, type UsageJob, type UsageModel } from './usage-store.js'
 
@@ -23,7 +23,7 @@ export interface UsageReviewInput {
   source: OwnerForegroundLearningTask
   signal: AbortSignal
   assertCurrent(): void
-  bindSourceRun(input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt'>): SourceGrowthRunBinding
+  bindSourceRun(input: Pick<SourceGrowthRunBinding, 'model' | 'sessionId' | 'toolContractDigest' | 'executionContractDigest' | 'createdAt' | 'generationDeadlineAt' | 'creationAcceptance'>): SourceGrowthRunBinding
 }
 export type UsageReviewResult = 'reviewed' | 'failed' | 'unknown'
 const same = (a: unknown, b: unknown): boolean => acceptanceDigest(a) === acceptanceDigest(b)
@@ -46,6 +46,7 @@ export class UsageLearningRuntime {
   constructor(private readonly config: NormalizedGrowthDriverConfig, private readonly ports: {
     evaluation: Evaluation; delivery: Delivery; automations: Automations
     review(input: UsageReviewInput): Promise<UsageReviewResult>
+    inspectCreationAcceptanceAuthority?(): CreationAcceptanceAuthorityRef | undefined
   }) {
     if (!config.usageLearning.enabled || !config.scope || !config.usageLearning.databasePath || !config.budgetId) throw new Error('usage learning configuration missing')
     if (typeof ports.evaluation.listTrustedTaskLearningProjections !== 'function'
@@ -127,6 +128,10 @@ export class UsageLearningRuntime {
       const source = this.source(job)
       const binding = job.sourceRun
       validateSourceGrowthRunBinding(binding)
+      if (binding.creationAcceptance !== undefined) {
+        const current = this.ports.inspectCreationAcceptanceAuthority?.()
+        if (current === undefined || current.expiresAt <= Date.now() || !same(binding.creationAcceptance, current)) return undefined
+      }
       if (binding.runId !== job.id || binding.intentDigest !== job.digest || binding.configDigest !== this.configDigest
         || binding.native.definitionHash !== job.definitionHash || binding.native.occurrenceId !== job.occurrenceId
         || binding.source.outcomeId !== source.canonical.triggerOutcomeId
@@ -270,6 +275,12 @@ export class UsageLearningRuntime {
       assertCurrent()
       const bindSourceRun: UsageReviewInput['bindSourceRun'] = actual => {
         assertCurrent()
+        if (actual.creationAcceptance !== undefined) {
+          const current = this.ports.inspectCreationAcceptanceAuthority?.()
+          if (current === undefined || current.expiresAt <= Date.now() || !same(actual.creationAcceptance, current)) {
+            throw new Error('usage creation acceptance authority changed during Agent setup')
+          }
+        }
         if (!job.intent.modelOrigin || !job.intent.budget || !same(actual.model, job.intent.model)) {
           throw new Error('usage source run lacks a frozen model or budget')
         }
@@ -286,6 +297,7 @@ export class UsageLearningRuntime {
             sourceDigest: sourceGrowthEvidenceDigest({ protocol: source.protocol, source: source.source,
               judgement: source.judgement, ownerRevision: source.ownerRevision }) },
           model: actual.model, modelOrigin: job.intent.modelOrigin, budget: job.intent.budget,
+          ...(actual.creationAcceptance === undefined ? {} : { creationAcceptance: structuredClone(actual.creationAcceptance) }),
           native: { owner: 'assistant-growth-usage', automationId: job.id,
             definitionHash: input.definitionHash, occurrenceId: input.occurrenceId },
           sessionId: actual.sessionId, toolContractDigest: actual.toolContractDigest,

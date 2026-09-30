@@ -320,6 +320,10 @@ Host 在私有 worktree 使用该基线的 `scripts/create-plugin.mjs`，生成 
 
 创建候选的独立签名采用、Cordis 动态加载、观察/回滚与后续真实任务收益尚未验收；本配置不授权生产激活。
 
+可选 `creationVerifications: { authority, publicKey }` 接续[Verifier 的普通任务创建验收](../assistant-verifier/README.md#普通任务产生的新插件验收)。公开字段由其 `compileCreationReviewConfig` 生成；控制面不接收私有密钥或期望用例。authority 须匹配创建命名空间且不能超过创建/SourceJobs 授权期限。Growth 在作者模型开始前冻结引用，prepared 后沿原生续跑自动验收；历史缺少引用的候选保持原状态。
+
+验收 dispatch 与结果使用独立 SQLite 记录；已 claim 的未知派发不再自动调用模型。签名落账前重读真实工作树、检查 tree/patch、不可变包、当前 owner/反馈与 Growth run，最终持有 Evaluation writer fence。`inspectVerifiedCreation(planId)` 只读验签并检查当前来源和封存制品，证明历史检查快照，不能证明可变工作树此刻未变化；后续采用须先 await `inspectPreparedCreationReviewContext` 异步复验并消费精确制品。该凭证不会把计划改为 approved，也不会绕过既有修改计划的审批、发布与采用门。
+
 成功准备返回 `pending-approval`，不会自动发布。普通 gap 可用已有签名审批流程；owner 任务来源必须通过 Host 当前来源 fence 审批，离线 CLI 签名本身不能代替该校验。审批后，普通 gap 用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest；owner 来源由下述 Host 发布接续入口完成复核，才能进入 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
 
 ### 普通任务修复的有限审批

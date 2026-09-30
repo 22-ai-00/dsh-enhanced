@@ -112,6 +112,7 @@ export class AssistantGrowthDriverService extends Service {
         const usage = new UsageLearningRuntime(this.#config, {
           evaluation: usageCtx.assistantEvaluation, automations: usageCtx.assistantAutomations,
           delivery: usageCtx.assistantDelivery, review: input => this.#reviewUsage(input),
+          inspectCreationAcceptanceAuthority: () => this.#sourceBinding?.port.inspectSourceCreationAcceptanceAuthority?.(),
         })
         usageCtx.effect(() => async () => {
           if (this.#usage === usage) this.#usage = undefined
@@ -128,7 +129,7 @@ export class AssistantGrowthDriverService extends Service {
       // when the control plane is absent or is being replaced.
       ctx.inject(['pluginControlPlane' as never], sourceCtx => {
         const abort = new AbortController()
-        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
+        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'inspectSourceCreationAcceptanceAuthority' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
           gaps(limit: number): readonly GrowthSourceGap[]
           recordOwnerTaskFailureGap?: (source: OwnerForegroundLearningTask) => GrowthSourceGap
           canPrepareSource?: () => boolean
@@ -194,7 +195,8 @@ export class AssistantGrowthDriverService extends Service {
                 getSourceCreationNamespace: () => {
                   const namespace = current().getSourceCreationNamespace?.()
                   return namespace === undefined ? undefined : { namePrefix: namespace.namePrefix }
-                } }
+                },
+                inspectSourceCreationAcceptanceAuthority: () => current().inspectSourceCreationAcceptanceAuthority?.() }
               : {}),
             prepareModifySourcePlan: async (input: Parameters<GrowthSourcePlanePort['prepareModifySourcePlan']>[0]) => {
               const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])

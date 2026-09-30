@@ -2,11 +2,14 @@ import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type Ado
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
-import { randomBytes } from 'node:crypto'
+import { createHash, createPublicKey, randomBytes } from 'node:crypto'
 import type { AssistantDeliveryService, ForegroundTaskObservationRegistration, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { sourceGrowthRunDigest, validateSourceGrowthRunBinding, type SourceGrowthRunBinding, type SourceGrowthRunProducer } from '@dsh-enhanced/assistant-growth-contract'
+import { sourceGrowthRunDigest, validateCreationAcceptanceAuthorityRef, verifyPluginCreationVerificationCertificate,
+  validateSourceGrowthRunBinding, type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate,
+  type PluginCreationVerificationRequest, type PluginCreationVerificationResult,
+  type SourceGrowthRunBinding, type SourceGrowthRunProducer } from '@dsh-enhanced/assistant-growth-contract'
 import { TaskObservationRuntime, validateTaskObservationConfig } from './task-observation-runtime.js'
 import { LiveQualificationRuntime, validateLiveQualificationConfig, type LiveQualificationConfig } from './live-qualification-runtime.js'
 import type { TaskObservationConfig } from './task-observation-types.js'
@@ -21,6 +24,7 @@ import {
   assertPluginModificationAllowed,
   createIsolatedWorktree,
   gcPreparedModifyWorktrees,
+  inspectPreparedCreationPatch,
   runLocalCommand,
   validateScopedPluginFiles,
   verifyPreparedSourceWorktree,
@@ -61,6 +65,8 @@ export interface Config {
   sourceBuild?: SourceBuildConfig
   /** Explicit, expiring Host authority for work that outlives a model wake. */
   sourceJobs?: SourceJobsConfig
+  /** Signed independent creation checks, bound to the pre-author owner policy. */
+  creationVerifications?: { authority: CreationAcceptanceAuthorityRef; publicKey: string }
   /** Optional finite owner authority; only approves prepared task-bound source, never deploys it. */
   sourceApprovals?: SourceApprovalClientConfig
   /** Optional separate finite authority for entering the local release state machine. */
@@ -82,13 +88,20 @@ export interface Config {
   /** Owner-pinned finite native replay; separate from the read-only observer. */
   replayEndpoint?: ReplayEndpointConfig
 }
-export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
-  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
+type CreationVerifierPort = {
+  verifyPluginCreation(request: PluginCreationVerificationRequest, signal?: AbortSignal): Promise<PluginCreationVerificationResult>
+}
+const CREATION_UNKNOWN_CODES = new Set(['schema-observation-unknown', 'case-observation-unknown', 'contract-insufficient',
+  'interrupted', 'stale-source', 'verification-unknown', 'previous-unknown'])
+const CREATION_REJECTED_CODES = new Set(['case-mismatch', 'source-review-rejected', 'request-invalid'])
+export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
+  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   sourceBuild: Schema.any(),
   sourceJobs: Schema.any(),
+  creationVerifications: Schema.any(),
   sourceApprovals: Schema.any(),
   sourceReleases: Schema.any(),
   sourceReleaseExecution: Schema.any(),
@@ -183,6 +196,24 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
   if (config.sourceJobs !== undefined) {
     validateSourceJobsConfig(config.sourceJobs, config.sourceBuild)
     if (realpathSync(config.sourceJobs.repository) !== config.sourceJobs.repository) throw new Error('plugin-control-plane: sourceJobs.repository must be canonical')
+  }
+  if (config.creationVerifications !== undefined) {
+    const policy = config.creationVerifications
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy)
+      || Object.keys(policy).sort().join(',') !== 'authority,publicKey'
+      || typeof policy.publicKey !== 'string' || policy.publicKey.length > 4096) {
+      throw new Error('plugin-control-plane: invalid creation verification configuration')
+    }
+    validateCreationAcceptanceAuthorityRef(policy.authority)
+    let key: ReturnType<typeof createPublicKey>
+    try { key = createPublicKey(policy.publicKey) } catch { throw new Error('plugin-control-plane: creation verification public key is invalid') }
+    if (!policy.publicKey.startsWith('-----BEGIN PUBLIC KEY-----\n') || key.asymmetricKeyType !== 'ed25519' || key.type !== 'public'
+      || key.export({ format: 'pem', type: 'spki' }).toString() !== policy.publicKey
+      || policy.authority.expiresAt <= Date.now()
+      || !config.sourceJobs?.creation || policy.authority.namePrefix !== config.sourceJobs.creation.namePrefix
+      || policy.authority.expiresAt > Math.min(config.sourceJobs.creation.expiresAt, config.sourceJobs.expiresAt)) {
+      throw new Error('plugin-control-plane: creation verification authority does not match finite source creation grant')
+    }
   }
   if (![config.catalogPath, config.statePath, config.trustPath].every(isAbsolute)) throw new Error('plugin-control-plane: catalogPath, statePath and trustPath must be absolute')
   return config
@@ -416,7 +447,8 @@ export class PluginControlPlaneService extends Service {
     })
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never,
       ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : []),
-      ...(this.config.sourceReleaseExecution?.independentReview ? ['assistantVerifier', 'agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'] as never[] : [])], jobsCtx => {
+      ...(this.config.sourceReleaseExecution?.independentReview ? ['assistantVerifier', 'agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'] as never[] : []),
+      ...(this.config.creationVerifications ? ['assistantVerifier' as never] : [])], jobsCtx => {
       jobsCtx.effect(async () => {
         this.abort.signal.throwIfAborted()
         const current = <K extends keyof SourceJobPorts>(key: K): SourceJobPorts[K] => jobsCtx.get((key === 'automations' ? 'assistantAutomations' : 'assistantDelivery') as never) as unknown as SourceJobPorts[K]
@@ -438,6 +470,8 @@ export class PluginControlPlaneService extends Service {
             delivery: { validateOwnerRoute: request => current('delivery').validateOwnerRoute(request) },
           }, withGapSourceFence: (gapId, owner, callback) => this.taskGaps.withCurrent(gapId, owner, callback),
           assertGrowthRun: (run, gapId, owner, generation) => this.assertSourceGrowthRun(run, gapId, owner, generation),
+          ...(this.config.creationVerifications ? { verifyPreparedCreation: (job: SourceJobRecord, signal: AbortSignal) =>
+            this.verifyPreparedCreation(job, signal, () => jobsCtx.get('assistantVerifier' as never) as unknown as CreationVerifierPort) } : {}),
           ...(this.config.sourceApprovals ? { approvePrepared: async (job: SourceJobRecord, signal: AbortSignal) => {
             if (!job.planId) throw new Error('source job has no prepared plan')
             await this.requestOwnerSourceApproval({ planId: job.planId, signal, expectedTrustDigest: job.intent.trustDigest })
@@ -731,6 +765,11 @@ export class PluginControlPlaneService extends Service {
     validateSourceGrowthRunBinding(actual)
     if (sourceGrowthRunDigest(actual) !== sourceGrowthRunDigest(expected)
       || expected.ownerDigest !== controlPlaneDigest(owner)) throw new Error('source growth run immutable binding changed')
+    const policy = this.config.creationVerifications?.authority
+    if (expected.creationAcceptance !== undefined
+      && (policy === undefined || controlPlaneDigest(policy) !== controlPlaneDigest(expected.creationAcceptance))) {
+      throw new Error('source growth run creation acceptance policy changed or was not pinned before authoring')
+    }
     const reference = this.store.getOwnerTaskFailureReference(gapId)
     if (!reference || expected.source.outcomeId !== reference.outcomeId
       || expected.source.sourceDigest !== reference.sourceDigest
@@ -767,6 +806,106 @@ export class PluginControlPlaneService extends Service {
         source: this.taskGaps.inspectCurrent(plan.gapId, reference.owner),
         artifact: this.store.readPreparedSourceArtifact(plan.id),
       }
+    })
+  }
+
+  /** Host-only pre-author policy reference; never grants candidate or model authority. */
+  inspectSourceCreationAcceptanceAuthority = (): CreationAcceptanceAuthorityRef | undefined => {
+    const policy = this.config.creationVerifications?.authority
+    if (this.abort.signal.aborted || !policy || Date.now() >= policy.expiresAt
+      || Date.now() >= (this.config.sourceJobs?.creation?.expiresAt ?? 0)
+      || Date.now() >= (this.config.sourceJobs?.expiresAt ?? 0)) return undefined
+    return structuredClone(policy)
+  }
+
+  /** Synchronous Evaluation writer fence for an exact independently reviewed creation. */
+  withPreparedCreationFence = <T>(input: { planId: string; planDigest: string; artifactSha256: string;
+    growthRunDigest: string; referenceDigest: string }, callback: () => T): T => {
+    this.abort.signal.throwIfAborted()
+    const policy = this.inspectSourceCreationAcceptanceAuthority()
+    if (!policy) throw new Error('creation verification authority unavailable')
+    const plan = this.store.getSourcePlan(input.planId)
+    const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
+    if (!reference) throw new Error('creation verification source unavailable')
+    return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
+      this.abort.signal.throwIfAborted()
+      const current = this.store.getSourcePlan(input.planId)
+      const job = this.store.getPreparedSourceJob(input.planId)
+      if (current.digest !== input.planDigest || current.mode !== 'prepared-create' || !current.creation?.growthRun
+        || !job.intent.creation?.growthRun || !current.sourceCheck || !current.preparedEvidence
+        || current.preparedEvidence.pack.sha256 !== input.artifactSha256
+        || controlPlaneDigest(reference) !== input.referenceDigest
+        || sourceGrowthRunDigest(current.creation.growthRun) !== input.growthRunDigest
+        || sourceGrowthRunDigest(job.intent.creation.growthRun) !== input.growthRunDigest
+        || !current.creation.growthRun.creationAcceptance
+        || controlPlaneDigest(current.creation.growthRun.creationAcceptance) !== controlPlaneDigest(policy)
+        || controlPlaneDigest(current.creation.grant) !== controlPlaneDigest(this.config.sourceJobs?.creation)) {
+        throw new Error('creation verification exact source binding changed')
+      }
+      this.assertSourceGrowthRun(current.creation.growthRun, current.gapId, reference.owner, false)
+      const artifact = this.store.readPreparedSourceArtifact(input.planId)
+      if (createHash('sha256').update(artifact).digest('hex') !== input.artifactSha256) {
+        throw new Error('creation verification artifact changed')
+      }
+      return callback()
+    })
+  }
+
+  /** Independent reviewer reads the actual checked tree through a disposable Git index. */
+  inspectPreparedCreationReviewContext = async (planId: string, signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }> => {
+    const combined = AbortSignal.any([this.abort.signal, signal, AbortSignal.timeout(120_000)])
+    combined.throwIfAborted()
+    const prepared = this.inspectPreparedCreation(planId)
+    const current = () => this.withPreparedCreationFence({ planId, planDigest: prepared.plan.digest,
+      artifactSha256: prepared.plan.preparedEvidence!.pack.sha256,
+      growthRunDigest: sourceGrowthRunDigest(prepared.plan.creation!.growthRun!),
+      referenceDigest: controlPlaneDigest(prepared.reference) }, () => undefined)
+    current()
+    const trust = await this.boundTrust()
+    const environment = inheritedEnvironment(trust)
+    const job = prepared.job
+    await verifyCreatedPluginWorkspace({ worktree: prepared.plan.worktree, baseCommit: prepared.plan.baseCommit,
+      name: prepared.plan.name, environment, signal: combined, assertCurrent: current,
+      creation: prepared.plan.creation!, files: job.intent.files })
+    const review = await inspectPreparedCreationPatch(prepared.plan, environment, combined)
+    current()
+    return review
+  }
+
+  /** Signed behavior evidence over stored pack/checks. Adoption must await async review-context recheck. */
+  inspectVerifiedCreation = (planId: string): PluginCreationVerificationCertificate | undefined => {
+    const certificate = this.store.getCreationVerification(planId)
+    if (!certificate) return undefined
+    const config = this.config.creationVerifications
+    if (!config || !verifyPluginCreationVerificationCertificate(certificate, config.authority, config.publicKey)) return undefined
+    this.withPreparedCreationFence({ planId, planDigest: certificate.plan.digest,
+      artifactSha256: certificate.plan.artifactSha256, growthRunDigest: certificate.source.growthRunDigest,
+      referenceDigest: certificate.source.referenceDigest }, () => {
+      const plan = this.store.getSourcePlan(planId)
+      if (!plan.sourceCheck || !plan.preparedEvidence || certificate.plan.name !== plan.name
+        || certificate.plan.generatorDigest !== plan.generatorDigest
+        || certificate.plan.sourceTreeDigest !== plan.sourceCheck.treeDigest
+        || certificate.plan.sourcePatchDigest !== plan.sourceCheck.patchDigest
+        || certificate.plan.artifactBytes !== plan.preparedEvidence.pack.sizeBytes) {
+        throw new Error('creation verification exact plan evidence changed')
+      }
+    })
+    return structuredClone(certificate)
+  }
+
+  /** Private Host diagnostic; no cases, prompts, source bytes or verifier output. */
+  inspectCreationVerification = (planId: string): { status: 'claimed' | 'verified' | 'unknown' | 'rejected';
+    reason?: string; updatedAt: number } | undefined => {
+    this.abort.signal.throwIfAborted()
+    const plan = this.store.getSourcePlan(planId)
+    const reference = this.store.getOwnerTaskFailureReference(plan.gapId)
+    if (!reference || plan.mode !== 'prepared-create') throw new Error('creation verification owner source unavailable')
+    return this.taskGaps.withCurrent(plan.gapId, reference.owner, () => {
+      const current = this.store.getSourcePlan(planId)
+      if (current.mode !== 'prepared-create' || current.digest !== plan.digest) {
+        throw new Error('creation verification diagnostic plan changed')
+      }
+      return this.store.inspectCreationVerificationRecord(planId)
     })
   }
 
@@ -807,6 +946,49 @@ export class PluginControlPlaneService extends Service {
       idempotencyKey: `source-job-plan:${job.id}`, expectedBaseCommit: intent.baseCommit, ttlMs: intent.ttlMs, timeoutMs: intent.build.timeoutMs, offline: true, signal, assertCurrent }, job)
     this.sourceBuilds.add(operation)
     try { return await operation } finally { this.sourceBuilds.delete(operation) }
+  }
+
+  private async verifyPreparedCreation(job: SourceJobRecord, signal: AbortSignal,
+    verifier: () => CreationVerifierPort): Promise<void> {
+    signal.throwIfAborted()
+    if (!job.planId || !this.config.creationVerifications || this.store.getCreationVerificationStatus(job.planId) !== undefined) return
+    const prepared = this.inspectPreparedCreation(job.planId)
+    if (prepared.job.id !== job.id || !prepared.plan.creation?.growthRun || !prepared.plan.preparedEvidence) {
+      throw new Error('creation verification job is not the exact prepared source')
+    }
+    const binding = { planId: prepared.plan.id, planDigest: prepared.plan.digest,
+      artifactSha256: prepared.plan.preparedEvidence.pack.sha256,
+      growthRunDigest: sourceGrowthRunDigest(prepared.plan.creation.growthRun),
+      referenceDigest: controlPlaneDigest(prepared.reference) }
+    this.withPreparedCreationFence(binding, () => this.store.claimCreationVerification(job.planId!))
+    try {
+      const current = verifier()
+      if (typeof current?.verifyPluginCreation !== 'function') throw new Error('independent creation verifier unavailable')
+      const result = await current.verifyPluginCreation({ protocol: 'assistant-growth/creation-verification-request/v1', planId: job.planId }, signal)
+      signal.throwIfAborted()
+      if (result.status === 'verified' && !verifyPluginCreationVerificationCertificate(result.certificate,
+        this.config.creationVerifications.authority, this.config.creationVerifications.publicKey)) {
+        throw new Error('creation verification certificate signature or policy invalid')
+      }
+      if (controlPlaneDigest(await this.boundTrust()) !== job.intent.trustDigest) throw new Error('creation verification trust changed')
+      await this.inspectPreparedCreationReviewContext(job.planId, signal)
+      this.withPreparedCreationFence(binding, () => {
+        if (result.status === 'verified') {
+          this.store.recordCreationVerification(result.certificate)
+        } else this.store.settleCreationVerification(job.planId!, result.status,
+          typeof result.reason === 'string' && (result.status === 'unknown' ? CREATION_UNKNOWN_CODES : CREATION_REJECTED_CODES).has(result.reason)
+            ? result.reason : `independent-verifier-${result.status}`)
+      })
+    } catch (error) {
+      // The claimed row is a durable no-replay fence even if the process dies
+      // before settlement. A later native tick cannot dispatch another review.
+      try { this.withPreparedCreationFence(binding, () => {
+        if (this.store.getCreationVerificationStatus(job.planId!) === 'claimed') {
+          this.store.settleCreationVerification(job.planId!, 'unknown', 'independent-verification-unsettled')
+        }
+      }) } catch { /* stale owner/source remains permanently claimed */ }
+      throw error
+    }
   }
 
   async inspectSource(input: { repository: string; name: string; paths: readonly string[]; baseCommit?: string; signal?: AbortSignal; assertCurrent?: () => void | Promise<void> }): Promise<SourceInspection> {

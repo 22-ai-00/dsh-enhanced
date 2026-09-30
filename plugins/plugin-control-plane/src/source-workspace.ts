@@ -224,6 +224,47 @@ export async function verifyPreparedSourceWorktree(plan: PluginSourcePlan, envir
   return checked
 }
 
+/** Stage an independent index so review sees untracked generated files as well as tracked edits. */
+export async function inspectPreparedCreationPatch(plan: PluginSourcePlan, environment: NodeJS.ProcessEnv,
+  signal: AbortSignal): Promise<{ patch: string; changedPaths: string[] }> {
+  signal.throwIfAborted()
+  if (plan.mode !== 'prepared-create' || !plan.sourceCheck || !plan.creation
+    || await realpath(plan.repository) !== plan.repository || await realpath(plan.worktree) !== plan.worktree
+    || plan.scope.join('\0') !== [`plugins/README.md`, `plugins/${plan.name}`, 'pnpm-lock.yaml'].join('\0')) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation paths or scope changed')
+  }
+  if ((await runLocalCommand('git', ['rev-parse', 'HEAD'], plan.worktree, environment, { capture: true, signal })).trim() !== plan.baseCommit) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation worktree HEAD changed')
+  }
+  const changedPaths = [...await changedSourcePaths(plan.worktree, plan.baseCommit, environment, signal)]
+  if (changedPaths.some(path => !sourcePathAllowed(path, plan.name, 'prepared-create'))) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation changed outside exact scope')
+  }
+  const snapshot = await checkedSourceSnapshot(plan.worktree, plan.baseCommit, plan.scope, environment, undefined, signal)
+  if (snapshot.checkedTreeDigest !== plan.sourceCheck.treeDigest || snapshot.checkedPatchDigest !== plan.sourceCheck.patchDigest) {
+    throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation source digests changed')
+  }
+  const temporary = await mkdtemp(join(tmpdir(), 'dsh-plugin-creation-review-'))
+  try {
+    const scope = [...new Set(plan.scope.map(value => value.normalize('NFC').trim()))].sort()
+    const reviewEnvironment = { ...environment, GIT_INDEX_FILE: join(temporary, 'index') }
+    await runLocalCommand('git', ['read-tree', plan.baseCommit], plan.worktree, reviewEnvironment, { signal })
+    await runLocalCommand('git', ['--literal-pathspecs', 'add', '--all', '--', ...scope], plan.worktree, reviewEnvironment, { signal })
+    const patch = await runLocalCommand('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', 'diff', '--cached', '--binary', '--full-index',
+      '--no-color', plan.baseCommit, '--', ...scope], plan.worktree, reviewEnvironment,
+      { capture: true, maximumOutput: MAX_COMMAND_OUTPUT_BYTES, signal })
+    signal.throwIfAborted()
+    const binding = `${plan.baseCommit}\0${JSON.stringify(scope)}\0`
+    const patchDigest = createHash('sha256').update('dsh-source-patch-v2\0').update(binding).update(patch).digest('hex')
+    if (patchDigest !== plan.sourceCheck.patchDigest) {
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation review patch differs from checked source')
+    }
+    if ((await checkedSourceSnapshot(plan.worktree, plan.baseCommit, plan.scope, environment, undefined, signal)).checkedPatchDigest
+      !== plan.sourceCheck.patchDigest) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared creation changed during review read')
+    return { patch, changedPaths }
+  } finally { await rm(temporary, { recursive: true, force: true }) }
+}
+
 async function assertOwnerDirectory(path: string): Promise<void> {
   const metadata = await lstat(path)
   const uid = process.getuid?.()

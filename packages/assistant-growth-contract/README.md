@@ -36,5 +36,9 @@ canonical 任务结果，替换/删除必须指定记录版本；模型不能设
 模型参数、格式校验或摘要都不能证明来源。生成期限不延长后续构建、验收或采用的授权，
 此记录也不是独立行为验收回执。本库不注册 producer 或调度创建。
 
-本包只使用 Node `crypto` 计算 canonical SHA-256，不访问网络、文件系统、子进程、凭据或
+可选 `creationAcceptance` 在作者模型开始前固定 Host 的验收政策引用；历史 run 保持可读，不能后补验收资格。
+`PluginCreationVerificationCertificate` 绑定任务来源、精确制品、私有用例摘要、观察身份和两次独立会话，
+使用 Ed25519 验签。验签函数只确认签名、政策和有效期，消费者必须重新检查当前来源；凭证不授予审批或采用权限。
+
+本包只使用 Node `crypto` 计算 canonical SHA-256 与验签，不访问网络、文件系统、子进程、凭据或
 浏览器，也没有 install script。
