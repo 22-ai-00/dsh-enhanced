@@ -25,7 +25,7 @@ import { AssistantEvaluationService, EvaluationStore } from '@dsh-enhanced/assis
 import { OwnerVerifiedWorkflowSourceError, type GoalRecord, type GoalScope, type VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
 import plugin, { apply, AssistantGrowthDriverService, name, normalizeConfig, version } from '../src/index.ts'
 import type { OwnerRouteReceipt } from '../src/deposit.ts'
-import type { GrowthSourcePlanePort } from '../src/source-port.ts'
+import type { GrowthSourceGap, GrowthSourcePlanePort } from '../src/source-port.ts'
 
 // Contract expiry is unreachable with the wall clock while the pinned contract
 // is still current, so the single assertCurrentContract call is gated through
@@ -174,6 +174,8 @@ class ScriptedAdapter extends LlmAdapter {
   requests: Array<{ provider: string; model: string; reasoningEffort?: string }> = []
   onRequest?: () => void
   surfaces: string[][] = []
+  toolDescriptions: Array<Record<string, string>> = []
+  messageTranscripts: string[] = []
   constructor(private readonly turns: readonly ScriptedTurn[]) { super() }
   reset(): void { this.calls = 0 }
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -181,6 +183,8 @@ class ScriptedAdapter extends LlmAdapter {
       ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }) })
     this.onRequest?.()
     this.surfaces.push((options.tools ?? []).map(tool => tool.name).sort())
+    this.toolDescriptions.push(Object.fromEntries((options.tools ?? []).map(tool => [tool.name, tool.description ?? ''])))
+    this.messageTranscripts.push(JSON.stringify(options.messages))
     const index = this.calls++
     if (index < this.turns.length) {
       const turn = this.turns[index]!
@@ -886,7 +890,7 @@ describe('opt-in plugin source proposals', () => {
       // recorder.  Automatic usage reviews must receive their one gap from
       // this owner/source-bound seam, never from the legacy global `gaps()`
       // listing used by manual wakes below.
-      recordOwnerTaskFailureGap: vi.fn(() => ({
+      recordOwnerTaskFailureGap: vi.fn((): GrowthSourceGap => ({
         id: 'gap-1', capability: 'task-failure', context: 'owner task failure', status: 'open' as const, createdAt: 1,
       })),
       prepareModifySourcePlan: vi.fn(async (input: Parameters<GrowthSourcePlanePort['prepareModifySourcePlan']>[0]) => {
@@ -898,10 +902,79 @@ describe('opt-in plugin source proposals', () => {
     }
   }
 
+  const creationName = 'assistant-new-capability'
+  const creationGap = 'owner-failure-gap'
+  const creationFiles = [{ path: 'src/index.ts', content: 'export const name = "assistant-new-capability"\n' },
+    { path: 'README.md', content: '# Assistant new capability\n' },
+    { path: 'tests/index.spec.ts', content: 'export {}\n' }]
+  const creationRead = (paths: string[], name = creationName) => ({ name: 'plugin_source_read', args: {
+    mode: 'create', gap_id: creationGap, plugin_name: name, paths,
+  } })
+  const creationCall = (files = creationFiles, name = creationName) => ({ name: 'plugin_source_create', args: {
+    gap_id: creationGap, plugin_name: name, files,
+  } })
+  function creationService() {
+    const base = sourceService()
+    base.gaps.mockReturnValue([{ id: creationGap, capability: 'new capability', context: 'owner failure',
+      status: 'open', createdAt: 1 }])
+    base.recordOwnerTaskFailureGap.mockReturnValue({ id: creationGap, capability: 'new capability',
+      context: 'owner failure', status: 'open', createdAt: 1 })
+    return {
+      ...base,
+      canEnqueueSource: () => true,
+      getSourceCreationNamespace: vi.fn((): { namePrefix: string } | undefined => ({ namePrefix: 'assistant-' })),
+      inspectCreateSource: vi.fn(async (input: Parameters<NonNullable<GrowthSourcePlanePort['inspectCreateSource']>>[0]) => {
+        input.signal.throwIfAborted()
+        input.assertCurrent()
+        return { name: input.name, baseCommit: 'c'.repeat(40),
+          files: [
+            { path: 'src/index.ts', bytes: 8 }, { path: 'README.md', bytes: 8 },
+            { path: 'tests/index.spec.ts', bytes: 8 }, { path: 'package.json', bytes: 8 },
+            { path: 'cordis.patch.yml', bytes: 8 }, { path: 'LICENSE', bytes: 8 },
+          ],
+          contents: input.paths.map(path => ({ path, content: 'template content' })),
+        }
+      }),
+      enqueueSourceJob: vi.fn(async (input: Parameters<GrowthSourcePlanePort['enqueueSourceJob']>[0]) => {
+        input.signal.throwIfAborted()
+        input.assertCurrent()
+        return { id: 'source-create-job', mode: 'create' as const, name: input.name, gapId: input.gapId,
+          baseCommit: input.expectedBaseCommit, status: 'queued' as const, createdAt: 1, expiresAt: 2 }
+      }),
+      inspectSourceJob: vi.fn((input: Parameters<GrowthSourcePlanePort['inspectSourceJob']>[0]) => ({
+        id: input.id, mode: 'create' as const, name: creationName, gapId: creationGap,
+        baseCommit: 'c'.repeat(40), status: 'queued' as const, createdAt: 1, expiresAt: 2,
+      })),
+    }
+  }
+
+  async function creationWake(input: {
+    turns: ScriptedTurn[]
+    source?: ReturnType<typeof creationService> | Record<string, unknown>
+    allowCreation?: boolean
+    maxPlansPerWake?: number
+    onRequest?: (adapter: ScriptedAdapter) => void
+  }) {
+    const adapter = new ScriptedAdapter(input.turns)
+    adapter.onRequest = () => input.onRequest?.(adapter)
+    const h = await mount({ adapter })
+    process.env.SUPER_RELAY_API_KEY = 'test-key'
+    const source = input.source ?? creationService()
+    h.ctx.provide('pluginControlPlane' as never, source as never)
+    const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
+      pluginSourceProposals: { ...options(h.root), preparationMode: 'durable', allowCreation: input.allowCreation ?? true,
+        maxPlansPerWake: input.maxPlansPerWake ?? 1 },
+    }))
+    await new Promise(resolve => setImmediate(resolve))
+    await service.wake()
+    return { h, adapter, service, source }
+  }
+
   async function startUsageReview(input: {
     h: Harness
     source: ReturnType<typeof sourceService> | Record<string, unknown>
     objectiveStatus: 'achieved' | 'not-achieved'
+    sourceConfig?: Record<string, unknown>
   }): Promise<AssistantGrowthDriverService> {
     const { h, source, objectiveStatus } = input
     await h.ctx.plugin(AssistantEvaluationService, { databasePath: join(h.root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
@@ -935,7 +1008,7 @@ describe('opt-in plugin source proposals', () => {
     h.ctx.provide('pluginControlPlane' as never, source as never)
     const service = new AssistantGrowthDriverService(h.ctx, driverConfig(h.root, {
       budgetId: 'growth-budget', budgetAmount: 1,
-      pluginSourceProposals: options(h.root),
+      pluginSourceProposals: { ...options(h.root), ...input.sourceConfig },
       usageLearning: { enabled: true, scanBudgetId: 'growth-scan-budget', scanBudgetAmount: 1, databasePath: join(h.root, 'usage.sqlite') },
     }))
     await vi.waitFor(() => expect(service.usageHealth()).toMatchObject({ connected: true, counts: { queued: 1 } }))
@@ -984,6 +1057,52 @@ describe('opt-in plugin source proposals', () => {
     expect(prompts.join('\n')).not.toContain('OTHER OWNER GLOBAL CONTEXT')
   })
 
+  it('queues new-plugin creation from ordinary failed owner usage with the original supplier and exact task gap', async () => {
+    const adapter = new ScriptedAdapter([
+      { name: 'plugin_source_gaps', args: {} }, creationRead([]), creationRead(['src/index.ts', 'README.md', 'tests/index.spec.ts']), creationCall(),
+    ])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    h.modelSelection.mockImplementation(() => { throw new Error('current session supplier changed') })
+    const source = creationService()
+    source.gaps.mockReturnValue([{ id: 'other-owner-gap', capability: 'private', context: 'OTHER OWNER GLOBAL CONTEXT',
+      status: 'open', createdAt: 1 }])
+    const prompts: string[] = []
+    h.ctx.on('llm/stream', async function* (options, next) { prompts.push(JSON.stringify(options.messages)); yield* next() })
+    const service = await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowCreation: true } })
+
+    expect(service.usageHealth()).toMatchObject({ counts: { reviewed: 1 } })
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 0 })
+    expect(source.gaps).not.toHaveBeenCalled()
+    expect(source.enqueueSourceJob).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'create', gapId: creationGap, name: creationName, files: creationFiles,
+      owner: expect.objectContaining({ principalId: PRINCIPAL, workspace: h.root }),
+    }))
+    expect(adapter.requests.every(request => request.provider === 'conversation-provider'
+      && request.model === 'original-task-model')).toBe(true)
+    expect(prompts.join('\n')).toContain('owner failure')
+    expect(prompts.join('\n')).not.toContain('OTHER OWNER GLOBAL CONTEXT')
+  })
+
+  it.each(['corrected', 'withdrawn'])('fences creation when the owner task gap is %s after template inspection', async disposition => {
+    const adapter = new ScriptedAdapter([
+      { name: 'plugin_source_gaps', args: {} }, creationRead(['src/index.ts']), creationCall(),
+    ])
+    const h = await mount({ adapter, provider: 'conversation-provider' })
+    const source = creationService()
+    const inspect = source.inspectCreateSource.getMockImplementation()!
+    source.inspectCreateSource.mockImplementation(async input => {
+      const result = await inspect(input)
+      source.recordOwnerTaskFailureGap.mockReturnValue({ id: creationGap, capability: 'new capability',
+        context: `owner ${disposition} the task`, status: 'closed', createdAt: 1 })
+      return result
+    })
+    const service = await startUsageReview({ h, source, objectiveStatus: 'not-achieved',
+      sourceConfig: { preparationMode: 'durable', allowCreation: true } })
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+    expect(service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
+  })
+
   it('does not record or expose global gaps for an achieved trusted foreground task', async () => {
     const adapter = new ScriptedAdapter([{ name: 'plugin_source_gaps', args: {} }])
     const h = await mount({ adapter, provider: 'conversation-provider' })
@@ -1028,6 +1147,153 @@ describe('opt-in plugin source proposals', () => {
     }
     expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), offline: false } }))).toThrow(/offline/)
     expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), preparationMode: 'later' } }))).toThrow()
+    expect(() => normalizeConfig(driverConfig('/tmp', { pluginSourceProposals: { ...options('/tmp'), allowCreation: true } })))
+      .toThrow(/requires enabled durable source proposals/)
+  })
+
+  it('exposes creation only with explicit owner opt-in and the optional creation reader', async () => {
+    const unopted = await creationWake({ turns: [], allowCreation: false })
+    expect(unopted.adapter.surfaces[0]).not.toContain('plugin_source_create')
+    expect(unopted.source.inspectCreateSource).not.toHaveBeenCalled()
+
+    const { inspectCreateSource: _missing, ...olderPort } = creationService()
+    const older = await creationWake({ turns: [], source: olderPort })
+    expect(older.adapter.surfaces[0]).toHaveLength(8)
+    expect(older.adapter.surfaces[0]).not.toContain('plugin_source_create')
+    expect(older.service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 0 })
+
+    const { getSourceCreationNamespace: _namespace, ...noNamespacePort } = creationService()
+    const noNamespace = await creationWake({ turns: [], source: noNamespacePort })
+    expect(noNamespace.adapter.surfaces[0]).toHaveLength(8)
+    expect(noNamespace.adapter.surfaces[0]).not.toContain('plugin_source_create')
+
+    const noGrantPort = creationService()
+    noGrantPort.getSourceCreationNamespace.mockReturnValue(undefined)
+    const noGrant = await creationWake({ turns: [], source: noGrantPort })
+    expect(noGrant.adapter.surfaces[0]).toHaveLength(8)
+    expect(noGrant.adapter.surfaces[0]).not.toContain('plugin_source_create')
+  })
+
+  it('publishes a nonstandard public name prefix, then queues only a matching new plugin', async () => {
+    const source = creationService()
+    source.getSourceCreationNamespace.mockReturnValue({ namePrefix: 'feature-' })
+    const name = 'feature-new-capability'
+    const files = [{ path: 'src/index.ts', content: `export const name = '${name}'\n` }]
+    const result = await creationWake({ source, turns: [
+      { name: 'plugin_source_gaps', args: {} }, creationRead([], name), creationRead(['src/index.ts'], name),
+      creationCall(files, name),
+    ] })
+    expect(result.adapter.toolDescriptions[0]?.plugin_source_create).toContain('feature-')
+    expect(result.adapter.toolDescriptions[0]?.plugin_source_read).toContain('feature-')
+    expect(result.adapter.messageTranscripts.some(text => /namePrefix.*feature-/u.test(text))).toBe(true)
+    expect(source.enqueueSourceJob).toHaveBeenCalledWith(expect.objectContaining({ mode: 'create', name, files }))
+    expect(result.service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 0 })
+  })
+
+  it.each([undefined, 'feature-'] as const)('rejects a cached creation snapshot when the public namespace becomes %s', async nextPrefix => {
+    const source = creationService()
+    const result = await creationWake({ source, maxPlansPerWake: 2, turns: [
+      { name: 'plugin_source_gaps', args: {} }, creationRead(['src/index.ts']),
+      creationCall([{ path: 'src/index.ts', content: 'changed' }]),
+      creationCall([{ path: 'src/index.ts', content: 'changed' }]),
+    ], onRequest: adapter => {
+      if (adapter.calls === 2) source.getSourceCreationNamespace.mockReturnValue(nextPrefix === undefined ? undefined : { namePrefix: nextPrefix })
+      if (adapter.calls === 3) source.getSourceCreationNamespace.mockReturnValue({ namePrefix: 'assistant-' })
+    } })
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+    expect(result.service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 2 })
+  })
+
+  it.each(['no-read', 'manifest-only', 'modify-snapshot'])('rejects creation without its own template content: %s', async kind => {
+    const turns = [
+      { name: 'plugin_source_gaps', args: {} },
+      ...(kind === 'no-read' ? [] : kind === 'manifest-only' ? [creationRead([])] : [
+        { name: 'plugin_source_read', args: { gap_id: creationGap, plugin_name: creationName, paths: ['src/index.ts'] } },
+      ]),
+      creationCall(),
+    ]
+    const source = creationService()
+    const result = await creationWake({ turns, source })
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+    expect(result.service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
+  })
+
+  it.each(['package.json', 'cordis.patch.yml', 'LICENSE', 'tsconfig.json', 'lib/index.js',
+    '../escape.ts', 'src/../../escape.ts', 'src/nested/new.ts'])('rejects creation draft path %s before Host queue', async path => {
+    const source = creationService()
+    const result = await creationWake({ source, turns: [
+      { name: 'plugin_source_gaps', args: {} }, creationRead([]), creationRead(['src/index.ts']),
+      creationCall([{ path, content: 'unsafe' }]),
+    ] })
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+    expect(result.service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
+  })
+
+  it('queues a new name from a read template with only source, README and tests, and keeps the reply content-free', async () => {
+    const source = creationService()
+    const result = await creationWake({ source, turns: [
+      { name: 'plugin_source_gaps', args: {} }, creationRead([]), creationRead(['src/index.ts', 'README.md', 'tests/index.spec.ts']),
+      creationCall(), { name: 'plugin_source_job_status', args: { id: 'source-create-job' } },
+    ] })
+    expect(result.adapter.surfaces[0]).toContain('plugin_source_create')
+    expect(source.inspectCreateSource).toHaveBeenCalledTimes(2)
+    expect(source.inspectCreateSource.mock.calls[1]?.[0]).toMatchObject({
+      name: creationName, paths: ['src/index.ts', 'README.md', 'tests/index.spec.ts'], baseCommit: 'c'.repeat(40),
+    })
+    expect(source.enqueueSourceJob).toHaveBeenCalledTimes(1)
+    expect(source.enqueueSourceJob.mock.calls[0]?.[0]).toMatchObject({
+      mode: 'create', gapId: creationGap, name: creationName, files: creationFiles,
+      repository: result.h.root, expectedBaseCommit: 'c'.repeat(40),
+      owner: { ownerRouteId: OWNER_ROUTE, principalId: PRINCIPAL, workspace: result.h.root },
+    })
+    const queuedInput = source.enqueueSourceJob.mock.calls[0]![0]
+    expect(queuedInput.idempotencyKey).toMatch(/^growth-source:create:[a-f0-9]{64}$/u)
+    expect(queuedInput).not.toHaveProperty('grant')
+    expect(queuedInput).not.toHaveProperty('image')
+    expect(queuedInput).not.toHaveProperty('timeoutMs')
+    expect(source.prepareModifySourcePlan).not.toHaveBeenCalled()
+    expect(result.service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 0 })
+    expect(tableCounts(result.h)).toEqual({ candidates: 0, definitions: 0, runs: 0 })
+  })
+
+  it('lets the Control Plane reject a missing creation grant without recording a prepared plan', async () => {
+    const source = creationService()
+    source.enqueueSourceJob.mockRejectedValue(new Error('creation grant unavailable'))
+    const result = await creationWake({ source, turns: [
+      { name: 'plugin_source_gaps', args: {} }, creationRead(['src/index.ts']),
+      creationCall([{ path: 'src/index.ts', content: 'export const name = "assistant-new-capability"\n' }]),
+    ] })
+    expect(source.enqueueSourceJob).toHaveBeenCalledTimes(1)
+    expect(result.service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
+  })
+
+  it('uses the same creation idempotency key after an ambiguous queue reply within one wake', async () => {
+    const source = creationService()
+    source.enqueueSourceJob.mockRejectedValueOnce(new Error('queue acknowledgement lost'))
+    const turns = [
+      { name: 'plugin_source_gaps', args: {} }, creationRead(['src/index.ts']),
+      creationCall([{ path: 'src/index.ts', content: 'changed' }]),
+      creationCall([{ path: 'src/index.ts', content: 'changed' }]),
+    ]
+    const result = await creationWake({ source, turns, maxPlansPerWake: 2 })
+    expect(source.enqueueSourceJob).toHaveBeenCalledTimes(2)
+    const [first, second] = source.enqueueSourceJob.mock.calls.map(([input]) => input.idempotencyKey)
+    expect(first).toBe(second)
+    expect(result.service.health().run?.sourceProposals).toEqual({ queued: 1, prepared: 0, rejected: 1 })
+  })
+
+  it('invalidates a drifting template base before creation queue', async () => {
+    const source = creationService()
+    let reads = 0
+    source.inspectCreateSource.mockImplementation(async input => ({ name: input.name,
+      baseCommit: (++reads === 1 ? 'c' : 'd').repeat(40), files: [{ path: 'src/index.ts', bytes: 8 }],
+      contents: input.paths.map(path => ({ path, content: 'template' })),
+    }))
+    const drift = await creationWake({ source, turns: [
+      { name: 'plugin_source_gaps', args: {} }, creationRead([]), creationRead(['src/index.ts']), creationCall(),
+    ] })
+    expect(source.enqueueSourceJob).not.toHaveBeenCalled()
+    expect(drift.service.health().run?.sourceProposals).toEqual({ queued: 0, prepared: 0, rejected: 1 })
   })
 
   it.each([false, true])('keeps four tools when source enabled=%s but its peer is absent', async enabled => {

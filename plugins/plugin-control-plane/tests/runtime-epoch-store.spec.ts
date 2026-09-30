@@ -7,6 +7,7 @@ vi.mock('../src/release.js', async importOriginal => ({
 }))
 
 import { ControlPlaneStore, controlPlaneDigest, readOwnerRuntimeEpochContext } from '../src/store.js'
+import { controlPlaneSchemaVersion } from '../src/sqlite.js'
 import { cleanupRuntimeEpochFixtures, createRuntimeEpochFixture } from './helpers/runtime-epoch.js'
 
 afterEach(async () => { vi.useRealTimers(); await cleanupRuntimeEpochFixtures() })
@@ -145,7 +146,7 @@ test('schema-25 upgrade adds the epoch journal while retaining signed historical
   try {
     const check = new DatabaseSync(f.plan.ledger.path, { readOnly: true })
     try {
-      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 28 })
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: controlPlaneSchemaVersion })
       expect(check.prepare('SELECT COUNT(*) AS n FROM deployment_runtime_epochs').get()).toEqual({ n: 0 })
     } finally { check.close() }
     expect(historicalRows(f.plan.ledger.path, f.plan.id)).toEqual(before)

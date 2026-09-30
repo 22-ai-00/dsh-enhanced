@@ -41,6 +41,8 @@ export interface WorkflowOwnerAnchoredConfig {
  */
 export interface PluginSourceProposalsConfig {
   enabled?: boolean
+  /** Separately opt into new-plugin creation; only Host-owned durable jobs may use it. */
+  allowCreation?: boolean
   /** Inline builds during the model wake; durable queues Host-owned work. */
   preparationMode?: 'inline' | 'durable'
   /** Canonical absolute path of the dsh-enhanced repository the patches target. Required when enabled. */
@@ -96,6 +98,7 @@ export interface NormalizedWorkflowOwnerAnchoredConfig {
 
 export interface NormalizedPluginSourceProposalsConfig {
   readonly enabled: boolean
+  readonly allowCreation: boolean
   readonly preparationMode: 'inline' | 'durable'
   readonly repository: string | null
   readonly maxPlansPerWake: number
@@ -171,6 +174,7 @@ const workflowOwnerAnchoredSchema = workflowOwnerAnchoredObjectSchema
 // Same missing-object default rationale as workflowOwnerAnchoredSchema above.
 const pluginSourceProposalsObjectSchema = Schema.object({
   enabled: Schema.boolean().default(false),
+  allowCreation: Schema.boolean().default(false),
   preparationMode: Schema.union(['inline', 'durable']).default('inline'),
   repository: boundedText(4_096),
   maxPlansPerWake: Schema.natural().min(1).max(5).default(1),
@@ -248,6 +252,7 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     }),
     pluginSourceProposals: Object.freeze({
       enabled: config.pluginSourceProposals?.enabled ?? false,
+      allowCreation: config.pluginSourceProposals?.allowCreation ?? false,
       preparationMode: config.pluginSourceProposals?.preparationMode ?? 'inline',
       repository: config.pluginSourceProposals?.repository?.normalize('NFC').trim() ?? null,
       maxPlansPerWake: config.pluginSourceProposals?.maxPlansPerWake ?? 1,
@@ -297,6 +302,10 @@ export function normalizeConfig(input?: AssistantGrowthDriverConfig): Readonly<N
     if (repository === null || !isAbsolute(repository) || resolve(repository) !== repository) {
       throw new Error('assistant-growth-driver: pluginSourceProposals.repository must be a canonical absolute path when enabled')
     }
+  }
+  if (normalized.pluginSourceProposals.allowCreation
+    && (!normalized.pluginSourceProposals.enabled || normalized.pluginSourceProposals.preparationMode !== 'durable')) {
+    throw new Error('assistant-growth-driver: source creation requires enabled durable source proposals')
   }
   if ((normalized.budgetId === null) !== (normalized.budgetAmount === null)) {
     throw new Error('assistant-growth-driver: budgetId and budgetAmount must be configured together')

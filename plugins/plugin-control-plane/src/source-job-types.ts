@@ -1,6 +1,7 @@
 import type { SourceBuildConfig } from './source-build.js'
 import type { ScopedPluginFile } from './source-workspace.js'
 import type { SourceBaselineConfig } from './source-baseline.js'
+import type { SourceCreationBinding, SourceCreationGrant } from './source-creation.js'
 
 /** Owner-configured authority for background checks, separate from an Agent wake. */
 export interface SourceJobsConfig {
@@ -10,6 +11,8 @@ export interface SourceJobsConfig {
   repository: string
   /** Owner-managed source history; the working checkout remains untouched. */
   baseline?: SourceBaselineConfig
+  /** Explicit owner grant for creating new plugin roots. */
+  creation?: SourceCreationGrant
   ownerRouteId: string
   principalId: string
   workspace: string
@@ -47,6 +50,9 @@ export interface SourceJobIntent {
   trustDigest: string
   repository: string
   baseline?: SourceBaselineConfig
+  /** Absent on historical and current modify jobs. */
+  mode?: 'create'
+  creation?: SourceCreationBinding
   name: string
   gapId: string
   gapRevision: number
@@ -90,6 +96,7 @@ export interface SourceJobProjection {
   name: string
   gapId: string
   baseCommit: string
+  mode?: 'create'
   status: SourceJobStatus
   createdAt: number
   expiresAt: number

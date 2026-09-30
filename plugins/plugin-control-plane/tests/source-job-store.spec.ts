@@ -53,7 +53,211 @@ function sourcePlanCount(path: string): number {
   finally { database.close() }
 }
 
+/** Rebuild the temporary fixture as an actual v28 table, preserving its rows. */
+function downgradeSourcePlansToV28(path: string, invalidMode = false): void {
+  const database = new DatabaseSync(path)
+  try {
+    const current = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'source_plans'").get() as { sql: string }
+    const indexes = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'source_plans' AND sql IS NOT NULL").all() as Array<{ sql: string }>
+    const columns = (database.prepare('PRAGMA table_info(source_plans)').all() as Array<{ name: string }>).map(row => row.name)
+      .filter(name => name !== 'creation_json').map(name => `"${name}"`).join(',')
+    const old = current.sql.replace(/^CREATE TABLE\s+"?source_plans"?/u, 'CREATE TABLE source_plans_v28')
+      .replace("mode IN ('create', 'modify', 'prepared-create')", invalidMode
+        ? "mode IN ('create', 'modify', 'unexpected')" : "mode IN ('create', 'modify')")
+      .replace(/\s*creation_json TEXT CHECK\(creation_json IS NULL OR \(json_valid\(creation_json\) AND json_type\(creation_json\) = 'object'\)\),/u, '')
+      .replace("mode IN ('modify', 'prepared-create') AND prepared_evidence_json IS NOT NULL", "mode = 'modify' AND prepared_evidence_json IS NOT NULL")
+      .replace(/\s*CHECK\(\(mode = 'prepared-create' AND creation_json IS NOT NULL\) OR \(mode IN \('create', 'modify'\) AND creation_json IS NULL\)\),/u, '')
+    if (old.includes('creation_json') || !old.includes('CREATE TABLE source_plans_v28')) throw new Error('v28 fixture schema was not reconstructed')
+    database.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE')
+    try {
+      database.exec(`${old}; INSERT INTO source_plans_v28 (${columns}) SELECT ${columns} FROM source_plans;
+        DROP TABLE source_plans; ALTER TABLE source_plans_v28 RENAME TO source_plans; DROP TABLE source_creation_grants;`)
+      for (const index of indexes) database.exec(index.sql)
+      if (database.prepare('PRAGMA foreign_key_check').all().length) throw new Error('v28 fixture has invalid foreign keys')
+      database.exec('PRAGMA user_version = 28; COMMIT')
+    } catch (error) { database.exec('ROLLBACK'); throw error }
+    finally { database.exec('PRAGMA foreign_keys = ON') }
+  } finally { database.close() }
+}
+
 describe('durable source job ledger', () => {
+  it('migrates a v28 source row with its original digest and dependent receipts intact', async () => {
+    const target = await fixture()
+    const gap = target.store.recordGap({ idempotencyKey: 'gap:v28', capability: 'health', context: 'migration', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+    const request = { gapId: gap.id, repository: '/repository', worktree: '/worktree', baseCommit: 'a'.repeat(40), name: 'health-helper',
+      generatorDigest: hex('legacy-generator'), scope: ['plugins/README.md', 'plugins/health-helper'], ttlMs: 60_000,
+      idempotencyKey: 'plan:v28' }
+    const original = target.store.createSourcePlan(request)
+    target.store.close()
+    downgradeSourcePlansToV28(target.path)
+    const reopened = new ControlPlaneStore({ path: target.path, now: target.now })
+    try {
+      expect(reopened.getSourcePlan(original.result.id)).toEqual(original.result)
+      expect(reopened.createSourcePlan(request)).toEqual(original)
+      const database = new DatabaseSync(target.path)
+      try {
+        expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: controlPlaneSchemaVersion })
+        expect(database.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+        expect(database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name='source_creation_grants'").get()).toEqual({ name: 'source_creation_grants' })
+      } finally { database.close() }
+    } finally { reopened.close() }
+  })
+
+  it('rejects an unknown v28 mode constraint without partial migration', async () => {
+    const target = await fixture()
+    target.store.close()
+    downgradeSourcePlansToV28(target.path, true)
+    expect(() => openControlPlaneDatabase(target.path)).toThrow(/unknown v28 source plan schema/)
+    const database = new DatabaseSync(target.path)
+    try {
+      expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 28 })
+      expect(database.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+      expect(database.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name='source_creation_grants'").get()).toBeUndefined()
+    } finally { database.close() }
+  })
+  it('charges every accepted create attempt to one immutable grant across failure, restart and authority changes', async () => {
+    const target = await fixture()
+    const grant = { id: 'owner-create-grant', expiresAt: target.now() + 60_000, maxCreates: 1, namePrefix: 'new-' }
+    const binding = { grant, generatorDigest: hex('fixed-generator') }
+    const create = (character: string, authority = intent().authority, creation = binding) => ({
+      id: jobId(character), automationId: jobId(character), idempotencyKey: `create:${character}`,
+      intent: intent({ name: `new-${character}`, mode: 'create', creation, authority }, character),
+    })
+    try {
+      const first = target.store.enqueueSourceJob(create('d'))
+      expect(first.intent.creation).toEqual(binding)
+      expect(target.store.enqueueSourceJob(create('d'))).toEqual(first)
+      target.store.settleSourceJob({ id: first.id, revision: first.revision, status: 'failed', failureCode: 'failed-build' })
+      expect(() => target.store.enqueueSourceJob(create('e'))).toThrow(/creation grant quota/)
+      expect(() => target.store.enqueueSourceJob(create('e', { ...intent().authority, id: 'other-authority', digest: hex('other-authority') }))).toThrow(/creation grant quota/)
+      expect(() => target.store.enqueueSourceJob(create('e', { ...intent().authority, id: 'other-authority', digest: hex('other-authority') },
+        { ...binding, grant: { ...grant, maxCreates: 2 } }))).toThrow(/immutable/)
+      target.store.close()
+      const reopened = new ControlPlaneStore({ path: target.path, now: target.now })
+      try {
+        expect(reopened.getSourceJob(first.id)?.intent.creation).toEqual(binding)
+        expect(() => reopened.enqueueSourceJob(create('e'))).toThrow(/creation grant quota/)
+        expect(() => reopened.enqueueSourceJob(create('e', { ...intent().authority, id: 'other-authority', digest: hex('other-authority') },
+          { ...binding, grant: { ...grant, maxCreates: 2 } }))).toThrow(/immutable/)
+        target.setNow(grant.expiresAt + 1)
+        expect(reopened.getSourceJob(first.id)?.intent.creation).toEqual(binding)
+      } finally { reopened.close() }
+    } finally { try { target.store.close() } catch {} }
+  })
+
+  it('keeps an unknown create attempt charged until explicit reconciliation without automatic replay', async () => {
+    const target = await fixture()
+    try {
+      const grant = { id: 'owner-create-unknown', expiresAt: target.now() + 60_000, maxCreates: 1, namePrefix: 'new-' }
+      const source = intent({ mode: 'create', creation: { grant, generatorDigest: hex('generator') }, name: 'new-helper' })
+      const queued = target.store.enqueueSourceJob({ id: jobId(), automationId: jobId(), idempotencyKey: 'create:unknown', intent: source })
+      const bound = target.store.bindSourceJobDefinition({ id: queued.id, revision: queued.revision, definitionHash: hex('definition') })
+      target.store.claimSourceJob({ id: queued.id, revision: bound.revision, definitionHash: hex('definition'), occurrenceId: 'occurrence-1' })
+      expect(target.store.interruptSourceJobs()).toBe(1)
+      expect(target.store.getSourceJob(queued.id)).toMatchObject({ status: 'unknown', failureCode: 'interrupted' })
+      expect(target.store.listPreparedSourcePlans()).toHaveLength(0)
+      expect(() => target.store.expirePreparedSourcePlan({ planId: queued.id, expectedRevision: 1, now: target.now() + 60_001 })).toThrow()
+      expect(() => target.store.enqueueSourceJob({ id: jobId('e'), automationId: jobId('e'), idempotencyKey: 'create:second',
+        intent: intent({ mode: 'create', creation: source.creation!, name: 'new-other' }, 'e') })).toThrow()
+      target.store.close()
+      const reopened = new ControlPlaneStore({ path: target.path, now: target.now })
+      try {
+        expect(reopened.interruptSourceJobs()).toBe(0)
+        expect(reopened.getSourceJob(queued.id)?.status).toBe('unknown')
+        const unknown = reopened.getSourceJob(queued.id)!
+        reopened.settleSourceJob({ id: unknown.id, revision: unknown.revision, status: 'failed', failureCode: 'reconciled' })
+        expect(() => reopened.enqueueSourceJob({ id: jobId('e'), automationId: jobId('e'), idempotencyKey: 'create:second',
+          intent: intent({ mode: 'create', creation: source.creation!, name: 'new-other' }, 'e') })).toThrow(/creation grant quota/)
+      } finally { reopened.close() }
+    } finally { try { target.store.close() } catch {} }
+  })
+
+  it('refuses a queued create claim exactly at grant expiry and keeps its accepted charge', async () => {
+    const target = await fixture()
+    try {
+      const grant = { id: 'owner-create-short', expiresAt: target.now() + 1, maxCreates: 1, namePrefix: 'new-' }
+      const source = intent({ mode: 'create', creation: { grant, generatorDigest: hex('generator') }, name: 'new-helper' })
+      const queued = target.store.enqueueSourceJob({ id: jobId(), automationId: jobId(), idempotencyKey: 'create:short', intent: source })
+      const bound = target.store.bindSourceJobDefinition({ id: queued.id, revision: queued.revision, definitionHash: hex('definition') })
+      target.setNow(grant.expiresAt)
+      expect(() => target.store.claimSourceJob({ id: queued.id, revision: bound.revision,
+        definitionHash: hex('definition'), occurrenceId: 'late-occurrence' })).toThrow(/CAS/)
+      expect(target.store.getSourceJob(queued.id)).toMatchObject({ status: 'queued', revision: bound.revision })
+      target.store.settleSourceJob({ id: queued.id, revision: bound.revision, status: 'failed', failureCode: 'grant-expired' })
+      const database = new DatabaseSync(target.path)
+      try { expect(database.prepare('SELECT creates FROM source_creation_grants WHERE grant_id = ?').get(grant.id)).toEqual({ creates: 1 }) }
+      finally { database.close() }
+    } finally { target.store.close() }
+  })
+
+  it('commits a prepared create only with its running intent, exact scope and frozen evidence', async () => {
+    const target = await fixture()
+    try {
+      const gap = target.store.recordGap({ idempotencyKey: 'gap:prepared-create', capability: 'new-capability', context: 'job', expectedValue: 10, frequency: 2, estimatedCost: 1, risk: 0 })
+      const creation = { grant: { id: 'owner-create-grant', expiresAt: target.now() + 60_000, maxCreates: 1, namePrefix: 'new-' }, generatorDigest: hex('generator') }
+      const source = intent({ mode: 'create', creation, name: 'new-helper', gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap) })
+      const queued = target.store.enqueueSourceJob({ id: jobId(), automationId: jobId(), idempotencyKey: 'create:prepared', intent: source })
+      const bound = target.store.bindSourceJobDefinition({ id: queued.id, revision: queued.revision, definitionHash: hex('definition') })
+      const running = target.store.claimSourceJob({ id: queued.id, revision: bound.revision, definitionHash: hex('definition'), occurrenceId: 'occurrence-1' })
+      const request = { gapId: gap.id, repository: source.repository, worktree: source.worktree, baseCommit: source.baseCommit,
+        name: source.name, generatorDigest: creation.generatorDigest, scope: ['plugins/new-helper', 'plugins/README.md', 'pnpm-lock.yaml'],
+        mode: 'prepared-create' as const, creation, ttlMs: source.ttlMs, idempotencyKey: 'create:plan',
+        sourceJob: { jobId: queued.id, jobRevision: running.revision, occurrenceId: 'occurrence-1' },
+        prepared: { treeDigest: hex('tree'), patchDigest: hex('patch'), checkedAt: target.now() + 1, evidence: evidence() } }
+      expect(() => target.store.createSourcePlan({ ...request, scope: ['plugins/new-helper', 'plugins/README.md'] })).toThrow(/scope/)
+      expect(() => target.store.createSourcePlan({ ...request, creation: { ...creation, generatorDigest: hex('other') } })).toThrow(/binding/)
+      expect(() => target.store.createSourcePlan({ ...request, sourceJob: undefined as never })).toThrow(/running source job/)
+      expect(sourcePlanCount(target.path)).toBe(0)
+      const receipt = target.store.createSourcePlan(request)
+      expect(receipt.result).toMatchObject({ mode: 'prepared-create', status: 'pending-approval', creation, sourceCheck: { treeDigest: hex('tree') } })
+      expect(target.store.getSourceJob(queued.id)).toMatchObject({ status: 'prepared', planId: receipt.result.id })
+      expect(target.store.createSourcePlan(request)).toEqual(receipt)
+      expect(target.store.listPreparedSourceApprovalJobs()).toHaveLength(0)
+      await expect(target.store.approveSource({ planId: receipt.result.id, expectedRevision: 1, receipt: {} as never,
+        resolveAuthority: () => { throw new Error('must not call modify authority') }, idempotencyKey: 'create:approve' })).rejects.toThrow(/own owner creation authority/)
+      expect(target.store.getSourcePlan(receipt.result.id).status).toBe('pending-approval')
+      const database = new DatabaseSync(target.path)
+      try { database.prepare('UPDATE source_plans SET creation_json = ? WHERE id = ?').run(JSON.stringify({ ...creation, unknown: true }), receipt.result.id) }
+      finally { database.close() }
+      expect(() => target.store.getSourcePlan(receipt.result.id)).toThrow(/creation binding is corrupt/)
+    } finally { target.store.close() }
+  })
+  it('retires an expired prepared create and reopens its gap without refunding create quota', async () => {
+    const target = await fixture()
+    try {
+      const gap = target.store.recordGap({ idempotencyKey: 'gap:create-expiry', capability: 'new-capability', context: 'expiry', expectedValue: 1, frequency: 1, estimatedCost: 1, risk: 0 })
+      const creation = { grant: { id: 'owner-create-expiry', expiresAt: target.now() + 180_000, maxCreates: 1, namePrefix: 'new-' }, generatorDigest: hex('generator') }
+      const source = intent({ mode: 'create', creation, name: 'new-helper', gapId: gap.id, gapRevision: gap.revision, gapDigest: controlPlaneDigest(gap) })
+      const queued = target.store.enqueueSourceJob({ id: jobId(), automationId: jobId(), idempotencyKey: 'create:expiry', intent: source })
+      const bound = target.store.bindSourceJobDefinition({ id: queued.id, revision: queued.revision, definitionHash: hex('definition') })
+      const running = target.store.claimSourceJob({ id: queued.id, revision: bound.revision, definitionHash: hex('definition'), occurrenceId: 'occurrence-1' })
+      const plan = target.store.createSourcePlan({ gapId: gap.id, repository: source.repository, worktree: source.worktree,
+        baseCommit: source.baseCommit, name: source.name, generatorDigest: creation.generatorDigest,
+        scope: ['plugins/README.md', 'plugins/new-helper', 'pnpm-lock.yaml'], mode: 'prepared-create', creation,
+        ttlMs: source.ttlMs, idempotencyKey: 'create:expiry-plan',
+        sourceJob: { jobId: queued.id, jobRevision: running.revision, occurrenceId: 'occurrence-1' },
+        prepared: { treeDigest: hex('tree'), patchDigest: hex('patch'), checkedAt: target.now() + 1, evidence: evidence() } }).result
+      expect(target.store.listModifySourcePlans()).toHaveLength(0)
+      expect(target.store.listPreparedSourcePlans()).toMatchObject([{ id: plan.id }])
+      target.setNow(plan.expiresAt + 1)
+      expect(target.store.listPreparedSourcePlans({ expiredBefore: target.now() })).toMatchObject([{ id: plan.id }])
+      const expired = target.store.expirePreparedSourcePlan({ planId: plan.id, expectedRevision: plan.revision, now: target.now() })
+      expect(expired).toMatchObject({ mode: 'prepared-create', status: 'expired', revision: plan.revision + 1, digest: plan.digest })
+      expect(target.store.getGap(gap.id).status).toBe('open')
+      expect(target.store.expirePreparedSourcePlan({ planId: plan.id, expectedRevision: plan.revision, now: target.now() })).toEqual(expired)
+      const secondAuthority = { ...source.authority, id: 'authority-after-expiry', digest: hex('authority-after-expiry'), expiresAt: target.now() + 60_000 }
+      expect(() => target.store.enqueueSourceJob({ id: jobId('e'), automationId: jobId('e'), idempotencyKey: 'create:after-expiry',
+        intent: intent({ mode: 'create', creation, name: 'new-other', authority: secondAuthority }, 'e') })).toThrow(/creation grant quota/)
+      target.store.close()
+      const reopened = new ControlPlaneStore({ path: target.path, now: target.now })
+      try {
+        expect(reopened.getSourcePlan(plan.id)).toEqual(expired)
+        expect(reopened.expirePreparedSourcePlan({ planId: plan.id, expectedRevision: plan.revision, now: target.now() })).toEqual(expired)
+        expect(reopened.listPreparedSourcePlans({ expiredBefore: target.now() })).toMatchObject([{ id: plan.id, status: 'expired' }])
+      } finally { reopened.close() }
+    } finally { try { target.store.close() } catch {} }
+  })
+
   it('replays exact authority-scoped submissions and persists its quota', async () => {
     const target = await fixture()
     try {

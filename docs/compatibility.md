@@ -12,6 +12,14 @@ Personal Memory v7 增加有限采用授权、累计额度与不可变结果回�
 
 v25 增加完成顺序与终态保护，原 owner 身份和只读 owner snapshot 协议不变。Web Owner 诊断显式兼容 v24/v25，安装生命周期接受 v23/v24/v25 的既有 snapshot 协议；未知 schema 继续拒绝。新来源读取与记忆审查须使用同批 Delivery、Evaluation、Verifier 和共享合同，旧读取器不能自动推断兼容。迁移保留历史任务，但历史完成顺序仅为确定性补序，不代表原始提交顺序。
 
+## 自动创建插件候选（Control Plane schema 29）
+
+schema 29 在原源码计划中增加 `prepared-create` 与冻结创建授权，并独立持久计量创建用量。升级保持 schema 28 的旧 `create` / `modify` 行、计划摘要、收据和引用不变，不回填创建权限。旧二进制不能打开新账本；停下旧写者，并同步升级共享账本的 Host、CLI 与签名器。只读维护入口要求当前 schema，不能用旧程序打开已升级副本。
+
+创建构建须使用保留已验证基线 lock 的新版 source builder 镜像；Host 精确复核新 importer 后，还须匹配镜像内基线锁 SHA。旧镜像缺少基线文件、基线变动或输入回执不匹配时拒绝创建，须通过现有候选构建流程准备新镜像；不自动重置旧 bootstrap 回执。普通修改保持原 pnpm 策略。安装器的 Dockerfile 白名单与镜像构建脚本须同批升级，实际构建权限和限制见[构建器说明](../scripts/isolation/README.md)。
+
+Growth 的 `pluginSourceProposals.allowCreation` 默认关闭且只适用于 durable 模式；启用时需同批 Control Plane 的创建读取与公开命名规则接口，以及 owner 的 `sourceJobs.creation`。缺少接口或有效授权时保留旧修改路径。创建用量不因重启或 sourceJobs 配置换代而复位；同一创建 grant id 的定义不能变更。候选目前只到 pending，旧修改审批、发布和采用合同不适用于它；详细边界见[创建候选](../plugins/plugin-control-plane/README.md#自动创建新插件候选)。
+
 ## 本地源码维护历史（Control Plane schema 28）
 
 schema 28 为冻结本地更新增加独立的源码维护记录，保留 schema 27 的计划、发布收据、部署记录和授权用量。维护记录由既有 Host 身份签名，绑定安装、账本、原始源码基准、更新前后提交与制品摘要，并与原有已签名 release merge 共同形成唯一的源码链。后续源码任务与发布准入都沿这条链解析基准，不能用重置 `initialCommit` 或清空旧记录恢复运行。

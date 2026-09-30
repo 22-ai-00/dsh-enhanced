@@ -6,6 +6,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import * as release from '../src/release.js'
 vi.mock('../src/release.js', async original => ({ ...await original<typeof release>(), invokeSourceReleaseAdapter: vi.fn() }))
 import { appendHostMaintenance, readHostMaintenanceContext, ControlPlaneStore } from '../src/store.js'
+import { controlPlaneSchemaVersion } from '../src/sqlite.js'
 import { hostMaintenanceDigest, signHostMaintenanceRecord, type HostMaintenanceRecord } from '../src/host-maintenance.js'
 import { cleanupRuntimeEpochFixtures, createRuntimeEpochFixture } from './helpers/runtime-epoch.js'
 import { rollbackPluginWatch } from '../src/cli.js'
@@ -137,7 +138,7 @@ test('schema 26 migration adds an empty maintenance journal and retains original
     f.db.exec('DROP TABLE deployment_host_maintenance; PRAGMA user_version=26')
     const reopened = new ControlPlaneStore({ path: f.plan.ledger.path })
     try {
-      expect(f.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 28 })
+      expect(f.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: controlPlaneSchemaVersion })
       expect(readHostMaintenanceContext(f.db, f.plan.id).records).toEqual([])
       expect(history(f.db)).toEqual(before)
     } finally { reopened.close() }

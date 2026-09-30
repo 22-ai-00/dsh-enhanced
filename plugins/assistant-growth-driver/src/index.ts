@@ -124,7 +124,7 @@ export class AssistantGrowthDriverService extends Service {
       // when the control plane is absent or is being replaced.
       ctx.inject(['pluginControlPlane' as never], sourceCtx => {
         const abort = new AbortController()
-        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSource' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
+        type SourceService = Pick<GrowthSourcePlanePort, 'prepareModifySourcePlan' | 'inspectSource' | 'inspectCreateSource' | 'getSourceCreationNamespace' | 'enqueueSourceJob' | 'inspectSourceJob'> & {
           gaps(limit: number): readonly GrowthSourceGap[]
           recordOwnerTaskFailureGap?: (source: OwnerForegroundLearningTask) => GrowthSourceGap
           canPrepareSource?: () => boolean
@@ -164,6 +164,21 @@ export class AssistantGrowthDriverService extends Service {
                 assertCurrent: () => { signal.throwIfAborted(); current(); input.assertCurrent() },
               })
             },
+            ...(durable && this.#config.pluginSourceProposals.allowCreation
+              && typeof provider.inspectCreateSource === 'function' && typeof provider.getSourceCreationNamespace === 'function'
+              ? { inspectCreateSource: async (input: Parameters<NonNullable<GrowthSourcePlanePort['inspectCreateSource']>>[0]) => {
+                  const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
+                  const live = current()
+                  if (typeof live.inspectCreateSource !== 'function') throw new Error('control plane creation source API unavailable')
+                  return live.inspectCreateSource({ ...input, signal,
+                    assertCurrent: () => { signal.throwIfAborted(); current(); input.assertCurrent() },
+                  })
+                },
+                getSourceCreationNamespace: () => {
+                  const namespace = current().getSourceCreationNamespace?.()
+                  return namespace === undefined ? undefined : { namePrefix: namespace.namePrefix }
+                } }
+              : {}),
             prepareModifySourcePlan: async (input: Parameters<GrowthSourcePlanePort['prepareModifySourcePlan']>[0]) => {
               const signal = AbortSignal.any([input.signal, abort.signal, this.#abort.signal])
               return current().prepareModifySourcePlan({ ...input, signal,

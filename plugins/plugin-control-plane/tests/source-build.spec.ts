@@ -1,24 +1,31 @@
 // Engineering fixtures run a fake Docker executable. These tests exercise Host
 // admission, process bounds and daemon failure handling, not OS isolation.
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, expect, it, vi } from 'vitest'
 import { removeSourceJobContainer, runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from '../src/source-build.ts'
+import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, type SourceCreationGrant } from '../src/source-creation.ts'
+import { createIsolatedWorktree } from '../src/source-workspace.ts'
+import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
 
 const indices = vi.hoisted(() => [] as string[])
+const indexHook = vi.hoisted(() => ({ run: undefined as undefined | (() => Promise<void>) }))
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
   return { ...actual, mkdtemp: async (prefix: string) => {
     const path = await actual.mkdtemp(prefix)
-    if (prefix.includes('dsh-source-build-index-')) indices.push(path)
+    if (prefix.includes('dsh-source-build-index-')) { indices.push(path); await indexHook.run?.() }
     return path
   } }
 })
 
 const roots: string[] = []
-afterEach(async () => { indices.length = 0; for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
+const worktrees: Array<{ remove: () => Promise<void> }> = []
+afterEach(async () => { indexHook.run = undefined; indices.length = 0; for (const worktree of worktrees.splice(0).reverse()) await worktree.remove(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
 const marker = `printf 'DSH_PREPARED_PACK\\thelper-1.0.0-rc.1.tgz\\t13\\t${'d'.repeat(64)}\\tv24.0.0\\t11.7.0\\n'`
 async function fixture(run = marker, control = 'exit 0', override: Partial<SourceBuildConfig> = {}, version = "printf '%s\\n' '29.4.1/linux/amd64'") {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'source-builder-test-'))); roots.push(root)
@@ -41,6 +48,71 @@ async function fixture(run = marker, control = 'exit 0', override: Partial<Sourc
     assertCurrent: async () => {}, preparedAt: Date.now() } }
 }
 
+async function creationFixture() {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'source-builder-create-'))); roots.push(root)
+  const sourceRoot = fileURLToPath(new URL('../../..', import.meta.url)).replace(/\/$/u, '')
+  const { repository, baseCommit } = await createSourceCreationFixture(sourceRoot, join(root, 'repository'))
+  const environment = { ...process.env, HOME: root }
+  const isolated = await createIsolatedWorktree({ stateRoot: join(root, 'state'), repository, baseCommit, environment })
+  worktrees.push(isolated)
+  const signal = new AbortController().signal
+  const name = 'rsi-build-proof'
+  const grant: SourceCreationGrant = { id: 'owner-build-proof', expiresAt: Date.now() + 120_000,
+    maxCreates: 1, namePrefix: 'rsi-build-' }
+  const view = await inspectSourceCreationContext({ repository, name, paths: ['src/index.ts'], baseCommit,
+    environment, signal, assertCurrent: () => undefined, grant })
+  const creation = { grant, generatorDigest: view.generatorDigest }
+  const prepared = await prepareCreatedPluginWorkspace({ worktree: isolated.worktree, baseCommit, name,
+    files: [{ path: 'README.md', content: '# Created build proof\n' }], environment, signal,
+    assertCurrent: () => undefined, creation })
+  const dockerPath = join(root, 'docker')
+  await writeFile(dockerPath, `#!/bin/sh\nif [ "$1" = run ]; then\nprintf '%s\\n' "$@" > "$0.args"\ncat >/dev/null\n${marker}\nfi\n`)
+  await chmod(dockerPath, 0o700)
+  const config: SourceBuildConfig = { dockerPath, image: `sha256:${'a'.repeat(64)}`, timeoutMs: 60_000,
+    memoryMiB: 512, cpus: 1, pidsLimit: 64, workspaceMiB: 128, outputBytes: 4_096 }
+  return { root, repository, worktree: isolated.worktree, dockerPath, name, baseCommit, scope: prepared.scope,
+    creation, input: { config, worktree: isolated.worktree, baseCommit, name, scope: prepared.scope,
+      environment, signal, assertCurrent: async () => {}, preparedAt: Date.now(), creation } }
+}
+
+it('enables trust-lockfile only after real generated creation proof and freezes the base lock digest', async () => {
+  const f = await creationFixture()
+  const result = await runDockerPreparedChecks(f.input)
+  const baseLock = execFileSync('/usr/bin/git', ['show', `${f.baseCommit}:pnpm-lock.yaml`], { cwd: f.repository })
+  const expected = createHash('sha256').update(baseLock).digest('hex')
+  expect(result.evidence.commands[0]?.args).toEqual(expect.arrayContaining([
+    '--env', 'DSH_SOURCE_TRUST_LOCKFILE=true', '--env', `DSH_SOURCE_BASE_LOCK_SHA256=${expected}`]))
+  expect(result.evidence.pack.version).toBe('0.1.0')
+  expect(await readFile(`${f.dockerPath}.args`, 'utf8')).toContain('DSH_SOURCE_TRUST_LOCKFILE=true')
+})
+
+it('rejects altered creation scope, grant, lock and scaffold before launching Docker', async () => {
+  const f = await creationFixture()
+  const argsPath = `${f.dockerPath}.args`
+  const base = f.input
+  await expect(runDockerPreparedChecks({ ...base, scope: [`plugins/${f.name}`] })).rejects.toThrow(/scope differs/)
+  await expect(lstat(argsPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  await expect(runDockerPreparedChecks({ ...base, creation: { ...f.creation,
+    grant: { ...f.creation.grant, expiresAt: Date.now() - 1 } } })).rejects.toThrow(/grant expired/)
+  await expect(lstat(argsPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  const lockPath = join(f.worktree, 'pnpm-lock.yaml')
+  const lock = await readFile(lockPath)
+  await writeFile(lockPath, 'tampered\n')
+  await expect(runDockerPreparedChecks(base)).rejects.toThrow(/lock importer changed|source changed/)
+  await expect(lstat(argsPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  await writeFile(lockPath, lock)
+  await writeFile(join(f.worktree, 'plugins', f.name, 'cordis.patch.yml'), 'tampered\n')
+  await expect(runDockerPreparedChecks(base)).rejects.toThrow(/Host-owned generated file changed/)
+  await expect(lstat(argsPath)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
+it('rejects a staged tree changed after creation proof and before Git staging', async () => {
+  const f = await creationFixture()
+  indexHook.run = async () => { await writeFile(join(f.worktree, 'plugins', f.name, 'README.md'), '# raced source\n') }
+  await expect(runDockerPreparedChecks(f.input)).rejects.toThrow(/staged tree differs from verified workspace/)
+  await expect(lstat(`${f.dockerPath}.args`)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
 it('records the immutable prerelease package version and configured image', async () => {
   const f = await fixture()
   const result = await runDockerPreparedChecks(f.input)
@@ -48,6 +120,7 @@ it('records the immutable prerelease package version and configured image', asyn
   expect(result.evidence.commands[0]?.args).toContain(f.config.image)
   expect(result.evidence.commands[0]?.args).not.toContain('systempaths=unconfined')
   expect(result.evidence.commands[0]?.args.some(arg => arg.startsWith('/sys:'))).toBe(false)
+  expect(result.evidence.commands[0]?.args.some(arg => arg.startsWith('VITEST_MAX_WORKERS='))).toBe(false)
 })
 
 it('rejects larger limits unless the owner explicitly selects the repository profile', () => {
@@ -74,12 +147,20 @@ it('passes repository profile resource and deterministic test environment flags 
   expect(argv).toContain('/workspace:rw,nosuid,nodev,mode=1777,size=8192m,exec')
   expect(argv).toContain('/tmp:rw,nosuid,nodev,mode=1777,size=2048m,exec')
   expect(argv).toContain('CI=true')
-  expect(argv).toContain('VITEST_MAX_WORKERS=1')
+  expect(argv).toContain('VITEST_MAX_WORKERS=4')
   expect(argv).not.toContain('systempaths=unconfined')
   expect(result.evidence.commands[0]?.args).toEqual(expect.arrayContaining([
     '--memory', '16384m', '--cpus', '16', '--pids-limit', '1024',
-    '--env', 'CI=true', '--env', 'VITEST_MAX_WORKERS=1',
+    '--env', 'CI=true', '--env', 'VITEST_MAX_WORKERS=4',
   ]))
+})
+
+it.each([[1, 1], [8, 4], [0.5, 1]])('sets repository Vitest workers from %s CPUs to %s', async (cpus, workers) => {
+  const f = await fixture(marker, 'exit 0', { profile: 'repository', cpus })
+  const result = await runDockerPreparedChecks(f.input)
+  const expected = `VITEST_MAX_WORKERS=${workers}`
+  expect(await readFile(`${f.dockerPath}.args`, 'utf8')).toContain(expected)
+  expect(result.evidence.commands[0]?.args).toEqual(expect.arrayContaining(['--cpus', String(cpus), '--env', expected]))
 })
 
 it('rejects repository seccomp escalation unless the exact repository configuration is used', () => {

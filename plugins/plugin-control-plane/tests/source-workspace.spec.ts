@@ -19,7 +19,9 @@ import { ControlPlaneCliError } from '../src/errors.ts'
 import {
   checkedSourceSnapshot,
   createIsolatedWorktree,
+  gcPreparedModifyWorktrees,
   linkedWorktrees,
+  preparedWorktreeIsGarbage,
   PROTECTED_PLUGIN_DENYLIST,
   writeScopedPluginFiles,
 } from '../src/source-workspace.ts'
@@ -573,9 +575,26 @@ exit 0
     expect(args.length).toBeGreaterThan(32)
     expect(args).toContain('CI=true')
     expect(args.some(arg => arg.startsWith('dsh.source.tree='))).toBe(true)
-    expect(args.at(-1)).toContain('checked check pnpm check')
+    expect(args.at(-1)).toContain("checked check /bin/sh -ceu 'umask 022; exec pnpm check'")
+    expect(args.at(-1)!.length).toBeGreaterThan(4096)
     const store = new ControlPlaneStore({ path: value.state })
-    try { expect(store.getSourcePlan(plan.id).preparedEvidence).toEqual(plan.preparedEvidence) } finally { store.close() }
+    const database = openDatabase(value.state)
+    try {
+      expect(store.getSourcePlan(plan.id).preparedEvidence).toEqual(plan.preparedEvidence)
+      const command = plan.preparedEvidence!.commands[0]!
+      const updateArgs = (changed: readonly string[]): void => {
+        database.prepare('UPDATE source_plans SET prepared_evidence_json = ? WHERE id = ?').run(JSON.stringify({
+          ...plan.preparedEvidence, commands: [{ ...command, args: changed }],
+        }), plan.id)
+      }
+      updateArgs(['x'.repeat(4097), ...args.slice(1)])
+      expect(() => store.getSourcePlan(plan.id)).toThrow('stored source prepared evidence is corrupt')
+      updateArgs([...args.slice(0, -1), 'x'.repeat(32_769)])
+      expect(() => store.getSourcePlan(plan.id)).toThrow('stored source prepared evidence is corrupt')
+      database.prepare('UPDATE source_plans SET prepared_evidence_json = ? WHERE id = ?')
+        .run(JSON.stringify(plan.preparedEvidence), plan.id)
+      expect(store.getSourcePlan(plan.id).preparedEvidence).toEqual(plan.preparedEvidence)
+    } finally { database.close(); store.close() }
   }, 30_000)
 
   it('advances a clean matching approved modify plan to ready via owner CLI verify-prepared', async () => {
@@ -741,6 +760,53 @@ exit 0
     expect((await service.gcPreparedSourceWorktrees(Date.now() + 10_000_000)).removed).toEqual([])
     expect((await lstat(fresh.worktree)).isDirectory()).toBe(true)
   }, 60_000)
+
+  it('collects only registered, expired prepared-create worktrees with exact frozen scope', async () => {
+    const value = await trustFixture()
+    const source = await modifyRepositoryFixture(value.root)
+    const stateRoot = join(value.statePath, 'source-worktrees')
+    const durable = await createIsolatedWorktree({ stateRoot, repository: source.repository,
+      baseCommit: source.head, environment: process.env, worktreeName: `worktree-job-${'a'.repeat(64)}` })
+    const now = Date.now()
+    const name = 'owner-created-tool'
+    const plan = {
+      id: 'prepared-create-gc', revision: 1, mode: 'prepared-create', status: 'pending-approval',
+      repository: source.repository, worktree: durable.worktree, baseCommit: source.head, name,
+      expiresAt: now - 1, scope: [`plugins/${name}`, 'plugins/README.md', 'pnpm-lock.yaml'],
+      generatorDigest: 'b'.repeat(64), creation: { generatorDigest: 'b'.repeat(64),
+        grant: { id: 'owner-create-1', expiresAt: now + 100_000, maxCreates: 1, namePrefix: 'owner-created-' } },
+      sourceCheck: { treeDigest: 'c'.repeat(64), patchDigest: 'd'.repeat(64), checkedAt: now - 2 },
+      preparedEvidence: minimalPreparedEvidence('e'.repeat(64), now - 2),
+    } as unknown as PluginSourcePlan
+    const expired: string[] = []
+    const store = { listPreparedSourcePlans: () => [plan], expirePreparedSourcePlan: ({ planId }: { planId: string }) => {
+      expired.push(planId); return plan
+    } } as unknown as ControlPlaneStore
+    expect(preparedWorktreeIsGarbage(plan, now)).toBe(true)
+    expect(await gcPreparedModifyWorktrees({ store, statePath: value.statePath, environment: process.env, now }))
+      .toEqual({ removed: [durable.worktree] })
+    expect(expired).toEqual([plan.id])
+    await expect(lstat(durable.worktree)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await linkedWorktrees(source.repository, process.env)).not.toContain(durable.worktree)
+
+    const ghost = join(stateRoot, `worktree-job-${'f'.repeat(64)}`)
+    await mkdir(ghost, { mode: 0o700 })
+    const ghostPlan = { ...plan, id: 'unregistered', worktree: ghost } as PluginSourcePlan
+    const ghostStore = { listPreparedSourcePlans: () => [ghostPlan], expirePreparedSourcePlan: () => {
+      throw new Error('unregistered worktree must not expire')
+    } } as unknown as ControlPlaneStore
+    expect(await gcPreparedModifyWorktrees({ store: ghostStore, statePath: value.statePath, environment: process.env, now }))
+      .toEqual({ removed: [] })
+    expect((await lstat(ghost)).isDirectory()).toBe(true)
+
+    for (const changed of [
+      { scope: [`plugins/${name}`, 'plugins/README.md'] },
+      { creation: { ...plan.creation!, generatorDigest: 'f'.repeat(64) } },
+      { status: 'ready-for-human-review' as const },
+    ]) expect(preparedWorktreeIsGarbage({ ...plan, ...changed }, now)).toBe(false)
+    const { sourceCheck: _missingEvidence, ...withoutCheck } = plan
+    expect(preparedWorktreeIsGarbage(withoutCheck, now)).toBe(false)
+  }, 30_000)
 
   it('binds source inspection to preparation and rejects stale HEAD before creating a worktree', async () => {
     const value = await trustFixture()

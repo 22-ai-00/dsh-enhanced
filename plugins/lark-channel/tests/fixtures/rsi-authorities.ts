@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -135,10 +135,20 @@ export async function createRsiAuthorityFixture(live = false): Promise<RsiAuthor
   return { root, manifest, binding: { owner: { id: owner.principalRecordId, version: owner.principalVersion } },
     async standingHost() {
       if (!live) throw new Error('standing Host requires live qualification')
-      const node = await realpath('/usr/bin/node')
+      const runtimeNode = await realpath(process.execPath)
+      const nodeMetadata = await stat(runtimeNode)
+      const node = nodeMetadata.nlink === 1 && (nodeMetadata.mode & 0o022) === 0 ? runtimeNode : join(root, 'node')
+      if (node !== runtimeNode) {
+        await copyFile(runtimeNode, node)
+        await chmod(node, 0o700)
+      }
       const nodePin = { path: node, sha256: digest(await readFile(node)) }
       const packageRoot = join(import.meta.dirname, '../../../plugin-control-plane')
-      const attestorPath = join(packageRoot, 'bin/dsh-systemd-host-attestor.js')
+      const shippedAttestor = await readFile(join(packageRoot, 'bin/dsh-systemd-host-attestor.js'), 'utf8')
+      if (!shippedAttestor.startsWith('#!/usr/bin/node\n')) throw new Error('shipped Host attestor shebang changed')
+      const attestorPath = join(root, 'dsh-systemd-host-attestor.mjs')
+      await writePrivate(attestorPath, `#!${node}\n${shippedAttestor.slice('#!/usr/bin/node\n'.length)}`)
+      await chmod(attestorPath, 0o700)
       const resolverPath = join(packageRoot, 'bin/dsh-systemd-host-authority.js')
       const helperPath = join(packageRoot, 'lib/adapter-process.js')
       const clientPath = join(packageRoot, 'lib/runtime-observer-protocol.js')

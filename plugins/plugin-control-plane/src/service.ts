@@ -1,5 +1,5 @@
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
-import { lstat, realpath } from 'node:fs/promises'
+import { lstat, readFile, realpath } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
@@ -36,6 +36,7 @@ import { Ed25519ApprovalAuthority } from './approval.js'
 import { ControlPlaneStore, MODIFY_GENERATOR_DIGEST, controlPlaneDigest } from './store.js'
 import { runDockerPreparedChecks, validateSourceBuildConfig, type SourceBuildConfig } from './source-build.js'
 import { awaitSourceSignal, inspectSourceContext, type SourceInspection } from './source-context.js'
+import { inspectSourceCreationContext, prepareCreatedPluginWorkspace, validateSourceCreationFiles, verifyCreatedPluginWorkspace } from './source-creation.js'
 import { resolveSourceBaseline } from './source-baseline.js'
 import { inheritedEnvironment, loadTrustConfig, resolveTrustKey } from './trust.js'
 import type { CapabilityGapInput, PluginActivationPlan, PluginControlPlaneHealth, PluginSourcePlan, StoredCapabilityGap } from './types.js'
@@ -691,6 +692,14 @@ export class PluginControlPlaneService extends Service {
   canPrepareSource(): boolean { return this.config.sourceBuild !== undefined }
   canEnqueueSource(): boolean { return this.sourceRuntime?.available() === true && !this.abort.signal.aborted }
 
+  /** Public naming rule only; never disclose grant identity or mutation authority. */
+  getSourceCreationNamespace(): { namePrefix: string } | undefined {
+    const config = this.config.sourceJobs
+    if (this.abort.signal.aborted || config?.creation === undefined
+      || Date.now() >= Math.min(config.expiresAt, config.creation.expiresAt)) return undefined
+    return { namePrefix: config.creation.namePrefix }
+  }
+
   // Bind Host entry points: Cordis service proxies must not become resource owners.
   enqueueSourceJob = async (input: EnqueueSourceJobInput): Promise<SourceJobProjection> => {
     this.abort.signal.throwIfAborted()
@@ -716,7 +725,7 @@ export class PluginControlPlaneService extends Service {
     this.abort.signal.throwIfAborted()
     if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new Error('plugin-control-plane: another source operation is draining')
     const intent = job.intent
-    const operation = this.prepareModifySourcePlanOwned({ gapId: intent.gapId, name: intent.name, repository: intent.repository, files: intent.files,
+    const operation = this.prepareSourcePlanOwned({ gapId: intent.gapId, name: intent.name, repository: intent.repository, files: intent.files,
       idempotencyKey: `source-job-plan:${job.id}`, expectedBaseCommit: intent.baseCommit, ttlMs: intent.ttlMs, timeoutMs: intent.build.timeoutMs, offline: true, signal, assertCurrent }, job)
     this.sourceBuilds.add(operation)
     try { return await operation } finally { this.sourceBuilds.delete(operation) }
@@ -746,6 +755,36 @@ export class PluginControlPlaneService extends Service {
     return inspectSourceContext({ repository: input.repository, name: input.name, paths: input.paths,
       ...(input.baseCommit === undefined ? {} : { baseCommit: input.baseCommit }),
       ...(baselineCommit === undefined ? {} : { baselineCommit }), environment, signal, assertCurrent })
+  }
+
+  async inspectCreateSource(input: Parameters<PluginControlPlaneService['inspectSource']>[0]): Promise<SourceInspection> {
+    this.abort.signal.throwIfAborted()
+    if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'another source operation is still draining')
+    const signal = AbortSignal.any([this.abort.signal, ...(input.signal === undefined ? [] : [input.signal]), AbortSignal.timeout(15_000)])
+    const operation = this.inspectCreateSourceOwned({ ...input, signal })
+    this.sourceInspections.add(operation)
+    try { return await operation } finally { this.sourceInspections.delete(operation) }
+  }
+
+  private async inspectCreateSourceOwned(input: Parameters<PluginControlPlaneService['inspectSource']>[0]): Promise<SourceInspection> {
+    const config = this.config.sourceJobs
+    if (!config?.creation || config.repository !== input.repository) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'plugin creation authority is not configured for this repository')
+    const signal = input.signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, input.signal])
+    const assertCurrent = async (): Promise<void> => {
+      signal.throwIfAborted(); await awaitSourceSignal(signal, () => input.assertCurrent?.()); signal.throwIfAborted()
+      if (Date.now() >= config.creation!.expiresAt || Date.now() >= config.expiresAt) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'plugin creation authority expired')
+    }
+    await assertCurrent()
+    const trust = await awaitSourceSignal(signal, () => this.boundTrust())
+    const environment = inheritedEnvironment(trust)
+    const baselineCommit = config.baseline === undefined ? undefined : await resolveSourceBaseline({ repository: input.repository,
+      config: config.baseline, environment, signal, assertCurrent, trust,
+      readHistory: () => this.store.getSourceBaselineHistory(input.repository),
+      readMaintenance: () => this.store.getSourceMaintenanceRecords(input.repository) })
+    const inspected = await inspectSourceCreationContext({ repository: input.repository, name: input.name, paths: input.paths,
+      ...(input.baseCommit === undefined ? {} : { baseCommit: input.baseCommit }),
+      ...(baselineCommit === undefined ? {} : { baselineCommit }), environment, signal, assertCurrent, grant: config.creation })
+    return { name: inspected.name, baseCommit: inspected.baseCommit, files: inspected.files, contents: inspected.contents }
   }
 
   async plan(candidateId: string, profile: string, idempotencyKey: string, gapId: string): Promise<PluginActivationPlan> {
@@ -792,32 +831,41 @@ export class PluginControlPlaneService extends Service {
   }): Promise<PluginSourcePlan> {
     this.abort.signal.throwIfAborted()
     if (this.sourceBuilds.size !== 0 || this.sourceInspections.size !== 0) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'another source operation is still draining')
-    const operation = this.prepareModifySourcePlanOwned(input)
+    const operation = this.prepareSourcePlanOwned(input)
     this.sourceBuilds.add(operation)
     void operation.then(() => this.sourceBuilds.delete(operation), () => this.sourceBuilds.delete(operation))
     return operation
   }
 
-  private async prepareModifySourcePlanOwned(input: Parameters<PluginControlPlaneService['prepareModifySourcePlan']>[0], sourceJob?: SourceJobRecord): Promise<PluginSourcePlan> {
+  private async prepareSourcePlanOwned(input: Parameters<PluginControlPlaneService['prepareModifySourcePlan']>[0], sourceJob?: SourceJobRecord): Promise<PluginSourcePlan> {
     const signal = input.signal === undefined ? this.abort.signal : AbortSignal.any([this.abort.signal, input.signal])
     const gapOwner = sourceJob?.intent.owner ?? input.owner
+    const creating = sourceJob?.intent.mode === 'create'
+    const creation = creating ? sourceJob!.intent.creation : undefined
     const assertCurrent = async (): Promise<void> => {
       signal.throwIfAborted(); await input.assertCurrent?.(); signal.throwIfAborted()
       this.taskGaps.withCurrent(input.gapId, gapOwner, () => {})
+      if (creating && (!creation || !this.config.sourceJobs?.creation || Date.now() >= creation.grant.expiresAt
+        || controlPlaneDigest(creation.grant) !== controlPlaneDigest(this.config.sourceJobs.creation))) {
+        throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'plugin creation authority changed or expired')
+      }
     }
     await assertCurrent()
     const trust = await this.boundTrust()
     const name = input.name.normalize('NFC').trim()
     if (!/^(?=.{1,64}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(name)) throw new ControlPlaneCliError('INVALID_ARGUMENT', 'plugin name is invalid')
     assertPluginModificationAllowed(name)
-    validateScopedPluginFiles(input.files)
-    if (this.config.sourceBuild?.versioning === 'patch') assertManagedVersionPaths(input.files)
+    if (creating) validateSourceCreationFiles(input.files)
+    else {
+      validateScopedPluginFiles(input.files)
+      if (this.config.sourceBuild?.versioning === 'patch') assertManagedVersionPaths(input.files)
+    }
     // Re-validate the gap reservation immediately before doing the work: the
     // store re-checks under BEGIN IMMEDIATE, but failing early avoids building
     // a patch against a gap that is already matched or closed.
     const gap = this.store.getGap(input.gapId)
     if (gap.status !== 'open' || gap.candidateId !== undefined) {
-      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'only an unreserved pre-existing control-plane open gap can receive a modify proposal')
+      throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'only an unreserved current control-plane open gap can receive a source proposal')
     }
     const repository = await realpath(resolve(input.repository))
     if (resolve(repository) !== repository) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'repository path must be canonical')
@@ -846,22 +894,31 @@ export class PluginControlPlaneService extends Service {
     const isolated = await createIsolatedWorktree({ stateRoot, repository, baseCommit, environment,
       ...(sourceJob === undefined ? {} : { worktreeName: basename(sourceJob.intent.worktree) }) })
     try {
-      await writeScopedPluginFiles({ worktree: isolated.worktree, name, files: input.files })
+      const generated = creation === undefined ? undefined : await prepareCreatedPluginWorkspace({ worktree: isolated.worktree,
+        baseCommit, name, files: input.files, environment, signal, assertCurrent, creation })
+      if (generated === undefined) await writeScopedPluginFiles({ worktree: isolated.worktree, name, files: input.files })
       await assertCurrent()
       if (this.config.sourceBuild === undefined) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'isolated source build runner is not configured')
       if (!offline) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'isolated source builds must remain offline')
       const configured = this.config.sourceBuild
       const versionInput = { worktree: isolated.worktree, baseCommit, name, environment, signal, assertCurrent }
-      const managed = configured.versioning === 'patch' ? await managedPatchVersionFiles(versionInput) : undefined
+      const managed = !creating && configured.versioning === 'patch' ? await managedPatchVersionFiles(versionInput) : undefined
       if (managed !== undefined) {
         await assertCurrent()
         await writeScopedPluginFiles({ worktree: isolated.worktree, name, files: managed.files })
         await verifyManagedPatchVersion(versionInput)
       }
       const checked = await runDockerPreparedChecks({ config: { ...configured, timeoutMs: Math.min(timeoutMs, configured.timeoutMs) },
-        worktree: isolated.worktree, baseCommit, name, scope: [`plugins/${name}`], environment, signal,
-        assertCurrent, preparedAt: Date.now(), ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName } }) })
+        worktree: isolated.worktree, baseCommit, name, scope: generated?.scope ?? [`plugins/${name}`], environment, signal,
+        assertCurrent, preparedAt: Date.now(), ...(creation === undefined ? {} : { creation }),
+        ...(sourceJob === undefined ? {} : { sourceJob: { id: sourceJob.id, containerName: sourceJob.intent.containerName } }) })
       await assertCurrent()
+      if (creation !== undefined) {
+        await verifyCreatedPluginWorkspace({ worktree: isolated.worktree, baseCommit, name,
+          files: input.files, environment, signal, assertCurrent, creation })
+        const manifest = JSON.parse(await readFile(join(isolated.worktree, 'plugins', name, 'package.json'), 'utf8')) as { version: string }
+        if (checked.evidence.pack.version !== manifest.version) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'new plugin artifact does not carry the generated version')
+      }
       if (managed !== undefined) {
         await verifyManagedPatchVersion(versionInput)
         if (checked.evidence.pack.version !== managed.version) throw new ControlPlaneCliError('SOURCE_BOUNDARY', 'prepared artifact does not carry the Host-managed version')
@@ -869,7 +926,9 @@ export class PluginControlPlaneService extends Service {
       // The worktree survives success: the owner recomputes its digests on this
       // exact directory during `source verify-prepared`.
       return this.taskGaps.withCurrent(input.gapId, gapOwner, () => this.store.createSourcePlan({ gapId: input.gapId, repository, worktree: isolated.worktree, baseCommit,
-        name, generatorDigest: MODIFY_GENERATOR_DIGEST, scope: [`plugins/${name}`], mode: 'modify', ttlMs,
+        name, generatorDigest: generated?.generatorDigest ?? MODIFY_GENERATOR_DIGEST,
+        scope: generated?.scope ?? [`plugins/${name}`], mode: creating ? 'prepared-create' : 'modify', ttlMs,
+        ...(creation === undefined ? {} : { creation }),
         idempotencyKey: input.idempotencyKey,
         ...(sourceJob === undefined ? {} : { sourceJob: { jobId: sourceJob.id, jobRevision: sourceJob.revision, occurrenceId: sourceJob.occurrenceId! } }),
         prepared: { treeDigest: checked.treeDigest, patchDigest: checked.patchDigest, checkedAt: checked.checkedAt, evidence: checked.evidence } }).result)
