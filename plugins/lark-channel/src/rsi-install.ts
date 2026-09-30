@@ -3,6 +3,7 @@ import { lstat, readFile, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { listActiveAutomationsLocally } from '@dsh-enhanced/assistant-automations'
+import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { isDeepStrictEqual } from 'node:util'
 import { controlPlaneDigest, queryRuntimeObserver, runtimeConfigDigest, type RuntimeObserverConfig } from '@dsh-enhanced/plugin-control-plane'
 import { withDshHomeLifecycleLock } from './setup.js'
@@ -23,7 +24,7 @@ import { readRsiServiceEnvironment } from './rsi-service-environment.js'
 import { version } from './version.js'
 import { readRsiLocalCohort, verifyRsiLocalInstalledPackages } from './rsi-local-cohort.js'
 import { installRsiLocalProfile, isRsiLocalPackageRepairable } from './rsi-local-install.js'
-import { assertRsiSchedulerActivation, captureRsiAutomationInventories } from './rsi-owner-profile.js'
+import { assertRsiSchedulerActivation, captureRsiAutomationInventories, rsiDatabasePaths } from './rsi-owner-profile.js'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const coordinatorBundles = ['assistant-policy', 'assistant-automations', 'plugin-control-plane'] as const
@@ -122,7 +123,40 @@ async function observerReady(observer: RuntimeObserverConfig, state: Record<stri
       || target.services.some(name => !entry.services.some(service => service.name === name && service.instance !== null))) fail('installed Loader entries are not ready')
   }
 }
+export function assertRsiMemoryScanActivation(manifest: RsiSetupManifest,
+  records: ReturnType<typeof listActiveAutomationsLocally>): void {
+  const learning = manifest.memoryLearning?.learning
+  if (!learning) return
+  const owner = learning.owner, digest = growthObjectDigest(learning)
+  const id = `memory-scan-${growthObjectDigest([learning.authorityId, owner])}`
+  const registration = records.find(item => item.id === id)
+  const definition = registration?.definition, execution = definition?.execution
+  if (!registration || registration.owner !== 'assistant-memory-learning'
+    || definition?.principal !== owner.principalId || definition.workspace !== owner.workspace
+    || definition.agentPreset !== owner.agentPreset || definition.budgetId !== learning.scanBudgetId
+    || definition.budgetAmount !== learning.scanBudgetAmount || definition.retrySafety !== 'never'
+    || definition.maxRetries !== 0 || execution?.kind !== 'host'
+    || execution.executorId !== 'assistant-memory-learning-v1' || execution.executorContractVersion !== 1
+    || execution.runbookId !== 'scan' || execution.runbookVersion !== 1
+    || execution.catalogDigest !== growthObjectDigest({ executor: 'assistant-memory-learning-v1', contract: 1 })
+    || execution.ownerRouteId !== owner.authorityId || execution.activationNonce !== digest
+    || !isDeepStrictEqual(execution.targetScope, { workspace: owner.workspace, preset: owner.agentPreset })
+    || execution.scopeDigest !== growthObjectDigest([owner.workspace, owner.agentPreset])) {
+    fail('target has no matching owner-bound native memory scan activation')
+  }
+}
 async function ready(manifest: RsiSetupManifest, pin: RsiAuthorityConfigInput['systemctl'], signal: AbortSignal, startedAt: number): Promise<void> {
+  const home = manifest.controlPlane.runtimeObserver!.profilePath.split('/profiles/').slice(0,-1).join('/profiles/')
+  const memoryDatabasePath = manifest.memoryLearning === undefined ? undefined
+    : rsiDatabasePaths(rsiSetupPorts.dump(manifest.targetProfile, home), home).automationsDatabasePath
+  if (manifest.memoryLearning) {
+    for (const [id, service] of [['dsh-enhanced-personal-assistant', 'personalMemory'],
+      ['dsh-enhanced-assistant-verifier', 'assistantVerifier'],
+      ['dsh-enhanced-assistant-memory-learning', 'assistantMemoryLearning']] as const) {
+      if (!manifest.controlPlane.runtimeObserver?.targets.some(target => target.entryId === id
+        && target.services.includes(service))) fail(`target memory observer is missing ${id}`)
+    }
+  }
   const deadline = Date.now() + 60_000
   let stableSince = 0, last = '', failure: unknown
   while (Date.now() < deadline) {
@@ -132,10 +166,10 @@ async function ready(manifest: RsiSetupManifest, pin: RsiAuthorityConfigInput['s
       if (states.some(state => state.ActiveState !== 'active' || !/^\d+$/u.test(state.MainPID ?? '') || Number(state.MainPID) < 1
         || !/^[a-f0-9]{32}$/u.test(state.InvocationID ?? ''))) fail('Host services are not running')
       await observerReady(manifest.controlPlane.runtimeObserver!, states[0]!, signal)
+      if (memoryDatabasePath) assertRsiMemoryScanActivation(manifest, listActiveAutomationsLocally(memoryDatabasePath))
       const scope = manifest.controlPlane.taskObservations!.scope
       const coordinatorId = manifest.controlPlane.sourceAdoptions!.handoff!.coordinatorId
       const id = `adoption-coordinator-${controlPlaneDigest({coordinatorId,scope}).slice(0,40)}`
-      const home = manifest.controlPlane.runtimeObserver!.profilePath.split('/profiles/').slice(0,-1).join('/profiles/')
       const registration = listActiveAutomationsLocally(join(home,'rsi-coordinators',manifest.coordinatorProfile,'automations.sqlite')).find(item => item.id === id)
       if (!registration || registration.owner !== 'plugin-control-plane-adoption-coordinator'
         || registration.updatedAt < startedAt || registration.definition.execution?.kind !== 'host'

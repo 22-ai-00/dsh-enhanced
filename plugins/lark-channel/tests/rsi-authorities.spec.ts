@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, test } from 'vitest'
 import { createHash } from 'node:crypto'
+import { join } from 'node:path'
 import { readFile, realpath } from 'node:fs/promises'
 import { validateRsiAuthorities } from '../src/rsi-setup.js'
 import { createRsiAuthorityFixture, type RsiAuthorityFixture } from './fixtures/rsi-authorities.js'
+import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import type { RsiMemoryLearningSetup } from '../src/rsi-memory-learning.js'
 
 const fixtures: RsiAuthorityFixture[] = []
 const previousHostConfig = process.env.DSH_SYSTEMD_HOST_ATTESTOR_CONFIG
@@ -14,6 +17,39 @@ afterEach(async () => {
 async function fixture(live = false): Promise<RsiAuthorityFixture> { const value = await createRsiAuthorityFixture(live); fixtures.push(value); return value }
 
 describe('RSI finite authority deployment binding', () => {
+  test('validates independent memory learning grants together with the existing owner deployment', async () => {
+    const value = await fixture()
+    const owner = value.manifest.sourceReviews.owner
+    const expiresAt = value.manifest.sourceReviews.expiresAt
+    const reviews: RsiMemoryLearningSetup['reviews'] = { authorityId: 'memory-review', owner,
+      expiresAt, maxReviews: 10, policy: 'Independently check the actual owner source.',
+      maxInputBytes: 65536, maxOutputTokens: 2048, timeoutMs: 120000 }
+    const adoption: RsiMemoryLearningSetup['adoption'] = { authorityId: 'memory-adoption', owner,
+      reviewAuthorityId: reviews.authorityId, reviewAuthorityDigest: growthObjectDigest(reviews),
+      expiresAt, maxMutations: 10, maxTotalContentBytes: 40960, maxRecordTtlMs: 86400000,
+      kinds: ['fact', 'experience'], operations: ['add', 'replace', 'remove'] }
+    value.manifest.memoryLearning = { reviews, adoption, limits: { extractions: 7, scans: 1440 },
+      learning: { authorityId: 'memory-extraction', owner, databasePath: join(value.root, 'memory-learning.sqlite'),
+        expiresAt, maxExtractions: 10, maxPending: 10, lookbackMs: 86400000,
+        policy: 'Learn explicit owner facts or source-bound experience.', maxInputBytes: 65536,
+        maxOutputTokens: 2048, timeoutMs: 120000, budgetId: 'memory-extractions', budgetAmount: 1,
+        scanBudgetId: 'memory-scans', scanBudgetAmount: 1,
+        reviewAuthorityId: reviews.authorityId, reviewAuthorityDigest: growthObjectDigest(reviews),
+        adoptionAuthorityId: adoption.authorityId, adoptionGrantDigest: growthObjectDigest(adoption) } }
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
+    const original = structuredClone(value.manifest.memoryLearning)
+    value.manifest.memoryLearning.learning.owner = { ...owner, principalVersion: owner.principalVersion + 1 }
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).rejects.toThrow('owner differs')
+    value.manifest.memoryLearning = structuredClone(original)
+    value.manifest.memoryLearning.learning.reviewAuthorityDigest = 'b'.repeat(64)
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).rejects.toThrow('digest binding')
+    value.manifest.memoryLearning = structuredClone(original)
+    value.manifest.memoryLearning.reviews.expiresAt = Date.now() - 1
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).rejects.toThrow('expiry')
+    value.manifest.memoryLearning = original
+    await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()
+  })
+
   test('accepts four owner-private finite authority files pinned to schema-v4 trust', async () => {
     const value = await fixture()
     await expect(validateRsiAuthorities(value.manifest, value.binding as any)).resolves.toBeUndefined()

@@ -42,6 +42,9 @@ DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
   'assistant-skills'
   'assistant-verifier'
   'assistant-growth-driver'
+  # Memory is already provided by personal-assistant. The learner remains
+  # disabled until owner setup supplies finite review/adoption grants.
+  'assistant-memory-learning'
   # Recovery's mounted class declares assistantGoals as a required Cordis
   # injection.  peerDependenciesMeta.optional only affects package installation;
   # it cannot make a Cordis injection optional.  Keep the runtime provider in

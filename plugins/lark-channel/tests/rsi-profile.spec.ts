@@ -8,7 +8,8 @@ import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse } from 'yaml'
-import { compileRsiProfiles, type RsiSetupManifest } from '../src/rsi-profile.ts'
+import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
+import { compileRsiPersonalAssistantOptions, compileRsiProfiles, type RsiSetupManifest } from '../src/rsi-profile.ts'
 
 const rows = (extra: string) => `
 - id: dsh-enhanced-personal-assistant
@@ -113,6 +114,8 @@ describe('RSI profile compiler', () => {
       expect(second).toEqual(first)
       expect(first.targetPatch).toContain('!!js dshHomePath')
       const target = parse(first.targetPatch) as Array<{ id: string; config: any }>
+      expect(target.some(row => row.id === 'dsh-enhanced-assistant-memory-learning')).toBe(false)
+      expect(target.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.personalMemory).toBeUndefined()
       expect(target.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config.sourceBuild.versioning).toBe('patch')
       expect(target.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config.sourceJobs.authorityId).toBe('authority')
       const reviewConfig = target.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config.sourceReviews
@@ -140,6 +143,91 @@ describe('RSI profile compiler', () => {
       const policyConfig = { ...target.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config.assistantPolicy, databasePath: join(root, 'policy.sqlite') }
       const policy = new AssistantPolicyService(new Context(), policyConfig)
       expect(policy.evaluate({ subject: { kind: 'background', id: 'source-job-123', workspace: adjustedOwner.workspace, principal: 'lark/account/tenant/owner' }, action: 'execute', resource: { kind: 'automation', id: 'source-job-123' }, context: { initiator: 'background' } }).effect).toBe('allow')
+
+      const memoryOwner = structuredClone(value.sourceReviews.owner)
+      const memoryReviews = { authorityId: 'memory-review', owner: memoryOwner, expiresAt: Date.now() + 60_000,
+        maxReviews: 3, policy: 'Independent evidence review.', maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 1000 }
+      const memoryAdoption = { authorityId: 'memory-adopt', owner: memoryOwner, reviewAuthorityId: memoryReviews.authorityId,
+        reviewAuthorityDigest: growthObjectDigest(memoryReviews), expiresAt: memoryReviews.expiresAt,
+        maxMutations: 3, maxTotalContentBytes: 8192, maxRecordTtlMs: 60_000,
+        kinds: ['fact', 'experience'] as const, operations: ['add', 'replace', 'remove'] as const }
+      const memoryManifest = structuredClone(value)
+      memoryManifest.memoryLearning = { learning: { databasePath: join(root, 'learning.sqlite'), authorityId: 'memory-extract',
+        owner: memoryOwner, expiresAt: memoryReviews.expiresAt, maxExtractions: 3, maxPending: 2, lookbackMs: 60_000,
+        policy: 'Extract only owner evidence.', maxInputBytes: 4096, maxOutputTokens: 64, timeoutMs: 1000,
+        budgetId: 'memory-extract-budget', budgetAmount: 1, scanBudgetId: 'memory-scan-budget', scanBudgetAmount: 1,
+        reviewAuthorityId: memoryReviews.authorityId, reviewAuthorityDigest: growthObjectDigest(memoryReviews),
+        adoptionAuthorityId: memoryAdoption.authorityId, adoptionGrantDigest: growthObjectDigest(memoryAdoption) },
+        reviews: memoryReviews, adoption: memoryAdoption, limits: { extractions: 2, scans: 5 } }
+      const memoryEffective = targetEffective.replace('    assistantAutomations:',
+        "    personalMemory: { databasePath: !!js dshHomePath('personal-memory/memory.sqlite'), approvalMode: delivery-required }\n    assistantAutomations:")
+        + '- id: dsh-enhanced-assistant-memory-learning\n  name: "@dsh-enhanced/assistant-memory-learning"\n  disabled: true\n'
+      const memoryInput = { ...input, manifest: memoryManifest, targetEffective: memoryEffective }
+      const memoryOutput = await compileRsiProfiles(memoryInput)
+      expect(await compileRsiProfiles({ ...memoryInput, targetPatch: memoryOutput.targetPatch,
+        coordinatorPatch: memoryOutput.coordinatorPatch })).toEqual(memoryOutput)
+      expect(memoryOutput.targetPatch).toContain("!!js dshHomePath('personal-memory/memory.sqlite')")
+      const memoryRows = parse(memoryOutput.targetPatch) as Array<{ id: string; name?: string; disabled?: boolean; config: any }>
+      const memoryPersonal = memoryRows.find(row => row.id === 'dsh-enhanced-personal-assistant')!.config
+      expect(memoryPersonal.personalMemory).toMatchObject({ approvalMode: 'delivery-required', automaticLearning: memoryAdoption })
+      expect(memoryRows.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config.memoryReviews).toEqual(memoryReviews)
+      expect(memoryRows.find(row => row.id === 'dsh-enhanced-assistant-memory-learning')).toMatchObject({
+        name: '@dsh-enhanced/assistant-memory-learning', disabled: false, config: memoryManifest.memoryLearning.learning })
+      const memoryPolicy = memoryPersonal.assistantPolicy
+      const expectedPersonal = compileRsiPersonalAssistantOptions({ effectiveConfig: {
+        assistantPolicy: { databasePath: { __jsExpr: "dshHomePath('policy.sqlite')" }, budgets: [], rules: [] },
+        assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false },
+        personalMemory: { databasePath: { __jsExpr: "dshHomePath('personal-memory/memory.sqlite')" }, approvalMode: 'delivery-required' },
+      }, manifest: memoryManifest, scope: { workspace: adjustedOwner.workspace, preset: 'primary', principal: memoryOwner.principalId },
+      budgetIds: { reviews: 'review', discovery: 'discovery', source: 'source', observations: 'observations' } })
+      expect(expectedPersonal.personalMemory).toMatchObject({ automaticLearning: memoryAdoption })
+      expect((expectedPersonal.assistantPolicy as { budgets: unknown[] }).budgets).toEqual(memoryPolicy.budgets)
+      expect((expectedPersonal.assistantPolicy as { rules: unknown[] }).rules).toEqual(memoryPolicy.rules)
+      expect(() => PolicyConfig({ ...memoryPolicy, databasePath: join(root, 'policy.sqlite') })).not.toThrow()
+      expect(memoryPolicy.budgets).toContainEqual({ id: 'memory-extract-budget', metric: 'automation-runs', limit: 2, periodMs: 60_000, scope: 'workspace' })
+      expect(memoryPolicy.budgets).toContainEqual({ id: 'memory-scan-budget', metric: 'automation-runs', limit: 5, periodMs: 60_000, scope: 'subject' })
+      const memoryPolicyService = new AssistantPolicyService(new Context(), { ...memoryPolicy, databasePath: join(root, 'memory-policy.sqlite') })
+      const background = (id: string) => ({ kind: 'background' as const, id, workspace: adjustedOwner.workspace, principal: memoryOwner.principalId })
+      expect(memoryPolicyService.getBudgetConfig('memory-extract-budget')?.scope).toBe('workspace')
+      expect(memoryPolicyService.reserve({ budgetId: 'memory-extract-budget', subject: background('memory-learning:a'), amount: 1,
+        idempotencyKey: 'memory-job-a' }).remaining).toBe(1)
+      expect(memoryPolicyService.reserve({ budgetId: 'memory-extract-budget', subject: background('memory-learning:b'), amount: 1,
+        idempotencyKey: 'memory-job-b' }).remaining).toBe(0)
+      expect(() => memoryPolicyService.reserve({ budgetId: 'memory-extract-budget', subject: background('memory-learning:c'), amount: 1,
+        idempotencyKey: 'memory-job-c' })).toThrow(/exhausted/)
+      for (const [action, authorityId] of [['extract', 'memory-extract'], ['review', 'memory-review'], ['adopt', 'memory-adopt']] as const) {
+        expect(memoryPolicyService.evaluate({ subject: background('assistant-memory-learning'), action,
+          resource: { kind: 'memory', id: `learning:${authorityId}` }, context: { initiator: 'background' } }).effect).toBe('allow')
+        expect(memoryPolicyService.evaluate({ subject: background('assistant-memory-learning'), action,
+          resource: { kind: 'memory', id: `learning:${authorityId}-other` }, context: { initiator: 'background' } }).effect).toBe('deny')
+      }
+      for (const id of ['memory-scan-abc', 'memory-learning:abc']) {
+        expect(memoryPolicyService.evaluate({ subject: background('assistant-memory-learning'), action: 'reconcile',
+          resource: { kind: 'automation', id }, context: { initiator: 'background' } }).effect).toBe('allow')
+        expect(memoryPolicyService.evaluate({ subject: background(id), action: 'execute',
+          resource: { kind: 'automation', id }, context: { initiator: 'background' } }).effect).toBe('allow')
+      }
+      expect(memoryPolicyService.evaluate({ subject: { ...background('assistant-memory-learning'), workspace: join(root, 'other-workspace') },
+        action: 'extract', resource: { kind: 'memory', id: 'learning:memory-extract' },
+        context: { initiator: 'background' } }).effect).toBe('deny')
+      expect(memoryOutput.coordinatorPatch).toBe(first.coordinatorPatch)
+      const activeLearner = memoryEffective.replace('  disabled: true\n',
+        `  disabled: false\n  config: ${JSON.stringify(memoryManifest.memoryLearning.learning)}\n`)
+      expect(await compileRsiProfiles({ ...memoryInput, targetEffective: activeLearner,
+        targetPatch: memoryOutput.targetPatch, coordinatorPatch: memoryOutput.coordinatorPatch })).toEqual(memoryOutput)
+      const driftedLearner = activeLearner.replace('"authorityId":"memory-extract"', '"authorityId":"drifted"')
+      await expect(compileRsiProfiles({ ...memoryInput, targetEffective: driftedLearner })).rejects.toThrow('exact current learning configuration')
+      const wrongMemory = structuredClone(memoryManifest); wrongMemory.memoryLearning!.learning.budgetId = 'review'
+      await expect(compileRsiProfiles({ ...memoryInput, manifest: wrongMemory })).rejects.toThrow('budget ids conflict')
+      const sharedPoolConflict = memoryEffective.replace('budgets: []',
+        'budgets: [{ id: preexisting-workspace, metric: automation-runs, limit: 9, periodMs: 60000, scope: workspace }]')
+      await expect(compileRsiProfiles({ ...memoryInput, targetEffective: sharedPoolConflict })).rejects.toThrow('workspace budget')
+      const sameLimitSharedPool = memoryEffective.replace('budgets: []',
+        'budgets: [{ id: same-limit-workspace, metric: automation-runs, limit: 2, periodMs: 60000, scope: workspace }]')
+      await expect(compileRsiProfiles({ ...memoryInput, targetEffective: sameLimitSharedPool })).rejects.toThrow('workspace budget')
+      await expect(compileRsiProfiles({ ...memoryInput, targetEffective: memoryEffective.replace('disabled: true', 'disabled: false') })).rejects.toThrow('inactive installed bundle')
+      await expect(compileRsiProfiles({ ...memoryInput, targetEffective: memoryEffective.replace('@dsh-enhanced/assistant-memory-learning', '@owner/other') })).rejects.toThrow('inactive installed bundle')
+      await expect(compileRsiProfiles({ ...memoryInput, targetEffective: memoryEffective.replace('    personalMemory:', '    missingMemory:') })).rejects.toThrow('personalMemory config')
 
       if (boundedLive) {
         expect(policy.evaluate({ subject: { kind: 'background', id: 'live-qualification-scan-abc', workspace: adjustedOwner.workspace, principal: 'lark/account/tenant/owner' }, action: 'execute', resource: { kind: 'automation', id: 'live-qualification-scan-abc' }, context: { initiator: 'background' } }).effect).toBe('allow')

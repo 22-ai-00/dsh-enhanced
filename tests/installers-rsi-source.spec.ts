@@ -92,13 +92,15 @@ describe('supervised RSI source and build preparation', () => {
       cwd: repoRoot, encoding: 'utf8', env: { ...process.env, DSH_HOME: home, PATH: pathWithoutTraex },
     })
     expect(result.status, result.stderr).toBe(0)
-    for (const slug of ['assistant-skills', 'assistant-verifier', 'assistant-growth-driver']) {
+    for (const slug of ['assistant-skills', 'assistant-verifier', 'assistant-growth-driver', 'assistant-memory-learning']) {
       expect(result.stdout).toContain(join(repoRoot, 'plugins', slug))
     }
     const install = result.stdout.indexOf('dsh-rsi-setup.js --install-local-cohort')
     const source = result.stdout.indexOf('dsh-rsi-setup --prepare-build --optional-build')
     expect(install).toBeGreaterThanOrEqual(0)
     expect(result.stdout).toContain('--bundle assistant-growth-driver')
+    expect(result.stdout).toContain('--bundle assistant-memory-learning')
+    expect(result.stdout).not.toContain('--bundle personal-memory')
     expect(result.stdout).not.toContain('dsh plugin --profile web add')
     expect(source).toBeGreaterThan(install)
     expect(result.stdout).not.toContain('dsh-supervised-growth-setup')
