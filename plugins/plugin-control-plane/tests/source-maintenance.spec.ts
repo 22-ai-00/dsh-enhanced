@@ -10,6 +10,7 @@ import { resolveSourceBaseline } from '../src/source-baseline.ts'
 import { signSourceMaintenanceRecord, sourceMaintenanceDigest, sourceBaselineChain,
   type SourceMaintenanceRecord } from '../src/source-maintenance.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
+import { controlPlaneSchemaVersion } from '../src/sqlite.ts'
 import { hostMaintenanceDigest } from '../src/host-maintenance.ts'
 import { Ed25519PostActivationObservationAuthority, postActivationEvidenceDigest,
   postActivationObservationSigningPayload } from '../src/post-activation.ts'
@@ -110,7 +111,7 @@ test('preserves signed releases across two Host-signed maintenance edges, restar
   } finally { reopened.close() }
 }, 60_000)
 
-test('schema 27 upgrades to 28 without replacing historical rows', async () => {
+test('schema 27 upgrades without replacing historical rows', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-source-schema27-'))); roots.push(root)
   const path = join(root, 'control.sqlite')
   const store = new ControlPlaneStore({ path })
@@ -123,7 +124,7 @@ test('schema 27 upgrades to 28 without replacing historical rows', async () => {
   try {
     const check = new DatabaseSync(path, { readOnly: true })
     try {
-      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: 28 })
+      expect(check.prepare('PRAGMA user_version').get()).toEqual({ user_version: controlPlaneSchemaVersion })
       expect(check.prepare('SELECT COUNT(*) AS count FROM source_maintenance').get()).toEqual({ count: 0 })
       expect(check.prepare('SELECT id FROM capability_gaps WHERE id=?').get(gap.id)).toEqual({ id: gap.id })
     } finally { check.close() }

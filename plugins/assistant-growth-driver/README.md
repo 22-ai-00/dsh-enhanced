@@ -52,6 +52,7 @@ dsh --profile web --dump-config
 | `pluginSourceProposals.enabled` | `false` | 开启后通过可选 `pluginControlPlane` 服务准备既有插件的 pending 修改提案。缺少该服务或构建器未配置时仍保持四工具基线。 |
 | `pluginSourceProposals.repository` | 无 | 开启时必填的绝对规范仓库路径；由 owner 配置，模型不可传入。 |
 | `pluginSourceProposals.preparationMode` | `inline` | `inline` 保持本轮隔离构建；`durable` 只把已读、冻结 base 的内容排入 Control Plane 自己的持久队列。队列 authority、构建超时和执行生命周期都由 Control Plane 配置，独立于模型 wake。 |
+| `pluginSourceProposals.allowCreation` | `false` | 仅 `durable` 可开启新插件候选。还须配置 Control Plane 的独立 `sourceJobs.creation` 授权；缺少创建读取接口或有效命名规则时保持既有修改工具。 |
 | `pluginSourceProposals.maxPlansPerWake` | `1` | 每轮源码提案尝试上限（1–5）；inline 的 prepared 与 durable 的 queued 都占用此预算，失败也占一次。 |
 | `pluginSourceProposals.isolatedBuildTimeoutMs` | `180000` | 仅 `inline` 使用的构建时间上限（60000–240000ms）；控制面可进一步收窄，单轮 authority 到期仍会取消。`durable` 使用控制面 `sourceBuild.timeoutMs`。 |
 | `pluginSourceProposals.offline` | `true` | 源码提案必须离线构建；`false` 配置会拒绝。镜像须预先准备依赖。 |
@@ -148,6 +149,14 @@ Agent 先通过 `plugin_source_gaps` 发现 owner 配置的控制面账本中已
 Host 在本轮内按 gap 与插件保存首次读取的 commit，后续读取和准备均绑定该 commit；HEAD 变化即拒绝旧上下文。同一文件在同一 commit 的再次读取若内容漂移也会拒绝。完整替换既有文件前必须读取原内容；精确编辑只能作用于已读的既有文件，可在已有目录中增加源码或测试文件。模型不能指定 commit，也不能只凭文件清单覆盖未读文件。服务提供者更换后读上下文与待执行动作一并失效；未提供源码读取接口的旧版 control-plane 保持四工具基础模式。
 
 Control Plane 拥有 worktree、源码快照、容器构建和 SQLite 写入。`inline` 成功时仅返回待审批 plan id 与检查摘要；`durable` 成功时只返回 content-free job id/status，Host 接受队列后继续以它自己的 durable authority 运行，即使模型 wake 随后到期也不会伪造为 prepared。`plugin_source_job_status` 只在 durable 模式出现，并用当前 Growth authority 的 owner scope 查询 job。owner 仍需通过控制面的签名审批、源码复核和发布流程处理。模型看不到 worktree 路径或构建日志。检查失败、owner route 漂移、provider 移除、插件卸载或本轮到期均终止尚未被 Host 接受的操作。`health().run.sourceProposals` 分别提供 `queued`、`prepared` / `rejected` 数量；可选 provider 更换后下一轮重新绑定，旧轮次不会跨代继续写入。
+
+### 新插件候选
+
+在上述 `durable` 配置中增加 `allowCreation: true`，并在 Control Plane 配置[有限创建授权](../plugin-control-plane/README.md#自动创建新插件候选)。正常使用的可信失败复盘可选择创建新能力，沿用同一原生 AgentLoop、来源模型、owner、gap 与预算。
+
+创建工具仅公开 Host 允许的 `namePrefix` 命名规则。模型先选择此前缀下尚不存在的插件名，通过 `plugin_source_read({gap_id, plugin_name, mode: "create", paths: []})` 查看冻结基线公共模板的文件清单，再实际读取 `README.md`、`src/` 或 `tests/` 的模板内容；最后以 `plugin_source_create({gap_id, plugin_name, files: [{path, content}]})` 排队。创建与修改快照分别绑定；命名规则变化、过期或来源纠正使旧创建快照失效。
+
+候选只能写 README、源码与测试；manifest、patch、版本、许可证、构建配置、目录行和锁文件由 Host 生成且不能覆盖，不允许新增依赖。创建与修改共享每轮提案预算；Host 另持久计量创建额度，失败和 unknown 也消耗额度。检查通过仅产生 `prepared-create` / `pending-approval`，现有修改审批器不会批准这种计划。新插件签名采用、动态加载及真实任务收益仍待接通，不代表已形成生产自迭代闭环。
 
 ## 真实使用自动触发
 

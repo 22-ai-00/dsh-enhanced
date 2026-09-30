@@ -33,6 +33,16 @@ The image prewarms pnpm 11.7.0 from the exact lockfile while ignoring package
 scripts. Its fixed launcher copies the image store into `/workspace/.pnpm-store`
 and the policy metadata cache into `/workspace/.pnpm-cache` before the initial
 install. This retains the lockfile supply-chain checks without network access.
+The image also retains the exact successfully verified seed lock at the
+read-only `/opt/dsh-source-baseline/pnpm-lock.yaml`. A new-plugin candidate
+may add one Host-generated importer referencing only existing resolutions.
+That changes pnpm's whole-lock verification cache key. Only after the Host
+verifies the complete creation scope and the container matches the original
+Git base lock SHA-256 to the image seed, the initial pnpm 11.7.0 install uses
+`--trust-lockfile`, relying on the seed's completed verification. This skips
+lock resolution and supply-chain re-verification; it does not authorize new
+resolutions. Normal modifications retain the default verification policy.
+Older images without the seed file cannot check newly created candidates.
 pnpm 11 requires a writable SQLite store index even
 with `--offline`. The source runner still provides writable workspace and `/tmp` tmpfs mounts and
 runs every candidate check offline with a read-only root.

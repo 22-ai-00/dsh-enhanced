@@ -98,13 +98,14 @@ if (args[1] === 'start' || args[1] === 'restart') {
 }
 process.exit(91)
 `
-  await writeFile(fakeSystemctl, systemctlSource.replaceAll('__STATE__', JSON.stringify(systemdState))
+  await writeFile(fakeSystemctl, systemctlSource.replace(/^#!\/usr\/bin\/env node/u, `#!${process.execPath}`)
+    .replaceAll('__STATE__', JSON.stringify(systemdState))
     .replaceAll('__LOG__', JSON.stringify(systemdLog)).replaceAll('__HOME__', JSON.stringify(home)), { mode: 0o700 })
   await writeFile(fakeJournalctl, String.raw`#!/usr/bin/env node
 const invocation = process.argv.find(arg => arg.startsWith('_SYSTEMD_INVOCATION_ID='))?.split('=')[1]
 if (invocation?.startsWith('fresh-')) process.stdout.write('dsh-enhanced host ready: v1\n')
 else process.stdout.write('old invocation\n')
-`, { mode: 0o700 })
+`.replace(/^#!\/usr\/bin\/env node/u, `#!${process.execPath}`), { mode: 0o700 })
 }
 
 async function controlledHostFixture(withUnits = false, dumpLink: 'none' | 'external' | 'candidate' = 'none') {
@@ -135,7 +136,8 @@ async function controlledHostFixture(withUnits = false, dumpLink: 'none' | 'exte
     await mkdir(binDirectory, { recursive: true, mode: 0o700 })
     await chmod(runtimeRoot, 0o700)
     await cp(yamlRoot, join(runtimeRoot, 'node_modules', 'yaml'), { recursive: true, dereference: true })
-    await writeFile(join(native, 'dsh', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version }) + '\n')
+    await writeFile(join(native, 'dsh', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version,
+      bin: { dsh: 'lib/bin.js' } }) + '\n')
     await writeFile(join(native, 'dsh-base', 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-base', version }) + '\n')
     await writeFile(join(runtimeRoot, 'package-lock.json'), JSON.stringify({ lockfileVersion: 3, packages: {
       'node_modules/@deepseek-ai/dsh': { version, integrity: old.integrity },
@@ -147,7 +149,7 @@ async function controlledHostFixture(withUnits = false, dumpLink: 'none' | 'exte
         ? `require('node:fs').mkdirSync(process.env.DSH_HOME + '/profiles/web/node_modules', { recursive: true }); `
           + `require('node:fs').symlinkSync('${runtimeRoot}/node_modules/@deepseek-ai/dsh', `
           + `process.env.DSH_HOME + '/profiles/web/node_modules/host-native'); ` : ''
-    await writeFile(join(native, 'dsh', 'lib', 'bin.js'), `#!/usr/bin/env node\n`
+    await writeFile(join(native, 'dsh', 'lib', 'bin.js'), `#!${process.execPath}\n`
       + `if (process.argv.includes('--version')) process.stdout.write('${version}\\n')\n`
       + `else if (process.argv.includes('--dump-config')) { ${dumpMutation}process.stdout.write('service: {}\\n') }\n`
       + `else process.exit(2)\n`, { mode: 0o700 })
@@ -211,16 +213,20 @@ async function controlledHostFixture(withUnits = false, dumpLink: 'none' | 'exte
   }
   if (withUnits) await setupControlledUnits({ home, systemdHome, systemdState, systemdLog,
     fakeSystemctl, fakeJournalctl, originalRuntime })
-  else await writeFile(fakeSystemctl, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+  else {
+    await writeFile(fakeSystemctl, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+    await writeFile(fakeJournalctl, '#!/bin/sh\nexit 0\n', { mode: 0o700 })
+  }
   const run = (operation: 'host-update' | 'host-recover', crash = false) => spawnSync(process.execPath, [
     join(install, 'lifecycle-profile.mjs'), operation, 'web', home,
     operation === 'host-update' ? originalRuntime.dshPath : process.execPath,
     operation === 'host-update' ? '/usr/bin/bwrap' : '/nonexistent/bwrap-not-required-for-recovery',
-    fakeSystemctl, withUnits ? fakeJournalctl : '/usr/bin/journalctl', ...(operation === 'host-update' ? [planPath] : []),
+    fakeSystemctl, fakeJournalctl, ...(operation === 'host-update' ? [planPath] : []),
   ], { encoding: 'utf8', timeout: 60_000, env: { ...process.env,
     DSH_HOST_TEST_SYSTEMCTL: fakeSystemctl,
+    DSH_HOST_TEST_JOURNALCTL: fakeJournalctl,
     DSH_HOST_TEST_ISOLATED_HOME: '1',
-    ...(withUnits ? { HOME: systemdHome, DSH_HOST_TEST_JOURNALCTL: fakeJournalctl, DSH_HOST_TEST_FAST: '1',
+    ...(withUnits ? { HOME: systemdHome, DSH_HOST_TEST_FAST: '1',
       DSH_HOST_TEST_STATE: systemdState, DSH_HOST_TEST_LOG: systemdLog, DSH_HOST_TEST_HOME: home } : {}),
     ...(crash ? { DSH_HOST_TEST_CRASH_RENAME: '1' } : {}),
   } })
@@ -340,8 +346,10 @@ describe('managed Host transaction inputs', () => {
       const path = join(root, 'plan.json')
       await writeFile(path, JSON.stringify(currentPlan), { mode: 0o600 })
       const script = resolve('scripts/install/lifecycle-profile.mjs')
+      // /usr/bin/false satisfies the production executable trust gate while
+      // making any accidental service operation fail this current-version test.
       const result = spawnSync(process.execPath, [script, 'host-update', 'owner', home, executable,
-        '/usr/bin/bwrap', '/usr/bin/systemctl', '/usr/bin/journalctl', path],
+        '/usr/bin/bwrap', '/usr/bin/false', '/usr/bin/false', path],
       { encoding: 'utf8', timeout: 30_000 })
       expect(result.status, result.stderr).toBe(0)
       expect(result.stdout).toContain('managed Host already current')

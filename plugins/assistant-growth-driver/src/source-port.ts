@@ -18,6 +18,9 @@
  * a growth proposal may never retarget a T3 safety-root plugin.
  */
 export const GROWTH_PROTECTED_PLUGIN_DENYLIST: ReadonlySet<string> = new Set([
+  'assistant-delivery', // authenticated task and feedback evidence
+  'lark-channel', // authenticated external-channel ingress
+  'assistant-automations', // qualification observation and rollback scheduling
   'assistant-policy', // 策略规则、授权寿命、急停根
   'credentials-keychain', // 凭据根
   'assistant-evaluation', // 评测答案根
@@ -66,6 +69,7 @@ export interface SourceJobProjection {
   readonly gapId: string
   readonly baseCommit: string
   readonly status: 'queued' | 'running' | 'prepared' | 'failed' | 'unknown'
+  readonly mode?: 'create'
   readonly createdAt: number
   readonly expiresAt: number
   readonly planId?: string
@@ -102,6 +106,17 @@ export interface GrowthSourcePlanePort {
     signal: AbortSignal
     assertCurrent: () => void
   }): Promise<GrowthSourceSnapshot>
+  /** Inspect the Host's fixed new-plugin template, never an arbitrary model path. */
+  inspectCreateSource?(input: {
+    repository: string
+    name: string
+    paths: readonly string[]
+    baseCommit?: string
+    signal: AbortSignal
+    assertCurrent: () => void
+  }): Promise<GrowthSourceSnapshot>
+  /** Public naming rule only; absence means creation is not currently granted. */
+  getSourceCreationNamespace?(): Readonly<{ namePrefix: string }> | undefined
   /** Enumerate recently recorded gaps; the caller filters to still-open ones. */
   listOpenGaps(): readonly GrowthSourceGap[]
   /**
@@ -126,6 +141,8 @@ export interface GrowthSourcePlanePort {
   }): Promise<GrowthSourcePreparedPlan>
   /** Queue Host-owned source preparation that outlives the model wake. */
   enqueueSourceJob(input: {
+    /** Absent means the legacy modify lane. Creation needs a separate owner grant. */
+    mode?: 'create'
     gapId: string
     name: string
     repository: string

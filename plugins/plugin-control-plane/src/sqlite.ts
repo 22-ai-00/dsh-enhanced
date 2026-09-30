@@ -4,7 +4,15 @@ import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { pathToFileURL } from 'node:url'
 
-export const controlPlaneSchemaVersion = 28
+export const controlPlaneSchemaVersion = 29
+
+const sourceCreationGrantSchema = `CREATE TABLE IF NOT EXISTS source_creation_grants (
+  grant_id TEXT PRIMARY KEY,
+  grant_digest TEXT NOT NULL CHECK(length(grant_digest) = 64),
+  expires_at INTEGER NOT NULL,
+  max_creates INTEGER NOT NULL CHECK(max_creates >= 1 AND max_creates <= 1000),
+  creates INTEGER NOT NULL CHECK(creates >= 0 AND creates <= max_creates)
+) STRICT, WITHOUT ROWID;`
 
 const sourceMaintenanceSchema = `CREATE TABLE IF NOT EXISTS source_maintenance (
   repository TEXT NOT NULL, sequence INTEGER NOT NULL CHECK(sequence > 0), transaction_id TEXT NOT NULL,
@@ -289,6 +297,8 @@ function createCurrent(database: DatabaseSync): void {
       max_submissions INTEGER NOT NULL CHECK(max_submissions >= 1),
       submissions INTEGER NOT NULL CHECK(submissions >= 0 AND submissions <= max_submissions)
     ) STRICT, WITHOUT ROWID;
+
+    ${sourceCreationGrantSchema}
 
     CREATE TABLE IF NOT EXISTS source_jobs (
       id TEXT PRIMARY KEY,
@@ -1207,6 +1217,47 @@ function migrateV17ToV18(database: DatabaseSync): void {
 }
 
 
+/** v28 rows keep their original mode, digest and receipts. Only the table constraint widens. */
+function migrateV28ToV29(database: DatabaseSync): void {
+  const table = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'source_plans'").get() as { sql: string } | undefined
+  const indexes = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'source_plans' AND sql IS NOT NULL").all() as Array<{ sql: string }>
+  // An older migration fixture may lower user_version after creating the
+  // current table. Validate that shape before advancing its ledger version.
+  if (table?.sql.includes("mode IN ('create', 'modify', 'prepared-create')")
+    && table.sql.includes('creation_json TEXT')
+    && table.sql.includes("mode = 'prepared-create' AND creation_json IS NOT NULL")) {
+    database.exec(`BEGIN IMMEDIATE; ${sourceCreationGrantSchema}
+      PRAGMA user_version = 29; COMMIT;`)
+    return
+  }
+  if (!table?.sql.match(/^CREATE TABLE\s+"?source_plans"?\s*\(/u)
+    || !table.sql.includes("mode IN ('create', 'modify')")
+    || !table.sql.includes("(mode = 'modify' AND prepared_evidence_json IS NOT NULL)")) throw new Error('unknown v28 source plan schema')
+  const oldColumns = (database.prepare('PRAGMA table_info(source_plans)').all() as Array<{ name: string }>).map(row => {
+    if (!/^[a-z_]+$/u.test(row.name) || row.name === 'creation_json') throw new Error('invalid v28 source plan column')
+    return `"${row.name}"`
+  }).join(',')
+  const schema = table.sql.replace(/^CREATE TABLE\s+"?source_plans"?/u, 'CREATE TABLE source_plans_v29')
+    .replace("mode IN ('create', 'modify')", "mode IN ('create', 'modify', 'prepared-create')")
+    .replace('(mode = \'modify\' AND prepared_evidence_json IS NOT NULL)', "(mode IN ('modify', 'prepared-create') AND prepared_evidence_json IS NOT NULL)")
+    .replace('release_authorization_json TEXT',
+      "creation_json TEXT CHECK(creation_json IS NULL OR (json_valid(creation_json) AND json_type(creation_json) = 'object')),\n      release_authorization_json TEXT")
+    .replace('CHECK((release_authorization_json IS NULL',
+      "CHECK((mode = 'prepared-create' AND creation_json IS NOT NULL) OR (mode IN ('create', 'modify') AND creation_json IS NULL)),\n      CHECK((release_authorization_json IS NULL")
+  if (!schema.includes('CREATE TABLE source_plans_v29') || !schema.includes('creation_json TEXT')
+    || !schema.includes("mode IN ('create', 'modify', 'prepared-create')")) throw new Error('invalid v29 source plan migration schema')
+  database.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE')
+  try {
+    database.exec(`${schema}; INSERT INTO source_plans_v29 (${oldColumns}) SELECT ${oldColumns} FROM source_plans;
+      DROP TABLE source_plans; ALTER TABLE source_plans_v29 RENAME TO source_plans;`)
+    for (const index of indexes) database.exec(index.sql)
+    database.exec(sourceCreationGrantSchema)
+    if (database.prepare('PRAGMA foreign_key_check').all().length) throw new Error('source creation migration changed a foreign key')
+    database.exec('PRAGMA user_version = 29; COMMIT')
+  } catch (error) { database.exec('ROLLBACK'); throw error }
+  finally { database.exec('PRAGMA foreign_keys = ON') }
+}
+
 export function openControlPlaneDatabase(path: string): DatabaseSync {
   prepare(path)
   const database = new DatabaseSync(path)
@@ -1267,6 +1318,8 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
     if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 28) {
       database.exec(`BEGIN IMMEDIATE; ${sourceMaintenanceSchema} PRAGMA user_version = 28; COMMIT;`)
     } else database.exec(sourceMaintenanceSchema)
+    if (Number(database.prepare('PRAGMA user_version').get()?.user_version) < 29) migrateV28ToV29(database)
+    else database.exec(sourceCreationGrantSchema)
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database
   } catch (error) {

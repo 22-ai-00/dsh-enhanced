@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -26,6 +27,9 @@ async function fixture() {
   await mkdir(profile, { recursive: true })
   const dsh = join(root, 'dsh'), bin = join(root, 'bin')
   await mkdir(bin)
+  // The installed-input collector pins a native systemctl binary but never invokes it here.
+  // An owned PATH entry backed by `false` fails closed if another test starts invoking it.
+  await symlink('/usr/bin/false', join(bin, 'systemctl'))
   await file(join(dsh, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh', version: '0.1.5-rc.3', bin: { dsh: 'lib/bin.js' } }))
   await file(join(dsh, 'lib', 'bin.js'), '#!/usr/bin/env node\n', 0o700)
   await symlink(join(dsh, 'lib', 'bin.js'), join(bin, 'dsh'))
@@ -84,6 +88,8 @@ describe('installed owner setup input capture', () => {
       }
       expect(result.observerTargets.map(target => target.services)).toEqual([['assistantDelivery'], ['larkChannel']])
       expect(result.executor).toMatchObject({ id: '@deepseek-ai/dsh', version: '0.1.5-rc.3', path: join(data.dsh, 'lib', 'bin.js') })
+      expect(result.systemctl.path).toBe(await realpath(join(data.bin, 'systemctl')))
+      expect(result.systemctl.sha256).toBe(createHash('sha256').update(await readFile(result.systemctl.path)).digest('hex'))
       expect(result.systemctl.interpreter).toBeNull()
       expect(result.policies).toMatchObject([{ candidateId: 'personal-assistant' }, { candidateId: 'assistant-health', dshBaseline: '0.1.5-rc.3',
         capabilities: ['owner-installed'], authorities: ['owner-installed'], requires: [] }, { candidateId: 'assistant-memory-learning', dshBaseline: '0.1.5-rc.3',

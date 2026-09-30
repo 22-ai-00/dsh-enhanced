@@ -103,7 +103,9 @@ test('native pnpm peer overrides preserve one module identity and do not install
     const peers = await rsiLocalPeerOverrides({ cohort, bundles: ['target'] })
     await writeFile(join(profilePath, 'pnpm-workspace.yaml'), mergeRsiLocalOverrides('packages: [.]\nautoInstallPeers: false\n',
       { ...rsiLocalDependencyOverrides(cohort, ['target']), ...peers }))
-    const output = execFileSync('pnpm', ['--dir', profilePath, 'install', '--ignore-scripts'], { encoding: 'utf8', timeout: 30_000,
+    // All runtime packages are frozen local tarballs. Offline resolution also
+    // prevents pnpm's optional peer metadata probe from needing a registry.
+    const output = execFileSync('pnpm', ['--dir', profilePath, 'install', '--offline', '--ignore-scripts'], { encoding: 'utf8', timeout: 30_000,
       env: { ...process.env, CI: 'true', pnpm_config_package_import_method: 'copy' } })
     expect(output).toContain('Packages: +3')
     await verifyRsiLocalInstalledPackages({ cohort, profilePath })

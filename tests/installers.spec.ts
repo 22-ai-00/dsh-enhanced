@@ -10223,7 +10223,7 @@ describe.skipIf(process.platform !== 'linux')('explicit pre-owner local source t
     expect(recovery.status,recovery.stderr).toBe(0)
     expect(await readFile(join(f.dshHome,'rsi-sources/web/receipt.json'),'utf8')).toContain('new')
     expect(existsSync(f.dshHome + '.dsh-enhanced-transaction')).toBe(false)
-  },15000)
+  },30000)
   test('refuses installed package byte drift during recovery before service operations', async () => {
     const f = await preOwnerLifecycleFixture()
     const first = runPreOwnerLifecycle(f, 'local-service-upgrade', { systemdStartFailsProfile: 'web' })

@@ -39,6 +39,8 @@ ENV pnpm_config_store_dir=/opt/pnpm-store \
 WORKDIR /seed
 COPY . /seed
 RUN pnpm fetch --workspace-root --frozen-lockfile --ignore-scripts \
+ && install -d -m 0755 /opt/dsh-source-baseline \
+ && install -m 0444 /seed/pnpm-lock.yaml /opt/dsh-source-baseline/pnpm-lock.yaml \
  && chmod -R a+rX /opt/pnpm-store /opt/pnpm-cache /opt/pnpm-runtime \
  && rm -rf /seed
 

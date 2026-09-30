@@ -1,6 +1,7 @@
 import type { CatalogEntry, CatalogPackage } from './catalog.js'
 import type { LiveQualificationTerms } from './live-qualification.js'
 import type { AdoptionHandoffTerms } from './adoption-handoff.js'
+import type { SourceCreationBinding } from './source-creation.js'
 
 export type PlanStatus =
   | 'pending-approval'
@@ -219,15 +220,18 @@ export interface PluginSourcePlan {
   /**
    * 'create' scaffolds a brand-new plugin after approval (the legacy flow);
    * 'modify' prepares a bounded patch for an *existing* plugin before approval,
-   * carrying its frozen-build evidence while still pending. Modify bindings
-   * include mode, checked digests, and evidence in the immutable plan digest;
-   * legacy create-plan digests retain their existing shape.
+   * 'prepared-create' carries a new plugin and owner creation grant through the
+   * same isolated check gate. Prepared bindings include mode, checked digests,
+   * and evidence in the immutable plan digest. Legacy create digests keep their
+   * original shape.
    */
-  mode: 'create' | 'modify'
+  mode: 'create' | 'modify' | 'prepared-create'
+  /** Frozen only for an owner-granted, prepared create candidate. */
+  creation?: SourceCreationBinding
   scope: readonly string[]
   approval?: VerifiedApprovalReceipt
   sourceCheck?: SourceCheckEvidence
-  /** Present only for 'modify' plans: frozen, offline, ignore-scripts build evidence captured at pending time. */
+  /** Present for prepared plans: frozen, offline, ignore-scripts build evidence captured at pending time. */
   preparedEvidence?: SourcePreparedEvidence
   releaseAuthorization?: VerifiedSourceReleaseAuthorization
   release?: {

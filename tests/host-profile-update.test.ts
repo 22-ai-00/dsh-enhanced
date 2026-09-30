@@ -17,7 +17,7 @@ async function host(root: string, version: string, dropped: boolean, cordisVersi
   const yamlEntry = createRequire(import.meta.url).resolve('yaml')
   await mkdir(join(root, 'node_modules'), { recursive: true })
   await symlink(dirname(dirname(yamlEntry)), join(root, 'node_modules', 'yaml'))
-  const packages = [native('@deepseek-ai/dsh', version), native('@deepseek-ai/dsh-base', version, { '@deepseek-ai/cordis': cordisVersion }), native('@deepseek-ai/cordis', cordisVersion)]
+  const packages = [{ ...native('@deepseek-ai/dsh', version), bin: { dsh: 'lib/bin.js' } }, native('@deepseek-ai/dsh-base', version, { '@deepseek-ai/cordis': cordisVersion }), native('@deepseek-ai/cordis', cordisVersion)]
   if (dropped) packages.push(native('@deepseek-ai/old-only', version))
   const lock: Record<string, unknown> = { '': { name: 'test-host', version: '0.0.0' } }
   for (const pkg of packages) {

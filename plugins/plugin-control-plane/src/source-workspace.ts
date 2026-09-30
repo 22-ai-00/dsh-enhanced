@@ -172,9 +172,10 @@ export async function changedSourcePaths(worktree: string, baseCommit: string, e
   return [...new Set(`${tracked}${untracked}`.split('\0').filter(Boolean))].sort()
 }
 
-export function sourcePathAllowed(path: string, name: string, mode: 'create' | 'modify' = 'modify'): boolean {
+export function sourcePathAllowed(path: string, name: string, mode: 'create' | 'modify' | 'prepared-create' = 'modify'): boolean {
   const pluginRoot = `plugins/${name}`
   const withinPluginTree = path === pluginRoot || path.startsWith(`${pluginRoot}/`)
+  if (mode === 'prepared-create') return withinPluginTree || path === pluginCatalogScope || path === 'pnpm-lock.yaml'
   return mode === 'create' ? (withinPluginTree || path === pluginCatalogScope) : withinPluginTree
 }
 
@@ -333,6 +334,15 @@ export async function writeScopedPluginFiles(input: {
   await writeValidatedPluginFiles(worktree, name, files)
 }
 
+/** Host-only writer for a newly scaffolded plugin. Parents may be added under
+ * its already-created root; every component is rechecked before O_NOFOLLOW. */
+export async function writeCreatedPluginFiles(input: {
+  worktree: string; name: string; files: readonly ScopedPluginFile[]
+}): Promise<void> {
+  validateScopedPluginFiles(input.files)
+  await writeValidatedPluginFiles(input.worktree, input.name, input.files, true)
+}
+
 /** Validate bytes and paths before persisting a durable source job. */
 export function validateScopedPluginFiles(files: readonly ScopedPluginFile[]): void {
   if (!Array.isArray(files)) throw new ControlPlaneCliError('INVALID_ARGUMENT', 'prepared files must be an array')
@@ -360,7 +370,8 @@ export function validateScopedPluginFiles(files: readonly ScopedPluginFile[]): v
   }
 }
 
-async function writeValidatedPluginFiles(worktree: string, name: string, files: readonly ScopedPluginFile[]): Promise<void> {
+async function writeValidatedPluginFiles(worktree: string, name: string, files: readonly ScopedPluginFile[],
+  createParents = false): Promise<void> {
   const pluginRoot = resolve(worktree, 'plugins', name)
   const rootMetadata = await lstat(pluginRoot).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT') return undefined
@@ -372,15 +383,19 @@ async function writeValidatedPluginFiles(worktree: string, name: string, files: 
   for (const file of files) {
     const normalized = file.path.normalize('NFC')
     const segments = normalized.split('/')
-    // Every parent segment must be an existing non-symlink directory at the
-    // base commit; modify never creates directories.
+    // Modify requires every parent at base; creation may add subdirectories
+    // after the fixed public generator created the plugin root.
     let parent = pluginRoot
     for (const segment of segments.slice(0, -1)) {
       parent = join(parent, segment)
-      const metadata = await lstat(parent).catch((error: NodeJS.ErrnoException) => {
+      let metadata = await lstat(parent).catch((error: NodeJS.ErrnoException) => {
         if (error.code === 'ENOENT') return undefined
         throw error
       })
+      if (metadata === undefined && createParents) {
+        await mkdir(parent, { mode: 0o700 })
+        metadata = await lstat(parent)
+      }
       if (metadata === undefined || metadata.isSymbolicLink() || !metadata.isDirectory()) {
         throw new ControlPlaneCliError('SOURCE_BOUNDARY', `prepared file parent directory must already exist and must not be a symlink: ${JSON.stringify(normalized)}`)
       }
@@ -394,7 +409,8 @@ async function writeValidatedPluginFiles(worktree: string, name: string, files: 
       if (error.code === 'ENOENT') return undefined
       throw error
     })
-    if (targetMetadata !== undefined && targetMetadata.isSymbolicLink()) {
+    if (targetMetadata !== undefined && (targetMetadata.isSymbolicLink()
+      || (createParents && (!targetMetadata.isFile() || targetMetadata.nlink !== 1)))) {
       throw new ControlPlaneCliError('SOURCE_BOUNDARY', `symlinked source path is forbidden: ${JSON.stringify(normalized)}`)
     }
     let handle
@@ -412,14 +428,16 @@ async function writeValidatedPluginFiles(worktree: string, name: string, files: 
   }
 }
 
-/**
- * A prepared modify worktree is garbage only while its plan is still waiting on
- * the owner (pending/approved) and the plan's TTL has elapsed. Plans that
- * reached ready-for-human-review or a release phase are retained for the
- * owner's release workflow.
- */
-export function preparedWorktreeIsGarbage(plan: { status: string; expiresAt: number }, now: number): boolean {
-  return GC_ELIGIBLE_SOURCE_STATUSES.has(plan.status) && plan.expiresAt < now
+/** Owner-retired prepared source plans are collectible only with frozen mode evidence. */
+export function preparedWorktreeIsGarbage(plan: Pick<PluginSourcePlan,
+  'mode' | 'status' | 'expiresAt' | 'scope' | 'name' | 'generatorDigest' | 'creation' | 'sourceCheck' | 'preparedEvidence'>,
+now: number): boolean {
+  if (plan.expiresAt >= now) return false
+  if (plan.mode === 'modify') return GC_ELIGIBLE_SOURCE_STATUSES.has(plan.status)
+  if (plan.mode !== 'prepared-create' || !['pending-approval', 'expired'].includes(plan.status)
+    || plan.creation?.generatorDigest !== plan.generatorDigest || !plan.sourceCheck || !plan.preparedEvidence) return false
+  return plan.scope.length === 3 && new Set(plan.scope).size === 3
+    && [`plugins/${plan.name}`, pluginCatalogScope, 'pnpm-lock.yaml'].every(path => plan.scope.includes(path))
 }
 
 /** Parse `git worktree list --porcelain` into canonical linked-worktree paths. */
@@ -447,11 +465,12 @@ export async function pruneRegisteredWorktree(input: {
 }
 
 /**
- * Remove prepared modify worktrees whose plans expired while still waiting on
- * the owner. Every removed path must (1) belong to a modify plan, (2) be a
+ * Remove prepared source worktrees whose plans expired while still waiting on
+ * the owner. Every removed path must (1) belong to a prepared plan, (2) be a
  * descendant of the control-plane state root and (3) still be a linked
  * worktree of the plan's repository; anything outside those proofs is left
- * untouched. Idempotent. Shared by the service and the owner CLI.
+ * untouched. Creation additionally requires exact generation/evidence scope
+ * and durable worktree identity. Idempotent. Shared by service and owner CLI.
  */
 export async function gcPreparedModifyWorktrees(input: {
   store: ControlPlaneStore
@@ -461,15 +480,20 @@ export async function gcPreparedModifyWorktrees(input: {
 }): Promise<{ removed: readonly string[] }> {
   const stateRoot = resolve(join(input.statePath, 'source-worktrees'))
   const removed: string[] = []
-  for (const plan of input.store.listModifySourcePlans() as PluginSourcePlan[]) {
+  for (const plan of input.store.listPreparedSourcePlans({ expiredBefore: input.now })) {
     if (!preparedWorktreeIsGarbage(plan, input.now)) continue
     const worktree = resolve(plan.worktree)
     const inside = relative(stateRoot, worktree)
     if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) continue
     const linked = await linkedWorktrees(plan.repository, input.environment).catch((): readonly string[] => [])
     if (!linked.includes(worktree)) continue
+    if (plan.mode === 'prepared-create' && (dirname(worktree) !== stateRoot
+      || !/^worktree-job-[a-f0-9]{64}$/u.test(worktree.slice(stateRoot.length + 1)))) continue
     input.store.expirePreparedSourcePlan({ planId: plan.id, expectedRevision: plan.revision, now: input.now })
-    await pruneRegisteredWorktree({ repository: plan.repository, worktree, environment: input.environment })
+    if (plan.mode === 'prepared-create') {
+      await removeSourceJobWorktree({ stateRoot, repository: plan.repository,
+        worktree, baseCommit: plan.baseCommit, environment: input.environment })
+    } else await pruneRegisteredWorktree({ repository: plan.repository, worktree, environment: input.environment })
     removed.push(worktree)
   }
   return Object.freeze({ removed: Object.freeze(removed) })

@@ -14,7 +14,7 @@ const repositoryRoot = fileURLToPath(new URL('../../../', import.meta.url))
 const isolation = join(repositoryRoot, 'scripts', 'isolation')
 const IMAGE = `sha256:${'a'.repeat(64)}`
 const pins = { 'build-source-image.mjs': '7b7eb0797e1ca543fb1ffa0463eb78b3ecad14f28fe4bfca25651640aac4669b',
-  'source-builder.Dockerfile': 'fe720d9f9627d7c8a64dbdaa19dbb50581df43e8ab4794d44d8c247c680291a1',
+  'source-builder.Dockerfile': 'c936e136517c5bc85603e7187fe74691e32f954f57b5076946dc42fed33c65f5',
   'source-builder-seccomp.json': 'b1e4b5b709578785bd2aff4a3a344301997571ad0e8ae5747aec176571ddc342' }
 
 function git(cwd: string, ...args: string[]): string {

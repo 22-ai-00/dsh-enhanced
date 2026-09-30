@@ -14,6 +14,7 @@ import { controlPlaneOperationReceiptDigest, controlPlaneSchemaVersion, openCont
 import { validateSourceBuildConfig } from './source-build.js'
 import { validateSourceBaselineConfig, verifySourceBaselineHistory } from './source-baseline.js'
 import { validateScopedPluginFiles } from './source-workspace.js'
+import { validateSourceCreationFiles, validateSourceCreationGrant, type SourceCreationBinding } from './source-creation.js'
 import { validateAdoptionHandoffTerms, type AdoptionHandoffRecord, type AdoptionHandoffTerms } from './adoption-handoff.js'
 import type { SourceJobCompletion, SourceJobIntent, SourceJobRecord, SourceJobStatus } from './source-job-types.js'
 import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
@@ -200,10 +201,23 @@ function positiveInteger(value: number, field: string): number {
  */
 export const MODIFY_GENERATOR_DIGEST = createHash('sha256').update('dsh-source-modify-no-generator-v1').digest('hex')
 
-function expectedSourceScope(name: string, mode: 'create' | 'modify'): readonly string[] {
-  return mode === 'create'
+function expectedSourceScope(name: string, mode: PluginSourcePlan['mode']): readonly string[] {
+  return mode === 'prepared-create'
+    ? Object.freeze(['plugins/README.md', `plugins/${name}`, 'pnpm-lock.yaml'].sort())
+    : mode === 'create'
     ? Object.freeze(['plugins/README.md', `plugins/${name}`].sort())
     : Object.freeze([`plugins/${name}`])
+}
+
+function creationBindingFromStored(value: unknown): SourceCreationBinding {
+  const binding = objectRecord(value, 'source creation binding')
+  exactKeys(binding, ['grant', 'generatorDigest'], 'source creation binding')
+  try { validateSourceCreationGrant(binding['grant']) }
+  catch { throw new ControlPlaneStoreError('invalid-input', 'source creation grant is invalid') }
+  if (typeof binding['generatorDigest'] !== 'string' || !DIGEST.test(binding['generatorDigest'])) {
+    throw new ControlPlaneStoreError('invalid-input', 'source creation generator digest is invalid')
+  }
+  return Object.freeze({ grant: Object.freeze(structuredClone(binding['grant'])), generatorDigest: binding['generatorDigest'] })
 }
 
 function objectRecord(value: unknown, label: string): Record<string, unknown> {
@@ -354,10 +368,11 @@ interface ActivationRow {
 interface SourceRow {
   id: string; plan_digest: string; gap_id: string; gap_snapshot_json: string; repository: string; worktree: string
   base_commit: string; plugin_name: string; generator_digest: string; scope_json: string
-  mode: 'create' | 'modify'; status: SourcePlanStatus
+  mode: PluginSourcePlan['mode']; status: SourcePlanStatus
   revision: number; created_at: number; expires_at: number; approval_json: string | null
   checked_tree_digest: string | null; checked_patch_digest: string | null; checked_at: number | null
   prepared_evidence_json: string | null
+  creation_json: string | null
   release_authorization_json: string | null; release_authorization_digest: string | null
   release_id: string | null; release_fence: number; release_failure_phase: SourceReleasePhase | null
   release_failure_code: string | null; updated_at: number
@@ -721,15 +736,18 @@ function preparedEvidenceFromStored(value: unknown): SourcePreparedEvidence {
   const commands = item['commands'].map((entry, index) => {
     const command = objectRecord(entry, `stored source prepared evidence command ${index}`)
     exactKeys(command, ['command', 'args', 'exitCode', 'durationMs', 'logDigest'], `stored source prepared evidence command ${index}`)
+    const args = command['args']
+    const scriptIndex = command['command'] === 'docker' && Array.isArray(args) && args.at(-2) === '-ceu'
+      ? args.length - 1 : -1
     if (typeof command['command'] !== 'string' || command['command'] === '' || command['command'].length > 64
-      || !Array.isArray(command['args']) || command['args'].length > 64
-      || command['args'].some(arg => typeof arg !== 'string' || arg.length > 4096)
+      || !Array.isArray(args) || args.length > 96
+      || args.some((arg, argIndex) => typeof arg !== 'string' || arg.length > (argIndex === scriptIndex ? 32_768 : 4096))
       || command['exitCode'] !== 0
       || !Number.isSafeInteger(command['durationMs']) || Number(command['durationMs']) < 0
       || !DIGEST.test(String(command['logDigest']))) {
       throw new ControlPlaneStoreError('invalid-state', `stored source prepared evidence command ${index} is corrupt`)
     }
-    return Object.freeze({ command: String(command['command']), args: Object.freeze([...command['args'] as string[]]),
+    return Object.freeze({ command: String(command['command']), args: Object.freeze([...args as string[]]),
       exitCode: 0 as const, durationMs: Number(command['durationMs']), logDigest: String(command['logDigest']) })
   })
   const pack = objectRecord(item['pack'], 'stored source prepared evidence pack')
@@ -750,7 +768,7 @@ function preparedEvidenceFromStored(value: unknown): SourcePreparedEvidence {
 }
 
 function sourceFromRow(row: SourceRow): PluginSourcePlan {
-  if (row.mode !== 'create' && row.mode !== 'modify') {
+  if (row.mode !== 'create' && row.mode !== 'modify' && row.mode !== 'prepared-create') {
     throw new ControlPlaneStoreError('invalid-state', 'stored source plan has an unknown mode')
   }
   const gapSnapshot = JSON.parse(row.gap_snapshot_json) as PluginSourcePlan['gapSnapshot']
@@ -770,9 +788,17 @@ function sourceFromRow(row: SourceRow): PluginSourcePlan {
       throw new ControlPlaneStoreError('invalid-state', 'stored source prepared evidence is corrupt')
     }
   }
-  if ((row.mode === 'modify') !== (preparedEvidence !== undefined)
-    || (row.mode === 'modify' && (row.checked_tree_digest === null || row.checked_patch_digest === null || row.checked_at === null))
-    || (row.mode === 'modify' && ['running-local-checks', 'local-checks-failed'].includes(row.status))) {
+  let creation: SourceCreationBinding | undefined
+  if (row.creation_json !== null) {
+    try { creation = creationBindingFromStored(JSON.parse(row.creation_json) as unknown) }
+    catch { throw new ControlPlaneStoreError('invalid-state', 'stored source creation binding is corrupt') }
+  }
+  const prepared = row.mode === 'modify' || row.mode === 'prepared-create'
+  if (prepared !== (preparedEvidence !== undefined) || (row.mode === 'prepared-create') !== (creation !== undefined)
+    || (row.mode === 'prepared-create' && (!['pending-approval', 'expired'].includes(row.status) || creation?.generatorDigest !== row.generator_digest
+      || row.approval_json !== null || row.release_authorization_json !== null || row.release_id !== null))
+    || (prepared && (row.checked_tree_digest === null || row.checked_patch_digest === null || row.checked_at === null))
+    || (prepared && ['running-local-checks', 'local-checks-failed'].includes(row.status))) {
     throw new ControlPlaneStoreError('invalid-state', 'stored source plan mode does not match its evidence or status')
   }
   let approval: PluginSourcePlan['approval']
@@ -790,8 +816,8 @@ function sourceFromRow(row: SourceRow): PluginSourcePlan {
       || !Number.isSafeInteger(sourceCheck.checkedAt) || sourceCheck.checkedAt < 0))) {
     throw new ControlPlaneStoreError('invalid-state', 'stored source check evidence is corrupt')
   }
-  const digestBinding = row.mode === 'modify'
-    ? { ...immutable, mode: row.mode, sourceCheck, preparedEvidence }
+  const digestBinding = prepared
+    ? { ...immutable, mode: row.mode, ...(creation === undefined ? {} : { creation }), sourceCheck, preparedEvidence }
     : immutable
   if (controlPlaneDigest(digestBinding) !== row.plan_digest) {
     throw new ControlPlaneStoreError('invalid-state', 'stored source plan is corrupt or digest-mismatched')
@@ -816,7 +842,7 @@ function sourceFromRow(row: SourceRow): PluginSourcePlan {
     && (row.release_id === null || releaseAuthorization === undefined || sourceCheck === undefined))) {
     throw new ControlPlaneStoreError('invalid-state', 'stored source release state is incomplete')
   }
-  return { ...immutable, mode: row.mode, digest: row.plan_digest, status: row.status, revision: row.revision,
+  return { ...immutable, mode: row.mode, ...(creation === undefined ? {} : { creation }), digest: row.plan_digest, status: row.status, revision: row.revision,
     ...(approval === undefined ? {} : { approval }),
     ...(sourceCheck === undefined ? {} : { sourceCheck }),
     ...(preparedEvidence === undefined ? {} : { preparedEvidence }),
@@ -831,13 +857,13 @@ function sourceSnapshotFromStored(value: unknown): PluginSourcePlan {
   // `mode` was introduced in schema v13; receipt rows written by older binaries
   // omit it and are backfilled to 'create'. `preparedEvidence` exists only on
   // 'modify' plans.
-  const optional = ['approval', 'sourceCheck', 'preparedEvidence', 'releaseAuthorization', 'release']
+  const optional = ['approval', 'sourceCheck', 'preparedEvidence', 'creation', 'releaseAuthorization', 'release']
     .filter(key => Object.hasOwn(item, key))
   exactKeys(item, [...SOURCE_PLAN_KEYS, 'mode', ...optional], 'stored source plan snapshot')
-  const rawMode = item['mode']; const mode: 'create' | 'modify' = rawMode === undefined
+  const rawMode = item['mode']; const mode: PluginSourcePlan['mode'] = rawMode === undefined
     ? 'create'
-    : rawMode === 'create' || rawMode === 'modify' ? rawMode : 'create'
-  const modeValid = rawMode === undefined || rawMode === 'create' || rawMode === 'modify'
+    : rawMode === 'create' || rawMode === 'modify' || rawMode === 'prepared-create' ? rawMode : 'create'
+  const modeValid = rawMode === undefined || rawMode === 'create' || rawMode === 'modify' || rawMode === 'prepared-create'
   const gapSnapshot = objectRecord(item['gapSnapshot'], 'stored source gap snapshot')
   exactKeys(gapSnapshot, ['revision', 'inputDigest', 'roi', 'capability'], 'stored source gap snapshot')
   if (item['schemaVersion'] !== 1 || item['kind'] !== 'source' || typeof item['id'] !== 'string'
@@ -850,8 +876,8 @@ function sourceSnapshotFromStored(value: unknown): PluginSourcePlan {
     || typeof item['name'] !== 'string' || !PLUGIN_NAME.test(item['name']) || typeof item['generatorDigest'] !== 'string'
     || !DIGEST.test(item['generatorDigest']) || !Array.isArray(item['scope'])
     || controlPlaneDigest(item['scope']) !== controlPlaneDigest(expectedSourceScope(item['name'], mode))
-    || (mode === 'modify' && item['preparedEvidence'] === undefined)
-    || (mode === 'create' && item['preparedEvidence'] !== undefined)
+    || ((mode === 'modify' || mode === 'prepared-create') !== (item['preparedEvidence'] !== undefined))
+    || ((mode === 'prepared-create') !== (item['creation'] !== undefined))
     || !Number.isSafeInteger(gapSnapshot['revision']) || Number(gapSnapshot['revision']) < 1
     || typeof gapSnapshot['inputDigest'] !== 'string' || !DIGEST.test(gapSnapshot['inputDigest'])
     || typeof gapSnapshot['roi'] !== 'number' || !Number.isFinite(gapSnapshot['roi']) || typeof gapSnapshot['capability'] !== 'string') {
@@ -861,6 +887,8 @@ function sourceSnapshotFromStored(value: unknown): PluginSourcePlan {
     repository: item['repository'], worktree: item['worktree'], baseCommit: item['baseCommit'], name: item['name'],
     generatorDigest: item['generatorDigest'], scope: item['scope'], createdAt: item['createdAt'], expiresAt: item['expiresAt'] }
   const preparedEvidence = item['preparedEvidence'] === undefined ? undefined : preparedEvidenceFromStored(item['preparedEvidence'])
+  const creation = item['creation'] === undefined ? undefined : creationBindingFromStored(item['creation'])
+  if (mode === 'prepared-create' && creation?.generatorDigest !== item['generatorDigest']) throw new ControlPlaneStoreError('invalid-state', 'stored source creation generator changed')
   const approval = item['approval'] === undefined ? undefined : verifiedApprovalFromStored(item['approval'], item['id'], item['digest'],
     Number(item['createdAt']), Number(item['expiresAt']))
   let sourceCheck: PluginSourcePlan['sourceCheck']
@@ -874,7 +902,8 @@ function sourceSnapshotFromStored(value: unknown): PluginSourcePlan {
     }
     sourceCheck = check as unknown as NonNullable<PluginSourcePlan['sourceCheck']>
   }
-  const digestBinding = mode === 'modify' ? { ...immutable, mode, sourceCheck, preparedEvidence } : immutable
+  const digestBinding = mode === 'modify' || mode === 'prepared-create'
+    ? { ...immutable, mode, ...(creation === undefined ? {} : { creation }), sourceCheck, preparedEvidence } : immutable
   if (controlPlaneDigest(digestBinding) !== item['digest']) throw new ControlPlaneStoreError('invalid-state', 'stored source plan snapshot digest is corrupt')
   let releaseAuthorization: PluginSourcePlan['releaseAuthorization']
   if (item['releaseAuthorization'] !== undefined) {
@@ -910,18 +939,19 @@ function sourceSnapshotFromStored(value: unknown): PluginSourcePlan {
   // running-local-checks / local-checks-failed states.
   const postCheckStates: readonly SourcePlanStatus[] = ['ready-for-human-review', 'release-complete',
     'release-failed', 'publish-ambiguous']
-  const requiresCheck = mode === 'modify'
+  const requiresCheck = mode === 'modify' || mode === 'prepared-create'
     || expectedSourceRelease(status) !== undefined || postCheckStates.includes(status)
   const requiresRelease = expectedSourceRelease(status) !== undefined || ['release-complete', 'release-failed', 'publish-ambiguous'].includes(status)
-  if ((mode === 'modify' && (['running-local-checks', 'local-checks-failed'].includes(status) || sourceCheck === undefined))
+  if (((mode === 'modify' || mode === 'prepared-create') && (['running-local-checks', 'local-checks-failed'].includes(status) || sourceCheck === undefined))
+    || (mode === 'prepared-create' && (!['pending-approval', 'expired'].includes(status) || approval !== undefined || releaseAuthorization !== undefined || release !== undefined))
     || (status !== 'expired' && requiresApproval !== (approval !== undefined))
-    || (status === 'expired' && mode !== 'modify')
+    || (status === 'expired' && mode !== 'modify' && mode !== 'prepared-create')
     || requiresCheck !== (sourceCheck !== undefined)
     || requiresRelease !== (releaseAuthorization !== undefined && release !== undefined)
     || (!requiresRelease && (releaseAuthorization !== undefined || release !== undefined))) {
     throw new ControlPlaneStoreError('invalid-state', 'stored source plan snapshot fields do not match its status')
   }
-  return { ...immutable, mode, digest: item['digest'], status: item['status'] as SourcePlanStatus, revision: Number(item['revision']),
+  return { ...immutable, mode, ...(creation === undefined ? {} : { creation }), digest: item['digest'], status: item['status'] as SourcePlanStatus, revision: Number(item['revision']),
     ...(approval === undefined ? {} : { approval }), ...(sourceCheck === undefined ? {} : { sourceCheck }),
     ...(preparedEvidence === undefined ? {} : { preparedEvidence }),
     ...(releaseAuthorization === undefined ? {} : { releaseAuthorization }),
@@ -961,7 +991,8 @@ export interface CreateSourcePlanInput {
   gapId: string; repository: string; worktree: string; baseCommit: string; name: string
   generatorDigest: string; scope: readonly string[]; ttlMs: number; idempotencyKey: string
   /** Defaults to 'create' (the legacy post-approval scaffold flow). */
-  mode?: 'create' | 'modify'
+  mode?: PluginSourcePlan['mode']
+  creation?: SourceCreationBinding
   /** Required exactly for 'modify': the patch was already built and checked in isolation. */
   prepared?: {
     treeDigest: string
@@ -1173,7 +1204,8 @@ function releaseArtifact(evidence: SourceReleaseSuccessEvidence): SourceReleaseA
 function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
   const intent = objectRecord(value, 'source job intent')
   exactKeys(intent, ['authority', 'owner', 'ownerDigest', 'trustDigest', 'repository', 'name', 'gapId', 'gapRevision', 'gapDigest',
-    'baseCommit', 'files', 'ttlMs', 'build', 'worktree', 'containerName', ...(Object.hasOwn(intent, 'baseline') ? ['baseline'] : [])], 'source job intent')
+    'baseCommit', 'files', 'ttlMs', 'build', 'worktree', 'containerName', ...(Object.hasOwn(intent, 'baseline') ? ['baseline'] : []),
+    ...(Object.hasOwn(intent, 'mode') ? ['mode'] : []), ...(Object.hasOwn(intent, 'creation') ? ['creation'] : [])], 'source job intent')
   const authority = objectRecord(intent['authority'], 'source job authority')
   exactKeys(authority, ['id', 'digest', 'expiresAt', 'maxSubmissions'], 'source job authority')
   const owner = objectRecord(intent['owner'], 'source job owner')
@@ -1195,7 +1227,9 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
     || typeof intent['baseCommit'] !== 'string' || !COMMIT.test(intent['baseCommit'] as string)
     || !Array.isArray(intent['files']) || intent['files'].length === 0 || intent['files'].length > 64
     || !Number.isSafeInteger(intent['ttlMs']) || Number(intent['ttlMs']) < 60_000 || Number(intent['ttlMs']) > 86_400_000
-    || typeof intent['containerName'] !== 'string' || !/^dsh-source-job-[a-f0-9]{64}$/u.test(intent['containerName'] as string)) {
+    || typeof intent['containerName'] !== 'string' || !/^dsh-source-job-[a-f0-9]{64}$/u.test(intent['containerName'] as string)
+    || (intent['mode'] !== undefined && intent['mode'] !== 'create')
+    || (intent['mode'] === 'create') !== Object.hasOwn(intent, 'creation')) {
     throw new ControlPlaneStoreError('invalid-input', 'source job intent is invalid')
   }
   if (Number(owner['principalVersion']) < 1 || Number(owner['bindingVersion']) < 1 || Number(owner['generation']) < 1) {
@@ -1213,8 +1247,12 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
     return Object.freeze({ path: file['path'], content: file['content'] })
   })
   if (new Set(files.map(file => file.path)).size !== files.length) throw new ControlPlaneStoreError('invalid-input', 'source job files are duplicated')
-  try { validateScopedPluginFiles(files) }
+  try { if (intent['mode'] === 'create') validateSourceCreationFiles(files); else validateScopedPluginFiles(files) }
   catch { throw new ControlPlaneStoreError('invalid-input', 'source job files are invalid') }
+  const creation = intent['mode'] === 'create' ? creationBindingFromStored(intent['creation']) : undefined
+  if (creation !== undefined && !(intent['name'] as string).startsWith(creation.grant.namePrefix)) {
+    throw new ControlPlaneStoreError('invalid-input', 'source job plugin name is outside its creation grant')
+  }
   try { validateSourceBuildConfig(intent['build'] as SourceJobIntent['build']) }
   catch { throw new ControlPlaneStoreError('invalid-input', 'source job build configuration is invalid') }
   if (Object.hasOwn(intent, 'baseline')) {
@@ -1229,6 +1267,7 @@ function sourceJobIntentFromStored(value: unknown): SourceJobIntent {
     name: intent['name'] as string, gapId: intent['gapId'] as string, gapRevision: Number(intent['gapRevision']), gapDigest: intent['gapDigest'] as string,
     baseCommit: intent['baseCommit'] as string, files: Object.freeze(files), ttlMs: Number(intent['ttlMs']), build: intent['build'] as SourceJobIntent['build'],
     worktree: intent['worktree'] as string, containerName: intent['containerName'] as string,
+    ...(creation === undefined ? {} : { mode: 'create' as const, creation }),
     ...(Object.hasOwn(intent, 'baseline') ? { baseline: Object.freeze(intent['baseline']) as NonNullable<SourceJobIntent['baseline']> } : {}) })
 }
 
@@ -2101,6 +2140,7 @@ export class ControlPlaneStore {
       throw new ControlPlaneStoreError('invalid-input', 'source job resource identity is invalid')
     }
     if (now >= intent.authority.expiresAt) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
+    if (intent.creation !== undefined && now >= intent.creation.grant.expiresAt) throw new ControlPlaneStoreError('expired', 'source creation grant is expired')
     this.#database.exec('BEGIN IMMEDIATE')
     try {
       const prior = this.#database.prepare('SELECT * FROM source_jobs WHERE authority_id = ? AND idempotency_key = ?')
@@ -2140,6 +2180,20 @@ export class ControlPlaneStore {
       }
       this.#database.prepare('UPDATE source_job_authorities SET submissions = submissions + 1 WHERE authority_id = ? AND submissions < max_submissions')
         .run(intent.authority.id)
+      if (intent.creation !== undefined) {
+        const grant = intent.creation.grant, digest = controlPlaneDigest(grant)
+        const previous = this.#database.prepare('SELECT * FROM source_creation_grants WHERE grant_id = ?').get(grant.id) as {
+          grant_digest: string; expires_at: number; max_creates: number; creates: number
+        } | undefined
+        if (previous !== undefined && (previous.grant_digest !== digest || previous.expires_at !== grant.expiresAt
+          || previous.max_creates !== grant.maxCreates)) throw new ControlPlaneStoreError('conflict', 'source creation grant definition is immutable')
+        if (previous !== undefined && previous.creates >= previous.max_creates) throw new ControlPlaneStoreError('invalid-state', 'source creation grant quota is exhausted')
+        if (previous === undefined) this.#database.prepare(`INSERT INTO source_creation_grants
+          (grant_id, grant_digest, expires_at, max_creates, creates) VALUES (?, ?, ?, ?, 0)`)
+          .run(grant.id, digest, grant.expiresAt, grant.maxCreates)
+        const quota = this.#database.prepare('UPDATE source_creation_grants SET creates = creates + 1 WHERE grant_id = ? AND creates < max_creates').run(grant.id)
+        if (Number(quota.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source creation grant quota changed')
+      }
       this.#database.prepare(`INSERT INTO source_jobs (id, automation_id, authority_id, idempotency_key, intent_json, intent_digest,
         status, revision, created_at, expires_at, definition_hash, occurrence_id, plan_id, failure_code, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?, NULL, NULL, NULL, NULL, ?)`).run(input.id, input.automationId, intent.authority.id,
@@ -2173,7 +2227,7 @@ export class ControlPlaneStore {
       JOIN owner_task_failure_gaps g ON g.gap_id = p.gap_id
       LEFT JOIN source_adoptions a ON a.source_plan_id = p.id
       LEFT JOIN activation_plans ap ON ap.id = a.activation_plan_id
-      WHERE j.status = 'prepared' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))
+      WHERE j.status = 'prepared' AND p.mode = 'modify' AND (p.status = 'pending-approval' OR (? = 1 AND p.status IN ('approved', 'ready-for-human-review'))
         OR (? = 1 AND p.status IN ('awaiting-pr', 'awaiting-review', 'awaiting-merge', 'awaiting-build', 'awaiting-sign', 'awaiting-publish',
           'awaiting-registry-verify', 'awaiting-catalog-admission'))
         OR (? = 1 AND p.status = 'release-complete' AND (ap.id IS NULL OR ap.status NOT IN ('activated', 'rolled-back', 'rejected')))) AND (p.expires_at > ? OR ap.status IN ('staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'))
@@ -2193,7 +2247,9 @@ export class ControlPlaneStore {
       throw new ControlPlaneStoreError('invalid-input', 'source job claim is invalid')
     }
     const now = this.#now(); const result = this.#database.prepare(`UPDATE source_jobs SET status = 'running', occurrence_id = ?, revision = revision + 1, updated_at = ?
-      WHERE id = ? AND revision = ? AND status = 'queued' AND definition_hash = ? AND occurrence_id IS NULL AND expires_at > ?`).run(input.occurrenceId, now, input.id, input.revision, input.definitionHash, now)
+      WHERE id = ? AND revision = ? AND status = 'queued' AND definition_hash = ? AND occurrence_id IS NULL AND expires_at > ?
+      AND (json_type(intent_json, '$.creation') IS NULL OR json_extract(intent_json, '$.creation.grant.expiresAt') > ?)`)
+      .run(input.occurrenceId, now, input.id, input.revision, input.definitionHash, now, now)
     if (Number(result.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'source job claim lost its queued CAS')
     return this.getSourceJob(input.id)!
   }
@@ -2215,17 +2271,24 @@ export class ControlPlaneStore {
 
   createSourcePlan(input: CreateSourcePlanInput): OperationReceipt<PluginSourcePlan> {
     const mode = input.mode ?? 'create'
-    if (input.sourceJob !== undefined && mode !== 'modify') throw new ControlPlaneStoreError('invalid-input', 'source jobs only complete checked modify plans')
+    if (mode !== 'create' && mode !== 'modify' && mode !== 'prepared-create') throw new ControlPlaneStoreError('invalid-input', 'source plan mode is invalid')
+    if (input.sourceJob !== undefined && mode === 'create') throw new ControlPlaneStoreError('invalid-input', 'source jobs only complete checked modify or prepared-create plans')
+    if (mode === 'prepared-create' && input.sourceJob === undefined) throw new ControlPlaneStoreError('invalid-input', 'prepared creation requires a running source job')
     const key = bounded(input.idempotencyKey, 'idempotencyKey', 160); const name = bounded(input.name, 'name', 64)
     if (!KEY.test(key) || !PLUGIN_NAME.test(name) || !COMMIT.test(input.baseCommit) || !DIGEST.test(input.generatorDigest)
       || input.scope.length === 0 || input.scope.length > 32) throw new ControlPlaneStoreError('invalid-input', 'source plan binding is invalid')
     if (mode === 'modify' && input.generatorDigest !== MODIFY_GENERATOR_DIGEST) {
       throw new ControlPlaneStoreError('invalid-input', 'modify source plans must bind the modify generator constant')
     }
+    const creation = input.creation === undefined ? undefined : creationBindingFromStored(input.creation)
+    if ((mode === 'prepared-create') !== (creation !== undefined)
+      || (creation !== undefined && (creation.generatorDigest !== input.generatorDigest || !name.startsWith(creation.grant.namePrefix)))) {
+      throw new ControlPlaneStoreError('invalid-input', 'prepared source creation binding is invalid')
+    }
     let preparedEvidence: SourcePreparedEvidence | undefined
-    if (mode === 'modify') {
+    if (mode === 'modify' || mode === 'prepared-create') {
       if (input.prepared === undefined) {
-        throw new ControlPlaneStoreError('invalid-input', 'modify source plan requires prepared check evidence')
+        throw new ControlPlaneStoreError('invalid-input', 'prepared source plan requires check evidence')
       }
       if (!DIGEST.test(input.prepared.treeDigest) || !DIGEST.test(input.prepared.patchDigest)
         || !Number.isSafeInteger(input.prepared.checkedAt) || input.prepared.checkedAt < 0) {
@@ -2249,7 +2312,8 @@ export class ControlPlaneStore {
     this.#assertOwnerTaskFailureGapAdmission(input.gapId)
     const sourceJobBinding = input.sourceJob === undefined ? undefined : { jobId: input.sourceJob.jobId, jobRevision: input.sourceJob.jobRevision,
       occurrenceId: input.sourceJob.occurrenceId }
-    const inputDigest = controlPlaneDigest({ ...(mode === 'modify' ? { ...requestBinding, mode, prepared: input.prepared } : requestBinding),
+    const inputDigest = controlPlaneDigest({ ...(mode === 'create' ? requestBinding : { ...requestBinding, mode,
+      ...(creation === undefined ? {} : { creation }), prepared: input.prepared }),
       ...(sourceJobBinding === undefined ? {} : { sourceJob: sourceJobBinding }) })
     const prior = this.#sourcePlanReceiptByKey(key, 'create-source-plan', inputDigest)
     if (prior !== undefined) return prior
@@ -2261,8 +2325,8 @@ export class ControlPlaneStore {
     const immutable = { schemaVersion: 1 as const, kind: 'source' as const, id, gapId: gap.id, gapSnapshot,
       repository: input.repository, worktree: input.worktree, baseCommit: input.baseCommit, name,
       generatorDigest: input.generatorDigest, scope, createdAt: now, expiresAt }
-    const digest = controlPlaneDigest(mode === 'modify'
-      ? { ...immutable, mode, sourceCheck: { treeDigest: input.prepared!.treeDigest, patchDigest: input.prepared!.patchDigest,
+    const digest = controlPlaneDigest(mode !== 'create'
+      ? { ...immutable, mode, ...(creation === undefined ? {} : { creation }), sourceCheck: { treeDigest: input.prepared!.treeDigest, patchDigest: input.prepared!.patchDigest,
         checkedAt: input.prepared!.checkedAt }, preparedEvidence }
       : immutable)
     this.#database.exec('BEGIN IMMEDIATE')
@@ -2277,10 +2341,12 @@ export class ControlPlaneStore {
           || sourceJob.occurrenceId !== sourceJobBinding.occurrenceId || sourceJob.intent.gapId !== gap.id
           || sourceJob.intent.gapRevision !== currentGap.revision || sourceJob.intent.gapDigest !== controlPlaneDigest(currentGap)
           || sourceJob.intent.baseCommit !== input.baseCommit || sourceJob.intent.name !== name
-          || sourceJob.intent.repository !== input.repository || sourceJob.intent.worktree !== input.worktree || sourceJob.intent.ttlMs !== input.ttlMs) {
+          || sourceJob.intent.repository !== input.repository || sourceJob.intent.worktree !== input.worktree || sourceJob.intent.ttlMs !== input.ttlMs
+          || (mode === 'prepared-create') !== (sourceJob.intent.mode === 'create')
+          || (mode === 'prepared-create' && controlPlaneDigest(sourceJob.intent.creation) !== controlPlaneDigest(creation))) {
           throw new ControlPlaneStoreError('conflict', 'source job completion lost its immutable running binding')
         }
-        if (now >= sourceJob.expiresAt) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
+        if (now >= sourceJob.expiresAt || (mode === 'prepared-create' && now >= creation!.grant.expiresAt)) throw new ControlPlaneStoreError('expired', 'source job authority is expired')
       }
       this.#database.prepare('INSERT INTO gap_plan_claims (gap_id, plan_id, plan_kind, claimed_at) VALUES (?, ?, ?, ?)').run(gap.id, id, 'source', now)
       // 'modify' rows carry their checked digests and frozen-build evidence from
@@ -2288,12 +2354,12 @@ export class ControlPlaneStore {
       // post-approval scaffold run finishes.
       this.#database.prepare(`INSERT INTO source_plans (id, plan_digest, gap_id, gap_snapshot_json, repository, worktree,
         base_commit, plugin_name, generator_digest, scope_json, mode, status, revision, created_at, expires_at,
-        approval_json, checked_tree_digest, checked_patch_digest, checked_at, prepared_evidence_json, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending-approval', 1, ?, ?, NULL, ?, ?, ?, ?, ?)`).run(
+        approval_json, checked_tree_digest, checked_patch_digest, checked_at, prepared_evidence_json, creation_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending-approval', 1, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`).run(
         id, digest, gap.id, JSON.stringify(gapSnapshot), input.repository, input.worktree, input.baseCommit, name,
         input.generatorDigest, JSON.stringify(scope), mode, now, expiresAt,
         input.prepared?.treeDigest ?? null, input.prepared?.patchDigest ?? null, input.prepared?.checkedAt ?? null,
-        preparedEvidence === undefined ? null : JSON.stringify(preparedEvidence), now)
+        preparedEvidence === undefined ? null : JSON.stringify(preparedEvidence), creation === undefined ? null : JSON.stringify(creation), now)
       const matched = this.#database.prepare(`UPDATE capability_gaps SET status = 'matched', revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ?`).run(now, gap.id, gap.revision)
       if (Number(matched.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'capability gap changed while source plan was created')
       if (sourceJob !== undefined) {
@@ -2538,12 +2604,24 @@ export class ControlPlaneStore {
     return rows.map(sourceFromRow)
   }
 
+  /** Isolated worktrees owned by the background prepared flows, including owner-granted creation. */
+  listPreparedSourcePlans(filter?: { expiredBefore?: number }): readonly PluginSourcePlan[] {
+    const rows = filter?.expiredBefore === undefined
+      ? (this.#database.prepare(`SELECT * FROM source_plans WHERE mode IN ('modify', 'prepared-create') ORDER BY created_at, id`)
+        .all() as unknown as SourceRow[])
+      : (this.#database.prepare(`SELECT * FROM source_plans WHERE mode IN ('modify', 'prepared-create') AND expires_at < ? ORDER BY created_at, id`)
+        .all(filter.expiredBefore) as unknown as SourceRow[])
+    return rows.map(sourceFromRow)
+  }
+
   /** Retire an expired prepared plan before removing its worktree. The CAS
    * fences owner approval/review, and releases only this plan's gap claim. */
   expirePreparedSourcePlan(input: { planId: string; expectedRevision: number; now: number }): PluginSourcePlan {
     if (!Number.isSafeInteger(input.now) || input.now < 0) throw new ControlPlaneStoreError('invalid-input', 'expiry time is invalid')
     const plan = this.getSourcePlan(input.planId)
-    if (plan.mode !== 'modify') throw new ControlPlaneStoreError('invalid-state', 'only prepared modify plans may expire here')
+    if (plan.mode !== 'modify' && plan.mode !== 'prepared-create') {
+      throw new ControlPlaneStoreError('invalid-state', 'only prepared source plans may expire here')
+    }
     const expiryDigest = controlPlaneDigest({ planId: plan.id, planDigest: plan.digest, expiresAt: plan.expiresAt })
     if (plan.status === 'expired') {
       const receipt = this.#sourcePlanReceipt(`source-expired:${plan.id}`, 'source-expired', expiryDigest, plan.id)
@@ -2553,7 +2631,8 @@ export class ControlPlaneStore {
     this.#database.exec('BEGIN IMMEDIATE')
     try {
       const retired = this.#database.prepare(`UPDATE source_plans SET status = 'expired', revision = revision + 1, updated_at = ?
-        WHERE id = ? AND revision = ? AND mode = 'modify' AND status IN ('pending-approval', 'approved') AND expires_at < ?`)
+        WHERE id = ? AND revision = ? AND ((mode = 'modify' AND status IN ('pending-approval', 'approved'))
+          OR (mode = 'prepared-create' AND status = 'pending-approval')) AND expires_at < ?`)
         .run(input.now, plan.id, input.expectedRevision, input.now)
       if (Number(retired.changes) !== 1) throw new ControlPlaneStoreError('conflict', 'prepared plan changed or is not expired')
       const released = this.#database.prepare(`DELETE FROM gap_plan_claims WHERE gap_id = ? AND plan_id = ? AND plan_kind = 'source'`)
@@ -2575,6 +2654,9 @@ export class ControlPlaneStore {
   }
 
   async approveSource(input: { withSourceFence?: <T>(callback: () => T) => T; planId: string; expectedRevision: number; receipt: ApprovalReceipt; resolveAuthority: (receipt: ApprovalReceipt) => ApprovalAuthority; idempotencyKey: string }): Promise<OperationReceipt<PluginSourcePlan>> {
+    if (this.getSourcePlan(input.planId).mode === 'prepared-create') {
+      throw new ControlPlaneStoreError('invalid-state', 'prepared creation requires its own owner creation authority')
+    }
     return this.#approvePlan('source', input) as Promise<OperationReceipt<PluginSourcePlan>>
   }
 
@@ -4866,15 +4948,24 @@ export class ControlPlaneStore {
     const replayBinding = { operation: 'create-source-plan', gapId: snapshot.gapId, repository: snapshot.repository,
       worktree: snapshot.worktree, baseCommit: snapshot.baseCommit, name: snapshot.name, generatorDigest: snapshot.generatorDigest,
       scope: snapshot.scope, ttlMs: snapshot.expiresAt - snapshot.createdAt }
+    const linkedRow = this.#database.prepare('SELECT * FROM source_jobs WHERE plan_id = ?').get(snapshot.id) as unknown as SourceJobRow | undefined
+    const linked = linkedRow === undefined ? undefined : sourceJobFromRow(linkedRow)
+    const sourceJob = linked === undefined ? undefined : { jobId: linked.id, jobRevision: linked.revision - 1,
+      occurrenceId: linked.occurrenceId }
     if (snapshot.digest !== authoritative.digest || snapshot.gapId !== authoritative.gapId
       || snapshot.revision !== 1 || snapshot.status !== 'pending-approval' || snapshot.createdAt !== receipt.createdAt
       || snapshot.approval !== undefined || snapshot.releaseAuthorization !== undefined
-      || snapshot.release !== undefined || controlPlaneDigest(snapshot.mode === 'modify' ? { ...replayBinding, mode: snapshot.mode,
+      || snapshot.release !== undefined || controlPlaneDigest({ ...(snapshot.mode === 'create' ? replayBinding : { ...replayBinding,
+        mode: snapshot.mode, ...(snapshot.creation === undefined ? {} : { creation: snapshot.creation }),
         prepared: { treeDigest: snapshot.sourceCheck!.treeDigest, patchDigest: snapshot.sourceCheck!.patchDigest,
-          checkedAt: snapshot.sourceCheck!.checkedAt, evidence: snapshot.preparedEvidence } } : replayBinding) !== inputDigest
+          checkedAt: snapshot.sourceCheck!.checkedAt, evidence: snapshot.preparedEvidence } }),
+      ...(sourceJob === undefined ? {} : { sourceJob }) }) !== inputDigest
       || (snapshot.mode === 'create' && (snapshot.sourceCheck !== undefined || snapshot.preparedEvidence !== undefined))
       || (snapshot.mode === 'modify' && (snapshot.sourceCheck === undefined || snapshot.preparedEvidence === undefined
-        || controlPlaneDigest(snapshot.sourceCheck) !== controlPlaneDigest(authoritative.sourceCheck)))) {
+        || controlPlaneDigest(snapshot.sourceCheck) !== controlPlaneDigest(authoritative.sourceCheck)))
+      || (snapshot.mode === 'prepared-create' && (snapshot.sourceCheck === undefined || snapshot.preparedEvidence === undefined
+        || snapshot.creation === undefined || linked?.intent.mode !== 'create'
+        || controlPlaneDigest(snapshot.creation) !== controlPlaneDigest(authoritative.creation)))) {
       throw new ControlPlaneStoreError('invalid-state', 'stored source operation receipt is not bound to authoritative state')
     }
     return { ...receipt, result: snapshot }
