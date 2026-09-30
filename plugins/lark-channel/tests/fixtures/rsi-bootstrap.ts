@@ -84,6 +84,7 @@ export async function rsiBootstrapFixture(): Promise<{
     const targetEffective = stringify([
       { id: 'dsh-enhanced-personal-assistant', name: '@dsh-enhanced/personal-assistant', config: {
         assistantPolicy: { databasePath: join(home, 'policy.sqlite'), budgets: [], rules: [] },
+        personalMemory: { databasePath: join(home, 'memory.sqlite') },
         assistantAutomations: { schedulerEnabled: false, allowUnbudgetedExecution: false } } },
       { id: 'dsh-enhanced-assistant-delivery', name: '@dsh-enhanced/assistant-delivery', config: deliveryConfig },
       { id: 'dsh-enhanced-lark-channel', name: '@dsh-enhanced/lark-channel', config: { enabled: true } },
@@ -92,6 +93,7 @@ export async function rsiBootstrapFixture(): Promise<{
       { id: 'dsh-enhanced-assistant-skills', name: '@dsh-enhanced/assistant-skills', config: {} },
       { id: 'dsh-enhanced-assistant-verifier', name: '@dsh-enhanced/assistant-verifier', config: { databasePath: join(home, 'verifier.sqlite') } },
       { id: 'dsh-enhanced-assistant-growth-driver', name: '@dsh-enhanced/assistant-growth-driver' },
+      { id: 'dsh-enhanced-assistant-memory-learning', name: '@dsh-enhanced/assistant-memory-learning', disabled: true },
       { id: 'dsh-enhanced-plugin-control-plane', name: '@dsh-enhanced/plugin-control-plane', config: {} },
       { id: 'dsh-enhanced-hello', name: '@dsh-enhanced/hello', config: {} },
     ])
@@ -105,9 +107,9 @@ export async function rsiBootstrapFixture(): Promise<{
     const profiles = { targetPatch: '[]\n', targetEffective, coordinatorPatch: '[]\n', coordinatorEffective,
       coordinatorBase: stringify([{ insert: [{ id: 'tool-web', name: '@deepseek-ai/tool-web' },
         { id: 'agent-loop', name: '@deepseek-ai/agent-loop' }] }]) }
-    const plugins = ['personal-assistant', 'assistant-goals', 'assistant-growth-driver', 'hello']
+    const plugins = ['personal-assistant', 'assistant-goals', 'assistant-growth-driver', 'assistant-memory-learning', 'hello']
     const hostDeploymentInputs = ['package.json', 'pnpm-lock.yaml', 'cordis.patch.yml',
-      ...plugins.flatMap(plugin => [`node_modules/@dsh-enhanced/${plugin}/package.json`,
+      ...[...plugins, 'personal-memory'].flatMap(plugin => [`node_modules/@dsh-enhanced/${plugin}/package.json`,
         `node_modules/@dsh-enhanced/${plugin}/cordis.patch.yml`, `node_modules/@dsh-enhanced/${plugin}/lib/index.js`])]
     for (const name of hostDeploymentInputs) await file(join(targetPath, name), `fixture ${name}\n`)
     const now = Date.now(), expiresAt = now + 3_600_000

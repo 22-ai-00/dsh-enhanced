@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parse, stringify } from 'yaml'
 import { runtimeConfigDigest } from '@dsh-enhanced/plugin-control-plane'
+import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { installRsiOwnerDeployment, rsiCoordinatorProfile, rsiInstallPorts, type RsiInstallPorts } from '../src/rsi-install.js'
+import { assertRsiMemoryScanActivation, installRsiOwnerDeployment, rsiCoordinatorProfile, rsiInstallPorts, type RsiInstallPorts } from '../src/rsi-install.js'
 import { rsiSetupPorts } from '../src/rsi-setup.js'
 import { RsiBuildUnavailableError } from '../src/rsi-build.js'
 import { RsiInstalledInputsUnavailableError } from '../src/rsi-install-inputs.js'
@@ -54,7 +55,10 @@ async function fixture() {
     collect: vi.fn(async value => ({ dsh:{root:'/fixture/dsh',path:f.input.executor.path,version:f.input.executor.version,pin:f.input.executor},
       executor:f.input.executor,git:f.input.manifest.sourceReviews.git,systemctl:f.input.systemctl,
       plugins:[...f.input.manifest.sourceReviews.plugins],policies:f.input.policies,
-      observerTargets:f.input.manifest.controlPlane.runtimeObserver!.targets.filter(target => !['dsh-enhanced-assistant-growth-driver','dsh-enhanced-assistant-verifier'].includes(target.entryId))
+      observerTargets:f.input.manifest.controlPlane.runtimeObserver!.targets.filter(target => ![
+        'dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-verifier',
+        'dsh-enhanced-personal-assistant', 'dsh-enhanced-assistant-memory-learning',
+      ].includes(target.entryId))
         .map(target => target.entryId === 'dsh-enhanced-assistant-delivery' ? {...target,
           configDigest:runtimeConfigDigest((parse(value.targetEffective) as Array<{id:string;config:unknown}>).find(row => row.id === target.entryId)!.config)} : target),
       hostDeploymentInputs:[...f.input.manifest.controlPlane.sourceAdoptions!.hostDeploymentInputs!] })),
@@ -70,6 +74,28 @@ async function fixture() {
 }
 
 describe('automatic owner deployment', () => {
+  test('accepts an exact persisted memory scan on restart and rejects owner, catalog, or config drift', async () => {
+    const f = await fixture()
+    const learning = f.f.input.manifest.memoryLearning!.learning, owner = learning.owner
+    const record = { id: `memory-scan-${growthObjectDigest([learning.authorityId, owner])}`,
+      owner: 'assistant-memory-learning', updatedAt: 1, definition: {
+        principal: owner.principalId, workspace: owner.workspace, agentPreset: owner.agentPreset,
+        budgetId: learning.scanBudgetId, budgetAmount: learning.scanBudgetAmount, retrySafety: 'never', maxRetries: 0,
+        execution: { kind: 'host', executorId: 'assistant-memory-learning-v1', executorContractVersion: 1,
+          runbookId: 'scan', runbookVersion: 1, catalogDigest: growthObjectDigest({ executor: 'assistant-memory-learning-v1', contract: 1 }),
+          ownerRouteId: owner.authorityId, activationNonce: growthObjectDigest(learning),
+          targetScope: { workspace: owner.workspace, preset: owner.agentPreset },
+          scopeDigest: growthObjectDigest([owner.workspace, owner.agentPreset]) },
+      } }
+    const check = (value: typeof record) => assertRsiMemoryScanActivation(f.f.input.manifest,
+      [value] as unknown as Parameters<typeof assertRsiMemoryScanActivation>[1])
+    expect(() => check(record)).not.toThrow()
+    expect(() => check({ ...record, definition: { ...record.definition, principal: 'other-owner' } })).toThrow('memory scan activation')
+    expect(() => check({ ...record, definition: { ...record.definition,
+      execution: { ...record.definition.execution, catalogDigest: 'a'.repeat(64) } } })).toThrow('memory scan activation')
+    expect(() => check({ ...record, definition: { ...record.definition,
+      execution: { ...record.definition.execution, activationNonce: 'b'.repeat(64) } } })).toThrow('memory scan activation')
+  })
   test('applies real owner/profile/authority transaction, starts coordinator first, and preserves frozen installation on retry', async () => {
     const f = await fixture()
     const original = parse(f.originals[f.profile]!) as Array<{id:string;config:Record<string,any>}>

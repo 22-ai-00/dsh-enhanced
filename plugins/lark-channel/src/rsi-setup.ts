@@ -22,6 +22,7 @@ import { renderDshSystemdService, systemdServicePaths } from './systemd.js'
 import { rsiServiceEnvironmentPath, type RsiServiceEnvironment } from './rsi-service-environment.js'
 import { resolveRsiServiceEnvironments } from './rsi-service-setup.js'
 import { validateRsiHostAuthorities } from './rsi-host-authorities.js'
+import { validateRsiMemoryLearningSetup } from './rsi-memory-learning.js'
 
 const MAX_BYTES = 2_097_152
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
@@ -308,6 +309,10 @@ export async function validateRsiAuthorities(manifest: RsiSetupManifest, binding
   cp.validateSourceAdoptionAuthorityConfig(adoptions); cp.validateTaskObservationAuthorityConfig(observations)
   const expectedOwner = manifest.sourceReviews.owner
   if (expectedOwner.principalRecordId !== binding.owner.id || expectedOwner.principalVersion !== binding.owner.version) fail('grant owner has changed')
+  // compileRsiProfiles first derives and checks all seven owner fields against
+  // effective Delivery. This secondary check binds grants to that owner; it
+  // cannot independently resolve a route from the principal receipt alone.
+  if (manifest.memoryLearning !== undefined) validateRsiMemoryLearningSetup(manifest.memoryLearning, expectedOwner)
   const trust = await cp.loadTrustConfig(config.trustPath)
   if (trust.schemaVersion !== 4 || !trust.hostAttestor || !trust.releaseAdapters
     || ['pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission'].some(phase => !Object.hasOwn(trust.releaseAdapters!, phase))) fail('complete release and Host attestation adapters are required')

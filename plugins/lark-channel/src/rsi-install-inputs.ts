@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { lstat, open, realpath } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { PROTECTED_PLUGIN_DENYLIST, resolveLocalExecutable, runtimeConfigDigest,
   validateHostDeploymentInputs, type PluginControlTrustConfig, type RuntimeObserverTarget,
@@ -168,13 +169,16 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
   const rows = new Map<string, YAMLMap>()
   const plugins: string[] = []
   const activeBundles: string[] = []
+  const learnerId = 'dsh-enhanced-assistant-memory-learning'
   for (const value of document.contents.items) {
     if (!isMap(value)) fail('effective entry is not a mapping')
     const row = value as YAMLMap
     const id = row.get('id'), name = row.get('name')
     if (typeof id !== 'string' || !id || rows.has(id)) fail('effective entry identity is duplicate or invalid')
     rows.set(id, row)
-    if (row.get('disabled') === true) continue
+    // The learning bundle ships disabled without configuration. Owner setup
+    // enables this one exact installed row after its grants are frozen.
+    if (row.get('disabled') === true && id !== learnerId) continue
     if (typeof name !== 'string' || !name.startsWith('@dsh-enhanced/')) {
       if (id.startsWith('dsh-enhanced-')) fail(`installed ${id} has no package name`)
       continue
@@ -183,6 +187,15 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
     if (!pluginPattern.test(plugin) || id !== `dsh-enhanced-${plugin}`) fail(`installed ${id} has inconsistent package identity`)
     activeBundles.push(plugin)
     if (!PROTECTED_PLUGIN_DENYLIST.has(plugin)) plugins.push(plugin)
+  }
+  const learner = rows.get(learnerId)
+  if (!learner || learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
+    || learner.get('disabled') === true && learner.has('config')) fail('installed memory learning row must be the unconfigured bundle entry')
+  const personal = rows.get('dsh-enhanced-personal-assistant')
+  const personalConfig = personal?.get('config', true)
+  if (!personal || personal.get('disabled') === true || personal.get('name') !== '@dsh-enhanced/personal-assistant'
+    || !isMap(personalConfig) || !isMap(personalConfig.get('personalMemory', true))) {
+    fail('enabled embedded Personal Memory is required')
   }
   if (!plugins.length || plugins.length > 32) fail('repairable installed plugin scope is empty or too large')
   const observerTargets: RuntimeObserverTarget[] = stableObserverRows.map(expected => {
@@ -228,6 +241,38 @@ export async function collectRsiInstalledInputs(input: RsiInstalledInputsRequest
       if (entry.endsWith('/cordis.patch.yml')) assertPackagePatch(content, plugin)
     }
     hostDeploymentInputs.push(...declared)
+  }
+  // Personal Assistant embeds Memory as a runtime dependency. Pin the package
+  // it actually resolves, and require the learner's peer to resolve to the same
+  // physical provider. The embedded package is not an independent Loader row.
+  const resolvedMemory = async (parent: 'personal-assistant' | 'assistant-memory-learning') => {
+    const parentManifest = await realpath(join(profile, 'node_modules', '@dsh-enhanced', parent, 'package.json'))
+    within(profile, parentManifest, `${parent} manifest`)
+    const resolved = createRequire(parentManifest).resolve('@dsh-enhanced/personal-memory/package.json')
+    const path = await realpath(resolved)
+    within(profile, path, `${parent} Personal Memory dependency`)
+    return path
+  }
+  const memoryManifestPath = await resolvedMemory('personal-assistant')
+  if (await resolvedMemory('assistant-memory-learning') !== memoryManifestPath) fail('learner and embedded Personal Memory resolve different providers')
+  const memoryManifest = await json(memoryManifestPath, 'embedded Personal Memory manifest')
+  const memoryExport = memoryManifest.exports && typeof memoryManifest.exports === 'object' && !Array.isArray(memoryManifest.exports)
+    ? (memoryManifest.exports as Record<string, unknown>)['.'] : undefined
+  const memoryMain = memoryExport && typeof memoryExport === 'object' && !Array.isArray(memoryExport)
+    ? (memoryExport as Record<string, unknown>).default : undefined
+  const memoryEntry = relativeJs(memoryManifest.main, 'embedded Personal Memory main', true)
+  if (memoryManifest.name !== '@dsh-enhanced/personal-memory' || memoryManifest.version !== input.source.version
+    || memoryMain !== memoryManifest.main
+    || (memoryManifest.dsh as { bundle?: { patch?: string } } | undefined)?.bundle?.patch !== './cordis.patch.yml') {
+    fail('embedded Personal Memory package identity or entry differs from source cohort')
+  }
+  const memoryRoot = dirname(memoryManifestPath)
+  for (const filename of ['package.json', 'cordis.patch.yml', memoryEntry]) {
+    const path = await realpath(join(memoryRoot, filename))
+    within(profile, path, `embedded Personal Memory ${filename}`)
+    const content = await bytes(path, 64 * 1024 * 1024, `embedded Personal Memory ${filename}`)
+    if (filename === 'cordis.patch.yml') assertPackagePatch(content, 'personal-memory')
+    hostDeploymentInputs.push(relative(profile, path).split(sep).join('/'))
   }
   validateHostDeploymentInputs(hostDeploymentInputs)
   if (input.source.origin?.kind === 'local-head') {

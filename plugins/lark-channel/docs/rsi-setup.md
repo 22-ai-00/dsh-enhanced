@@ -1,6 +1,6 @@
 # 日常使用自迭代的双 Host 配置
 
-`dsh-rsi-setup` 将已配置的 Lark owner 目标 profile 和独立采用协调器接入原生 Automations。目标 Host 从真实任务反馈形成源码修复，协调器在目标重启期间继续有限交接；目标恢复后重验当前 owner 和反馈，再完成采用。后续任务进入观察与回滚流程。
+`dsh-rsi-setup` 将已配置的 Lark owner 目标 profile 和独立采用协调器接入原生 Automations。目标 Host 从普通任务学习持久事实与经验，并从真实任务反馈形成源码修复，协调器在目标重启期间继续有限交接；目标恢复后重验当前 owner 和反馈，再完成采用。后续任务进入观察与回滚流程。
 
 Linux `supervised` 新安装在最终模型、TraeX、Lark 配置和 doctor 完成后自动运行 `dsh-rsi-setup --install-owner`。它使用当前 active owner，准备独立协调器、有限授权与发布/Host 配置，成对应用并启动两个 systemd user Host。需要可用的 systemd user session、完整离线构建资源和同批已安装插件；缺少构建前置条件会返回 `not-ready` 和退出码 3，安装流程不打印完成。完整生产部署仍需实际使用验收。源码发布轨使用授权的本地 registry，仓库公共 npm 发版仍走仓库发布流程。
 
@@ -42,7 +42,7 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
 
 自动配置沿用完整仓库检查的 30 分钟、16 GiB 内存、8 CPU、1024 PID、4 GiB 工作区和 2 GiB 临时目录上限；宿主需提供相应资源。嵌套 sandbox 的系统路径与 seccomp 边界见[构建镜像指南](../../../scripts/isolation/README.md#nested-sandbox-profile)。准备资源只完成安装前置步骤；`--install-owner` 会核对已安装 Host、owner 和最终配置后再应用。
 
-目标先完成 [Lark 配对](setup.md)与 [supervised 安装](../../../scripts/install/README.md)，已有唯一 active owner DM。无需先激活固定 Recovery runbook；缺失的 owner route 在成对配置事务内生成，既有唯一精确路由（包括 `supervised-growth-owner`）沿用原 ID 和 minimum generation。路由冲突或重复会拒绝，不覆盖其他授权。新安装自动补齐目标依赖；旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier 与 Control Plane。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
+目标先完成 [Lark 配对](setup.md)与 [supervised 安装](../../../scripts/install/README.md)，已有唯一 active owner DM。无需先激活固定 Recovery runbook；缺失的 owner route 在成对配置事务内生成，既有唯一精确路由（包括 `supervised-growth-owner`）沿用原 ID 和 minimum generation。路由冲突或重复会拒绝，不覆盖其他授权。新安装自动补齐目标依赖；旧安装若缺依赖，为目标补装同一构建的 Growth Driver、Goals、Skills、Verifier、Memory Learning 与 Control Plane。Memory 由 Personal Assistant 内嵌提供，不再添加独立 Memory bundle。开发版应使用本地构建的包；仅有相同版本号不能证明含有这些新增 API。
 
 ```sh
 dsh plugin --profile web add \
@@ -50,6 +50,7 @@ dsh plugin --profile web add \
   @dsh-enhanced/assistant-goals \
   @dsh-enhanced/assistant-skills \
   @dsh-enhanced/assistant-verifier \
+  @dsh-enhanced/assistant-memory-learning \
   @dsh-enhanced/plugin-control-plane
 
 dsh plugin --profile rsi-coordinator add \
@@ -75,11 +76,24 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
 | `controlPlane` | 目标的完整 Control Plane config；必需 `sourceBuild`、`sourceJobs`、`sourceApprovals`、`sourceReleases`、`sourceReleaseExecution`、`sourceAdoptions.handoff`、`runtimeObserver`、`foregroundDeployments`、`taskObservations` |
 | `growthDriver` | 完整 Growth config；`enabled: true`、`intervalMs: 0`、启用 `usageLearning` 与 durable `pluginSourceProposals`，绑定同一 owner/workspace/preset/repository |
 | `sourceReviews` | 有限独立审查授权；owner 精确匹配当前 Delivery 记录，decisionRoot 与发布轨一致 |
+| `memoryLearning` | 新自动安装必含 `{ learning, reviews, adoption, limits: { extractions, scans } }`；三份准确 owner 绑定的有限配置，旧手动 manifest 可省略以保留原行为。见下文。 |
 | `coordinator` | `{ "budgetId": "rsi-adoption", "budgetAmount": 1, "timeoutMs": 900000 }`，按实际约束设置 |
 | `limits` | 例如 `{ "periodMs": 86400000, "reviews": 5, "discovery": 1440, "source": 1440, "observations": 1440, "coordinator": 1440 }`；均为显式有限额度 |
 | `serviceEnvironment` | 可选 `{ "target": { ... }, "coordinator": { ... } }`，显式替换两个服务的配置路径绑定；通常无需填写，见下文 |
 
 具体配置契约见 [Control Plane](../../plugin-control-plane/README.md)、[Growth Driver](../../assistant-growth-driver/README.md)、[Verifier](../../assistant-verifier/README.md)。四份签名授权必须使用相同 owner、目标 ledger 与插件白名单，并与 trust 登记的公钥一致。采用授权绑定 executor、profile、handoff；观察授权绑定包名单和观察策略。所有授权须在有效期内。
+
+### 普通任务的自动记忆学习
+
+自动 manifest 为提取、独立审查、采用分别生成不同授权 ID，并绑定 Delivery 当前七字段 owner。默认各有 1,000 次生命周期 admission/mutation 上限，采用总内容上限 4,096,000 字节、记录 TTL 最多 30 天；提取队列最多 100 项、来源窗口 30 天。模型默认继承来源任务，单轮输入最多 65,536 字节、输出最多 2,048 token、期限 120 秒。只学习明确 owner 事实和可信客观结果绑定的经验。
+
+`learning` 使用 [Memory Learning 配置](../../assistant-memory-learning/README.md)，`reviews` 写入 Verifier 的 `memoryReviews`，`adoption` 写入 Personal Assistant 内嵌的 `personalMemory.automaticLearning`。review/adoption 摘要从验证后的配置生成，跨 owner、摘要漂移或过期都会拒绝。三份 grant 和学习数据库均保持原期限、额度与已消耗状态，重复安装不续期、不清空历史；已有 owner manifest 缺此组不能靠重跑安装静默补签，仍需显式迁移。
+
+原生调度的默认提取预算为每工作区每日 7 次，扫描预算为该扫描任务每日 1,440 次；每次 reservation 为 1。不同学习 job 共用工作区提取计数。Policy 按 scope/metric/period 共用计数，预算 ID 不隔离相同计数池；同 scope/metric/period 的其他工作区预算会拒绝，即使额度相同，避免静默共用；不覆盖额度。提取、审查、采用及调度规则均限定 owner/workspace，不开启 unbudgeted execution。
+
+学习插件安装 patch 默认禁用且无配置。安装器核对其 profile-local 同批制品，并确认它与 Personal Assistant 解析同一物理 Memory provider；Memory 的 manifest、patch 与入口也进入声明文件 pins，这不是完整传递 JS 模块证明。配置器先验证整组配置，随后启用准确行；已启用行只允许完全相同的重试配置。最终 observer 同时核对 Personal Assistant 的 Policy/调度/Memory 配置、Verifier 及学习插件配置与服务实例。就绪使用本次 Host 的 PID/InvocationID 与 observer，扫描定义可复用原持久记录，但必须匹配 owner、executor、catalog、配置摘要与预算，不能用旧记录时间戳冒充失败或新激活。
+
+这完成安装接线。临时 Home 的真实 DSH 配置导出和工程 fixture 不证明生产双 Host 已启动、真实模型学习效果或后续任务收益；这些仍按当前状态验收。
 
 所有 owner 字段中的 `authorityId` 使用有效 Delivery 路由的 ID，即 `sourceJobs.ownerRouteId`。`sourceJobs.authorityId` 是源码作业的独立期限与额度标识，不能用作 owner 路由身份。
 
@@ -113,7 +127,7 @@ dsh-rsi-setup --prepare-local-update --profile web --dsh-home "$HOME/.dsh"
 
 尚未配置 owner 自动迭代的冻结安装另有显式内部 `maintenanceMode: 'pre-owner'`，不会因账本缺失自动启用。只读 `assertRsiPreOwnerInstallation` 核对原 Home/副本的初始授权资源、全部身份、bootstrap 与签名源码链，拒绝协调器、安装 journal、已配置 owner 或不明配置层；读取 Git 时禁用可选写锁。该模式保留初始身份与历史，以 `host:null` 签署连续维护记录，不创建控制账本。对应的 `stageRsiLocalSinglePackages` 只迁移单 profile，拒绝任何协调器残留，仍核验同版本的实际包字节。外层必须另外检查所有 profile 的有效插件图与真实启动参数，并负责停服、副本、切换和恢复；这些内部组件本身不负责服务切换。开发 checkout 已提供显式 `local-service-upgrade` / `local-service-recover`，复用 Home 锁、systemd 收容、完整 Home 副本及切换/恢复；预检的原生配置导出仅在私有副本运行，恢复前重验源码、安装模块和全部配置。激活预览使用额外可丢弃 Home 副本，其队列、数据库及会话写入不会进入正式安装。用法和未发布边界见[安装器指南](../../../scripts/install/README.md#checkout-内的-pre-owner-冻结源码维护)。
 
-自动入口只收集已启用且可修复的 `@dsh-enhanced/*` 条目，核对同批包名、版本、patch、入口及声明的 Host 文件；最终 Delivery、Growth Driver、Verifier 配置及原始 Lark Loader 配置都进入目标 observer。停机后临时加载最终计划的 systemd unit，以真实 `systemctl show` 捕获授权所需属性，再恢复原 unit；捕获期间不启动服务。随后成对应用 patch、环境绑定和 unit，先启动协调器再启动目标。就绪判断要求两个 PID、InvocationID 与重启计数连续 12 秒稳定，目标 observer 与实际进程和配置摘要一致，并读到本次启动后持久登记的、绑定当前 owner scope 的协调器原生 Automation。它证明这次部署的有限启动状态，不证明普通任务已产生候选、通过独立验收或完成采用/回滚。
+自动入口只收集已启用且可修复的 `@dsh-enhanced/*` 条目，核对同批包名、版本、patch、入口及声明的 Host 文件；最终 Delivery、Growth Driver、Verifier、Personal Assistant（含 Memory/Policy/调度）、Memory Learning 配置及原始 Lark Loader 配置都进入目标 observer。停机后临时加载最终计划的 systemd unit，以真实 `systemctl show` 捕获授权所需属性，再恢复原 unit；捕获期间不启动服务。随后成对应用 patch、环境绑定和 unit，先启动协调器再启动目标。就绪判断要求两个 PID、InvocationID 与重启计数连续 12 秒稳定，目标 observer 与实际进程和配置摘要一致，并读到本次启动后持久登记的、绑定当前 owner scope 的协调器原生 Automation。它证明这次部署的有限启动状态，不证明普通任务已产生候选、通过独立验收或完成采用/回滚。
 
 崩溃留下的 `prepared` journal 会先在两个 Host 停机后回滚；若回滚确认成功，先恢复原来运行的服务，再继续新预检。应用前失败仅在原 patch、journal、unit 均可核对时恢复原服务；未知状态保持停机供对账。已应用后的启动或就绪失败保留 applied journal 和配置，供停止服务、排查后重试或显式回滚。自动重试沿用原有限授权起点、期限和额度。
 

@@ -61,7 +61,8 @@
     "@larksuiteoapi/node-sdk": "1.73.0",
     "markdown-it": "14.3.1",
     "qrcode": "1.5.4",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "@dsh-enhanced/assistant-growth-contract": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -79,7 +80,9 @@
     "@dsh-enhanced/assistant-growth-driver": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/plugin-control-plane": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-verifier": ">=0.1.33 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.33 <0.2.0"
+    "@dsh-enhanced/assistant-policy": ">=0.1.33 <0.2.0",
+    "@dsh-enhanced/assistant-memory-learning": ">=0.1.48 <0.2.0",
+    "@dsh-enhanced/personal-memory": ">=0.1.48 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -129,6 +132,12 @@
     },
     "@dsh-enhanced/assistant-policy": {
       "optional": true
+    },
+    "@dsh-enhanced/assistant-memory-learning": {
+      "optional": true
+    },
+    "@dsh-enhanced/personal-memory": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -152,6 +161,9 @@
     "@dsh-enhanced/assistant-growth-driver": "workspace:*",
     "@dsh-enhanced/plugin-control-plane": "workspace:*",
     "@dsh-enhanced/assistant-verifier": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*"
+    "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@dsh-enhanced/assistant-memory-learning": "workspace:*",
+    "@dsh-enhanced/personal-memory": "workspace:*",
+    "@dsh-enhanced/assistant-growth-contract": "workspace:*"
   }
 }

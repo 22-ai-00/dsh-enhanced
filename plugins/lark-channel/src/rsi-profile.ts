@@ -8,6 +8,7 @@ import { isMap, isSeq, parseDocument, type Document, type Node, type YAMLMap, ty
 
 import type { RsiServiceEnvironments } from './rsi-service-setup.js'
 import { resolveRsiOwnerRoute, rsiCoordinatorAutomationDatabasePath } from './rsi-owner-profile.js'
+import { validateRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from './rsi-memory-learning.js'
 
 /** Private, owner supplied input for the two-host RSI overlay. */
 export interface RsiSetupManifest {
@@ -18,6 +19,7 @@ export interface RsiSetupManifest {
   controlPlane: ControlPlaneConfig
   growthDriver: AssistantGrowthDriverConfig
   sourceReviews: SourceReviewConfig
+  memoryLearning?: RsiMemoryLearningSetup
   coordinator: { budgetId: string; budgetAmount: number; timeoutMs: number }
   limits: { periodMs: number; reviews: number; discovery: number; source: number; observations: number; coordinator: number; qualification?: number }
 }
@@ -119,7 +121,20 @@ function assertBudget(document: Document, policy: YAMLMap, id: string, limit: nu
   upsertById(document, budgets, { id, metric: 'automation-runs', limit, periodMs, scope })
 }
 
-function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupManifest, scope: { workspace: string; preset: string; principal: string }, budgetIds: { reviews: string; discovery: string; source: string; observations: string }): void {
+function assertNewMemoryBudget(policy: YAMLMap, id: string, limit: number, periodMs: number,
+  scope: 'subject' | 'workspace'): void {
+  const budgets = seq(policy.get('budgets', true) as Node | undefined, 'assistantPolicy.budgets')
+  const matches = budgets.items.filter(item => isMap(item) && item.get('id') === id)
+  if (matches.length > 1 || matches.length === 1 && !isDeepStrictEqual((matches[0] as YAMLMap).toJSON(),
+    { id, metric: 'automation-runs', limit, periodMs, scope })) fail(`memory Policy budget ${id} conflicts`)
+  if (scope === 'workspace' && budgets.items.some(item => isMap(item) && item.get('id') !== id
+    && item.get('metric') === 'automation-runs' && item.get('scope') === 'workspace'
+    && item.get('periodMs') === periodMs)) {
+    fail(`memory Policy workspace budget ${id} conflicts with an existing counter pool`)
+  }
+}
+
+function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupManifest, scope: { workspace: string; preset: string; principal: string }, budgetIds: { reviews: string; discovery: string; source: string; observations: string }, memory?: RsiMemoryLearningSetup): void {
   const policy = map(personal.get('assistantPolicy', true) as Node | undefined, 'assistantPolicy config')
   const automation = map(personal.get('assistantAutomations', true) as Node | undefined, 'assistantAutomations config')
   if (automation.get('allowUnbudgetedExecution') === true) fail('assistantAutomations.allowUnbudgetedExecution must be false')
@@ -129,6 +144,12 @@ function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupM
   assertBudget(document, policy, budgetIds.source, manifest.limits.source, manifest.limits.periodMs, 'subject')
   assertBudget(document, policy, budgetIds.observations, manifest.limits.observations, manifest.limits.periodMs, 'subject')
   if (manifest.controlPlane.liveQualification) assertBudget(document, policy, manifest.controlPlane.liveQualification.budgetId, manifest.limits.qualification!, manifest.limits.periodMs, 'subject')
+  if (memory) {
+    assertNewMemoryBudget(policy, memory.learning.budgetId, memory.limits.extractions, manifest.limits.periodMs, 'workspace')
+    assertNewMemoryBudget(policy, memory.learning.scanBudgetId, memory.limits.scans, manifest.limits.periodMs, 'subject')
+    assertBudget(document, policy, memory.learning.budgetId, memory.limits.extractions, manifest.limits.periodMs, 'workspace')
+    assertBudget(document, policy, memory.learning.scanBudgetId, memory.limits.scans, manifest.limits.periodMs, 'subject')
+  }
   const rules = seq(policy.get('rules', true) as Node | undefined, 'assistantPolicy.rules'); removePrefixed(rules)
   const background = (id: string, subject: string, action: 'reconcile' | 'execute', automationId: string) => ({ id: `${rsiPrefix}${id}`, effect: 'allow', subject: { kind: 'background', id: subject, workspace: scope.workspace, principal: scope.principal }, actions: [action], resource: { kind: 'automation', id: automationId }, context: { initiators: ['background'] } })
   for (const [name, subject, automation] of [['usage', 'assistant-growth-usage', 'usage-*'], ['source', 'plugin-control-plane-source', 'source-job-*'], ['observation', 'plugin-control-plane-task-observations', 'task-observation-scan-*']] as const) {
@@ -141,9 +162,46 @@ function targetPolicy(document: Document, personal: YAMLMap, manifest: RsiSetupM
     upsertById(document, rules, background('qualification-reconcile', 'plugin-control-plane-live-qualification', 'reconcile', 'live-qualification-scan-*'))
     upsertById(document, rules, background('qualification-execute', 'live-qualification-scan-*', 'execute', 'live-qualification-scan-*'))
   }
+  if (memory) {
+    const subject = { kind: 'background', id: 'assistant-memory-learning', workspace: scope.workspace, principal: scope.principal }
+    for (const [action, authorityId] of [['extract', memory.learning.authorityId], ['review', memory.reviews.authorityId], ['adopt', memory.adoption.authorityId]] as const) {
+      upsertById(document, rules, { id: `${rsiPrefix}memory-${action}`, effect: 'allow', subject,
+        actions: [action], resource: { kind: 'memory', id: `learning:${authorityId}` }, context: { initiators: ['background'] } })
+    }
+    for (const [kind, automationId] of [['scan', 'memory-scan-*'], ['job', 'memory-learning:*']] as const) {
+      upsertById(document, rules, background(`memory-${kind}-reconcile`, 'assistant-memory-learning', 'reconcile', automationId))
+      upsertById(document, rules, background(`memory-${kind}-execute`, automationId, 'execute', automationId))
+    }
+  }
   const agent = { kind: 'agent', id: scope.preset, workspace: scope.workspace, principal: scope.principal }
   for (const tool of ['growth_*', 'plugin_source_*'] as const) upsertById(document, rules, { id: `${rsiPrefix}${tool}`, effect: 'allow', subject: agent, actions: ['execute'], resource: { kind: 'tool', id: tool }, context: { initiators: ['background'] } })
   upsertById(document, rules, { id: `${rsiPrefix}verified-workflows`, effect: 'allow', subject: agent, actions: ['draft'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: { initiators: ['background'] } })
+}
+
+function configurePersonal(document: Document, personal: YAMLMap, manifest: RsiSetupManifest,
+  scope: { workspace: string; preset: string; principal: string },
+  budgetIds: { reviews: string; discovery: string; source: string; observations: string },
+  memory?: RsiMemoryLearningSetup): void {
+  if (memory) {
+    const personalMemory = map(personal.get('personalMemory', true) as Node | undefined, 'personalMemory config')
+    replaceNode(document, personalMemory, 'automaticLearning', memory.adoption)
+  }
+  targetPolicy(document, personal, manifest, scope, budgetIds, memory)
+}
+
+/** Match the target compiler's exact embedded Personal Assistant options for Host attestation. */
+export function compileRsiPersonalAssistantOptions(input: {
+  effectiveConfig: Record<string, unknown>
+  manifest: RsiSetupManifest
+  scope: { workspace: string; preset: string; principal: string }
+  budgetIds: { reviews: string; discovery: string; source: string; observations: string }
+}): Record<string, unknown> {
+  const document = parseDocument(JSON.stringify(input.effectiveConfig), { uniqueKeys: true })
+  const personal = map(document.contents ?? undefined, 'personal assistant options')
+  const memory = input.manifest.memoryLearning === undefined ? undefined
+    : validateRsiMemoryLearningSetup(input.manifest.memoryLearning, input.manifest.sourceReviews.owner)
+  configurePersonal(document, personal, input.manifest, input.scope, input.budgetIds, memory)
+  return json(personal, 'personal assistant options')
 }
 
 /**
@@ -169,6 +227,8 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   const expectedOwner = { authorityId: owner.route.id, authorityHash: owner.route.authorityHash, principalId: owner.principal, principalRecordId: input.owner.owner.id, principalVersion: input.owner.owner.version, workspace: owner.workspace, agentPreset: owner.preset }
   if (!isDeepStrictEqual(input.manifest.sourceReviews.owner, expectedOwner)) fail('sourceReviews.owner does not match current owner')
   validateSourceReviewConfig(input.manifest.sourceReviews)
+  const memory = input.manifest.memoryLearning === undefined ? undefined
+    : validateRsiMemoryLearningSetup(input.manifest.memoryLearning, expectedOwner)
 
   const cp = structuredClone(input.manifest.controlPlane)
   if (!cp.sourceBuild || !cp.sourceApprovals || !cp.sourceReleases || !cp.sourceReleaseExecution || !cp.sourceAdoptions || !cp.runtimeObserver || !cp.foregroundDeployments || !cp.taskObservations) fail('target controlPlane lacks a complete source adoption chain')
@@ -187,15 +247,47 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
     if (!Number.isSafeInteger(input.manifest.limits.qualification) || input.manifest.limits.qualification! < 1
       || [...Object.values(budgetIds), input.manifest.coordinator.budgetId].includes(cp.liveQualification.budgetId)) fail('live qualification requires a distinct finite budget')
   }
+  if (memory) {
+    const existing = [...Object.values(budgetIds), input.manifest.coordinator.budgetId,
+      ...(cp.liveQualification ? [cp.liveQualification.budgetId] : [])]
+    if (memory.learning.budgetId === memory.learning.scanBudgetId
+      || existing.includes(memory.learning.budgetId) || existing.includes(memory.learning.scanBudgetId)) fail('memory automation budget ids conflict with RSI')
+    const learnerRows = effective.rows.items.filter(item => isMap(item) && item.get('id') === 'dsh-enhanced-assistant-memory-learning')
+    if (learnerRows.length !== 1) fail('memory learner row is missing or duplicate')
+    const learner = learnerRows[0] as YAMLMap
+    const currentLearnerConfig = learner.get('config', true) as Node | undefined
+    if (learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
+      || !(learner.get('disabled') === true && !learner.has('config')
+        || learner.get('disabled') === false && isMap(currentLearnerConfig)
+          && isDeepStrictEqual((currentLearnerConfig as YAMLMap).toJSON(), memory.learning))) {
+      fail('memory learner must be the inactive installed bundle or exact current learning configuration')
+    }
+    const standalone = row(effective.rows, 'dsh-enhanced-personal-memory')
+    if (standalone && standalone.get('disabled') !== true) fail('ambiguous standalone and embedded Memory providers')
+  }
   if (owner.created) {
     const deliveryOverride = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-delivery')
     seq(deliveryOverride.get('ownerRoutes', true) as Node | undefined, 'Delivery ownerRoutes').add(target.document.createNode(owner.authority))
   }
   const personal = cloneEffectiveConfig(target, effective, 'dsh-enhanced-personal-assistant')
-  targetPolicy(target.document, personal, input.manifest, owner, budgetIds as { reviews: string; discovery: string; source: string; observations: string })
+  configurePersonal(target.document, personal, input.manifest, owner,
+    budgetIds as { reviews: string; discovery: string; source: string; observations: string }, memory)
   const verifier = cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-verifier')
   // Keep all existing verifier settings, replacing only the finite review grant.
   replaceNode(target.document, verifier, 'sourceReviews', input.manifest.sourceReviews)
+  if (memory) replaceNode(target.document, verifier, 'memoryReviews', memory.reviews)
+  if (memory) {
+    let learner = row(target.rows, 'dsh-enhanced-assistant-memory-learning')
+    if (!learner) {
+      learner = map(target.document.createNode({ id: 'dsh-enhanced-assistant-memory-learning' }), 'memory learner override')
+      target.rows.add(learner)
+    }
+    if (Object.keys(json(learner, 'memory learner override')).some(key => !['id', 'name', 'disabled', 'config'].includes(key))) fail('memory learner override has unsupported fields')
+    if (learner.has('name') && learner.get('name') !== '@dsh-enhanced/assistant-memory-learning') fail('memory learner override package differs')
+    learner.set('name', '@dsh-enhanced/assistant-memory-learning')
+    learner.set('disabled', false)
+    replaceNode(target.document, learner, 'config', memory.learning)
+  }
   cloneEffectiveConfig(target, effective, 'dsh-enhanced-assistant-growth-driver', true)
   replaceNode(target.document, required(target.rows, 'dsh-enhanced-assistant-growth-driver'), 'config', input.manifest.growthDriver)
   cloneEffectiveConfig(target, effective, 'dsh-enhanced-plugin-control-plane')

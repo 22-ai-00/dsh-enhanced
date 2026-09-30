@@ -1,6 +1,7 @@
 import { isAbsolute, join, resolve } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { type ActiveLarkOwnerBinding } from '@dsh-enhanced/assistant-delivery'
+import { growthObjectDigest } from '@dsh-enhanced/assistant-growth-contract'
 import { PROTECTED_PLUGIN_DENYLIST, runtimeConfigDigest, validateHostDeploymentInputs, type RuntimeObserverTarget } from '@dsh-enhanced/plugin-control-plane'
 import { isAlias, isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 
@@ -10,13 +11,15 @@ import type { RsiBuildEnvironment } from './rsi-build.js'
 import type { RsiSetupManifest } from './rsi-profile.js'
 import type { RsiSourceWorkspace } from './rsi-source.js'
 import { resolveRsiOwnerRoute } from './rsi-owner-profile.js'
+import { getRsiMemoryLearningValidators, validateRsiMemoryLearningSetup } from './rsi-memory-learning.js'
+import { compileRsiPersonalAssistantOptions } from './rsi-profile.js'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const pluginPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
 const digestPattern = /^[a-f0-9]{64}$/u
 const phases = ['pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission'] as const
 const mutableRows = new Set(['dsh-enhanced-personal-assistant', 'dsh-enhanced-assistant-verifier',
-  'dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-plugin-control-plane'])
+  'dsh-enhanced-assistant-growth-driver', 'dsh-enhanced-assistant-memory-learning', 'dsh-enhanced-plugin-control-plane'])
 const day = 86_400_000
 
 export interface RsiBootstrapManifestInput {
@@ -135,6 +138,13 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
       fail(`Host deployment input does not cover installed package ${name}`)
     }
   }
+  const memoryManifestPaths = hostInputs.filter(path => path.endsWith('/@dsh-enhanced/personal-memory/package.json'))
+  if (memoryManifestPaths.length !== 1) fail('Host deployment inputs require one embedded Personal Memory package')
+  const memoryPrefix = memoryManifestPaths[0]!.slice(0, -'package.json'.length)
+  if (!hostInputs.includes(`${memoryPrefix}cordis.patch.yml`)
+    || !hostInputs.some(path => path.startsWith(`${memoryPrefix}lib/`) && path.endsWith('.js'))) {
+    fail('Host deployment inputs do not cover embedded Personal Memory')
+  }
 
   const document = parseDocument(input.targetEffective, { uniqueKeys: true })
   if (document.errors.length || !isSeq(document.contents)) fail('target effective YAML is invalid')
@@ -146,7 +156,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     rows.set(id, entry)
   }
   const installedRepairable = [...rows.entries()].flatMap(([id, entry]) => {
-    if (entry.get('disabled') === true) return []
+    if (entry.get('disabled') === true && id !== 'dsh-enhanced-assistant-memory-learning') return []
     const name = entry.get('name')
     if (typeof name !== 'string' || !name.startsWith('@dsh-enhanced/')) {
       if (id.startsWith('dsh-enhanced-')) fail(`installed plugin row ${id} has no package name`)
@@ -170,7 +180,13 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     workspace: input.owner.workspace, agentPreset: input.owner.agentPreset }
 
   const personal = rows.get('dsh-enhanced-personal-assistant')
-  if (!personal) fail('effective personal assistant is missing')
+  if (!personal || personal.get('disabled') === true || personal.get('name') !== '@dsh-enhanced/personal-assistant') fail('effective personal assistant is missing')
+  const personalConfig = rowConfig(personal, 'personal assistant')
+  const memoryConfig = personalConfig.get('personalMemory', true) as Node | undefined
+  if (!isMap(memoryConfig)) fail('effective embedded Personal Memory is missing')
+  const learner = rows.get('dsh-enhanced-assistant-memory-learning')
+  if (!learner || learner.get('name') !== '@dsh-enhanced/assistant-memory-learning'
+    || learner.get('disabled') === true && learner.has('config')) fail('effective memory learner must be the installed unconfigured bundle')
   const policy = plain(mapping(rowConfig(personal, 'personal assistant').get('assistantPolicy', true) as Node | undefined, 'assistantPolicy'), 'assistantPolicy')
   let reviewLimit = 7
   const budgets = (policy.budgets as unknown[] | undefined) ?? []
@@ -221,6 +237,33 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
   for (const phase of phases) targetEnvironment[`DSH_RELEASE_${phase.toUpperCase().replaceAll('-', '_')}_CONFIG`] = join(config, `release-${phase}.json`)
   const profilePath = join(input.dshHome, 'profiles', input.targetProfile)
   const installation = input.resources.installationId
+  const { validateLearningConfig, validateMemoryReviewConfig, validateMemoryLearningAdoptionGrant } = getRsiMemoryLearningValidators()
+  const memoryReview = validateMemoryReviewConfig({ authorityId: `memory-review-${installation}`,
+    owner: reviewOwner, expiresAt: input.expiresAt, maxReviews: 1000,
+    policy: 'Independently verify exact owner statements for facts and trusted owner objectives with canonical outcomes for experiences. Reject unsupported claims, withdrawn sources, and ambiguous mutations.',
+    maxInputBytes: 65_536, maxOutputTokens: 2048, timeoutMs: 120_000 })
+  const memoryAdoption = validateMemoryLearningAdoptionGrant({ authorityId: `memory-adopt-${installation}`,
+    owner: reviewOwner, reviewAuthorityId: memoryReview.authorityId,
+    reviewAuthorityDigest: growthObjectDigest(memoryReview), expiresAt: input.expiresAt,
+    maxMutations: 1000, maxTotalContentBytes: 4_096_000, maxRecordTtlMs: 30 * day,
+    kinds: ['fact', 'experience'], operations: ['add', 'replace', 'remove'] })
+  const memoryLearning = validateRsiMemoryLearningSetup({
+    learning: validateLearningConfig({ databasePath: join(state, 'memory-learning.sqlite'),
+      authorityId: `memory-extract-${installation}`, owner: reviewOwner, expiresAt: input.expiresAt,
+      maxExtractions: 1000, maxPending: 100, lookbackMs: 30 * day,
+      policy: 'Extract only explicit owner facts or experience grounded in a trusted owner objective and canonical outcome. Do not infer success from a reply. Prefer noop when evidence is insufficient.',
+      maxInputBytes: 65_536, maxOutputTokens: 2048, timeoutMs: 120_000,
+      budgetId: `rsi-memory-learning-${installation}`, budgetAmount: 1,
+      scanBudgetId: `rsi-memory-scan-${installation}`, scanBudgetAmount: 1,
+      reviewAuthorityId: memoryReview.authorityId, reviewAuthorityDigest: growthObjectDigest(memoryReview),
+      adoptionAuthorityId: memoryAdoption.authorityId, adoptionGrantDigest: growthObjectDigest(memoryAdoption) }),
+    reviews: memoryReview, adoption: memoryAdoption, limits: { extractions: 7, scans: 1440 },
+  }, reviewOwner, input.now)
+  if (learner.get('disabled') !== true) {
+    if (!learner.has('config') || !isDeepStrictEqual(plain(rowConfig(learner, 'memory learner'), 'memory learner'), memoryLearning.learning)) {
+      fail('existing memory learner config differs from frozen owner grant')
+    }
+  }
   const manifest: RsiSetupManifest = {
     schemaVersion: 1, targetProfile: input.targetProfile, coordinatorProfile: input.coordinatorProfile,
     serviceEnvironment: { target: targetEnvironment, coordinator: { DSH_SYSTEMD_HOST_ATTESTOR_CONFIG: hostPath } },
@@ -259,6 +302,7 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
       plugins: [...input.plugins], owner: reviewOwner, reviewerPrincipal: `rsi-independent-reviewer-${installation}`,
       policy: 'Review the exact owner-bound source repair and its acceptance evidence independently.',
       maxChangedFiles: 256, maxInputBytes: 2_097_152, maxOutputTokens: 8192, timeoutMs: 300_000 },
+    memoryLearning,
     coordinator: { budgetId: `rsi-coordinator-${installation}`, budgetAmount: 1, timeoutMs: 300_000 },
     limits: { periodMs: day, reviews: reviewLimit, discovery: 1440, source: 7, observations: 1440,
       coordinator: 1440, qualification: 1440 },
@@ -274,7 +318,17 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     { entryId: 'dsh-enhanced-assistant-growth-driver', module: '@dsh-enhanced/assistant-growth-driver',
       configDigest: runtimeConfigDigest(manifest.growthDriver), services: ['assistantGrowthDriver'] },
     { entryId: 'dsh-enhanced-assistant-verifier', module: '@dsh-enhanced/assistant-verifier',
-      configDigest: runtimeConfigDigest({ ...verifierRaw, sourceReviews: manifest.sourceReviews }), services: ['assistantVerifier'] },
+      configDigest: runtimeConfigDigest({ ...verifierRaw, sourceReviews: manifest.sourceReviews,
+        memoryReviews: memoryLearning.reviews }), services: ['assistantVerifier'] },
+    { entryId: 'dsh-enhanced-personal-assistant', module: '@dsh-enhanced/personal-assistant',
+      configDigest: runtimeConfigDigest(compileRsiPersonalAssistantOptions({
+        effectiveConfig: rawLoaderConfig(personalConfig, 'personal assistant') as Record<string, unknown>,
+        manifest, scope: { workspace: scope.workspace, preset: scope.preset, principal: scope.principalId },
+        budgetIds: { reviews: manifest.growthDriver.budgetId!, discovery: manifest.growthDriver.usageLearning!.scanBudgetId!,
+          source: manifest.controlPlane.sourceJobs!.budgetId, observations: manifest.controlPlane.taskObservations!.budgetId },
+      })), services: ['personalMemory', 'assistantPolicy', 'assistantAutomations'] },
+    { entryId: 'dsh-enhanced-assistant-memory-learning', module: '@dsh-enhanced/assistant-memory-learning',
+      configDigest: runtimeConfigDigest(memoryLearning.learning), services: ['assistantMemoryLearning'] },
   )
   const deliveryTarget = manifest.controlPlane.runtimeObserver!.targets.find(target => target.entryId === 'dsh-enhanced-assistant-delivery')
   if (deliveryTarget) {
