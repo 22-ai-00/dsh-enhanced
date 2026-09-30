@@ -59,6 +59,16 @@ Linux `supervised` 的已登记 RSI 双 Host 可以在同一个 Home 事务中�
 
 已安装冻结源码/cohort、尚无 RSI owner、coordinator 或 control ledger 的 Linux systemd Home，可显式调用已经审核并构建的本地 checkout。此入口尚未接入普通 `dsh-rsi update`、远程 helper 下载或发布版本 pins；不要复制单个新版 `lib` 文件到正式 profile。先以 `dsh-rsi-setup --prepare-local-update` 在 Home 外制作候选；候选与执行维护的 reviewed checkout 是两份独立绑定的输入。
 
+旧冻结安装缺少 `assistant-memory-learning` 时，可用同一 reviewed checkout 的 CLI 显式准备唯一受支持的根包扩展。目标必须已提供 Personal Assistant、Delivery、Evaluation 和 Verifier，且通过实际 pre-owner 权限与签名历史检查；这不是任意增删插件的入口：
+
+```sh
+node /reviewed/checkout/plugins/lark-channel/bin/dsh-rsi-setup.js \
+  --prepare-local-update --add-memory-learning --profile assistant \
+  --dsh-home /absolute/dsh-home --source-repository /absolute/source-repository
+```
+
+该候选使用独立 schema 2 收据和目录，冻结旧 cohort 与精确新增包；普通 schema 1 更新仍保持原 roots。准备不切换服务、不启用学习。随后按下述 `local-service-upgrade` 激活同一候选：停服副本只增加该根依赖及原生 bundle mount，原 patch 字节不变；真实有效配置只允许新增官方 `disabled: true`、无 config 的 learner 行，保留其固定 injections、其他行的动态标签及所有其他 profile。成功迁移后再执行 owner 安装，分别签发有限授权与预算；已有 paused Automation 的确认仍属于 owner 安装。
+
 ```sh
 node /reviewed/checkout/scripts/install/lifecycle-profile.mjs \
   local-service-upgrade assistant /absolute/dsh-home \

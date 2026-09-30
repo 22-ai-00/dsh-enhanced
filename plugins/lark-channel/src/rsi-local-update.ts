@@ -10,14 +10,18 @@ import { prepareRsiSourceWorkspace, readRsiSourceWorkspace } from './rsi-source.
 import { prepareRsiSourceUpdate, readRsiSourceUpdate, type RsiSourceUpdateCandidate } from './rsi-source-update.js'
 import { withDshHomeLifecycleLock } from './setup.js'
 import { prepareRsiLocalUpdateBuild } from './rsi-local-update-build.js'
+import { rsiLocalUpdateBundles } from './rsi-local-roots-extension.js'
 
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
 const fail = (message: string): never => { throw new Error(`rsi local update: ${message}`) }
 const profileName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
-export interface RsiLocalUpdateInput { dshHome: string; profile: string; sourceRepository: string; signal?: AbortSignal }
+export interface RsiLocalUpdateInput { dshHome: string; profile: string; sourceRepository: string;
+  rootExtension?: 'memory-learning'; signal?: AbortSignal }
 export interface RsiLocalUpdatePreparation {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   mode: 'prepared'
+  /** Schema 2 explicitly binds the only supported pre-owner root addition. */
+  extension?: 'memory-learning'
   dshHome: string
   profile: string
   root: string
@@ -45,21 +49,27 @@ export async function readRsiLocalUpdateLocked(input: { dshHome: string; profile
   signal.throwIfAborted()
   const raw = await io.readStable(join(input.root, 'receipt.json'), 20_971_520, true)
   const saved = JSON.parse(raw.toString('utf8')) as RsiLocalUpdatePreparation
+  const extended = saved?.schemaVersion === 2
   if (!saved || typeof saved !== 'object' || Array.isArray(saved)
     || !isDeepStrictEqual(Object.keys(saved).sort(), ['schemaVersion', 'mode', 'dshHome', 'profile', 'root',
-      'candidateHome', 'originalCohortDigest', 'source', 'cohort', 'build', 'receiptDigest'].sort())) fail('prepared update receipt is invalid')
+      'candidateHome', 'originalCohortDigest', 'source', 'cohort', 'build', 'receiptDigest',
+      ...(extended ? ['extension'] : [])].sort())) fail('prepared update receipt is invalid')
   const { receiptDigest, ...body } = saved
-  if (receiptDigest !== hash(JSON.stringify(body)) || saved.schemaVersion !== 1 || saved.mode !== 'prepared'
+  if (receiptDigest !== hash(JSON.stringify(body)) || ![1, 2].includes(saved.schemaVersion)
+    || extended && saved.extension !== 'memory-learning' || saved.mode !== 'prepared'
     || saved.dshHome !== input.dshHome || saved.profile !== input.profile || saved.root !== input.root
     || saved.candidateHome !== join(input.root, 'home') || !saved.build) fail('prepared update receipt binding differs')
   if (!isDeepStrictEqual((await readdir(input.root)).sort(), ['home', 'receipt.json', 'source'])) fail('unexpected preparation contents')
   const original = await readRsiLocalCohort(input)
   if (saved.originalCohortDigest !== original.receiptDigest) fail('prepared update no longer matches installed cohort')
+  const expectedBundles = rsiLocalUpdateBundles(original.bundles, saved.extension)
+  if (!isDeepStrictEqual(saved.cohort.bundles, expectedBundles)) fail('prepared bundle selection differs')
+  if (extended) await assertPreOwner(input, signal)
   const sourceInput = { dshHome: input.dshHome, profile: input.profile, sourceRepository: original.sourceRepository,
     candidateRoot: join(input.root, 'source'), signal }
   const source = await readRsiSourceUpdate(sourceInput)
-  const identity = hash(JSON.stringify({ preparation: 'isolated-build-v1', home: input.dshHome, profile: input.profile,
-    original: original.receiptDigest, upstreamCommit: source.upstreamCommit, repairCommit: source.repairCommit }))
+  const identity = preparationIdentity({ ...input, original, upstreamCommit: source.upstreamCommit,
+    repairCommit: source.repairCommit, ...(saved.extension ? { rootExtension: saved.extension } : {}) })
   if (join(parent, identity) !== input.root || !isDeepStrictEqual(saved.source, source)) fail('prepared source differs')
   const workspace = await readRsiSourceWorkspace({ dshHome: saved.candidateHome, profile: input.profile,
     sourceRepository: source.repository, signal })
@@ -73,7 +83,22 @@ export async function readRsiLocalUpdateLocked(input: { dshHome: string; profile
     || !isDeepStrictEqual(await readRsiLocalCohort(input), original)
     || !(await io.readStable(join(input.root, 'receipt.json'), 20_971_520, true)).equals(raw)) fail('preparation or original changed during verification')
   signal.throwIfAborted()
+  if (extended) await assertPreOwner(input, signal)
   return saved
+}
+
+function preparationIdentity(input: { dshHome: string; profile: string; original: RsiLocalCohort;
+  upstreamCommit: string; repairCommit: string; rootExtension?: 'memory-learning' }): string {
+  return hash(JSON.stringify({ preparation: input.rootExtension ? 'isolated-build-v2' : 'isolated-build-v1',
+    home: input.dshHome, profile: input.profile, original: input.original.receiptDigest,
+    upstreamCommit: input.upstreamCommit, repairCommit: input.repairCommit,
+    ...(input.rootExtension ? { extension: input.rootExtension } : {}) }))
+}
+
+async function assertPreOwner(input: { dshHome: string; profile: string }, signal: AbortSignal): Promise<void> {
+  const { assertRsiPreOwnerInstallation } = await import('./rsi-local-activation.js')
+  await assertRsiPreOwnerInstallation({ logicalHome: input.dshHome, physicalHome: input.dshHome,
+    profile: input.profile, signal })
 }
 
 export async function readRsiLocalUpdate(input: Parameters<typeof readRsiLocalUpdateLocked>[0]): Promise<RsiLocalUpdatePreparation> {
@@ -114,13 +139,14 @@ export async function prepareRsiLocalUpdate(input: RsiLocalUpdateInput,
   return withDshHomeLifecycleLock(input.dshHome, async () => {
     const original = await readRsiLocalCohort(input)
     if (original.sourceRepository !== input.sourceRepository) fail('update source differs from installed cohort')
+    const bundles = rsiLocalUpdateBundles(original.bundles, input.rootExtension)
+    if (input.rootExtension) await assertPreOwner(input, signal)
     const profilePath = join(input.dshHome, 'profiles', input.profile)
     await verifyRsiLocalInstalledPackages({ cohort: original, profilePath })
     const upstreamCommit = await commit(input.sourceRepository, 'HEAD', signal)
     const repository = join(input.dshHome, 'rsi-sources', input.profile, 'checkout')
     const repairCommit = await commit(repository, 'refs/dsh-source/repairs', signal)
-    const identity = hash(JSON.stringify({ preparation: 'isolated-build-v1', home: input.dshHome, profile: input.profile,
-      original: original.receiptDigest, upstreamCommit, repairCommit }))
+    const identity = preparationIdentity({ ...input, original, upstreamCommit, repairCommit })
     // Outside Home so preparing/building never changes an active Agent's input
     // tree. Each exact upstream/repair pair has a distinct immutable directory.
     const parent = join(dirname(input.dshHome), `.dsh-rsi-local-updates-${hash(input.dshHome).slice(0, 16)}`)
@@ -139,15 +165,17 @@ export async function prepareRsiLocalUpdate(input: RsiLocalUpdateInput,
     const builder = ports ? undefined : await prepareRsiLocalUpdateBuild({ dshHome: candidateHome,
       profile: input.profile, source: workspace, signal })
     const cohort = await prepareRsiLocalCohort({ dshHome: candidateHome, profile: input.profile,
-      source: workspace, bundles: original.bundles, signal }, ports ?? builder!.ports)
+      source: workspace, bundles, signal }, ports ?? builder!.ports)
     const verifyOriginal = async () => {
       if (!isDeepStrictEqual(await readRsiSourceUpdate(sourceInput), source)
         || !isDeepStrictEqual(await readRsiLocalCohort(input), original)) fail('installed source or cohort changed during build')
       await verifyRsiLocalInstalledPackages({ cohort: original, profilePath })
+      if (input.rootExtension) await assertPreOwner(input, signal)
       signal.throwIfAborted()
     }
     await verifyOriginal()
-    const content = { schemaVersion: 1 as const, mode: 'prepared' as const, dshHome: input.dshHome,
+    const content = { schemaVersion: input.rootExtension ? 2 as const : 1 as const,
+      ...(input.rootExtension ? { extension: input.rootExtension } : {}), mode: 'prepared' as const, dshHome: input.dshHome,
       profile: input.profile, root, candidateHome, originalCohortDigest: original.receiptDigest, source, cohort,
       build: builder?.evidence ?? null }
     const result = { ...content, receiptDigest: hash(JSON.stringify(content)) }

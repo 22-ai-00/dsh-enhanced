@@ -24,7 +24,10 @@ const modules = ['rsi-local-update', 'rsi-local-resources', 'rsi-source-maintena
   'rsi-local-activation', 'rsi-local-pair-install', 'rsi-local-cohort', 'rsi-authority-runtime', 'supervised-growth-profile']
 const resourceKinds = ['rsi-sources', 'rsi-local-cohorts', 'rsi-builds', 'rsi-release-builds', 'rsi-authorities', 'rsi-authority-runtimes']
 const ownerFields = new Set(['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceReleaseExecution',
-  'sourceAdoptions', 'sourceBuild', 'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'adoptionCoordinator'])
+  'sourceAdoptions', 'sourceBuild', 'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'adoptionCoordinator',
+  'memoryReviews', 'automaticLearning'])
+const learnerId = 'dsh-enhanced-assistant-memory-learning'
+const learnerName = '@dsh-enhanced/assistant-memory-learning'
 
 async function trustedDirectory(path) {
   if (!exactPath(path) || await realpath(path) !== path) fail(`non-canonical trusted path: ${path}`)
@@ -123,6 +126,13 @@ async function load(binding) {
   result.yaml = require('yaml')
   return result
 }
+async function memoryLearnerInitialRow(binding) {
+  await assertLocalSourceInstaller(binding)
+  const source = join(binding.root, 'plugins', 'lark-channel', 'lib', 'rsi-local-roots-extension.js')
+  const { rsiMemoryLearningInitialRow } = await import(pathToFileURL(source).href)
+  if (!rsiMemoryLearningInitialRow || typeof rsiMemoryLearningInitialRow !== 'object') fail('reviewed memory learner row is unavailable')
+  return rsiMemoryLearningInitialRow
+}
 
 /** pnpm compares store spellings in .modules.yaml, even for the same inode. */
 export async function readLocalSourcePnpmStoreAlias({ profilePath, storePath, installer }) {
@@ -181,6 +191,11 @@ export function assertPreOwnerEffectiveConfigs(configs, logicalHome, targetProfi
     for (const row of rows) {
       if (!row || typeof row !== 'object' || typeof row.id !== 'string' || typeof row.name !== 'string') fail('effective row identity is invalid')
       inspect(row, `${row.id}/${row.name}`)
+      if (row.id === learnerId || row.name === learnerName) {
+        if (row.id !== learnerId || row.name !== learnerName || row.disabled !== true || Object.hasOwn(row, 'config')) {
+          fail('pre-owner memory learner row must be disabled and unconfigured')
+        }
+      }
       if (row.disabled === true) continue
       if (row.name.endsWith('assistant-automations') && row.config?.schedulerEnabled !== false) fail('active Automations scheduler is not explicitly disabled')
       if (row.name.endsWith('personal-assistant') && row.config?.assistantAutomations?.schedulerEnabled !== false) fail('personal-assistant Automations scheduler is not explicitly disabled')
@@ -213,6 +228,61 @@ function preOwnerDocument(source, yaml) {
   }
   inspect(document.contents)
   return document
+}
+
+function configSignature(node, yaml) {
+  if (node === null) return null
+  if (yaml.isScalar(node)) return ['scalar', node.tag ?? null, node.value]
+  if (yaml.isSeq(node)) return ['sequence', node.tag ?? null, node.items.map(item => configSignature(item, yaml))]
+  if (yaml.isMap(node)) return ['map', node.tag ?? null, node.items.map(pair => {
+    if (!yaml.isScalar(pair.key) || pair.key.tag || typeof pair.key.value !== 'string') fail('dynamic configuration mapping key')
+    return [pair.key.value, configSignature(pair.value, yaml)]
+  }).sort(([left], [right]) => left.localeCompare(right))]
+  fail('unsupported configuration node')
+}
+
+function learnerRows(source, yaml, initialRow) {
+  const document = preOwnerDocument(source, yaml)
+  if (!yaml.isSeq(document.contents)) fail('effective configuration is not a sequence')
+  const seen = new Set()
+  const rows = []
+  for (const row of document.contents.items) {
+    if (!yaml.isMap(row)) fail('effective configuration row is not a mapping')
+    const id = row.get('id', true), name = row.get('name', true)
+    if (!yaml.isScalar(id) || id.tag || typeof id.value !== 'string' || seen.has(id.value)
+      || !yaml.isScalar(name) || name.tag || typeof name.value !== 'string') fail('missing or duplicate effective row identity')
+    seen.add(id.value)
+    rows.push({ id: id.value, name: name.value, signature: configSignature(row, yaml) })
+  }
+  const learner = rows.filter(row => row.id === initialRow.id || row.name === initialRow.name)
+  return { rows, learner }
+}
+
+function fixedLearnerSignature(yaml, initialRow) {
+  const source = yaml.stringify([initialRow])
+  return learnerRows(source, yaml, { id: '', name: '' }).rows[0].signature
+}
+
+/** The digest is over YAML ASTs, including !!js tags. Row position may vary,
+ * but deleting the one fixed learner row must recover the old row sequence. */
+export function expectedMemoryLearningSemanticDigest(source, yaml, initialRow) {
+  const { rows, learner } = learnerRows(source, yaml, initialRow)
+  if (learner.length) fail('memory learner row is already present before preparation')
+  return digest({ existing: rows.map(row => row.signature), learner: fixedLearnerSignature(yaml, initialRow) })
+}
+
+export function assertMemoryLearningCandidateConfigs({ configs, original, targetProfile, expectedCandidateSemanticDigest }, yaml, initialRow) {
+  if (typeof expectedCandidateSemanticDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(expectedCandidateSemanticDigest)
+    || !configs || typeof configs !== 'object' || !Object.hasOwn(configs, targetProfile)
+    || !isDeepStrictEqual(Object.keys(configs).sort(), Object.keys(original.configDigests).sort())) fail('memory learner configuration inventory differs')
+  for (const [profile, source] of Object.entries(configs)) {
+    if (profile !== targetProfile && hash(source) !== original.configDigests[profile]) fail('other effective profile changed during memory learner installation')
+  }
+  const { rows, learner } = learnerRows(configs[targetProfile], yaml, initialRow)
+  const fixed = fixedLearnerSignature(yaml, initialRow)
+  if (learner.length !== 1 || !isDeepStrictEqual(learner[0].signature, fixed)) fail('memory learner row differs from its fixed disabled bundle row')
+  const existing = rows.filter(row => row !== learner[0]).map(row => row.signature)
+  if (digest({ existing, learner: fixed }) !== expectedCandidateSemanticDigest) fail('memory learner changed pre-existing effective rows')
 }
 
 /** No native CLI before this proof: prepareProfile writes cordis.yml even for
@@ -310,10 +380,25 @@ async function assertHomeOwnerAbsence(home, profile) {
   }
   for (const name of await readdir(home)) if (name.startsWith('.rsi-coordinator-') || name === '.rsi-setup-journal.json') fail('coordinator/owner setup residue is present')
 }
+export async function assertPreOwnerAuthorityState(physicalHome, profile, records) {
+  const authority = join(physicalHome, 'rsi-authorities', profile)
+  await trustedDirectory(authority)
+  if (!isDeepStrictEqual((await readdir(authority)).sort(),
+    ['bootstrap.json', 'catalog.json', 'config', 'identities', 'registry', 'state'])) fail('pre-owner authority layout changed')
+  for (const name of ['config', 'state', 'registry']) {
+    const directory = join(authority, name)
+    await trustedDirectory(directory)
+    if ((await readdir(directory)).length) fail(`pre-owner ${name} is not empty`)
+  }
+  const catalog = JSON.parse((await bytes(join(authority, 'catalog.json'), 2_097_152)).toString('utf8'))
+  if (!isDeepStrictEqual(catalog, { schemaVersion: 1, entries: [] })) fail('pre-owner catalog is not empty')
+  if (!Array.isArray(records) || records.some(record => record?.host !== null)) fail('pre-owner maintenance contains Host activation evidence')
+}
 async function selection(input, api, verifyPackages = true) {
   const { logicalHome, physicalHome = logicalHome, profile, dshPath } = input
   await assertHomeOwnerAbsence(physicalHome, profile)
   const live = await api.readRsiSourceMaintenance({ logicalHome, physicalHome, profile })
+  await assertPreOwnerAuthorityState(physicalHome, profile, live.records)
   const resources = {}
   for (const kind of resourceKinds) resources[kind] = await treeDigest(join(physicalHome, kind, profile))
   const metadata = {}
@@ -336,15 +421,22 @@ async function selection(input, api, verifyPackages = true) {
 export async function preflightLocalSourceMaintenance(input) {
   const installer = input.installer ?? await bindLocalSourceInstaller(input.installerRoot)
   const api = await load(installer)
-  const original = await selection({ ...input, logicalHome: input.homePath, installer }, api)
+  const configs = input.configs ?? (await composeLocalSourceConfigs({ ...input, installer })).configs
+  const original = await selection({ ...input, configs, logicalHome: input.homePath, installer }, api)
   const preparation = await api.readRsiLocalUpdateLocked({ dshHome: input.homePath, profile: input.profile, root: input.preparationRoot })
-  return { protocol: 'dsh-enhanced/pre-owner-source-maintenance/v1', installer, preparationRoot: input.preparationRoot,
-    preparationDigest: preparation.receiptDigest, original, candidate: null }
+  const extension = preparation.extension
+  if (extension !== undefined && extension !== 'memory-learning') fail('unsupported prepared root extension')
+  const initialRow = extension ? await memoryLearnerInitialRow(installer) : undefined
+  return { protocol: extension ? 'dsh-enhanced/pre-owner-source-maintenance/v2' : 'dsh-enhanced/pre-owner-source-maintenance/v1',
+    ...(extension ? { extension, expectedCandidateSemanticDigest: expectedMemoryLearningSemanticDigest(
+      configs[input.profile], api.yaml, initialRow) } : {}),
+    installer, preparationRoot: input.preparationRoot, preparationDigest: preparation.receiptDigest, original, candidate: null }
 }
 export async function prepareLocalSourceStage(input) {
   const api = await load(input.proof.installer)
   const preparation = await api.readRsiLocalUpdateLocked({ dshHome: input.homePath, profile: input.profile, root: input.proof.preparationRoot })
-  if (preparation.receiptDigest !== input.proof.preparationDigest) fail('prepared candidate changed')
+  if (preparation.receiptDigest !== input.proof.preparationDigest
+    || preparation.extension !== input.proof.extension) fail('prepared candidate changed')
   const live = await api.readRsiSourceMaintenance({ logicalHome: input.homePath, physicalHome: input.homePath, profile: input.profile })
   const originalCohort = await api.readRsiLocalCohort({ dshHome: input.homePath, profile: input.profile })
   const resource = await api.stageRsiLocalUpdateResources({ logicalHome: input.homePath, stagePhysicalHome: input.stageHome,
@@ -364,9 +456,18 @@ export async function replaceLocalSourceAuthority(input) {
 }
 export async function verifyLocalSourceSelection(input) {
   const api = await load(input.proof.installer)
-  const selected = await selection({ logicalHome: input.homePath, physicalHome: input.physicalHome, profile: input.profile, dshPath: input.dshPath, installer: input.proof.installer, configs: input.configs }, api, input.physicalHome === undefined)
+  const configs = input.configs ?? (await composeLocalSourceConfigs(input)).configs
+  const selected = await selection({ logicalHome: input.homePath, physicalHome: input.physicalHome, profile: input.profile, dshPath: input.dshPath, installer: input.proof.installer, configs }, api, input.physicalHome === undefined)
   const expected = input.proof[input.selection]
   if (expected && !isDeepStrictEqual(selected, expected)) fail(`${input.selection} source/resource/config identity changed`)
+  if (input.selection === 'candidate' && selected.resources['rsi-authorities'] !== input.proof.original.resources['rsi-authorities']) {
+    fail('pre-owner authority resources changed during local source update')
+  }
+  if (input.proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v2' && input.selection === 'candidate') {
+    assertMemoryLearningCandidateConfigs({ configs, original: input.proof.original, targetProfile: input.profile,
+      expectedCandidateSemanticDigest: input.proof.expectedCandidateSemanticDigest }, api.yaml,
+    await memoryLearnerInitialRow(input.proof.installer))
+  }
   return selected
 }
 export async function localSourcePreviewOverlay(input) {
@@ -393,7 +494,8 @@ async function main() {
   if (action === 'packages') {
     const api = await load(input.proof.installer)
     result = await api.stageRsiLocalSinglePackages({ dshHome: input.homePath, profile: input.profile,
-      originalCohort: input.originalCohort, dsh: input.dsh, signal: AbortSignal.timeout(600_000) })
+      originalCohort: input.originalCohort, dsh: input.dsh, rootExtension: input.proof.extension,
+      signal: AbortSignal.timeout(600_000) })
   } else if (action === 'configs') result = await composeLocalSourceConfigs(input)
   else if (action === 'verify') result = await verifyLocalSourceSelection(input)
   else if (action === 'preview-overlay') result = await localSourcePreviewOverlay(input)

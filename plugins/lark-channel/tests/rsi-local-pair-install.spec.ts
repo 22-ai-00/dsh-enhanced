@@ -45,9 +45,43 @@ async function unpack(cohort: RsiLocalCohort, root: string, bundles: readonly st
     pending.push(...pkg.runtimeDependencies)
   }
 }
-async function fixture(sameVersion = false, peerGraph = false) {
-  const f = await localCohortFixture(peerGraph); roots.push(f.root)
-  const original = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
+async function addSourcePackage(repository: string, slug: string, version: string, runtime: string[] = [], peer: string[] = []): Promise<void> {
+  const library = slug === 'personal-memory' || slug === 'assistant-growth-contract'
+  const root = join(repository, library ? 'packages' : 'plugins', slug)
+  await mkdir(join(root, 'lib'), { recursive: true })
+  const pkg = { name: `@dsh-enhanced/${slug}`, version, type: 'module', main: './lib/index.js',
+    exports: { '.': './lib/index.js', './package.json': './package.json' },
+    ...(library ? {} : { dsh: { bundle: { patch: './cordis.patch.yml' } } }),
+    dependencies: Object.fromEntries(runtime.map(name => [`@dsh-enhanced/${name}`, 'workspace:*'])),
+    peerDependencies: Object.fromEntries(peer.map(name => [`@dsh-enhanced/${name}`, 'workspace:*'])),
+    peerDependenciesMeta: Object.fromEntries(peer.map(name => [`@dsh-enhanced/${name}`, { optional: true }])) }
+  await writeFile(join(root, 'package.json'), JSON.stringify(pkg, null, 2) + '\n')
+  await writeFile(join(root, 'lib/index.js'), `export const identity = '${slug}'\n`)
+  await writeFile(join(root, 'README.md'), `# ${slug}\n`)
+  await writeFile(join(root, 'LICENSE'), 'MIT\n')
+  if (!library) await writeFile(join(root, 'cordis.patch.yml'), slug === 'assistant-memory-learning'
+    ? "- insert:\n    - id: dsh-enhanced-assistant-memory-learning\n      name: '@dsh-enhanced/assistant-memory-learning'\n      disabled: true\n"
+    : '[]\n')
+}
+
+async function fixture(sameVersion = false, peerGraph = false, memoryExtension = false) {
+  const base = await localCohortFixture(peerGraph); roots.push(base.root)
+  if (memoryExtension) {
+    for (const slug of ['assistant-delivery', 'assistant-evaluation', 'assistant-verifier', 'personal-memory']) {
+      await addSourcePackage(base.sourceRepository, slug, base.version)
+    }
+    await addSourcePackage(base.sourceRepository, 'personal-assistant', base.version, ['personal-memory'])
+    git(base.sourceRepository, 'add', '.'); git(base.sourceRepository, 'commit', '-m', 'provider roots')
+  }
+  const home = memoryExtension ? join(base.root, 'extended-home') : base.home
+  if (memoryExtension) await mkdir(home, { mode: 0o700 })
+  const f = memoryExtension ? { ...base, home, source: await prepareRsiSourceWorkspace({ dshHome: home,
+    profile: base.profile, version: base.version, sourceRepository: base.sourceRepository }) } : base
+  const oldRoots = memoryExtension
+    ? ['assistant-delivery', 'assistant-evaluation', 'assistant-verifier', 'personal-assistant', 'target'] : ['target']
+  const nextRoots = memoryExtension ? ['assistant-delivery', 'assistant-evaluation', 'assistant-memory-learning',
+    'assistant-verifier', 'personal-assistant', 'target'] : oldRoots
+  const original = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: oldRoots }, f.ports)
   const coordinator = rsiCoordinatorProfile(f.profile), pair = [f.profile, coordinator] as const
   for (const name of pair) {
     const root = join(f.home, 'profiles', name), bundles = name === f.profile ? original.bundles : coordinatorBundles
@@ -76,11 +110,16 @@ async function fixture(sameVersion = false, peerGraph = false) {
     value.version = version
     await writeFile(manifestPath, JSON.stringify(value, null, 2) + '\n')
   }
+  if (memoryExtension) {
+    await addSourcePackage(f.sourceRepository, 'assistant-growth-contract', version)
+    await addSourcePackage(f.sourceRepository, 'assistant-memory-learning', version, ['assistant-growth-contract'],
+      ['assistant-delivery', 'assistant-evaluation', 'assistant-verifier', 'personal-memory'])
+  }
   await writeFile(join(f.sourceRepository, 'plugins/target/lib/index.js'), "export const identity = 'candidate-byte-change'\n")
   git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'candidate release')
   const buildHome = join(f.root, 'candidate-home'); await mkdir(buildHome, { mode: 0o700 })
   const source = await prepareRsiSourceWorkspace({ dshHome: buildHome, profile: f.profile, version, sourceRepository: f.sourceRepository })
-  const built = await prepareRsiLocalCohort({ dshHome: buildHome, profile: f.profile, source, bundles: ['target'] }, f.ports)
+  const built = await prepareRsiLocalCohort({ dshHome: buildHome, profile: f.profile, source, bundles: nextRoots }, f.ports)
   await rm(original.root, { recursive: true }); await cp(built.root, original.root, { recursive: true })
   const { receiptDigest: _digest, ...body } = built
   const content = { ...body, root: original.root,
@@ -95,11 +134,18 @@ async function fixture(sameVersion = false, peerGraph = false) {
     expect(environment.DSH_HOME).toBe(f.home)
     expect(environment.pnpm_config_package_import_method).toBe('copy')
     if (args[3] === 'add') {
-      const bundles = name === f.profile ? original.bundles : coordinatorBundles
+      const bundles = name === f.profile ? candidate.bundles : coordinatorBundles
       expect(args.slice(4)).toEqual(bundles.map(slug => candidate.packages.find(pkg => pkg.name === `@dsh-enhanced/${slug}`)!.tarball))
       // A same-version add may preserve stale files; the existing installer must
       // verify those bytes and perform its bounded force retry.
       if (!(sameVersion && name === f.profile && environment.pnpm_config_force !== 'true')) await unpack(candidate, root, bundles)
+      if (memoryExtension && name === f.profile) {
+        const path = join(root, 'package.json'), manifest = JSON.parse(await readFile(path, 'utf8'))
+        const learner = candidate.packages.find(item => item.name === '@dsh-enhanced/assistant-memory-learning')!
+        manifest.dependencies[learner.name] = `file:${learner.tarball}`
+        if (!manifest.dsh.profile.bundles.includes(learner.name)) manifest.dsh.profile.bundles.push(learner.name)
+        await writeFile(path, JSON.stringify(manifest))
+      }
       await writeFile(join(root, 'pnpm-lock.yaml'), `# candidate lock ${candidate.version}\n`, { mode: 0o600 })
     } else expect(args[3]).toBe('list')
     return ''
@@ -126,6 +172,65 @@ describe('disposable Home paired package installation', () => {
     await expect(lstat(f.receiptPath)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(lstat(join(f.home, 'profiles', f.coordinator))).rejects.toMatchObject({ code: 'ENOENT' })
     await verifyRsiLocalInstalledPackages({ cohort: f.candidate, profilePath: join(f.home, 'profiles', f.profile), bundles: f.original.bundles })
+  })
+
+  test('extends only a pre-owner single profile with the frozen disabled learner root', async () => {
+    const f = await fixture(false, true, true)
+    await rm(f.receiptPath)
+    await rm(join(f.home, 'profiles', f.coordinator), { recursive: true })
+    const target = join(f.home, 'profiles', f.profile)
+    const oldPatch = await readFile(join(target, 'cordis.patch.yml'))
+    const oldManifest = JSON.parse(await readFile(join(target, 'package.json'), 'utf8'))
+    await expect(stageRsiLocalSinglePackages(f.input, f.ports)).rejects.toThrow(/bundle roots differ/u)
+    expect(f.install).not.toHaveBeenCalled()
+    const proof = await stageRsiLocalSinglePackages({ ...f.input, rootExtension: 'memory-learning' }, f.ports)
+    expect(proof.cohortDigest).toBe(f.candidate.receiptDigest)
+    expect(f.install.mock.calls.map(([input]) => input.bundles)).toEqual([f.candidate.bundles])
+    expect(await readFile(join(target, 'cordis.patch.yml'))).toEqual(oldPatch)
+    const manifest = JSON.parse(await readFile(join(target, 'package.json'), 'utf8'))
+    const learner = '@dsh-enhanced/assistant-memory-learning'
+    expect(manifest.dependencies[learner]).toBe(`file:${f.candidate.packages.find(item => item.name === learner)!.tarball}`)
+    expect(manifest.dsh.profile.bundles).toEqual([...oldManifest.dsh.profile.bundles, learner])
+    expect(proof.files[join(target, 'package.json')]).toBe(hash(await readFile(join(target, 'package.json'))))
+    await verifyRsiLocalInstalledPackages({ cohort: f.candidate, profilePath: target, bundles: f.candidate.bundles })
+  })
+
+  test('rejects an existing learner patch reference before a pre-owner extension writes', async () => {
+    const f = await fixture(false, true, true)
+    await rm(f.receiptPath)
+    await rm(join(f.home, 'profiles', f.coordinator), { recursive: true })
+    const target = join(f.home, 'profiles', f.profile), patch = join(target, 'cordis.patch.yml')
+    await writeFile(patch, "- id: existing\n  config: !!js |\n    return '@dsh-enhanced/assistant-memory-learning'\n")
+    const before = await snapshot(target)
+    await expect(stageRsiLocalSinglePackages({ ...f.input, rootExtension: 'memory-learning' }, f.ports))
+      .rejects.toThrow(/already references/u)
+    expect(f.install).not.toHaveBeenCalled()
+    expect(await snapshot(target)).toEqual(before)
+  })
+
+  test('a paired installation never accepts the memory root extension', async () => {
+    const f = await fixture(false, true, true)
+    const before = await snapshot(f.home)
+    await expect(stageRsiLocalPairPackages({ ...f.input, rootExtension: 'memory-learning' }, f.ports))
+      .rejects.toThrow(/paired installation/u)
+    expect(f.install).not.toHaveBeenCalled()
+    expect(await snapshot(f.home)).toEqual(before)
+  })
+
+  test('rejects extra native manifest changes after adding the learner root', async () => {
+    const f = await fixture(false, true, true)
+    await rm(f.receiptPath)
+    await rm(join(f.home, 'profiles', f.coordinator), { recursive: true })
+    const install = f.ports.install
+    f.ports.install = vi.fn(async input => {
+      await install(input)
+      const path = join(f.home, 'profiles', f.profile, 'package.json')
+      const manifest = JSON.parse(await readFile(path, 'utf8'))
+      manifest.owner.setting = 'unexpected native rewrite'
+      await writeFile(path, JSON.stringify(manifest))
+    })
+    await expect(stageRsiLocalSinglePackages({ ...f.input, rootExtension: 'memory-learning' }, f.ports))
+      .rejects.toThrow(/owner manifest changed/u)
   })
 
   test.each(['both', 'receipt', 'profile'] as const)('refuses a single update with %s coordinator residue before mutation', async residue => {

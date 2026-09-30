@@ -5292,10 +5292,13 @@ async function installUpgradeIntoStage({ sandbox, current, stagedProfile, target
 function validLocalSourceManifest(manifest) {
   const proof = manifest?.localSourceMaintenance
   if (manifest?.version !== LOCAL_SOURCE_MANIFEST_VERSION) return proof === undefined
+  const extended = proof?.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v2'
   return manifest.operation === 'upgrade' && manifest.rsiCoordinator === undefined
     && proof !== null && typeof proof === 'object'
-    && exactKeys(proof, ['protocol', 'installer', 'preparationRoot', 'preparationDigest', 'original', 'candidate', 'bwrapExecutable', 'driverDigest'])
-    && proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v1'
+    && exactKeys(proof, ['protocol', 'installer', 'preparationRoot', 'preparationDigest', 'original', 'candidate', 'bwrapExecutable', 'driverDigest',
+      ...(extended ? ['extension', 'expectedCandidateSemanticDigest'] : [])])
+    && (extended ? proof.extension === 'memory-learning' && validDigest(proof.expectedCandidateSemanticDigest)
+      : proof.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v1')
     && typeof proof.preparationRoot === 'string' && isAbsolute(proof.preparationRoot)
     && resolve(proof.preparationRoot) === proof.preparationRoot && !inside(manifest.homePath, proof.preparationRoot) && !inside(proof.preparationRoot, manifest.homePath)
     && validDigest(proof.preparationDigest) && validDigest(proof.driverDigest)
@@ -5802,7 +5805,15 @@ async function performLifecycle({
         await helper.replaceLocalSourceAuthority({ homePath, stageHome: canonicalStageHome, profile, proof: manifest.localSourceMaintenance })
         await assertApiStage()
         const candidate = await localSourceSandbox(sandbox, 'verify', { proof: manifest.localSourceMaintenance, homePath, profile, dshPath: dshExecutable, selection: 'candidate' })
-        if (!isDeepStrictEqual(candidate.configDigests, manifest.localSourceMaintenance.original.configDigests)) fail('local source update changed effective configuration')
+        if (manifest.localSourceMaintenance.protocol === 'dsh-enhanced/pre-owner-source-maintenance/v1') {
+          if (!isDeepStrictEqual(candidate.configDigests, manifest.localSourceMaintenance.original.configDigests)) fail('local source update changed effective configuration')
+        } else {
+          const originalDigests = manifest.localSourceMaintenance.original.configDigests
+          if (!isDeepStrictEqual(Object.keys(candidate.configDigests).sort(), Object.keys(originalDigests).sort())
+            || Object.entries(originalDigests).some(([name, value]) => name !== profile && candidate.configDigests[name] !== value)) {
+            fail('memory learner changed another effective profile')
+          }
+        }
         manifest = await writeManifest(physicalTransactionRoot, { ...manifest, localSourceMaintenance: { ...manifest.localSourceMaintenance, candidate } }, 'prepared')
       } else await installUpgradeIntoStage({ sandbox, current, stagedProfile, targets, npmPreparation, pnpmStore, packageSymlinkWhitelist })
       if (rsiCoordinator !== undefined) {

@@ -1,33 +1,65 @@
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { afterEach, expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
+import * as sourceBuild from '../src/rsi-build.js'
+import * as releaseBuild from '../src/rsi-release-build.js'
 import { prepareRsiLocalCohort, verifyRsiLocalInstalledPackages } from '../src/rsi-local-cohort.js'
 import { prepareRsiLocalUpdate, readRsiLocalUpdate } from '../src/rsi-local-update.js'
 import { parseRsiSetupArgs } from '../src/rsi-setup.js'
+import { prepareRsiAuthorityResources } from '../src/rsi-authority-resources.js'
+import { prepareRsiSourceWorkspace } from '../src/rsi-source.js'
 import { localCohortFixture, installFixture } from './fixtures/rsi-local-cohort.js'
 
 const roots: string[] = []
-afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('/usr/bin/git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args],
     { cwd, encoding: 'utf8', env: { PATH: '/usr/bin:/bin', HOME: '/nonexistent', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } }).trim()
 }
-async function fixture() {
+async function fixture(memory = false) {
   const f = await localCohortFixture(); roots.push(f.root)
-  const original = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source: f.source, bundles: ['target'] }, f.ports)
+  const bundles = ['target']
+  const addBundle = async (slug: string, patch = '[]\n') => {
+    const directory = join(f.sourceRepository, 'plugins', slug)
+    await mkdir(join(directory, 'lib'), { recursive: true })
+    const manifest = JSON.parse(await readFile(join(f.sourceRepository, 'plugins/assistant-policy/package.json'), 'utf8'))
+    manifest.name = `@dsh-enhanced/${slug}`
+    await writeFile(join(directory, 'package.json'), JSON.stringify(manifest, null, 2) + '\n')
+    await writeFile(join(directory, 'lib/index.js'), `export const identity = '${slug}'\n`)
+    await writeFile(join(directory, 'README.md'), `# ${slug}\n`)
+    await writeFile(join(directory, 'LICENSE'), 'MIT\n')
+    await writeFile(join(directory, 'cordis.patch.yml'), patch)
+  }
+  let source = f.source
+  if (memory) {
+    for (const slug of ['personal-assistant', 'assistant-delivery', 'assistant-evaluation', 'assistant-verifier']) {
+      await addBundle(slug); bundles.push(slug)
+    }
+    git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'initial providers')
+    // Construct a fresh legacy installation from its committed provider set.
+    await rm(join(f.home, 'rsi-sources'), { recursive: true })
+    source = await prepareRsiSourceWorkspace({ dshHome: f.home, profile: f.profile,
+      version: f.version, sourceRepository: f.sourceRepository })
+  }
+  const original = await prepareRsiLocalCohort({ dshHome: f.home, profile: f.profile, source, bundles }, f.ports)
   const installed = await installFixture(f, original)
   await mkdir(join(f.home, 'profiles'), { mode: 0o700 })
   const profilePath = join(f.home, 'profiles', f.profile)
   await rename(installed, profilePath)
   await writeFile(join(profilePath, 'cordis.patch.yml'), '# user patch retained\n')
+  if (memory) {
+    await writeFile(join(profilePath, 'cordis.patch.yml'), '[]\n')
+    await prepareRsiAuthorityResources({ dshHome: f.home, profile: f.profile })
+  }
   const args = { dshHome: f.home, profile: f.profile, sourceRepository: f.sourceRepository }
   const next = async () => {
     await writeFile(join(f.sourceRepository, 'plugins/target/lib/index.js'), "export const identity = 'updated'\n")
     git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'upstream update')
     return git(f.sourceRepository, 'rev-parse', 'HEAD')
   }
-  return { ...f, args, original, profilePath, next }
+  return { ...f, source, args, original, profilePath, next, addBundle, get builds() { return f.builds } }
 }
 
 test('prepares and reuses exact candidate tarballs outside Home while preserving installed files and source', async () => {
@@ -132,4 +164,98 @@ test('CLI preparation derives the existing source and cannot be combined with ac
     expect(() => parseRsiSetupArgs([...base, ...flags])).toThrow('cannot be combined')
   }
   expect(() => parseRsiSetupArgs(['--prepare-local-update'])).toThrow('requires --profile')
+  expect(parseRsiSetupArgs([...base, '--add-memory-learning'])).toMatchObject({ addMemoryLearning: true })
+  for (const flags of [[], ['--install-owner'], ['--install-local-cohort'], ['--apply']]) {
+    expect(() => parseRsiSetupArgs([...flags, '--add-memory-learning'])).toThrow('requires --prepare-local-update')
+  }
 })
+
+test('explicit pre-owner extension freezes exactly one disabled bundle without changing the installed Home', async () => {
+  const f = await fixture(true)
+  const patch = await readFile(new URL('../../assistant-memory-learning/cordis.patch.yml', import.meta.url), 'utf8')
+  await f.addBundle('assistant-memory-learning', patch)
+  git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'add learner upstream')
+  const bootstrapPath = join(f.home, 'rsi-sources', f.profile, 'bootstrap.json')
+  const originalBootstrap = await readFile(bootstrapPath)
+  const originalReceipt = await readFile(join(f.original.root, 'receipt.json'))
+  const ordinary = await prepareRsiLocalUpdate(f.args, f.ports)
+  expect(ordinary.schemaVersion).toBe(1)
+  expect(ordinary).not.toHaveProperty('extension')
+  expect(ordinary.cohort.bundles).toEqual(f.original.bundles)
+  const args = { ...f.args, rootExtension: 'memory-learning' as const }
+  const extended = await prepareRsiLocalUpdate(args, f.ports)
+  expect(extended).toMatchObject({ schemaVersion: 2, extension: 'memory-learning', mode: 'prepared',
+    originalCohortDigest: f.original.receiptDigest })
+  expect(extended.root).not.toBe(ordinary.root)
+  expect(extended.cohort.bundles).toEqual([...f.original.bundles, 'assistant-memory-learning'].sort())
+  expect(extended.cohort.packages.find(item => item.name === '@dsh-enhanced/assistant-memory-learning')).toBeDefined()
+  const builds = f.builds
+  expect(await prepareRsiLocalUpdate(args, f.ports)).toEqual(extended)
+  expect(f.builds).toBe(builds)
+  expect(await readFile(bootstrapPath)).toEqual(originalBootstrap)
+  expect(await readFile(join(f.original.root, 'receipt.json'))).toEqual(originalReceipt)
+  expect(await readFile(join(f.profilePath, 'cordis.patch.yml'), 'utf8')).toBe('[]\n')
+  await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
+  expect((await readdir(join(f.home, 'rsi-authorities', f.profile, 'state')))).toEqual([])
+  // A prepared candidate must not bypass an owner authority installed later.
+  await writeFile(join(f.home, 'rsi-authorities', f.profile, 'config/owner.json'), '{}', { mode: 0o600 })
+  await expect(prepareRsiLocalUpdate(args, f.ports)).rejects.toThrow('pre-owner config is not empty')
+  expect(f.builds).toBe(builds)
+}, 60_000)
+
+test('owner authority appearing during an extension build prevents a completed receipt', async () => {
+  const f = await fixture(true)
+  await f.addBundle('assistant-memory-learning')
+  git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'add learner')
+  const args = { ...f.args, rootExtension: 'memory-learning' as const }
+  await expect(prepareRsiLocalUpdate(args, { build: async (...input) => {
+    await f.ports.build(...input)
+    await writeFile(join(f.home, 'rsi-authorities', f.profile, 'state/owner.json'), '{}', { mode: 0o600 })
+  } })).rejects.toThrow('pre-owner state is not empty')
+  const parent = (await readdir(dirname(f.home))).find(name => name.startsWith('.dsh-rsi-local-updates-'))!
+  for (const name of await readdir(join(dirname(f.home), parent))) {
+    await expect(readFile(join(dirname(f.home), parent, name, 'receipt.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+  }
+  await verifyRsiLocalInstalledPackages({ cohort: f.original, profilePath: f.profilePath })
+}, 60_000)
+
+test('schema 2 reader rechecks roots, build identity, current cohort and owner after candidate preparation', async () => {
+  const f = await fixture(true)
+  await f.addBundle('assistant-memory-learning')
+  git(f.sourceRepository, 'add', '.'); git(f.sourceRepository, 'commit', '-m', 'add learner')
+  const prepared = await prepareRsiLocalUpdate({ ...f.args, rootExtension: 'memory-learning' }, f.ports)
+  // Only the independently tested external build readers are ports here. Git,
+  // source/cohort receipts, actual tarball inventory and pre-owner checks are real.
+  const build = {
+    sourceBuild: { proof: 'controlled source-build identity' } as unknown as Awaited<ReturnType<typeof sourceBuild.readRsiBuildEnvironment>>,
+    releaseBuild: { proof: 'controlled release-build identity' } as unknown as Awaited<ReturnType<typeof releaseBuild.readRsiReleaseBuildEnvironment>>,
+  }
+  vi.spyOn(sourceBuild, 'readRsiBuildEnvironment').mockResolvedValue(build.sourceBuild)
+  vi.spyOn(releaseBuild, 'readRsiReleaseBuildEnvironment').mockResolvedValue(build.releaseBuild)
+  const candidate = { ...prepared, build }
+  const encode = (value: object) => {
+    const { receiptDigest: _digest, ...body } = value as Record<string, unknown>
+    return JSON.stringify({ ...body, receiptDigest: createHash('sha256').update(JSON.stringify(body)).digest('hex') })
+  }
+  const path = join(prepared.root, 'receipt.json')
+  const saved = encode(candidate)
+  await writeFile(path, saved, { mode: 0o600 })
+  const input = { dshHome: f.home, profile: f.profile, root: prepared.root }
+  expect(await readRsiLocalUpdate(input)).toEqual(JSON.parse(saved))
+  await writeFile(path, encode({ ...candidate, cohort: { ...candidate.cohort,
+    bundles: [...candidate.cohort.bundles, 'extra-root'] } }), { mode: 0o600 })
+  await expect(readRsiLocalUpdate(input)).rejects.toThrow('prepared bundle selection differs')
+  await writeFile(path, encode({ ...candidate, build: { ...build, sourceBuild: { proof: 'different build' } } }), { mode: 0o600 })
+  await expect(readRsiLocalUpdate(input)).rejects.toThrow('prepared build or cohort differs')
+  await writeFile(path, encode({ ...candidate, schemaVersion: 1 }), { mode: 0o600 })
+  await expect(readRsiLocalUpdate(input)).rejects.toThrow('receipt is invalid')
+  await writeFile(path, saved, { mode: 0o600 })
+  const originalReceipt = await readFile(join(f.original.root, 'receipt.json'))
+  await writeFile(join(f.original.root, 'receipt.json'), encode({ ...f.original,
+    allowBuilds: Object.fromEntries(Object.entries({ ...f.original.allowBuilds, 'extra-blocked': false })
+      .sort(([left], [right]) => left.localeCompare(right))) }), { mode: 0o600 })
+  await expect(readRsiLocalUpdate(input)).rejects.toThrow('no longer matches installed cohort')
+  await writeFile(join(f.original.root, 'receipt.json'), originalReceipt, { mode: 0o600 })
+  await writeFile(join(f.home, 'rsi-authorities', f.profile, 'registry/owner.json'), '{}', { mode: 0o600 })
+  await expect(readRsiLocalUpdate(input)).rejects.toThrow('pre-owner registry is not empty')
+}, 60_000)

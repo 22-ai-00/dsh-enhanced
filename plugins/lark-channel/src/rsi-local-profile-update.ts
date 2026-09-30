@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, parseDocument } from 'yaml'
 import type { RsiLocalCohort } from './rsi-local-cohort.js'
 import { mergeRsiLocalOverrides, rsiLocalDependencyOverrides } from './rsi-local-install.js'
+import { rsiLocalUpdateBundles, type RsiLocalRootExtension } from './rsi-local-roots-extension.js'
 
 const INTERNAL = '@dsh-enhanced/'
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
@@ -62,11 +63,15 @@ function compareVersions(left: string, right: string): number {
  * the candidate cannot grant new build-script authority. No files are read or
  * written and no installation/Host action is performed. */
 export function rebaseRsiLocalProfileWorkspace(input: { source: string; original: RsiLocalCohort; candidate: RsiLocalCohort; bundles?: readonly string[];
-  originalPeers?: Record<string, string>; candidatePeers?: Record<string, string> }): string {
+  originalPeers?: Record<string, string>; candidatePeers?: Record<string, string>; rootExtension?: RsiLocalRootExtension }): string {
   const { source, original, candidate } = input
   assertCohort(original); assertCohort(candidate)
+  const expectedBundles = rsiLocalUpdateBundles(original.bundles, input.rootExtension)
   if (original.root !== candidate.root || original.sourceRepository !== candidate.sourceRepository
-    || !isDeepStrictEqual(original.bundles, candidate.bundles)) fail('candidate cohort installation identity changed')
+    || !isDeepStrictEqual(candidate.bundles, expectedBundles)) fail('candidate cohort installation identity changed')
+  if (input.rootExtension && input.bundles !== undefined && !isDeepStrictEqual([...input.bundles].sort(), [...original.bundles].sort())) {
+    fail('root extension is only supported for the target profile')
+  }
   if (compareVersions(candidate.version, original.version) < 0) fail('candidate cohort version moved backwards')
   for (const item of original.packages) {
     const next = candidate.packages.find(value => value.name === item.name)
@@ -84,7 +89,7 @@ export function rebaseRsiLocalProfileWorkspace(input: { source: string; original
   const oldRuntime = rsiLocalDependencyOverrides(original)
   const oldRequired = rsiLocalDependencyOverrides(original, input.bundles)
   const oldOverrides = { ...oldRuntime, ...input.originalPeers }
-  const nextOverrides = { ...rsiLocalDependencyOverrides(candidate, input.bundles), ...input.candidatePeers }
+  const nextOverrides = { ...rsiLocalDependencyOverrides(candidate, input.rootExtension ? candidate.bundles : input.bundles), ...input.candidatePeers }
   const overrides = document.get('overrides', true)
   if (overrides !== undefined && !isMap(overrides)) fail('profile overrides must be a mapping')
   if (isMap(overrides)) for (const item of overrides.items) {
@@ -127,7 +132,18 @@ export function rebaseRsiLocalProfileWorkspace(input: { source: string; original
       document.deleteIn(['overrides', selector])
     }
   }
-  return mergeRsiLocalOverrides(document.toString(), nextOverrides, candidate.allowBuilds)
+  let result = mergeRsiLocalOverrides(document.toString(), nextOverrides, candidate.allowBuilds)
+  if (input.rootExtension) {
+    // The native installer runs this same merge once more. Long new peer
+    // selectors may be wrapped on that parse/serialize pass.
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const next = mergeRsiLocalOverrides(result, nextOverrides, candidate.allowBuilds)
+      if (next === result) return result
+      result = next
+    }
+    fail('extended workspace serialization did not stabilize')
+  }
+  return result
 }
 
 /** Assert the manifest's internal root dependencies are exactly this profile's

@@ -61,6 +61,7 @@ export interface RsiSetupArgs {
   expectedAutomationInventories?: RsiAutomationInventories
   installLocalCohort?: boolean; bundles?: string[]
   prepareLocalUpdate?: boolean
+  addMemoryLearning?: boolean
 }
 export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
   const result: RsiSetupArgs = { manifestPath: '', dshHome: process.env.DSH_HOME || join(homedir(), '.dsh'),
@@ -82,6 +83,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     else if (key === '--ack-existing-automations') result.ackExistingAutomations = true
     else if (key === '--install-local-cohort') result.installLocalCohort = true
     else if (key === '--prepare-local-update') result.prepareLocalUpdate = true
+    else if (key === '--add-memory-learning') result.addMemoryLearning = true
     else if (key === '--bundle') {
       const value = argv[++i]
       if (!value || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(value)) fail('--bundle requires a plugin slug')
@@ -99,6 +101,7 @@ export function parseRsiSetupArgs(argv: readonly string[]): RsiSetupArgs {
     } else fail(`unknown option ${key}`)
   }
   if (result.help) return result
+  if (result.addMemoryLearning && !result.prepareLocalUpdate) fail('--add-memory-learning requires --prepare-local-update')
   if (result.ackExistingAutomations && (!result.installOwner && !result.apply || result.rollback
     || result.prepareLocalUpdate || result.installLocalCohort || result.prepareSource || result.prepareBuild || result.prepareAuthorities)) fail('--ack-existing-automations requires --install-owner or --apply')
   if (result.prepareLocalUpdate) {
@@ -479,7 +482,7 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
   const args = parseRsiSetupArgs(argv)
   if (args.help) {
     process.stdout.write('Usage: dsh-rsi-setup --manifest <private.json> [--dsh-home <absolute>] [--apply --confirm-hosts-stopped [--ack-existing-automations] [--start] | --rollback --confirm-hosts-stopped]\n       dsh-rsi-setup --prepare-source --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\n       dsh-rsi-setup --prepare-build --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--docker-path <absolute>] [--optional-build]\n       dsh-rsi-setup --prepare-authorities --profile <name> [--dsh-home <absolute>]\n       dsh-rsi-setup --install-owner --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--ack-existing-automations]\n       dsh-rsi-setup --install-local-cohort --profile <name> --source-repository <local-absolute> --bundle <slug> [--bundle <slug> ...] [--dsh-home <absolute>]\n--ack-existing-automations acknowledges active or paused durable rows when enabling or switching an Automation scheduler; accepted only with --install-owner or --apply, and does not bypass inventory drift checks.\nDefault: validate installed profiles and finite authority configuration without changing profiles.\nSource preparation creates a private checkout and release repository for the installed version. Build preparation also prepares private authority tools, signing identities and local release storage on Linux, creates an offline image and exports a pinned native release toolchain/store/cache; --optional-build reports which build prerequisites are unavailable. Authority preparation alone needs neither Docker nor a source checkout and does not issue grants or start Hosts.\n')
-    process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>]\nPrepare local update source and tarballs outside the active Home; does not install or activate them.\n')
+    process.stdout.write('       dsh-rsi-setup --prepare-local-update --profile <name> [--dsh-home <absolute>] [--source-repository <local-absolute>] [--add-memory-learning]\nPrepare local update source and tarballs outside the active Home; does not install or activate them. --add-memory-learning explicitly prepares the disabled learner bundle for a verified pre-owner installation.\n')
     return
   }
   if (args.prepareLocalUpdate) {
@@ -490,10 +493,12 @@ export async function runRsiSetup(argv: readonly string[] = process.argv.slice(2
       const { prepareRsiLocalUpdate } = await import('./rsi-local-update.js')
       const { readRsiLocalCohort } = await import('./rsi-local-cohort.js')
       const sourceRepository = args.sourceRepository ?? (await readRsiLocalCohort({ dshHome: args.dshHome, profile: args.profile! })).sourceRepository
-      const prepared = await prepareRsiLocalUpdate({ dshHome: args.dshHome, profile: args.profile!, sourceRepository, signal: controller.signal })
+      const prepared = await prepareRsiLocalUpdate({ dshHome: args.dshHome, profile: args.profile!, sourceRepository,
+        ...(args.addMemoryLearning ? { rootExtension: 'memory-learning' as const } : {}), signal: controller.signal })
       process.stdout.write(`${JSON.stringify({ mode: prepared.mode, root: prepared.root, profile: prepared.profile,
         sourceCommit: prepared.source.sourceCommit, version: prepared.cohort.version,
-        packages: prepared.cohort.packages.length, receiptDigest: prepared.receiptDigest })}\n`)
+        packages: prepared.cohort.packages.length, receiptDigest: prepared.receiptDigest,
+        ...(prepared.extension ? { extension: prepared.extension } : {}) })}\n`)
     } finally { process.off('SIGINT', cancel); process.off('SIGTERM', cancel) }
     return
   }

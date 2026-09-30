@@ -81,7 +81,8 @@ async function optionalBytes(path: string, maximum: number, privateMode = true):
 }
 
 const PRE_OWNER_FIELDS = new Set(['sourceJobs', 'sourceApprovals', 'sourceReleases', 'sourceReleaseExecution',
-  'sourceAdoptions', 'sourceBuild', 'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'adoptionCoordinator'])
+  'sourceAdoptions', 'sourceBuild', 'runtimeObserver', 'foregroundDeployments', 'taskObservations', 'adoptionCoordinator',
+  'memoryReviews', 'automaticLearning'])
 function assertPreOwnerConfiguration(source: string, path: string, authorityConfig: string): void {
   const document = parseDocument(source, { uniqueKeys: true,
     customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
@@ -106,6 +107,9 @@ function assertPreOwnerConfiguration(source: string, path: string, authorityConf
     if (/rsi-setup-/u.test(identity)) fail(`pre-owner layer contains an RSI owner row: ${path}`)
     if (/cordis-plugin-(?:include|loader)/u.test(identity)) fail(`pre-owner include or Loader override is unsupported: ${path}`)
     const config = row.get('config', true)
+    if (identity.includes('assistant-memory-learning') && ((row.get('disabled') as unknown) !== true || config !== undefined)) {
+      fail(`pre-owner memory learner is not inert: ${path}`)
+    }
     if (identity.includes('plugin-control-plane') && isScalar(config) && config.tag === 'tag:yaml.org,2002:js') fail(`pre-owner dynamic control-plane configuration is unsupported: ${path}`)
     inspect(row)
   }
