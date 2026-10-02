@@ -37,7 +37,7 @@
 
 固定使用 `POST https://super-relay.byted.org/v1/responses`（OpenAI **Responses** 协议，不是 Chat Completions）、`stream: false`、`redirect: 'error'`、`credentials: 'omit'`，没有自动重试、图片/文件 API、全局 fetch patch 或额外 wire 字段。
 
-- system prompt 必须走顶层 `instructions` 字段；直接传 `system` role 消息会被拒绝。
+- AgentLoop 原生请求中，开头连续的纯文本 `system` role 消息投影到顶层 `instructions`；单次调用的 `options.system` 排在它们前面，非空文本按原顺序以换行分隔。空的原生 system 内容不产生指令；非文本或出现在普通消息之后的 system 消息在发送前拒绝。
 - 工具以 Responses `tools` 发送；响应中的 `function_call` item 映射为 DSH `tool-call` block，finish 置为 `tool-calls`。
 - 校验响应 `status`、`output` 数组与 `usage`（要求 `total_tokens === input_tokens + output_tokens`）；未知 status、非数组 output、usage 不一致均 fail closed。空完成抛 `EMPTY_RESPONSE_CODE`。
 - `incomplete` 状态仅接受 `reason === 'max_output_tokens'`，其余拒绝。

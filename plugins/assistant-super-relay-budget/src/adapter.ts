@@ -48,18 +48,14 @@ function textOnly(blocks: readonly ContentBlock[], role: string): string {
   let value = ''
   for (const block of blocks) {
     if (block.type !== 'text') throw new Error(`assistant-super-relay-budget: ${role} content must be text-only`)
-    value += block.text
+    value += text(block.text, `${role} text`)
   }
   return value
 }
 
-/**
- * Project one DSH Message to OpenAI Responses `input` items. System text is
- * carried by the top-level `instructions` field, so a system-role Message here
- * is rejected rather than silently moved.
- */
+/** Project one non-system DSH Message to OpenAI Responses `input` items. */
 function projectMessage(message: Message): unknown[] {
-  if (message.role === 'system') throw new Error('assistant-super-relay-budget: system prompt must be supplied as instructions')
+  if (message.role === 'system') throw new Error('assistant-super-relay-budget: non-leading system message')
   if (message.role === 'user') {
     if (message.source.kind === 'tool') {
       if (message.content.length !== 1 || message.content[0]?.type !== 'tool-result' || message.content[0].toolCallId !== message.source.callId) {
@@ -99,10 +95,24 @@ function project(options: GenerateOptions, maxTokens: number): Record<string, un
     if (tool === null || typeof tool !== 'object' || !/^[A-Za-z0-9_-]{1,64}$/u.test(tool.name) || typeof tool.description !== 'string' || tool.parameters === null || typeof tool.parameters !== 'object' || Array.isArray(tool.parameters)) throw new Error('assistant-super-relay-budget: invalid tool schema')
     return { type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters }
   })
+  const instructionParts = options.system === undefined || options.system === '' ? [] : [options.system]
+  const input: unknown[] = []
+  let historyStarted = false
+  for (const message of options.messages) {
+    if (message.role === 'system') {
+      if (historyStarted) throw new Error('assistant-super-relay-budget: non-leading system message')
+      const systemText = text(textOnly(message.content, 'system'), 'system instructions')
+      if (systemText !== '') instructionParts.push(systemText)
+    } else {
+      historyStarted = true
+      input.push(...projectMessage(message))
+    }
+  }
+  const instructions = text(instructionParts.join('\n'), 'instructions')
   return {
     model: options.model, stream: false, max_output_tokens: maxTokens,
-    ...(options.system === undefined ? {} : { instructions: options.system }),
-    input: options.messages.flatMap(projectMessage),
+    ...(options.system === undefined && instructionParts.length === 0 ? {} : { instructions }),
+    input,
     ...(tools === undefined ? {} : { tools }),
     ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
   }
