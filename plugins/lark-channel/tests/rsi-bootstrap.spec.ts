@@ -5,10 +5,60 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, test } from 'vitest'
 import { ControlPlaneStore, signSourceMaintenanceRecord } from '@dsh-enhanced/plugin-control-plane'
-import { prepareRsiOwnerConfiguration } from '../src/rsi-bootstrap.js'
+import { inspectRsiOwnerConfiguration, prepareRsiOwnerConfiguration } from '../src/rsi-bootstrap.js'
+import { compileRsiProfiles } from '../src/rsi-profile.js'
+import { signRsiHostUpdateOverlay } from '../src/rsi-host-update.js'
 import { rsiBootstrapFixture } from './fixtures/rsi-bootstrap.js'
 
 describe.skipIf(process.platform !== 'linux')('owner configuration preparation', () => {
+  test('pre-stop inspection accepts signed backup profiles and rejects backup or runtime receipt drift', async () => {
+    const f = await rsiBootstrapFixture()
+    try {
+      const { manifest, resources } = f.input
+      const home = dirname(dirname(resources.root))
+      const result = await prepareRsiOwnerConfiguration(f.input, f)
+      const patches = await compileRsiProfiles({ manifest, dshHome: home, ...f.profiles, owner: f.binding })
+      const sha = (bytes: Buffer | string) => createHash('sha256').update(bytes).digest('hex')
+      const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`
+      const bootstrapSource = await readFile(join(resources.configRoot, 'bootstrap.json'), 'utf8')
+      const receipt = JSON.parse(bootstrapSource) as { files: Record<string, string> }
+      const backup = `.${manifest.targetProfile}.plugin-backup-test`
+      const sources = { [manifest.targetProfile]: patches.targetPatch,
+        [manifest.coordinatorProfile]: patches.coordinatorPatch, [backup]: patches.targetPatch }
+      const digests: Record<string, string> = {}
+      for (const [profile, source] of Object.entries(sources)) {
+        const root = join(home, 'profiles', profile)
+        await mkdir(root, { recursive: true, mode: 0o700 })
+        await writeFile(join(root, 'cordis.patch.yml'), source, { mode: 0o600 })
+        digests[profile] = sha(source)
+      }
+      const runtimePath = join(home, 'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json')
+      const runtimeSource = await readFile(runtimePath)
+      const host = resources.identities.host
+      const overlay = signRsiHostUpdateOverlay({ schemaVersion: 1, kind: 'rsi-host-update-overlay',
+        transactionId: 'backup-restart', dshHome: home, targetProfile: manifest.targetProfile,
+        installationId: resources.installationId, currentPlanId: 'plan', activationId: 'activation',
+        sequence: 1, previousDigest: null, bootstrapDigest: sha(bootstrapSource), files: receipt.files,
+        patches: digests, runtimeReceiptDigest: sha(runtimeSource),
+        planDigest: sha(json({ files: receipt.files, patches: digests })), result,
+        issuedAt: f.input.now, authority: host.authority, keyId: host.keyId },
+      await readFile(host.keyPath, 'utf8'), resources, bootstrapSource, [])
+      await writeFile(join(resources.configRoot, 'host-update-overlays.json'),
+        json({ schemaVersion: 1, kind: 'rsi-host-update-overlays', records: [overlay] }), { mode: 0o600 })
+      const inspect = () => inspectRsiOwnerConfiguration({ manifest, resources, patches,
+        signal: new AbortController().signal })
+      await expect(inspect()).resolves.toBeUndefined()
+      const backupPath = join(home, 'profiles', backup, 'cordis.patch.yml')
+      await writeFile(backupPath, '[]\n')
+      await expect(inspect()).rejects.toThrow('before stopping Hosts')
+      await writeFile(backupPath, patches.targetPatch)
+      await writeFile(runtimePath, '{}\n')
+      await expect(inspect()).rejects.toThrow('before stopping Hosts')
+      await writeFile(runtimePath, runtimeSource)
+      await expect(inspect()).resolves.toBeUndefined()
+    } finally { await f.cleanup() }
+  }, 120_000)
+
   test('first owner imports retained pre-owner source maintenance and retry detects a missing ledger edge', async () => {
     const f = await rsiBootstrapFixture()
     try {

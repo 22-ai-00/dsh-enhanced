@@ -99,6 +99,53 @@ async function fixture() {
 }
 
 describe('ordinary-use RSI manifest factory', () => {
+  test('compiles the complete finite created-tool chain and fences mismatched setup fields', async () => {
+    const { root, input } = await fixture()
+    try {
+      await mkdir(input.owner.workspace, { mode: 0o700 })
+      for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
+        await mkdir(join(input.resources.stateRoot, name), { mode: 0o700 })
+      }
+      input.sourceBuild.image = `sha256:${'a'.repeat(64)}`
+      input.creationBuild = { schemaVersion: 1, sourceCommit: input.source.sourceCommit,
+        sourceImage: input.sourceBuild.image, image: `sha256:${'b'.repeat(64)}`,
+        dockerPath: input.sourceBuild.dockerPath }
+      const manifest = createRsiBootstrapManifest(input)
+      const creation = manifest.pluginCreation!
+      expect(creation.reviews.owner).toEqual(manifest.sourceReviews.owner)
+      expect(creation.capabilities.owner).toEqual(manifest.sourceReviews.owner)
+      expect(creation.reviews.keyPath).not.toBe(creation.capabilities.keyPath)
+      expect(manifest.growthDriver.pluginSourceProposals!.allowCreation).toBe(true)
+      const compile = (candidate = manifest) => compileRsiProfiles({ manifest: candidate,
+        dshHome: input.dshHome, targetPatch: '[]\n', targetEffective: input.targetEffective,
+        coordinatorPatch: '[]\n', coordinatorEffective: stringify(coordinatorEffective),
+        coordinatorBase, owner: input.owner })
+      const compiled = await compile()
+      const rows = parse(compiled.targetPatch) as Array<{ id: string; config: Record<string, any> }>
+      const verifier = rows.find(row => row.id === 'dsh-enhanced-assistant-verifier')!.config
+      expect(verifier.creationReviews).toEqual(creation.reviews)
+      expect(manifest.controlPlane.runtimeObserver!.targets.find(target =>
+        target.entryId === 'dsh-enhanced-assistant-verifier')!.configDigest).toBe(runtimeConfigDigest(verifier))
+      const cp = rows.find(row => row.id === 'dsh-enhanced-plugin-control-plane')!.config
+      expect(cp.creationCapabilities).toEqual(creation.capabilities)
+      expect(cp.creationVerifications).toEqual(creation.verifications)
+      expect(cp.sourceJobs.creation).toEqual(creation.creation)
+      const partial = structuredClone(manifest)
+      delete partial.pluginCreation
+      await expect(compile(partial)).rejects.toThrow('complete independently verified adoption setup')
+      const drift = structuredClone(manifest)
+      drift.controlPlane.sourceJobs!.creation = { ...drift.controlPlane.sourceJobs!.creation!, namePrefix: 'foreign-' }
+      await expect(compile(drift)).rejects.toThrow('source creation grant')
+      const ownerDrift = structuredClone(manifest)
+      ownerDrift.pluginCreation!.reviews.owner.principalId = 'foreign-owner'
+      await expect(compile(ownerDrift)).rejects.toThrow()
+      const disabled = structuredClone(manifest)
+      disabled.growthDriver.pluginSourceProposals!.allowCreation = false
+      await expect(compile(disabled)).rejects.toThrow('enabled Growth')
+      expect(() => createRsiBootstrapManifest({ ...input,
+        creationBuild: { ...input.creationBuild!, sourceCommit: 'c'.repeat(40) } })).toThrow('approved source build')
+    } finally { await rm(root, { recursive: true, force: true }) }
+  })
   test('cold bootstrap import does not resolve optional memory bundles', async () => {
     vi.doMock('@dsh-enhanced/assistant-memory-learning', () => { throw new Error('unexpected learner import') })
     vi.doMock('@dsh-enhanced/personal-memory', () => { throw new Error('unexpected memory import') })

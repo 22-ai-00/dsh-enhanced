@@ -29,6 +29,10 @@ Linux 上的新安装还会自动准备授权工具与本地发布资源，无�
 
 `authorityResources` 包含 `$DSH_HOME/rsi-authorities/<profile>` 内 14 个独立 Ed25519 身份的公钥与私钥路径、安装/账本标识、私有 `file:` registry、catalog、配置及状态目录。私钥正文不出现在输出中。重复执行复用相同身份并保留已发布内容、catalog 条目及授权状态；缺失、损坏或权限漂移不会触发密钥重建或存储清空。失败只清理本次创建的目录；崩溃留下不完整目录时拒绝覆盖，需要先检查残留。独立的 `--prepare-authorities` 只准备资源；自动 `--install-owner` 后续才生成 owner 配置并启动服务。
 
+新 owner 安装同时配置普通失败任务驱动的有界新工具创建：Growth 可创建 owner 命名空间内插件，Verifier 从真实任务/反馈独立产生验收用例，Control Plane 消费签名凭证并动态注册隔离工具。`pluginCreation` manifest 绑定同一 owner、命名空间、期限及有限额度，并镜像到 `sourceJobs.creation`、`creationVerifications`、`creationCapabilities` 和 Verifier `creationReviews`；字段不完整或不一致时拒绝部署。验收和采用分别使用现有 `review`、`adoption` 身份，沿独立协议签名，不新增或重建既有身份。复跑旧 manifest 保持原授权范围，不自动打开创建通道或更新期限。
+
+安装器从已批准的源码构建镜像准备独立行为镜像，资源保存在 `$DSH_HOME/rsi-creation-builds/<profile>`。临时上下文只含固定受信任 worker/launcher、Dockerfile、清单和锁文件，不复制候选、owner 凭据或期望行为。首次镜像准备可能访问 Debian 包源；运行候选时禁用网络。重复安装核验原始回执、输入摘要、Docker 可执行文件和实际不可变镜像 ID；镜像缺失或输入漂移不会触发重建。验收与调用使用独立私有 runner 账本，额度和 unknown 不因重启重置。该安装配置本身不证明普通任务收益或完整自迭代闭环。
+
 新安装还会尝试准备离线构建镜像。当前完整仓库检查沿用已验证的 Linux x64、Docker Server `29.4.1/linux/amd64` 与嵌套 sandbox 配置；不满足这些前置条件时，安装器保留源码并报告 `buildUnavailable`，普通 Agent 安装继续，但不声称源码修复构建已经可用。实际镜像构建失败或已有资源不一致会停止安装。
 
 支持的环境可单独运行严格构建准备：
@@ -76,6 +80,7 @@ manifest 是 owner 私有的 JSON（`chmod 600`），路径须 canonical，不�
 | `controlPlane` | 目标的完整 Control Plane config；必需 `sourceBuild`、`sourceJobs`、`sourceApprovals`、`sourceReleases`、`sourceReleaseExecution`、`sourceAdoptions.handoff`、`runtimeObserver`、`foregroundDeployments`、`taskObservations` |
 | `growthDriver` | 完整 Growth config；`enabled: true`、`intervalMs: 0`、启用 `usageLearning` 与 durable `pluginSourceProposals`，绑定同一 owner/workspace/preset/repository |
 | `sourceReviews` | 有限独立审查授权；owner 精确匹配当前 Delivery 记录，decisionRoot 与发布轨一致 |
+| `pluginCreation` | 可选完整创建/独立验收/采用链；新 owner 安装生成，旧 manifest 缺席时保持旧能力边界 |
 | `memoryLearning` | 新自动安装必含 `{ learning, reviews, adoption, limits: { extractions, scans } }`；三份准确 owner 绑定的有限配置，旧手动 manifest 可省略以保留原行为。见下文。 |
 | `coordinator` | `{ "budgetId": "rsi-adoption", "budgetAmount": 1, "timeoutMs": 900000 }`，按实际约束设置 |
 | `limits` | 例如 `{ "periodMs": 86400000, "reviews": 5, "discovery": 1440, "source": 1440, "observations": 1440, "coordinator": 1440 }`；均为显式有限额度 |
