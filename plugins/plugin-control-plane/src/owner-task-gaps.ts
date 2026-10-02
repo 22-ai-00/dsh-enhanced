@@ -1,5 +1,6 @@
 import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import { isSourceOwnerContinuation } from '@dsh-enhanced/assistant-growth-contract'
 import { controlPlaneDigest, type ControlPlaneStore } from './store.js'
 import type { OwnerTaskFailureReference } from './owner-task-gap-types.js'
 import type { SourceJobCaller } from './source-jobs.js'
@@ -77,7 +78,7 @@ export class OwnerTaskFailureGaps {
     if (!reference) return callback()
     const expected = reference.owner
     if (!owner || ('receiptVersion' in owner
-      ? controlPlaneDigest(owner) !== controlPlaneDigest(expected)
+      ? !isSourceOwnerContinuation(owner, expected)
       : owner.ownerRouteId !== expected.authorityId || owner.principalId !== expected.principalId
         || owner.principalRecordId !== expected.principalRecordId || owner.principalVersion !== expected.principalVersion
         || owner.workspace !== expected.workspace || owner.preset !== expected.agentPreset)) {

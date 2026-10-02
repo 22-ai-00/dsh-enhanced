@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, join, resolve } from 'node:path'
 import { realpath } from 'node:fs/promises'
-import { SourceGrowthRunUnavailableError, validateSourceGrowthRunBinding, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
+import { SourceGrowthRunUnavailableError, isSourceOwnerContinuation, validateSourceGrowthRunBinding, type SourceGrowthRunBinding } from '@dsh-enhanced/assistant-growth-contract'
 import { automationDefinitionDigest, type AssistantAutomationsService, type HostAutomationDefinition, type HostAutomationExecutor, type HostAutomationExecutorInput, type HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
 import { controlPlaneDigest, expectedSourceRelease, type ControlPlaneStore } from './store.js'
 import { awaitSourceSignal, inspectSourceContext } from './source-context.js'
@@ -285,10 +285,15 @@ export class SourceJobRuntime {
   }
 
   private assertOwner(job: SourceJobRecord): void {
+    const current = this.receipt()
+    const taskBacked = this.options.store.getOwnerTaskFailureReference(job.intent.gapId) !== undefined
     if (!this.available() || job.expiresAt <= Date.now() || (job.intent.mode === 'create' && (!this.options.config.creation || !job.intent.creation
       || job.intent.creation.grant.expiresAt <= Date.now() || controlPlaneDigest(job.intent.creation.grant) !== controlPlaneDigest(this.options.config.creation)))
       || job.intent.authority.digest !== this.authorityDigest
-      || job.intent.authority.id !== this.options.config.authorityId || controlPlaneDigest(this.receipt()) !== job.intent.ownerDigest) throw new Error('source job authority changed or expired')
+      || job.intent.authority.id !== this.options.config.authorityId
+      || controlPlaneDigest(job.intent.owner) !== job.intent.ownerDigest
+      || (taskBacked ? !isSourceOwnerContinuation(current, job.intent.owner)
+        : controlPlaneDigest(current) !== job.intent.ownerDigest)) throw new Error('source job authority changed or expired')
     this.withGapSource(job.intent.gapId, job.intent.owner, () => this.assertGrowthRun(job.intent.creation?.growthRun,
       job.intent.mode, job.intent.gapId, job.intent.owner, false))
   }
@@ -332,8 +337,11 @@ export class SourceJobRuntime {
     const config = this.options.config
     if (input.mode === 'create' && (config.creation === undefined || config.creation.expiresAt <= Date.now())) throw new Error('source creation grant unavailable or expired')
     if (input.repository !== config.repository || await realpath(input.repository) !== config.repository) throw new Error('source job repository mismatch')
-    const owner = this.assertCaller(input.owner)
-    this.withGapSource(input.gapId, owner, () => this.assertGrowthRun(input.growthRun, input.mode, input.gapId, owner, true))
+    const currentOwner = this.assertCaller(input.owner)
+    const reference = this.options.store.getOwnerTaskFailureReference(input.gapId)
+    const owner = reference?.owner ?? currentOwner
+    if (reference && !isSourceOwnerContinuation(currentOwner, owner)) throw new Error('source job task owner changed')
+    this.withGapSource(input.gapId, currentOwner, () => this.assertGrowthRun(input.growthRun, input.mode, input.gapId, owner, true))
     const trust = await awaitSourceSignal(signal, this.options.trust)
     for (const outstanding of this.options.store.listSourceJobs(1)) this.refreshQueued(outstanding)
     const token = createHash('sha256').update(config.authorityId).update('\0').update(input.idempotencyKey).digest('hex')
@@ -386,8 +394,8 @@ export class SourceJobRuntime {
   inspect(input: { id: string; owner: SourceJobCaller }): SourceJobProjection {
     const owner = this.assertCaller(input.owner)
     const job = this.options.store.getSourceJob(input.id)
-    // A new session binding may inspect/clean this owner's old job. Execution
-    // still requires the complete frozen receipt in assertOwner; never replay.
+    // Inspection and cleanup may cross a session binding. A task-backed job
+    // retains its frozen owner digest and may continue under the same owner.
     if (job === undefined || job.intent.owner.authorityId !== owner.authorityId
       || job.intent.owner.principalId !== owner.principalId || job.intent.owner.principalRecordId !== owner.principalRecordId
       || job.intent.owner.principalVersion !== owner.principalVersion || job.intent.owner.workspace !== owner.workspace

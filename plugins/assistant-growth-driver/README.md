@@ -188,9 +188,11 @@ usageLearning:
 
 `usageHealth()` 返回连接、扫描错误与各状态数量，不返回任务正文。queued 可在重启后恢复；running 中断转 unknown，不自动重跑。配置、owner 身份/route 或来源变化会阻止旧作业继续。停用 `usageLearning` 会卸载执行器并中止本代工作；持久作业不会被清除。它目前自动驱动有界复盘和候选生成，尚不创建任意修复 Goal；完成复盘不代表候选已采用或带来收益。
 
+普通任务来源保留实际执行时的 binding 版本和代次。同一主人 `/new` 后，任务驱动的复盘及已检查候选可以在原窗口内继续；每次使用仍核对当前 route、主人记录与版本、workspace、preset 和 canonical 修订。重新配对、撤权、授权变化或代次倒退会拒绝继续。新 Session 不改写原来源、模型、预算、额度或期限；其他显式 Growth wake 保留原 binding 栅栏。
+
 同时启用 `pluginSourceProposals` 后，可信 `not-achieved` 前台结果会在模型启动前自动登记 Control Plane 私有 gap，无需预先人工登记。Host 重新读取 Delivery 来源，在 Evaluation writer fence 内记录 owner、任务修订和来源摘要；gap 不保存任务原文，默认 ROI 为未知占位值 0。成功、unknown、撤回、未结束及截断来源不产生失败 gap。新控制面接口缺失时失败关闭，不读取全局手工 gap。
 
-源码检查、最终计划提交及 durable job 的排队、恢复和执行都重新核对来源。完整 owner receipt 固定后，`/new` 导致 binding/generation 变化也会停止旧任务。纠正或撤回后保留历史引用，禁止旧来源继续产出计划。Driver 负责候选生成；后续有限审批、发布、独立审查、采用与真实任务观察由另行配置的 [Control Plane](../plugin-control-plane/README.md) 接续。组件已接线，可安装部署与独立行为验收尚未贯通，不能据此宣称生产自迭代已完成。
+源码检查、最终计划提交及 durable job 的排队、恢复和执行都重新核对来源。完整原执行 owner receipt 固定后，同主人 `/new` 可在原授权窗口内继续；身份或授权变化、纠正或撤回会拒绝旧来源继续产出计划，历史引用保留。Driver 负责候选生成；后续有限审批、发布、独立审查、采用与真实任务观察由另行配置的 [Control Plane](../plugin-control-plane/README.md) 接续。组件已接线，可安装部署与独立行为验收尚未贯通，不能据此宣称生产自迭代已完成。
 
 ## 权限与数据
 

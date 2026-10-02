@@ -36,6 +36,8 @@ canonical 任务结果，替换/删除必须指定记录版本；模型不能设
 模型参数、格式校验或摘要都不能证明来源。生成期限不延长后续构建、验收或采用的授权，
 此记录也不是独立行为验收回执。本库不注册 producer 或调度创建。
 
+`isSourceOwnerContinuation` 只比较已认证的当前 route 与冻结来源 owner：稳定身份和授权必须完全一致，代次不能倒退，同代次的 binding 版本必须相同。它允许普通来源在同一主人 `/new` 后继续保留原证据，不延长期限或授予 Agent 权限；调用者仍须回读原任务、canonical 修订及实际当前 Agent。
+
 可选 `creationAcceptance` 在作者模型开始前固定 Host 的验收政策引用；历史 run 保持可读，不能后补验收资格。
 `PluginCreationVerificationCertificate` 绑定任务来源、精确制品、私有用例摘要、观察身份和两次独立会话，
 使用 Ed25519 验签。验签函数只确认签名、政策和有效期，消费者必须重新检查当前来源；凭证不授予审批或采用权限。

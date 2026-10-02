@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { HostAutomationExecutor, SystemAutomationReconcileInput } from '@dsh-enhanced/assistant-automations'
+import { isSourceOwnerContinuation } from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { Ed25519SourceReleaseAuthorizationAuthority, sourceReleaseAuthorizationSigningPayload } from '../src/release.ts'
@@ -67,7 +68,10 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
   // This fixture models the service gateway only: production obtains this
   // proof from Evaluation's canonical writer fence, never from this boolean.
   const gapSourceFence = <T>(gapId: string, owner: ReturnType<typeof receipt>, callback: () => T): T => {
-      if (!store.getOwnerTaskFailureReference(gapId) || controlPlaneDigest(owner) !== controlPlaneDigest(receipt()) || !sourceCurrent) {
+      const reference = store.getOwnerTaskFailureReference(gapId)
+      const current = delivery.validateOwnerRoute()
+      if (!reference || !isSourceOwnerContinuation(owner, reference.owner)
+        || !isSourceOwnerContinuation(current, reference.owner) || !sourceCurrent) {
         throw new Error('typed source is no longer current')
       }
       return store.withOwnerTaskFailureGapAdmission(gapId, callback)
@@ -125,6 +129,32 @@ async function fixture(options: { typed?: boolean; fence?: boolean; approvals?: 
 }
 
 describe('durable source-job runtime', () => {
+  it('freezes the original task owner for a creation enqueued and dispatched in a later session', async () => {
+    const f = await fixture({ typed: true, creation: true })
+    try {
+      const original = f.store.getOwnerTaskFailureReference(f.gap.id)!.owner
+      f.delivery.validateOwnerRoute.mockReturnValue({ ...receipt(), generation: 2, bindingVersion: 2 })
+      const queued = await f.runtime.enqueue({ gapId: f.gap.id, name: 'agent-creation-runtime-probe', repository: f.sourceRepository,
+        files: [{ path: 'src/index.ts', content: 'export const candidate = true\n' }], mode: 'create', growthRun: f.growthRun!,
+        idempotencyKey: 'create:later-session', expectedBaseCommit: f.sourceHead, ttlMs: 900_000,
+        owner: OWNER, signal: new AbortController().signal, assertCurrent: () => undefined })
+      const frozen = f.store.getSourceJob(queued.id)!
+      expect(frozen.intent.owner).toEqual(original)
+      expect(frozen.intent.ownerDigest).toBe(controlPlaneDigest(original))
+      expect(frozen.intent.creation?.growthRun).toEqual(f.growthRun)
+      expect(frozen.expiresAt).toBe(f.config.expiresAt)
+      expect(frozen.intent.creation?.grant.expiresAt).toBe(f.config.creation!.expiresAt)
+      expect(frozen.intent.creation?.growthRun?.generationDeadlineAt).toBe(f.growthRun!.generationDeadlineAt)
+      const active = f.activation(queued.id)
+      const result = await f.executor!.execute({ occurrenceId: 'later-session', automationId: queued.id,
+        definitionHash: active.definitionHash, executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset },
+        principal: OWNER.principalId, ownerRouteId: OWNER.ownerRouteId, activationNonce: active.activationNonce,
+        catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(result.outcome).toBe('succeeded')
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'prepared', expiresAt: frozen.expiresAt })
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+
   it('migrates a v30 task-created queued row byte-for-byte and refuses its missing run on restart', async () => {
     const f = await fixture({ typed: true, creation: true })
     const queued = await f.runtime.enqueue({ gapId: f.gap.id, name: 'agent-creation-runtime-probe', repository: f.sourceRepository,
@@ -528,7 +558,7 @@ describe('durable source-job runtime', () => {
       const current = f.store.getSourceJob(queued.id)!
       f.store.claimSourceJob({ id: current.id, revision: current.revision, definitionHash: current.definitionHash!, occurrenceId: 'interrupted' })
       f.store.interruptSourceJobs()
-      f.delivery.validateOwnerRoute.mockReturnValue({ ...receipt(), generation: 2, bindingVersion: 2, authorityHash: 'f'.repeat(64) })
+      f.delivery.validateOwnerRoute.mockReturnValue({ ...receipt(), generation: 2, bindingVersion: 2 })
       expect(f.runtime.inspect({ id: queued.id, owner: OWNER }).status).toBe('unknown')
       expect(() => f.runtime.inspect({ id: queued.id, owner: { ...OWNER, principalRecordId: 'another' } })).toThrow(/scope mismatch/)
       // OS ownership is separately exercised in source-build/resources tests.
@@ -543,7 +573,7 @@ describe('durable source-job runtime', () => {
     const f = await fixture()
     try {
       const queued = await f.enqueue()
-      if (changed === 'owner') f.delivery.validateOwnerRoute.mockReturnValue({ ...receipt(), generation: 2 })
+      if (changed === 'owner') f.delivery.validateOwnerRoute.mockReturnValue({ ...receipt(), generation: 2, principalVersion: 2 })
       if (changed === 'trust') f.trust.dshHome = '/changed'
       if (changed === 'gap') {
         const database = new DatabaseSync(join(f.root, 'control.sqlite'))
@@ -556,6 +586,22 @@ describe('durable source-job runtime', () => {
       expect(outcome.outcome).not.toBe('succeeded')
       expect(f.prepare).not.toHaveBeenCalled()
       expect(f.store.getGap(f.gap.id).status).toBe('open')
+      expect(f.store.getSourceJob(queued.id)?.planId).toBeUndefined()
+    } finally { await f.runtime.close(); f.store.close() }
+  })
+  it('rejects a generic job before dispatch after only its owner session binding changes', async () => {
+    const f = await fixture()
+    try {
+      const queued = await f.enqueue()
+      f.delivery.validateOwnerRoute.mockReturnValue({ ...receipt(), generation: 2, bindingVersion: 2 })
+      const activation = f.activation(queued.id)
+      const outcome = await f.executor!.execute({ occurrenceId: 'generic-new-session', automationId: queued.id,
+        definitionHash: activation.definitionHash, executionMode: 'production', targetScope: { workspace: OWNER.workspace, preset: OWNER.preset },
+        principal: OWNER.principalId, ownerRouteId: OWNER.ownerRouteId, activationNonce: activation.activationNonce,
+        catalogDigest: f.executor!.descriptor.catalogDigest, signal: new AbortController().signal })
+      expect(outcome.outcome).toBe('failed')
+      expect(f.store.getSourceJob(queued.id)).toMatchObject({ status: 'failed', failureCode: 'source-job-preflight-rejected' })
+      expect(f.prepare).not.toHaveBeenCalled()
       expect(f.store.getSourceJob(queued.id)?.planId).toBeUndefined()
     } finally { await f.runtime.close(); f.store.close() }
   })

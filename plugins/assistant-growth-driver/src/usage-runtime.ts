@@ -2,7 +2,7 @@ import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomat
 import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import type { AssistantDeliveryService, OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { SourceGrowthRunUnavailableError, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding,
+import { SourceGrowthRunUnavailableError, isSourceOwnerContinuation, sourceGrowthEvidenceDigest, sourceGrowthRunDigest, validateSourceGrowthRunBinding,
   type CreationAcceptanceAuthorityRef, type SourceGrowthRunBinding, type SourceGrowthRunRequest } from '@dsh-enhanced/assistant-growth-contract'
 import type { NormalizedGrowthDriverConfig } from './config.js'
 import { UsageStore, type UsageIntent, type UsageJob, type UsageModel } from './usage-store.js'
@@ -105,7 +105,7 @@ export class UsageLearningRuntime {
   private source(job: UsageJob): OwnerForegroundLearningTask {
     this.abort.signal.throwIfAborted()
     if (job.intent.configDigest !== this.configDigest || job.intent.expiresAt <= Date.now()
-      || !same(this.owner(), job.intent.source.owner)) throw new Error('usage authority changed or expired')
+      || !isSourceOwnerContinuation(this.owner(), job.intent.source.owner)) throw new Error('usage authority changed or expired')
     const owner = job.intent.source.owner
     const source = this.ports.delivery.inspectOwnerForegroundLearningTask({ authorityId: owner.authorityId,
       principalId: owner.principalId, workspace: owner.workspace, agentPreset: owner.agentPreset,

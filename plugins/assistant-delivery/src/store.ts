@@ -2112,6 +2112,7 @@ export class DeliveryStore {
   private readonly codeGenerator: () => string
   private readonly maxTextBytes: number
   private closed = false
+  private writerTransactionActive = false
 
   constructor(options: DeliveryStoreOptions) {
     this.database = openDeliveryDatabase(options.path)
@@ -4425,12 +4426,15 @@ export class DeliveryStore {
     if (typeof input.inboxId !== 'string' || input.inboxId === '') {
       throw new DeliveryStoreError('invalid-binding', 'foreground source inbox ID is invalid')
     }
-    return this.transaction(() => {
+    const inspect = () => {
       const fence = this.foregroundSourceFence(input, authority)
       const row = this.database.prepare(`SELECT * FROM delivery_foreground_executions
         WHERE inbox_id = ? AND status != 'pending'`).get(input.inboxId) as unknown as ForegroundSourceRow | undefined
       return row === undefined ? undefined : this.foregroundSource(row, input, fence)
-    })
+    }
+    // A route writer fence may inspect the same source while holding this
+    // connection's transaction. Reuse that atomic snapshot and its write lock.
+    return this.writerTransactionActive ? inspect() : this.transaction(inspect)
   }
 
   /** Content comes from the canonical Inbox/Outbox, with no alternate text ledger. */
@@ -8805,6 +8809,7 @@ export class DeliveryStore {
 
   private transaction<T>(operation: () => T): T {
     this.database.exec('BEGIN IMMEDIATE')
+    this.writerTransactionActive = true
     try {
       const result = operation()
       this.database.exec('COMMIT')
@@ -8812,6 +8817,8 @@ export class DeliveryStore {
     } catch (error) {
       this.database.exec('ROLLBACK')
       throw error
+    } finally {
+      this.writerTransactionActive = false
     }
   }
 

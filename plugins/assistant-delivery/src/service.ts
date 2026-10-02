@@ -31,6 +31,7 @@ const TRUSTED_EVALUATION_PRODUCER_PROTOCOL = 'assistant-evaluation/trusted-produ
 import {
   ASSISTANT_GROWTH_CONTRACT_VERSION,
   growthObjectDigest,
+  isSourceOwnerContinuation,
   validateResolvedWorkflowAutomationTemplate,
   validateWorkflowAutomationTemplate,
   validateWorkflowScope,
@@ -422,6 +423,7 @@ function containsReservedLearningMetadata(metadata: Readonly<Record<string, stri
 /** Owner-bound discovery evidence, not permission to execute or adopt a repair. */
 export interface OwnerForegroundLearningTask {
   readonly protocol: 'assistant-delivery/owner-foreground-learning/v1'
+  /** Current owner authority with the original task's immutable execution binding. */
   readonly owner: Readonly<OwnerRouteValidationReceipt>
   readonly canonical: TrustedTaskLearningProjectionReceipt
   readonly judgement: 'independent-verifier' | 'owner-feedback' | 'unresolved'
@@ -4829,6 +4831,18 @@ export class AssistantDeliveryService extends Service {
       bindingVersion: binding.version, bindingGeneration: binding.generation,
       owner: { principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion } }) ?? accepted
     if (execution === null) return undefined
+    // /new retires the conversation binding. Read the version from the actual
+    // execution row, never the retired binding's incremented version or the
+    // new Session's generation. The Store also fences the current owner route.
+    const original = this.deliveryStore.inspectOwnerForegroundTaskSource({ ...routeInput,
+      inboxId: inbox.id, expectedOwner: { authorityHash: owner.authorityHash,
+        principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion } },
+    this.ownerRoutes.get(owner.authorityId)!)
+    if (original === undefined || original.binding.id !== binding.id
+      || original.binding.sessionId !== binding.sessionId) return undefined
+    const sourceOwner = Object.freeze({ ...owner, bindingVersion: original.binding.version,
+      generation: original.binding.generation })
+    if (!isSourceOwnerContinuation(owner, sourceOwner)) return undefined
     const verifierComponent = (component: Pick<NonNullable<TrustedTaskLearningProjectionReceipt['objective']>, 'source' | 'evidence' | 'evaluator'>) =>
       accepted !== null && component.source.kind === 'evaluator' && component.source.id === 'assistant-verifier'
       && component.evaluator.id === 'assistant-verifier' && component.evaluator.version === '1'
@@ -4873,7 +4887,7 @@ export class AssistantDeliveryService extends Service {
     if (!evaluation.isTrustedTaskLearningProjectionReceipt(canonical)
       || acceptanceCanonicalJson(owner) !== acceptanceCanonicalJson(this.validateOwnerRoute(routeInput))) return undefined
     const objectiveText = inbox.envelope.text
-    return Object.freeze({ protocol: 'assistant-delivery/owner-foreground-learning/v1', owner, canonical, judgement,
+    return Object.freeze({ protocol: 'assistant-delivery/owner-foreground-learning/v1', owner: sourceOwner, canonical, judgement,
       ...(ownerRevision === undefined ? {} : { ownerRevision }),
       ...(feedback === undefined ? {} : { feedback }),
       source: Object.freeze({ sessionId: binding.sessionId, inboxId: inbox.id,

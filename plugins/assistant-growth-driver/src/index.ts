@@ -283,7 +283,8 @@ export class AssistantGrowthDriverService extends Service {
     // ---- preflight (no network, no agent) ----
     let authority
     try {
-      authority = mintGrowthAuthority(delivery as unknown as GrowthDeliveryPort, config.scope, startedAt + config.maxDurationMs)
+      authority = mintGrowthAuthority(delivery as unknown as GrowthDeliveryPort, config.scope,
+        startedAt + config.maxDurationMs, input.usage !== undefined)
       if (input.usage) {
         const base = authority, usage = input.usage
         authority = Object.freeze({ ...base, assertCurrent() { base.assertCurrent(); usage.assertCurrent() } })

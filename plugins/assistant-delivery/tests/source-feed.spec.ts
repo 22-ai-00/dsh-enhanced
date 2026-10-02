@@ -364,6 +364,33 @@ describe('durable owner foreground completion feed', () => {
     } finally { inspector.close() }
   })
 
+  test('inspects exact metadata inside the owner writer fence and rechecks owner authority', async () => {
+    const f = await fixture()
+    const inbox = dispatch(f.store, f.binding, 'nested-inspection')
+    complete(f.store, inbox.record.id)
+    reply(f.store, f.binding, inbox.record.id, 'nested-inspection')
+    const input = sourceInput(f, inbox.record.id)
+    const other = open(f.path)
+    ;(other as unknown as { database: DatabaseSync }).database.exec('PRAGMA busy_timeout = 0')
+    const metadata = f.store.withOwnerForegroundTaskSourceFence(input, authority, content => {
+      const inspected = f.store.inspectOwnerForegroundTaskSource(input, authority)
+      expect(inspected).toEqual(content.source)
+      expect(f.store.inspectOwnerForegroundTaskSource({ ...input, inboxId: 'missing' }, authority)).toBeUndefined()
+      expect(() => f.store.inspectOwnerForegroundTaskSource({ ...input, expectedOwner: {
+        ...input.expectedOwner, principalVersion: input.expectedOwner.principalVersion + 1,
+      } }, authority)).toThrow(/owner authority changed/u)
+      expect(() => f.store.revokePrincipal(f.owner.id, f.owner.version))
+        .toThrow(/cannot start a transaction within a transaction/u)
+      expect(f.store.inspectOwnerForegroundTaskSource(input, authority)).toEqual(inspected)
+      expect(() => other.revokePrincipal(f.owner.id, f.owner.version)).toThrow(/locked/u)
+      return inspected
+    })
+    expect(metadata?.inboxId).toBe(inbox.record.id)
+    other.revokePrincipal(f.owner.id, f.owner.version)
+    expect(() => f.store.inspectOwnerForegroundTaskSource(input, authority)).toThrow(/owner authority changed/u)
+    expect(() => f.store.withOwnerForegroundTaskSourceFence(input, authority, () => 'stale')).toThrow(/owner authority changed/u)
+  })
+
   test('batch fence checks ordered sources under one owner-bound writer transaction', async () => {
     const f = await fixture()
     const first = dispatch(f.store, f.binding, 'batch-first')
