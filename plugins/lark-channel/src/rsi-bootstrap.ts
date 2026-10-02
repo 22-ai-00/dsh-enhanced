@@ -55,6 +55,56 @@ async function privateFile(path: string, maximum = 2_097_152): Promise<Buffer> {
   return io.readStable(path, maximum, true)
 }
 
+/** Read-only retry admission before either Host is stopped. */
+export async function inspectRsiOwnerConfiguration(input: {
+  manifest: RsiAuthorityConfigInput['manifest']; resources: RsiAuthorityConfigInput['resources'];
+  patches: Awaited<ReturnType<typeof compileRsiProfiles>>; signal: AbortSignal
+}): Promise<void> {
+  input.signal.throwIfAborted()
+  const { manifest, resources, patches } = input
+  const manifestPath = join(resources.configRoot, 'manifest.json')
+  const bootstrapSource = (await privateFile(join(resources.configRoot, 'bootstrap.json'))).toString('utf8')
+  const receipt = JSON.parse(bootstrapSource) as Receipt
+  const home = dirname(dirname(manifest.controlPlane.runtimeObserver!.profilePath))
+  const overlayPath = join(resources.configRoot, 'host-update-overlays.json')
+  const overlay = readRsiHostUpdateOverlayChain({ source: await exists(overlayPath)
+    ? (await privateFile(overlayPath)).toString('utf8') : undefined,
+  resources, dshHome: home, profile: manifest.targetProfile, bootstrapSource })
+  const effective = overlay.latest ?? receipt
+  const expectedResult: RsiOwnerConfiguration = { schemaVersion: 1, manifestPath,
+    manifestDigest: hash(json(manifest)), targetProfile: manifest.targetProfile,
+    coordinatorProfile: manifest.coordinatorProfile }
+  if (receipt.schemaVersion !== 1 || !isDeepStrictEqual(effective.result, expectedResult)
+    || !effective.files || typeof effective.files !== 'object' || Array.isArray(effective.files)
+    || Object.keys(effective.files).length > 512
+    || effective.files[manifestPath] !== expectedResult.manifestDigest) fail('existing owner receipt differs before stopping Hosts')
+  const roots = [resources.configRoot, resources.stateRoot, resources.registry.root]
+  for (const [path, digest] of Object.entries(effective.files)) {
+    input.signal.throwIfAborted()
+    if (!roots.some(root => within(path, root)) || !/^[a-f0-9]{64}$/u.test(digest)
+      || hash(await privateFile(path)) !== digest) fail('existing configuration changed before stopping Hosts')
+  }
+  const key = await privateFile(manifest.controlPlane.runtimeObserver!.keyPath, 32)
+  if (key.length !== 32 || hash(key) !== receipt.observerKeyDigest) fail('observer identity changed before stopping Hosts')
+  if (overlay.latest) {
+    const patchDigests = { [manifest.targetProfile]: hash(patches.targetPatch),
+      [manifest.coordinatorProfile]: hash(patches.coordinatorPatch) }
+    for (const [profile, digest] of Object.entries(overlay.latest.patches)) {
+      const path = join(home, 'profiles', profile, 'cordis.patch.yml')
+      if (!within(path, join(home, 'profiles')) || hash(await privateFile(path)) !== digest)
+        fail('signed owner profile changed before stopping Hosts')
+    }
+    if (Object.entries(patchDigests).some(([profile, digest]) => overlay.latest?.patches[profile] !== digest)
+      || hash(json({ files: effective.files, patches: overlay.latest.patches })) !== overlay.latest.planDigest
+      || overlay.latest.runtimeReceiptDigest !== hash(await privateFile(join(home,
+        'rsi-authority-runtimes', manifest.targetProfile, 'receipt.json'), 65_536)))
+      fail('signed owner profiles changed before stopping Hosts')
+  } else if (hash(json({ files: effective.files, patches })) !== receipt.planDigest) {
+    fail('owner receipt digest changed before stopping Hosts')
+  }
+  input.signal.throwIfAborted()
+}
+
 /** Prepare runnable owner-bound configurations, without changing either Host.
  * The installer must hold the DSH_HOME lifecycle lock and reread the current
  * owner/profile sources before calling. Configurations and grants are immutable

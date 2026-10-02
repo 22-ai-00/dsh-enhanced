@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { lstat, readFile, realpath } from 'node:fs/promises'
+import { lstat, mkdir, readFile, realpath } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { listActiveAutomationsLocally } from '@dsh-enhanced/assistant-automations'
@@ -13,7 +13,9 @@ import { prepareRsiReleaseBuildEnvironment, RsiReleaseBuildUnavailableError } fr
 import { prepareRsiAuthorityRuntime } from './rsi-authority-runtime.js'
 import { prepareRsiAuthorityResources } from './rsi-authority-resources.js'
 import { createRsiBootstrapManifest } from './rsi-bootstrap-manifest.js'
-import { prepareRsiOwnerConfiguration } from './rsi-bootstrap.js'
+import { prepareRsiCreationBuildEnvironment, type RsiCreationBuildEnvironment } from './rsi-creation-build.js'
+import { validateRsiPluginCreationSetup } from './rsi-plugin-creation.js'
+import { inspectRsiOwnerConfiguration, prepareRsiOwnerConfiguration } from './rsi-bootstrap.js'
 import { collectRsiInstalledInputs, RsiInstalledInputsUnavailableError } from './rsi-install-inputs.js'
 import { captureRsiSystemdUnitProperties, readRsiSystemdUnitProperties } from './rsi-systemd-bootstrap.js'
 import { configureRsiSetupLocked, rsiSetupPorts, type RsiSetupPorts } from './rsi-setup.js'
@@ -46,7 +48,21 @@ async function prepareResources(input: RsiInstallInput, signal: AbortSignal) {
   const resources = await prepareRsiAuthorityResources({ ...input, signal })
   const build = await prepareRsiBuildEnvironment({ ...input, source, signal })
   const release = await prepareRsiReleaseBuildEnvironment({ ...input, build, signal })
-  return { source, runtime, resources, build, release }
+  const storedManifest = join(resources.configRoot, 'manifest.json')
+  const previous = await exists(storedManifest)
+    ? JSON.parse((await io.readStable(storedManifest, 2_097_152, true)).toString('utf8')) as RsiSetupManifest
+    : undefined
+  if (previous?.pluginCreation !== undefined) validateRsiPluginCreationSetup(previous.pluginCreation, previous.sourceReviews.owner)
+  const creationBuild: RsiCreationBuildEnvironment | undefined = previous && previous.pluginCreation === undefined
+    ? undefined : await prepareRsiCreationBuildEnvironment({ ...input, source, build, signal })
+  if (creationBuild) {
+    for (const name of ['creation-review-runner', 'creation-adoption-runner']) {
+      const path = join(resources.stateRoot, name)
+      if (!await exists(path)) await mkdir(path, { mode: 0o700 })
+      await io.directory(path)
+    }
+  }
+  return { source, runtime, resources, build, release, ...(creationBuild ? { creationBuild } : {}) }
 }
 async function ensureCoordinator(input: RsiInstallInput, coordinator: string,
   executor: RsiAuthorityConfigInput['executor'], signal: AbortSignal, systemctlPin: RsiAuthorityConfigInput['systemctl']): Promise<void> {
@@ -252,16 +268,28 @@ export async function installRsiOwnerDeployment(input: RsiInstallInput, ports: R
     const binding = snapshot.bindings[0]!
     const storedManifest = join(resources.configRoot, 'manifest.json')
     let now = Date.now(), expiresAt = now + 365 * 86_400_000
+    let enableCreation = true
+    let previousManifest: RsiSetupManifest | undefined
     if (await exists(storedManifest)) {
       // A retry reuses the original installation's finite terms, never renews them.
       const previous = JSON.parse((await io.readStable(storedManifest, 2_097_152, true)).toString('utf8')) as RsiSetupManifest
+      previousManifest = previous
       const host = JSON.parse((await io.readStable(join(resources.configRoot,'host-authority.json'), 2_097_152, true)).toString('utf8')) as { grant: { notBefore: number } }
       now = host.grant.notBefore; expiresAt = previous.sourceReviews.expiresAt
+      // Replaying a legacy installation must not silently add a new authority.
+      enableCreation = previous.pluginCreation !== undefined
     }
     const manifest = createRsiBootstrapManifest({ dshHome: input.dshHome, targetProfile: pair[0], coordinatorProfile: pair[1],
       targetEffective, owner: binding, resources, runtime, source, sourceBuild: build.sourceBuild,
+      ...(enableCreation && prepared.creationBuild ? { creationBuild: prepared.creationBuild } : {}),
       git: installed.git, now, expiresAt, plugins: installed.plugins,
       observerTargets: installed.observerTargets, hostDeploymentInputs: installed.hostDeploymentInputs })
+    if (previousManifest && !isDeepStrictEqual(previousManifest, manifest)) fail('existing manifest differs before stopping Hosts')
+    if (previousManifest) {
+      const compiledPatches = await ports.setup.compile({ manifest, dshHome: input.dshHome,
+        ...profiles, owner: binding })
+      await inspectRsiOwnerConfiguration({ manifest, resources, patches: compiledPatches, signal })
+    }
     const inventories = await captureRsiAutomationInventories(ports.setup.automationInventory,
       targetEffective, profiles.coordinatorEffective, input.dshHome, coordinatorProfile)
     assertRsiSchedulerActivation(inventories, input.ackExistingAutomations === true)

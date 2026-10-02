@@ -9,6 +9,7 @@ import { isMap, isSeq, parseDocument, type Document, type Node, type YAMLMap, ty
 import type { RsiServiceEnvironments } from './rsi-service-setup.js'
 import { resolveRsiOwnerRoute, rsiCoordinatorAutomationDatabasePath } from './rsi-owner-profile.js'
 import { validateRsiMemoryLearningSetup, type RsiMemoryLearningSetup } from './rsi-memory-learning.js'
+import { validateRsiPluginCreationSetup, type RsiPluginCreationSetup } from './rsi-plugin-creation.js'
 
 /** Private, owner supplied input for the two-host RSI overlay. */
 export interface RsiSetupManifest {
@@ -20,6 +21,7 @@ export interface RsiSetupManifest {
   growthDriver: AssistantGrowthDriverConfig
   sourceReviews: SourceReviewConfig
   memoryLearning?: RsiMemoryLearningSetup
+  pluginCreation?: RsiPluginCreationSetup
   coordinator: { budgetId: string; budgetAmount: number; timeoutMs: number }
   limits: { periodMs: number; reviews: number; discovery: number; source: number; observations: number; coordinator: number; qualification?: number }
 }
@@ -229,6 +231,17 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   validateSourceReviewConfig(input.manifest.sourceReviews)
   const memory = input.manifest.memoryLearning === undefined ? undefined
     : validateRsiMemoryLearningSetup(input.manifest.memoryLearning, expectedOwner)
+  const creation = input.manifest.pluginCreation === undefined ? undefined
+    : validateRsiPluginCreationSetup(input.manifest.pluginCreation, expectedOwner)
+  if (creation) {
+    same(jobs.creation, creation.creation, 'source creation grant')
+    same(input.manifest.controlPlane.creationVerifications, creation.verifications, 'creation verification authority')
+    same(input.manifest.controlPlane.creationCapabilities, creation.capabilities, 'creation adoption grant')
+    if (!growth.pluginSourceProposals.allowCreation || creation.creation.expiresAt > jobs.expiresAt) fail('creation requires enabled Growth and a covering source job grant')
+  } else if (jobs.creation || input.manifest.controlPlane.creationVerifications
+    || input.manifest.controlPlane.creationCapabilities || growth.pluginSourceProposals.allowCreation) {
+    fail('creation requires a complete independently verified adoption setup')
+  }
 
   const cp = structuredClone(input.manifest.controlPlane)
   if (!cp.sourceBuild || !cp.sourceApprovals || !cp.sourceReleases || !cp.sourceReleaseExecution || !cp.sourceAdoptions || !cp.runtimeObserver || !cp.foregroundDeployments || !cp.taskObservations) fail('target controlPlane lacks a complete source adoption chain')
@@ -276,6 +289,7 @@ export async function compileRsiProfiles(input: { manifest: RsiSetupManifest; ds
   // Keep all existing verifier settings, replacing only the finite review grant.
   replaceNode(target.document, verifier, 'sourceReviews', input.manifest.sourceReviews)
   if (memory) replaceNode(target.document, verifier, 'memoryReviews', memory.reviews)
+  if (creation) replaceNode(target.document, verifier, 'creationReviews', creation.reviews)
   if (memory) {
     let learner = row(target.rows, 'dsh-enhanced-assistant-memory-learning')
     if (!learner) {

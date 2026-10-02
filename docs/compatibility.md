@@ -30,6 +30,8 @@ Control Plane 可选 `creationCapabilities` 增加独立私有 `creation-adoptio
 
 Host 动态挂载可信工具入口，精确候选每次在独立 Docker child 内挂载真实 Cordis Context，支持有界无跨调用状态的 Tools/SystemPrompt 插件。此路径不替代旧修改发布门；源计划保持 pending，采用状态保存于独立账本。调用、重启恢复与撤销边界见 [有限动态采用](../plugins/plugin-control-plane/README.md#新工具插件的有限动态采用)。
 
+Owner 安装 manifest 的可选 `pluginCreation` 只在完整创建、独立验收与采用字段一致时启用；需同批 Verifier 创建配置编译器和 Control Plane 有限采用校验器。新安装从固定源码构建资源准备行为镜像，使用原 14 身份中的独立 `review`/`adoption` 密钥及独立协议，不更改资源 v1 回执。旧 manifest 的重试保留原授权和期限，不自动增加创建能力；缺失已登记镜像或漂移输入时拒绝重建。
+
 ## 本地源码维护历史（Control Plane schema 28）
 
 schema 28 为冻结本地更新增加独立的源码维护记录，保留 schema 27 的计划、发布收据、部署记录和授权用量。维护记录由既有 Host 身份签名，绑定安装、账本、原始源码基准、更新前后提交与制品摘要，并与原有已签名 release merge 共同形成唯一的源码链。后续源码任务与发布准入都沿这条链解析基准，不能用重置 `initialCommit` 或清空旧记录恢复运行。

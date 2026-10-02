@@ -23,7 +23,7 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 - [日常使用自迭代的双 Host 配置](docs/rsi-setup.md)
 - [进度展示、安全与权限边界](docs/progress-security.md)
 
-Linux `supervised` 新安装在模型、TraeX、飞书配置与 doctor 后自动取得当前 owner、生成有限授权与 manifest，并部署目标和独立协调器两个 systemd Host。未就绪会以非零状态停止安装完成提示；重试不续期授权。当前尚未完成真实普通任务驱动的修复、采用和观察验收，见上述配置指南。
+Linux `supervised` 新安装在模型、TraeX、飞书配置与 doctor 后自动取得当前 owner、生成有限授权与 manifest，并部署目标和独立协调器两个 systemd Host。新 owner 安装接通有界新工具创建、任务派生独立验收与动态采用；旧安装重试保留原授权，不自动增加创建通道。未就绪会以非零状态停止安装完成提示；重试不续期授权。当前尚未完成真实普通任务驱动的修复、采用和观察验收，见上述配置指南。
 
 ## 兼容性
 
@@ -161,6 +161,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 - `dsh-rsi-setup --prepare-local-update` 在 Home 外准备本地上游与现有修复分支合并后的源码和 tarball，使用固定的镜像准备器及离线 bubblewrap 构建，保留原包、源码 refs 与授权。它可联网准备依赖镜像，但候选 build/pack 不带网络、凭据或原 Home；不会停服或激活更新，后续完整迁移仍需实现，详见 [RSI 配置](docs/rsi-setup.md)。
 - Linux 安装的 `--prepare-build` 还自动准备私有授权运行时和本地发布资源，也可单独执行 `--prepare-authorities`：从同版本已安装 Control Plane 复制官方程序及模块、固定独立 Node，运行副本做版本/模块检查，并生成 14 个独立 Ed25519 身份和本地 registry/catalog。目录和密钥仅当前用户可读写；重复执行核验固定内容并保留发布/状态进展。此步骤需要文件写入与子进程权限，不需要网络、浏览器或飞书凭据，不执行 npm lifecycle，不签发 owner grant 或启动 Host。
 - `dsh-rsi-setup --prepare-build` 还会执行摘要固定的构建脚本和 Dockerfile，用空 Docker 配置准备联网下载依赖的镜像，保存不可变 image ID 与私有构建回执。随后候选检查使用离线完整仓库 sandbox；安装期间不会读取主机 Docker registry 凭据或启动候选 Host。当前 runtime 支持与资源上限见 [RSI 配置](docs/rsi-setup.md)。
+- 新 `--install-owner` 从已批准的源码镜像准备独立行为镜像；首次构建允许访问 Debian 包源，使用空 Docker 配置和固定 worker/launcher，不读取 owner 凭据、浏览器或候选期望行为，不运行 npm lifecycle。资源与摘要位于 `$DSH_HOME/rsi-creation-builds/<profile>`，创建验收和采用使用既有独立签名身份及私有 runner 账本；重试验证实际镜像，不重建缺失资源或重置额度。
 - `requestTimeoutMs`（默认 30 秒）为常规 OpenAPI 请求设置硬 deadline，`imageDownloadTimeoutMs` 独立限制图片下载。SDK 会把可下传的 AbortSignal 交给底层 HTTP；若调用已经被服务端接收后超时，最终消息保留 Delivery 的 `unknown_after_send` 语义，绝不自动重发或假称未发送。
 - App Secret 不写 Delivery 数据库、工具参数、health、route、日志或异常；Linux protected-file 没有额外静态加密，同 UID、root 和可读备份仍能取得内容。
 - Delivery SQLite 保存标准化文本、路由 id 和最多 10 个受限附件描述符；不保存 raw 事件、token 或下载 URL。图片字节只交给 AttachmentStore。

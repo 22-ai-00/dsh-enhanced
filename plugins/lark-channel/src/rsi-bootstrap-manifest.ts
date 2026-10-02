@@ -13,6 +13,8 @@ import type { RsiSourceWorkspace } from './rsi-source.js'
 import { resolveRsiOwnerRoute } from './rsi-owner-profile.js'
 import { getRsiMemoryLearningValidators, validateRsiMemoryLearningSetup } from './rsi-memory-learning.js'
 import { compileRsiPersonalAssistantOptions } from './rsi-profile.js'
+import type { RsiCreationBuildEnvironment } from './rsi-creation-build.js'
+import { createRsiPluginCreationSetup } from './rsi-plugin-creation.js'
 
 const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const pluginPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u
@@ -33,6 +35,8 @@ export interface RsiBootstrapManifestInput {
   runtime: RsiAuthorityRuntime
   source: RsiSourceWorkspace
   sourceBuild: RsiBuildEnvironment['sourceBuild']
+  /** Prepared immutable behavior image; absent for legacy manifests. */
+  creationBuild?: RsiCreationBuildEnvironment
   git: Pin
   now: number
   expiresAt: number
@@ -307,6 +311,18 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
     limits: { periodMs: day, reviews: reviewLimit, discovery: 1440, source: 7, observations: 1440,
       coordinator: 1440, qualification: 1440 },
   }
+  if (input.creationBuild) {
+    if (input.creationBuild.sourceCommit !== input.source.sourceCommit
+      || input.creationBuild.sourceImage !== input.sourceBuild.image
+      || input.creationBuild.dockerPath !== input.sourceBuild.dockerPath) fail('creation image differs from approved source build')
+    const creation = createRsiPluginCreationSetup({ resources: input.resources, build: input.creationBuild,
+      owner: reviewOwner, now: input.now, expiresAt: input.expiresAt })
+    manifest.pluginCreation = creation
+    manifest.controlPlane.sourceJobs!.creation = creation.creation
+    manifest.controlPlane.creationVerifications = creation.verifications
+    manifest.controlPlane.creationCapabilities = creation.capabilities
+    manifest.growthDriver.pluginSourceProposals!.allowCreation = true
+  }
   // Delivery, Growth and Verifier final options are determined by compileRsiProfiles.
   // Observe their final raw Loader options, not the pre-install dump. Neither
   // embeds runtimeObserver, so there is no configuration-digest cycle.
@@ -319,7 +335,8 @@ export function createRsiBootstrapManifest(input: RsiBootstrapManifestInput): Rs
       configDigest: runtimeConfigDigest(manifest.growthDriver), services: ['assistantGrowthDriver'] },
     { entryId: 'dsh-enhanced-assistant-verifier', module: '@dsh-enhanced/assistant-verifier',
       configDigest: runtimeConfigDigest({ ...verifierRaw, sourceReviews: manifest.sourceReviews,
-        memoryReviews: memoryLearning.reviews }), services: ['assistantVerifier'] },
+        memoryReviews: memoryLearning.reviews,
+        ...(manifest.pluginCreation ? { creationReviews: manifest.pluginCreation.reviews } : {}) }), services: ['assistantVerifier'] },
     { entryId: 'dsh-enhanced-personal-assistant', module: '@dsh-enhanced/personal-assistant',
       configDigest: runtimeConfigDigest(compileRsiPersonalAssistantOptions({
         effectiveConfig: rawLoaderConfig(personalConfig, 'personal assistant') as Record<string, unknown>,
