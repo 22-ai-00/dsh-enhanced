@@ -1,0 +1,115 @@
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
+import type { SourceJobOwnerReceipt } from './source-job-types.js'
+
+export type CreationCapabilityOwner = Pick<SourceJobOwnerReceipt, 'authorityId' | 'authorityHash' | 'principalId'
+  | 'principalRecordId' | 'principalVersion' | 'workspace' | 'agentPreset'>
+
+/** Separate owner authority for adoption and ordinary use; never a verifier policy. */
+export interface CreationCapabilityConfig {
+  authorityId: string
+  keyId: string
+  keyPath: string
+  owner: CreationCapabilityOwner
+  namePrefix: string
+  expiresAt: number
+  maxAdoptions: number
+  maxTools: number
+  maxCallsPerAdoption: number
+  maxCallRecords: number
+  maxInputBytes: number
+  runner: {
+    stateRoot: string
+    image: string
+    dockerPath: string
+    expiresAt: number
+    maxRuns: number
+    maxTotalDurationMs: number
+    maxDurationMs: number
+    maxOutputBytes: number
+  }
+}
+
+export interface CreationCapabilityTool {
+  originalName: string
+  name: string
+  description: string
+  parameters: Record<string, unknown>
+}
+
+export interface CreationCapabilityReceipt {
+  protocol: 'dsh-created-capability-adoption/v1'
+  authorityId: string
+  authorityDigest: string
+  keyId: string
+  planId: string
+  planDigest: string
+  verificationDigest: string
+  artifactSha256: string
+  artifactBytes: number
+  source: PluginCreationVerificationCertificate['source']
+  schemaDigest: string
+  toolsDigest: string
+  expiresAt: number
+  adoptedAt: number
+  signature: string
+}
+
+export interface CreationCapabilityRecord {
+  planId: string
+  status: 'claimed' | 'authorized' | 'active' | 'closed' | 'unknown' | 'rejected'
+  receipt?: CreationCapabilityReceipt
+  certificate: PluginCreationVerificationCertificate
+  tools?: readonly CreationCapabilityTool[]
+  artifact: Buffer
+  reason?: string
+}
+
+export interface CreationCapabilityObservation {
+  status: 'observed' | 'unknown'
+  quiescent: boolean
+  jobId?: string
+  artifactSha256: string
+  reason?: string
+  environment?: PluginCreationVerificationCertificate['environment']
+  schemaDigest?: string
+  schemas?: readonly unknown[]
+  calls?: readonly { id: string; toolName: string; result: unknown }[]
+}
+
+export interface CreationCapabilityRunner {
+  run(input: { key: string; artifact: Buffer; operation: { kind: 'discover' }
+    | { kind: 'invoke'; schemaDigest: string; calls: readonly { id: string; toolName: string; arguments: unknown }[] };
+    signal: AbortSignal }): Promise<CreationCapabilityObservation>
+  close(): Promise<void>
+}
+
+/** The integration owns current authenticated task/owner fences, not model parameters. */
+export interface CreationCapabilityPorts {
+  inspect(planId: string): { certificate: PluginCreationVerificationCertificate; artifact: Buffer; owner: CreationCapabilityOwner }
+  recheck(planId: string, signal: AbortSignal): Promise<void>
+  withCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T
+  assertCaller(record: CreationCapabilityRecord, execution: ToolRunContext): void
+}
+
+export interface CreationCapabilityCall {
+  key: string
+  status: 'claimed' | 'completed' | 'unknown'
+  result?: unknown
+  jobId?: string
+}
+
+export interface CreationCapabilityJournalPort {
+  readonly authorityDigest: string
+  readonly publicKey: string
+  inspect(planId: string): CreationCapabilityRecord | undefined
+  list(): readonly CreationCapabilityRecord[]
+  claim(input: { certificate: PluginCreationVerificationCertificate; artifact: Buffer }): { created: boolean; record: CreationCapabilityRecord }
+  authorize(planId: string, tools: readonly CreationCapabilityTool[]): CreationCapabilityRecord
+  activate(planId: string): CreationCapabilityRecord
+  settle(planId: string, status: 'closed' | 'unknown' | 'rejected', reason: string): void
+  claimCall(input: { planId: string; key: string; argumentsDigest: string }): { created: boolean; call: CreationCapabilityCall }
+  settleCall(input: { planId: string; key: string; status: 'completed' | 'unknown'; result?: unknown; jobId?: string }): void
+  recoverClaims(): void
+  close(): void
+}

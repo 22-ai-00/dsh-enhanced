@@ -4651,6 +4651,67 @@ export class AssistantDeliveryService extends Service {
     })
   }
 
+  /** Host-only proof that the live caller Agent belongs to the current owner route. */
+  validateOwnerAgentForRoute(
+    agent: Agent,
+    authorityId: string,
+  ): ReturnType<AssistantDeliveryService['validateOwnerRoute']> | undefined {
+    if (!this.active || typeof agent !== 'object' || agent === null || agent.session === undefined) return undefined
+    const agents = this.context.get('agents')
+    const sessions = this.context.get('sessions')
+    if (agents === undefined || sessions === undefined) return undefined
+    const sessionId = String(agent.session.id)
+    const liveCaller = () => String(agent.id) === sessionId
+      && agents.get(agent.id) === agent
+      && sessions.get(agent.id) === agent.session
+    if (!liveCaller()) return undefined
+
+    const matches = (
+      attestation: NonNullable<ReturnType<AssistantDeliveryService['preferencePrincipalForAgent']>>,
+      route: ResolvedOwnerRoute,
+      receipt: ReturnType<AssistantDeliveryService['validateOwnerRoute']>,
+    ): boolean => attestation.sessionId === sessionId
+      && attestation.bindingId === route.binding.id
+      && attestation.bindingVersion === route.binding.version
+      && attestation.bindingGeneration === route.binding.generation
+      && route.binding.sessionId === sessionId
+      && route.snapshot.bindingId === attestation.bindingId
+      && route.snapshot.bindingVersion === attestation.bindingVersion
+      && route.snapshot.generation === attestation.bindingGeneration
+      && attestation.principalId === receipt.principalId
+      && attestation.principalLineage.principalRecordId === receipt.principalRecordId
+      && attestation.principalLineage.principalVersion === receipt.principalVersion
+      && attestation.scope.workspace === receipt.workspace
+      && attestation.scope.preset === receipt.agentPreset
+      && agent.session.header.cwd === receipt.workspace
+      && agent.session.header.agentPreset === receipt.agentPreset
+      && route.authorityId === receipt.authorityId
+      && route.snapshot.authorityHash === receipt.authorityHash
+      && route.snapshot.bindingVersion === receipt.bindingVersion
+      && route.snapshot.generation === receipt.generation
+
+    try {
+      const first = this.preferencePrincipalForAgent(agent)
+      if (first === undefined) return undefined
+      const route = this.resolveOwnerRoute(authorityId)
+      const receipt = this.validateOwnerRoute({
+        authorityId: route.authorityId,
+        principalId: first.principalId,
+        workspace: first.scope.workspace,
+        agentPreset: first.scope.preset,
+      })
+      if (!matches(first, route, receipt)) return undefined
+      const current = this.preferencePrincipalForAgent(agent)
+      const currentRoute = this.resolveOwnerRoute(authorityId)
+      return current !== undefined && liveCaller() && matches(current, currentRoute, receipt)
+        ? receipt
+        : undefined
+    } catch (error) {
+      if (error instanceof AssistantDeliveryError && error.code === 'missing-binding') return undefined
+      throw error
+    }
+  }
+
   /** Host-only durable ordinary-turn metadata; never registered as a model tool. */
   listOwnerForegroundTaskSources(input: OwnerForegroundTaskSourceScope & {
     after?: Readonly<OwnerForegroundTaskSourceCursor>; limit?: number

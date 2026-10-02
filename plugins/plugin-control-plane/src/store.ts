@@ -2271,7 +2271,7 @@ export class ControlPlaneStore {
   }
 
   /** Prepared owner continuations have a bounded recovery query, independent of job history. */
-  listPreparedSourceApprovalJobs(includeRelease = false, includeExecution = false, includeAdoption = false, includeCreation = false): readonly SourceJobRecord[] {
+  listPreparedSourceApprovalJobs(includeRelease = false, includeExecution = false, includeAdoption = false, includeCreation = false, includeCreationAdoption = false): readonly SourceJobRecord[] {
     return (this.#database.prepare(`SELECT j.* FROM source_jobs j JOIN source_plans p ON p.id = j.plan_id
       JOIN owner_task_failure_gaps g ON g.gap_id = p.gap_id
       LEFT JOIN source_adoptions a ON a.source_plan_id = p.id
@@ -2282,10 +2282,12 @@ export class ControlPlaneStore {
         OR (? = 1 AND p.status = 'release-complete' AND (ap.id IS NULL OR ap.status NOT IN ('activated', 'rolled-back', 'rejected')))))
         OR (? = 1 AND p.mode = 'prepared-create' AND p.status = 'pending-approval'
           AND json_type(j.intent_json, '$.creation.growthRun.creationAcceptance') IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM source_creation_verifications v WHERE v.plan_id = p.id)))
+          AND NOT EXISTS (SELECT 1 FROM source_creation_verifications v WHERE v.plan_id = p.id))
+        OR (? = 1 AND p.mode = 'prepared-create' AND p.status = 'pending-approval'
+          AND EXISTS (SELECT 1 FROM source_creation_verifications v WHERE v.plan_id = p.id AND v.status = 'verified')))
         AND (p.expires_at > ? OR ap.status IN ('staging', 'awaiting-reload', 'awaiting-readiness', 'awaiting-live-tasks', 'awaiting-effect-blocked-replay', 'awaiting-shadow', 'awaiting-canary', 'awaiting-soak', 'awaiting-health', 'commit-pending', 'rollback-pending'))
       ORDER BY j.created_at, j.id LIMIT 1000`).all(includeRelease ? 1 : 0, includeExecution ? 1 : 0, includeAdoption ? 1 : 0,
-      includeCreation ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
+      includeCreation ? 1 : 0, includeCreationAdoption ? 1 : 0, this.#now()) as unknown as SourceJobRow[]).map(sourceJobFromRow)
   }
 
   bindSourceJobDefinition(input: { id: string; revision: number; definitionHash: string }): SourceJobRecord {

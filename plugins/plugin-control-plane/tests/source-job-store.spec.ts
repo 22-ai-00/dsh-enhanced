@@ -239,6 +239,26 @@ describe('durable source job ledger', () => {
       expect(target.store.getSourceJob(queued.id)).toMatchObject({ status: 'prepared', planId: receipt.result.id })
       expect(target.store.createSourcePlan(request)).toEqual(receipt)
       expect(target.store.listPreparedSourceApprovalJobs()).toHaveLength(0)
+      const selectors = () => target.store.listPreparedSourceApprovalJobs(false, false, false, false, true).map(job => job.id)
+      const verification = new DatabaseSync(target.path)
+      try {
+        // The selector requires the owner sidecar; this fixture exercises only its SQL state filter.
+        verification.prepare('INSERT INTO owner_task_failure_gaps (gap_id,reference_json,reference_digest) VALUES (?, ?, ?)')
+          .run(gap.id, '{}', hex('owner-reference'))
+        verification.prepare(`INSERT INTO source_creation_verifications
+          (plan_id,status,certificate_json,certificate_digest,reason,created_at,updated_at)
+          VALUES (?,'claimed',NULL,NULL,NULL,?,?)`).run(receipt.result.id, target.now(), target.now())
+        expect(selectors()).toEqual([])
+        verification.prepare("UPDATE source_creation_verifications SET status='unknown',reason='unsettled' WHERE plan_id=?").run(receipt.result.id)
+        expect(selectors()).toEqual([])
+        verification.prepare("UPDATE source_creation_verifications SET status='rejected',reason='case-mismatch' WHERE plan_id=?").run(receipt.result.id)
+        expect(selectors()).toEqual([])
+        verification.prepare(`UPDATE source_creation_verifications SET status='verified',reason=NULL,certificate_json='{}',certificate_digest=?
+          WHERE plan_id=?`).run(hex('certificate'), receipt.result.id)
+        expect(selectors()).toEqual([queued.id])
+        expect(target.store.listPreparedSourceApprovalJobs()).toEqual([])
+        expect(target.store.listPreparedSourceApprovalJobs(false, false, false, true).map(job => job.id)).toEqual([])
+      } finally { verification.close() }
       await expect(target.store.approveSource({ planId: receipt.result.id, expectedRevision: 1, receipt: {} as never,
         resolveAuthority: () => { throw new Error('must not call modify authority') }, idempotencyKey: 'create:approve' })).rejects.toThrow(/own owner creation authority/)
       expect(target.store.getSourcePlan(receipt.result.id).status).toBe('pending-approval')
@@ -333,6 +353,12 @@ describe('durable source job ledger', () => {
       expect(target.store.getSourceJob(queued.id)).toMatchObject({ status: 'prepared', planId: receipt.result.id })
       expect(receipt.result).toMatchObject({ mode: 'modify', sourceCheck: { treeDigest: hex('tree'), patchDigest: hex('patch') } })
       expect(target.store.getGap(gap.id).status).toBe('matched')
+      const selectorDatabase = new DatabaseSync(target.path)
+      try { selectorDatabase.prepare('INSERT INTO owner_task_failure_gaps (gap_id,reference_json,reference_digest) VALUES (?, ?, ?)')
+        .run(gap.id, '{}', hex('owner-reference')) }
+      finally { selectorDatabase.close() }
+      expect(target.store.listPreparedSourceApprovalJobs().map(job => job.id)).toEqual([queued.id])
+      expect(target.store.listPreparedSourceApprovalJobs(false, false, false, false, true).map(job => job.id)).toEqual([queued.id])
     } finally { target.store.close() }
   })
 

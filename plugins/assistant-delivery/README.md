@@ -31,6 +31,8 @@ dsh --profile headless --dump-config
 
 Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent runtime 另外等待 `agents`、`sessions` 与 `llm` 就绪。Web profile 提供 `agentPresets` 时会解析并挂载 session preset；不带 roster 的 headless profile 保留宿主全局工具组合。`schedulerEnabled` 默认开启，因此生产环境必须由 launchd、systemd 或 Docker restart policy 监管 DSH 进程。
 
+Host-only `validateOwnerAgentForRoute(agent, authorityId)` 为有限动态工具提供当前调用者证明：核对原生 Agent/Session 注册对象、当前 owner route、principal record/version、workspace 和 preset；伪造对象、旧 Session 或撤权身份拒绝。它只证明当前调用身份，不授予动作权限，也不替代最终提交时的来源与 canonical writer fence。此 API 无数据库迁移，消费者须检测同批实现。
+
 ## 配置
 
 | 字段 | 默认值 | 含义 |

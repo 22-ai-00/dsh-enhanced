@@ -1,4 +1,7 @@
 import { AdoptionCoordinatorRuntime, validateAdoptionCoordinatorConfig, type AdoptionCoordinatorConfig } from './adoption-coordinator.js'
+import { CreationCapabilityJournal, creationCapabilityPublicKey, validateCreationCapabilityConfig } from './creation-capability-journal.js'
+import { CreationCapabilityRuntime } from './creation-capability-runtime.js'
+import type { CreationCapabilityConfig, CreationCapabilityRecord } from './creation-capability-types.js'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
@@ -67,6 +70,8 @@ export interface Config {
   sourceJobs?: SourceJobsConfig
   /** Signed independent creation checks, bound to the pre-author owner policy. */
   creationVerifications?: { authority: CreationAcceptanceAuthorityRef; publicKey: string }
+  /** Separate finite owner grant for dynamically adopted isolated tools. */
+  creationCapabilities?: CreationCapabilityConfig
   /** Optional finite owner authority; only approves prepared task-bound source, never deploys it. */
   sourceApprovals?: SourceApprovalClientConfig
   /** Optional separate finite authority for entering the local release state machine. */
@@ -94,14 +99,15 @@ type CreationVerifierPort = {
 const CREATION_UNKNOWN_CODES = new Set(['schema-observation-unknown', 'case-observation-unknown', 'contract-insufficient',
   'interrupted', 'stale-source', 'verification-unknown', 'previous-unknown'])
 const CREATION_REJECTED_CODES = new Set(['case-mismatch', 'source-review-rejected', 'request-invalid'])
-export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
-  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
+export type NormalizedControlPlaneConfig = Required<Omit<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>>
+  & Pick<Config, 'sourceBuild' | 'sourceJobs' | 'creationVerifications' | 'creationCapabilities' | 'sourceApprovals' | 'sourceReleases' | 'sourceReleaseExecution' | 'sourceAdoptions' | 'adoptionCoordinator' | 'runtimeObserver' | 'foregroundDeployments' | 'taskObservations' | 'liveQualification' | 'replayEndpoint'>
 const schema = Schema.object({
   catalogPath: Schema.string().required(), statePath: Schema.string().required(), trustPath: Schema.string().required(),
   proposalTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   sourceBuild: Schema.any(),
   sourceJobs: Schema.any(),
   creationVerifications: Schema.any(),
+  creationCapabilities: Schema.any(),
   sourceApprovals: Schema.any(),
   sourceReleases: Schema.any(),
   sourceReleaseExecution: Schema.any(),
@@ -215,6 +221,21 @@ export function normalizeControlPlaneConfig(input: Config): NormalizedControlPla
       throw new Error('plugin-control-plane: creation verification authority does not match finite source creation grant')
     }
   }
+  if (config.creationCapabilities !== undefined) {
+    validateCreationCapabilityConfig(config.creationCapabilities)
+    const capability = config.creationCapabilities
+    const verification = config.creationVerifications
+    const jobs = config.sourceJobs
+    if (!verification || !jobs?.creation || capability.namePrefix !== jobs.creation.namePrefix
+      || capability.owner.authorityId !== jobs.ownerRouteId || capability.owner.principalId !== jobs.principalId
+      || capability.owner.workspace !== jobs.workspace || capability.owner.agentPreset !== jobs.preset
+      || capability.keyId === verification.authority.keyId) {
+      throw new Error('plugin-control-plane: created capability authority does not match its authenticated creation lane')
+    }
+    const adoptionKey = createPublicKey(creationCapabilityPublicKey(capability)).export({ format: 'der', type: 'spki' })
+    const verificationKey = createPublicKey(verification.publicKey).export({ format: 'der', type: 'spki' })
+    if (adoptionKey.equals(verificationKey)) throw new Error('plugin-control-plane: adoption and verification signing keys must be separate')
+  }
   if (![config.catalogPath, config.statePath, config.trustPath].every(isAbsolute)) throw new Error('plugin-control-plane: catalogPath, statePath and trustPath must be absolute')
   return config
 }
@@ -236,6 +257,10 @@ export class PluginControlPlaneService extends Service {
   private assertLiveRuntime: ((planId: string) => void) | undefined
   private sourceRuntime: SourceJobRuntime | undefined
   private readonly sourceRuntimes = new Set<SourceJobRuntime>()
+  private creationCapabilityRuntime: CreationCapabilityRuntime | undefined
+  private readonly creationCapabilityRuntimes = new Set<CreationCapabilityRuntime>()
+  private readonly creationCapabilityFlights = new Set<Promise<unknown>>()
+  private creationCapabilityReconcileRequested = false
   private growthRunProducer: SourceGrowthRunProducer | undefined
   private growthProviderDraining = false
 
@@ -255,7 +280,12 @@ export class PluginControlPlaneService extends Service {
       this.abort.abort()
       await Promise.allSettled([...this.sourceRuntimes].map(runtime => runtime.close()))
       await Promise.allSettled([...this.sourceBuilds, ...this.sourceInspections, ...this.sourceApprovalFlights, ...this.sourceReleaseFlights, ...this.sourceAdoptionFlights.values()])
-      this.store.close()
+      await Promise.allSettled(this.creationCapabilityFlights)
+      const closed = await Promise.allSettled([...this.creationCapabilityRuntimes].map(runtime => runtime.close()))
+      const failures = closed.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map(result => result.reason as unknown)
+      try { this.store.close() } catch (error) { failures.push(error) }
+      if (failures.length) throw new AggregateError(failures, 'created capability resource release unconfirmed')
     }, 'plugin-control-plane.store')
     installHostReadiness(ctx)
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
@@ -448,7 +478,8 @@ export class PluginControlPlaneService extends Service {
     if (this.config.sourceJobs !== undefined) ctx.inject(['assistantAutomations' as never, 'assistantDelivery' as never,
       ...(this.config.sourceApprovals ? ['assistantEvaluation' as never] : []),
       ...(this.config.sourceReleaseExecution?.independentReview ? ['assistantVerifier', 'agents', 'sessions', 'tools', 'llm', 'systemPrompt', 'assistantPolicy'] as never[] : []),
-      ...(this.config.creationVerifications ? ['assistantVerifier' as never] : [])], jobsCtx => {
+      ...(this.config.creationVerifications ? ['assistantVerifier' as never] : []),
+      ...(this.config.creationCapabilities ? ['tools', 'assistantEvaluation', 'assistantPolicy'] as never[] : [])], jobsCtx => {
       jobsCtx.effect(async () => {
         this.abort.signal.throwIfAborted()
         const current = <K extends keyof SourceJobPorts>(key: K): SourceJobPorts[K] => jobsCtx.get((key === 'automations' ? 'assistantAutomations' : 'assistantDelivery') as never) as unknown as SourceJobPorts[K]
@@ -457,6 +488,56 @@ export class PluginControlPlaneService extends Service {
           if (typeof current('automations')[method] !== 'function') throw new Error(`plugin-control-plane: durable source jobs require assistantAutomations.${method}`)
         }
         if (typeof current('delivery').validateOwnerRoute !== 'function') throw new Error('plugin-control-plane: durable source jobs require Delivery v2 owner validation')
+        let capabilities: CreationCapabilityRuntime | undefined
+        let unsubscribeTaskChanges: (() => void) | undefined
+        if (this.config.creationCapabilities) {
+          if (typeof (current('delivery') as AssistantDeliveryService).validateOwnerAgentForRoute !== 'function') {
+            throw new Error('plugin-control-plane: created capabilities require authenticated live owner Agent admission')
+          }
+          const evaluation = jobsCtx.get('assistantEvaluation' as never) as unknown as AssistantEvaluationService
+          if (typeof evaluation.onTrustedTaskChange !== 'function') {
+            throw new Error('created capabilities require canonical task change notifications')
+          }
+          const config = this.config.creationCapabilities
+          const journal = new CreationCapabilityJournal({ path: join(this.config.statePath, 'creation-adoptions.sqlite'), config })
+          try {
+            capabilities = new CreationCapabilityRuntime({ ctx: jobsCtx, config, journal, ports: {
+              inspect: planId => {
+                const certificate = this.inspectVerifiedCreation(planId)
+                if (!certificate) throw new Error('created capability requires a fresh independent certificate')
+                const prepared = this.inspectPreparedCreation(planId)
+                const owner = config.owner
+                if (Object.keys(owner).some(key => prepared.reference.owner[key as keyof typeof owner] !== owner[key as keyof typeof owner])) {
+                  throw new Error('created capability owner differs from the finite grant')
+                }
+                return { certificate, artifact: prepared.artifact, owner }
+              },
+              recheck: async (planId, signal) => {
+                await this.inspectPreparedCreationReviewContext(planId, signal)
+                if (!this.inspectVerifiedCreation(planId)) throw new Error('created capability independent certificate changed')
+              },
+              withCurrent: (record, callback) => this.withCreatedCapabilityCurrent(record, callback),
+              assertCaller: (_record, execution) => {
+                if (!execution.agent) throw new Error('created capability requires an authenticated owner Agent')
+                const delivery = current('delivery') as AssistantDeliveryService
+                const receipt = delivery.validateOwnerAgentForRoute(execution.agent, config.owner.authorityId)
+                if (!receipt || Object.keys(config.owner).some(key => receipt[key as keyof typeof config.owner] !== config.owner[key as keyof typeof config.owner])) {
+                  throw new Error('created capability caller is not the current authorized owner')
+                }
+              },
+            } })
+            this.creationCapabilityRuntimes.add(capabilities)
+            await capabilities.start()
+            this.abort.signal.throwIfAborted()
+            this.creationCapabilityRuntime = capabilities
+            unsubscribeTaskChanges = evaluation.onTrustedTaskChange(() => this.reconcileCreatedCapabilities())
+          } catch (error) {
+            unsubscribeTaskChanges?.()
+            if (capabilities) { await capabilities.close(); this.creationCapabilityRuntimes.delete(capabilities) }
+            else journal.close()
+            throw error
+          }
+        }
         const runtime = new SourceJobRuntime({ config: this.config.sourceJobs!, build: this.config.sourceBuild!, statePath: this.config.statePath, store: this.store,
           ports: {
             automations: {
@@ -472,6 +553,11 @@ export class PluginControlPlaneService extends Service {
           assertGrowthRun: (run, gapId, owner, generation) => this.assertSourceGrowthRun(run, gapId, owner, generation),
           ...(this.config.creationVerifications ? { verifyPreparedCreation: (job: SourceJobRecord, signal: AbortSignal) =>
             this.verifyPreparedCreation(job, signal, () => jobsCtx.get('assistantVerifier' as never) as unknown as CreationVerifierPort) } : {}),
+          ...(capabilities ? { creationAdoptionEligible: (planId: string) => capabilities!.eligible(planId),
+            adoptVerifiedCreation: async (job: SourceJobRecord, signal: AbortSignal) => {
+              if (!job.planId) throw new Error('created capability has no prepared source plan')
+              await capabilities!.adopt(job.planId, signal)
+            } } : {}),
           ...(this.config.sourceApprovals ? { approvePrepared: async (job: SourceJobRecord, signal: AbortSignal) => {
             if (!job.planId) throw new Error('source job has no prepared plan')
             await this.requestOwnerSourceApproval({ planId: job.planId, signal, expectedTrustDigest: job.intent.trustDigest })
@@ -494,9 +580,17 @@ export class PluginControlPlaneService extends Service {
         })
         this.sourceRuntimes.add(runtime)
         const close = async (): Promise<void> => {
+          unsubscribeTaskChanges?.()
           if (this.sourceRuntime === runtime) this.sourceRuntime = undefined
           try { await runtime.close() }
-          finally { this.sourceRuntimes.delete(runtime) }
+          finally {
+            this.sourceRuntimes.delete(runtime)
+            if (capabilities) {
+              if (this.creationCapabilityRuntime === capabilities) this.creationCapabilityRuntime = undefined
+              await capabilities.close()
+              this.creationCapabilityRuntimes.delete(capabilities)
+            }
+          }
         }
         try {
           runtime.start()
@@ -739,13 +833,16 @@ export class PluginControlPlaneService extends Service {
     if (producer?.protocol !== 'assistant-growth-source-run-producer/v1' || typeof producer.inspect !== 'function'
       || this.growthRunProducer !== undefined || this.growthProviderDraining) throw new Error('plugin-control-plane: source growth run producer is invalid or already registered')
     this.growthRunProducer = producer
-    try { this.sourceRuntime?.reconcileQueued() }
+    try { this.sourceRuntime?.reconcileQueued(); this.reconcileCreatedCapabilities() }
     catch (error) { this.growthRunProducer = undefined; throw error }
     return async () => {
       if (this.growthRunProducer !== producer) return
       this.growthRunProducer = undefined
       this.growthProviderDraining = true
-      try { await this.sourceRuntime?.growthProviderDisposed() }
+      try {
+        await this.sourceRuntime?.growthProviderDisposed()
+        await this.creationCapabilityRuntime?.reconcile()
+      }
       finally { this.growthProviderDraining = false }
     }
   }
@@ -754,6 +851,39 @@ export class PluginControlPlaneService extends Service {
   reconcileSourceGrowthRuns = (): void => {
     this.abort.signal.throwIfAborted()
     if (this.growthRunProducer !== undefined) this.sourceRuntime?.reconcileQueued()
+    this.reconcileCreatedCapabilities()
+  }
+
+  private reconcileCreatedCapabilities(): void {
+    const runtime = this.creationCapabilityRuntime
+    if (!runtime || this.abort.signal.aborted) return
+    this.creationCapabilityReconcileRequested = true
+    if (this.creationCapabilityFlights.size) return
+    this.creationCapabilityReconcileRequested = false
+    const operation = runtime.reconcile()
+    this.creationCapabilityFlights.add(operation)
+    void operation.catch(error => this.ctx.logger.warn('created capability reconciliation failed', error))
+      .finally(() => {
+        this.creationCapabilityFlights.delete(operation)
+        if (this.creationCapabilityReconcileRequested) this.reconcileCreatedCapabilities()
+      })
+  }
+
+  /** Content-free Host diagnostics; never register adoption as a model tool. */
+  inspectCreatedCapability = (planId: string) => {
+    this.abort.signal.throwIfAborted()
+    return this.creationCapabilityRuntime?.inspectStatus(planId)
+  }
+
+  private withCreatedCapabilityCurrent<T>(record: CreationCapabilityRecord, callback: () => T): T {
+    this.abort.signal.throwIfAborted()
+    const certificate = this.inspectVerifiedCreation(record.planId)
+    if (!certificate || controlPlaneDigest(certificate) !== controlPlaneDigest(record.certificate)) {
+      throw new Error('created capability certificate or current source changed')
+    }
+    return this.withPreparedCreationFence({ planId: record.planId, planDigest: certificate.plan.digest,
+      artifactSha256: certificate.plan.artifactSha256, growthRunDigest: certificate.source.growthRunDigest,
+      referenceDigest: certificate.source.referenceDigest }, callback)
   }
 
   private assertSourceGrowthRun(expected: SourceGrowthRunBinding, gapId: string, owner: SourceJobOwnerReceipt, generation: boolean): void {
