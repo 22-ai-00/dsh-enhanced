@@ -70,6 +70,7 @@
     "@dsh-enhanced/assistant-automations": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-evaluation": ">=0.1.33 <0.2.0",
+    "@dsh-enhanced/assistant-policy": ">=0.1.33 <0.2.0",
     "@dsh-enhanced/assistant-verifier": ">=0.1.33 <0.2.0"
   },
   "peerDependenciesMeta": {
@@ -95,6 +96,9 @@
       "optional": true
     },
     "@dsh-enhanced/assistant-verifier": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-policy": {
       "optional": true
     }
   },

@@ -88,6 +88,8 @@ export class SourceJobRuntime {
     trust: () => Promise<Trust>
     approvePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     verifyPreparedCreation?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
+    creationAdoptionEligible?: (planId: string) => boolean
+    adoptVerifiedCreation?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     releasePrepared?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     advanceReleased?: (job: SourceJobRecord, signal: AbortSignal) => Promise<void>
     releaseTimeoutMs?: number
@@ -154,6 +156,7 @@ export class SourceJobRuntime {
         if (current?.status === 'queued') this.options.store.settleSourceJob({ id: current.id, revision: current.revision, status: 'failed', failureCode: 'source-job-reconcile-rejected' })
       }
     }
+    this.reconcileContinuations()
   }
 
   /** Provider removal revokes in-flight authority without replaying a claimed job. */
@@ -198,11 +201,17 @@ export class SourceJobRuntime {
       signal.throwIfAborted(); this.assertOwner(job)
     }
     if (initial.mode === 'prepared-create') {
-      if (job.intent.mode !== 'create' || !this.options.verifyPreparedCreation
-        || !job.intent.creation?.growthRun?.creationAcceptance || !initial.creation?.growthRun?.creationAcceptance
-        || this.options.store.getCreationVerificationStatus(planId) !== undefined) return
+      if (job.intent.mode !== 'create'
+        || !job.intent.creation?.growthRun?.creationAcceptance || !initial.creation?.growthRun?.creationAcceptance) return
       await assertCurrent()
-      await this.options.verifyPreparedCreation(job, signal)
+      if (this.options.store.getCreationVerificationStatus(planId) === undefined && this.options.verifyPreparedCreation) {
+        await this.options.verifyPreparedCreation(job, signal)
+      }
+      if (this.options.store.getCreationVerificationStatus(planId) === 'verified'
+        && this.options.creationAdoptionEligible?.(planId) && this.options.adoptVerifiedCreation) {
+        await assertCurrent()
+        await this.options.adoptVerifiedCreation(job, signal)
+      }
       return
     }
     if (this.options.adoptReleased && this.options.store.getSourcePlan(planId).status === 'release-complete') {
@@ -493,13 +502,13 @@ export class SourceJobRuntime {
   }
 
   private hasContinuations(): boolean {
-    return !!(this.options.approvePrepared || this.options.verifyPreparedCreation || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
+    return !!(this.options.approvePrepared || this.options.verifyPreparedCreation || this.options.adoptVerifiedCreation || this.options.releasePrepared || this.options.advanceReleased || this.options.adoptReleased)
   }
 
   private continuationJobs(): readonly SourceJobRecord[] {
     if (!this.hasContinuations()) return []
     return this.options.store.listPreparedSourceApprovalJobs(this.options.releasePrepared !== undefined, this.options.advanceReleased !== undefined,
-      this.options.adoptReleased !== undefined, this.options.verifyPreparedCreation !== undefined)
+      this.options.adoptReleased !== undefined, this.options.verifyPreparedCreation !== undefined, this.options.adoptVerifiedCreation !== undefined)
       .filter(job => this.eligibleContinuation(job))
   }
 
@@ -509,9 +518,13 @@ export class SourceJobRuntime {
     let plan: PluginSourcePlan
     try { plan = this.options.store.getSourcePlan(job.planId) } catch { return false }
     if (plan.mode === 'prepared-create') {
-      if (!this.options.verifyPreparedCreation || job.intent.mode !== 'create' || plan.status !== 'pending-approval'
-        || !job.intent.creation?.growthRun?.creationAcceptance || !plan.creation?.growthRun?.creationAcceptance
-        || this.options.store.getCreationVerificationStatus(plan.id) !== undefined) return false
+      if (job.intent.mode !== 'create' || plan.status !== 'pending-approval'
+        || !job.intent.creation?.growthRun?.creationAcceptance || !plan.creation?.growthRun?.creationAcceptance) return false
+      const verification = this.options.store.getCreationVerificationStatus(plan.id)
+      const verify = verification === undefined && this.options.verifyPreparedCreation !== undefined
+      const adopt = verification === 'verified' && this.options.adoptVerifiedCreation !== undefined
+        && this.options.creationAdoptionEligible?.(plan.id) === true
+      if (!verify && !adopt) return false
       if (job.intent.authority.digest !== this.authorityDigest || job.intent.authority.id !== this.options.config.authorityId) return false
       try { this.assertOwner(job); this.withGapSource(job.intent.gapId, job.intent.owner, () => {
         this.assertGrowthRun(job.intent.creation?.growthRun, job.intent.mode, job.intent.gapId, job.intent.owner, false)

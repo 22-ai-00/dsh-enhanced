@@ -2,38 +2,72 @@
 // SQLite. Delivery/Evaluation and Docker are fixtures, not live acceptance.
 import { execFileSync } from 'node:child_process'
 import { createHash, generateKeyPairSync, sign, type KeyObject } from 'node:crypto'
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
+import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import { defineTool, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { pluginCreationVerificationSigningPayload, sourceGrowthRunDigest, SourceGrowthRunUnavailableError,
   type CreationAcceptanceAuthorityRef, type PluginCreationVerificationCertificate } from '@dsh-enhanced/assistant-growth-contract'
 import type { OwnerForegroundLearningTask } from '@dsh-enhanced/assistant-delivery'
 import { afterEach, expect, it, vi } from 'vitest'
-import { PluginControlPlaneService } from '../src/service.ts'
+import { PluginControlPlaneService, normalizeControlPlaneConfig, type Config } from '../src/service.ts'
 import { ControlPlaneStore, controlPlaneDigest } from '../src/store.ts'
 import { checkedSourceSnapshot } from '../src/source-workspace.ts'
 import * as build from '../src/source-build.ts'
 import * as trust from '../src/trust.ts'
 import { defaultHostAttestationPolicy } from '../src/trust.ts'
 import type { SourcePreparedEvidence } from '../src/types.ts'
+import type { CreationCapabilityConfig, CreationCapabilityObservation } from '../src/creation-capability-types.ts'
+import { CreationCapabilityRuntime } from '../src/creation-capability-runtime.ts'
 import { createSourceCreationFixture } from './helpers/source-creation-fixture.ts'
 import { sourceGrowthRunFixture } from './helpers/source-growth-run-fixture.ts'
 
 vi.mock('../src/source-build.ts', async original => ({ ...await original<typeof build>(), runDockerPreparedChecks: vi.fn() }))
 vi.mock('../src/trust.ts', async original => ({ ...await original<typeof trust>(), loadTrustConfig: vi.fn() }))
+const runnerRun = vi.hoisted(() => vi.fn())
+vi.mock('@dsh-enhanced/assistant-verifier/plugin-behavior-runner', () => ({
+  PluginBehaviorRunner: class {
+    run = runnerRun
+    close = async () => undefined
+  },
+}))
+const candidateSchemas = [{ name: 'read_test', description: 'candidate supplied description',
+  parameters: { type: 'object', additionalProperties: false, properties: { query: { type: 'string' } }, required: ['query'] } }]
+const candidateEnvironment = { node: 'v22.19.0', cordis: '4.0.2', tools: '0.1.5-rc.3', systemPrompt: '0.1.5-rc.3' }
+const candidateSchemaDigest = createHash('sha256').update(JSON.stringify(candidateSchemas)).digest('hex')
 const baselineRepository = fileURLToPath(new URL('../../..', import.meta.url)).replace(/\/$/u, '')
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); vi.resetAllMocks() })
 
-async function fixture(withVerification = false) {
+async function fixture(withVerification = false, withAdoption = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'cp-created-service-')))
   const { repository } = await createSourceCreationFixture(baselineRepository, join(root, 'source'))
   const git = (...args: string[]) => execFileSync('/usr/bin/git', args, { cwd: repository, encoding: 'utf8' }).trim()
   const ctx = new Context(), statePath = join(root, 'control'), catalogPath = join(root, 'catalog.json')
+  let capability: CreationCapabilityConfig | undefined
+  if (withAdoption) {
+    await mountAgentLoopTestDependencies(ctx, { systemPrompt: { personaPrefix: '' }, tools: { mode: 'native' } })
+    ctx.tools.register(defineTool({ name: 'existing_probe', description: 'fixture existing tool', parameters: {},
+      output: { schema: { type: 'object', properties: {}, additionalProperties: false }, render: () => [] }, execute: async () => ({}) }))
+    const key = generateKeyPairSync('ed25519')
+    const keyPath = join(root, 'adoption.key'), stateRoot = join(root, 'runner')
+    await chmod(root, 0o700)
+    await mkdir(stateRoot, { mode: 0o700 })
+    await writeFile(keyPath, key.privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 })
+    capability = { authorityId: 'owner-adoption', keyId: 'adoption-key', keyPath,
+      owner: { authorityId: 'route', authorityHash: 'a'.repeat(64), principalId: 'owner', principalRecordId: 'record',
+        principalVersion: 1, workspace: root, agentPreset: 'primary' }, namePrefix: 'rsi-service-',
+      expiresAt: Date.now() + 600_000, maxAdoptions: 1, maxTools: 1, maxCallsPerAdoption: 2,
+      maxCallRecords: 2, maxInputBytes: 1024,
+      runner: { stateRoot, image: `sha256:${'a'.repeat(64)}`, dockerPath: '/usr/bin/docker',
+        expiresAt: Date.now() + 600_000, maxRuns: 3, maxTotalDurationMs: 60_000,
+        maxDurationMs: 10_000, maxOutputBytes: 65_536 } }
+  }
   cleanup.push(async () => {
     await ctx.fiber.dispose()
     // Test cleanup proves registration ownership before removing its own tree.
@@ -56,9 +90,13 @@ async function fixture(withVerification = false) {
     judgement: 'independent-verifier', source: { sessionId: 'session', inboxId: 'inbox', objective: 'ordinary failed task',
       quiescent: true, truncated: false, modelSelectionState: 'frozen', modelSelection: { provider: 'supplier', model: 'task-model', reasoningEffort: 'high' } } }
   let activeSource: OwnerForegroundLearningTask = source
-  ctx.provide('assistantDelivery' as never, { validateOwnerRoute: () => structuredClone(owner), inspectOwnerForegroundLearningTask: () => structuredClone(activeSource) })
+  const taskChangeListeners = new Set<() => void>()
+  ctx.provide('assistantDelivery' as never, { validateOwnerRoute: () => structuredClone(owner),
+    validateOwnerAgentForRoute: (agent: { owner?: typeof owner }) => agent.owner ? structuredClone(agent.owner) : undefined,
+    inspectOwnerForegroundLearningTask: () => structuredClone(activeSource) })
   ctx.provide('assistantEvaluation' as never, { canonicalHostScope: (input: unknown) => input,
-    withTrustedCanonicalTaskWriterFence: (_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }) })
+    withTrustedCanonicalTaskWriterFence: (_input: unknown, callback: () => unknown) => ({ matched: true, value: callback() }),
+    onTrustedTaskChange: (listener: () => void) => { taskChangeListeners.add(listener); return () => { taskChangeListeners.delete(listener) } } })
   const signing = generateKeyPairSync('ed25519')
   const authority: CreationAcceptanceAuthorityRef = { protocol: 'assistant-growth/creation-acceptance-authority/v1',
     authorityId: 'fixture-creation-review', keyId: 'fixture-key', authorityDigest: '9'.repeat(64),
@@ -78,13 +116,15 @@ async function fixture(withVerification = false) {
     ledger: { id: 'ledger', path: join(statePath, 'control.sqlite') }, catalog: { id: 'catalog', path: catalogPath },
     executor: { id: 'executor', version: '1', path: '/bin/true', sha256: 'a'.repeat(64), environmentAllowlist: [] },
     hostPolicy: defaultHostAttestationPolicy, releaseReceiptTtlMs: 30_000, approvalKeys: [], hostAttestationKeys: [], releaseKeys: [], releaseAuthorizationKeys: [] })
-  const service = new PluginControlPlaneService(ctx, { statePath, catalogPath, trustPath: join(root, 'trust.json'),
+  const config: Config = { statePath, catalogPath, trustPath: join(root, 'trust.json'),
     ...(withVerification ? { creationVerifications: { authority, publicKey } } : {}),
+    ...(capability ? { creationCapabilities: capability } : {}),
     sourceBuild: { dockerPath: '/usr/bin/docker', image: `fixture@sha256:${'a'.repeat(64)}`, timeoutMs: 60_000, versioning: 'patch',
       memoryMiB: 128, cpus: 1, pidsLimit: 16, workspaceMiB: 64, outputBytes: 4096 },
     sourceJobs: { authorityId: 'source-grant', expiresAt: now + 600_000, maxSubmissions: 3, repository,
       ownerRouteId: 'route', principalId: 'owner', workspace: root, preset: 'primary', budgetId: 'source-budget', budgetAmount: 1,
-      creation: { id: 'owner-create', expiresAt: now + 600_000, maxCreates: 2, namePrefix: 'rsi-service-' } } })
+      creation: { id: 'owner-create', expiresAt: now + 600_000, maxCreates: 2, namePrefix: 'rsi-service-' } } }
+  const service = new PluginControlPlaneService(ctx, config)
   await vi.waitFor(() => expect(service.canEnqueueSource()).toBe(true))
   const store = new ControlPlaneStore({ path: join(statePath, 'control.sqlite') })
   cleanup.push(async () => store.close())
@@ -114,8 +154,10 @@ async function fixture(withVerification = false) {
     return checked
   })
   else vi.mocked(build.runDockerPreparedChecks).mockResolvedValue(checked)
-  return { root, repository, git, service, automations, policy, store, source, owner, request, checked, growthRun, inspectGrowthRun,
+  return { root, repository, git, ctx, config, capability, service, automations, policy, store, source, owner, request, checked, growthRun, inspectGrowthRun,
     unregisterGrowthRun, authority, signing, verification, setSource: (next: OwnerForegroundLearningTask) => { activeSource = next },
+    notifyTaskChange: () => { for (const listener of taskChangeListeners) listener() },
+    taskChangeListenerCount: () => taskChangeListeners.size,
     advance: (milliseconds = 1_100) => { now += milliseconds } }
 }
 
@@ -177,6 +219,106 @@ it('automatically verifies a pinned task creation after prepare and retains exac
   f.advance(300_000)
   expect(f.service.inspectVerifiedCreation(planId)).toBeUndefined()
 }, 60_000)
+
+it.each(['correction', 'withdrawal'] as const)(
+  'native task creation verifies, adopts and revokes its live wrapper after %s', async change => {
+    const f = await fixture(true, true)
+    const reserve = vi.spyOn(f.policy, 'reserve')
+    f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId,
+      f.signing.privateKey, body => { body.schemaDigest = candidateSchemaDigest; body.environment = candidateEnvironment }) }))
+    runnerRun.mockImplementation(async (input: { artifact: Buffer; operation: { kind: string;
+      calls?: readonly { id: string; toolName: string }[] } }): Promise<CreationCapabilityObservation> => {
+      const common = { status: 'observed' as const, quiescent: true,
+        artifactSha256: createHash('sha256').update(input.artifact).digest('hex'),
+        schemaDigest: candidateSchemaDigest, environment: candidateEnvironment }
+      return input.operation.kind === 'discover' ? { ...common, schemas: candidateSchemas }
+        : { ...common, calls: input.operation.calls!.map(call => ({ id: call.id, toolName: call.toolName,
+          result: { isError: false, value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] } })) }
+    })
+    const job = await f.service.enqueueSourceJob(f.request)
+    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+    const planId = f.store.getSourceJob(job.id)!.planId!
+    expect(f.store.getSourcePlan(planId)).toMatchObject({ mode: 'prepared-create', status: 'pending-approval' })
+    expect(f.store.getCreationVerificationStatus(planId)).toBe('verified')
+    expect(f.taskChangeListenerCount()).toBeGreaterThan(0)
+    const adopted = f.service.inspectCreatedCapability(planId)
+    expect(adopted).toMatchObject({ status: 'active', aliases: [expect.stringMatching(/^evolved_rsi_service_helper_[a-f0-9]{8}_0$/u)] })
+    const alias = adopted!.aliases[0]!
+    expect(f.ctx.tools.get(alias)).toBeDefined()
+    expect(f.ctx.tools.get('existing_probe')).toBeDefined()
+    expect(f.verification).toHaveBeenCalledOnce()
+    expect(runnerRun).toHaveBeenCalledTimes(1)
+    expect(reserve).toHaveBeenCalledOnce()
+    const tool = f.ctx.tools.get(alias)!
+    const signal = new AbortController().signal
+    const valid = { callId: 'first-call', agent: { session: { id: 'session-1' }, owner: f.owner }, signal } as unknown as ToolRunContext
+    await expect(tool.execute({ query: 'hello' }, { ...valid, agent: undefined } as unknown as ToolRunContext)).rejects.toThrow(/unavailable|authenticated/)
+    await expect(tool.execute({ query: 'hello' }, { ...valid, agent: { session: { id: 'session-1' },
+      owner: { ...f.owner, principalId: 'other' } } } as unknown as ToolRunContext)).rejects.toThrow(/current authorized owner/)
+    expect(runnerRun).toHaveBeenCalledTimes(1)
+    await expect(tool.execute({ query: 'hello' }, valid)).resolves.toEqual({ value: { answer: 'ok' }, content: [{ type: 'text', text: 'ok' }] })
+    expect(runnerRun).toHaveBeenCalledTimes(2)
+    f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+    expect(f.verification).toHaveBeenCalledOnce()
+    expect(runnerRun).toHaveBeenCalledTimes(2)
+    expect(reserve).toHaveBeenCalledOnce()
+    expect(f.service.inspectCreatedCapability(planId)?.status).toBe('active')
+    f.setSource(change === 'correction'
+      ? { ...f.source, source: { ...f.source.source, objective: 'owner corrected the original task' } }
+      : { ...f.source, canonical: { ...f.source.canonical,
+        projection: { ...f.source.canonical.projection, disposition: 'retract' } } })
+    await expect(tool.execute({ query: 'after-change' }, { ...valid, callId: 'changed-call' } as ToolRunContext)).rejects.toThrow()
+    const reconcile = vi.spyOn(CreationCapabilityRuntime.prototype, 'reconcile')
+    f.notifyTaskChange()
+    f.notifyTaskChange()
+    f.notifyTaskChange()
+    await vi.waitFor(() => expect(f.service.inspectCreatedCapability(planId)?.status).toBe('closed'))
+    await vi.waitFor(() => expect(reconcile).toHaveBeenCalledTimes(2))
+    expect(f.ctx.tools.get(alias)).toBeUndefined()
+    expect(f.ctx.tools.get('existing_probe')).toBeDefined()
+    expect(runnerRun).toHaveBeenCalledTimes(2)
+    await f.ctx.fiber.dispose()
+    expect(reconcile).toHaveBeenCalledTimes(2)
+    expect(f.taskChangeListenerCount()).toBe(0)
+    f.notifyTaskChange()
+  }, 60_000)
+
+it('preflights independent adoption key, owner and namespace before constructing a Host service', async () => {
+  const f = await fixture(true, true)
+  const config = f.config, capability = f.capability!
+  await writeFile(capability.keyPath, f.signing.privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 })
+  expect(() => normalizeControlPlaneConfig(config)).toThrow(/signing keys must be separate/)
+  const second = generateKeyPairSync('ed25519')
+  await writeFile(capability.keyPath, second.privateKey.export({ format: 'pem', type: 'pkcs8' }), { mode: 0o600 })
+  expect(() => normalizeControlPlaneConfig({ ...config, creationCapabilities: { ...capability,
+    owner: { ...capability.owner, principalId: 'different-owner' } } })).toThrow(/does not match its authenticated creation lane/)
+  expect(() => normalizeControlPlaneConfig({ ...config, creationCapabilities: { ...capability,
+    namePrefix: 'other-' } })).toThrow(/does not match its authenticated creation lane/)
+}, 60_000)
+
+it.each(['schema-digest', 'environment', 'schemas'] as const)(
+  'refuses %s drift between signed verification and isolated discovery without redispatch', async mismatch => {
+    const f = await fixture(true, true)
+    f.verification.mockImplementation(async request => ({ status: 'verified', certificate: signedCertificate(f, request.planId,
+      f.signing.privateKey, body => { body.schemaDigest = candidateSchemaDigest; body.environment = candidateEnvironment }) }))
+    runnerRun.mockImplementation(async (input: { artifact: Buffer }): Promise<CreationCapabilityObservation> => ({
+      status: 'observed', quiescent: true, artifactSha256: createHash('sha256').update(input.artifact).digest('hex'),
+      schemaDigest: mismatch === 'schema-digest' ? 'f'.repeat(64) : candidateSchemaDigest,
+      environment: mismatch === 'environment' ? { ...candidateEnvironment, cordis: 'different' } : candidateEnvironment,
+      schemas: mismatch === 'schemas' ? [{ ...candidateSchemas[0], name: 'changed_tool' }] : candidateSchemas,
+    }))
+    const job = await f.service.enqueueSourceJob(f.request)
+    f.advance(); await f.automations.tick(); await f.automations.whenIdle()
+    const planId = f.store.getSourceJob(job.id)!.planId!
+    expect(f.store.getCreationVerificationStatus(planId)).toBe('verified')
+    expect(f.service.inspectCreatedCapability(planId)).toEqual({ status: 'unknown', aliases: [] })
+    expect(f.ctx.tools.get('existing_probe')).toBeDefined()
+    expect(runnerRun).toHaveBeenCalledTimes(1)
+    f.advance(60_000); await f.automations.tick(); await f.automations.whenIdle()
+    expect(f.verification).toHaveBeenCalledOnce()
+    expect(runnerRun).toHaveBeenCalledTimes(1)
+    expect(f.service.inspectCreatedCapability(planId)?.status).toBe('unknown')
+  }, 60_000)
 
 it('retains unknown verification without another native model dispatch and leaves old unpinned creates pending', async () => {
   const f = await fixture(true)

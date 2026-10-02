@@ -238,7 +238,7 @@ sourceBuild:
 
 Host 可在调用源码检查时单独请求 `capturePack`，从同一次已核验的 tgz 读取中取回最多 32 MiB 的原始制品字节，供后续独立行为验收。容器用有版本的单帧传输；Host 严格核对帧、大小及 SHA-256，并保留原有取消、清理和源码快照栅栏。默认检查不传输制品，持久 evidence 只记录摘要，不保存制品内容；该开关不向候选或模型工具开放。
 
-普通 owner 失败触发的持久创建任务会自动捕获包，并在同一 SQLite 事务中保存字节、pending 计划和任务终态；旧计划与手工来源保持兼容，不因此获得验收资格。schema 30 的私有 BLOB 账本按 SHA-256 去重，限制 256 件、总计 128 MiB，读写均核对真实字节；额度耗尽拒绝提交，不丢弃在用制品。Host-only `inspectPreparedCreation(planId)` 在当前 owner 与 canonical writer fence 内返回绑定的计划、持久任务、真实 Delivery 来源和包；过期、纠正、换 owner、缺包或损坏均拒绝，不向模型状态工具返回正文。现有 Host/CLI 过期 worktree 维护在完成清理后回收 orphan 或仅被已过期计划引用的包；计划与摘要历史保留。这只提供独立观察的交接，创建计划仍不能审批、发布或采用。
+普通 owner 失败触发的持久创建任务会自动捕获包，并在同一 SQLite 事务中保存字节、pending 计划和任务终态；旧计划与手工来源保持兼容，不因此获得验收资格。schema 30 的私有 BLOB 账本按 SHA-256 去重，限制 256 件、总计 128 MiB，读写均核对真实字节；额度耗尽拒绝提交，不丢弃在用制品。Host-only `inspectPreparedCreation(planId)` 在当前 owner 与 canonical writer fence 内返回绑定的计划、持久任务、真实 Delivery 来源和包；过期、纠正、换 owner、缺包或损坏均拒绝，不向模型状态工具返回正文。现有 Host/CLI 过期 worktree 维护在完成清理后回收 orphan 或仅被已过期计划引用的包；计划与摘要历史保留。这只提供独立观察的交接，创建计划仍不能走旧修改审批、发布或采用；独立验收与有限工具采用另见下文。
 
 ### 持久源码检查任务（可选）
 
@@ -318,13 +318,56 @@ Host 在私有 worktree 使用该基线的 `scripts/create-plugin.mjs`，生成 
 
 成功仅产生 `prepared-create`、`pending-approval` 的检查候选。现有修改签名器、发布与采用接续不会推进它；工程检查和候选测试不能代替独立行为验收。TTL 到期后，`source gc` 以 CAS 释放该计划的 gap 并仅清理可证明归属的注册 worktree，不返还额度。unknown 必须先按现有资源协议对账，不能直接重放或当作过期计划清理。旧手动 `create` 和现有 `modify` 流程保持原语义。
 
-创建候选的独立签名采用、Cordis 动态加载、观察/回滚与后续真实任务收益尚未验收；本配置不授权生产激活。
+仅配置创建授权不授予采用权限；后续真实任务收益与部署闭环仍须验收。
 
 可选 `creationVerifications: { authority, publicKey }` 接续[Verifier 的普通任务创建验收](../assistant-verifier/README.md#普通任务产生的新插件验收)。公开字段由其 `compileCreationReviewConfig` 生成；控制面不接收私有密钥或期望用例。authority 须匹配创建命名空间且不能超过创建/SourceJobs 授权期限。Growth 在作者模型开始前冻结引用，prepared 后沿原生续跑自动验收；历史缺少引用的候选保持原状态。
 
 验收 dispatch 与结果使用独立 SQLite 记录；已 claim 的未知派发不再自动调用模型。签名落账前重读真实工作树、检查 tree/patch、不可变包、当前 owner/反馈与 Growth run，最终持有 Evaluation writer fence。`inspectVerifiedCreation(planId)` 只读验签并检查当前来源和封存制品，证明历史检查快照，不能证明可变工作树此刻未变化；后续采用须先 await `inspectPreparedCreationReviewContext` 异步复验并消费精确制品。该凭证不会把计划改为 approved，也不会绕过既有修改计划的审批、发布与采用门。
 
 成功准备返回 `pending-approval`，不会自动发布。普通 gap 可用已有签名审批流程；owner 任务来源必须通过 Host 当前来源 fence 审批，离线 CLI 签名本身不能代替该校验。审批后，普通 gap 用 `dsh-plugin-control source verify-prepared --plan-id <id> --expected-revision <revision>` 重读同一 worktree 并核对 digest；owner 来源由下述 Host 发布接续入口完成复核，才能进入 review/release。修改 worktree 会使复核失败；旧 `create` 计划仍走 `scaffold`。`dsh-plugin-control source gc` 将已过 TTL、仍 pending/approved 的计划以版本 CAS 转为 `expired`，释放该计划的 gap 占用，再清理控制面登记的 modify worktree；已经 `expired` 的计划可重试物理清理，已经进入 review/release 的 worktree 保留。
+
+### 新工具插件的有限动态采用
+
+可选 `creationCapabilities` 是一次配置的独立 owner 采用授权，必须与 `sourceJobs.creation`、`creationVerifications` 一起启用。其 owner 的七个稳定字段须匹配实际 Delivery owner 来源，命名空间须一致；采用 Ed25519 私钥与验收器私钥的实际 material 和 key id 均须不同。旧 peer 缺少 live Agent 校验或 Evaluation 变化订阅时拒绝启动此能力。示例中的路径、身份、摘要、期限和镜像须替换为实际授权：
+
+```yaml
+creationCapabilities:
+  authorityId: owner-created-tools-1
+  keyId: owner-adoption-key
+  keyPath: /private/owner/adoption.pem
+  owner:
+    authorityId: configured-delivery-owner-route
+    authorityHash: <delivery-route-sha256>
+    principalId: configured-principal
+    principalRecordId: <delivery-principal-record>
+    principalVersion: 1
+    workspace: /absolute/owner/workspace
+    agentPreset: primary
+  namePrefix: owner-tool-
+  expiresAt: 1800000000000
+  maxAdoptions: 3
+  maxTools: 2
+  maxCallsPerAdoption: 20
+  maxCallRecords: 60
+  maxInputBytes: 4096
+  runner:
+    stateRoot: /private/owner/capability-runner
+    image: sha256:<64-hex-plugin-verifier-image-id>
+    dockerPath: /usr/bin/docker
+    expiresAt: 1800000000000
+    maxRuns: 63
+    maxTotalDurationMs: 600000
+    maxDurationMs: 30000
+    maxOutputBytes: 65536
+```
+
+原生 SourceJobs 续跑自动消费精确验收凭证、复验工作树和当前 canonical 来源，先持久 claim，再独立发现工具 schema，签发绑定制品、来源、schema、别名、授权和期限的采用回执。`statePath/creation-adoptions.sqlite` 保存不可变授权、512 KiB 内精确包及累计额度；更换 runner 状态目录不能重置采用额度，修改同一 ledger 的授权定义会拒绝。失败或 unknown 消费额度，不自动重放；重启只恢复已授权的同一凭证和制品，不重新发现或签发。模型没有采用、签名或账本工具。
+
+Host 用真实 Cordis Fiber 动态注册受控 `evolved_<插件名>_<plan hash>_<序号>` 原生工具入口。候选代码在每次 discovery/invoke 的独立离线 Docker 子进程中创建自己的 Cordis Context 并挂载；Host 不导入候选代码。当前只支持原生 Tools/SystemPrompt 服务的有界纯工具插件；每次调用新建 candidate Context，不支持跨调用候选内存状态或任意 Host 服务桥接。包读取、临时制品、容器、Docker 子进程、私有 ledger 和密钥读取属于本授权；容器无 Host 挂载、网络或凭据，不执行包安装脚本。限制详见 [行为执行器](../../scripts/isolation/README.md#plugin-behavior-verifier-image)。
+
+调用经过原生 ToolRuntime/Policy，须由 Delivery 证明当前注册的真实 Agent、Session 和 owner lineage；Policy 还须允许该 owner scope 下的准确工具别名或有限别名模式。输入、结果和累计调用均有界；同一 Agent Session/call id/参数的已完成调用回读缓存，unknown 不再派发。候选注释不进入 Host 描述，输出作为不可信数据。每次异步检查后、派发前和落账前重验真实调用者与 canonical 来源，撤权或纠正期间的迟到结果不能变成成功。
+
+Evaluation 纠正/撤回通知自动重验并卸载对应入口；到期、来源漂移也关闭该版本，其他 Host 插件保留。源码 producer 暂缺时只暂停入口，恢复原来源后可重新挂同一凭证。采用有效期还受原验收、任务/SourceJobs 和源码计划窗口约束，不授予跨窗口永久使用。源计划仍为 `pending-approval`，旧修改审批、PR、npm 发布和整 profile 采用门不变；Host-only `inspectCreatedCapability(planId)` 返回采用状态和别名。动态卸载是本能力的撤销路径，真实后续收益、版本替换回退和普通使用部署仍属完整目标的下一次验收。
 
 ### 普通任务修复的有限审批
 

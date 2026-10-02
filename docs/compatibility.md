@@ -24,6 +24,12 @@ schema 29 在原源码计划中增加 `prepared-create` 与冻结创建授权，
 
 Growth 的 `pluginSourceProposals.allowCreation` 默认关闭且只适用于 durable 模式；启用时需同批 Control Plane 的创建读取与公开命名规则接口，以及 owner 的 `sourceJobs.creation`。缺少接口或有效授权时保留旧修改路径。创建用量不因重启或 sourceJobs 配置换代而复位；同一创建 grant id 的定义不能变更。候选目前只到 pending，旧修改审批、发布和采用合同不适用于它；详细边界见[创建候选](../plugins/plugin-control-plane/README.md#自动创建新插件候选)。
 
+## 新工具插件的有限动态采用
+
+Control Plane 可选 `creationCapabilities` 增加独立私有 `creation-adoptions.sqlite` v1，不改变主账本 schema 31。授权、密钥、ledger 路径和有限额度不可变；停下旧 controller 后保留该库与 runner ledger，unknown 不自动重派。需同批 Delivery `validateOwnerAgentForRoute`、Evaluation `onTrustedTaskChange`、Verifier 行为执行器及 native Tools/Policy peers；旧 peer 缺接口时仅此能力拒绝启动。Policy 新增可选 Host peer，不自动启用。DSH/Cordis/Loader/Include 基线与公共 npm 版本不变。
+
+Host 动态挂载可信工具入口，精确候选每次在独立 Docker child 内挂载真实 Cordis Context，支持有界无跨调用状态的 Tools/SystemPrompt 插件。此路径不替代旧修改发布门；源计划保持 pending，采用状态保存于独立账本。调用、重启恢复与撤销边界见 [有限动态采用](../plugins/plugin-control-plane/README.md#新工具插件的有限动态采用)。
+
 ## 本地源码维护历史（Control Plane schema 28）
 
 schema 28 为冻结本地更新增加独立的源码维护记录，保留 schema 27 的计划、发布收据、部署记录和授权用量。维护记录由既有 Host 身份签名，绑定安装、账本、原始源码基准、更新前后提交与制品摘要，并与原有已签名 release merge 共同形成唯一的源码链。后续源码任务与发布准入都沿这条链解析基准，不能用重置 `initialCommit` 或清空旧记录恢复运行。
