@@ -4,7 +4,7 @@
  * 外部系统证据；真实协议以 src/contract.ts 的短期 primary-source contract 为准。
  */
 import { readFileSync } from 'node:fs'
-import { EMPTY_RESPONSE_CODE, createMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { EMPTY_RESPONSE_CODE, ToolCallId, createAssistantMessage, createMessage, createSystemMessage, createToolResultMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { SuperRelayGoalMeteredAdapter } from '../src/adapter.ts'
 import { Config, normalizeConfig } from '../src/config.ts'
@@ -204,10 +204,71 @@ describe('dsh-enhanced-assistant-super-relay-budget', () => {
       await expect(collect(adapter, streamOptions())).rejects.toMatchObject({ code: EMPTY_RESPONSE_CODE })
     })
 
-    it('rejects a system-role message; system text must travel as instructions', async () => {
-      const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true }), { environment: { SUPER_RELAY_API_KEY: 'test-key' }, fetch: jsonFetch(completedResponse()) })
-      const options = { ...streamOptions(), messages: [{ role: 'system', content: [{ type: 'text', text: 'be brief' }] }] } as GenerateOptions
-      await expect(collect(adapter, options)).rejects.toThrow(/system prompt must be supplied as instructions/)
+    it('projects native leading system messages after one-shot system text, preserving text and history order', async () => {
+      const callId = ToolCallId('call_1')
+      const messages = [
+        createSystemMessage(' first\n', 'dsh-agent-loop'),
+        createSystemMessage('second ', 'dsh-agent-loop'),
+        ...userMessage('hello'),
+        createAssistantMessage({ source: { provider: SUPER_RELAY_PROVIDER, model: MODEL }, content: [
+          { type: 'text', text: 'checking' }, { type: 'tool-call', id: callId, name: 'inspect', arguments: '{"x":1}' },
+        ] }),
+        createToolResultMessage({ callId, content: [{ type: 'text', text: 'ok' }], isError: false }),
+      ]
+      const fetch = vi.fn(jsonFetch(completedResponse(), init => {
+        expect(JSON.parse(String(init.body))).toEqual({
+          model: MODEL, stream: false, max_output_tokens: 32,
+          instructions: 'one-shot\n first\n\nsecond ',
+          input: [
+            { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+            { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'checking' }] },
+            { type: 'function_call', call_id: 'call_1', name: 'inspect', arguments: '{"x":1}' },
+            { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
+          ],
+        })
+      }))
+      const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true }), { environment: { SUPER_RELAY_API_KEY: 'test-key' }, fetch })
+      await collect(adapter, streamOptions({ system: 'one-shot', messages }))
+      expect(fetch).toHaveBeenCalledOnce()
+    })
+
+    it('projects an AgentLoop-shaped request with only a leading native system message', async () => {
+      const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true }), {
+        environment: { SUPER_RELAY_API_KEY: 'test-key' },
+        fetch: jsonFetch(completedResponse(), init => {
+          expect(JSON.parse(String(init.body))).toEqual({
+            model: MODEL, stream: false, max_output_tokens: 32,
+            instructions: 'native prompt',
+            input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
+          })
+        }),
+      })
+      await collect(adapter, streamOptions({ messages: [createSystemMessage('native prompt', 'dsh-agent-loop'), ...userMessage('hello')] }))
+    })
+
+    it('omits instructions for an empty native system message and preserves one-shot system alone', async () => {
+      const bodies: Record<string, unknown>[] = []
+      const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true }), {
+        environment: { SUPER_RELAY_API_KEY: 'test-key' },
+        fetch: jsonFetch(completedResponse(), init => { bodies.push(JSON.parse(String(init.body))) }),
+      })
+      const messages = [createSystemMessage('', 'dsh-agent-loop'), ...userMessage('hello')]
+      await collect(adapter, streamOptions({ messages }))
+      await collect(adapter, streamOptions({ system: 'one-shot', messages }))
+      expect(bodies).toEqual([
+        { model: MODEL, stream: false, max_output_tokens: 32, input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }] },
+        { model: MODEL, stream: false, max_output_tokens: 32, instructions: 'one-shot', input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }] },
+      ])
+    })
+
+    it.each([
+      ['a non-leading system message', [...userMessage('hello'), createSystemMessage('late', 'dsh-agent-loop')], /non-leading system/],
+      ['a non-text leading system message', [{ ...createSystemMessage('hello', 'dsh-agent-loop'), content: [{ type: 'reasoning', text: 'hidden' }] }, ...userMessage('hello')], /system content must be text-only/],
+    ])('rejects %s before fetch', async (_label, messages, error) => {
+      const fetch = vi.fn(jsonFetch(completedResponse()))
+      const adapter = new SuperRelayGoalMeteredAdapter(Config({ enabled: true }), { environment: { SUPER_RELAY_API_KEY: 'test-key' }, fetch })
+      await expect(collect(adapter, streamOptions({ messages: messages as GenerateOptions['messages'] }))).rejects.toThrow(error)
+      expect(fetch).not.toHaveBeenCalled()
     })
 
     it('fails closed after contract expiry even with a healthy fetch', async () => {

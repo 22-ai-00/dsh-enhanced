@@ -181,7 +181,13 @@ async function fixture(options: { verdict?: 'approved' | 'rejected' | 'unknown';
       { databasePath: evaluationPath, projectionIntervalMs: 0 }) } }
 }
 
-test('ordinary source flows through native Automations and independent review ledger into later Memory prompt', async () => {
+test.each([
+  { timing: 'within one minute', offset: 10_000, scanRuns: 0 },
+  { timing: 'across a minute boundary', offset: 59_800, scanRuns: 1 },
+])('ordinary source flows through native Automations and independent review ledger into later Memory prompt $timing', async ({ offset, scanRuns }) => {
+  const minute = Math.floor(Date.now() / 60_000) * 60_000
+  let now = minute + offset
+  vi.spyOn(Date, 'now').mockImplementation(() => now)
   const f = await fixture()
   const deliveryWriter = new DatabaseSync(join(f.root, 'delivery.sqlite'))
   const evaluationWriter = new DatabaseSync(join(f.root, 'evaluation.sqlite'))
@@ -193,14 +199,23 @@ test('ordinary source flows through native Automations and independent review le
     return apply.call(this, input)
   })
   const source = f.source()
-  try { await f.run() } finally { deliveryWriter.close(); evaluationWriter.close() }
+  try { await f.run(() => { now += 1200 }) } finally { deliveryWriter.close(); evaluationWriter.close() }
   expect(commit).toHaveBeenCalledOnce()
   expect(f.runtime.health().counts.adopted).toBe(1)
-  const policyRead = new DatabaseSync(join(f.root, 'policy.sqlite'), { readOnly: true })
-  try { expect(policyRead.prepare("SELECT status,metric,amount,actual_amount FROM budget_reservations WHERE metric = 'automation-runs'").all())
-    .toEqual([{ status: 'finalized', metric: 'automation-runs', amount: 1, actual_amount: 1 }]) }
-  finally { policyRead.close() }
   expect(f.extract).toHaveBeenCalledOnce()
+  const learningId = f.extract.mock.calls[0]![0].job.id
+  const scanId = `memory-scan-${growthObjectDigest(['producer-grant', f.owner])}`
+  const policyRead = new DatabaseSync(join(f.root, 'policy.sqlite'), { readOnly: true })
+  try {
+    const reservations = policyRead.prepare("SELECT scope,status,metric,amount,actual_amount FROM budget_reservations WHERE metric = 'automation-runs'").all()
+    const settled = { status: 'finalized', metric: 'automation-runs', amount: 1, actual_amount: 1 }
+    // A due native cron scan spends its own budget without repeating learning.
+    const expected = [{ scope: `background:${learningId}`, ...settled },
+      ...(scanRuns === 0 ? [] : [{ scope: `background:${scanId}`, ...settled }])]
+    expect(reservations).toHaveLength(expected.length)
+    expect(reservations).toEqual(expect.arrayContaining(expected))
+  }
+  finally { policyRead.close() }
   expect(f.reviewCalls).toHaveBeenCalledOnce()
   const hits = f.ctx.personalMemory.search(f.agent, { query: 'Atlas pnpm' })
   expect(hits).toHaveLength(1)
